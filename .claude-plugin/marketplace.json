@@ -22,6 +22,13 @@
       "category": "development"
     },
     {
+      "name": "rust",
+      "source": "./plugins/rust",
+      "description": "Rust migration-edit gate, cargo install, RUSTFLAGS linker and global target-dir advisories, and Rust guidance skills.",
+      "version": "0.1.0",
+      "category": "development"
+    },
+    {
       "name": "whats-new",
       "source": "./plugins/whats-new",
       "description": "Research breaking changes, deprecations and new features between two versions, report-only.",

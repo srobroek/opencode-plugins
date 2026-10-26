@@ -12,5 +12,6 @@
   "plugins/subagent-worktree": "0.1.0",
   "plugins/parley": "0.1.0",
   "plugins/chezmoi": "0.1.0",
-  "plugins/languages": "0.1.0"
+  "plugins/languages": "0.1.0",
+  "plugins/rust": "0.1.0"
 }

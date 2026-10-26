@@ -69,6 +69,10 @@
     "plugins/languages": {
       "release-type": "node",
       "component": "languages"
+    },
+    "plugins/rust": {
+      "release-type": "node",
+      "component": "rust"
     }
   }
 }
