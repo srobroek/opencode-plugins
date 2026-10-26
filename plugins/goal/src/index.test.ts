@@ -11,8 +11,49 @@ const settle = (ms = 15) => Bun.sleep(ms)
 
 type Call = { method: string; input: Record<string, unknown> }
 
+const waiters = new WeakMap<FakeContext, Set<() => void>>()
+
+/** Wake `waitFor` callers after every prompt and synthetic message the plugin sends. */
+function observe(fake: FakeContext): void {
+  const listeners = new Set<() => void>()
+  waiters.set(fake, listeners)
+  const session = fake.context.session as unknown as Record<string, (input: unknown) => Promise<unknown>>
+  for (const method of ["prompt", "synthetic"]) {
+    const original = session[method] as (input: unknown) => Promise<unknown>
+    session[method] = async (input) => {
+      const result = await original(input)
+      for (const listener of [...listeners]) listener()
+      return result
+    }
+  }
+}
+
+/**
+ * Resolve once `predicate` holds, re-checked after each message the plugin sends.
+ * For outcomes behind a real subprocess (loop conditions), whose latency a fixed sleep cannot bound.
+ */
+function waitFor(fake: FakeContext, predicate: () => boolean, label: string, timeoutMs = 10_000): Promise<void> {
+  const listeners = waiters.get(fake)
+  if (!listeners) throw new Error("fake context is not observed")
+  if (predicate()) return Promise.resolve()
+  return new Promise((resolve, reject) => {
+    const check = () => {
+      if (!predicate()) return
+      listeners.delete(check)
+      clearTimeout(timer)
+      resolve()
+    }
+    const timer = setTimeout(() => {
+      listeners.delete(check)
+      reject(new Error(`timed out waiting for ${label}`))
+    }, timeoutMs)
+    listeners.add(check)
+  })
+}
+
 async function start(options: Record<string, unknown> = {}, extra: Parameters<typeof createFakeContext>[0] = {}) {
   const fake = createFakeContext({ directory: tmpdir(), options: { delayMs: 0, ...options }, ...extra })
+  observe(fake)
   const cleanup = (await plugin.setup(fake.context)) as () => Promise<void>
   await settle(1)
   return { fake, cleanup }
@@ -367,27 +408,34 @@ describe("/loop", () => {
 
   test("--until stops once the command succeeds", async () => {
     const { fake, cleanup } = await start()
-    await run(fake, "loop", "--until 'exit 0' go")
-    await turn(fake)
-    await settle(300)
-    expect(calls(fake, "session.prompt")).toHaveLength(1)
-    expect(notices(fake).at(-1)).toContain("is now satisfied")
-    await cleanup()
-  })
+    try {
+      await run(fake, "loop", "--until 'exit 0' go")
+      await turn(fake)
+      await waitFor(fake, () => notices(fake).length > 0, "the --until notice")
+      expect(calls(fake, "session.prompt")).toHaveLength(1)
+      expect(notices(fake).at(-1)).toContain("is now satisfied")
+      expect(fake.storage.has(`loop:${ROOT}`)).toBe(false)
+    } finally {
+      await cleanup()
+    }
+  }, 15_000)
 
   test("--while continues on exit 0 and a broken condition disables the loop", async () => {
     const { fake, cleanup } = await start()
-    await run(fake, "loop", "--while 'true' go")
-    await turn(fake)
-    await settle(300)
-    expect(calls(fake, "session.prompt")).toHaveLength(2)
-    await run(fake, "loop", "")
-    await run(fake, "loop", "--while 'exit 3' go")
-    await turn(fake)
-    await settle(300)
-    expect(notices(fake).at(-1)).toContain("failed (exit 3)")
-    await cleanup()
-  })
+    try {
+      await run(fake, "loop", "--while 'true' go")
+      await turn(fake)
+      await waitFor(fake, () => calls(fake, "session.prompt").length >= 2, "the second --while prompt")
+      expect(calls(fake, "session.prompt")).toHaveLength(2)
+      await run(fake, "loop", "")
+      await run(fake, "loop", "--while 'exit 3' go")
+      await turn(fake)
+      await waitFor(fake, () => /^Loop condition/.test(notices(fake).at(-1) ?? ""), "the broken-condition notice")
+      expect(notices(fake).at(-1)).toContain("failed (exit 3)")
+    } finally {
+      await cleanup()
+    }
+  }, 15_000)
 
   test("Esc suspends the loop; the next prompt resumes it; /loop toggles it off", async () => {
     const { fake, cleanup } = await start()
