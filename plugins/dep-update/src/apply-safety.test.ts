@@ -1,8 +1,52 @@
-import { expect, test } from "bun:test"
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { afterAll, expect, test } from "bun:test"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { applyBump, checkNodeVersion } from "./bump.ts"
+
+/** What one package-manager stub does: record its argv, write files, print, then hang or exit. */
+type Behaviour = {
+  marker?: string
+  /** Prepended to the recorded argv, naming which manager ran. */
+  label?: string
+  write?: Array<[string, string]>
+  stdout?: string
+  hang?: boolean
+  exit?: number
+}
+
+/**
+ * One executable for every package-manager stub in this file. macOS can hold the first
+ * exec of a freshly written executable for a second or more (a policy scan), and each
+ * test used to write several; now each name is a symlink to this one file, which pays
+ * that once. The shell wrapper passes the name it was run as (`$0`) to a script bun
+ * reads rather than execs, and the behaviour comes from `<name>.json` beside it.
+ */
+const STUB_HOME = mkdtempSync(join(tmpdir(), "dep-apply-stub-"))
+const STUB = join(STUB_HOME, "stub")
+const STUB_SCRIPT = join(STUB_HOME, "stub.mjs")
+writeFileSync(
+  STUB_SCRIPT,
+  `import { readFileSync, writeFileSync } from "node:fs"
+const [self, ...args] = process.argv.slice(2)
+const behaviour = JSON.parse(readFileSync(self + ".json", "utf8"))
+if (behaviour.marker) writeFileSync(behaviour.marker, JSON.stringify(behaviour.label ? [behaviour.label, ...args] : args))
+for (const [path, content] of behaviour.write ?? []) writeFileSync(path, content)
+if (behaviour.stdout) process.stdout.write(behaviour.stdout)
+if (behaviour.hang) setInterval(() => {}, 1000)
+else process.exitCode = behaviour.exit ?? 0
+`,
+)
+writeFileSync(STUB, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(STUB_SCRIPT)} "$0" "$@"\n`)
+chmodSync(STUB, 0o755)
+afterAll(() => rmSync(STUB_HOME, { recursive: true, force: true }))
+
+/** Put a package manager named `name` in `bin` that does `behaviour`. */
+function stubManager(bin: string, name: string, behaviour: Behaviour): void {
+  const path = join(bin, name)
+  if (!existsSync(path)) symlinkSync(STUB, path)
+  writeFileSync(`${path}.json`, JSON.stringify(behaviour))
+}
 
 test("checkNodeVersion reads own manifest keys only", async () => {
   const root = mkdtempSync(join(tmpdir(), "dep-shape-"))
@@ -24,18 +68,11 @@ test("apply rejects options, honors cancellation, bounds children/output, and pi
   // Real processes and inherited pipes require the platform clock, not fake JS timers.
   const oldPm = process.env.DEP_UPDATE_PKG_MANAGER
   const marker = join(root, "spawned")
-  const stub = join(root, "pnpm")
-  const installStub = (body: string) => {
-    writeFileSync(
-      stub,
-      `#!${process.execPath}\nimport {writeFileSync} from 'node:fs';\nwriteFileSync(${JSON.stringify(marker)}, JSON.stringify(process.argv.slice(2)));\n${body}\n`,
-    )
-    chmodSync(stub, 0o755)
-  }
+  const installStub = (behaviour: Behaviour) => stubManager(root, "pnpm", { marker, ...behaviour })
   try {
     process.env.PATH = root
     process.env.DEP_UPDATE_PKG_MANAGER = "pnpm"
-    installStub("setInterval(() => {}, 1000);")
+    installStub({ hang: true })
     for (const [ecosystem, name, version] of [
       ["npm", "--help", "1.0.0"],
       ["npm", "x", "--recursive"],
@@ -63,13 +100,13 @@ test("apply rejects options, honors cancellation, bounds children/output, and pi
       clearTimeout(timer)
     }
 
-    installStub("process.stdout.write('x'.repeat(100000)); setInterval(() => {}, 1000);")
+    installStub({ stdout: "x".repeat(100000), hang: true })
     const loud = await applyBump("npm", "x", "1.0.0", root, { maxOutputBytes: 512 })
     expect(loud.exit).toBe(1)
     expect(loud.text).toContain("output limit exceeded")
     expect(loud.text.length).toBeLessThan(1500)
 
-    installStub(`writeFileSync('package.json', JSON.stringify({dependencies:{'@scope/pkg':'1.2.3'}}));`)
+    installStub({ write: [["package.json", JSON.stringify({ dependencies: { "@scope/pkg": "1.2.3" } })]] })
     const success = await applyBump("npm", "@scope/pkg", "1.2.3", root)
     expect(success.exit).toBe(0)
     expect(JSON.parse(readFileSync(marker, "utf8"))).toEqual(["update", "@scope/pkg@1.2.3"])
@@ -88,12 +125,7 @@ test("the package-manager bound is sized for a real install, not a 25 s tool_cal
   const root = mkdtempSync(join(tmpdir(), "dep-apply-bound-"))
   const oldPath = process.env.PATH
   const oldPm = process.env.DEP_UPDATE_PKG_MANAGER
-  const stub = join(root, "pnpm")
-  writeFileSync(
-    stub,
-    `#!${process.execPath}\nimport {writeFileSync} from 'node:fs';\nwriteFileSync('package.json', JSON.stringify({dependencies:{x:'1.0.0'}}));\n`,
-  )
-  chmodSync(stub, 0o755)
+  stubManager(root, "pnpm", { write: [["package.json", JSON.stringify({ dependencies: { x: "1.0.0" } })]] })
   const scheduled: number[] = []
   const schedule = (callback: () => void, ms: number) => {
     scheduled.push(ms)
@@ -144,13 +176,7 @@ test("Python bumps route by project: poetry, uv with or without a lock, requirem
   const oldPath = process.env.PATH
   const marker = join(bin, "argv.json")
   // Each stub records its argv and writes the pin the real manager would write.
-  const stub = (pm: string, pin: string) => {
-    writeFileSync(
-      join(bin, pm),
-      `#!${process.execPath}\nimport {writeFileSync} from 'node:fs';\nwriteFileSync(${JSON.stringify(marker)}, JSON.stringify([${JSON.stringify(pm)}, ...process.argv.slice(2)]));\nwriteFileSync('pyproject.toml', ${JSON.stringify(pin)});\n`,
-    )
-    chmodSync(join(bin, pm), 0o755)
-  }
+  const stub = (pm: string, pin: string) => stubManager(bin, pm, { marker, label: pm, write: [["pyproject.toml", pin]] })
   const reset = (files: Record<string, string>) => {
     rmSync(root, { recursive: true, force: true })
     mkdirSync(root)
@@ -206,14 +232,8 @@ test("npm and Python bumps end the same three ways: a failed run, an unconfirmed
   const oldPath = process.env.PATH
   const oldPm = process.env.DEP_UPDATE_PKG_MANAGER
   /** A package manager that exits with `code`, after writing `pin` into its working directory when given. */
-  const stub = (pm: string, code: number, pin?: [string, string]) => {
-    const write = pin ? `writeFileSync(${JSON.stringify(pin[0])}, ${JSON.stringify(pin[1])});\n` : ""
-    writeFileSync(
-      join(bin, pm),
-      `#!${process.execPath}\nimport {writeFileSync} from 'node:fs';\n${write}process.exit(${code});\n`,
-    )
-    chmodSync(join(bin, pm), 0o755)
-  }
+  const stub = (pm: string, code: number, pin?: [string, string]) =>
+    stubManager(bin, pm, { exit: code, ...(pin ? { write: [pin] } : {}) })
   const node: [string, string] = ["package.json", '{"dependencies":{"left-pad":"1.3.0"}}']
   const python: [string, string] = ["pyproject.toml", '[project]\nname = "app"\ndependencies = ["requests==2.32.3"]\n']
   const cases: Array<[string, string, string, string, number, [string, string] | undefined, number, string]> = [
