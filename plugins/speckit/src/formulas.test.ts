@@ -47,7 +47,7 @@ describe("execution_agent_type routing (beads FO-5)", () => {
     for (const { step } of routed) {
       const metadata = step.metadata ?? {}
       if (metadata.execution_agent_type === "speckit-verify")
-        expect(["tasks", "requirements"]).toContain(metadata.execution_agent_mode as string)
+        expect(["tasks", "requirements", "review"]).toContain(metadata.execution_agent_mode as string)
       if (metadata.execution_agent_type === "speckit-sync")
         expect(["drift", "conflicts", "both"]).toContain(metadata.execution_agent_scope as string)
     }

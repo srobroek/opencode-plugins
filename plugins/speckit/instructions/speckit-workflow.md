@@ -113,7 +113,7 @@ COMMAND ROUTING (lifecycle commands)
   `speckit-sync`) with the subagent tool, name the step's bead id in the prompt, and
   pass `execution_agent_mode` as `mode: <value>` or `execution_agent_scope` as
   `scope: <value>`. The beads routing gate refuses a spawn to any other agent.
-- review.run / qa.run: bond `mol-speckit-fix-findings` for code defects; converge
+- review steps (speckit-verify `mode: review`) / qa.run: bond `mol-speckit-fix-findings` for code defects; converge
   for NEVER-built requirements.
 - retro.run: read beads (`bd list --spec --status all --json`), close reasons,
   wisps, and decision beads -- not only spec.md/plan.md.

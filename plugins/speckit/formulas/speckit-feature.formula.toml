@@ -182,10 +182,13 @@ id = "review"
 title = "review {{feature}}"
 type = "task"
 needs = ["verify", "verify-signoff"]
-description = "Run /speckit.review.run (full review cycle); route findings through fix-findings. Multi-dimension or cross-model review: create one review-wisp shell per dimension plus a blocks edge from the downstream step to each, before spawning any reviewer."
+labels = ["agent:speckit-verify"]
+description = "Spawn the speckit-verify agent (mode: review) to review the branch diff against spec.md, plan.md and the spec's task beads; route its findings through the mol-speckit-fix-findings molecule. Multi-dimension or cross-model review: create one review-wisp shell per dimension plus a blocks edge from the downstream step to each, before spawning any reviewer."
 
 [steps.metadata]
-skill_hints = "speckit.review.run"
+execution_agent_type = "speckit-verify"
+execution_agent_mode = "review"
+execution_mode = "subagent"
 
 [[steps]]
 id = "qa"
@@ -202,10 +205,12 @@ id = "code-review"
 title = "code review {{feature}}"
 type = "task"
 needs = ["qa"]
-description = "Run /speckit.review.code as a subagent. Parallel with security-review-post."
+labels = ["agent:speckit-verify"]
+description = "Spawn the speckit-verify agent (mode: review) for a post-QA code review of the branch diff against spec.md, plan.md and the spec's task beads; route its findings through the mol-speckit-fix-findings molecule. Parallel with security-review-post."
 
 [steps.metadata]
-skill_hints = "speckit.review.code"
+execution_agent_type = "speckit-verify"
+execution_agent_mode = "review"
 execution_mode = "subagent"
 
 [[steps]]
