@@ -1,6 +1,9 @@
 ---
 description: "Implements one UI unit end to end on the project's tokens and components, verified at three widths. Escalates multi-component or direction work to ui-ux-specialist."
 mode: subagent
+request:
+  headers:
+    x-opencode-model-role: designer
 permissions:
   - action: webfetch
     resource: "*"
