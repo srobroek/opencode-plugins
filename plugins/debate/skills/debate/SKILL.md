@@ -14,7 +14,9 @@ Answer an already-specified request directly. Ask only for missing context that 
 ### Phase 0: Context questions
 
 Infer decision type and scope from the request and available evidence. Ask about
-unresolved constraints only. Research when requested or when current facts are
+unresolved constraints only, in one round through the channels in the `grilling` skill's
+**Asking questions** section (parley when installed, else the host's question tool, else
+chat), each question with your recommended answer. Research when requested or when current facts are
 material; do not require the user to choose an agent strategy.
 
 ### Phase 1: Decomposition
@@ -62,7 +64,11 @@ Merge the main analysis with the devil's advocate critique:
 - Calibrate confidence: High (75-95%), Medium (40-74%), Low (10-39%)
 - Produce a conditional verdict: "This makes sense IF... It does NOT make sense IF..."
 
-Offer additional rounds only when an unresolved tradeoff warrants discussion.
+Offer additional rounds only when an unresolved tradeoff warrants discussion. Ask them
+the same way: one question per open tradeoff, usually `show_options` with the
+alternatives' pros and cons and the verdict's pick as the recommendation. When an
+answer opens dependent decisions, hand off to the `grilling` skill. Call `parley_end`
+when you used parley and the debate is done.
 
 ### Phase 6: Save
 

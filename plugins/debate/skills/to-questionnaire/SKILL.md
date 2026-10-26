@@ -18,6 +18,9 @@ THIS FILE HAS BEEN MODIFIED from the original. Changes:
   3. Rewrote the frontmatter description to this repository's authoring contract.
   4. Ported to opencode-plugins: references to other skills name the skill instead
      of an Oh My Pi skill URI.
+  5. Steps 1-2 are asked through the channels in the grilling skill's "Asking
+     questions" section (parley, the host's question tool, or chat). With parley, the
+     draft is shown as a review question before it is written.
 The three steps, the document structure, and the template content are upstream's and are
 unchanged in substance.
 -->
@@ -39,6 +42,11 @@ then target the **gap** between what the recipient knows and what the user needs
 
 ## Workflow
 
+Ask steps 1 and 2 together in one round through the channels in the `grilling` skill's
+**Asking questions** section: two `ask_text` questions (ids `send.recipient` and
+`send.needs`) with no recommendation unless the conversation already suggests one. A
+deferred answer means ask it again in chat; both are needed before step 3.
+
 1. **Who is it going to?** Ask, in one exchange, the recipient's role, expertise, and
    relationship to the user. This fixes the questionnaire's tone and how much context it
    must carry. → you know who the recipient is and what they know that the user does not.
@@ -47,7 +55,9 @@ then target the **gap** between what the recipient knows and what the user needs
    user must walk away able to do or decide.
 3. **Write the questionnaire.** Draft questions aimed at the gap from steps 1-2, following
    the document structure below. Write it to the path the user names; with no path, write
-   `~/tmp/to-questionnaire-{slug}.md` (slug from the topic). Report the absolute path.
+   `~/tmp/to-questionnaire-{slug}.md` (slug from the topic). With parley, first show the
+   draft as one `review` question (`markdown` = the draft, recommended `approve`) and
+   apply any `revise` feedback; then call `parley_end`. Report the absolute path.
    → the file exists and every item the user named in step 2 is covered by a question.
 
 ## Document structure

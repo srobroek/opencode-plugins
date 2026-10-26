@@ -21,5 +21,8 @@ Modifications:
   1. The questionnaire goes to a user-named path or ~/tmp, never the current directory.
   2. Template placeholders use {braces} inside a fenced block.
   3. The frontmatter description follows this repository's authoring contract.
+  4. References to other skills name the skill instead of an Oh My Pi skill URI.
+  5. The intake questions go through the channels in the grilling skill (parley, the
+     host's question tool, or chat), and parley can review the draft before it is written.
 
 Why vendored: it pairs with `grilling` for knowledge the user does not hold.
