@@ -7,7 +7,9 @@
     "typecheck": "tsc --noEmit",
     "lint": "biome check --config-path biome.json --max-diagnostics=1000",
     "test": "bun test",
-    "check": "bun run typecheck && bun run lint && bun run test"
+    "build": "bun scripts/build.ts",
+    "build:check": "bun scripts/build.ts --check",
+    "check": "bun run typecheck && bun run lint && bun run test && bun run build:check"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.15",
