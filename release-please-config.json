@@ -122,6 +122,10 @@
       "release-type": "node",
       "component": "safety"
     },
+    "plugins/trunk-dev": {
+      "release-type": "node",
+      "component": "trunk-dev"
+    },
     "plugins/find-tools": {
       "release-type": "node",
       "component": "find-tools"

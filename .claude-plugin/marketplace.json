@@ -85,6 +85,13 @@
       "category": "development"
     },
     {
+      "name": "trunk-dev",
+      "source": "./plugins/trunk-dev",
+      "description": "Trunk-based delivery for OpenCode: a Conventional Commit and main-push gate, skip-CI and MR/PR advisories, a feature-flag cleanup bead after each flagged merge, and release-setup skills.",
+      "version": "0.1.0",
+      "category": "development"
+    },
+    {
       "name": "worktrunk",
       "source": "./plugins/worktrunk",
       "description": "Worktrunk (wt) skills: work in linked worktrees and run deterministic preflight checks before an agent run or merge.",

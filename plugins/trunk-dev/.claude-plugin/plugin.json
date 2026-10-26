@@ -1,0 +1,12 @@
+{
+  "name": "trunk-dev",
+  "version": "0.1.0",
+  "description": "Trunk-based delivery for OpenCode: a Conventional Commit and main-push gate, skip-CI and MR/PR advisories, a feature-flag cleanup bead after each flagged merge, and release-setup skills.",
+  "author": {
+    "name": "Sjors Robroek",
+    "url": "https://github.com/srobroek"
+  },
+  "homepage": "https://github.com/srobroek/opencode-plugins/tree/main/plugins/trunk-dev",
+  "repository": "https://github.com/srobroek/opencode-plugins",
+  "license": "Apache-2.0"
+}
