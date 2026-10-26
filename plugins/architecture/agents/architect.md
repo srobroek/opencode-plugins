@@ -1,6 +1,9 @@
 ---
 description: "Read-only architect for software, system, module, and API design and complex implementation plans. Spawn before nontrivial structural work; never edits."
 mode: subagent
+request:
+  headers:
+    x-opencode-model-role: architect
 permissions:
   - action: edit
     resource: "*"
