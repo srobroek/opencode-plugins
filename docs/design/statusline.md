@@ -18,7 +18,23 @@ Repo changes: tsconfig `jsx: preserve`, `jsxImportSource: @opentui/solid`,
 include `*.tsx`; devDependencies `@opentui/core`, `@opentui/solid`, `solid-js`,
 `@opencode/theme@2.1.4` (peers >= 0.6.8).
 
-To verify: `"-opencode.prompt.footer"` disables the built-in footer; how a TSX
-`./tui` export is compiled at runtime.
+Verified on 2.1.4 (opencode-plugins-4p3.5):
+
+- `"-opencode.prompt.footer"` in `cli.json` `plugins` disables the built-in
+  `opencode.prompt.footer` TUI plugin (a leading `-` disables matching builtin
+  ids). The usage/cost/shortcuts text goes; the location line stays.
+- A local directory plugin resolves `<dir>/tui` by path (`Bun.resolveSync`), not
+  through `package.json` exports; a package plugin resolves `<name>/tui` through
+  exports. The root `tui.js` shim from `scripts/build.ts` covers the first case.
+- The CLI registers the OpenTUI Solid transform for `.tsx` outside
+  `node_modules` only. TSX inside `node_modules` falls back to Bun's JSX and
+  fails (`Cannot find package 'react'`). `scripts/build.ts` therefore applies
+  `@opentui/solid/bun-plugin` and keeps `@opentui/*` and `solid-js` external,
+  since the host provides them alongside `@opencode/plugin/*`. A bundled
+  `dist/tui.js` loaded from under `node_modules` renders and updates reactively.
+- The host does not provide `@opencode/client`, and `@opencode/client/solid`
+  pulls in effect and schema modules. The plugin keeps a local
+  `lastAssistantWithUsage` with a parity test against the upstream one.
+- No server entry is needed; a TUI-only package loads.
 
 Effort: 2-3 days. Sketch: `statusline-sketch.tsx`.

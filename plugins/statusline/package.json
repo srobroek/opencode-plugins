@@ -1,0 +1,22 @@
+{
+  "name": "@srobroek/opencode-statusline",
+  "version": "0.1.0",
+  "description": "omp-style status line above the OpenCode session composer.",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./tui": "./dist/tui.js"
+  },
+  "files": ["dist", "tui.js"],
+  "peerDependencies": {
+    "@opencode/plugin": "^2.1.4"
+  },
+  "peerDependenciesMeta": {
+    "@opencode/plugin": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@srobroek/opencode-lib": "workspace:*"
+  }
+}
