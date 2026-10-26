@@ -97,6 +97,10 @@
     "plugins/architecture": {
       "release-type": "node",
       "component": "architecture"
+    },
+    "plugins/build": {
+      "release-type": "node",
+      "component": "build"
     }
   }
 }
