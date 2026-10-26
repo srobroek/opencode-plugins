@@ -38,7 +38,6 @@ test("requires only installable community extensions", () => {
     "qa",
     "refine",
     "retro",
-    "review",
     "security-review",
     "status-report",
     "tinyspec",

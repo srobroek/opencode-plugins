@@ -34,7 +34,7 @@ rerun resumes by skipping completed phases. Each phase has its own timeout.
 
 1. `specify init --here --force --integration <integration> --script sh --ignore-agent-tools`, unless `.specify/` exists.
 2. The community catalog, only with `installAllowed=true` (skipped when `SPECKIT_CATALOG_URL` is set: specify then reads only that catalog).
-3. The required extensions not yet installed: `agent-context`, `bugfix`, `cleanup`, `critique`, `fix-findings`, `iterate`, `qa`, `refine`, `retro`, `review`, `security-review`, `status-report`, `tinyspec`.
+3. The required extensions not yet installed: `agent-context`, `bugfix`, `cleanup`, `critique`, `fix-findings`, `iterate`, `qa`, `refine`, `retro`, `security-review`, `status-report`, `tinyspec`.
 4. `bd init --skip-hooks` without a workspace, then the bundled formulas into `.beads/formulas/`. Formula installation rejects symlinks and never overwrites a divergent file.
 5. `specs/**/spec-status.md` in `.gitignore`.
 
@@ -97,7 +97,7 @@ subagents do not get it.
 | Agent | Spawn with |
 | --- | --- |
 | `speckit-sync` | `scope: drift` / `conflicts` / `both` |
-| `speckit-verify` | `mode: requirements` / `tasks` |
+| `speckit-verify` | `mode: requirements` / `tasks` / `review` |
 
 Both are read-only (edits denied) and carry the `challenger` model role in
 `request.headers.x-opencode-model-role`; with the model-roles plugin they run on that
@@ -106,6 +106,11 @@ role's model, otherwise on the parent's. They pin no model.
 Formula steps that spawn them set `execution_agent_type` to the agent id, with
 `execution_agent_mode` or `execution_agent_scope` beside it. That is the beads
 routing gate's convention: a spawn naming such a step's bead must go to that agent.
+
+The review steps (`review`, and `code-review` in `speckit-feature`) spawn
+`speckit-verify` with `mode: review` rather than spec-kit's `review` extension, which
+`speckit_setup` does not install. They route to this plugin's own agent, not
+delivery's `pr-reviewer`, so they work without the delivery plugin.
 
 ## Skills
 

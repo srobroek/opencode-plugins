@@ -919,7 +919,6 @@ var EXTENSIONS = [
   "qa",
   "refine",
   "retro",
-  "review",
   "security-review",
   "status-report",
   "tinyspec"
