@@ -87,6 +87,130 @@ async function registerSkills(skill, paths) {
   });
 }
 
+// plugins/lib/src/subprocess.ts
+var EXIT_GRACE_MS = 2000;
+var EXIT_POLL_MS = 100;
+function processAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+}
+function killChild(child, group) {
+  if (group) {
+    try {
+      process.kill(-child.pid, "SIGKILL");
+      return;
+    } catch {}
+  }
+  try {
+    child.kill("SIGKILL");
+  } catch {}
+}
+function unref(timer) {
+  timer.unref?.();
+}
+function capture(stream) {
+  if (!(stream instanceof ReadableStream))
+    return { text: Promise.resolve(""), snapshot: () => "", cancel: () => {} };
+  const reader = stream.getReader();
+  const decoder = new TextDecoder;
+  let collected = "";
+  const text = (async () => {
+    try {
+      for (;; ) {
+        const chunk = await reader.read();
+        if (chunk.done)
+          break;
+        collected += decoder.decode(chunk.value, { stream: true });
+      }
+    } catch {}
+    collected += decoder.decode();
+    return collected;
+  })();
+  const cancel = () => {
+    try {
+      reader.cancel().catch(() => {
+        return;
+      });
+    } catch {}
+  };
+  return { text, snapshot: () => collected, cancel };
+}
+function supervise(child, options = {}) {
+  const grace = Math.max(0, options.graceMs ?? EXIT_GRACE_MS);
+  const pollMs = Math.max(1, options.pollMs ?? EXIT_POLL_MS);
+  const alive = options.alive ?? processAlive;
+  const group = options.group ?? false;
+  const { signal, timeoutMs } = options;
+  const out = capture(child.stdout);
+  const err = capture(child.stderr);
+  return new Promise((resolve) => {
+    let ended = null;
+    let exitSeen = false;
+    let settled = false;
+    let goneSince = null;
+    let deadline;
+    let graceTimer;
+    const settle = (run) => {
+      if (settled)
+        return;
+      settled = true;
+      clearTimeout(deadline);
+      clearTimeout(graceTimer);
+      clearInterval(poller);
+      signal?.removeEventListener("abort", onAbort);
+      resolve(run);
+    };
+    const end = (cause) => {
+      if (ended !== null || settled)
+        return;
+      ended = cause;
+      if (cause !== "lost" || group)
+        killChild(child, group);
+      out.cancel();
+      err.cancel();
+      graceTimer = setTimeout(() => settle({ kind: cause, stdout: out.snapshot(), stderr: err.snapshot() }), grace);
+      if (options.unref)
+        unref(graceTimer);
+    };
+    const onAbort = () => end("aborted");
+    const poller = setInterval(() => {
+      if (exitSeen || ended !== null || settled)
+        return;
+      if (alive(child.pid)) {
+        goneSince = null;
+        return;
+      }
+      goneSince ??= Date.now();
+      if (Date.now() - goneSince >= grace)
+        end("lost");
+    }, pollMs);
+    unref(poller);
+    if (timeoutMs !== undefined && timeoutMs > 0 && Number.isFinite(timeoutMs)) {
+      deadline = setTimeout(() => end("timeout"), timeoutMs);
+      if (options.unref)
+        unref(deadline);
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted)
+      onAbort();
+    child.exited.then(() => {
+      exitSeen = true;
+    }, () => {
+      return;
+    });
+    Promise.all([child.exited, out.text, err.text]).then(([exitCode, stdout, stderr]) => {
+      if (ended !== null)
+        settle({ kind: ended, stdout, stderr });
+      else
+        settle({ kind: "exited", exitCode, signalCode: child.signalCode ?? null, stdout, stderr });
+    }, () => end("lost"));
+  });
+}
+
 // plugins/lib/src/shell-command.ts
 import { resolve } from "path";
 
@@ -1116,22 +1240,12 @@ async function asyncShowRun(argv, cwd, deadline = Date.now() + TIMEOUT_MS, base 
     stderr: "pipe",
     env: { ...base, BD_JSON_ENVELOPE: "1", BD_NO_PAGER: "1", BD_NON_INTERACTIVE: "1" }
   });
-  let timer;
-  try {
-    const timeout = new Promise((_, reject) => {
-      timer = setTimeout(() => {
-        proc.kill("SIGKILL");
-        reject(timeoutError());
-      }, remaining);
-    });
-    const result = await Promise.race([Promise.all([proc.exited, new Response(proc.stdout).text()]), timeout]);
-    if (Date.now() >= deadline)
-      throw timeoutError();
-    return { exitCode: result[0], stdout: result[1] };
-  } finally {
-    if (timer !== undefined)
-      clearTimeout(timer);
-  }
+  const run = await supervise(proc, { timeoutMs: remaining });
+  if (run.kind === "lost")
+    throw new Error("bd show ended without an exit status; gate types remain unverified");
+  if (run.kind !== "exited" || Date.now() >= deadline)
+    throw timeoutError();
+  return { exitCode: run.exitCode, stdout: run.stdout };
 }
 async function gateIdsAmongAsync(ids, dbArgs, cwd, deadline, env) {
   if (ids.length === 0)
@@ -3004,14 +3118,17 @@ async function spawnBd(cwd, args, deadline, env) {
       cwd,
       stdout: "pipe",
       stderr: "pipe",
-      env: { ...env, BD_NO_PAGER: "1", BD_NON_INTERACTIVE: "1", BD_JSON_ENVELOPE: "1" },
-      timeout: Math.min(BD_COMMAND_CEILING_MS, remaining),
-      killSignal: "SIGKILL"
+      env: { ...env, BD_NO_PAGER: "1", BD_NON_INTERACTIVE: "1", BD_JSON_ENVELOPE: "1" }
     });
-    if (!writesStore(invocationFromArgv(args)))
+    const read = !writesStore(invocationFromArgv(args));
+    if (read)
       proc.unref();
-    const [out, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
-    const code = await proc.exited;
+    const run = await supervise(proc, { timeoutMs: Math.min(BD_COMMAND_CEILING_MS, remaining), unref: read });
+    if (run.kind === "timeout")
+      return { failure: "bd command timed out" };
+    if (run.kind !== "exited")
+      return { failure: "bd ended without reporting an exit status" };
+    const { exitCode: code, stdout: out, stderr } = run;
     if (code === 0)
       return { output: out };
     if (Date.now() >= deadline || Date.now() - started >= remaining)

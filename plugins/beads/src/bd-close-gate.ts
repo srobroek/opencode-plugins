@@ -14,6 +14,8 @@
  * close without gate proof. A command whose ids are shell variables, or `bd close`
  * with no id at all, has no lookup to perform and remains allowed.
  */
+import { supervise } from "@srobroek/opencode-lib/subprocess"
+
 import { tokenizeShell } from "./shell.ts"
 
 /** The shell gates' shared 25,000 ms budget also bounds every gate lookup. */
@@ -142,20 +144,10 @@ async function asyncShowRun(
     stderr: "pipe",
     env: { ...base, BD_JSON_ENVELOPE: "1", BD_NO_PAGER: "1", BD_NON_INTERACTIVE: "1" },
   })
-  let timer: ReturnType<typeof setTimeout> | undefined
-  try {
-    const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => {
-        proc.kill("SIGKILL")
-        reject(timeoutError())
-      }, remaining)
-    })
-    const result = await Promise.race([Promise.all([proc.exited, new Response(proc.stdout).text()]), timeout])
-    if (Date.now() >= deadline) throw timeoutError()
-    return { exitCode: result[0], stdout: result[1] }
-  } finally {
-    if (timer !== undefined) clearTimeout(timer)
-  }
+  const run = await supervise(proc, { timeoutMs: remaining })
+  if (run.kind === "lost") throw new Error("bd show ended without an exit status; gate types remain unverified")
+  if (run.kind !== "exited" || Date.now() >= deadline) throw timeoutError()
+  return { exitCode: run.exitCode, stdout: run.stdout }
 }
 
 async function gateIdsAmongAsync(

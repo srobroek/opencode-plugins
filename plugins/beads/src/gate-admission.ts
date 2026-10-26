@@ -9,6 +9,9 @@
 
 import { existsSync, realpathSync, statSync } from "node:fs"
 import { dirname, isAbsolute, join, resolve } from "node:path"
+
+import { supervise } from "@srobroek/opencode-lib/subprocess"
+
 import { type BdInvocation, bdInvocations, flagEnabled, globalValue, invocationFromArgv } from "./bd-actor-gate.ts"
 import { embeddedWriteTargets, withEmbeddedWriteLock, writesStore } from "./bd-embedded-write-lock.ts"
 import { sessionPinFor } from "./beads-store.ts"
@@ -255,14 +258,15 @@ async function spawnBd(cwd: string, args: string[], deadline: number, env: NodeJ
       stdout: "pipe",
       stderr: "pipe",
       env: { ...env, BD_NO_PAGER: "1", BD_NON_INTERACTIVE: "1", BD_JSON_ENVELOPE: "1" },
-      timeout: Math.min(BD_COMMAND_CEILING_MS, remaining),
-      killSignal: "SIGKILL",
     })
     // A read is unreferenced so a slow one cannot hold the host open. A write runs inside
     // the embedded write lock this process holds and must not be cut off mid-journal.
-    if (!writesStore(invocationFromArgv(args))) proc.unref()
-    const [out, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()])
-    const code = await proc.exited
+    const read = !writesStore(invocationFromArgv(args))
+    if (read) proc.unref()
+    const run = await supervise(proc, { timeoutMs: Math.min(BD_COMMAND_CEILING_MS, remaining), unref: read })
+    if (run.kind === "timeout") return { failure: "bd command timed out" }
+    if (run.kind !== "exited") return { failure: "bd ended without reporting an exit status" }
+    const { exitCode: code, stdout: out, stderr } = run
     if (code === 0) return { output: out }
     if (Date.now() >= deadline || Date.now() - started >= remaining) return { failure: "bd command timed out" }
     const detail = stderr.replace(/\s+/g, " ").trim()
