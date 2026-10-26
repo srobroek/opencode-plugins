@@ -43,8 +43,13 @@ merge with them.
   its own model, or inherits one if it has none.
 - `cooldownMs`: how long a failed model sits out (default `600000`, 10 min).
   See [Runtime fallback](#runtime-fallback).
-- `retryOnFallback`: retry a failed root session once on the next model
-  (default `true`).
+- `quotaCooldownMs`: how long a spent quota sits out when the provider names
+  no reset time (default `21600000`, 6 h).
+- `hostRetries`: how many retries the host may spend on the same model for a
+  transient failure before the plugin switches the request (default `2`).
+- `switchTimeoutMs`: how long the plugin waits for `session.switchModel`
+  during a retry (default `2000`).
+  See [Runtime fallback](#runtime-fallback).
 - `purposes`: role name to a short text saying when to pick it, shown to the
   spawner. `smol`, `task`, `slow` and `challenger` have built-in texts. See
   [Choosing a role per spawn](#choosing-a-role-per-spawn).
@@ -102,7 +107,8 @@ is cheaper.
 "guard": {
   "expensive": "auto",
   "threshold": 4,
-  "allowInherit": ["fork"]
+  "allowInherit": ["fork"],
+  "allowModels": []
 }
 ```
 
@@ -113,10 +119,19 @@ is cheaper.
   `["amazon-bedrock/global.anthropic.claude-opus-5-5"]`. An entry with a
   `#variant` matches only that variant.
 - `allowInherit`: agent ids that may inherit the session model.
+- `allowModels`: expensive models a spawn may name in its own `model`
+  argument. Same format as `expensive`.
 
-A spawn is allowed if it passes `model`, or a `role` that resolves, or if the
-target agent has a model, or a role that resolves (through the `agents` option
-or the header). The session model is
+A spawn is allowed if it passes a `role` that resolves, or if the target agent
+has a model, or a role that resolves (through the `agents` option or the
+header).
+
+Models often set the `subagent` tool's `model` argument even though its
+description says not to. So a spawn that names an expensive `model` itself
+(not one filled in from `role`) is refused too, unless the target agent pins
+that model or `allowModels` lists it. The refusal asks for the cheapest role
+instead, and names the role that resolves to the requested model, if there is
+one. The session model is
 `session.model`, else the calling agent's model, else the parent session's
 (a session that inherits carries no model), else the default model. A root
 session on the configured default model has no `session.model`. If any
@@ -125,48 +140,73 @@ checked.
 
 ## Runtime fallback
 
-OpenCode doesn't fall back to another model on its own. The `retry` hook can
-only retry the same model, and a subagent whose model is unavailable fails
-with `Model unavailable`. The plugin adds the fallback:
+OpenCode doesn't fall back to another model on its own: its retries stay on
+the same model. The plugin adds the fallback in the host's `retry` hook, which
+runs before every retry of a failed model request, in root and child sessions
+alike:
 
-The host retries a transient error on the same model first. A provider that
-keeps answering 503 is retried about ten times, over roughly 80 seconds, before
-`session.execution.failed` fires. The fallback starts only after that, so a
-dead provider costs about 80 seconds per session before it is marked
-unhealthy. Later spawns and sessions skip it for `cooldownMs`.
+1. It checks whether the model or provider caused the error, and how:
 
-1. On `session.execution.failed`, or when a `subagent` call fails, it checks
-   whether the model or provider caused the error: model unavailable,
-   auth or credential errors, 401/403, 429 or throttling, 5xx or overloaded,
-   and Bedrock's `The provided model identifier is invalid`.
-   User interrupts, tool errors and context overflow don't count.
-2. The failed model (all its variants) is marked unhealthy for `cooldownMs`
-   in plugin storage, under `health`.
-3. Roles are resolved again. Unhealthy candidates are skipped, so agents on
-   that role move to the next candidate. If every available candidate is
-   unhealthy, the one that failed longest ago is used. When a cooldown ends,
+   | Kind | Examples | Cools down | Budget |
+   | --- | --- | --- | --- |
+   | `rate-limit` | 429, throttling | the model | transient |
+   | `server` | 5xx, overloaded | the model | transient |
+   | `outage` | connection refused, DNS, fetch failed | the provider | transient |
+   | `auth` | 401/403, bad or expired credentials or SSO | the provider | permanent |
+   | `quota` | 402, spent quota, billing, weekly or daily usage limit | the provider | permanent |
+   | `unavailable` | unknown or retired model, Bedrock's `The provided model identifier is invalid` | the model | permanent |
+   | `content-filter` | blocked by a content or safety filter | the model | permanent |
+
+   User interrupts, tool errors and context overflow don't count, and the
+   host's own decision stands.
+2. A transient failure stays on the same model for the first `hostRetries`
+   retries. A permanent one switches on the first retry.
+3. The failed model, or its whole provider, is marked unhealthy in plugin
+   storage, under `health`. A model's variants share its health. The cooldown
+   is `cooldownMs`. A spent quota sits out until the reset time the error
+   reports (an ISO time, a unix `reset` stamp, or a span such as
+   `resets in 3h 20m`), else for `quotaCooldownMs`. Roles are resolved again,
+   so agents on that role move to the next candidate. When a cooldown ends,
    the roles are resolved again.
-4. Then, depending on the session:
-   - **Root session** with `retryOnFallback`: the plugin switches the session
-     to the next model (`session.switchModel`) and sends one short message
-     asking it to continue. A session is retried at most once per
-     `cooldownMs`. After that it only gets a note.
-   - **Subagent session**, or a failed `subagent` call: the parent gets a
-     note that does not start a turn (`session.synthetic`, steer). The note
-     names the failed model and the next one, and says the spawn may be
-     retried. The child's failure event and the tool error produce one note
-     between them. A child spawned with `role` falls back within that role:
-     the plugin switches the child to the role's next model, and the note
-     says to spawn again with the same `role` or resume the child by
-     `sessionID`.
+4. The request moves to the next healthy candidate of the session's role: the
+   `role` the session was spawned with, else its agent's role, else the first
+   role that lists the failed model. The plugin calls `session.switchModel`
+   and tells the host to retry at once. The host reloads the session before
+   each attempt, so the same turn continues on the new model. Nothing is
+   replayed and no message is sent. This also covers errors the host would
+   not retry, such as a 401.
+5. If `session.switchModel` takes longer than `switchTimeoutMs`, the host's
+   own decision stands. The switch keeps landing in the background and is
+   picked up by the next attempt. Until it lands, the session isn't switched
+   again.
+6. A model that is cooling down is never a target, so two failing models
+   can't take turns. When no healthy candidate is left, the host's own
+   decision stands.
 
-Every fallback is logged (`console.warn`) and shown in the session. A retried
-root session gets the note as part of the message that restarts it. Other
-notes don't start a turn: waking an idle session would only run it again on
-the model that just failed, or override `retryOnFallback: false`. The model is
-the one the error names (`Model unavailable: provider/model`), else the
-session's model, found the same way as for the guard. Notes leave out the
-host's `#default` variant.
+Without the plugin's switch, the host retries a transient error on the same
+model about ten times over roughly 80 seconds (seen with a provider that keeps
+answering 503) before `session.execution.failed` fires. With a healthy
+candidate left, the switch happens after `hostRetries` retries.
+
+Some failures never reach the `retry` hook, such as a spawn whose model is
+unavailable. And sometimes nothing healthy is left. For those, on
+`session.execution.failed` or a failed `subagent` call, the plugin marks the
+model unhealthy and leaves a note that does not start a turn
+(`session.synthetic`, steer):
+
+- A **root session** gets a note naming the failed model and what its role
+  resolves to now. The plugin doesn't switch or wake it: switching an idle
+  session could change a turn the user starts later.
+- A **subagent session**, or a failed `subagent` call, leaves the note in the
+  parent. The note names the failed model and the next one, and says the
+  spawn may be retried. The child's failure event and the tool error produce
+  one note between them. For a child spawned with `role`, the plugin also
+  switches the child to the role's next model, and the note says to spawn
+  again with the same `role` or resume the child by `sessionID`.
+
+Every fallback is logged (`console.warn`). The model is the one the error
+names (`Model unavailable: provider/model`), else the session's model, found
+the same way as for the guard. Notes leave out the host's `#default` variant.
 
 ## Choosing a role per spawn
 
@@ -195,7 +235,8 @@ removes `role`. The model is chosen in this order:
 4. the target agent's own model
 5. the session's model, which the child inherits
 
-An unknown role refuses the spawn and lists the configured roles. A role with
+The plugin never overrides an explicit `model` or a resumed spawn. An unknown
+role refuses the spawn and lists the configured roles. A role with
 nothing available falls through to step 3. A resumed spawn (with
 `sessionID`) keeps its model. The plugin records the role each child was
 spawned with (in plugin storage, under `spawn-role:<sessionID>`), so a

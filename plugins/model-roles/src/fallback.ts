@@ -3,7 +3,7 @@
  * failed session is retried, and the notes the plugin shows. Pure.
  */
 
-import { type FailureClass, healthKey, mayRetry } from "./health.ts"
+import { type FailureClass, type FailureScope, failureScope, healthKey, isTransient } from "./health.ts"
 import {
   type AvailableModel,
   type HealthView,
@@ -12,7 +12,6 @@ import {
   type Options,
   parseCandidate,
   resolveRole,
-  sameModel,
 } from "./resolve.ts"
 
 export const SOURCE = "srobroek.model-roles"
@@ -50,22 +49,50 @@ export function fallbackTarget(
   return undefined
 }
 
-export type FallbackFacts = {
-  isChild: boolean
-  retryOnFallback: boolean
+/** Retries the host may spend on the same model for a transient failure before the retry hook switches. */
+export const DEFAULT_HOST_RETRIES = 2
+
+/** How long the retry hook waits for `session.switchModel` before leaving the host's decision alone. */
+export const DEFAULT_SWITCH_TIMEOUT_MS = 2_000
+
+export type RetryFacts = {
+  options: Options
+  available: ReadonlyArray<AvailableModel>
+  /** Health after the failed model was marked. */
+  health: HealthView
+  role: string | undefined
   failed: ModelRef
-  next: ModelRef | undefined
-  lastRetryAt: unknown
-  now: number
-  windowMs: number
+  kind: FailureClass
+  /** The attempt the host is about to make: 2 for the first retry. */
+  attempt: number
+  hostRetries: number
 }
 
-export type FallbackAction = "retry" | "notify" | "notify-parent"
+/**
+ * Whether a failed request should stay on its model for now: a transient failure
+ * (throttling, overload, an outage) within the host's retry budget. Permanent ones
+ * (spent quota, auth, an unknown model, a content filter) switch at once.
+ */
+export function staysOnModel(kind: FailureClass, attempt: number, hostRetries: number): boolean {
+  return isTransient(kind) && attempt - 1 <= hostRetries
+}
 
-export function decideFallback(facts: FallbackFacts): FallbackAction {
-  if (facts.isChild) return "notify-parent"
-  if (!facts.retryOnFallback || facts.next === undefined || sameModel(facts.next, facts.failed)) return "notify"
-  return mayRetry(facts.lastRetryAt, facts.now, facts.windowMs) ? "retry" : "notify"
+/**
+ * The model the retry hook switches a failing request to: the next healthy candidate
+ * of the session's role. Never a model that is cooling down, so two failing models
+ * cannot trade places; when nothing healthy is left the host's own decision stands.
+ */
+export function retryTarget(facts: RetryFacts): { role: string; model: ModelRef } | undefined {
+  if (staysOnModel(facts.kind, facts.attempt, facts.hostRetries)) return undefined
+  const within =
+    facts.role !== undefined && Object.hasOwn(facts.options.roles, facts.role) ? [facts.role] : rolesListing(facts.options, facts.failed)
+  for (const role of within) {
+    const resolution = resolveRole(facts.options.roles, facts.available, role, facts.health)
+    if (resolution.model === undefined || resolution.unhealthy) continue
+    if (healthKey(resolution.model) === healthKey(facts.failed)) continue
+    return { role, model: resolution.model }
+  }
+  return undefined
 }
 
 export type NoteFacts = {
@@ -73,18 +100,29 @@ export type NoteFacts = {
   kind: FailureClass
   cooldownMs: number
   target: { role: string; model: ModelRef } | undefined
+  /** Defaults to the scope of `kind`. */
+  scope?: FailureScope
+}
+
+/** A cooldown as text: seconds, minutes or hours. */
+export function duration(ms: number): string {
+  if (ms < 60_000) return `${Math.round(ms / 1_000)} s`
+  if (ms < 3_600_000) return `${Math.round(ms / 60_000)} min`
+  return `${Math.round((ms / 3_600_000) * 10) / 10} h`
 }
 
 /** What happened and what the role now resolves to. */
 export function failureNote(facts: NoteFacts): string {
-  const minutes = Math.round(facts.cooldownMs / 60_000)
-  const head = `Model ${label(facts.failed)} failed (${facts.kind}); it sits out new resolutions for ${minutes} min.`
+  const scope = facts.scope ?? failureScope(facts.kind)
+  const who = scope === "provider" ? `every ${facts.failed.providerID} model` : "it"
+  const head = `Model ${label(facts.failed)} failed (${facts.kind}); ${who} sits out new resolutions for ${duration(facts.cooldownMs)}.`
   if (facts.target === undefined) return `${head} No other candidate is available for it.`
   return `${head} Role ${facts.target.role} now resolves to ${label(facts.target.model)}.`
 }
 
-export function retryPrompt(facts: NoteFacts & { target: { role: string; model: ModelRef } }): string {
-  return `${failureNote(facts)} This session switched to ${label(facts.target.model)}. Continue the previous task from where it stopped.`
+/** The note for a request the retry hook moved to another model. */
+export function switchNote(facts: NoteFacts & { target: { role: string; model: ModelRef } }): string {
+  return `${failureNote(facts)} The request was retried on ${label(facts.target.model)}.`
 }
 
 export type SubagentNoteFacts = NoteFacts & {

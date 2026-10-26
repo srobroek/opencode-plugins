@@ -32,6 +32,8 @@ export type GuardOptions = {
   threshold: number
   /** Agent ids allowed to inherit the session model. */
   allowInherit: string[]
+  /** Expensive models a spawn may still name in its own `model` argument. */
+  allowModels: string[]
 }
 
 export type GuardAgent = {
@@ -79,7 +81,7 @@ export function parseGuard(raw: unknown): GuardOptions | undefined {
     typeof input.threshold === "number" && Number.isFinite(input.threshold) && input.threshold > 0
       ? input.threshold
       : AUTO_THRESHOLD
-  return { expensive, threshold, allowInherit: strings(input.allowInherit) }
+  return { expensive, threshold, allowInherit: strings(input.allowInherit), allowModels: strings(input.allowModels) }
 }
 
 const key = (ref: ModelRef): string => `${ref.providerID}/${ref.id}`
@@ -191,5 +193,39 @@ export function judgeSpawn(facts: GuardFacts): GuardDecision {
   lines.push(
     `If '${facts.target}' should run on the session model, add it to the srobroek.model-roles option guard.allowInherit.`,
   )
+  return { allow: false, reason: lines.join("\n") }
+}
+
+const listed = (ref: ModelRef, entries: ReadonlyArray<string>): boolean =>
+  entries.some((entry) => {
+    const candidate = parseCandidate(entry)
+    if (candidate?.kind !== "model" || key(candidate.ref) !== key(ref)) return false
+    return candidate.ref.variant === undefined || candidate.ref.variant === ref.variant
+  })
+
+/**
+ * Judge a spawn that names its own `model` (not one a `role` filled in). An expensive
+ * model is refused unless the target agent pins it anyway or `guard.allowModels`
+ * lists it: models set `model` despite the tool description telling them not to.
+ */
+export function judgeModelOverride(facts: GuardFacts & { model: ModelRef }): GuardDecision {
+  if (!isExpensive(facts.model, facts.guard, facts.available)) return { allow: true }
+  if (listed(facts.model, facts.guard.allowModels)) return { allow: true }
+  const target = facts.agents.find((agent) => agent.id === facts.target)
+  const pinned = target === undefined ? undefined : pinnedModel(target, facts)
+  if (pinned !== undefined && key(pinned) === key(facts.model)) return { allow: true }
+  const { roles } = cheaperAlternatives(facts)
+  const lines = [`This spawn sets model ${label(facts.model)} itself, and that model is expensive.`]
+  const [cheapest] = roles
+  if (cheapest !== undefined)
+    lines.push(`Drop \`model\` and pass role: "${cheapest.role}" (runs ${label(cheapest.model)}, ${price(cheapest.cost)}), or another role that fits the task.`)
+  const matching = Object.keys(facts.options.roles)
+    .sort()
+    .filter((role) => {
+      const model = resolveRole(facts.options.roles, facts.available, role, facts.health).model
+      return model !== undefined && key(model) === key(facts.model)
+    })
+  if (matching.length > 0) lines.push(`If the task needs ${label(facts.model)}, pass role: "${matching[0]}" instead; it resolves to that model.`)
+  lines.push(`If the user asked for ${label(facts.model)}, add it to the srobroek.model-roles option guard.allowModels.`)
   return { allow: false, reason: lines.join("\n") }
 }

@@ -2,12 +2,16 @@ import { describe, expect, test } from "bun:test"
 import {
   childSessionID,
   classifyFailure,
+  cooldownFor,
+  failureScope,
+  healthEntry,
   healthView,
+  isTransient,
   markUnhealthy,
-  mayRetry,
   modelFromError,
   nextExpiry,
   pruneHealth,
+  quotaReset,
   readHealth,
 } from "./health.ts"
 import { parseOptions, resolveRole } from "./resolve.ts"
@@ -37,6 +41,54 @@ describe("classifyFailure", () => {
     expect(classifyFailure({ message: "prompt is too long: 250000 tokens", status: 400 })).toBeUndefined()
     expect(classifyFailure({ message: "file not found: src/x.ts" })).toBeUndefined()
     expect(classifyFailure({ message: "bad request", status: 400 })).toBeUndefined()
+  })
+})
+
+describe("failure classes and scope", () => {
+  test("quota, content filter and outage", () => {
+    expect(classifyFailure({ type: "api", message: "You exceeded your current quota", status: 429 })).toBe("quota")
+    expect(classifyFailure({ message: "Weekly usage limit reached", status: 429 })).toBe("quota")
+    expect(classifyFailure({ message: "Your credit balance is too low", status: 400 })).toBe("quota")
+    expect(classifyFailure({ message: "nope", status: 402 })).toBe("quota")
+    expect(classifyFailure({ message: "Output blocked by content filtering policy", status: 400 })).toBe("content-filter")
+    expect(classifyFailure({ message: "fetch failed: ECONNREFUSED 127.0.0.1:1" })).toBe("outage")
+    expect(classifyFailure({ message: "The SSO session associated with this profile has expired" })).toBe("auth")
+  })
+
+  test("provider-scoped and transient kinds", () => {
+    expect(["auth", "quota", "outage"].map((k) => failureScope(k as never))).toEqual(["provider", "provider", "provider"])
+    expect(["unavailable", "content-filter", "rate-limit", "server"].map((k) => failureScope(k as never))).toEqual([
+      "model",
+      "model",
+      "model",
+      "model",
+    ])
+    expect(isTransient("rate-limit")).toBe(true)
+    expect(isTransient("quota")).toBe(false)
+  })
+
+  test("a provider entry covers every model of it", () => {
+    const state = markUnhealthy({}, { providerID: "p", id: "a" }, 1_000, 500, "auth: x", "provider")
+    expect(Object.keys(state)).toEqual(["p/*"])
+    expect(healthView(state, 1_200)({ providerID: "p", id: "zzz" })).toBe(1_000)
+    expect(healthView(state, 1_200)({ providerID: "q", id: "a" })).toBeUndefined()
+    expect(healthEntry(state, { providerID: "p", id: "b" }, 1_600)).toBeUndefined()
+  })
+
+  test("quota reset from the error, else the quota cooldown", () => {
+    const now = Date.parse("2026-10-26T12:00:00Z")
+    expect(quotaReset({ message: "limit hit, resets at 2026-10-27T00:00:00Z" }, now)).toBe(Date.parse("2026-10-27T00:00:00Z"))
+    expect(quotaReset({ message: "x", response: { body: '{"error":{"reset_at":"2026-10-26T15:00:00Z"}}' } }, now)).toBe(
+      Date.parse("2026-10-26T15:00:00Z"),
+    )
+    expect(quotaReset({ message: "Usage limit reached. Resets in 3h 20m" }, now)).toBe(now + 200 * 60_000)
+    expect(quotaReset({ message: "retry-after: 90 seconds" }, now)).toBe(now + 90_000)
+    expect(quotaReset({ message: `"reset": ${Math.floor(now / 1_000) + 60}` }, now)).toBe(now + 60_000)
+    expect(quotaReset({ message: "resets at 2020-01-01T00:00:00Z" }, now)).toBeUndefined()
+    const options = { cooldownMs: 600_000, quotaCooldownMs: 6 * 3_600_000 }
+    expect(cooldownFor("quota", { message: "quota exceeded" }, now, options)).toBe(6 * 3_600_000)
+    expect(cooldownFor("quota", { message: "resets in 2h" }, now, options)).toBe(7_200_000)
+    expect(cooldownFor("auth", { message: "resets in 2h" }, now, options)).toBe(600_000)
   })
 })
 
@@ -81,11 +133,6 @@ describe("health state", () => {
     expect(readHealth([1])).toEqual({})
   })
 
-  test("mayRetry allows one retry per window", () => {
-    expect(mayRetry(undefined, 1_000, 500)).toBe(true)
-    expect(mayRetry(800, 1_000, 500)).toBe(false)
-    expect(mayRetry(400, 1_000, 500)).toBe(true)
-  })
 })
 
 describe("resolveRole with health", () => {
