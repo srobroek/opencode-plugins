@@ -6,9 +6,13 @@ import {
   annotation,
   decideIsolation,
   decideMerge,
+  formatLaneList,
   isConflict,
+  LANE_PREFIX,
   type Lane,
+  type LaneReport,
   laneKey,
+  liveness,
   MERGE_TOOL,
   mergeArgs,
   type Options,
@@ -16,9 +20,11 @@ import {
   readOptions,
   readSubagentInput,
   rewritePrompt,
+  SESSION_LOOKUP_MS,
   SUBAGENT_TOOL,
   shouldRemove,
   tail,
+  worktreeForBranch,
   worktreeName,
 } from "./lane.ts"
 
@@ -29,20 +35,25 @@ export const MERGE_DESCRIPTION =
   "Merge a subagent's worktree branch back. The subagent tool result names the lane (branch, base, sessionID). " +
   'method "wt-merge" runs `wt merge <target> --no-squash --no-ff --yes` from the subagent worktree, keeping its commits, ' +
   "and removes the worktree on success; a conflict keeps the worktree and reports the output. " +
-  'method "none" only reports the lane status. The worktree must be committed and clean.'
+  "The worktree must be committed and clean, and the target checkout must have no uncommitted or untracked changes to files the lane changes. " +
+  'method "none" only reports the lane status. method "list" (no sessionID) reports every active lane in the project ' +
+  "with commits ahead, uncommitted changes, and lanes whose child or parent session is gone; it never removes anything."
 
 export const MERGE_INPUT = {
   type: "object",
   additionalProperties: false,
-  required: ["sessionID", "method"],
+  required: ["method"],
   properties: {
-    sessionID: { type: "string", description: "The subagent's sessionID from the subagent tool result" },
-    method: { type: "string", enum: ["wt-merge", "none"] },
+    sessionID: {
+      type: "string",
+      description: 'The subagent\'s sessionID from the subagent tool result. Required unless method is "list".',
+    },
+    method: { type: "string", enum: ["wt-merge", "none", "list"] },
     target: { type: "string", description: "Branch to merge into. Defaults to the branch the lane was created from." },
   },
 } as const
 
-type MergeInput = { sessionID: string; method: "wt-merge" | "none"; target?: string }
+type MergeInput = { sessionID?: string; method: "wt-merge" | "none" | "list"; target?: string }
 
 type Session = {
   id: string
@@ -52,10 +63,10 @@ type Session = {
   location: { directory: string }
 }
 
-type AgentInfo = { id: string; name?: string; mode?: string; model?: Session["model"] }
+type AgentInfo = { id: string; name?: string; mode?: string; model?: Session["model"]; permissions?: unknown }
 
 /** Test seams; the host never passes these. */
-export type Overrides = { run?: Runner; suffix?: () => string }
+export type Overrides = { run?: Runner; suffix?: () => string; lookupMs?: number }
 
 const randomSuffix = () => crypto.randomUUID().slice(0, 6)
 
@@ -69,7 +80,13 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-export function createLanes(ctx: Context, options: Options, git: Git, suffix: () => string) {
+export function createLanes(
+  ctx: Context,
+  options: Options,
+  git: Git,
+  suffix: () => string,
+  lookupMs = SESSION_LOOKUP_MS,
+) {
   const load = async (child: string) => parseLane(await ctx.storage.get(laneKey(child)))
   const save = (lane: Lane) => ctx.storage.set(laneKey(lane.child), lane)
 
@@ -263,10 +280,73 @@ export function createLanes(ctx: Context, options: Options, git: Git, suffix: ()
     }
   }
 
+  const scan = async () => {
+    const found: Lane[] = []
+    let after: string | undefined
+    do {
+      const page = await ctx.storage.scan({ prefix: LANE_PREFIX, ...(after === undefined ? {} : { after }) } as never)
+      for (const entry of page.entries) {
+        const lane = parseLane(entry.value)
+        if (lane) found.push(lane)
+      }
+      after = page.next
+    } while (after !== undefined)
+    return found
+  }
+
+  const alive = (sessionID: string) => liveness(ctx.session.get({ sessionID } as never), lookupMs)
+
+  /** Every active lane in the caller's project, with git status and session liveness. Removes nothing. */
+  const list = async (caller: string): Promise<Result> => {
+    const session = await getSession(caller)
+    const lanes = (await scan())
+      .filter((lane) => lane.state === "active")
+      .filter((lane) => (session ? lane.projectID === session.projectID : lane.parent === caller))
+      .sort((a, b) => a.branch.localeCompare(b.branch))
+    const reports: LaneReport[] = await Promise.all(
+      lanes.map(async (lane) => {
+        const [status, child, parent] = await Promise.all([
+          git.status(lane.directory, lane.base),
+          alive(lane.child),
+          lane.parent === caller && session ? Promise.resolve("alive" as const) : alive(lane.parent),
+        ])
+        return { lane, status, child, parent }
+      }),
+    )
+    return {
+      content: formatLaneList(reports, caller),
+      metadata: {
+        ok: true,
+        lanes: reports.map(({ lane, status, child, parent }) => ({
+          sessionID: lane.child,
+          parent: lane.parent,
+          branch: lane.branch,
+          directory: lane.directory,
+          ahead: status?.ahead,
+          dirty: status?.dirty,
+          child,
+          parentSession: parent,
+        })),
+      },
+    }
+  }
+
+  /** Uncommitted and untracked files where `target` is checked out; [] when it is not checked out. */
+  const targetChanges = async (lane: Lane, target: string) => {
+    const porcelain = await git.worktrees(lane.parentDir)
+    if (porcelain === undefined) return undefined
+    const directory = worktreeForBranch(porcelain, target)
+    return directory === undefined ? [] : git.localFiles(directory)
+  }
+
   const merge = async (
     input: MergeInput,
     tool: { sessionID: string; agent: string; messageID: string; id: string },
   ): Promise<Result> => {
+    if (input.method === "list") return list(tool.sessionID)
+    if (!input.sessionID) {
+      return { content: `${MERGE_TOOL}: sessionID is required for method "${input.method}"`, metadata: { ok: false } }
+    }
     const lane = await load(input.sessionID)
     await ctx.permission.assert({
       sessionID: tool.sessionID,
@@ -280,11 +360,18 @@ export function createLanes(ctx: Context, options: Options, git: Git, suffix: ()
       if (!lane) return { content: `${MERGE_TOOL}: no worktree lane for session ${input.sessionID}`, metadata: { ok: false } }
       return { content: annotation(lane, status, false), metadata: { ok: true, lane } }
     }
+    const target = input.target ?? lane?.target
+    const ready = lane?.state === "active" && lane.parent === tool.sessionID && target && status && status.ahead > 0
+    const files =
+      ready && !status.dirty
+        ? { laneFiles: await git.changedFiles(lane.directory, target), localFiles: await targetChanges(lane, target) }
+        : {}
     const decision = decideMerge({
       lane,
       caller: tool.sessionID,
       status,
       ...(input.target ? { target: input.target } : {}),
+      ...files,
     })
     if (decision.refuse || !lane) {
       const reason = decision.refuse ? decision.reason : "no lane"
@@ -325,7 +412,7 @@ export function createPlugin(overrides: Overrides = {}) {
     async setup(ctx) {
       const options = readOptions(ctx.options)
       const git = createGit(overrides.run ?? spawnRunner)
-      const lanes = createLanes(ctx, options, git, overrides.suffix ?? randomSuffix)
+      const lanes = createLanes(ctx, options, git, overrides.suffix ?? randomSuffix, overrides.lookupMs)
       const registrations: { dispose: () => Promise<void> }[] = []
       const cleanup = async () => {
         for (const registration of registrations.reverse()) await registration.dispose()

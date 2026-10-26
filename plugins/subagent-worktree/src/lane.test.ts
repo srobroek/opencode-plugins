@@ -5,18 +5,25 @@ import {
   decideIsolation,
   decideMerge,
   diffCommand,
+  formatLaneList,
   type IsolationFacts,
   isConflict,
   type Lane,
+  type LaneReport,
+  liveness,
   mergeArgs,
+  orphanReasons,
+  overlap,
   parseLane,
   readOptions,
   readSubagentInput,
   rewritePrompt,
+  rulesAreReadOnly,
   SUBAGENT_PREAMBLE,
   shouldRemove,
   slug,
   tail,
+  worktreeForBranch,
   worktreeName,
 } from "./lane.ts"
 
@@ -74,6 +81,11 @@ describe("decideIsolation", () => {
     ["unknown agent", { agent: undefined }, "unknown agent"],
     ["primary", { agent: { id: "general", mode: "primary" } }, "primary"],
     ["child caller", { callerIsChild: true }, "child"],
+    [
+      "read-only agent",
+      { agent: { id: "general", permissions: [{ action: "edit", resource: "*", effect: "deny" }] } },
+      "read-only",
+    ],
     ["no git", { isGit: false }, "not a git"],
   ] as const)("skips: %s", (_name, over, reason) => {
     const decision = decideIsolation(facts(over as Partial<IsolationFacts>))
@@ -85,6 +97,23 @@ describe("decideIsolation", () => {
       facts({ input: { agent: "Implementer", description: "", prompt: "p" }, agent: { id: "implementer" } }),
     )
     expect(decision).toEqual({ isolate: true })
+  })
+})
+
+describe("rulesAreReadOnly", () => {
+  const rule = (action: string, resource: string, effect: string) => ({ action, resource, effect })
+  test("the last rule matching edit on * decides", () => {
+    expect(rulesAreReadOnly([rule("edit", "*", "deny")])).toBe(true)
+    expect(rulesAreReadOnly([rule("*", "**", "deny")])).toBe(true)
+    expect(rulesAreReadOnly([rule("edit", "*", "deny"), rule("edit", "*", "allow")])).toBe(false)
+    expect(rulesAreReadOnly([rule("edit", "*", "allow"), rule("ed*", "*", "deny")])).toBe(true)
+  })
+  test("path-scoped denies, other actions and junk are not read-only", () => {
+    expect(rulesAreReadOnly([rule("edit", "*.env", "deny")])).toBe(false)
+    expect(rulesAreReadOnly([rule("shell", "*", "deny")])).toBe(false)
+    expect(rulesAreReadOnly([rule("edit", "*", "ask")])).toBe(false)
+    expect(rulesAreReadOnly([null, { action: 1 }])).toBe(false)
+    expect(rulesAreReadOnly(undefined)).toBe(false)
   })
 })
 
@@ -139,6 +168,12 @@ describe("annotation", () => {
     expect(note).toContain("git -C '/my repo' diff")
     expect(note).toContain("status")
   })
+  test("warns when the work exists only as uncommitted changes", () => {
+    const note = annotation(lane, { ahead: 0, dirty: true }, false)
+    expect(note).toContain("exists only as uncommitted changes")
+    expect(note).toContain("sessionID ses_child")
+    expect(annotation(lane, { ahead: 1, dirty: true }, false)).not.toContain("exists only as uncommitted")
+  })
   test("removed lane", () => {
     expect(annotation(lane, { ahead: 0, dirty: false }, true)).toContain('state="removed"')
   })
@@ -154,9 +189,10 @@ describe("merge", () => {
     expect(isConflict("Merged 2 commits")).toBe(false)
   })
   const clean = { ahead: 1, dirty: false }
+  const none = { laneFiles: [], localFiles: [] }
   test("decideMerge", () => {
-    expect(decideMerge({ lane, caller: "ses_parent", status: clean })).toEqual({ refuse: false, target: "main" })
-    expect(decideMerge({ lane, caller: "ses_parent", status: clean, target: "dev" })).toEqual({
+    expect(decideMerge({ lane, caller: "ses_parent", status: clean, ...none })).toEqual({ refuse: false, target: "main" })
+    expect(decideMerge({ lane, caller: "ses_parent", status: clean, target: "dev", ...none })).toEqual({
       refuse: false,
       target: "dev",
     })
@@ -172,6 +208,79 @@ describe("merge", () => {
     expect(reason({ lane, caller: "ses_parent", status: undefined })).toContain("cannot read")
     expect(reason({ lane, caller: "ses_parent", status: { ahead: 1, dirty: true } })).toContain("uncommitted")
     expect(reason({ lane, caller: "ses_parent", status: { ahead: 0, dirty: false } })).toContain("no commits")
+    const only = reason({ lane, caller: "ses_parent", status: { ahead: 0, dirty: true } })
+    expect(only).toContain("0 commits")
+    expect(only).toContain("exists only as uncommitted changes")
+    expect(only).toContain("sessionID ses_child")
+  })
+  test("decideMerge refuses overlapping local changes in the target checkout", () => {
+    const decide = (laneFiles: string[] | undefined, localFiles: string[] | undefined) =>
+      decideMerge({ lane, caller: "ses_parent", status: clean, laneFiles, localFiles })
+    expect(decide(["a.ts", "b.ts"], ["c.ts"])).toEqual({ refuse: false, target: "main" })
+    const refused = decide(["b.ts", "a.ts", "c.ts"], ["c.ts", "a.ts"])
+    expect(refused.refuse).toBe(true)
+    if (refused.refuse) expect(refused.reason).toEndWith(": a.ts, c.ts")
+    expect(decide(undefined, [])).toEqual({ refuse: true, reason: expect.stringContaining("cannot list the files") })
+    expect(decide([], undefined)).toEqual({ refuse: true, reason: expect.stringContaining("cannot read the local") })
+  })
+  test("overlap", () => {
+    expect(overlap(["b", "a", "a"], ["a", "b", "x"])).toEqual(["a", "b"])
+    expect(overlap([], ["a"])).toEqual([])
+  })
+  test("worktreeForBranch", () => {
+    const porcelain = [
+      "worktree /repo",
+      "HEAD 1111",
+      "branch refs/heads/main",
+      "",
+      "worktree /wt/x",
+      "HEAD 2222",
+      "branch refs/heads/subagent-x",
+      "",
+      "worktree /wt/detached",
+      "HEAD 3333",
+      "detached",
+    ].join("\n")
+    expect(worktreeForBranch(porcelain, "main")).toBe("/repo")
+    expect(worktreeForBranch(porcelain, "subagent-x")).toBe("/wt/x")
+    expect(worktreeForBranch(porcelain, "dev")).toBeUndefined()
+  })
+})
+
+describe("lane inventory", () => {
+  test("liveness: resolved is alive, rejected is gone, slow is unknown", async () => {
+    expect(await liveness(Promise.resolve({}), 50)).toBe("alive")
+    expect(await liveness(Promise.reject(new Error("no session")), 50)).toBe("gone")
+    expect(await liveness(new Promise(() => {}), 5)).toBe("unknown")
+  })
+  test("orphanReasons", () => {
+    const status = { ahead: 1, dirty: false }
+    expect(orphanReasons({ status, child: "alive", parent: "alive" })).toEqual([])
+    expect(orphanReasons({ status, child: "unknown", parent: "unknown" })).toEqual([])
+    expect(orphanReasons({ status: undefined, child: "gone", parent: "gone" })).toEqual([
+      "child session gone",
+      "parent session gone",
+      "worktree unreadable",
+    ])
+  })
+  test("formatLaneList", () => {
+    expect(formatLaneList([], "ses_parent")).toContain("No active lanes")
+    const reports: LaneReport[] = [
+      { lane, status: { ahead: 2, dirty: false }, child: "alive", parent: "alive" },
+      {
+        lane: { ...lane, child: "ses_old", parent: "ses_gone", branch: "subagent-y", directory: "/wt/y" },
+        status: { ahead: 0, dirty: true },
+        child: "gone",
+        parent: "gone",
+      },
+    ]
+    const text = formatLaneList(reports, "ses_parent")
+    expect(text).toContain('count="2"')
+    expect(text).toContain("- subagent-x (sessionID ses_child, yours) /wt/subagent-x ahead=2 dirty=no child=alive parent=alive\n")
+    expect(text).toContain("parent ses_gone")
+    expect(text).toContain("ORPHAN: child session gone, parent session gone")
+    expect(text).toContain("exists only as uncommitted changes")
+    expect(text).toContain("nothing was removed")
   })
 })
 

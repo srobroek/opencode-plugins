@@ -22,6 +22,7 @@ export function createGit(run: Runner) {
     const result = await run(["git", "-C", directory, ...args])
     return result.code === 0 ? result.stdout.trim() : undefined
   }
+  const files = (output: string | undefined) => output?.split("\0").filter((file) => file !== "")
   return {
     run,
     isWorkTree: async (directory: string) => (await git(directory, "rev-parse", "--is-inside-work-tree")) === "true",
@@ -41,6 +42,17 @@ export function createGit(run: Runner) {
       if (ahead === undefined || porcelain === undefined) return undefined
       return { ahead: Number.parseInt(ahead, 10) || 0, dirty: porcelain !== "" }
     },
+    /** Files HEAD changes since its merge base with `target`. */
+    changedFiles: async (directory: string, target: string) =>
+      files(await git(directory, "diff", "--name-only", "-z", `${target}...HEAD`)),
+    /** Uncommitted (staged or not) and untracked files, relative to the work tree root. */
+    localFiles: async (directory: string) => {
+      const changed = files(await git(directory, "diff", "--name-only", "-z", "HEAD"))
+      const untracked = files(await git(directory, "ls-files", "--others", "--exclude-standard", "--full-name", "-z"))
+      return changed && untracked ? [...changed, ...untracked] : undefined
+    },
+    /** `git worktree list --porcelain`. */
+    worktrees: (directory: string) => git(directory, "worktree", "list", "--porcelain"),
   }
 }
 

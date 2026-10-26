@@ -26,8 +26,9 @@ the `wt` strategy when the [worktrunk](../worktrunk) plugin is loaded, OpenCode'
 ## How it works
 
 `execute.before` on the `subagent` tool. It skips the call when it continues a session (`sessionID`
-is set), the agent is not opted in, unknown or primary, the caller is itself a child session, or
-the caller's directory is not a git work tree. Otherwise it:
+is set), the agent is not opted in, unknown or primary, the agent is read-only (its last permission
+rule matching `edit` on `*` denies it), the caller is itself a child session, or the caller's
+directory is not a git work tree. Otherwise it:
 
 1. asserts the `subagent` permission for the agent;
 2. creates a worktree with `ctx.worktree.create` named `subagent-<description>-<random>`, starting
@@ -41,7 +42,8 @@ the caller's directory is not a git work tree. Otherwise it:
 base, target, commit count, a diff command and how to merge. When the child finished with no
 commits and a clean tree, the worktree is removed and the child moves back to the caller's
 checkout. Continuing such a child later gives it a fresh worktree. Background runs are left alone
-until merged.
+until merged. A lane with no commits but uncommitted changes gets a warning: its work exists only
+in the worktree, so continue the subagent and ask it to commit.
 
 Each lane is stored as `lane/<childSessionID>`, because the child runs in the worktree's own
 plugin instance.
@@ -50,15 +52,36 @@ plugin instance.
 
 | Input | Effect |
 | --- | --- |
-| `sessionID` | The child session from the subagent result. |
+| `sessionID` | The child session from the subagent result. Not needed for `list`. |
 | `method: "wt-merge"` | Runs `wt -C <worktree> merge <target> --no-squash --no-ff --yes`. |
 | `method: "none"` | Reports the lane status only. |
+| `method: "list"` | Reports every active lane in the caller's project. |
 | `target` | Branch to merge into. Defaults to the branch the caller was on. |
 
-The tool asserts the `subagent_worktree_merge` permission for the lane branch. Only the session that
-spawned the subagent can merge, and the worktree must be committed and clean. On success `wt`
-removes the worktree and branch, and the child moves back to the caller's checkout. On a conflict
-or any other failure the worktree is kept and the `wt` output is returned.
+For `wt-merge` and `none` the tool asserts the `subagent_worktree_merge` permission for the lane
+branch. Only the session that spawned the subagent can merge. The merge is refused when:
+
+- the worktree has uncommitted changes. A lane with 0 commits and a dirty tree is called out:
+  continue the subagent and ask it to commit;
+- the branch has no commits;
+- the checkout that has `target` checked out has uncommitted or untracked changes to any file the
+  lane changes (`git diff --name-only <target>...HEAD`). The refusal lists the files. A target that
+  is not checked out anywhere has no local changes.
+
+On success `wt` removes the worktree and branch, and the child moves back to the caller's checkout.
+On a conflict or any other failure the worktree is kept and the `wt` output is returned.
+
+`list` reads every stored lane in the caller's project and reports the branch, worktree path,
+commits ahead, uncommitted changes, and whether the child and parent sessions still exist. Each
+session lookup has a 2 second limit and reports `unknown` when it runs out. Lanes whose child or
+parent session is gone, or whose worktree git cannot read, are flagged as orphans. `list` only
+reports. It removes nothing.
+
+## Credits
+
+The overlap check before merging, the uncommitted-only warning, the orphan report with bounded
+session lookups and the read-only agent check are adapted from
+[hueyexe/opencode-ensemble](https://github.com/hueyexe/opencode-ensemble) (MIT). See [NOTICE](NOTICE).
 
 ## Caveats
 

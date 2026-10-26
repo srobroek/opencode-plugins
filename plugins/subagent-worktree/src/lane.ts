@@ -84,7 +84,7 @@ export type IsolationFacts = {
   input: SubagentInput | undefined
   options: Options
   /** The resolved agent, or undefined when the host does not know it. */
-  agent: { id: string; name?: string; mode?: string } | undefined
+  agent: { id: string; name?: string; mode?: string; permissions?: unknown } | undefined
   /** Whether the calling session is itself a child session. */
   callerIsChild: boolean
   /** Whether the caller's directory is inside a git work tree. */
@@ -103,9 +103,29 @@ export function decideIsolation(facts: IsolationFacts): Isolation {
   if (!facts.options.agents.some((agent) => names.has(agent))) return { isolate: false, reason: "agent not opted in" }
   if (!facts.agent) return { isolate: false, reason: "unknown agent" }
   if (facts.agent.mode === "primary") return { isolate: false, reason: "primary agent" }
+  if (rulesAreReadOnly(facts.agent.permissions)) return { isolate: false, reason: "read-only agent (edit denied)" }
   if (facts.callerIsChild) return { isolate: false, reason: "caller is a child session" }
   if (!facts.isGit) return { isolate: false, reason: "not a git checkout" }
   return { isolate: true }
+}
+
+/** OpenCode wildcard match: `*` matches any run of characters. */
+function wildcard(value: string, pattern: string): boolean {
+  const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")
+  return new RegExp(`^${escaped}$`).test(value)
+}
+
+/**
+ * Whether an agent's permission rules deny `edit` everywhere. OpenCode uses the last matching
+ * rule, so this mirrors evaluating `edit` on `*`. Adapted from hueyexe/opencode-ensemble (MIT).
+ */
+export function rulesAreReadOnly(rules: unknown): boolean {
+  if (!Array.isArray(rules)) return false
+  const match = [...rules].reverse().find((rule: { action?: unknown; resource?: unknown } | null) => {
+    if (typeof rule?.action !== "string" || typeof rule.resource !== "string") return false
+    return wildcard("edit", rule.action) && (rule.resource === "*" || rule.resource === "**")
+  }) as { effect?: unknown } | undefined
+  return match?.effect === "deny"
 }
 
 /** A branch-safe slug of a task description. */
@@ -159,6 +179,15 @@ function quote(path: string): string {
   return /^[\w@%+=:,./-]+$/.test(path) ? path : `'${path.replace(/'/g, `'\\''`)}'`
 }
 
+/** A lane with no commits whose work exists only as uncommitted changes. */
+export function isUncommittedOnly(status: LaneStatus): boolean {
+  return status.ahead === 0 && status.dirty
+}
+
+export function uncommittedOnly(lane: Pick<Lane, "child" | "directory">): string {
+  return `the branch has 0 commits; the work exists only as uncommitted changes in ${lane.directory} and is lost if the worktree is force-removed. Continue the subagent (subagent with sessionID ${lane.child}) and ask it to commit its work.`
+}
+
 /** The lane note appended to the subagent tool result. */
 export function annotation(lane: Lane, status: LaneStatus | undefined, removed: boolean): string {
   const attrs = `branch="${lane.branch}" base="${shortSha(lane.base)}"${lane.target ? ` target="${lane.target}"` : ""}`
@@ -168,10 +197,11 @@ export function annotation(lane: Lane, status: LaneStatus | undefined, removed: 
   const lines = [`<subagent-worktree ${attrs} directory="${lane.directory}" state="${lane.state}">`]
   if (status) {
     lines.push(`Commits ahead of base: ${status.ahead}. Uncommitted changes: ${status.dirty ? "yes" : "no"}.`)
+    if (isUncommittedOnly(status)) lines.push(`Warning: ${uncommittedOnly(lane)}`)
   }
   lines.push(`Review: ${diffCommand(lane)}${status?.dirty ? ` (uncommitted: git -C ${quote(lane.directory)} status)` : ""}`)
   lines.push(
-    `Merge: subagent_worktree_merge with sessionID ${lane.child} and method "wt-merge"${lane.target ? ` merges into ${lane.target}` : ""}. Method "none" reports status without merging.`,
+    `Merge: subagent_worktree_merge with sessionID ${lane.child} and method "wt-merge"${lane.target ? ` merges into ${lane.target}` : ""}. Method "none" reports status without merging; "list" reports every active lane.`,
   )
   lines.push("</subagent-worktree>")
   return lines.join("\n")
@@ -187,9 +217,15 @@ export function isConflict(output: string): boolean {
   return /conflict|could not apply|resolve all conflicts|needs merge/i.test(output)
 }
 
-export type MergeMethod = "wt-merge" | "none"
+export type MergeMethod = "wt-merge" | "none" | "list"
 
 export type MergeRefusal = { refuse: true; reason: string } | { refuse: false; target: string }
+
+/** Files in both lists, sorted. */
+export function overlap(laneFiles: readonly string[], localFiles: readonly string[]): string[] {
+  const local = new Set(localFiles)
+  return [...new Set(laneFiles.filter((file) => local.has(file)))].sort()
+}
 
 /** Whether a lane can merge now, and into which branch. */
 export function decideMerge(input: {
@@ -197,6 +233,10 @@ export function decideMerge(input: {
   caller: string
   target?: string
   status: LaneStatus | undefined
+  /** Files the lane branch changes since its merge base with the target; undefined when unreadable. */
+  laneFiles?: readonly string[] | undefined
+  /** Uncommitted and untracked files in the target's checkout ([] when it is not checked out); undefined when unreadable. */
+  localFiles?: readonly string[] | undefined
 }): MergeRefusal {
   const { lane } = input
   if (!lane) return { refuse: true, reason: "no worktree lane for this session" }
@@ -205,11 +245,89 @@ export function decideMerge(input: {
   const target = input.target ?? lane.target
   if (!target) return { refuse: true, reason: "the lane has no target branch (the caller was on a detached HEAD); pass target" }
   if (!input.status) return { refuse: true, reason: `cannot read the worktree at ${lane.directory}` }
+  if (isUncommittedOnly(input.status)) return { refuse: true, reason: uncommittedOnly(lane) }
   if (input.status.dirty) {
     return { refuse: true, reason: `the worktree has uncommitted changes; commit or discard them in ${lane.directory} first` }
   }
   if (input.status.ahead === 0) return { refuse: true, reason: "the branch has no commits to merge" }
+  if (!input.laneFiles) return { refuse: true, reason: `cannot list the files ${lane.branch} changes against ${target}` }
+  if (!input.localFiles) return { refuse: true, reason: `cannot read the local changes in the ${target} checkout` }
+  const files = overlap(input.laneFiles, input.localFiles)
+  if (files.length > 0) {
+    return {
+      refuse: true,
+      reason: `the ${target} checkout has uncommitted or untracked changes to files the lane also changes; commit, stash or remove them there first: ${files.join(", ")}`,
+    }
+  }
   return { refuse: false, target }
+}
+
+/** The worktree path that has `branch` checked out, from `git worktree list --porcelain`. */
+export function worktreeForBranch(porcelain: string, branch: string): string | undefined {
+  for (const block of porcelain.split(/\n\s*\n/)) {
+    const lines = block.split("\n")
+    const path = lines.find((line) => line.startsWith("worktree "))?.slice("worktree ".length)
+    if (path && lines.includes(`branch refs/heads/${branch}`)) return path
+  }
+  return undefined
+}
+
+/** How long a session lookup in `method: "list"` may take before it counts as unknown. */
+export const SESSION_LOOKUP_MS = 2000
+
+export type Liveness = "alive" | "gone" | "unknown"
+
+/** Settle a session lookup: resolved is alive, rejected is gone, and no answer within `ms` is unknown. */
+export async function liveness(lookup: Promise<unknown>, ms: number): Promise<Liveness> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<Liveness>((resolve) => {
+    timer = setTimeout(() => resolve("unknown"), ms)
+  })
+  try {
+    return await Promise.race([lookup.then((): Liveness => "alive", (): Liveness => "gone"), timeout])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+export type LaneReport = {
+  lane: Lane
+  /** undefined when git cannot read the worktree (for example, it was deleted). */
+  status: LaneStatus | undefined
+  child: Liveness
+  parent: Liveness
+}
+
+/** Why a lane looks orphaned, or an empty list. */
+export function orphanReasons(report: Pick<LaneReport, "child" | "parent" | "status">): string[] {
+  const reasons: string[] = []
+  if (report.child === "gone") reasons.push("child session gone")
+  if (report.parent === "gone") reasons.push("parent session gone")
+  if (report.status === undefined) reasons.push("worktree unreadable")
+  return reasons
+}
+
+/** The `method: "list"` report. It never removes anything. */
+export function formatLaneList(reports: readonly LaneReport[], caller: string): string {
+  if (reports.length === 0) return `<subagent-worktree-lanes count="0">\nNo active lanes.\n</subagent-worktree-lanes>`
+  const lines = [`<subagent-worktree-lanes count="${reports.length}">`]
+  for (const report of reports) {
+    const { lane, status } = report
+    const state = status ? `ahead=${status.ahead} dirty=${status.dirty ? "yes" : "no"}` : "ahead=? dirty=?"
+    const reasons = orphanReasons(report)
+    const owner = lane.parent === caller ? "yours" : `parent ${lane.parent}`
+    lines.push(
+      `- ${lane.branch} (sessionID ${lane.child}, ${owner}) ${lane.directory} ${state} child=${report.child} parent=${report.parent}${reasons.length > 0 ? ` ORPHAN: ${reasons.join(", ")}` : ""}`,
+    )
+    if (status && isUncommittedOnly(status)) lines.push(`  Warning: ${uncommittedOnly(lane)}`)
+  }
+  if (reports.some((report) => orphanReasons(report).length > 0)) {
+    lines.push(
+      "Orphaned lanes are reported only; nothing was removed. Review them and remove a worktree yourself (wt remove) once its work is merged or no longer needed.",
+    )
+  }
+  lines.push("</subagent-worktree-lanes>")
+  return lines.join("\n")
 }
 
 /** The last lines of command output, without ANSI codes. */
