@@ -8,6 +8,7 @@ import {
   type AvailableModel,
   type HealthView,
   type ModelRef,
+  modelText,
   type Options,
   parseCandidate,
   resolveRole,
@@ -16,7 +17,7 @@ import {
 
 export const SOURCE = "srobroek.model-roles"
 
-const label = (ref: ModelRef): string => `${ref.providerID}/${ref.id}${ref.variant ? `#${ref.variant}` : ""}`
+const label = modelText
 
 /** Roles that list `failed` directly, in name order. */
 export function rolesListing(options: Options, failed: ModelRef): string[] {

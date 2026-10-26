@@ -47,6 +47,8 @@ describe("decideFallback", () => {
     expect(subagentNote({ ...facts, agent: "general" })).toContain("Subagent 'general' failed. Model p/a")
     expect(subagentNote({ ...facts, agent: "general" })).toContain("may be retried")
     expect(subagentNote({ ...facts, target: undefined, agent: undefined })).toContain("same model")
+    expect(failureNote({ ...facts, failed: { ...a, variant: "default" } })).toStartWith("Model p/a failed (auth)")
+    expect(failureNote({ ...facts, failed: { ...a, variant: "high" } })).toStartWith("Model p/a#high failed (auth)")
     const byRole = subagentNote({ ...facts, agent: "general", spawnRole: "task", resumable: "ses_c" })
     expect(byRole).toContain('Spawn it again with role: "task"; that role now runs p/b.')
     expect(byRole).toContain("resume it with sessionID ses_c")

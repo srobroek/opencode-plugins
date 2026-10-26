@@ -154,6 +154,15 @@ export function desiredModels(
   return result
 }
 
+/** The variant the host reports when none was chosen; labels leave it out. */
+export const DEFAULT_VARIANT = "default"
+
+/** `provider/model#variant` for notes and messages, without the host's `#default`. */
+export function modelText(ref: ModelRef): string {
+  const variant = ref.variant === undefined || ref.variant === DEFAULT_VARIANT ? "" : `#${ref.variant}`
+  return `${ref.providerID}/${ref.id}${variant}`
+}
+
 /** Field-wise model comparison; key order and an absent vs undefined variant do not matter. */
 export function sameModel(a: ModelRef | undefined, b: ModelRef | undefined): boolean {
   if (a === undefined || b === undefined) return a === b
