@@ -1,4 +1,12 @@
-import { afterAll, describe, expect, test } from "bun:test"
+import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test"
+
+// The ledger and publishing cases build real repositories (init, commit, clone, worktree,
+// submodule) with five or more git children each. Under heavy machine load those children
+// alone outlast Bun's 5 s default, which then kills a fixture mid-build; this is the same
+// headroom cleanup.test.ts keeps. The one elapsed-time assertion (the FIFO read) times
+// its own call, not the fixture.
+setDefaultTimeout(60_000)
+
 import {
   chmodSync,
   lstatSync,
