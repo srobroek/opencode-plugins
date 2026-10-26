@@ -1,0 +1,16 @@
+{
+  "name": "@srobroek/opencode-beads",
+  "version": "0.1.0",
+  "description": "Beads issue tracking for OpenCode: shell gates, store pinning, subagent actors, claim tracking and bd prime context.",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@srobroek/opencode-lib": "workspace:*"
+  },
+  "peerDependencies": {
+    "@opencode/plugin": "^2.1.4"
+  }
+}

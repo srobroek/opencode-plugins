@@ -41,6 +41,10 @@
     "plugins/statusline": {
       "release-type": "node",
       "component": "statusline"
+    },
+    "plugins/beads": {
+      "release-type": "node",
+      "component": "beads"
     }
   }
 }
