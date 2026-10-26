@@ -1,4 +1,5 @@
 import { commandWords, leadingCdCwd, scanShell } from "@srobroek/opencode-lib"
+import { supervise } from "@srobroek/opencode-lib/subprocess"
 
 /** A refusal; the hook turns it into a tool error the model reads. */
 export type Decision = { block: true; reason: string } | undefined
@@ -146,9 +147,9 @@ export async function spawnProbe(
   } catch {
     return null
   }
-  const [code, stdout] = await Promise.all([child.exited, new Response(child.stdout).text()])
-  if (signal.aborted) throw new ProbeTimeout(`${binary} ${args.join(" ")}`)
-  return code === 0 ? stdout.trim() : null
+  const run = await supervise(child, { signal })
+  if (signal.aborted || run.kind !== "exited") throw new ProbeTimeout(`${binary} ${args.join(" ")}`)
+  return run.exitCode === 0 ? run.stdout.trim() : null
 }
 
 export type Probes = { git: Probe; wt: Probe }

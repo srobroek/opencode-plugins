@@ -2,6 +2,7 @@ import { stat } from "node:fs/promises"
 import { basename } from "node:path"
 import type { WorktreeDefinition } from "@opencode/plugin/promise/worktree"
 import type { WorktreeCreateInput, WorktreeEntry, WorktreeRemoveInput } from "@opencode/plugin/worktree"
+import { supervise } from "@srobroek/opencode-lib/subprocess"
 
 export const STRATEGY_ID = "worktrunk"
 
@@ -15,13 +16,11 @@ export type StrategyError = (message: string, forceRequired?: boolean) => Error
 /** Run `argv` with Bun.spawn, killing it when `signal` aborts. */
 export const spawnRunner: Runner = async (argv, signal) => {
   const child = Bun.spawn(argv, { stdin: "ignore", stdout: "pipe", stderr: "pipe", signal })
-  const [code, stdout, stderr] = await Promise.all([
-    child.exited,
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-  ])
+  const run = await supervise(child, { signal })
   signal.throwIfAborted()
-  return { code, stdout, stderr }
+  if (run.kind !== "exited")
+    return { code: 1, stdout: run.stdout, stderr: `${run.stderr}\n${argv[0]} ended without reporting an exit status` }
+  return { code: run.exitCode, stdout: run.stdout, stderr: run.stderr }
 }
 
 /** `wt switch` arguments that create `<basename(directory)>` from `base` and print JSON. */
