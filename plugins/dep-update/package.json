@@ -8,6 +8,10 @@
     ".": "./dist/index.js"
   },
   "files": ["dist", "index.js", "skills"],
+  "opencode-plugins": {
+    "claude": false,
+    "codex": false
+  },
   "peerDependencies": {
     "@opencode/plugin": "^2.1.4"
   },

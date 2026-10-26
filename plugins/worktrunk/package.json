@@ -8,6 +8,9 @@
     ".": "./dist/index.js"
   },
   "files": ["dist", "index.js", "skills"],
+  "opencode-plugins": {
+    "description": "Worktrunk (wt) skills: work in linked worktrees and run deterministic preflight checks before an agent run or merge."
+  },
   "peerDependencies": {
     "@opencode/plugin": "^2.1.4"
   },

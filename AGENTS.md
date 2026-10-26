@@ -16,8 +16,10 @@ package whose entry point default-exports `Plugin.define({ id, setup })` from
 - `bun test`
 - `bun run build` regenerates every plugin's `dist/` and root `index.js` shim.
 - `bun run build:check` fails when committed build output is stale.
-- `bun run check` runs typecheck, lint, test and build:check before you hand
-  work off.
+- `bun run marketplaces` regenerates the Claude Code and Codex marketplaces.
+- `bun run marketplaces:check` fails when committed marketplace files are stale.
+- `bun run check` runs typecheck, lint, test, build:check and
+  marketplaces:check before you hand work off.
 
 ## Conventions
 
@@ -28,6 +30,14 @@ package whose entry point default-exports `Plugin.define({ id, setup })` from
   dependency. Never hand-edit `dist/` or the shims; run `bun run build` and
   commit the output with the source change. Do not add `prepare`/`prepack`
   scripts to plugin packages.
+- `scripts/build-marketplaces.ts` generates `.claude-plugin/marketplace.json`,
+  `.agents/plugins/marketplace.json` and every `plugins/<name>/.claude-plugin/`
+  and `plugins/<name>/.codex-plugin/` manifest. Never hand-edit them; change the
+  plugin's `package.json` (version, description, `"opencode-plugins"` overrides)
+  or its `skills/`, run `bun run marketplaces` and commit the output. Only
+  `skills/` and `.mcp.json` reach Claude Code and Codex. A plugin with `skills/`
+  is exported by default; set `"opencode-plugins": { "claude": false, "codex": false }`
+  when its skills depend on OpenCode tools.
 - Runtime `dependencies` must be published on npm. Workspace packages are only
   available at build time.
 - Plugin ids: `srobroek.<name>`. Tool names: `<name>_<verb>`.

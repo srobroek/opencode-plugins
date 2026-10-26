@@ -50,6 +50,41 @@ opencode plugin add 'github:srobroek/opencode-plugins::path:plugins/<name>'
 
 Pin a tag (`#<tag>`) to stop automatic updates.
 
+## Claude Code and Codex
+
+The repository is also a Claude Code and a Codex plugin marketplace named
+`srobroek-opencode`. It carries only the harness-neutral parts of a plugin:
+Agent Skills (`skills/<name>/SKILL.md`) and a bundled `.mcp.json`. Tools, hooks,
+agents and TUI code are OpenCode-only and are not exported.
+
+```sh
+# Claude Code
+claude plugin marketplace add srobroek/opencode-plugins
+claude plugin install worktrunk@srobroek-opencode
+
+# Codex
+codex plugin marketplace add srobroek/opencode-plugins
+codex plugin add worktrunk@srobroek-opencode
+```
+
+| Plugin | Claude Code / Codex |
+| --- | --- |
+| `worktrunk` | Skills `worktrunk-worktrees`, `worktrunk-preflight` |
+| `whats-new` | Skill `whats-new` (no `version_gap_scan` tool, no report-only agent) |
+| `session`, `dep-update` | Not exported: their skills drive OpenCode tools |
+| `beads`, `example`, `goal`, `model-roles`, `statusline` | Not exported: OpenCode code only |
+
+`scripts/build-marketplaces.ts` generates `.claude-plugin/marketplace.json`,
+`.agents/plugins/marketplace.json` and each exported plugin's
+`.claude-plugin/plugin.json` and `.codex-plugin/plugin.json`, with the version
+from its `package.json`. A plugin is exported when it has `skills/` or
+`.mcp.json`. Override that, or set the category or listing description, in its
+`package.json`:
+
+```json
+"opencode-plugins": { "claude": false, "codex": false, "category": "development", "description": "..." }
+```
+
 ## Developing
 
 ```sh
@@ -61,6 +96,8 @@ bun run build   # regenerate plugins/*/dist after changing src or lib
 
 `bun run build:check` (part of `check` and CI) fails when a committed `dist/`
 is stale. Commit the rebuilt output with the source change.
+`bun run marketplaces` regenerates the Claude Code and Codex marketplace files;
+`bun run marketplaces:check` (also part of `check` and CI) fails when they drift.
 
 Load a local checkout by adding the plugin directory to `plugins` in
 `opencode.json`, or link it into `.opencode/plugins/`. Run `bun run build`
