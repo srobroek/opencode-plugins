@@ -59,7 +59,6 @@ Target host: OpenCode 2.1.4. One row per plugin. "Port" means rewrite against
 | [github/spec-kit](https://github.com/github/spec-kit) | Adopt | Skills layout; optional `/speckit.*` commands. |
 | [nigel-dev/opencode-mission-control](https://github.com/nigel-dev/opencode-mission-control) | Borrow code | Test-gated merge with rollback, early conflict check, touchSet check, checkpoints. Driven from delivery and beads gates. |
 | [hueyexe/opencode-ensemble](https://github.com/hueyexe/opencode-ensemble) | Pilot, conditional | Only after confirming teammates really run in their worktree on V2 (child `location` is dropped when `parentID` is set). Borrow branch preservation and stall detection regardless. |
-| [anomalyco/rift](https://github.com/anomalyco/rift) | Optional | Copy-on-write worktree backend instead of worktrunk. |
 | omp ratchet (MIT) | Optional port | Gate statistics and protocol as a `ratchet` tool plus skill. |
 | [harbor-framework/harbor](https://github.com/harbor-framework/harbor) | Adopt (tooling) | A/B benchmark runs: OpenCode vs omp vs pi on our models and tasks. |
 
@@ -70,3 +69,4 @@ Target host: OpenCode 2.1.4. One row per plugin. "Port" means rewrite against
 - oh-my-opencode (inert on V2, SUL license), except `code-yeongyu/lsp-tools-mcp` if the MCP evaluation picks it.
 - Mission Control and Ensemble as runtimes replacing beads, delivery or the supervisor.
 - A revived orchestrator plugin.
+- Rift: no base ref, no branch or merge lifecycle, refuses linked worktrees, and forks `.beads` by default. worktrunk's `wt step copy-ignored` with `.worktreeinclude` already gives copy-on-write artifact copies.
