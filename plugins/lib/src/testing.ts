@@ -27,6 +27,7 @@ export type FakeTool = Loose & { name: string; id: string }
 export type FakeAgent = Loose & { id: string }
 export type FakeSession = Loose & { id: string }
 export type FakeSkill = Loose & { id: string }
+export type FakeAssert = Loose & { action: string; resources: ReadonlyArray<string> }
 export type FakeCall = { method: string; input: unknown }
 
 export type FakeContextOptions = {
@@ -46,6 +47,8 @@ export type FakeContextOptions = {
   storage?: Record<string, unknown>
   /** Plugin options passed as `context.options`. */
   options?: Loose
+  /** Decides each `permission.assert`: resolve to allow, throw to reject. Allows when omitted. */
+  assert?: (input: FakeAssert) => Promise<void> | void
 }
 
 export type FakeContext = {
@@ -67,6 +70,8 @@ export type FakeContext = {
   messages: Map<string, ReadonlyArray<unknown>>
   /** Skills after every transform, keyed by id. */
   skills: Map<string, FakeSkill>
+  /** Every `permission.assert` input, in call order. */
+  asserts: FakeAssert[]
   /** Calls to faked client methods (`session.*`, `event.subscribe`), in order. */
   calls: FakeCall[]
   /** Run every registered hook of one domain and name in order, as the host does; resolves to the payload. */
@@ -96,6 +101,7 @@ export function createFakeContext(options: FakeContextOptions = {}): FakeContext
   const messages = new Map<string, ReadonlyArray<unknown>>(Object.entries(options.messages ?? {}))
   const skills = new Map<string, FakeSkill>((options.skills ?? []).map((skill) => [skill.id, { ...skill }]))
   const storage = new Map<string, unknown>(Object.entries(options.storage ?? {}))
+  const asserts: FakeAssert[] = []
   const agentUpdates: string[] = []
   const agentDefaults: Array<string | undefined> = []
   const calls: FakeCall[] = []
@@ -172,6 +178,11 @@ export function createFakeContext(options: FakeContextOptions = {}): FakeContext
     }
     callback(editor)
     return register()
+  }
+
+  const permissionAssert = async (input: FakeAssert): Promise<void> => {
+    asserts.push(input)
+    await options.assert?.(input)
   }
 
   type Subscriber = { queue: unknown[]; closed: boolean; wake?: () => void }
@@ -316,7 +327,7 @@ export function createFakeContext(options: FakeContextOptions = {}): FakeContext
       list: async () => [...tools.values()],
     },
     shell: { hook: hook("shell") },
-    permission: { hook: hook("permission") },
+    permission: { hook: hook("permission"), assert: permissionAssert },
     session: {
       hook: hook("session"),
       list: sessionList,
@@ -356,6 +367,7 @@ export function createFakeContext(options: FakeContextOptions = {}): FakeContext
     sessions,
     messages,
     skills,
+    asserts,
     calls,
     fire: { tool: fire("tool"), shell: fire("shell"), permission: fire("permission"), session: fire("session") },
     hooks: (domain) => hooks[domain].map((entry) => entry.name),
