@@ -89,6 +89,10 @@
     "plugins/eli5": {
       "release-type": "node",
       "component": "eli5"
+    },
+    "plugins/project": {
+      "release-type": "node",
+      "component": "project"
     }
   }
 }

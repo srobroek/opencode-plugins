@@ -1,0 +1,19 @@
+{
+  "name": "project",
+  "version": "0.1.0",
+  "description": "Project lifecycle: pick an OSI-approved license from the project's constraints.",
+  "author": {
+    "name": "Sjors Robroek",
+    "url": "https://github.com/srobroek"
+  },
+  "homepage": "https://github.com/srobroek/opencode-plugins/tree/main/plugins/project",
+  "repository": "https://github.com/srobroek/opencode-plugins",
+  "license": "Apache-2.0",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Project",
+    "shortDescription": "Project lifecycle: pick an OSI-approved license from the project's constraints.",
+    "developerName": "Sjors Robroek",
+    "category": "productivity"
+  }
+}

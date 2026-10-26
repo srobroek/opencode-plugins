@@ -193,6 +193,19 @@
         "@opencode/plugin",
       ],
     },
+    "plugins/project": {
+      "name": "@srobroek/opencode-project",
+      "version": "0.1.0",
+      "devDependencies": {
+        "@srobroek/opencode-lib": "workspace:*",
+      },
+      "peerDependencies": {
+        "@opencode/plugin": "^2.1.4",
+      },
+      "optionalPeers": [
+        "@opencode/plugin",
+      ],
+    },
     "plugins/rust": {
       "name": "@srobroek/opencode-rust",
       "version": "0.1.0",
@@ -584,6 +597,8 @@
     "@srobroek/opencode-model-roles": ["@srobroek/opencode-model-roles@workspace:plugins/model-roles"],
 
     "@srobroek/opencode-parley": ["@srobroek/opencode-parley@workspace:plugins/parley"],
+
+    "@srobroek/opencode-project": ["@srobroek/opencode-project@workspace:plugins/project"],
 
     "@srobroek/opencode-rust": ["@srobroek/opencode-rust@workspace:plugins/rust"],
 
