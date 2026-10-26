@@ -2,6 +2,9 @@
 description: "Mechanical tier (`execution_agent_type=operator`). Executes one exact bounded command, formatting step, or inventory over explicit targets with no design judgment, and records the observed result."
 mode: subagent
 model: "amazon-bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0"
+request:
+  headers:
+    x-opencode-model-role: smol
 permissions:
   - action: webfetch
     resource: "*"

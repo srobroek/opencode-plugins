@@ -2,5 +2,5 @@
   "task": { "model": "amazon-bedrock/global.anthropic.claude-sonnet-5-5", "variants": ["low", "medium", "high", "xhigh", "max"] },
   "slow": { "model": "amazon-bedrock/global.anthropic.claude-opus-5-5", "variants": ["low", "medium", "high", "xhigh", "max"] },
   "reviewer": { "model": "amazon-bedrock/global.anthropic.claude-opus-5-5", "variants": ["low", "medium", "high", "xhigh", "max"] },
-  "tiny": "amazon-bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0"
+  "smol": "amazon-bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0"
 }

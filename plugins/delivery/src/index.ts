@@ -5,13 +5,21 @@ import type { Context } from "@opencode/plugin/promise/plugin"
 import type { ToolContext } from "@opencode/plugin/promise/tool"
 import { appendResultText, shellOutput } from "@srobroek/opencode-lib/shell-result"
 import { registerSkills } from "@srobroek/opencode-lib/skill-files"
-import { AGENT_IDS, type Available, availableModel, loadAgents, parseModel, shapeAgent } from "./agents.ts"
+import { AGENT_IDS, type Available, fallbackModel, hasModelRoles, loadAgents, shapeAgent } from "./agents.ts"
 import { type CleanupResult, cleanupDelivery, type DeliveryCleanupParams } from "./cleanup.ts"
 import { MERGE_METHODS } from "./forge-adapter.ts"
 import { type LandOutcome, type LandParams, landPullRequest } from "./land.ts"
 import { malformedNote, parseVerdict } from "./verdict.ts"
 
-export { AGENT_IDS, availableModel, parseAgentFile, parseModel, shapeAgent } from "./agents.ts"
+export {
+  AGENT_IDS,
+  availableModel,
+  fallbackModel,
+  hasModelRoles,
+  parseAgentFile,
+  parseModel,
+  shapeAgent,
+} from "./agents.ts"
 export { cleanupDelivery } from "./cleanup.ts"
 export { landPullRequest } from "./land.ts"
 export { AGENT_VERDICTS, parseVerdict } from "./verdict.ts"
@@ -28,12 +36,26 @@ export type DeliveryOptions = {
   receiptsDirectory?: string
   /** Register the delivery agents. Default true. */
   agents: boolean
-  /** Per-agent model override (`provider/model#variant`), or false to inherit the session model. */
+  /**
+   * Per-agent model override (`provider/model#variant`), or false for no model. Without
+   * an override, an agent's file model applies only when the model-roles plugin is absent.
+   */
   models: Record<string, string | false>
   /** Add the fan-out instructions to primary sessions. Default true. */
   fanOut: boolean
   /** Parse delivery-agent verdicts into subagent result metadata. Default true. */
   verdicts: boolean
+}
+
+/** `plugin.list` during setup must not hold up startup; a slow answer counts as "not installed". */
+const PLUGIN_LIST_TIMEOUT_MS = 2000
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error("timed out")), ms)
+  })
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer))
 }
 
 export function parseOptions(raw: Record<string, unknown> | undefined): DeliveryOptions {
@@ -303,11 +325,15 @@ export async function setupDelivery(ctx: Context): Promise<() => Promise<void>> 
     } catch {
       available = []
     }
+    let modelRoles = false
+    try {
+      modelRoles = hasModelRoles(await withTimeout(ctx.plugin.list(), PLUGIN_LIST_TIMEOUT_MS))
+    } catch {
+      modelRoles = false
+    }
     const agents = await ctx.agent.transform((editor) => {
       for (const file of files) {
-        const override = options.models[file.id]
-        const wanted = override === false ? undefined : parseModel(override ?? file.model ?? "")
-        const model = availableModel(wanted, available)
+        const model = fallbackModel(file, options.models[file.id], modelRoles, available)
         const created = editor.get(file.id) === undefined
         editor.update(file.id, (draft) => shapeAgent(draft as never, file, model, created))
       }

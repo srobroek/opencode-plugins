@@ -2,6 +2,9 @@
 description: "Lands one reviewed PR through delivery_land with exact-head approval and green checks required, closes its merge-queue and receipt beads children-first, runs delivery_cleanup, and reports refusals."
 mode: subagent
 model: "amazon-bedrock/global.anthropic.claude-sonnet-5-5#medium"
+request:
+  headers:
+    x-opencode-model-role: task
 permissions:
   - action: edit
     resource: "*"

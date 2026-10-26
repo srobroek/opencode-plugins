@@ -2,6 +2,9 @@
 description: "Research tier (`execution_agent_type=researcher`). Answers one assigned bead's scoped question with cited observations and explicit inferences; makes no product-code edits, and may use forge tools."
 mode: subagent
 model: "amazon-bedrock/global.anthropic.claude-sonnet-5-5#medium"
+request:
+  headers:
+    x-opencode-model-role: task
 permissions:
   - action: edit
     resource: "*"

@@ -2,6 +2,9 @@
 description: "Reasoning tier for root-cause debugging, concurrency or data-integrity logic, cross-module contracts, algorithmic or numeric precision, or design judgment beyond the bead text; records diagnosis."
 mode: subagent
 model: "amazon-bedrock/global.anthropic.claude-opus-5-5#high"
+request:
+  headers:
+    x-opencode-model-role: slow
 permissions:
   - action: webfetch
     resource: "*"

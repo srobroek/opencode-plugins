@@ -98,6 +98,7 @@ function parseAgentFile(id, text) {
     description: typeof data.description === "string" ? data.description : undefined,
     mode: typeof data.mode === "string" ? data.mode : "subagent",
     model: typeof data.model === "string" ? data.model : undefined,
+    ...data.request && typeof data.request === "object" ? { request: data.request } : {},
     permissions,
     system: text.slice(match[0].length).trim()
   };
@@ -133,7 +134,25 @@ function shapeAgent(draft, file, model, created) {
     draft.system = file.system;
   if (model !== undefined && (created || draft.model === undefined))
     draft.model = { ...model };
+  if (file.request?.headers)
+    draft.request = { ...draft.request, headers: { ...file.request.headers, ...draft.request?.headers } };
   draft.permissions = created ? [...file.permissions] : [...draft.permissions ?? [], ...file.permissions];
+}
+var MODEL_ROLES_PLUGIN = "srobroek.model-roles";
+function hasModelRoles(listed) {
+  const entries = Array.isArray(listed) ? listed : listed?.data;
+  if (!Array.isArray(entries))
+    return false;
+  return entries.some((entry) => entry?.id === MODEL_ROLES_PLUGIN || typeof entry?.source?.target === "string" && /(^|[/:@])(opencode-)?model-roles\b/.test(entry.source.target));
+}
+function fallbackModel(file, override, modelRoles, available) {
+  if (override === false)
+    return;
+  if (override !== undefined)
+    return availableModel(parseModel(override), available);
+  if (modelRoles)
+    return;
+  return availableModel(parseModel(file.model ?? ""), available);
 }
 function loadAgents(ids = AGENT_IDS) {
   return ids.map((id) => parseAgentFile(id, readFileSync2(agentPath(id), "utf8")));
@@ -3184,6 +3203,14 @@ var LAND_ACTION = "delivery_land";
 var CLEANUP_ACTION = "delivery_cleanup";
 var SKILL_PATH = fileURLToPath2(new URL("../skills/delivery-git-workflow/SKILL.md", import.meta.url));
 var FAN_OUT_PATH = fileURLToPath2(new URL("../instructions/delivery-fan-out.md", import.meta.url));
+var PLUGIN_LIST_TIMEOUT_MS = 2000;
+function withTimeout(promise, ms) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error("timed out")), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
 function parseOptions(raw) {
   const options = raw ?? {};
   const models = {};
@@ -3412,11 +3439,15 @@ receipt: ${result.path}` : `delivery_cleanup refused: ${result.reason}`;
     } catch {
       available = [];
     }
+    let modelRoles = false;
+    try {
+      modelRoles = hasModelRoles(await withTimeout(ctx.plugin.list(), PLUGIN_LIST_TIMEOUT_MS));
+    } catch {
+      modelRoles = false;
+    }
     const agents = await ctx.agent.transform((editor) => {
       for (const file of files) {
-        const override = options.models[file.id];
-        const wanted = override === false ? undefined : parseModel(override ?? file.model ?? "");
-        const model = availableModel(wanted, available);
+        const model = fallbackModel(file, options.models[file.id], modelRoles, available);
         const created = editor.get(file.id) === undefined;
         editor.update(file.id, (draft) => shapeAgent(draft, file, model, created));
       }
@@ -3484,6 +3515,8 @@ export {
   cleanupDelivery,
   confirmDelivery,
   src_default as default,
+  fallbackModel,
+  hasModelRoles,
   landPullRequest,
   parseAgentFile,
   parseModel,
