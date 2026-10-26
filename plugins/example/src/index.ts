@@ -1,12 +1,18 @@
 import { Plugin } from "@opencode/plugin"
+import { parse, parsedInvocations } from "@srobroek/opencode-lib/shell-command"
 
-export const BLOCKED_COMMAND = /\bgit\s+push\b.*\s--force(?!-with-lease)\b/
+function isForcePush(args: readonly string[]): boolean {
+  return args.some((arg) => arg === "--force" || arg === "-f")
+}
 
 export function blockReason(tool: string, input: unknown): string | undefined {
   if (tool !== "shell") return undefined
   const command = (input as { command?: unknown } | null)?.command
   if (typeof command !== "string") return undefined
-  return BLOCKED_COMMAND.test(command) ? "Use git push --force-with-lease instead of --force." : undefined
+  const pushes = parsedInvocations(parse(command), "git").filter((call) => call.verb === "push")
+  return pushes.some((call) => isForcePush(call.args))
+    ? "Use git push --force-with-lease instead of --force."
+    : undefined
 }
 
 export default Plugin.define({
