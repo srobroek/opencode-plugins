@@ -39,6 +39,8 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "nod
 import { devNull, tmpdir } from "node:os"
 import { join } from "node:path"
 
+import { supervise } from "@srobroek/opencode-lib/subprocess"
+
 export type Forge = "github" | "gitlab" | "unknown"
 /** The GitLab instances whose API this adapter addresses, by canonical API host. */
 export type GitlabHost = "gitlab.com" | "gitlab.aws.dev"
@@ -396,35 +398,6 @@ function hostOf(remoteUrl: string): string | null {
   return scpHost === undefined || scpHost === "" ? null : scpHost.toLowerCase()
 }
 
-/** A stream read to its end, or cut short by {@link CapturedStream.cancel}, keeping what arrived. */
-type CapturedStream = { text: Promise<string>; cancel: () => void }
-
-function capture(stream: ReadableStream<Uint8Array>): CapturedStream {
-  const reader = stream.getReader()
-  const decoder = new TextDecoder()
-  const text = (async () => {
-    let collected = ""
-    try {
-      for (;;) {
-        const chunk = await reader.read()
-        if (chunk.done) break
-        collected += decoder.decode(chunk.value, { stream: true })
-      }
-    } catch {
-      // A cancelled or failed read ends the capture; the bytes already read stay.
-    }
-    return collected + decoder.decode()
-  })()
-  const cancel = (): void => {
-    try {
-      void reader.cancel().catch(() => undefined)
-    } catch {
-      // Already released or closed: there is nothing left to cut short.
-    }
-  }
-  return { text, cancel }
-}
-
 /**
  * Write `input` to a child's stdin and close it. A child that exits without reading
  * all of it closes the pipe first; its exit status is then the observation, so the
@@ -454,7 +427,8 @@ async function feed(stdin: Bun.FileSink, input: string): Promise<void> {
  * an orphan that inherited stdout holds the pipe open, so a read waiting for EOF
  * would outlive the deadline it exists to enforce. The readers are cancelled with
  * the group for the same reason. A command that was ended reports `ok: false`, with
- * whatever output arrived before it.
+ * whatever output arrived before it. The wait never depends on the exit event alone
+ * ({@link supervise}): a child that is gone without one reports `ok: false` too.
  *
  * Stdin is not connected unless `input` is given, so nothing can wait on a prompt.
  * Every failure collapses into the {@link CliResult} contract rather than throwing, so
@@ -491,53 +465,16 @@ export const runCli: CliRunner = async (argv, options) => {
     return { ok: false, exitCode: null, stdout: "", stderr: "", error }
   }
   const child = proc
-  const stdout = capture(child.stdout)
-  const stderr = capture(child.stderr)
-  let ended: string | null = null
-  // `end` runs from a raw timer and an abort listener — this library has no host
-  // context to schedule through — so every step is contained: a throw there would
-  // surface as an uncaught exception in the session, long after this call returned.
-  const end = (cause: string): void => {
-    if (ended !== null) return
-    ended = cause
-    try {
-      process.kill(-child.pid, "SIGKILL")
-    } catch {
-      // No group left to signal; the direct child is the last thing to stop.
-      try {
-        child.kill("SIGKILL")
-      } catch {
-        // Already reaped.
-      }
-    }
-    stdout.cancel()
-    stderr.cancel()
-  }
-  const timer = setTimeout(() => end(`the ${timeout}ms timeout`), timeout)
-  const onAbort = (): void => end("an abort")
-  signal?.addEventListener("abort", onAbort, { once: true })
-  // An abort between the check above and this listener would otherwise go unheard.
-  // (Read as `signal`, not `options.signal`: the earlier read would narrow this one.)
-  if (signal?.aborted === true) end("an abort")
-  try {
-    if (input !== undefined && child.stdin !== undefined) await feed(child.stdin, input)
-    const [exitCode, out, err] = await Promise.all([child.exited, stdout.text, stderr.text])
-    if (ended !== null)
-      return { ok: false, exitCode: null, stdout: out, stderr: err, error: `${argv[0]} was killed by ${ended}` }
-    if (child.signalCode !== null) {
-      return {
-        ok: false,
-        exitCode: null,
-        stdout: out,
-        stderr: err,
-        error: `${argv[0]} was terminated by ${child.signalCode}`,
-      }
-    }
-    return { ok: true, exitCode, stdout: out, stderr: err }
-  } finally {
-    clearTimeout(timer)
-    signal?.removeEventListener("abort", onAbort)
-  }
+  const run = supervise(child, { timeoutMs: timeout, signal, group: true })
+  if (input !== undefined && child.stdin !== undefined) await feed(child.stdin, input)
+  const result = await run
+  const { stdout: out, stderr: err } = result
+  const failed = (error: string): CliResult => ({ ok: false, exitCode: null, stdout: out, stderr: err, error })
+  if (result.kind === "timeout") return failed(`${argv[0]} was killed by the ${timeout}ms timeout`)
+  if (result.kind === "aborted") return failed(`${argv[0]} was killed by an abort`)
+  if (result.kind === "lost") return failed(`${argv[0]} ended without reporting an exit status`)
+  if (result.signalCode !== null) return failed(`${argv[0]} was terminated by ${result.signalCode}`)
+  return { ok: true, exitCode: result.exitCode, stdout: out, stderr: err }
 }
 
 /**

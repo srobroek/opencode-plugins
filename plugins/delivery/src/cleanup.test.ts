@@ -23,7 +23,14 @@ import {
 import { devNull, tmpdir } from "node:os"
 import { basename, dirname, join } from "node:path"
 import pkg from "../package.json" with { type: "json" }
-import { branchDeleteArgs, type CleanupResult, cleanupDelivery, type DeliveryCleanupParams } from "./cleanup.ts"
+import {
+  branchDeleteArgs,
+  CLEANUP_BOUNDS,
+  type CleanupBounds,
+  type CleanupResult,
+  cleanupDelivery,
+  type DeliveryCleanupParams,
+} from "./cleanup.ts"
 import { type CliResult, type CliRunner, runCli } from "./forge-adapter.ts"
 import { landPullRequest } from "./land.ts"
 import {
@@ -359,6 +366,12 @@ function remoteUrl(f: Fixture, remote: string, options: RunnerOptions): string |
   return `https://${host}/${nameWithOwner}.git`
 }
 
+/**
+ * These fixtures run real git, and a loaded machine stalls even a ref read past its
+ * production bound; the bounds test below checks the production values.
+ */
+const HEAVY_FIXTURE_BOUNDS: Partial<CleanupBounds> = { refReadMs: 60_000 }
+
 function runner(
   f: Fixture,
   options: RunnerOptions = {},
@@ -446,7 +459,12 @@ async function invoke(
   details: RecordedCall[]
 }> {
   const scripted = runner(f, options)
-  const result = await cleanupDelivery(params, f.main, { run: scripted.run, now: () => NOW + 10, env: f.env })
+  const result = await cleanupDelivery(params, f.main, {
+    run: scripted.run,
+    now: () => NOW + 10,
+    env: f.env,
+    bounds: HEAVY_FIXTURE_BOUNDS,
+  })
   return { result, calls: scripted.calls, details: scripted.details }
 }
 
@@ -1062,9 +1080,14 @@ describe("delivery_cleanup irreversible boundary", () => {
     const scripted = runner(f)
     const run: CliRunner = (argv, options) =>
       argv.includes("@{upstream}") && argv[1] === "rev-parse"
-        ? { ok: false, exitCode: null, stdout: "", stderr: "", error: "git was killed by the 2000ms timeout" }
+        ? { ok: false, exitCode: null, stdout: "", stderr: "", error: "git was killed by the 5000ms timeout" }
         : scripted.run(argv, options)
-    const result = await cleanupDelivery({ receipt: f.receiptPath }, f.main, { run, now: () => NOW + 10, env: f.env })
+    const result = await cleanupDelivery({ receipt: f.receiptPath }, f.main, {
+      run,
+      now: () => NOW + 10,
+      env: f.env,
+      bounds: HEAVY_FIXTURE_BOUNDS,
+    })
     expect(refusal(result)).toContain("branch.upstream: observed")
     expect(commandCalls(scripted.calls, "bd")).toEqual([])
     expect(mutationCalls(scripted.calls)).toEqual([])
@@ -1189,6 +1212,7 @@ describe("delivery_cleanup irreversible boundary", () => {
       run: mainRun.run,
       now: () => NOW + 20,
       env: mainTarget.env,
+      bounds: HEAVY_FIXTURE_BOUNDS,
     })
     expect(refusal(mainResult)).toContain("a linked worktree other than main")
     expect(mutationCalls(mainRun.calls)).toEqual([])
@@ -1209,6 +1233,7 @@ describe("delivery_cleanup irreversible boundary", () => {
       run: foreignRun.run,
       now: () => NOW + 20,
       env: current.env,
+      bounds: HEAVY_FIXTURE_BOUNDS,
     })
     expect(refusal(foreignResult)).toContain("a worktree in the current repository")
     expect(mutationCalls(foreignRun.calls)).toEqual([])
@@ -1230,6 +1255,7 @@ describe("delivery_cleanup irreversible boundary", () => {
       run: unlistedRun.run,
       now: () => NOW + 20,
       env: unlisted.env,
+      bounds: HEAVY_FIXTURE_BOUNDS,
     })
     expect(refusal(unlistedResult)).toContain("an exact live record in git worktree list --porcelain")
     expect(mutationCalls(unlistedRun.calls)).toEqual([])
@@ -1247,7 +1273,12 @@ describe("delivery_cleanup irreversible boundary", () => {
     })
     const path = writeReceipt(receipt, receiptDirectory(f.env, receipt.repo.key))
     const { run, calls } = runner(f)
-    const result = await cleanupDelivery({ receipt: path }, f.main, { run, now: () => NOW + 10, env: f.env })
+    const result = await cleanupDelivery({ receipt: path }, f.main, {
+      run,
+      now: () => NOW + 10,
+      env: f.env,
+      bounds: HEAVY_FIXTURE_BOUNDS,
+    })
     expect(refusal(result)).toContain(`${alias} (unsafe)`)
     expect(mutationCalls(calls)).toEqual([])
     expect(existsSync(f.linked)).toBe(true)
@@ -1441,6 +1472,7 @@ describe("the ledger is classified at the canonical root, never at a caller's di
       run: cleaning.run,
       now: () => NOW + 10,
       env: f.env,
+      bounds: HEAVY_FIXTURE_BOUNDS,
     })
     expect(cleaned.ok).toBe(true)
     // The gate ran: the bypass was a cleanup that reached success with no bd call.
@@ -1467,6 +1499,7 @@ describe("the ledger is classified at the canonical root, never at a caller's di
       run: cleaning.run,
       now: () => NOW + 10,
       env: f.env,
+      bounds: HEAVY_FIXTURE_BOUNDS,
     })
     expect(refusal(refused)).toContain(
       `bd update delivery-17 --set-metadata pr=${landed.receipt.pr.number} --set-metadata merge_sha=${landed.receipt.pr.mergeCommitOid}`,
@@ -1499,6 +1532,7 @@ describe("the ledger is classified at the canonical root, never at a caller's di
         run: cleaning.run,
         now: () => NOW + 10,
         env: f.env,
+        bounds: HEAVY_FIXTURE_BOUNDS,
       })
       expect(refusal(refused)).toContain(
         `bd update delivery-17 --set-metadata pr=${landed.receipt.pr.number} --set-metadata merge_sha=${landed.receipt.pr.mergeCommitOid}`,
@@ -1525,7 +1559,12 @@ describe("the ledger is classified at the canonical root, never at a caller's di
     const stalePath = writeReceipt(stale, receiptDirectory(f.env, stale.repo.key))
 
     const { run, calls } = runner(f)
-    const result = await cleanupDelivery({ receipt: stalePath }, f.main, { run, now: () => NOW + 10, env: f.env })
+    const result = await cleanupDelivery({ receipt: stalePath }, f.main, {
+      run,
+      now: () => NOW + 10,
+      env: f.env,
+      bounds: HEAVY_FIXTURE_BOUNDS,
+    })
 
     const reason = refusal(result)
     expect(reason).toContain("beads.ledgerActive: observed false stored in the receipt, expected true")
@@ -1549,7 +1588,12 @@ describe("the ledger is classified at the canonical root, never at a caller's di
     const claimedPath = writeReceipt(claimed, receiptDirectory(f.env, claimed.repo.key))
 
     const { run, calls } = runner(f)
-    const result = await cleanupDelivery({ receipt: claimedPath }, f.main, { run, now: () => NOW + 10, env: f.env })
+    const result = await cleanupDelivery({ receipt: claimedPath }, f.main, {
+      run,
+      now: () => NOW + 10,
+      env: f.env,
+      bounds: HEAVY_FIXTURE_BOUNDS,
+    })
 
     const reason = refusal(result)
     expect(reason).toContain("beads.ledgerActive: observed true stored in the receipt, expected false")
@@ -1575,7 +1619,12 @@ describe("the ledger is classified at the canonical root, never at a caller's di
     writeFileSync(join(directory, `${f.receipt.receiptId}.json`), JSON.stringify(tampered))
 
     const { run, calls } = runner(f)
-    const result = await cleanupDelivery({ receipt: f.receiptPath }, f.main, { run, now: () => NOW + 10, env: f.env })
+    const result = await cleanupDelivery({ receipt: f.receiptPath }, f.main, {
+      run,
+      now: () => NOW + 10,
+      env: f.env,
+      bounds: HEAVY_FIXTURE_BOUNDS,
+    })
 
     expect(refusal(result)).toContain(
       "beads.ids: observed array of 0, expected at least one bead id when beads.ledgerActive is true",
@@ -1589,7 +1638,12 @@ describe("delivery_cleanup never removes the worktree it was called from", () =>
   test("a call from inside its own target refuses, naming the invocation and the resolved target", async () => {
     const f = fixture("invocation-target")
     const { run, calls } = runner(f)
-    const result = await cleanupDelivery({ receipt: f.receiptPath }, f.linked, { run, now: () => NOW + 10, env: f.env })
+    const result = await cleanupDelivery({ receipt: f.receiptPath }, f.linked, {
+      run,
+      now: () => NOW + 10,
+      env: f.env,
+      bounds: HEAVY_FIXTURE_BOUNDS,
+    })
 
     const reason = refusal(result)
     expect(reason).toContain(`worktree.invocationCwd: observed "${f.linked}"`)
@@ -1604,7 +1658,12 @@ describe("delivery_cleanup never removes the worktree it was called from", () =>
     const nested = join(f.linked, "deep", "deeper")
     mkdirSync(nested, { recursive: true })
     const { run, calls } = runner(f)
-    const result = await cleanupDelivery({ receipt: f.receiptPath }, nested, { run, now: () => NOW + 10, env: f.env })
+    const result = await cleanupDelivery({ receipt: f.receiptPath }, nested, {
+      run,
+      now: () => NOW + 10,
+      env: f.env,
+      bounds: HEAVY_FIXTURE_BOUNDS,
+    })
 
     expect(refusal(result)).toContain("expected a directory outside the worktree this call would remove")
     expect(calls).toEqual([])
@@ -1616,7 +1675,12 @@ describe("delivery_cleanup never removes the worktree it was called from", () =>
     const alias = join(f.root, "alias")
     symlinkSync(f.linked, alias, "dir")
     const { run, calls } = runner(f)
-    const result = await cleanupDelivery({ receipt: f.receiptPath }, alias, { run, now: () => NOW + 10, env: f.env })
+    const result = await cleanupDelivery({ receipt: f.receiptPath }, alias, {
+      run,
+      now: () => NOW + 10,
+      env: f.env,
+      bounds: HEAVY_FIXTURE_BOUNDS,
+    })
 
     expect(refusal(result)).toContain("worktree.invocationCwd")
     expect(calls).toEqual([])
@@ -1643,7 +1707,12 @@ describe("delivery_cleanup never removes the worktree it was called from", () =>
       }
       return scripted.run(argv, options)
     }
-    const result = await cleanupDelivery({ receipt: f.receiptPath }, f.main, { run, now: () => NOW + 10, env: f.env })
+    const result = await cleanupDelivery({ receipt: f.receiptPath }, f.main, {
+      run,
+      now: () => NOW + 10,
+      env: f.env,
+      bounds: HEAVY_FIXTURE_BOUNDS,
+    })
 
     expect(result.ok).toBe(true)
     expect(probes).toHaveLength(1)
@@ -1658,7 +1727,7 @@ describe("delivery_cleanup never removes the worktree it was called from", () =>
 
 /**
  * The tool is registered, so no harness deadline applies: each bound is sized by the
- * work its command does. Cheap ref reads keep 2 s; a cold embedded store needs far
+ * work its command does. Cheap ref reads keep 5 s; a cold embedded store needs far
  * longer than that to answer `bd show`, and a removal stopped mid-way leaves a
  * half-deleted worktree.
  */
@@ -1666,9 +1735,17 @@ describe("delivery_cleanup command bounds and interrupts", () => {
   /** A command that never answers on its own: only its bound or an interrupt ends it. */
   const hang = (options: Parameters<CliRunner>[1]) => runCli(["sleep", "30"], options)
 
-  test("each command is bounded by its work, and no mutation or bd read runs under the 2 s ref-read bound", async () => {
+  test("each command is bounded by its work, and no mutation or bd read runs under the 5 s ref-read bound", async () => {
     const f = fixture("bounds")
-    const { result, details } = await invoke(f)
+    // The bound each command was given is recorded; it then runs under a generous one,
+    // so a loaded machine cannot trip the production bound this test reads back.
+    const scripted = runner(f)
+    const details: { argv: string[]; timeoutMs: number }[] = []
+    const run: CliRunner = (argv, options) => {
+      details.push({ argv: [...argv], timeoutMs: options.timeoutMs })
+      return scripted.run(argv, { ...options, timeoutMs: Math.max(options.timeoutMs, 60_000) })
+    }
+    const result = await cleanupDelivery({ receipt: f.receiptPath }, f.main, { run, now: () => NOW + 10, env: f.env })
     expect(result.ok).toBe(true)
     const bounds = (match: (argv: string[]) => boolean) =>
       details.filter((call) => match(call.argv)).map((call) => call.timeoutMs)
@@ -1683,7 +1760,28 @@ describe("delivery_cleanup command bounds and interrupts", () => {
           (argv[1] === "worktree" && argv[2] === "list")),
     )
     expect(refReads.length).toBeGreaterThan(0)
-    expect(refReads.every((bound) => bound === 2_000)).toBe(true)
+    expect(refReads.every((bound) => bound === CLEANUP_BOUNDS.refReadMs)).toBe(true)
+    expect(CLEANUP_BOUNDS.refReadMs).toBe(5_000)
+  })
+
+  test("bounds.refReadMs replaces the ref-read bound on every ref read", async () => {
+    const f = fixture("configured-ref-read")
+    const scripted = runner(f)
+    const refReads: number[] = []
+    const run: CliRunner = (argv, options) => {
+      if (argv[0] === "git" && ["rev-parse", "rev-list", "show-ref", "remote"].includes(argv[1] ?? ""))
+        refReads.push(options.timeoutMs)
+      return scripted.run(argv, options)
+    }
+    const result = await cleanupDelivery({ receipt: f.receiptPath }, f.main, {
+      run,
+      now: () => NOW + 10,
+      env: f.env,
+      bounds: { refReadMs: 61_000 },
+    })
+    expect(result.ok).toBe(true)
+    expect(refReads.length).toBeGreaterThan(0)
+    expect(refReads.every((bound) => bound === 61_000)).toBe(true)
   })
 
   test("a bd show that hangs past its bound reports the ledger step not done, and nothing is removed", async () => {
@@ -1695,7 +1793,7 @@ describe("delivery_cleanup command bounds and interrupts", () => {
       run,
       now: () => NOW + 10,
       env: f.env,
-      bounds: { bdShowMs: 300 },
+      bounds: { ...HEAVY_FIXTURE_BOUNDS, bdShowMs: 300 },
     })
     expect(Date.now() - started).toBeLessThan(10_000)
     const reason = refusal(result)
@@ -1721,6 +1819,7 @@ describe("delivery_cleanup command bounds and interrupts", () => {
       now: () => NOW + 10,
       env: f.env,
       signal: controller.signal,
+      bounds: HEAVY_FIXTURE_BOUNDS,
     })
     expect(Date.now() - started).toBeLessThan(10_000)
     expect(refusal(result)).toContain("killed by an abort")
@@ -1745,6 +1844,7 @@ describe("delivery_cleanup command bounds and interrupts", () => {
       now: () => NOW + 10,
       env: f.env,
       signal: controller.signal,
+      bounds: HEAVY_FIXTURE_BOUNDS,
     })
     expect(refusal(result)).toContain("nothing was removed")
     expect(mutationCalls(scripted.calls)).toEqual([])
@@ -1766,6 +1866,7 @@ describe("delivery_cleanup command bounds and interrupts", () => {
       now: () => NOW + 10,
       env: f.env,
       signal: controller.signal,
+      bounds: HEAVY_FIXTURE_BOUNDS,
     })
     expect(result.ok).toBe(true)
     expect(existsSync(f.linked)).toBe(false)

@@ -28,6 +28,7 @@ import {
   buildReceipt,
   canonicalLedger,
   closeoutCommands,
+  GIT_TIMEOUT_MS,
   type GitRunner,
   type LandingReceipt,
   listReceipts,
@@ -808,8 +809,11 @@ describe("repoKey", () => {
 
     const key = repoKey("/anywhere", run)
     expect(key).toMatch(/^[0-9a-f]{16}$/)
-    expect(seen).toEqual([{ argv: ["rev-parse", "--git-common-dir"], cwd: "/anywhere", timeoutMs: 2000 }])
+    expect(seen).toEqual([{ argv: ["rev-parse", "--git-common-dir"], cwd: "/anywhere", timeoutMs: GIT_TIMEOUT_MS }])
+    expect(GIT_TIMEOUT_MS).toBe(5_000)
     expect(repoKey("/elsewhere", () => common)).toBe(key)
+    repoKey("/anywhere", run, 60_000)
+    expect(seen[1]?.timeoutMs).toBe(60_000)
   })
 
   test("what repoKey mints is always accepted as a directory name", () => {
@@ -860,7 +864,7 @@ describe("canonicalLedger", () => {
     }
 
     expect(canonicalLedger("/anywhere", run)).toEqual({ root: realpathSync(repository), active: true })
-    expect(seen).toEqual([{ argv: REPOSITORY_OBSERVATION_ARGS, cwd: "/anywhere", timeoutMs: 2000 }])
+    expect(seen).toEqual([{ argv: REPOSITORY_OBSERVATION_ARGS, cwd: "/anywhere", timeoutMs: GIT_TIMEOUT_MS }])
   })
   test("classifies at the canonical root, so a nested marker below the cwd does not vote", () => {
     const repository = scratch("ledger-canonical")
