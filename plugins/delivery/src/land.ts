@@ -1,0 +1,1401 @@
+/**
+ * `delivery_land`: prove a pull request landed, then emit exactly one receipt.
+ *
+ * The tool is the sequencing layer over two library modules and owns no proof
+ * logic of its own. `forge-adapter.ts` classifies the remote, reads and writes
+ * the deletion-on-merge setting, builds the merge argv, and owns the single
+ * observation that can answer "is the branch gone". `landing-receipt.ts` owns the
+ * receipt's shape, its identity, its validation, and its atomic publication. What
+ * is left here is order, refusal, and the mapping from two forge dialects onto the
+ * receipt's `pr` fields.
+ *
+ * Five properties this file exists to hold.
+ *
+ * A merge is issued at most once, and only against the exact subject that was
+ * read and the head the caller reviewed. A pull request the forge already reports
+ * as MERGED is proved, not merged again: no merge argv is built, and the receipt
+ * says so in its notes. A merge needs `expectHeadSha` to name the observed head;
+ * only that already-MERGED proof may omit it. On the merge path every command
+ * binds its repository with `--repo` and the merge binds the first observed head —
+ * `--match-head-commit` on GitHub, `--sha` on GitLab — so neither the working
+ * directory nor an ambient `GH_REPO` or `GH_HOST` chooses what lands, and a push
+ * between the read and the merge fails the merge at the forge instead of landing a
+ * commit nobody here observed. A squash takes the pull request title as its
+ * subject. Every payload is checked to carry the requested number, and the re-read
+ * must still show that head on that base. The proof is the re-read, never the
+ * merge's own exit status: a zero exit is a request that was accepted, not an
+ * observation of state. A rebase landing rewrites commit SHAs, so it is proved by
+ * ordered `git patch-id --stable` equivalence between the reviewed commits and the
+ * landed ones, not by the reviewed head's ancestry.
+ *
+ * The forge merges on its side, so the commits that proof reads are fetched first.
+ * Each commit the shape proof needs is checked locally with `git cat-file -e`, and a
+ * missing one is fetched by id from the landing's remote, falling back to the base
+ * branch, on a short bounded schedule for a forge whose Git service lags its API.
+ * The fetch writes objects only and moves no ref, so the proof still reads exact ids.
+ *
+ * A merge this call issued is never left unaccounted for. If anything after the
+ * forge accepted it refuses — the re-read, the fetch, the shape proof, the receipt —
+ * no receipt is written, because cleanup acts on every receipt it accepts, and the
+ * refusal carries `mergeIssued: true` and says the request is merged: re-running with
+ * the same inputs reads it as MERGED, issues no merge, and writes the receipt once
+ * the proof completes. Merging at most once and writing nothing unproved both hold
+ * across that retry.
+ *
+ * Nothing is written before the proof exists. An `expectHeadSha` that is missing
+ * or disagrees with the observed head, a `worktree` whose HEAD is not that head, a
+ * payload for another pull request, a head or base that moved between the two
+ * reads, a re-read that is not MERGED, a merge commit oid that is absent, and a
+ * receipt the validator refuses each end the call with no merge issued past that
+ * point and no file created. Every refusal names the field, the observed value,
+ * and what was expected.
+ *
+ * A setting changes only when a caller asks for it, and only once nothing is left
+ * to refuse. `setupAutoDelete` must be exactly `true` to reach
+ * {@link enableAutoDelete}; absent, false, or any other value issues no
+ * repository-setting write, and the observed setting is recorded either way.
+ * `"unknown"` is recorded as `"unknown"` and never promoted. The setting is neither
+ * read nor written until the landing is proved and its receipt has passed the
+ * validator, because it governs every later merge by every contributor: a landing
+ * this call refused, or that the forge rejected, leaves the repository as it was.
+ *
+ * Every command can be interrupted. Each child process runs through an abortable
+ * runner that carries the tool call's signal as well as its deadline, so an
+ * interrupt ends a hung `gh` instead of waiting out its timeout, and an abort
+ * observed between steps stops the call before its next merge or write.
+ *
+ * The ledger is not this package's to write, and not this call's directory to
+ * classify. Delivery proves and beads records, so this tool runs no `bd` verb at
+ * all — the receipt is the hand-off, and the result text names the native bead
+ * update and close commands before `delivery_cleanup`. `beads.ledgerActive` is classified at the repository's canonical root, so a
+ * nested retired `.beads` under the directory this tool was called in cannot record
+ * a landing as ledger-free and send cleanup past a reconciliation that never
+ * happened. On an active ledger the landing must also be able to name the bead it
+ * closes, from the branch convention or from `beadId`, because a receipt with an
+ * active ledger and no ids is a gate with nothing to check.
+ */
+
+import { resolve } from "node:path"
+import pkg from "../package.json" with { type: "json" }
+import { readApproval, readChecks } from "./approval.ts"
+import {
+  allowMergeCommit,
+  autoDeleteSetting,
+  type CliResult,
+  type CliRunner,
+  enableAutoDelete,
+  FETCH_TIMEOUT_MS,
+  FORGE_TIMEOUT_MS,
+  fetchCommitsArgv,
+  forgeEnvironment,
+  forgeTarget,
+  type GitlabHost,
+  gitObservationEnvironment,
+  MERGE_METHODS,
+  type MergeMethod,
+  mergeArgs,
+  normalizeRepoPath,
+  REMOTE_NAME,
+  redactRemote,
+  remoteBranchAbsent,
+  repoPathFromRemote,
+  runCli,
+  singleRemoteRecord,
+} from "./forge-adapter.ts"
+import {
+  buildReceipt,
+  type CanonicalLedger,
+  closeoutCommands,
+  type LandingReceipt,
+  RECEIPT_METHOD_UNKNOWN,
+  REPOSITORY_OBSERVATION_ARGS,
+  type ReceiptAutoDelete,
+  receiptDirectory,
+  repositoryContext,
+  validateReceipt,
+  writeReceipt,
+} from "./landing-receipt.ts"
+
+/** Wall-clock ceiling for the local Git reads this file issues itself. */
+const GIT_TIMEOUT_MS = 5_000
+
+/**
+ * What a pull request number may be before it becomes an argv element.
+ *
+ * {@link mergeArgs} applies the same rule to the merge argv. It is applied here
+ * too, and earlier, because the read that precedes the merge also puts the number
+ * on a command line, and a value beginning with `-` is read as an option there
+ * just as readily.
+ */
+const POSITIVE_INTEGER = /^[1-9][0-9]*$/
+
+/**
+ * The branch convention that names the work a landing closes.
+ *
+ * `omp/agent/<bead-id>` and `opencode/agent/<bead-id>` are where agent worktrees put
+ * bead ids, so a branch following either needs no `beadId` argument. A branch that does not follow it records no id from
+ * the convention, and on a repository whose canonical ledger is active the landing
+ * then refuses unless the caller supplies one: a receipt claiming an active ledger
+ * with nothing to reconcile would send cleanup past a gate that never ran.
+ */
+const AGENT_BRANCH = /^(?:omp|opencode)\/agent\/([A-Za-z0-9][A-Za-z0-9._-]*)$/
+
+/**
+ * What an explicit `beadId` may be.
+ *
+ * The value is recorded in a receipt that `delivery_cleanup` passes to `bd show` as
+ * an argv element, so it is shape-checked here rather than where it is spent: the
+ * same charset the branch convention captures, and never a leading `-`.
+ */
+const BEAD_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
+
+/** The GitHub fields a landing proof needs, in one `--json` projection. */
+const PR_FIELDS = "number,url,state,baseRefName,headRefName,headRefOid,mergeCommit,mergedAt,title"
+
+/**
+ * A whole Git object id, in the lower-case hex both forges print.
+ *
+ * Only a whole id can bind a merge: `gh pr merge --match-head-commit` and
+ * `glab mr merge --sha` compare the value they are given against the source head,
+ * and an abbreviation or a ref name is a value the forge will not match, which is
+ * indistinguishable from not binding at all.
+ */
+const FULL_OID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
+
+export type LandParams = {
+  pr: number | string
+  repo?: string
+  remote?: string
+  expectHeadSha?: string
+  setupAutoDelete?: boolean
+  worktree?: string
+  /**
+   * The bead this landing closes, for a branch the `<omp|opencode>/agent/<bead-id>`
+   * convention does not name; it is not a way to override the convention's answer.
+   */
+  beadId?: string
+  /** The forge landing strategy; defaults to squash for compatibility. */
+  merge_method?: MergeMethod | string
+  /** Before merging, require an approval artifact on the PR for the exact head. */
+  requireApproval?: boolean
+  /** Before merging, require every check on the PR head to have passed. */
+  requireGreenChecks?: boolean
+}
+
+/** What a landing is about to do, handed to {@link LandDeps.authorize} before any write. */
+export type LandAuthorization = {
+  /** `owner/name#number`. */
+  resource: string
+  forge: "github" | "gitlab"
+  head: string
+  /** The merge method, or null when the request is already MERGED and nothing is merged. */
+  merge: MergeMethod | null
+  setupAutoDelete: boolean
+}
+
+/**
+ * Injected surroundings.
+ *
+ * One `run` seam covers every child process — the forge CLIs and Git alike — so a
+ * test that records calls records all of them, which is what makes "issued no
+ * merge argv" and "issued no `bd` argv" observable rather than argued.
+ */
+export type LandDeps = {
+  run?: CliRunner
+  cwd?: string
+  env?: NodeJS.ProcessEnv
+  /** The single millisecond the receipt id, `emittedAt`, and every proof timestamp share. */
+  now?: () => number
+  /** Receipt directory override. Absent, {@link receiptDirectory} decides. */
+  receiptsDirectory?: string
+  /**
+   * Called once every read has passed and before the first write (merge, setting,
+   * receipt). A throw ends the call with nothing written; the error propagates.
+   */
+  authorize?: (request: LandAuthorization) => Promise<void>
+  /** The tool call's abort signal: it ends the running command and stops every later step. */
+  signal?: AbortSignal
+  /** The wait between attempts to fetch landed commits; tests replace it to observe the schedule. */
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>
+}
+
+export type LandOutcome =
+  | { ok: true; receipt: LandingReceipt; receiptPath: string; text: string; next: readonly string[] }
+  /**
+   * `mergeIssued` is true only when this call's merge was accepted by the forge and a
+   * later step refused: the forge holds the landing, no receipt exists, and re-running
+   * with the same inputs proves the MERGED request without merging it again.
+   */
+  | { ok: false; reason: string; text: string; mergeIssued?: true }
+
+/** One observed pull request, in receipt spelling, from either forge's dialect. */
+type PrObservation = {
+  number: number
+  url: string
+  /** Only a squash spends it, as the commit subject, so only a squash requires it. */
+  title: string | null
+  state: string
+  baseRefName: string
+  headRefName: string
+  headRefOid: string
+  mergeCommitOid: string | null
+  mergedAt: string | null
+}
+
+/** The observed value, named so a refusal is actionable without re-running anything. */
+function show(value: unknown): string {
+  if (value === undefined) return "absent"
+  if (value === null) return "null"
+  if (typeof value === "string") return JSON.stringify(value)
+  if (typeof value === "object") return Array.isArray(value) ? `an array of ${value.length}` : "an object"
+  return String(value)
+}
+
+function landingMethod(value: unknown): { method: MergeMethod } | { reason: string } {
+  const method = value === undefined ? "squash" : value
+  if (typeof method === "string" && MERGE_METHODS.includes(method as MergeMethod))
+    return { method: method as MergeMethod }
+  return { reason: `merge_method: observed ${show(value)}, expected one of "squash", "merge", "rebase"` }
+}
+
+/**
+ * Read an own, enumerable data property.
+ *
+ * A forge CLI's JSON is untrusted input, so `in` and a plain member read are both
+ * wrong: each consults the prototype chain, and a polluted `Object.prototype`
+ * would supply a `state` or a `mergeCommit` the forge never sent. An accessor is
+ * skipped rather than invoked — reading a payload must execute nothing.
+ */
+function ownValue(holder: unknown, key: string): unknown {
+  if (typeof holder !== "object" || holder === null || Array.isArray(holder)) return undefined
+  const descriptor = Object.getOwnPropertyDescriptor(holder, key)
+  if (descriptor === undefined || !descriptor.enumerable || !("value" in descriptor)) return undefined
+  return descriptor.value
+}
+
+function stringField(holder: unknown, key: string): string | null {
+  const value = ownValue(holder, key)
+  return typeof value === "string" ? value : null
+}
+
+function integerField(holder: unknown, key: string): number | null {
+  const value = ownValue(holder, key)
+  return typeof value === "number" && Number.isInteger(value) ? value : null
+}
+
+/**
+ * A merge commit oid in canonical spelling, or null when the payload holds none.
+ *
+ * Case is normalised because the receipt id is built from the first 12 characters
+ * and `landing-receipt.ts` mints and validates them lowercase. An empty or
+ * whitespace-only field becomes null: a forge that returns `""` for an unmerged
+ * request has not named a commit, and carrying `""` forward would let an empty
+ * string stand in for proof.
+ */
+function mergeOid(value: string | null): string | null {
+  if (value === null) return null
+  const trimmed = value.trim().toLowerCase()
+  return trimmed === "" ? null : trimmed
+}
+
+/**
+ * Map one forge's pull-request payload onto {@link PrObservation}.
+ *
+ * Refuses by field name when a required field is not the type the receipt needs.
+ * Emptiness is deliberately not judged here: `validateReceipt` is the one place
+ * that decides what a receipt field may hold, and duplicating its rules would
+ * create a second, drifting opinion.
+ */
+function observePr(forge: "github" | "gitlab", payload: unknown): PrObservation | { reason: string } {
+  const keys =
+    forge === "github"
+      ? {
+          number: "number",
+          url: "url",
+          state: "state",
+          base: "baseRefName",
+          head: "headRefName",
+          oid: "headRefOid",
+          mergedAt: "mergedAt",
+        }
+      : {
+          number: "iid",
+          url: "web_url",
+          state: "state",
+          base: "target_branch",
+          head: "source_branch",
+          oid: "sha",
+          mergedAt: "merged_at",
+        }
+  const number = integerField(payload, keys.number)
+  if (number === null)
+    return {
+      reason: `pr.number: observed ${show(ownValue(payload, keys.number))}, expected an integer in field ${keys.number}`,
+    }
+  for (const [field, key] of [
+    ["pr.url", keys.url],
+    ["pr.state", keys.state],
+    ["pr.baseRefName", keys.base],
+    ["pr.headRefName", keys.head],
+    ["pr.headRefOid", keys.oid],
+  ] as const) {
+    if (stringField(payload, key) === null) {
+      return { reason: `${field}: observed ${show(ownValue(payload, key))}, expected a string in field ${key}` }
+    }
+  }
+  const merge =
+    forge === "github"
+      ? mergeOid(stringField(ownValue(payload, "mergeCommit"), "oid"))
+      : (mergeOid(stringField(payload, "merge_commit_sha")) ?? mergeOid(stringField(payload, "squash_commit_sha")))
+  const mergedAt = stringField(payload, keys.mergedAt)
+  return {
+    number,
+    url: stringField(payload, keys.url) ?? "",
+    title: stringField(payload, "title"),
+    state: stringField(payload, keys.state) ?? "",
+    baseRefName: stringField(payload, keys.base) ?? "",
+    headRefName: stringField(payload, keys.head) ?? "",
+    headRefOid: stringField(payload, keys.oid) ?? "",
+    mergeCommitOid: merge,
+    mergedAt: mergedAt === null || mergedAt.trim() === "" ? null : mergedAt,
+  }
+}
+
+/**
+ * Why a forge or Git invocation did not succeed, or null when it exited 0. The
+ * joined argv is a label for prose, never a command to run.
+ */
+function cliFailure(argv: readonly string[], result: CliResult): string | null {
+  if (result.ok && result.error === undefined && result.exitCode === 0) return null
+  const observed = result.error ?? (result.exitCode === null ? "no exit status" : `exit ${result.exitCode}`)
+  const stderr = result.stderr.trim()
+  const detail = stderr === "" ? "" : `; stderr: ${stderr.slice(0, 400)}`
+  return `${argv.join(" ")}: observed ${observed}, expected exit 0${detail}`
+}
+
+/** Read and normalise one pull request, or say why it could not be read. */
+async function readPr(
+  run: CliRunner,
+  forge: "github" | "gitlab",
+  repo: string,
+  pr: string,
+  timeoutMs: number,
+  env: Readonly<Record<string, string>>,
+): Promise<{ argv: string[]; pr: PrObservation } | { argv: string[]; reason: string }> {
+  const argv =
+    forge === "github"
+      ? ["gh", "pr", "view", pr, "--repo", repo, "--json", PR_FIELDS]
+      : ["glab", "mr", "view", pr, "--repo", repo, "--output", "json"]
+  const result = await run(argv, { timeoutMs, env })
+  const failure = cliFailure(argv, result)
+  if (failure !== null) return { argv, reason: failure }
+  const text = result.stdout.trim()
+  if (text === "") return { argv, reason: `${argv.join(" ")}: observed empty output, expected one JSON object` }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return { argv, reason: `${argv.join(" ")}: observed unparseable output, expected one JSON object` }
+  }
+  const observed = observePr(forge, parsed)
+  if ("reason" in observed) return { argv, reason: `${argv.join(" ")}: ${observed.reason}` }
+  return { argv, pr: observed }
+}
+
+/**
+ * Whether a payload still describes the pull request this call is landing.
+ *
+ * `number` is checked on every read, against the number that was requested. A
+ * payload for a different pull request is not a partial answer: a forge that
+ * resolved the request against the wrong repository, or a `--repo` that was
+ * ignored, would otherwise produce a receipt naming a landing nobody asked for.
+ *
+ * With `previous` given — the read the merge was bound to — the head and the base
+ * must match it as well. The merge is bound to that head, so a differing head in
+ * the re-read means the answer describes some other state than the one that
+ * merged, and a differing base means the request was re-targeted between the two
+ * reads. Both refuse: a receipt may name only what one continuous observation
+ * supports.
+ */
+function subjectDrift(
+  observed: PrObservation,
+  requested: number,
+  previous: PrObservation | null,
+  source: string,
+): string | null {
+  if (observed.number !== requested) {
+    return `${source}: observed pr.number ${show(observed.number)}, expected ${requested}`
+  }
+  if (previous === null) return null
+  if (observed.headRefOid.trim().toLowerCase() !== previous.headRefOid.trim().toLowerCase()) {
+    return `${source}: observed pr.headRefOid ${show(observed.headRefOid)}, expected ${show(previous.headRefOid)} — the head moved after the merge was bound to it`
+  }
+  if (observed.baseRefName !== previous.baseRefName) {
+    return `${source}: observed pr.baseRefName ${show(observed.baseRefName)}, expected ${show(previous.baseRefName)} — the pull request was re-targeted`
+  }
+  return null
+}
+
+/**
+ * How a rebase landing was shown to carry the reviewed commits.
+ *
+ * `identical`: the forge fast-forwarded, so the landed tip is the reviewed head
+ * itself. `patch-id`: the commits were rewritten, and the landed range holds the
+ * reviewed range's patches in order. Both ranges are recorded so a reader can
+ * repeat the comparison; the commit lists are not, because a long branch would
+ * push the receipt past the size its readers accept.
+ */
+type RebaseEquivalence =
+  | { method: "identical"; commit: string }
+  | { method: "patch-id"; reviewed: string; landed: string; commits: number }
+
+type MergeShapeProof = { oid: string; parents: string[]; rebase: RebaseEquivalence | null } | { reason: string }
+
+/** One local Git read bound to the landing's repository and environment; stdout, or null when Git did not complete it. */
+type GitRead = (argv: readonly string[], input?: string) => Promise<string | null>
+
+/** The whole object ids one per line, or null when any line is something else. */
+function oidLines(output: string | null): string[] | null {
+  if (output === null) return null
+  const lines = output.split("\n").filter((line) => line !== "")
+  return lines.every((line) => FULL_OID.test(line)) ? lines : null
+}
+
+/**
+ * Each commit's `git patch-id --stable`, in the order given; null for a commit whose
+ * diff is empty, which `patch-id` prints nothing for.
+ *
+ * The diffs come from `git diff-tree --stdin -p -U0`, the plumbing form, with external
+ * diff drivers and textconv filters off: the same command produces both sides of a
+ * comparison, so what is compared is the patch itself and not a repository's
+ * display configuration, and no configured program runs. Zero context lines, because
+ * `patch-id` hashes context: a base edit near a reviewed hunk changes the landed
+ * commit's context, not its patch, and a clean rebase must still compare equal.
+ */
+async function patchIds(commits: readonly string[], git: GitRead): Promise<Array<string | null> | { reason: string }> {
+  const diff = await git(
+    ["diff-tree", "--stdin", "-p", "-U0", "--no-color", "--no-ext-diff", "--no-textconv"],
+    `${commits.join("\n")}\n`,
+  )
+  if (diff === null)
+    return { reason: "git diff-tree --stdin -p -U0: observed no completed read, expected each commit's patch" }
+  const printed = await git(["patch-id", "--stable"], diff)
+  if (printed === null)
+    return { reason: "git patch-id --stable: observed no completed read, expected one patch id per commit with a diff" }
+  const wanted = new Set(commits)
+  const byCommit = new Map<string, string>()
+  for (const line of printed.split("\n")) {
+    if (line === "") continue
+    const [id, commit, extra] = line.split(" ")
+    if (
+      id === undefined ||
+      commit === undefined ||
+      extra !== undefined ||
+      !FULL_OID.test(id) ||
+      !wanted.has(commit) ||
+      byCommit.has(commit)
+    ) {
+      return {
+        reason: `git patch-id --stable: observed record ${show(line)}, expected "<patch-id> <commit>" once for a requested commit`,
+      }
+    }
+    byCommit.set(commit, id)
+  }
+  return commits.map((commit) => byCommit.get(commit) ?? null)
+}
+
+/**
+ * Prove a rebase landing carried the reviewed commits, in order.
+ *
+ * A rebase-and-merge rewrites every commit — GitHub always does, with a new
+ * committer — so the reviewed head is never reachable from what landed, and SHAs
+ * cannot be compared. Patches can. The reviewed commits are those between the
+ * point the reviewed branch forked from the landed history and the reviewed head;
+ * the landed commits are as many single-parent commits ending at the merge commit.
+ * Each landed commit's stable patch id must equal the reviewed commit's at the same
+ * position. A dropped, added, reordered, or edited commit fails that comparison,
+ * and so does a landing whose chain holds a merge commit.
+ */
+async function rebaseEquivalence(
+  head: string,
+  oid: string,
+  git: GitRead,
+): Promise<RebaseEquivalence | { reason: string }> {
+  if (head === oid) return { method: "identical", commit: oid }
+  const forkRead = await git(["merge-base", head, oid])
+  const fork = forkRead?.trim() ?? null
+  if (fork === null || !FULL_OID.test(fork)) {
+    return {
+      reason: `git merge-base ${head} ${oid}: observed ${fork === null ? "no completed read" : show(fork)}, expected the commit the reviewed branch forked from`,
+    }
+  }
+  const reviewed = oidLines(await git(["rev-list", "--reverse", "--topo-order", "--no-merges", `${fork}..${head}`]))
+  if (reviewed === null || reviewed.length === 0) {
+    return {
+      reason: `git rev-list ${fork}..${head}: observed ${reviewed === null ? "no completed read" : "no commits"}, expected the reviewed commits`,
+    }
+  }
+  const chain = await git(["rev-list", "--first-parent", "--parents", `--max-count=${reviewed.length}`, oid])
+  const records =
+    chain === null
+      ? null
+      : chain
+          .split("\n")
+          .filter((line) => line !== "")
+          .map((line) => line.split(" "))
+  if (
+    records === null ||
+    records.length !== reviewed.length ||
+    records.some((ids) => ids.length !== 2 || !ids.every((id) => FULL_OID.test(id)))
+  ) {
+    return {
+      reason: `git rev-list --first-parent --parents ${oid}: observed ${records === null ? "no completed read" : `${records.length} records`}, expected ${reviewed.length} single-parent commits ending at the merge commit, one per reviewed commit`,
+    }
+  }
+  const landed = records.map((ids) => ids[0] ?? "").reverse()
+  const landedBase = records.at(-1)?.[1] ?? ""
+  const reviewedIds = await patchIds(reviewed, git)
+  if ("reason" in reviewedIds) return reviewedIds
+  // Empty commits carry no patch id, so a branch of nothing but empty commits — or a
+  // diff read that came back empty — would make every position compare equal. That is
+  // no evidence of anything, so it refuses.
+  if (reviewedIds.every((id) => id === null)) {
+    return {
+      reason: `git patch-id --stable: observed no patch id for any of the ${reviewed.length} reviewed commits in ${fork}..${head}, expected at least one commit with a diff`,
+    }
+  }
+  const landedIds = await patchIds(landed, git)
+  if ("reason" in landedIds) return landedIds
+  for (let index = 0; index < reviewed.length; index++) {
+    if (reviewedIds[index] !== landedIds[index]) {
+      return {
+        reason: `git patch-id --stable: observed landed commit ${landed[index]} with patch id ${show(landedIds[index])}, expected ${show(reviewedIds[index])} from reviewed commit ${reviewed[index]} at position ${index + 1} of ${reviewed.length}; the landed commits are not the reviewed patches in order`,
+      }
+    }
+  }
+  return { method: "patch-id", reviewed: `${fork}..${head}`, landed: `${landedBase}..${oid}`, commits: reviewed.length }
+}
+
+/**
+ * Prove that the observed commit has the shape requested by the landing method.
+ * Merge and squash are distinguished by parent count; a merge commit must retain
+ * the exact reviewed head as its second parent. Rebase is linear and additionally
+ * requires {@link rebaseEquivalence} between the reviewed and the landed commits.
+ */
+async function mergeProof(pr: PrObservation, method: MergeMethod | null, git: GitRead): Promise<MergeShapeProof> {
+  if (pr.state.trim().toUpperCase() !== "MERGED" || pr.mergeCommitOid === null) {
+    return {
+      reason: `observed pr.state ${show(pr.state)} and pr.mergeCommitOid ${show(pr.mergeCommitOid)}, expected state "MERGED" and a non-empty merge commit oid`,
+    }
+  }
+  const oid = pr.mergeCommitOid.trim().toLowerCase()
+  const head = pr.headRefOid.trim().toLowerCase()
+  const output = await git(["show", "-s", "--format=%P", oid])
+  if (output === null)
+    return { reason: `git show -s --format=%P ${oid}: observed no completed read, expected the merge commit's parents` }
+  const text = output.trim()
+  const parents = text === "" ? [] : text.split(/\s+/)
+  if (parents.some((parent) => !FULL_OID.test(parent))) {
+    return {
+      reason: `git show -s --format=%P ${oid}: observed malformed parent ids ${show(text)}, expected full hexadecimal object ids`,
+    }
+  }
+  if (method === null) {
+    if (parents.length === 1) return { oid, parents, rebase: null }
+    if (parents.length === 2 && parents[1]?.toLowerCase() === head) return { oid, parents, rebase: null }
+    return {
+      reason: `pre-merged request: observed ${parents.length} parents, expected one parent or two with the reviewed head as the second parent`,
+    }
+  }
+  if (method === "merge") {
+    if (parents.length !== 2)
+      return {
+        reason: `merge_method "merge": observed ${parents.length} parents, expected exactly 2 with the reviewed head as the second parent`,
+      }
+    if (parents[1]?.toLowerCase() !== head) {
+      return {
+        reason: `merge_method "merge": observed second parent ${show(parents[1])}, expected reviewed head ${show(pr.headRefOid)}`,
+      }
+    }
+    return { oid, parents, rebase: null }
+  }
+  if (parents.length !== 1)
+    return {
+      reason: `merge_method "${method}": observed ${parents.length} parents, expected exactly 1 for a linear landing`,
+    }
+  if (method === "squash") return { oid, parents, rebase: null }
+  const rebase = await rebaseEquivalence(head, oid, git)
+  if ("reason" in rebase) return { reason: `merge_method "rebase": ${rebase.reason}` }
+  return { oid, parents, rebase }
+}
+
+/**
+ * Waits before each attempt to bring the landed commits into the local object store.
+ *
+ * A merge the forge just accepted can be named by its API before its Git service
+ * serves the commit, so the first fetch may miss it. Three attempts over about seven
+ * seconds cover that replication lag; a commit still missing after them is a
+ * refusal, never a guess.
+ */
+const FETCH_ATTEMPT_DELAYS_MS: readonly number[] = [0, 2_000, 5_000]
+
+/** An abortable wait: the abort resolves it early, and the caller then observes the signal. */
+function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (ms <= 0 || signal?.aborted === true) return Promise.resolve()
+  return new Promise((resolve) => {
+    const done = (): void => {
+      clearTimeout(timer)
+      signal?.removeEventListener("abort", done)
+      resolve()
+    }
+    const timer = setTimeout(done, ms)
+    signal?.addEventListener("abort", done, { once: true })
+  })
+}
+
+/** What bringing the landed commits local took, recorded in the receipt's evidence. */
+type LocalCommits = { required: string[]; fetches: string[] }
+
+/**
+ * Make every commit the shape proof reads present locally, fetching it from `remote`
+ * when it is not.
+ *
+ * The forge merged on its side, so the merge commit — and, for a rebase, the
+ * reviewed head the patch ids are read from — is not in a checkout that has not
+ * fetched since. Without this step `git show` of the merge commit fails and a
+ * landing the forge holds is refused for want of a fetch. Each attempt fetches the
+ * missing ids directly and, if the forge will not serve them by id, the base branch
+ * the landing went to. The fetch writes objects only, so the proof that follows
+ * still reads exact ids and no ref is ever trusted in their place.
+ */
+async function ensureLocalCommits(
+  required: readonly string[],
+  baseBranch: string,
+  remote: string,
+  git: GitRead,
+  fetch: (argv: string[]) => Promise<CliResult>,
+  sleep: (ms: number, signal?: AbortSignal) => Promise<void>,
+  signal: AbortSignal | undefined,
+): Promise<LocalCommits | { reason: string }> {
+  const present = async (oid: string): Promise<boolean> => (await git(["cat-file", "-e", `${oid}^{commit}`])) !== null
+  const missing = async (): Promise<string[]> => {
+    const absent: string[] = []
+    for (const oid of required) if (!(await present(oid))) absent.push(oid)
+    return absent
+  }
+  const fetches: string[] = []
+  const failures: string[] = []
+  let absent = await missing()
+  for (const delay of FETCH_ATTEMPT_DELAYS_MS) {
+    if (absent.length === 0) break
+    const halted = (): { reason: string } | null =>
+      signal?.aborted === true
+        ? { reason: `signal: observed an abort while fetching ${absent.join(", ")} from ${remote}` }
+        : null
+    const before = halted()
+    if (before !== null) return before
+    await sleep(delay, signal)
+    const after = halted()
+    if (after !== null) return after
+    const byId = fetchCommitsArgv(remote, { oids: absent })
+    if (byId === null)
+      return {
+        reason: `git fetch ${remote}: observed operands ${show(absent.join(" "))} it will not issue, expected whole object ids and a remote name`,
+      }
+    fetches.push(byId.join(" "))
+    const fetchedById = cliFailure(byId, await fetch(byId))
+    if (fetchedById !== null) failures.push(fetchedById)
+    absent = await missing()
+    if (absent.length === 0) break
+    const byBranch = fetchCommitsArgv(remote, { branch: baseBranch })
+    if (byBranch === null) continue
+    fetches.push(byBranch.join(" "))
+    const fetchedByBranch = cliFailure(byBranch, await fetch(byBranch))
+    if (fetchedByBranch !== null) failures.push(fetchedByBranch)
+    absent = await missing()
+  }
+  if (absent.length > 0) {
+    const last = failures.at(-1)
+    return {
+      reason: `git cat-file -e: observed ${absent.join(", ")} absent locally after ${fetches.length} fetches from ${remote} over ${FETCH_ATTEMPT_DELAYS_MS.length} attempts, expected the commits the shape proof reads${last === undefined ? "" : `; last fetch: ${last}`}`,
+    }
+  }
+  return { required: [...required], fetches }
+}
+
+/** Exact stdout of one successful local Git read, or null when Git did not complete it. */
+async function gitOutput(
+  run: CliRunner,
+  cwd: string,
+  argv: readonly string[],
+  env: Readonly<Record<string, string>>,
+  input?: string,
+): Promise<string | null> {
+  const result = await run(["git", ...argv], { cwd, timeoutMs: GIT_TIMEOUT_MS, env, input })
+  if (!result.ok || result.error !== undefined || result.exitCode !== 0) return null
+  return result.stdout
+}
+
+/**
+ * The repository's stable key, canonical checkout root, and ledger verdict.
+ *
+ * {@link repositoryContext} is the producer/consumer seam: this producer feeds it
+ * the exact stdout from one combined common-dir/top-level Git read, while cleanup
+ * invokes the same seam directly. The key, recorded root, and ledger verdict cannot
+ * therefore come from different observations or layout heuristics.
+ *
+ * The seam reads through a synchronous callback and asks for exactly that one
+ * observation, so the read is made here, through the abortable runner, and its
+ * stdout is what the callback answers. Any other request is answered as a failed
+ * read, which the seam turns into a refusal rather than a guess.
+ */
+async function observeRepository(
+  git: GitRead,
+  cwd: string,
+): Promise<{ key: string; canonicalRoot: string; ledger: CanonicalLedger } | { reason: string }> {
+  const printed = await git(REPOSITORY_OBSERVATION_ARGS)
+  const repository = repositoryContext(cwd, (argv) =>
+    argv.length === REPOSITORY_OBSERVATION_ARGS.length &&
+    argv.every((part, index) => part === REPOSITORY_OBSERVATION_ARGS[index])
+      ? printed
+      : null,
+  )
+  if (repository === null) {
+    return {
+      reason: `git ${REPOSITORY_OBSERVATION_ARGS.join(" ")} in ${cwd}: observed no unambiguous repository paths, expected absolute git common directory and checkout top level`,
+    }
+  }
+  return { key: repository.key, canonicalRoot: repository.ledger.root, ledger: repository.ledger }
+}
+
+/**
+ * The commit a worktree has checked out, or why it could not be read.
+ *
+ * A recorded worktree is what `delivery_cleanup` later removes, so it has to be the
+ * checkout holding the landed head; a path at any other head names work this
+ * landing did not land. `HEAD^{commit}` peels to the commit and `--verify` refuses
+ * anything that is not exactly one object, so the answer is one whole id or nothing.
+ */
+async function worktreeHead(
+  run: CliRunner,
+  path: string,
+  env: Readonly<Record<string, string>>,
+): Promise<{ head: string } | { reason: string }> {
+  const argv = ["rev-parse", "--verify", "HEAD^{commit}"]
+  const printed = await gitOutput(run, path, argv, env)
+  const head = printed?.trim().toLowerCase() ?? null
+  if (head === null || !FULL_OID.test(head)) {
+    return {
+      reason: `worktree: git ${argv.join(" ")} in ${show(path)} observed ${head === null ? "no completed read" : show(head)}, expected one whole commit id`,
+    }
+  }
+  return { head }
+}
+
+/** The bead ids a landing closes, read from the agent branch convention. */
+export function beadIdsFromBranch(branch: string): string[] {
+  const id = AGENT_BRANCH.exec(branch.trim())?.[1]
+  return id === undefined ? [] : [id]
+}
+
+/**
+ * The bead ids this landing closes: an explicit `beadId` when the caller gave one,
+ * otherwise whatever the branch convention names.
+ *
+ * An explicit id wins over the convention only when the branch carries none, because
+ * the two agreeing is the normal case and the two disagreeing is a caller naming a
+ * bead other than the one its own branch is for — which is a mistake to report, not
+ * to pick a side in.
+ */
+function beadIdentity(beadId: string | undefined, branch: string): { ids: string[] } | { reason: string } {
+  const fromBranch = beadIdsFromBranch(branch)
+  const explicit = beadId?.trim() ?? ""
+  if (explicit === "") return { ids: fromBranch }
+  if (!BEAD_ID.test(explicit)) {
+    return {
+      reason: `beadId: observed ${show(beadId)}, expected a bead id of letters, digits, ".", "_" or "-", starting with a letter or digit`,
+    }
+  }
+  if (fromBranch.length > 0 && fromBranch[0] !== explicit) {
+    return {
+      reason: `beadId: observed ${show(explicit)}, expected ${show(fromBranch[0])} from branch ${show(branch)}, which already names the bead this landing closes`,
+    }
+  }
+  return { ids: [explicit] }
+}
+
+function nativeCloseoutSteps(receipt: LandingReceipt, receiptPath: string, mergeSha: string): readonly string[] {
+  const commands = receipt.beads.ids.flatMap((id) => {
+    const { update, close } = closeoutCommands(id, receipt.pr.number, mergeSha, receiptPath)
+    return [update, close]
+  })
+  return [...commands, "delivery_cleanup"]
+}
+
+/**
+ * Why a landing with no bead identity may not be recorded, or null when it may.
+ *
+ * A receipt whose ledger is active and whose id list is empty claims that work was
+ * landed into a repository that tracks it, and names nothing for the native close-out
+ * commands. `delivery_cleanup` would then ask `bd` about an empty list and pass a
+ * gate that verified nothing, so the landing refuses here instead — before the merge
+ * when the branch is already known, and again before the receipt is built.
+ */
+function missingBeadIdentity(ids: readonly string[], branch: string, ledger: CanonicalLedger): string | null {
+  if (!ledger.active || ids.length > 0) return null
+  return `beads.ids: observed no bead identity for branch ${show(branch)}, expected an "omp/agent/<bead-id>" or "opencode/agent/<bead-id>" branch or an explicit beadId; the ledger at canonical root ${show(ledger.root)} is active, so this landing has no bead for the native close-out commands`
+}
+
+/**
+ * The provider CLI and verb that observed this landing — `gh pr view`,
+ * `glab mr view` — taken from the argv of the read that proved it.
+ *
+ * Read off the issued command rather than composed from the forge name, so
+ * `proof.method` cannot describe a command this tool did not run. An argv that names
+ * no CLI and verb yields {@link RECEIPT_METHOD_UNKNOWN}, which `validateReceipt`
+ * refuses to combine with `outcome: "landed"`.
+ */
+function observationMethod(argv: readonly string[]): string {
+  const head = argv.slice(0, 3)
+  const named = head.length === 3 && head.every((element) => element !== "" && !/\s/.test(element))
+  return named ? head.join(" ") : RECEIPT_METHOD_UNKNOWN
+}
+
+/** Where one landing's forge commands go, resolved from the configured remote before anything is merged. */
+export type LandingTarget = {
+  remote: string
+  /** The remote URL as a receipt or refusal may print it: credentials redacted. */
+  remoteUrl: string
+  forge: "github" | "gitlab"
+  /** The canonical API host {@link forgeTarget} resolved for the remote's transport host. */
+  forgeHost: "github.com" | GitlabHost
+  nameWithOwner: string
+  repository: { key: string; canonicalRoot: string; ledger: CanonicalLedger }
+  /** `HOST/PATH`: the `--repo` every forge command is given. */
+  cliRepo: string
+  /** The forge environment with that verified host pinned. */
+  forgeCommandEnv: Readonly<Record<string, string>>
+}
+
+/**
+ * Resolve the repository a landing addresses, or the first reason it cannot be
+ * trusted. The refusals keep one fixed order: the explicit `repo` shape before any
+ * read, then the remote name, the repository observation, the remote URL, its forge,
+ * and last the agreement between the remote's path and an explicit `repo`.
+ */
+export async function resolveLandingTarget(
+  params: Pick<LandParams, "repo" | "remote">,
+  git: GitRead,
+  cwd: string,
+  forgeEnv: Readonly<Record<string, string>>,
+): Promise<LandingTarget | { reason: string }> {
+  // Before reading any repository state, reject an explicit identity that cannot
+  // be valid for either supported forge. GitLab's bounded nested-group form is
+  // the superset; the forge-specific boundary below tightens GitHub to exactly
+  // two segments once the trusted remote identifies the forge.
+  const explicitRepo = params.repo === undefined || params.repo.trim() === "" ? null : params.repo.trim()
+  if (explicitRepo !== null && normalizeRepoPath("gitlab", explicitRepo) === null) {
+    return {
+      reason: `repo: observed ${show(explicitRepo)}, expected an unqualified "<owner>/<name>" or bounded GitLab "<group>/.../<project>" path`,
+    }
+  }
+
+  const remote = params.remote === undefined || params.remote.trim() === "" ? "origin" : params.remote.trim()
+  if (!REMOTE_NAME.test(remote))
+    return { reason: `remote: observed ${show(params.remote)}, expected a git remote name` }
+
+  const repository = await observeRepository(git, cwd)
+  if ("reason" in repository) return repository
+
+  // The raw stdout, parsed as exactly one record rather than trimmed: `URL` deletes
+  // embedded tabs and newlines before parsing, so a remote spelled with one, or a
+  // remote printing two URLs, would classify here as an ordinary forge URL while Git
+  // contacts something else. This identity binds the merge argv, so the disagreement
+  // would not merely misreport — it would merge somewhere nobody named.
+  //
+  // The refusal names the shape, never the bytes: a remote URL may carry userinfo or a
+  // token query, and output no parser here accepts cannot be redacted, because
+  // `redactRemote` can only locate a secret in a spelling it understands.
+  const printed = await git(["remote", "get-url", remote])
+  const remoteText = printed === null ? null : singleRemoteRecord(printed)
+  if (remoteText === null) {
+    const observed = printed === null ? "no completed read" : "malformed Git remote output"
+    return {
+      reason: `git remote get-url ${remote}: observed ${observed}, expected exactly one URL record for a configured remote in ${cwd}`,
+    }
+  }
+  const target = forgeTarget(remoteText)
+  // The URL is classified before it is redacted: `forgeTarget` owns that
+  // judgement and must see the spelling Git will actually contact.
+  const remoteUrl = redactRemote(remoteText)
+  if (target === null) {
+    return {
+      reason: `repo.forge: observed "unknown" for remote ${remote} at ${show(remoteUrl)}, expected "github" or "gitlab"`,
+    }
+  }
+  const { forge } = target
+
+  const fromRemote = repoPathFromRemote(remoteText)
+  if (fromRemote === null && explicitRepo === null) {
+    return {
+      reason: `repo.nameWithOwner: observed no owner/name in remote ${remote} at ${show(remoteUrl)}, expected "<owner>/<name>"`,
+    }
+  }
+  const normalizedRemote = fromRemote === null ? null : normalizeRepoPath(forge, fromRemote)
+  if (fromRemote !== null && normalizedRemote === null) {
+    const expected = forge === "github" ? 'exactly "<owner>/<name>"' : 'a bounded "<group>/.../<project>" path'
+    return { reason: `repo: observed ${show(fromRemote)} from remote ${remote}, expected ${expected}` }
+  }
+  const candidate = explicitRepo ?? normalizedRemote
+  if (candidate === null) {
+    return {
+      reason: `repo.nameWithOwner: observed no owner/name in remote ${remote} at ${show(remoteUrl)}, expected "<owner>/<name>"`,
+    }
+  }
+  // This adapter-owned normalization is the one path boundary every forge
+  // command below shares, and it runs before any host is prefixed: an explicit
+  // `repo` is reduced to exactly two segments on GitHub and a bounded group path
+  // on GitLab, so no caller-supplied string can occupy the host position.
+  const nameWithOwner = normalizeRepoPath(forge, candidate)
+  if (nameWithOwner === null) {
+    const expected = forge === "github" ? 'exactly "<owner>/<name>"' : 'a bounded "<group>/.../<project>" path'
+    return { reason: `repo: observed ${show(candidate)}, expected ${expected}` }
+  }
+  // A `repo` override that disagrees with the remote is still refused, naming both:
+  // the remote is what `git ls-remote` will be asked about when the branch's absence
+  // is verified, so a receipt built from two different repositories would be proof
+  // of neither.
+  if (normalizedRemote !== null && nameWithOwner !== normalizedRemote) {
+    return {
+      reason: `repo: observed ${show(nameWithOwner)}, expected ${show(normalizedRemote)} from remote ${remote}; the branch absence is verified against ${remote}, so both must name one repository`,
+    }
+  }
+  // Only now, on top of a normalized path, is the host added — and it is added to
+  // both forges. `gh` documents `--repo [HOST/]OWNER/REPO` and `glab` the same
+  // shape, so each CLI is told the host explicitly rather than resolving a bare
+  // path against whichever host it has configured. The value is not caller data:
+  // it is what `forgeTarget` returned for the transport host Git will contact, so
+  // an alternate SSH endpoint such as `altssh.gitlab.com` still addresses the
+  // vendor's canonical API host. The same verified host is pinned in the
+  // environment, which is where a CLI would otherwise read a default from.
+  const cliRepo = `${target.canonicalHost}/${nameWithOwner}`
+  const forgeCommandEnv = Object.assign(
+    Object.create(null) as Record<string, string>,
+    forgeEnv,
+    forge === "github"
+      ? { GH_HOST: target.canonicalHost }
+      : { GITLAB_HOST: target.canonicalHost, GITLAB_API_HOST: target.canonicalHost },
+  )
+  return {
+    remote,
+    remoteUrl,
+    forge,
+    forgeHost: target.canonicalHost,
+    nameWithOwner,
+    repository,
+    cliRepo,
+    forgeCommandEnv,
+  }
+}
+
+/**
+ * Land one pull request and emit its receipt.
+ *
+ * The whole tool, as a function, so every refusal and every issued argv is
+ * observable from a test without a host session.
+ */
+export async function landPullRequest(params: LandParams, deps: LandDeps = {}): Promise<LandOutcome> {
+  const { signal } = deps
+  const baseRun = deps.run ?? runCli
+  // Every child process carries the tool call's signal, so an interrupt ends whichever
+  // command is running and keeps the next one from starting.
+  const run: CliRunner = (argv, options) => baseRun(argv, { ...options, signal })
+  const cwd = deps.cwd ?? process.cwd()
+  const env = deps.env ?? process.env
+  const forgeEnv = forgeEnvironment(env)
+  const gitEnv = gitObservationEnvironment(env)
+  const git: GitRead = (argv, input) => gitOutput(run, cwd, argv, gitEnv, input)
+  // Every adapter call runs with the same neutralised environment, except where the
+  // adapter passes one of its own: `remoteBranchAbsent` hardens Git's environment
+  // itself, and that choice belongs to the module that owns the observation.
+  const forgeRun: CliRunner = (argv, options) => run(argv, { ...options, env: options.env ?? forgeEnv })
+  const now = deps.now?.() ?? Date.now()
+  const observedAt = new Date(now).toISOString()
+  const refuse = (reason: string): LandOutcome => ({ ok: false, reason, text: `delivery_land refused: ${reason}` })
+  // A command the abort ended already refuses through its own failed read. This is
+  // for the gaps between commands, where the next step would be a merge or a write.
+  const interrupted = (where: string): LandOutcome | null =>
+    signal?.aborted === true ? refuse(`signal: observed an abort ${where}`) : null
+  const unstarted = interrupted("before the first command; nothing was read, merged, or written")
+  if (unstarted !== null) return unstarted
+  const selected = landingMethod(params.merge_method)
+  if ("reason" in selected) return refuse(selected.reason)
+  const mergeMethod = selected.method
+
+  const number =
+    typeof params.pr === "number" ? String(params.pr) : typeof params.pr === "string" ? params.pr.trim() : ""
+  if (!POSITIVE_INTEGER.test(number)) return refuse(`pr: observed ${show(params.pr)}, expected a positive integer`)
+  const requested = Number(number)
+  if (!Number.isSafeInteger(requested)) {
+    return refuse(`pr: observed ${show(params.pr)}, expected a positive integer of at most ${Number.MAX_SAFE_INTEGER}`)
+  }
+
+  const resolved = await resolveLandingTarget(params, git, cwd, forgeEnv)
+  if ("reason" in resolved) return refuse(resolved.reason)
+  const { remote, remoteUrl, forge, forgeHost, nameWithOwner, repository, cliRepo, forgeCommandEnv } = resolved
+  const gitlabHost: GitlabHost | undefined = forgeHost === "github.com" ? undefined : forgeHost
+  const boundForgeRun: CliRunner = (argv, options) => run(argv, { ...options, env: options.env ?? forgeCommandEnv })
+
+  const first = await readPr(run, forge, cliRepo, number, FORGE_TIMEOUT_MS, forgeCommandEnv)
+  if ("reason" in first) return refuse(first.reason)
+  const subject = subjectDrift(first.pr, requested, null, first.argv.join(" "))
+  if (subject !== null) return refuse(`${subject}; no merge was issued and no receipt was written`)
+  const alreadyMerged = first.pr.state.trim().toUpperCase() === "MERGED"
+  const head = first.pr.headRefOid.trim().toLowerCase()
+
+  // A merge is issued only against a head the caller names: the reviewed head, which
+  // must be the forge's own `headRefOid`. Without one the call would merge whatever
+  // the branch held at read time, and nothing would tie the landing to the review.
+  // Only proving a request that is already MERGED may omit it, because that path
+  // issues nothing.
+  const expected = params.expectHeadSha?.trim() ?? ""
+  if (expected === "") {
+    if (params.expectHeadSha !== undefined || !alreadyMerged) {
+      return refuse(
+        `expectHeadSha: observed ${show(params.expectHeadSha)}, expected the reviewed head sha; pr.headRefOid is ${show(first.pr.headRefOid)}, and only an already-MERGED request may be proved without one; no merge was issued and no receipt was written`,
+      )
+    }
+  } else if (expected.toLowerCase() !== head) {
+    return refuse(
+      `expectHeadSha: observed pr.headRefOid ${show(first.pr.headRefOid)}, expected ${show(expected)}; no merge was issued and no receipt was written`,
+    )
+  }
+
+  // The worktree is recorded for `delivery_cleanup` to remove, so it is read before
+  // anything is merged or written, on either path: it must hold the head that lands.
+  const worktreePath =
+    params.worktree === undefined || params.worktree.trim() === "" ? null : resolve(cwd, params.worktree.trim())
+  let worktree: { path: string; head: string } | null = null
+  if (worktreePath !== null) {
+    const held = await worktreeHead(run, worktreePath, gitEnv)
+    if ("reason" in held) {
+      return refuse(
+        `${held.reason} to compare with pr.headRefOid ${show(first.pr.headRefOid)}; no merge was issued and no receipt was written`,
+      )
+    }
+    if (held.head !== head) {
+      return refuse(
+        `worktree: observed HEAD ${show(held.head)} in ${show(worktreePath)}, expected pr.headRefOid ${show(first.pr.headRefOid)}; a recorded worktree must hold the landed head; no merge was issued and no receipt was written`,
+      )
+    }
+    worktree = { path: worktreePath, head: held.head }
+  }
+
+  // The bead identity is settled before anything is merged: the branch the forge
+  // just named is the branch the receipt will record, so a landing that cannot name
+  // the work it closes refuses while refusing is still free.
+  const identity = beadIdentity(params.beadId, first.pr.headRefName)
+  if ("reason" in identity) return refuse(`${identity.reason}; no merge was issued and no receipt was written`)
+  const unnamed = missingBeadIdentity(identity.ids, first.pr.headRefName, repository.ledger)
+  if (unnamed !== null) return refuse(`${unnamed}; no merge was issued and no receipt was written`)
+
+  // The shepherd's preconditions, read from the forge for the head the merge is bound
+  // to. Only a merge needs them: an already-MERGED request is proved, not approved.
+  const preconditions: { approval?: Record<string, unknown>; checks?: Record<string, unknown> } = {}
+  if (!alreadyMerged && (params.requireApproval === true || params.requireGreenChecks === true)) {
+    const bound = {
+      forge,
+      cliRepo,
+      nameWithOwner,
+      forgeHost,
+      number,
+      head,
+      env: forgeCommandEnv,
+      timeoutMs: FORGE_TIMEOUT_MS,
+    }
+    if (params.requireApproval === true) {
+      const approval = await readApproval(run, bound)
+      if (!approval.ok) return refuse(`${approval.reason}; no merge was issued and no receipt was written`)
+      preconditions.approval = approval.evidence
+    }
+    if (params.requireGreenChecks === true) {
+      const checks = await readChecks(run, bound)
+      if (!checks.ok) return refuse(`${checks.reason}; no merge was issued and no receipt was written`)
+      preconditions.checks = checks.evidence
+    }
+  }
+
+  // Every read above passed; nothing has been written yet.
+  const unasked = interrupted("before authorization; nothing was merged or written")
+  if (unasked !== null) return unasked
+  await deps.authorize?.({
+    resource: `${nameWithOwner}#${number}`,
+    forge,
+    head,
+    merge: alreadyMerged ? null : mergeMethod,
+    setupAutoDelete: params.setupAutoDelete === true,
+  })
+
+  const notes: string[] = []
+  let mergeArgv: string[] | null = null
+  let proved = first.pr
+  let rereadArgv: string[] | null = null
+  let mergePolicy: boolean | "unknown" | null = null
+  // A refusal once a landing exists on the forge. No receipt is written for a landing
+  // this call could not prove, so cleanup never acts on one; instead the refusal says
+  // the forge holds it and that re-running is safe: the next call reads the request as
+  // MERGED, takes the no-merge proof path, and writes the receipt. That keeps "merge at
+  // most once" and "nothing written before the proof" both true across the retry.
+  const refuseMerged = (reason: string): LandOutcome => {
+    if (mergeArgv === null) {
+      const retry = alreadyMerged ? "; the request is already MERGED, so re-running delivery_land issues no merge" : ""
+      return refuse(`${reason}; no receipt was written${retry}`)
+    }
+    const text = `${reason}; no receipt was written. The forge accepted ${mergeArgv.join(" ")}, so the request is merged and must not be merged again: re-run delivery_land with the same pr and expectHeadSha ${head}; it reads the request as MERGED, issues no merge, and writes the receipt once the proof completes`
+    return { ok: false, reason: text, text: `delivery_land refused: ${text}`, mergeIssued: true }
+  }
+  if (alreadyMerged) {
+    notes.push(
+      `The pull request was already MERGED when it was read, so no merge argv was issued: ${first.argv.join(" ")} is the proof.`,
+    )
+  } else {
+    if (mergeMethod === "merge") {
+      mergePolicy = await allowMergeCommit(forge, nameWithOwner, boundForgeRun)
+      if (mergePolicy === false) {
+        return refuse(
+          `merge_method "merge": repository policy allow_merge_commit observed false, expected true; no merge was issued and no receipt was written`,
+        )
+      }
+    }
+    // The merge is bound to the head that was just read and checked against
+    // `expectHeadSha`. A push between the read and the merge then fails the merge at
+    // the forge instead of landing a commit nobody in this call observed, so the
+    // binding must be a whole object id: a value the forge would not match exactly
+    // is no binding, and merging without one is the race itself.
+    if (!FULL_OID.test(head)) {
+      return refuse(
+        `pr.headRefOid: observed ${show(first.pr.headRefOid)}, expected a 40- or 64-character hex object id to bind the merge to; no merge was issued`,
+      )
+    }
+    // A squash lands as one commit, and its subject is the reviewed title. Left to
+    // the forge, a one-commit pull request would land under that commit's message.
+    const title = first.pr.title?.trim() ?? ""
+    if (mergeMethod === "squash" && title === "") {
+      return refuse(
+        `pr.title: observed ${show(first.pr.title)}, expected a non-empty title to pass as the squash commit subject; no merge was issued and no receipt was written`,
+      )
+    }
+    try {
+      // `gh pr merge --match-head-commit` and `glab mr merge --sha` each fail the merge
+      // unless the source head is still this commit. Neither is a default.
+      const binding = forge === "github" ? ["--match-head-commit", head] : ["--sha", head]
+      const options = mergeMethod === "squash" ? { mergeMethod, squashSubject: title } : { mergeMethod }
+      mergeArgv = [...mergeArgs(forge, number, options), "--repo", cliRepo, ...binding]
+    } catch (error) {
+      return refuse(error instanceof Error ? error.message : String(error))
+    }
+    const unmerged = interrupted("before the merge; no merge was issued and no receipt was written")
+    if (unmerged !== null) return unmerged
+    const mergeFailure = cliFailure(
+      mergeArgv,
+      await run(mergeArgv, { cwd, timeoutMs: FORGE_TIMEOUT_MS, env: forgeCommandEnv }),
+    )
+    if (mergeFailure !== null) return refuse(`${mergeFailure}; no receipt was written`)
+    const second = await readPr(run, forge, cliRepo, number, FORGE_TIMEOUT_MS, forgeCommandEnv)
+    rereadArgv = second.argv
+    if ("reason" in second) return refuseMerged(second.reason)
+    // The re-read must describe the same pull request, at the same head, on the same
+    // base. A merge proves a landing only of what was read: a re-target or a push
+    // between the two reads would otherwise let this receipt name a head and a base
+    // that never merged.
+    const drift = subjectDrift(second.pr, requested, first.pr, second.argv.join(" "))
+    if (drift !== null) return refuse(`${drift}; no receipt was written`)
+    proved = second.pr
+  }
+
+  const proofMethod = alreadyMerged ? null : mergeMethod
+  const provedOid = proved.mergeCommitOid?.trim().toLowerCase() ?? ""
+  let localCommits: LocalCommits | null = null
+  if (proved.state.trim().toUpperCase() === "MERGED" && FULL_OID.test(provedOid)) {
+    const required =
+      proofMethod === "rebase" && FULL_OID.test(head) && head !== provedOid ? [provedOid, head] : [provedOid]
+    const fetchRun = (argv: string[]): Promise<CliResult> =>
+      Promise.resolve(run(argv, { cwd, timeoutMs: FETCH_TIMEOUT_MS, env: gitEnv }))
+    const local = await ensureLocalCommits(
+      required,
+      proved.baseRefName,
+      remote,
+      git,
+      fetchRun,
+      deps.sleep ?? abortableSleep,
+      signal,
+    )
+    if ("reason" in local) {
+      const source = alreadyMerged ? "the pull request read" : `the re-read after ${(mergeArgv ?? []).join(" ")}`
+      return refuseMerged(`${source}: ${local.reason}`)
+    }
+    localCommits = local
+  }
+
+  const proof = await mergeProof(proved, proofMethod, git)
+  if ("reason" in proof) {
+    const source = alreadyMerged ? "the pull request read" : `the re-read after ${(mergeArgv ?? []).join(" ")}`
+    return refuseMerged(`${source}: ${proof.reason}`)
+  }
+
+  // Re-derived from the branch the re-read proved, which need not be the branch the
+  // first read named, and checked again: no receipt claims an active ledger with
+  // nothing for the native close-out commands to process.
+  const proven = beadIdentity(params.beadId, proved.headRefName)
+  if ("reason" in proven) return refuseMerged(proven.reason)
+  const unproven = missingBeadIdentity(proven.ids, proved.headRefName, repository.ledger)
+  if (unproven !== null) return refuseMerged(unproven)
+
+  // The probe is asked from this call's own working directory: `remote` is a name,
+  // and a name only resolves in the repository that configures it.
+  const verdict = await remoteBranchAbsent(remote, proved.headRefName, cwd, forgeRun, env)
+  if (verdict !== "absent") {
+    notes.push(
+      `The remote branch ${proved.headRefName} on ${remote} is ${verdict}, not proved absent, so branch.deletedRemote stays false and remoteAbsenceVerifiedAt stays null.`,
+    )
+  }
+
+  // Read only now that the landing is proved, and written below only once its receipt
+  // has passed the validator: the setting governs every later merge by every
+  // contributor, so a landing that refused anywhere above leaves it as it was.
+  const observedAutoDelete: ReceiptAutoDelete = await autoDeleteSetting(forge, nameWithOwner, boundForgeRun, gitlabHost)
+
+  // The proof of the landing is the read that observed it: the re-read when a merge
+  // was issued here, the first read when the forge had already merged it.
+  const observingArgv = rereadArgv ?? first.argv
+  const evidence: Record<string, unknown> = {
+    remote,
+    mergeMethod,
+    mergePolicy,
+    // The URL lives here and not in `repo.remote`, which records the configured
+    // remote NAME: the name is what a later `git ls-remote` is given, and the URL is
+    // the redacted spelling of what was contacted.
+    remoteUrl,
+    // Both the repository and the head the merge was bound to are recorded, because a
+    // reader of this receipt cannot otherwise tell a bound merge from an ambient one.
+    boundRepo: nameWithOwner,
+    ledger: { root: repository.ledger.root, active: repository.ledger.active },
+    prView: {
+      argv: first.argv.join(" "),
+      number: first.pr.number,
+      state: first.pr.state,
+      headRefOid: first.pr.headRefOid,
+      baseRefName: first.pr.baseRefName,
+    },
+    expectHeadSha: expected === "" ? null : expected,
+    worktree,
+    autoDelete: { observed: observedAutoDelete, requested: params.setupAutoDelete === true },
+    merge: mergeArgv === null ? null : { argv: mergeArgv.join(" "), method: mergeMethod, boundHead: head },
+    mergeShape: { parents: proof.parents, rebase: proof.rebase },
+    // The commits the shape proof read and the fetches that brought them local; an
+    // empty list means they were already present.
+    localCommits,
+    reread:
+      rereadArgv === null
+        ? null
+        : {
+            argv: rereadArgv.join(" "),
+            number: proved.number,
+            state: proved.state,
+            headRefOid: proved.headRefOid,
+            baseRefName: proved.baseRefName,
+            mergeCommitOid: proved.mergeCommitOid,
+          },
+    remoteBranch: { ref: `refs/heads/${proved.headRefName}`, verdict },
+    preconditions: Object.keys(preconditions).length === 0 ? null : preconditions,
+  }
+
+  // Built and validated before the setting write, and again after it with the write's
+  // outcome in the notes, so a receipt the validator refuses has written nothing.
+  const compose = (settingNote: string): { receipt: LandingReceipt } | { reason: string } => {
+    let built: LandingReceipt
+    try {
+      built = buildReceipt({
+        emitter: { plugin: pkg.name, version: pkg.version, tool: "delivery_land" },
+        repo: { key: repository.key, canonicalRoot: repository.canonicalRoot, remote, forge, nameWithOwner },
+        pr: {
+          number: proved.number,
+          url: proved.url,
+          state: proved.state,
+          baseRefName: proved.baseRefName,
+          headRefName: proved.headRefName,
+          headRefOid: proved.headRefOid,
+          mergeCommitOid: proof.oid,
+          mergedAt: proved.mergedAt,
+        },
+        branch: {
+          name: proved.headRefName,
+          deletedRemote: verdict === "absent",
+          remoteAbsenceVerifiedAt: verdict === "absent" ? observedAt : null,
+          autoDeleteSetting: observedAutoDelete,
+        },
+        worktree: { path: worktreePath, removed: false, localRefDeleted: false, absenceVerifiedAt: null },
+        beads: { ids: proven.ids, ledgerActive: repository.ledger.active },
+        proof: { method: observationMethod(observingArgv), observedAt, evidence },
+        outcome: "landed",
+        now,
+        notes: [...notes, settingNote].join(" "),
+      })
+    } catch (error) {
+      return { reason: `the receipt could not be built: ${error instanceof Error ? error.message : String(error)}` }
+    }
+    const validation = validateReceipt(built)
+    return validation.ok
+      ? { receipt: validation.receipt }
+      : { reason: `the receipt was refused by its validator, so no file was written: ${validation.reason}` }
+  }
+
+  let composed = compose(
+    params.setupAutoDelete === true
+      ? `setupAutoDelete: the deletion-on-merge write was not issued; the setting observed was ${observedAutoDelete}.`
+      : `setupAutoDelete was not requested, so no repository setting was written; autoDeleteSetting was observed as ${observedAutoDelete}.`,
+  )
+  if ("reason" in composed) return refuseMerged(composed.reason)
+  const landedState = alreadyMerged ? "the request was already MERGED" : "the pull request is merged"
+  if (params.setupAutoDelete === true) {
+    const unwritten = interrupted(
+      `before the deletion-on-merge write; no setting was written and no receipt was written, and ${landedState}, so delivery_land proves it again without merging`,
+    )
+    if (unwritten !== null) return unwritten
+    const enabled = await enableAutoDelete(forge, nameWithOwner, boundForgeRun, gitlabHost)
+    composed = compose(
+      enabled.ok
+        ? `setupAutoDelete: the forge accepted a deletion-on-merge write; the setting observed before the request was ${observedAutoDelete}, which is what this receipt records because acceptance is not a re-read.`
+        : `setupAutoDelete: the deletion-on-merge write was refused: ${enabled.reason ?? "no reason reported"}. The setting observed before the request was ${observedAutoDelete}.`,
+    )
+    if ("reason" in composed) return refuseMerged(composed.reason)
+  }
+  const unrecorded = interrupted(
+    `before the receipt was written; no receipt was written, and ${landedState}, so delivery_land proves it again without merging`,
+  )
+  if (unrecorded !== null) return unrecorded
+
+  const receipt = composed.receipt
+  let receiptPath: string
+  try {
+    receiptPath = writeReceipt(receipt, deps.receiptsDirectory ?? receiptDirectory(env, receipt.repo.key))
+  } catch (error) {
+    return refuseMerged(`the receipt could not be written: ${error instanceof Error ? error.message : String(error)}`)
+  }
+
+  const next = receipt.beads.ledgerActive
+    ? nativeCloseoutSteps(receipt, receiptPath, proof.oid)
+    : (["delivery_cleanup"] as const)
+  const text = [
+    `delivery_land proved ${nameWithOwner}#${proved.number} merged as ${proof.oid.slice(0, 12)} on ${forge}.`,
+    `branch ${proved.headRefName}: remote ${verdict}, deletedRemote ${verdict === "absent"}, autoDeleteSetting ${observedAutoDelete}.`,
+    `receipt: ${receiptPath}`,
+    receipt.beads.ledgerActive
+      ? `next (children before parents):\n${next
+          .slice(0, -1)
+          .map((step) => `  ${step}`)
+          .join("\n")}\n  delivery_cleanup to remove the worktree and the local branch.`
+      : "next: run delivery_cleanup to remove the worktree and the local branch.",
+  ].join("\n")
+  return { ok: true, receipt, receiptPath, text, next }
+}
