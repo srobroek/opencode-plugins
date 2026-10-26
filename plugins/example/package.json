@@ -1,0 +1,13 @@
+{
+  "name": "@srobroek/opencode-example",
+  "version": "0.1.0",
+  "description": "Reference OpenCode V2 plugin: one tool and one tool hook.",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "peerDependencies": {
+    "@opencode/plugin": "^2.1.4"
+  }
+}

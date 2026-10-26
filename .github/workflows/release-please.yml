@@ -1,0 +1,23 @@
+name: release-please
+
+# Uses GITHUB_TOKEN. GitHub does not trigger workflows from commits made with it,
+# so CI on the release PR needs a manual re-run. Switch to the release GitHub App
+# token (as in srobroek/omp-plugins) once the app is installed on this repository.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
