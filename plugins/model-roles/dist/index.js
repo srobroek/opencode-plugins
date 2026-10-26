@@ -136,7 +136,7 @@ var NOT_MODEL = [
   /\b(?:abort(?:ed)?|cancel(?:l)?ed|interrupted)\b/i
 ];
 var PATTERNS = [
-  ["unavailable", /model (?:unavailable|not found|not available|is not supported)|unknown model|no such model|model_not_found|not ready|modelnotready/i],
+  ["unavailable", /model (?:unavailable|not found|not available|is not supported)|unknown model|no such model|model_not_found|model identifier is invalid|not ready|modelnotready/i],
   ["auth", /credential|unauthori[sz]ed|forbidden|access ?denied|api[ _-]?key|authenticat|security token|token (?:has )?expired|permission denied for model/i],
   ["rate-limit", /throttl|rate.?limit|too many requests|quota|insufficient_quota|\b429\b/i],
   ["server", /overloaded|over capacity|service unavailable|bad gateway|gateway timeout|internal server error|server error|serviceunavailable|\b50[0234]\b|\b529\b/i]
@@ -168,6 +168,9 @@ function modelFromError(message) {
     return;
   const candidate = parseCandidate(match[1].replace(/[.:]+$/, ""));
   return candidate?.kind === "model" ? candidate.ref : undefined;
+}
+function childSessionID(message) {
+  return /subagent failed \((?:sessionid:\s*)?([^)\s]+)\)/i.exec(message)?.[1];
 }
 var healthKey = (ref) => `${ref.providerID}/${ref.id}`;
 function readHealth(value) {
@@ -501,6 +504,7 @@ function shapeRoleAgent(draft, general, role, description, created) {
 var MAX_REREGISTER = 3;
 var NOTICE_DEDUPE_MS = 60000;
 var CHECK_TOOL = "model_roles_check";
+var MAX_SESSION_DEPTH = 8;
 var REFRESH_EVENTS = new Set(["model.updated", "provider.updated"]);
 var CHECK_EVENTS = new Set(["agent.updated", ...REFRESH_EVENTS]);
 var FAILED_EVENT = "session.execution.failed";
@@ -652,7 +656,7 @@ var src_default = Plugin.define({
       await notify(parentID, text, "subagent-fallback");
     };
     const childModel = async (message) => {
-      const id = /subagent failed \(([^)\s]+)\)/i.exec(message)?.[1];
+      const id = childSessionID(message);
       if (id === undefined)
         return;
       try {
@@ -660,6 +664,34 @@ var src_default = Plugin.define({
       } catch {
         return;
       }
+    };
+    const defaultModel = async () => {
+      try {
+        const model = (await ctx.model.default()).data;
+        return model == null ? undefined : { providerID: model.providerID, id: model.id };
+      } catch {
+        return;
+      }
+    };
+    const runningModel = async (session, agents, agentID) => {
+      const facts = { options, available, health: view() };
+      let current = session;
+      let id = agentID ?? session?.agent;
+      for (let depth = 0;current !== undefined && depth < MAX_SESSION_DEPTH; depth++) {
+        if (current.model !== undefined)
+          return current.model;
+        const agent = agents.find((a) => a.id === id);
+        const pinned = agent === undefined ? undefined : pinnedModel(agent, facts);
+        if (pinned !== undefined)
+          return pinned;
+        if (typeof current.parentID !== "string" || current.parentID === "")
+          break;
+        current = await ctx.session.get({ sessionID: current.parentID }).catch(() => {
+          return;
+        });
+        id = current?.agent;
+      }
+      return defaultModel();
     };
     const recentOr = (parentID, model) => {
       const last = childFailures.get(parentID);
@@ -673,7 +705,7 @@ var src_default = Plugin.define({
       const session = await ctx.session.get({ sessionID });
       const agents = await listAgents();
       const agent = agents.find((a) => a.id === session.agent);
-      const failed = modelFromError(error.message ?? "") ?? session.model ?? agent?.model;
+      const failed = modelFromError(error.message ?? "") ?? await runningModel(session, agents);
       if (failed === undefined) {
         console.warn(`${SOURCE}: session ${sessionID} failed (${kind}) on an unknown model; nothing marked unhealthy`);
         return;
@@ -742,9 +774,8 @@ var src_default = Plugin.define({
       let reason;
       try {
         const [agents, session] = await Promise.all([listAgents(), ctx.session.get({ sessionID: event.sessionID })]);
-        const caller = agents.find((agent) => agent.id === event.agent);
         const facts = { options, available, health: view() };
-        const sessionModel = session?.model ?? (caller === undefined ? undefined : pinnedModel(caller, facts));
+        const sessionModel = await runningModel(session, agents, event.agent);
         const decision = judgeSpawn({ ...facts, guard: guard2, target, agents, sessionModel, roleAgents: roleAgentIds });
         if (!decision.allow)
           reason = decision.reason;
@@ -827,6 +858,7 @@ export {
   DEFAULT_ROLE_AGENTS,
   HEALTH_KEY,
   MAX_REREGISTER,
+  MAX_SESSION_DEPTH,
   NOTICE_DEDUPE_MS,
   RETRY_KEY_PREFIX,
   ROLE_AGENT_PREFIX,
@@ -836,6 +868,7 @@ export {
   candidateStatus,
   cheaperAlternatives,
   checkRoles,
+  childSessionID,
   classifyFailure,
   costTier,
   decideFallback,

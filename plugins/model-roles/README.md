@@ -113,7 +113,9 @@ roles that resolve to one.
 
 A spawn is allowed if the target agent has a model, or a role that resolves
 (through the `agents` option or the header). The session model is
-`session.model`, or the calling agent's model if the session has none. If any
+`session.model`, else the calling agent's model, else the parent session's
+(a session that inherits carries no model), else the default model. A root
+session on the configured default model has no `session.model`. If any
 lookup fails, the spawn goes ahead. Resumed spawns (with `sessionID`) are not
 checked.
 
@@ -127,7 +129,8 @@ with `Model unavailable`. The plugin adds the fallback:
 
 1. On `session.execution.failed`, or when a `subagent` call fails, it checks
    whether the model or provider caused the error: model unavailable,
-   auth or credential errors, 401/403, 429 or throttling, 5xx or overloaded.
+   auth or credential errors, 401/403, 429 or throttling, 5xx or overloaded,
+   and Bedrock's `The provided model identifier is invalid`.
    User interrupts, tool errors and context overflow don't count.
 2. The failed model (all its variants) is marked unhealthy for `cooldownMs`
    in plugin storage, under `health`.
@@ -148,7 +151,7 @@ with `Model unavailable`. The plugin adds the fallback:
 
 Every fallback is logged (`console.warn`) and shown in the session. The model
 is the one the error names (`Model unavailable: provider/model`), else the
-session's model, else the agent's.
+session's model, found the same way as for the guard.
 
 ## Role subagents
 

@@ -10,7 +10,13 @@ type Editor = {
 }
 
 /** A host that replays agent transforms in registration order and emits `agent.updated` after each change. */
-function createHost(input: { agents: Agent[]; models: Model[]; options: unknown; sessionModel?: ModelRef }) {
+function createHost(input: {
+  agents: Agent[]
+  models: Model[]
+  options: unknown
+  sessionModel?: ModelRef
+  defaultModel?: ModelRef
+}) {
   const toolHooks: Array<{ name: string; callback: (payload: unknown) => Promise<void> }> = []
   let sessionGet: (id: string) => Promise<unknown> = async (id) =>
     sessions.get(id) ?? { id, model: input.sessionModel }
@@ -70,7 +76,7 @@ function createHost(input: { agents: Agent[]; models: Model[]; options: unknown;
       transform,
       list: async () => ({ data: listOverride ? listOverride() : [...agents.values()].map((a) => structuredClone(a)) }),
     },
-    model: { list: async () => ({ data: models }) },
+    model: { list: async () => ({ data: models }), default: async () => ({ data: input.defaultModel }) },
     storage: {
       get: async (key: string) => storage.get(key),
       set: async (key: string, value: unknown) => void storage.set(key, value),
@@ -148,9 +154,9 @@ function createHost(input: { agents: Agent[]; models: Model[]; options: unknown;
     },
     emit,
     toolHooks: () => toolHooks.filter((hook) => hook.name === "execute.before").length,
-    spawn: async (tool: string, payload: unknown, agent = "build") => {
+    spawn: async (tool: string, payload: unknown, agent = "build", sessionID = "s1") => {
       for (const hook of toolHooks)
-        if (hook.name === "execute.before") await hook.callback({ tool, sessionID: "s1", agent, id: "c1", input: payload })
+        if (hook.name === "execute.before") await hook.callback({ tool, sessionID, agent, id: "c1", input: payload })
     },
     spawnFailed: async (payload: unknown, message: string, sessionID = "s1") => {
       for (const hook of toolHooks)
@@ -359,6 +365,19 @@ describe("subagent model guard", () => {
     await cleanup()
   })
 
+  test("a session on the default model, or inheriting it from its parent, is judged on the default", async () => {
+    const host = createHost({ agents: [{ id: "plain" }], models: priced, options: guarded, defaultModel: opus })
+    host.sessions.set("root", { id: "root" })
+    host.sessions.set("child", { id: "child", parentID: "root", agent: "plain" })
+    const cleanup = await setup(host)
+    await expect(host.spawn("subagent", { agent: "plain", prompt: "x" }, "build", "root")).rejects.toThrow(
+      /inherit this session's expensive model amazon-bedrock\/claude-opus/,
+    )
+    await expect(host.spawn("subagent", { agent: "plain", prompt: "x" }, "plain", "child")).rejects.toThrow(/inherit/)
+    host.close()
+    await cleanup()
+  })
+
   test("fails open when a lookup throws", async () => {
     const host = createHost({ agents, models: priced, options: guarded, sessionModel: opus })
     const cleanup = await setup(host)
@@ -518,6 +537,31 @@ describe("runtime fallback", () => {
     await settle()
     expect(host.agents().get("general")?.model).toEqual(haiku)
     expect(methods(host, "synthetic")).toHaveLength(1)
+    host.close()
+    await cleanup()
+  })
+
+  test("a root session on the default model retries on the next candidate", async () => {
+    const host = createHost({ agents: [{ id: "build" }], models, options: fallbackOptions, defaultModel: sonnet })
+    host.sessions.set("r", { id: "r" })
+    const cleanup = await setup(host)
+    host.emit(failed("r", { type: "provider.internal", message: "Service Unavailable", status: 503 }))
+    await settle()
+    expect(Object.keys(host.storage.get("health") as object)).toEqual(["amazon-bedrock/claude-sonnet"])
+    expect(methods(host, "switchModel").map((c) => c.input)).toEqual([{ sessionID: "r", model: haiku }])
+    host.close()
+    await cleanup()
+  })
+
+  test("a spawn error names its child as sessionID: <id>", async () => {
+    const host = createHost({ agents: [{ id: "general" }], models, options: fallbackOptions })
+    // The child ran on haiku, not on what general resolves to now: the child's model is the one blamed.
+    host.sessions.set("c", { id: "c", parentID: "r", agent: "general", model: haiku })
+    const cleanup = await setup(host)
+    await host.spawnFailed({ agent: "general", prompt: "x" }, "Subagent failed (sessionID: c): Service Unavailable: upstream overloaded", "r")
+    await settle()
+    expect(Object.keys(host.storage.get("health") as object)).toEqual(["anthropic/claude-haiku"])
+    expect(host.agents().get("general")?.model).toEqual(sonnet)
     host.close()
     await cleanup()
   })

@@ -4,6 +4,7 @@ import { checkRoles, formatCheck } from "./check.ts"
 import { decideFallback, failureNote, fallbackTarget, type NoteFacts, retryPrompt, SOURCE, subagentNote } from "./fallback.ts"
 import { type GuardAgent, type GuardModel, inputCost, judgeSpawn, parseGuard, pinnedModel } from "./guard.ts"
 import {
+  childSessionID,
   classifyFailure,
   type FailureClass,
   HEALTH_KEY,
@@ -44,6 +45,9 @@ export const MAX_REREGISTER = 3
 export const NOTICE_DEDUPE_MS = 60_000
 
 export const CHECK_TOOL = "model_roles_check"
+
+/** How far up the parent chain a session's inherited model is looked for. */
+export const MAX_SESSION_DEPTH = 8
 
 const REFRESH_EVENTS = new Set(["model.updated", "provider.updated"])
 const CHECK_EVENTS = new Set(["agent.updated", ...REFRESH_EVENTS])
@@ -224,15 +228,46 @@ export default Plugin.define({
       await notify(parentID, text, "subagent-fallback")
     }
 
-    /** The model of the child session a `Subagent failed (<id>)` message names. */
+    /** The model of the child session a `Subagent failed (sessionID: <id>)` message names. */
     const childModel = async (message: string): Promise<ModelRef | undefined> => {
-      const id = /subagent failed \(([^)\s]+)\)/i.exec(message)?.[1]
+      const id = childSessionID(message)
       if (id === undefined) return undefined
       try {
         return ((await ctx.session.get({ sessionID: id })) as { model?: ModelRef } | undefined)?.model
       } catch {
         return undefined
       }
+    }
+
+    type SessionLike = { parentID?: string; agent?: string; model?: ModelRef } | undefined
+
+    const defaultModel = async (): Promise<ModelRef | undefined> => {
+      try {
+        const model = (await ctx.model.default()).data
+        return model == null ? undefined : { providerID: model.providerID, id: model.id }
+      } catch {
+        return undefined
+      }
+    }
+
+    /**
+     * The model a session runs on. A session on the default model, or one that
+     * inherits, carries no `model`: walk its agent, then its parents, then the default.
+     */
+    const runningModel = async (session: SessionLike, agents: Agents, agentID?: string): Promise<ModelRef | undefined> => {
+      const facts = { options, available, health: view() }
+      let current = session
+      let id = agentID ?? session?.agent
+      for (let depth = 0; current !== undefined && depth < MAX_SESSION_DEPTH; depth++) {
+        if (current.model !== undefined) return current.model
+        const agent = agents.find((a) => a.id === id)
+        const pinned = agent === undefined ? undefined : pinnedModel(agent, facts)
+        if (pinned !== undefined) return pinned
+        if (typeof current.parentID !== "string" || current.parentID === "") break
+        current = (await ctx.session.get({ sessionID: current.parentID }).catch(() => undefined)) as SessionLike
+        id = current?.agent
+      }
+      return defaultModel()
     }
 
     /**
@@ -251,14 +286,10 @@ export default Plugin.define({
     const onSessionFailed = async (sessionID: string, error: { type?: string; message?: string; status?: number }) => {
       const kind = classifyFailure(error)
       if (kind === undefined) return
-      const session = (await ctx.session.get({ sessionID })) as {
-        parentID?: string
-        agent?: string
-        model?: ModelRef
-      }
+      const session = (await ctx.session.get({ sessionID })) as SessionLike & {}
       const agents = await listAgents()
       const agent = agents.find((a) => a.id === session.agent)
-      const failed = modelFromError(error.message ?? "") ?? session.model ?? agent?.model
+      const failed = modelFromError(error.message ?? "") ?? (await runningModel(session, agents))
       if (failed === undefined) {
         console.warn(`${SOURCE}: session ${sessionID} failed (${kind}) on an unknown model; nothing marked unhealthy`)
         return
@@ -330,9 +361,8 @@ export default Plugin.define({
             let reason: string | undefined
             try {
               const [agents, session] = await Promise.all([listAgents(), ctx.session.get({ sessionID: event.sessionID })])
-              const caller = agents.find((agent) => agent.id === event.agent)
               const facts = { options, available, health: view() }
-              const sessionModel = session?.model ?? (caller === undefined ? undefined : pinnedModel(caller, facts))
+              const sessionModel = await runningModel(session as SessionLike, agents, event.agent)
               const decision = judgeSpawn({ ...facts, guard, target, agents, sessionModel, roleAgents: roleAgentIds })
               if (!decision.allow) reason = decision.reason
             } catch {

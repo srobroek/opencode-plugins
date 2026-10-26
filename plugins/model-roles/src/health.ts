@@ -30,7 +30,7 @@ const NOT_MODEL = [
 ]
 
 const PATTERNS: ReadonlyArray<[FailureClass, RegExp]> = [
-  ["unavailable", /model (?:unavailable|not found|not available|is not supported)|unknown model|no such model|model_not_found|not ready|modelnotready/i],
+  ["unavailable", /model (?:unavailable|not found|not available|is not supported)|unknown model|no such model|model_not_found|model identifier is invalid|not ready|modelnotready/i],
   ["auth", /credential|unauthori[sz]ed|forbidden|access ?denied|api[ _-]?key|authenticat|security token|token (?:has )?expired|permission denied for model/i],
   ["rate-limit", /throttl|rate.?limit|too many requests|quota|insufficient_quota|\b429\b/i],
   ["server", /overloaded|over capacity|service unavailable|bad gateway|gateway timeout|internal server error|server error|serviceunavailable|\b50[0234]\b|\b529\b/i],
@@ -60,6 +60,11 @@ export function modelFromError(message: string): ModelRef | undefined {
   if (match?.[1] === undefined) return undefined
   const candidate = parseCandidate(match[1].replace(/[.:]+$/, ""))
   return candidate?.kind === "model" ? candidate.ref : undefined
+}
+
+/** The child session a `Subagent failed (sessionID: <id>): ...` tool error names. */
+export function childSessionID(message: string): string | undefined {
+  return /subagent failed \((?:sessionid:\s*)?([^)\s]+)\)/i.exec(message)?.[1]
 }
 
 export const healthKey = (ref: Pick<ModelRef, "providerID" | "id">): string => `${ref.providerID}/${ref.id}`
