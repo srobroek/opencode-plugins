@@ -1,0 +1,23 @@
+{
+  "name": "@srobroek/opencode-dep-update",
+  "version": "0.1.0",
+  "description": "Classify dependency updates by semver safety and apply confirmed patch and minor bumps.",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": ["dist", "index.js", "skills"],
+  "peerDependencies": {
+    "@opencode/plugin": "^2.1.4"
+  },
+  "peerDependenciesMeta": {
+    "@opencode/plugin": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@srobroek/opencode-lib": "workspace:*",
+    "smol-toml": "1.9.0"
+  }
+}

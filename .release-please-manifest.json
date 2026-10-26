@@ -2,5 +2,6 @@
   "plugins/example": "0.1.0",
   "plugins/model-roles": "0.1.0",
   "plugins/worktrunk": "0.1.0",
-  "plugins/session": "0.1.0"
+  "plugins/session": "0.1.0",
+  "plugins/dep-update": "0.1.0"
 }
