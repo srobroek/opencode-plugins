@@ -7,6 +7,7 @@
 
 import { readFileSync } from "node:fs"
 import { isAbsolute, resolve } from "node:path"
+import { hasAttribution } from "./attribution.ts"
 import {
   base,
   type Command,
@@ -126,12 +127,7 @@ export function remoteExec(commands: readonly Command[]): boolean {
   return false
 }
 
-const ATTRIBUTION =
-  /co-authored-by:[^\n]{0,120}(?:claude|codex|gpt|copilot|cursor|devin|anthropic|openai|gemini)|generated (?:with|by) [[(]?(?:claude|codex|copilot|opencode|gemini)|noreply@(?:anthropic|openai)\.com/i
-
-export function hasAttribution(text: string): boolean {
-  return ATTRIBUTION.test(text)
-}
+export { hasAttribution }
 
 /** The `-m`/`--message`/`--trailer` texts and `-F`/`--file` paths of a `git commit`. */
 export function commitMessage(args: readonly string[]): { texts: string[]; files: string[] } {

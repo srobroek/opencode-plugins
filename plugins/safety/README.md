@@ -84,6 +84,76 @@ rather than passes.
   - lockfile restores such as `bun install` and `npm install`;
   - read-only lookups such as `npm view` and `cargo search`.
 
+## Commit-msg hook
+
+The `attribution` gate only sees commits the agent makes. `hooks/commit-msg` applies the same
+matcher to every commit in a repository, including the ones you make in your own terminal. It
+ignores comment lines and the `git commit -v` diff below the scissors line. It needs `bun` on
+`PATH`. Without `bun`, it warns and lets the commit through. Use `git commit --no-verify` to skip
+it once.
+
+Install it per repository. Nothing is installed until you run this:
+
+```sh
+bun <safety>/dist/commit-msg.js install [--repo DIR] [--behind-hooks-path]
+bun <safety>/dist/commit-msg.js uninstall [--repo DIR]
+```
+
+`<safety>` is this plugin's directory, such as a clone's `plugins/safety`. `install` writes
+`<git-common-dir>/hooks/commit-msg` and copies the bundled checker next to it as
+`safety-commit-msg.js`, so the hook still works after the plugin moves. Linked worktrees share
+the hook. `install` never overwrites a hook it did not write:
+
+| Existing `commit-msg` | `install` |
+| --- | --- |
+| none | writes the hook |
+| the safety hook | refreshes it |
+| a plain script | renames it to `commit-msg.chained`, which runs after the check passes; `uninstall` restores it |
+| a binary (Mach-O, ELF) | refuses and leaves it alone |
+| a hook framework's shim (pre-commit, prek, husky, lefthook, beads) | refuses and prints the snippet below |
+
+If `core.hooksPath` sends git to another directory, git ignores `.git/hooks`. `install` then
+refuses and names the setting and its scope. There are two exceptions:
+
+- Git Defender's `/usr/local/amazon/var/git-defender/hooks` runs the repository's `.git/hooks`
+  after its own hooks, so `install` goes ahead.
+- `--behind-hooks-path` tells `install` that some other dispatcher does the same.
+
+Otherwise, call `<safety>/hooks/commit-msg "$@"` from that directory's `commit-msg`.
+
+For pre-commit or prek, register the check as a local hook in `.pre-commit-config.yaml`.
+Install the `commit-msg` hook type too, for example `prek install --hook-type commit-msg`:
+
+```yaml
+repos:
+  - repo: local
+    hooks:
+      - id: no-ai-attribution
+        name: no AI attribution
+        entry: bun <safety>/dist/commit-msg.js check
+        language: system
+        stages: [commit-msg]
+```
+
+### Every repository at once
+
+`hooks/commit-msg` also works from a shared `core.hooksPath`. After the check it runs the
+repository's own `.git/hooks/commit-msg`, so per-repository commit-msg hooks keep working:
+
+```sh
+mkdir -p ~/.config/git/hooks
+ln -s <safety>/hooks/commit-msg ~/.config/git/hooks/commit-msg
+git config --global core.hooksPath ~/.config/git/hooks
+```
+
+A global `core.hooksPath` replaces `.git/hooks` for every hook type. Without a matching
+pass-through script for each hook type, a repository's `pre-commit`, `pre-push` and other hooks
+stop running. A global setting also overrides a system one, such as Git Defender's. On a machine
+where something else already owns `core.hooksPath`, do not set it globally. Install per repository
+behind that owner instead. If your dotfiles manage git hooks (for example a chezmoi-managed prek
+setup), add the pre-commit snippet above to the template your dotfiles install. Do not run a second
+installer.
+
 ## Options
 
 | Option | Default | Effect |
@@ -128,5 +198,6 @@ nested script, or the git state that lets the plugin pass a landed branch.
 - Every check is lexical. A script, Makefile target, git alias or hook, or a command assembled at
   run time is not seen. These checks reduce mistakes; they are not a security boundary.
 - The omp text rules (`ask-pr-after-branch-push`, `delegated-data-not-instructions`) and the omp
-  extensions `spawn-budget`, `quota-notice-resume` and `quality-edit-advisory` are not ported. There
-  is no git `commit-msg` hook either: the attribution gate covers agent commits only.
+  extensions `spawn-budget`, `quota-notice-resume` and `quality-edit-advisory` are not ported.
+- The attribution gate covers agent commits only. Commits made elsewhere need the opt-in
+  [commit-msg hook](#commit-msg-hook).
