@@ -1,0 +1,22 @@
+{
+  "name": "@srobroek/opencode-session",
+  "version": "0.1.0",
+  "description": "Read-only handoff from an earlier session: session_resume tool and resume-session skill.",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": ["dist", "index.js", "skills"],
+  "peerDependencies": {
+    "@opencode/plugin": "^2.1.4"
+  },
+  "peerDependenciesMeta": {
+    "@opencode/plugin": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@srobroek/opencode-lib": "workspace:*"
+  }
+}

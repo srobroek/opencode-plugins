@@ -25,6 +25,10 @@
     "plugins/worktrunk": {
       "release-type": "node",
       "component": "worktrunk"
+    },
+    "plugins/session": {
+      "release-type": "node",
+      "component": "session"
     }
   }
 }

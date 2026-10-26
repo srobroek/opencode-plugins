@@ -483,6 +483,29 @@ compaction (completed and running), synthetic, location-switched.
   `docs/adoption.md` row change.
 
 ## 8. Open items to verify when implementing
+
+Verified on 2.1.4 while implementing `plugins/session` (private `opencode serve`,
+scratch repo with a linked worktree, plus the `../oc` source):
+
+- `context()` returns the completed compaction as its first element, then only later
+  messages. Kept messages are not returned; their text is in the compaction's
+  `metadata.recent` when `keepID` is set (`core/src/session/history.ts`). A forced
+  `POST /compact` summary had `## Objective`, `## Requirements`, `## Decisions`,
+  `## Work State` (with `###` subsections), `## Next Move`, `## Relevant Files` and
+  `## Important Context`.
+- `list({search})` is SQL `LIKE %term%` on the title, so it is case-insensitive for
+  ASCII (`csv` and `CSV` both matched).
+- `archived` unset applies no filter, so archived sessions are included by default. The
+  plugin always passes `archived: false` unless asked.
+- `parentID: null` filters to roots, and the cursor keeps that filter on later pages.
+  Worktrees of one repository share a `projectID`.
+- Plugin tools run in Code Mode by default (`options.codemode !== false`); the agent
+  called the tool as `tools.session_resume(...)` inside `execute`.
+- `opencode api` takes `--server <url>` after `api`, not before. `GET /api/session/{id}`
+  and `/context` wrap their payload in `data`.
+
+Original list:
+
 - `context()` should include the `compaction` message itself as the first element. No
   compacted session exists locally to confirm this; force one in a throwaway session
   (`POST /compact`).

@@ -114,6 +114,40 @@ describe("createFakeContext", () => {
     await expect(session.get({ sessionID: "ses_missing" })).rejects.toThrow("no session")
   })
 
+  test("session.list filters and pages like the host; context returns stored messages", async () => {
+    const fake = createFakeContext({
+      sessions: [
+        { id: "ses_a", projectID: "p", title: "Alpha work", time: { updated: 3 }, location: { directory: "/r" } },
+        { id: "ses_b", projectID: "p", title: "beta", time: { updated: 2 }, location: { directory: "/w" } },
+        { id: "ses_c", projectID: "p", parentID: "ses_a", time: { updated: 4 }, location: { directory: "/r" } },
+        { id: "ses_d", projectID: "p", time: { updated: 5, archived: 5 }, location: { directory: "/r" } },
+        { id: "ses_e", projectID: "q", time: { updated: 6 }, location: { directory: "/x" } },
+      ],
+      messages: { ses_a: [{ type: "user", text: "hi" }] },
+    })
+    const { session } = fake.context
+    const ids = (page: { data: ReadonlyArray<{ id: string }> }) => page.data.map((entry) => entry.id)
+    expect(ids(await session.list({ project: "p" }))).toEqual(["ses_d", "ses_c", "ses_a", "ses_b"])
+    const first = await session.list({ project: "p", parentID: null, archived: false, limit: 1 })
+    expect(ids(first)).toEqual(["ses_a"])
+    const second = await session.list({ cursor: first.cursor.next ?? "" })
+    expect(ids(second)).toEqual(["ses_b"])
+    expect(second.cursor.next).toBeUndefined()
+    expect(ids(await session.list({ search: "ALPHA" }))).toEqual(["ses_a"])
+    expect(ids(await session.list({ directory: "/w" }))).toEqual(["ses_b"])
+    expect(await session.context({ sessionID: "ses_a" })).toEqual([{ type: "user", text: "hi" }] as never)
+  })
+
+  test("skill.transform adds skills and dispose removes them", async () => {
+    const fake = createFakeContext()
+    const registration = await fake.context.skill.transform((editor) => {
+      editor.add({ id: "s", name: "s", path: "/s/SKILL.md", content: "body" } as never)
+    })
+    expect(fake.skills.get("s")).toMatchObject({ content: "body" })
+    await registration.dispose()
+    expect(fake.skills.size).toBe(0)
+  })
+
   test("event subscriptions receive emitted events until closed", async () => {
     const fake = createFakeContext()
     const seen: unknown[] = []
