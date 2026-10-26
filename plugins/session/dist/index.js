@@ -63,10 +63,14 @@ function parseWorktrees(out, exists = existsSync) {
   return live;
 }
 async function listWorktrees(directory) {
+  if (!existsSync(directory))
+    return [];
   const out = await git(["-C", directory, "worktree", "list", "--porcelain"]);
   return out === null ? [] : parseWorktrees(out);
 }
 async function currentBranch(directory) {
+  if (!existsSync(directory))
+    return;
   const out = await git(["-C", directory, "rev-parse", "--abbrev-ref", "HEAD"]);
   const branch = out?.trim();
   return branch ? branch : undefined;

@@ -64,12 +64,15 @@ export function parseWorktrees(out: string, exists: (path: string) => boolean = 
 
 /** Live worktrees of the repository containing `directory`; empty outside a repository. */
 export async function listWorktrees(directory: string): Promise<Worktree[]> {
+  // A removed worktree is common among recorded sessions; there is nothing for git to read there.
+  if (!existsSync(directory)) return []
   const out = await git(["-C", directory, "worktree", "list", "--porcelain"])
   return out === null ? [] : parseWorktrees(out)
 }
 
 /** The branch checked out in `directory` now, or undefined. */
 export async function currentBranch(directory: string): Promise<string | undefined> {
+  if (!existsSync(directory)) return undefined
   const out = await git(["-C", directory, "rev-parse", "--abbrev-ref", "HEAD"])
   const branch = out?.trim()
   return branch ? branch : undefined
