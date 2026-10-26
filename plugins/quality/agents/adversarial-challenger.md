@@ -1,6 +1,9 @@
 ---
 description: "Read-only adversarial challenger. Stress-tests any claim, plan, design, or decision. Give it the claim plus observable facts; it returns evidence-backed counter-arguments."
 mode: subagent
+request:
+  headers:
+    x-opencode-model-role: challenger
 permissions:
   - action: edit
     resource: "*"

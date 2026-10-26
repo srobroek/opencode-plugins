@@ -29,9 +29,10 @@ counter-arguments and alternatives. Its permissions deny `edit`, `shell` and
 Rules are added after any you configure for an agent with the same id.
 
 Converted with `scripts/convert-agent.ts`; omp `lsp` and `ast_grep` are dropped. It
-pins no model. On omp it used the `challenger` role at high thinking; map it with
-the model-roles plugin (`{ "agents": { "adversarial-challenger": "challenger" } }`)
-or set `agent.adversarial-challenger.model`.
+pins no model. It declares the `challenger` model role through the
+`x-opencode-model-role` request header, so with the model-roles plugin a
+`challenger` role picks its model. Without it the agent inherits the caller's model;
+set `agent.adversarial-challenger.model` to pin one.
 
 ## Not ported
 
