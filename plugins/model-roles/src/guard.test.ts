@@ -89,8 +89,8 @@ describe("judgeSpawn", () => {
     if (decision.allow) return
     expect(decision.reason).toContain("inherit this session's expensive model amazon-bedrock/global.anthropic.claude-opus-5-5")
     expect(decision.reason).toContain("explore (anthropic/claude-haiku: Read-only search)")
-    expect(decision.reason).toContain("task → amazon-bedrock/global.anthropic.claude-sonnet-5-5")
-    expect(decision.reason).not.toContain("slow →")
+    expect(decision.reason).toContain('role: "task" (runs amazon-bedrock/global.anthropic.claude-sonnet-5-5, $2/M input tokens)')
+    expect(decision.reason).not.toContain("slow")
     expect(decision.reason).not.toContain("build")
     expect(decision.reason).not.toContain("secret")
     expect(decision.reason).not.toContain("deep (")
@@ -119,6 +119,22 @@ describe("judgeSpawn", () => {
     expect(judgeSpawn(facts({ target: "ghost" })).allow).toBe(true)
     const guard = parseGuard({ allowInherit: ["general"] }) as NonNullable<ReturnType<typeof parseGuard>>
     expect(judgeSpawn(facts({ guard })).allow).toBe(true)
+  })
+
+  test("asks for the cheapest fitting role first", () => {
+    const roles = parseOptions({ roles: { ...options.roles, smol: "anthropic/claude-haiku" } })
+    const decision = judgeSpawn(facts({ options: roles }))
+    if (decision.allow) throw new Error("allowed")
+    expect(decision.reason).toContain('Re-issue the spawn with role: "smol" (runs anthropic/claude-haiku, $0.11/M input tokens)')
+    expect(decision.reason).toContain("Other cheaper roles: task → amazon-bedrock/global.anthropic.claude-sonnet-5-5 ($2/M input tokens)")
+    expect(decision.reason).not.toContain("general-")
+  })
+
+  test("says so when no role is cheaper", () => {
+    const decision = judgeSpawn(facts({ options: parseOptions({ roles: { slow: "amazon-bedrock/global.anthropic.claude-opus-5-5" } }) }))
+    if (decision.allow) throw new Error("allowed")
+    expect(decision.reason).toContain("No model role resolves to a cheaper model right now.")
+    expect(decision.reason).toContain("Or spawn an agent that pins a cheaper model: explore (anthropic/claude-haiku: Read-only search)")
   })
 
   test("alternatives are bounded and sorted", () => {

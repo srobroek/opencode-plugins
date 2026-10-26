@@ -86,11 +86,21 @@ export function retryPrompt(facts: NoteFacts & { target: { role: string; model: 
   return `${failureNote(facts)} This session switched to ${label(facts.target.model)}. Continue the previous task from where it stopped.`
 }
 
-export function subagentNote(facts: NoteFacts & { agent: string | undefined }): string {
+export type SubagentNoteFacts = NoteFacts & {
+  agent: string | undefined
+  /** The role the spawn passed, when it passed one. */
+  spawnRole?: string
+  /** The child session, when it was switched to the next model and can be resumed. */
+  resumable?: string
+}
+
+export function subagentNote(facts: SubagentNoteFacts): string {
   const who = facts.agent === undefined ? "A subagent" : `Subagent '${facts.agent}'`
-  const retry =
-    facts.target === undefined
-      ? "Retrying it would hit the same model; pick another agent or role."
-      : "The spawn may be retried: it now resolves to the next model."
+  let retry: string
+  if (facts.target === undefined) retry = "Retrying it would hit the same model; pick another agent or role."
+  else if (facts.spawnRole !== undefined) {
+    retry = `Spawn it again with role: "${facts.spawnRole}"; that role now runs ${label(facts.target.model)}.`
+    if (facts.resumable !== undefined) retry += ` Or resume it with sessionID ${facts.resumable}; it was switched to that model.`
+  } else retry = "The spawn may be retried: it now resolves to the next model."
   return `${who} failed. ${failureNote(facts)} ${retry}`
 }

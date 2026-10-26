@@ -215,140 +215,6 @@ function mayRetry(lastRetryAt, now, windowMs) {
   return typeof lastRetryAt !== "number" || now - lastRetryAt >= windowMs;
 }
 
-// plugins/model-roles/src/check.ts
-function candidateStatus(entry, models, roles, health, now) {
-  const candidate = parseCandidate(entry);
-  if (candidate === undefined)
-    return { status: "invalid" };
-  if (candidate.kind === "role")
-    return { status: "role-link", role: candidate.role, known: Object.hasOwn(roles, candidate.role) };
-  const { ref } = candidate;
-  const fromProvider = models.filter((m) => m.providerID === ref.providerID);
-  const model = fromProvider.find((m) => m.id === ref.id);
-  if (model === undefined)
-    return fromProvider.length === 0 ? { status: "provider-unavailable" } : { status: "unknown-id" };
-  if (ref.variant !== undefined && !(model.variants ?? []).some((v) => v.id === ref.variant))
-    return { status: "unknown-variant", variants: (model.variants ?? []).map((v) => v.id) };
-  if (model.enabled === false)
-    return { status: "provider-unavailable" };
-  const entryHealth = health[healthKey(ref)];
-  if (entryHealth !== undefined && entryHealth.until > now)
-    return { status: "unhealthy", until: entryHealth.until, reason: entryHealth.reason };
-  return { status: "available" };
-}
-function checkRoles(options, models, agents, health = {}, now = Date.now()) {
-  const view = healthView(health, now);
-  const roles = Object.keys(options.roles).sort().map((role) => {
-    const resolution = resolveRole(options.roles, models, role, view);
-    const report = {
-      role,
-      candidates: (options.roles[role] ?? []).map((entry) => ({
-        entry,
-        ...candidateStatus(entry, models, options.roles, health, now)
-      }))
-    };
-    if (resolution.model !== undefined)
-      report.resolved = resolution.model;
-    if (resolution.model !== undefined && resolution.unhealthy)
-      report.degraded = true;
-    return report;
-  });
-  const agentReports = [];
-  for (const agent of [...agents].sort((a, b) => a.id.localeCompare(b.id))) {
-    const role = roleOf(agent, options.agents);
-    if (role === undefined)
-      continue;
-    const report = { id: agent.id, role };
-    const resolved = resolveRole(options.roles, models, role, view).model;
-    if (resolved !== undefined)
-      report.resolved = resolved;
-    if (agent.model !== undefined)
-      report.own = agent.model;
-    agentReports.push(report);
-  }
-  return { roles, agents: agentReports };
-}
-var label = (ref) => `${ref.providerID}/${ref.id}${ref.variant ? `#${ref.variant}` : ""}`;
-function describe(candidate) {
-  switch (candidate.status) {
-    case "available":
-      return "available";
-    case "unhealthy":
-      return `unhealthy until ${new Date(candidate.until).toISOString()}${candidate.reason ? ` (${candidate.reason})` : ""}`;
-    case "unknown-id":
-      return "unknown id: the provider lists no such model";
-    case "unknown-variant":
-      return `unknown variant (has: ${candidate.variants.join(", ") || "none"})`;
-    case "provider-unavailable":
-      return "provider unavailable (not connected, no credentials, or denied by policy)";
-    case "role-link":
-      return candidate.known ? `link to role ${candidate.role}` : `link to unknown role ${candidate.role}`;
-    case "invalid":
-      return "invalid: expected provider/model, provider/model#variant or @role";
-  }
-}
-function formatCheck(report) {
-  const lines = [];
-  if (report.roles.length === 0)
-    lines.push("No roles configured.");
-  for (const role of report.roles) {
-    const resolved = role.resolved === undefined ? "nothing available" : `${label(role.resolved)}${role.degraded ? " (every candidate unhealthy; least recently failed)" : ""}`;
-    lines.push(`Role ${role.role} \u2192 ${resolved}`);
-    for (const candidate of role.candidates)
-      lines.push(`  - ${candidate.entry}: ${describe(candidate)}`);
-  }
-  if (report.agents.length > 0) {
-    lines.push("", "Agents:");
-    for (const agent of report.agents) {
-      const target = agent.resolved !== undefined ? label(agent.resolved) : agent.own !== undefined ? `${label(agent.own)} (own model)` : "inherits the session model";
-      lines.push(`  - ${agent.id} (role ${agent.role}) \u2192 ${target}`);
-    }
-  }
-  return lines.join(`
-`);
-}
-
-// plugins/model-roles/src/fallback.ts
-var SOURCE = "srobroek.model-roles";
-var label2 = (ref) => `${ref.providerID}/${ref.id}${ref.variant ? `#${ref.variant}` : ""}`;
-function rolesListing(options, failed) {
-  return Object.keys(options.roles).sort().filter((role) => (options.roles[role] ?? []).some((entry) => {
-    const candidate = parseCandidate(entry);
-    return candidate?.kind === "model" && healthKey(candidate.ref) === healthKey(failed);
-  }));
-}
-function fallbackTarget(options, available, health, role, failed) {
-  const within = role !== undefined && Object.hasOwn(options.roles, role) ? [role] : rolesListing(options, failed);
-  for (const candidate of within) {
-    const model = resolveRole(options.roles, available, candidate, health).model;
-    if (model !== undefined && healthKey(model) !== healthKey(failed))
-      return { role: candidate, model };
-  }
-  return;
-}
-function decideFallback(facts) {
-  if (facts.isChild)
-    return "notify-parent";
-  if (!facts.retryOnFallback || facts.next === undefined || sameModel(facts.next, facts.failed))
-    return "notify";
-  return mayRetry(facts.lastRetryAt, facts.now, facts.windowMs) ? "retry" : "notify";
-}
-function failureNote(facts) {
-  const minutes = Math.round(facts.cooldownMs / 60000);
-  const head = `Model ${label2(facts.failed)} failed (${facts.kind}); it sits out new resolutions for ${minutes} min.`;
-  if (facts.target === undefined)
-    return `${head} No other candidate is available for it.`;
-  return `${head} Role ${facts.target.role} now resolves to ${label2(facts.target.model)}.`;
-}
-function retryPrompt(facts) {
-  return `${failureNote(facts)} This session switched to ${label2(facts.target.model)}. Continue the previous task from where it stopped.`;
-}
-function subagentNote(facts) {
-  const who = facts.agent === undefined ? "A subagent" : `Subagent '${facts.agent}'`;
-  const retry = facts.target === undefined ? "Retrying it would hit the same model; pick another agent or role." : "The spawn may be retried: it now resolves to the next model.";
-  return `${who} failed. ${failureNote(facts)} ${retry}`;
-}
-
 // plugins/model-roles/src/guard.ts
 var AUTO_THRESHOLD = 4;
 var CATALOG_LIMIT = 12;
@@ -366,7 +232,7 @@ function parseGuard(raw) {
   return { expensive, threshold, allowInherit: strings(input.allowInherit) };
 }
 var key = (ref) => `${ref.providerID}/${ref.id}`;
-var label3 = (ref) => ref.variant === undefined ? key(ref) : `${key(ref)}#${ref.variant}`;
+var label = (ref) => ref.variant === undefined ? key(ref) : `${key(ref)}#${ref.variant}`;
 function inputCost(ref, available) {
   const model = available.find((m) => m.providerID === ref.providerID && m.id === ref.id);
   const costs = model?.cost ?? [];
@@ -396,8 +262,6 @@ function pinnedModel(agent, facts) {
   return resolveRole(facts.options.roles, facts.available, role, facts.health).model;
 }
 function cheaperAlternatives(facts) {
-  const roleAgentIds = new Set(facts.roleAgents ?? []);
-  const roleAgents = [];
   const agents = [];
   for (const agent of facts.agents) {
     if (agent.id === facts.target || agent.mode === "primary" || agent.hidden === true)
@@ -405,26 +269,20 @@ function cheaperAlternatives(facts) {
     const model = pinnedModel(agent, facts);
     if (model === undefined || isExpensive(model, facts.guard, facts.available))
       continue;
-    if (roleAgentIds.has(agent.id)) {
-      roleAgents.push(`${agent.id} (${label3(model)})`);
-      continue;
-    }
     const description = agent.description?.trim().split(`
 `)[0];
-    agents.push(description ? `${agent.id} (${label3(model)}: ${description})` : `${agent.id} (${label3(model)})`);
+    agents.push(description ? `${agent.id} (${label(model)}: ${description})` : `${agent.id} (${label(model)})`);
   }
   const roles = [];
   for (const role of Object.keys(facts.options.roles).sort()) {
     const model = resolveRole(facts.options.roles, facts.available, role, facts.health).model;
     if (model !== undefined && !isExpensive(model, facts.guard, facts.available))
-      roles.push(`${role} \u2192 ${label3(model)}`);
+      roles.push({ role, model, cost: inputCost(model, facts.available) });
   }
-  return {
-    roleAgents: roleAgents.sort(),
-    agents: agents.sort().slice(0, CATALOG_LIMIT),
-    roles: roles.slice(0, CATALOG_LIMIT)
-  };
+  roles.sort((a, b) => (a.cost ?? Number.POSITIVE_INFINITY) - (b.cost ?? Number.POSITIVE_INFINITY));
+  return { agents: agents.sort().slice(0, CATALOG_LIMIT), roles: roles.slice(0, CATALOG_LIMIT) };
 }
+var price = (cost) => cost === undefined ? "cost unknown" : `$${cost}/M input tokens`;
 function judgeSpawn(facts) {
   if (facts.guard.allowInherit.includes(facts.target))
     return { allow: true };
@@ -437,67 +295,322 @@ function judgeSpawn(facts) {
     return { allow: true };
   if (!isExpensive(facts.sessionModel, facts.guard, facts.available))
     return { allow: true };
-  const { roleAgents, agents, roles } = cheaperAlternatives(facts);
+  const { agents, roles } = cheaperAlternatives(facts);
   const lines = [
-    `Subagent '${facts.target}' has no model and no resolvable role, so it would inherit this session's expensive model ${label3(facts.sessionModel)}.`,
-    "Re-issue the spawn with one of:"
+    `Subagent '${facts.target}' has no model and no resolvable role, so it would inherit this session's expensive model ${label(facts.sessionModel)}.`
   ];
-  if (roleAgents.length > 0)
-    lines.push(`- a role subagent (general's tools and instructions on a cheaper model role): ${roleAgents.join("; ")}`);
+  const [cheapest, ...others] = roles;
+  if (cheapest !== undefined) {
+    lines.push(`Re-issue the spawn with role: "${cheapest.role}" (runs ${label(cheapest.model)}, ${price(cheapest.cost)}), or another role that fits the task better.`);
+    if (others.length > 0)
+      lines.push(`Other cheaper roles: ${others.map((r) => `${r.role} \u2192 ${label(r.model)} (${price(r.cost)})`).join("; ")}`);
+  } else
+    lines.push("No model role resolves to a cheaper model right now.");
   if (agents.length > 0)
-    lines.push(`- an agent that pins a cheaper model: ${agents.join("; ")}`);
-  else if (roleAgents.length === 0)
-    lines.push("- an agent that pins a cheaper model (none is configured)");
-  if (roles.length > 0)
-    lines.push(`- a role for '${facts.target}' in the srobroek.model-roles \`agents\` option (e.g. agents: { "${facts.target}": "<role>" }): ${roles.join("; ")}`);
+    lines.push(`Or spawn an agent that pins a cheaper model: ${agents.join("; ")}`);
   lines.push(`If '${facts.target}' should run on the session model, add it to the srobroek.model-roles option guard.allowInherit.`);
   return { allow: false, reason: lines.join(`
 `) };
 }
 
-// plugins/model-roles/src/role-agents.ts
-var DEFAULT_ROLE_AGENTS = ["smol", "task", "slow", "challenger"];
-var ROLE_AGENT_PREFIX = "general-";
+// plugins/model-roles/src/spawn-role.ts
+var ROLE_PARAM = "role";
 var ROLE_PURPOSE = {
   smol: "cheap and fast: lookups, summaries, log and diff reading, mechanical edits",
   task: "everyday implementation and investigation",
   slow: "hard reasoning: design, root-cause debugging, subtle concurrency or data-integrity work",
   challenger: "an independent second opinion or review from a different model"
 };
+var ROLE_TOOL_NOTE = "Set `role` on every new spawn: it picks the model the subagent runs on. Choose the cheapest role that fits the task. An explicit `model` overrides it; a resumed spawn (`sessionID`) keeps its model.";
 var isRecord3 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 function parseRuntime(raw, options) {
   const input = isRecord3(raw) ? raw : {};
   const cooldownMs = typeof input.cooldownMs === "number" && Number.isFinite(input.cooldownMs) && input.cooldownMs >= 0 ? input.cooldownMs : DEFAULT_COOLDOWN_MS;
-  const wanted = Array.isArray(input.roleAgents) ? input.roleAgents.filter((role) => typeof role === "string") : [...DEFAULT_ROLE_AGENTS];
-  const roleAgents = [...new Set(wanted.map((role) => role.trim()))].filter((role) => Object.hasOwn(options.roles, role));
-  return { cooldownMs, retryOnFallback: input.retryOnFallback !== false, roleAgents };
+  const purposes = {};
+  if (isRecord3(input.purposes)) {
+    for (const [role, text] of Object.entries(input.purposes)) {
+      if (typeof text === "string" && text.trim() !== "" && Object.hasOwn(options.roles, role))
+        purposes[role] = text.trim();
+    }
+  }
+  return { cooldownMs, retryOnFallback: input.retryOnFallback !== false, purposes };
 }
-var roleAgentId = (role) => `${ROLE_AGENT_PREFIX}${role}`;
 function costTier(input) {
   if (input === undefined)
     return "cost unknown";
   const tier = input < 1 ? "low cost" : input < 4 ? "medium cost" : "high cost";
   return `${tier}, $${input}/M input tokens`;
 }
-function roleAgentDescription(role, model, inputCost) {
-  const purpose = ROLE_PURPOSE[role] ?? `work that suits the '${role}' model role`;
-  const runs = model === undefined ? "no model of this role is available now, so it inherits yours" : `runs ${model.providerID}/${model.id}${model.variant ? `#${model.variant}` : ""} (${costTier(inputCost)})`;
-  return `General-purpose agent on the '${role}' model role: ${purpose}. It ${runs}. Same tools and instructions as general.`;
+function cheapestCost(roles, available, role) {
+  let cheapest;
+  const seen = new Set;
+  const walk = (current) => {
+    if (seen.has(current) || !Object.hasOwn(roles, current))
+      return;
+    seen.add(current);
+    for (const entry of roles[current] ?? []) {
+      const candidate = parseCandidate(entry);
+      if (candidate === undefined)
+        continue;
+      if (candidate.kind === "role") {
+        walk(candidate.role);
+        continue;
+      }
+      if (!isAvailable(candidate.ref, available))
+        continue;
+      const cost = inputCost(candidate.ref, available);
+      if (cost !== undefined && (cheapest === undefined || cost < cheapest))
+        cheapest = cost;
+    }
+  };
+  walk(role);
+  return cheapest;
 }
-function shapeRoleAgent(draft, general, role, description, created) {
-  draft.name = created || draft.name === undefined ? roleAgentId(role) : draft.name;
-  if (created || draft.description === undefined)
-    draft.description = description;
-  if (created || draft.mode === undefined)
-    draft.mode = "subagent";
-  if (created)
-    draft.hidden = false;
-  if (draft.system === undefined && general?.system !== undefined)
-    draft.system = general.system;
-  if (draft.steps === undefined && general?.steps !== undefined)
-    draft.steps = general.steps;
-  draft.permissions = [...structuredClone(general?.permissions ?? []), ...created ? [] : draft.permissions ?? []];
-  draft.request = { ...draft.request, headers: { ...draft.request?.headers, [ROLE_HEADER]: role } };
+function roleChoices(options, available, purposes = {}) {
+  return Object.keys(options.roles).sort().map((role) => ({
+    role,
+    purpose: purposes[role] ?? ROLE_PURPOSE[role] ?? `work that suits the '${role}' model role`,
+    cost: cheapestCost(options.roles, available, role),
+    available: resolveRole(options.roles, available, role).model !== undefined
+  }));
+}
+function describeChoice(choice) {
+  const tier = choice.available ? costTier(choice.cost) : "no model available now; the agent's own model applies";
+  return `'${choice.role}': ${choice.purpose} (${tier})`;
+}
+function roleParamDescription(choices) {
+  return [
+    "Model role the subagent runs on. Pick the cheapest one that fits the task:",
+    ...choices.map((choice) => `- ${describeChoice(choice)}`)
+  ].join(`
+`);
+}
+var JSON_TYPES = { String: "string", Boolean: "boolean", Number: "number" };
+var escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function toJsonSchema(input) {
+  if (isRecord3(input) && input.type === "object" && isRecord3(input.properties))
+    return structuredClone(input);
+  const ast = input?.ast;
+  if (!isRecord3(ast) || ast._tag !== "Objects" || !Array.isArray(ast.propertySignatures))
+    return;
+  if (Array.isArray(ast.indexSignatures) && ast.indexSignatures.length > 0)
+    return;
+  const properties = {};
+  const required = [];
+  for (const signature of ast.propertySignatures) {
+    if (!isRecord3(signature) || typeof signature.name !== "string" || !isRecord3(signature.type))
+      return;
+    const type = signature.type;
+    const json = typeof type._tag === "string" ? JSON_TYPES[type._tag] : undefined;
+    if (json === undefined)
+      return;
+    const property = { type: json };
+    let description = isRecord3(type.annotations) && typeof type.annotations.description === "string" ? type.annotations.description : undefined;
+    for (const check of Array.isArray(type.checks) ? type.checks : []) {
+      const annotations = isRecord3(check) && isRecord3(check.annotations) ? check.annotations : {};
+      if (typeof annotations.description === "string")
+        description ??= annotations.description;
+      const representation = isRecord3(annotations.representation) ? annotations.representation : {};
+      const payload = isRecord3(representation.payload) ? representation.payload : {};
+      if (representation.id === "effect/schema/isStartingWith" && typeof payload.startsWith === "string")
+        property.pattern = `^${escapeRegExp(payload.startsWith)}`;
+    }
+    if (description !== undefined)
+      property.description = description;
+    properties[signature.name] = property;
+    const optional = isRecord3(type.context) && type.context.isOptional === true;
+    if (!optional)
+      required.push(signature.name);
+  }
+  return { type: "object", properties, required, additionalProperties: false };
+}
+function withRoleParam(schema, roles, description) {
+  const next = structuredClone(schema);
+  next.properties[ROLE_PARAM] = { type: "string", enum: [...roles], description };
+  next.required = (next.required ?? []).filter((name) => name !== ROLE_PARAM);
+  return next;
+}
+function withRoleNote(description) {
+  return description.includes(ROLE_TOOL_NOTE) ? description : `${description.trimEnd()}
+${ROLE_TOOL_NOTE}`;
+}
+var modelLabel = (ref) => `${ref.providerID}/${ref.id}${ref.variant ? `#${ref.variant}` : ""}`;
+function planSpawn(input, options, available, health) {
+  if (!isRecord3(input) || !Object.hasOwn(input, ROLE_PARAM))
+    return { input };
+  const { [ROLE_PARAM]: raw, ...rest } = input;
+  const role = typeof raw === "string" ? raw.trim() : "";
+  if (role === "")
+    return { input: rest };
+  if (typeof rest.sessionID === "string" && rest.sessionID !== "")
+    return { input: rest };
+  if (typeof rest.model === "string" && rest.model.trim() !== "")
+    return { input: rest };
+  if (!Object.hasOwn(options.roles, role)) {
+    const known = Object.keys(options.roles).sort();
+    return {
+      input: rest,
+      error: `Unknown model role '${role}'. Pass one of: ${known.join(", ") || "(none configured)"}.`
+    };
+  }
+  const model = resolveRole(options.roles, available, role, health).model;
+  if (model === undefined)
+    return { input: rest, role };
+  return { input: { ...rest, model: modelLabel(model) }, role, model };
+}
+function inputModel(input) {
+  if (!isRecord3(input) || typeof input.model !== "string")
+    return;
+  const candidate = parseCandidate(input.model);
+  return candidate?.kind === "model" ? candidate.ref : undefined;
+}
+var SPAWN_ROLE_KEY_PREFIX = "spawn-role:";
+
+// plugins/model-roles/src/check.ts
+function candidateStatus(entry, models, roles, health, now) {
+  const candidate = parseCandidate(entry);
+  if (candidate === undefined)
+    return { status: "invalid" };
+  if (candidate.kind === "role")
+    return { status: "role-link", role: candidate.role, known: Object.hasOwn(roles, candidate.role) };
+  const { ref } = candidate;
+  const fromProvider = models.filter((m) => m.providerID === ref.providerID);
+  const model = fromProvider.find((m) => m.id === ref.id);
+  if (model === undefined)
+    return fromProvider.length === 0 ? { status: "provider-unavailable" } : { status: "unknown-id" };
+  if (ref.variant !== undefined && !(model.variants ?? []).some((v) => v.id === ref.variant))
+    return { status: "unknown-variant", variants: (model.variants ?? []).map((v) => v.id) };
+  if (model.enabled === false)
+    return { status: "provider-unavailable" };
+  const entryHealth = health[healthKey(ref)];
+  if (entryHealth !== undefined && entryHealth.until > now)
+    return { status: "unhealthy", until: entryHealth.until, reason: entryHealth.reason };
+  return { status: "available" };
+}
+function checkRoles(options, models, agents, health = {}, now = Date.now(), purposes = {}) {
+  const view = healthView(health, now);
+  const roles = Object.keys(options.roles).sort().map((role) => {
+    const resolution = resolveRole(options.roles, models, role, view);
+    const report = {
+      role,
+      candidates: (options.roles[role] ?? []).map((entry) => ({
+        entry,
+        ...candidateStatus(entry, models, options.roles, health, now)
+      }))
+    };
+    if (resolution.model !== undefined)
+      report.resolved = resolution.model;
+    if (resolution.model !== undefined && resolution.unhealthy)
+      report.degraded = true;
+    return report;
+  });
+  const agentReports = [];
+  for (const agent of [...agents].sort((a, b) => a.id.localeCompare(b.id))) {
+    const role = roleOf(agent, options.agents);
+    if (role === undefined)
+      continue;
+    const report = { id: agent.id, role };
+    const resolved = resolveRole(options.roles, models, role, view).model;
+    if (resolved !== undefined)
+      report.resolved = resolved;
+    if (agent.model !== undefined)
+      report.own = agent.model;
+    agentReports.push(report);
+  }
+  return { roles, agents: agentReports, choices: roleChoices(options, models, purposes) };
+}
+var label2 = (ref) => `${ref.providerID}/${ref.id}${ref.variant ? `#${ref.variant}` : ""}`;
+function describe(candidate) {
+  switch (candidate.status) {
+    case "available":
+      return "available";
+    case "unhealthy":
+      return `unhealthy until ${new Date(candidate.until).toISOString()}${candidate.reason ? ` (${candidate.reason})` : ""}`;
+    case "unknown-id":
+      return "unknown id: the provider lists no such model";
+    case "unknown-variant":
+      return `unknown variant (has: ${candidate.variants.join(", ") || "none"})`;
+    case "provider-unavailable":
+      return "provider unavailable (not connected, no credentials, or denied by policy)";
+    case "role-link":
+      return candidate.known ? `link to role ${candidate.role}` : `link to unknown role ${candidate.role}`;
+    case "invalid":
+      return "invalid: expected provider/model, provider/model#variant or @role";
+  }
+}
+function formatCheck(report) {
+  const lines = [];
+  if (report.roles.length === 0)
+    lines.push("No roles configured.");
+  for (const role of report.roles) {
+    const resolved = role.resolved === undefined ? "nothing available" : `${label2(role.resolved)}${role.degraded ? " (every candidate unhealthy; least recently failed)" : ""}`;
+    lines.push(`Role ${role.role} \u2192 ${resolved}`);
+    for (const candidate of role.candidates)
+      lines.push(`  - ${candidate.entry}: ${describe(candidate)}`);
+  }
+  if (report.agents.length > 0) {
+    lines.push("", "Agents:");
+    for (const agent of report.agents) {
+      const target = agent.resolved !== undefined ? label2(agent.resolved) : agent.own !== undefined ? `${label2(agent.own)} (own model)` : "inherits the session model";
+      lines.push(`  - ${agent.id} (role ${agent.role}) \u2192 ${target}`);
+    }
+  }
+  if (report.choices.length > 0) {
+    lines.push("", "subagent `role` parameter:");
+    for (const choice of report.choices)
+      lines.push(`  - ${describeChoice(choice)}`);
+  }
+  return lines.join(`
+`);
+}
+
+// plugins/model-roles/src/fallback.ts
+var SOURCE = "srobroek.model-roles";
+var label3 = (ref) => `${ref.providerID}/${ref.id}${ref.variant ? `#${ref.variant}` : ""}`;
+function rolesListing(options, failed) {
+  return Object.keys(options.roles).sort().filter((role) => (options.roles[role] ?? []).some((entry) => {
+    const candidate = parseCandidate(entry);
+    return candidate?.kind === "model" && healthKey(candidate.ref) === healthKey(failed);
+  }));
+}
+function fallbackTarget(options, available, health, role, failed) {
+  const within = role !== undefined && Object.hasOwn(options.roles, role) ? [role] : rolesListing(options, failed);
+  for (const candidate of within) {
+    const model = resolveRole(options.roles, available, candidate, health).model;
+    if (model !== undefined && healthKey(model) !== healthKey(failed))
+      return { role: candidate, model };
+  }
+  return;
+}
+function decideFallback(facts) {
+  if (facts.isChild)
+    return "notify-parent";
+  if (!facts.retryOnFallback || facts.next === undefined || sameModel(facts.next, facts.failed))
+    return "notify";
+  return mayRetry(facts.lastRetryAt, facts.now, facts.windowMs) ? "retry" : "notify";
+}
+function failureNote(facts) {
+  const minutes = Math.round(facts.cooldownMs / 60000);
+  const head = `Model ${label3(facts.failed)} failed (${facts.kind}); it sits out new resolutions for ${minutes} min.`;
+  if (facts.target === undefined)
+    return `${head} No other candidate is available for it.`;
+  return `${head} Role ${facts.target.role} now resolves to ${label3(facts.target.model)}.`;
+}
+function retryPrompt(facts) {
+  return `${failureNote(facts)} This session switched to ${label3(facts.target.model)}. Continue the previous task from where it stopped.`;
+}
+function subagentNote(facts) {
+  const who = facts.agent === undefined ? "A subagent" : `Subagent '${facts.agent}'`;
+  let retry;
+  if (facts.target === undefined)
+    retry = "Retrying it would hit the same model; pick another agent or role.";
+  else if (facts.spawnRole !== undefined) {
+    retry = `Spawn it again with role: "${facts.spawnRole}"; that role now runs ${label3(facts.target.model)}.`;
+    if (facts.resumable !== undefined)
+      retry += ` Or resume it with sessionID ${facts.resumable}; it was switched to that model.`;
+  } else
+    retry = "The spawn may be retried: it now resolves to the next model.";
+  return `${who} failed. ${failureNote(facts)} ${retry}`;
 }
 
 // plugins/model-roles/src/index.ts
@@ -508,6 +621,16 @@ var MAX_SESSION_DEPTH = 8;
 var REFRESH_EVENTS = new Set(["model.updated", "provider.updated"]);
 var CHECK_EVENTS = new Set(["agent.updated", ...REFRESH_EVENTS]);
 var FAILED_EVENT = "session.execution.failed";
+var CREATED_EVENT = "session.created";
+var PENDING_SPAWN_MS = 10 * 60000;
+function withRoleField(input, description) {
+  const schema = input;
+  const model = schema?.fields?.model;
+  if (typeof schema?.mapFields !== "function" || typeof model?.annotate !== "function")
+    return;
+  const role = model.annotate({ description });
+  return schema.mapFields((fields) => ({ ...fields, role }));
+}
 var SUBAGENT_TOOL = "subagent";
 var isRecord4 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 function spawnTarget(input) {
@@ -539,7 +662,6 @@ var src_default = Plugin.define({
     const options = parseOptions(ctx.options);
     const runtime = parseRuntime(ctx.options, options);
     const guard2 = parseGuard(isRecord4(ctx.options) ? ctx.options.guard : undefined);
-    const roleAgentIds = runtime.roleAgents.map(roleAgentId);
     let available = [];
     let availableKey = "";
     let health2 = {};
@@ -564,16 +686,7 @@ var src_default = Plugin.define({
       return changed;
     };
     const apply = (editor) => {
-      const now = healthView(health2, Date.now());
-      const general = editor.get("general");
-      for (const role of runtime.roleAgents) {
-        const id = roleAgentId(role);
-        const created = editor.get(id) === undefined;
-        const model = resolveRole(options.roles, available, role, now).model;
-        const description = roleAgentDescription(role, model, model && inputCost(model, available));
-        editor.update(id, (draft) => shapeRoleAgent(draft, general, role, description, created));
-      }
-      const desired = desiredModels(editor.list(), options, available, now);
+      const desired = desiredModels(editor.list(), options, available, healthView(health2, Date.now()));
       for (const [id, ref] of desired) {
         const agent = editor.get(id);
         if (agent === undefined || sameModel(agent.model, ref))
@@ -698,6 +811,44 @@ var src_default = Plugin.define({
       return last !== undefined && Date.now() - last < NOTICE_DEDUPE_MS ? undefined : model;
     };
     const listAgents = async () => (await ctx.agent.list()).data;
+    const pending = new Map;
+    const childRoles = new Map;
+    const recordChildRole = async (childID, role) => {
+      if (childRoles.get(childID) === role)
+        return;
+      childRoles.set(childID, role);
+      try {
+        await ctx.storage.set(`${SPAWN_ROLE_KEY_PREFIX}${childID}`, role);
+      } catch {}
+    };
+    const spawnRoleOf = async (childID) => {
+      const known = childRoles.get(childID);
+      if (known !== undefined)
+        return known;
+      const stored = await ctx.storage.get(`${SPAWN_ROLE_KEY_PREFIX}${childID}`).catch(() => {
+        return;
+      });
+      return typeof stored === "string" && Object.hasOwn(options.roles, stored) ? stored : undefined;
+    };
+    const onSessionCreated = async (data) => {
+      if (typeof data.sessionID !== "string" || typeof data.parentID !== "string" || !isRecord4(data.model))
+        return;
+      const model = data.model;
+      const now = Date.now();
+      for (const [id, spawn] of pending) {
+        if (now - spawn.at > PENDING_SPAWN_MS)
+          pending.delete(id);
+      }
+      for (const spawn of pending.values()) {
+        if (spawn.childID !== undefined || spawn.parentID !== data.parentID || spawn.agent !== data.agent)
+          continue;
+        if (healthKey(spawn.model) !== healthKey(model))
+          continue;
+        spawn.childID = data.sessionID;
+        await recordChildRole(data.sessionID, spawn.role);
+        return;
+      }
+    };
     const onSessionFailed = async (sessionID, error) => {
       const kind = classifyFailure(error);
       if (kind === undefined)
@@ -711,10 +862,11 @@ var src_default = Plugin.define({
         return;
       }
       await markFailed(failed, kind, error.message ?? "");
-      const role = agent === undefined ? undefined : roleOf(agent, options.agents);
+      const isChild = typeof session.parentID === "string" && session.parentID !== "";
+      const spawnRole = isChild ? await spawnRoleOf(sessionID) : undefined;
+      const role = spawnRole ?? (agent === undefined ? undefined : roleOf(agent, options.agents));
       const target = fallbackTarget(options, available, view(), role, failed);
       const facts = { failed, kind, cooldownMs: runtime.cooldownMs, target };
-      const isChild = typeof session.parentID === "string" && session.parentID !== "";
       const retryKey = `${RETRY_KEY_PREFIX}${sessionID}`;
       const lastRetryAt = isChild ? undefined : await ctx.storage.get(retryKey).catch(() => {
         return;
@@ -731,7 +883,15 @@ var src_default = Plugin.define({
       });
       if (action === "notify-parent") {
         childFailures.set(session.parentID, Date.now());
-        await notifyParentOnce(session.parentID, failed, subagentNote({ ...facts, agent: session.agent }));
+        let resumable;
+        if (spawnRole !== undefined && target !== undefined) {
+          try {
+            await ctx.session.switchModel({ sessionID, model: target.model });
+            resumable = sessionID;
+          } catch {}
+        }
+        const note = subagentNote({ ...facts, agent: session.agent, spawnRole, resumable });
+        await notifyParentOnce(session.parentID, failed, note);
         return;
       }
       if (action === "retry" && target !== undefined) {
@@ -755,39 +915,88 @@ var src_default = Plugin.define({
     const tools = await ctx.tool.transform((editor) => {
       editor.add({
         name: CHECK_TOOL,
-        description: "Read-only. List every model role's candidates with their status (available, unknown id, unknown variant, provider unavailable, unhealthy until a time) against all providers, and the model each role-bearing agent resolves to.",
+        description: "Read-only. List every model role's candidates with their status (available, unknown id, unknown variant, provider unavailable, unhealthy until a time) against all providers, the model each role-bearing agent resolves to, and the roles the subagent tool's `role` parameter offers.",
         input: { type: "object", properties: {}, additionalProperties: false },
         execute: async () => {
           await refresh();
           const agents = await listAgents();
-          const report = checkRoles(options, available, agents, health2);
+          const report = checkRoles(options, available, agents, health2, Date.now(), runtime.purposes);
           return { content: formatCheck(report), metadata: { roles: report.roles.length, agents: report.agents.length } };
         }
       });
     });
-    const guarded = guard2 === undefined ? undefined : await ctx.tool.hook("execute.before", async (event) => {
-      if (event.tool !== SUBAGENT_TOOL)
+    const applySubagentTool = (editor) => {
+      const choices = roleChoices(options, available, runtime.purposes);
+      if (choices.length === 0)
         return;
-      const target = spawnTarget(event.input);
-      if (target === undefined)
+      const description = roleParamDescription(choices);
+      editor.update(SUBAGENT_TOOL, (tool) => {
+        const schema = toJsonSchema(tool.input);
+        const input = schema === undefined ? withRoleField(tool.input, description) : withRoleParam(schema, choices.map((choice) => choice.role), description);
+        if (input === undefined)
+          return;
+        tool.input = input;
+        tool.description = withRoleNote(tool.description);
+      });
+    };
+    let subagentTool = await ctx.tool.transform(applySubagentTool);
+    const refreshSubagentTool = async () => {
+      if (controller.signal.aborted)
         return;
-      let reason;
+      const next = await ctx.tool.transform(applySubagentTool);
+      if (controller.signal.aborted) {
+        await next.dispose();
+        return;
+      }
+      const previous = subagentTool;
+      subagentTool = next;
+      await previous.dispose();
+    };
+    const judge = async (event, target) => {
+      if (guard2 === undefined)
+        return;
       try {
         const [agents, session] = await Promise.all([listAgents(), ctx.session.get({ sessionID: event.sessionID })]);
         const facts = { options, available, health: view() };
         const sessionModel = await runningModel(session, agents, event.agent);
-        const decision = judgeSpawn({ ...facts, guard: guard2, target, agents, sessionModel, roleAgents: roleAgentIds });
-        if (!decision.allow)
-          reason = decision.reason;
+        const decision = judgeSpawn({ ...facts, guard: guard2, target, agents, sessionModel });
+        return decision.allow ? undefined : decision.reason;
       } catch {
         return;
       }
+    };
+    const spawns = await ctx.tool.hook("execute.before", async (event) => {
+      if (event.tool !== SUBAGENT_TOOL)
+        return;
+      const plan = planSpawn(event.input, options, available, view());
+      if (plan.error !== undefined)
+        throw new Error(plan.error);
+      if (plan.input !== event.input)
+        event.input = plan.input;
+      const target = spawnTarget(plan.input);
+      if (target === undefined)
+        return;
+      if (plan.role !== undefined && plan.model !== undefined) {
+        pending.set(event.id, { parentID: event.sessionID, agent: target, role: plan.role, model: plan.model, at: Date.now() });
+        return;
+      }
+      if (inputModel(plan.input) !== undefined)
+        return;
+      const reason = await judge(event, target);
       if (reason !== undefined)
         throw new Error(reason);
     });
-    const spawnFailures = await ctx.tool.hook("execute.after", async (event) => {
-      if (event.tool !== SUBAGENT_TOOL || event.status !== "error")
+    const spawnResults = await ctx.tool.hook("execute.after", async (event) => {
+      if (event.tool !== SUBAGENT_TOOL)
         return;
+      const spawn = pending.get(event.id);
+      pending.delete(event.id);
+      if (event.status === "completed") {
+        const childID = event.result.metadata?.sessionID;
+        if (spawn !== undefined && typeof childID === "string")
+          await recordChildRole(childID, spawn.role);
+        return;
+      }
       const message = event.error.message;
       const kind = classifyFailure({ message });
       if (kind === undefined)
@@ -797,14 +1006,14 @@ var src_default = Plugin.define({
         await queue(async () => {
           const agents = await listAgents();
           const agent = agents.find((a) => a.id === agentID);
-          const failed = modelFromError(message) ?? await childModel(message) ?? recentOr(event.sessionID, agent?.model);
+          const failed = modelFromError(message) ?? await childModel(message) ?? inputModel(event.input) ?? recentOr(event.sessionID, agent?.model);
           if (failed === undefined)
             return;
           await markFailed(failed, kind, message);
-          const role = agent === undefined ? undefined : roleOf(agent, options.agents);
+          const role = spawn?.role ?? (agent === undefined ? undefined : roleOf(agent, options.agents));
           const target = fallbackTarget(options, available, view(), role, failed);
           const facts = { failed, kind, cooldownMs: runtime.cooldownMs, target };
-          await notifyParentOnce(event.sessionID, failed, subagentNote({ ...facts, agent: agentID }));
+          await notifyParentOnce(event.sessionID, failed, subagentNote({ ...facts, agent: agentID, spawnRole: spawn?.role }));
         });
       } catch (error) {
         console.warn(`${SOURCE}: could not record the subagent failure`, error);
@@ -824,6 +1033,12 @@ var src_default = Plugin.define({
           await queue(() => onSessionFailed(sessionID, error)).catch((error) => console.warn(`${SOURCE}: fallback after a failed execution did not complete`, error));
           continue;
         }
+        if (type === CREATED_EVENT) {
+          const data = event.data;
+          if (isRecord4(data))
+            await onSessionCreated(data).catch(() => {});
+          continue;
+        }
         if (typeof type !== "string" || !CHECK_EVENTS.has(type))
           continue;
         try {
@@ -832,6 +1047,8 @@ var src_default = Plugin.define({
             if (changed)
               attempts = 0;
             await check2(changed);
+            if (changed)
+              await refreshSubagentTool();
           });
         } catch {}
       }
@@ -840,13 +1057,16 @@ var src_default = Plugin.define({
       controller.abort();
       if (expiry !== undefined)
         clearTimeout(expiry);
-      await spawnFailures.dispose();
-      await guarded?.dispose();
+      await spawnResults.dispose();
+      await spawns.dispose();
+      await subagentTool.dispose();
       await tools.dispose();
       await strip.dispose();
       await registration.dispose();
       notices.clear();
       childFailures.clear();
+      pending.clear();
+      childRoles.clear();
     };
   }
 });
@@ -855,24 +1075,28 @@ export {
   CATALOG_LIMIT,
   CHECK_TOOL,
   DEFAULT_COOLDOWN_MS,
-  DEFAULT_ROLE_AGENTS,
   HEALTH_KEY,
   MAX_REREGISTER,
   MAX_SESSION_DEPTH,
   NOTICE_DEDUPE_MS,
+  PENDING_SPAWN_MS,
   RETRY_KEY_PREFIX,
-  ROLE_AGENT_PREFIX,
   ROLE_HEADER,
+  ROLE_PARAM,
   ROLE_PURPOSE,
+  ROLE_TOOL_NOTE,
   SOURCE,
+  SPAWN_ROLE_KEY_PREFIX,
   candidateStatus,
   cheaperAlternatives,
+  cheapestCost,
   checkRoles,
   childSessionID,
   classifyFailure,
   costTier,
   decideFallback,
   src_default as default,
+  describeChoice,
   desiredModels,
   failureNote,
   fallbackTarget,
@@ -880,30 +1104,35 @@ export {
   healthKey,
   healthView,
   inputCost,
+  inputModel,
   isAvailable,
   isExpensive,
   judgeSpawn,
   markUnhealthy,
   mayRetry,
   modelFromError,
+  modelLabel,
   nextExpiry,
   parseCandidate,
   parseGuard,
   parseOptions,
   parseRuntime,
   pinnedModel,
+  planSpawn,
   pruneHealth,
   readHealth,
   resolveRole,
   retryPrompt,
-  roleAgentDescription,
-  roleAgentId,
+  roleChoices,
   roleOf,
+  roleParamDescription,
   rolesListing,
   sameModel,
-  shapeRoleAgent,
   spawnTarget,
   staleAgents,
   stripRoleHeader,
-  subagentNote
+  subagentNote,
+  toJsonSchema,
+  withRoleNote,
+  withRoleParam
 };

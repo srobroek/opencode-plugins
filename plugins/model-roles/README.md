@@ -45,9 +45,9 @@ merge with them.
   See [Runtime fallback](#runtime-fallback).
 - `retryOnFallback`: retry a failed root session once on the next model
   (default `true`).
-- `roleAgents`: roles that get a `general-<role>` subagent (default
-  `["smol", "task", "slow", "challenger"]`, limited to the roles you
-  configured; `[]` turns them off). See [Role subagents](#role-subagents).
+- `purposes`: role name to a short text saying when to pick it, shown to the
+  spawner. `smol`, `task`, `slow` and `challenger` have built-in texts. See
+  [Choosing a role per spawn](#choosing-a-role-per-spawn).
 - `guard`: see [Subagent model guard](#subagent-model-guard).
 
 ## Declaring a role in an agent file
@@ -92,8 +92,9 @@ row that don't converge.
 
 An agent with no model and no resolvable role inherits the session's model. The
 optional guard refuses a `subagent` spawn when that inherited model is
-expensive. The refusal lists the subagents that pin a cheaper model and the
-roles that resolve to one.
+expensive. The refusal asks the spawner to pass `role` with the cheapest role
+that resolves to a cheaper model, lists the other cheaper roles, and names the
+subagents that pin a cheaper model.
 
 ```jsonc
 "guard": {
@@ -111,15 +112,14 @@ roles that resolve to one.
   `#variant` matches only that variant.
 - `allowInherit`: agent ids that may inherit the session model.
 
-A spawn is allowed if the target agent has a model, or a role that resolves
-(through the `agents` option or the header). The session model is
+A spawn is allowed if it passes `model`, or a `role` that resolves, or if the
+target agent has a model, or a role that resolves (through the `agents` option
+or the header). The session model is
 `session.model`, else the calling agent's model, else the parent session's
 (a session that inherits carries no model), else the default model. A root
 session on the configured default model has no `session.model`. If any
 lookup fails, the spawn goes ahead. Resumed spawns (with `sessionID`) are not
 checked.
-
-The `general-<role>` subagents are listed first in the refusal.
 
 ## Runtime fallback
 
@@ -147,18 +147,21 @@ with `Model unavailable`. The plugin adds the fallback:
      note that does not start a turn (`session.synthetic`, steer). The note
      names the failed model and the next one, and says the spawn may be
      retried. The child's failure event and the tool error produce one note
-     between them.
+     between them. A child spawned with `role` falls back within that role:
+     the plugin switches the child to the role's next model, and the note
+     says to spawn again with the same `role` or resume the child by
+     `sessionID`.
 
 Every fallback is logged (`console.warn`) and shown in the session. The model
 is the one the error names (`Model unavailable: provider/model`), else the
 session's model, found the same way as for the guard.
 
-## Role subagents
+## Choosing a role per spawn
 
-For each role in `roleAgents`, the plugin registers a `general-<role>`
-subagent. It copies `general`'s system prompt, steps and permissions, and
-carries the role header, so it runs on that role's model. Its description
-gives the role's purpose and the resolved model's cost tier:
+The plugin adds an optional `role` parameter to OpenCode's built-in
+`subagent` tool, so the spawner picks the model tier for each call. It is an
+enum of the configured roles. Each role is described with its purpose and a
+cost tier, taken from the cheapest available candidate's input cost:
 
 - `smol`: cheap and fast work, such as lookups, summaries, log and diff
   reading, and mechanical edits.
@@ -167,9 +170,24 @@ gives the role's purpose and the resolved model's cost tier:
   concurrency or data-integrity work.
 - `challenger`: an independent second opinion or review.
 
-The parent then picks a role for each spawn by agent name. Fields you set
-yourself for an agent with the same id take precedence, except the role
-header.
+Other roles use the text from the `purposes` option. The descriptions are
+refreshed when model availability changes.
+
+Before the tool runs, the plugin resolves the role the same way as for agents,
+skipping unhealthy models, then sets the call's `model` to the result and
+removes `role`. The model is chosen in this order:
+
+1. an explicit `model` in the call
+2. the `role` in the call
+3. the target agent's role (from the `agents` option or the header)
+4. the target agent's own model
+5. the session's model, which the child inherits
+
+An unknown role refuses the spawn and lists the configured roles. A role with
+nothing available falls through to step 3. A resumed spawn (with
+`sessionID`) keeps its model. The plugin records the role each child was
+spawned with (in plugin storage, under `spawn-role:<sessionID>`), so a
+fallback for that child stays in the same role.
 
 ## Check
 
@@ -177,9 +195,10 @@ header.
 against `ctx.model.list()` across all providers, enabled or not, and reports
 one of: available, unknown id, unknown variant (listing the ones that
 exist), provider unavailable, unhealthy until a time, or a link to another
-role. It also shows what each role resolves to, and the model each
-role-bearing agent ends up on.
+role. It also shows what each role resolves to, the model each
+role-bearing agent ends up on, and the values the `subagent` tool's `role`
+parameter offers, with their purpose and cost tier.
 
 The same check is exported for scripts: `checkRoles(options, models, agents,
-health?, now?)` returns the report, and `formatCheck(report)` turns it into
+health?, now?, purposes?)` returns the report, and `formatCheck(report)` turns it into
 text. Pass `parseOptions(yourOptions)` and the `data` of a `model.list` call.
