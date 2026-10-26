@@ -24,7 +24,7 @@ function appendResultText(result, text) {
 }
 
 // plugins/lib/src/skill-files.ts
-import { readFileSync } from "fs";
+import { existsSync, readdirSync, readFileSync } from "fs";
 var FRONTMATTER = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/;
 function unquote(value) {
   const first = value[0];
@@ -45,11 +45,23 @@ function parseSkillFile(text) {
     throw new Error("SKILL.md frontmatter has no name");
   const description = fields.get("description");
   const content = match ? text.replace(/^\uFEFF/, "").slice(match[0].length) : text;
-  return description ? { name, description, content } : { name, content };
+  return {
+    name,
+    ...description ? { description } : {},
+    ...fields.get("disable-model-invocation") === "true" ? { autoinvoke: false } : {},
+    content
+  };
 }
 function skillInfo(path) {
   const file = parseSkillFile(readFileSync(path, "utf8"));
-  return { id: file.name, name: file.name, description: file.description, path, content: file.content };
+  return {
+    id: file.name,
+    name: file.name,
+    description: file.description,
+    ...file.autoinvoke === false ? { autoinvoke: false } : {},
+    path,
+    content: file.content
+  };
 }
 async function registerSkills(skill, paths) {
   const infos = paths.map(skillInfo);
