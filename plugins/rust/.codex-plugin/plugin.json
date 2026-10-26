@@ -1,0 +1,19 @@
+{
+  "name": "rust",
+  "version": "0.1.0",
+  "description": "Rust migration-edit gate, cargo install, RUSTFLAGS linker and global target-dir advisories, and Rust guidance skills.",
+  "author": {
+    "name": "Sjors Robroek",
+    "url": "https://github.com/srobroek"
+  },
+  "homepage": "https://github.com/srobroek/opencode-plugins/tree/main/plugins/rust",
+  "repository": "https://github.com/srobroek/opencode-plugins",
+  "license": "Apache-2.0",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Rust",
+    "shortDescription": "Rust migration-edit gate, cargo install, RUSTFLAGS linker and global target-dir advisories, and Rust guidance skills.",
+    "developerName": "Sjors Robroek",
+    "category": "development"
+  }
+}
