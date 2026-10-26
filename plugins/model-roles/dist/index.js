@@ -108,6 +108,11 @@ function desiredModels(agents, options, available, health) {
   }
   return result;
 }
+var DEFAULT_VARIANT = "default";
+function modelText(ref) {
+  const variant = ref.variant === undefined || ref.variant === DEFAULT_VARIANT ? "" : `#${ref.variant}`;
+  return `${ref.providerID}/${ref.id}${variant}`;
+}
 function sameModel(a, b) {
   if (a === undefined || b === undefined)
     return a === b;
@@ -218,6 +223,8 @@ function mayRetry(lastRetryAt, now, windowMs) {
 // plugins/model-roles/src/guard.ts
 var AUTO_THRESHOLD = 4;
 var CATALOG_LIMIT = 12;
+var AGENT_HINT_LIMIT = 5;
+var SUMMARY_LIMIT = 80;
 var isRecord2 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 var strings = (value) => Array.isArray(value) ? value.filter((v) => typeof v === "string" && v.trim() !== "").map((v) => v.trim()) : [];
 function parseGuard(raw) {
@@ -232,7 +239,7 @@ function parseGuard(raw) {
   return { expensive, threshold, allowInherit: strings(input.allowInherit) };
 }
 var key = (ref) => `${ref.providerID}/${ref.id}`;
-var label = (ref) => ref.variant === undefined ? key(ref) : `${key(ref)}#${ref.variant}`;
+var label = modelText;
 function inputCost(ref, available) {
   const model = available.find((m) => m.providerID === ref.providerID && m.id === ref.id);
   const costs = model?.cost ?? [];
@@ -261,6 +268,16 @@ function pinnedModel(agent, facts) {
     return;
   return resolveRole(facts.options.roles, facts.available, role, facts.health).model;
 }
+function summarize(description) {
+  const line = description?.trim().split(`
+`)[0]?.trim() ?? "";
+  const sentence = line.match(/^.*?[.!?](?=\s|$)/)?.[0] ?? line;
+  const text = sentence.replace(/[.!?]$/, "");
+  if (text === "")
+    return;
+  return text.length > SUMMARY_LIMIT ? `${text.slice(0, SUMMARY_LIMIT - 3).trimEnd()}...` : text;
+}
+var agentText = (agent, withSummary) => withSummary && agent.summary !== undefined ? `${agent.id} (${label(agent.model)}: ${agent.summary})` : `${agent.id} (${label(agent.model)})`;
 function cheaperAlternatives(facts) {
   const agents = [];
   for (const agent of facts.agents) {
@@ -269,9 +286,8 @@ function cheaperAlternatives(facts) {
     const model = pinnedModel(agent, facts);
     if (model === undefined || isExpensive(model, facts.guard, facts.available))
       continue;
-    const description = agent.description?.trim().split(`
-`)[0];
-    agents.push(description ? `${agent.id} (${label(model)}: ${description})` : `${agent.id} (${label(model)})`);
+    const summary = summarize(agent.description);
+    agents.push(summary === undefined ? { id: agent.id, model } : { id: agent.id, model, summary });
   }
   const roles = [];
   for (const role of Object.keys(facts.options.roles).sort()) {
@@ -280,7 +296,8 @@ function cheaperAlternatives(facts) {
       roles.push({ role, model, cost: inputCost(model, facts.available) });
   }
   roles.sort((a, b) => (a.cost ?? Number.POSITIVE_INFINITY) - (b.cost ?? Number.POSITIVE_INFINITY));
-  return { agents: agents.sort().slice(0, CATALOG_LIMIT), roles: roles.slice(0, CATALOG_LIMIT) };
+  agents.sort((a, b) => a.id.localeCompare(b.id));
+  return { agents: agents.slice(0, CATALOG_LIMIT), roles: roles.slice(0, CATALOG_LIMIT) };
 }
 var price = (cost) => cost === undefined ? "cost unknown" : `$${cost}/M input tokens`;
 function judgeSpawn(facts) {
@@ -306,8 +323,10 @@ function judgeSpawn(facts) {
       lines.push(`Other cheaper roles: ${others.map((r) => `${r.role} \u2192 ${label(r.model)} (${price(r.cost)})`).join("; ")}`);
   } else
     lines.push("No model role resolves to a cheaper model right now.");
-  if (agents.length > 0)
-    lines.push(`Or spawn an agent that pins a cheaper model: ${agents.join("; ")}`);
+  const hinted = cheapest === undefined ? agents : agents.slice(0, AGENT_HINT_LIMIT);
+  const more = agents.length > hinted.length ? `; ${agents.length - hinted.length} more` : "";
+  if (hinted.length > 0)
+    lines.push(`Or spawn an agent that pins a cheaper model: ${hinted.map((a) => agentText(a, cheapest === undefined)).join("; ")}${more}`);
   lines.push(`If '${facts.target}' should run on the session model, add it to the srobroek.model-roles option guard.allowInherit.`);
   return { allow: false, reason: lines.join(`
 `) };
@@ -519,7 +538,7 @@ function checkRoles(options, models, agents, health = {}, now = Date.now(), purp
   }
   return { roles, agents: agentReports, choices: roleChoices(options, models, purposes) };
 }
-var label2 = (ref) => `${ref.providerID}/${ref.id}${ref.variant ? `#${ref.variant}` : ""}`;
+var label2 = modelText;
 function describe(candidate) {
   switch (candidate.status) {
     case "available":
@@ -566,7 +585,7 @@ function formatCheck(report) {
 
 // plugins/model-roles/src/fallback.ts
 var SOURCE = "srobroek.model-roles";
-var label3 = (ref) => `${ref.providerID}/${ref.id}${ref.variant ? `#${ref.variant}` : ""}`;
+var label3 = modelText;
 function rolesListing(options, failed) {
   return Object.keys(options.roles).sort().filter((role) => (options.roles[role] ?? []).some((entry) => {
     const candidate = parseCandidate(entry);
@@ -1071,10 +1090,12 @@ var src_default = Plugin.define({
   }
 });
 export {
+  AGENT_HINT_LIMIT,
   AUTO_THRESHOLD,
   CATALOG_LIMIT,
   CHECK_TOOL,
   DEFAULT_COOLDOWN_MS,
+  DEFAULT_VARIANT,
   HEALTH_KEY,
   MAX_REREGISTER,
   MAX_SESSION_DEPTH,
@@ -1087,6 +1108,7 @@ export {
   ROLE_TOOL_NOTE,
   SOURCE,
   SPAWN_ROLE_KEY_PREFIX,
+  SUMMARY_LIMIT,
   candidateStatus,
   cheaperAlternatives,
   cheapestCost,
@@ -1112,6 +1134,7 @@ export {
   mayRetry,
   modelFromError,
   modelLabel,
+  modelText,
   nextExpiry,
   parseCandidate,
   parseGuard,
@@ -1132,6 +1155,7 @@ export {
   staleAgents,
   stripRoleHeader,
   subagentNote,
+  summarize,
   toJsonSchema,
   withRoleNote,
   withRoleParam

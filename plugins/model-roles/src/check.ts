@@ -10,6 +10,7 @@ import {
   type AgentLike,
   type AvailableModel,
   type ModelRef,
+  modelText,
   type Options,
   parseCandidate,
   resolveRole,
@@ -96,7 +97,7 @@ export function checkRoles(
   return { roles, agents: agentReports, choices: roleChoices(options, models, purposes) }
 }
 
-const label = (ref: ModelRef): string => `${ref.providerID}/${ref.id}${ref.variant ? `#${ref.variant}` : ""}`
+const label = modelText
 
 function describe(candidate: CandidateReport): string {
   switch (candidate.status) {

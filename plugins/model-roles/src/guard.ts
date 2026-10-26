@@ -7,6 +7,7 @@ import {
   type AvailableModel,
   type HealthView,
   type ModelRef,
+  modelText,
   type Options,
   parseCandidate,
   resolveRole,
@@ -18,6 +19,12 @@ export const AUTO_THRESHOLD = 4
 
 /** How many alternatives a deny message names. */
 export const CATALOG_LIMIT = 12
+
+/** How many pinned agents a deny message names when a cheaper role exists. */
+export const AGENT_HINT_LIMIT = 5
+
+/** Longest agent summary a deny message quotes. */
+export const SUMMARY_LIMIT = 80
 
 export type GuardOptions = {
   /** `provider/model` references, or `"auto"` to judge by input cost. */
@@ -77,7 +84,7 @@ export function parseGuard(raw: unknown): GuardOptions | undefined {
 
 const key = (ref: ModelRef): string => `${ref.providerID}/${ref.id}`
 
-const label = (ref: ModelRef): string => (ref.variant === undefined ? key(ref) : `${key(ref)}#${ref.variant}`)
+const label = modelText
 
 /** The base-tier input cost of `ref`, when the model list knows it. */
 export function inputCost(ref: ModelRef, available: ReadonlyArray<GuardModel>): number | undefined {
@@ -114,15 +121,31 @@ export function pinnedModel(
 
 export type CheapRole = { role: string; model: ModelRef; cost: number | undefined }
 
+export type CheapAgent = { id: string; model: ModelRef; summary?: string }
+
+/** The first sentence of an agent description's first line, capped at `SUMMARY_LIMIT`. */
+export function summarize(description: string | undefined): string | undefined {
+  const line = description?.trim().split("\n")[0]?.trim() ?? ""
+  const sentence = line.match(/^.*?[.!?](?=\s|$)/)?.[0] ?? line
+  const text = sentence.replace(/[.!?]$/, "")
+  if (text === "") return undefined
+  return text.length > SUMMARY_LIMIT ? `${text.slice(0, SUMMARY_LIMIT - 3).trimEnd()}...` : text
+}
+
+const agentText = (agent: CheapAgent, withSummary: boolean): string =>
+  withSummary && agent.summary !== undefined
+    ? `${agent.id} (${label(agent.model)}: ${agent.summary})`
+    : `${agent.id} (${label(agent.model)})`
+
 /** Spawnable agents and roles that run on a model outside the expensive set. Roles come cheapest first. */
-export function cheaperAlternatives(facts: GuardFacts): { agents: string[]; roles: CheapRole[] } {
-  const agents: string[] = []
+export function cheaperAlternatives(facts: GuardFacts): { agents: CheapAgent[]; roles: CheapRole[] } {
+  const agents: CheapAgent[] = []
   for (const agent of facts.agents) {
     if (agent.id === facts.target || agent.mode === "primary" || agent.hidden === true) continue
     const model = pinnedModel(agent, facts)
     if (model === undefined || isExpensive(model, facts.guard, facts.available)) continue
-    const description = agent.description?.trim().split("\n")[0]
-    agents.push(description ? `${agent.id} (${label(model)}: ${description})` : `${agent.id} (${label(model)})`)
+    const summary = summarize(agent.description)
+    agents.push(summary === undefined ? { id: agent.id, model } : { id: agent.id, model, summary })
   }
   const roles: CheapRole[] = []
   for (const role of Object.keys(facts.options.roles).sort()) {
@@ -131,7 +154,8 @@ export function cheaperAlternatives(facts: GuardFacts): { agents: string[]; role
       roles.push({ role, model, cost: inputCost(model, facts.available) })
   }
   roles.sort((a, b) => (a.cost ?? Number.POSITIVE_INFINITY) - (b.cost ?? Number.POSITIVE_INFINITY))
-  return { agents: agents.sort().slice(0, CATALOG_LIMIT), roles: roles.slice(0, CATALOG_LIMIT) }
+  agents.sort((a, b) => a.id.localeCompare(b.id))
+  return { agents: agents.slice(0, CATALOG_LIMIT), roles: roles.slice(0, CATALOG_LIMIT) }
 }
 
 const price = (cost: number | undefined): string => (cost === undefined ? "cost unknown" : `$${cost}/M input tokens`)
@@ -157,7 +181,13 @@ export function judgeSpawn(facts: GuardFacts): GuardDecision {
     if (others.length > 0)
       lines.push(`Other cheaper roles: ${others.map((r) => `${r.role} → ${label(r.model)} (${price(r.cost)})`).join("; ")}`)
   } else lines.push("No model role resolves to a cheaper model right now.")
-  if (agents.length > 0) lines.push(`Or spawn an agent that pins a cheaper model: ${agents.join("; ")}`)
+  // With a role to pass, pinned agents are a side note: ids and models only.
+  const hinted = cheapest === undefined ? agents : agents.slice(0, AGENT_HINT_LIMIT)
+  const more = agents.length > hinted.length ? `; ${agents.length - hinted.length} more` : ""
+  if (hinted.length > 0)
+    lines.push(
+      `Or spawn an agent that pins a cheaper model: ${hinted.map((a) => agentText(a, cheapest === undefined)).join("; ")}${more}`,
+    )
   lines.push(
     `If '${facts.target}' should run on the session model, add it to the srobroek.model-roles option guard.allowInherit.`,
   )

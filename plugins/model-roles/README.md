@@ -93,8 +93,10 @@ row that don't converge.
 An agent with no model and no resolvable role inherits the session's model. The
 optional guard refuses a `subagent` spawn when that inherited model is
 expensive. The refusal asks the spawner to pass `role` with the cheapest role
-that resolves to a cheaper model, lists the other cheaper roles, and names the
-subagents that pin a cheaper model.
+that resolves to a cheaper model and lists the other cheaper roles. It also
+names up to five subagents that pin a cheaper model, by id and model. Their
+descriptions (first sentence, at most 80 characters) appear only when no role
+is cheaper.
 
 ```jsonc
 "guard": {
@@ -127,6 +129,12 @@ OpenCode doesn't fall back to another model on its own. The `retry` hook can
 only retry the same model, and a subagent whose model is unavailable fails
 with `Model unavailable`. The plugin adds the fallback:
 
+The host retries a transient error on the same model first. A provider that
+keeps answering 503 is retried about ten times, over roughly 80 seconds, before
+`session.execution.failed` fires. The fallback starts only after that, so a
+dead provider costs about 80 seconds per session before it is marked
+unhealthy. Later spawns and sessions skip it for `cooldownMs`.
+
 1. On `session.execution.failed`, or when a `subagent` call fails, it checks
    whether the model or provider caused the error: model unavailable,
    auth or credential errors, 401/403, 429 or throttling, 5xx or overloaded,
@@ -152,9 +160,13 @@ with `Model unavailable`. The plugin adds the fallback:
      says to spawn again with the same `role` or resume the child by
      `sessionID`.
 
-Every fallback is logged (`console.warn`) and shown in the session. The model
-is the one the error names (`Model unavailable: provider/model`), else the
-session's model, found the same way as for the guard.
+Every fallback is logged (`console.warn`) and shown in the session. A retried
+root session gets the note as part of the message that restarts it. Other
+notes don't start a turn: waking an idle session would only run it again on
+the model that just failed, or override `retryOnFallback: false`. The model is
+the one the error names (`Model unavailable: provider/model`), else the
+session's model, found the same way as for the guard. Notes leave out the
+host's `#default` variant.
 
 ## Choosing a role per spawn
 

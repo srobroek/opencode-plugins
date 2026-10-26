@@ -7,6 +7,7 @@ import {
   isExpensive,
   judgeSpawn,
   parseGuard,
+  summarize,
 } from "./guard.ts"
 import { parseOptions } from "./resolve.ts"
 
@@ -88,7 +89,7 @@ describe("judgeSpawn", () => {
     expect(decision.allow).toBe(false)
     if (decision.allow) return
     expect(decision.reason).toContain("inherit this session's expensive model amazon-bedrock/global.anthropic.claude-opus-5-5")
-    expect(decision.reason).toContain("explore (anthropic/claude-haiku: Read-only search)")
+    expect(decision.reason).toContain("Or spawn an agent that pins a cheaper model: explore (anthropic/claude-haiku)\n")
     expect(decision.reason).toContain('role: "task" (runs amazon-bedrock/global.anthropic.claude-sonnet-5-5, $2/M input tokens)')
     expect(decision.reason).not.toContain("slow")
     expect(decision.reason).not.toContain("build")
@@ -141,6 +142,23 @@ describe("judgeSpawn", () => {
     const agents = Array.from({ length: 20 }, (_, i) => ({ id: `a${String(i).padStart(2, "0")}`, model: haiku }))
     const result = cheaperAlternatives(facts({ agents }))
     expect(result.agents).toHaveLength(12)
-    expect(result.agents[0]).toBe("a00 (anthropic/claude-haiku)")
+    expect(result.agents[0]).toEqual({ id: "a00", model: haiku })
+    const decision = judgeSpawn(facts({ agents: [{ id: "general" }, ...agents] }))
+    if (decision.allow) throw new Error("allowed")
+    expect(decision.reason).toContain("a04 (anthropic/claude-haiku); 7 more")
+    expect(decision.reason.split("\n")).toHaveLength(4)
+  })
+
+  test("summaries are the first sentence, capped", () => {
+    expect(summarize("Read-only search. Use it for lookups.\nmore")).toBe("Read-only search")
+    expect(summarize("v1.2 parser")).toBe("v1.2 parser")
+    expect(summarize(`${"x".repeat(100)}`)).toBe(`${"x".repeat(77)}...`)
+    expect(summarize("  \n")).toBeUndefined()
+  })
+
+  test("drops the host's #default variant from labels", () => {
+    const decision = judgeSpawn(facts({ sessionModel: { ...opus, variant: "default" } }))
+    if (decision.allow) throw new Error("allowed")
+    expect(decision.reason).toContain("expensive model amazon-bedrock/global.anthropic.claude-opus-5-5.")
   })
 })
