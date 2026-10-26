@@ -21,5 +21,6 @@
   "plugins/project": "0.1.0",
   "plugins/architecture": "0.1.0",
   "plugins/build": "0.1.0",
-  "plugins/quality": "0.1.0"
+  "plugins/quality": "0.1.0",
+  "plugins/toolchain": "0.1.0"
 }

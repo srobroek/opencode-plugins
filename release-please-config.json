@@ -105,6 +105,10 @@
     "plugins/quality": {
       "release-type": "node",
       "component": "quality"
+    },
+    "plugins/toolchain": {
+      "release-type": "node",
+      "component": "toolchain"
     }
   }
 }

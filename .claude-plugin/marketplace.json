@@ -64,6 +64,13 @@
       "category": "development"
     },
     {
+      "name": "toolchain",
+      "source": "./plugins/toolchain",
+      "description": "Toolchain defaults as skills: stack, frontend, infrastructure, languages, observability, shell, Terraform, caches, background jobs and worktree coexistence.",
+      "version": "0.1.0",
+      "category": "development"
+    },
+    {
       "name": "whats-new",
       "source": "./plugins/whats-new",
       "description": "Research breaking changes, deprecations and new features between two versions, report-only.",

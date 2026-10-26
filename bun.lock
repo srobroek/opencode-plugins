@@ -297,6 +297,19 @@
         "@opencode/plugin",
       ],
     },
+    "plugins/toolchain": {
+      "name": "@srobroek/opencode-toolchain",
+      "version": "0.1.0",
+      "devDependencies": {
+        "@srobroek/opencode-lib": "workspace:*",
+      },
+      "peerDependencies": {
+        "@opencode/plugin": "^2.1.4",
+      },
+      "optionalPeers": [
+        "@opencode/plugin",
+      ],
+    },
     "plugins/whats-new": {
       "name": "@srobroek/opencode-whats-new",
       "version": "0.1.0",
@@ -652,6 +665,8 @@
     "@srobroek/opencode-statusline": ["@srobroek/opencode-statusline@workspace:plugins/statusline"],
 
     "@srobroek/opencode-subagent-worktree": ["@srobroek/opencode-subagent-worktree@workspace:plugins/subagent-worktree"],
+
+    "@srobroek/opencode-toolchain": ["@srobroek/opencode-toolchain@workspace:plugins/toolchain"],
 
     "@srobroek/opencode-whats-new": ["@srobroek/opencode-whats-new@workspace:plugins/whats-new"],
 

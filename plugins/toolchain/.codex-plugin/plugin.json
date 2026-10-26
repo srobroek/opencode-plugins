@@ -1,0 +1,19 @@
+{
+  "name": "toolchain",
+  "version": "0.1.0",
+  "description": "Toolchain defaults as skills: stack, frontend, infrastructure, languages, observability, shell, Terraform, caches, background jobs and worktree coexistence.",
+  "author": {
+    "name": "Sjors Robroek",
+    "url": "https://github.com/srobroek"
+  },
+  "homepage": "https://github.com/srobroek/opencode-plugins/tree/main/plugins/toolchain",
+  "repository": "https://github.com/srobroek/opencode-plugins",
+  "license": "Apache-2.0",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Toolchain",
+    "shortDescription": "Toolchain defaults as skills: stack, frontend, infrastructure, languages, observability, shell, Terraform, caches, background jobs and worktree coexistence.",
+    "developerName": "Sjors Robroek",
+    "category": "development"
+  }
+}
