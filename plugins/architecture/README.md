@@ -26,14 +26,10 @@ The agent was converted from omp with `scripts/convert-agent.ts`. The omp
 available, and `explore` in place of `scout`. Spawning `explore` from `architect`
 running as a subagent needs `experimental.subagent_depth` of 2 or more.
 
-The agent pins no model. On omp it used the `plan` role at high thinking; map it
-with the model-roles plugin:
-
-```jsonc
-{ "agents": { "architect": "plan" } }
-```
-
-or set `agent.architect.model` in your config.
+The agent pins no model. It declares the `architect` model role through the
+`x-opencode-model-role` request header, so with the model-roles plugin an
+`architect` role picks its model. Without it the agent inherits the caller's model;
+set `agent.architect.model` in your config to pin one.
 
 ## Install
 
