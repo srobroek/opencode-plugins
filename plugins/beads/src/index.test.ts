@@ -43,7 +43,7 @@ describe("plugin definition", () => {
     const { fake, cleanup } = await start(scratch())
     expect(fake.hooks("tool")).toEqual(["execute.before", "execute.after"])
     expect(fake.hooks("shell")).toEqual(["create.before"])
-    expect(fake.hooks("session")).toEqual(["context"])
+    expect(fake.hooks("session")).toEqual(["context", "prompt"])
     await cleanup()
     expect(fake.active()).toBe(0)
   })

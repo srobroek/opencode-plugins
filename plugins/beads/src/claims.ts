@@ -1,7 +1,7 @@
 /**
  * Claims a session can prove from its own successful `bd` results.
  *
- * Phase 2 releases these at session end; phase 1 only records them. The state is
+ * The lifecycle nudges about and releases these at the end of a session's turn. The state is
  * plain JSON so it lives in `ctx.storage`: OpenCode runs one plugin instance per
  * location, so module memory would split one session's claims across instances.
  */
@@ -80,6 +80,21 @@ function mutationTargetIds(args: readonly string[]): string[] {
     // An unknown option may consume later bead-shaped tokens, but it cannot change
     // positional ids already seen. Keep those and stop.
     if (token.startsWith("-")) break
+    const [id] = beadIdCandidates(token)
+    if (id !== undefined) ids.push(id)
+  }
+  return ids
+}
+
+/** Ids a `bd unclaim` names, skipping the values of its options. */
+function unclaimIds(args: readonly string[]): string[] {
+  const ids: string[] = []
+  for (let index = 0; index < args.length; index++) {
+    const token = args[index] ?? ""
+    if (token.startsWith("-")) {
+      if (TRANSITION_VALUE_FLAGS[token] === true) index++
+      continue
+    }
     const [id] = beadIdCandidates(token)
     if (id !== undefined) ids.push(id)
   }
@@ -264,6 +279,10 @@ export function recordClaimTransitions(
   for (const close of closeInvocations(command)) {
     for (const id of close.ids) deleteClaim(state, target, id)
   }
+  if (invocation.verb === "unclaim") {
+    for (const id of unclaimIds(invocation.args)) deleteClaim(state, target, id)
+    return
+  }
   if (invocation.verb === "assign") {
     const [idToken, assignee] = invocation.args
     const [id] = idToken === undefined ? [] : beadIdCandidates(idToken)
@@ -295,7 +314,7 @@ const CONTENTION = [
 ]
 
 export const CONTENTION_ADVISORY =
-  "Beads: this is embedded-store contention, not a failure. Wait briefly and retry the same command, up to three attempts, then report what still failed. Do not escalate it, report the run as blocked, or build your own lock, wrapper or retry helper: the plugin's embedded-write lock already serialises writes. `workspace gate unavailable, continuing ungated` is NOT contention: that command ran."
+  "Beads: this is embedded-store contention, not a failure. Wait briefly and retry the same command, up to three attempts, then report what still failed. Do not escalate it, report the run as blocked, or build your own lock, wrapper or retry helper: the plugin's embedded-write lock already serialises writes. `workspace gate unavailable, continuing ungated` is NOT contention: that command ran. The beads-contention-retry skill has the full policy."
 
 /** The contention advisory when `output` shows contention, else `undefined`. */
 export function contentionAdvisory(output: string): string | undefined {

@@ -1,14 +1,18 @@
 {
   "name": "@srobroek/opencode-beads",
   "version": "0.1.0",
-  "description": "Beads issue tracking for OpenCode: shell gates, store pinning, subagent actors, claim tracking and bd prime context.",
+  "description": "Beads issue tracking for OpenCode: shell gates, store pinning, subagent actors, claim tracking, stop nudge and guarded claim release, lease heartbeats, bd prime context and Beads skills.",
   "private": true,
   "type": "module",
   "exports": {
     ".": "./dist/index.js",
     "./embedded-write-runner": "./dist/bd-embedded-write-runner.js"
   },
-  "files": ["dist", "index.js", "embedded-write-runner.js"],
+  "files": ["dist", "index.js", "embedded-write-runner.js", "skills"],
+  "opencode-plugins": {
+    "claude": false,
+    "codex": false
+  },
   "peerDependencies": {
     "@opencode/plugin": "^2.1.4"
   },

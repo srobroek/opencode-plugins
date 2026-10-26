@@ -1,0 +1,43 @@
+---
+name: beads-preflight
+description: Runs read-only Beads readiness checks before ledger work. Use when starting ledger work or asking for a beads preflight.
+---
+
+# Beads preflight
+
+TRIGGER
++ Before starting ledger work in a session
++ "run the beads preflight"
+- Worktrunk readiness → run `worktrunk-preflight`
+
+## Workflow
+
+1. Before ledger work starts in the session, run `preflight.py` from this skill's base directory, with the repository as the shell tool's `workdir`:
+   `python3 <skill base directory>/preflight.py --json`
+2. Read the JSON object. `ok` is `true` when no check has `status: "fail"`.
+3. `warn` and `skip` do not clear `ok`.
+   Each check has a stable `id`.
+   Each check has a status, detail, and optional exact `fix` command.
+4. Select checks with `--only ID[,ID...]`.
+   Use `--apply` to print that no Beads check has a safe automatic fix.
+5. The `no-stale-lease-on-open-work` scan is skipped by default because it enumerates open beads. Pass `--include-slow`, or select that ID explicitly with `--only`, to run it.
+6. Every `bd` call has a 60-second timeout by default, because a cold embedded store takes 30-50 seconds to open. Override it with `--timeout SECONDS`; a timeout is reported as `warn`, except a `store-reachable` timeout is `fail`.
+
+This skill is read-only.
+It performs no ledger mutation.
+
+
+## Check failures and remedies
+
+| ID | FAIL means | Exact remedy |
+| --- | --- | --- |
+| `bd-available` | `bd` is not on PATH. The version command failed. | Install stable `bd`. Expose it with `export PATH='DIRECTORY_CONTAINING_BD:$PATH'`. |
+| `bd-version-supported` | The client is older than stable `1.3.0`. The client is an RC or prerelease. | Put stable `bd` version `1.3.0` or later first on PATH. |
+| `store-reachable` | `bd info --json` failed. The result was not an object. `config.issue_prefix` was missing. | For `no beads database found`, run `bd bootstrap --yes` when `git ls-remote origin refs/dolt/data` finds Dolt data; otherwise confirm the git origin first and run `bd init --init-if-missing --skip-hooks --skip-agents`. Load the `beads-setup` skill. |
+| `store-is-embedded` | The embedded `.beads` store was not confirmed. | Configure the checkout to use its embedded `.beads` store. A server configuration is a `warn`, not a required shared server. |
+| `actor-identity` | Neither actor environment variable is non-blank. | Run `export BEADS_ACTOR='your-name'`. |
+| `ready-work-readable` | `bd ready --json` failed. Its JSON was unparseable or unknown-shaped. | For `no beads database found`, follow the `store-reachable` remedy (the `beads-setup` skill); otherwise repair the Beads store. |
+| `no-stale-lease-on-open-work` | The verified JSON lease scan could not run. Its result could not be parsed. | Run `bd unclaim ID` for each stale assigned bead. |
+| `remote-sync-configured` | This check never fails. | No remotes configured is a `warn`; add one with `bd dolt remote add origin git+ssh://git@github.com/OWNER/REPO.git`. A `skip` means `bd dolt remote list` could not determine the setting read-only. |
+
+A stale lease is a `warn`, never a failure. The script never runs `bd unclaim` or any synchronization command.

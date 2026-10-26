@@ -1,8 +1,9 @@
-import { isAbsolute, resolve } from "node:path"
+import { isAbsolute, join, resolve } from "node:path"
 import { Plugin } from "@opencode/plugin"
 import type { Context } from "@opencode/plugin/promise/plugin"
 import type { Result } from "@opencode/plugin/promise/tool"
 import { appendResultText, shellExit } from "@srobroek/opencode-lib/shell-result"
+import { registerSkills } from "@srobroek/opencode-lib/skill-files"
 import { bdInvocations, isMutatingBdCommand } from "./bd-actor-gate.ts"
 import { claimResultOutput } from "./bd-lease-gate.ts"
 import { sessionPinFor } from "./beads-store.ts"
@@ -14,8 +15,10 @@ import {
   environmentForCommand,
   GateAdmitter,
   lifecycleBdEnvironment,
+  runBdResult,
   staleSkipNotice,
 } from "./gate-admission.ts"
+import { type HeartbeatClock, Heartbeats, heartbeatOnce, leaseEndingIds, nextLeases, readLeases } from "./heartbeat.ts"
 import {
   agentActor,
   GateRefusal,
@@ -25,12 +28,26 @@ import {
   sessionChain,
   shellInput,
 } from "./host.ts"
+import { BEADS_SOURCE, Lifecycle } from "./lifecycle.ts"
 import { PRIME_WAIT_MS, readPrime, storedPrime } from "./prime.ts"
+import { type StartDeps, sessionStartAdvisories } from "./session-start.ts"
 import { decideShell, type ShellGateDeps, TOOL_CALL_BUDGET_MS } from "./shell-gates.ts"
 
 export { decideShell } from "./shell-gates.ts"
 
 const SUBAGENT_TOOL = "subagent"
+
+/** The skills this plugin ships, each in `skills/<name>/SKILL.md`. */
+export const SKILL_NAMES = [
+  "beads-ledger",
+  "beads-evidence",
+  "beads-setup",
+  "beads-contention-retry",
+  "beads-preflight",
+] as const
+
+/** `skills/` at the package root; `src/` and the bundled `dist/` both sit one level below it. */
+export const SKILLS_DIRECTORY = join(import.meta.dir, "..", "skills")
 const PIN_CACHE_MS = 5_000
 
 /**
@@ -86,6 +103,11 @@ export type AdapterDeps = {
   runnerLookup?: ShellGateDeps["runnerLookup"]
   repositoryControl?: ShellGateDeps["repositoryControl"]
   env?: NodeJS.ProcessEnv
+  clock?: HeartbeatClock
+  /** Receives every detached task (claim releases); tests join them. */
+  detach?: (task: Promise<unknown>) => void
+  skillsDirectory?: string
+  start?: Pick<StartDeps, "hooksAdvisory" | "identity">
 }
 
 export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<() => Promise<void>> {
@@ -99,6 +121,50 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
   const chains = new Map<string, Promise<SessionChain>>()
   const pins = new Map<string, { at: number; pin: string | undefined }>()
   const queue = keyedQueue()
+  const run = deps.run ?? runBdResult
+  const detached = new Set<Promise<unknown>>()
+  const detach =
+    deps.detach ??
+    ((task: Promise<unknown>) => {
+      const settled = task.catch((error) => console.error("srobroek.beads: detached task failed", error))
+      detached.add(settled)
+      void settled.finally(() => detached.delete(settled))
+    })
+  const heartbeatNoticed = new Set<string>()
+  const heartbeats = new Heartbeats(async (sessionID, key, lease) => {
+    const failure = await heartbeatOnce(lease, run, baseEnv())
+    if (failure === undefined) return
+    const leaseKey = `leases/${sessionID}`
+    const leases = await queue(leaseKey, async () => {
+      const current = readLeases(await ctx.storage.get(leaseKey))
+      delete current[key]
+      await ctx.storage.set(leaseKey, current)
+      return current
+    })
+    heartbeats.run(sessionID, leases)
+    const notice = `${sessionID}\0${lease.id}`
+    if (heartbeatNoticed.has(notice)) return
+    heartbeatNoticed.add(notice)
+    await ctx.session
+      .synthetic({
+        sessionID,
+        text: `Beads lease heartbeat failed for ${lease.id}; the claim may no longer be held (${failure}). Check it with bd show ${lease.id} --json before continuing work on it.`,
+        delivery: "queue",
+        resume: false,
+        metadata: { source: BEADS_SOURCE, kind: "heartbeat" },
+      } as never)
+      .catch(() => undefined)
+  }, deps.clock)
+  const lifecycle = new Lifecycle({
+    ctx,
+    run,
+    env: baseEnv,
+    queue,
+    heartbeats,
+    nudge: on("beads-stop-nudge"),
+    release: on("beads-claim-release"),
+    detach,
+  })
 
   const cachedPinFor = (cwd: string): string | undefined => {
     const hit = pins.get(cwd)
@@ -130,6 +196,7 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
   const before = await ctx.tool.hook("execute.before", async (event) => {
     const deadline = Date.now() + TOOL_CALL_BUDGET_MS
     if (event.tool === SUBAGENT_TOOL) {
+      lifecycle.subagentStarted(event.sessionID, event.id, event.input)
       if (!on("beads-gate-admission")) return
       const admission = await admitter.admit(directory, lifecycleBdEnvironment(directory, baseEnv()), true, deadline)
       if (admission?.block === true)
@@ -170,6 +237,15 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
   })
 
   const after = await ctx.tool.hook("execute.after", async (event) => {
+    if (event.tool === SUBAGENT_TOOL) {
+      const text = await lifecycle.subagentEnded(
+        event.sessionID,
+        event.id,
+        event.status === "completed" ? event.result : undefined,
+      )
+      if (text !== undefined && event.status === "completed") event.result = appendResultText(event.result, text)
+      return
+    }
     if (event.tool !== "shell") return
     const call = pending.get(event.id)
     pending.delete(event.id)
@@ -192,31 +268,84 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
         const key = `claims/${event.sessionID}`
         const env = environmentForCommand(call.command, pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor))
         if (call.actor !== undefined) env.BEADS_ACTOR = call.actor
-        await queue(key, async () => {
+        const invocations = bdInvocations(call.command)
+        const [before, state] = await queue(key, async () => {
           const state = readClaimState(await ctx.storage.get(key))
-          const before = JSON.stringify(state)
-          recordClaimTransitions(state, call.command, call.cwd, env, output, bdInvocations(call.command))
-          if (JSON.stringify(state) !== before) await ctx.storage.set(key, state)
+          const before = readClaimState(state)
+          recordClaimTransitions(state, call.command, call.cwd, env, output, invocations)
+          if (JSON.stringify(state) !== JSON.stringify(before)) await ctx.storage.set(key, state)
+          return [before, state] as const
         })
+        if (on("bd-lease-heartbeat")) {
+          const leaseKey = `leases/${event.sessionID}`
+          const leases = await queue(leaseKey, async () => {
+            const current = readLeases(await ctx.storage.get(leaseKey))
+            const next = nextLeases(current, before, state, leaseEndingIds(invocations))
+            if (JSON.stringify(next) !== JSON.stringify(current)) await ctx.storage.set(leaseKey, next)
+            return next
+          })
+          heartbeats.run(event.sessionID, leases)
+        }
       }
     }
     if (advisories.length > 0) event.result = appendResultText(result, advisories.join("\n\n"))
   })
 
   const context = await ctx.session.hook("context", async (event) => {
-    if (!on("beads-prime")) return
+    if (!on("beads-prime") && !on("beads-session-advisories")) return
     const key = `prime/${event.sessionID}`
     const text = await queue(key, async () => {
       const stored = storedPrime(await ctx.storage.get(key))
       if (stored !== undefined) return stored
-      const fresh = await bounded(prime, PRIME_WAIT_MS, "")
+      const parts = [await bounded(prime, PRIME_WAIT_MS, "")]
+      // Session-start advisories are frozen with the prime text, so the system prompt stays cacheable.
+      if (on("beads-session-advisories") && (await lifecycle.parentOf(event.sessionID)) === undefined)
+        parts.push(
+          ...sessionStartAdvisories(directory, {
+            env: baseEnv(),
+            binaryHooks: on("binary-git-hooks"),
+            pinFor,
+            ...deps.start,
+          }),
+        )
+      const fresh = parts.filter((part) => part !== "").join("\n\n")
       await ctx.storage.set(key, { text: fresh })
       return fresh
     })
     if (text !== "") event.system.push({ type: "text", text })
   })
 
+  const promptHook = await ctx.session.hook("prompt", async (event) => {
+    await lifecycle.prompt(event.sessionID, event.metadata)
+  })
+
+  const skills = on("beads-skills")
+    ? await registerSkills(
+        ctx.skill,
+        SKILL_NAMES.map((name) => join(deps.skillsDirectory ?? SKILLS_DIRECTORY, name, "SKILL.md")),
+      )
+    : undefined
+
+  const abort = new AbortController()
+  const iterator = ctx.event.subscribe({ signal: abort.signal } as never)[Symbol.asyncIterator]()
+  void (async () => {
+    for (;;) {
+      const next = await iterator.next().catch(() => ({ done: true as const, value: undefined }))
+      if (next.done) return
+      try {
+        await lifecycle.handleEvent(next.value)
+      } catch (error) {
+        console.error("srobroek.beads: event handling failed", error)
+      }
+    }
+  })()
+
   return async () => {
+    abort.abort()
+    await iterator.return?.()
+    heartbeats.dispose()
+    await skills?.dispose()
+    await promptHook.dispose()
     await context.dispose()
     await after.dispose()
     await pin.dispose()
