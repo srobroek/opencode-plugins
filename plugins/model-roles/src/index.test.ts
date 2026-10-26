@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test"
-import plugin, { MAX_REREGISTER, type ModelRef } from "./index.ts"
+import plugin, { MAX_REREGISTER, type ModelRef, spawnTarget } from "./index.ts"
 
 type Agent = { id: string; model?: ModelRef; request?: { headers?: Record<string, string> } }
-type Model = { providerID: string; id: string; variants: { id: string }[] }
+type Model = { providerID: string; id: string; variants: { id: string }[]; cost?: { input: number }[] }
 type Editor = {
   list: () => Agent[]
   get: (id: string) => Agent | undefined
@@ -10,7 +10,9 @@ type Editor = {
 }
 
 /** A host that replays agent transforms in registration order and emits `agent.updated` after each change. */
-function createHost(input: { agents: Agent[]; models: Model[]; options: unknown }) {
+function createHost(input: { agents: Agent[]; models: Model[]; options: unknown; sessionModel?: ModelRef }) {
+  const toolHooks: Array<{ name: string; callback: (payload: unknown) => Promise<void> }> = []
+  let sessionGet: (id: string) => Promise<unknown> = async (id) => ({ id, model: input.sessionModel })
   const transforms: Array<{ callback: (editor: Editor) => void }> = []
   const hooks: Array<{ name: string; callback: (payload: unknown) => void }> = []
   let agents = new Map<string, Agent>()
@@ -64,7 +66,21 @@ function createHost(input: { agents: Agent[]; models: Model[]; options: unknown 
       list: async () => ({ data: listOverride ? listOverride() : [...agents.values()].map((a) => structuredClone(a)) }),
     },
     model: { list: async () => ({ data: models }) },
+    tool: {
+      hook: async (name: string, callback: (payload: unknown) => Promise<void>) => {
+        registrations++
+        const entry = { name, callback }
+        toolHooks.push(entry)
+        return {
+          dispose: async () => {
+            registrations--
+            toolHooks.splice(toolHooks.indexOf(entry), 1)
+          },
+        }
+      },
+    },
     session: {
+      get: async ({ sessionID }: { sessionID: string }) => sessionGet(sessionID),
       hook: async (name: string, callback: (payload: unknown) => void) => {
         registrations++
         const entry = { name, callback }
@@ -103,6 +119,14 @@ function createHost(input: { agents: Agent[]; models: Model[]; options: unknown 
       emit({ type: "model.updated" })
     },
     emit,
+    toolHooks: () => toolHooks.length,
+    spawn: async (tool: string, payload: unknown, agent = "build") => {
+      for (const hook of toolHooks)
+        if (hook.name === "execute.before") await hook.callback({ tool, sessionID: "s1", agent, id: "c1", input: payload })
+    },
+    setSessionGet: (fn: (id: string) => Promise<unknown>) => {
+      sessionGet = fn
+    },
     setListOverride: (fn: () => Agent[]) => {
       listOverride = fn
     },
@@ -246,6 +270,65 @@ describe("setup", () => {
     }
     const cleanup = await setup(host)
     expect(host.agents().get("general")?.model).toEqual(flint)
+    host.close()
+    await cleanup()
+  })
+})
+
+describe("subagent model guard", () => {
+  const opus = { providerID: "amazon-bedrock", id: "claude-opus" }
+  const priced: Model[] = [
+    { ...opus, variants: [], cost: [{ input: 4.4 }] },
+    { providerID: "amazon-bedrock", id: "claude-sonnet", variants: [{ id: "high" }], cost: [{ input: 2 }] },
+    { providerID: "anthropic", id: "claude-haiku", variants: [], cost: [{ input: 0.1 }] },
+  ]
+  const agents: Agent[] = [{ id: "general" }, { id: "plain" }, { id: "explore", model: haiku }, { id: "build", model: opus }]
+  const guarded = { ...options, guard: true }
+
+  test("spawnTarget skips resumed and malformed spawns", () => {
+    expect(spawnTarget({ agent: "general", prompt: "x" })).toBe("general")
+    expect(spawnTarget({ agent: "general", prompt: "x", sessionID: "ses_1" })).toBeUndefined()
+    expect(spawnTarget({ prompt: "x" })).toBeUndefined()
+    expect(spawnTarget(null)).toBeUndefined()
+  })
+
+  test("no hook without the guard option", async () => {
+    const host = createHost({ agents, models: priced, options })
+    const cleanup = await setup(host)
+    expect(host.toolHooks()).toBe(0)
+    host.close()
+    await cleanup()
+  })
+
+  test("denies an inheriting spawn under an expensive session model", async () => {
+    const host = createHost({ agents, models: priced, options: guarded, sessionModel: opus })
+    const cleanup = await setup(host)
+    await expect(host.spawn("subagent", { agent: "plain", prompt: "x" })).rejects.toThrow(/explore \(anthropic\/claude-haiku\)/)
+    await host.spawn("subagent", { agent: "general", prompt: "x" })
+    await host.spawn("subagent", { agent: "explore", prompt: "x" })
+    await host.spawn("subagent", { agent: "plain", prompt: "x", sessionID: "ses_2" })
+    await host.spawn("shell", { agent: "plain", prompt: "x" })
+    host.close()
+    await cleanup()
+    expect(host.toolHooks()).toBe(0)
+  })
+
+  test("falls back to the calling agent's model when the session has none", async () => {
+    const host = createHost({ agents, models: priced, options: guarded })
+    const cleanup = await setup(host)
+    await expect(host.spawn("subagent", { agent: "plain", prompt: "x" }, "build")).rejects.toThrow(/inherit/)
+    await host.spawn("subagent", { agent: "plain", prompt: "x" }, "explore")
+    host.close()
+    await cleanup()
+  })
+
+  test("fails open when a lookup throws", async () => {
+    const host = createHost({ agents, models: priced, options: guarded, sessionModel: opus })
+    const cleanup = await setup(host)
+    host.setSessionGet(async () => {
+      throw new Error("gone")
+    })
+    await host.spawn("subagent", { agent: "plain", prompt: "x" })
     host.close()
     await cleanup()
   })

@@ -1,0 +1,130 @@
+import { describe, expect, test } from "bun:test"
+import {
+  cheaperAlternatives,
+  type GuardFacts,
+  type GuardModel,
+  inputCost,
+  isExpensive,
+  judgeSpawn,
+  parseGuard,
+} from "./guard.ts"
+import { parseOptions } from "./resolve.ts"
+
+const opus = { providerID: "amazon-bedrock", id: "global.anthropic.claude-opus-5-5" }
+const sonnet = { providerID: "amazon-bedrock", id: "global.anthropic.claude-sonnet-5-5" }
+const haiku = { providerID: "anthropic", id: "claude-haiku" }
+const available: GuardModel[] = [
+  { ...opus, cost: [{ input: 4.4 }] },
+  { ...sonnet, variants: [{ id: "high" }], cost: [{ input: 2 }] },
+  { ...haiku, cost: [{ tier: { type: "context", size: 100_000 }, input: 0.55 }, { input: 0.11 }] },
+]
+const options = parseOptions({ roles: { task: "amazon-bedrock/global.anthropic.claude-sonnet-5-5", slow: "amazon-bedrock/global.anthropic.claude-opus-5-5" } })
+
+const facts = (overrides: Partial<GuardFacts> = {}): GuardFacts => ({
+  guard: parseGuard(true) as NonNullable<ReturnType<typeof parseGuard>>,
+  options,
+  target: "general",
+  agents: [
+    { id: "general", mode: "subagent" },
+    { id: "explore", mode: "subagent", model: haiku, description: "Read-only search\nmore" },
+    { id: "build", mode: "primary", model: haiku },
+    { id: "secret", mode: "subagent", hidden: true, model: haiku },
+    { id: "deep", mode: "subagent", model: opus },
+  ],
+  available,
+  sessionModel: opus,
+  ...overrides,
+})
+
+describe("parseGuard", () => {
+  test("off unless configured", () => {
+    expect(parseGuard(undefined)).toBeUndefined()
+    expect(parseGuard(false)).toBeUndefined()
+    expect(parseGuard({ enabled: false })).toBeUndefined()
+  })
+
+  test("true and {} mean auto with the default threshold", () => {
+    expect(parseGuard(true)).toEqual({ expensive: "auto", threshold: 4, allowInherit: [] })
+    expect(parseGuard({})).toEqual({ expensive: "auto", threshold: 4, allowInherit: [] })
+  })
+
+  test("reads a list, a threshold and allowInherit, dropping junk", () => {
+    expect(parseGuard({ expensive: ["a/b", 3, " "], threshold: 10, allowInherit: ["x", 1] })).toEqual({
+      expensive: ["a/b"],
+      threshold: 10,
+      allowInherit: ["x"],
+    })
+    expect(parseGuard({ expensive: "a/b", threshold: -1 })?.expensive).toEqual(["a/b"])
+    expect(parseGuard({ threshold: -1 })?.threshold).toBe(4)
+  })
+})
+
+describe("isExpensive", () => {
+  test("auto compares the base-tier input cost", () => {
+    const guard = parseGuard(true) as NonNullable<ReturnType<typeof parseGuard>>
+    expect(inputCost(haiku, available)).toBe(0.11)
+    expect(isExpensive(opus, guard, available)).toBe(true)
+    expect(isExpensive(sonnet, guard, available)).toBe(false)
+    expect(isExpensive({ providerID: "x", id: "unknown" }, guard, available)).toBe(false)
+  })
+
+  test("a list matches provider/model, and a listed variant only that variant", () => {
+    const guard = parseGuard({ expensive: ["amazon-bedrock/global.anthropic.claude-sonnet-5-5#high"] }) as NonNullable<
+      ReturnType<typeof parseGuard>
+    >
+    expect(isExpensive({ ...sonnet, variant: "high" }, guard, available)).toBe(true)
+    expect(isExpensive(sonnet, guard, available)).toBe(false)
+    expect(isExpensive(opus, guard, available)).toBe(false)
+    const any = parseGuard({ expensive: ["amazon-bedrock/global.anthropic.claude-opus-5-5"] }) as NonNullable<
+      ReturnType<typeof parseGuard>
+    >
+    expect(isExpensive({ ...opus, variant: "max" }, any, available)).toBe(true)
+  })
+})
+
+describe("judgeSpawn", () => {
+  test("denies an inheriting agent under an expensive session model and names cheaper options", () => {
+    const decision = judgeSpawn(facts())
+    expect(decision.allow).toBe(false)
+    if (decision.allow) return
+    expect(decision.reason).toContain("inherit this session's expensive model amazon-bedrock/global.anthropic.claude-opus-5-5")
+    expect(decision.reason).toContain("explore (anthropic/claude-haiku: Read-only search)")
+    expect(decision.reason).toContain("task → amazon-bedrock/global.anthropic.claude-sonnet-5-5")
+    expect(decision.reason).not.toContain("slow →")
+    expect(decision.reason).not.toContain("build")
+    expect(decision.reason).not.toContain("secret")
+    expect(decision.reason).not.toContain("deep (")
+    expect(decision.reason).toContain("guard.allowInherit")
+  })
+
+  test("allows an explicit model, even an expensive one", () => {
+    expect(judgeSpawn(facts({ target: "deep" })).allow).toBe(true)
+    expect(judgeSpawn(facts({ target: "explore" })).allow).toBe(true)
+  })
+
+  test("allows an agent whose role resolves, by option or header", () => {
+    expect(judgeSpawn(facts({ options: { ...options, agents: { general: "task" } } })).allow).toBe(true)
+    const agents = [{ id: "general", request: { headers: { "X-OpenCode-Model-Role": "task" } } }]
+    expect(judgeSpawn(facts({ agents })).allow).toBe(true)
+  })
+
+  test("denies when the role cannot resolve", () => {
+    const decision = judgeSpawn(facts({ options: { ...options, agents: { general: "missing" } } }))
+    expect(decision.allow).toBe(false)
+  })
+
+  test("allows a cheap session model, an unknown session model, an unknown agent and allowInherit", () => {
+    expect(judgeSpawn(facts({ sessionModel: sonnet })).allow).toBe(true)
+    expect(judgeSpawn(facts({ sessionModel: undefined })).allow).toBe(true)
+    expect(judgeSpawn(facts({ target: "ghost" })).allow).toBe(true)
+    const guard = parseGuard({ allowInherit: ["general"] }) as NonNullable<ReturnType<typeof parseGuard>>
+    expect(judgeSpawn(facts({ guard })).allow).toBe(true)
+  })
+
+  test("alternatives are bounded and sorted", () => {
+    const agents = Array.from({ length: 20 }, (_, i) => ({ id: `a${String(i).padStart(2, "0")}`, model: haiku }))
+    const result = cheaperAlternatives(facts({ agents }))
+    expect(result.agents).toHaveLength(12)
+    expect(result.agents[0]).toBe("a00 (anthropic/claude-haiku)")
+  })
+})
