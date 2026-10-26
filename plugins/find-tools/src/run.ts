@@ -5,6 +5,8 @@
 
 import { spawn } from "node:child_process"
 
+import { EXIT_GRACE_MS, EXIT_POLL_MS, processAlive } from "@srobroek/opencode-lib/subprocess"
+
 export type RunResult = { ok: boolean; stdout: string; stderr: string }
 export type Run = (argv: string[], timeoutMs: number, signal?: AbortSignal) => Promise<RunResult>
 
@@ -15,6 +17,8 @@ const OUTPUT_LIMIT = 1_048_576
  * Run `argv` without a shell. The process group is killed at the deadline, on
  * cancellation or when stdout and stderr together pass the output limit; a detached
  * descendant holding the pipes cannot keep the call open past a one-second grace.
+ * A child that is gone without its exit reported (oven-sh/bun#41024) is stopped the
+ * same way, so the call never waits on that event alone.
  */
 export function defaultRun(argv: string[], timeoutMs: number, signal?: AbortSignal): Promise<RunResult> {
   if (signal?.aborted) return Promise.resolve({ ok: false, stdout: "", stderr: "Cancelled before spawn" })
@@ -36,6 +40,7 @@ export function defaultRun(argv: string[], timeoutMs: number, signal?: AbortSign
         if (settled) return
         settled = true
         clearTimeout(deadline)
+        clearInterval(poll)
         if (cleanup) clearTimeout(cleanup)
         signal?.removeEventListener("abort", abort)
         proc.stdout?.destroy()
@@ -60,6 +65,17 @@ export function defaultRun(argv: string[], timeoutMs: number, signal?: AbortSign
       const abort = () => stop("Cancelled")
       const ms = Number.isFinite(timeoutMs) ? Math.max(1, Math.min(timeoutMs, DEFAULT_MS)) : DEFAULT_MS
       const deadline = setTimeout(() => stop("Discovery command deadline exceeded"), ms)
+      let goneSince: number | undefined
+      let exitSeen = false
+      const poll = setInterval(() => {
+        if (exitSeen || !proc.pid || processAlive(proc.pid)) {
+          goneSince = undefined
+          return
+        }
+        goneSince ??= Date.now()
+        if (Date.now() - goneSince >= EXIT_GRACE_MS) stop("Discovery command ended without reporting an exit status")
+      }, EXIT_POLL_MS)
+      poll.unref?.()
       const collect = (target: Buffer[], chunk: Buffer) => {
         if (stopped || settled) return
         const remaining = OUTPUT_LIMIT - bytes
@@ -75,6 +91,9 @@ export function defaultRun(argv: string[], timeoutMs: number, signal?: AbortSign
       proc.on("error", (error) => {
         stopped = `Discovery command failed to start: ${error.message}`
         finish(1)
+      })
+      proc.on("exit", () => {
+        exitSeen = true
       })
       proc.on("close", (code) => finish(code ?? 1))
       signal?.addEventListener("abort", abort, { once: true })
