@@ -29,6 +29,19 @@
         "@opencode/plugin",
       ],
     },
+    "plugins/chezmoi": {
+      "name": "@srobroek/opencode-chezmoi",
+      "version": "0.1.0",
+      "devDependencies": {
+        "@srobroek/opencode-lib": "workspace:*",
+      },
+      "peerDependencies": {
+        "@opencode/plugin": "^2.1.4",
+      },
+      "optionalPeers": [
+        "@opencode/plugin",
+      ],
+    },
     "plugins/dep-update": {
       "name": "@srobroek/opencode-dep-update",
       "version": "0.1.0",
@@ -467,6 +480,8 @@
     "@smithy/util-utf8": ["@smithy/util-utf8@4.2.2", "", { "dependencies": { "@smithy/util-buffer-from": "^4.2.2", "tslib": "^2.6.2" } }, "sha512-75MeYpjdWRe8M5E3AW0O4Cx3UadweS+cwdXjwYGBW5h/gxxnbeZ877sLPX/ZJA9GVTlL/qG0dXP29JWFCD1Ayw=="],
 
     "@srobroek/opencode-beads": ["@srobroek/opencode-beads@workspace:plugins/beads"],
+
+    "@srobroek/opencode-chezmoi": ["@srobroek/opencode-chezmoi@workspace:plugins/chezmoi"],
 
     "@srobroek/opencode-dep-update": ["@srobroek/opencode-dep-update@workspace:plugins/dep-update"],
 

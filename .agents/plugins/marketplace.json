@@ -5,6 +5,18 @@
   },
   "plugins": [
     {
+      "name": "chezmoi",
+      "source": {
+        "source": "local",
+        "path": "./plugins/chezmoi"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "development"
+    },
+    {
       "name": "whats-new",
       "source": {
         "source": "local",
