@@ -14,9 +14,15 @@
     "plugins/example": {
       "name": "@srobroek/opencode-example",
       "version": "0.1.0",
+      "devDependencies": {
+        "@srobroek/opencode-lib": "workspace:*",
+      },
       "peerDependencies": {
         "@opencode/plugin": "^2.1.4",
       },
+      "optionalPeers": [
+        "@opencode/plugin",
+      ],
     },
     "plugins/lib": {
       "name": "@srobroek/opencode-lib",

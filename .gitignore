@@ -6,9 +6,8 @@
 .idea/
 *.swp
 
-# Dependencies and build output
+# Dependencies. Plugin build output (plugins/*/dist) is committed; see AGENTS.md.
 node_modules/
-dist/
 
 # Beads / Dolt runtime state. .beads/.gitignore owns the files inside .beads/.
 .dolt/
