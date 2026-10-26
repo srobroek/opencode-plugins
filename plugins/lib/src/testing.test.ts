@@ -114,6 +114,20 @@ describe("createFakeContext", () => {
     await expect(session.get({ sessionID: "ses_missing" })).rejects.toThrow("no session")
   })
 
+  test("command transforms add commands and prompts are recorded", async () => {
+    const fake = createFakeContext()
+    const ran: string[] = []
+    const registration = await fake.context.command.transform((editor) => {
+      editor.add({ name: "lib-cmd", execute: async (input) => void ran.push(input.prompt.text) })
+    })
+    await fake.commands.get("lib-cmd")?.execute({ sessionID: "ses_a", prompt: { text: "args" } } as never)
+    expect(ran).toEqual(["args"])
+    await fake.context.session.prompt({ sessionID: "ses_a", text: "hello" })
+    expect(fake.calls.at(-1)).toEqual({ method: "session.prompt", input: { sessionID: "ses_a", text: "hello" } })
+    await registration.dispose()
+    expect(fake.commands.size).toBe(0)
+  })
+
   test("session.list filters and pages like the host; context returns stored messages", async () => {
     const fake = createFakeContext({
       sessions: [

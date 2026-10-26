@@ -29,6 +29,7 @@ export type FakeSession = Loose & { id: string }
 export type FakeSkill = Loose & { id: string }
 export type FakeAssert = Loose & { action: string; resources: ReadonlyArray<string> }
 export type FakeCall = { method: string; input: unknown }
+export type FakeCommand = Loose & { name: string; execute: (input: never) => Promise<void> }
 
 export type FakeContextOptions = {
   /** The project directory reported as `context.location.directory`. */
@@ -58,6 +59,8 @@ export type FakeContext = {
   tools: Map<string, FakeTool>
   /** Agents after every transform, keyed by id. */
   agents: Map<string, FakeAgent>
+  /** Commands added by `command.transform`, keyed by name. */
+  commands: Map<string, FakeCommand>
   /** Every agent id passed to an agent editor's `update`, in call order. */
   agentUpdates: string[]
   /** Every agent editor `default(id)` call, in call order. */
@@ -101,6 +104,7 @@ export function createFakeContext(options: FakeContextOptions = {}): FakeContext
   const messages = new Map<string, ReadonlyArray<unknown>>(Object.entries(options.messages ?? {}))
   const skills = new Map<string, FakeSkill>((options.skills ?? []).map((skill) => [skill.id, { ...skill }]))
   const storage = new Map<string, unknown>(Object.entries(options.storage ?? {}))
+  const commands = new Map<string, FakeCommand>()
   const asserts: FakeAssert[] = []
   const agentUpdates: string[] = []
   const agentDefaults: Array<string | undefined> = []
@@ -178,6 +182,19 @@ export function createFakeContext(options: FakeContextOptions = {}): FakeContext
     }
     callback(editor)
     return register()
+  }
+
+  const commandTransform = async (callback: (editor: unknown) => void): Promise<Registration> => {
+    const added: string[] = []
+    callback({
+      add: (command: FakeCommand) => {
+        commands.set(command.name, { ...command })
+        added.push(command.name)
+      },
+    })
+    return register(() => {
+      for (const name of added) commands.delete(name)
+    })
   }
 
   const permissionAssert = async (input: FakeAssert): Promise<void> => {
@@ -307,6 +324,22 @@ export function createFakeContext(options: FakeContextOptions = {}): FakeContext
     }
   }
 
+  const sessionPrompt = async (input: Loose & { sessionID: string }): Promise<Loose> => {
+    calls.push({ method: "session.prompt", input })
+    return {
+      id: `msg_fake${++sequence}`,
+      sessionID: input.sessionID,
+      time: { created: Date.now() },
+      type: "user",
+      payload: input,
+      delivery: input.delivery ?? "queue",
+    }
+  }
+  const sessionInterrupt = async (input: Loose & { sessionID: string }): Promise<Loose> => {
+    calls.push({ method: "session.interrupt", input })
+    return { interrupted: false }
+  }
+
   const scan = async (input: { prefix: string; after?: string; limit?: number }) => {
     const keys = [...storage.keys()]
       .filter((key) => key.startsWith(input.prefix) && (input.after === undefined || key > input.after))
@@ -336,6 +369,13 @@ export function createFakeContext(options: FakeContextOptions = {}): FakeContext
       create: sessionCreate,
       move: sessionMove,
       synthetic: sessionSynthetic,
+      prompt: sessionPrompt,
+      interrupt: sessionInterrupt,
+    },
+    command: {
+      transform: commandTransform,
+      reload: async () => {},
+      list: async () => [...commands.values()],
     },
     agent: {
       transform: agentTransform,
@@ -361,6 +401,7 @@ export function createFakeContext(options: FakeContextOptions = {}): FakeContext
     context: context as unknown as Context,
     tools,
     agents,
+    commands,
     agentUpdates,
     agentDefaults,
     storage,
