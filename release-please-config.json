@@ -129,6 +129,10 @@
     "plugins/find-tools": {
       "release-type": "node",
       "component": "find-tools"
+    },
+    "plugins/speckit": {
+      "release-type": "node",
+      "component": "speckit"
     }
   }
 }

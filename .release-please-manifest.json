@@ -27,5 +27,6 @@
   "plugins/design": "0.1.0",
   "plugins/safety": "0.1.0",
   "plugins/find-tools": "0.1.0",
-  "plugins/trunk-dev": "0.1.0"
+  "plugins/trunk-dev": "0.1.0",
+  "plugins/speckit": "0.1.0"
 }
