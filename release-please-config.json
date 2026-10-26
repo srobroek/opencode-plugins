@@ -37,6 +37,10 @@
     "plugins/whats-new": {
       "release-type": "node",
       "component": "whats-new"
+    },
+    "plugins/statusline": {
+      "release-type": "node",
+      "component": "statusline"
     }
   }
 }
