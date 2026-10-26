@@ -80,7 +80,7 @@ codex plugin add worktrunk@srobroek-opencode
 | `quality` | Skills `prototype-logic`, `quality-code-design`, `quality-code-policy` (no `adversarial-challenger` agent) |
 | `toolchain` | Thirteen toolchain rule skills |
 | `aws` | Skill `aws-guidance` |
-| `design` | Thirteen design skills (no design agents) |
+| `design` | Thirteen design skills (no design agents, formulas, `design_setup` or `design_impeccable_scan`) |
 | `trunk-dev` | Skills `trunk-dev-workflow`, `trunk-dev-feature-flags`, `trunk-dev-release-setup` (no commit gate, no skip-CI or MR advisories) |
 | `session`, `dep-update`, `journeys`, `delivery`, `beads`, `find-tools`, `speckit` | Not exported: their skills or agents drive OpenCode tools |
 | `whats-new` | Not exported: its skill depends on OpenCode tools and version checks |
