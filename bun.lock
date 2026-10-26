@@ -16,6 +16,16 @@
         "typescript": "7.0.2",
       },
     },
+    "plugins/beads": {
+      "name": "@srobroek/opencode-beads",
+      "version": "0.1.0",
+      "dependencies": {
+        "@srobroek/opencode-lib": "workspace:*",
+      },
+      "peerDependencies": {
+        "@opencode/plugin": "^2.1.4",
+      },
+    },
     "plugins/dep-update": {
       "name": "@srobroek/opencode-dep-update",
       "version": "0.1.0",
@@ -400,6 +410,8 @@
     "@smithy/util-hex-encoding": ["@smithy/util-hex-encoding@4.5.2", "", { "dependencies": { "@smithy/core": "^3.33.2", "tslib": "^2.6.2" } }, "sha512-iq+cW3mAb7vfcxEEpYi3zXKpDtbrIFyanWjQl4zBq4seWD4OSxXDWSfespZxenX6aEaighn+NR3u1nU1DSvs3w=="],
 
     "@smithy/util-utf8": ["@smithy/util-utf8@4.2.2", "", { "dependencies": { "@smithy/util-buffer-from": "^4.2.2", "tslib": "^2.6.2" } }, "sha512-75MeYpjdWRe8M5E3AW0O4Cx3UadweS+cwdXjwYGBW5h/gxxnbeZ877sLPX/ZJA9GVTlL/qG0dXP29JWFCD1Ayw=="],
+
+    "@srobroek/opencode-beads": ["@srobroek/opencode-beads@workspace:plugins/beads"],
 
     "@srobroek/opencode-dep-update": ["@srobroek/opencode-dep-update@workspace:plugins/dep-update"],
 
