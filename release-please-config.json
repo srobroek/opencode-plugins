@@ -21,6 +21,10 @@
     "plugins/model-roles": {
       "release-type": "node",
       "component": "model-roles"
+    },
+    "plugins/worktrunk": {
+      "release-type": "node",
+      "component": "worktrunk"
     }
   }
 }

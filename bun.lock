@@ -41,6 +41,19 @@
         "@opencode/plugin",
       ],
     },
+    "plugins/worktrunk": {
+      "name": "@srobroek/opencode-worktrunk",
+      "version": "0.1.0",
+      "devDependencies": {
+        "@srobroek/opencode-lib": "workspace:*",
+      },
+      "peerDependencies": {
+        "@opencode/plugin": "^2.1.4",
+      },
+      "optionalPeers": [
+        "@opencode/plugin",
+      ],
+    },
   },
   "packages": {
     "@ai-sdk/provider": ["@ai-sdk/provider@3.0.8", "", { "dependencies": { "json-schema": "^0.4.0" } }, "sha512-oGMAgGoQdBXbZqNG0Ze56CHjDZ1IDYOwGYxYjO5KLSlz5HiNQ9udIXsPZ61VWaHGZ5XW/jyjmr6t2xz2jGVwbQ=="],
@@ -244,6 +257,8 @@
     "@srobroek/opencode-lib": ["@srobroek/opencode-lib@workspace:plugins/lib"],
 
     "@srobroek/opencode-model-roles": ["@srobroek/opencode-model-roles@workspace:plugins/model-roles"],
+
+    "@srobroek/opencode-worktrunk": ["@srobroek/opencode-worktrunk@workspace:plugins/worktrunk"],
 
     "@standard-schema/spec": ["@standard-schema/spec@1.1.0", "", {}, "sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w=="],
 
