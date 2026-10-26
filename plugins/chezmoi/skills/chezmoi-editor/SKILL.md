@@ -11,7 +11,7 @@ source first; do not edit the rendered live target as the durable fix.
 In OpenCode, the chezmoi plugin refuses `edit`, `write` and `patch` calls that
 target a managed file, and common literal shell writes (`>`/`>>` redirects, `tee`,
 `cp`/`mv`, `sed -i`, `perl -i`). The refusal names the source path to edit. It reads
-literal words only: writes through `sh -c`, `eval`, scripts, variables other than
+literal words only: writes through `sh -c`, the shell eval builtin, scripts, variables other than
 `$HOME`, or other tools pass unchecked, so resolve the source yourself.
 
 ## Workflow
