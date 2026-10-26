@@ -162,4 +162,30 @@ describe("createFakeContext", () => {
     expect(seen).toEqual([{ type: "one" }, { type: "two" }])
     expect(fake.calls).toEqual([{ method: "event.subscribe", input: undefined }])
   })
+
+  test("skill transforms add skills and dispose them; existing skills stay", async () => {
+    const fake = createFakeContext({ skills: [{ id: "host", content: "host" }] })
+    const registration = await fake.context.skill.transform((editor) => {
+      editor.add({ id: "mine", name: "mine", path: "/p/SKILL.md", content: "body" } as never)
+      editor.update("host", (skill) => {
+        skill.autoinvoke = true
+      })
+    })
+    expect([...fake.skills.keys()]).toEqual(["host", "mine"])
+    expect(fake.skills.get("host")).toMatchObject({ autoinvoke: true })
+    await registration.dispose()
+    expect([...fake.skills.keys()]).toEqual(["host"])
+  })
+
+  test("permission.assert records each input and applies the decision", async () => {
+    const fake = createFakeContext({
+      assert: (input) => {
+        if (input.resources.includes("no")) throw new Error("rejected")
+      },
+    })
+    const assert = fake.context.permission.assert
+    await assert({ sessionID: "ses_a", action: "deploy", resources: ["yes"] })
+    await expect(assert({ sessionID: "ses_a", action: "deploy", resources: ["no"] })).rejects.toThrow("rejected")
+    expect(fake.asserts.map((input) => input.resources)).toEqual([["yes"], ["no"]])
+  })
 })
