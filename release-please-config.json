@@ -93,6 +93,10 @@
     "plugins/project": {
       "release-type": "node",
       "component": "project"
+    },
+    "plugins/architecture": {
+      "release-type": "node",
+      "component": "architecture"
     }
   }
 }

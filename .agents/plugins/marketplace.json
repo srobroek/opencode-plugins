@@ -5,6 +5,18 @@
   },
   "plugins": [
     {
+      "name": "architecture",
+      "source": {
+        "source": "local",
+        "path": "./plugins/architecture"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "development"
+    },
+    {
       "name": "chezmoi",
       "source": {
         "source": "local",

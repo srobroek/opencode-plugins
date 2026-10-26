@@ -1,0 +1,12 @@
+{
+  "name": "architecture",
+  "version": "0.1.0",
+  "description": "Architecture skills: capability-first top-level layout, ownership boundaries, and durable docs/ project knowledge.",
+  "author": {
+    "name": "Sjors Robroek",
+    "url": "https://github.com/srobroek"
+  },
+  "homepage": "https://github.com/srobroek/opencode-plugins/tree/main/plugins/architecture",
+  "repository": "https://github.com/srobroek/opencode-plugins",
+  "license": "Apache-2.0"
+}

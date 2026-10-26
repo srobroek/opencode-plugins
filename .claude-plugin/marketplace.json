@@ -8,6 +8,13 @@
   },
   "plugins": [
     {
+      "name": "architecture",
+      "source": "./plugins/architecture",
+      "description": "Architecture skills: capability-first top-level layout, ownership boundaries, and durable docs/ project knowledge.",
+      "version": "0.1.0",
+      "category": "development"
+    },
+    {
       "name": "chezmoi",
       "source": "./plugins/chezmoi",
       "description": "Refuse edits and shell writes to chezmoi-managed live files, naming the source to edit, plus the chezmoi-editor skill.",

@@ -18,5 +18,6 @@
   "plugins/delivery": "0.1.0",
   "plugins/debate": "0.1.0",
   "plugins/eli5": "0.1.0",
-  "plugins/project": "0.1.0"
+  "plugins/project": "0.1.0",
+  "plugins/architecture": "0.1.0"
 }
