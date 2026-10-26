@@ -10,7 +10,7 @@ Target host: OpenCode 2.1.4. One row per plugin. "Port" means rewrite against
 | architecture | Port (content) | `architect` subagent + 3 skills | Rules become skills; `@plan` model role becomes an explicit model. |
 | authoring | Drop | — | Teaches the omp extension API. Rewrite for V2 only if needed. |
 | aws | Port (config) | `mcp.servers` + instructions | `aws-guidance` to instructions; drop `aws-skill-first`. |
-| beads | Port (core) | `plugins/beads` | Shell gates on `execute.before`/`after`, per-call `BEADS_DIR`, actor from session parentID, lease heartbeat on `session.execution.*` events, stop nudge via `session.synthetic`, `bd prime` via `context` hook. Absorbs the supervisor's stall and stop nudges. |
+| beads | Port (core) | `plugins/beads` | Shell gates on `execute.before`/`after`, per-call `BEADS_DIR`, actor from session parentID, lease heartbeat on `session.execution.*` events, stop nudge via `session.synthetic`, `bd prime` via `context` hook. |
 | build | Port (content) | `external-repo-worker` subagent | Frontmatter only. |
 | chezmoi | Port | `plugins/chezmoi` + skill | Managed-file guard on edit and shell writes. |
 | debate | As-is | skills | `debate`, `grilling`, `to-questionnaire`. Borrow octto question types. |
@@ -28,7 +28,7 @@ Target host: OpenCode 2.1.4. One row per plugin. "Port" means rewrite against
 | safety | Split | permissions config + `plugins/safety` | 8 rules become permission rules; branch-delete and detached-worktree gates on `permission.hook("evaluate")`; close-keywords rewrite on `execute.before`. Test every deny pattern first. |
 | session | Replace | built-in sessions, export/import | |
 | speckit | Port (core) | `plugins/speckit` + skills + 2 subagents | spec-kit skills layout (`--integration codex`); `tasks.md` guard on `execute.before`; taskstoissues blocked on the skill tool; implement redirected via `skill.transform`. Fix the 4 harness-independent bugs first. |
-| supervisor | Merge into beads | — | Native background subagents already notify the parent. |
+| supervisor | Drop | refill sentence in instructions | V2 delivers background results to the parent inbox, wakes an idle parent and survives restarts. On omp its wake and settled nudges duplicated native delivery, stall alerts were mostly sleep artifacts, and the stop reminder led to a dispatch in 2 of 20 cases. Build a stall watchdog only if hung children show up. |
 | toolchain | Port (content) | instructions + skills + permissions | tfstate guard to permissions. |
 | trunk-dev | Port | `plugins/trunk-dev` + skill | Commit gate and MR advisory. |
 | typescript | Replace | built-in formatter + skill | |
@@ -40,7 +40,7 @@ Target host: OpenCode 2.1.4. One row per plugin. "Port" means rewrite against
 | Plugin | Purpose | Effort |
 | --- | --- | --- |
 | `permissions` | Shared permission and policy config replacing the simple shell guards | S |
-| `rules` | Tool-scoped rule engine replacing TTSR (block or advise on `execute.before`/`after`) and glob-scoped instruction injection via the `context` hook | M |
+| `rules` | Small advisory-only plugin: about 6 `never` rules re-triggered on tool output via `execute.after`, kept as markdown data. Build after the gates. TTSR session data: 13 of 24 rules never fired, no text-scoped rule produced a useful injection, and tool-scoped rules are better as `execute.before` gates or permissions. | S |
 | `subagent-worktree` | `execute.before` on `subagent`: create worktree (worktrunk strategy), create child, `session.move`, continue via `sessionID`; explicit `subagent_merge` (`wt merge --no-squash --no-ff`) | M |
 | `lsp-hashline` | LSP diagnostics after edits plus an `lsp` tool; hashline `read`/`edit` for an allowlist of models | L |
 | `octto` | Browser questionnaire UI, ported from upstream (backlog `opencode-plugins-3go`) | M |
