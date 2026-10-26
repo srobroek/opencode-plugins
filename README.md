@@ -5,7 +5,7 @@ OpenCode V2 plugins by Sjors Robroek. This is the OpenCode counterpart of
 
 | Field | Value |
 | --- | --- |
-| Status | Early. Plugins: `example`, `model-roles`, `worktrunk`, `session`, `dep-update`, `whats-new`, `statusline`, `beads`, `goal`, `lsp`, `subagent-worktree`, `parley`, `chezmoi`, `languages`, `rust`, `journeys`, `delivery`, `debate`, `eli5`, `project`, `architecture`, `build`, `quality`, `toolchain`, `aws`, `design`, `safety`. |
+| Status | Early. Plugins: `example`, `model-roles`, `worktrunk`, `session`, `dep-update`, `whats-new`, `statusline`, `beads`, `goal`, `lsp`, `subagent-worktree`, `parley`, `chezmoi`, `languages`, `rust`, `journeys`, `delivery`, `debate`, `eli5`, `project`, `architecture`, `build`, `quality`, `toolchain`, `aws`, `design`, `safety`, `find-tools`. |
 | Host | OpenCode 2.1.4 or later (`@opencode/plugin` 2.x) |
 | License | Apache-2.0 |
 
@@ -81,7 +81,7 @@ codex plugin add worktrunk@srobroek-opencode
 | `toolchain` | Thirteen toolchain rule skills |
 | `aws` | Skill `aws-guidance` |
 | `design` | Thirteen design skills (no design agents) |
-| `session`, `dep-update`, `journeys`, `delivery`, `beads` | Not exported: their skills or agents drive OpenCode tools |
+| `session`, `dep-update`, `journeys`, `delivery`, `beads`, `find-tools` | Not exported: their skills or agents drive OpenCode tools |
 | `whats-new` | Not exported: its skill depends on OpenCode tools and version checks |
 | `example`, `goal`, `lsp`, `model-roles`, `parley`, `safety`, `statusline`, `subagent-worktree` | Not exported: OpenCode code only |
 | `build` | Not exported: agent only |

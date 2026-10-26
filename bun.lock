@@ -160,6 +160,19 @@
         "@opencode/plugin",
       ],
     },
+    "plugins/find-tools": {
+      "name": "@srobroek/opencode-find-tools",
+      "version": "0.1.0",
+      "devDependencies": {
+        "@srobroek/opencode-lib": "workspace:*",
+      },
+      "peerDependencies": {
+        "@opencode/plugin": "^2.1.4",
+      },
+      "optionalPeers": [
+        "@opencode/plugin",
+      ],
+    },
     "plugins/goal": {
       "name": "@srobroek/opencode-goal",
       "version": "0.1.0",
@@ -682,6 +695,8 @@
     "@srobroek/opencode-eli5": ["@srobroek/opencode-eli5@workspace:plugins/eli5"],
 
     "@srobroek/opencode-example": ["@srobroek/opencode-example@workspace:plugins/example"],
+
+    "@srobroek/opencode-find-tools": ["@srobroek/opencode-find-tools@workspace:plugins/find-tools"],
 
     "@srobroek/opencode-goal": ["@srobroek/opencode-goal@workspace:plugins/goal"],
 
