@@ -24,5 +24,6 @@
   "plugins/quality": "0.1.0",
   "plugins/toolchain": "0.1.0",
   "plugins/aws": "0.1.0",
-  "plugins/design": "0.1.0"
+  "plugins/design": "0.1.0",
+  "plugins/safety": "0.1.0"
 }
