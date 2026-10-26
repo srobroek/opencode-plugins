@@ -1,7 +1,8 @@
 # @srobroek/opencode-lib
 
 Shared helpers for the plugins in this repository. This package is internal: it is
-not a plugin, has no `Plugin.define`, and is not released on its own.
+not a plugin, has no `Plugin.define`, and is not released on its own. Plugins list it as a `workspace:*` dev dependency and
+`scripts/build.ts` inlines it into their `dist/`.
 
 Import a module by path, for example `@srobroek/opencode-lib/tool-targets`, or
 everything except the test helpers from `@srobroek/opencode-lib`.
