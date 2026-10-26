@@ -16,6 +16,18 @@ It does three things:
 opencode plugin add 'github:srobroek/opencode-plugins::path:plugins/worktrunk'
 ```
 
+Claude Code and Codex install the skills from this repository's marketplace:
+
+```sh
+claude plugin marketplace add srobroek/opencode-plugins
+claude plugin install worktrunk@srobroek-opencode
+
+codex plugin marketplace add srobroek/opencode-plugins
+codex plugin add worktrunk@srobroek-opencode
+```
+
+Claude Code and Codex get the two skills only; the worktree strategy and merge gate are OpenCode code.
+
 Needs `wt` and `git` on `PATH`. The preflight skill also needs `python3` (3.11 or later).
 
 ## Options

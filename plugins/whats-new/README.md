@@ -12,6 +12,18 @@ Ported from the omp-plugins `whats-new` plugin.
 opencode plugin add 'github:srobroek/opencode-plugins::path:plugins/whats-new'
 ```
 
+Claude Code and Codex install the skills from this repository's marketplace:
+
+```sh
+claude plugin marketplace add srobroek/opencode-plugins
+claude plugin install whats-new@srobroek-opencode
+
+codex plugin marketplace add srobroek/opencode-plugins
+codex plugin add whats-new@srobroek-opencode
+```
+
+Claude Code and Codex get the skill only. The `version_gap_scan` tool and the report-only `whats-new` agent are OpenCode code: there, name the target yourself (the skill has no dependency scanner) and nothing enforces report-only.
+
 ## Agent
 
 The plugin adds a `whats-new` agent (mode `all`, so you can switch to it or launch

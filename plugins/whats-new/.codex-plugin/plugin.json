@@ -1,0 +1,19 @@
+{
+  "name": "whats-new",
+  "version": "0.1.0",
+  "description": "Research breaking changes, deprecations and new features between two versions, report-only.",
+  "author": {
+    "name": "Sjors Robroek",
+    "url": "https://github.com/srobroek"
+  },
+  "homepage": "https://github.com/srobroek/opencode-plugins/tree/main/plugins/whats-new",
+  "repository": "https://github.com/srobroek/opencode-plugins",
+  "license": "Apache-2.0",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Whats New",
+    "shortDescription": "Research breaking changes, deprecations and new features between two versions, report-only.",
+    "developerName": "Sjors Robroek",
+    "category": "development"
+  }
+}
