@@ -20,6 +20,9 @@ its frontmatter.
 Modifications:
   1. Cheap fact lookups (a few reads, one grep) run inline instead of in a sub-agent.
   2. The frontmatter description follows this repository's authoring contract.
+  3. References to other skills name the skill instead of an Oh My Pi skill URI.
+  4. Rounds go through the parley tool when installed, else the host's question tool,
+     else upstream's markdown format; questions carry a node id, kind and rationale.
 
 Why vendored: `debate` routes deeper interviews to `grilling`. Vendoring it beside
 `debate` keeps that route working after the mattpocock-skills marketplace is removed.
