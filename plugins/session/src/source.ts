@@ -10,6 +10,7 @@
  */
 
 import type { Context } from "@opencode/plugin/promise/plugin"
+import { supervise } from "@srobroek/opencode-lib/subprocess"
 import { isRecord, type NormalizeOptions, type Transcript, toTranscript } from "./transcript.ts"
 
 export type SourceKind = "opencode" | "api" | "omp"
@@ -116,11 +117,9 @@ export type ApiRunner = (path: string) => Promise<string>
 export function spawnApiRunner(command: readonly string[] = ["opencode"], args: readonly string[] = []): ApiRunner {
   return async (path) => {
     const child = Bun.spawn([...command, "api", ...args, "get", path], { stdout: "pipe", stderr: "pipe", stdin: "ignore" })
-    const [stdout, stderr, code] = await Promise.all([
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-      child.exited,
-    ])
+    const run = await supervise(child)
+    if (run.kind !== "exited") throw new Error(`opencode api get ${path} ended without reporting an exit status`)
+    const { exitCode: code, stdout, stderr } = run
     if (code !== 0) throw new Error(`opencode api get ${path} exited ${code}: ${stderr.trim().slice(0, 300)}`)
     return stdout
   }
