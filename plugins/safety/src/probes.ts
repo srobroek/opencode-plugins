@@ -7,6 +7,8 @@
  * slow repository never blocks the server's event loop.
  */
 
+import { supervise } from "@srobroek/opencode-lib/subprocess"
+
 /** Per subprocess. */
 export const CALL_TIMEOUT_MS = 10_000
 /** For every subprocess one decision starts. */
@@ -17,7 +19,10 @@ export class ProbeTimeout extends Error {}
 
 export type SpawnResult = { exitCode: number; stdout: string }
 
-/** Runs `argv` in `cwd` for at most `timeoutMs`: null when it cannot start, ProbeTimeout when it outlives the bound. */
+/**
+ * Runs `argv` in `cwd` for at most `timeoutMs`: null when it cannot start, ProbeTimeout
+ * when it outlives the bound or ends without its exit status being reported.
+ */
 export type Spawner = (
   argv: string[],
   cwd: string,
@@ -43,18 +48,9 @@ export const spawnWithin: Spawner = async (argv, cwd, timeoutMs, env) => {
   } catch {
     return null
   }
-  let timedOut = false
-  const timer = setTimeout(() => {
-    timedOut = true
-    child.kill("SIGKILL")
-  }, timeoutMs)
-  try {
-    const [exitCode, stdout] = await Promise.all([child.exited, new Response(child.stdout).text()])
-    if (timedOut) throw new ProbeTimeout(label(argv))
-    return { exitCode, stdout }
-  } finally {
-    clearTimeout(timer)
-  }
+  const run = await supervise(child, { timeoutMs })
+  if (run.kind !== "exited") throw new ProbeTimeout(label(argv))
+  return { exitCode: run.exitCode, stdout: run.stdout }
 }
 
 export type Budget = {
