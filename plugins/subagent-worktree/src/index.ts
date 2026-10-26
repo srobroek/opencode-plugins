@@ -1,0 +1,355 @@
+import { Plugin } from "@opencode/plugin"
+import type { Context } from "@opencode/plugin/promise/plugin"
+import { type Result, Error as ToolError } from "@opencode/plugin/promise/tool"
+import { createGit, type Git, type Runner, spawnRunner } from "./git.ts"
+import {
+  annotation,
+  decideIsolation,
+  decideMerge,
+  isConflict,
+  type Lane,
+  laneKey,
+  MERGE_TOOL,
+  mergeArgs,
+  type Options,
+  parseLane,
+  readOptions,
+  readSubagentInput,
+  rewritePrompt,
+  SUBAGENT_TOOL,
+  shouldRemove,
+  tail,
+  worktreeName,
+} from "./lane.ts"
+
+export * from "./git.ts"
+export * from "./lane.ts"
+
+export const MERGE_DESCRIPTION =
+  "Merge a subagent's worktree branch back. The subagent tool result names the lane (branch, base, sessionID). " +
+  'method "wt-merge" runs `wt merge <target> --no-squash --no-ff --yes` from the subagent worktree, keeping its commits, ' +
+  "and removes the worktree on success; a conflict keeps the worktree and reports the output. " +
+  'method "none" only reports the lane status. The worktree must be committed and clean.'
+
+export const MERGE_INPUT = {
+  type: "object",
+  additionalProperties: false,
+  required: ["sessionID", "method"],
+  properties: {
+    sessionID: { type: "string", description: "The subagent's sessionID from the subagent tool result" },
+    method: { type: "string", enum: ["wt-merge", "none"] },
+    target: { type: "string", description: "Branch to merge into. Defaults to the branch the lane was created from." },
+  },
+} as const
+
+type MergeInput = { sessionID: string; method: "wt-merge" | "none"; target?: string }
+
+type Session = {
+  id: string
+  parentID?: string
+  projectID: string
+  model?: { id: string; providerID: string; variant?: string }
+  location: { directory: string }
+}
+
+type AgentInfo = { id: string; name?: string; mode?: string; model?: Session["model"] }
+
+/** Test seams; the host never passes these. */
+export type Overrides = { run?: Runner; suffix?: () => string }
+
+const randomSuffix = () => crypto.randomUUID().slice(0, 6)
+
+function appendContent(content: Result["content"], note: string): Result["content"] {
+  if (content === undefined) return note
+  if (typeof content === "string") return `${content}\n\n${note}`
+  return [...content, { type: "text", text: note }]
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+export function createLanes(ctx: Context, options: Options, git: Git, suffix: () => string) {
+  const load = async (child: string) => parseLane(await ctx.storage.get(laneKey(child)))
+  const save = (lane: Lane) => ctx.storage.set(laneKey(lane.child), lane)
+
+  const getSession = (sessionID: string) =>
+    ctx.session.get({ sessionID } as never).then(
+      (session) => session as unknown as Session,
+      () => undefined,
+    )
+
+  const getAgent = (agentID: string, directory: string) =>
+    ctx.agent.get({ agentID, location: { directory } } as never).then(
+      (output) => {
+        const value = output as unknown as { data?: AgentInfo } | AgentInfo | undefined
+        const agent = value && "data" in value ? value.data : (value as AgentInfo | undefined)
+        return typeof agent?.id === "string" ? agent : undefined
+      },
+      () => undefined,
+    )
+
+  const assertSubagent = (event: { sessionID: string; agent: string; messageID: string; id: string }, agent: string) =>
+    ctx.permission.assert({
+      sessionID: event.sessionID,
+      agent: event.agent,
+      action: SUBAGENT_TOOL,
+      resources: [agent],
+      save: [agent],
+      source: { type: "tool", messageID: event.messageID, id: event.id },
+    } as never)
+
+  const removeWorktree = async (projectID: string, directory: string, force: boolean) => {
+    await ctx.worktree.remove({ projectID, directory, force } as never)
+  }
+
+  /** Create a worktree from the caller's checkout; the caller cleans it up if a later step fails. */
+  const provision = async (parent: Session, description: string) => {
+    const parentDir = parent.location.directory
+    const base = await git.commit(parentDir, options.base)
+    if (!base) throw new Error(`subagent-worktree: cannot resolve base ${options.base} in ${parentDir}`)
+    const target =
+      options.base !== "HEAD" && (await git.isLocalBranch(parentDir, options.base))
+        ? options.base
+        : await git.branch(parentDir)
+    const name = worktreeName(description, suffix())
+    const created = await ctx.worktree.create({ projectID: parent.projectID, name, branch: base } as never)
+    const directory = (created as { directory: string }).directory
+    try {
+      let branch = await git.branch(directory)
+      // OpenCode's git strategy checks out a detached HEAD; give the lane a branch to merge.
+      if (!branch) {
+        if (!(await git.createBranch(directory, name))) throw new Error(`cannot create branch ${name} in ${directory}`)
+        branch = name
+      }
+      return { directory, branch, base, parentDir, ...(target ? { target } : {}) }
+    } catch (error) {
+      await removeWorktree(parent.projectID, directory, true).catch(() => {})
+      throw error
+    }
+  }
+
+  const before = async (event: {
+    tool: string
+    sessionID: string
+    agent: string
+    messageID: string
+    id: string
+    input: unknown
+  }) => {
+    if (event.tool !== SUBAGENT_TOOL) return
+    const input = readSubagentInput(event.input)
+    if (!input) return
+    if (input.sessionID !== undefined) return revive(event, input.sessionID, input.prompt)
+
+    const parent = await getSession(event.sessionID)
+    if (!parent) return
+    const agent = await getAgent(input.agent, parent.location.directory)
+    const decision = decideIsolation({
+      tool: event.tool,
+      input,
+      options,
+      agent,
+      callerIsChild: Boolean(parent.parentID),
+      isGit: await git.isWorkTree(parent.location.directory),
+    })
+    if (!decision.isolate || !agent) return
+
+    await assertSubagent(event, agent.id)
+    const worktree = await provision(parent, input.description || input.agent)
+    let child: string | undefined
+    try {
+      const model = agent.model ?? parent.model
+      const created = await ctx.session.create({
+        parentID: event.sessionID,
+        title: input.description,
+        agent: agent.id,
+        ...(model ? { model } : {}),
+      } as never)
+      child = (created as unknown as Session).id
+      await ctx.session.move({ sessionID: child, directory: worktree.directory } as never)
+      const lane: Lane = {
+        child,
+        parent: event.sessionID,
+        projectID: parent.projectID,
+        ...worktree,
+        ...(input.description ? { title: input.description } : {}),
+        state: "active",
+      }
+      await save(lane)
+      event.input = { ...(event.input as object), sessionID: child, prompt: rewritePrompt(input.prompt, lane, true) }
+    } catch (error) {
+      if (child) await ctx.session.remove({ sessionID: child } as never).catch(() => {})
+      await removeWorktree(parent.projectID, worktree.directory, true).catch(() => {})
+      throw new Error(`subagent-worktree: ${errorMessage(error)}`)
+    }
+  }
+
+  /** Continuing a lane whose worktree was removed gives the child a fresh one. */
+  const revive = async (
+    event: { sessionID: string; agent: string; messageID: string; id: string; input: unknown },
+    child: string,
+    prompt: string,
+  ) => {
+    const lane = await load(child)
+    if (!lane || lane.state === "active" || lane.parent !== event.sessionID) return
+    const parent = await getSession(event.sessionID)
+    const session = await getSession(child)
+    if (!parent || !session || !(await git.isWorkTree(parent.location.directory))) return
+    if (session.parentID !== event.sessionID) return
+    const agent = (event.input as { agent?: string }).agent ?? ""
+    await assertSubagent(event, (await getAgent(agent, parent.location.directory))?.id ?? agent)
+    const worktree = await provision(parent, lane.title ?? "task")
+    try {
+      await ctx.session.move({ sessionID: child, directory: worktree.directory } as never)
+      const next: Lane = { ...lane, ...worktree, state: "active" }
+      if (!worktree.target) delete next.target
+      await save(next)
+      event.input = { ...(event.input as object), prompt: rewritePrompt(prompt, next, false) }
+    } catch (error) {
+      await removeWorktree(parent.projectID, worktree.directory, true).catch(() => {})
+      throw new Error(`subagent-worktree: ${errorMessage(error)}`)
+    }
+  }
+
+  /** Remove an empty lane's worktree and move the child back to the caller's checkout. */
+  const retire = async (lane: Lane, state: "removed" | "merged") => {
+    const next: Lane = { ...lane, state }
+    await ctx.session.move({ sessionID: lane.child, directory: lane.parentDir } as never).catch(() => {})
+    await save(next)
+    return next
+  }
+
+  const after = async (
+    event: { tool: string; input: unknown } & (
+      | { status: "completed"; result: Result }
+      | { status: "error"; error: InstanceType<typeof ToolError> }
+    ),
+  ) => {
+    if (event.tool !== SUBAGENT_TOOL) return
+    const metadata = event.status === "completed" ? (event.result.metadata ?? {}) : (event.error.metadata ?? {})
+    const child =
+      typeof metadata.sessionID === "string" ? metadata.sessionID : readSubagentInput(event.input)?.sessionID
+    if (!child) return
+    let lane = await load(child)
+    if (lane?.state !== "active") return
+
+    const resultStatus = event.status === "error" ? "error" : metadata.status === "running" ? "running" : "completed"
+    const status = await git.status(lane.directory, lane.base)
+    let removed = false
+    if (shouldRemove(status, resultStatus)) {
+      try {
+        await removeWorktree(lane.projectID, lane.directory, false)
+        await git.deleteBranch(lane.parentDir, lane.branch)
+        lane = await retire(lane, "removed")
+        removed = true
+      } catch {}
+    }
+    const note = annotation(lane, status, removed)
+    const worktree = { branch: lane.branch, base: lane.base, directory: lane.directory, state: lane.state }
+    if (event.status === "completed") {
+      event.result = {
+        ...event.result,
+        content: appendContent(event.result.content, note),
+        metadata: { ...metadata, worktree },
+      }
+    } else {
+      const previous = event.error
+      event.error = new ToolError({
+        message: `${previous.message}\n\n${note}`,
+        ...(previous.error === undefined ? {} : { error: previous.error }),
+        metadata: { ...metadata, worktree },
+      })
+    }
+  }
+
+  const merge = async (
+    input: MergeInput,
+    tool: { sessionID: string; agent: string; messageID: string; id: string },
+  ): Promise<Result> => {
+    const lane = await load(input.sessionID)
+    await ctx.permission.assert({
+      sessionID: tool.sessionID,
+      agent: tool.agent,
+      action: MERGE_TOOL,
+      resources: [lane?.branch ?? input.sessionID],
+      source: { type: "tool", messageID: tool.messageID, id: tool.id },
+    } as never)
+    const status = lane && lane.state === "active" ? await git.status(lane.directory, lane.base) : undefined
+    if (input.method === "none") {
+      if (!lane) return { content: `${MERGE_TOOL}: no worktree lane for session ${input.sessionID}`, metadata: { ok: false } }
+      return { content: annotation(lane, status, false), metadata: { ok: true, lane } }
+    }
+    const decision = decideMerge({
+      lane,
+      caller: tool.sessionID,
+      status,
+      ...(input.target ? { target: input.target } : {}),
+    })
+    if (decision.refuse || !lane) {
+      const reason = decision.refuse ? decision.reason : "no lane"
+      return { content: `${MERGE_TOOL}: not merged: ${reason}`, metadata: { ok: false, reason } }
+    }
+    const argv = mergeArgs(lane.directory, decision.target)
+    const result = await git.run(argv)
+    const output = tail(`${result.stdout}\n${result.stderr}`)
+    if (result.code !== 0) {
+      const conflict = isConflict(output)
+      const what = result.code === 127 ? "wt is not installed" : conflict ? "merge conflict" : `wt merge exited ${result.code}`
+      return {
+        content: [
+          `${MERGE_TOOL}: not merged (${what}). The worktree is kept at ${lane.directory} on branch ${lane.branch}.`,
+          conflict ? `Resolve the conflict there (git -C ${lane.directory} status), commit, and call ${MERGE_TOOL} again.` : "",
+          `$ ${argv.join(" ")}`,
+          output,
+        ]
+          .filter(Boolean)
+          .join("\n"),
+        metadata: { ok: false, conflict, code: result.code },
+      }
+    }
+    const merged = await retire(lane, "merged")
+    await ctx.worktree.refresh({ projectID: lane.projectID } as never).catch(() => {})
+    return {
+      content: `${MERGE_TOOL}: merged ${lane.branch} into ${decision.target} (${status?.ahead ?? 0} commits, --no-squash --no-ff).\n$ ${argv.join(" ")}\n${output}`,
+      metadata: { ok: true, lane: merged },
+    }
+  }
+
+  return { before, after, merge, load }
+}
+
+export function createPlugin(overrides: Overrides = {}) {
+  return Plugin.define({
+    id: "srobroek.subagent-worktree",
+    async setup(ctx) {
+      const options = readOptions(ctx.options)
+      const git = createGit(overrides.run ?? spawnRunner)
+      const lanes = createLanes(ctx, options, git, overrides.suffix ?? randomSuffix)
+      const registrations: { dispose: () => Promise<void> }[] = []
+      const cleanup = async () => {
+        for (const registration of registrations.reverse()) await registration.dispose()
+      }
+      try {
+        registrations.push(await ctx.tool.hook("execute.before", lanes.before))
+        registrations.push(await ctx.tool.hook("execute.after", lanes.after as never))
+        registrations.push(
+          await ctx.tool.transform((editor) => {
+            editor.add({
+              name: MERGE_TOOL,
+              description: MERGE_DESCRIPTION,
+              input: MERGE_INPUT,
+              execute: async (raw, tool) => lanes.merge(raw as MergeInput, tool),
+            })
+          }),
+        )
+      } catch (error) {
+        await cleanup()
+        throw error
+      }
+      return cleanup
+    },
+  })
+}
+
+export default createPlugin()
