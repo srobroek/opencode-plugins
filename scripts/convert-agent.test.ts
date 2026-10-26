@@ -4,6 +4,7 @@ import { join } from "node:path"
 import {
   buildPermissions,
   convertAgent,
+  mapRole,
   mapTools,
   parseArgs,
   parseFrontmatter,
@@ -235,10 +236,35 @@ describe("convertAgent", () => {
     for (const name of ["architect", "implementer", "pr-reviewer", "ui-ux-specialist"]) {
       const agent = convertAgent(fixture(name), { roles })
       const { data, body } = parseFrontmatter(renderAgent(agent))
-      expect(Object.keys(data).every((key) => ["description", "mode", "model", "permissions"].includes(key))).toBe(true)
+      expect(Object.keys(data).every((key) => ["description", "mode", "model", "request", "permissions"].includes(key))).toBe(
+        true,
+      )
       expect(data).toEqual({ ...agent.frontmatter })
       expect(body.trim()).toBe(agent.body.trim())
     }
+  })
+
+  test("writes the role header and, without a roles file, no model", () => {
+    const agent = convertAgent(fixture("implementer"), {})
+    expect(agent.frontmatter.model).toBeUndefined()
+    expect(agent.frontmatter.request).toEqual({ headers: { "x-opencode-model-role": "task" } })
+    expect(agent.warnings).toContain("thinking-level: medium dropped; the task role picks the variant")
+    const rendered = renderAgent(agent)
+    expect(rendered).toContain("request:\n  headers:\n    x-opencode-model-role: task\n")
+    expect(rendered).not.toContain("model:")
+  })
+
+  test("renames roles through the role map and refuses unknown roles", () => {
+    const architect = convertAgent(fixture("architect"), { roleMap: { plan: "architect" } })
+    expect(architect.role).toBe("architect")
+    expect(architect.frontmatter.request?.headers["x-opencode-model-role"]).toBe("architect")
+    const warnings: string[] = []
+    expect(mapRole("scout", undefined, warnings)).toBeUndefined()
+    expect(mapRole("task", { task: "nope" }, warnings)).toBeUndefined()
+    expect(warnings).toHaveLength(2)
+    const unknown = convertAgent(fixture("implementer"), { roleMap: { task: "worker" } })
+    expect(unknown.frontmatter.request).toBeUndefined()
+    expect(rolesFragment([unknown])).toEqual({ agents: {} })
   })
 
   test("requires a name or an id", () => {
@@ -261,6 +287,7 @@ describe("parseArgs", () => {
   test("rejects missing arguments and unknown flags", () => {
     expect(parseArgs(["--roles", "r", "--out", "o", "--fragment", "f.json", "a.md"]).fragment).toBe("f.json")
     expect(() => parseArgs(["a.md"])).toThrow("usage")
+    expect(parseArgs(["--out", "o", "--role-map", "m.json", "a.md"])).toMatchObject({ roleMap: "m.json", out: "o" })
     expect(() => parseArgs(["--roles", "r", "--out", "o", "--nope", "a.md"])).toThrow("unknown flag")
     expect(() => parseArgs(["--roles", "r", "--out", "o", "--mode", "x", "a.md"])).toThrow("bad --mode")
   })

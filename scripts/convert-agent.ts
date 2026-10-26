@@ -2,16 +2,20 @@
 /**
  * Convert Oh My Pi agent markdown into OpenCode V2 agent markdown.
  *
- *   bun scripts/convert-agent.ts --roles roles.json --out <dir> [--fragment <file>] [--mode subagent] [--allow-listed] <files...>
+ *   bun scripts/convert-agent.ts --out <dir> [--roles roles.json] [--role-map map.json] [--fragment <file>] [--mode subagent] [--allow-listed] <files...>
  *
  * Writes `<dir>/<id>.md` per agent plus a roles fragment for the model-roles plugin
- * ({ agents: { <id>: <role> } }, default `<dir>/roles.json`), and prints warnings. Only V2-native frontmatter keys are
+ * ({ agents: { <id>: <role> } }, default `<dir>/roles.json`), and prints warnings. Each
+ * agent's omp `@role` becomes an `x-opencode-model-role` request header, renamed through
+ * the role map. No model is written unless `--roles` names fallback models for hosts
+ * without model-roles. Only V2-native frontmatter keys are
  * emitted: an unknown key makes OpenCode read the file as V1, which drops `model: …#variant`
  * and moves the key into `request.body` (docs/design/model-roles.md).
  */
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { basename, join } from "node:path"
+import { isModelRole, MODEL_ROLE_HEADER, MODEL_ROLES } from "../plugins/lib/src/model-roles.ts"
 
 export type Mode = "subagent" | "primary" | "all"
 export type Effect = "allow" | "ask" | "deny"
@@ -30,8 +34,14 @@ export interface Permission {
 export type RoleEntry = string | string[] | { model: string; variants?: string[] }
 export type RolesConfig = Record<string, RoleEntry>
 
+/** omp role -> model-roles role. A role missing here keeps its name. */
+export type RoleMap = Record<string, string>
+
 export interface ConvertOptions {
-  roles: RolesConfig
+  /** Fallback models per role. Omit to write no model, so the agent inherits without model-roles. */
+  roles?: RolesConfig
+  /** Renames omp roles; defaults to keeping each name. */
+  roleMap?: RoleMap
   /** Agent id; defaults to the omp `name`. */
   id?: string
   mode?: Mode
@@ -43,6 +53,7 @@ export interface V2Frontmatter {
   description?: string
   mode: Mode
   model?: string
+  request?: { headers: Record<string, string> }
   permissions: Permission[]
 }
 
@@ -80,6 +91,16 @@ const IGNORED_KEYS: Record<string, string> = {
   "read-summarize": "no V2 equivalent",
   autoloadSkills: "no V2 equivalent; load the skills from the prompt instead",
   blocking: "no V2 equivalent; the caller chooses foreground or background",
+}
+
+/** The model-roles role for an omp role, or undefined (with a warning) when it is not a known role. */
+export function mapRole(role: string, roleMap: RoleMap | undefined, warnings: string[]): string | undefined {
+  const mapped = roleMap?.[role] ?? role
+  if (isModelRole(mapped)) return mapped
+  warnings.push(
+    `model: role @${role}${mapped === role ? "" : ` (mapped to ${mapped})`} is not a model role (${MODEL_ROLES.join(", ")}); no role header written`,
+  )
+  return undefined
 }
 
 const HANDLED_KEYS = new Set(["name", "description", "model", "thinking-level", "tools", "spawns", "output"])
@@ -314,13 +335,17 @@ export function convertAgent(text: string, options: ConvertOptions): Converted {
     const value = splitList(data[key]).join(", ")
     warnings.push(`${key}: dropped (${IGNORED_KEYS[key] ?? "unknown omp key"})${value ? `: ${value}` : ""}`)
   }
-  const { role, level } = parseRole(data.model, warnings)
-  const thinking = level ?? (typeof data["thinking-level"] === "string" ? data["thinking-level"] : undefined)
-  const model = role ? resolveModel(options.roles, role, thinking, warnings) : undefined
+  const parsed = parseRole(data.model, warnings)
+  const thinking = parsed.level ?? (typeof data["thinking-level"] === "string" ? data["thinking-level"] : undefined)
+  const role = parsed.role ? mapRole(parsed.role, options.roleMap, warnings) : undefined
+  const model = role && options.roles ? resolveModel(options.roles, role, thinking, warnings) : undefined
+  if (role && !options.roles && thinking && thinking !== "off")
+    warnings.push(`thinking-level: ${thinking} dropped; the ${role} role picks the variant`)
   const frontmatter: V2Frontmatter = {
     ...(typeof data.description === "string" ? { description: data.description } : {}),
     mode: options.mode ?? "subagent",
     ...(model ? { model } : {}),
+    ...(role ? { request: { headers: { [MODEL_ROLE_HEADER]: role } } } : {}),
     permissions: buildPermissions(data.tools, data.spawns, warnings, options.allowListed),
   }
   if (!frontmatter.description) warnings.push("description: missing; the subagent catalog shows nothing")
@@ -338,6 +363,10 @@ export function renderAgent(agent: Converted): string {
   if (fm.description !== undefined) lines.push(`description: ${quote(fm.description)}`)
   lines.push(`mode: ${fm.mode}`)
   if (fm.model) lines.push(`model: ${quote(fm.model)}`)
+  if (fm.request) {
+    lines.push("request:", "  headers:")
+    for (const [name, value] of Object.entries(fm.request.headers)) lines.push(`    ${name}: ${value}`)
+  }
   if (fm.permissions.length === 0) lines.push("permissions: []")
   else {
     lines.push("permissions:")
@@ -359,7 +388,8 @@ export function rolesFragment(agents: Converted[]): { agents: Record<string, str
 }
 
 export interface Cli {
-  roles: string
+  roles?: string
+  roleMap?: string
   out: string
   fragment?: string
   mode: Mode
@@ -377,6 +407,7 @@ export function parseArgs(argv: string[]): Cli {
       return value
     }
     if (arg === "--roles") cli.roles = next()
+    else if (arg === "--role-map") cli.roleMap = next()
     else if (arg === "--out") cli.out = next()
     else if (arg === "--fragment") cli.fragment = next()
     else if (arg === "--mode") {
@@ -387,21 +418,23 @@ export function parseArgs(argv: string[]): Cli {
     else if (arg.startsWith("--")) throw new Error(`unknown flag ${arg}`)
     else cli.files.push(arg)
   }
-  if (!cli.roles || !cli.out || cli.files.length === 0)
+  if (!cli.out || cli.files.length === 0)
     throw new Error(
-      "usage: bun scripts/convert-agent.ts --roles roles.json --out <dir> [--fragment <file>] [--mode subagent] [--allow-listed] <files...>",
+      "usage: bun scripts/convert-agent.ts --out <dir> [--roles roles.json] [--role-map map.json] [--fragment <file>] [--mode subagent] [--allow-listed] <files...>",
     )
   return cli as Cli
 }
 
 function main(argv: string[]): number {
   const cli = parseArgs(argv)
-  const roles = JSON.parse(readFileSync(cli.roles, "utf8")) as RolesConfig
+  const roles = cli.roles ? (JSON.parse(readFileSync(cli.roles, "utf8")) as RolesConfig) : undefined
+  const roleMap = cli.roleMap ? (JSON.parse(readFileSync(cli.roleMap, "utf8")) as RoleMap) : undefined
   mkdirSync(cli.out, { recursive: true })
   const converted: Converted[] = []
   for (const file of cli.files) {
     const agent = convertAgent(readFileSync(file, "utf8"), {
-      roles,
+      ...(roles ? { roles } : {}),
+      ...(roleMap ? { roleMap } : {}),
       mode: cli.mode,
       allowListed: cli.allowListed,
     })
