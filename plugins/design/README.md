@@ -1,7 +1,8 @@
 # design
 
-UI and UX design content: eight workflow skills, five design rules as skills, and
-four design subagents. Content only; the impeccable detector hook is separate work.
+UI and UX design for OpenCode: eight workflow skills, five design rules as skills,
+four design subagents, nine beads formulas with a `design_setup` tool that installs
+them, and a `design_impeccable_scan` tool that runs impeccable's detector.
 
 ## Skills
 
@@ -54,6 +55,66 @@ inherits the caller's model:
 The browser steps need a browser the agent can drive: the OpenCode desktop browser
 tools, a browser MCP server, or Playwright through the shell. The `ui-review` skill's
 `references/tools.md` maps each step to both.
+
+## Tools
+
+| Tool | What it does |
+| --- | --- |
+| `design_setup` | Copies the nine formulas into a beads workspace's `.beads/formulas/`. Identical copies stay; a divergent copy is refused unless `force=true`; a symlinked `.beads` or formulas path is refused. The workspace needs `.beads/` already (`bd init`). |
+| `design_impeccable_scan` | Runs `npx --yes impeccable detect --json` over files, directories or a URL (optional `viewport`, `noConfig`, `timeoutSeconds`) and returns the JSON. Exit 0 is clean, 2 is findings, 1 is a target it could not scan. |
+
+Both ask permission. `design_impeccable_scan` asks before every run even when a rule
+allows it, because npx may download impeccable and its engine; set the plugin option
+`confirmScan: false` to leave it to your permission rules:
+
+```jsonc
+{
+  "plugins": [{
+    "package": "github:srobroek/opencode-plugins::path:plugins/design",
+    "options": { "confirmScan": false }
+  }]
+}
+```
+
+Detector findings are a coarse corroborating signal: HTML-engine findings can carry
+`"line": 0`, so the critique confirms each one on the rendered surface.
+
+## Formulas
+
+Install them with the `design_setup` tool, or copy `formulas/*.formula.toml` into
+`<repo>/.beads/formulas/` (or `~/.beads/formulas/`) yourself; `bd formula list` then
+shows them. They need bd 1.3 and the beads plugin.
+
+Three tiers are poured, one molecule per piece of work:
+
+```sh
+bd mol pour design-touch --var surface=<route> --var scope=<paths>    # 8 steps, 1 human gate
+bd mol pour design-surface --var surface=<route> --var scope=<paths>  # 15 steps, 3 human gates
+bd mol pour design-system --var surface=<route> --var scope=<paths>   # 22 steps, 3 human gates
+```
+
+Optional vars: `platform` (default `web`), `want_design_md` (default `false`), and on
+`design-system` `themes` and `density`.
+
+Six sub-processes are bonded onto the step whose result called for them:
+
+| Formula | Bond it when | Extra vars |
+| --- | --- | --- |
+| `mol-design-a11y` | an accessibility audit returned MAJOR | `round` |
+| `mol-design-component` | a primitive needs its own isolated build | `component` |
+| `mol-design-iterate` | the user wants another round of visual intent | `round` |
+| `mol-design-motion` | motion or reduced-motion needs a pass | |
+| `mol-design-responsive` | reflow or target size failed | |
+| `mol-design-tokens` | the system audit returned ABSENT or PARTIAL | |
+
+```sh
+bd mol bond mol-design-iterate <step-id> --var surface=<route> --var node=<step-id> --var round=2
+```
+
+Every var of a `mol-` formula is required: `bd mol bond` does not apply var defaults.
+The critique and audit steps carry `execution_agent_type` `design-critic` or
+`a11y-auditor` with `execution_mode` `subagent`, so the beads plugin's routing gate
+admits a spawn of that agent and blocks a spawn of any other.
 
 ## MCP servers
 
@@ -112,13 +173,19 @@ project, and config keeps versions and flags visible.
 - The agents' `autoloadSkills` became a "load these skills" line; `scout` became
   `explore`; the delivery `researcher` and `operator` children became a web search and
   the built-in `general` agent.
-
-## Not ported
-
-- The nine beads formulas (`design-touch`, `design-surface`, `design-system` and the
-  `mol-design-*` sub-processes). They need the formula tooling of the beads plugin.
-- The `impeccable detect` hook. `ui-ux-specialist` still runs `impeccable detect`
-  itself at CRITIQUE.
+- The beads formulas name skills instead of `skill://` and `rule://` URIs, the browser
+  tools or a desktop accessibility inspector instead of `browser` and `computer`, an
+  LSP rename instead of the `lsp` tool, and Playwright's `page.emulateMedia` instead of
+  `tab.emulate`. Their critique steps run `design_impeccable_scan` instead of npx.
+- `mol-design-a11y` and `mol-design-iterate` make `round` required: it had a default,
+  and `bd mol bond` fails on a var it was not passed even when the formula declares a
+  default.
+- The impeccable `PostToolUse` hook became the `design_impeccable_scan` tool. The hook
+  ran impeccable's launcher after every UI file write, which fetches the engine from
+  the network unasked; impeccable itself tells a harness without its hook to run
+  `detect` once the changed UI is finished, which is where the formulas and
+  `ui-ux-specialist` run the tool. The launcher-path note for
+  `impeccable-asset-producer` is dropped with it: that agent is not registered here.
 
 ## Attribution
 

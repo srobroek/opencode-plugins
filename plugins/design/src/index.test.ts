@@ -1,8 +1,10 @@
 import { expect, test } from "bun:test"
-import { existsSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
+import type { SupervisedRun } from "@srobroek/opencode-lib/subprocess"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
-import plugin from "./index.ts"
+import plugin, { createPlugin, SCAN_TOOL, SETUP_TOOL } from "./index.ts"
 
 const SKILLS = [
   "accessibility-audit",
@@ -20,7 +22,11 @@ const SKILLS = [
   "wireloom",
 ]
 
-test("registers the design skills and the four design agents", async () => {
+type Execute = (input: unknown, context: unknown) => Promise<{ content: string; metadata: Record<string, unknown> }>
+
+const context = { sessionID: "ses_1", agent: "build", messageID: "msg_1", id: "call_1", signal: new AbortController().signal }
+
+test("registers the design skills, the four design agents, both tools and the scan prompt", async () => {
   const fake = createFakeContext()
   const cleanup = await plugin.setup(fake.context)
   expect([...fake.skills.keys()]).toEqual(SKILLS)
@@ -31,8 +37,17 @@ test("registers the design skills and the four design agents", async () => {
     resource: "design-critic",
     effect: "allow",
   })
+  expect([...fake.tools.keys()]).toEqual([SETUP_TOOL, SCAN_TOOL])
+  expect(fake.hooks("permission")).toEqual(["evaluate"])
   await cleanup?.()
   expect(fake.active()).toBe(0)
+  expect(fake.tools.size).toBe(0)
+})
+
+test("confirmScan=false leaves the scan to the configured permission rules", async () => {
+  const fake = createFakeContext({ options: { confirmScan: false } })
+  await plugin.setup(fake.context)
+  expect(fake.hooks("permission")).toEqual([])
 })
 
 test("every own references/ path in a design skill resolves; other skills' references exist too", async () => {
@@ -46,4 +61,46 @@ test("every own references/ path in a design skill resolves; other skills' refer
       expect(existsSync(join(dirname(owner?.path ?? ""), match[2] ?? ""))).toBe(true)
     }
   }
+})
+
+test("design_setup asks for the resolved workspace and copies the formulas", async () => {
+  const repo = mkdtempSync(join(tmpdir(), "design-setup-"))
+  try {
+    mkdirSync(join(repo, ".beads"))
+    const fake = createFakeContext({ directory: repo })
+    await plugin.setup(fake.context)
+    const setup = fake.tools.get(SETUP_TOOL)?.execute as Execute
+    const result = await setup({}, context)
+    expect(result.metadata.ok).toBe(true)
+    expect(fake.asserts[0]).toMatchObject({ action: SETUP_TOOL, resources: [repo] })
+    expect(existsSync(join(repo, ".beads", "formulas", "design-touch.formula.toml"))).toBe(true)
+  } finally {
+    rmSync(repo, { recursive: true, force: true })
+  }
+})
+
+test("design_impeccable_scan asks before npx runs, and a rejection stops it", async () => {
+  const seen: string[][] = []
+  const exec = async (argv: string[]): Promise<SupervisedRun> => {
+    seen.push(argv)
+    return { kind: "exited", exitCode: 0, signalCode: null, stdout: "[]", stderr: "" }
+  }
+  const fake = createFakeContext({ directory: "/project" })
+  await createPlugin({ exec }).setup(fake.context)
+  const scan = fake.tools.get(SCAN_TOOL)?.execute as Execute
+  const result = await scan({ targets: ["src", "https://example.test/"] }, context)
+  expect(result.metadata).toMatchObject({ ok: true, status: "clean", findings: 0 })
+  expect(fake.asserts[0]).toMatchObject({ action: SCAN_TOOL, resources: ["/project/src", "https://example.test/"] })
+  expect(seen[0]).toEqual(["npx", "--yes", "impeccable", "detect", "--json", "/project/src", "https://example.test/"])
+
+  const refused = createFakeContext({
+    assert: () => {
+      throw new Error("rejected")
+    },
+  })
+  await createPlugin({ exec }).setup(refused.context)
+  const blocked = refused.tools.get(SCAN_TOOL)?.execute as Execute
+  await expect(blocked({ targets: ["src"] }, context)).rejects.toThrow("rejected")
+  expect(seen).toHaveLength(1)
+  expect((await blocked({ targets: [] }, context)).metadata.ok).toBe(false)
 })

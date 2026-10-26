@@ -60,8 +60,9 @@ and apply the `design-upstream-preflight` skill for the routes this task enables
    and integrate real data. Never start from a page. A CONTROLLED
    component's story needs a state holder: args alone reject every keystroke.
 5. VERIFY. Follow the `ui-review` skill for the rendered-surface evidence contract.
-6. CRITIQUE. Run `npx --yes impeccable detect "<target>" --json` yourself first, since only you
-   have a shell; `detect` is a CLI command, not one of the skill's 23 routes. Then spawn
+6. CRITIQUE. Run the `design_impeccable_scan` tool on the target yourself first, since the
+   critic cannot; it asks the user before it runs `npx --yes impeccable detect --json`, and
+   `detect` is a CLI command, not one of the skill's 23 routes. Then spawn
    `design-critic` and `a11y-auditor` in parallel, in one batch of subagent calls, briefing each with the
    route to drive, the changed paths, the viewport widths, the token paths, and that JSON.
 7. RECONCILE. Reproduce each finding yourself, fix what reproduces, then re-run only the
