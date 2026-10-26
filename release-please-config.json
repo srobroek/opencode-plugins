@@ -65,6 +65,10 @@
     "plugins/chezmoi": {
       "release-type": "node",
       "component": "chezmoi"
+    },
+    "plugins/languages": {
+      "release-type": "node",
+      "component": "languages"
     }
   }
 }

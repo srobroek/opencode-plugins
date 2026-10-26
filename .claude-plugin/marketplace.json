@@ -15,6 +15,13 @@
       "category": "development"
     },
     {
+      "name": "languages",
+      "source": "./plugins/languages",
+      "description": "Go, Python and TypeScript lint, type-check and test skills; formatting runs through OpenCode built-in formatters.",
+      "version": "0.1.0",
+      "category": "development"
+    },
+    {
       "name": "whats-new",
       "source": "./plugins/whats-new",
       "description": "Research breaking changes, deprecations and new features between two versions, report-only.",
