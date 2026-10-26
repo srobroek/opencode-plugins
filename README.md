@@ -5,7 +5,7 @@ OpenCode V2 plugins by Sjors Robroek. This is the OpenCode counterpart of
 
 | Field | Value |
 | --- | --- |
-| Status | Early. Plugins: `example`, `model-roles`, `worktrunk`, `session`, `dep-update`, `whats-new`, `statusline`, `beads`, `goal`, `lsp`, `subagent-worktree`, `parley`, `chezmoi`, `languages`, `rust`, `journeys`, `delivery`. |
+| Status | Early. Plugins: `example`, `model-roles`, `worktrunk`, `session`, `dep-update`, `whats-new`, `statusline`, `beads`, `goal`, `lsp`, `subagent-worktree`, `parley`, `chezmoi`, `languages`, `rust`, `journeys`, `delivery`, `debate`, `eli5`, `project`, `architecture`, `build`, `quality`, `toolchain`, `aws`, `design`. |
 | Host | OpenCode 2.1.4 or later (`@opencode/plugin` 2.x) |
 | License | Apache-2.0 |
 
@@ -74,8 +74,17 @@ codex plugin add worktrunk@srobroek-opencode
 | `chezmoi` | Skill `chezmoi-editor` (no managed-file guard) |
 | `languages` | Skills `go-quality`, `python-quality`, `typescript-quality` |
 | `rust` | Skill `rust-quality` and eight Rust guidance skills (no migration gate, no advisories) |
+| `debate` | Skills `debate`, `grilling`, `to-questionnaire` |
+| `eli5` | Skill `eli5` |
+| `project` | Skill `license-picker` |
+| `architecture` | Skills `architecture-docs-files`, `architecture-ownership`, `architecture-top-level` (no `architect` agent) |
+| `quality` | Skills `prototype-logic`, `quality-code-design`, `quality-code-policy` (no `adversarial-challenger` agent) |
+| `toolchain` | Thirteen toolchain rule skills |
+| `aws` | Skill `aws-guidance` |
+| `design` | Thirteen design skills (no design agents) |
 | `session`, `dep-update`, `journeys`, `delivery` | Not exported: their skills or agents drive OpenCode tools |
 | `beads`, `example`, `goal`, `lsp`, `model-roles`, `parley`, `statusline`, `subagent-worktree` | Not exported: OpenCode code only |
+| `build` | Not exported: agent only |
 
 `scripts/build-marketplaces.ts` generates `.claude-plugin/marketplace.json`,
 `.agents/plugins/marketplace.json` and each exported plugin's
@@ -130,6 +139,20 @@ bun scripts/convert-agent.ts --roles roles.json --out .opencode/agents \
 - Only V2-native frontmatter keys are written. Everything dropped or rewritten
   (omp-only tools, `autoloadSkills`, `skill://`/`rule://`/`agent://`/`proc://`
   references) is printed as a warning.
+
+## Content plugins
+
+Plugins that only ship skills and agents (`debate`, `eli5`, `project`,
+`architecture`, `build`, `quality`, `toolchain`, `aws`, `design`) export
+`contentPlugin(id, import.meta.url)` from `@srobroek/opencode-lib/content-plugin`. It
+registers every `skills/<name>/SKILL.md` and `agents/<id>.md` beside the bundle;
+agents are V2 markdown written by `scripts/convert-agent.ts` and pin no model. A
+skill or agent you already have with the same id keeps its fields.
+
+`bun run steering` (part of `check`) fails on omp steering left in shipped
+markdown: `skill://`, `rule://`, `agent://`, `proc://` and other omp URIs, omp tool
+names such as `` `bash` ``, `` `task` ``, `` `eval` `` or `ast_grep`, TTSR wording, omp
+CLI paths, and SKILL.md frontmatter that is not strict YAML.
 
 ## Releases
 
