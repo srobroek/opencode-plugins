@@ -1,4 +1,9 @@
-import { describe, expect, test } from "bun:test"
+import { describe, expect, setDefaultTimeout, test } from "bun:test"
+
+// Every case builds a real repository and probes it with git; under heavy machine load
+// those children alone can outlast Bun's 5 s default. No assertion here is about time.
+setDefaultTimeout(30_000)
+
 import { execFileSync } from "node:child_process"
 import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
