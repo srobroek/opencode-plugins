@@ -53,6 +53,10 @@
     "plugins/lsp": {
       "release-type": "node",
       "component": "lsp"
+    },
+    "plugins/subagent-worktree": {
+      "release-type": "node",
+      "component": "subagent-worktree"
     }
   }
 }
