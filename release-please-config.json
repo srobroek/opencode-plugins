@@ -49,6 +49,10 @@
     "plugins/goal": {
       "release-type": "node",
       "component": "goal"
+    },
+    "plugins/lsp": {
+      "release-type": "node",
+      "component": "lsp"
     }
   }
 }

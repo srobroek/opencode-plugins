@@ -22,3 +22,10 @@ plus a small V2 plugin that calls `lsp_diagnostics` on edited files in
 `execute.after` and appends errors. Fallback if the undocumented MCP call breaks:
 the IronWolf native plugin for diagnostics. Serena optional for symbol editing.
 Scratch evidence: $TMPDIR/opencode/lspmcp.
+
+Implemented in `plugins/lsp` (opencode-plugins-4p3.2). OpenCode names MCP tools
+`<server>_<tool>` from the server's `tools/list` name, and lsp-tools-mcp lists
+`diagnostics`, so under server `lsp` the tool is `lsp_diagnostics` (its
+`lsp_diagnostics` alias is call-only). Live check on 2.1.4 with lsp-tools-mcp
+9cc6f75: an edit introducing a TS2345 got it appended (~3 s cold, ~1.5 s warm);
+a later session's edit shifting that error a line appended nothing.
