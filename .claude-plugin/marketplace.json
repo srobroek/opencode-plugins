@@ -36,6 +36,13 @@
       "category": "productivity"
     },
     {
+      "name": "design",
+      "source": "./plugins/design",
+      "description": "UI and UX design skills: design-system audit, DESIGN.md, rendered-surface review, accessibility audit, motion, microcopy, prototypes, and wireframes.",
+      "version": "0.1.0",
+      "category": "development"
+    },
+    {
       "name": "eli5",
       "source": "./plugins/eli5",
       "description": "Explain a topic at five depth levels, from metaphor to frontier.",
