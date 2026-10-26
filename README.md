@@ -66,6 +66,31 @@ Load a local checkout by adding the plugin directory to `plugins` in
 `opencode.json`, or link it into `.opencode/plugins/`. Run `bun run build`
 after each change; OpenCode loads the built `dist/`, not `src/`.
 
+## Converting Oh My Pi agents
+
+`scripts/convert-agent.ts` turns omp agent markdown into V2 agent markdown:
+
+```sh
+bun scripts/convert-agent.ts --roles roles.json --out .opencode/agents \
+  --fragment model-roles.json ../omp-plugins/delivery/agents/*.md
+```
+
+- `--roles` maps each omp role to its default model. A value is
+  `"provider/model"`, `"provider/model#variant"`, a model-roles candidate list
+  (`["@slow", "provider/model"]`), or `{ "model": "provider/model", "variants": ["low", "high"] }`.
+  `thinking-level` becomes `#<variant>` only when the variant is listed.
+- The fragment (default `<out>/roles.json`) is `{ "agents": { "<id>": "<role>" } }`
+  for the model-roles plugin options.
+- `tools` becomes `deny` rules for the V2 actions the agent does not list, and
+  listed actions inherit the global rules. Pass `--allow-listed` to emit explicit
+  `allow` rules instead. `spawns` becomes `subagent` deny `*` plus one allow per
+  agent, with `scout` mapped to `explore`.
+- A JTD `output` schema becomes a "Report format" section: a `VERDICT:` first
+  line and a fenced JSON block.
+- Only V2-native frontmatter keys are written. Everything dropped or rewritten
+  (omp-only tools, `autoloadSkills`, `skill://`/`rule://`/`agent://`/`proc://`
+  references) is printed as a warning.
+
 ## Releases
 
 release-please opens a release PR from Conventional Commits and tags each
