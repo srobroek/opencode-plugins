@@ -113,6 +113,28 @@ not `allow`.
 
 `bd` and `bun` on `PATH` (or `BUN_INSTALL`, or mise). The runner is a Bun script.
 
+## Subagent routing (FO-5)
+
+When the location has a store, a second `execute.before` hook checks each new
+`subagent` call against delivery rule FO-5:
+
+1. It finds bead ids in the prompt. Ids that start with the ledger prefix (the
+   name of the store's repository directory) win. If there are none, a token
+   counts when its hash part contains a digit or it has a `.N` child suffix.
+   At most 8 ids are read.
+2. It reads them in one `bd show <ids> --json`, with a 3-second limit.
+3. If a named bead sets `metadata.execution_agent_type` and the spawn's agent
+   matches none of them, the call is refused. The refusal names each bead's agent
+   and its `execution_reasoning_effort`. A namespaced agent (`delivery:implementer`)
+   matches `implementer`.
+4. A spawn to `implementer-high` that no named bead asks for goes ahead, with an
+   advisory appended to the result: use `implementer` unless the brief states an
+   implementer-high criterion.
+
+A resumed call (with `sessionID`), a prompt with no ids, a failed or slow `bd`
+read, and a location without a store are all allowed. Gate name:
+`bead-agent-routing`.
+
 ## Install
 
 ```sh
