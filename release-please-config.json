@@ -33,6 +33,10 @@
     "plugins/dep-update": {
       "release-type": "node",
       "component": "dep-update"
+    },
+    "plugins/whats-new": {
+      "release-type": "node",
+      "component": "whats-new"
     }
   }
 }
