@@ -23,9 +23,10 @@ subagents. Its checkouts live outside the project, so OpenCode asks for
 `external_directory` access unless your config allows `/tmp/agentic/**`.
 
 Converted from the omp-plugins `build` agent with `scripts/convert-agent.ts`. The
-agent pins no model. On omp it used the `task` role at high thinking; map it with
-the model-roles plugin (`{ "agents": { "external-repo-worker": "task" } }`) or set
-`agent.external-repo-worker.model`.
+agent pins no model. It declares the `task` model role through the
+`x-opencode-model-role` request header, so with the model-roles plugin a `task` role
+picks its model. Without it the agent inherits the caller's model; set
+`agent.external-repo-worker.model` to pin one.
 
 ## Install
 

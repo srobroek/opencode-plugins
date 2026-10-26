@@ -1,6 +1,9 @@
 ---
 description: "Works in an external repo outside the caller project. Clones, discovers conventions, edits, verifies, and optionally publishes. Use when parent names a repo URL."
 mode: subagent
+request:
+  headers:
+    x-opencode-model-role: task
 permissions:
   - action: subagent
     resource: "*"
