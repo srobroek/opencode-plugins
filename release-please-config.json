@@ -57,6 +57,10 @@
     "plugins/subagent-worktree": {
       "release-type": "node",
       "component": "subagent-worktree"
+    },
+    "plugins/parley": {
+      "release-type": "node",
+      "component": "parley"
     }
   }
 }

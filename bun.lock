@@ -102,6 +102,19 @@
         "@opencode/plugin",
       ],
     },
+    "plugins/parley": {
+      "name": "@srobroek/opencode-parley",
+      "version": "0.1.0",
+      "devDependencies": {
+        "@srobroek/opencode-lib": "workspace:*",
+      },
+      "peerDependencies": {
+        "@opencode/plugin": "^2.1.4",
+      },
+      "optionalPeers": [
+        "@opencode/plugin",
+      ],
+    },
     "plugins/session": {
       "name": "@srobroek/opencode-session",
       "version": "0.1.0",
@@ -466,6 +479,8 @@
     "@srobroek/opencode-lsp": ["@srobroek/opencode-lsp@workspace:plugins/lsp"],
 
     "@srobroek/opencode-model-roles": ["@srobroek/opencode-model-roles@workspace:plugins/model-roles"],
+
+    "@srobroek/opencode-parley": ["@srobroek/opencode-parley@workspace:plugins/parley"],
 
     "@srobroek/opencode-session": ["@srobroek/opencode-session@workspace:plugins/session"],
 

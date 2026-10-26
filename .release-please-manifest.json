@@ -9,5 +9,6 @@
   "plugins/beads": "0.1.0",
   "plugins/goal": "0.1.0",
   "plugins/lsp": "0.1.0",
-  "plugins/subagent-worktree": "0.1.0"
+  "plugins/subagent-worktree": "0.1.0",
+  "plugins/parley": "0.1.0"
 }
