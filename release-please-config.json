@@ -109,6 +109,10 @@
     "plugins/toolchain": {
       "release-type": "node",
       "component": "toolchain"
+    },
+    "plugins/aws": {
+      "release-type": "node",
+      "component": "aws"
     }
   }
 }

@@ -15,6 +15,13 @@
       "category": "development"
     },
     {
+      "name": "aws",
+      "source": "./plugins/aws",
+      "description": "AWS working guidance: route AWS tasks through the AWS MCP Server's guided skills, verify against AWS documentation, and price with the AWS Pricing MCP server.",
+      "version": "0.1.0",
+      "category": "development"
+    },
+    {
       "name": "chezmoi",
       "source": "./plugins/chezmoi",
       "description": "Refuse edits and shell writes to chezmoi-managed live files, naming the source to edit, plus the chezmoi-editor skill.",
