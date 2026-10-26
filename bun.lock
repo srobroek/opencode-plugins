@@ -42,6 +42,19 @@
         "@opencode/plugin",
       ],
     },
+    "plugins/debate": {
+      "name": "@srobroek/opencode-debate",
+      "version": "0.1.0",
+      "devDependencies": {
+        "@srobroek/opencode-lib": "workspace:*",
+      },
+      "peerDependencies": {
+        "@opencode/plugin": "^2.1.4",
+      },
+      "optionalPeers": [
+        "@opencode/plugin",
+      ],
+    },
     "plugins/delivery": {
       "name": "@srobroek/opencode-delivery",
       "version": "0.1.0",
@@ -534,6 +547,8 @@
     "@srobroek/opencode-beads": ["@srobroek/opencode-beads@workspace:plugins/beads"],
 
     "@srobroek/opencode-chezmoi": ["@srobroek/opencode-chezmoi@workspace:plugins/chezmoi"],
+
+    "@srobroek/opencode-debate": ["@srobroek/opencode-debate@workspace:plugins/debate"],
 
     "@srobroek/opencode-delivery": ["@srobroek/opencode-delivery@workspace:plugins/delivery"],
 
