@@ -121,6 +121,10 @@
     "plugins/safety": {
       "release-type": "node",
       "component": "safety"
+    },
+    "plugins/find-tools": {
+      "release-type": "node",
+      "component": "find-tools"
     }
   }
 }
