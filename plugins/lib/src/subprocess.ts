@@ -9,10 +9,12 @@
  * disappeared without its exit being reported.
  */
 
+import { constants } from "node:os"
+
 export type SupervisedChild = {
   readonly pid: number
   readonly exited: Promise<number>
-  readonly signalCode?: string | null
+  readonly signalCode?: string | number | null
   readonly stdout?: unknown
   readonly stderr?: unknown
   kill(signal?: number | NodeJS.Signals): void
@@ -178,9 +180,16 @@ export function supervise(child: SupervisedChild, options: SuperviseOptions = {}
     Promise.all([child.exited, out.text, err.text]).then(
       ([exitCode, stdout, stderr]) => {
         if (ended !== null) settle({ kind: ended, stdout, stderr })
-        else settle({ kind: "exited", exitCode, signalCode: child.signalCode ?? null, stdout, stderr })
+        else settle({ kind: "exited", exitCode, signalCode: signalName(child.signalCode), stdout, stderr })
       },
       () => end("lost"),
     )
   })
+}
+
+/** Bun reports a signal by name or, since @types/bun 1.4.4, possibly by number; callers get the name. */
+export function signalName(code: string | number | null | undefined): string | null {
+  if (code === null || code === undefined) return null
+  if (typeof code === "string") return code
+  return Object.entries(constants.signals).find(([, n]) => n === code)?.[0] ?? String(code)
 }
