@@ -77,6 +77,18 @@
       "category": "productivity"
     },
     {
+      "name": "quality",
+      "source": {
+        "source": "local",
+        "path": "./plugins/quality"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "development"
+    },
+    {
       "name": "rust",
       "source": {
         "source": "local",

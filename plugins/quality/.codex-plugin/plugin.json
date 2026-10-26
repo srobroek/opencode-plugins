@@ -1,0 +1,19 @@
+{
+  "name": "quality",
+  "version": "0.1.0",
+  "description": "Code design and review guidance, an always-on style code-quality policy, and throwaway logic prototypes.",
+  "author": {
+    "name": "Sjors Robroek",
+    "url": "https://github.com/srobroek"
+  },
+  "homepage": "https://github.com/srobroek/opencode-plugins/tree/main/plugins/quality",
+  "repository": "https://github.com/srobroek/opencode-plugins",
+  "license": "Apache-2.0",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Quality",
+    "shortDescription": "Code design and review guidance, an always-on style code-quality policy, and throwaway logic prototypes.",
+    "developerName": "Sjors Robroek",
+    "category": "development"
+  }
+}

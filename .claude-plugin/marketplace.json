@@ -50,6 +50,13 @@
       "category": "productivity"
     },
     {
+      "name": "quality",
+      "source": "./plugins/quality",
+      "description": "Code design and review guidance, an always-on style code-quality policy, and throwaway logic prototypes.",
+      "version": "0.1.0",
+      "category": "development"
+    },
+    {
       "name": "rust",
       "source": "./plugins/rust",
       "description": "Rust migration-edit gate, cargo install, RUSTFLAGS linker and global target-dir advisories, and Rust guidance skills.",
