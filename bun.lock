@@ -323,6 +323,19 @@
         "@opencode/plugin",
       ],
     },
+    "plugins/speckit": {
+      "name": "@srobroek/opencode-speckit",
+      "version": "0.1.0",
+      "devDependencies": {
+        "@srobroek/opencode-lib": "workspace:*",
+      },
+      "peerDependencies": {
+        "@opencode/plugin": "^2.1.4",
+      },
+      "optionalPeers": [
+        "@opencode/plugin",
+      ],
+    },
     "plugins/statusline": {
       "name": "@srobroek/opencode-statusline",
       "version": "0.1.0",
@@ -734,6 +747,8 @@
     "@srobroek/opencode-safety": ["@srobroek/opencode-safety@workspace:plugins/safety"],
 
     "@srobroek/opencode-session": ["@srobroek/opencode-session@workspace:plugins/session"],
+
+    "@srobroek/opencode-speckit": ["@srobroek/opencode-speckit@workspace:plugins/speckit"],
 
     "@srobroek/opencode-statusline": ["@srobroek/opencode-statusline@workspace:plugins/statusline"],
 
