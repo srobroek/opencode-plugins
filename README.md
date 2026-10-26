@@ -5,7 +5,7 @@ OpenCode V2 plugins by Sjors Robroek. This is the OpenCode counterpart of
 
 | Field | Value |
 | --- | --- |
-| Status | Early. Plugins: `example`, `model-roles`, `worktrunk`, `session`, `dep-update`, `whats-new`, `statusline`, `beads`, `goal`, `lsp`, `subagent-worktree`, `parley`, `chezmoi`, `languages`, `rust`, `journeys`. |
+| Status | Early. Plugins: `example`, `model-roles`, `worktrunk`, `session`, `dep-update`, `whats-new`, `statusline`, `beads`, `goal`, `lsp`, `subagent-worktree`, `parley`, `chezmoi`, `languages`, `rust`, `journeys`, `delivery`. |
 | Host | OpenCode 2.1.4 or later (`@opencode/plugin` 2.x) |
 | License | Apache-2.0 |
 
@@ -74,7 +74,7 @@ codex plugin add worktrunk@srobroek-opencode
 | `chezmoi` | Skill `chezmoi-editor` (no managed-file guard) |
 | `languages` | Skills `go-quality`, `python-quality`, `typescript-quality` |
 | `rust` | Skill `rust-quality` and eight Rust guidance skills (no migration gate, no advisories) |
-| `session`, `dep-update`, `journeys` | Not exported: their skills or agents drive OpenCode tools |
+| `session`, `dep-update`, `journeys`, `delivery` | Not exported: their skills or agents drive OpenCode tools |
 | `beads`, `example`, `goal`, `lsp`, `model-roles`, `parley`, `statusline`, `subagent-worktree` | Not exported: OpenCode code only |
 
 `scripts/build-marketplaces.ts` generates `.claude-plugin/marketplace.json`,

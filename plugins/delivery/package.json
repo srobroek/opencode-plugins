@@ -1,0 +1,32 @@
+{
+  "name": "@srobroek/opencode-delivery",
+  "version": "0.1.0",
+  "description": "Pull-request landing with merge proof and receipts, receipt-driven worktree cleanup, delivery agents and fan-out instructions for OpenCode V2.",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "index.js",
+    "agents",
+    "skills",
+    "instructions"
+  ],
+  "opencode-plugins": {
+    "claude": false,
+    "codex": false
+  },
+  "peerDependencies": {
+    "@opencode/plugin": "^2.1.4"
+  },
+  "peerDependenciesMeta": {
+    "@opencode/plugin": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@srobroek/opencode-lib": "workspace:*"
+  }
+}

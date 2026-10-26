@@ -14,5 +14,6 @@
   "plugins/chezmoi": "0.1.0",
   "plugins/languages": "0.1.0",
   "plugins/rust": "0.1.0",
-  "plugins/journeys": "0.1.0"
+  "plugins/journeys": "0.1.0",
+  "plugins/delivery": "0.1.0"
 }

@@ -77,6 +77,10 @@
     "plugins/journeys": {
       "release-type": "node",
       "component": "journeys"
+    },
+    "plugins/delivery": {
+      "release-type": "node",
+      "component": "delivery"
     }
   }
 }

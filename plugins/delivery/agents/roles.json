@@ -1,0 +1,10 @@
+{
+  "agents": {
+    "implementer": "task",
+    "implementer-high": "slow",
+    "researcher": "task",
+    "pr-reviewer": "reviewer",
+    "operator": "tiny",
+    "shepherd": "task"
+  }
+}
