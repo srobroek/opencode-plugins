@@ -82,6 +82,19 @@
         "@opencode/plugin",
       ],
     },
+    "plugins/eli5": {
+      "name": "@srobroek/opencode-eli5",
+      "version": "0.1.0",
+      "devDependencies": {
+        "@srobroek/opencode-lib": "workspace:*",
+      },
+      "peerDependencies": {
+        "@opencode/plugin": "^2.1.4",
+      },
+      "optionalPeers": [
+        "@opencode/plugin",
+      ],
+    },
     "plugins/example": {
       "name": "@srobroek/opencode-example",
       "version": "0.1.0",
@@ -553,6 +566,8 @@
     "@srobroek/opencode-delivery": ["@srobroek/opencode-delivery@workspace:plugins/delivery"],
 
     "@srobroek/opencode-dep-update": ["@srobroek/opencode-dep-update@workspace:plugins/dep-update"],
+
+    "@srobroek/opencode-eli5": ["@srobroek/opencode-eli5@workspace:plugins/eli5"],
 
     "@srobroek/opencode-example": ["@srobroek/opencode-example@workspace:plugins/example"],
 
