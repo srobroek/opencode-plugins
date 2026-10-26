@@ -85,13 +85,6 @@
       "category": "development"
     },
     {
-      "name": "whats-new",
-      "source": "./plugins/whats-new",
-      "description": "Research breaking changes, deprecations and new features between two versions, report-only.",
-      "version": "0.1.0",
-      "category": "development"
-    },
-    {
       "name": "worktrunk",
       "source": "./plugins/worktrunk",
       "description": "Worktrunk (wt) skills: work in linked worktrees and run deterministic preflight checks before an agent run or merge.",

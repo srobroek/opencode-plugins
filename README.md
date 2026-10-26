@@ -70,7 +70,6 @@ codex plugin add worktrunk@srobroek-opencode
 | Plugin | Claude Code / Codex |
 | --- | --- |
 | `worktrunk` | Skills `worktrunk-worktrees`, `worktrunk-preflight` |
-| `whats-new` | Skill `whats-new` (no `version_gap_scan` tool, no report-only agent) |
 | `chezmoi` | Skill `chezmoi-editor` (no managed-file guard) |
 | `languages` | Skills `go-quality`, `python-quality`, `typescript-quality` |
 | `rust` | Skill `rust-quality` and eight Rust guidance skills (no migration gate, no advisories) |
@@ -83,6 +82,7 @@ codex plugin add worktrunk@srobroek-opencode
 | `aws` | Skill `aws-guidance` |
 | `design` | Thirteen design skills (no design agents) |
 | `session`, `dep-update`, `journeys`, `delivery`, `beads` | Not exported: their skills or agents drive OpenCode tools |
+| `whats-new` | Not exported: its skill depends on OpenCode tools and version checks |
 | `example`, `goal`, `lsp`, `model-roles`, `parley`, `safety`, `statusline`, `subagent-worktree` | Not exported: OpenCode code only |
 | `build` | Not exported: agent only |
 

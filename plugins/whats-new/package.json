@@ -18,5 +18,9 @@
   },
   "devDependencies": {
     "@srobroek/opencode-lib": "workspace:*"
+  },
+  "opencode-plugins": {
+    "claude": false,
+    "codex": false
   }
 }
