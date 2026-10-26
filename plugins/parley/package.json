@@ -1,0 +1,23 @@
+{
+  "name": "@srobroek/opencode-parley",
+  "version": "0.1.0",
+  "description": "Ask the user rounds of typed questions in a TUI panel, with recommended answers, notes and deferrals.",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js",
+    "./tui": "./dist/tui.js"
+  },
+  "files": ["dist", "index.js", "tui.js", "NOTICE"],
+  "peerDependencies": {
+    "@opencode/plugin": "^2.1.4"
+  },
+  "peerDependenciesMeta": {
+    "@opencode/plugin": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@srobroek/opencode-lib": "workspace:*"
+  }
+}
