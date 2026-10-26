@@ -1,3 +1,4 @@
 {
-  "plugins/example": "0.1.0"
+  "plugins/example": "0.1.0",
+  "plugins/model-roles": "0.1.0"
 }

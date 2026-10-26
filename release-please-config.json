@@ -17,6 +17,10 @@
     "plugins/example": {
       "release-type": "node",
       "component": "example"
+    },
+    "plugins/model-roles": {
+      "release-type": "node",
+      "component": "model-roles"
     }
   }
 }
