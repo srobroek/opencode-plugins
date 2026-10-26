@@ -31,8 +31,15 @@ type GitRunner = (cwd: string, args: string[]) => GitResult
 type CommandChunk = { start: number; end: number }
 type WordSpan = { value: string; start: number; end: number }
 
+/**
+ * A probe that times out reads as "no binary hooks", which lets `bd init` rewrite them,
+ * so the bound only has to stop a hung git: a loaded machine can take over a second to
+ * start one.
+ */
+const GIT_PROBE_TIMEOUT_MS = 5_000
+
 function runGit(cwd: string, args: string[]): GitResult {
-  const result = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf8", timeout: 1000 })
+  const result = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf8", timeout: GIT_PROBE_TIMEOUT_MS })
   if (result.error) throw result.error
   return { status: result.status, stdout: result.stdout.trim() }
 }

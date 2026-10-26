@@ -4059,8 +4059,9 @@ var GLOBAL_VALUE_FLAGS = new Set([
 ]);
 var SEPARATORS2 = new Set([";", "&", "|", "&&", "||", "(", ")", "{", "}", `
 `]);
+var GIT_PROBE_TIMEOUT_MS = 5000;
 function runGit(cwd, args) {
-  const result = spawnSync3("git", ["-C", cwd, ...args], { encoding: "utf8", timeout: 1000 });
+  const result = spawnSync3("git", ["-C", cwd, ...args], { encoding: "utf8", timeout: GIT_PROBE_TIMEOUT_MS });
   if (result.error)
     throw result.error;
   return { status: result.status, stdout: result.stdout.trim() };
