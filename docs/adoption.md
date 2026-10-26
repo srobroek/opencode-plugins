@@ -14,7 +14,7 @@ Target host: OpenCode 2.1.4. One row per plugin. "Port" means rewrite against
 | build | Port (content) | `external-repo-worker` subagent | Frontmatter only. |
 | chezmoi | Port | `plugins/chezmoi` + skill | Managed-file guard on edit and shell writes. |
 | debate | As-is | skills | `debate`, `grilling`, `to-questionnaire`. Borrow octto question types. |
-| delivery | Port | `plugins/delivery` + 7 subagents | `delivery_land`/`cleanup`/`hygiene_report` tools; fan-out rule as always-on instructions; verdicts in prose. |
+| delivery | Port | `plugins/delivery` + 5 subagents | `delivery_land` and `delivery_cleanup` (382 and 156 calls on omp), receipts, forge adapter; fix fetch-before-read; exact-head approval check moves into `delivery_land`. Drop `hygiene_report` and `worktree-reaper`; shrink `shepherd`. Verdict line + JSON parsed into metadata. See `design/delivery.md`. |
 | dep-update | Port | `plugins/dep-update` + skill | `dep_apply` confirmation via `ctx.permission.assert`. |
 | design | Port | 8 skills, 4 subagents, `plugins/design` | impeccable detector on `execute.after`; drop the launcher-path workaround; MCP to config. |
 | eli5 | As-is | skill | |
@@ -26,7 +26,7 @@ Target host: OpenCode 2.1.4. One row per plugin. "Port" means rewrite against
 | quality | Port (content) | skill + `adversarial-challenger` subagent | Drop watchdog and advisor-resample (omp-only). |
 | rust | Port | skills + `plugins/rust` | Migration-edit gate on `execute.before`. |
 | safety | Split | permissions config + `plugins/safety` | 8 rules become permission rules; branch-delete and detached-worktree gates on `permission.hook("evaluate")`; close-keywords rewrite on `execute.before`. Test every deny pattern first. |
-| session | Replace | built-in sessions, export/import | |
+| session | Port (slim) | `plugins/session`: `session_resume` tool + thin skill | Built-ins reload full history; this gives a short handoff into a fresh session. Ranks sessions by description, walks back from the end or the last compaction summary. Optional read-only omp transcript mode. See `design/resume-session.md`. |
 | speckit | Port (core) | `plugins/speckit` + skills + 2 subagents | spec-kit skills layout (`--integration codex`); `tasks.md` guard on `execute.before`; taskstoissues blocked on the skill tool; implement redirected via `skill.transform`. Fix the 4 harness-independent bugs first. |
 | supervisor | Drop | refill sentence in instructions | V2 delivers background results to the parent inbox, wakes an idle parent and survives restarts. On omp its wake and settled nudges duplicated native delivery, stall alerts were mostly sleep artifacts, and the stop reminder led to a dispatch in 2 of 20 cases. Build a stall watchdog only if hung children show up. |
 | toolchain | Port (content) | instructions + skills + permissions | tfstate guard to permissions. |
