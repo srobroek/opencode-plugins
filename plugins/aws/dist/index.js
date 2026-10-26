@@ -25,7 +25,7 @@ function parseAgentFile(text, id) {
     throw new Error(`agent ${id}: no frontmatter`);
   const agent = { id, mode: "subagent", permissions: [], system: source.slice(match[0].length).trim() };
   let rule;
-  let inPermissions = false;
+  let section;
   const flush = () => {
     if (!rule)
       return;
@@ -38,19 +38,36 @@ function parseAgentFile(text, id) {
   for (const line of (match[1] ?? "").split(/\r?\n/)) {
     if (!line.trim())
       continue;
-    const item = /^\s+(-\s+)?([a-z]+):\s*(.*)$/.exec(line);
-    if (inPermissions && item) {
-      if (item[1])
-        flush();
-      rule ??= {};
-      const key = item[2];
-      if (key !== "action" && key !== "resource" && key !== "effect")
-        throw new Error(`agent ${id}: unknown permission key ${key}`);
-      rule[key] = scalar(item[3] ?? "");
-      continue;
+    if (section === "permissions") {
+      const item = /^\s+(-\s+)?([a-z]+):\s*(.*)$/.exec(line);
+      if (item) {
+        if (item[1])
+          flush();
+        rule ??= {};
+        const key = item[2];
+        if (key !== "action" && key !== "resource" && key !== "effect")
+          throw new Error(`agent ${id}: unknown permission key ${key}`);
+        rule[key] = scalar(item[3] ?? "");
+        continue;
+      }
+    }
+    if (section === "request" || section === "headers") {
+      const headers = /^ {2}headers:\s*$/.exec(line);
+      if (headers) {
+        agent.request = { headers: {} };
+        section = "headers";
+        continue;
+      }
+      const header = /^ {4}([\w-]+):\s*(.*)$/.exec(line);
+      if (section === "headers" && header && agent.request) {
+        agent.request.headers[header[1] ?? ""] = scalar(header[2] ?? "");
+        continue;
+      }
+      if (/^\s/.test(line))
+        throw new Error(`agent ${id}: request supports only headers`);
     }
     flush();
-    inPermissions = false;
+    section = undefined;
     const field = /^([a-z][\w-]*):\s*(.*)$/.exec(line);
     if (!field)
       throw new Error(`agent ${id}: unreadable frontmatter line ${JSON.stringify(line)}`);
@@ -62,12 +79,21 @@ function parseAgentFile(text, id) {
       if (!MODES.includes(mode))
         throw new Error(`agent ${id}: bad mode ${mode}`);
       agent.mode = mode;
+    } else if (key === "steps") {
+      const steps = Number(scalar(value));
+      if (!Number.isInteger(steps) || steps <= 0)
+        throw new Error(`agent ${id}: steps must be a positive integer`);
+      agent.steps = steps;
+    } else if (key === "request") {
+      if (value.trim() !== "")
+        throw new Error(`agent ${id}: request must be a map`);
+      section = "request";
     } else if (key === "permissions") {
       if (value.trim() === "[]")
         continue;
       if (value.trim() !== "")
         throw new Error(`agent ${id}: permissions must be a list`);
-      inPermissions = true;
+      section = "permissions";
     } else
       throw new Error(`agent ${id}: unsupported frontmatter key ${key}`);
   }
@@ -89,6 +115,10 @@ function shapeAgent(agent, file, created) {
   if (created || agent.mode === undefined)
     agent.mode = file.mode;
   agent.system ??= file.system;
+  if (file.steps !== undefined)
+    agent.steps ??= file.steps;
+  if (file.request)
+    agent.request = { ...agent.request, headers: { ...file.request.headers, ...agent.request?.headers } };
   agent.permissions = [...agent.permissions ?? [], ...file.permissions];
 }
 async function registerAgents(agent, paths) {
