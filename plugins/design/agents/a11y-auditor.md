@@ -1,6 +1,9 @@
 ---
 description: "Audits a rendered surface and its source against WCAG 2.2 AA with measured values. Spawn at CRITIQUE beside design-critic; never edits project files or implements."
 mode: subagent
+request:
+  headers:
+    x-opencode-model-role: reviewer
 permissions:
   - action: edit
     resource: "*"

@@ -39,12 +39,17 @@ load by name:
 All four are `subagent` agents converted with `scripts/convert-agent.ts`. Rules are
 added after any you configure for an agent with the same id. `ui-ux-specialist`
 spawning children while it runs as a subagent needs `experimental.subagent_depth`
-of 2 or more. The agents pin no model; on omp they used the `designer` role, so map
-it with the model-roles plugin:
+of 2 or more. `ui-ux-specialist` runs at most 400 steps. The agents pin no model;
+each declares a model role through the `x-opencode-model-role` request header, so
+with the model-roles plugin that role picks its model, and without it the agent
+inherits the caller's model:
 
-```jsonc
-{ "agents": { "ui-ux-specialist": "designer", "ui-implementer": "designer", "design-critic": "designer", "a11y-auditor": "designer" } }
-```
+| Agent | Model role |
+| --- | --- |
+| `ui-ux-specialist` | `designer` |
+| `ui-implementer` | `designer` |
+| `design-critic` | `reviewer` |
+| `a11y-auditor` | `reviewer` |
 
 The browser steps need a browser the agent can drive: the OpenCode desktop browser
 tools, a browser MCP server, or Playwright through the shell. The `ui-review` skill's

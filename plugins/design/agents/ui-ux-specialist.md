@@ -1,6 +1,10 @@
 ---
 description: "Leads multi-component UI and UX work through six design phases, delegating critique. Excludes software architecture, API planning, and routine implementation."
 mode: subagent
+steps: 400
+request:
+  headers:
+    x-opencode-model-role: designer
 permissions:
   - action: subagent
     resource: "*"
