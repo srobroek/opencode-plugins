@@ -137,18 +137,6 @@
       "category": "development"
     },
     {
-      "name": "whats-new",
-      "source": {
-        "source": "local",
-        "path": "./plugins/whats-new"
-      },
-      "policy": {
-        "installation": "AVAILABLE",
-        "authentication": "ON_INSTALL"
-      },
-      "category": "development"
-    },
-    {
       "name": "worktrunk",
       "source": {
         "source": "local",
