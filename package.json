@@ -16,7 +16,7 @@
     "check": "bun run typecheck && bun run lint && bun run test && bun run build:check && bun run marketplaces:check && bun run steering && bun run agent-roles"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.15",
+    "@biomejs/biome": "2.6.2",
     "@opencode/client": "2.1.4",
     "@opencode/plugin": "2.1.4",
     "@opencode/theme": "2.1.4",
