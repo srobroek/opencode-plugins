@@ -18,8 +18,10 @@ package whose entry point default-exports `Plugin.define({ id, setup })` from
 - `bun run build:check` fails when committed build output is stale.
 - `bun run marketplaces` regenerates the Claude Code and Codex marketplaces.
 - `bun run marketplaces:check` fails when committed marketplace files are stale.
-- `bun run check` runs typecheck, lint, test, build:check and
-  marketplaces:check before you hand work off.
+- `bun run agent-roles` fails when a shipped agent lacks a known
+  `x-opencode-model-role` header.
+- `bun run check` runs typecheck, lint, test, build:check, marketplaces:check,
+  steering and agent-roles before you hand work off.
 
 ## Conventions
 
@@ -41,6 +43,10 @@ package whose entry point default-exports `Plugin.define({ id, setup })` from
 - Runtime `dependencies` must be published on npm. Workspace packages are only
   available at build time.
 - Plugin ids: `srobroek.<name>`. Tool names: `<name>_<verb>`.
+- Shipped agents name a model-roles role in the `x-opencode-model-role` request
+  header (see `plugins/lib/src/model-roles.ts` for the role list) and pin no
+  model, so without model-roles they inherit the session model. Only `delivery`
+  keeps per-agent fallback models, applied when model-roles is absent.
 - Keep decision logic in pure exported functions and test them directly; keep
   `setup` a thin adapter over the plugin context.
 - Return the cleanup function from `setup` and dispose every registration in it.

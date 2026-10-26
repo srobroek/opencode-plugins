@@ -120,11 +120,17 @@ after each change; OpenCode loads the built `dist/`, not `src/`.
 `scripts/convert-agent.ts` turns omp agent markdown into V2 agent markdown:
 
 ```sh
-bun scripts/convert-agent.ts --roles roles.json --out .opencode/agents \
+bun scripts/convert-agent.ts --out .opencode/agents \
   --fragment model-roles.json ../omp-plugins/delivery/agents/*.md
 ```
 
-- `--roles` maps each omp role to its default model. A value is
+- The omp `@role` becomes the `x-opencode-model-role` request header, which the
+  model-roles plugin resolves to a model. `--role-map map.json`
+  (`{ "<omp role>": "<role>" }`) renames roles; a role outside the model-roles role
+  map (`default`, `task`, `slow`, `smol`, `tiny`, `commit`, `reviewer`, `challenger`,
+  `architect`, `designer`, `plan`, `judge`) gets no header and a warning.
+- No model is written by default, so without model-roles the agent inherits the
+  session's model. `--roles` adds a fallback model per role. A value is
   `"provider/model"`, `"provider/model#variant"`, a model-roles candidate list
   (`["@slow", "provider/model"]`), or `{ "model": "provider/model", "variants": ["low", "high"] }`.
   `thinking-level` becomes `#<variant>` only when the variant is listed.
@@ -146,8 +152,14 @@ Plugins that only ship skills and agents (`debate`, `eli5`, `project`,
 `architecture`, `build`, `quality`, `toolchain`, `aws`, `design`) export
 `contentPlugin(id, import.meta.url)` from `@srobroek/opencode-lib/content-plugin`. It
 registers every `skills/<name>/SKILL.md` and `agents/<id>.md` beside the bundle;
-agents are V2 markdown written by `scripts/convert-agent.ts` and pin no model. A
-skill or agent you already have with the same id keeps its fields.
+agents are V2 markdown written by `scripts/convert-agent.ts`. They pin no model and
+name a model-roles role in the `x-opencode-model-role` request header. A skill or
+agent you already have with the same id keeps its fields.
+
+`bun run agent-roles` (part of `check`) fails when a shipped agent has no role
+header, names a role outside the role map, or pins a model outside `delivery`, whose
+models are fallbacks for hosts without model-roles. A plugin's `agents/roles.json`
+fragment must match the headers.
 
 `bun run steering` (part of `check`) fails on omp steering left in shipped
 markdown: `skill://`, `rule://`, `agent://`, `proc://` and other omp URIs, omp tool
