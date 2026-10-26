@@ -15,5 +15,6 @@
   "plugins/languages": "0.1.0",
   "plugins/rust": "0.1.0",
   "plugins/journeys": "0.1.0",
-  "plugins/delivery": "0.1.0"
+  "plugins/delivery": "0.1.0",
+  "plugins/debate": "0.1.0"
 }

@@ -81,6 +81,10 @@
     "plugins/delivery": {
       "release-type": "node",
       "component": "delivery"
+    },
+    "plugins/debate": {
+      "release-type": "node",
+      "component": "debate"
     }
   }
 }

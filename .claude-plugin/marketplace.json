@@ -15,6 +15,13 @@
       "category": "development"
     },
     {
+      "name": "debate",
+      "source": "./plugins/debate",
+      "description": "Stress-test a decision from both sides, grill a plan in frontier rounds, or write a questionnaire for someone else.",
+      "version": "0.1.0",
+      "category": "productivity"
+    },
+    {
       "name": "languages",
       "source": "./plugins/languages",
       "description": "Go, Python and TypeScript lint, type-check and test skills; formatting runs through OpenCode built-in formatters.",
