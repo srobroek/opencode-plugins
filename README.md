@@ -23,6 +23,10 @@ Each plugin is a workspace package under `plugins/<name>/`:
 
 Plugin ids use the `srobroek.<name>` prefix.
 
+`plugins/lib` is not a plugin. It is the internal `@srobroek/opencode-lib`
+package of shared helpers (shell parsing, tool-call targets, test fakes) and is
+not released.
+
 ## Installing a plugin
 
 OpenCode installs a plugin straight from a subdirectory of this repository:
