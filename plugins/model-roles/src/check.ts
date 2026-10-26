@@ -5,7 +5,7 @@
  */
 
 import type { GuardModel } from "./guard.ts"
-import { type HealthState, healthKey, healthView } from "./health.ts"
+import { type HealthState, healthEntry, healthView } from "./health.ts"
 import {
   type AgentLike,
   type AvailableModel,
@@ -54,8 +54,8 @@ export function candidateStatus(
   if (ref.variant !== undefined && !(model.variants ?? []).some((v) => v.id === ref.variant))
     return { status: "unknown-variant", variants: (model.variants ?? []).map((v) => v.id) }
   if (model.enabled === false) return { status: "provider-unavailable" }
-  const entryHealth = health[healthKey(ref)]
-  if (entryHealth !== undefined && entryHealth.until > now)
+  const entryHealth = healthEntry(health, ref, now)
+  if (entryHealth !== undefined)
     return { status: "unhealthy", until: entryHealth.until, reason: entryHealth.reason }
   return { status: "available" }
 }

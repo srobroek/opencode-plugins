@@ -1,12 +1,24 @@
 import { Plugin } from "@opencode/plugin"
 import type { Context } from "@opencode/plugin/promise/plugin"
 import { checkRoles, formatCheck } from "./check.ts"
-import { decideFallback, failureNote, fallbackTarget, type NoteFacts, retryPrompt, SOURCE, subagentNote } from "./fallback.ts"
-import { type GuardAgent, type GuardModel, judgeSpawn, parseGuard, pinnedModel } from "./guard.ts"
+import {
+  failureNote,
+  fallbackTarget,
+  type NoteFacts,
+  retryTarget,
+  SOURCE,
+  staysOnModel,
+  subagentNote,
+  switchNote,
+} from "./fallback.ts"
+import { type GuardAgent, type GuardModel, judgeModelOverride, judgeSpawn, parseGuard, pinnedModel } from "./guard.ts"
 import {
   childSessionID,
   classifyFailure,
+  cooldownFor,
   type FailureClass,
+  type FailureInput,
+  failureScope,
   HEALTH_KEY,
   type HealthState,
   healthKey,
@@ -15,7 +27,6 @@ import {
   modelFromError,
   nextExpiry,
   pruneHealth,
-  RETRY_KEY_PREFIX,
   readHealth,
 } from "./health.ts"
 import {
@@ -210,8 +221,12 @@ export default Plugin.define({
     }
     scheduleExpiry()
 
-    const markFailed = async (ref: ModelRef, kind: FailureClass, message: string) => {
-      health = markUnhealthy(health, ref, Date.now(), runtime.cooldownMs, `${kind}: ${oneLine(message)}`)
+    /** Mark `ref` (or its provider) unhealthy; returns the cooldown it got. */
+    const markFailed = async (ref: ModelRef, kind: FailureClass, error: FailureInput): Promise<number> => {
+      const now = Date.now()
+      const cooldownMs = cooldownFor(kind, error, now, runtime)
+      const reason = `${kind}: ${oneLine(error.message ?? "")}`
+      health = markUnhealthy(health, ref, now, cooldownMs, reason, failureScope(kind))
       try {
         await ctx.storage.set(HEALTH_KEY, health)
       } catch {
@@ -220,6 +235,7 @@ export default Plugin.define({
       attempts = 0
       await check(true)
       scheduleExpiry()
+      return cooldownMs
     }
 
     const notify = async (sessionID: string, text: string, kind: string) => {
@@ -353,25 +369,13 @@ export default Plugin.define({
         console.warn(`${SOURCE}: session ${sessionID} failed (${kind}) on an unknown model; nothing marked unhealthy`)
         return
       }
-      await markFailed(failed, kind, error.message ?? "")
+      const cooldownMs = await markFailed(failed, kind, error)
       const isChild = typeof session.parentID === "string" && session.parentID !== ""
       const spawnRole = isChild ? await spawnRoleOf(sessionID) : undefined
       const role = spawnRole ?? (agent === undefined ? undefined : roleOf(agent, options.agents))
       const target = fallbackTarget(options, available, view(), role, failed)
-      const facts: NoteFacts = { failed, kind, cooldownMs: runtime.cooldownMs, target }
-      const retryKey = `${RETRY_KEY_PREFIX}${sessionID}`
-      const lastRetryAt = isChild ? undefined : await ctx.storage.get(retryKey).catch(() => undefined)
-      const now = Date.now()
-      const action = decideFallback({
-        isChild,
-        retryOnFallback: runtime.retryOnFallback,
-        failed,
-        next: target?.model,
-        lastRetryAt,
-        now,
-        windowMs: runtime.cooldownMs,
-      })
-      if (action === "notify-parent") {
+      const facts: NoteFacts = { failed, kind, cooldownMs, target }
+      if (isChild) {
         childFailures.set(session.parentID as string, Date.now())
         // A child spawned with a role follows that role: move it on, so resuming it continues on the next model.
         let resumable: string | undefined
@@ -387,21 +391,78 @@ export default Plugin.define({
         await notifyParentOnce(session.parentID as string, failed, note)
         return
       }
-      if (action === "retry" && target !== undefined) {
-        await ctx.storage.set(retryKey, now)
-        const text = retryPrompt({ ...facts, target })
-        console.warn(`${SOURCE}: ${text}`)
-        await ctx.session.switchModel({ sessionID, model: target.model })
-        await ctx.session.prompt({
-          sessionID,
-          text,
-          metadata: { source: SOURCE, kind: "fallback-retry" },
-          delivery: "queue",
-        } as never)
-        return
-      }
       await notify(sessionID, failureNote(facts), "fallback")
     }
+
+    /**
+     * Move a failing request to the next healthy model of its session's role, inside
+     * the same turn: the host reloads the session before each attempt, so the retry
+     * goes to the switched model and nothing is replayed.
+     */
+    /** Model switches still landing, by session. A late one is never doubled. */
+    const switching = new Map<string, Promise<boolean>>()
+
+    /** `session.switchModel` bounded by `switchTimeoutMs`: "late" leaves it landing in the background. */
+    const switchWithin = async (sessionID: string, model: ModelRef): Promise<"switched" | "late" | "failed"> => {
+      const tracked: Promise<boolean> = Promise.resolve()
+        .then(() => ctx.session.switchModel({ sessionID, model }))
+        .then(
+          () => true,
+          () => false,
+        )
+        .finally(() => {
+          if (switching.get(sessionID) === tracked) switching.delete(sessionID)
+        })
+      switching.set(sessionID, tracked)
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const late = new Promise<"late">((resolve) => {
+        timer = setTimeout(() => resolve("late"), runtime.switchTimeoutMs)
+        ;(timer as { unref?: () => void }).unref?.()
+      })
+      const outcome = await Promise.race([tracked.then((ok): "switched" | "failed" => (ok ? "switched" : "failed")), late])
+      clearTimeout(timer)
+      return outcome
+    }
+
+    const retries = await ctx.session.hook("retry", async (event) => {
+      const error = event.error as FailureInput
+      const kind = classifyFailure(error)
+      if (kind === undefined || staysOnModel(kind, event.attempt, runtime.hostRetries)) return
+      // A switch from an earlier retry is still landing: the host's next attempt reloads it.
+      if (switching.has(event.sessionID)) return
+      const { providerID, id, variant } = event.model as { providerID: string; id: string; variant?: string }
+      const failed: ModelRef = variant ? { providerID, id, variant } : { providerID, id }
+      try {
+        await queue(async () => {
+          const cooldownMs = await markFailed(failed, kind, error)
+          const agent = (await listAgents()).find((a) => a.id === event.agent)
+          const role = (await spawnRoleOf(event.sessionID)) ?? (agent === undefined ? undefined : roleOf(agent, options.agents))
+          const target = retryTarget({
+            options,
+            available,
+            health: view(),
+            role,
+            failed,
+            kind,
+            attempt: event.attempt,
+            hostRetries: runtime.hostRetries,
+          })
+          if (target === undefined) return
+          const outcome = await switchWithin(event.sessionID, target.model)
+          const note = switchNote({ failed, kind, cooldownMs, target })
+          if (outcome === "switched") {
+            event.decision = { retry: true, delay: 0 }
+            console.warn(`${SOURCE}: session ${event.sessionID}: ${note}`)
+          } else
+            console.warn(
+              `${SOURCE}: session ${event.sessionID}: switching to ${target.model.providerID}/${target.model.id} ${outcome === "late" ? "is still pending" : "failed"}; the host's retry decision stands.`,
+            )
+        })
+      } catch (error) {
+        // The host's own retry decision stands.
+        console.warn(`${SOURCE}: could not switch the failing request to another model`, error)
+      }
+    })
 
     const strip = await ctx.session.hook("model.request", (request) => {
       stripRoleHeader(request.headers)
@@ -458,8 +519,21 @@ export default Plugin.define({
       await previous.dispose()
     }
 
-    const judge = async (event: { sessionID: string; agent: string }, target: string): Promise<string | undefined> => {
+    const judge = async (
+      event: { sessionID: string; agent: string },
+      target: string,
+      override: ModelRef | undefined,
+    ): Promise<string | undefined> => {
       if (guard === undefined) return undefined
+      if (override !== undefined) {
+        try {
+          const agents = await listAgents()
+          const decision = judgeModelOverride({ options, available, health: view(), guard, target, agents, sessionModel: undefined, model: override })
+          return decision.allow ? undefined : decision.reason
+        } catch {
+          return undefined
+        }
+      }
       try {
         const [agents, session] = await Promise.all([listAgents(), ctx.session.get({ sessionID: event.sessionID })])
         const facts = { options, available, health: view() }
@@ -483,8 +557,8 @@ export default Plugin.define({
         pending.set(event.id, { parentID: event.sessionID, agent: target, role: plan.role, model: plan.model, at: Date.now() })
         return
       }
-      if (inputModel(plan.input) !== undefined) return
-      const reason = await judge(event, target)
+      const override = inputModel(plan.input)
+      const reason = await judge(event, target, override)
       if (reason !== undefined) throw new Error(reason)
     })
 
@@ -511,10 +585,10 @@ export default Plugin.define({
             inputModel(event.input) ??
             recentOr(event.sessionID, agent?.model)
           if (failed === undefined) return
-          await markFailed(failed, kind, message)
+          const cooldownMs = await markFailed(failed, kind, { message })
           const role = spawn?.role ?? (agent === undefined ? undefined : roleOf(agent, options.agents))
           const target = fallbackTarget(options, available, view(), role, failed)
-          const facts: NoteFacts = { failed, kind, cooldownMs: runtime.cooldownMs, target }
+          const facts: NoteFacts = { failed, kind, cooldownMs, target }
           await notifyParentOnce(event.sessionID, failed, subagentNote({ ...facts, agent: agentID, spawnRole: spawn?.role }))
         })
       } catch (error) {
@@ -563,6 +637,7 @@ export default Plugin.define({
       await subagentTool.dispose()
       await tools.dispose()
       await strip.dispose()
+      await retries.dispose()
       await registration.dispose()
       notices.clear()
       childFailures.clear()

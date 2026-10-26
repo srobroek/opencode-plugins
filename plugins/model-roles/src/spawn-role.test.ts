@@ -65,10 +65,22 @@ const effectInput = {
 
 describe("runtime options", () => {
   test("defaults, and purposes only for configured roles", () => {
-    expect(parseRuntime({}, options)).toEqual({ cooldownMs: 600_000, retryOnFallback: true, purposes: {} })
-    expect(parseRuntime({ cooldownMs: 5, retryOnFallback: false, purposes: { custom: " mine ", nope: "x", task: 3 } }, options)).toEqual(
-      { cooldownMs: 5, retryOnFallback: false, purposes: { custom: "mine" } },
-    )
+    expect(parseRuntime({}, options)).toEqual({
+      cooldownMs: 600_000,
+      quotaCooldownMs: 21_600_000,
+      hostRetries: 2,
+      switchTimeoutMs: 2_000,
+      purposes: {},
+    })
+    const raw = { cooldownMs: 5, quotaCooldownMs: 7, hostRetries: 0, switchTimeoutMs: 9, purposes: { custom: " mine ", nope: "x", task: 3 } }
+    expect(parseRuntime(raw, options)).toEqual({
+      cooldownMs: 5,
+      quotaCooldownMs: 7,
+      hostRetries: 0,
+      switchTimeoutMs: 9,
+      purposes: { custom: "mine" },
+    })
+    expect(parseRuntime({ hostRetries: 1.5, switchTimeoutMs: 0 }, options)).toMatchObject({ hostRetries: 2, switchTimeoutMs: 2_000 })
   })
 })
 

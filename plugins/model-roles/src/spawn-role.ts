@@ -4,8 +4,9 @@
  * and its `execute.before` hook.
  */
 
+import { DEFAULT_HOST_RETRIES, DEFAULT_SWITCH_TIMEOUT_MS } from "./fallback.ts"
 import { type GuardModel, inputCost } from "./guard.ts"
-import { DEFAULT_COOLDOWN_MS } from "./health.ts"
+import { DEFAULT_COOLDOWN_MS, DEFAULT_QUOTA_COOLDOWN_MS } from "./health.ts"
 import {
   type AvailableModel,
   type HealthView,
@@ -32,7 +33,12 @@ export const ROLE_TOOL_NOTE =
 
 export type RuntimeOptions = {
   cooldownMs: number
-  retryOnFallback: boolean
+  /** How long a spent quota sits out when the provider names no reset time. */
+  quotaCooldownMs: number
+  /** Retries the host spends on the same model for a transient failure before the retry hook switches. */
+  hostRetries: number
+  /** How long the retry hook waits for `session.switchModel`. */
+  switchTimeoutMs: number
   /** Your own purpose text per role, shown to the spawner. */
   purposes: Record<string, string>
 }
@@ -53,7 +59,17 @@ export function parseRuntime(raw: unknown, options: Options): RuntimeOptions {
       if (typeof text === "string" && text.trim() !== "" && Object.hasOwn(options.roles, role)) purposes[role] = text.trim()
     }
   }
-  return { cooldownMs, retryOnFallback: input.retryOnFallback !== false, purposes }
+  const count = (value: unknown, fallback: number) =>
+    typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : fallback
+  const span = (value: unknown, fallback: number) =>
+    typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback
+  return {
+    cooldownMs,
+    quotaCooldownMs: span(input.quotaCooldownMs, DEFAULT_QUOTA_COOLDOWN_MS),
+    hostRetries: count(input.hostRetries, DEFAULT_HOST_RETRIES),
+    switchTimeoutMs: span(input.switchTimeoutMs, DEFAULT_SWITCH_TIMEOUT_MS),
+    purposes,
+  }
 }
 
 /** A short cost label from an input price in USD per million tokens. */
