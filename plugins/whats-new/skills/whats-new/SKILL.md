@@ -74,7 +74,7 @@ Honor whatever the user supplies; only discover the rest.
 
 ## Steering
 
-- **Report, don't upgrade.** Run this research as the `whats-new` agent: its permissions deny dependency-manifest and lockfile edits, installer and upgrade commands, and `dep_apply`. Shell permissions read commands statically and do not see writes made through `eval` or a script, so the rule binds you under any agent. If the user wants the upgrade applied, hand over to the `dep-update` skill outside this agent.
+- **Report, don't upgrade.** Run this research as the `whats-new` agent: its permissions deny dependency-manifest and lockfile edits, installer and upgrade commands, and `dep_apply`. Shell permissions read commands statically and do not see writes made through the shell's eval builtin or a script, so the rule binds you under any agent. If the user wants the upgrade applied, hand over to the `dep-update` skill outside this agent.
 - **Programmatic over manual.** Catch yourself reading a rendered registry page → stop and use the matching recipe.
 - **Cover the whole span.** Every intermediate version (software) or the full window (service) -- not just the endpoints.
 - **Classification is heuristic.** A `feat:`/`fix:`/`!` prefix is a signal, not ground truth; read the diff for load-bearing changes.
