@@ -6,7 +6,8 @@
  * references in the body resolve against the skill's own directory.
  */
 
-import { readFileSync } from "node:fs"
+import { existsSync, readdirSync, readFileSync } from "node:fs"
+import { join } from "node:path"
 import type { Skill } from "@opencode/plugin"
 import type { Context } from "@opencode/plugin/promise/plugin"
 
@@ -14,6 +15,8 @@ export type SkillFile = {
   /** The frontmatter `name`, used as both id and name. */
   name: string
   description?: string
+  /** `false` when the frontmatter sets `disable-model-invocation: true`: the user loads it, the model does not. */
+  autoinvoke?: false
   /** The body after the frontmatter. */
   content: string
 }
@@ -38,13 +41,35 @@ export function parseSkillFile(text: string): SkillFile {
   if (!name) throw new Error("SKILL.md frontmatter has no name")
   const description = fields.get("description")
   const content = match ? text.replace(/^\uFEFF/, "").slice(match[0].length) : text
-  return description ? { name, description, content } : { name, content }
+  return {
+    name,
+    ...(description ? { description } : {}),
+    ...(fields.get("disable-model-invocation") === "true" ? { autoinvoke: false as const } : {}),
+    content,
+  }
 }
 
 /** The `Skill.Info` for the `SKILL.md` at absolute `path`. */
 export function skillInfo(path: string): Skill.Info {
   const file = parseSkillFile(readFileSync(path, "utf8"))
-  return { id: file.name, name: file.name, description: file.description, path, content: file.content } as Skill.Info
+  return {
+    id: file.name,
+    name: file.name,
+    description: file.description,
+    ...(file.autoinvoke === false ? { autoinvoke: false } : {}),
+    path,
+    content: file.content,
+  } as Skill.Info
+}
+
+/** The absolute `SKILL.md` path of every `<directory>/<name>/` that has one, sorted by name. */
+export function skillPaths(directory: string): string[] {
+  if (!existsSync(directory)) return []
+  return readdirSync(directory, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => join(directory, entry.name, "SKILL.md"))
+    .filter((path) => existsSync(path))
+    .sort()
 }
 
 /**

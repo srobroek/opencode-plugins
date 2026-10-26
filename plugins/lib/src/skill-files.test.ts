@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test"
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { parseSkillFile, registerSkills, skillInfo } from "./skill-files.ts"
+import { parseSkillFile, registerSkills, skillInfo, skillPaths } from "./skill-files.ts"
 
 describe("parseSkillFile", () => {
   test("reads name, description and body", () => {
@@ -14,6 +14,31 @@ describe("parseSkillFile", () => {
     expect(parseSkillFile("---\nname: bare\n---\nx")).toEqual({ name: "bare", content: "x" })
     expect(() => parseSkillFile("---\ndescription: nameless\n---\nx")).toThrow("no name")
     expect(() => parseSkillFile("no frontmatter")).toThrow("no name")
+  })
+
+  test("disable-model-invocation: true turns autoinvoke off", () => {
+    expect(parseSkillFile("---\nname: manual\ndisable-model-invocation: true\n---\nx")).toEqual({
+      name: "manual",
+      autoinvoke: false,
+      content: "x",
+    })
+    expect(parseSkillFile("---\nname: auto\ndisable-model-invocation: false\n---\nx")).not.toHaveProperty("autoinvoke")
+  })
+})
+
+describe("skillPaths", () => {
+  test("lists <dir>/<name>/SKILL.md, sorted, skipping directories without one", () => {
+    const dir = mkdtempSync(join(tmpdir(), "skill-paths-"))
+    try {
+      for (const name of ["beta", "alpha", "empty"]) mkdirSync(join(dir, name))
+      writeFileSync(join(dir, "beta", "SKILL.md"), "---\nname: beta\n---\n")
+      writeFileSync(join(dir, "alpha", "SKILL.md"), "---\nname: alpha\n---\n")
+      writeFileSync(join(dir, "loose.md"), "x")
+      expect(skillPaths(dir)).toEqual([join(dir, "alpha", "SKILL.md"), join(dir, "beta", "SKILL.md")])
+      expect(skillPaths(join(dir, "missing"))).toEqual([])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
 

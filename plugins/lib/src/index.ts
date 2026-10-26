@@ -1,3 +1,4 @@
+export * from "./agent-files.ts"
 export * from "./command-words.ts"
 export * from "./dep-detect.ts"
 export * from "./patterns.ts"

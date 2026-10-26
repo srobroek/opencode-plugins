@@ -6,7 +6,7 @@ import { fileURLToPath as fileURLToPath3 } from "url";
 import { Plugin } from "@opencode/plugin";
 
 // plugins/lib/src/skill-files.ts
-import { readFileSync } from "fs";
+import { existsSync, readdirSync, readFileSync } from "fs";
 var FRONTMATTER = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/;
 function unquote(value) {
   const first = value[0];
@@ -27,11 +27,23 @@ function parseSkillFile(text) {
     throw new Error("SKILL.md frontmatter has no name");
   const description = fields.get("description");
   const content = match ? text.replace(/^\uFEFF/, "").slice(match[0].length) : text;
-  return description ? { name, description, content } : { name, content };
+  return {
+    name,
+    ...description ? { description } : {},
+    ...fields.get("disable-model-invocation") === "true" ? { autoinvoke: false } : {},
+    content
+  };
 }
 function skillInfo(path) {
   const file = parseSkillFile(readFileSync(path, "utf8"));
-  return { id: file.name, name: file.name, description: file.description, path, content: file.content };
+  return {
+    id: file.name,
+    name: file.name,
+    description: file.description,
+    ...file.autoinvoke === false ? { autoinvoke: false } : {},
+    path,
+    content: file.content
+  };
 }
 async function registerSkills(skill, paths) {
   const infos = paths.map(skillInfo);
@@ -83,7 +95,7 @@ function shapeAgent(agent, file, created) {
 
 // plugins/journeys/src/journeys-tool.ts
 import { execFile } from "child_process";
-import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync as readFileSync3, realpathSync } from "fs";
+import { copyFileSync, existsSync as existsSync2, lstatSync, mkdirSync, readdirSync as readdirSync2, readFileSync as readFileSync3, realpathSync } from "fs";
 import { basename, isAbsolute, join, relative, resolve, sep } from "path";
 import { fileURLToPath as fileURLToPath2 } from "url";
 import { promisify } from "util";
@@ -176,9 +188,9 @@ function safePath(path, base) {
   }
 }
 function formulaSources(dir = FORMULAS_DIR) {
-  if (!existsSync(dir))
+  if (!existsSync2(dir))
     return [];
-  return readdirSync(dir).filter((name) => name.endsWith(".formula.toml")).sort().map((name) => join(dir, name));
+  return readdirSync2(dir).filter((name) => name.endsWith(".formula.toml")).sort().map((name) => join(dir, name));
 }
 function installFormulas(rawRepoRoot, force, base, rawSourcesDir = FORMULAS_DIR) {
   const repoRoot = managedRoot(rawRepoRoot, base);

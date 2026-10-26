@@ -3,7 +3,6 @@
 // plugins/worktrunk/src/index.ts
 import { isAbsolute, resolve as resolve2 } from "path";
 import { Plugin, Skill, Worktree } from "@opencode/plugin";
-
 // plugins/lib/src/shell-tokenizer.ts
 var SEPARATORS = new Set([";", "&", "|", "(", ")", `
 `]);
