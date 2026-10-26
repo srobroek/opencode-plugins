@@ -674,6 +674,20 @@ function npmSearchText(keyword, query) {
 
 // plugins/find-tools/src/run.ts
 import { spawn } from "child_process";
+
+// plugins/lib/src/subprocess.ts
+var EXIT_GRACE_MS = 2000;
+var EXIT_POLL_MS = 100;
+function processAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+}
+
+// plugins/find-tools/src/run.ts
 var DEFAULT_MS = 1e4;
 var OUTPUT_LIMIT = 1048576;
 function defaultRun(argv, timeoutMs, signal) {
@@ -699,6 +713,7 @@ function defaultRun(argv, timeoutMs, signal) {
           return;
         settled = true;
         clearTimeout(deadline);
+        clearInterval(poll);
         if (cleanup)
           clearTimeout(cleanup);
         signal?.removeEventListener("abort", abort);
@@ -726,6 +741,18 @@ function defaultRun(argv, timeoutMs, signal) {
       const abort = () => stop("Cancelled");
       const ms = Number.isFinite(timeoutMs) ? Math.max(1, Math.min(timeoutMs, DEFAULT_MS)) : DEFAULT_MS;
       const deadline = setTimeout(() => stop("Discovery command deadline exceeded"), ms);
+      let goneSince;
+      let exitSeen = false;
+      const poll = setInterval(() => {
+        if (exitSeen || !proc.pid || processAlive(proc.pid)) {
+          goneSince = undefined;
+          return;
+        }
+        goneSince ??= Date.now();
+        if (Date.now() - goneSince >= EXIT_GRACE_MS)
+          stop("Discovery command ended without reporting an exit status");
+      }, EXIT_POLL_MS);
+      poll.unref?.();
       const collect = (target, chunk) => {
         if (stopped || settled)
           return;
@@ -743,6 +770,9 @@ function defaultRun(argv, timeoutMs, signal) {
       proc.on("error", (error) => {
         stopped = `Discovery command failed to start: ${error.message}`;
         finish(1);
+      });
+      proc.on("exit", () => {
+        exitSeen = true;
       });
       proc.on("close", (code) => finish(code ?? 1));
       signal?.addEventListener("abort", abort, { once: true });
