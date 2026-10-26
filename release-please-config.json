@@ -113,6 +113,10 @@
     "plugins/aws": {
       "release-type": "node",
       "component": "aws"
+    },
+    "plugins/design": {
+      "release-type": "node",
+      "component": "design"
     }
   }
 }
