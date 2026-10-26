@@ -1,6 +1,7 @@
 export * from "./agent-files.ts"
 export * from "./command-words.ts"
 export * from "./dep-detect.ts"
+export * from "./model-roles.ts"
 export * from "./patterns.ts"
 export * from "./shell-command.ts"
 export * from "./shell-result.ts"

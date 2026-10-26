@@ -40,6 +40,17 @@ describe("parseAgentFile", () => {
     expect(parseAgentFile("---\nmode: all\npermissions: []\n---\nhi", "x")).toMatchObject({ mode: "all", permissions: [] })
   })
 
+  test("reads steps and the model-role request header", () => {
+    const text = "---\nmode: subagent\nsteps: 400\nrequest:\n  headers:\n    x-opencode-model-role: designer\npermissions: []\n---\nhi"
+    expect(parseAgentFile(text, "x")).toMatchObject({
+      steps: 400,
+      request: { headers: { "x-opencode-model-role": "designer" } },
+      permissions: [],
+    })
+    expect(() => parseAgentFile("---\nsteps: lots\n---\nx", "x")).toThrow("steps must be a positive integer")
+    expect(() => parseAgentFile("---\nrequest:\n  body: {}\n---\nx", "x")).toThrow("request supports only headers")
+  })
+
   test("rejects keys a shipped agent must not carry", () => {
     expect(() => parseAgentFile('---\nmodel: "a/b"\n---\nx', "x")).toThrow("unsupported frontmatter key model")
     expect(() => parseAgentFile("---\nmode: boss\n---\nx", "x")).toThrow("bad mode")
@@ -69,6 +80,19 @@ describe("shapeAgent", () => {
     shapeAgent(agent, file, false)
     expect(agent).toMatchObject({ name: "mine", description: "custom", mode: "all", system: "own" })
     expect(agent.permissions).toEqual([own, ...file.permissions])
+  })
+
+  test("the file's role header and steps fill in, but a configured header or steps win", () => {
+    const roled = parseAgentFile(
+      "---\nsteps: 400\nrequest:\n  headers:\n    x-opencode-model-role: task\n    x-other: a\n---\nx",
+      "r",
+    )
+    const fresh: Record<string, unknown> = {}
+    shapeAgent(fresh, roled, true)
+    expect(fresh).toMatchObject({ steps: 400, request: { headers: { "x-opencode-model-role": "task", "x-other": "a" } } })
+    const configured: Record<string, unknown> = { steps: 10, request: { headers: { "x-opencode-model-role": "slow" } } }
+    shapeAgent(configured, roled, false)
+    expect(configured).toMatchObject({ steps: 10, request: { headers: { "x-opencode-model-role": "slow", "x-other": "a" } } })
   })
 })
 
