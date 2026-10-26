@@ -1206,6 +1206,12 @@ function rewriteCloseKeywords(command) {
 import { readFileSync } from "fs";
 import { isAbsolute, resolve as resolve2 } from "path";
 
+// plugins/safety/src/attribution.ts
+var ATTRIBUTION = /co-authored-by:[^\n]{0,120}(?:claude|codex|gpt|copilot|cursor|devin|anthropic|openai|gemini)|generated (?:with|by) [[(]?(?:claude|codex|copilot|opencode|gemini)|noreply@(?:anthropic|openai)\.com/i;
+function hasAttribution(text) {
+  return ATTRIBUTION.test(text);
+}
+
 // plugins/safety/src/shell.ts
 var SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish", "ash", "mksh"]);
 var RESERVED = new Set([
@@ -1558,10 +1564,6 @@ function remoteExec(commands) {
       return true;
   }
   return false;
-}
-var ATTRIBUTION = /co-authored-by:[^\n]{0,120}(?:claude|codex|gpt|copilot|cursor|devin|anthropic|openai|gemini)|generated (?:with|by) [[(]?(?:claude|codex|copilot|opencode|gemini)|noreply@(?:anthropic|openai)\.com/i;
-function hasAttribution(text) {
-  return ATTRIBUTION.test(text);
 }
 function commitMessage(args) {
   const texts = [];

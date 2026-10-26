@@ -1,0 +1,44 @@
+#!/bin/sh
+# srobroek.safety commit-msg hook
+#
+# Refuses a commit message that carries AI-assistant attribution, using the same matcher
+# as the safety plugin's `attribution` gate, then runs the hook it chains to. Install it
+# per repository with `bun <safety>/dist/commit-msg.js install`; see the safety README.
+
+self=$0
+while [ -L "$self" ]; do
+  link=$(readlink "$self")
+  case $link in
+    /*) self=$link ;;
+    *) self=$(dirname "$self")/$link ;;
+  esac
+done
+here=$(cd "$(dirname "$self")" && pwd)
+
+checker=${SAFETY_COMMIT_MSG_CHECKER:-}
+if [ -z "$checker" ]; then
+  for candidate in "$here/safety-commit-msg.js" "$here/../dist/commit-msg.js"; do
+    if [ -f "$candidate" ]; then
+      checker=$candidate
+      break
+    fi
+  done
+fi
+
+if [ -z "$checker" ] || ! command -v bun >/dev/null 2>&1; then
+  echo "safety commit-msg: bun or the checker script is missing, so attribution was not checked" >&2
+else
+  bun "$checker" check "$1" || exit $?
+fi
+
+# The hook `install` moved aside, then the repository's own hook when this script runs
+# from a shared core.hooksPath.
+if [ -x "$here/commit-msg.chained" ]; then
+  "$here/commit-msg.chained" "$@" || exit $?
+fi
+common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exit 0
+local_hook="$common/hooks/commit-msg"
+if [ -x "$local_hook" ] && ! [ "$local_hook" -ef "$self" ] && ! [ "$common/hooks" -ef "$here" ]; then
+  exec "$local_hook" "$@"
+fi
+exit 0

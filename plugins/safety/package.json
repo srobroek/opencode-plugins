@@ -5,9 +5,10 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./dist/index.js"
+    ".": "./dist/index.js",
+    "./commit-msg": "./dist/commit-msg.js"
   },
-  "files": ["dist", "index.js"],
+  "files": ["dist", "index.js", "commit-msg.js", "hooks"],
   "peerDependencies": {
     "@opencode/plugin": "^2.1.4"
   },
