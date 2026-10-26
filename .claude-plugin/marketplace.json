@@ -8,6 +8,13 @@
   },
   "plugins": [
     {
+      "name": "chezmoi",
+      "source": "./plugins/chezmoi",
+      "description": "Refuse edits and shell writes to chezmoi-managed live files, naming the source to edit, plus the chezmoi-editor skill.",
+      "version": "0.1.0",
+      "category": "development"
+    },
+    {
       "name": "whats-new",
       "source": "./plugins/whats-new",
       "description": "Research breaking changes, deprecations and new features between two versions, report-only.",

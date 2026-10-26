@@ -61,6 +61,10 @@
     "plugins/parley": {
       "release-type": "node",
       "component": "parley"
+    },
+    "plugins/chezmoi": {
+      "release-type": "node",
+      "component": "chezmoi"
     }
   }
 }
