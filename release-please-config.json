@@ -73,6 +73,10 @@
     "plugins/rust": {
       "release-type": "node",
       "component": "rust"
+    },
+    "plugins/journeys": {
+      "release-type": "node",
+      "component": "journeys"
     }
   }
 }
