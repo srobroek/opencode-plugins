@@ -1,5 +1,21 @@
 import { Plugin } from "@opencode/plugin"
 import type { Context } from "@opencode/plugin/promise/plugin"
+import {
+  type AutoOptions,
+  type AutoReason,
+  type AutoRecord,
+  autoEligible,
+  buildDeciderPrompt,
+  capRole,
+  deciderModel,
+  formatHistory,
+  parseAuto,
+  parseDecision,
+  pickRole,
+  pushHistory,
+  roleCosts,
+  withAutoTag,
+} from "./auto.ts"
 import { checkRoles, formatCheck } from "./check.ts"
 import {
   failureNote,
@@ -11,7 +27,16 @@ import {
   subagentNote,
   switchNote,
 } from "./fallback.ts"
-import { type GuardAgent, type GuardModel, judgeModelOverride, judgeSpawn, parseGuard, pinnedModel } from "./guard.ts"
+import {
+  type GuardAgent,
+  type GuardModel,
+  inputCost,
+  isExpensive,
+  judgeModelOverride,
+  judgeSpawn,
+  parseGuard,
+  pinnedModel,
+} from "./guard.ts"
 import {
   childSessionID,
   classifyFailure,
@@ -34,6 +59,7 @@ import {
   desiredModels,
   type ModelRef,
   parseOptions,
+  resolveRole,
   roleOf,
   sameModel,
   staleAgents,
@@ -51,6 +77,7 @@ import {
   withRoleParam,
 } from "./spawn-role.ts"
 
+export * from "./auto.ts"
 export * from "./check.ts"
 export * from "./fallback.ts"
 export * from "./guard.ts"
@@ -135,6 +162,10 @@ export default Plugin.define({
     const options = parseOptions(ctx.options)
     const runtime = parseRuntime(ctx.options, options)
     const guard = parseGuard(isRecord(ctx.options) ? ctx.options.guard : undefined)
+    const auto = parseAuto(isRecord(ctx.options) ? ctx.options.auto : undefined, options)
+    /** The decider settings `guard.mode: "auto"` uses when `auto` itself is off. */
+    const guardAuto = guard?.mode === "auto" ? (auto ?? parseAuto(true, options)) : undefined
+    let autoHistory: AutoRecord[] = []
     let available: GuardModel[] = []
     let availableKey = ""
     let health: HealthState = {}
@@ -472,13 +503,14 @@ export default Plugin.define({
       editor.add({
         name: CHECK_TOOL,
         description:
-          "Read-only. List every model role's candidates with their status (available, unknown id, unknown variant, provider unavailable, unhealthy until a time) against all providers, the model each role-bearing agent resolves to, and the roles the subagent tool's `role` parameter offers.",
+          "Read-only. List every model role's candidates with their status (available, unknown id, unknown variant, provider unavailable, unhealthy until a time) against all providers, the model each role-bearing agent resolves to, and the roles the subagent tool's `role` parameter offers, and recent auto routing decisions.",
         input: { type: "object", properties: {}, additionalProperties: false },
         execute: async () => {
           await refresh()
           const agents = await listAgents()
           const report = checkRoles(options, available, agents, health, Date.now(), runtime.purposes)
-          return { content: formatCheck(report), metadata: { roles: report.roles.length, agents: report.agents.length } }
+          const content = [formatCheck(report), ...formatHistory(autoHistory)].join("\n")
+          return { content, metadata: { roles: report.roles.length, agents: report.agents.length, auto: autoHistory.length } }
         },
       })
     })
@@ -546,6 +578,87 @@ export default Plugin.define({
       }
     }
 
+    /** Ask the decider, bounded by `timeoutMs`. The host ignores abort signals here, so a late reply is dropped. */
+    const decide = async (settings: AutoOptions, model: ModelRef, prompt: string): Promise<{ text?: string; failure?: "timeout" | "error" }> => {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const late = new Promise<{ failure: "timeout" }>((resolve) => {
+        timer = setTimeout(() => resolve({ failure: "timeout" }), settings.timeoutMs)
+        ;(timer as { unref?: () => void }).unref?.()
+      })
+      const call = ctx.generate.text({ prompt, model }).then(
+        (result) => ({ text: result.text }),
+        () => ({ failure: "error" as const }),
+      )
+      const outcome = await Promise.race([call, late])
+      clearTimeout(timer)
+      return outcome
+    }
+
+    type Routed = { input: Record<string, unknown>; role: string; model: ModelRef }
+
+    /**
+     * Pick a role for a spawn that names none. `cheapOnly` (the guard's auto mode)
+     * offers only roles whose model is not expensive. Returns `undefined` when the
+     * spawn is not eligible or no allowed role resolves; the spawn then goes on as is.
+     */
+    const route = async (
+      event: { sessionID: string; agent: string },
+      target: string,
+      input: unknown,
+      settings: AutoOptions,
+      cheapOnly: boolean,
+    ): Promise<Routed | undefined> => {
+      const agents = await listAgents()
+      const agent = agents.find((a) => a.id === target)
+      if (!autoEligible(input, agent, options) || !isRecord(input)) return undefined
+      const health = view()
+      const choices = roleChoices(options, available, runtime.purposes).filter((choice) => {
+        if (!settings.roles.includes(choice.role) || !choice.available) return false
+        if (!cheapOnly || guard === undefined) return true
+        const model = resolveRole(options.roles, available, choice.role, health).model
+        return model !== undefined && !isExpensive(model, guard, available)
+      })
+      const allowed = choices.map((choice) => choice.role)
+      const fallback = allowed.includes(settings.default) ? settings.default : allowed[0]
+      if (fallback === undefined) return undefined
+      const started = Date.now()
+      const decider = deciderModel(settings, options, available, health)
+      let picked: { role: string; reason: AutoReason }
+      if (decider === undefined) picked = pickRole(undefined, { default: fallback }, "no-decider")
+      else {
+        const prompt = buildDeciderPrompt({
+          agent: { id: target, description: agent?.description },
+          description: typeof input.description === "string" ? input.description : undefined,
+          prompt: typeof input.prompt === "string" ? input.prompt : "",
+          choices,
+        })
+        const reply = await decide(settings, decider, prompt)
+        picked =
+          reply.failure !== undefined
+            ? pickRole(undefined, { default: fallback }, reply.failure)
+            : pickRole(parseDecision(reply.text ?? "", allowed), { default: fallback })
+      }
+      let role = picked.role
+      let capped: string | undefined
+      if (settings.capAtParent) {
+        const session = (await ctx.session.get({ sessionID: event.sessionID }).catch(() => undefined)) as SessionLike
+        const parent = await runningModel(session, agents, event.agent).catch(() => undefined)
+        const parentCost = parent === undefined ? undefined : inputCost(parent, available)
+        const next = capRole(role, roleCosts(allowed, options, available, health), parentCost)
+        if (next !== role) {
+          capped = role
+          role = next
+        }
+      }
+      const plan = planSpawn({ ...input, role }, options, available, health)
+      if (plan.model === undefined || !isRecord(plan.input)) return undefined
+      const record: AutoRecord = { at: started, agent: target, role, reason: picked.reason, model: plan.model, ms: Date.now() - started }
+      if (capped !== undefined) record.capped = capped
+      autoHistory = pushHistory(autoHistory, record)
+      console.warn(`${SOURCE}: auto-routed '${target}' to role ${role} (${picked.reason}${capped ? `, capped from ${capped}` : ""})`)
+      return { input: { ...plan.input, description: withAutoTag(input.description, record) }, role, model: plan.model }
+    }
+
     const spawns = await ctx.tool.hook("execute.before", async (event) => {
       if (event.tool !== SUBAGENT_TOOL) return
       const plan = planSpawn(event.input, options, available, view())
@@ -558,8 +671,22 @@ export default Plugin.define({
         return
       }
       const override = inputModel(plan.input)
+      const unroled = override === undefined && plan.role === undefined
+      const accept = (routed: Routed) => {
+        event.input = routed.input
+        pending.set(event.id, { parentID: event.sessionID, agent: target, role: routed.role, model: routed.model, at: Date.now() })
+      }
+      if (unroled && auto !== undefined) {
+        const routed = await route(event, target, plan.input, auto, false).catch(() => undefined)
+        if (routed !== undefined) return accept(routed)
+      }
       const reason = await judge(event, target, override)
-      if (reason !== undefined) throw new Error(reason)
+      if (reason === undefined) return
+      if (unroled && guardAuto !== undefined) {
+        const routed = await route(event, target, plan.input, guardAuto, true).catch(() => undefined)
+        if (routed !== undefined) return accept(routed)
+      }
+      throw new Error(reason)
     })
 
     const spawnResults = await ctx.tool.hook("execute.after", async (event) => {
@@ -643,6 +770,7 @@ export default Plugin.define({
       childFailures.clear()
       pending.clear()
       childRoles.clear()
+      autoHistory = []
     }
   },
 })
