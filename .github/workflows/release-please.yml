@@ -1,8 +1,17 @@
 name: release-please
 
-# Uses GITHUB_TOKEN. GitHub does not trigger workflows from commits made with it,
-# so CI on the release PR needs a manual re-run. Switch to the release GitHub App
-# token (as in srobroek/omp-plugins) once the app is installed on this repository.
+# Maintains a release PR from Conventional Commits and tags each plugin as
+# <name>--v<version> on merge.
+#
+# TOKEN: the release PR is authored with the release GitHub App
+# (vars.RELEASE_APP_CLIENT_ID + secrets.RELEASE_APP_PRIVATE_KEY), not the default
+# GITHUB_TOKEN. GitHub does not trigger workflows from GITHUB_TOKEN commits, so a
+# bot-authored release PR would sit without CI. App-authored commits trigger CI
+# normally. Same pattern as srobroek/omp-plugins.
+#
+# Build output: release-please only bumps package.json versions and changelogs.
+# The bundles in dist/ do not embed the version, so build:check stays green on
+# the release PR; the sync step below rebuilds anyway in case that changes.
 
 on:
   push:
@@ -17,7 +26,45 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5
+      - name: Mint release-app token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
+      - name: Run release-please
+        id: release
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5
+        with:
+          token: ${{ steps.app-token.outputs.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+      # Check out the release branch with the App token persisted, so the sync
+      # commit below also triggers CI on the PR.
+      - name: Checkout release branch
+        if: ${{ steps.release.outputs.prs_created == 'true' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Set up Bun
+        if: ${{ steps.release.outputs.prs_created == 'true' }}
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.4.3"
+
+      - name: Rebuild plugin bundles on the release branch
+        if: ${{ steps.release.outputs.prs_created == 'true' }}
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+          git add -- 'plugins/*/dist/*' 'plugins/*/index.js' 'plugins/*/tui.js'
+          if ! git diff --cached --quiet; then
+            git config user.name "release-app[bot]"
+            git config user.email "release-app[bot]@users.noreply.github.com"
+            git commit -m "chore: rebuild plugin bundles"
+            git push
+          fi
