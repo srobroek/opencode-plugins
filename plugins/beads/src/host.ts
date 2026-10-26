@@ -9,6 +9,7 @@ import { isAbsolute, resolve } from "node:path"
 /** Gates the plugin options can switch off: `{ gates: { "<gate>": { enabled: false } } }` or `{ gates: { "<gate>": false } }`. */
 export const GATES = [
   "beads-gate-admission",
+  "bead-agent-routing",
   "binary-git-hooks",
   "bd-update-close-gate",
   "bd-close-gate",

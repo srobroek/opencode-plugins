@@ -32,6 +32,7 @@ import { BEADS_SOURCE, Lifecycle } from "./lifecycle.ts"
 import { PRIME_WAIT_MS, readPrime, storedPrime } from "./prime.ts"
 import { type StartDeps, sessionStartAdvisories } from "./session-start.ts"
 import { decideShell, type ShellGateDeps, TOOL_CALL_BUDGET_MS } from "./shell-gates.ts"
+import { registerAgentRouting } from "./subagent-routing.ts"
 
 export { decideShell } from "./shell-gates.ts"
 
@@ -228,6 +229,8 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
     pending.set(event.id, { command: call.command, cwd: call.cwd, actor, advisories: decision.advisories })
   })
 
+  const routing = await registerAgentRouting(ctx, { run: deps.run, env: baseEnv })
+
   const pin = await ctx.shell.hook("create.before", (event) => {
     if (!on("beads-dir-pin")) return
     const cwd = isAbsolute(event.cwd) ? event.cwd : resolve(directory, event.cwd)
@@ -352,6 +355,7 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
     await before.dispose()
     pending.clear()
     chains.clear()
+    await routing()
   }
 }
 

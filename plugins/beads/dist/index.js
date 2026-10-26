@@ -4823,6 +4823,135 @@ ${command}`;
   return { kind: "allow", command, advisories };
 }
 
+// plugins/beads/src/subagent-routing.ts
+import { basename as basename2, dirname as dirname8 } from "path";
+var ROUTING_GATE = "bead-agent-routing";
+var ROUTING_BUDGET_MS = 3000;
+var HIGH_TIER_AGENT = "implementer-high";
+var MAX_IDS = 8;
+var ID_PATTERN = /\b[a-z][a-z0-9]*(?:-[a-z0-9]+)*-[a-z0-9]{3,8}(?:\.\d+)*\b/g;
+function beadIdsIn(prompt, prefix) {
+  const tokens = [...new Set(Array.from(prompt.toLowerCase().matchAll(ID_PATTERN), (match) => match[0]))];
+  const known = prefix === undefined || prefix === "" ? [] : tokens.filter((id) => id.startsWith(`${prefix}-`));
+  const ids = known.length > 0 ? known : tokens.filter((id) => {
+    const [base = "", ...children] = id.split(".");
+    return children.length > 0 || /\d/.test(base.slice(base.lastIndexOf("-") + 1));
+  });
+  return ids.slice(0, MAX_IDS);
+}
+function ledgerPrefix(store) {
+  if (store === undefined)
+    return;
+  const name = basename2(dirname8(store)).toLowerCase();
+  return /^[a-z][a-z0-9-]*$/.test(name) ? name : undefined;
+}
+var text = (value) => typeof value === "string" && value.trim() !== "" ? value.trim() : undefined;
+function readRouting(output) {
+  const data = envelopeData(parseTrailingJson(output));
+  const list = Array.isArray(data) ? data : data !== null && typeof data === "object" ? [data] : [];
+  const beads = [];
+  for (const item of list) {
+    if (item === null || typeof item !== "object")
+      continue;
+    const record = item;
+    const id = text(record.id);
+    if (id === undefined)
+      continue;
+    const metadata = record.metadata !== null && typeof record.metadata === "object" ? record.metadata : {};
+    const bead = { id };
+    const agentType = text(metadata.execution_agent_type);
+    const effort = text(metadata.execution_reasoning_effort);
+    if (agentType !== undefined)
+      bead.agentType = agentType;
+    if (effort !== undefined)
+      bead.effort = effort;
+    beads.push(bead);
+  }
+  return beads;
+}
+function agentMatches(agent, agentType) {
+  const a = agent.toLowerCase();
+  const t = agentType.toLowerCase();
+  return a === t || a.endsWith(`:${t}`) || a.endsWith(`/${t}`);
+}
+function decideRouting(agent, beads) {
+  const typed = beads.filter((bead) => bead.agentType !== undefined);
+  if (typed.length > 0 && !typed.some((bead) => agentMatches(agent, bead.agentType))) {
+    const named = typed.map((bead) => {
+      const effort = bead.effort === undefined ? "" : `, execution_reasoning_effort=${bead.effort}`;
+      return `${bead.id} (execution_agent_type=${bead.agentType}${effort})`;
+    });
+    return {
+      kind: "block",
+      cause: `FO-5: the spawn goes to '${agent}', but the bead it names routes elsewhere: ${named.join("; ")}`,
+      resolution: "re-issue the subagent call to the agent the bead names, passing its execution_reasoning_effort when set; implementer-high only when the bead says so"
+    };
+  }
+  if (agentMatches(agent, HIGH_TIER_AGENT) && !typed.some((bead) => agentMatches(HIGH_TIER_AGENT, bead.agentType)))
+    return {
+      kind: "advise",
+      text: `FO-5 advisory: this spawn used ${HIGH_TIER_AGENT}, but no named bead sets execution_agent_type=${HIGH_TIER_AGENT}. Dispatch to implementer unless the brief states an implementer-high criterion (root-cause/debugging work, concurrency or data-integrity logic, cross-module contract changes, algorithmic or numeric precision rules, or acceptance that needs design judgment beyond the bead text).`
+    };
+  return { kind: "allow" };
+}
+function spawnInput(input) {
+  if (input === null || typeof input !== "object" || Array.isArray(input))
+    return;
+  const record = input;
+  if (typeof record.agent !== "string" || typeof record.prompt !== "string")
+    return;
+  if (typeof record.sessionID === "string" && record.sessionID !== "")
+    return;
+  return { agent: record.agent, prompt: record.prompt };
+}
+async function registerAgentRouting(ctx, deps = {}) {
+  const options = ctx.options;
+  const directory = ctx.location.directory;
+  const run = deps.run ?? runBdResult;
+  const baseEnv = deps.env ?? (() => process.env);
+  if (!gateEnabled(options, ROUTING_GATE) || bdStoreDir(directory, lifecycleBdEnvironment(directory, baseEnv())) === undefined)
+    return async () => {};
+  const advisories = new Map;
+  const before = await ctx.tool.hook("execute.before", async (event) => {
+    if (event.tool !== "subagent")
+      return;
+    const spawn = spawnInput(event.input);
+    if (spawn === undefined)
+      return;
+    let decision = { kind: "allow" };
+    try {
+      const env = lifecycleBdEnvironment(directory, baseEnv());
+      const ids = beadIdsIn(spawn.prompt, ledgerPrefix(bdStoreDir(directory, env)));
+      let beads = [];
+      if (ids.length > 0) {
+        const result = await run(directory, ["show", ...ids, "--json"], Date.now() + ROUTING_BUDGET_MS, env);
+        if ("output" in result)
+          beads = readRouting(result.output);
+      }
+      decision = decideRouting(spawn.agent, beads);
+    } catch {
+      return;
+    }
+    if (decision.kind === "block")
+      throw new GateRefusal(ROUTING_GATE, decision.cause, decision.resolution);
+    if (decision.kind === "advise")
+      advisories.set(event.id, decision.text);
+  });
+  const after = await ctx.tool.hook("execute.after", (event) => {
+    const advisory = advisories.get(event.id);
+    if (advisory === undefined)
+      return;
+    advisories.delete(event.id);
+    if (event.status === "completed")
+      event.result = appendResultText(event.result, advisory);
+  });
+  return async () => {
+    await after.dispose();
+    await before.dispose();
+    advisories.clear();
+  };
+}
+
 // plugins/beads/src/index.ts
 var SUBAGENT_TOOL = "subagent";
 var SKILL_NAMES = [
@@ -4985,6 +5114,7 @@ async function setupBeads(ctx, deps = {}) {
       event.input = { ...event.input, command: decision.command };
     pending.set(event.id, { command: call.command, cwd: call.cwd, actor, advisories: decision.advisories });
   });
+  const routing = await registerAgentRouting(ctx, { run: deps.run, env: baseEnv });
   const pin = await ctx.shell.hook("create.before", (event) => {
     if (!on("beads-dir-pin"))
       return;
@@ -5109,6 +5239,7 @@ async function setupBeads(ctx, deps = {}) {
     await before.dispose();
     pending.clear();
     chains.clear();
+    await routing();
   };
 }
 var src_default = Plugin.define({
