@@ -5,7 +5,7 @@ OpenCode V2 plugins by Sjors Robroek. This is the OpenCode counterpart of
 
 | Field | Value |
 | --- | --- |
-| Status | Early. Plugins: `example`, `model-roles`, `worktrunk`, `session`, `dep-update`, `whats-new`, `statusline`, `beads`, `goal`, `lsp`, `subagent-worktree`, `parley`, `chezmoi`. |
+| Status | Early. Plugins: `example`, `model-roles`, `worktrunk`, `session`, `dep-update`, `whats-new`, `statusline`, `beads`, `goal`, `lsp`, `subagent-worktree`, `parley`, `chezmoi`, `languages`. |
 | Host | OpenCode 2.1.4 or later (`@opencode/plugin` 2.x) |
 | License | Apache-2.0 |
 
@@ -72,6 +72,7 @@ codex plugin add worktrunk@srobroek-opencode
 | `worktrunk` | Skills `worktrunk-worktrees`, `worktrunk-preflight` |
 | `whats-new` | Skill `whats-new` (no `version_gap_scan` tool, no report-only agent) |
 | `chezmoi` | Skill `chezmoi-editor` (no managed-file guard) |
+| `languages` | Skills `go-quality`, `python-quality`, `typescript-quality` |
 | `session`, `dep-update` | Not exported: their skills drive OpenCode tools |
 | `beads`, `example`, `goal`, `model-roles`, `parley`, `statusline` | Not exported: OpenCode code only |
 

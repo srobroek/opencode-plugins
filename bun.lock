@@ -82,6 +82,19 @@
         "@opencode/plugin",
       ],
     },
+    "plugins/languages": {
+      "name": "@srobroek/opencode-languages",
+      "version": "0.1.0",
+      "devDependencies": {
+        "@srobroek/opencode-lib": "workspace:*",
+      },
+      "peerDependencies": {
+        "@opencode/plugin": "^2.1.4",
+      },
+      "optionalPeers": [
+        "@opencode/plugin",
+      ],
+    },
     "plugins/lib": {
       "name": "@srobroek/opencode-lib",
       "version": "0.0.0",
@@ -488,6 +501,8 @@
     "@srobroek/opencode-example": ["@srobroek/opencode-example@workspace:plugins/example"],
 
     "@srobroek/opencode-goal": ["@srobroek/opencode-goal@workspace:plugins/goal"],
+
+    "@srobroek/opencode-languages": ["@srobroek/opencode-languages@workspace:plugins/languages"],
 
     "@srobroek/opencode-lib": ["@srobroek/opencode-lib@workspace:plugins/lib"],
 
