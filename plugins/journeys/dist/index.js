@@ -74,6 +74,8 @@ function parseAgentFile(id, text) {
   };
   if (typeof data.description === "string")
     agent.description = data.description;
+  if (typeof data.steps === "number")
+    agent.steps = data.steps;
   if (data.request && typeof data.request === "object")
     agent.request = data.request;
   return agent;
@@ -88,6 +90,8 @@ function shapeAgent(agent, file, created) {
   if (created || agent.mode === undefined)
     agent.mode = file.mode;
   agent.system ??= file.system;
+  if (file.steps !== undefined)
+    agent.steps ??= file.steps;
   if (file.request?.headers)
     agent.request = { ...agent.request, headers: { ...file.request.headers, ...agent.request?.headers } };
   agent.permissions = [...file.permissions, ...agent.permissions ?? []];

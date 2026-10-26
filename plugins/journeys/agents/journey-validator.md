@@ -1,6 +1,7 @@
 ---
 description: "Validates one user journey against the running product, recording evidence, intent-gated triage, and run results. Never edits product code."
 mode: subagent
+steps: 400
 request:
   headers:
     x-opencode-model-role: task

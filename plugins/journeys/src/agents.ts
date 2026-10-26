@@ -12,6 +12,7 @@ export type AgentFile = {
   id: string
   description?: string
   mode: "subagent" | "primary" | "all"
+  steps?: number
   request?: { headers?: Record<string, string> }
   permissions: Permission[]
   system: string
@@ -32,6 +33,7 @@ export function parseAgentFile(id: string, text: string): AgentFile {
     system: text.slice(match[0].length).trim(),
   }
   if (typeof data.description === "string") agent.description = data.description
+  if (typeof data.steps === "number") agent.steps = data.steps
   if (data.request && typeof data.request === "object") agent.request = data.request as AgentFile["request"]
   return agent
 }
@@ -45,6 +47,7 @@ export type AgentFields = {
   description?: string
   mode?: string
   system?: string
+  steps?: number
   request?: { headers?: Record<string, string> }
   permissions?: unknown[]
 }
@@ -59,6 +62,7 @@ export function shapeAgent(agent: AgentFields, file: AgentFile, created: boolean
   if (file.description !== undefined) agent.description ??= file.description
   if (created || agent.mode === undefined) agent.mode = file.mode
   agent.system ??= file.system
+  if (file.steps !== undefined) agent.steps ??= file.steps
   if (file.request?.headers) agent.request = { ...agent.request, headers: { ...file.request.headers, ...agent.request?.headers } }
   agent.permissions = [...file.permissions, ...(agent.permissions ?? [])]
 }

@@ -6,7 +6,7 @@ import { join } from "node:path"
 import { pathToFileURL } from "node:url"
 import { promisify } from "node:util"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
-import { AGENT_IDS, loadAgents, parseAgentFile, shapeAgent } from "./agents.ts"
+import { AGENT_IDS, type AgentFile, loadAgents, parseAgentFile, shapeAgent } from "./agents.ts"
 import { createPlugin, indexResource, readIndexParams, SKILL_NAMES } from "./index.ts"
 import { type Exec, installFormulas, JOURNEYS_SCRIPT, journeysWrites, runJourneys } from "./journeys-tool.ts"
 
@@ -185,6 +185,10 @@ describe("agents", () => {
       expect(agent.permissions).toContainEqual({ action: "subagent", resource: "*", effect: "deny" })
       expect(agent.system).not.toMatch(/skill:\/\/|CAP: none|\bbash\b|\beval\b|result channel/)
     }
+    expect(agents.find((agent) => agent.id === "journey-validator")?.steps).toBe(400)
+    const shaped: Record<string, unknown> = {}
+    shapeAgent(shaped, agents.find((agent) => agent.id === "journey-validator") as AgentFile, true)
+    expect(shaped.steps).toBe(400)
   })
 
   test("a configured agent keeps its fields, and its permissions come after the shipped ones", () => {
