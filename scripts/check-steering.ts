@@ -3,7 +3,8 @@
  * Fail when shipped markdown still carries Oh My Pi steering: `skill://`, `rule://`,
  * `agent://`, `proc://` and the other omp URI schemes, omp tool names, TTSR wording, or
  * omp CLI and config paths. Shipped markdown is every `*.md` under a plugin's `skills/`
- * or `agents/` directory.
+ * or `agents/` directory. A `SKILL.md` must also open with YAML frontmatter that parses
+ * and carries a `name` and a `description`: Claude Code and Codex read it strictly.
  *
  *   bun scripts/check-steering.ts           check plugins/*
  *   bun scripts/check-steering.ts <files>   check the named files
@@ -53,6 +54,22 @@ export function checkText(file: string, text: string): Finding[] {
   return findings
 }
 
+/** Findings for a `SKILL.md` whose frontmatter is not strict YAML with a name and description. */
+export function checkSkillFrontmatter(file: string, text: string): Finding[] {
+  const match = /^---\r?\n([\s\S]*?)\r?\n---\r?\n/.exec(text)
+  const finding = (reason: string): Finding[] => [{ file, line: 1, match: "---", reason }]
+  if (!match) return finding("SKILL.md has no frontmatter")
+  let data: unknown
+  try {
+    data = Bun.YAML.parse(match[1] ?? "")
+  } catch (error) {
+    return finding(`frontmatter is not valid YAML (quote values that contain ": "): ${String(error)}`)
+  }
+  const fields = (data && typeof data === "object" ? data : {}) as Record<string, unknown>
+  const missing = ["name", "description"].filter((key) => typeof fields[key] !== "string" || !fields[key])
+  return missing.length > 0 ? finding(`frontmatter has no ${missing.join(" or ")}`) : []
+}
+
 function walk(dir: string): string[] {
   const out: string[] = []
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -78,7 +95,11 @@ export function shippedMarkdown(pluginsDir: string): string[] {
 function main(argv: string[]): number {
   const root = path.resolve(import.meta.dir, "..")
   const files = argv.length > 0 ? argv : shippedMarkdown(path.join(root, "plugins"))
-  const findings = files.flatMap((file) => checkText(path.relative(root, path.resolve(file)), readFileSync(file, "utf8")))
+  const findings = files.flatMap((file) => {
+    const name = path.relative(root, path.resolve(file))
+    const text = readFileSync(file, "utf8")
+    return [...(path.basename(file) === "SKILL.md" ? checkSkillFrontmatter(name, text) : []), ...checkText(name, text)]
+  })
   for (const finding of findings) console.error(`${finding.file}:${finding.line}: ${finding.reason}`)
   if (findings.length > 0) {
     console.error(`check-steering: ${findings.length} finding(s) in ${new Set(findings.map((f) => f.file)).size} file(s)`)

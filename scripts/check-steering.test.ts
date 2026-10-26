@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { checkText, shippedMarkdown } from "./check-steering.ts"
+import { checkSkillFrontmatter, checkText, shippedMarkdown } from "./check-steering.ts"
 
 const matches = (text: string) => checkText("x.md", text).map((finding) => finding.match)
 
@@ -34,6 +34,20 @@ describe("checkText", () => {
     expect(checkText("x.md", "ok\nskill://a")).toEqual([
       { file: "x.md", line: 2, match: "skill://", reason: expect.stringContaining("skill://") },
     ])
+  })
+})
+
+describe("checkSkillFrontmatter", () => {
+  const reasons = (text: string) => checkSkillFrontmatter("SKILL.md", text).map((finding) => finding.reason)
+
+  test("accepts strict YAML with a name and description", () => {
+    expect(reasons('---\nname: a\ndescription: "Use when x: y."\n---\nbody')).toEqual([])
+  })
+
+  test("rejects an unquoted colon-space, a missing field and missing frontmatter", () => {
+    expect(reasons("---\nname: a\ndescription: Use when x: y.\n---\nbody")[0]).toContain("not valid YAML")
+    expect(reasons("---\nname: a\n---\nbody")).toEqual(["frontmatter has no description"])
+    expect(reasons("body")).toEqual(["SKILL.md has no frontmatter"])
   })
 })
 
