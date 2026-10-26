@@ -1601,7 +1601,7 @@ describe("runCli against real processes", () => {
   test("an abort kills the command and every process in its group", async () => {
     const { script, self, child } = family("aborted")
     const controller = new AbortController()
-    const pending = runCli([script], { timeoutMs: FORGE_TIMEOUT_MS, signal: controller.signal })
+    const pending = runCli(["/bin/sh", script], { timeoutMs: FORGE_TIMEOUT_MS, signal: controller.signal })
     await appeared(child)
     await appeared(self)
     expect(alive(pid(self))).toBe(true)
@@ -1629,8 +1629,12 @@ describe("runCli against real processes", () => {
     chmodSync(script, 0o700)
     const started = Date.now()
     // Long enough that the script is running, holding the pipe, when the deadline fires.
-    const pending = runCli([script], { timeoutMs: 1_500 })
-    await appeared(self)
+    // Run through `/bin/sh` rather than exec'd: macOS can hold the first exec of a freshly
+    // written executable for seconds (a policy scan), which would let the deadline win.
+    const pending = runCli(["/bin/sh", script], { timeoutMs: 1_500 })
+    // A deadline that fires before the script started leaves no pid file; fail on it instead of waiting.
+    await Promise.race([appeared(self), pending])
+    expect(existsSync(self)).toBe(true)
     const result = await pending
 
     expect(Date.now() - started).toBeLessThan(FORGE_TIMEOUT_MS)
