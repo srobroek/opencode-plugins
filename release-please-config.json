@@ -85,6 +85,10 @@
     "plugins/debate": {
       "release-type": "node",
       "component": "debate"
+    },
+    "plugins/eli5": {
+      "release-type": "node",
+      "component": "eli5"
     }
   }
 }

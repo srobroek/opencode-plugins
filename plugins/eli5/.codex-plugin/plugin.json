@@ -1,0 +1,19 @@
+{
+  "name": "eli5",
+  "version": "0.1.0",
+  "description": "Explain a topic at five depth levels, from metaphor to frontier.",
+  "author": {
+    "name": "Sjors Robroek",
+    "url": "https://github.com/srobroek"
+  },
+  "homepage": "https://github.com/srobroek/opencode-plugins/tree/main/plugins/eli5",
+  "repository": "https://github.com/srobroek/opencode-plugins",
+  "license": "Apache-2.0",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Eli5",
+    "shortDescription": "Explain a topic at five depth levels, from metaphor to frontier.",
+    "developerName": "Sjors Robroek",
+    "category": "productivity"
+  }
+}

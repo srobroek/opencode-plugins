@@ -29,6 +29,18 @@
       "category": "productivity"
     },
     {
+      "name": "eli5",
+      "source": {
+        "source": "local",
+        "path": "./plugins/eli5"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "productivity"
+    },
+    {
       "name": "languages",
       "source": {
         "source": "local",
