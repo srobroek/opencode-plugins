@@ -1,0 +1,14 @@
+{
+  "name": "@srobroek/opencode-lib",
+  "version": "0.0.0",
+  "description": "Shared helpers for the plugins in this repository. Internal; not a plugin.",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./*": "./src/*.ts"
+  },
+  "peerDependencies": {
+    "@opencode/plugin": "^2.1.4"
+  }
+}
