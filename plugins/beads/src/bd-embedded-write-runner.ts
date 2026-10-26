@@ -258,3 +258,5 @@ export async function main(args: string[]): Promise<number> {
 }
 
 if (import.meta.main) process.exitCode = await main(process.argv.slice(2))
+
+export default main
