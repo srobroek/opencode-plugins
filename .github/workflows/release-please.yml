@@ -61,7 +61,7 @@ jobs:
         run: |
           bun install --frozen-lockfile
           bun run build
-          git add -- 'plugins/*/dist/*' 'plugins/*/index.js' 'plugins/*/tui.js'
+          git add -A -- plugins
           if ! git diff --cached --quiet; then
             git config user.name "release-app[bot]"
             git config user.email "release-app[bot]@users.noreply.github.com"
