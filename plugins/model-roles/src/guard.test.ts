@@ -46,15 +46,17 @@ describe("parseGuard", () => {
   })
 
   test("true and {} mean auto with the default threshold", () => {
-    expect(parseGuard(true)).toEqual({ expensive: "auto", threshold: 4, allowInherit: [], allowModels: [] })
-    expect(parseGuard({})).toEqual({ expensive: "auto", threshold: 4, allowInherit: [], allowModels: [] })
+    expect(parseGuard(true)).toEqual({ expensive: "auto", threshold: 4, allowInherit: [], allowModels: [], mode: "refuse" })
+    expect(parseGuard({})).toEqual({ expensive: "auto", threshold: 4, allowInherit: [], allowModels: [], mode: "refuse" })
   })
 
   test("reads a list, a threshold and allowInherit, dropping junk", () => {
     expect(
       parseGuard({ expensive: ["a/b", 3, " "], threshold: 10, allowInherit: ["x", 1], allowModels: ["c/d", null] }),
-    ).toEqual({ expensive: ["a/b"], threshold: 10, allowInherit: ["x"], allowModels: ["c/d"] })
+    ).toEqual({ expensive: ["a/b"], threshold: 10, allowInherit: ["x"], allowModels: ["c/d"], mode: "refuse" })
     expect(parseGuard({ expensive: "a/b", threshold: -1 })?.expensive).toEqual(["a/b"])
+    expect(parseGuard({ mode: "auto" })?.mode).toBe("auto")
+    expect(parseGuard({ mode: "other" })?.mode).toBe("refuse")
     expect(parseGuard({ threshold: -1 })?.threshold).toBe(4)
   })
 })

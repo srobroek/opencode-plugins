@@ -34,6 +34,8 @@ export type GuardOptions = {
   allowInherit: string[]
   /** Expensive models a spawn may still name in its own `model` argument. */
   allowModels: string[]
+  /** `"auto"` routes a spawn it would refuse through the auto decider instead. */
+  mode: "refuse" | "auto"
 }
 
 export type GuardAgent = {
@@ -81,7 +83,8 @@ export function parseGuard(raw: unknown): GuardOptions | undefined {
     typeof input.threshold === "number" && Number.isFinite(input.threshold) && input.threshold > 0
       ? input.threshold
       : AUTO_THRESHOLD
-  return { expensive, threshold, allowInherit: strings(input.allowInherit), allowModels: strings(input.allowModels) }
+  const mode = input.mode === "auto" ? "auto" : "refuse"
+  return { expensive, threshold, allowInherit: strings(input.allowInherit), allowModels: strings(input.allowModels), mode }
 }
 
 const key = (ref: ModelRef): string => `${ref.providerID}/${ref.id}`

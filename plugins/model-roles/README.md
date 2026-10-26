@@ -54,6 +54,7 @@ merge with them.
   spawner. `smol`, `task`, `slow` and `challenger` have built-in texts. See
   [Choosing a role per spawn](#choosing-a-role-per-spawn).
 - `guard`: see [Subagent model guard](#subagent-model-guard).
+- `auto`: see [Auto routing](#auto-routing). Off when absent.
 
 ## Declaring a role in an agent file
 
@@ -121,6 +122,10 @@ is cheaper.
 - `allowInherit`: agent ids that may inherit the session model.
 - `allowModels`: expensive models a spawn may name in its own `model`
   argument. Same format as `expensive`.
+- `mode`: `"refuse"` (default) refuses the spawn. `"auto"` asks the
+  [auto decider](#auto-routing) for a role instead, offering only roles whose
+  model is not expensive, and refuses only when none resolves. It uses the
+  `auto` settings, or their defaults when `auto` is absent.
 
 A spawn is allowed if it passes a `role` that resolves, or if the target agent
 has a model, or a role that resolves (through the `agents` option or the
@@ -242,6 +247,52 @@ nothing available falls through to step 3. A resumed spawn (with
 spawned with (in plugin storage, under `spawn-role:<sessionID>`), so a
 fallback for that child stays in the same role.
 
+## Auto routing
+
+Experimental, and off unless you set `auto`. When a fresh `subagent` spawn
+names no `model` and no `role`, and its agent has no model and no role of its
+own, a small model picks a role for it through `ctx.generate.text`.
+
+```jsonc
+"auto": {
+  "decider": "@tiny",
+  "roles": ["smol", "task"],
+  "default": "task",
+  "timeoutMs": 5000,
+  "capAtParent": true
+}
+```
+
+- `auto`: `true` turns it on with the defaults.
+- `decider`: the role (`@tiny`) or `provider/model#variant` the decider runs
+  on (default `@smol`). A role resolves like any other, skipping unhealthy
+  models.
+- `roles`: the roles the decider may pick (default `smol` and `task`). Roles
+  that aren't configured are dropped. With none left, auto routing is off.
+- `default`: the role a spawn gets when the decider isn't confident, replies
+  with something other than the JSON it was asked for, fails, takes longer
+  than `timeoutMs` (default 5000), or has no model. Defaults to `task` when
+  allowed, else the first allowed role.
+- `capAtParent`: when on (default), a role whose model costs more than the
+  calling session's model steps down to the dearest allowed role at or under
+  that cost.
+
+The decider sees the agent id and description, the spawn's description, the
+first 6000 characters of its prompt, and each allowed role's purpose and cost
+tier. It answers `{"role": …, "confident": true|false}`; a code fence around
+it is fine. The chosen role then applies as if the spawner had passed it, so
+fallback stays in that role. The spawn description gets a tag such as
+`[auto: smol, confident]` (or `unsure`, `invalid`, `timeout`, `error`,
+`no-decider`, `capped from slow`), which becomes the child session's title.
+`model_roles_check` lists the last 20 decisions of this server.
+
+Auto routing never overrides an explicit `model` or `role`, a resumed spawn,
+or an agent's own model or role, and it never touches a root session. The
+spawn waits for the decider: about 1.5 s with Claude Haiku 4.5 on Bedrock
+(p50 1.5 s, p95 1.8 s over 30 calls). The host ignores abort signals on
+`ctx.generate.text`, so a decider past `timeoutMs` keeps running in the
+background and its answer is dropped.
+
 ## Check
 
 `model_roles_check` is a read-only tool. It checks every role candidate
@@ -250,7 +301,8 @@ one of: available, unknown id, unknown variant (listing the ones that
 exist), provider unavailable, unhealthy until a time, or a link to another
 role. It also shows what each role resolves to, the model each
 role-bearing agent ends up on, and the values the `subagent` tool's `role`
-parameter offers, with their purpose and cost tier.
+parameter offers, with their purpose and cost tier, and the recent
+[auto routing](#auto-routing) decisions.
 
 The same check is exported for scripts: `checkRoles(options, models, agents,
 health?, now?, purposes?)` returns the report, and `formatCheck(report)` turns it into

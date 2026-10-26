@@ -40,6 +40,9 @@ function createHost(input: {
   const sessions = new Map<string, Record<string, unknown>>()
   const storage = new Map<string, unknown>()
   const calls: Array<{ method: string; input: unknown }> = []
+  let generate: (input: { prompt: string; model?: ModelRef }) => Promise<{ text: string }> = async () => ({
+    text: '{"role": "smol", "confident": true}',
+  })
   const tools = new Map<string, { execute: (input: unknown) => Promise<{ content: string }> }>()
   const transforms: Array<{ callback: (editor: Editor) => void }> = []
   const hooks: Array<{ name: string; callback: (payload: unknown) => unknown }> = []
@@ -111,6 +114,12 @@ function createHost(input: {
       list: async () => ({ data: listOverride ? listOverride() : [...agents.values()].map((a) => structuredClone(a)) }),
     },
     model: { list: async () => ({ data: models }), default: async () => ({ data: input.defaultModel }) },
+    generate: {
+      text: async (payload: { prompt: string; model?: ModelRef }) => {
+        calls.push({ method: "generate", input: payload })
+        return generate(payload)
+      },
+    },
     storage: {
       get: async (key: string) => storage.get(key),
       set: async (key: string, value: unknown) => void storage.set(key, value),
@@ -215,6 +224,9 @@ function createHost(input: {
     storage,
     calls,
     tools,
+    setGenerate: (fn: typeof generate) => {
+      generate = fn
+    },
     setSessionGet: (fn: (id: string) => Promise<unknown>) => {
       sessionGet = fn
     },
@@ -820,6 +832,113 @@ describe("runtime fallback", () => {
     host.storage.set("health", { "amazon-bedrock/claude-sonnet": { failedAt: Date.now(), until: Date.now() + 60_000, reason: "x" } })
     const cleanup = await setup(host)
     expect(host.agents().get("general")?.model).toEqual(haiku)
+    host.close()
+    await cleanup()
+  })
+})
+
+describe("auto routing", () => {
+  const opus = { providerID: "amazon-bedrock", id: "claude-opus" }
+  const priced: Model[] = [
+    { ...opus, variants: [], cost: [{ input: 4.4 }] },
+    { providerID: "amazon-bedrock", id: "claude-sonnet", variants: [{ id: "high" }], cost: [{ input: 2 }] },
+    { providerID: "anthropic", id: "claude-haiku", variants: [], cost: [{ input: 0.1 }] },
+  ]
+  const agents: Agent[] = [{ id: "general" }, { id: "plain" }, { id: "explore", model: haiku }]
+  const roles = { task: "amazon-bedrock/claude-sonnet#high", smol: "anthropic/claude-haiku", tiny: "anthropic/claude-haiku", slow: "amazon-bedrock/claude-opus" }
+  const autoOptions = (auto: unknown, extra: Record<string, unknown> = {}) => ({ roles, agents: {}, auto, ...extra })
+  const generations = (host: ReturnType<typeof createHost>) => host.calls.filter((c) => c.method === "generate")
+
+  test("routes an unroled spawn to the decided role and records it", async () => {
+    const host = createHost({ agents, models: priced, options: autoOptions({ decider: "@tiny" }), sessionModel: opus })
+    const cleanup = await setup(host)
+    const input = await host.spawn("subagent", { agent: "general", description: "find parser", prompt: "where is parseOptions?" })
+    expect(input).toEqual({
+      agent: "general",
+      description: "find parser [auto: smol, confident]",
+      prompt: "where is parseOptions?",
+      model: "anthropic/claude-haiku",
+    })
+    const call = generations(host)[0]?.input as { model: ModelRef; prompt: string } | undefined
+    expect(call?.model).toEqual(haiku)
+    expect(call?.prompt).toContain("where is parseOptions?")
+    const check = await host.tools.get("model_roles_check")?.execute({})
+    expect(check?.content).toContain("general → smol (anthropic/claude-haiku; confident;")
+    host.close()
+    await cleanup()
+  })
+
+  test("never overrides a role, a model, a resume or an agent with its own model", async () => {
+    const host = createHost({ agents, models: priced, options: autoOptions(true), sessionModel: opus })
+    const cleanup = await setup(host)
+    await host.spawn("subagent", { agent: "plain", prompt: "x", role: "task" })
+    await host.spawn("subagent", { agent: "plain", prompt: "x", model: "anthropic/claude-haiku" })
+    await host.spawn("subagent", { agent: "plain", prompt: "x", sessionID: "ses_9" })
+    expect(await host.spawn("subagent", { agent: "explore", prompt: "x" })).toEqual({ agent: "explore", prompt: "x" })
+    expect(await host.spawn("subagent", { agent: "missing", prompt: "x" })).toEqual({ agent: "missing", prompt: "x" })
+    expect(generations(host)).toHaveLength(0)
+    host.close()
+    await cleanup()
+  })
+
+  test("takes the default role when the decider is unsure, wrong, failing or slow", async () => {
+    const host = createHost({ agents, models: priced, options: autoOptions({ timeoutMs: 20 }), sessionModel: opus })
+    const cleanup = await setup(host)
+    const replies: Array<() => Promise<{ text: string }>> = [
+      async () => ({ text: '{"role": "smol", "confident": false}' }),
+      async () => ({ text: '{"role": "slow", "confident": true}' }),
+      async () => {
+        throw new Error("boom")
+      },
+      () => new Promise((resolve) => setTimeout(() => resolve({ text: '{"role": "smol", "confident": true}' }), 200)),
+    ]
+    const tags: unknown[] = []
+    for (const reply of replies) {
+      host.setGenerate(reply)
+      const input = await host.spawn("subagent", { agent: "general", description: "d", prompt: "x" })
+      expect(input.model).toBe("amazon-bedrock/claude-sonnet#high")
+      tags.push(input.description)
+    }
+    expect(tags).toEqual(["d [auto: task, unsure]", "d [auto: task, invalid]", "d [auto: task, error]", "d [auto: task, timeout]"])
+    host.close()
+    await cleanup()
+  })
+
+  test("caps the role at the parent's model cost", async () => {
+    const host = createHost({
+      agents,
+      models: priced,
+      options: autoOptions({ roles: ["smol", "task", "slow"] }),
+      sessionModel: { providerID: "amazon-bedrock", id: "claude-sonnet", variant: "high" },
+    })
+    const cleanup = await setup(host)
+    host.setGenerate(async () => ({ text: '{"role": "slow", "confident": true}' }))
+    const input = await host.spawn("subagent", { agent: "general", description: "d", prompt: "design it" })
+    expect(input.model).toBe("amazon-bedrock/claude-sonnet#high")
+    expect(input.description).toBe("d [auto: task, capped from slow]")
+    host.close()
+    await cleanup()
+  })
+
+  test("guard mode auto routes a spawn it would refuse to a cheap role", async () => {
+    const host = createHost({ agents, models: priced, options: autoOptions(undefined, { guard: { mode: "auto" } }), sessionModel: opus })
+    const cleanup = await setup(host)
+    host.setGenerate(async () => ({ text: '{"role": "task", "confident": true}' }))
+    const input = await host.spawn("subagent", { agent: "plain", description: "d", prompt: "x" })
+    expect(input.model).toBe("amazon-bedrock/claude-sonnet#high")
+    // Under a cheap session model the guard allows, so nothing is routed.
+    host.setSessionGet(async (id) => ({ id, model: haiku }))
+    expect(await host.spawn("subagent", { agent: "plain", prompt: "x" })).toEqual({ agent: "plain", prompt: "x" })
+    expect(generations(host)).toHaveLength(1)
+    host.close()
+    await cleanup()
+  })
+
+  test("guard refuse mode still refuses without auto", async () => {
+    const host = createHost({ agents, models: priced, options: autoOptions(undefined, { guard: true }), sessionModel: opus })
+    const cleanup = await setup(host)
+    await expect(host.spawn("subagent", { agent: "plain", prompt: "x" })).rejects.toThrow(/inherit/)
+    expect(generations(host)).toHaveLength(0)
     host.close()
     await cleanup()
   })
