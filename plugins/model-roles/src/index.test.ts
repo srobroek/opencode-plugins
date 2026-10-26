@@ -12,7 +12,12 @@ type Editor = {
 /** A host that replays agent transforms in registration order and emits `agent.updated` after each change. */
 function createHost(input: { agents: Agent[]; models: Model[]; options: unknown; sessionModel?: ModelRef }) {
   const toolHooks: Array<{ name: string; callback: (payload: unknown) => Promise<void> }> = []
-  let sessionGet: (id: string) => Promise<unknown> = async (id) => ({ id, model: input.sessionModel })
+  let sessionGet: (id: string) => Promise<unknown> = async (id) =>
+    sessions.get(id) ?? { id, model: input.sessionModel }
+  const sessions = new Map<string, Record<string, unknown>>()
+  const storage = new Map<string, unknown>()
+  const calls: Array<{ method: string; input: unknown }> = []
+  const tools = new Map<string, { execute: (input: unknown) => Promise<{ content: string }> }>()
   const transforms: Array<{ callback: (editor: Editor) => void }> = []
   const hooks: Array<{ name: string; callback: (payload: unknown) => void }> = []
   let agents = new Map<string, Agent>()
@@ -66,7 +71,27 @@ function createHost(input: { agents: Agent[]; models: Model[]; options: unknown;
       list: async () => ({ data: listOverride ? listOverride() : [...agents.values()].map((a) => structuredClone(a)) }),
     },
     model: { list: async () => ({ data: models }) },
+    storage: {
+      get: async (key: string) => storage.get(key),
+      set: async (key: string, value: unknown) => void storage.set(key, value),
+    },
     tool: {
+      transform: async (callback: (editor: { add: (tool: { name: string; execute: never }) => void }) => void) => {
+        registrations++
+        const added: string[] = []
+        callback({
+          add: (tool) => {
+            tools.set(tool.name, tool)
+            added.push(tool.name)
+          },
+        })
+        return {
+          dispose: async () => {
+            registrations--
+            for (const name of added) tools.delete(name)
+          },
+        }
+      },
       hook: async (name: string, callback: (payload: unknown) => Promise<void>) => {
         registrations++
         const entry = { name, callback }
@@ -81,6 +106,9 @@ function createHost(input: { agents: Agent[]; models: Model[]; options: unknown;
     },
     session: {
       get: async ({ sessionID }: { sessionID: string }) => sessionGet(sessionID),
+      synthetic: async (payload: unknown) => void calls.push({ method: "synthetic", input: payload }),
+      prompt: async (payload: unknown) => void calls.push({ method: "prompt", input: payload }),
+      switchModel: async (payload: unknown) => void calls.push({ method: "switchModel", input: payload }),
       hook: async (name: string, callback: (payload: unknown) => void) => {
         registrations++
         const entry = { name, callback }
@@ -119,11 +147,20 @@ function createHost(input: { agents: Agent[]; models: Model[]; options: unknown;
       emit({ type: "model.updated" })
     },
     emit,
-    toolHooks: () => toolHooks.length,
+    toolHooks: () => toolHooks.filter((hook) => hook.name === "execute.before").length,
     spawn: async (tool: string, payload: unknown, agent = "build") => {
       for (const hook of toolHooks)
         if (hook.name === "execute.before") await hook.callback({ tool, sessionID: "s1", agent, id: "c1", input: payload })
     },
+    spawnFailed: async (payload: unknown, message: string, sessionID = "s1") => {
+      for (const hook of toolHooks)
+        if (hook.name === "execute.after")
+          await hook.callback({ tool: "subagent", sessionID, agent: "build", id: "c1", input: payload, status: "error", error: { message } })
+    },
+    sessions,
+    storage,
+    calls,
+    tools,
     setSessionGet: (fn: (id: string) => Promise<unknown>) => {
       sessionGet = fn
     },
@@ -329,6 +366,182 @@ describe("subagent model guard", () => {
       throw new Error("gone")
     })
     await host.spawn("subagent", { agent: "plain", prompt: "x" })
+    host.close()
+    await cleanup()
+  })
+})
+
+describe("role subagents", () => {
+  const general: Agent & Record<string, unknown> = {
+    id: "general",
+    system: "general prompt",
+    permissions: [{ action: "edit", resource: "*", effect: "allow" }],
+  }
+
+  test("registers general-<role> for configured default roles, cloned from general", async () => {
+    const host = createHost({ agents: [general], models, options })
+    const cleanup = await setup(host)
+    const smol = host.agents().get("general-smol") as Agent & Record<string, unknown>
+    expect(smol.model).toEqual(haiku)
+    expect(smol.mode).toBe("subagent")
+    expect(smol.system).toBe("general prompt")
+    expect(smol.permissions).toEqual(general.permissions)
+    expect(smol.request?.headers?.["x-opencode-model-role"]).toBe("smol")
+    expect(String(smol.description)).toContain("'smol' model role")
+    expect(host.agents().get("general-task")?.model).toEqual(sonnet)
+    expect(host.agents().has("general-slow")).toBe(false)
+    host.close()
+    await cleanup()
+    expect(host.agents().has("general-smol")).toBe(false)
+  })
+
+  test("roleAgents: [] registers none", async () => {
+    const host = createHost({ agents: [general], models, options: { ...options, roleAgents: [] } })
+    const cleanup = await setup(host)
+    expect([...host.agents().keys()]).toEqual(["general"])
+    host.close()
+    await cleanup()
+  })
+
+  test("the guard suggests role subagents first", async () => {
+    const opus = { providerID: "amazon-bedrock", id: "claude-opus" }
+    const priced: Model[] = [
+      { ...opus, variants: [], cost: [{ input: 4.4 }] },
+      { providerID: "anthropic", id: "claude-haiku", variants: [], cost: [{ input: 0.1 }] },
+    ]
+    const host = createHost({
+      agents: [{ id: "plain" }],
+      models: priced,
+      options: { roles: { smol: "anthropic/claude-haiku" }, guard: true },
+      sessionModel: opus,
+    })
+    const cleanup = await setup(host)
+    await expect(host.spawn("subagent", { agent: "plain", prompt: "x" })).rejects.toThrow(
+      /role subagent .*general-smol \(anthropic\/claude-haiku\)/,
+    )
+    host.close()
+    await cleanup()
+  })
+})
+
+describe("model_roles_check", () => {
+  test("lists roles, candidate status and agent resolution", async () => {
+    const host = createHost({ agents: [{ id: "general" }], models, options })
+    const cleanup = await setup(host)
+    const tool = host.tools.get("model_roles_check")
+    const result = await tool?.execute({})
+    expect(result?.content).toContain("Role task → amazon-bedrock/claude-sonnet#high")
+    expect(result?.content).toContain("  - nope-provider/x: provider unavailable")
+    expect(result?.content).toContain("  - general (role task) → amazon-bedrock/claude-sonnet#high")
+    host.close()
+    await cleanup()
+    expect(host.tools.size).toBe(0)
+  })
+})
+
+describe("runtime fallback", () => {
+  const fallbackOptions = {
+    roles: { task: ["amazon-bedrock/claude-sonnet#high", "anthropic/claude-haiku"] },
+    agents: { general: "task", build: "task" },
+    roleAgents: [],
+  }
+  const failed = (sessionID: string, error: Record<string, unknown>) => ({
+    type: "session.execution.failed",
+    data: { sessionID, error },
+  })
+  const methods = (host: ReturnType<typeof createHost>, method: string) => host.calls.filter((c) => c.method === method)
+
+  test("a root failure marks the model, moves the role and retries once per window", async () => {
+    const host = createHost({ agents: [{ id: "general" }, { id: "build" }], models, options: fallbackOptions })
+    host.sessions.set("r", { id: "r", agent: "build", model: sonnet })
+    const cleanup = await setup(host)
+    host.emit(failed("r", { type: "api", message: "Too many requests", status: 429 }))
+    await settle()
+    expect(host.agents().get("general")?.model).toEqual(haiku)
+    expect(Object.keys(host.storage.get("health") as object)).toEqual(["amazon-bedrock/claude-sonnet"])
+    expect(methods(host, "switchModel").map((c) => c.input)).toEqual([{ sessionID: "r", model: haiku }])
+    const prompt = methods(host, "prompt")[0]?.input as { text: string; metadata: unknown }
+    expect(prompt.text).toContain("Role task now resolves to anthropic/claude-haiku")
+    expect(prompt.metadata).toEqual({ source: "srobroek.model-roles", kind: "fallback-retry" })
+
+    // The retried model fails too: no second retry inside the window, only a visible note.
+    host.sessions.set("r", { id: "r", agent: "build", model: haiku })
+    host.emit(failed("r", { type: "api", message: "Overloaded", status: 529 }))
+    await settle()
+    expect(methods(host, "switchModel")).toHaveLength(1)
+    expect(methods(host, "prompt")).toHaveLength(1)
+    expect(methods(host, "synthetic")).toHaveLength(1)
+    // Every candidate is unhealthy now: the least recently failed one wins.
+    expect(host.agents().get("general")?.model).toEqual(sonnet)
+    host.close()
+    await cleanup()
+  })
+
+  test("retryOnFallback: false only notifies", async () => {
+    const host = createHost({ agents: [{ id: "build" }], models, options: { ...fallbackOptions, retryOnFallback: false } })
+    host.sessions.set("r", { id: "r", agent: "build", model: sonnet })
+    const cleanup = await setup(host)
+    host.emit(failed("r", { type: "api", message: "Model unavailable: amazon-bedrock/claude-sonnet" }))
+    await settle()
+    expect(methods(host, "switchModel")).toHaveLength(0)
+    expect(methods(host, "synthetic")).toHaveLength(1)
+    host.close()
+    await cleanup()
+  })
+
+  test("a subagent failure tells the parent once, from the event or the tool error", async () => {
+    const host = createHost({ agents: [{ id: "general" }], models, options: fallbackOptions })
+    host.sessions.set("r", { id: "r" })
+    host.sessions.set("c", { id: "c", parentID: "r", agent: "general", model: sonnet })
+    const cleanup = await setup(host)
+    host.emit(failed("c", { type: "api", message: "ThrottlingException", status: 429 }))
+    await settle()
+    await host.spawnFailed({ agent: "general", prompt: "x" }, "Subagent failed (c): ThrottlingException", "r")
+    await host.spawnFailed({ agent: "general", prompt: "x" }, "rate limit exceeded", "r")
+    await settle()
+    const notes = methods(host, "synthetic").map((c) => c.input as { sessionID: string; text: string })
+    expect(notes).toHaveLength(1)
+    expect(notes[0]?.sessionID).toBe("r")
+    expect(notes[0]?.text).toContain("Subagent 'general' failed")
+    expect(notes[0]?.text).toContain("may be retried")
+    expect(Object.keys(host.storage.get("health") as object)).toEqual(["amazon-bedrock/claude-sonnet"])
+    expect(methods(host, "switchModel")).toHaveLength(0)
+    expect(host.agents().get("general")?.model).toEqual(haiku)
+    host.close()
+    await cleanup()
+  })
+
+  test("a spawn that fails with Model unavailable marks that model", async () => {
+    const host = createHost({ agents: [{ id: "general" }], models, options: fallbackOptions })
+    const cleanup = await setup(host)
+    await host.spawnFailed({ agent: "general", prompt: "x" }, "Subagent failed (c): Model unavailable: amazon-bedrock/claude-sonnet")
+    await settle()
+    expect(host.agents().get("general")?.model).toEqual(haiku)
+    expect(methods(host, "synthetic")).toHaveLength(1)
+    host.close()
+    await cleanup()
+  })
+
+  test("non-model failures change nothing", async () => {
+    const host = createHost({ agents: [{ id: "general" }], models, options: fallbackOptions })
+    host.sessions.set("r", { id: "r", agent: "general", model: sonnet })
+    const cleanup = await setup(host)
+    host.emit(failed("r", { type: "tool", message: "Model unavailable: x/y" }))
+    host.emit(failed("r", { type: "unknown", message: "prompt is too long" }))
+    await host.spawnFailed({ agent: "general", prompt: "x" }, "file not found")
+    await settle()
+    expect(host.storage.has("health")).toBe(false)
+    expect(host.calls).toHaveLength(0)
+    expect(host.agents().get("general")?.model).toEqual(sonnet)
+    host.close()
+    await cleanup()
+  })
+
+  test("stored health survives a restart", async () => {
+    const host = createHost({ agents: [{ id: "general" }], models, options: fallbackOptions })
+    host.storage.set("health", { "amazon-bedrock/claude-sonnet": { failedAt: Date.now(), until: Date.now() + 60_000, reason: "x" } })
+    const cleanup = await setup(host)
+    expect(host.agents().get("general")?.model).toEqual(haiku)
     host.close()
     await cleanup()
   })

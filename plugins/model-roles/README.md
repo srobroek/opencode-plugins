@@ -41,6 +41,14 @@ merge with them.
   `title`, `compaction`) or to override an agent's own role.
 - `fallback`: only `"keep"` is supported. If nothing matches, the agent keeps
   its own model, or inherits one if it has none.
+- `cooldownMs`: how long a failed model sits out (default `600000`, 10 min).
+  See [Runtime fallback](#runtime-fallback).
+- `retryOnFallback`: retry a failed root session once on the next model
+  (default `true`).
+- `roleAgents`: roles that get a `general-<role>` subagent (default
+  `["smol", "task", "slow", "challenger"]`, limited to the roles you
+  configured; `[]` turns them off). See [Role subagents](#role-subagents).
+- `guard`: see [Subagent model guard](#subagent-model-guard).
 
 ## Declaring a role in an agent file
 
@@ -108,3 +116,67 @@ A spawn is allowed if the target agent has a model, or a role that resolves
 `session.model`, or the calling agent's model if the session has none. If any
 lookup fails, the spawn goes ahead. Resumed spawns (with `sessionID`) are not
 checked.
+
+The `general-<role>` subagents are listed first in the refusal.
+
+## Runtime fallback
+
+OpenCode doesn't fall back to another model on its own. The `retry` hook can
+only retry the same model, and a subagent whose model is unavailable fails
+with `Model unavailable`. The plugin adds the fallback:
+
+1. On `session.execution.failed`, or when a `subagent` call fails, it checks
+   whether the model or provider caused the error: model unavailable,
+   auth or credential errors, 401/403, 429 or throttling, 5xx or overloaded.
+   User interrupts, tool errors and context overflow don't count.
+2. The failed model (all its variants) is marked unhealthy for `cooldownMs`
+   in plugin storage, under `health`.
+3. Roles are resolved again. Unhealthy candidates are skipped, so agents on
+   that role move to the next candidate. If every available candidate is
+   unhealthy, the one that failed longest ago is used. When a cooldown ends,
+   the roles are resolved again.
+4. Then, depending on the session:
+   - **Root session** with `retryOnFallback`: the plugin switches the session
+     to the next model (`session.switchModel`) and sends one short message
+     asking it to continue. A session is retried at most once per
+     `cooldownMs`. After that it only gets a note.
+   - **Subagent session**, or a failed `subagent` call: the parent gets a
+     note that does not start a turn (`session.synthetic`, steer). The note
+     names the failed model and the next one, and says the spawn may be
+     retried. The child's failure event and the tool error produce one note
+     between them.
+
+Every fallback is logged (`console.warn`) and shown in the session. The model
+is the one the error names (`Model unavailable: provider/model`), else the
+session's model, else the agent's.
+
+## Role subagents
+
+For each role in `roleAgents`, the plugin registers a `general-<role>`
+subagent. It copies `general`'s system prompt, steps and permissions, and
+carries the role header, so it runs on that role's model. Its description
+gives the role's purpose and the resolved model's cost tier:
+
+- `smol`: cheap and fast work, such as lookups, summaries, log and diff
+  reading, and mechanical edits.
+- `task`: everyday implementation and investigation.
+- `slow`: hard reasoning, such as design, root-cause debugging, and subtle
+  concurrency or data-integrity work.
+- `challenger`: an independent second opinion or review.
+
+The parent then picks a role for each spawn by agent name. Fields you set
+yourself for an agent with the same id take precedence, except the role
+header.
+
+## Check
+
+`model_roles_check` is a read-only tool. It checks every role candidate
+against `ctx.model.list()` across all providers, enabled or not, and reports
+one of: available, unknown id, unknown variant (listing the ones that
+exist), provider unavailable, unhealthy until a time, or a link to another
+role. It also shows what each role resolves to, and the model each
+role-bearing agent ends up on.
+
+The same check is exported for scripts: `checkRoles(options, models, agents,
+health?, now?)` returns the report, and `formatCheck(report)` turns it into
+text. Pass `parseOptions(yourOptions)` and the `data` of a `model.list` call.
