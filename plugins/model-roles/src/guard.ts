@@ -49,8 +49,6 @@ export type GuardFacts = {
   available: ReadonlyArray<GuardModel>
   /** The calling session's model, when known. */
   sessionModel: ModelRef | undefined
-  /** Ids of the plugin's `general-<role>` subagents, suggested first. */
-  roleAgents?: ReadonlyArray<string>
   /** How the plugin resolves models right now; defaults to plain role resolution. */
   health?: HealthView
 }
@@ -114,33 +112,29 @@ export function pinnedModel(
   return resolveRole(facts.options.roles, facts.available, role, facts.health).model
 }
 
-/** Spawnable agents and roles that run on a model outside the expensive set. */
-export function cheaperAlternatives(facts: GuardFacts): { roleAgents: string[]; agents: string[]; roles: string[] } {
-  const roleAgentIds = new Set(facts.roleAgents ?? [])
-  const roleAgents: string[] = []
+export type CheapRole = { role: string; model: ModelRef; cost: number | undefined }
+
+/** Spawnable agents and roles that run on a model outside the expensive set. Roles come cheapest first. */
+export function cheaperAlternatives(facts: GuardFacts): { agents: string[]; roles: CheapRole[] } {
   const agents: string[] = []
   for (const agent of facts.agents) {
     if (agent.id === facts.target || agent.mode === "primary" || agent.hidden === true) continue
     const model = pinnedModel(agent, facts)
     if (model === undefined || isExpensive(model, facts.guard, facts.available)) continue
-    if (roleAgentIds.has(agent.id)) {
-      roleAgents.push(`${agent.id} (${label(model)})`)
-      continue
-    }
     const description = agent.description?.trim().split("\n")[0]
     agents.push(description ? `${agent.id} (${label(model)}: ${description})` : `${agent.id} (${label(model)})`)
   }
-  const roles: string[] = []
+  const roles: CheapRole[] = []
   for (const role of Object.keys(facts.options.roles).sort()) {
     const model = resolveRole(facts.options.roles, facts.available, role, facts.health).model
-    if (model !== undefined && !isExpensive(model, facts.guard, facts.available)) roles.push(`${role} → ${label(model)}`)
+    if (model !== undefined && !isExpensive(model, facts.guard, facts.available))
+      roles.push({ role, model, cost: inputCost(model, facts.available) })
   }
-  return {
-    roleAgents: roleAgents.sort(),
-    agents: agents.sort().slice(0, CATALOG_LIMIT),
-    roles: roles.slice(0, CATALOG_LIMIT),
-  }
+  roles.sort((a, b) => (a.cost ?? Number.POSITIVE_INFINITY) - (b.cost ?? Number.POSITIVE_INFINITY))
+  return { agents: agents.sort().slice(0, CATALOG_LIMIT), roles: roles.slice(0, CATALOG_LIMIT) }
 }
+
+const price = (cost: number | undefined): string => (cost === undefined ? "cost unknown" : `$${cost}/M input tokens`)
 
 /** Judge one spawn. Anything the guard cannot establish allows. */
 export function judgeSpawn(facts: GuardFacts): GuardDecision {
@@ -151,19 +145,19 @@ export function judgeSpawn(facts: GuardFacts): GuardDecision {
   if (facts.sessionModel === undefined) return { allow: true }
   if (!isExpensive(facts.sessionModel, facts.guard, facts.available)) return { allow: true }
 
-  const { roleAgents, agents, roles } = cheaperAlternatives(facts)
+  const { agents, roles } = cheaperAlternatives(facts)
   const lines = [
     `Subagent '${facts.target}' has no model and no resolvable role, so it would inherit this session's expensive model ${label(facts.sessionModel)}.`,
-    "Re-issue the spawn with one of:",
   ]
-  if (roleAgents.length > 0)
-    lines.push(`- a role subagent (general's tools and instructions on a cheaper model role): ${roleAgents.join("; ")}`)
-  if (agents.length > 0) lines.push(`- an agent that pins a cheaper model: ${agents.join("; ")}`)
-  else if (roleAgents.length === 0) lines.push("- an agent that pins a cheaper model (none is configured)")
-  if (roles.length > 0)
+  const [cheapest, ...others] = roles
+  if (cheapest !== undefined) {
     lines.push(
-      `- a role for '${facts.target}' in the srobroek.model-roles \`agents\` option (e.g. agents: { "${facts.target}": "<role>" }): ${roles.join("; ")}`,
+      `Re-issue the spawn with role: "${cheapest.role}" (runs ${label(cheapest.model)}, ${price(cheapest.cost)}), or another role that fits the task better.`,
     )
+    if (others.length > 0)
+      lines.push(`Other cheaper roles: ${others.map((r) => `${r.role} → ${label(r.model)} (${price(r.cost)})`).join("; ")}`)
+  } else lines.push("No model role resolves to a cheaper model right now.")
+  if (agents.length > 0) lines.push(`Or spawn an agent that pins a cheaper model: ${agents.join("; ")}`)
   lines.push(
     `If '${facts.target}' should run on the session model, add it to the srobroek.model-roles option guard.allowInherit.`,
   )

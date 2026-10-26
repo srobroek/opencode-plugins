@@ -4,6 +4,7 @@
  * options and a `model.list` dump.
  */
 
+import type { GuardModel } from "./guard.ts"
 import { type HealthState, healthKey, healthView } from "./health.ts"
 import {
   type AgentLike,
@@ -14,6 +15,7 @@ import {
   resolveRole,
   roleOf,
 } from "./resolve.ts"
+import { describeChoice, type RoleChoice, roleChoices } from "./spawn-role.ts"
 
 export type CandidateStatus =
   | { status: "available" }
@@ -30,7 +32,8 @@ export type RoleReport = { role: string; candidates: CandidateReport[]; resolved
 
 export type AgentReport = { id: string; role: string; resolved?: ModelRef; own?: ModelRef }
 
-export type CheckReport = { roles: RoleReport[]; agents: AgentReport[] }
+/** `choices`: the values the `subagent` tool's `role` parameter offers. */
+export type CheckReport = { roles: RoleReport[]; agents: AgentReport[]; choices: RoleChoice[] }
 
 /** One candidate's status against every model the host lists, enabled or not. */
 export function candidateStatus(
@@ -58,10 +61,11 @@ export function candidateStatus(
 
 export function checkRoles(
   options: Options,
-  models: ReadonlyArray<AvailableModel>,
+  models: ReadonlyArray<GuardModel>,
   agents: ReadonlyArray<AgentLike>,
   health: HealthState = {},
   now = Date.now(),
+  purposes: Readonly<Record<string, string>> = {},
 ): CheckReport {
   const view = healthView(health, now)
   const roles = Object.keys(options.roles)
@@ -89,7 +93,7 @@ export function checkRoles(
     if (agent.model !== undefined) report.own = agent.model
     agentReports.push(report)
   }
-  return { roles, agents: agentReports }
+  return { roles, agents: agentReports, choices: roleChoices(options, models, purposes) }
 }
 
 const label = (ref: ModelRef): string => `${ref.providerID}/${ref.id}${ref.variant ? `#${ref.variant}` : ""}`
@@ -129,6 +133,10 @@ export function formatCheck(report: CheckReport): string {
       const target = agent.resolved !== undefined ? label(agent.resolved) : agent.own !== undefined ? `${label(agent.own)} (own model)` : "inherits the session model"
       lines.push(`  - ${agent.id} (role ${agent.role}) → ${target}`)
     }
+  }
+  if (report.choices.length > 0) {
+    lines.push("", "subagent `role` parameter:")
+    for (const choice of report.choices) lines.push(`  - ${describeChoice(choice)}`)
   }
   return lines.join("\n")
 }

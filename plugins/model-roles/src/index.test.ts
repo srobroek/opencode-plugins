@@ -3,6 +3,23 @@ import plugin, { MAX_REREGISTER, type ModelRef, spawnTarget } from "./index.ts"
 
 type Agent = { id: string; model?: ModelRef; request?: { headers?: Record<string, string> } }
 type Model = { providerID: string; id: string; variants: { id: string }[]; cost?: { input: number }[] }
+type SubagentTool = { id: string; name: string; description: string; input: unknown }
+type ToolEditor = {
+  add: (tool: { name: string; execute: (input: unknown) => Promise<{ content: string }> }) => void
+  get: (id: string) => SubagentTool | undefined
+  update: (id: string, fn: (tool: SubagentTool) => void) => void
+}
+const baseSubagent = (): SubagentTool => ({
+  id: "subagent",
+  name: "subagent",
+  description: "Spawns an agent in a child session.",
+  input: {
+    type: "object",
+    properties: { agent: { type: "string" }, prompt: { type: "string" }, model: { type: "string" }, sessionID: { type: "string" } },
+    required: ["agent", "prompt"],
+    additionalProperties: false,
+  },
+})
 type Editor = {
   list: () => Agent[]
   get: (id: string) => Agent | undefined
@@ -35,6 +52,23 @@ function createHost(input: {
   let wake: (() => void) | undefined
   let closed = false
 
+  const toolTransforms: Array<(editor: ToolEditor) => void> = []
+  let subagent = baseSubagent()
+  let toolReplays = 0
+  const replayTools = () => {
+    toolReplays++
+    tools.clear()
+    const current = baseSubagent()
+    const editor: ToolEditor = {
+      add: (tool) => void tools.set(tool.name, tool),
+      get: (id) => (id === "subagent" ? current : undefined),
+      update: (id, fn) => {
+        if (id === "subagent") fn(current)
+      },
+    }
+    for (const transform of toolTransforms) transform(editor)
+    subagent = current
+  }
   const emit = (event: unknown) => {
     queue.push(event)
     wake?.()
@@ -82,19 +116,18 @@ function createHost(input: {
       set: async (key: string, value: unknown) => void storage.set(key, value),
     },
     tool: {
-      transform: async (callback: (editor: { add: (tool: { name: string; execute: never }) => void }) => void) => {
+      transform: async (callback: (editor: ToolEditor) => void) => {
         registrations++
-        const added: string[] = []
-        callback({
-          add: (tool) => {
-            tools.set(tool.name, tool)
-            added.push(tool.name)
-          },
-        })
+        toolTransforms.push(callback)
+        replayTools()
+        let live = true
         return {
           dispose: async () => {
+            if (!live) return
+            live = false
             registrations--
-            for (const name of added) tools.delete(name)
+            toolTransforms.splice(toolTransforms.indexOf(callback), 1)
+            replayTools()
           },
         }
       },
@@ -154,14 +187,23 @@ function createHost(input: {
     },
     emit,
     toolHooks: () => toolHooks.filter((hook) => hook.name === "execute.before").length,
-    spawn: async (tool: string, payload: unknown, agent = "build", sessionID = "s1") => {
-      for (const hook of toolHooks)
-        if (hook.name === "execute.before") await hook.callback({ tool, sessionID, agent, id: "c1", input: payload })
+    subagent: () => subagent,
+    toolReplays: () => toolReplays,
+    /** Run `execute.before`; returns the input the tool would run with. */
+    spawn: async (tool: string, payload: unknown, agent = "build", sessionID = "s1", id = "c1") => {
+      const event = { tool, sessionID, agent, id, input: payload }
+      for (const hook of toolHooks) if (hook.name === "execute.before") await hook.callback(event)
+      return event.input as Record<string, unknown>
     },
-    spawnFailed: async (payload: unknown, message: string, sessionID = "s1") => {
+    spawnFailed: async (payload: unknown, message: string, sessionID = "s1", id = "c1") => {
       for (const hook of toolHooks)
         if (hook.name === "execute.after")
-          await hook.callback({ tool: "subagent", sessionID, agent: "build", id: "c1", input: payload, status: "error", error: { message } })
+          await hook.callback({ tool: "subagent", sessionID, agent: "build", id, input: payload, status: "error", error: { message } })
+    },
+    spawnDone: async (payload: unknown, metadata: unknown, sessionID = "s1", id = "c1") => {
+      for (const hook of toolHooks)
+        if (hook.name === "execute.after")
+          await hook.callback({ tool: "subagent", sessionID, agent: "build", id, input: payload, status: "completed", result: { metadata } })
     },
     sessions,
     storage,
@@ -335,10 +377,29 @@ describe("subagent model guard", () => {
     expect(spawnTarget(null)).toBeUndefined()
   })
 
-  test("no hook without the guard option", async () => {
-    const host = createHost({ agents, models: priced, options })
+  test("without the guard option an inheriting spawn goes ahead", async () => {
+    const host = createHost({ agents, models: priced, options, sessionModel: opus })
     const cleanup = await setup(host)
+    expect(await host.spawn("subagent", { agent: "plain", prompt: "x" })).toEqual({ agent: "plain", prompt: "x" })
+    host.close()
+    await cleanup()
     expect(host.toolHooks()).toBe(0)
+  })
+
+  test("asks for the cheapest fitting role, and allows a role or an explicit model", async () => {
+    const host = createHost({ agents, models: priced, options: guarded, sessionModel: opus })
+    const cleanup = await setup(host)
+    await expect(host.spawn("subagent", { agent: "plain", prompt: "x" })).rejects.toThrow(
+      /role: "smol" \(runs anthropic\/claude-haiku, \$0\.1\/M input tokens\)/,
+    )
+    expect(await host.spawn("subagent", { agent: "plain", prompt: "x", role: "smol" })).toEqual({
+      agent: "plain",
+      prompt: "x",
+      model: "anthropic/claude-haiku",
+    })
+    await host.spawn("subagent", { agent: "plain", prompt: "x", model: "amazon-bedrock/claude-opus" })
+    // A role with nothing available falls through to the guard.
+    await expect(host.spawn("subagent", { agent: "plain", prompt: "x", role: "fake" })).rejects.toThrow(/inherit/)
     host.close()
     await cleanup()
   })
@@ -390,53 +451,71 @@ describe("subagent model guard", () => {
   })
 })
 
-describe("role subagents", () => {
-  const general: Agent & Record<string, unknown> = {
-    id: "general",
-    system: "general prompt",
-    permissions: [{ action: "edit", resource: "*", effect: "allow" }],
-  }
+describe("subagent role parameter", () => {
+  const roleOf = (host: ReturnType<typeof createHost>) =>
+    (host.subagent().input as { properties: Record<string, { enum?: string[]; description?: string }> }).properties.role
 
-  test("registers general-<role> for configured default roles, cloned from general", async () => {
-    const host = createHost({ agents: [general], models, options })
+  test("adds a role enum of the configured roles to the built-in subagent tool", async () => {
+    const host = createHost({ agents: [{ id: "general" }], models, options })
     const cleanup = await setup(host)
-    const smol = host.agents().get("general-smol") as Agent & Record<string, unknown>
-    expect(smol.model).toEqual(haiku)
-    expect(smol.mode).toBe("subagent")
-    expect(smol.system).toBe("general prompt")
-    expect(smol.permissions).toEqual(general.permissions)
-    expect(smol.request?.headers?.["x-opencode-model-role"]).toBe("smol")
-    expect(String(smol.description)).toContain("'smol' model role")
-    expect(host.agents().get("general-task")?.model).toEqual(sonnet)
-    expect(host.agents().has("general-slow")).toBe(false)
+    const role = roleOf(host)
+    expect(role?.enum).toEqual(["fake", "smol", "task"])
+    expect(role?.description).toContain("- 'smol': cheap and fast")
+    expect(role?.description).toContain("- 'fake': work that suits the 'fake' model role (no model available now")
+    expect(host.subagent().description).toContain("Set `role` on every new spawn")
+    expect((host.subagent().input as { required: string[] }).required).toEqual(["agent", "prompt"])
     host.close()
     await cleanup()
-    expect(host.agents().has("general-smol")).toBe(false)
+    expect(roleOf(host)).toBeUndefined()
   })
 
-  test("roleAgents: [] registers none", async () => {
-    const host = createHost({ agents: [general], models, options: { ...options, roleAgents: [] } })
+  test("no roles, no parameter", async () => {
+    const host = createHost({ agents: [], models, options: {} })
     const cleanup = await setup(host)
-    expect([...host.agents().keys()]).toEqual(["general"])
+    expect(roleOf(host)).toBeUndefined()
+    expect(host.subagent().description).toBe("Spawns an agent in a child session.")
     host.close()
     await cleanup()
   })
 
-  test("the guard suggests role subagents first", async () => {
-    const opus = { providerID: "amazon-bedrock", id: "claude-opus" }
-    const priced: Model[] = [
-      { ...opus, variants: [], cost: [{ input: 4.4 }] },
-      { providerID: "anthropic", id: "claude-haiku", variants: [], cost: [{ input: 0.1 }] },
-    ]
-    const host = createHost({
-      agents: [{ id: "plain" }],
-      models: priced,
-      options: { roles: { smol: "anthropic/claude-haiku" }, guard: true },
-      sessionModel: opus,
+  test("re-describes the roles when availability changes, not on every event", async () => {
+    const host = createHost({ agents: [{ id: "general" }], models, options })
+    const cleanup = await setup(host)
+    const before = host.toolReplays()
+    host.emit({ type: "agent.updated" })
+    await settle()
+    expect(host.toolReplays()).toBe(before)
+    host.setModels([...models, { providerID: "nope-provider", id: "x", variants: [], cost: [{ input: 0.5 }] }])
+    await settle()
+    expect(roleOf(host)?.description).toContain("- 'fake': work that suits the 'fake' model role (low cost, $0.5/M input tokens)")
+    host.close()
+    await cleanup()
+    expect(roleOf(host)).toBeUndefined()
+  })
+
+  test("precedence: explicit model, then role, then the agent", async () => {
+    const host = createHost({ agents: [{ id: "general" }], models, options })
+    const cleanup = await setup(host)
+    expect(await host.spawn("subagent", { agent: "general", prompt: "x", role: "smol" })).toEqual({
+      agent: "general",
+      prompt: "x",
+      model: "anthropic/claude-haiku",
     })
-    const cleanup = await setup(host)
-    await expect(host.spawn("subagent", { agent: "plain", prompt: "x" })).rejects.toThrow(
-      /role subagent .*general-smol \(anthropic\/claude-haiku\)/,
+    expect(await host.spawn("subagent", { agent: "general", prompt: "x", role: "smol", model: "opencode/flint" })).toEqual({
+      agent: "general",
+      prompt: "x",
+      model: "opencode/flint",
+    })
+    // No role: the input is untouched and the host runs general on its role's model.
+    expect(await host.spawn("subagent", { agent: "general", prompt: "x" })).toEqual({ agent: "general", prompt: "x" })
+    expect(host.agents().get("general")?.model).toEqual(sonnet)
+    expect(await host.spawn("subagent", { agent: "general", prompt: "x", role: "task", sessionID: "ses_1" })).toEqual({
+      agent: "general",
+      prompt: "x",
+      sessionID: "ses_1",
+    })
+    await expect(host.spawn("subagent", { agent: "general", prompt: "x", role: "huge" })).rejects.toThrow(
+      "Unknown model role 'huge'. Pass one of: fake, smol, task.",
     )
     host.close()
     await cleanup()
@@ -452,6 +531,8 @@ describe("model_roles_check", () => {
     expect(result?.content).toContain("Role task → amazon-bedrock/claude-sonnet#high")
     expect(result?.content).toContain("  - nope-provider/x: provider unavailable")
     expect(result?.content).toContain("  - general (role task) → amazon-bedrock/claude-sonnet#high")
+    expect(result?.content).toContain("subagent `role` parameter:")
+    expect(result?.content).toContain("  - 'task': everyday implementation and investigation")
     host.close()
     await cleanup()
     expect(host.tools.size).toBe(0)
@@ -462,7 +543,6 @@ describe("runtime fallback", () => {
   const fallbackOptions = {
     roles: { task: ["amazon-bedrock/claude-sonnet#high", "anthropic/claude-haiku"] },
     agents: { general: "task", build: "task" },
-    roleAgents: [],
   }
   const failed = (sessionID: string, error: Record<string, unknown>) => ({
     type: "session.execution.failed",
@@ -577,6 +657,53 @@ describe("runtime fallback", () => {
     expect(host.storage.has("health")).toBe(false)
     expect(host.calls).toHaveLength(0)
     expect(host.agents().get("general")?.model).toEqual(sonnet)
+    host.close()
+    await cleanup()
+  })
+
+  test("a child spawned with a role falls back within that role and can be resumed on the next model", async () => {
+    const host = createHost({ agents: [{ id: "plain" }], models, options: fallbackOptions })
+    host.sessions.set("r", { id: "r" })
+    host.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: sonnet })
+    const cleanup = await setup(host)
+    const input = await host.spawn("subagent", { agent: "plain", prompt: "x", role: "task" }, "build", "r", "call-1")
+    expect(input.model).toBe("amazon-bedrock/claude-sonnet#high")
+    host.emit({ type: "session.created", data: { sessionID: "c", parentID: "r", agent: "plain", model: sonnet } })
+    host.emit(failed("c", { type: "api", message: "ThrottlingException", status: 429 }))
+    await settle()
+    expect(host.storage.get("spawn-role:c")).toBe("task")
+    expect(methods(host, "switchModel").map((c) => c.input)).toEqual([{ sessionID: "c", model: haiku }])
+    const note = methods(host, "synthetic")[0]?.input as { sessionID: string; text: string }
+    expect(note.sessionID).toBe("r")
+    expect(note.text).toContain('Spawn it again with role: "task"; that role now runs anthropic/claude-haiku.')
+    expect(note.text).toContain("resume it with sessionID c")
+    // The same role now resolves past the unhealthy model.
+    expect((await host.spawn("subagent", { agent: "plain", prompt: "x", role: "task" }, "build", "r", "call-2")).model).toBe(
+      "anthropic/claude-haiku",
+    )
+    host.close()
+    await cleanup()
+  })
+
+  test("a role spawn whose tool call fails names the role in the parent's note", async () => {
+    const host = createHost({ agents: [{ id: "plain" }], models, options: fallbackOptions })
+    const cleanup = await setup(host)
+    const input = await host.spawn("subagent", { agent: "plain", prompt: "x", role: "task" }, "build", "r", "call-1")
+    await host.spawnFailed(input, "Subagent failed (sessionID: gone): Service Unavailable", "r", "call-1")
+    await settle()
+    expect(Object.keys(host.storage.get("health") as object)).toEqual(["amazon-bedrock/claude-sonnet"])
+    const note = methods(host, "synthetic")[0]?.input as { text: string }
+    expect(note.text).toContain('Spawn it again with role: "task"')
+    host.close()
+    await cleanup()
+  })
+
+  test("a completed role spawn records the child's role", async () => {
+    const host = createHost({ agents: [{ id: "plain" }], models, options: fallbackOptions })
+    const cleanup = await setup(host)
+    const input = await host.spawn("subagent", { agent: "plain", prompt: "x", role: "task" }, "build", "r", "call-1")
+    await host.spawnDone(input, { sessionID: "c2", status: "completed" }, "r", "call-1")
+    expect(host.storage.get("spawn-role:c2")).toBe("task")
     host.close()
     await cleanup()
   })

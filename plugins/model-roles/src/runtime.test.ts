@@ -2,8 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { candidateStatus, checkRoles, formatCheck } from "./check.ts"
 import { decideFallback, failureNote, fallbackTarget, rolesListing, subagentNote } from "./fallback.ts"
 import { healthView, markUnhealthy } from "./health.ts"
-import { parseOptions, ROLE_HEADER } from "./resolve.ts"
-import { costTier, parseRuntime, roleAgentDescription, shapeRoleAgent } from "./role-agents.ts"
+import { parseOptions } from "./resolve.ts"
 
 const a = { providerID: "p", id: "a" }
 const b = { providerID: "p", id: "b" }
@@ -48,48 +47,9 @@ describe("decideFallback", () => {
     expect(subagentNote({ ...facts, agent: "general" })).toContain("Subagent 'general' failed. Model p/a")
     expect(subagentNote({ ...facts, agent: "general" })).toContain("may be retried")
     expect(subagentNote({ ...facts, target: undefined, agent: undefined })).toContain("same model")
-  })
-})
-
-describe("role agents", () => {
-  test("parseRuntime defaults and intersects roleAgents with configured roles", () => {
-    expect(parseRuntime({}, options)).toEqual({ cooldownMs: 600_000, retryOnFallback: true, roleAgents: ["task", "slow"] })
-    expect(parseRuntime({ roleAgents: [], cooldownMs: 5, retryOnFallback: false }, options)).toEqual({
-      cooldownMs: 5,
-      retryOnFallback: false,
-      roleAgents: [],
-    })
-    expect(parseRuntime({ roleAgents: ["other", "nope", 3] }, options).roleAgents).toEqual(["other"])
-  })
-
-  test("descriptions state purpose and cost tier", () => {
-    expect(costTier(0.11)).toBe("low cost, $0.11/M input tokens")
-    expect(costTier(4.4)).toBe("high cost, $4.4/M input tokens")
-    const text = roleAgentDescription("smol", { providerID: "anthropic", id: "haiku" }, 0.1)
-    expect(text).toContain("'smol' model role: cheap and fast")
-    expect(text).toContain("runs anthropic/haiku (low cost")
-    expect(roleAgentDescription("odd", undefined, undefined)).toContain("inherits yours")
-  })
-
-  test("shapeRoleAgent clones general and sets the role header", () => {
-    const general = { system: "be general", steps: 9, permissions: [{ action: "edit", resource: "*", effect: "allow" }] }
-    const draft: Record<string, unknown> = { mode: "primary", permissions: [] }
-    shapeRoleAgent(draft, general, "smol", "desc", true)
-    expect(draft).toEqual({
-      name: "general-smol",
-      description: "desc",
-      mode: "subagent",
-      hidden: false,
-      system: "be general",
-      steps: 9,
-      permissions: [{ action: "edit", resource: "*", effect: "allow" }],
-      request: { headers: { [ROLE_HEADER]: "smol" } },
-    })
-    const configured: Record<string, unknown> = { name: "Mine", description: "mine", mode: "all", permissions: [{ action: "x" }] }
-    shapeRoleAgent(configured, general, "smol", "desc", false)
-    expect(configured.description).toBe("mine")
-    expect(configured.mode).toBe("all")
-    expect(configured.permissions).toEqual([{ action: "edit", resource: "*", effect: "allow" }, { action: "x" }])
+    const byRole = subagentNote({ ...facts, agent: "general", spawnRole: "task", resumable: "ses_c" })
+    expect(byRole).toContain('Spawn it again with role: "task"; that role now runs p/b.')
+    expect(byRole).toContain("resume it with sessionID ses_c")
   })
 })
 
@@ -119,6 +79,9 @@ describe("check", () => {
     expect(text).toContain("  - q/x#low: unknown variant (has: high)")
     expect(text).toContain("  - @ghost: link to unknown role ghost")
     expect(text).toContain("  - general (role task) → p/a")
+    expect(report.choices.map((choice) => choice.role)).toEqual(["odd", "other", "slow", "task"])
+    expect(text).toContain("subagent `role` parameter:")
+    expect(text).toContain("  - 'task': everyday implementation and investigation (cost unknown)")
     expect(formatCheck(checkRoles(parseOptions({}), [], []))).toBe("No roles configured.")
   })
 
