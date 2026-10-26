@@ -5,9 +5,18 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./dist/index.js"
   },
+  "files": ["dist", "index.js"],
   "peerDependencies": {
     "@opencode/plugin": "^2.1.4"
+  },
+  "peerDependenciesMeta": {
+    "@opencode/plugin": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@srobroek/opencode-lib": "workspace:*"
   }
 }

@@ -8,6 +8,12 @@ describe("blockReason", () => {
   test("allows force-with-lease", () => {
     expect(blockReason("shell", { command: "git push --force-with-lease" })).toBeUndefined()
   })
+  test("blocks -f inside a compound command", () => {
+    expect(blockReason("shell", { command: "git add . && sudo git -C repo push -f" })).toBeDefined()
+  })
+  test("allows force push text that is only data", () => {
+    expect(blockReason("shell", { command: 'echo "git push --force"' })).toBeUndefined()
+  })
   test("ignores other tools", () => {
     expect(blockReason("read", { command: "git push --force" })).toBeUndefined()
   })
