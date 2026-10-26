@@ -101,6 +101,10 @@
     "plugins/build": {
       "release-type": "node",
       "component": "build"
+    },
+    "plugins/quality": {
+      "release-type": "node",
+      "component": "quality"
     }
   }
 }
