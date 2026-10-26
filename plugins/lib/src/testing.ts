@@ -26,6 +26,7 @@ type Loose = Record<string, unknown>
 export type FakeTool = Loose & { name: string; id: string }
 export type FakeAgent = Loose & { id: string }
 export type FakeSession = Loose & { id: string }
+export type FakeSkill = Loose & { id: string }
 export type FakeCall = { method: string; input: unknown }
 
 export type FakeContextOptions = {
@@ -35,8 +36,12 @@ export type FakeContextOptions = {
   tools?: ReadonlyArray<Loose & { name: string }>
   /** Agents the host already has before any transform runs. */
   agents?: ReadonlyArray<FakeAgent>
-  /** Sessions `session.get` can return. */
+  /** Sessions `session.get` and `session.list` can return. */
   sessions?: ReadonlyArray<FakeSession>
+  /** Messages `session.context` returns, by session id. */
+  messages?: Record<string, ReadonlyArray<unknown>>
+  /** Skills the host already has before any transform runs. */
+  skills?: ReadonlyArray<FakeSkill>
   /** Initial storage contents. */
   storage?: Record<string, unknown>
   /** Plugin options passed as `context.options`. */
@@ -58,6 +63,10 @@ export type FakeContext = {
   storage: Map<string, unknown>
   /** Sessions by id; `session.create` adds to it. */
   sessions: Map<string, FakeSession>
+  /** Messages `session.context` returns, by session id. */
+  messages: Map<string, ReadonlyArray<unknown>>
+  /** Skills after every transform, keyed by id. */
+  skills: Map<string, FakeSkill>
   /** Calls to faked client methods (`session.*`, `event.subscribe`), in order. */
   calls: FakeCall[]
   /** Run every registered hook of one domain and name in order, as the host does; resolves to the payload. */
@@ -84,6 +93,8 @@ export function createFakeContext(options: FakeContextOptions = {}): FakeContext
   for (const tool of options.tools ?? []) tools.set(tool.name, { ...tool, id: tool.name })
   const agents = new Map<string, FakeAgent>((options.agents ?? []).map((agent) => [agent.id, { ...agent }]))
   const sessions = new Map<string, FakeSession>((options.sessions ?? []).map((session) => [session.id, { ...session }]))
+  const messages = new Map<string, ReadonlyArray<unknown>>(Object.entries(options.messages ?? {}))
+  const skills = new Map<string, FakeSkill>((options.skills ?? []).map((skill) => [skill.id, { ...skill }]))
   const storage = new Map<string, unknown>(Object.entries(options.storage ?? {}))
   const agentUpdates: string[] = []
   const agentDefaults: Array<string | undefined> = []
@@ -210,6 +221,69 @@ export function createFakeContext(options: FakeContextOptions = {}): FakeContext
     const session = sessions.get(input.sessionID)
     if (session !== undefined) session.location = { directory: input.directory }
   }
+  const cursors = new Map<string, { query: Loose; offset: number }>()
+  const updatedAt = (session: FakeSession): number => {
+    const time = session.time as { updated?: unknown } | undefined
+    return typeof time?.updated === "number" ? time.updated : 0
+  }
+  const matchesQuery = (session: FakeSession, query: Loose): boolean => {
+    if ("project" in query && session.projectID !== query.project) return false
+    if ("directory" in query && (session.location as Loose | undefined)?.directory !== query.directory) return false
+    if (typeof query.search === "string" && query.search) {
+      const title = typeof session.title === "string" ? session.title.toLowerCase() : ""
+      if (!title.includes(query.search.toLowerCase())) return false
+    }
+    if (query.parentID === null && session.parentID !== undefined && session.parentID !== null) return false
+    if (typeof query.parentID === "string" && session.parentID !== query.parentID) return false
+    const archived = (session.time as { archived?: unknown } | undefined)?.archived !== undefined
+    if (query.archived === true && !archived) return false
+    if (query.archived === false && archived) return false
+    return true
+  }
+  // Mirrors the host: filters as given (no implicit archived or parentID filter), ordered by
+  // `time.updated`, and a cursor that carries the filters of the first page.
+  const sessionList = async (input: Loose = {}): Promise<{ data: FakeSession[]; cursor: { next?: string } }> => {
+    calls.push({ method: "session.list", input })
+    const page = typeof input.cursor === "string" ? cursors.get(input.cursor) : { query: input, offset: 0 }
+    if (page === undefined) throw new Error(`fake context: unknown cursor ${String(input.cursor)}`)
+    const { query, offset } = page
+    const order = query.order === "asc" ? 1 : -1
+    const all = [...sessions.values()]
+      .filter((session) => matchesQuery(session, query))
+      .sort((a, b) => order * (updatedAt(a) - updatedAt(b)) || order * a.id.localeCompare(b.id))
+    const limit = typeof query.limit === "number" ? query.limit : all.length
+    const data = all.slice(offset, offset + limit)
+    if (offset + limit >= all.length) return { data, cursor: {} }
+    const next = `cursor_${++sequence}`
+    cursors.set(next, { query, offset: offset + limit })
+    return { data, cursor: { next } }
+  }
+  const sessionContext = async (input: { sessionID: string }): Promise<ReadonlyArray<unknown>> => {
+    calls.push({ method: "session.context", input })
+    if (!sessions.has(input.sessionID)) throw new Error(`fake context: no session ${input.sessionID}`)
+    return messages.get(input.sessionID) ?? []
+  }
+  const skillTransform = async (callback: (editor: unknown) => void): Promise<Registration> => {
+    const added: string[] = []
+    const editor = {
+      list: () => [...skills.values()],
+      get: (id: string) => skills.get(id),
+      add: (skill: FakeSkill) => {
+        skills.set(skill.id, { ...skill })
+        added.push(skill.id)
+      },
+      update: (id: string, update: (skill: FakeSkill) => void) => {
+        const skill = skills.get(id)
+        if (skill !== undefined) update(skill)
+      },
+      remove: (id: string) => void skills.delete(id),
+    }
+    callback(editor)
+    return register(() => {
+      for (const id of added) skills.delete(id)
+    })
+  }
+
   const sessionSynthetic = async (input: Loose & { sessionID: string }): Promise<Loose> => {
     calls.push({ method: "session.synthetic", input })
     return {
@@ -245,7 +319,9 @@ export function createFakeContext(options: FakeContextOptions = {}): FakeContext
     permission: { hook: hook("permission") },
     session: {
       hook: hook("session"),
+      list: sessionList,
       get: sessionGet,
+      context: sessionContext,
       create: sessionCreate,
       move: sessionMove,
       synthetic: sessionSynthetic,
@@ -257,6 +333,11 @@ export function createFakeContext(options: FakeContextOptions = {}): FakeContext
       get: async (input: { agentID?: string; id?: string }) => agents.get(input.agentID ?? input.id ?? ""),
     },
     event: { subscribe },
+    skill: {
+      transform: skillTransform,
+      reload: async () => {},
+      list: async () => [...skills.values()],
+    },
     storage: {
       get: async (key: string) => storage.get(key),
       set: async (key: string, value: unknown) => void storage.set(key, value),
@@ -273,6 +354,8 @@ export function createFakeContext(options: FakeContextOptions = {}): FakeContext
     agentDefaults,
     storage,
     sessions,
+    messages,
+    skills,
     calls,
     fire: { tool: fire("tool"), shell: fire("shell"), permission: fire("permission"), session: fire("session") },
     hooks: (domain) => hooks[domain].map((entry) => entry.name),
