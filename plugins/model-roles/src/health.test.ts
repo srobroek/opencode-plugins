@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import {
+  childSessionID,
   classifyFailure,
   healthView,
   markUnhealthy,
@@ -22,6 +23,10 @@ describe("classifyFailure", () => {
     expect(classifyFailure({ message: "ThrottlingException: Too many requests" })).toBe("rate-limit")
     expect(classifyFailure({ message: "Overloaded" })).toBe("server")
     expect(classifyFailure({ type: "api", message: "oops", status: 503 })).toBe("server")
+    // Bedrock, for a catalog id this region cannot serve.
+    expect(
+      classifyFailure({ type: "provider.invalid-request", message: "The provided model identifier is invalid.", status: 400 }),
+    ).toBe("unavailable")
   })
 
   test("not the model's fault", () => {
@@ -43,6 +48,14 @@ describe("modelFromError", () => {
     })
     expect(modelFromError("Model unavailable: a/b#high.")).toEqual({ providerID: "a", id: "b", variant: "high" })
     expect(modelFromError("rate limited")).toBeUndefined()
+  })
+})
+
+describe("childSessionID", () => {
+  test("reads the child session from a subagent tool error", () => {
+    expect(childSessionID("Subagent failed (sessionID: ses_e87): Service Unavailable")).toBe("ses_e87")
+    expect(childSessionID("Subagent failed (ses_1): x")).toBe("ses_1")
+    expect(childSessionID("rate limited")).toBeUndefined()
   })
 })
 
