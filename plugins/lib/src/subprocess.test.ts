@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
-import { processAlive, type SupervisedChild, supervise } from "./subprocess.ts"
+import { processAlive, type SupervisedChild, signalName, supervise } from "./subprocess.ts"
 
 const never = new Promise<number>(() => {})
 
@@ -78,5 +78,14 @@ describe("supervise", () => {
       "aborted",
     )
     expect(child.kills).toEqual(["SIGKILL"])
+  })
+})
+
+describe("signalName", () => {
+  test("keeps names, maps numbers to names and passes null through", () => {
+    expect(signalName("SIGTERM")).toBe("SIGTERM")
+    expect(signalName(9)).toBe("SIGKILL")
+    expect(signalName(null)).toBeNull()
+    expect(signalName(undefined)).toBeNull()
   })
 })

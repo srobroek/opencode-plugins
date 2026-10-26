@@ -6,6 +6,7 @@ import { unlinkSync as unlinkSync2, writeFileSync } from "fs";
 import { join as join2 } from "path";
 
 // plugins/lib/src/subprocess.ts
+import { constants } from "os";
 var EXIT_GRACE_MS = 2000;
 var EXIT_POLL_MS = 100;
 function processAlive(pid) {
@@ -124,9 +125,16 @@ function supervise(child, options = {}) {
       if (ended !== null)
         settle({ kind: ended, stdout, stderr });
       else
-        settle({ kind: "exited", exitCode, signalCode: child.signalCode ?? null, stdout, stderr });
+        settle({ kind: "exited", exitCode, signalCode: signalName(child.signalCode), stdout, stderr });
     }, () => end("lost"));
   });
+}
+function signalName(code) {
+  if (code === null || code === undefined)
+    return null;
+  if (typeof code === "string")
+    return code;
+  return Object.entries(constants.signals).find(([, n]) => n === code)?.[0] ?? String(code);
 }
 
 // plugins/beads/src/bd-embedded-write-lock.ts

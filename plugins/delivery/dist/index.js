@@ -202,6 +202,7 @@ import { devNull, tmpdir } from "os";
 import { join } from "path";
 
 // plugins/lib/src/subprocess.ts
+import { constants } from "os";
 var EXIT_GRACE_MS = 2000;
 var EXIT_POLL_MS = 100;
 function processAlive(pid) {
@@ -320,9 +321,16 @@ function supervise(child, options = {}) {
       if (ended !== null)
         settle({ kind: ended, stdout, stderr });
       else
-        settle({ kind: "exited", exitCode, signalCode: child.signalCode ?? null, stdout, stderr });
+        settle({ kind: "exited", exitCode, signalCode: signalName(child.signalCode), stdout, stderr });
     }, () => end("lost"));
   });
+}
+function signalName(code) {
+  if (code === null || code === undefined)
+    return null;
+  if (typeof code === "string")
+    return code;
+  return Object.entries(constants.signals).find(([, n]) => n === code)?.[0] ?? String(code);
 }
 
 // plugins/delivery/src/forge-adapter.ts
@@ -903,7 +911,7 @@ async function remoteBranchAbsent(remoteOrUrl, branch, cwd, run = runCli, enviro
 import { createHash, randomBytes } from "crypto";
 import {
   closeSync,
-  constants,
+  constants as constants2,
   fchmodSync,
   fstatSync,
   linkSync,
@@ -1386,7 +1394,7 @@ function validateReceipt(value) {
 function readBounded(path) {
   let fd;
   try {
-    fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
+    fd = openSync(path, constants2.O_RDONLY | constants2.O_NONBLOCK | constants2.O_NOFOLLOW);
   } catch {
     return refuse("path", path, "a readable receipt file");
   }
@@ -1439,7 +1447,7 @@ function writeReceipt(receipt, directory, options) {
   mkdirSync2(into, { recursive: true, mode: 448 });
   let directoryFd;
   try {
-    directoryFd = openSync(into, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    directoryFd = openSync(into, constants2.O_RDONLY | constants2.O_DIRECTORY | constants2.O_NOFOLLOW);
   } catch {
     throw new Error(`${into}: observed an unsafe receipt directory, expected a non-symlink directory`);
   }
