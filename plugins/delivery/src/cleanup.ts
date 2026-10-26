@@ -31,8 +31,6 @@ import {
   writeReceipt,
 } from "./landing-receipt.ts"
 
-/** Ref and config reads — `rev-parse`, `rev-list`, `show-ref`, `worktree list`, `remote get-url` — are cheap. */
-const LOCAL_TIMEOUT_MS = 2_000
 
 /**
  * Bounds for the commands whose cost grows with the work, not with the ref count.
@@ -41,6 +39,12 @@ const LOCAL_TIMEOUT_MS = 2_000
  * step as not done.
  */
 export type CleanupBounds = {
+  /**
+   * Ref and config reads — `rev-parse`, `rev-list`, `show-ref`, `worktree list`,
+   * `remote get-url` — are cheap, but a loaded machine can stall even those for
+   * seconds, and a read that runs out refuses the cleanup.
+   */
+  refReadMs: number
   /** `git status --porcelain` walks the whole target tree, which a large checkout makes slow. */
   treeScanMs: number
   /** Read-only `bd show`: a cold embedded store takes 30-50 s to open; matches the beads runner's 120 s wait. */
@@ -53,7 +57,9 @@ export type CleanupBounds = {
   mutationMs: number
 }
 
-export const CLEANUP_BOUNDS: Readonly<CleanupBounds> = { treeScanMs: 60_000, bdShowMs: 120_000, mutationMs: 600_000 }
+export const CLEANUP_BOUNDS: Readonly<CleanupBounds> = {
+  refReadMs: 5_000,
+  treeScanMs: 60_000, bdShowMs: 120_000, mutationMs: 600_000 }
 const MAX_CLI_JSON_BYTES = 1024 * 1024
 const MAX_DIRTY_PATHS = 8
 const LOCAL_REF_PREFIX = "refs/heads/"
@@ -268,6 +274,7 @@ async function resolveRemoteIdentity(
   cwd: string,
   forgeEnv: Readonly<Record<string, string>>,
   env: NodeJS.ProcessEnv,
+  refReadMs: number,
 ): Promise<RemoteIdentity | CleanupFailure> {
   // Tested exactly as recorded, not trimmed first: `" origin"` is not the name of a
   // remote, it is a receipt that does not say which remote, and normalising it here
@@ -276,7 +283,7 @@ async function resolveRemoteIdentity(
   if (!REMOTE_NAME.test(remote)) return refuse("repo.remote", remote, "a git remote name")
   const argv = ["git", "remote", "get-url", remote]
   const expected = `exactly one URL record for the configured remote ${remote} in ${cwd}`
-  const result = await run(argv, { cwd, timeoutMs: LOCAL_TIMEOUT_MS, env: gitObservationEnvironment(env) })
+  const result = await run(argv, { cwd, timeoutMs: refReadMs, env: gitObservationEnvironment(env) })
   if (!completed(result)) return commandFailure("repo.remote", argv, result, expected)
   // Not trimmed: a trimmed value is what lets a malformed one through. `URL` deletes
   // embedded tabs and newlines before parsing, so a rewritten or multi-URL remote can
@@ -384,8 +391,9 @@ export async function observePullRequest(
   run: CliRunner = runCli,
   cwd: string = receipt.repo.canonicalRoot,
   env: NodeJS.ProcessEnv = process.env,
+  refReadMs: number = CLEANUP_BOUNDS.refReadMs,
 ): Promise<Observation | CleanupFailure> {
-  const identity = await resolveRemoteIdentity(receipt, run, cwd, forgeEnvironment(env), env)
+  const identity = await resolveRemoteIdentity(receipt, run, cwd, forgeEnvironment(env), env, refReadMs)
   if (isFailure(identity)) return identity
   const pr =
     identity.forge === "github"
@@ -475,8 +483,13 @@ function canonicalReceiptPath(raw: string, cwd: string, directory: string): stri
   return target
 }
 
-function resolveReceipt(params: DeliveryCleanupParams, cwd: string, env: NodeJS.ProcessEnv): ReceiptResolution {
-  const key = repoKey(cwd)
+function resolveReceipt(
+  params: DeliveryCleanupParams,
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  refReadMs: number,
+): ReceiptResolution {
+  const key = repoKey(cwd, undefined, refReadMs)
   if (key === null) {
     return {
       tag: "refused",
@@ -558,7 +571,7 @@ function verifyArguments(params: DeliveryCleanupParams, receipt: LandingReceipt)
   return null
 }
 
-async function runGit(run: CliRunner, cwd: string, args: string[], timeoutMs = LOCAL_TIMEOUT_MS): Promise<CliResult> {
+async function runGit(run: CliRunner, cwd: string, args: string[], timeoutMs: number): Promise<CliResult> {
   return run(["git", ...args], { cwd, timeoutMs })
 }
 
@@ -617,15 +630,15 @@ async function verifyCleanTarget(path: string, run: CliRunner, timeoutMs: number
  */
 export type PushProof = "upstream" | "pr-head"
 
-async function verifyPushed(path: string, run: CliRunner): Promise<CleanupFailure | PushProof> {
+async function verifyPushed(path: string, run: CliRunner, refReadMs: number): Promise<CleanupFailure | PushProof> {
   const upstreamArgv = ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]
-  const upstream = await runGit(run, path, upstreamArgv)
+  const upstream = await runGit(run, path, upstreamArgv, refReadMs)
   if (upstream.error !== undefined || !upstream.ok) {
     return commandFailure("branch.upstream", ["git", ...upstreamArgv], upstream, "a completed upstream read")
   }
   if (upstream.exitCode !== 0 || upstream.stdout.trim() === "") return "pr-head"
   const countArgv = ["rev-list", "--count", "@{upstream}..HEAD"]
-  const countResult = await runGit(run, path, countArgv)
+  const countResult = await runGit(run, path, countArgv, refReadMs)
   if (!completed(countResult)) {
     return commandFailure("branch.unpushed", ["git", ...countArgv], countResult, "exit 0 and count 0")
   }
@@ -766,9 +779,13 @@ export function parseWorktreeList(output: string): WorktreeRecord[] {
   return records
 }
 
-async function readWorktrees(cwd: string, run: CliRunner): Promise<WorktreeRecord[] | CleanupFailure> {
+async function readWorktrees(
+  cwd: string,
+  run: CliRunner,
+  refReadMs: number,
+): Promise<WorktreeRecord[] | CleanupFailure> {
   const argv = ["worktree", "list", "--porcelain"]
-  const result = await runGit(run, cwd, argv)
+  const result = await runGit(run, cwd, argv, refReadMs)
   if (!completed(result)) return commandFailure("worktree.list", ["git", ...argv], result, "exit 0 porcelain records")
   const records = parseWorktreeList(result.stdout)
   if (records.length === 0) return refuse("worktree.list", [], "at least the repository's main worktree")
@@ -778,8 +795,9 @@ async function readWorktrees(cwd: string, run: CliRunner): Promise<WorktreeRecor
   return records
 }
 
-function isInsidePhysicalRepository(target: string, cwd: string): boolean {
-  return repoKey(target) !== null && repoKey(target) === repoKey(cwd)
+function isInsidePhysicalRepository(target: string, cwd: string, refReadMs: number): boolean {
+  const key = repoKey(target, undefined, refReadMs)
+  return key !== null && key === repoKey(cwd, undefined, refReadMs)
 }
 
 function physicalPath(path: string): string | null {
@@ -832,15 +850,16 @@ async function verifyTargetIdentity(
   receipt: LandingReceipt,
   cwd: string,
   run: CliRunner,
+  refReadMs: number,
 ): Promise<TargetIdentity | CleanupFailure> {
   const path = receipt.worktree.path as string
-  const listed = await readWorktrees(cwd, run)
+  const listed = await readWorktrees(cwd, run, refReadMs)
   if (!Array.isArray(listed)) return listed
   const main = listed[0]
   if (main === undefined) return refuse("worktree.list", [], "a main worktree record")
   if (physicalPath(path) === physicalPath(main.path))
     return refuse("worktree.path", path, `a linked worktree other than main ${show(main.path)}`)
-  if (!isInsidePhysicalRepository(path, cwd))
+  if (!isInsidePhysicalRepository(path, cwd, refReadMs))
     return refuse("worktree.path", path, "a worktree in the current repository")
   const target = recordForTarget(listed, path)
   if (target === null || target.prunable)
@@ -857,10 +876,15 @@ async function verifyTargetIdentity(
   return { records: listed, target, main }
 }
 
-async function verifyLocalRef(receipt: LandingReceipt, cwd: string, run: CliRunner): Promise<CleanupFailure | null> {
+async function verifyLocalRef(
+  receipt: LandingReceipt,
+  cwd: string,
+  run: CliRunner,
+  refReadMs: number,
+): Promise<CleanupFailure | null> {
   const ref = `${LOCAL_REF_PREFIX}${receipt.branch.name}`
   const argv = ["rev-parse", "--verify", ref]
-  const result = await runGit(run, cwd, argv)
+  const result = await runGit(run, cwd, argv, refReadMs)
   if (!completed(result))
     return commandFailure("branch.localRef", ["git", ...argv], result, `exit 0 and oid ${receipt.pr.headRefOid}`)
   return compare("branch.localRef", result.stdout.trim(), receipt.pr.headRefOid)
@@ -872,18 +896,23 @@ async function revalidateBoundary(
   run: CliRunner,
   bounds: CleanupBounds,
 ): Promise<TargetIdentity | CleanupFailure> {
-  const identity = await verifyTargetIdentity(receipt, cwd, run)
+  const identity = await verifyTargetIdentity(receipt, cwd, run, bounds.refReadMs)
   if (isFailure(identity)) return identity
-  const ref = await verifyLocalRef(receipt, cwd, run)
+  const ref = await verifyLocalRef(receipt, cwd, run, bounds.refReadMs)
   if (ref !== null) return ref
   const clean = await verifyCleanTarget(identity.target.path, run, bounds.treeScanMs)
   if (clean !== null) return clean
-  const pushed = await verifyPushed(identity.target.path, run)
+  const pushed = await verifyPushed(identity.target.path, run, bounds.refReadMs)
   return isFailure(pushed) ? pushed : identity
 }
 
-async function registrationAbsence(cwd: string, trustedPath: string, run: CliRunner): Promise<Absence> {
-  const listed = await readWorktrees(cwd, run)
+async function registrationAbsence(
+  cwd: string,
+  trustedPath: string,
+  run: CliRunner,
+  refReadMs: number,
+): Promise<Absence> {
+  const listed = await readWorktrees(cwd, run, refReadMs)
   if (!Array.isArray(listed)) return "unknown"
   return storedRecordForTarget(listed, trustedPath) === null ? "absent" : "present"
 }
@@ -897,8 +926,9 @@ function pathAbsence(path: string): Absence {
   }
 }
 
-async function localRefAbsence(cwd: string, branch: string, run: CliRunner): Promise<Absence> {
-  const result = await runGit(run, cwd, ["show-ref", "--verify", "--quiet", `${LOCAL_REF_PREFIX}${branch}`])
+async function localRefAbsence(cwd: string, branch: string, run: CliRunner, refReadMs: number): Promise<Absence> {
+  const argv = ["show-ref", "--verify", "--quiet", `${LOCAL_REF_PREFIX}${branch}`]
+  const result = await runGit(run, cwd, argv, refReadMs)
   if (result.error !== undefined || !result.ok) return "unknown"
   if (result.exitCode === 0) return "present"
   if (result.exitCode === 1 && result.stdout === "" && result.stderr === "") return "absent"
@@ -943,7 +973,7 @@ export async function cleanupDelivery(
   const run: CliRunner = (argv, options) => commit(argv, { ...options, signal })
   const now = deps.now ?? Date.now
   const env = deps.env ?? process.env
-  const resolution = resolveReceipt(params, cwd, env)
+  const resolution = resolveReceipt(params, cwd, env, bounds.refReadMs)
   if (resolution.tag === "refused") return resolution.failure
   const receipt = resolution.receipt
 
@@ -974,21 +1004,21 @@ export async function cleanupDelivery(
   // receipt's branch and head before it is used as a directory to run a command in,
   // and `revalidateBoundary` proves the same identity again immediately before the
   // irreversible step.
-  const identity = await verifyTargetIdentity(receipt, cwd, run)
+  const identity = await verifyTargetIdentity(receipt, cwd, run, bounds.refReadMs)
   if (isFailure(identity)) return identity
-  const observed = await observePullRequest(receipt, run, identity.target.path, env)
+  const observed = await observePullRequest(receipt, run, identity.target.path, env, bounds.refReadMs)
   if (isFailure(observed)) return observed
   const observedFailure = verifyObservation(receipt, observed.pr)
   if (observedFailure !== null) return observedFailure
   const path = receipt.worktree.path as string
   const dirty = await verifyCleanTarget(path, run, bounds.treeScanMs)
   if (dirty !== null) return dirty
-  const pushed = await verifyPushed(path, run)
+  const pushed = await verifyPushed(path, run, bounds.refReadMs)
   if (isFailure(pushed)) return pushed
   const ledger = await verifyLedger(receipt, cwd, resolution.path, run, bounds.bdShowMs)
   if (ledger !== null) return ledger
 
-  const localRef = await verifyLocalRef(receipt, cwd, run)
+  const localRef = await verifyLocalRef(receipt, cwd, run, bounds.refReadMs)
   if (localRef !== null) return localRef
   const boundary = await revalidateBoundary(receipt, cwd, run, bounds)
   if (isFailure(boundary)) return boundary
@@ -1009,19 +1039,19 @@ export async function cleanupDelivery(
     return commandFailure("worktree.removed", ["git", ...removeArgv], removed, "exit 0 without --force")
   }
 
-  const registration = await registrationAbsence(executionCwd, targetPath, commit)
+  const registration = await registrationAbsence(executionCwd, targetPath, commit, bounds.refReadMs)
   const pathGone = pathAbsence(targetPath)
   if (registration !== "absent") return refuse("worktree.registrationAbsence", registration, '"absent" after removal')
   if (pathGone !== "absent") return refuse("worktree.pathAbsence", pathGone, '"absent" after removal')
 
-  const refAfterWorktree = await verifyLocalRef(receipt, executionCwd, commit)
+  const refAfterWorktree = await verifyLocalRef(receipt, executionCwd, commit, bounds.refReadMs)
   if (refAfterWorktree !== null) return refAfterWorktree
   const deleteArgv = branchDeleteArgs(receipt.branch.name)
   const deleted = await runGit(commit, executionCwd, deleteArgv, bounds.mutationMs)
   if (!completed(deleted)) {
     return commandFailure("worktree.localRefDeleted", ["git", ...deleteArgv], deleted, "exit 0 without -D")
   }
-  const localAbsence = await localRefAbsence(executionCwd, receipt.branch.name, commit)
+  const localAbsence = await localRefAbsence(executionCwd, receipt.branch.name, commit, bounds.refReadMs)
   if (localAbsence !== "absent") return refuse("worktree.localRefAbsence", localAbsence, '"absent" after branch -d')
 
   // The probe is given the URL the target resolved, not `repo.remote`. A name is

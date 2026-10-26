@@ -65,8 +65,12 @@ export type ReceiptSchema = (typeof RECEIPT_SCHEMAS)[number]
 /** Version this module implements. A greater observed version is refused, never guessed at. */
 export const RECEIPT_VERSION = 1
 
-/** Git calls are bounded: a receipt is written at a session boundary, never blocking it. */
-const GIT_TIMEOUT_MS = 2000
+/**
+ * Default bound on each Git read: a receipt is written at a session boundary, never
+ * blocking it. Generous enough that a loaded machine does not turn a cheap read into
+ * a refusal; callers that know better pass their own.
+ */
+export const GIT_TIMEOUT_MS = 5_000
 
 /**
  * Cap on a single receipt, shared by writer and reader. A receipt is a few
@@ -334,8 +338,12 @@ function repositoryPaths(output: string): { commonDir: string; topLevel: string 
  * Every input and selected output is realpathed. Missing, malformed, non-directory,
  * or ambiguous observations return null rather than a ledger-free verdict.
  */
-export function repositoryContext(cwd: string, run: GitRunner = spawnGit): RepositoryContext | null {
-  const printed = run(REPOSITORY_OBSERVATION_ARGS, cwd, GIT_TIMEOUT_MS)
+export function repositoryContext(
+  cwd: string,
+  run: GitRunner = spawnGit,
+  timeoutMs: number = GIT_TIMEOUT_MS,
+): RepositoryContext | null {
+  const printed = run(REPOSITORY_OBSERVATION_ARGS, cwd, timeoutMs)
   if (printed === null || printed === "") return null
   const paths = repositoryPaths(printed)
   if (paths === null) return null
@@ -361,8 +369,8 @@ export function repositoryContext(cwd: string, run: GitRunner = spawnGit): Repos
 }
 
 /** Stable identity shared by a repository's primary checkout and linked worktrees. */
-export function repoKey(cwd: string, run: GitRunner = spawnGit): string | null {
-  const printed = run(["rev-parse", "--git-common-dir"], cwd, GIT_TIMEOUT_MS)
+export function repoKey(cwd: string, run: GitRunner = spawnGit, timeoutMs: number = GIT_TIMEOUT_MS): string | null {
+  const printed = run(["rev-parse", "--git-common-dir"], cwd, timeoutMs)
   if (printed === null || printed === "") return null
   const common = printed.endsWith("\n") ? printed.slice(0, -1) : printed
   if (common === "" || common.includes("\n") || common.includes("\r") || common.includes("\0")) return null
