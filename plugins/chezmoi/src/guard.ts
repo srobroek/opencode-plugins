@@ -11,6 +11,7 @@
 import { realpathSync } from "node:fs"
 import { homedir } from "node:os"
 import { under } from "@srobroek/opencode-lib/shell-write-targets"
+import { supervise } from "@srobroek/opencode-lib/subprocess"
 import { shellCall, writtenPaths } from "@srobroek/opencode-lib/tool-targets"
 
 export const SUBPROCESS_TIMEOUT_MS = 2000
@@ -25,9 +26,9 @@ export type Spawn = (args: string[]) => Promise<string | null>
 
 export const spawnChezmoi: Spawn = async (args) => {
   try {
-    const proc = Bun.spawn(["chezmoi", ...args], { stdout: "pipe", stderr: "ignore", timeout: SUBPROCESS_TIMEOUT_MS })
-    const [stdout, exit] = await Promise.all([new Response(proc.stdout).text(), proc.exited])
-    return exit === 0 ? stdout : null
+    const proc = Bun.spawn(["chezmoi", ...args], { stdout: "pipe", stderr: "ignore" })
+    const run = await supervise(proc, { timeoutMs: SUBPROCESS_TIMEOUT_MS })
+    return run.kind === "exited" && run.exitCode === 0 ? run.stdout : null
   } catch {
     return null
   }
