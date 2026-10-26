@@ -245,6 +245,11 @@ const numbered = (line: number, text: string): string =>
  * them. `altered` changes the last landed patch, which no equivalence may accept.
  * `context-moved` has the base edit line 4 of a file whose line 6 the reviewed branch
  * edits: the rebase replays cleanly, but the landed hunk's context lines differ.
+ *
+ * The history is written by one `git fast-import`, the landed commits as the trees a
+ * replay onto the moved base produces, instead of some fifteen porcelain commands
+ * and a real rebase: under heavy load each child process costs a sizeable part of
+ * Bun's per-test budget, and the proof reads only commits, trees and diffs.
  */
 function rebasedRepository(variant: "clean" | "altered" | "context-moved" = "clean"): {
   canonical: string
@@ -254,23 +259,69 @@ function rebasedRepository(variant: "clean" | "altered" | "context-moved" = "cle
 } {
   const moved = variant === "context-moved"
   const canonical = realpathSync(temporaryDirectory("delivery-land-rebase-"))
-  git(canonical, ["init", "-q", "-b", "main"])
-  commitFile(canonical, "base.txt", moved ? numbered(0, "") : "base\n", "base")
-  git(canonical, ["checkout", "-q", "-b", BRANCH])
-  commitFile(canonical, "one.txt", "one\n", "one")
-  commitFile(canonical, "base.txt", moved ? numbered(6, "6, reviewed") : "base\ntwo\n", "two")
-  const head = git(canonical, ["rev-parse", "HEAD"])
-  git(canonical, ["checkout", "-q", "main"])
-  if (moved) commitFile(canonical, "base.txt", numbered(4, "4, moved on the base"), "base moved")
-  else commitFile(canonical, "other.txt", "other\n", "other")
-  git(canonical, ["checkout", "-q", "-b", "landed", head])
-  git(canonical, ["-c", "user.name=Forge Rebase", "rebase", "-q", "main"])
-  if (variant === "altered") {
-    writeFileSync(join(canonical, "base.txt"), "base\ntwo, altered\n")
-    git(canonical, ["commit", "-q", "-a", "--amend", "--no-edit"])
+  const base = moved ? numbered(0, "") : "base\n"
+  const reviewedTwo = moved ? numbered(6, "6, reviewed") : "base\ntwo\n"
+  const movedBase = numbered(4, "4, moved on the base")
+  const landedTwo =
+    variant === "altered"
+      ? "base\ntwo, altered\n"
+      : moved
+        ? movedBase.replace("6\n", "6, reviewed\n")
+        : "base\ntwo\n"
+  let time = 1_700_000_000
+  const commit = (
+    ref: string,
+    mark: number,
+    message: string,
+    files: Record<string, string>,
+    from?: number,
+    committer = "Delivery Test",
+  ): string => {
+    time += 1
+    const author = `Delivery Test <delivery@example.test> ${time} +0000`
+    const lines = [
+      `commit ${ref}`,
+      `mark :${mark}`,
+      `author ${author}`,
+      `committer ${committer} <delivery@example.test> ${time} +0000`,
+      `data ${Buffer.byteLength(message)}`,
+      message,
+    ]
+    if (from !== undefined) lines.push(`from :${from}`)
+    for (const [path, content] of Object.entries(files)) {
+      lines.push(`M 100644 inline ${path}`, `data ${Buffer.byteLength(content)}`, content)
+    }
+    return `${lines.join("\n")}\n`
   }
-  const landed = git(canonical, ["rev-parse", "HEAD"])
-  git(canonical, ["checkout", "-q", "main"])
+  const stream = [
+    commit("refs/heads/main", 1, "base", { "base.txt": base }),
+    commit(`refs/heads/${BRANCH}`, 2, "one", { "one.txt": "one\n" }, 1),
+    commit(`refs/heads/${BRANCH}`, 3, "two", { "base.txt": reviewedTwo }, 2),
+    moved
+      ? commit("refs/heads/main", 4, "base moved", { "base.txt": movedBase }, 1)
+      : commit("refs/heads/main", 4, "other", { "other.txt": "other\n" }, 1),
+    commit("refs/heads/landed", 5, "one", { "one.txt": "one\n" }, 4, "Forge Rebase"),
+    commit("refs/heads/landed", 6, "two", { "base.txt": landedTwo }, 5, "Forge Rebase"),
+  ].join("")
+  const marks = join(canonical, ".git", "fixture-marks")
+  git(canonical, ["init", "-q", "-b", "main"])
+  const imported = Bun.spawnSync(["git", "fast-import", "--quiet", `--export-marks=${marks}`], {
+    cwd: canonical,
+    stdin: Buffer.from(stream),
+    stdout: "pipe",
+    stderr: "pipe",
+    env: { ...process.env, GIT_CONFIG_GLOBAL: devNull, GIT_CONFIG_NOSYSTEM: "1" },
+  })
+  if (imported.exitCode !== 0) throw new Error(`git fast-import: ${imported.stderr.toString()}`)
+  const oids = new Map(
+    readFileSync(marks, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => line.split(" ") as [string, string]),
+  )
+  const head = oids.get(":3")
+  const landed = oids.get(":6")
+  if (head === undefined || landed === undefined) throw new Error("git fast-import exported no marks")
   return { canonical, receipts: temporaryDirectory("delivery-land-receipts-"), head, landed }
 }
 
@@ -1807,7 +1858,6 @@ describe("delivery_land", () => {
     chmodSync(join(bin, "gh"), 0o755)
     const receipts = temporaryDirectory("delivery-land-receipts-")
     const controller = new AbortController()
-    const started = Date.now()
     const pending = landPullRequest(
       { pr: 470, ...REVIEWED },
       {
@@ -1818,19 +1868,24 @@ describe("delivery_land", () => {
         signal: controller.signal,
       },
     )
-    await appeared(pidFile)
+    await Promise.race([appeared(pidFile), pending])
+    expect(existsSync(pidFile)).toBe(true)
     const pid = Number(readFileSync(pidFile, "utf8").trim())
     expect(() => process.kill(pid, 0)).not.toThrow()
+    // Timed from the interrupt: getting the stub running is spawn cost, not what is under test.
+    const aborted = Date.now()
     controller.abort()
     const outcome = await pending
 
-    expect(Date.now() - started).toBeLessThan(4_000)
+    expect(Date.now() - aborted).toBeLessThan(4_000)
     if (outcome.ok) throw new Error("expected a refusal")
     expect(outcome.reason).toContain("gh pr view 470")
     expect(outcome.reason).toContain("abort")
     expect(() => process.kill(pid, 0)).toThrow()
     expect(readdirSync(receipts)).toEqual([])
-  })
+    // The stub must be exec'd by name, and macOS can hold the first exec of a freshly
+    // written executable for about 2 s; with git children under load, 5 s is too tight.
+  }, 20_000)
 })
 
 describe("branch reading", () => {
