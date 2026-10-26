@@ -8,6 +8,8 @@
 
 import { existsSync } from "node:fs"
 
+import { supervise } from "@srobroek/opencode-lib/subprocess"
+
 import type { LoopConditionConfig } from "./loop.ts"
 
 export type LoopConditionVerdict =
@@ -109,44 +111,11 @@ export async function runCondition(command: string, options: ConditionOptions): 
   } catch (error) {
     return { kind: "spawn-error", error: error instanceof Error ? error.message : String(error) }
   }
-  let timedOut = false
-  let aborted = false
-  // Kill the whole process group: sh may fork the command, and an orphaned child keeps the pipes open.
-  const kill = () => {
-    try {
-      process.kill(-proc.pid, "SIGKILL")
-    } catch {
-      proc.kill("SIGKILL")
-    }
-  }
-  const timer =
-    timeoutMs > 0
-      ? setTimeout(() => {
-          timedOut = true
-          kill()
-        }, timeoutMs)
-      : undefined
-  const onAbort = () => {
-    aborted = true
-    kill()
-  }
-  options.signal?.addEventListener("abort", onAbort, { once: true })
-  if (options.signal?.aborted) onAbort()
-  try {
-    const [exitCode, stdout, stderr] = await Promise.all([
-      proc.exited,
-      new Response(proc.stdout as ReadableStream).text(),
-      new Response(proc.stderr as ReadableStream).text(),
-    ])
-    if (timedOut) return { kind: "timeout" }
-    if (aborted) return { kind: "aborted" }
-    return { kind: "exited", exitCode: proc.signalCode ? null : exitCode, output: `${stdout}\n${stderr}` }
-  } catch (error) {
-    return { kind: "spawn-error", error: error instanceof Error ? error.message : String(error) }
-  } finally {
-    if (timer) clearTimeout(timer)
-    options.signal?.removeEventListener("abort", onAbort)
-  }
+  const run = await supervise(proc, { timeoutMs, signal: options.signal, group: true })
+  if (run.kind === "timeout") return { kind: "timeout" }
+  if (run.kind === "aborted") return { kind: "aborted" }
+  if (run.kind === "lost") return { kind: "spawn-error", error: "its exit status was never reported" }
+  return { kind: "exited", exitCode: run.signalCode ? null : run.exitCode, output: `${run.stdout}\n${run.stderr}` }
 }
 
 export async function evaluateLoopCondition(
