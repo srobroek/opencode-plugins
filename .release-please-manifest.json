@@ -6,5 +6,6 @@
   "plugins/dep-update": "0.1.0",
   "plugins/whats-new": "0.1.0",
   "plugins/statusline": "0.1.0",
-  "plugins/beads": "0.1.0"
+  "plugins/beads": "0.1.0",
+  "plugins/goal": "0.1.0"
 }

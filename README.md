@@ -5,7 +5,7 @@ OpenCode V2 plugins by Sjors Robroek. This is the OpenCode counterpart of
 
 | Field | Value |
 | --- | --- |
-| Status | Early. Plugins: `example`, `model-roles`, `worktrunk`, `session`, `dep-update`, `whats-new`, `statusline`, `beads`. |
+| Status | Early. Plugins: `example`, `model-roles`, `worktrunk`, `session`, `dep-update`, `whats-new`, `statusline`, `beads`, `goal`. |
 | Host | OpenCode 2.1.4 or later (`@opencode/plugin` 2.x) |
 | License | Apache-2.0 |
 
