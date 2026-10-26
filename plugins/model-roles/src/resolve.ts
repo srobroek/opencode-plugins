@@ -33,8 +33,11 @@ export type Options = {
 export type Candidate = { kind: "model"; ref: ModelRef } | { kind: "role"; role: string }
 
 export type Resolution =
-  | { model: ModelRef; via: string[] }
+  | { model: ModelRef; via: string[]; unhealthy?: true }
   | { model: undefined; reason: "unknown-role" | "unavailable" }
+
+/** When a model last failed, if it is still cooling down; `undefined` when it is healthy. */
+export type HealthView = (ref: ModelRef) => number | undefined
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value)
@@ -85,22 +88,28 @@ export function isAvailable(ref: ModelRef, available: ReadonlyArray<AvailableMod
 }
 
 /**
- * Resolve a role to its first available candidate, following `@role` links
- * depth-first. A link back into the current chain is skipped, as is a link to
- * an unknown role.
+ * Resolve a role to its first available, healthy candidate, following `@role` links
+ * depth-first. A link back into the current chain is skipped, as is a link to an
+ * unknown role. When every available candidate is unhealthy, the one that failed
+ * longest ago wins, so a role never resolves to nothing just because of a cooldown.
  */
 export function resolveRole(
   roles: Readonly<Record<string, ReadonlyArray<string>>>,
   available: ReadonlyArray<AvailableModel>,
   role: string,
+  health: HealthView = () => undefined,
 ): Resolution {
   if (!Object.hasOwn(roles, role)) return { model: undefined, reason: "unknown-role" }
+  let stale: { model: ModelRef; via: string[]; failedAt: number } | undefined
   const walk = (current: string, chain: string[]): { model: ModelRef; via: string[] } | undefined => {
     for (const entry of roles[current] ?? []) {
       const candidate = parseCandidate(entry)
       if (candidate === undefined) continue
       if (candidate.kind === "model") {
-        if (isAvailable(candidate.ref, available)) return { model: candidate.ref, via: chain }
+        if (!isAvailable(candidate.ref, available)) continue
+        const failedAt = health(candidate.ref)
+        if (failedAt === undefined) return { model: candidate.ref, via: chain }
+        if (stale === undefined || failedAt < stale.failedAt) stale = { model: candidate.ref, via: chain, failedAt }
         continue
       }
       if (chain.includes(candidate.role) || !Object.hasOwn(roles, candidate.role)) continue
@@ -109,7 +118,10 @@ export function resolveRole(
     }
     return undefined
   }
-  return walk(role, [role]) ?? { model: undefined, reason: "unavailable" }
+  const found = walk(role, [role])
+  if (found) return found
+  if (stale) return { model: stale.model, via: stale.via, unhealthy: true }
+  return { model: undefined, reason: "unavailable" }
 }
 
 /** The role an agent declares: plugin options win over the request header. */
@@ -130,12 +142,13 @@ export function desiredModels(
   agents: ReadonlyArray<AgentLike>,
   options: Options,
   available: ReadonlyArray<AvailableModel>,
+  health?: HealthView,
 ): Map<string, ModelRef> {
   const result = new Map<string, ModelRef>()
   for (const agent of agents) {
     const role = roleOf(agent, options.agents)
     if (role === undefined) continue
-    const resolution = resolveRole(options.roles, available, role)
+    const resolution = resolveRole(options.roles, available, role, health)
     if (resolution.model) result.set(agent.id, resolution.model)
   }
   return result
