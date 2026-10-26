@@ -12,7 +12,8 @@
     "marketplaces": "bun scripts/build-marketplaces.ts",
     "marketplaces:check": "bun scripts/build-marketplaces.ts --check",
     "steering": "bun scripts/check-steering.ts",
-    "check": "bun run typecheck && bun run lint && bun run test && bun run build:check && bun run marketplaces:check && bun run steering"
+    "agent-roles": "bun scripts/check-agent-roles.ts",
+    "check": "bun run typecheck && bun run lint && bun run test && bun run build:check && bun run marketplaces:check && bun run steering && bun run agent-roles"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.15",
