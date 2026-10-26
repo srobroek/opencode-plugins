@@ -1,17 +1,23 @@
 /** The git and wt commands the plugin runs, behind a replaceable runner. */
 
+import { supervise } from "@srobroek/opencode-lib/subprocess"
+
 export type RunResult = { code: number; stdout: string; stderr: string }
 export type Runner = (argv: string[]) => Promise<RunResult>
+
+/**
+ * Bound on one git read or ref update. `wt merge` gets none: it runs the repository's
+ * merge hooks, and killing it mid-way could leave a half-landed merge.
+ */
+export const GIT_TIMEOUT_MS = 60_000
 
 export const spawnRunner: Runner = async (argv) => {
   try {
     const child = Bun.spawn(argv, { stdin: "ignore", stdout: "pipe", stderr: "pipe" })
-    const [code, stdout, stderr] = await Promise.all([
-      child.exited,
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-    ])
-    return { code, stdout, stderr }
+    const run = await supervise(child, argv[0] === "git" ? { timeoutMs: GIT_TIMEOUT_MS } : {})
+    if (run.kind === "exited") return { code: run.exitCode, stdout: run.stdout, stderr: run.stderr }
+    const why = run.kind === "timeout" ? `timed out after ${GIT_TIMEOUT_MS / 1_000}s` : "ended without an exit status"
+    return { code: 124, stdout: run.stdout, stderr: `${run.stderr}\n${argv[0]} ${why}`.trim() }
   } catch (error) {
     return { code: 127, stdout: "", stderr: error instanceof Error ? error.message : String(error) }
   }
