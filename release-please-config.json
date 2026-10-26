@@ -117,6 +117,10 @@
     "plugins/design": {
       "release-type": "node",
       "component": "design"
+    },
+    "plugins/safety": {
+      "release-type": "node",
+      "component": "safety"
     }
   }
 }
