@@ -14,6 +14,10 @@ type Repo = {
   ahead: number
   dirty: boolean
   merge: RunResult
+  /** Files the lane changes against its target. */
+  laneFiles: string[]
+  /** Uncommitted and untracked files in the target checkout, by directory. */
+  local: Record<string, { changed: string[]; untracked: string[] }>
 }
 
 function fakeRun(repo: Repo, log: string[][]) {
@@ -38,6 +42,14 @@ function fakeRun(repo: Repo, log: string[][]) {
     if (cmd.startsWith("rev-list --count")) return ok(`${repo.ahead}\n`)
     if (cmd === "status --porcelain") return ok(repo.dirty ? " M a.txt\n" : "")
     if (cmd.startsWith("branch --quiet -d")) return ok()
+    if (cmd === "worktree list --porcelain") return ok(`worktree ${REPO}\nHEAD ${BASE}\nbranch refs/heads/main\n`)
+    if (cmd === "diff --name-only -z HEAD") return ok(repo.local[dir]?.changed.map((file) => `${file}\0`).join("") ?? "")
+    if (cmd === "ls-files --others --exclude-standard --full-name -z") {
+      return ok(repo.local[dir]?.untracked.map((file) => `${file}\0`).join("") ?? "")
+    }
+    if (cmd.startsWith("diff --name-only -z ") && cmd.endsWith("...HEAD")) {
+      return ok(repo.laneFiles.map((file) => `${file}\0`).join(""))
+    }
     return fail
   }
 }
@@ -60,6 +72,15 @@ async function start(
       { id: "general", name: "general", mode: "subagent" },
       { id: "explore", name: "explore", mode: "subagent" },
       { id: "build", name: "build", mode: "primary" },
+      {
+        id: "reviewer",
+        name: "reviewer",
+        mode: "subagent",
+        permissions: [
+          { action: "*", resource: "*", effect: "allow" },
+          { action: "edit", resource: "*", effect: "deny" },
+        ],
+      },
     ],
     sessions: [
       { id: PARENT, projectID: "prj", location: { directory: REPO }, model: { id: "m", providerID: "p" } },
@@ -73,6 +94,8 @@ async function start(
     ahead: 0,
     dirty: false,
     merge: { code: 0, stdout: "Merged", stderr: "" },
+    laneFiles: ["hello.txt"],
+    local: {},
     ...options.repo,
   }
   const worktree: Setup["worktree"] = { calls: [] }
@@ -92,7 +115,7 @@ async function start(
     remove: async (input: unknown) => void fake.calls.push({ method: "session.remove", input }),
   })
   const log: string[][] = []
-  const plugin = createPlugin({ run: fakeRun(repo, log), suffix: () => "abc123" })
+  const plugin = createPlugin({ run: fakeRun(repo, log), suffix: () => "abc123", lookupMs: 20 })
   const cleanup = (await plugin.setup(fake.context)) as () => Promise<void>
   return { fake, repo, log, worktree, cleanup }
 }
@@ -197,8 +220,9 @@ describe("execute.before", () => {
     ["a child caller", {}, "ses_nested", {}],
     ["a non-git project", {}, PARENT, { git: false }],
     ["a primary agent", { agent: "build" }, PARENT, {}],
+    ["a read-only agent", { agent: "reviewer" }, PARENT, {}],
   ] as const)("leaves %s alone", async (_name, input, sessionID, repo) => {
-    const setup = await start({ opts: { agents: ["general", "build"] }, repo })
+    const setup = await start({ opts: { agents: ["general", "build", "reviewer"] }, repo })
     const original = call(input, sessionID)
     const event = await setup.fake.fire.tool("execute.before", { ...original, input: { ...original.input } })
     expect(event.input).toEqual(original.input)
@@ -333,6 +357,83 @@ describe(MERGE_TOOL, () => {
     expect(result.content).toContain("kept at /wt/subagent-write-hello-abc123")
     expect(lane(setup.fake)?.state).toBe("active")
     expect(setup.worktree.calls.map((entry) => entry.method)).toEqual(["create"])
+  })
+
+  test("refuses when the target checkout has local changes to files the lane changes", async () => {
+    const setup = await start({
+      repo: { laneFiles: ["a.ts", "hello.txt"], local: { [REPO]: { changed: ["a.ts"], untracked: ["hello.txt", "x"] } } },
+    })
+    await spawn(setup)
+    setup.repo.ahead = 1
+    const result = await run(setup, { sessionID: "ses_fake1", method: "wt-merge" })
+    expect(result.metadata.ok).toBe(false)
+    expect(result.content).toContain("main checkout has uncommitted or untracked changes")
+    expect(result.content).toEndWith(": a.ts, hello.txt")
+    expect(setup.log.some((argv) => argv[0] === "wt")).toBe(false)
+    expect(setup.log).toContainEqual(["git", "-C", REPO, "diff", "--name-only", "-z", "HEAD"])
+    expect(lane(setup.fake)?.state).toBe("active")
+
+    setup.repo.local = { [REPO]: { changed: ["other.ts"], untracked: [] } }
+    expect((await run(setup, { sessionID: "ses_fake1", method: "wt-merge" })).metadata.ok).toBe(true)
+  })
+
+  test("a target that is not checked out anywhere has no local changes", async () => {
+    const setup = await start({ repo: { local: { [REPO]: { changed: ["hello.txt"], untracked: [] } } } })
+    await spawn(setup)
+    setup.repo.ahead = 1
+    const result = await run(setup, { sessionID: "ses_fake1", method: "wt-merge", target: "release" })
+    expect(result.metadata.ok).toBe(true)
+  })
+
+  test("refuses an uncommitted-only lane and says to continue the subagent", async () => {
+    const setup = await start()
+    await spawn(setup)
+    setup.repo.dirty = true
+    const result = await run(setup, { sessionID: "ses_fake1", method: "wt-merge" })
+    expect(result.content).toContain("exists only as uncommitted changes")
+    expect(result.content).toContain("sessionID ses_fake1")
+    expect(setup.log.some((argv) => argv[0] === "wt")).toBe(false)
+  })
+
+  test("list reports active lanes and flags orphans without removing anything", async () => {
+    const orphan: Lane = {
+      child: "ses_gone_child",
+      parent: "ses_gone_parent",
+      projectID: "prj",
+      directory: "/wt/orphan",
+      branch: "subagent-orphan",
+      base: BASE,
+      parentDir: REPO,
+      state: "active",
+    }
+    const setup = await start()
+    await spawn(setup)
+    setup.repo.ahead = 1
+    setup.fake.storage.set(laneKey(orphan.child), orphan)
+    setup.fake.storage.set(laneKey("ses_other"), { ...orphan, child: "ses_other", projectID: "prj2" })
+    setup.fake.storage.set(laneKey("ses_done"), { ...orphan, child: "ses_done", state: "merged" })
+    const slow = setup.fake.context.session.get
+    Object.assign(setup.fake.context.session, {
+      get: (input: { sessionID: string }) =>
+        input.sessionID === "ses_fake1" ? new Promise(() => {}) : slow(input as never),
+    })
+    const result = await run(setup, { method: "list" })
+    expect(result.metadata.ok).toBe(true)
+    expect(result.content).toContain('count="2"')
+    expect(result.content).toContain(
+      "- subagent-orphan (sessionID ses_gone_child, parent ses_gone_parent) /wt/orphan ahead=1 dirty=no child=gone parent=gone ORPHAN: child session gone, parent session gone",
+    )
+    expect(result.content).toContain("subagent-write-hello-abc123 (sessionID ses_fake1, yours)")
+    expect(result.content).toContain("child=unknown parent=alive")
+    expect(result.content).not.toContain("ses_other")
+    expect(result.content).not.toContain("ses_done")
+    expect(setup.worktree.calls.map((entry) => entry.method)).toEqual(["create"])
+    expect(setup.fake.storage.get(laneKey(orphan.child))).toEqual(orphan)
+  })
+
+  test("wt-merge and none need a sessionID", async () => {
+    const setup = await start()
+    expect((await run(setup, { method: "none" })).content).toContain("sessionID is required")
   })
 
   test("refuses another session and an unknown lane; none only reports", async () => {

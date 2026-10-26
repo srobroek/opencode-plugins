@@ -23,6 +23,7 @@ function createGit(run) {
     const result = await run(["git", "-C", directory, ...args]);
     return result.code === 0 ? result.stdout.trim() : undefined;
   };
+  const files = (output) => output?.split("\x00").filter((file) => file !== "");
   return {
     run,
     isWorkTree: async (directory) => await git(directory, "rev-parse", "--is-inside-work-tree") === "true",
@@ -37,7 +38,14 @@ function createGit(run) {
       if (ahead === undefined || porcelain === undefined)
         return;
       return { ahead: Number.parseInt(ahead, 10) || 0, dirty: porcelain !== "" };
-    }
+    },
+    changedFiles: async (directory, target) => files(await git(directory, "diff", "--name-only", "-z", `${target}...HEAD`)),
+    localFiles: async (directory) => {
+      const changed = files(await git(directory, "diff", "--name-only", "-z", "HEAD"));
+      const untracked = files(await git(directory, "ls-files", "--others", "--exclude-standard", "--full-name", "-z"));
+      return changed && untracked ? [...changed, ...untracked] : undefined;
+    },
+    worktrees: (directory) => git(directory, "worktree", "list", "--porcelain")
   };
 }
 
@@ -103,11 +111,27 @@ function decideIsolation(facts) {
     return { isolate: false, reason: "unknown agent" };
   if (facts.agent.mode === "primary")
     return { isolate: false, reason: "primary agent" };
+  if (rulesAreReadOnly(facts.agent.permissions))
+    return { isolate: false, reason: "read-only agent (edit denied)" };
   if (facts.callerIsChild)
     return { isolate: false, reason: "caller is a child session" };
   if (!facts.isGit)
     return { isolate: false, reason: "not a git checkout" };
   return { isolate: true };
+}
+function wildcard(value, pattern) {
+  const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
+  return new RegExp(`^${escaped}$`).test(value);
+}
+function rulesAreReadOnly(rules) {
+  if (!Array.isArray(rules))
+    return false;
+  const match = [...rules].reverse().find((rule) => {
+    if (typeof rule?.action !== "string" || typeof rule.resource !== "string")
+      return false;
+    return wildcard("edit", rule.action) && (rule.resource === "*" || rule.resource === "**");
+  });
+  return match?.effect === "deny";
 }
 function slug(text, max = 32) {
   const value = text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, max).replace(/-+$/g, "");
@@ -145,6 +169,12 @@ function diffCommand(lane) {
 function quote(path) {
   return /^[\w@%+=:,./-]+$/.test(path) ? path : `'${path.replace(/'/g, `'\\''`)}'`;
 }
+function isUncommittedOnly(status) {
+  return status.ahead === 0 && status.dirty;
+}
+function uncommittedOnly(lane) {
+  return `the branch has 0 commits; the work exists only as uncommitted changes in ${lane.directory} and is lost if the worktree is force-removed. Continue the subagent (subagent with sessionID ${lane.child}) and ask it to commit its work.`;
+}
 function annotation(lane, status, removed) {
   const attrs = `branch="${lane.branch}" base="${shortSha(lane.base)}"${lane.target ? ` target="${lane.target}"` : ""}`;
   if (removed) {
@@ -155,9 +185,11 @@ No commits and a clean tree, so the worktree was removed. Continuing this sessio
   const lines = [`<subagent-worktree ${attrs} directory="${lane.directory}" state="${lane.state}">`];
   if (status) {
     lines.push(`Commits ahead of base: ${status.ahead}. Uncommitted changes: ${status.dirty ? "yes" : "no"}.`);
+    if (isUncommittedOnly(status))
+      lines.push(`Warning: ${uncommittedOnly(lane)}`);
   }
   lines.push(`Review: ${diffCommand(lane)}${status?.dirty ? ` (uncommitted: git -C ${quote(lane.directory)} status)` : ""}`);
-  lines.push(`Merge: subagent_worktree_merge with sessionID ${lane.child} and method "wt-merge"${lane.target ? ` merges into ${lane.target}` : ""}. Method "none" reports status without merging.`);
+  lines.push(`Merge: subagent_worktree_merge with sessionID ${lane.child} and method "wt-merge"${lane.target ? ` merges into ${lane.target}` : ""}. Method "none" reports status without merging; "list" reports every active lane.`);
   lines.push("</subagent-worktree>");
   return lines.join(`
 `);
@@ -167,6 +199,10 @@ function mergeArgs(directory, target) {
 }
 function isConflict(output) {
   return /conflict|could not apply|resolve all conflicts|needs merge/i.test(output);
+}
+function overlap(laneFiles, localFiles) {
+  const local = new Set(localFiles);
+  return [...new Set(laneFiles.filter((file) => local.has(file)))].sort();
 }
 function decideMerge(input) {
   const { lane } = input;
@@ -181,12 +217,79 @@ function decideMerge(input) {
     return { refuse: true, reason: "the lane has no target branch (the caller was on a detached HEAD); pass target" };
   if (!input.status)
     return { refuse: true, reason: `cannot read the worktree at ${lane.directory}` };
+  if (isUncommittedOnly(input.status))
+    return { refuse: true, reason: uncommittedOnly(lane) };
   if (input.status.dirty) {
     return { refuse: true, reason: `the worktree has uncommitted changes; commit or discard them in ${lane.directory} first` };
   }
   if (input.status.ahead === 0)
     return { refuse: true, reason: "the branch has no commits to merge" };
+  if (!input.laneFiles)
+    return { refuse: true, reason: `cannot list the files ${lane.branch} changes against ${target}` };
+  if (!input.localFiles)
+    return { refuse: true, reason: `cannot read the local changes in the ${target} checkout` };
+  const files = overlap(input.laneFiles, input.localFiles);
+  if (files.length > 0) {
+    return {
+      refuse: true,
+      reason: `the ${target} checkout has uncommitted or untracked changes to files the lane also changes; commit, stash or remove them there first: ${files.join(", ")}`
+    };
+  }
   return { refuse: false, target };
+}
+function worktreeForBranch(porcelain, branch) {
+  for (const block of porcelain.split(/\n\s*\n/)) {
+    const lines = block.split(`
+`);
+    const path = lines.find((line) => line.startsWith("worktree "))?.slice("worktree ".length);
+    if (path && lines.includes(`branch refs/heads/${branch}`))
+      return path;
+  }
+  return;
+}
+var SESSION_LOOKUP_MS = 2000;
+async function liveness(lookup, ms) {
+  let timer;
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => resolve("unknown"), ms);
+  });
+  try {
+    return await Promise.race([lookup.then(() => "alive", () => "gone"), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+function orphanReasons(report) {
+  const reasons = [];
+  if (report.child === "gone")
+    reasons.push("child session gone");
+  if (report.parent === "gone")
+    reasons.push("parent session gone");
+  if (report.status === undefined)
+    reasons.push("worktree unreadable");
+  return reasons;
+}
+function formatLaneList(reports, caller) {
+  if (reports.length === 0)
+    return `<subagent-worktree-lanes count="0">
+No active lanes.
+</subagent-worktree-lanes>`;
+  const lines = [`<subagent-worktree-lanes count="${reports.length}">`];
+  for (const report of reports) {
+    const { lane, status } = report;
+    const state = status ? `ahead=${status.ahead} dirty=${status.dirty ? "yes" : "no"}` : "ahead=? dirty=?";
+    const reasons = orphanReasons(report);
+    const owner = lane.parent === caller ? "yours" : `parent ${lane.parent}`;
+    lines.push(`- ${lane.branch} (sessionID ${lane.child}, ${owner}) ${lane.directory} ${state} child=${report.child} parent=${report.parent}${reasons.length > 0 ? ` ORPHAN: ${reasons.join(", ")}` : ""}`);
+    if (status && isUncommittedOnly(status))
+      lines.push(`  Warning: ${uncommittedOnly(lane)}`);
+  }
+  if (reports.some((report) => orphanReasons(report).length > 0)) {
+    lines.push("Orphaned lanes are reported only; nothing was removed. Review them and remove a worktree yourself (wt remove) once its work is merged or no longer needed.");
+  }
+  lines.push("</subagent-worktree-lanes>");
+  return lines.join(`
+`);
 }
 function tail(text, lines = 40) {
   const clean = text.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "").trim();
@@ -196,14 +299,17 @@ function tail(text, lines = 40) {
 }
 
 // plugins/subagent-worktree/src/index.ts
-var MERGE_DESCRIPTION = "Merge a subagent's worktree branch back. The subagent tool result names the lane (branch, base, sessionID). " + 'method "wt-merge" runs `wt merge <target> --no-squash --no-ff --yes` from the subagent worktree, keeping its commits, ' + "and removes the worktree on success; a conflict keeps the worktree and reports the output. " + 'method "none" only reports the lane status. The worktree must be committed and clean.';
+var MERGE_DESCRIPTION = "Merge a subagent's worktree branch back. The subagent tool result names the lane (branch, base, sessionID). " + 'method "wt-merge" runs `wt merge <target> --no-squash --no-ff --yes` from the subagent worktree, keeping its commits, ' + "and removes the worktree on success; a conflict keeps the worktree and reports the output. " + "The worktree must be committed and clean, and the target checkout must have no uncommitted or untracked changes to files the lane changes. " + 'method "none" only reports the lane status. method "list" (no sessionID) reports every active lane in the project ' + "with commits ahead, uncommitted changes, and lanes whose child or parent session is gone; it never removes anything.";
 var MERGE_INPUT = {
   type: "object",
   additionalProperties: false,
-  required: ["sessionID", "method"],
+  required: ["method"],
   properties: {
-    sessionID: { type: "string", description: "The subagent's sessionID from the subagent tool result" },
-    method: { type: "string", enum: ["wt-merge", "none"] },
+    sessionID: {
+      type: "string",
+      description: `The subagent's sessionID from the subagent tool result. Required unless method is "list".`
+    },
+    method: { type: "string", enum: ["wt-merge", "none", "list"] },
     target: { type: "string", description: "Branch to merge into. Defaults to the branch the lane was created from." }
   }
 };
@@ -220,7 +326,7 @@ ${note}`;
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
 }
-function createLanes(ctx, options, git2, suffix) {
+function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS) {
   const load = async (child) => parseLane(await ctx.storage.get(laneKey(child)));
   const save = (lane2) => ctx.storage.set(laneKey(lane2.child), lane2);
   const getSession = (sessionID) => ctx.session.get({ sessionID }).then((session) => session, () => {
@@ -389,7 +495,62 @@ ${note}`,
       });
     }
   };
+  const scan = async () => {
+    const found = [];
+    let after;
+    do {
+      const page = await ctx.storage.scan({ prefix: LANE_PREFIX, ...after === undefined ? {} : { after } });
+      for (const entry of page.entries) {
+        const lane2 = parseLane(entry.value);
+        if (lane2)
+          found.push(lane2);
+      }
+      after = page.next;
+    } while (after !== undefined);
+    return found;
+  };
+  const alive = (sessionID) => liveness(ctx.session.get({ sessionID }), lookupMs);
+  const list = async (caller) => {
+    const session = await getSession(caller);
+    const lanes = (await scan()).filter((lane2) => lane2.state === "active").filter((lane2) => session ? lane2.projectID === session.projectID : lane2.parent === caller).sort((a, b) => a.branch.localeCompare(b.branch));
+    const reports = await Promise.all(lanes.map(async (lane2) => {
+      const [status, child, parent] = await Promise.all([
+        git2.status(lane2.directory, lane2.base),
+        alive(lane2.child),
+        lane2.parent === caller && session ? Promise.resolve("alive") : alive(lane2.parent)
+      ]);
+      return { lane: lane2, status, child, parent };
+    }));
+    return {
+      content: formatLaneList(reports, caller),
+      metadata: {
+        ok: true,
+        lanes: reports.map(({ lane: lane2, status, child, parent }) => ({
+          sessionID: lane2.child,
+          parent: lane2.parent,
+          branch: lane2.branch,
+          directory: lane2.directory,
+          ahead: status?.ahead,
+          dirty: status?.dirty,
+          child,
+          parentSession: parent
+        }))
+      }
+    };
+  };
+  const targetChanges = async (lane2, target) => {
+    const porcelain = await git2.worktrees(lane2.parentDir);
+    if (porcelain === undefined)
+      return;
+    const directory = worktreeForBranch(porcelain, target);
+    return directory === undefined ? [] : git2.localFiles(directory);
+  };
   const merge = async (input, tool) => {
+    if (input.method === "list")
+      return list(tool.sessionID);
+    if (!input.sessionID) {
+      return { content: `${MERGE_TOOL}: sessionID is required for method "${input.method}"`, metadata: { ok: false } };
+    }
     const lane2 = await load(input.sessionID);
     await ctx.permission.assert({
       sessionID: tool.sessionID,
@@ -404,11 +565,15 @@ ${note}`,
         return { content: `${MERGE_TOOL}: no worktree lane for session ${input.sessionID}`, metadata: { ok: false } };
       return { content: annotation(lane2, status, false), metadata: { ok: true, lane: lane2 } };
     }
+    const target = input.target ?? lane2?.target;
+    const ready = lane2?.state === "active" && lane2.parent === tool.sessionID && target && status && status.ahead > 0;
+    const files = ready && !status.dirty ? { laneFiles: await git2.changedFiles(lane2.directory, target), localFiles: await targetChanges(lane2, target) } : {};
     const decision = decideMerge({
       lane: lane2,
       caller: tool.sessionID,
       status,
-      ...input.target ? { target: input.target } : {}
+      ...input.target ? { target: input.target } : {},
+      ...files
     });
     if (decision.refuse || !lane2) {
       const reason = decision.refuse ? decision.reason : "no lane";
@@ -449,7 +614,7 @@ function createPlugin(overrides = {}) {
     async setup(ctx) {
       const options = readOptions(ctx.options);
       const git2 = createGit(overrides.run ?? spawnRunner);
-      const lanes = createLanes(ctx, options, git2, overrides.suffix ?? randomSuffix);
+      const lanes = createLanes(ctx, options, git2, overrides.suffix ?? randomSuffix, overrides.lookupMs);
       const registrations = [];
       const cleanup = async () => {
         for (const registration of registrations.reverse())
@@ -481,6 +646,7 @@ export {
   MERGE_DESCRIPTION,
   MERGE_INPUT,
   MERGE_TOOL,
+  SESSION_LOOKUP_MS,
   SUBAGENT_PREAMBLE,
   SUBAGENT_TOOL,
   annotation,
@@ -491,18 +657,26 @@ export {
   decideMerge,
   src_default as default,
   diffCommand,
+  formatLaneList,
   isConflict,
+  isUncommittedOnly,
   laneKey,
+  liveness,
   mergeArgs,
   notice,
+  orphanReasons,
+  overlap,
   parseLane,
   readOptions,
   readSubagentInput,
   rewritePrompt,
+  rulesAreReadOnly,
   shortSha,
   shouldRemove,
   slug,
   spawnRunner,
   tail,
+  uncommittedOnly,
+  worktreeForBranch,
   worktreeName
 };
