@@ -12,6 +12,8 @@ name: release-please
 # Build output: release-please only bumps package.json versions and changelogs.
 # The bundles in dist/ do not embed the version, so build:check stays green on
 # the release PR; the sync step below rebuilds anyway in case that changes.
+# The Claude Code and Codex marketplace files do embed each plugin's version,
+# so the same step regenerates them and stages the root-level catalogs too.
 
 on:
   push:
@@ -56,15 +58,16 @@ jobs:
         with:
           bun-version: "1.4.3"
 
-      - name: Rebuild plugin bundles on the release branch
+      - name: Rebuild plugin bundles and marketplaces on the release branch
         if: ${{ steps.release.outputs.prs_created == 'true' }}
         run: |
           bun install --frozen-lockfile
           bun run build
-          git add -A -- plugins
+          bun run marketplaces
+          git add -A -- plugins .claude-plugin .agents/plugins
           if ! git diff --cached --quiet; then
             git config user.name "release-app[bot]"
             git config user.email "release-app[bot]@users.noreply.github.com"
-            git commit -m "chore: rebuild plugin bundles"
+            git commit -m "chore: rebuild plugin bundles and marketplaces"
             git push
           fi
