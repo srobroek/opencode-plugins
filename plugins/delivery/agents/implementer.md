@@ -2,6 +2,9 @@
 description: "Default implementation tier; implements one assigned bead in its own worktree, records reproducible evidence, reports its branch head, and blocks on missing prerequisites."
 mode: subagent
 model: "amazon-bedrock/global.anthropic.claude-sonnet-5-5#medium"
+request:
+  headers:
+    x-opencode-model-role: task
 permissions:
   - action: webfetch
     resource: "*"

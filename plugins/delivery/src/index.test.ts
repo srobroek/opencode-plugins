@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createFakeContext, type FakeContextOptions } from "@srobroek/opencode-lib/testing"
-import { AGENT_IDS, loadAgents } from "./agents.ts"
+import { AGENT_IDS, hasModelRoles, loadAgents } from "./agents.ts"
 import plugin, {
   CLEANUP_ACTION,
   confirmDelivery,
@@ -142,7 +142,56 @@ describe("agents", () => {
     expect(implementer.mode).toBe("subagent")
     expect(String(implementer.system)).toContain("VERDICT: DONE|BLOCKED|SPLIT")
     expect(implementer.model).toBeUndefined()
+    expect(implementer.request).toEqual({ headers: { "x-opencode-model-role": "task" } })
     expect(implementer.permissions).toContainEqual({ action: "subagent", resource: "researcher", effect: "allow" })
+  })
+
+  const withHost = (fake: ReturnType<typeof createFakeContext>, plugins: unknown[]) => {
+    const context = fake.context as unknown as Record<string, unknown>
+    context.model = {
+      list: async () => ({
+        data: [{ providerID: "amazon-bedrock", id: "global.anthropic.claude-sonnet-5-5", variants: [{ id: "medium" }] }],
+      }),
+    }
+    context.plugin = { list: async () => ({ data: plugins }) }
+    return fake
+  }
+
+  test("without model-roles an agent falls back to its file model when available", async () => {
+    const fake = withHost(createFakeContext(), [{ id: "srobroek.delivery" }])
+    await plugin.setup(fake.context)
+    expect(fake.agents.get("implementer")?.model).toEqual({
+      providerID: "amazon-bedrock",
+      id: "global.anthropic.claude-sonnet-5-5",
+      variant: "medium",
+    })
+  })
+
+  test("with model-roles installed an agent pins no model and keeps only its role header", async () => {
+    const fake = withHost(createFakeContext(), [{ id: "srobroek.model-roles" }])
+    await plugin.setup(fake.context)
+    const implementer = fake.agents.get("implementer") as Record<string, unknown>
+    expect(implementer.model).toBeUndefined()
+    expect(implementer.request).toEqual({ headers: { "x-opencode-model-role": "task" } })
+  })
+
+  test("an explicit models option still applies with model-roles installed", async () => {
+    const fake = withHost(
+      createFakeContext({ options: { models: { implementer: "amazon-bedrock/global.anthropic.claude-sonnet-5-5" } } }),
+      [{ source: { type: "package", target: "github:srobroek/opencode-plugins#main::path:plugins/model-roles" } }],
+    )
+    await plugin.setup(fake.context)
+    expect(fake.agents.get("implementer")?.model).toEqual({
+      providerID: "amazon-bedrock",
+      id: "global.anthropic.claude-sonnet-5-5",
+    })
+  })
+
+  test("hasModelRoles matches the plugin id or its package target", () => {
+    expect(hasModelRoles({ data: [{ id: "srobroek.model-roles" }] })).toBe(true)
+    expect(hasModelRoles([{ source: { target: "@srobroek/opencode-model-roles" } }])).toBe(true)
+    expect(hasModelRoles({ data: [{ id: "srobroek.delivery", source: { target: "x/delivery" } }] })).toBe(false)
+    expect(hasModelRoles(undefined)).toBe(false)
   })
 
   test("an existing agent keeps its own fields and gains the delivery permissions after its own", async () => {

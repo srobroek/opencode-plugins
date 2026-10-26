@@ -2,6 +2,9 @@
 description: "Reviews a GitHub pull request diff for code quality, security, correctness, and coverage. Read-only; returns a verdict. Not for Beads run nodes."
 mode: subagent
 model: "amazon-bedrock/global.anthropic.claude-opus-5-5#high"
+request:
+  headers:
+    x-opencode-model-role: reviewer
 permissions:
   - action: glob
     resource: "*"

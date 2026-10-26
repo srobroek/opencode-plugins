@@ -3,7 +3,9 @@
  * through `ctx.agent.transform`, so installing the plugin is enough to get them.
  *
  * Markdown and config agents load after plugins, so a user's own `implementer.md`
- * still wins field by field. A registered agent's model is used only when it is
+ * still wins field by field. Each agent names its model-roles role in the
+ * `x-opencode-model-role` header. With the model-roles plugin installed, that role
+ * picks the model. Without it, the file's `model` is a fallback, used only when it is
  * available on this machine; otherwise the agent inherits the session's model.
  */
 
@@ -29,6 +31,7 @@ export type AgentFile = {
   description?: string
   mode: string
   model?: string
+  request?: { headers?: Record<string, string> }
   permissions: AgentPermission[]
   system: string
 }
@@ -50,6 +53,7 @@ export function parseAgentFile(id: string, text: string): AgentFile {
     description: typeof data.description === "string" ? data.description : undefined,
     mode: typeof data.mode === "string" ? data.mode : "subagent",
     model: typeof data.model === "string" ? data.model : undefined,
+    ...(data.request && typeof data.request === "object" ? { request: data.request as AgentFile["request"] } : {}),
     permissions,
     system: text.slice(match[0].length).trim(),
   }
@@ -84,6 +88,7 @@ export type AgentDraft = {
   mode?: string
   model?: unknown
   system?: string
+  request?: { headers?: Record<string, string> }
   permissions?: unknown[]
 }
 
@@ -98,7 +103,40 @@ export function shapeAgent(draft: AgentDraft, file: AgentFile, model: ModelRef |
   if (created || draft.mode === undefined) draft.mode = file.mode
   if (created || draft.system === undefined) draft.system = file.system
   if (model !== undefined && (created || draft.model === undefined)) draft.model = { ...model }
+  if (file.request?.headers) draft.request = { ...draft.request, headers: { ...file.request.headers, ...draft.request?.headers } }
   draft.permissions = created ? [...file.permissions] : [...(draft.permissions ?? []), ...file.permissions]
+}
+
+export const MODEL_ROLES_PLUGIN = "srobroek.model-roles"
+
+type PluginEntry = { id?: unknown; source?: { target?: unknown } }
+
+/** Whether a `plugin.list` result (a `{ data }` envelope or an array) includes the model-roles plugin. */
+export function hasModelRoles(listed: unknown): boolean {
+  const entries = Array.isArray(listed) ? listed : (listed as { data?: unknown } | undefined)?.data
+  if (!Array.isArray(entries)) return false
+  return (entries as PluginEntry[]).some(
+    (entry) =>
+      entry?.id === MODEL_ROLES_PLUGIN ||
+      (typeof entry?.source?.target === "string" && /(^|[/:@])(opencode-)?model-roles\b/.test(entry.source.target)),
+  )
+}
+
+/**
+ * The model to give an agent. An explicit `models` option wins; `false` means none.
+ * Otherwise the file's model is a fallback for hosts without model-roles, where the
+ * role header has no effect.
+ */
+export function fallbackModel(
+  file: AgentFile,
+  override: string | false | undefined,
+  modelRoles: boolean,
+  available: readonly Available[],
+): ModelRef | undefined {
+  if (override === false) return undefined
+  if (override !== undefined) return availableModel(parseModel(override), available)
+  if (modelRoles) return undefined
+  return availableModel(parseModel(file.model ?? ""), available)
 }
 
 /** Read every shipped agent file. */

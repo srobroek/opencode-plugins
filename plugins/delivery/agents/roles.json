@@ -4,7 +4,7 @@
     "implementer-high": "slow",
     "researcher": "task",
     "pr-reviewer": "reviewer",
-    "operator": "tiny",
+    "operator": "smol",
     "shepherd": "task"
   }
 }
