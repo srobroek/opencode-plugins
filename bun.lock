@@ -79,6 +79,19 @@
         "@opencode/plugin": "^2.1.4",
       },
     },
+    "plugins/lsp": {
+      "name": "@srobroek/opencode-lsp",
+      "version": "0.1.0",
+      "devDependencies": {
+        "@srobroek/opencode-lib": "workspace:*",
+      },
+      "peerDependencies": {
+        "@opencode/plugin": "^2.1.4",
+      },
+      "optionalPeers": [
+        "@opencode/plugin",
+      ],
+    },
     "plugins/model-roles": {
       "name": "@srobroek/opencode-model-roles",
       "version": "0.1.0",
@@ -436,6 +449,8 @@
     "@srobroek/opencode-goal": ["@srobroek/opencode-goal@workspace:plugins/goal"],
 
     "@srobroek/opencode-lib": ["@srobroek/opencode-lib@workspace:plugins/lib"],
+
+    "@srobroek/opencode-lsp": ["@srobroek/opencode-lsp@workspace:plugins/lsp"],
 
     "@srobroek/opencode-model-roles": ["@srobroek/opencode-model-roles@workspace:plugins/model-roles"],
 
