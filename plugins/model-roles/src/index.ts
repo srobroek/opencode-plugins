@@ -1,5 +1,6 @@
 import { Plugin } from "@opencode/plugin"
 import type { Context } from "@opencode/plugin/promise/plugin"
+import { type GuardAgent, type GuardModel, judgeSpawn, parseGuard, pinnedModel } from "./guard.ts"
 import {
   type AvailableModel,
   desiredModels,
@@ -10,6 +11,7 @@ import {
   stripRoleHeader,
 } from "./resolve.ts"
 
+export * from "./guard.ts"
 export * from "./resolve.ts"
 
 /** Re-registrations allowed in a row without the agents converging, before giving up until inputs change. */
@@ -19,6 +21,18 @@ const REFRESH_EVENTS = new Set(["model.updated", "provider.updated"])
 const CHECK_EVENTS = new Set(["agent.updated", ...REFRESH_EVENTS])
 
 type AgentEditor = Parameters<Parameters<Context["agent"]["transform"]>[0]>[0]
+
+const SUBAGENT_TOOL = "subagent"
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value)
+
+/** The agent a fresh `subagent` spawn names; a resumed one (`sessionID`) keeps its session and is not judged. */
+export function spawnTarget(input: unknown): string | undefined {
+  if (!isRecord(input) || typeof input.agent !== "string" || input.agent === "") return undefined
+  if (typeof input.sessionID === "string" && input.sessionID !== "") return undefined
+  return input.agent
+}
 
 const availabilityKey = (models: ReadonlyArray<AvailableModel>): string =>
   models
@@ -31,7 +45,8 @@ export default Plugin.define({
   id: "srobroek.model-roles",
   async setup(ctx) {
     const options = parseOptions(ctx.options)
-    let available: AvailableModel[] = []
+    const guard = parseGuard(isRecord(ctx.options) ? ctx.options.guard : undefined)
+    let available: GuardModel[] = []
     let availableKey = ""
 
     const refresh = async (): Promise<boolean> => {
@@ -89,6 +104,32 @@ export default Plugin.define({
       stripRoleHeader(request.headers)
     })
 
+    const guarded =
+      guard === undefined
+        ? undefined
+        : await ctx.tool.hook("execute.before", async (event) => {
+            if (event.tool !== SUBAGENT_TOOL) return
+            const target = spawnTarget(event.input)
+            if (target === undefined) return
+            let reason: string | undefined
+            try {
+              const [listed, session] = await Promise.all([
+                ctx.agent.list(),
+                ctx.session.get({ sessionID: event.sessionID }),
+              ])
+              const agents = listed.data as ReadonlyArray<GuardAgent>
+              const caller = agents.find((agent) => agent.id === event.agent)
+              const sessionModel =
+                session?.model ?? (caller === undefined ? undefined : pinnedModel(caller, { options, available }))
+              const decision = judgeSpawn({ guard, options, target, agents, available, sessionModel })
+              if (!decision.allow) reason = decision.reason
+            } catch {
+              // Fail open: a broken lookup must never block delegation.
+              return
+            }
+            if (reason !== undefined) throw new Error(reason)
+          })
+
     void (async () => {
       for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
         if (controller.signal.aborted) break
@@ -105,6 +146,7 @@ export default Plugin.define({
 
     return async () => {
       controller.abort()
+      await guarded?.dispose()
       await strip.dispose()
       await registration.dispose()
     }

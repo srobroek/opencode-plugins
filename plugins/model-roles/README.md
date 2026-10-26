@@ -79,3 +79,32 @@ Config and markdown agents load after user plugins. On `agent.updated`,
 transform, which puts it last again. It does this only when an agent's model is
 out of date or availability has changed. It gives up after three attempts in a
 row that don't converge.
+
+## Subagent model guard
+
+An agent with no model and no resolvable role inherits the session's model. The
+optional guard refuses a `subagent` spawn when that inherited model is
+expensive. The refusal lists the subagents that pin a cheaper model and the
+roles that resolve to one.
+
+```jsonc
+"guard": {
+  "expensive": "auto",
+  "threshold": 4,
+  "allowInherit": ["fork"]
+}
+```
+
+- `guard`: off when absent. `true` turns it on with the defaults.
+- `expensive`: `"auto"` (default) counts a model as expensive when its
+  base-tier input cost from `ctx.model.list()` is at least `threshold` USD per
+  million tokens (default 4). It can also be a list such as
+  `["amazon-bedrock/global.anthropic.claude-opus-5-5"]`. An entry with a
+  `#variant` matches only that variant.
+- `allowInherit`: agent ids that may inherit the session model.
+
+A spawn is allowed if the target agent has a model, or a role that resolves
+(through the `agents` option or the header). The session model is
+`session.model`, or the calling agent's model if the session has none. If any
+lookup fails, the spawn goes ahead. Resumed spawns (with `sessionID`) are not
+checked.
