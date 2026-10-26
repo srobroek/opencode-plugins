@@ -32,6 +32,7 @@ import { randomUUID } from "node:crypto"
 import { unlinkSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 
+import { supervise } from "@srobroek/opencode-lib/subprocess"
 import type { Subprocess } from "bun"
 
 import { attachWriter, hold, RUNNER_STORE_FLAG, RUNNER_WAIT_FLAG, release } from "./bd-embedded-write-lock.ts"
@@ -191,7 +192,7 @@ async function run(request: Request): Promise<number> {
       })
       if (!(await attachWriter(request.store, owner, child.pid, request.waitMs))) {
         child.kill("SIGTERM")
-        await child.exited
+        await supervise(child)
         return NOT_RUN
       }
       writeFileSync(startGate, "")
@@ -214,7 +215,9 @@ async function run(request: Request): Promise<number> {
             }, TERMINATION_GRACE_MS)
           }, commandTimeoutMs())
         : undefined
-      const code = await child.exited
+      // No deadline of its own (the write must not be cut off), but a child that is gone
+      // without its exit reported must not hold the store's lock forever.
+      const exit = await supervise(child)
       clearTimeout(timeout)
       clearTimeout(grace)
       try {
@@ -226,9 +229,13 @@ async function run(request: Request): Promise<number> {
         process.stderr.write(`embedded write child exceeded ${commandTimeoutMs() / 1000}s and was terminated\n`)
         return 124
       }
+      if (exit.kind !== "exited") {
+        process.stderr.write("embedded write child ended without reporting an exit status\n")
+        return 1
+      }
       // A child killed by a signal exits with no code; report it the way a shell
       // does, so a caller reading `$?` sees the same number bd's own shell would give.
-      return child.signalCode === null ? code : 128 + (SIGNAL_NUMBER[child.signalCode] ?? 0)
+      return exit.signalCode === null ? exit.exitCode : 128 + (SIGNAL_NUMBER[exit.signalCode] ?? 0)
     } finally {
       release(request.store, owner)
     }
