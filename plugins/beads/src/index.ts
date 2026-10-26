@@ -8,6 +8,7 @@ import { claimResultOutput } from "./bd-lease-gate.ts"
 import { sessionPinFor } from "./beads-store.ts"
 import { contentionAdvisory, readClaimState, recordClaimTransitions } from "./claims.ts"
 import {
+  type BdRun,
   bdStoreDir,
   EMBEDDED_PIN_ENV,
   environmentForCommand,
@@ -25,7 +26,7 @@ import {
   shellInput,
 } from "./host.ts"
 import { PRIME_WAIT_MS, readPrime, storedPrime } from "./prime.ts"
-import { decideShell, TOOL_CALL_BUDGET_MS } from "./shell-gates.ts"
+import { decideShell, type ShellGateDeps, TOOL_CALL_BUDGET_MS } from "./shell-gates.ts"
 
 export { decideShell } from "./shell-gates.ts"
 
@@ -78,11 +79,22 @@ async function bounded<T>(pending: Promise<T>, ms: number, fallback: T): Promise
   }
 }
 
-export async function setupBeads(ctx: Context): Promise<() => Promise<void>> {
+/** Seams for tests; production passes none. */
+export type AdapterDeps = {
+  run?: BdRun
+  pinFor?: (cwd: string) => string | undefined
+  runnerLookup?: ShellGateDeps["runnerLookup"]
+  repositoryControl?: ShellGateDeps["repositoryControl"]
+  env?: NodeJS.ProcessEnv
+}
+
+export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<() => Promise<void>> {
   const options = ctx.options as Options
   const directory = ctx.location.directory
   const on = (gate: Parameters<typeof gateEnabled>[1]) => gateEnabled(options, gate)
-  const admitter = new GateAdmitter()
+  const admitter = new GateAdmitter(deps.run)
+  const pinFor = deps.pinFor ?? sessionPinFor
+  const baseEnv = (): NodeJS.ProcessEnv => deps.env ?? process.env
   const pending = new Map<string, PendingCall>()
   const chains = new Map<string, Promise<SessionChain>>()
   const pins = new Map<string, { at: number; pin: string | undefined }>()
@@ -91,7 +103,7 @@ export async function setupBeads(ctx: Context): Promise<() => Promise<void>> {
   const cachedPinFor = (cwd: string): string | undefined => {
     const hit = pins.get(cwd)
     if (hit !== undefined && Date.now() - hit.at < PIN_CACHE_MS) return hit.pin
-    const pin = sessionPinFor(cwd)
+    const pin = pinFor(cwd)
     pins.set(cwd, { at: Date.now(), pin })
     return pin
   }
@@ -110,16 +122,16 @@ export async function setupBeads(ctx: Context): Promise<() => Promise<void>> {
   }
 
   // Start the location's gate verification now, so the first mutation rarely waits.
-  const locationEnv = lifecycleBdEnvironment(directory)
+  const locationEnv = lifecycleBdEnvironment(directory, baseEnv())
   if (on("beads-gate-admission") && bdStoreDir(directory, locationEnv) !== undefined)
     admitter.verify(directory, locationEnv)
-  const prime = on("beads-prime") ? readPrime(directory, locationEnv).catch(() => "") : Promise.resolve("")
+  const prime = on("beads-prime") ? readPrime(directory, locationEnv, deps.run).catch(() => "") : Promise.resolve("")
 
   const before = await ctx.tool.hook("execute.before", async (event) => {
     const deadline = Date.now() + TOOL_CALL_BUDGET_MS
     if (event.tool === SUBAGENT_TOOL) {
       if (!on("beads-gate-admission")) return
-      const admission = await admitter.admit(directory, lifecycleBdEnvironment(directory), true, deadline)
+      const admission = await admitter.admit(directory, lifecycleBdEnvironment(directory, baseEnv()), true, deadline)
       if (admission?.block === true)
         throw new GateRefusal(
           "beads-gate-admission",
@@ -133,7 +145,7 @@ export async function setupBeads(ctx: Context): Promise<() => Promise<void>> {
     if (call === undefined || call.command.trim() === "") return
     const chain = await chainFor(event.sessionID, event.agent)
     const actor = agentActor(chain)
-    const env = pinnedEnvironment(call.cwd, process.env, cachedPinFor)
+    const env = pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor)
     const decision = await decideShell(call.command, call.cwd, {
       options,
       actor,
@@ -141,6 +153,8 @@ export async function setupBeads(ctx: Context): Promise<() => Promise<void>> {
       admitter,
       callID: event.id,
       deadline,
+      runnerLookup: deps.runnerLookup,
+      repositoryControl: deps.repositoryControl,
     })
     if (decision.kind === "block") throw new GateRefusal(decision.gate, decision.cause, decision.resolution)
     if (decision.command !== call.command) event.input = { ...(event.input as object), command: decision.command }
@@ -176,7 +190,7 @@ export async function setupBeads(ctx: Context): Promise<() => Promise<void>> {
       }
       if (on("beads-claim-tracking") && isMutatingBdCommand(call.command) && shellExit(result) === 0) {
         const key = `claims/${event.sessionID}`
-        const env = environmentForCommand(call.command, pinnedEnvironment(call.cwd, process.env, cachedPinFor))
+        const env = environmentForCommand(call.command, pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor))
         if (call.actor !== undefined) env.BEADS_ACTOR = call.actor
         await queue(key, async () => {
           const state = readClaimState(await ctx.storage.get(key))
@@ -214,5 +228,5 @@ export async function setupBeads(ctx: Context): Promise<() => Promise<void>> {
 
 export default Plugin.define({
   id: "srobroek.beads",
-  setup: setupBeads,
+  setup: (ctx) => setupBeads(ctx),
 })

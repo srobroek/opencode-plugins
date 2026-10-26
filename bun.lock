@@ -19,12 +19,15 @@
     "plugins/beads": {
       "name": "@srobroek/opencode-beads",
       "version": "0.1.0",
-      "dependencies": {
+      "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
       },
       "peerDependencies": {
         "@opencode/plugin": "^2.1.4",
       },
+      "optionalPeers": [
+        "@opencode/plugin",
+      ],
     },
     "plugins/dep-update": {
       "name": "@srobroek/opencode-dep-update",
