@@ -1,0 +1,230 @@
+---
+name: beads-ledger
+description: Beads ledger preferences bd prime does not state, covering acceptance criteria, metadata, agent routing, multiline text, batched graph creation, dependency semantics, bulk mutation and embedded-store write safety. Load before creating, planning or bulk-editing beads.
+---
+
+`bd prime` is the single source of truth for `bd` commands and the default
+workflow. The beads plugin adds it to the system prompt once per session; follow it. This skill states only the
+preferences it does not cover, and it OUTRANKS `bd prime` on the two points
+below where they disagree.
+# REVIEW ACCEPTANCE
+MUST set acceptance criteria at creation for every bead that will be reviewed, using `bd create ... --acceptance "CRITERIA"` or the graph-plan `acceptance_criteria` field. Judge completeness against those criteria; a reviewed bead without criteria cannot be judged complete.
+
+# METADATA
+MUST put useful facts in bead `metadata`, not comments or the description, including git anchors (`repo`, `branch`, `base_sha`, `worktree`, `pr`, `merge_sha`). Keep rationale in the description.
+
+# AGENT ROUTING
+MUST set `execution_agent_type` in `metadata` at creation on every work bead, with one of `implementer`, `implementer-high`, `researcher`, or `operator`. Add `execution_reasoning_effort` (`low`, `medium`, `high`, or `xhigh`) ONLY when the bead deviates from that agent's default effort. These are bd's documented advisory execution keys; the dispatching parent reads them before spawning. Example: `bd create "title" -t task -p 2 --metadata '{"execution_agent_type":"implementer"}' --acceptance "CRITERIA"`; in a graph plan, put the same keys in the node's `metadata`.
+
+Choose each bead's type from the work that bead itself does, never from the plan's overall importance, risk, or size:
+
+- `implementer-high`: root-cause debugging where the cause is not yet known, concurrency or data-integrity logic, a change to a contract other modules consume, algorithmic or numeric precision rules, or acceptance that needs a design decision the bead text does not make.
+- `implementer`, the default: every other bead that edits files. This includes multi-file, prose, rule, prompt, config, and test edits whose change the bead already specifies, and fixes whose cause is already known.
+- `researcher`: answers a question, inventories, or analyses existing data or results, with no product-code edits.
+- `operator`: runs one exact, known command or a bounded mechanical step with no design judgment.
+
+Apply the list to each bead individually. Planners err in both directions: one planning experiment caught only 29-36% of complex beads, while a later ledger audit found most tagged implementation beads set to `implementer-high`. Check each `implementer-high` bead against the criteria above, and each other bead for any of them.
+
+# MULTILINE TEXT
+MUST pass multiline bead text through a file: `bd create|update ... --body-file notes.md` (or `--stdin`) for a description, `bd comments add ID --file notes.md` for a comment. A `\n` inside a quoted argument is stored as a literal backslash-n, not a paragraph break. The embedded-write gate accepts the `--body-file` form.
+
+# WISPS
+NEVER use wisps for durable agent-to-agent decisions, acceptance evidence, or closure. Use a durable bead carrier instead.
+
+# BATCHED CREATION
+MUST create more than one bead in a single `bd create --graph plan.json` call.
+NEVER loop plain `bd create`, and NEVER fan `bd create` out across parallel
+subagents. `bd prime` recommends exactly that fan-out; it is wrong here for two
+independent reasons. Each invocation is its own transaction and its own Dolt
+commit, which `bd batch --help` describes as severe write amplification, and
+parallel writers against an embedded store corrupt the Dolt journal. One
+measured session issued 37 separate `bd create` calls and 27 separate
+`bd dep add` and `bd dep remove` calls among 122 `bd` invocations.
+
+# DEPENDENCY SEMANTICS
+Create a `blocks` dependency ONLY when the consumer needs an artifact, contract,
+schema, or decision the producer creates, or both beads write the same file or
+region and cannot be sequenced otherwise. Titles, epic order, "nice to have
+first," review ordering, and a shared topic are NOT blockers; use `related` or
+`tracks` instead. When in doubt, do NOT block; parallelise as much as possible.
+Prefer one owner bead for a shared region, with `blocks` edges only to its true
+dependents, over serial chains. To classify research, use `blocks` only when its
+finding is an input the consumer needs before proceeding; use `discovered-from`
+for a mid-work follow-up and `related` or `tracks` for a non-blocking association.
+
+# GRAPH PLAN SCHEMA
+`bd create --graph` is the only batched path that carries the fields this
+steering requires. Its verified plan shape:
+
+- Top level is `nodes`, plus an optional `edges`. A top-level `issues` key is
+  silently dropped with a warning.
+- A node's plan-local identifier is `key`, never `id`; a node without `key`
+  is rejected. Accepted node fields are `key`, `type`, `priority`, `title`,
+  `description`, `acceptance_criteria`, `parent_key`, `parent_id`, `labels`,
+  `metadata`.
+- The field is `acceptance_criteria`. Plain `acceptance` is silently dropped.
+- To attach a newly-created node to an existing parent bead, use the node-level
+  `parent_id` field with that bead's id. `parent_key` only names another node
+  in the same plan; it fails when it names an existing bead. A dry run with an
+  existing parent reported `23 parent-child link(s)` when `parent_id` was used,
+  while putting that id in a top-level `from_id`/`to_id` edge reported
+  `23 edge(s) (0 parent-child link(s))`.
+- Dependencies between plan nodes belong in the top-level `edges` array, each
+  entry `{"from_key": "a", "to_key": "b", "type": "blocks"}`. Use `from_key`
+  and `to_key` for plan nodes and `from_id` and `to_id` for existing beads.
+- Unknown fields anywhere are silently dropped with a warning, so a typo costs
+  the field rather than raising.
+
+Verified fixture showing an existing parent (`parent_id`), a plan-local parent
+(`parent_key`), and a dependency edge together:
+
+```json
+{
+  "nodes": [
+    {"key": "child", "parent_id": "omp-plugins-m8tf", "type": "task", "title": "Child"},
+    {"key": "part", "parent_key": "child", "type": "task", "title": "Part"}
+  ],
+  "edges": [{"from_key": "part", "to_key": "child", "type": "blocks"}]
+}
+```
+
+The fixture keeps the dependency in the top-level `edges` array; a per-node
+`deps` array is not equivalent.
+
+Before creating a graph plan, check it yourself; no separate plan review is
+required:
+
+- Every task names bounded files or symbols and independently verifiable
+  acceptance criteria.
+- Dependencies encode true ordering only, under DEPENDENCY SEMANTICS, with no
+  missing, over-constraining, or cyclic `blocks` edges.
+- Every work bead carries an `execution_agent_type` chosen under AGENT ROUTING.
+- Design decisions are separate decision or research beads that block the work they decide.
+- Review beads depend on every task they review.
+- The plan has an explicit integration and delivery path.
+
+MUST dry-run first and check the reported node and edge counts, for example
+`would create 3 issue(s) and 1 edge(s) (2 parent-child link(s))`. That count is
+the only signal that catches the dropped-dependency trap. A dry run validates
+structure only: a live create can still reject parent-child blocking paths after
+resolving stored dependencies.
+
+MUST treat a per-node `deps` array as a trap. It reports success and creates
+ZERO edges, so the plan looks correct and the DAG has no dependencies at all.
+
+# BULK MUTATION
+Use `bd batch` for mutations of existing beads. First filter candidates with
+`bd list`, `bd ready`, or `bd query`. Then render one grammar line per selected ID
+and pass those lines to one `bd batch` transaction. Use graph creation for fields
+that the batch `create` form cannot carry.
+
+## Grammar
+
+Each non-empty input line is one operation. The parser ignores lines beginning
+with `#` and blank lines. Supported lines are:
+
+```text
+close <id> [reason...]
+update <id> <key>=<value> [...]
+create <type> <priority> <title...>
+dep add <from> <to> [type]
+dep remove <from> <to>
+```
+
+`update` accepts these keys:
+
+- `status`
+- `priority`
+- `title`
+- `assignee`
+- `force`
+
+Use double quotes for values containing spaces. The `force` key is a closure
+override, not a persisted bead field. `dep add` defaults to `blocks`. When you
+need a different relationship, pass a supported type such as `related` or
+`parent-child`.
+
+The input may come from stdin, `bd batch -f operations.txt`, or an inline
+`printf` pipe. Every operation runs in one transaction. If any line fails, bd
+returns a non-zero status and rolls back every earlier line in that batch.
+
+## Filtering before batching
+
+Use a read command to select IDs. Generate only the narrow mutation lines.
+Scratch tests on bd 1.3.0 produced these forms:
+
+```sh
+# Close stale open items selected from human-readable list output.
+bd list --status open -q |
+  awk '/stale/ {print "close", $2, "stale filtered"}' |
+  bd batch
+
+# Return reclaimed in-progress items to ready with the assignee cleared.
+bd list --status in_progress -q |
+  awk '/reclaim/ {print "update", $2, "assignee=\"\"", "status=open"}' |
+  bd batch
+
+# Normalize priority for every open item at P2 or lower using JSON selection.
+bd query 'status=open AND priority>=2' --json |
+  jq -r '.[].id' |
+  awk '{print "update", $1, "priority=1"}' |
+  bd batch
+
+# Add a typed dependency between the first two ready IDs.
+bd ready --json |
+  jq -r '.[].id' |
+  awk 'NR == 1 {source=$1; next} NR == 2 {print "dep add", source, $1, "related"; exit}' |
+  bd batch
+```
+
+The filters select IDs at runtime. When titles or reasons contain whitespace,
+quote those values. If text output can make field boundaries ambiguous, use
+`--json` with `jq`.
+
+## Capability boundary
+
+| Operation | `bd batch` result | Use instead |
+|---|---|---|
+| Close with a reason | Supported: `close ID reason...` | -- |
+| Update fields | Supported for the five keys listed above | -- |
+| Create fields | Supported for `type`, `priority`, and `title` | -- |
+| Add or remove dependencies | Supported, including typed `parent-child` edges | -- |
+| Comments and blank lines | Ignored; they do not add issue comments | `bd comment` or `bd comments add` |
+| Issue comments | Unsupported `comment` command | `bd comment` or `bd comments add` |
+| Metadata, labels, description, or acceptance | Unsupported update keys | `bd update`/`bd create` flags or graph-plan fields |
+| Claim | Unsupported; `--claim` is not a batch update key | `bd update ID --claim` |
+| Direct parent field | Unsupported `parent=...` update | `dep add FROM TO parent-child` or graph-plan `parent_key` |
+| Read commands | Unsupported batch commands | Filter with `bd list` or `bd query` before batching |
+
+`bd batch -f` reads one file instead of stdin. It does not change the command
+set or the transaction boundary.
+
+# EMBEDDED STORE
+The store is embedded and lives in the canonical checkout, and linked worktrees
+share it. `BEADS_DIR` does not redirect `bd init` away from canonical. No Dolt
+server may be started. Two concurrent writers corrupt the Dolt journal, so a
+contended `bd` call is retried rather than worked around.
+
+`bd` MAY share one bash call with other commands. Reads pass anywhere: pipes,
+`;` / `&&` / `||` lists, groups, loops, redirections. Each write MUST start its own
+simple command (`[VAR=literal ...] bd ...`); the write lock then runs it under its
+serialising runner with its own hold. The lock refuses these shapes and names the
+part; rewrite that part as the refusal says:
+
+- NEVER put `bd` inside `$(...)`, backticks, the shell eval builtin, `sh -c` strings, or a
+  here-document fed to a shell.
+- NEVER put `bd` behind `xargs`, `env`, `timeout`, or `find -exec`.
+- NEVER make a write the condition of `if` / `while` / `until`, negate it with
+  `!`, or `time` it.
+- NEVER give `BEADS_DIR`, `-C`, or `--db` a value the shell expands.
+# DELIVERY
+MUST run `bd dolt pull` before claiming when the read decides assignment, so the
+claim uses fresh ledger state. After delivery, MUST run `bd dolt push`.
+
+`bd dolt pull` and `bd dolt push` are bounded persistence operations, not locks.
+Retry each failed sync up to three attempts with a brief wait, then report the
+verbatim failure. Never fall back to a manual `dolt` invocation, start a server,
+or continue as though the remote were current. If the final attempt may have
+applied remotely but its result is unknown, report the sync as UNKNOWN and do
+not claim that the ledger is synchronized. Re-run `bd dolt pull` before trusting
+a read that decides assignment after any retry sequence.

@@ -82,8 +82,8 @@ codex plugin add worktrunk@srobroek-opencode
 | `toolchain` | Thirteen toolchain rule skills |
 | `aws` | Skill `aws-guidance` |
 | `design` | Thirteen design skills (no design agents) |
-| `session`, `dep-update`, `journeys`, `delivery` | Not exported: their skills or agents drive OpenCode tools |
-| `beads`, `example`, `goal`, `lsp`, `model-roles`, `parley`, `statusline`, `subagent-worktree` | Not exported: OpenCode code only |
+| `session`, `dep-update`, `journeys`, `delivery`, `beads` | Not exported: their skills or agents drive OpenCode tools |
+| `example`, `goal`, `lsp`, `model-roles`, `parley`, `statusline`, `subagent-worktree` | Not exported: OpenCode code only |
 | `build` | Not exported: agent only |
 
 `scripts/build-marketplaces.ts` generates `.claude-plugin/marketplace.json`,

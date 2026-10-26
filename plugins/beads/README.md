@@ -38,9 +38,52 @@ in the child environment. An explicitly set `BEADS_DIR` is left alone.
 storage, and appends the contention-retry and stale-import advisories.
 
 `session.hook("context")` adds `bd prime` to the system prompt. The text is read
-once and frozen per session, so the prompt stays cacheable.
+once and frozen per session, so the prompt stays cacheable. A root session's frozen
+text also carries its session-start advisories, once: a binary Git hook that Beads
+modified, the verdict a detached `bd dolt push` left in `.beads/last-push.log`
+(consumed when read), and an inherited `BEADS_DIR` that points at another
+repository's store.
 
 The `subagent` tool also waits for gate admission.
+
+## Session lifecycle
+
+The plugin follows `session.execution.*` events (`ctx.event.subscribe`). Every
+message it sends is a `session.synthetic` with `metadata.source: "srobroek.beads"`.
+
+- **Stop nudge.** When a root session's execution succeeds while it holds tracked
+  claims, it gets one queued message listing each claim with its guarded release
+  command, and resumes. A real user prompt (`session.hook("prompt")`, not one from
+  this plugin or `srobroek.goal`) re-arms the nudge. Nothing happens while the goal
+  plugin will continue the session (its `Symbol.for("srobroek.goal.continuations")`
+  registry), or when the execution failed or was interrupted.
+- **Release.** When the nudged session stops again still holding claims, they are
+  released in the background (at most 120 s): `bd show`, then
+  `bd unclaim <id> --if-assignee <holder>`, then, for a parked claim,
+  `bd update <id> --status blocked|deferred --if-status open --if-assignee ''`. A claim
+  bd no longer shows as the holder's is forgotten without a write. The session gets a
+  message, without resuming, naming what was released and what could not be verified.
+- **Subagents.** A subagent's claims are released when it finishes (any end except a
+  superseded execution). For a foreground `subagent` call the release runs in the
+  parent's `execute.after` (at most 25 s) and its report is appended to the tool
+  result. For a background call the child's end triggers the release, and the parent
+  gets the report as a message that does not wake it.
+- **Lease heartbeat.** Each tracked claim with a known actor and store is renewed with
+  `bd heartbeat <id> --json` every 60 s while its session executes, under the
+  embedded write lock. Timers pause when an execution ends and resume (renewing at
+  once) when the next starts, so an idle session lets its leases lapse. A close, an
+  unclaim, a status other than `in_progress`, or `session.deleted` ends the lease. A
+  failed heartbeat ends it and tells the session once. Leases live in plugin storage
+  (`leases/<sessionID>`); timers are process-wide, so two plugin instances never renew
+  one lease twice, and each instance clears its own on cleanup.
+
+## Skills
+
+Registered through `ctx.skill.transform` from `skills/` (a user skill of the same
+name wins): `beads-ledger`, `beads-evidence`, `beads-setup`,
+`beads-contention-retry` and `beads-preflight` (a read-only `preflight.py`). They are
+not exported to the Claude Code and Codex marketplaces, because they describe this
+plugin's write lock and prime context.
 
 ## Options
 
@@ -53,7 +96,10 @@ Every gate is on by default. Switch one off in the plugin options:
 Gates: `beads-gate-admission`, `binary-git-hooks`, `bd-update-close-gate`,
 `bd-close-gate`, `bd-unclaim-gate`, `bd-actor-gate`, `pr-bead-link-gate`,
 `bd-embedded-write-lock`, `bd-editor-gate`, `beads-dir-pin`, `beads-prime`,
-`beads-claim-tracking`.
+`beads-claim-tracking`, `beads-stop-nudge` (also the root-session release that
+follows it), `beads-claim-release`, `bd-lease-heartbeat`, `beads-session-advisories`,
+`beads-skills`. The lifecycle and the heartbeat read the claims that
+`beads-claim-tracking` records.
 
 ## Permissions
 

@@ -20,6 +20,11 @@ export const GATES = [
   "beads-dir-pin",
   "beads-prime",
   "beads-claim-tracking",
+  "beads-stop-nudge",
+  "beads-claim-release",
+  "bd-lease-heartbeat",
+  "beads-session-advisories",
+  "beads-skills",
 ] as const
 
 export type Gate = (typeof GATES)[number]
