@@ -6,7 +6,7 @@ import plugin from "./index.ts"
 test("registers the architecture skills and the read-only architect", async () => {
   const fake = createFakeContext()
   const cleanup = await plugin.setup(fake.context)
-  expect([...fake.skills.keys()]).toEqual(["architecture-docs-files", "architecture-ownership", "architecture-top-level"])
+  expect([...fake.skills.keys()]).toEqual(["architecture-docs-files", "architecture-guide", "architecture-ownership", "architecture-top-level"])
   expect(fake.agents.get("architect")).toMatchObject({ name: "architect", mode: "subagent" })
   const rules = fake.agents.get("architect")?.permissions as AgentPermission[]
   for (const action of ["edit", "shell", "question", "some_plugin_tool"]) expect(permissionEffect(rules, action)).toBe("deny")

@@ -1,6 +1,8 @@
 ---
 name: architecture-ownership
 description: Use when placing libs, owner-local assets, data, schemas, generated clients or UI primitives in an ownership layout.
+metadata:
+  opencode/autoinvoke: false
 ---
 
 Keep `libs/` organized by architectural role: `domain`, `application`,

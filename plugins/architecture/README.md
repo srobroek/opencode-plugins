@@ -2,6 +2,11 @@
 
 Architecture guidance as skills, plus a read-only `architect` subagent.
 
+Only `architecture-guide` is listed to the model in OpenCode: it is a router whose body maps each
+situation to the skills below, which set `opencode/autoinvoke: false` and load by id. One listing
+entry instead of one per skill keeps the per-request skills listing short. Claude Code
+and Codex ignore that metadata, so there every skill is listed and triggers directly.
+
 | Skill | When |
 | --- | --- |
 | `architecture-top-level` | Choosing or changing top-level directories: `apps/`, `services/`, `functions/`, `workers/`, `libs/`, `packages/`, `schemas/`, `data/`, `infrastructure/`, `tools/`, ... |
