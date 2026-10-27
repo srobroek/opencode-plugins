@@ -29,7 +29,8 @@ Options:
 
 ## Tools
 
-All three are direct tools (`codemode: false`) under the permission key
+All three go through Code Mode when it is on (`tools.parley_ask` and so on), so
+they add nothing to the request's tool list, and share the permission key
 `parley`, so one rule allows or denies them.
 
 | Tool | Does |
