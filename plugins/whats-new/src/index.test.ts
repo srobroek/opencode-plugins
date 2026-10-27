@@ -16,7 +16,7 @@ describe("setup", () => {
     expect(fake.agentUpdates).toEqual(["whats-new"])
     expect(fake.agents.get("whats-new")).toMatchObject({
       name: "whats-new",
-      mode: "all",
+      mode: "subagent",
       system: AGENT_PROMPT,
       permissions: reportOnlyPermissions(),
     })
@@ -38,10 +38,16 @@ describe("setup", () => {
     expect(agent.permissions.slice(1)).toEqual(reportOnlyPermissions())
   })
 
-  test("a newly created agent becomes mode all over the host's primary default", () => {
+  test("a newly created agent becomes a subagent over the host's primary default", () => {
     const agent = { mode: "primary", permissions: [] }
     shapeAgent(agent, true)
-    expect(agent.mode).toBe("all")
+    expect(agent.mode).toBe("subagent")
+  })
+
+  test("a configured agent keeps its own primary mode", () => {
+    const agent = { mode: "primary", permissions: [] }
+    shapeAgent(agent, false)
+    expect(agent.mode).toBe("primary")
   })
 })
 

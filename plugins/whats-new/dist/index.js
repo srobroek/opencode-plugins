@@ -2013,7 +2013,7 @@ function shapeAgent(agent, created) {
   agent.name ??= AGENT_ID;
   agent.description ??= "Research breaking changes, deprecations and new features between the version in use and the latest. Report-only.";
   if (created || agent.mode === undefined)
-    agent.mode = "all";
+    agent.mode = "subagent";
   agent.system ??= AGENT_PROMPT;
   agent.permissions = [...agent.permissions ?? [], ...reportOnlyPermissions()];
 }

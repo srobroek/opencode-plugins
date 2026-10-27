@@ -36,14 +36,15 @@ export type AgentFields = {
 
 /**
  * Shape the whats-new agent: description, prompt and the report-only rules after any
- * existing ones. A `created` agent also gets mode `all`; the host fills a new agent's
- * mode with `primary` before the callback runs, so only a configured agent keeps its own.
+ * existing ones. A `created` agent also gets mode `subagent`, which keeps it out of the TUI's
+ * primary-agent cycle; the host fills a new agent's mode with `primary` before the callback
+ * runs, so only a configured agent keeps its own.
  */
 export function shapeAgent(agent: AgentFields, created: boolean): void {
   agent.name ??= AGENT_ID
   agent.description ??=
     "Research breaking changes, deprecations and new features between the version in use and the latest. Report-only."
-  if (created || agent.mode === undefined) agent.mode = "all"
+  if (created || agent.mode === undefined) agent.mode = "subagent"
   agent.system ??= AGENT_PROMPT
   agent.permissions = [...(agent.permissions ?? []), ...reportOnlyPermissions()]
 }
