@@ -23,6 +23,9 @@ then continue; later steps on code that does not build only add noise.
 | Vulnerabilities | `govulncheck ./...` (or `go tool govulncheck ./...` when it is a `tool` in `go.mod`) |
 | Format fix | `golangci-lint fmt`, or `gofmt -w .` |
 
+- After an edit that spans files or packages or changes a signature, run
+  `go vet ./...` and `go build ./...` once before handing back (or the project's
+  own `make`/task target for them when it has one).
 - Respect the project's formatter. When `.golangci.yml` enables `gofumpt`,
   `goimports` or `gci`, a `gofmt`-only check passes code its CI rejects; when it
   uses plain `gofmt`, do not reformat with `gofumpt`.
