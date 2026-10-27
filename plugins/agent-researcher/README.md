@@ -21,10 +21,11 @@ Its reply starts with `VERDICT: DONE|BLOCKED` and ends with a fenced `json` bloc
 (`verdict`, `answer`, and optional `bead_id`, `uncertainty`, `notes`), the shape the
 delivery plugin's verdict hook parses.
 
-Its permissions are an allowlist: read, grep, glob, skill, Code Mode (`execute`),
-the `lsp_*` tools, shell (for `bd` and forge reads), `webfetch`, `websearch`,
-`repomix_pack` (from the repomix plugin, for packing an external repo to a temp file),
-and spawning only `explore`. Reads outside the workspace (`external_directory`) ask.
+Its permissions are an allowlist: read, grep, glob, the `repomix` skill, Code Mode
+(`execute`, for `repomix_pack`), the `lsp_*` tools, shell (for `bd` and forge reads),
+`webfetch`, `websearch`, `repomix_pack` (from the repomix plugin, for packing an
+external repo to a temp file), and spawning only `explore`. Every other skill is denied,
+so the skill listing stays out of its requests. Reads outside the workspace (`external_directory`) ask.
 
 The agent pins no model. It declares the `standard` tier through the
 `x-opencode-model-role` request header, so with the model-roles plugin that tier
