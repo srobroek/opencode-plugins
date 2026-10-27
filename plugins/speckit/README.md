@@ -25,6 +25,7 @@ formulas and subagents.
 | `blockTasksToIssues` | `true` | Refuse the taskstoissues skills where beads is active. |
 | `workflow` | `true` | Add the workflow instructions to sessions in a SpecKit repository. |
 | `agents` | `true` | Register the `speckit-sync` and `speckit-verify` subagents. |
+| `specAgent` | `"auto"` | Register the primary `spec` agent. `"auto"`: only where the location or its project root holds `.specify/`; `true`: everywhere; `false`: never. |
 
 ## Tools
 
@@ -96,12 +97,47 @@ text in the tool result instead. The two speckit subagents do not get it.
 
 ## Agents
 
+### spec (primary)
+
+`spec` drives one feature through SpecKit up to implementation. It checks for
+`.specify/`, the `speckit-*` skills and a beads workspace and offers `speckit_setup`;
+calls `speckit_start` and asks the routine-approval question; then follows the poured
+molecule with the upstream skills (`speckit-specify`, `speckit-clarify`, `speckit-plan`,
+`speckit-tasks` as child beads of the implement step, `speckit-analyze`, plus checklist,
+critique and security review where the profile has them). At the implement step it
+stops and hands the task beads to `build` (or delivery's implementers).
+
+It asks through the `question` tool, which parley takes over when its TUI is attached,
+and through `tools.parley_ask` for rounds of several questions.
+
+| Boundary | Allowed |
+| --- | --- |
+| Edits | `specs/*` and `.specify/*` only |
+| Shell | `bd` (including the beads write-lock runner), `specify`, `.specify/` scripts, and `git` status, diff, log, show, branch, rev-parse, ls-files, merge-base, switch, `add specs/` / `add .specify/`, commit |
+| Tools | read, grep, glob, LSP, `question`, `execute` (for `parley_ask`, `speckit_setup`, `speckit_start`), `speckit_*` |
+| Skills | `speckit-*` (this plugin's and spec-kit's), `quality-*` |
+| Subagents | `explore`, `researcher`, `architect`, `speckit-verify`, `speckit-sync` |
+
+Everything else is denied, including `git push`, web access and edits of product code.
+The `.specify/` scripts it may run can still write outside `specs/`, as spec-kit's own
+do (for example the agent-context extension updating `AGENTS.md`).
+
+It carries the `strong` model tier: the spec, plan and task breakdown decide what every
+implementer builds, and the agent writes no code, so its token volume stays small next
+to the implementation it directs.
+
+Each location runs its own plugin instance, so with `specAgent: "auto"` the agent is
+listed (and in the primary-agent cycle) only in SpecKit repositories. A `speckit_setup`
+that creates `.specify/` at the location registers it without a restart.
+
+### Subagents
+
 | Agent | Spawn with |
 | --- | --- |
 | `speckit-sync` | `scope: drift` / `conflicts` / `both` |
 | `speckit-verify` | `mode: requirements` / `tasks` / `review` |
 
-Both are read-only (edits denied) and carry the `reviewer` model tier in
+The two subagents are read-only (edits denied) and carry the `reviewer` model tier in
 `request.headers.x-opencode-model-role`; with the model-roles plugin they run on that
 tier's model, otherwise on the parent's. They pin no model. Both are hidden from the
 subagent catalog, since the formulas and the workflow instructions spawn them by id, and

@@ -3,7 +3,14 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
-import { createPlugin, DENY_REASON, IMPLEMENT_REDIRECT, parseOptions, TASKSTOISSUES_REFUSAL } from "./index.ts"
+import {
+  createPlugin,
+  DENY_REASON,
+  IMPLEMENT_REDIRECT,
+  parseOptions,
+  TASKSTOISSUES_REFUSAL,
+  wantsSpecAgent,
+} from "./index.ts"
 
 type Fake = ReturnType<typeof createFakeContext>
 
@@ -170,5 +177,76 @@ describe("workflow context", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+})
+
+describe("spec agent registration", () => {
+  const withDir = async (run: (dir: string) => Promise<void>) => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "speckit-agent-")))
+    try {
+      await run(dir)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  test("registers the primary spec agent where the location holds .specify/", () =>
+    withDir(async (dir) => {
+      mkdirSync(join(dir, ".specify"))
+      const { fake, cleanup } = await start({ directory: dir })
+      expect(fake.agents.get("spec")).toMatchObject({
+        mode: "primary",
+        hidden: false,
+        request: { headers: { "x-opencode-model-role": "strong" } },
+      })
+      expect(fake.agents.get("spec")?.model).toBeUndefined()
+      expect(fake.agents.has("speckit-verify")).toBe(true)
+      await cleanup()
+      expect(fake.active()).toBe(0)
+    }))
+
+  test("skips the spec agent in a plain repository but keeps the subagents", () =>
+    withDir(async (dir) => {
+      const { fake, cleanup } = await start({ directory: dir })
+      expect(fake.agents.has("spec")).toBe(false)
+      expect(fake.agents.has("speckit-verify")).toBe(true)
+      await cleanup()
+    }))
+
+  test("specAgent true registers it anywhere and false never; agents false keeps it", async () => {
+    const always = await start({ plugin: { specAgent: true, agents: false } })
+    expect(always.fake.agents.has("spec")).toBe(true)
+    expect(always.fake.agents.has("speckit-verify")).toBe(false)
+    await always.cleanup()
+    await withDir(async (dir) => {
+      mkdirSync(join(dir, ".specify"))
+      const never = await start({ directory: dir, plugin: { specAgent: false } })
+      expect(never.fake.agents.has("spec")).toBe(false)
+      await never.cleanup()
+    })
+  })
+
+  test("speckit_setup at the location registers it once .specify/ exists", () =>
+    withDir(async (dir) => {
+      const { fake, cleanup } = await start({ directory: dir })
+      expect(fake.agents.has("spec")).toBe(false)
+      mkdirSync(join(dir, ".specify"))
+      const execute = fake.tools.get("speckit_setup")?.execute as (input: unknown, ctx: unknown) => Promise<unknown>
+      const context = { sessionID: "ses_main", agent: "build", messageID: "msg_1", id: "call_1", signal: new AbortController().signal }
+      await execute({ skipSpecify: true, skipBeads: true }, context)
+      expect(fake.agents.get("spec")).toMatchObject({ mode: "primary" })
+      await execute({ skipSpecify: true, skipBeads: true }, context)
+      await cleanup()
+      expect(fake.active()).toBe(0)
+    }))
+})
+
+describe("wantsSpecAgent", () => {
+  test("auto checks the location, then the project root", () => {
+    const has = (dir: string) => dir === "/root"
+    expect(wantsSpecAgent("auto", ["/root/sub", "/root"], has)).toBe(true)
+    expect(wantsSpecAgent("auto", ["/elsewhere"], has)).toBe(false)
+    expect(wantsSpecAgent(true, ["/elsewhere"], has)).toBe(true)
+    expect(wantsSpecAgent(false, ["/root"], has)).toBe(false)
   })
 })

@@ -139,6 +139,16 @@ async function registerAgents(agent, paths) {
   });
 }
 
+// plugins/lib/src/mcp.ts
+function locationDirectories(ctx) {
+  const location = ctx.location;
+  const directories = [location.directory];
+  const root = location.project?.directory;
+  if (typeof root === "string" && root !== location.directory)
+    directories.push(root);
+  return directories;
+}
+
 // plugins/lib/src/skill-files.ts
 import { existsSync as existsSync2, readdirSync as readdirSync2, readFileSync as readFileSync2 } from "fs";
 import { join as join2 } from "path";
@@ -1291,6 +1301,65 @@ function skillRefusal(tool, input) {
   return typeof id === "string" && TASKSTOISSUES_SKILLS.includes(id) ? TASKSTOISSUES_REFUSAL : undefined;
 }
 
+// plugins/speckit/src/spec-agent.ts
+import { basename as basename3 } from "path";
+
+// plugins/speckit/src/workflow.ts
+import { existsSync as existsSync4 } from "fs";
+import { join as join5 } from "path";
+var OWN_PROMPT_AGENTS = ["speckit-sync", "speckit-verify"];
+function usesSpeckit(directory) {
+  return existsSync4(join5(directory, ".specify"));
+}
+function workflowLatch(detect = usesSpeckit, store) {
+  const decided = new Map;
+  const decide = async (sessionID, directory) => {
+    const stored = await store?.get(sessionID).catch(() => {
+      return;
+    });
+    if (stored !== undefined)
+      return stored;
+    const value = await directory().then(detect, () => false);
+    await store?.set(sessionID, value).catch(() => {});
+    return value;
+  };
+  return {
+    include(sessionID, agent, directory) {
+      if (OWN_PROMPT_AGENTS.includes(agent))
+        return Promise.resolve(false);
+      let known = decided.get(sessionID);
+      if (known === undefined) {
+        known = decide(sessionID, directory);
+        decided.set(sessionID, known);
+      }
+      return known;
+    },
+    async lacks(sessionID) {
+      const known = decided.get(sessionID);
+      if (known !== undefined)
+        return !await known;
+      return await store?.get(sessionID).catch(() => {
+        return;
+      }) === false;
+    },
+    clear: () => decided.clear()
+  };
+}
+
+// plugins/speckit/src/spec-agent.ts
+var SPEC_AGENT = "spec";
+function specAgentSetting(raw) {
+  return typeof raw === "boolean" ? raw : "auto";
+}
+function isSpecAgent(path) {
+  return basename3(path, ".md") === SPEC_AGENT;
+}
+function wantsSpecAgent(setting, directories, detect = usesSpeckit) {
+  if (setting !== "auto")
+    return setting;
+  return directories.some(detect);
+}
+
 // plugins/speckit/src/tasks-guard.ts
 import { dirname as dirname2, isAbsolute as isAbsolute3, resolve as resolve3 } from "path";
 var DENY_REASON = `blocked by speckit (task state lives in beads, tasks.md is never authored): this repo has an active beads workspace, so specs/*/tasks.md is read-only legacy and must not be written or created. Create implementation tasks as beads under the feature molecule's implement step instead: bd create "T00N <title>" --parent <implement-step-id> --spec-id <NNN-slug> -t task; wire ordering with bd dep add <later-id> <earlier-id>; bulk-create with bd create -f <tmpfile>.md (write the temp file OUTSIDE specs/). Then work the tasks via bd ready -> bd update <id> --claim -> bd close <id> --reason. Find the implement step with bd mol current <molecule-root-id>. IF A SKILL DEMANDED tasks.md: skip check-prerequisites.sh --require-tasks and read bd list --spec <NNN-slug>. Do not create tasks.md to get past the check. Disable: set the srobroek.speckit plugin option tasksGuard=false`;
@@ -1574,13 +1643,13 @@ async function startSpec(options, command) {
 import { spawn } from "child_process";
 import { randomUUID } from "crypto";
 import { realpathSync as realpathSync3 } from "fs";
-import { join as join6 } from "path";
+import { join as join7 } from "path";
 
 // plugins/beads/src/bd-embedded-write-lock.ts
 import { spawnSync as spawnSync2 } from "child_process";
 import {
   closeSync,
-  existsSync as existsSync4,
+  existsSync as existsSync5,
   openSync,
   readFileSync as readFileSync4,
   realpathSync as realpathSync2,
@@ -1589,7 +1658,7 @@ import {
   writeSync
 } from "fs";
 import { hostname } from "os";
-import { basename as basename3, dirname as dirname4, isAbsolute as isAbsolute5, join as join5, resolve as resolve5 } from "path";
+import { basename as basename4, dirname as dirname4, isAbsolute as isAbsolute5, join as join6, resolve as resolve5 } from "path";
 // plugins/beads/src/bd-actor-gate.ts
 var VALUE_FLAGS = new Set([
   "--actor",
@@ -1785,9 +1854,9 @@ function storeFor(globals, cwd, env) {
   const base = directory === undefined ? cwd : absolute(directory, cwd);
   if (db !== undefined) {
     const target = absolute(db, base);
-    if (!existsSync4(target))
+    if (!existsSync5(target))
       return;
-    return canonical(isDirectory2(target) ? target : join5(target, ".."));
+    return canonical(isDirectory2(target) ? target : join6(target, ".."));
   }
   if (directory !== undefined)
     return canonicalStore(sessionPinFor(base));
@@ -1820,10 +1889,10 @@ function embedded(store) {
   let metadata = "";
   let config = "";
   try {
-    metadata = readFileSync4(join5(store, "metadata.json"), "utf8");
+    metadata = readFileSync4(join6(store, "metadata.json"), "utf8");
   } catch {}
   try {
-    config = readFileSync4(join5(store, "config.yaml"), "utf8");
+    config = readFileSync4(join6(store, "config.yaml"), "utf8");
   } catch {}
   return metadata !== "" || config !== "";
 }
@@ -1945,7 +2014,7 @@ function wakeHead(lock) {
   registry().queues.get(lock)?.[0]?.wake?.();
 }
 async function hold(store, owner, waitMs = WAIT_MS, signal) {
-  const lock = join5(store, LOCK_NAME);
+  const lock = join6(store, LOCK_NAME);
   const { owned, queues } = registry();
   const deadline = Date.now() + waitMs;
   const queue = queues.get(lock) ?? [];
@@ -1990,7 +2059,7 @@ async function hold(store, owner, waitMs = WAIT_MS, signal) {
               reason: `Beads embedded write lock could not be taken at ${lock} (${code ?? "unknown error"}). The write was refused rather than risk a second writer on the embedded Dolt journal.`
             };
           }
-          takeOverIfAbandoned(lock, join5(store, STEAL_NAME));
+          takeOverIfAbandoned(lock, join6(store, STEAL_NAME));
         }
       }
       if (signal?.aborted === true) {
@@ -2019,7 +2088,7 @@ async function hold(store, owner, waitMs = WAIT_MS, signal) {
   }
 }
 function withOwnership(storeLock, token, change) {
-  const steal = join5(dirname4(storeLock), STEAL_NAME);
+  const steal = join6(dirname4(storeLock), STEAL_NAME);
   let fd;
   try {
     fd = openSync(steal, "wx");
@@ -2041,7 +2110,7 @@ function withOwnership(storeLock, token, change) {
   }
 }
 function release(store, owner) {
-  const lock = join5(store, LOCK_NAME);
+  const lock = join6(store, LOCK_NAME);
   const owned = registry().owned;
   const held = owned.get(lock);
   if (held === undefined)
@@ -2121,7 +2190,7 @@ async function runSpecStart(options, signal, commandMs = COMMAND_MS, module = BE
   const cwd = realpathSync3(options.workspace);
   const env = {
     ...process.env,
-    BEADS_DIR: realpathSync3(join6(cwd, ".beads")),
+    BEADS_DIR: realpathSync3(join7(cwd, ".beads")),
     GIT_TERMINAL_PROMPT: "0",
     SSH_ASKPASS: "/usr/bin/false",
     SSH_ASKPASS_REQUIRE: "force",
@@ -2359,48 +2428,6 @@ async function executeStart(input, directory, signal, lock = BEADS_LOCK) {
   }
 }
 
-// plugins/speckit/src/workflow.ts
-import { existsSync as existsSync5 } from "fs";
-import { join as join7 } from "path";
-var OWN_PROMPT_AGENTS = ["speckit-sync", "speckit-verify"];
-function usesSpeckit(directory) {
-  return existsSync5(join7(directory, ".specify"));
-}
-function workflowLatch(detect = usesSpeckit, store) {
-  const decided = new Map;
-  const decide = async (sessionID, directory) => {
-    const stored = await store?.get(sessionID).catch(() => {
-      return;
-    });
-    if (stored !== undefined)
-      return stored;
-    const value = await directory().then(detect, () => false);
-    await store?.set(sessionID, value).catch(() => {});
-    return value;
-  };
-  return {
-    include(sessionID, agent, directory) {
-      if (OWN_PROMPT_AGENTS.includes(agent))
-        return Promise.resolve(false);
-      let known = decided.get(sessionID);
-      if (known === undefined) {
-        known = decide(sessionID, directory);
-        decided.set(sessionID, known);
-      }
-      return known;
-    },
-    async lacks(sessionID) {
-      const known = decided.get(sessionID);
-      if (known !== undefined)
-        return !await known;
-      return await store?.get(sessionID).catch(() => {
-        return;
-      }) === false;
-    },
-    clear: () => decided.clear()
-  };
-}
-
 // plugins/speckit/src/index.ts
 var WORKFLOW_PATH = fileURLToPath2(new URL("../instructions/speckit-workflow.md", import.meta.url));
 var SKILLS_DIR = fileURLToPath2(new URL("../skills", import.meta.url));
@@ -2415,7 +2442,8 @@ function parseOptions(raw) {
     implementRedirect: options.implementRedirect !== false,
     blockTasksToIssues: options.blockTasksToIssues !== false,
     workflow: options.workflow !== false,
-    agents: options.agents !== false
+    agents: options.agents !== false,
+    specAgent: specAgentSetting(options.specAgent)
   };
 }
 async function setupSpeckit(ctx, overrides = {}) {
@@ -2443,6 +2471,14 @@ async function setupSpeckit(ctx, overrides = {}) {
     taskstoissues: active && options.blockTasksToIssues
   });
   let refreshSkills;
+  const agentFiles = agentPaths(AGENTS_DIR);
+  let specRegistration;
+  const registerSpecAgent = async () => {
+    if (specRegistration !== undefined || !wantsSpecAgent(options.specAgent, locationDirectories(ctx)))
+      return;
+    specRegistration = registerAgents(ctx.agent, agentFiles.filter(isSpecAgent));
+    await specRegistration;
+  };
   const workflow = options.workflow ? {
     text: readFileSync5(WORKFLOW_PATH, "utf8").trim(),
     latch: workflowLatch(usesSpeckit, {
@@ -2466,6 +2502,7 @@ async function setupSpeckit(ctx, overrides = {}) {
           if (cwd === location) {
             active = await probe(location);
             await refreshSkills?.();
+            await registerSpecAgent();
           }
           if (workflow !== undefined && usesSpeckit(cwd) && await workflow.latch.lacks(context.sessionID))
             return { ...result, content: `${result.content}
@@ -2587,9 +2624,16 @@ ${workflow.text}` };
     const skills = await registerSkills(ctx.skill, skillPaths(SKILLS_DIR));
     disposers.push(() => skills.dispose());
     if (options.agents) {
-      const agents = await registerAgents(ctx.agent, agentPaths(AGENTS_DIR));
+      const agents = await registerAgents(ctx.agent, agentFiles.filter((path) => !isSpecAgent(path)));
       disposers.push(() => agents.dispose());
     }
+    disposers.push(async () => {
+      const registration = await specRegistration?.catch(() => {
+        return;
+      });
+      await registration?.dispose();
+    });
+    await registerSpecAgent();
   } catch (error) {
     await cleanup();
     throw error;
@@ -2608,6 +2652,7 @@ export {
   DENY_REASON,
   IMPLEMENT_REDIRECT,
   SKILLS_DIR,
+  SPEC_AGENT,
   TASKSTOISSUES_REFUSAL,
   WORKFLOW_PATH,
   beadsActive,
@@ -2625,5 +2670,6 @@ export {
   setupSpeckit,
   skillRefusal,
   startSpec,
+  wantsSpecAgent,
   writesTasksMd
 };
