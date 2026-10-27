@@ -27,10 +27,13 @@ permissions:
     resource: "*"
     effect: allow
   - action: skill
-    resource: "*"
+    resource: "architecture-*"
     effect: allow
-  - action: execute
-    resource: "*"
+  - action: skill
+    resource: "lang-*"
+    effect: allow
+  - action: skill
+    resource: "quality-*"
     effect: allow
   - action: "lsp_*"
     resource: "*"
