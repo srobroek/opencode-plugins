@@ -1,6 +1,8 @@
 ---
 name: design-prototype
 description: Routes a wireframe, mockup, prototype or deck request to the right producer; triggers on wireframe this or prototype.
+metadata:
+  opencode/autoinvoke: false
 ---
 
 # Design Prototype

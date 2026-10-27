@@ -1,6 +1,8 @@
 ---
 name: design-system-audit
 description: Inventories design tokens, scales and primitives before UI work; triggers on what tokens does this project use.
+metadata:
+  opencode/autoinvoke: false
 ---
 
 # Design System Audit

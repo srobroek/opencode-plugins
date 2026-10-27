@@ -1,6 +1,8 @@
 ---
 name: ui-review
 description: Verifies a rendered surface with ARIA snapshots, computed styles and keyboard walks; triggers on review this UI.
+metadata:
+  opencode/autoinvoke: false
 ---
 
 # UI Review

@@ -1,6 +1,8 @@
 ---
 name: motion-design
 description: Authors durations, easings and reduced-motion branches from the project scale; use when adding or changing animation.
+metadata:
+  opencode/autoinvoke: false
 ---
 
 # Motion Design

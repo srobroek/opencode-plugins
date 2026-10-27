@@ -10,6 +10,7 @@ const SKILLS = [
   "accessibility-audit",
   "design-component-truth",
   "design-evidence",
+  "design-guide",
   "design-md",
   "design-no-slop",
   "design-prototype",

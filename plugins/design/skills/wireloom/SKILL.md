@@ -1,6 +1,8 @@
 ---
 name: wireloom
 description: Authors a wireframe mockup as inline SVG from a fenced wireloom block; triggers on mock up a dialog or draw a wireframe.
+metadata:
+  opencode/autoinvoke: false
 ---
 
 <!--
