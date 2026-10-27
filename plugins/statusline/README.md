@@ -5,11 +5,12 @@ session composer (the `session.composer.top` slot) and keeps the built-in
 spinner and prompt footer.
 
 ```
-Opus 4.5 · high  build  ~/dev/app   main *2  12.3%/1M  $0.42                    Fix login
+Opus 4.5 · high  build  ~/dev/app   main *2  12.3%/1M  $0.42        Fix login  42.0 tok/s
 ```
 
 The default layout is omp's `default` preset: model and effort, agent, path, git,
-context and cost on the left, the session title on the right.
+context and cost on the left, the session title and tokens per second on the right.
+On a narrow row `token_rate` is the first segment dropped, after the title has shrunk.
 
 | Segment | Default side | Shows |
 | --- | --- | --- |
@@ -27,7 +28,7 @@ context and cost on the left, the session title on the right.
 | `token_rate` | right | Output tokens per second of the latest step |
 | `time_spent` | right | Total time spent in assistant steps |
 
-`session`, `hostname`, the token and cache counts, `token_rate` and `time_spent`
+`session`, `hostname`, the token and cache counts and `time_spent`
 are off by default; list them in `segments` to show them.
 
 Colours are theme tokens only: values use `text.base`, labels, units and

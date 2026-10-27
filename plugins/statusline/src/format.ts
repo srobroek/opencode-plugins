@@ -53,7 +53,7 @@ export interface Options extends Layout {
 /** omp's `default` preset, minus the segments OpenCode has no data for (`pi`, `pr`, hook statuses). */
 export const DEFAULT_LAYOUT: Layout = {
   left: ["model", "agent", "path", "git", "context_pct", "cost"],
-  right: ["session_name"],
+  right: ["session_name", "token_rate"],
 }
 
 /** The side a segment takes when `segments` is a flat list. */
