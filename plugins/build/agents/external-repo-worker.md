@@ -27,7 +27,46 @@ permissions:
     resource: "*"
     effect: allow
   - action: skill
-    resource: "*"
+    resource: "lang-*"
+    effect: allow
+  - action: skill
+    resource: "quality-*"
+    effect: allow
+  - action: skill
+    resource: "toolchain-*"
+    effect: allow
+  - action: skill
+    resource: shell-language
+    effect: allow
+  - action: skill
+    resource: terraform-language
+    effect: allow
+  - action: skill
+    resource: backend-background-jobs
+    effect: allow
+  - action: skill
+    resource: ci-github-actions
+    effect: allow
+  - action: skill
+    resource: coexistence-worktree
+    effect: allow
+  - action: skill
+    resource: infrastructure-tfstate-guard
+    effect: allow
+  - action: skill
+    resource: "ops-*"
+    effect: allow
+  - action: skill
+    resource: "architecture-*"
+    effect: allow
+  - action: skill
+    resource: "trunk-dev-*"
+    effect: allow
+  - action: skill
+    resource: "worktrunk-*"
+    effect: allow
+  - action: skill
+    resource: repomix
     effect: allow
   - action: execute
     resource: "*"
