@@ -178,7 +178,7 @@ describe("parseOptions", () => {
   test("defaults to omp's default preset", () => {
     expect(parseOptions(undefined)).toEqual({ ...DEFAULT_LAYOUT, separator: "powerline", pathMaxLength: 40 })
     expect(DEFAULT_LAYOUT.left).toEqual(["model", "agent", "path", "git", "context_pct", "cost"])
-    expect(DEFAULT_LAYOUT.right).toEqual(["session_name", "token_rate"])
+    expect(DEFAULT_LAYOUT.right).toEqual(["session_name"])
   })
   test("a flat list keeps each id on its default side, filtering unknown and duplicate ids", () => {
     const o = parseOptions({ segments: ["git", "nope", "time_spent", "session", "git"], separator: "plain", pathMaxLength: 30 })
@@ -216,7 +216,7 @@ describe("buildSegments", () => {
   test("default layout", () => {
     const { left, right } = buildSegments(input, { ...DEFAULT_LAYOUT, pathMaxLength: 40 })
     expect(left.map(segmentText)).toEqual(["Opus 4.5 · high", "build", "~/dev/x", "\uE0A0 main *2", "12.3%/1M", "$0.42"])
-    expect(right.map(segmentText)).toEqual(["Fix bug", "11500.0 tok/s"])
+    expect(right.map(segmentText)).toEqual(["Fix bug"])
   })
   test("every segment renders with values bright and labels faint", () => {
     const all = buildSegments(input, { left: [], right: [...SEGMENT_IDS], pathMaxLength: 40 }).right
@@ -266,8 +266,8 @@ describe("fitSegments", () => {
   const right = [seg("session_name", "A long session title"), seg("token_in", "↑1k"), seg("time_spent", "3s")]
   const ids = (r: { left: Segment[]; right: Segment[] }) => [r.left.map(segmentText), r.right.map(segmentText)]
 
-  test("the default right side loses tok/s before the left side shrinks", () => {
-    const row = buildSegments(long, { ...DEFAULT_LAYOUT, pathMaxLength: 40 })
+  test("an opted-in tok/s after the title drops before the left side shrinks", () => {
+    const row = buildSegments(long, { ...DEFAULT_LAYOUT, right: ["session_name", "token_rate"], pathMaxLength: 40 })
     const full = fitSegments(row, 200, sep, long)
     expect(full.right.map(segmentText)).toEqual(["Fix bug", "11500.0 tok/s"])
     const narrow = fitSegments(row, rowWidth(row, sep) - 10, sep, long)
