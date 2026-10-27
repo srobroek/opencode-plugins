@@ -18,6 +18,11 @@ jobs:
         with:
           bun-version: "1.4.3"
       - run: bun install --frozen-lockfile
+      # --frozen-lockfile accepts stale workspace versions in bun.lock.
+      - name: Check bun.lock is up to date
+        run: |
+          bun install --lockfile-only
+          git diff --exit-code -- bun.lock
       - run: bun run typecheck
       - run: bun run lint
       - run: bun test
