@@ -14,6 +14,11 @@ name: release-please
 # the release PR; the sync step below rebuilds anyway in case that changes.
 # The Claude Code and Codex marketplace files do embed each plugin's version,
 # so the same step regenerates them and stages the root-level catalogs too.
+#
+# Lockfile: bun.lock records each workspace package's version, and
+# `bun install --frozen-lockfile` does not reject a stale one, so the sync step
+# runs a plain `bun install` first and commits the refreshed bun.lock with the
+# rebuilt output.
 
 on:
   push:
@@ -58,16 +63,16 @@ jobs:
         with:
           bun-version: "1.4.3"
 
-      - name: Rebuild plugin bundles and marketplaces on the release branch
+      - name: Sync bun.lock, plugin bundles and marketplaces on the release branch
         if: ${{ steps.release.outputs.prs_created == 'true' }}
         run: |
-          bun install --frozen-lockfile
+          bun install
           bun run build
           bun run marketplaces
-          git add -A -- plugins .claude-plugin .agents/plugins
+          git add -A -- bun.lock plugins .claude-plugin .agents/plugins
           if ! git diff --cached --quiet; then
             git config user.name "release-app[bot]"
             git config user.email "release-app[bot]@users.noreply.github.com"
-            git commit -m "chore: rebuild plugin bundles and marketplaces"
+            git commit -m "chore: sync bun.lock, plugin bundles and marketplaces"
             git push
           fi
