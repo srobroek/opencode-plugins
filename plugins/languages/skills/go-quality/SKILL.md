@@ -1,6 +1,8 @@
 ---
 name: go-quality
 description: Use to run Go format, lint, and test checks with the project toolchain.
+metadata:
+  opencode/autoinvoke: false
 ---
 
 # Go Quality

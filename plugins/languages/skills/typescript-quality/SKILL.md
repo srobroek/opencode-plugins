@@ -1,6 +1,8 @@
 ---
 name: typescript-quality
 description: Use to run TypeScript/JavaScript format, lint and type-check, and for exhaustive unions or trust-boundary validation.
+metadata:
+  opencode/autoinvoke: false
 ---
 
 # TypeScript Quality
