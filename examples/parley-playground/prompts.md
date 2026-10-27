@@ -116,7 +116,8 @@ and what the model should do with the answers. Models vary; if the kind differs,
 - "Ask, wait for the first answer only (wait any), then continue."
 
 ## Question-tool takeover
-Needs `./start.sh --takeover` and the `questionTool` option (feat/parley-question-takeover).
+On by default (`questionTool: "takeover"`) while the parley panel is attached; `./start.sh --no-takeover`
+shows the built-in form for comparison.
 - "Ask me a multiple-choice question about which shell I use, with the question tool."
 - "Use the question tool to ask me which of these three colours I prefer."
 - Expect: a parley card instead of the built-in form; the model gets the question tool's normal answer shape.

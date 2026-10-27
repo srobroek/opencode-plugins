@@ -6,7 +6,7 @@
 #   ./start.sh --mini              minimal interface: no parley panel, so rounds fall back or are unavailable
 #   ./start.sh --run "message"     one-shot `opencode run`: no panel either
 #   --fallback                     parley option fallback: "question" (the built-in question tool when no panel)
-#   --takeover                     parley option questionTool (feat/parley-question-takeover; ignored until it lands)
+#   --no-takeover                  parley option questionTool "off" (default "takeover": question calls become parley cards)
 #   --model <provider/model>       model to use (or PARLEY_MODEL)
 #
 # macOS and Linux (bash). There is no Windows script.
@@ -18,7 +18,7 @@ model="${PARLEY_MODEL:-amazon-bedrock/global.anthropic.claude-haiku-5-5}"
 mode=tui
 message=""
 fallback="${PARLEY_FALLBACK:-}"
-takeover="${PARLEY_QUESTION_TOOL:-}"
+takeover="${PARLEY_QUESTION_TOOL:-takeover}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -30,6 +30,7 @@ while [ $# -gt 0 ]; do
       ;;
     --fallback) fallback=question ;;
     --takeover) takeover=takeover ;;
+    --no-takeover) takeover=off ;;
     --model)
       model="${2:?--model needs provider/model}"
       shift
@@ -68,7 +69,7 @@ esac
 printf '{\n  "$schema": "https://opencode.ai/config.json",\n  "model": "%s"%s\n}\n' "$model" "$provider" \
   > "$XDG_CONFIG_HOME/opencode/opencode.json"
 
-echo "parley playground: model $model, fallback ${fallback:-none}, questionTool ${takeover:-off}, state $state" >&2
+echo "parley playground: model $model, fallback ${fallback:-none}, questionTool $takeover, state $state" >&2
 cd "$here"
 case "$mode" in
   tui) exec opencode --standalone ;;

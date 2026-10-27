@@ -33,7 +33,7 @@ own `AGENTS.md` still loads as an ancestor instruction file.
 | --- | --- |
 | `--model <ref>` / `PARLEY_MODEL` | Model, default `amazon-bedrock/global.anthropic.claude-haiku-5-5`. For Bedrock, `AWS_PROFILE` defaults to `omp-bedrock` and `AWS_REGION` to `us-east-1`. |
 | `--fallback` / `PARLEY_FALLBACK=question` | parley option `fallback: "question"`: with no panel, ask through the built-in question tool. |
-| `--takeover` / `PARLEY_QUESTION_TOOL` | parley option `questionTool` (plain `question` calls become parley cards). Available once `feat/parley-question-takeover` lands; ignored before that. |
+| `--no-takeover` / `PARLEY_QUESTION_TOOL=off` | parley option `questionTool: "off"`. The default, `"takeover"`, asks plain `question` calls as parley cards while the panel is attached. |
 | `--mini` | `opencode mini` instead of the TUI: no parley panel. |
 | `--run "<message>"` | One-shot `opencode run`: no parley panel. |
 
