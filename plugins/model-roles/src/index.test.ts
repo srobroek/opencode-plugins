@@ -220,6 +220,12 @@ function createHost(input: {
       for (const hook of hooks) if (hook.name === "model.request") hook.callback({ headers })
       return headers
     },
+    /** Run the `context` hooks on the current subagent tool as the host does for one request. */
+    fireContext: async (sessionID: string) => {
+      const tools = { subagent: { description: subagent.description, input: structuredClone(subagent.input) } }
+      for (const hook of hooks) if (hook.name === "context") await hook.callback({ sessionID, agent: "build", tools })
+      return tools.subagent as { description: string; input: { properties: Record<string, { enum?: string[]; description?: string }> } }
+    },
     setModels: (next: Model[]) => {
       models = next
       emit({ type: "model.updated" })
@@ -571,6 +577,50 @@ describe("subagent role parameter", () => {
     host.close()
     await cleanup()
     expect(roleOf(host)).toBeUndefined()
+  })
+
+  test("a session keeps the tier parameter it first saw; new sessions get the current one", async () => {
+    const host = createHost({ agents: [{ id: "general" }], models, options })
+    const cleanup = await setup(host)
+    const first = await host.fireContext("s1")
+    expect(first.input.properties.tier?.description).not.toContain("$0.5/M")
+    host.setModels([...models, { providerID: "nope-provider", id: "x", variants: [], cost: [{ input: 0.5 }] }])
+    await settle()
+    expect(roleOf(host)?.description).toContain("$0.5/M")
+    expect(JSON.stringify(await host.fireContext("s1"))).toBe(JSON.stringify(first))
+    expect((await host.fireContext("s2")).input.properties.tier?.description).toContain("$0.5/M")
+    // A restarted plugin reads the frozen parameter back from storage.
+    host.close()
+    await cleanup()
+    const again = createHost({ agents: [{ id: "general" }], models, options })
+    for (const [key, value] of host.storage) again.storage.set(key, value)
+    const cleanupAgain = await setup(again)
+    expect(JSON.stringify((await again.fireContext("s1")).input)).toBe(JSON.stringify(first.input))
+    again.close()
+    await cleanupAgain()
+  })
+
+  test("the tier parameters go last whatever order the tool transforms ran in", async () => {
+    const worktree = (editor: ToolEditor) =>
+      editor.update("subagent", (tool) => {
+        const input = withOptionalString(tool.input, WORKTREE_PARAM, WORKTREE_PARAM_DESCRIPTION)
+        if (input !== undefined) tool.input = input
+      })
+    const seen: string[] = []
+    for (const order of ["worktree first", "model-roles first"]) {
+      const host = createHost({ agents: [{ id: "general" }], models, options })
+      const tool = host.context.tool as { transform: (callback: (editor: ToolEditor) => void) => Promise<{ dispose: () => Promise<void> }> }
+      const before = order === "worktree first" ? await tool.transform(worktree) : undefined
+      const cleanup = await setup(host)
+      const after = order === "model-roles first" ? await tool.transform(worktree) : undefined
+      const sent = await host.fireContext("s1")
+      expect(Object.keys(sent.input.properties).slice(-3)).toEqual(["worktree", "tier", "role"])
+      seen.push(JSON.stringify(sent))
+      host.close()
+      await cleanup()
+      await (before ?? after)?.dispose()
+    }
+    expect(seen[0]).toBe(seen[1] as string)
   })
 
   test("precedence: explicit model, then role, then the agent", async () => {

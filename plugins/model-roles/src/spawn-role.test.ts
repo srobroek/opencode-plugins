@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test"
 import { healthView, markUnhealthy } from "./health.ts"
 import { parseOptions } from "./resolve.ts"
 import {
+  applyFrozenTierParam,
+  captureTierParam,
   cheapestCost,
   costTier,
   inputModel,
@@ -9,6 +11,7 @@ import {
   planSpawn,
   ROLE_ALIAS_DESCRIPTION,
   ROLE_TOOL_NOTE,
+  readFrozenTierParam,
   roleChoices,
   roleParamDescription,
   toJsonSchema,
@@ -199,5 +202,44 @@ describe("planSpawn", () => {
     expect(inputModel({ model: "a/b#c" })).toEqual({ providerID: "a", id: "b", variant: "c" })
     expect(inputModel({ model: "@smol" })).toBeUndefined()
     expect(inputModel({})).toBeUndefined()
+  })
+})
+
+describe("frozen tier parameter", () => {
+  const base = {
+    type: "object",
+    properties: { agent: { type: "string" }, prompt: { type: "string" } },
+    required: ["agent", "prompt"],
+  }
+  const listed = "Spawns an agent.\n\nAvailable subagents:\n- general: does things"
+
+  test("captures the tier and role parameters, or records that there were none", () => {
+    const input = withRoleParam(base as never, ["cheap"], "Tier.")
+    expect(captureTierParam(input)).toEqual({
+      tier: { type: "string", enum: ["cheap"], description: "Tier." },
+      role: { type: "string", description: ROLE_ALIAS_DESCRIPTION },
+    })
+    expect(captureTierParam(base)).toEqual({})
+    expect(readFrozenTierParam({})).toEqual({})
+    expect(readFrozenTierParam({ tier: "x" })).toBeUndefined()
+    expect(readFrozenTierParam(null)).toBeUndefined()
+  })
+
+  test("puts the frozen parameters last and adds the note before the subagent list", () => {
+    const frozen = captureTierParam(withRoleParam(base as never, ["cheap"], "Old."))
+    const current = withRoleParam({ ...base, properties: { ...base.properties } } as never, ["cheap", "strong"], "New.")
+    current.properties.worktree = { type: "string" }
+    const out = applyFrozenTierParam({ description: listed, input: current }, frozen)
+    const input = out.input as { properties: Record<string, { description?: string }> }
+    expect(Object.keys(input.properties)).toEqual(["agent", "prompt", "worktree", "tier", "role"])
+    expect(input.properties.tier?.description).toBe("Old.")
+    expect(out.description).toBe(`Spawns an agent.\n${ROLE_TOOL_NOTE}\n\nAvailable subagents:\n- general: does things`)
+  })
+
+  test("a session frozen without tiers keeps none, and loses the note", () => {
+    const current = withRoleParam(base as never, ["cheap"], "New.")
+    const out = applyFrozenTierParam({ description: withRoleNote("Spawns an agent."), input: current }, {})
+    expect(Object.keys((out.input as { properties: object }).properties)).toEqual(["agent", "prompt"])
+    expect(out.description).toBe("Spawns an agent.")
   })
 })

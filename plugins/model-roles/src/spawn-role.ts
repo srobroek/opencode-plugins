@@ -250,6 +250,65 @@ export function withRoleNote(description: string): string {
   return description.includes(ROLE_TOOL_NOTE) ? description : `${description.trimEnd()}\n${ROLE_TOOL_NOTE}`
 }
 
+/**
+ * The `tier` and `role` parameters of the `subagent` tool as a session first saw them. An
+ * empty object records that the session had none. Tools come first in the prompt-cache
+ * prefix, so a session keeps these for its lifetime: a catalog or `/tiers` change only
+ * reaches new sessions.
+ */
+export type FrozenTierParam = { tier?: Record<string, unknown>; role?: Record<string, unknown> }
+
+const SUBAGENTS_HEADING = "\n\nAvailable subagents:"
+
+/** The parameters to freeze from the `subagent` tool's current input schema. */
+export function captureTierParam(input: unknown): FrozenTierParam {
+  const properties = isRecord(input) && isRecord(input.properties) ? input.properties : {}
+  const tier = properties[TIER_PARAM]
+  const role = properties[ROLE_PARAM]
+  if (!isRecord(tier)) return {}
+  return { tier: structuredClone(tier), ...(isRecord(role) ? { role: structuredClone(role) } : {}) }
+}
+
+/** A stored {@link FrozenTierParam}, or `undefined` when the value is not one. */
+export function readFrozenTierParam(value: unknown): FrozenTierParam | undefined {
+  if (!isRecord(value)) return undefined
+  if (value.tier !== undefined && !isRecord(value.tier)) return undefined
+  if (value.role !== undefined && !isRecord(value.role)) return undefined
+  return {
+    ...(isRecord(value.tier) ? { tier: value.tier } : {}),
+    ...(isRecord(value.role) ? { role: value.role } : {}),
+  }
+}
+
+/**
+ * The `subagent` tool with `frozen` in place of whatever `tier` and `role` it has now:
+ * the two parameters go last, after every other plugin's, so the schema bytes do not depend
+ * on the order the tool transforms ran in, and the role note follows the frozen `tier`.
+ */
+export function applyFrozenTierParam(
+  tool: { description: string; input: unknown },
+  frozen: FrozenTierParam,
+): { description: string; input: unknown } {
+  const input = tool.input
+  if (!isRecord(input) || !isRecord(input.properties)) return tool
+  const properties: Record<string, unknown> = {}
+  for (const [name, value] of Object.entries(input.properties))
+    if (name !== TIER_PARAM && name !== ROLE_PARAM) properties[name] = value
+  if (frozen.tier !== undefined) properties[TIER_PARAM] = frozen.tier
+  if (frozen.tier !== undefined && frozen.role !== undefined) properties[ROLE_PARAM] = frozen.role
+  const next: Record<string, unknown> = { ...input, properties }
+  if (Array.isArray(input.required))
+    next.required = input.required.filter((name) => name !== TIER_PARAM && name !== ROLE_PARAM)
+  let description = tool.description
+  const noted = description.includes(ROLE_TOOL_NOTE)
+  if (frozen.tier === undefined && noted) description = description.replace(`\n${ROLE_TOOL_NOTE}`, "").replace(ROLE_TOOL_NOTE, "")
+  if (frozen.tier !== undefined && !noted) {
+    const at = description.indexOf(SUBAGENTS_HEADING)
+    description = at === -1 ? withRoleNote(description) : `${withRoleNote(description.slice(0, at))}${description.slice(at)}`
+  }
+  return { description, input: next }
+}
+
 export const modelLabel = (ref: ModelRef): string => `${ref.providerID}/${ref.id}${ref.variant ? `#${ref.variant}` : ""}`
 
 export type SpawnPlan = {
@@ -307,3 +366,6 @@ export function inputModel(input: unknown): ModelRef | undefined {
 
 /** Storage key for the role a child session was spawned with. */
 export const SPAWN_ROLE_KEY_PREFIX = "spawn-role:"
+
+/** Storage key for the `tier` parameter a session first saw. */
+export const TIER_FREEZE_KEY_PREFIX = "tier-param:"

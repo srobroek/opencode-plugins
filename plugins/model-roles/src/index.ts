@@ -87,16 +87,21 @@ import {
 } from "./resolve.ts"
 import { TiersRpc } from "./rpc.ts"
 import {
+  applyFrozenTierParam,
+  captureTierParam,
   choicesFor,
+  type FrozenTierParam,
   inputModel,
   modelLabel,
   parseRuntime,
   planSpawn,
   ROLE_ALIAS_DESCRIPTION,
   ROLE_PARAM,
+  readFrozenTierParam,
   roleChoices,
   roleParamDescription,
   SPAWN_ROLE_KEY_PREFIX,
+  TIER_FREEZE_KEY_PREFIX,
   TIER_PARAM,
   toJsonSchema,
   withRoleNote,
@@ -622,7 +627,8 @@ export default Plugin.define({
 
     /**
      * Offer `role` on the built-in `subagent` tool. The enum and the cost tiers follow
-     * availability, not health, so the tool list only changes when models come or go.
+     * availability, not health, so the tool list only changes when models come or go, and
+     * then only for new sessions (see the session hooks below).
      */
     const applySubagentTool = (editor: ToolEditor) => {
       const choices = roleChoices(options, available, runtime.purposes)
@@ -655,6 +661,37 @@ export default Plugin.define({
       subagentTool = next
       await previous.dispose()
     }
+
+    // The transform above is global, but each request's tools pass through the session hooks:
+    // a session keeps the tier parameter it first saw, so availability or `/tiers` changes
+    // never rewrite the cached tool prefix of a running session.
+    const frozenTiers = new Map<string, Promise<FrozenTierParam>>()
+    const frozenTier = (sessionID: string, input: unknown): Promise<FrozenTierParam> => {
+      const known = frozenTiers.get(sessionID)
+      if (known !== undefined) return known
+      const key = `${TIER_FREEZE_KEY_PREFIX}${sessionID}`
+      const loaded = (async () => {
+        const stored = readFrozenTierParam(await ctx.storage.get(key).catch(() => undefined))
+        if (stored !== undefined) return stored
+        const fresh = captureTierParam(input)
+        await ctx.storage.set(key, fresh as never).catch(() => {})
+        return fresh
+      })()
+      frozenTiers.set(sessionID, loaded)
+      return loaded
+    }
+    const freezeTiers = async (event: { sessionID: string; tools: Record<string, { description: string; input: unknown }> }) => {
+      const tool = event.tools[SUBAGENT_TOOL]
+      if (tool === undefined) return
+      const next = applyFrozenTierParam(tool, await frozenTier(event.sessionID, tool.input))
+      tool.description = next.description
+      tool.input = next.input as typeof tool.input
+    }
+    const freezeHooks = [
+      await ctx.session.hook("context", freezeTiers),
+      await ctx.session.hook("compaction", freezeTiers),
+      await ctx.session.hook("generate", freezeTiers),
+    ]
 
     const judge = async (
       event: { sessionID: string; agent: string },
@@ -1035,6 +1072,8 @@ export default Plugin.define({
       await spawnResults.dispose()
       await rpc.dispose()
       await spawns.dispose()
+      for (const hook of freezeHooks) await hook.dispose()
+      frozenTiers.clear()
       await subagentTool.dispose()
       await tools.dispose()
       await strip.dispose()

@@ -1159,6 +1159,55 @@ function withRoleNote(description) {
   return description.includes(ROLE_TOOL_NOTE) ? description : `${description.trimEnd()}
 ${ROLE_TOOL_NOTE}`;
 }
+var SUBAGENTS_HEADING = `
+
+Available subagents:`;
+function captureTierParam(input) {
+  const properties = isRecord4(input) && isRecord4(input.properties) ? input.properties : {};
+  const tier = properties[TIER_PARAM];
+  const role = properties[ROLE_PARAM];
+  if (!isRecord4(tier))
+    return {};
+  return { tier: structuredClone(tier), ...isRecord4(role) ? { role: structuredClone(role) } : {} };
+}
+function readFrozenTierParam(value) {
+  if (!isRecord4(value))
+    return;
+  if (value.tier !== undefined && !isRecord4(value.tier))
+    return;
+  if (value.role !== undefined && !isRecord4(value.role))
+    return;
+  return {
+    ...isRecord4(value.tier) ? { tier: value.tier } : {},
+    ...isRecord4(value.role) ? { role: value.role } : {}
+  };
+}
+function applyFrozenTierParam(tool, frozen) {
+  const input = tool.input;
+  if (!isRecord4(input) || !isRecord4(input.properties))
+    return tool;
+  const properties = {};
+  for (const [name, value] of Object.entries(input.properties))
+    if (name !== TIER_PARAM && name !== ROLE_PARAM)
+      properties[name] = value;
+  if (frozen.tier !== undefined)
+    properties[TIER_PARAM] = frozen.tier;
+  if (frozen.tier !== undefined && frozen.role !== undefined)
+    properties[ROLE_PARAM] = frozen.role;
+  const next = { ...input, properties };
+  if (Array.isArray(input.required))
+    next.required = input.required.filter((name) => name !== TIER_PARAM && name !== ROLE_PARAM);
+  let description = tool.description;
+  const noted = description.includes(ROLE_TOOL_NOTE);
+  if (frozen.tier === undefined && noted)
+    description = description.replace(`
+${ROLE_TOOL_NOTE}`, "").replace(ROLE_TOOL_NOTE, "");
+  if (frozen.tier !== undefined && !noted) {
+    const at = description.indexOf(SUBAGENTS_HEADING);
+    description = at === -1 ? withRoleNote(description) : `${withRoleNote(description.slice(0, at))}${description.slice(at)}`;
+  }
+  return { description, input: next };
+}
 var modelLabel = (ref) => `${ref.providerID}/${ref.id}${ref.variant ? `#${ref.variant}` : ""}`;
 function planSpawn(input, options, available, health, callerVendor, pinned = false) {
   if (!isRecord4(input) || !Object.hasOwn(input, ROLE_PARAM) && !Object.hasOwn(input, TIER_PARAM))
@@ -1193,6 +1242,7 @@ function inputModel(input) {
   return candidate?.kind === "model" ? candidate.ref : undefined;
 }
 var SPAWN_ROLE_KEY_PREFIX = "spawn-role:";
+var TIER_FREEZE_KEY_PREFIX = "tier-param:";
 
 // plugins/model-roles/src/auto.ts
 var DEFAULT_AUTO_TIMEOUT_MS = 5000;
@@ -3545,6 +3595,38 @@ ${refs.size}`;
       subagentTool = next;
       await previous.dispose();
     };
+    const frozenTiers = new Map;
+    const frozenTier = (sessionID, input) => {
+      const known = frozenTiers.get(sessionID);
+      if (known !== undefined)
+        return known;
+      const key = `${TIER_FREEZE_KEY_PREFIX}${sessionID}`;
+      const loaded = (async () => {
+        const stored = readFrozenTierParam(await ctx.storage.get(key).catch(() => {
+          return;
+        }));
+        if (stored !== undefined)
+          return stored;
+        const fresh = captureTierParam(input);
+        await ctx.storage.set(key, fresh).catch(() => {});
+        return fresh;
+      })();
+      frozenTiers.set(sessionID, loaded);
+      return loaded;
+    };
+    const freezeTiers = async (event) => {
+      const tool = event.tools[SUBAGENT_TOOL];
+      if (tool === undefined)
+        return;
+      const next = applyFrozenTierParam(tool, await frozenTier(event.sessionID, tool.input));
+      tool.description = next.description;
+      tool.input = next.input;
+    };
+    const freezeHooks = [
+      await ctx.session.hook("context", freezeTiers),
+      await ctx.session.hook("compaction", freezeTiers),
+      await ctx.session.hook("generate", freezeTiers)
+    ];
     const judge = async (event, target, override) => {
       if (guard2 === undefined)
         return;
@@ -3901,6 +3983,9 @@ ${refs.size}`;
       await spawnResults.dispose();
       await rpc.dispose();
       await spawns.dispose();
+      for (const hook of freezeHooks)
+        await hook.dispose();
+      frozenTiers.clear();
       await subagentTool.dispose();
       await tools.dispose();
       await strip.dispose();
@@ -3964,12 +4049,14 @@ export {
   STALE_MS,
   SUMMARY_LIMIT,
   TIER_ALIASES,
+  TIER_FREEZE_KEY_PREFIX,
   TIER_PARAM,
   TIER_PURPOSE,
   TIER_SEEDS,
   TiersRpc,
   agentHash,
   applyEdit2 as applyEdit,
+  applyFrozenTierParam,
   autoEligible,
   autoTag,
   basePrice,
@@ -3983,6 +4070,7 @@ export {
   candidateStatus,
   canonical,
   capRole,
+  captureTierParam,
   cheaperAlternatives,
   cheapestCost,
   checkRoles,
@@ -4051,6 +4139,7 @@ export {
   rankOf,
   readClassification,
   readConfigFiles,
+  readFrozenTierParam,
   readHealth,
   readState,
   readTiers,

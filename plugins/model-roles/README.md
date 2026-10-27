@@ -131,7 +131,9 @@ global config: `$OPENCODE_CONFIG_DIR`, else `$XDG_CONFIG_HOME/opencode`, else
 `~/.config/opencode`, in `opencode.jsonc` when it has the entry, else
 `opencode.json`. The edit keeps comments and formatting, and turns a bare string
 plugin entry into `{ "package": …, "options": … }`. OpenCode reloads the config
-on its own, so the new tiers apply without a restart. A config with no
+on its own, so the new tiers apply without a restart. Spawns resolve the new
+tiers at once; the `tier` parameter's text and enum change only for sessions
+started after the edit, so running sessions keep their prompt cache. A config with no
 model-roles entry in the global files (for example, only in a project config) is
 not edited; `/tiers` says so.
 
@@ -373,7 +375,13 @@ cost class of its first available candidate (`metered, $2/M input tokens`,
 - `reviewer`: an independent second opinion or review, from another model
   vendor than the caller's when one is available.
 
-The descriptions are refreshed when model availability changes. The old `role`
+The descriptions follow model availability and the tier config, never model
+health, and each session keeps the `tier` and `role` parameters it saw on its
+first request for its whole life (stored, so a server restart keeps them too).
+Tools come first in the provider's prompt-cache prefix, so a running session's
+cache is never rebuilt by a new model or a `/tiers` edit: those reach new
+sessions only. Unhealthy models are skipped when a spawn resolves its tier,
+not in the tool text. The old `role`
 parameter is still accepted (free-form, so it also takes the
 [old role names](#old-role-names)); `tier` wins when both are set.
 
