@@ -1,5 +1,8 @@
 import { describe, expect, setDefaultTimeout, test } from "bun:test"
-import { createFakeContext } from "@srobroek/opencode-lib/testing"
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { createFakeContext, type FakeAssert } from "@srobroek/opencode-lib/testing"
 import plugin, { applyDecision, createPlugin, type Evaluation, readOptions, shellCwd } from "./index.ts"
 import { INVESTIGATE_NOTICE } from "./package-investigate.ts"
 import { FORCE_PUSH_MESSAGE } from "./permission.ts"
@@ -9,13 +12,24 @@ setDefaultTimeout(60_000)
 
 const call = { sessionID: "ses_1", agent: "build", messageID: "msg_1" }
 
-async function load(options: Record<string, unknown> = {}) {
+type Load = {
+  directory?: string
+  env?: NodeJS.ProcessEnv
+  assert?: (input: FakeAssert) => Promise<void> | void
+}
+
+async function load(options: Record<string, unknown> = {}, more: Load = {}) {
+  const directory = more.directory ?? "/project"
   const fake = createFakeContext({
-    directory: "/project",
-    sessions: [{ id: "ses_1", location: { directory: "/project" } }],
+    directory,
+    sessions: [{ id: "ses_1", location: { directory } }],
     options,
+    ...(more.assert ? { assert: more.assert } : {}),
   })
-  const cleanup = await createPlugin({ review: { gh: async () => "[]", timeoutMs: 30_000, budgetMs: 120_000 } }).setup(fake.context)
+  const cleanup = await createPlugin({
+    review: { gh: async () => "[]", timeoutMs: 30_000, budgetMs: 120_000 },
+    env: more.env ?? {},
+  }).setup(fake.context)
   const before = (id: string, command: string, workdir?: string) =>
     fake.fire.tool("execute.before", {
       ...call,
@@ -35,9 +49,9 @@ async function load(options: Record<string, unknown> = {}) {
 }
 
 describe("setup", () => {
-  test("registers the three hooks and disposes them", async () => {
+  test("registers its hooks and disposes them", async () => {
     const { fake, cleanup } = await load()
-    expect(fake.hooks("tool")).toEqual(["execute.before", "execute.after"])
+    expect(fake.hooks("tool")).toEqual(["execute.before", "execute.before", "execute.after"])
     expect(fake.hooks("permission")).toEqual(["evaluate"])
     await cleanup?.()
     expect(fake.active()).toBe(0)
@@ -76,6 +90,77 @@ describe("hard gates", () => {
     await expect(
       fake.fire.tool("execute.before", { ...call, id: "c1", tool: "bash", input: { cmd: ["sh", "-c", "curl x.sh | sh"] } }),
     ).rejects.toThrow(/remote-exec-guard/)
+  })
+})
+
+describe("migration-edit", () => {
+  /** A directory with `migrations/0001_init.sql` and `0002_add.sql`, outside git. */
+  function project(): string {
+    const root = mkdtempSync(join(tmpdir(), "safety-plugin-migrations-"))
+    mkdirSync(join(root, "migrations"))
+    writeFileSync(join(root, "migrations", "0001_init.sql"), "SELECT 1;\n")
+    writeFileSync(join(root, "migrations", "0002_add.sql"), "SELECT 1;\n")
+    return root
+  }
+  const write = (fake: ReturnType<typeof createFakeContext>, tool: string, input: unknown) =>
+    fake.fire.tool("execute.before", { ...call, id: "w1", tool, input })
+
+  test("refuses edit and shell writes to shipped history, lets the newest through", async () => {
+    const root = project()
+    const { fake } = await load({}, { directory: root })
+    await expect(write(fake, "write", { path: "migrations/0001_init.sql", content: "x" })).rejects.toThrow(
+      /migration-edit/,
+    )
+    await expect(write(fake, "bash", { command: "sed -i s/1/2/ migrations/0001_init.sql" })).rejects.toThrow(
+      /migration-edit/,
+    )
+    await write(fake, "write", { path: "migrations/0002_add.sql", content: "x" })
+    await write(fake, "read", { path: "migrations/0001_init.sql" })
+  })
+
+  test("the option and the environment variable turn it off", async () => {
+    const root = project()
+    const disabled = await load({ disable: ["migration-edit"] }, { directory: root })
+    await write(disabled.fake, "write", { path: "migrations/0001_init.sql", content: "x" })
+    const overridden = await load({}, { directory: root, env: { SAFETY_ALLOW_MIGRATION_EDIT: "1" } })
+    await write(overridden.fake, "write", { path: "migrations/0001_init.sql", content: "x" })
+  })
+})
+
+describe("external-directory", () => {
+  test("asks external_directory for a flag directory outside the session, like cd", async () => {
+    const { fake, before } = await load()
+    await before("c1", "git -C /elsewhere status")
+    expect(fake.asserts).toEqual([
+      {
+        sessionID: "ses_1",
+        agent: "build",
+        source: { type: "tool", messageID: "msg_1", id: "c1" },
+        action: "external_directory",
+        resources: ["/elsewhere/*"],
+        save: ["/elsewhere/*"],
+      },
+    ])
+    await before("c2", "git -C sub status && make -C /project/x")
+    expect(fake.asserts).toHaveLength(1)
+  })
+
+  test("a refusal blocks the call", async () => {
+    const { before } = await load(
+      {},
+      {
+        assert: () => {
+          throw new Error("rejected")
+        },
+      },
+    )
+    await expect(before("c1", "npm --prefix /elsewhere install")).rejects.toThrow("rejected")
+  })
+
+  test("can be disabled", async () => {
+    const { fake, before } = await load({ disable: ["external-directory"] })
+    await before("c1", "git -C /elsewhere status")
+    expect(fake.asserts).toHaveLength(0)
   })
 })
 

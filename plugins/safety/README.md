@@ -1,7 +1,8 @@
 # safety
 
 Guards for the shell tool in OpenCode V2: hard gates for commands that should never run unreviewed,
-permission checks for commands that destroy work, a PR close-keyword rewrite, and a package-vetting
+permission checks for commands that destroy work, a gate that keeps shipped migrations append-only,
+an `external_directory` check for directory flags, a PR close-keyword rewrite, and a package-vetting
 advisory. Ported from the omp-plugins `safety` package.
 
 Every check reads the command with the shared shell parser (`@srobroek/opencode-lib`), not a regex
@@ -30,6 +31,46 @@ and the command does not run.
 | `attribution` | `git commit` (or `dgit commit`) whose `-m`, `--message`, `--trailer` or `-F`/`--file` message names an AI assistant. That covers a `Co-authored-by` trailer naming Claude, Codex, GPT, Copilot, Cursor, Devin, Gemini, Anthropic or OpenAI, a `Generated with …` line, and an `@anthropic.com`/`@openai.com` noreply address. A `-F` file is read from disk, and the gate also reads what earlier commands in the same call wrote into it. `-F -` reads the command's here-document. |
 | `worktree-tmp` | `git worktree add` with a path under `/tmp` or `/private/tmp`. Relative paths resolve against the call's directory. Also `wt switch\|new\|co\|agent` naming such a path. |
 | `git-defender` | The Git Defender CLI (`git defender …`, `git-defender`) in any command position. Only the user runs it. |
+
+## Migration-edit
+
+A second `execute.before` hook refuses a write to a migration that has already shipped. Every
+database that ran it keeps the old statements, so editing the file makes the recorded history and
+the live schema disagree. The refusal asks for a new migration instead.
+
+- **Layouts.** An entry with a numeric prefix directly under `migrations/` (sqlx, diesel, refinery,
+  goose, Django `app/migrations/0001_*.py`, Prisma `prisma/migrations/<timestamp>_*/migration.sql`,
+  knex), `db/migrate/` (Rails) or `db/migration/` (Flyway `V1__*`; repeatable `R__*` is exempt).
+  Alembic: a `*.py` revision directly in `versions/` next to an `env.py`. Per-migration directories
+  (`0003_name/up.sql`) count as their entry.
+- **Shipped** means the file exists at the merge base of `HEAD` with the default branch
+  (`origin/HEAD`, else `origin/main`, `origin/master`, `main`, `master`). A migration that is
+  untracked or was added on this branch stays editable, so branch-local `0005`/`0006` can be
+  edited and renumbered during a rebase. Creating a new migration is always allowed.
+- **Without a git answer** (no repository, no default branch, a timeout), ordered layouts fall back
+  to "only the newest entry is editable" (prefixes compare as numbers, `10_x` after `2_x`).
+  Alembic revisions have no order, so they are let through.
+- **Checked calls:** `edit`, `write`, `patch` (every file header) and the static write targets of a
+  shell call (redirects, `tee`, `cp`/`mv` destinations, `sed -i`, `perl -i`). Reads are unaffected.
+- **Cost.** Filesystem and git work only happens for a path that matches a layout: at most four git
+  calls, 5 s each and 10 s per call.
+- **Override:** `disable: ["migration-edit"]`, or start OpenCode with `SAFETY_ALLOW_MIGRATION_EDIT=1`.
+
+## Directory flags
+
+OpenCode asks for `external_directory` when a shell call's `cd`/`pushd` target is outside the
+session, but not when a command's own directory flag moves it there. The `execute.before` hook reads
+these flags (behind wrappers, `sh -c` and substitutions) and, for a directory outside the session's
+directory and its repository root, calls `permission.assert` with `external_directory`, the same
+resource (`<dir>/*`) and saved pattern (`<repo root>/*`) OpenCode uses for `cd`:
+
+- `git`/`dgit` `-C` (nested), `--git-dir`, `--work-tree`, and `GIT_DIR=`/`GIT_WORK_TREE=` prefixes
+- `make -C`/`--directory` (nested), `npm -C`/`--prefix`, `pnpm -C`/`--dir`, `yarn --cwd`,
+  `bun --cwd`, `cargo -C`/`--manifest-path`, `go -C`, `uv --directory`/`--project`
+
+Relative values resolve against the call's `workdir` (and a leading `cd DIR &&`). A value with an
+expansion other than `$HOME`/`~` is skipped, as OpenCode skips such a `cd`. A denied or rejected
+approval fails the call. Turn it off with `disable: ["external-directory"]`.
 
 ## Permission checks
 
@@ -158,7 +199,7 @@ installer.
 
 | Option | Default | Effect |
 | --- | --- | --- |
-| `disable` | `[]` | Feature ids to turn off: `indirection`, `remote-exec`, `attribution`, `worktree-tmp`, `git-defender`, `force-push`, `sudo-destructive`, `worktree-destruction`, `close-keywords`, `package-investigate`. |
+| `disable` | `[]` | Feature ids to turn off: `indirection`, `remote-exec`, `attribution`, `worktree-tmp`, `git-defender`, `force-push`, `sudo-destructive`, `worktree-destruction`, `close-keywords`, `package-investigate`, `migration-edit`, `external-directory`. |
 
 ```jsonc
 { "plugins": [{ "package": "...", "options": { "disable": ["git-defender"] } }] }

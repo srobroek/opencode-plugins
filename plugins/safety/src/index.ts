@@ -1,17 +1,27 @@
 import { isAbsolute, resolve } from "node:path"
 import { Plugin } from "@opencode/plugin"
-import { appendResultText, leadingCdCwd, shellCall } from "@srobroek/opencode-lib"
+import { appendResultText, isShellTool, leadingCdCwd, shellCall, WRITE_TOOLS } from "@srobroek/opencode-lib"
 import { rewriteCloseKeywords } from "./close-keywords.ts"
+import { externalDirectories, sessionRoots, shellFlagDirectories } from "./flag-directories.ts"
 import { GUARD_IDS, type GuardID, hardGate } from "./guards.ts"
+import { decideToolCall, type MigrationOptions, migrationOverride } from "./migrations.ts"
 import { createPackageAdvisor } from "./package-investigate.ts"
 import { type Decision, type DecisionID, type ReviewOptions, reviewPermission } from "./permission.ts"
 
 export { normalize as normalizeCloseKeywords, rewriteCloseKeywords } from "./close-keywords.ts"
+export { externalDirectories, flagDirectories, shellFlagDirectories } from "./flag-directories.ts"
 export { hardGate, MESSAGES } from "./guards.ts"
+export { decidePath as decideMigrationPath, latestMigration, migrationTarget } from "./migrations.ts"
 export { INVESTIGATE_NOTICE, packagesToInvestigate } from "./package-investigate.ts"
 export { reviewPermission } from "./permission.ts"
 
-export type FeatureID = GuardID | DecisionID | "close-keywords" | "package-investigate"
+export type FeatureID =
+  | GuardID
+  | DecisionID
+  | "close-keywords"
+  | "package-investigate"
+  | "migration-edit"
+  | "external-directory"
 
 export const FEATURE_IDS: readonly FeatureID[] = [
   ...GUARD_IDS,
@@ -20,6 +30,8 @@ export const FEATURE_IDS: readonly FeatureID[] = [
   "worktree-destruction",
   "close-keywords",
   "package-investigate",
+  "migration-edit",
+  "external-directory",
 ]
 
 export type SafetyOptions = { disabled: ReadonlySet<FeatureID> }
@@ -85,7 +97,7 @@ const PENDING_TTL_MS = 10 * 60_000
 type Pending = { sessionID: string; at: number; decision: Decision | undefined }
 
 /** Test seams; the host never passes these. */
-export type Overrides = { review?: ReviewOptions }
+export type Overrides = { review?: ReviewOptions; migrations?: MigrationOptions; env?: NodeJS.ProcessEnv }
 
 export function createPlugin(overrides: Overrides = {}) {
   return Plugin.define({
@@ -123,9 +135,36 @@ export function createPlugin(overrides: Overrides = {}) {
         const cwd = shellCwd(call.workdir, await sessionDirectory(event.sessionID))
         const refusal = safely(() => hardGate(command, leadingCdCwd(command, cwd), guardOptions))
         if (refusal !== undefined) throw new Error(refusal.reason)
+        if (on("external-directory")) {
+          const sessionDir = await sessionDirectory(event.sessionID)
+          const external =
+            safely(() =>
+              externalDirectories(shellFlagDirectories(command, leadingCdCwd(command, cwd)), sessionRoots(sessionDir)),
+            ) ?? []
+          if (external.length > 0)
+            await ctx.permission.assert({
+              sessionID: event.sessionID,
+              agent: event.agent,
+              source: { type: "tool", messageID: event.messageID, id: event.id },
+              action: "external_directory",
+              resources: external.map((item) => item.resource),
+              save: external.map((item) => item.save),
+            } as never)
+        }
         prune()
         const decision = await review(command, cwd, reviewOptions)
         pending.set(event.id, { sessionID: event.sessionID, at: Date.now(), decision })
+      })
+
+      const migrations = await ctx.tool.hook("execute.before", async (event) => {
+        if (!on("migration-edit") || migrationOverride(overrides.env)) return
+        if (!WRITE_TOOLS.has(event.tool) && !isShellTool(event.tool)) return
+        const call = shellCall(event.tool, event.input)
+        const directory = await sessionDirectory(event.sessionID)
+        const cwd = call === undefined ? directory : shellCwd(call.workdir, directory)
+        const input = call === undefined ? event.input : { command: call.command }
+        const reason = await decideToolCall(event.tool, input, cwd, overrides.migrations).catch(() => undefined)
+        if (reason) throw new Error(reason)
       })
 
       const gate = await ctx.permission.hook("evaluate", async (evaluation) => {
@@ -155,6 +194,7 @@ export function createPlugin(overrides: Overrides = {}) {
       return async () => {
         await after.dispose()
         await gate.dispose()
+        await migrations.dispose()
         await before.dispose()
         pending.clear()
       }

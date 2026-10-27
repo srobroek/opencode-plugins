@@ -1,7 +1,7 @@
 {
   "name": "@srobroek/opencode-safety",
   "version": "0.2.0",
-  "description": "Hard gates and permission checks for destructive, indirect, remote-exec and attributed shell commands, plus close-keyword and package-vetting help.",
+  "description": "Hard gates and permission checks for destructive, indirect, remote-exec and attributed shell commands, shipped-migration edits and external directory flags, plus close-keyword and package-vetting help.",
   "private": true,
   "type": "module",
   "exports": {
