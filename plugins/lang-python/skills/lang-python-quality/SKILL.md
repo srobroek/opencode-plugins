@@ -23,6 +23,10 @@ project has `uv.lock`, `poetry run` with `poetry.lock`.
 | Test | `uv run pytest -x` |
 | Fix | `uv run ruff check --fix PATHS`, then `uv run ruff format PATHS` |
 
+- After an edit that spans modules or changes a signature, run the type check once
+  before handing back: the project's own script or task when it has one, else
+  `uv run pyright` or `uv run mypy`, whichever `pyproject.toml` (or
+  `pyrightconfig.json`, `mypy.ini`) configures.
 - `uv run` syncs the environment first and may rewrite `uv.lock`. In checks and CI
   use `uv run --locked …` (error instead of relocking); never commit a lockfile
   change the task did not ask for.
