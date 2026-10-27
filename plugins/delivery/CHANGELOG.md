@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/srobroek/opencode-plugins/compare/delivery--v0.2.0...delivery--v0.2.1) (2026-10-27)
+
+
+### Performance
+
+* **delivery:** add the fan-out text to compaction and generate requests ([a4752f6](https://github.com/srobroek/opencode-plugins/commit/a4752f6475c9a93ef52f1fb8fc6966ac041c2638))
+
 ## [0.2.0](https://github.com/srobroek/opencode-plugins/compare/delivery--v0.1.0...delivery--v0.2.0) (2026-10-27)
 
 

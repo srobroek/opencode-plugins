@@ -60,7 +60,7 @@
       "name": "languages",
       "source": "./plugins/languages",
       "description": "Go, Python and TypeScript lint, type-check, test and profiling skills; formatting runs through OpenCode built-in formatters.",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "category": "development"
     },
     {
@@ -74,21 +74,21 @@
       "name": "quality",
       "source": "./plugins/quality",
       "description": "Code design and review guidance, an always-on style code-quality policy, performance profiling, and throwaway logic prototypes.",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "category": "development"
     },
     {
       "name": "rust",
       "source": "./plugins/rust",
       "description": "Rust cargo install, RUSTFLAGS linker and global target-dir advisories, and Rust guidance and profiling skills.",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "category": "development"
     },
     {
       "name": "toolchain",
       "source": "./plugins/toolchain",
       "description": "Toolchain defaults as skills: stack, frontend, infrastructure, languages, observability, shell, Terraform, caches, background jobs and worktree coexistence.",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "category": "development"
     },
     {

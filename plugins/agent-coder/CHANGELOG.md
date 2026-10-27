@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.0](https://github.com/srobroek/opencode-plugins/compare/agent-coder--v0.2.0...agent-coder--v0.3.0) (2026-10-27)
+
+
+### Features
+
+* **agent-coder:** allow the quality-testing and ci-github-actions skills ([11dba4a](https://github.com/srobroek/opencode-plugins/commit/11dba4a934526b4a58315e583c296456dbcd82b4))
+* **quality:** quality-profiling method skill with per-language profiling skills ([7786848](https://github.com/srobroek/opencode-plugins/commit/7786848fb2cfe68b6c1c29848644023c6668197f))
+
 ## [0.2.0](https://github.com/srobroek/opencode-plugins/compare/agent-coder--v0.1.0...agent-coder--v0.2.0) (2026-10-27)
 
 

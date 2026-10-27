@@ -1,6 +1,6 @@
 {
   "name": "@srobroek/opencode-speckit",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "SpecKit on beads for OpenCode: speckit_setup and speckit_start tools, a tasks.md guard, the implement and taskstoissues skill routes, workflow instructions, formulas, and the speckit-sync and speckit-verify subagents.",
   "private": true,
   "type": "module",

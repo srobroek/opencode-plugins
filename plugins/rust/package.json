@@ -1,6 +1,6 @@
 {
   "name": "@srobroek/opencode-rust",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Rust cargo install, RUSTFLAGS linker and global target-dir advisories, and Rust guidance and profiling skills.",
   "private": true,
   "type": "module",

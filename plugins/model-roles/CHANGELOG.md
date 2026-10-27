@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/srobroek/opencode-plugins/compare/model-roles--v0.2.0...model-roles--v0.2.1) (2026-10-27)
+
+
+### Performance
+
+* **model-roles:** freeze the subagent tier parameter per session ([44c179e](https://github.com/srobroek/opencode-plugins/commit/44c179e4c6ad559b5b26df77fcce2729a5598f95))
+
 ## [0.2.0](https://github.com/srobroek/opencode-plugins/compare/model-roles--v0.1.0...model-roles--v0.2.0) (2026-10-27)
 
 

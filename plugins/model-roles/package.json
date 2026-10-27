@@ -1,6 +1,6 @@
 {
   "name": "@srobroek/opencode-model-roles",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Give agents a model tier (cheap, standard, strong, reviewer) derived from the model catalog, and resolve each tier to the first available candidate.",
   "private": true,
   "type": "module",

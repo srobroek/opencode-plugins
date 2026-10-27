@@ -1,6 +1,6 @@
 {
   "name": "@srobroek/opencode-beads",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Beads issue tracking for OpenCode: shell gates, store pinning, subagent actors, claim tracking, stop nudge and guarded claim release, lease heartbeats, bd prime context and Beads skills.",
   "private": true,
   "type": "module",

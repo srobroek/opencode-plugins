@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/srobroek/opencode-plugins/compare/languages--v0.2.0...languages--v0.3.0) (2026-10-27)
+
+
+### Features
+
+* **quality:** quality-profiling method skill with per-language profiling skills ([7786848](https://github.com/srobroek/opencode-plugins/commit/7786848fb2cfe68b6c1c29848644023c6668197f))
+
 ## [0.2.0](https://github.com/srobroek/opencode-plugins/compare/languages--v0.1.0...languages--v0.2.0) (2026-10-27)
 
 
