@@ -1,6 +1,6 @@
 {
   "name": "toolchain",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Toolchain defaults as skills: stack, frontend, infrastructure, languages, observability, shell, Terraform, caches, background jobs and worktree coexistence.",
   "author": {
     "name": "Sjors Robroek",

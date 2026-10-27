@@ -1,6 +1,6 @@
 {
   "name": "lang-python",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Python skills: uv, ruff, mypy or pyright and pytest checks, testing, packaging, typing and pydantic, SQLAlchemy and Alembic, and profiling.",
   "author": {
     "name": "Sjors Robroek",

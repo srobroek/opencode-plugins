@@ -11,28 +11,28 @@
       "name": "agent-reviewer",
       "source": "./plugins/agent-reviewer",
       "description": "A security review skill: trace untrusted input to sinks, tag CWE ids and check cross-boundary dispatch.",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "category": "development"
     },
     {
       "name": "architecture",
       "source": "./plugins/architecture",
       "description": "Architecture skills: capability-first top-level layout, ownership boundaries, and durable docs/ project knowledge.",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "category": "development"
     },
     {
       "name": "ast-grep",
       "source": "./plugins/ast-grep",
       "description": "Structural code search with ast-grep: the ast-grep MCP server and a skill on patterns, preview-only rewrites and language-server CLI checks.",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "category": "development"
     },
     {
       "name": "aws",
       "source": "./plugins/aws",
       "description": "AWS working guidance: route AWS tasks through the AWS MCP Server's guided skills, verify against AWS documentation, and price with the AWS Pricing MCP server.",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "category": "development"
     },
     {
@@ -46,84 +46,84 @@
       "name": "debate",
       "source": "./plugins/debate",
       "description": "Stress-test a decision from both sides, grill a plan in frontier rounds, or write a questionnaire for someone else.",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "category": "productivity"
     },
     {
       "name": "design",
       "source": "./plugins/design",
       "description": "UI and UX design skills: design-system audit, DESIGN.md, rendered-surface review, accessibility audit, motion, microcopy, prototypes, and wireframes.",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "category": "development"
     },
     {
       "name": "eli5",
       "source": "./plugins/eli5",
       "description": "Explain a topic at five depth levels, from metaphor to frontier.",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "category": "productivity"
     },
     {
       "name": "lang-go",
       "source": "./plugins/lang-go",
       "description": "Go skills: build, lint, go test -race, tidy and govulncheck checks, testing and fuzzing, module and package layout, and pprof profiling.",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "category": "development"
     },
     {
       "name": "lang-python",
       "source": "./plugins/lang-python",
       "description": "Python skills: uv, ruff, mypy or pyright and pytest checks, testing, packaging, typing and pydantic, SQLAlchemy and Alembic, and profiling.",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "category": "development"
     },
     {
       "name": "lang-rust",
       "source": "./plugins/lang-rust",
       "description": "Rust skills: fmt, clippy and test checks, testing with nextest, proptest and insta, crates and workspaces, CI, sqlx persistence, Tauri and profiling.",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "category": "development"
     },
     {
       "name": "lang-typescript",
       "source": "./plugins/lang-typescript",
       "description": "TypeScript and JavaScript skills: install, lint, tsc and test checks, testing, monorepo packaging, type safety and zod, and Bun and Node profiling.",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "category": "development"
     },
     {
       "name": "project",
       "source": "./plugins/project",
       "description": "Project lifecycle: pick an OSI-approved license from the project's constraints.",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "category": "productivity"
     },
     {
       "name": "quality",
       "source": "./plugins/quality",
       "description": "Code design and review guidance, an always-on style code-quality policy, performance profiling, and throwaway logic prototypes.",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "category": "development"
     },
     {
       "name": "repomix",
       "source": "./plugins/repomix",
       "description": "Pack a local or remote repo into one file with repomix for bulk context: external repos, module packs and version diffs.",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "category": "development"
     },
     {
       "name": "toolchain",
       "source": "./plugins/toolchain",
       "description": "Toolchain defaults as skills: stack, frontend, infrastructure, languages, observability, shell, Terraform, caches, background jobs and worktree coexistence.",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "category": "development"
     },
     {
       "name": "trunk-dev",
       "source": "./plugins/trunk-dev",
       "description": "Trunk-based delivery for OpenCode: a Conventional Commit and main-push gate, skip-CI and MR/PR advisories, a feature-flag cleanup bead after each flagged merge, and release-setup skills.",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "category": "development"
     },
     {
