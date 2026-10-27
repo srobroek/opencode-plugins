@@ -13,10 +13,13 @@ import { createEffect, createMemo, createSignal, For, Match, onCleanup, onMount,
 import { createStore, reconcile } from "solid-js/store"
 import type { FileValue, SubmittedAnswer } from "./answers.ts"
 import { clipboardFiles, copyText } from "./clipboard.ts"
+import { visibleQuestions } from "./conditions.ts"
 import { cardText } from "./copy-text.ts"
 import { FocusGuard, INPUT_MODE } from "./focus.ts"
 import { DEFAULT_EMOJIS, optionLabel, type Question, sliderBounds, sliderText } from "./questions.ts"
 import type { RoundView } from "./rounds.ts"
+import { isStructured, structuredSummary } from "./structured.ts"
+import { calendarText, structuredRows, structuredRowText, structuredSetText, structuredStep } from "./structured-ui.ts"
 import {
   type Arrow,
   accept,
@@ -144,12 +147,19 @@ function createRoundControls(
     return deadline === undefined ? undefined : Math.max(0, Math.ceil((deadline - now()) / 1000))
   }
 
-  const questions = createMemo(() => props.round()?.questions ?? [])
+  const allQuestions = createMemo(() => props.round()?.questions ?? [])
+  const questions = createMemo(() => visibleQuestions(allQuestions(), (id) => {
+    const draft = draftOf(id)
+    return draft?.status === "answered" || draft?.status === "accepted" ? draft.value : undefined
+  }))
   const current = () => questions()[focus()]
 
   // New questions can join an open round; keep existing edits and add drafts for the rest.
   createEffect(() => {
-    for (const question of questions()) if (!draftOf(question.id)) setDraft(question.id, initialDraft(question))
+    for (const question of allQuestions()) if (!draftOf(question.id)) setDraft(question.id, initialDraft(question))
+    if (focus() >= questions().length) setFocus(Math.max(0, questions().length - 1))
+    const edit = editing()
+    if (edit && !questions().some((q) => q.id === edit.id)) { setEditing(undefined); setSuggestions([]); ++lookup }
   })
 
   const update = (fn: (question: Question, draft: Draft) => Draft) => {
@@ -196,7 +206,7 @@ function createRoundControls(
   const fileCard = () => {
     const edit = editing()
     const question = questions().find((candidate) => candidate.id === edit?.id)
-    return edit?.field === "text" && (question?.kind === "ask_image" || question?.kind === "ask_file") ? question : undefined
+    return edit?.field === "text" && (question?.kind === "ask_image" || question?.kind === "ask_file" || question?.kind === "path" || question?.kind === "tags") ? question : undefined
   }
 
   /** Keeps the suggestion list in step with the path being typed. */
@@ -209,12 +219,11 @@ function createRoundControls(
       setSuggestions([])
       return
     }
-    void props
-      .find(query)
+    void (question.kind === "tags" ? Promise.resolve(question.config?.suggestions ?? []) : props.find(query))
       .catch(() => [] as string[])
       .then((found) => {
         if (disposed || ticket !== lookup) return
-        setSuggestions(rankPaths(query, found.filter((candidate) => acceptsPath(question, candidate))))
+        setSuggestions(rankPaths(query, found.filter((candidate) => question.kind === "tags" || acceptsPath(question, candidate))))
         setSelected(0)
       })
   }
@@ -256,7 +265,7 @@ function createRoundControls(
     props.context.ui.toast.show({ message: copied ? "Card copied" : "Clipboard unavailable (OSC 52, pbcopy, wl-copy or xclip required)", variant: copied ? "success" : "warning" })
   }
   const pathKeys = () => [
-    ...(fileCard() ? [{ bind: "ctrl+v", title: "Paste file", group: "Parley", run: pasteFiles }] : []),
+    ...(isFileKind(fileCard()) ? [{ bind: "ctrl+v", title: "Paste file", group: "Parley", run: pasteFiles }] : []),
     ...(suggestions().length > 0 ? [{ bind: "tab", title: "Complete path", group: "Parley", run: complete }] : []),
     // Always bound in a field: unclaimed, ↑/↓ reach the host's global bindings (↓ opens the subagent view).
     { bind: "down", title: "Next suggestion / line", group: "Parley", run: () => fieldArrow(1) },
@@ -295,6 +304,13 @@ function createRoundControls(
     const draft = draftOf(question.id) ?? initialDraft(question)
     if (edit.field === "note") {
       setDraft(question.id, setNote(draft, text))
+      return
+    }
+    if (isStructured(question)) {
+      const result = structuredSetText(question, draft, text)
+      if ("error" in result) { setErrors([result.error]); return }
+      setDraft(question.id, result.draft)
+      setErrors([])
       return
     }
     if (question.kind === "ask_image" || question.kind === "ask_file") {
@@ -357,6 +373,10 @@ function createRoundControls(
     pasteFiles,
     pasteKeys,
     copy,
+    calendarKeys: () => current()?.kind === "date" || current()?.kind === "datetime" ? [
+      { bind: "shift+left", title: "Previous month", group: "Parley", run: () => update((q, d) => structuredStep(q, d, -1, true)) },
+      { bind: "shift+right", title: "Next month", group: "Parley", run: () => update((q, d) => structuredStep(q, d, 1, true)) },
+    ] : [],
     pathKeys,
     /** The open text field, if any, so a focus request lands in it rather than on the card. */
     field: () => (editing() && textarea && !textarea.isDestroyed ? textarea : undefined),
@@ -443,6 +463,7 @@ export function RoundPanel(props: RoundPanelProps) {
       { bind: "ctrl+return", title: "Submit round", group: "Parley", run: () => void submit() },
       { bind: "ctrl+s", title: "Submit round", group: "Parley", run: () => void submit() },
       ...controls.pasteKeys(),
+      ...controls.calendarKeys(),
       { bind: "y", title: "Copy card text", group: "Parley", run: () => void controls.copy() },
       { bind: "f", title: "Toggle view", group: "Parley", run: toggleView },
       { bind: "escape", title: "Minimise", group: "Parley", run: () => props.panel.close() },
@@ -718,6 +739,7 @@ export function InlineCard(props: InlineCardProps) {
       { bind: "ctrl+return", title: "Submit", group: "Parley", run: () => void send() },
       { bind: "ctrl+s", title: "Submit", group: "Parley", run: () => void send() },
       ...controls.pasteKeys(),
+      ...controls.calendarKeys(),
       { bind: "y", title: "Copy card text", group: "Parley", run: () => void controls.copy() },
       { bind: "f", title: "Full screen", group: "Parley", run: () => props.expand() },
       { bind: "escape", title: "Hide", group: "Parley", run: () => props.hide() },
@@ -980,6 +1002,36 @@ function Body(props: CardProps & { readonly value: Record<string, unknown> | und
   )
   return (
     <Switch>
+      <Match when={isStructured(q())}>
+        <Show when={q().kind === "date" || q().kind === "datetime"}>
+          <text fg={theme().text.muted}>{calendarText(String(props.value?.value ?? ""))}</text>
+        </Show>
+        <For each={structuredRows(q())}>
+          {(row, index) => (
+            <box flexDirection="row" gap={1}>
+              <Show when={q().kind === "colour" && props.context.renderer.capabilities?.rgb === true}>
+                <text bg={row.id}>    </text>
+              </Show>
+              <Row context={props.context} cursor={cursorAt(index())} marker="" label={`${row.label}: ${structuredRowText(q(), props.draft, row.id)}`} />
+            </box>
+          )}
+        </For>
+        <Show when={q().kind === "allocate"}>
+          <text fg={theme().text.faint}>{`Total: ${Object.values((props.value?.allocations as Record<string, number>) ?? {}).reduce((sum, n) => sum + n, 0)} / ${q().config?.total ?? 100} ${q().unit ?? "points"}`}</text>
+        </Show>
+        <Show when={q().kind === "tags" || q().kind === "colour"}>
+          <text fg={theme().text.base}>{structuredSummary(q(), props.value)}</text>
+        </Show>
+        <Show when={editable(q())}>
+          <box flexDirection="row" gap={1}>
+            <text fg={theme().text.faint}>value (e):</text>
+            {editField(q().placeholder ?? "Type the selected value")}
+          </box>
+        </Show>
+        <Show when={props.editing === "text" && props.suggestions.length > 0}>
+          <For each={props.suggestions}>{(candidate, index) => <text fg={index() === props.selected ? theme().text.action.primary.base : theme().text.muted}>{`${index() === props.selected ? "›" : " "} ${candidate}`}</text>}</For>
+        </Show>
+      </Match>
       <Match when={q().kind === "pick_one" || q().kind === "pick_many"}>
         <For each={q().options ?? []}>
           {(option, index) => {

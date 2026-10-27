@@ -17,21 +17,21 @@ export const questionSchema = {
   type: "object",
   required: ["id", "title", "kind"],
   properties: {
-    id: { type: "string", description: "Stable id, e.g. a design-tree node; answers are keyed by it" },
+    id: { type: "string", description: "Stable answer key" },
     title: { type: "string" },
     kind: { type: "string", enum: [...KINDS] },
     body: { type: "string", description: "Markdown" },
     rationale: { type: "string", description: "One line on why you recommend it" },
     recommended: {
       description:
-        "Preselected: option id (ids for pick_many/rank), yes|no, up|down, number, {optionId: number} for rate, text, approve|revise, or an emoji",
+        "Preselected; new kinds use the full answer object",
     },
     options: { type: "array", items: option },
     allow_other: { type: "boolean", description: "Free text: pick_one/pick_many default true, slider false" },
     allow_defer: { type: "boolean" },
     depends_on: { type: "array", items: { type: "string" } },
-    min: { type: "number", description: "slider (numbers only)/rate bound; pick_many minimum" },
-    max: { type: "number", description: "slider/rate bound; pick_many maximum" },
+    min: { type: "number" },
+    max: { type: "number" },
     step: { type: "number" },
     unit: { type: "string" },
     labels: {
@@ -55,8 +55,10 @@ export const questionSchema = {
     diff: { type: "string", description: "show_diff: unified diff" },
     language: { type: "string", description: "ask_code/show_diff" },
     emojis: { type: "array", items: { type: "string" } },
-    multiple: { type: "boolean", description: "ask_image/ask_file" },
+    multiple: { type: "boolean", description: "path/ask_image/ask_file" },
     accept: { type: "array", items: { type: "string" }, description: "ask_file extensions" },
+    config: { type: "object", description: "Kind-specific fields; see tool description and README" },
+    show_if: { type: "object", required: ["id", "equals"], properties: { id: { type: "string" }, equals: {} }, description: "Earlier answer value must equal equals" },
   },
 } as const
 

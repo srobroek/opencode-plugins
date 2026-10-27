@@ -3,6 +3,7 @@ import type { Prompt } from "./fallback.ts"
 import { NOTES_HINT } from "./notes.ts"
 import { type Question, validateQuestions } from "./questions.ts"
 import type { RoundResult } from "./rounds.ts"
+import { isStructured, structuredSummary } from "./structured.ts"
 
 /** The built-in question tool's guidance asks models to mark their pick with this suffix. */
 const RECOMMENDED = /\s*\(recommended\)\s*$/i
@@ -66,6 +67,7 @@ export function shouldTakeOver(settings: { questionTool: string; disabled: boole
 /** The built-in tool's answer for one prompt: the chosen option labels as the model wrote them, plus free text. */
 export function nativeAnswer(prompt: Prompt, question: Question, answer: Answer | undefined): string[] {
   if (answer === undefined || answer.value === undefined) return []
+  if (isStructured(question)) return [structuredSummary(question, answer.value)]
   const value = answer.value as { selected?: string | string[]; other?: string; text?: string }
   const label = (id: string) => {
     const index = (question.options ?? []).findIndex((option) => option.id === id)

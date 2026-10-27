@@ -1,4 +1,8 @@
 import { DEFAULT_EMOJIS, optionLabel, type Question, recommendedValue, sliderBounds, sliderText } from "./questions.ts"
+import { structuredSummary, validateStructuredValue } from "./structured.ts"
+import { canonical } from "./value-json.ts"
+
+export { canonical } from "./value-json.ts"
 
 export const ANSWER_STATUSES = ["answered", "accepted", "noted", "deferred"] as const
 export type AnswerStatus = (typeof ANSWER_STATUSES)[number]
@@ -34,18 +38,6 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value)
 
 const text = (value: unknown) => (typeof value === "string" && value.trim() !== "" ? value : undefined)
-
-/** Canonical JSON so two equal values compare equal regardless of key order. */
-export function canonical(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`
-  if (isRecord(value))
-    return `{${Object.keys(value)
-      .filter((key) => value[key] !== undefined)
-      .sort()
-      .map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`)
-      .join(",")}}`
-  return JSON.stringify(value)
-}
 
 const sameSet = (a: readonly string[], b: readonly string[]) => canonical([...a].sort()) === canonical([...b].sort())
 
@@ -168,6 +160,21 @@ export function validateValue(question: Question, value: unknown): { value: unkn
       }
       return { value: { files: cleaned } }
     }
+    case "form":
+    case "buckets":
+    case "match":
+    case "allocate":
+    case "matrix":
+    case "range":
+    case "path":
+    case "date":
+    case "time":
+    case "datetime":
+    case "tags":
+    case "colour": {
+      const checked = validateStructuredValue(question, value)
+      return "error" in checked ? fail(checked.error) : checked
+    }
   }
 }
 
@@ -252,6 +259,19 @@ export function describeValue(question: Question, value: unknown): string {
     case "ask_image":
     case "ask_file":
       return ((value.files as FileValue[]) ?? []).map((file) => `${file.name} (${file.mime}, ${file.size} B)`).join(", ")
+    case "form":
+    case "buckets":
+    case "match":
+    case "allocate":
+    case "matrix":
+    case "range":
+    case "path":
+    case "date":
+    case "time":
+    case "datetime":
+    case "tags":
+    case "colour":
+      return structuredSummary(question, value)
   }
 }
 
