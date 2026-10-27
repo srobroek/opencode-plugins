@@ -71,6 +71,13 @@
       "category": "development"
     },
     {
+      "name": "lang-typescript",
+      "source": "./plugins/lang-typescript",
+      "description": "TypeScript and JavaScript skills: lint, tsc and test checks, type-safety rules, and Bun and Node profiling; formatting runs through OpenCode built-in formatters.",
+      "version": "0.1.0",
+      "category": "development"
+    },
+    {
       "name": "languages",
       "source": "./plugins/languages",
       "description": "Go, Python and TypeScript lint, type-check, test and profiling skills; formatting runs through OpenCode built-in formatters.",
