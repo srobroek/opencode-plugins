@@ -122,6 +122,97 @@ function fields(input) {
   return input !== null && typeof input === "object" ? input : {};
 }
 
+// plugins/agent-efficiency/src/explore.ts
+var EXPLORE_ID = "explore";
+var EXPLORE_PROMPT = `You are a read-only scout. Investigate the codebase, and the web when the question needs it, and return findings another agent can use without re-reading everything.
+
+Report:
+- Summary: findings and conclusions, brief.
+- Files: each relevant file as an absolute \`path:start-end\`, with what that code holds.
+- Architecture: how the pieces connect, brief.
+- Sources: the URL of anything taken from the web.
+
+Guidelines:
+- Search with grep and glob, then read only the sections that matter. Read whole files only when they are small.
+- Run independent searches and reads in parallel.
+- If a search finds nothing, try at least one other pattern or path before concluding the target does not exist.
+- Match depth to the thoroughness the caller asks for (quick, medium or very thorough); default to medium.
+- Never create, modify or delete files. You have no shell.`;
+var EXPLORE_PERMISSIONS = [
+  { action: "*", resource: "*", effect: "deny" },
+  { action: "read", resource: "*", effect: "allow" },
+  { action: "read", resource: "*.env", effect: "ask" },
+  { action: "read", resource: "*.env.*", effect: "ask" },
+  { action: "read", resource: "*.env.example", effect: "allow" },
+  { action: "grep", resource: "*", effect: "allow" },
+  { action: "glob", resource: "*", effect: "allow" },
+  { action: "websearch", resource: "*", effect: "allow" },
+  { action: "webfetch", resource: "*", effect: "allow" },
+  { action: "external_directory", resource: "*", effect: "ask" }
+];
+function shapeExplore(draft) {
+  draft.system = EXPLORE_PROMPT;
+  draft.permissions.push(...EXPLORE_PERMISSIONS.map((rule) => ({ ...rule })));
+}
+
+// plugins/agent-efficiency/src/lean.ts
+var SEGMENTS = ["instructions", "identity", "worktree"];
+var DEFAULT_LEAN_AGENTS = [
+  "explore",
+  "pr-reviewer",
+  "adversarial-challenger",
+  "design-critic",
+  "a11y-auditor",
+  "speckit-verify",
+  "seance",
+  "security-reviewer",
+  "code-reviewer"
+];
+var IDENTITY = `# Your Model
+- Name: `;
+var WORKTREE = "When you create a worktree outside the current working directory and intend to use it";
+var INSTRUCTIONS = "Instructions from: ";
+var DATE = `
+
+Today's date: `;
+function dropInstructions(text) {
+  const start = text.startsWith(INSTRUCTIONS) ? 0 : text.indexOf(`
+
+${INSTRUCTIONS}`);
+  if (start === -1)
+    return text;
+  const end = text.indexOf(DATE, start);
+  if (end === -1)
+    return text;
+  return start === 0 ? text.slice(end + 2) : text.slice(0, start) + text.slice(end);
+}
+function leanSystem(system, drop) {
+  return system.flatMap((part) => {
+    if (part.type !== "text")
+      return [part];
+    if (drop.has("identity") && part.text.startsWith(IDENTITY))
+      return [];
+    if (drop.has("worktree") && part.text.startsWith(WORKTREE))
+      return [];
+    if (drop.has("instructions")) {
+      const text = dropInstructions(part.text);
+      if (text !== part.text)
+        return [{ ...part, text }];
+    }
+    return [part];
+  });
+}
+function parseLeanOptions(options) {
+  const agents = options.leanSubagents;
+  if (agents === false)
+    return;
+  const ids = Array.isArray(agents) ? agents.filter((id) => typeof id === "string") : DEFAULT_LEAN_AGENTS;
+  const drop = Array.isArray(options.leanDrop) ? options.leanDrop.filter((name) => SEGMENTS.includes(name)) : SEGMENTS;
+  if (ids.length === 0 || drop.length === 0)
+    return;
+  return { agents: new Set(ids), drop: new Set(drop) };
+}
+
 // plugins/agent-efficiency/src/index.ts
 function routeShellAlias(tool, input, registered) {
   if (!SHELL_ALIASES.has(tool) || registered(tool))
@@ -131,24 +222,72 @@ function routeShellAlias(tool, input, registered) {
 var src_default = Plugin.define({
   id: "srobroek.agent-efficiency",
   async setup(ctx) {
-    if (ctx.options.bashAlias === false)
-      return;
-    const alias = await ctx.tool.hook("execute.before", async (event) => {
-      if (!SHELL_ALIASES.has(event.tool))
-        return;
-      const tools = await ctx.tool.list();
-      const route = routeShellAlias(event.tool, event.input, (id) => tools.some((tool) => tool.id === id));
-      if (route === undefined)
-        return;
-      event.tool = route.tool;
-      event.input = route.input;
-    });
+    const options = ctx.options;
+    const disposers = [];
+    if (options.bashAlias !== false) {
+      const alias = await ctx.tool.hook("execute.before", async (event) => {
+        if (!SHELL_ALIASES.has(event.tool))
+          return;
+        const tools = await ctx.tool.list();
+        const route = routeShellAlias(event.tool, event.input, (id) => tools.some((tool) => tool.id === id));
+        if (route === undefined)
+          return;
+        event.tool = route.tool;
+        event.input = route.input;
+      });
+      disposers.push(() => alias.dispose());
+    }
+    if (options.explore !== false) {
+      const agents = await ctx.agent.transform((editor) => {
+        if (editor.get(EXPLORE_ID) === undefined)
+          return;
+        editor.update(EXPLORE_ID, (draft) => shapeExplore(draft));
+      });
+      disposers.push(() => agents.dispose());
+    }
+    const lean2 = parseLeanOptions(options);
+    if (lean2 !== undefined) {
+      const child = new Map;
+      const isChild = async (sessionID) => {
+        try {
+          const session = await ctx.session.get({ sessionID });
+          return typeof session?.parentID === "string";
+        } catch {
+          return false;
+        }
+      };
+      const context = await ctx.session.hook("context", async (event) => {
+        if (!lean2.agents.has(event.agent))
+          return;
+        let known = child.get(event.sessionID);
+        if (known === undefined) {
+          known = isChild(event.sessionID);
+          child.set(event.sessionID, known);
+        }
+        if (await known)
+          event.system.splice(0, event.system.length, ...leanSystem(event.system, lean2.drop));
+      });
+      disposers.push(async () => {
+        await context.dispose();
+        child.clear();
+      });
+    }
     return async () => {
-      await alias.dispose();
+      for (const dispose of disposers.reverse())
+        await dispose();
     };
   }
 });
 export {
+  DEFAULT_LEAN_AGENTS,
+  EXPLORE_ID,
+  EXPLORE_PERMISSIONS,
+  EXPLORE_PROMPT,
+  SEGMENTS,
   src_default as default,
-  routeShellAlias
+  dropInstructions,
+  leanSystem,
+  parseLeanOptions,
+  routeShellAlias,
+  shapeExplore
 };
