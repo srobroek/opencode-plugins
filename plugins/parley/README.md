@@ -115,24 +115,28 @@ named …".
 A round opens the session's tab and sends an attention notification. A round
 with one question shows as a compact card above the prompt. The card takes
 focus and uses the keys below, with `enter` to submit (it also picks the row
-under the cursor if nothing is chosen), `f` for full screen and `esc` to hide
-the card (`/parley` brings it back). Larger rounds show the panel full screen. `esc` minimises it; `/parley` (or the command palette)
+under the cursor if nothing is chosen), `j` / `k` to move between choices, `f`
+for full screen and `esc` to hide the card (`/parley` brings it back). Larger rounds show the panel full screen. `esc` minimises it; `/parley` (or the command palette)
 brings it back with your edits intact.
 
 | Key | Action |
 | --- | --- |
 | `tab` / `shift+tab`, `j` / `k` | Next / previous question |
-| `↑` / `↓` | Move between choices in a card |
+| `↑` / `↓` | Move between stacked choices (options, yes/no, ranked or rated rows). On side-by-side cards (`show_options`, `emoji_react`) and cards without rows (slider, text), go to the previous / next question |
+| `←` / `→` | Move between side-by-side choices; adjust a slider, or the rating of the row under the cursor |
 | `space` / `enter`, `1`–`9` | Choose (toggle for pick_many) |
 | `a` | Accept the recommendation |
-| `n` | Add a note (inline; `esc` when done) |
+| `n` | Add a note |
 | `d` | Defer (again to undo) |
 | `e` | Edit text: answer, "other", review feedback, file paths |
 | `shift+↑` / `shift+↓`, `J` / `K` | Move a ranked item |
-| `←` / `→` | Slider value, or the rating of the option under the cursor |
 | `ctrl+enter` / `ctrl+s` | Submit the round (partial rounds are fine) |
 | `D` | Dismiss the round (the agent gets `cancelled`; a taken-over `question` call ends the turn) |
 | `esc` | Minimise |
+
+In a note or text field, `enter` saves it and returns to the card (on the inline
+card it saves and submits), `shift+enter` adds a line, `esc` saves too, and
+`ctrl+enter` / `ctrl+s` submit. In `ask_code` answers `enter` adds a line.
 
 The TUI checks in with the server every 10 s (RPC `parley.attach`), and fetches
 open rounds with `parley.pending` on start and after a reconnect. Desktop, web
@@ -155,7 +159,9 @@ with `action` `opened`, `updated`, `closed` or `ended`.
    `esc`, run `/parley`, check the edits survived, press `ctrl+s`.
 4. The tool result lists each id with its status and note.
 5. Ask the model to use the `question` tool with one question: the card shows
-   above the prompt. Choose with `2`, add a note with `n`, press `esc`, then
-   `enter`. The result reads like the built-in tool's, plus a `Note on …` line.
+   above the prompt. Choose with `2`, add a note with `n` and press `enter`:
+   the card submits. The result reads like the built-in tool's, plus a
+   `Note on …` line. Ask again and press `D`: the turn ends as it does when you
+   dismiss the built-in form.
 6. Repeat with `opencode run` (no TUI): the call returns `unavailable`, or with
    `fallback: "question"` the questions appear as a form.

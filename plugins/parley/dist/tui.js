@@ -563,6 +563,19 @@ function toSubmission(question, draft) {
   }
 }
 var clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+var HORIZONTAL = new Set(["show_options", "emoji_react"]);
+function arrowAction(question, key) {
+  const delta = key === "up" || key === "left" ? -1 : 1;
+  const vertical = key === "up" || key === "down";
+  if (HORIZONTAL.has(question.kind))
+    return { kind: vertical ? "question" : "cursor", delta };
+  if (!vertical)
+    return question.kind === "slider" || question.kind === "rate" ? { kind: "step", delta } : undefined;
+  return rows(question).length > 0 ? { kind: "cursor", delta } : { kind: "question", delta };
+}
+function enterIsNewline(question, field) {
+  return field === "text" && question.kind === "ask_code";
+}
 function moveCursor(question, draft, delta) {
   const count = rows(question).length;
   if (count === 0)
@@ -813,6 +826,23 @@ function createRoundControls(props, onMove) {
     if (id)
       onMove?.(id);
   };
+  const arrow = (key, toQuestion) => {
+    const question = current();
+    const action = question ? arrowAction(question, key) : undefined;
+    if (!action)
+      return;
+    if (action.kind === "question")
+      toQuestion?.(action.delta);
+    else if (action.kind === "cursor")
+      update((q, d) => moveCursor(q, d, action.delta));
+    else
+      update((q, d) => step(q, d, action.delta));
+  };
+  const enterSaves = () => {
+    const edit = editing();
+    const question = questions().find((candidate) => candidate.id === edit?.id);
+    return edit !== undefined && question !== undefined && !enterIsNewline(question, edit.field);
+  };
   const startEdit = (field) => {
     const question = current();
     if (!question)
@@ -878,9 +908,15 @@ function createRoundControls(props, onMove) {
     current,
     update,
     moveCard,
+    arrow,
+    enterSaves,
     startEdit,
     finishEdit,
     submit,
+    newline: () => {
+      if (textarea && !textarea.isDestroyed)
+        textarea.newLine();
+    },
     setTextarea: (element) => {
       textarea = element;
     }
@@ -898,9 +934,12 @@ function RoundPanel(props) {
     questions,
     update,
     moveCard,
+    arrow,
+    enterSaves,
     startEdit,
     finishEdit,
     submit,
+    newline,
     setTextarea
   } = createRoundControls(props, (id) => scroll?.scrollChildIntoView(`parley-card-${id}`));
   props.context.keymap.layer(() => ({
@@ -929,12 +968,22 @@ function RoundPanel(props) {
       bind: "down",
       title: "Next choice",
       group: "Parley",
-      run: () => update((q, d) => moveCursor(q, d, 1))
+      run: () => arrow("down", moveCard)
     }, {
       bind: "up",
       title: "Previous choice",
       group: "Parley",
-      run: () => update((q, d) => moveCursor(q, d, -1))
+      run: () => arrow("up", moveCard)
+    }, {
+      bind: "left",
+      title: "Previous / decrease",
+      group: "Parley",
+      run: () => arrow("left", moveCard)
+    }, {
+      bind: "right",
+      title: "Next / increase",
+      group: "Parley",
+      run: () => arrow("right", moveCard)
     }, {
       bind: "space",
       title: "Choose",
@@ -972,16 +1021,6 @@ function RoundPanel(props) {
       title: "Move down",
       group: "Parley",
       run: () => update((q, d) => rankMove(q, d, 1))
-    }, {
-      bind: "left",
-      title: "Decrease",
-      group: "Parley",
-      run: () => update((q, d) => step(q, d, -1))
-    }, {
-      bind: "right",
-      title: "Increase",
-      group: "Parley",
-      run: () => update((q, d) => step(q, d, 1))
     }, {
       bind: "a",
       title: "Accept recommendation",
@@ -1045,6 +1084,20 @@ function RoundPanel(props) {
       title: "Done editing",
       group: "Parley",
       run: () => void finishEdit()
+    }, {
+      bind: "shift+return",
+      title: "New line",
+      group: "Parley",
+      run: newline
+    }, {
+      bind: "return",
+      title: "Save",
+      group: "Parley",
+      run: () => {
+        if (!enterSaves())
+          return false;
+        finishEdit();
+      }
     }, {
       bind: "ctrl+return",
       title: "Submit round",
@@ -1163,7 +1216,10 @@ function RoundPanel(props) {
     _$setProp(_el$8, "paddingTop", 1);
     _$setProp(_el$8, "paddingBottom", 1);
     _$setProp(_el$9, "wrapMode", "word");
-    _$insert(_el$9, () => editing() ? "esc done \xB7 ctrl+enter / ctrl+s submit round" : "tab/j/k question \xB7 \u2191/\u2193 choice \xB7 space choose \xB7 a accept \xB7 n note \xB7 d defer \xB7 e edit \xB7 shift+\u2191/\u2193 J/K rank \xB7 \u2190/\u2192 adjust \xB7 ctrl+enter / ctrl+s submit \xB7 esc minimise \xB7 D dismiss");
+    _$insert(_el$9, (() => {
+      var _c$ = _$memo(() => !!editing());
+      return () => _c$() ? `${enterSaves() ? "enter save \xB7 shift+enter newline" : "enter newline"} \xB7 esc done \xB7 ctrl+enter / ctrl+s submit round` : "tab/j/k question \xB7 \u2191/\u2193 choice (\u2190/\u2192 side by side) \xB7 space choose \xB7 a accept \xB7 n note \xB7 d defer \xB7 e edit \xB7 shift+\u2191/\u2193 J/K rank \xB7 \u2190/\u2192 adjust \xB7 ctrl+enter / ctrl+s submit \xB7 esc minimise \xB7 D dismiss";
+    })());
     _$insert(_el$, _$createComponent(Show, {
       get when() {
         return busy();
@@ -1206,9 +1262,12 @@ function InlineCard(props) {
     busy,
     questions,
     update,
+    arrow,
+    enterSaves,
     startEdit,
     finishEdit,
     submit,
+    newline,
     setTextarea
   } = createRoundControls(props);
   let box;
@@ -1239,6 +1298,10 @@ function InlineCard(props) {
       update((target, current) => choose(target, current));
     await submit();
   };
+  const saveAndSend = async () => {
+    await done();
+    await send();
+  };
   props.context.keymap.layer(() => ({
     target: () => box,
     enabled: () => editing() === undefined,
@@ -1246,12 +1309,22 @@ function InlineCard(props) {
       bind: "down",
       title: "Next choice",
       group: "Parley",
-      run: () => update((q, d) => moveCursor(q, d, 1))
+      run: () => arrow("down")
     }, {
       bind: "up",
       title: "Previous choice",
       group: "Parley",
-      run: () => update((q, d) => moveCursor(q, d, -1))
+      run: () => arrow("up")
+    }, {
+      bind: "left",
+      title: "Previous / decrease",
+      group: "Parley",
+      run: () => arrow("left")
+    }, {
+      bind: "right",
+      title: "Next / increase",
+      group: "Parley",
+      run: () => arrow("right")
     }, {
       bind: "j",
       title: "Next choice",
@@ -1275,16 +1348,6 @@ function InlineCard(props) {
       group: "Parley",
       run: () => update((q, d) => choose(q, d, index))
     })), {
-      bind: "left",
-      title: "Decrease",
-      group: "Parley",
-      run: () => update((q, d) => step(q, d, -1))
-    }, {
-      bind: "right",
-      title: "Increase",
-      group: "Parley",
-      run: () => update((q, d) => step(q, d, 1))
-    }, {
       bind: "a",
       title: "Accept recommendation",
       group: "Parley",
@@ -1349,15 +1412,29 @@ function InlineCard(props) {
       group: "Parley",
       run: () => void done()
     }, {
+      bind: "shift+return",
+      title: "New line",
+      group: "Parley",
+      run: newline
+    }, {
+      bind: "return",
+      title: "Save and submit",
+      group: "Parley",
+      run: () => {
+        if (!enterSaves())
+          return false;
+        saveAndSend();
+      }
+    }, {
       bind: "ctrl+return",
       title: "Submit",
       group: "Parley",
-      run: () => void submit()
+      run: () => void saveAndSend()
     }, {
       bind: "ctrl+s",
       title: "Submit",
       group: "Parley",
-      run: () => void submit()
+      run: () => void saveAndSend()
     }]
   }));
   return (() => {
@@ -1415,8 +1492,8 @@ function InlineCard(props) {
     }), _el$12);
     _$setProp(_el$12, "wrapMode", "word");
     _$insert(_el$12, (() => {
-      var _c$ = _$memo(() => !!busy());
-      return () => _c$() ? "Submitting\u2026" : editing() ? "esc done \xB7 ctrl+s submit" : "Parley \xB7 1-9/space choose \xB7 enter submit \xB7 n note \xB7 d defer \xB7 e edit \xB7 a accept \xB7 f full screen \xB7 esc hide \xB7 D dismiss";
+      var _c$2 = _$memo(() => !!busy());
+      return () => _c$2() ? "Submitting\u2026" : _$memo(() => !!editing())() ? enterSaves() ? "enter submit \xB7 shift+enter newline \xB7 esc done" : "enter newline \xB7 ctrl+s submit \xB7 esc done" : "Parley \xB7 1-9/space choose \xB7 enter submit \xB7 n note \xB7 d defer \xB7 e edit \xB7 a accept \xB7 f full screen \xB7 esc hide \xB7 D dismiss";
     })());
     _$effect((_$p) => _$setProp(_el$12, "fg", theme().text.muted, _$p));
     return _el$11;
@@ -1539,7 +1616,7 @@ function Card(props) {
         _$insertNode(_el$24, _$createTextNode(`Note:`));
         var _ref$ = props.textareaRef;
         typeof _ref$ === "function" ? _$use(_ref$, _el$26) : props.textareaRef = _el$26;
-        _$setProp(_el$26, "placeholder", "Add a note (esc when done)");
+        _$setProp(_el$26, "placeholder", "Add a note");
         _$setProp(_el$26, "minHeight", 1);
         _$setProp(_el$26, "maxHeight", 6);
         _$setProp(_el$26, "flexGrow", 1);
@@ -2071,8 +2148,8 @@ ${section.content}`, _v$37 = props.syntax, _v$38 = theme().markdown.text;
           _$setProp(_el$47, "flexDirection", "row");
           _$setProp(_el$47, "gap", 1);
           _$insert(_el$48, (() => {
-            var _c$2 = _$memo(() => q().kind === "ask_code");
-            return () => _c$2() ? `code${q().language ? ` (${q().language})` : ""} (e):` : "answer (e):";
+            var _c$3 = _$memo(() => q().kind === "ask_code");
+            return () => _c$3() ? `code${q().language ? ` (${q().language})` : ""} (e):` : "answer (e):";
           })());
           _$insert(_el$47, () => editField(q().placeholder ?? "Type your answer"), null);
           _$effect((_$p) => _$setProp(_el$48, "fg", theme().text.faint, _$p));

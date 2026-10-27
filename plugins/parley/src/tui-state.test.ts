@@ -2,8 +2,10 @@ import { describe, expect, test } from "bun:test"
 import type { Question } from "./questions.ts"
 import {
   accept,
+  arrowAction,
   badge,
   choose,
+  enterIsNewline,
   initialDraft,
   moveCursor,
   parsePaths,
@@ -107,5 +109,54 @@ describe("badge", () => {
     expect(badge(initialDraft(question), question)).toBe("★ recommended")
     expect(badge(choose(question, initialDraft(question), 1), question)).toBe("● answered")
     expect(badge(toggleDefer(initialDraft(question), question), question)).toBe("⏸ deferred")
+  })
+})
+
+describe("arrow keys", () => {
+  const kind = (kind: Question["kind"], extra: Partial<Question> = {}) => ({ id: "q", title: "Q", kind, options, ...extra }) as Question
+
+  test("side-by-side choices move with ←/→ and ↑/↓ change question", () => {
+    for (const k of ["show_options", "emoji_react"] as const) {
+      expect(arrowAction(kind(k), "left")).toEqual({ kind: "cursor", delta: -1 })
+      expect(arrowAction(kind(k), "right")).toEqual({ kind: "cursor", delta: 1 })
+      expect(arrowAction(kind(k), "up")).toEqual({ kind: "question", delta: -1 })
+      expect(arrowAction(kind(k), "down")).toEqual({ kind: "question", delta: 1 })
+    }
+  })
+
+  test("stacked rows move with ↑/↓; ←/→ do nothing unless there is a value to adjust", () => {
+    for (const k of ["pick_one", "pick_many", "rank", "confirm", "thumbs", "review"] as const) {
+      expect(arrowAction(kind(k), "down")).toEqual({ kind: "cursor", delta: 1 })
+      expect(arrowAction(kind(k), "up")).toEqual({ kind: "cursor", delta: -1 })
+      expect(arrowAction(kind(k), "right")).toBeUndefined()
+    }
+    expect(arrowAction(kind("rate"), "down")).toEqual({ kind: "cursor", delta: 1 })
+    expect(arrowAction(kind("rate"), "left")).toEqual({ kind: "step", delta: -1 })
+  })
+
+  test("cards without rows pass ↑/↓ on to the next question", () => {
+    const slider = kind("slider", { options: undefined, min: 0, max: 10 })
+    expect(arrowAction(slider, "right")).toEqual({ kind: "step", delta: 1 })
+    expect(arrowAction(slider, "down")).toEqual({ kind: "question", delta: 1 })
+    expect(arrowAction(kind("ask_text", { options: undefined }), "up")).toEqual({ kind: "question", delta: -1 })
+    expect(arrowAction(kind("ask_text", { options: undefined }), "left")).toBeUndefined()
+  })
+
+  test("the cursor stays on the side-by-side option it reaches", () => {
+    const question = kind("show_options")
+    const action = arrowAction(question, "right")
+    const draft = moveCursor(question, initialDraft(question), action?.delta ?? 0)
+    expect(choose(question, draft)).toMatchObject({ value: { selected: "b" } })
+  })
+})
+
+describe("enter in text fields", () => {
+  test("saves notes and answers, but starts a new line in code", () => {
+    const text = { id: "t", title: "T", kind: "ask_text" } as Question
+    const code = { id: "c", title: "C", kind: "ask_code" } as Question
+    expect(enterIsNewline(text, "text")).toBe(false)
+    expect(enterIsNewline(text, "note")).toBe(false)
+    expect(enterIsNewline(code, "note")).toBe(false)
+    expect(enterIsNewline(code, "text")).toBe(true)
   })
 })

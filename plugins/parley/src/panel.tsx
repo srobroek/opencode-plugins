@@ -14,12 +14,15 @@ import type { FileValue, SubmittedAnswer } from "./answers.ts"
 import { DEFAULT_EMOJIS, optionLabel, type Question, sliderBounds } from "./questions.ts"
 import type { RoundView } from "./rounds.ts"
 import {
+  type Arrow,
   accept,
+  arrowAction,
   badge,
   choose,
   type Draft,
   editable,
   editText,
+  enterIsNewline,
   initialDraft,
   mimeFor,
   moveCursor,
@@ -119,6 +122,23 @@ function createRoundControls(
     if (id) onMove?.(id)
   }
 
+  /** Applies an arrow key to the focused card; question moves go to `toQuestion` (none on the inline card). */
+  const arrow = (key: Arrow, toQuestion?: (delta: number) => void) => {
+    const question = current()
+    const action = question ? arrowAction(question, key) : undefined
+    if (!action) return
+    if (action.kind === "question") toQuestion?.(action.delta)
+    else if (action.kind === "cursor") update((q, d) => moveCursor(q, d, action.delta))
+    else update((q, d) => step(q, d, action.delta))
+  }
+
+  /** Whether enter in the open text field saves it (not for code, where it starts a new line). */
+  const enterSaves = () => {
+    const edit = editing()
+    const question = questions().find((candidate) => candidate.id === edit?.id)
+    return edit !== undefined && question !== undefined && !enterIsNewline(question, edit.field)
+  }
+
   const startEdit = (field: "note" | "text") => {
     const question = current()
     if (!question) return
@@ -176,9 +196,15 @@ function createRoundControls(
     current,
     update,
     moveCard,
+    arrow,
+    enterSaves,
     startEdit,
     finishEdit,
     submit,
+    /** shift+enter: the edit layer's `return` would otherwise take it too. */
+    newline: () => {
+      if (textarea && !textarea.isDestroyed) textarea.newLine()
+    },
     setTextarea: (element: TextareaRenderable) => {
       textarea = element
     },
@@ -188,8 +214,23 @@ function createRoundControls(
 export function RoundPanel(props: PanelProps) {
   const theme = () => props.context.theme
   let scroll: ScrollBoxRenderable | undefined
-  const { draftOf, focus, editing, errors, busy, questions, update, moveCard, startEdit, finishEdit, submit, setTextarea } =
-    createRoundControls(props, (id) => scroll?.scrollChildIntoView(`parley-card-${id}`))
+  const {
+    draftOf,
+    focus,
+    editing,
+    errors,
+    busy,
+    questions,
+    update,
+    moveCard,
+    arrow,
+    enterSaves,
+    startEdit,
+    finishEdit,
+    submit,
+    newline,
+    setTextarea,
+  } = createRoundControls(props, (id) => scroll?.scrollChildIntoView(`parley-card-${id}`))
 
   props.context.keymap.layer(() => ({
     enabled: () => editing() === undefined,
@@ -198,8 +239,10 @@ export function RoundPanel(props: PanelProps) {
       { bind: "shift+tab", title: "Previous question", group: "Parley", run: () => moveCard(-1) },
       { bind: "j", title: "Next question", group: "Parley", run: () => moveCard(1) },
       { bind: "k", title: "Previous question", group: "Parley", run: () => moveCard(-1) },
-      { bind: "down", title: "Next choice", group: "Parley", run: () => update((q, d) => moveCursor(q, d, 1)) },
-      { bind: "up", title: "Previous choice", group: "Parley", run: () => update((q, d) => moveCursor(q, d, -1)) },
+      { bind: "down", title: "Next choice", group: "Parley", run: () => arrow("down", moveCard) },
+      { bind: "up", title: "Previous choice", group: "Parley", run: () => arrow("up", moveCard) },
+      { bind: "left", title: "Previous / decrease", group: "Parley", run: () => arrow("left", moveCard) },
+      { bind: "right", title: "Next / increase", group: "Parley", run: () => arrow("right", moveCard) },
       { bind: "space", title: "Choose", group: "Parley", run: () => update((q, d) => choose(q, d)) },
       { bind: "return", title: "Choose", group: "Parley", run: () => update((q, d) => choose(q, d)) },
       ...Array.from({ length: 9 }, (_, index) => ({
@@ -212,8 +255,6 @@ export function RoundPanel(props: PanelProps) {
       { bind: "shift+down", title: "Move down", group: "Parley", run: () => update((q, d) => rankMove(q, d, 1)) },
       { bind: "shift+k", title: "Move up", group: "Parley", run: () => update((q, d) => rankMove(q, d, -1)) },
       { bind: "shift+j", title: "Move down", group: "Parley", run: () => update((q, d) => rankMove(q, d, 1)) },
-      { bind: "left", title: "Decrease", group: "Parley", run: () => update((q, d) => step(q, d, -1)) },
-      { bind: "right", title: "Increase", group: "Parley", run: () => update((q, d) => step(q, d, 1)) },
       { bind: "a", title: "Accept recommendation", group: "Parley", run: () => update(accept) },
       { bind: "d", title: "Defer", group: "Parley", run: () => update((q, d) => toggleDefer(d, q)) },
       { bind: "n", title: "Note", group: "Parley", run: () => startEdit("note") },
@@ -239,6 +280,16 @@ export function RoundPanel(props: PanelProps) {
     enabled: () => editing() !== undefined,
     commands: [
       { bind: "escape", title: "Done editing", group: "Parley", run: () => void finishEdit() },
+      { bind: "shift+return", title: "New line", group: "Parley", run: newline },
+      {
+        bind: "return",
+        title: "Save",
+        group: "Parley",
+        run: () => {
+          if (!enterSaves()) return false
+          void finishEdit()
+        },
+      },
       { bind: "ctrl+return", title: "Submit round", group: "Parley", run: () => void submit() },
       { bind: "ctrl+s", title: "Submit round", group: "Parley", run: () => void submit() },
     ],
@@ -301,8 +352,8 @@ export function RoundPanel(props: PanelProps) {
       <box flexShrink={0} paddingTop={1} paddingBottom={1}>
         <text fg={theme().text.muted} wrapMode="word">
           {editing()
-            ? "esc done · ctrl+enter / ctrl+s submit round"
-            : "tab/j/k question · ↑/↓ choice · space choose · a accept · n note · d defer · e edit · shift+↑/↓ J/K rank · ←/→ adjust · ctrl+enter / ctrl+s submit · esc minimise · D dismiss"}
+            ? `${enterSaves() ? "enter save · shift+enter newline" : "enter newline"} · esc done · ctrl+enter / ctrl+s submit round`
+            : "tab/j/k question · ↑/↓ choice (←/→ side by side) · space choose · a accept · n note · d defer · e edit · shift+↑/↓ J/K rank · ←/→ adjust · ctrl+enter / ctrl+s submit · esc minimise · D dismiss"}
         </text>
       </box>
       <Show when={busy()}>
@@ -327,8 +378,21 @@ const within = (node: Renderable | null | undefined, root: Renderable | undefine
 /** A one-question round as a compact card above the prompt, with the panel's keys. */
 export function InlineCard(props: InlineCardProps) {
   const theme = () => props.context.theme
-  const { draftOf, editing, errors, busy, questions, update, startEdit, finishEdit, submit, setTextarea } =
-    createRoundControls(props)
+  const {
+    draftOf,
+    editing,
+    errors,
+    busy,
+    questions,
+    update,
+    arrow,
+    enterSaves,
+    startEdit,
+    finishEdit,
+    submit,
+    newline,
+    setTextarea,
+  } = createRoundControls(props)
   let box: BoxRenderable | undefined
   const question = () => questions()[0]
 
@@ -360,12 +424,19 @@ export function InlineCard(props: InlineCardProps) {
     await submit()
   }
 
+  const saveAndSend = async () => {
+    await done()
+    await send()
+  }
+
   props.context.keymap.layer(() => ({
     target: () => box,
     enabled: () => editing() === undefined,
     commands: [
-      { bind: "down", title: "Next choice", group: "Parley", run: () => update((q, d) => moveCursor(q, d, 1)) },
-      { bind: "up", title: "Previous choice", group: "Parley", run: () => update((q, d) => moveCursor(q, d, -1)) },
+      { bind: "down", title: "Next choice", group: "Parley", run: () => arrow("down") },
+      { bind: "up", title: "Previous choice", group: "Parley", run: () => arrow("up") },
+      { bind: "left", title: "Previous / decrease", group: "Parley", run: () => arrow("left") },
+      { bind: "right", title: "Next / increase", group: "Parley", run: () => arrow("right") },
       { bind: "j", title: "Next choice", group: "Parley", run: () => update((q, d) => moveCursor(q, d, 1)) },
       { bind: "k", title: "Previous choice", group: "Parley", run: () => update((q, d) => moveCursor(q, d, -1)) },
       { bind: "space", title: "Choose", group: "Parley", run: () => update((q, d) => choose(q, d)) },
@@ -375,8 +446,6 @@ export function InlineCard(props: InlineCardProps) {
         group: "Parley",
         run: () => update((q, d) => choose(q, d, index)),
       })),
-      { bind: "left", title: "Decrease", group: "Parley", run: () => update((q, d) => step(q, d, -1)) },
-      { bind: "right", title: "Increase", group: "Parley", run: () => update((q, d) => step(q, d, 1)) },
       { bind: "a", title: "Accept recommendation", group: "Parley", run: () => update(accept) },
       { bind: "d", title: "Defer", group: "Parley", run: () => update((q, d) => toggleDefer(d, q)) },
       { bind: "n", title: "Note", group: "Parley", run: () => startEdit("note") },
@@ -403,8 +472,18 @@ export function InlineCard(props: InlineCardProps) {
     enabled: () => editing() !== undefined,
     commands: [
       { bind: "escape", title: "Done editing", group: "Parley", run: () => void done() },
-      { bind: "ctrl+return", title: "Submit", group: "Parley", run: () => void submit() },
-      { bind: "ctrl+s", title: "Submit", group: "Parley", run: () => void submit() },
+      { bind: "shift+return", title: "New line", group: "Parley", run: newline },
+      {
+        bind: "return",
+        title: "Save and submit",
+        group: "Parley",
+        run: () => {
+          if (!enterSaves()) return false
+          void saveAndSend()
+        },
+      },
+      { bind: "ctrl+return", title: "Submit", group: "Parley", run: () => void saveAndSend() },
+      { bind: "ctrl+s", title: "Submit", group: "Parley", run: () => void saveAndSend() },
     ],
   }))
 
@@ -443,7 +522,9 @@ export function InlineCard(props: InlineCardProps) {
         {busy()
           ? "Submitting…"
           : editing()
-            ? "esc done · ctrl+s submit"
+            ? enterSaves()
+              ? "enter submit · shift+enter newline · esc done"
+              : "enter newline · ctrl+s submit · esc done"
             : "Parley · 1-9/space choose · enter submit · n note · d defer · e edit · a accept · f full screen · esc hide · D dismiss"}
       </text>
     </box>
@@ -514,7 +595,7 @@ function Card(props: CardProps) {
           <textarea
             ref={props.textareaRef}
             initialValue={props.draft.note}
-            placeholder="Add a note (esc when done)"
+            placeholder="Add a note"
             minHeight={1}
             maxHeight={6}
             flexGrow={1}
