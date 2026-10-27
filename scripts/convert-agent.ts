@@ -2,7 +2,7 @@
 /**
  * Convert Oh My Pi agent markdown into OpenCode V2 agent markdown.
  *
- *   bun scripts/convert-agent.ts --out <dir> [--roles roles.json] [--role-map map.json] [--fragment <file>] [--mode subagent] [--allow-listed] <files...>
+ *   bun scripts/convert-agent.ts --out <dir> [--roles roles.json] [--role-map map.json] [--fragment <file>] [--mode subagent] [--allow-listed] [--exclusive] <files...>
  *
  * Writes `<dir>/<id>.md` per agent plus a roles fragment for the model-roles plugin
  * ({ agents: { <id>: <role> } }, default `<dir>/roles.json`), and prints warnings. Each
@@ -47,6 +47,12 @@ export interface ConvertOptions {
   mode?: Mode
   /** Emit explicit `allow` rules for listed tools; otherwise they inherit global rules. */
   allowListed?: boolean
+  /**
+   * Start with a deny on every action, then allow only the listed tools plus skill, Code
+   * Mode (`execute`) and, for omp `lsp`, the `lsp_*` MCP tools. A wholly denied tool is
+   * left out of the agent's requests, so this also shrinks every request.
+   */
+  exclusive?: boolean
 }
 
 export interface V2Frontmatter {
@@ -83,6 +89,9 @@ const TOOL_MAP: Record<string, string[]> = {
 }
 
 const DROPPED_TOOLS = new Set(["lsp", "ast_grep", "eval", "yield", "github"])
+
+/** Allowed in every `exclusive` agent: loading skills and Code Mode, which carries plugin tools. */
+export const EXCLUSIVE_BASE = ["skill", "execute"] as const
 
 /** omp agent ids that have a different V2 counterpart. */
 export const AGENT_MAP: Record<string, string> = { scout: "explore" }
@@ -199,18 +208,41 @@ export function buildPermissions(
   spawns: unknown,
   warnings: string[],
   allowListed = false,
+  exclusive = false,
 ): Permission[] {
   const all = (action: string, effect: Effect): Permission => ({ action, resource: "*", effect })
   const children = splitList(spawns).map((id) => AGENT_MAP[id] ?? id)
   if (tools === undefined) {
-    warnings.push("tools: none listed, so omp grants every tool; only subagent rules are emitted")
+    warnings.push(
+      exclusive
+        ? "tools: none listed, so --exclusive has nothing to allow; only subagent rules are emitted"
+        : "tools: none listed, so omp grants every tool; only subagent rules are emitted",
+    )
   }
   const actions = tools === undefined ? new Set<string>(MANAGED_ACTIONS) : mapTools(tools, warnings)
   const rules: Permission[] = []
-  for (const action of MANAGED_ACTIONS) {
-    if (action === "subagent" && children.length > 0) continue
-    if (!actions.has(action)) rules.push(all(action, "deny"))
-    else if (allowListed) rules.push(all(action, "allow"))
+  if (exclusive && tools !== undefined) {
+    rules.push(all("*", "deny"))
+    for (const action of MANAGED_ACTIONS) {
+      if (action === "subagent" || !actions.has(action)) continue
+      rules.push(all(action, "allow"))
+      if (action === "read")
+        rules.push(
+          { action: "read", resource: "*.env", effect: "ask" },
+          { action: "read", resource: "*.env.*", effect: "ask" },
+          { action: "read", resource: "*.env.example", effect: "allow" },
+        )
+    }
+    for (const action of EXCLUSIVE_BASE) rules.push(all(action, "allow"))
+    if (splitList(tools).includes("lsp")) rules.push(all("lsp_*", "allow"))
+    rules.push(all("external_directory", "ask"))
+    if (children.length === 0 && actions.has("subagent")) rules.push(all("subagent", "allow"))
+  } else {
+    for (const action of MANAGED_ACTIONS) {
+      if (action === "subagent" && children.length > 0) continue
+      if (!actions.has(action)) rules.push(all(action, "deny"))
+      else if (allowListed) rules.push(all(action, "allow"))
+    }
   }
   if (children.length > 0) {
     rules.push(all("subagent", "deny"))
@@ -349,7 +381,7 @@ export function convertAgent(text: string, options: ConvertOptions): Converted {
     mode: options.mode ?? "subagent",
     ...(model ? { model } : {}),
     ...(tier ? { request: { headers: { [MODEL_ROLE_HEADER]: tier } } } : {}),
-    permissions: buildPermissions(data.tools, data.spawns, warnings, options.allowListed),
+    permissions: buildPermissions(data.tools, data.spawns, warnings, options.allowListed, options.exclusive),
   }
   if (!frontmatter.description) warnings.push("description: missing; the subagent catalog shows nothing")
   let converted = rewriteReferences(body.trim(), warnings)
@@ -397,11 +429,12 @@ export interface Cli {
   fragment?: string
   mode: Mode
   allowListed: boolean
+  exclusive: boolean
   files: string[]
 }
 
 export function parseArgs(argv: string[]): Cli {
-  const cli: Partial<Cli> & { files: string[] } = { files: [], mode: "subagent", allowListed: false }
+  const cli: Partial<Cli> & { files: string[] } = { files: [], mode: "subagent", allowListed: false, exclusive: false }
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i] ?? ""
     const next = () => {
@@ -418,12 +451,13 @@ export function parseArgs(argv: string[]): Cli {
       if (mode !== "subagent" && mode !== "primary" && mode !== "all") throw new Error(`bad --mode ${mode}`)
       cli.mode = mode
     } else if (arg === "--allow-listed") cli.allowListed = true
+    else if (arg === "--exclusive") cli.exclusive = true
     else if (arg.startsWith("--")) throw new Error(`unknown flag ${arg}`)
     else cli.files.push(arg)
   }
   if (!cli.out || cli.files.length === 0)
     throw new Error(
-      "usage: bun scripts/convert-agent.ts --out <dir> [--roles roles.json] [--role-map map.json] [--fragment <file>] [--mode subagent] [--allow-listed] <files...>",
+      "usage: bun scripts/convert-agent.ts --out <dir> [--roles roles.json] [--role-map map.json] [--fragment <file>] [--mode subagent] [--allow-listed] [--exclusive] <files...>",
     )
   return cli as Cli
 }
@@ -440,6 +474,7 @@ function main(argv: string[]): number {
       ...(roleMap ? { roleMap } : {}),
       mode: cli.mode,
       allowListed: cli.allowListed,
+      exclusive: cli.exclusive,
     })
     if (agent.id !== basename(file, ".md")) agent.warnings.push(`id ${agent.id} differs from filename ${basename(file)}`)
     converted.push(agent)

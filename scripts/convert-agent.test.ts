@@ -126,6 +126,31 @@ describe("buildPermissions", () => {
     expect(warnings[0]).toContain("subagent_depth")
   })
 
+  test("exclusive denies everything, then allows the listed tools, skill, Code Mode and lsp", () => {
+    const rules = buildPermissions("read, grep, bash, lsp", "scout", [], false, true)
+    expect(rules).toEqual([
+      { action: "*", resource: "*", effect: "deny" },
+      { action: "read", resource: "*", effect: "allow" },
+      { action: "read", resource: "*.env", effect: "ask" },
+      { action: "read", resource: "*.env.*", effect: "ask" },
+      { action: "read", resource: "*.env.example", effect: "allow" },
+      { action: "grep", resource: "*", effect: "allow" },
+      { action: "shell", resource: "*", effect: "allow" },
+      { action: "skill", resource: "*", effect: "allow" },
+      { action: "execute", resource: "*", effect: "allow" },
+      { action: "lsp_*", resource: "*", effect: "allow" },
+      { action: "external_directory", resource: "*", effect: "ask" },
+      { action: "subagent", resource: "*", effect: "deny" },
+      { action: "subagent", resource: "explore", effect: "allow" },
+    ])
+  })
+
+  test("exclusive without a tools list falls back to subagent rules and says so", () => {
+    const warnings: string[] = []
+    expect(buildPermissions(undefined, undefined, warnings, false, true)).toEqual([])
+    expect(warnings[0]).toContain("--exclusive")
+  })
+
   test("an agent without tools only gets subagent rules", () => {
     expect(buildPermissions(undefined, "scout", [])).toEqual([
       { action: "subagent", resource: "*", effect: "deny" },
@@ -280,8 +305,10 @@ describe("parseArgs", () => {
       out: "o",
       mode: "subagent",
       allowListed: true,
+      exclusive: false,
       files: ["a.md", "b.md"],
     })
+    expect(parseArgs(["--out", "o", "--exclusive", "a.md"]).exclusive).toBe(true)
   })
 
   test("rejects missing arguments and unknown flags", () => {
