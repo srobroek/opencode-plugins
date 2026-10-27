@@ -1,7 +1,10 @@
 # lang-rust
 
-Rust guidance for OpenCode as skills: crate, workspace, CI, persistence, bindings,
-safe-mutation and Tauri defaults, the format, lint and test commands, and profiling.
+Rust guidance for OpenCode as skills: the format, lint and test commands, testing
+idioms, crate and workspace layout, CI, sqlx persistence and Tauri defaults, and
+profiling. Language-neutral design (error enums and newtypes, generated bindings and
+wire casing, plan/approve/apply flows) is in the `quality` plugin's `quality-code-design`
+skill and its `rust.md`, `contracts.md` and `safe-mutation.md` references.
 The plugin ships no hooks.
 
 Replaces the former `rust` plugin, ported from the omp-plugins `rust` plugin. The omp
@@ -40,13 +43,14 @@ already exists:
 
 - `lang-rust`: the router.
 - `lang-rust-quality`: format, lint and test commands.
-- `lang-rust-crate-boundaries`: crate splits, facades, adapters.
-- `lang-rust-domain-modeling`: thiserror and serde newtypes.
-- `lang-rust-contract-boundary`: generated bindings and wire casing.
-- `lang-rust-safe-mutation`: plan/approve/apply and CAS.
-- `lang-rust-ci`: rust-cache, ci-gate, attestation, linker placement, prebuilt tools.
-- `lang-rust-persistence`: sqlx, migrations, transactional CAS.
-- `lang-rust-workspace`: workspace lints, dependencies, and layered tests.
+- `lang-rust-testing`: unit and integration layout, nextest, doc tests, proptest, insta,
+  tokio paused time.
+- `lang-rust-packaging`: crate splits, `lib.rs` facades, workspace manifest, lints and
+  dependencies, feature-gated dev code.
+- `lang-rust-ci`: rust-cache, `CARGO_INCREMENTAL`, linker placement, prebuilt tools,
+  sccache or mold. Workflow structure is the `toolchain` plugin's `ci-github-actions`.
+- `lang-rust-persistence`: persistence crate, `migrate!` and `build.rs` reruns, offline
+  `.sqlx` data, `rows_affected` CAS, `#[sqlx::test]`.
 - `lang-rust-profiling`: samply, cargo flamegraph, perf and criterion baselines; the
   method is the `quality` plugin's `quality-profiling` skill.
 - `lang-rust-tauri`: Tauri v2 bundles, updater, WebDriver, and the MCP bridge reference.

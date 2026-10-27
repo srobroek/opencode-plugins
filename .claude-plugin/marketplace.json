@@ -73,7 +73,7 @@
     {
       "name": "lang-rust",
       "source": "./plugins/lang-rust",
-      "description": "Rust skills: fmt, clippy and test checks, CI, crates, workspaces, errors, sqlx persistence, bindings, safe mutation, Tauri and profiling.",
+      "description": "Rust skills: fmt, clippy and test checks, testing with nextest, proptest and insta, crates and workspaces, CI, sqlx persistence, Tauri and profiling.",
       "version": "0.1.0",
       "category": "development"
     },

@@ -1,11 +1,16 @@
 ---
 name: lang-rust-ci
-description: Use when authoring Rust GitHub Actions CI, rust-cache keys, required-check gates, or supply-chain attestation.
+description: Use when authoring Rust GitHub Actions CI (rust-cache keys, linker placement, prebuilt cargo tools, sccache or mold).
 metadata:
   opencode/autoinvoke: false
 ---
 
 # Rust CI Defaults (GitHub Actions)
+
+Workflow structure (the single required `ci-gate` job, path filters, matrices,
+concurrency, SHA-pinned actions, build attestation) is the `toolchain` plugin's
+`ci-github-actions` skill. The check steps and their order are `lang-rust-quality`.
+This skill is what is specific to Rust.
 
 ## Caching & speed
 
@@ -30,17 +35,10 @@ metadata:
   dominates. With `sccache`, use an S3/GCS backend -- the GitHub Actions cache
   backend fights `rust-cache` for the 10 GB limit (verify with `sccache --show-stats`).
 
-## Structure
+## Steps
 
-- Filter paths with `dorny/paths-filter` feeding job `if:` conditions. Never put
-  `paths:` on a job that is a required check -- skipped required checks deadlock.
-- Make ONE `ci-gate` job the sole required status: `if: always()`, needs all
-  jobs, `re-actors/alls-green` + `allowed-skips`.
-- `fail-fast: false` on the OS matrix; `cancel-in-progress: true` on CI only
-  (omit on release workflows mid-upload).
-
-## Supply chain
-
-- SHA-pin third-party actions (e.g. `pinact`).
-- Attest released binaries with `actions/attest-build-provenance`
-  (needs `id-token: write`, `attestations: write`).
+- Build and test with `--locked`, so a stale `Cargo.lock` fails instead of being
+  rewritten on the runner.
+- With nextest, run `cargo test --doc` as its own step; nextest skips doc tests.
+- sqlx offline builds: `cargo sqlx prepare --check` (see `lang-rust-persistence`).
+- `fail-fast: false` on the OS matrix: a Windows-only failure stays visible.

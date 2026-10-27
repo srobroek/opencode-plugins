@@ -1382,43 +1382,37 @@ Run clippy and the tests for this Rust crate.
 Set up GitHub Actions CI for this Rust workspace with rust-cache and a required-check gate.
 ```
 
-**Expect:** `lang-rust-ci`.
+**Expect:** `lang-rust-ci`, and `ci-github-actions` from the toolchain plugin for the gate.
 
 ```text
 Split this Rust crate so the domain has no IO, behind a lib.rs facade.
 ```
 
-**Expect:** `lang-rust-crate-boundaries`.
+**Expect:** `lang-rust-packaging`.
 
 ```text
 Add workspace lints and move shared versions into workspace.dependencies.
 ```
 
-**Expect:** `lang-rust-workspace`.
-
-```text
-Define a thiserror error enum and a serde-transparent UserId newtype.
-```
-
-**Expect:** `lang-rust-domain-modeling`.
+**Expect:** `lang-rust-packaging`.
 
 ```text
 Add a Rust crate for persistence: a sqlx repository with a compare-and-swap update inside a transaction.
 ```
 
-**Expect:** `lang-rust-persistence`.
+**Expect:** `lang-rust-persistence` (`rows_affected`, `build.rs` rerun, `#[sqlx::test]`).
 
 ```text
-Generate TypeScript bindings for my Rust IPC commands and guard against codegen drift.
+Add proptest property tests and insta snapshot tests to this Rust crate.
 ```
 
-**Expect:** `lang-rust-contract-boundary`.
+**Expect:** `lang-rust-testing` (`proptest!`, committed `proptest-regressions/`, `cargo insta review`).
 
 ```text
-Implement a plan/approve/apply flow for file mutations in Rust with TOCTOU checks.
+Define a thiserror error enum and a serde-transparent UserId newtype.
 ```
 
-**Expect:** `lang-rust-safe-mutation`.
+**Expect:** `quality-code-design` and its `rust.md` reference (the former `lang-rust-domain-modeling`); bindings and plan/approve/apply prompts likewise reach `contracts.md` and `safe-mutation.md`.
 
 ```text
 Set up the Tauri v2 updater and code signing for my desktop app.
