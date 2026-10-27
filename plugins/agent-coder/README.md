@@ -53,6 +53,7 @@ plugin's family are allowed by id:
 | `toolchain` | `toolchain-*`, `ops-*`; `shell-language`, `terraform-language`, `backend-background-jobs`, `ci-github-actions`, `coexistence-worktree`, `infrastructure-tfstate-guard` |
 | `architecture` | `architecture-*` |
 | `trunk-dev`, `worktrunk` | `trunk-dev-*`, `worktrunk-*` |
+| `ast-grep` | `ast-grep-*` |
 | `dep-update`, `whats-new` | `dep-update`, `whats-new` |
 
 Design, journeys, speckit, delivery, debate, beads and project-management skills are
