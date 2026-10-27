@@ -207,6 +207,9 @@ Some projects ship neither. Then the commit log (C1) is the primary source --
 classify it and read the breaking/feat commits' diffs directly. Say so in the
 report: "no CHANGELOG or releases; summary derived from the commit log."
 
+For a source-level API comparison across many files, the `repomix` skill packs
+the repo at both tags and diffs the two packs.
+
 ---
 
 ## Step D -- prose sources (only when needed)
