@@ -1,13 +1,17 @@
 {
   "name": "@srobroek/opencode-find-tools",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Discover and vet plugins, skills and MCP servers across local inventory, catalogs and public registries, without installing anything.",
   "private": true,
   "type": "module",
   "exports": {
     ".": "./dist/index.js"
   },
-  "files": ["dist", "index.js", "skills"],
+  "files": [
+    "dist",
+    "index.js",
+    "skills"
+  ],
   "opencode-plugins": {
     "claude": false,
     "codex": false

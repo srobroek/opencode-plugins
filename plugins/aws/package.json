@@ -1,13 +1,17 @@
 {
   "name": "@srobroek/opencode-aws",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "AWS working guidance as a skill, plus documented config for the read-only AWS MCP Server and the AWS Pricing MCP server.",
   "private": true,
   "type": "module",
   "exports": {
     ".": "./dist/index.js"
   },
-  "files": ["dist", "index.js", "skills"],
+  "files": [
+    "dist",
+    "index.js",
+    "skills"
+  ],
   "opencode-plugins": {
     "description": "AWS working guidance: route AWS tasks through the AWS MCP Server's guided skills, verify against AWS documentation, and price with the AWS Pricing MCP server."
   },

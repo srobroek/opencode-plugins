@@ -1,13 +1,17 @@
 {
   "name": "@srobroek/opencode-eli5",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Explain a topic at five depth levels, from metaphor to frontier.",
   "private": true,
   "type": "module",
   "exports": {
     ".": "./dist/index.js"
   },
-  "files": ["dist", "index.js", "skills"],
+  "files": [
+    "dist",
+    "index.js",
+    "skills"
+  ],
   "opencode-plugins": {
     "category": "productivity"
   },

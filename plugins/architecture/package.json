@@ -1,13 +1,18 @@
 {
   "name": "@srobroek/opencode-architecture",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Architecture skills (capability-first layout, ownership boundaries, durable docs/ knowledge) and a read-only architect subagent.",
   "private": true,
   "type": "module",
   "exports": {
     ".": "./dist/index.js"
   },
-  "files": ["dist", "index.js", "skills", "agents"],
+  "files": [
+    "dist",
+    "index.js",
+    "skills",
+    "agents"
+  ],
   "opencode-plugins": {
     "description": "Architecture skills: capability-first top-level layout, ownership boundaries, and durable docs/ project knowledge."
   },

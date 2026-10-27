@@ -1,13 +1,18 @@
 {
   "name": "@srobroek/opencode-quality",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Code design and review guidance, a code-quality policy, logic prototyping, and a read-only adversarial-challenger subagent.",
   "private": true,
   "type": "module",
   "exports": {
     ".": "./dist/index.js"
   },
-  "files": ["dist", "index.js", "skills", "agents"],
+  "files": [
+    "dist",
+    "index.js",
+    "skills",
+    "agents"
+  ],
   "opencode-plugins": {
     "description": "Code design and review guidance, an always-on style code-quality policy, and throwaway logic prototypes."
   },

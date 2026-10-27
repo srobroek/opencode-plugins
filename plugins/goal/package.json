@@ -1,13 +1,17 @@
 {
   "name": "@srobroek/opencode-goal",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Goal mode and loop mode for OpenCode V2: /goal keeps working toward an objective, /loop repeats a prompt.",
   "private": true,
   "type": "module",
   "exports": {
     ".": "./dist/index.js"
   },
-  "files": ["dist", "index.js", "NOTICE"],
+  "files": [
+    "dist",
+    "index.js",
+    "NOTICE"
+  ],
   "peerDependencies": {
     "@opencode/plugin": "^2.1.4"
   },

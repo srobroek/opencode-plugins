@@ -11,98 +11,98 @@
       "name": "agent-reviewer",
       "source": "./plugins/agent-reviewer",
       "description": "A security review skill: trace untrusted input to sinks, tag CWE ids and check cross-boundary dispatch.",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "category": "development"
     },
     {
       "name": "architecture",
       "source": "./plugins/architecture",
       "description": "Architecture skills: capability-first top-level layout, ownership boundaries, and durable docs/ project knowledge.",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "category": "development"
     },
     {
       "name": "aws",
       "source": "./plugins/aws",
       "description": "AWS working guidance: route AWS tasks through the AWS MCP Server's guided skills, verify against AWS documentation, and price with the AWS Pricing MCP server.",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "category": "development"
     },
     {
       "name": "chezmoi",
       "source": "./plugins/chezmoi",
       "description": "Refuse edits and shell writes to chezmoi-managed live files, naming the source to edit, plus the chezmoi-editor skill.",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "category": "development"
     },
     {
       "name": "debate",
       "source": "./plugins/debate",
       "description": "Stress-test a decision from both sides, grill a plan in frontier rounds, or write a questionnaire for someone else.",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "category": "productivity"
     },
     {
       "name": "design",
       "source": "./plugins/design",
       "description": "UI and UX design skills: design-system audit, DESIGN.md, rendered-surface review, accessibility audit, motion, microcopy, prototypes, and wireframes.",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "category": "development"
     },
     {
       "name": "eli5",
       "source": "./plugins/eli5",
       "description": "Explain a topic at five depth levels, from metaphor to frontier.",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "category": "productivity"
     },
     {
       "name": "languages",
       "source": "./plugins/languages",
       "description": "Go, Python and TypeScript lint, type-check and test skills; formatting runs through OpenCode built-in formatters.",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "category": "development"
     },
     {
       "name": "project",
       "source": "./plugins/project",
       "description": "Project lifecycle: pick an OSI-approved license from the project's constraints.",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "category": "productivity"
     },
     {
       "name": "quality",
       "source": "./plugins/quality",
       "description": "Code design and review guidance, an always-on style code-quality policy, and throwaway logic prototypes.",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "category": "development"
     },
     {
       "name": "rust",
       "source": "./plugins/rust",
       "description": "Rust migration-edit gate, cargo install, RUSTFLAGS linker and global target-dir advisories, and Rust guidance skills.",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "category": "development"
     },
     {
       "name": "toolchain",
       "source": "./plugins/toolchain",
       "description": "Toolchain defaults as skills: stack, frontend, infrastructure, languages, observability, shell, Terraform, caches, background jobs and worktree coexistence.",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "category": "development"
     },
     {
       "name": "trunk-dev",
       "source": "./plugins/trunk-dev",
       "description": "Trunk-based delivery for OpenCode: a Conventional Commit and main-push gate, skip-CI and MR/PR advisories, a feature-flag cleanup bead after each flagged merge, and release-setup skills.",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "category": "development"
     },
     {
       "name": "worktrunk",
       "source": "./plugins/worktrunk",
       "description": "Worktrunk (wt) skills: work in linked worktrees and run deterministic preflight checks before an agent run or merge.",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "category": "development"
     }
   ]

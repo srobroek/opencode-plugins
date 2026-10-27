@@ -1,13 +1,17 @@
 {
   "name": "@srobroek/opencode-agent-researcher",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "The researcher subagent: answers one scoped question from code, docs and the web with cited observations and inferences, and records it on a bead when given one.",
   "private": true,
   "type": "module",
   "exports": {
     ".": "./dist/index.js"
   },
-  "files": ["dist", "index.js", "agents"],
+  "files": [
+    "dist",
+    "index.js",
+    "agents"
+  ],
   "peerDependencies": {
     "@opencode/plugin": "^2.1.4"
   },

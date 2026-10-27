@@ -1,6 +1,6 @@
 {
   "name": "project",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Project lifecycle: pick an OSI-approved license from the project's constraints.",
   "author": {
     "name": "Sjors Robroek",

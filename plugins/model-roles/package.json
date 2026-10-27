@@ -1,6 +1,6 @@
 {
   "name": "@srobroek/opencode-model-roles",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Give agents a model tier (cheap, standard, strong, reviewer) derived from the model catalog, and resolve each tier to the first available candidate.",
   "private": true,
   "type": "module",
@@ -8,7 +8,11 @@
     ".": "./dist/index.js",
     "./tui": "./dist/tui.js"
   },
-  "files": ["dist", "index.js", "tui.js"],
+  "files": [
+    "dist",
+    "index.js",
+    "tui.js"
+  ],
   "peerDependencies": {
     "@opencode/plugin": "^2.1.4"
   },
