@@ -41,14 +41,14 @@ ask. `find_tools_scan` is denied: adopting new tools is not development work.
 
 ## Skills
 
-Skills are allowlisted by id. Where a plugin routes a skill family through one
+Skills are allowlisted by id, and the per-language plugins by the prefix `lang-*`, so a
+skill added to one is covered. Where a plugin routes a skill family through one
 router skill, the router is allowed too, because the family's members are hidden
 from the listing and only load by id through it:
 
 | Source plugin | Skills |
 | --- | --- |
-| `languages` | router `language-quality`; `go-quality`, `python-quality`, `typescript-quality`, `lang-go-profiling`, `lang-python-profiling`, `lang-typescript-profiling` |
-| `rust` | router `rust-guide`; `rust-ci`, `rust-contract-boundary`, `rust-crate-boundaries`, `rust-domain-modeling`, `rust-persistence`, `rust-quality`, `rust-safe-mutation`, `rust-tauri`, `rust-workspace`, `lang-rust-profiling` |
+| `lang-go`, `lang-python`, `lang-typescript`, `lang-rust` | the prefix `lang-*`: each language's router `lang-<language>` and its members, such as `lang-rust-persistence` and `lang-python-profiling` |
 | `quality` | `quality-code-design` (debugging, TDD), `quality-code-policy`, `quality-profiling`, `quality-testing` |
 | `toolchain` | router `toolchain-guide`; `shell-language`, `terraform-language`, `backend-background-jobs`, `ci-github-actions`, `coexistence-worktree`, `infrastructure-tfstate-guard`, `ops-no-global-cargo-target`, `ops-toolchain-cache-policy`, `toolchain-asset-ownership`, `toolchain-frontend`, `toolchain-infrastructure`, `toolchain-languages`, `toolchain-quality-observability`, `toolchain-stack-defaults` |
 | `architecture` | router `architecture-guide`; `architecture-docs-files`, `architecture-ownership`, `architecture-top-level` |
