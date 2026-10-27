@@ -1,6 +1,8 @@
 ---
 name: journey-verify
 description: "Use when validating user journeys against the running product: drive each step, triage mismatches, record results."
+metadata:
+  opencode/autoinvoke: false
 ---
 
 # journey-verify

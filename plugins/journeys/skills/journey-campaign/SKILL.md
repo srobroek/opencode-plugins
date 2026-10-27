@@ -1,6 +1,8 @@
 ---
 name: journey-campaign
 description: "Use for fleet-scale journey or issue validation: fan out validators, fix defects and re-validate until green."
+metadata:
+  opencode/autoinvoke: false
 ---
 
 # journey-campaign

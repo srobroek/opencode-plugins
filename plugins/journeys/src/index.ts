@@ -22,6 +22,7 @@ export const SKILL_NAMES = [
   "journey-verify-changed",
   "journey-campaign",
   "journey-consolidate",
+  "journeys-guide",
 ] as const
 
 export const SKILL_PATHS = SKILL_NAMES.map((name) =>

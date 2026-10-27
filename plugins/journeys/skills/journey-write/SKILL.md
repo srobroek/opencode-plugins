@@ -1,6 +1,8 @@
 ---
 name: journey-write
 description: Use when authoring or amending user journeys from feature evidence, grilling on unknowns and checking readiness.
+metadata:
+  opencode/autoinvoke: false
 ---
 
 # journey-write

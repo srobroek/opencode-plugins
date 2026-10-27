@@ -294,7 +294,8 @@ var SKILL_NAMES = [
   "journey-verify",
   "journey-verify-changed",
   "journey-campaign",
-  "journey-consolidate"
+  "journey-consolidate",
+  "journeys-guide"
 ];
 var SKILL_PATHS = SKILL_NAMES.map((name) => fileURLToPath3(new URL(`../skills/${name}/SKILL.md`, import.meta.url)));
 var COMMANDS = ["index", "lint", "prune"];

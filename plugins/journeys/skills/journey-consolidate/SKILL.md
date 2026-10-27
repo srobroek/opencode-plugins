@@ -1,6 +1,8 @@
 ---
 name: journey-consolidate
 description: "Use when advancing a journey checkpoint with approval: flush delta-log entries, prune old runs, regenerate the index."
+metadata:
+  opencode/autoinvoke: false
 ---
 
 # journey-consolidate

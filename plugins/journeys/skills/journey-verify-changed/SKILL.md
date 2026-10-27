@@ -1,6 +1,8 @@
 ---
 name: journey-verify-changed
 description: Use when validating only the journeys affected by a diff, PR, or branch change rather than the full journey suite.
+metadata:
+  opencode/autoinvoke: false
 ---
 
 # journey-verify-changed

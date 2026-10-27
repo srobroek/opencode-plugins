@@ -16,6 +16,10 @@ subagents.
 
 ## Skills
 
+Only `journeys-guide` is listed to the model in OpenCode: it is a router whose body maps each
+situation to one of the skills below, which set `opencode/autoinvoke: false` and load by id. One listing
+entry instead of one per skill keeps the per-request skills listing short.
+
 The plugin registers these skills from `skills/`, unless a skill with the same id
 already exists:
 
