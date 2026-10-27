@@ -473,7 +473,16 @@ function describeAnswer(question, answer, index) {
 
 // plugins/parley/src/takeover.ts
 var RECOMMENDED = /\s*\(recommended\)\s*$/i;
-var DISMISSED = "The user dismissed this question";
+var BUILTIN = Symbol("parley.builtin");
+function wrapQuestion(builtin, takeover, onBuiltin) {
+  return async (input, context) => {
+    const outcome = await takeover(input, context);
+    if (outcome !== BUILTIN)
+      return outcome;
+    onBuiltin?.(context);
+    return builtin(input, context);
+  };
+}
 var clip = (text, max) => text.length > max ? `${text.slice(0, max - 1)}\u2026` : text;
 function fromPrompts(prompts) {
   if (!Array.isArray(prompts) || prompts.length === 0)
@@ -690,10 +699,11 @@ var ParleyRpc = Rpc.define({
         properties: {
           sessionID: { type: "string" },
           roundID: { type: "string" },
-          action: { type: "string", enum: ["opened", "updated", "closed", "ended"] },
+          action: { type: "string", enum: ["opened", "updated", "closed", "ended", "native"] },
           status: { type: "string" },
           reason: { type: "string" },
-          message: { type: "string" }
+          message: { type: "string" },
+          callID: { type: "string" }
         }
       }
     }
@@ -1001,6 +1011,8 @@ class Rounds {
       return { errors };
     if (existing) {
       existing.questions.push(...input.questions);
+      if (input.callID !== undefined)
+        existing.callIDs.push(input.callID);
       if (input.title !== undefined)
         existing.title = input.title;
       existing.updated = now;
@@ -1017,6 +1029,7 @@ class Rounds {
       questions: [...input.questions],
       answers: new Map,
       delivered: new Set,
+      callIDs: input.callID === undefined ? [] : [input.callID],
       status: "open",
       created: now,
       updated: now
@@ -1142,7 +1155,8 @@ function view(round) {
     ...round.title === undefined ? {} : { title: round.title },
     status: round.status,
     questions: round.questions,
-    answers: [...round.answers.values()].map(publicAnswer)
+    answers: [...round.answers.values()].map(publicAnswer),
+    ...round.callIDs.length === 0 ? {} : { callIDs: [...round.callIDs] }
   };
 }
 function waitFor(rounds, round, options) {
@@ -1224,22 +1238,31 @@ class Parley {
   }
   async takeover(input, context) {
     if (!shouldTakeOver(this.deps.settings, this.attached(context.sessionID)))
-      return;
+      return BUILTIN;
     const prompts = input.questions ?? [];
     const mapped = fromPrompts(prompts);
     if ("errors" in mapped)
-      return;
-    const { result, questions } = await this.#open({ questions: mapped.questions, timeout_s: 0 }, context);
-    if (result.status === "cancelled")
-      throw new Error(result.reason === "user_closed" || result.reason === "dismissed" ? DISMISSED : `The question was cancelled before the user answered (${result.reason ?? "cancelled"})`);
+      return BUILTIN;
+    const { result, questions } = await this.#open({ questions: mapped.questions, timeout_s: 0 }, context, context.callID);
+    if (result.status === "cancelled") {
+      if (result.reason === "user_closed" || result.reason === "dismissed")
+        return BUILTIN;
+      throw new Error(`The question was cancelled before the user answered (${result.reason ?? "cancelled"})`);
+    }
     return nativeResult(prompts, questions, result);
   }
-  async#open(input, context) {
+  async handedToBuiltin(sessionID, callID) {
+    if (!this.attached(sessionID))
+      return;
+    await this.deps.emit({ sessionID, roundID: "", action: "native", callID });
+  }
+  async#open(input, context, callID) {
     const questions = input.questions;
     const opened = this.rounds.open(context.sessionID, {
       questions,
       ...input.title === undefined ? {} : { title: input.title },
-      ...input.round === undefined ? {} : { round: input.round }
+      ...input.round === undefined ? {} : { round: input.round },
+      ...callID === undefined ? {} : { callID }
     }, this.#now());
     if ("errors" in opened)
       throw new InputError(`Invalid questions:
@@ -1414,8 +1437,7 @@ var src_default = Plugin.define({
         const wanted = service.takeoverWanted();
         if (wanted && !current)
           return ctx.tool.transform((editor) => editor.update("question", (draft) => {
-            const builtin = draft.execute;
-            draft.execute = async (input, context) => await service.takeover(input, call(context)) ?? builtin(input, context);
+            draft.execute = wrapQuestion(draft.execute, (input, context) => service.takeover(input, call(context)), (context) => void service.handedToBuiltin(context.sessionID, context.id));
           }));
         if (!wanted && current)
           await current.dispose();
@@ -1438,6 +1460,7 @@ var src_default = Plugin.define({
     emitEvent = (event) => rpc.events.emit("round", { ...event });
     const call = (context) => ({
       sessionID: context.sessionID,
+      callID: context.id,
       signal: context.signal,
       progress: context.progress,
       tool: context

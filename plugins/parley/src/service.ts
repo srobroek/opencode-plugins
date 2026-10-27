@@ -4,7 +4,7 @@ import { Presence } from "./presence.ts"
 import { coerceQuestion, type Question, validateQuestions } from "./questions.ts"
 import { collect, type Round, type RoundResult, Rounds, view, type WaitMode, waitFor } from "./rounds.ts"
 import type { RoundEvent } from "./rpc.ts"
-import { DISMISSED, fromPrompts, nativeResult, shouldTakeOver } from "./takeover.ts"
+import { BUILTIN, fromPrompts, nativeResult, shouldTakeOver } from "./takeover.ts"
 
 export const DEFAULT_TIMEOUT_S = 1800
 export const CLOSED_TTL_MS = 30 * 60_000
@@ -34,6 +34,8 @@ export interface CallContext {
   readonly progress?: (update: Record<string, unknown>) => Promise<void>
   /** The original tool context, passed through to the question tool in fallback mode. */
   readonly tool?: unknown
+  /** The tool call id, recorded on taken-over rounds. */
+  readonly callID?: string
 }
 
 export interface QuestionTool {
@@ -112,24 +114,34 @@ export class Parley {
 
   /**
    * Runs a built-in `question` call as a parley round when takeover applies, and returns its result in
-   * the question tool's shape. `undefined` means: leave the call to the built-in tool.
+   * the question tool's shape. `BUILTIN` means: hand the call to the built-in tool, either because
+   * takeover does not apply or because the user dismissed the round. In that case the dismissing TUI
+   * cancels the built-in form, so the call fails with the built-in dismissal and the turn ends.
    */
   async takeover(input: { questions?: readonly Prompt[] }, context: CallContext) {
-    if (!shouldTakeOver(this.deps.settings, this.attached(context.sessionID))) return undefined
+    if (!shouldTakeOver(this.deps.settings, this.attached(context.sessionID))) return BUILTIN
     const prompts = input.questions ?? []
     const mapped = fromPrompts(prompts)
-    if ("errors" in mapped) return undefined
-    const { result, questions } = await this.#open({ questions: mapped.questions, timeout_s: 0 }, context)
-    if (result.status === "cancelled")
-      throw new Error(
-        result.reason === "user_closed" || result.reason === "dismissed"
-          ? DISMISSED
-          : `The question was cancelled before the user answered (${result.reason ?? "cancelled"})`,
-      )
+    if ("errors" in mapped) return BUILTIN
+    const { result, questions } = await this.#open({ questions: mapped.questions, timeout_s: 0 }, context, context.callID)
+    if (result.status === "cancelled") {
+      if (result.reason === "user_closed" || result.reason === "dismissed") return BUILTIN
+      throw new Error(`The question was cancelled before the user answered (${result.reason ?? "cancelled"})`)
+    }
     return nativeResult(prompts, questions, result)
   }
 
-  async #open(input: AskInput, context: CallContext): Promise<{ result: Result; questions: readonly Question[] }> {
+  /**
+   * Tells the session's TUI that a `question` call went to the built-in tool. Its form events reach
+   * the TUI without a location when the tool runs under the plugin's wrapper, and the TUI drops those,
+   * so the TUI fetches the form itself.
+   */
+  async handedToBuiltin(sessionID: string, callID: string) {
+    if (!this.attached(sessionID)) return
+    await this.deps.emit({ sessionID, roundID: "", action: "native", callID })
+  }
+
+  async #open(input: AskInput, context: CallContext, callID?: string): Promise<{ result: Result; questions: readonly Question[] }> {
     const questions = input.questions
     const opened = this.rounds.open(
       context.sessionID,
@@ -137,6 +149,7 @@ export class Parley {
         questions,
         ...(input.title === undefined ? {} : { title: input.title }),
         ...(input.round === undefined ? {} : { round: input.round }),
+        ...(callID === undefined ? {} : { callID }),
       },
       this.#now(),
     )
