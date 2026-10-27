@@ -145,6 +145,10 @@
     "plugins/agent-seance": {
       "release-type": "node",
       "component": "agent-seance"
+    },
+    "plugins/agent-mechanic": {
+      "release-type": "node",
+      "component": "agent-mechanic"
     }
   }
 }
