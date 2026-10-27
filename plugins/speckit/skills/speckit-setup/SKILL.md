@@ -28,10 +28,13 @@ that worktree and skip each one already done:
 2. Only on explicit opt-in (`installAllowed=true`, after vetting), register the
    community catalog (`catalog.community.json`) as an install source. Never pass
    `--install-allowed` without it.
-3. Install + enable the required extensions not yet installed: `agent-context`, `bugfix`, `cleanup`,
+3. Attempt the optional extensions not yet installed: `agent-context`, `bugfix`, `cleanup`,
    `critique`, `fix-findings`, `iterate`, `qa`, `refine`, `retro`,
-   `security-review`, `status-report`, `tinyspec`. Stop and report failure if
-   any required CLI step fails.
+   `security-review`, `status-report`, `tinyspec`. Report each failed install as
+   skipped with its reason and continue to beads and formulas. A rerun retries
+   missing extensions, not installed ones. Other CLI failures stop setup.
+   `agent-context` is bundled; the others are community/discovery-only by default.
+   Do not bypass catalog trust or infer opt-in from an installation failure.
 4. `bd init --skip-hooks` if no workspace; copy every formula from the speckit
    plugin's `formulas/` directory into `.beads/formulas/`.
    Formulas: `speckit-feature`, `speckit-lean`, `speckit-basic`,
@@ -45,6 +48,11 @@ gitignore only. `skipBeads=true` explicitly omits beads and formulas; report
 that molecule workflows are unavailable rather than claiming full setup.
 Missing formula sources, symlink paths, or divergent destinations stop
 installation before formula copies. Resolve conflicts explicitly, then retry.
+
+Report unavailable extensions before starting a workflow. Use `speckit-basic`
+for a core-only workflow, or perform an unavailable extension step's described
+work directly and record the fallback on its bead. Keep its deliverables and
+review/verification checks; never treat a missing command as completed work.
 
 Then call `speckit_start` for the spec and run the `speckit-specify` skill.
 Workflow order is the poured molecule; `bd mol current <root>` is the current position.

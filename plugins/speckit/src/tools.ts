@@ -43,7 +43,7 @@ export function setupInput(integration: string) {
 
 export const SETUP_DESCRIPTION =
   "Resumable SpecKit bootstrap in the session's workspace; a rerun skips the phases already done.\n" +
-  "Phases: specify init, opt-in community catalog, required extensions, bd init, copy the bundled bd formulas, gitignore spec-status.md. Every phase reports done, skipped (already present) or failed and has its own timeout."
+  "Phases: specify init, opt-in community catalog, optional extensions, bd init, bundled bd formulas, gitignore spec-status.md. Extension errors are reported as skipped with reasons; setup continues and retries them on rerun. Other failures stop setup. Each phase has its own timeout."
 
 export const START_INPUT = {
   type: "object",

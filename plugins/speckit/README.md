@@ -30,14 +30,27 @@ formulas and subagents.
 ## Tools
 
 `speckit_setup` bootstraps the session's repository. Every phase reports `done`,
-`skipped` (already present) or `failed`; a failed phase stops with `ok: false`, and a
-rerun resumes by skipping completed phases. Each phase has its own timeout.
+`skipped` (already present or an extension could not install) or `failed`.
+Extension failures are non-fatal and report the extension and CLI reason;
+other failed phases stop with `ok: false`. A rerun skips completed work and retries
+missing extensions. `ok: true` means bootstrap completed, not that every optional
+extension is available. Each phase has its own timeout.
 
 1. `specify init --here --force --integration <integration> --script sh --ignore-agent-tools`, unless `.specify/` exists.
 2. The community catalog, only with `installAllowed=true` (skipped when `SPECKIT_CATALOG_URL` is set: specify then reads only that catalog).
-3. The required extensions not yet installed: `agent-context`, `bugfix`, `cleanup`, `critique`, `fix-findings`, `iterate`, `qa`, `refine`, `retro`, `security-review`, `status-report`, `tinyspec`.
+3. Attempt optional extensions not yet installed: `agent-context`, `bugfix`, `cleanup`, `critique`, `fix-findings`, `iterate`, `qa`, `refine`, `retro`, `security-review`, `status-report`, `tinyspec`.
 4. `bd init --skip-hooks` without a workspace, then the bundled formulas into `.beads/formulas/`. Formula installation rejects symlinks and never overwrites a divergent file.
 5. `specs/**/spec-status.md` in `.gitignore`.
+
+`agent-context` is bundled in the core catalog. All other ids above remain in the
+community catalog with download URLs and version requirements compatible with
+specify 1.2.x (checked against 1.2.3). `bugfix` is neither removed nor renamed:
+default installs fail because the community catalog is discovery-only, not an
+install source. Setup does not change that trust policy without explicit opt-in.
+Before a workflow, report skipped capabilities. Select `speckit-basic` for core
+commands only, or use the formulas' direct-work fallbacks with the same
+deliverables and checks. Never skip a review or verification because its
+extension is missing.
 
 | Input | Effect |
 | --- | --- |

@@ -29,7 +29,7 @@ pattern = "^(yes|no)$"
 id = "specify"
 title = "specify {{feature}}"
 type = "task"
-description = "Run /speckit.specify to create specs/{{feature}}/spec.md. PRECONDITION: the /speckit.* skills come from spec-kit and its extensions, which this package does not ship -- run the speckit-setup skill first. Install the extensions required by the selected steps before proceeding."
+description = "Run /speckit.specify to create specs/{{feature}}/spec.md. PRECONDITION: the /speckit.* skills come from spec-kit and its extensions, which this package does not ship -- run the speckit-setup skill first. For a no-community workflow, use the basic profile or perform unavailable extension steps directly with the same deliverables and checks; record each fallback on its bead and never skip review or verification."
 
 [steps.metadata]
 skill_hints = "speckit.specify"
@@ -81,7 +81,7 @@ id = "critique"
 title = "critique {{feature}}"
 type = "task"
 needs = ["tasks"]
-description = "Run /speckit.critique.run (plan + task quality gate). Requires the critique extension."
+description = "Run /speckit.critique.run (plan + task quality gate). If the extension is unavailable, perform the described work directly, record the fallback on this bead, keep the same deliverable and checks, and never skip review or verification."
 
 [steps.metadata]
 skill_hints = "speckit.critique.run"
@@ -170,7 +170,7 @@ id = "qa"
 title = "qa {{feature}}"
 type = "task"
 needs = ["review"]
-description = "Run /speckit.qa.run; failures route through the mol-speckit-fix-findings molecule. Requires the qa extension."
+description = "Run /speckit.qa.run; failures route through the mol-speckit-fix-findings molecule. If the extension is unavailable, perform the described work directly, record the fallback on this bead, keep the same deliverable and checks, and never skip review or verification."
 
 [steps.metadata]
 skill_hints = "speckit.qa.run"

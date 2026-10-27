@@ -10,7 +10,7 @@ const root = join(import.meta.dir, "..")
 const formulas = join(root, "formulas")
 const agents = agentPaths(join(root, "agents")).map(readAgentFile)
 
-type Step = { id: string; metadata?: Record<string, unknown> }
+type Step = { id: string; description?: string; metadata?: Record<string, unknown> }
 
 function steps(file: string): Step[] {
   const data = Bun.TOML.parse(readFileSync(join(formulas, file), "utf8")) as { steps?: Step[] }
@@ -25,6 +25,19 @@ const routed = readdirSync(formulas)
 test("ships exactly the formulas setup installs", () => {
   const shipped = readdirSync(formulas).map((file) => file.replace(/\.formula\.toml$/, ""))
   expect(shipped.sort()).toEqual([...FORMULAS].sort())
+})
+
+test("community extension steps retain their work and checks when setup skips the extension", () => {
+  const extensionCommand = /\/speckit\.(bugfix|refine|iterate|fix-findings|critique|security-review|qa|cleanup|retro)\b/
+  const extensionSteps = readdirSync(formulas)
+    .flatMap((file) => steps(file))
+    .filter((step) => extensionCommand.test(step.description ?? ""))
+  expect(extensionSteps.length).toBeGreaterThan(0)
+  for (const step of extensionSteps) {
+    expect(step.description).toContain("If the extension is unavailable, perform the described work directly")
+    expect(step.description).toContain("record the fallback on this bead")
+    expect(step.description).toContain("never skip review or verification")
+  }
 })
 
 describe("execution_agent_type routing (beads FO-5)", () => {

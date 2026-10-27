@@ -59,6 +59,8 @@ export const FORMULAS = [
 ] as const
 
 export const EXTENSIONS = [
+  // agent-context is bundled in the core catalog; the other ids remain in the
+  // community catalog (discovery-only by default). Do not bypass catalog trust.
   "agent-context",
   "bugfix",
   "cleanup",
@@ -319,7 +321,12 @@ export async function runSetup(params: SetupParams, cwd: string): Promise<SetupR
           continue
         }
         const add = await run(["specify", "extension", "add", ext], repo, budget())
-        if (add.exitCode !== 0) return fail(`${output(add)}${hint}`)
+        if (add.exitCode !== 0) {
+          // Optional upstream capabilities must not block beads or formula setup.
+          // No success is written to the registry; a rerun retries this extension.
+          record(current, "skipped", `not installed: ${output(add)}${hint}`)
+          continue
+        }
         record(current, "done", "installed")
       }
     }
