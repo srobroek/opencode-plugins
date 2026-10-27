@@ -3276,6 +3276,9 @@ var AGENT_VERDICTS = {
 var REPORTS_JSON = new Set(["implementer", "implementer-high", "researcher", "operator", "shepherd"]);
 var VERDICT_LINE = /^VERDICT:\s*([A-Z][A-Z-]*)\b[\s:\u2014\u2013-]*(.*)$/;
 var JSON_BLOCK = /```json[ \t]*\r?\n([\s\S]*?)\r?\n```/g;
+function bare(line) {
+  return line.trim().replace(/^(?:[#>]+\s*)+/, "").replace(/^(?:\*\*|`)+|(?:\*\*|`)+$/g, "").trim();
+}
 function lastJsonBlock(text) {
   let last;
   for (const match of text.matchAll(JSON_BLOCK))
@@ -3292,11 +3295,19 @@ function parseVerdict(text, agent) {
   const allowed = agent === undefined ? undefined : AGENT_VERDICTS[agent];
   const malformed = (reason) => agent === undefined ? { verdict: "MALFORMED", reason } : { verdict: "MALFORMED", agent, reason };
   const first = text.replace(/^\uFEFF/, "").trimStart().split(/\r?\n/, 1)[0]?.trim() ?? "";
-  const match = VERDICT_LINE.exec(first.replace(/^\*\*|\*\*$/g, ""));
+  let match = VERDICT_LINE.exec(bare(first));
+  let late = false;
   if (match === null) {
     if (allowed === undefined)
       return;
-    return malformed(`first line is ${JSON.stringify(first.slice(0, 80))}, expected "VERDICT: ${allowed.join("|")}"`);
+    for (const line of text.split(/\r?\n/)) {
+      match = VERDICT_LINE.exec(bare(line));
+      if (match !== null)
+        break;
+    }
+    if (match === null)
+      return malformed(`first line is ${JSON.stringify(first.slice(0, 80))}, expected "VERDICT: ${allowed.join("|")}"`);
+    late = true;
   }
   const verdict = match[1];
   if (allowed !== undefined && !allowed.includes(verdict)) {
@@ -3308,6 +3319,8 @@ function parseVerdict(text, agent) {
   const summary = match[2]?.trim();
   if (summary)
     result.summary = summary;
+  if (late)
+    result.late = true;
   const block = lastJsonBlock(text);
   if (block.found) {
     if (block.error !== undefined)
