@@ -86,6 +86,87 @@ Uploaded images reach the model as image content. Text files are inlined in the
 result. Other files are written to a temporary directory on the server and the
 path is reported.
 
+## Phase three kinds
+
+Phase three adds structured kinds. Each takes its settings in `config` and
+returns a full answer object in `value`. A question's `recommended` uses the
+same object shape as `value`. The schema is a runtime config object on purpose,
+to stay within the Code Mode 3k schema cap; this table is the reference.
+
+| Kind | Config | Answer `value` |
+| --- | --- | --- |
+| `form` | `fields: [{ id, label, type: text \| number \| choice \| toggle, options?: string[], min?, max?, required? }]` | `{ fields: { [id]: value } }` |
+| `buckets` | `items: [{ id, label }]`, `categories: [{ id, label }]` | `{ buckets: { [categoryId]: [itemId] } }`, every item exactly once |
+| `match` | `items` (left), `targets` (right), same cardinality | `{ pairs: { [leftId]: rightId } }`, bijective |
+| `allocate` | `options` (question), `total` (default 100, positive) | `{ allocations: { [id]: number } }`, nonnegative, sums exactly to `total` |
+| `matrix` | `options` (question), `criteria: [{ id, label }]`; question `min`/`max`/`step` (defaults 0/5/1) | `{ scores: { [optionId]: { [criterionId]: number } } }`, every cell |
+| `range` | Question `min`, `max`, `step`, `unit` (not in config) | `{ min, max }`, ordered, on-step, within bounds |
+| `path` | `mode`: `files` \| `dirs` \| `both` (default `both`); question-level `multiple` | `{ paths: string[] }`; a folder has a trailing slash; no upload |
+| `date` / `time` / `datetime` | `min`, `max`: strict ISO `YYYY-MM-DD` / `HH:mm` / `YYYY-MM-DDTHH:mm` | `{ value: string }`, no timezone |
+| `tags` | `suggestions: string[]`; question `min`/`max` (counts) | `{ tags: string[] }`, trimmed, unique; duplicate entries rejected |
+| `colour` | `swatches: string[]` as `#rrggbb` | `{ hex: "#rrggbb" }`; `#rgb` is accepted and expanded; truecolour swatches only when the renderer has rgb, otherwise hex text |
+
+Keys for the phase three kinds:
+
+| Kind | Keys |
+| --- | --- |
+| `form` | `↑` / `↓` field, `←` / `→` choices, toggle or number, `e` edit the selected field |
+| `buckets` | `↑` / `↓` item, `←` / `→` category |
+| `match` | `↑` / `↓` left item, `←` / `→` partner (swaps) |
+| `allocate` | `↑` / `↓` option, `←` / `→` transfer to the next option (the donor is the next option), `e` enter an amount that redistributes among the other options |
+| `matrix` | `↑` / `↓` cell, `←` / `→` score, `e` enter a score for the cell |
+| `range` | `↑` / `↓` endpoint, `←` / `→` adjust, `e` edit the endpoint |
+| `path` | `e` edit, type to fuzzy-filter, `↑` / `↓` suggestion, `tab` complete |
+| `date` / `datetime` | `←` / `→` day, `↑` / `↓` week, `shift+←` / `shift+→` month, `e` edit as ISO |
+| `time` | `←` / `→` minute, `↑` / `↓` hour, `e` edit as `HH:mm` |
+| `tags` | `↑` / `↓` suggestion, `space` toggle, `e` edit as a comma list |
+| `colour` | `←` / `→` swatch, `space` choose, `e` edit hex |
+
+Conditions: a question may set a top-level `show_if`, for example
+`show_if: { id: "earlier", equals: { choice: "yes" } }`. `id` must name an
+earlier question, and `equals` is compared with that question's canonical full
+`value`. A question whose parent is hidden is hidden too, and its answers are
+suppressed. The UI activates conditions only for answered or accepted drafts:
+a hidden question's answers are excluded from `pending` and are discarded on
+the server when their parent changes.
+
+Fallback (`fallback: "question"`) supports only the existing old kinds
+(`pick_one`, `show_options`, `pick_many`, `confirm`, `ask_text`). Every
+phase three kind is unavailable there: its id is listed in `pending` and it is
+not converted lossily. A round with `show_if` falls back to the old kinds only,
+asked one by one after the earlier actual answers.
+
+Native format (`format: "native"`) words the result as structured human text,
+one labelled line per answer, instead of JSON.
+
+Example, a form:
+
+```json
+{ "questions": [{
+  "id": "contact", "title": "Contact", "kind": "form",
+  "config": { "fields": [
+    { "id": "name", "label": "Name", "type": "text", "required": true },
+    { "id": "seats", "label": "Seats", "type": "number", "min": 1, "max": 10 }
+  ] },
+  "recommended": { "fields": { "name": "Ada", "seats": 1 } },
+  "rationale": "Start with one seat for the primary contact."
+}] }
+```
+
+Example, a conditional follow-up:
+
+```json
+{ "questions": [
+  { "id": "gate", "title": "Need details?", "kind": "confirm", "recommended": "yes" },
+  { "id": "detail", "title": "Details", "kind": "ask_text",
+    "show_if": { "id": "gate", "equals": { "choice": "yes" } } }
+] }
+```
+
+Path suggestions use the built-in fuzzy matcher rather than `fzf`. The built-in
+matcher keeps search embedded, focus- and session-scoped and gitignore-aware,
+with no subprocess or binary dependency.
+
 ## Question tool takeover
 
 With `questionTool: "takeover"` (default), parley wraps the built-in `question`
