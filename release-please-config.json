@@ -173,6 +173,10 @@
     "plugins/docs": {
       "release-type": "node",
       "component": "docs"
+    },
+    "plugins/ast-grep": {
+      "release-type": "node",
+      "component": "ast-grep"
     }
   }
 }

@@ -107,6 +107,19 @@
         "@opencode/plugin",
       ],
     },
+    "plugins/ast-grep": {
+      "name": "@srobroek/opencode-ast-grep",
+      "version": "0.1.0",
+      "devDependencies": {
+        "@srobroek/opencode-lib": "workspace:*",
+      },
+      "peerDependencies": {
+        "@opencode/plugin": "^2.1.4",
+      },
+      "optionalPeers": [
+        "@opencode/plugin",
+      ],
+    },
     "plugins/aws": {
       "name": "@srobroek/opencode-aws",
       "version": "0.2.0",
@@ -850,6 +863,8 @@
     "@srobroek/opencode-agent-seance": ["@srobroek/opencode-agent-seance@workspace:plugins/agent-seance"],
 
     "@srobroek/opencode-architecture": ["@srobroek/opencode-architecture@workspace:plugins/architecture"],
+
+    "@srobroek/opencode-ast-grep": ["@srobroek/opencode-ast-grep@workspace:plugins/ast-grep"],
 
     "@srobroek/opencode-aws": ["@srobroek/opencode-aws@workspace:plugins/aws"],
 

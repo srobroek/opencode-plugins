@@ -1,0 +1,30 @@
+{
+  "name": "@srobroek/opencode-ast-grep",
+  "version": "0.1.0",
+  "description": "Structural code search with ast-grep: the ast-grep MCP server, pinned and added only where the ast-grep binary is on PATH, and a skill on patterns, preview-only rewrites and language-server CLI checks.",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "index.js",
+    "skills",
+    ".mcp.json"
+  ],
+  "opencode-plugins": {
+    "description": "Structural code search with ast-grep: the ast-grep MCP server and a skill on patterns, preview-only rewrites and language-server CLI checks."
+  },
+  "peerDependencies": {
+    "@opencode/plugin": "^2.1.4"
+  },
+  "peerDependenciesMeta": {
+    "@opencode/plugin": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@srobroek/opencode-lib": "workspace:*"
+  }
+}

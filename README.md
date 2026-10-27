@@ -5,7 +5,7 @@ OpenCode V2 plugins by Sjors Robroek. This is the OpenCode counterpart of
 
 | Field | Value |
 | --- | --- |
-| Status | Early. Plugins: `example`, `model-roles`, `worktrunk`, `session`, `dep-update`, `whats-new`, `statusline`, `beads`, `goal`, `lsp`, `subagent-worktree`, `parley`, `chezmoi`, `lang-go`, `lang-python`, `lang-typescript`, `lang-rust`, `journeys`, `delivery`, `debate`, `eli5`, `project`, `architecture`, `build`, `quality`, `toolchain`, `aws`, `design`, `safety`, `find-tools`, `trunk-dev`, `speckit`, `agent-efficiency`, `agent-researcher`, `agent-seance`, `agent-mechanic`, `agent-coder`, `agent-reviewer`, `repomix`, `docs`. |
+| Status | Early. Plugins: `example`, `model-roles`, `worktrunk`, `session`, `dep-update`, `whats-new`, `statusline`, `beads`, `goal`, `lsp`, `subagent-worktree`, `parley`, `chezmoi`, `lang-go`, `lang-python`, `lang-typescript`, `lang-rust`, `journeys`, `delivery`, `debate`, `eli5`, `project`, `architecture`, `build`, `quality`, `toolchain`, `aws`, `design`, `safety`, `find-tools`, `trunk-dev`, `speckit`, `agent-efficiency`, `agent-researcher`, `agent-seance`, `agent-mechanic`, `agent-coder`, `agent-reviewer`, `repomix`, `docs`, `ast-grep`. |
 | Host | OpenCode 2.1.4 or later (`@opencode/plugin` 2.x) |
 | License | Apache-2.0 |
 
@@ -83,6 +83,7 @@ codex plugin add worktrunk@srobroek-opencode
 | `agent-reviewer` | Skill `review-security` (no reviewer agents) |
 | `toolchain` | Router skill `toolchain-guide` and fourteen toolchain rule skills |
 | `aws` | Skill `aws-guidance` and MCP servers `aws-mcp`, `aws-pricing` |
+| `ast-grep` | Skill `ast-grep-search` and MCP server `ast-grep` (no `ast-grep` binary check) |
 | `repomix` | Skill `repomix`, with a CLI recipe for where `repomix_pack` is missing (no `repomix_pack`) |
 | `design` | Router skill `design-guide`, thirteen design skills and MCP servers `accessibility-scanner`, `wire-dsl` (no design agents, formulas, `design_setup`, `design_impeccable_scan` or `storybook` server) |
 | `trunk-dev` | Router skill `trunk-dev-guide` and skills `trunk-dev-workflow`, `trunk-dev-feature-flags`, `trunk-dev-release-setup` (no commit gate, no skip-CI or MR advisories) |
@@ -105,7 +106,7 @@ from its `package.json`. A plugin is exported when it has `skills/` or
 
 ## MCP servers from plugins
 
-`docs`, `aws` and `design` add MCP servers through `ctx.mcp.transform`, using
+`docs`, `aws`, `design` and `ast-grep` add MCP servers through `ctx.mcp.transform`, using
 `plugins/lib/src/mcp.ts`. Servers are written in the Claude Code `.mcp.json` format,
 so the same file ships to Claude Code and Codex; OpenCode-only servers live in code.
 In OpenCode:
@@ -116,8 +117,8 @@ In OpenCode:
   (OpenCode does not expand `{env:...}` in plugin-set configs), and a server naming
   an unset variable is skipped.
 - The plugin option `mcp` is `"auto"` (default: only in projects the plugin's marker
-  check matches), `"always"` or `"off"`, and `mcpServers` turns single servers on or
-  off by name: `{ "mcp": "auto", "mcpServers": { "storybook": true } }`.
+  check matches; for `ast-grep`, only when its binary is on `PATH`), `"always"` or
+  `"off"`, and `mcpServers` turns single servers on or off by name: `{ "mcp": "auto", "mcpServers": { "storybook": true } }`.
 - Every server runs in Code Mode. Remote servers that need no sign-in set
   `oauth: false`; any other remote server signs in through `/mcps`.
 
