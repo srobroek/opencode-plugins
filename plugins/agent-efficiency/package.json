@@ -1,7 +1,7 @@
 {
   "name": "@srobroek/opencode-agent-efficiency",
   "version": "0.1.0",
-  "description": "Run calls to the nonexistent bash tool as the built-in shell tool, with shell's permissions and guards, at no token cost.",
+  "description": "Cut agent tokens: run bash calls as the built-in shell tool, narrow explore to search and web tools, and trim read-only subagent prompts.",
   "private": true,
   "type": "module",
   "exports": {
