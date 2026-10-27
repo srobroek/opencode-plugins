@@ -1,6 +1,7 @@
 import { type Answer, describeAnswer, type FileValue, publicAnswer } from "./answers.ts"
 import type { Question } from "./questions.ts"
 import type { RoundResult } from "./rounds.ts"
+import { nativeSummary } from "./takeover.ts"
 
 export interface ToolResult extends RoundResult {
   readonly channel?: "tui" | "question"
@@ -53,7 +54,12 @@ export const baseMime = (mime: string) => mime.split(";")[0]?.trim().toLowerCase
  * Images go to the model as file content, text files are inlined, other files are handed to `save`
  * (which returns a server-side path) because most providers reject arbitrary media types.
  */
-export function render(result: ToolResult, questions: readonly Question[], save?: (file: FileValue) => string | undefined) {
+export function render(
+  result: ToolResult,
+  questions: readonly Question[],
+  save?: (file: FileValue) => string | undefined,
+  format: "parley" | "native" = "parley",
+) {
   const output = { ...result, answers: result.answers.map(publicAnswer) }
   const parts: ContentPart[] = []
   const notes: string[] = []
@@ -76,7 +82,8 @@ export function render(result: ToolResult, questions: readonly Question[], save?
       notes.push(`${answer.id}: ${file.name} (${mime}, ${file.size} B)${path ? ` saved to ${path}` : " not forwarded"}`)
     }
   }
-  const text = [summarise(result, questions), ...notes].join("\n\n")
+  const head = format === "native" && result.status === "submitted" ? nativeSummary(result, questions) : summarise(result, questions)
+  const text = [head, ...notes].join("\n\n")
   const content: string | ContentPart[] = parts.length === 0 ? text : [{ type: "text", text }, ...parts]
   return { output, content }
 }

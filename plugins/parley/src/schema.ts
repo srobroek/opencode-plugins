@@ -76,6 +76,11 @@ export const askInput = {
       minimum: 0,
       description: "Default 1800; 0 waits without limit",
     },
+    format: {
+      type: "string",
+      enum: ["parley", "native"],
+      description: "native: word the answers like the question tool",
+    },
     questions: { type: "array", minItems: 1, maxItems: MAX_QUESTIONS, items: questionSchema },
   },
 } as const

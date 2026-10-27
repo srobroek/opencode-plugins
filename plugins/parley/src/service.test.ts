@@ -4,7 +4,7 @@ import type { Question } from "./questions.ts"
 import type { RoundEvent } from "./rpc.ts"
 import { Parley, type QuestionTool, type Settings, settingsFrom } from "./service.ts"
 
-const settings: Settings = { fallback: "none", disabled: false, heartbeatWindowMs: 30_000 }
+const settings: Settings = { fallback: "none", questionTool: "takeover", disabled: false, heartbeatWindowMs: 30_000 }
 const questions: Question[] = [
   { id: "auth.storage", title: "Storage", kind: "pick_one", options: [{ id: "sqlite", label: "SQLite" }, { id: "pg", label: "Postgres" }], recommended: "sqlite" },
   { id: "auth.ttl", title: "TTL", kind: "slider", min: 0, max: 60, recommended: 30 },
@@ -230,5 +230,65 @@ describe("render uploads", () => {
   test("hands other files to save", () => {
     const { content } = render(files({ name: "a.bin", mime: "application/zip", size: 2, data: "aGk=" }), question, () => "/tmp/a.bin")
     expect(content).toContain("saved to /tmp/a.bin")
+  })
+})
+
+describe("question takeover", () => {
+  const prompts = [
+    {
+      question: "Which database?",
+      header: "Database",
+      options: [
+        { label: "SQLite (Recommended)", description: "Embedded" },
+        { label: "Postgres", description: "Server" },
+      ],
+    },
+  ]
+
+  test("leaves the call to the built-in tool without a heartbeat, or when off", async () => {
+    const { service, events } = setup()
+    expect(await service.takeover({ questions: prompts }, { sessionID: "s" })).toBeUndefined()
+    expect(service.takeoverWanted()).toBe(false)
+    const off = setup({ questionTool: "off" }).service
+    off.attach({ clientID: "tui" })
+    expect(await off.takeover({ questions: prompts }, { sessionID: "s" })).toBeUndefined()
+    expect(off.takeoverWanted()).toBe(false)
+    expect(events).toEqual([])
+  })
+
+  test("runs the call as a parley round and answers in the native shape", async () => {
+    const { service, events } = setup()
+    service.attach({ clientID: "tui" })
+    expect(service.takeoverWanted()).toBe(true)
+    const asking = service.takeover({ questions: prompts }, { sessionID: "s" })
+    await tick()
+    expect(events[0]).toMatchObject({ action: "opened" })
+    const [round] = service.pending({ sessionID: "s" }).rounds
+    expect(round?.questions[0]).toMatchObject({ id: "q1", kind: "pick_one", recommended: "o1" })
+    await service.submit({
+      roundID: round?.roundID ?? "",
+      answers: [{ id: "q1", status: "accepted", note: "fine for now" }],
+    })
+    const result = await asking
+    expect(result?.output).toEqual({ answers: [["SQLite (Recommended)"]] })
+    expect(result?.content).toBe(
+      'User has answered your questions: "Which database?"="SQLite (Recommended)". You can now continue with the user\'s answers in mind.\nNote on "Which database?": fine for now',
+    )
+  })
+
+  test("a dismissed round fails the call like a dismissed form", async () => {
+    const { service } = setup()
+    service.attach({ clientID: "tui" })
+    const asking = service.takeover({ questions: prompts }, { sessionID: "s" })
+    await tick()
+    await service.cancel({ roundID: service.pending({}).rounds[0]?.roundID ?? "" })
+    await expect(asking).rejects.toThrow("The user dismissed this question")
+  })
+
+  test("calls parley cannot map go to the built-in tool", async () => {
+    const { service } = setup()
+    service.attach({ clientID: "tui" })
+    const single = [{ ...prompts[0], options: [{ label: "Only", description: "" }] }] as typeof prompts
+    expect(await service.takeover({ questions: single }, { sessionID: "s" })).toBeUndefined()
   })
 })

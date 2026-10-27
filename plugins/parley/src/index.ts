@@ -3,6 +3,7 @@ import { tmpdir } from "node:os"
 import path from "node:path"
 import { Plugin } from "@opencode/plugin"
 import type { FileValue, SubmittedAnswer } from "./answers.ts"
+import type { Prompt } from "./fallback.ts"
 import { render } from "./format.ts"
 import { ParleyRpc, type RoundEvent } from "./rpc.ts"
 import { askInput, endInput, endOutput, resultOutput, waitInput } from "./schema.ts"
@@ -38,8 +39,35 @@ export default Plugin.define({
       questionTool: async () => (await ctx.tool.list()).find((tool) => tool.id === "question"),
     })
 
+    // execute.before cannot route `question` to parley: renaming a call only reaches direct (non Code
+    // Mode) tools, and parley's are Code Mode tools. So the built-in tool itself is wrapped, and only
+    // while a parley TUI is attached here; otherwise the registry holds the untouched built-in tool
+    // (its dismissal still ends the turn, which a Promise wrapper cannot reproduce).
+    let takeover: Promise<{ dispose: () => Promise<void> } | undefined> = Promise.resolve(undefined)
+    const syncTakeover = () => {
+      takeover = takeover.then(async (current) => {
+        const wanted = service.takeoverWanted()
+        if (wanted && !current)
+          return ctx.tool.transform((editor) =>
+            editor.update("question", (draft) => {
+              const builtin = draft.execute
+              draft.execute = async (input, context) =>
+                ((await service.takeover(input as { questions?: Prompt[] }, call(context))) as never) ??
+                builtin(input, context)
+            }),
+          )
+        if (!wanted && current) await current.dispose()
+        return wanted ? current : undefined
+      }, () => undefined)
+      return takeover
+    }
+
     const rpc = await ctx.rpc.register(ParleyRpc, {
-      attach: async (input) => service.attach(input as { clientID: string; sessionIDs?: string[]; detach?: boolean }),
+      attach: async (input) => {
+        const result = service.attach(input as { clientID: string; sessionIDs?: string[]; detach?: boolean })
+        void syncTakeover()
+        return result
+      },
       pending: async (input) => service.pending((input ?? {}) as { sessionID?: string }),
       submit: async (input) =>
         service.submit(input as { roundID: string; answers: SubmittedAnswer[]; final?: boolean }),
@@ -64,7 +92,7 @@ export default Plugin.define({
         execute: async (input, context) => {
           try {
             const { result, questions } = await service.ask(input as AskInput, call(context))
-            return render(result, questions, saveUpload)
+            return render(result, questions, saveUpload, (input as AskInput).format === "native" ? "native" : "parley")
           } catch (error) {
             if (error instanceof InputError) throw new Error(error.message)
             throw error
@@ -99,10 +127,14 @@ export default Plugin.define({
 
     const sweep = setInterval(() => service.sweep(), 5 * 60_000)
     sweep.unref?.()
+    const presence = setInterval(() => void syncTakeover(), 15_000)
+    presence.unref?.()
 
     return async () => {
       clearInterval(sweep)
+      clearInterval(presence)
       service.close()
+      await (await takeover)?.dispose()
       await tools.dispose()
       await rpc.dispose()
     }
