@@ -14,8 +14,16 @@ This folder is for trying the parley plugin. When you ask the user anything:
   use `show_diff`.
 - When the user asks for an overview or a demo, use every kind at least once across the rounds:
   pick_one, show_options, pick_many, confirm, rank, slider, ask_text, ask_code, review, show_diff,
-  rate, thumbs, emoji_react, ask_image, ask_file. One call holds at most 12 questions, so split
+  rate, thumbs, emoji_react, ask_image, ask_file, form, buckets, match, allocate, matrix, range,
+  path, date, time, datetime, tags, colour. One call holds at most 12 questions, so split
   them into rounds.
+- Use `form` for fields, `buckets` for categorising, `match` for bijections, `allocate` for a fixed
+  total, `matrix` for criteria scores, `range` for intervals, `path` for local paths, `date` / `time` /
+  `datetime` for scheduling, `tags` for labels and `colour` for hex colours. Put kind-specific settings
+  in `config`; recommendations must be canonical full value objects for these kinds.
+- Conditional is not a kind. Use `show_if: { id: "gate", equals: { choice: "yes" } }` on a follow-up
+  after a `confirm` with id `gate`. Keep both in the same round, gate first; recommend yes and give
+  the follow-up its own recommendation and rationale. Include this conditional demo in an overview.
 - Give every question a `recommended` answer and a one-line `rationale`.
 - Read each answer's status. Notes are the user's input to act on: when a note asks a question or
   raises a concern ("why not Postgres?"), answer it, or ask a follow-up round through parley, before

@@ -67,7 +67,7 @@ completes.
 
 ### `/parley-demo all`
 
-Every kind, in two rounds (a call holds at most 12 questions).
+Every kind plus a conditional demo, in five rounds (a call holds at most 12 questions).
 
 1. Round 1 *choices* opens full screen: pick_one, show_options, pick_many, confirm, rank, slider,
    rate, thumbs, emoji_react. Each card shows ★ recommended and a "Why" line.
@@ -84,15 +84,25 @@ Every kind, in two rounds (a call holds at most 12 questions).
    to write feedback. On ask_image press `e`, type `dia`, pick `samples/diagram.png` from the list
    with `tab`, `esc`; or copy a screenshot (`cmd+ctrl+shift+4` on macOS) and press `ctrl+v`. On
    ask_file: `samples/notes.txt, samples/data.bin`.
-5. `ctrl+s`. Expected: two `◈` messages. Round 1 lists each id as `answered` or `accepted`
+5. `ctrl+s`. The first two `◈` messages appear. Round 1 lists each id as `answered` or `accepted`
    (`other: …` for the free text). Round 2 inlines `notes.txt`, reports `data.bin … saved to
-   <tmp>/parley/<id>/data.bin`, and lists `diagram.png` as an image part sent to the model.
+    <tmp>/parley/<id>/data.bin`, and lists `diagram.png` as an image part sent to the model.
+
+6. Round 3: form, buckets, match, allocate, matrix and range. Follow each card's body keys;
+   try editing a field, swapping partners, transferring budget and changing range endpoints.
+7. Round 4: path, date, time, datetime, tags and colour. Complete `samples/notes.txt` or `samples/`
+   in path; edit ISO dates/times, toggle tags and type a hex colour.
+8. Round 5: conditional. Change gate from yes to no and back: detail hides and reappears.
+   Edit detail with `e`, then `ctrl+s`. Expected: five `◈` messages overall.
 
 ### `/parley-demo <kind>`
 
 One question of that kind, for example `/parley-demo slider` or `/parley-demo show_diff`. Kinds:
 pick_one, show_options, pick_many, confirm, rank, slider, ask_text, ask_code, review, show_diff,
-rate, thumbs, emoji_react, ask_image, ask_file. `/parley-demo files` asks the two upload kinds.
+rate, thumbs, emoji_react, ask_image, ask_file, form, buckets, match, allocate, matrix, range,
+path, date, time, datetime, tags, colour. `/parley-demo files` asks the two upload kinds.
+`/parley-demo conditional` separately asks confirm `gate` and ask_text `detail` with
+`show_if: { id: "gate", equals: { choice: "yes" } }`; conditional is not a kind.
 
 ### `/parley-demo statuses`
 
@@ -166,7 +176,7 @@ always recommend, and follow up on notes and deferrals. Try for example:
 - "Grill me on `samples/plan.md` before I start." → several kinds in one round. For the debate
   plugin's grilling skill, add `"../../plugins/debate"` to `plugins` in `opencode.json` and ask
   "grill me on this plan"; its questions go through parley.
-- "Give me a tour of everything parley can ask." → every kind across two rounds.
+- "Give me a tour of everything parley can ask." → every kind plus conditional across five rounds.
 
 See [prompts.md](prompts.md) for prompts per kind, status and wait-mode prompts, and takeover
 prompts.

@@ -204,6 +204,84 @@ export function kindQuestions(samples: Samples): Record<string, Question> {
       emojis: ["🚀", "🙂", "😐", "😩", "🔥"],
       recommended: "🚀",
     },
+    form: {
+      id: "service.form", title: "Configure the service", kind: "form",
+      body: "`↑`/`↓` selects a field; `←`/`→` changes choice, toggle or number; `e` types a field.",
+      config: { fields: [
+        { id: "name", label: "Name", type: "text", required: true },
+        { id: "replicas", label: "Replicas", type: "number", min: 1, max: 5 },
+        { id: "region", label: "Region", type: "choice", options: ["eu", "us"] },
+        { id: "logging", label: "Logging", type: "toggle" },
+      ] },
+      recommended: { fields: { name: "reports", replicas: 2, region: "eu", logging: true } },
+      rationale: "Two replicas and logging make the first rollout observable.",
+    },
+    buckets: {
+      id: "work.buckets", title: "Sort the work", kind: "buckets",
+      body: "`↑`/`↓` selects an item; `←`/`→` changes its category. Put every item in exactly one bucket.",
+      config: { items: [{ id: "cache", label: "Cache" }, { id: "docs", label: "Docs" }], categories: [{ id: "now", label: "Now" }, { id: "later", label: "Later" }] },
+      recommended: { buckets: { now: ["cache"], later: ["docs"] } },
+      rationale: "Fix latency before polishing the documentation.",
+    },
+    match: {
+      id: "owners.match", title: "Match work to owners", kind: "match",
+      body: "`↑`/`↓` selects the left item; `←`/`→` changes its partner (swaps). Each target is used once.",
+      config: { items: [{ id: "cache", label: "Cache" }, { id: "docs", label: "Docs" }], targets: [{ id: "sam", label: "Sam" }, { id: "lee", label: "Lee" }] },
+      recommended: { pairs: { cache: "sam", docs: "lee" } },
+      rationale: "Match each task to its current maintainer.",
+    },
+    allocate: {
+      id: "budget.allocate", title: "Allocate the budget", kind: "allocate",
+      body: "`↑`/`↓` selects an option; `←`/`→` transfers from the next option; `e` types a number. The total must be 100.",
+      options: [{ id: "cache", label: "Cache" }, { id: "docs", label: "Docs" }], config: { total: 100 },
+      recommended: { allocations: { cache: 70, docs: 30 } }, rationale: "Most effort goes to the latency bottleneck.",
+    },
+    matrix: {
+      id: "design.matrix", title: "Score the designs", kind: "matrix",
+      body: "`↑`/`↓` selects a cell; `←`/`→` changes its score; `e` types a number.",
+      options: [{ id: "local", label: "Local" }, { id: "shared", label: "Shared" }],
+      config: { criteria: [{ id: "speed", label: "Speed" }, { id: "simplicity", label: "Simplicity" }] }, min: 0, max: 5, step: 1,
+      recommended: { scores: { local: { speed: 5, simplicity: 5 }, shared: { speed: 3, simplicity: 2 } } },
+      rationale: "Local caching is fast and needs no extra service.",
+    },
+    range: {
+      id: "ttl.range", title: "Acceptable TTL range", kind: "range",
+      body: "`↑`/`↓` selects an endpoint; `←`/`→` adjusts it; `e` types a number.",
+      min: 0, max: 300, step: 15, unit: "s", recommended: { min: 30, max: 90 },
+      rationale: "Keep freshness within a minute and a half.",
+    },
+    path: {
+      id: "context.path", title: "Choose context paths", kind: "path",
+      body: "`e` types paths; `↑`/`↓` selects a suggestion; `tab` completes. Directory paths end in `/`.",
+      config: { mode: "both" }, multiple: true, recommended: { paths: ["samples/notes.txt", "samples/"] },
+      rationale: "The notes and sample directory provide local context without uploading files.",
+    },
+    date: {
+      id: "release.date", title: "Release date", kind: "date",
+      body: "`←`/`→` changes the day; `↑`/`↓` changes the week; `shift+←`/`shift+→` changes the month; `e` types ISO YYYY-MM-DD.",
+      config: { min: "2026-11-01", max: "2026-12-31" }, recommended: { value: "2026-11-16" }, rationale: "Leave time for the rollout checks.",
+    },
+    time: {
+      id: "release.time", title: "Release time", kind: "time",
+      body: "`←`/`→` changes the minute; `↑`/`↓` changes the hour; `e` types ISO HH:mm.",
+      config: { min: "09:00", max: "17:00" }, recommended: { value: "10:00" }, rationale: "The team is online for the rollout.",
+    },
+    datetime: {
+      id: "release.datetime", title: "Schedule the rollout", kind: "datetime",
+      body: "`←`/`→` changes the day; `↑`/`↓` changes the week; `shift+←`/`shift+→` changes the month; `e` types ISO YYYY-MM-DDTHH:mm.",
+      config: { min: "2026-11-01T09:00", max: "2026-12-31T17:00" }, recommended: { value: "2026-11-16T10:00" }, rationale: "Schedule a staffed weekday rollout.",
+    },
+    tags: {
+      id: "release.tags", title: "Tag the release", kind: "tags",
+      body: "`↑`/`↓` selects a suggestion; `space` toggles it; `e` types a comma-separated list.",
+      config: { suggestions: ["cache", "performance", "docs"] }, min: 1, max: 3,
+      recommended: { tags: ["cache", "performance"] }, rationale: "These tags describe the main change.",
+    },
+    colour: {
+      id: "release.colour", title: "Choose the release colour", kind: "colour",
+      body: "`←`/`→` selects a swatch; `e` types a hex colour.",
+      config: { swatches: ["#336699", "#cc6633", "#669933"] }, recommended: { hex: "#336699" }, rationale: "Use the existing blue brand colour.",
+    },
     ask_image: {
       id: "design.image",
       title: "Attach a screenshot or diagram",
@@ -252,9 +330,18 @@ const slug = (title: string, index: number) =>
 
 const CHOICE_KINDS = ["pick_one", "show_options", "pick_many", "confirm", "rank", "slider", "rate", "thumbs", "emoji_react"]
 const CONTENT_KINDS = ["ask_text", "ask_code", "review", "show_diff", "ask_image", "ask_file"]
+const STRUCTURED_KINDS = ["form", "buckets", "match", "allocate", "matrix", "range"]
+const INPUT_KINDS = ["path", "date", "time", "datetime", "tags", "colour"]
 const FALLBACK_KINDS = ["pick_one", "show_options", "pick_many", "confirm", "ask_text"]
 
-export const KINDS = [...CHOICE_KINDS, ...CONTENT_KINDS]
+export const KINDS = [...CHOICE_KINDS, ...CONTENT_KINDS, ...STRUCTURED_KINDS, ...INPUT_KINDS]
+
+export function conditionalQuestions(): Question[] {
+  return [
+    { id: "gate", title: "Add rollout detail?", kind: "confirm", body: "Choose yes to show the detail question; choose no to hide it.", recommended: "yes", rationale: "Capture the rollout instructions." },
+    { id: "detail", title: "Rollout detail", kind: "ask_text", body: "Press `e` to type the detail. This question only shows when gate is yes.", show_if: { id: "gate", equals: { choice: "yes" } }, recommended: "Watch latency after enabling the flag.", rationale: "Check the metric the cache is meant to improve." },
+  ]
+}
 
 export function statusQuestions(): Question[] {
   return [
@@ -315,6 +402,7 @@ export const SUBCOMMANDS = [
   "all",
   "<kind>",
   "files",
+  "conditional",
   "statuses",
   "wait",
   "timeout",
@@ -338,16 +426,21 @@ export function plan(args: string, samples: Samples): Plan {
     case "all":
       return {
         steps: [
-          ask("all, round 1 of 2 (choices)", {
-            title: "Every kind, round 1 of 2: choices",
+          ask("all, round 1 of 5 (choices)", {
+            title: "Every kind, round 1 of 5: choices",
             questions: pick(all, CHOICE_KINDS),
           }),
-          ask("all, round 2 of 2 (content)", {
-            title: "Every kind, round 2 of 2: text, review and files",
+          ask("all, round 2 of 5 (content)", {
+            title: "Every kind, round 2 of 5: text, review and files",
             questions: pick(all, CONTENT_KINDS),
           }),
+          ask("all, round 3 of 5 (structured)", { title: "Every kind, round 3 of 5: structured answers", questions: pick(all, STRUCTURED_KINDS) }),
+          ask("all, round 4 of 5 (inputs)", { title: "Every kind, round 4 of 5: paths, dates and labels", questions: pick(all, INPUT_KINDS) }),
+          ask("all, round 5 of 5 (conditional)", { title: "Conditional follow-up", questions: conditionalQuestions() }),
         ],
       }
+    case "conditional":
+      return { steps: [ask("conditional", { title: "Conditional follow-up", questions: conditionalQuestions() })] }
     case "files":
       return {
         steps: [ask("files", { title: "File uploads", questions: pick(all, ["ask_image", "ask_file"]) })],
@@ -402,9 +495,10 @@ export function help(): string {
   return [
     "Usage: /parley-demo <subcommand>",
     "",
-    "  all        every kind, in two rounds (a round holds at most 12 questions)",
+    "  all        every kind plus conditional, in five rounds (at most 12 questions each)",
     `  <kind>     one question: ${KINDS.join(", ")}`,
     "  files      ask_image and ask_file",
+    "  conditional confirm gate and ask_text detail with show_if",
     "  statuses   accept, change, note, defer and pending in one round",
     "  wait       wait: none, then parley_wait any and all",
     "  timeout    timeout_s: 15: the round closes and the call returns timeout",

@@ -95,7 +95,7 @@ export default Plugin.define({
     const commands = await ctx.command.transform((editor) => {
       editor.add({
         name: "parley-demo",
-        description: "parley playground: all | <kind> | files | statuses | wait | timeout | resume | fallback | cancel | end",
+        description: "parley playground: all | <kind> | conditional | files | statuses | wait | timeout | resume | fallback | cancel | end",
         execute: async (input) => {
           const { sessionID } = input
           const planned = plan(input.prompt.text ?? "", loadSamples(ctx.location.directory))
