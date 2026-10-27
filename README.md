@@ -5,7 +5,7 @@ OpenCode V2 plugins by Sjors Robroek. This is the OpenCode counterpart of
 
 | Field | Value |
 | --- | --- |
-| Status | Early. Plugins: `example`, `model-roles`, `worktrunk`, `session`, `dep-update`, `whats-new`, `statusline`, `beads`, `goal`, `lsp`, `subagent-worktree`, `parley`, `chezmoi`, `languages`, `rust`, `journeys`, `delivery`, `debate`, `eli5`, `project`, `architecture`, `build`, `quality`, `toolchain`, `aws`, `design`, `safety`, `find-tools`, `trunk-dev`, `speckit`, `agent-efficiency`, `agent-researcher`, `agent-seance`, `agent-mechanic`, `agent-coder`. |
+| Status | Early. Plugins: `example`, `model-roles`, `worktrunk`, `session`, `dep-update`, `whats-new`, `statusline`, `beads`, `goal`, `lsp`, `subagent-worktree`, `parley`, `chezmoi`, `languages`, `rust`, `journeys`, `delivery`, `debate`, `eli5`, `project`, `architecture`, `build`, `quality`, `toolchain`, `aws`, `design`, `safety`, `find-tools`, `trunk-dev`, `speckit`, `agent-efficiency`, `agent-researcher`, `agent-seance`, `agent-mechanic`, `agent-coder`, `agent-reviewer`. |
 | Host | OpenCode 2.1.4 or later (`@opencode/plugin` 2.x) |
 | License | Apache-2.0 |
 
@@ -78,6 +78,7 @@ codex plugin add worktrunk@srobroek-opencode
 | `project` | Skill `license-picker` |
 | `architecture` | Router skill `architecture-guide` and skills `architecture-docs-files`, `architecture-ownership`, `architecture-top-level` (no `architect` agent) |
 | `quality` | Skills `prototype-logic`, `quality-code-design`, `quality-code-policy` (no `adversarial-challenger` agent) |
+| `agent-reviewer` | Skill `review-security` (no reviewer agents) |
 | `toolchain` | Router skill `toolchain-guide` and thirteen toolchain rule skills |
 | `aws` | Skill `aws-guidance` |
 | `design` | Router skill `design-guide` and thirteen design skills (no design agents, formulas, `design_setup` or `design_impeccable_scan`) |

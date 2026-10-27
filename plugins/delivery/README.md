@@ -121,7 +121,7 @@ The plugin registers these subagents from `agents/*.md` through
 | `implementer` | One bead or task in its own worktree; `DONE`/`BLOCKED`/`SPLIT` | `standard` | `amazon-bedrock/global.anthropic.claude-sonnet-5-5#medium` |
 | `implementer-high` | Root cause, concurrency, contracts, precision, design judgment | `strong` | `amazon-bedrock/global.anthropic.claude-opus-5-5#high` |
 | `researcher` | One cited answer; no product edits (fallback copy, see below) | `standard` | `amazon-bedrock/global.anthropic.claude-sonnet-5-5#medium` |
-| `pr-reviewer` | Read-only diff review through `gh pr view` / `gh pr diff`; `VERDICT:` first line | `reviewer` | `amazon-bedrock/global.anthropic.claude-opus-5-5#high` |
+| `pr-reviewer` | Read-only diff review through `gh pr view` / `gh pr diff`; `VERDICT:` first line (fallback copy, see below) | `reviewer` | `amazon-bedrock/global.anthropic.claude-opus-5-5#high` |
 | `operator` | One exact bounded command | `cheap` | `amazon-bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0` |
 | `shepherd` | Lands one approved PR with `delivery_land` (approval and checks required), closes beads, cleans up | `standard` | `amazon-bedrock/global.anthropic.claude-sonnet-5-5#medium` |
 
@@ -133,6 +133,11 @@ The plugin registers these subagents from `agents/*.md` through
   it, so either order leaves one agent. The logic is
   `@srobroek/opencode-lib/agent-fallback` and `FALLBACK_AGENTS` in `src/agents.ts`;
   `plugins/agent-researcher` tests keep the two files in sync.
+- `pr-reviewer` belongs to the [`agent-reviewer`](../agent-reviewer/README.md) plugin
+  the same way, and is `hidden: true`: the fan-out and git-workflow skills name it, so
+  it stays out of the subagent catalog. Its prompt is composed from
+  `agents.src/pr-reviewer.md` and the shared review core by `bun run build`; edit the
+  source, not `agents/pr-reviewer.md`. Only this copy carries the fallback model.
 - Every agent names its tier in the `x-opencode-model-role` request header. With
   the model-roles plugin installed (detected through `plugin.list`), the tier picks
   the model and the plugin sets no model of its own.

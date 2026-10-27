@@ -138,6 +138,10 @@
       "release-type": "node",
       "component": "agent-researcher"
     },
+    "plugins/agent-reviewer": {
+      "release-type": "node",
+      "component": "agent-reviewer"
+    },
     "plugins/agent-efficiency": {
       "release-type": "node",
       "component": "agent-efficiency"

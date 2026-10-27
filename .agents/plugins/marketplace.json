@@ -5,6 +5,18 @@
   },
   "plugins": [
     {
+      "name": "agent-reviewer",
+      "source": {
+        "source": "local",
+        "path": "./plugins/agent-reviewer"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "development"
+    },
+    {
       "name": "architecture",
       "source": {
         "source": "local",

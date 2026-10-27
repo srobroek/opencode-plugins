@@ -280,7 +280,9 @@ function contentPlugin(id, moduleUrl, options = {}) {
 }
 
 // plugins/quality/src/index.ts
-var src_default = contentPlugin("srobroek.quality", import.meta.url);
+var FALLBACK_AGENTS = { "adversarial-challenger": "agent-reviewer" };
+var src_default = contentPlugin("srobroek.quality", import.meta.url, { fallbacks: FALLBACK_AGENTS });
 export {
+  FALLBACK_AGENTS,
   src_default as default
 };
