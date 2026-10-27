@@ -1,6 +1,6 @@
 ---
 name: beads-evidence
-description: The evidence every Beads close needs, beyond the reason string bd prime documents. Load before closing or reviewing a bead.
+description: The evidence every Beads close needs beyond the bd prime reason string; load before closing or reviewing a bead.
 ---
 
 `bd prime` documents `bd close ID --reason` without saying what a reason must

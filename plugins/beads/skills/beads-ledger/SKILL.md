@@ -1,6 +1,6 @@
 ---
 name: beads-ledger
-description: Beads ledger preferences bd prime does not state, covering acceptance criteria, metadata, agent routing, multiline text, batched graph creation, dependency semantics, bulk mutation and embedded-store write safety. Load before creating, planning or bulk-editing beads.
+description: Ledger rules bd prime omits (acceptance, metadata, routing, deps); load before creating, planning or bulk-editing beads.
 ---
 
 `bd prime` is the single source of truth for `bd` commands and the default

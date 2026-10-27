@@ -1,6 +1,6 @@
 ---
 name: ui-review
-description: Verifies a rendered surface with ARIA snapshots, computed styles, and keyboard walks. Triggers when asked to review a rendered UI.
+description: Verifies a rendered surface with ARIA snapshots, computed styles and keyboard walks; triggers on review this UI.
 ---
 
 # UI Review

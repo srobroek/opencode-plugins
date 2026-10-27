@@ -1,6 +1,8 @@
 ---
 name: beads-contention-retry
-description: How to treat embedded-store contention messages (lock busy, workspace gate busy, other bd commands are using this workspace) and how to retry a failed bd dolt pull or push.
+description: How to treat embedded-store contention (lock busy, workspace gate busy) and retry a failed bd dolt pull or push.
+metadata:
+  opencode/autoinvoke: false
 ---
 
 ## Contention messages

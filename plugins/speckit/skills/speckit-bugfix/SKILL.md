@@ -1,6 +1,6 @@
 ---
 name: speckit-bugfix
-description: Use when fixing bugs in a SpecKit repo. Scales from quick fixes to full bug workflows.
+description: Use when fixing bugs in a SpecKit repo, from quick fixes to full bug workflows.
 ---
 
 # Bug Fix

@@ -1,6 +1,6 @@
 ---
 name: infrastructure-tfstate-guard
-description: Use before any Terraform or OpenTofu state operation (state rm, mv, push) or any edit, move, or delete of a *.tfstate file. Never hand-edit state.
+description: Use before any Terraform/OpenTofu state operation (state rm, mv, push) or *.tfstate edit; never hand-edit state.
 ---
 
 Never hand-edit Terraform or OpenTofu state files.

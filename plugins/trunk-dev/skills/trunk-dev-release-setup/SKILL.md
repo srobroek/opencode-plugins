@@ -1,6 +1,6 @@
 ---
 name: trunk-dev-release-setup
-description: Set up semantic-release on GitLab or GitHub with Conventional Commits, synchronized manifests, and protected credentials, plus the daily stale-branch job for Beads repositories.
+description: Use to set up semantic-release on GitHub or GitLab with Conventional Commits, synced manifests and a stale-branch job.
 ---
 
 # Set up semantic-release

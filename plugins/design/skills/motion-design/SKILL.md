@@ -1,6 +1,6 @@
 ---
 name: motion-design
-description: Authors durations, easings, and reduced-motion branches from the project scale. Triggers when adding or changing animation.
+description: Authors durations, easings and reduced-motion branches from the project scale; use when adding or changing animation.
 ---
 
 # Motion Design

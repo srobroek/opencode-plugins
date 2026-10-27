@@ -1,6 +1,6 @@
 ---
 name: find-tools
-description: Discover and vet reusable OpenCode plugins, agent skills and MCP servers for a capability, then recommend Use existing, Adopt, Trial, Reject or Build. Use when asked to find a tool or decide whether to adopt, reject or build one.
+description: Use when asked to find a tool, or whether to adopt, reject or build a plugin, skill or MCP server for a capability.
 ---
 
 # Find Tools

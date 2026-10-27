@@ -1,6 +1,6 @@
 ---
 name: dep-update
-description: Classify dependencies by semver safety and produce a cited upgrade plan. Applies patch/minor bumps one at a time, each behind a permission prompt. Use when asked to upgrade dependencies.
+description: "Use when asked to upgrade dependencies: classifies bumps by semver safety and applies patch/minor ones one at a time."
 ---
 
 # Dependency Update / Upgrade Advisory

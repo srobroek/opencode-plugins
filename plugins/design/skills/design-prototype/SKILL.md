@@ -1,6 +1,6 @@
 ---
 name: design-prototype
-description: Routes a wireframe, mockup, prototype, or deck request to the right artifact producer. Triggers on wireframe this or make a prototype.
+description: Routes a wireframe, mockup, prototype or deck request to the right producer; triggers on wireframe this or prototype.
 ---
 
 # Design Prototype

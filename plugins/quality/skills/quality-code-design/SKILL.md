@@ -1,6 +1,6 @@
 ---
 name: quality-code-design
-description: Guides code design, implementation, review, debugging, and test-first work. Use for coding, refactoring, reviewing, debug or diagnose requests, TDD, test-first, or red-green-refactor.
+description: Use for coding, refactoring, reviewing, debugging or diagnosing, TDD, test-first or red-green-refactor work.
 ---
 
 # Code design and review

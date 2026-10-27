@@ -1,6 +1,6 @@
 ---
 name: rust-safe-mutation
-description: Use when implementing plan/approve/apply flows, TOCTOU CAS freshness, path traversal checks, or mutation audit trails in Rust.
+description: Use when implementing plan/approve/apply flows, TOCTOU CAS freshness, path traversal checks or mutation audits in Rust.
 ---
 
 # Rust Safe Mutation

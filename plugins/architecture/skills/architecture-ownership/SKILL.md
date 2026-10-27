@@ -1,6 +1,6 @@
 ---
 name: architecture-ownership
-description: Opinionated repository ownership layout for repos that adopt it. Use when placing libs, owner-local assets, data, schemas, generated clients, UI primitives, or product agents.
+description: Use when placing libs, owner-local assets, data, schemas, generated clients or UI primitives in an ownership layout.
 ---
 
 Keep `libs/` organized by architectural role: `domain`, `application`,

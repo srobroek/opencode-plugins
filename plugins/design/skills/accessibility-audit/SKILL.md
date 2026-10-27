@@ -1,6 +1,6 @@
 ---
 name: accessibility-audit
-description: Audits a surface against WCAG 2.2 AA with measured values. Triggers on is this accessible or check accessibility or WCAG.
+description: Audits a surface against WCAG 2.2 AA with measured values; triggers on is this accessible, check accessibility or WCAG.
 ---
 
 # Accessibility Audit

@@ -1,6 +1,8 @@
 ---
 name: design-token-discipline
-description: Use when styling a component or editing its design tokens, to use named color and spacing tokens and get approval for new scales.
+description: Use when styling a component or editing tokens, to use named color and spacing tokens and get new scales approved.
+metadata:
+  opencode/autoinvoke: false
 ---
 
 MUST Use a named color token for every color. A literal hex, rgb, hsl, or named CSS color in a component is a miss.

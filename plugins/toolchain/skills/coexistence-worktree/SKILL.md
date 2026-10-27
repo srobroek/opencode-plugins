@@ -1,6 +1,6 @@
 ---
 name: coexistence-worktree
-description: Use when other agents or humans edit the same repository or switch the branch underneath you. Worktrunk coexistence and interference handling.
+description: Use when other agents or humans edit the same repository or switch its branch under you (Worktrunk coexistence).
 ---
 
 # Multi-Agent Coexistence

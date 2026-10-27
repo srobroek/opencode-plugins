@@ -1,6 +1,6 @@
 ---
 name: typescript-quality
-description: Use to run TypeScript or JavaScript format, lint, and type-check commands, and when writing TypeScript that needs exhaustive unions, allow-lists, or trust-boundary validation.
+description: Use to run TypeScript/JavaScript format, lint and type-check, and for exhaustive unions or trust-boundary validation.
 ---
 
 # TypeScript Quality

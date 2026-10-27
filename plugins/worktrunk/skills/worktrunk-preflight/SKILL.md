@@ -1,6 +1,6 @@
 ---
 name: worktrunk-preflight
-description: Run deterministic Worktrunk checks before an agent run, merge, or focused test; triggers on "preflight Worktrunk" or "check worktree".
+description: Runs deterministic Worktrunk checks before an agent run, merge or focused test; triggers on preflight Worktrunk.
 ---
 
 # Worktrunk Preflight

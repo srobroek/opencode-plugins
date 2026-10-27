@@ -1,6 +1,6 @@
 ---
 name: beads-preflight
-description: Runs read-only Beads readiness checks before ledger work. Use when starting ledger work or asking for a beads preflight.
+description: Runs read-only Beads readiness checks; use when starting ledger work or when asked for a beads preflight.
 ---
 
 # Beads preflight

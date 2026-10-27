@@ -1,6 +1,6 @@
 ---
 name: rust-persistence
-description: Use when designing Rust SQLite/sqlx repositories, numbered migrations, CAS-in-transaction updates, or embed-macro rebuilds.
+description: Use for Rust SQLite/sqlx repositories, numbered migrations, CAS-in-transaction updates or embed-macro rebuilds.
 ---
 
 # Rust Persistence Defaults

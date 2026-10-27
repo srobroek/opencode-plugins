@@ -1,6 +1,6 @@
 ---
 name: eli5
-description: Explain topics from metaphor to frontier. Use for explicit “ELI5” requests or explanations that ask for child-friendly, plain-language, or beginner-oriented wording; not generic explanations.
+description: Explains from metaphor to frontier; use for explicit ELI5 requests or child-friendly, plain-language, beginner wording.
 ---
 
 # ELI5
