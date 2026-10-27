@@ -79,7 +79,7 @@ codex plugin add worktrunk@srobroek-opencode
 | `architecture` | Router skill `architecture-guide` and skills `architecture-docs-files`, `architecture-ownership`, `architecture-top-level` (no `architect` agent) |
 | `quality` | Skills `prototype-logic`, `quality-code-design`, `quality-code-policy`, `quality-testing` (no `adversarial-challenger` agent) |
 | `agent-reviewer` | Skill `review-security` (no reviewer agents) |
-| `toolchain` | Router skill `toolchain-guide` and thirteen toolchain rule skills |
+| `toolchain` | Router skill `toolchain-guide` and fourteen toolchain rule skills |
 | `aws` | Skill `aws-guidance` |
 | `design` | Router skill `design-guide` and thirteen design skills (no design agents, formulas, `design_setup` or `design_impeccable_scan`) |
 | `trunk-dev` | Router skill `trunk-dev-guide` and skills `trunk-dev-workflow`, `trunk-dev-feature-flags`, `trunk-dev-release-setup` (no commit gate, no skip-CI or MR advisories) |

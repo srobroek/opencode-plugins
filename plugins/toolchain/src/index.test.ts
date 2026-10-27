@@ -7,6 +7,7 @@ test("registers every toolchain skill and disposes them", async () => {
   const cleanup = await plugin.setup(fake.context)
   expect([...fake.skills.keys()]).toEqual([
     "backend-background-jobs",
+    "ci-github-actions",
     "coexistence-worktree",
     "infrastructure-tfstate-guard",
     "ops-no-global-cargo-target",

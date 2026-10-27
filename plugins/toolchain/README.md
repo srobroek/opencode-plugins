@@ -3,7 +3,7 @@
 Toolchain, backend, infrastructure and operations defaults, as skills the model
 loads when the description matches.
 
-In OpenCode the `toolchain-*` and `ops-*` skills set `opencode/autoinvoke: false` and are
+In OpenCode the `toolchain-*`, `ops-*` and `ci-*` skills set `opencode/autoinvoke: false` and are
 listed as one router, `toolchain-guide`, whose body maps each situation to the skill to load
 by id; the other skills stay listed. Claude Code and Codex ignore that metadata, so there
 every skill is listed and triggers directly.
@@ -21,6 +21,7 @@ every skill is listed and triggers directly.
 | `terraform-language` | Terraform, OpenTofu and HCL conventions |
 | `infrastructure-tfstate-guard` | Any Terraform or OpenTofu state operation or `*.tfstate` edit |
 | `backend-background-jobs` | Workers, queues, retries, idempotency, dead letters |
+| `ci-github-actions` | GitHub Actions workflows: one required gate, matrices, concurrency, SHA-pinned actions, attestation, caches |
 | `ops-toolchain-cache-policy` | Shared, bounded download and compiler caches; worktree build output |
 | `ops-no-global-cargo-target` | Setting `CARGO_TARGET_DIR` or `[build].target-dir` to a global directory |
 

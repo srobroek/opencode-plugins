@@ -1,6 +1,6 @@
 ---
 name: toolchain-guide
-description: "Use when choosing a stack, dependency, framework, library, infra tool, logging or scanner, or setting toolchain caches."
+description: "Use when choosing a stack, dependency, framework, library, infra tool, logging, scanner, CI or toolchain caches."
 ---
 
 # Toolchain guide
@@ -17,5 +17,6 @@ skill, not from this table.
 | Choosing Terraform, OpenTofu, CDK, Kubernetes or Helm | `toolchain-infrastructure` |
 | Adding logging, tracing or security scanners to a service or worker | `toolchain-quality-observability` |
 | Adding or changing agentic assets: where OpenCode config, plugins, skills and agents live | `toolchain-asset-ownership` |
+| Writing or changing GitHub Actions workflows: required checks, matrices, caches, action pinning, attestation | `ci-github-actions` |
 | Configuring toolchain download or compiler caches, worktree build output, cache roots and sizes | `ops-toolchain-cache-policy` |
 | Cargo, shell, mise or CI config would set `CARGO_TARGET_DIR` or `build.target-dir` machine-wide | `ops-no-global-cargo-target` |
