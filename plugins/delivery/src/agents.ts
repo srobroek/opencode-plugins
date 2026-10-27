@@ -35,6 +35,7 @@ export type AgentFile = {
   description?: string
   mode: string
   model?: string
+  hidden?: boolean
   request?: { headers?: Record<string, string> }
   permissions: AgentPermission[]
   system: string
@@ -57,6 +58,7 @@ export function parseAgentFile(id: string, text: string): AgentFile {
     description: typeof data.description === "string" ? data.description : undefined,
     mode: typeof data.mode === "string" ? data.mode : "subagent",
     model: typeof data.model === "string" ? data.model : undefined,
+    ...(typeof data.hidden === "boolean" ? { hidden: data.hidden } : {}),
     ...(data.request && typeof data.request === "object" ? { request: data.request as AgentFile["request"] } : {}),
     permissions,
     system: text.slice(match[0].length).trim(),
@@ -91,6 +93,7 @@ export type AgentDraft = {
   description?: string
   mode?: string
   model?: unknown
+  hidden?: boolean
   system?: string
   request?: { headers?: Record<string, string> }
   permissions?: unknown[]
@@ -111,6 +114,7 @@ export function shapeAgent(draft: AgentDraft, file: AgentFile, model: AgentModel
   if (created || draft.description === undefined) draft.description = file.description
   if (created || draft.mode === undefined) draft.mode = file.mode
   if (created || draft.system === undefined) draft.system = file.system
+  if (file.hidden !== undefined && (created || draft.hidden === undefined)) draft.hidden = file.hidden
   const { fallback, ...ref } = model ?? {}
   const setModel = model !== undefined && (created || draft.model === undefined)
   if (setModel) draft.model = ref
@@ -132,7 +136,7 @@ export function hasModelRoles(listed: unknown): boolean {
  * when the owner is not installed and no earlier plugin added the id (see
  * `@srobroek/opencode-lib/agent-fallback`). Keep the copy in sync with the owner's file.
  */
-export const FALLBACK_AGENTS: FallbackOwners = { researcher: "agent-researcher" }
+export const FALLBACK_AGENTS: FallbackOwners = { researcher: "agent-researcher", "pr-reviewer": "agent-reviewer" }
 
 /**
  * The model to give an agent. An explicit `models` option wins; `false` means none.

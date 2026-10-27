@@ -1,0 +1,12 @@
+{
+  "name": "agent-reviewer",
+  "version": "0.1.0",
+  "description": "A security review skill: trace untrusted input to sinks, tag CWE ids and check cross-boundary dispatch.",
+  "author": {
+    "name": "Sjors Robroek",
+    "url": "https://github.com/srobroek"
+  },
+  "homepage": "https://github.com/srobroek/opencode-plugins/tree/main/plugins/agent-reviewer",
+  "repository": "https://github.com/srobroek/opencode-plugins",
+  "license": "Apache-2.0"
+}

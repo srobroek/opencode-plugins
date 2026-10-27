@@ -5,16 +5,28 @@ import { type AgentPermission, permissionEffect } from "@srobroek/opencode-lib/a
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
 import plugin from "./index.ts"
 
+test("skips the challenger copy when plugin.list reports agent-reviewer", async () => {
+  const fake = createFakeContext()
+  ;(fake.context as unknown as Record<string, unknown>).plugin = {
+    list: async () => ({ data: [{ id: "srobroek.agent-reviewer" }] }),
+  }
+  await plugin.setup(fake.context)
+  expect(fake.agents.has("adversarial-challenger")).toBe(false)
+  expect(fake.skills.has("quality-code-design")).toBe(true)
+})
+
 test("registers the quality skills and the read-only challenger", async () => {
   const fake = createFakeContext()
   const cleanup = await plugin.setup(fake.context)
   expect([...fake.skills.keys()]).toEqual(["prototype-logic", "quality-code-design", "quality-code-policy"])
   expect(fake.agents.get("adversarial-challenger")).toMatchObject({ mode: "subagent" })
   const rules = fake.agents.get("adversarial-challenger")?.permissions as AgentPermission[]
-  for (const action of ["edit", "shell", "subagent", "question", "some_plugin_tool"])
+  for (const action of ["edit", "shell", "subagent", "question", "execute", "some_plugin_tool"])
     expect(permissionEffect(rules, action)).toBe("deny")
-  for (const action of ["read", "grep", "glob", "skill", "execute", "lsp_diagnostics", "webfetch", "websearch"])
+  for (const action of ["read", "grep", "glob", "lsp_diagnostics", "webfetch", "websearch"])
     expect(permissionEffect(rules, action)).toBe("allow")
+  expect(permissionEffect(rules, "skill", "quality-code-design")).toBe("allow")
+  expect(permissionEffect(rules, "skill", "other")).toBe("deny")
   await cleanup?.()
   expect(fake.active()).toBe(0)
 })

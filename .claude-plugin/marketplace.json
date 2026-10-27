@@ -8,6 +8,13 @@
   },
   "plugins": [
     {
+      "name": "agent-reviewer",
+      "source": "./plugins/agent-reviewer",
+      "description": "A security review skill: trace untrusted input to sinks, tag CWE ids and check cross-boundary dispatch.",
+      "version": "0.1.0",
+      "category": "development"
+    },
+    {
       "name": "architecture",
       "source": "./plugins/architecture",
       "description": "Architecture skills: capability-first top-level layout, ownership boundaries, and durable docs/ project knowledge.",

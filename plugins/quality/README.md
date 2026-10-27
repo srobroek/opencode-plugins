@@ -24,17 +24,16 @@ its description matches. To make it always on, copy its body into your global
 
 `adversarial-challenger` (mode `subagent`) stress-tests a claim, plan, design or
 decision from a brief of observable facts and returns evidence-backed
-counter-arguments and alternatives. Its permissions are an allowlist (read, grep,
-glob, skill, Code Mode, `lsp_*`, webfetch, websearch), so `edit`, `shell` and
-`subagent` are not in its requests; when a check needs a command it names the command for a writing agent.
-Rules are added after any you configure for an agent with the same id.
+counter-arguments and alternatives, starting with `VERDICT: HOLDS|WEAKENED|REFUTED`.
+It belongs to the [`agent-reviewer`](../agent-reviewer/README.md) plugin, which
+documents its permissions and the shared review core. Quality ships an identical
+fallback copy, composed from `agents.src/adversarial-challenger.md`, and skips it when
+`plugin.list` reports `srobroek.agent-reviewer` or an earlier plugin already registered
+the id; if the copy loads first, agent-reviewer replaces it.
 
-Converted with `scripts/convert-agent.ts`; omp `lsp` and `ast_grep` are dropped. It
-pins no model. It declares the `reviewer` model tier through the
-`x-opencode-model-role` request header, so with the model-roles plugin the
-`reviewer` tier picks its model, from another vendor than the caller's when one is
-available. Without it the agent inherits the caller's model;
-set `agent.adversarial-challenger.model` to pin one.
+It pins no model and declares the `reviewer` tier through the
+`x-opencode-model-role` request header; without model-roles it inherits the caller's
+model. Set `agent.adversarial-challenger.model` to pin one.
 
 ## Not ported
 

@@ -139,6 +139,7 @@ function parseAgentFile(id, text) {
     description: typeof data.description === "string" ? data.description : undefined,
     mode: typeof data.mode === "string" ? data.mode : "subagent",
     model: typeof data.model === "string" ? data.model : undefined,
+    ...typeof data.hidden === "boolean" ? { hidden: data.hidden } : {},
     ...data.request && typeof data.request === "object" ? { request: data.request } : {},
     permissions,
     system: text.slice(match[0].length).trim()
@@ -174,6 +175,8 @@ function shapeAgent2(draft, file, model, created) {
     draft.mode = file.mode;
   if (created || draft.system === undefined)
     draft.system = file.system;
+  if (file.hidden !== undefined && (created || draft.hidden === undefined))
+    draft.hidden = file.hidden;
   const { fallback, ...ref } = model ?? {};
   const setModel = model !== undefined && (created || draft.model === undefined);
   if (setModel)
@@ -187,7 +190,7 @@ function shapeAgent2(draft, file, model, created) {
 function hasModelRoles(listed) {
   return listsPlugin(listed, "model-roles");
 }
-var FALLBACK_AGENTS = { researcher: "agent-researcher" };
+var FALLBACK_AGENTS = { researcher: "agent-researcher", "pr-reviewer": "agent-reviewer" };
 function fallbackModel(file, override, modelRoles, available) {
   if (override === false)
     return;
