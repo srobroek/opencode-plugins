@@ -10,6 +10,7 @@
   "repository": "https://github.com/srobroek/opencode-plugins",
   "license": "Apache-2.0",
   "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Aws",
     "shortDescription": "AWS working guidance: route AWS tasks through the AWS MCP Server's guided skills, verify against AWS documentation, and price with the AWS Pricing MCP server.",
