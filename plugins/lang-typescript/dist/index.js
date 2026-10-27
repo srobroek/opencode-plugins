@@ -120,8 +120,8 @@ function shapeAgent(agent, file, created) {
   if (created || agent.mode === undefined)
     agent.mode = file.mode;
   agent.system ??= file.system;
-  if (file.hidden !== undefined)
-    agent.hidden ??= file.hidden;
+  if (file.hidden !== undefined && (created || agent.hidden === undefined))
+    agent.hidden = file.hidden;
   if (file.steps !== undefined)
     agent.steps ??= file.steps;
   if (file.request)

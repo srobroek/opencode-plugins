@@ -159,15 +159,16 @@ type MutableAgent = {
 /**
  * Fill an agent from its file. Fields the agent already has win, including its own request
  * headers; the file's permission rules go after existing ones, so its boundary holds (the
- * last matching rule wins). A `created` agent takes the file's mode, because the host
- * gives a new agent `primary`.
+ * last matching rule wins). A `created` agent takes the file's mode and `hidden`, because
+ * the host gives a new agent `primary` and `hidden: false`.
  */
 export function shapeAgent(agent: MutableAgent, file: AgentFile, created: boolean): void {
   agent.name ??= file.id
   if (file.description !== undefined) agent.description ??= file.description
   if (created || agent.mode === undefined) agent.mode = file.mode
   agent.system ??= file.system
-  if (file.hidden !== undefined) agent.hidden ??= file.hidden
+  // The host fills a new agent's `hidden` with false before the callback runs.
+  if (file.hidden !== undefined && (created || agent.hidden === undefined)) agent.hidden = file.hidden
   if (file.steps !== undefined) agent.steps ??= file.steps
   if (file.request) agent.request = { ...agent.request, headers: { ...file.request.headers, ...agent.request?.headers } }
   agent.permissions = [...(agent.permissions ?? []), ...file.permissions]

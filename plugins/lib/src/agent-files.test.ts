@@ -117,6 +117,9 @@ describe("shapeAgent", () => {
     const created: Parameters<typeof shapeAgent>[0] = {}
     shapeAgent(created, file, true)
     expect(created.hidden).toBe(true)
+    const prefilled: Parameters<typeof shapeAgent>[0] = { hidden: false }
+    shapeAgent(prefilled, file, true)
+    expect(prefilled.hidden).toBe(true)
     const shown: Parameters<typeof shapeAgent>[0] = { hidden: false }
     shapeAgent(shown, file, false)
     expect(shown.hidden).toBe(false)
