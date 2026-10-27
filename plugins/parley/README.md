@@ -150,6 +150,7 @@ that keys go to the prompt and that `alt+p` or `/parley` returns.
 | `e` | Edit text: answer, "other" (pick_one, pick_many), a slider value (a number, a label, or free text with `allow_other`), review feedback, file paths |
 | `shift+↑` / `shift+↓`, `J` / `K` | Move a ranked item |
 | `ctrl+v` | On ask_image / ask_file: attach the clipboard's image (a screenshot) or copied files |
+| `y` | Copy the focused card's plain text (body, review/code/diff, current answer and note); only outside text editing |
 | `f` | Inline card ↔ full screen; full screen ↔ side panel for larger rounds |
 | `alt+p` | Return focus to the open card or panel (also `/parley`, or "Return to parley round" in the command palette) |
 | `ctrl+enter` / `ctrl+s` | Submit the round (partial rounds are fine) |
@@ -167,6 +168,12 @@ you type; `↑` / `↓` pick one and `tab` completes it. Paths starting with `~`
 `/` complete from that directory. Relative paths resolve against the session
 directory. `ctrl+v` reads the system clipboard through OpenTUI's clipboard
 service, with an AppleScript fallback on macOS.
+
+Copy uses the renderer's OSC 52 support, so it also works over SSH when the
+terminal permits clipboard writes. When unsupported, it falls back to `pbcopy`
+on macOS or `wl-copy`, then `xclip -selection clipboard` on Linux (each bounded
+to 1.5 s). Uploaded file bytes and key hints are not copied. `y` remains ordinary
+text while editing; the host's `ctrl+c` behaviour is unchanged.
 
 The TUI checks in with the server every 10 s (RPC `parley.attach`), and fetches
 open rounds with `parley.pending` on start and after a reconnect. Desktop, web
