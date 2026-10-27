@@ -28,7 +28,40 @@ permissions:
     resource: "*"
     effect: allow
   - action: skill
-    resource: "*"
+    resource: "design-*"
+    effect: allow
+  - action: skill
+    resource: "ui-*"
+    effect: allow
+  - action: skill
+    resource: accessibility-audit
+    effect: allow
+  - action: skill
+    resource: motion-design
+    effect: allow
+  - action: skill
+    resource: wireloom
+    effect: allow
+  - action: skill
+    resource: impeccable
+    effect: allow
+  - action: skill
+    resource: "ss-*"
+    effect: allow
+  - action: skill
+    resource: accessibility
+    effect: allow
+  - action: skill
+    resource: "html-*"
+    effect: allow
+  - action: skill
+    resource: frontend-slides
+    effect: allow
+  - action: skill
+    resource: web-asset-generator
+    effect: allow
+  - action: skill
+    resource: superdesign
     effect: allow
   - action: execute
     resource: "*"
