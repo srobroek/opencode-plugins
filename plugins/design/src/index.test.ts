@@ -105,3 +105,37 @@ test("design_impeccable_scan asks before npx runs, and a rejection stops it", as
   expect(seen).toHaveLength(1)
   expect((await blocked({ targets: [] }, context)).metadata.ok).toBe(false)
 })
+
+test("adds accessibility-scanner and wire-dsl in a frontend project, storybook only on request", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "design-mcp-"))
+  try {
+    await Bun.write(join(directory, "package.json"), '{"dependencies":{"react":"19"}}')
+    const fake = createFakeContext({ directory })
+    const cleanup = await plugin.setup(fake.context)
+    expect([...fake.mcp.keys()]).toEqual(["accessibility-scanner", "wire-dsl"])
+    expect(fake.mcp.get("wire-dsl")).toEqual({
+      type: "local",
+      command: ["npx", "-y", "@wire-dsl/mcp-server@0.1.3"],
+      codemode: true,
+    })
+    await cleanup?.()
+    expect(fake.mcp.size).toBe(0)
+
+    const withStorybook = createFakeContext({ directory, options: { mcpServers: { storybook: true } } })
+    await plugin.setup(withStorybook.context)
+    expect(withStorybook.mcp.get("storybook")).toEqual({
+      type: "remote",
+      url: "http://localhost:6006/mcp",
+      codemode: true,
+      oauth: false,
+    })
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("adds no servers outside a frontend project", async () => {
+  const fake = createFakeContext()
+  await plugin.setup(fake.context)
+  expect(fake.mcp.size).toBe(0)
+})

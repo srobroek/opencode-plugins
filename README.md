@@ -82,7 +82,7 @@ codex plugin add worktrunk@srobroek-opencode
 | `toolchain` | Router skill `toolchain-guide` and fourteen toolchain rule skills |
 | `aws` | Skill `aws-guidance` and MCP servers `aws-mcp`, `aws-pricing` |
 | `repomix` | Skill `repomix`, with a CLI recipe for where `repomix_pack` is missing (no `repomix_pack`) |
-| `design` | Router skill `design-guide` and thirteen design skills (no design agents, formulas, `design_setup` or `design_impeccable_scan`) |
+| `design` | Router skill `design-guide`, thirteen design skills and MCP servers `accessibility-scanner`, `wire-dsl` (no design agents, formulas, `design_setup`, `design_impeccable_scan` or `storybook` server) |
 | `trunk-dev` | Router skill `trunk-dev-guide` and skills `trunk-dev-workflow`, `trunk-dev-feature-flags`, `trunk-dev-release-setup` (no commit gate, no skip-CI or MR advisories) |
 | `session`, `dep-update`, `journeys`, `delivery`, `beads`, `find-tools`, `speckit` | Not exported: their skills or agents drive OpenCode tools |
 | `whats-new` | Not exported: its skill depends on OpenCode tools and version checks |
