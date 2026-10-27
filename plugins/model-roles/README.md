@@ -17,6 +17,7 @@ Keep the options in your **global** config (`~/.config/opencode/opencode.json`),
 in the plugin entry's `options` (OpenCode rejects unknown top-level keys). A second
 plugin entry in a project config replaces these options; it does not merge with
 them. The `/tiers` command (see [Editing tiers in the TUI](#editing-tiers-in-the-tui))
+writes them for you. The `/tiers` command (see [Editing tiers in the TUI](#editing-tiers-in-the-tui))
 writes them for you.
 
 ## Options
@@ -109,6 +110,33 @@ Headers and spawns that use the old role names keep working:
 | `slow`, `plan`, `architect`, `designer` | `strong` |
 | `challenger`, `judge` | `reviewer` |
 | `default` | none: the agent inherits the session model |
+
+## Editing tiers in the TUI
+
+The package also has a TUI entry (`./tui`), loaded from the same install. `/tiers`
+(slash command, or **Model tiers** in the command palette) lists the tiers with
+what they resolve to now, for the current session's location. Pick a tier, or
+**Add a tier…** (name, then purpose), and then:
+
+- **Models**: pick models from the location's available models one at a time, in
+  fallback order, then **Done**; **Auto** drops the list.
+- **Effort**: a level, `auto`, or **Tier default** (removes the setting).
+- **Purpose**: the text the spawner sees.
+- **Reset to auto**: a built-in tier loses its settings; a custom tier keeps only
+  its purpose.
+
+Each answer is saved at once to `options.tiers` of the model-roles entry in the
+global config: `$OPENCODE_CONFIG_DIR`, else `$XDG_CONFIG_HOME/opencode`, else
+`~/.config/opencode`, in `opencode.jsonc` when it has the entry, else
+`opencode.json`. The edit keeps comments and formatting, and turns a bare string
+plugin entry into `{ "package": …, "options": … }`. OpenCode reloads the config
+on its own, so the new tiers apply without a restart. A config with no
+model-roles entry in the global files (for example, only in a project config) is
+not edited; `/tiers` says so.
+
+The server side is the RPC `model-roles` (`state`, `set`), which scripts can call
+through `POST /api/rpc/model-roles/{state|set}` with `{ "input": … }`; `set` takes
+`{ "tier": "<name>", "value": <tier config> | null }`.
 
 ## Derived tiers
 

@@ -1,3 +1,4 @@
+import { homedir } from "node:os"
 import { Plugin } from "@opencode/plugin"
 import type { Context } from "@opencode/plugin/promise/plugin"
 import {
@@ -32,6 +33,7 @@ import {
   planImplicit,
   readClassification,
 } from "./classify.ts"
+import { globalConfigDir, pickConfigFile, readConfigFiles, readTiers, writeTier } from "./config-edit.ts"
 import {
   failureNote,
   fallbackTarget,
@@ -81,6 +83,7 @@ import {
   staleAgents,
   stripRoleHeader,
 } from "./resolve.ts"
+import { TiersRpc } from "./rpc.ts"
 import {
   choicesFor,
   inputModel,
@@ -97,18 +100,22 @@ import {
   withRoleNote,
   withRoleParam,
 } from "./spawn-role.ts"
-import { buildTiers, parseTierSettings, rankOf, resolveTier, tierMeta } from "./tiers.ts"
+import { buildTiers, parseTierConfig, parseTierSettings, rankOf, resolveTier, type TierConfig, tierMeta } from "./tiers.ts"
+import { compact, tierState } from "./tiers-ui.ts"
 
 export * from "./auto.ts"
 export * from "./catalog.ts"
 export * from "./check.ts"
 export * from "./classify.ts"
+export * from "./config-edit.ts"
 export * from "./fallback.ts"
 export * from "./guard.ts"
 export * from "./health.ts"
 export * from "./resolve.ts"
+export { TiersRpc } from "./rpc.ts"
 export * from "./spawn-role.ts"
 export * from "./tiers.ts"
+export * from "./tiers-ui.ts"
 
 /** Re-registrations allowed in a row without the agents converging, before giving up until inputs change. */
 export const MAX_REREGISTER = 3
@@ -909,6 +916,42 @@ export default Plugin.define({
       throw new Error(reason)
     })
 
+    // The `/tiers` TUI dialog reads the tier table and writes `options.tiers` through these.
+    const configDir = () => globalConfigDir(process.env, homedir())
+    const rpc = await ctx.rpc.register(TiersRpc, {
+      state: async () => {
+        await queue(async () => {
+          await refresh()
+        })
+        const file = (() => {
+          try {
+            return pickConfigFile(readConfigFiles(configDir()))
+          } catch {
+            return undefined
+          }
+        })()
+        const configured: Record<string, TierConfig> = {}
+        for (const [name, value] of Object.entries(file === undefined ? settings.tiers : readTiers(file.text)))
+          configured[name] = parseTierConfig(value)
+        return tierState({
+          options,
+          available,
+          configured,
+          ...(file === undefined
+            ? { error: `No model-roles plugin entry in the global config (${configDir()}); /tiers cannot save.` }
+            : { config: file.path }),
+        })
+      },
+      set: async (input) => {
+        const { tier, value } = (input ?? {}) as { tier?: unknown; value?: unknown }
+        if (typeof tier !== "string" || !/^[a-z][a-z0-9-]*$/.test(tier)) throw new Error(`Invalid tier name ${JSON.stringify(tier)}`)
+        const config = value === null || value === undefined ? undefined : compact(parseTierConfig(value))
+        const result = writeTier(configDir(), tier, config)
+        console.warn(`${SOURCE}: ${config === undefined ? "removed" : "set"} tier ${tier} in ${result.path}`)
+        return result
+      },
+    })
+
     const spawnResults = await ctx.tool.hook("execute.after", async (event) => {
       if (event.tool !== SUBAGENT_TOOL) return
       const spawn = pending.get(event.id)
@@ -980,6 +1023,7 @@ export default Plugin.define({
       controller.abort()
       if (expiry !== undefined) clearTimeout(expiry)
       await spawnResults.dispose()
+      await rpc.dispose()
       await spawns.dispose()
       await subagentTool.dispose()
       await tools.dispose()
