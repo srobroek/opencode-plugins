@@ -52,7 +52,7 @@ test("allowlists coding skills by id or family prefix and denies the rest", asyn
   const ids = ["quality-code-policy", "lang-typescript-quality", "lang-rust-quality", "lang-go", "shell-language", "dep-update"]
   for (const id of [...ids, "whats-new"]) expect(permissionEffect(rules, "skill", id)).toBe("allow")
   const excluded = ["design-md", "journey-write", "speckit-bugfix", "delivery-fan-out", "delivery-git-workflow", "debate"]
-  for (const id of [...excluded, "license-picker", "beads-ledger", "trunk-dev-workflow", "find-tools"])
+  for (const id of [...excluded, "license-picker", "beads-ledger", "find-tools", "prototype-logic"])
     expect(permissionEffect(rules, "skill", id)).toBe("deny")
 })
 

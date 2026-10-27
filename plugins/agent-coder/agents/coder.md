@@ -60,25 +60,10 @@ permissions:
     resource: "lang-*"
     effect: allow
   - action: skill
-    resource: toolchain-guide
+    resource: "quality-*"
     effect: allow
   - action: skill
-    resource: architecture-guide
-    effect: allow
-  - action: skill
-    resource: trunk-dev-guide
-    effect: allow
-  - action: skill
-    resource: quality-code-design
-    effect: allow
-  - action: skill
-    resource: quality-code-policy
-    effect: allow
-  - action: skill
-    resource: quality-profiling
-    effect: allow
-  - action: skill
-    resource: quality-testing
+    resource: "toolchain-*"
     effect: allow
   - action: skill
     resource: shell-language
@@ -99,49 +84,22 @@ permissions:
     resource: infrastructure-tfstate-guard
     effect: allow
   - action: skill
-    resource: ops-no-global-cargo-target
+    resource: "ops-*"
     effect: allow
   - action: skill
-    resource: ops-toolchain-cache-policy
+    resource: "architecture-*"
     effect: allow
   - action: skill
-    resource: toolchain-asset-ownership
+    resource: "trunk-dev-*"
     effect: allow
   - action: skill
-    resource: toolchain-frontend
-    effect: allow
-  - action: skill
-    resource: toolchain-infrastructure
-    effect: allow
-  - action: skill
-    resource: toolchain-languages
-    effect: allow
-  - action: skill
-    resource: toolchain-quality-observability
-    effect: allow
-  - action: skill
-    resource: toolchain-stack-defaults
-    effect: allow
-  - action: skill
-    resource: architecture-docs-files
-    effect: allow
-  - action: skill
-    resource: architecture-ownership
-    effect: allow
-  - action: skill
-    resource: architecture-top-level
+    resource: "worktrunk-*"
     effect: allow
   - action: skill
     resource: dep-update
     effect: allow
   - action: skill
     resource: whats-new
-    effect: allow
-  - action: skill
-    resource: trunk-dev-feature-flags
-    effect: allow
-  - action: skill
-    resource: worktrunk-worktrees
     effect: allow
   - action: subagent
     resource: explore

@@ -41,19 +41,19 @@ ask. `find_tools_scan` is denied: adopting new tools is not development work.
 
 ## Skills
 
-Skills are allowlisted by id, and the per-language plugins by the prefix `lang-*`, so a
-skill added to one is covered. Where a plugin routes a skill family through one
-router skill, the router is allowed too, because the family's members are hidden
-from the listing and only load by id through it:
+Skills are allowlisted by family prefix, so a skill a plugin adds to its family is
+covered without a change here. Each family pattern also covers that family's router
+skill, which the hidden members load through. The few coding skills outside their
+plugin's family are allowed by id:
 
-| Source plugin | Skills |
+| Source plugin | Rules |
 | --- | --- |
-| `lang-go`, `lang-python`, `lang-typescript`, `lang-rust` | the prefix `lang-*`: each language's router `lang-<language>` and its members, such as `lang-rust-persistence` and `lang-python-profiling` |
-| `quality` | `quality-code-design` (debugging, TDD), `quality-code-policy`, `quality-profiling`, `quality-testing` |
-| `toolchain` | router `toolchain-guide`; `shell-language`, `terraform-language`, `backend-background-jobs`, `ci-github-actions`, `coexistence-worktree`, `infrastructure-tfstate-guard`, `ops-no-global-cargo-target`, `ops-toolchain-cache-policy`, `toolchain-asset-ownership`, `toolchain-frontend`, `toolchain-infrastructure`, `toolchain-languages`, `toolchain-quality-observability`, `toolchain-stack-defaults` |
-| `architecture` | router `architecture-guide`; `architecture-docs-files`, `architecture-ownership`, `architecture-top-level` |
+| `lang-go`, `lang-python`, `lang-typescript`, `lang-rust` | `lang-*` |
+| `quality` | `quality-*` |
+| `toolchain` | `toolchain-*`, `ops-*`; `shell-language`, `terraform-language`, `backend-background-jobs`, `ci-github-actions`, `coexistence-worktree`, `infrastructure-tfstate-guard` |
+| `architecture` | `architecture-*` |
+| `trunk-dev`, `worktrunk` | `trunk-dev-*`, `worktrunk-*` |
 | `dep-update`, `whats-new` | `dep-update`, `whats-new` |
-| `trunk-dev`, `worktrunk` | router `trunk-dev-guide`; `trunk-dev-feature-flags`, `worktrunk-worktrees` |
 
 Design, journeys, speckit, delivery, debate, beads and project-management skills are
 left out. A skill whose plugin is not installed is simply absent. To allow another
