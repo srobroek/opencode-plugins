@@ -6,18 +6,24 @@ import {
   activeMs,
   buildSegments,
   compact,
-  contextUsage,
-  DEFAULT_SEGMENTS,
+  contextLevel,
+  contextParts,
+  DEFAULT_LAYOUT,
   fitSegments,
+  formatCost,
   formatDuration,
-  gitLabel,
   lastAssistantWithUsage,
-  modelLabel,
   parseOptions,
+  pathParts,
+  renderSegment,
+  SEGMENT_IDS,
   type Segment,
+  type SegmentInput,
+  segmentText,
   separators,
   shortSessionID,
   tokenRate,
+  truncateEnd,
   truncatePath,
 } from "./format.ts"
 
@@ -79,19 +85,6 @@ describe("lastAssistantWithUsage", () => {
   })
 })
 
-describe("contextUsage", () => {
-  test("renders percent of the window", () => {
-    expect(contextUsage(tokens(100_000, 23_000), 1_000_000)).toBe("12.3%/1M")
-    expect(contextUsage(tokens(50_000, 0, 50_000), 200_000)).toBe("50.0%/200k")
-  })
-  test("falls back to raw count without a window", () => {
-    expect(contextUsage(tokens(1500), undefined)).toBe("1.5k/?")
-  })
-  test("is empty without usage", () => {
-    expect(contextUsage(undefined, 1000)).toBeUndefined()
-  })
-})
-
 describe("time and rate", () => {
   test("activeMs sums completed assistant steps", () => {
     expect(
@@ -110,27 +103,9 @@ describe("time and rate", () => {
   })
   test("tokenRate uses output over the streaming window", () => {
     const m = assistant("a", tokens(0, 100), { created: 0, streamed: 1000, completed: 3000 })
-    expect(tokenRate(m as never)).toBe("50.0 tok/s")
+    expect(tokenRate(m as never)).toBe("50.0")
     expect(tokenRate(assistant("b", tokens(0, 1), { created: 0 } as never) as never)).toBeUndefined()
     expect(tokenRate(undefined)).toBeUndefined()
-  })
-})
-
-describe("labels", () => {
-  test("modelLabel strips Claude and appends the variant", () => {
-    expect(modelLabel("Claude Opus 4.5", "high")).toBe("Opus 4.5 · high")
-    expect(modelLabel("GPT-5", undefined)).toBe("GPT-5")
-    expect(modelLabel(undefined, "high")).toBeUndefined()
-  })
-  test("gitLabel appends the dirty count", () => {
-    expect(gitLabel("main", 3)).toBe("main *3")
-    expect(gitLabel("main", 0)).toBe("main")
-    expect(gitLabel(undefined, 3)).toBeUndefined()
-  })
-  test("truncatePath keeps the tail", () => {
-    expect(truncatePath("~/a/b", 60)).toBe("~/a/b")
-    expect(truncatePath("~/personal/dev/opencode-plugins", 20)).toBe("…/opencode-plugins")
-    expect(truncatePath("~/averyveryverylongdirectoryname", 10)).toBe("…ctoryname")
   })
 })
 
@@ -150,13 +125,68 @@ describe("accentIndex", () => {
   })
 })
 
-describe("parseOptions", () => {
-  test("defaults", () => {
-    expect(parseOptions(undefined)).toEqual({ segments: DEFAULT_SEGMENTS, separator: "powerline", pathMaxLength: 60 })
+describe("context", () => {
+  test("renders percent of the window with a faint window unit", () => {
+    expect(contextParts(tokens(100_000, 23_000), 1_000_000)).toEqual([
+      { text: "12.3%", tone: "value" },
+      { text: "/1M", tone: "label" },
+    ])
+    expect(contextParts(tokens(1500), undefined)?.map((p) => p.text).join("")).toBe("1.5k/?")
+    expect(contextParts(undefined, 1000)).toBeUndefined()
   })
-  test("filters unknown segments and keeps order", () => {
-    const o = parseOptions({ segments: ["git", "nope", "session"], separator: "plain", pathMaxLength: 30 })
-    expect(o).toEqual({ segments: ["git", "session"], separator: "plain", pathMaxLength: 30 })
+  test("levels follow omp's percent and token thresholds", () => {
+    expect(contextLevel(40_000, 200_000)).toBe("normal")
+    expect(contextLevel(100_000, 200_000)).toBe("warning")
+    expect(contextLevel(185_000, 200_000)).toBe("error")
+    // 150k tokens warn even in a 1M window
+    expect(contextLevel(150_000, 1_000_000)).toBe("warning")
+    expect(contextLevel(500_000, 1_000_000)).toBe("error")
+    expect(contextLevel(160_000, undefined)).toBe("warning")
+    expect(contextParts(tokens(100_000), 200_000)?.[0]?.tone).toBe("warning")
+  })
+})
+
+describe("labels", () => {
+  test("formatCost hides zero and keeps sub-cent spend visible", () => {
+    expect(formatCost(0)).toBeUndefined()
+    expect(formatCost(undefined)).toBeUndefined()
+    expect(formatCost(0.0042)).toBe("0.0042")
+    expect(formatCost(0.000123)).toBe("0.00012")
+    expect(formatCost(1.2e-7)).toBe("<0.0001")
+    expect(formatCost(1.234)).toBe("1.23")
+  })
+  test("truncatePath keeps the tail", () => {
+    expect(truncatePath("~/a/b", 60)).toBe("~/a/b")
+    expect(truncatePath("~/personal/dev/opencode-plugins", 20)).toBe("…/opencode-plugins")
+    expect(truncatePath("~/averyveryverylongdirectoryname", 10)).toBe("…ctoryname")
+  })
+  test("pathParts dims the parent and brightens the leaf", () => {
+    expect(pathParts("~/dev/app")).toEqual([
+      { text: "~/dev/", tone: "label" },
+      { text: "app", tone: "value" },
+    ])
+    expect(pathParts("~")).toEqual([{ text: "~", tone: "value" }])
+  })
+  test("truncateEnd", () => {
+    expect(truncateEnd("short", 10)).toBe("short")
+    expect(truncateEnd("a long session title", 8)).toBe("a long…")
+  })
+})
+
+describe("parseOptions", () => {
+  test("defaults to omp's default preset", () => {
+    expect(parseOptions(undefined)).toEqual({ ...DEFAULT_LAYOUT, separator: "powerline", pathMaxLength: 40 })
+    expect(DEFAULT_LAYOUT.left).toEqual(["model", "agent", "path", "git", "context_pct", "cost"])
+  })
+  test("a flat list keeps each id on its default side, filtering unknown and duplicate ids", () => {
+    const o = parseOptions({ segments: ["git", "nope", "time_spent", "session", "git"], separator: "plain", pathMaxLength: 30 })
+    expect(o).toEqual({ left: ["git", "session"], right: ["time_spent"], separator: "plain", pathMaxLength: 30 })
+  })
+  test("an object places ids on the named side", () => {
+    expect(parseOptions({ segments: { left: ["model", "session_name"], right: ["context_pct", "model"] } })).toMatchObject({
+      left: ["model", "session_name"],
+      right: ["context_pct"],
+    })
   })
   test("separators", () => {
     expect(separators("plain").left).toBe(" · ")
@@ -164,32 +194,62 @@ describe("parseOptions", () => {
   })
 })
 
+const input: SegmentInput = {
+  sessionID: "ses_abcdef123456",
+  hostname: "mac",
+  model: "Claude Opus 4.5",
+  variant: "high",
+  agent: "build",
+  path: "~/dev/x",
+  branch: "main",
+  dirty: 2,
+  title: "Fix bug",
+  cost: 0.42,
+  tokens: tokens(1200, 3400, 5600, 7800),
+  messages: [assistant("a", tokens(100_000, 23_000))],
+  contextWindow: 1_000_000,
+}
+
 describe("buildSegments", () => {
-  const input = {
-    sessionID: "ses_abcdef123456",
-    hostname: "mac",
-    model: "Claude Opus 4.5",
-    variant: "high",
-    agent: "build",
-    path: "~/dev/x",
-    branch: "main",
-    dirty: 2,
-    title: "Fix bug",
-    tokens: tokens(1200, 3400, 5600, 7800),
-    messages: [assistant("a", tokens(100_000, 23_000))],
-    contextWindow: 1_000_000,
-  }
-  test("mirrors omp segment order", () => {
-    const { left, right } = buildSegments(input, { segments: DEFAULT_SEGMENTS, pathMaxLength: 60 })
-    expect(left.map((s) => s.text)).toEqual(["abcdef12", "mac", "Opus 4.5 · high", "build", "~/dev/x", "main *2"])
-    expect(right.map((s) => s.text)).toEqual(["12.3%/1M", "Fix bug", "↑1.2k", "↓3.4k", "⟳5.6k", "✎7.8k", "11500.0 tok/s", "3s"])
-    expect(left[0]?.accent).toBe(true)
-    expect(right[1]?.accent).toBe(true)
+  test("default layout", () => {
+    const { left, right } = buildSegments(input, { ...DEFAULT_LAYOUT, pathMaxLength: 40 })
+    expect(left.map(segmentText)).toEqual(["Opus 4.5 · high", "build", "~/dev/x", "\uE0A0 main *2", "12.3%/1M", "$0.42"])
+    expect(right.map(segmentText)).toEqual(["Fix bug"])
   })
-  test("respects the configured segment list and skips empty values", () => {
+  test("every segment renders with values bright and labels faint", () => {
+    const all = buildSegments(input, { left: [], right: [...SEGMENT_IDS], pathMaxLength: 40 }).right
+    expect(all.map(segmentText)).toEqual([
+      "abcdef12",
+      "mac",
+      "Opus 4.5 · high",
+      "build",
+      "~/dev/x",
+      "\uE0A0 main *2",
+      "12.3%/1M",
+      "$0.42",
+      "Fix bug",
+      "↑1.2k",
+      "↓3.4k",
+      "⟳5.6k",
+      "✎7.8k",
+      "11500.0 tok/s",
+      "3s",
+    ])
+    const model = all.find((s) => s.id === "model")?.parts
+    expect(model?.[0]).toEqual({ text: "Opus 4.5", tone: "accent", bold: true })
+    expect(model?.[2]?.tone).toBe("dim")
+    expect(all.find((s) => s.id === "token_in")?.parts.map((p) => p.tone)).toEqual(["label", "value"])
+  })
+  test("git is green when clean and amber when dirty", () => {
+    expect(renderSegment("git", { ...input, dirty: 0 }, 40)?.parts.map((p) => p.tone)).toEqual(["label", "success"])
+    expect(renderSegment("git", input, 40)?.parts.map((p) => p.tone)).toEqual(["label", "warning", "warning"])
+    expect(renderSegment("model", input, 40, "plain")?.parts.map((p) => p.text).join("")).toBe("Opus 4.5 high")
+    expect(renderSegment("git", input, 40, "plain")?.parts.map((p) => p.text).join("")).toBe("main *2")
+  })
+  test("skips empty values", () => {
     const { left, right } = buildSegments(
       { sessionID: "ses_1", messages: [] },
-      { segments: ["git", "session", "token_in"], pathMaxLength: 60 },
+      { left: ["git", "session", "cost"], right: ["token_in"], pathMaxLength: 60 },
     )
     expect(left.map((s) => s.id)).toEqual(["session"])
     expect(right).toEqual([])
@@ -197,21 +257,33 @@ describe("buildSegments", () => {
 })
 
 describe("fitSegments", () => {
-  const seg = (id: Segment["id"], text: string): Segment => ({ id, text })
+  const seg = (id: Segment["id"], text: string): Segment => ({ id, parts: [{ text, tone: "value" }] })
   const sep = { left: " | ", right: " | " }
-  const left = [seg("session", "abcd"), seg("hostname", "mac")]
-  const right = [seg("context_pct", "1%/1M"), seg("session_name", "A long title"), seg("token_in", "↑1k"), seg("time_spent", "3s")]
+  const long = { ...input, path: "~/personal/dev/opencode-plugins" }
+  const left = [seg("model", "Opus"), seg("path", "~/personal/dev/opencode-plugins"), seg("git", "main")]
+  const right = [seg("session_name", "A long session title"), seg("token_in", "↑1k"), seg("time_spent", "3s")]
+  const ids = (r: { left: Segment[]; right: Segment[] }) => [r.left.map(segmentText), r.right.map(segmentText)]
 
   test("keeps everything when it fits", () => {
-    expect(fitSegments(left, right, 200, sep).right).toEqual(right)
+    expect(fitSegments({ left, right }, 200, sep, long)).toEqual({ left, right })
   })
-  test("drops the title first", () => {
-    // left 10, gap 1, right without title: 5+3+3+3+3+2 = 19 -> 30
-    expect(fitSegments(left, right, 30, sep).right.map((s) => s.id)).toEqual(["context_pct", "token_in", "time_spent"])
+  test("shrinks the title before dropping anything", () => {
+    // left 4+3+31+3+4 = 45, gap 2, right 20+3+3+3+2 = 31 -> 78
+    expect(ids(fitSegments({ left, right }, 70, sep, long))).toEqual([
+      ["Opus", "~/personal/dev/opencode-plugins", "main"],
+      ["A long sess…", "↑1k", "3s"],
+    ])
   })
-  test("then drops right segments from the end", () => {
-    expect(fitSegments(left, right, 22, sep).right.map((s) => s.id)).toEqual(["context_pct", "token_in"])
-    expect(fitSegments(left, right, 5, sep).right).toEqual([])
-    expect(fitSegments(left, right, 5, sep).left).toEqual(left)
+  test("then drops right segments from the far end", () => {
+    expect(ids(fitSegments({ left, right }, 59, sep, long))[1]).toEqual(["A long…"])
+  })
+  test("then shrinks the path", () => {
+    expect(ids(fitSegments({ left, right }, 40, sep, long))).toEqual([["Opus", "…/dev/opencode-plugins", "main"], []])
+  })
+  test("then drops left segments, keeping the path last", () => {
+    // path floors at 8 columns, then git goes, then the model
+    expect(ids(fitSegments({ left, right }, 15, sep, long))).toEqual([["Opus", "…plugins"], []])
+    expect(ids(fitSegments({ left, right }, 10, sep, long))).toEqual([["…plugins"], []])
+    expect(ids(fitSegments({ left, right }, 3, sep, long))).toEqual([[], []])
   })
 })

@@ -9,12 +9,18 @@ import { createElement as _$createElement } from "@opentui/solid";
 import { createComponent as _$createComponent } from "@opentui/solid";
 import { hostname } from "os";
 import { Plugin } from "@opencode/plugin/tui";
-import { createMemo, createResource, createSignal, For, onCleanup, Show } from "solid-js";
+import { createMemo, createResource, createSignal, Index, onCleanup, Show } from "solid-js";
 
 // plugins/statusline/src/format.ts
-var LEFT_SEGMENTS = ["session", "hostname", "model", "agent", "path", "git"];
-var RIGHT_SEGMENTS = [
+var SEGMENT_IDS = [
+  "session",
+  "hostname",
+  "model",
+  "agent",
+  "path",
+  "git",
   "context_pct",
+  "cost",
   "session_name",
   "token_in",
   "token_out",
@@ -23,14 +29,55 @@ var RIGHT_SEGMENTS = [
   "token_rate",
   "time_spent"
 ];
-var DEFAULT_SEGMENTS = [...LEFT_SEGMENTS, ...RIGHT_SEGMENTS];
-var KNOWN = new Set(DEFAULT_SEGMENTS);
+var DEFAULT_LAYOUT = {
+  left: ["model", "agent", "path", "git", "context_pct", "cost"],
+  right: ["session_name"]
+};
+var DEFAULT_SIDE = {
+  session: "left",
+  hostname: "left",
+  model: "left",
+  agent: "left",
+  path: "left",
+  git: "left",
+  context_pct: "left",
+  cost: "left",
+  session_name: "right",
+  token_in: "right",
+  token_out: "right",
+  cache_read: "right",
+  cache_write: "right",
+  token_rate: "right",
+  time_spent: "right"
+};
+var KNOWN = new Set(SEGMENT_IDS);
+function ids(raw) {
+  if (!Array.isArray(raw))
+    return;
+  const seen = new Set;
+  return raw.filter((s) => {
+    if (typeof s !== "string" || !KNOWN.has(s) || seen.has(s))
+      return false;
+    seen.add(s);
+    return true;
+  });
+}
+function parseLayout(raw) {
+  const flat = ids(raw);
+  if (flat)
+    return { left: flat.filter((id) => DEFAULT_SIDE[id] === "left"), right: flat.filter((id) => DEFAULT_SIDE[id] === "right") };
+  if (raw && typeof raw === "object") {
+    const o = raw;
+    const left = ids(o.left) ?? [];
+    return { left, right: (ids(o.right) ?? []).filter((id) => !left.includes(id)) };
+  }
+  return DEFAULT_LAYOUT;
+}
 function parseOptions(raw) {
-  const segments = Array.isArray(raw?.segments) ? raw.segments.filter((s) => typeof s === "string" && KNOWN.has(s)) : DEFAULT_SEGMENTS;
   const separator = raw?.separator === "plain" ? "plain" : "powerline";
   const max = raw?.pathMaxLength;
-  const pathMaxLength = typeof max === "number" && Number.isFinite(max) && max > 0 ? Math.floor(max) : 60;
-  return { segments, separator, pathMaxLength };
+  const pathMaxLength = typeof max === "number" && Number.isFinite(max) && max > 0 ? Math.floor(max) : 40;
+  return { ...parseLayout(raw?.segments), separator, pathMaxLength };
 }
 function separators(style) {
   return style === "powerline" ? { left: " \uE0B1 ", right: " \uE0B3 " } : { left: " \xB7 ", right: " \xB7 " };
@@ -57,13 +104,33 @@ function lastAssistantWithUsage(messages, boundary) {
 function contextTokens(t) {
   return t.input + t.output + t.reasoning + t.cache.read + t.cache.write;
 }
-function contextUsage(tokens, window) {
+function contextLevel(used, window) {
+  const reaches = (pct, tokens) => window ? used / window >= Math.min(pct, tokens / window) : used >= tokens;
+  if (reaches(0.9, 500000))
+    return "error";
+  if (reaches(0.5, 150000))
+    return "warning";
+  return "normal";
+}
+function contextParts(tokens, window) {
   if (!tokens)
     return;
   const used = contextTokens(tokens);
+  const level = contextLevel(used, window);
+  const tone = level === "normal" ? "value" : level;
   if (!window)
-    return `${compact(used)}/?`;
-  return `${(used / window * 100).toFixed(1)}%/${compact(window)}`;
+    return [{ text: compact(used), tone }, { text: "/?", tone: "label" }];
+  return [
+    { text: `${(used / window * 100).toFixed(1)}%`, tone },
+    { text: `/${compact(window)}`, tone: "label" }
+  ];
+}
+function formatCost(usd) {
+  if (!usd || !Number.isFinite(usd) || usd <= 0)
+    return;
+  if (usd < 0.0001)
+    return "<0.0001";
+  return usd < 0.01 ? String(Number(usd.toPrecision(2))) : usd.toFixed(2);
 }
 function activeMs(messages) {
   let ms = 0;
@@ -87,18 +154,10 @@ function tokenRate(last) {
   if (!last?.tokens || last.time.streamed === undefined || last.time.completed === undefined)
     return;
   const seconds = (last.time.completed - last.time.streamed) / 1000;
-  return seconds > 0 ? `${(last.tokens.output / seconds).toFixed(1)} tok/s` : undefined;
+  return seconds > 0 ? (last.tokens.output / seconds).toFixed(1) : undefined;
 }
-function modelLabel(name, variant) {
-  if (!name)
-    return;
-  const short = name.replace(/^Claude /, "");
-  return variant ? `${short} \xB7 ${variant}` : short;
-}
-function gitLabel(branch, dirty) {
-  if (!branch)
-    return;
-  return dirty ? `${branch} *${dirty}` : branch;
+function modelName(name) {
+  return name?.replace(/^Claude /, "");
 }
 function truncatePath(path, max) {
   if (path.length <= max)
@@ -113,6 +172,23 @@ function truncatePath(path, max) {
   }
   return out ? `\u2026/${out}` : `\u2026${path.slice(-(max - 1))}`;
 }
+function pathParts(path) {
+  const slash = path.lastIndexOf("/", path.length - 2);
+  if (slash < 0 || slash + 1 >= path.length)
+    return [{ text: path, tone: "value" }];
+  return [
+    { text: path.slice(0, slash + 1), tone: "label" },
+    { text: path.slice(slash + 1), tone: "value" }
+  ];
+}
+function truncateEnd(text, max, measure = measureDefault) {
+  if (measure(text) <= max)
+    return text;
+  let out = text;
+  while (out && measure(`${out}\u2026`) > max)
+    out = out.slice(0, -1);
+  return `${out.trimEnd()}\u2026`;
+}
 function accentIndex(seed, size) {
   if (size <= 0)
     return 0;
@@ -123,58 +199,122 @@ function accentIndex(seed, size) {
   }
   return (h >>> 0) % size;
 }
-function buildSegments(input, options) {
-  const last = lastAssistantWithUsage(input.messages, input.revert);
+var stat = (glyph, n) => n ? [{ text: `${glyph}`, tone: "label" }, { text: compact(n), tone: "value" }] : undefined;
+var BRANCH_GLYPH = "\uE0A0";
+function renderSegment(id, input, pathMax, separator = "powerline") {
   const t = input.tokens;
-  const text = {
-    session: () => shortSessionID(input.sessionID),
-    hostname: () => input.hostname,
-    model: () => modelLabel(input.model, input.variant),
-    agent: () => input.agent,
-    path: () => input.path ? truncatePath(input.path, options.pathMaxLength) : undefined,
-    git: () => gitLabel(input.branch, input.dirty),
-    context_pct: () => contextUsage(last?.tokens, input.contextWindow),
-    session_name: () => input.title || undefined,
-    token_in: () => t?.input ? `\u2191${compact(t.input)}` : undefined,
-    token_out: () => t?.output ? `\u2193${compact(t.output)}` : undefined,
-    cache_read: () => t?.cache.read ? `\u27F3${compact(t.cache.read)}` : undefined,
-    cache_write: () => t?.cache.write ? `\u270E${compact(t.cache.write)}` : undefined,
-    token_rate: () => tokenRate(last),
-    time_spent: () => formatDuration(activeMs(input.messages))
-  };
-  const pick = (ids) => options.segments.flatMap((id) => {
-    if (!ids.includes(id))
-      return [];
-    const value = text[id]();
-    if (!value)
-      return [];
-    return [{ id, text: value, ...id === "session" || id === "session_name" ? { accent: true } : {} }];
+  const last = () => lastAssistantWithUsage(input.messages, input.revert);
+  const parts = (() => {
+    switch (id) {
+      case "session":
+        return [{ text: shortSessionID(input.sessionID), tone: "accent" }];
+      case "hostname":
+        return input.hostname ? [{ text: input.hostname, tone: "dim" }] : undefined;
+      case "model": {
+        const name = modelName(input.model);
+        if (!name)
+          return;
+        const head = { text: name, tone: "accent", bold: true };
+        if (!input.variant)
+          return [head];
+        const joiner = separator === "powerline" ? " \xB7 " : " ";
+        return [head, { text: joiner, tone: "label" }, { text: input.variant, tone: "dim" }];
+      }
+      case "agent":
+        return input.agent ? [{ text: input.agent, tone: "dim" }] : undefined;
+      case "path":
+        return input.path ? pathParts(truncatePath(input.path, pathMax)) : undefined;
+      case "git": {
+        if (!input.branch)
+          return;
+        const tone = input.dirty ? "warning" : "success";
+        const out = separator === "powerline" ? [{ text: `${BRANCH_GLYPH} `, tone: "label" }] : [];
+        out.push({ text: input.branch, tone });
+        if (input.dirty)
+          out.push({ text: ` *${input.dirty}`, tone: "warning" });
+        return out;
+      }
+      case "context_pct":
+        return contextParts(last()?.tokens, input.contextWindow);
+      case "cost": {
+        const cost = formatCost(input.cost);
+        return cost ? [{ text: "$", tone: "label" }, { text: cost, tone: "value" }] : undefined;
+      }
+      case "session_name":
+        return input.title ? [{ text: input.title, tone: "accent" }] : undefined;
+      case "token_in":
+        return stat("\u2191", t?.input);
+      case "token_out":
+        return stat("\u2193", t?.output);
+      case "cache_read":
+        return stat("\u27F3", t?.cache.read);
+      case "cache_write":
+        return stat("\u270E", t?.cache.write);
+      case "token_rate": {
+        const rate = tokenRate(last());
+        return rate ? [{ text: rate, tone: "value" }, { text: " tok/s", tone: "label" }] : undefined;
+      }
+      case "time_spent": {
+        const d = formatDuration(activeMs(input.messages));
+        return d ? [{ text: d, tone: "dim" }] : undefined;
+      }
+    }
+  })();
+  return parts ? { id, parts } : undefined;
+}
+function buildSegments(input, options) {
+  const pick = (list) => list.flatMap((id) => {
+    const seg = renderSegment(id, input, options.pathMaxLength, options.separator);
+    return seg ? [seg] : [];
   });
-  return { left: pick(LEFT_SEGMENTS), right: pick(RIGHT_SEGMENTS) };
+  return { left: pick(options.left), right: pick(options.right) };
 }
 var measureDefault = (s) => typeof Bun === "undefined" ? s.length : Bun.stringWidth(s);
-function rowWidth(left, right, sep, measure = measureDefault) {
-  const side = (segs, s) => segs.reduce((w, seg, i) => w + measure(seg.text) + (i ? measure(s) : 0), 0);
-  const gap = left.length && right.length ? 1 : 0;
-  return side(left, sep.left) + gap + side(right, sep.right);
+var segmentText = (seg) => seg.parts.map((p) => p.text).join("");
+var GAP = 2;
+var MIN_ELASTIC = 8;
+function rowWidth(row, sep, measure = measureDefault) {
+  const side = (segs, s) => segs.reduce((w, seg, i) => w + measure(segmentText(seg)) + (i ? measure(s) : 0), 0);
+  const gap = row.left.length && row.right.length ? GAP : 0;
+  return side(row.left, sep.left) + gap + side(row.right, sep.right);
 }
-function fitSegments(left, right, width, sep, measure = measureDefault) {
-  let r = [...right];
-  const fits = () => rowWidth(left, r, sep, measure) <= width;
-  if (!fits())
-    r = r.filter((s) => s.id !== "session_name");
-  while (r.length && !fits())
-    r = r.slice(0, -1);
-  return { left: [...left], right: r };
+function fitSegments(row, width, sep, input, measure = measureDefault) {
+  const left = [...row.left];
+  const right = [...row.right];
+  const over = () => rowWidth({ left, right }, sep, measure) - width;
+  if (over() <= 0)
+    return { left, right };
+  const title = right.findIndex((s) => s.id === "session_name");
+  const titleSeg = right[title];
+  if (titleSeg) {
+    const text = segmentText(titleSeg);
+    const target = Math.max(MIN_ELASTIC, measure(text) - over());
+    const tone = titleSeg.parts[0]?.tone ?? "accent";
+    right[title] = { id: titleSeg.id, parts: [{ text: truncateEnd(text, target, measure), tone }] };
+  }
+  while (right.length && over() > 0)
+    right.pop();
+  const path = left.findIndex((s) => s.id === "path");
+  const pathSeg = left[path];
+  if (pathSeg && input.path && over() > 0) {
+    const target = Math.max(MIN_ELASTIC, measure(segmentText(pathSeg)) - over());
+    left[path] = { id: "path", parts: pathParts(truncatePath(input.path, target)) };
+  }
+  while (left.length && over() > 0) {
+    const drop = left.findLastIndex((s) => s.id !== "path");
+    left.splice(drop === -1 ? left.length - 1 : drop, 1);
+  }
+  return { left, right };
 }
 
 // plugins/statusline/src/tui.tsx
+var COMPOSER_INSET = 2;
 function Bar(props) {
   const ctx = props.context;
   const theme = ctx.theme;
   const host = hostname().split(".")[0];
   const sep = separators(props.options.separator);
-  const [width, setWidth] = createSignal(0);
+  const [width, setWidth] = createSignal(Math.max(0, ctx.renderer.width - 2 * COMPOSER_INSET));
   const session = createMemo(() => ctx.data.session.get(props.sessionID));
   const messages = createMemo(() => ctx.data.session.message.list(props.sessionID));
   const model = createMemo(() => {
@@ -201,9 +341,25 @@ function Bar(props) {
     const scale = palette[accentIndex(session()?.title || props.sessionID, palette.length)];
     return scale?.[ctx.themeMode === "dark" ? 400 : 600] ?? theme.text.base;
   });
-  const row = createMemo(() => {
+  const color = (tone) => {
+    switch (tone) {
+      case "accent":
+        return accent();
+      case "value":
+        return theme.text.base;
+      case "dim":
+        return theme.text.muted;
+      case "label":
+        return theme.text.faint;
+      case "success":
+      case "warning":
+      case "error":
+        return theme.text.feedback[tone].base;
+    }
+  };
+  const input = createMemo(() => {
     const s = session();
-    const all = buildSegments({
+    return {
       sessionID: props.sessionID,
       hostname: host,
       model: model()?.name,
@@ -211,23 +367,25 @@ function Bar(props) {
       agent: s?.agent,
       path: s ? ctx.ui.format.path(s.location.directory) : undefined,
       branch: vcs()?.branch.current,
-      dirty: dirty.error ? undefined : dirty(),
+      dirty: dirty.error ? undefined : dirty.latest,
       title: s?.title,
+      cost: s?.cost,
       tokens: s?.tokens,
       messages: messages(),
       revert: s?.revert?.messageID,
       contextWindow: model()?.limit.context
-    }, props.options);
-    return width() > 0 ? fitSegments(all.left, all.right, width(), sep) : all;
+    };
   });
-  const Side = (p) => _$createComponent(For, {
+  const row = createMemo(() => {
+    const all = buildSegments(input(), props.options);
+    return width() > 0 ? fitSegments(all, width(), sep, input()) : all;
+  });
+  const Side = (p) => _$createComponent(Index, {
     get each() {
       return p.segments;
     },
     children: (seg, i) => [_$createComponent(Show, {
-      get when() {
-        return i() > 0;
-      },
+      when: i > 0,
       get children() {
         var _el$ = _$createElement("span");
         _$insert(_el$, () => p.sep);
@@ -236,14 +394,20 @@ function Bar(props) {
         }, _$p));
         return _el$;
       }
-    }), (() => {
-      var _el$2 = _$createElement("span");
-      _$insert(_el$2, () => seg.text);
-      _$effect((_$p) => _$setProp(_el$2, "style", {
-        fg: seg.accent ? accent() : theme.text.muted
-      }, _$p));
-      return _el$2;
-    })()]
+    }), _$createComponent(Index, {
+      get each() {
+        return seg().parts;
+      },
+      children: (part) => (() => {
+        var _el$2 = _$createElement("span");
+        _$insert(_el$2, () => part().text);
+        _$effect((_$p) => _$setProp(_el$2, "style", {
+          fg: color(part().tone),
+          bold: part().bold ?? false
+        }, _$p));
+        return _el$2;
+      })()
+    })]
   });
   return (() => {
     var _el$3 = _$createElement("box"), _el$4 = _$createElement("text"), _el$5 = _$createElement("text");
