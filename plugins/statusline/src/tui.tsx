@@ -1,6 +1,7 @@
 import { hostname } from "node:os"
 import { Plugin } from "@opencode/plugin/tui"
-import { createMemo, createResource, createSignal, For, onCleanup, Show } from "solid-js"
+import type { RGBA } from "@opentui/core"
+import { createMemo, createResource, createSignal, Index, onCleanup, Show } from "solid-js"
 import {
   accentIndex,
   buildSegments,
@@ -8,17 +9,22 @@ import {
   type Options,
   parseOptions,
   type Segment,
+  type SegmentInput,
   separators,
+  type Tone,
 } from "./format.ts"
 
 type Context = Plugin.Context
+
+/** Columns the composer insets this slot by on each side; only seeds the first frame before layout reports a width. */
+const COMPOSER_INSET = 2
 
 function Bar(props: { context: Context; options: Options; sessionID: string }) {
   const ctx = props.context
   const theme = ctx.theme
   const host = hostname().split(".")[0]
   const sep = separators(props.options.separator)
-  const [width, setWidth] = createSignal(0)
+  const [width, setWidth] = createSignal(Math.max(0, ctx.renderer.width - 2 * COMPOSER_INSET))
 
   const session = createMemo(() => ctx.data.session.get(props.sessionID))
   const messages = createMemo(() => ctx.data.session.message.list(props.sessionID))
@@ -47,41 +53,66 @@ function Bar(props: { context: Context; options: Options; sessionID: string }) {
     const scale = palette[accentIndex(session()?.title || props.sessionID, palette.length)]
     return scale?.[ctx.themeMode === "dark" ? 400 : 600] ?? theme.text.base
   })
+  const color = (tone: Tone): RGBA => {
+    switch (tone) {
+      case "accent":
+        return accent()
+      case "value":
+        return theme.text.base
+      case "dim":
+        return theme.text.muted
+      case "label":
+        return theme.text.faint
+      case "success":
+      case "warning":
+      case "error":
+        return theme.text.feedback[tone].base
+    }
+  }
 
-  const row = createMemo(() => {
+  const input = createMemo((): SegmentInput => {
     const s = session()
-    const all = buildSegments(
-      {
-        sessionID: props.sessionID,
-        hostname: host,
-        model: model()?.name,
-        variant: ctx.ui.model.current()?.variant,
-        agent: s?.agent,
-        path: s ? ctx.ui.format.path(s.location.directory) : undefined,
-        branch: vcs()?.branch.current,
-        dirty: dirty.error ? undefined : dirty(),
-        title: s?.title,
-        tokens: s?.tokens,
-        messages: messages(),
-        revert: s?.revert?.messageID,
-        contextWindow: model()?.limit.context,
-      },
-      props.options,
-    )
-    return width() > 0 ? fitSegments(all.left, all.right, width(), sep) : all
+    return {
+      sessionID: props.sessionID,
+      hostname: host,
+      model: model()?.name,
+      variant: ctx.ui.model.current()?.variant,
+      agent: s?.agent,
+      path: s ? ctx.ui.format.path(s.location.directory) : undefined,
+      branch: vcs()?.branch.current,
+      // `latest` keeps the last count while a refetch is in flight, so the segment never blinks out.
+      dirty: dirty.error ? undefined : dirty.latest,
+      title: s?.title,
+      cost: s?.cost,
+      tokens: s?.tokens,
+      messages: messages(),
+      revert: s?.revert?.messageID,
+      contextWindow: model()?.limit.context,
+    }
+  })
+  const row = createMemo(() => {
+    const all = buildSegments(input(), props.options)
+    return width() > 0 ? fitSegments(all, width(), sep, input()) : all
   })
 
+  // Index keeps one node per slot, so a changing value updates the span in place instead of remounting it.
   const Side = (p: { segments: Segment[]; sep: string }) => (
-    <For each={p.segments}>
+    <Index each={p.segments}>
       {(seg, i) => (
         <>
-          <Show when={i() > 0}>
+          <Show when={i > 0}>
             <span style={{ fg: theme.text.faint }}>{p.sep}</span>
           </Show>
-          <span style={{ fg: seg.accent ? accent() : theme.text.muted }}>{seg.text}</span>
+          <Index each={seg().parts}>
+            {(part) => (
+              <span style={{ fg: color(part().tone), bold: part().bold ?? false }}>
+                {part().text}
+              </span>
+            )}
+          </Index>
         </>
       )}
-    </For>
+    </Index>
   )
 
   return (
