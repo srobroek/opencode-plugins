@@ -1,6 +1,6 @@
 ---
 name: architecture-guide
-description: "Use when inferring a project's architecture or stack, laying out top-level dirs or ownership, or writing docs/ files."
+description: "Load for a project's architecture or stack: map components, plan top-level dirs or monorepo layout, write docs/ files."
 ---
 
 # Architecture guide
