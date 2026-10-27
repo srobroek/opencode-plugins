@@ -4,7 +4,7 @@
  * A plugin keeps its agents as `agents/<id>.md` in the V2 markdown shape that
  * `scripts/convert-agent.ts` writes: flat `description`, `mode` and `steps` keys, a
  * `request.headers` map, a `permissions` list of `action`/`resource`/`effect` items, and
- * the prompt as the body. Shipped agents never pin a model: they name a model-roles role
+ * the prompt as the body. Shipped agents never pin a model: they name a model-roles tier
  * in the `x-opencode-model-role` header, and without that plugin inherit the session model.
  */
 

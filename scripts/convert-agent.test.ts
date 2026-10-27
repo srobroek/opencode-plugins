@@ -187,7 +187,7 @@ describe("convertAgent", () => {
   test("implementer: role model, spawns, report format, roles fragment", () => {
     const agent = convertAgent(fixture("implementer"), { roles })
     expect(agent.id).toBe("implementer")
-    expect(agent.role).toBe("task")
+    expect(agent.role).toBe("standard")
     expect(agent.frontmatter.model).toBe("anthropic/claude-sonnet-5-5#medium")
     expect(agent.frontmatter.mode).toBe("subagent")
     expect(agent.frontmatter.permissions.map((rule) => `${rule.action}:${rule.resource}:${rule.effect}`)).toEqual([
@@ -202,7 +202,7 @@ describe("convertAgent", () => {
     expect(agent.body).toContain("VERDICT: DONE|BLOCKED|SPLIT")
     expect(agent.body).not.toContain("rule://")
     expect(agent.body).not.toContain("agent://")
-    expect(rolesFragment([agent])).toEqual({ agents: { implementer: "task" } })
+    expect(rolesFragment([agent])).toEqual({ agents: { implementer: "standard" } })
   })
 
   test("pr-reviewer: read-only, no variant, no report section", () => {
@@ -244,20 +244,20 @@ describe("convertAgent", () => {
     }
   })
 
-  test("writes the role header and, without a roles file, no model", () => {
+  test("writes the tier header and, without a roles file, no model", () => {
     const agent = convertAgent(fixture("implementer"), {})
     expect(agent.frontmatter.model).toBeUndefined()
-    expect(agent.frontmatter.request).toEqual({ headers: { "x-opencode-model-role": "task" } })
-    expect(agent.warnings).toContain("thinking-level: medium dropped; the task role picks the variant")
+    expect(agent.frontmatter.request).toEqual({ headers: { "x-opencode-model-role": "standard" } })
+    expect(agent.warnings).toContain("thinking-level: medium dropped; the standard tier picks the variant")
     const rendered = renderAgent(agent)
-    expect(rendered).toContain("request:\n  headers:\n    x-opencode-model-role: task\n")
+    expect(rendered).toContain("request:\n  headers:\n    x-opencode-model-role: standard\n")
     expect(rendered).not.toContain("model:")
   })
 
   test("renames roles through the role map and refuses unknown roles", () => {
     const architect = convertAgent(fixture("architect"), { roleMap: { plan: "architect" } })
-    expect(architect.role).toBe("architect")
-    expect(architect.frontmatter.request?.headers["x-opencode-model-role"]).toBe("architect")
+    expect(architect.role).toBe("strong")
+    expect(architect.frontmatter.request?.headers["x-opencode-model-role"]).toBe("strong")
     const warnings: string[] = []
     expect(mapRole("scout", undefined, warnings)).toBeUndefined()
     expect(mapRole("task", { task: "nope" }, warnings)).toBeUndefined()

@@ -4,7 +4,7 @@ mode: subagent
 steps: 400
 request:
   headers:
-    x-opencode-model-role: designer
+    x-opencode-model-role: strong
 permissions:
   - action: subagent
     resource: "*"

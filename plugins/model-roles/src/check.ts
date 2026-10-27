@@ -4,7 +4,8 @@
  * options and a `model.list` dump.
  */
 
-import type { GuardModel } from "./guard.ts"
+import type { Derived } from "./catalog.ts"
+import { type GuardModel, tierNames } from "./guard.ts"
 import { type HealthState, healthEntry, healthView } from "./health.ts"
 import {
   type AgentLike,
@@ -17,6 +18,7 @@ import {
   roleOf,
 } from "./resolve.ts"
 import { describeChoice, type RoleChoice, roleChoices } from "./spawn-role.ts"
+import { type TierMeta, tierOf } from "./tiers.ts"
 
 export type CandidateStatus =
   | { status: "available" }
@@ -29,12 +31,40 @@ export type CandidateStatus =
 
 export type CandidateReport = { entry: string } & CandidateStatus
 
-export type RoleReport = { role: string; candidates: CandidateReport[]; resolved?: ModelRef; degraded?: true }
+export type RoleReport = {
+  role: string
+  candidates: CandidateReport[]
+  resolved?: ModelRef
+  degraded?: true
+  /** The tier table entry, for a tier. */
+  tier?: TierMeta
+}
 
 export type AgentReport = { id: string; role: string; resolved?: ModelRef; own?: ModelRef }
 
-/** `choices`: the values the `subagent` tool's `role` parameter offers. */
-export type CheckReport = { roles: RoleReport[]; agents: AgentReport[]; choices: RoleChoice[] }
+/** `choices`: the values the `subagent` tool's `tier` parameter offers. */
+export type CheckReport = {
+  roles: RoleReport[]
+  agents: AgentReport[]
+  choices: RoleChoice[]
+  /** The derived lineups and what the derivation dropped, when tiers are derived. */
+  derived?: Pick<Derived, "lineups" | "dropped">
+  warnings: string[]
+}
+
+/** The names the check reports: tiers first, then old role names with a list of their own. */
+function reportedNames(options: Options): string[] {
+  if (options.tiers === undefined) return Object.keys(options.roles).sort()
+  const tiers = tierNames(options)
+  const rest = Object.keys(options.roles)
+    .filter((name) => !tiers.includes(name))
+    .filter((name) => {
+      const list = options.roles[name] ?? []
+      return !(list.length === 1 && list[0] === `@${tierOf(name)}`)
+    })
+    .sort()
+  return [...tiers, ...rest]
+}
 
 /** One candidate's status against every model the host lists, enabled or not. */
 export function candidateStatus(
@@ -67,10 +97,10 @@ export function checkRoles(
   health: HealthState = {},
   now = Date.now(),
   purposes: Readonly<Record<string, string>> = {},
+  derived?: Pick<Derived, "lineups" | "dropped">,
 ): CheckReport {
   const view = healthView(health, now)
-  const roles = Object.keys(options.roles)
-    .sort()
+  const roles = reportedNames(options)
     .map((role): RoleReport => {
       const resolution = resolveRole(options.roles, models, role, view)
       const report: RoleReport = {
@@ -82,11 +112,18 @@ export function checkRoles(
       }
       if (resolution.model !== undefined) report.resolved = resolution.model
       if (resolution.model !== undefined && resolution.unhealthy) report.degraded = true
+      const tier = options.tiers?.[role]
+      if (tier !== undefined) report.tier = tier
       return report
     })
+  const warnings: string[] = []
+  for (const [name, tier] of Object.entries(options.tiers ?? {})) {
+    if (tier.purposeMissing) warnings.push(`Tier ${name} has no purpose; set tiers.${name}.purpose so the spawner knows when to pick it.`)
+    if ((options.roles[name] ?? []).length === 0) warnings.push(`Tier ${name} has no candidates on this machine.`)
+  }
   const agentReports: AgentReport[] = []
   for (const agent of [...agents].sort((a, b) => a.id.localeCompare(b.id))) {
-    const role = roleOf(agent, options.agents)
+    const role = roleOf(agent, options.agents, options.implicit)
     if (role === undefined) continue
     const report: AgentReport = { id: agent.id, role }
     const resolved = resolveRole(options.roles, models, role, view).model
@@ -94,7 +131,32 @@ export function checkRoles(
     if (agent.model !== undefined) report.own = agent.model
     agentReports.push(report)
   }
-  return { roles, agents: agentReports, choices: roleChoices(options, models, purposes) }
+  const report: CheckReport = { roles, agents: agentReports, choices: roleChoices(options, models, purposes), warnings }
+  if (derived !== undefined) report.derived = { lineups: derived.lineups, dropped: derived.dropped }
+  return report
+}
+
+/** How many dropped models the check names per reason. */
+export const DROPPED_LIMIT = 12
+
+function formatDerived(derived: Pick<Derived, "lineups" | "dropped">): string[] {
+  const lines = ["", "Derived lineups (cheapest first):"]
+  if (derived.lineups.length === 0) lines.push("  (none: no listed model passed the rules)")
+  for (const lineup of derived.lineups) {
+    const head = lineup[0]
+    if (head === undefined) continue
+    lines.push(
+      `  - ${head.model.providerID} ${head.vendor}: ${lineup.map((r) => `${r.model.id} (${r.billing}, $${r.price}/M)`).join(" < ")}`,
+    )
+  }
+  const byReason = new Map<string, string[]>()
+  for (const entry of derived.dropped) byReason.set(entry.reason, [...(byReason.get(entry.reason) ?? []), entry.ref])
+  if (byReason.size > 0) lines.push("", "Dropped from derivation:")
+  for (const [reason, refs] of [...byReason].sort((a, b) => a[0].localeCompare(b[0]))) {
+    const more = refs.length > DROPPED_LIMIT ? `; ${refs.length - DROPPED_LIMIT} more` : ""
+    lines.push(`  - ${reason} (${refs.length}): ${refs.slice(0, DROPPED_LIMIT).join(", ")}${more}`)
+  }
+  return lines
 }
 
 const label = modelText
@@ -125,7 +187,12 @@ export function formatCheck(report: CheckReport): string {
   for (const role of report.roles) {
     const resolved =
       role.resolved === undefined ? "nothing available" : `${label(role.resolved)}${role.degraded ? " (every candidate unhealthy; least recently failed)" : ""}`
-    lines.push(`Role ${role.role} → ${resolved}`)
+    if (role.tier !== undefined) {
+      const facts = [role.tier.source, role.tier.effort ? `effort ${role.tier.effort}` : "", role.tier.distinctVendor ? "another vendor first" : ""]
+        .filter((f) => f !== "")
+        .join(", ")
+      lines.push(`Tier ${role.role} (${facts}) → ${resolved}`)
+    } else lines.push(`Role ${role.role} → ${resolved}`)
     for (const candidate of role.candidates) lines.push(`  - ${candidate.entry}: ${describe(candidate)}`)
   }
   if (report.agents.length > 0) {
@@ -136,8 +203,10 @@ export function formatCheck(report: CheckReport): string {
     }
   }
   if (report.choices.length > 0) {
-    lines.push("", "subagent `role` parameter:")
+    lines.push("", "subagent `tier` parameter:")
     for (const choice of report.choices) lines.push(`  - ${describeChoice(choice)}`)
   }
+  if (report.warnings.length > 0) lines.push("", "Warnings:", ...report.warnings.map((w) => `  - ${w}`))
+  if (report.derived !== undefined) lines.push(...formatDerived(report.derived))
   return lines.join("\n")
 }

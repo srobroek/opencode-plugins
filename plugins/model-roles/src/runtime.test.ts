@@ -64,14 +64,14 @@ describe("retry switch", () => {
 
   test("the switch note names both models", () => {
     const facts = { failed: a, kind: "server" as const, cooldownMs: 600_000, target: { role: "task", model: b } }
-    expect(switchNote(facts)).toEndWith("Role task now resolves to p/b. The request was retried on p/b.")
+    expect(switchNote(facts)).toEndWith("Tier task now resolves to p/b. The request was retried on p/b.")
     expect(failureNote({ ...facts, cooldownMs: 1_000 })).toContain("sits out new resolutions for 1 s.")
   })
 
   test("notes name the model, the cooldown and the next model", () => {
     const facts = { failed: a, kind: "auth" as const, cooldownMs: 600_000, target: { role: "task", model: b } }
     expect(failureNote(facts)).toBe(
-      "Model p/a failed (auth); every p model sits out new resolutions for 10 min. Role task now resolves to p/b.",
+      "Model p/a failed (auth); every p model sits out new resolutions for 10 min. Tier task now resolves to p/b.",
     )
     expect(failureNote({ ...facts, kind: "server" })).toStartWith("Model p/a failed (server); it sits out new resolutions for 10 min.")
     expect(failureNote({ ...facts, kind: "quota", cooldownMs: 6 * 3_600_000 })).toContain("for 6 h.")
@@ -81,7 +81,7 @@ describe("retry switch", () => {
     expect(failureNote({ ...facts, failed: { ...a, variant: "default" } })).toStartWith("Model p/a failed (auth)")
     expect(failureNote({ ...facts, failed: { ...a, variant: "high" } })).toStartWith("Model p/a#high failed (auth)")
     const byRole = subagentNote({ ...facts, agent: "general", spawnRole: "task", resumable: "ses_c" })
-    expect(byRole).toContain('Spawn it again with role: "task"; that role now runs p/b.')
+    expect(byRole).toContain('Spawn it again with tier: "task"; that tier now runs p/b.')
     expect(byRole).toContain("resume it with sessionID ses_c")
   })
 })
@@ -113,7 +113,7 @@ describe("check", () => {
     expect(text).toContain("  - @ghost: link to unknown role ghost")
     expect(text).toContain("  - general (role task) → p/a")
     expect(report.choices.map((choice) => choice.role)).toEqual(["odd", "other", "slow", "task"])
-    expect(text).toContain("subagent `role` parameter:")
+    expect(text).toContain("subagent `tier` parameter:")
     expect(text).toContain("  - 'task': everyday implementation and investigation (cost unknown)")
     expect(formatCheck(checkRoles(parseOptions({}), [], []))).toBe("No roles configured.")
   })

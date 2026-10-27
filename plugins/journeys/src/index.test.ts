@@ -181,7 +181,7 @@ describe("agents", () => {
     for (const agent of agents) {
       expect(agent.mode).toBe("subagent")
       expect(agent.description).toBeTruthy()
-      expect(agent.request?.headers).toEqual({ "x-opencode-model-role": "task" })
+      expect(agent.request?.headers).toEqual({ "x-opencode-model-role": "standard" })
       expect(agent.permissions).toContainEqual({ action: "subagent", resource: "*", effect: "deny" })
       expect(agent.system).not.toMatch(/skill:\/\/|CAP: none|\bbash\b|\beval\b|result channel/)
     }

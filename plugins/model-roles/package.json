@@ -1,7 +1,7 @@
 {
   "name": "@srobroek/opencode-model-roles",
   "version": "0.1.0",
-  "description": "Map agents to model roles and resolve each role to the first available candidate model.",
+  "description": "Give agents a model tier (cheap, standard, strong, reviewer) derived from the model catalog, and resolve each tier to the first available candidate.",
   "private": true,
   "type": "module",
   "exports": {

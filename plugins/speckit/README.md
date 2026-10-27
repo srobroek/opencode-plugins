@@ -99,9 +99,9 @@ subagents do not get it.
 | `speckit-sync` | `scope: drift` / `conflicts` / `both` |
 | `speckit-verify` | `mode: requirements` / `tasks` / `review` |
 
-Both are read-only (edits denied) and carry the `challenger` model role in
+Both are read-only (edits denied) and carry the `reviewer` model tier in
 `request.headers.x-opencode-model-role`; with the model-roles plugin they run on that
-role's model, otherwise on the parent's. They pin no model.
+tier's model, otherwise on the parent's. They pin no model.
 
 Formula steps that spawn them set `execution_agent_type` to the agent id, with
 `execution_agent_mode` or `execution_agent_scope` beside it. That is the beads

@@ -4,7 +4,7 @@ mode: subagent
 model: "amazon-bedrock/global.anthropic.claude-sonnet-5-5#medium"
 request:
   headers:
-    x-opencode-model-role: task
+    x-opencode-model-role: standard
 permissions:
   - action: edit
     resource: "*"

@@ -3,7 +3,7 @@ description: "Authors and amends user journeys with evidence-gated changes and s
 mode: subagent
 request:
   headers:
-    x-opencode-model-role: task
+    x-opencode-model-role: standard
 permissions:
   - action: webfetch
     resource: "*"

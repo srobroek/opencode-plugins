@@ -1,11 +1,12 @@
 /**
- * The optional auto decider for `srobroek.model-roles`: a small model picks a role
- * for a fresh `subagent` spawn that names no model and no role and whose agent has
- * neither. Pure: the plugin calls `ctx.generate.text` with `buildDeciderPrompt` and
- * applies `parseDecision`, `pickRole` and `capRole` in its `execute.before` hook.
+ * The optional auto decider for `srobroek.model-roles`: a small model picks a tier
+ * for a fresh `general` spawn that names no model and no tier, and an effort for a
+ * tier whose effort is `"auto"`. Pure: the plugin calls `ctx.generate.text` with
+ * `buildDeciderPrompt` and applies `parseDecision`, `pickRole` and `capRole` in its
+ * `execute.before` hook.
  */
 
-import { type GuardAgent, type GuardModel, inputCost } from "./guard.ts"
+import type { GuardAgent, GuardModel } from "./guard.ts"
 import {
   type HealthView,
   type ModelRef,
@@ -16,6 +17,7 @@ import {
   roleOf,
 } from "./resolve.ts"
 import { describeChoice, type RoleChoice } from "./spawn-role.ts"
+import { rankOf } from "./tiers.ts"
 
 /** How long a spawn waits for the decider before it takes the default role. */
 export const DEFAULT_AUTO_TIMEOUT_MS = 5000
@@ -26,7 +28,10 @@ export const DECIDER_PROMPT_LIMIT = 6000
 /** Auto decisions `model_roles_check` lists, newest first. */
 export const AUTO_HISTORY_LIMIT = 20
 
-export const DEFAULT_AUTO_ROLES: ReadonlyArray<string> = ["smol", "task"]
+export const DEFAULT_AUTO_ROLES: ReadonlyArray<string> = ["cheap", "standard"]
+
+/** The decider runs on the cheap tier at effort none. */
+export const DEFAULT_DECIDER = "@tiny"
 
 export type AutoOptions = {
   /** `@role` or `provider/model#variant` the decider runs on. */
@@ -57,8 +62,14 @@ export function parseAuto(raw: unknown, options: Options): AutoOptions | undefin
   const roles = [...new Set(listed)].filter((role) => role !== "" && Object.hasOwn(options.roles, role))
   if (roles.length === 0) return undefined
   const wanted = typeof input.default === "string" ? input.default.trim() : ""
-  const fallback = roles.includes(wanted) ? wanted : roles.includes("task") ? "task" : (roles[0] as string)
-  const decider = typeof input.decider === "string" && input.decider.trim() !== "" ? input.decider.trim() : "@smol"
+  const fallback = roles.includes(wanted)
+    ? wanted
+    : roles.includes("standard")
+      ? "standard"
+      : roles.includes("task")
+        ? "task"
+        : (roles[0] as string)
+  const decider = typeof input.decider === "string" && input.decider.trim() !== "" ? input.decider.trim() : DEFAULT_DECIDER
   const timeoutMs =
     typeof input.timeoutMs === "number" && Number.isFinite(input.timeoutMs) && input.timeoutMs > 0
       ? input.timeoutMs
@@ -92,7 +103,7 @@ export function autoEligible(input: unknown, agent: GuardAgent | undefined, opti
   if (typeof input.model === "string" && input.model.trim() !== "") return false
   if (typeof input.role === "string" && input.role.trim() !== "") return false
   if (agent.model !== undefined) return false
-  return roleOf(agent, options.agents) === undefined
+  return roleOf(agent, options.agents, options.implicit) === undefined
 }
 
 export type DeciderInput = {
@@ -111,13 +122,13 @@ export function buildDeciderPrompt(input: DeciderInput): string {
   const names = input.choices.map((choice) => choice.role).join(", ")
   const agent = input.agent.description?.trim()
   return [
-    "You route a subagent task to a model role. Reply with ONLY a JSON object, no prose:",
+    "You route a subagent task to a model tier. Reply with ONLY a JSON object, no prose:",
     `{"role": "<one of: ${names}>", "confident": true|false}`,
     "",
-    "Roles:",
+    "Tiers:",
     ...input.choices.map((choice) => `- ${describeChoice(choice)}`),
     "",
-    "Pick the cheapest role that fits the task. Set confident to false when the task is ambiguous.",
+    "Pick the cheapest tier that fits the task. Set confident to false when the task is ambiguous.",
     "",
     `Agent: ${input.agent.id}${agent ? ` — ${agent}` : ""}`,
     `Spawn description: ${input.description?.trim() || "(none)"}`,
@@ -163,12 +174,13 @@ export function pickRole(
   return { role: decision.role, reason: "confident" }
 }
 
+/** A tier and the lineup rank of the model it resolves to (0 cheap, 1 standard, 2 strong). */
 export type RoleCost = { role: string; cost: number | undefined }
 
 /**
- * Keep `role` unless its model costs more than the parent's: then the dearest allowed
- * role at or under the parent's cost, else the cheapest allowed role. Unknown costs
- * leave the role alone.
+ * Keep `role` unless its model ranks above the parent's: then the highest allowed
+ * tier at or under the parent's rank, else the lowest allowed one. Unknown ranks
+ * leave the tier alone.
  */
 export function capRole(role: string, costs: ReadonlyArray<RoleCost>, parentCost: number | undefined): string {
   const chosen = costs.find((entry) => entry.role === role)?.cost
@@ -179,7 +191,7 @@ export function capRole(role: string, costs: ReadonlyArray<RoleCost>, parentCost
   return known.sort((a, b) => a.cost - b.cost)[0]?.role ?? role
 }
 
-/** The input cost of the model each role resolves to right now. */
+/** The lineup rank of the model each tier resolves to right now. */
 export function roleCosts(
   roles: ReadonlyArray<string>,
   options: Options,
@@ -188,8 +200,40 @@ export function roleCosts(
 ): RoleCost[] {
   return roles.map((role) => {
     const model = resolveRole(options.roles, available, role, health).model
-    return { role, cost: model === undefined ? undefined : inputCost(model, available) }
+    return { role, cost: model === undefined ? undefined : rankOf(model, options.classes) }
   })
+}
+
+/** The decider prompt for an effort: the variants the model has, and the task. */
+export function buildEffortPrompt(input: { tier: string; variants: ReadonlyArray<string>; description?: string; prompt: string }): string {
+  const task = input.prompt.length > DECIDER_PROMPT_LIMIT ? `${input.prompt.slice(0, DECIDER_PROMPT_LIMIT)}\n[truncated]` : input.prompt
+  return [
+    "You pick the reasoning effort for a subagent task. Reply with ONLY a JSON object, no prose:",
+    `{"effort": "<one of: ${input.variants.join(", ")}>"}`,
+    "",
+    "Pick the lowest effort that does the task well: low for lookups and mechanical edits, higher for design, debugging and subtle reasoning.",
+    "",
+    `Tier: ${input.tier}`,
+    `Spawn description: ${input.description?.trim() || "(none)"}`,
+    "Task:",
+    "<<<",
+    task,
+    ">>>",
+  ].join("\n")
+}
+
+/** The effort in the decider's reply, if it is one of `allowed`. */
+export function parseEffort(text: string, allowed: ReadonlyArray<string>): string | undefined {
+  const start = text.indexOf("{")
+  const end = text.indexOf("}", start)
+  if (start < 0 || end < 0) return undefined
+  try {
+    const value = JSON.parse(text.slice(start, end + 1)) as { effort?: unknown }
+    const effort = typeof value.effort === "string" ? value.effort.trim() : ""
+    return allowed.includes(effort) ? effort : undefined
+  } catch {
+    return undefined
+  }
 }
 
 export type AutoRecord = {

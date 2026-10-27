@@ -4,7 +4,7 @@ mode: subagent
 model: "amazon-bedrock/global.anthropic.claude-opus-5-5#high"
 request:
   headers:
-    x-opencode-model-role: slow
+    x-opencode-model-role: strong
 permissions:
   - action: webfetch
     resource: "*"

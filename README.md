@@ -125,11 +125,13 @@ bun scripts/convert-agent.ts --out .opencode/agents \
   --fragment model-roles.json ../omp-plugins/delivery/agents/*.md
 ```
 
-- The omp `@role` becomes the `x-opencode-model-role` request header, which the
-  model-roles plugin resolves to a model. `--role-map map.json`
-  (`{ "<omp role>": "<role>" }`) renames roles; a role outside the model-roles role
-  map (`default`, `task`, `slow`, `smol`, `tiny`, `commit`, `reviewer`, `challenger`,
-  `architect`, `designer`, `plan`, `judge`) gets no header and a warning.
+- The omp `@role` becomes the `x-opencode-model-role` request header with the
+  model-roles tier it stands for (`cheap`, `standard`, `strong`, `reviewer`), which
+  the model-roles plugin resolves to a model. Old role names map to their tier
+  (`smol`, `commit`, `tiny` → `cheap`; `task` → `standard`; `slow`, `plan`,
+  `architect`, `designer` → `strong`; `challenger`, `judge` → `reviewer`), and
+  `default` writes no header. `--role-map map.json` (`{ "<omp role>": "<tier>" }`)
+  renames roles first; anything else gets no header and a warning.
 - No model is written by default, so without model-roles the agent inherits the
   session's model. `--roles` adds a fallback model per role. A value is
   `"provider/model"`, `"provider/model#variant"`, a model-roles candidate list
@@ -154,11 +156,11 @@ Plugins that only ship skills and agents (`debate`, `eli5`, `project`,
 `contentPlugin(id, import.meta.url)` from `@srobroek/opencode-lib/content-plugin`. It
 registers every `skills/<name>/SKILL.md` and `agents/<id>.md` beside the bundle;
 agents are V2 markdown written by `scripts/convert-agent.ts`. They pin no model and
-name a model-roles role in the `x-opencode-model-role` request header. A skill or
+name a model-roles tier in the `x-opencode-model-role` request header. A skill or
 agent you already have with the same id keeps its fields.
 
-`bun run agent-roles` (part of `check`) fails when a shipped agent has no role
-header, names a role outside the role map, or pins a model outside `delivery`, whose
+`bun run agent-roles` (part of `check`) fails when a shipped agent has no tier
+header, names a value that is neither a tier nor an accepted old role name, or pins a model outside `delivery`, whose
 models are fallbacks for hosts without model-roles. A plugin's `agents/roles.json`
 fragment must match the headers.
 

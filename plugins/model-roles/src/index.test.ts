@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test"
+import reference from "./fixtures/reference.json"
+import work from "./fixtures/work-models.json"
 import plugin, { MAX_REREGISTER, type ModelRef, spawnTarget } from "./index.ts"
 
 type Agent = { id: string; model?: ModelRef; request?: { headers?: Record<string, string> } }
@@ -33,6 +35,7 @@ function createHost(input: {
   options: unknown
   sessionModel?: ModelRef
   defaultModel?: ModelRef
+  references?: Array<Model & { family?: string; time?: { released?: number } }>
 }) {
   const toolHooks: Array<{ name: string; callback: (payload: unknown) => Promise<void> }> = []
   let sessionGet: (id: string) => Promise<unknown> = async (id) =>
@@ -41,7 +44,7 @@ function createHost(input: {
   const storage = new Map<string, unknown>()
   const calls: Array<{ method: string; input: unknown }> = []
   let generate: (input: { prompt: string; model?: ModelRef }) => Promise<{ text: string }> = async () => ({
-    text: '{"role": "smol", "confident": true}',
+    text: '{"role": "cheap", "confident": true}',
   })
   const tools = new Map<string, { execute: (input: unknown) => Promise<{ content: string }> }>()
   const transforms: Array<{ callback: (editor: Editor) => void }> = []
@@ -113,7 +116,15 @@ function createHost(input: {
       transform,
       list: async () => ({ data: listOverride ? listOverride() : [...agents.values()].map((a) => structuredClone(a)) }),
     },
-    model: { list: async () => ({ data: models }), default: async () => ({ data: input.defaultModel }) },
+    model: {
+      list: async () => ({ data: models }),
+      default: async () => ({ data: input.defaultModel }),
+      transform: async (callback: (editor: { provider: { list: () => unknown[] } }) => void) => {
+        registrations++
+        callback({ provider: { list: () => [{ models: new Map((input.references ?? []).map((m) => [m.id, m])) }] } })
+        return { dispose: async () => void registrations-- }
+      },
+    },
     generate: {
       text: async (payload: { prompt: string; model?: ModelRef }) => {
         calls.push({ method: "generate", input: payload })
@@ -381,7 +392,7 @@ describe("setup", () => {
 describe("subagent model guard", () => {
   const opus = { providerID: "amazon-bedrock", id: "claude-opus" }
   const priced: Model[] = [
-    { ...opus, variants: [], cost: [{ input: 4.4 }] },
+    { ...opus, variants: [], cost: [{ input: 12 }] },
     { providerID: "amazon-bedrock", id: "claude-sonnet", variants: [{ id: "high" }], cost: [{ input: 2 }] },
     { providerID: "anthropic", id: "claude-haiku", variants: [], cost: [{ input: 0.1 }] },
   ]
@@ -404,11 +415,11 @@ describe("subagent model guard", () => {
     expect(host.toolHooks()).toBe(0)
   })
 
-  test("asks for the cheapest fitting role, and allows a role or an explicit model", async () => {
+  test("asks for the cheapest fitting tier, and allows a tier or an explicit model", async () => {
     const host = createHost({ agents, models: priced, options: guarded, sessionModel: opus })
     const cleanup = await setup(host)
     await expect(host.spawn("subagent", { agent: "plain", prompt: "x" })).rejects.toThrow(
-      /role: "smol" \(runs anthropic\/claude-haiku, \$0\.1\/M input tokens\)/,
+      /tier: "cheap" \(runs anthropic\/claude-haiku, metered, \$0\.1\/M input tokens\)/,
     )
     expect(await host.spawn("subagent", { agent: "plain", prompt: "x", role: "smol" })).toEqual({
       agent: "plain",
@@ -474,23 +485,23 @@ describe("subagent model guard", () => {
 
 describe("subagent role parameter", () => {
   const roleOf = (host: ReturnType<typeof createHost>) =>
-    (host.subagent().input as { properties: Record<string, { enum?: string[]; description?: string }> }).properties.role
+    (host.subagent().input as { properties: Record<string, { enum?: string[]; description?: string }> }).properties.tier
 
-  test("adds a role enum of the configured roles to the built-in subagent tool", async () => {
+  test("adds a tier enum of the built-in and custom tiers to the built-in subagent tool", async () => {
     const host = createHost({ agents: [{ id: "general" }], models, options })
     const cleanup = await setup(host)
     const role = roleOf(host)
-    expect(role?.enum).toEqual(["fake", "smol", "task"])
-    expect(role?.description).toContain("- 'smol': cheap and fast")
-    expect(role?.description).toContain("- 'fake': work that suits the 'fake' model role (no model available now")
-    expect(host.subagent().description).toContain("Set `role` on every new spawn")
+    expect(role?.enum).toEqual(["cheap", "standard", "strong", "reviewer", "fake"])
+    expect(role?.description).toContain("- 'cheap': cheap and fast")
+    expect(role?.description).toContain("- 'fake': work that suits the 'fake' tier (no model available now")
+    expect(host.subagent().description).toContain("Set `tier` on every new spawn")
     expect((host.subagent().input as { required: string[] }).required).toEqual(["agent", "prompt"])
     host.close()
     await cleanup()
     expect(roleOf(host)).toBeUndefined()
   })
 
-  test("no roles, no parameter", async () => {
+  test("no tier resolves, no parameter", async () => {
     const host = createHost({ agents: [], models, options: {} })
     const cleanup = await setup(host)
     expect(roleOf(host)).toBeUndefined()
@@ -508,7 +519,7 @@ describe("subagent role parameter", () => {
     expect(host.toolReplays()).toBe(before)
     host.setModels([...models, { providerID: "nope-provider", id: "x", variants: [], cost: [{ input: 0.5 }] }])
     await settle()
-    expect(roleOf(host)?.description).toContain("- 'fake': work that suits the 'fake' model role (low cost, $0.5/M input tokens)")
+    expect(roleOf(host)?.description).toContain("- 'fake': work that suits the 'fake' tier (metered, $0.5/M input tokens)")
     host.close()
     await cleanup()
     expect(roleOf(host)).toBeUndefined()
@@ -536,7 +547,7 @@ describe("subagent role parameter", () => {
       sessionID: "ses_1",
     })
     await expect(host.spawn("subagent", { agent: "general", prompt: "x", role: "huge" })).rejects.toThrow(
-      "Unknown model role 'huge'. Pass one of: fake, smol, task.",
+      "Unknown model tier 'huge'. Pass one of: cheap, standard, strong, reviewer, fake.",
     )
     host.close()
     await cleanup()
@@ -552,8 +563,9 @@ describe("model_roles_check", () => {
     expect(result?.content).toContain("Role task → amazon-bedrock/claude-sonnet#high")
     expect(result?.content).toContain("  - nope-provider/x: provider unavailable")
     expect(result?.content).toContain("  - general (role task) → amazon-bedrock/claude-sonnet#high")
-    expect(result?.content).toContain("subagent `role` parameter:")
-    expect(result?.content).toContain("  - 'task': everyday implementation and investigation")
+    expect(result?.content).toContain("subagent `tier` parameter:")
+    expect(result?.content).toContain("  - 'standard': everyday implementation and investigation")
+    expect(result?.content).toContain("Tier fake has no purpose")
     host.close()
     await cleanup()
     expect(host.tools.size).toBe(0)
@@ -701,7 +713,7 @@ describe("runtime fallback", () => {
     expect(methods(host, "switchModel")).toHaveLength(0)
     expect(methods(host, "prompt")).toHaveLength(0)
     const note = methods(host, "synthetic")[0]?.input as { text: string; resume: boolean }
-    expect(note.text).toContain("Role task now resolves to anthropic/claude-haiku")
+    expect(note.text).toContain("Tier task now resolves to anthropic/claude-haiku")
     expect(note.resume).toBe(false)
     host.close()
     await cleanup()
@@ -794,7 +806,7 @@ describe("runtime fallback", () => {
     expect(methods(host, "switchModel").map((c) => c.input)).toEqual([{ sessionID: "c", model: haiku }])
     const note = methods(host, "synthetic")[0]?.input as { sessionID: string; text: string }
     expect(note.sessionID).toBe("r")
-    expect(note.text).toContain('Spawn it again with role: "task"; that role now runs anthropic/claude-haiku.')
+    expect(note.text).toContain('Spawn it again with tier: "task"; that tier now runs anthropic/claude-haiku.')
     expect(note.text).toContain("resume it with sessionID c")
     // The same role now resolves past the unhealthy model.
     expect((await host.spawn("subagent", { agent: "plain", prompt: "x", role: "task" }, "build", "r", "call-2")).model).toBe(
@@ -812,7 +824,7 @@ describe("runtime fallback", () => {
     await settle()
     expect(Object.keys(host.storage.get("health") as object)).toEqual(["amazon-bedrock/claude-sonnet"])
     const note = methods(host, "synthetic")[0]?.input as { text: string }
-    expect(note.text).toContain('Spawn it again with role: "task"')
+    expect(note.text).toContain('Spawn it again with tier: "task"')
     host.close()
     await cleanup()
   })
@@ -840,7 +852,7 @@ describe("runtime fallback", () => {
 describe("auto routing", () => {
   const opus = { providerID: "amazon-bedrock", id: "claude-opus" }
   const priced: Model[] = [
-    { ...opus, variants: [], cost: [{ input: 4.4 }] },
+    { ...opus, variants: [], cost: [{ input: 12 }] },
     { providerID: "amazon-bedrock", id: "claude-sonnet", variants: [{ id: "high" }], cost: [{ input: 2 }] },
     { providerID: "anthropic", id: "claude-haiku", variants: [], cost: [{ input: 0.1 }] },
   ]
@@ -855,7 +867,7 @@ describe("auto routing", () => {
     const input = await host.spawn("subagent", { agent: "general", description: "find parser", prompt: "where is parseOptions?" })
     expect(input).toEqual({
       agent: "general",
-      description: "find parser [auto: smol, confident]",
+      description: "find parser [auto: cheap, confident]",
       prompt: "where is parseOptions?",
       model: "anthropic/claude-haiku",
     })
@@ -863,7 +875,7 @@ describe("auto routing", () => {
     expect(call?.model).toEqual(haiku)
     expect(call?.prompt).toContain("where is parseOptions?")
     const check = await host.tools.get("model_roles_check")?.execute({})
-    expect(check?.content).toContain("general → smol (anthropic/claude-haiku; confident;")
+    expect(check?.content).toContain("general → cheap (anthropic/claude-haiku; confident;")
     host.close()
     await cleanup()
   })
@@ -885,12 +897,12 @@ describe("auto routing", () => {
     const host = createHost({ agents, models: priced, options: autoOptions({ timeoutMs: 20 }), sessionModel: opus })
     const cleanup = await setup(host)
     const replies: Array<() => Promise<{ text: string }>> = [
-      async () => ({ text: '{"role": "smol", "confident": false}' }),
-      async () => ({ text: '{"role": "slow", "confident": true}' }),
+      async () => ({ text: '{"role": "cheap", "confident": false}' }),
+      async () => ({ text: '{"role": "strong", "confident": true}' }),
       async () => {
         throw new Error("boom")
       },
-      () => new Promise((resolve) => setTimeout(() => resolve({ text: '{"role": "smol", "confident": true}' }), 200)),
+      () => new Promise((resolve) => setTimeout(() => resolve({ text: '{"role": "cheap", "confident": true}' }), 200)),
     ]
     const tags: unknown[] = []
     for (const reply of replies) {
@@ -899,15 +911,21 @@ describe("auto routing", () => {
       expect(input.model).toBe("amazon-bedrock/claude-sonnet#high")
       tags.push(input.description)
     }
-    expect(tags).toEqual(["d [auto: task, unsure]", "d [auto: task, invalid]", "d [auto: task, error]", "d [auto: task, timeout]"])
+    expect(tags).toEqual([
+      "d [auto: standard, unsure]",
+      "d [auto: standard, invalid]",
+      "d [auto: standard, error]",
+      "d [auto: standard, timeout]",
+    ])
     host.close()
     await cleanup()
   })
 
-  test("caps the role at the parent's model cost", async () => {
+  test("caps the tier at the parent's lineup rank", async () => {
     const host = createHost({
       agents,
-      models: priced,
+      // Opus below the premium price, so it is the strong end of the Bedrock lineup.
+      models: [{ ...opus, variants: [], cost: [{ input: 4.4 }] }, ...priced.slice(1)],
       options: autoOptions({ roles: ["smol", "task", "slow"] }),
       sessionModel: { providerID: "amazon-bedrock", id: "claude-sonnet", variant: "high" },
     })
@@ -939,6 +957,117 @@ describe("auto routing", () => {
     const cleanup = await setup(host)
     await expect(host.spawn("subagent", { agent: "plain", prompt: "x" })).rejects.toThrow(/inherit/)
     expect(generations(host)).toHaveLength(0)
+    host.close()
+    await cleanup()
+  })
+})
+
+describe("tiers", () => {
+  const workModels = work as unknown as Model[]
+  const references = reference as unknown as Model[]
+  const opus55 = { providerID: "amazon-bedrock", id: "global.anthropic.claude-opus-5-5" }
+  const sol = { providerID: "amazon-bedrock", id: "global.openai.gpt-6.1-sol" }
+  const generations = (host: ReturnType<typeof createHost>) => host.calls.filter((c) => c.method === "generate")
+
+  test("a spawn passes a tier; the reviewer tier puts another vendor than the caller's first", async () => {
+    const agents: Agent[] = [{ id: "plain" }, { id: "critic", request: header("reviewer") }]
+    const host = createHost({ agents, models: workModels, references, options: {}, sessionModel: opus55 })
+    const cleanup = await setup(host)
+    expect((await host.spawn("subagent", { agent: "plain", prompt: "x", tier: "cheap" })).model).toBe(
+      "amazon-bedrock/global.anthropic.claude-haiku-5-5#low",
+    )
+    expect((await host.spawn("subagent", { agent: "plain", prompt: "x", role: "smol" })).model).toBe(
+      "amazon-bedrock/global.anthropic.claude-haiku-5-5#low",
+    )
+    expect((await host.spawn("subagent", { agent: "plain", prompt: "x", tier: "reviewer" })).model).toBe(
+      "amazon-bedrock/global.openai.gpt-6.1-sol#high",
+    )
+    expect((await host.spawn("subagent", { agent: "plain", prompt: "x", role: "default" })).model).toBeUndefined()
+    // An agent on the reviewer tier is moved per spawn too.
+    expect(host.agents().get("critic")?.model).toEqual({ ...opus55, variant: "high" })
+    expect((await host.spawn("subagent", { agent: "critic", prompt: "x" })).model).toBe("amazon-bedrock/global.openai.gpt-6.1-sol#high")
+    host.setSessionGet(async (id) => ({ id, model: sol }))
+    expect((await host.spawn("subagent", { agent: "critic", prompt: "x" })).model).toBe(
+      "amazon-bedrock/global.anthropic.claude-opus-5-5#high",
+    )
+    const check = await host.tools.get("model_roles_check")?.execute({})
+    expect(check?.content).toContain("Tier strong (derived, effort high) → amazon-bedrock/global.anthropic.claude-opus-5-5#high")
+    expect(check?.content).toContain("premium (")
+    host.close()
+    await cleanup()
+  })
+
+  test("the guard counts premium models as expensive, not strong ones such as Opus", async () => {
+    const fable = { providerID: "amazon-bedrock", id: "global.anthropic.claude-fable-5-1" }
+    const host = createHost({ agents: [{ id: "plain" }], models: workModels, references, options: { guard: true }, sessionModel: fable })
+    const cleanup = await setup(host)
+    await expect(host.spawn("subagent", { agent: "plain", prompt: "x" })).rejects.toThrow(
+      /tier: "cheap" \(runs amazon-bedrock\/global\.anthropic\.claude-haiku-5-5#low, metered, \$0\.1\/M input tokens\)/,
+    )
+    host.setSessionGet(async (id) => ({ id, model: opus55 }))
+    expect(await host.spawn("subagent", { agent: "plain", prompt: "x" })).toEqual({ agent: "plain", prompt: "x" })
+    host.close()
+    await cleanup()
+  })
+
+  test("an agent with no tier is classified once from its description, and the answer is cached", async () => {
+    const agents: Agent[] = [{ id: "docs", mode: "subagent", description: "Writes the changelog" } as Agent]
+    const host = createHost({ agents, models: workModels, references, options: {} })
+    host.setGenerate(async () => ({ text: '{"tier": "cheap"}' }))
+    const cleanup = await setup(host)
+    await settle()
+    expect(host.agents().get("docs")?.model).toEqual({ providerID: "amazon-bedrock", id: "global.anthropic.claude-haiku-5-5", variant: "low" })
+    const call = generations(host)[0]?.input as { prompt: string; model: ModelRef } | undefined
+    expect(call?.prompt).toContain("Writes the changelog")
+    expect(call?.model).toEqual({ providerID: "amazon-bedrock", id: "global.anthropic.claude-haiku-5-5", variant: "none" })
+    expect(host.storage.get("classify:docs")).toMatchObject({ tier: "cheap" })
+    host.close()
+    await cleanup()
+
+    const again = createHost({ agents, models: workModels, references, options: {} })
+    again.storage.set("classify:docs", host.storage.get("classify:docs"))
+    again.context.storage = { ...again.context.storage, scan: async () => ({ entries: [{ key: "classify:docs", value: again.storage.get("classify:docs") }] }) } as typeof again.context.storage
+    const cleanupAgain = await setup(again)
+    await settle()
+    expect(generations(again)).toHaveLength(0)
+    expect(again.agents().get("docs")?.model?.id).toBe("global.anthropic.claude-haiku-5-5")
+    again.close()
+    await cleanupAgain()
+  })
+
+  test("a markdown agent that loads after the plugin is classified too", async () => {
+    const host = createHost({ agents: [], models: workModels, references, options: {} })
+    host.setGenerate(async () => ({ text: '{"tier": "cheap"}' }))
+    const cleanup = await setup(host)
+    await configAgents(host, [{ id: "late", mode: "subagent", description: "Late agent" } as Agent])
+    await settle()
+    expect(host.agents().get("late")?.model?.id).toBe("global.anthropic.claude-haiku-5-5")
+    host.close()
+    await cleanup()
+  })
+
+  test("a failed classification runs the agent on standard", async () => {
+    const agents: Agent[] = [{ id: "docs", mode: "subagent", description: "Writes the changelog" } as Agent]
+    const host = createHost({ agents, models: workModels, references, options: {} })
+    host.setGenerate(async () => ({ text: "no idea" }))
+    const cleanup = await setup(host)
+    await settle()
+    expect(host.agents().get("docs")?.model?.id).toBe("global.openai.gpt-6.1-sol")
+    expect(host.storage.has("classify:docs")).toBe(false)
+    host.close()
+    await cleanup()
+  })
+
+  test("effort auto lets the decider pick the variant per spawn", async () => {
+    const options = { tiers: { standard: { effort: "auto" } }, auto: true }
+    const host = createHost({ agents: [{ id: "plain" }], models: workModels, references, options, sessionModel: opus55 })
+    host.setGenerate(async () => ({ text: '{"effort": "xhigh"}' }))
+    const cleanup = await setup(host)
+    expect((await host.spawn("subagent", { agent: "plain", prompt: "x", tier: "standard" })).model).toBe(
+      "amazon-bedrock/global.openai.gpt-6.1-sol#xhigh",
+    )
+    host.setGenerate(async () => ({ text: "?" }))
+    expect((await host.spawn("subagent", { agent: "plain", prompt: "x", tier: "standard" })).model).toBe("amazon-bedrock/global.openai.gpt-6.1-sol")
     host.close()
     await cleanup()
   })

@@ -116,17 +116,17 @@ per repository.
 The plugin registers these subagents from `agents/*.md` through
 `ctx.agent.transform`, so they need no files in your project:
 
-| Agent | Job | Model role | Fallback model |
+| Agent | Job | Model tier | Fallback model |
 | --- | --- | --- | --- |
-| `implementer` | One bead or task in its own worktree; `DONE`/`BLOCKED`/`SPLIT` | `task` | `amazon-bedrock/global.anthropic.claude-sonnet-5-5#medium` |
-| `implementer-high` | Root cause, concurrency, contracts, precision, design judgment | `slow` | `amazon-bedrock/global.anthropic.claude-opus-5-5#high` |
-| `researcher` | One cited answer; no product edits | `task` | `amazon-bedrock/global.anthropic.claude-sonnet-5-5#medium` |
+| `implementer` | One bead or task in its own worktree; `DONE`/`BLOCKED`/`SPLIT` | `standard` | `amazon-bedrock/global.anthropic.claude-sonnet-5-5#medium` |
+| `implementer-high` | Root cause, concurrency, contracts, precision, design judgment | `strong` | `amazon-bedrock/global.anthropic.claude-opus-5-5#high` |
+| `researcher` | One cited answer; no product edits | `standard` | `amazon-bedrock/global.anthropic.claude-sonnet-5-5#medium` |
 | `pr-reviewer` | Read-only diff review through `gh pr view` / `gh pr diff`; `VERDICT:` first line | `reviewer` | `amazon-bedrock/global.anthropic.claude-opus-5-5#high` |
-| `operator` | One exact bounded command | `smol` | `amazon-bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0` |
-| `shepherd` | Lands one approved PR with `delivery_land` (approval and checks required), closes beads, cleans up | `task` | `amazon-bedrock/global.anthropic.claude-sonnet-5-5#medium` |
+| `operator` | One exact bounded command | `cheap` | `amazon-bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0` |
+| `shepherd` | Lands one approved PR with `delivery_land` (approval and checks required), closes beads, cleans up | `standard` | `amazon-bedrock/global.anthropic.claude-sonnet-5-5#medium` |
 
-- Every agent names its role in the `x-opencode-model-role` request header. With
-  the model-roles plugin installed (detected through `plugin.list`), the role picks
+- Every agent names its tier in the `x-opencode-model-role` request header. With
+  the model-roles plugin installed (detected through `plugin.list`), the tier picks
   the model and the plugin sets no model of its own.
 - Without model-roles, the agent uses its fallback model when it is available on
   this machine, and otherwise inherits the session's model. Delivery keeps these
@@ -135,9 +135,9 @@ The plugin registers these subagents from `agents/*.md` through
 - The `models` option overrides a model per agent (`"provider/model#variant"`),
   with or without model-roles; `false` means no model.
 - Your own markdown or config agent with the same id loads after the plugin and
-  overrides it field by field, including the role header.
+  overrides it field by field, including the tier header.
 - `agents/roles.json` holds the same mapping as the headers, as a model-roles
-  `agents` fragment, for hosts that set roles in config instead.
+  `agents` fragment, for hosts that set tiers in config instead.
 
 The agents were converted with
 `bun scripts/convert-agent.ts --roles plugins/delivery/agents/roles.source.json`,

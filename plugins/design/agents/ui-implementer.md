@@ -3,7 +3,7 @@ description: "Implements one UI unit end to end on the project's tokens and comp
 mode: subagent
 request:
   headers:
-    x-opencode-model-role: designer
+    x-opencode-model-role: strong
 permissions:
   - action: webfetch
     resource: "*"

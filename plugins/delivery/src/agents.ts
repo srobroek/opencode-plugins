@@ -3,8 +3,8 @@
  * through `ctx.agent.transform`, so installing the plugin is enough to get them.
  *
  * Markdown and config agents load after plugins, so a user's own `implementer.md`
- * still wins field by field. Each agent names its model-roles role in the
- * `x-opencode-model-role` header. With the model-roles plugin installed, that role
+ * still wins field by field. Each agent names its model-roles tier in the
+ * `x-opencode-model-role` header. With the model-roles plugin installed, that tier
  * picks the model. Without it, the file's `model` is a fallback, used only when it is
  * available on this machine; otherwise the agent inherits the session's model.
  */

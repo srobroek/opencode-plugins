@@ -33,20 +33,23 @@ describe("parseAuto", () => {
     expect(parseAuto(undefined, options)).toBeUndefined()
     expect(parseAuto(false, options)).toBeUndefined()
     expect(parseAuto({ enabled: false }, options)).toBeUndefined()
-    expect(parseAuto(true, options)).toEqual({
-      decider: "@smol",
-      roles: ["smol", "task"],
-      default: "task",
+    const tiers = { ...options, roles: { ...options.roles, cheap: ["anthropic/haiku"], standard: ["bedrock/sonnet#high"] } }
+    expect(parseAuto(true, tiers)).toEqual({
+      decider: "@tiny",
+      roles: ["cheap", "standard"],
+      default: "standard",
       timeoutMs: DEFAULT_AUTO_TIMEOUT_MS,
       capAtParent: true,
     })
+    expect(parseAuto(true, options)).toBeUndefined()
+    expect(parseAuto({ roles: ["smol", "task"] }, options)?.default).toBe("task")
   })
 
   test("keeps configured roles only and a default among them", () => {
     const auto = parseAuto({ decider: "@tiny", roles: ["slow", "nope", "smol", "smol"], default: "task", timeoutMs: 900, capAtParent: false }, options)
     expect(auto).toEqual({ decider: "@tiny", roles: ["slow", "smol"], default: "slow", timeoutMs: 900, capAtParent: false })
     expect(parseAuto({ roles: ["nope"] }, options)).toBeUndefined()
-    expect(parseAuto({ timeoutMs: -1 }, options)?.timeoutMs).toBe(DEFAULT_AUTO_TIMEOUT_MS)
+    expect(parseAuto({ roles: ["smol"], timeoutMs: -1 }, options)?.timeoutMs).toBe(DEFAULT_AUTO_TIMEOUT_MS)
   })
 })
 
@@ -151,10 +154,15 @@ describe("capRole", () => {
     expect(capRole("slow", [{ role: "slow", cost: 5 }, { role: "x", cost: undefined }], 1)).toBe("slow")
   })
 
-  test("roleCosts reads each role's resolved model", () => {
-    expect(roleCosts(["smol", "slow", "nope"], options, available)).toEqual([
-      { role: "smol", cost: 0.8 },
-      { role: "slow", cost: 5 },
+  test("roleCosts reads the lineup rank of each tier's resolved model, premium as strong", () => {
+    const classes = {
+      "anthropic/haiku": { billing: "metered" as const, price: 0.8, rank: 0, premium: false },
+      "bedrock/opus": { billing: "metered" as const, price: 5, premium: true },
+    }
+    expect(roleCosts(["smol", "slow", "task", "nope"], { ...options, classes }, available)).toEqual([
+      { role: "smol", cost: 0 },
+      { role: "slow", cost: 2 },
+      { role: "task", cost: undefined },
       { role: "nope", cost: undefined },
     ])
   })

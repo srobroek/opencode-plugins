@@ -142,7 +142,7 @@ describe("agents", () => {
     expect(implementer.mode).toBe("subagent")
     expect(String(implementer.system)).toContain("VERDICT: DONE|BLOCKED|SPLIT")
     expect(implementer.model).toBeUndefined()
-    expect(implementer.request).toEqual({ headers: { "x-opencode-model-role": "task" } })
+    expect(implementer.request).toEqual({ headers: { "x-opencode-model-role": "standard" } })
     expect(implementer.permissions).toContainEqual({ action: "subagent", resource: "researcher", effect: "allow" })
   })
 
@@ -172,7 +172,7 @@ describe("agents", () => {
     await plugin.setup(fake.context)
     const implementer = fake.agents.get("implementer") as Record<string, unknown>
     expect(implementer.model).toBeUndefined()
-    expect(implementer.request).toEqual({ headers: { "x-opencode-model-role": "task" } })
+    expect(implementer.request).toEqual({ headers: { "x-opencode-model-role": "standard" } })
   })
 
   test("an explicit models option still applies with model-roles installed", async () => {

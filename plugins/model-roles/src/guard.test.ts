@@ -10,7 +10,8 @@ import {
   parseGuard,
   summarize,
 } from "./guard.ts"
-import { parseOptions } from "./resolve.ts"
+import { type Options, parseOptions } from "./resolve.ts"
+import type { ModelClass } from "./tiers.ts"
 
 const opus = { providerID: "amazon-bedrock", id: "global.anthropic.claude-opus-5-5" }
 const sonnet = { providerID: "amazon-bedrock", id: "global.anthropic.claude-sonnet-5-5" }
@@ -20,7 +21,16 @@ const available: GuardModel[] = [
   { ...sonnet, variants: [{ id: "high" }], cost: [{ input: 2 }] },
   { ...haiku, cost: [{ tier: { type: "context", size: 100_000 }, input: 0.55 }, { input: 0.11 }] },
 ]
-const options = parseOptions({ roles: { task: "amazon-bedrock/global.anthropic.claude-sonnet-5-5", slow: "amazon-bedrock/global.anthropic.claude-opus-5-5" } })
+/** Derived classes: this opus stands in for a premium model; sonnet and haiku are not premium. */
+const classes: Record<string, ModelClass> = {
+  "amazon-bedrock/global.anthropic.claude-opus-5-5": { billing: "metered", price: 4.4, rank: 2, premium: true },
+  "amazon-bedrock/global.anthropic.claude-sonnet-5-5": { billing: "metered", price: 2, rank: 1, premium: false },
+  "anthropic/claude-haiku": { billing: "metered", price: 0.11, rank: 0, premium: false },
+}
+const withClasses = (options: Options): Options => ({ ...options, classes })
+const options = withClasses(
+  parseOptions({ roles: { task: "amazon-bedrock/global.anthropic.claude-sonnet-5-5", slow: "amazon-bedrock/global.anthropic.claude-opus-5-5" } }),
+)
 
 const facts = (overrides: Partial<GuardFacts> = {}): GuardFacts => ({
   guard: parseGuard(true) as NonNullable<ReturnType<typeof parseGuard>>,
@@ -45,42 +55,47 @@ describe("parseGuard", () => {
     expect(parseGuard({ enabled: false })).toBeUndefined()
   })
 
-  test("true and {} mean auto with the default threshold", () => {
-    expect(parseGuard(true)).toEqual({ expensive: "auto", threshold: 4, allowInherit: [], allowModels: [], mode: "refuse" })
-    expect(parseGuard({})).toEqual({ expensive: "auto", threshold: 4, allowInherit: [], allowModels: [], mode: "refuse" })
+  test("true and {} mean auto", () => {
+    expect(parseGuard(true)).toEqual({ expensive: "auto", allowInherit: [], allowModels: [], mode: "refuse" })
+    expect(parseGuard({})).toEqual({ expensive: "auto", allowInherit: [], allowModels: [], mode: "refuse" })
   })
 
-  test("reads a list, a threshold and allowInherit, dropping junk", () => {
-    expect(
-      parseGuard({ expensive: ["a/b", 3, " "], threshold: 10, allowInherit: ["x", 1], allowModels: ["c/d", null] }),
-    ).toEqual({ expensive: ["a/b"], threshold: 10, allowInherit: ["x"], allowModels: ["c/d"], mode: "refuse" })
-    expect(parseGuard({ expensive: "a/b", threshold: -1 })?.expensive).toEqual(["a/b"])
+  test("reads a list and allowInherit, dropping junk", () => {
+    expect(parseGuard({ expensive: ["a/b", 3, " "], allowInherit: ["x", 1], allowModels: ["c/d", null] })).toEqual({
+      expensive: ["a/b"],
+      allowInherit: ["x"],
+      allowModels: ["c/d"],
+      mode: "refuse",
+    })
+    expect(parseGuard({ expensive: "a/b" })?.expensive).toEqual(["a/b"])
     expect(parseGuard({ mode: "auto" })?.mode).toBe("auto")
     expect(parseGuard({ mode: "other" })?.mode).toBe("refuse")
-    expect(parseGuard({ threshold: -1 })?.threshold).toBe(4)
   })
 })
 
 describe("isExpensive", () => {
-  test("auto compares the base-tier input cost", () => {
+  test("auto reads the derived class: premium only, not the strong end of a lineup", () => {
     const guard = parseGuard(true) as NonNullable<ReturnType<typeof parseGuard>>
     expect(inputCost(haiku, available)).toBe(0.11)
-    expect(isExpensive(opus, guard, available)).toBe(true)
-    expect(isExpensive(sonnet, guard, available)).toBe(false)
-    expect(isExpensive({ providerID: "x", id: "unknown" }, guard, available)).toBe(false)
+    expect(isExpensive(opus, guard, classes)).toBe(true)
+    expect(isExpensive(sonnet, guard, classes)).toBe(false)
+    expect(isExpensive({ providerID: "x", id: "unknown" }, guard, classes)).toBe(false)
+    expect(isExpensive(sonnet, guard, { "amazon-bedrock/global.anthropic.claude-sonnet-5-5": { billing: "subscription", premium: true } })).toBe(true)
+    expect(isExpensive(opus, guard, undefined)).toBe(false)
+    expect(isExpensive(sonnet, guard, { "amazon-bedrock/global.anthropic.claude-sonnet-5-5": { billing: "metered", rank: 2, premium: false } })).toBe(false)
   })
 
   test("a list matches provider/model, and a listed variant only that variant", () => {
     const guard = parseGuard({ expensive: ["amazon-bedrock/global.anthropic.claude-sonnet-5-5#high"] }) as NonNullable<
       ReturnType<typeof parseGuard>
     >
-    expect(isExpensive({ ...sonnet, variant: "high" }, guard, available)).toBe(true)
-    expect(isExpensive(sonnet, guard, available)).toBe(false)
-    expect(isExpensive(opus, guard, available)).toBe(false)
+    expect(isExpensive({ ...sonnet, variant: "high" }, guard, classes)).toBe(true)
+    expect(isExpensive(sonnet, guard, classes)).toBe(false)
+    expect(isExpensive(opus, guard, classes)).toBe(false)
     const any = parseGuard({ expensive: ["amazon-bedrock/global.anthropic.claude-opus-5-5"] }) as NonNullable<
       ReturnType<typeof parseGuard>
     >
-    expect(isExpensive({ ...opus, variant: "max" }, any, available)).toBe(true)
+    expect(isExpensive({ ...opus, variant: "max" }, any, classes)).toBe(true)
   })
 })
 
@@ -91,7 +106,7 @@ describe("judgeSpawn", () => {
     if (decision.allow) return
     expect(decision.reason).toContain("inherit this session's expensive model amazon-bedrock/global.anthropic.claude-opus-5-5")
     expect(decision.reason).toContain("Or spawn an agent that pins a cheaper model: explore (anthropic/claude-haiku)\n")
-    expect(decision.reason).toContain('role: "task" (runs amazon-bedrock/global.anthropic.claude-sonnet-5-5, $2/M input tokens)')
+    expect(decision.reason).toContain('tier: "task" (runs amazon-bedrock/global.anthropic.claude-sonnet-5-5, metered, $2/M input tokens)')
     expect(decision.reason).not.toContain("slow")
     expect(decision.reason).not.toContain("build")
     expect(decision.reason).not.toContain("secret")
@@ -124,28 +139,32 @@ describe("judgeSpawn", () => {
   })
 
   test("asks for the cheapest fitting role first", () => {
-    const roles = parseOptions({ roles: { ...options.roles, smol: "anthropic/claude-haiku" } })
+    const roles = withClasses(parseOptions({ roles: { ...options.roles, smol: "anthropic/claude-haiku" } }))
     const decision = judgeSpawn(facts({ options: roles }))
     if (decision.allow) throw new Error("allowed")
-    expect(decision.reason).toContain('Re-issue the spawn with role: "smol" (runs anthropic/claude-haiku, $0.11/M input tokens)')
-    expect(decision.reason).toContain("Other cheaper roles: task → amazon-bedrock/global.anthropic.claude-sonnet-5-5 ($2/M input tokens)")
+    expect(decision.reason).toContain('Re-issue the spawn with tier: "smol" (runs anthropic/claude-haiku, metered, $0.11/M input tokens)')
+    expect(decision.reason).toContain(
+      "Other cheaper tiers: task → amazon-bedrock/global.anthropic.claude-sonnet-5-5 (metered, $2/M input tokens)",
+    )
     expect(decision.reason).not.toContain("general-")
   })
 
   test("says so when no role is cheaper", () => {
-    const decision = judgeSpawn(facts({ options: parseOptions({ roles: { slow: "amazon-bedrock/global.anthropic.claude-opus-5-5" } }) }))
+    const decision = judgeSpawn(
+      facts({ options: withClasses(parseOptions({ roles: { slow: "amazon-bedrock/global.anthropic.claude-opus-5-5" } })) }),
+    )
     if (decision.allow) throw new Error("allowed")
-    expect(decision.reason).toContain("No model role resolves to a cheaper model right now.")
+    expect(decision.reason).toContain("No model tier resolves to a cheaper model right now.")
     expect(decision.reason).toContain("Or spawn an agent that pins a cheaper model: explore (anthropic/claude-haiku: Read-only search)")
   })
 
   test("an explicit expensive model is refused unless a role, the agent or allowModels backs it", () => {
-    const withSmol = parseOptions({ roles: { ...options.roles, smol: "anthropic/claude-haiku" } })
+    const withSmol = withClasses(parseOptions({ roles: { ...options.roles, smol: "anthropic/claude-haiku" } }))
     const decision = judgeModelOverride({ ...facts({ options: withSmol }), model: opus })
     if (decision.allow) throw new Error("allowed")
     expect(decision.reason).toContain("This spawn sets model amazon-bedrock/global.anthropic.claude-opus-5-5 itself")
-    expect(decision.reason).toContain('Drop `model` and pass role: "smol"')
-    expect(decision.reason).toContain('pass role: "slow" instead; it resolves to that model')
+    expect(decision.reason).toContain('Drop `model` and pass tier: "smol"')
+    expect(decision.reason).toContain('pass tier: "slow" instead; it resolves to that model')
     expect(decision.reason).toContain("guard.allowModels")
     expect(judgeModelOverride({ ...facts(), model: sonnet }).allow).toBe(true)
     expect(judgeModelOverride({ ...facts({ target: "deep" }), model: opus }).allow).toBe(true)
