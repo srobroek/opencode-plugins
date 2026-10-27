@@ -71,6 +71,13 @@
       "category": "development"
     },
     {
+      "name": "lang-rust",
+      "source": "./plugins/lang-rust",
+      "description": "Rust skills: fmt, clippy and test checks, CI, crates, workspaces, errors, sqlx persistence, bindings, safe mutation, Tauri and profiling.",
+      "version": "0.1.0",
+      "category": "development"
+    },
+    {
       "name": "lang-typescript",
       "source": "./plugins/lang-typescript",
       "description": "TypeScript and JavaScript skills: lint, tsc and test checks, type-safety rules, and Bun and Node profiling; formatting runs through OpenCode built-in formatters.",
@@ -103,13 +110,6 @@
       "source": "./plugins/repomix",
       "description": "Pack a local or remote repo into one file with repomix for bulk context: external repos, module packs and version diffs.",
       "version": "0.1.0",
-      "category": "development"
-    },
-    {
-      "name": "rust",
-      "source": "./plugins/rust",
-      "description": "Rust cargo install, RUSTFLAGS linker and global target-dir advisories, and Rust guidance and profiling skills.",
-      "version": "0.3.0",
       "category": "development"
     },
     {

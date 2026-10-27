@@ -1,5 +1,5 @@
 ---
-name: rust-workspace
+name: lang-rust-workspace
 description: Use when setting Cargo workspace lints, workspace.dependencies, feature-gated dev surfaces, or layered Rust tests.
 metadata:
   opencode/autoinvoke: false

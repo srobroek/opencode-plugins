@@ -1,5 +1,5 @@
 ---
-name: rust-ci
+name: lang-rust-ci
 description: Use when authoring Rust GitHub Actions CI, rust-cache keys, required-check gates, or supply-chain attestation.
 metadata:
   opencode/autoinvoke: false
@@ -14,12 +14,18 @@ metadata:
 - Use the toolchain declared by `rust-toolchain.toml` or the package `rust-version`; set
   `>=1.90` only when a dependency or project capability requires Rust 1.90. Set
   `linker = "rust-lld.exe"` for Windows in `.cargo/config.toml`.
-- Never select a linker through `RUSTFLAGS`: rust-cache hashes it into the cache key,
-  so every job inheriting it misses the cache. Use per-target `[target.<triple>]`
-  tables in `.cargo/config.toml` (`linker = …` or `rustflags = ["-C", "link-arg=…"]`);
+- Never select a linker through `RUSTFLAGS` (workflow `env:` or job env): rust-cache
+  hashes it into the cache key, so every job inheriting it misses the cache and rebuilds
+  the whole dependency graph. Use per-target `[target.<triple>]` tables in
+  `.cargo/config.toml` (`linker = …`, or for example
+  `[target.x86_64-unknown-linux-gnu] rustflags = ["-C", "link-arg=-fuse-ld=mold"]`);
   they apply only where they match and are not part of the key.
-- Install tools from prebuilt binaries (`taiki-e/install-action`, `cargo binstall`),
-  not `cargo install`, which compiles from source on every run outside rust-cache.
+- Never `cargo install` in a workflow `run:` step: it compiles the tool from source on
+  every run, before your build starts, outside rust-cache. Install prebuilt binaries:
+  `taiki-e/install-action` covers the common tools (`cargo-nextest`, `cargo-llvm-cov`,
+  `cargo-deny`, `cargo-machete`, `cargo-audit`); `cargo binstall` covers the rest.
+  Locally, try `cargo binstall <tool>` first and fall back to `cargo install --locked <tool>`
+  only when the crate publishes no prebuilt artifact.
 - Add `mold` (Linux) or `sccache` only when measurements show compile/link still
   dominates. With `sccache`, use an S3/GCS backend -- the GitHub Actions cache
   backend fights `rust-cache` for the 10 GB limit (verify with `sccache --show-stats`).

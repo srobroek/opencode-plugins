@@ -303,6 +303,19 @@
         "@opencode/plugin",
       ],
     },
+    "plugins/lang-rust": {
+      "name": "@srobroek/opencode-lang-rust",
+      "version": "0.1.0",
+      "devDependencies": {
+        "@srobroek/opencode-lib": "workspace:*",
+      },
+      "peerDependencies": {
+        "@opencode/plugin": "^2.1.4",
+      },
+      "optionalPeers": [
+        "@opencode/plugin",
+      ],
+    },
     "plugins/lang-typescript": {
       "name": "@srobroek/opencode-lang-typescript",
       "version": "0.1.0",
@@ -880,6 +893,8 @@
     "@srobroek/opencode-lang-go": ["@srobroek/opencode-lang-go@workspace:plugins/lang-go"],
 
     "@srobroek/opencode-lang-python": ["@srobroek/opencode-lang-python@workspace:plugins/lang-python"],
+
+    "@srobroek/opencode-lang-rust": ["@srobroek/opencode-lang-rust@workspace:plugins/lang-rust"],
 
     "@srobroek/opencode-lang-typescript": ["@srobroek/opencode-lang-typescript@workspace:plugins/lang-typescript"],
 

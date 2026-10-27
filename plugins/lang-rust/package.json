@@ -1,0 +1,26 @@
+{
+  "name": "@srobroek/opencode-lang-rust",
+  "version": "0.1.0",
+  "description": "Rust skills: fmt, clippy and test checks, CI, crates, workspaces, errors, sqlx persistence, bindings, safe mutation, Tauri and profiling.",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "index.js",
+    "skills"
+  ],
+  "peerDependencies": {
+    "@opencode/plugin": "^2.1.4"
+  },
+  "peerDependenciesMeta": {
+    "@opencode/plugin": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@srobroek/opencode-lib": "workspace:*"
+  }
+}
