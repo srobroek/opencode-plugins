@@ -329,19 +329,6 @@
         "@opencode/plugin",
       ],
     },
-    "plugins/languages": {
-      "name": "@srobroek/opencode-languages",
-      "version": "0.3.0",
-      "devDependencies": {
-        "@srobroek/opencode-lib": "workspace:*",
-      },
-      "peerDependencies": {
-        "@opencode/plugin": "^2.1.4",
-      },
-      "optionalPeers": [
-        "@opencode/plugin",
-      ],
-    },
     "plugins/lib": {
       "name": "@srobroek/opencode-lib",
       "version": "0.0.0",
@@ -420,19 +407,6 @@
     "plugins/repomix": {
       "name": "@srobroek/opencode-repomix",
       "version": "0.1.0",
-      "devDependencies": {
-        "@srobroek/opencode-lib": "workspace:*",
-      },
-      "peerDependencies": {
-        "@opencode/plugin": "^2.1.4",
-      },
-      "optionalPeers": [
-        "@opencode/plugin",
-      ],
-    },
-    "plugins/rust": {
-      "name": "@srobroek/opencode-rust",
-      "version": "0.3.0",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
       },
@@ -898,8 +872,6 @@
 
     "@srobroek/opencode-lang-typescript": ["@srobroek/opencode-lang-typescript@workspace:plugins/lang-typescript"],
 
-    "@srobroek/opencode-languages": ["@srobroek/opencode-languages@workspace:plugins/languages"],
-
     "@srobroek/opencode-lib": ["@srobroek/opencode-lib@workspace:plugins/lib"],
 
     "@srobroek/opencode-lsp": ["@srobroek/opencode-lsp@workspace:plugins/lsp"],
@@ -913,8 +885,6 @@
     "@srobroek/opencode-quality": ["@srobroek/opencode-quality@workspace:plugins/quality"],
 
     "@srobroek/opencode-repomix": ["@srobroek/opencode-repomix@workspace:plugins/repomix"],
-
-    "@srobroek/opencode-rust": ["@srobroek/opencode-rust@workspace:plugins/rust"],
 
     "@srobroek/opencode-safety": ["@srobroek/opencode-safety@workspace:plugins/safety"],
 

@@ -44,10 +44,10 @@ could not run.
 
 | Language | Check | Fix | Skill |
 | --- | --- | --- | --- |
-| Go | `gofmt -l .`, `golangci-lint run` (or `go vet ./...`), `go test ./...` | `gofmt -w .` | `go-quality` (languages plugin) |
-| Python | `ruff check .`, `ruff format --check .`, `pyright`, `pytest` | `ruff check --fix .`, `ruff format .` | `python-quality` (languages plugin) |
-| TypeScript | `biome check .` or `eslint .`, `tsc --noEmit`, the test script | `biome check --write .` or `eslint . --fix` | `typescript-quality` (languages plugin) |
-| Rust | `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test` | `cargo fmt` | `rust-quality` (rust plugin) |
+| Go | `gofmt -l .`, `golangci-lint run` (or `go vet ./...`), `go test ./...` | `gofmt -w .` | `lang-go-quality` (lang-go plugin) |
+| Python | `ruff check .`, `ruff format --check .`, `pyright`, `pytest` | `ruff check --fix .`, `ruff format .` | `lang-python-quality` (lang-python plugin) |
+| TypeScript | `biome check .` or `eslint .`, `tsc --noEmit`, the test script | `biome check --write .` or `eslint . --fix` | `lang-typescript-quality` (lang-typescript plugin) |
+| Rust | `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test` | `cargo fmt` | `lang-rust-quality` (lang-rust plugin) |
 
 Prefix Python commands with `uv run` or `poetry run` when the project uses them, and
 run TypeScript tools through the project's package manager (`bunx`, `pnpm exec`,

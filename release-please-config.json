@@ -66,13 +66,21 @@
       "release-type": "node",
       "component": "chezmoi"
     },
-    "plugins/languages": {
+    "plugins/lang-go": {
       "release-type": "node",
-      "component": "languages"
+      "component": "lang-go"
     },
-    "plugins/rust": {
+    "plugins/lang-python": {
       "release-type": "node",
-      "component": "rust"
+      "component": "lang-python"
+    },
+    "plugins/lang-typescript": {
+      "release-type": "node",
+      "component": "lang-typescript"
+    },
+    "plugins/lang-rust": {
+      "release-type": "node",
+      "component": "lang-rust"
     },
     "plugins/journeys": {
       "release-type": "node",
