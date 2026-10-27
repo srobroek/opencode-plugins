@@ -1,0 +1,19 @@
+{
+  "name": "lang-python",
+  "version": "0.1.0",
+  "description": "Python skills: ruff, pyright and pytest checks, and py-spy, scalene and memray profiling; formatting runs through OpenCode built-in formatters.",
+  "author": {
+    "name": "Sjors Robroek",
+    "url": "https://github.com/srobroek"
+  },
+  "homepage": "https://github.com/srobroek/opencode-plugins/tree/main/plugins/lang-python",
+  "repository": "https://github.com/srobroek/opencode-plugins",
+  "license": "Apache-2.0",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Lang Python",
+    "shortDescription": "Python skills: ruff, pyright and pytest checks, and py-spy, scalene and memray profiling; formatting runs through OpenCode built-in formatters.",
+    "developerName": "Sjors Robroek",
+    "category": "development"
+  }
+}
