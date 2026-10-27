@@ -1,6 +1,7 @@
 ---
 description: "Lands one reviewed PR via delivery_land with exact-head approval and green checks, closes its beads, runs delivery_cleanup."
 mode: subagent
+hidden: true
 model: "amazon-bedrock/global.anthropic.claude-sonnet-5-5#medium"
 request:
   headers:
@@ -28,12 +29,9 @@ permissions:
     resource: "*"
     effect: allow
   - action: skill
-    resource: "*"
+    resource: "delivery-*"
     effect: allow
   - action: execute
-    resource: "*"
-    effect: allow
-  - action: "lsp_*"
     resource: "*"
     effect: allow
   - action: external_directory
