@@ -3618,7 +3618,7 @@ receipt: ${result.path}` : `delivery_cleanup refused: ${result.reason}`;
   if (options.fanOut) {
     const fanOut = readFileSync4(FAN_OUT_PATH, "utf8").trim();
     const primary = new Map;
-    const context = await ctx.session.hook("context", async (event) => {
+    const addFanOut = async (event) => {
       if (AGENT_IDS.includes(event.agent))
         return;
       if (!("subagent" in event.tools))
@@ -3630,9 +3630,15 @@ receipt: ${result.path}` : `delivery_cleanup refused: ${result.reason}`;
       }
       if (await known)
         event.system.push({ type: "text", text: fanOut });
-    });
+    };
+    const hooks = [
+      await ctx.session.hook("context", addFanOut),
+      await ctx.session.hook("compaction", addFanOut),
+      await ctx.session.hook("generate", addFanOut)
+    ];
     disposers.push(async () => {
-      await context.dispose();
+      for (const hook of hooks)
+        await hook.dispose();
       primary.clear();
     });
   }
