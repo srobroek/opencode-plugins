@@ -32,5 +32,6 @@
   "plugins/agent-efficiency": "0.1.0",
   "plugins/agent-researcher": "0.1.0",
   "plugins/agent-seance": "0.1.0",
-  "plugins/agent-mechanic": "0.1.0"
+  "plugins/agent-mechanic": "0.1.0",
+  "plugins/agent-coder": "0.1.0"
 }

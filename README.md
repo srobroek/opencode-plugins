@@ -5,7 +5,7 @@ OpenCode V2 plugins by Sjors Robroek. This is the OpenCode counterpart of
 
 | Field | Value |
 | --- | --- |
-| Status | Early. Plugins: `example`, `model-roles`, `worktrunk`, `session`, `dep-update`, `whats-new`, `statusline`, `beads`, `goal`, `lsp`, `subagent-worktree`, `parley`, `chezmoi`, `languages`, `rust`, `journeys`, `delivery`, `debate`, `eli5`, `project`, `architecture`, `build`, `quality`, `toolchain`, `aws`, `design`, `safety`, `find-tools`, `trunk-dev`, `speckit`, `agent-efficiency`, `agent-researcher`, `agent-seance`, `agent-mechanic`. |
+| Status | Early. Plugins: `example`, `model-roles`, `worktrunk`, `session`, `dep-update`, `whats-new`, `statusline`, `beads`, `goal`, `lsp`, `subagent-worktree`, `parley`, `chezmoi`, `languages`, `rust`, `journeys`, `delivery`, `debate`, `eli5`, `project`, `architecture`, `build`, `quality`, `toolchain`, `aws`, `design`, `safety`, `find-tools`, `trunk-dev`, `speckit`, `agent-efficiency`, `agent-researcher`, `agent-seance`, `agent-mechanic`, `agent-coder`. |
 | Host | OpenCode 2.1.4 or later (`@opencode/plugin` 2.x) |
 | License | Apache-2.0 |
 
@@ -85,7 +85,7 @@ codex plugin add worktrunk@srobroek-opencode
 | `session`, `dep-update`, `journeys`, `delivery`, `beads`, `find-tools`, `speckit` | Not exported: their skills or agents drive OpenCode tools |
 | `whats-new` | Not exported: its skill depends on OpenCode tools and version checks |
 | `agent-efficiency`, `example`, `goal`, `lsp`, `model-roles`, `parley`, `safety`, `statusline`, `subagent-worktree` | Not exported: OpenCode code only |
-| `agent-mechanic`, `agent-researcher`, `build` | Not exported: agent only |
+| `agent-coder`, `agent-mechanic`, `agent-researcher`, `build` | Not exported: agent only |
 | `agent-seance` | Not exported: agent with an OpenCode tool |
 
 `scripts/build-marketplaces.ts` generates `.claude-plugin/marketplace.json`,
@@ -156,7 +156,7 @@ bun scripts/convert-agent.ts --out .opencode/agents \
 ## Content plugins
 
 Plugins that only ship skills and agents (`debate`, `eli5`, `project`,
-`architecture`, `build`, `quality`, `toolchain`, `aws`, `design`) export
+`architecture`, `build`, `quality`, `toolchain`, `aws`, `design`, `agent-coder`) export
 `contentPlugin(id, import.meta.url)` from `@srobroek/opencode-lib/content-plugin`. It
 registers every `skills/<name>/SKILL.md` and `agents/<id>.md` beside the bundle;
 agents are V2 markdown written by `scripts/convert-agent.ts`. They pin no model and

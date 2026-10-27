@@ -149,6 +149,10 @@
     "plugins/agent-mechanic": {
       "release-type": "node",
       "component": "agent-mechanic"
+    },
+    "plugins/agent-coder": {
+      "release-type": "node",
+      "component": "agent-coder"
     }
   }
 }
