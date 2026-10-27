@@ -1,14 +1,14 @@
 # lang-typescript
 
-TypeScript and JavaScript quality and profiling skills: the lint, type-check and test
-commands to run through the shell tool, the type-safety rules, and the Bun and Node
-profiler and benchmark tooling. Formatting is OpenCode's built-in formatter (`"formatter": true`); see
+TypeScript and JavaScript skills: the install, lint, type-check and test commands to run
+through the shell tool and in CI, test-runner idioms, monorepo and package layout, the
+type-safety rules, and the Bun and Node profiler and benchmark tooling. Formatting is OpenCode's built-in formatter (`"formatter": true`); see
 [docs/formatters.md](../../docs/formatters.md).
 
 Replaces the TypeScript half of the former `languages` plugin, which ported the
 omp-plugins `typescript` plugin. Its `typescript_quality` tool is not ported, and the
 `typescript-type-safety` rule (which omp attached to `*.ts`, `*.tsx` and `*.mts` files) is
-the "Type safety" section of `lang-typescript-quality`.
+part of `lang-typescript-types`.
 
 ## Install
 
@@ -35,7 +35,13 @@ The plugin registers these skills from `skills/`, unless a skill with the same i
 already exists:
 
 - `lang-typescript`: the router.
-- `lang-typescript-quality`: Biome or ESLint, `tsc --noEmit`, the test script, and the
-  type-safety rules for unions, allow-lists and trust-boundary validation.
+- `lang-typescript-quality`: frozen-lockfile install, Biome or ESLint, `tsc -b` or
+  `tsc --noEmit`, the test script, in that order; workspace filters and CI.
+- `lang-typescript-testing`: bun test and vitest, module mocks, snapshots, msw, fake
+  timers, fast-check.
+- `lang-typescript-packaging`: project references and `tsc -b`, `exports` maps, barrel
+  files, catalogs, `--define` dead-code removal.
+- `lang-typescript-types`: strict tsconfig flags, union and `satisfies` patterns, zod at
+  trust boundaries, openapi-typescript.
 - `lang-typescript-profiling`: Bun and Node `--cpu-prof`, `--heap-prof`, heap snapshots,
   mitata, tinybench. The method is the `quality` plugin's `quality-profiling` skill.

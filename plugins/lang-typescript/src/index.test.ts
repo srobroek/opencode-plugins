@@ -7,12 +7,15 @@ test("registers the typescript skills and disposes them", async () => {
   const cleanup = await plugin.setup(fake.context)
   expect([...fake.skills.keys()].sort()).toEqual([
     "lang-typescript",
+    "lang-typescript-packaging",
     "lang-typescript-profiling",
     "lang-typescript-quality",
+    "lang-typescript-testing",
+    "lang-typescript-types",
   ])
   for (const skill of fake.skills.values())
     expect(String(skill.content)).not.toMatch(/skill:\/\/|rule:\/\/|_quality`? tool|\bbash\b|TTSR/)
-    expect(String(fake.skills.get("lang-typescript-quality")?.content)).toContain("satisfies readonly Union[]")
+    expect(String(fake.skills.get("lang-typescript-types")?.content)).toContain("satisfies readonly Union[]")
   await cleanup?.()
   expect(fake.active()).toBe(0)
   expect(fake.skills.size).toBe(0)

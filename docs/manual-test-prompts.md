@@ -1265,8 +1265,30 @@ Use the journey-validator agent to validate user-journeys/<journey>.md.
 Run the TypeScript lint and type-check for this repo.
 ```
 
-**Expect:** loads `lang-typescript`, then `lang-typescript-quality`, and runs `tsc --noEmit` (or Biome or ESLint).
+**Expect:** loads `lang-typescript`, then `lang-typescript-quality`, and runs Biome or ESLint, then `tsc -b` or `tsc --noEmit`.
 **If not:** `plugins/lang-typescript/skills/lang-typescript/SKILL.md`.
+
+### `lang-typescript` → testing, packaging, types
+
+Each prompt should load `lang-typescript`, then the named member.
+
+```text
+Mock the HTTP API in these vitest tests with msw.
+```
+
+**Expect:** `lang-typescript-testing` (`setupServer`, `onUnhandledRequest: "error"`, `resetHandlers`).
+
+```text
+Set up TypeScript project references for this bun monorepo with a shared core package.
+```
+
+**Expect:** `lang-typescript-packaging` (`composite`, root solution `tsconfig.json`, `tsc -b`, `exports` map).
+
+```text
+Turn on stricter tsconfig flags and validate the webhook payload with zod.
+```
+
+**Expect:** `lang-typescript-types` (`noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `safeParse` at the boundary).
 
 ### `lang-python` → `lang-python-quality`
 
