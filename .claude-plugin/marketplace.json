@@ -66,7 +66,7 @@
     {
       "name": "lang-python",
       "source": "./plugins/lang-python",
-      "description": "Python skills: ruff, pyright and pytest checks, and py-spy, scalene and memray profiling; formatting runs through OpenCode built-in formatters.",
+      "description": "Python skills: uv, ruff, mypy or pyright and pytest checks, testing, packaging, typing and pydantic, SQLAlchemy and Alembic, and profiling.",
       "version": "0.1.0",
       "category": "development"
     },
