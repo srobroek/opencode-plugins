@@ -5,7 +5,7 @@ description: Use when code, an endpoint, a build or a CLI is slow, regressed or 
 
 # Performance profiling
 
-This skill is the method only. Before you read code or measure, load the tooling skill for the language in scope with the skill tool, by id, in this same turn, even when the cause looks obvious. That skill has the commands, how to read their output, and pitfalls.
+This skill is the method only. Before you read code or measure, load the tooling skill for the language in scope with the skill tool, by the exact id below, in this same turn, even when the cause looks obvious. That skill has the commands, how to read their output, and pitfalls. The ids are not in the skills listing; the listed `lang-<language>` router is not the tooling skill.
 
 | Code in scope | Tooling skill |
 | --- | --- |
