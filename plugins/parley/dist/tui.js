@@ -1081,6 +1081,11 @@ function createRoundControls(props, onMove) {
   const [now, setNow] = createSignal(Date.now());
   let textarea;
   let lookup = 0;
+  let disposed = false;
+  onCleanup(() => {
+    disposed = true;
+    ++lookup;
+  });
   createEffect(() => {
     if (props.round()?.deadline === undefined)
       return;
@@ -1162,7 +1167,7 @@ function createRoundControls(props, onMove) {
       return;
     }
     props.find(query).catch(() => []).then((found) => {
-      if (ticket !== lookup)
+      if (disposed || ticket !== lookup)
         return;
       setSuggestions(rankPaths(query, found.filter((candidate) => acceptsPath(question, candidate))));
       setSelected(0);
@@ -1238,6 +1243,8 @@ function createRoundControls(props, onMove) {
   };
   const attach = async (question) => {
     const files = await clipboardFiles(question.kind === "ask_image");
+    if (disposed)
+      return;
     if (files.length === 0) {
       setErrors(["Nothing to attach on the clipboard (copy a screenshot or a file first)."]);
       return;
@@ -1262,6 +1269,8 @@ function createRoundControls(props, onMove) {
     if (question.kind === "ask_image" || question.kind === "ask_file") {
       try {
         const files = text.trim() === "" ? [] : await readFiles(text, props.directory());
+        if (disposed)
+          return;
         setDraft(question.id, setFiles(question, draft, files, "typed"));
         setErrors([]);
       } catch (error) {
@@ -1288,9 +1297,12 @@ function createRoundControls(props, onMove) {
     setBusy(true);
     try {
       const problems = await props.submit(round, submissions(questions(), Object.fromEntries(questions().map((q) => [q.id, draftOf(q.id) ?? initialDraft(q)]))));
+      if (disposed)
+        return;
       setErrors(problems);
     } finally {
-      setBusy(false);
+      if (!disposed)
+        setBusy(false);
     }
   };
   return {
@@ -2965,6 +2977,15 @@ var locationKey = (location) => `${location.directory}\x00${location.workspaceID
 var tui_default = Plugin.define({
   id: "srobroek.parley",
   setup(context) {
+    let disposed = false;
+    const delays = new Map;
+    const sleep = (ms) => new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        delays.delete(timer);
+        resolve();
+      }, ms);
+      delays.set(timer, resolve);
+    });
     const rpc = context.client.rpc(ParleyRpc);
     const clientID = `tui_${crypto.randomUUID()}`;
     const [rounds, setRounds] = createSignal2([]);
@@ -3041,12 +3062,14 @@ var tui_default = Plugin.define({
       return [...found.values()];
     };
     const refresh = async (location) => {
+      if (disposed)
+        return;
       const result = await rpc.pending({}, {
         location
       }).catch(() => {
         return;
       });
-      if (!result)
+      if (disposed || !result)
         return;
       const key = locationKey(location);
       const open = new Set((result.rounds ?? []).map((view) => view.roundID));
@@ -3062,9 +3085,13 @@ var tui_default = Plugin.define({
     const single = (sessionID) => forSession(sessionID)?.view.questions.length === 1;
     const openPanel = (sessionID, delay = 0) => {
       showInline(sessionID, false);
-      setTimeout(() => context.ui.panel.open(PANEL, {
-        presentation: "fullscreen"
-      }), delay);
+      sleep(delay).then(() => {
+        if (disposed)
+          return;
+        context.ui.panel.open(PANEL, {
+          presentation: "fullscreen"
+        });
+      });
     };
     const present = (sessionID) => {
       const entry = forSession(sessionID);
@@ -3103,11 +3130,15 @@ var tui_default = Plugin.define({
     };
     let reachable = true;
     const heartbeat = async () => {
+      if (disposed)
+        return;
       const results = await Promise.all(locations().map((location) => rpc.attach({
         clientID
       }, {
         location
       }).then(() => true, () => false)));
+      if (disposed)
+        return;
       const ok = results.some(Boolean);
       if (ok && !reachable)
         for (const location of locations())
@@ -3123,6 +3154,8 @@ var tui_default = Plugin.define({
         return;
       }
       await refresh(location);
+      if (disposed)
+        return;
       if (data.action === "opened")
         present(data.sessionID);
       else if (data.action === "updated") {
@@ -3165,9 +3198,15 @@ var tui_default = Plugin.define({
     const dismissing = new Set;
     const fetchNative = async (sessionID, callID, location) => {
       for (const delay of NATIVE_POLL_MS) {
-        await Bun.sleep(delay);
+        if (disposed)
+          return;
+        await sleep(delay);
+        if (disposed)
+          return;
         context.data.session.form.invalidate(sessionID, location);
         await context.data.session.form.sync(sessionID, location).catch(() => {});
+        if (disposed)
+          return;
         const form = (context.data.session.form.list(sessionID, location) ?? []).find((candidate) => candidate.metadata?.tool?.id === callID);
         if (!form)
           continue;
@@ -3203,6 +3242,8 @@ var tui_default = Plugin.define({
         }, {
           location: entry.location
         });
+        if (disposed)
+          return [];
         if (!result.ok)
           return result.errors ?? ["Submit failed"];
         context.ui.toast.show({
@@ -3211,6 +3252,8 @@ var tui_default = Plugin.define({
           duration: 2000
         });
         await refresh(entry.location);
+        if (disposed)
+          return [];
         if (context.ui.panel.current()?.name === PANEL)
           context.ui.panel.close();
         showInline(view.sessionID, false);
@@ -3232,7 +3275,7 @@ var tui_default = Plugin.define({
           cancel: "Keep"
         }
       });
-      if (!confirmed)
+      if (disposed || !confirmed)
         return;
       for (const callID of view.callIDs ?? [])
         dismissing.add(callID);
@@ -3243,12 +3286,16 @@ var tui_default = Plugin.define({
         location: entry.location
       }).catch(() => {});
       await refresh(entry.location);
+      if (disposed)
+        return;
       if (context.ui.panel.current()?.name === PANEL)
         context.ui.panel.close();
       showInline(view.sessionID, false);
     };
     const directoryOf = (sessionID) => forSession(sessionID)?.location.directory ?? context.data.session.get(sessionID)?.location?.directory;
     const find = async (sessionID, query) => {
+      if (disposed)
+        return [];
       if (query.startsWith("/") || query.startsWith("~"))
         return listDirectory(query);
       const directory = directoryOf(sessionID);
@@ -3261,6 +3308,8 @@ var tui_default = Plugin.define({
         query,
         limit: 200
       });
+      if (disposed)
+        return [];
       return (found.data ?? []).map((item) => item.type === "directory" && !item.path.endsWith("/") ? `${item.path}/` : item.path);
     };
     const disposeSlot = context.ui.slot({
@@ -3359,20 +3408,29 @@ var tui_default = Plugin.define({
         return null;
       }
     });
-    return async () => {
+    return () => {
+      if (disposed)
+        return;
+      disposed = true;
+      const attachedLocations = locations();
       clearInterval(timer);
+      for (const [timer, resolve] of delays) {
+        clearTimeout(timer);
+        resolve();
+      }
+      delays.clear();
       stopEvents();
       stopReconnect();
       disposeSlot();
       disposeCard();
       disposeCommands();
-      await Promise.all(locations().map((location) => rpc.attach({
+      Promise.all(attachedLocations.map((location) => rpc.attach({
         clientID,
         detach: true
       }, {
         location
-      }).catch(() => {})));
-      await context.renderer.idle().then(() => syntax.destroy());
+      }))).catch(() => {});
+      context.renderer.idle().then(() => syntax.destroy()).catch(() => {});
     };
   }
 });

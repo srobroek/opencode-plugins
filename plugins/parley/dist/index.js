@@ -1488,6 +1488,7 @@ function saveUpload(file) {
 var src_default = Plugin.define({
   id: "srobroek.parley",
   async setup(ctx) {
+    let disposed = false;
     let emitEvent;
     const service = new Parley({
       settings: settingsFrom(ctx.options, process.env),
@@ -1498,12 +1499,24 @@ var src_default = Plugin.define({
     });
     let takeover = Promise.resolve(undefined);
     const syncTakeover = () => {
+      if (disposed)
+        return;
       takeover = takeover.then(async (current) => {
+        if (disposed) {
+          await current?.dispose();
+          return;
+        }
         const wanted = service.takeoverWanted();
-        if (wanted && !current)
-          return ctx.tool.transform((editor) => editor.update("question", (draft) => {
+        if (wanted && !current) {
+          const handle = await ctx.tool.transform((editor) => editor.update("question", (draft) => {
             draft.execute = wrapQuestion(draft.execute, (input, context) => service.takeover(input, call(context)), (context) => void service.handedToBuiltin(context.sessionID, context.id));
           }));
+          if (disposed) {
+            await handle.dispose();
+            return;
+          }
+          return handle;
+        }
         if (!wanted && current)
           await current.dispose();
         return wanted ? current : undefined;
@@ -1575,13 +1588,14 @@ var src_default = Plugin.define({
     sweep.unref?.();
     const presence = setInterval(() => void syncTakeover(), 15000);
     presence.unref?.();
-    return async () => {
+    return () => {
       clearInterval(sweep);
       clearInterval(presence);
+      disposed = true;
       service.close();
-      await (await takeover)?.dispose();
-      await tools.dispose();
-      await rpc.dispose();
+      takeover.then((current) => current?.dispose()).catch(() => {});
+      tools.dispose().catch(() => {});
+      rpc.dispose().catch(() => {});
     };
   }
 });

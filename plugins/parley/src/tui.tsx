@@ -38,6 +38,12 @@ const locationKey = (location: LocationRef) => `${location.directory}\u0000${loc
 export default Plugin.define({
   id: "srobroek.parley",
   setup(context) {
+    let disposed = false
+    const delays = new Map<ReturnType<typeof setTimeout>, () => void>()
+    const sleep = (ms: number) => new Promise<void>((resolve) => {
+      const timer = setTimeout(() => { delays.delete(timer); resolve() }, ms)
+      delays.set(timer, resolve)
+    })
     const rpc = context.client.rpc(ParleyRpc)
     const clientID = `tui_${crypto.randomUUID()}`
     const [rounds, setRounds] = createSignal<Entry[]>([])
@@ -85,8 +91,9 @@ export default Plugin.define({
     }
 
     const refresh = async (location: LocationRef) => {
+      if (disposed) return
       const result = (await rpc.pending({}, { location }).catch(() => undefined)) as { rounds?: RoundView[] } | undefined
-      if (!result) return
+      if (disposed || !result) return
       const key = locationKey(location)
       const open = new Set((result.rounds ?? []).map((view) => view.roundID))
       for (const entry of rounds())
@@ -104,7 +111,10 @@ export default Plugin.define({
     const openPanel = (sessionID: string, delay = 0) => {
       showInline(sessionID, false)
       // Let the route switch before the panel opens in the now-current session.
-      setTimeout(() => context.ui.panel.open(PANEL, { presentation: "fullscreen" }), delay)
+      void sleep(delay).then(() => {
+        if (disposed) return
+        context.ui.panel.open(PANEL, { presentation: "fullscreen" })
+      })
     }
 
     const present = (sessionID: string) => {
@@ -137,6 +147,7 @@ export default Plugin.define({
 
     let reachable = true
     const heartbeat = async () => {
+      if (disposed) return
       const results = await Promise.all(
         locations().map((location) =>
           rpc.attach({ clientID }, { location }).then(
@@ -145,6 +156,7 @@ export default Plugin.define({
           ),
         ),
       )
+      if (disposed) return
       const ok = results.some(Boolean)
       // Reconnected: catch up on rounds opened while we could not hear events.
       if (ok && !reachable) for (const location of locations()) void refresh(location)
@@ -159,6 +171,7 @@ export default Plugin.define({
         return
       }
       await refresh(location)
+      if (disposed) return
       if (data.action === "opened") present(data.sessionID)
       else if (data.action === "updated") {
         if (inline().has(data.sessionID) && !single(data.sessionID)) {
@@ -189,9 +202,12 @@ export default Plugin.define({
     const dismissing = new Set<string>()
     const fetchNative = async (sessionID: string, callID: string, location: LocationRef) => {
       for (const delay of NATIVE_POLL_MS) {
-        await Bun.sleep(delay)
+        if (disposed) return
+        await sleep(delay)
+        if (disposed) return
         context.data.session.form.invalidate(sessionID, location)
         await context.data.session.form.sync(sessionID, location).catch(() => {})
+        if (disposed) return
         const form = (context.data.session.form.list(sessionID, location) ?? []).find(
           (candidate) => (candidate.metadata as { tool?: { id?: string } } | undefined)?.tool?.id === callID,
         )
@@ -219,9 +235,11 @@ export default Plugin.define({
           ok: boolean
           errors?: string[]
         }
+        if (disposed) return []
         if (!result.ok) return result.errors ?? ["Submit failed"]
         context.ui.toast.show({ message: "Answers sent", variant: "success", duration: 2000 })
         await refresh(entry.location)
+        if (disposed) return []
         if (context.ui.panel.current()?.name === PANEL) context.ui.panel.close()
         showInline(view.sessionID, false)
         return []
@@ -241,10 +259,11 @@ export default Plugin.define({
           : "The agent gets a cancelled result for every question in this round.",
         label: { confirm: "Dismiss", cancel: "Keep" },
       })
-      if (!confirmed) return
+      if (disposed || !confirmed) return
       for (const callID of view.callIDs ?? []) dismissing.add(callID)
       await rpc.cancel({ roundID: view.roundID, reason: "user_closed" }, { location: entry.location }).catch(() => {})
       await refresh(entry.location)
+      if (disposed) return
       if (context.ui.panel.current()?.name === PANEL) context.ui.panel.close()
       showInline(view.sessionID, false)
     }
@@ -254,6 +273,7 @@ export default Plugin.define({
 
     /** Path candidates for a file card: the server's file search under the session directory, or a directory listing for ~ and absolute paths. */
     const find = async (sessionID: string, query: string): Promise<string[]> => {
+      if (disposed) return []
       if (query.startsWith("/") || query.startsWith("~")) return listDirectory(query)
       const directory = directoryOf(sessionID)
       const found = await context.client.file.find({
@@ -261,6 +281,7 @@ export default Plugin.define({
         query,
         limit: 200,
       } as never)
+      if (disposed) return []
       return ((found as { data?: { path: string; type: string }[] }).data ?? []).map((item) =>
         item.type === "directory" && !item.path.endsWith("/") ? `${item.path}/` : item.path,
       )
@@ -360,17 +381,24 @@ export default Plugin.define({
       },
     })
 
-    return async () => {
+    return () => {
+      if (disposed) return
+      disposed = true
+      const attachedLocations = locations()
       clearInterval(timer)
+      for (const [timer, resolve] of delays) { clearTimeout(timer); resolve() }
+      delays.clear()
       stopEvents()
       stopReconnect()
       disposeSlot()
       disposeCard()
       disposeCommands()
-      await Promise.all(
-        locations().map((location) => rpc.attach({ clientID, detach: true }, { location }).catch(() => {})),
-      )
-      await context.renderer.idle().then(() => syntax.destroy())
+      // Best effort: presence expires server-side.
+      void Promise.all(
+        attachedLocations.map((location) => rpc.attach({ clientID, detach: true }, { location })),
+      ).catch(() => {})
+      // Don't gate reload on renderer idle.
+      void context.renderer.idle().then(() => syntax.destroy()).catch(() => {})
     }
   },
 })

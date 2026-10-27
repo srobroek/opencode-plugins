@@ -124,6 +124,11 @@ function createRoundControls(
   const [now, setNow] = createSignal(Date.now())
   let textarea: TextareaRenderable | undefined
   let lookup = 0
+  let disposed = false
+  onCleanup(() => {
+    disposed = true
+    ++lookup
+  })
 
   // Ticks while the round has a deadline, for the "closes in" countdown.
   createEffect(() => {
@@ -205,7 +210,7 @@ function createRoundControls(
       .find(query)
       .catch(() => [] as string[])
       .then((found) => {
-        if (ticket !== lookup) return
+        if (disposed || ticket !== lookup) return
         setSuggestions(rankPaths(query, found.filter((candidate) => acceptsPath(question, candidate))))
         setSelected(0)
       })
@@ -259,6 +264,7 @@ function createRoundControls(
 
   const attach = async (question: Question) => {
     const files = await clipboardFiles(question.kind === "ask_image")
+    if (disposed) return
     if (files.length === 0) {
       setErrors(["Nothing to attach on the clipboard (copy a screenshot or a file first)."])
       return
@@ -283,6 +289,7 @@ function createRoundControls(
     if (question.kind === "ask_image" || question.kind === "ask_file") {
       try {
         const files = text.trim() === "" ? [] : await readFiles(text, props.directory())
+        if (disposed) return
         setDraft(question.id, setFiles(question, draft, files, "typed"))
         setErrors([])
       } catch (error) {
@@ -308,9 +315,10 @@ function createRoundControls(
     setBusy(true)
     try {
       const problems = await props.submit(round, submissions(questions(), Object.fromEntries(questions().map((q) => [q.id, draftOf(q.id) ?? initialDraft(q)]))))
+      if (disposed) return
       setErrors(problems)
     } finally {
-      setBusy(false)
+      if (!disposed) setBusy(false)
     }
   }
 
