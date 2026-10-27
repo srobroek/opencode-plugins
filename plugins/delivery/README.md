@@ -120,11 +120,19 @@ The plugin registers these subagents from `agents/*.md` through
 | --- | --- | --- | --- |
 | `implementer` | One bead or task in its own worktree; `DONE`/`BLOCKED`/`SPLIT` | `standard` | `amazon-bedrock/global.anthropic.claude-sonnet-5-5#medium` |
 | `implementer-high` | Root cause, concurrency, contracts, precision, design judgment | `strong` | `amazon-bedrock/global.anthropic.claude-opus-5-5#high` |
-| `researcher` | One cited answer; no product edits | `standard` | `amazon-bedrock/global.anthropic.claude-sonnet-5-5#medium` |
+| `researcher` | One cited answer; no product edits (fallback copy, see below) | `standard` | `amazon-bedrock/global.anthropic.claude-sonnet-5-5#medium` |
 | `pr-reviewer` | Read-only diff review through `gh pr view` / `gh pr diff`; `VERDICT:` first line | `reviewer` | `amazon-bedrock/global.anthropic.claude-opus-5-5#high` |
 | `operator` | One exact bounded command | `cheap` | `amazon-bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0` |
 | `shepherd` | Lands one approved PR with `delivery_land` (approval and checks required), closes beads, cleans up | `standard` | `amazon-bedrock/global.anthropic.claude-sonnet-5-5#medium` |
 
+- `researcher` belongs to the [`agent-researcher`](../agent-researcher/README.md)
+  plugin. Delivery ships the same agent as a fallback, so `execution_agent_type=researcher`
+  beads still have an agent without that plugin. Delivery skips its copy when
+  `plugin.list` reports `srobroek.agent-researcher` or an earlier plugin already
+  registered `researcher`; if delivery's copy loads first anyway, the owner replaces
+  it, so either order leaves one agent. The logic is
+  `@srobroek/opencode-lib/agent-fallback` and `FALLBACK_AGENTS` in `src/agents.ts`;
+  `plugins/agent-researcher` tests keep the two files in sync.
 - Every agent names its tier in the `x-opencode-model-role` request header. With
   the model-roles plugin installed (detected through `plugin.list`), the tier picks
   the model and the plugin sets no model of its own.

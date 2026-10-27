@@ -134,6 +134,10 @@
       "release-type": "node",
       "component": "speckit"
     },
+    "plugins/agent-researcher": {
+      "release-type": "node",
+      "component": "agent-researcher"
+    },
     "plugins/agent-efficiency": {
       "release-type": "node",
       "component": "agent-efficiency"

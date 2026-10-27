@@ -3,9 +3,18 @@ import { fileURLToPath } from "node:url"
 import { Plugin } from "@opencode/plugin"
 import type { Context } from "@opencode/plugin/promise/plugin"
 import type { ToolContext } from "@opencode/plugin/promise/tool"
+import { keepFallback, ownedElsewhere } from "@srobroek/opencode-lib/agent-fallback"
 import { appendResultText, shellOutput } from "@srobroek/opencode-lib/shell-result"
 import { registerSkills } from "@srobroek/opencode-lib/skill-files"
-import { AGENT_IDS, type Available, fallbackModel, hasModelRoles, loadAgents, shapeAgent } from "./agents.ts"
+import {
+  AGENT_IDS,
+  type Available,
+  FALLBACK_AGENTS,
+  fallbackModel,
+  hasModelRoles,
+  loadAgents,
+  shapeAgent,
+} from "./agents.ts"
 import { type CleanupResult, cleanupDelivery, type DeliveryCleanupParams } from "./cleanup.ts"
 import { MERGE_METHODS } from "./forge-adapter.ts"
 import { type LandOutcome, type LandParams, landPullRequest } from "./land.ts"
@@ -14,6 +23,7 @@ import { malformedNote, parseVerdict } from "./verdict.ts"
 export {
   AGENT_IDS,
   availableModel,
+  FALLBACK_AGENTS,
   fallbackModel,
   hasModelRoles,
   parseAgentFile,
@@ -309,15 +319,19 @@ export async function setupDelivery(ctx: Context): Promise<() => Promise<void>> 
       available = []
     }
     let modelRoles = false
+    let owned = new Set<string>()
     try {
-      modelRoles = hasModelRoles(await withTimeout(ctx.plugin.list(), PLUGIN_LIST_TIMEOUT_MS))
+      const listed = await withTimeout(ctx.plugin.list(), PLUGIN_LIST_TIMEOUT_MS)
+      modelRoles = hasModelRoles(listed)
+      owned = ownedElsewhere(listed, FALLBACK_AGENTS)
     } catch {
       modelRoles = false
     }
     const agents = await ctx.agent.transform((editor) => {
       for (const file of files) {
-        const model = fallbackModel(file, options.models[file.id], modelRoles, available)
         const created = editor.get(file.id) === undefined
+        if (!keepFallback(file.id, FALLBACK_AGENTS, owned, !created)) continue
+        const model = fallbackModel(file, options.models[file.id], modelRoles, available)
         editor.update(file.id, (draft) => shapeAgent(draft as never, file, model, created))
       }
     })

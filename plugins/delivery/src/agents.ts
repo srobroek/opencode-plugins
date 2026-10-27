@@ -11,6 +11,7 @@
 
 import { readFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
+import { type FallbackOwners, listsPlugin } from "@srobroek/opencode-lib/agent-fallback"
 
 export const AGENT_IDS = [
   "implementer",
@@ -109,18 +110,17 @@ export function shapeAgent(draft: AgentDraft, file: AgentFile, model: ModelRef |
 
 export const MODEL_ROLES_PLUGIN = "srobroek.model-roles"
 
-type PluginEntry = { id?: unknown; source?: { target?: unknown } }
-
-/** Whether a `plugin.list` result (a `{ data }` envelope or an array) includes the model-roles plugin. */
+/** Whether a `plugin.list` result includes the model-roles plugin. */
 export function hasModelRoles(listed: unknown): boolean {
-  const entries = Array.isArray(listed) ? listed : (listed as { data?: unknown } | undefined)?.data
-  if (!Array.isArray(entries)) return false
-  return (entries as PluginEntry[]).some(
-    (entry) =>
-      entry?.id === MODEL_ROLES_PLUGIN ||
-      (typeof entry?.source?.target === "string" && /(^|[/:@])(opencode-)?model-roles\b/.test(entry.source.target)),
-  )
+  return listsPlugin(listed, "model-roles")
 }
+
+/**
+ * Agents another package owns; delivery ships each as a fallback copy, registered only
+ * when the owner is not installed and no earlier plugin added the id (see
+ * `@srobroek/opencode-lib/agent-fallback`). Keep the copy in sync with the owner's file.
+ */
+export const FALLBACK_AGENTS: FallbackOwners = { researcher: "agent-researcher" }
 
 /**
  * The model to give an agent. An explicit `models` option wins; `false` means none.
