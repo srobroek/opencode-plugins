@@ -1,6 +1,6 @@
 ---
 name: lang-rust
-description: "Use for Rust work: new crates, fmt/clippy/tests, CI, workspaces, errors, persistence/sqlx, bindings, Tauri, profiling."
+description: "Use for Rust work: fmt/clippy/tests, nextest, proptest, insta, CI, crates, workspaces, sqlx, Tauri, profiling."
 ---
 
 # Rust
@@ -12,12 +12,13 @@ skill, not from this table.
 | Situation | Load skill |
 | --- | --- |
 | Running Rust format, lint (clippy) or test checks | `lang-rust-quality` |
-| Rust GitHub Actions CI, rust-cache keys, required checks, supply-chain attestation | `lang-rust-ci` |
-| Splitting crates, workspace layout, `lib.rs` facades, extracting IO from a domain crate | `lang-rust-crate-boundaries` |
-| Cargo workspace lints, `workspace.dependencies`, feature-gated dev surfaces, layered tests | `lang-rust-workspace` |
-| Error enums, newtypes, serde-transparent wrappers | `lang-rust-domain-modeling` |
-| Persistence crates, SQLite/sqlx repositories, numbered migrations, CAS-in-transaction updates, embed-macro rebuilds | `lang-rust-persistence` |
-| Generated bindings, codegen drift guards, pinned IPC invoke names, wire casing | `lang-rust-contract-boundary` |
-| Plan/approve/apply flows, TOCTOU CAS freshness, path traversal checks, mutation audits | `lang-rust-safe-mutation` |
+| Writing or fixing Rust tests: unit and integration layout, nextest, doc tests, proptest, insta snapshots, tokio | `lang-rust-testing` |
+| Splitting crates, `lib.rs` facades, Cargo workspace layout, workspace lints and dependencies, feature-gated dev code | `lang-rust-packaging` |
+| Rust GitHub Actions CI: rust-cache keys, linker placement, prebuilt cargo tools, sccache or mold | `lang-rust-ci` |
+| Persistence crates with sqlx: `migrate!`, `build.rs` reruns, offline `.sqlx` data, CAS updates, `#[sqlx::test]` | `lang-rust-persistence` |
 | Tauri v2 desktop apps: bundles, release-please, updater, signing, WebDriver E2E | `lang-rust-tauri` |
 | Rust profilers and benchmarks: samply, cargo flamegraph, perf, criterion | `lang-rust-profiling` |
+
+Rust design is the `quality-code-design` skill: its `rust.md` reference covers error
+enums, newtypes and serde wrappers; `contracts.md` generated bindings, invoke names and
+wire casing; `safe-mutation.md` plan/approve/apply flows.

@@ -20,7 +20,10 @@ directory with `Cargo.toml`):
 Run them in that order and stop at the first failure you need to fix. In a
 workspace, add `--workspace` to clippy and test, or `-p <crate>` to narrow them.
 Use `cargo nextest run` instead of `cargo test` when the project already uses
-nextest.
+nextest, plus `cargo test --doc`, because nextest does not run doc tests.
+
+CI runs the same steps with `--locked`; the Rust-specific workflow settings are in
+`lang-rust-ci`.
 
 In OpenCode, formatting after an edit is the host's job: with `"formatter": true` in
 `opencode.json`, the built-in `rustfmt` formatter rewrites each `.rs` file after the

@@ -8,20 +8,19 @@ test("registers the rust skills and disposes them", async () => {
   expect([...fake.skills.keys()].sort()).toEqual([
     "lang-rust",
     "lang-rust-ci",
-    "lang-rust-contract-boundary",
-    "lang-rust-crate-boundaries",
-    "lang-rust-domain-modeling",
+    "lang-rust-packaging",
     "lang-rust-persistence",
     "lang-rust-profiling",
     "lang-rust-quality",
-    "lang-rust-safe-mutation",
     "lang-rust-tauri",
-    "lang-rust-workspace",
+    "lang-rust-testing",
   ])
   for (const skill of fake.skills.values())
     expect(String(skill.content)).not.toMatch(/skill:\/\/|rule:\/\/|_quality`? tool|\bbash\b|TTSR/)
     expect(fake.hooks("tool")).toEqual([])
     expect(String(fake.skills.get("lang-rust-persistence")?.content)).toContain("safety plugin")
+    expect(String(fake.skills.get("lang-rust-persistence")?.content)).toContain("cargo:rerun-if-changed=migrations")
+    expect(String(fake.skills.get("lang-rust-ci")?.content)).toContain("CARGO_INCREMENTAL: 0")
   await cleanup?.()
   expect(fake.active()).toBe(0)
   expect(fake.skills.size).toBe(0)
