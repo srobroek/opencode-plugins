@@ -312,7 +312,7 @@ var src_default = Plugin.define({
           return false;
         }
       };
-      const context = await ctx.session.hook("context", async (event) => {
+      const trim = async (event) => {
         if (!lean2.agents.has(event.agent))
           return;
         let known = child.get(event.sessionID);
@@ -322,9 +322,15 @@ var src_default = Plugin.define({
         }
         if (await known)
           event.system.splice(0, event.system.length, ...leanSystem(event.system, lean2.drop, globalDirs));
-      });
+      };
+      const hooks = [
+        await ctx.session.hook("context", trim),
+        await ctx.session.hook("compaction", trim),
+        await ctx.session.hook("generate", trim)
+      ];
       disposers.push(async () => {
-        await context.dispose();
+        for (const hook of hooks)
+          await hook.dispose();
         child.clear();
       });
     }

@@ -72,7 +72,8 @@ export default Plugin.define({
           return false
         }
       }
-      const context = await ctx.session.hook("context", async (event) => {
+      // Also on compaction and generate, so those requests keep the turns' system prompt and prompt cache.
+      const trim = async (event: { sessionID: string; agent: string; system: Array<{ type: "text"; text: string }> }) => {
         if (!lean.agents.has(event.agent)) return
         let known = child.get(event.sessionID)
         if (known === undefined) {
@@ -80,9 +81,14 @@ export default Plugin.define({
           child.set(event.sessionID, known)
         }
         if (await known) event.system.splice(0, event.system.length, ...leanSystem(event.system, lean.drop, globalDirs))
-      })
+      }
+      const hooks = [
+        await ctx.session.hook("context", trim),
+        await ctx.session.hook("compaction", trim),
+        await ctx.session.hook("generate", trim),
+      ]
       disposers.push(async () => {
-        await context.dispose()
+        for (const hook of hooks) await hook.dispose()
         child.clear()
       })
     }
