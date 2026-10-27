@@ -4,7 +4,7 @@
  * decider through `ctx.generate.text` and caches the answer in `ctx.storage`.
  */
 
-import type { ModelRef } from "./resolve.ts"
+import { type ModelRef, userPin } from "./resolve.ts"
 import { BUILTIN_AGENT_TIERS, GENERAL_TIER, type TierMeta } from "./tiers.ts"
 
 /** Storage key prefix for an agent's classification. */
@@ -54,7 +54,7 @@ export type ImplicitPlan = {
 }
 
 /**
- * Tiers for agents that pin no model and declare no tier (neither in the `agents`
+ * Tiers for agents the user pinned to no model and that declare no tier (neither in the `agents`
  * option nor the header). `general` gets the standard tier unless the auto picker
  * chooses per spawn; built-ins get their defaults; other subagents get their cached
  * classification when it matches their description, else they are pending and
@@ -71,7 +71,7 @@ export function planImplicit(input: {
   const implicit: Record<string, string> = {}
   const pending: ClassifyAgent[] = []
   for (const agent of input.agents) {
-    if (agent.model !== undefined || Object.hasOwn(input.configured, agent.id) || hasHeader(agent, input.header)) continue
+    if (userPin(agent) !== undefined || Object.hasOwn(input.configured, agent.id) || hasHeader(agent, input.header)) continue
     if (agent.id === AUTO_AGENT) {
       if (!input.autoGeneral) implicit[agent.id] = GENERAL_TIER
       continue

@@ -16,6 +16,7 @@ import {
   parseCandidate,
   resolveRole,
   roleOf,
+  userPin,
 } from "./resolve.ts"
 import { describeChoice, type RoleChoice, roleChoices } from "./spawn-role.ts"
 import { type TierMeta, tierOf } from "./tiers.ts"
@@ -40,7 +41,8 @@ export type RoleReport = {
   tier?: TierMeta
 }
 
-export type AgentReport = { id: string; role: string; resolved?: ModelRef; own?: ModelRef }
+/** `pinned`: `own` is the user's pin, so the tier does not apply. */
+export type AgentReport = { id: string; role: string; resolved?: ModelRef; own?: ModelRef; pinned?: true }
 
 /** `choices`: the values the `subagent` tool's `tier` parameter offers. */
 export type CheckReport = {
@@ -129,6 +131,7 @@ export function checkRoles(
     const resolved = resolveRole(options.roles, models, role, view).model
     if (resolved !== undefined) report.resolved = resolved
     if (agent.model !== undefined) report.own = agent.model
+    if (userPin(agent) !== undefined) report.pinned = true
     agentReports.push(report)
   }
   const report: CheckReport = { roles, agents: agentReports, choices: roleChoices(options, models, purposes), warnings }
@@ -198,7 +201,14 @@ export function formatCheck(report: CheckReport): string {
   if (report.agents.length > 0) {
     lines.push("", "Agents:")
     for (const agent of report.agents) {
-      const target = agent.resolved !== undefined ? label(agent.resolved) : agent.own !== undefined ? `${label(agent.own)} (own model)` : "inherits the session model"
+      const target =
+        agent.pinned && agent.own !== undefined
+          ? `${label(agent.own)} (pinned in config; tier not applied)`
+          : agent.resolved !== undefined
+            ? label(agent.resolved)
+            : agent.own !== undefined
+              ? `${label(agent.own)} (own model)`
+              : "inherits the session model"
       lines.push(`  - ${agent.id} (role ${agent.role}) → ${target}`)
     }
   }

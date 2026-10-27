@@ -122,6 +122,9 @@ function shapeAgent(agent, file, created) {
   agent.permissions = [...agent.permissions ?? [], ...file.permissions];
 }
 
+// plugins/lib/src/model-roles.ts
+var MODEL_FALLBACK_HEADER = "x-opencode-model-fallback";
+
 // plugins/lib/src/agent-fallback.ts
 function isCopyOf(agent, file) {
   return agent?.system !== undefined && agent.system === file.system;
@@ -131,6 +134,10 @@ function applyOwnedAgent(draft, file, existing) {
   if (copy) {
     draft.permissions = [];
     delete draft.model;
+    if (draft.request?.headers?.[MODEL_FALLBACK_HEADER] !== undefined) {
+      const { [MODEL_FALLBACK_HEADER]: _, ...headers } = draft.request.headers;
+      draft.request = { ...draft.request, headers };
+    }
   }
   shapeAgent(draft, file, existing === undefined || copy);
 }

@@ -5,6 +5,9 @@ import { readFileSync as readFileSync4 } from "fs";
 import { fileURLToPath as fileURLToPath2 } from "url";
 import { Plugin } from "@opencode/plugin";
 
+// plugins/lib/src/model-roles.ts
+var MODEL_FALLBACK_HEADER = "x-opencode-model-fallback";
+
 // plugins/lib/src/agent-fallback.ts
 function listsPlugin(listed, name) {
   const entries = Array.isArray(listed) ? listed : listed?.data;
@@ -162,6 +165,7 @@ function availableModel(ref, available) {
   }
   return ref;
 }
+var modelLabel = (ref) => `${ref.providerID}/${ref.id}${ref.variant ? `#${ref.variant}` : ""}`;
 function shapeAgent2(draft, file, model, created) {
   draft.name ??= file.id;
   if (created || draft.description === undefined)
@@ -170,10 +174,14 @@ function shapeAgent2(draft, file, model, created) {
     draft.mode = file.mode;
   if (created || draft.system === undefined)
     draft.system = file.system;
-  if (model !== undefined && (created || draft.model === undefined))
-    draft.model = { ...model };
+  const { fallback, ...ref } = model ?? {};
+  const setModel = model !== undefined && (created || draft.model === undefined);
+  if (setModel)
+    draft.model = ref;
   if (file.request?.headers)
     draft.request = { ...draft.request, headers: { ...file.request.headers, ...draft.request?.headers } };
+  if (setModel && fallback)
+    draft.request = { ...draft.request, headers: { ...draft.request?.headers, [MODEL_FALLBACK_HEADER]: modelLabel(ref) } };
   draft.permissions = created ? [...file.permissions] : [...draft.permissions ?? [], ...file.permissions];
 }
 function hasModelRoles(listed) {
@@ -187,7 +195,8 @@ function fallbackModel(file, override, modelRoles, available) {
     return availableModel(parseModel(override), available);
   if (modelRoles)
     return;
-  return availableModel(parseModel(file.model ?? ""), available);
+  const ref = availableModel(parseModel(file.model ?? ""), available);
+  return ref === undefined ? undefined : { ...ref, fallback: true };
 }
 function loadAgents(ids = AGENT_IDS) {
   return ids.map((id) => parseAgentFile(id, readFileSync2(agentPath(id), "utf8")));

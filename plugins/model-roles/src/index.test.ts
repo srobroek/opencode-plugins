@@ -311,7 +311,7 @@ describe("setup", () => {
     await cleanup()
   })
 
-  test("re-registers after config agents load so roles win over config models", async () => {
+  test("re-registers after config agents load; their model pins win over tiers", async () => {
     const host = createHost({ agents: [{ id: "general" }], models, options })
     const cleanup = await setup(host)
     await configAgents(host, [
@@ -322,8 +322,9 @@ describe("setup", () => {
     ])
     await settle()
     const agents = host.agents()
-    expect(agents.get("j4")?.model).toEqual(sonnet)
+    expect(agents.get("j4")?.model).toEqual(flint)
     expect(agents.get("j3")?.model).toEqual(haiku)
+    expect(agents.get("j3")?.request?.headers?.["x-opencode-model-fallback"]).toBe("anthropic/claude-haiku")
     expect(agents.get("j5")?.model).toEqual(flint)
     expect(agents.get("j6")?.model).toEqual(flint)
     expect(agents.get("general")?.model).toEqual(sonnet)
@@ -337,7 +338,7 @@ describe("setup", () => {
   test("stops re-registering when agents never converge", async () => {
     const host = createHost({ agents: [{ id: "general" }], models, options })
     const cleanup = await setup(host)
-    host.setListOverride(() => [{ id: "general", model: flint }])
+    host.setListOverride(() => [{ id: "general" }])
     for (let i = 0; i < 10; i++) host.emit({ type: "agent.updated" })
     await settle()
     expect(host.transformCalls()).toBe(1 + MAX_REREGISTER)
@@ -357,8 +358,14 @@ describe("setup", () => {
     await cleanup()
   })
 
-  test("losing every candidate restores the agent's own model", async () => {
-    const host = createHost({ agents: [{ id: "general", model: flint }], models, options })
+  test("a user pin set before the plugin wins; a fallback model gives way and comes back", async () => {
+    const pinned = createHost({ agents: [{ id: "general", model: flint }], models, options })
+    const stop = await setup(pinned)
+    expect(pinned.agents().get("general")?.model).toEqual(flint)
+    pinned.close()
+    await stop()
+    const fallback = { headers: { "x-opencode-model-fallback": "opencode/flint" } }
+    const host = createHost({ agents: [{ id: "general", model: flint, request: fallback }], models, options })
     const cleanup = await setup(host)
     expect(host.agents().get("general")?.model).toEqual(sonnet)
     host.setModels([models[2] as Model])
@@ -1005,6 +1012,30 @@ describe("tiers", () => {
     const check = await host.tools.get("model_roles_check")?.execute({})
     expect(check?.content).toContain("Tier strong (derived, effort high) → amazon-bedrock/global.anthropic.claude-opus-5-5#high")
     expect(check?.content).toContain("premium (")
+    host.close()
+    await cleanup()
+  })
+
+  test("a config model pin on a reviewer agent wins over its tier, a passed tier and the vendor move", async () => {
+    const haiku55 = { providerID: "amazon-bedrock", id: "global.anthropic.claude-haiku-5-5" }
+    const agents: Agent[] = [
+      { id: "pr-reviewer", request: header("reviewer") },
+      { id: "critic", request: header("reviewer") },
+    ]
+    const host = createHost({ agents, models: workModels, references, options: {}, sessionModel: opus55 })
+    const cleanup = await setup(host)
+    await configAgents(host, [{ id: "pr-reviewer", model: haiku55, request: header("reviewer") }])
+    await settle()
+    expect(host.agents().get("pr-reviewer")?.model).toEqual(haiku55)
+    expect(await host.spawn("subagent", { agent: "pr-reviewer", prompt: "x" })).toEqual({ agent: "pr-reviewer", prompt: "x" })
+    expect(await host.spawn("subagent", { agent: "pr-reviewer", prompt: "x", tier: "strong" })).toEqual({ agent: "pr-reviewer", prompt: "x" })
+    expect((await host.spawn("subagent", { agent: "pr-reviewer", prompt: "x", model: "amazon-bedrock/global.openai.gpt-6.1-sol" })).model).toBe(
+      "amazon-bedrock/global.openai.gpt-6.1-sol",
+    )
+    // Without a pin the tier still picks.
+    expect((await host.spawn("subagent", { agent: "critic", prompt: "x" })).model).toBe("amazon-bedrock/global.openai.gpt-6.1-sol#high")
+    const check = await host.tools.get("model_roles_check")?.execute({})
+    expect(check?.content).toContain("  - pr-reviewer (role reviewer) → amazon-bedrock/global.anthropic.claude-haiku-5-5 (pinned in config; tier not applied)")
     host.close()
     await cleanup()
   })

@@ -73,6 +73,7 @@ import {
 import {
   type AvailableModel,
   desiredModels,
+  FALLBACK_HEADER,
   type ModelRef,
   type Options,
   parseOptions,
@@ -82,6 +83,7 @@ import {
   sameModel,
   staleAgents,
   stripRoleHeader,
+  userPin,
 } from "./resolve.ts"
 import { TiersRpc } from "./rpc.ts"
 import {
@@ -273,6 +275,10 @@ export default Plugin.define({
         if (agent === undefined || sameModel(agent.model, ref)) continue
         editor.update(id, (draft) => {
           draft.model = { ...ref } as typeof draft.model
+          // Marks the model as this plugin's, so a later look at the agent does not take it for a user pin.
+          const shape = draft as { request?: { headers?: Record<string, string> } }
+          shape.request ??= {}
+          shape.request.headers = { ...shape.request.headers, [FALLBACK_HEADER]: modelLabel(ref) }
         })
       }
     }
@@ -868,15 +874,18 @@ export default Plugin.define({
     const spawns = await ctx.tool.hook("execute.before", async (event) => {
       if (event.tool !== SUBAGENT_TOOL) return
       const passed = passedTier(event.input)
-      const vendor = passed !== undefined && tierMeta(options, passed)?.distinctVendor ? await callerVendor(event) : undefined
-      let plan = planSpawn(event.input, options, available, view(), vendor)
+      const named = spawnTarget(event.input)
+      const agent = named === undefined ? undefined : (await listAgents().catch(() => [] as Agents)).find((a) => a.id === named)
+      // A model the user pinned on the target wins over any tier, passed or its own.
+      const pinned = agent !== undefined && userPin(agent) !== undefined
+      const vendor = passed !== undefined && !pinned && tierMeta(options, passed)?.distinctVendor ? await callerVendor(event) : undefined
+      let plan = planSpawn(event.input, options, available, view(), vendor, pinned)
       if (plan.error !== undefined) throw new Error(plan.error)
       if (plan.input !== event.input) event.input = plan.input
       const target = spawnTarget(plan.input)
       if (target === undefined) return
       // An agent on a tier that wants another vendor than the caller's is moved per spawn.
-      if (plan.role === undefined && inputModel(plan.input) === undefined && isRecord(plan.input)) {
-        const agent = (await listAgents().catch(() => [] as Agents)).find((a) => a.id === target)
+      if (plan.role === undefined && !pinned && inputModel(plan.input) === undefined && isRecord(plan.input)) {
         const own = agent === undefined ? undefined : roleOf(agent, options.agents, options.implicit)
         if (own !== undefined && tierMeta(options, own)?.distinctVendor) {
           const model = resolveTier(options, available, own, view(), await callerVendor(event)).model

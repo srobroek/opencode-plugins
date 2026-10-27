@@ -159,13 +159,32 @@ describe("agents", () => {
     return fake
   }
 
-  test("without model-roles an agent falls back to its file model when available", async () => {
+  test("without model-roles an agent falls back to its file model when available, marked as a fallback", async () => {
     const fake = withHost(createFakeContext(), [{ id: "srobroek.delivery" }])
     await plugin.setup(fake.context)
     expect(fake.agents.get("implementer")?.model).toEqual({
       providerID: "amazon-bedrock",
       id: "global.anthropic.claude-sonnet-5-5",
       variant: "medium",
+    })
+    expect(fake.agents.get("implementer")?.request).toEqual({
+      headers: {
+        "x-opencode-model-role": "standard",
+        "x-opencode-model-fallback": "amazon-bedrock/global.anthropic.claude-sonnet-5-5#medium",
+      },
+    })
+  })
+
+  test("the researcher fallback copy is marked as a fallback too", async () => {
+    const fake = withHost(createFakeContext(), [{ id: "srobroek.delivery" }])
+    await plugin.setup(fake.context)
+    const researcher = fake.agents.get("researcher")
+    expect(researcher?.model).toEqual({ providerID: "amazon-bedrock", id: "global.anthropic.claude-sonnet-5-5", variant: "medium" })
+    expect(researcher?.request).toEqual({
+      headers: {
+        "x-opencode-model-role": "standard",
+        "x-opencode-model-fallback": "amazon-bedrock/global.anthropic.claude-sonnet-5-5#medium",
+      },
     })
   })
 
@@ -187,6 +206,7 @@ describe("agents", () => {
       providerID: "amazon-bedrock",
       id: "global.anthropic.claude-sonnet-5-5",
     })
+    expect(fake.agents.get("implementer")?.request).toEqual({ headers: { "x-opencode-model-role": "standard" } })
   })
 
   test("hasModelRoles matches the plugin id or its package target", () => {

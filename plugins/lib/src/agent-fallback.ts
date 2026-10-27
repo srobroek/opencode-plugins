@@ -16,6 +16,7 @@
 
 import type { Context } from "@opencode/plugin/promise/plugin"
 import { type AgentFile, readAgentFile, shapeAgent } from "./agent-files.ts"
+import { MODEL_FALLBACK_HEADER } from "./model-roles.ts"
 
 type PluginEntry = { id?: unknown; source?: { target?: unknown; path?: unknown } }
 
@@ -61,11 +62,17 @@ export function isCopyOf(agent: { system?: string } | undefined, file: AgentFile
   return agent?.system !== undefined && agent.system === file.system
 }
 
-type Draft = { system?: string; model?: unknown; permissions?: AgentFile["permissions"] }
+type Draft = {
+  system?: string
+  model?: unknown
+  request?: { headers?: Record<string, string> }
+  permissions?: AgentFile["permissions"]
+}
 
 /**
  * Owner side: fill one agent from its file. A fallback copy is reset first (its
- * permissions and fallback model dropped), so the result matches a fresh registration;
+ * permissions, fallback model and its fallback header dropped), so the result matches a
+ * fresh registration;
  * any other existing agent keeps its own fields and gains the file's permissions after
  * its own, as `shapeAgent` does.
  */
@@ -74,6 +81,10 @@ export function applyOwnedAgent(draft: Draft, file: AgentFile, existing: { syste
   if (copy) {
     draft.permissions = []
     delete draft.model
+    if (draft.request?.headers?.[MODEL_FALLBACK_HEADER] !== undefined) {
+      const { [MODEL_FALLBACK_HEADER]: _, ...headers } = draft.request.headers
+      draft.request = { ...draft.request, headers }
+    }
   }
   shapeAgent(draft as never, file, existing === undefined || copy)
 }

@@ -72,6 +72,7 @@ writes them for you.
   (default 8). Premium models are never derived, and they are what the
   [guard](#subagent-model-guard) protects.
 - `agents`: agent id to tier, for builtins or to override an agent's own tier.
+  It does not override a [model pin](#model-pins-win-over-tiers).
   Without it, `explore` and `compaction` get `cheap`, `title` and `summary` get
   `cheap` at effort `none`, and `general` gets `standard` (unless `auto` is on).
 - `fallback`: only `"keep"` is supported. If nothing matches, the agent keeps
@@ -173,13 +174,13 @@ On a Bedrock-only machine this gives `cheap` = Haiku 5.5, GPT-6 Luna;
 ## Declaring a tier in an agent file
 
 Put the tier in a request header. The plugin removes this header before any
-request reaches a provider. Without the plugin, the agent uses its own `model`.
+request reaches a provider. Without the plugin, the agent inherits the session
+model.
 
 ```md
 ---
 description: Reviews changes
 mode: subagent
-model: anthropic/claude-sonnet-5-5#high
 request:
   headers:
     x-opencode-model-role: reviewer
@@ -190,6 +191,22 @@ Don't use a frontmatter `role:` key. OpenCode either drops it, or reads the
 file as V1 and drops a `#variant` model.
 
 If both are set, the `agents` option wins over the header.
+
+### Model pins win over tiers
+
+A model you set on an agent is a pin: `agents.<id>.model` in `opencode.json`, or
+`model:` in a markdown agent file. The plugin leaves a pinned agent on that model,
+whatever tier its header, the `agents` option, the built-in defaults or a
+classification give it, and drops a `tier` passed when spawning it. Only an
+explicit `model` in the spawn call wins over a pin. `model_roles_check` lists a
+pinned agent as `pinned in config; tier not applied`.
+
+A plugin that gives a shipped agent a fallback model (delivery does, when
+model-roles is not detected) marks it in the `x-opencode-model-fallback` request
+header with the same `provider/model#variant`. That model gives way to the tier.
+A config pin replaces the model but not the header, so it no longer matches and
+counts as a pin. This plugin marks the models it sets the same way, and removes
+the header before any request reaches a provider.
 
 ### Agents that declare no tier
 
@@ -215,7 +232,7 @@ and is asked again on the next start. `general` is never classified: it gets
 
 Config and markdown agents load after user plugins. On `agent.updated`,
 `model.updated` and `provider.updated` the plugin re-registers its agent
-transform, which puts it last again. It does this only when an agent's model is
+transform, which puts it last again; it still leaves pinned agents alone. It does this only when an agent's model is
 out of date or availability has changed. It gives up after three attempts in a
 row that don't converge.
 
@@ -368,15 +385,17 @@ front; an agent whose own tier has `distinctVendor` is moved the same way on
 each spawn. The model is chosen in this order:
 
 1. an explicit `model` in the call
-2. the `tier` (or `role`) in the call
-3. the target agent's tier (from the `agents` option, the header, the built-in
+2. the target agent's [model pin](#model-pins-win-over-tiers); a `tier` in the
+   call is dropped
+3. the `tier` (or `role`) in the call
+4. the target agent's tier (from the `agents` option, the header, the built-in
    defaults or its classification)
-4. the target agent's own model
-5. the session's model, which the child inherits
+5. the target agent's fallback model (marked in `x-opencode-model-fallback`)
+6. the session's model, which the child inherits
 
 The plugin never overrides an explicit `model` or a resumed spawn. An unknown
 tier refuses the spawn and lists the tiers. `default` passes no tier. A tier with
-nothing available falls through to step 3. A resumed spawn (with `sessionID`)
+nothing available falls through to step 4. A resumed spawn (with `sessionID`)
 keeps its model. The plugin records the tier each child was spawned with (in
 plugin storage, under `spawn-role:<sessionID>`), so a fallback for that child
 stays in the same tier.

@@ -43,11 +43,13 @@ describe("owner side", () => {
       system: "prompt",
       mode: "subagent",
       model: { providerID: "p", id: "m" },
+      request: { headers: { "x-opencode-model-role": "standard", "x-opencode-model-fallback": "p/m" } },
       permissions: [{ action: "read", resource: "*", effect: "allow" }],
     }
     expect(isCopyOf(draft as { system: string }, file)).toBe(true)
     applyOwnedAgent(draft, file, { ...(draft as { system: string }) })
     expect(draft.model).toBeUndefined()
+    expect(draft.request).toEqual({ headers: { "x-opencode-model-role": "standard" } })
     expect(draft.permissions).toEqual(file.permissions)
   })
 
