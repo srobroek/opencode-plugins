@@ -467,6 +467,8 @@ var WRAPPERS = new Map([
 // plugins/lib/src/tool-targets.ts
 var WRITE_TOOLS = new Set(["edit", "write", "patch"]);
 var READ_TOOLS = new Set(["read"]);
+var SHELL_ALIASES = new Set(["bash", "Bash"]);
+var SHELL_EXECUTABLES = new Set(["bash", "sh", "zsh", "dash", "ksh"]);
 var PATCH_HEADER = /^\*\*\* (?:(?<verb>Add|Update|Delete) File|(?<move>Move to)):\s*(?<path>.+?)\s*$/;
 function unquote(path) {
   const first = path[0];

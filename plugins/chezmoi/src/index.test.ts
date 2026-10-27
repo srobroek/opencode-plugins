@@ -183,6 +183,9 @@ describe("plugin", () => {
     await expect(
       fake.fire.tool("execute.before", { tool: "shell", sessionID: "ses_1", input: { command: "tee .zshrc" } }),
     ).rejects.toThrow(ZSHRC_SOURCE)
+    await expect(
+      fake.fire.tool("execute.before", { tool: "bash", sessionID: "ses_1", input: { command: "tee .zshrc" } }),
+    ).rejects.toThrow(ZSHRC_SOURCE)
     await fake.fire.tool("execute.before", { tool: "read", sessionID: "ses_1", input: { path: ZSHRC } })
     await cleanup?.()
     expect(fake.active()).toBe(0)

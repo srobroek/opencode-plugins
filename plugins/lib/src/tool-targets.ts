@@ -22,6 +22,77 @@ export const READ_TOOLS: ReadonlySet<string> = new Set(["read"])
 
 export const SHELL_TOOL = "shell"
 
+/**
+ * Names models call `shell` by although no such tool exists. The agent-efficiency
+ * plugin routes them to `shell` in `execute.before`; guards treat them as `shell` so
+ * they hold whichever plugin's hook runs first.
+ */
+export const SHELL_ALIASES: ReadonlySet<string> = new Set(["bash", "Bash"])
+
+/** Whether a tool call runs a shell command: `shell` or one of its aliases. */
+export function isShellTool(tool: string): boolean {
+  return tool === SHELL_TOOL || SHELL_ALIASES.has(tool)
+}
+
+const SHELL_EXECUTABLES: ReadonlySet<string> = new Set(["bash", "sh", "zsh", "dash", "ksh"])
+const SAFE_WORD = /^[A-Za-z0-9_@%+=:,./-]+$/
+
+function quoteWord(word: string): string {
+  return SAFE_WORD.test(word) ? word : `'${word.replaceAll("'", `'\\''`)}'`
+}
+
+/** A command given as a string or an argv array, as one command string. */
+function commandText(value: unknown): string | undefined {
+  if (typeof value === "string") return value
+  if (!Array.isArray(value) || value.length === 0 || !value.every((word) => typeof word === "string")) return undefined
+  const argv = value as string[]
+  const executable = argv[0]?.split("/").pop() ?? ""
+  if (argv.length === 3 && SHELL_EXECUTABLES.has(executable) && /^-l?c$/.test(argv[1] ?? "")) return argv[2]
+  return argv.map(quoteWord).join(" ")
+}
+
+function flag(value: unknown): boolean | undefined {
+  if (typeof value === "boolean") return value
+  if (value === "true") return true
+  if (value === "false") return false
+  return undefined
+}
+
+function milliseconds(value: unknown): number | undefined {
+  const parsed = typeof value === "string" && value.trim() !== "" ? Number(value) : value
+  return typeof parsed === "number" && Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined
+}
+
+/**
+ * A shell-alias call's input in the `shell` tool's shape. Reads the Claude Code and
+ * Codex spellings too: `cmd`, an argv array, `cwd`/`working_directory`,
+ * `run_in_background`, `timeout_ms`. Drops every other field. Input without a
+ * command string is returned unchanged so `shell` reports the error.
+ */
+export function shellAliasInput(input: unknown): unknown {
+  let raw = input
+  if (typeof raw === "string") {
+    try {
+      raw = JSON.parse(raw)
+    } catch {
+      return input
+    }
+  }
+  const value = fields(raw)
+  const command = commandText(value.command ?? value.cmd)
+  if (command === undefined) return input
+  const out: Record<string, unknown> = { command }
+  const workdir = [value.workdir, value.cwd, value.working_directory].find(
+    (dir): dir is string => typeof dir === "string" && dir !== "",
+  )
+  if (workdir !== undefined) out.workdir = workdir
+  const timeout = milliseconds(value.timeout ?? value.timeout_ms)
+  if (timeout !== undefined) out.timeout = timeout
+  const background = flag(value.background ?? value.run_in_background)
+  if (background !== undefined) out.background = background
+  return out
+}
+
 export type PatchOperation = "add" | "update" | "delete" | "move"
 
 export type PatchTarget = { operation: PatchOperation; path: string }
@@ -74,10 +145,13 @@ export function readTargets(tool: string, input: unknown): string[] {
 
 export type ShellCall = { command: string; workdir?: string; timeout?: number; background?: boolean }
 
-/** The `shell` tool call's input, or `undefined` for any other tool or a call without a command. */
+/**
+ * The `shell` tool call's input, or `undefined` for any other tool or a call without a
+ * command. A shell-alias call reads as the `shell` call it is routed to.
+ */
 export function shellCall(tool: string, input: unknown): ShellCall | undefined {
-  if (tool !== SHELL_TOOL) return undefined
-  const value = fields(input)
+  if (!isShellTool(tool)) return undefined
+  const value = fields(tool === SHELL_TOOL ? input : shellAliasInput(input))
   if (typeof value.command !== "string") return undefined
   const call: ShellCall = { command: value.command }
   if (typeof value.workdir === "string" && value.workdir) call.workdir = value.workdir

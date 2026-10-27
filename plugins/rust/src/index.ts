@@ -2,6 +2,7 @@ import { fileURLToPath } from "node:url"
 import { Plugin } from "@opencode/plugin"
 import { appendResultText } from "@srobroek/opencode-lib/shell-result"
 import { registerSkills } from "@srobroek/opencode-lib/skill-files"
+import { isShellTool, WRITE_TOOLS } from "@srobroek/opencode-lib/tool-targets"
 import { ADVISORIES, advisoriesFor } from "./advisories.ts"
 import { decideToolCall } from "./migration-gate.ts"
 
@@ -36,7 +37,7 @@ export default Plugin.define({
     const shown = new Set<string>()
 
     const gate = await ctx.tool.hook("execute.before", async (event) => {
-      if (!["edit", "write", "patch", "shell"].includes(event.tool)) return
+      if (!WRITE_TOOLS.has(event.tool) && !isShellTool(event.tool)) return
       const reason = decideToolCall(event.tool, event.input, await directory(event.sessionID))
       if (reason) throw new Error(reason)
     })

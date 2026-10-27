@@ -7,7 +7,7 @@
 
 import { dirname, isAbsolute, resolve } from "node:path"
 import { lexicalAbs } from "@srobroek/opencode-lib/shell-write-targets"
-import { SHELL_TOOL, shellCall, WRITE_TOOLS, writeTargets, writtenPaths } from "@srobroek/opencode-lib/tool-targets"
+import { isShellTool, shellCall, WRITE_TOOLS, writeTargets, writtenPaths } from "@srobroek/opencode-lib/tool-targets"
 
 export const DENY_REASON =
   'blocked by speckit (task state lives in beads, tasks.md is never authored): this repo has an active beads workspace, so specs/*/tasks.md is read-only legacy and must not be written or created. Create implementation tasks as beads under the feature molecule\'s implement step instead: bd create "T00N <title>" --parent <implement-step-id> --spec-id <NNN-slug> -t task; wire ordering with bd dep add <later-id> <earlier-id>; bulk-create with bd create -f <tmpfile>.md (write the temp file OUTSIDE specs/). Then work the tasks via bd ready -> bd update <id> --claim -> bd close <id> --reason. Find the implement step with bd mol current <molecule-root-id>. IF A SKILL DEMANDED tasks.md: skip check-prerequisites.sh --require-tasks and read bd list --spec <NNN-slug>. Do not create tasks.md to get past the check. Disable: set the srobroek.speckit plugin option tasksGuard=false'
@@ -66,7 +66,7 @@ export function tasksTargets(tool: string, input: unknown, directory: string): s
       .map((path) => (isAbsolute(path) ? path : resolve(directory, path)))
     return hits.length > 0 ? [...new Set(hits.map(repoOf))] : undefined
   }
-  if (tool !== SHELL_TOOL) return undefined
+  if (!isShellTool(tool)) return undefined
   const call = shellCall(tool, input)
   if (call === undefined || !commandMentionsTasksMd(call.command)) return undefined
   const cwd = call.workdir ? lexicalAbs(call.workdir, directory) : directory

@@ -64,6 +64,13 @@ describe("execute.before on shell", () => {
     await cleanup()
   })
 
+  test("gates a bash alias call like shell", async () => {
+    const { fake, cleanup } = await start(scratch())
+    const bash = { ...shellCall("bd edit proj-1"), tool: "bash", input: { cmd: ["bd", "edit", "proj-1"] } }
+    await expect(fake.fire.tool("execute.before", bash)).rejects.toThrow(/\$EDITOR/)
+    await cleanup()
+  })
+
   test("a switched-off gate lets the command through", async () => {
     const { fake, cleanup } = await start(scratch(), {}, { gates: { "bd-update-close-gate": { enabled: false } } })
     const event = await fake.fire.tool("execute.before", shellCall("bd update proj-1 --status closed"))

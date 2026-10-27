@@ -784,6 +784,64 @@ function shellWriteTargets(command, cwd) {
 var WRITE_TOOLS = new Set(["edit", "write", "patch"]);
 var READ_TOOLS = new Set(["read"]);
 var SHELL_TOOL = "shell";
+var SHELL_ALIASES = new Set(["bash", "Bash"]);
+function isShellTool(tool) {
+  return tool === SHELL_TOOL || SHELL_ALIASES.has(tool);
+}
+var SHELL_EXECUTABLES = new Set(["bash", "sh", "zsh", "dash", "ksh"]);
+var SAFE_WORD = /^[A-Za-z0-9_@%+=:,./-]+$/;
+function quoteWord(word) {
+  return SAFE_WORD.test(word) ? word : `'${word.replaceAll("'", `'\\''`)}'`;
+}
+function commandText(value) {
+  if (typeof value === "string")
+    return value;
+  if (!Array.isArray(value) || value.length === 0 || !value.every((word) => typeof word === "string"))
+    return;
+  const argv = value;
+  const executable = argv[0]?.split("/").pop() ?? "";
+  if (argv.length === 3 && SHELL_EXECUTABLES.has(executable) && /^-l?c$/.test(argv[1] ?? ""))
+    return argv[2];
+  return argv.map(quoteWord).join(" ");
+}
+function flag(value) {
+  if (typeof value === "boolean")
+    return value;
+  if (value === "true")
+    return true;
+  if (value === "false")
+    return false;
+  return;
+}
+function milliseconds(value) {
+  const parsed = typeof value === "string" && value.trim() !== "" ? Number(value) : value;
+  return typeof parsed === "number" && Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined;
+}
+function shellAliasInput(input) {
+  let raw = input;
+  if (typeof raw === "string") {
+    try {
+      raw = JSON.parse(raw);
+    } catch {
+      return input;
+    }
+  }
+  const value = fields(raw);
+  const command = commandText(value.command ?? value.cmd);
+  if (command === undefined)
+    return input;
+  const out = { command };
+  const workdir = [value.workdir, value.cwd, value.working_directory].find((dir) => typeof dir === "string" && dir !== "");
+  if (workdir !== undefined)
+    out.workdir = workdir;
+  const timeout = milliseconds(value.timeout ?? value.timeout_ms);
+  if (timeout !== undefined)
+    out.timeout = timeout;
+  const background = flag(value.background ?? value.run_in_background);
+  if (background !== undefined)
+    out.background = background;
+  return out;
+}
 var PATCH_HEADER = /^\*\*\* (?:(?<verb>Add|Update|Delete) File|(?<move>Move to)):\s*(?<path>.+?)\s*$/;
 function unquote2(path) {
   const first = path[0];
@@ -821,9 +879,9 @@ function writeTargets(tool, input) {
   return [];
 }
 function shellCall(tool, input) {
-  if (tool !== SHELL_TOOL)
+  if (!isShellTool(tool))
     return;
-  const value = fields(input);
+  const value = fields(tool === SHELL_TOOL ? input : shellAliasInput(input));
   if (typeof value.command !== "string")
     return;
   const call = { command: value.command };
@@ -1245,7 +1303,7 @@ function tasksTargets(tool, input, directory) {
     const hits = writeTargets(tool, input).filter(isTasksMd).map((path) => isAbsolute3(path) ? path : resolve3(directory, path));
     return hits.length > 0 ? [...new Set(hits.map(repoOf))] : undefined;
   }
-  if (tool !== SHELL_TOOL)
+  if (!isShellTool(tool))
     return;
   const call = shellCall(tool, input);
   if (call === undefined || !commandMentionsTasksMd(call.command))
@@ -2387,7 +2445,7 @@ async function setupSpeckit(ctx, overrides = {}) {
             throw new Error(reason);
           return;
         }
-        if (!options.tasksGuard || event.tool !== SHELL_TOOL && !WRITE_TOOLS.has(event.tool))
+        if (!options.tasksGuard || !isShellTool(event.tool) && !WRITE_TOOLS.has(event.tool))
           return;
         let reason;
         try {

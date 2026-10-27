@@ -16,6 +16,19 @@
         "typescript": "7.0.2",
       },
     },
+    "plugins/agent-efficiency": {
+      "name": "@srobroek/opencode-agent-efficiency",
+      "version": "0.1.0",
+      "devDependencies": {
+        "@srobroek/opencode-lib": "workspace:*",
+      },
+      "peerDependencies": {
+        "@opencode/plugin": "^2.1.4",
+      },
+      "optionalPeers": [
+        "@opencode/plugin",
+      ],
+    },
     "plugins/architecture": {
       "name": "@srobroek/opencode-architecture",
       "version": "0.1.0",
@@ -703,6 +716,8 @@
     "@smithy/util-hex-encoding": ["@smithy/util-hex-encoding@4.5.2", "", { "dependencies": { "@smithy/core": "^3.33.2", "tslib": "^2.6.2" } }, "sha512-iq+cW3mAb7vfcxEEpYi3zXKpDtbrIFyanWjQl4zBq4seWD4OSxXDWSfespZxenX6aEaighn+NR3u1nU1DSvs3w=="],
 
     "@smithy/util-utf8": ["@smithy/util-utf8@4.2.2", "", { "dependencies": { "@smithy/util-buffer-from": "^4.2.2", "tslib": "^2.6.2" } }, "sha512-75MeYpjdWRe8M5E3AW0O4Cx3UadweS+cwdXjwYGBW5h/gxxnbeZ877sLPX/ZJA9GVTlL/qG0dXP29JWFCD1Ayw=="],
+
+    "@srobroek/opencode-agent-efficiency": ["@srobroek/opencode-agent-efficiency@workspace:plugins/agent-efficiency"],
 
     "@srobroek/opencode-architecture": ["@srobroek/opencode-architecture@workspace:plugins/architecture"],
 
