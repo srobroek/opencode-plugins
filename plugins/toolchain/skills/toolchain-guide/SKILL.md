@@ -1,6 +1,6 @@
 ---
 name: toolchain-guide
-description: "Use when choosing a stack, dependency, framework, library, infra tool, logging, scanner, CI or toolchain caches."
+description: "Load before answering which stack, dependency, package manager, linter, test runner, logger, scanner, infra or CI cache."
 ---
 
 # Toolchain guide
