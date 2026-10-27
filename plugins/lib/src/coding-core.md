@@ -14,7 +14,8 @@ whole file near 400 tokens. -->
    surrounding code's conventions. Keep throwaway files in the OpenCode temp
    directory and delete them when done.
 4. Check: run the repo's checks for the touched code (format, lint, typecheck,
-   tests, build) and fix what your change broke. Never claim success without
+   tests, build) and fix what your change broke; after a multi-file or signature
+   change, run the type checker once before reporting. Never claim success without
    command output, or why one could not run.
 5. Review your own diff (`git diff`) for scope, leftovers and missed call sites,
    then report.
