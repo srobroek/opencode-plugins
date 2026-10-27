@@ -28,7 +28,7 @@ permissions:
     resource: "*"
     effect: allow
   - action: skill
-    resource: "*"
+    resource: repomix
     effect: allow
   - action: execute
     resource: "*"

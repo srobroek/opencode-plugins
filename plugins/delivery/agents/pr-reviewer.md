@@ -12,10 +12,10 @@ permissions:
     resource: "*"
     effect: deny
   - action: skill
-    resource: quality-code-design
+    resource: "quality-*"
     effect: allow
   - action: skill
-    resource: review-security
+    resource: "review-*"
     effect: allow
   - action: shell
     resource: "gh pr view *"
