@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.3.0](https://github.com/srobroek/opencode-plugins/compare/rust--v0.2.0...rust--v0.3.0) (2026-10-27)
+
+
+### Features
+
+* **quality:** quality-profiling method skill with per-language profiling skills ([7786848](https://github.com/srobroek/opencode-plugins/commit/7786848fb2cfe68b6c1c29848644023c6668197f))
+
+
+### Refactors
+
+* **rust:** drop the migration gate, now in safety ([27a6ebe](https://github.com/srobroek/opencode-plugins/commit/27a6ebe4f1b1fcce01cb2130e47744ed5d3c7cbd))
+
+
+### Documentation
+
+* list the profiling skills in the marketplace export table ([f40f96c](https://github.com/srobroek/opencode-plugins/commit/f40f96c2adb224704660399730daedee5cbab870))
+
 ## [0.2.0](https://github.com/srobroek/opencode-plugins/compare/rust--v0.1.0...rust--v0.2.0) (2026-10-27)
 
 

@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.0](https://github.com/srobroek/opencode-plugins/compare/quality--v0.2.0...quality--v0.3.0) (2026-10-27)
+
+
+### Features
+
+* **quality:** quality-profiling method skill with per-language profiling skills ([7786848](https://github.com/srobroek/opencode-plugins/commit/7786848fb2cfe68b6c1c29848644023c6668197f))
+* **quality:** safe-mutation, persistence, contracts, TypeScript and Python references and a quality-testing skill ([d53491a](https://github.com/srobroek/opencode-plugins/commit/d53491adc07943d68e372db34e61eba2d897d7b3))
+
 ## [0.2.0](https://github.com/srobroek/opencode-plugins/compare/quality--v0.1.0...quality--v0.2.0) (2026-10-27)
 
 

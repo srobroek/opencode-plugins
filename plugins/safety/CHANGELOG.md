@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.0](https://github.com/srobroek/opencode-plugins/compare/safety--v0.2.0...safety--v0.3.0) (2026-10-27)
+
+
+### Features
+
+* **safety:** git-aware migration-edit gate and external_directory check for directory flags ([5f35605](https://github.com/srobroek/opencode-plugins/commit/5f356054281f62e9458007aee836d1942df9e52e))
+
+
+### Documentation
+
+* list the profiling skills in the marketplace export table ([f40f96c](https://github.com/srobroek/opencode-plugins/commit/f40f96c2adb224704660399730daedee5cbab870))
+
 ## [0.2.0](https://github.com/srobroek/opencode-plugins/compare/safety--v0.1.0...safety--v0.2.0) (2026-10-27)
 
 

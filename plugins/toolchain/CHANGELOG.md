@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/srobroek/opencode-plugins/compare/toolchain--v0.2.0...toolchain--v0.3.0) (2026-10-27)
+
+
+### Features
+
+* **toolchain:** ci-github-actions skill behind toolchain-guide ([bc401c1](https://github.com/srobroek/opencode-plugins/commit/bc401c1ffbae2db4ae074bb2111065ea0829f773))
+
 ## [0.2.0](https://github.com/srobroek/opencode-plugins/compare/toolchain--v0.1.0...toolchain--v0.2.0) (2026-10-27)
 
 
