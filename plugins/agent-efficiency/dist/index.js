@@ -160,7 +160,7 @@ function shapeExplore(draft) {
 // plugins/agent-efficiency/src/lean.ts
 import path from "path";
 var SEGMENTS = ["global-instructions", "project-instructions", "identity", "worktree"];
-var DEFAULT_DROP = ["global-instructions", "identity", "worktree"];
+var DEFAULT_DROP = ["identity", "worktree"];
 var ALIASES = {
   instructions: ["global-instructions", "project-instructions"]
 };
