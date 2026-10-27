@@ -1,5 +1,5 @@
 ---
-name: python-quality
+name: lang-python-quality
 description: Use to run Python format, lint, type-check, and test commands with the project toolchain.
 metadata:
   opencode/autoinvoke: false
