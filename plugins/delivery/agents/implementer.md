@@ -6,23 +6,56 @@ request:
   headers:
     x-opencode-model-role: standard
 permissions:
-  - action: webfetch
+  - action: "*"
     resource: "*"
     effect: deny
-  - action: websearch
+  - action: read
     resource: "*"
-    effect: deny
-  - action: subagent
+    effect: allow
+  - action: read
+    resource: "*.env"
+    effect: ask
+  - action: read
+    resource: "*.env.*"
+    effect: ask
+  - action: read
+    resource: "*.env.example"
+    effect: allow
+  - action: grep
     resource: "*"
-    effect: deny
-  - action: subagent
-    resource: "explore"
+    effect: allow
+  - action: glob
+    resource: "*"
+    effect: allow
+  - action: skill
+    resource: "*"
+    effect: allow
+  - action: execute
+    resource: "*"
+    effect: allow
+  - action: "lsp_*"
+    resource: "*"
+    effect: allow
+  - action: external_directory
+    resource: "*"
+    effect: ask
+  - action: edit
+    resource: "*"
+    effect: allow
+  - action: shell
+    resource: "*"
     effect: allow
   - action: subagent
-    resource: "operator"
+    resource: "*"
+    effect: deny
+  - action: subagent
+    resource: explore
     effect: allow
   - action: subagent
-    resource: "researcher"
+    resource: operator
+    effect: allow
+  - action: subagent
+    resource: researcher
     effect: allow
 ---
 

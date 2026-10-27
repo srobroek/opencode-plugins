@@ -24,8 +24,9 @@ its description matches. To make it always on, copy its body into your global
 
 `adversarial-challenger` (mode `subagent`) stress-tests a claim, plan, design or
 decision from a brief of observable facts and returns evidence-backed
-counter-arguments and alternatives. Its permissions deny `edit`, `shell` and
-`subagent`; when a check needs a command it names the command for a writing agent.
+counter-arguments and alternatives. Its permissions are an allowlist (read, grep,
+glob, skill, Code Mode, `lsp_*`, webfetch, websearch), so `edit`, `shell` and
+`subagent` are not in its requests; when a check needs a command it names the command for a writing agent.
 Rules are added after any you configure for an agent with the same id.
 
 Converted with `scripts/convert-agent.ts`; omp `lsp` and `ast_grep` are dropped. It

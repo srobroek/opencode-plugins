@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test"
 import { existsSync } from "node:fs"
 import { dirname, join } from "node:path"
+import { type AgentPermission, permissionEffect } from "@srobroek/opencode-lib/agent-files"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
 import plugin from "./index.ts"
 
@@ -9,11 +10,11 @@ test("registers the quality skills and the read-only challenger", async () => {
   const cleanup = await plugin.setup(fake.context)
   expect([...fake.skills.keys()]).toEqual(["prototype-logic", "quality-code-design", "quality-code-policy"])
   expect(fake.agents.get("adversarial-challenger")).toMatchObject({ mode: "subagent" })
-  expect(fake.agents.get("adversarial-challenger")?.permissions).toEqual([
-    { action: "edit", resource: "*", effect: "deny" },
-    { action: "shell", resource: "*", effect: "deny" },
-    { action: "subagent", resource: "*", effect: "deny" },
-  ])
+  const rules = fake.agents.get("adversarial-challenger")?.permissions as AgentPermission[]
+  for (const action of ["edit", "shell", "subagent", "question", "some_plugin_tool"])
+    expect(permissionEffect(rules, action)).toBe("deny")
+  for (const action of ["read", "grep", "glob", "skill", "execute", "lsp_diagnostics", "webfetch", "websearch"])
+    expect(permissionEffect(rules, action)).toBe("allow")
   await cleanup?.()
   expect(fake.active()).toBe(0)
 })

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { readdirSync, readFileSync } from "node:fs"
 import { join } from "node:path"
-import { agentPaths, readAgentFile } from "@srobroek/opencode-lib/agent-files"
+import { agentPaths, permissionEffect, readAgentFile } from "@srobroek/opencode-lib/agent-files"
 import { agentRole } from "@srobroek/opencode-lib/model-roles"
 import { decideRouting } from "../../beads/src/subagent-routing.ts"
 import { FORMULAS } from "./setup.ts"
@@ -58,7 +58,8 @@ test("shipped agents carry a model-roles role header and no model", () => {
   expect(agents.map((agent) => agent.id)).toEqual(["speckit-sync", "speckit-verify"])
   for (const agent of agents) {
     expect(agentRole(agent.request)).toBe("reviewer")
-    expect(agent.permissions).toContainEqual({ action: "edit", resource: "*", effect: "deny" })
+    expect(permissionEffect(agent.permissions, "edit")).toBe("deny")
+    expect(permissionEffect(agent.permissions, "shell")).toBe("allow")
     expect(agent.mode).toBe("subagent")
   }
 })

@@ -36,9 +36,13 @@ The plugin adds two subagents from `agents/`, converted from the omp agents with
 `scripts/convert-agent.ts`:
 
 - `journey-scribe`: writes and amends journey documents; never drives the product.
-  Web fetch, web search and subagents are denied.
+  Its permissions are a tool allowlist: read, grep, glob, edit, shell, skill, Code
+  Mode, the `lsp_*` tools and the journeys tools. Everything else, including web
+  access and subagents, is denied and left out of its requests.
 - `journey-validator`: drives one journey end to end and records a run. Web fetch,
-  web search and subagents are denied.
+  web search and subagents are denied. It keeps a denylist rather than an
+  allowlist because it drives the product through whatever MCP server the
+  journey's profile names, and those tool names are not known in advance.
 
 Fields you configure for an agent with the same id win, and your permissions are
 added after the shipped ones, so they take precedence. Both agents declare the
