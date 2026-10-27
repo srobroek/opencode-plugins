@@ -35,6 +35,7 @@ import {
   editText,
   enterIsNewline,
   initialDraft,
+  inlineEligible,
   keyHints,
   mimeFor,
   moveCursor,
@@ -418,7 +419,7 @@ export function RoundPanel(props: RoundPanelProps) {
     newline,
     setTextarea,
   } = controls
-  const single = () => questions().length === 1
+  const single = () => inlineEligible(props.round()?.questions ?? [])
   const ownership = exclusiveFocus(props.context, () => box, controls.field, () => props.panel.focus())
   // A side panel must keep the host's input scope, not just look selected after a prompt click.
   createEffect(() => { if (!ownership.paused() && !props.panel.focused) props.panel.focus() })

@@ -129,6 +129,8 @@ earlier question, and `equals` is compared with that question's canonical full
 suppressed. The UI activates conditions only for answered or accepted drafts:
 a hidden question's answers are excluded from `pending` and are discarded on
 the server when their parent changes.
+Round membership still determines inline placement: hiding a sibling does not
+turn a multi-question panel into a single-question card when pressing `f`.
 
 Fallback (`fallback: "question"`) supports only the existing old kinds
 (`pick_one`, `show_options`, `pick_many`, `confirm`, `ask_text`). Every

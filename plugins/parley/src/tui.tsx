@@ -8,6 +8,7 @@ import type { SubmittedAnswer } from "./answers.ts"
 import { createRoundStore, InlineCard, PANEL, RoundPanel } from "./panel.tsx"
 import type { RoundView } from "./rounds.ts"
 import { ParleyRpc, type RoundEvent } from "./rpc.ts"
+import { inlineEligible } from "./tui-state.ts"
 
 const HEARTBEAT_MS = 10_000
 /** When to look for the built-in form of a call handed to the built-in tool (ms since the last look). */
@@ -106,7 +107,7 @@ export default Plugin.define({
 
     const forSession = (sessionID: string) => rounds().find((entry) => entry.view.sessionID === sessionID)
 
-    const single = (sessionID: string) => forSession(sessionID)?.view.questions.length === 1
+    const single = (sessionID: string) => inlineEligible(forSession(sessionID)?.view.questions ?? [])
 
     const openPanel = (sessionID: string, delay = 0) => {
       showInline(sessionID, false)

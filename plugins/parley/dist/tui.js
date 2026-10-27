@@ -1437,8 +1437,9 @@ function structuredStep(q, draft, delta, month = false) {
       break;
     }
     case "colour": {
-      value.hex = cycle((config.swatches ?? ["#808080"]).map((hex) => hex.toLowerCase()), value.hex, delta) ?? "#808080";
-      break;
+      const swatches = (config.swatches ?? ["#808080"]).map((hex) => hex.toLowerCase());
+      value.hex = cycle(swatches, value.hex, delta) ?? "#808080";
+      return { ...changed(draft, value), cursor: Math.max(0, swatches.indexOf(value.hex)) };
     }
     case "date":
     case "time":
@@ -1618,6 +1619,9 @@ ${weeks.join(`
 var structuredEditable = (q) => isStructured(q) && q.kind !== "buckets" && q.kind !== "match";
 
 // plugins/parley/src/tui-state.ts
+function inlineEligible(questions) {
+  return questions.length === 1;
+}
 var TEXT_KINDS = new Set(["ask_text", "ask_code", "ask_image", "ask_file"]);
 function isTextKind(question) {
   return TEXT_KINDS.has(question.kind);
@@ -1670,7 +1674,7 @@ function initialDraft(question) {
   const value = rec ?? neutral(question);
   const ids = rows(question);
   const selected = value ?? {};
-  const pointed = [selected.selected, selected.choice, selected.decision, selected.emoji].find((item) => typeof item === "string" && ids.includes(item));
+  const pointed = [selected.selected, selected.choice, selected.decision, selected.emoji, selected.hex].find((item) => typeof item === "string" && ids.includes(item));
   return {
     status: rec === undefined ? "unset" : "answered",
     ...value === undefined ? {} : { value: structuredClone(value) },
@@ -2611,7 +2615,7 @@ function RoundPanel(props) {
     newline,
     setTextarea
   } = controls;
-  const single = () => questions().length === 1;
+  const single = () => inlineEligible(props.round()?.questions ?? []);
   const ownership = exclusiveFocus(props.context, () => box, controls.field, () => props.panel.focus());
   createEffect(() => {
     if (!ownership.paused() && !props.panel.focused)
@@ -4465,7 +4469,7 @@ var tui_default = Plugin.define({
       }))]);
     };
     const forSession = (sessionID) => rounds().find((entry) => entry.view.sessionID === sessionID);
-    const single = (sessionID) => forSession(sessionID)?.view.questions.length === 1;
+    const single = (sessionID) => inlineEligible(forSession(sessionID)?.view.questions ?? []);
     const openPanel = (sessionID, delay = 0) => {
       showInline(sessionID, false);
       sleep(delay).then(() => {

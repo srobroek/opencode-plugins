@@ -145,8 +145,9 @@ export function structuredStep(q: Question, draft: Draft, delta: number, month =
       break
     }
     case "colour": {
-      value.hex = cycle((config.swatches ?? ["#808080"]).map((hex) => hex.toLowerCase()), value.hex, delta) ?? "#808080"
-      break
+      const swatches = (config.swatches ?? ["#808080"]).map((hex) => hex.toLowerCase())
+      value.hex = cycle(swatches, value.hex, delta) ?? "#808080"
+      return { ...changed(draft, value), cursor: Math.max(0, swatches.indexOf(value.hex)) }
     }
     case "date": case "time": case "datetime": {
       const next = temporalStep(q, value.value ?? "", delta, month)
