@@ -23,8 +23,9 @@ for "review my change", "is this safe" or "poke holes in this plan".
 Each permission list is an allowlist: a deny on every action, then the tools the agent
 uses. No reviewer can edit, spawn subagents, ask the user, or run Code Mode (`execute`),
 so the Code Mode catalog stays out of their requests. Skills are allowed by family
-pattern only (`quality-*` from the quality plugin, `review-*` from this one), so a skill
-added to either family is covered. Reads
+pattern only (`quality-*` from the quality plugin, `review-*` from this one, and
+`ast-grep-*` from the ast-grep plugin on `code-reviewer` and `security-reviewer`), so a
+skill added to any of those families is covered. Reads
 outside the workspace (`external_directory`) and `.env` files ask.
 
 Every agent declares the `reviewer` tier in the `x-opencode-model-role` request header and

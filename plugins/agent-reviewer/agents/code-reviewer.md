@@ -36,6 +36,9 @@ permissions:
   - action: skill
     resource: "review-*"
     effect: allow
+  - action: skill
+    resource: "ast-grep-*"
+    effect: allow
   - action: shell
     resource: git diff
     effect: allow
