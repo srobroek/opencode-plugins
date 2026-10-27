@@ -46,6 +46,7 @@ export const SKILL_NAMES = [
   "beads-setup",
   "beads-contention-retry",
   "beads-preflight",
+  "beads-guide",
 ] as const
 
 /** `skills/` at the package root; `src/` and the bundled `dist/` both sit one level below it. */

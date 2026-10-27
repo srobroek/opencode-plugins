@@ -1,6 +1,8 @@
 ---
 name: beads-preflight
 description: Runs read-only Beads readiness checks; use when starting ledger work or when asked for a beads preflight.
+metadata:
+  opencode/autoinvoke: false
 ---
 
 # Beads preflight

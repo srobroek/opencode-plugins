@@ -1,6 +1,8 @@
 ---
 name: beads-ledger
 description: Ledger rules bd prime omits (acceptance, metadata, routing, deps); load before creating, planning or bulk-editing beads.
+metadata:
+  opencode/autoinvoke: false
 ---
 
 `bd prime` is the single source of truth for `bd` commands and the default

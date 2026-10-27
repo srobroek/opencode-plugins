@@ -1,6 +1,8 @@
 ---
 name: beads-setup
 description: "Use for Beads init and remotes: repos without .beads/, ledger clones, git/Dolt remotes, or no beads database found."
+metadata:
+  opencode/autoinvoke: false
 ---
 
 # DETECT
