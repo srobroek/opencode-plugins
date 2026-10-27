@@ -22,6 +22,10 @@ it, rerun that step, then continue. Prefer the project's own scripts (`bun run c
 | Test | The project's test script (`bun test`, `vitest run`, `npm test`, …) |
 | Fix | `biome check --write PATHS`, or `eslint --fix PATHS` and `prettier --write PATHS` |
 
+- After an edit that spans files or changes an exported signature, run the type
+  check once before handing back, even when no other check is due: the project's
+  `typecheck` script (`npm run typecheck`, `bun run typecheck`) when it has one,
+  else `tsc --noEmit -p .`, or `tsc -b` for project references.
 - Run tools through the project's package manager (`bunx`, `pnpm exec`, `npx`,
   `yarn`), and never let it download a tool the project does not already have.
 - `tsc --noEmit` on a root `tsconfig.json` with `"files": []` and `references`
