@@ -1,52 +1,6 @@
 # Other language paradigms
 
-Load only the section matching the code under discussion. These examples illustrate portable design principles, not required frameworks.
-
-## TypeScript and JavaScript
-
-**Do:** use modules, functions, structural types, and discriminated unions for stateless behavior and closed variants; use classes for owned state and lifecycle.
-**Do not:** implement a class hierarchy merely to get polymorphism, or mistake static types for runtime input validation.
-
-Bad:
-
-```ts
-class UppercaseService { run(value: string) { return value.toUpperCase(); } }
-class UppercaseFactory { create() { return new UppercaseService(); } }
-```
-
-Good:
-
-```ts
-const uppercase = (value: string): string => value.toUpperCase();
-```
-
-When locale policy, caching, or I/O is added, reassess responsibilities and dependencies. A callback or explicit options value can still be simpler than an object.
-
-**Exception:** a framework's lifecycle requires an injectable class. Use its normal convention; do not build factories around a class the framework already constructs.
-
-## Python
-
-**Do:** use functions for transformations, dataclasses for records, classes for owned behavior, and protocols where a typed consumer boundary helps.
-**Do not:** add abstract base classes for every helper, mutate global clients from domain functions, or assume underscore-prefixed fields enforce runtime privacy.
-
-Bad: `ReportServiceFactory` creates a stateless `ReportService` just to format three fields.
-Good: `format_report(record)` is a function.
-
-Good at a real delivery boundary:
-
-```python
-from typing import Protocol
-
-class ReportSender(Protocol):
-    def send(self, report: str) -> None: ...
-
-def publish(report: str, sender: ReportSender) -> None:
-    sender.send(report)
-```
-
-Why: structural typing documents the capability without forcing an inheritance hierarchy. Duck typing or a callable can be sufficient for a small local collaboration.
-
-**Exception:** an ABC is useful when runtime enforcement or shared lifecycle behavior is actually required. A frozen dataclass is only shallowly immutable; validate and protect nested mutable data when invariants depend on it.
+Load only the section matching the code under discussion. TypeScript and JavaScript are in [typescript.md](typescript.md), Python in [python.md](python.md). These examples illustrate portable design principles, not required frameworks.
 
 ## Java and C#
 

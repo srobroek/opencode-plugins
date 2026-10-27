@@ -66,6 +66,8 @@ Good for simple CRUD: use the ORM in the application/data layer directly; omit a
 
 **Exception:** a framework's unit-of-work convention can own the transaction if that lifecycle is clear and consistently honored. Follow its idiom instead of adding a parallel transaction framework.
 
+State transitions, migrations, dynamic SQL, and database tests: [persistence.md](persistence.md).
+
 ## Leave extraction practical
 
 Bad: a "temporary" direct SDK call spreads provider-specific errors and data types through every caller.

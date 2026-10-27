@@ -91,3 +91,28 @@ Good: await/confirm the promised persistence and return the documented error, or
 Why: Rust's type checker does not verify every behavioral contract. Ownership safety does not replace LSP, SRP, or error semantics.
 
 **Exception:** `expect()` can document an invariant already established by local construction, and a disposable tool can use a simple application-level error type. Do not create a public error taxonomy for a one-off script unless callers need one.
+
+## Error enums sized to the operation
+
+**Do:** define one `#[derive(thiserror::Error)]` enum per module scope, with variants for the failures that module's operations can actually produce, and a `pub type XResult<T> = Result<T, XError>` alias beside it. Wrap a foreign error with `#[from]` only when that foreign type is stable enough to be part of your contract; otherwise map it into a variant that carries the meaning.
+**Do not:** grow one crate-wide god-error enum. Every caller then matches variants that cannot occur at its call site, and adding a variant anywhere is a breaking change everywhere.
+
+```rust
+#[derive(Debug, thiserror::Error)]
+pub enum ImportError {
+    #[error("row {row}: {reason}")]
+    InvalidRow { row: usize, reason: String },
+    #[error("reading {path}")]
+    Io { path: PathBuf, #[source] source: std::io::Error },
+}
+pub type ImportResult<T> = Result<T, ImportError>;
+```
+
+Applications can use `anyhow` (or `eyre`) at the binary edge to add context; libraries return typed errors.
+
+## Newtypes that keep the wire format
+
+**Do:** wrap IDs and validated values in newtypes, and annotate them `#[serde(transparent)]` so introducing the wrapper does not change the serialized form. Validate in a `TryFrom` or constructor and route deserialization through it (`#[serde(try_from = "u32")]`) when the invariant must hold for decoded data.
+**Do not:** derive `Deserialize` on an invariant-bearing newtype without validation; it reopens the invalid states the constructor closed.
+
+Persistence patterns (compare-and-set transitions, append-only migrations) are in [persistence.md](persistence.md). With `sqlx::migrate!` or another embed macro, a new migration file is not applied until the crate recompiles; add `println!("cargo:rerun-if-changed=migrations")` to `build.rs`. For wire casing, set `#[serde(rename_all = "camelCase")]` once per type rather than renaming fields ([contracts.md](contracts.md)).

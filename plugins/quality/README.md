@@ -7,6 +7,7 @@ prototypes, and a read-only `adversarial-challenger` subagent.
 | --- | --- |
 | `quality-code-policy` | The six-line policy: SOLID and invariants over YAGNI, DRY for knowledge that changes together, reuse before building, planning scaled by risk, refactors scoped to the change. Load at the start of any code task |
 | `quality-code-design` | Code design, investigation, implementation, refactoring, review, debugging or test-first work in any language. Picks IMPLEMENT, INVESTIGATE or REVIEW and loads only the references the task needs from `references/` |
+| `quality-testing` | What to test and at which level, test doubles, flaky tests, test data, property-based tests, coverage; points to `lang-<language>-testing` skills for tooling |
 | `prototype-logic` | A throwaway single-file HTML demo over a pure reducer or state machine, to test a state model before building it |
 
 Other plugins point at these: `architecture` and the `architect` agent load
