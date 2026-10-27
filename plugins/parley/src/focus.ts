@@ -1,40 +1,29 @@
-/** How recently the user must have pressed a key or clicked for a focus move to count as theirs (ms). */
-export const DELIBERATE_MS = 400
+/** Parley owns keyboard dispatch while its card/panel is shown; base prompt bindings are inactive. */
+export const INPUT_MODE = "srobroek.parley"
 
-/**
- * Keeps a parley card focused. The host can move focus to the prompt on its own (a session update,
- * a route change); such a move comes with no user input and is undone. A move right after a key or
- * click is the user's: the card lets go and shows how to come back until `reclaim`.
- */
+/** One input-mode lease per mounted surface, renewed by the explicit recovery command. */
 export class FocusGuard {
-  #lastInput = Number.NEGATIVE_INFINITY
-  #released = false
+  #release: (() => void) | undefined
 
-  /** Records a key press or mouse event. */
-  input(now: number) {
-    this.#lastInput = now
+  constructor(readonly push: (mode: string) => () => void) {}
+
+  get active() { return this.#release !== undefined }
+
+  acquire() {
+    if (!this.#release) this.#release = this.push(INPUT_MODE)
   }
 
-  get released() {
-    return this.#released
-  }
+  /** A click on the prompt cannot hand away ownership while the surface is open. */
+  moved(inside: boolean) { return this.active && !inside }
 
-  /** Focus moved; `inside` says whether it is still in the card. Returns true to take it back. */
-  moved(now: number, inside: boolean): boolean {
-    if (inside) {
-      this.#released = false
-      return false
-    }
-    if (this.#released) return false
-    if (now - this.#lastInput < DELIBERATE_MS) {
-      this.#released = true
-      return false
-    }
-    return true
-  }
-
-  /** The user asked to return (alt+p, /parley). */
   reclaim() {
-    this.#released = false
+    this.release()
+    this.acquire()
+  }
+
+  release() {
+    const release = this.#release
+    this.#release = undefined
+    release?.()
   }
 }

@@ -14,12 +14,12 @@ import { spread as _$spread } from "@opentui/solid";
 import { mergeProps as _$mergeProps } from "@opentui/solid";
 import { memo as _$memo } from "@opentui/solid";
 import { createTextNode as _$createTextNode } from "@opentui/solid";
-import { use as _$use } from "@opentui/solid";
 import { insertNode as _$insertNode } from "@opentui/solid";
 import { createComponent as _$createComponent } from "@opentui/solid";
 import { effect as _$effect } from "@opentui/solid";
 import { insert as _$insert } from "@opentui/solid";
 import { setProp as _$setProp } from "@opentui/solid";
+import { use as _$use } from "@opentui/solid";
 import { createElement as _$createElement } from "@opentui/solid";
 import { EditBufferRenderable, TextAttributes } from "@opentui/core";
 import { createEffect, createMemo, createSignal, For, Match, onCleanup, onMount, Show, Switch } from "solid-js";
@@ -1067,32 +1067,32 @@ ${draft.note}`
 }
 
 // plugins/parley/src/focus.ts
-var DELIBERATE_MS = 400;
+var INPUT_MODE = "srobroek.parley";
 
 class FocusGuard {
-  #lastInput = Number.NEGATIVE_INFINITY;
-  #released = false;
-  input(now) {
-    this.#lastInput = now;
+  push;
+  #release;
+  constructor(push) {
+    this.push = push;
   }
-  get released() {
-    return this.#released;
+  get active() {
+    return this.#release !== undefined;
   }
-  moved(now, inside) {
-    if (inside) {
-      this.#released = false;
-      return false;
-    }
-    if (this.#released)
-      return false;
-    if (now - this.#lastInput < DELIBERATE_MS) {
-      this.#released = true;
-      return false;
-    }
-    return true;
+  acquire() {
+    if (!this.#release)
+      this.#release = this.push(INPUT_MODE);
+  }
+  moved(inside) {
+    return this.active && !inside;
   }
   reclaim() {
-    this.#released = false;
+    this.release();
+    this.acquire();
+  }
+  release() {
+    const release = this.#release;
+    this.#release = undefined;
+    release?.();
   }
 }
 
@@ -1431,6 +1431,7 @@ function createRoundControls(props, onMove) {
 }
 function RoundPanel(props) {
   const theme = () => props.context.theme;
+  let box;
   let scroll;
   const controls = createRoundControls(props, (id) => scroll?.scrollChildIntoView(`parley-card-${id}`));
   const {
@@ -1452,9 +1453,14 @@ function RoundPanel(props) {
     setTextarea
   } = controls;
   const single = () => questions().length === 1;
+  const ownership = exclusiveFocus(props.context, () => box, controls.field, () => props.panel.focus());
+  createEffect(() => {
+    if (!ownership.paused() && !props.panel.focused)
+      props.panel.focus();
+  });
   createEffect(() => {
     if (props.focusRequest() > 0)
-      props.panel.focus();
+      ownership.reclaim();
   });
   const toggleView = () => {
     if (single())
@@ -1463,6 +1469,8 @@ function RoundPanel(props) {
       props.panel.toggleFullscreen();
   };
   props.context.keymap.layer(() => ({
+    mode: INPUT_MODE,
+    priority: 100,
     enabled: () => editing() === undefined,
     commands: [{
       bind: "tab",
@@ -1593,7 +1601,7 @@ function RoundPanel(props) {
       run: () => {
         const round = props.round();
         if (round)
-          props.dismiss(round);
+          ownership.suspend(() => props.dismiss(round));
       }
     }, {
       bind: "pageup",
@@ -1608,6 +1616,8 @@ function RoundPanel(props) {
     }]
   }));
   props.context.keymap.layer(() => ({
+    mode: INPUT_MODE,
+    priority: 100,
     enabled: () => editing() !== undefined,
     commands: [{
       bind: "escape",
@@ -1649,6 +1659,8 @@ function RoundPanel(props) {
     _$insertNode(_el$, _el$2);
     _$insertNode(_el$, _el$7);
     _$insertNode(_el$, _el$8);
+    _$use((element) => box = element, _el$);
+    _$setProp(_el$, "focusable", true);
     _$setProp(_el$, "flexGrow", 1);
     _$setProp(_el$, "flexDirection", "column");
     _$setProp(_el$, "paddingLeft", 2);
@@ -1805,6 +1817,79 @@ var within = (node, root) => {
   return false;
 };
 var SETTLE_MS = [50, 200, 500, 1000, 2000];
+function exclusiveFocus(context, target, field, scope) {
+  const guard = new FocusGuard((mode) => context.keymap.mode.push(mode));
+  const [paused, setPaused] = createSignal(false);
+  let disposed = false;
+  const focusNow = () => {
+    if (!guard.active)
+      return;
+    scope?.();
+    const node = field() ?? target();
+    if (node && !node.isDestroyed)
+      node.focus();
+  };
+  const grab = () => queueMicrotask(focusNow);
+  onMount(() => {
+    const renderer = context.renderer;
+    const previous = renderer.currentFocusedRenderable;
+    guard.acquire();
+    grab();
+    const onFocus = () => {
+      const focused = renderer.currentFocusedRenderable;
+      const inside = within(focused, target());
+      if (!inside && focused !== null && !(focused instanceof EditBufferRenderable))
+        return;
+      if (guard.moved(inside)) {
+        focusNow();
+        grab();
+      }
+    };
+    const onInput = () => {
+      const focused = renderer.currentFocusedRenderable;
+      if (guard.active && focused instanceof EditBufferRenderable && !within(focused, target()))
+        focusNow();
+      return false;
+    };
+    renderer.prependInputHandler(onInput);
+    renderer.on("focused_renderable", onFocus);
+    const checks = SETTLE_MS.map((delay) => setTimeout(() => {
+      if (guard.moved(within(renderer.currentFocusedRenderable, target())))
+        grab();
+    }, delay));
+    onCleanup(() => {
+      disposed = true;
+      guard.release();
+      for (const check of checks)
+        clearTimeout(check);
+      renderer.off("focused_renderable", onFocus);
+      renderer.removeInputHandler(onInput);
+      const now = renderer.currentFocusedRenderable;
+      if ((now === null || within(now, target())) && previous && !previous.isDestroyed)
+        previous.focus();
+    });
+  });
+  return {
+    paused,
+    reclaim: () => {
+      guard.reclaim();
+      grab();
+    },
+    suspend: async (operation) => {
+      setPaused(true);
+      guard.release();
+      try {
+        await operation();
+      } finally {
+        if (!disposed) {
+          guard.acquire();
+          setPaused(false);
+          grab();
+        }
+      }
+    }
+  };
+}
 function InlineCard(props) {
   const theme = () => props.context.theme;
   const controls = createRoundControls(props);
@@ -1825,67 +1910,11 @@ function InlineCard(props) {
   } = controls;
   let box;
   const question = () => questions()[0];
-  const [away, setAway] = createSignal(false);
-  const guard = new FocusGuard;
-  const grab = () => queueMicrotask(() => {
-    if (guard.released)
-      return;
-    const field = controls.field();
-    if (field)
-      field.focus();
-    else if (box && !box.isDestroyed)
-      box.focus();
-  });
+  const ownership = exclusiveFocus(props.context, () => box, controls.field);
   createEffect(() => {
     if (props.focusRequest() === 0)
       return;
-    guard.reclaim();
-    setAway(false);
-    grab();
-  });
-  onMount(() => {
-    const renderer = props.context.renderer;
-    const previous = renderer.currentFocusedRenderable;
-    grab();
-    const onInput = () => {
-      guard.input(Date.now());
-      return false;
-    };
-    const onFocus = () => queueMicrotask(() => {
-      const focused = renderer.currentFocusedRenderable;
-      const inside = within(focused, box);
-      if (!inside && focused !== null && !(focused instanceof EditBufferRenderable))
-        return;
-      if (guard.moved(Date.now(), inside))
-        grab();
-      setAway(guard.released);
-    });
-    renderer.prependInputHandler(onInput);
-    renderer.on("focused_renderable", onFocus);
-    const root = renderer.root;
-    const priorDown = root.onMouseDown;
-    root.onMouseDown = function(event) {
-      guard.input(Date.now());
-      priorDown?.call(this, event);
-    };
-    const checks = SETTLE_MS.map((delay) => setTimeout(() => {
-      if (!guard.released && !within(renderer.currentFocusedRenderable, box))
-        grab();
-    }, delay));
-    onCleanup(() => {
-      for (const check of checks)
-        clearTimeout(check);
-      root.onMouseDown = priorDown;
-      renderer.removeInputHandler(onInput);
-      renderer.off("focused_renderable", onFocus);
-    });
-    onCleanup(() => {
-      const now = props.context.renderer.currentFocusedRenderable;
-      if (now && !within(now, box))
-        return;
-      if (previous && !previous.isDestroyed)
-        previous.focus();
-    });
+    ownership.reclaim();
   });
   const done = async () => {
     await finishEdit();
@@ -1904,6 +1933,8 @@ function InlineCard(props) {
     await send();
   };
   props.context.keymap.layer(() => ({
+    mode: INPUT_MODE,
+    priority: 100,
     target: () => box,
     enabled: () => editing() === undefined,
     commands: [
@@ -2061,12 +2092,14 @@ function InlineCard(props) {
         run: () => {
           const round = props.round();
           if (round)
-            props.dismiss(round);
+            ownership.suspend(() => props.dismiss(round));
         }
       }
     ]
   }));
   props.context.keymap.layer(() => ({
+    mode: INPUT_MODE,
+    priority: 100,
     target: () => box,
     enabled: () => editing() !== undefined,
     commands: [{
@@ -2101,8 +2134,8 @@ function InlineCard(props) {
     }]
   }));
   return (() => {
-    var _el$12 = _$createElement("box"), _el$15 = _$createElement("text");
-    _$insertNode(_el$12, _el$15);
+    var _el$12 = _$createElement("box"), _el$13 = _$createElement("text");
+    _$insertNode(_el$12, _el$13);
     _$use((element) => box = element, _el$12);
     _$setProp(_el$12, "focusable", true);
     _$setProp(_el$12, "flexDirection", "column");
@@ -2150,32 +2183,20 @@ function InlineCard(props) {
           });
         }
       })
-    }), _el$15);
+    }), _el$13);
     _$insert(_el$12, _$createComponent(For, {
       get each() {
         return errors();
       },
       children: (error) => (() => {
-        var _el$16 = _$createElement("text");
-        _$insert(_el$16, error);
-        _$effect((_$p) => _$setProp(_el$16, "fg", theme().text.feedback.error.base, _$p));
-        return _el$16;
+        var _el$14 = _$createElement("text");
+        _$insert(_el$14, error);
+        _$effect((_$p) => _$setProp(_el$14, "fg", theme().text.feedback.error.base, _$p));
+        return _el$14;
       })()
-    }), _el$15);
-    _$insert(_el$12, _$createComponent(Show, {
-      get when() {
-        return away();
-      },
-      get children() {
-        var _el$13 = _$createElement("text");
-        _$insertNode(_el$13, _$createTextNode(`Keys go to the prompt now \xB7 alt+p or /parley returns to this card`));
-        _$setProp(_el$13, "wrapMode", "word");
-        _$effect((_$p) => _$setProp(_el$13, "fg", theme().text.feedback.warning.base, _$p));
-        return _el$13;
-      }
-    }), _el$15);
-    _$setProp(_el$15, "wrapMode", "word");
-    _$insert(_el$15, (() => {
+    }), _el$13);
+    _$setProp(_el$13, "wrapMode", "word");
+    _$insert(_el$13, (() => {
       var _c$ = _$memo(() => !!busy());
       return () => _c$() ? "Submitting\u2026" : `${countdown(controls.remaining()) ? `${countdown(controls.remaining())} \xB7 ` : ""}${keyHints(question(), "card", editing() ? {
         field: editing()?.field ?? "text",
@@ -2183,7 +2204,7 @@ function InlineCard(props) {
         suggestions: controls.suggestions().length > 0
       } : undefined)}`;
     })());
-    _$effect((_$p) => _$setProp(_el$15, "fg", theme().text.muted, _$p));
+    _$effect((_$p) => _$setProp(_el$13, "fg", theme().text.muted, _$p));
     return _el$12;
   })();
 }
@@ -2208,143 +2229,143 @@ function Card(props) {
     return String(rec);
   };
   return (() => {
-    var _el$17 = _$createElement("box"), _el$18 = _$createElement("box"), _el$19 = _$createElement("text"), _el$20 = _$createElement("text"), _el$28 = _$createElement("box");
-    _$insertNode(_el$17, _el$18);
-    _$insertNode(_el$17, _el$28);
-    _$setProp(_el$17, "border", true);
-    _$setProp(_el$17, "paddingLeft", 1);
-    _$setProp(_el$17, "paddingRight", 1);
-    _$setProp(_el$17, "marginBottom", 1);
-    _$setProp(_el$17, "flexDirection", "column");
-    _$setProp(_el$17, "flexShrink", 0);
-    _$insertNode(_el$18, _el$19);
-    _$insertNode(_el$18, _el$20);
-    _$setProp(_el$18, "flexDirection", "row");
-    _$setProp(_el$18, "gap", 2);
-    _$setProp(_el$19, "flexGrow", 1);
-    _$insert(_el$19, () => `Q${props.index + 1} ${q().title}`);
-    _$insert(_el$20, () => badge(props.draft, props.question));
-    _$insert(_el$17, _$createComponent(Show, {
+    var _el$15 = _$createElement("box"), _el$16 = _$createElement("box"), _el$17 = _$createElement("text"), _el$18 = _$createElement("text"), _el$26 = _$createElement("box");
+    _$insertNode(_el$15, _el$16);
+    _$insertNode(_el$15, _el$26);
+    _$setProp(_el$15, "border", true);
+    _$setProp(_el$15, "paddingLeft", 1);
+    _$setProp(_el$15, "paddingRight", 1);
+    _$setProp(_el$15, "marginBottom", 1);
+    _$setProp(_el$15, "flexDirection", "column");
+    _$setProp(_el$15, "flexShrink", 0);
+    _$insertNode(_el$16, _el$17);
+    _$insertNode(_el$16, _el$18);
+    _$setProp(_el$16, "flexDirection", "row");
+    _$setProp(_el$16, "gap", 2);
+    _$setProp(_el$17, "flexGrow", 1);
+    _$insert(_el$17, () => `Q${props.index + 1} ${q().title}`);
+    _$insert(_el$18, () => badge(props.draft, props.question));
+    _$insert(_el$15, _$createComponent(Show, {
       get when() {
         return (q().depends_on?.length ?? 0) > 0;
       },
       get children() {
-        var _el$21 = _$createElement("text");
-        _$insert(_el$21, () => `after: ${q().depends_on?.join(", ")}`);
-        _$effect((_$p) => _$setProp(_el$21, "fg", theme().text.faint, _$p));
-        return _el$21;
+        var _el$19 = _$createElement("text");
+        _$insert(_el$19, () => `after: ${q().depends_on?.join(", ")}`);
+        _$effect((_$p) => _$setProp(_el$19, "fg", theme().text.faint, _$p));
+        return _el$19;
       }
-    }), _el$28);
-    _$insert(_el$17, _$createComponent(Show, {
+    }), _el$26);
+    _$insert(_el$15, _$createComponent(Show, {
       get when() {
         return q().body;
       },
       get children() {
-        var _el$22 = _$createElement("markdown");
-        _$setProp(_el$22, "conceal", true);
+        var _el$20 = _$createElement("markdown");
+        _$setProp(_el$20, "conceal", true);
         _$effect((_p$) => {
           var _v$5 = q().body ?? "", _v$6 = props.syntax, _v$7 = theme().markdown.text;
-          _v$5 !== _p$.e && (_p$.e = _$setProp(_el$22, "content", _v$5, _p$.e));
-          _v$6 !== _p$.t && (_p$.t = _$setProp(_el$22, "syntaxStyle", _v$6, _p$.t));
-          _v$7 !== _p$.a && (_p$.a = _$setProp(_el$22, "fg", _v$7, _p$.a));
+          _v$5 !== _p$.e && (_p$.e = _$setProp(_el$20, "content", _v$5, _p$.e));
+          _v$6 !== _p$.t && (_p$.t = _$setProp(_el$20, "syntaxStyle", _v$6, _p$.t));
+          _v$7 !== _p$.a && (_p$.a = _$setProp(_el$20, "fg", _v$7, _p$.a));
           return _p$;
         }, {
           e: undefined,
           t: undefined,
           a: undefined
         });
-        return _el$22;
+        return _el$20;
       }
-    }), _el$28);
-    _$insert(_el$17, _$createComponent(Show, {
+    }), _el$26);
+    _$insert(_el$15, _$createComponent(Show, {
       get when() {
         return recommended() !== undefined;
       },
       get children() {
-        var _el$23 = _$createElement("text");
-        _$insert(_el$23, () => `\u2605 Recommended: ${recommended()}`);
-        _$effect((_$p) => _$setProp(_el$23, "fg", theme().text.feedback.success.base, _$p));
-        return _el$23;
+        var _el$21 = _$createElement("text");
+        _$insert(_el$21, () => `\u2605 Recommended: ${recommended()}`);
+        _$effect((_$p) => _$setProp(_el$21, "fg", theme().text.feedback.success.base, _$p));
+        return _el$21;
       }
-    }), _el$28);
-    _$insert(_el$17, _$createComponent(Show, {
+    }), _el$26);
+    _$insert(_el$15, _$createComponent(Show, {
       get when() {
         return _$memo(() => !!(q().kind === "ask_code" && typeof q().recommended === "string"))() && editText(q(), props.draft) !== q().recommended;
       },
       get children() {
         return [(() => {
-          var _el$24 = _$createElement("text");
-          _$insertNode(_el$24, _$createTextNode(`\u2605 Recommended:`));
-          _$effect((_$p) => _$setProp(_el$24, "fg", theme().text.feedback.success.base, _$p));
-          return _el$24;
+          var _el$22 = _$createElement("text");
+          _$insertNode(_el$22, _$createTextNode(`\u2605 Recommended:`));
+          _$effect((_$p) => _$setProp(_el$22, "fg", theme().text.feedback.success.base, _$p));
+          return _el$22;
         })(), (() => {
-          var _el$26 = _$createElement("markdown");
+          var _el$24 = _$createElement("markdown");
           _$effect((_p$) => {
             var _v$8 = codeBlock(String(q().recommended), q().language), _v$9 = props.syntax, _v$0 = theme().markdown.text;
-            _v$8 !== _p$.e && (_p$.e = _$setProp(_el$26, "content", _v$8, _p$.e));
-            _v$9 !== _p$.t && (_p$.t = _$setProp(_el$26, "syntaxStyle", _v$9, _p$.t));
-            _v$0 !== _p$.a && (_p$.a = _$setProp(_el$26, "fg", _v$0, _p$.a));
+            _v$8 !== _p$.e && (_p$.e = _$setProp(_el$24, "content", _v$8, _p$.e));
+            _v$9 !== _p$.t && (_p$.t = _$setProp(_el$24, "syntaxStyle", _v$9, _p$.t));
+            _v$0 !== _p$.a && (_p$.a = _$setProp(_el$24, "fg", _v$0, _p$.a));
             return _p$;
           }, {
             e: undefined,
             t: undefined,
             a: undefined
           });
-          return _el$26;
+          return _el$24;
         })()];
       }
-    }), _el$28);
-    _$insert(_el$17, _$createComponent(Show, {
+    }), _el$26);
+    _$insert(_el$15, _$createComponent(Show, {
       get when() {
         return q().rationale;
       },
       get children() {
-        var _el$27 = _$createElement("markdown");
-        _$setProp(_el$27, "conceal", true);
+        var _el$25 = _$createElement("markdown");
+        _$setProp(_el$25, "conceal", true);
         _$effect((_p$) => {
           var _v$1 = `*Why:* ${q().rationale}`, _v$10 = props.syntax, _v$11 = theme().text.muted;
-          _v$1 !== _p$.e && (_p$.e = _$setProp(_el$27, "content", _v$1, _p$.e));
-          _v$10 !== _p$.t && (_p$.t = _$setProp(_el$27, "syntaxStyle", _v$10, _p$.t));
-          _v$11 !== _p$.a && (_p$.a = _$setProp(_el$27, "fg", _v$11, _p$.a));
+          _v$1 !== _p$.e && (_p$.e = _$setProp(_el$25, "content", _v$1, _p$.e));
+          _v$10 !== _p$.t && (_p$.t = _$setProp(_el$25, "syntaxStyle", _v$10, _p$.t));
+          _v$11 !== _p$.a && (_p$.a = _$setProp(_el$25, "fg", _v$11, _p$.a));
           return _p$;
         }, {
           e: undefined,
           t: undefined,
           a: undefined
         });
-        return _el$27;
+        return _el$25;
       }
-    }), _el$28);
-    _$setProp(_el$28, "paddingTop", 1);
-    _$setProp(_el$28, "flexDirection", "column");
-    _$insert(_el$28, _$createComponent(Body, _$mergeProps(props, {
+    }), _el$26);
+    _$setProp(_el$26, "paddingTop", 1);
+    _$setProp(_el$26, "flexDirection", "column");
+    _$insert(_el$26, _$createComponent(Body, _$mergeProps(props, {
       get value() {
         return value();
       }
     })));
-    _$insert(_el$17, _$createComponent(Show, {
+    _$insert(_el$15, _$createComponent(Show, {
       get when() {
         return props.editing === "note";
       },
       get children() {
-        var _el$29 = _$createElement("box"), _el$30 = _$createElement("text"), _el$32 = _$createElement("textarea");
-        _$insertNode(_el$29, _el$30);
-        _$insertNode(_el$29, _el$32);
-        _$setProp(_el$29, "flexDirection", "row");
-        _$setProp(_el$29, "gap", 1);
-        _$insertNode(_el$30, _$createTextNode(`Note:`));
+        var _el$27 = _$createElement("box"), _el$28 = _$createElement("text"), _el$30 = _$createElement("textarea");
+        _$insertNode(_el$27, _el$28);
+        _$insertNode(_el$27, _el$30);
+        _$setProp(_el$27, "flexDirection", "row");
+        _$setProp(_el$27, "gap", 1);
+        _$insertNode(_el$28, _$createTextNode(`Note:`));
         var _ref$ = props.textareaRef;
-        typeof _ref$ === "function" ? _$use(_ref$, _el$32) : props.textareaRef = _el$32;
-        _$setProp(_el$32, "placeholder", "Add a note");
-        _$setProp(_el$32, "minHeight", 1);
-        _$setProp(_el$32, "maxHeight", 6);
-        _$setProp(_el$32, "flexGrow", 1);
+        typeof _ref$ === "function" ? _$use(_ref$, _el$30) : props.textareaRef = _el$30;
+        _$setProp(_el$30, "placeholder", "Add a note");
+        _$setProp(_el$30, "minHeight", 1);
+        _$setProp(_el$30, "maxHeight", 6);
+        _$setProp(_el$30, "flexGrow", 1);
         _$effect((_p$) => {
           var _v$12 = theme().text.muted, _v$13 = props.draft.note, _v$14 = theme().text.base, _v$15 = theme().text.base;
-          _v$12 !== _p$.e && (_p$.e = _$setProp(_el$30, "fg", _v$12, _p$.e));
-          _v$13 !== _p$.t && (_p$.t = _$setProp(_el$32, "initialValue", _v$13, _p$.t));
-          _v$14 !== _p$.a && (_p$.a = _$setProp(_el$32, "textColor", _v$14, _p$.a));
-          _v$15 !== _p$.o && (_p$.o = _$setProp(_el$32, "focusedTextColor", _v$15, _p$.o));
+          _v$12 !== _p$.e && (_p$.e = _$setProp(_el$28, "fg", _v$12, _p$.e));
+          _v$13 !== _p$.t && (_p$.t = _$setProp(_el$30, "initialValue", _v$13, _p$.t));
+          _v$14 !== _p$.a && (_p$.a = _$setProp(_el$30, "textColor", _v$14, _p$.a));
+          _v$15 !== _p$.o && (_p$.o = _$setProp(_el$30, "focusedTextColor", _v$15, _p$.o));
           return _p$;
         }, {
           e: undefined,
@@ -2352,29 +2373,29 @@ function Card(props) {
           a: undefined,
           o: undefined
         });
-        return _el$29;
+        return _el$27;
       }
     }), null);
-    _$insert(_el$17, _$createComponent(Show, {
+    _$insert(_el$15, _$createComponent(Show, {
       get when() {
         return _$memo(() => props.editing !== "note")() && props.draft.note.trim() !== "";
       },
       get children() {
-        var _el$33 = _$createElement("text");
-        _$setProp(_el$33, "wrapMode", "word");
-        _$insert(_el$33, () => `Note: ${props.draft.note}`);
-        _$effect((_$p) => _$setProp(_el$33, "fg", theme().text.muted, _$p));
-        return _el$33;
+        var _el$31 = _$createElement("text");
+        _$setProp(_el$31, "wrapMode", "word");
+        _$insert(_el$31, () => `Note: ${props.draft.note}`);
+        _$effect((_$p) => _$setProp(_el$31, "fg", theme().text.muted, _$p));
+        return _el$31;
       }
     }), null);
     _$effect((_p$) => {
       var _v$16 = `parley-card-${q().id}`, _v$17 = props.focused ? "heavy" : "rounded", _v$18 = props.focused ? theme().text.action.primary.base : theme().border.base, _v$19 = theme().text.base, _v$20 = TextAttributes.BOLD, _v$21 = props.draft.status === "deferred" ? theme().text.feedback.warning.base : theme().text.muted;
-      _v$16 !== _p$.e && (_p$.e = _$setProp(_el$17, "id", _v$16, _p$.e));
-      _v$17 !== _p$.t && (_p$.t = _$setProp(_el$17, "borderStyle", _v$17, _p$.t));
-      _v$18 !== _p$.a && (_p$.a = _$setProp(_el$17, "borderColor", _v$18, _p$.a));
-      _v$19 !== _p$.o && (_p$.o = _$setProp(_el$19, "fg", _v$19, _p$.o));
-      _v$20 !== _p$.i && (_p$.i = _$setProp(_el$19, "attributes", _v$20, _p$.i));
-      _v$21 !== _p$.n && (_p$.n = _$setProp(_el$20, "fg", _v$21, _p$.n));
+      _v$16 !== _p$.e && (_p$.e = _$setProp(_el$15, "id", _v$16, _p$.e));
+      _v$17 !== _p$.t && (_p$.t = _$setProp(_el$15, "borderStyle", _v$17, _p$.t));
+      _v$18 !== _p$.a && (_p$.a = _$setProp(_el$15, "borderColor", _v$18, _p$.a));
+      _v$19 !== _p$.o && (_p$.o = _$setProp(_el$17, "fg", _v$19, _p$.o));
+      _v$20 !== _p$.i && (_p$.i = _$setProp(_el$17, "attributes", _v$20, _p$.i));
+      _v$21 !== _p$.n && (_p$.n = _$setProp(_el$18, "fg", _v$21, _p$.n));
       return _p$;
     }, {
       e: undefined,
@@ -2384,7 +2405,7 @@ function Card(props) {
       i: undefined,
       n: undefined
     });
-    return _el$17;
+    return _el$15;
   })();
 }
 var codeBlock = (code, language) => {
@@ -2396,45 +2417,45 @@ ${fence}`;
 function Row(props) {
   const theme = () => props.context.theme;
   return (() => {
-    var _el$34 = _$createElement("box"), _el$35 = _$createElement("text"), _el$36 = _$createElement("text"), _el$37 = _$createElement("text");
-    _$insertNode(_el$34, _el$35);
-    _$insertNode(_el$34, _el$36);
-    _$insertNode(_el$34, _el$37);
-    _$setProp(_el$34, "flexDirection", "row");
-    _$setProp(_el$34, "gap", 1);
-    _$insert(_el$35, () => props.cursor ? "\u203A" : " ");
-    _$insert(_el$36, () => props.marker);
-    _$insert(_el$37, () => props.label);
-    _$insert(_el$34, _$createComponent(Show, {
+    var _el$32 = _$createElement("box"), _el$33 = _$createElement("text"), _el$34 = _$createElement("text"), _el$35 = _$createElement("text");
+    _$insertNode(_el$32, _el$33);
+    _$insertNode(_el$32, _el$34);
+    _$insertNode(_el$32, _el$35);
+    _$setProp(_el$32, "flexDirection", "row");
+    _$setProp(_el$32, "gap", 1);
+    _$insert(_el$33, () => props.cursor ? "\u203A" : " ");
+    _$insert(_el$34, () => props.marker);
+    _$insert(_el$35, () => props.label);
+    _$insert(_el$32, _$createComponent(Show, {
       get when() {
         return props.recommended;
       },
       get children() {
-        var _el$38 = _$createElement("text");
-        _$insertNode(_el$38, _$createTextNode(`\u2605`));
-        _$effect((_$p) => _$setProp(_el$38, "fg", theme().text.feedback.success.base, _$p));
-        return _el$38;
+        var _el$36 = _$createElement("text");
+        _$insertNode(_el$36, _$createTextNode(`\u2605`));
+        _$effect((_$p) => _$setProp(_el$36, "fg", theme().text.feedback.success.base, _$p));
+        return _el$36;
       }
     }), null);
-    _$insert(_el$34, _$createComponent(Show, {
+    _$insert(_el$32, _$createComponent(Show, {
       get when() {
         return props.description;
       },
       get children() {
-        var _el$40 = _$createElement("text");
-        _$setProp(_el$40, "wrapMode", "word");
-        _$setProp(_el$40, "flexShrink", 1);
-        _$insert(_el$40, () => props.description);
-        _$effect((_$p) => _$setProp(_el$40, "fg", theme().text.faint, _$p));
-        return _el$40;
+        var _el$38 = _$createElement("text");
+        _$setProp(_el$38, "wrapMode", "word");
+        _$setProp(_el$38, "flexShrink", 1);
+        _$insert(_el$38, () => props.description);
+        _$effect((_$p) => _$setProp(_el$38, "fg", theme().text.faint, _$p));
+        return _el$38;
       }
     }), null);
     _$effect((_p$) => {
       var _v$22 = props.cursor ? theme().text.action.primary.base : theme().text.faint, _v$23 = theme().text.base, _v$24 = props.cursor ? theme().text.base : theme().text.muted, _v$25 = props.cursor ? TextAttributes.BOLD : 0;
-      _v$22 !== _p$.e && (_p$.e = _$setProp(_el$35, "fg", _v$22, _p$.e));
-      _v$23 !== _p$.t && (_p$.t = _$setProp(_el$36, "fg", _v$23, _p$.t));
-      _v$24 !== _p$.a && (_p$.a = _$setProp(_el$37, "fg", _v$24, _p$.a));
-      _v$25 !== _p$.o && (_p$.o = _$setProp(_el$37, "attributes", _v$25, _p$.o));
+      _v$22 !== _p$.e && (_p$.e = _$setProp(_el$33, "fg", _v$22, _p$.e));
+      _v$23 !== _p$.t && (_p$.t = _$setProp(_el$34, "fg", _v$23, _p$.t));
+      _v$24 !== _p$.a && (_p$.a = _$setProp(_el$35, "fg", _v$24, _p$.a));
+      _v$25 !== _p$.o && (_p$.o = _$setProp(_el$35, "attributes", _v$25, _p$.o));
       return _p$;
     }, {
       e: undefined,
@@ -2442,7 +2463,7 @@ function Row(props) {
       a: undefined,
       o: undefined
     });
-    return _el$34;
+    return _el$32;
   })();
 }
 function Body(props) {
@@ -2477,49 +2498,49 @@ function Body(props) {
             },
             get fallback() {
               return (() => {
-                var _el$43 = _$createElement("text");
-                _$setProp(_el$43, "wrapMode", "word");
-                _$insert(_el$43, shown);
-                _$effect((_$p) => _$setProp(_el$43, "fg", theme().text.base, _$p));
-                return _el$43;
+                var _el$41 = _$createElement("text");
+                _$setProp(_el$41, "wrapMode", "word");
+                _$insert(_el$41, shown);
+                _$effect((_$p) => _$setProp(_el$41, "fg", theme().text.base, _$p));
+                return _el$41;
               })();
             },
             get children() {
-              var _el$42 = _$createElement("markdown");
+              var _el$40 = _$createElement("markdown");
               _$effect((_p$) => {
                 var _v$31 = codeBlock(shown(), q().language), _v$32 = props.syntax, _v$33 = theme().markdown.text;
-                _v$31 !== _p$.e && (_p$.e = _$setProp(_el$42, "content", _v$31, _p$.e));
-                _v$32 !== _p$.t && (_p$.t = _$setProp(_el$42, "syntaxStyle", _v$32, _p$.t));
-                _v$33 !== _p$.a && (_p$.a = _$setProp(_el$42, "fg", _v$33, _p$.a));
+                _v$31 !== _p$.e && (_p$.e = _$setProp(_el$40, "content", _v$31, _p$.e));
+                _v$32 !== _p$.t && (_p$.t = _$setProp(_el$40, "syntaxStyle", _v$32, _p$.t));
+                _v$33 !== _p$.a && (_p$.a = _$setProp(_el$40, "fg", _v$33, _p$.a));
                 return _p$;
               }, {
                 e: undefined,
                 t: undefined,
                 a: undefined
               });
-              return _el$42;
+              return _el$40;
             }
           });
         }
       });
     },
     get children() {
-      var _el$41 = _$createElement("textarea");
+      var _el$39 = _$createElement("textarea");
       _$use((element) => {
         field = element;
         props.textareaRef(element);
-      }, _el$41);
-      _$setProp(_el$41, "placeholder", placeholder);
-      _$setProp(_el$41, "flexGrow", 1);
-      _$setProp(_el$41, "onContentChange", () => props.onInput(field?.plainText ?? ""));
+      }, _el$39);
+      _$setProp(_el$39, "placeholder", placeholder);
+      _$setProp(_el$39, "flexGrow", 1);
+      _$setProp(_el$39, "onContentChange", () => props.onInput(field?.plainText ?? ""));
       _$effect((_p$) => {
         var _v$26 = editText(q(), props.draft), _v$27 = code() ? Math.min(16, Math.max(3, editText(q(), props.draft).split(`
 `).length)) : 1, _v$28 = code() ? 16 : 8, _v$29 = theme().text.base, _v$30 = theme().text.base;
-        _v$26 !== _p$.e && (_p$.e = _$setProp(_el$41, "initialValue", _v$26, _p$.e));
-        _v$27 !== _p$.t && (_p$.t = _$setProp(_el$41, "minHeight", _v$27, _p$.t));
-        _v$28 !== _p$.a && (_p$.a = _$setProp(_el$41, "maxHeight", _v$28, _p$.a));
-        _v$29 !== _p$.o && (_p$.o = _$setProp(_el$41, "textColor", _v$29, _p$.o));
-        _v$30 !== _p$.i && (_p$.i = _$setProp(_el$41, "focusedTextColor", _v$30, _p$.i));
+        _v$26 !== _p$.e && (_p$.e = _$setProp(_el$39, "initialValue", _v$26, _p$.e));
+        _v$27 !== _p$.t && (_p$.t = _$setProp(_el$39, "minHeight", _v$27, _p$.t));
+        _v$28 !== _p$.a && (_p$.a = _$setProp(_el$39, "maxHeight", _v$28, _p$.a));
+        _v$29 !== _p$.o && (_p$.o = _$setProp(_el$39, "textColor", _v$29, _p$.o));
+        _v$30 !== _p$.i && (_p$.i = _$setProp(_el$39, "focusedTextColor", _v$30, _p$.i));
         return _p$;
       }, {
         e: undefined,
@@ -2528,7 +2549,7 @@ function Body(props) {
         o: undefined,
         i: undefined
       });
-      return _el$41;
+      return _el$39;
     }
   });
   return _$createComponent(Switch, {
@@ -2574,14 +2595,14 @@ function Body(props) {
               return editable(q());
             },
             get children() {
-              var _el$44 = _$createElement("box"), _el$45 = _$createElement("text");
-              _$insertNode(_el$44, _el$45);
-              _$setProp(_el$44, "flexDirection", "row");
-              _$setProp(_el$44, "gap", 1);
-              _$insertNode(_el$45, _$createTextNode(`other (e):`));
-              _$insert(_el$44, () => editField("Type your own answer"), null);
-              _$effect((_$p) => _$setProp(_el$45, "fg", theme().text.faint, _$p));
-              return _el$44;
+              var _el$42 = _$createElement("box"), _el$43 = _$createElement("text");
+              _$insertNode(_el$42, _el$43);
+              _$setProp(_el$42, "flexDirection", "row");
+              _$setProp(_el$42, "gap", 1);
+              _$insertNode(_el$43, _$createTextNode(`other (e):`));
+              _$insert(_el$42, () => editField("Type your own answer"), null);
+              _$effect((_$p) => _$setProp(_el$43, "fg", theme().text.faint, _$p));
+              return _el$42;
             }
           })];
         }
@@ -2590,67 +2611,67 @@ function Body(props) {
           return q().kind === "show_options";
         },
         get children() {
-          var _el$47 = _$createElement("box");
-          _$setProp(_el$47, "flexDirection", "row");
-          _$setProp(_el$47, "gap", 1);
-          _$insert(_el$47, _$createComponent(For, {
+          var _el$45 = _$createElement("box");
+          _$setProp(_el$45, "flexDirection", "row");
+          _$setProp(_el$45, "gap", 1);
+          _$insert(_el$45, _$createComponent(For, {
             get each() {
               return q().options ?? [];
             },
             children: (option, index) => {
               const picked = () => props.value?.selected === option.id;
               return (() => {
-                var _el$62 = _$createElement("box"), _el$63 = _$createElement("text");
-                _$insertNode(_el$62, _el$63);
-                _$setProp(_el$62, "border", true);
-                _$setProp(_el$62, "flexGrow", 1);
-                _$setProp(_el$62, "flexBasis", 0);
-                _$setProp(_el$62, "paddingLeft", 1);
-                _$setProp(_el$62, "paddingRight", 1);
-                _$setProp(_el$62, "flexDirection", "column");
-                _$insert(_el$63, () => `${picked() ? "(\u2022)" : "( )"} ${index() + 1}. ${option.label}${isRec(option.id) ? " \u2605" : ""}`);
-                _$insert(_el$62, _$createComponent(Show, {
+                var _el$60 = _$createElement("box"), _el$61 = _$createElement("text");
+                _$insertNode(_el$60, _el$61);
+                _$setProp(_el$60, "border", true);
+                _$setProp(_el$60, "flexGrow", 1);
+                _$setProp(_el$60, "flexBasis", 0);
+                _$setProp(_el$60, "paddingLeft", 1);
+                _$setProp(_el$60, "paddingRight", 1);
+                _$setProp(_el$60, "flexDirection", "column");
+                _$insert(_el$61, () => `${picked() ? "(\u2022)" : "( )"} ${index() + 1}. ${option.label}${isRec(option.id) ? " \u2605" : ""}`);
+                _$insert(_el$60, _$createComponent(Show, {
                   get when() {
                     return option.description;
                   },
                   get children() {
-                    var _el$64 = _$createElement("text");
-                    _$setProp(_el$64, "wrapMode", "word");
-                    _$insert(_el$64, () => option.description);
-                    _$effect((_$p) => _$setProp(_el$64, "fg", theme().text.muted, _$p));
-                    return _el$64;
+                    var _el$62 = _$createElement("text");
+                    _$setProp(_el$62, "wrapMode", "word");
+                    _$insert(_el$62, () => option.description);
+                    _$effect((_$p) => _$setProp(_el$62, "fg", theme().text.muted, _$p));
+                    return _el$62;
                   }
                 }), null);
-                _$insert(_el$62, _$createComponent(For, {
+                _$insert(_el$60, _$createComponent(For, {
                   get each() {
                     return option.pros ?? [];
                   },
                   children: (pro) => (() => {
-                    var _el$65 = _$createElement("text");
-                    _$setProp(_el$65, "wrapMode", "word");
-                    _$insert(_el$65, `+ ${pro}`);
-                    _$effect((_$p) => _$setProp(_el$65, "fg", theme().text.feedback.success.base, _$p));
-                    return _el$65;
+                    var _el$63 = _$createElement("text");
+                    _$setProp(_el$63, "wrapMode", "word");
+                    _$insert(_el$63, `+ ${pro}`);
+                    _$effect((_$p) => _$setProp(_el$63, "fg", theme().text.feedback.success.base, _$p));
+                    return _el$63;
                   })()
                 }), null);
-                _$insert(_el$62, _$createComponent(For, {
+                _$insert(_el$60, _$createComponent(For, {
                   get each() {
                     return option.cons ?? [];
                   },
                   children: (con) => (() => {
-                    var _el$66 = _$createElement("text");
-                    _$setProp(_el$66, "wrapMode", "word");
-                    _$insert(_el$66, `\u2212 ${con}`);
-                    _$effect((_$p) => _$setProp(_el$66, "fg", theme().text.feedback.error.base, _$p));
-                    return _el$66;
+                    var _el$64 = _$createElement("text");
+                    _$setProp(_el$64, "wrapMode", "word");
+                    _$insert(_el$64, `\u2212 ${con}`);
+                    _$effect((_$p) => _$setProp(_el$64, "fg", theme().text.feedback.error.base, _$p));
+                    return _el$64;
                   })()
                 }), null);
                 _$effect((_p$) => {
                   var _v$39 = picked() ? "double" : "single", _v$40 = cursorAt(index()) ? theme().text.action.primary.base : theme().border.base, _v$41 = theme().text.base, _v$42 = TextAttributes.BOLD;
-                  _v$39 !== _p$.e && (_p$.e = _$setProp(_el$62, "borderStyle", _v$39, _p$.e));
-                  _v$40 !== _p$.t && (_p$.t = _$setProp(_el$62, "borderColor", _v$40, _p$.t));
-                  _v$41 !== _p$.a && (_p$.a = _$setProp(_el$63, "fg", _v$41, _p$.a));
-                  _v$42 !== _p$.o && (_p$.o = _$setProp(_el$63, "attributes", _v$42, _p$.o));
+                  _v$39 !== _p$.e && (_p$.e = _$setProp(_el$60, "borderStyle", _v$39, _p$.e));
+                  _v$40 !== _p$.t && (_p$.t = _$setProp(_el$60, "borderColor", _v$40, _p$.t));
+                  _v$41 !== _p$.a && (_p$.a = _$setProp(_el$61, "fg", _v$41, _p$.a));
+                  _v$42 !== _p$.o && (_p$.o = _$setProp(_el$61, "attributes", _v$42, _p$.o));
                   return _p$;
                 }, {
                   e: undefined,
@@ -2658,11 +2679,11 @@ function Body(props) {
                   a: undefined,
                   o: undefined
                 });
-                return _el$62;
+                return _el$60;
               })();
             }
           }));
-          return _el$47;
+          return _el$45;
         }
       }), _$createComponent(Match, {
         get when() {
@@ -2679,42 +2700,42 @@ function Body(props) {
                   return q().markdown;
                 },
                 get children() {
-                  var _el$48 = _$createElement("markdown");
-                  _$setProp(_el$48, "conceal", true);
+                  var _el$46 = _$createElement("markdown");
+                  _$setProp(_el$46, "conceal", true);
                   _$effect((_p$) => {
                     var _v$34 = q().markdown ?? "", _v$35 = props.syntax, _v$36 = theme().markdown.text;
-                    _v$34 !== _p$.e && (_p$.e = _$setProp(_el$48, "content", _v$34, _p$.e));
-                    _v$35 !== _p$.t && (_p$.t = _$setProp(_el$48, "syntaxStyle", _v$35, _p$.t));
-                    _v$36 !== _p$.a && (_p$.a = _$setProp(_el$48, "fg", _v$36, _p$.a));
+                    _v$34 !== _p$.e && (_p$.e = _$setProp(_el$46, "content", _v$34, _p$.e));
+                    _v$35 !== _p$.t && (_p$.t = _$setProp(_el$46, "syntaxStyle", _v$35, _p$.t));
+                    _v$36 !== _p$.a && (_p$.a = _$setProp(_el$46, "fg", _v$36, _p$.a));
                     return _p$;
                   }, {
                     e: undefined,
                     t: undefined,
                     a: undefined
                   });
-                  return _el$48;
+                  return _el$46;
                 }
               }), _$createComponent(For, {
                 get each() {
                   return q().sections ?? [];
                 },
                 children: (section) => (() => {
-                  var _el$67 = _$createElement("markdown");
-                  _$setProp(_el$67, "conceal", true);
+                  var _el$65 = _$createElement("markdown");
+                  _$setProp(_el$65, "conceal", true);
                   _$effect((_p$) => {
                     var _v$43 = `### ${section.title}
 
 ${section.content}`, _v$44 = props.syntax, _v$45 = theme().markdown.text;
-                    _v$43 !== _p$.e && (_p$.e = _$setProp(_el$67, "content", _v$43, _p$.e));
-                    _v$44 !== _p$.t && (_p$.t = _$setProp(_el$67, "syntaxStyle", _v$44, _p$.t));
-                    _v$45 !== _p$.a && (_p$.a = _$setProp(_el$67, "fg", _v$45, _p$.a));
+                    _v$43 !== _p$.e && (_p$.e = _$setProp(_el$65, "content", _v$43, _p$.e));
+                    _v$44 !== _p$.t && (_p$.t = _$setProp(_el$65, "syntaxStyle", _v$44, _p$.t));
+                    _v$45 !== _p$.a && (_p$.a = _$setProp(_el$65, "fg", _v$45, _p$.a));
                     return _p$;
                   }, {
                     e: undefined,
                     t: undefined,
                     a: undefined
                   });
-                  return _el$67;
+                  return _el$65;
                 })()
               })];
             }
@@ -2723,9 +2744,9 @@ ${section.content}`, _v$44 = props.syntax, _v$45 = theme().markdown.text;
               return q().kind === "show_diff";
             },
             get children() {
-              var _el$49 = _$createElement("diff");
-              _$setProp(_el$49, "view", "unified");
-              _$spread(_el$49, _$mergeProps({
+              var _el$47 = _$createElement("diff");
+              _$setProp(_el$47, "view", "unified");
+              _$spread(_el$47, _$mergeProps({
                 get diff() {
                   return q().diff ?? "";
                 },
@@ -2746,11 +2767,11 @@ ${section.content}`, _v$44 = props.syntax, _v$45 = theme().markdown.text;
                   return theme().text.base;
                 }
               }), false);
-              return _el$49;
+              return _el$47;
             }
           }), (() => {
-            var _el$50 = _$createElement("box");
-            _$insert(_el$50, _$createComponent(For, {
+            var _el$48 = _$createElement("box");
+            _$insert(_el$48, _$createComponent(For, {
               get each() {
                 return rows(q());
               },
@@ -2786,27 +2807,27 @@ ${section.content}`, _v$44 = props.syntax, _v$45 = theme().markdown.text;
             }));
             _$effect((_p$) => {
               var _v$37 = q().kind === "emoji_react" ? "row" : "column", _v$38 = q().kind === "emoji_react" ? 2 : 0;
-              _v$37 !== _p$.e && (_p$.e = _$setProp(_el$50, "flexDirection", _v$37, _p$.e));
-              _v$38 !== _p$.t && (_p$.t = _$setProp(_el$50, "gap", _v$38, _p$.t));
+              _v$37 !== _p$.e && (_p$.e = _$setProp(_el$48, "flexDirection", _v$37, _p$.e));
+              _v$38 !== _p$.t && (_p$.t = _$setProp(_el$48, "gap", _v$38, _p$.t));
               return _p$;
             }, {
               e: undefined,
               t: undefined
             });
-            return _el$50;
+            return _el$48;
           })(), _$createComponent(Show, {
             get when() {
               return q().kind === "review" || q().kind === "show_diff";
             },
             get children() {
-              var _el$51 = _$createElement("box"), _el$52 = _$createElement("text");
-              _$insertNode(_el$51, _el$52);
-              _$setProp(_el$51, "flexDirection", "row");
-              _$setProp(_el$51, "gap", 1);
-              _$insertNode(_el$52, _$createTextNode(`feedback (e):`));
-              _$insert(_el$51, () => editField("What should change?"), null);
-              _$effect((_$p) => _$setProp(_el$52, "fg", theme().text.faint, _$p));
-              return _el$51;
+              var _el$49 = _$createElement("box"), _el$50 = _$createElement("text");
+              _$insertNode(_el$49, _el$50);
+              _$setProp(_el$49, "flexDirection", "row");
+              _$setProp(_el$49, "gap", 1);
+              _$insertNode(_el$50, _$createTextNode(`feedback (e):`));
+              _$insert(_el$49, () => editField("What should change?"), null);
+              _$effect((_$p) => _$setProp(_el$50, "fg", theme().text.faint, _$p));
+              return _el$49;
             }
           })];
         }
@@ -2846,30 +2867,30 @@ ${section.content}`, _v$44 = props.syntax, _v$45 = theme().markdown.text;
             const bounds = () => sliderBounds(q());
             const current = () => props.value?.value ?? bounds().min;
             return (() => {
-              var _el$68 = _$createElement("box"), _el$69 = _$createElement("text"), _el$70 = _$createElement("text"), _el$71 = _$createElement("box"), _el$72 = _$createElement("text");
-              _$insertNode(_el$68, _el$69);
-              _$insertNode(_el$68, _el$70);
-              _$insertNode(_el$68, _el$71);
-              _$setProp(_el$68, "flexDirection", "column");
-              _$insert(_el$69, () => `${sliderBar(q(), current())} ${sliderText(q(), current())}`);
-              _$insert(_el$70, () => `${q().labels?.min ?? bounds().min} \u2026 ${q().labels?.mid ? `${q().labels?.mid} \u2026 ` : ""}${q().labels?.max ?? bounds().max}`);
-              _$insertNode(_el$71, _el$72);
-              _$setProp(_el$71, "flexDirection", "row");
-              _$setProp(_el$71, "gap", 1);
-              _$insert(_el$72, () => q().allow_other === true ? "value or other (e):" : "value (e):");
-              _$insert(_el$71, () => editField(`${bounds().min}\u2013${bounds().max}`), null);
+              var _el$66 = _$createElement("box"), _el$67 = _$createElement("text"), _el$68 = _$createElement("text"), _el$69 = _$createElement("box"), _el$70 = _$createElement("text");
+              _$insertNode(_el$66, _el$67);
+              _$insertNode(_el$66, _el$68);
+              _$insertNode(_el$66, _el$69);
+              _$setProp(_el$66, "flexDirection", "column");
+              _$insert(_el$67, () => `${sliderBar(q(), current())} ${sliderText(q(), current())}`);
+              _$insert(_el$68, () => `${q().labels?.min ?? bounds().min} \u2026 ${q().labels?.mid ? `${q().labels?.mid} \u2026 ` : ""}${q().labels?.max ?? bounds().max}`);
+              _$insertNode(_el$69, _el$70);
+              _$setProp(_el$69, "flexDirection", "row");
+              _$setProp(_el$69, "gap", 1);
+              _$insert(_el$70, () => q().allow_other === true ? "value or other (e):" : "value (e):");
+              _$insert(_el$69, () => editField(`${bounds().min}\u2013${bounds().max}`), null);
               _$effect((_p$) => {
                 var _v$46 = props.focused ? theme().text.base : theme().text.muted, _v$47 = theme().text.faint, _v$48 = theme().text.faint;
-                _v$46 !== _p$.e && (_p$.e = _$setProp(_el$69, "fg", _v$46, _p$.e));
-                _v$47 !== _p$.t && (_p$.t = _$setProp(_el$70, "fg", _v$47, _p$.t));
-                _v$48 !== _p$.a && (_p$.a = _$setProp(_el$72, "fg", _v$48, _p$.a));
+                _v$46 !== _p$.e && (_p$.e = _$setProp(_el$67, "fg", _v$46, _p$.e));
+                _v$47 !== _p$.t && (_p$.t = _$setProp(_el$68, "fg", _v$47, _p$.t));
+                _v$48 !== _p$.a && (_p$.a = _$setProp(_el$70, "fg", _v$48, _p$.a));
                 return _p$;
               }, {
                 e: undefined,
                 t: undefined,
                 a: undefined
               });
-              return _el$68;
+              return _el$66;
             })();
           })();
         }
@@ -2914,27 +2935,27 @@ ${section.content}`, _v$44 = props.syntax, _v$45 = theme().markdown.text;
           return q().kind === "ask_text";
         },
         get children() {
-          var _el$54 = _$createElement("box"), _el$55 = _$createElement("text");
-          _$insertNode(_el$54, _el$55);
-          _$setProp(_el$54, "flexDirection", "row");
-          _$setProp(_el$54, "gap", 1);
-          _$insertNode(_el$55, _$createTextNode(`answer (e):`));
-          _$insert(_el$54, () => editField(q().placeholder ?? "Type your answer"), null);
-          _$effect((_$p) => _$setProp(_el$55, "fg", theme().text.faint, _$p));
-          return _el$54;
+          var _el$52 = _$createElement("box"), _el$53 = _$createElement("text");
+          _$insertNode(_el$52, _el$53);
+          _$setProp(_el$52, "flexDirection", "row");
+          _$setProp(_el$52, "gap", 1);
+          _$insertNode(_el$53, _$createTextNode(`answer (e):`));
+          _$insert(_el$52, () => editField(q().placeholder ?? "Type your answer"), null);
+          _$effect((_$p) => _$setProp(_el$53, "fg", theme().text.faint, _$p));
+          return _el$52;
         }
       }), _$createComponent(Match, {
         get when() {
           return q().kind === "ask_code";
         },
         get children() {
-          var _el$57 = _$createElement("box"), _el$58 = _$createElement("text");
-          _$insertNode(_el$57, _el$58);
-          _$setProp(_el$57, "flexDirection", "column");
-          _$insert(_el$58, () => `code${q().language ? ` (${q().language})` : ""} (e):`);
-          _$insert(_el$57, () => editField(q().placeholder ?? "Write the code"), null);
-          _$effect((_$p) => _$setProp(_el$58, "fg", theme().text.faint, _$p));
-          return _el$57;
+          var _el$55 = _$createElement("box"), _el$56 = _$createElement("text");
+          _$insertNode(_el$55, _el$56);
+          _$setProp(_el$55, "flexDirection", "column");
+          _$insert(_el$56, () => `code${q().language ? ` (${q().language})` : ""} (e):`);
+          _$insert(_el$55, () => editField(q().placeholder ?? "Write the code"), null);
+          _$effect((_$p) => _$setProp(_el$56, "fg", theme().text.faint, _$p));
+          return _el$55;
         }
       }), _$createComponent(Match, {
         get when() {
@@ -2946,48 +2967,48 @@ ${section.content}`, _v$44 = props.syntax, _v$45 = theme().markdown.text;
               return props.value?.files ?? [];
             },
             children: (file) => (() => {
-              var _el$73 = _$createElement("text");
-              _$insert(_el$73, () => `\uD83D\uDCCE ${file.name} (${file.mime}, ${file.size} B)`);
-              _$effect((_$p) => _$setProp(_el$73, "fg", theme().text.base, _$p));
-              return _el$73;
+              var _el$71 = _$createElement("text");
+              _$insert(_el$71, () => `\uD83D\uDCCE ${file.name} (${file.mime}, ${file.size} B)`);
+              _$effect((_$p) => _$setProp(_el$71, "fg", theme().text.base, _$p));
+              return _el$71;
             })()
           }), (() => {
-            var _el$59 = _$createElement("box"), _el$60 = _$createElement("text");
-            _$insertNode(_el$59, _el$60);
-            _$setProp(_el$59, "flexDirection", "row");
-            _$setProp(_el$59, "gap", 1);
-            _$insert(_el$60, () => q().multiple ? "paths, comma or line separated (e):" : "path (e):");
-            _$insert(_el$59, () => editField(q().kind === "ask_image" ? "screenshot.png, or ctrl+v to paste one" : "./path/to/file"), null);
-            _$effect((_$p) => _$setProp(_el$60, "fg", theme().text.faint, _$p));
-            return _el$59;
+            var _el$57 = _$createElement("box"), _el$58 = _$createElement("text");
+            _$insertNode(_el$57, _el$58);
+            _$setProp(_el$57, "flexDirection", "row");
+            _$setProp(_el$57, "gap", 1);
+            _$insert(_el$58, () => q().multiple ? "paths, comma or line separated (e):" : "path (e):");
+            _$insert(_el$57, () => editField(q().kind === "ask_image" ? "screenshot.png, or ctrl+v to paste one" : "./path/to/file"), null);
+            _$effect((_$p) => _$setProp(_el$58, "fg", theme().text.faint, _$p));
+            return _el$57;
           })(), _$createComponent(Show, {
             get when() {
               return _$memo(() => props.editing === "text")() && props.suggestions.length > 0;
             },
             get children() {
-              var _el$61 = _$createElement("box");
-              _$setProp(_el$61, "flexDirection", "column");
-              _$setProp(_el$61, "paddingLeft", 2);
-              _$insert(_el$61, _$createComponent(For, {
+              var _el$59 = _$createElement("box");
+              _$setProp(_el$59, "flexDirection", "column");
+              _$setProp(_el$59, "paddingLeft", 2);
+              _$insert(_el$59, _$createComponent(For, {
                 get each() {
                   return props.suggestions;
                 },
                 children: (suggestion, index) => (() => {
-                  var _el$74 = _$createElement("text");
-                  _$insert(_el$74, () => `${index() === props.selected ? "\u203A" : " "} ${suggestion}`);
+                  var _el$72 = _$createElement("text");
+                  _$insert(_el$72, () => `${index() === props.selected ? "\u203A" : " "} ${suggestion}`);
                   _$effect((_p$) => {
                     var _v$49 = index() === props.selected ? theme().text.action.primary.base : theme().text.muted, _v$50 = index() === props.selected ? TextAttributes.BOLD : 0;
-                    _v$49 !== _p$.e && (_p$.e = _$setProp(_el$74, "fg", _v$49, _p$.e));
-                    _v$50 !== _p$.t && (_p$.t = _$setProp(_el$74, "attributes", _v$50, _p$.t));
+                    _v$49 !== _p$.e && (_p$.e = _$setProp(_el$72, "fg", _v$49, _p$.e));
+                    _v$50 !== _p$.t && (_p$.t = _$setProp(_el$72, "attributes", _v$50, _p$.t));
                     return _p$;
                   }, {
                     e: undefined,
                     t: undefined
                   });
-                  return _el$74;
+                  return _el$72;
                 })()
               }));
-              return _el$61;
+              return _el$59;
             }
           })];
         }

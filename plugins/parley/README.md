@@ -133,10 +133,12 @@ session. `esc` minimises it; `/parley` (or the command palette) brings it back
 with your edits intact, and says so when the session has no open round. The
 line under the round lists the keys of the focused card first. Once a round is
 within ten minutes of its `timeout_s`, it shows the time left. The card keeps focus
-while it is open: the host moving focus to the prompt on its own is undone, and
-keys it does not use (`↓`, `tab`) stay with it instead of reaching the prompt's
-bindings. Clicking the prompt hands focus over on purpose; the card then says
-that keys go to the prompt and that `alt+p` or `/parley` returns.
+while it is shown: it owns an exclusive input mode, not just native visual
+focus. The prompt's bindings are disabled and clicking the prompt cannot take
+input away. Side panels also retain the host panel's input scope. `esc`
+minimises the surface and restores prompt input; `alt+p` or `/parley` is a
+recovery path to show it again. Submit, dismiss and plugin cleanup release the
+input mode and restore normal prompt behaviour.
 
 | Key | Action |
 | --- | --- |
