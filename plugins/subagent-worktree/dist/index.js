@@ -432,7 +432,8 @@ function tail(text, lines = 40) {
 }
 
 // plugins/subagent-worktree/src/index.ts
-var MERGE_DESCRIPTION = "Merge a subagent's worktree branch back. The subagent tool result names the lane (branch, base, sessionID). " + 'method "wt-merge" runs `wt merge <target> --no-squash --no-ff --yes` from the subagent worktree, keeping its commits, ' + "and removes the worktree on success; a conflict keeps the worktree and reports the output. " + "The worktree must be committed and clean, and the target checkout must have no uncommitted or untracked changes to files the lane changes. " + 'method "none" only reports the lane status. method "list" (no sessionID) reports every active lane in the project ' + "with commits ahead, uncommitted changes, and lanes whose child or parent session is gone; it never removes anything.";
+var MERGE_DESCRIPTION = `Merge a subagent's worktree branch back, report one lane, or list every active lane.
+` + "The subagent tool result names the lane (branch, base, sessionID). " + 'method "wt-merge" runs `wt merge <target> --no-squash --no-ff --yes` from the subagent worktree, keeping its commits, ' + "and removes the worktree on success; a conflict keeps the worktree and reports the output. " + "The worktree must be committed and clean, and the target checkout must have no uncommitted or untracked changes to files the lane changes. " + 'method "none" only reports the lane status. method "list" (no sessionID) reports every active lane in the project ' + "with commits ahead, uncommitted changes, and lanes whose child or parent session is gone; it never removes anything.";
 var MERGE_INPUT = {
   type: "object",
   additionalProperties: false,
@@ -440,10 +441,10 @@ var MERGE_INPUT = {
   properties: {
     sessionID: {
       type: "string",
-      description: `The subagent's sessionID from the subagent tool result. Required unless method is "list".`
+      description: 'From the subagent tool result; required unless method is "list"'
     },
     method: { type: "string", enum: ["wt-merge", "none", "list"] },
-    target: { type: "string", description: "Branch to merge into. Defaults to the branch the lane was created from." }
+    target: { type: "string", description: "Defaults to the lane's base branch" }
   }
 };
 var randomSuffix = () => crypto.randomUUID().slice(0, 6);

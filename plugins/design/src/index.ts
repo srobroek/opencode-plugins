@@ -26,8 +26,9 @@ export {
 } from "./impeccable.ts"
 
 export const SETUP_DESCRIPTION =
-  "Copy the design plugin's beads formulas (design-touch, design-surface, design-system and the mol-design-* " +
-  "sub-processes) into a beads workspace's .beads/formulas/, so bd mol pour and bd mol bond find them. Identical " +
+  "Copy the design plugin's beads formulas into a beads workspace's .beads/formulas/.\n" +
+  "Covers design-touch, design-surface, design-system and the mol-design-* sub-processes, so bd mol pour and " +
+  "bd mol bond find them. Identical " +
   "copies stay; divergent ones are refused unless force=true; symlinked paths are always refused."
 
 const SETUP_INPUT = {

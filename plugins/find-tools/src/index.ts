@@ -58,7 +58,7 @@ export default Plugin.define({
       editor.add({
         name: "find_tools_scan",
         description:
-          "Read-only discovery of plugins, skills and MCP servers for a capability. Sources run in parallel, " +
+          "Read-only discovery of plugins, skills and MCP servers for a capability.\nSources run in parallel, " +
           "10 s each: local (installed plugins and skills; MCP as counts only), catalog (srobroek/opencode-plugins " +
           "marketplace and configured skill catalogs), mcp_registry, npm, github (gh api), awesome_opencode " +
           "(unvetted), smithery (needs SMITHERY_API_KEY), skills_cli (reported gap, never run). Each source " +

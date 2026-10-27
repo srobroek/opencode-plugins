@@ -74,8 +74,8 @@ export function createPlugin(overrides: Overrides = {}) {
         editor.add({
           name: "journeys_index",
           description:
-            "Index, structurally lint (not semantic readiness), or prune a user-journeys directory by running the " +
-            "bundled journeys.py helper. index rewrites INDEX.md; prune is a dry run unless yes=true. A run that " +
+            "Index, structurally lint or prune a user-journeys directory with the bundled journeys.py helper.\n" +
+            "Lint is structural, not semantic readiness. index rewrites INDEX.md; prune is a dry run unless yes=true. A run that " +
             "times out or is cancelled reports complete: false instead of an exit code.",
           input: {
             type: "object",
@@ -86,8 +86,7 @@ export function createPlugin(overrides: Overrides = {}) {
               yes: { type: "boolean", description: "prune: actually delete (default dry run)" },
               journey: {
                 type: "string",
-                description:
-                  "prune: the journey directory name to prune; omit only for an explicitly authorized directory-wide prune",
+                description: "prune: the journey directory name; omit only for an authorized directory-wide prune",
               },
             },
             required: ["command", "journeysDir"],
@@ -131,7 +130,7 @@ export function createPlugin(overrides: Overrides = {}) {
         editor.add({
           name: "journey_install_formulas",
           description:
-            "Copy the journeys plugin's formula TOMLs into a Beads workspace's .beads/formulas/. Identical copies " +
+            "Copy the journeys plugin's formula TOMLs into a Beads workspace's .beads/formulas/.\nIdentical copies " +
             "stay; divergent destinations are refused unless force=true; symlinked paths are always refused.",
           input: {
             type: "object",

@@ -1453,7 +1453,8 @@ var src_default = Plugin.define({
     const tools = await ctx.tool.transform((editor) => {
       editor.add({
         name: "find_tools_scan",
-        description: "Read-only discovery of plugins, skills and MCP servers for a capability. Sources run in parallel, " + "10 s each: local (installed plugins and skills; MCP as counts only), catalog (srobroek/opencode-plugins " + "marketplace and configured skill catalogs), mcp_registry, npm, github (gh api), awesome_opencode " + "(unvetted), smithery (needs SMITHERY_API_KEY), skills_cli (reported gap, never run). Each source " + "reports ok, empty, partial, skipped or failed, with gaps and coverage. Install hints are shown, never run.",
+        description: `Read-only discovery of plugins, skills and MCP servers for a capability.
+Sources run in parallel, ` + "10 s each: local (installed plugins and skills; MCP as counts only), catalog (srobroek/opencode-plugins " + "marketplace and configured skill catalogs), mcp_registry, npm, github (gh api), awesome_opencode " + "(unvetted), smithery (needs SMITHERY_API_KEY), skills_cli (reported gap, never run). Each source " + "reports ok, empty, partial, skipped or failed, with gaps and coverage. Install hints are shown, never run.",
         input: {
           type: "object",
           properties: {

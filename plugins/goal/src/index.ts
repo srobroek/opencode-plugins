@@ -14,7 +14,7 @@ const GOAL_GET_DESCRIPTION =
   "Read this session's goal: objective, status and budget use. Use it when a goal is active and you need its exact state."
 
 const GOAL_COMPLETE_DESCRIPTION =
-  "Mark this session's goal complete. Call it only when every deliverable is verified against the current state (files read, commands and tests run), never because the budget is low or the turn is ending. Pass the evidence. Ends automatic goal continuation."
+  "Mark this session's goal complete, passing the evidence; ends automatic goal continuation.\nCall it only when every deliverable is verified against the current state (files read, commands and tests run), never because the budget is low or the turn is ending."
 
 export default Plugin.define({
   id: "srobroek.goal",

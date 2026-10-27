@@ -3353,40 +3353,24 @@ function confirmDelivery(evaluation) {
 var LAND_INPUT = {
   type: "object",
   properties: {
-    pr: { type: ["integer", "string"], description: "Pull request or merge request number" },
-    merge_method: {
-      type: "string",
-      enum: [...MERGE_METHODS],
-      description: 'Landing strategy: "squash" (default), "merge", or "rebase"'
-    },
-    repo: { type: "string", description: 'Repository as "<owner>/<name>"; defaults to the path of the remote URL' },
-    remote: {
-      type: "string",
-      description: 'Git remote to resolve the forge and observe the branch on; defaults to "origin"'
-    },
+    pr: { type: ["integer", "string"], description: "PR or MR number" },
+    merge_method: { type: "string", enum: [...MERGE_METHODS], description: "default squash" },
+    repo: { type: "string", description: '"<owner>/<name>"; defaults to the remote URL path' },
+    remote: { type: "string", description: 'Forge remote; default "origin"' },
     expectHeadSha: {
       type: "string",
-      description: "The reviewed head sha; required whenever the call would merge, optional only when proving an already MERGED request. Nothing is merged on a mismatch"
+      description: "The reviewed head; required to merge, optional when proving an already MERGED PR"
     },
     requireApproval: {
       type: "boolean",
-      description: "Before merging, require an approval artifact on the PR for the exact head: an APPROVED review for that commit, or an author comment starting 'VERDICT: APPROVE' naming it"
+      description: "Require an APPROVED review or a 'VERDICT: APPROVE' author comment for the exact head"
     },
-    requireGreenChecks: {
-      type: "boolean",
-      description: "Before merging, require every check on the PR head to have passed"
-    },
-    setupAutoDelete: {
-      type: "boolean",
-      description: "Only true writes the repository's deletion-on-merge setting, and only after the landing is proved"
-    },
-    worktree: {
-      type: "string",
-      description: "Worktree this landing belongs to, recorded for delivery_cleanup; its HEAD must be the pull request head"
-    },
+    requireGreenChecks: { type: "boolean", description: "Require every check on the head to pass" },
+    setupAutoDelete: { type: "boolean", description: "Enable deletion-on-merge after the landing is proved" },
+    worktree: { type: "string", description: "The landing's worktree, for delivery_cleanup; HEAD must be the PR head" },
     beadId: {
       type: "string",
-      description: "Bead this landing closes, for a branch the <omp|opencode>/agent/<bead-id> convention does not name; required on an active ledger when the branch names none"
+      description: "Bead this closes when the branch is not <omp|opencode>/agent/<bead-id>; required then on a ledger"
     }
   },
   required: ["pr"],
@@ -3435,8 +3419,10 @@ var CLEANUP_OUTPUT = {
   },
   required: ["ok"]
 };
-var LAND_DESCRIPTION = "Prove a pull request landed and write one landing receipt. Refuses unless expectHeadSha names the PR head (required whenever the call would merge) " + "and, when worktree is given, its HEAD is that head. With requireApproval/requireGreenChecks it also requires an approval artifact on the PR for that exact head " + "and green checks before merging. Merges at most once (an already MERGED request is proved, not re-merged) with merge_method (squash by default, PR title as subject), " + "binds the merge to the head, re-reads it, fetches the landed commits and checks the method's commit shape, observes the remote branch, then writes the receipt. " + "Writes no Beads ledger: when beads.ledgerActive, run the returned next steps child-before-parent, then delivery_cleanup. " + "A refusal with mergeIssued true means the PR is merged: re-run with the same pr and expectHeadSha to write the receipt.";
-var CLEANUP_DESCRIPTION = "Clean up after a landing receipt: recompute the ledger classification at the canonical root, prove the PR merged at the recorded head from the receipt's own remote, " + "check every receipt bead is closed with metadata.merge_sha equal to the merge (read-only bd show), refuse to remove the worktree it runs from, a dirty tree or unpushed commits, " + "then git worktree remove (no force), git branch -d, verify four absences and write one continuation receipt.";
+var LAND_DESCRIPTION = `Merge a reviewed pull request at most once, prove it landed, and write one landing receipt.
+` + "Refuses unless expectHeadSha names the PR head (required whenever the call would merge) " + "and, when worktree is given, its HEAD is that head. With requireApproval/requireGreenChecks it also requires an approval artifact on the PR for that exact head " + "and green checks before merging. Merges at most once (an already MERGED request is proved, not re-merged) with merge_method (squash by default, PR title as subject), " + "binds the merge to the head, re-reads it, fetches the landed commits and checks the method's commit shape, observes the remote branch, then writes the receipt. " + "Writes no Beads ledger: when beads.ledgerActive, run the returned next steps child-before-parent, then delivery_cleanup. " + "A refusal with mergeIssued true means the PR is merged: re-run with the same pr and expectHeadSha to write the receipt.";
+var CLEANUP_DESCRIPTION = `Remove a landed PR's worktree and local branch after proving the landing receipt, and write a continuation receipt.
+` + "Recomputes the ledger classification at the canonical root, proves the PR merged at the recorded head from the receipt's own remote, " + "checks every receipt bead is closed with metadata.merge_sha equal to the merge (read-only bd show), refuses to remove the worktree it runs from, a dirty tree or unpushed commits, " + "then runs git worktree remove (no force) and git branch -d and verifies four absences.";
 function landOutput(outcome) {
   if (!outcome.ok) {
     return {
