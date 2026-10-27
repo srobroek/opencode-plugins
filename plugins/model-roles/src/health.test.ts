@@ -33,6 +33,65 @@ describe("classifyFailure", () => {
     ).toBe("unavailable")
   })
 
+  test("subscription session and usage limits are spent quota", () => {
+    // @openchamber/opencode-claude 1.6.0 proxy.js: the 429 the rate-limit gate sends.
+    const claude = {
+      type: "provider.rate-limit",
+      message: "You've hit your session limit · resets 5pm (Europe/Amsterdam) · limit resets in 2h 10m (2026-10-26T14:10:00.000Z)",
+      status: 429,
+      response: {
+        body: JSON.stringify({
+          error: {
+            message: "You've hit your session limit · resets 5pm (Europe/Amsterdam)",
+            type: "rate_limit_error",
+            code: "claude_session_limit",
+            resets_at: "2026-10-26T14:10:00.000Z",
+            retry_after: 7800,
+          },
+        }),
+      },
+      retryAfterMs: 7_800_000,
+    }
+    expect(classifyFailure(claude)).toBe("quota")
+    expect(classifyFailure({ status: 429, message: "x", response: { body: '{"error":{"code":"claude_session_limit"}}' } })).toBe("quota")
+    expect(classifyFailure({ message: "Claude Code returned an error result: Claude AI usage limit reached|1761500000" })).toBe("quota")
+    expect(classifyFailure({ message: "You've reached your weekly limit for Opus" })).toBe("quota")
+    // openai/codex api_bridge.rs: the ChatGPT backend's 429 body.
+    const chatgpt = {
+      type: "provider.rate-limit",
+      message: "The usage limit has been reached",
+      status: 429,
+      response: { body: '{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","plan_type":"plus","resets_at":1793021400,"resets_in_seconds":5400}}' },
+    }
+    expect(classifyFailure(chatgpt)).toBe("quota")
+    expect(classifyFailure({ status: 429, message: "x", response: { body: '{"error":{"type":"usage_not_included"}}' } })).toBe("quota")
+    // OpenCode 2.1.4 chatgpt.ts: token sharing replaces the message and keeps the body.
+    expect(
+      classifyFailure({
+        type: "provider.rate-limit",
+        message: "ChatGPT usage limit reached. Check ChatGPT Settings → Usage for details.",
+        status: 429,
+        response: { body: '{"error":{"code":"subscription_sharing_usage_limit_exceeded"}}' },
+      }),
+    ).toBe("quota")
+    expect(classifyFailure({ status: 429, message: "x", response: { body: "subscription_sharing_usage_limit_exceeded" } })).toBe("quota")
+    expect(classifyFailure({ type: "provider.quota", message: "nope" })).toBe("quota")
+    expect(failureScope(classifyFailure(claude) ?? "rate-limit")).toBe("provider")
+    // A plain rate limit is still the model's, for a short cooldown.
+    expect(classifyFailure({ type: "provider.rate-limit", message: "Rate limit reached for requests", status: 429 })).toBe("rate-limit")
+
+    const now = Date.parse("2026-10-26T12:00:00Z")
+    expect(quotaReset(claude, now)).toBe(Date.parse("2026-10-26T14:10:00.000Z"))
+    expect(quotaReset({ message: "You've hit your session limit · limit resets in 2h 10m" }, now)).toBe(now + 130 * 60_000)
+    expect(quotaReset(chatgpt, now)).toBe(1_793_021_400_000)
+    expect(quotaReset({ message: "x", response: { body: '{"error":{"resets_in_seconds":5400}}' } }, now)).toBe(now + 5_400_000)
+    expect(quotaReset({ message: "x", response: { body: '{"error":{"retry_after":7800}}' } }, now)).toBe(now + 7_800_000)
+    expect(quotaReset({ message: "Retry-After: 120" }, now)).toBe(now + 120_000)
+    expect(quotaReset({ message: "Claude AI usage limit reached|1793023200" }, now)).toBe(1_793_023_200_000)
+    expect(quotaReset({ message: "ChatGPT usage limit reached.", retryAfterMs: 60_000 }, now)).toBe(now + 60_000)
+    expect(quotaReset({ message: "ChatGPT usage limit reached." }, now)).toBeUndefined()
+  })
+
   test("not the model's fault", () => {
     expect(classifyFailure(undefined)).toBeUndefined()
     expect(classifyFailure({ type: "tool", message: "Model unavailable: a/b" })).toBeUndefined()

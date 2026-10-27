@@ -29,7 +29,14 @@ export const failureScope = (kind: FailureClass): FailureScope => (PROVIDER_SCOP
 export const isTransient = (kind: FailureClass): boolean => TRANSIENT.has(kind)
 
 /** The structured error `session.execution.failed` carries, or a tool error's message. */
-export type FailureInput = { type?: string; message?: string; status?: number; response?: { body?: unknown } }
+export type FailureInput = {
+  type?: string
+  message?: string
+  status?: number
+  response?: { body?: unknown }
+  /** The host's reading of a `Retry-After` header. */
+  retryAfterMs?: number
+}
 
 export type HealthEntry = { failedAt: number; until: number; reason: string }
 
@@ -41,8 +48,20 @@ const NOT_MODEL = [
   /\b(?:abort(?:ed)?|cancel(?:l)?ed|interrupted)\b/i,
 ]
 
+/**
+ * Spent quota, which cools the whole provider until it resets. Besides the plain
+ * wording, this covers the codes subscription providers send:
+ * - ChatGPT (openai/codex `api_bridge.rs`): 429 `usage_limit_reached`, `usage_not_included`,
+ *   `credit_balance_exhausted`, `*_spend_limit_exceeded`, `organization_usage_limit_exceeded`.
+ * - ChatGPT token sharing (OpenCode 2.1.4 `provider/chatgpt.ts`): `subscription_sharing_usage_limit_exceeded`.
+ * - claude-code (`@openchamber/opencode-claude` 1.6.0 `proxy.js`): 429 `claude_session_limit`, and
+ *   Claude Code's own "You've hit your session limit" / "Claude AI usage limit reached".
+ */
 const QUOTA =
-  /insufficient_quota|quota (?:exceeded|exhausted|reached)|exceeded (?:your |the )?(?:current )?quota|billing|credit balance|out of credits|payment required|usage limit|(?:weekly|daily|monthly|5-hour) (?:usage )?limit|plan limit/i
+  /insufficient_quota|quota (?:exceeded|exhausted|reached)|exceeded (?:your |the )?(?:current )?quota|billing|credit[_ ]balance|out of credits|payment required|usage[_ ]limit|usage_not_included|spend_limit_exceeded|session[_ ]limit|(?:weekly|daily|monthly|5-hour) (?:usage )?limit|plan limit|\b(?:hit|reached) your [^·\n]*?limit/i
+
+/** OpenCode's failure types for a spent quota. */
+const QUOTA_TYPE = /^provider\.(?:quota|free-limit)$/
 
 const PATTERNS: ReadonlyArray<[FailureClass, RegExp]> = [
   ["quota", QUOTA],
@@ -53,6 +72,11 @@ const PATTERNS: ReadonlyArray<[FailureClass, RegExp]> = [
   ["rate-limit", /throttl|rate.?limit|too many requests|\b429\b/i],
   ["server", /overloaded|over capacity|service unavailable|bad gateway|gateway timeout|internal server error|server error|serviceunavailable|\b50[0234]\b|\b529\b/i],
 ]
+
+const bodyText = (error: FailureInput): string => {
+  const body = error.response?.body
+  return typeof body === "string" ? body : body === undefined ? "" : JSON.stringify(body)
+}
 
 /**
  * Whether a failure is the model's or provider's, and which kind. User interrupts,
@@ -65,7 +89,7 @@ export function classifyFailure(error: FailureInput | undefined): FailureClass |
   const message = error.message ?? ""
   if (NOT_MODEL.some((pattern) => pattern.test(message))) return undefined
   const status = error.status
-  if (status === 402 || QUOTA.test(message)) return "quota"
+  if (status === 402 || QUOTA_TYPE.test(type) || QUOTA.test(message) || QUOTA.test(bodyText(error))) return "quota"
   if (status === 401 || status === 403) return "auth"
   if (status === 429) return "rate-limit"
   if (status !== undefined && status >= 500 && status <= 599) return "server"
@@ -94,29 +118,32 @@ export const providerKey = (providerID: string): string => `${providerID}/*`
 const DURATION_UNITS: Readonly<Record<string, number>> = { s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 }
 
 /**
- * When a spent quota resets, if the error says: an ISO time after "reset", a
- * `retry-after`/`resets in` duration such as `3h 20m` or `90 seconds`, or a unix
- * `reset` timestamp. Only times in the future count.
+ * When a spent quota resets, if the error says: an ISO time after "reset", a unix
+ * `reset`/`resets_at` timestamp, a `resets_in_seconds`/`retry_after` count of
+ * seconds, a `retry-after`/`resets in` duration such as `3h 20m` or `90 seconds`,
+ * or the host's `retryAfterMs`. Only times in the future count.
  */
 export function quotaReset(error: FailureInput, now: number): number | undefined {
-  const body = error.response?.body
-  const text = `${error.message ?? ""} ${typeof body === "string" ? body : body === undefined ? "" : JSON.stringify(body)}`
+  const text = `${error.message ?? ""} ${bodyText(error)}`
   const iso = /reset\w*["':\s]*(?:at|on)?\s*["']?(\d{4}-\d{2}-\d{2}T[\d:.]+(?:Z|[+-]\d{2}:?\d{2})?)/i.exec(text)?.[1]
   if (iso !== undefined) {
     const at = Date.parse(iso)
     if (Number.isFinite(at) && at > now) return at
   }
-  const unix = /reset\w*["':\s]+(\d{10})\b/i.exec(text)?.[1]
+  const unix = /(?:reset\w*["':\s]+|limit reached\|)(\d{10})\b/i.exec(text)?.[1]
   if (unix !== undefined) {
     const at = Number(unix) * 1_000
     if (at > now) return at
   }
+  const seconds = /(?:resets?_?in_?seconds|retry[-_ ]?after)["':\s]+(\d+(?:\.\d+)?)(?![\d.]|\s*[a-z])/i.exec(text)?.[1]
+  if (seconds !== undefined && Number(seconds) > 0) return now + Number(seconds) * 1_000
   const span = /(?:reset\w*|retry[- ]after|try again)\s*(?:in|:)?\s*((?:\d+(?:\.\d+)?\s*(?:d|h|m|s)[a-z]*[\s,]*(?:and\s*)?)+)/i.exec(text)?.[1]
   if (span !== undefined) {
     let total = 0
     for (const match of span.matchAll(/(\d+(?:\.\d+)?)\s*([dhms])/gi)) total += Number(match[1]) * (DURATION_UNITS[(match[2] ?? "").toLowerCase()] ?? 0)
     if (total > 0) return now + total
   }
+  if (error.retryAfterMs !== undefined && error.retryAfterMs > 0) return now + error.retryAfterMs
   return undefined
 }
 
