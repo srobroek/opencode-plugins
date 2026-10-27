@@ -43,7 +43,7 @@ describe("plugin definition", () => {
     const { fake, cleanup } = await start(scratch())
     expect(fake.hooks("tool")).toEqual(["execute.before", "execute.after"])
     expect(fake.hooks("shell")).toEqual(["create.before"])
-    expect(fake.hooks("session")).toEqual(["context", "prompt"])
+    expect(fake.hooks("session")).toEqual(["context", "compaction", "generate", "prompt"])
     await cleanup()
     expect(fake.active()).toBe(0)
   })
@@ -262,6 +262,8 @@ describe("bd prime context", () => {
     const two = await fake.fire.session("context", request())
     expect(one.system).toEqual([{ type: "text", text: "# Beads Workflow Context" }])
     expect(two.system).toEqual(one.system)
+    // Compaction keeps the turns' system prompt, so it reuses their prompt cache.
+    expect((await fake.fire.session("compaction", request())).system).toEqual(one.system)
     expect(calls.filter((args) => args[0] === "prime")).toHaveLength(1)
     expect(fake.storage.get("prime/ses_root")).toEqual({ text: "# Beads Workflow Context" })
     await cleanup()
