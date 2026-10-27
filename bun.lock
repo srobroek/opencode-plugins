@@ -365,6 +365,19 @@
         "@opencode/plugin",
       ],
     },
+    "plugins/repomix": {
+      "name": "@srobroek/opencode-repomix",
+      "version": "0.1.0",
+      "devDependencies": {
+        "@srobroek/opencode-lib": "workspace:*",
+      },
+      "peerDependencies": {
+        "@opencode/plugin": "^2.1.4",
+      },
+      "optionalPeers": [
+        "@opencode/plugin",
+      ],
+    },
     "plugins/rust": {
       "name": "@srobroek/opencode-rust",
       "version": "0.3.0",
@@ -838,6 +851,8 @@
     "@srobroek/opencode-project": ["@srobroek/opencode-project@workspace:plugins/project"],
 
     "@srobroek/opencode-quality": ["@srobroek/opencode-quality@workspace:plugins/quality"],
+
+    "@srobroek/opencode-repomix": ["@srobroek/opencode-repomix@workspace:plugins/repomix"],
 
     "@srobroek/opencode-rust": ["@srobroek/opencode-rust@workspace:plugins/rust"],
 

@@ -1,0 +1,29 @@
+{
+  "name": "@srobroek/opencode-repomix",
+  "version": "0.1.0",
+  "description": "Pack a local or remote repo into one file for bulk context with repomix: a repomix_pack tool that returns only the path and metrics, and a recipes skill.",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "index.js",
+    "skills"
+  ],
+  "opencode-plugins": {
+    "description": "Pack a local or remote repo into one file with repomix for bulk context: external repos, module packs and version diffs."
+  },
+  "peerDependencies": {
+    "@opencode/plugin": "^2.1.4"
+  },
+  "peerDependenciesMeta": {
+    "@opencode/plugin": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@srobroek/opencode-lib": "workspace:*"
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "name": "repomix",
+  "version": "0.1.0",
+  "description": "Pack a local or remote repo into one file with repomix for bulk context: external repos, module packs and version diffs.",
+  "author": {
+    "name": "Sjors Robroek",
+    "url": "https://github.com/srobroek"
+  },
+  "homepage": "https://github.com/srobroek/opencode-plugins/tree/main/plugins/repomix",
+  "repository": "https://github.com/srobroek/opencode-plugins",
+  "license": "Apache-2.0",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Repomix",
+    "shortDescription": "Pack a local or remote repo into one file with repomix for bulk context: external repos, module packs and version diffs.",
+    "developerName": "Sjors Robroek",
+    "category": "development"
+  }
+}
