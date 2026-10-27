@@ -12,7 +12,8 @@ import {
 import { createEffect, createMemo, createSignal, For, Match, onCleanup, onMount, Show, Switch } from "solid-js"
 import { createStore, reconcile } from "solid-js/store"
 import type { FileValue, SubmittedAnswer } from "./answers.ts"
-import { clipboardFiles } from "./clipboard.ts"
+import { clipboardFiles, copyText } from "./clipboard.ts"
+import { cardText } from "./copy-text.ts"
 import { FocusGuard } from "./focus.ts"
 import { DEFAULT_EMOJIS, optionLabel, type Question, sliderBounds, sliderText } from "./questions.ts"
 import type { RoundView } from "./rounds.ts"
@@ -107,7 +108,7 @@ async function readFiles(text: string, base: string | undefined): Promise<FileVa
 
 /** Draft, edit and submit state of one round, shared by the full panel and the inline card. */
 function createRoundControls(
-  props: Pick<PanelProps, "store" | "round" | "submit" | "directory" | "find">,
+  props: Pick<PanelProps, "store" | "round" | "submit" | "directory" | "find" | "context">,
   onMove?: (id: string) => void,
 ) {
   const roundID = () => props.round()?.roundID ?? ""
@@ -125,8 +126,10 @@ function createRoundControls(
   let textarea: TextareaRenderable | undefined
   let lookup = 0
   let disposed = false
+  const clipboardAbort = new AbortController()
   onCleanup(() => {
     disposed = true
+    clipboardAbort.abort()
     ++lookup
   })
 
@@ -244,6 +247,14 @@ function createRoundControls(
   // the subagent view, tab switches agents), which is how keys used to leak out of a card.
   const pasteKeys = () =>
     isFileKind(current()) ? [{ bind: "ctrl+v", title: "Paste file", group: "Parley", run: pasteFiles }] : []
+  const copy = async () => {
+    const question = current()
+    if (!question || editing()) return
+    const text = cardText(question, draftOf(question.id) ?? initialDraft(question))
+    const copied = await copyText(text, props.context.renderer, clipboardAbort.signal)
+    if (disposed) return
+    props.context.ui.toast.show({ message: copied ? "Card copied" : "Clipboard unavailable (OSC 52, pbcopy, wl-copy or xclip required)", variant: copied ? "success" : "warning" })
+  }
   const pathKeys = () => [
     ...(fileCard() ? [{ bind: "ctrl+v", title: "Paste file", group: "Parley", run: pasteFiles }] : []),
     ...(suggestions().length > 0 ? [{ bind: "tab", title: "Complete path", group: "Parley", run: complete }] : []),
@@ -345,6 +356,7 @@ function createRoundControls(
     complete,
     pasteFiles,
     pasteKeys,
+    copy,
     pathKeys,
     /** The open text field, if any, so a focus request lands in it rather than on the card. */
     field: () => (editing() && textarea && !textarea.isDestroyed ? textarea : undefined),
@@ -425,6 +437,7 @@ export function RoundPanel(props: RoundPanelProps) {
       { bind: "ctrl+return", title: "Submit round", group: "Parley", run: () => void submit() },
       { bind: "ctrl+s", title: "Submit round", group: "Parley", run: () => void submit() },
       ...controls.pasteKeys(),
+      { bind: "y", title: "Copy card text", group: "Parley", run: () => void controls.copy() },
       { bind: "f", title: "Toggle view", group: "Parley", run: toggleView },
       { bind: "escape", title: "Minimise", group: "Parley", run: () => props.panel.close() },
       {
@@ -697,6 +710,7 @@ export function InlineCard(props: InlineCardProps) {
       { bind: "ctrl+return", title: "Submit", group: "Parley", run: () => void send() },
       { bind: "ctrl+s", title: "Submit", group: "Parley", run: () => void send() },
       ...controls.pasteKeys(),
+      { bind: "y", title: "Copy card text", group: "Parley", run: () => void controls.copy() },
       { bind: "f", title: "Full screen", group: "Parley", run: () => props.expand() },
       { bind: "escape", title: "Hide", group: "Parley", run: () => props.hide() },
       {

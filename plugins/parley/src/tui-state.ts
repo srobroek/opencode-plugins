@@ -483,7 +483,7 @@ export function keyHints(
     surface === "card"
       ? "enter submit · a accept · n note · d defer · f full screen · esc hide · D dismiss"
       : `tab/j/k question · a accept · n note · d defer · ctrl+s submit · f ${single ? "inline card" : surface === "side" ? "full screen" : "side panel"} · esc minimise · D dismiss`
-  return own === "" ? shared : `${own} · ${shared}`
+  return `${own === "" ? shared : `${own} · ${shared}`} · y copy`
 }
 
 /** "closes in 1m 05s" for the last ten minutes before a round's deadline; nothing earlier, so the default 30 minutes stays quiet. */

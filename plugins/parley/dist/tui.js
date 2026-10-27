@@ -915,7 +915,7 @@ function keyHints(question, surface, editing, single = false) {
   }
   const own = question ? kindKeys(question) : "";
   const shared = surface === "card" ? "enter submit \xB7 a accept \xB7 n note \xB7 d defer \xB7 f full screen \xB7 esc hide \xB7 D dismiss" : `tab/j/k question \xB7 a accept \xB7 n note \xB7 d defer \xB7 ctrl+s submit \xB7 f ${single ? "inline card" : surface === "side" ? "full screen" : "side panel"} \xB7 esc minimise \xB7 D dismiss`;
-  return own === "" ? shared : `${own} \xB7 ${shared}`;
+  return `${own === "" ? shared : `${own} \xB7 ${shared}`} \xB7 y copy`;
 }
 function countdown(seconds) {
   if (seconds === undefined || seconds > 600)
@@ -927,6 +927,42 @@ function countdown(seconds) {
 
 // plugins/parley/src/clipboard.ts
 var IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp", "image/tiff"];
+function clipboardCommands(platform) {
+  return platform === "darwin" ? [["pbcopy"]] : platform === "linux" ? [["wl-copy"], ["xclip", "-selection", "clipboard"]] : [];
+}
+async function systemCopy(text, signal) {
+  for (const command of clipboardCommands(process.platform)) {
+    if (signal?.aborted)
+      return false;
+    if (!Bun.which(command[0] ?? ""))
+      continue;
+    try {
+      const proc = Bun.spawn(command, { stdin: new TextEncoder().encode(text), stdout: "ignore", stderr: "ignore" });
+      const kill = () => {
+        proc.kill();
+      };
+      signal?.addEventListener("abort", kill, { once: true });
+      const timeout = setTimeout(kill, 1500);
+      try {
+        if (await proc.exited === 0)
+          return true;
+      } finally {
+        clearTimeout(timeout);
+        signal?.removeEventListener("abort", kill);
+      }
+    } catch {}
+  }
+  return false;
+}
+async function copyText(text, terminal, signal, fallback = systemCopy) {
+  if (signal?.aborted)
+    return false;
+  try {
+    if (terminal.copyToClipboardOSC52(text))
+      return true;
+  } catch {}
+  return fallback(text, signal);
+}
 function fileURLs(text) {
   return text.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.startsWith("file://")).map((line) => decodeURIComponent(new URL(line).pathname));
 }
@@ -990,6 +1026,44 @@ async function clipboardFiles(images) {
   if (png)
     return [{ name: `clipboard-${stamp()}.png`, mime: "image/png", size: png.length, data: Buffer.from(png).toString("base64") }];
   return [];
+}
+
+// plugins/parley/src/copy-text.ts
+function cardText(question, draft) {
+  const value = draft.value;
+  const label = (id) => typeof id === "string" ? optionLabel(question, id) : String(id);
+  let answer = "";
+  if (value) {
+    if (typeof value.text === "string")
+      answer = value.text;
+    else if (Array.isArray(value.files))
+      answer = value.files.map((file) => file.path ?? file.name).join(`
+`);
+    else if (Array.isArray(value.selected))
+      answer = value.selected.map(label).join(", ");
+    else if (Array.isArray(value.order))
+      answer = value.order.map(label).join(" \u2192 ");
+    else if (typeof value.selected === "string")
+      answer = label(value.selected);
+    else if (typeof value.value === "number")
+      answer = `${value.value}${question.unit ? ` ${question.unit}` : ""}`;
+    else
+      answer = JSON.stringify(value, null, 2);
+  }
+  return [
+    question.title,
+    question.body,
+    question.markdown,
+    ...(question.sections ?? []).map((section) => `${section.title}
+${section.content}`),
+    question.diff,
+    answer === "" ? undefined : `Answer:
+${answer}`,
+    draft.note === "" ? undefined : `Note:
+${draft.note}`
+  ].filter((part) => part !== undefined && part !== "").join(`
+
+`);
 }
 
 // plugins/parley/src/focus.ts
@@ -1082,8 +1156,10 @@ function createRoundControls(props, onMove) {
   let textarea;
   let lookup = 0;
   let disposed = false;
+  const clipboardAbort = new AbortController;
   onCleanup(() => {
     disposed = true;
+    clipboardAbort.abort();
     ++lookup;
   });
   createEffect(() => {
@@ -1203,6 +1279,19 @@ function createRoundControls(props, onMove) {
     group: "Parley",
     run: pasteFiles
   }] : [];
+  const copy = async () => {
+    const question = current();
+    if (!question || editing())
+      return;
+    const text = cardText(question, draftOf(question.id) ?? initialDraft(question));
+    const copied = await copyText(text, props.context.renderer, clipboardAbort.signal);
+    if (disposed)
+      return;
+    props.context.ui.toast.show({
+      message: copied ? "Card copied" : "Clipboard unavailable (OSC 52, pbcopy, wl-copy or xclip required)",
+      variant: copied ? "success" : "warning"
+    });
+  };
   const pathKeys = () => [
     ...fileCard() ? [{
       bind: "ctrl+v",
@@ -1328,6 +1417,7 @@ function createRoundControls(props, onMove) {
     complete,
     pasteFiles,
     pasteKeys,
+    copy,
     pathKeys,
     field: () => editing() && textarea && !textarea.isDestroyed ? textarea : undefined,
     newline: () => {
@@ -1482,6 +1572,11 @@ function RoundPanel(props) {
       group: "Parley",
       run: () => void submit()
     }, ...controls.pasteKeys(), {
+      bind: "y",
+      title: "Copy card text",
+      group: "Parley",
+      run: () => void controls.copy()
+    }, {
       bind: "f",
       title: "Toggle view",
       group: "Parley",
@@ -1941,6 +2036,12 @@ function InlineCard(props) {
         run: () => void send()
       },
       ...controls.pasteKeys(),
+      {
+        bind: "y",
+        title: "Copy card text",
+        group: "Parley",
+        run: () => void controls.copy()
+      },
       {
         bind: "f",
         title: "Full screen",

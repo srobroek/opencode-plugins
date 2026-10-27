@@ -7,6 +7,48 @@ import { mimeFor } from "./tui-state.ts"
 
 const IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp", "image/tiff"] as const
 
+export interface ClipboardWriter {
+  copyToClipboardOSC52(text: string): boolean
+}
+
+export function clipboardCommands(platform: string): string[][] {
+  return platform === "darwin" ? [["pbcopy"]] : platform === "linux" ? [["wl-copy"], ["xclip", "-selection", "clipboard"]] : []
+}
+
+async function systemCopy(text: string, signal?: AbortSignal): Promise<boolean> {
+  for (const command of clipboardCommands(process.platform)) {
+    if (signal?.aborted) return false
+    if (!Bun.which(command[0] ?? "")) continue
+    try {
+      const proc = Bun.spawn(command, { stdin: new TextEncoder().encode(text), stdout: "ignore", stderr: "ignore" })
+      const kill = () => { proc.kill() }
+      signal?.addEventListener("abort", kill, { once: true })
+      const timeout = setTimeout(kill, 1500)
+      try {
+        if ((await proc.exited) === 0) return true
+      } finally {
+        clearTimeout(timeout)
+        signal?.removeEventListener("abort", kill)
+      }
+    } catch { /* Try the next installed backend. */ }
+  }
+  return false
+}
+
+/** OSC 52 first (including remote terminals); bounded local commands when unsupported. */
+export async function copyText(
+  text: string,
+  terminal: ClipboardWriter,
+  signal?: AbortSignal,
+  fallback: (text: string, signal?: AbortSignal) => Promise<boolean> = systemCopy,
+): Promise<boolean> {
+  if (signal?.aborted) return false
+  try {
+    if (terminal.copyToClipboardOSC52(text)) return true
+  } catch { /* Host/terminal does not support OSC 52. */ }
+  return fallback(text, signal)
+}
+
 /** Paths from a `text/uri-list` or a pasted list of `file://` URLs. */
 export function fileURLs(text: string): string[] {
   return text
