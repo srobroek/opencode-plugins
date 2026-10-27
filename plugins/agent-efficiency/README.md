@@ -42,7 +42,7 @@ A plugin that registers a real `bash` tool keeps it; the hook leaves the call al
 
 Hooks run in plugin load order. A guard whose `execute.before` hook runs before this
 plugin's sees the call still named `bash`. The guards in this repository (`safety`,
-`trunk-dev`, `worktrunk`, `beads`, `chezmoi`, `rust`, `speckit`) treat `bash` and
+`trunk-dev`, `worktrunk`, `beads`, `chezmoi`, `speckit`) treat `bash` and
 `Bash` as `shell`, so they hold in any order. Load this plugin first when you also
 run third-party guards keyed on `shell`.
 
