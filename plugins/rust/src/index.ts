@@ -2,12 +2,9 @@ import { fileURLToPath } from "node:url"
 import { Plugin } from "@opencode/plugin"
 import { appendResultText } from "@srobroek/opencode-lib/shell-result"
 import { registerSkills } from "@srobroek/opencode-lib/skill-files"
-import { isShellTool, WRITE_TOOLS } from "@srobroek/opencode-lib/tool-targets"
 import { ADVISORIES, advisoriesFor } from "./advisories.ts"
-import { decideToolCall } from "./migration-gate.ts"
 
 export { ADVISORIES, advisoriesFor, runsCargoInstall } from "./advisories.ts"
-export { decidePath, decideToolCall, latestMigration, migrationTarget } from "./migration-gate.ts"
 
 export const SKILL_NAMES = [
   "rust-quality",
@@ -38,11 +35,6 @@ export default Plugin.define({
     /** Advisories already shown, per session, so each appears once. */
     const shown = new Set<string>()
 
-    const gate = await ctx.tool.hook("execute.before", async (event) => {
-      if (!WRITE_TOOLS.has(event.tool) && !isShellTool(event.tool)) return
-      const reason = decideToolCall(event.tool, event.input, await directory(event.sessionID))
-      if (reason) throw new Error(reason)
-    })
     const advisory = await ctx.tool.hook("execute.after", async (event) => {
       if (event.status !== "completed" || !["edit", "write", "patch", "shell"].includes(event.tool)) return
       const ids = advisoriesFor(event.tool, event.input, await directory(event.sessionID)).filter(
@@ -56,7 +48,6 @@ export default Plugin.define({
     return async () => {
       await skills.dispose()
       await advisory.dispose()
-      await gate.dispose()
     }
   },
 })

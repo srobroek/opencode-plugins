@@ -91,10 +91,9 @@ async function registerSkills(skill, paths) {
   });
 }
 
-// plugins/lib/src/shell-write-targets.ts
-import { statSync } from "fs";
-import { homedir } from "os";
-import { basename, isAbsolute, join, relative, resolve } from "path";
+// plugins/rust/src/advisories.ts
+import { homedir as homedir2 } from "os";
+import { basename as basename2 } from "path";
 
 // plugins/lib/src/shell-tokenizer.ts
 var SEPARATORS = new Set([";", "&", "|", "(", ")", `
@@ -336,9 +335,256 @@ function substitutionEnd(body, from) {
   return body.length;
 }
 
+// plugins/lib/src/shell-command.ts
+var OPERATORS = {
+  ";": true,
+  "&&": true,
+  "||": true,
+  "&": true,
+  "|": true,
+  "\n": true,
+  "(": true,
+  ")": true,
+  "{": true,
+  "}": true
+};
+var WRAPPERS = {
+  mise: true,
+  env: true,
+  command: true,
+  exec: true,
+  nohup: true,
+  nice: true,
+  sudo: true,
+  xargs: true,
+  time: true,
+  "!": true,
+  if: true,
+  elif: true,
+  else: true,
+  while: true,
+  until: true,
+  do: true
+};
+function tokenize(segment) {
+  return tokenizeShell(segment, { preserveBackslashes: true }).map(({ value, startsQuoted }) => ({
+    value,
+    quoted: startsQuoted
+  }));
+}
+function splitCommands(source) {
+  const positions = [];
+  let current = [];
+  const flush = () => {
+    if (current.length === 0)
+      return;
+    const words = [...current];
+    const argv = words.map((word) => word.value);
+    let index = 0;
+    while (index < words.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[index]?.value ?? "") || words[index]?.value === "!"))
+      index++;
+    while (index < words.length && WRAPPERS[words[index]?.value.split("/").pop() ?? words[index]?.value ?? ""] === true) {
+      const wrapper = words[index]?.value.split("/").pop() ?? words[index]?.value ?? "";
+      index++;
+      if (wrapper === "env")
+        while (index < words.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[index]?.value ?? "") || words[index]?.value?.startsWith("-") === true))
+          index++;
+      if (wrapper === "xargs")
+        while (index < words.length && words[index]?.value?.startsWith("-") === true)
+          index++;
+      if (wrapper === "sudo")
+        while (index < words.length && words[index]?.value?.startsWith("-") === true) {
+          index++;
+          if (index < words.length && words[index]?.value?.startsWith("-") === false)
+            index++;
+        }
+    }
+    const executable = words[index] && !words[index]?.quoted ? words[index]?.value : undefined;
+    const raw = words.map((word) => word.quoted ? `'${word.value.replaceAll("'", "'\\''")}'` : word.value).join(" ");
+    positions.push({ raw, words, argv, executable });
+    current = [];
+  };
+  for (const token of tokenize(source)) {
+    if (OPERATORS[token.value] === true) {
+      flush();
+      continue;
+    }
+    current.push(token);
+  }
+  flush();
+  return positions;
+}
+function nestedSources(source) {
+  const sources = [];
+  let unknown = false;
+  let depth = 0;
+  let start = -1;
+  let quote = null;
+  for (let i = 0;i < source.length; i++) {
+    const ch = source[i];
+    if (quote === "'") {
+      if (ch === "'")
+        quote = null;
+      continue;
+    }
+    if (quote === '"') {
+      if (ch === "\\")
+        i++;
+      else if (ch === '"')
+        quote = null;
+      continue;
+    }
+    if (ch === "'") {
+      quote = "'";
+      continue;
+    }
+    if (ch === '"') {
+      quote = '"';
+      continue;
+    }
+    if (ch === "`") {
+      const end = source.indexOf("`", i + 1);
+      if (end < 0)
+        return { sources, unknown: true };
+      sources.push(source.slice(i + 1, end));
+      i = end;
+      continue;
+    }
+    if (source.startsWith("$(", i)) {
+      if (depth++ === 0)
+        start = i + 2;
+      i++;
+      continue;
+    }
+    if (depth > 0 && ch === ")") {
+      if (--depth === 0)
+        sources.push(source.slice(start, i));
+    }
+  }
+  if (depth !== 0)
+    unknown = true;
+  for (const match of source.matchAll(/"((?:\\.|[^"\\])*)"/g)) {
+    const body = match[1] ?? "";
+    for (const substitution of body.matchAll(/\$\(([^()]*)\)/g))
+      if (substitution[1] !== undefined)
+        sources.push(substitution[1]);
+    for (const substitution of body.matchAll(/`([^`]*)`/g))
+      if (substitution[1] !== undefined)
+        sources.push(substitution[1]);
+  }
+  for (const match of source.matchAll(/\b(?:bash|sh|zsh|dash|ksh)\s+-c\s+((?:'[^']*')|(?:"[^"]*")|[^\s;&|]+)/g)) {
+    const value = match[1];
+    if (!value || value.startsWith('"$') || value.startsWith("'$"))
+      unknown = true;
+    else
+      sources.push(value.replace(/^['"]|['"]$/g, ""));
+  }
+  for (const match of source.matchAll(/\beval\s+((?:'[^']*')|(?:"[^"]*")|[^\s;&|]+)/g)) {
+    const value = match[1];
+    if (value?.startsWith("$"))
+      unknown = true;
+    else if (value)
+      sources.push(value.replace(/^['"]|['"]$/g, ""));
+  }
+  for (const match of source.matchAll(/\bxargs(?:\s+-[^\s;&|]+)*\s+([^;&|]+?)(?=\s*(?:[;&|]|$))/g)) {
+    const value = match[1]?.trim();
+    if (value?.startsWith("$"))
+      unknown = true;
+    else if (value)
+      sources.push(value.replace(/^['"]|['"]$/g, ""));
+  }
+  return { sources, unknown };
+}
+function staticParse(command) {
+  if (command.length > 64000)
+    return {
+      kind: "parse-failure",
+      reason: "input exceeds 64000 characters",
+      command,
+      segments: [],
+      commands: [],
+      unknown: true,
+      nested: []
+    };
+  if (!shellQuoteBalanced(command))
+    return {
+      kind: "parse-failure",
+      reason: "unbalanced shell quote",
+      command,
+      segments: [],
+      commands: [],
+      unknown: true,
+      nested: []
+    };
+  const commands = splitCommands(command);
+  const nested = nestedSources(command);
+  const children = nested.sources.map(staticParse);
+  const unknown = nested.unknown || children.some((child) => child.unknown);
+  return {
+    command,
+    segments: commands.map((position) => position.argv),
+    commands,
+    unknown,
+    nested: children
+  };
+}
+function parse(command) {
+  if (typeof command !== "string") {
+    return {
+      kind: "parse-failure",
+      reason: "command is not a string",
+      command: "",
+      segments: [],
+      commands: [],
+      unknown: true,
+      nested: []
+    };
+  }
+  return staticParse(command);
+}
+function parsedInvocations(parsed, executable, booleanFlags = []) {
+  if (parsed.unknown)
+    return [];
+  const found = [];
+  for (const position of parsed.commands) {
+    const executableName = position.executable?.split("/").pop();
+    const index = executableName === executable ? position.argv.findIndex((word, i) => !position.words[i]?.quoted && (word.split("/").pop() ?? word) === executable) : -1;
+    if (index < 0)
+      continue;
+    const args = position.argv.slice(index + 1);
+    const globals = [];
+    let verb;
+    for (let i = 0;i < args.length; i++) {
+      const word = args[i];
+      if (word === undefined)
+        continue;
+      if (word.startsWith("-") && verb === undefined) {
+        globals.push(word);
+        const next = args[i + 1];
+        if (!booleanFlags.includes(word) && !word.includes("=") && next !== undefined && !next.startsWith("-")) {
+          globals.push(next);
+          i++;
+        }
+        continue;
+      }
+      if (verb === undefined && !word.startsWith("\x00"))
+        verb = word;
+    }
+    found.push({ position, command: position.raw, args, verb, globals });
+  }
+  for (const child of parsed.nested)
+    found.push(...parsedInvocations(child, executable, booleanFlags));
+  return found;
+}
+
+// plugins/lib/src/shell-write-targets.ts
+import { statSync } from "fs";
+import { homedir } from "os";
+import { basename, isAbsolute, join, relative, resolve } from "path";
+
 // plugins/lib/src/command-words.ts
 var NONE = new Set;
-var WRAPPERS = new Map([
+var WRAPPERS2 = new Map([
   [
     "sudo",
     {
@@ -418,7 +664,7 @@ function commandWords(input) {
       i++;
       continue;
     }
-    const wrapper = WRAPPERS.get(word.slice(word.lastIndexOf("/") + 1));
+    const wrapper = WRAPPERS2.get(word.slice(word.lastIndexOf("/") + 1));
     if (wrapper === undefined)
       break;
     i++;
@@ -823,252 +1069,6 @@ function writtenPaths(tool, input, cwd) {
 }
 
 // plugins/rust/src/advisories.ts
-import { homedir as homedir2 } from "os";
-import { basename as basename2 } from "path";
-
-// plugins/lib/src/shell-command.ts
-var OPERATORS = {
-  ";": true,
-  "&&": true,
-  "||": true,
-  "&": true,
-  "|": true,
-  "\n": true,
-  "(": true,
-  ")": true,
-  "{": true,
-  "}": true
-};
-var WRAPPERS2 = {
-  mise: true,
-  env: true,
-  command: true,
-  exec: true,
-  nohup: true,
-  nice: true,
-  sudo: true,
-  xargs: true,
-  time: true,
-  "!": true,
-  if: true,
-  elif: true,
-  else: true,
-  while: true,
-  until: true,
-  do: true
-};
-function tokenize(segment) {
-  return tokenizeShell(segment, { preserveBackslashes: true }).map(({ value, startsQuoted }) => ({
-    value,
-    quoted: startsQuoted
-  }));
-}
-function splitCommands(source) {
-  const positions = [];
-  let current = [];
-  const flush = () => {
-    if (current.length === 0)
-      return;
-    const words = [...current];
-    const argv = words.map((word) => word.value);
-    let index = 0;
-    while (index < words.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[index]?.value ?? "") || words[index]?.value === "!"))
-      index++;
-    while (index < words.length && WRAPPERS2[words[index]?.value.split("/").pop() ?? words[index]?.value ?? ""] === true) {
-      const wrapper = words[index]?.value.split("/").pop() ?? words[index]?.value ?? "";
-      index++;
-      if (wrapper === "env")
-        while (index < words.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[index]?.value ?? "") || words[index]?.value?.startsWith("-") === true))
-          index++;
-      if (wrapper === "xargs")
-        while (index < words.length && words[index]?.value?.startsWith("-") === true)
-          index++;
-      if (wrapper === "sudo")
-        while (index < words.length && words[index]?.value?.startsWith("-") === true) {
-          index++;
-          if (index < words.length && words[index]?.value?.startsWith("-") === false)
-            index++;
-        }
-    }
-    const executable = words[index] && !words[index]?.quoted ? words[index]?.value : undefined;
-    const raw = words.map((word) => word.quoted ? `'${word.value.replaceAll("'", "'\\''")}'` : word.value).join(" ");
-    positions.push({ raw, words, argv, executable });
-    current = [];
-  };
-  for (const token of tokenize(source)) {
-    if (OPERATORS[token.value] === true) {
-      flush();
-      continue;
-    }
-    current.push(token);
-  }
-  flush();
-  return positions;
-}
-function nestedSources(source) {
-  const sources = [];
-  let unknown = false;
-  let depth = 0;
-  let start = -1;
-  let quote = null;
-  for (let i = 0;i < source.length; i++) {
-    const ch = source[i];
-    if (quote === "'") {
-      if (ch === "'")
-        quote = null;
-      continue;
-    }
-    if (quote === '"') {
-      if (ch === "\\")
-        i++;
-      else if (ch === '"')
-        quote = null;
-      continue;
-    }
-    if (ch === "'") {
-      quote = "'";
-      continue;
-    }
-    if (ch === '"') {
-      quote = '"';
-      continue;
-    }
-    if (ch === "`") {
-      const end = source.indexOf("`", i + 1);
-      if (end < 0)
-        return { sources, unknown: true };
-      sources.push(source.slice(i + 1, end));
-      i = end;
-      continue;
-    }
-    if (source.startsWith("$(", i)) {
-      if (depth++ === 0)
-        start = i + 2;
-      i++;
-      continue;
-    }
-    if (depth > 0 && ch === ")") {
-      if (--depth === 0)
-        sources.push(source.slice(start, i));
-    }
-  }
-  if (depth !== 0)
-    unknown = true;
-  for (const match of source.matchAll(/"((?:\\.|[^"\\])*)"/g)) {
-    const body = match[1] ?? "";
-    for (const substitution of body.matchAll(/\$\(([^()]*)\)/g))
-      if (substitution[1] !== undefined)
-        sources.push(substitution[1]);
-    for (const substitution of body.matchAll(/`([^`]*)`/g))
-      if (substitution[1] !== undefined)
-        sources.push(substitution[1]);
-  }
-  for (const match of source.matchAll(/\b(?:bash|sh|zsh|dash|ksh)\s+-c\s+((?:'[^']*')|(?:"[^"]*")|[^\s;&|]+)/g)) {
-    const value = match[1];
-    if (!value || value.startsWith('"$') || value.startsWith("'$"))
-      unknown = true;
-    else
-      sources.push(value.replace(/^['"]|['"]$/g, ""));
-  }
-  for (const match of source.matchAll(/\beval\s+((?:'[^']*')|(?:"[^"]*")|[^\s;&|]+)/g)) {
-    const value = match[1];
-    if (value?.startsWith("$"))
-      unknown = true;
-    else if (value)
-      sources.push(value.replace(/^['"]|['"]$/g, ""));
-  }
-  for (const match of source.matchAll(/\bxargs(?:\s+-[^\s;&|]+)*\s+([^;&|]+?)(?=\s*(?:[;&|]|$))/g)) {
-    const value = match[1]?.trim();
-    if (value?.startsWith("$"))
-      unknown = true;
-    else if (value)
-      sources.push(value.replace(/^['"]|['"]$/g, ""));
-  }
-  return { sources, unknown };
-}
-function staticParse(command) {
-  if (command.length > 64000)
-    return {
-      kind: "parse-failure",
-      reason: "input exceeds 64000 characters",
-      command,
-      segments: [],
-      commands: [],
-      unknown: true,
-      nested: []
-    };
-  if (!shellQuoteBalanced(command))
-    return {
-      kind: "parse-failure",
-      reason: "unbalanced shell quote",
-      command,
-      segments: [],
-      commands: [],
-      unknown: true,
-      nested: []
-    };
-  const commands = splitCommands(command);
-  const nested = nestedSources(command);
-  const children = nested.sources.map(staticParse);
-  const unknown = nested.unknown || children.some((child) => child.unknown);
-  return {
-    command,
-    segments: commands.map((position) => position.argv),
-    commands,
-    unknown,
-    nested: children
-  };
-}
-function parse(command) {
-  if (typeof command !== "string") {
-    return {
-      kind: "parse-failure",
-      reason: "command is not a string",
-      command: "",
-      segments: [],
-      commands: [],
-      unknown: true,
-      nested: []
-    };
-  }
-  return staticParse(command);
-}
-function parsedInvocations(parsed, executable, booleanFlags = []) {
-  if (parsed.unknown)
-    return [];
-  const found = [];
-  for (const position of parsed.commands) {
-    const executableName = position.executable?.split("/").pop();
-    const index = executableName === executable ? position.argv.findIndex((word, i) => !position.words[i]?.quoted && (word.split("/").pop() ?? word) === executable) : -1;
-    if (index < 0)
-      continue;
-    const args = position.argv.slice(index + 1);
-    const globals = [];
-    let verb;
-    for (let i = 0;i < args.length; i++) {
-      const word = args[i];
-      if (word === undefined)
-        continue;
-      if (word.startsWith("-") && verb === undefined) {
-        globals.push(word);
-        const next = args[i + 1];
-        if (!booleanFlags.includes(word) && !word.includes("=") && next !== undefined && !next.startsWith("-")) {
-          globals.push(next);
-          i++;
-        }
-        continue;
-      }
-      if (verb === undefined && !word.startsWith("\x00"))
-        verb = word;
-    }
-    found.push({ position, command: position.raw, args, verb, globals });
-  }
-  for (const child of parsed.nested)
-    found.push(...parsedInvocations(child, executable, booleanFlags));
-  return found;
-}
-
-// plugins/rust/src/advisories.ts
 var ADVISORIES = {
   "cargo-install": [
     "[rust] `cargo install` builds the tool from source. In CI that is a full compile on every run, before",
@@ -1182,62 +1182,6 @@ function advisoriesFor(tool, input, cwd, home = homedir2()) {
   return Object.keys(ADVISORIES).filter((id) => found.has(id));
 }
 
-// plugins/rust/src/migration-gate.ts
-import { existsSync as existsSync2, readdirSync as readdirSync2 } from "fs";
-var NUMERIC_PREFIX = /^(\d+)/;
-function migrationTarget(path) {
-  const parts = path.replaceAll("\\", "/").split("/");
-  const at = parts.lastIndexOf("migrations");
-  if (at === -1 || at + 1 >= parts.length)
-    return null;
-  const entry = parts[at + 1] ?? "";
-  if (!NUMERIC_PREFIX.test(entry))
-    return null;
-  return { dir: parts.slice(0, at + 1).join("/") || "migrations", entry };
-}
-function latestMigration(dir) {
-  let names;
-  try {
-    names = readdirSync2(dir);
-  } catch {
-    return;
-  }
-  let best;
-  for (const name of names) {
-    const digits = NUMERIC_PREFIX.exec(name)?.[1];
-    if (!digits)
-      continue;
-    const ordinal = Number(digits);
-    if (!Number.isFinite(ordinal))
-      continue;
-    if (!best || ordinal > best.ordinal || ordinal === best.ordinal && name > best.name)
-      best = { name, ordinal };
-  }
-  return best?.name;
-}
-function migrationRefusal(path, latest) {
-  return `Migrations are append-only: '${path}' is committed migration history. ` + "Every database that already ran it keeps the old statements, so editing the file makes the " + `recorded history and the live schema disagree. Only the latest migration ('${latest}') is ` + `still editable. Express this change as a NEW migration with the next prefix after ` + `'${latest}' (an ALTER, not a rewrite). Reading the file is unaffected.`;
-}
-function decidePath(path) {
-  const target = migrationTarget(path);
-  if (!target)
-    return;
-  if (!existsSync2(path))
-    return;
-  const latest = latestMigration(target.dir);
-  if (latest === undefined || latest === target.entry)
-    return;
-  return migrationRefusal(path, latest);
-}
-function decideToolCall(tool, input, cwd) {
-  for (const path of writtenPaths(tool, input, cwd)) {
-    const reason = decidePath(path);
-    if (reason)
-      return reason;
-  }
-  return;
-}
-
 // plugins/rust/src/index.ts
 var SKILL_NAMES = [
   "rust-quality",
@@ -1258,13 +1202,6 @@ var src_default = Plugin.define({
   async setup(ctx) {
     const directory = (sessionID) => ctx.session.get({ sessionID }).then((session) => session.location.directory).catch(() => ctx.location.directory);
     const shown = new Set;
-    const gate = await ctx.tool.hook("execute.before", async (event) => {
-      if (!WRITE_TOOLS.has(event.tool) && !isShellTool(event.tool))
-        return;
-      const reason = decideToolCall(event.tool, event.input, await directory(event.sessionID));
-      if (reason)
-        throw new Error(reason);
-    });
     const advisory = await ctx.tool.hook("execute.after", async (event) => {
       if (event.status !== "completed" || !["edit", "write", "patch", "shell"].includes(event.tool))
         return;
@@ -1281,7 +1218,6 @@ var src_default = Plugin.define({
     return async () => {
       await skills.dispose();
       await advisory.dispose();
-      await gate.dispose();
     };
   }
 });
@@ -1290,10 +1226,6 @@ export {
   SKILL_NAMES,
   SKILL_PATHS,
   advisoriesFor,
-  decidePath,
-  decideToolCall,
   src_default as default,
-  latestMigration,
-  migrationTarget,
   runsCargoInstall
 };

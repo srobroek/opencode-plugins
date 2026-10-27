@@ -72,7 +72,7 @@ codex plugin add worktrunk@srobroek-opencode
 | `worktrunk` | Skills `worktrunk-worktrees`, `worktrunk-preflight` |
 | `chezmoi` | Skill `chezmoi-editor` (no managed-file guard) |
 | `languages` | Router skill `language-quality` and skills `go-quality`, `python-quality`, `typescript-quality` |
-| `rust` | Router skill `rust-guide`, skill `rust-quality` and eight Rust guidance skills (no migration gate, no advisories) |
+| `rust` | Router skill `rust-guide`, skill `rust-quality` and eight Rust guidance skills (no advisories) |
 | `debate` | Skills `debate`, `grilling`, `to-questionnaire` |
 | `eli5` | Skill `eli5` |
 | `project` | Skill `license-picker` |

@@ -1,8 +1,7 @@
 # rust
 
-Rust guidance for OpenCode: a gate that keeps committed migrations append-only,
-advisories for slow or cache-breaking Cargo setups, and skills with crate,
-workspace, CI, persistence and Tauri defaults.
+Rust guidance for OpenCode: advisories for slow or cache-breaking Cargo setups,
+and skills with crate, workspace, CI, persistence and Tauri defaults.
 
 Ported from the omp-plugins `rust` plugin. The omp `rust_quality` tool is not
 ported: `rustfmt` runs as OpenCode's built-in formatter (`"formatter": true`, see
@@ -23,22 +22,13 @@ claude plugin install rust@srobroek-opencode
 codex plugin add rust@srobroek-opencode
 ```
 
-There the skills have no gate or advisories behind them.
+There the skills have no advisories behind them.
 
 ## Migration gate
 
-A `tool.hook("execute.before")` refuses a write to a numbered migration that is not
-the highest-numbered entry in its `migrations/` directory. Every database that ran a
-shipped migration keeps the old statements, so editing it makes the recorded history
-and the live schema disagree. The refusal asks for a new migration instead.
-
-- Entries are the segment directly under `migrations/`, so `0003_name.sql` and
-  `0003_name/up.sql` are the same unit. Prefixes compare as numbers (`10_x` is newer
-  than `2_x`).
-- A migration that does not exist yet is always allowed.
-- Checked calls: `edit`, `write`, `patch` (every file header), and the static write
-  targets of a `shell` command (redirects, `tee`, `cp`/`mv`, `sed -i`, `perl -i`).
-  Reads are unaffected.
+The migration-edit gate moved to the [safety](../safety/README.md#migration-edit)
+plugin, which covers every language's migration layout and reads from git which
+migrations have shipped.
 
 ## Advisories
 

@@ -1,7 +1,7 @@
 {
   "name": "rust",
   "version": "0.2.0",
-  "description": "Rust migration-edit gate, cargo install, RUSTFLAGS linker and global target-dir advisories, and Rust guidance and profiling skills.",
+  "description": "Rust cargo install, RUSTFLAGS linker and global target-dir advisories, and Rust guidance and profiling skills.",
   "author": {
     "name": "Sjors Robroek",
     "url": "https://github.com/srobroek"
@@ -12,7 +12,7 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Rust",
-    "shortDescription": "Rust migration-edit gate, cargo install, RUSTFLAGS linker and global target-dir advisories, and Rust guidance and profiling skills.",
+    "shortDescription": "Rust cargo install, RUSTFLAGS linker and global target-dir advisories, and Rust guidance and profiling skills.",
     "developerName": "Sjors Robroek",
     "category": "development"
   }
