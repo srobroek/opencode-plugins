@@ -22,6 +22,10 @@ workspace, add `--workspace` to clippy and test, or `-p <crate>` to narrow them.
 Use `cargo nextest run` instead of `cargo test` when the project already uses
 nextest, plus `cargo test --doc`, because nextest does not run doc tests.
 
+After an edit that spans files or changes a signature, run `cargo check --all-targets`
+(add `--workspace` in a workspace) once before handing back, or the project's own
+script or `just`/`make` target for it when it has one.
+
 CI runs the same steps with `--locked`; the Rust-specific workflow settings are in
 `lang-rust-ci`.
 
