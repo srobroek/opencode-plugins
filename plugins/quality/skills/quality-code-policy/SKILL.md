@@ -15,4 +15,6 @@ MUST Before adding a capability the repository lacks, check the standard library
 
 MUST Scale planning and verification by uncertainty, consequences, and reversibility; file or line counts decide neither safety nor design. A PR request does not authorize a production release.
 
+MUST After an edit that spans files or changes a signature, run the project's type checker once through the shell before handing back, preferring its own script (`npm run typecheck`); `lang-<language>-quality` names the command.
+
 MUST Refactor only within the requested change: fix the violations it introduces and report pre-existing ones. A major refactor needs the user's approval; a worker reports it to its lead instead of doing it.

@@ -5,7 +5,7 @@ prototypes, and a read-only `adversarial-challenger` subagent.
 
 | Skill | When |
 | --- | --- |
-| `quality-code-policy` | The six-line policy: SOLID and invariants over YAGNI, DRY for knowledge that changes together, reuse before building, planning scaled by risk, refactors scoped to the change. Load at the start of any code task |
+| `quality-code-policy` | The seven-line policy: SOLID and invariants over YAGNI, DRY for knowledge that changes together, reuse before building, planning scaled by risk, a type check after multi-file or signature edits, refactors scoped to the change. Load at the start of any code task |
 | `quality-code-design` | Code design, investigation, implementation, refactoring, review, debugging or test-first work in any language. Picks IMPLEMENT, INVESTIGATE or REVIEW and loads only the references the task needs from `references/` |
 | `quality-profiling` | Slow or memory-heavy code, endpoints, builds or CLIs: set a target, reproduce with a fixed workload, baseline with variance, pick the profiler, change one thing, re-measure, report before/after. hyperfine, Linux perf and macOS Instruments live in `references/`; language tooling is the `lang-<language>-profiling` skills in the `lang-<language>` plugins |
 | `quality-testing` | What to test and at which level, test doubles, flaky tests, test data, property-based tests, coverage; points to `lang-<language>-testing` skills for tooling |
