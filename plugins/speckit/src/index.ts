@@ -4,11 +4,13 @@ import { Plugin } from "@opencode/plugin"
 import type { Context } from "@opencode/plugin/promise/plugin"
 import type { ToolContext } from "@opencode/plugin/promise/tool"
 import { agentPaths, registerAgents } from "@srobroek/opencode-lib/agent-files"
+import { locationDirectories } from "@srobroek/opencode-lib/mcp"
 import { registerSkills, skillPaths } from "@srobroek/opencode-lib/skill-files"
 import { isShellTool, WRITE_TOOLS } from "@srobroek/opencode-lib/tool-targets"
 import { beadsActive } from "./beads.ts"
 import { DEFAULT_INTEGRATION } from "./setup.ts"
 import { rewriteSkill, type SkillLike, type SkillRouting, skillRefusal, staleSkills } from "./skills.ts"
+import { isSpecAgent, type SpecAgentSetting, specAgentSetting, wantsSpecAgent } from "./spec-agent.ts"
 import { type BeadsProbe, decideToolCall } from "./tasks-guard.ts"
 import {
   executeSetup,
@@ -25,6 +27,7 @@ import { usesSpeckit, workflowLatch } from "./workflow.ts"
 export { beadsActive } from "./beads.ts"
 export { installFormulas, runSetup } from "./setup.ts"
 export { IMPLEMENT_REDIRECT, rewriteSkill, skillRefusal, TASKSTOISSUES_REFUSAL } from "./skills.ts"
+export { SPEC_AGENT, wantsSpecAgent } from "./spec-agent.ts"
 export { startSpec } from "./spec-start.ts"
 export { runSpecStart } from "./spec-start-runtime.ts"
 export { DENY_REASON, decideToolCall, isTasksMd, writesTasksMd } from "./tasks-guard.ts"
@@ -53,6 +56,8 @@ export type SpeckitOptions = {
   workflow: boolean
   /** Register the speckit-sync and speckit-verify subagents. Default true. */
   agents: boolean
+  /** Register the primary `spec` agent: `auto` (default) only where `.specify/` exists, or always / never. */
+  specAgent: SpecAgentSetting
 }
 
 export function parseOptions(raw: Record<string, unknown> | undefined): SpeckitOptions {
@@ -67,6 +72,7 @@ export function parseOptions(raw: Record<string, unknown> | undefined): SpeckitO
     blockTasksToIssues: options.blockTasksToIssues !== false,
     workflow: options.workflow !== false,
     agents: options.agents !== false,
+    specAgent: specAgentSetting(options.specAgent),
   }
 }
 
@@ -107,6 +113,14 @@ export async function setupSpeckit(ctx: Context, overrides: Overrides = {}): Pro
     taskstoissues: active && options.blockTasksToIssues,
   })
   let refreshSkills: (() => Promise<void>) | undefined
+  const agentFiles = agentPaths(AGENTS_DIR)
+  let specRegistration: Promise<{ dispose: () => Promise<void> }> | undefined
+  // The location's plugin instance registers the agent, so a project without SpecKit never lists it.
+  const registerSpecAgent = async () => {
+    if (specRegistration !== undefined || !wantsSpecAgent(options.specAgent, locationDirectories(ctx))) return
+    specRegistration = registerAgents(ctx.agent, agentFiles.filter(isSpecAgent))
+    await specRegistration
+  }
   const workflow = options.workflow
     ? {
         text: readFileSync(WORKFLOW_PATH, "utf8").trim(),
@@ -133,6 +147,7 @@ export async function setupSpeckit(ctx: Context, overrides: Overrides = {}): Pro
           if (cwd === location) {
             active = await probe(location)
             await refreshSkills?.()
+            await registerSpecAgent()
           }
           // The system prompt stays as the session's first request had it; the workflow arrives here instead.
           if (workflow !== undefined && usesSpeckit(cwd) && (await workflow.latch.lacks(context.sessionID)))
@@ -252,9 +267,17 @@ export async function setupSpeckit(ctx: Context, overrides: Overrides = {}): Pro
     disposers.push(() => skills.dispose())
 
     if (options.agents) {
-      const agents = await registerAgents(ctx.agent, agentPaths(AGENTS_DIR))
+      const agents = await registerAgents(
+        ctx.agent,
+        agentFiles.filter((path) => !isSpecAgent(path)),
+      )
       disposers.push(() => agents.dispose())
     }
+    disposers.push(async () => {
+      const registration = await specRegistration?.catch(() => undefined)
+      await registration?.dispose()
+    })
+    await registerSpecAgent()
   } catch (error) {
     await cleanup()
     throw error

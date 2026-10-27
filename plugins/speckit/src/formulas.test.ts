@@ -55,11 +55,47 @@ describe("execution_agent_type routing (beads FO-5)", () => {
 })
 
 test("shipped agents carry a model-roles role header and no model", () => {
-  expect(agents.map((agent) => agent.id)).toEqual(["speckit-sync", "speckit-verify"])
-  for (const agent of agents) {
+  expect(agents.map((agent) => agent.id)).toEqual(["spec", "speckit-sync", "speckit-verify"])
+  for (const agent of agents.filter((agent) => agent.id !== "spec")) {
     expect(agentRole(agent.request)).toBe("reviewer")
     expect(permissionEffect(agent.permissions, "edit")).toBe("deny")
     expect(permissionEffect(agent.permissions, "shell")).toBe("allow")
     expect(agent.mode).toBe("subagent")
   }
+})
+
+test("the spec agent edits only specs/ and .specify/ and runs only the SpecKit commands", () => {
+  const spec = agents.find((agent) => agent.id === "spec")
+  if (spec === undefined) throw new Error("no spec agent")
+  const rules = spec.permissions
+  expect(agentRole(spec.request)).toBe("strong")
+  expect(spec.mode).toBe("primary")
+  expect(spec.hidden).toBe(false)
+  for (const path of ["specs/001-a/spec.md", "specs/001-a/contracts/api.md", ".specify/memory/constitution.md"])
+    expect({ path, effect: permissionEffect(rules, "edit", path) }).toEqual({ path, effect: "allow" })
+  for (const path of ["src/index.ts", "README.md", "AGENTS.md", ".beads/config.yaml"])
+    expect({ path, effect: permissionEffect(rules, "edit", path) }).toEqual({ path, effect: "deny" })
+  for (const command of [
+    "bd mol current bd-1",
+    "BEADS_DOLT_SHARED_SERVER= BEADS_DIR=/r/.beads '/bin/bun' '/p/dist/bd-embedded-write-runner.js' --beads-store /r/.beads --beads-wait-ms 5000 -- bd create x",
+    "specify extension list",
+    ".specify/scripts/bash/setup-plan.sh --json",
+    "bash .specify/extensions/git/scripts/bash/create-new-feature.sh --json x",
+    "git status --short",
+    "git add specs/001-a",
+    'git commit -m "docs: spec"',
+  ])
+    expect({ command, effect: permissionEffect(rules, "shell", command) }).toEqual({ command, effect: "allow" })
+  for (const command of ["git push", "git reset --hard", "git add src", "rm -rf specs", "bun test", "npm install"])
+    expect({ command, effect: permissionEffect(rules, "shell", command) }).toEqual({ command, effect: "deny" })
+  for (const action of ["speckit_setup", "speckit_start", "parley", "question", "execute"])
+    expect({ action, effect: permissionEffect(rules, action) }).toEqual({ action, effect: "allow" })
+  for (const skill of ["speckit-specify", "speckit-critique-run", "quality-code-design"])
+    expect({ skill, effect: permissionEffect(rules, "skill", skill) }).toEqual({ skill, effect: "allow" })
+  expect(permissionEffect(rules, "skill", "delivery-git-workflow")).toBe("deny")
+  for (const agent of ["explore", "researcher", "architect", "speckit-verify", "speckit-sync"])
+    expect({ agent, effect: permissionEffect(rules, "subagent", agent) }).toEqual({ agent, effect: "allow" })
+  for (const agent of ["implementer", "general", "build"])
+    expect({ agent, effect: permissionEffect(rules, "subagent", agent) }).toEqual({ agent, effect: "deny" })
+  expect(permissionEffect(rules, "webfetch")).toBe("deny")
 })

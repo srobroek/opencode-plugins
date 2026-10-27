@@ -39,6 +39,7 @@ const PROFILES: Readonly<Record<string, Profile>> = {
   "journey-validator": { hidden: true, codeMode: ["browser"], web: false },
   "speckit-sync": { hidden: true, codeMode: [], web: false },
   "speckit-verify": { hidden: true, codeMode: [], web: false },
+  spec: { hidden: false, codeMode: ["parley", "speckit_setup", "speckit_start"], web: false },
 }
 
 /** Agents that keep a denylist: journey-validator drives the product through MCP tools named per project. */
@@ -141,7 +142,8 @@ test("execute, web access and hidden match each agent's profile", () => {
 
 test("read-only agents get the lean subagent prompt by default", () => {
   for (const agent of agents()) {
-    if (DENYLIST.has(agent.id) || WRITERS.has(agent.id) || allows(agent, "edit")) continue
+    const edits = agent.rules.some((rule) => rule.action === "edit" && rule.effect === "allow")
+    if (DENYLIST.has(agent.id) || WRITERS.has(agent.id) || edits) continue
     expect({ id: agent.id, lean: DEFAULT_LEAN_AGENTS.includes(agent.id) }).toEqual({ id: agent.id, lean: true })
   }
 })
