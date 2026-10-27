@@ -471,6 +471,104 @@ function describeAnswer(question, answer, index) {
   return `${head}${value}${note}`;
 }
 
+// plugins/parley/src/takeover.ts
+var RECOMMENDED = /\s*\(recommended\)\s*$/i;
+var DISMISSED = "The user dismissed this question";
+var clip = (text, max) => text.length > max ? `${text.slice(0, max - 1)}\u2026` : text;
+function fromPrompts(prompts) {
+  if (!Array.isArray(prompts) || prompts.length === 0)
+    return { errors: ["questions must be a non-empty array"] };
+  const questions = prompts.map((prompt, index) => {
+    const text = typeof prompt.question === "string" ? prompt.question.trim() : "";
+    const header = typeof prompt.header === "string" ? prompt.header.trim() : "";
+    const base = { id: `q${index + 1}`, title: header || clip(text, 60) || `Question ${index + 1}`, ...text ? { body: text } : {} };
+    const raw = Array.isArray(prompt.options) ? prompt.options : [];
+    if (raw.length === 0)
+      return { ...base, kind: "ask_text" };
+    const options = raw.map((option, at) => {
+      const label = option.label.replace(RECOMMENDED, "") || option.label;
+      const description = option.description?.trim();
+      return { id: `o${at + 1}`, label, ...description && description !== label ? { description } : {} };
+    });
+    const recommended = raw.flatMap((option, at) => RECOMMENDED.test(option.label) ? [`o${at + 1}`] : []);
+    if (prompt.multiple === true)
+      return { ...base, kind: "pick_many", options, allow_other: true, ...recommended.length > 0 ? { recommended } : {} };
+    return { ...base, kind: "pick_one", options, allow_other: true, ...recommended[0] ? { recommended: recommended[0] } : {} };
+  });
+  const errors = validateQuestions(questions);
+  return errors.length > 0 ? { errors } : { questions };
+}
+function shouldTakeOver(settings, attached) {
+  return settings.questionTool === "takeover" && !settings.disabled && attached;
+}
+function nativeAnswer(prompt, question, answer) {
+  if (answer === undefined || answer.value === undefined)
+    return [];
+  const value = answer.value;
+  const label = (id) => {
+    const index = (question.options ?? []).findIndex((option) => option.id === id);
+    return prompt.options[index]?.label ?? id;
+  };
+  const selected = value.selected === undefined ? [] : Array.isArray(value.selected) ? value.selected : [value.selected];
+  const parts = [...selected.map(label)];
+  if (typeof value.other === "string" && value.other.trim() !== "")
+    parts.push(value.other);
+  if (typeof value.text === "string" && value.text.trim() !== "")
+    parts.push(value.text);
+  return parts;
+}
+function nativeText(entries) {
+  const formatted = entries.map((entry) => `"${entry.question}"="${entry.answer.length ? entry.answer.join(", ") : "Unanswered"}"`).join(", ");
+  const lines = [`User has answered your questions: ${formatted}. You can now continue with the user's answers in mind.`];
+  for (const entry of entries)
+    if (entry.note)
+      lines.push(`Note on "${entry.question}": ${entry.note}`);
+  const deferred = entries.filter((entry) => entry.deferred).map((entry) => `"${entry.question}"`);
+  if (deferred.length > 0)
+    lines.push(`Deferred (the user will answer later): ${deferred.join(", ")}`);
+  return lines.join(`
+`);
+}
+function nativeResult(prompts, questions, result) {
+  const answers = questions.map((question, index) => nativeAnswer(prompts[index], question, result.answers.find((answer) => answer.id === question.id)));
+  const content = nativeText(questions.map((question, index) => {
+    const answer = result.answers.find((candidate) => candidate.id === question.id);
+    return {
+      question: prompts[index].question,
+      answer: answers[index] ?? [],
+      ...answer?.note ? { note: answer.note } : {},
+      deferred: answer?.status === "deferred"
+    };
+  }));
+  return {
+    output: { answers },
+    content,
+    metadata: {
+      answers,
+      parley: {
+        ...result.round === undefined ? {} : { round: result.round },
+        answers: result.answers.map(publicAnswer),
+        pending: result.pending
+      }
+    }
+  };
+}
+function nativeSummary(result, questions) {
+  const asked = result.pending.length + result.answers.length;
+  const scope = asked === 0 ? questions : questions.filter((q) => result.pending.includes(q.id) || result.answers.some((a) => a.id === q.id));
+  return nativeText(scope.map((question) => {
+    const answer = result.answers.find((candidate) => candidate.id === question.id);
+    const value = answer?.value;
+    const described = value === undefined ? "" : typeof value.text === "string" ? value.text : describeValue(question, value);
+    return {
+      question: question.title,
+      answer: described === "" ? [] : [described],
+      ...answer?.note ? { note: answer.note } : {},
+      deferred: answer?.status === "deferred"
+    };
+  }));
+}
+
 // plugins/parley/src/format.ts
 var HINTS = {
   open: "The round is open in the parley panel. Call parley_wait to collect the answers.",
@@ -507,7 +605,7 @@ function describe(question, answer, position, fallback) {
 var MAX_INLINE_TEXT = 20000;
 var TEXT_MIME = /^(text\/|application\/(json|xml|yaml|x-yaml|toml|javascript|typescript))/;
 var baseMime = (mime) => mime.split(";")[0]?.trim().toLowerCase() || "application/octet-stream";
-function render(result, questions, save) {
+function render(result, questions, save, format = "parley") {
   const output = { ...result, answers: result.answers.map(publicAnswer) };
   const parts = [];
   const notes = [];
@@ -533,7 +631,8 @@ ${clipped}`);
       notes.push(`${answer.id}: ${file.name} (${mime}, ${file.size} B)${path ? ` saved to ${path}` : " not forwarded"}`);
     }
   }
-  const text = [summarise(result, questions), ...notes].join(`
+  const head = format === "native" && result.status === "submitted" ? nativeSummary(result, questions) : summarise(result, questions);
+  const text = [head, ...notes].join(`
 
 `);
   const content = parts.length === 0 ? text : [{ type: "text", text }, ...parts];
@@ -673,6 +772,11 @@ var askInput = {
       type: "integer",
       minimum: 0,
       description: "Default 1800; 0 waits without limit"
+    },
+    format: {
+      type: "string",
+      enum: ["parley", "native"],
+      description: "native: word the answers like the question tool"
     },
     questions: { type: "array", minItems: 1, maxItems: MAX_QUESTIONS, items: questionSchema }
   }
@@ -1073,6 +1177,7 @@ function settingsFrom(options, env) {
   const window = Number(options.heartbeat_window_s);
   return {
     fallback: options.fallback === "question" ? "question" : "none",
+    questionTool: options.questionTool === "off" ? "off" : "takeover",
     disabled: options.ui === "off" || env.PARLEY_DISABLE === "1",
     heartbeatWindowMs: Number.isFinite(window) && window > 0 ? window * 1000 : 30000
   };
@@ -1099,6 +1204,10 @@ class Parley {
   attached(sessionID) {
     return this.presence.attached(this.#now(), sessionID);
   }
+  takeoverWanted() {
+    this.presence.prune(this.#now());
+    return shouldTakeOver(this.deps.settings, this.presence.size > 0);
+  }
   async ask(input, context) {
     const questions = Array.isArray(input.questions) ? input.questions.map(coerceQuestion) : input.questions;
     if (this.deps.settings.disabled)
@@ -1111,6 +1220,22 @@ class Parley {
 - `)}`);
       return { result: await this.#fallback({ ...input, questions }, context), questions };
     }
+    return this.#open({ ...input, questions }, context);
+  }
+  async takeover(input, context) {
+    if (!shouldTakeOver(this.deps.settings, this.attached(context.sessionID)))
+      return;
+    const prompts = input.questions ?? [];
+    const mapped = fromPrompts(prompts);
+    if ("errors" in mapped)
+      return;
+    const { result, questions } = await this.#open({ questions: mapped.questions, timeout_s: 0 }, context);
+    if (result.status === "cancelled")
+      throw new Error(result.reason === "user_closed" || result.reason === "dismissed" ? DISMISSED : `The question was cancelled before the user answered (${result.reason ?? "cancelled"})`);
+    return nativeResult(prompts, questions, result);
+  }
+  async#open(input, context) {
+    const questions = input.questions;
     const opened = this.rounds.open(context.sessionID, {
       questions,
       ...input.title === undefined ? {} : { title: input.title },
@@ -1283,8 +1408,29 @@ var src_default = Plugin.define({
       },
       questionTool: async () => (await ctx.tool.list()).find((tool) => tool.id === "question")
     });
+    let takeover = Promise.resolve(undefined);
+    const syncTakeover = () => {
+      takeover = takeover.then(async (current) => {
+        const wanted = service.takeoverWanted();
+        if (wanted && !current)
+          return ctx.tool.transform((editor) => editor.update("question", (draft) => {
+            const builtin = draft.execute;
+            draft.execute = async (input, context) => await service.takeover(input, call(context)) ?? builtin(input, context);
+          }));
+        if (!wanted && current)
+          await current.dispose();
+        return wanted ? current : undefined;
+      }, () => {
+        return;
+      });
+      return takeover;
+    };
     const rpc = await ctx.rpc.register(ParleyRpc, {
-      attach: async (input) => service.attach(input),
+      attach: async (input) => {
+        const result = service.attach(input);
+        syncTakeover();
+        return result;
+      },
       pending: async (input) => service.pending(input ?? {}),
       submit: async (input) => service.submit(input),
       cancel: async (input) => service.cancel(input)
@@ -1306,7 +1452,7 @@ var src_default = Plugin.define({
         execute: async (input, context) => {
           try {
             const { result, questions } = await service.ask(input, call(context));
-            return render(result, questions, saveUpload);
+            return render(result, questions, saveUpload, input.format === "native" ? "native" : "parley");
           } catch (error) {
             if (error instanceof InputError)
               throw new Error(error.message);
@@ -1339,9 +1485,13 @@ var src_default = Plugin.define({
     });
     const sweep = setInterval(() => service.sweep(), 5 * 60000);
     sweep.unref?.();
+    const presence = setInterval(() => void syncTakeover(), 15000);
+    presence.unref?.();
     return async () => {
       clearInterval(sweep);
+      clearInterval(presence);
       service.close();
+      await (await takeover)?.dispose();
       await tools.dispose();
       await rpc.dispose();
     };

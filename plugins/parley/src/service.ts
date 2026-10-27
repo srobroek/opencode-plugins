@@ -1,9 +1,10 @@
 import type { SubmittedAnswer } from "./answers.ts"
-import { FALLBACK_KINDS, fromQuestionTool, toPrompt, unsupported } from "./fallback.ts"
+import { FALLBACK_KINDS, fromQuestionTool, type Prompt, toPrompt, unsupported } from "./fallback.ts"
 import { Presence } from "./presence.ts"
 import { coerceQuestion, type Question, validateQuestions } from "./questions.ts"
 import { collect, type Round, type RoundResult, Rounds, view, type WaitMode, waitFor } from "./rounds.ts"
 import type { RoundEvent } from "./rpc.ts"
+import { DISMISSED, fromPrompts, nativeResult, shouldTakeOver } from "./takeover.ts"
 
 export const DEFAULT_TIMEOUT_S = 1800
 export const CLOSED_TTL_MS = 30 * 60_000
@@ -11,6 +12,8 @@ export const CLOSED_TTL_MS = 30 * 60_000
 export interface Settings {
   /** `"question"` falls back to the built-in question tool when no TUI is attached. */
   readonly fallback: "question" | "none"
+  /** `"takeover"` routes built-in `question` calls through parley while a TUI is attached. */
+  readonly questionTool: "takeover" | "off"
   readonly disabled: boolean
   readonly heartbeatWindowMs: number
 }
@@ -19,6 +22,7 @@ export function settingsFrom(options: Readonly<Record<string, unknown>>, env: Re
   const window = Number(options.heartbeat_window_s)
   return {
     fallback: options.fallback === "question" ? "question" : "none",
+    questionTool: options.questionTool === "off" ? "off" : "takeover",
     disabled: options.ui === "off" || env.PARLEY_DISABLE === "1",
     heartbeatWindowMs: Number.isFinite(window) && window > 0 ? window * 1000 : 30_000,
   }
@@ -53,6 +57,8 @@ export interface AskInput {
   readonly round?: number
   readonly wait?: WaitMode
   readonly timeout_s?: number
+  /** `"native"` words the result text like the built-in question tool. */
+  readonly format?: "native" | "parley"
 }
 
 export interface WaitInput {
@@ -87,6 +93,12 @@ export class Parley {
     return this.presence.attached(this.#now(), sessionID)
   }
 
+  /** Whether the `question` tool should be wrapped at all: takeover on and some TUI attached here. */
+  takeoverWanted() {
+    this.presence.prune(this.#now())
+    return shouldTakeOver(this.deps.settings, this.presence.size > 0)
+  }
+
   async ask(input: AskInput, context: CallContext): Promise<{ result: Result; questions: readonly Question[] }> {
     const questions = (Array.isArray(input.questions) ? input.questions.map(coerceQuestion) : input.questions) as Question[]
     if (this.deps.settings.disabled) return { result: unavailable("disabled"), questions }
@@ -95,6 +107,30 @@ export class Parley {
       if (errors.length > 0) throw new InputError(`Invalid questions:\n- ${errors.join("\n- ")}`)
       return { result: await this.#fallback({ ...input, questions }, context), questions }
     }
+    return this.#open({ ...input, questions }, context)
+  }
+
+  /**
+   * Runs a built-in `question` call as a parley round when takeover applies, and returns its result in
+   * the question tool's shape. `undefined` means: leave the call to the built-in tool.
+   */
+  async takeover(input: { questions?: readonly Prompt[] }, context: CallContext) {
+    if (!shouldTakeOver(this.deps.settings, this.attached(context.sessionID))) return undefined
+    const prompts = input.questions ?? []
+    const mapped = fromPrompts(prompts)
+    if ("errors" in mapped) return undefined
+    const { result, questions } = await this.#open({ questions: mapped.questions, timeout_s: 0 }, context)
+    if (result.status === "cancelled")
+      throw new Error(
+        result.reason === "user_closed" || result.reason === "dismissed"
+          ? DISMISSED
+          : `The question was cancelled before the user answered (${result.reason ?? "cancelled"})`,
+      )
+    return nativeResult(prompts, questions, result)
+  }
+
+  async #open(input: AskInput, context: CallContext): Promise<{ result: Result; questions: readonly Question[] }> {
+    const questions = input.questions
     const opened = this.rounds.open(
       context.sessionID,
       {

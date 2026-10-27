@@ -1,7 +1,14 @@
 import type { Plugin } from "@opencode/plugin/tui"
 import type { PanelInput } from "@opencode/plugin/tui/context"
-import { type ScrollBoxRenderable, type SyntaxStyle, TextAttributes, type TextareaRenderable } from "@opentui/core"
-import { createEffect, createMemo, createSignal, For, Match, Show, Switch } from "solid-js"
+import {
+  type BoxRenderable,
+  type Renderable,
+  type ScrollBoxRenderable,
+  type SyntaxStyle,
+  TextAttributes,
+  type TextareaRenderable,
+} from "@opentui/core"
+import { createEffect, createMemo, createSignal, For, Match, onCleanup, onMount, Show, Switch } from "solid-js"
 import { createStore, reconcile } from "solid-js/store"
 import type { FileValue, SubmittedAnswer } from "./answers.ts"
 import { DEFAULT_EMOJIS, optionLabel, type Question, sliderBounds } from "./questions.ts"
@@ -72,8 +79,11 @@ async function readFiles(text: string): Promise<FileValue[]> {
   return files
 }
 
-export function RoundPanel(props: PanelProps) {
-  const theme = () => props.context.theme
+/** Draft, edit and submit state of one round, shared by the full panel and the inline card. */
+function createRoundControls(
+  props: Pick<PanelProps, "store" | "round" | "submit">,
+  onMove?: (id: string) => void,
+) {
   const roundID = () => props.round()?.roundID ?? ""
   const key = (id: string) => `${roundID()}\u0000${id}`
   const draftOf = (id: string): Draft | undefined => props.store.drafts[key(id)]
@@ -83,7 +93,6 @@ export function RoundPanel(props: PanelProps) {
   const [editing, setEditing] = createSignal<Editing>()
   const [errors, setErrors] = createSignal<string[]>([])
   const [busy, setBusy] = createSignal(false)
-  let scroll: ScrollBoxRenderable | undefined
   let textarea: TextareaRenderable | undefined
 
   const questions = createMemo(() => props.round()?.questions ?? [])
@@ -107,7 +116,7 @@ export function RoundPanel(props: PanelProps) {
     const next = (focus() + delta + count) % count
     setFocus(next)
     const id = questions()[next]?.id
-    if (id) scroll?.scrollChildIntoView(`parley-card-${id}`)
+    if (id) onMove?.(id)
   }
 
   const startEdit = (field: "note" | "text") => {
@@ -156,6 +165,31 @@ export function RoundPanel(props: PanelProps) {
       setBusy(false)
     }
   }
+
+  return {
+    draftOf,
+    focus,
+    editing,
+    errors,
+    busy,
+    questions,
+    current,
+    update,
+    moveCard,
+    startEdit,
+    finishEdit,
+    submit,
+    setTextarea: (element: TextareaRenderable) => {
+      textarea = element
+    },
+  }
+}
+
+export function RoundPanel(props: PanelProps) {
+  const theme = () => props.context.theme
+  let scroll: ScrollBoxRenderable | undefined
+  const { draftOf, focus, editing, errors, busy, questions, update, moveCard, startEdit, finishEdit, submit, setTextarea } =
+    createRoundControls(props, (id) => scroll?.scrollChildIntoView(`parley-card-${id}`))
 
   props.context.keymap.layer(() => ({
     enabled: () => editing() === undefined,
@@ -253,7 +287,7 @@ export function RoundPanel(props: PanelProps) {
               focused={index() === focus()}
               editing={editing()?.id === question.id ? editing()?.field : undefined}
               textareaRef={(element) => {
-                textarea = element
+                setTextarea(element)
                 queueMicrotask(() => {
                   if (element.isDestroyed) return
                   element.focus()
@@ -274,6 +308,144 @@ export function RoundPanel(props: PanelProps) {
       <Show when={busy()}>
         <text fg={theme().text.muted}>Submitting…</text>
       </Show>
+    </box>
+  )
+}
+
+export interface InlineCardProps extends Omit<PanelProps, "panel"> {
+  /** Hides the card; `/parley` brings it back with its edits. */
+  readonly hide: () => void
+  /** Moves the round to the full-screen panel. */
+  readonly expand: () => void
+}
+
+const within = (node: Renderable | null | undefined, root: Renderable | undefined) => {
+  for (let current = node; current; current = current.parent) if (current === root) return true
+  return false
+}
+
+/** A one-question round as a compact card above the prompt, with the panel's keys. */
+export function InlineCard(props: InlineCardProps) {
+  const theme = () => props.context.theme
+  const { draftOf, editing, errors, busy, questions, update, startEdit, finishEdit, submit, setTextarea } =
+    createRoundControls(props)
+  let box: BoxRenderable | undefined
+  const question = () => questions()[0]
+
+  // Take focus from the prompt like a dialog does, and hand it back when the card goes away.
+  onMount(() => {
+    const previous = props.context.renderer.currentFocusedRenderable
+    queueMicrotask(() => {
+      if (box && !box.isDestroyed) box.focus()
+    })
+    onCleanup(() => {
+      const now = props.context.renderer.currentFocusedRenderable
+      if (now && !within(now, box)) return
+      if (previous && !previous.isDestroyed) previous.focus()
+    })
+  })
+
+  // The edit textarea held focus; give it back to the card so its keys keep working.
+  const done = async () => {
+    await finishEdit()
+    if (box && !box.isDestroyed) box.focus()
+  }
+
+  // Enter on a single choice with nothing picked yet takes the row under the cursor, like the built-in form.
+  const send = async () => {
+    const q = question()
+    const draft = q ? draftOf(q.id) : undefined
+    if (q && draft?.status === "unset" && draft.note.trim() === "" && rows(q).length > 0 && q.kind !== "pick_many")
+      update((target, current) => choose(target, current))
+    await submit()
+  }
+
+  props.context.keymap.layer(() => ({
+    target: () => box,
+    enabled: () => editing() === undefined,
+    commands: [
+      { bind: "down", title: "Next choice", group: "Parley", run: () => update((q, d) => moveCursor(q, d, 1)) },
+      { bind: "up", title: "Previous choice", group: "Parley", run: () => update((q, d) => moveCursor(q, d, -1)) },
+      { bind: "j", title: "Next choice", group: "Parley", run: () => update((q, d) => moveCursor(q, d, 1)) },
+      { bind: "k", title: "Previous choice", group: "Parley", run: () => update((q, d) => moveCursor(q, d, -1)) },
+      { bind: "space", title: "Choose", group: "Parley", run: () => update((q, d) => choose(q, d)) },
+      ...Array.from({ length: 9 }, (_, index) => ({
+        bind: String(index + 1),
+        title: `Choose ${index + 1}`,
+        group: "Parley",
+        run: () => update((q, d) => choose(q, d, index)),
+      })),
+      { bind: "left", title: "Decrease", group: "Parley", run: () => update((q, d) => step(q, d, -1)) },
+      { bind: "right", title: "Increase", group: "Parley", run: () => update((q, d) => step(q, d, 1)) },
+      { bind: "a", title: "Accept recommendation", group: "Parley", run: () => update(accept) },
+      { bind: "d", title: "Defer", group: "Parley", run: () => update((q, d) => toggleDefer(d, q)) },
+      { bind: "n", title: "Note", group: "Parley", run: () => startEdit("note") },
+      { bind: "e", title: "Edit answer", group: "Parley", run: () => startEdit("text") },
+      { bind: "return", title: "Submit", group: "Parley", run: () => void send() },
+      { bind: "ctrl+return", title: "Submit", group: "Parley", run: () => void send() },
+      { bind: "ctrl+s", title: "Submit", group: "Parley", run: () => void send() },
+      { bind: "f", title: "Full screen", group: "Parley", run: () => props.expand() },
+      { bind: "escape", title: "Hide", group: "Parley", run: () => props.hide() },
+      {
+        bind: "shift+d",
+        title: "Dismiss",
+        group: "Parley",
+        run: () => {
+          const round = props.round()
+          if (round) void props.dismiss(round)
+        },
+      },
+    ],
+  }))
+
+  props.context.keymap.layer(() => ({
+    target: () => box,
+    enabled: () => editing() !== undefined,
+    commands: [
+      { bind: "escape", title: "Done editing", group: "Parley", run: () => void done() },
+      { bind: "ctrl+return", title: "Submit", group: "Parley", run: () => void submit() },
+      { bind: "ctrl+s", title: "Submit", group: "Parley", run: () => void submit() },
+    ],
+  }))
+
+  return (
+    <box
+      ref={(element: BoxRenderable) => (box = element)}
+      focusable
+      flexDirection="column"
+      flexShrink={0}
+      paddingLeft={1}
+      paddingRight={1}
+    >
+      <Show when={question()}>
+        {(q: () => Question) => (
+          <Card
+            context={props.context}
+            syntax={props.syntax}
+            question={q()}
+            index={0}
+            draft={draftOf(q().id) ?? initialDraft(q())}
+            focused
+            editing={editing()?.id === q().id ? editing()?.field : undefined}
+            textareaRef={(element) => {
+              setTextarea(element)
+              queueMicrotask(() => {
+                if (element.isDestroyed) return
+                element.focus()
+                element.gotoBufferEnd()
+              })
+            }}
+          />
+        )}
+      </Show>
+      <For each={errors()}>{(error) => <text fg={theme().text.feedback.error.base}>{error}</text>}</For>
+      <text fg={theme().text.muted} wrapMode="word">
+        {busy()
+          ? "Submitting…"
+          : editing()
+            ? "esc done · ctrl+s submit"
+            : "Parley · 1-9/space choose · enter submit · n note · d defer · e edit · a accept · f full screen · esc hide · D dismiss"}
+      </text>
     </box>
   )
 }

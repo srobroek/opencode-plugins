@@ -19,6 +19,7 @@ Options:
 
 | Option | Default | Effect |
 | --- | --- | --- |
+| `questionTool` | `"takeover"` | While a parley TUI is attached, calls to the built-in `question` tool are asked in parley and answered in that tool's format. `"off"` leaves the tool alone. |
 | `fallback` | `"none"` | `"question"`: with no TUI attached, ask through the built-in `question` tool (pick_one, show_options, pick_many, confirm, ask_text only). |
 | `ui` | | `"off"` makes every call return `unavailable`. `PARLEY_DISABLE=1` does the same. |
 | `heartbeat_window_s` | `30` | How recently a TUI must have checked in to count as attached. |
@@ -38,6 +39,9 @@ they add nothing to the request's tool list, and share the permission key
 | `parley_ask` | Opens a round (or adds questions to the session's open round) and, with `wait: "all"` (default), blocks until the user submits. `wait: "any"` / `"none"` return earlier. `timeout_s` defaults to 1800; 0 waits without limit. Aborting the call cancels the round in the UI. |
 | `parley_wait` | Keeps waiting on the session's round after a timeout or a non-blocking ask. Returns only answers it has not returned before. Optional `ids` and `wait: "any"`. |
 | `parley_end` | Closes the open round (if any) and shows an optional `message`. |
+
+`parley_ask` with `format: "native"` words a submitted result like the built-in
+`question` tool (`output` stays parley's JSON).
 
 Each question: `{ id, title, kind, body?, rationale?, recommended?, options?, ... }`.
 The `id` is yours (for example a design-tree node such as `auth.storage`);
@@ -72,10 +76,44 @@ Uploaded images reach the model as image content. Text files are inlined in the
 result. Other files are written to a temporary directory on the server and the
 path is reported.
 
+## Question tool takeover
+
+With `questionTool: "takeover"` (default), parley wraps the built-in `question`
+tool while a parley TUI is attached at the location. A call from a session with
+an attached TUI becomes a parley round: each prompt becomes a `pick_one`
+(`pick_many` for `multiple: true`) with free text allowed, or an `ask_text`
+when it has no options. A label ending in "(Recommended)" becomes the
+recommendation. The model gets the built-in tool's result: `output.answers` and
+`metadata.answers` hold the chosen labels as the model wrote them, and the text
+is the built-in sentence with parley's extras on their own lines:
+
+```text
+User has answered your questions: "Which database?"="Postgres", "Which extras?"="Unanswered". You can now continue with the user's answers in mind.
+Note on "Which database?": we already run it
+Deferred (the user will answer later): "Which extras?"
+```
+
+`metadata.parley` holds parley's own answers. Dismissing the round (`D`) fails
+the call with "The user dismissed this question", so the model keeps going. A
+dismissed built-in form ends the turn instead.
+
+With no TUI attached, the built-in tool runs unchanged. After the last TUI's
+heartbeat expires (up to `heartbeat_window_s` plus 15 s), the wrapper is removed.
+Calls parley cannot ask as given, such as a prompt with exactly one option, also
+go to the built-in tool.
+
+Why a wrapper and not an `execute.before` rename (the `bash` → `shell` trick
+in agent-efficiency): in 2.1.4 a renamed call resolves only to direct tools,
+and parley's tools are Code Mode tools. Renaming to one fails with "No tool
+named …".
+
 ## TUI panel
 
-A round opens the session's tab, sends an attention notification and shows the
-panel full screen. `esc` minimises it; `/parley` (or the command palette)
+A round opens the session's tab and sends an attention notification. A round
+with one question shows as a compact card above the prompt. The card takes
+focus and uses the keys below, with `enter` to submit (it also picks the row
+under the cursor if nothing is chosen), `f` for full screen and `esc` to hide
+the card (`/parley` brings it back). Larger rounds show the panel full screen. `esc` minimises it; `/parley` (or the command palette)
 brings it back with your edits intact.
 
 | Key | Action |
@@ -113,5 +151,8 @@ with `action` `opened`, `updated`, `closed` or `ended`.
 3. The panel opens. Change one answer, defer one with a note (`d`, `n`), press
    `esc`, run `/parley`, check the edits survived, press `ctrl+s`.
 4. The tool result lists each id with its status and note.
-5. Repeat with `opencode run` (no TUI): the call returns `unavailable`, or with
+5. Ask the model to use the `question` tool with one question: the card shows
+   above the prompt. Choose with `2`, add a note with `n`, press `esc`, then
+   `enter`. The result reads like the built-in tool's, plus a `Note on …` line.
+6. Repeat with `opencode run` (no TUI): the call returns `unavailable`, or with
    `fallback: "question"` the questions appear as a form.
