@@ -1,0 +1,9 @@
+Playground notes
+
+These are plain-text meeting notes for the ask_file demo. When you attach this
+file, parley inlines its contents in the tool result, so the model reads it
+directly.
+
+- Ship the cache behind a flag first.
+- Keep the old code path for one release.
+- Measure p95 latency before and after.

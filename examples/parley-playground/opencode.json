@@ -1,0 +1,13 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": [
+    {
+      "package": "../../plugins/parley",
+      "options": {
+        "fallback": "{env:PARLEY_FALLBACK}",
+        "questionTool": "{env:PARLEY_QUESTION_TOOL}"
+      }
+    }
+  ],
+  "permissions": [{ "action": "parley", "resource": "*", "effect": "allow" }]
+}
