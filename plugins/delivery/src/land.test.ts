@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import {
-  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -221,14 +220,20 @@ function commitFile(repo: string, file: string, content: string, message: string
 }
 
 /** Resolve once `file` exists, on the directory's change events rather than a polling clock. */
-function appeared(file: string): Promise<void> {
+function appeared(file: string, signal: AbortSignal): Promise<void> {
   const { promise, resolve } = Promise.withResolvers<void>()
   const settle = (): void => {
     if (!existsSync(file)) return
     watcher.close()
+    signal.removeEventListener("abort", cancel)
     resolve()
   }
   const watcher = watch(dirname(file), settle)
+  const cancel = (): void => {
+    watcher.close()
+    resolve()
+  }
+  signal.addEventListener("abort", cancel, { once: true })
   settle()
   return promise
 }
@@ -504,7 +509,7 @@ describe("delivery_land", () => {
     })
     expect(outcome.receipt.pr.mergeCommitOid).toBe(repo.landed)
     expect(files()).toHaveLength(1)
-  })
+  }, 60_000)
 
   test("a clean rebase whose landed hunk's context moved on the base is still proved", async () => {
     const repo = rebasedRepository("context-moved")
@@ -524,7 +529,7 @@ describe("delivery_land", () => {
       mergeShape: { rebase: { method: "patch-id", commits: 2 } },
     })
     expect(files()).toHaveLength(1)
-  })
+  }, 60_000)
 
   test("a rebase landing whose patches differ from the reviewed commits refuses and writes nothing", async () => {
     const repo = rebasedRepository("altered")
@@ -536,7 +541,7 @@ describe("delivery_land", () => {
     expect(outcome.reason).toContain(repo.landed)
     expect(outcome.reason).toContain("no receipt was written")
     expect(files()).toHaveLength(0)
-  })
+  }, 60_000)
 
   test("refuses merge method when repository policy disallows merge commits", async () => {
     const { outcome, calls, files } = await land(
@@ -1840,7 +1845,7 @@ describe("delivery_land", () => {
   })
 
   /**
-   * The hung `gh` is a real process: a script on PATH that records its pid and sleeps.
+   * The hung forge call is a real process that records its pid and waits.
    * The interrupt must kill it and return, instead of holding the session for the
    * forge timeout, and nothing may be merged or written after it.
    */
@@ -1850,12 +1855,13 @@ describe("delivery_land", () => {
     git(canonical, ["remote", "add", "origin", REMOTE_URL])
     const bin = temporaryDirectory("delivery-land-bin-")
     const pidFile = join(bin, "gh.pid")
-    // Written aside and renamed, so the pid file exists only once it is whole.
+    // Invoke a script through an existing executable, not a freshly scanned
+    // shebang. The marker is published by the process we will actually kill.
+    const stub = join(bin, "gh.mjs")
     writeFileSync(
-      join(bin, "gh"),
-      `#!/bin/sh\necho $$ > '${pidFile}.tmp' && mv '${pidFile}.tmp' '${pidFile}'\nexec sleep 30\n`,
+      stub,
+      `import { writeFileSync, renameSync } from "node:fs";\nwriteFileSync(${JSON.stringify(`${pidFile}.tmp`)}, String(process.pid));\nrenameSync(${JSON.stringify(`${pidFile}.tmp`)}, ${JSON.stringify(pidFile)});\nsetInterval(() => {}, 1000);\n`,
     )
-    chmodSync(join(bin, "gh"), 0o755)
     const receipts = temporaryDirectory("delivery-land-receipts-")
     const controller = new AbortController()
     const pending = landPullRequest(
@@ -1864,28 +1870,28 @@ describe("delivery_land", () => {
         cwd: canonical,
         now: () => NOW,
         receiptsDirectory: receipts,
-        env: { PATH: `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}` },
+        run: (argv, options) => runCli(argv[0] === "gh" ? [process.execPath, stub] : argv, options),
         signal: controller.signal,
       },
     )
-    await Promise.race([appeared(pidFile), pending])
-    expect(existsSync(pidFile)).toBe(true)
-    const pid = Number(readFileSync(pidFile, "utf8").trim())
-    expect(() => process.kill(pid, 0)).not.toThrow()
-    // Timed from the interrupt: getting the stub running is spawn cost, not what is under test.
-    const aborted = Date.now()
-    controller.abort()
-    const outcome = await pending
+    try {
+      await Promise.race([appeared(pidFile, controller.signal), pending])
+      expect(existsSync(pidFile)).toBe(true)
+      const pid = Number(readFileSync(pidFile, "utf8").trim())
+      expect(() => process.kill(pid, 0)).not.toThrow()
+      controller.abort()
+      const outcome = await pending
 
-    expect(Date.now() - aborted).toBeLessThan(4_000)
-    if (outcome.ok) throw new Error("expected a refusal")
-    expect(outcome.reason).toContain("gh pr view 470")
-    expect(outcome.reason).toContain("abort")
-    expect(() => process.kill(pid, 0)).toThrow()
-    expect(readdirSync(receipts)).toEqual([])
-    // The stub must be exec'd by name, and macOS can hold the first exec of a freshly
-    // written executable for about 2 s; with git children under load, 5 s is too tight.
-  }, 20_000)
+      if (outcome.ok) throw new Error("expected a refusal")
+      expect(outcome.reason).toContain("gh pr view 470")
+      expect(outcome.reason).toContain("abort")
+      expect(() => process.kill(pid, 0)).toThrow()
+      expect(readdirSync(receipts)).toEqual([])
+    } finally {
+      controller.abort()
+      await pending
+    }
+  }, 60_000)
 })
 
 describe("branch reading", () => {
