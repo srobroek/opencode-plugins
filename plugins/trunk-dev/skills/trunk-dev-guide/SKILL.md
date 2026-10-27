@@ -1,6 +1,6 @@
 ---
 name: trunk-dev-guide
-description: "Use when branching, opening, merging or landing a PR/MR in a trunk-based repo, adding feature flags or semantic-release."
+description: "Use when branching, landing on main, opening or merging a PR/MR, adding or removing a feature flag, or semantic-release."
 ---
 
 # Trunk-based development guide
