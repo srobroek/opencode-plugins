@@ -34,6 +34,7 @@ function saveUpload(file: FileValue) {
 export default Plugin.define({
   id: "srobroek.parley",
   async setup(ctx) {
+    let disposed = false
     let emitEvent: ((event: RoundEvent) => Promise<void>) | undefined
     const service = new Parley({
       settings: settingsFrom(ctx.options, process.env),
@@ -48,10 +49,15 @@ export default Plugin.define({
     // while a parley TUI is attached here; otherwise the registry holds the untouched built-in tool.
     let takeover: Promise<{ dispose: () => Promise<void> } | undefined> = Promise.resolve(undefined)
     const syncTakeover = () => {
+      if (disposed) return
       takeover = takeover.then(async (current) => {
+        if (disposed) {
+          await current?.dispose()
+          return undefined
+        }
         const wanted = service.takeoverWanted()
-        if (wanted && !current)
-          return ctx.tool.transform((editor) =>
+        if (wanted && !current) {
+          const handle = await ctx.tool.transform((editor) =>
             editor.update("question", (draft) => {
               draft.execute = wrapQuestion(
                 draft.execute,
@@ -60,6 +66,12 @@ export default Plugin.define({
               )
             }),
           )
+          if (disposed) {
+            await handle.dispose()
+            return undefined
+          }
+          return handle
+        }
         if (!wanted && current) await current.dispose()
         return wanted ? current : undefined
       }, () => undefined)
@@ -135,13 +147,14 @@ export default Plugin.define({
     const presence = setInterval(() => void syncTakeover(), 15_000)
     presence.unref?.()
 
-    return async () => {
+    return () => {
       clearInterval(sweep)
       clearInterval(presence)
+      disposed = true
       service.close()
-      await (await takeover)?.dispose()
-      await tools.dispose()
-      await rpc.dispose()
+      void takeover.then((current) => current?.dispose()).catch(() => {})
+      void tools.dispose().catch(() => {})
+      void rpc.dispose().catch(() => {})
     }
   },
 })
