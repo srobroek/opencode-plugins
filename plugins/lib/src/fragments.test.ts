@@ -82,3 +82,37 @@ describe("review-core", () => {
     expect([...parts.values()].join("\n").length).toBeLessThan(1600)
   })
 })
+
+describe("coding-core", () => {
+  const parts = fragmentParts("coding-core", readFragment("coding-core"))
+
+  test("has the method and the rule parts", () => {
+    expect([...parts.keys()]).toEqual(["method", "agents-md", "scope", "paths", "blocked"])
+  })
+
+  test("carries the shared coding method and rules", () => {
+    const text = [...parts.values()].join("\n")
+    for (const rule of [
+      "AGENTS.md",
+      "check commands",
+      "reproduce it",
+      "Never guess a root cause",
+      "OpenCode temp",
+      "Never claim success without",
+      "Review your own diff",
+      "commit, push and scratch rules",
+      "absolute paths",
+      "never ask the",
+    ])
+      expect(text).toContain(rule)
+  })
+
+  test("names no agent-specific contract", () => {
+    const text = [...parts.values()].join("\n")
+    for (const word of ["bd ", "bead", "VERDICT", "SPLIT", "PARTIAL"]) expect(text).not.toContain(word)
+  })
+
+  test("stays near 400 tokens (about 4 characters each)", () => {
+    expect([...parts.values()].join("\n").length).toBeLessThan(1700)
+  })
+})
