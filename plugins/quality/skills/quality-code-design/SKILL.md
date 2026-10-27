@@ -13,6 +13,7 @@ TRIGGER
 + Review a branch, PR, or work-in-progress change since a fixed point.
 - Prose-only work or mechanical execution of an unchanged command needs no design analysis.
 - Tuning code-agent instructions, model routing, or tools against task cases → the `tune-model-prompt` skill when installed (an owner-local skill this repository does not ship).
+- Deciding what to test, at which level, with which doubles or test data → the `quality-testing` skill.
 - Checking whether a state model or logic holds up before building it → the `prototype-logic` skill.
 
 ## Workflow
@@ -35,10 +36,15 @@ References live in `references/` beside this file; the links below are relative 
 | Module depth, seams, adapters, testability, or deepening shallow modules → [deep-modules.md](references/deep-modules.md) | Depth vocabulary, the seam rule, dependency categories, replace-don't-layer tests, optional design-it-twice |
 | Scope, duplication, or simplifying a solution → [simplicity.md](references/simplicity.md) | YAGNI, KISS, DRY, reversible design, refactoring scope, scripts, tests |
 | Adding a capability or dependency; library, ORM, or persistence choice → [dependencies.md](references/dependencies.md) | Repository and earlier-code reuse, mature packages, present value and boundaries |
+| Database state, transitions, migrations, dynamic SQL, or persistence tests → [persistence.md](references/persistence.md) | DB as the record, compare-and-set updates, append-only migrations, bound queries, real-database tests |
+| Generated bindings, IPC command names, wire casing, or client/server contract tests → [contracts.md](references/contracts.md) | Committed codegen with drift check, name conformance, one casing, tests against the real surface |
+| Plan/approve/apply flows, bulk or destructive file operations, path checks, audit trails → [safe-mutation.md](references/safe-mutation.md) | Apply-time approval tokens, freshness checks, traversal, append-only audit, reversible deletes |
 | Contracts, internal knowledge, naming, errors, or effects → [supporting-principles.md](references/supporting-principles.md) | Design by Contract, least knowledge, predictability, command-query separation; researched sources and limits |
 | Go code → [go.md](references/go.md) | Consumer interfaces, structs, composition, package boundaries, errors |
-| Rust code → [rust.md](references/rust.md) | Ownership, enums, traits, privacy, dispatch, error contracts |
-| Class-based, dynamic, functional, or procedural code → [other-paradigms.md](references/other-paradigms.md) | TypeScript, Python, Java/C#, functional and C-style designs |
+| Rust code → [rust.md](references/rust.md) | Ownership, enums, traits, privacy, dispatch, error enums, serde newtypes |
+| TypeScript or JavaScript code → [typescript.md](references/typescript.md) | Functions before classes, discriminated unions, branded types, errors with `cause` |
+| Python code → [python.md](references/python.md) | Dataclasses and protocols, exception hierarchies, NewType/Annotated, pydantic at boundaries |
+| Java/C#, functional, or procedural code → [other-paradigms.md](references/other-paradigms.md) | Java/C#, functional and C-style designs |
 | Code, PR, or work-in-progress review → [review.md](references/review.md) | Fixed point and spec source, checklist, severity, evidence, exceptions, review examples |
 | Uncertain scope, work sequencing, durable tradeoff, domain terms, or recurring delivery problem → [lifecycle.md](references/lifecycle.md) | Risk, small batches, decision records, term discipline, feedback and outcome metrics |
 | Selecting tests or making verification/performance claims → [verification.md](references/verification.md) | Behavioral evidence, test fidelity, failure cases, proportional checks |

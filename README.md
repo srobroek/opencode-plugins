@@ -77,7 +77,7 @@ codex plugin add worktrunk@srobroek-opencode
 | `eli5` | Skill `eli5` |
 | `project` | Skill `license-picker` |
 | `architecture` | Router skill `architecture-guide` and skills `architecture-docs-files`, `architecture-ownership`, `architecture-top-level` (no `architect` agent) |
-| `quality` | Skills `prototype-logic`, `quality-code-design`, `quality-code-policy` (no `adversarial-challenger` agent) |
+| `quality` | Skills `prototype-logic`, `quality-code-design`, `quality-code-policy`, `quality-testing` (no `adversarial-challenger` agent) |
 | `agent-reviewer` | Skill `review-security` (no reviewer agents) |
 | `toolchain` | Router skill `toolchain-guide` and thirteen toolchain rule skills |
 | `aws` | Skill `aws-guidance` |

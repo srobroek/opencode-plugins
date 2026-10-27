@@ -1,6 +1,6 @@
 # Verification proportional to risk
 
-Read when selecting tests or making verification or performance claims. Follow required project gates and the worker/lead division of verification responsibility. Hard bugs: [debugging.md](debugging.md). Test-first loop: [test-first.md](test-first.md).
+Read when selecting tests or making verification or performance claims. Follow required project gates and the worker/lead division of verification responsibility. Hard bugs: [debugging.md](debugging.md). Test-first loop: [test-first.md](test-first.md). Test strategy in depth (pyramid, doubles, flaky tests, test data): the `quality-testing` skill.
 
 ## Acceptance and independent expectations
 
