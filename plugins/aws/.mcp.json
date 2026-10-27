@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "aws-mcp": {
+      "command": "uvx",
+      "args": ["mcp-proxy-for-aws-cli@1.7.0", "https://aws-mcp.us-east-1.api.aws/mcp", "--read-only", "--skip-auth"]
+    },
+    "aws-pricing": {
+      "command": "uvx",
+      "args": ["--with", "botocore[crt]", "awslabs.aws-pricing-mcp-server@1.1.1"],
+      "env": { "AWS_REGION": "us-east-1", "FASTMCP_LOG_LEVEL": "ERROR" }
+    }
+  }
+}

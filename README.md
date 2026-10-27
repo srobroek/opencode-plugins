@@ -80,7 +80,7 @@ codex plugin add worktrunk@srobroek-opencode
 | `quality` | Skills `prototype-logic`, `quality-code-design`, `quality-code-policy`, `quality-profiling`, `quality-testing` (no `adversarial-challenger` agent) |
 | `agent-reviewer` | Skill `review-security` (no reviewer agents) |
 | `toolchain` | Router skill `toolchain-guide` and fourteen toolchain rule skills |
-| `aws` | Skill `aws-guidance` |
+| `aws` | Skill `aws-guidance` and MCP servers `aws-mcp`, `aws-pricing` |
 | `repomix` | Skill `repomix`, with a CLI recipe for where `repomix_pack` is missing (no `repomix_pack`) |
 | `design` | Router skill `design-guide` and thirteen design skills (no design agents, formulas, `design_setup` or `design_impeccable_scan`) |
 | `trunk-dev` | Router skill `trunk-dev-guide` and skills `trunk-dev-workflow`, `trunk-dev-feature-flags`, `trunk-dev-release-setup` (no commit gate, no skip-CI or MR advisories) |
