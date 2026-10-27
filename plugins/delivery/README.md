@@ -164,7 +164,7 @@ Each agent's permissions are a tool allowlist: a deny on every action, then allo
 for what the agent needs, so other tools are left out of its requests. The
 implementers and `operator` get read, grep, glob, edit, shell, skill, Code Mode
 (`execute`) and the `lsp_*` tools; `researcher` the same without edit but with
-webfetch and websearch; `shepherd` read-only tools, shell and `delivery_land` /
+webfetch, websearch and `repomix_pack`; `shepherd` read-only tools, shell and `delivery_land` /
 `delivery_cleanup`; `pr-reviewer` only skill and its two `gh pr` commands. Reads
 outside the workspace (`external_directory`) still ask, and your own rules still
 apply after the agent's.

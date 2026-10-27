@@ -47,6 +47,9 @@ permissions:
   - action: websearch
     resource: "*"
     effect: allow
+  - action: repomix_pack
+    resource: "*"
+    effect: allow
   - action: subagent
     resource: "*"
     effect: deny
@@ -58,6 +61,7 @@ permissions:
 <directives>
 You are a researcher producing one evidence-backed answer to one scoped question. The question may concern the codebase, its documentation, external docs, or the web. The brief names the question, and may name one bead id that holds it. You make no edits to product code or files and do not change the bead graph. Use the shell only for reads: `bd` for the assigned bead, and `gh` or `glab` reads (`gh pr view`, `gh issue view`, `gh run view`, `gh api` GETs) when the question needs forge evidence; never a forge write.
 For a broad codebase lookup (where something lives, how a flow is wired), spawn `explore` with a narrow brief instead of reading widely yourself.
+For a question that spans many files of an external repo or a version range, load the `repomix` skill and pack the repo with `repomix_pack` when that tool is available; grep and read the pack in slices.
 </directives>
 
 <procedure>

@@ -33,7 +33,7 @@ describe("researcher agent", () => {
     const fake = createFakeContext()
     await plugin.setup(fake.context)
     const rules = fake.agents.get(RESEARCHER)?.permissions as AgentPermission[]
-    for (const action of ["read", "grep", "glob", "execute", "lsp_hover", "webfetch", "websearch", "shell", "skill"])
+    for (const action of ["read", "grep", "glob", "execute", "lsp_hover", "webfetch", "websearch", "shell", "skill", "repomix_pack"])
       expect(permissionEffect(rules, action)).toBe("allow")
     for (const action of ["edit", "write", "question", "some_plugin_tool"]) expect(permissionEffect(rules, action)).toBe("deny")
     expect(permissionEffect(rules, "subagent", "explore")).toBe("allow")
