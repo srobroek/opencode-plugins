@@ -71,13 +71,13 @@ codex plugin add worktrunk@srobroek-opencode
 | --- | --- |
 | `worktrunk` | Skills `worktrunk-worktrees`, `worktrunk-preflight` |
 | `chezmoi` | Skill `chezmoi-editor` (no managed-file guard) |
-| `languages` | Router skill `language-quality` and skills `go-quality`, `python-quality`, `typescript-quality` |
-| `rust` | Router skill `rust-guide`, skill `rust-quality` and eight Rust guidance skills (no advisories) |
+| `languages` | Router skill `language-quality` and skills `go-quality`, `python-quality`, `typescript-quality`, `lang-go-profiling`, `lang-python-profiling`, `lang-typescript-profiling` |
+| `rust` | Router skill `rust-guide`, skills `rust-quality`, `lang-rust-profiling` and eight Rust guidance skills (no advisories) |
 | `debate` | Skills `debate`, `grilling`, `to-questionnaire` |
 | `eli5` | Skill `eli5` |
 | `project` | Skill `license-picker` |
 | `architecture` | Router skill `architecture-guide` and skills `architecture-docs-files`, `architecture-ownership`, `architecture-top-level` (no `architect` agent) |
-| `quality` | Skills `prototype-logic`, `quality-code-design`, `quality-code-policy`, `quality-testing` (no `adversarial-challenger` agent) |
+| `quality` | Skills `prototype-logic`, `quality-code-design`, `quality-code-policy`, `quality-profiling`, `quality-testing` (no `adversarial-challenger` agent) |
 | `agent-reviewer` | Skill `review-security` (no reviewer agents) |
 | `toolchain` | Router skill `toolchain-guide` and fourteen toolchain rule skills |
 | `aws` | Skill `aws-guidance` |
