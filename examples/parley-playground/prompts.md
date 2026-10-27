@@ -97,7 +97,7 @@ and what the model should do with the answers. Models vary; if the kind differs,
 - Model: quotes the notes (inlined) and mentions the binary's saved path.
 
 ## Mixed rounds
-- "Give me a tour of everything parley can ask." → every kind once, split over two rounds (12 per call).
+- "Give me a tour of everything parley can ask." → every kind plus conditional, split over five rounds (12 per call).
 - "Interview me to set up a new service: name, language, database, CI checks, deployment, budget." → ask_text, pick_one, show_options, pick_many, slider in one round.
 - "Grill me on samples/plan.md." → review plus confirm/rank/slider questions on the risks.
 
@@ -133,6 +133,72 @@ shows the built-in form for comparison.
   card submits, with a `Note on …` line in the answer. `shift+enter` adds a line to the note.
 - Ask again and press `D`: the turn ends, as when you dismiss the built-in form.
 
-## Upcoming kinds (4p3.52)
-To be filled when they land: form, buckets/matching, allocate, matrix, range, path picker,
-date/time, tags, conditional, colour.
+## Structured and input kinds
+
+Each prompt below is an actual model instruction. Give the question a stable id, title, body,
+recommendation and rationale; use the returned value and follow up on notes.
+
+### form
+- "Call parley_ask for service settings with kind form, config.fields [{id:'name',label:'Name',type:'text',required:true},{id:'replicas',label:'Replicas',type:'number',min:1,max:5},{id:'region',label:'Region',type:'choice',options:['eu','us']},{id:'logging',label:'Logging',type:'toggle'}], recommended {fields:{name:'reports',replicas:2,region:'eu',logging:true}} and a rationale. Then summarise my fields."
+- "Call parley_ask with kind form to collect a release name: config.fields [{id:'name',label:'Name',type:'text',required:true}], recommended {fields:{name:'Cache Money'}}, and explain the recommendation. Use my edited name."
+- Try: `↑`/`↓` field, `←`/`→` choice/toggle/number, `e` type field.
+
+### buckets
+- "Call parley_ask with kind buckets, config.items [{id:'cache',label:'Cache'},{id:'docs',label:'Docs'}], config.categories [{id:'now',label:'Now'},{id:'later',label:'Later'}], recommended {buckets:{now:['cache'],later:['docs']}} and a rationale. Plan from my categories."
+- "Ask via parley_ask kind buckets to sort bugs: config.items [{id:'login',label:'Login'},{id:'theme',label:'Theme'}], config.categories [{id:'urgent',label:'Urgent'},{id:'backlog',label:'Backlog'}], recommended {buckets:{urgent:['login'],backlog:['theme']}} with rationale; every item must appear exactly once."
+- Try: `↑`/`↓` item, `←`/`→` category.
+
+### match
+- "Call parley_ask kind match with config.items [{id:'cache',label:'Cache'},{id:'docs',label:'Docs'}], config.targets [{id:'sam',label:'Sam'},{id:'lee',label:'Lee'}], recommended {pairs:{cache:'sam',docs:'lee'}} and rationale. Assign work using my bijective pairs."
+- "Ask via parley_ask kind match: config.items [{id:'api',label:'API'},{id:'web',label:'Web'}], config.targets [{id:'a',label:'Team A'},{id:'b',label:'Team B'}], recommended {pairs:{api:'a',web:'b'}} with rationale. Use each target once."
+- Try: `↑`/`↓` left item, `←`/`→` partner (swaps).
+
+### allocate
+- "Call parley_ask kind allocate with options [{id:'cache',label:'Cache'},{id:'docs',label:'Docs'}], config.total 100, recommended {allocations:{cache:70,docs:30}} and rationale. Use my exact-total budget."
+- "Ask via parley_ask kind allocate with options [{id:'tests',label:'Tests'},{id:'build',label:'Build'}], config.total 20, recommended {allocations:{tests:12,build:8}} with rationale. Schedule my allocation of 20 hours."
+- Try: `↑`/`↓` option, `←`/`→` transfer from next option, `e` type.
+
+### matrix
+- "Call parley_ask kind matrix with options [{id:'local',label:'Local'},{id:'shared',label:'Shared'}], config.criteria [{id:'speed',label:'Speed'}], min 0 max 5 step 1, recommended {scores:{local:{speed:5},shared:{speed:3}}} and rationale. Compare my scores."
+- "Ask via parley_ask kind matrix with options [{id:'sql',label:'SQL'},{id:'kv',label:'Key-value'}], config.criteria [{id:'cost',label:'Cost'},{id:'ease',label:'Ease'}], min 0 max 5 step 1, recommended {scores:{sql:{cost:4,ease:5},kv:{cost:3,ease:2}}} and rationale. Summarise my criteria scores."
+- Try: `↑`/`↓` cell, `←`/`→` score, `e` type.
+
+### range
+- "Call parley_ask kind range with min 0 max 300 step 15 unit 's', recommended {min:30,max:90} and rationale. Use my TTL interval."
+- "Ask via parley_ask kind range with min 1 max 10 step 1 unit 'replicas', recommended {min:2,max:4} and rationale. Use my scaling interval."
+- Try: `↑`/`↓` endpoint, `←`/`→` adjust, `e` number.
+
+### path
+- "Call parley_ask kind path with config.mode 'files', multiple true, recommended {paths:['samples/notes.txt']} and rationale. Report the selected local paths without uploading them."
+- "Ask via parley_ask with questions:[{id:'paths',title:'Select paths',kind:'path',config:{mode:'both'},multiple:true,recommended:{paths:['samples/notes.txt','samples/']},rationale:'Use both the notes and sample directory.'}]. multiple belongs to the question, not config or the call. Keep a trailing slash on directory paths and summarise my selection."
+- Try: `e` type, `↑`/`↓` suggestion, `tab` complete.
+
+### date
+- "Call parley_ask kind date with config.min '2026-11-01', config.max '2026-12-31', recommended {value:'2026-11-16'} and rationale. Use my YYYY-MM-DD release date."
+- "Ask via parley_ask kind date with config.min '2027-01-01', config.max '2027-01-31', recommended {value:'2027-01-11'} and rationale. Record my review date."
+- Try: `←`/`→` day, `↑`/`↓` week, `shift+←`/`shift+→` month, `e` ISO.
+
+### time
+- "Call parley_ask kind time with config.min '09:00', config.max '17:00', recommended {value:'10:00'} and rationale. Record my HH:mm rollout time."
+- "Ask via parley_ask kind time with config.min '12:00', config.max '18:00', recommended {value:'14:30'} and rationale. Use my review time."
+- Try: `←`/`→` minute, `↑`/`↓` hour, `e` ISO.
+
+### datetime
+- "Call parley_ask kind datetime with config.min '2026-11-01T09:00', config.max '2026-12-31T17:00', recommended {value:'2026-11-16T10:00'} and rationale. Record my YYYY-MM-DDTHH:mm rollout slot."
+- "Ask via parley_ask kind datetime with config.min '2027-01-01T09:00', config.max '2027-01-31T17:00', recommended {value:'2027-01-11T14:30'} and rationale. Use my review slot."
+- Try: `←`/`→` day, `↑`/`↓` week, `shift+←`/`shift+→` month, `e` ISO.
+
+### tags
+- "Call parley_ask kind tags with config.suggestions ['cache','performance','docs'], min 1 max 3, recommended {tags:['cache','performance']} and rationale. Label the release with my tags."
+- "Ask via parley_ask kind tags with config.suggestions ['bug','feature','maintenance'], min 1 max 2, recommended {tags:['maintenance']} and rationale. Use my edited tags."
+- Try: `↑`/`↓` suggestion, `space` toggle, `e` comma-list.
+
+### colour
+- "Call parley_ask kind colour with config.swatches ['#336699','#cc6633'], recommended {hex:'#336699'} and rationale. Use my hex colour for the release badge."
+- "Ask via parley_ask kind colour with config.swatches ['#669933','#993366'], recommended {hex:'#669933'} and rationale. Record my chosen accent colour."
+- Try: `←`/`→` swatch, `e` hex.
+
+### conditional (not a kind)
+- "Call parley_ask with two questions: confirm id 'gate' recommended 'yes' with rationale, then ask_text id 'detail' show_if {id:'gate',equals:{choice:'yes'}} recommended 'Watch latency after enabling the flag.' with rationale. Ask whether to add rollout detail, then use the visible detail answer."
+- "Ask via parley_ask in one round: confirm id 'gate' recommended 'yes' with rationale to enable review notes; ask_text id 'detail' show_if {id:'gate',equals:{choice:'yes'}} recommended 'Review before merge.' with rationale. Do not invent a conditional kind; respect my gate choice."
+- Try: toggle gate no/yes; detail hides/reappears. `e` edits detail. Model: uses detail only when enabled.
