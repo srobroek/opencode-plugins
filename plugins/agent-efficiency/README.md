@@ -82,9 +82,10 @@ global config directory (`OPENCODE_CONFIG_DIR`, `$XDG_CONFIG_HOME/opencode` or
 file, including `instructions` entries from your config, is `project-instructions`.
 
 The default agents are read-only: `explore`, `pr-reviewer`, `adversarial-challenger`,
-`design-critic`, `a11y-auditor` and `speckit-verify`, plus `seance`,
-`security-reviewer` and `code-reviewer`. `architect` and `journey-validator` are left
-out because the project's AGENTS.md shapes their output. Agents that change code
+`design-critic`, `a11y-auditor`, `speckit-verify` and `speckit-sync`, plus `seance`,
+`security-reviewer`, `code-reviewer`, `researcher` and `architect`. They keep every
+AGENTS.md, so the project's still shapes their output. `journey-validator` writes run
+files, so it is left out. Agents that change code
 (`general`, `implementer*`, `operator`, `shepherd`, `mechanic`, `ui-implementer`) are
 never trimmed unless you list them.
 
