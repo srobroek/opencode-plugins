@@ -27,7 +27,7 @@ permissions:
     resource: "*"
     effect: allow
   - action: skill
-    resource: quality-code-design
+    resource: "quality-*"
     effect: allow
   - action: "lsp_*"
     resource: "*"

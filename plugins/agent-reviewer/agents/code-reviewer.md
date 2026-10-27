@@ -31,13 +31,13 @@ permissions:
     resource: "*"
     effect: allow
   - action: skill
-    resource: quality-code-design
+    resource: "quality-*"
     effect: allow
   - action: skill
-    resource: review-security
+    resource: "review-*"
     effect: allow
   - action: shell
-    resource: "git diff"
+    resource: git diff
     effect: allow
   - action: shell
     resource: "git diff *"
@@ -46,7 +46,7 @@ permissions:
     resource: "git log *"
     effect: allow
   - action: shell
-    resource: "git show"
+    resource: git show
     effect: allow
   - action: shell
     resource: "git show *"
