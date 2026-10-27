@@ -71,4 +71,6 @@ already exists:
 - `rust-ci`: rust-cache, ci-gate, attestation, linker placement, prebuilt tools.
 - `rust-persistence`: sqlx, migrations, transactional CAS.
 - `rust-workspace`: workspace lints, dependencies, and layered tests.
+- `lang-rust-profiling`: samply, cargo flamegraph, perf and criterion baselines; the
+  method is the `quality` plugin's `quality-profiling` skill.
 - `rust-tauri`: Tauri v2 bundles, updater, WebDriver, and the MCP bridge reference.

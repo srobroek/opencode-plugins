@@ -37,3 +37,7 @@ already exists:
 - `python-quality`: `ruff check`, `ruff format --check`, `pyright`, `pytest`.
 - `typescript-quality`: Biome or ESLint, `tsc --noEmit`, the test script, and the
   type-safety rules for unions, allow-lists and trust-boundary validation.
+- `lang-typescript-profiling`, `lang-python-profiling`, `lang-go-profiling`: profiler
+  and benchmark commands, how to read their output, and pitfalls (Bun and Node; py-spy,
+  `profiling.sampling`, scalene, memray; pprof and benchstat). The method is the
+  `quality` plugin's `quality-profiling` skill.

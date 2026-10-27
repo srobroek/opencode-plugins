@@ -1,7 +1,7 @@
 {
   "name": "languages",
   "version": "0.2.0",
-  "description": "Go, Python and TypeScript lint, type-check and test skills; formatting runs through OpenCode built-in formatters.",
+  "description": "Go, Python and TypeScript lint, type-check, test and profiling skills; formatting runs through OpenCode built-in formatters.",
   "author": {
     "name": "Sjors Robroek",
     "url": "https://github.com/srobroek"

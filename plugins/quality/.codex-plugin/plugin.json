@@ -1,7 +1,7 @@
 {
   "name": "quality",
   "version": "0.2.0",
-  "description": "Code design and review guidance, an always-on style code-quality policy, and throwaway logic prototypes.",
+  "description": "Code design and review guidance, an always-on style code-quality policy, performance profiling, and throwaway logic prototypes.",
   "author": {
     "name": "Sjors Robroek",
     "url": "https://github.com/srobroek"
@@ -12,7 +12,7 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Quality",
-    "shortDescription": "Code design and review guidance, an always-on style code-quality policy, and throwaway logic prototypes.",
+    "shortDescription": "Code design and review guidance, an always-on style code-quality policy, performance profiling, and throwaway logic prototypes.",
     "developerName": "Sjors Robroek",
     "category": "development"
   }

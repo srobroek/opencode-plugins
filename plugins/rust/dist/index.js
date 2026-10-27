@@ -1249,7 +1249,8 @@ var SKILL_NAMES = [
   "rust-safe-mutation",
   "rust-tauri",
   "rust-workspace",
-  "rust-guide"
+  "rust-guide",
+  "lang-rust-profiling"
 ];
 var SKILL_PATHS = SKILL_NAMES.map((name) => fileURLToPath(new URL(`../skills/${name}/SKILL.md`, import.meta.url)));
 var src_default = Plugin.define({

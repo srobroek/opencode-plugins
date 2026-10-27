@@ -18,7 +18,13 @@ test("skips the challenger copy when plugin.list reports agent-reviewer", async 
 test("registers the quality skills and the read-only challenger", async () => {
   const fake = createFakeContext()
   const cleanup = await plugin.setup(fake.context)
-  expect([...fake.skills.keys()]).toEqual(["prototype-logic", "quality-code-design", "quality-code-policy", "quality-testing"])
+  expect([...fake.skills.keys()]).toEqual([
+    "prototype-logic",
+    "quality-code-design",
+    "quality-code-policy",
+    "quality-profiling",
+    "quality-testing",
+  ])
   expect(fake.agents.get("adversarial-challenger")).toMatchObject({ mode: "subagent" })
   const rules = fake.agents.get("adversarial-challenger")?.permissions as AgentPermission[]
   for (const action of ["edit", "shell", "subagent", "question", "execute", "some_plugin_tool"])

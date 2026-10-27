@@ -15,6 +15,7 @@ TRIGGER
 - Tuning code-agent instructions, model routing, or tools against task cases → the `tune-model-prompt` skill when installed (an owner-local skill this repository does not ship).
 - Deciding what to test, at which level, with which doubles or test data → the `quality-testing` skill.
 - Checking whether a state model or logic holds up before building it → the `prototype-logic` skill.
+- Measuring, profiling or benchmarking slow or memory-heavy code → the `quality-profiling` skill.
 
 ## Workflow
 
