@@ -104,7 +104,7 @@ import { existsSync as existsSync2, readdirSync, statSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
 
-// plugins/session/src/text.ts
+// plugins/lib/src/transcript-text.ts
 function estimateTokens(text) {
   return Math.ceil(text.length / 4);
 }
@@ -171,7 +171,6 @@ function idPrefixLength(ids, floor = 12) {
   }
   return longest;
 }
-
 // plugins/lib/src/shell-tokenizer.ts
 var SEPARATORS = new Set([";", "&", "|", "(", ")", `
 `]);
@@ -506,7 +505,7 @@ function writeTargets(tool, input) {
   return [];
 }
 
-// plugins/session/src/transcript.ts
+// plugins/lib/src/transcript.ts
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -782,7 +781,6 @@ function toTranscript(messages, options = {}) {
   const finished = finishTurns(turns, boundary);
   return { ...finished, compactions, locations, messages: messages.length };
 }
-
 // plugins/session/src/omp.ts
 var DEFAULT_OMP_DIR = join(homedir(), ".omp", "agent", "sessions");
 function snapshot(file) {
