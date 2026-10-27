@@ -17,8 +17,9 @@ references, which now name the skill (`architecture-docs-files` points at the
 
 `architect` (mode `subagent`) designs systems, modules and APIs and turns a hard
 change into an ordered implementation plan. It starts its reply with
-`VERDICT: DESIGNED|PARTIAL|BLOCKED`. Its permissions deny `edit` and `shell`, and
-`subagent` except `explore`. Rules are added after any you configure for an agent
+`VERDICT: DESIGNED|PARTIAL|BLOCKED`. Its permissions are an allowlist: every tool
+is denied except read, grep, glob, skill, Code Mode, the `lsp_*` tools, webfetch,
+websearch and `subagent` for `explore`, so `edit` and `shell` are not in its requests. Rules are added after any you configure for an agent
 with the same id, so the read-only boundary holds.
 
 The agent was converted from omp with `scripts/convert-agent.ts`. The omp

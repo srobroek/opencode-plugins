@@ -108,6 +108,23 @@ export function parseAgentFile(text: string, id: string): AgentFile {
   return agent
 }
 
+function wildcard(value: string, pattern: string): boolean {
+  const source = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replaceAll("*", ".*")
+  return new RegExp(`^${source}$`, "s").test(value)
+}
+
+/**
+ * The effect OpenCode gives `action` on `resource` under `rules`: the last matching rule
+ * wins, and nothing matching means `ask`. Lets tests check an agent's tool boundary.
+ */
+export function permissionEffect(
+  rules: readonly AgentPermission[],
+  action: string,
+  resource = "*",
+): AgentPermission["effect"] {
+  return rules.findLast((rule) => wildcard(action, rule.action) && wildcard(resource, rule.resource))?.effect ?? "ask"
+}
+
 /** Read `<path>` and parse it as the agent named by its file name. */
 export function readAgentFile(path: string): AgentFile {
   return parseAgentFile(readFileSync(path, "utf8"), basename(path, ".md"))

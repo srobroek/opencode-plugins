@@ -6,36 +6,18 @@ request:
   headers:
     x-opencode-model-role: reviewer
 permissions:
-  - action: glob
+  - action: "*"
     resource: "*"
     effect: deny
-  - action: grep
+  - action: skill
     resource: "*"
-    effect: deny
-  - action: edit
-    resource: "*"
-    effect: deny
-  - action: read
-    resource: "*"
-    effect: deny
-  - action: shell
-    resource: "*"
-    effect: deny
+    effect: allow
   - action: shell
     resource: "gh pr view *"
     effect: allow
   - action: shell
     resource: "gh pr diff *"
     effect: allow
-  - action: webfetch
-    resource: "*"
-    effect: deny
-  - action: websearch
-    resource: "*"
-    effect: deny
-  - action: subagent
-    resource: "*"
-    effect: deny
 ---
 
 You are an expert code reviewer. Your job is to review pull requests and provide

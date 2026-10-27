@@ -2,7 +2,14 @@ import { describe, expect, test } from "bun:test"
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { type AgentPermission, agentPaths, parseAgentFile, registerAgents, shapeAgent } from "./agent-files.ts"
+import {
+  type AgentPermission,
+  agentPaths,
+  parseAgentFile,
+  permissionEffect,
+  registerAgents,
+  shapeAgent,
+} from "./agent-files.ts"
 import { createFakeContext } from "./testing.ts"
 
 const CONVERTED = [
@@ -56,6 +63,29 @@ describe("parseAgentFile", () => {
     expect(() => parseAgentFile("---\nmode: boss\n---\nx", "x")).toThrow("bad mode")
     expect(() => parseAgentFile("---\npermissions:\n  - action: edit\n---\nx", "x")).toThrow("incomplete permission")
     expect(() => parseAgentFile("no frontmatter", "x")).toThrow("no frontmatter")
+  })
+})
+
+describe("permissionEffect", () => {
+  const rules: AgentPermission[] = [
+    { action: "*", resource: "*", effect: "deny" },
+    { action: "read", resource: "*", effect: "allow" },
+    { action: "read", resource: "*.env", effect: "ask" },
+    { action: "lsp_*", resource: "*", effect: "allow" },
+    { action: "subagent", resource: "explore", effect: "allow" },
+  ]
+
+  test("the last matching rule wins and wildcards match any run of characters", () => {
+    expect(permissionEffect(rules, "read", "src/a.ts")).toBe("allow")
+    expect(permissionEffect(rules, "read", "app/.env")).toBe("ask")
+    expect(permissionEffect(rules, "lsp_diagnostics")).toBe("allow")
+    expect(permissionEffect(rules, "subagent", "explore")).toBe("allow")
+    expect(permissionEffect(rules, "subagent", "general")).toBe("deny")
+    expect(permissionEffect(rules, "edit")).toBe("deny")
+  })
+
+  test("no matching rule means ask", () => {
+    expect(permissionEffect([], "edit")).toBe("ask")
   })
 })
 
