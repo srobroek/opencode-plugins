@@ -19,6 +19,7 @@ export const SKILL_NAMES = [
   "rust-safe-mutation",
   "rust-tauri",
   "rust-workspace",
+  "rust-guide",
 ] as const
 
 export const SKILL_PATHS = SKILL_NAMES.map((name) =>

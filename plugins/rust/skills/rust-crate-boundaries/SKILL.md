@@ -1,6 +1,8 @@
 ---
 name: rust-crate-boundaries
 description: Use when splitting crates, laying out a Rust workspace, writing lib.rs facades or extracting IO from a domain crate.
+metadata:
+  opencode/autoinvoke: false
 ---
 
 # Rust Crate Boundaries

@@ -1,6 +1,8 @@
 ---
 name: rust-domain-modeling
 description: Use when defining Rust error enums, newtypes, or serde-transparent wrappers.
+metadata:
+  opencode/autoinvoke: false
 ---
 
 # Rust Domain Modeling
