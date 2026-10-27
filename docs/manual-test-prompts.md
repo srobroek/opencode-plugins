@@ -1274,8 +1274,36 @@ Run the TypeScript lint and type-check for this repo.
 Run the Python format, lint, type-check and tests for this project.
 ```
 
-**Expect:** `lang-python`, then `lang-python-quality` (`ruff check`, `ruff format --check`, `pyright`, `pytest`).
+**Expect:** `lang-python`, then `lang-python-quality` (`uv lock --check`, `ruff check`, `ruff format --check`, mypy or pyright, `pytest -x`, in order).
 **If not:** `plugins/lang-python/skills/lang-python/SKILL.md`.
+
+### `lang-python` → testing, packaging, types, persistence
+
+Each prompt should load `lang-python`, then the named member.
+
+```text
+Add property tests to this Python module.
+```
+
+**Expect:** `lang-python-testing` (Hypothesis `@given`, shrunk examples kept with `@example`).
+
+```text
+Split this Python project into a uv workspace with a shared library package.
+```
+
+**Expect:** `lang-python-packaging` (`[tool.uv.workspace]`, `{ workspace = true }` sources, src layout).
+
+```text
+Make this Python code pass pyright strict and add pydantic models for the camelCase API payloads.
+```
+
+**Expect:** `lang-python-types` (`typeCheckingMode = "strict"`, `alias_generator=to_camel`).
+
+```text
+Add an Alembic migration for the new column and a CI check for multiple heads.
+```
+
+**Expect:** `lang-python-persistence` (autogenerate review list, `alembic heads` count, `alembic check`).
 
 ### `lang-go` → `lang-go-quality`
 

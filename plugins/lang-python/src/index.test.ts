@@ -7,11 +7,16 @@ test("registers the python skills and disposes them", async () => {
   const cleanup = await plugin.setup(fake.context)
   expect([...fake.skills.keys()].sort()).toEqual([
     "lang-python",
+    "lang-python-packaging",
+    "lang-python-persistence",
     "lang-python-profiling",
     "lang-python-quality",
+    "lang-python-testing",
+    "lang-python-types",
   ])
   for (const skill of fake.skills.values())
     expect(String(skill.content)).not.toMatch(/skill:\/\/|rule:\/\/|_quality`? tool|\bbash\b|TTSR/)
+  expect(String(fake.skills.get("lang-python-persistence")?.content)).toContain("safety plugin")
   await cleanup?.()
   expect(fake.active()).toBe(0)
   expect(fake.skills.size).toBe(0)
