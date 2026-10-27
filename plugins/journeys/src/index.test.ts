@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { execFile } from "node:child_process"
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { pathToFileURL } from "node:url"
@@ -73,13 +73,12 @@ describe("runJourneys", () => {
     const dir = tempRoot("journeys-timeout-")
     const python = join(dir, "python3")
     writeFileSync(python, "#!/bin/sh\nexec /bin/sleep 30\n")
-    chmodSync(python, 0o755)
     try {
       const result = await runJourneys(
         dir,
         { command: "lint", journeysDir: dir },
         undefined,
-        (_file, args, options) => execFileAsync(python, args, options),
+        (_file, _args, options) => execFileAsync("/bin/sh", [python], options),
         3_000,
       )
       expect(result).toEqual({ stdout: "", stderr: "", unrun: "timed out after 3 s" })
