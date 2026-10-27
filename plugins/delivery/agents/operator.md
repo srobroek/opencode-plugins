@@ -1,5 +1,5 @@
 ---
-description: "Mechanical tier (`execution_agent_type=operator`). Executes one exact bounded command, formatting step, or inventory over explicit targets with no design judgment, and records the observed result."
+description: "Mechanical tier: runs one exact bounded command, formatting step or inventory over explicit targets and records the result."
 mode: subagent
 model: "amazon-bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0"
 request:

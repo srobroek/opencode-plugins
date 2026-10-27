@@ -1,5 +1,5 @@
 ---
-description: "Read-only architect for software, system, module, and API design and complex implementation plans. Spawn before nontrivial structural work; never edits."
+description: "Read-only architect for software, system, module and API design and complex plans. Spawn before nontrivial structural work."
 mode: subagent
 request:
   headers:

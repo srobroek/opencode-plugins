@@ -1,5 +1,5 @@
 ---
-description: "Lands one reviewed PR through delivery_land with exact-head approval and green checks required, closes its merge-queue and receipt beads children-first, runs delivery_cleanup, and reports refusals."
+description: "Lands one reviewed PR via delivery_land with exact-head approval and green checks, closes its beads, runs delivery_cleanup."
 mode: subagent
 model: "amazon-bedrock/global.anthropic.claude-sonnet-5-5#medium"
 request:

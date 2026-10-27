@@ -1,5 +1,5 @@
 ---
-description: "Read-only critique of rendered surfaces for hierarchy, rhythm, and generated-UI tells. Spawned at CRITIQUE beside `a11y-auditor`. Never implements or edits."
+description: "Read-only critique of rendered surfaces for hierarchy, rhythm and generated-UI tells; spawned at CRITIQUE beside a11y-auditor."
 mode: subagent
 request:
   headers:

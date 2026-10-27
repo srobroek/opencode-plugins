@@ -1,5 +1,5 @@
 ---
-description: "Default implementation tier; implements one assigned bead in its own worktree, records reproducible evidence, reports its branch head, and blocks on missing prerequisites."
+description: "Default implementation tier: implements one bead in its own worktree, records reproducible evidence, reports its branch head."
 mode: subagent
 model: "amazon-bedrock/global.anthropic.claude-sonnet-5-5#medium"
 request:
