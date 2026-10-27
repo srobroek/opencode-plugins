@@ -277,6 +277,19 @@
         "@opencode/plugin",
       ],
     },
+    "plugins/lang-go": {
+      "name": "@srobroek/opencode-lang-go",
+      "version": "0.1.0",
+      "devDependencies": {
+        "@srobroek/opencode-lib": "workspace:*",
+      },
+      "peerDependencies": {
+        "@opencode/plugin": "^2.1.4",
+      },
+      "optionalPeers": [
+        "@opencode/plugin",
+      ],
+    },
     "plugins/languages": {
       "name": "@srobroek/opencode-languages",
       "version": "0.3.0",
@@ -837,6 +850,8 @@
     "@srobroek/opencode-goal": ["@srobroek/opencode-goal@workspace:plugins/goal"],
 
     "@srobroek/opencode-journeys": ["@srobroek/opencode-journeys@workspace:plugins/journeys"],
+
+    "@srobroek/opencode-lang-go": ["@srobroek/opencode-lang-go@workspace:plugins/lang-go"],
 
     "@srobroek/opencode-languages": ["@srobroek/opencode-languages@workspace:plugins/languages"],
 

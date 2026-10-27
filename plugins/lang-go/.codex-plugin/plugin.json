@@ -1,0 +1,19 @@
+{
+  "name": "lang-go",
+  "version": "0.1.0",
+  "description": "Go skills: gofmt, golangci-lint or go vet and go test checks, and pprof and benchmark profiling; formatting runs through OpenCode built-in formatters.",
+  "author": {
+    "name": "Sjors Robroek",
+    "url": "https://github.com/srobroek"
+  },
+  "homepage": "https://github.com/srobroek/opencode-plugins/tree/main/plugins/lang-go",
+  "repository": "https://github.com/srobroek/opencode-plugins",
+  "license": "Apache-2.0",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Lang Go",
+    "shortDescription": "Go skills: gofmt, golangci-lint or go vet and go test checks, and pprof and benchmark profiling; formatting runs through OpenCode built-in formatters.",
+    "developerName": "Sjors Robroek",
+    "category": "development"
+  }
+}
