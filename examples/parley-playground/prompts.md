@@ -15,7 +15,7 @@ and what the model should do with the answers. Models vary; if the kind differs,
 ### show_options
 - "Help me choose a database for a small side project; give me 3 options with pros and cons and let me pick."
 - "Compare REST, GraphQL and gRPC for an internal API and let me decide."
-- Expect: show_options, cards side by side with +/− lines. Try: pick a non-recommended card, add a note.
+- Expect: show_options, cards side by side with +/− lines. Try: `←`/`→` between cards, pick a non-recommended one, `n`, type a note, `enter`.
 - Model: explains the consequences of your pick and follows up on the note.
 
 ### pick_many
@@ -80,7 +80,7 @@ and what the model should do with the answers. Models vary; if the kind differs,
 ### emoji_react
 - "How do you feel about this sprint? Let me react with an emoji."
 - "React to this commit message with an emoji."
-- Expect: emoji_react. Model: acknowledges the reaction briefly.
+- Expect: emoji_react. Try: `←`/`→` between emojis. Model: acknowledges the reaction briefly.
 
 ### ask_image
 - "I want to show you a screenshot of the layout bug; ask me for it."
@@ -121,6 +121,9 @@ shows the built-in form for comparison.
 - "Ask me a multiple-choice question about which shell I use, with the question tool."
 - "Use the question tool to ask me which of these three colours I prefer."
 - Expect: a parley card instead of the built-in form; the model gets the question tool's normal answer shape.
+- On a single-question inline card: choose, `n`, type a note and press `enter`: the note saves and the
+  card submits, with a `Note on …` line in the answer. `shift+enter` adds a line to the note.
+- Ask again and press `D`: the turn ends, as when you dismiss the built-in form.
 
 ## Upcoming kinds (4p3.52)
 To be filled when they land: form, buckets/matching, allocate, matrix, range, path picker,
