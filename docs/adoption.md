@@ -19,19 +19,19 @@ Target host: OpenCode 2.1.4. One row per plugin. "Port" means rewrite against
 | design | Port | 8 skills, 4 subagents, `plugins/design` | impeccable detector on `execute.after`; drop the launcher-path workaround; MCP to config. |
 | eli5 | As-is | skill | |
 | find-tools | Rewrite or drop | — | Built on omp discovery. Decide later. |
-| go | Replace | built-in formatter + skill | `formatter: true`; lint/test as a documented command. |
+| go | Replace | built-in formatter + `plugins/lang-go` skills | `formatter: true`; lint/test as a documented command. |
 | journeys | Port | 6 skills, 2 subagents, `plugins/journeys` | Tools or plain shell calls to `journeys.py`. |
 | project | As-is | skill | `license-picker`. |
-| python | Replace | built-in formatter + skill | |
+| python | Replace | built-in formatter + `plugins/lang-python` skills | |
 | quality | Port (content) | skill + `adversarial-challenger` subagent | Drop watchdog and advisor-resample (omp-only). |
-| rust | Port | skills + `plugins/rust` | Advisories on `execute.after`. The migration-edit gate moved to safety. |
+| rust | Port (content) | `plugins/lang-rust` skills | Advisories dropped: `cargo install` and `RUSTFLAGS` linker advice live in `lang-rust-ci`; the global target-dir check is toolchain's `ops-no-global-cargo-target`. The migration-edit gate moved to safety. |
 | safety | Port | `plugins/safety` (+ optional permission snippet in its README) | Indirection, remote-exec, attribution, worktree-tmp and git-defender gates throw on `execute.before`, as does the git-aware migration-edit gate (moved from rust); directory flags (`git -C`, `make -C`, …) outside the session ask `external_directory`. Worktree destruction (with the branch-delete and detached-worktree proofs), sudo destruction and force push are decided on `permission.hook("evaluate")`. close-keywords is rewritten on `execute.before`, and package-investigate is an `execute.after` advisory. Text rules, spawn-budget, quota-notice-resume and quality-edit-advisory are dropped. |
 | session | Port (slim) | `plugins/session`: `session_resume` tool + thin skill | Built-ins reload full history; this gives a short handoff into a fresh session. Ranks sessions by description, walks back from the end or the last compaction summary. Optional read-only omp transcript mode. See `design/resume-session.md`. |
 | speckit | Port (core) | `plugins/speckit` + skills + 2 subagents | spec-kit skills layout (`--integration codex`); `tasks.md` guard on `execute.before`; taskstoissues blocked on the skill tool; implement redirected via `skill.transform`. Fix the 4 harness-independent bugs first. |
 | supervisor | Drop | refill sentence in instructions | V2 delivers background results to the parent inbox, wakes an idle parent and survives restarts. On omp its wake and settled nudges duplicated native delivery, stall alerts were mostly sleep artifacts, and the stop reminder led to a dispatch in 2 of 20 cases. Build a stall watchdog only if hung children show up. |
 | toolchain | Port (content) | instructions + skills + permissions | tfstate guard to permissions. |
 | trunk-dev | Port | `plugins/trunk-dev` + skill | Commit gate and MR advisory. |
-| typescript | Replace | built-in formatter + skill | |
+| typescript | Replace | built-in formatter + `plugins/lang-typescript` skills | |
 | whats-new | Port | `plugins/whats-new` + agent | Report-only mode becomes agent permissions. |
 | worktrunk | Port | `plugins/worktrunk` | `wt` as a `ctx.worktree.transform` strategy; merge-policy gate; drop the omp isolation check. |
 

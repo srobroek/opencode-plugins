@@ -5,7 +5,7 @@ OpenCode V2 plugins by Sjors Robroek. This is the OpenCode counterpart of
 
 | Field | Value |
 | --- | --- |
-| Status | Early. Plugins: `example`, `model-roles`, `worktrunk`, `session`, `dep-update`, `whats-new`, `statusline`, `beads`, `goal`, `lsp`, `subagent-worktree`, `parley`, `chezmoi`, `languages`, `rust`, `journeys`, `delivery`, `debate`, `eli5`, `project`, `architecture`, `build`, `quality`, `toolchain`, `aws`, `design`, `safety`, `find-tools`, `trunk-dev`, `speckit`, `agent-efficiency`, `agent-researcher`, `agent-seance`, `agent-mechanic`, `agent-coder`, `agent-reviewer`, `repomix`. |
+| Status | Early. Plugins: `example`, `model-roles`, `worktrunk`, `session`, `dep-update`, `whats-new`, `statusline`, `beads`, `goal`, `lsp`, `subagent-worktree`, `parley`, `chezmoi`, `lang-go`, `lang-python`, `lang-typescript`, `lang-rust`, `journeys`, `delivery`, `debate`, `eli5`, `project`, `architecture`, `build`, `quality`, `toolchain`, `aws`, `design`, `safety`, `find-tools`, `trunk-dev`, `speckit`, `agent-efficiency`, `agent-researcher`, `agent-seance`, `agent-mechanic`, `agent-coder`, `agent-reviewer`, `repomix`. |
 | Host | OpenCode 2.1.4 or later (`@opencode/plugin` 2.x) |
 | License | Apache-2.0 |
 
@@ -71,8 +71,8 @@ codex plugin add worktrunk@srobroek-opencode
 | --- | --- |
 | `worktrunk` | Skills `worktrunk-worktrees`, `worktrunk-preflight` |
 | `chezmoi` | Skill `chezmoi-editor` (no managed-file guard) |
-| `languages` | Router skill `language-quality` and skills `go-quality`, `python-quality`, `typescript-quality`, `lang-go-profiling`, `lang-python-profiling`, `lang-typescript-profiling` |
-| `rust` | Router skill `rust-guide`, skills `rust-quality`, `lang-rust-profiling` and eight Rust guidance skills (no advisories) |
+| `lang-go`, `lang-python`, `lang-typescript` | Router skill `lang-<language>` and skills `lang-<language>-quality`, `lang-<language>-profiling` |
+| `lang-rust` | Router skill `lang-rust`, skills `lang-rust-quality`, `lang-rust-profiling` and eight Rust guidance skills |
 | `debate` | Skills `debate`, `grilling`, `to-questionnaire` |
 | `eli5` | Skill `eli5` |
 | `project` | Skill `license-picker` |

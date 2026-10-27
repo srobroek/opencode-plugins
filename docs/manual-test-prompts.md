@@ -40,13 +40,13 @@ skill listing, its agents in the `@` picker, and its tools in a Code Mode `searc
   [find-tools](#find-tools) ·
   [goal](#goal) ·
   [journeys](#journeys) ·
-  [languages](#languages) ·
+  [lang-go, lang-python, lang-typescript](#lang-go-lang-python-lang-typescript) ·
+  [lang-rust](#lang-rust) ·
   [lsp](#lsp) ·
   [model-roles](#model-roles) ·
   [parley](#parley) ·
   [project](#project) ·
   [quality](#quality) ·
-  [rust](#rust) ·
   [safety](#safety) ·
   [session](#session) ·
   [speckit](#speckit) ·
@@ -90,8 +90,9 @@ All of them at once (statusline is TUI-only, see below):
 ```sh
 for p in agent-coder agent-efficiency agent-mechanic agent-researcher agent-reviewer \
   agent-seance architecture aws beads build chezmoi debate delivery dep-update design \
-  eli5 find-tools goal journeys languages lsp model-roles parley project quality rust \
-  safety session speckit subagent-worktree toolchain trunk-dev whats-new worktrunk; do
+  eli5 find-tools goal journeys lang-go lang-python lang-typescript lang-rust lsp \
+  model-roles parley project quality safety session speckit subagent-worktree toolchain \
+  trunk-dev whats-new worktrunk; do
   opencode plugin add "github:srobroek/opencode-plugins#main::path:plugins/$p"
 done
 ```
@@ -215,14 +216,14 @@ Create src/div.ts exporting div(a, b) = a / b with no zero check, stage it, then
 **Expect:** the child reply starts with `VERDICT: APPROVE|REQUEST-CHANGES|COMMENT` and cites `src/div.ts:<line>`.
 **If not:** `plugins/agent-reviewer/agents/code-reviewer.md`; its shell is limited to `git diff`, `git log` and `git show`.
 
-**6. rust: the router loads a hidden member**
+**6. lang-rust: the router loads a hidden member**
 
 ```text
 I'm adding a numbered sqlx migration to a Rust SQLite repository. What are the rules?
 ```
 
-**Expect:** the agent loads `rust-guide`, then `rust-persistence` by id, and answers from it.
-**If not:** the router table in `plugins/rust/skills/rust-guide/SKILL.md`.
+**Expect:** the agent loads `lang-rust`, then `lang-rust-persistence` by id, and answers from it.
+**If not:** the router table in `plugins/lang-rust/skills/lang-rust/SKILL.md`.
 
 **7. safety: the migration gate**
 
@@ -263,7 +264,7 @@ Look above the composer.
 ## agent-coder
 
 **Install:** `opencode plugin add 'github:srobroek/opencode-plugins#main::path:plugins/agent-coder'`. No
-options. Install languages, quality, rust and toolchain too so its skill allowlist has content.
+options. Install the lang-<language> plugins, quality and toolchain too so its skill allowlist has content.
 
 ### Agent `coder`
 
@@ -285,7 +286,7 @@ Use the coder agent to find new tools for parsing YAML with find_tools_scan.
 Use the coder agent to plan tests for div in src/div.ts (zero, negative, fractional inputs). Load the testing guidance first and report which skills you loaded.
 ```
 
-**Expect:** the child loads `quality-testing` (and possibly `language-quality`, then `typescript-quality`) and names them. A design or journeys skill is denied.
+**Expect:** the child loads `quality-testing` (and possibly `lang-typescript`, then `lang-typescript-quality`) and names them. A design or journeys skill is denied.
 **If not:** the skill allowlist in `plugins/agent-coder/agents/coder.md`; routers must be allowed next to their hidden members.
 
 ## agent-efficiency
@@ -1253,45 +1254,118 @@ Use the journey-validator agent to validate user-journeys/<journey>.md.
 **Expect:** per-step results with triage and a recorded run file. It never edits product code.
 **If not:** `plugins/journeys/agents/journey-validator.md`.
 
-## languages
+## lang-go, lang-python, lang-typescript
 
-**Install:** `opencode plugin add 'github:srobroek/opencode-plugins#main::path:plugins/languages'`.
+**Install:** `opencode plugin add 'github:srobroek/opencode-plugins#main::path:plugins/lang-<language>'` for
+`lang-go`, `lang-python` and `lang-typescript`. Each lists one router, `lang-<language>`.
 
-### Skill `language-quality` (router) → `typescript-quality`
+### Skill `lang-typescript` (router) → `lang-typescript-quality`
 
 ```text
 Run the TypeScript lint and type-check for this repo.
 ```
 
-**Expect:** loads `language-quality`, then `typescript-quality`, and runs `tsc --noEmit` (or Biome or ESLint).
-**If not:** `plugins/languages/skills/language-quality/SKILL.md`.
+**Expect:** loads `lang-typescript`, then `lang-typescript-quality`, and runs `tsc --noEmit` (or Biome or ESLint).
+**If not:** `plugins/lang-typescript/skills/lang-typescript/SKILL.md`.
 
-### → `python-quality`
+### `lang-python` → `lang-python-quality`
 
 ```text
 Run the Python format, lint, type-check and tests for this project.
 ```
 
-**Expect:** `python-quality` (`ruff check`, `ruff format --check`, `pyright`, `pytest`).
-**If not:** same router.
+**Expect:** `lang-python`, then `lang-python-quality` (`ruff check`, `ruff format --check`, `pyright`, `pytest`).
+**If not:** `plugins/lang-python/skills/lang-python/SKILL.md`.
 
-### → `go-quality`
+### `lang-go` → `lang-go-quality`
 
 ```text
 Run the Go lint and tests.
 ```
 
-**Expect:** `go-quality` (`gofmt -l`, `golangci-lint run` or `go vet`, `go test ./...`).
-**If not:** same router.
+**Expect:** `lang-go`, then `lang-go-quality` (`gofmt -l`, `golangci-lint run` or `go vet`, `go test ./...`).
+**If not:** `plugins/lang-go/skills/lang-go/SKILL.md`.
 
 ### → `lang-typescript-profiling`, `lang-python-profiling`, `lang-go-profiling`
 
+Install `quality` too.
+
 ```text
-This Bun script got slow. Which profiler and benchmark tool should I use, and how?
+Speed up this Python script.
 ```
 
-**Expect:** loads `language-quality`, then `lang-typescript-profiling` (`--cpu-prof`, heap profiles, mitata). Asking the same for a Python or Go service routes to `lang-python-profiling` (py-spy, scalene, memray) or `lang-go-profiling` (pprof, `go test -bench`, benchstat).
-**If not:** the profiling rows in `plugins/languages/skills/language-quality/SKILL.md`.
+**Expect:** loads `quality-profiling` (or `lang-python`), then `lang-python-profiling` (py-spy, scalene, memray). Asking the same for a Bun script or a Go service routes to `lang-typescript-profiling` (`--cpu-prof`, heap profiles, mitata) or `lang-go-profiling` (pprof, `go test -bench`, benchstat).
+**If not:** the language table in `plugins/quality/skills/quality-profiling/SKILL.md`, or the profiling row of the language's router.
+
+## lang-rust
+
+**Install:** `opencode plugin add 'github:srobroek/opencode-plugins#main::path:plugins/lang-rust'`. The plugin
+ships skills only; the former `rust` advisories are now guidance in `lang-rust-ci`.
+
+### Skill `lang-rust` (router) and its members
+
+Each prompt should load `lang-rust`, then the named member. If one does not, check
+`plugins/lang-rust/skills/lang-rust/SKILL.md`.
+
+```text
+Run clippy and the tests for this Rust crate.
+```
+
+**Expect:** `lang-rust-quality`.
+
+```text
+Set up GitHub Actions CI for this Rust workspace with rust-cache and a required-check gate.
+```
+
+**Expect:** `lang-rust-ci`.
+
+```text
+Split this Rust crate so the domain has no IO, behind a lib.rs facade.
+```
+
+**Expect:** `lang-rust-crate-boundaries`.
+
+```text
+Add workspace lints and move shared versions into workspace.dependencies.
+```
+
+**Expect:** `lang-rust-workspace`.
+
+```text
+Define a thiserror error enum and a serde-transparent UserId newtype.
+```
+
+**Expect:** `lang-rust-domain-modeling`.
+
+```text
+Add a Rust crate for persistence: a sqlx repository with a compare-and-swap update inside a transaction.
+```
+
+**Expect:** `lang-rust-persistence`.
+
+```text
+Generate TypeScript bindings for my Rust IPC commands and guard against codegen drift.
+```
+
+**Expect:** `lang-rust-contract-boundary`.
+
+```text
+Implement a plan/approve/apply flow for file mutations in Rust with TOCTOU checks.
+```
+
+**Expect:** `lang-rust-safe-mutation`.
+
+```text
+Set up the Tauri v2 updater and code signing for my desktop app.
+```
+
+**Expect:** `lang-rust-tauri`.
+
+```text
+Profile this Rust binary and set up criterion benchmarks with a saved baseline.
+```
+
+**Expect:** `lang-rust-profiling` (samply, cargo flamegraph, criterion baselines).
 
 ## lsp
 
@@ -1511,93 +1585,6 @@ Uninstall agent-reviewer, restart, then rerun the
 
 **Expect:** the same `VERDICT: HOLDS|WEAKENED|REFUTED` reply, from quality's copy.
 **If not:** `FALLBACK_AGENTS` in `plugins/quality/src/index.ts`.
-
-## rust
-
-**Install:** `opencode plugin add 'github:srobroek/opencode-plugins#main::path:plugins/rust'`.
-
-### Advisory: `cargo install` in CI
-
-```text
-Write .github/workflows/ci.yml with a job that runs: cargo install cargo-nextest
-```
-
-**Expect:** the result ends with ``[rust] `cargo install` builds the tool from source...``, suggesting `taiki-e/install-action`, once per session.
-**If not:** `plugins/rust/src/advisories.ts`.
-
-### Advisory: `RUSTFLAGS` linker
-
-```text
-Add an env block to .github/workflows/ci.yml with RUSTFLAGS: "-C link-arg=-fuse-ld=mold".
-```
-
-**Expect:** the result ends with ``[rust] `Swatinem/rust-cache` hashes `RUSTFLAGS` into its cache key...``.
-**If not:** `RUSTFLAGS_LINKER` in `plugins/rust/src/advisories.ts`.
-
-### Skill `rust-guide` (router) and its members
-
-Each prompt should load `rust-guide`, then the named member. If one does not, check
-`plugins/rust/skills/rust-guide/SKILL.md`.
-
-```text
-Run clippy and the tests for this Rust crate.
-```
-
-**Expect:** `rust-quality`.
-
-```text
-Set up GitHub Actions CI for this Rust workspace with rust-cache and a required-check gate.
-```
-
-**Expect:** `rust-ci`.
-
-```text
-Split this Rust crate so the domain has no IO, behind a lib.rs facade.
-```
-
-**Expect:** `rust-crate-boundaries`.
-
-```text
-Add workspace lints and move shared versions into workspace.dependencies.
-```
-
-**Expect:** `rust-workspace`.
-
-```text
-Define a thiserror error enum and a serde-transparent UserId newtype.
-```
-
-**Expect:** `rust-domain-modeling`.
-
-```text
-Add a sqlx repository with a compare-and-swap update inside a transaction.
-```
-
-**Expect:** `rust-persistence`.
-
-```text
-Generate TypeScript bindings for my Rust IPC commands and guard against codegen drift.
-```
-
-**Expect:** `rust-contract-boundary`.
-
-```text
-Implement a plan/approve/apply flow for file mutations in Rust with TOCTOU checks.
-```
-
-**Expect:** `rust-safe-mutation`.
-
-```text
-Set up the Tauri v2 updater and code signing for my desktop app.
-```
-
-**Expect:** `rust-tauri`.
-
-```text
-Profile this Rust binary and set up criterion benchmarks with a saved baseline.
-```
-
-**Expect:** `lang-rust-profiling` (samply, cargo flamegraph, criterion baselines).
 
 ## safety
 

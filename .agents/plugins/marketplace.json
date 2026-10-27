@@ -137,18 +137,6 @@
       "category": "development"
     },
     {
-      "name": "languages",
-      "source": {
-        "source": "local",
-        "path": "./plugins/languages"
-      },
-      "policy": {
-        "installation": "AVAILABLE",
-        "authentication": "ON_INSTALL"
-      },
-      "category": "development"
-    },
-    {
       "name": "project",
       "source": {
         "source": "local",
