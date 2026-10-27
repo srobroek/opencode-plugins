@@ -50,11 +50,12 @@ describe("plan", () => {
     expect("error" in planned && planned.error).toContain("Usage: /parley-demo")
   })
 
-  test("wait and timeout follow up with parley_wait", () => {
+  test("wait follows up with parley_wait; timeout does not", () => {
     const wait = plan("wait", samples)
     expect("steps" in wait && wait.steps.map((step) => step.tool)).toEqual(["parley_ask", "parley_wait", "parley_wait"])
     const timeout = plan("timeout", samples)
     expect("steps" in timeout && timeout.steps[0]?.input).toMatchObject({ timeout_s: 15 })
+    expect("steps" in timeout && timeout.steps).toHaveLength(1)
   })
 })
 
@@ -82,6 +83,7 @@ test("describeResult shows the summary and files, and keeps the JSON for the mod
 })
 
 test("stillOpen", () => {
-  expect(stillOpen({ output: { status: "timeout" } })).toBe(true)
+  expect(stillOpen({ output: { status: "partial" } })).toBe(true)
+  expect(stillOpen({ output: { status: "timeout" } })).toBe(false)
   expect(stillOpen({ output: { status: "submitted" } })).toBe(false)
 })

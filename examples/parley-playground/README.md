@@ -42,7 +42,7 @@ config and the shared service); the options then come from the same env variable
 
 The TUI part loads automatically: the server loads `plugins/parley` from `opencode.json`, and the
 TUI loads the TUI part of every plugin its server loads. No `cli.json` entry is needed. Check with
-`/parley` in the command list (it is disabled until a round is open).
+`/parley` in the command list (with no open round it shows a toast).
 
 ## The `/parley-demo` command
 
@@ -56,9 +56,14 @@ Panel keys: `tab`/`j`/`k` next/previous question; `↑`/`↓` move between stack
 yes/no, ranked or rated rows), and on side-by-side cards (show_options, emoji_react) and cards
 without rows (slider, text) go to the previous/next question; `←`/`→` move between side-by-side
 choices, or adjust a slider or the rating of the row under the cursor; `space`/`enter`/`1`–`9`
-choose, `a` accept, `n` note, `d` defer, `e` edit text, `shift+↑`/`↓` or `J`/`K` move ranked item,
-`ctrl+s` submit, `D` dismiss, `esc` minimise. In a note or text field `enter` saves and returns to
-the card (`shift+enter` adds a line, `esc` saves too); in ask_code answers `enter` adds a line.
+choose, `a` accept, `n` note, `d` defer, `e` edit text (also types a slider value), `shift+↑`/`↓` or
+`J`/`K` move ranked item, `ctrl+v` attach a clipboard image or copied files on file cards, `ctrl+s`
+submit, `D` dismiss, `esc` minimise, `f` switch view (inline card ↔ full screen, full screen ↔ side
+panel), `alt+p` return to the round after clicking into the prompt (`/parley` does the same). The
+line under the round starts with the focused card's own keys. In a note or text field
+`enter` saves and returns to the card (`shift+enter` adds a line, `esc` saves too); in ask_code
+answers `enter` adds a line. In a path field, suggestions list as you type: `↑`/`↓` pick, `tab`
+completes.
 
 ### `/parley-demo all`
 
@@ -69,12 +74,16 @@ Every kind, in two rounds (a call holds at most 12 questions).
 2. Try: on pick_one press `e` and type an answer of your own (`allow_other`); on pick_many toggle
    until you have 2–3 (min/max are enforced on submit, try 4 to see the error); move a rank item
    with `J`/`K`; move the slider (step 15 s, labels "always fresh … very stale"); rate each library
-   with `↑`/`↓` then `←`/`→`.
+   with `↑`/`↓` then `←`/`→`. On the slider press `e` and type `balanced` or `90`: the card shows
+   `balanced (150 s)` / `90 s`. Confirm shows the snippet it asks about in its body.
 3. `ctrl+s`. Toast "Answers sent"; round 2 *text, review and files* opens: ask_text, ask_code,
    review (the sections of `samples/plan.md`), show_diff (`samples/change.diff`), ask_image,
    ask_file.
-4. On review choose revise and press `e` to write feedback. On ask_image press `e`, type
-   `samples/diagram.png`, `esc`. On ask_file: `samples/notes.txt, samples/data.bin`.
+4. On ask_code press `e`: the suggested function opens in a multi-line editor (`enter` adds a
+   line); out of the editor it shows once, as a code block. On review choose revise and press `e`
+   to write feedback. On ask_image press `e`, type `dia`, pick `samples/diagram.png` from the list
+   with `tab`, `esc`; or copy a screenshot (`cmd+ctrl+shift+4` on macOS) and press `ctrl+v`. On
+   ask_file: `samples/notes.txt, samples/data.bin`.
 5. `ctrl+s`. Expected: two `◈` messages. Round 1 lists each id as `answered` or `accepted`
    (`other: …` for the free text). Round 2 inlines `notes.txt`, reports `data.bin … saved to
    <tmp>/parley/<id>/data.bin`, and lists `diagram.png` as an image part sent to the model.
@@ -91,9 +100,14 @@ Five questions whose titles say what to do:
 
 1. press `a` → `accepted`, `accepted_recommendation: true`;
 2. choose Tabs → `answered`, `accepted_recommendation: false`;
-3. `n`, type a note, `enter` → `noted` with the note and no value;
+3. `n`, type a note, `enter` → `noted` with the note and no value, and the result text tells the
+   model to act on notes;
 4. `d`, then `n` and a reason → `deferred` with the note;
 5. leave it → its id is in `Pending:`.
+
+Focus check: when a card pops up, press `↓` and type a few letters; the card's cursor moves and
+nothing reaches the prompt. Click the prompt and type: the card says keys go to the prompt; `alt+p`
+brings focus back.
 
 Before submitting, press `esc` (panel minimises), type `/parley` (it comes back with every edit
 intact), then `ctrl+s`. Submitting with an untouched question is a **partial submit**: the round
@@ -110,10 +124,10 @@ closes and the untouched ids come back in `pending`.
 
 ### `/parley-demo timeout`
 
-`parley_ask` with `timeout_s: 15`. Wait 15 s without submitting: `◈ … timeout — 0 answers, 1
-pending` ("The round stays open"). The panel stays up; the demo calls `parley_wait` (10 minutes).
-Submit: `◈ … parley_wait after the timeout … submitted`. `/parley-demo resume` calls `parley_wait`
-by hand at any time (`none` when there is no round).
+`parley_ask` with `timeout_s: 15`. The card counts down (`closes in 14s`). Wait without submitting:
+the card closes, a toast says the round timed out and `◈ … timeout (timeout) — 0 answers, 1
+pending` tells the model to go on with its recommendations. `/parley-demo resume` calls
+`parley_wait` by hand at any time (`none` when there is no round).
 
 ### Dismiss, cancel and end
 

@@ -39,8 +39,9 @@ and what the model should do with the answers. Models vary; if the kind differs,
 ### slider
 - "What cache TTL should we use? Let me set a number between 0 and 300 seconds."
 - "How many retries before we give up?"
-- Expect: slider with unit and min/max labels. Try: `←`/`→`.
+- Expect: slider with unit and min/max labels. Try: `←`/`→`, then `e` and type a number.
 - Model: uses the number exactly.
+- Counter-check: "Ask me how wide the change should be." Expect pick_one (narrow / module / repo), not a slider.
 
 ### ask_text
 - "Ask me what the release should be called."
@@ -51,8 +52,9 @@ and what the model should do with the answers. Models vary; if the kind differs,
 ### ask_code
 - "Ask me for the regex we should use to validate tags."
 - "Let me write the SQL for the report query."
-- Expect: ask_code with a language. Try: edit the snippet.
+- Expect: ask_code with a language; the code shows once, as a block. Try: `e`, add lines with `enter`.
 - Model: uses or reviews the snippet.
+- Counter-check: "Confirm this snippet before you apply it." Expect confirm with the snippet in the body, or show_diff, not ask_code.
 
 ### review
 - "Draft a plan for adding a cache from samples/plan.md and let me review it."
@@ -85,7 +87,7 @@ and what the model should do with the answers. Models vary; if the kind differs,
 ### ask_image
 - "I want to show you a screenshot of the layout bug; ask me for it."
 - "Ask me for the architecture diagram."
-- Expect: ask_image. Try: `e`, `samples/diagram.png`.
+- Expect: ask_image. Try: `e`, type `dia` and `tab` to complete `samples/diagram.png`; or copy a screenshot and `ctrl+v`.
 - Model: describes what it sees in the image (a box on a gradient).
 
 ### ask_file
@@ -105,6 +107,9 @@ and what the model should do with the answers. Models vary; if the kind differs,
   Model: lists each status; asks the deferred and pending ones again later; does not treat a note-only answer as a choice.
 
 ## Follow-up behaviour
+- "Ask me which database to use for a small notes app." Pick the recommendation and add the note
+  "why not Postgres? I already run it on my NAS". Model: answers the question and asks a follow-up
+  round (verified with haiku: a confirm "Use the Postgres on your NAS instead of SQLite?").
 - After any round, add a note such as "only if hosting is free" to an answer.
   Model: the next round asks about the note (for example, which free host). Verified with show_options: a confirm about free tiers followed.
 - Defer a question with "ask the team". Model: asks it again in a later round or records it as open.
@@ -112,7 +117,10 @@ and what the model should do with the answers. Models vary; if the kind differs,
 ## Wait modes
 - "Ask me three questions but don't block: use wait none, then wait for my answers with parley_wait."
   Expect: `open`, then a parley_wait call that returns on submit.
-- "Ask me one question with a 15 second timeout." Do not answer. Expect: `timeout`, then parley_wait.
+- "Ask me one question with a 15 second timeout." Do not answer. Expect: the card counts down and
+  closes, `timeout`, and the model goes on with its recommendations.
+- "Ask me how wide the change should be and how many retries the loader gets. You have 30 seconds."
+  Expect `timeout_s: 30` (verified with haiku), pick_one for the width, slider for retries.
 - "Ask, wait for the first answer only (wait any), then continue."
 
 ## Question-tool takeover

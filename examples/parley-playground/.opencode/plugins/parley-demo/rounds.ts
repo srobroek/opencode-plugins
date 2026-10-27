@@ -96,6 +96,14 @@ export function kindQuestions(samples: Samples): Record<string, Question> {
       id: "rollout.flag",
       title: "Ship the cache behind a feature flag?",
       kind: "confirm",
+      body: [
+        "The snippet to confirm sits in the body; the answer is just yes or no.",
+        "",
+        "```typescript",
+        'if (flags.enabled("report_cache")) return cached(loadReport)(id)',
+        "return loadReport(id)",
+        "```",
+      ].join("\n"),
       yes_label: "Yes, behind a flag",
       no_label: "No, ship it on",
       recommended: "yes",
@@ -119,7 +127,7 @@ export function kindQuestions(samples: Samples): Record<string, Question> {
       id: "cache.ttl",
       title: "Cache TTL",
       kind: "slider",
-      body: "`←`/`→` moves the value by one step.",
+      body: "`←`/`→` moves the value by one step; `e` types a number (snapped to the 15 s step) or a label such as `balanced`.",
       min: 0,
       max: 300,
       step: 15,
@@ -139,11 +147,15 @@ export function kindQuestions(samples: Samples): Record<string, Question> {
     },
     ask_code: {
       id: "cache.key",
-      title: "How should the cache key be built?",
+      title: "Write the cache key function",
       kind: "ask_code",
       language: "typescript",
-      body: "Edit the snippet with `e`.",
-      recommended: "const key = [tenant, report, JSON.stringify(params)].join(\"|\")",
+      body: "Press `e` and write the body of `cacheKey(tenant, report, params)`; `enter` adds a line, `esc` saves. The card starts from the suggestion below.",
+      recommended: [
+        "function cacheKey(tenant: string, report: string, params: object) {",
+        '  return [tenant, report, JSON.stringify(params)].join("|")',
+        "}",
+      ].join("\n"),
       rationale: "Ids never contain a pipe, so the key is unambiguous.",
     },
     review: {
@@ -196,7 +208,7 @@ export function kindQuestions(samples: Samples): Record<string, Question> {
       id: "design.image",
       title: "Attach a screenshot or diagram",
       kind: "ask_image",
-      body: "Press `e` and type a path, for example `samples/diagram.png` (relative to where you started opencode).\n\nThe model receives it as image content.",
+      body: "Press `e` and type a path such as `samples/dia` (`tab` completes from the list), or copy a screenshot and press `ctrl+v`.\n\nThe model receives it as image content.",
     },
     ask_file: {
       id: "context.files",
@@ -204,7 +216,7 @@ export function kindQuestions(samples: Samples): Record<string, Question> {
       kind: "ask_file",
       multiple: true,
       body: [
-        "Press `e` and type one or more paths, separated by commas, for example:",
+        "Press `e` and type one or more paths, separated by commas (`tab` completes, `↑`/`↓` pick a suggestion), for example:",
         "",
         "`samples/notes.txt, samples/data.bin`",
         "",
@@ -272,7 +284,7 @@ export function statusQuestions(): Question[] {
     },
     {
       id: "status.note",
-      title: "3. Note only: press `n`, type a comment, `esc`",
+      title: "3. Note only: press `n`, type a comment, `enter`",
       kind: "confirm",
       body: "No recommendation and no choice: the note alone comes back as `noted`.",
     },
@@ -360,11 +372,10 @@ export function plan(args: string, samples: Samples): Plan {
       return {
         steps: [
           ask("timeout_s: 15", {
-            title: "Timeout: wait 15 seconds before submitting",
+            title: "Timeout: leave this for 15 seconds",
             timeout_s: 15,
             questions: pick(all, ["slider"]),
           }),
-          { label: "parley_wait after the timeout", tool: "parley_wait", input: { timeout_s: 600 }, ifOpen: true },
         ],
       }
     case "resume":
@@ -396,7 +407,7 @@ export function help(): string {
     "  files      ask_image and ask_file",
     "  statuses   accept, change, note, defer and pending in one round",
     "  wait       wait: none, then parley_wait any and all",
-    "  timeout    timeout_s: 15, then parley_wait",
+    "  timeout    timeout_s: 15: the round closes and the call returns timeout",
     "  resume     parley_wait on the open round",
     "  fallback   only the kinds the question-tool fallback supports",
     "  cancel     abort this session's running demo calls (result: cancelled, aborted)",
@@ -409,7 +420,7 @@ type ContentPart = { type: string; text?: string; mime?: string; name?: string; 
 /** Whether the result still has questions the user has not settled. */
 export function stillOpen(result: unknown): boolean {
   const status = (result as { output?: { status?: string } })?.output?.status
-  return status === "open" || status === "partial" || status === "timeout"
+  return status === "open" || status === "partial"
 }
 
 export interface Message {
