@@ -166,12 +166,13 @@ apply after the agent's.
 
 ### Verdicts
 
-Every delivery agent starts its reply with `VERDICT: <WORD>`. Every agent except
+Every delivery agent starts its reply with `VERDICT: <WORD>`. A verdict line that
+slips below a preamble or into a code fence still counts, marked `late: true`. Every agent except
 `pr-reviewer` ends it with one fenced `json` block. An `execute.after` hook on the
 `subagent` tool parses that into the result's `metadata.delivery`
-(`{ verdict, agent, summary?, fields? }`).
+(`{ verdict, agent, summary?, late?, fields? }`).
 
-If a delivery agent's reply breaks this format, the verdict is `MALFORMED` and the
+If a delivery agent's reply has no verdict line or otherwise breaks this format, the verdict is `MALFORMED` and the
 result gets a note naming the session to continue. Other agents' results are left
 alone. Background subagent completions arrive as synthetic messages rather than
 tool results, so the hook does not see them.

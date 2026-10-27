@@ -24,8 +24,10 @@ export type DeliveryVerdict =
   | {
       verdict: string
       agent?: string
-      /** The rest of the first line after the verdict word, trimmed. */
+      /** The rest of the verdict line after the verdict word, trimmed. */
       summary?: string
+      /** The verdict line was not the reply's first line (it came later, or inside a code fence). */
+      late?: true
       /** The fenced JSON block, when the reply has a parseable one. */
       fields?: Record<string, unknown>
     }
@@ -33,6 +35,15 @@ export type DeliveryVerdict =
 
 const VERDICT_LINE = /^VERDICT:\s*([A-Z][A-Z-]*)\b[\s:—–-]*(.*)$/
 const JSON_BLOCK = /```json[ \t]*\r?\n([\s\S]*?)\r?\n```/g
+
+/** A line without the markdown a model wraps a verdict line in: bold, inline code, heading or quote marks. */
+function bare(line: string): string {
+  return line
+    .trim()
+    .replace(/^(?:[#>]+\s*)+/, "")
+    .replace(/^(?:\*\*|`)+|(?:\*\*|`)+$/g, "")
+    .trim()
+}
 
 function lastJsonBlock(text: string): { found: false } | { found: true; value: unknown; error?: string } {
   let last: string | undefined
@@ -46,9 +57,10 @@ function lastJsonBlock(text: string): { found: false } | { found: true; value: u
 }
 
 /**
- * Parse a subagent's reply. Returns undefined for a non-delivery agent whose reply has
- * no verdict line, so other agents' results stay untouched; a delivery agent's reply
- * that breaks the contract is `MALFORMED`.
+ * Parse a subagent's reply. Returns undefined for a non-delivery agent whose first line is
+ * no verdict line, so other agents' results stay untouched. A delivery agent's verdict
+ * line may also come later or inside a code fence (marked `late`); a reply without one,
+ * or otherwise breaking the contract, is `MALFORMED`.
  */
 export function parseVerdict(text: string, agent?: string): DeliveryVerdict | undefined {
   const allowed = agent === undefined ? undefined : AGENT_VERDICTS[agent]
@@ -60,10 +72,18 @@ export function parseVerdict(text: string, agent?: string): DeliveryVerdict | un
       .trimStart()
       .split(/\r?\n/, 1)[0]
       ?.trim() ?? ""
-  const match = VERDICT_LINE.exec(first.replace(/^\*\*|\*\*$/g, ""))
+  let match = VERDICT_LINE.exec(bare(first))
+  let late = false
   if (match === null) {
     if (allowed === undefined) return undefined
-    return malformed(`first line is ${JSON.stringify(first.slice(0, 80))}, expected "VERDICT: ${allowed.join("|")}"`)
+    // A delivery agent's verdict line that slipped below a preamble or into a code fence still counts.
+    for (const line of text.split(/\r?\n/)) {
+      match = VERDICT_LINE.exec(bare(line))
+      if (match !== null) break
+    }
+    if (match === null)
+      return malformed(`first line is ${JSON.stringify(first.slice(0, 80))}, expected "VERDICT: ${allowed.join("|")}"`)
+    late = true
   }
   const verdict = match[1] as string
   if (allowed !== undefined && !allowed.includes(verdict)) {
@@ -73,6 +93,7 @@ export function parseVerdict(text: string, agent?: string): DeliveryVerdict | un
   if (agent !== undefined) result.agent = agent
   const summary = match[2]?.trim()
   if (summary) result.summary = summary
+  if (late) result.late = true
   const block = lastJsonBlock(text)
   if (block.found) {
     if (block.error !== undefined) return malformed(`the json block does not parse: ${block.error}`)

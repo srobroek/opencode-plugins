@@ -28,6 +28,29 @@ describe("parseVerdict", () => {
     })
   })
 
+  test("a delivery agent's verdict line below a preamble or inside a code fence counts, marked late", () => {
+    expect(parseVerdict("I reviewed the diff.\n\nVERDICT: APPROVE -- diff only", "pr-reviewer")).toEqual({
+      verdict: "APPROVE",
+      agent: "pr-reviewer",
+      summary: "diff only",
+      late: true,
+    })
+    expect(parseVerdict(`\`\`\`\nVERDICT: DONE — answered\n\`\`\`${json({ verdict: "DONE" })}`, "researcher")).toMatchObject({
+      verdict: "DONE",
+      summary: "answered",
+      late: true,
+    })
+    expect(parseVerdict("## `VERDICT: COMMENT`", "pr-reviewer")).toEqual({ verdict: "COMMENT", agent: "pr-reviewer" })
+    expect(parseVerdict("Summary first.\nVERDICT: MAYBE", "pr-reviewer")).toMatchObject({ verdict: "MALFORMED" })
+    expect(parseVerdict("No verdict here.\nPost a `VERDICT: APPROVE` comment.", "pr-reviewer")).toMatchObject({
+      verdict: "MALFORMED",
+    })
+  })
+
+  test("other agents' later verdict lines are ignored", () => {
+    expect(parseVerdict("notes\nVERDICT: OK", undefined)).toBeUndefined()
+  })
+
   test("a delivery agent that breaks the contract is MALFORMED", () => {
     expect(parseVerdict("Done! All good.", "implementer")).toMatchObject({ verdict: "MALFORMED" })
     expect(parseVerdict(`VERDICT: APPROVE${json({})}`, "implementer")).toMatchObject({ verdict: "MALFORMED" })
