@@ -133,6 +133,10 @@
     "plugins/speckit": {
       "release-type": "node",
       "component": "speckit"
+    },
+    "plugins/agent-efficiency": {
+      "release-type": "node",
+      "component": "agent-efficiency"
     }
   }
 }

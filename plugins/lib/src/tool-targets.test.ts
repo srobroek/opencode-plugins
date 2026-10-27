@@ -2,10 +2,13 @@ import { describe, expect, test } from "bun:test"
 import { homedir } from "node:os"
 
 import {
+  isShellTool,
   patchPaths,
   patchTargets,
   READ_TOOLS,
   readTargets,
+  SHELL_ALIASES,
+  shellAliasInput,
   shellCall,
   shellCommand,
   WRITE_TOOLS,
@@ -84,10 +87,62 @@ describe("shellCall", () => {
   })
 
   test("returns undefined for other tools or a missing command", () => {
-    expect(shellCall("bash", { command: "ls" })).toBeUndefined()
+    expect(shellCall("read", { command: "ls" })).toBeUndefined()
     expect(shellCall("shell", {})).toBeUndefined()
+    expect(shellCall("bash", {})).toBeUndefined()
     expect(shellCommand("shell", { command: "ls" })).toBe("ls")
     expect(shellCommand("read", { command: "ls" })).toBeUndefined()
+  })
+
+  test("reads a shell-alias call as the shell call it routes to", () => {
+    expect(shellCall("bash", { command: "ls", cwd: "/tmp", run_in_background: true, description: "x" })).toEqual({
+      command: "ls",
+      workdir: "/tmp",
+      background: true,
+    })
+    expect(shellCommand("Bash", { cmd: ["bash", "-lc", "git push"] })).toBe("git push")
+  })
+})
+
+describe("shell aliases", () => {
+  test("isShellTool accepts shell and its aliases only", () => {
+    expect(isShellTool("shell")).toBe(true)
+    expect(isShellTool("bash")).toBe(true)
+    expect(isShellTool("Bash")).toBe(true)
+    expect(isShellTool("read")).toBe(false)
+    expect([...SHELL_ALIASES].sort()).toEqual(["Bash", "bash"])
+  })
+
+  test("shellAliasInput maps Claude Code and Codex spellings to shell's input", () => {
+    expect(
+      shellAliasInput({ command: "make", description: "build", timeout: 60000, run_in_background: false }),
+    ).toEqual({ command: "make", timeout: 60000, background: false })
+    expect(shellAliasInput({ cmd: "ls", working_directory: "/w", timeout_ms: "500", background: "true" })).toEqual({
+      command: "ls",
+      workdir: "/w",
+      timeout: 500,
+      background: true,
+    })
+    expect(shellAliasInput({ command: "ls", workdir: "/a", cwd: "/b", timeout: -1 })).toEqual({
+      command: "ls",
+      workdir: "/a",
+    })
+  })
+
+  test("shellAliasInput joins an argv array, unwrapping a shell -c script", () => {
+    expect(shellAliasInput({ command: ["sh", "-c", "echo hi | wc"] })).toEqual({ command: "echo hi | wc" })
+    expect(shellAliasInput({ command: ["/bin/zsh", "-lc", "ls"] })).toEqual({ command: "ls" })
+    expect(shellAliasInput({ command: ["git", "commit", "-m", "it's done"] })).toEqual({
+      command: "git commit -m 'it'\\''s done'",
+    })
+  })
+
+  test("shellAliasInput parses a JSON string and leaves input without a command alone", () => {
+    expect(shellAliasInput('{"command":"pwd"}')).toEqual({ command: "pwd" })
+    expect(shellAliasInput("not json")).toBe("not json")
+    const input = { description: "no command" }
+    expect(shellAliasInput(input)).toBe(input)
+    expect(shellAliasInput({ command: [1, 2] })).toEqual({ command: [1, 2] })
   })
 })
 

@@ -87,141 +87,6 @@ async function registerSkills(skill, paths) {
   });
 }
 
-// plugins/lib/src/subprocess.ts
-import { constants } from "os";
-var EXIT_GRACE_MS = 2000;
-var EXIT_POLL_MS = 100;
-function processAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error.code === "EPERM";
-  }
-}
-function killChild(child, group) {
-  if (group) {
-    try {
-      process.kill(-child.pid, "SIGKILL");
-      return;
-    } catch {}
-  }
-  try {
-    child.kill("SIGKILL");
-  } catch {}
-}
-function unref(timer) {
-  timer.unref?.();
-}
-function capture(stream) {
-  if (!(stream instanceof ReadableStream))
-    return { text: Promise.resolve(""), snapshot: () => "", cancel: () => {} };
-  const reader = stream.getReader();
-  const decoder = new TextDecoder;
-  let collected = "";
-  const text = (async () => {
-    try {
-      for (;; ) {
-        const chunk = await reader.read();
-        if (chunk.done)
-          break;
-        collected += decoder.decode(chunk.value, { stream: true });
-      }
-    } catch {}
-    collected += decoder.decode();
-    return collected;
-  })();
-  const cancel = () => {
-    try {
-      reader.cancel().catch(() => {
-        return;
-      });
-    } catch {}
-  };
-  return { text, snapshot: () => collected, cancel };
-}
-function supervise(child, options = {}) {
-  const grace = Math.max(0, options.graceMs ?? EXIT_GRACE_MS);
-  const pollMs = Math.max(1, options.pollMs ?? EXIT_POLL_MS);
-  const alive = options.alive ?? processAlive;
-  const group = options.group ?? false;
-  const { signal, timeoutMs } = options;
-  const out = capture(child.stdout);
-  const err = capture(child.stderr);
-  return new Promise((resolve) => {
-    let ended = null;
-    let exitSeen = false;
-    let settled = false;
-    let goneSince = null;
-    let deadline;
-    let graceTimer;
-    const settle = (run) => {
-      if (settled)
-        return;
-      settled = true;
-      clearTimeout(deadline);
-      clearTimeout(graceTimer);
-      clearInterval(poller);
-      signal?.removeEventListener("abort", onAbort);
-      resolve(run);
-    };
-    const end = (cause) => {
-      if (ended !== null || settled)
-        return;
-      ended = cause;
-      if (cause !== "lost" || group)
-        killChild(child, group);
-      out.cancel();
-      err.cancel();
-      graceTimer = setTimeout(() => settle({ kind: cause, stdout: out.snapshot(), stderr: err.snapshot() }), grace);
-      if (options.unref)
-        unref(graceTimer);
-    };
-    const onAbort = () => end("aborted");
-    const poller = setInterval(() => {
-      if (exitSeen || ended !== null || settled)
-        return;
-      if (alive(child.pid)) {
-        goneSince = null;
-        return;
-      }
-      goneSince ??= Date.now();
-      if (Date.now() - goneSince >= grace)
-        end("lost");
-    }, pollMs);
-    unref(poller);
-    if (timeoutMs !== undefined && timeoutMs > 0 && Number.isFinite(timeoutMs)) {
-      deadline = setTimeout(() => end("timeout"), timeoutMs);
-      if (options.unref)
-        unref(deadline);
-    }
-    signal?.addEventListener("abort", onAbort, { once: true });
-    if (signal?.aborted)
-      onAbort();
-    child.exited.then(() => {
-      exitSeen = true;
-    }, () => {
-      return;
-    });
-    Promise.all([child.exited, out.text, err.text]).then(([exitCode, stdout, stderr]) => {
-      if (ended !== null)
-        settle({ kind: ended, stdout, stderr });
-      else
-        settle({ kind: "exited", exitCode, signalCode: signalName(child.signalCode), stdout, stderr });
-    }, () => end("lost"));
-  });
-}
-function signalName(code) {
-  if (code === null || code === undefined)
-    return null;
-  if (typeof code === "string")
-    return code;
-  return Object.entries(constants.signals).find(([, n]) => n === code)?.[0] ?? String(code);
-}
-
-// plugins/lib/src/shell-command.ts
-import { resolve } from "path";
-
 // plugins/lib/src/shell-tokenizer.ts
 var SEPARATORS = new Set([";", "&", "|", "(", ")", `
 `]);
@@ -462,7 +327,258 @@ function substitutionEnd(body, from) {
   return body.length;
 }
 
+// plugins/lib/src/command-words.ts
+var NONE = new Set;
+var WRAPPERS = new Map([
+  [
+    "sudo",
+    {
+      valued: new Set([
+        "-C",
+        "-D",
+        "-g",
+        "-h",
+        "-p",
+        "-R",
+        "-r",
+        "-T",
+        "-t",
+        "-U",
+        "-u",
+        "--chdir",
+        "--chroot",
+        "--close-from",
+        "--command-timeout",
+        "--group",
+        "--host",
+        "--other-user",
+        "--prompt",
+        "--role",
+        "--type",
+        "--user"
+      ]),
+      chdir: new Set(["-D", "--chdir"])
+    }
+  ],
+  ["doas", { valued: new Set(["-C", "-u"]) }],
+  [
+    "env",
+    {
+      valued: new Set(["-C", "-L", "-P", "-S", "-U", "-u", "--chdir", "--split-string", "--unset"]),
+      chdir: new Set(["-C", "--chdir"]),
+      split: new Set(["-S", "--split-string"]),
+      assignments: true
+    }
+  ],
+  ["nice", { valued: new Set(["-n", "--adjustment"]) }],
+  ["timeout", { valued: new Set(["-k", "-s", "--kill-after", "--signal"]), operands: 1 }],
+  ["stdbuf", { valued: new Set(["-e", "-i", "-o", "--error", "--input", "--output"]) }],
+  ["exec", { valued: new Set(["-a"]) }],
+  ["command", { valued: NONE, lookup: new Set(["-V", "-v"]) }],
+  ["time", { valued: new Set(["-f", "-o", "--format", "--output"]) }],
+  ["nohup", { valued: NONE }]
+]);
+
+// plugins/lib/src/tool-targets.ts
+var WRITE_TOOLS = new Set(["edit", "write", "patch"]);
+var READ_TOOLS = new Set(["read"]);
+var SHELL_TOOL = "shell";
+var SHELL_ALIASES = new Set(["bash", "Bash"]);
+function isShellTool(tool) {
+  return tool === SHELL_TOOL || SHELL_ALIASES.has(tool);
+}
+var SHELL_EXECUTABLES = new Set(["bash", "sh", "zsh", "dash", "ksh"]);
+var SAFE_WORD = /^[A-Za-z0-9_@%+=:,./-]+$/;
+function quoteWord(word) {
+  return SAFE_WORD.test(word) ? word : `'${word.replaceAll("'", `'\\''`)}'`;
+}
+function commandText(value) {
+  if (typeof value === "string")
+    return value;
+  if (!Array.isArray(value) || value.length === 0 || !value.every((word) => typeof word === "string"))
+    return;
+  const argv = value;
+  const executable = argv[0]?.split("/").pop() ?? "";
+  if (argv.length === 3 && SHELL_EXECUTABLES.has(executable) && /^-l?c$/.test(argv[1] ?? ""))
+    return argv[2];
+  return argv.map(quoteWord).join(" ");
+}
+function flag(value) {
+  if (typeof value === "boolean")
+    return value;
+  if (value === "true")
+    return true;
+  if (value === "false")
+    return false;
+  return;
+}
+function milliseconds(value) {
+  const parsed = typeof value === "string" && value.trim() !== "" ? Number(value) : value;
+  return typeof parsed === "number" && Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined;
+}
+function shellAliasInput(input) {
+  let raw = input;
+  if (typeof raw === "string") {
+    try {
+      raw = JSON.parse(raw);
+    } catch {
+      return input;
+    }
+  }
+  const value = fields(raw);
+  const command = commandText(value.command ?? value.cmd);
+  if (command === undefined)
+    return input;
+  const out = { command };
+  const workdir = [value.workdir, value.cwd, value.working_directory].find((dir) => typeof dir === "string" && dir !== "");
+  if (workdir !== undefined)
+    out.workdir = workdir;
+  const timeout = milliseconds(value.timeout ?? value.timeout_ms);
+  if (timeout !== undefined)
+    out.timeout = timeout;
+  const background = flag(value.background ?? value.run_in_background);
+  if (background !== undefined)
+    out.background = background;
+  return out;
+}
+function fields(input) {
+  return input !== null && typeof input === "object" ? input : {};
+}
+
+// plugins/lib/src/subprocess.ts
+import { constants } from "os";
+var EXIT_GRACE_MS = 2000;
+var EXIT_POLL_MS = 100;
+function processAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+}
+function killChild(child, group) {
+  if (group) {
+    try {
+      process.kill(-child.pid, "SIGKILL");
+      return;
+    } catch {}
+  }
+  try {
+    child.kill("SIGKILL");
+  } catch {}
+}
+function unref(timer) {
+  timer.unref?.();
+}
+function capture(stream) {
+  if (!(stream instanceof ReadableStream))
+    return { text: Promise.resolve(""), snapshot: () => "", cancel: () => {} };
+  const reader = stream.getReader();
+  const decoder = new TextDecoder;
+  let collected = "";
+  const text = (async () => {
+    try {
+      for (;; ) {
+        const chunk = await reader.read();
+        if (chunk.done)
+          break;
+        collected += decoder.decode(chunk.value, { stream: true });
+      }
+    } catch {}
+    collected += decoder.decode();
+    return collected;
+  })();
+  const cancel = () => {
+    try {
+      reader.cancel().catch(() => {
+        return;
+      });
+    } catch {}
+  };
+  return { text, snapshot: () => collected, cancel };
+}
+function supervise(child, options = {}) {
+  const grace = Math.max(0, options.graceMs ?? EXIT_GRACE_MS);
+  const pollMs = Math.max(1, options.pollMs ?? EXIT_POLL_MS);
+  const alive = options.alive ?? processAlive;
+  const group = options.group ?? false;
+  const { signal, timeoutMs } = options;
+  const out = capture(child.stdout);
+  const err = capture(child.stderr);
+  return new Promise((resolve) => {
+    let ended = null;
+    let exitSeen = false;
+    let settled = false;
+    let goneSince = null;
+    let deadline;
+    let graceTimer;
+    const settle = (run) => {
+      if (settled)
+        return;
+      settled = true;
+      clearTimeout(deadline);
+      clearTimeout(graceTimer);
+      clearInterval(poller);
+      signal?.removeEventListener("abort", onAbort);
+      resolve(run);
+    };
+    const end = (cause) => {
+      if (ended !== null || settled)
+        return;
+      ended = cause;
+      if (cause !== "lost" || group)
+        killChild(child, group);
+      out.cancel();
+      err.cancel();
+      graceTimer = setTimeout(() => settle({ kind: cause, stdout: out.snapshot(), stderr: err.snapshot() }), grace);
+      if (options.unref)
+        unref(graceTimer);
+    };
+    const onAbort = () => end("aborted");
+    const poller = setInterval(() => {
+      if (exitSeen || ended !== null || settled)
+        return;
+      if (alive(child.pid)) {
+        goneSince = null;
+        return;
+      }
+      goneSince ??= Date.now();
+      if (Date.now() - goneSince >= grace)
+        end("lost");
+    }, pollMs);
+    unref(poller);
+    if (timeoutMs !== undefined && timeoutMs > 0 && Number.isFinite(timeoutMs)) {
+      deadline = setTimeout(() => end("timeout"), timeoutMs);
+      if (options.unref)
+        unref(deadline);
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted)
+      onAbort();
+    child.exited.then(() => {
+      exitSeen = true;
+    }, () => {
+      return;
+    });
+    Promise.all([child.exited, out.text, err.text]).then(([exitCode, stdout, stderr]) => {
+      if (ended !== null)
+        settle({ kind: ended, stdout, stderr });
+      else
+        settle({ kind: "exited", exitCode, signalCode: signalName(child.signalCode), stdout, stderr });
+    }, () => end("lost"));
+  });
+}
+function signalName(code) {
+  if (code === null || code === undefined)
+    return null;
+  if (typeof code === "string")
+    return code;
+  return Object.entries(constants.signals).find(([, n]) => n === code)?.[0] ?? String(code);
+}
+
 // plugins/lib/src/shell-command.ts
+import { resolve } from "path";
 var OPERATORS = {
   ";": true,
   "&&": true,
@@ -475,7 +591,7 @@ var OPERATORS = {
   "{": true,
   "}": true
 };
-var WRAPPERS = {
+var WRAPPERS2 = {
   mise: true,
   env: true,
   command: true,
@@ -597,7 +713,7 @@ function invocation(segment, argv) {
       }
       continue;
     }
-    if (!/^[A-Za-z_][A-Za-z0-9_]*=/.test(token.value) && !token.value.startsWith("-") && WRAPPERS[basename] !== true)
+    if (!/^[A-Za-z_][A-Za-z0-9_]*=/.test(token.value) && !token.value.startsWith("-") && WRAPPERS2[basename] !== true)
       return null;
     start++;
   }
@@ -940,7 +1056,7 @@ function splitCommands(source) {
     let index = 0;
     while (index < words.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[index]?.value ?? "") || words[index]?.value === "!"))
       index++;
-    while (index < words.length && WRAPPERS[words[index]?.value.split("/").pop() ?? words[index]?.value ?? ""] === true) {
+    while (index < words.length && WRAPPERS2[words[index]?.value.split("/").pop() ?? words[index]?.value ?? ""] === true) {
       const wrapper = words[index]?.value.split("/").pop() ?? words[index]?.value ?? "";
       index++;
       if (wrapper === "env")
@@ -5216,9 +5332,9 @@ async function setupBeads(ctx, deps = {}) {
         throw new GateRefusal("beads-gate-admission", admission.reason, "retry the operation; verification continues and the next attempt waits on the same read");
       return;
     }
-    if (event.tool !== "shell")
+    if (!isShellTool(event.tool))
       return;
-    const call = shellInput(event.input, directory);
+    const call = shellInput(event.tool === SHELL_TOOL ? event.input : shellAliasInput(event.input), directory);
     if (call === undefined || call.command.trim() === "")
       return;
     const chain = await chainFor(event.sessionID, event.agent);

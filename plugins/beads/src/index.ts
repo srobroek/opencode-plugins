@@ -4,6 +4,7 @@ import type { Context } from "@opencode/plugin/promise/plugin"
 import type { Result } from "@opencode/plugin/promise/tool"
 import { appendResultText, shellExit } from "@srobroek/opencode-lib/shell-result"
 import { registerSkills } from "@srobroek/opencode-lib/skill-files"
+import { isShellTool, SHELL_TOOL, shellAliasInput } from "@srobroek/opencode-lib/tool-targets"
 import { bdInvocations, isMutatingBdCommand } from "./bd-actor-gate.ts"
 import { claimResultOutput } from "./bd-lease-gate.ts"
 import { sessionPinFor } from "./beads-store.ts"
@@ -208,8 +209,8 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
         )
       return
     }
-    if (event.tool !== "shell") return
-    const call = shellInput(event.input, directory)
+    if (!isShellTool(event.tool)) return
+    const call = shellInput(event.tool === SHELL_TOOL ? event.input : shellAliasInput(event.input), directory)
     if (call === undefined || call.command.trim() === "") return
     const chain = await chainFor(event.sessionID, event.agent)
     const actor = agentActor(chain)

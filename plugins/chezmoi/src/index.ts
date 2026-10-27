@@ -1,7 +1,7 @@
 import { fileURLToPath } from "node:url"
 import { Plugin } from "@opencode/plugin"
 import { registerSkills } from "@srobroek/opencode-lib/skill-files"
-import { SHELL_TOOL, WRITE_TOOLS } from "@srobroek/opencode-lib/tool-targets"
+import { isShellTool, WRITE_TOOLS } from "@srobroek/opencode-lib/tool-targets"
 import { createGuard, type GuardOptions } from "./guard.ts"
 
 export { createGuard, MANAGED_TTL_MS, refusal } from "./guard.ts"
@@ -15,7 +15,7 @@ export function createPlugin(overrides: GuardOptions = {}) {
     async setup(ctx) {
       const guard = createGuard(overrides)
       const before = await ctx.tool.hook("execute.before", async (event) => {
-        if (event.tool !== SHELL_TOOL && !WRITE_TOOLS.has(event.tool)) return
+        if (!isShellTool(event.tool) && !WRITE_TOOLS.has(event.tool)) return
         const directory = await ctx.session
           .get({ sessionID: event.sessionID })
           .then((session) => session.location.directory as string)

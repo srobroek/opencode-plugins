@@ -5,7 +5,7 @@ import type { Context } from "@opencode/plugin/promise/plugin"
 import type { ToolContext } from "@opencode/plugin/promise/tool"
 import { agentPaths, registerAgents } from "@srobroek/opencode-lib/agent-files"
 import { registerSkills, skillPaths } from "@srobroek/opencode-lib/skill-files"
-import { SHELL_TOOL, WRITE_TOOLS } from "@srobroek/opencode-lib/tool-targets"
+import { isShellTool, WRITE_TOOLS } from "@srobroek/opencode-lib/tool-targets"
 import { beadsActive } from "./beads.ts"
 import { DEFAULT_INTEGRATION } from "./setup.ts"
 import { rewriteSkill, type SkillLike, type SkillRouting, skillRefusal, staleSkills } from "./skills.ts"
@@ -145,7 +145,7 @@ export async function setupSpeckit(ctx: Context, overrides: Overrides = {}): Pro
           if (reason !== undefined && (await probe(await directory(event.sessionID)))) throw new Error(reason)
           return
         }
-        if (!options.tasksGuard || (event.tool !== SHELL_TOOL && !WRITE_TOOLS.has(event.tool))) return
+        if (!options.tasksGuard || (!isShellTool(event.tool) && !WRITE_TOOLS.has(event.tool))) return
         let reason: string | undefined
         try {
           reason = await decideToolCall(event.tool, event.input, await directory(event.sessionID), probe)

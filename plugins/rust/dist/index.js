@@ -71,9 +71,10 @@ async function registerSkills(skill, paths) {
   });
 }
 
-// plugins/rust/src/advisories.ts
-import { homedir as homedir2 } from "os";
-import { basename as basename2 } from "path";
+// plugins/lib/src/shell-write-targets.ts
+import { statSync } from "fs";
+import { homedir } from "os";
+import { basename, isAbsolute, join, relative, resolve } from "path";
 
 // plugins/lib/src/shell-tokenizer.ts
 var SEPARATORS = new Set([";", "&", "|", "(", ")", `
@@ -315,256 +316,9 @@ function substitutionEnd(body, from) {
   return body.length;
 }
 
-// plugins/lib/src/shell-command.ts
-var OPERATORS = {
-  ";": true,
-  "&&": true,
-  "||": true,
-  "&": true,
-  "|": true,
-  "\n": true,
-  "(": true,
-  ")": true,
-  "{": true,
-  "}": true
-};
-var WRAPPERS = {
-  mise: true,
-  env: true,
-  command: true,
-  exec: true,
-  nohup: true,
-  nice: true,
-  sudo: true,
-  xargs: true,
-  time: true,
-  "!": true,
-  if: true,
-  elif: true,
-  else: true,
-  while: true,
-  until: true,
-  do: true
-};
-function tokenize(segment) {
-  return tokenizeShell(segment, { preserveBackslashes: true }).map(({ value, startsQuoted }) => ({
-    value,
-    quoted: startsQuoted
-  }));
-}
-function splitCommands(source) {
-  const positions = [];
-  let current = [];
-  const flush = () => {
-    if (current.length === 0)
-      return;
-    const words = [...current];
-    const argv = words.map((word) => word.value);
-    let index = 0;
-    while (index < words.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[index]?.value ?? "") || words[index]?.value === "!"))
-      index++;
-    while (index < words.length && WRAPPERS[words[index]?.value.split("/").pop() ?? words[index]?.value ?? ""] === true) {
-      const wrapper = words[index]?.value.split("/").pop() ?? words[index]?.value ?? "";
-      index++;
-      if (wrapper === "env")
-        while (index < words.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[index]?.value ?? "") || words[index]?.value?.startsWith("-") === true))
-          index++;
-      if (wrapper === "xargs")
-        while (index < words.length && words[index]?.value?.startsWith("-") === true)
-          index++;
-      if (wrapper === "sudo")
-        while (index < words.length && words[index]?.value?.startsWith("-") === true) {
-          index++;
-          if (index < words.length && words[index]?.value?.startsWith("-") === false)
-            index++;
-        }
-    }
-    const executable = words[index] && !words[index]?.quoted ? words[index]?.value : undefined;
-    const raw = words.map((word) => word.quoted ? `'${word.value.replaceAll("'", "'\\''")}'` : word.value).join(" ");
-    positions.push({ raw, words, argv, executable });
-    current = [];
-  };
-  for (const token of tokenize(source)) {
-    if (OPERATORS[token.value] === true) {
-      flush();
-      continue;
-    }
-    current.push(token);
-  }
-  flush();
-  return positions;
-}
-function nestedSources(source) {
-  const sources = [];
-  let unknown = false;
-  let depth = 0;
-  let start = -1;
-  let quote = null;
-  for (let i = 0;i < source.length; i++) {
-    const ch = source[i];
-    if (quote === "'") {
-      if (ch === "'")
-        quote = null;
-      continue;
-    }
-    if (quote === '"') {
-      if (ch === "\\")
-        i++;
-      else if (ch === '"')
-        quote = null;
-      continue;
-    }
-    if (ch === "'") {
-      quote = "'";
-      continue;
-    }
-    if (ch === '"') {
-      quote = '"';
-      continue;
-    }
-    if (ch === "`") {
-      const end = source.indexOf("`", i + 1);
-      if (end < 0)
-        return { sources, unknown: true };
-      sources.push(source.slice(i + 1, end));
-      i = end;
-      continue;
-    }
-    if (source.startsWith("$(", i)) {
-      if (depth++ === 0)
-        start = i + 2;
-      i++;
-      continue;
-    }
-    if (depth > 0 && ch === ")") {
-      if (--depth === 0)
-        sources.push(source.slice(start, i));
-    }
-  }
-  if (depth !== 0)
-    unknown = true;
-  for (const match of source.matchAll(/"((?:\\.|[^"\\])*)"/g)) {
-    const body = match[1] ?? "";
-    for (const substitution of body.matchAll(/\$\(([^()]*)\)/g))
-      if (substitution[1] !== undefined)
-        sources.push(substitution[1]);
-    for (const substitution of body.matchAll(/`([^`]*)`/g))
-      if (substitution[1] !== undefined)
-        sources.push(substitution[1]);
-  }
-  for (const match of source.matchAll(/\b(?:bash|sh|zsh|dash|ksh)\s+-c\s+((?:'[^']*')|(?:"[^"]*")|[^\s;&|]+)/g)) {
-    const value = match[1];
-    if (!value || value.startsWith('"$') || value.startsWith("'$"))
-      unknown = true;
-    else
-      sources.push(value.replace(/^['"]|['"]$/g, ""));
-  }
-  for (const match of source.matchAll(/\beval\s+((?:'[^']*')|(?:"[^"]*")|[^\s;&|]+)/g)) {
-    const value = match[1];
-    if (value?.startsWith("$"))
-      unknown = true;
-    else if (value)
-      sources.push(value.replace(/^['"]|['"]$/g, ""));
-  }
-  for (const match of source.matchAll(/\bxargs(?:\s+-[^\s;&|]+)*\s+([^;&|]+?)(?=\s*(?:[;&|]|$))/g)) {
-    const value = match[1]?.trim();
-    if (value?.startsWith("$"))
-      unknown = true;
-    else if (value)
-      sources.push(value.replace(/^['"]|['"]$/g, ""));
-  }
-  return { sources, unknown };
-}
-function staticParse(command) {
-  if (command.length > 64000)
-    return {
-      kind: "parse-failure",
-      reason: "input exceeds 64000 characters",
-      command,
-      segments: [],
-      commands: [],
-      unknown: true,
-      nested: []
-    };
-  if (!shellQuoteBalanced(command))
-    return {
-      kind: "parse-failure",
-      reason: "unbalanced shell quote",
-      command,
-      segments: [],
-      commands: [],
-      unknown: true,
-      nested: []
-    };
-  const commands = splitCommands(command);
-  const nested = nestedSources(command);
-  const children = nested.sources.map(staticParse);
-  const unknown = nested.unknown || children.some((child) => child.unknown);
-  return {
-    command,
-    segments: commands.map((position) => position.argv),
-    commands,
-    unknown,
-    nested: children
-  };
-}
-function parse(command) {
-  if (typeof command !== "string") {
-    return {
-      kind: "parse-failure",
-      reason: "command is not a string",
-      command: "",
-      segments: [],
-      commands: [],
-      unknown: true,
-      nested: []
-    };
-  }
-  return staticParse(command);
-}
-function parsedInvocations(parsed, executable, booleanFlags = []) {
-  if (parsed.unknown)
-    return [];
-  const found = [];
-  for (const position of parsed.commands) {
-    const executableName = position.executable?.split("/").pop();
-    const index = executableName === executable ? position.argv.findIndex((word, i) => !position.words[i]?.quoted && (word.split("/").pop() ?? word) === executable) : -1;
-    if (index < 0)
-      continue;
-    const args = position.argv.slice(index + 1);
-    const globals = [];
-    let verb;
-    for (let i = 0;i < args.length; i++) {
-      const word = args[i];
-      if (word === undefined)
-        continue;
-      if (word.startsWith("-") && verb === undefined) {
-        globals.push(word);
-        const next = args[i + 1];
-        if (!booleanFlags.includes(word) && !word.includes("=") && next !== undefined && !next.startsWith("-")) {
-          globals.push(next);
-          i++;
-        }
-        continue;
-      }
-      if (verb === undefined && !word.startsWith("\x00"))
-        verb = word;
-    }
-    found.push({ position, command: position.raw, args, verb, globals });
-  }
-  for (const child of parsed.nested)
-    found.push(...parsedInvocations(child, executable, booleanFlags));
-  return found;
-}
-
-// plugins/lib/src/shell-write-targets.ts
-import { statSync } from "fs";
-import { homedir } from "os";
-import { basename, isAbsolute, join, relative, resolve } from "path";
-
 // plugins/lib/src/command-words.ts
 var NONE = new Set;
-var WRAPPERS2 = new Map([
+var WRAPPERS = new Map([
   [
     "sudo",
     {
@@ -644,7 +398,7 @@ function commandWords(input) {
       i++;
       continue;
     }
-    const wrapper = WRAPPERS2.get(word.slice(word.lastIndexOf("/") + 1));
+    const wrapper = WRAPPERS.get(word.slice(word.lastIndexOf("/") + 1));
     if (wrapper === undefined)
       break;
     i++;
@@ -932,6 +686,64 @@ function shellWriteTargets(command, cwd) {
 var WRITE_TOOLS = new Set(["edit", "write", "patch"]);
 var READ_TOOLS = new Set(["read"]);
 var SHELL_TOOL = "shell";
+var SHELL_ALIASES = new Set(["bash", "Bash"]);
+function isShellTool(tool) {
+  return tool === SHELL_TOOL || SHELL_ALIASES.has(tool);
+}
+var SHELL_EXECUTABLES = new Set(["bash", "sh", "zsh", "dash", "ksh"]);
+var SAFE_WORD = /^[A-Za-z0-9_@%+=:,./-]+$/;
+function quoteWord(word) {
+  return SAFE_WORD.test(word) ? word : `'${word.replaceAll("'", `'\\''`)}'`;
+}
+function commandText(value) {
+  if (typeof value === "string")
+    return value;
+  if (!Array.isArray(value) || value.length === 0 || !value.every((word) => typeof word === "string"))
+    return;
+  const argv = value;
+  const executable = argv[0]?.split("/").pop() ?? "";
+  if (argv.length === 3 && SHELL_EXECUTABLES.has(executable) && /^-l?c$/.test(argv[1] ?? ""))
+    return argv[2];
+  return argv.map(quoteWord).join(" ");
+}
+function flag(value) {
+  if (typeof value === "boolean")
+    return value;
+  if (value === "true")
+    return true;
+  if (value === "false")
+    return false;
+  return;
+}
+function milliseconds(value) {
+  const parsed = typeof value === "string" && value.trim() !== "" ? Number(value) : value;
+  return typeof parsed === "number" && Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined;
+}
+function shellAliasInput(input) {
+  let raw = input;
+  if (typeof raw === "string") {
+    try {
+      raw = JSON.parse(raw);
+    } catch {
+      return input;
+    }
+  }
+  const value = fields(raw);
+  const command = commandText(value.command ?? value.cmd);
+  if (command === undefined)
+    return input;
+  const out = { command };
+  const workdir = [value.workdir, value.cwd, value.working_directory].find((dir) => typeof dir === "string" && dir !== "");
+  if (workdir !== undefined)
+    out.workdir = workdir;
+  const timeout = milliseconds(value.timeout ?? value.timeout_ms);
+  if (timeout !== undefined)
+    out.timeout = timeout;
+  const background = flag(value.background ?? value.run_in_background);
+  if (background !== undefined)
+    out.background = background;
+  return out;
+}
 var PATCH_HEADER = /^\*\*\* (?:(?<verb>Add|Update|Delete) File|(?<move>Move to)):\s*(?<path>.+?)\s*$/;
 function unquote2(path) {
   const first = path[0];
@@ -969,9 +781,9 @@ function writeTargets(tool, input) {
   return [];
 }
 function shellCall(tool, input) {
-  if (tool !== SHELL_TOOL)
+  if (!isShellTool(tool))
     return;
-  const value = fields(input);
+  const value = fields(tool === SHELL_TOOL ? input : shellAliasInput(input));
   if (typeof value.command !== "string")
     return;
   const call = { command: value.command };
@@ -988,6 +800,252 @@ function writtenPaths(tool, input, cwd) {
   if (shell !== undefined)
     return shellWriteTargets(shell.command, shell.workdir ? lexicalAbs(shell.workdir, cwd) : cwd);
   return [...new Set(writeTargets(tool, input).map((path) => lexicalAbs(path, cwd)))];
+}
+
+// plugins/rust/src/advisories.ts
+import { homedir as homedir2 } from "os";
+import { basename as basename2 } from "path";
+
+// plugins/lib/src/shell-command.ts
+var OPERATORS = {
+  ";": true,
+  "&&": true,
+  "||": true,
+  "&": true,
+  "|": true,
+  "\n": true,
+  "(": true,
+  ")": true,
+  "{": true,
+  "}": true
+};
+var WRAPPERS2 = {
+  mise: true,
+  env: true,
+  command: true,
+  exec: true,
+  nohup: true,
+  nice: true,
+  sudo: true,
+  xargs: true,
+  time: true,
+  "!": true,
+  if: true,
+  elif: true,
+  else: true,
+  while: true,
+  until: true,
+  do: true
+};
+function tokenize(segment) {
+  return tokenizeShell(segment, { preserveBackslashes: true }).map(({ value, startsQuoted }) => ({
+    value,
+    quoted: startsQuoted
+  }));
+}
+function splitCommands(source) {
+  const positions = [];
+  let current = [];
+  const flush = () => {
+    if (current.length === 0)
+      return;
+    const words = [...current];
+    const argv = words.map((word) => word.value);
+    let index = 0;
+    while (index < words.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[index]?.value ?? "") || words[index]?.value === "!"))
+      index++;
+    while (index < words.length && WRAPPERS2[words[index]?.value.split("/").pop() ?? words[index]?.value ?? ""] === true) {
+      const wrapper = words[index]?.value.split("/").pop() ?? words[index]?.value ?? "";
+      index++;
+      if (wrapper === "env")
+        while (index < words.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[index]?.value ?? "") || words[index]?.value?.startsWith("-") === true))
+          index++;
+      if (wrapper === "xargs")
+        while (index < words.length && words[index]?.value?.startsWith("-") === true)
+          index++;
+      if (wrapper === "sudo")
+        while (index < words.length && words[index]?.value?.startsWith("-") === true) {
+          index++;
+          if (index < words.length && words[index]?.value?.startsWith("-") === false)
+            index++;
+        }
+    }
+    const executable = words[index] && !words[index]?.quoted ? words[index]?.value : undefined;
+    const raw = words.map((word) => word.quoted ? `'${word.value.replaceAll("'", "'\\''")}'` : word.value).join(" ");
+    positions.push({ raw, words, argv, executable });
+    current = [];
+  };
+  for (const token of tokenize(source)) {
+    if (OPERATORS[token.value] === true) {
+      flush();
+      continue;
+    }
+    current.push(token);
+  }
+  flush();
+  return positions;
+}
+function nestedSources(source) {
+  const sources = [];
+  let unknown = false;
+  let depth = 0;
+  let start = -1;
+  let quote = null;
+  for (let i = 0;i < source.length; i++) {
+    const ch = source[i];
+    if (quote === "'") {
+      if (ch === "'")
+        quote = null;
+      continue;
+    }
+    if (quote === '"') {
+      if (ch === "\\")
+        i++;
+      else if (ch === '"')
+        quote = null;
+      continue;
+    }
+    if (ch === "'") {
+      quote = "'";
+      continue;
+    }
+    if (ch === '"') {
+      quote = '"';
+      continue;
+    }
+    if (ch === "`") {
+      const end = source.indexOf("`", i + 1);
+      if (end < 0)
+        return { sources, unknown: true };
+      sources.push(source.slice(i + 1, end));
+      i = end;
+      continue;
+    }
+    if (source.startsWith("$(", i)) {
+      if (depth++ === 0)
+        start = i + 2;
+      i++;
+      continue;
+    }
+    if (depth > 0 && ch === ")") {
+      if (--depth === 0)
+        sources.push(source.slice(start, i));
+    }
+  }
+  if (depth !== 0)
+    unknown = true;
+  for (const match of source.matchAll(/"((?:\\.|[^"\\])*)"/g)) {
+    const body = match[1] ?? "";
+    for (const substitution of body.matchAll(/\$\(([^()]*)\)/g))
+      if (substitution[1] !== undefined)
+        sources.push(substitution[1]);
+    for (const substitution of body.matchAll(/`([^`]*)`/g))
+      if (substitution[1] !== undefined)
+        sources.push(substitution[1]);
+  }
+  for (const match of source.matchAll(/\b(?:bash|sh|zsh|dash|ksh)\s+-c\s+((?:'[^']*')|(?:"[^"]*")|[^\s;&|]+)/g)) {
+    const value = match[1];
+    if (!value || value.startsWith('"$') || value.startsWith("'$"))
+      unknown = true;
+    else
+      sources.push(value.replace(/^['"]|['"]$/g, ""));
+  }
+  for (const match of source.matchAll(/\beval\s+((?:'[^']*')|(?:"[^"]*")|[^\s;&|]+)/g)) {
+    const value = match[1];
+    if (value?.startsWith("$"))
+      unknown = true;
+    else if (value)
+      sources.push(value.replace(/^['"]|['"]$/g, ""));
+  }
+  for (const match of source.matchAll(/\bxargs(?:\s+-[^\s;&|]+)*\s+([^;&|]+?)(?=\s*(?:[;&|]|$))/g)) {
+    const value = match[1]?.trim();
+    if (value?.startsWith("$"))
+      unknown = true;
+    else if (value)
+      sources.push(value.replace(/^['"]|['"]$/g, ""));
+  }
+  return { sources, unknown };
+}
+function staticParse(command) {
+  if (command.length > 64000)
+    return {
+      kind: "parse-failure",
+      reason: "input exceeds 64000 characters",
+      command,
+      segments: [],
+      commands: [],
+      unknown: true,
+      nested: []
+    };
+  if (!shellQuoteBalanced(command))
+    return {
+      kind: "parse-failure",
+      reason: "unbalanced shell quote",
+      command,
+      segments: [],
+      commands: [],
+      unknown: true,
+      nested: []
+    };
+  const commands = splitCommands(command);
+  const nested = nestedSources(command);
+  const children = nested.sources.map(staticParse);
+  const unknown = nested.unknown || children.some((child) => child.unknown);
+  return {
+    command,
+    segments: commands.map((position) => position.argv),
+    commands,
+    unknown,
+    nested: children
+  };
+}
+function parse(command) {
+  if (typeof command !== "string") {
+    return {
+      kind: "parse-failure",
+      reason: "command is not a string",
+      command: "",
+      segments: [],
+      commands: [],
+      unknown: true,
+      nested: []
+    };
+  }
+  return staticParse(command);
+}
+function parsedInvocations(parsed, executable, booleanFlags = []) {
+  if (parsed.unknown)
+    return [];
+  const found = [];
+  for (const position of parsed.commands) {
+    const executableName = position.executable?.split("/").pop();
+    const index = executableName === executable ? position.argv.findIndex((word, i) => !position.words[i]?.quoted && (word.split("/").pop() ?? word) === executable) : -1;
+    if (index < 0)
+      continue;
+    const args = position.argv.slice(index + 1);
+    const globals = [];
+    let verb;
+    for (let i = 0;i < args.length; i++) {
+      const word = args[i];
+      if (word === undefined)
+        continue;
+      if (word.startsWith("-") && verb === undefined) {
+        globals.push(word);
+        const next = args[i + 1];
+        if (!booleanFlags.includes(word) && !word.includes("=") && next !== undefined && !next.startsWith("-")) {
+          globals.push(next);
+          i++;
+        }
+        continue;
+      }
+      if (verb === undefined && !word.startsWith("\x00"))
+        verb = word;
+    }
+    found.push({ position, command: position.raw, args, verb, globals });
+  }
+  for (const child of parsed.nested)
+    found.push(...parsedInvocations(child, executable, booleanFlags));
+  return found;
 }
 
 // plugins/rust/src/advisories.ts
@@ -1179,7 +1237,7 @@ var src_default = Plugin.define({
     const directory = (sessionID) => ctx.session.get({ sessionID }).then((session) => session.location.directory).catch(() => ctx.location.directory);
     const shown = new Set;
     const gate = await ctx.tool.hook("execute.before", async (event) => {
-      if (!["edit", "write", "patch", "shell"].includes(event.tool))
+      if (!WRITE_TOOLS.has(event.tool) && !isShellTool(event.tool))
         return;
       const reason = decideToolCall(event.tool, event.input, await directory(event.sessionID));
       if (reason)
