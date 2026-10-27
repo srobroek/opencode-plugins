@@ -18,8 +18,8 @@ project.
 - commits, pushes or opens a PR only when the parent delegated that, and keeps
   internal ids (beads, agents, gates) out of text written to an external repo.
 
-It may read, search, edit, run shell commands and search the web; it may not spawn
-subagents. Its checkouts live outside the project, so OpenCode asks for
+It may read, search, edit, run shell commands, search the web and pack a repo with
+`repomix_pack` (from the repomix plugin); it may not spawn subagents. Its checkouts live outside the project, so OpenCode asks for
 `external_directory` access unless your config allows `/tmp/agentic/**`.
 
 Converted from the omp-plugins `build` agent with `scripts/convert-agent.ts`. The
