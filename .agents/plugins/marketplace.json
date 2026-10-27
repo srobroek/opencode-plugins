@@ -89,6 +89,18 @@
       "category": "productivity"
     },
     {
+      "name": "lang-go",
+      "source": {
+        "source": "local",
+        "path": "./plugins/lang-go"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "development"
+    },
+    {
       "name": "languages",
       "source": {
         "source": "local",
