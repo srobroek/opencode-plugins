@@ -1,7 +1,7 @@
 {
   "name": "@srobroek/opencode-lang-go",
   "version": "0.1.0",
-  "description": "Go skills: gofmt, golangci-lint or go vet and go test checks, and pprof and benchmark profiling; formatting runs through OpenCode built-in formatters.",
+  "description": "Go skills: build, lint, go test -race, tidy and govulncheck checks, testing and fuzzing, module and package layout, and pprof profiling.",
   "private": true,
   "type": "module",
   "exports": {

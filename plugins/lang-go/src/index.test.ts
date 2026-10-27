@@ -7,8 +7,10 @@ test("registers the go skills and disposes them", async () => {
   const cleanup = await plugin.setup(fake.context)
   expect([...fake.skills.keys()].sort()).toEqual([
     "lang-go",
+    "lang-go-packaging",
     "lang-go-profiling",
     "lang-go-quality",
+    "lang-go-testing",
   ])
   for (const skill of fake.skills.values())
     expect(String(skill.content)).not.toMatch(/skill:\/\/|rule:\/\/|_quality`? tool|\bbash\b|TTSR/)

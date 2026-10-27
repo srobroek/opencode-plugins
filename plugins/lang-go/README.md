@@ -1,7 +1,8 @@
 # lang-go
 
-Go quality and profiling skills: the lint and test commands to run through the shell
-tool, how to report a step that could not run, and the profiler and benchmark tooling.
+Go skills: the build, lint, test, tidy and vulnerability checks to run through the shell
+tool and in CI, how to report a step that could not run, testing and fuzzing idioms,
+module and package layout, and the profiler and benchmark tooling.
 Formatting is OpenCode's built-in formatter (`"formatter": true`); see
 [docs/formatters.md](../../docs/formatters.md).
 
@@ -33,6 +34,11 @@ The plugin registers these skills from `skills/`, unless a skill with the same i
 already exists:
 
 - `lang-go`: the router.
-- `lang-go-quality`: `gofmt -l`, `golangci-lint run` or `go vet`, `go test ./...`.
+- `lang-go-quality`: `go build`, `golangci-lint fmt --diff` or `gofmt -l`, `golangci-lint run`
+  or `go vet`, `go test -race`, `go mod tidy -diff`, `govulncheck`, in that order, and CI.
+- `lang-go-testing`: table tests and subtests, go-cmp, golden files, fuzzing, httptest,
+  `testing/synctest`.
+- `lang-go-packaging`: one module with `cmd/` and `internal/`, `go.work`, `tool`
+  directives, build tags for debug code, depguard import rules.
 - `lang-go-profiling`: pprof, `go test -bench`, `go tool trace`, benchstat. The method is
   the `quality` plugin's `quality-profiling` skill.
