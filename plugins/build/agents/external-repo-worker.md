@@ -50,6 +50,9 @@ permissions:
   - action: websearch
     resource: "*"
     effect: allow
+  - action: repomix_pack
+    resource: "*"
+    effect: allow
   - action: subagent
     resource: "*"
     effect: deny
@@ -98,6 +101,8 @@ that are outside the caller project's current repo root.
 2. Clone if absent; update only when parent requested current upstream state.
 3. Read the repo's own instructions first: `AGENTS.md`, `CLAUDE.md`,
    `CONTRIBUTING.md`, `README.md`, `.github/`, `.specify/`, and local tooling.
+   To orient in a large repo before or after cloning, `repomix_pack` (when available)
+   packs it to a temp file; grep and read that pack in slices, never whole.
 4. Confirm task boundary and affected files before editing.
 5. Make only the requested bounded changes.
 6. Run the repo's relevant local verification.
