@@ -25,6 +25,28 @@ the `wt` strategy when the [worktrunk](../worktrunk) plugin is loaded, OpenCode'
 
 ## How it works
 
+### Where a subagent starts
+
+The plugin adds an optional `worktree` argument to the built-in `subagent` tool: the path (or a
+path inside it), the branch, or the directory name of an existing worktree of the caller's
+repository, as `git worktree list` reports it. Anything else is refused, as is `worktree` together
+with `sessionID`. The argument is removed before the built-in tool runs.
+
+| Caller passes | Read-only or not opted-in agent | Opted-in writer |
+| --- | --- | --- |
+| `worktree` | a child session moved into that worktree before it starts | a fresh worktree branched from that worktree's `HEAD`, merged back into its branch |
+| nothing | the caller's directory | a fresh worktree branched from the caller's checkout |
+
+Child sessions start in the parent session's location, so a parent that already runs in a worktree
+(for example after `session_move`) passes it on without `worktree`. A child moved into a worktree
+gets a prompt line naming it, and its reads and commands there are inside its own directory, so
+they do not ask for `external_directory`. With `worktree`, a writer branches from that worktree's
+`HEAD` even when `base` names another ref. Naming the worktree the caller is already in changes
+nothing. A writer that is not isolated (for example, one a child session spawns) runs in the named
+worktree like a read-only agent.
+
+### Writers
+
 `execute.before` on the `subagent` tool. It skips the call when it continues a session (`sessionID`
 is set), the agent is not opted in, unknown or primary, the agent is read-only (its last permission
 rule matching `edit` on `*` denies it), the caller is itself a child session, or the caller's
@@ -32,7 +54,8 @@ directory is not a git work tree. Otherwise it:
 
 1. asserts the `subagent` permission for the agent;
 2. creates a worktree with `ctx.worktree.create` named `subagent-<description>-<random>`, starting
-   at the `base` commit. On a detached checkout (Git strategy) it creates a branch with that name;
+   at the `base` commit (or the named worktree's `HEAD`). On a detached checkout (Git strategy) it
+   creates a branch with that name;
 3. creates the child session the way the built-in tool does (parent, title, agent, model), moves it
    into the worktree, and stores the lane in plugin storage;
 4. sets `sessionID` on the call and prepends a short worktree notice to the prompt, so the built-in
