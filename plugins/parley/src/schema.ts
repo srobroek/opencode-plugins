@@ -27,10 +27,10 @@ export const questionSchema = {
         "Preselected: option id (ids for pick_many/rank), yes|no, up|down, number, {optionId: number} for rate, text, approve|revise, or an emoji",
     },
     options: { type: "array", items: option },
-    allow_other: { type: "boolean" },
+    allow_other: { type: "boolean", description: "Free text: pick_one/pick_many default true, slider false" },
     allow_defer: { type: "boolean" },
     depends_on: { type: "array", items: { type: "string" } },
-    min: { type: "number", description: "slider/rate bound; pick_many minimum" },
+    min: { type: "number", description: "slider (numbers only)/rate bound; pick_many minimum" },
     max: { type: "number", description: "slider/rate bound; pick_many maximum" },
     step: { type: "number" },
     unit: { type: "string" },
@@ -74,7 +74,7 @@ export const askInput = {
     timeout_s: {
       type: "integer",
       minimum: 0,
-      description: "Default 1800; 0 waits without limit",
+      description: "Default 1800; 0 waits without limit. When it passes the round closes",
     },
     format: {
       type: "string",

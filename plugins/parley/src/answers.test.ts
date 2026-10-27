@@ -95,9 +95,14 @@ describe("normaliseAnswer", () => {
 })
 
 describe("validateValue", () => {
-  test("pick_many enforces max and allow_other", () => {
+  test("pick_many enforces max and allows other unless turned off", () => {
     expect(validateValue(pickMany, { selected: ["sqlite", "pg", "redis"] })).toHaveProperty("error")
-    expect(validateValue(pickMany, { selected: [], other: "mongo" })).toHaveProperty("error")
+    expect(validateValue(pickMany, { selected: [], other: "mongo" })).toEqual({ value: { selected: [], other: "mongo" } })
+    expect(validateValue({ ...pickMany, allow_other: false }, { selected: [], other: "mongo" })).toHaveProperty("error")
+  })
+  test("slider takes other only with allow_other", () => {
+    expect(validateValue(slider, { other: "depends" })).toHaveProperty("error")
+    expect(validateValue({ ...slider, allow_other: true }, { other: "depends" })).toEqual({ value: { other: "depends" } })
   })
   test("pick_one allows other by default", () => {
     expect(validateValue(pickOne, { other: "mysql" })).toEqual({ value: { other: "mysql" } })

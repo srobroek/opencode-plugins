@@ -1,4 +1,5 @@
 import { type Answer, describeAnswer, type FileValue, publicAnswer } from "./answers.ts"
+import { NOTES_HINT } from "./notes.ts"
 import type { Question } from "./questions.ts"
 import type { RoundResult } from "./rounds.ts"
 import { nativeSummary } from "./takeover.ts"
@@ -14,7 +15,8 @@ export type ContentPart =
 const HINTS: Partial<Record<ToolResult["status"], string>> = {
   open: "The round is open in the parley panel. Call parley_wait to collect the answers.",
   partial: "Some answers are in; the round is still open. Call parley_wait for the rest.",
-  timeout: "The user has not submitted yet. The round stays open; call parley_wait to keep waiting.",
+  timeout:
+    "The user did not answer in time and the round closed. Go on with your recommendations for the pending ids and say so, or ask again in a new round if an answer matters.",
   unavailable:
     "No parley UI is available. Ask through the built-in question tool if present, otherwise as a plain markdown round in chat.",
   none: "There is no parley round for this session.",
@@ -37,6 +39,7 @@ export function summarise(result: ToolResult, questions: readonly Question[]): s
   if (result.pending.length > 0) lines.push(`Pending: ${result.pending.join(", ")}`)
   const hint = HINTS[result.status]
   if (hint) lines.push(hint)
+  if (result.answers.some((answer) => answer.note !== undefined)) lines.push(NOTES_HINT)
   return lines.join("\n")
 }
 

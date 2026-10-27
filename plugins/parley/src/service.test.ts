@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { render, summarise } from "./format.ts"
+import { NOTES_HINT } from "./notes.ts"
 import type { Question } from "./questions.ts"
 import type { RoundEvent } from "./rpc.ts"
 import { Parley, type QuestionTool, type Settings, settingsFrom } from "./service.ts"
@@ -92,21 +93,48 @@ describe("Parley", () => {
     expect(service.pending({}).rounds).toEqual([])
   })
 
-  test("timeout keeps the round open and wait picks it up", async () => {
+  test("wait none returns at once and parley_wait picks the answers up", async () => {
     const { service } = setup()
     service.attach({ clientID: "tui" })
     const first = await service.ask({ questions, wait: "none" }, { sessionID: "s" })
     expect(first.result.status).toBe("open")
-    const timed = await service.wait({ timeout_s: 0.01 } as never, { sessionID: "s" })
-    expect(timed.result.status).toBe("timeout")
+    expect(service.pending({}).rounds[0]?.deadline).toBeUndefined()
     const waiting = service.wait({}, { sessionID: "s" })
     await tick()
     const roundID = service.pending({}).rounds[0]?.roundID ?? ""
+    expect(service.pending({}).rounds[0]?.deadline).toBeGreaterThan(Date.now())
     await service.submit({ roundID, answers: [{ id: "auth.storage", status: "accepted" }] })
     const { result } = await waiting
     expect(result).toMatchObject({ status: "submitted", pending: ["auth.ttl"] })
     expect(result.answers[0]).toMatchObject({ id: "auth.storage", status: "accepted", value: { selected: "sqlite" } })
     expect((await service.wait({}, { sessionID: "other" })).result.status).toBe("none")
+  })
+
+  test("a timeout closes the round, tells the TUI and returns timeout", async () => {
+    const { service, events } = setup()
+    service.attach({ clientID: "tui" })
+    const asking = service.ask({ questions, timeout_s: "0.02" as never }, { sessionID: "s" })
+    await tick()
+    expect(service.pending({}).rounds[0]?.deadline).toBeGreaterThan(Date.now() - 5)
+    const { result } = await asking
+    expect(result).toMatchObject({ status: "timeout", reason: "timeout", pending: ["auth.storage", "auth.ttl"] })
+    expect(service.pending({}).rounds).toEqual([])
+    expect(events.at(-1)).toMatchObject({ action: "closed", status: "timeout", reason: "timeout" })
+    expect(render(result, questions).content).toContain("did not answer in time")
+    expect((await service.wait({}, { sessionID: "s" })).result.status).toBe("timeout")
+  })
+
+  test("a call that times out before a longer one leaves the round open", async () => {
+    const { service } = setup()
+    service.attach({ clientID: "tui" })
+    const long = service.ask({ questions: [questions[0] as Question], timeout_s: 5 }, { sessionID: "s" })
+    await tick()
+    const short = await service.ask({ questions: [questions[1] as Question], timeout_s: 0.01 as never }, { sessionID: "s" })
+    expect(short.result.status).toBe("timeout")
+    const roundID = service.pending({}).rounds[0]?.roundID ?? ""
+    expect(roundID).not.toBe("")
+    await service.submit({ roundID, answers: [{ id: "auth.storage", status: "accepted" }] })
+    expect((await long).result.status).toBe("submitted")
   })
 
   test("questions asked mid-round join the open round", async () => {
@@ -273,7 +301,7 @@ describe("question takeover", () => {
     const result = (await asking) as Exclude<Awaited<typeof asking>, typeof BUILTIN>
     expect(result?.output).toEqual({ answers: [["SQLite (Recommended)"]] })
     expect(result?.content).toBe(
-      'User has answered your questions: "Which database?"="SQLite (Recommended)". You can now continue with the user\'s answers in mind.\nNote on "Which database?": fine for now',
+      `User has answered your questions: "Which database?"="SQLite (Recommended)". You can now continue with the user's answers in mind.\nNote on "Which database?": fine for now\n${NOTES_HINT}`,
     )
   })
 

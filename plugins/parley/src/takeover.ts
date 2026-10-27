@@ -1,5 +1,6 @@
 import { type Answer, describeValue, publicAnswer } from "./answers.ts"
 import type { Prompt } from "./fallback.ts"
+import { NOTES_HINT } from "./notes.ts"
 import { type Question, validateQuestions } from "./questions.ts"
 import type { RoundResult } from "./rounds.ts"
 
@@ -94,6 +95,7 @@ export function nativeText(entries: readonly Entry[]): string {
     .join(", ")
   const lines = [`User has answered your questions: ${formatted}. You can now continue with the user's answers in mind.`]
   for (const entry of entries) if (entry.note) lines.push(`Note on "${entry.question}": ${entry.note}`)
+  if (entries.some((entry) => entry.note)) lines.push(NOTES_HINT)
   const deferred = entries.filter((entry) => entry.deferred).map((entry) => `"${entry.question}"`)
   if (deferred.length > 0) lines.push(`Deferred (the user will answer later): ${deferred.join(", ")}`)
   return lines.join("\n")
