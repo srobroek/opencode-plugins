@@ -42,7 +42,11 @@ load by name:
 | `design-critic` | Read-only critique for hierarchy, rhythm and generated-UI tells | no edit, shell or subagents |
 | `a11y-auditor` | Read-only WCAG 2.2 AA audit with measured values | no edit or subagents; shell only for preflight probes and the axe CLI fallback, by prompt |
 
-All four are `subagent` agents converted with `scripts/convert-agent.ts`. Their
+All four are `subagent` agents converted with `scripts/convert-agent.ts`.
+`design-critic` and `a11y-auditor` are composed by `bun run build` from
+`agents.src/<id>.md` and the shared review core (`plugins/lib/src/review-core.md`,
+see [agent-reviewer](../agent-reviewer/README.md)); edit the source, not `agents/`. Their
+first line is `VERDICT: PASS|MINOR|MAJOR`. Their
 permissions are tool allowlists (a deny on every action, then allows), so a tool an
 agent does not need is left out of its requests: each gets read, grep, glob, skill,
 Code Mode, the `lsp_*` tools, the `browser` tools and the `design_*` tools, plus
