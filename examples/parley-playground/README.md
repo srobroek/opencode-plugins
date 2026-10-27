@@ -52,9 +52,13 @@ synthetic message: the TUI shows its summary above the prompt (`◈ parley-demo 
 text, including the structured JSON output, is what the model receives with your next message.
 `/parley-demo` alone prints the usage.
 
-Panel keys: `tab`/`j`/`k` next/previous question, `↑`/`↓` choice, `space`/`enter`/`1`–`9` choose,
-`a` accept, `n` note, `d` defer, `e` edit text, `shift+↑`/`↓` or `J`/`K` move ranked item,
-`←`/`→` slider or rating, `ctrl+s` submit, `D` dismiss, `esc` minimise.
+Panel keys: `tab`/`j`/`k` next/previous question; `↑`/`↓` move between stacked choices (options,
+yes/no, ranked or rated rows), and on side-by-side cards (show_options, emoji_react) and cards
+without rows (slider, text) go to the previous/next question; `←`/`→` move between side-by-side
+choices, or adjust a slider or the rating of the row under the cursor; `space`/`enter`/`1`–`9`
+choose, `a` accept, `n` note, `d` defer, `e` edit text, `shift+↑`/`↓` or `J`/`K` move ranked item,
+`ctrl+s` submit, `D` dismiss, `esc` minimise. In a note or text field `enter` saves and returns to
+the card (`shift+enter` adds a line, `esc` saves too); in ask_code answers `enter` adds a line.
 
 ### `/parley-demo all`
 
@@ -87,7 +91,7 @@ Five questions whose titles say what to do:
 
 1. press `a` → `accepted`, `accepted_recommendation: true`;
 2. choose Tabs → `answered`, `accepted_recommendation: false`;
-3. `n`, type a note, `esc` → `noted` with the note and no value;
+3. `n`, type a note, `enter` → `noted` with the note and no value;
 4. `d`, then `n` and a reason → `deferred` with the note;
 5. leave it → its id is in `Pending:`.
 
