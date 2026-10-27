@@ -1214,8 +1214,10 @@ ${ver.stderr}`))
           continue;
         }
         const add = await run(["specify", "extension", "add", ext], repo, budget());
-        if (add.exitCode !== 0)
-          return fail(`${output(add)}${hint}`);
+        if (add.exitCode !== 0) {
+          record(current, "skipped", `not installed: ${output(add)}${hint}`);
+          continue;
+        }
         record(current, "done", "installed");
       }
     }
@@ -2324,7 +2326,7 @@ function setupInput(integration) {
   };
 }
 var SETUP_DESCRIPTION = `Resumable SpecKit bootstrap in the session's workspace; a rerun skips the phases already done.
-` + "Phases: specify init, opt-in community catalog, required extensions, bd init, copy the bundled bd formulas, gitignore spec-status.md. Every phase reports done, skipped (already present) or failed and has its own timeout.";
+` + "Phases: specify init, opt-in community catalog, optional extensions, bd init, bundled bd formulas, gitignore spec-status.md. Extension errors are reported as skipped with reasons; setup continues and retries them on rerun. Other failures stop setup. Each phase has its own timeout.";
 var START_INPUT = {
   type: "object",
   properties: {

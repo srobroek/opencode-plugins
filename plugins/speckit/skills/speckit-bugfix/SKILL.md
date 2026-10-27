@@ -16,6 +16,12 @@ bd mol bond mol-speckit-bugfix <implement-step-id> --var feature=<NNN-slug>
 
 The patch step must not write `specs/*/tasks.md` — create child beads.
 
+If the community `bugfix` extension was skipped by setup, do not invoke missing
+`/speckit.bugfix.*` commands. Follow this skill's loop directly: capture the defect
+and artifact trace, patch spec/plan/task beads, and verify consistency. The bonded
+formula supports the same direct fallback; record it on each step, preserving
+all deliverables and checks. No extension install or trust opt-in is implied.
+
 ## Phases
 
 1. **Triage**: Parse input (issue, stack trace, or description). Gather context in parallel. Classify P0-P3. Ensure a bead exists for P0/P1.

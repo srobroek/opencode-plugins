@@ -1,9 +1,9 @@
 # mol-speckit-fix-findings -- the review/QA/security finding loop, bonded onto a
 # running feature molecule.
 #
-# Requires the `fix-findings` spec-kit community extension
-# (/speckit.fix-findings.run). Without it the run step names a skill that does not
-# exist.
+# Uses the optional `fix-findings` spec-kit community extension; when unavailable,
+# perform each step directly with the same deliverables and checks, record the
+# fallback on its bead, and never skip review or verification.
 #
 # Bond it onto the step whose review produced the findings:
 #   bd mol bond mol-speckit-fix-findings <review-step-id> --var feature=<NNN-slug>
@@ -30,7 +30,7 @@ id = "fix-findings-run"
 title = "fix findings {{feature}}"
 type = "task"
 labels = ["speckit:subprocess", "sub:fix-findings"]
-description = "Run /speckit.fix-findings.run: iteratively analyze and fix spec findings. The extension caps itself at 5 iterations. Record the iteration count and the surviving finding list on this bead; per-iteration chatter rides a [wisp:worklog] wisp linked relates-to this step. Requires the fix-findings extension."
+description = "Run /speckit.fix-findings.run: iteratively analyze and fix spec findings. The extension caps itself at 5 iterations. Record the iteration count and the surviving finding list on this bead; per-iteration chatter rides a [wisp:worklog] wisp linked relates-to this step. If the extension is unavailable, perform the described work directly, record the fallback on this bead, keep the same deliverable and checks, and never skip review or verification."
 
 [steps.metadata]
 skill_hints = "speckit.fix-findings.run"

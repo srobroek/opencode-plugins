@@ -27,7 +27,7 @@ const registeredExecute = () => async (_id: string, params: Record<string, unkno
 
 const SAFE_TMPDIR = realpathSync(tmpdir())
 
-test("requires only installable community extensions", () => {
+test("attempts the core and community extension ids without bypassing catalog trust", () => {
   expect(EXTENSIONS).toEqual([
     "agent-context",
     "bugfix",
@@ -277,11 +277,42 @@ describe("runSetup specify phases", () => {
       status: "skipped",
       detail: expect.stringContaining("SPECKIT_CATALOG_URL"),
     })
-    expect(out.phases.at(-1)).toMatchObject({
+    expect(out.ok).toBe(true)
+    expect(out.phases.find((row) => row.phase === "extension qa")).toMatchObject({
       phase: "extension qa",
-      status: "failed",
-      detail: "Error: Extension 'qa' not found in catalog",
+      status: "skipped",
+      detail: "not installed: Error: Extension 'qa' not found in catalog",
     })
+    expect(specifyCalls()).toContain("extension add tinyspec")
+    expect(out.phases.at(-1)?.phase).toBe("gitignore")
+  })
+
+  test("default discovery-only extension failures do not prevent beads init or formulas, and reruns retry them", async () => {
+    setSpawnForTests((argv, opts) => {
+      calls.push({ argv, timeout: opts.timeout })
+      if (argv[0] === "bd" && argv[1] === "where") return { exitCode: 1, stdout: "", stderr: "no workspace" }
+      if (argv[0] === "specify" && argv[2] === "add" && argv[3] !== "agent-context")
+        return { exitCode: 1, stdout: `${argv[3]} is discovery-only`, stderr: "catalog warning" }
+      return { exitCode: 0, stdout: argv[1] === "--version" ? "specify 1.2.3" : "", stderr: "" }
+    })
+    const out = await runSetup({}, dir)
+    expect(out.ok).toBe(true)
+    expect(
+      out.phases.filter((row) => row.phase.startsWith("extension ") && row.detail.startsWith("not installed:")),
+    ).toHaveLength(11)
+    expect(out.phases.find((row) => row.phase === "extension bugfix")).toMatchObject({
+      status: "skipped",
+      detail: expect.stringContaining("catalog warning\nbugfix is discovery-only"),
+    })
+    expect(calls.some(({ argv }) => argv.join(" ") === "bd init --skip-hooks")).toBe(true)
+    for (const name of FORMULAS) expect(existsSync(join(dir, ".beads", "formulas", `${name}.formula.toml`))).toBe(true)
+    writeFileSync(join(dir, ".specify", "extensions", ".registry"), JSON.stringify({ extensions: { "agent-context": {} } }))
+    calls = []
+    const rerun = await runSetup({}, dir)
+    expect(rerun.ok).toBe(true)
+    expect(specifyCalls()).not.toContain("extension add agent-context")
+    expect(specifyCalls()).toContain("extension add bugfix")
+    expect(rerun.phases.find((row) => row.phase === "formulas")?.detail).toBe("every formula already present")
   })
 
   test("installs status-report by its catalog id like every other extension", async () => {

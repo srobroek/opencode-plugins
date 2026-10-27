@@ -1,7 +1,8 @@
 # mol-speckit-iterate -- an approved-intent change, bonded onto a running feature molecule.
 #
-# Requires the `iterate` spec-kit community extension (/speckit.iterate.define,
-# /speckit.iterate.apply). Without it both steps name a skill that does not exist.
+# Uses the optional `iterate` spec-kit community extension; when unavailable,
+# perform each step directly with the same deliverables and checks, record the
+# fallback on its bead, and never skip review or verification.
 #
 # Bond it onto the molecule whose approach changed:
 #   bd mol bond mol-speckit-iterate <feature-root-id> --var feature=<NNN-slug>
@@ -25,7 +26,7 @@ id = "iterate-define"
 title = "iterate define {{feature}}"
 type = "task"
 labels = ["speckit:subprocess", "sub:iterate"]
-description = "Run /speckit.iterate.define: analyze the change request against current spec state and implementation progress, and write a reviewable iteration plan. Record on this bead why the approved approach changed -- the DECISIONS table makes an iteration a decision-producing phase. Requires the iterate extension."
+description = "Run /speckit.iterate.define: analyze the change request against current spec state and implementation progress, and write a reviewable iteration plan. Record on this bead why the approved approach changed -- the DECISIONS table makes an iteration a decision-producing phase. If the extension is unavailable, perform the described work directly, record the fallback on this bead, keep the same deliverable and checks, and never skip review or verification."
 
 [steps.metadata]
 skill_hints = "speckit.iterate.define"
@@ -37,7 +38,7 @@ title = "iterate apply {{feature}}"
 type = "task"
 needs = ["iterate-define"]
 labels = ["speckit:subprocess", "sub:iterate"]
-description = "Run /speckit.iterate.apply: update spec.md, plan.md, and the task beads under the feature's implement step so implementation restarts from the iterated state. Never write specs/{{feature}}/tasks.md; create or amend task beads instead. Requires the iterate extension."
+description = "Run /speckit.iterate.apply: update spec.md, plan.md, and the task beads under the feature's implement step so implementation restarts from the iterated state. Never write specs/{{feature}}/tasks.md; create or amend task beads instead. If the extension is unavailable, perform the described work directly, record the fallback on this bead, keep the same deliverable and checks, and never skip review or verification."
 
 [steps.metadata]
 skill_hints = "speckit.iterate.apply"
