@@ -1,6 +1,6 @@
 {
   "name": "@srobroek/opencode-agent-coder",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "coder subagent for any code development task (implement, fix, debug, test, build, profile, upgrade deps) with only coding tools and skills.",
   "private": true,
   "type": "module",

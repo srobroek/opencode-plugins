@@ -1,6 +1,6 @@
 {
   "name": "@srobroek/opencode-trunk-dev",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Trunk-based delivery for OpenCode: a Conventional Commit and main-push gate, skip-CI and MR/PR advisories, a feature-flag cleanup bead after each flagged merge, and release-setup skills.",
   "private": true,
   "type": "module",

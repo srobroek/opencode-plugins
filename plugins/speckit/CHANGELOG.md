@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.3.0](https://github.com/srobroek/opencode-plugins/compare/speckit--v0.2.1...speckit--v0.3.0) (2026-10-27)
+
+
+### Features
+
+* **speckit:** add a primary spec agent ([ece9f0b](https://github.com/srobroek/opencode-plugins/commit/ece9f0b9b4c30f38ed50da22a9d52b04452879f8))
+
+
+### Bug Fixes
+
+* **lib:** keep a shipped agent hidden when the host prefills hidden: false ([6156c94](https://github.com/srobroek/opencode-plugins/commit/6156c946f8a5265ff5498bb4062a9d822bbd0555))
+* **speckit:** continue setup when optional extensions cannot install ([5a94570](https://github.com/srobroek/opencode-plugins/commit/5a945701b3d2ce78d003f5d19fa8802a5dc13dd1))
+
+
+### Performance
+
+* **speckit:** hide the speckit agents and drop Code Mode ([08040a4](https://github.com/srobroek/opencode-plugins/commit/08040a4a405d7ee4efea79bbd985d22adfa2e7a9))
+
 ## [0.2.1](https://github.com/srobroek/opencode-plugins/compare/speckit--v0.2.0...speckit--v0.2.1) (2026-10-27)
 
 

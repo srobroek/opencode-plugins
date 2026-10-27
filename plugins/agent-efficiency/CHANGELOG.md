@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.4.0](https://github.com/srobroek/opencode-plugins/compare/agent-efficiency--v0.3.0...agent-efficiency--v0.4.0) (2026-10-27)
+
+
+### Features
+
+* **agent-efficiency:** keep the global AGENTS.md in lean subagent prompts ([9dd4718](https://github.com/srobroek/opencode-plugins/commit/9dd4718d38214a21f310d826f89e9ccc9ae63fd8))
+
+
+### Performance
+
+* **agent-efficiency:** trim researcher, architect and speckit-sync by default ([2427aee](https://github.com/srobroek/opencode-plugins/commit/2427aee44d8d3b814dbb3c9310fad0c143044b16))
+
+
+### Documentation
+
+* add repomix to the manual-test install loop ([d411160](https://github.com/srobroek/opencode-plugins/commit/d41116016e8a7f7390046cc8aca70f58b7c2ab22))
+* **agent-efficiency:** drop rust from the plugins that treat bash as shell ([fd87225](https://github.com/srobroek/opencode-plugins/commit/fd87225284c57875e5dc7db6b43facdc500d4e8d))
+
 ## [0.3.0](https://github.com/srobroek/opencode-plugins/compare/agent-efficiency--v0.2.0...agent-efficiency--v0.3.0) (2026-10-27)
 
 

@@ -1,6 +1,6 @@
 {
   "name": "@srobroek/opencode-lang-rust",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Rust skills: fmt, clippy and test checks, testing with nextest, proptest and insta, crates and workspaces, CI, sqlx persistence, Tauri and profiling.",
   "private": true,
   "type": "module",

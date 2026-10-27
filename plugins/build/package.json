@@ -1,6 +1,6 @@
 {
   "name": "@srobroek/opencode-build",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "External-repository worker subagent: clone, follow the target's conventions, edit, verify, and publish only when delegated.",
   "private": true,
   "type": "module",

@@ -1,6 +1,6 @@
 {
   "name": "@srobroek/opencode-aws",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "AWS working guidance as a skill, plus the read-only AWS MCP Server and the AWS Pricing MCP server, added in AWS projects.",
   "private": true,
   "type": "module",

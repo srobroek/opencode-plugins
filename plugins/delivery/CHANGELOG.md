@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.3.0](https://github.com/srobroek/opencode-plugins/compare/delivery--v0.2.1...delivery--v0.3.0) (2026-10-27)
+
+
+### Features
+
+* **agent-researcher:** allow repomix_pack for researcher ([56867d2](https://github.com/srobroek/opencode-plugins/commit/56867d20cff05af4d65f7d61ffccc28701d303e3))
+* **lib:** coding-core type-checks after multi-file or signature changes ([ea722cd](https://github.com/srobroek/opencode-plugins/commit/ea722cd31c171b4b08969eaa0e9084c6fda0bdd9))
+
+
+### Performance
+
+* **delivery:** lean profiles for the delivery agents ([0fa1b1f](https://github.com/srobroek/opencode-plugins/commit/0fa1b1fc5179d2ba52193cf6e1227b64c7086ecf))
+
+
+### Refactors
+
+* **delivery:** compose implementers from coding-core ([ea15911](https://github.com/srobroek/opencode-plugins/commit/ea15911eea22eeec0bd4144d238759f18275119d))
+
 ## [0.2.1](https://github.com/srobroek/opencode-plugins/compare/delivery--v0.2.0...delivery--v0.2.1) (2026-10-27)
 
 

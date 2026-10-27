@@ -1,6 +1,6 @@
 {
   "name": "@srobroek/opencode-parley",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Ask the user rounds of typed questions in a TUI panel, with recommended answers, notes and deferrals.",
   "private": true,
   "type": "module",

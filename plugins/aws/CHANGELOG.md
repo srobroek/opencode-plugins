@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/srobroek/opencode-plugins/compare/aws--v0.2.0...aws--v0.3.0) (2026-10-27)
+
+
+### Features
+
+* **aws:** add the pinned AWS MCP servers in AWS projects ([5c1f8cb](https://github.com/srobroek/opencode-plugins/commit/5c1f8cb20d7a7e8668a8f3412169973d058c92e2))
+
 ## [0.2.0](https://github.com/srobroek/opencode-plugins/compare/aws--v0.1.0...aws--v0.2.0) (2026-10-27)
 
 

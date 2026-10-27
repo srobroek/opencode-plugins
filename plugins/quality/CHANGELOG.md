@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.4.0](https://github.com/srobroek/opencode-plugins/compare/quality--v0.3.0...quality--v0.4.0) (2026-10-27)
+
+
+### Features
+
+* **quality:** type-check once after multi-file or signature edits ([72871bf](https://github.com/srobroek/opencode-plugins/commit/72871bf9e3005d741eb80fde938beff51eecd06f))
+
+
+### Bug Fixes
+
+* **lib:** keep a shipped agent hidden when the host prefills hidden: false ([6156c94](https://github.com/srobroek/opencode-plugins/commit/6156c946f8a5265ff5498bb4062a9d822bbd0555))
+* **quality:** quality-profiling loads the exact lang-&lt;language&gt;-profiling id, not the router ([80f44bc](https://github.com/srobroek/opencode-plugins/commit/80f44bc6b6f19ecedfe4f4755b0a7cc0d9dc777d))
+
+
+### Performance
+
+* **quality:** allow the challenger fallback quality-* skills ([1c85401](https://github.com/srobroek/opencode-plugins/commit/1c8540191f1ec9a979353689ecfd763dc8475b7d))
+
+
+### Documentation
+
+* add repomix to the manual-test install loop ([d411160](https://github.com/srobroek/opencode-plugins/commit/d41116016e8a7f7390046cc8aca70f58b7c2ab22))
+
 ## [0.3.0](https://github.com/srobroek/opencode-plugins/compare/quality--v0.2.0...quality--v0.3.0) (2026-10-27)
 
 

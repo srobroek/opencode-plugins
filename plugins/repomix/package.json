@@ -1,6 +1,6 @@
 {
   "name": "@srobroek/opencode-repomix",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Pack a local or remote repo into one file for bulk context with repomix: a repomix_pack tool that returns only the path and metrics, and a recipes skill.",
   "private": true,
   "type": "module",

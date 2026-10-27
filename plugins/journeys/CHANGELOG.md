@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/srobroek/opencode-plugins/compare/journeys--v0.2.0...journeys--v0.2.1) (2026-10-27)
+
+
+### Performance
+
+* **journeys:** make the journey agents' allowlists hold and hide them ([d5d0929](https://github.com/srobroek/opencode-plugins/commit/d5d09297e678e394af5910e12c2029d7114a0355))
+
 ## [0.2.0](https://github.com/srobroek/opencode-plugins/compare/journeys--v0.1.0...journeys--v0.2.0) (2026-10-27)
 
 

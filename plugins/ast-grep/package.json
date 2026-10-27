@@ -1,6 +1,6 @@
 {
   "name": "@srobroek/opencode-ast-grep",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Structural code search with ast-grep: the ast-grep MCP server, pinned and added only where the ast-grep binary is on PATH, and a skill on patterns, preview-only rewrites and language-server CLI checks.",
   "private": true,
   "type": "module",

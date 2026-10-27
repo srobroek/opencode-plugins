@@ -1,6 +1,6 @@
 {
   "name": "@srobroek/opencode-agent-researcher",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "The researcher subagent: answers one scoped question from code, docs and the web with cited observations and inferences, and records it on a bead when given one.",
   "private": true,
   "type": "module",

@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.1](https://github.com/srobroek/opencode-plugins/compare/whats-new--v0.2.0...whats-new--v0.2.1) (2026-10-27)
+
+
+### Bug Fixes
+
+* **whats-new:** register the agent as a subagent ([6437c3a](https://github.com/srobroek/opencode-plugins/commit/6437c3a7dc0f5ed489e4af601174c088f5579231))
+
+
+### Documentation
+
+* **whats-new:** point source-level version diffs at the repomix skill ([9c23230](https://github.com/srobroek/opencode-plugins/commit/9c2323002c25b91f85661a46785a1163eb07876e))
+
 ## [0.2.0](https://github.com/srobroek/opencode-plugins/compare/whats-new--v0.1.0...whats-new--v0.2.0) (2026-10-27)
 
 

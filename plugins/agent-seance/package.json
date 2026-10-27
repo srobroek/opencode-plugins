@@ -1,6 +1,6 @@
 {
   "name": "@srobroek/opencode-agent-seance",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "seance subagent and read-only seance_read tool: answer a question from a past session and its subagent transcripts.",
   "private": true,
   "type": "module",
