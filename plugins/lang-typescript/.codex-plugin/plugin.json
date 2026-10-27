@@ -1,7 +1,7 @@
 {
   "name": "lang-typescript",
   "version": "0.1.0",
-  "description": "TypeScript and JavaScript skills: lint, tsc and test checks, type-safety rules, and Bun and Node profiling; formatting runs through OpenCode built-in formatters.",
+  "description": "TypeScript and JavaScript skills: install, lint, tsc and test checks, testing, monorepo packaging, type safety and zod, and Bun and Node profiling.",
   "author": {
     "name": "Sjors Robroek",
     "url": "https://github.com/srobroek"
@@ -12,7 +12,7 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Lang Typescript",
-    "shortDescription": "TypeScript and JavaScript skills: lint, tsc and test checks, type-safety rules, and Bun and Node profiling; formatting runs through OpenCode built-in formatters.",
+    "shortDescription": "TypeScript and JavaScript skills: install, lint, tsc and test checks, testing, monorepo packaging, type safety and zod, and Bun and Node profiling.",
     "developerName": "Sjors Robroek",
     "category": "development"
   }
