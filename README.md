@@ -141,7 +141,10 @@ bun scripts/convert-agent.ts --out .opencode/agents \
   for the model-roles plugin options.
 - `tools` becomes `deny` rules for the V2 actions the agent does not list, and
   listed actions inherit the global rules. Pass `--allow-listed` to emit explicit
-  `allow` rules instead. `spawns` becomes `subagent` deny `*` plus one allow per
+  `allow` rules instead, or `--exclusive` for a tool allowlist: a deny on every
+  action first, then allows for the listed tools, `skill`, Code Mode (`execute`)
+  and, for omp `lsp`, the `lsp_*` MCP tools. A wholly denied tool is left out of
+  the agent's requests. `spawns` becomes `subagent` deny `*` plus one allow per
   agent, with `scout` mapped to `explore`.
 - A JTD `output` schema becomes a "Report format" section: a `VERDICT:` first
   line and a fenced JSON block.
