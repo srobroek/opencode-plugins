@@ -48,6 +48,8 @@ export type FakeContextOptions = {
   storage?: Record<string, unknown>
   /** Plugin options passed as `context.options`. */
   options?: Loose
+  /** MCP servers the host already has (the user's config) before any transform runs. */
+  mcp?: Record<string, Loose>
   /** Decides each `permission.assert`: resolve to allow, throw to reject. Allows when omitted. */
   assert?: (input: FakeAssert) => Promise<void> | void
 }
@@ -73,6 +75,8 @@ export type FakeContext = {
   messages: Map<string, ReadonlyArray<unknown>>
   /** Skills after every transform, keyed by id. */
   skills: Map<string, FakeSkill>
+  /** MCP server configs after every transform, keyed by name. */
+  mcp: Map<string, Loose>
   /** Every `permission.assert` input, in call order. */
   asserts: FakeAssert[]
   /** Calls to faked client methods (`session.*`, `event.subscribe`), in order. */
@@ -104,6 +108,7 @@ export function createFakeContext(options: FakeContextOptions = {}): FakeContext
   const messages = new Map<string, ReadonlyArray<unknown>>(Object.entries(options.messages ?? {}))
   const skills = new Map<string, FakeSkill>((options.skills ?? []).map((skill) => [skill.id, { ...skill }]))
   const storage = new Map<string, unknown>(Object.entries(options.storage ?? {}))
+  const mcp = new Map<string, Loose>(Object.entries(options.mcp ?? {}).map(([name, config]) => [name, { ...config }]))
   const commands = new Map<string, FakeCommand>()
   const asserts: FakeAssert[] = []
   const agentUpdates: string[] = []
@@ -312,6 +317,26 @@ export function createFakeContext(options: FakeContextOptions = {}): FakeContext
     })
   }
 
+  const mcpTransform = async (callback: (editor: unknown) => void): Promise<Registration> => {
+    const added: string[] = []
+    callback({
+      list: () => [...mcp.entries()],
+      get: (name: string) => mcp.get(name),
+      set: (name: string, config: Loose) => {
+        if (!mcp.has(name)) added.push(name)
+        mcp.set(name, { ...config })
+      },
+      update: (name: string, update: (config: Loose) => void) => {
+        const config = mcp.get(name)
+        if (config !== undefined) update(config)
+      },
+      remove: (name: string) => void mcp.delete(name),
+    })
+    return register(() => {
+      for (const name of added) mcp.delete(name)
+    })
+  }
+
   const sessionSynthetic = async (input: Loose & { sessionID: string }): Promise<Loose> => {
     calls.push({ method: "session.synthetic", input })
     return {
@@ -389,6 +414,11 @@ export function createFakeContext(options: FakeContextOptions = {}): FakeContext
       reload: async () => {},
       list: async () => [...skills.values()],
     },
+    mcp: {
+      transform: mcpTransform,
+      reload: async () => {},
+      list: async () => [...mcp.keys()].map((name) => ({ name })),
+    },
     storage: {
       get: async (key: string) => storage.get(key),
       set: async (key: string, value: unknown) => void storage.set(key, value),
@@ -408,6 +438,7 @@ export function createFakeContext(options: FakeContextOptions = {}): FakeContext
     sessions,
     messages,
     skills,
+    mcp,
     asserts,
     calls,
     fire: { tool: fire("tool"), shell: fire("shell"), permission: fire("permission"), session: fire("session") },
