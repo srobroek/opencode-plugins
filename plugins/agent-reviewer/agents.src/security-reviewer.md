@@ -30,7 +30,7 @@ permissions:
     resource: "*"
     effect: allow
   - action: skill
-    resource: review-security
+    resource: "review-*"
     effect: allow
   - action: external_directory
     resource: "*"
