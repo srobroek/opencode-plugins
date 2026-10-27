@@ -6,12 +6,15 @@
  * still wins field by field. Each agent names its model-roles tier in the
  * `x-opencode-model-role` header. With the model-roles plugin installed, that tier
  * picks the model. Without it, the file's `model` is a fallback, used only when it is
- * available on this machine; otherwise the agent inherits the session's model.
+ * available on this machine; otherwise the agent inherits the session's model. A
+ * fallback is marked in the `x-opencode-model-fallback` header, so model-roles never
+ * mistakes it for a user's pin.
  */
 
 import { readFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import { type FallbackOwners, listsPlugin } from "@srobroek/opencode-lib/agent-fallback"
+import { MODEL_FALLBACK_HEADER } from "@srobroek/opencode-lib/model-roles"
 
 export const AGENT_IDS = [
   "implementer",
@@ -93,18 +96,27 @@ export type AgentDraft = {
   permissions?: unknown[]
 }
 
+/** A model for an agent; `fallback` when it is the file's own, not a `models` choice. */
+export type AgentModel = ModelRef & { fallback?: true }
+
+const modelLabel = (ref: ModelRef): string => `${ref.providerID}/${ref.id}${ref.variant ? `#${ref.variant}` : ""}`
+
 /**
  * Fill one agent from its file. A created agent takes every field; an existing one
  * (another plugin's, or a host default) keeps what it has and gains the delivery
- * permissions after its own.
+ * permissions after its own. A fallback model is marked in the fallback header.
  */
-export function shapeAgent(draft: AgentDraft, file: AgentFile, model: ModelRef | undefined, created: boolean): void {
+export function shapeAgent(draft: AgentDraft, file: AgentFile, model: AgentModel | undefined, created: boolean): void {
   draft.name ??= file.id
   if (created || draft.description === undefined) draft.description = file.description
   if (created || draft.mode === undefined) draft.mode = file.mode
   if (created || draft.system === undefined) draft.system = file.system
-  if (model !== undefined && (created || draft.model === undefined)) draft.model = { ...model }
+  const { fallback, ...ref } = model ?? {}
+  const setModel = model !== undefined && (created || draft.model === undefined)
+  if (setModel) draft.model = ref
   if (file.request?.headers) draft.request = { ...draft.request, headers: { ...file.request.headers, ...draft.request?.headers } }
+  if (setModel && fallback)
+    draft.request = { ...draft.request, headers: { ...draft.request?.headers, [MODEL_FALLBACK_HEADER]: modelLabel(ref as ModelRef) } }
   draft.permissions = created ? [...file.permissions] : [...(draft.permissions ?? []), ...file.permissions]
 }
 
@@ -132,11 +144,12 @@ export function fallbackModel(
   override: string | false | undefined,
   modelRoles: boolean,
   available: readonly Available[],
-): ModelRef | undefined {
+): AgentModel | undefined {
   if (override === false) return undefined
   if (override !== undefined) return availableModel(parseModel(override), available)
   if (modelRoles) return undefined
-  return availableModel(parseModel(file.model ?? ""), available)
+  const ref = availableModel(parseModel(file.model ?? ""), available)
+  return ref === undefined ? undefined : { ...ref, fallback: true }
 }
 
 /** Read every shipped agent file. */

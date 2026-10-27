@@ -8,6 +8,12 @@ import type { ModelClass, TierMeta } from "./tiers.ts"
 /** Agent request header that names the agent's tier. */
 export const ROLE_HEADER = "x-opencode-model-role"
 
+/**
+ * Agent request header naming the model a plugin set as a fallback (`provider/model#variant`).
+ * An agent model equal to it gives way to the agent's tier; any other model is a user pin.
+ */
+export const FALLBACK_HEADER = "x-opencode-model-fallback"
+
 /** A model reference in the shape `Agent.Info.model` uses. */
 export type ModelRef = { providerID: string; id: string; variant?: string }
 
@@ -134,6 +140,26 @@ export function resolveRole(
   return { model: undefined, reason: "unavailable" }
 }
 
+function headerValue(agent: AgentLike, header: string): string | undefined {
+  for (const [name, value] of Object.entries(agent.request?.headers ?? {})) {
+    if (name.toLowerCase() === header && value.trim() !== "") return value.trim()
+  }
+  return undefined
+}
+
+/**
+ * The model the user pinned on an agent (`agents.<id>.model` in config, or a markdown
+ * agent's `model`): its own model, unless the fallback header marks that model as a
+ * plugin's fallback. A pin wins over every tier the agent has.
+ */
+export function userPin(agent: AgentLike): ModelRef | undefined {
+  if (agent.model === undefined) return undefined
+  const marked = headerValue(agent, FALLBACK_HEADER)
+  const candidate = marked === undefined ? undefined : parseCandidate(marked)
+  if (candidate?.kind === "model" && sameModel(candidate.ref, agent.model)) return undefined
+  return agent.model
+}
+
 /** The tier an agent declares: plugin options win over the request header, which wins over `implicit`. */
 export function roleOf(
   agent: AgentLike,
@@ -141,17 +167,16 @@ export function roleOf(
   implicit: Readonly<Record<string, string>> = {},
 ): string | undefined {
   if (Object.hasOwn(agents, agent.id)) return agents[agent.id]
-  const headers = agent.request?.headers ?? {}
-  for (const [name, value] of Object.entries(headers)) {
-    if (name.toLowerCase() === ROLE_HEADER && value.trim() !== "") return value.trim()
-  }
+  const header = headerValue(agent, ROLE_HEADER)
+  if (header !== undefined) return header
   if (Object.hasOwn(implicit, agent.id)) return implicit[agent.id]
   return undefined
 }
 
 /**
- * The model each role-bearing agent should get. Agents whose role is unknown or
- * has nothing available are absent, so their own model (or inheritance) stays.
+ * The model each role-bearing agent should get. Agents the user pinned to a model,
+ * and agents whose role is unknown or has nothing available, are absent, so their
+ * own model (or inheritance) stays.
  */
 export function desiredModels(
   agents: ReadonlyArray<AgentLike>,
@@ -161,6 +186,7 @@ export function desiredModels(
 ): Map<string, ModelRef> {
   const result = new Map<string, ModelRef>()
   for (const agent of agents) {
+    if (userPin(agent) !== undefined) continue
     const role = roleOf(agent, options.agents, options.implicit)
     if (role === undefined) continue
     const resolution = resolveRole(options.roles, available, role, health)
@@ -189,11 +215,12 @@ export function staleAgents(agents: ReadonlyArray<AgentLike>, desired: ReadonlyM
   return agents.filter((a) => desired.has(a.id) && !sameModel(a.model, desired.get(a.id))).map((a) => a.id)
 }
 
-/** Remove the role header (any casing) from outgoing request headers. Returns whether one was removed. */
+/** Remove the role and fallback headers (any casing) from outgoing request headers. Returns whether one was removed. */
 export function stripRoleHeader(headers: Record<string, string>): boolean {
   let removed = false
   for (const name of Object.keys(headers)) {
-    if (name.toLowerCase() === ROLE_HEADER) {
+    const lower = name.toLowerCase()
+    if (lower === ROLE_HEADER || lower === FALLBACK_HEADER) {
       delete headers[name]
       removed = true
     }

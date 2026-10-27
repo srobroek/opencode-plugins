@@ -137,7 +137,10 @@ The plugin registers these subagents from `agents/*.md` through
   the model-roles plugin installed (detected through `plugin.list`), the tier picks
   the model and the plugin sets no model of its own.
 - Without model-roles, the agent uses its fallback model when it is available on
-  this machine, and otherwise inherits the session's model. Delivery keeps these
+  this machine, and otherwise inherits the session's model. The fallback is marked
+  in the `x-opencode-model-fallback` request header: if model-roles is installed
+  but was not detected, its tier still replaces the fallback. A model you pin in
+  config (`agents.<id>.model`) wins over the tier either way. Delivery keeps these
   fallbacks, unlike the other plugins' agents, so `operator` stays on a cheap model
   and the reviewer on a strong one for users without model-roles.
 - The `models` option overrides a model per agent (`"provider/model#variant"`),

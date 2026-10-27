@@ -7,6 +7,13 @@
 
 export const MODEL_ROLE_HEADER = "x-opencode-model-role"
 
+/**
+ * Request header a plugin sets to the `provider/model#variant` it gave an agent as a
+ * fallback. model-roles treats a model equal to this value as replaceable by the
+ * agent's tier, and any other model as the user's pin, which it leaves alone.
+ */
+export const MODEL_FALLBACK_HEADER = "x-opencode-model-fallback"
+
 /** The built-in tiers a shipped agent declares. */
 export const MODEL_TIERS = ["cheap", "standard", "strong", "reviewer"] as const
 

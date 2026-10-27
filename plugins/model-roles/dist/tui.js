@@ -27,6 +27,7 @@ var TiersRpc = Rpc.define({
 
 // plugins/model-roles/src/resolve.ts
 var ROLE_HEADER = "x-opencode-model-role";
+var FALLBACK_HEADER = "x-opencode-model-fallback";
 var isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 function parseOptions(raw) {
   const input = isRecord(raw) ? raw : {};
@@ -108,14 +109,28 @@ function resolveRole(roles, available, role, health = () => {
     return { model: stale.model, via: stale.via, unhealthy: true };
   return { model: undefined, reason: "unavailable" };
 }
+function headerValue(agent, header) {
+  for (const [name, value] of Object.entries(agent.request?.headers ?? {})) {
+    if (name.toLowerCase() === header && value.trim() !== "")
+      return value.trim();
+  }
+  return;
+}
+function userPin(agent) {
+  if (agent.model === undefined)
+    return;
+  const marked = headerValue(agent, FALLBACK_HEADER);
+  const candidate = marked === undefined ? undefined : parseCandidate(marked);
+  if (candidate?.kind === "model" && sameModel(candidate.ref, agent.model))
+    return;
+  return agent.model;
+}
 function roleOf(agent, agents, implicit = {}) {
   if (Object.hasOwn(agents, agent.id))
     return agents[agent.id];
-  const headers = agent.request?.headers ?? {};
-  for (const [name, value] of Object.entries(headers)) {
-    if (name.toLowerCase() === ROLE_HEADER && value.trim() !== "")
-      return value.trim();
-  }
+  const header = headerValue(agent, ROLE_HEADER);
+  if (header !== undefined)
+    return header;
   if (Object.hasOwn(implicit, agent.id))
     return implicit[agent.id];
   return;
@@ -123,6 +138,8 @@ function roleOf(agent, agents, implicit = {}) {
 function desiredModels(agents, options, available, health) {
   const result = new Map;
   for (const agent of agents) {
+    if (userPin(agent) !== undefined)
+      continue;
     const role = roleOf(agent, options.agents, options.implicit);
     if (role === undefined)
       continue;
@@ -148,7 +165,8 @@ function staleAgents(agents, desired) {
 function stripRoleHeader(headers) {
   let removed = false;
   for (const name of Object.keys(headers)) {
-    if (name.toLowerCase() === ROLE_HEADER) {
+    const lower = name.toLowerCase();
+    if (lower === ROLE_HEADER || lower === FALLBACK_HEADER) {
       delete headers[name];
       removed = true;
     }

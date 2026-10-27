@@ -265,10 +265,10 @@ export type SpawnPlan = {
 
 /**
  * Apply the `tier` (or deprecated `role`) argument of one `subagent` call. Precedence:
- * an explicit `model`, then `tier`, then `role`, then whatever the agent itself
- * resolves to (its tier in the `agents` option or header, its own model, or
- * inheritance), which the host applies. `callerVendor` puts another vendor first for
- * a tier with `distinctVendor`.
+ * an explicit `model`, then the target agent's user pin (`pinned`: the tier is dropped),
+ * then `tier`, then `role`, then whatever the agent itself resolves to (its tier in the
+ * `agents` option or header, its fallback model, or inheritance), which the host applies.
+ * `callerVendor` puts another vendor first for a tier with `distinctVendor`.
  */
 export function planSpawn(
   input: unknown,
@@ -276,6 +276,7 @@ export function planSpawn(
   available: ReadonlyArray<AvailableModel>,
   health?: HealthView,
   callerVendor?: string,
+  pinned = false,
 ): SpawnPlan {
   if (!isRecord(input) || (!Object.hasOwn(input, ROLE_PARAM) && !Object.hasOwn(input, TIER_PARAM))) return { input }
   const { [ROLE_PARAM]: rawRole, [TIER_PARAM]: rawTier, ...rest } = input
@@ -291,6 +292,7 @@ export function planSpawn(
       error: `Unknown model tier '${role}'. Pass one of: ${known.join(", ") || "(none configured)"}.`,
     }
   }
+  if (pinned) return { input: rest }
   const model = resolveTier(options, available, role, health, callerVendor).model
   if (model === undefined) return { input: rest, role }
   return { input: { ...rest, model: modelLabel(model) }, role, model }

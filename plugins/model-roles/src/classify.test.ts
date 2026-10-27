@@ -3,6 +3,7 @@ import {
   agentHash,
   buildClassifyPrompt,
   CLASSIFY_FALLBACK,
+  type ClassifyAgent,
   parseClassification,
   planImplicit,
   readClassification,
@@ -16,12 +17,12 @@ const tiers: Record<string, TierMeta> = Object.fromEntries(
 )
 
 describe("planImplicit", () => {
-  const agents = [
+  const agents: ClassifyAgent[] = [
     { id: "general", mode: "subagent" },
-    { id: "explore", mode: "subagent" },
     { id: "title", mode: "primary" },
     { id: "docs", mode: "subagent", description: "Writes docs" },
     { id: "pinned", mode: "subagent", model: { providerID: "a", id: "b" } },
+    { id: "explore", mode: "subagent", model: { providerID: "a", id: "b" }, request: { headers: { "x-opencode-model-fallback": "a/b" } } },
     { id: "headed", mode: "subagent", request: { headers: { "X-OpenCode-Model-Role": "strong" } } },
     { id: "configured", mode: "subagent" },
     { id: "build", mode: "primary" },

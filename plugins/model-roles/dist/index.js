@@ -6,6 +6,7 @@ import { Plugin } from "@opencode/plugin";
 
 // plugins/model-roles/src/resolve.ts
 var ROLE_HEADER = "x-opencode-model-role";
+var FALLBACK_HEADER = "x-opencode-model-fallback";
 var isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 function parseOptions(raw) {
   const input = isRecord(raw) ? raw : {};
@@ -87,14 +88,28 @@ function resolveRole(roles, available, role, health = () => {
     return { model: stale.model, via: stale.via, unhealthy: true };
   return { model: undefined, reason: "unavailable" };
 }
+function headerValue(agent, header) {
+  for (const [name, value] of Object.entries(agent.request?.headers ?? {})) {
+    if (name.toLowerCase() === header && value.trim() !== "")
+      return value.trim();
+  }
+  return;
+}
+function userPin(agent) {
+  if (agent.model === undefined)
+    return;
+  const marked = headerValue(agent, FALLBACK_HEADER);
+  const candidate = marked === undefined ? undefined : parseCandidate(marked);
+  if (candidate?.kind === "model" && sameModel(candidate.ref, agent.model))
+    return;
+  return agent.model;
+}
 function roleOf(agent, agents, implicit = {}) {
   if (Object.hasOwn(agents, agent.id))
     return agents[agent.id];
-  const headers = agent.request?.headers ?? {};
-  for (const [name, value] of Object.entries(headers)) {
-    if (name.toLowerCase() === ROLE_HEADER && value.trim() !== "")
-      return value.trim();
-  }
+  const header = headerValue(agent, ROLE_HEADER);
+  if (header !== undefined)
+    return header;
   if (Object.hasOwn(implicit, agent.id))
     return implicit[agent.id];
   return;
@@ -102,6 +117,8 @@ function roleOf(agent, agents, implicit = {}) {
 function desiredModels(agents, options, available, health) {
   const result = new Map;
   for (const agent of agents) {
+    if (userPin(agent) !== undefined)
+      continue;
     const role = roleOf(agent, options.agents, options.implicit);
     if (role === undefined)
       continue;
@@ -127,7 +144,8 @@ function staleAgents(agents, desired) {
 function stripRoleHeader(headers) {
   let removed = false;
   for (const name of Object.keys(headers)) {
-    if (name.toLowerCase() === ROLE_HEADER) {
+    const lower = name.toLowerCase();
+    if (lower === ROLE_HEADER || lower === FALLBACK_HEADER) {
       delete headers[name];
       removed = true;
     }
@@ -1142,7 +1160,7 @@ function withRoleNote(description) {
 ${ROLE_TOOL_NOTE}`;
 }
 var modelLabel = (ref) => `${ref.providerID}/${ref.id}${ref.variant ? `#${ref.variant}` : ""}`;
-function planSpawn(input, options, available, health, callerVendor) {
+function planSpawn(input, options, available, health, callerVendor, pinned = false) {
   if (!isRecord4(input) || !Object.hasOwn(input, ROLE_PARAM) && !Object.hasOwn(input, TIER_PARAM))
     return { input };
   const { [ROLE_PARAM]: rawRole, [TIER_PARAM]: rawTier, ...rest } = input;
@@ -1161,6 +1179,8 @@ function planSpawn(input, options, available, health, callerVendor) {
       error: `Unknown model tier '${role}'. Pass one of: ${known.join(", ") || "(none configured)"}.`
     };
   }
+  if (pinned)
+    return { input: rest };
   const model = resolveTier(options, available, role, health, callerVendor).model;
   if (model === undefined)
     return { input: rest, role };
@@ -1408,6 +1428,8 @@ function checkRoles(options, models, agents, health = {}, now = Date.now(), purp
       report.resolved = resolved;
     if (agent.model !== undefined)
       report.own = agent.model;
+    if (userPin(agent) !== undefined)
+      report.pinned = true;
     agentReports.push(report);
   }
   const report = { roles, agents: agentReports, choices: roleChoices(options, models, purposes), warnings };
@@ -1473,7 +1495,7 @@ function formatCheck(report) {
   if (report.agents.length > 0) {
     lines.push("", "Agents:");
     for (const agent of report.agents) {
-      const target = agent.resolved !== undefined ? label3(agent.resolved) : agent.own !== undefined ? `${label3(agent.own)} (own model)` : "inherits the session model";
+      const target = agent.pinned && agent.own !== undefined ? `${label3(agent.own)} (pinned in config; tier not applied)` : agent.resolved !== undefined ? label3(agent.resolved) : agent.own !== undefined ? `${label3(agent.own)} (own model)` : "inherits the session model";
       lines.push(`  - ${agent.id} (role ${agent.role}) \u2192 ${target}`);
     }
   }
@@ -1509,7 +1531,7 @@ function planImplicit(input) {
   const implicit = {};
   const pending = [];
   for (const agent of input.agents) {
-    if (agent.model !== undefined || Object.hasOwn(input.configured, agent.id) || hasHeader(agent, input.header))
+    if (userPin(agent) !== undefined || Object.hasOwn(input.configured, agent.id) || hasHeader(agent, input.header))
       continue;
     if (agent.id === AUTO_AGENT) {
       if (!input.autoGeneral)
@@ -3205,6 +3227,9 @@ ${refs.size}`;
           continue;
         editor.update(id, (draft) => {
           draft.model = { ...ref };
+          const shape = draft;
+          shape.request ??= {};
+          shape.request.headers = { ...shape.request.headers, [FALLBACK_HEADER]: modelLabel(ref) };
         });
       }
     };
@@ -3708,8 +3733,11 @@ ${refs.size}`;
       if (event.tool !== SUBAGENT_TOOL)
         return;
       const passed = passedTier(event.input);
-      const vendor = passed !== undefined && tierMeta(options, passed)?.distinctVendor ? await callerVendor(event) : undefined;
-      let plan = planSpawn(event.input, options, available, view(), vendor);
+      const named = spawnTarget(event.input);
+      const agent = named === undefined ? undefined : (await listAgents().catch(() => [])).find((a) => a.id === named);
+      const pinned = agent !== undefined && userPin(agent) !== undefined;
+      const vendor = passed !== undefined && !pinned && tierMeta(options, passed)?.distinctVendor ? await callerVendor(event) : undefined;
+      let plan = planSpawn(event.input, options, available, view(), vendor, pinned);
       if (plan.error !== undefined)
         throw new Error(plan.error);
       if (plan.input !== event.input)
@@ -3717,8 +3745,7 @@ ${refs.size}`;
       const target = spawnTarget(plan.input);
       if (target === undefined)
         return;
-      if (plan.role === undefined && inputModel(plan.input) === undefined && isRecord7(plan.input)) {
-        const agent = (await listAgents().catch(() => [])).find((a) => a.id === target);
+      if (plan.role === undefined && !pinned && inputModel(plan.input) === undefined && isRecord7(plan.input)) {
         const own = agent === undefined ? undefined : roleOf(agent, options.agents, options.implicit);
         if (own !== undefined && tierMeta(options, own)?.distinctVendor) {
           const model = resolveTier(options, available, own, view(), await callerVendor(event)).model;
@@ -3917,6 +3944,7 @@ export {
   DROPPED_LIMIT,
   EFFORT_CHOICES,
   EFFORT_SCALE,
+  FALLBACK_HEADER,
   GENERAL_TIER,
   HEALTH_KEY,
   INHERIT_NAMES,
@@ -4053,6 +4081,7 @@ export {
   tierState,
   tierSummary,
   toJsonSchema,
+  userPin,
   vendorOf,
   withAutoTag,
   withEffort,

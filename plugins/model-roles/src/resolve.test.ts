@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import {
+  type AgentLike,
   type AvailableModel,
   desiredModels,
   isAvailable,
@@ -10,6 +11,7 @@ import {
   sameModel,
   staleAgents,
   stripRoleHeader,
+  userPin,
 } from "./resolve.ts"
 
 const available: AvailableModel[] = [
@@ -205,10 +207,20 @@ describe("desiredModels (failure matrix)", () => {
     },
     agents: { general: "task", explore: "smol", ghost: "task" },
   })
-  const agents = [
+  const agents: AgentLike[] = [
     { id: "general" },
-    { id: "explore", model: { providerID: "opencode", id: "flint" } },
+    { id: "explore", model: { providerID: "opencode", id: "flint" }, request: { headers: { "x-opencode-model-fallback": "opencode/flint" } } },
     { id: "explicit-and-role", model: { providerID: "opencode", id: "flint" }, request: { headers: { "x-opencode-model-role": "task" } } },
+    {
+      id: "fallback-and-role",
+      model: { providerID: "opencode", id: "flint" },
+      request: { headers: { "x-opencode-model-role": "task", "X-OpenCode-Model-Fallback": "opencode/flint" } },
+    },
+    {
+      id: "repinned",
+      model: { providerID: "anthropic", id: "claude-haiku" },
+      request: { headers: { "x-opencode-model-role": "task", "x-opencode-model-fallback": "opencode/flint" } },
+    },
     { id: "role-only", request: { headers: { "x-opencode-model-role": "smol" } } },
     { id: "unknown-role", model: { providerID: "opencode", id: "flint" }, request: { headers: { "x-opencode-model-role": "nope" } } },
     { id: "unavailable-role", model: { providerID: "opencode", id: "flint" }, request: { headers: { "x-opencode-model-role": "fake-only" } } },
@@ -223,8 +235,12 @@ describe("desiredModels (failure matrix)", () => {
     expect(desired.get("general")).toEqual(sonnet)
     expect(desired.get("explore")).toEqual(haiku)
   })
-  test("role overrides an explicit model", () => {
-    expect(desired.get("explicit-and-role")).toEqual(sonnet)
+  test("a user's model pin wins over the role", () => {
+    expect(desired.has("explicit-and-role")).toBe(false)
+    expect(desired.has("repinned")).toBe(false)
+  })
+  test("a model the fallback header marks gives way to the role", () => {
+    expect(desired.get("fallback-and-role")).toEqual(sonnet)
   })
   test("role-only agent gets a model", () => {
     expect(desired.get("role-only")).toEqual(haiku)
@@ -282,9 +298,28 @@ describe("staleAgents", () => {
   })
 })
 
+describe("userPin", () => {
+  const flint = { providerID: "opencode", id: "flint" }
+  const marked = (value: string) => ({ headers: { "x-opencode-model-fallback": value } })
+  test("an unmarked model is a pin; a marked one is not", () => {
+    expect(userPin({ id: "a", model: flint })).toEqual(flint)
+    expect(userPin({ id: "a", model: flint, request: marked("opencode/flint") })).toBeUndefined()
+    expect(userPin({ id: "a" })).toBeUndefined()
+  })
+  test("a model other than the marked one is a pin", () => {
+    expect(userPin({ id: "a", model: flint, request: marked("opencode/flint#high") })).toEqual(flint)
+    expect(userPin({ id: "a", model: flint, request: marked("not a model") })).toEqual(flint)
+  })
+})
+
 describe("stripRoleHeader", () => {
   test("removes every casing and keeps other headers", () => {
-    const headers: Record<string, string> = { "x-opencode-model-role": "a", "X-OpenCode-Model-Role": "b", authorization: "x" }
+    const headers: Record<string, string> = {
+      "x-opencode-model-role": "a",
+      "X-OpenCode-Model-Role": "b",
+      "x-opencode-model-fallback": "p/m",
+      authorization: "x",
+    }
     expect(stripRoleHeader(headers)).toBe(true)
     expect(headers).toEqual({ authorization: "x" })
   })

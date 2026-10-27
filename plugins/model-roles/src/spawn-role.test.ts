@@ -167,6 +167,11 @@ describe("planSpawn", () => {
     expect(planSpawn(input, options, available)).toEqual({ input: { ...spawn, model: "amazon-bedrock/claude-sonnet" } })
   })
 
+  test("a user pin on the target wins over the role, which is still checked", () => {
+    expect(planSpawn({ ...spawn, tier: "task" }, options, available, undefined, undefined, true)).toEqual({ input: spawn })
+    expect(planSpawn({ ...spawn, tier: "huge" }, options, available, undefined, undefined, true).error).toContain("Unknown model tier")
+  })
+
   test("a resumed spawn keeps its model", () => {
     expect(planSpawn({ ...spawn, role: "smol", sessionID: "ses_1" }, options, available)).toEqual({
       input: { ...spawn, sessionID: "ses_1" },

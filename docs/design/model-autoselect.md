@@ -154,7 +154,7 @@ Before I added the exclude patterns, `gpt-realtime-2.1` came out as OpenAI "stro
 **How the parent's choice and the decider fit.**
 - The `subagent` tool gets a `tier` enum: `cheap | standard | strong | reviewer`, plus custom tiers. The free-form `role` parameter stays as an alias.
 - The old role names are still accepted as aliases (table below).
-- Precedence is unchanged: explicit model > tier argument > agent tier (from `agents`, the header, built-in defaults or the one-time classification) > agent model > inherit.
+- Precedence: explicit spawn model > user model pin (config `agents.<id>.model` or a markdown `model`) > tier argument > agent tier (from `agents`, the header, built-in defaults or the one-time classification) > shipped fallback model > inherit. On the merged `Agent.Info` a plugin cannot tell where a model came from (the host rebuilds agents by replaying every transform, config last until model-roles re-registers), so a plugin that sets a fallback model marks it in the `x-opencode-model-fallback` request header with the same `provider/model#variant`; a model equal to the marker gives way to the tier, any other is a pin. model-roles marks its own assignments the same way and strips the header from provider requests.
 - The opt-in `auto` decider picks a *tier* for `general` spawns only, from `cheap` and `standard` (by default), and runs on `cheap` at effort `none` (`@tiny`). `capAtParent` compares lineup ranks instead of prices. Every other untiered subagent is classified once from its description (§10).
 - Root sessions are never routed.
 
