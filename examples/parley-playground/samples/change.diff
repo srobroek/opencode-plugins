@@ -1,0 +1,30 @@
+diff --git a/src/reports.ts b/src/reports.ts
+index 3f2a1c4..9b7d0e2 100644
+--- a/src/reports.ts
++++ b/src/reports.ts
+@@ -1,12 +1,24 @@
+ import { db } from "./db.ts"
++import { LRU } from "./lru.ts"
++
++const cache = new LRU<string, Report>({ max: 5_000, ttlMs: 60_000 })
+ 
+ export interface Report {
+   readonly id: string
+   readonly rows: readonly unknown[]
+ }
+ 
+-export async function loadReport(tenant: string, id: string): Promise<Report> {
+-  return db.query("select * from reports where tenant = ? and id = ?", [tenant, id])
++export async function loadReport(tenant: string, id: string, flags: Flags): Promise<Report> {
++  if (!flags.report_cache) return query(tenant, id)
++  const key = `${tenant}\0${id}`
++  const hit = cache.get(key)
++  if (hit) return hit
++  const report = await query(tenant, id)
++  cache.set(key, report)
++  return report
++}
++
++function query(tenant: string, id: string): Promise<Report> {
++  return db.query("select * from reports where tenant = ? and id = ?", [tenant, id])
+ }

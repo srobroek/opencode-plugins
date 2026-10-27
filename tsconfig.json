@@ -17,6 +17,12 @@
     "jsx": "preserve",
     "jsxImportSource": "@opentui/solid"
   },
-  "include": ["plugins/**/*.ts", "plugins/**/*.tsx", "scripts/**/*.ts"],
+  "include": [
+    "plugins/**/*.ts",
+    "plugins/**/*.tsx",
+    "scripts/**/*.ts",
+    "examples/*/test/**/*.ts",
+    "examples/*/.opencode/plugins/**/*.ts"
+  ],
   "exclude": ["node_modules", "dist"]
 }
