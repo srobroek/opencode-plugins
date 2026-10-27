@@ -15,6 +15,7 @@ test("registers every toolchain skill and disposes them", async () => {
     "terraform-language",
     "toolchain-asset-ownership",
     "toolchain-frontend",
+    "toolchain-guide",
     "toolchain-infrastructure",
     "toolchain-languages",
     "toolchain-quality-observability",

@@ -1,6 +1,8 @@
 ---
 name: ops-toolchain-cache-policy
 description: Use when configuring toolchain download or compiler caches, worktree build output, or cache root and size knobs.
+metadata:
+  opencode/autoinvoke: false
 ---
 
 # Toolchain Cache Policy

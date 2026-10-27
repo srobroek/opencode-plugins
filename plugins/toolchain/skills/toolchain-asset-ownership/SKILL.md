@@ -1,6 +1,8 @@
 ---
 name: toolchain-asset-ownership
 description: "Use when adding or changing agentic assets: where OpenCode config, plugins, skills and agents live and who owns them."
+metadata:
+  opencode/autoinvoke: false
 ---
 
 # Agentic asset ownership

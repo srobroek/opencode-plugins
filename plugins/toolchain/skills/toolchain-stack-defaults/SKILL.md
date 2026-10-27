@@ -1,6 +1,8 @@
 ---
 name: toolchain-stack-defaults
 description: Use when choosing or changing a project stack, package manager, or task runner, or when adding a dependency.
+metadata:
+  opencode/autoinvoke: false
 ---
 
 # Toolchain Stack Defaults
