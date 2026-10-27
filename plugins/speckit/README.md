@@ -103,6 +103,10 @@ Both are read-only (edits denied) and carry the `reviewer` model tier in
 `request.headers.x-opencode-model-role`; with the model-roles plugin they run on that
 tier's model, otherwise on the parent's. They pin no model.
 
+`speckit-verify` is composed by `bun run build` from `agents.src/speckit-verify.md` and
+the evidence and report parts of the shared review core (`plugins/lib/src/review-core.md`);
+edit the source, not `agents/`. Its reply starts with `VERDICT: PASS|GAPS`.
+
 Formula steps that spawn them set `execution_agent_type` to the agent id, with
 `execution_agent_mode` or `execution_agent_scope` beside it. That is the beads
 routing gate's convention: a spawn naming such a step's bead must go to that agent.
