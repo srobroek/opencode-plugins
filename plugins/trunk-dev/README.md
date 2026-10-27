@@ -92,6 +92,11 @@ through the shell tool, where the beads gates apply. Every other failure is sile
 
 ## Skills
 
+Only `trunk-dev-guide` is listed to the model in OpenCode: it is a router whose body maps each
+situation to the skills below, which set `opencode/autoinvoke: false` and load by id. One listing
+entry instead of one per skill keeps the per-request skills listing short. Claude Code
+and Codex ignore that metadata, so there every skill is listed and triggers directly.
+
 Registered through `ctx.skill.transform` (a user skill of the same name wins):
 
 | Name | When |

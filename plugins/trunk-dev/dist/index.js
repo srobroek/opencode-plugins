@@ -2054,7 +2054,7 @@ function skipCiAdvisory(command, cwd = "/") {
 
 // plugins/trunk-dev/src/index.ts
 var LAND_TOOL = "delivery_land";
-var SKILL_NAMES = ["trunk-dev-workflow", "trunk-dev-feature-flags", "trunk-dev-release-setup"];
+var SKILL_NAMES = ["trunk-dev-workflow", "trunk-dev-feature-flags", "trunk-dev-release-setup", "trunk-dev-guide"];
 var SKILL_PATHS = SKILL_NAMES.map((name) => fileURLToPath(new URL(`../skills/${name}/SKILL.md`, import.meta.url)));
 var FEATURE_IDS = ["commit-gate", "skip-ci", "mr-advisory", "flag-cleanup"];
 function readOptions(options) {

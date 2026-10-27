@@ -1,6 +1,8 @@
 ---
 name: trunk-dev-workflow
 description: Use when branching, opening, merging or landing an MR/PR in a repo with CI or automated releases (trunk-based).
+metadata:
+  opencode/autoinvoke: false
 ---
 
 # Trunk-based delivery
