@@ -1,6 +1,8 @@
 ---
 name: design-no-slop
 description: Use when critiquing or building a rendered UI, to reject generated-UI visual tells and missing interaction states.
+metadata:
+  opencode/autoinvoke: false
 ---
 
 MUST Cover loading, empty, and error on every data-backed surface. A missing state is a miss.

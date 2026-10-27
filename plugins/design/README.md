@@ -6,6 +6,11 @@ them, and a `design_impeccable_scan` tool that runs impeccable's detector.
 
 ## Skills
 
+Only `design-guide` is listed to the model in OpenCode: it is a router whose body maps each
+situation to every skill below, which set `opencode/autoinvoke: false` and load by id. One listing
+entry instead of one per skill keeps the per-request skills listing short. Claude Code
+and Codex ignore that metadata, so there every skill is listed and triggers directly.
+
 | Skill | Phase | When |
 | --- | --- | --- |
 | `design-system-audit` | GROUND | Inventory existing tokens, scales and primitives before UI work |

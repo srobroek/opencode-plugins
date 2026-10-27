@@ -1,6 +1,8 @@
 ---
 name: accessibility-audit
 description: Audits a surface against WCAG 2.2 AA with measured values; triggers on is this accessible, check accessibility or WCAG.
+metadata:
+  opencode/autoinvoke: false
 ---
 
 # Accessibility Audit

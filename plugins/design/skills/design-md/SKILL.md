@@ -1,6 +1,8 @@
 ---
 name: design-md
 description: Routes DESIGN.md extraction to create-design-md and lints it; triggers on write a DESIGN.md or document the design.
+metadata:
+  opencode/autoinvoke: false
 ---
 
 # DESIGN.md

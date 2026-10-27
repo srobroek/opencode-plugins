@@ -1,6 +1,8 @@
 ---
 name: ui-microcopy
 description: Writes and reviews UX copy (errors, empty states, CTAs, confirmations, onboarding); triggers on write copy, fix wording.
+metadata:
+  opencode/autoinvoke: false
 ---
 <!--
 This skill includes modified guidance from anthropics/knowledge-work-plugins. The
