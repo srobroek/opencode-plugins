@@ -1,0 +1,19 @@
+{
+  "name": "lang-typescript",
+  "version": "0.1.0",
+  "description": "TypeScript and JavaScript skills: lint, tsc and test checks, type-safety rules, and Bun and Node profiling; formatting runs through OpenCode built-in formatters.",
+  "author": {
+    "name": "Sjors Robroek",
+    "url": "https://github.com/srobroek"
+  },
+  "homepage": "https://github.com/srobroek/opencode-plugins/tree/main/plugins/lang-typescript",
+  "repository": "https://github.com/srobroek/opencode-plugins",
+  "license": "Apache-2.0",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Lang Typescript",
+    "shortDescription": "TypeScript and JavaScript skills: lint, tsc and test checks, type-safety rules, and Bun and Node profiling; formatting runs through OpenCode built-in formatters.",
+    "developerName": "Sjors Robroek",
+    "category": "development"
+  }
+}
