@@ -3,6 +3,8 @@
 // plugins/parley/src/tui.tsx
 import { memo as _$memo2 } from "@opentui/solid";
 import { createComponent as _$createComponent2 } from "@opentui/solid";
+import { readdirSync } from "fs";
+import path2 from "path";
 import { Plugin } from "@opencode/plugin/tui";
 import { SyntaxStyle } from "@opentui/core";
 import { createSignal as createSignal2, Show as Show2 } from "solid-js";
@@ -10,8 +12,8 @@ import { createSignal as createSignal2, Show as Show2 } from "solid-js";
 // plugins/parley/src/panel.tsx
 import { spread as _$spread } from "@opentui/solid";
 import { mergeProps as _$mergeProps } from "@opentui/solid";
-import { createTextNode as _$createTextNode } from "@opentui/solid";
 import { memo as _$memo } from "@opentui/solid";
+import { createTextNode as _$createTextNode } from "@opentui/solid";
 import { use as _$use } from "@opentui/solid";
 import { insertNode as _$insertNode } from "@opentui/solid";
 import { createComponent as _$createComponent } from "@opentui/solid";
@@ -19,9 +21,15 @@ import { effect as _$effect } from "@opentui/solid";
 import { insert as _$insert } from "@opentui/solid";
 import { setProp as _$setProp } from "@opentui/solid";
 import { createElement as _$createElement } from "@opentui/solid";
-import { TextAttributes } from "@opentui/core";
+import { EditBufferRenderable, TextAttributes } from "@opentui/core";
 import { createEffect, createMemo, createSignal, For, Match, onCleanup, onMount, Show, Switch } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
+
+// plugins/parley/src/clipboard.ts
+import { mkdtempSync, readFileSync, rmSync } from "fs";
+import { tmpdir } from "os";
+import path from "path";
+import { createHostClipboard } from "@opentui/core";
 
 // plugins/parley/src/questions.ts
 var PHASE_ONE_KINDS = [
@@ -554,10 +562,8 @@ function neutral(question) {
       return { selected: [] };
     case "rank":
       return { order: ids };
-    case "slider": {
-      const { min, max, step } = sliderBounds(question);
-      return { value: Math.round((min + max) / 2 / step) * step };
-    }
+    case "slider":
+      return { value: sliderMid(question) };
     case "rate":
       return { ratings: {} };
     case "ask_text":
@@ -714,17 +720,49 @@ function setText(question, draft, text) {
       const trimmed = text.trim();
       return { ...draft, status: "answered", value: trimmed === "" ? { decision } : { decision, feedback: trimmed } };
     }
+    case "slider": {
+      const parsed = parseSlider(question, text);
+      if (parsed === undefined || "error" in parsed)
+        return draft;
+      return { ...draft, status: "answered", value: parsed };
+    }
     default:
       return draft;
   }
 }
+function parseSlider(question, text) {
+  const trimmed = text.trim();
+  if (trimmed === "")
+    return;
+  const { min, max, step: size } = sliderBounds(question);
+  const unit = question.unit ?? "";
+  const bare = unit !== "" && trimmed.endsWith(unit) ? trimmed.slice(0, -unit.length).trim() : trimmed;
+  const number = Number(bare);
+  if (bare !== "" && Number.isFinite(number)) {
+    if (number < min || number > max)
+      return { error: `Enter a number from ${min} to ${max}` };
+    return { value: Number(clamp(Math.round((number - min) / size) * size + min, min, max).toFixed(10)) };
+  }
+  const labels = Object.entries(question.labels ?? {});
+  const named = labels.find(([, label]) => label.toLowerCase() === trimmed.toLowerCase())?.[0];
+  if (named !== undefined)
+    return { value: named === "min" ? min : named === "max" ? max : sliderMid(question) };
+  if (question.allow_other === true)
+    return { other: trimmed };
+  return { error: `Enter a number from ${min} to ${max}` };
+}
 function editable(question) {
-  return isTextKind(question) || question.kind === "pick_one" && question.allow_other !== false || question.kind === "pick_many" && question.allow_other === true || question.kind === "review" || question.kind === "show_diff";
+  return isTextKind(question) || question.kind === "pick_one" && question.allow_other !== false || question.kind === "pick_many" && question.allow_other !== false || question.kind === "slider" || question.kind === "review" || question.kind === "show_diff";
 }
 function editText(question, draft) {
   const value = draft.value;
   if (question.kind === "ask_image" || question.kind === "ask_file")
-    return "";
+    return filePaths(draft).join(`
+`);
+  if (question.kind === "slider") {
+    const slider = draft.value;
+    return slider?.other ?? (slider?.value === undefined ? "" : String(slider.value));
+  }
   return value?.text ?? value?.other ?? value?.feedback ?? "";
 }
 function submissions(questions, drafts) {
@@ -786,6 +824,203 @@ function sliderBar(question, value, width = 20) {
   const position = clamp(filled, 0, width);
   return `[${"\u2501".repeat(position)}\u25CF${"\u2500".repeat(width - position)}]`;
 }
+var filesOf = (draft) => draft.value?.files ?? [];
+function filePaths(draft) {
+  return filesOf(draft).flatMap((file) => file.path === undefined ? [] : [file.path]);
+}
+function setFiles(question, draft, files, from) {
+  const kept = from === "typed" ? filesOf(draft).filter((file) => file.path === undefined) : filesOf(draft);
+  const all = [...kept, ...files];
+  const result = question.multiple === true ? all : all.slice(-1);
+  if (result.length === 0)
+    return { ...initialDraft(question), note: draft.note };
+  return { ...draft, status: "answered", value: { files: result } };
+}
+function completionQuery(text) {
+  const start = Math.max(text.lastIndexOf(","), text.lastIndexOf(`
+`)) + 1;
+  const rest = text.slice(start);
+  const lead = rest.length - rest.trimStart().length;
+  return { start: start + lead, query: rest.trim() };
+}
+function applyCompletion(text, choice) {
+  const { start } = completionQuery(text);
+  const prefix = text.slice(0, start);
+  return `${prefix}${prefix !== "" && !/[\s]$/.test(prefix) ? " " : ""}${choice}`;
+}
+var IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "tiff", "heic"]);
+function acceptsPath(question, path) {
+  if (path.endsWith("/"))
+    return true;
+  const ext = path.split("/").pop()?.split(".").slice(1).pop()?.toLowerCase() ?? "";
+  if (question.kind === "ask_image")
+    return IMAGE_EXTENSIONS.has(ext);
+  const accept = (question.accept ?? []).map((item) => item.replace(/^\./, "").toLowerCase());
+  return accept.length === 0 || accept.includes(ext);
+}
+function fuzzyScore(query, candidate) {
+  const needle = query.toLowerCase();
+  const hay = candidate.toLowerCase();
+  if (needle === "")
+    return 0;
+  const nameStart = hay.lastIndexOf("/", hay.length - 2) + 1;
+  let score = 0;
+  let at = -1;
+  let run = 0;
+  for (const char of needle) {
+    const next = hay.indexOf(char, at + 1);
+    if (next < 0)
+      return;
+    run = next === at + 1 ? run + 1 : 0;
+    const boundary = next === 0 || "/._- ".includes(hay[next - 1]);
+    score += 1 + run * 2 + (boundary ? 3 : 0) + (next >= nameStart ? 1 : 0);
+    at = next;
+  }
+  return score - hay.length / 100;
+}
+function rankPaths(query, candidates, limit = 8) {
+  return candidates.flatMap((candidate) => {
+    const score = fuzzyScore(query, candidate);
+    return score === undefined ? [] : [{ candidate, score }];
+  }).sort((a, b) => b.score - a.score).slice(0, limit).map((item) => item.candidate);
+}
+var PANEL_KEYS = {
+  pick_one: "\u2191/\u2193 choice \xB7 space/1-9 choose \xB7 e type your own",
+  pick_many: "\u2191/\u2193 choice \xB7 space/1-9 toggle \xB7 e add your own",
+  show_options: "\u2190/\u2192 choice \xB7 space/1-9 choose",
+  confirm: "\u2191/\u2193 choice \xB7 space/1-9 choose",
+  thumbs: "\u2191/\u2193 choice \xB7 space/1-9 choose",
+  rank: "\u2191/\u2193 item \xB7 J/K or shift+\u2191/\u2193 move item",
+  rate: "\u2191/\u2193 option \xB7 \u2190/\u2192 rating",
+  ask_text: "e edit answer",
+  ask_code: "e edit code",
+  review: "\u2191/\u2193 approve/revise \xB7 e feedback",
+  show_diff: "\u2191/\u2193 approve/revise \xB7 e feedback",
+  emoji_react: "\u2190/\u2192 emoji \xB7 space/1-9 choose",
+  ask_image: "e type a path (tab completes) \xB7 ctrl+v paste image",
+  ask_file: "e type paths (tab completes) \xB7 ctrl+v paste"
+};
+function kindKeys(question) {
+  if (question.kind === "slider")
+    return `\u2190/\u2192 adjust \xB7 e type a number${question.allow_other === true ? " or your own answer" : ""}`;
+  return PANEL_KEYS[question.kind] ?? "";
+}
+var PATH_KINDS = new Set(["ask_image", "ask_file"]);
+function keyHints(question, surface, editing, single = false) {
+  if (editing) {
+    const enter = editing.enterSaves ? surface === "card" ? "enter submit \xB7 shift+enter newline" : "enter save \xB7 shift+enter newline" : "enter newline";
+    const paths = editing.field === "text" && question && PATH_KINDS.has(question.kind) ? editing.suggestions ? " \xB7 \u2191/\u2193 suggestion \xB7 tab complete" : " \xB7 tab complete" : "";
+    const paste = editing.field === "text" && question && PATH_KINDS.has(question.kind) ? " \xB7 ctrl+v paste" : "";
+    return `${enter}${paths}${paste} \xB7 esc done \xB7 ctrl+s submit`;
+  }
+  const own = question ? kindKeys(question) : "";
+  const shared = surface === "card" ? "enter submit \xB7 a accept \xB7 n note \xB7 d defer \xB7 f full screen \xB7 esc hide \xB7 D dismiss" : `tab/j/k question \xB7 a accept \xB7 n note \xB7 d defer \xB7 ctrl+s submit \xB7 f ${single ? "inline card" : surface === "side" ? "full screen" : "side panel"} \xB7 esc minimise \xB7 D dismiss`;
+  return own === "" ? shared : `${own} \xB7 ${shared}`;
+}
+function countdown(seconds) {
+  if (seconds === undefined || seconds > 600)
+    return;
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  return `closes in ${minutes > 0 ? `${minutes}m ${String(rest).padStart(2, "0")}s` : `${rest}s`}`;
+}
+
+// plugins/parley/src/clipboard.ts
+var IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp", "image/tiff"];
+function fileURLs(text) {
+  return text.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.startsWith("file://")).map((line) => decodeURIComponent(new URL(line).pathname));
+}
+var stamp = () => new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+async function hostRead(types) {
+  const clipboard = createHostClipboard({ timeoutMs: 3000 });
+  try {
+    const result = await clipboard.read({ preferredTypes: types });
+    return result.status === "read" ? result.representation : undefined;
+  } catch {
+    return;
+  } finally {
+    await clipboard.dispose().catch(() => {});
+  }
+}
+async function osascriptImage() {
+  if (process.platform !== "darwin")
+    return;
+  const dir = mkdtempSync(path.join(tmpdir(), "parley-paste-"));
+  const target = path.join(dir, "clipboard.png");
+  const script = `set f to open for access POSIX file "${target}" with write permission
+write (the clipboard as \xABclass PNGf\xBB) to f
+close access f`;
+  try {
+    const proc = Bun.spawn(["osascript", "-e", script], { stdout: "ignore", stderr: "ignore" });
+    if (await proc.exited !== 0)
+      return;
+    const bytes = readFileSync(target);
+    return bytes.length > 0 ? new Uint8Array(bytes) : undefined;
+  } catch {
+    return;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+async function clipboardFiles(images) {
+  const image = await hostRead(IMAGE_TYPES) ?? undefined;
+  if (image) {
+    const ext = image.mimeType.split("/")[1] ?? "png";
+    const data = Buffer.from(image.bytes).toString("base64");
+    return [{ name: `clipboard-${stamp()}.${ext}`, mime: image.mimeType, size: image.bytes.length, data }];
+  }
+  const list = await hostRead(["text/uri-list"]);
+  if (list) {
+    const paths = fileURLs(new TextDecoder().decode(list.bytes));
+    const files = [];
+    for (const file of paths) {
+      const handle = Bun.file(file);
+      if (!await handle.exists())
+        continue;
+      const mime = (handle.type || mimeFor(file)).split(";")[0] ?? mimeFor(file);
+      if (images && !mime.startsWith("image/"))
+        continue;
+      const data = Buffer.from(await handle.arrayBuffer()).toString("base64");
+      files.push({ name: path.basename(file), path: file, mime, size: handle.size, data });
+    }
+    if (files.length > 0)
+      return files;
+  }
+  const png = await osascriptImage();
+  if (png)
+    return [{ name: `clipboard-${stamp()}.png`, mime: "image/png", size: png.length, data: Buffer.from(png).toString("base64") }];
+  return [];
+}
+
+// plugins/parley/src/focus.ts
+var DELIBERATE_MS = 400;
+
+class FocusGuard {
+  #lastInput = Number.NEGATIVE_INFINITY;
+  #released = false;
+  input(now) {
+    this.#lastInput = now;
+  }
+  get released() {
+    return this.#released;
+  }
+  moved(now, inside) {
+    if (inside) {
+      this.#released = false;
+      return false;
+    }
+    if (this.#released)
+      return false;
+    if (now - this.#lastInput < DELIBERATE_MS) {
+      this.#released = true;
+      return false;
+    }
+    return true;
+  }
+  reclaim() {
+    this.#released = false;
+  }
+}
 
 // plugins/parley/src/panel.tsx
 var PANEL = "srobroek.parley.round";
@@ -805,18 +1040,25 @@ function createRoundStore() {
     }
   };
 }
-async function readFiles(text) {
+var resolvePath = (raw, base) => {
   const home = process.env.HOME ?? "";
+  if (raw === "~" || raw.startsWith("~/"))
+    return `${home}${raw.slice(1)}`;
+  if (raw.startsWith("/") || base === undefined)
+    return raw;
+  return `${base.replace(/\/$/, "")}/${raw.replace(/^\.\//, "")}`;
+};
+async function readFiles(text, base) {
   const files = [];
   for (const raw of parsePaths(text)) {
-    const path = raw.startsWith("~/") ? `${home}${raw.slice(1)}` : raw;
+    const path = resolvePath(raw, base);
     const file = Bun.file(path);
     if (!await file.exists())
       throw new Error(`No such file: ${raw}`);
     const data = Buffer.from(await file.arrayBuffer()).toString("base64");
     files.push({
       name: path.split("/").pop() ?? path,
-      path,
+      path: raw,
       mime: (file.type || mimeFor(path)).split(";")[0] ?? mimeFor(path),
       size: file.size,
       data
@@ -834,7 +1076,21 @@ function createRoundControls(props, onMove) {
   const [editing, setEditing] = createSignal();
   const [errors, setErrors] = createSignal([]);
   const [busy, setBusy] = createSignal(false);
+  const [suggestions, setSuggestions] = createSignal([]);
+  const [selected, setSelected] = createSignal(0);
+  const [now, setNow] = createSignal(Date.now());
   let textarea;
+  let lookup = 0;
+  createEffect(() => {
+    if (props.round()?.deadline === undefined)
+      return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    onCleanup(() => clearInterval(timer));
+  });
+  const remaining = () => {
+    const deadline = props.round()?.deadline;
+    return deadline === undefined ? undefined : Math.max(0, Math.ceil((deadline - now()) / 1000));
+  };
   const questions = createMemo(() => props.round()?.questions ?? []);
   const current = () => questions()[focus()];
   createEffect(() => {
@@ -882,16 +1138,120 @@ function createRoundControls(props, onMove) {
       return;
     if (field === "text" && !editable(question))
       return;
+    setSuggestions([]);
     setEditing({
       id: question.id,
       field
     });
+  };
+  const fileCard = () => {
+    const edit = editing();
+    const question = questions().find((candidate) => candidate.id === edit?.id);
+    return edit?.field === "text" && (question?.kind === "ask_image" || question?.kind === "ask_file") ? question : undefined;
+  };
+  const onInput = (text) => {
+    const question = fileCard();
+    if (!question)
+      return;
+    const {
+      query
+    } = completionQuery(text);
+    const ticket = ++lookup;
+    if (query === "") {
+      setSuggestions([]);
+      return;
+    }
+    props.find(query).catch(() => []).then((found) => {
+      if (ticket !== lookup)
+        return;
+      setSuggestions(rankPaths(query, found.filter((candidate) => acceptsPath(question, candidate))));
+      setSelected(0);
+    });
+  };
+  const moveSuggestion = (delta) => {
+    const count = suggestions().length;
+    if (count === 0)
+      return false;
+    setSelected((index) => (index + delta + count) % count);
+  };
+  const complete = () => {
+    const choice = suggestions()[selected()];
+    if (!fileCard() || !textarea || textarea.isDestroyed || choice === undefined)
+      return false;
+    textarea.setText(applyCompletion(textarea.plainText, choice));
+    textarea.gotoBufferEnd();
+    if (choice.endsWith("/"))
+      onInput(textarea.plainText);
+    else
+      setSuggestions([]);
+  };
+  const pasteFiles = () => {
+    const question = fileCard() ?? current();
+    if (!question || question.kind !== "ask_image" && question.kind !== "ask_file")
+      return false;
+    attach(question);
+  };
+  const isFileKind = (question) => question?.kind === "ask_image" || question?.kind === "ask_file";
+  const pasteKeys = () => isFileKind(current()) ? [{
+    bind: "ctrl+v",
+    title: "Paste file",
+    group: "Parley",
+    run: pasteFiles
+  }] : [];
+  const pathKeys = () => [
+    ...fileCard() ? [{
+      bind: "ctrl+v",
+      title: "Paste file",
+      group: "Parley",
+      run: pasteFiles
+    }] : [],
+    ...suggestions().length > 0 ? [{
+      bind: "tab",
+      title: "Complete path",
+      group: "Parley",
+      run: complete
+    }] : [],
+    {
+      bind: "down",
+      title: "Next suggestion / line",
+      group: "Parley",
+      run: () => fieldArrow(1)
+    },
+    {
+      bind: "up",
+      title: "Previous suggestion / line",
+      group: "Parley",
+      run: () => fieldArrow(-1)
+    }
+  ];
+  const fieldArrow = (delta) => {
+    if (suggestions().length > 0) {
+      moveSuggestion(delta);
+      return;
+    }
+    if (!textarea || textarea.isDestroyed)
+      return;
+    if (delta > 0)
+      textarea.moveCursorDown();
+    else
+      textarea.moveCursorUp();
+  };
+  const attach = async (question) => {
+    const files = await clipboardFiles(question.kind === "ask_image");
+    if (files.length === 0) {
+      setErrors(["Nothing to attach on the clipboard (copy a screenshot or a file first)."]);
+      return;
+    }
+    const draft = draftOf(question.id) ?? initialDraft(question);
+    setDraft(question.id, setFiles(question, draft, files, "pasted"));
+    setErrors([]);
   };
   const finishEdit = async () => {
     const edit = editing();
     const question = questions().find((candidate) => candidate.id === edit?.id);
     const text = textarea?.plainText ?? "";
     setEditing(undefined);
+    setSuggestions([]);
     if (!edit || !question)
       return;
     const draft = draftOf(question.id) ?? initialDraft(question);
@@ -901,20 +1261,22 @@ function createRoundControls(props, onMove) {
     }
     if (question.kind === "ask_image" || question.kind === "ask_file") {
       try {
-        const files = text.trim() === "" ? [] : await readFiles(text);
-        setDraft(question.id, files.length === 0 ? initialDraft(question) : {
-          ...draft,
-          status: "answered",
-          value: {
-            files
-          }
-        });
+        const files = text.trim() === "" ? [] : await readFiles(text, props.directory());
+        setDraft(question.id, setFiles(question, draft, files, "typed"));
         setErrors([]);
       } catch (error) {
         setErrors([error instanceof Error ? error.message : String(error)]);
       }
       return;
     }
+    if (question.kind === "slider") {
+      const parsed = parseSlider(question, text);
+      if (parsed !== undefined && "error" in parsed) {
+        setErrors([parsed.error]);
+        return;
+      }
+    }
+    setErrors([]);
     setDraft(question.id, setText(question, draft, text));
   };
   const submit = async () => {
@@ -946,6 +1308,16 @@ function createRoundControls(props, onMove) {
     startEdit,
     finishEdit,
     submit,
+    suggestions,
+    selected,
+    remaining,
+    onInput,
+    moveSuggestion,
+    complete,
+    pasteFiles,
+    pasteKeys,
+    pathKeys,
+    field: () => editing() && textarea && !textarea.isDestroyed ? textarea : undefined,
     newline: () => {
       if (textarea && !textarea.isDestroyed)
         textarea.newLine();
@@ -958,6 +1330,7 @@ function createRoundControls(props, onMove) {
 function RoundPanel(props) {
   const theme = () => props.context.theme;
   let scroll;
+  const controls = createRoundControls(props, (id) => scroll?.scrollChildIntoView(`parley-card-${id}`));
   const {
     draftOf,
     focus,
@@ -965,6 +1338,7 @@ function RoundPanel(props) {
     errors,
     busy,
     questions,
+    current,
     update,
     moveCard,
     arrow,
@@ -974,7 +1348,18 @@ function RoundPanel(props) {
     submit,
     newline,
     setTextarea
-  } = createRoundControls(props, (id) => scroll?.scrollChildIntoView(`parley-card-${id}`));
+  } = controls;
+  const single = () => questions().length === 1;
+  createEffect(() => {
+    if (props.focusRequest() > 0)
+      props.panel.focus();
+  });
+  const toggleView = () => {
+    if (single())
+      props.inline();
+    else
+      props.panel.toggleFullscreen();
+  };
   props.context.keymap.layer(() => ({
     enabled: () => editing() === undefined,
     commands: [{
@@ -1084,6 +1469,11 @@ function RoundPanel(props) {
       title: "Submit round",
       group: "Parley",
       run: () => void submit()
+    }, ...controls.pasteKeys(), {
+      bind: "f",
+      title: "Toggle view",
+      group: "Parley",
+      run: toggleView
     }, {
       bind: "escape",
       title: "Minimise",
@@ -1122,13 +1512,13 @@ function RoundPanel(props) {
       title: "New line",
       group: "Parley",
       run: newline
-    }, {
+    }, ...controls.pathKeys(), {
       bind: "return",
       title: "Save",
       group: "Parley",
       run: () => {
         if (!enterSaves())
-          return false;
+          return newline();
         finishEdit();
       }
     }, {
@@ -1176,6 +1566,17 @@ function RoundPanel(props) {
         return _el$4;
       }
     }), _el$5);
+    _$insert(_el$2, _$createComponent(Show, {
+      get when() {
+        return countdown(controls.remaining());
+      },
+      children: (text) => (() => {
+        var _el$10 = _$createElement("text");
+        _$insert(_el$10, text);
+        _$effect((_$p) => _$setProp(_el$10, "fg", theme().text.feedback.warning.base, _$p));
+        return _el$10;
+      })()
+    }), _el$5);
     _$insert(_el$5, () => `${answered()}/${questions().length} ready`);
     _$insert(_el$, _$createComponent(Show, {
       get when() {
@@ -1190,10 +1591,10 @@ function RoundPanel(props) {
             return errors();
           },
           children: (error) => (() => {
-            var _el$10 = _$createElement("text");
-            _$insert(_el$10, error);
-            _$effect((_$p) => _$setProp(_el$10, "fg", theme().text.feedback.error.base, _$p));
-            return _el$10;
+            var _el$11 = _$createElement("text");
+            _$insert(_el$11, error);
+            _$effect((_$p) => _$setProp(_el$11, "fg", theme().text.feedback.error.base, _$p));
+            return _el$11;
           })()
         }));
         return _el$6;
@@ -1233,6 +1634,15 @@ function RoundPanel(props) {
         get editing() {
           return _$memo(() => editing()?.id === question.id)() ? editing()?.field : undefined;
         },
+        get suggestions() {
+          return controls.suggestions();
+        },
+        get selected() {
+          return controls.selected();
+        },
+        get onInput() {
+          return controls.onInput;
+        },
         textareaRef: (element) => {
           setTextarea(element);
           queueMicrotask(() => {
@@ -1249,10 +1659,11 @@ function RoundPanel(props) {
     _$setProp(_el$8, "paddingTop", 1);
     _$setProp(_el$8, "paddingBottom", 1);
     _$setProp(_el$9, "wrapMode", "word");
-    _$insert(_el$9, (() => {
-      var _c$ = _$memo(() => !!editing());
-      return () => _c$() ? `${enterSaves() ? "enter save \xB7 shift+enter newline" : "enter newline"} \xB7 esc done \xB7 ctrl+enter / ctrl+s submit round` : "tab/j/k question \xB7 \u2191/\u2193 choice (\u2190/\u2192 side by side) \xB7 space choose \xB7 a accept \xB7 n note \xB7 d defer \xB7 e edit \xB7 shift+\u2191/\u2193 J/K rank \xB7 \u2190/\u2192 adjust \xB7 ctrl+enter / ctrl+s submit \xB7 esc minimise \xB7 D dismiss";
-    })());
+    _$insert(_el$9, () => keyHints(current(), props.panel.presentation === "fullscreen" ? "panel" : "side", editing() ? {
+      field: editing()?.field ?? "text",
+      enterSaves: enterSaves(),
+      suggestions: controls.suggestions().length > 0
+    } : undefined, single()));
     _$insert(_el$, _$createComponent(Show, {
       get when() {
         return busy();
@@ -1286,8 +1697,10 @@ var within = (node, root) => {
       return true;
   return false;
 };
+var SETTLE_MS = [50, 200, 500, 1000, 2000];
 function InlineCard(props) {
   const theme = () => props.context.theme;
+  const controls = createRoundControls(props);
   const {
     draftOf,
     editing,
@@ -1302,14 +1715,62 @@ function InlineCard(props) {
     submit,
     newline,
     setTextarea
-  } = createRoundControls(props);
+  } = controls;
   let box;
   const question = () => questions()[0];
+  const [away, setAway] = createSignal(false);
+  const guard = new FocusGuard;
+  const grab = () => queueMicrotask(() => {
+    if (guard.released)
+      return;
+    const field = controls.field();
+    if (field)
+      field.focus();
+    else if (box && !box.isDestroyed)
+      box.focus();
+  });
+  createEffect(() => {
+    if (props.focusRequest() === 0)
+      return;
+    guard.reclaim();
+    setAway(false);
+    grab();
+  });
   onMount(() => {
-    const previous = props.context.renderer.currentFocusedRenderable;
-    queueMicrotask(() => {
-      if (box && !box.isDestroyed)
-        box.focus();
+    const renderer = props.context.renderer;
+    const previous = renderer.currentFocusedRenderable;
+    grab();
+    const onInput = () => {
+      guard.input(Date.now());
+      return false;
+    };
+    const onFocus = () => queueMicrotask(() => {
+      const focused = renderer.currentFocusedRenderable;
+      const inside = within(focused, box);
+      if (!inside && focused !== null && !(focused instanceof EditBufferRenderable))
+        return;
+      if (guard.moved(Date.now(), inside))
+        grab();
+      setAway(guard.released);
+    });
+    renderer.prependInputHandler(onInput);
+    renderer.on("focused_renderable", onFocus);
+    const root = renderer.root;
+    const priorDown = root.onMouseDown;
+    root.onMouseDown = function(event) {
+      guard.input(Date.now());
+      priorDown?.call(this, event);
+    };
+    const checks = SETTLE_MS.map((delay) => setTimeout(() => {
+      if (!guard.released && !within(renderer.currentFocusedRenderable, box))
+        grab();
+    }, delay));
+    onCleanup(() => {
+      for (const check of checks)
+        clearTimeout(check);
+      root.onMouseDown = priorDown;
+      renderer.removeInputHandler(onInput);
+      renderer.off("focused_renderable", onFocus);
     });
     onCleanup(() => {
       const now = props.context.renderer.currentFocusedRenderable;
@@ -1338,103 +1799,159 @@ function InlineCard(props) {
   props.context.keymap.layer(() => ({
     target: () => box,
     enabled: () => editing() === undefined,
-    commands: [{
-      bind: "down",
-      title: "Next choice",
-      group: "Parley",
-      run: () => arrow("down")
-    }, {
-      bind: "up",
-      title: "Previous choice",
-      group: "Parley",
-      run: () => arrow("up")
-    }, {
-      bind: "left",
-      title: "Previous / decrease",
-      group: "Parley",
-      run: () => arrow("left")
-    }, {
-      bind: "right",
-      title: "Next / increase",
-      group: "Parley",
-      run: () => arrow("right")
-    }, {
-      bind: "j",
-      title: "Next choice",
-      group: "Parley",
-      run: () => update((q, d) => moveCursor(q, d, 1))
-    }, {
-      bind: "k",
-      title: "Previous choice",
-      group: "Parley",
-      run: () => update((q, d) => moveCursor(q, d, -1))
-    }, {
-      bind: "space",
-      title: "Choose",
-      group: "Parley",
-      run: () => update((q, d) => choose(q, d))
-    }, ...Array.from({
-      length: 9
-    }, (_, index) => ({
-      bind: String(index + 1),
-      title: `Choose ${index + 1}`,
-      group: "Parley",
-      run: () => update((q, d) => choose(q, d, index))
-    })), {
-      bind: "a",
-      title: "Accept recommendation",
-      group: "Parley",
-      run: () => update(accept)
-    }, {
-      bind: "d",
-      title: "Defer",
-      group: "Parley",
-      run: () => update((q, d) => toggleDefer(d, q))
-    }, {
-      bind: "n",
-      title: "Note",
-      group: "Parley",
-      run: () => startEdit("note")
-    }, {
-      bind: "e",
-      title: "Edit answer",
-      group: "Parley",
-      run: () => startEdit("text")
-    }, {
-      bind: "return",
-      title: "Submit",
-      group: "Parley",
-      run: () => void send()
-    }, {
-      bind: "ctrl+return",
-      title: "Submit",
-      group: "Parley",
-      run: () => void send()
-    }, {
-      bind: "ctrl+s",
-      title: "Submit",
-      group: "Parley",
-      run: () => void send()
-    }, {
-      bind: "f",
-      title: "Full screen",
-      group: "Parley",
-      run: () => props.expand()
-    }, {
-      bind: "escape",
-      title: "Hide",
-      group: "Parley",
-      run: () => props.hide()
-    }, {
-      bind: "shift+d",
-      title: "Dismiss",
-      group: "Parley",
-      run: () => {
-        const round = props.round();
-        if (round)
-          props.dismiss(round);
+    commands: [
+      {
+        bind: "down",
+        title: "Next choice",
+        group: "Parley",
+        run: () => arrow("down")
+      },
+      {
+        bind: "up",
+        title: "Previous choice",
+        group: "Parley",
+        run: () => arrow("up")
+      },
+      {
+        bind: "left",
+        title: "Previous / decrease",
+        group: "Parley",
+        run: () => arrow("left")
+      },
+      {
+        bind: "right",
+        title: "Next / increase",
+        group: "Parley",
+        run: () => arrow("right")
+      },
+      {
+        bind: "j",
+        title: "Next choice",
+        group: "Parley",
+        run: () => update((q, d) => moveCursor(q, d, 1))
+      },
+      {
+        bind: "k",
+        title: "Previous choice",
+        group: "Parley",
+        run: () => update((q, d) => moveCursor(q, d, -1))
+      },
+      {
+        bind: "tab",
+        title: "Next choice",
+        group: "Parley",
+        run: () => update((q, d) => moveCursor(q, d, 1))
+      },
+      {
+        bind: "shift+tab",
+        title: "Previous choice",
+        group: "Parley",
+        run: () => update((q, d) => moveCursor(q, d, -1))
+      },
+      {
+        bind: "shift+up",
+        title: "Move up",
+        group: "Parley",
+        run: () => update((q, d) => rankMove(q, d, -1))
+      },
+      {
+        bind: "shift+down",
+        title: "Move down",
+        group: "Parley",
+        run: () => update((q, d) => rankMove(q, d, 1))
+      },
+      {
+        bind: "shift+k",
+        title: "Move up",
+        group: "Parley",
+        run: () => update((q, d) => rankMove(q, d, -1))
+      },
+      {
+        bind: "shift+j",
+        title: "Move down",
+        group: "Parley",
+        run: () => update((q, d) => rankMove(q, d, 1))
+      },
+      {
+        bind: "space",
+        title: "Choose",
+        group: "Parley",
+        run: () => update((q, d) => choose(q, d))
+      },
+      ...Array.from({
+        length: 9
+      }, (_, index) => ({
+        bind: String(index + 1),
+        title: `Choose ${index + 1}`,
+        group: "Parley",
+        run: () => update((q, d) => choose(q, d, index))
+      })),
+      {
+        bind: "a",
+        title: "Accept recommendation",
+        group: "Parley",
+        run: () => update(accept)
+      },
+      {
+        bind: "d",
+        title: "Defer",
+        group: "Parley",
+        run: () => update((q, d) => toggleDefer(d, q))
+      },
+      {
+        bind: "n",
+        title: "Note",
+        group: "Parley",
+        run: () => startEdit("note")
+      },
+      {
+        bind: "e",
+        title: "Edit answer",
+        group: "Parley",
+        run: () => startEdit("text")
+      },
+      {
+        bind: "return",
+        title: "Submit",
+        group: "Parley",
+        run: () => void send()
+      },
+      {
+        bind: "ctrl+return",
+        title: "Submit",
+        group: "Parley",
+        run: () => void send()
+      },
+      {
+        bind: "ctrl+s",
+        title: "Submit",
+        group: "Parley",
+        run: () => void send()
+      },
+      ...controls.pasteKeys(),
+      {
+        bind: "f",
+        title: "Full screen",
+        group: "Parley",
+        run: () => props.expand()
+      },
+      {
+        bind: "escape",
+        title: "Hide",
+        group: "Parley",
+        run: () => props.hide()
+      },
+      {
+        bind: "shift+d",
+        title: "Dismiss",
+        group: "Parley",
+        run: () => {
+          const round = props.round();
+          if (round)
+            props.dismiss(round);
+        }
       }
-    }]
+    ]
   }));
   props.context.keymap.layer(() => ({
     target: () => box,
@@ -1449,13 +1966,13 @@ function InlineCard(props) {
       title: "New line",
       group: "Parley",
       run: newline
-    }, {
+    }, ...controls.pathKeys(), {
       bind: "return",
       title: "Save and submit",
       group: "Parley",
       run: () => {
         if (!enterSaves())
-          return false;
+          return newline();
         saveAndSend();
       }
     }, {
@@ -1471,15 +1988,15 @@ function InlineCard(props) {
     }]
   }));
   return (() => {
-    var _el$11 = _$createElement("box"), _el$12 = _$createElement("text");
-    _$insertNode(_el$11, _el$12);
-    _$use((element) => box = element, _el$11);
-    _$setProp(_el$11, "focusable", true);
-    _$setProp(_el$11, "flexDirection", "column");
-    _$setProp(_el$11, "flexShrink", 0);
-    _$setProp(_el$11, "paddingLeft", 1);
-    _$setProp(_el$11, "paddingRight", 1);
-    _$insert(_el$11, _$createComponent(Show, {
+    var _el$12 = _$createElement("box"), _el$15 = _$createElement("text");
+    _$insertNode(_el$12, _el$15);
+    _$use((element) => box = element, _el$12);
+    _$setProp(_el$12, "focusable", true);
+    _$setProp(_el$12, "flexDirection", "column");
+    _$setProp(_el$12, "flexShrink", 0);
+    _$setProp(_el$12, "paddingLeft", 1);
+    _$setProp(_el$12, "paddingRight", 1);
+    _$insert(_el$12, _$createComponent(Show, {
       get when() {
         return question();
       },
@@ -1501,6 +2018,15 @@ function InlineCard(props) {
         get editing() {
           return _$memo(() => editing()?.id === q().id)() ? editing()?.field : undefined;
         },
+        get suggestions() {
+          return controls.suggestions();
+        },
+        get selected() {
+          return controls.selected();
+        },
+        get onInput() {
+          return controls.onInput;
+        },
         textareaRef: (element) => {
           setTextarea(element);
           queueMicrotask(() => {
@@ -1511,25 +2037,41 @@ function InlineCard(props) {
           });
         }
       })
-    }), _el$12);
-    _$insert(_el$11, _$createComponent(For, {
+    }), _el$15);
+    _$insert(_el$12, _$createComponent(For, {
       get each() {
         return errors();
       },
       children: (error) => (() => {
-        var _el$13 = _$createElement("text");
-        _$insert(_el$13, error);
-        _$effect((_$p) => _$setProp(_el$13, "fg", theme().text.feedback.error.base, _$p));
-        return _el$13;
+        var _el$16 = _$createElement("text");
+        _$insert(_el$16, error);
+        _$effect((_$p) => _$setProp(_el$16, "fg", theme().text.feedback.error.base, _$p));
+        return _el$16;
       })()
-    }), _el$12);
-    _$setProp(_el$12, "wrapMode", "word");
-    _$insert(_el$12, (() => {
-      var _c$2 = _$memo(() => !!busy());
-      return () => _c$2() ? "Submitting\u2026" : _$memo(() => !!editing())() ? enterSaves() ? "enter submit \xB7 shift+enter newline \xB7 esc done" : "enter newline \xB7 ctrl+s submit \xB7 esc done" : "Parley \xB7 1-9/space choose \xB7 enter submit \xB7 n note \xB7 d defer \xB7 e edit \xB7 a accept \xB7 f full screen \xB7 esc hide \xB7 D dismiss";
+    }), _el$15);
+    _$insert(_el$12, _$createComponent(Show, {
+      get when() {
+        return away();
+      },
+      get children() {
+        var _el$13 = _$createElement("text");
+        _$insertNode(_el$13, _$createTextNode(`Keys go to the prompt now \xB7 alt+p or /parley returns to this card`));
+        _$setProp(_el$13, "wrapMode", "word");
+        _$effect((_$p) => _$setProp(_el$13, "fg", theme().text.feedback.warning.base, _$p));
+        return _el$13;
+      }
+    }), _el$15);
+    _$setProp(_el$15, "wrapMode", "word");
+    _$insert(_el$15, (() => {
+      var _c$ = _$memo(() => !!busy());
+      return () => _c$() ? "Submitting\u2026" : `${countdown(controls.remaining()) ? `${countdown(controls.remaining())} \xB7 ` : ""}${keyHints(question(), "card", editing() ? {
+        field: editing()?.field ?? "text",
+        enterSaves: enterSaves(),
+        suggestions: controls.suggestions().length > 0
+      } : undefined)}`;
     })());
-    _$effect((_$p) => _$setProp(_el$12, "fg", theme().text.muted, _$p));
-    return _el$11;
+    _$effect((_$p) => _$setProp(_el$15, "fg", theme().text.muted, _$p));
+    return _el$12;
   })();
 }
 function Card(props) {
@@ -1540,6 +2082,10 @@ function Card(props) {
     const rec = q().recommended;
     if (rec === undefined)
       return;
+    if (q().kind === "ask_code")
+      return;
+    if (q().kind === "slider" && typeof rec === "number")
+      return sliderText(q(), rec);
     if (Array.isArray(rec))
       return rec.map((id) => optionLabel(q(), String(id))).join(", ");
     if (typeof rec === "object")
@@ -1549,116 +2095,143 @@ function Card(props) {
     return String(rec);
   };
   return (() => {
-    var _el$14 = _$createElement("box"), _el$15 = _$createElement("box"), _el$16 = _$createElement("text"), _el$17 = _$createElement("text"), _el$22 = _$createElement("box");
-    _$insertNode(_el$14, _el$15);
-    _$insertNode(_el$14, _el$22);
-    _$setProp(_el$14, "border", true);
-    _$setProp(_el$14, "paddingLeft", 1);
-    _$setProp(_el$14, "paddingRight", 1);
-    _$setProp(_el$14, "marginBottom", 1);
-    _$setProp(_el$14, "flexDirection", "column");
-    _$setProp(_el$14, "flexShrink", 0);
-    _$insertNode(_el$15, _el$16);
-    _$insertNode(_el$15, _el$17);
-    _$setProp(_el$15, "flexDirection", "row");
-    _$setProp(_el$15, "gap", 2);
-    _$setProp(_el$16, "flexGrow", 1);
-    _$insert(_el$16, () => `Q${props.index + 1} ${q().title}`);
-    _$insert(_el$17, () => badge(props.draft, props.question));
-    _$insert(_el$14, _$createComponent(Show, {
+    var _el$17 = _$createElement("box"), _el$18 = _$createElement("box"), _el$19 = _$createElement("text"), _el$20 = _$createElement("text"), _el$28 = _$createElement("box");
+    _$insertNode(_el$17, _el$18);
+    _$insertNode(_el$17, _el$28);
+    _$setProp(_el$17, "border", true);
+    _$setProp(_el$17, "paddingLeft", 1);
+    _$setProp(_el$17, "paddingRight", 1);
+    _$setProp(_el$17, "marginBottom", 1);
+    _$setProp(_el$17, "flexDirection", "column");
+    _$setProp(_el$17, "flexShrink", 0);
+    _$insertNode(_el$18, _el$19);
+    _$insertNode(_el$18, _el$20);
+    _$setProp(_el$18, "flexDirection", "row");
+    _$setProp(_el$18, "gap", 2);
+    _$setProp(_el$19, "flexGrow", 1);
+    _$insert(_el$19, () => `Q${props.index + 1} ${q().title}`);
+    _$insert(_el$20, () => badge(props.draft, props.question));
+    _$insert(_el$17, _$createComponent(Show, {
       get when() {
         return (q().depends_on?.length ?? 0) > 0;
       },
       get children() {
-        var _el$18 = _$createElement("text");
-        _$insert(_el$18, () => `after: ${q().depends_on?.join(", ")}`);
-        _$effect((_$p) => _$setProp(_el$18, "fg", theme().text.faint, _$p));
-        return _el$18;
+        var _el$21 = _$createElement("text");
+        _$insert(_el$21, () => `after: ${q().depends_on?.join(", ")}`);
+        _$effect((_$p) => _$setProp(_el$21, "fg", theme().text.faint, _$p));
+        return _el$21;
       }
-    }), _el$22);
-    _$insert(_el$14, _$createComponent(Show, {
+    }), _el$28);
+    _$insert(_el$17, _$createComponent(Show, {
       get when() {
         return q().body;
       },
       get children() {
-        var _el$19 = _$createElement("markdown");
-        _$setProp(_el$19, "conceal", true);
+        var _el$22 = _$createElement("markdown");
+        _$setProp(_el$22, "conceal", true);
         _$effect((_p$) => {
           var _v$5 = q().body ?? "", _v$6 = props.syntax, _v$7 = theme().markdown.text;
-          _v$5 !== _p$.e && (_p$.e = _$setProp(_el$19, "content", _v$5, _p$.e));
-          _v$6 !== _p$.t && (_p$.t = _$setProp(_el$19, "syntaxStyle", _v$6, _p$.t));
-          _v$7 !== _p$.a && (_p$.a = _$setProp(_el$19, "fg", _v$7, _p$.a));
+          _v$5 !== _p$.e && (_p$.e = _$setProp(_el$22, "content", _v$5, _p$.e));
+          _v$6 !== _p$.t && (_p$.t = _$setProp(_el$22, "syntaxStyle", _v$6, _p$.t));
+          _v$7 !== _p$.a && (_p$.a = _$setProp(_el$22, "fg", _v$7, _p$.a));
           return _p$;
         }, {
           e: undefined,
           t: undefined,
           a: undefined
         });
-        return _el$19;
+        return _el$22;
       }
-    }), _el$22);
-    _$insert(_el$14, _$createComponent(Show, {
+    }), _el$28);
+    _$insert(_el$17, _$createComponent(Show, {
       get when() {
         return recommended() !== undefined;
       },
       get children() {
-        var _el$20 = _$createElement("text");
-        _$insert(_el$20, () => `\u2605 Recommended: ${recommended()}`);
-        _$effect((_$p) => _$setProp(_el$20, "fg", theme().text.feedback.success.base, _$p));
-        return _el$20;
+        var _el$23 = _$createElement("text");
+        _$insert(_el$23, () => `\u2605 Recommended: ${recommended()}`);
+        _$effect((_$p) => _$setProp(_el$23, "fg", theme().text.feedback.success.base, _$p));
+        return _el$23;
       }
-    }), _el$22);
-    _$insert(_el$14, _$createComponent(Show, {
+    }), _el$28);
+    _$insert(_el$17, _$createComponent(Show, {
+      get when() {
+        return _$memo(() => !!(q().kind === "ask_code" && typeof q().recommended === "string"))() && editText(q(), props.draft) !== q().recommended;
+      },
+      get children() {
+        return [(() => {
+          var _el$24 = _$createElement("text");
+          _$insertNode(_el$24, _$createTextNode(`\u2605 Recommended:`));
+          _$effect((_$p) => _$setProp(_el$24, "fg", theme().text.feedback.success.base, _$p));
+          return _el$24;
+        })(), (() => {
+          var _el$26 = _$createElement("markdown");
+          _$effect((_p$) => {
+            var _v$8 = codeBlock(String(q().recommended), q().language), _v$9 = props.syntax, _v$0 = theme().markdown.text;
+            _v$8 !== _p$.e && (_p$.e = _$setProp(_el$26, "content", _v$8, _p$.e));
+            _v$9 !== _p$.t && (_p$.t = _$setProp(_el$26, "syntaxStyle", _v$9, _p$.t));
+            _v$0 !== _p$.a && (_p$.a = _$setProp(_el$26, "fg", _v$0, _p$.a));
+            return _p$;
+          }, {
+            e: undefined,
+            t: undefined,
+            a: undefined
+          });
+          return _el$26;
+        })()];
+      }
+    }), _el$28);
+    _$insert(_el$17, _$createComponent(Show, {
       get when() {
         return q().rationale;
       },
       get children() {
-        var _el$21 = _$createElement("markdown");
-        _$setProp(_el$21, "conceal", true);
+        var _el$27 = _$createElement("markdown");
+        _$setProp(_el$27, "conceal", true);
         _$effect((_p$) => {
-          var _v$8 = `*Why:* ${q().rationale}`, _v$9 = props.syntax, _v$0 = theme().text.muted;
-          _v$8 !== _p$.e && (_p$.e = _$setProp(_el$21, "content", _v$8, _p$.e));
-          _v$9 !== _p$.t && (_p$.t = _$setProp(_el$21, "syntaxStyle", _v$9, _p$.t));
-          _v$0 !== _p$.a && (_p$.a = _$setProp(_el$21, "fg", _v$0, _p$.a));
+          var _v$1 = `*Why:* ${q().rationale}`, _v$10 = props.syntax, _v$11 = theme().text.muted;
+          _v$1 !== _p$.e && (_p$.e = _$setProp(_el$27, "content", _v$1, _p$.e));
+          _v$10 !== _p$.t && (_p$.t = _$setProp(_el$27, "syntaxStyle", _v$10, _p$.t));
+          _v$11 !== _p$.a && (_p$.a = _$setProp(_el$27, "fg", _v$11, _p$.a));
           return _p$;
         }, {
           e: undefined,
           t: undefined,
           a: undefined
         });
-        return _el$21;
+        return _el$27;
       }
-    }), _el$22);
-    _$setProp(_el$22, "paddingTop", 1);
-    _$setProp(_el$22, "flexDirection", "column");
-    _$insert(_el$22, _$createComponent(Body, _$mergeProps(props, {
+    }), _el$28);
+    _$setProp(_el$28, "paddingTop", 1);
+    _$setProp(_el$28, "flexDirection", "column");
+    _$insert(_el$28, _$createComponent(Body, _$mergeProps(props, {
       get value() {
         return value();
       }
     })));
-    _$insert(_el$14, _$createComponent(Show, {
+    _$insert(_el$17, _$createComponent(Show, {
       get when() {
         return props.editing === "note";
       },
       get children() {
-        var _el$23 = _$createElement("box"), _el$24 = _$createElement("text"), _el$26 = _$createElement("textarea");
-        _$insertNode(_el$23, _el$24);
-        _$insertNode(_el$23, _el$26);
-        _$setProp(_el$23, "flexDirection", "row");
-        _$setProp(_el$23, "gap", 1);
-        _$insertNode(_el$24, _$createTextNode(`Note:`));
+        var _el$29 = _$createElement("box"), _el$30 = _$createElement("text"), _el$32 = _$createElement("textarea");
+        _$insertNode(_el$29, _el$30);
+        _$insertNode(_el$29, _el$32);
+        _$setProp(_el$29, "flexDirection", "row");
+        _$setProp(_el$29, "gap", 1);
+        _$insertNode(_el$30, _$createTextNode(`Note:`));
         var _ref$ = props.textareaRef;
-        typeof _ref$ === "function" ? _$use(_ref$, _el$26) : props.textareaRef = _el$26;
-        _$setProp(_el$26, "placeholder", "Add a note");
-        _$setProp(_el$26, "minHeight", 1);
-        _$setProp(_el$26, "maxHeight", 6);
-        _$setProp(_el$26, "flexGrow", 1);
+        typeof _ref$ === "function" ? _$use(_ref$, _el$32) : props.textareaRef = _el$32;
+        _$setProp(_el$32, "placeholder", "Add a note");
+        _$setProp(_el$32, "minHeight", 1);
+        _$setProp(_el$32, "maxHeight", 6);
+        _$setProp(_el$32, "flexGrow", 1);
         _$effect((_p$) => {
-          var _v$1 = theme().text.muted, _v$10 = props.draft.note, _v$11 = theme().text.base, _v$12 = theme().text.base;
-          _v$1 !== _p$.e && (_p$.e = _$setProp(_el$24, "fg", _v$1, _p$.e));
-          _v$10 !== _p$.t && (_p$.t = _$setProp(_el$26, "initialValue", _v$10, _p$.t));
-          _v$11 !== _p$.a && (_p$.a = _$setProp(_el$26, "textColor", _v$11, _p$.a));
-          _v$12 !== _p$.o && (_p$.o = _$setProp(_el$26, "focusedTextColor", _v$12, _p$.o));
+          var _v$12 = theme().text.muted, _v$13 = props.draft.note, _v$14 = theme().text.base, _v$15 = theme().text.base;
+          _v$12 !== _p$.e && (_p$.e = _$setProp(_el$30, "fg", _v$12, _p$.e));
+          _v$13 !== _p$.t && (_p$.t = _$setProp(_el$32, "initialValue", _v$13, _p$.t));
+          _v$14 !== _p$.a && (_p$.a = _$setProp(_el$32, "textColor", _v$14, _p$.a));
+          _v$15 !== _p$.o && (_p$.o = _$setProp(_el$32, "focusedTextColor", _v$15, _p$.o));
           return _p$;
         }, {
           e: undefined,
@@ -1666,29 +2239,29 @@ function Card(props) {
           a: undefined,
           o: undefined
         });
-        return _el$23;
+        return _el$29;
       }
     }), null);
-    _$insert(_el$14, _$createComponent(Show, {
+    _$insert(_el$17, _$createComponent(Show, {
       get when() {
         return _$memo(() => props.editing !== "note")() && props.draft.note.trim() !== "";
       },
       get children() {
-        var _el$27 = _$createElement("text");
-        _$setProp(_el$27, "wrapMode", "word");
-        _$insert(_el$27, () => `Note: ${props.draft.note}`);
-        _$effect((_$p) => _$setProp(_el$27, "fg", theme().text.muted, _$p));
-        return _el$27;
+        var _el$33 = _$createElement("text");
+        _$setProp(_el$33, "wrapMode", "word");
+        _$insert(_el$33, () => `Note: ${props.draft.note}`);
+        _$effect((_$p) => _$setProp(_el$33, "fg", theme().text.muted, _$p));
+        return _el$33;
       }
     }), null);
     _$effect((_p$) => {
-      var _v$13 = `parley-card-${q().id}`, _v$14 = props.focused ? "heavy" : "rounded", _v$15 = props.focused ? theme().text.action.primary.base : theme().border.base, _v$16 = theme().text.base, _v$17 = TextAttributes.BOLD, _v$18 = props.draft.status === "deferred" ? theme().text.feedback.warning.base : theme().text.muted;
-      _v$13 !== _p$.e && (_p$.e = _$setProp(_el$14, "id", _v$13, _p$.e));
-      _v$14 !== _p$.t && (_p$.t = _$setProp(_el$14, "borderStyle", _v$14, _p$.t));
-      _v$15 !== _p$.a && (_p$.a = _$setProp(_el$14, "borderColor", _v$15, _p$.a));
-      _v$16 !== _p$.o && (_p$.o = _$setProp(_el$16, "fg", _v$16, _p$.o));
-      _v$17 !== _p$.i && (_p$.i = _$setProp(_el$16, "attributes", _v$17, _p$.i));
-      _v$18 !== _p$.n && (_p$.n = _$setProp(_el$17, "fg", _v$18, _p$.n));
+      var _v$16 = `parley-card-${q().id}`, _v$17 = props.focused ? "heavy" : "rounded", _v$18 = props.focused ? theme().text.action.primary.base : theme().border.base, _v$19 = theme().text.base, _v$20 = TextAttributes.BOLD, _v$21 = props.draft.status === "deferred" ? theme().text.feedback.warning.base : theme().text.muted;
+      _v$16 !== _p$.e && (_p$.e = _$setProp(_el$17, "id", _v$16, _p$.e));
+      _v$17 !== _p$.t && (_p$.t = _$setProp(_el$17, "borderStyle", _v$17, _p$.t));
+      _v$18 !== _p$.a && (_p$.a = _$setProp(_el$17, "borderColor", _v$18, _p$.a));
+      _v$19 !== _p$.o && (_p$.o = _$setProp(_el$19, "fg", _v$19, _p$.o));
+      _v$20 !== _p$.i && (_p$.i = _$setProp(_el$19, "attributes", _v$20, _p$.i));
+      _v$21 !== _p$.n && (_p$.n = _$setProp(_el$20, "fg", _v$21, _p$.n));
       return _p$;
     }, {
       e: undefined,
@@ -1698,51 +2271,57 @@ function Card(props) {
       i: undefined,
       n: undefined
     });
-    return _el$14;
+    return _el$17;
   })();
 }
+var codeBlock = (code, language) => {
+  const fence = code.includes("```") ? "~~~~" : "```";
+  return `${fence}${language ?? ""}
+${code}
+${fence}`;
+};
 function Row(props) {
   const theme = () => props.context.theme;
   return (() => {
-    var _el$28 = _$createElement("box"), _el$29 = _$createElement("text"), _el$30 = _$createElement("text"), _el$31 = _$createElement("text");
-    _$insertNode(_el$28, _el$29);
-    _$insertNode(_el$28, _el$30);
-    _$insertNode(_el$28, _el$31);
-    _$setProp(_el$28, "flexDirection", "row");
-    _$setProp(_el$28, "gap", 1);
-    _$insert(_el$29, () => props.cursor ? "\u203A" : " ");
-    _$insert(_el$30, () => props.marker);
-    _$insert(_el$31, () => props.label);
-    _$insert(_el$28, _$createComponent(Show, {
+    var _el$34 = _$createElement("box"), _el$35 = _$createElement("text"), _el$36 = _$createElement("text"), _el$37 = _$createElement("text");
+    _$insertNode(_el$34, _el$35);
+    _$insertNode(_el$34, _el$36);
+    _$insertNode(_el$34, _el$37);
+    _$setProp(_el$34, "flexDirection", "row");
+    _$setProp(_el$34, "gap", 1);
+    _$insert(_el$35, () => props.cursor ? "\u203A" : " ");
+    _$insert(_el$36, () => props.marker);
+    _$insert(_el$37, () => props.label);
+    _$insert(_el$34, _$createComponent(Show, {
       get when() {
         return props.recommended;
       },
       get children() {
-        var _el$32 = _$createElement("text");
-        _$insertNode(_el$32, _$createTextNode(`\u2605`));
-        _$effect((_$p) => _$setProp(_el$32, "fg", theme().text.feedback.success.base, _$p));
-        return _el$32;
+        var _el$38 = _$createElement("text");
+        _$insertNode(_el$38, _$createTextNode(`\u2605`));
+        _$effect((_$p) => _$setProp(_el$38, "fg", theme().text.feedback.success.base, _$p));
+        return _el$38;
       }
     }), null);
-    _$insert(_el$28, _$createComponent(Show, {
+    _$insert(_el$34, _$createComponent(Show, {
       get when() {
         return props.description;
       },
       get children() {
-        var _el$34 = _$createElement("text");
-        _$setProp(_el$34, "wrapMode", "word");
-        _$setProp(_el$34, "flexShrink", 1);
-        _$insert(_el$34, () => props.description);
-        _$effect((_$p) => _$setProp(_el$34, "fg", theme().text.faint, _$p));
-        return _el$34;
+        var _el$40 = _$createElement("text");
+        _$setProp(_el$40, "wrapMode", "word");
+        _$setProp(_el$40, "flexShrink", 1);
+        _$insert(_el$40, () => props.description);
+        _$effect((_$p) => _$setProp(_el$40, "fg", theme().text.faint, _$p));
+        return _el$40;
       }
     }), null);
     _$effect((_p$) => {
-      var _v$19 = props.cursor ? theme().text.action.primary.base : theme().text.faint, _v$20 = theme().text.base, _v$21 = props.cursor ? theme().text.base : theme().text.muted, _v$22 = props.cursor ? TextAttributes.BOLD : 0;
-      _v$19 !== _p$.e && (_p$.e = _$setProp(_el$29, "fg", _v$19, _p$.e));
-      _v$20 !== _p$.t && (_p$.t = _$setProp(_el$30, "fg", _v$20, _p$.t));
-      _v$21 !== _p$.a && (_p$.a = _$setProp(_el$31, "fg", _v$21, _p$.a));
-      _v$22 !== _p$.o && (_p$.o = _$setProp(_el$31, "attributes", _v$22, _p$.o));
+      var _v$22 = props.cursor ? theme().text.action.primary.base : theme().text.faint, _v$23 = theme().text.base, _v$24 = props.cursor ? theme().text.base : theme().text.muted, _v$25 = props.cursor ? TextAttributes.BOLD : 0;
+      _v$22 !== _p$.e && (_p$.e = _$setProp(_el$35, "fg", _v$22, _p$.e));
+      _v$23 !== _p$.t && (_p$.t = _$setProp(_el$36, "fg", _v$23, _p$.t));
+      _v$24 !== _p$.a && (_p$.a = _$setProp(_el$37, "fg", _v$24, _p$.a));
+      _v$25 !== _p$.o && (_p$.o = _$setProp(_el$37, "attributes", _v$25, _p$.o));
       return _p$;
     }, {
       e: undefined,
@@ -1750,7 +2329,7 @@ function Row(props) {
       a: undefined,
       o: undefined
     });
-    return _el$28;
+    return _el$34;
   })();
 }
 function Body(props) {
@@ -1761,6 +2340,14 @@ function Body(props) {
     const rec = q().recommended;
     return Array.isArray(rec) ? rec.includes(id) : rec === id;
   };
+  let field;
+  const code = () => q().kind === "ask_code";
+  const shown = () => {
+    if (q().kind !== "slider")
+      return editText(q(), props.draft);
+    const other = props.value?.other;
+    return other === undefined ? "" : `other: ${other}`;
+  };
   const editField = (placeholder) => _$createComponent(Show, {
     get when() {
       return props.editing === "text";
@@ -1768,37 +2355,67 @@ function Body(props) {
     get fallback() {
       return _$createComponent(Show, {
         get when() {
-          return editText(q(), props.draft) !== "";
+          return shown() !== "";
         },
         get children() {
-          var _el$36 = _$createElement("text");
-          _$setProp(_el$36, "wrapMode", "word");
-          _$insert(_el$36, () => editText(q(), props.draft));
-          _$effect((_$p) => _$setProp(_el$36, "fg", theme().text.base, _$p));
-          return _el$36;
+          return _$createComponent(Show, {
+            get when() {
+              return code();
+            },
+            get fallback() {
+              return (() => {
+                var _el$43 = _$createElement("text");
+                _$setProp(_el$43, "wrapMode", "word");
+                _$insert(_el$43, shown);
+                _$effect((_$p) => _$setProp(_el$43, "fg", theme().text.base, _$p));
+                return _el$43;
+              })();
+            },
+            get children() {
+              var _el$42 = _$createElement("markdown");
+              _$effect((_p$) => {
+                var _v$31 = codeBlock(shown(), q().language), _v$32 = props.syntax, _v$33 = theme().markdown.text;
+                _v$31 !== _p$.e && (_p$.e = _$setProp(_el$42, "content", _v$31, _p$.e));
+                _v$32 !== _p$.t && (_p$.t = _$setProp(_el$42, "syntaxStyle", _v$32, _p$.t));
+                _v$33 !== _p$.a && (_p$.a = _$setProp(_el$42, "fg", _v$33, _p$.a));
+                return _p$;
+              }, {
+                e: undefined,
+                t: undefined,
+                a: undefined
+              });
+              return _el$42;
+            }
+          });
         }
       });
     },
     get children() {
-      var _el$35 = _$createElement("textarea");
-      var _ref$2 = props.textareaRef;
-      typeof _ref$2 === "function" ? _$use(_ref$2, _el$35) : props.textareaRef = _el$35;
-      _$setProp(_el$35, "placeholder", placeholder);
-      _$setProp(_el$35, "minHeight", 1);
+      var _el$41 = _$createElement("textarea");
+      _$use((element) => {
+        field = element;
+        props.textareaRef(element);
+      }, _el$41);
+      _$setProp(_el$41, "placeholder", placeholder);
+      _$setProp(_el$41, "flexGrow", 1);
+      _$setProp(_el$41, "onContentChange", () => props.onInput(field?.plainText ?? ""));
       _$effect((_p$) => {
-        var _v$23 = editText(q(), props.draft), _v$24 = q().kind === "ask_code" ? 16 : 8, _v$25 = theme().text.base, _v$26 = theme().text.base;
-        _v$23 !== _p$.e && (_p$.e = _$setProp(_el$35, "initialValue", _v$23, _p$.e));
-        _v$24 !== _p$.t && (_p$.t = _$setProp(_el$35, "maxHeight", _v$24, _p$.t));
-        _v$25 !== _p$.a && (_p$.a = _$setProp(_el$35, "textColor", _v$25, _p$.a));
-        _v$26 !== _p$.o && (_p$.o = _$setProp(_el$35, "focusedTextColor", _v$26, _p$.o));
+        var _v$26 = editText(q(), props.draft), _v$27 = code() ? Math.min(16, Math.max(3, editText(q(), props.draft).split(`
+`).length)) : 1, _v$28 = code() ? 16 : 8, _v$29 = theme().text.base, _v$30 = theme().text.base;
+        _v$26 !== _p$.e && (_p$.e = _$setProp(_el$41, "initialValue", _v$26, _p$.e));
+        _v$27 !== _p$.t && (_p$.t = _$setProp(_el$41, "minHeight", _v$27, _p$.t));
+        _v$28 !== _p$.a && (_p$.a = _$setProp(_el$41, "maxHeight", _v$28, _p$.a));
+        _v$29 !== _p$.o && (_p$.o = _$setProp(_el$41, "textColor", _v$29, _p$.o));
+        _v$30 !== _p$.i && (_p$.i = _$setProp(_el$41, "focusedTextColor", _v$30, _p$.i));
         return _p$;
       }, {
         e: undefined,
         t: undefined,
         a: undefined,
-        o: undefined
+        o: undefined,
+        i: undefined
       });
-      return _el$35;
+      return _el$41;
     }
   });
   return _$createComponent(Switch, {
@@ -1844,14 +2461,14 @@ function Body(props) {
               return editable(q());
             },
             get children() {
-              var _el$37 = _$createElement("box"), _el$38 = _$createElement("text");
-              _$insertNode(_el$37, _el$38);
-              _$setProp(_el$37, "flexDirection", "row");
-              _$setProp(_el$37, "gap", 1);
-              _$insertNode(_el$38, _$createTextNode(`other (e):`));
-              _$insert(_el$37, () => editField("Type your own answer"), null);
-              _$effect((_$p) => _$setProp(_el$38, "fg", theme().text.faint, _$p));
-              return _el$37;
+              var _el$44 = _$createElement("box"), _el$45 = _$createElement("text");
+              _$insertNode(_el$44, _el$45);
+              _$setProp(_el$44, "flexDirection", "row");
+              _$setProp(_el$44, "gap", 1);
+              _$insertNode(_el$45, _$createTextNode(`other (e):`));
+              _$insert(_el$44, () => editField("Type your own answer"), null);
+              _$effect((_$p) => _$setProp(_el$45, "fg", theme().text.faint, _$p));
+              return _el$44;
             }
           })];
         }
@@ -1860,67 +2477,67 @@ function Body(props) {
           return q().kind === "show_options";
         },
         get children() {
-          var _el$40 = _$createElement("box");
-          _$setProp(_el$40, "flexDirection", "row");
-          _$setProp(_el$40, "gap", 1);
-          _$insert(_el$40, _$createComponent(For, {
+          var _el$47 = _$createElement("box");
+          _$setProp(_el$47, "flexDirection", "row");
+          _$setProp(_el$47, "gap", 1);
+          _$insert(_el$47, _$createComponent(For, {
             get each() {
               return q().options ?? [];
             },
             children: (option, index) => {
               const picked = () => props.value?.selected === option.id;
               return (() => {
-                var _el$51 = _$createElement("box"), _el$52 = _$createElement("text");
-                _$insertNode(_el$51, _el$52);
-                _$setProp(_el$51, "border", true);
-                _$setProp(_el$51, "flexGrow", 1);
-                _$setProp(_el$51, "flexBasis", 0);
-                _$setProp(_el$51, "paddingLeft", 1);
-                _$setProp(_el$51, "paddingRight", 1);
-                _$setProp(_el$51, "flexDirection", "column");
-                _$insert(_el$52, () => `${picked() ? "(\u2022)" : "( )"} ${index() + 1}. ${option.label}${isRec(option.id) ? " \u2605" : ""}`);
-                _$insert(_el$51, _$createComponent(Show, {
+                var _el$62 = _$createElement("box"), _el$63 = _$createElement("text");
+                _$insertNode(_el$62, _el$63);
+                _$setProp(_el$62, "border", true);
+                _$setProp(_el$62, "flexGrow", 1);
+                _$setProp(_el$62, "flexBasis", 0);
+                _$setProp(_el$62, "paddingLeft", 1);
+                _$setProp(_el$62, "paddingRight", 1);
+                _$setProp(_el$62, "flexDirection", "column");
+                _$insert(_el$63, () => `${picked() ? "(\u2022)" : "( )"} ${index() + 1}. ${option.label}${isRec(option.id) ? " \u2605" : ""}`);
+                _$insert(_el$62, _$createComponent(Show, {
                   get when() {
                     return option.description;
                   },
                   get children() {
-                    var _el$53 = _$createElement("text");
-                    _$setProp(_el$53, "wrapMode", "word");
-                    _$insert(_el$53, () => option.description);
-                    _$effect((_$p) => _$setProp(_el$53, "fg", theme().text.muted, _$p));
-                    return _el$53;
+                    var _el$64 = _$createElement("text");
+                    _$setProp(_el$64, "wrapMode", "word");
+                    _$insert(_el$64, () => option.description);
+                    _$effect((_$p) => _$setProp(_el$64, "fg", theme().text.muted, _$p));
+                    return _el$64;
                   }
                 }), null);
-                _$insert(_el$51, _$createComponent(For, {
+                _$insert(_el$62, _$createComponent(For, {
                   get each() {
                     return option.pros ?? [];
                   },
                   children: (pro) => (() => {
-                    var _el$54 = _$createElement("text");
-                    _$setProp(_el$54, "wrapMode", "word");
-                    _$insert(_el$54, `+ ${pro}`);
-                    _$effect((_$p) => _$setProp(_el$54, "fg", theme().text.feedback.success.base, _$p));
-                    return _el$54;
+                    var _el$65 = _$createElement("text");
+                    _$setProp(_el$65, "wrapMode", "word");
+                    _$insert(_el$65, `+ ${pro}`);
+                    _$effect((_$p) => _$setProp(_el$65, "fg", theme().text.feedback.success.base, _$p));
+                    return _el$65;
                   })()
                 }), null);
-                _$insert(_el$51, _$createComponent(For, {
+                _$insert(_el$62, _$createComponent(For, {
                   get each() {
                     return option.cons ?? [];
                   },
                   children: (con) => (() => {
-                    var _el$55 = _$createElement("text");
-                    _$setProp(_el$55, "wrapMode", "word");
-                    _$insert(_el$55, `\u2212 ${con}`);
-                    _$effect((_$p) => _$setProp(_el$55, "fg", theme().text.feedback.error.base, _$p));
-                    return _el$55;
+                    var _el$66 = _$createElement("text");
+                    _$setProp(_el$66, "wrapMode", "word");
+                    _$insert(_el$66, `\u2212 ${con}`);
+                    _$effect((_$p) => _$setProp(_el$66, "fg", theme().text.feedback.error.base, _$p));
+                    return _el$66;
                   })()
                 }), null);
                 _$effect((_p$) => {
-                  var _v$32 = picked() ? "double" : "single", _v$33 = cursorAt(index()) ? theme().text.action.primary.base : theme().border.base, _v$34 = theme().text.base, _v$35 = TextAttributes.BOLD;
-                  _v$32 !== _p$.e && (_p$.e = _$setProp(_el$51, "borderStyle", _v$32, _p$.e));
-                  _v$33 !== _p$.t && (_p$.t = _$setProp(_el$51, "borderColor", _v$33, _p$.t));
-                  _v$34 !== _p$.a && (_p$.a = _$setProp(_el$52, "fg", _v$34, _p$.a));
-                  _v$35 !== _p$.o && (_p$.o = _$setProp(_el$52, "attributes", _v$35, _p$.o));
+                  var _v$39 = picked() ? "double" : "single", _v$40 = cursorAt(index()) ? theme().text.action.primary.base : theme().border.base, _v$41 = theme().text.base, _v$42 = TextAttributes.BOLD;
+                  _v$39 !== _p$.e && (_p$.e = _$setProp(_el$62, "borderStyle", _v$39, _p$.e));
+                  _v$40 !== _p$.t && (_p$.t = _$setProp(_el$62, "borderColor", _v$40, _p$.t));
+                  _v$41 !== _p$.a && (_p$.a = _$setProp(_el$63, "fg", _v$41, _p$.a));
+                  _v$42 !== _p$.o && (_p$.o = _$setProp(_el$63, "attributes", _v$42, _p$.o));
                   return _p$;
                 }, {
                   e: undefined,
@@ -1928,11 +2545,11 @@ function Body(props) {
                   a: undefined,
                   o: undefined
                 });
-                return _el$51;
+                return _el$62;
               })();
             }
           }));
-          return _el$40;
+          return _el$47;
         }
       }), _$createComponent(Match, {
         get when() {
@@ -1949,42 +2566,42 @@ function Body(props) {
                   return q().markdown;
                 },
                 get children() {
-                  var _el$41 = _$createElement("markdown");
-                  _$setProp(_el$41, "conceal", true);
+                  var _el$48 = _$createElement("markdown");
+                  _$setProp(_el$48, "conceal", true);
                   _$effect((_p$) => {
-                    var _v$27 = q().markdown ?? "", _v$28 = props.syntax, _v$29 = theme().markdown.text;
-                    _v$27 !== _p$.e && (_p$.e = _$setProp(_el$41, "content", _v$27, _p$.e));
-                    _v$28 !== _p$.t && (_p$.t = _$setProp(_el$41, "syntaxStyle", _v$28, _p$.t));
-                    _v$29 !== _p$.a && (_p$.a = _$setProp(_el$41, "fg", _v$29, _p$.a));
+                    var _v$34 = q().markdown ?? "", _v$35 = props.syntax, _v$36 = theme().markdown.text;
+                    _v$34 !== _p$.e && (_p$.e = _$setProp(_el$48, "content", _v$34, _p$.e));
+                    _v$35 !== _p$.t && (_p$.t = _$setProp(_el$48, "syntaxStyle", _v$35, _p$.t));
+                    _v$36 !== _p$.a && (_p$.a = _$setProp(_el$48, "fg", _v$36, _p$.a));
                     return _p$;
                   }, {
                     e: undefined,
                     t: undefined,
                     a: undefined
                   });
-                  return _el$41;
+                  return _el$48;
                 }
               }), _$createComponent(For, {
                 get each() {
                   return q().sections ?? [];
                 },
                 children: (section) => (() => {
-                  var _el$56 = _$createElement("markdown");
-                  _$setProp(_el$56, "conceal", true);
+                  var _el$67 = _$createElement("markdown");
+                  _$setProp(_el$67, "conceal", true);
                   _$effect((_p$) => {
-                    var _v$36 = `### ${section.title}
+                    var _v$43 = `### ${section.title}
 
-${section.content}`, _v$37 = props.syntax, _v$38 = theme().markdown.text;
-                    _v$36 !== _p$.e && (_p$.e = _$setProp(_el$56, "content", _v$36, _p$.e));
-                    _v$37 !== _p$.t && (_p$.t = _$setProp(_el$56, "syntaxStyle", _v$37, _p$.t));
-                    _v$38 !== _p$.a && (_p$.a = _$setProp(_el$56, "fg", _v$38, _p$.a));
+${section.content}`, _v$44 = props.syntax, _v$45 = theme().markdown.text;
+                    _v$43 !== _p$.e && (_p$.e = _$setProp(_el$67, "content", _v$43, _p$.e));
+                    _v$44 !== _p$.t && (_p$.t = _$setProp(_el$67, "syntaxStyle", _v$44, _p$.t));
+                    _v$45 !== _p$.a && (_p$.a = _$setProp(_el$67, "fg", _v$45, _p$.a));
                     return _p$;
                   }, {
                     e: undefined,
                     t: undefined,
                     a: undefined
                   });
-                  return _el$56;
+                  return _el$67;
                 })()
               })];
             }
@@ -1993,9 +2610,9 @@ ${section.content}`, _v$37 = props.syntax, _v$38 = theme().markdown.text;
               return q().kind === "show_diff";
             },
             get children() {
-              var _el$42 = _$createElement("diff");
-              _$setProp(_el$42, "view", "unified");
-              _$spread(_el$42, _$mergeProps({
+              var _el$49 = _$createElement("diff");
+              _$setProp(_el$49, "view", "unified");
+              _$spread(_el$49, _$mergeProps({
                 get diff() {
                   return q().diff ?? "";
                 },
@@ -2016,11 +2633,11 @@ ${section.content}`, _v$37 = props.syntax, _v$38 = theme().markdown.text;
                   return theme().text.base;
                 }
               }), false);
-              return _el$42;
+              return _el$49;
             }
           }), (() => {
-            var _el$43 = _$createElement("box");
-            _$insert(_el$43, _$createComponent(For, {
+            var _el$50 = _$createElement("box");
+            _$insert(_el$50, _$createComponent(For, {
               get each() {
                 return rows(q());
               },
@@ -2055,28 +2672,28 @@ ${section.content}`, _v$37 = props.syntax, _v$38 = theme().markdown.text;
               }
             }));
             _$effect((_p$) => {
-              var _v$30 = q().kind === "emoji_react" ? "row" : "column", _v$31 = q().kind === "emoji_react" ? 2 : 0;
-              _v$30 !== _p$.e && (_p$.e = _$setProp(_el$43, "flexDirection", _v$30, _p$.e));
-              _v$31 !== _p$.t && (_p$.t = _$setProp(_el$43, "gap", _v$31, _p$.t));
+              var _v$37 = q().kind === "emoji_react" ? "row" : "column", _v$38 = q().kind === "emoji_react" ? 2 : 0;
+              _v$37 !== _p$.e && (_p$.e = _$setProp(_el$50, "flexDirection", _v$37, _p$.e));
+              _v$38 !== _p$.t && (_p$.t = _$setProp(_el$50, "gap", _v$38, _p$.t));
               return _p$;
             }, {
               e: undefined,
               t: undefined
             });
-            return _el$43;
+            return _el$50;
           })(), _$createComponent(Show, {
             get when() {
               return q().kind === "review" || q().kind === "show_diff";
             },
             get children() {
-              var _el$44 = _$createElement("box"), _el$45 = _$createElement("text");
-              _$insertNode(_el$44, _el$45);
-              _$setProp(_el$44, "flexDirection", "row");
-              _$setProp(_el$44, "gap", 1);
-              _$insertNode(_el$45, _$createTextNode(`feedback (e):`));
-              _$insert(_el$44, () => editField("What should change?"), null);
-              _$effect((_$p) => _$setProp(_el$45, "fg", theme().text.faint, _$p));
-              return _el$44;
+              var _el$51 = _$createElement("box"), _el$52 = _$createElement("text");
+              _$insertNode(_el$51, _el$52);
+              _$setProp(_el$51, "flexDirection", "row");
+              _$setProp(_el$51, "gap", 1);
+              _$insertNode(_el$52, _$createTextNode(`feedback (e):`));
+              _$insert(_el$51, () => editField("What should change?"), null);
+              _$effect((_$p) => _$setProp(_el$52, "fg", theme().text.faint, _$p));
+              return _el$51;
             }
           })];
         }
@@ -2116,22 +2733,30 @@ ${section.content}`, _v$37 = props.syntax, _v$38 = theme().markdown.text;
             const bounds = () => sliderBounds(q());
             const current = () => props.value?.value ?? bounds().min;
             return (() => {
-              var _el$57 = _$createElement("box"), _el$58 = _$createElement("text"), _el$59 = _$createElement("text");
-              _$insertNode(_el$57, _el$58);
-              _$insertNode(_el$57, _el$59);
-              _$setProp(_el$57, "flexDirection", "column");
-              _$insert(_el$58, () => `${sliderBar(q(), current())} ${current()}${q().unit ? ` ${q().unit}` : ""}`);
-              _$insert(_el$59, () => `${q().labels?.min ?? bounds().min} \u2026 ${q().labels?.mid ? `${q().labels?.mid} \u2026 ` : ""}${q().labels?.max ?? bounds().max}   \u2190/\u2192 adjust`);
+              var _el$68 = _$createElement("box"), _el$69 = _$createElement("text"), _el$70 = _$createElement("text"), _el$71 = _$createElement("box"), _el$72 = _$createElement("text");
+              _$insertNode(_el$68, _el$69);
+              _$insertNode(_el$68, _el$70);
+              _$insertNode(_el$68, _el$71);
+              _$setProp(_el$68, "flexDirection", "column");
+              _$insert(_el$69, () => `${sliderBar(q(), current())} ${sliderText(q(), current())}`);
+              _$insert(_el$70, () => `${q().labels?.min ?? bounds().min} \u2026 ${q().labels?.mid ? `${q().labels?.mid} \u2026 ` : ""}${q().labels?.max ?? bounds().max}`);
+              _$insertNode(_el$71, _el$72);
+              _$setProp(_el$71, "flexDirection", "row");
+              _$setProp(_el$71, "gap", 1);
+              _$insert(_el$72, () => q().allow_other === true ? "value or other (e):" : "value (e):");
+              _$insert(_el$71, () => editField(`${bounds().min}\u2013${bounds().max}`), null);
               _$effect((_p$) => {
-                var _v$39 = props.focused ? theme().text.base : theme().text.muted, _v$40 = theme().text.faint;
-                _v$39 !== _p$.e && (_p$.e = _$setProp(_el$58, "fg", _v$39, _p$.e));
-                _v$40 !== _p$.t && (_p$.t = _$setProp(_el$59, "fg", _v$40, _p$.t));
+                var _v$46 = props.focused ? theme().text.base : theme().text.muted, _v$47 = theme().text.faint, _v$48 = theme().text.faint;
+                _v$46 !== _p$.e && (_p$.e = _$setProp(_el$69, "fg", _v$46, _p$.e));
+                _v$47 !== _p$.t && (_p$.t = _$setProp(_el$70, "fg", _v$47, _p$.t));
+                _v$48 !== _p$.a && (_p$.a = _$setProp(_el$72, "fg", _v$48, _p$.a));
                 return _p$;
               }, {
                 e: undefined,
-                t: undefined
+                t: undefined,
+                a: undefined
               });
-              return _el$57;
+              return _el$68;
             })();
           })();
         }
@@ -2173,20 +2798,30 @@ ${section.content}`, _v$37 = props.syntax, _v$38 = theme().markdown.text;
         }
       }), _$createComponent(Match, {
         get when() {
-          return q().kind === "ask_text" || q().kind === "ask_code";
+          return q().kind === "ask_text";
         },
         get children() {
-          var _el$47 = _$createElement("box"), _el$48 = _$createElement("text");
-          _$insertNode(_el$47, _el$48);
-          _$setProp(_el$47, "flexDirection", "row");
-          _$setProp(_el$47, "gap", 1);
-          _$insert(_el$48, (() => {
-            var _c$3 = _$memo(() => q().kind === "ask_code");
-            return () => _c$3() ? `code${q().language ? ` (${q().language})` : ""} (e):` : "answer (e):";
-          })());
-          _$insert(_el$47, () => editField(q().placeholder ?? "Type your answer"), null);
-          _$effect((_$p) => _$setProp(_el$48, "fg", theme().text.faint, _$p));
-          return _el$47;
+          var _el$54 = _$createElement("box"), _el$55 = _$createElement("text");
+          _$insertNode(_el$54, _el$55);
+          _$setProp(_el$54, "flexDirection", "row");
+          _$setProp(_el$54, "gap", 1);
+          _$insertNode(_el$55, _$createTextNode(`answer (e):`));
+          _$insert(_el$54, () => editField(q().placeholder ?? "Type your answer"), null);
+          _$effect((_$p) => _$setProp(_el$55, "fg", theme().text.faint, _$p));
+          return _el$54;
+        }
+      }), _$createComponent(Match, {
+        get when() {
+          return q().kind === "ask_code";
+        },
+        get children() {
+          var _el$57 = _$createElement("box"), _el$58 = _$createElement("text");
+          _$insertNode(_el$57, _el$58);
+          _$setProp(_el$57, "flexDirection", "column");
+          _$insert(_el$58, () => `code${q().language ? ` (${q().language})` : ""} (e):`);
+          _$insert(_el$57, () => editField(q().placeholder ?? "Write the code"), null);
+          _$effect((_$p) => _$setProp(_el$58, "fg", theme().text.faint, _$p));
+          return _el$57;
         }
       }), _$createComponent(Match, {
         get when() {
@@ -2198,21 +2833,50 @@ ${section.content}`, _v$37 = props.syntax, _v$38 = theme().markdown.text;
               return props.value?.files ?? [];
             },
             children: (file) => (() => {
-              var _el$60 = _$createElement("text");
-              _$insert(_el$60, () => `\uD83D\uDCCE ${file.name} (${file.mime}, ${file.size} B)`);
-              _$effect((_$p) => _$setProp(_el$60, "fg", theme().text.base, _$p));
-              return _el$60;
+              var _el$73 = _$createElement("text");
+              _$insert(_el$73, () => `\uD83D\uDCCE ${file.name} (${file.mime}, ${file.size} B)`);
+              _$effect((_$p) => _$setProp(_el$73, "fg", theme().text.base, _$p));
+              return _el$73;
             })()
           }), (() => {
-            var _el$49 = _$createElement("box"), _el$50 = _$createElement("text");
-            _$insertNode(_el$49, _el$50);
-            _$setProp(_el$49, "flexDirection", "row");
-            _$setProp(_el$49, "gap", 1);
-            _$insert(_el$50, () => q().multiple ? "paths, one per line (e):" : "path (e):");
-            _$insert(_el$49, () => editField(q().kind === "ask_image" ? "~/Pictures/screenshot.png" : "./path/to/file"), null);
-            _$effect((_$p) => _$setProp(_el$50, "fg", theme().text.faint, _$p));
-            return _el$49;
-          })()];
+            var _el$59 = _$createElement("box"), _el$60 = _$createElement("text");
+            _$insertNode(_el$59, _el$60);
+            _$setProp(_el$59, "flexDirection", "row");
+            _$setProp(_el$59, "gap", 1);
+            _$insert(_el$60, () => q().multiple ? "paths, comma or line separated (e):" : "path (e):");
+            _$insert(_el$59, () => editField(q().kind === "ask_image" ? "screenshot.png, or ctrl+v to paste one" : "./path/to/file"), null);
+            _$effect((_$p) => _$setProp(_el$60, "fg", theme().text.faint, _$p));
+            return _el$59;
+          })(), _$createComponent(Show, {
+            get when() {
+              return _$memo(() => props.editing === "text")() && props.suggestions.length > 0;
+            },
+            get children() {
+              var _el$61 = _$createElement("box");
+              _$setProp(_el$61, "flexDirection", "column");
+              _$setProp(_el$61, "paddingLeft", 2);
+              _$insert(_el$61, _$createComponent(For, {
+                get each() {
+                  return props.suggestions;
+                },
+                children: (suggestion, index) => (() => {
+                  var _el$74 = _$createElement("text");
+                  _$insert(_el$74, () => `${index() === props.selected ? "\u203A" : " "} ${suggestion}`);
+                  _$effect((_p$) => {
+                    var _v$49 = index() === props.selected ? theme().text.action.primary.base : theme().text.muted, _v$50 = index() === props.selected ? TextAttributes.BOLD : 0;
+                    _v$49 !== _p$.e && (_p$.e = _$setProp(_el$74, "fg", _v$49, _p$.e));
+                    _v$50 !== _p$.t && (_p$.t = _$setProp(_el$74, "attributes", _v$50, _p$.t));
+                    return _p$;
+                  }, {
+                    e: undefined,
+                    t: undefined
+                  });
+                  return _el$74;
+                })()
+              }));
+              return _el$61;
+            }
+          })];
         }
       })];
     }
@@ -2284,6 +2948,19 @@ var ParleyRpc = Rpc.define({
 // plugins/parley/src/tui.tsx
 var HEARTBEAT_MS = 1e4;
 var NATIVE_POLL_MS = [0, 100, 300, 700, 1500, 3000, 6000, 12000];
+function listDirectory(query) {
+  const home = process.env.HOME ?? "";
+  const expanded = query.startsWith("~") ? `${home}${query.slice(1)}` : query;
+  const dir = expanded.endsWith("/") ? expanded : path2.dirname(expanded);
+  const typedDir = query.endsWith("/") ? query : query.slice(0, query.length - path2.basename(expanded).length);
+  try {
+    return readdirSync(dir, {
+      withFileTypes: true
+    }).filter((entry) => !entry.name.startsWith(".") || path2.basename(expanded).startsWith(".")).map((entry) => `${typedDir}${entry.name}${entry.isDirectory() ? "/" : ""}`);
+  } catch {
+    return [];
+  }
+}
 var locationKey = (location) => `${location.directory}\x00${location.workspaceID ?? ""}`;
 var tui_default = Plugin.define({
   id: "srobroek.parley",
@@ -2292,6 +2969,7 @@ var tui_default = Plugin.define({
     const clientID = `tui_${crypto.randomUUID()}`;
     const [rounds, setRounds] = createSignal2([]);
     const store = createRoundStore();
+    const [focusRequest, setFocusRequest] = createSignal2(0);
     const [inline, setInline] = createSignal2(new Set);
     const showInline = (sessionID, on) => setInline((current) => {
       const next = new Set(current);
@@ -2404,8 +3082,12 @@ var tui_default = Plugin.define({
         if (open?.name === PANEL && open.sessionID === sessionID)
           context.ui.panel.close();
         showInline(sessionID, true);
-      } else
-        openPanel(sessionID, here ? 0 : 50);
+      } else {
+        const open = context.ui.panel.current();
+        if (!here || open?.name !== PANEL || open.sessionID !== sessionID)
+          openPanel(sessionID, here ? 0 : 50);
+      }
+      setFocusRequest((value) => value + 1);
       const count = entry.view.questions.length;
       context.attention.notify({
         title: "Parley",
@@ -2464,6 +3146,12 @@ var tui_default = Plugin.define({
           context.ui.toast.show({
             title: "Parley",
             message: data.message,
+            sessionID: data.sessionID
+          });
+        else if (data.reason === "timeout")
+          context.ui.toast.show({
+            message: "The round timed out; the agent goes on without it",
+            variant: "warning",
             sessionID: data.sessionID
           });
         else if (data.reason === "aborted")
@@ -2559,6 +3247,22 @@ var tui_default = Plugin.define({
         context.ui.panel.close();
       showInline(view.sessionID, false);
     };
+    const directoryOf = (sessionID) => forSession(sessionID)?.location.directory ?? context.data.session.get(sessionID)?.location?.directory;
+    const find = async (sessionID, query) => {
+      if (query.startsWith("/") || query.startsWith("~"))
+        return listDirectory(query);
+      const directory = directoryOf(sessionID);
+      const found = await context.client.file.find({
+        ...directory === undefined ? {} : {
+          location: {
+            directory
+          }
+        },
+        query,
+        limit: 200
+      });
+      return (found.data ?? []).map((item) => item.type === "directory" && !item.path.endsWith("/") ? `${item.path}/` : item.path);
+    };
     const disposeSlot = context.ui.slot({
       append: "session.panel",
       render: (panel) => _$createComponent2(Show2, {
@@ -2573,7 +3277,14 @@ var tui_default = Plugin.define({
             round: () => forSession(panel.sessionID)?.view,
             syntax,
             submit,
-            dismiss
+            dismiss,
+            focusRequest,
+            directory: () => directoryOf(panel.sessionID),
+            find: (query) => find(panel.sessionID, query),
+            inline: () => {
+              context.ui.panel.close();
+              showInline(panel.sessionID, true);
+            }
           });
         }
       })
@@ -2592,6 +3303,9 @@ var tui_default = Plugin.define({
           syntax,
           submit,
           dismiss,
+          focusRequest,
+          directory: () => directoryOf(slot.sessionID),
+          find: (query) => find(slot.sessionID, query),
           hide: () => showInline(slot.sessionID, false),
           expand: () => openPanel(slot.sessionID)
         })
@@ -2615,6 +3329,22 @@ var tui_default = Plugin.define({
             slash: {
               name: "parley"
             },
+            run: () => {
+              const sessionID = currentSession();
+              if (sessionID && forSession(sessionID))
+                present(sessionID);
+              else
+                context.ui.toast.show({
+                  message: "No open parley round in this session"
+                });
+            }
+          }, {
+            id: "parley.focus",
+            title: "Return to parley round",
+            description: "Move focus back to this session's open question card or panel",
+            group: "Parley",
+            palette: true,
+            bind: "alt+p",
             enabled: () => {
               const sessionID = currentSession();
               return sessionID !== undefined && forSession(sessionID) !== undefined;

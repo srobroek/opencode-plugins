@@ -1,5 +1,5 @@
-import { type AnswerStatus, normaliseAnswer, type SubmittedAnswer } from "./answers.ts"
-import { DEFAULT_EMOJIS, type Question, recommendedValue, sliderBounds } from "./questions.ts"
+import { type AnswerStatus, type FileValue, normaliseAnswer, type SubmittedAnswer } from "./answers.ts"
+import { DEFAULT_EMOJIS, type Question, recommendedValue, sliderBounds, sliderMid } from "./questions.ts"
 
 /** Client-side edit state of one card. `status: "unset"` is left out of the submission (stays pending). */
 export interface Draft {
@@ -46,10 +46,8 @@ function neutral(question: Question): unknown {
       return { selected: [] }
     case "rank":
       return { order: ids }
-    case "slider": {
-      const { min, max, step } = sliderBounds(question)
-      return { value: Math.round((min + max) / 2 / step) * step }
-    }
+    case "slider":
+      return { value: sliderMid(question) }
     case "rate":
       return { ratings: {} }
     case "ask_text":
@@ -227,9 +225,36 @@ export function setText(question: Question, draft: Draft, text: string): Draft {
       const trimmed = text.trim()
       return { ...draft, status: "answered", value: trimmed === "" ? { decision } : { decision, feedback: trimmed } }
     }
+    case "slider": {
+      const parsed = parseSlider(question, text)
+      if (parsed === undefined || "error" in parsed) return draft
+      return { ...draft, status: "answered", value: parsed }
+    }
     default:
       return draft
   }
+}
+
+/**
+ * Text typed into a slider: a number, snapped to the step and checked against the bounds, or free
+ * text when `allow_other` is on. Empty text leaves the value alone (undefined).
+ */
+export function parseSlider(question: Question, text: string): { value: number } | { other: string } | { error: string } | undefined {
+  const trimmed = text.trim()
+  if (trimmed === "") return undefined
+  const { min, max, step: size } = sliderBounds(question)
+  const unit = question.unit ?? ""
+  const bare = unit !== "" && trimmed.endsWith(unit) ? trimmed.slice(0, -unit.length).trim() : trimmed
+  const number = Number(bare)
+  if (bare !== "" && Number.isFinite(number)) {
+    if (number < min || number > max) return { error: `Enter a number from ${min} to ${max}` }
+    return { value: Number(clamp(Math.round((number - min) / size) * size + min, min, max).toFixed(10)) }
+  }
+  const labels = Object.entries(question.labels ?? {}) as [keyof NonNullable<Question["labels"]>, string][]
+  const named = labels.find(([, label]) => label.toLowerCase() === trimmed.toLowerCase())?.[0]
+  if (named !== undefined) return { value: named === "min" ? min : named === "max" ? max : sliderMid(question) }
+  if (question.allow_other === true) return { other: trimmed }
+  return { error: `Enter a number from ${min} to ${max}` }
 }
 
 /** Whether `e` (edit) opens a text field for this card. */
@@ -237,7 +262,8 @@ export function editable(question: Question) {
   return (
     isTextKind(question) ||
     (question.kind === "pick_one" && question.allow_other !== false) ||
-    (question.kind === "pick_many" && question.allow_other === true) ||
+    (question.kind === "pick_many" && question.allow_other !== false) ||
+    question.kind === "slider" ||
     question.kind === "review" ||
     question.kind === "show_diff"
   )
@@ -245,7 +271,11 @@ export function editable(question: Question) {
 
 export function editText(question: Question, draft: Draft): string {
   const value = draft.value as { text?: string; other?: string; feedback?: string; files?: unknown } | undefined
-  if (question.kind === "ask_image" || question.kind === "ask_file") return ""
+  if (question.kind === "ask_image" || question.kind === "ask_file") return filePaths(draft).join("\n")
+  if (question.kind === "slider") {
+    const slider = draft.value as { value?: number; other?: string } | undefined
+    return slider?.other ?? (slider?.value === undefined ? "" : String(slider.value))
+  }
   return value?.text ?? value?.other ?? value?.feedback ?? ""
 }
 
@@ -316,4 +346,150 @@ export function sliderBar(question: Question, value: number, width = 20): string
   const filled = Math.round(((value - min) / (max - min)) * width)
   const position = clamp(filled, 0, width)
   return `[${"━".repeat(position)}●${"─".repeat(width - position)}]`
+}
+
+const filesOf = (draft: Draft) => (draft.value as { files?: FileValue[] } | undefined)?.files ?? []
+
+/** Paths of the files typed into a file card (pasted files have none). */
+export function filePaths(draft: Draft): string[] {
+  return filesOf(draft).flatMap((file) => (file.path === undefined ? [] : [file.path]))
+}
+
+/**
+ * Puts files on a file card. `typed` replaces the files read from the path field and keeps pasted
+ * ones; a pasted file joins them. A single-file card keeps only the newest.
+ */
+export function setFiles(question: Question, draft: Draft, files: readonly FileValue[], from: "typed" | "pasted"): Draft {
+  const kept = from === "typed" ? filesOf(draft).filter((file) => file.path === undefined) : filesOf(draft)
+  const all = [...kept, ...files]
+  const result = question.multiple === true ? all : all.slice(-1)
+  if (result.length === 0) return { ...initialDraft(question), note: draft.note }
+  return { ...draft, status: "answered", value: { files: result } }
+}
+
+/** The path segment the cursor is completing: the text after the last comma or newline. */
+export function completionQuery(text: string): { readonly start: number; readonly query: string } {
+  const start = Math.max(text.lastIndexOf(","), text.lastIndexOf("\n")) + 1
+  const rest = text.slice(start)
+  const lead = rest.length - rest.trimStart().length
+  return { start: start + lead, query: rest.trim() }
+}
+
+/** Replaces the segment being completed with `choice`. */
+export function applyCompletion(text: string, choice: string): string {
+  const { start } = completionQuery(text)
+  const prefix = text.slice(0, start)
+  return `${prefix}${prefix !== "" && !/[\s]$/.test(prefix) ? " " : ""}${choice}`
+}
+
+const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "tiff", "heic"])
+
+/** Whether a completion candidate fits the card: images for ask_image, `accept` extensions for ask_file. */
+export function acceptsPath(question: Question, path: string): boolean {
+  if (path.endsWith("/")) return true
+  const ext = path.split("/").pop()?.split(".").slice(1).pop()?.toLowerCase() ?? ""
+  if (question.kind === "ask_image") return IMAGE_EXTENSIONS.has(ext)
+  const accept = (question.accept ?? []).map((item) => item.replace(/^\./, "").toLowerCase())
+  return accept.length === 0 || accept.includes(ext)
+}
+
+/**
+ * Fuzzy score of `query` against `candidate`: every query character must appear in order. Higher is
+ * better; matches in the file name, at word starts and in runs score more. Undefined means no match.
+ */
+export function fuzzyScore(query: string, candidate: string): number | undefined {
+  const needle = query.toLowerCase()
+  const hay = candidate.toLowerCase()
+  if (needle === "") return 0
+  const nameStart = hay.lastIndexOf("/", hay.length - 2) + 1
+  let score = 0
+  let at = -1
+  let run = 0
+  for (const char of needle) {
+    const next = hay.indexOf(char, at + 1)
+    if (next < 0) return undefined
+    run = next === at + 1 ? run + 1 : 0
+    const boundary = next === 0 || "/._- ".includes(hay[next - 1] as string)
+    score += 1 + run * 2 + (boundary ? 3 : 0) + (next >= nameStart ? 1 : 0)
+    at = next
+  }
+  return score - hay.length / 100
+}
+
+/** Candidates ordered by fuzzy score, best first, at most `limit`. */
+export function rankPaths(query: string, candidates: readonly string[], limit = 8): string[] {
+  return candidates
+    .flatMap((candidate) => {
+      const score = fuzzyScore(query, candidate)
+      return score === undefined ? [] : [{ candidate, score }]
+    })
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit)
+    .map((item) => item.candidate)
+}
+
+const PANEL_KEYS: Partial<Record<Question["kind"], string>> = {
+  pick_one: "↑/↓ choice · space/1-9 choose · e type your own",
+  pick_many: "↑/↓ choice · space/1-9 toggle · e add your own",
+  show_options: "←/→ choice · space/1-9 choose",
+  confirm: "↑/↓ choice · space/1-9 choose",
+  thumbs: "↑/↓ choice · space/1-9 choose",
+  rank: "↑/↓ item · J/K or shift+↑/↓ move item",
+  rate: "↑/↓ option · ←/→ rating",
+  ask_text: "e edit answer",
+  ask_code: "e edit code",
+  review: "↑/↓ approve/revise · e feedback",
+  show_diff: "↑/↓ approve/revise · e feedback",
+  emoji_react: "←/→ emoji · space/1-9 choose",
+  ask_image: "e type a path (tab completes) · ctrl+v paste image",
+  ask_file: "e type paths (tab completes) · ctrl+v paste",
+}
+
+function kindKeys(question: Question): string {
+  if (question.kind === "slider")
+    return `←/→ adjust · e type a number${question.allow_other === true ? " or your own answer" : ""}`
+  return PANEL_KEYS[question.kind] ?? ""
+}
+
+const PATH_KINDS = new Set(["ask_image", "ask_file"])
+
+/**
+ * The key hint under a round for the focused card: its own keys first, then the shared ones.
+ * `surface` is the full panel (`panel`, `side` when shown beside the session) or the inline `card`.
+ */
+export function keyHints(
+  question: Question | undefined,
+  surface: "panel" | "side" | "card",
+  editing?: { readonly field: "note" | "text"; readonly enterSaves: boolean; readonly suggestions?: boolean },
+  single = false,
+): string {
+  if (editing) {
+    const enter = editing.enterSaves
+      ? surface === "card"
+        ? "enter submit · shift+enter newline"
+        : "enter save · shift+enter newline"
+      : "enter newline"
+    const paths =
+      editing.field === "text" && question && PATH_KINDS.has(question.kind)
+        ? editing.suggestions
+          ? " · ↑/↓ suggestion · tab complete"
+          : " · tab complete"
+        : ""
+    const paste = editing.field === "text" && question && PATH_KINDS.has(question.kind) ? " · ctrl+v paste" : ""
+    return `${enter}${paths}${paste} · esc done · ctrl+s submit`
+  }
+  const own = question ? kindKeys(question) : ""
+  const shared =
+    surface === "card"
+      ? "enter submit · a accept · n note · d defer · f full screen · esc hide · D dismiss"
+      : `tab/j/k question · a accept · n note · d defer · ctrl+s submit · f ${single ? "inline card" : surface === "side" ? "full screen" : "side panel"} · esc minimise · D dismiss`
+  return own === "" ? shared : `${own} · ${shared}`
+}
+
+/** "closes in 1m 05s" for the last ten minutes before a round's deadline; nothing earlier, so the default 30 minutes stays quiet. */
+export function countdown(seconds: number | undefined): string | undefined {
+  if (seconds === undefined || seconds > 600) return undefined
+  const minutes = Math.floor(seconds / 60)
+  const rest = seconds % 60
+  return `closes in ${minutes > 0 ? `${minutes}m ${String(rest).padStart(2, "0")}s` : `${rest}s`}`
 }

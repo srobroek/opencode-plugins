@@ -1,3 +1,5 @@
+import { readdirSync } from "node:fs"
+import path from "node:path"
 import type { LocationRef } from "@opencode/client"
 import { Plugin } from "@opencode/plugin/tui"
 import { SyntaxStyle } from "@opentui/core"
@@ -16,6 +18,21 @@ interface Entry {
   readonly location: LocationRef
 }
 
+/** Entries of the directory a ~ or absolute path is in, as typed paths (directories end in /). */
+function listDirectory(query: string): string[] {
+  const home = process.env.HOME ?? ""
+  const expanded = query.startsWith("~") ? `${home}${query.slice(1)}` : query
+  const dir = expanded.endsWith("/") ? expanded : path.dirname(expanded)
+  const typedDir = query.endsWith("/") ? query : query.slice(0, query.length - path.basename(expanded).length)
+  try {
+    return readdirSync(dir, { withFileTypes: true })
+      .filter((entry) => !entry.name.startsWith(".") || path.basename(expanded).startsWith("."))
+      .map((entry) => `${typedDir}${entry.name}${entry.isDirectory() ? "/" : ""}`)
+  } catch {
+    return []
+  }
+}
+
 const locationKey = (location: LocationRef) => `${location.directory}\u0000${location.workspaceID ?? ""}`
 
 export default Plugin.define({
@@ -25,6 +42,8 @@ export default Plugin.define({
     const clientID = `tui_${crypto.randomUUID()}`
     const [rounds, setRounds] = createSignal<Entry[]>([])
     const store = createRoundStore()
+    // Bumped to make the open card or panel take focus back (/parley, alt+p).
+    const [focusRequest, setFocusRequest] = createSignal(0)
     // Sessions whose one-question round shows as the inline card (cleared by esc, kept across round updates).
     const [inline, setInline] = createSignal<ReadonlySet<string>>(new Set())
     const showInline = (sessionID: string, on: boolean) =>
@@ -99,7 +118,12 @@ export default Plugin.define({
         const open = context.ui.panel.current()
         if (open?.name === PANEL && open.sessionID === sessionID) context.ui.panel.close()
         showInline(sessionID, true)
-      } else openPanel(sessionID, here ? 0 : 50)
+      } else {
+        const open = context.ui.panel.current()
+        // An open panel keeps its presentation (full screen or side) and only takes focus back.
+        if (!here || open?.name !== PANEL || open.sessionID !== sessionID) openPanel(sessionID, here ? 0 : 50)
+      }
+      setFocusRequest((value) => value + 1)
       const count = entry.view.questions.length
       void context.attention
         .notify({
@@ -151,6 +175,8 @@ export default Plugin.define({
         if (!forSession(data.sessionID)) showInline(data.sessionID, false)
         if (data.action === "ended" && data.message)
           context.ui.toast.show({ title: "Parley", message: data.message, sessionID: data.sessionID })
+        else if (data.reason === "timeout")
+          context.ui.toast.show({ message: "The round timed out; the agent goes on without it", variant: "warning", sessionID: data.sessionID })
         else if (data.reason === "aborted")
           context.ui.toast.show({ message: "Round cancelled by the agent", variant: "warning", sessionID: data.sessionID })
       }
@@ -223,6 +249,23 @@ export default Plugin.define({
       showInline(view.sessionID, false)
     }
 
+    const directoryOf = (sessionID: string) =>
+      forSession(sessionID)?.location.directory ?? context.data.session.get(sessionID)?.location?.directory
+
+    /** Path candidates for a file card: the server's file search under the session directory, or a directory listing for ~ and absolute paths. */
+    const find = async (sessionID: string, query: string): Promise<string[]> => {
+      if (query.startsWith("/") || query.startsWith("~")) return listDirectory(query)
+      const directory = directoryOf(sessionID)
+      const found = await context.client.file.find({
+        ...(directory === undefined ? {} : { location: { directory } }),
+        query,
+        limit: 200,
+      } as never)
+      return ((found as { data?: { path: string; type: string }[] }).data ?? []).map((item) =>
+        item.type === "directory" && !item.path.endsWith("/") ? `${item.path}/` : item.path,
+      )
+    }
+
     const disposeSlot = context.ui.slot({
       append: "session.panel",
       render: (panel) => (
@@ -235,6 +278,13 @@ export default Plugin.define({
             syntax={syntax}
             submit={submit}
             dismiss={dismiss}
+            focusRequest={focusRequest}
+            directory={() => directoryOf(panel.sessionID)}
+            find={(query) => find(panel.sessionID, query)}
+            inline={() => {
+              context.ui.panel.close()
+              showInline(panel.sessionID, true)
+            }}
           />
         </Show>
       ),
@@ -252,6 +302,9 @@ export default Plugin.define({
               syntax={syntax}
               submit={submit}
               dismiss={dismiss}
+              focusRequest={focusRequest}
+              directory={() => directoryOf(slot.sessionID)}
+              find={(query) => find(slot.sessionID, query)}
               hide={() => showInline(slot.sessionID, false)}
               expand={() => openPanel(slot.sessionID)}
             />
@@ -278,6 +331,20 @@ export default Plugin.define({
               group: "Parley",
               palette: true,
               slash: { name: "parley" },
+              // Always listed, so /parley is there to find; with no open round it says so.
+              run: () => {
+                const sessionID = currentSession()
+                if (sessionID && forSession(sessionID)) present(sessionID)
+                else context.ui.toast.show({ message: "No open parley round in this session" })
+              },
+            },
+            {
+              id: "parley.focus",
+              title: "Return to parley round",
+              description: "Move focus back to this session's open question card or panel",
+              group: "Parley",
+              palette: true,
+              bind: "alt+p",
               enabled: () => {
                 const sessionID = currentSession()
                 return sessionID !== undefined && forSession(sessionID) !== undefined

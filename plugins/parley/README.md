@@ -36,8 +36,8 @@ they add nothing to the request's tool list, and share the permission key
 
 | Tool | Does |
 | --- | --- |
-| `parley_ask` | Opens a round (or adds questions to the session's open round) and, with `wait: "all"` (default), blocks until the user submits. `wait: "any"` / `"none"` return earlier. `timeout_s` defaults to 1800; 0 waits without limit. Aborting the call cancels the round in the UI. |
-| `parley_wait` | Keeps waiting on the session's round after a timeout or a non-blocking ask. Returns only answers it has not returned before. Optional `ids` and `wait: "any"`. |
+| `parley_ask` | Opens a round (or adds questions to the session's open round) and, with `wait: "all"` (default), blocks until the user submits. `wait: "any"` / `"none"` return earlier. `timeout_s` defaults to 1800; 0 waits without limit. When it passes, the round closes in the UI and the call returns `timeout` (with several waiting calls, the one with the latest deadline closes it). Aborting the call cancels the round in the UI. |
+| `parley_wait` | Keeps waiting on the session's round after a non-blocking ask. Returns only answers it has not returned before. Optional `ids`, `wait: "any"` and `timeout_s`. |
 | `parley_end` | Closes the open round (if any) and shows an optional `message`. |
 
 `parley_ask` with `format: "native"` words a submitted result like the built-in
@@ -51,10 +51,10 @@ answers come back keyed by it.
 | --- | --- | --- |
 | `pick_one` (`allow_other`, default true) | option id | `{ selected }` or `{ other }` |
 | `show_options` (options with `pros`/`cons`, side by side) | option id | `{ selected }` |
-| `pick_many` (`min`, `max`, `allow_other`) | option ids | `{ selected[], other? }` |
+| `pick_many` (`min`, `max`, `allow_other`, default true) | option ids | `{ selected[], other? }` |
 | `confirm` (`yes_label`, `no_label`) | `yes` / `no` | `{ choice }` |
 | `rank` | option ids, highest first | `{ order[] }` |
-| `slider` (`min`, `max`, `step`, `unit`, `labels`) | number | `{ value }` |
+| `slider` (`min`, `max`, `step`, `unit`, `labels`, `allow_other`, default false) | number | `{ value }` or `{ other }` |
 | `ask_text` / `ask_code` (`language`) | text | `{ text }` |
 | `review` (`markdown`, `sections`) / `show_diff` (`diff`, unified) | `approve` / `revise` | `{ decision, feedback? }` |
 | `rate` (`min`/`max`, default 1..5) | `{ optionId: n }` | `{ ratings }` |
@@ -62,11 +62,21 @@ answers come back keyed by it.
 | `emoji_react` (`emojis`) | emoji | `{ emoji }` |
 | `ask_image` / `ask_file` (`multiple`) | | `{ files: [{ name, mime, size, path }] }` |
 
+Use `slider` for numeric quantities only. A categorical choice ("how wide should
+the change be") is a `pick_one`; a labelled slider shows its label for the value
+under the knob, with the number in brackets unless every step is labelled.
+`ask_code` is for code the user writes (the recommendation starts the editor);
+to have a snippet approved, put it in a `confirm` body or use `show_diff`.
+
 Answer statuses: `answered`, `accepted` (equals your recommendation),
 `noted` (a note only, no value) and `deferred`. Any answer can carry a `note`.
 Questions left alone come back in `pending`.
 
-Result statuses: `submitted`, `open`, `partial`, `timeout`, `cancelled`
+When any answer carries a note, the result text tells the model that notes are
+input to act on: answer a question or concern in a note, or ask a follow-up
+round, before going on.
+
+Result statuses: `submitted`, `open`, `partial`, `timeout` (`reason: timeout`, the round closed), `cancelled`
 (`reason`: `aborted`, `user_closed`, `dismissed`, `ended`, `plugin_unloaded`),
 `unavailable` (`reason`: `no_tui`, `disabled`, ...) and `none`. `unavailable`
 returns at once, so a skill can fall back to the `question` tool or a plain
@@ -116,8 +126,17 @@ A round opens the session's tab and sends an attention notification. A round
 with one question shows as a compact card above the prompt. The card takes
 focus and uses the keys below, with `enter` to submit (it also picks the row
 under the cursor if nothing is chosen), `j` / `k` to move between choices, `f`
-for full screen and `esc` to hide the card (`/parley` brings it back). Larger rounds show the panel full screen. `esc` minimises it; `/parley` (or the command palette)
-brings it back with your edits intact.
+for full screen and `esc` to hide the card (`/parley` brings it back). In full
+screen, `f` returns a one-question round to the card. Larger rounds show the
+panel full screen; `f` switches between full screen and a side panel next to the
+session. `esc` minimises it; `/parley` (or the command palette) brings it back
+with your edits intact, and says so when the session has no open round. The
+line under the round lists the keys of the focused card first. Once a round is
+within ten minutes of its `timeout_s`, it shows the time left. The card keeps focus
+while it is open: the host moving focus to the prompt on its own is undone, and
+keys it does not use (`↓`, `tab`) stay with it instead of reaching the prompt's
+bindings. Clicking the prompt hands focus over on purpose; the card then says
+that keys go to the prompt and that `alt+p` or `/parley` returns.
 
 | Key | Action |
 | --- | --- |
@@ -128,15 +147,26 @@ brings it back with your edits intact.
 | `a` | Accept the recommendation |
 | `n` | Add a note |
 | `d` | Defer (again to undo) |
-| `e` | Edit text: answer, "other", review feedback, file paths |
+| `e` | Edit text: answer, "other" (pick_one, pick_many), a slider value (a number, a label, or free text with `allow_other`), review feedback, file paths |
 | `shift+↑` / `shift+↓`, `J` / `K` | Move a ranked item |
+| `ctrl+v` | On ask_image / ask_file: attach the clipboard's image (a screenshot) or copied files |
+| `f` | Inline card ↔ full screen; full screen ↔ side panel for larger rounds |
+| `alt+p` | Return focus to the open card or panel (also `/parley`, or "Return to parley round" in the command palette) |
 | `ctrl+enter` / `ctrl+s` | Submit the round (partial rounds are fine) |
 | `D` | Dismiss the round (the agent gets `cancelled`; a taken-over `question` call ends the turn) |
 | `esc` | Minimise |
 
 In a note or text field, `enter` saves it and returns to the card (on the inline
 card it saves and submits), `shift+enter` adds a line, `esc` saves too, and
-`ctrl+enter` / `ctrl+s` submit. In `ask_code` answers `enter` adds a line.
+`ctrl+enter` / `ctrl+s` submit. In `ask_code` answers `enter` adds a line; the
+code shows as a highlighted block. Text pastes with the terminal's own paste.
+
+In a path field, suggestions from the session directory (fuzzy, `.gitignore`
+respected, filtered to images or `accept` extensions) list under the field as
+you type; `↑` / `↓` pick one and `tab` completes it. Paths starting with `~` or
+`/` complete from that directory. Relative paths resolve against the session
+directory. `ctrl+v` reads the system clipboard through OpenTUI's clipboard
+service, with an AppleScript fallback on macOS.
 
 The TUI checks in with the server every 10 s (RPC `parley.attach`), and fetches
 open rounds with `parley.pending` on start and after a reconnect. Desktop, web
