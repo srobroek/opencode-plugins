@@ -2,6 +2,7 @@ import type { Plugin } from "@opencode/plugin/tui"
 import type { PanelInput } from "@opencode/plugin/tui/context"
 import {
   type BoxRenderable,
+  EditBufferRenderable,
   type Renderable,
   type ScrollBoxRenderable,
   type SyntaxStyle,
@@ -11,24 +12,34 @@ import {
 import { createEffect, createMemo, createSignal, For, Match, onCleanup, onMount, Show, Switch } from "solid-js"
 import { createStore, reconcile } from "solid-js/store"
 import type { FileValue, SubmittedAnswer } from "./answers.ts"
-import { DEFAULT_EMOJIS, optionLabel, type Question, sliderBounds } from "./questions.ts"
+import { clipboardFiles } from "./clipboard.ts"
+import { FocusGuard } from "./focus.ts"
+import { DEFAULT_EMOJIS, optionLabel, type Question, sliderBounds, sliderText } from "./questions.ts"
 import type { RoundView } from "./rounds.ts"
 import {
   type Arrow,
   accept,
+  acceptsPath,
+  applyCompletion,
   arrowAction,
   badge,
   choose,
+  completionQuery,
+  countdown,
   type Draft,
   editable,
   editText,
   enterIsNewline,
   initialDraft,
+  keyHints,
   mimeFor,
   moveCursor,
   parsePaths,
+  parseSlider,
   rankMove,
+  rankPaths,
   rows,
+  setFiles,
   setNote,
   setText,
   sliderBar,
@@ -67,24 +78,36 @@ export interface PanelProps {
   readonly syntax: SyntaxStyle
   readonly submit: (round: RoundView, answers: SubmittedAnswer[]) => Promise<string[]>
   readonly dismiss: (round: RoundView) => Promise<void>
+  /** The session's directory: relative paths in file cards resolve against it. */
+  readonly directory: () => string | undefined
+  /** Files and directories under the session directory matching a query (gitignore respected). */
+  readonly find: (query: string) => Promise<string[]>
+  /** Bumped by `/parley` and alt+p: take focus back. */
+  readonly focusRequest: () => number
 }
 
-async function readFiles(text: string): Promise<FileValue[]> {
+const resolvePath = (raw: string, base: string | undefined) => {
   const home = process.env.HOME ?? ""
+  if (raw === "~" || raw.startsWith("~/")) return `${home}${raw.slice(1)}`
+  if (raw.startsWith("/") || base === undefined) return raw
+  return `${base.replace(/\/$/, "")}/${raw.replace(/^\.\//, "")}`
+}
+
+async function readFiles(text: string, base: string | undefined): Promise<FileValue[]> {
   const files: FileValue[] = []
   for (const raw of parsePaths(text)) {
-    const path = raw.startsWith("~/") ? `${home}${raw.slice(1)}` : raw
+    const path = resolvePath(raw, base)
     const file = Bun.file(path)
     if (!(await file.exists())) throw new Error(`No such file: ${raw}`)
     const data = Buffer.from(await file.arrayBuffer()).toString("base64")
-    files.push({ name: path.split("/").pop() ?? path, path, mime: (file.type || mimeFor(path)).split(";")[0] ?? mimeFor(path), size: file.size, data })
+    files.push({ name: path.split("/").pop() ?? path, path: raw, mime: (file.type || mimeFor(path)).split(";")[0] ?? mimeFor(path), size: file.size, data })
   }
   return files
 }
 
 /** Draft, edit and submit state of one round, shared by the full panel and the inline card. */
 function createRoundControls(
-  props: Pick<PanelProps, "store" | "round" | "submit">,
+  props: Pick<PanelProps, "store" | "round" | "submit" | "directory" | "find">,
   onMove?: (id: string) => void,
 ) {
   const roundID = () => props.round()?.roundID ?? ""
@@ -96,7 +119,22 @@ function createRoundControls(
   const [editing, setEditing] = createSignal<Editing>()
   const [errors, setErrors] = createSignal<string[]>([])
   const [busy, setBusy] = createSignal(false)
+  const [suggestions, setSuggestions] = createSignal<string[]>([])
+  const [selected, setSelected] = createSignal(0)
+  const [now, setNow] = createSignal(Date.now())
   let textarea: TextareaRenderable | undefined
+  let lookup = 0
+
+  // Ticks while the round has a deadline, for the "closes in" countdown.
+  createEffect(() => {
+    if (props.round()?.deadline === undefined) return
+    const timer = setInterval(() => setNow(Date.now()), 1000)
+    onCleanup(() => clearInterval(timer))
+  })
+  const remaining = () => {
+    const deadline = props.round()?.deadline
+    return deadline === undefined ? undefined : Math.max(0, Math.ceil((deadline - now()) / 1000))
+  }
 
   const questions = createMemo(() => props.round()?.questions ?? [])
   const current = () => questions()[focus()]
@@ -143,7 +181,91 @@ function createRoundControls(
     const question = current()
     if (!question) return
     if (field === "text" && !editable(question)) return
+    setSuggestions([])
     setEditing({ id: question.id, field })
+  }
+
+  const fileCard = () => {
+    const edit = editing()
+    const question = questions().find((candidate) => candidate.id === edit?.id)
+    return edit?.field === "text" && (question?.kind === "ask_image" || question?.kind === "ask_file") ? question : undefined
+  }
+
+  /** Keeps the suggestion list in step with the path being typed. */
+  const onInput = (text: string) => {
+    const question = fileCard()
+    if (!question) return
+    const { query } = completionQuery(text)
+    const ticket = ++lookup
+    if (query === "") {
+      setSuggestions([])
+      return
+    }
+    void props
+      .find(query)
+      .catch(() => [] as string[])
+      .then((found) => {
+        if (ticket !== lookup) return
+        setSuggestions(rankPaths(query, found.filter((candidate) => acceptsPath(question, candidate))))
+        setSelected(0)
+      })
+  }
+
+  const moveSuggestion = (delta: number) => {
+    const count = suggestions().length
+    if (count === 0) return false
+    setSelected((index) => (index + delta + count) % count)
+  }
+
+  /** Tab in a path field: put the highlighted suggestion in place of the path being typed. */
+  const complete = () => {
+    const choice = suggestions()[selected()]
+    if (!fileCard() || !textarea || textarea.isDestroyed || choice === undefined) return false
+    textarea.setText(applyCompletion(textarea.plainText, choice))
+    textarea.gotoBufferEnd()
+    if (choice.endsWith("/")) onInput(textarea.plainText)
+    else setSuggestions([])
+  }
+
+  /** ctrl+v on a file card: attach a screenshot or copied files from the system clipboard. */
+  const pasteFiles = () => {
+    const question = fileCard() ?? current()
+    if (!question || (question.kind !== "ask_image" && question.kind !== "ask_file")) return false
+    void attach(question)
+  }
+  const isFileKind = (question: Question | undefined) => question?.kind === "ask_image" || question?.kind === "ask_file"
+
+  // Bound only where they apply: a binding that declines a key hands it to the host's own (↓ opens
+  // the subagent view, tab switches agents), which is how keys used to leak out of a card.
+  const pasteKeys = () =>
+    isFileKind(current()) ? [{ bind: "ctrl+v", title: "Paste file", group: "Parley", run: pasteFiles }] : []
+  const pathKeys = () => [
+    ...(fileCard() ? [{ bind: "ctrl+v", title: "Paste file", group: "Parley", run: pasteFiles }] : []),
+    ...(suggestions().length > 0 ? [{ bind: "tab", title: "Complete path", group: "Parley", run: complete }] : []),
+    // Always bound in a field: unclaimed, ↑/↓ reach the host's global bindings (↓ opens the subagent view).
+    { bind: "down", title: "Next suggestion / line", group: "Parley", run: () => fieldArrow(1) },
+    { bind: "up", title: "Previous suggestion / line", group: "Parley", run: () => fieldArrow(-1) },
+  ]
+
+  const fieldArrow = (delta: number) => {
+    if (suggestions().length > 0) {
+      moveSuggestion(delta)
+      return
+    }
+    if (!textarea || textarea.isDestroyed) return
+    if (delta > 0) textarea.moveCursorDown()
+    else textarea.moveCursorUp()
+  }
+
+  const attach = async (question: Question) => {
+    const files = await clipboardFiles(question.kind === "ask_image")
+    if (files.length === 0) {
+      setErrors(["Nothing to attach on the clipboard (copy a screenshot or a file first)."])
+      return
+    }
+    const draft = draftOf(question.id) ?? initialDraft(question)
+    setDraft(question.id, setFiles(question, draft, files, "pasted"))
+    setErrors([])
   }
 
   const finishEdit = async () => {
@@ -151,6 +273,7 @@ function createRoundControls(
     const question = questions().find((candidate) => candidate.id === edit?.id)
     const text = textarea?.plainText ?? ""
     setEditing(undefined)
+    setSuggestions([])
     if (!edit || !question) return
     const draft = draftOf(question.id) ?? initialDraft(question)
     if (edit.field === "note") {
@@ -159,17 +282,22 @@ function createRoundControls(
     }
     if (question.kind === "ask_image" || question.kind === "ask_file") {
       try {
-        const files = text.trim() === "" ? [] : await readFiles(text)
-        setDraft(
-          question.id,
-          files.length === 0 ? initialDraft(question) : { ...draft, status: "answered", value: { files } },
-        )
+        const files = text.trim() === "" ? [] : await readFiles(text, props.directory())
+        setDraft(question.id, setFiles(question, draft, files, "typed"))
         setErrors([])
       } catch (error) {
         setErrors([error instanceof Error ? error.message : String(error)])
       }
       return
     }
+    if (question.kind === "slider") {
+      const parsed = parseSlider(question, text)
+      if (parsed !== undefined && "error" in parsed) {
+        setErrors([parsed.error])
+        return
+      }
+    }
+    setErrors([])
     setDraft(question.id, setText(question, draft, text))
   }
 
@@ -201,6 +329,17 @@ function createRoundControls(
     startEdit,
     finishEdit,
     submit,
+    suggestions,
+    selected,
+    remaining,
+    onInput,
+    moveSuggestion,
+    complete,
+    pasteFiles,
+    pasteKeys,
+    pathKeys,
+    /** The open text field, if any, so a focus request lands in it rather than on the card. */
+    field: () => (editing() && textarea && !textarea.isDestroyed ? textarea : undefined),
     /** shift+enter: the edit layer's `return` would otherwise take it too. */
     newline: () => {
       if (textarea && !textarea.isDestroyed) textarea.newLine()
@@ -211,9 +350,15 @@ function createRoundControls(
   }
 }
 
-export function RoundPanel(props: PanelProps) {
+export interface RoundPanelProps extends PanelProps {
+  /** Shows a one-question round as the inline card again. */
+  readonly inline: () => void
+}
+
+export function RoundPanel(props: RoundPanelProps) {
   const theme = () => props.context.theme
   let scroll: ScrollBoxRenderable | undefined
+  const controls = createRoundControls(props, (id) => scroll?.scrollChildIntoView(`parley-card-${id}`))
   const {
     draftOf,
     focus,
@@ -221,6 +366,7 @@ export function RoundPanel(props: PanelProps) {
     errors,
     busy,
     questions,
+    current,
     update,
     moveCard,
     arrow,
@@ -230,7 +376,16 @@ export function RoundPanel(props: PanelProps) {
     submit,
     newline,
     setTextarea,
-  } = createRoundControls(props, (id) => scroll?.scrollChildIntoView(`parley-card-${id}`))
+  } = controls
+  const single = () => questions().length === 1
+  createEffect(() => {
+    if (props.focusRequest() > 0) props.panel.focus()
+  })
+  /** f: a one-question round goes back to the inline card; a larger one toggles full screen and the side panel. */
+  const toggleView = () => {
+    if (single()) props.inline()
+    else props.panel.toggleFullscreen()
+  }
 
   props.context.keymap.layer(() => ({
     enabled: () => editing() === undefined,
@@ -261,6 +416,8 @@ export function RoundPanel(props: PanelProps) {
       { bind: "e", title: "Edit answer", group: "Parley", run: () => startEdit("text") },
       { bind: "ctrl+return", title: "Submit round", group: "Parley", run: () => void submit() },
       { bind: "ctrl+s", title: "Submit round", group: "Parley", run: () => void submit() },
+      ...controls.pasteKeys(),
+      { bind: "f", title: "Toggle view", group: "Parley", run: toggleView },
       { bind: "escape", title: "Minimise", group: "Parley", run: () => props.panel.close() },
       {
         bind: "shift+d",
@@ -281,12 +438,13 @@ export function RoundPanel(props: PanelProps) {
     commands: [
       { bind: "escape", title: "Done editing", group: "Parley", run: () => void finishEdit() },
       { bind: "shift+return", title: "New line", group: "Parley", run: newline },
+      ...controls.pathKeys(),
       {
         bind: "return",
         title: "Save",
         group: "Parley",
         run: () => {
-          if (!enterSaves()) return false
+          if (!enterSaves()) return newline()
           void finishEdit()
         },
       },
@@ -311,6 +469,9 @@ export function RoundPanel(props: PanelProps) {
           <text fg={theme().text.muted} truncate flexGrow={1}>
             {props.round()?.title}
           </text>
+        </Show>
+        <Show when={countdown(controls.remaining())}>
+          {(text: () => string) => <text fg={theme().text.feedback.warning.base}>{text()}</text>}
         </Show>
         <text fg={theme().text.muted}>{`${answered()}/${questions().length} ready`}</text>
       </box>
@@ -337,6 +498,9 @@ export function RoundPanel(props: PanelProps) {
               draft={draftOf(question.id) ?? initialDraft(question)}
               focused={index() === focus()}
               editing={editing()?.id === question.id ? editing()?.field : undefined}
+              suggestions={controls.suggestions()}
+              selected={controls.selected()}
+              onInput={controls.onInput}
               textareaRef={(element) => {
                 setTextarea(element)
                 queueMicrotask(() => {
@@ -351,9 +515,14 @@ export function RoundPanel(props: PanelProps) {
       </scrollbox>
       <box flexShrink={0} paddingTop={1} paddingBottom={1}>
         <text fg={theme().text.muted} wrapMode="word">
-          {editing()
-            ? `${enterSaves() ? "enter save · shift+enter newline" : "enter newline"} · esc done · ctrl+enter / ctrl+s submit round`
-            : "tab/j/k question · ↑/↓ choice (←/→ side by side) · space choose · a accept · n note · d defer · e edit · shift+↑/↓ J/K rank · ←/→ adjust · ctrl+enter / ctrl+s submit · esc minimise · D dismiss"}
+          {keyHints(
+            current(),
+            props.panel.presentation === "fullscreen" ? "panel" : "side",
+            editing()
+              ? { field: editing()?.field ?? "text", enterSaves: enterSaves(), suggestions: controls.suggestions().length > 0 }
+              : undefined,
+            single(),
+          )}
         </text>
       </box>
       <Show when={busy()}>
@@ -375,9 +544,13 @@ const within = (node: Renderable | null | undefined, root: Renderable | undefine
   return false
 }
 
+/** When to make sure the inline card has focus after it mounts (ms). */
+const SETTLE_MS = [50, 200, 500, 1000, 2000]
+
 /** A one-question round as a compact card above the prompt, with the panel's keys. */
 export function InlineCard(props: InlineCardProps) {
   const theme = () => props.context.theme
+  const controls = createRoundControls(props)
   const {
     draftOf,
     editing,
@@ -392,15 +565,70 @@ export function InlineCard(props: InlineCardProps) {
     submit,
     newline,
     setTextarea,
-  } = createRoundControls(props)
+  } = controls
   let box: BoxRenderable | undefined
   const question = () => questions()[0]
 
-  // Take focus from the prompt like a dialog does, and hand it back when the card goes away.
-  onMount(() => {
-    const previous = props.context.renderer.currentFocusedRenderable
+  const [away, setAway] = createSignal(false)
+  const guard = new FocusGuard()
+  const grab = () =>
     queueMicrotask(() => {
-      if (box && !box.isDestroyed) box.focus()
+      if (guard.released) return
+      const field = controls.field()
+      if (field) field.focus()
+      else if (box && !box.isDestroyed) box.focus()
+    })
+
+  // Back to the card on /parley or alt+p.
+  createEffect(() => {
+    if (props.focusRequest() === 0) return
+    guard.reclaim()
+    setAway(false)
+    grab()
+  })
+
+  // Take focus from the prompt like a dialog does, and hand it back when the card goes away.
+  // The host may refocus the prompt on its own (session updates): take it back unless a key press
+  // or click just moved it, which is the user leaving on purpose.
+  onMount(() => {
+    const renderer = props.context.renderer
+    const previous = renderer.currentFocusedRenderable
+    grab()
+    const onInput = () => {
+      guard.input(Date.now())
+      return false
+    }
+    // Decided after the event that moved focus finishes: the prompt focuses itself in its own
+    // mouse-down, before that click bubbles to the root where it is recorded.
+    const onFocus = () =>
+      queueMicrotask(() => {
+        const focused = renderer.currentFocusedRenderable
+        const inside = within(focused, box)
+        // Dialogs and other non-editor targets keep focus; only a move into a text field (the prompt) is undone.
+        if (!inside && focused !== null && !(focused instanceof EditBufferRenderable)) return
+        if (guard.moved(Date.now(), inside)) grab()
+        setAway(guard.released)
+      })
+    renderer.prependInputHandler(onInput)
+    renderer.on("focused_renderable", onFocus)
+    // Mouse events bubble to the root before a click moves focus; key input handlers never see them.
+    const root = renderer.root
+    const priorDown = root.onMouseDown
+    root.onMouseDown = function (event) {
+      guard.input(Date.now())
+      priorDown?.call(this, event)
+    }
+    // The card can mount before the host settles focus on a new session's prompt; check again.
+    const checks = SETTLE_MS.map((delay) =>
+      setTimeout(() => {
+        if (!guard.released && !within(renderer.currentFocusedRenderable, box)) grab()
+      }, delay),
+    )
+    onCleanup(() => {
+      for (const check of checks) clearTimeout(check)
+      root.onMouseDown = priorDown
+      renderer.removeInputHandler(onInput)
+      renderer.off("focused_renderable", onFocus)
     })
     onCleanup(() => {
       const now = props.context.renderer.currentFocusedRenderable
@@ -439,6 +667,13 @@ export function InlineCard(props: InlineCardProps) {
       { bind: "right", title: "Next / increase", group: "Parley", run: () => arrow("right") },
       { bind: "j", title: "Next choice", group: "Parley", run: () => update((q, d) => moveCursor(q, d, 1)) },
       { bind: "k", title: "Previous choice", group: "Parley", run: () => update((q, d) => moveCursor(q, d, -1)) },
+      // Claimed so they do not reach the host (shift+tab switches the agent).
+      { bind: "tab", title: "Next choice", group: "Parley", run: () => update((q, d) => moveCursor(q, d, 1)) },
+      { bind: "shift+tab", title: "Previous choice", group: "Parley", run: () => update((q, d) => moveCursor(q, d, -1)) },
+      { bind: "shift+up", title: "Move up", group: "Parley", run: () => update((q, d) => rankMove(q, d, -1)) },
+      { bind: "shift+down", title: "Move down", group: "Parley", run: () => update((q, d) => rankMove(q, d, 1)) },
+      { bind: "shift+k", title: "Move up", group: "Parley", run: () => update((q, d) => rankMove(q, d, -1)) },
+      { bind: "shift+j", title: "Move down", group: "Parley", run: () => update((q, d) => rankMove(q, d, 1)) },
       { bind: "space", title: "Choose", group: "Parley", run: () => update((q, d) => choose(q, d)) },
       ...Array.from({ length: 9 }, (_, index) => ({
         bind: String(index + 1),
@@ -453,6 +688,7 @@ export function InlineCard(props: InlineCardProps) {
       { bind: "return", title: "Submit", group: "Parley", run: () => void send() },
       { bind: "ctrl+return", title: "Submit", group: "Parley", run: () => void send() },
       { bind: "ctrl+s", title: "Submit", group: "Parley", run: () => void send() },
+      ...controls.pasteKeys(),
       { bind: "f", title: "Full screen", group: "Parley", run: () => props.expand() },
       { bind: "escape", title: "Hide", group: "Parley", run: () => props.hide() },
       {
@@ -473,12 +709,13 @@ export function InlineCard(props: InlineCardProps) {
     commands: [
       { bind: "escape", title: "Done editing", group: "Parley", run: () => void done() },
       { bind: "shift+return", title: "New line", group: "Parley", run: newline },
+      ...controls.pathKeys(),
       {
         bind: "return",
         title: "Save and submit",
         group: "Parley",
         run: () => {
-          if (!enterSaves()) return false
+          if (!enterSaves()) return newline()
           void saveAndSend()
         },
       },
@@ -506,6 +743,9 @@ export function InlineCard(props: InlineCardProps) {
             draft={draftOf(q().id) ?? initialDraft(q())}
             focused
             editing={editing()?.id === q().id ? editing()?.field : undefined}
+            suggestions={controls.suggestions()}
+            selected={controls.selected()}
+            onInput={controls.onInput}
             textareaRef={(element) => {
               setTextarea(element)
               queueMicrotask(() => {
@@ -518,14 +758,21 @@ export function InlineCard(props: InlineCardProps) {
         )}
       </Show>
       <For each={errors()}>{(error) => <text fg={theme().text.feedback.error.base}>{error}</text>}</For>
+      <Show when={away()}>
+        <text fg={theme().text.feedback.warning.base} wrapMode="word">
+          Keys go to the prompt now · alt+p or /parley returns to this card
+        </text>
+      </Show>
       <text fg={theme().text.muted} wrapMode="word">
         {busy()
           ? "Submitting…"
-          : editing()
-            ? enterSaves()
-              ? "enter submit · shift+enter newline · esc done"
-              : "enter newline · ctrl+s submit · esc done"
-            : "Parley · 1-9/space choose · enter submit · n note · d defer · e edit · a accept · f full screen · esc hide · D dismiss"}
+          : `${countdown(controls.remaining()) ? `${countdown(controls.remaining())} · ` : ""}${keyHints(
+              question(),
+              "card",
+              editing()
+                ? { field: editing()?.field ?? "text", enterSaves: enterSaves(), suggestions: controls.suggestions().length > 0 }
+                : undefined,
+            )}`}
       </text>
     </box>
   )
@@ -540,6 +787,10 @@ interface CardProps {
   readonly focused: boolean
   readonly editing: "note" | "text" | undefined
   readonly textareaRef: (element: TextareaRenderable) => void
+  /** Path suggestions for the open file field, and the highlighted one. */
+  readonly suggestions: readonly string[]
+  readonly selected: number
+  readonly onInput: (text: string) => void
 }
 
 function Card(props: CardProps) {
@@ -549,6 +800,9 @@ function Card(props: CardProps) {
   const recommended = () => {
     const rec = q().recommended
     if (rec === undefined) return undefined
+    // Code is shown as a block below; preselected code would only repeat what the editor shows.
+    if (q().kind === "ask_code") return undefined
+    if (q().kind === "slider" && typeof rec === "number") return sliderText(q(), rec)
     if (Array.isArray(rec)) return rec.map((id) => optionLabel(q(), String(id))).join(", ")
     if (typeof rec === "object") return JSON.stringify(rec)
     if (typeof rec === "string" && (q().options?.length ?? 0) > 0) return optionLabel(q(), rec)
@@ -583,6 +837,10 @@ function Card(props: CardProps) {
       <Show when={recommended() !== undefined}>
         <text fg={theme().text.feedback.success.base}>{`★ Recommended: ${recommended()}`}</text>
       </Show>
+      <Show when={q().kind === "ask_code" && typeof q().recommended === "string" && editText(q(), props.draft) !== q().recommended}>
+        <text fg={theme().text.feedback.success.base}>★ Recommended:</text>
+        <markdown content={codeBlock(String(q().recommended), q().language)} syntaxStyle={props.syntax} fg={theme().markdown.text} />
+      </Show>
       <Show when={q().rationale}>
         <markdown content={`*Why:* ${q().rationale}`} syntaxStyle={props.syntax} conceal fg={theme().text.muted} />
       </Show>
@@ -609,6 +867,11 @@ function Card(props: CardProps) {
       </Show>
     </box>
   )
+}
+
+const codeBlock = (code: string, language?: string) => {
+  const fence = code.includes("```") ? "~~~~" : "```"
+  return `${fence}${language ?? ""}\n${code}\n${fence}`
 }
 
 function Row(props: {
@@ -647,25 +910,44 @@ function Body(props: CardProps & { readonly value: Record<string, unknown> | und
     const rec = q().recommended
     return Array.isArray(rec) ? rec.includes(id) : rec === id
   }
+  let field: TextareaRenderable | undefined
+  const code = () => q().kind === "ask_code"
+  const shown = () => {
+    if (q().kind !== "slider") return editText(q(), props.draft)
+    const other = (props.value as { other?: string } | undefined)?.other
+    return other === undefined ? "" : `other: ${other}`
+  }
   const editField = (placeholder: string) => (
     <Show
       when={props.editing === "text"}
       fallback={
-        <Show when={editText(q(), props.draft) !== ""}>
-          <text fg={theme().text.base} wrapMode="word">
-            {editText(q(), props.draft)}
-          </text>
+        <Show when={shown() !== ""}>
+          <Show
+            when={code()}
+            fallback={
+              <text fg={theme().text.base} wrapMode="word">
+                {shown()}
+              </text>
+            }
+          >
+            <markdown content={codeBlock(shown(), q().language)} syntaxStyle={props.syntax} fg={theme().markdown.text} />
+          </Show>
         </Show>
       }
     >
       <textarea
-        ref={props.textareaRef}
+        ref={(element: TextareaRenderable) => {
+          field = element
+          props.textareaRef(element)
+        }}
         initialValue={editText(q(), props.draft)}
         placeholder={placeholder}
-        minHeight={1}
-        maxHeight={q().kind === "ask_code" ? 16 : 8}
+        minHeight={code() ? Math.min(16, Math.max(3, editText(q(), props.draft).split("\n").length)) : 1}
+        maxHeight={code() ? 16 : 8}
+        flexGrow={1}
         textColor={theme().text.base}
         focusedTextColor={theme().text.base}
+        onContentChange={() => props.onInput(field?.plainText ?? "")}
       />
     </Show>
   )
@@ -823,11 +1105,15 @@ function Body(props: CardProps & { readonly value: Record<string, unknown> | und
           return (
             <box flexDirection="column">
               <text fg={props.focused ? theme().text.base : theme().text.muted}>
-                {`${sliderBar(q(), current())} ${current()}${q().unit ? ` ${q().unit}` : ""}`}
+                {`${sliderBar(q(), current())} ${sliderText(q(), current())}`}
               </text>
               <text fg={theme().text.faint}>
-                {`${q().labels?.min ?? bounds().min} … ${q().labels?.mid ? `${q().labels?.mid} … ` : ""}${q().labels?.max ?? bounds().max}   ←/→ adjust`}
+                {`${q().labels?.min ?? bounds().min} … ${q().labels?.mid ? `${q().labels?.mid} … ` : ""}${q().labels?.max ?? bounds().max}`}
               </text>
+              <box flexDirection="row" gap={1}>
+                <text fg={theme().text.faint}>{q().allow_other === true ? "value or other (e):" : "value (e):"}</text>
+                {editField(`${bounds().min}–${bounds().max}`)}
+              </box>
             </box>
           )
         })()}
@@ -854,10 +1140,16 @@ function Body(props: CardProps & { readonly value: Record<string, unknown> | und
           }}
         </For>
       </Match>
-      <Match when={q().kind === "ask_text" || q().kind === "ask_code"}>
+      <Match when={q().kind === "ask_text"}>
         <box flexDirection="row" gap={1}>
-          <text fg={theme().text.faint}>{q().kind === "ask_code" ? `code${q().language ? ` (${q().language})` : ""} (e):` : "answer (e):"}</text>
+          <text fg={theme().text.faint}>answer (e):</text>
           {editField(q().placeholder ?? "Type your answer")}
+        </box>
+      </Match>
+      <Match when={q().kind === "ask_code"}>
+        <box flexDirection="column">
+          <text fg={theme().text.faint}>{`code${q().language ? ` (${q().language})` : ""} (e):`}</text>
+          {editField(q().placeholder ?? "Write the code")}
         </box>
       </Match>
       <Match when={q().kind === "ask_image" || q().kind === "ask_file"}>
@@ -865,9 +1157,23 @@ function Body(props: CardProps & { readonly value: Record<string, unknown> | und
           {(file) => <text fg={theme().text.base}>{`📎 ${file.name} (${file.mime}, ${file.size} B)`}</text>}
         </For>
         <box flexDirection="row" gap={1}>
-          <text fg={theme().text.faint}>{q().multiple ? "paths, one per line (e):" : "path (e):"}</text>
-          {editField(q().kind === "ask_image" ? "~/Pictures/screenshot.png" : "./path/to/file")}
+          <text fg={theme().text.faint}>{q().multiple ? "paths, comma or line separated (e):" : "path (e):"}</text>
+          {editField(q().kind === "ask_image" ? "screenshot.png, or ctrl+v to paste one" : "./path/to/file")}
         </box>
+        <Show when={props.editing === "text" && props.suggestions.length > 0}>
+          <box flexDirection="column" paddingLeft={2}>
+            <For each={props.suggestions}>
+              {(suggestion, index) => (
+                <text
+                  fg={index() === props.selected ? theme().text.action.primary.base : theme().text.muted}
+                  attributes={index() === props.selected ? TextAttributes.BOLD : 0}
+                >
+                  {`${index() === props.selected ? "›" : " "} ${suggestion}`}
+                </text>
+              )}
+            </For>
+          </box>
+        </Show>
       </Match>
     </Switch>
   )
