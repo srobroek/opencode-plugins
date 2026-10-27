@@ -25,6 +25,11 @@ codex plugin add languages@srobroek-opencode
 
 ## Skills
 
+Only `language-quality` is listed to the model in OpenCode: it is a router whose body maps each
+situation to the per-language skills below, which set `opencode/autoinvoke: false` and load by id. One listing
+entry instead of one per skill keeps the per-request skills listing short. Claude Code
+and Codex ignore that metadata, so there every skill is listed and triggers directly.
+
 The plugin registers these skills from `skills/`, unless a skill with the same id
 already exists:
 
