@@ -1,6 +1,7 @@
 ---
 description: "Audits SpecKit artifacts; spawn with scope drift, conflicts, or both."
 mode: subagent
+hidden: true
 request:
   headers:
     x-opencode-model-role: reviewer
@@ -24,12 +25,6 @@ permissions:
     resource: "*"
     effect: allow
   - action: glob
-    resource: "*"
-    effect: allow
-  - action: skill
-    resource: "*"
-    effect: allow
-  - action: execute
     resource: "*"
     effect: allow
   - action: "lsp_*"
