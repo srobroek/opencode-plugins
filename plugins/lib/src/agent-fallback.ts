@@ -18,6 +18,9 @@ import type { Context } from "@opencode/plugin/promise/plugin"
 import { type AgentFile, readAgentFile, shapeAgent } from "./agent-files.ts"
 import { MODEL_FALLBACK_HEADER } from "./model-roles.ts"
 
+/** `plugin.list` during setup must not hold up startup; a slow answer counts as "not installed". */
+export const PLUGIN_LIST_TIMEOUT_MS = 2000
+
 type PluginEntry = { id?: unknown; source?: { target?: unknown; path?: unknown } }
 
 /**
@@ -96,6 +99,38 @@ export async function registerOwnedAgents(agent: Context["agent"], paths: readon
     for (const file of files) {
       const existing = editor.get(file.id)
       editor.update(file.id, (draft) => applyOwnedAgent(draft as unknown as Draft, file, existing))
+    }
+  })
+}
+
+/** The `plugin.list` result, or undefined when it fails or takes longer than `ms`. */
+export async function listPlugins(plugin: Context["plugin"], ms = PLUGIN_LIST_TIMEOUT_MS): Promise<unknown> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<undefined>((resolve) => {
+    timer = setTimeout(() => resolve(undefined), ms)
+  })
+  try {
+    return await Promise.race([plugin.list(), timeout])
+  } catch {
+    return undefined
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
+ * Fallback side for a plugin without its own agent shaping: register every agent file as
+ * `registerAgents` does, except a fallback copy whose owner is installed or whose id an
+ * earlier transform already added.
+ */
+export async function registerFallbackAgents(ctx: Pick<Context, "agent" | "plugin">, paths: readonly string[], owners: FallbackOwners) {
+  const files = paths.map(readAgentFile)
+  const owned = files.some((file) => file.id in owners) ? ownedElsewhere(await listPlugins(ctx.plugin), owners) : new Set<string>()
+  return ctx.agent.transform((editor) => {
+    for (const file of files) {
+      const created = editor.get(file.id) === undefined
+      if (!keepFallback(file.id, owners, owned, !created)) continue
+      editor.update(file.id, (draft) => shapeAgent(draft as never, file, created))
     }
   })
 }

@@ -5,7 +5,8 @@
 
 import { fileURLToPath } from "node:url"
 import { Plugin } from "@opencode/plugin"
-import { agentPaths, registerAgents } from "./agent-files.ts"
+import { type FallbackOwners, registerFallbackAgents } from "./agent-fallback.ts"
+import { agentPaths } from "./agent-files.ts"
 import { registerSkills, skillPaths } from "./skill-files.ts"
 
 export type ContentPaths = { skills: string[]; agents: string[] }
@@ -18,8 +19,16 @@ export function contentPaths(moduleUrl: string): ContentPaths {
   }
 }
 
+export type ContentOptions = {
+  /**
+   * Agents this package ships as fallback copies of another package's, by owner plugin
+   * name (see `./agent-fallback.ts`). Each registers only when its owner is not installed.
+   */
+  fallbacks?: FallbackOwners
+}
+
 /** Define plugin `id`, registering the skills and agents found next to `moduleUrl`. */
-export function contentPlugin(id: string, moduleUrl: string) {
+export function contentPlugin(id: string, moduleUrl: string, options: ContentOptions = {}) {
   return Plugin.define({
     id,
     async setup(ctx) {
@@ -30,7 +39,7 @@ export function contentPlugin(id: string, moduleUrl: string) {
       }
       try {
         if (skills.length > 0) registrations.push(await registerSkills(ctx.skill, skills))
-        if (agents.length > 0) registrations.push(await registerAgents(ctx.agent, agents))
+        if (agents.length > 0) registrations.push(await registerFallbackAgents(ctx, agents, options.fallbacks ?? {}))
       } catch (error) {
         await cleanup()
         throw error
