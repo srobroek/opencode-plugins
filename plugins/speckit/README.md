@@ -88,9 +88,11 @@ Project skills load after plugins, so the skill transform registers again whenev
 ## Workflow instructions
 
 `instructions/speckit-workflow.md` holds the beads workflow contract and command
-routing. A session gets it once its directory holds `.specify/`, and keeps it for the
-rest of the session, so the system prompt changes at most once. The two speckit
-subagents do not get it.
+routing. A session gets it in its system prompt when its directory holds `.specify/` at
+the session's first request, and that decision holds for the whole session (also across
+a server restart), so the system prompt never changes mid-session and the provider's
+prompt cache holds. A session that started without it and runs `speckit_setup` gets the
+text in the tool result instead. The two speckit subagents do not get it.
 
 ## Agents
 

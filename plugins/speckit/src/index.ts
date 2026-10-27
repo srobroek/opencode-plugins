@@ -20,7 +20,7 @@ import {
   START_TOOL,
   setupInput,
 } from "./tools.ts"
-import { workflowLatch } from "./workflow.ts"
+import { usesSpeckit, workflowLatch } from "./workflow.ts"
 
 export { beadsActive } from "./beads.ts"
 export { installFormulas, runSetup } from "./setup.ts"
@@ -33,6 +33,9 @@ export { executeSetup, executeStart } from "./tools.ts"
 export const WORKFLOW_PATH = fileURLToPath(new URL("../instructions/speckit-workflow.md", import.meta.url))
 export const SKILLS_DIR = fileURLToPath(new URL("../skills", import.meta.url))
 export const AGENTS_DIR = fileURLToPath(new URL("../agents", import.meta.url))
+
+/** Storage key for whether a session carries the workflow text. */
+const WORKFLOW_KEY_PREFIX = "workflow/"
 
 /** Re-registrations of the skill transform allowed before a non-stale check resets the count. */
 const MAX_REREGISTER = 3
@@ -104,6 +107,18 @@ export async function setupSpeckit(ctx: Context, overrides: Overrides = {}): Pro
     taskstoissues: active && options.blockTasksToIssues,
   })
   let refreshSkills: (() => Promise<void>) | undefined
+  const workflow = options.workflow
+    ? {
+        text: readFileSync(WORKFLOW_PATH, "utf8").trim(),
+        latch: workflowLatch(usesSpeckit, {
+          get: async (sessionID) => {
+            const value = await ctx.storage.get(`${WORKFLOW_KEY_PREFIX}${sessionID}`)
+            return typeof value === "boolean" ? value : undefined
+          },
+          set: (sessionID, value) => ctx.storage.set(`${WORKFLOW_KEY_PREFIX}${sessionID}`, value),
+        }),
+      }
+    : undefined
 
   try {
     const tools = await ctx.tool.transform((editor) => {
@@ -119,6 +134,9 @@ export async function setupSpeckit(ctx: Context, overrides: Overrides = {}): Pro
             active = await probe(location)
             await refreshSkills?.()
           }
+          // The system prompt stays as the session's first request had it; the workflow arrives here instead.
+          if (workflow !== undefined && usesSpeckit(cwd) && (await workflow.latch.lacks(context.sessionID)))
+            return { ...result, content: `${result.content}\n\n${workflow.text}` }
           return result
         },
       })
@@ -212,15 +230,20 @@ export async function setupSpeckit(ctx: Context, overrides: Overrides = {}): Pro
       })
     }
 
-    if (options.workflow) {
-      const text = readFileSync(WORKFLOW_PATH, "utf8").trim()
-      const latch = workflowLatch()
-      const context = await ctx.session.hook("context", async (event) => {
+    if (workflow !== undefined) {
+      const { text, latch } = workflow
+      // Also on compaction and generate, so those requests keep the turns' system prompt and prompt cache.
+      const addWorkflow = async (event: { sessionID: string; agent: string; system: Array<{ type: "text"; text: string }> }) => {
         if (await latch.include(event.sessionID, event.agent, () => directory(event.sessionID)))
           event.system.push({ type: "text", text })
-      })
+      }
+      const hooks = [
+        await ctx.session.hook("context", addWorkflow),
+        await ctx.session.hook("compaction", addWorkflow),
+        await ctx.session.hook("generate", addWorkflow),
+      ]
       disposers.push(async () => {
-        await context.dispose()
+        for (const hook of hooks) await hook.dispose()
         latch.clear()
       })
     }

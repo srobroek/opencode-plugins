@@ -2366,20 +2366,38 @@ var OWN_PROMPT_AGENTS = ["speckit-sync", "speckit-verify"];
 function usesSpeckit(directory) {
   return existsSync5(join7(directory, ".specify"));
 }
-function workflowLatch(detect = usesSpeckit) {
-  const on = new Set;
+function workflowLatch(detect = usesSpeckit, store) {
+  const decided = new Map;
+  const decide = async (sessionID, directory) => {
+    const stored = await store?.get(sessionID).catch(() => {
+      return;
+    });
+    if (stored !== undefined)
+      return stored;
+    const value = await directory().then(detect, () => false);
+    await store?.set(sessionID, value).catch(() => {});
+    return value;
+  };
   return {
-    async include(sessionID, agent, directory) {
+    include(sessionID, agent, directory) {
       if (OWN_PROMPT_AGENTS.includes(agent))
-        return false;
-      if (on.has(sessionID))
-        return true;
-      if (!detect(await directory()))
-        return false;
-      on.add(sessionID);
-      return true;
+        return Promise.resolve(false);
+      let known = decided.get(sessionID);
+      if (known === undefined) {
+        known = decide(sessionID, directory);
+        decided.set(sessionID, known);
+      }
+      return known;
     },
-    clear: () => on.clear()
+    async lacks(sessionID) {
+      const known = decided.get(sessionID);
+      if (known !== undefined)
+        return !await known;
+      return await store?.get(sessionID).catch(() => {
+        return;
+      }) === false;
+    },
+    clear: () => decided.clear()
   };
 }
 
@@ -2387,6 +2405,7 @@ function workflowLatch(detect = usesSpeckit) {
 var WORKFLOW_PATH = fileURLToPath2(new URL("../instructions/speckit-workflow.md", import.meta.url));
 var SKILLS_DIR = fileURLToPath2(new URL("../skills", import.meta.url));
 var AGENTS_DIR = fileURLToPath2(new URL("../agents", import.meta.url));
+var WORKFLOW_KEY_PREFIX = "workflow/";
 var MAX_REREGISTER = 3;
 function parseOptions(raw) {
   const options = raw ?? {};
@@ -2424,6 +2443,16 @@ async function setupSpeckit(ctx, overrides = {}) {
     taskstoissues: active && options.blockTasksToIssues
   });
   let refreshSkills;
+  const workflow = options.workflow ? {
+    text: readFileSync5(WORKFLOW_PATH, "utf8").trim(),
+    latch: workflowLatch(usesSpeckit, {
+      get: async (sessionID) => {
+        const value = await ctx.storage.get(`${WORKFLOW_KEY_PREFIX}${sessionID}`);
+        return typeof value === "boolean" ? value : undefined;
+      },
+      set: (sessionID, value) => ctx.storage.set(`${WORKFLOW_KEY_PREFIX}${sessionID}`, value)
+    })
+  } : undefined;
   try {
     const tools = await ctx.tool.transform((editor) => {
       editor.add({
@@ -2438,6 +2467,10 @@ async function setupSpeckit(ctx, overrides = {}) {
             active = await probe(location);
             await refreshSkills?.();
           }
+          if (workflow !== undefined && usesSpeckit(cwd) && await workflow.latch.lacks(context.sessionID))
+            return { ...result, content: `${result.content}
+
+${workflow.text}` };
           return result;
         }
       });
@@ -2534,15 +2567,20 @@ async function setupSpeckit(ctx, overrides = {}) {
         await registration.dispose();
       });
     }
-    if (options.workflow) {
-      const text = readFileSync5(WORKFLOW_PATH, "utf8").trim();
-      const latch = workflowLatch();
-      const context = await ctx.session.hook("context", async (event) => {
+    if (workflow !== undefined) {
+      const { text, latch } = workflow;
+      const addWorkflow = async (event) => {
         if (await latch.include(event.sessionID, event.agent, () => directory(event.sessionID)))
           event.system.push({ type: "text", text });
-      });
+      };
+      const hooks = [
+        await ctx.session.hook("context", addWorkflow),
+        await ctx.session.hook("compaction", addWorkflow),
+        await ctx.session.hook("generate", addWorkflow)
+      ];
       disposers.push(async () => {
-        await context.dispose();
+        for (const hook of hooks)
+          await hook.dispose();
         latch.clear();
       });
     }
