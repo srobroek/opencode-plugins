@@ -51,10 +51,11 @@ export const ParleyRpc = Rpc.define({
         properties: {
           sessionID: { type: "string" },
           roundID: { type: "string" },
-          action: { type: "string", enum: ["opened", "updated", "closed", "ended"] },
+          action: { type: "string", enum: ["opened", "updated", "closed", "ended", "native"] },
           status: { type: "string" },
           reason: { type: "string" },
           message: { type: "string" },
+          callID: { type: "string" },
         },
       },
     },
@@ -64,8 +65,10 @@ export const ParleyRpc = Rpc.define({
 export interface RoundEvent {
   readonly sessionID: string
   readonly roundID: string
-  readonly action: "opened" | "updated" | "closed" | "ended"
+  /** `native`: a `question` call (`callID`) went to the built-in tool, whose form the TUI must fetch. */
+  readonly action: "opened" | "updated" | "closed" | "ended" | "native"
   readonly status?: string
   readonly reason?: string
   readonly message?: string
+  readonly callID?: string
 }

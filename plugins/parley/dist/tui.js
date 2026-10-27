@@ -2160,10 +2160,11 @@ var ParleyRpc = Rpc.define({
         properties: {
           sessionID: { type: "string" },
           roundID: { type: "string" },
-          action: { type: "string", enum: ["opened", "updated", "closed", "ended"] },
+          action: { type: "string", enum: ["opened", "updated", "closed", "ended", "native"] },
           status: { type: "string" },
           reason: { type: "string" },
-          message: { type: "string" }
+          message: { type: "string" },
+          callID: { type: "string" }
         }
       }
     }
@@ -2172,6 +2173,7 @@ var ParleyRpc = Rpc.define({
 
 // plugins/parley/src/tui.tsx
 var HEARTBEAT_MS = 1e4;
+var NATIVE_POLL_MS = [0, 100, 300, 700, 1500, 3000, 6000, 12000];
 var locationKey = (location) => `${location.directory}\x00${location.workspaceID ?? ""}`;
 var tui_default = Plugin.define({
   id: "srobroek.parley",
@@ -2323,6 +2325,11 @@ var tui_default = Plugin.define({
     const stopEvents = rpc.events.on("round", async (event) => {
       const data = event.data;
       const location = event.location;
+      if (data.action === "native") {
+        if (data.callID)
+          fetchNative(data.sessionID, data.callID, location);
+        return;
+      }
       await refresh(location);
       if (data.action === "opened")
         present(data.sessionID);
@@ -2357,6 +2364,24 @@ var tui_default = Plugin.define({
           });
       }
     });
+    const dismissing = new Set;
+    const fetchNative = async (sessionID, callID, location) => {
+      for (const delay of NATIVE_POLL_MS) {
+        await Bun.sleep(delay);
+        context.data.session.form.invalidate(sessionID, location);
+        await context.data.session.form.sync(sessionID, location).catch(() => {});
+        const form = (context.data.session.form.list(sessionID, location) ?? []).find((candidate) => candidate.metadata?.tool?.id === callID);
+        if (!form)
+          continue;
+        if (dismissing.delete(callID))
+          await context.data.session.form.cancel({
+            sessionID,
+            formID: form.id
+          }, location).catch(() => {});
+        return;
+      }
+      dismissing.delete(callID);
+    };
     const stopReconnect = context.data.listen(({
       details
     }) => {
@@ -2400,9 +2425,10 @@ var tui_default = Plugin.define({
       const entry = rounds().find((item) => item.view.roundID === view.roundID);
       if (!entry)
         return;
+      const native = (view.callIDs?.length ?? 0) > 0;
       const confirmed = await context.ui.dialog.confirm({
         title: "Dismiss round?",
-        message: "The agent gets a cancelled result for every question in this round.",
+        message: native ? "This ends the agent's turn, like dismissing a question." : "The agent gets a cancelled result for every question in this round.",
         label: {
           confirm: "Dismiss",
           cancel: "Keep"
@@ -2410,6 +2436,8 @@ var tui_default = Plugin.define({
       });
       if (!confirmed)
         return;
+      for (const callID of view.callIDs ?? [])
+        dismissing.add(callID);
       await rpc.cancel({
         roundID: view.roundID,
         reason: "user_closed"

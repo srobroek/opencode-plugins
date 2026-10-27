@@ -93,9 +93,12 @@ Note on "Which database?": we already run it
 Deferred (the user will answer later): "Which extras?"
 ```
 
-`metadata.parley` holds parley's own answers. Dismissing the round (`D`) fails
-the call with "The user dismissed this question", so the model keeps going. A
-dismissed built-in form ends the turn instead.
+`metadata.parley` holds parley's own answers. Dismissing the round (`D`) ends
+the turn exactly like dismissing the built-in form: parley hands the call back
+to the built-in tool and the TUI cancels the form it opens, so the host records
+"The user dismissed this question" and stops the step. If that TUI goes away
+first, the built-in form stays up and can be answered there. A dismissed
+built-in form (no TUI attached) passes through the wrapper unchanged.
 
 With no TUI attached, the built-in tool runs unchanged. After the last TUI's
 heartbeat expires (up to `heartbeat_window_s` plus 15 s), the wrapper is removed.
@@ -128,7 +131,7 @@ brings it back with your edits intact.
 | `shift+↑` / `shift+↓`, `J` / `K` | Move a ranked item |
 | `←` / `→` | Slider value, or the rating of the option under the cursor |
 | `ctrl+enter` / `ctrl+s` | Submit the round (partial rounds are fine) |
-| `D` | Dismiss the round (the agent gets `cancelled`) |
+| `D` | Dismiss the round (the agent gets `cancelled`; a taken-over `question` call ends the turn) |
 | `esc` | Minimise |
 
 The TUI checks in with the server every 10 s (RPC `parley.attach`), and fetches

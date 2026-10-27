@@ -3,6 +3,7 @@ import { render, summarise } from "./format.ts"
 import type { Question } from "./questions.ts"
 import type { RoundEvent } from "./rpc.ts"
 import { Parley, type QuestionTool, type Settings, settingsFrom } from "./service.ts"
+import { BUILTIN } from "./takeover.ts"
 
 const settings: Settings = { fallback: "none", questionTool: "takeover", disabled: false, heartbeatWindowMs: 30_000 }
 const questions: Question[] = [
@@ -247,11 +248,11 @@ describe("question takeover", () => {
 
   test("leaves the call to the built-in tool without a heartbeat, or when off", async () => {
     const { service, events } = setup()
-    expect(await service.takeover({ questions: prompts }, { sessionID: "s" })).toBeUndefined()
+    expect(await service.takeover({ questions: prompts }, { sessionID: "s" })).toBe(BUILTIN)
     expect(service.takeoverWanted()).toBe(false)
     const off = setup({ questionTool: "off" }).service
     off.attach({ clientID: "tui" })
-    expect(await off.takeover({ questions: prompts }, { sessionID: "s" })).toBeUndefined()
+    expect(await off.takeover({ questions: prompts }, { sessionID: "s" })).toBe(BUILTIN)
     expect(off.takeoverWanted()).toBe(false)
     expect(events).toEqual([])
   })
@@ -269,26 +270,54 @@ describe("question takeover", () => {
       roundID: round?.roundID ?? "",
       answers: [{ id: "q1", status: "accepted", note: "fine for now" }],
     })
-    const result = await asking
+    const result = (await asking) as Exclude<Awaited<typeof asking>, typeof BUILTIN>
     expect(result?.output).toEqual({ answers: [["SQLite (Recommended)"]] })
     expect(result?.content).toBe(
       'User has answered your questions: "Which database?"="SQLite (Recommended)". You can now continue with the user\'s answers in mind.\nNote on "Which database?": fine for now',
     )
   })
 
-  test("a dismissed round fails the call like a dismissed form", async () => {
+  test("a dismissed round goes to the built-in tool, whose form the TUI cancels", async () => {
+    const { service } = setup()
+    service.attach({ clientID: "tui" })
+    const asking = service.takeover({ questions: prompts }, { sessionID: "s", callID: "call_1" })
+    await tick()
+    const [round] = service.pending({}).rounds
+    expect(round?.callIDs).toEqual(["call_1"])
+    await service.cancel({ roundID: round?.roundID ?? "" })
+    expect(await asking).toBe(BUILTIN)
+  })
+
+  test("tells an attached TUI when a call goes to the built-in tool", async () => {
+    const { service, events } = setup()
+    await service.handedToBuiltin("s", "call_1")
+    expect(events).toEqual([])
+    service.attach({ clientID: "tui" })
+    await service.handedToBuiltin("s", "call_1")
+    expect(events).toEqual([{ sessionID: "s", roundID: "", action: "native", callID: "call_1" }])
+  })
+
+  test("any other cancellation fails the call", async () => {
     const { service } = setup()
     service.attach({ clientID: "tui" })
     const asking = service.takeover({ questions: prompts }, { sessionID: "s" })
     await tick()
-    await service.cancel({ roundID: service.pending({}).rounds[0]?.roundID ?? "" })
-    await expect(asking).rejects.toThrow("The user dismissed this question")
+    await service.end("s")
+    await expect(asking).rejects.toThrow("cancelled before the user answered (ended)")
+  })
+
+  test("parley_ask rounds carry no call ids", async () => {
+    const { service } = setup()
+    service.attach({ clientID: "tui" })
+    void service.ask({ questions: [{ id: "a", title: "A", kind: "ask_text" }] }, { sessionID: "s", callID: "call_2" })
+    await tick()
+    expect(service.pending({}).rounds[0]?.callIDs).toBeUndefined()
   })
 
   test("calls parley cannot map go to the built-in tool", async () => {
     const { service } = setup()
     service.attach({ clientID: "tui" })
     const single = [{ ...prompts[0], options: [{ label: "Only", description: "" }] }] as typeof prompts
-    expect(await service.takeover({ questions: single }, { sessionID: "s" })).toBeUndefined()
+    expect(await service.takeover({ questions: single }, { sessionID: "s" })).toBe(BUILTIN)
   })
 })

@@ -8,6 +8,8 @@ import type { RoundView } from "./rounds.ts"
 import { ParleyRpc, type RoundEvent } from "./rpc.ts"
 
 const HEARTBEAT_MS = 10_000
+/** When to look for the built-in form of a call handed to the built-in tool (ms since the last look). */
+const NATIVE_POLL_MS = [0, 100, 300, 700, 1500, 3000, 6000, 12_000]
 
 interface Entry {
   readonly view: RoundView
@@ -128,6 +130,10 @@ export default Plugin.define({
     const stopEvents = rpc.events.on("round", async (event) => {
       const data = event.data as unknown as RoundEvent
       const location = event.location as LocationRef
+      if (data.action === "native") {
+        if (data.callID) void fetchNative(data.sessionID, data.callID, location)
+        return
+      }
       await refresh(location)
       if (data.action === "opened") present(data.sessionID)
       else if (data.action === "updated") {
@@ -149,6 +155,27 @@ export default Plugin.define({
           context.ui.toast.show({ message: "Round cancelled by the agent", variant: "warning", sessionID: data.sessionID })
       }
     })
+
+    // A `question` call the server hands to the built-in tool opens a form whose events carry no
+    // location (the tool runs under parley's wrapper), and the data layer drops those. Fetch the form
+    // so it shows, or, for the built-in half of a dismissal, cancel it without a message so the call
+    // fails with the built-in dismissal and the turn ends.
+    const dismissing = new Set<string>()
+    const fetchNative = async (sessionID: string, callID: string, location: LocationRef) => {
+      for (const delay of NATIVE_POLL_MS) {
+        await Bun.sleep(delay)
+        context.data.session.form.invalidate(sessionID, location)
+        await context.data.session.form.sync(sessionID, location).catch(() => {})
+        const form = (context.data.session.form.list(sessionID, location) ?? []).find(
+          (candidate) => (candidate.metadata as { tool?: { id?: string } } | undefined)?.tool?.id === callID,
+        )
+        if (!form) continue
+        if (dismissing.delete(callID))
+          await context.data.session.form.cancel({ sessionID, formID: form.id }, location).catch(() => {})
+        return
+      }
+      dismissing.delete(callID)
+    }
 
     const stopReconnect = context.data.listen(({ details }) => {
       if (details.type === "server.connected") for (const location of locations()) void refresh(location)
@@ -180,12 +207,16 @@ export default Plugin.define({
     const dismiss = async (view: RoundView) => {
       const entry = rounds().find((item) => item.view.roundID === view.roundID)
       if (!entry) return
+      const native = (view.callIDs?.length ?? 0) > 0
       const confirmed = await context.ui.dialog.confirm({
         title: "Dismiss round?",
-        message: "The agent gets a cancelled result for every question in this round.",
+        message: native
+          ? "This ends the agent's turn, like dismissing a question."
+          : "The agent gets a cancelled result for every question in this round.",
         label: { confirm: "Dismiss", cancel: "Keep" },
       })
       if (!confirmed) return
+      for (const callID of view.callIDs ?? []) dismissing.add(callID)
       await rpc.cancel({ roundID: view.roundID, reason: "user_closed" }, { location: entry.location }).catch(() => {})
       await refresh(entry.location)
       if (context.ui.panel.current()?.name === PANEL) context.ui.panel.close()

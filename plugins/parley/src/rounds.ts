@@ -13,6 +13,8 @@ export interface Round {
   readonly questions: Question[]
   readonly answers: Map<string, Answer>
   readonly delivered: Set<string>
+  /** Tool call ids of the built-in `question` calls asked in this round (takeover). */
+  readonly callIDs: string[]
   status: RoundStatus
   reason?: string
   readonly created: number
@@ -28,6 +30,11 @@ export interface RoundView {
   readonly status: RoundStatus
   readonly questions: readonly Question[]
   readonly answers: readonly Answer[]
+  /**
+   * Taken-over `question` calls in this round. Dismissing the round hands each to the built-in tool,
+   * whose form the dismissing client cancels so the turn ends exactly as a dismissed form does.
+   */
+  readonly callIDs?: readonly string[]
 }
 
 export interface RoundResult {
@@ -43,6 +50,7 @@ export interface OpenInput {
   readonly questions: readonly Question[]
   readonly title?: string
   readonly round?: number
+  readonly callID?: string
 }
 
 type Listener = (round: Round) => void
@@ -62,6 +70,7 @@ export class Rounds {
     if (errors.length > 0) return { errors }
     if (existing) {
       existing.questions.push(...input.questions)
+      if (input.callID !== undefined) existing.callIDs.push(input.callID)
       if (input.title !== undefined) existing.title = input.title
       existing.updated = now
       this.#emit(existing)
@@ -77,6 +86,7 @@ export class Rounds {
       questions: [...input.questions],
       answers: new Map(),
       delivered: new Set(),
+      callIDs: input.callID === undefined ? [] : [input.callID],
       status: "open",
       created: now,
       updated: now,
@@ -217,6 +227,7 @@ export function view(round: Round): RoundView {
     status: round.status,
     questions: round.questions,
     answers: [...round.answers.values()].map(publicAnswer),
+    ...(round.callIDs.length === 0 ? {} : { callIDs: [...round.callIDs] }),
   }
 }
 

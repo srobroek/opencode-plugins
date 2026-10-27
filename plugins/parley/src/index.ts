@@ -8,6 +8,7 @@ import { render } from "./format.ts"
 import { ParleyRpc, type RoundEvent } from "./rpc.ts"
 import { askInput, endInput, endOutput, resultOutput, waitInput } from "./schema.ts"
 import { type AskInput, type CallContext, InputError, Parley, settingsFrom, type WaitInput } from "./service.ts"
+import { wrapQuestion } from "./takeover.ts"
 
 export { ParleyRpc } from "./rpc.ts"
 
@@ -41,8 +42,7 @@ export default Plugin.define({
 
     // execute.before cannot route `question` to parley: renaming a call only reaches direct (non Code
     // Mode) tools, and parley's are Code Mode tools. So the built-in tool itself is wrapped, and only
-    // while a parley TUI is attached here; otherwise the registry holds the untouched built-in tool
-    // (its dismissal still ends the turn, which a Promise wrapper cannot reproduce).
+    // while a parley TUI is attached here; otherwise the registry holds the untouched built-in tool.
     let takeover: Promise<{ dispose: () => Promise<void> } | undefined> = Promise.resolve(undefined)
     const syncTakeover = () => {
       takeover = takeover.then(async (current) => {
@@ -50,10 +50,11 @@ export default Plugin.define({
         if (wanted && !current)
           return ctx.tool.transform((editor) =>
             editor.update("question", (draft) => {
-              const builtin = draft.execute
-              draft.execute = async (input, context) =>
-                ((await service.takeover(input as { questions?: Prompt[] }, call(context))) as never) ??
-                builtin(input, context)
+              draft.execute = wrapQuestion(
+                draft.execute,
+                (input, context) => service.takeover(input as { questions?: Prompt[] }, call(context)),
+                (context) => void service.handedToBuiltin(context.sessionID, context.id),
+              )
             }),
           )
         if (!wanted && current) await current.dispose()
@@ -75,8 +76,9 @@ export default Plugin.define({
     })
     emitEvent = (event) => rpc.events.emit("round", { ...event })
 
-    const call = (context: { sessionID: string; signal: AbortSignal; progress: CallContext["progress"] }) => ({
+    const call = (context: { sessionID: string; id: string; signal: AbortSignal; progress: CallContext["progress"] }) => ({
       sessionID: context.sessionID,
+      callID: context.id,
       signal: context.signal,
       progress: context.progress,
       tool: context,

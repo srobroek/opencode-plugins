@@ -6,7 +6,26 @@ import type { RoundResult } from "./rounds.ts"
 /** The built-in question tool's guidance asks models to mark their pick with this suffix. */
 const RECOMMENDED = /\s*\(recommended\)\s*$/i
 
-export const DISMISSED = "The user dismissed this question"
+/** `Parley.takeover` result: run the built-in `question` tool for this call. */
+export const BUILTIN: unique symbol = Symbol("parley.builtin")
+
+/**
+ * The wrapped `question` tool's execute. Whatever the built-in tool throws is rethrown untouched: its
+ * dismissal is a defect the host recognises by class (even attached to the `Tool.Error` the Promise
+ * adapter wraps it in) and turns into "the user dismissed this question", ending the turn.
+ */
+export function wrapQuestion<Input, Context, Output>(
+  builtin: (input: Input, context: Context) => Promise<Output>,
+  takeover: (input: Input, context: Context) => Promise<unknown>,
+  onBuiltin?: (context: Context) => void,
+) {
+  return async (input: Input, context: Context): Promise<Output> => {
+    const outcome = await takeover(input, context)
+    if (outcome !== BUILTIN) return outcome as Output
+    onBuiltin?.(context)
+    return builtin(input, context)
+  }
+}
 
 const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 1)}…` : text)
 

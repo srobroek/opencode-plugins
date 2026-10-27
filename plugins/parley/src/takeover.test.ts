@@ -1,7 +1,16 @@
 import { describe, expect, test } from "bun:test"
 import type { Prompt } from "./fallback.ts"
 import type { Question } from "./questions.ts"
-import { fromPrompts, nativeAnswer, nativeResult, nativeSummary, nativeText, shouldTakeOver } from "./takeover.ts"
+import {
+  BUILTIN,
+  fromPrompts,
+  nativeAnswer,
+  nativeResult,
+  nativeSummary,
+  nativeText,
+  shouldTakeOver,
+  wrapQuestion,
+} from "./takeover.ts"
 
 const db: Prompt = {
   question: "Which database should we use?",
@@ -127,5 +136,49 @@ describe("native result", () => {
     expect(text).toBe(
       'User has answered your questions: "Database"="SQLite", "Extras"="Unanswered", "Project name?"="atlas". You can now continue with the user\'s answers in mind.',
     )
+  })
+})
+
+describe("wrapQuestion", () => {
+  // Stands in for the host's QuestionTool.CancelledError, which it recognises by class.
+  class Dismissed extends Error {}
+
+  test("returns parley's result without running the built-in tool", async () => {
+    let ran = false
+    const wrapped = wrapQuestion(
+      async () => {
+        ran = true
+        return "builtin"
+      },
+      async () => "parley",
+    )
+    expect(await wrapped({}, {})).toBe("parley")
+    expect(ran).toBe(false)
+  })
+
+  test("hands BUILTIN calls to the built-in tool with the same input and context", async () => {
+    const input = { questions: [] }
+    const context = { sessionID: "s" }
+    const handed: unknown[] = []
+    const wrapped = wrapQuestion(
+      async (seenInput: typeof input, seenContext: typeof context) => (seenInput === input && seenContext === context ? "builtin" : "wrong"),
+      async () => BUILTIN,
+      (seen) => handed.push(seen),
+    )
+    expect(await wrapped(input, context)).toBe("builtin")
+    expect(handed).toEqual([context])
+  })
+
+  test("rethrows the built-in dismissal as the very same object", async () => {
+    const dismissal = new Dismissed("The user dismissed this question")
+    const wrapped = wrapQuestion(
+      () => Promise.reject(dismissal),
+      async () => BUILTIN,
+    )
+    const caught = await wrapped({}, {}).then(
+      () => undefined,
+      (error: unknown) => error,
+    )
+    expect(caught).toBe(dismissal)
   })
 })
