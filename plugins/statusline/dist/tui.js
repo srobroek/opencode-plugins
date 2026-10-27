@@ -31,7 +31,7 @@ var SEGMENT_IDS = [
 ];
 var DEFAULT_LAYOUT = {
   left: ["model", "agent", "path", "git", "context_pct", "cost"],
-  right: ["session_name", "token_rate"]
+  right: ["session_name"]
 };
 var DEFAULT_SIDE = {
   session: "left",
