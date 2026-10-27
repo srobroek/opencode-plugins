@@ -47,9 +47,9 @@ from the listing and only load by id through it:
 
 | Source plugin | Skills |
 | --- | --- |
-| `languages` | router `language-quality`; `go-quality`, `python-quality`, `typescript-quality` |
-| `rust` | router `rust-guide`; `rust-ci`, `rust-contract-boundary`, `rust-crate-boundaries`, `rust-domain-modeling`, `rust-persistence`, `rust-quality`, `rust-safe-mutation`, `rust-tauri`, `rust-workspace` |
-| `quality` | `quality-code-design` (debugging, TDD), `quality-code-policy`, `quality-testing` |
+| `languages` | router `language-quality`; `go-quality`, `python-quality`, `typescript-quality`, `lang-go-profiling`, `lang-python-profiling`, `lang-typescript-profiling` |
+| `rust` | router `rust-guide`; `rust-ci`, `rust-contract-boundary`, `rust-crate-boundaries`, `rust-domain-modeling`, `rust-persistence`, `rust-quality`, `rust-safe-mutation`, `rust-tauri`, `rust-workspace`, `lang-rust-profiling` |
+| `quality` | `quality-code-design` (debugging, TDD), `quality-code-policy`, `quality-profiling`, `quality-testing` |
 | `toolchain` | router `toolchain-guide`; `shell-language`, `terraform-language`, `backend-background-jobs`, `ci-github-actions`, `coexistence-worktree`, `infrastructure-tfstate-guard`, `ops-no-global-cargo-target`, `ops-toolchain-cache-policy`, `toolchain-asset-ownership`, `toolchain-frontend`, `toolchain-infrastructure`, `toolchain-languages`, `toolchain-quality-observability`, `toolchain-stack-defaults` |
 | `architecture` | router `architecture-guide`; `architecture-docs-files`, `architecture-ownership`, `architecture-top-level` |
 | `dep-update`, `whats-new` | `dep-update`, `whats-new` |

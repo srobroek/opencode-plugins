@@ -60,6 +60,15 @@ permissions:
     resource: language-quality
     effect: allow
   - action: skill
+    resource: lang-go-profiling
+    effect: allow
+  - action: skill
+    resource: lang-python-profiling
+    effect: allow
+  - action: skill
+    resource: lang-typescript-profiling
+    effect: allow
+  - action: skill
     resource: rust-guide
     effect: allow
   - action: skill
@@ -108,10 +117,16 @@ permissions:
     resource: rust-workspace
     effect: allow
   - action: skill
+    resource: lang-rust-profiling
+    effect: allow
+  - action: skill
     resource: quality-code-design
     effect: allow
   - action: skill
     resource: quality-code-policy
+    effect: allow
+  - action: skill
+    resource: quality-profiling
     effect: allow
   - action: skill
     resource: quality-testing

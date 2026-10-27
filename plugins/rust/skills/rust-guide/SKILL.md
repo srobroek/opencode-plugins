@@ -20,3 +20,4 @@ skill, not from this table.
 | Generated bindings, codegen drift guards, pinned IPC invoke names, wire casing | `rust-contract-boundary` |
 | Plan/approve/apply flows, TOCTOU CAS freshness, path traversal checks, mutation audits | `rust-safe-mutation` |
 | Tauri v2 desktop apps: bundles, release-please, updater, signing, WebDriver E2E | `rust-tauri` |
+| Rust profilers and benchmarks: samply, cargo flamegraph, perf, criterion | `lang-rust-profiling` |

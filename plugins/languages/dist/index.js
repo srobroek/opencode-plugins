@@ -74,7 +74,15 @@ async function registerSkills(skill, paths) {
 }
 
 // plugins/languages/src/index.ts
-var SKILL_NAMES = ["go-quality", "python-quality", "typescript-quality", "language-quality"];
+var SKILL_NAMES = [
+  "go-quality",
+  "python-quality",
+  "typescript-quality",
+  "language-quality",
+  "lang-go-profiling",
+  "lang-python-profiling",
+  "lang-typescript-profiling"
+];
 var SKILL_PATHS = SKILL_NAMES.map((name) => fileURLToPath(new URL(`../skills/${name}/SKILL.md`, import.meta.url)));
 var src_default = Plugin.define({
   id: "srobroek.languages",

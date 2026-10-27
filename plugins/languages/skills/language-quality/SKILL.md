@@ -14,3 +14,6 @@ skill, not from this table.
 | Go format, lint and test checks | `go-quality` |
 | Python format, lint, type-check and test commands | `python-quality` |
 | TypeScript/JavaScript format, lint and type-check; exhaustive unions; trust-boundary validation | `typescript-quality` |
+| Go profilers and benchmarks: pprof, `go test -bench`, benchstat | `lang-go-profiling` |
+| Python profilers and benchmarks: py-spy, scalene, memray, cProfile | `lang-python-profiling` |
+| Bun or Node profilers and benchmarks: `--cpu-prof`, heap profiles, mitata | `lang-typescript-profiling` |
