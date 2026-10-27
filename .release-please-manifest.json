@@ -29,5 +29,6 @@
   "plugins/find-tools": "0.1.0",
   "plugins/trunk-dev": "0.1.0",
   "plugins/speckit": "0.1.0",
-  "plugins/agent-efficiency": "0.1.0"
+  "plugins/agent-efficiency": "0.1.0",
+  "plugins/agent-researcher": "0.1.0"
 }

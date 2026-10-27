@@ -5,6 +5,24 @@ import { readFileSync as readFileSync4 } from "fs";
 import { fileURLToPath as fileURLToPath2 } from "url";
 import { Plugin } from "@opencode/plugin";
 
+// plugins/lib/src/agent-fallback.ts
+function listsPlugin(listed, name) {
+  const entries = Array.isArray(listed) ? listed : listed?.data;
+  if (!Array.isArray(entries))
+    return false;
+  const target = new RegExp(`(^|[/:@])(opencode-)?${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`);
+  const names = (value) => typeof value === "string" && target.test(value);
+  return entries.some((entry) => entry?.id === `srobroek.${name}` || names(entry?.source?.target) || names(entry?.source?.path));
+}
+function ownedElsewhere(listed, owners) {
+  return new Set(Object.entries(owners).filter(([, owner]) => listsPlugin(listed, owner)).map(([id]) => id));
+}
+function keepFallback(id, owners, owned, exists) {
+  if (!(id in owners))
+    return true;
+  return !owned.has(id) && !exists;
+}
+
 // plugins/lib/src/shell-result.ts
 function record(value) {
   return value !== null && typeof value === "object" ? value : undefined;
@@ -144,7 +162,7 @@ function availableModel(ref, available) {
   }
   return ref;
 }
-function shapeAgent(draft, file, model, created) {
+function shapeAgent2(draft, file, model, created) {
   draft.name ??= file.id;
   if (created || draft.description === undefined)
     draft.description = file.description;
@@ -158,13 +176,10 @@ function shapeAgent(draft, file, model, created) {
     draft.request = { ...draft.request, headers: { ...file.request.headers, ...draft.request?.headers } };
   draft.permissions = created ? [...file.permissions] : [...draft.permissions ?? [], ...file.permissions];
 }
-var MODEL_ROLES_PLUGIN = "srobroek.model-roles";
 function hasModelRoles(listed) {
-  const entries = Array.isArray(listed) ? listed : listed?.data;
-  if (!Array.isArray(entries))
-    return false;
-  return entries.some((entry) => entry?.id === MODEL_ROLES_PLUGIN || typeof entry?.source?.target === "string" && /(^|[/:@])(opencode-)?model-roles\b/.test(entry.source.target));
+  return listsPlugin(listed, "model-roles");
 }
+var FALLBACK_AGENTS = { researcher: "agent-researcher" };
 function fallbackModel(file, override, modelRoles, available) {
   if (override === false)
     return;
@@ -3536,16 +3551,21 @@ receipt: ${result.path}` : `delivery_cleanup refused: ${result.reason}`;
       available = [];
     }
     let modelRoles = false;
+    let owned = new Set;
     try {
-      modelRoles = hasModelRoles(await withTimeout(ctx.plugin.list(), PLUGIN_LIST_TIMEOUT_MS));
+      const listed = await withTimeout(ctx.plugin.list(), PLUGIN_LIST_TIMEOUT_MS);
+      modelRoles = hasModelRoles(listed);
+      owned = ownedElsewhere(listed, FALLBACK_AGENTS);
     } catch {
       modelRoles = false;
     }
     const agents = await ctx.agent.transform((editor) => {
       for (const file of files) {
-        const model = fallbackModel(file, options.models[file.id], modelRoles, available);
         const created = editor.get(file.id) === undefined;
-        editor.update(file.id, (draft) => shapeAgent(draft, file, model, created));
+        if (!keepFallback(file.id, FALLBACK_AGENTS, owned, !created))
+          continue;
+        const model = fallbackModel(file, options.models[file.id], modelRoles, available);
+        editor.update(file.id, (draft) => shapeAgent2(draft, file, model, created));
       }
     });
     disposers.push(() => agents.dispose());
@@ -3606,6 +3626,7 @@ export {
   AGENT_IDS,
   AGENT_VERDICTS,
   CLEANUP_ACTION,
+  FALLBACK_AGENTS,
   FAN_OUT_PATH,
   FAN_OUT_SKILL_PATH,
   LAND_ACTION,
@@ -3622,5 +3643,5 @@ export {
   parseOptions,
   parseVerdict,
   setupDelivery,
-  shapeAgent
+  shapeAgent2 as shapeAgent
 };
