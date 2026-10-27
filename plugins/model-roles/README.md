@@ -158,7 +158,7 @@ alike:
    | `server` | 5xx, overloaded | the model | transient |
    | `outage` | connection refused, DNS, fetch failed | the provider | transient |
    | `auth` | 401/403, bad or expired credentials or SSO | the provider | permanent |
-   | `quota` | 402, spent quota, billing, weekly or daily usage limit | the provider | permanent |
+   | `quota` | 402, spent quota, billing, weekly or daily usage limit, subscription session or usage limits (`claude_session_limit`, `usage_limit_reached`, `subscription_sharing_usage_limit_exceeded`) | the provider | permanent |
    | `unavailable` | unknown or retired model, Bedrock's `The provided model identifier is invalid` | the model | permanent |
    | `content-filter` | blocked by a content or safety filter | the model | permanent |
 
@@ -169,8 +169,8 @@ alike:
 3. The failed model, or its whole provider, is marked unhealthy in plugin
    storage, under `health`. A model's variants share its health. The cooldown
    is `cooldownMs`. A spent quota sits out until the reset time the error
-   reports (an ISO time, a unix `reset` stamp, or a span such as
-   `resets in 3h 20m`), else for `quotaCooldownMs`. Roles are resolved again,
+   reports (an ISO time, a unix `reset` stamp, a `resets_in_seconds` or
+   `Retry-After` count, or a span such as `resets in 3h 20m`), else for `quotaCooldownMs`. Roles are resolved again,
    so agents on that role move to the next candidate. When a cooldown ends,
    the roles are resolved again.
 4. The request moves to the next healthy candidate of the session's role: the

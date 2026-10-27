@@ -287,7 +287,8 @@ var NOT_MODEL = [
   /context (?:length|window)|maximum context|prompt is too long|too many tokens/i,
   /\b(?:abort(?:ed)?|cancel(?:l)?ed|interrupted)\b/i
 ];
-var QUOTA = /insufficient_quota|quota (?:exceeded|exhausted|reached)|exceeded (?:your |the )?(?:current )?quota|billing|credit balance|out of credits|payment required|usage limit|(?:weekly|daily|monthly|5-hour) (?:usage )?limit|plan limit/i;
+var QUOTA = /insufficient_quota|quota (?:exceeded|exhausted|reached)|exceeded (?:your |the )?(?:current )?quota|billing|credit[_ ]balance|out of credits|payment required|usage[_ ]limit|usage_not_included|spend_limit_exceeded|session[_ ]limit|(?:weekly|daily|monthly|5-hour) (?:usage )?limit|plan limit|\b(?:hit|reached) your [^\u00B7\n]*?limit/i;
+var QUOTA_TYPE = /^provider\.(?:quota|free-limit)$/;
 var PATTERNS = [
   ["quota", QUOTA],
   ["content-filter", /content[_ -]?(?:filter|policy|management policy)|blocked by (?:the )?safety|safety (?:filter|system)|responsible ai polic/i],
@@ -297,6 +298,10 @@ var PATTERNS = [
   ["rate-limit", /throttl|rate.?limit|too many requests|\b429\b/i],
   ["server", /overloaded|over capacity|service unavailable|bad gateway|gateway timeout|internal server error|server error|serviceunavailable|\b50[0234]\b|\b529\b/i]
 ];
+var bodyText = (error) => {
+  const body = error.response?.body;
+  return typeof body === "string" ? body : body === undefined ? "" : JSON.stringify(body);
+};
 function classifyFailure(error) {
   if (error === undefined)
     return;
@@ -307,7 +312,7 @@ function classifyFailure(error) {
   if (NOT_MODEL.some((pattern) => pattern.test(message)))
     return;
   const status = error.status;
-  if (status === 402 || QUOTA.test(message))
+  if (status === 402 || QUOTA_TYPE.test(type) || QUOTA.test(message) || QUOTA.test(bodyText(error)))
     return "quota";
   if (status === 401 || status === 403)
     return "auth";
@@ -334,20 +339,22 @@ var healthKey = (ref) => `${ref.providerID}/${ref.id}`;
 var providerKey = (providerID) => `${providerID}/*`;
 var DURATION_UNITS = { s: 1000, m: 60000, h: 3600000, d: 86400000 };
 function quotaReset(error, now) {
-  const body = error.response?.body;
-  const text = `${error.message ?? ""} ${typeof body === "string" ? body : body === undefined ? "" : JSON.stringify(body)}`;
+  const text = `${error.message ?? ""} ${bodyText(error)}`;
   const iso = /reset\w*["':\s]*(?:at|on)?\s*["']?(\d{4}-\d{2}-\d{2}T[\d:.]+(?:Z|[+-]\d{2}:?\d{2})?)/i.exec(text)?.[1];
   if (iso !== undefined) {
     const at = Date.parse(iso);
     if (Number.isFinite(at) && at > now)
       return at;
   }
-  const unix = /reset\w*["':\s]+(\d{10})\b/i.exec(text)?.[1];
+  const unix = /(?:reset\w*["':\s]+|limit reached\|)(\d{10})\b/i.exec(text)?.[1];
   if (unix !== undefined) {
     const at = Number(unix) * 1000;
     if (at > now)
       return at;
   }
+  const seconds = /(?:resets?_?in_?seconds|retry[-_ ]?after)["':\s]+(\d+(?:\.\d+)?)(?![\d.]|\s*[a-z])/i.exec(text)?.[1];
+  if (seconds !== undefined && Number(seconds) > 0)
+    return now + Number(seconds) * 1000;
   const span = /(?:reset\w*|retry[- ]after|try again)\s*(?:in|:)?\s*((?:\d+(?:\.\d+)?\s*(?:d|h|m|s)[a-z]*[\s,]*(?:and\s*)?)+)/i.exec(text)?.[1];
   if (span !== undefined) {
     let total = 0;
@@ -356,6 +363,8 @@ function quotaReset(error, now) {
     if (total > 0)
       return now + total;
   }
+  if (error.retryAfterMs !== undefined && error.retryAfterMs > 0)
+    return now + error.retryAfterMs;
   return;
 }
 function cooldownFor(kind, error, now, options) {
