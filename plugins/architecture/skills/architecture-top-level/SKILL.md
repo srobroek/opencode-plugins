@@ -1,6 +1,8 @@
 ---
 name: architecture-top-level
 description: Use when choosing or changing a repository's top-level directories or its capability-first layout.
+metadata:
+  opencode/autoinvoke: false
 ---
 
 Prefer these top-level directories when the project shape needs them:

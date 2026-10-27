@@ -1,6 +1,8 @@
 ---
 name: architecture-docs-files
 description: Use when inferring a project's architecture or stack, or when creating durable project knowledge files under docs/.
+metadata:
+  opencode/autoinvoke: false
 ---
 
 Store durable project knowledge under `docs/` and read those files before
