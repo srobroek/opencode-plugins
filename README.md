@@ -71,17 +71,17 @@ codex plugin add worktrunk@srobroek-opencode
 | --- | --- |
 | `worktrunk` | Skills `worktrunk-worktrees`, `worktrunk-preflight` |
 | `chezmoi` | Skill `chezmoi-editor` (no managed-file guard) |
-| `languages` | Skills `go-quality`, `python-quality`, `typescript-quality` |
-| `rust` | Skill `rust-quality` and eight Rust guidance skills (no migration gate, no advisories) |
+| `languages` | Router skill `language-quality` and skills `go-quality`, `python-quality`, `typescript-quality` |
+| `rust` | Router skill `rust-guide`, skill `rust-quality` and eight Rust guidance skills (no migration gate, no advisories) |
 | `debate` | Skills `debate`, `grilling`, `to-questionnaire` |
 | `eli5` | Skill `eli5` |
 | `project` | Skill `license-picker` |
-| `architecture` | Skills `architecture-docs-files`, `architecture-ownership`, `architecture-top-level` (no `architect` agent) |
+| `architecture` | Router skill `architecture-guide` and skills `architecture-docs-files`, `architecture-ownership`, `architecture-top-level` (no `architect` agent) |
 | `quality` | Skills `prototype-logic`, `quality-code-design`, `quality-code-policy` (no `adversarial-challenger` agent) |
-| `toolchain` | Thirteen toolchain rule skills |
+| `toolchain` | Router skill `toolchain-guide` and thirteen toolchain rule skills |
 | `aws` | Skill `aws-guidance` |
-| `design` | Thirteen design skills (no design agents, formulas, `design_setup` or `design_impeccable_scan`) |
-| `trunk-dev` | Skills `trunk-dev-workflow`, `trunk-dev-feature-flags`, `trunk-dev-release-setup` (no commit gate, no skip-CI or MR advisories) |
+| `design` | Router skill `design-guide` and thirteen design skills (no design agents, formulas, `design_setup` or `design_impeccable_scan`) |
+| `trunk-dev` | Router skill `trunk-dev-guide` and skills `trunk-dev-workflow`, `trunk-dev-feature-flags`, `trunk-dev-release-setup` (no commit gate, no skip-CI or MR advisories) |
 | `session`, `dep-update`, `journeys`, `delivery`, `beads`, `find-tools`, `speckit` | Not exported: their skills or agents drive OpenCode tools |
 | `whats-new` | Not exported: its skill depends on OpenCode tools and version checks |
 | `agent-efficiency`, `example`, `goal`, `lsp`, `model-roles`, `parley`, `safety`, `statusline`, `subagent-worktree` | Not exported: OpenCode code only |
