@@ -225,10 +225,234 @@ function contentPaths(moduleUrl) {
   };
 }
 
-// plugins/design/src/formulas.ts
-import { copyFileSync, lstatSync, mkdirSync, readFileSync as readFileSync3 } from "fs";
-import { dirname, isAbsolute, join as join3, resolve } from "path";
+// plugins/lib/src/mcp.ts
+import { existsSync as existsSync3, readFileSync as readFileSync3 } from "fs";
 import { fileURLToPath as fileURLToPath2 } from "url";
+var MCP_MODES = ["auto", "always", "off"];
+var isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+var isStringRecord = (value) => isRecord(value) && Object.values(value).every((entry) => typeof entry === "string");
+function parseMcpJson(text, where = ".mcp.json") {
+  const document = JSON.parse(text);
+  if (!isRecord(document))
+    throw new Error(`${where}: expected an object`);
+  const servers = document.mcpServers ?? {};
+  if (!isRecord(servers))
+    throw new Error(`${where}: mcpServers must be an object`);
+  const result = {};
+  for (const [name, server] of Object.entries(servers)) {
+    const at = `${where}: ${name}`;
+    if (!isRecord(server))
+      throw new Error(`${at}: expected an object`);
+    const type = server.type ?? (server.url === undefined ? "stdio" : "http");
+    if (type !== "stdio" && type !== "http" && type !== "sse")
+      throw new Error(`${at}: unknown type ${String(type)}`);
+    if (type === "stdio") {
+      if (typeof server.command !== "string" || server.command === "")
+        throw new Error(`${at}: command is required`);
+      if (server.args !== undefined && !(Array.isArray(server.args) && server.args.every((a) => typeof a === "string")))
+        throw new Error(`${at}: args must be strings`);
+      if (server.env !== undefined && !isStringRecord(server.env))
+        throw new Error(`${at}: env must map to strings`);
+      if (server.cwd !== undefined && typeof server.cwd !== "string")
+        throw new Error(`${at}: cwd must be a string`);
+    } else {
+      if (typeof server.url !== "string" || server.url === "")
+        throw new Error(`${at}: url is required`);
+      if (server.headers !== undefined && !isStringRecord(server.headers))
+        throw new Error(`${at}: headers must map to strings`);
+    }
+    result[name] = { ...server, type };
+  }
+  return result;
+}
+function loadMcpJson(path) {
+  if (!existsSync3(path))
+    return {};
+  return parseMcpJson(readFileSync3(path, "utf8"), path);
+}
+var VARIABLE = /\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}/g;
+function expandVars(value, env, missing) {
+  return value.replace(VARIABLE, (_, name, fallback) => {
+    const found = env[name];
+    if (found !== undefined && found !== "")
+      return found;
+    if (fallback !== undefined)
+      return fallback;
+    if (found === undefined)
+      missing.add(name);
+    return "";
+  });
+}
+var expandRecord = (record, env, missing) => record === undefined ? undefined : Object.fromEntries(Object.entries(record).map(([key, value]) => [key, expandVars(value, env, missing)]));
+function toOpenCode(server, env) {
+  const missing = new Set;
+  let config;
+  if (server.type === "http" || server.type === "sse" || server.type === undefined && server.url !== undefined) {
+    const headers = expandRecord(server.headers, env, missing);
+    config = {
+      type: "remote",
+      url: expandVars(server.url ?? "", env, missing),
+      ...headers === undefined ? {} : { headers },
+      codemode: true
+    };
+  } else {
+    const environment = expandRecord(server.env, env, missing);
+    config = {
+      type: "local",
+      command: [server.command ?? "", ...server.args ?? []].map((part) => expandVars(part, env, missing)),
+      ...server.cwd === undefined ? {} : { cwd: expandVars(server.cwd, env, missing) },
+      ...environment === undefined ? {} : { environment },
+      codemode: true
+    };
+  }
+  if (missing.size > 0)
+    return { missing: [...missing].sort() };
+  return { config };
+}
+function parseMcpOptions(options) {
+  const mode = MCP_MODES.includes(options?.mcp) ? options?.mcp : "auto";
+  const servers = {};
+  if (isRecord(options?.mcpServers)) {
+    for (const [name, value] of Object.entries(options.mcpServers))
+      if (typeof value === "boolean")
+        servers[name] = value;
+  }
+  return { mode, servers };
+}
+function planMcp(servers, options, settings = {}) {
+  const plan = { add: [], skipped: [] };
+  const names = Object.keys(servers);
+  const skipAll = (reason) => ({ add: [], skipped: names.map((name) => ({ name, reason })) });
+  if (options.mode === "off")
+    return skipAll("mcp is off");
+  if (options.mode === "auto" && settings.relevant !== undefined && !settings.relevant())
+    return skipAll("not relevant here");
+  const off = new Set(settings.off ?? []);
+  for (const name of names) {
+    const server = servers[name];
+    if (!(options.servers[name] ?? !off.has(name))) {
+      plan.skipped.push({ name, reason: "turned off" });
+      continue;
+    }
+    const converted = toOpenCode(server, settings.env ?? process.env);
+    if ("missing" in converted) {
+      plan.skipped.push({ name, reason: `unset ${converted.missing.join(", ")}` });
+      continue;
+    }
+    plan.add.push([name, { ...converted.config, ...settings.extra?.[name] }]);
+  }
+  return plan;
+}
+function applyMcp(editor, add) {
+  for (const [name, config] of add) {
+    if (editor.get(name) !== undefined)
+      continue;
+    editor.set(name, structuredClone(config));
+  }
+}
+function locationDirectories(ctx) {
+  const location = ctx.location;
+  const directories = [location.directory];
+  const root = location.project?.directory;
+  if (typeof root === "string" && root !== location.directory)
+    directories.push(root);
+  return directories;
+}
+async function registerMcp(ctx, servers, options, settings = {}) {
+  const plan = planMcp(servers, options, settings);
+  if (plan.add.length === 0)
+    return { registration: { dispose: async () => {} }, plan };
+  const registration = await ctx.mcp.transform((editor) => applyMcp(editor, plan.add));
+  return { registration, plan };
+}
+async function registerPluginMcp(ctx, moduleUrl, settings = {}) {
+  const { relevant, servers: more, ...rest } = settings;
+  const servers = { ...loadMcpJson(fileURLToPath2(new URL("../.mcp.json", moduleUrl))), ...more };
+  const options = parseMcpOptions(ctx.options);
+  const check = relevant === undefined ? undefined : () => locationDirectories(ctx).some(relevant);
+  return registerMcp(ctx, servers, options, { ...rest, relevant: check });
+}
+
+// plugins/lib/src/project-markers.ts
+import { readdirSync as readdirSync3, readFileSync as readFileSync4, statSync } from "fs";
+import { join as join3 } from "path";
+var MAX_MARKER_BYTES = 512 * 1024;
+function exists(path) {
+  try {
+    statSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function readSmall(path) {
+  try {
+    const stat = statSync(path);
+    if (!stat.isFile() || stat.size > MAX_MARKER_BYTES)
+      return;
+    return readFileSync4(path, "utf8");
+  } catch {
+    return;
+  }
+}
+function entries(directory) {
+  try {
+    return readdirSync3(directory);
+  } catch {
+    return [];
+  }
+}
+function hasAny(directory, names) {
+  return names.some((name) => exists(join3(directory, name)));
+}
+function packageDependencies(directory) {
+  const text = readSmall(join3(directory, "package.json"));
+  if (text === undefined)
+    return [];
+  try {
+    const manifest = JSON.parse(text);
+    const fields = ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"];
+    return fields.flatMap((field) => {
+      const value = manifest[field];
+      return typeof value === "object" && value !== null ? Object.keys(value) : [];
+    });
+  } catch {
+    return [];
+  }
+}
+function packageDirectories(directory, groups = ["apps", "packages", "web"]) {
+  const result = [directory];
+  for (const group of groups) {
+    const parent = join3(directory, group);
+    if (exists(join3(parent, "package.json")))
+      result.push(parent);
+    for (const name of entries(parent)) {
+      const child = join3(parent, name);
+      if (exists(join3(child, "package.json")))
+        result.push(child);
+    }
+  }
+  return result;
+}
+
+// plugins/design/src/detect.ts
+var FRONTEND_MARKERS = [
+  ".storybook",
+  "DESIGN.md",
+  "index.html",
+  "components.json",
+  "tailwind.config.js",
+  "tailwind.config.ts"
+];
+var FRONTEND_PACKAGES = /^(?:react|react-dom|vue|svelte|@sveltejs\/kit|solid-js|preact|@angular\/core|next|nuxt|astro|lit|@remix-run\/.+|@builder\.io\/qwik|ember-source|storybook|@storybook\/.+|tailwindcss|react-native|expo)$/;
+function isFrontendProject(directory) {
+  return packageDirectories(directory).some((dir) => hasAny(dir, FRONTEND_MARKERS) || packageDependencies(dir).some((name) => FRONTEND_PACKAGES.test(name)));
+}
+
+// plugins/design/src/formulas.ts
+import { copyFileSync, lstatSync, mkdirSync, readFileSync as readFileSync5 } from "fs";
+import { dirname, isAbsolute, join as join4, resolve } from "path";
+import { fileURLToPath as fileURLToPath3 } from "url";
 var SETUP_TOOL = "design_setup";
 var FORMULAS = [
   "design-touch",
@@ -241,9 +465,9 @@ var FORMULAS = [
   "mol-design-responsive",
   "mol-design-tokens"
 ];
-var FORMULAS_DIR = join3(dirname(fileURLToPath2(import.meta.url)), "..", "formulas");
+var FORMULAS_DIR = join4(dirname(fileURLToPath3(import.meta.url)), "..", "formulas");
 function symlinkBelow(repo) {
-  for (const path of [join3(repo, ".beads"), join3(repo, ".beads", "formulas")])
+  for (const path of [join4(repo, ".beads"), join4(repo, ".beads", "formulas")])
     if (lstatSync(path, { throwIfNoEntry: false })?.isSymbolicLink())
       return path;
   return null;
@@ -251,8 +475,8 @@ function symlinkBelow(repo) {
 function installFormulas(workspace, cwd, force = false, sourceDir = FORMULAS_DIR) {
   const repo = isAbsolute(workspace) ? workspace : resolve(cwd, workspace);
   const fail = (text) => ({ ok: false, text, copied: [], unchanged: [] });
-  const beads = join3(repo, ".beads");
-  const destDir = join3(beads, "formulas");
+  const beads = join4(repo, ".beads");
+  const destDir = join4(beads, "formulas");
   const link = symlinkBelow(repo);
   if (link)
     return fail(`refusing symlinked path: ${link}`);
@@ -265,15 +489,15 @@ function installFormulas(workspace, cwd, force = false, sourceDir = FORMULAS_DIR
   const unchanged = [];
   const divergent = [];
   for (const name of FORMULAS) {
-    const src = join3(sourceDir, `${name}.formula.toml`);
-    const dest = join3(destDir, `${name}.formula.toml`);
+    const src = join4(sourceDir, `${name}.formula.toml`);
+    const dest = join4(destDir, `${name}.formula.toml`);
     const srcStat = lstatSync(src, { throwIfNoEntry: false });
     if (!srcStat?.isFile() || srcStat.isSymbolicLink())
       return fail(`shipped formula missing or unsafe: ${src}`);
     const st = lstatSync(dest, { throwIfNoEntry: false });
     if (st && (st.isSymbolicLink() || !st.isFile()))
       return fail(`refusing non-file formula destination: ${dest}`);
-    if (st && readFileSync3(src).equals(readFileSync3(dest))) {
+    if (st && readFileSync5(src).equals(readFileSync5(dest))) {
       unchanged.push(name);
       continue;
     }
@@ -591,6 +815,7 @@ var SETUP_INPUT = {
   },
   additionalProperties: false
 };
+var STORYBOOK_MCP = { storybook: { type: "http", url: "http://localhost:6006/mcp" } };
 function parseOptions(options) {
   return { confirmScan: options?.confirmScan !== false };
 }
@@ -657,6 +882,13 @@ async function setupDesign(ctx, moduleUrl, overrides = {}) {
       registrations.push(await registerSkills(ctx.skill, skills));
     if (agents.length > 0)
       registrations.push(await registerAgents(ctx.agent, agents));
+    const mcp = await registerPluginMcp(ctx, moduleUrl, {
+      relevant: isFrontendProject,
+      servers: STORYBOOK_MCP,
+      off: ["storybook"],
+      extra: { storybook: { oauth: false } }
+    });
+    registrations.push(mcp.registration);
   } catch (error) {
     await cleanup();
     throw error;
@@ -672,15 +904,18 @@ function createPlugin(overrides = {}) {
 var src_default = createPlugin();
 export {
   FORMULAS,
+  FRONTEND_MARKERS,
   SCAN_TOOL,
   SETUP_DESCRIPTION,
   SETUP_TOOL,
+  STORYBOOK_MCP,
   confirmScan,
   countFindings,
   createPlugin,
   src_default as default,
   installFormulas,
   interpretScan,
+  isFrontendProject,
   parseOptions,
   readScanParams,
   resolveTargets,

@@ -4,7 +4,9 @@ import type { Context } from "@opencode/plugin/promise/plugin"
 import type { ToolContext } from "@opencode/plugin/promise/tool"
 import { registerAgents } from "@srobroek/opencode-lib/agent-files"
 import { contentPaths } from "@srobroek/opencode-lib/content-plugin"
+import { registerPluginMcp } from "@srobroek/opencode-lib/mcp"
 import { registerSkills } from "@srobroek/opencode-lib/skill-files"
+import { isFrontendProject } from "./detect.ts"
 import { installFormulas, SETUP_TOOL } from "./formulas.ts"
 import {
   confirmScan,
@@ -13,6 +15,7 @@ import {
   resolveTargets,
   runScan, SCAN_DESCRIPTION, SCAN_INPUT, SCAN_TOOL } from "./impeccable.ts"
 
+export { FRONTEND_MARKERS, isFrontendProject } from "./detect.ts"
 export { FORMULAS, installFormulas, SETUP_TOOL } from "./formulas.ts"
 export {
   confirmScan,
@@ -41,6 +44,12 @@ const SETUP_INPUT = {
 } as const
 
 export type DesignOptions = { confirmScan: boolean }
+
+/**
+ * OpenCode-only and off unless the `mcpServers` option turns it on: it answers only while
+ * `storybook dev` runs, so the Claude Code and Codex `.mcp.json` leaves it out.
+ */
+export const STORYBOOK_MCP = { storybook: { type: "http" as const, url: "http://localhost:6006/mcp" } }
 
 export function parseOptions(options: Record<string, unknown> | undefined): DesignOptions {
   return { confirmScan: options?.confirmScan !== false }
@@ -115,6 +124,13 @@ export async function setupDesign(ctx: Context, moduleUrl: string, overrides: Ov
     if (options.confirmScan) registrations.push(await ctx.permission.hook("evaluate", confirmScan as never))
     if (skills.length > 0) registrations.push(await registerSkills(ctx.skill, skills))
     if (agents.length > 0) registrations.push(await registerAgents(ctx.agent, agents))
+    const mcp = await registerPluginMcp(ctx, moduleUrl, {
+      relevant: isFrontendProject,
+      servers: STORYBOOK_MCP,
+      off: ["storybook"],
+      extra: { storybook: { oauth: false } },
+    })
+    registrations.push(mcp.registration)
   } catch (error) {
     await cleanup()
     throw error

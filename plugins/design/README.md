@@ -2,7 +2,8 @@
 
 UI and UX design for OpenCode: eight workflow skills, five design rules as skills,
 four design subagents, nine beads formulas with a `design_setup` tool that installs
-them, and a `design_impeccable_scan` tool that runs impeccable's detector.
+them, a `design_impeccable_scan` tool that runs impeccable's detector, and the
+design MCP servers in frontend projects.
 
 ## Skills
 
@@ -131,40 +132,46 @@ admits a spawn of that agent and blocks a spawn of any other.
 
 ## MCP servers
 
-The plugin adds no MCP servers. Add the ones you use to `opencode.json`:
+The plugin adds the servers in [`.mcp.json`](.mcp.json), with pinned versions, in
+Code Mode:
+
+| Server | Default | Command | Used by |
+| --- | --- | --- | --- |
+| `accessibility-scanner` | on | `npx -y accessibility-scanner-mcp@0.2.3` | The primary measurement route of `accessibility-audit` and `a11y-auditor`. Needs a local Google Chrome or `CHROME_PATH` |
+| `wire-dsl` | on | `npx -y @wire-dsl/mcp-server@0.1.3` | Vector wireframes for `design-prototype` |
+| `storybook` | off | remote `http://localhost:6006/mcp` | Component documentation for `design-component-truth` and `ui-review`, served while `storybook dev` runs with `@storybook/addon-mcp` |
+
+`storybook` is off because it answers only while Storybook runs; turn it on with
+`mcpServers` in a project that runs it. OpenCode connects without OAuth. It is
+OpenCode-only and not in `.mcp.json`.
+
+By default (`mcp: "auto"`) the servers are added only where the session's directory or
+its project root is a frontend project, so a globally installed plugin does not start
+two `npx` processes in every project. A frontend project has `.storybook/`, `DESIGN.md`,
+`index.html`, `components.json` or a Tailwind config, or a `package.json` depending on
+React, Vue, Svelte, SvelteKit, Solid, Preact, Angular, Next, Nuxt, Astro, Lit, Remix,
+Qwik, Ember, Storybook, Tailwind, React Native or Expo. Workspace packages one level
+below `apps/`, `packages/` and `web/` count too. The check runs when the plugin loads
+for a directory; run `/reload` after adding the first marker.
 
 ```jsonc
 {
-  "mcp": {
-    "servers": {
-      "accessibility-scanner": {
-        "type": "local",
-        "command": ["npx", "-y", "accessibility-scanner-mcp@0.2.3"]
-      },
-      "wire-dsl": {
-        "type": "local",
-        "command": ["npx", "-y", "@wire-dsl/mcp-server@0.1.3"]
-      },
-      "storybook": {
-        "type": "remote",
-        "url": "http://localhost:6006/mcp",
-        "oauth": false,
-        "disabled": true
-      }
+  "plugins": [{
+    "package": "github:srobroek/opencode-plugins::path:plugins/design",
+    "options": {
+      "mcp": "auto",                           // "auto" (default), "always", or "off" for no servers
+      "mcpServers": { "storybook": true, "wire-dsl": false }
     }
-  }
+  }]
 }
 ```
 
-- `accessibility-scanner` is the primary measurement route of `accessibility-audit`
-  and `a11y-auditor`. It needs a local Google Chrome or `CHROME_PATH`.
-- `wire-dsl` renders vector wireframes for `design-prototype`.
-- `storybook` serves component documentation for `design-component-truth` and
-  `ui-review`. Enable it while `storybook dev` runs with `@storybook/addon-mcp`.
+A server under the same name in your `opencode.json` wins: the plugin leaves it as you
+configured it, so use that to change a version, a port or flags.
 
-On omp the plugin declared these servers itself; the reasons for keeping them in
-config are the same as for the aws plugin: a global plugin would start them in every
-project, and config keeps versions and flags visible.
+Claude Code and Codex get the same `.mcp.json` from the marketplace, which there starts
+`accessibility-scanner` and `wire-dsl` in every project, with no project check; disable
+what you do not use in that harness's MCP settings. Add `storybook` there yourself.
 
 ## Changes from omp
 
@@ -213,8 +220,8 @@ routes to are installed from their authors, never bundled; see
 opencode plugin add 'github:srobroek/opencode-plugins::path:plugins/design'
 ```
 
-Claude Code and Codex install the skills, not the agents, from this repository's
-marketplace:
+Claude Code and Codex install the skills and MCP servers, not the agents, from this
+repository's marketplace:
 
 ```sh
 claude plugin marketplace add srobroek/opencode-plugins
