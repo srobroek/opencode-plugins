@@ -1,5 +1,5 @@
 ---
-name: rust-domain-modeling
+name: lang-rust-domain-modeling
 description: Use when defining Rust error enums, newtypes, or serde-transparent wrappers.
 metadata:
   opencode/autoinvoke: false

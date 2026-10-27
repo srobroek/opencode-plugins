@@ -1,5 +1,5 @@
 ---
-name: rust-tauri
+name: lang-rust-tauri
 description: Use when building Tauri v2 desktop apps — bundles, release-please, updater, signing, or WebDriver E2E.
 metadata:
   opencode/autoinvoke: false

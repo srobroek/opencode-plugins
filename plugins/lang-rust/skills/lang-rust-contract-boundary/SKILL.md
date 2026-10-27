@@ -1,5 +1,5 @@
 ---
-name: rust-contract-boundary
+name: lang-rust-contract-boundary
 description: Use when generating Rust bindings, guarding codegen drift, pinning IPC invoke names, or choosing wire casing.
 metadata:
   opencode/autoinvoke: false
