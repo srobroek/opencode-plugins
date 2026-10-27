@@ -1,6 +1,18 @@
 import { describe, expect, test } from "bun:test"
-import { applyOwnedAgent, isCopyOf, keepFallback, listsPlugin, ownedElsewhere } from "./agent-fallback.ts"
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import {
+  applyOwnedAgent,
+  isCopyOf,
+  keepFallback,
+  listPlugins,
+  listsPlugin,
+  ownedElsewhere,
+  registerFallbackAgents,
+} from "./agent-fallback.ts"
 import type { AgentFile } from "./agent-files.ts"
+import { createFakeContext } from "./testing.ts"
 
 const file: AgentFile = {
   id: "researcher",
@@ -60,5 +72,47 @@ describe("owner side", () => {
     expect(draft.system).toBe("mine")
     expect(draft.permissions).toEqual([own, ...file.permissions])
     expect(isCopyOf(undefined, file)).toBe(false)
+  })
+})
+
+describe("registerFallbackAgents", () => {
+  const withAgents = <T>(run: (paths: string[]) => Promise<T>) => {
+    const dir = mkdtempSync(join(tmpdir(), "fallback-agents-"))
+    const paths = ["researcher", "helper"].map((id) => {
+      const path = join(dir, `${id}.md`)
+      writeFileSync(path, `---\nmode: subagent\npermissions: []\n---\n${id} prompt`)
+      return path
+    })
+    return run(paths).finally(() => rmSync(dir, { recursive: true, force: true }))
+  }
+  const listing = (fake: ReturnType<typeof createFakeContext>, list: () => Promise<unknown>) => {
+    ;(fake.context as unknown as Record<string, unknown>).plugin = { list }
+    return fake
+  }
+
+  test("skips a fallback whose owner is installed and keeps the rest", () =>
+    withAgents(async (paths) => {
+      const fake = listing(createFakeContext(), async () => ({ data: [{ id: "srobroek.agent-researcher" }] }))
+      const registration = await registerFallbackAgents(fake.context, paths, owners)
+      expect([...fake.agents.keys()]).toEqual(["helper"])
+      await registration.dispose()
+      expect(fake.active()).toBe(0)
+    }))
+
+  test("registers the fallback without its owner, and never over an existing agent", () =>
+    withAgents(async (paths) => {
+      const fake = listing(createFakeContext(), async () => ({ data: [] }))
+      await registerFallbackAgents(fake.context, paths, owners)
+      expect(fake.agents.get("researcher")?.system).toBe("researcher prompt")
+      const taken = listing(createFakeContext({ agents: [{ id: "researcher", system: "owner" }] }), async () => [])
+      await registerFallbackAgents(taken.context, paths, owners)
+      expect(taken.agents.get("researcher")?.system).toBe("owner")
+    }))
+
+  test("listPlugins treats a failing or slow plugin.list as nothing installed", async () => {
+    const fake = createFakeContext()
+    expect(await listPlugins(listing(fake, async () => Promise.reject(new Error("x"))).context.plugin)).toBeUndefined()
+    expect(await listPlugins(listing(fake, () => new Promise(() => {})).context.plugin, 5)).toBeUndefined()
+    expect(await listPlugins(listing(fake, async () => [1]).context.plugin)).toEqual([1])
   })
 })

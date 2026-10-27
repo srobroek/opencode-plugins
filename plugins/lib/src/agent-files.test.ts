@@ -58,6 +58,14 @@ describe("parseAgentFile", () => {
     expect(() => parseAgentFile("---\nrequest:\n  body: {}\n---\nx", "x")).toThrow("request supports only headers")
   })
 
+  test("reads hidden and skips comment lines", () => {
+    const text = "---\n# Generated. Do not edit.\nmode: subagent\nhidden: true\npermissions:\n  # a note\n  - action: read\n    resource: \"*\"\n    effect: allow\n---\nhi"
+    expect(parseAgentFile(text, "x")).toMatchObject({ hidden: true, permissions: [{ action: "read", resource: "*", effect: "allow" }] })
+    expect(parseAgentFile("---\nhidden: false\n---\nhi", "x").hidden).toBe(false)
+    expect(parseAgentFile("---\nmode: all\n---\nhi", "x").hidden).toBeUndefined()
+    expect(() => parseAgentFile("---\nhidden: yes\n---\nx", "x")).toThrow("hidden must be true or false")
+  })
+
   test("rejects keys a shipped agent must not carry", () => {
     expect(() => parseAgentFile('---\nmodel: "a/b"\n---\nx', "x")).toThrow("unsupported frontmatter key model")
     expect(() => parseAgentFile("---\nmode: boss\n---\nx", "x")).toThrow("bad mode")
@@ -102,6 +110,16 @@ describe("shapeAgent", () => {
       system: file.system,
       permissions: file.permissions,
     })
+  })
+
+  test("hidden fills in, but a configured value wins", () => {
+    const file = { ...parseAgentFile("---\nhidden: true\n---\nhi", "x") }
+    const created: Parameters<typeof shapeAgent>[0] = {}
+    shapeAgent(created, file, true)
+    expect(created.hidden).toBe(true)
+    const shown: Parameters<typeof shapeAgent>[0] = { hidden: false }
+    shapeAgent(shown, file, false)
+    expect(shown.hidden).toBe(false)
   })
 
   test("a configured agent keeps its fields and gains the file's rules after its own", () => {

@@ -37,7 +37,7 @@ function parseAgentFile(text, id) {
     rule = undefined;
   };
   for (const line of (match[1] ?? "").split(/\r?\n/)) {
-    if (!line.trim())
+    if (!line.trim() || /^\s*#/.test(line))
       continue;
     if (section === "permissions") {
       const item = /^\s+(-\s+)?([a-z]+):\s*(.*)$/.exec(line);
@@ -80,6 +80,11 @@ function parseAgentFile(text, id) {
       if (!MODES.includes(mode))
         throw new Error(`agent ${id}: bad mode ${mode}`);
       agent.mode = mode;
+    } else if (key === "hidden") {
+      const hidden = scalar(value);
+      if (hidden !== "true" && hidden !== "false")
+        throw new Error(`agent ${id}: hidden must be true or false`);
+      agent.hidden = hidden === "true";
     } else if (key === "steps") {
       const steps = Number(scalar(value));
       if (!Number.isInteger(steps) || steps <= 0)
@@ -116,6 +121,8 @@ function shapeAgent(agent, file, created) {
   if (created || agent.mode === undefined)
     agent.mode = file.mode;
   agent.system ??= file.system;
+  if (file.hidden !== undefined)
+    agent.hidden ??= file.hidden;
   if (file.steps !== undefined)
     agent.steps ??= file.steps;
   if (file.request)

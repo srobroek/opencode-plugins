@@ -36,7 +36,7 @@ function parseAgentFile(text, id) {
     rule = undefined;
   };
   for (const line of (match[1] ?? "").split(/\r?\n/)) {
-    if (!line.trim())
+    if (!line.trim() || /^\s*#/.test(line))
       continue;
     if (section === "permissions") {
       const item = /^\s+(-\s+)?([a-z]+):\s*(.*)$/.exec(line);
@@ -79,6 +79,11 @@ function parseAgentFile(text, id) {
       if (!MODES.includes(mode))
         throw new Error(`agent ${id}: bad mode ${mode}`);
       agent.mode = mode;
+    } else if (key === "hidden") {
+      const hidden = scalar(value);
+      if (hidden !== "true" && hidden !== "false")
+        throw new Error(`agent ${id}: hidden must be true or false`);
+      agent.hidden = hidden === "true";
     } else if (key === "steps") {
       const steps = Number(scalar(value));
       if (!Number.isInteger(steps) || steps <= 0)
@@ -115,18 +120,55 @@ function shapeAgent(agent, file, created) {
   if (created || agent.mode === undefined)
     agent.mode = file.mode;
   agent.system ??= file.system;
+  if (file.hidden !== undefined)
+    agent.hidden ??= file.hidden;
   if (file.steps !== undefined)
     agent.steps ??= file.steps;
   if (file.request)
     agent.request = { ...agent.request, headers: { ...file.request.headers, ...agent.request?.headers } };
   agent.permissions = [...agent.permissions ?? [], ...file.permissions];
 }
-async function registerAgents(agent, paths) {
+
+// plugins/lib/src/agent-fallback.ts
+var PLUGIN_LIST_TIMEOUT_MS = 2000;
+function listsPlugin(listed, name) {
+  const entries = Array.isArray(listed) ? listed : listed?.data;
+  if (!Array.isArray(entries))
+    return false;
+  const target = new RegExp(`(^|[/:@])(opencode-)?${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`);
+  const names = (value) => typeof value === "string" && target.test(value);
+  return entries.some((entry) => entry?.id === `srobroek.${name}` || names(entry?.source?.target) || names(entry?.source?.path));
+}
+function ownedElsewhere(listed, owners) {
+  return new Set(Object.entries(owners).filter(([, owner]) => listsPlugin(listed, owner)).map(([id]) => id));
+}
+function keepFallback(id, owners, owned, exists) {
+  if (!(id in owners))
+    return true;
+  return !owned.has(id) && !exists;
+}
+async function listPlugins(plugin, ms = PLUGIN_LIST_TIMEOUT_MS) {
+  let timer;
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(undefined), ms);
+  });
+  try {
+    return await Promise.race([plugin.list(), timeout]);
+  } catch {
+    return;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+async function registerFallbackAgents(ctx, paths, owners) {
   const files = paths.map(readAgentFile);
-  return agent.transform((editor) => {
+  const owned = files.some((file) => (file.id in owners)) ? ownedElsewhere(await listPlugins(ctx.plugin), owners) : new Set;
+  return ctx.agent.transform((editor) => {
     for (const file of files) {
       const created = editor.get(file.id) === undefined;
-      editor.update(file.id, (info) => shapeAgent(info, file, created));
+      if (!keepFallback(file.id, owners, owned, !created))
+        continue;
+      editor.update(file.id, (draft) => shapeAgent(draft, file, created));
     }
   });
 }
@@ -213,7 +255,7 @@ function contentPaths(moduleUrl) {
     agents: agentPaths(fileURLToPath(new URL("../agents", moduleUrl)))
   };
 }
-function contentPlugin(id, moduleUrl) {
+function contentPlugin(id, moduleUrl, options = {}) {
   return Plugin.define({
     id,
     async setup(ctx) {
@@ -227,7 +269,7 @@ function contentPlugin(id, moduleUrl) {
         if (skills.length > 0)
           registrations.push(await registerSkills(ctx.skill, skills));
         if (agents.length > 0)
-          registrations.push(await registerAgents(ctx.agent, agents));
+          registrations.push(await registerFallbackAgents(ctx, agents, options.fallbacks ?? {}));
       } catch (error) {
         await cleanup();
         throw error;

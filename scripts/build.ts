@@ -7,6 +7,8 @@
 // `tui.js`, ...) because OpenCode loads a local plugin directory by file name,
 // not through package.json exports. TSX sources get the OpenTUI Solid
 // transform here, because OpenCode only compiles TSX outside node_modules.
+// It also composes each `agents.src/<id>.md` into the committed `agents/<id>.md`,
+// inlining `{{include <fragment>}}` lines from plugins/lib/src/<fragment>.md.
 //
 //   bun scripts/build.ts          build all plugins
 //   bun scripts/build.ts --check  fail when committed output is stale
@@ -14,6 +16,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import path from "node:path"
 import { createSolidTransformPlugin } from "@opentui/solid/bun-plugin"
+import { composeAgentFile, generatedComment } from "../plugins/lib/src/fragments.ts"
 
 const HOST_MODULES = [
   "@opencode/plugin",
@@ -87,6 +90,33 @@ export async function buildPlugin(dir: string): Promise<Output[]> {
   return outputs
 }
 
+const AGENT_SOURCES = "agents.src"
+
+/** The `agents/<id>.md` composed from every `agents.src/<id>.md`. */
+export function composeAgents(dir: string, read?: (name: string) => string): Output[] {
+  const sources = path.join(dir, AGENT_SOURCES)
+  if (!existsSync(sources)) return []
+  return readdirSync(sources)
+    .filter((name) => name.endsWith(".md"))
+    .sort()
+    .map((name) => ({
+      file: path.join(dir, "agents", name),
+      contents: composeAgentFile(readFileSync(path.join(sources, name), "utf8"), `${AGENT_SOURCES}/${name}`, read),
+    }))
+}
+
+/** Composed agent files whose source is gone: they carry the generated comment but no build produces them. */
+export function orphanAgents(dir: string, outputs: readonly Output[]): string[] {
+  const agents = path.join(dir, "agents")
+  if (!existsSync(agents)) return []
+  const expected = new Set(outputs.map((output) => output.file))
+  return readdirSync(agents)
+    .filter((name) => name.endsWith(".md"))
+    .map((name) => path.join(agents, name))
+    .filter((file) => !expected.has(file))
+    .filter((file) => readFileSync(file, "utf8").startsWith(`---\n${generatedComment(`${AGENT_SOURCES}/${path.basename(file)}`)}\n`))
+}
+
 function listFiles(dir: string): string[] {
   if (!existsSync(dir)) return []
   return readdirSync(dir, { recursive: true, withFileTypes: true })
@@ -112,6 +142,18 @@ async function main(check: boolean) {
     .map((entry) => path.join(pluginsDir, entry.name))
   const problems: string[] = []
   for (const dir of dirs) {
+    const agents = composeAgents(dir)
+    const orphans = orphanAgents(dir, agents)
+    const changed = agents.filter((output) => !existsSync(output.file) || readFileSync(output.file, "utf8") !== output.contents)
+    if (check) problems.push(...changed.map((output) => output.file), ...orphans)
+    else {
+      for (const file of orphans) rmSync(file)
+      for (const output of changed) {
+        mkdirSync(path.dirname(output.file), { recursive: true })
+        writeFileSync(output.file, output.contents)
+      }
+      if (agents.length > 0) console.log(`composed ${agents.length} agent(s) in ${path.relative(root, dir)}`)
+    }
     const outputs = await buildPlugin(dir)
     if (outputs.length === 0) continue
     if (check) {

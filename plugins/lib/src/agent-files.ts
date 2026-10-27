@@ -2,7 +2,7 @@
  * Register agent markdown shipped inside a plugin package through `ctx.agent.transform`.
  *
  * A plugin keeps its agents as `agents/<id>.md` in the V2 markdown shape that
- * `scripts/convert-agent.ts` writes: flat `description`, `mode` and `steps` keys, a
+ * `scripts/convert-agent.ts` writes: flat `description`, `mode`, `hidden` and `steps` keys, a
  * `request.headers` map, a `permissions` list of `action`/`resource`/`effect` items, and
  * the prompt as the body. Shipped agents never pin a model: they name a model-roles tier
  * in the `x-opencode-model-role` header, and without that plugin inherit the session model.
@@ -19,6 +19,8 @@ export type AgentFile = {
   id: string
   description?: string
   mode: AgentMode
+  /** Kept out of listings and the subagent catalog; callers spawn it by id. */
+  hidden?: boolean
   steps?: number
   request?: { headers: Record<string, string> }
   permissions: AgentPermission[]
@@ -54,7 +56,7 @@ export function parseAgentFile(text: string, id: string): AgentFile {
     rule = undefined
   }
   for (const line of (match[1] ?? "").split(/\r?\n/)) {
-    if (!line.trim()) continue
+    if (!line.trim() || /^\s*#/.test(line)) continue
     if (section === "permissions") {
       const item = /^\s+(-\s+)?([a-z]+):\s*(.*)$/.exec(line)
       if (item) {
@@ -91,6 +93,10 @@ export function parseAgentFile(text: string, id: string): AgentFile {
       const mode = scalar(value)
       if (!MODES.includes(mode)) throw new Error(`agent ${id}: bad mode ${mode}`)
       agent.mode = mode as AgentMode
+    } else if (key === "hidden") {
+      const hidden = scalar(value)
+      if (hidden !== "true" && hidden !== "false") throw new Error(`agent ${id}: hidden must be true or false`)
+      agent.hidden = hidden === "true"
     } else if (key === "steps") {
       const steps = Number(scalar(value))
       if (!Number.isInteger(steps) || steps <= 0) throw new Error(`agent ${id}: steps must be a positive integer`)
@@ -143,6 +149,7 @@ type MutableAgent = {
   name?: string
   description?: string
   mode?: string
+  hidden?: boolean
   system?: string
   steps?: number
   request?: { headers?: Record<string, string> }
@@ -160,6 +167,7 @@ export function shapeAgent(agent: MutableAgent, file: AgentFile, created: boolea
   if (file.description !== undefined) agent.description ??= file.description
   if (created || agent.mode === undefined) agent.mode = file.mode
   agent.system ??= file.system
+  if (file.hidden !== undefined) agent.hidden ??= file.hidden
   if (file.steps !== undefined) agent.steps ??= file.steps
   if (file.request) agent.request = { ...agent.request, headers: { ...file.request.headers, ...agent.request?.headers } }
   agent.permissions = [...(agent.permissions ?? []), ...file.permissions]
