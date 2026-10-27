@@ -1,13 +1,17 @@
 {
   "name": "@srobroek/opencode-rust",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Rust migration-edit gate, cargo install, RUSTFLAGS linker and global target-dir advisories, and Rust guidance skills.",
   "private": true,
   "type": "module",
   "exports": {
     ".": "./dist/index.js"
   },
-  "files": ["dist", "index.js", "skills"],
+  "files": [
+    "dist",
+    "index.js",
+    "skills"
+  ],
   "peerDependencies": {
     "@opencode/plugin": "^2.1.4"
   },

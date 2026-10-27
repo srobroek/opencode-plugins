@@ -1,13 +1,18 @@
 {
   "name": "@srobroek/opencode-journeys",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Author, validate and maintain user journeys: journeys.py tools, six skills and the journey-scribe and journey-validator subagents.",
   "private": true,
   "type": "module",
   "exports": {
     ".": "./dist/index.js"
   },
-  "files": ["dist", "index.js", "skills", "agents"],
+  "files": [
+    "dist",
+    "index.js",
+    "skills",
+    "agents"
+  ],
   "opencode-plugins": {
     "claude": false,
     "codex": false

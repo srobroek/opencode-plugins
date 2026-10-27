@@ -1,13 +1,19 @@
 {
   "name": "@srobroek/opencode-design",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "UI and UX design skills (system audit, DESIGN.md, browser verification, accessibility, motion, microcopy, prototypes, wireframes), four design subagents, nine beads formulas with a design_setup installer, and an impeccable detector scan tool.",
   "private": true,
   "type": "module",
   "exports": {
     ".": "./dist/index.js"
   },
-  "files": ["dist", "index.js", "skills", "agents", "formulas"],
+  "files": [
+    "dist",
+    "index.js",
+    "skills",
+    "agents",
+    "formulas"
+  ],
   "opencode-plugins": {
     "description": "UI and UX design skills: design-system audit, DESIGN.md, rendered-surface review, accessibility audit, motion, microcopy, prototypes, and wireframes."
   },

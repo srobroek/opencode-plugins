@@ -1,13 +1,17 @@
 {
   "name": "@srobroek/opencode-project",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Project lifecycle: pick an OSI-approved license from the project's constraints.",
   "private": true,
   "type": "module",
   "exports": {
     ".": "./dist/index.js"
   },
-  "files": ["dist", "index.js", "skills"],
+  "files": [
+    "dist",
+    "index.js",
+    "skills"
+  ],
   "opencode-plugins": {
     "category": "productivity"
   },

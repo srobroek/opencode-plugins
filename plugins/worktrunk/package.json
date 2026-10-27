@@ -1,13 +1,17 @@
 {
   "name": "@srobroek/opencode-worktrunk",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Worktrunk (wt) worktree strategy, wt merge policy gate and Worktrunk skills for OpenCode V2.",
   "private": true,
   "type": "module",
   "exports": {
     ".": "./dist/index.js"
   },
-  "files": ["dist", "index.js", "skills"],
+  "files": [
+    "dist",
+    "index.js",
+    "skills"
+  ],
   "opencode-plugins": {
     "description": "Worktrunk (wt) skills: work in linked worktrees and run deterministic preflight checks before an agent run or merge."
   },

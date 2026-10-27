@@ -1,13 +1,17 @@
 {
   "name": "@srobroek/opencode-debate",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Stress-test a decision from both sides, grill a plan in frontier rounds, or write a questionnaire for someone else.",
   "private": true,
   "type": "module",
   "exports": {
     ".": "./dist/index.js"
   },
-  "files": ["dist", "index.js", "skills"],
+  "files": [
+    "dist",
+    "index.js",
+    "skills"
+  ],
   "opencode-plugins": {
     "category": "productivity"
   },

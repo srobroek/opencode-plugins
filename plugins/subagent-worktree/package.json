@@ -1,13 +1,17 @@
 {
   "name": "@srobroek/opencode-subagent-worktree",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Runs opted-in subagents in their own git worktree and merges their branch back with wt merge.",
   "private": true,
   "type": "module",
   "exports": {
     ".": "./dist/index.js"
   },
-  "files": ["dist", "index.js", "NOTICE"],
+  "files": [
+    "dist",
+    "index.js",
+    "NOTICE"
+  ],
   "peerDependencies": {
     "@opencode/plugin": "^2.1.4"
   },

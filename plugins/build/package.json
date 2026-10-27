@@ -1,13 +1,17 @@
 {
   "name": "@srobroek/opencode-build",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "External-repository worker subagent: clone, follow the target's conventions, edit, verify, and publish only when delegated.",
   "private": true,
   "type": "module",
   "exports": {
     ".": "./dist/index.js"
   },
-  "files": ["dist", "index.js", "agents"],
+  "files": [
+    "dist",
+    "index.js",
+    "agents"
+  ],
   "peerDependencies": {
     "@opencode/plugin": "^2.1.4"
   },
