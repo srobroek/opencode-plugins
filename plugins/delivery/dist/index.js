@@ -3311,6 +3311,7 @@ function malformedNote(verdict, sessionID) {
 var LAND_ACTION = "delivery_land";
 var CLEANUP_ACTION = "delivery_cleanup";
 var SKILL_PATH = fileURLToPath2(new URL("../skills/delivery-git-workflow/SKILL.md", import.meta.url));
+var FAN_OUT_SKILL_PATH = fileURLToPath2(new URL("../skills/delivery-fan-out/SKILL.md", import.meta.url));
 var FAN_OUT_PATH = fileURLToPath2(new URL("../instructions/delivery-fan-out.md", import.meta.url));
 var PLUGIN_LIST_TIMEOUT_MS = 2000;
 function withTimeout(promise, ms) {
@@ -3589,6 +3590,8 @@ receipt: ${result.path}` : `delivery_cleanup refused: ${result.reason}`;
     const context = await ctx.session.hook("context", async (event) => {
       if (AGENT_IDS.includes(event.agent))
         return;
+      if (!("subagent" in event.tools))
+        return;
       let known = primary.get(event.sessionID);
       if (known === undefined) {
         known = isPrimary(ctx, event.sessionID);
@@ -3602,7 +3605,7 @@ receipt: ${result.path}` : `delivery_cleanup refused: ${result.reason}`;
       primary.clear();
     });
   }
-  const skills = await registerSkills(ctx.skill, [SKILL_PATH]);
+  const skills = await registerSkills(ctx.skill, [SKILL_PATH, FAN_OUT_SKILL_PATH]);
   disposers.push(() => skills.dispose());
   return async () => {
     for (const dispose of disposers.reverse())
@@ -3618,6 +3621,7 @@ export {
   AGENT_VERDICTS,
   CLEANUP_ACTION,
   FAN_OUT_PATH,
+  FAN_OUT_SKILL_PATH,
   LAND_ACTION,
   SKILL_PATH,
   availableModel,

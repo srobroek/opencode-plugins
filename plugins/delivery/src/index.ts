@@ -27,6 +27,7 @@ export { AGENT_VERDICTS, parseVerdict } from "./verdict.ts"
 export const LAND_ACTION = "delivery_land"
 export const CLEANUP_ACTION = "delivery_cleanup"
 export const SKILL_PATH = fileURLToPath(new URL("../skills/delivery-git-workflow/SKILL.md", import.meta.url))
+export const FAN_OUT_SKILL_PATH = fileURLToPath(new URL("../skills/delivery-fan-out/SKILL.md", import.meta.url))
 export const FAN_OUT_PATH = fileURLToPath(new URL("../instructions/delivery-fan-out.md", import.meta.url))
 
 export type DeliveryOptions = {
@@ -41,7 +42,7 @@ export type DeliveryOptions = {
    * an override, an agent's file model applies only when the model-roles plugin is absent.
    */
   models: Record<string, string | false>
-  /** Add the fan-out instructions to primary sessions. Default true. */
+  /** Add the short fan-out instructions to primary sessions that can call `subagent`. Default true. */
   fanOut: boolean
   /** Parse delivery-agent verdicts into subagent result metadata. Default true. */
   verdicts: boolean
@@ -366,6 +367,7 @@ export async function setupDelivery(ctx: Context): Promise<() => Promise<void>> 
     const primary = new Map<string, Promise<boolean>>()
     const context = await ctx.session.hook("context", async (event) => {
       if ((AGENT_IDS as readonly string[]).includes(event.agent)) return
+      if (!("subagent" in event.tools)) return
       let known = primary.get(event.sessionID)
       if (known === undefined) {
         known = isPrimary(ctx, event.sessionID)
@@ -379,7 +381,7 @@ export async function setupDelivery(ctx: Context): Promise<() => Promise<void>> 
     })
   }
 
-  const skills = await registerSkills(ctx.skill, [SKILL_PATH])
+  const skills = await registerSkills(ctx.skill, [SKILL_PATH, FAN_OUT_SKILL_PATH])
   disposers.push(() => skills.dispose())
 
   return async () => {

@@ -8,6 +8,7 @@ import plugin, {
   CLEANUP_ACTION,
   confirmDelivery,
   FAN_OUT_PATH,
+  FAN_OUT_SKILL_PATH,
   LAND_ACTION,
   parseOptions,
   SKILL_PATH,
@@ -34,6 +35,7 @@ describe("setup", () => {
     expect(fake.hooks("session")).toEqual(["context"])
     expect([...fake.agents.keys()].sort()).toEqual([...AGENT_IDS].sort())
     expect(fake.skills.get("delivery-git-workflow")).toMatchObject({ path: SKILL_PATH })
+    expect(fake.skills.get("delivery-fan-out")).toMatchObject({ path: FAN_OUT_SKILL_PATH, autoinvoke: false })
     await cleanup?.()
     expect(fake.active()).toBe(0)
     expect(fake.tools.size).toBe(0)
@@ -246,13 +248,18 @@ describe("verdict hook", () => {
 })
 
 describe("fan-out instructions", () => {
-  const fire = async (fake: ReturnType<typeof createFakeContext>, sessionID: string, agent = "build") =>
+  const fire = async (
+    fake: ReturnType<typeof createFakeContext>,
+    sessionID: string,
+    agent = "build",
+    tools: Record<string, unknown> = { subagent: {} },
+  ) =>
     fake.fire.session("context", {
       sessionID,
       agent,
       system: [] as Array<{ type: string; text: string }>,
       messages: [],
-      tools: {},
+      tools,
     })
 
   test("a primary session gets the static text; a child session and delivery agents do not", async () => {
@@ -263,5 +270,17 @@ describe("fan-out instructions", () => {
     expect((await fire(fake, "ses_child")).system).toEqual([])
     expect((await fire(fake, "ses_root", "implementer")).system).toEqual([])
     expect(text).not.toMatch(/skill:\/\/|rule:\/\/|agent:\/\/|`task`/)
+  })
+
+  test("an agent without the subagent tool gets no fan-out text", async () => {
+    const { fake } = await load({ sessions: [{ id: "ses_root" }] })
+    expect((await fire(fake, "ses_root", "plan", {})).system).toEqual([])
+  })
+
+  test("the always-on text stays short and points at the full rules", () => {
+    const text = readFileSync(FAN_OUT_PATH, "utf8").trim()
+    expect(text.length).toBeLessThanOrEqual(1000)
+    expect(text).toContain("`delivery-fan-out` skill")
+    expect(readFileSync(FAN_OUT_SKILL_PATH, "utf8")).toContain("FO-7")
   })
 })
