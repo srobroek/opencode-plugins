@@ -29,22 +29,44 @@ function unquote(value: string): string {
   return value
 }
 
-/** The name, description and body of a `SKILL.md`. Throws when the frontmatter has no `name`. */
+/** OpenCode's boolean spellings for frontmatter flags. */
+function flag(value: string | undefined): boolean | undefined {
+  const normalized = value?.trim().toLowerCase()
+  if (normalized === undefined) return undefined
+  if (["true", "yes", "on", "1"].includes(normalized)) return true
+  if (["false", "no", "off", "0"].includes(normalized)) return false
+  return undefined
+}
+
+/**
+ * The name, description and body of a `SKILL.md`. Throws when the frontmatter has no `name`.
+ * Like OpenCode's own loader, `metadata: { opencode/autoinvoke }` wins over
+ * `disable-model-invocation`.
+ */
 export function parseSkillFile(text: string): SkillFile {
   const match = FRONTMATTER.exec(text.replace(/^\uFEFF/, ""))
   const fields = new Map<string, string>()
+  const metadata = new Map<string, string>()
+  let block: string | undefined
   for (const line of (match?.[1] ?? "").split(/\r?\n/)) {
     const at = line.indexOf(":")
-    if (at > 0 && !/^\s/.test(line)) fields.set(line.slice(0, at).trim(), unquote(line.slice(at + 1).trim()))
+    if (at <= 0) continue
+    const key = line.slice(0, at).trim()
+    const value = unquote(line.slice(at + 1).trim())
+    if (!/^\s/.test(line)) {
+      fields.set(key, value)
+      block = value === "" ? key : undefined
+    } else if (block === "metadata") metadata.set(unquote(key), value)
   }
   const name = fields.get("name")
   if (!name) throw new Error("SKILL.md frontmatter has no name")
   const description = fields.get("description")
   const content = match ? text.replace(/^\uFEFF/, "").slice(match[0].length) : text
+  const autoinvoke = flag(metadata.get("opencode/autoinvoke")) ?? (flag(fields.get("disable-model-invocation")) ? false : undefined)
   return {
     name,
     ...(description ? { description } : {}),
-    ...(fields.get("disable-model-invocation") === "true" ? { autoinvoke: false as const } : {}),
+    ...(autoinvoke === false ? { autoinvoke: false as const } : {}),
     content,
   }
 }

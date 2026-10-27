@@ -24,6 +24,20 @@ describe("parseSkillFile", () => {
     })
     expect(parseSkillFile("---\nname: auto\ndisable-model-invocation: false\n---\nx")).not.toHaveProperty("autoinvoke")
   })
+
+  test("metadata opencode/autoinvoke: false turns autoinvoke off and wins over disable-model-invocation", () => {
+    expect(parseSkillFile("---\nname: ref\nmetadata:\n  opencode/autoinvoke: false\n---\nx")).toEqual({
+      name: "ref",
+      autoinvoke: false,
+      content: "x",
+    })
+    expect(
+      parseSkillFile("---\nname: on\ndisable-model-invocation: true\nmetadata:\n  opencode/autoinvoke: true\n---\nx"),
+    ).not.toHaveProperty("autoinvoke")
+    expect(
+      parseSkillFile("---\nname: other\nnotes:\n  opencode/autoinvoke: false\n---\nx"),
+    ).not.toHaveProperty("autoinvoke")
+  })
 })
 
 describe("skillPaths", () => {

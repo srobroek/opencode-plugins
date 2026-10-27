@@ -32,23 +32,43 @@ function unquote(value) {
     return value.slice(1, -1);
   return value;
 }
+function flag(value) {
+  const normalized = value?.trim().toLowerCase();
+  if (normalized === undefined)
+    return;
+  if (["true", "yes", "on", "1"].includes(normalized))
+    return true;
+  if (["false", "no", "off", "0"].includes(normalized))
+    return false;
+  return;
+}
 function parseSkillFile(text) {
   const match = FRONTMATTER.exec(text.replace(/^\uFEFF/, ""));
   const fields = new Map;
+  const metadata = new Map;
+  let block;
   for (const line of (match?.[1] ?? "").split(/\r?\n/)) {
     const at = line.indexOf(":");
-    if (at > 0 && !/^\s/.test(line))
-      fields.set(line.slice(0, at).trim(), unquote(line.slice(at + 1).trim()));
+    if (at <= 0)
+      continue;
+    const key = line.slice(0, at).trim();
+    const value = unquote(line.slice(at + 1).trim());
+    if (!/^\s/.test(line)) {
+      fields.set(key, value);
+      block = value === "" ? key : undefined;
+    } else if (block === "metadata")
+      metadata.set(unquote(key), value);
   }
   const name = fields.get("name");
   if (!name)
     throw new Error("SKILL.md frontmatter has no name");
   const description = fields.get("description");
   const content = match ? text.replace(/^\uFEFF/, "").slice(match[0].length) : text;
+  const autoinvoke = flag(metadata.get("opencode/autoinvoke")) ?? (flag(fields.get("disable-model-invocation")) ? false : undefined);
   return {
     name,
     ...description ? { description } : {},
-    ...fields.get("disable-model-invocation") === "true" ? { autoinvoke: false } : {},
+    ...autoinvoke === false ? { autoinvoke: false } : {},
     content
   };
 }
@@ -438,7 +458,7 @@ function commandText(value) {
     return argv[2];
   return argv.map(quoteWord).join(" ");
 }
-function flag(value) {
+function flag2(value) {
   if (typeof value === "boolean")
     return value;
   if (value === "true")
@@ -471,7 +491,7 @@ function shellAliasInput(input) {
   const timeout = milliseconds(value.timeout ?? value.timeout_ms);
   if (timeout !== undefined)
     out.timeout = timeout;
-  const background = flag(value.background ?? value.run_in_background);
+  const background = flag2(value.background ?? value.run_in_background);
   if (background !== undefined)
     out.background = background;
   return out;
