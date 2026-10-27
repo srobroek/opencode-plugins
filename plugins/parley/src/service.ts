@@ -2,12 +2,14 @@ import type { SubmittedAnswer } from "./answers.ts"
 import { FALLBACK_KINDS, fromQuestionTool, type Prompt, toPrompt, unsupported } from "./fallback.ts"
 import { Presence } from "./presence.ts"
 import { coerceQuestion, type Question, validateQuestions } from "./questions.ts"
-import { collect, type Round, type RoundResult, Rounds, view, type WaitMode, waitFor } from "./rounds.ts"
+import { collect, type Round, type RoundResult, Rounds, TIMEOUT, view, type WaitMode, waitFor } from "./rounds.ts"
 import type { RoundEvent } from "./rpc.ts"
 import { BUILTIN, fromPrompts, nativeResult, shouldTakeOver } from "./takeover.ts"
 
 export const DEFAULT_TIMEOUT_S = 1800
 export const CLOSED_TTL_MS = 30 * 60_000
+/** Timer jitter tolerated when deciding whether a timed-out call holds the round's deadline. */
+const DEADLINE_SLACK_MS = 250
 
 export interface Settings {
   /** `"question"` falls back to the built-in question tool when no TUI is attached. */
@@ -67,6 +69,12 @@ export interface WaitInput {
   readonly wait?: "all" | "any"
   readonly ids?: readonly string[]
   readonly timeout_s?: number
+}
+
+/** `timeout_s` as seconds: the default when missing, numbers sent as strings repaired, 0 for no limit. */
+export function timeoutSeconds(value: unknown): number {
+  const seconds = typeof value === "string" && value.trim() !== "" ? Number(value) : value
+  return typeof seconds === "number" && Number.isFinite(seconds) && seconds >= 0 ? seconds : DEFAULT_TIMEOUT_S
 }
 
 const unavailable = (reason: string): Result => ({ status: "unavailable", reason, answers: [], pending: [] })
@@ -155,6 +163,7 @@ export class Parley {
     )
     if ("errors" in opened) throw new InputError(`Invalid questions:\n- ${opened.errors.join("\n- ")}`)
     const { round, joined } = opened
+    if ((input.wait ?? "all") !== "none") this.#extendDeadline(round, input.timeout_s)
     await this.deps.emit({ sessionID: round.sessionID, roundID: round.id, action: joined ? "updated" : "opened" })
     const ids = questions.map((question) => question.id)
     const result = await this.#await(round, {
@@ -166,9 +175,20 @@ export class Parley {
     return { result, questions: round.questions }
   }
 
+  /** Records when a waiting call gives up, so the TUI can show the time left. The latest deadline wins. */
+  #extendDeadline(round: Round, timeout_s: number | undefined) {
+    const seconds = timeoutSeconds(timeout_s)
+    if (seconds === 0 || round.status !== "open") return
+    round.deadline = Math.max(round.deadline ?? 0, this.#now() + seconds * 1000)
+  }
+
   async wait(input: WaitInput, context: CallContext): Promise<{ result: Result; questions: readonly Question[] }> {
     const round = this.rounds.current(context.sessionID) ?? this.rounds.latest(context.sessionID)
     if (!round) return { result: { status: "none", answers: [], pending: [] }, questions: [] }
+    if (round.status === "open") {
+      this.#extendDeadline(round, input.timeout_s)
+      await this.deps.emit({ sessionID: round.sessionID, roundID: round.id, action: "updated" })
+    }
     const result = await this.#await(round, {
       mode: input.wait ?? "all",
       ids: input.ids,
@@ -253,16 +273,20 @@ export class Parley {
       const outcome = await waitFor(this.rounds, round, {
         mode: options.mode,
         ...(options.ids === undefined ? {} : { ids: options.ids }),
-        timeoutMs: (options.timeout_s ?? DEFAULT_TIMEOUT_S) * 1000,
+        timeoutMs: timeoutSeconds(options.timeout_s) * 1000,
         ...(context.signal === undefined ? {} : { signal: context.signal }),
       })
-      if (outcome === "aborted" && this.rounds.cancel(round.id, "aborted", this.#now()))
+      // A timeout closes the round like a dismissal, so the TUI takes it down and the model moves on.
+      // Only the call with the latest deadline closes it; one that gave up earlier leaves it to that call.
+      const last = round.deadline === undefined || this.#now() >= round.deadline - DEADLINE_SLACK_MS
+      const closing = outcome === "aborted" ? "aborted" : outcome === "timeout" && last ? TIMEOUT : undefined
+      if (closing && this.rounds.cancel(round.id, closing, this.#now()))
         await this.deps.emit({
           sessionID: round.sessionID,
           roundID: round.id,
           action: "closed",
-          status: "cancelled",
-          reason: "aborted",
+          status: closing === TIMEOUT ? "timeout" : "cancelled",
+          reason: closing,
         })
       return {
         ...collect(round, { ...(options.ids === undefined ? {} : { ids: options.ids }), timedOut: outcome === "timeout" }),

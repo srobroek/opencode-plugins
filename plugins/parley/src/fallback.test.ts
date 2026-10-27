@@ -70,9 +70,8 @@ describe("fromQuestionTool", () => {
       {
         id: "m",
         status: "answered",
-        value: { selected: ["a", "b"] },
+        value: { selected: ["a", "b"], other: "and more" },
         accepted_recommendation: false,
-        note: "and more",
       },
       { id: "t", status: "answered", value: { text: "hello" }, accepted_recommendation: false },
     ])

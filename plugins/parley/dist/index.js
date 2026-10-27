@@ -221,6 +221,31 @@ function sliderBounds(question) {
   const step = question.step ?? 1;
   return { min, max, step };
 }
+function sliderAnchor(question, value) {
+  const { min, max } = sliderBounds(question);
+  const labels = question.labels;
+  if (!labels)
+    return;
+  if (value === min)
+    return labels.min;
+  if (value === max)
+    return labels.max;
+  return value === sliderMid(question) ? labels.mid : undefined;
+}
+function sliderMid(question) {
+  const { min, max, step } = sliderBounds(question);
+  return Number((Math.round((max - min) / 2 / step) * step + min).toFixed(10));
+}
+function sliderText(question, value) {
+  const { min, max, step } = sliderBounds(question);
+  const number = `${value}${question.unit ? ` ${question.unit}` : ""}`;
+  const label = sliderAnchor(question, value);
+  if (label === undefined)
+    return number;
+  const count = Math.round((max - min) / step) + 1;
+  const every = Array.from({ length: count }, (_, index) => Number((min + index * step).toFixed(10)));
+  return count <= 3 && every.every((at) => sliderAnchor(question, at) !== undefined) ? label : `${label} (${number})`;
+}
 function optionLabel(question, id) {
   return question.options?.find((option) => option.id === id)?.label ?? id;
 }
@@ -291,7 +316,7 @@ function validateValue(question, value) {
         return fail("selected must be option ids");
       const unique = [...new Set(selected)];
       const other = text(value.other);
-      if (other !== undefined && question.allow_other !== true)
+      if (other !== undefined && question.allow_other === false)
         return fail("free-text answer not allowed");
       const count = unique.length + (other === undefined ? 0 : 1);
       if (question.min !== undefined && count < question.min)
@@ -315,6 +340,12 @@ function validateValue(question, value) {
     }
     case "slider": {
       const { min, max, step } = sliderBounds(question);
+      const other = text(value.other);
+      if (other !== undefined) {
+        if (question.allow_other !== true)
+          return fail("free-text answer not allowed");
+        return { value: { other } };
+      }
       if (typeof value.value !== "number" || !Number.isFinite(value.value))
         return fail("value must be a number");
       if (value.value < min || value.value > max)
@@ -448,7 +479,9 @@ function describeValue(question, value) {
     case "rank":
       return (value.order ?? []).map(label).join(" > ");
     case "slider":
-      return `${String(value.value)}${question.unit ? ` ${question.unit}` : ""}`;
+      if (value.other !== undefined)
+        return `other: ${String(value.other)}`;
+      return typeof value.value === "number" ? sliderText(question, value.value) : String(value.value);
     case "rate":
       return Object.entries(value.ratings ?? {}).map(([id, rating]) => `${label(id)}=${rating}`).join(", ");
     case "ask_text":
@@ -470,6 +503,9 @@ function describeAnswer(question, answer, index) {
   const note = answer.note === undefined ? "" : ` (note: ${answer.note})`;
   return `${head}${value}${note}`;
 }
+
+// plugins/parley/src/notes.ts
+var NOTES_HINT = "Notes are the user's input: act on each one. If a note asks a question or raises a concern, answer it, or ask a follow-up parley round, before you proceed.";
 
 // plugins/parley/src/takeover.ts
 var RECOMMENDED = /\s*\(recommended\)\s*$/i;
@@ -532,6 +568,8 @@ function nativeText(entries) {
   for (const entry of entries)
     if (entry.note)
       lines.push(`Note on "${entry.question}": ${entry.note}`);
+  if (entries.some((entry) => entry.note))
+    lines.push(NOTES_HINT);
   const deferred = entries.filter((entry) => entry.deferred).map((entry) => `"${entry.question}"`);
   if (deferred.length > 0)
     lines.push(`Deferred (the user will answer later): ${deferred.join(", ")}`);
@@ -582,7 +620,7 @@ function nativeSummary(result, questions) {
 var HINTS = {
   open: "The round is open in the parley panel. Call parley_wait to collect the answers.",
   partial: "Some answers are in; the round is still open. Call parley_wait for the rest.",
-  timeout: "The user has not submitted yet. The round stays open; call parley_wait to keep waiting.",
+  timeout: "The user did not answer in time and the round closed. Go on with your recommendations for the pending ids and say so, or ask again in a new round if an answer matters.",
   unavailable: "No parley UI is available. Ask through the built-in question tool if present, otherwise as a plain markdown round in chat.",
   none: "There is no parley round for this session."
 };
@@ -605,6 +643,8 @@ function summarise(result, questions) {
   const hint = HINTS[result.status];
   if (hint)
     lines.push(hint);
+  if (result.answers.some((answer) => answer.note !== undefined))
+    lines.push(NOTES_HINT);
   return lines.join(`
 `);
 }
@@ -735,10 +775,10 @@ var questionSchema = {
       description: "Preselected: option id (ids for pick_many/rank), yes|no, up|down, number, {optionId: number} for rate, text, approve|revise, or an emoji"
     },
     options: { type: "array", items: option },
-    allow_other: { type: "boolean" },
+    allow_other: { type: "boolean", description: "Free text: pick_one/pick_many default true, slider false" },
     allow_defer: { type: "boolean" },
     depends_on: { type: "array", items: { type: "string" } },
-    min: { type: "number", description: "slider/rate bound; pick_many minimum" },
+    min: { type: "number", description: "slider (numbers only)/rate bound; pick_many minimum" },
     max: { type: "number", description: "slider/rate bound; pick_many maximum" },
     step: { type: "number" },
     unit: { type: "string" },
@@ -781,7 +821,7 @@ var askInput = {
     timeout_s: {
       type: "integer",
       minimum: 0,
-      description: "Default 1800; 0 waits without limit"
+      description: "Default 1800; 0 waits without limit. When it passes the round closes"
     },
     format: {
       type: "string",
@@ -927,7 +967,7 @@ function toSubmitted(question, raw) {
           free.push(value);
       }
       const other = free.join(", ");
-      if (other !== "" && question.allow_other !== true)
+      if (other !== "" && question.allow_other === false)
         return { id, status: "answered", value: { selected }, note: other };
       return { id, status: "answered", value: other === "" ? { selected } : { selected, other } };
     }
@@ -996,6 +1036,8 @@ class Presence {
 }
 
 // plugins/parley/src/rounds.ts
+var TIMEOUT = "timeout";
+
 class Rounds {
   newID;
   #rounds = new Map;
@@ -1137,7 +1179,7 @@ function collect(round, options = {}) {
     round.delivered.add(id);
   const answers = fresh.map((id) => round.answers.get(id));
   const pending = wanted.filter((id) => !round.answers.has(id));
-  const status = round.status === "submitted" ? "submitted" : round.status === "cancelled" ? "cancelled" : options.timedOut ? "timeout" : round.answers.size > 0 ? "partial" : "open";
+  const status = round.status === "submitted" ? "submitted" : round.status === "cancelled" ? round.reason === TIMEOUT ? "timeout" : "cancelled" : options.timedOut ? "timeout" : round.answers.size > 0 ? "partial" : "open";
   return {
     status,
     ...round.reason === undefined ? {} : { reason: round.reason },
@@ -1156,6 +1198,7 @@ function view(round) {
     status: round.status,
     questions: round.questions,
     answers: [...round.answers.values()].map(publicAnswer),
+    ...round.deadline === undefined ? {} : { deadline: round.deadline },
     ...round.callIDs.length === 0 ? {} : { callIDs: [...round.callIDs] }
   };
 }
@@ -1187,6 +1230,7 @@ function waitFor(rounds, round, options) {
 // plugins/parley/src/service.ts
 var DEFAULT_TIMEOUT_S = 1800;
 var CLOSED_TTL_MS = 30 * 60000;
+var DEADLINE_SLACK_MS = 250;
 function settingsFrom(options, env) {
   const window = Number(options.heartbeat_window_s);
   return {
@@ -1195,6 +1239,10 @@ function settingsFrom(options, env) {
     disabled: options.ui === "off" || env.PARLEY_DISABLE === "1",
     heartbeatWindowMs: Number.isFinite(window) && window > 0 ? window * 1000 : 30000
   };
+}
+function timeoutSeconds(value) {
+  const seconds = typeof value === "string" && value.trim() !== "" ? Number(value) : value;
+  return typeof seconds === "number" && Number.isFinite(seconds) && seconds >= 0 ? seconds : DEFAULT_TIMEOUT_S;
 }
 var unavailable = (reason) => ({ status: "unavailable", reason, answers: [], pending: [] });
 
@@ -1269,6 +1317,8 @@ class Parley {
 - ${opened.errors.join(`
 - `)}`);
     const { round, joined } = opened;
+    if ((input.wait ?? "all") !== "none")
+      this.#extendDeadline(round, input.timeout_s);
     await this.deps.emit({ sessionID: round.sessionID, roundID: round.id, action: joined ? "updated" : "opened" });
     const ids = questions.map((question) => question.id);
     const result = await this.#await(round, {
@@ -1279,10 +1329,20 @@ class Parley {
     });
     return { result, questions: round.questions };
   }
+  #extendDeadline(round, timeout_s) {
+    const seconds = timeoutSeconds(timeout_s);
+    if (seconds === 0 || round.status !== "open")
+      return;
+    round.deadline = Math.max(round.deadline ?? 0, this.#now() + seconds * 1000);
+  }
   async wait(input, context) {
     const round = this.rounds.current(context.sessionID) ?? this.rounds.latest(context.sessionID);
     if (!round)
       return { result: { status: "none", answers: [], pending: [] }, questions: [] };
+    if (round.status === "open") {
+      this.#extendDeadline(round, input.timeout_s);
+      await this.deps.emit({ sessionID: round.sessionID, roundID: round.id, action: "updated" });
+    }
     const result = await this.#await(round, {
       mode: input.wait ?? "all",
       ids: input.ids,
@@ -1356,16 +1416,18 @@ class Parley {
       const outcome = await waitFor(this.rounds, round, {
         mode: options.mode,
         ...options.ids === undefined ? {} : { ids: options.ids },
-        timeoutMs: (options.timeout_s ?? DEFAULT_TIMEOUT_S) * 1000,
+        timeoutMs: timeoutSeconds(options.timeout_s) * 1000,
         ...context.signal === undefined ? {} : { signal: context.signal }
       });
-      if (outcome === "aborted" && this.rounds.cancel(round.id, "aborted", this.#now()))
+      const last = round.deadline === undefined || this.#now() >= round.deadline - DEADLINE_SLACK_MS;
+      const closing = outcome === "aborted" ? "aborted" : outcome === "timeout" && last ? TIMEOUT : undefined;
+      if (closing && this.rounds.cancel(round.id, closing, this.#now()))
         await this.deps.emit({
           sessionID: round.sessionID,
           roundID: round.id,
           action: "closed",
-          status: "cancelled",
-          reason: "aborted"
+          status: closing === TIMEOUT ? "timeout" : "cancelled",
+          reason: closing
         });
       return {
         ...collect(round, { ...options.ids === undefined ? {} : { ids: options.ids }, timedOut: outcome === "timeout" }),
@@ -1408,8 +1470,11 @@ class Parley {
 // plugins/parley/src/index.ts
 var ASK_DESCRIPTION = `Ask the user one round of questions in the parley panel and wait for the answers.
 Send every question whose prerequisites are settled in one call, each with your recommended answer and rationale.
+Kinds: pick_one for categorical choices (how wide, which approach), never a slider; slider only for numeric quantities.
+ask_code is for code the user writes; to confirm a snippet use confirm with it in the body, or show_diff.
 Answers are keyed by id: answered, accepted (took your recommendation), noted (comment only) or deferred; unanswered ids are in pending.
-Status unavailable: no parley UI, so use the question tool or chat for the rest of the session. On timeout, call parley_wait.`;
+Notes are user input: answer a question or concern in a note, or ask a follow-up round, before you proceed.
+Status unavailable: no parley UI, so use the question tool or chat for the rest of the session. timeout: the round closed unanswered.`;
 var options = { permission: "parley" };
 function saveUpload(file) {
   if (file.data === undefined)
@@ -1485,7 +1550,7 @@ var src_default = Plugin.define({
       });
       editor.add({
         name: "parley_wait",
-        description: "Keep waiting on this session's open parley round after a timeout or wait none/any; returns only new answers.",
+        description: "Keep waiting on this session's open parley round after wait none/any; returns only new answers.",
         input: waitInput,
         output: resultOutput,
         options,

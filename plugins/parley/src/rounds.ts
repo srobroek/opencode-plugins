@@ -17,6 +17,8 @@ export interface Round {
   readonly callIDs: string[]
   status: RoundStatus
   reason?: string
+  /** When the longest waiting call times out and closes the round (ms since epoch). */
+  deadline?: number
   readonly created: number
   updated: number
 }
@@ -30,6 +32,8 @@ export interface RoundView {
   readonly status: RoundStatus
   readonly questions: readonly Question[]
   readonly answers: readonly Answer[]
+  /** When the round closes unanswered (ms since epoch), if a call set `timeout_s`. */
+  readonly deadline?: number
   /**
    * Taken-over `question` calls in this round. Dismissing the round hands each to the built-in tool,
    * whose form the dismissing client cancels so the turn ends exactly as a dismissed form does.
@@ -54,6 +58,9 @@ export interface OpenInput {
 }
 
 type Listener = (round: Round) => void
+
+/** Cancel reason of a round closed because a waiting call's `timeout_s` passed. */
+export const TIMEOUT = "timeout"
 
 /** In-memory rounds for one plugin instance, keyed by session. One open round per session. */
 export class Rounds {
@@ -202,7 +209,9 @@ export function collect(round: Round, options: { ids?: readonly string[]; timedO
     round.status === "submitted"
       ? "submitted"
       : round.status === "cancelled"
-        ? "cancelled"
+        ? round.reason === TIMEOUT
+          ? "timeout"
+          : "cancelled"
         : options.timedOut
           ? "timeout"
           : round.answers.size > 0
@@ -227,6 +236,7 @@ export function view(round: Round): RoundView {
     status: round.status,
     questions: round.questions,
     answers: [...round.answers.values()].map(publicAnswer),
+    ...(round.deadline === undefined ? {} : { deadline: round.deadline }),
     ...(round.callIDs.length === 0 ? {} : { callIDs: [...round.callIDs] }),
   }
 }

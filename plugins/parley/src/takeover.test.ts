@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import type { Prompt } from "./fallback.ts"
+import { NOTES_HINT } from "./notes.ts"
 import type { Question } from "./questions.ts"
 import {
   BUILTIN,
@@ -116,6 +117,7 @@ describe("native result", () => {
         'User has answered your questions: "Which database should we use?"="Postgres", "Which extras?"="Unanswered", "Project name?"="Unanswered". You can now continue with the user\'s answers in mind.',
         'Note on "Which database should we use?": we already run it',
         'Note on "Which extras?": ask product',
+        NOTES_HINT,
         'Deferred (the user will answer later): "Which extras?"',
       ].join("\n"),
     )

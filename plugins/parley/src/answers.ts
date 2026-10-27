@@ -1,4 +1,4 @@
-import { DEFAULT_EMOJIS, optionLabel, type Question, recommendedValue, sliderBounds } from "./questions.ts"
+import { DEFAULT_EMOJIS, optionLabel, type Question, recommendedValue, sliderBounds, sliderText } from "./questions.ts"
 
 export const ANSWER_STATUSES = ["answered", "accepted", "noted", "deferred"] as const
 export type AnswerStatus = (typeof ANSWER_STATUSES)[number]
@@ -87,7 +87,7 @@ export function validateValue(question: Question, value: unknown): { value: unkn
         return fail("selected must be option ids")
       const unique = [...new Set(selected as string[])]
       const other = text(value.other)
-      if (other !== undefined && question.allow_other !== true) return fail("free-text answer not allowed")
+      if (other !== undefined && question.allow_other === false) return fail("free-text answer not allowed")
       const count = unique.length + (other === undefined ? 0 : 1)
       if (question.min !== undefined && count < question.min) return fail(`pick at least ${question.min}`)
       if (question.max !== undefined && count > question.max) return fail(`pick at most ${question.max}`)
@@ -108,6 +108,11 @@ export function validateValue(question: Question, value: unknown): { value: unkn
     }
     case "slider": {
       const { min, max, step } = sliderBounds(question)
+      const other = text(value.other)
+      if (other !== undefined) {
+        if (question.allow_other !== true) return fail("free-text answer not allowed")
+        return { value: { other } }
+      }
       if (typeof value.value !== "number" || !Number.isFinite(value.value)) return fail("value must be a number")
       if (value.value < min || value.value > max) return fail(`value must be within ${min}..${max}`)
       const snapped = Number((Math.round((value.value - min) / step) * step + min).toFixed(10))
@@ -228,7 +233,8 @@ export function describeValue(question: Question, value: unknown): string {
     case "rank":
       return ((value.order as string[]) ?? []).map(label).join(" > ")
     case "slider":
-      return `${String(value.value)}${question.unit ? ` ${question.unit}` : ""}`
+      if (value.other !== undefined) return `other: ${String(value.other)}`
+      return typeof value.value === "number" ? sliderText(question, value.value) : String(value.value)
     case "rate":
       return Object.entries((value.ratings as Record<string, number>) ?? {})
         .map(([id, rating]) => `${label(id)}=${rating}`)

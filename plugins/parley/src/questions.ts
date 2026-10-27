@@ -247,6 +247,36 @@ export function sliderBounds(question: Question) {
   return { min, max, step }
 }
 
+/** The `labels` entry at a slider value (min, max, or the midpoint), if any. */
+export function sliderAnchor(question: Question, value: number): string | undefined {
+  const { min, max } = sliderBounds(question)
+  const labels = question.labels
+  if (!labels) return undefined
+  if (value === min) return labels.min
+  if (value === max) return labels.max
+  return value === sliderMid(question) ? labels.mid : undefined
+}
+
+/** The step nearest the middle of a slider's range. */
+export function sliderMid(question: Question): number {
+  const { min, max, step } = sliderBounds(question)
+  return Number((Math.round((max - min) / 2 / step) * step + min).toFixed(10))
+}
+
+/**
+ * A slider value as the user reads it: the label text when the value sits on a label, with the
+ * number in brackets unless every value is labelled (a three-step scale reads as its labels).
+ */
+export function sliderText(question: Question, value: number): string {
+  const { min, max, step } = sliderBounds(question)
+  const number = `${value}${question.unit ? ` ${question.unit}` : ""}`
+  const label = sliderAnchor(question, value)
+  if (label === undefined) return number
+  const count = Math.round((max - min) / step) + 1
+  const every = Array.from({ length: count }, (_, index) => Number((min + index * step).toFixed(10)))
+  return count <= 3 && every.every((at) => sliderAnchor(question, at) !== undefined) ? label : `${label} (${number})`
+}
+
 export function optionLabel(question: Question, id: string): string {
   return question.options?.find((option) => option.id === id)?.label ?? id
 }

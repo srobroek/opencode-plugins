@@ -14,8 +14,11 @@ export { ParleyRpc } from "./rpc.ts"
 
 const ASK_DESCRIPTION = `Ask the user one round of questions in the parley panel and wait for the answers.
 Send every question whose prerequisites are settled in one call, each with your recommended answer and rationale.
+Kinds: pick_one for categorical choices (how wide, which approach), never a slider; slider only for numeric quantities.
+ask_code is for code the user writes; to confirm a snippet use confirm with it in the body, or show_diff.
 Answers are keyed by id: answered, accepted (took your recommendation), noted (comment only) or deferred; unanswered ids are in pending.
-Status unavailable: no parley UI, so use the question tool or chat for the rest of the session. On timeout, call parley_wait.`
+Notes are user input: answer a question or concern in a note, or ask a follow-up round, before you proceed.
+Status unavailable: no parley UI, so use the question tool or chat for the rest of the session. timeout: the round closed unanswered.`
 
 const options = { permission: "parley" } as const
 
@@ -104,7 +107,7 @@ export default Plugin.define({
       editor.add({
         name: "parley_wait",
         description:
-          "Keep waiting on this session's open parley round after a timeout or wait none/any; returns only new answers.",
+          "Keep waiting on this session's open parley round after wait none/any; returns only new answers.",
         input: waitInput,
         output: resultOutput,
         options,

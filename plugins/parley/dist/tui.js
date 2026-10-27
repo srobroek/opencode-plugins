@@ -238,6 +238,31 @@ function sliderBounds(question) {
   const step = question.step ?? 1;
   return { min, max, step };
 }
+function sliderAnchor(question, value) {
+  const { min, max } = sliderBounds(question);
+  const labels = question.labels;
+  if (!labels)
+    return;
+  if (value === min)
+    return labels.min;
+  if (value === max)
+    return labels.max;
+  return value === sliderMid(question) ? labels.mid : undefined;
+}
+function sliderMid(question) {
+  const { min, max, step } = sliderBounds(question);
+  return Number((Math.round((max - min) / 2 / step) * step + min).toFixed(10));
+}
+function sliderText(question, value) {
+  const { min, max, step } = sliderBounds(question);
+  const number = `${value}${question.unit ? ` ${question.unit}` : ""}`;
+  const label = sliderAnchor(question, value);
+  if (label === undefined)
+    return number;
+  const count = Math.round((max - min) / step) + 1;
+  const every = Array.from({ length: count }, (_, index) => Number((min + index * step).toFixed(10)));
+  return count <= 3 && every.every((at) => sliderAnchor(question, at) !== undefined) ? label : `${label} (${number})`;
+}
 function optionLabel(question, id) {
   return question.options?.find((option) => option.id === id)?.label ?? id;
 }
@@ -308,7 +333,7 @@ function validateValue(question, value) {
         return fail("selected must be option ids");
       const unique = [...new Set(selected)];
       const other = text(value.other);
-      if (other !== undefined && question.allow_other !== true)
+      if (other !== undefined && question.allow_other === false)
         return fail("free-text answer not allowed");
       const count = unique.length + (other === undefined ? 0 : 1);
       if (question.min !== undefined && count < question.min)
@@ -332,6 +357,12 @@ function validateValue(question, value) {
     }
     case "slider": {
       const { min, max, step } = sliderBounds(question);
+      const other = text(value.other);
+      if (other !== undefined) {
+        if (question.allow_other !== true)
+          return fail("free-text answer not allowed");
+        return { value: { other } };
+      }
       if (typeof value.value !== "number" || !Number.isFinite(value.value))
         return fail("value must be a number");
       if (value.value < min || value.value > max)
@@ -465,7 +496,9 @@ function describeValue(question, value) {
     case "rank":
       return (value.order ?? []).map(label).join(" > ");
     case "slider":
-      return `${String(value.value)}${question.unit ? ` ${question.unit}` : ""}`;
+      if (value.other !== undefined)
+        return `other: ${String(value.other)}`;
+      return typeof value.value === "number" ? sliderText(question, value.value) : String(value.value);
     case "rate":
       return Object.entries(value.ratings ?? {}).map(([id, rating]) => `${label(id)}=${rating}`).join(", ");
     case "ask_text":

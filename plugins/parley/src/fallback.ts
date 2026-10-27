@@ -116,7 +116,7 @@ export function toSubmitted(question: Question, raw: readonly string[]): Submitt
         else free.push(value)
       }
       const other = free.join(", ")
-      if (other !== "" && question.allow_other !== true)
+      if (other !== "" && question.allow_other === false)
         return { id, status: "answered", value: { selected }, note: other }
       return { id, status: "answered", value: other === "" ? { selected } : { selected, other } }
     }
