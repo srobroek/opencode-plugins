@@ -20,8 +20,12 @@ package whose entry point default-exports `Plugin.define({ id, setup })` from
 - `bun run marketplaces:check` fails when committed marketplace files are stale.
 - `bun run agent-roles` fails when a shipped agent lacks a known tier in its
   `x-opencode-model-role` header.
+- `bun run descriptions` fails when a tool's first description line passes 120
+  characters, a direct tool's schema passes 1.5k (Code Mode 3k), `codemode: false`
+  lacks a `check-descriptions: direct <reason>` comment, a skill description passes
+  160 characters, an agent description 150, or an `instructions/` block 1k.
 - `bun run check` runs typecheck, lint, test, build:check, marketplaces:check,
-  steering and agent-roles before you hand work off.
+  steering, agent-roles and descriptions before you hand work off.
 
 ## Conventions
 
@@ -52,6 +56,12 @@ package whose entry point default-exports `Plugin.define({ id, setup })` from
 - Keep decision logic in pure exported functions and test them directly; keep
   `setup` a thin adapter over the plugin context.
 - Return the cleanup function from `setup` and dispose every registration in it.
+- Every request lists each skill and agent description and each tool's first
+  description line, so keep them short: a skill description is one sentence of at
+  most 120 characters that keeps its trigger words, and a skill that only other
+  skills, agents or tool results load by id sets `metadata:` /
+  `opencode/autoinvoke: false`. Shipped subagents deny `*` first and allow only the
+  tools they use.
 - Do not inject changing state into the system prompt on every request; it breaks
   provider prompt caching. Put live state in tool results.
 - Conventional Commits. Scope is the plugin name, for example `feat(beads): ...`.
