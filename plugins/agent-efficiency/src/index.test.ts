@@ -306,6 +306,19 @@ describe("plugin", () => {
     expect(fake.active()).toBe(0)
   })
 
+  test("compaction and generate requests get the same trimmed system prompt", async () => {
+    const fake = createFakeContext({ sessions: [{ id: "ses_child", parentID: "ses_root" }, { id: "ses_root" }] })
+    const cleanup = await plugin.setup(fake.context)
+    expect(fake.hooks("session")).toEqual(["context", "compaction", "generate"])
+    const turn = (await fake.fire.session("context", context("ses_child", "pr-reviewer"))).system
+    expect(turn).not.toEqual(system())
+    for (const hook of ["compaction", "generate"] as const)
+      expect({ hook, system: (await fake.fire.session(hook, context("ses_child", "pr-reviewer"))).system }).toEqual({ hook, system: turn })
+    expect((await fake.fire.session("compaction", context("ses_root", "pr-reviewer"))).system).toEqual(system())
+    await cleanup?.()
+    expect(fake.active()).toBe(0)
+  })
+
   test("leanSubagents: false registers no session hook", async () => {
     const fake = createFakeContext({ options: { leanSubagents: false } })
     await plugin.setup(fake.context)

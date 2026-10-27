@@ -70,9 +70,10 @@ A subagent's system prompt repeats parts of the parent's that a read-only agent 
 not need: the user's global AGENTS.md (push and scratch rules), the model identity
 block ("# Your Model") and the hint about moving a session into a worktree. For child
 sessions of the agents in `leanSubagents`, a `context` hook removes them before each
-request. The project's AGENTS.md stays, so explore and the reviewers still know the
-project. The result depends only on the agent and the prompt, so the prompt cache
-prefix holds across steps.
+request, and `compaction` and `generate` hooks do the same for those requests. The
+project's AGENTS.md stays, so explore and the reviewers still know the project. The
+result depends only on the agent and the prompt, so the prompt cache prefix holds
+across steps and compaction.
 
 Each AGENTS.md file is its own "Instructions from: <path>" section. A file under the
 global config directory (`OPENCODE_CONFIG_DIR`, `$XDG_CONFIG_HOME/opencode` or
