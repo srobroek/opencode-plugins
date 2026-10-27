@@ -1628,6 +1628,20 @@ var endOutput = {
   properties: { ok: { type: "boolean" }, closed: { type: "integer" } }
 };
 
+// plugins/parley/src/conditions.ts
+function visibleQuestions(questions, value) {
+  const visible = [];
+  const ids = new Set;
+  for (const question of questions) {
+    const condition = question.show_if;
+    if (condition && (!ids.has(condition.id) || value(condition.id) === undefined || canonical(value(condition.id)) !== canonical(condition.equals)))
+      continue;
+    visible.push(question);
+    ids.add(question.id);
+  }
+  return visible;
+}
+
 // plugins/parley/src/fallback.ts
 var FALLBACK_KINDS = new Set(["pick_one", "show_options", "pick_many", "confirm", "ask_text"]);
 var RECOMMENDED_SUFFIX = " (Recommended)";
@@ -1876,7 +1890,18 @@ class Rounds {
     }
     if (errors.length > 0)
       return { ok: false, errors };
+    const combined = new Map(round.answers);
+    for (const answer of accepted)
+      combined.set(answer.id, answer);
+    const active = new Set(visibleQuestions(round.questions, (id) => combined.get(id)?.value).map((question) => question.id));
+    for (const id of round.answers.keys())
+      if (!active.has(id)) {
+        round.answers.delete(id);
+        round.delivered.delete(id);
+      }
     for (const answer of accepted) {
+      if (!active.has(answer.id))
+        continue;
       round.answers.set(answer.id, answer);
       round.delivered.delete(answer.id);
     }
@@ -1918,11 +1943,13 @@ class Rounds {
       listener(round);
   }
 }
-var scoped = (round, ids) => round.questions.map((question) => question.id).filter((id) => ids === undefined || ids.includes(id));
+var scoped = (round, ids) => visibleQuestions(round.questions, (id) => round.answers.get(id)?.value).map((question) => question.id).filter((id) => ids === undefined || ids.includes(id));
 function settled(round, mode, ids) {
   if (round.status !== "open" || mode === "none")
     return true;
   const wanted = scoped(round, ids);
+  if (wanted.length === 0)
+    return true;
   if (mode === "any")
     return wanted.some((id) => round.answers.has(id) && !round.delivered.has(id));
   return wanted.every((id) => round.answers.has(id));
@@ -2195,9 +2222,11 @@ class Parley {
   async#fallback(input, context) {
     if (this.deps.settings.fallback !== "question")
       return unavailable("no_tui");
+    if (input.questions.some((question) => question.show_if !== undefined))
+      return this.#conditionalFallback(input, context);
     const blocked = unsupported(input.questions);
     if (blocked.length > 0)
-      return unavailable(`no_tui; the question tool cannot ask ${blocked.join(", ")} (supports ${[...FALLBACK_KINDS].join(", ")})`);
+      return { ...unavailable(`no_tui; the question tool cannot ask ${blocked.join(", ")} (supports ${[...FALLBACK_KINDS].join(", ")})`), pending: blocked };
     const tool = await this.deps.questionTool?.();
     if (!tool)
       return unavailable("no_tui; question tool not available");
@@ -2217,6 +2246,44 @@ class Parley {
         return { status: "cancelled", reason: "aborted", channel: "question", answers: [], pending };
       if (isCancel(error))
         return { status: "cancelled", reason: "dismissed", channel: "question", answers: [], pending };
+      throw error;
+    }
+  }
+  async#conditionalFallback(input, context) {
+    const tool = await this.deps.questionTool?.();
+    if (!tool)
+      return unavailable("no_tui; question tool not available");
+    const answers = [];
+    const unavailableIDs = [];
+    try {
+      for (const question of input.questions) {
+        const active = visibleQuestions(input.questions, (id) => answers.find((answer) => answer.id === id)?.value);
+        if (!active.some((entry) => entry.id === question.id))
+          continue;
+        if (unsupported([question]).length > 0) {
+          unavailableIDs.push(question.id);
+          continue;
+        }
+        const raw = await tool.execute({ questions: [toPrompt(question)] }, context.tool);
+        answers.push(...fromQuestionTool([question], raw?.output?.answers ?? raw?.metadata?.answers ?? []));
+      }
+      return {
+        status: unavailableIDs.length > 0 ? "unavailable" : "submitted",
+        channel: "question",
+        answers,
+        pending: unavailableIDs,
+        ...unavailableIDs.length > 0 ? { reason: `no_tui; unavailable questions: ${unavailableIDs.join(", ")}` } : {},
+        ...input.round === undefined ? {} : { round: input.round }
+      };
+    } catch (error) {
+      if (context.signal?.aborted || isCancel(error))
+        return {
+          status: "cancelled",
+          reason: context.signal?.aborted ? "aborted" : "dismissed",
+          channel: "question",
+          answers,
+          pending: visibleQuestions(input.questions, (id) => answers.find((answer) => answer.id === id)?.value).filter((q) => !answers.some((answer) => answer.id === q.id)).map((q) => q.id)
+        };
       throw error;
     }
   }

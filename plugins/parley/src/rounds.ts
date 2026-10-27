@@ -1,4 +1,5 @@
 import { type Answer, normaliseAnswer, publicAnswer, type SubmittedAnswer } from "./answers.ts"
+import { visibleQuestions } from "./conditions.ts"
 import { type Question, validateQuestions } from "./questions.ts"
 
 export type RoundStatus = "open" | "submitted" | "cancelled"
@@ -143,7 +144,12 @@ export class Rounds {
     }
     // A submission with errors is rejected whole so the client can fix it and resend.
     if (errors.length > 0) return { ok: false, errors }
+    const combined = new Map(round.answers)
+    for (const answer of accepted) combined.set(answer.id, answer)
+    const active = new Set(visibleQuestions(round.questions, (id) => combined.get(id)?.value).map((question) => question.id))
+    for (const id of round.answers.keys()) if (!active.has(id)) { round.answers.delete(id); round.delivered.delete(id) }
     for (const answer of accepted) {
+      if (!active.has(answer.id)) continue
       round.answers.set(answer.id, answer)
       round.delivered.delete(answer.id)
     }
@@ -188,12 +194,13 @@ export class Rounds {
 }
 
 const scoped = (round: Round, ids?: readonly string[]) =>
-  round.questions.map((question) => question.id).filter((id) => ids === undefined || ids.includes(id))
+  visibleQuestions(round.questions, (id) => round.answers.get(id)?.value).map((question) => question.id).filter((id) => ids === undefined || ids.includes(id))
 
 /** Whether a wait in `mode` is satisfied for the given ids. */
 export function settled(round: Round, mode: WaitMode, ids?: readonly string[]): boolean {
   if (round.status !== "open" || mode === "none") return true
   const wanted = scoped(round, ids)
+  if (wanted.length === 0) return true
   if (mode === "any") return wanted.some((id) => round.answers.has(id) && !round.delivered.has(id))
   return wanted.every((id) => round.answers.has(id))
 }

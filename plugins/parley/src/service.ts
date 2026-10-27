@@ -1,4 +1,5 @@
-import type { SubmittedAnswer } from "./answers.ts"
+import type { Answer, SubmittedAnswer } from "./answers.ts"
+import { visibleQuestions } from "./conditions.ts"
 import { FALLBACK_KINDS, fromQuestionTool, type Prompt, toPrompt, unsupported } from "./fallback.ts"
 import { Presence } from "./presence.ts"
 import { coerceQuestion, type Question, validateQuestions } from "./questions.ts"
@@ -299,11 +300,12 @@ export class Parley {
 
   async #fallback(input: AskInput, context: CallContext): Promise<Result> {
     if (this.deps.settings.fallback !== "question") return unavailable("no_tui")
+    if (input.questions.some((question) => question.show_if !== undefined)) return this.#conditionalFallback(input, context)
     const blocked = unsupported(input.questions)
     if (blocked.length > 0)
-      return unavailable(
+      return { ...unavailable(
         `no_tui; the question tool cannot ask ${blocked.join(", ")} (supports ${[...FALLBACK_KINDS].join(", ")})`,
-      )
+      ), pending: blocked }
     const tool = await this.deps.questionTool?.()
     if (!tool) return unavailable("no_tui; question tool not available")
     try {
@@ -326,4 +328,31 @@ export class Parley {
       throw error
     }
   }
+
+  /** A dependent prompt must not be sent until its predecessor has actually been answered. */
+  async #conditionalFallback(input: AskInput, context: CallContext): Promise<Result> {
+    const tool = await this.deps.questionTool?.()
+    if (!tool) return unavailable("no_tui; question tool not available")
+    const answers: Answer[] = []
+    const unavailableIDs: string[] = []
+    try {
+      for (const question of input.questions) {
+        const active = visibleQuestions(input.questions, (id) => answers.find((answer) => answer.id === id)?.value)
+        if (!active.some((entry) => entry.id === question.id)) continue
+        if (unsupported([question]).length > 0) { unavailableIDs.push(question.id); continue }
+        const raw = (await tool.execute({ questions: [toPrompt(question)] }, context.tool)) as {
+          output?: { answers?: string[][] }; metadata?: { answers?: string[][] }
+        }
+        answers.push(...fromQuestionTool([question], raw?.output?.answers ?? raw?.metadata?.answers ?? []))
+      }
+      return { status: unavailableIDs.length > 0 ? "unavailable" : "submitted", channel: "question", answers, pending: unavailableIDs,
+        ...(unavailableIDs.length > 0 ? { reason: `no_tui; unavailable questions: ${unavailableIDs.join(", ")}` } : {}),
+        ...(input.round === undefined ? {} : { round: input.round }) }
+    } catch (error) {
+      if (context.signal?.aborted || isCancel(error)) return { status: "cancelled", reason: context.signal?.aborted ? "aborted" : "dismissed", channel: "question", answers,
+        pending: visibleQuestions(input.questions, (id) => answers.find((answer) => answer.id === id)?.value).filter((q) => !answers.some((answer) => answer.id === q.id)).map((q) => q.id) }
+      throw error
+    }
+  }
+
 }
