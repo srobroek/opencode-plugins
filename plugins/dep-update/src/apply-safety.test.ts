@@ -7,6 +7,7 @@ import { applyBump, checkNodeVersion } from "./bump.ts"
 /** What one package-manager stub does: record its argv, write files, print, then hang or exit. */
 type Behaviour = {
   marker?: string
+  pidFile?: string
   /** Prepended to the recorded argv, naming which manager ran. */
   label?: string
   write?: Array<[string, string]>
@@ -30,6 +31,7 @@ writeFileSync(
   `import { readFileSync, writeFileSync } from "node:fs"
 const [self, ...args] = process.argv.slice(2)
 const behaviour = JSON.parse(readFileSync(self + ".json", "utf8"))
+if (behaviour.pidFile) writeFileSync(behaviour.pidFile, String(process.pid))
 if (behaviour.marker) writeFileSync(behaviour.marker, JSON.stringify(behaviour.label ? [behaviour.label, ...args] : args))
 for (const [path, content] of behaviour.write ?? []) writeFileSync(path, content)
 if (behaviour.stdout) process.stdout.write(behaviour.stdout)
@@ -68,11 +70,12 @@ test("apply rejects options, honors cancellation, bounds children/output, and pi
   // Real processes and inherited pipes require the platform clock, not fake JS timers.
   const oldPm = process.env.DEP_UPDATE_PKG_MANAGER
   const marker = join(root, "spawned")
+  const pidFile = join(root, "pid")
   const installStub = (behaviour: Behaviour) => stubManager(root, "pnpm", { marker, ...behaviour })
   try {
     process.env.PATH = root
     process.env.DEP_UPDATE_PKG_MANAGER = "pnpm"
-    installStub({ hang: true })
+    installStub({ hang: true, pidFile })
     for (const [ecosystem, name, version] of [
       ["npm", "--help", "1.0.0"],
       ["npm", "x", "--recursive"],
@@ -85,17 +88,33 @@ test("apply rejects options, honors cancellation, bounds children/output, and pi
     cancelled.abort()
     expect((await applyBump("npm", "x", "1.0.0", root, { signal: cancelled.signal })).exit).toBe(1)
     expect(existsSync(marker)).toBe(false)
-    const timed = await applyBump("npm", "x", "1.0.0", root, { timeoutMs: 100 })
+    // Fire the injected deadline only after the child has started. Scheduler or
+    // executable-policy latency is not the package-manager timeout contract.
+    const whenStarted = (callback: () => void) => {
+      const timer = setInterval(() => {
+        if (!existsSync(marker)) return
+        clearInterval(timer)
+        callback()
+      }, 10)
+      return timer
+    }
+    const timed = await applyBump("npm", "x", "1.0.0", root, {
+      timeoutMs: 100,
+      setTimeout: (callback, ms) => ms === 100 ? whenStarted(callback) : setTimeout(callback, ms),
+    })
     expect(timed.exit).toBe(1)
     expect(timed.text).toContain("deadline exceeded")
     expect(timed.text).toContain("partial")
+    expect(() => process.kill(Number(readFileSync(pidFile, "utf8")), 0)).toThrow()
 
     const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), 100)
+    rmSync(marker)
+    const timer = whenStarted(() => controller.abort())
     try {
       const aborted = await applyBump("npm", "x", "1.0.0", root, { signal: controller.signal })
       expect(aborted.exit).toBe(1)
       expect(aborted.text).toContain("Cancelled")
+      expect(() => process.kill(Number(readFileSync(pidFile, "utf8")), 0)).toThrow()
     } finally {
       clearTimeout(timer)
     }
@@ -117,7 +136,7 @@ test("apply rejects options, honors cancellation, bounds children/output, and pi
     else process.env.DEP_UPDATE_PKG_MANAGER = oldPm
     rmSync(root, { recursive: true, force: true })
   }
-}, 10000)
+}, 60_000)
 
 test("the package-manager bound is sized for a real install, not a 25 s tool_call budget", async () => {
   // A registered tool's execute has no harness deadline, so a caller-sized bound is
