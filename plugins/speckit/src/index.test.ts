@@ -48,7 +48,7 @@ describe("setup", () => {
     const { fake, cleanup } = await start()
     expect([...fake.tools.keys()].sort()).toEqual(["speckit_setup", "speckit_start"])
     expect(fake.hooks("tool")).toEqual(["execute.before"])
-    expect(fake.hooks("session")).toEqual(["context"])
+    expect(fake.hooks("session")).toEqual(["context", "compaction", "generate"])
     expect([...fake.skills.keys()].sort()).toEqual(["speckit-bugfix", "speckit-setup"])
     expect(fake.agents.get("speckit-verify")).toMatchObject({
       mode: "subagent",
@@ -152,18 +152,20 @@ describe("skill routing", () => {
 })
 
 describe("workflow context", () => {
-  test("adds the workflow text in a SpecKit repository, for every request of the session", async () => {
+  test("a session's first request decides the workflow text, for every request of the session", async () => {
     const dir = realpathSync(mkdtempSync(join(tmpdir(), "speckit-ctx-")))
     try {
       const { fake, cleanup } = await start({ directory: dir })
-      const request = () => ({ sessionID: "ses_main", agent: "build", system: [] as { text: string }[] })
-      expect((await fake.fire.session("context", request())).system).toEqual([])
+      const request = (sessionID: string) => ({ sessionID, agent: "build", system: [] as { text: string }[] })
+      expect((await fake.fire.session("context", request("ses_plain"))).system).toEqual([])
       mkdirSync(join(dir, ".specify"))
-      const first = await fake.fire.session("context", request())
+      // A session that started without SpecKit keeps its system prompt.
+      expect((await fake.fire.session("context", request("ses_plain"))).system).toEqual([])
+      const first = await fake.fire.session("context", request("ses_main"))
       expect(first.system).toHaveLength(1)
       expect(first.system[0]?.text).toContain("SpecKit workflow")
       rmSync(join(dir, ".specify"), { recursive: true })
-      expect((await fake.fire.session("context", request())).system).toEqual(first.system)
+      expect((await fake.fire.session("context", request("ses_main"))).system).toEqual(first.system)
       await cleanup()
     } finally {
       rmSync(dir, { recursive: true, force: true })
