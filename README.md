@@ -5,7 +5,7 @@ OpenCode V2 plugins by Sjors Robroek. This is the OpenCode counterpart of
 
 | Field | Value |
 | --- | --- |
-| Status | Early. Plugins: `example`, `model-roles`, `worktrunk`, `session`, `dep-update`, `whats-new`, `statusline`, `beads`, `goal`, `lsp`, `subagent-worktree`, `parley`, `chezmoi`, `lang-go`, `lang-python`, `lang-typescript`, `lang-rust`, `journeys`, `delivery`, `debate`, `eli5`, `project`, `architecture`, `build`, `quality`, `toolchain`, `aws`, `design`, `safety`, `find-tools`, `trunk-dev`, `speckit`, `agent-efficiency`, `agent-researcher`, `agent-seance`, `agent-mechanic`, `agent-coder`, `agent-reviewer`, `repomix`. |
+| Status | Early. Plugins: `example`, `model-roles`, `worktrunk`, `session`, `dep-update`, `whats-new`, `statusline`, `beads`, `goal`, `lsp`, `subagent-worktree`, `parley`, `chezmoi`, `lang-go`, `lang-python`, `lang-typescript`, `lang-rust`, `journeys`, `delivery`, `debate`, `eli5`, `project`, `architecture`, `build`, `quality`, `toolchain`, `aws`, `design`, `safety`, `find-tools`, `trunk-dev`, `speckit`, `agent-efficiency`, `agent-researcher`, `agent-seance`, `agent-mechanic`, `agent-coder`, `agent-reviewer`, `repomix`, `docs`. |
 | Host | OpenCode 2.1.4 or later (`@opencode/plugin` 2.x) |
 | License | Apache-2.0 |
 
@@ -86,7 +86,7 @@ codex plugin add worktrunk@srobroek-opencode
 | `trunk-dev` | Router skill `trunk-dev-guide` and skills `trunk-dev-workflow`, `trunk-dev-feature-flags`, `trunk-dev-release-setup` (no commit gate, no skip-CI or MR advisories) |
 | `session`, `dep-update`, `journeys`, `delivery`, `beads`, `find-tools`, `speckit` | Not exported: their skills or agents drive OpenCode tools |
 | `whats-new` | Not exported: its skill depends on OpenCode tools and version checks |
-| `agent-efficiency`, `example`, `goal`, `lsp`, `model-roles`, `parley`, `safety`, `statusline`, `subagent-worktree` | Not exported: OpenCode code only |
+| `agent-efficiency`, `docs`, `example`, `goal`, `lsp`, `model-roles`, `parley`, `safety`, `statusline`, `subagent-worktree` | Not exported: OpenCode code only |
 | `agent-coder`, `agent-mechanic`, `agent-researcher`, `build` | Not exported: agent only |
 | `agent-seance` | Not exported: agent with an OpenCode tool |
 
@@ -100,6 +100,24 @@ from its `package.json`. A plugin is exported when it has `skills/` or
 ```json
 "opencode-plugins": { "claude": false, "codex": false, "category": "development", "description": "..." }
 ```
+
+## MCP servers from plugins
+
+`docs`, `aws` and `design` add MCP servers through `ctx.mcp.transform`, using
+`plugins/lib/src/mcp.ts`. Servers are written in the Claude Code `.mcp.json` format,
+so the same file ships to Claude Code and Codex; OpenCode-only servers live in code.
+In OpenCode:
+
+- A server you configure under the same name in `opencode.json` wins; the plugin
+  leaves it alone.
+- `${VAR}` and `${VAR:-default}` are expanded from the environment OpenCode starts in
+  (OpenCode does not expand `{env:...}` in plugin-set configs), and a server naming
+  an unset variable is skipped.
+- The plugin option `mcp` is `"auto"` (default: only in projects the plugin's marker
+  check matches), `"always"` or `"off"`, and `mcpServers` turns single servers on or
+  off by name: `{ "mcp": "auto", "mcpServers": { "storybook": true } }`.
+- Every server runs in Code Mode. Remote servers that need no sign-in set
+  `oauth: false`; any other remote server signs in through `/mcps`.
 
 ## Developing
 
@@ -158,7 +176,7 @@ bun scripts/convert-agent.ts --out .opencode/agents \
 ## Content plugins
 
 Plugins that only ship skills and agents (`debate`, `eli5`, `project`,
-`architecture`, `build`, `quality`, `toolchain`, `aws`, `design`, `agent-coder`) export
+`architecture`, `build`, `quality`, `toolchain`, `design`, `agent-coder`) export
 `contentPlugin(id, import.meta.url)` from `@srobroek/opencode-lib/content-plugin`. It
 registers every `skills/<name>/SKILL.md` and `agents/<id>.md` beside the bundle;
 agents are V2 markdown written by `scripts/convert-agent.ts`. They pin no model and

@@ -37,5 +37,6 @@
   "plugins/agent-mechanic": "0.2.0",
   "plugins/agent-coder": "0.3.0",
   "plugins/agent-reviewer": "0.2.0",
-  "plugins/repomix": "0.1.0"
+  "plugins/repomix": "0.1.0",
+  "plugins/docs": "0.1.0"
 }
