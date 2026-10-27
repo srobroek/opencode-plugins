@@ -27,7 +27,10 @@ permissions:
     resource: "*"
     effect: allow
   - action: skill
-    resource: "*"
+    resource: "design-*"
+    effect: allow
+  - action: skill
+    resource: "ui-*"
     effect: allow
   - action: execute
     resource: "*"

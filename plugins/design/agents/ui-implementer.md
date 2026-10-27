@@ -27,7 +27,28 @@ permissions:
     resource: "*"
     effect: allow
   - action: skill
-    resource: "*"
+    resource: "design-*"
+    effect: allow
+  - action: skill
+    resource: "ui-*"
+    effect: allow
+  - action: skill
+    resource: accessibility-audit
+    effect: allow
+  - action: skill
+    resource: motion-design
+    effect: allow
+  - action: skill
+    resource: wireloom
+    effect: allow
+  - action: skill
+    resource: "lang-*"
+    effect: allow
+  - action: skill
+    resource: "quality-*"
+    effect: allow
+  - action: skill
+    resource: "toolchain-*"
     effect: allow
   - action: execute
     resource: "*"

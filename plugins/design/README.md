@@ -49,9 +49,14 @@ All four are `subagent` agents converted with `scripts/convert-agent.ts`.
 see [agent-reviewer](../agent-reviewer/README.md)); edit the source, not `agents/`. Their
 first line is `VERDICT: PASS|MINOR|MAJOR`. Their
 permissions are tool allowlists (a deny on every action, then allows), so a tool an
-agent does not need is left out of its requests: each gets read, grep, glob, skill,
-Code Mode, the `lsp_*` tools, the `browser` tools and the `design_*` tools, plus
-the edit, shell and web access its row allows. Rules are added after any you
+agent does not need is left out of its requests: each gets read, grep, glob, Code
+Mode, the `lsp_*` tools, the `browser` tools and the `design_*` tools, plus the edit,
+shell and web access its row allows. Skills are allowed by family: `design-*` and
+`ui-*` for all four, plus `accessibility-audit` and the upstream `accessibility` skill
+for `a11y-auditor`, the rest of the design skills (`accessibility-audit`,
+`motion-design`, `wireloom`) and the coding families (`lang-*`, `quality-*`,
+`toolchain-*`) for `ui-implementer`, and every design skill and the
+upstream skills `design-upstream-preflight` routes to for `ui-ux-specialist`. Rules are added after any you
 configure for an agent with the same id. `ui-ux-specialist`
 spawning children while it runs as a subagent needs `experimental.subagent_depth`
 of 2 or more. `ui-ux-specialist` runs at most 400 steps. The agents pin no model;
