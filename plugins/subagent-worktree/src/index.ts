@@ -32,7 +32,8 @@ export * from "./git.ts"
 export * from "./lane.ts"
 
 export const MERGE_DESCRIPTION =
-  "Merge a subagent's worktree branch back. The subagent tool result names the lane (branch, base, sessionID). " +
+  "Merge a subagent's worktree branch back, report one lane, or list every active lane.\n" +
+  "The subagent tool result names the lane (branch, base, sessionID). " +
   'method "wt-merge" runs `wt merge <target> --no-squash --no-ff --yes` from the subagent worktree, keeping its commits, ' +
   "and removes the worktree on success; a conflict keeps the worktree and reports the output. " +
   "The worktree must be committed and clean, and the target checkout must have no uncommitted or untracked changes to files the lane changes. " +
@@ -46,10 +47,10 @@ export const MERGE_INPUT = {
   properties: {
     sessionID: {
       type: "string",
-      description: 'The subagent\'s sessionID from the subagent tool result. Required unless method is "list".',
+      description: 'From the subagent tool result; required unless method is "list"',
     },
     method: { type: "string", enum: ["wt-merge", "none", "list"] },
-    target: { type: "string", description: "Branch to merge into. Defaults to the branch the lane was created from." },
+    target: { type: "string", description: "Defaults to the lane's base branch" },
   },
 } as const
 

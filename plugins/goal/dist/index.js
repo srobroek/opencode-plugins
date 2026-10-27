@@ -1499,7 +1499,8 @@ ${renderActivePrompt(created)}`, "goal-start", input.delivery);
 
 // plugins/goal/src/index.ts
 var GOAL_GET_DESCRIPTION = "Read this session's goal: objective, status and budget use. Use it when a goal is active and you need its exact state.";
-var GOAL_COMPLETE_DESCRIPTION = "Mark this session's goal complete. Call it only when every deliverable is verified against the current state (files read, commands and tests run), never because the budget is low or the turn is ending. Pass the evidence. Ends automatic goal continuation.";
+var GOAL_COMPLETE_DESCRIPTION = `Mark this session's goal complete, passing the evidence; ends automatic goal continuation.
+Call it only when every deliverable is verified against the current state (files read, commands and tests run), never because the budget is low or the turn is ending.`;
 var src_default = Plugin.define({
   id: "srobroek.goal",
   async setup(ctx) {

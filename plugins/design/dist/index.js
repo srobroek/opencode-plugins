@@ -429,7 +429,8 @@ var SCAN_TOOL = "design_impeccable_scan";
 var DEFAULT_TIMEOUT_SECONDS = 180;
 var MAX_TIMEOUT_SECONDS = 900;
 var MAX_OUTPUT_CHARS = 60000;
-var SCAN_DESCRIPTION = "Run impeccable's deterministic design detector (npx --yes impeccable detect --json) over files, directories, " + "or a URL, and return its JSON findings. Asks before every run, because npx may download impeccable and its " + "engine. Findings are a coarse corroborating signal: HTML-engine findings can carry line 0, so confirm each one " + "on the rendered surface before citing it.";
+var SCAN_DESCRIPTION = `Run impeccable's deterministic design detector over files, directories or a URL; returns JSON findings.
+` + "Runs npx --yes impeccable detect --json. Asks before every run, because npx may download impeccable and its " + "engine. Findings are a coarse corroborating signal: HTML-engine findings can carry line 0, so confirm each one " + "on the rendered surface before citing it.";
 var SCAN_INPUT = {
   type: "object",
   properties: {
@@ -573,7 +574,8 @@ function confirmScan(evaluation) {
 }
 
 // plugins/design/src/index.ts
-var SETUP_DESCRIPTION = "Copy the design plugin's beads formulas (design-touch, design-surface, design-system and the mol-design-* " + "sub-processes) into a beads workspace's .beads/formulas/, so bd mol pour and bd mol bond find them. Identical " + "copies stay; divergent ones are refused unless force=true; symlinked paths are always refused.";
+var SETUP_DESCRIPTION = `Copy the design plugin's beads formulas into a beads workspace's .beads/formulas/.
+` + "Covers design-touch, design-surface, design-system and the mol-design-* sub-processes, so bd mol pour and " + "bd mol bond find them. Identical " + "copies stay; divergent ones are refused unless force=true; symlinked paths are always refused.";
 var SETUP_INPUT = {
   type: "object",
   properties: {

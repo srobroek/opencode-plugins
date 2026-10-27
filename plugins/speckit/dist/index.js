@@ -2232,47 +2232,39 @@ function setupInput(integration) {
     properties: {
       integration: {
         type: "string",
-        description: `spec-kit integration for specify init (default ${integration}; codex writes the commands as skills under .agents/skills/)`
+        description: `specify init integration (default ${integration})`
       },
-      script: { type: "string", enum: ["sh", "ps"], description: "specify script flavor (default sh)" },
-      force: { type: "boolean", description: "Re-run specify init even if .specify exists" },
-      workspace: {
-        type: "string",
-        description: "Repository root, resolved against the session's working directory; defaults to it"
-      },
+      script: { type: "string", enum: ["sh", "ps"], description: "default sh" },
+      force: { type: "boolean", description: "Re-run specify init over an existing .specify" },
+      workspace: { type: "string", description: "Repository root; defaults to the session directory" },
       installAllowed: {
         type: "boolean",
-        description: "Register the public community catalog as a trusted install source (--install-allowed). Opt in only after vetting the required extensions"
+        description: "Trust the public community catalog (--install-allowed); only after vetting the extensions"
       },
-      skipBeads: { type: "boolean", description: "Explicitly omit beads and formulas; molecule workflows unavailable" },
-      skipSpecify: { type: "boolean", description: "Skip the specify CLI (formulas and gitignore only)" }
+      skipBeads: { type: "boolean", description: "Omit beads and formulas (no molecule workflows)" },
+      skipSpecify: { type: "boolean", description: "Formulas and gitignore only" }
     },
     additionalProperties: false
   };
 }
-var SETUP_DESCRIPTION = "Resumable SpecKit bootstrap in the session's workspace: specify init, opt-in community catalog, required extensions, bd init, copy the bundled bd formulas, gitignore spec-status.md. Every phase reports done, skipped (already present) or failed, has its own timeout, and a rerun skips the phases already done.";
+var SETUP_DESCRIPTION = `Resumable SpecKit bootstrap in the session's workspace; a rerun skips the phases already done.
+` + "Phases: specify init, opt-in community catalog, required extensions, bd init, copy the bundled bd formulas, gitignore spec-status.md. Every phase reports done, skipped (already present) or failed and has its own timeout.";
 var START_INPUT = {
   type: "object",
   properties: {
     spec: { type: "string", pattern: "^[0-9]{3}-[a-z0-9-]+$", description: "NNN-slug spec identity" },
-    workspace: {
-      type: "string",
-      description: "Canonical repository root containing .beads; defaults to the session's working directory"
-    },
-    profile: { type: "string", enum: [...PROFILES], description: "Formula to pour (default speckit-feature)" },
-    root: { type: "string", description: "Existing run root; required if multiple runs exist" },
-    approvals: {
-      type: "string",
-      enum: ["yes", "no"],
-      description: "Explicit user answer, never inferred from unattended mode"
-    },
-    decision: { type: "string", description: "Explicit user decision to retain in history" },
-    migrate: { type: "boolean", description: "Separate explicit authorization to migrate an existing gated run" }
+    workspace: { type: "string", description: "Repository root with .beads; defaults to the session directory" },
+    profile: { type: "string", enum: [...PROFILES], description: "default speckit-feature" },
+    root: { type: "string", description: "Existing run root; required when several runs exist" },
+    approvals: { type: "string", enum: ["yes", "no"], description: "The user's explicit answer, never inferred" },
+    decision: { type: "string", description: "The user's decision, kept in history" },
+    migrate: { type: "boolean", description: "The user's separate consent to migrate a gated run" }
   },
   required: ["spec"],
   additionalProperties: false
 };
-var START_DESCRIPTION = "Start or resume a spec workflow: ask for an explicit routine approval choice before pouring, persist and read back the answer, reuse it on resume, and require separate consent to migrate an existing gated run. Holds the Beads store's write lock for the whole start. Returns CHOICE_REQUIRED or MIGRATION_REQUIRED with a question to ask the user, READY when the run can advance, or INCOMPLETE (store-lock wait ran out, a bd command passed its bound, or cancellation) with the step reached and whether a pour was issued; inspect the run before retrying. Reviews, tests and safety confirmations remain required.";
+var START_DESCRIPTION = `Start or resume a spec workflow, with an explicit routine approval choice from the user before pouring.
+` + "Persists and reads back the answer, reuses it on resume, and requires separate consent to migrate an existing gated run. Holds the Beads store's write lock for the whole start. Returns CHOICE_REQUIRED or MIGRATION_REQUIRED with a question to ask the user, READY when the run can advance, or INCOMPLETE (store-lock wait ran out, a bd command passed its bound, or cancellation) with the step reached and whether a pour was issued; inspect the run before retrying. Reviews, tests and safety confirmations remain required.";
 var within = (base, path) => path === undefined ? base : isAbsolute6(path) ? path : resolve6(base, path);
 var record = (input) => input !== null && typeof input === "object" && !Array.isArray(input) ? input : {};
 function readSetupParams(input) {

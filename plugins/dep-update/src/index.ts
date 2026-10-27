@@ -81,8 +81,8 @@ export default Plugin.define({
       editor.add({
         name: "dep_scan",
         description:
-          "Enumerate a project's declared dependencies, query PyPI/npm for the latest versions, and " +
-          "classify exact-version bumps as PATCH-SAFE, MINOR-CHECK, or MAJOR-ADVISORY. Read-only. A scan " +
+          "Read-only: classify a project's dependency bumps as PATCH-SAFE, MINOR-CHECK or MAJOR-ADVISORY.\n" +
+          "Enumerates the declared dependencies and queries PyPI/npm for the latest versions. A scan " +
           "stopped by its aggregate deadline or by cancellation returns an incomplete report (complete: false) " +
           "that lists every dependency it did not query as UNCHECKED. Rust and Go deps are advisory-only.",
         input: {
@@ -104,8 +104,8 @@ export default Plugin.define({
       editor.add({
         name: "dep_apply",
         description:
-          "Apply one dependency bump via the ecosystem package manager, after a permission prompt naming " +
-          "that exact bump. One call per bump. The run is bounded to 10 minutes; if it is cancelled or fails, " +
+          "Apply one dependency bump with the ecosystem package manager, after a permission prompt.\n" +
+          "The prompt names that exact bump. One call per bump. The run is bounded to 10 minutes; if it is cancelled or fails, " +
           "the result says partial changes may remain so the caller can inspect manifests and lockfiles.",
         input: {
           type: "object",

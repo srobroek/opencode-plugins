@@ -2023,7 +2023,8 @@ var src_default = Plugin.define({
     const tools = await ctx.tool.transform((editor) => {
       editor.add({
         name: "version_gap_scan",
-        description: "Enumerate a project's root dependencies, offline and read-only: npm (package.json + package-lock.json), " + "Python (pyproject.toml or requirements.txt + uv.lock/poetry.lock), Cargo.toml, go.mod, Gemfile, composer.json. " + "One tab-separated row per dependency: ecosystem, name, declared spec, resolved lockfile version ('?' when " + "unlocked), direct|transitive. Use resolved as the installed version when present. Input for what's-new research.",
+        description: `List a project's root dependencies with declared and locked versions, offline and read-only.
+` + "Reads npm (package.json + package-lock.json), " + "Python (pyproject.toml or requirements.txt + uv.lock/poetry.lock), Cargo.toml, go.mod, Gemfile, composer.json. " + "One tab-separated row per dependency: ecosystem, name, declared spec, resolved lockfile version ('?' when " + "unlocked), direct|transitive. Use resolved as the installed version when present. Input for what's-new research.",
         input: {
           type: "object",
           properties: {

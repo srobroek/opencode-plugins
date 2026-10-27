@@ -3480,7 +3480,8 @@ ${refs.size}`;
     const tools = await ctx.tool.transform((editor) => {
       editor.add({
         name: CHECK_TOOL,
-        description: "Read-only. List every model tier's candidates with their status (available, unknown id, unknown variant, provider unavailable, unhealthy until a time) against all providers, the model each tiered agent resolves to, the tiers the subagent tool's `tier` parameter offers, the derived lineups and dropped models, and recent auto routing decisions.",
+        description: `Read-only report of every model tier's candidates, the model each tiered agent resolves to, and recent routing.
+` + "Lists every model tier's candidates with their status (available, unknown id, unknown variant, provider unavailable, unhealthy until a time) against all providers, the model each tiered agent resolves to, the tiers the subagent tool's `tier` parameter offers, the derived lineups and dropped models, and recent auto routing decisions.",
         input: { type: "object", properties: {}, additionalProperties: false },
         execute: async () => {
           await refresh();
