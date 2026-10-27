@@ -1283,7 +1283,22 @@ Run the Python format, lint, type-check and tests for this project.
 Run the Go lint and tests.
 ```
 
-**Expect:** `lang-go`, then `lang-go-quality` (`gofmt -l`, `golangci-lint run` or `go vet`, `go test ./...`).
+**Expect:** `lang-go`, then `lang-go-quality` (`go build ./...`, `golangci-lint run` or `go vet`, `go test -race ./...`, `go mod tidy -diff`, in order).
+**If not:** `plugins/lang-go/skills/lang-go/SKILL.md`.
+
+### `lang-go` → `lang-go-testing`, `lang-go-packaging`
+
+```text
+Add fuzz tests and table-driven tests to this Go parser.
+```
+
+**Expect:** `lang-go`, then `lang-go-testing` (`t.Run` table, `f.Fuzz`, committed `testdata/fuzz` corpus).
+
+```text
+Set up a Go monorepo with shared internal packages for two services.
+```
+
+**Expect:** `lang-go`, then `lang-go-packaging` (one module, `cmd/<service>`, `internal/`, `go.work` only for separately versioned modules).
 **If not:** `plugins/lang-go/skills/lang-go/SKILL.md`.
 
 ### → `lang-typescript-profiling`, `lang-python-profiling`, `lang-go-profiling`
