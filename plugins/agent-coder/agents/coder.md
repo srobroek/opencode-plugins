@@ -57,19 +57,7 @@ permissions:
     resource: "*"
     effect: ask
   - action: skill
-    resource: language-quality
-    effect: allow
-  - action: skill
-    resource: lang-go-profiling
-    effect: allow
-  - action: skill
-    resource: lang-python-profiling
-    effect: allow
-  - action: skill
-    resource: lang-typescript-profiling
-    effect: allow
-  - action: skill
-    resource: rust-guide
+    resource: "lang-*"
     effect: allow
   - action: skill
     resource: toolchain-guide
@@ -79,45 +67,6 @@ permissions:
     effect: allow
   - action: skill
     resource: trunk-dev-guide
-    effect: allow
-  - action: skill
-    resource: go-quality
-    effect: allow
-  - action: skill
-    resource: python-quality
-    effect: allow
-  - action: skill
-    resource: typescript-quality
-    effect: allow
-  - action: skill
-    resource: rust-ci
-    effect: allow
-  - action: skill
-    resource: rust-contract-boundary
-    effect: allow
-  - action: skill
-    resource: rust-crate-boundaries
-    effect: allow
-  - action: skill
-    resource: rust-domain-modeling
-    effect: allow
-  - action: skill
-    resource: rust-persistence
-    effect: allow
-  - action: skill
-    resource: rust-quality
-    effect: allow
-  - action: skill
-    resource: rust-safe-mutation
-    effect: allow
-  - action: skill
-    resource: rust-tauri
-    effect: allow
-  - action: skill
-    resource: rust-workspace
-    effect: allow
-  - action: skill
-    resource: lang-rust-profiling
     effect: allow
   - action: skill
     resource: quality-code-design

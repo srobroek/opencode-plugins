@@ -45,12 +45,12 @@ test("spawns only explore and mechanic", async () => {
     expect(permissionEffect(rules, "subagent", child)).toBe("deny")
 })
 
-test("allowlists coding skills by id and denies the rest", async () => {
+test("allowlists coding skills by id or family prefix and denies the rest", async () => {
   const { rules } = await setup()
   const skills = allowedSkills(rules)
   expect(skills).not.toContain("*")
-  for (const id of ["quality-code-policy", "typescript-quality", "rust-quality", "shell-language", "dep-update", "whats-new"])
-    expect(permissionEffect(rules, "skill", id)).toBe("allow")
+  const ids = ["quality-code-policy", "lang-typescript-quality", "lang-rust-quality", "lang-go", "shell-language", "dep-update"]
+  for (const id of [...ids, "whats-new"]) expect(permissionEffect(rules, "skill", id)).toBe("allow")
   const excluded = ["design-md", "journey-write", "speckit-bugfix", "delivery-fan-out", "delivery-git-workflow", "debate"]
   for (const id of [...excluded, "license-picker", "beads-ledger", "trunk-dev-workflow", "find-tools"])
     expect(permissionEffect(rules, "skill", id)).toBe("deny")
@@ -61,12 +61,15 @@ test("every allowlisted skill ships in this repository", async () => {
   const ids = new Set(
     [...new Bun.Glob("*/skills/**/SKILL.md").scanSync(PLUGINS)].map((path) => path.split("/").at(-2)),
   )
-  for (const id of allowedSkills(rules)) expect({ id, shipped: ids.has(id) }).toEqual({ id, shipped: true })
+  for (const id of allowedSkills(rules)) {
+    const shipped = id.endsWith("*") ? [...ids].some((name) => name?.startsWith(id.slice(0, -1))) : ids.has(id)
+    expect({ id, shipped }).toEqual({ id, shipped: true })
+  }
 })
 
 test("every allowlisted router member's router is allowlisted too", async () => {
   const { rules } = await setup()
-  const allowed = new Set(allowedSkills(rules))
+  const allowed = { has: (id: string) => permissionEffect(rules, "skill", id) === "allow" }
   const row = /^\|.*\|\s*`([\w-]+)`\s*\|\s*$/
   const routerOf = new Map<string, string>()
   for (const path of new Bun.Glob("*/skills/*/SKILL.md").scanSync(PLUGINS)) {
@@ -78,12 +81,12 @@ test("every allowlisted router member's router is allowlisted too", async () => 
       if (member !== undefined) routerOf.set(member, router)
     }
   }
-  const routed = [...allowed].filter((id) => routerOf.has(id))
+  const routed = [...routerOf.keys()].filter((id) => allowed.has(id))
   expect(routed.length).toBeGreaterThan(0)
   for (const id of routed) {
     const router = routerOf.get(id)
     expect({ id, router, allowed: allowed.has(router as string) }).toEqual({ id, router, allowed: true })
   }
-  for (const router of ["language-quality", "rust-guide", "toolchain-guide", "architecture-guide", "trunk-dev-guide"])
+  for (const router of ["lang-go", "lang-python", "lang-typescript", "lang-rust", "toolchain-guide", "architecture-guide", "trunk-dev-guide"])
     expect(permissionEffect(rules, "skill", router)).toBe("allow")
 })
