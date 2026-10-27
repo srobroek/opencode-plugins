@@ -5,6 +5,11 @@ runs no language servers itself, so this plugin calls the `diagnostics` tool of
 [lsp-tools-mcp](https://github.com/code-yeongyu/lsp-tools-mcp), an MCP server
 that also gives the agent go-to-definition, references, symbols and rename.
 
+This plugin is optional and opt-in. On small typed-language tasks, measured runs
+with it took more turns, time and tokens and caught no type error that a type
+checker run from the shell (the `quality` and `lang-*` skills' default) missed.
+Install it when you want LSP navigation on large repositories.
+
 After each completed edit the plugin asks the diagnostics tool for errors in
 every file the call touched and appends only the errors the edit introduced:
 
@@ -71,6 +76,13 @@ servers beyond its built-in defaults, point `LSP_TOOLS_MCP_PROJECT_CONFIG` or
 The plugin calls the MCP tool as `lsp_diagnostics`, so a permission rule for
 that action also applies to the plugin's calls. Leave it allowed.
 
+4. Tell the agent to use the LSP tools, for example in `AGENTS.md`:
+
+   ```markdown
+   Prefer the `lsp_*` tools (definition, references, symbols, rename) over grep
+   for code navigation, and trust their results.
+   ```
+
 ## Options
 
 | Option | Default | Meaning |
@@ -80,8 +92,13 @@ that action also applies to the plugin's calls. Leave it allowed.
 | `maxLines` | `20` | Most diagnostic lines appended to one result |
 | `baseline` | `true` | Record a file's errors before a session's first edit to it. `false` reports every error on that first edit |
 
-## Caveat
+## Caveats
 
-Plugins reach MCP tools through `ctx.tool.list()` and the tool's `execute`.
-That path works on OpenCode 2.1.4 but is not documented. If it breaks, the
-plugin goes silent rather than failing edits.
+- Diagnostics can go stale after a write the language server did not see.
+  `lsp_rename` and other tools that write files themselves, as well as shell
+  commands, change files behind the server's back, so the next check can report
+  errors from the old contents (seen with pyright after `lsp_rename`). Rerun the
+  project's type checker from the shell before trusting such an error.
+- Plugins reach MCP tools through `ctx.tool.list()` and the tool's `execute`.
+  That path works on OpenCode 2.1.4 but is not documented. If it breaks, the
+  plugin goes silent rather than failing edits.
