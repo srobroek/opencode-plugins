@@ -3,6 +3,7 @@ import { visibleQuestions } from "./conditions.ts"
 import type { Question } from "./questions.ts"
 import { collect, Rounds, settled } from "./rounds.ts"
 import { Parley } from "./service.ts"
+import { inlineEligible } from "./tui-state.ts"
 
 const questions: Question[] = [
   { id: "gate", title: "Enable?", kind: "confirm" },
@@ -15,6 +16,13 @@ test("conditions evaluate live, including hidden chains and canonical equality",
   expect(visibleQuestions(questions, (id) => values[id]).map((q) => q.id)).toEqual(["gate", "detail", "more"])
   values.gate = { choice: "no" }
   expect(visibleQuestions(questions, (id) => values[id]).map((q) => q.id)).toEqual(["gate"])
+})
+
+test("a hidden sibling does not change a multi-question round's placement contract", () => {
+  const visible = visibleQuestions(questions, () => ({ choice: "no" }))
+  expect(visible).toHaveLength(1)
+  expect(inlineEligible(questions)).toBe(false)
+  expect(inlineEligible([questions[0] as Question])).toBe(true)
 })
 
 test("round results never wait for hidden questions or leak stale hidden answers", () => {

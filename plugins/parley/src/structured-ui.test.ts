@@ -104,6 +104,10 @@ test("tags suggestions toggle alongside free-form tags, with count limits", () =
 test("colour supports swatches and canonical hex input", () => {
   const question = q("colour", { config: { swatches: ["#ff0000", "#00ff00"] } })
   expect(structuredStep(question, initialDraft(question), 1).value).toEqual({ hex: "#00ff00" })
+  const moved = structuredStep(question, initialDraft(question), 1)
+  expect(moved.cursor).toBe(1)
+  expect(structuredChoose(question, moved, moved.cursor).value).toEqual({ hex: "#00ff00" })
+  expect(initialDraft({ ...question, recommended: { hex: "#00ff00" } }).cursor).toBe(1)
   expect(structuredSetText(question, initialDraft(question), "#ABC")).toMatchObject({ draft: { value: { hex: "#aabbcc" } } })
   expect(structuredEditText(question, initialDraft(question))).toBe("#ff0000")
 })

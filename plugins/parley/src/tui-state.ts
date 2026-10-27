@@ -12,6 +12,9 @@ export interface Draft {
   cursor: number
 }
 
+/** Placement uses round membership, not the live subset: hiding a sibling must not make f open a non-existent inline card. */
+export function inlineEligible(questions: readonly Question[]): boolean { return questions.length === 1 }
+
 const TEXT_KINDS = new Set(["ask_text", "ask_code", "ask_image", "ask_file"])
 
 export function isTextKind(question: Question) {
@@ -66,8 +69,8 @@ export function initialDraft(question: Question): Draft {
   const rec = recommendedValue(question)
   const value = rec ?? neutral(question)
   const ids = rows(question)
-  const selected = (value as { selected?: unknown; choice?: unknown; decision?: unknown; emoji?: unknown } | undefined) ?? {}
-  const pointed = [selected.selected, selected.choice, selected.decision, selected.emoji].find(
+  const selected = (value as { selected?: unknown; choice?: unknown; decision?: unknown; emoji?: unknown; hex?: unknown } | undefined) ?? {}
+  const pointed = [selected.selected, selected.choice, selected.decision, selected.emoji, selected.hex].find(
     (item) => typeof item === "string" && ids.includes(item),
   ) as string | undefined
   return {
