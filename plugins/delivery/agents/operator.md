@@ -4,7 +4,7 @@ mode: subagent
 model: "amazon-bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0"
 request:
   headers:
-    x-opencode-model-role: smol
+    x-opencode-model-role: cheap
 permissions:
   - action: webfetch
     resource: "*"

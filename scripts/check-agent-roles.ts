@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
 /**
  * Fail when a shipped agent (`plugins/<name>/agents/*.md`) does not declare a model-roles
- * role in its `x-opencode-model-role` request header, declares a role outside the role
- * map, or pins a model in a plugin that does not treat it as a fallback. A plugin's
+ * tier in its `x-opencode-model-role` request header, declares a value that is neither a
+ * tier nor an accepted old role name, or pins a model in a plugin that does not treat it as a fallback. A plugin's
  * `agents/roles.json` fragment, when present, must match the headers.
  *
  *   bun scripts/check-agent-roles.ts           check plugins/*
@@ -11,7 +11,7 @@
 
 import { existsSync, readdirSync, readFileSync } from "node:fs"
 import path from "node:path"
-import { isModelRole, MODEL_ROLE_HEADER, MODEL_ROLES } from "../plugins/lib/src/model-roles.ts"
+import { isModelRole, MODEL_ROLE_HEADER, MODEL_TIERS } from "../plugins/lib/src/model-roles.ts"
 
 export type Finding = { file: string; reason: string }
 
@@ -36,9 +36,9 @@ export function checkAgent(file: string, text: string, allowModel: boolean): { r
   const role = headers?.[MODEL_ROLE_HEADER]
   if (role === undefined) findings.push({ file, reason: `no request.headers.${MODEL_ROLE_HEADER}` })
   else if (!isModelRole(role))
-    findings.push({ file, reason: `unknown model role ${JSON.stringify(role)}; use one of ${MODEL_ROLES.join(", ")}` })
+    findings.push({ file, reason: `unknown model tier ${JSON.stringify(role)}; use one of ${MODEL_TIERS.join(", ")}` })
   if (data.model !== undefined && !allowModel)
-    findings.push({ file, reason: "pins a model; declare a role and let the agent inherit without model-roles" })
+    findings.push({ file, reason: "pins a model; declare a tier and let the agent inherit without model-roles" })
   return { ...(isModelRole(role) ? { role } : {}), findings }
 }
 
@@ -99,7 +99,7 @@ function main(argv: string[]): number {
     console.error(`check-agent-roles: ${findings.length} finding(s)`)
     return 1
   }
-  console.log(`check-agent-roles: ${files.length} agent(s) declare a model role`)
+  console.log(`check-agent-roles: ${files.length} agent(s) declare a model tier`)
   return 0
 }
 

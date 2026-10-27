@@ -6,17 +6,32 @@ import {
   type AutoRecord,
   autoEligible,
   buildDeciderPrompt,
+  buildEffortPrompt,
   capRole,
   deciderModel,
   formatHistory,
   parseAuto,
   parseDecision,
+  parseEffort,
   pickRole,
   pushHistory,
   roleCosts,
   withAutoTag,
 } from "./auto.ts"
+import { buildReferenceIndex, type CatalogModel, type Derived, nearestVariant, type ReferenceIndex, vendorOf } from "./catalog.ts"
 import { checkRoles, formatCheck } from "./check.ts"
+import {
+  AUTO_AGENT,
+  agentHash,
+  buildClassifyPrompt,
+  CLASSIFY_KEY_PREFIX,
+  CLASSIFY_TIMEOUT_MS,
+  type Classification,
+  type ClassifyAgent,
+  parseClassification,
+  planImplicit,
+  readClassification,
+} from "./classify.ts"
 import {
   failureNote,
   fallbackTarget,
@@ -30,7 +45,6 @@ import {
 import {
   type GuardAgent,
   type GuardModel,
-  inputCost,
   isExpensive,
   judgeModelOverride,
   judgeSpawn,
@@ -58,7 +72,9 @@ import {
   type AvailableModel,
   desiredModels,
   type ModelRef,
+  type Options,
   parseOptions,
+  ROLE_HEADER,
   resolveRole,
   roleOf,
   sameModel,
@@ -66,24 +82,33 @@ import {
   stripRoleHeader,
 } from "./resolve.ts"
 import {
+  choicesFor,
   inputModel,
+  modelLabel,
   parseRuntime,
   planSpawn,
+  ROLE_ALIAS_DESCRIPTION,
+  ROLE_PARAM,
   roleChoices,
   roleParamDescription,
   SPAWN_ROLE_KEY_PREFIX,
+  TIER_PARAM,
   toJsonSchema,
   withRoleNote,
   withRoleParam,
 } from "./spawn-role.ts"
+import { buildTiers, parseTierSettings, rankOf, resolveTier, tierMeta } from "./tiers.ts"
 
 export * from "./auto.ts"
+export * from "./catalog.ts"
 export * from "./check.ts"
+export * from "./classify.ts"
 export * from "./fallback.ts"
 export * from "./guard.ts"
 export * from "./health.ts"
 export * from "./resolve.ts"
 export * from "./spawn-role.ts"
+export * from "./tiers.ts"
 
 /** Re-registrations allowed in a row without the agents converging, before giving up until inputs change. */
 export const MAX_REREGISTER = 3
@@ -111,15 +136,16 @@ type StructSchema = { fields?: Record<string, FieldSchema>; mapFields?: (f: (fie
 
 /**
  * Fallback when the `subagent` input is an Effect struct this plugin cannot express as
- * JSON Schema: add `role` as another optional string, shaped like `model`. Unknown
- * roles are then refused in `execute.before` instead of by the schema.
+ * JSON Schema: add `tier` and `role` as more optional strings, shaped like `model`.
+ * Unknown tiers are then refused in `execute.before` instead of by the schema.
  */
 function withRoleField(input: unknown, description: string): unknown {
   const schema = input as StructSchema | undefined
   const model = schema?.fields?.model
   if (typeof schema?.mapFields !== "function" || typeof model?.annotate !== "function") return undefined
-  const role = model.annotate({ description })
-  return schema.mapFields((fields) => ({ ...fields, role }))
+  const tier = model.annotate({ description })
+  const role = model.annotate({ description: ROLE_ALIAS_DESCRIPTION })
+  return schema.mapFields((fields) => ({ ...fields, [TIER_PARAM]: tier, [ROLE_PARAM]: role }))
 }
 
 const SUBAGENT_TOOL = "subagent"
@@ -159,15 +185,38 @@ function serial() {
 export default Plugin.define({
   id: "srobroek.model-roles",
   async setup(ctx) {
-    const options = parseOptions(ctx.options)
+    const settings = parseTierSettings(ctx.options)
+    const options: Options = { ...parseOptions(ctx.options), tiers: {}, classes: {}, implicit: {} }
     const runtime = parseRuntime(ctx.options, options)
     const guard = parseGuard(isRecord(ctx.options) ? ctx.options.guard : undefined)
-    const auto = parseAuto(isRecord(ctx.options) ? ctx.options.auto : undefined, options)
-    /** The decider settings `guard.mode: "auto"` uses when `auto` itself is off. */
-    const guardAuto = guard?.mode === "auto" ? (auto ?? parseAuto(true, options)) : undefined
     let autoHistory: AutoRecord[] = []
     let available: GuardModel[] = []
     let availableKey = ""
+    let refs: ReferenceIndex = new Map()
+    let derived: Derived | undefined
+    /** Cached classifications of agents that declare no tier, by agent id. */
+    const classified: Record<string, Classification> = {}
+    /** `id\0hash` of agents the decider could not classify this run; they get the standard tier. */
+    const unclassifiable = new Set<string>()
+    const classifying = new Set<string>()
+
+    const rebuild = () => {
+      const set = buildTiers(settings, available as CatalogModel[], refs)
+      options.roles = set.roles
+      options.tiers = set.tiers
+      options.classes = set.classes
+      derived = set.derived
+    }
+
+    // models.dev first-party records (anthropic, openai, google), connected or not, price
+    // subscription models. Read-only: nothing is edited.
+    const references = await ctx.model.transform((editor) => {
+      try {
+        refs = buildReferenceIndex(editor.provider.list().flatMap((definition) => [...definition.models.values()] as CatalogModel[]))
+      } catch {
+        // Keep the last index.
+      }
+    })
     let health: HealthState = {}
     try {
       health = pruneHealth(readHealth(await ctx.storage.get(HEALTH_KEY)), Date.now())
@@ -186,13 +235,31 @@ export default Plugin.define({
       } catch {
         available = []
       }
-      const key = availabilityKey(available)
+      const key = `${availabilityKey(available)}\n${refs.size}`
       const changed = key !== availableKey
       availableKey = key
+      rebuild()
       return changed
     }
 
+    /** Agents waiting for a classification until the classifier below is ready. */
+    let unscheduled: ReadonlyArray<ClassifyAgent> = []
+    let scheduleClassify: (agents: ReadonlyArray<ClassifyAgent>) => void = (agents) => {
+      unscheduled = agents
+    }
+
     const apply = (editor: AgentEditor) => {
+      const agents = editor.list() as ReadonlyArray<ClassifyAgent>
+      const plan = planImplicit({
+        agents,
+        configured: options.agents,
+        header: ROLE_HEADER,
+        classified,
+        failed: unclassifiable,
+        autoGeneral: auto !== undefined,
+      })
+      options.implicit = plan.implicit
+      if (plan.pending.length > 0) scheduleClassify(plan.pending)
       const desired = desiredModels(editor.list(), options, available, healthView(health, Date.now()))
       for (const [id, ref] of desired) {
         const agent = editor.get(id)
@@ -204,6 +271,19 @@ export default Plugin.define({
     }
 
     await refresh()
+    const auto = parseAuto(isRecord(ctx.options) ? ctx.options.auto : undefined, options)
+    /** The decider settings `guard.mode: "auto"` and classification use when `auto` itself is off. */
+    const deciderSettings = auto ?? parseAuto(true, options)
+    const guardAuto = guard?.mode === "auto" ? deciderSettings : undefined
+    try {
+      const scan = await ctx.storage.scan({ prefix: CLASSIFY_KEY_PREFIX })
+      for (const entry of scan.entries) {
+        const value = readClassification(entry.value)
+        if (value !== undefined) classified[entry.key.slice(CLASSIFY_KEY_PREFIX.length)] = value
+      }
+    } catch {
+      // Classifications are looked up one by one instead.
+    }
     let registration = await ctx.agent.transform(apply)
     let attempts = 0
     const controller = new AbortController()
@@ -214,6 +294,17 @@ export default Plugin.define({
     // so a model that just became unavailable or unhealthy is replaced.
     const check = async (force: boolean) => {
       const agents = (await ctx.agent.list()).data
+      // Config and markdown agents may have loaded after this transform ran, unseen by it.
+      const late = planImplicit({
+        agents: agents as ReadonlyArray<ClassifyAgent>,
+        configured: options.agents,
+        header: ROLE_HEADER,
+        classified,
+        failed: unclassifiable,
+        autoGeneral: auto !== undefined,
+      })
+      options.implicit = { ...options.implicit, ...late.implicit }
+      if (late.pending.length > 0) scheduleClassify(late.pending)
       const desired: Map<string, ModelRef> = desiredModels(agents, options, available, view())
       if (!force && staleAgents(agents, desired).length === 0) {
         attempts = 0
@@ -403,7 +494,7 @@ export default Plugin.define({
       const cooldownMs = await markFailed(failed, kind, error)
       const isChild = typeof session.parentID === "string" && session.parentID !== ""
       const spawnRole = isChild ? await spawnRoleOf(sessionID) : undefined
-      const role = spawnRole ?? (agent === undefined ? undefined : roleOf(agent, options.agents))
+      const role = spawnRole ?? (agent === undefined ? undefined : roleOf(agent, options.agents, options.implicit))
       const target = fallbackTarget(options, available, view(), role, failed)
       const facts: NoteFacts = { failed, kind, cooldownMs, target }
       if (isChild) {
@@ -467,7 +558,7 @@ export default Plugin.define({
         await queue(async () => {
           const cooldownMs = await markFailed(failed, kind, error)
           const agent = (await listAgents()).find((a) => a.id === event.agent)
-          const role = (await spawnRoleOf(event.sessionID)) ?? (agent === undefined ? undefined : roleOf(agent, options.agents))
+          const role = (await spawnRoleOf(event.sessionID)) ?? (agent === undefined ? undefined : roleOf(agent, options.agents, options.implicit))
           const target = retryTarget({
             options,
             available,
@@ -503,12 +594,12 @@ export default Plugin.define({
       editor.add({
         name: CHECK_TOOL,
         description:
-          "Read-only. List every model role's candidates with their status (available, unknown id, unknown variant, provider unavailable, unhealthy until a time) against all providers, the model each role-bearing agent resolves to, and the roles the subagent tool's `role` parameter offers, and recent auto routing decisions.",
+          "Read-only. List every model tier's candidates with their status (available, unknown id, unknown variant, provider unavailable, unhealthy until a time) against all providers, the model each tiered agent resolves to, the tiers the subagent tool's `tier` parameter offers, the derived lineups and dropped models, and recent auto routing decisions.",
         input: { type: "object", properties: {}, additionalProperties: false },
         execute: async () => {
           await refresh()
           const agents = await listAgents()
-          const report = checkRoles(options, available, agents, health, Date.now(), runtime.purposes)
+          const report = checkRoles(options, available, agents, health, Date.now(), runtime.purposes, derived)
           const content = [formatCheck(report), ...formatHistory(autoHistory)].join("\n")
           return { content, metadata: { roles: report.roles.length, agents: report.agents.length, auto: autoHistory.length } }
         },
@@ -521,7 +612,7 @@ export default Plugin.define({
      */
     const applySubagentTool = (editor: ToolEditor) => {
       const choices = roleChoices(options, available, runtime.purposes)
-      if (choices.length === 0) return
+      if (!choices.some((choice) => choice.available)) return
       const description = roleParamDescription(choices)
       editor.update(SUBAGENT_TOOL, (tool) => {
         const schema = toJsonSchema(tool.input)
@@ -594,6 +685,101 @@ export default Plugin.define({
       return outcome
     }
 
+    const classifyQueue = serial()
+
+    /** Classify one agent from its description, once per description: storage first, then the decider. */
+    const classifyOne = async (agent: ClassifyAgent): Promise<boolean> => {
+      const hash = agentHash(agent)
+      const storageKey = `${CLASSIFY_KEY_PREFIX}${agent.id}`
+      const stored = readClassification(await ctx.storage.get(storageKey).catch(() => undefined))
+      const tiers = options.tiers ?? {}
+      if (stored !== undefined && stored.hash === hash && Object.hasOwn(tiers, stored.tier)) {
+        classified[agent.id] = stored
+        return true
+      }
+      const model = deciderSettings === undefined ? undefined : deciderModel(deciderSettings, options, available, view())
+      const reply =
+        model === undefined || deciderSettings === undefined
+          ? { failure: "error" as const }
+          : await decide(
+              { ...deciderSettings, timeoutMs: Math.max(deciderSettings.timeoutMs, CLASSIFY_TIMEOUT_MS) },
+              model,
+              buildClassifyPrompt(agent, tiers),
+            )
+      const tier = reply.text === undefined ? undefined : parseClassification(reply.text, Object.keys(tiers))
+      if (tier === undefined) {
+        unclassifiable.add(`${agent.id}\0${hash}`)
+        console.warn(`${SOURCE}: could not classify agent '${agent.id}' (${reply.failure ?? "invalid reply"}); it runs on the standard tier for now`)
+        return true
+      }
+      const value: Classification = { hash, tier }
+      classified[agent.id] = value
+      try {
+        await ctx.storage.set(storageKey, value)
+      } catch {
+        // The in-memory classification still steers this instance.
+      }
+      console.warn(`${SOURCE}: classified agent '${agent.id}' as tier ${tier}`)
+      return true
+    }
+
+    scheduleClassify = (agents) => {
+      for (const agent of agents) {
+        const key = `${agent.id}\0${agentHash(agent)}`
+        if (classifying.has(key) || controller.signal.aborted) continue
+        classifying.add(key)
+        void classifyQueue(() => classifyOne(agent))
+          .then(async (changed) => {
+            if (!changed || controller.signal.aborted) return
+            await queue(async () => {
+              attempts = 0
+              await check(true)
+            })
+          })
+          .catch((error) => console.warn(`${SOURCE}: classifying agent '${agent.id}' failed`, error))
+          .finally(() => classifying.delete(key))
+      }
+    }
+    scheduleClassify(unscheduled)
+    unscheduled = []
+
+    /** The vendor of the model a spawning session runs on, for tiers that want another vendor. */
+    const callerVendor = async (event: { sessionID: string; agent: string }): Promise<string | undefined> => {
+      try {
+        const [agents, session] = await Promise.all([listAgents(), ctx.session.get({ sessionID: event.sessionID })])
+        const model = await runningModel(session as SessionLike, agents, event.agent)
+        return model === undefined ? undefined : vendorOf(model)
+      } catch {
+        return undefined
+      }
+    }
+
+    /** For a tier whose effort is `"auto"`, let the decider pick the model's variant. */
+    const withAutoEffort = async (
+      input: Record<string, unknown>,
+      role: string,
+      model: ModelRef,
+    ): Promise<{ input: Record<string, unknown>; model: ModelRef }> => {
+      if (auto === undefined || tierMeta(options, role)?.effort !== "auto") return { input, model }
+      const listed = available.find((m) => m.providerID === model.providerID && m.id === model.id)
+      const variants = (listed?.variants ?? []).map((v) => v.id)
+      if (variants.length === 0) return { input, model }
+      const decider = deciderModel(auto, options, available, view())
+      if (decider === undefined) return { input, model }
+      const prompt = buildEffortPrompt({
+        tier: role,
+        variants,
+        description: typeof input.description === "string" ? input.description : undefined,
+        prompt: typeof input.prompt === "string" ? input.prompt : "",
+      })
+      const reply = await decide(auto, decider, prompt)
+      const effort = reply.text === undefined ? undefined : parseEffort(reply.text, variants)
+      if (effort === undefined) return { input, model }
+      const variant = nearestVariant(listed?.variants, effort) ?? effort
+      const next: ModelRef = { providerID: model.providerID, id: model.id, variant }
+      return { input: { ...input, model: modelLabel(next) }, model: next }
+    }
+
     type Routed = { input: Record<string, unknown>; role: string; model: ModelRef }
 
     /**
@@ -610,13 +796,14 @@ export default Plugin.define({
     ): Promise<Routed | undefined> => {
       const agents = await listAgents()
       const agent = agents.find((a) => a.id === target)
+      if (!cheapOnly && target !== AUTO_AGENT) return undefined
       if (!autoEligible(input, agent, options) || !isRecord(input)) return undefined
       const health = view()
-      const choices = roleChoices(options, available, runtime.purposes).filter((choice) => {
-        if (!settings.roles.includes(choice.role) || !choice.available) return false
+      const choices = choicesFor(settings.roles, options, available, runtime.purposes).filter((choice) => {
+        if (!choice.available) return false
         if (!cheapOnly || guard === undefined) return true
         const model = resolveRole(options.roles, available, choice.role, health).model
-        return model !== undefined && !isExpensive(model, guard, available)
+        return model !== undefined && !isExpensive(model, guard, options.classes)
       })
       const allowed = choices.map((choice) => choice.role)
       const fallback = allowed.includes(settings.default) ? settings.default : allowed[0]
@@ -643,14 +830,15 @@ export default Plugin.define({
       if (settings.capAtParent) {
         const session = (await ctx.session.get({ sessionID: event.sessionID }).catch(() => undefined)) as SessionLike
         const parent = await runningModel(session, agents, event.agent).catch(() => undefined)
-        const parentCost = parent === undefined ? undefined : inputCost(parent, available)
+        const parentCost = parent === undefined ? undefined : rankOf(parent, options.classes)
         const next = capRole(role, roleCosts(allowed, options, available, health), parentCost)
         if (next !== role) {
           capped = role
           role = next
         }
       }
-      const plan = planSpawn({ ...input, role }, options, available, health)
+      const vendor = tierMeta(options, role)?.distinctVendor ? await callerVendor(event) : undefined
+      const plan = planSpawn({ ...input, tier: role }, options, available, health, vendor)
       if (plan.model === undefined || !isRecord(plan.input)) return undefined
       const record: AutoRecord = { at: started, agent: target, role, reason: picked.reason, model: plan.model, ms: Date.now() - started }
       if (capped !== undefined) record.capped = capped
@@ -659,15 +847,47 @@ export default Plugin.define({
       return { input: { ...plan.input, description: withAutoTag(input.description, record) }, role, model: plan.model }
     }
 
+    /** The tier a spawn passes (`tier`, else the deprecated `role`). */
+    const passedTier = (input: unknown): string | undefined => {
+      if (!isRecord(input)) return undefined
+      for (const key of [TIER_PARAM, ROLE_PARAM]) {
+        const value = input[key]
+        if (typeof value === "string" && value.trim() !== "") return value.trim()
+      }
+      return undefined
+    }
+
     const spawns = await ctx.tool.hook("execute.before", async (event) => {
       if (event.tool !== SUBAGENT_TOOL) return
-      const plan = planSpawn(event.input, options, available, view())
+      const passed = passedTier(event.input)
+      const vendor = passed !== undefined && tierMeta(options, passed)?.distinctVendor ? await callerVendor(event) : undefined
+      let plan = planSpawn(event.input, options, available, view(), vendor)
       if (plan.error !== undefined) throw new Error(plan.error)
       if (plan.input !== event.input) event.input = plan.input
       const target = spawnTarget(plan.input)
       if (target === undefined) return
+      // An agent on a tier that wants another vendor than the caller's is moved per spawn.
+      if (plan.role === undefined && inputModel(plan.input) === undefined && isRecord(plan.input)) {
+        const agent = (await listAgents().catch(() => [] as Agents)).find((a) => a.id === target)
+        const own = agent === undefined ? undefined : roleOf(agent, options.agents, options.implicit)
+        if (own !== undefined && tierMeta(options, own)?.distinctVendor) {
+          const model = resolveTier(options, available, own, view(), await callerVendor(event)).model
+          if (model !== undefined) {
+            plan = { input: { ...plan.input, model: modelLabel(model) }, role: own, model }
+            event.input = plan.input
+          }
+        }
+      }
       if (plan.role !== undefined && plan.model !== undefined) {
-        pending.set(event.id, { parentID: event.sessionID, agent: target, role: plan.role, model: plan.model, at: Date.now() })
+        let model = plan.model
+        if (isRecord(plan.input)) {
+          const tuned = await withAutoEffort(plan.input, plan.role, plan.model).catch(() => undefined)
+          if (tuned !== undefined) {
+            event.input = tuned.input
+            model = tuned.model
+          }
+        }
+        pending.set(event.id, { parentID: event.sessionID, agent: target, role: plan.role, model, at: Date.now() })
         return
       }
       const override = inputModel(plan.input)
@@ -713,7 +933,7 @@ export default Plugin.define({
             recentOr(event.sessionID, agent?.model)
           if (failed === undefined) return
           const cooldownMs = await markFailed(failed, kind, { message })
-          const role = spawn?.role ?? (agent === undefined ? undefined : roleOf(agent, options.agents))
+          const role = spawn?.role ?? (agent === undefined ? undefined : roleOf(agent, options.agents, options.implicit))
           const target = fallbackTarget(options, available, view(), role, failed)
           const facts: NoteFacts = { failed, kind, cooldownMs, target }
           await notifyParentOnce(event.sessionID, failed, subagentNote({ ...facts, agent: agentID, spawnRole: spawn?.role }))
@@ -766,6 +986,7 @@ export default Plugin.define({
       await strip.dispose()
       await retries.dispose()
       await registration.dispose()
+      await references.dispose()
       notices.clear()
       childFailures.clear()
       pending.clear()

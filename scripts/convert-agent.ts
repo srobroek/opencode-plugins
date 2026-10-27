@@ -6,8 +6,8 @@
  *
  * Writes `<dir>/<id>.md` per agent plus a roles fragment for the model-roles plugin
  * ({ agents: { <id>: <role> } }, default `<dir>/roles.json`), and prints warnings. Each
- * agent's omp `@role` becomes an `x-opencode-model-role` request header, renamed through
- * the role map. No model is written unless `--roles` names fallback models for hosts
+ * agent's omp `@role` is renamed through the role map and becomes an
+ * `x-opencode-model-role` request header carrying the tier it stands for. No model is written unless `--roles` names fallback models for hosts
  * without model-roles. Only V2-native frontmatter keys are
  * emitted: an unknown key makes OpenCode read the file as V1, which drops `model: …#variant`
  * and moves the key into `request.body` (docs/design/model-roles.md).
@@ -15,7 +15,7 @@
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { basename, join } from "node:path"
-import { isModelRole, MODEL_ROLE_HEADER, MODEL_ROLES } from "../plugins/lib/src/model-roles.ts"
+import { isModelRole, MODEL_ROLE_HEADER, MODEL_TIERS, tierFor } from "../plugins/lib/src/model-roles.ts"
 
 export type Mode = "subagent" | "primary" | "all"
 export type Effect = "allow" | "ask" | "deny"
@@ -98,7 +98,7 @@ export function mapRole(role: string, roleMap: RoleMap | undefined, warnings: st
   const mapped = roleMap?.[role] ?? role
   if (isModelRole(mapped)) return mapped
   warnings.push(
-    `model: role @${role}${mapped === role ? "" : ` (mapped to ${mapped})`} is not a model role (${MODEL_ROLES.join(", ")}); no role header written`,
+    `model: role @${role}${mapped === role ? "" : ` (mapped to ${mapped})`} is not a model tier or old role name (tiers: ${MODEL_TIERS.join(", ")}); no tier header written`,
   )
   return undefined
 }
@@ -339,20 +339,23 @@ export function convertAgent(text: string, options: ConvertOptions): Converted {
   const thinking = parsed.level ?? (typeof data["thinking-level"] === "string" ? data["thinking-level"] : undefined)
   const role = parsed.role ? mapRole(parsed.role, options.roleMap, warnings) : undefined
   const model = role && options.roles ? resolveModel(options.roles, role, thinking, warnings) : undefined
-  if (role && !options.roles && thinking && thinking !== "off")
-    warnings.push(`thinking-level: ${thinking} dropped; the ${role} role picks the variant`)
+  // The header carries the tier an old role name stands for; `default` means inherit, so no header.
+  const mappedTier = role === undefined ? undefined : tierFor(role)
+  const tier = mappedTier === "inherit" ? undefined : mappedTier
+  if (tier && !options.roles && thinking && thinking !== "off")
+    warnings.push(`thinking-level: ${thinking} dropped; the ${tier} tier picks the variant`)
   const frontmatter: V2Frontmatter = {
     ...(typeof data.description === "string" ? { description: data.description } : {}),
     mode: options.mode ?? "subagent",
     ...(model ? { model } : {}),
-    ...(role ? { request: { headers: { [MODEL_ROLE_HEADER]: role } } } : {}),
+    ...(tier ? { request: { headers: { [MODEL_ROLE_HEADER]: tier } } } : {}),
     permissions: buildPermissions(data.tools, data.spawns, warnings, options.allowListed),
   }
   if (!frontmatter.description) warnings.push("description: missing; the subagent catalog shows nothing")
   let converted = rewriteReferences(body.trim(), warnings)
   const report = reportFormat(data.output, warnings)
   if (report) converted = `${converted}\n\n${report}`
-  return { id, ...(role ? { role } : {}), frontmatter, body: `${converted}\n`, warnings }
+  return { id, ...(tier ? { role: tier } : {}), frontmatter, body: `${converted}\n`, warnings }
 }
 
 const quote = (value: string) => JSON.stringify(value)

@@ -6,13 +6,14 @@ const agent = (frontmatter: string) => `---\ndescription: x\nmode: subagent\n${f
 const role = (name: string) => `request:\n  headers:\n    x-opencode-model-role: ${name}\n`
 
 describe("checkAgent", () => {
-  test("accepts a known role", () => {
+  test("accepts a tier and an old role name", () => {
+    expect(checkAgent("a.md", agent(role("standard")), false)).toEqual({ role: "standard", findings: [] })
     expect(checkAgent("a.md", agent(role("task")), false)).toEqual({ role: "task", findings: [] })
   })
 
   test("flags a missing header, an unknown role and an unexpected model", () => {
     expect(checkAgent("a.md", agent(""), false).findings[0]?.reason).toContain("no request.headers.x-opencode-model-role")
-    expect(checkAgent("a.md", agent(role("worker")), false).findings[0]?.reason).toContain('unknown model role "worker"')
+    expect(checkAgent("a.md", agent(role("worker")), false).findings[0]?.reason).toContain('unknown model tier "worker"')
     expect(checkAgent("a.md", agent(`model: a/b\n${role("task")}`), false).findings[0]?.reason).toContain("pins a model")
     expect(checkAgent("a.md", agent(`model: a/b\n${role("task")}`), true).findings).toEqual([])
     expect(checkAgent("a.md", "no frontmatter", false).findings[0]?.reason).toBe("no frontmatter")
@@ -29,7 +30,7 @@ describe("checkFragment", () => {
   })
 })
 
-test("every shipped agent declares a known model role", () => {
+test("every shipped agent declares a known model tier", () => {
   const root = path.resolve(import.meta.dir, "..")
   const files = shippedAgents(path.join(root, "plugins"))
   expect(files.length).toBeGreaterThan(0)

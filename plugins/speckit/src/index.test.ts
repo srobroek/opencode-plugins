@@ -52,7 +52,7 @@ describe("setup", () => {
     expect([...fake.skills.keys()].sort()).toEqual(["speckit-bugfix", "speckit-setup"])
     expect(fake.agents.get("speckit-verify")).toMatchObject({
       mode: "subagent",
-      request: { headers: { "x-opencode-model-role": "challenger" } },
+      request: { headers: { "x-opencode-model-role": "reviewer" } },
     })
     expect(fake.agents.get("speckit-verify")?.model).toBeUndefined()
     await cleanup()

@@ -3,7 +3,7 @@ description: "Works in an external repo outside the caller project. Clones, disc
 mode: subagent
 request:
   headers:
-    x-opencode-model-role: task
+    x-opencode-model-role: standard
 permissions:
   - action: subagent
     resource: "*"

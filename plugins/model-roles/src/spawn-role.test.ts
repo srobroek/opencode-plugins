@@ -7,6 +7,7 @@ import {
   inputModel,
   parseRuntime,
   planSpawn,
+  ROLE_ALIAS_DESCRIPTION,
   ROLE_TOOL_NOTE,
   roleChoices,
   roleParamDescription,
@@ -128,14 +129,15 @@ describe("subagent schema", () => {
     expect(toJsonSchema(undefined)).toBeUndefined()
   })
 
-  test("adds an optional role enum, idempotently", () => {
+  test("adds an optional tier enum and a free-form role alias, idempotently", () => {
     const schema = toJsonSchema(effectInput)
     if (schema === undefined) throw new Error("no schema")
-    const once = withRoleParam(schema, ["smol", "task"], "pick one")
-    expect(once.properties.role).toEqual({ type: "string", enum: ["smol", "task"], description: "pick one" })
+    const once = withRoleParam(schema, ["cheap", "standard"], "pick one")
+    expect(once.properties.tier).toEqual({ type: "string", enum: ["cheap", "standard"], description: "pick one" })
+    expect(once.properties.role).toEqual({ type: "string", description: ROLE_ALIAS_DESCRIPTION })
     expect(once.required).toEqual(["agent", "prompt"])
-    const again = withRoleParam(toJsonSchema(once) as typeof once, ["smol"], "again")
-    expect(again.properties.role?.enum).toEqual(["smol"])
+    const again = withRoleParam(toJsonSchema(once) as typeof once, ["cheap"], "again")
+    expect(again.properties.tier?.enum).toEqual(["cheap"])
     expect(schema.properties.role).toBeUndefined()
     expect(withRoleNote(withRoleNote("Spawns."))).toBe(`Spawns.\n${ROLE_TOOL_NOTE}`)
   })
@@ -184,7 +186,7 @@ describe("planSpawn", () => {
 
   test("an unknown role is an error naming the configured ones", () => {
     expect(planSpawn({ ...spawn, role: "huge" }, options, available).error).toBe(
-      "Unknown model role 'huge'. Pass one of: custom, ghost, smol, task.",
+      "Unknown model tier 'huge'. Pass one of: custom, ghost, smol, task.",
     )
   })
 

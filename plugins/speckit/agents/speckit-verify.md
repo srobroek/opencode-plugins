@@ -3,7 +3,7 @@ description: "Verifies SpecKit implementations; spawn with mode requirements, ta
 mode: subagent
 request:
   headers:
-    x-opencode-model-role: challenger
+    x-opencode-model-role: reviewer
 permissions:
   - action: edit
     resource: "*"

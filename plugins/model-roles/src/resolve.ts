@@ -3,7 +3,9 @@
  * plugin context, so every rule is tested directly.
  */
 
-/** Agent request header that names the agent's role. */
+import type { ModelClass, TierMeta } from "./tiers.ts"
+
+/** Agent request header that names the agent's tier. */
 export const ROLE_HEADER = "x-opencode-model-role"
 
 /** A model reference in the shape `Agent.Info.model` uses. */
@@ -25,9 +27,17 @@ export type AgentLike = {
 }
 
 export type Options = {
+  /** Resolution map: tiers, their aliases and legacy role names, each an ordered candidate list. */
   roles: Record<string, string[]>
+  /** Agent id to tier, from the `agents` option; wins over the header. */
   agents: Record<string, string>
   fallback: "keep"
+  /** Tiers the spawner may pick. Absent: every name in `roles`. */
+  tiers?: Record<string, TierMeta>
+  /** How expensive each listed model is, from the derived lineups. */
+  classes?: Record<string, ModelClass>
+  /** Agent id to tier applied only when the agent declares none: built-in defaults and classifications. */
+  implicit?: Record<string, string>
 }
 
 export type Candidate = { kind: "model"; ref: ModelRef } | { kind: "role"; role: string }
@@ -124,13 +134,18 @@ export function resolveRole(
   return { model: undefined, reason: "unavailable" }
 }
 
-/** The role an agent declares: plugin options win over the request header. */
-export function roleOf(agent: AgentLike, agents: Readonly<Record<string, string>>): string | undefined {
+/** The tier an agent declares: plugin options win over the request header, which wins over `implicit`. */
+export function roleOf(
+  agent: AgentLike,
+  agents: Readonly<Record<string, string>>,
+  implicit: Readonly<Record<string, string>> = {},
+): string | undefined {
   if (Object.hasOwn(agents, agent.id)) return agents[agent.id]
   const headers = agent.request?.headers ?? {}
   for (const [name, value] of Object.entries(headers)) {
     if (name.toLowerCase() === ROLE_HEADER && value.trim() !== "") return value.trim()
   }
+  if (Object.hasOwn(implicit, agent.id)) return implicit[agent.id]
   return undefined
 }
 
@@ -146,7 +161,7 @@ export function desiredModels(
 ): Map<string, ModelRef> {
   const result = new Map<string, ModelRef>()
   for (const agent of agents) {
-    const role = roleOf(agent, options.agents)
+    const role = roleOf(agent, options.agents, options.implicit)
     if (role === undefined) continue
     const resolution = resolveRole(options.roles, available, role, health)
     if (resolution.model) result.set(agent.id, resolution.model)

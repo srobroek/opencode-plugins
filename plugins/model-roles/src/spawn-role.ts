@@ -1,7 +1,7 @@
 /**
- * The `role` parameter on the built-in `subagent` tool, and the runtime options for
- * `srobroek.model-roles`. Pure: the plugin applies these inside its tool transform
- * and its `execute.before` hook.
+ * The `tier` parameter (and its `role` alias) on the built-in `subagent` tool, and the
+ * runtime options for `srobroek.model-roles`. Pure: the plugin applies these inside its
+ * tool transform and its `execute.before` hook.
  */
 
 import { DEFAULT_HOST_RETRIES, DEFAULT_SWITCH_TIMEOUT_MS } from "./fallback.ts"
@@ -16,20 +16,28 @@ import {
   parseCandidate,
   resolveRole,
 } from "./resolve.ts"
+import { INHERIT_NAMES, resolveTier, TIER_PURPOSE, tierOf } from "./tiers.ts"
 
+export const TIER_PARAM = "tier"
+
+/** The deprecated name of `tier`, still accepted; it also takes the old role names. */
 export const ROLE_PARAM = "role"
 
-/** When the parent should pick each well-known role. */
+/** When the parent should pick each well-known tier or old role name. */
 export const ROLE_PURPOSE: Readonly<Record<string, string>> = {
-  smol: "cheap and fast: lookups, summaries, log and diff reading, mechanical edits",
-  task: "everyday implementation and investigation",
-  slow: "hard reasoning: design, root-cause debugging, subtle concurrency or data-integrity work",
-  challenger: "an independent second opinion or review from a different model",
+  ...TIER_PURPOSE,
+  smol: TIER_PURPOSE.cheap as string,
+  task: TIER_PURPOSE.standard as string,
+  slow: TIER_PURPOSE.strong as string,
+  challenger: TIER_PURPOSE.reviewer as string,
 }
 
-/** Appended to the `subagent` tool description when the `role` parameter is offered. */
+/** Appended to the `subagent` tool description when the `tier` parameter is offered. */
 export const ROLE_TOOL_NOTE =
-  "Set `role` on every new spawn: it picks the model the subagent runs on. Choose the cheapest role that fits the task. An explicit `model` overrides it; a resumed spawn (`sessionID`) keeps its model."
+  "Set `tier` on every new spawn: it picks the model the subagent runs on. Choose the cheapest tier that fits the task. An explicit `model` overrides it; a resumed spawn (`sessionID`) keeps its model."
+
+/** The description of the deprecated `role` parameter. */
+export const ROLE_ALIAS_DESCRIPTION = "Deprecated: use `tier`. Also accepts the old role names (smol, task, slow, challenger and the like)."
 
 export type RuntimeOptions = {
   cooldownMs: number
@@ -109,14 +117,32 @@ export function cheapestCost(
   return cheapest
 }
 
-export type RoleChoice = { role: string; purpose: string; cost: number | undefined; available: boolean }
+export type RoleChoice = {
+  role: string
+  purpose: string
+  cost: number | undefined
+  available: boolean
+  /** The cost class text, when the tier table provides it. */
+  costText?: string
+}
 
-/** The roles a spawner may pass, in name order, with their purpose and cost tier. */
+/**
+ * The tiers a spawner may pass, with their purpose and cost class. With a tier table
+ * that is its tiers in display order; without one, every role in name order.
+ */
 export function roleChoices(
   options: Options,
   available: ReadonlyArray<GuardModel>,
   purposes: Readonly<Record<string, string>> = {},
 ): RoleChoice[] {
+  if (options.tiers !== undefined)
+    return Object.entries(options.tiers).map(([role, meta]) => ({
+      role,
+      purpose: meta.purpose,
+      cost: cheapestCost(options.roles, available, role),
+      available: resolveRole(options.roles, available, role).model !== undefined,
+      costText: meta.cost,
+    }))
   return Object.keys(options.roles)
     .sort()
     .map((role) => ({
@@ -127,15 +153,38 @@ export function roleChoices(
     }))
 }
 
+/** Choices for the named tiers or old role names, in the order given; unknown names are left out. */
+export function choicesFor(
+  names: ReadonlyArray<string>,
+  options: Options,
+  available: ReadonlyArray<GuardModel>,
+  purposes: Readonly<Record<string, string>> = {},
+): RoleChoice[] {
+  const listed = new Map(roleChoices(options, available, purposes).map((choice) => [choice.role, choice]))
+  return names
+    .filter((name) => Object.hasOwn(options.roles, name))
+    .map(
+      (name) =>
+        listed.get(name) ?? {
+          role: name,
+          purpose: purposes[name] ?? options.tiers?.[tierOf(name)]?.purpose ?? ROLE_PURPOSE[name] ?? `work that suits the '${name}' model role`,
+          cost: cheapestCost(options.roles, available, name),
+          available: resolveRole(options.roles, available, name).model !== undefined,
+        },
+    )
+}
+
 export function describeChoice(choice: RoleChoice): string {
-  const tier = choice.available ? costTier(choice.cost) : "no model available now; the agent's own model applies"
+  const tier = !choice.available
+    ? "no model available now; the agent's own model applies"
+    : (choice.costText ?? costTier(choice.cost))
   return `'${choice.role}': ${choice.purpose} (${tier})`
 }
 
-/** The `role` parameter's description: one line per role. */
+/** The `tier` parameter's description: one line per tier. */
 export function roleParamDescription(choices: ReadonlyArray<RoleChoice>): string {
   return [
-    "Model role the subagent runs on. Pick the cheapest one that fits the task:",
+    "Model tier the subagent runs on. Pick the cheapest one that fits the task:",
     ...choices.map((choice) => `- ${describeChoice(choice)}`),
   ].join("\n")
 }
@@ -187,11 +236,12 @@ export function toJsonSchema(input: unknown): JsonObjectSchema | undefined {
   return { type: "object", properties, required, additionalProperties: false }
 }
 
-/** `schema` with an optional `role` enum over `roles`. */
-export function withRoleParam(schema: JsonObjectSchema, roles: ReadonlyArray<string>, description: string): JsonObjectSchema {
+/** `schema` with an optional `tier` enum over `tiers`, and the deprecated free-form `role`. */
+export function withRoleParam(schema: JsonObjectSchema, tiers: ReadonlyArray<string>, description: string): JsonObjectSchema {
   const next = structuredClone(schema)
-  next.properties[ROLE_PARAM] = { type: "string", enum: [...roles], description }
-  next.required = (next.required ?? []).filter((name) => name !== ROLE_PARAM)
+  next.properties[TIER_PARAM] = { type: "string", enum: [...tiers], description }
+  next.properties[ROLE_PARAM] = { type: "string", description: ROLE_ALIAS_DESCRIPTION }
+  next.required = (next.required ?? []).filter((name) => name !== ROLE_PARAM && name !== TIER_PARAM)
   return next
 }
 
@@ -203,9 +253,9 @@ export function withRoleNote(description: string): string {
 export const modelLabel = (ref: ModelRef): string => `${ref.providerID}/${ref.id}${ref.variant ? `#${ref.variant}` : ""}`
 
 export type SpawnPlan = {
-  /** The input the tool runs with: `role` removed, `model` set when the role resolved. */
+  /** The input the tool runs with: `tier` and `role` removed, `model` set when the tier resolved. */
   input: unknown
-  /** The role the spawner passed, when it applies. */
+  /** The tier (or old role name) the spawner passed, when it applies. */
   role?: string
   /** The model the role resolved to. */
   model?: ModelRef
@@ -214,30 +264,34 @@ export type SpawnPlan = {
 }
 
 /**
- * Apply the `role` argument of one `subagent` call. Precedence: an explicit `model`,
- * then `role`, then whatever the agent itself resolves to (its role in the `agents`
- * option or header, its own model, or inheritance), which the host applies.
+ * Apply the `tier` (or deprecated `role`) argument of one `subagent` call. Precedence:
+ * an explicit `model`, then `tier`, then `role`, then whatever the agent itself
+ * resolves to (its tier in the `agents` option or header, its own model, or
+ * inheritance), which the host applies. `callerVendor` puts another vendor first for
+ * a tier with `distinctVendor`.
  */
 export function planSpawn(
   input: unknown,
   options: Options,
   available: ReadonlyArray<AvailableModel>,
   health?: HealthView,
+  callerVendor?: string,
 ): SpawnPlan {
-  if (!isRecord(input) || !Object.hasOwn(input, ROLE_PARAM)) return { input }
-  const { [ROLE_PARAM]: raw, ...rest } = input
-  const role = typeof raw === "string" ? raw.trim() : ""
-  if (role === "") return { input: rest }
+  if (!isRecord(input) || (!Object.hasOwn(input, ROLE_PARAM) && !Object.hasOwn(input, TIER_PARAM))) return { input }
+  const { [ROLE_PARAM]: rawRole, [TIER_PARAM]: rawTier, ...rest } = input
+  const tier = typeof rawTier === "string" ? rawTier.trim() : ""
+  const role = tier !== "" ? tier : typeof rawRole === "string" ? rawRole.trim() : ""
+  if (role === "" || INHERIT_NAMES.includes(role)) return { input: rest }
   if (typeof rest.sessionID === "string" && rest.sessionID !== "") return { input: rest }
   if (typeof rest.model === "string" && rest.model.trim() !== "") return { input: rest }
   if (!Object.hasOwn(options.roles, role)) {
-    const known = Object.keys(options.roles).sort()
+    const known = options.tiers !== undefined ? Object.keys(options.tiers) : Object.keys(options.roles).sort()
     return {
       input: rest,
-      error: `Unknown model role '${role}'. Pass one of: ${known.join(", ") || "(none configured)"}.`,
+      error: `Unknown model tier '${role}'. Pass one of: ${known.join(", ") || "(none configured)"}.`,
     }
   }
-  const model = resolveRole(options.roles, available, role, health).model
+  const model = resolveTier(options, available, role, health, callerVendor).model
   if (model === undefined) return { input: rest, role }
   return { input: { ...rest, model: modelLabel(model) }, role, model }
 }

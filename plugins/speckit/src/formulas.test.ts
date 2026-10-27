@@ -57,7 +57,7 @@ describe("execution_agent_type routing (beads FO-5)", () => {
 test("shipped agents carry a model-roles role header and no model", () => {
   expect(agents.map((agent) => agent.id)).toEqual(["speckit-sync", "speckit-verify"])
   for (const agent of agents) {
-    expect(agentRole(agent.request)).toBe("challenger")
+    expect(agentRole(agent.request)).toBe("reviewer")
     expect(agent.permissions).toContainEqual({ action: "edit", resource: "*", effect: "deny" })
     expect(agent.mode).toBe("subagent")
   }

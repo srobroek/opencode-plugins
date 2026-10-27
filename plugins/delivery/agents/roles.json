@@ -1,10 +1,10 @@
 {
   "agents": {
-    "implementer": "task",
-    "implementer-high": "slow",
-    "researcher": "task",
+    "implementer": "standard",
+    "implementer-high": "strong",
+    "researcher": "standard",
     "pr-reviewer": "reviewer",
-    "operator": "smol",
-    "shepherd": "task"
+    "operator": "cheap",
+    "shepherd": "standard"
   }
 }

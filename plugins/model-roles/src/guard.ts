@@ -13,9 +13,7 @@ import {
   resolveRole,
   roleOf,
 } from "./resolve.ts"
-
-/** Input cost (USD per million tokens) at or above which `"auto"` counts a model as expensive. */
-export const AUTO_THRESHOLD = 4
+import { costLabel, isExpensiveClass, type ModelClass, rankOf } from "./tiers.ts"
 
 /** How many alternatives a deny message names. */
 export const CATALOG_LIMIT = 12
@@ -27,9 +25,8 @@ export const AGENT_HINT_LIMIT = 5
 export const SUMMARY_LIMIT = 80
 
 export type GuardOptions = {
-  /** `provider/model` references, or `"auto"` to judge by input cost. */
+  /** `provider/model` references, or `"auto"`: premium models (at or above the `premium` price). */
   expensive: string[] | "auto"
-  threshold: number
   /** Agent ids allowed to inherit the session model. */
   allowInherit: string[]
   /** Expensive models a spawn may still name in its own `model` argument. */
@@ -79,13 +76,13 @@ export function parseGuard(raw: unknown): GuardOptions | undefined {
   if (input.enabled === false) return undefined
   const list = typeof input.expensive === "string" && input.expensive !== "auto" ? [input.expensive] : strings(input.expensive)
   const expensive = input.expensive === undefined || input.expensive === "auto" ? "auto" : list
-  const threshold =
-    typeof input.threshold === "number" && Number.isFinite(input.threshold) && input.threshold > 0
-      ? input.threshold
-      : AUTO_THRESHOLD
   const mode = input.mode === "auto" ? "auto" : "refuse"
-  return { expensive, threshold, allowInherit: strings(input.allowInherit), allowModels: strings(input.allowModels), mode }
+  return { expensive, allowInherit: strings(input.allowInherit), allowModels: strings(input.allowModels), mode }
 }
+
+/** The names a spawner picks from: the tier table, else every role. */
+export const tierNames = (options: Pick<Options, "roles" | "tiers">): string[] =>
+  options.tiers !== undefined ? Object.keys(options.tiers) : Object.keys(options.roles).sort()
 
 const key = (ref: ModelRef): string => `${ref.providerID}/${ref.id}`
 
@@ -99,12 +96,13 @@ export function inputCost(ref: ModelRef, available: ReadonlyArray<GuardModel>): 
   return typeof base?.input === "number" ? base.input : undefined
 }
 
-/** Whether `ref` is in the expensive set. A listed entry with a variant matches only that variant. */
-export function isExpensive(ref: ModelRef, guard: GuardOptions, available: ReadonlyArray<GuardModel>): boolean {
-  if (guard.expensive === "auto") {
-    const cost = inputCost(ref, available)
-    return cost !== undefined && cost >= guard.threshold
-  }
+/**
+ * Whether `ref` is in the expensive set. `"auto"` reads the derived classes: premium
+ * models only, so strong models such as Opus are not guarded. A listed entry with a
+ * variant matches only that variant.
+ */
+export function isExpensive(ref: ModelRef, guard: GuardOptions, classes: Readonly<Record<string, ModelClass>> | undefined): boolean {
+  if (guard.expensive === "auto") return isExpensiveClass(ref, classes)
   return guard.expensive.some((entry) => {
     const candidate = parseCandidate(entry)
     if (candidate?.kind !== "model") return false
@@ -119,12 +117,12 @@ export function pinnedModel(
   facts: Pick<GuardFacts, "options" | "available" | "health">,
 ): ModelRef | undefined {
   if (agent.model !== undefined) return agent.model
-  const role = roleOf(agent, facts.options.agents)
+  const role = roleOf(agent, facts.options.agents, facts.options.implicit)
   if (role === undefined) return undefined
   return resolveRole(facts.options.roles, facts.available, role, facts.health).model
 }
 
-export type CheapRole = { role: string; model: ModelRef; cost: number | undefined }
+export type CheapRole = { role: string; model: ModelRef; cost: number | undefined; rank?: number; text?: string }
 
 export type CheapAgent = { id: string; model: ModelRef; summary?: string }
 
@@ -148,22 +146,29 @@ export function cheaperAlternatives(facts: GuardFacts): { agents: CheapAgent[]; 
   for (const agent of facts.agents) {
     if (agent.id === facts.target || agent.mode === "primary" || agent.hidden === true) continue
     const model = pinnedModel(agent, facts)
-    if (model === undefined || isExpensive(model, facts.guard, facts.available)) continue
+    if (model === undefined || isExpensive(model, facts.guard, facts.options.classes)) continue
     const summary = summarize(agent.description)
     agents.push(summary === undefined ? { id: agent.id, model } : { id: agent.id, model, summary })
   }
   const roles: CheapRole[] = []
-  for (const role of Object.keys(facts.options.roles).sort()) {
+  for (const role of tierNames(facts.options)) {
     const model = resolveRole(facts.options.roles, facts.available, role, facts.health).model
-    if (model !== undefined && !isExpensive(model, facts.guard, facts.available))
-      roles.push({ role, model, cost: inputCost(model, facts.available) })
+    if (model === undefined || isExpensive(model, facts.guard, facts.options.classes)) continue
+    const known = facts.options.classes?.[key(model)]
+    const entry: CheapRole = { role, model, cost: known?.price ?? inputCost(model, facts.available) }
+    const rank = rankOf(model, facts.options.classes)
+    if (rank !== undefined) entry.rank = rank
+    if (known !== undefined) entry.text = costLabel(known)
+    roles.push(entry)
   }
-  roles.sort((a, b) => (a.cost ?? Number.POSITIVE_INFINITY) - (b.cost ?? Number.POSITIVE_INFINITY))
+  const inf = Number.POSITIVE_INFINITY
+  roles.sort((a, b) => (a.cost ?? inf) - (b.cost ?? inf) || (a.rank ?? inf) - (b.rank ?? inf))
   agents.sort((a, b) => a.id.localeCompare(b.id))
   return { agents: agents.slice(0, CATALOG_LIMIT), roles: roles.slice(0, CATALOG_LIMIT) }
 }
 
-const price = (cost: number | undefined): string => (cost === undefined ? "cost unknown" : `$${cost}/M input tokens`)
+const price = (role: Pick<CheapRole, "cost" | "text">): string =>
+  role.text ?? (role.cost === undefined ? "cost unknown" : `$${role.cost}/M input tokens`)
 
 /** Judge one spawn. Anything the guard cannot establish allows. */
 export function judgeSpawn(facts: GuardFacts): GuardDecision {
@@ -172,20 +177,20 @@ export function judgeSpawn(facts: GuardFacts): GuardDecision {
   if (target === undefined) return { allow: true }
   if (pinnedModel(target, facts) !== undefined) return { allow: true }
   if (facts.sessionModel === undefined) return { allow: true }
-  if (!isExpensive(facts.sessionModel, facts.guard, facts.available)) return { allow: true }
+  if (!isExpensive(facts.sessionModel, facts.guard, facts.options.classes)) return { allow: true }
 
   const { agents, roles } = cheaperAlternatives(facts)
   const lines = [
-    `Subagent '${facts.target}' has no model and no resolvable role, so it would inherit this session's expensive model ${label(facts.sessionModel)}.`,
+    `Subagent '${facts.target}' has no model and no resolvable tier, so it would inherit this session's expensive model ${label(facts.sessionModel)}.`,
   ]
   const [cheapest, ...others] = roles
   if (cheapest !== undefined) {
     lines.push(
-      `Re-issue the spawn with role: "${cheapest.role}" (runs ${label(cheapest.model)}, ${price(cheapest.cost)}), or another role that fits the task better.`,
+      `Re-issue the spawn with tier: "${cheapest.role}" (runs ${label(cheapest.model)}, ${price(cheapest)}), or another tier that fits the task better.`,
     )
     if (others.length > 0)
-      lines.push(`Other cheaper roles: ${others.map((r) => `${r.role} → ${label(r.model)} (${price(r.cost)})`).join("; ")}`)
-  } else lines.push("No model role resolves to a cheaper model right now.")
+      lines.push(`Other cheaper tiers: ${others.map((r) => `${r.role} → ${label(r.model)} (${price(r)})`).join("; ")}`)
+  } else lines.push("No model tier resolves to a cheaper model right now.")
   // With a role to pass, pinned agents are a side note: ids and models only.
   const hinted = cheapest === undefined ? agents : agents.slice(0, AGENT_HINT_LIMIT)
   const more = agents.length > hinted.length ? `; ${agents.length - hinted.length} more` : ""
@@ -212,7 +217,7 @@ const listed = (ref: ModelRef, entries: ReadonlyArray<string>): boolean =>
  * lists it: models set `model` despite the tool description telling them not to.
  */
 export function judgeModelOverride(facts: GuardFacts & { model: ModelRef }): GuardDecision {
-  if (!isExpensive(facts.model, facts.guard, facts.available)) return { allow: true }
+  if (!isExpensive(facts.model, facts.guard, facts.options.classes)) return { allow: true }
   if (listed(facts.model, facts.guard.allowModels)) return { allow: true }
   const target = facts.agents.find((agent) => agent.id === facts.target)
   const pinned = target === undefined ? undefined : pinnedModel(target, facts)
@@ -221,14 +226,12 @@ export function judgeModelOverride(facts: GuardFacts & { model: ModelRef }): Gua
   const lines = [`This spawn sets model ${label(facts.model)} itself, and that model is expensive.`]
   const [cheapest] = roles
   if (cheapest !== undefined)
-    lines.push(`Drop \`model\` and pass role: "${cheapest.role}" (runs ${label(cheapest.model)}, ${price(cheapest.cost)}), or another role that fits the task.`)
-  const matching = Object.keys(facts.options.roles)
-    .sort()
-    .filter((role) => {
+    lines.push(`Drop \`model\` and pass tier: "${cheapest.role}" (runs ${label(cheapest.model)}, ${price(cheapest)}), or another tier that fits the task.`)
+  const matching = tierNames(facts.options).filter((role) => {
       const model = resolveRole(facts.options.roles, facts.available, role, facts.health).model
       return model !== undefined && key(model) === key(facts.model)
     })
-  if (matching.length > 0) lines.push(`If the task needs ${label(facts.model)}, pass role: "${matching[0]}" instead; it resolves to that model.`)
+  if (matching.length > 0) lines.push(`If the task needs ${label(facts.model)}, pass tier: "${matching[0]}" instead; it resolves to that model.`)
   lines.push(`If the user asked for ${label(facts.model)}, add it to the srobroek.model-roles option guard.allowModels.`)
   return { allow: false, reason: lines.join("\n") }
 }

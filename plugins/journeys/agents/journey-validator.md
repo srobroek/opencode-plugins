@@ -4,7 +4,7 @@ mode: subagent
 steps: 400
 request:
   headers:
-    x-opencode-model-role: task
+    x-opencode-model-role: standard
 permissions:
   - action: webfetch
     resource: "*"

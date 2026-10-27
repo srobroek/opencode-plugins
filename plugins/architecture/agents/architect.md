@@ -3,7 +3,7 @@ description: "Read-only architect for software, system, module, and API design a
 mode: subagent
 request:
   headers:
-    x-opencode-model-role: architect
+    x-opencode-model-role: strong
 permissions:
   - action: edit
     resource: "*"

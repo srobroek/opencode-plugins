@@ -117,7 +117,7 @@ export function failureNote(facts: NoteFacts): string {
   const who = scope === "provider" ? `every ${facts.failed.providerID} model` : "it"
   const head = `Model ${label(facts.failed)} failed (${facts.kind}); ${who} sits out new resolutions for ${duration(facts.cooldownMs)}.`
   if (facts.target === undefined) return `${head} No other candidate is available for it.`
-  return `${head} Role ${facts.target.role} now resolves to ${label(facts.target.model)}.`
+  return `${head} Tier ${facts.target.role} now resolves to ${label(facts.target.model)}.`
 }
 
 /** The note for a request the retry hook moved to another model. */
@@ -136,9 +136,9 @@ export type SubagentNoteFacts = NoteFacts & {
 export function subagentNote(facts: SubagentNoteFacts): string {
   const who = facts.agent === undefined ? "A subagent" : `Subagent '${facts.agent}'`
   let retry: string
-  if (facts.target === undefined) retry = "Retrying it would hit the same model; pick another agent or role."
+  if (facts.target === undefined) retry = "Retrying it would hit the same model; pick another agent or tier."
   else if (facts.spawnRole !== undefined) {
-    retry = `Spawn it again with role: "${facts.spawnRole}"; that role now runs ${label(facts.target.model)}.`
+    retry = `Spawn it again with tier: "${facts.spawnRole}"; that tier now runs ${label(facts.target.model)}.`
     if (facts.resumable !== undefined) retry += ` Or resume it with sessionID ${facts.resumable}; it was switched to that model.`
   } else retry = "The spawn may be retried: it now resolves to the next model."
   return `${who} failed. ${failureNote(facts)} ${retry}`

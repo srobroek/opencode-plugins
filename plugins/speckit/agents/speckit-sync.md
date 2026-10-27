@@ -3,7 +3,7 @@ description: "Audits SpecKit artifacts; spawn with scope drift, conflicts, or bo
 mode: subagent
 request:
   headers:
-    x-opencode-model-role: challenger
+    x-opencode-model-role: reviewer
 permissions:
   - action: edit
     resource: "*"
