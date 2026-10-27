@@ -14,8 +14,8 @@ export type Segment = "global-instructions" | "project-instructions" | "identity
 
 export const SEGMENTS: ReadonlyArray<Segment> = ["global-instructions", "project-instructions", "identity", "worktree"]
 
-/** Read-only agents keep the project's AGENTS.md and lose the user's global one. */
-export const DEFAULT_DROP: ReadonlyArray<Segment> = ["global-instructions", "identity", "worktree"]
+/** Read-only agents keep every AGENTS.md and lose the model identity and the worktree hint. */
+export const DEFAULT_DROP: ReadonlyArray<Segment> = ["identity", "worktree"]
 
 /** `leanDrop` names that stand for several segments. */
 const ALIASES: Readonly<Record<string, ReadonlyArray<Segment>>> = {

@@ -293,8 +293,8 @@ Use the coder agent to plan tests for div in src/div.ts (zero, negative, fractio
 
 **Install:** `opencode plugin add 'github:srobroek/opencode-plugins#main::path:plugins/agent-efficiency'`.
 Options: `bashAlias`, `explore`, `leanSubagents` and `leanDrop`, all on by default. `leanDrop`
-defaults to `global-instructions`, `identity` and `worktree`. Add `project-instructions` (or use
-`instructions` for both) to drop the project `AGENTS.md` too.
+defaults to `identity` and `worktree`. Add `global-instructions` or `project-instructions` (or
+use `instructions` for both) to drop an `AGENTS.md` too.
 
 ### Hook: bash alias
 
@@ -329,7 +329,7 @@ Add a project `AGENTS.md` to the scratch repo first: `echo '# Probe rules' > AGE
 Use the adversarial-challenger agent to answer: does your system prompt contain any "Instructions from:" AGENTS.md blocks or a "# Your Model" section? Quote the headings and file paths you see.
 ```
 
-**Expect:** no block for the global `~/.config/opencode/AGENTS.md` and no `# Your Model` section. The scratch repo's own `AGENTS.md` block is still there, as are the environment block and the date.
+**Expect:** no `# Your Model` section. The blocks for the global `~/.config/opencode/AGENTS.md` and the scratch repo's own `AGENTS.md` are both there, as are the environment block and the date. With `"leanDrop": ["global-instructions", "identity", "worktree"]` the global block is gone and the project block stays.
 **If not:** `plugins/agent-efficiency/src/lean.ts` (`DEFAULT_LEAN_AGENTS`, `DEFAULT_DROP`); a global/project split that misfires shows up as both blocks gone or both kept.
 
 ## agent-mechanic

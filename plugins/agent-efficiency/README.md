@@ -67,13 +67,14 @@ agent and your config.
 ## Lean subagents
 
 A subagent's system prompt repeats parts of the parent's that a read-only agent does
-not need: the user's global AGENTS.md (push and scratch rules), the model identity
-block ("# Your Model") and the hint about moving a session into a worktree. For child
-sessions of the agents in `leanSubagents`, a `context` hook removes them before each
-request, and `compaction` and `generate` hooks do the same for those requests. The
-project's AGENTS.md stays, so explore and the reviewers still know the project. The
-result depends only on the agent and the prompt, so the prompt cache prefix holds
-across steps and compaction.
+not need: the model identity block ("# Your Model") and the hint about moving a
+session into a worktree. For child sessions of the agents in `leanSubagents`, a
+`context` hook removes them before each request, and `compaction` and `generate`
+hooks do the same for those requests. Every AGENTS.md stays by default: the user's
+global one carries rules that apply everywhere, so keep it short, and the project's
+tells explore and the reviewers about the project. Add `global-instructions` or
+`project-instructions` to `leanDrop` to drop them too. The result depends only on the
+agent and the prompt, so the prompt cache prefix holds across steps and compaction.
 
 Each AGENTS.md file is its own "Instructions from: <path>" section. A file under the
 global config directory (`OPENCODE_CONFIG_DIR`, `$XDG_CONFIG_HOME/opencode` or
@@ -94,10 +95,10 @@ its own AGENTS.md, still arrive as messages.
 Measured on OpenCode 2.1.4 with Claude Haiku 4.5, one global AGENTS.md (869 bytes)
 and one project AGENTS.md (3,981 bytes), first request in tokens:
 
-| Agent | Untrimmed | Default (`global-instructions`, `identity`, `worktree`) | `instructions`, `identity`, `worktree` |
-| --- | --- | --- | --- |
-| `explore` | 3,536 | 3,148 | 1,948 |
-| `adversarial-challenger` | 4,792 | 4,404 | 3,204 |
+| Agent | Untrimmed | Default (`identity`, `worktree`) | Plus `global-instructions` | `instructions`, `identity`, `worktree` |
+| --- | --- | --- | --- | --- |
+| `explore` | 3,587 | 3,484 | 3,194 | 1,993 |
+| `adversarial-challenger` | 4,282 | 4,129 | 3,833 | 2,629 |
 
 Providers cache only prompt prefixes above a minimum (4,096 tokens for Claude Haiku
 4.5 on Bedrock), so a prompt this short may be sent uncached until the conversation
@@ -143,4 +144,4 @@ starts with, rejects it. Moving the call into `workdir` does not help: OpenCode 
 | `bashAlias` | `true` | `false` leaves `bash` calls to fail as unknown tools. |
 | `explore` | `true` | `false` keeps the built-in `explore` agent as OpenCode and your config define it. |
 | `leanSubagents` | the read-only agents above | Agent ids whose child sessions get the trimmed prompt. `false` or `[]` turns it off. |
-| `leanDrop` | `["global-instructions", "identity", "worktree"]` | Which segments to remove: `global-instructions`, `project-instructions`, `identity`, `worktree`. `instructions` stands for both AGENTS.md segments. |
+| `leanDrop` | `["identity", "worktree"]` | Which segments to remove: `global-instructions`, `project-instructions`, `identity`, `worktree`. `instructions` stands for both AGENTS.md segments. |

@@ -115,8 +115,15 @@ describe("leanSystem on a recorded 2.1.4 prompt", () => {
     const prompt = recorded[0]?.text ?? ""
     const part = instructions(recorded)[0]?.text ?? ""
 
-    test(`${agent}: the default drops the global file, identity and hint, and keeps the project file`, () => {
+    test(`${agent}: the default drops identity and the hint, and keeps both AGENTS.md files`, () => {
       const lean = leanSystem(recorded, new Set(DEFAULT_DROP), dirs)
+      expect(lean).toEqual(recorded.filter((_, index) => index === 0 || index === 2))
+      expect(lean[1]?.text).toContain("Instructions from: /Users/u/.config/opencode/AGENTS.md")
+      expect(lean[1]?.text).toContain("Instructions from: /Users/u/dev/repo/AGENTS.md")
+    })
+
+    test(`${agent}: global-instructions drops the global file and keeps the project file`, () => {
+      const lean = leanSystem(recorded, new Set(["global-instructions", ...DEFAULT_DROP] as const), dirs)
       expect(lean).toHaveLength(2)
       expect(lean[0]?.text).toBe(prompt)
       const kept = lean[1]?.text ?? ""
@@ -170,10 +177,10 @@ describe("leanSystem", () => {
 })
 
 describe("parseLeanOptions", () => {
-  test("defaults to the read-only agents, dropping the global AGENTS.md, identity and the hint", () => {
+  test("defaults to the read-only agents, dropping identity and the hint", () => {
     const parsed = parseLeanOptions({})
     expect([...(parsed?.agents ?? [])]).toEqual([...DEFAULT_LEAN_AGENTS])
-    expect([...(parsed?.drop ?? [])]).toEqual(["global-instructions", "identity", "worktree"])
+    expect([...(parsed?.drop ?? [])]).toEqual(["identity", "worktree"])
   })
 
   test("leaves implementers out of the default list", () => {
@@ -296,7 +303,7 @@ describe("plugin", () => {
     })
     const cleanup = await plugin.setup(fake.context)
     const lean = await fake.fire.session("context", context("ses_child", "pr-reviewer"))
-    expect(lean.system).toEqual([text("You are a reviewer."), text([CATALOG, SKILLS, PROJECT, BUILTINS].join("\n\n"))])
+    expect(lean.system).toEqual([text("You are a reviewer."), text([CATALOG, SKILLS, AGENTS, BUILTINS].join("\n\n"))])
     const again = await fake.fire.session("context", context("ses_child", "pr-reviewer"))
     expect(again.system).toEqual(lean.system)
     expect(fake.calls.filter((entry) => entry.method === "session.get")).toHaveLength(1)
@@ -304,6 +311,16 @@ describe("plugin", () => {
     expect((await fake.fire.session("context", context("ses_impl", "implementer"))).system).toEqual(system())
     await cleanup?.()
     expect(fake.active()).toBe(0)
+  })
+
+  test("leanDrop global-instructions also drops the global AGENTS.md", async () => {
+    const fake = createFakeContext({
+      options: { leanDrop: ["global-instructions", "identity", "worktree"] },
+      sessions: [{ id: "ses_child", parentID: "ses_root" }, { id: "ses_root" }],
+    })
+    await plugin.setup(fake.context)
+    const lean = await fake.fire.session("context", context("ses_child", "pr-reviewer"))
+    expect(lean.system).toEqual([text("You are a reviewer."), text([CATALOG, SKILLS, PROJECT, BUILTINS].join("\n\n"))])
   })
 
   test("compaction and generate requests get the same trimmed system prompt", async () => {
