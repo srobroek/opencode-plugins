@@ -1,6 +1,8 @@
 ---
 name: toolchain-frontend
 description: Use when choosing a frontend framework, UI kit, or client or server state library.
+metadata:
+  opencode/autoinvoke: false
 ---
 
 # Frontend Defaults

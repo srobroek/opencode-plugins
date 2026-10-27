@@ -3,6 +3,11 @@
 Toolchain, backend, infrastructure and operations defaults, as skills the model
 loads when the description matches.
 
+In OpenCode the `toolchain-*` and `ops-*` skills set `opencode/autoinvoke: false` and are
+listed as one router, `toolchain-guide`, whose body maps each situation to the skill to load
+by id; the other skills stay listed. Claude Code and Codex ignore that metadata, so there
+every skill is listed and triggers directly.
+
 | Skill | When |
 | --- | --- |
 | `toolchain-stack-defaults` | Stack, package manager, task runner, adding a dependency (bun, uv, mise, just; deps through the package manager CLI) |

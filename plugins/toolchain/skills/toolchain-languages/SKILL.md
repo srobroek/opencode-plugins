@@ -1,6 +1,8 @@
 ---
 name: toolchain-languages
 description: Use when picking per-language libraries or test and lint tools that the language itself does not imply.
+metadata:
+  opencode/autoinvoke: false
 ---
 
 # Per-Language Library And Tool Defaults

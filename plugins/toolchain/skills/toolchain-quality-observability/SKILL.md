@@ -1,6 +1,8 @@
 ---
 name: toolchain-quality-observability
 description: Use when adding logging, tracing, or security scanners to a service or worker.
+metadata:
+  opencode/autoinvoke: false
 ---
 
 # Quality And Observability Defaults

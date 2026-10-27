@@ -1,6 +1,8 @@
 ---
 name: toolchain-infrastructure
 description: Use when choosing Terraform, OpenTofu, CDK, Kubernetes, or Helm for infrastructure.
+metadata:
+  opencode/autoinvoke: false
 ---
 
 # Infrastructure Defaults
