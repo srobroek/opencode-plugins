@@ -14,7 +14,7 @@ import { createStore, reconcile } from "solid-js/store"
 import type { FileValue, SubmittedAnswer } from "./answers.ts"
 import { clipboardFiles, copyText } from "./clipboard.ts"
 import { cardText } from "./copy-text.ts"
-import { FocusGuard } from "./focus.ts"
+import { FocusGuard, INPUT_MODE } from "./focus.ts"
 import { DEFAULT_EMOJIS, optionLabel, type Question, sliderBounds, sliderText } from "./questions.ts"
 import type { RoundView } from "./rounds.ts"
 import {
@@ -377,6 +377,7 @@ export interface RoundPanelProps extends PanelProps {
 
 export function RoundPanel(props: RoundPanelProps) {
   const theme = () => props.context.theme
+  let box: BoxRenderable | undefined
   let scroll: ScrollBoxRenderable | undefined
   const controls = createRoundControls(props, (id) => scroll?.scrollChildIntoView(`parley-card-${id}`))
   const {
@@ -398,8 +399,11 @@ export function RoundPanel(props: RoundPanelProps) {
     setTextarea,
   } = controls
   const single = () => questions().length === 1
+  const ownership = exclusiveFocus(props.context, () => box, controls.field, () => props.panel.focus())
+  // A side panel must keep the host's input scope, not just look selected after a prompt click.
+  createEffect(() => { if (!ownership.paused() && !props.panel.focused) props.panel.focus() })
   createEffect(() => {
-    if (props.focusRequest() > 0) props.panel.focus()
+    if (props.focusRequest() > 0) ownership.reclaim()
   })
   /** f: a one-question round goes back to the inline card; a larger one toggles full screen and the side panel. */
   const toggleView = () => {
@@ -408,6 +412,8 @@ export function RoundPanel(props: RoundPanelProps) {
   }
 
   props.context.keymap.layer(() => ({
+    mode: INPUT_MODE,
+    priority: 100,
     enabled: () => editing() === undefined,
     commands: [
       { bind: "tab", title: "Next question", group: "Parley", run: () => moveCard(1) },
@@ -446,7 +452,7 @@ export function RoundPanel(props: RoundPanelProps) {
         group: "Parley",
         run: () => {
           const round = props.round()
-          if (round) void props.dismiss(round)
+          if (round) void ownership.suspend(() => props.dismiss(round))
         },
       },
       { bind: "pageup", title: "Scroll", group: "Parley", run: () => scroll?.scrollBy(-10) },
@@ -455,6 +461,8 @@ export function RoundPanel(props: RoundPanelProps) {
   }))
 
   props.context.keymap.layer(() => ({
+    mode: INPUT_MODE,
+    priority: 100,
     enabled: () => editing() !== undefined,
     commands: [
       { bind: "escape", title: "Done editing", group: "Parley", run: () => void finishEdit() },
@@ -481,7 +489,7 @@ export function RoundPanel(props: RoundPanelProps) {
     }).length
 
   return (
-    <box flexGrow={1} flexDirection="column" paddingLeft={2} paddingRight={2} paddingTop={1}>
+    <box ref={(element: BoxRenderable) => (box = element)} focusable flexGrow={1} flexDirection="column" paddingLeft={2} paddingRight={2} paddingTop={1}>
       <box flexDirection="row" flexShrink={0} gap={2}>
         <text fg={theme().text.base} attributes={TextAttributes.BOLD}>
           {`Parley · round ${props.round()?.number ?? "?"}`}
@@ -568,6 +576,63 @@ const within = (node: Renderable | null | undefined, root: Renderable | undefine
 /** When to make sure the inline card has focus after it mounts (ms). */
 const SETTLE_MS = [50, 200, 500, 1000, 2000]
 
+/** Both surfaces need native focus AND an input-mode lease: either alone lets composer keys leak. */
+function exclusiveFocus(context: Plugin.Context, target: () => Renderable | undefined, field: () => Renderable | undefined, scope?: () => void) {
+  const guard = new FocusGuard((mode) => context.keymap.mode.push(mode))
+  const [paused, setPaused] = createSignal(false)
+  let disposed = false
+  const focusNow = () => {
+    if (!guard.active) return
+    scope?.()
+    const node = field() ?? target()
+    if (node && !node.isDestroyed) node.focus()
+  }
+  const grab = () => queueMicrotask(focusNow)
+  onMount(() => {
+    const renderer = context.renderer
+    const previous = renderer.currentFocusedRenderable
+    guard.acquire()
+    grab()
+    const onFocus = () => {
+      const focused = renderer.currentFocusedRenderable
+      const inside = within(focused, target())
+      // Parley's confirmation dialog may own focus; the composer never may.
+      if (!inside && focused !== null && !(focused instanceof EditBufferRenderable)) return
+      if (guard.moved(inside)) { focusNow(); grab() }
+    }
+    const onInput = () => {
+      const focused = renderer.currentFocusedRenderable
+      if (guard.active && focused instanceof EditBufferRenderable && !within(focused, target())) focusNow()
+      return false
+    }
+    renderer.prependInputHandler(onInput)
+    renderer.on("focused_renderable", onFocus)
+    const checks = SETTLE_MS.map((delay) => setTimeout(() => { if (guard.moved(within(renderer.currentFocusedRenderable, target()))) grab() }, delay))
+    onCleanup(() => {
+      disposed = true
+      guard.release()
+      for (const check of checks) clearTimeout(check)
+      renderer.off("focused_renderable", onFocus)
+      renderer.removeInputHandler(onInput)
+      const now = renderer.currentFocusedRenderable
+      if ((now === null || within(now, target())) && previous && !previous.isDestroyed) previous.focus()
+    })
+  })
+  return {
+    paused,
+    reclaim: () => { guard.reclaim(); grab() },
+    // Host confirmation dialogs own their own keyboard scope. Temporarily hand the lease to them,
+    // never to the prompt, and reacquire only if this surface survived the dialog.
+    suspend: async (operation: () => Promise<void>) => {
+      setPaused(true)
+      guard.release()
+      try { await operation() } finally {
+        if (!disposed) { guard.acquire(); setPaused(false); grab() }
+      }
+    },
+  }
+}
+
 /** A one-question round as a compact card above the prompt, with the panel's keys. */
 export function InlineCard(props: InlineCardProps) {
   const theme = () => props.context.theme
@@ -590,73 +655,14 @@ export function InlineCard(props: InlineCardProps) {
   let box: BoxRenderable | undefined
   const question = () => questions()[0]
 
-  const [away, setAway] = createSignal(false)
-  const guard = new FocusGuard()
-  const grab = () =>
-    queueMicrotask(() => {
-      if (guard.released) return
-      const field = controls.field()
-      if (field) field.focus()
-      else if (box && !box.isDestroyed) box.focus()
-    })
+  const ownership = exclusiveFocus(props.context, () => box, controls.field)
 
   // Back to the card on /parley or alt+p.
   createEffect(() => {
     if (props.focusRequest() === 0) return
-    guard.reclaim()
-    setAway(false)
-    grab()
+    ownership.reclaim()
   })
 
-  // Take focus from the prompt like a dialog does, and hand it back when the card goes away.
-  // The host may refocus the prompt on its own (session updates): take it back unless a key press
-  // or click just moved it, which is the user leaving on purpose.
-  onMount(() => {
-    const renderer = props.context.renderer
-    const previous = renderer.currentFocusedRenderable
-    grab()
-    const onInput = () => {
-      guard.input(Date.now())
-      return false
-    }
-    // Decided after the event that moved focus finishes: the prompt focuses itself in its own
-    // mouse-down, before that click bubbles to the root where it is recorded.
-    const onFocus = () =>
-      queueMicrotask(() => {
-        const focused = renderer.currentFocusedRenderable
-        const inside = within(focused, box)
-        // Dialogs and other non-editor targets keep focus; only a move into a text field (the prompt) is undone.
-        if (!inside && focused !== null && !(focused instanceof EditBufferRenderable)) return
-        if (guard.moved(Date.now(), inside)) grab()
-        setAway(guard.released)
-      })
-    renderer.prependInputHandler(onInput)
-    renderer.on("focused_renderable", onFocus)
-    // Mouse events bubble to the root before a click moves focus; key input handlers never see them.
-    const root = renderer.root
-    const priorDown = root.onMouseDown
-    root.onMouseDown = function (event) {
-      guard.input(Date.now())
-      priorDown?.call(this, event)
-    }
-    // The card can mount before the host settles focus on a new session's prompt; check again.
-    const checks = SETTLE_MS.map((delay) =>
-      setTimeout(() => {
-        if (!guard.released && !within(renderer.currentFocusedRenderable, box)) grab()
-      }, delay),
-    )
-    onCleanup(() => {
-      for (const check of checks) clearTimeout(check)
-      root.onMouseDown = priorDown
-      renderer.removeInputHandler(onInput)
-      renderer.off("focused_renderable", onFocus)
-    })
-    onCleanup(() => {
-      const now = props.context.renderer.currentFocusedRenderable
-      if (now && !within(now, box)) return
-      if (previous && !previous.isDestroyed) previous.focus()
-    })
-  })
 
   // The edit textarea held focus; give it back to the card so its keys keep working.
   const done = async () => {
@@ -679,6 +685,8 @@ export function InlineCard(props: InlineCardProps) {
   }
 
   props.context.keymap.layer(() => ({
+    mode: INPUT_MODE,
+    priority: 100,
     target: () => box,
     enabled: () => editing() === undefined,
     commands: [
@@ -719,13 +727,15 @@ export function InlineCard(props: InlineCardProps) {
         group: "Parley",
         run: () => {
           const round = props.round()
-          if (round) void props.dismiss(round)
+          if (round) void ownership.suspend(() => props.dismiss(round))
         },
       },
     ],
   }))
 
   props.context.keymap.layer(() => ({
+    mode: INPUT_MODE,
+    priority: 100,
     target: () => box,
     enabled: () => editing() !== undefined,
     commands: [
@@ -780,11 +790,6 @@ export function InlineCard(props: InlineCardProps) {
         )}
       </Show>
       <For each={errors()}>{(error) => <text fg={theme().text.feedback.error.base}>{error}</text>}</For>
-      <Show when={away()}>
-        <text fg={theme().text.feedback.warning.base} wrapMode="word">
-          Keys go to the prompt now · alt+p or /parley returns to this card
-        </text>
-      </Show>
       <text fg={theme().text.muted} wrapMode="word">
         {busy()
           ? "Submitting…"
