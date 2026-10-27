@@ -71,8 +71,10 @@ codex plugin add worktrunk@srobroek-opencode
 | --- | --- |
 | `worktrunk` | Skills `worktrunk-worktrees`, `worktrunk-preflight` |
 | `chezmoi` | Skill `chezmoi-editor` (no managed-file guard) |
-| `lang-go`, `lang-python`, `lang-typescript` | Router skill `lang-<language>` and skills `lang-<language>-quality`, `lang-<language>-profiling` |
-| `lang-rust` | Router skill `lang-rust`, skills `lang-rust-quality`, `lang-rust-profiling` and eight Rust guidance skills |
+| `lang-go` | Router skill `lang-go` and skills `lang-go-quality`, `lang-go-testing`, `lang-go-profiling`, `lang-go-packaging` |
+| `lang-python` | Router skill `lang-python` and skills `lang-python-quality`, `lang-python-testing`, `lang-python-profiling`, `lang-python-packaging`, `lang-python-types`, `lang-python-persistence` |
+| `lang-typescript` | Router skill `lang-typescript` and skills `lang-typescript-quality`, `lang-typescript-testing`, `lang-typescript-profiling`, `lang-typescript-packaging`, `lang-typescript-types` |
+| `lang-rust` | Router skill `lang-rust` and skills `lang-rust-quality`, `lang-rust-testing`, `lang-rust-profiling`, `lang-rust-packaging`, `lang-rust-persistence`, `lang-rust-ci`, `lang-rust-tauri` |
 | `debate` | Skills `debate`, `grilling`, `to-questionnaire` |
 | `eli5` | Skill `eli5` |
 | `project` | Skill `license-picker` |
