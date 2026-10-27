@@ -169,6 +169,10 @@
     "plugins/repomix": {
       "release-type": "node",
       "component": "repomix"
+    },
+    "plugins/docs": {
+      "release-type": "node",
+      "component": "docs"
     }
   }
 }
