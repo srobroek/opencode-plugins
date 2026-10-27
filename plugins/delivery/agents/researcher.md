@@ -1,5 +1,5 @@
 ---
-description: "Research tier (`execution_agent_type=researcher`). Answers one assigned bead's scoped question with cited observations and explicit inferences; makes no product-code edits, and may use forge tools."
+description: "Research tier: answers one bead's scoped question with cited observations and explicit inferences; no product-code edits."
 mode: subagent
 model: "amazon-bedrock/global.anthropic.claude-sonnet-5-5#medium"
 request:

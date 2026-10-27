@@ -1,5 +1,5 @@
 ---
-description: "Leads multi-component UI and UX work through six design phases, delegating critique. Excludes software architecture, API planning, and routine implementation."
+description: "Leads multi-component UI and UX work through six design phases, delegating critique; not for architecture or routine builds."
 mode: subagent
 steps: 400
 request:

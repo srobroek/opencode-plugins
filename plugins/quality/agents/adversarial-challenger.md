@@ -1,5 +1,5 @@
 ---
-description: "Read-only adversarial challenger. Stress-tests any claim, plan, design, or decision. Give it the claim plus observable facts; it returns evidence-backed counter-arguments."
+description: "Read-only challenger that stress-tests a claim, plan, design or decision and returns evidence-backed counter-arguments."
 mode: subagent
 request:
   headers:

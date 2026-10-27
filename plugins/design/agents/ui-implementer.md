@@ -1,5 +1,5 @@
 ---
-description: "Implements one UI unit end to end on the project's tokens and components, verified at three widths. Escalates multi-component or direction work to ui-ux-specialist."
+description: "Implements one UI unit on the project's tokens and components at three widths; escalates direction work to ui-ux-specialist."
 mode: subagent
 request:
   headers:

@@ -1,5 +1,5 @@
 ---
-description: "Works in an external repo outside the caller project. Clones, discovers conventions, edits, verifies, and optionally publishes. Use when parent names a repo URL."
+description: "Works in an external repo outside the caller project: clones, follows its conventions, edits, verifies, optionally publishes."
 mode: subagent
 request:
   headers:
