@@ -157,6 +157,10 @@
     "plugins/agent-coder": {
       "release-type": "node",
       "component": "agent-coder"
+    },
+    "plugins/repomix": {
+      "release-type": "node",
+      "component": "repomix"
     }
   }
 }

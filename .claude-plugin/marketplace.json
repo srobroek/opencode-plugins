@@ -78,6 +78,13 @@
       "category": "development"
     },
     {
+      "name": "repomix",
+      "source": "./plugins/repomix",
+      "description": "Pack a local or remote repo into one file with repomix for bulk context: external repos, module packs and version diffs.",
+      "version": "0.1.0",
+      "category": "development"
+    },
+    {
       "name": "rust",
       "source": "./plugins/rust",
       "description": "Rust cargo install, RUSTFLAGS linker and global target-dir advisories, and Rust guidance and profiling skills.",

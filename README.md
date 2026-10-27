@@ -5,7 +5,7 @@ OpenCode V2 plugins by Sjors Robroek. This is the OpenCode counterpart of
 
 | Field | Value |
 | --- | --- |
-| Status | Early. Plugins: `example`, `model-roles`, `worktrunk`, `session`, `dep-update`, `whats-new`, `statusline`, `beads`, `goal`, `lsp`, `subagent-worktree`, `parley`, `chezmoi`, `languages`, `rust`, `journeys`, `delivery`, `debate`, `eli5`, `project`, `architecture`, `build`, `quality`, `toolchain`, `aws`, `design`, `safety`, `find-tools`, `trunk-dev`, `speckit`, `agent-efficiency`, `agent-researcher`, `agent-seance`, `agent-mechanic`, `agent-coder`, `agent-reviewer`. |
+| Status | Early. Plugins: `example`, `model-roles`, `worktrunk`, `session`, `dep-update`, `whats-new`, `statusline`, `beads`, `goal`, `lsp`, `subagent-worktree`, `parley`, `chezmoi`, `languages`, `rust`, `journeys`, `delivery`, `debate`, `eli5`, `project`, `architecture`, `build`, `quality`, `toolchain`, `aws`, `design`, `safety`, `find-tools`, `trunk-dev`, `speckit`, `agent-efficiency`, `agent-researcher`, `agent-seance`, `agent-mechanic`, `agent-coder`, `agent-reviewer`, `repomix`. |
 | Host | OpenCode 2.1.4 or later (`@opencode/plugin` 2.x) |
 | License | Apache-2.0 |
 
@@ -81,6 +81,7 @@ codex plugin add worktrunk@srobroek-opencode
 | `agent-reviewer` | Skill `review-security` (no reviewer agents) |
 | `toolchain` | Router skill `toolchain-guide` and fourteen toolchain rule skills |
 | `aws` | Skill `aws-guidance` |
+| `repomix` | Skill `repomix`, with a CLI recipe for where `repomix_pack` is missing (no `repomix_pack`) |
 | `design` | Router skill `design-guide` and thirteen design skills (no design agents, formulas, `design_setup` or `design_impeccable_scan`) |
 | `trunk-dev` | Router skill `trunk-dev-guide` and skills `trunk-dev-workflow`, `trunk-dev-feature-flags`, `trunk-dev-release-setup` (no commit gate, no skip-CI or MR advisories) |
 | `session`, `dep-update`, `journeys`, `delivery`, `beads`, `find-tools`, `speckit` | Not exported: their skills or agents drive OpenCode tools |
