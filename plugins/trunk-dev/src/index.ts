@@ -22,7 +22,7 @@ export { SKIP_CI_ADVISORY, skipCiAdvisory } from "./skip-ci.ts"
 
 export const LAND_TOOL = "delivery_land"
 
-export const SKILL_NAMES = ["trunk-dev-workflow", "trunk-dev-feature-flags", "trunk-dev-release-setup"] as const
+export const SKILL_NAMES = ["trunk-dev-workflow", "trunk-dev-feature-flags", "trunk-dev-release-setup", "trunk-dev-guide"] as const
 
 export const SKILL_PATHS = SKILL_NAMES.map((name) =>
   fileURLToPath(new URL(`../skills/${name}/SKILL.md`, import.meta.url)),

@@ -1,6 +1,8 @@
 ---
 name: trunk-dev-feature-flags
 description: Use when adding a feat change, writing a PR Flag line, or rolling out or removing a default-off feature flag.
+metadata:
+  opencode/autoinvoke: false
 ---
 
 # Feature flag decisions

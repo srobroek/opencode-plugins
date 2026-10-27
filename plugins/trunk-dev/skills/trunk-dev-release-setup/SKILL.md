@@ -1,6 +1,8 @@
 ---
 name: trunk-dev-release-setup
 description: Use to set up semantic-release on GitHub or GitLab with Conventional Commits, synced manifests and a stale-branch job.
+metadata:
+  opencode/autoinvoke: false
 ---
 
 # Set up semantic-release
