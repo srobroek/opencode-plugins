@@ -1,6 +1,8 @@
 ---
 name: journey-init
 description: "Use when setting up a user-journeys directory in a repo that has none: investigate, interview and scaffold the format."
+metadata:
+  opencode/autoinvoke: false
 ---
 
 # journey-init
