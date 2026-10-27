@@ -31,6 +31,710 @@ import { tmpdir } from "os";
 import path from "path";
 import { createHostClipboard } from "@opentui/core";
 
+// plugins/parley/src/value-json.ts
+function canonical(value) {
+  if (Array.isArray(value))
+    return `[${value.map(canonical).join(",")}]`;
+  if (typeof value === "object" && value !== null)
+    return `{${Object.keys(value).filter((key) => value[key] !== undefined).sort().map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`).join(",")}}`;
+  return JSON.stringify(value);
+}
+
+// plugins/parley/src/structured.ts
+var NEW_KINDS = [
+  "form",
+  "buckets",
+  "match",
+  "allocate",
+  "matrix",
+  "range",
+  "path",
+  "date",
+  "time",
+  "datetime",
+  "tags",
+  "colour"
+];
+var FORM_FIELD_TYPES = ["text", "number", "choice", "toggle"];
+var PATH_MODES = ["files", "dirs", "both"];
+var ID = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
+var STEP_TOLERANCE = 0.00000001;
+var ALLOCATION_TOLERANCE = 0.00000001;
+var DEFAULT_TOTAL = 100;
+var NEUTRAL_COLOUR = "#808080";
+var TEMPORAL_DEFAULTS = { date: "2026-01-01", time: "12:00", datetime: "2026-01-01T12:00" };
+var isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+var finite = (value) => typeof value === "number" && Number.isFinite(value);
+var tidy = (value) => Number(value.toPrecision(15));
+function isStructured(question) {
+  return NEW_KINDS.includes(question.kind);
+}
+function parseItems(raw, path, errors) {
+  if (!Array.isArray(raw) || raw.length === 0) {
+    errors.push(`${path} must be a non-empty array`);
+    return [];
+  }
+  const items = [];
+  const seen = new Set;
+  raw.forEach((entry, index) => {
+    if (!isRecord(entry)) {
+      errors.push(`${path}[${index}] must be an object with id and label`);
+      return;
+    }
+    const { id, label } = entry;
+    if (typeof id !== "string" || !ID.test(id)) {
+      errors.push(`${path}[${index}].id must match ${ID}`);
+      return;
+    }
+    if (seen.has(id)) {
+      errors.push(`${path}: duplicate id ${id}`);
+      return;
+    }
+    seen.add(id);
+    if (typeof label !== "string" || label.trim() === "") {
+      errors.push(`${path}.${id}.label is required`);
+      return;
+    }
+    items.push({ id, label });
+  });
+  return items;
+}
+function optionalNumber(raw, path, errors) {
+  if (raw === undefined)
+    return;
+  if (!finite(raw)) {
+    errors.push(`${path} must be a finite number`);
+    return;
+  }
+  return raw;
+}
+function parseStep(raw, fallback, path, errors) {
+  if (raw === undefined)
+    return fallback;
+  if (!finite(raw) || raw <= 0) {
+    errors.push(`${path} must be a positive finite number`);
+    return fallback;
+  }
+  return raw;
+}
+function parseFields(raw, errors) {
+  if (!Array.isArray(raw) || raw.length === 0) {
+    errors.push("config.fields must be a non-empty array");
+    return [];
+  }
+  const fields = [];
+  const seen = new Set;
+  raw.forEach((entry, index) => {
+    const at = `config.fields[${index}]`;
+    if (!isRecord(entry)) {
+      errors.push(`${at} must be an object`);
+      return;
+    }
+    const { id, label, type, options, required } = entry;
+    if (typeof id !== "string" || !ID.test(id)) {
+      errors.push(`${at}.id must match ${ID}`);
+      return;
+    }
+    if (seen.has(id)) {
+      errors.push(`config.fields: duplicate id ${id}`);
+      return;
+    }
+    seen.add(id);
+    const before = errors.length;
+    if (typeof label !== "string" || label.trim() === "")
+      errors.push(`${at}.label is required`);
+    if (typeof type !== "string" || !FORM_FIELD_TYPES.includes(type)) {
+      errors.push(`${at}.type must be one of ${FORM_FIELD_TYPES.join(", ")}`);
+      return;
+    }
+    if (required !== undefined && typeof required !== "boolean")
+      errors.push(`${at}.required must be a boolean`);
+    const min = optionalNumber(entry.min, `${at}.min`, errors);
+    const max = optionalNumber(entry.max, `${at}.max`, errors);
+    if ((entry.min !== undefined || entry.max !== undefined) && type !== "number")
+      errors.push(`${at}: min and max apply only to number fields`);
+    if (min !== undefined && max !== undefined && min > max)
+      errors.push(`${at}: min must be <= max`);
+    let choices;
+    if (type === "choice") {
+      if (!Array.isArray(options) || options.length === 0)
+        errors.push(`${at}.options must be a non-empty array`);
+      else if (options.some((option) => typeof option !== "string" || option.trim() === ""))
+        errors.push(`${at}.options must be non-empty strings`);
+      else if (new Set(options).size !== options.length)
+        errors.push(`${at}.options has duplicates`);
+      else
+        choices = [...options];
+    } else if (options !== undefined)
+      errors.push(`${at}.options apply only to choice fields`);
+    if (errors.length > before)
+      return;
+    fields.push({
+      id,
+      label,
+      type,
+      ...choices === undefined ? {} : { options: choices },
+      ...min === undefined ? {} : { min },
+      ...max === undefined ? {} : { max },
+      ...required === undefined ? {} : { required }
+    });
+  });
+  return fields;
+}
+var DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
+var TIME = /^(\d{2}):(\d{2})$/;
+var leap = (year) => year % 4 === 0 && year % 100 !== 0 || year % 400 === 0;
+var DAYS = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+function validDate(text) {
+  const match = DATE.exec(text);
+  if (!match)
+    return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (month < 1 || month > 12 || day < 1)
+    return false;
+  const days = month === 2 && leap(year) ? 29 : DAYS[month - 1];
+  return day <= days;
+}
+function validTime(text) {
+  const match = TIME.exec(text);
+  return match !== null && Number(match[1]) < 24 && Number(match[2]) < 60;
+}
+function validTemporal(kind, text) {
+  if (typeof text !== "string")
+    return false;
+  if (kind === "date")
+    return validDate(text);
+  if (kind === "time")
+    return validTime(text);
+  const [date, time, ...rest] = text.split("T");
+  return rest.length === 0 && date !== undefined && time !== undefined && validDate(date) && validTime(time);
+}
+var TEMPORAL_FORMAT = { date: "YYYY-MM-DD", time: "HH:mm", datetime: "YYYY-MM-DDTHH:mm" };
+var HEX6 = /^#[0-9a-fA-F]{6}$/;
+var HEX3 = /^#[0-9a-fA-F]{3}$/;
+function canonicalHex(text) {
+  if (typeof text !== "string")
+    return;
+  if (HEX6.test(text))
+    return text.toLowerCase();
+  if (HEX3.test(text))
+    return `#${[...text.slice(1)].map((digit) => `${digit}${digit}`).join("")}`.toLowerCase();
+  return;
+}
+function parseSpec(question) {
+  const errors = [];
+  const raw = question.config;
+  const needsConfig = question.kind === "form" || question.kind === "buckets" || question.kind === "match" || question.kind === "matrix";
+  if (raw !== undefined && !isRecord(raw))
+    return { errors: ["config must be an object"] };
+  if (raw === undefined && needsConfig)
+    return { errors: [`config is required for ${question.kind}`] };
+  const config = raw ?? {};
+  const done = (spec) => errors.length > 0 ? { errors } : { spec };
+  switch (question.kind) {
+    case "form":
+      return done({ kind: "form", fields: parseFields(config.fields, errors) });
+    case "buckets":
+      return done({
+        kind: "buckets",
+        items: parseItems(config.items, "config.items", errors),
+        categories: parseItems(config.categories, "config.categories", errors)
+      });
+    case "match": {
+      const items = parseItems(config.items, "config.items", errors);
+      const targets = parseItems(config.targets, "config.targets", errors);
+      if (Array.isArray(config.items) && Array.isArray(config.targets) && config.items.length !== config.targets.length)
+        errors.push("config.items and config.targets must have the same number of entries");
+      return done({ kind: "match", items, targets });
+    }
+    case "allocate": {
+      const options = parseItems(question.options, "options", errors);
+      let total = DEFAULT_TOTAL;
+      if (config.total !== undefined) {
+        if (!finite(config.total) || config.total <= 0)
+          errors.push("config.total must be a positive finite number");
+        else
+          total = config.total;
+      }
+      return done({ kind: "allocate", options, total });
+    }
+    case "matrix": {
+      const options = parseItems(question.options, "options", errors);
+      const criteria = parseItems(config.criteria, "config.criteria", errors);
+      const min = optionalNumber(question.min, "min", errors) ?? 0;
+      const max = optionalNumber(question.max, "max", errors) ?? 5;
+      const step = parseStep(question.step, 1, "step", errors);
+      if (min >= max)
+        errors.push("min must be < max");
+      return done({ kind: "matrix", options, criteria, min, max, step });
+    }
+    case "range": {
+      if (question.min === undefined || question.max === undefined)
+        errors.push("min and max are required");
+      const min = optionalNumber(question.min, "min", errors) ?? 0;
+      const max = optionalNumber(question.max, "max", errors) ?? 0;
+      const step = parseStep(question.step, 1, "step", errors);
+      if (errors.length === 0 && min >= max)
+        errors.push("min must be < max");
+      if (question.unit !== undefined && typeof question.unit !== "string")
+        errors.push("unit must be a string");
+      return done({ kind: "range", min, max, step, ...typeof question.unit === "string" ? { unit: question.unit } : {} });
+    }
+    case "path": {
+      let mode = "both";
+      if (config.mode !== undefined) {
+        if (typeof config.mode !== "string" || !PATH_MODES.includes(config.mode))
+          errors.push(`config.mode must be one of ${PATH_MODES.join(", ")}`);
+        else
+          mode = config.mode;
+      }
+      return done({ kind: "path", mode, multiple: question.multiple === true });
+    }
+    case "date":
+    case "time":
+    case "datetime": {
+      const kind = question.kind;
+      const read = (key) => {
+        const value = config[key];
+        if (value === undefined)
+          return;
+        if (!validTemporal(kind, value)) {
+          errors.push(`config.${key} must be a valid ${TEMPORAL_FORMAT[kind]}`);
+          return;
+        }
+        return value;
+      };
+      const min = read("min");
+      const max = read("max");
+      if (min !== undefined && max !== undefined && min > max)
+        errors.push("config.min must be <= config.max");
+      return done({ kind, ...min === undefined ? {} : { min }, ...max === undefined ? {} : { max } });
+    }
+    case "tags": {
+      let suggestions = [];
+      if (config.suggestions !== undefined) {
+        const list = config.suggestions;
+        if (!Array.isArray(list) || list.some((tag) => typeof tag !== "string" || tag.trim() === ""))
+          errors.push("config.suggestions must be an array of non-empty strings");
+        else if (new Set(list.map((tag) => tag.trim())).size !== list.length)
+          errors.push("config.suggestions has duplicates");
+        else
+          suggestions = list.map((tag) => tag.trim());
+      }
+      const count = (key) => {
+        const value = question[key];
+        if (value === undefined)
+          return;
+        if (!finite(value) || !Number.isInteger(value) || value < 0) {
+          errors.push(`${key} must be a non-negative integer`);
+          return;
+        }
+        return value;
+      };
+      const min = count("min");
+      const max = count("max");
+      if (min !== undefined && max !== undefined && min > max)
+        errors.push("min must be <= max");
+      return done({ kind: "tags", suggestions, ...min === undefined ? {} : { min }, ...max === undefined ? {} : { max } });
+    }
+    case "colour": {
+      let swatches = [];
+      if (config.swatches !== undefined) {
+        const list = config.swatches;
+        if (!Array.isArray(list) || list.some((swatch) => typeof swatch !== "string" || !HEX6.test(swatch)))
+          errors.push("config.swatches must be an array of #RRGGBB colours");
+        else {
+          const lower = list.map((swatch) => swatch.toLowerCase());
+          if (new Set(lower).size !== lower.length)
+            errors.push("config.swatches has duplicates");
+          else
+            swatches = lower;
+        }
+      }
+      return done({ kind: "colour", swatches });
+    }
+    default:
+      return { errors: [`${question.kind} is not a structured kind`] };
+  }
+}
+function keyError(map, ids, what) {
+  for (const key of Object.keys(map))
+    if (!ids.includes(key))
+      return `unknown ${what} ${key}`;
+  for (const id of ids)
+    if (!Object.hasOwn(map, id))
+      return `missing ${what} ${id}`;
+  return;
+}
+var onStep = (value, min, step) => {
+  const steps = (value - min) / step;
+  return Math.abs(steps - Math.round(steps)) <= STEP_TOLERANCE;
+};
+function checkValue(spec, value) {
+  const fail = (error) => ({ error });
+  if (!isRecord(value))
+    return fail("value must be an object");
+  switch (spec.kind) {
+    case "form": {
+      const raw = value.fields;
+      if (!isRecord(raw))
+        return fail("fields must map field ids to values");
+      const missing = keyError(raw, spec.fields.map((field) => field.id), "field");
+      if (missing)
+        return fail(missing);
+      const fields = {};
+      for (const field of spec.fields) {
+        const entry = raw[field.id];
+        switch (field.type) {
+          case "text":
+            if (typeof entry !== "string")
+              return fail(`field ${field.id} must be a string`);
+            if (field.required === true && entry.trim() === "")
+              return fail(`field ${field.id} is required`);
+            break;
+          case "number":
+            if (!finite(entry))
+              return fail(`field ${field.id} must be a finite number`);
+            if (field.min !== undefined && entry < field.min)
+              return fail(`field ${field.id} must be >= ${field.min}`);
+            if (field.max !== undefined && entry > field.max)
+              return fail(`field ${field.id} must be <= ${field.max}`);
+            break;
+          case "choice":
+            if (typeof entry !== "string" || !(field.options ?? []).includes(entry))
+              return fail(`field ${field.id} must be one of its options`);
+            break;
+          case "toggle":
+            if (typeof entry !== "boolean")
+              return fail(`field ${field.id} must be a boolean`);
+            break;
+        }
+        fields[field.id] = entry;
+      }
+      return { value: { fields } };
+    }
+    case "buckets": {
+      const raw = value.buckets;
+      if (!isRecord(raw))
+        return fail("buckets must map category ids to item ids");
+      const missing = keyError(raw, spec.categories.map((category) => category.id), "category");
+      if (missing)
+        return fail(missing);
+      const itemIDs = spec.items.map((item) => item.id);
+      const placed = new Set;
+      const buckets = {};
+      for (const category of spec.categories) {
+        const list = raw[category.id];
+        if (!Array.isArray(list))
+          return fail(`bucket ${category.id} must be an array of item ids`);
+        for (const id of list) {
+          if (typeof id !== "string" || !itemIDs.includes(id))
+            return fail(`unknown item ${JSON.stringify(id)}`);
+          if (placed.has(id))
+            return fail(`item ${id} is placed more than once`);
+          placed.add(id);
+        }
+        buckets[category.id] = [...list];
+      }
+      const unplaced = itemIDs.find((id) => !placed.has(id));
+      if (unplaced !== undefined)
+        return fail(`item ${unplaced} is not placed`);
+      return { value: { buckets } };
+    }
+    case "match": {
+      const raw = value.pairs;
+      if (!isRecord(raw))
+        return fail("pairs must map item ids to target ids");
+      const missing = keyError(raw, spec.items.map((item) => item.id), "item");
+      if (missing)
+        return fail(missing);
+      const targetIDs = spec.targets.map((target) => target.id);
+      const used = new Set;
+      const pairs = {};
+      for (const item of spec.items) {
+        const target = raw[item.id];
+        if (typeof target !== "string" || !targetIDs.includes(target))
+          return fail(`unknown target ${JSON.stringify(target)} for ${item.id}`);
+        if (used.has(target))
+          return fail(`target ${target} is matched more than once`);
+        used.add(target);
+        pairs[item.id] = target;
+      }
+      return { value: { pairs } };
+    }
+    case "allocate": {
+      const raw = value.allocations;
+      if (!isRecord(raw))
+        return fail("allocations must map option ids to numbers");
+      const missing = keyError(raw, spec.options.map((option) => option.id), "option");
+      if (missing)
+        return fail(missing);
+      const allocations = {};
+      let sum = 0;
+      for (const option of spec.options) {
+        const amount = raw[option.id];
+        if (!finite(amount) || amount < 0)
+          return fail(`allocation for ${option.id} must be a non-negative finite number`);
+        allocations[option.id] = amount;
+        sum += amount;
+      }
+      if (Math.abs(sum - spec.total) > ALLOCATION_TOLERANCE)
+        return fail(`allocations must add up to ${spec.total} (got ${tidy(sum)})`);
+      return { value: { allocations } };
+    }
+    case "matrix": {
+      const raw = value.scores;
+      if (!isRecord(raw))
+        return fail("scores must map option ids to criterion scores");
+      const missing = keyError(raw, spec.options.map((option) => option.id), "option");
+      if (missing)
+        return fail(missing);
+      const criterionIDs = spec.criteria.map((criterion) => criterion.id);
+      const scores = {};
+      for (const option of spec.options) {
+        const row = raw[option.id];
+        if (!isRecord(row))
+          return fail(`scores for ${option.id} must map criterion ids to numbers`);
+        const missingCriterion = keyError(row, criterionIDs, `criterion for ${option.id}:`);
+        if (missingCriterion)
+          return fail(missingCriterion);
+        const cleaned = {};
+        for (const id of criterionIDs) {
+          const score = row[id];
+          if (!finite(score))
+            return fail(`score ${option.id}.${id} must be a finite number`);
+          if (score < spec.min || score > spec.max)
+            return fail(`score ${option.id}.${id} must be within ${spec.min}..${spec.max}`);
+          if (!onStep(score, spec.min, spec.step))
+            return fail(`score ${option.id}.${id} must be on a step of ${spec.step}`);
+          cleaned[id] = score;
+        }
+        scores[option.id] = cleaned;
+      }
+      return { value: { scores } };
+    }
+    case "range": {
+      const { min, max } = value;
+      if (!finite(min) || !finite(max))
+        return fail("min and max must be finite numbers");
+      if (min > max)
+        return fail("min must be <= max");
+      if (min < spec.min || max > spec.max)
+        return fail(`range must be within ${spec.min}..${spec.max}`);
+      if (!onStep(min, spec.min, spec.step) || !onStep(max, spec.min, spec.step))
+        return fail(`min and max must be on a step of ${spec.step}`);
+      return { value: { min, max } };
+    }
+    case "path": {
+      const raw = value.paths;
+      if (!Array.isArray(raw) || raw.length === 0)
+        return fail("paths must be a non-empty array");
+      if (!spec.multiple && raw.length > 1)
+        return fail("only one path allowed");
+      if (raw.some((path) => typeof path !== "string" || path.trim() === ""))
+        return fail("paths must be non-empty strings");
+      const paths = raw;
+      if (new Set(paths).size !== paths.length)
+        return fail("paths must be unique");
+      if (spec.mode === "files" && paths.some((path) => path.endsWith("/")))
+        return fail("only files allowed");
+      if (spec.mode === "dirs" && paths.some((path) => !path.endsWith("/")))
+        return fail("only directories (ending in /) allowed");
+      return { value: { paths: [...paths] } };
+    }
+    case "date":
+    case "time":
+    case "datetime": {
+      const text = value.value;
+      if (!validTemporal(spec.kind, text))
+        return fail(`value must be a valid ${TEMPORAL_FORMAT[spec.kind]}`);
+      if (spec.min !== undefined && text < spec.min)
+        return fail(`value must be on or after ${spec.min}`);
+      if (spec.max !== undefined && text > spec.max)
+        return fail(`value must be on or before ${spec.max}`);
+      return { value: { value: text } };
+    }
+    case "tags": {
+      const raw = value.tags;
+      if (!Array.isArray(raw) || raw.some((tag) => typeof tag !== "string"))
+        return fail("tags must be an array of strings");
+      const tags = raw.map((tag) => tag.trim());
+      if (tags.some((tag) => tag === ""))
+        return fail("tags must not be blank");
+      if (new Set(tags).size !== tags.length)
+        return fail("tags must be unique");
+      if (spec.min !== undefined && tags.length < spec.min)
+        return fail(`add at least ${spec.min} tags`);
+      if (spec.max !== undefined && tags.length > spec.max)
+        return fail(`add at most ${spec.max} tags`);
+      return { value: { tags } };
+    }
+    case "colour": {
+      const hex = canonicalHex(value.hex);
+      if (hex === undefined)
+        return fail("hex must be #rgb or #rrggbb");
+      return { value: { hex } };
+    }
+  }
+}
+function validateStructuredQuestion(question) {
+  const parsed = parseSpec(question);
+  if ("errors" in parsed)
+    return parsed.errors;
+  const rec = question.recommended;
+  if (rec === undefined)
+    return [];
+  const checked = checkValue(parsed.spec, rec);
+  if ("error" in checked)
+    return [`recommended: ${checked.error}`];
+  if (canonical(checked.value) !== canonical(rec))
+    return [`recommended must be the canonical answer ${JSON.stringify(checked.value)}`];
+  return [];
+}
+function validateStructuredValue(question, value) {
+  const parsed = parseSpec(question);
+  if ("errors" in parsed)
+    return { error: `invalid question: ${parsed.errors[0]}` };
+  return checkValue(parsed.spec, value);
+}
+function structuredDefault(question) {
+  const parsed = parseSpec(question);
+  if ("errors" in parsed)
+    return;
+  const spec = parsed.spec;
+  switch (spec.kind) {
+    case "form": {
+      const fields = {};
+      for (const field of spec.fields) {
+        if (field.type === "text")
+          fields[field.id] = "";
+        else if (field.type === "number")
+          fields[field.id] = field.min ?? (field.max !== undefined && field.max < 0 ? field.max : 0);
+        else if (field.type === "choice")
+          fields[field.id] = field.options?.[0] ?? "";
+        else
+          fields[field.id] = false;
+      }
+      return { fields };
+    }
+    case "buckets": {
+      const buckets = {};
+      spec.categories.forEach((category, index) => {
+        buckets[category.id] = index === 0 ? spec.items.map((item) => item.id) : [];
+      });
+      return { buckets };
+    }
+    case "match": {
+      const pairs = {};
+      spec.items.forEach((item, index) => {
+        pairs[item.id] = spec.targets[index].id;
+      });
+      return { pairs };
+    }
+    case "allocate": {
+      const allocations = {};
+      spec.options.forEach((option, index) => {
+        allocations[option.id] = index === 0 ? spec.total : 0;
+      });
+      return { allocations };
+    }
+    case "matrix": {
+      const scores = {};
+      for (const option of spec.options)
+        scores[option.id] = Object.fromEntries(spec.criteria.map((criterion) => [criterion.id, spec.min]));
+      return { scores };
+    }
+    case "range": {
+      const top = tidy(spec.min + Math.floor((spec.max - spec.min) / spec.step + STEP_TOLERANCE) * spec.step);
+      return { min: spec.min, max: Math.min(spec.max, top) };
+    }
+    case "path":
+      return { paths: [] };
+    case "date":
+    case "time":
+    case "datetime": {
+      const fixed = TEMPORAL_DEFAULTS[spec.kind];
+      return { value: spec.min ?? (spec.max !== undefined && fixed > spec.max ? spec.max : fixed) };
+    }
+    case "tags":
+      return { tags: [] };
+    case "colour":
+      return { hex: spec.swatches[0] ?? NEUTRAL_COLOUR };
+  }
+}
+var pretty = (value) => JSON.stringify(value, null, 2) ?? String(value);
+function structuredSummary(question, value) {
+  const parsed = parseSpec(question);
+  if ("errors" in parsed || !isRecord(value))
+    return pretty(value);
+  const spec = parsed.spec;
+  const labelIn = (items, id) => items.find((item) => item.id === id)?.label ?? id;
+  const map = (key) => isRecord(value[key]) ? value[key] : undefined;
+  switch (spec.kind) {
+    case "form": {
+      const fields = map("fields");
+      if (!fields)
+        return pretty(value);
+      return spec.fields.filter((field) => Object.hasOwn(fields, field.id)).map((field) => {
+        const entry = fields[field.id];
+        const shown = field.type === "toggle" ? entry === true ? "yes" : "no" : String(entry);
+        return `${field.label}: ${shown}`;
+      }).join(`
+`);
+    }
+    case "buckets": {
+      const buckets = map("buckets");
+      if (!buckets)
+        return pretty(value);
+      return spec.categories.map((category) => {
+        const list = Array.isArray(buckets[category.id]) ? buckets[category.id] : [];
+        const shown = list.map((id) => labelIn(spec.items, String(id))).join(", ");
+        return `${category.label}: ${shown || "(none)"}`;
+      }).join(`
+`);
+    }
+    case "match": {
+      const pairs = map("pairs");
+      if (!pairs)
+        return pretty(value);
+      return spec.items.filter((item) => Object.hasOwn(pairs, item.id)).map((item) => `${item.label} \u2192 ${labelIn(spec.targets, String(pairs[item.id]))}`).join(`
+`);
+    }
+    case "allocate": {
+      const allocations = map("allocations");
+      if (!allocations)
+        return pretty(value);
+      return spec.options.filter((option) => Object.hasOwn(allocations, option.id)).map((option) => `${option.label}: ${String(allocations[option.id])}`).join(`
+`);
+    }
+    case "matrix": {
+      const scores = map("scores");
+      if (!scores)
+        return pretty(value);
+      return spec.options.filter((option) => isRecord(scores[option.id])).map((option) => {
+        const row = scores[option.id];
+        const cells = spec.criteria.filter((criterion) => Object.hasOwn(row, criterion.id)).map((criterion) => `${criterion.label}=${String(row[criterion.id])}`);
+        return `${option.label}: ${cells.join(", ")}`;
+      }).join(`
+`);
+    }
+    case "range":
+      return `${String(value.min)}\u2013${String(value.max)}${spec.unit ? ` ${spec.unit}` : ""}`;
+    case "path":
+      return Array.isArray(value.paths) ? value.paths.map(String).join(", ") : pretty(value);
+    case "date":
+    case "time":
+    case "datetime":
+      return String(value.value);
+    case "tags":
+      return Array.isArray(value.tags) ? value.tags.map(String).join(", ") || "(none)" : pretty(value);
+    case "colour":
+      return String(value.hex);
+  }
+}
+
 // plugins/parley/src/questions.ts
 var PHASE_ONE_KINDS = [
   "pick_one",
@@ -51,13 +755,13 @@ var PHASE_TWO_KINDS = [
   "ask_image",
   "ask_file"
 ];
-var KINDS = [...PHASE_ONE_KINDS, ...PHASE_TWO_KINDS];
+var KINDS = [...PHASE_ONE_KINDS, ...PHASE_TWO_KINDS, ...NEW_KINDS];
 var OPTION_KINDS = new Set(["pick_one", "show_options", "pick_many", "rank", "rate"]);
 var DEFAULT_EMOJIS = ["\uD83D\uDC4D", "\uD83D\uDC4E", "\uD83C\uDF89", "\uD83E\uDD14", "\u2764\uFE0F", "\uD83D\uDE80"];
 var MAX_QUESTIONS = 12;
 var QUESTION_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]*$/;
 var OPTION_ID = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
-var isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+var isRecord2 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 var isStringArray = (value) => Array.isArray(value) && value.every((item) => typeof item === "string");
 function validateQuestions(input, existing = []) {
   const errors = [];
@@ -68,11 +772,22 @@ function validateQuestions(input, existing = []) {
   const seen = new Set(existing.map((question) => question.id));
   input.forEach((raw, index) => {
     const at = `questions[${index}]`;
-    if (!isRecord(raw)) {
+    if (!isRecord2(raw)) {
       errors.push(`${at} must be an object`);
       return;
     }
     const where = typeof raw.id === "string" ? `${at} (${raw.id})` : at;
+    if (raw.show_if !== undefined) {
+      const showIf = raw.show_if;
+      if (!isRecord2(showIf) || typeof showIf.id !== "string")
+        errors.push(`${where}.show_if must be an object with an id`);
+      else if (showIf.id === raw.id)
+        errors.push(`${where}.show_if cannot refer to the question itself`);
+      else if (!seen.has(showIf.id))
+        errors.push(`${where}.show_if refers to ${JSON.stringify(showIf.id)}, which is not an earlier question`);
+      if (isRecord2(showIf) && !Object.hasOwn(showIf, "equals"))
+        errors.push(`${where}.show_if.equals is required`);
+    }
     if (typeof raw.id !== "string" || !QUESTION_ID.test(raw.id))
       errors.push(`${at}.id must match ${QUESTION_ID}`);
     else if (seen.has(raw.id))
@@ -90,6 +805,8 @@ function validateQuestions(input, existing = []) {
   return errors;
 }
 function validateKind(question, where) {
+  if (isStructured(question))
+    return validateStructuredQuestion(question).map((error) => `${where}: ${error}`);
   const errors = [];
   const options = question.options ?? [];
   const optionIDs = new Set;
@@ -97,7 +814,7 @@ function validateKind(question, where) {
     if (options.length < 2)
       errors.push(`${where}.options needs at least 2 entries for ${question.kind}`);
     for (const option of options) {
-      if (!isRecord(option) || typeof option.id !== "string" || !OPTION_ID.test(option.id)) {
+      if (!isRecord2(option) || typeof option.id !== "string" || !OPTION_ID.test(option.id)) {
         errors.push(`${where}.options: every option needs an id matching ${OPTION_ID}`);
         continue;
       }
@@ -168,7 +885,7 @@ function validateKind(question, where) {
           errors.push(`${where}.recommended is outside min..max`);
       }
       if (question.kind === "rate" && rec !== undefined) {
-        if (!isRecord(rec))
+        if (!isRecord2(rec))
           errors.push(`${where}.recommended must map option ids to numbers`);
         else
           for (const key of Object.keys(rec))
@@ -238,6 +955,19 @@ function recommendedValue(question) {
     case "ask_image":
     case "ask_file":
       return;
+    case "form":
+    case "buckets":
+    case "match":
+    case "allocate":
+    case "matrix":
+    case "range":
+    case "path":
+    case "date":
+    case "time":
+    case "datetime":
+    case "tags":
+    case "colour":
+      return rec === undefined ? undefined : structuredClone(rec);
   }
 }
 function sliderBounds(question) {
@@ -295,31 +1025,24 @@ function coerceQuestion(raw) {
 // plugins/parley/src/answers.ts
 var ANSWER_STATUSES = ["answered", "accepted", "noted", "deferred"];
 var MAX_FILE_BYTES = 10 * 1024 * 1024;
-var isRecord2 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+var isRecord3 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 var text = (value) => typeof value === "string" && value.trim() !== "" ? value : undefined;
-function canonical(value) {
-  if (Array.isArray(value))
-    return `[${value.map(canonical).join(",")}]`;
-  if (isRecord2(value))
-    return `{${Object.keys(value).filter((key) => value[key] !== undefined).sort().map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`).join(",")}}`;
-  return JSON.stringify(value);
-}
 var sameSet = (a, b) => canonical([...a].sort()) === canonical([...b].sort());
 function equalsRecommendation(question, value) {
   const rec = recommendedValue(question);
   if (rec === undefined || value === undefined)
     return false;
-  if (question.kind === "pick_many" && isRecord2(value) && isRecord2(rec)) {
+  if (question.kind === "pick_many" && isRecord3(value) && isRecord3(rec)) {
     return value.other === undefined && Array.isArray(value.selected) && sameSet(value.selected, rec.selected);
   }
-  if ((question.kind === "review" || question.kind === "show_diff") && isRecord2(value)) {
+  if ((question.kind === "review" || question.kind === "show_diff") && isRecord3(value)) {
     return value.decision === rec.decision && text(value.feedback) === undefined;
   }
   return canonical(value) === canonical(rec);
 }
 function validateValue(question, value) {
   const fail = (error) => ({ error: `${question.id}: ${error}` });
-  if (!isRecord2(value))
+  if (!isRecord3(value))
     return fail("value must be an object");
   const ids = (question.options ?? []).map((option) => option.id);
   switch (question.kind) {
@@ -380,7 +1103,7 @@ function validateValue(question, value) {
     }
     case "rate": {
       const { min, max } = sliderBounds(question);
-      if (!isRecord2(value.ratings))
+      if (!isRecord3(value.ratings))
         return fail("ratings must map option ids to numbers");
       const ratings = {};
       for (const [id, rating] of Object.entries(value.ratings)) {
@@ -419,7 +1142,7 @@ function validateValue(question, value) {
         return fail("only one file allowed");
       const cleaned = [];
       for (const file of files) {
-        if (!isRecord2(file) || typeof file.name !== "string" || typeof file.data !== "string")
+        if (!isRecord3(file) || typeof file.name !== "string" || typeof file.data !== "string")
           return fail("each file needs name and base64 data");
         const size = Buffer.byteLength(file.data, "base64");
         if (size > MAX_FILE_BYTES)
@@ -436,6 +1159,21 @@ function validateValue(question, value) {
         });
       }
       return { value: { files: cleaned } };
+    }
+    case "form":
+    case "buckets":
+    case "match":
+    case "allocate":
+    case "matrix":
+    case "range":
+    case "path":
+    case "date":
+    case "time":
+    case "datetime":
+    case "tags":
+    case "colour": {
+      const checked = validateStructuredValue(question, value);
+      return "error" in checked ? fail(checked.error) : checked;
     }
   }
 }
@@ -478,13 +1216,13 @@ function normaliseAnswer(question, submitted) {
   }
 }
 function publicAnswer(answer) {
-  if (!isRecord2(answer.value) || !Array.isArray(answer.value.files))
+  if (!isRecord3(answer.value) || !Array.isArray(answer.value.files))
     return answer;
   const files = answer.value.files.map(({ data: _data, ...file }) => file);
   return { ...answer, value: { files } };
 }
 function describeValue(question, value) {
-  if (!isRecord2(value))
+  if (!isRecord3(value))
     return "";
   const label = (id) => optionLabel(question, id);
   switch (question.kind) {
@@ -520,6 +1258,19 @@ function describeValue(question, value) {
     case "ask_image":
     case "ask_file":
       return (value.files ?? []).map((file) => `${file.name} (${file.mime}, ${file.size} B)`).join(", ");
+    case "form":
+    case "buckets":
+    case "match":
+    case "allocate":
+    case "matrix":
+    case "range":
+    case "path":
+    case "date":
+    case "time":
+    case "datetime":
+    case "tags":
+    case "colour":
+      return structuredSummary(question, value);
   }
 }
 function describeAnswer(question, answer, index) {
@@ -529,12 +1280,351 @@ function describeAnswer(question, answer, index) {
   return `${head}${value}${note}`;
 }
 
+// plugins/parley/src/structured-ui.ts
+var draftValue = (q, draft) => JSON.parse(JSON.stringify(draft.value ?? structuredDefault(q)));
+var clamp = (n, min, max) => Math.max(min, Math.min(max, n));
+var tidy2 = (n) => Number(n.toPrecision(15));
+var cycle = (values, current, delta) => values[(Math.max(0, values.indexOf(current)) + delta + values.length) % values.length];
+var changed = (draft, value) => ({ ...draft, status: "answered", value });
+function structuredRows(q) {
+  const config = q.config ?? {};
+  switch (q.kind) {
+    case "form":
+      return (config.fields ?? []).map((field) => ({ id: field.id, label: `${field.label} (${field.type})` }));
+    case "buckets":
+    case "match":
+      return [...config.items ?? []];
+    case "allocate":
+      return [...q.options ?? []];
+    case "matrix":
+      return (q.options ?? []).flatMap((option) => (config.criteria ?? []).map((criterion) => ({ id: `${option.id}/${criterion.id}`, label: `${option.label} \xD7 ${criterion.label}` })));
+    case "range":
+      return [{ id: "min", label: "Minimum" }, { id: "max", label: "Maximum" }];
+    case "tags":
+      return (config.suggestions ?? []).map((tag) => ({ id: tag.trim(), label: tag.trim() }));
+    case "colour":
+      return (config.swatches ?? ["#808080"]).map((hex) => ({ id: hex.toLowerCase(), label: hex.toLowerCase() }));
+    default:
+      return [{ id: q.kind, label: q.kind }];
+  }
+}
+function structuredRowText(q, draft, id) {
+  const value = draftValue(q, draft);
+  switch (q.kind) {
+    case "form":
+      return String(value.fields?.[id] ?? "");
+    case "buckets": {
+      const category = (q.config?.categories ?? []).find((entry) => value.buckets?.[entry.id]?.includes(id));
+      return category?.label ?? "unassigned";
+    }
+    case "match":
+      return q.config?.targets?.find((entry) => entry.id === value.pairs?.[id])?.label ?? "unpaired";
+    case "allocate":
+      return `${value.allocations?.[id] ?? 0}${q.unit ? ` ${q.unit}` : ""}`;
+    case "matrix": {
+      const [option, criterion] = id.split("/");
+      return String(value.scores?.[option ?? ""]?.[criterion ?? ""] ?? q.min ?? 0);
+    }
+    case "range":
+      return `${value[id] ?? ""}${q.unit ? ` ${q.unit}` : ""}`;
+    case "tags":
+      return value.tags?.includes(id) ? "[x]" : "[ ]";
+    case "colour":
+      return value.hex?.toLowerCase() === id.toLowerCase() ? "\u25CF" : "\u25CB";
+    case "path":
+      return value.paths?.join(", ") ?? "";
+    default:
+      return value.value ?? "";
+  }
+}
+function temporalStep(q, value, delta, month = false) {
+  if (q.kind === "time") {
+    const [hour, minute] = value.split(":").map(Number);
+    const total = clamp((hour ?? 0) * 60 + (minute ?? 0) + delta, 0, 1439);
+    return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
+  }
+  const date = new Date(`${value.slice(0, 10)}T12:00:00Z`);
+  if (month) {
+    const day = date.getUTCDate();
+    date.setUTCDate(1);
+    date.setUTCMonth(date.getUTCMonth() + delta);
+    const lastDay = new Date(date);
+    lastDay.setUTCMonth(lastDay.getUTCMonth() + 1, 0);
+    const last = lastDay.getUTCDate();
+    date.setUTCDate(Math.min(day, last));
+  } else
+    date.setUTCDate(date.getUTCDate() + delta);
+  if (date.getUTCFullYear() < 0)
+    return `0000-01-01${q.kind === "datetime" ? value.slice(10) : ""}`;
+  if (date.getUTCFullYear() > 9999)
+    return `9999-12-31${q.kind === "datetime" ? value.slice(10) : ""}`;
+  return `${date.toISOString().slice(0, 10)}${q.kind === "datetime" ? value.slice(10) : ""}`;
+}
+function allocate(q, value, id, requested) {
+  const ids = (q.options ?? []).map((option) => option.id);
+  const other = ids[(ids.indexOf(id) + 1) % ids.length];
+  if (!other || other === id || !value.allocations)
+    return;
+  const current = value.allocations[id] ?? 0;
+  const donor = value.allocations[other] ?? 0;
+  const next = clamp(requested, 0, current + donor);
+  value.allocations[id] = tidy2(next);
+  value.allocations[other] = tidy2(donor + current - next);
+}
+function structuredStep(q, draft, delta, month = false) {
+  const value = draftValue(q, draft);
+  const id = structuredRows(q)[draft.cursor]?.id ?? "";
+  const config = q.config ?? {};
+  const size = q.step ?? 1;
+  switch (q.kind) {
+    case "form": {
+      const field = config.fields?.find((entry) => entry.id === id);
+      if (!field || !value.fields)
+        return draft;
+      const current = value.fields[id];
+      if (field.type === "toggle")
+        value.fields[id] = !current;
+      else if (field.type === "choice")
+        value.fields[id] = cycle(field.options ?? [], current, delta) ?? "";
+      else if (field.type === "number")
+        value.fields[id] = clamp(Number(current ?? 0) + delta, field.min ?? -Number.MAX_SAFE_INTEGER, field.max ?? Number.MAX_SAFE_INTEGER);
+      else
+        return draft;
+      break;
+    }
+    case "buckets": {
+      const categories = (config.categories ?? []).map((entry) => entry.id);
+      const current = categories.find((category) => value.buckets?.[category]?.includes(id));
+      const next = cycle(categories, current, delta);
+      if (!next || !value.buckets)
+        return draft;
+      for (const category of categories)
+        value.buckets[category] = (value.buckets[category] ?? []).filter((item) => item !== id);
+      value.buckets[next]?.push(id);
+      break;
+    }
+    case "match": {
+      const targets = (config.targets ?? []).map((entry) => entry.id);
+      const current = value.pairs?.[id];
+      const next = cycle(targets, current, delta);
+      if (!next || !value.pairs)
+        return draft;
+      const other = Object.keys(value.pairs).find((left) => value.pairs?.[left] === next);
+      if (other && current)
+        value.pairs[other] = current;
+      value.pairs[id] = next;
+      break;
+    }
+    case "allocate":
+      allocate(q, value, id, (value.allocations?.[id] ?? 0) + delta * size);
+      break;
+    case "matrix": {
+      const [option, criterion] = id.split("/");
+      const row = value.scores?.[option ?? ""];
+      if (!row || !criterion)
+        return draft;
+      const min = q.min ?? 0;
+      const max = min + Math.floor(((q.max ?? 5) - min) / size + 0.00000001) * size;
+      row[criterion] = tidy2(clamp((row[criterion] ?? min) + delta * size, min, max));
+      break;
+    }
+    case "range": {
+      const key = id;
+      const lower = key === "max" ? value.min ?? q.min ?? 0 : q.min ?? 0;
+      const bound = key === "min" ? value.max ?? q.max ?? 10 : q.max ?? 10;
+      const upper = (q.min ?? 0) + Math.floor((bound - (q.min ?? 0)) / size + 0.00000001) * size;
+      value[key] = tidy2(clamp((value[key] ?? lower) + delta * size, lower, upper));
+      break;
+    }
+    case "colour": {
+      value.hex = cycle((config.swatches ?? ["#808080"]).map((hex) => hex.toLowerCase()), value.hex, delta) ?? "#808080";
+      break;
+    }
+    case "date":
+    case "time":
+    case "datetime": {
+      const next = temporalStep(q, value.value ?? "", delta, month);
+      value.value = config.min && next < config.min ? config.min : config.max && next > config.max ? config.max : next;
+      break;
+    }
+    default:
+      return draft;
+  }
+  return changed(draft, value);
+}
+function structuredChoose(q, draft, index) {
+  const next = { ...draft, cursor: index };
+  if (q.kind === "colour")
+    return changed(next, { hex: (structuredRows(q)[index]?.id ?? "#808080").toLowerCase() });
+  if (q.kind === "tags") {
+    const value = draftValue(q, draft);
+    const id = structuredRows(q)[index]?.id;
+    if (!id)
+      return draft;
+    const tags = value.tags ?? [];
+    value.tags = tags.includes(id) ? tags.filter((tag) => tag !== id) : q.max === undefined || tags.length < q.max ? [...tags, id] : tags;
+    return changed(next, value);
+  }
+  return structuredStep(q, next, 1);
+}
+function structuredEditText(q, draft) {
+  const value = draftValue(q, draft);
+  const id = structuredRows(q)[draft.cursor]?.id ?? "";
+  switch (q.kind) {
+    case "form":
+      return String(value.fields?.[id] ?? "");
+    case "allocate":
+      return String(value.allocations?.[id] ?? 0);
+    case "matrix": {
+      const [option, criterion] = id.split("/");
+      return String(value.scores?.[option ?? ""]?.[criterion ?? ""] ?? q.min ?? 0);
+    }
+    case "range":
+      return String(value[id] ?? "");
+    case "path":
+      return (value.paths ?? []).join(`
+`);
+    case "tags":
+      return (value.tags ?? []).join(", ");
+    case "colour":
+      return value.hex ?? "";
+    default:
+      return value.value ?? "";
+  }
+}
+function structuredSetText(q, draft, text) {
+  const value = draftValue(q, draft);
+  const id = structuredRows(q)[draft.cursor]?.id ?? "";
+  const trimmed = text.trim();
+  const numeric = () => trimmed !== "" && Number.isFinite(Number(trimmed));
+  switch (q.kind) {
+    case "form": {
+      const field = q.config?.fields?.find((entry) => entry.id === id);
+      if (!field || !value.fields)
+        return { error: "No field selected" };
+      if (field.type === "number") {
+        if (!numeric() || field.min !== undefined && Number(trimmed) < field.min || field.max !== undefined && Number(trimmed) > field.max)
+          return { error: "Enter a number within the field bounds" };
+        value.fields[id] = Number(trimmed);
+      } else if (field.type === "toggle") {
+        if (!/^(true|false)$/i.test(trimmed))
+          return { error: "Enter true or false" };
+        value.fields[id] = trimmed.toLowerCase() === "true";
+      } else if (field.type === "choice") {
+        if (!field.options?.includes(trimmed))
+          return { error: `Choose ${field.options?.join(", ")}` };
+        value.fields[id] = trimmed;
+      } else
+        value.fields[id] = text;
+      if (field.required && trimmed === "")
+        return { error: "This field is required" };
+      return { draft: changed(draft, value) };
+    }
+    case "allocate": {
+      const total = q.config?.total ?? 100;
+      if (!numeric() || Number(trimmed) < 0 || Number(trimmed) > total)
+        return { error: `Enter 0..${total}` };
+      const ids = (q.options ?? []).map((option) => option.id);
+      const wanted = Number(trimmed);
+      let remaining = wanted - (value.allocations?.[id] ?? 0);
+      if (!value.allocations)
+        return { error: "No allocation" };
+      for (const other of ids.filter((candidate) => candidate !== id)) {
+        const transfer = remaining > 0 ? Math.min(remaining, value.allocations[other] ?? 0) : remaining;
+        value.allocations[other] = tidy2((value.allocations[other] ?? 0) - transfer);
+        remaining -= transfer;
+      }
+      value.allocations[id] = wanted;
+      break;
+    }
+    case "matrix": {
+      if (!numeric())
+        return { error: "Enter a number" };
+      const [option, criterion] = id.split("/");
+      const row = value.scores?.[option ?? ""];
+      if (row && criterion)
+        row[criterion] = Number(trimmed);
+      break;
+    }
+    case "range":
+      if (!numeric())
+        return { error: "Enter a number" };
+      value[id] = Number(trimmed);
+      break;
+    case "path":
+      value.paths = trimmed.split(/[\n,]/).map((path) => path.trim()).filter(Boolean);
+      break;
+    case "tags":
+      value.tags = trimmed.split(/[\n,]/).map((tag) => tag.trim()).filter(Boolean);
+      break;
+    case "colour":
+      value.hex = trimmed;
+      break;
+    case "date":
+    case "time":
+    case "datetime":
+      value.value = trimmed;
+      break;
+    default:
+      return { draft };
+  }
+  const checked = validateStructuredValue(q, value);
+  return "error" in checked ? checked : { draft: changed(draft, checked.value) };
+}
+function structuredKeys(q) {
+  switch (q.kind) {
+    case "form":
+      return "\u2191/\u2193 field \xB7 \u2190/\u2192 choice/toggle/number \xB7 e type field";
+    case "buckets":
+      return "\u2191/\u2193 item \xB7 \u2190/\u2192 category";
+    case "match":
+      return "\u2191/\u2193 item \xB7 \u2190/\u2192 partner (swaps)";
+    case "allocate":
+      return "\u2191/\u2193 option \xB7 \u2190/\u2192 transfer points \xB7 e type amount";
+    case "matrix":
+      return "\u2191/\u2193 cell \xB7 \u2190/\u2192 score \xB7 e type score";
+    case "range":
+      return "\u2191/\u2193 endpoint \xB7 \u2190/\u2192 adjust \xB7 e type endpoint";
+    case "path":
+      return "e type paths \xB7 \u2191/\u2193 suggestion \xB7 tab complete";
+    case "tags":
+      return "\u2191/\u2193 suggestion \xB7 space toggle \xB7 e comma-separated tags";
+    case "colour":
+      return "\u2190/\u2192 swatch \xB7 space choose \xB7 e hex";
+    case "time":
+      return "\u2190/\u2192 minute \xB7 \u2191/\u2193 hour \xB7 e HH:mm";
+    default:
+      return "\u2190/\u2192 day \xB7 \u2191/\u2193 week \xB7 shift+\u2190/\u2192 month \xB7 e ISO date/time";
+  }
+}
+function calendarText(value) {
+  const date = new Date(`${value.slice(0, 10)}T12:00:00Z`);
+  if (!Number.isFinite(date.getTime()))
+    return value;
+  const monthStart = new Date(date);
+  monthStart.setUTCDate(1);
+  const first = monthStart.getUTCDay();
+  monthStart.setUTCMonth(monthStart.getUTCMonth() + 1, 0);
+  const last = monthStart.getUTCDate();
+  const cells = Array.from({ length: first + last }, (_, i) => i < first ? "    " : i - first + 1 === date.getUTCDate() ? `[${String(i - first + 1).padStart(2)}]` : ` ${String(i - first + 1).padStart(2)} `);
+  const weeks = [];
+  for (let i = 0;i < cells.length; i += 7)
+    weeks.push(cells.slice(i, i + 7).join(""));
+  return `${value.slice(0, 7)}
+ Su  Mo  Tu  We  Th  Fr  Sa
+${weeks.join(`
+`)}`;
+}
+var structuredEditable = (q) => isStructured(q) && q.kind !== "buckets" && q.kind !== "match";
+
 // plugins/parley/src/tui-state.ts
 var TEXT_KINDS = new Set(["ask_text", "ask_code", "ask_image", "ask_file"]);
 function isTextKind(question) {
   return TEXT_KINDS.has(question.kind);
 }
 function rows(question) {
+  if (isStructured(question))
+    return structuredRows(question).map((row) => row.id);
   switch (question.kind) {
     case "pick_one":
     case "show_options":
@@ -556,6 +1646,8 @@ function rows(question) {
   }
 }
 function neutral(question) {
+  if (isStructured(question))
+    return structuredDefault(question);
   const ids = rows(question);
   switch (question.kind) {
     case "pick_many":
@@ -601,11 +1693,17 @@ function toSubmission(question, draft) {
       return withNote({ id: question.id, status: "answered", value: draft.value });
   }
 }
-var clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+var clamp2 = (value, min, max) => Math.min(max, Math.max(min, value));
 var HORIZONTAL = new Set(["show_options", "emoji_react"]);
 function arrowAction(question, key) {
   const delta = key === "up" || key === "left" ? -1 : 1;
   const vertical = key === "up" || key === "down";
+  if (question.kind === "date" || question.kind === "datetime" || question.kind === "time")
+    return { kind: "step", delta: delta * (vertical ? question.kind === "time" ? 60 : 7 : 1) };
+  if (question.kind === "colour")
+    return { kind: vertical ? "question" : "step", delta };
+  if (isStructured(question))
+    return { kind: vertical ? "cursor" : "step", delta };
   if (HORIZONTAL.has(question.kind))
     return { kind: vertical ? "question" : "cursor", delta };
   if (!vertical)
@@ -619,7 +1717,7 @@ function moveCursor(question, draft, delta) {
   const count = rows(question).length;
   if (count === 0)
     return draft;
-  return { ...draft, cursor: clamp(draft.cursor + delta, 0, count - 1) };
+  return { ...draft, cursor: clamp2(draft.cursor + delta, 0, count - 1) };
 }
 function accept(question, draft) {
   const rec = recommendedValue(question);
@@ -638,6 +1736,8 @@ function setNote(draft, note) {
   return { ...draft, note };
 }
 function choose(question, draft, index = draft.cursor) {
+  if (isStructured(question))
+    return structuredChoose(question, draft, index);
   const ids = rows(question);
   const id = ids[index];
   if (id === undefined)
@@ -677,7 +1777,7 @@ function rankMove(question, draft, delta) {
     return draft;
   const order = (draft.value?.order ?? rows(question)).slice();
   const from = draft.cursor;
-  const to = clamp(from + delta, 0, order.length - 1);
+  const to = clamp2(from + delta, 0, order.length - 1);
   if (from === to)
     return draft;
   const [item] = order.splice(from, 1);
@@ -685,8 +1785,10 @@ function rankMove(question, draft, delta) {
   return { ...draft, status: "answered", cursor: to, value: { order } };
 }
 function step(question, draft, delta) {
+  if (isStructured(question))
+    return structuredStep(question, draft, delta);
   const { min, max, step: size } = sliderBounds(question);
-  const round = (value) => Number(clamp(value, min, max).toFixed(10));
+  const round = (value) => Number(clamp2(value, min, max).toFixed(10));
   if (question.kind === "slider") {
     const current = draft.value?.value ?? min;
     return { ...draft, status: "answered", value: { value: round(current + delta * size) } };
@@ -702,6 +1804,10 @@ function step(question, draft, delta) {
   return draft;
 }
 function setText(question, draft, text) {
+  if (isStructured(question)) {
+    const result = structuredSetText(question, draft, text);
+    return "draft" in result ? result.draft : draft;
+  }
   switch (question.kind) {
     case "ask_text":
     case "ask_code":
@@ -741,7 +1847,7 @@ function parseSlider(question, text) {
   if (bare !== "" && Number.isFinite(number)) {
     if (number < min || number > max)
       return { error: `Enter a number from ${min} to ${max}` };
-    return { value: Number(clamp(Math.round((number - min) / size) * size + min, min, max).toFixed(10)) };
+    return { value: Number(clamp2(Math.round((number - min) / size) * size + min, min, max).toFixed(10)) };
   }
   const labels = Object.entries(question.labels ?? {});
   const named = labels.find(([, label]) => label.toLowerCase() === trimmed.toLowerCase())?.[0];
@@ -752,9 +1858,11 @@ function parseSlider(question, text) {
   return { error: `Enter a number from ${min} to ${max}` };
 }
 function editable(question) {
-  return isTextKind(question) || question.kind === "pick_one" && question.allow_other !== false || question.kind === "pick_many" && question.allow_other !== false || question.kind === "slider" || question.kind === "review" || question.kind === "show_diff";
+  return isTextKind(question) || structuredEditable(question) || question.kind === "pick_one" && question.allow_other !== false || question.kind === "pick_many" && question.allow_other !== false || question.kind === "slider" || question.kind === "review" || question.kind === "show_diff";
 }
 function editText(question, draft) {
+  if (isStructured(question))
+    return structuredEditText(question, draft);
   const value = draft.value;
   if (question.kind === "ask_image" || question.kind === "ask_file")
     return filePaths(draft).join(`
@@ -821,7 +1929,7 @@ function matchesRecommendation(question, draft) {
 function sliderBar(question, value, width = 20) {
   const { min, max } = sliderBounds(question);
   const filled = Math.round((value - min) / (max - min) * width);
-  const position = clamp(filled, 0, width);
+  const position = clamp2(filled, 0, width);
   return `[${"\u2501".repeat(position)}\u25CF${"\u2500".repeat(width - position)}]`;
 }
 var filesOf = (draft) => draft.value?.files ?? [];
@@ -850,6 +1958,8 @@ function applyCompletion(text, choice) {
 }
 var IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "tiff", "heic"]);
 function acceptsPath(question, path) {
+  if (question.kind === "path")
+    return question.config?.mode === "dirs" ? path.endsWith("/") : question.config?.mode === "files" ? !path.endsWith("/") : true;
   if (path.endsWith("/"))
     return true;
   const ext = path.split("/").pop()?.split(".").slice(1).pop()?.toLowerCase() ?? "";
@@ -901,16 +2011,18 @@ var PANEL_KEYS = {
   ask_file: "e type paths (tab completes) \xB7 ctrl+v paste"
 };
 function kindKeys(question) {
+  if (isStructured(question))
+    return structuredKeys(question);
   if (question.kind === "slider")
     return `\u2190/\u2192 adjust \xB7 e type a number${question.allow_other === true ? " or your own answer" : ""}`;
   return PANEL_KEYS[question.kind] ?? "";
 }
-var PATH_KINDS = new Set(["ask_image", "ask_file"]);
+var PATH_KINDS = new Set(["ask_image", "ask_file", "path", "tags"]);
 function keyHints(question, surface, editing, single = false) {
   if (editing) {
     const enter = editing.enterSaves ? surface === "card" ? "enter submit \xB7 shift+enter newline" : "enter save \xB7 shift+enter newline" : "enter newline";
     const paths = editing.field === "text" && question && PATH_KINDS.has(question.kind) ? editing.suggestions ? " \xB7 \u2191/\u2193 suggestion \xB7 tab complete" : " \xB7 tab complete" : "";
-    const paste = editing.field === "text" && question && PATH_KINDS.has(question.kind) ? " \xB7 ctrl+v paste" : "";
+    const paste = editing.field === "text" && question && (question.kind === "ask_image" || question.kind === "ask_file") ? " \xB7 ctrl+v paste" : "";
     return `${enter}${paths}${paste} \xB7 esc done \xB7 ctrl+s submit`;
   }
   const own = question ? kindKeys(question) : "";
@@ -1026,6 +2138,20 @@ async function clipboardFiles(images) {
   if (png)
     return [{ name: `clipboard-${stamp()}.png`, mime: "image/png", size: png.length, data: Buffer.from(png).toString("base64") }];
   return [];
+}
+
+// plugins/parley/src/conditions.ts
+function visibleQuestions(questions, value) {
+  const visible = [];
+  const ids = new Set;
+  for (const question of questions) {
+    const condition = question.show_if;
+    if (condition && (!ids.has(condition.id) || value(condition.id) === undefined || canonical(value(condition.id)) !== canonical(condition.equals)))
+      continue;
+    visible.push(question);
+    ids.add(question.id);
+  }
+  return visible;
 }
 
 // plugins/parley/src/copy-text.ts
@@ -1172,12 +2298,24 @@ function createRoundControls(props, onMove) {
     const deadline = props.round()?.deadline;
     return deadline === undefined ? undefined : Math.max(0, Math.ceil((deadline - now()) / 1000));
   };
-  const questions = createMemo(() => props.round()?.questions ?? []);
+  const allQuestions = createMemo(() => props.round()?.questions ?? []);
+  const questions = createMemo(() => visibleQuestions(allQuestions(), (id) => {
+    const draft = draftOf(id);
+    return draft?.status === "answered" || draft?.status === "accepted" ? draft.value : undefined;
+  }));
   const current = () => questions()[focus()];
   createEffect(() => {
-    for (const question of questions())
+    for (const question of allQuestions())
       if (!draftOf(question.id))
         setDraft(question.id, initialDraft(question));
+    if (focus() >= questions().length)
+      setFocus(Math.max(0, questions().length - 1));
+    const edit = editing();
+    if (edit && !questions().some((q) => q.id === edit.id)) {
+      setEditing(undefined);
+      setSuggestions([]);
+      ++lookup;
+    }
   });
   const update = (fn) => {
     const question = current();
@@ -1228,7 +2366,7 @@ function createRoundControls(props, onMove) {
   const fileCard = () => {
     const edit = editing();
     const question = questions().find((candidate) => candidate.id === edit?.id);
-    return edit?.field === "text" && (question?.kind === "ask_image" || question?.kind === "ask_file") ? question : undefined;
+    return edit?.field === "text" && (question?.kind === "ask_image" || question?.kind === "ask_file" || question?.kind === "path" || question?.kind === "tags") ? question : undefined;
   };
   const onInput = (text) => {
     const question = fileCard();
@@ -1242,10 +2380,10 @@ function createRoundControls(props, onMove) {
       setSuggestions([]);
       return;
     }
-    props.find(query).catch(() => []).then((found) => {
+    (question.kind === "tags" ? Promise.resolve(question.config?.suggestions ?? []) : props.find(query)).catch(() => []).then((found) => {
       if (disposed || ticket !== lookup)
         return;
-      setSuggestions(rankPaths(query, found.filter((candidate) => acceptsPath(question, candidate))));
+      setSuggestions(rankPaths(query, found.filter((candidate) => question.kind === "tags" || acceptsPath(question, candidate))));
       setSelected(0);
     });
   };
@@ -1293,7 +2431,7 @@ function createRoundControls(props, onMove) {
     });
   };
   const pathKeys = () => [
-    ...fileCard() ? [{
+    ...isFileKind(fileCard()) ? [{
       bind: "ctrl+v",
       title: "Paste file",
       group: "Parley",
@@ -1353,6 +2491,16 @@ function createRoundControls(props, onMove) {
     const draft = draftOf(question.id) ?? initialDraft(question);
     if (edit.field === "note") {
       setDraft(question.id, setNote(draft, text));
+      return;
+    }
+    if (isStructured(question)) {
+      const result = structuredSetText(question, draft, text);
+      if ("error" in result) {
+        setErrors([result.error]);
+        return;
+      }
+      setDraft(question.id, result.draft);
+      setErrors([]);
       return;
     }
     if (question.kind === "ask_image" || question.kind === "ask_file") {
@@ -1418,6 +2566,17 @@ function createRoundControls(props, onMove) {
     pasteFiles,
     pasteKeys,
     copy,
+    calendarKeys: () => current()?.kind === "date" || current()?.kind === "datetime" ? [{
+      bind: "shift+left",
+      title: "Previous month",
+      group: "Parley",
+      run: () => update((q, d) => structuredStep(q, d, -1, true))
+    }, {
+      bind: "shift+right",
+      title: "Next month",
+      group: "Parley",
+      run: () => update((q, d) => structuredStep(q, d, 1, true))
+    }] : [],
     pathKeys,
     field: () => editing() && textarea && !textarea.isDestroyed ? textarea : undefined,
     newline: () => {
@@ -1579,7 +2738,7 @@ function RoundPanel(props) {
       title: "Submit round",
       group: "Parley",
       run: () => void submit()
-    }, ...controls.pasteKeys(), {
+    }, ...controls.pasteKeys(), ...controls.calendarKeys(), {
       bind: "y",
       title: "Copy card text",
       group: "Parley",
@@ -2067,6 +3226,7 @@ function InlineCard(props) {
         run: () => void send()
       },
       ...controls.pasteKeys(),
+      ...controls.calendarKeys(),
       {
         bind: "y",
         title: "Copy card text",
@@ -2556,6 +3716,107 @@ function Body(props) {
     get children() {
       return [_$createComponent(Match, {
         get when() {
+          return isStructured(q());
+        },
+        get children() {
+          return [_$createComponent(Show, {
+            get when() {
+              return q().kind === "date" || q().kind === "datetime";
+            },
+            get children() {
+              var _el$42 = _$createElement("text");
+              _$insert(_el$42, () => calendarText(String(props.value?.value ?? "")));
+              _$effect((_$p) => _$setProp(_el$42, "fg", theme().text.muted, _$p));
+              return _el$42;
+            }
+          }), _$createComponent(For, {
+            get each() {
+              return structuredRows(q());
+            },
+            children: (row, index) => (() => {
+              var _el$66 = _$createElement("box");
+              _$setProp(_el$66, "flexDirection", "row");
+              _$setProp(_el$66, "gap", 1);
+              _$insert(_el$66, _$createComponent(Show, {
+                get when() {
+                  return _$memo(() => q().kind === "colour")() && props.context.renderer.capabilities?.rgb === true;
+                },
+                get children() {
+                  var _el$67 = _$createElement("text");
+                  _$insertNode(_el$67, _$createTextNode(` `));
+                  _$effect((_$p) => _$setProp(_el$67, "bg", row.id, _$p));
+                  return _el$67;
+                }
+              }), null);
+              _$insert(_el$66, _$createComponent(Row, {
+                get context() {
+                  return props.context;
+                },
+                get cursor() {
+                  return cursorAt(index());
+                },
+                marker: "",
+                get label() {
+                  return `${row.label}: ${structuredRowText(q(), props.draft, row.id)}`;
+                }
+              }), null);
+              return _el$66;
+            })()
+          }), _$createComponent(Show, {
+            get when() {
+              return q().kind === "allocate";
+            },
+            get children() {
+              var _el$43 = _$createElement("text");
+              _$insert(_el$43, () => `Total: ${Object.values(props.value?.allocations ?? {}).reduce((sum, n) => sum + n, 0)} / ${q().config?.total ?? 100} ${q().unit ?? "points"}`);
+              _$effect((_$p) => _$setProp(_el$43, "fg", theme().text.faint, _$p));
+              return _el$43;
+            }
+          }), _$createComponent(Show, {
+            get when() {
+              return q().kind === "tags" || q().kind === "colour";
+            },
+            get children() {
+              var _el$44 = _$createElement("text");
+              _$insert(_el$44, () => structuredSummary(q(), props.value));
+              _$effect((_$p) => _$setProp(_el$44, "fg", theme().text.base, _$p));
+              return _el$44;
+            }
+          }), _$createComponent(Show, {
+            get when() {
+              return editable(q());
+            },
+            get children() {
+              var _el$45 = _$createElement("box"), _el$46 = _$createElement("text");
+              _$insertNode(_el$45, _el$46);
+              _$setProp(_el$45, "flexDirection", "row");
+              _$setProp(_el$45, "gap", 1);
+              _$insertNode(_el$46, _$createTextNode(`value (e):`));
+              _$insert(_el$45, () => editField(q().placeholder ?? "Type the selected value"), null);
+              _$effect((_$p) => _$setProp(_el$46, "fg", theme().text.faint, _$p));
+              return _el$45;
+            }
+          }), _$createComponent(Show, {
+            get when() {
+              return _$memo(() => props.editing === "text")() && props.suggestions.length > 0;
+            },
+            get children() {
+              return _$createComponent(For, {
+                get each() {
+                  return props.suggestions;
+                },
+                children: (candidate, index) => (() => {
+                  var _el$69 = _$createElement("text");
+                  _$insert(_el$69, () => `${index() === props.selected ? "\u203A" : " "} ${candidate}`);
+                  _$effect((_$p) => _$setProp(_el$69, "fg", index() === props.selected ? theme().text.action.primary.base : theme().text.muted, _$p));
+                  return _el$69;
+                })()
+              });
+            }
+          })];
+        }
+      }), _$createComponent(Match, {
+        get when() {
           return q().kind === "pick_one" || q().kind === "pick_many";
         },
         get children() {
@@ -2595,14 +3856,14 @@ function Body(props) {
               return editable(q());
             },
             get children() {
-              var _el$42 = _$createElement("box"), _el$43 = _$createElement("text");
-              _$insertNode(_el$42, _el$43);
-              _$setProp(_el$42, "flexDirection", "row");
-              _$setProp(_el$42, "gap", 1);
-              _$insertNode(_el$43, _$createTextNode(`other (e):`));
-              _$insert(_el$42, () => editField("Type your own answer"), null);
-              _$effect((_$p) => _$setProp(_el$43, "fg", theme().text.faint, _$p));
-              return _el$42;
+              var _el$48 = _$createElement("box"), _el$49 = _$createElement("text");
+              _$insertNode(_el$48, _el$49);
+              _$setProp(_el$48, "flexDirection", "row");
+              _$setProp(_el$48, "gap", 1);
+              _$insertNode(_el$49, _$createTextNode(`other (e):`));
+              _$insert(_el$48, () => editField("Type your own answer"), null);
+              _$effect((_$p) => _$setProp(_el$49, "fg", theme().text.faint, _$p));
+              return _el$48;
             }
           })];
         }
@@ -2611,67 +3872,67 @@ function Body(props) {
           return q().kind === "show_options";
         },
         get children() {
-          var _el$45 = _$createElement("box");
-          _$setProp(_el$45, "flexDirection", "row");
-          _$setProp(_el$45, "gap", 1);
-          _$insert(_el$45, _$createComponent(For, {
+          var _el$51 = _$createElement("box");
+          _$setProp(_el$51, "flexDirection", "row");
+          _$setProp(_el$51, "gap", 1);
+          _$insert(_el$51, _$createComponent(For, {
             get each() {
               return q().options ?? [];
             },
             children: (option, index) => {
               const picked = () => props.value?.selected === option.id;
               return (() => {
-                var _el$60 = _$createElement("box"), _el$61 = _$createElement("text");
-                _$insertNode(_el$60, _el$61);
-                _$setProp(_el$60, "border", true);
-                _$setProp(_el$60, "flexGrow", 1);
-                _$setProp(_el$60, "flexBasis", 0);
-                _$setProp(_el$60, "paddingLeft", 1);
-                _$setProp(_el$60, "paddingRight", 1);
-                _$setProp(_el$60, "flexDirection", "column");
-                _$insert(_el$61, () => `${picked() ? "(\u2022)" : "( )"} ${index() + 1}. ${option.label}${isRec(option.id) ? " \u2605" : ""}`);
-                _$insert(_el$60, _$createComponent(Show, {
+                var _el$70 = _$createElement("box"), _el$71 = _$createElement("text");
+                _$insertNode(_el$70, _el$71);
+                _$setProp(_el$70, "border", true);
+                _$setProp(_el$70, "flexGrow", 1);
+                _$setProp(_el$70, "flexBasis", 0);
+                _$setProp(_el$70, "paddingLeft", 1);
+                _$setProp(_el$70, "paddingRight", 1);
+                _$setProp(_el$70, "flexDirection", "column");
+                _$insert(_el$71, () => `${picked() ? "(\u2022)" : "( )"} ${index() + 1}. ${option.label}${isRec(option.id) ? " \u2605" : ""}`);
+                _$insert(_el$70, _$createComponent(Show, {
                   get when() {
                     return option.description;
                   },
                   get children() {
-                    var _el$62 = _$createElement("text");
-                    _$setProp(_el$62, "wrapMode", "word");
-                    _$insert(_el$62, () => option.description);
-                    _$effect((_$p) => _$setProp(_el$62, "fg", theme().text.muted, _$p));
-                    return _el$62;
+                    var _el$72 = _$createElement("text");
+                    _$setProp(_el$72, "wrapMode", "word");
+                    _$insert(_el$72, () => option.description);
+                    _$effect((_$p) => _$setProp(_el$72, "fg", theme().text.muted, _$p));
+                    return _el$72;
                   }
                 }), null);
-                _$insert(_el$60, _$createComponent(For, {
+                _$insert(_el$70, _$createComponent(For, {
                   get each() {
                     return option.pros ?? [];
                   },
                   children: (pro) => (() => {
-                    var _el$63 = _$createElement("text");
-                    _$setProp(_el$63, "wrapMode", "word");
-                    _$insert(_el$63, `+ ${pro}`);
-                    _$effect((_$p) => _$setProp(_el$63, "fg", theme().text.feedback.success.base, _$p));
-                    return _el$63;
+                    var _el$73 = _$createElement("text");
+                    _$setProp(_el$73, "wrapMode", "word");
+                    _$insert(_el$73, `+ ${pro}`);
+                    _$effect((_$p) => _$setProp(_el$73, "fg", theme().text.feedback.success.base, _$p));
+                    return _el$73;
                   })()
                 }), null);
-                _$insert(_el$60, _$createComponent(For, {
+                _$insert(_el$70, _$createComponent(For, {
                   get each() {
                     return option.cons ?? [];
                   },
                   children: (con) => (() => {
-                    var _el$64 = _$createElement("text");
-                    _$setProp(_el$64, "wrapMode", "word");
-                    _$insert(_el$64, `\u2212 ${con}`);
-                    _$effect((_$p) => _$setProp(_el$64, "fg", theme().text.feedback.error.base, _$p));
-                    return _el$64;
+                    var _el$74 = _$createElement("text");
+                    _$setProp(_el$74, "wrapMode", "word");
+                    _$insert(_el$74, `\u2212 ${con}`);
+                    _$effect((_$p) => _$setProp(_el$74, "fg", theme().text.feedback.error.base, _$p));
+                    return _el$74;
                   })()
                 }), null);
                 _$effect((_p$) => {
                   var _v$39 = picked() ? "double" : "single", _v$40 = cursorAt(index()) ? theme().text.action.primary.base : theme().border.base, _v$41 = theme().text.base, _v$42 = TextAttributes.BOLD;
-                  _v$39 !== _p$.e && (_p$.e = _$setProp(_el$60, "borderStyle", _v$39, _p$.e));
-                  _v$40 !== _p$.t && (_p$.t = _$setProp(_el$60, "borderColor", _v$40, _p$.t));
-                  _v$41 !== _p$.a && (_p$.a = _$setProp(_el$61, "fg", _v$41, _p$.a));
-                  _v$42 !== _p$.o && (_p$.o = _$setProp(_el$61, "attributes", _v$42, _p$.o));
+                  _v$39 !== _p$.e && (_p$.e = _$setProp(_el$70, "borderStyle", _v$39, _p$.e));
+                  _v$40 !== _p$.t && (_p$.t = _$setProp(_el$70, "borderColor", _v$40, _p$.t));
+                  _v$41 !== _p$.a && (_p$.a = _$setProp(_el$71, "fg", _v$41, _p$.a));
+                  _v$42 !== _p$.o && (_p$.o = _$setProp(_el$71, "attributes", _v$42, _p$.o));
                   return _p$;
                 }, {
                   e: undefined,
@@ -2679,11 +3940,11 @@ function Body(props) {
                   a: undefined,
                   o: undefined
                 });
-                return _el$60;
+                return _el$70;
               })();
             }
           }));
-          return _el$45;
+          return _el$51;
         }
       }), _$createComponent(Match, {
         get when() {
@@ -2700,42 +3961,42 @@ function Body(props) {
                   return q().markdown;
                 },
                 get children() {
-                  var _el$46 = _$createElement("markdown");
-                  _$setProp(_el$46, "conceal", true);
+                  var _el$52 = _$createElement("markdown");
+                  _$setProp(_el$52, "conceal", true);
                   _$effect((_p$) => {
                     var _v$34 = q().markdown ?? "", _v$35 = props.syntax, _v$36 = theme().markdown.text;
-                    _v$34 !== _p$.e && (_p$.e = _$setProp(_el$46, "content", _v$34, _p$.e));
-                    _v$35 !== _p$.t && (_p$.t = _$setProp(_el$46, "syntaxStyle", _v$35, _p$.t));
-                    _v$36 !== _p$.a && (_p$.a = _$setProp(_el$46, "fg", _v$36, _p$.a));
+                    _v$34 !== _p$.e && (_p$.e = _$setProp(_el$52, "content", _v$34, _p$.e));
+                    _v$35 !== _p$.t && (_p$.t = _$setProp(_el$52, "syntaxStyle", _v$35, _p$.t));
+                    _v$36 !== _p$.a && (_p$.a = _$setProp(_el$52, "fg", _v$36, _p$.a));
                     return _p$;
                   }, {
                     e: undefined,
                     t: undefined,
                     a: undefined
                   });
-                  return _el$46;
+                  return _el$52;
                 }
               }), _$createComponent(For, {
                 get each() {
                   return q().sections ?? [];
                 },
                 children: (section) => (() => {
-                  var _el$65 = _$createElement("markdown");
-                  _$setProp(_el$65, "conceal", true);
+                  var _el$75 = _$createElement("markdown");
+                  _$setProp(_el$75, "conceal", true);
                   _$effect((_p$) => {
                     var _v$43 = `### ${section.title}
 
 ${section.content}`, _v$44 = props.syntax, _v$45 = theme().markdown.text;
-                    _v$43 !== _p$.e && (_p$.e = _$setProp(_el$65, "content", _v$43, _p$.e));
-                    _v$44 !== _p$.t && (_p$.t = _$setProp(_el$65, "syntaxStyle", _v$44, _p$.t));
-                    _v$45 !== _p$.a && (_p$.a = _$setProp(_el$65, "fg", _v$45, _p$.a));
+                    _v$43 !== _p$.e && (_p$.e = _$setProp(_el$75, "content", _v$43, _p$.e));
+                    _v$44 !== _p$.t && (_p$.t = _$setProp(_el$75, "syntaxStyle", _v$44, _p$.t));
+                    _v$45 !== _p$.a && (_p$.a = _$setProp(_el$75, "fg", _v$45, _p$.a));
                     return _p$;
                   }, {
                     e: undefined,
                     t: undefined,
                     a: undefined
                   });
-                  return _el$65;
+                  return _el$75;
                 })()
               })];
             }
@@ -2744,9 +4005,9 @@ ${section.content}`, _v$44 = props.syntax, _v$45 = theme().markdown.text;
               return q().kind === "show_diff";
             },
             get children() {
-              var _el$47 = _$createElement("diff");
-              _$setProp(_el$47, "view", "unified");
-              _$spread(_el$47, _$mergeProps({
+              var _el$53 = _$createElement("diff");
+              _$setProp(_el$53, "view", "unified");
+              _$spread(_el$53, _$mergeProps({
                 get diff() {
                   return q().diff ?? "";
                 },
@@ -2767,11 +4028,11 @@ ${section.content}`, _v$44 = props.syntax, _v$45 = theme().markdown.text;
                   return theme().text.base;
                 }
               }), false);
-              return _el$47;
+              return _el$53;
             }
           }), (() => {
-            var _el$48 = _$createElement("box");
-            _$insert(_el$48, _$createComponent(For, {
+            var _el$54 = _$createElement("box");
+            _$insert(_el$54, _$createComponent(For, {
               get each() {
                 return rows(q());
               },
@@ -2807,27 +4068,27 @@ ${section.content}`, _v$44 = props.syntax, _v$45 = theme().markdown.text;
             }));
             _$effect((_p$) => {
               var _v$37 = q().kind === "emoji_react" ? "row" : "column", _v$38 = q().kind === "emoji_react" ? 2 : 0;
-              _v$37 !== _p$.e && (_p$.e = _$setProp(_el$48, "flexDirection", _v$37, _p$.e));
-              _v$38 !== _p$.t && (_p$.t = _$setProp(_el$48, "gap", _v$38, _p$.t));
+              _v$37 !== _p$.e && (_p$.e = _$setProp(_el$54, "flexDirection", _v$37, _p$.e));
+              _v$38 !== _p$.t && (_p$.t = _$setProp(_el$54, "gap", _v$38, _p$.t));
               return _p$;
             }, {
               e: undefined,
               t: undefined
             });
-            return _el$48;
+            return _el$54;
           })(), _$createComponent(Show, {
             get when() {
               return q().kind === "review" || q().kind === "show_diff";
             },
             get children() {
-              var _el$49 = _$createElement("box"), _el$50 = _$createElement("text");
-              _$insertNode(_el$49, _el$50);
-              _$setProp(_el$49, "flexDirection", "row");
-              _$setProp(_el$49, "gap", 1);
-              _$insertNode(_el$50, _$createTextNode(`feedback (e):`));
-              _$insert(_el$49, () => editField("What should change?"), null);
-              _$effect((_$p) => _$setProp(_el$50, "fg", theme().text.faint, _$p));
-              return _el$49;
+              var _el$55 = _$createElement("box"), _el$56 = _$createElement("text");
+              _$insertNode(_el$55, _el$56);
+              _$setProp(_el$55, "flexDirection", "row");
+              _$setProp(_el$55, "gap", 1);
+              _$insertNode(_el$56, _$createTextNode(`feedback (e):`));
+              _$insert(_el$55, () => editField("What should change?"), null);
+              _$effect((_$p) => _$setProp(_el$56, "fg", theme().text.faint, _$p));
+              return _el$55;
             }
           })];
         }
@@ -2867,30 +4128,30 @@ ${section.content}`, _v$44 = props.syntax, _v$45 = theme().markdown.text;
             const bounds = () => sliderBounds(q());
             const current = () => props.value?.value ?? bounds().min;
             return (() => {
-              var _el$66 = _$createElement("box"), _el$67 = _$createElement("text"), _el$68 = _$createElement("text"), _el$69 = _$createElement("box"), _el$70 = _$createElement("text");
-              _$insertNode(_el$66, _el$67);
-              _$insertNode(_el$66, _el$68);
-              _$insertNode(_el$66, _el$69);
-              _$setProp(_el$66, "flexDirection", "column");
-              _$insert(_el$67, () => `${sliderBar(q(), current())} ${sliderText(q(), current())}`);
-              _$insert(_el$68, () => `${q().labels?.min ?? bounds().min} \u2026 ${q().labels?.mid ? `${q().labels?.mid} \u2026 ` : ""}${q().labels?.max ?? bounds().max}`);
-              _$insertNode(_el$69, _el$70);
-              _$setProp(_el$69, "flexDirection", "row");
-              _$setProp(_el$69, "gap", 1);
-              _$insert(_el$70, () => q().allow_other === true ? "value or other (e):" : "value (e):");
-              _$insert(_el$69, () => editField(`${bounds().min}\u2013${bounds().max}`), null);
+              var _el$76 = _$createElement("box"), _el$77 = _$createElement("text"), _el$78 = _$createElement("text"), _el$79 = _$createElement("box"), _el$80 = _$createElement("text");
+              _$insertNode(_el$76, _el$77);
+              _$insertNode(_el$76, _el$78);
+              _$insertNode(_el$76, _el$79);
+              _$setProp(_el$76, "flexDirection", "column");
+              _$insert(_el$77, () => `${sliderBar(q(), current())} ${sliderText(q(), current())}`);
+              _$insert(_el$78, () => `${q().labels?.min ?? bounds().min} \u2026 ${q().labels?.mid ? `${q().labels?.mid} \u2026 ` : ""}${q().labels?.max ?? bounds().max}`);
+              _$insertNode(_el$79, _el$80);
+              _$setProp(_el$79, "flexDirection", "row");
+              _$setProp(_el$79, "gap", 1);
+              _$insert(_el$80, () => q().allow_other === true ? "value or other (e):" : "value (e):");
+              _$insert(_el$79, () => editField(`${bounds().min}\u2013${bounds().max}`), null);
               _$effect((_p$) => {
                 var _v$46 = props.focused ? theme().text.base : theme().text.muted, _v$47 = theme().text.faint, _v$48 = theme().text.faint;
-                _v$46 !== _p$.e && (_p$.e = _$setProp(_el$67, "fg", _v$46, _p$.e));
-                _v$47 !== _p$.t && (_p$.t = _$setProp(_el$68, "fg", _v$47, _p$.t));
-                _v$48 !== _p$.a && (_p$.a = _$setProp(_el$70, "fg", _v$48, _p$.a));
+                _v$46 !== _p$.e && (_p$.e = _$setProp(_el$77, "fg", _v$46, _p$.e));
+                _v$47 !== _p$.t && (_p$.t = _$setProp(_el$78, "fg", _v$47, _p$.t));
+                _v$48 !== _p$.a && (_p$.a = _$setProp(_el$80, "fg", _v$48, _p$.a));
                 return _p$;
               }, {
                 e: undefined,
                 t: undefined,
                 a: undefined
               });
-              return _el$66;
+              return _el$76;
             })();
           })();
         }
@@ -2935,27 +4196,27 @@ ${section.content}`, _v$44 = props.syntax, _v$45 = theme().markdown.text;
           return q().kind === "ask_text";
         },
         get children() {
-          var _el$52 = _$createElement("box"), _el$53 = _$createElement("text");
-          _$insertNode(_el$52, _el$53);
-          _$setProp(_el$52, "flexDirection", "row");
-          _$setProp(_el$52, "gap", 1);
-          _$insertNode(_el$53, _$createTextNode(`answer (e):`));
-          _$insert(_el$52, () => editField(q().placeholder ?? "Type your answer"), null);
-          _$effect((_$p) => _$setProp(_el$53, "fg", theme().text.faint, _$p));
-          return _el$52;
+          var _el$58 = _$createElement("box"), _el$59 = _$createElement("text");
+          _$insertNode(_el$58, _el$59);
+          _$setProp(_el$58, "flexDirection", "row");
+          _$setProp(_el$58, "gap", 1);
+          _$insertNode(_el$59, _$createTextNode(`answer (e):`));
+          _$insert(_el$58, () => editField(q().placeholder ?? "Type your answer"), null);
+          _$effect((_$p) => _$setProp(_el$59, "fg", theme().text.faint, _$p));
+          return _el$58;
         }
       }), _$createComponent(Match, {
         get when() {
           return q().kind === "ask_code";
         },
         get children() {
-          var _el$55 = _$createElement("box"), _el$56 = _$createElement("text");
-          _$insertNode(_el$55, _el$56);
-          _$setProp(_el$55, "flexDirection", "column");
-          _$insert(_el$56, () => `code${q().language ? ` (${q().language})` : ""} (e):`);
-          _$insert(_el$55, () => editField(q().placeholder ?? "Write the code"), null);
-          _$effect((_$p) => _$setProp(_el$56, "fg", theme().text.faint, _$p));
-          return _el$55;
+          var _el$61 = _$createElement("box"), _el$62 = _$createElement("text");
+          _$insertNode(_el$61, _el$62);
+          _$setProp(_el$61, "flexDirection", "column");
+          _$insert(_el$62, () => `code${q().language ? ` (${q().language})` : ""} (e):`);
+          _$insert(_el$61, () => editField(q().placeholder ?? "Write the code"), null);
+          _$effect((_$p) => _$setProp(_el$62, "fg", theme().text.faint, _$p));
+          return _el$61;
         }
       }), _$createComponent(Match, {
         get when() {
@@ -2967,48 +4228,48 @@ ${section.content}`, _v$44 = props.syntax, _v$45 = theme().markdown.text;
               return props.value?.files ?? [];
             },
             children: (file) => (() => {
-              var _el$71 = _$createElement("text");
-              _$insert(_el$71, () => `\uD83D\uDCCE ${file.name} (${file.mime}, ${file.size} B)`);
-              _$effect((_$p) => _$setProp(_el$71, "fg", theme().text.base, _$p));
-              return _el$71;
+              var _el$81 = _$createElement("text");
+              _$insert(_el$81, () => `\uD83D\uDCCE ${file.name} (${file.mime}, ${file.size} B)`);
+              _$effect((_$p) => _$setProp(_el$81, "fg", theme().text.base, _$p));
+              return _el$81;
             })()
           }), (() => {
-            var _el$57 = _$createElement("box"), _el$58 = _$createElement("text");
-            _$insertNode(_el$57, _el$58);
-            _$setProp(_el$57, "flexDirection", "row");
-            _$setProp(_el$57, "gap", 1);
-            _$insert(_el$58, () => q().multiple ? "paths, comma or line separated (e):" : "path (e):");
-            _$insert(_el$57, () => editField(q().kind === "ask_image" ? "screenshot.png, or ctrl+v to paste one" : "./path/to/file"), null);
-            _$effect((_$p) => _$setProp(_el$58, "fg", theme().text.faint, _$p));
-            return _el$57;
+            var _el$63 = _$createElement("box"), _el$64 = _$createElement("text");
+            _$insertNode(_el$63, _el$64);
+            _$setProp(_el$63, "flexDirection", "row");
+            _$setProp(_el$63, "gap", 1);
+            _$insert(_el$64, () => q().multiple ? "paths, comma or line separated (e):" : "path (e):");
+            _$insert(_el$63, () => editField(q().kind === "ask_image" ? "screenshot.png, or ctrl+v to paste one" : "./path/to/file"), null);
+            _$effect((_$p) => _$setProp(_el$64, "fg", theme().text.faint, _$p));
+            return _el$63;
           })(), _$createComponent(Show, {
             get when() {
               return _$memo(() => props.editing === "text")() && props.suggestions.length > 0;
             },
             get children() {
-              var _el$59 = _$createElement("box");
-              _$setProp(_el$59, "flexDirection", "column");
-              _$setProp(_el$59, "paddingLeft", 2);
-              _$insert(_el$59, _$createComponent(For, {
+              var _el$65 = _$createElement("box");
+              _$setProp(_el$65, "flexDirection", "column");
+              _$setProp(_el$65, "paddingLeft", 2);
+              _$insert(_el$65, _$createComponent(For, {
                 get each() {
                   return props.suggestions;
                 },
                 children: (suggestion, index) => (() => {
-                  var _el$72 = _$createElement("text");
-                  _$insert(_el$72, () => `${index() === props.selected ? "\u203A" : " "} ${suggestion}`);
+                  var _el$82 = _$createElement("text");
+                  _$insert(_el$82, () => `${index() === props.selected ? "\u203A" : " "} ${suggestion}`);
                   _$effect((_p$) => {
                     var _v$49 = index() === props.selected ? theme().text.action.primary.base : theme().text.muted, _v$50 = index() === props.selected ? TextAttributes.BOLD : 0;
-                    _v$49 !== _p$.e && (_p$.e = _$setProp(_el$72, "fg", _v$49, _p$.e));
-                    _v$50 !== _p$.t && (_p$.t = _$setProp(_el$72, "attributes", _v$50, _p$.t));
+                    _v$49 !== _p$.e && (_p$.e = _$setProp(_el$82, "fg", _v$49, _p$.e));
+                    _v$50 !== _p$.t && (_p$.t = _$setProp(_el$82, "attributes", _v$50, _p$.t));
                     return _p$;
                   }, {
                     e: undefined,
                     t: undefined
                   });
-                  return _el$72;
+                  return _el$82;
                 })()
               }));
-              return _el$59;
+              return _el$65;
             }
           })];
         }

@@ -1,5 +1,7 @@
 import { type AnswerStatus, type FileValue, normaliseAnswer, type SubmittedAnswer } from "./answers.ts"
 import { DEFAULT_EMOJIS, type Question, recommendedValue, sliderBounds, sliderMid } from "./questions.ts"
+import { isStructured, structuredDefault } from "./structured.ts"
+import { structuredChoose, structuredEditable, structuredEditText, structuredKeys, structuredRows, structuredSetText, structuredStep } from "./structured-ui.ts"
 
 /** Client-side edit state of one card. `status: "unset"` is left out of the submission (stays pending). */
 export interface Draft {
@@ -18,6 +20,7 @@ export function isTextKind(question: Question) {
 
 /** Choices shown as rows for a kind, used for the cursor and number keys. */
 export function rows(question: Question): string[] {
+  if (isStructured(question)) return structuredRows(question).map((row) => row.id)
   switch (question.kind) {
     case "pick_one":
     case "show_options":
@@ -40,6 +43,7 @@ export function rows(question: Question): string[] {
 }
 
 function neutral(question: Question): unknown {
+  if (isStructured(question)) return structuredDefault(question)
   const ids = rows(question)
   switch (question.kind) {
     case "pick_many":
@@ -109,6 +113,9 @@ export type ArrowAction = { readonly kind: "cursor" | "step" | "question"; reado
 export function arrowAction(question: Question, key: Arrow): ArrowAction | undefined {
   const delta = key === "up" || key === "left" ? -1 : 1
   const vertical = key === "up" || key === "down"
+  if (question.kind === "date" || question.kind === "datetime" || question.kind === "time") return { kind: "step", delta: delta * (vertical ? question.kind === "time" ? 60 : 7 : 1) }
+  if (question.kind === "colour") return { kind: vertical ? "question" : "step", delta }
+  if (isStructured(question)) return { kind: vertical ? "cursor" : "step", delta }
   if (HORIZONTAL.has(question.kind)) return { kind: vertical ? "question" : "cursor", delta }
   if (!vertical) return question.kind === "slider" || question.kind === "rate" ? { kind: "step", delta } : undefined
   return rows(question).length > 0 ? { kind: "cursor", delta } : { kind: "question", delta }
@@ -143,6 +150,7 @@ export function setNote(draft: Draft, note: string): Draft {
 
 /** Space/enter on the row under the cursor (or row `index` for number keys). */
 export function choose(question: Question, draft: Draft, index = draft.cursor): Draft {
+  if (isStructured(question)) return structuredChoose(question, draft, index)
   const ids = rows(question)
   const id = ids[index]
   if (id === undefined) return draft
@@ -189,6 +197,7 @@ export function rankMove(question: Question, draft: Draft, delta: number): Draft
 
 /** ←/→ on a slider, or on the rated option under the cursor. */
 export function step(question: Question, draft: Draft, delta: number): Draft {
+  if (isStructured(question)) return structuredStep(question, draft, delta)
   const { min, max, step: size } = sliderBounds(question)
   const round = (value: number) => Number(clamp(value, min, max).toFixed(10))
   if (question.kind === "slider") {
@@ -207,6 +216,7 @@ export function step(question: Question, draft: Draft, delta: number): Draft {
 
 /** Text typed into the card's answer field (ask_text/ask_code, pick_one "other", review feedback). */
 export function setText(question: Question, draft: Draft, text: string): Draft {
+  if (isStructured(question)) { const result = structuredSetText(question, draft, text); return "draft" in result ? result.draft : draft }
   switch (question.kind) {
     case "ask_text":
     case "ask_code":
@@ -260,7 +270,7 @@ export function parseSlider(question: Question, text: string): { value: number }
 /** Whether `e` (edit) opens a text field for this card. */
 export function editable(question: Question) {
   return (
-    isTextKind(question) ||
+    isTextKind(question) || structuredEditable(question) ||
     (question.kind === "pick_one" && question.allow_other !== false) ||
     (question.kind === "pick_many" && question.allow_other !== false) ||
     question.kind === "slider" ||
@@ -270,6 +280,7 @@ export function editable(question: Question) {
 }
 
 export function editText(question: Question, draft: Draft): string {
+  if (isStructured(question)) return structuredEditText(question, draft)
   const value = draft.value as { text?: string; other?: string; feedback?: string; files?: unknown } | undefined
   if (question.kind === "ask_image" || question.kind === "ask_file") return filePaths(draft).join("\n")
   if (question.kind === "slider") {
@@ -386,6 +397,7 @@ const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "b
 
 /** Whether a completion candidate fits the card: images for ask_image, `accept` extensions for ask_file. */
 export function acceptsPath(question: Question, path: string): boolean {
+  if (question.kind === "path") return question.config?.mode === "dirs" ? path.endsWith("/") : question.config?.mode === "files" ? !path.endsWith("/") : true
   if (path.endsWith("/")) return true
   const ext = path.split("/").pop()?.split(".").slice(1).pop()?.toLowerCase() ?? ""
   if (question.kind === "ask_image") return IMAGE_EXTENSIONS.has(ext)
@@ -446,12 +458,13 @@ const PANEL_KEYS: Partial<Record<Question["kind"], string>> = {
 }
 
 function kindKeys(question: Question): string {
+  if (isStructured(question)) return structuredKeys(question)
   if (question.kind === "slider")
     return `←/→ adjust · e type a number${question.allow_other === true ? " or your own answer" : ""}`
   return PANEL_KEYS[question.kind] ?? ""
 }
 
-const PATH_KINDS = new Set(["ask_image", "ask_file"])
+const PATH_KINDS = new Set(["ask_image", "ask_file", "path", "tags"])
 
 /**
  * The key hint under a round for the focused card: its own keys first, then the shared ones.
@@ -475,7 +488,7 @@ export function keyHints(
           ? " · ↑/↓ suggestion · tab complete"
           : " · tab complete"
         : ""
-    const paste = editing.field === "text" && question && PATH_KINDS.has(question.kind) ? " · ctrl+v paste" : ""
+    const paste = editing.field === "text" && question && (question.kind === "ask_image" || question.kind === "ask_file") ? " · ctrl+v paste" : ""
     return `${enter}${paths}${paste} · esc done · ctrl+s submit`
   }
   const own = question ? kindKeys(question) : ""

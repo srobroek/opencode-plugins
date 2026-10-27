@@ -16,6 +16,13 @@ const ASK_DESCRIPTION = `Ask the user one round of questions in the parley panel
 Send every question whose prerequisites are settled in one call, each with your recommended answer and rationale.
 Kinds: pick_one for categorical choices (how wide, which approach), never a slider; slider only for numeric quantities.
 ask_code is for code the user writes; to confirm a snippet use confirm with it in the body, or show_diff.
+New kinds use config and recommended as the complete answer object:
+form config.fields [{id,label,type:text|number|choice|toggle,options?:string[],min?,max?,required?}], answer {fields:{id:value}}.
+buckets config.items/categories [{id,label}], answer {buckets:{categoryId:[itemId]}}; match config.items/targets, answer {pairs:{itemId:targetId}} (bijection).
+allocate options + config.total (100), answer {allocations:{optionId:number}} summing to total; matrix options + config.criteria [{id,label}], answer {scores:{optionId:{criterionId:number}}}.
+range min/max/step/unit, answer {min,max}; path config.mode files|dirs|both + question.multiple, answer {paths:[strings]} (directories end /, no upload).
+date/time/datetime config.min/max ISO bounds, answer {value:YYYY-MM-DD|HH:mm|YYYY-MM-DDTHH:mm}; tags config.suggestions + min/max counts, answer {tags:[strings]}; colour config.swatches, answer {hex:'#rrggbb'}.
+show_if {id:earlierQuestionId,equals:answerValue} hides conditional questions until that earlier answer matches. Hidden questions are omitted, not pending.
 Answers are keyed by id: answered, accepted (took your recommendation), noted (comment only) or deferred; unanswered ids are in pending.
 Notes are user input: answer a question or concern in a note, or ask a follow-up round, before you proceed.
 Status unavailable: no parley UI, so use the question tool or chat for the rest of the session. timeout: the round closed unanswered.`

@@ -1,3 +1,5 @@
+import { isStructured, NEW_KINDS, type StructuredConfig, validateStructuredQuestion } from "./structured.ts"
+
 export const PHASE_ONE_KINDS = [
   "pick_one",
   "show_options",
@@ -19,7 +21,7 @@ export const PHASE_TWO_KINDS = [
   "ask_file",
 ] as const
 
-export const KINDS = [...PHASE_ONE_KINDS, ...PHASE_TWO_KINDS] as const
+export const KINDS = [...PHASE_ONE_KINDS, ...PHASE_TWO_KINDS, ...NEW_KINDS] as const
 export type Kind = (typeof KINDS)[number]
 
 export const OPTION_KINDS: ReadonlySet<Kind> = new Set(["pick_one", "show_options", "pick_many", "rank", "rate"])
@@ -69,6 +71,10 @@ export interface Question {
   readonly emojis?: readonly string[]
   readonly multiple?: boolean
   readonly accept?: readonly string[]
+  /** Kind-specific settings for the structured kinds in `NEW_KINDS`. */
+  readonly config?: StructuredConfig
+  /** Show this question only when an earlier question's answer value equals `equals`. */
+  readonly show_if?: { readonly id: string; readonly equals: unknown }
 }
 
 const QUESTION_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]*$/
@@ -94,6 +100,13 @@ export function validateQuestions(input: unknown, existing: readonly Question[] 
       return
     }
     const where = typeof raw.id === "string" ? `${at} (${raw.id})` : at
+    if (raw.show_if !== undefined) {
+      const showIf = raw.show_if
+      if (!isRecord(showIf) || typeof showIf.id !== "string") errors.push(`${where}.show_if must be an object with an id`)
+      else if (showIf.id === raw.id) errors.push(`${where}.show_if cannot refer to the question itself`)
+      else if (!seen.has(showIf.id)) errors.push(`${where}.show_if refers to ${JSON.stringify(showIf.id)}, which is not an earlier question`)
+      if (isRecord(showIf) && !Object.hasOwn(showIf, "equals")) errors.push(`${where}.show_if.equals is required`)
+    }
     if (typeof raw.id !== "string" || !QUESTION_ID.test(raw.id)) errors.push(`${at}.id must match ${QUESTION_ID}`)
     else if (seen.has(raw.id)) errors.push(`${where}: duplicate id`)
     else seen.add(raw.id)
@@ -108,6 +121,7 @@ export function validateQuestions(input: unknown, existing: readonly Question[] 
 }
 
 function validateKind(question: Question, where: string): string[] {
+  if (isStructured(question)) return validateStructuredQuestion(question).map((error) => `${where}: ${error}`)
   const errors: string[] = []
   const options = question.options ?? []
   const optionIDs = new Set<string>()
@@ -237,6 +251,19 @@ export function recommendedValue(question: Question): unknown {
     case "ask_image":
     case "ask_file":
       return undefined
+    case "form":
+    case "buckets":
+    case "match":
+    case "allocate":
+    case "matrix":
+    case "range":
+    case "path":
+    case "date":
+    case "time":
+    case "datetime":
+    case "tags":
+    case "colour":
+      return rec === undefined ? undefined : structuredClone(rec)
   }
 }
 
