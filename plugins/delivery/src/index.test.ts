@@ -32,7 +32,7 @@ describe("setup", () => {
     expect([...fake.tools.keys()]).toEqual([LAND_ACTION, CLEANUP_ACTION])
     expect(fake.hooks("permission")).toEqual(["evaluate"])
     expect(fake.hooks("tool")).toEqual(["execute.after"])
-    expect(fake.hooks("session")).toEqual(["context"])
+    expect(fake.hooks("session")).toEqual(["context", "compaction", "generate"])
     expect([...fake.agents.keys()].sort()).toEqual([...AGENT_IDS].sort())
     expect(fake.skills.get("delivery-git-workflow")).toMatchObject({ path: SKILL_PATH })
     expect(fake.skills.get("delivery-fan-out")).toMatchObject({ path: FAN_OUT_SKILL_PATH, autoinvoke: false })
@@ -282,8 +282,9 @@ describe("fan-out instructions", () => {
     sessionID: string,
     agent = "build",
     tools: Record<string, unknown> = { subagent: {} },
+    hook: "context" | "compaction" = "context",
   ) =>
-    fake.fire.session("context", {
+    fake.fire.session(hook, {
       sessionID,
       agent,
       system: [] as Array<{ type: string; text: string }>,
@@ -296,6 +297,7 @@ describe("fan-out instructions", () => {
     const text = readFileSync(FAN_OUT_PATH, "utf8").trim()
     expect((await fire(fake, "ses_root")).system).toEqual([{ type: "text", text }])
     expect((await fire(fake, "ses_root")).system).toEqual([{ type: "text", text }])
+    expect((await fire(fake, "ses_root", "build", { subagent: {} }, "compaction")).system).toEqual([{ type: "text", text }])
     expect((await fire(fake, "ses_child")).system).toEqual([])
     expect((await fire(fake, "ses_root", "implementer")).system).toEqual([])
     expect(text).not.toMatch(/skill:\/\/|rule:\/\/|agent:\/\/|`task`/)

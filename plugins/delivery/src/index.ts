@@ -361,7 +361,8 @@ export async function setupDelivery(ctx: Context): Promise<() => Promise<void>> 
   if (options.fanOut) {
     const fanOut = readFileSync(FAN_OUT_PATH, "utf8").trim()
     const primary = new Map<string, Promise<boolean>>()
-    const context = await ctx.session.hook("context", async (event) => {
+    // Also on compaction and generate, so those requests keep the turns' system prompt and prompt cache.
+    const addFanOut = async (event: { sessionID: string; agent: string; tools: object; system: Array<{ type: "text"; text: string }> }) => {
       if ((AGENT_IDS as readonly string[]).includes(event.agent)) return
       if (!("subagent" in event.tools)) return
       let known = primary.get(event.sessionID)
@@ -370,9 +371,14 @@ export async function setupDelivery(ctx: Context): Promise<() => Promise<void>> 
         primary.set(event.sessionID, known)
       }
       if (await known) event.system.push({ type: "text", text: fanOut })
-    })
+    }
+    const hooks = [
+      await ctx.session.hook("context", addFanOut),
+      await ctx.session.hook("compaction", addFanOut),
+      await ctx.session.hook("generate", addFanOut),
+    ]
     disposers.push(async () => {
-      await context.dispose()
+      for (const hook of hooks) await hook.dispose()
       primary.clear()
     })
   }
