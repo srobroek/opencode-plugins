@@ -5,7 +5,7 @@ OpenCode V2 plugins by Sjors Robroek. This is the OpenCode counterpart of
 
 | Field | Value |
 | --- | --- |
-| Status | Early. Plugins: `example`, `model-roles`, `worktrunk`, `session`, `dep-update`, `whats-new`, `statusline`, `beads`, `goal`, `lsp`, `subagent-worktree`, `parley`, `chezmoi`, `languages`, `rust`, `journeys`, `delivery`, `debate`, `eli5`, `project`, `architecture`, `build`, `quality`, `toolchain`, `aws`, `design`, `safety`, `find-tools`, `trunk-dev`, `speckit`, `agent-efficiency`, `agent-researcher`. |
+| Status | Early. Plugins: `example`, `model-roles`, `worktrunk`, `session`, `dep-update`, `whats-new`, `statusline`, `beads`, `goal`, `lsp`, `subagent-worktree`, `parley`, `chezmoi`, `languages`, `rust`, `journeys`, `delivery`, `debate`, `eli5`, `project`, `architecture`, `build`, `quality`, `toolchain`, `aws`, `design`, `safety`, `find-tools`, `trunk-dev`, `speckit`, `agent-efficiency`, `agent-researcher`, `agent-seance`. |
 | Host | OpenCode 2.1.4 or later (`@opencode/plugin` 2.x) |
 | License | Apache-2.0 |
 
@@ -86,6 +86,7 @@ codex plugin add worktrunk@srobroek-opencode
 | `whats-new` | Not exported: its skill depends on OpenCode tools and version checks |
 | `agent-efficiency`, `example`, `goal`, `lsp`, `model-roles`, `parley`, `safety`, `statusline`, `subagent-worktree` | Not exported: OpenCode code only |
 | `agent-researcher`, `build` | Not exported: agent only |
+| `agent-seance` | Not exported: agent with an OpenCode tool |
 
 `scripts/build-marketplaces.ts` generates `.claude-plugin/marketplace.json`,
 `.agents/plugins/marketplace.json` and each exported plugin's

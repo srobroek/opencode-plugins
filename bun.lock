@@ -42,6 +42,19 @@
         "@opencode/plugin",
       ],
     },
+    "plugins/agent-seance": {
+      "name": "@srobroek/opencode-agent-seance",
+      "version": "0.1.0",
+      "devDependencies": {
+        "@srobroek/opencode-lib": "workspace:*",
+      },
+      "peerDependencies": {
+        "@opencode/plugin": "^2.1.4",
+      },
+      "optionalPeers": [
+        "@opencode/plugin",
+      ],
+    },
     "plugins/architecture": {
       "name": "@srobroek/opencode-architecture",
       "version": "0.1.0",
@@ -736,6 +749,8 @@
     "@srobroek/opencode-agent-efficiency": ["@srobroek/opencode-agent-efficiency@workspace:plugins/agent-efficiency"],
 
     "@srobroek/opencode-agent-researcher": ["@srobroek/opencode-agent-researcher@workspace:plugins/agent-researcher"],
+
+    "@srobroek/opencode-agent-seance": ["@srobroek/opencode-agent-seance@workspace:plugins/agent-seance"],
 
     "@srobroek/opencode-architecture": ["@srobroek/opencode-architecture@workspace:plugins/architecture"],
 
