@@ -1,7 +1,9 @@
+import { realpathSync } from "node:fs"
+import { homedir } from "node:os"
 import { Plugin } from "@opencode/plugin"
 import { SHELL_ALIASES, SHELL_TOOL, shellAliasInput } from "@srobroek/opencode-lib/tool-targets"
 import { EXPLORE_ID, shapeExplore } from "./explore.ts"
-import { leanSystem, parseLeanOptions } from "./lean.ts"
+import { globalConfigDirs, leanSystem, parseLeanOptions } from "./lean.ts"
 
 export * from "./explore.ts"
 export * from "./lean.ts"
@@ -15,6 +17,18 @@ export type Route = { tool: string; input: unknown }
 export function routeShellAlias(tool: string, input: unknown, registered: (id: string) => boolean): Route | undefined {
   if (!SHELL_ALIASES.has(tool) || registered(tool)) return undefined
   return { tool: SHELL_TOOL, input: shellAliasInput(input) }
+}
+
+/** `dirs` plus the resolved path of each, since OpenCode names the global AGENTS.md by its real path. */
+function withRealPaths(dirs: ReadonlyArray<string>): string[] {
+  const resolved = dirs.flatMap((dir) => {
+    try {
+      return [realpathSync(dir)]
+    } catch {
+      return []
+    }
+  })
+  return [...new Set([...dirs, ...resolved])]
 }
 
 export default Plugin.define({
@@ -49,6 +63,7 @@ export default Plugin.define({
     const lean = parseLeanOptions(options)
     if (lean !== undefined) {
       const child = new Map<string, Promise<boolean>>()
+      const globalDirs = withRealPaths(globalConfigDirs(process.env, homedir()))
       const isChild = async (sessionID: string) => {
         try {
           const session = (await ctx.session.get({ sessionID } as never)) as { parentID?: string | null } | undefined
@@ -64,7 +79,7 @@ export default Plugin.define({
           known = isChild(event.sessionID)
           child.set(event.sessionID, known)
         }
-        if (await known) event.system.splice(0, event.system.length, ...leanSystem(event.system, lean.drop))
+        if (await known) event.system.splice(0, event.system.length, ...leanSystem(event.system, lean.drop, globalDirs))
       })
       disposers.push(async () => {
         await context.dispose()
