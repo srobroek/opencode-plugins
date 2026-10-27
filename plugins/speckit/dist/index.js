@@ -2190,7 +2190,7 @@ class IncompleteStart extends Error {
     this.name = "IncompleteStart";
   }
 }
-async function runSpecStart(options, signal, commandMs = COMMAND_MS, module = BEADS_LOCK) {
+async function runSpecStart(options, signal, commandMs = COMMAND_MS, module = BEADS_LOCK, timers = globalThis) {
   const started = Date.now();
   const cwd = realpathSync3(options.workspace);
   const env = {
@@ -2241,14 +2241,14 @@ async function runSpecStart(options, signal, commandMs = COMMAND_MS, module = BE
         return;
       stopped = why;
       kill("SIGTERM");
-      grace = setTimeout(() => kill("SIGKILL"), TERMINATION_GRACE_MS);
+      grace = timers.setTimeout(() => kill("SIGKILL"), TERMINATION_GRACE_MS);
     };
-    const bound = UNBOUNDED.has(step) ? undefined : setTimeout(() => stop(`${commandMs / 1000} s bound reached during`), commandMs);
+    const bound = UNBOUNDED.has(step) ? undefined : timers.setTimeout(() => stop(`${commandMs / 1000} s bound reached during`), commandMs);
     const cancel = () => stop("cancelled during");
     signal?.addEventListener("abort", cancel, { once: true });
     const settle = () => {
-      clearTimeout(bound);
-      clearTimeout(grace);
+      timers.clearTimeout(bound);
+      timers.clearTimeout(grace);
       signal?.removeEventListener("abort", cancel);
     };
     let stdout = "";

@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test"
+import { afterAll, beforeAll, beforeEach, expect, setDefaultTimeout, test } from "bun:test"
 import {
   chmodSync,
   existsSync,
@@ -11,10 +11,12 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { type LockModule, runSpecStart } from "./spec-start-runtime.ts"
+import { type LockModule, type RuntimeTimers, runSpecStart } from "./spec-start-runtime.ts"
 import { executeStart } from "./tools.ts"
 
 const spec = "001-example"
+// These cases execute several real children; the watchdog is not a command deadline.
+setDefaultTimeout(60_000)
 let dir: string
 let workspace: string
 let state: string
@@ -50,14 +52,16 @@ const recording: LockModule = {
   },
 }
 
-/** A `bd` that keeps one JSON ledger, logs every call, and pours slowly enough to race; SPECKIT_FAKE_BD_DELAY slows named steps further. */
+/** A `bd` with one JSON ledger; selected steps wait for an explicit release marker. */
 const FAKE_BD = `#!/usr/bin/env bun
-import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 const path = process.env.SPECKIT_FAKE_BD_STATE;
 const args = process.argv.slice(2).filter(arg => arg !== "--json");
 appendFileSync(path + ".log", args.join(" ") + "\\n");
 const step = args[0] === "mol" ? args[0] + " " + args[1] : args[0];
-await Bun.sleep(JSON.parse(process.env.SPECKIT_FAKE_BD_DELAY ?? "{}")[step] ?? (step === "mol pour" ? 300 : 0));
+if (step in JSON.parse(process.env.SPECKIT_FAKE_BD_DELAY ?? "{}")) {
+  while (!existsSync(path + ".release")) await Bun.sleep(10);
+}
 const ledger = JSON.parse(readFileSync(path, "utf8"));
 const out = value => console.log(JSON.stringify(value));
 if (args[0] === "query") out(ledger.filter(row => row.spec_id === "${spec}"));
@@ -81,10 +85,40 @@ else if (args[0] === "mol" && args[1] === "pour") {
 const calls = (): string[] =>
   existsSync(`${state}.log`) ? readFileSync(`${state}.log`, "utf8").trim().split("\n").filter(Boolean) : []
 const options = () => ({ spec, workspace, approvals: "yes" as const, decision: "Keep routine approvals" })
-const start = (lock: LockModule, signal?: AbortSignal, commandMs?: number) =>
-  runSpecStart(options(), signal, commandMs, lock)
+const start = (lock: LockModule, signal?: AbortSignal, commandMs?: number, timers?: RuntimeTimers) =>
+  runSpecStart(options(), signal, commandMs, lock, timers)
 const delay = (steps: Record<string, number>) => {
   process.env.SPECKIT_FAKE_BD_DELAY = JSON.stringify(steps)
+}
+
+async function entered(step: string, pending: Promise<unknown>): Promise<void> {
+  const controller = new AbortController()
+  const ready = (async () => {
+    while (!controller.signal.aborted && !calls().some((line) => line.startsWith(step))) await Bun.sleep(10)
+  })()
+  try {
+    await Promise.race([ready, pending.then(() => { throw new Error(`start finished before ${step}`) })])
+  } finally {
+    controller.abort()
+    await ready
+  }
+}
+
+function controlledTimers() {
+  const bounds = new Map<ReturnType<typeof setTimeout>, () => void>()
+  const timers: RuntimeTimers = {
+    setTimeout: ((callback: () => void, ms: number) => {
+      if (ms === 5_000) return setTimeout(callback, ms)
+      const handle = setTimeout(() => {}, 60_000)
+      bounds.set(handle, callback)
+      return handle
+    }) as typeof setTimeout,
+    clearTimeout: ((handle: ReturnType<typeof setTimeout> | undefined) => {
+      if (handle !== undefined) bounds.delete(handle)
+      clearTimeout(handle)
+    }) as typeof clearTimeout,
+  }
+  return { timers, bounds }
 }
 
 /** The `speckit_start` execute as the plugin registers it, with the lock module under test. */
@@ -97,7 +131,9 @@ beforeAll(() => {
   mkdirSync(join(workspace, ".beads"), { recursive: true })
   const bin = join(dir, "bin")
   mkdirSync(bin)
-  writeFileSync(join(bin, "bd"), FAKE_BD)
+  const script = join(bin, "bd.mjs")
+  writeFileSync(script, FAKE_BD)
+  writeFileSync(join(bin, "bd"), `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(script)} "$@"\n`)
   chmodSync(join(bin, "bd"), 0o755)
   state = join(dir, "ledger.json")
   process.env.PATH = `${bin}:${saved.path ?? ""}`
@@ -107,6 +143,7 @@ beforeAll(() => {
 beforeEach(() => {
   writeFileSync(state, "[]")
   rmSync(`${state}.log`, { force: true })
+  rmSync(`${state}.release`, { force: true })
   delete process.env.SPECKIT_FAKE_BD_DELAY
 })
 
@@ -157,28 +194,56 @@ test("cancelling during the pour stops bd and reports that a pour was issued", a
   delay({ "mol pour": 60_000 })
   const controller = new AbortController()
   const pending = tool()("id", options(), controller.signal, serialising)
-  while (!calls().some((line) => line.startsWith("mol pour"))) await Bun.sleep(50)
-  controller.abort()
+  try {
+    await entered("mol pour", pending)
+  } finally {
+    controller.abort()
+    await pending
+  }
   const result = await pending
   expect(result.metadata.ok).toBe(false)
   expect(result.content).toContain("a pour was issued and may be partial")
   expect(result.metadata).toMatchObject({ status: "INCOMPLETE", step: "mol pour", completedSteps: ["query"] })
   expect(calls()).toHaveLength(2)
   expect(readFileSync(state, "utf8")).toBe("[]")
-}, 20_000)
+}, 60_000)
 
 test("a bounded read that outlasts its own bound is an incomplete start, not a failure", async () => {
   delay({ query: 60_000 })
-  const error = await start(serialising, undefined, 3_000).then(
+  const { timers, bounds } = controlledTimers()
+  const controller = new AbortController()
+  const pending = start(serialising, controller.signal, 3_000, timers)
+  const result = pending.then(
     () => undefined,
     (caught: unknown) => caught,
   )
+  try {
+    await entered("query", pending)
+    expect(bounds.size).toBe(1)
+    for (const fire of bounds.values()) fire()
+  } finally {
+    controller.abort()
+    await result
+  }
+  const error = await result
   expect(error).toMatchObject({ details: { status: "INCOMPLETE", step: "query", completedSteps: [] } })
+  expect((error as Error).message).toContain("3 s bound reached during")
   expect((error as Error).message).toContain("no pour was issued")
   expect(calls()).toHaveLength(1)
-}, 20_000)
+}, 60_000)
 
 test("a pour longer than the per-command bound is not cut off", async () => {
   delay({ "mol pour": 6_000 })
-  expect(await start(serialising, undefined, 3_000)).toMatchObject({ status: "READY", root: "run-1" })
-}, 20_000)
+  const { timers, bounds } = controlledTimers()
+  const controller = new AbortController()
+  const pending = start(serialising, controller.signal, 3_000, timers)
+  try {
+    await entered("mol pour", pending)
+    expect(bounds.size).toBe(0)
+    writeFileSync(`${state}.release`, "release")
+    expect(await pending).toMatchObject({ status: "READY", root: "run-1" })
+  } finally {
+    controller.abort()
+    await pending.catch(() => {})
+  }
+}, 60_000)

@@ -24,6 +24,7 @@ export interface LockModule {
 }
 export const BEADS_LOCK: LockModule = { embeddedStoreFor, withEmbeddedWriteLock }
 export type RuntimeOptions = StartOptions
+export type RuntimeTimers = Pick<typeof globalThis, "setTimeout" | "clearTimeout">
 /**
  * Each bounded `bd` command gets its own bound, sized for a cold embedded store, where one
  * read alone can take 30-50 s; it matches the Beads runner's bound for one-bead writes.
@@ -56,6 +57,7 @@ export async function runSpecStart(
   signal?: AbortSignal,
   commandMs = COMMAND_MS,
   module: LockModule = BEADS_LOCK,
+  timers: RuntimeTimers = globalThis,
 ): Promise<StartResult> {
   const started = Date.now()
   const cwd = realpathSync(options.workspace)
@@ -117,16 +119,16 @@ export async function runSpecStart(
       if (stopped !== undefined) return
       stopped = why
       kill("SIGTERM")
-      grace = setTimeout(() => kill("SIGKILL"), TERMINATION_GRACE_MS)
+      grace = timers.setTimeout(() => kill("SIGKILL"), TERMINATION_GRACE_MS)
     }
     const bound = UNBOUNDED.has(step)
       ? undefined
-      : setTimeout(() => stop(`${commandMs / 1000} s bound reached during`), commandMs)
+      : timers.setTimeout(() => stop(`${commandMs / 1000} s bound reached during`), commandMs)
     const cancel = (): void => stop("cancelled during")
     signal?.addEventListener("abort", cancel, { once: true })
     const settle = (): void => {
-      clearTimeout(bound)
-      clearTimeout(grace)
+      timers.clearTimeout(bound)
+      timers.clearTimeout(grace)
       signal?.removeEventListener("abort", cancel)
     }
     let stdout = ""
