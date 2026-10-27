@@ -158,13 +158,17 @@ tool results, so the hook does not see them.
 
 ## Instructions and skill
 
-- **Fan-out rules.** `instructions/delivery-fan-out.md` covers splitting work into
-  units, batched background dispatch, self-contained briefs, tier routing, one
-  worktree per writer, and verifying once after integration. A `session.hook("context")`
-  adds it to the system prompt of every primary session, but not to subagent
-  sessions or the delivery agents. The text is static, so provider prompt caching
-  keeps working. To manage it yourself, set `fanOut: false` and copy the file into
-  your `AGENTS.md`.
+- **Fan-out rules.** `instructions/delivery-fan-out.md` is a short summary
+  (under 250 tokens) of the lead's fan-out rules. A `session.hook("context")` adds
+  it to the system prompt of every primary session whose agent can call
+  `subagent`, but not to subagent sessions or the delivery agents. The text is
+  static, so provider prompt caching keeps working. To manage it yourself, set
+  `fanOut: false` and copy the file into your `AGENTS.md`.
+- **Skill `delivery-fan-out`.** The full rules the summary points at: splitting
+  work into units, batched background dispatch, self-contained briefs, tier
+  routing, one worktree per writer, and verifying once after integration. It sets
+  `metadata: opencode/autoinvoke: false`, so it stays out of the skill listing and
+  loads by id when the summary sends the lead to it.
 - **Skill `delivery-git-workflow`.** Covers PR shipping, the review-loop owner,
   squash titles, external-repository hygiene, merge-method choice, approval
   artifacts, the land/close/cleanup order, and Beads linkage. Load it for PR or
