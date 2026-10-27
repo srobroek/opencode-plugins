@@ -4,6 +4,9 @@ export const SUBAGENT_TOOL = "subagent"
 export const MERGE_TOOL = "subagent_worktree_merge"
 export const LANE_PREFIX = "lane/"
 export const SUBAGENT_PREAMBLE = "You are a subagent spawned by another session."
+export const WORKTREE_PARAM = "worktree"
+export const WORKTREE_PARAM_DESCRIPTION =
+  "Path or branch of an existing worktree of this project to run the subagent in; defaults to your directory."
 
 export const DEFAULT_AGENTS: readonly string[] = ["implementer", "implementer-high", "general"]
 
@@ -63,6 +66,8 @@ export type SubagentInput = {
   prompt: string
   sessionID?: string
   background?: boolean
+  /** An existing worktree (path or branch) to start the subagent in. */
+  worktree?: string
 }
 
 export function readSubagentInput(input: unknown): SubagentInput | undefined {
@@ -76,8 +81,103 @@ export function readSubagentInput(input: unknown): SubagentInput | undefined {
   }
   if (typeof value.sessionID === "string" && value.sessionID !== "") read.sessionID = value.sessionID
   if (value.background === true) read.background = true
+  if (typeof value[WORKTREE_PARAM] === "string" && value[WORKTREE_PARAM].trim() !== "")
+    read.worktree = value[WORKTREE_PARAM].trim()
   return read
 }
+
+/** The `subagent` input without `worktree`, which the built-in tool does not know. */
+export function withoutWorktree(input: unknown): unknown {
+  if (input === null || typeof input !== "object" || Array.isArray(input) || !Object.hasOwn(input, WORKTREE_PARAM))
+    return input
+  const { [WORKTREE_PARAM]: _, ...rest } = input as Record<string, unknown>
+  return rest
+}
+
+/** One checkout from `git worktree list --porcelain`. */
+export type WorktreeEntry = { directory: string; branch?: string }
+
+/** The checkouts in `git worktree list --porcelain` output, skipping bare repositories. */
+export function parseWorktrees(porcelain: string): WorktreeEntry[] {
+  const entries: WorktreeEntry[] = []
+  for (const block of porcelain.split(/\n\s*\n/)) {
+    const lines = block.split("\n").map((line) => line.trim())
+    const directory = lines.find((line) => line.startsWith("worktree "))?.slice("worktree ".length)
+    if (!directory || lines.includes("bare")) continue
+    const ref = lines.find((line) => line.startsWith("branch "))?.slice("branch ".length)
+    entries.push(ref ? { directory, branch: ref.replace(/^refs\/heads\//, "") } : { directory })
+  }
+  return entries
+}
+
+function within(path: string, directory: string): boolean {
+  const root = directory.replace(/\/+$/, "")
+  return path === root || path.startsWith(`${root}/`)
+}
+
+export type WorktreeLookup = { ok: true; worktree: WorktreeEntry } | { ok: false; reason: string }
+
+/** The deepest worktree that contains `path`. */
+export function containingWorktree(path: string, entries: readonly WorktreeEntry[]): WorktreeEntry | undefined {
+  return entries.filter((entry) => within(path, entry.directory)).sort((a, b) => b.directory.length - a.directory.length)[0]
+}
+
+/**
+ * The worktree a `worktree` argument names: a branch checked out in one, a path inside one
+ * (`path`, already resolved and normalized by the caller; the deepest worktree wins), or a
+ * worktree's directory name when only one has it. `entries` is undefined outside git.
+ */
+export function findWorktree(requested: string, path: string | undefined, entries: readonly WorktreeEntry[] | undefined): WorktreeLookup {
+  if (entries === undefined) return { ok: false, reason: `cannot use worktree "${requested}": the caller is not in a git checkout` }
+  const name = requested.replace(/^refs\/heads\//, "")
+  const byBranch = entries.find((entry) => entry.branch === name)
+  if (byBranch) return { ok: true, worktree: byBranch }
+  const byPath = path === undefined ? undefined : containingWorktree(path, entries)
+  if (byPath) return { ok: true, worktree: byPath }
+  const byName = entries.filter((entry) => entry.directory.replace(/\/+$/, "").split("/").pop() === name)
+  if (byName.length === 1 && byName[0]) return { ok: true, worktree: byName[0] }
+  const known = entries.map((entry) => `${entry.directory}${entry.branch ? ` (${entry.branch})` : ""}`).join(", ")
+  return {
+    ok: false,
+    reason: `worktree "${requested}" is not a worktree of this project; pass the path or branch of one of: ${known || "(none)"}`,
+  }
+}
+
+/** Where a new subagent starts. */
+export type StartPlan =
+  | { kind: "default" }
+  | { kind: "isolate"; from: string }
+  | { kind: "move"; worktree: WorktreeEntry }
+  | { kind: "refuse"; reason: string }
+
+/**
+ * Where a subagent call starts. Without `worktree` it is today's behaviour: a fresh
+ * worktree from the caller's checkout when the agent is isolated, else the caller's
+ * directory (child sessions inherit the parent's location). With `worktree`, an isolated
+ * agent gets a fresh worktree branched from that worktree, and any other agent runs in it.
+ */
+export function planStart(facts: {
+  input: SubagentInput
+  isolation: Isolation
+  parentDir: string
+  /** The worktree the caller's directory is in. */
+  current?: string | undefined
+  /** The worktree `input.worktree` names, when it was given. */
+  lookup?: WorktreeLookup
+  /** Whether the host can run the agent as a subagent (known, not primary). */
+  runnable: boolean
+}): StartPlan {
+  const { input, isolation, lookup } = facts
+  if (input.worktree === undefined || lookup === undefined)
+    return isolation.isolate ? { kind: "isolate", from: facts.parentDir } : { kind: "default" }
+  if (!lookup.ok) return { kind: "refuse", reason: lookup.reason }
+  if (!facts.runnable) return { kind: "default" }
+  if (isolation.isolate) return { kind: "isolate", from: lookup.worktree.directory }
+  if (lookup.worktree.directory === facts.current) return { kind: "default" }
+  return { kind: "move", worktree: lookup.worktree }
+}
+
+export const CONTINUE_WITH_WORKTREE = "worktree applies only to new subagents; omit it when passing sessionID"
 
 export type IsolationFacts = {
   tool: string
@@ -161,6 +261,13 @@ export function notice(lane: Pick<Lane, "directory" | "branch" | "base">, fresh:
 export function rewritePrompt(prompt: string, lane: Pick<Lane, "directory" | "branch" | "base">, fresh: boolean): string {
   const text = fresh && prompt.startsWith(SUBAGENT_PREAMBLE) ? prompt.slice(SUBAGENT_PREAMBLE.length).trimStart() : prompt
   return `${notice(lane, fresh)}\n\n${text}`
+}
+
+/** The first prompt of a subagent that runs in an existing worktree. */
+export function startPrompt(prompt: string, worktree: WorktreeEntry): string {
+  const text = prompt.startsWith(SUBAGENT_PREAMBLE) ? prompt.slice(SUBAGENT_PREAMBLE.length).trimStart() : prompt
+  const where = `${worktree.directory}${worktree.branch ? ` (branch ${worktree.branch})` : ""}`
+  return `${SUBAGENT_PREAMBLE}\nYou work in the git worktree ${where}. Run every command and read every file there.\n\n${text}`
 }
 
 export type LaneStatus = { ahead: number; dirty: boolean }

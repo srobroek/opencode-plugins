@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test"
 import {
   annotation,
+  containingWorktree,
   DEFAULT_AGENTS,
   decideIsolation,
   decideMerge,
   diffCommand,
+  findWorktree,
   formatLaneList,
   type IsolationFacts,
   isConflict,
@@ -15,6 +17,8 @@ import {
   orphanReasons,
   overlap,
   parseLane,
+  parseWorktrees,
+  planStart,
   readOptions,
   readSubagentInput,
   rewritePrompt,
@@ -22,7 +26,9 @@ import {
   SUBAGENT_PREAMBLE,
   shouldRemove,
   slug,
+  startPrompt,
   tail,
+  withoutWorktree,
   worktreeForBranch,
   worktreeName,
 } from "./lane.ts"
@@ -57,6 +63,112 @@ describe("readSubagentInput", () => {
     expect(readSubagentInput({ agent: "general", prompt: "p", sessionID: "ses_1" })?.sessionID).toBe("ses_1")
     expect(readSubagentInput({ prompt: "p" })).toBeUndefined()
     expect(readSubagentInput("x")).toBeUndefined()
+    expect(readSubagentInput({ agent: "a", prompt: "p", worktree: " feat/x " })?.worktree).toBe("feat/x")
+    expect(readSubagentInput({ agent: "a", prompt: "p", worktree: " " })?.worktree).toBeUndefined()
+  })
+
+  test("withoutWorktree drops only the worktree argument", () => {
+    const input = { agent: "a", prompt: "p", worktree: "x" }
+    expect(withoutWorktree(input)).toEqual({ agent: "a", prompt: "p" })
+    expect(input.worktree).toBe("x")
+    const plain = { agent: "a", prompt: "p" }
+    expect(withoutWorktree(plain)).toBe(plain)
+  })
+})
+
+const PORCELAIN = [
+  "worktree /repo",
+  "HEAD 0123",
+  "branch refs/heads/main",
+  "",
+  "worktree /repo/.worktrees/feat-x",
+  "HEAD 4567",
+  "branch refs/heads/feat/x",
+  "",
+  "worktree /wt/detached",
+  "HEAD 89ab",
+  "detached",
+  "",
+  "worktree /bare.git",
+  "bare",
+  "",
+].join("\n")
+
+describe("worktree lookup", () => {
+  const entries = parseWorktrees(PORCELAIN)
+
+  test("parses git worktree list, skipping bare repositories", () => {
+    expect(entries).toEqual([
+      { directory: "/repo", branch: "main" },
+      { directory: "/repo/.worktrees/feat-x", branch: "feat/x" },
+      { directory: "/wt/detached" },
+    ])
+  })
+
+  test("finds a worktree by branch, path inside it, or unique directory name", () => {
+    const found = (...args: Parameters<typeof findWorktree>) => {
+      const lookup = findWorktree(...args)
+      return lookup.ok ? lookup.worktree.directory : lookup.reason
+    }
+    expect(found("feat/x", "/cwd/feat/x", entries)).toBe("/repo/.worktrees/feat-x")
+    expect(found("refs/heads/feat/x", undefined, entries)).toBe("/repo/.worktrees/feat-x")
+    expect(found("/repo/.worktrees/feat-x/src", "/repo/.worktrees/feat-x/src", entries)).toBe("/repo/.worktrees/feat-x")
+    expect(found("/repo", "/repo", entries)).toBe("/repo")
+    expect(found("detached", "/cwd/detached", entries)).toBe("/wt/detached")
+  })
+
+  test("rejects anything outside the project", () => {
+    const outside = findWorktree("/elsewhere", "/elsewhere", entries)
+    expect(outside.ok).toBe(false)
+    expect(!outside.ok && outside.reason).toContain("/repo/.worktrees/feat-x (feat/x)")
+    expect(findWorktree("/repository", "/repository", entries).ok).toBe(false)
+    expect(findWorktree("x", "/x", undefined)).toEqual({
+      ok: false,
+      reason: 'cannot use worktree "x": the caller is not in a git checkout',
+    })
+  })
+
+  test("containingWorktree picks the deepest", () => {
+    expect(containingWorktree("/repo/.worktrees/feat-x/a", entries)?.directory).toBe("/repo/.worktrees/feat-x")
+    expect(containingWorktree("/repo/src", entries)?.directory).toBe("/repo")
+    expect(containingWorktree("/other", entries)).toBeUndefined()
+  })
+})
+
+describe("planStart", () => {
+  const feat = { directory: "/wt/feat", branch: "feat" }
+  const isolate = { isolate: true } as const
+  const shared = { isolate: false, reason: "read-only agent (edit denied)" } as const
+  const base = { parentDir: "/repo", current: "/repo", runnable: true }
+  const input = { agent: "explore", description: "d", prompt: "p" }
+  const named = { ...input, worktree: "feat" }
+
+  test("without worktree keeps today's behaviour", () => {
+    expect(planStart({ ...base, input, isolation: isolate })).toEqual({ kind: "isolate", from: "/repo" })
+    expect(planStart({ ...base, input, isolation: shared })).toEqual({ kind: "default" })
+  })
+
+  test("a named worktree: writers branch from it, others run in it", () => {
+    const lookup = { ok: true, worktree: feat } as const
+    expect(planStart({ ...base, input: named, lookup, isolation: isolate })).toEqual({ kind: "isolate", from: "/wt/feat" })
+    expect(planStart({ ...base, input: named, lookup, isolation: shared })).toEqual({ kind: "move", worktree: feat })
+    expect(planStart({ ...base, current: "/wt/feat", input: named, lookup, isolation: shared })).toEqual({ kind: "default" })
+    expect(planStart({ ...base, runnable: false, input: named, lookup, isolation: shared })).toEqual({ kind: "default" })
+  })
+
+  test("refuses a worktree it cannot find", () => {
+    const lookup = { ok: false, reason: "nope" } as const
+    expect(planStart({ ...base, input: named, lookup, isolation: isolate })).toEqual({ kind: "refuse", reason: "nope" })
+  })
+})
+
+describe("startPrompt", () => {
+  test("replaces the preamble with one that names the worktree", () => {
+    const prompt = startPrompt(`${SUBAGENT_PREAMBLE}\nDo it`, { directory: "/wt/feat", branch: "feat" })
+    expect(prompt).toBe(
+      `${SUBAGENT_PREAMBLE}\nYou work in the git worktree /wt/feat (branch feat). Run every command and read every file there.\n\nDo it`,
+    )
+    expect(startPrompt("Do it", { directory: "/wt/d" })).toContain("worktree /wt/d. Run")
   })
 })
 

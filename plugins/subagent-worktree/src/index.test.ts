@@ -7,6 +7,8 @@ import { type Lane, laneKey, MERGE_TOOL, SUBAGENT_PREAMBLE } from "./lane.ts"
 const BASE = "0123456789abcdef0123456789abcdef01234567"
 const PARENT = "ses_parent"
 const REPO = "/repo"
+const OTHER = "/wt/other"
+const OTHER_HEAD = "fedcba9876543210fedcba9876543210fedcba98"
 
 type Repo = {
   git: boolean
@@ -18,6 +20,9 @@ type Repo = {
   laneFiles: string[]
   /** Uncommitted and untracked files in the target checkout, by directory. */
   local: Record<string, { changed: string[]; untracked: string[] }>
+  /** HEAD commit by directory; BASE elsewhere. */
+  heads: Record<string, string>
+  porcelain: string
 }
 
 function fakeRun(repo: Repo, log: string[][]) {
@@ -29,7 +34,7 @@ function fakeRun(repo: Repo, log: string[][]) {
     const [, , dir = "", ...args] = argv
     const cmd = args.join(" ")
     if (cmd === "rev-parse --is-inside-work-tree") return repo.git ? ok("true\n") : fail
-    if (cmd.startsWith("rev-parse --verify")) return ok(`${BASE}\n`)
+    if (cmd.startsWith("rev-parse --verify")) return ok(`${repo.heads[dir] ?? BASE}\n`)
     if (cmd === "symbolic-ref --quiet --short HEAD") {
       const branch = repo.branch[dir]
       return branch ? ok(`${branch}\n`) : fail
@@ -42,7 +47,7 @@ function fakeRun(repo: Repo, log: string[][]) {
     if (cmd.startsWith("rev-list --count")) return ok(`${repo.ahead}\n`)
     if (cmd === "status --porcelain") return ok(repo.dirty ? " M a.txt\n" : "")
     if (cmd.startsWith("branch --quiet -d")) return ok()
-    if (cmd === "worktree list --porcelain") return ok(`worktree ${REPO}\nHEAD ${BASE}\nbranch refs/heads/main\n`)
+    if (cmd === "worktree list --porcelain") return repo.git ? ok(repo.porcelain) : fail
     if (cmd === "diff --name-only -z HEAD") return ok(repo.local[dir]?.changed.map((file) => `${file}\0`).join("") ?? "")
     if (cmd === "ls-files --others --exclude-standard --full-name -z") {
       return ok(repo.local[dir]?.untracked.map((file) => `${file}\0`).join("") ?? "")
@@ -63,7 +68,13 @@ type Setup = {
 }
 
 async function start(
-  options: { opts?: Record<string, unknown>; repo?: Partial<Repo>; assert?: () => void; strategy?: "wt" | "git" } = {},
+  options: {
+    opts?: Record<string, unknown>
+    repo?: Partial<Repo>
+    assert?: () => void
+    strategy?: "wt" | "git"
+    tools?: Array<Record<string, unknown> & { name: string }>
+  } = {},
 ): Promise<Setup> {
   const fake = createFakeContext({
     directory: REPO,
@@ -85,17 +96,21 @@ async function start(
     sessions: [
       { id: PARENT, projectID: "prj", location: { directory: REPO }, model: { id: "m", providerID: "p" } },
       { id: "ses_nested", parentID: PARENT, projectID: "prj", location: { directory: REPO } },
+      { id: "ses_in_other", projectID: "prj", location: { directory: OTHER } },
     ],
     ...(options.assert ? { assert: options.assert } : {}),
+    ...(options.tools ? { tools: options.tools } : {}),
   })
   const repo: Repo = {
     git: true,
-    branch: { [REPO]: "main" },
+    branch: { [REPO]: "main", [OTHER]: "feat" },
     ahead: 0,
     dirty: false,
     merge: { code: 0, stdout: "Merged", stderr: "" },
     laneFiles: ["hello.txt"],
     local: {},
+    heads: { [OTHER]: OTHER_HEAD },
+    porcelain: `worktree ${REPO}\nHEAD ${BASE}\nbranch refs/heads/main\n\nworktree ${OTHER}\nHEAD ${OTHER_HEAD}\nbranch refs/heads/feat\n`,
     ...options.repo,
   }
   const worktree: Setup["worktree"] = { calls: [] }
@@ -131,8 +146,8 @@ const call = (input: Record<string, unknown>, sessionID = PARENT) => ({
 
 const lane = (fake: FakeContext, child = "ses_fake1") => fake.storage.get(laneKey(child)) as Lane | undefined
 
-async function spawn(setup: Setup, input: Record<string, unknown> = {}) {
-  return setup.fake.fire.tool("execute.before", call(input))
+async function spawn(setup: Setup, input: Record<string, unknown> = {}, sessionID = PARENT) {
+  return setup.fake.fire.tool("execute.before", call(input, sessionID))
 }
 
 const completed = (child: string, content = "<subagent>done</subagent>") => ({
@@ -252,6 +267,97 @@ describe("execute.before", () => {
     expect(setup.worktree.calls.map((entry) => entry.method)).toEqual(["create", "remove"])
     expect(setup.fake.calls.some((entry) => entry.method === "session.remove")).toBe(true)
     expect(lane(setup.fake)).toBeUndefined()
+  })
+})
+
+describe("worktree argument", () => {
+  const subagentTool = {
+    name: "subagent",
+    description: "Spawns an agent",
+    input: { type: "object", properties: { agent: { type: "string" } }, required: ["agent"], additionalProperties: false },
+  }
+  const moves = (fake: FakeContext) => fake.calls.filter((entry) => entry.method === "session.move").map((entry) => entry.input)
+
+  test("offers worktree on the subagent tool", async () => {
+    const { fake, cleanup } = await start({ tools: [subagentTool] })
+    const input = fake.tools.get("subagent")?.input as { properties: Record<string, { description: string }>; required: string[] }
+    expect(Object.keys(input.properties)).toEqual(["agent", "worktree"])
+    expect(input.properties.worktree?.description).toStartWith("Path or branch of an existing worktree")
+    expect(input.required).toEqual(["agent"])
+    expect(fake.tools.get("subagent")?.description).toBe("Spawns an agent")
+    await cleanup()
+  })
+
+  test("a read-only agent runs in the named worktree", async () => {
+    const setup = await start()
+    const event = await spawn(setup, { agent: "explore", worktree: OTHER, prompt: `${SUBAGENT_PREAMBLE}\nLook` })
+    expect(setup.worktree.calls).toEqual([])
+    expect(setup.fake.asserts).toEqual([expect.objectContaining({ action: "subagent", resources: ["explore"] })])
+    expect(setup.fake.calls.find((entry) => entry.method === "session.create")?.input).toEqual(
+      expect.objectContaining({ parentID: PARENT, agent: "explore" }),
+    )
+    expect(moves(setup.fake)).toEqual([{ sessionID: "ses_fake1", directory: OTHER }])
+    const input = event.input as Record<string, string>
+    expect(input.worktree).toBeUndefined()
+    expect(input.sessionID).toBe("ses_fake1")
+    expect(input.prompt).toBe(
+      `${SUBAGENT_PREAMBLE}\nYou work in the git worktree ${OTHER} (branch feat). Run every command and read every file there.\n\nLook`,
+    )
+    expect(lane(setup.fake)).toBeUndefined()
+  })
+
+  test("a writer gets a fresh worktree branched from the named worktree's HEAD", async () => {
+    const setup = await start({ opts: { base: "main" } })
+    await spawn(setup, { worktree: "feat" })
+    expect(setup.worktree.calls).toEqual([
+      { method: "create", input: { projectID: "prj", name: "subagent-write-hello-abc123", branch: OTHER_HEAD } },
+    ])
+    expect(lane(setup.fake)).toEqual(
+      expect.objectContaining({ base: OTHER_HEAD, target: "feat", parentDir: OTHER, directory: "/wt/subagent-write-hello-abc123" }),
+    )
+    setup.repo.ahead = 1
+    const tool = setup.fake.tools.get(MERGE_TOOL) as unknown as { execute: (i: unknown, c: unknown) => Promise<unknown> }
+    await tool.execute({ sessionID: "ses_fake1", method: "wt-merge" }, { sessionID: PARENT, agent: "build", messageID: "m", id: "c" })
+    expect(setup.log).toContainEqual(["wt", "-C", "/wt/subagent-write-hello-abc123", "merge", "feat", "--no-squash", "--no-ff", "--yes"])
+  })
+
+  test("a parent already in a worktree: children start there and writers branch from it", async () => {
+    const setup = await start()
+    const original = call({ agent: "explore" }, "ses_in_other")
+    const event = await setup.fake.fire.tool("execute.before", { ...original, input: { ...original.input } })
+    expect(event.input).toEqual(original.input)
+    await spawn(setup, {}, "ses_in_other")
+    expect(setup.worktree.calls[0]?.input).toEqual(expect.objectContaining({ branch: OTHER_HEAD }))
+    expect(lane(setup.fake)).toEqual(expect.objectContaining({ parentDir: OTHER, target: "feat" }))
+  })
+
+  test("naming the caller's own worktree only drops the argument", async () => {
+    const setup = await start()
+    const event = await spawn(setup, { agent: "explore", worktree: "main" })
+    expect(event.input).toEqual(call({ agent: "explore" }).input)
+    expect(setup.fake.calls.some((entry) => entry.method === "session.create")).toBe(false)
+  })
+
+  test.each([
+    ["a path outside the project", { worktree: "/elsewhere" }, {}, "is not a worktree of this project"],
+    ["a non-git caller", { agent: "explore", worktree: OTHER }, { git: false }, "not in a git checkout"],
+    ["a continuation", { sessionID: "ses_other", worktree: OTHER }, {}, "only to new subagents"],
+  ] as const)("refuses %s", async (_name, input, repo, message) => {
+    const setup = await start({ repo })
+    await expect(spawn(setup, input)).rejects.toThrow(message)
+    expect(setup.worktree.calls).toEqual([])
+    expect(setup.fake.calls.some((entry) => entry.method === "session.create")).toBe(false)
+  })
+
+  test("a failed move removes the child session", async () => {
+    const setup = await start()
+    Object.assign(setup.fake.context.session, {
+      move: async () => {
+        throw new Error("move failed")
+      },
+    })
+    await expect(spawn(setup, { agent: "explore", worktree: OTHER })).rejects.toThrow("subagent-worktree: move failed")
+    expect(setup.fake.calls.some((entry) => entry.method === "session.remove")).toBe(true)
   })
 })
 

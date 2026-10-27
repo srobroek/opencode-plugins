@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test"
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
+import { withOptionalString } from "../../lib/src/tool-schema.ts"
+import { WORKTREE_PARAM, WORKTREE_PARAM_DESCRIPTION } from "../../subagent-worktree/src/lane.ts"
 import reference from "./fixtures/reference.json"
 import work from "./fixtures/work-models.json"
 import plugin, { MAX_REREGISTER, type ModelRef, readTiers, spawnTarget } from "./index.ts"
@@ -518,6 +520,33 @@ describe("subagent role parameter", () => {
     host.close()
     await cleanup()
     expect(roleOf(host)).toBeUndefined()
+  })
+
+  test("composes with subagent-worktree's worktree parameter in either load order", async () => {
+    // The same transform subagent-worktree registers on the subagent tool.
+    const worktree = (editor: ToolEditor) =>
+      editor.update("subagent", (tool) => {
+        const input = withOptionalString(tool.input, WORKTREE_PARAM, WORKTREE_PARAM_DESCRIPTION)
+        if (input !== undefined) tool.input = input
+      })
+    for (const order of ["worktree first", "model-roles first"]) {
+      const host = createHost({ agents: [{ id: "general" }], models, options })
+      const tool = host.context.tool as { transform: (callback: (editor: ToolEditor) => void) => Promise<{ dispose: () => Promise<void> }> }
+      const before = order === "worktree first" ? await tool.transform(worktree) : undefined
+      const cleanup = await setup(host)
+      const after = order === "model-roles first" ? await tool.transform(worktree) : undefined
+      const input = host.subagent().input as { properties: Record<string, { enum?: string[] }>; required: string[] }
+      expect({ order, keys: Object.keys(input.properties).sort() }).toEqual({
+        order,
+        keys: ["agent", "model", "prompt", "role", "sessionID", "tier", "worktree"],
+      })
+      expect(input.properties.tier?.enum).toContain("cheap")
+      expect(input.required).toEqual(["agent", "prompt"])
+      expect(host.subagent().description).toContain("Set `tier` on every new spawn")
+      host.close()
+      await cleanup()
+      await (before ?? after)?.dispose()
+    }
   })
 
   test("no tier resolves, no parameter", async () => {

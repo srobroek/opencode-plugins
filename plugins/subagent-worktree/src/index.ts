@@ -1,11 +1,18 @@
+import { realpath } from "node:fs/promises"
+import { homedir } from "node:os"
+import { join, resolve } from "node:path"
 import { Plugin } from "@opencode/plugin"
 import type { Context } from "@opencode/plugin/promise/plugin"
 import { type Result, Error as ToolError } from "@opencode/plugin/promise/tool"
+import { withOptionalString } from "@srobroek/opencode-lib/tool-schema"
 import { createGit, type Git, type Runner, spawnRunner } from "./git.ts"
 import {
   annotation,
+  CONTINUE_WITH_WORKTREE,
+  containingWorktree,
   decideIsolation,
   decideMerge,
+  findWorktree,
   formatLaneList,
   isConflict,
   LANE_PREFIX,
@@ -17,13 +24,20 @@ import {
   mergeArgs,
   type Options,
   parseLane,
+  parseWorktrees,
+  planStart,
   readOptions,
   readSubagentInput,
   rewritePrompt,
   SESSION_LOOKUP_MS,
   SUBAGENT_TOOL,
+  type SubagentInput,
   shouldRemove,
+  startPrompt,
   tail,
+  WORKTREE_PARAM,
+  WORKTREE_PARAM_DESCRIPTION,
+  withoutWorktree,
   worktreeForBranch,
   worktreeName,
 } from "./lane.ts"
@@ -70,6 +84,9 @@ type AgentInfo = { id: string; name?: string; mode?: string; model?: Session["mo
 export type Overrides = { run?: Runner; suffix?: () => string; lookupMs?: number }
 
 const randomSuffix = () => crypto.randomUUID().slice(0, 6)
+
+/** The real path, or the resolved one when it does not exist. */
+const normalize = (path: string) => realpath(path).catch(() => resolve(path))
 
 function appendContent(content: Result["content"], note: string): Result["content"] {
   if (content === undefined) return note
@@ -121,15 +138,14 @@ export function createLanes(
     await ctx.worktree.remove({ projectID, directory, force } as never)
   }
 
-  /** Create a worktree from the caller's checkout; the caller cleans it up if a later step fails. */
-  const provision = async (parent: Session, description: string) => {
-    const parentDir = parent.location.directory
-    const base = await git.commit(parentDir, options.base)
-    if (!base) throw new Error(`subagent-worktree: cannot resolve base ${options.base} in ${parentDir}`)
+  /** Create a worktree from `from` (the caller's checkout, or the worktree it named); the caller cleans it up if a later step fails. */
+  const provision = async (parent: Session, description: string, from = parent.location.directory, named = false) => {
+    const parentDir = from
+    const ref = named ? "HEAD" : options.base
+    const base = await git.commit(parentDir, ref)
+    if (!base) throw new Error(`subagent-worktree: cannot resolve base ${ref} in ${parentDir}`)
     const target =
-      options.base !== "HEAD" && (await git.isLocalBranch(parentDir, options.base))
-        ? options.base
-        : await git.branch(parentDir)
+      ref !== "HEAD" && (await git.isLocalBranch(parentDir, ref)) ? ref : await git.branch(parentDir)
     const name = worktreeName(description, suffix())
     const created = await ctx.worktree.create({ projectID: parent.projectID, name, branch: base } as never)
     const directory = (created as { directory: string }).directory
@@ -147,6 +163,32 @@ export function createLanes(
     }
   }
 
+  const createChild = async (event: { sessionID: string }, input: SubagentInput, agent: AgentInfo, parent: Session) => {
+    const model = agent.model ?? parent.model
+    const created = await ctx.session.create({
+      parentID: event.sessionID,
+      title: input.description,
+      agent: agent.id,
+      ...(model ? { model } : {}),
+    } as never)
+    return (created as unknown as Session).id
+  }
+
+  /** The worktrees of the caller's repository, the one its directory is in, and the one `requested` names. */
+  const locate = async (parentDir: string, requested: string) => {
+    const porcelain = await git.worktrees(parentDir)
+    const entries =
+      porcelain === undefined
+        ? undefined
+        : await Promise.all(
+            parseWorktrees(porcelain).map(async (entry) => ({ ...entry, directory: await normalize(entry.directory) })),
+          )
+    const raw = requested.startsWith("~/") ? join(homedir(), requested.slice(2)) : requested
+    const path = await normalize(resolve(parentDir, raw))
+    const current = entries && containingWorktree(await normalize(parentDir), entries)?.directory
+    return { lookup: findWorktree(requested, path, entries), current }
+  }
+
   const before = async (event: {
     tool: string
     sessionID: string
@@ -158,33 +200,54 @@ export function createLanes(
     if (event.tool !== SUBAGENT_TOOL) return
     const input = readSubagentInput(event.input)
     if (!input) return
-    if (input.sessionID !== undefined) return revive(event, input.sessionID, input.prompt)
+    event.input = withoutWorktree(event.input)
+    if (input.sessionID !== undefined) {
+      if (input.worktree !== undefined) throw new Error(`subagent-worktree: ${CONTINUE_WITH_WORKTREE}`)
+      return revive(event, input.sessionID, input.prompt)
+    }
 
     const parent = await getSession(event.sessionID)
     if (!parent) return
-    const agent = await getAgent(input.agent, parent.location.directory)
-    const decision = decideIsolation({
+    const parentDir = parent.location.directory
+    const agent = await getAgent(input.agent, parentDir)
+    const start = input.worktree === undefined ? undefined : await locate(parentDir, input.worktree)
+    const isolation = decideIsolation({
       tool: event.tool,
       input,
       options,
       agent,
       callerIsChild: Boolean(parent.parentID),
-      isGit: await git.isWorkTree(parent.location.directory),
+      isGit: start ? start.lookup.ok : await git.isWorkTree(parentDir),
     })
-    if (!decision.isolate || !agent) return
+    const plan = planStart({
+      input,
+      isolation,
+      parentDir,
+      current: start?.current,
+      ...(start ? { lookup: start.lookup } : {}),
+      runnable: agent !== undefined && agent.mode !== "primary",
+    })
+    if (plan.kind === "refuse") throw new Error(`subagent-worktree: ${plan.reason}`)
+    if (plan.kind === "default" || !agent) return
 
     await assertSubagent(event, agent.id)
-    const worktree = await provision(parent, input.description || input.agent)
+    if (plan.kind === "move") {
+      let child: string | undefined
+      try {
+        child = await createChild(event, input, agent, parent)
+        await ctx.session.move({ sessionID: child, directory: plan.worktree.directory } as never)
+        event.input = { ...(event.input as object), sessionID: child, prompt: startPrompt(input.prompt, plan.worktree) }
+      } catch (error) {
+        if (child) await ctx.session.remove({ sessionID: child } as never).catch(() => {})
+        throw new Error(`subagent-worktree: ${errorMessage(error)}`)
+      }
+      return
+    }
+
+    const worktree = await provision(parent, input.description || input.agent, plan.from, input.worktree !== undefined)
     let child: string | undefined
     try {
-      const model = agent.model ?? parent.model
-      const created = await ctx.session.create({
-        parentID: event.sessionID,
-        title: input.description,
-        agent: agent.id,
-        ...(model ? { model } : {}),
-      } as never)
-      child = (created as unknown as Session).id
+      child = await createChild(event, input, agent, parent)
       await ctx.session.move({ sessionID: child, directory: worktree.directory } as never)
       const lane: Lane = {
         child,
@@ -428,6 +491,14 @@ export function createPlugin(overrides: Overrides = {}) {
               description: MERGE_DESCRIPTION,
               input: MERGE_INPUT,
               execute: async (raw, tool) => lanes.merge(raw as MergeInput, tool),
+            })
+          }),
+        )
+        registrations.push(
+          await ctx.tool.transform((editor) => {
+            editor.update(SUBAGENT_TOOL, (tool) => {
+              const input = withOptionalString(tool.input, WORKTREE_PARAM, WORKTREE_PARAM_DESCRIPTION)
+              if (input !== undefined) tool.input = input as typeof tool.input
             })
           }),
         )
