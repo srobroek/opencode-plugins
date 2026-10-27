@@ -114,6 +114,9 @@ permissions:
     resource: quality-code-policy
     effect: allow
   - action: skill
+    resource: quality-testing
+    effect: allow
+  - action: skill
     resource: shell-language
     effect: allow
   - action: skill
@@ -121,6 +124,9 @@ permissions:
     effect: allow
   - action: skill
     resource: backend-background-jobs
+    effect: allow
+  - action: skill
+    resource: ci-github-actions
     effect: allow
   - action: skill
     resource: coexistence-worktree

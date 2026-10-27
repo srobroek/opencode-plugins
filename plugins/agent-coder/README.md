@@ -49,8 +49,8 @@ from the listing and only load by id through it:
 | --- | --- |
 | `languages` | router `language-quality`; `go-quality`, `python-quality`, `typescript-quality` |
 | `rust` | router `rust-guide`; `rust-ci`, `rust-contract-boundary`, `rust-crate-boundaries`, `rust-domain-modeling`, `rust-persistence`, `rust-quality`, `rust-safe-mutation`, `rust-tauri`, `rust-workspace` |
-| `quality` | `quality-code-design` (debugging, TDD), `quality-code-policy` |
-| `toolchain` | router `toolchain-guide`; `shell-language`, `terraform-language`, `backend-background-jobs`, `coexistence-worktree`, `infrastructure-tfstate-guard`, `ops-no-global-cargo-target`, `ops-toolchain-cache-policy`, `toolchain-asset-ownership`, `toolchain-frontend`, `toolchain-infrastructure`, `toolchain-languages`, `toolchain-quality-observability`, `toolchain-stack-defaults` |
+| `quality` | `quality-code-design` (debugging, TDD), `quality-code-policy`, `quality-testing` |
+| `toolchain` | router `toolchain-guide`; `shell-language`, `terraform-language`, `backend-background-jobs`, `ci-github-actions`, `coexistence-worktree`, `infrastructure-tfstate-guard`, `ops-no-global-cargo-target`, `ops-toolchain-cache-policy`, `toolchain-asset-ownership`, `toolchain-frontend`, `toolchain-infrastructure`, `toolchain-languages`, `toolchain-quality-observability`, `toolchain-stack-defaults` |
 | `architecture` | router `architecture-guide`; `architecture-docs-files`, `architecture-ownership`, `architecture-top-level` |
 | `dep-update`, `whats-new` | `dep-update`, `whats-new` |
 | `trunk-dev`, `worktrunk` | router `trunk-dev-guide`; `trunk-dev-feature-flags`, `worktrunk-worktrees` |
