@@ -296,7 +296,9 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
     if (advisories.length > 0) event.result = appendResultText(result, advisories.join("\n\n"))
   })
 
-  const context = await ctx.session.hook("context", async (event) => {
+  // Compaction and generate requests get the same system prompt as the session's turns, so
+  // they reuse the turns' prompt cache instead of rewriting the whole conversation.
+  const primeHook = async (event: { sessionID: string; system: Array<{ type: "text"; text: string }> }) => {
     if (!on("beads-prime") && !on("beads-session-advisories")) return
     const key = `prime/${event.sessionID}`
     const text = await queue(key, async () => {
@@ -318,7 +320,10 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
       return fresh
     })
     if (text !== "") event.system.push({ type: "text", text })
-  })
+  }
+  const context = await ctx.session.hook("context", primeHook)
+  const compaction = await ctx.session.hook("compaction", primeHook)
+  const generate = await ctx.session.hook("generate", primeHook)
 
   const promptHook = await ctx.session.hook("prompt", async (event) => {
     await lifecycle.prompt(event.sessionID, event.metadata)
@@ -351,6 +356,8 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
     heartbeats.dispose()
     await skills?.dispose()
     await promptHook.dispose()
+    await generate.dispose()
+    await compaction.dispose()
     await context.dispose()
     await after.dispose()
     await pin.dispose()
