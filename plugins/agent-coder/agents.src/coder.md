@@ -60,6 +60,9 @@ permissions:
     resource: "lang-*"
     effect: allow
   - action: skill
+    resource: "ast-grep-*"
+    effect: allow
+  - action: skill
     resource: "quality-*"
     effect: allow
   - action: skill
