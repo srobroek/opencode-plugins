@@ -79,6 +79,10 @@ message it sends is a `session.synthetic` with `metadata.source: "srobroek.beads
 
 ## Skills
 
+Only `beads-guide` is listed to the model in OpenCode: it is a router whose body maps each
+situation to the other beads skills, which set `opencode/autoinvoke: false` and load by id. One listing
+entry instead of one per skill keeps the per-request skills listing short.
+
 Registered through `ctx.skill.transform` from `skills/` (a user skill of the same
 name wins): `beads-ledger`, `beads-evidence`, `beads-setup`,
 `beads-contention-retry` and `beads-preflight` (a read-only `preflight.py`). They are

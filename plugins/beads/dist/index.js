@@ -5221,7 +5221,8 @@ var SKILL_NAMES = [
   "beads-evidence",
   "beads-setup",
   "beads-contention-retry",
-  "beads-preflight"
+  "beads-preflight",
+  "beads-guide"
 ];
 var SKILLS_DIRECTORY = join6(import.meta.dir, "..", "skills");
 var PIN_CACHE_MS = 5000;
