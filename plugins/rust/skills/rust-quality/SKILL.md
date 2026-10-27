@@ -1,6 +1,8 @@
 ---
 name: rust-quality
 description: Use to run Rust format, lint, and test checks with the project toolchain.
+metadata:
+  opencode/autoinvoke: false
 ---
 
 # Rust Quality

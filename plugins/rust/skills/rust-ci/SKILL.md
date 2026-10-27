@@ -1,6 +1,8 @@
 ---
 name: rust-ci
 description: Use when authoring Rust GitHub Actions CI, rust-cache keys, required-check gates, or supply-chain attestation.
+metadata:
+  opencode/autoinvoke: false
 ---
 
 # Rust CI Defaults (GitHub Actions)

@@ -1,6 +1,8 @@
 ---
 name: rust-persistence
 description: Use for Rust SQLite/sqlx repositories, numbered migrations, CAS-in-transaction updates or embed-macro rebuilds.
+metadata:
+  opencode/autoinvoke: false
 ---
 
 # Rust Persistence Defaults
