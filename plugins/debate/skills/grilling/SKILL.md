@@ -74,9 +74,9 @@ Write each frontier question once, with:
 
 Deliver the round through the first channel that works, and stay on it for the session:
 
-1. **parley**: when the `parley_ask` tool is available, call it once with the whole round
-   (`round` set to the round number, `title` to the plan; at most 12 questions, so ask
-   the most fundamental first). It blocks until the user submits and returns answers
+1. **parley**: when the `parley_ask` tool is available (in Code Mode, `tools.parley_ask`),
+   call it once with the whole round (`round` set to the round number, `title` to the
+   plan; at most 12 questions, so ask the most fundamental first). It blocks until the user submits and returns answers
    keyed by `id`:
    - `answered` or `accepted` (took your recommendation): settle the node; keep any `note`.
    - `noted`: the user commented without choosing. Read the note; usually the node

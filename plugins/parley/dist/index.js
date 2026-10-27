@@ -606,31 +606,31 @@ var option = {
   type: "object",
   required: ["id", "label"],
   properties: {
-    id: { type: "string", description: "Stable option id, e.g. sqlite" },
+    id: { type: "string" },
     label: { type: "string" },
     description: { type: "string" },
-    pros: { type: "array", items: { type: "string" }, description: "show_options only" },
-    cons: { type: "array", items: { type: "string" }, description: "show_options only" }
+    pros: { type: "array", items: { type: "string" } },
+    cons: { type: "array", items: { type: "string" } }
   }
 };
 var questionSchema = {
   type: "object",
   required: ["id", "title", "kind"],
   properties: {
-    id: { type: "string", description: "Stable id (e.g. a design-tree node such as auth.storage); answers are keyed by it" },
-    title: { type: "string", description: "Short title" },
+    id: { type: "string", description: "Stable id, e.g. a design-tree node; answers are keyed by it" },
+    title: { type: "string" },
     kind: { type: "string", enum: [...KINDS] },
-    body: { type: "string", description: "Markdown body" },
-    rationale: { type: "string", description: "Why you recommend the recommended answer" },
+    body: { type: "string", description: "Markdown" },
+    rationale: { type: "string", description: "One line on why you recommend it" },
     recommended: {
-      description: "Recommended answer, preselected in the UI. pick_one/show_options: option id; pick_many/rank: option ids; confirm: yes|no; thumbs: up|down; slider: number; rate: {optionId: number}; ask_text/ask_code: text; review/show_diff: approve|revise; emoji_react: emoji"
+      description: "Preselected: option id (ids for pick_many/rank), yes|no, up|down, number, {optionId: number} for rate, text, approve|revise, or an emoji"
     },
-    options: { type: "array", items: option, description: "pick_one, show_options, pick_many, rank, rate" },
-    allow_other: { type: "boolean", description: "pick_one (default true), pick_many (default false)" },
-    allow_defer: { type: "boolean", description: "Default true" },
-    depends_on: { type: "array", items: { type: "string" }, description: "Display only" },
-    min: { type: "number", description: "slider/rate bounds; pick_many minimum selections" },
-    max: { type: "number", description: "slider/rate bounds; pick_many maximum selections" },
+    options: { type: "array", items: option },
+    allow_other: { type: "boolean" },
+    allow_defer: { type: "boolean" },
+    depends_on: { type: "array", items: { type: "string" } },
+    min: { type: "number", description: "slider/rate bound; pick_many minimum" },
+    max: { type: "number", description: "slider/rate bound; pick_many maximum" },
     step: { type: "number" },
     unit: { type: "string" },
     labels: {
@@ -641,38 +641,38 @@ var questionSchema = {
     no_label: { type: "string" },
     placeholder: { type: "string" },
     multiline: { type: "boolean" },
-    markdown: { type: "string", description: "review: the plan or summary to approve" },
+    markdown: { type: "string", description: "review: the plan to approve" },
     sections: {
       type: "array",
-      description: "review: sections of the plan",
+      description: "review",
       items: {
         type: "object",
         required: ["id", "title", "content"],
         properties: { id: { type: "string" }, title: { type: "string" }, content: { type: "string" } }
       }
     },
-    diff: { type: "string", description: "show_diff: unified diff text" },
-    language: { type: "string", description: "ask_code / show_diff file type" },
-    emojis: { type: "array", items: { type: "string" }, description: "emoji_react choices" },
-    multiple: { type: "boolean", description: "ask_image/ask_file: allow several files" },
-    accept: { type: "array", items: { type: "string" }, description: "ask_file: allowed extensions" }
+    diff: { type: "string", description: "show_diff: unified diff" },
+    language: { type: "string", description: "ask_code/show_diff" },
+    emojis: { type: "array", items: { type: "string" } },
+    multiple: { type: "boolean", description: "ask_image/ask_file" },
+    accept: { type: "array", items: { type: "string" }, description: "ask_file extensions" }
   }
 };
 var askInput = {
   type: "object",
   required: ["questions"],
   properties: {
-    title: { type: "string", description: "Shown at the top of the round, e.g. the plan being discussed" },
-    round: { type: "integer", minimum: 1, description: "Round number to display" },
+    title: { type: "string", description: "Shown above the round, e.g. the plan" },
+    round: { type: "integer", minimum: 1 },
     wait: {
       type: "string",
       enum: ["all", "any", "none"],
-      description: "all (default): block until the round is submitted; any: until the first answer; none: return at once"
+      description: "all (default): until submitted; any: first answer; none: return at once"
     },
     timeout_s: {
       type: "integer",
       minimum: 0,
-      description: "Default 1800. 0 waits without limit. On timeout, call parley_wait"
+      description: "Default 1800; 0 waits without limit"
     },
     questions: { type: "array", minItems: 1, maxItems: MAX_QUESTIONS, items: questionSchema }
   }
@@ -681,7 +681,7 @@ var waitInput = {
   type: "object",
   properties: {
     wait: { type: "string", enum: ["all", "any"] },
-    ids: { type: "array", items: { type: "string" }, description: "Only these question ids" },
+    ids: { type: "array", items: { type: "string" } },
     timeout_s: { type: "integer", minimum: 0 }
   }
 };
@@ -1259,12 +1259,10 @@ class Parley {
 
 // plugins/parley/src/index.ts
 var ASK_DESCRIPTION = `Ask the user one round of questions in the parley panel and wait for the answers.
-
-Send every question you can ask now (questions whose prerequisites are settled) in one call. Each question has a stable \`id\`, a short \`title\`, a markdown \`body\`, a \`kind\`, your \`recommended\` answer and a one-line \`rationale\`. Kinds: pick_one, show_options (options with pros/cons), pick_many, confirm, rank, slider, ask_text, review, rate, thumbs, emoji_react, show_diff, ask_code, ask_image, ask_file.
-
-Answers come back keyed by id with status answered, accepted (took your recommendation), noted (comment only) or deferred (keep it open). Ids still unanswered are listed in \`pending\`.
-If the result status is \`unavailable\`, no parley UI is attached: ask with the question tool or in chat for the rest of the session. On \`timeout\`, call parley_wait.`;
-var options = { codemode: false, permission: "parley" };
+Send every question whose prerequisites are settled in one call, each with your recommended answer and rationale.
+Answers are keyed by id: answered, accepted (took your recommendation), noted (comment only) or deferred; unanswered ids are in pending.
+Status unavailable: no parley UI, so use the question tool or chat for the rest of the session. On timeout, call parley_wait.`;
+var options = { permission: "parley" };
 function saveUpload(file) {
   if (file.data === undefined)
     return;
@@ -1318,7 +1316,7 @@ var src_default = Plugin.define({
       });
       editor.add({
         name: "parley_wait",
-        description: "Keep waiting for answers to this session's open parley round (after a timeout or wait:none/any). Returns only answers not returned before.",
+        description: "Keep waiting on this session's open parley round after a timeout or wait none/any; returns only new answers.",
         input: waitInput,
         output: resultOutput,
         options,

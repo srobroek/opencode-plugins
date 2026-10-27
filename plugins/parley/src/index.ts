@@ -11,13 +11,11 @@ import { type AskInput, type CallContext, InputError, Parley, settingsFrom, type
 export { ParleyRpc } from "./rpc.ts"
 
 const ASK_DESCRIPTION = `Ask the user one round of questions in the parley panel and wait for the answers.
+Send every question whose prerequisites are settled in one call, each with your recommended answer and rationale.
+Answers are keyed by id: answered, accepted (took your recommendation), noted (comment only) or deferred; unanswered ids are in pending.
+Status unavailable: no parley UI, so use the question tool or chat for the rest of the session. On timeout, call parley_wait.`
 
-Send every question you can ask now (questions whose prerequisites are settled) in one call. Each question has a stable \`id\`, a short \`title\`, a markdown \`body\`, a \`kind\`, your \`recommended\` answer and a one-line \`rationale\`. Kinds: pick_one, show_options (options with pros/cons), pick_many, confirm, rank, slider, ask_text, review, rate, thumbs, emoji_react, show_diff, ask_code, ask_image, ask_file.
-
-Answers come back keyed by id with status answered, accepted (took your recommendation), noted (comment only) or deferred (keep it open). Ids still unanswered are listed in \`pending\`.
-If the result status is \`unavailable\`, no parley UI is attached: ask with the question tool or in chat for the rest of the session. On \`timeout\`, call parley_wait.`
-
-const options = { codemode: false, permission: "parley" } as const
+const options = { permission: "parley" } as const
 
 function saveUpload(file: FileValue) {
   if (file.data === undefined) return undefined
@@ -76,7 +74,7 @@ export default Plugin.define({
       editor.add({
         name: "parley_wait",
         description:
-          "Keep waiting for answers to this session's open parley round (after a timeout or wait:none/any). Returns only answers not returned before.",
+          "Keep waiting on this session's open parley round after a timeout or wait none/any; returns only new answers.",
         input: waitInput,
         output: resultOutput,
         options,
