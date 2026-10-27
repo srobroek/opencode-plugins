@@ -120,29 +120,37 @@ function ledger(rows: Record<string, Row> = {}) {
   return { run, calls, rows }
 }
 
-async function start(sessions: Array<{ id: string; parentID?: string }>, deps: AdapterDeps = {}, options = {}) {
+async function start(sessions: Array<{ id: string; parentID?: string }>, deps: AdapterDeps = {}, options: { gates?: Record<string, boolean> } = {}) {
   const directory = mkdtempSync(join(Bun.env.TMPDIR ?? "/tmp", "beads-lifecycle-"))
   roots.push(directory)
-  const fake = createFakeContext({ directory, sessions, options })
+  // Lifecycle cases do not exercise Git-hook discovery; avoid native Git probes.
+  const fake = createFakeContext({ directory, sessions, options: { ...options, gates: { "binary-git-hooks": false, ...options.gates } } })
   const detached: Array<Promise<unknown>> = []
+  const waiters = new Map<string, () => void>()
   const clock = new FakeClock()
   const cleanup = await setupBeads(fake.context, {
     env: { PATH: process.env.PATH, HOME: process.env.HOME } as NodeJS.ProcessEnv,
     pinFor: () => undefined,
     clock,
     detach: (task) => void detached.push(task),
+    eventHandled: (event) => {
+      const id = (event as { id: string }).id
+      waiters.get(id)?.()
+      waiters.delete(id)
+    },
     ...deps,
   })
   const settle = async () => {
-    for (let i = 0; i < 5; i++) {
-      await new Promise((resolve) => setTimeout(resolve, 1))
-      await Promise.all(detached.splice(0))
-    }
+    while (detached.length) await Promise.all(detached.splice(0))
   }
   let event = 0
-  const emit = async (type: string, sessionID: string, data: Record<string, unknown> = {}) => {
-    fake.emit({ id: `evt_${unique}_${++event}`, type, data: { sessionID, ...data } })
-    await settle()
+  const emit = async (type: string, sessionID: string, data: Record<string, unknown> = {}, drain = true) => {
+    const id = `evt_${unique}_${++event}`
+    const ack = Promise.withResolvers<void>()
+    waiters.set(id, ack.resolve)
+    fake.emit({ id, type, data: { sessionID, ...data } })
+    await ack.promise
+    if (drain) await settle()
   }
   const shell = async (sessionID: string, command: string, output: string, id = `call_${++event}`) => {
     const before = { tool: "shell", sessionID, agent: "general", messageID: "msg_1", id, input: { command } }
@@ -246,15 +254,22 @@ describe("stop nudge and release in a root session", () => {
     const bd = ledger()
     const directory = mkdtempSync(join(Bun.env.TMPDIR ?? "/tmp", "beads-lifecycle-"))
     roots.push(directory)
-    const fake = createFakeContext({ directory, sessions: [{ id: root }] })
-    const deps = { env: {}, pinFor: () => undefined, run: bd.run, clock: new FakeClock() }
+    const fake = createFakeContext({ directory, sessions: [{ id: root }], options: { gates: { "binary-git-hooks": false } } })
+    const ack = Promise.withResolvers<void>()
+    let handled = 0
+    const deps = {
+      env: {}, pinFor: () => undefined, run: bd.run, clock: new FakeClock(),
+      eventHandled: () => {
+        if (++handled === 2) ack.resolve()
+      },
+    }
     const one = await setupBeads(fake.context, deps)
     const two = await setupBeads(fake.context, deps)
     const before = { tool: "shell", sessionID: root, agent: "general", messageID: "m", id: "c1", input: { command: "BEADS_ACTOR=me/main bd update proj-1 --claim" } }
     await fake.fire.tool("execute.before", before)
     await fake.fire.tool("execute.after", { ...before, status: "completed", result: { content: "✓ Claimed proj-1", output: { exit: 0, output: "✓ Claimed proj-1" }, metadata: { exit: 0 } } })
     fake.emit({ id: `evt_dup_${++unique}`, type: "session.execution.succeeded", data: { sessionID: root } })
-    await new Promise((resolve) => setTimeout(resolve, 20))
+    await ack.promise
     expect(fake.calls.filter((call) => call.method === "session.synthetic")).toHaveLength(1)
     await one()
     await two()
@@ -288,8 +303,13 @@ describe("subagent claim release", () => {
     const parent = sid("parent")
     const child = sid("child")
     const bd = ledger({ "proj-6": { status: "in_progress", assignee: `opencode/${parent}/general/${child}` } })
+    const showEntered = Promise.withResolvers<void>()
+    const allowShow = Promise.withResolvers<void>()
     const run: BdRun = async (cwd, args, deadline, env) => {
-      if (args[0] === "show") await new Promise((resolve) => setTimeout(resolve, 30))
+      if (args[0] === "show") {
+        showEntered.resolve()
+        await allowShow.promise
+      }
       return bd.run(cwd, args, deadline, env)
     }
     const t = await start([{ id: parent }, { id: child, parentID: parent }], { run })
@@ -301,7 +321,9 @@ describe("subagent claim release", () => {
       status: "completed" as const,
       result: { content: "done", metadata: { sessionID: child, status: "completed" } },
     })
-    await t.emit("session.execution.succeeded", child)
+    await showEntered.promise
+    await t.emit("session.execution.succeeded", child, {}, false)
+    allowShow.resolve()
     expect(String((await after).result.content)).toContain("released (guarded bd unclaim): proj-6")
     await t.settle()
     expect(t.synthetics()).toEqual([])
@@ -451,7 +473,7 @@ describe("session start", () => {
           return "Beads appears to have modified a binary Git hook."
         },
       },
-    })
+    }, { gates: { "binary-git-hooks": true } })
     const request = (sessionID: string) => ({ sessionID, agent: "general", system: [] as Array<{ text: string }> })
     const one = await t.fake.fire.session("context", request(root))
     const two = await t.fake.fire.session("context", request(root))

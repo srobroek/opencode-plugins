@@ -132,6 +132,12 @@ export function setPreflightWaitForTests(waitMs?: number): void {
 let leaseMs = LEASE_MS
 let renewMs = RENEW_MS
 let nextToken = 0
+let identityForTests: ((pid: number) => string | undefined) | undefined
+
+/** Inject process identity observations; omit to restore the operating-system lookup. */
+export function setProcessStartIdentityForTests(identity?: (pid: number) => string | undefined): void {
+  identityForTests = identity
+}
 
 /**
  * Shorten the lease so a test can outlast it without waiting two minutes.
@@ -171,6 +177,7 @@ export function parseLinuxStatStartIdentity(stat: string): string | undefined {
 }
 
 export function processStartIdentity(pid: number): string | undefined {
+  if (identityForTests !== undefined) return identityForTests(pid)
   try {
     if (process.platform === "linux") {
       // Linux exposes a monotonic process start tick in field 22 of stat.

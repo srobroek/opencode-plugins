@@ -1746,6 +1746,7 @@ function preflightWaitMs() {
 var leaseMs = LEASE_MS;
 var renewMs = RENEW_MS;
 var nextToken = 0;
+var identityForTests;
 var HOST = hostname().split(".")[0] ?? "localhost";
 function pidAlive(pid) {
   try {
@@ -1764,6 +1765,8 @@ function parseLinuxStatStartIdentity(stat) {
   return start !== undefined && start !== "" ? start : undefined;
 }
 function processStartIdentity(pid) {
+  if (identityForTests !== undefined)
+    return identityForTests(pid);
   try {
     if (process.platform === "linux") {
       const stat = readFileSync(`/proc/${pid}/stat`, "utf8");

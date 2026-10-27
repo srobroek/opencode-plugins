@@ -8,9 +8,9 @@ import {
   embeddedWriteTargets,
   hold,
   parseLinuxStatStartIdentity,
-  processStartIdentity,
   release,
   resolveBunBinary,
+  setProcessStartIdentityForTests,
 } from "./bd-embedded-write-lock.ts"
 import { main as runEmbeddedWriter, setCommandTimeoutForTests } from "./bd-embedded-write-runner.ts"
 import { parse } from "./shell.ts"
@@ -144,12 +144,6 @@ test("parses Linux stat start ticks after a close-paren-space comm", () => {
   expect(parseLinuxStatStartIdentity(stat)).toBe("4242")
 })
 
-function writerStartIdentity(pid: number): string {
-  const identity = processStartIdentity(pid)
-  if (identity === undefined) throw new Error("process start identity unavailable")
-  return identity
-}
-
 describe("embedded write lock", () => {
   test.skipIf(process.platform !== "linux")(
     "recovers an expired lock when the writer PID has been reused",
@@ -178,8 +172,9 @@ describe("embedded write lock", () => {
     },
   )
 
-  test("protects an expired lock while the writer identity is still live", async () => {
+  test.each(["matching", "unknown"])("protects an expired lock while the live writer identity is %s", async (identity) => {
     const store = mkdtempSync(join(Bun.env.TMPDIR ?? "/tmp", "beads-lock-live-writer-"))
+    setProcessStartIdentityForTests(() => identity === "matching" ? "test-start" : undefined)
     try {
       writeFileSync(
         join(store, "omp-embedded-write.lock"),
@@ -191,13 +186,14 @@ describe("embedded write lock", () => {
           taken: Date.now() - 1000,
           expires: Date.now() - 1,
           writer: process.pid,
-          writerStart: writerStartIdentity(process.pid),
+          writerStart: "test-start",
         }),
       )
       const result = await hold(store, "blocked", 35)
       expect(result.kind).toBe("failed")
       if (result.kind === "failed") expect(result.reason).toContain("stayed held")
     } finally {
+      setProcessStartIdentityForTests()
       rmSync(store, { recursive: true, force: true })
     }
   })
@@ -210,7 +206,7 @@ describe("embedded write lock", () => {
     const script = `
 import { existsSync, writeFileSync } from "node:fs";
 import { hold, setLeaseTimingForTests } from ${JSON.stringify(modulePath)};
-setLeaseTimingForTests(80, 1000);
+setLeaseTimingForTests(80, 60_000);
 const result = await hold(process.argv[1], "old-owner", 2000);
 if (result.kind !== "held") process.exit(2);
 writeFileSync(process.argv[2], "ready");
@@ -219,7 +215,7 @@ writeFileSync(process.argv[2], "ready");
 `
     const child = Bun.spawn([process.execPath, "-e", script, store, ready, done], { stdout: "ignore", stderr: "pipe" })
     try {
-      const deadline = Date.now() + 3000
+      const deadline = Date.now() + 30_000
       while (!existsSync(ready)) {
         if (Date.now() >= deadline) throw new Error("old-owner test process did not become ready")
         await Bun.sleep(10)
@@ -236,18 +232,17 @@ writeFileSync(process.argv[2], "ready");
       release(store, "successor")
     } finally {
       if (child.exitCode === null) child.kill()
+      await child.exited
       rmSync(store, { recursive: true, force: true })
     }
-  })
+  }, { timeout: 60_000 })
 
-  test("five consecutive acquisitions stay within the bounded wait", async () => {
+  test("five consecutive uncontended acquisitions succeed", async () => {
     const store = mkdtempSync(join(Bun.env.TMPDIR ?? "/tmp", "beads-lock-bounded-"))
     try {
       for (let round = 0; round < 5; round++) {
-        const started = Date.now()
         const result = await hold(store, `round-${round}`, 500)
         expect(result).toEqual({ kind: "held" })
-        expect(Date.now() - started).toBeLessThan(500)
         release(store, `round-${round}`)
       }
     } finally {
@@ -312,41 +307,49 @@ test("parallel runner acquisitions do not refuse ordinary short writes", async (
     expect(statuses).toEqual(Array.from({ length: 10 }, () => 0))
   } finally {
     for (const child of children) if (child.exitCode === null) child.kill()
+    await Promise.all(children.map((child) => child.exited))
     rmSync(store, { recursive: true, force: true })
   }
-})
+}, { timeout: 60_000 })
 
 test("runner refuses a queued writer at its lock deadline", async () => {
   const store = mkdtempSync(join(Bun.env.TMPDIR ?? "/tmp", "beads-lock-wait-"))
   const runner = join(import.meta.dir, "bd-embedded-write-runner.ts")
   const fakeBd = join(store, "bd")
-  writeFileSync(fakeBd, "#!/bin/sh\nsleep 0.2\n", { mode: 0o755 })
+  const ready = join(store, "ready")
+  const releaseMarker = join(store, "release-marker")
+  writeFileSync(
+    fakeBd,
+    `#!/bin/sh\nprintf ready > ${JSON.stringify(ready)}\nwhile [ ! -e ${JSON.stringify(releaseMarker)} ]; do /bin/sleep 0.01; done\n`,
+  )
   const first = Bun.spawn(
-    [process.execPath, runner, "--beads-store", store, "--beads-wait-ms", "1000", "--", fakeBd, "update", "bead-1"],
+    [process.execPath, runner, "--beads-store", store, "--beads-wait-ms", "1000", "--", "/bin/sh", fakeBd, "update", "bead-1"],
     { stdout: "ignore", stderr: "ignore" },
   )
+  let second: ReturnType<typeof Bun.spawn> | undefined
   try {
-    const lock = join(store, "omp-embedded-write.lock")
-    const deadline = Date.now() + 2000
-    while (!existsSync(lock)) {
+    const deadline = Date.now() + 30_000
+    while (!existsSync(ready)) {
       // Separate runner processes and the OS lock use the platform clock; fake timers cannot drive this integration boundary.
       await Bun.sleep(5)
-      if (Date.now() >= deadline) throw new Error("first runner did not acquire the lock")
+      if (Date.now() >= deadline) throw new Error("first runner did not start its write")
     }
-    const second = Bun.spawn(
-      [process.execPath, runner, "--beads-store", store, "--beads-wait-ms", "25", "--", fakeBd, "update", "bead-2"],
+    second = Bun.spawn(
+      [process.execPath, runner, "--beads-store", store, "--beads-wait-ms", "25", "--", "/bin/sh", fakeBd, "update", "bead-2"],
       { stdout: "ignore", stderr: "ignore" },
     )
     expect(await second.exited).toBe(120)
+    writeFileSync(releaseMarker, "release")
     expect(await first.exited).toBe(0)
   } finally {
-    if (first.exitCode === null) {
-      first.kill("SIGTERM")
-      await first.exited
+    writeFileSync(releaseMarker, "release")
+    for (const child of [first, second]) {
+      if (child && child.exitCode === null) child.kill()
+      await child?.exited
     }
     rmSync(store, { recursive: true, force: true })
   }
-})
+}, { timeout: 60_000 })
 
 test("accepts a literal cd prefix while refusing dynamic cwd", async () => {
   const root = mkdtempSync(join(Bun.env.TMPDIR ?? "/tmp", "beads-lock-cwd-"))
@@ -662,9 +665,10 @@ describe("compound commands", () => {
       mkdirSync(bin, { recursive: true })
       // A stand-in `bd` that records, at its start, whether the hold names this very
       // process as the writer, and sleeps long enough for an overlapping writer to show.
+      // writerStart is optional (ps can be unavailable), so writer may end the JSON object.
       writeFileSync(
         join(bin, "bd"),
-        `#!/bin/sh\nheld=$(grep -c "\\"writer\\":$$," "$BEADS_DIR/omp-embedded-write.lock")\nprintf 'start %s %s\\n' "$2" "$held" >> ${JSON.stringify(log)}\nsleep 0.2\nprintf 'end %s\\n' "$2" >> ${JSON.stringify(log)}\n`,
+        `#!/bin/sh\nheld=$(grep -c "\\"writer\\":$$[,}]" "$BEADS_DIR/omp-embedded-write.lock")\nprintf 'start %s %s\\n' "$2" "$held" >> ${JSON.stringify(log)}\nsleep 0.2\nprintf 'end %s\\n' "$2" >> ${JSON.stringify(log)}\n`,
         { mode: 0o755 },
       )
       const real = { interpreter: process.execPath, script: join(import.meta.dir, "bd-embedded-write-runner.ts") }

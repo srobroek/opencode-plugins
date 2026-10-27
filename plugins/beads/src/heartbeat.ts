@@ -130,10 +130,12 @@ export class Heartbeats {
   readonly #owner = {}
   readonly #clock: HeartbeatClock
   readonly #beat: (sessionID: string, key: string, lease: Lease) => Promise<void>
+  readonly #observer: (task: Promise<void>) => void
 
-  constructor(beat: (sessionID: string, key: string, lease: Lease) => Promise<void>, clock: HeartbeatClock = realClock) {
+  constructor(beat: (sessionID: string, key: string, lease: Lease) => Promise<void>, clock: HeartbeatClock = realClock, observer: (task: Promise<void>) => void = () => {}) {
     this.#beat = beat
     this.#clock = clock
+    this.#observer = observer
   }
 
   /** Run `sessionID`'s timers for exactly `leases`; `now` also renews each one once. */
@@ -146,10 +148,10 @@ export class Heartbeats {
       const id = timerKey(sessionID, key)
       if (!timers().has(id)) {
         const entry: Timer = { owner: this.#owner, clock: this.#clock, running: false, timer: undefined }
-        entry.timer = this.#clock.setInterval(() => void this.#tick(id, sessionID, key, lease), HEARTBEAT_INTERVAL_MS)
+        entry.timer = this.#clock.setInterval(() => this.#observer(this.#tick(id, sessionID, key, lease)), HEARTBEAT_INTERVAL_MS)
         timers().set(id, entry)
       }
-      if (now) void this.#tick(id, sessionID, key, lease)
+      if (now) this.#observer(this.#tick(id, sessionID, key, lease))
     }
   }
 
