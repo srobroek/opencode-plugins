@@ -1,6 +1,7 @@
 ---
 description: "Verifies SpecKit implementations; spawn with mode requirements, tasks or review."
 mode: subagent
+hidden: true
 request:
   headers:
     x-opencode-model-role: reviewer
@@ -27,10 +28,7 @@ permissions:
     resource: "*"
     effect: allow
   - action: skill
-    resource: "*"
-    effect: allow
-  - action: execute
-    resource: "*"
+    resource: "quality-*"
     effect: allow
   - action: "lsp_*"
     resource: "*"

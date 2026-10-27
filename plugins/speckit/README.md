@@ -103,7 +103,10 @@ text in the tool result instead. The two speckit subagents do not get it.
 
 Both are read-only (edits denied) and carry the `reviewer` model tier in
 `request.headers.x-opencode-model-role`; with the model-roles plugin they run on that
-tier's model, otherwise on the parent's. They pin no model.
+tier's model, otherwise on the parent's. They pin no model. Both are hidden from the
+subagent catalog, since the formulas and the workflow instructions spawn them by id, and
+neither gets Code Mode; `speckit-verify` may load the `quality-*` skills, `speckit-sync`
+no skill.
 
 `speckit-verify` is composed by `bun run build` from `agents.src/speckit-verify.md` and
 the evidence and report parts of the shared review core (`plugins/lib/src/review-core.md`);
