@@ -91,8 +91,8 @@ All of them at once (statusline is TUI-only, see below):
 for p in agent-coder agent-efficiency agent-mechanic agent-researcher agent-reviewer \
   agent-seance architecture aws beads build chezmoi debate delivery dep-update design \
   eli5 find-tools goal journeys lang-go lang-python lang-typescript lang-rust lsp \
-  model-roles parley project quality safety session speckit subagent-worktree toolchain \
-  trunk-dev whats-new worktrunk; do
+  model-roles parley project quality repomix safety session speckit subagent-worktree \
+  toolchain trunk-dev whats-new worktrunk; do
   opencode plugin add "github:srobroek/opencode-plugins#main::path:plugins/$p"
 done
 ```
