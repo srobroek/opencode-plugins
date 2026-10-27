@@ -1998,6 +1998,7 @@ function preflightWaitMs() {
 var leaseMs = LEASE_MS;
 var renewMs = RENEW_MS;
 var nextToken = 0;
+var identityForTests;
 var HOST = hostname().split(".")[0] ?? "localhost";
 function pidAlive(pid) {
   try {
@@ -2016,6 +2017,8 @@ function parseLinuxStatStartIdentity(stat) {
   return start !== undefined && start !== "" ? start : undefined;
 }
 function processStartIdentity(pid) {
+  if (identityForTests !== undefined)
+    return identityForTests(pid);
   try {
     if (process.platform === "linux") {
       const stat = readFileSync2(`/proc/${pid}/stat`, "utf8");
@@ -3978,9 +3981,11 @@ class Heartbeats {
   #owner = {};
   #clock;
   #beat;
-  constructor(beat, clock = realClock) {
+  #observer;
+  constructor(beat, clock = realClock, observer = () => {}) {
     this.#beat = beat;
     this.#clock = clock;
+    this.#observer = observer;
   }
   run(sessionID, leases, now = false) {
     const prefix = `${sessionID}\x00`;
@@ -3992,11 +3997,11 @@ class Heartbeats {
       const id = timerKey(sessionID, key);
       if (!timers().has(id)) {
         const entry = { owner: this.#owner, clock: this.#clock, running: false, timer: undefined };
-        entry.timer = this.#clock.setInterval(() => void this.#tick(id, sessionID, key, lease), HEARTBEAT_INTERVAL_MS);
+        entry.timer = this.#clock.setInterval(() => this.#observer(this.#tick(id, sessionID, key, lease)), HEARTBEAT_INTERVAL_MS);
         timers().set(id, entry);
       }
       if (now)
-        this.#tick(id, sessionID, key, lease);
+        this.#observer(this.#tick(id, sessionID, key, lease));
     }
   }
   pause(sessionID) {
@@ -5307,7 +5312,7 @@ async function setupBeads(ctx, deps = {}) {
     }).catch(() => {
       return;
     });
-  }, deps.clock);
+  }, deps.clock, deps.detach);
   const lifecycle = new Lifecycle({
     ctx,
     run,
@@ -5490,6 +5495,8 @@ async function setupBeads(ctx, deps = {}) {
         await lifecycle.handleEvent(next.value);
       } catch (error) {
         console.error("srobroek.beads: event handling failed", error);
+      } finally {
+        deps.eventHandled?.(next.value);
       }
     }
   })();

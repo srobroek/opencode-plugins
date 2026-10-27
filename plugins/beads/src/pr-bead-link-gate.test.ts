@@ -29,6 +29,7 @@ describe("repository subprocess contract", () => {
     const previousPermission = process.env.GH_PERMISSION
     process.env.PATH = `${dir}:${previousPath ?? ""}`
     process.env.GH_ARGS_FILE = args
+    process.env.GH_PERMISSION = "WRITE"
     try {
       expect(repositoryControlled("owner/repo")).toEqual({ kind: "controlled" })
       process.env.GH_PERMISSION = "READ"

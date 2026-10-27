@@ -109,6 +109,7 @@ export type AdapterDeps = {
   clock?: HeartbeatClock
   /** Receives every detached task (claim releases); tests join them. */
   detach?: (task: Promise<unknown>) => void
+  eventHandled?: (event: unknown) => void
   skillsDirectory?: string
   start?: Pick<StartDeps, "hooksAdvisory" | "identity">
 }
@@ -157,7 +158,7 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
         metadata: { source: BEADS_SOURCE, kind: "heartbeat" },
       } as never)
       .catch(() => undefined)
-  }, deps.clock)
+  }, deps.clock, deps.detach)
   const lifecycle = new Lifecycle({
     ctx,
     run,
@@ -346,6 +347,8 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
         await lifecycle.handleEvent(next.value)
       } catch (error) {
         console.error("srobroek.beads: event handling failed", error)
+      } finally {
+        deps.eventHandled?.(next.value)
       }
     }
   })()
