@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test"
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import path from "node:path"
 import reference from "./fixtures/reference.json"
 import work from "./fixtures/work-models.json"
-import plugin, { MAX_REREGISTER, type ModelRef, spawnTarget } from "./index.ts"
+import plugin, { MAX_REREGISTER, type ModelRef, readTiers, spawnTarget } from "./index.ts"
 
 type Agent = { id: string; model?: ModelRef; request?: { headers?: Record<string, string> } }
 type Model = { providerID: string; id: string; variants: { id: string }[]; cost?: { input: number }[] }
@@ -42,6 +45,7 @@ function createHost(input: {
     sessions.get(id) ?? { id, model: input.sessionModel }
   const sessions = new Map<string, Record<string, unknown>>()
   const storage = new Map<string, unknown>()
+  let rpcHandlers: Record<string, (input: unknown) => Promise<unknown>> = {}
   const calls: Array<{ method: string; input: unknown }> = []
   let generate: (input: { prompt: string; model?: ModelRef }) => Promise<{ text: string }> = async () => ({
     text: '{"role": "cheap", "confident": true}',
@@ -129,6 +133,13 @@ function createHost(input: {
       text: async (payload: { prompt: string; model?: ModelRef }) => {
         calls.push({ method: "generate", input: payload })
         return generate(payload)
+      },
+    },
+    rpc: {
+      register: async (_definition: unknown, handlers: Record<string, (input: unknown) => Promise<unknown>>) => {
+        registrations++
+        rpcHandlers = handlers
+        return { events: { emit: async () => {} }, dispose: async () => void registrations-- }
       },
     },
     storage: {
@@ -233,6 +244,7 @@ function createHost(input: {
     },
     sessions,
     storage,
+    rpc: (method: string, input: unknown = {}) => rpcHandlers[method]?.(input),
     calls,
     tools,
     setGenerate: (fn: typeof generate) => {
@@ -1070,5 +1082,37 @@ describe("tiers", () => {
     expect((await host.spawn("subagent", { agent: "plain", prompt: "x", tier: "standard" })).model).toBe("amazon-bedrock/global.openai.gpt-6.1-sol")
     host.close()
     await cleanup()
+  })
+})
+
+describe("tiers rpc", () => {
+  test("state reports the tiers and models; set writes the global config", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "model-roles-rpc-"))
+    const previous = process.env.OPENCODE_CONFIG_DIR
+    process.env.OPENCODE_CONFIG_DIR = dir
+    try {
+      writeFileSync(path.join(dir, "opencode.jsonc"), '{\n  // mine\n  "plugins": ["/x/plugins/model-roles"]\n}\n')
+      const host = createHost({ agents: [], models: work as unknown as Model[], references: reference as unknown as Model[], options: {} })
+      const cleanup = await setup(host)
+      const state = (await host.rpc("state")) as { tiers: Array<{ name: string; resolved?: string }>; models: unknown[]; config?: string }
+      expect(state.tiers.map((t) => t.name)).toEqual(["cheap", "standard", "strong", "reviewer"])
+      expect(state.tiers[0]?.resolved).toBe("amazon-bedrock/global.anthropic.claude-haiku-5-5#low")
+      expect(state.models.length).toBeGreaterThan(100)
+      expect(state.config).toBe(path.join(dir, "opencode.jsonc"))
+      await host.rpc("set", { tier: "docs", value: { model: "auto", purpose: "docs", junk: 1 } })
+      const text = readFileSync(path.join(dir, "opencode.jsonc"), "utf8")
+      expect(text).toContain("// mine")
+      expect(text).toContain('"package": "/x/plugins/model-roles"')
+      expect(readTiers(text)).toEqual({ docs: { model: "auto", purpose: "docs" } })
+      await host.rpc("set", { tier: "docs", value: null })
+      expect(readTiers(readFileSync(path.join(dir, "opencode.jsonc"), "utf8"))).toEqual({})
+      await expect(host.rpc("set", { tier: "Bad Name", value: {} })).rejects.toThrow(/Invalid tier name/)
+      host.close()
+      await cleanup()
+    } finally {
+      if (previous === undefined) delete process.env.OPENCODE_CONFIG_DIR
+      else process.env.OPENCODE_CONFIG_DIR = previous
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

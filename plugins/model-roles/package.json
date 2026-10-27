@@ -5,9 +5,10 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./dist/index.js"
+    ".": "./dist/index.js",
+    "./tui": "./dist/tui.js"
   },
-  "files": ["dist", "index.js"],
+  "files": ["dist", "index.js", "tui.js"],
   "peerDependencies": {
     "@opencode/plugin": "^2.1.4"
   },
@@ -15,5 +16,8 @@
     "@opencode/plugin": {
       "optional": true
     }
+  },
+  "dependencies": {
+    "jsonc-parser": "3.3.1"
   }
 }
