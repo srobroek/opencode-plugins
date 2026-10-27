@@ -1,6 +1,6 @@
 {
   "name": "languages",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Go, Python and TypeScript lint, type-check and test skills; formatting runs through OpenCode built-in formatters.",
   "author": {
     "name": "Sjors Robroek",
