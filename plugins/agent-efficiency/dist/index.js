@@ -173,7 +173,10 @@ var DEFAULT_LEAN_AGENTS = [
   "speckit-verify",
   "seance",
   "security-reviewer",
-  "code-reviewer"
+  "code-reviewer",
+  "researcher",
+  "architect",
+  "speckit-sync"
 ];
 var IDENTITY = `# Your Model
 - Name: `;
