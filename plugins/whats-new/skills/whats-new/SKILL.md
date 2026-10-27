@@ -1,6 +1,6 @@
 ---
 name: whats-new
-description: Research breaking changes, deprecations, and new features between the version in use and latest. Triggers on "what's new in X", "what changed", "safe to upgrade".
+description: Researches breaking changes up to the latest version; triggers on what's new in X, what changed, or safe to upgrade.
 ---
 
 # What's New (Upgrade & Change Research)

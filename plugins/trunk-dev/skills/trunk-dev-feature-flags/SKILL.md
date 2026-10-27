@@ -1,6 +1,6 @@
 ---
 name: trunk-dev-feature-flags
-description: Use when adding a feat change, writing an MR/PR Flag line, or rolling out or removing a feature flag. Gate every new feature behind a default-off feature flag, record its owner and cleanup date, test both states, and use truthful commit types for dormant, enabled, and removed code.
+description: Use when adding a feat change, writing a PR Flag line, or rolling out or removing a default-off feature flag.
 ---
 
 # Feature flag decisions

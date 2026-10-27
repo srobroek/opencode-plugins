@@ -1,6 +1,6 @@
 ---
 name: resume-session
-description: Prepare a short handoff from an earlier OpenCode session into this fresh one. Use for "resume my session", "continue where I left off", "pick up the session about X", "resume ses_…".
+description: Use for resume my session, continue where I left off or resume ses_…, to hand an earlier OpenCode session to this one.
 ---
 
 # Resume Session

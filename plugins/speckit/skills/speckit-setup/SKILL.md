@@ -1,6 +1,6 @@
 ---
 name: speckit-setup
-description: Bootstrap SpecKit end-to-end -- scaffold, extensions, formulas, gitignore. Use when setting up SpecKit, when the speckit-* skills are missing, or to initialize/enable SpecKit.
+description: Use to set up or enable SpecKit (scaffold, extensions, formulas, gitignore) or when the speckit-* skills are missing.
 ---
 
 # SpecKit Setup

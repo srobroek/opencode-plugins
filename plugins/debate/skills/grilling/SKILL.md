@@ -1,6 +1,6 @@
 ---
 name: grilling
-description: Interviews the user relentlessly about a plan or decision in numbered frontier rounds. Triggers on grill me or stress-test my thinking.
+description: Interviews the user relentlessly about a plan or decision in rounds; triggers on grill me or stress-test my thinking.
 ---
 
 <!--

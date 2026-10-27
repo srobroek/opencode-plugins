@@ -1,6 +1,6 @@
 ---
 name: ops-toolchain-cache-policy
-description: Use when configuring or using toolchain download and compiler caches, worktree build output, or cache root and size knobs.
+description: Use when configuring toolchain download or compiler caches, worktree build output, or cache root and size knobs.
 ---
 
 # Toolchain Cache Policy

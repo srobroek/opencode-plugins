@@ -1,6 +1,6 @@
 ---
 name: prototype-logic
-description: Builds a throwaway single-file HTML demo over a pure reducer or state machine. Triggers on does this state model work or prototype the logic.
+description: Builds a throwaway HTML demo over a pure reducer or state machine; triggers on does this state model work.
 ---
 
 <!--

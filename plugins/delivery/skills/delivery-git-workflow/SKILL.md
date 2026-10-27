@@ -1,6 +1,6 @@
 ---
 name: delivery-git-workflow
-description: Use when creating or reviewing PRs, owning an automated review loop, choosing a merge method, landing a PR with delivery_land, cleaning up with delivery_cleanup, or linking delivery to Beads.
+description: Use when creating or reviewing PRs, choosing a merge method, landing with delivery_land or cleaning up after a merge.
 ---
 
 # Git workflow

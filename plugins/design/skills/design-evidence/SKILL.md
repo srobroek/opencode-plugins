@@ -1,6 +1,6 @@
 ---
 name: design-evidence
-description: Use when making any claim about a rendered UI surface, to cite ARIA, computed-style, or screenshot evidence with the viewport width.
+description: Use when making any claim about a rendered UI, to cite ARIA, computed-style or screenshot evidence with the viewport.
 ---
 
 MUST Cite, per claim, the ONE kind that fits it: an ARIA snapshot (the browser's accessibility snapshot, such as Playwright's `ariaSnapshot()` YAML), a computed-style value read with page-side JavaScript, or a screenshot path. This governs citation. Collection order is separate and lives in the phase map of the `ui-review` skill's `references/tools.md`: snapshot the tree once per pass before claiming anything, then cite whichever kind the claim needs.

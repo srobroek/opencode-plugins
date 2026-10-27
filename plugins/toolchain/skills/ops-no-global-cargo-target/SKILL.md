@@ -1,6 +1,6 @@
 ---
 name: ops-no-global-cargo-target
-description: Use when Cargo, shell, mise, or CI configuration would set CARGO_TARGET_DIR or [build].target-dir to a machine-global directory. Worktrunk owns one target directory per repository.
+description: Use when Cargo, shell, mise or CI config would set CARGO_TARGET_DIR or build.target-dir to a machine-global directory.
 ---
 
 Cargo final and link output is deliberately absent from the shared cache policy. Worktrunk creates one absolute `dirname(git-common-dir)/target` per repository, so every worktree of that repository shares it and no two repositories collide.

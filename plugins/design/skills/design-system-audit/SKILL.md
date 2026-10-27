@@ -1,6 +1,6 @@
 ---
 name: design-system-audit
-description: Inventories existing design tokens, scales, and primitives before UI work. Triggers on what tokens does this project use, is there a design system.
+description: Inventories design tokens, scales and primitives before UI work; triggers on what tokens does this project use.
 ---
 
 # Design System Audit

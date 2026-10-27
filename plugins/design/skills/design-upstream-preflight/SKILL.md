@@ -1,6 +1,8 @@
 ---
 name: design-upstream-preflight
 description: Use before a design skill or agent routes to an upstream skill or CLI, to install and probe only what that route needs.
+metadata:
+  opencode/autoinvoke: false
 ---
 
 # Design Upstream Preflight

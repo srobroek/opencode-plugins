@@ -1,6 +1,6 @@
 ---
 name: worktrunk-worktrees
-description: Work in a git linked worktree created with Worktrunk (`wt`), never in the canonical checkout; covers creation, base commits, absolute paths, provisioning and merges. Use before editing a repository that uses Worktrunk.
+description: "Use before editing a repo that uses Worktrunk (wt): work in a linked worktree, never the canonical checkout."
 ---
 
 # Worktrunk worktrees

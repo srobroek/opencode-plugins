@@ -1,6 +1,6 @@
 ---
 name: terraform-language
-description: Use when writing or reviewing Terraform, OpenTofu, HCL, stacks, environments, modules, providers, state, or IaC conventions.
+description: "Use when writing or reviewing Terraform, OpenTofu or HCL: stacks, environments, modules, providers, state, conventions."
 ---
 
 # Terraform And HCL

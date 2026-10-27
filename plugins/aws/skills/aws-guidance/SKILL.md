@@ -1,6 +1,6 @@
 ---
 name: aws-guidance
-description: Use for any AWS task, including the AWS CLI, CDK, SAM, SDK code, AWS infrastructure as code, pricing, and secrets. Routes the work through the AWS MCP Server's guided skills and AWS documentation, and prices it with the AWS Pricing MCP server.
+description: Use for any AWS task (CLI, CDK, SAM, SDK, IaC, pricing, secrets); routes it through the AWS MCP servers and docs.
 ---
 
 AWS work goes through two MCP servers: `aws-mcp` (the read-only AWS MCP Server) and `aws-pricing`. When either is not connected, say so and state which checks below stayed undone.

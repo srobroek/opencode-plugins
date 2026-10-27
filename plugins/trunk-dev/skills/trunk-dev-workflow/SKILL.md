@@ -1,6 +1,6 @@
 ---
 name: trunk-dev-workflow
-description: Use when branching, opening, merging or landing an MR/PR in a repository with CI or automated releases. Apply trunk-based small-batch branch, merge-request, CI, squash-release, and preview-testing practices; configure forge enforcement for Conventional Commits and protected default branches.
+description: Use when branching, opening, merging or landing an MR/PR in a repo with CI or automated releases (trunk-based).
 ---
 
 # Trunk-based delivery

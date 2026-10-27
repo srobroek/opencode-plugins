@@ -1,6 +1,6 @@
 ---
 name: license-picker
-description: Selects an OSI-approved license from project constraints and explains implementation tradeoffs. Use for new repositories, relicensing, or “what license should I use?”
+description: Use for a new repository, relicensing or “what license should I use?”, to pick an OSI license from project constraints.
 ---
 
 # License Picker

@@ -1,6 +1,6 @@
 ---
 name: toolchain-asset-ownership
-description: Use when adding or changing agentic assets, to know where OpenCode config, plugins, skills, and agents live and who owns them.
+description: "Use when adding or changing agentic assets: where OpenCode config, plugins, skills and agents live and who owns them."
 ---
 
 # Agentic asset ownership

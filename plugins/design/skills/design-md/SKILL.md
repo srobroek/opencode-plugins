@@ -1,6 +1,6 @@
 ---
 name: design-md
-description: Routes DESIGN.md extraction to the vendored create-design-md and lints the result. Triggers on write a DESIGN.md or document the design system.
+description: Routes DESIGN.md extraction to create-design-md and lints it; triggers on write a DESIGN.md or document the design.
 ---
 
 # DESIGN.md

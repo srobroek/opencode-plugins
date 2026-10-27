@@ -1,6 +1,6 @@
 ---
 name: to-questionnaire
-description: Turns a decision the user cannot answer alone into a questionnaire for another person. Triggers on write a questionnaire for.
+description: Turns a decision the user cannot answer alone into a questionnaire for others; triggers on write a questionnaire for.
 disable-model-invocation: true
 ---
 

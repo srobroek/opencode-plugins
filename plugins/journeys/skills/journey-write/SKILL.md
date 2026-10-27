@@ -1,6 +1,6 @@
 ---
 name: journey-write
-description: Use when authoring or amending user journeys from feature evidence, grilling on unknowns and checking the definition-of-ready.
+description: Use when authoring or amending user journeys from feature evidence, grilling on unknowns and checking readiness.
 ---
 
 # journey-write

@@ -1,6 +1,6 @@
 ---
 name: debate
-description: Use when stress-testing an architectural decision, technology choice, or feature proposal from both sides before committing.
+description: Use to stress-test an architectural decision, technology choice or feature proposal from both sides before committing.
 ---
 
 # Debate

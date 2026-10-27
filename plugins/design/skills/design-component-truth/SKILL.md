@@ -1,6 +1,8 @@
 ---
 name: design-component-truth
-description: Use when passing component props or writing Storybook stories, to verify each prop against the component documentation before coding.
+description: Use when passing component props or writing Storybook stories, to check each prop against the component's docs first.
+metadata:
+  opencode/autoinvoke: false
 ---
 
 Prop hallucination is its own failure mode. A plausible-sounding prop such as

@@ -1,6 +1,6 @@
 ---
 name: journey-verify
-description: "Use when validating user journeys against the running product: drives each step, triages mismatches, and records run results."
+description: "Use when validating user journeys against the running product: drive each step, triage mismatches, record results."
 ---
 
 # journey-verify

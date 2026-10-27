@@ -1,6 +1,6 @@
 ---
 name: quality-code-policy
-description: The short always-on code-quality policy (SOLID and invariants over YAGNI, DRY for shared knowledge, reuse before building, scoped refactors). Load at the start of any code task, before the quality-code-design skill.
+description: The always-on code-quality policy (SOLID, invariants, DRY, reuse, scoped refactors); load at the start of code tasks.
 ---
 
 # Maintainable code

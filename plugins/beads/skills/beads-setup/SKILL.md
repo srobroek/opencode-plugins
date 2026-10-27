@@ -1,6 +1,6 @@
 ---
 name: beads-setup
-description: Beads initialization and remote setup for repositories without .beads/, ledger-bearing clones, git/Dolt remote checks, or `bd where` reporting no beads database found.
+description: "Use for Beads init and remotes: repos without .beads/, ledger clones, git/Dolt remotes, or no beads database found."
 ---
 
 # DETECT
