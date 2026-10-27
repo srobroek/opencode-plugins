@@ -5,8 +5,9 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { pathToFileURL } from "node:url"
 import { promisify } from "node:util"
+import { permissionEffect } from "@srobroek/opencode-lib/agent-files"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
-import { AGENT_IDS, type AgentFile, loadAgents, parseAgentFile, shapeAgent } from "./agents.ts"
+import { AGENT_IDS, type AgentFile, loadAgents, type Permission, parseAgentFile, shapeAgent } from "./agents.ts"
 import { createPlugin, indexResource, readIndexParams, SKILL_NAMES } from "./index.ts"
 import { type Exec, installFormulas, JOURNEYS_SCRIPT, journeysWrites, runJourneys } from "./journeys-tool.ts"
 
@@ -189,6 +190,30 @@ describe("agents", () => {
     const shaped: Record<string, unknown> = {}
     shapeAgent(shaped, agents.find((agent) => agent.id === "journey-validator") as AgentFile, true)
     expect(shaped.steps).toBe(400)
+    expect(shaped.hidden).toBe(true)
+  })
+
+  test("both agents stay out of the catalog, and the validator loads no skill", () => {
+    const agents = loadAgents()
+    for (const agent of agents) expect({ id: agent.id, hidden: agent.hidden }).toEqual({ id: agent.id, hidden: true })
+    const validator = agents.find((agent) => agent.id === "journey-validator") as AgentFile
+    expect(validator.permissions).toContainEqual({ action: "skill", resource: "*", effect: "deny" })
+    const configured = { hidden: false }
+    shapeAgent(configured, validator, false)
+    expect(configured.hidden).toBe(false)
+    const prefilled = { hidden: false }
+    shapeAgent(prefilled, validator, true)
+    expect(prefilled.hidden).toBe(true)
+  })
+
+  test("a created agent's shipped rules go after the host defaults, so its allowlist holds", () => {
+    const scribe = loadAgents().find((agent) => agent.id === "journey-scribe") as AgentFile
+    const defaults: Permission[] = [{ action: "*", resource: "*", effect: "allow" }]
+    const agent: { permissions: Permission[] } = { permissions: [...defaults] }
+    shapeAgent(agent, scribe, true)
+    expect(agent.permissions).toEqual([...defaults, ...scribe.permissions])
+    expect(permissionEffect(agent.permissions, "webfetch")).toBe("deny")
+    expect(permissionEffect(agent.permissions, "edit")).toBe("allow")
   })
 
   test("a configured agent keeps its fields, and its permissions come after the shipped ones", () => {
