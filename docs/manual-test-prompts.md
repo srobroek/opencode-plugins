@@ -224,14 +224,14 @@ I'm adding a numbered sqlx migration to a Rust SQLite repository. What are the r
 **Expect:** the agent loads `rust-guide`, then `rust-persistence` by id, and answers from it.
 **If not:** the router table in `plugins/rust/skills/rust-guide/SKILL.md`.
 
-**7. rust: the migration gate**
+**7. safety: the migration gate**
 
 ```text
 Use the edit tool to change migrations/0001_init.sql so table a gets a name TEXT column.
 ```
 
-**Expect:** refused with `Migrations are append-only: '.../migrations/0001_init.sql' is committed migration history...`, naming `0002_b.sql` as the latest.
-**If not:** `plugins/rust/src/migration-gate.ts`.
+**Expect:** refused with `Blocked by safety (migration-edit): '.../migrations/0001_init.sql' is a migration that has shipped (it is on the default branch)...`, asking for a new migration.
+**If not:** `plugins/safety/src/migrations.ts`.
 
 **8. worktrunk: the merge gate**
 
@@ -263,7 +263,7 @@ Look above the composer.
 ## agent-coder
 
 **Install:** `opencode plugin add 'github:srobroek/opencode-plugins#main::path:plugins/agent-coder'`. No
-options. Install languages, quality and rust too so its skill allowlist has content.
+options. Install languages, quality, rust and toolchain too so its skill allowlist has content.
 
 ### Agent `coder`
 
@@ -281,10 +281,19 @@ Use the coder agent to find new tools for parsing YAML with find_tools_scan.
 **Expect:** the agent cannot call `find_tools_scan` (denied) and reports that, or returns `BLOCKED`.
 **If not:** the `find_tools_scan` deny in `plugins/agent-coder/agents/coder.md`.
 
+```text
+Use the coder agent to plan tests for div in src/div.ts (zero, negative, fractional inputs). Load the testing guidance first and report which skills you loaded.
+```
+
+**Expect:** the child loads `quality-testing` (and possibly `language-quality`, then `typescript-quality`) and names them. A design or journeys skill is denied.
+**If not:** the skill allowlist in `plugins/agent-coder/agents/coder.md`; routers must be allowed next to their hidden members.
+
 ## agent-efficiency
 
 **Install:** `opencode plugin add 'github:srobroek/opencode-plugins#main::path:plugins/agent-efficiency'`.
-Options: `bashAlias`, `explore`, `leanSubagents` and `leanDrop`, all on by default.
+Options: `bashAlias`, `explore`, `leanSubagents` and `leanDrop`, all on by default. `leanDrop`
+defaults to `global-instructions`, `identity` and `worktree`. Add `project-instructions` (or use
+`instructions` for both) to drop the project `AGENTS.md` too.
 
 ### Hook: bash alias
 
@@ -313,12 +322,14 @@ Use the explore agent to find where add is defined in this repo.
 
 ### Hook: lean subagents
 
+Add a project `AGENTS.md` to the scratch repo first: `echo '# Probe rules' > AGENTS.md`.
+
 ```text
-Use the adversarial-challenger agent to answer: does your system prompt contain any "Instructions from:" AGENTS.md blocks or a "# Your Model" section? Quote the headings you see.
+Use the adversarial-challenger agent to answer: does your system prompt contain any "Instructions from:" AGENTS.md blocks or a "# Your Model" section? Quote the headings and file paths you see.
 ```
 
-**Expect:** neither appears. The environment block and the date are still there.
-**If not:** `plugins/agent-efficiency/src/lean.ts` (`DEFAULT_LEAN_AGENTS`, `dropInstructions`).
+**Expect:** no block for the global `~/.config/opencode/AGENTS.md` and no `# Your Model` section. The scratch repo's own `AGENTS.md` block is still there, as are the environment block and the date.
+**If not:** `plugins/agent-efficiency/src/lean.ts` (`DEFAULT_LEAN_AGENTS`, `DEFAULT_DROP`); a global/project split that misfires shows up as both blocks gone or both kept.
 
 ## agent-mechanic
 
@@ -1273,6 +1284,15 @@ Run the Go lint and tests.
 **Expect:** `go-quality` (`gofmt -l`, `golangci-lint run` or `go vet`, `go test ./...`).
 **If not:** same router.
 
+### → `lang-typescript-profiling`, `lang-python-profiling`, `lang-go-profiling`
+
+```text
+This Bun script got slow. Which profiler and benchmark tool should I use, and how?
+```
+
+**Expect:** loads `language-quality`, then `lang-typescript-profiling` (`--cpu-prof`, heap profiles, mitata). Asking the same for a Python or Go service routes to `lang-python-profiling` (py-spy, scalene, memray) or `lang-go-profiling` (pprof, `go test -bench`, benchstat).
+**If not:** the profiling rows in `plugins/languages/skills/language-quality/SKILL.md`.
+
 ## lsp
 
 **Install:** a language server (`npm i -g typescript typescript-language-server`),
@@ -1457,6 +1477,24 @@ Start a code task: refactor src/math.ts so every operation lives in one table. L
 **Expect:** loads `quality-code-policy` before editing.
 **If not:** `plugins/quality/skills/quality-code-policy/SKILL.md`.
 
+### Skill `quality-testing`
+
+```text
+How should I test src/math.ts: what belongs in unit tests, do I need test doubles, and how do I keep the tests from going flaky?
+```
+
+**Expect:** loads `quality-testing` and answers on test levels, doubles and flakiness, pointing to a `lang-<language>-testing` skill for tooling.
+**If not:** `plugins/quality/skills/quality-testing/SKILL.md`.
+
+### Skill `quality-profiling`
+
+```text
+add() in src/math.ts got slower after the last change. Find out why before changing anything.
+```
+
+**Expect:** loads `quality-profiling`, then sets a target, reproduces with a fixed workload and takes a baseline before changing one thing at a time. It loads a `lang-*-profiling` skill for the profiler.
+**If not:** `plugins/quality/skills/quality-profiling/SKILL.md`.
+
 ### Skill `prototype-logic`
 
 ```text
@@ -1477,29 +1515,6 @@ Uninstall agent-reviewer, restart, then rerun the
 ## rust
 
 **Install:** `opencode plugin add 'github:srobroek/opencode-plugins#main::path:plugins/rust'`.
-
-### Gate: migration edits
-
-```text
-Use the edit tool to add a column to migrations/0001_init.sql.
-```
-
-**Expect:** refused with `Migrations are append-only: ...`, naming `0002_b.sql` as the latest.
-**If not:** `plugins/rust/src/migration-gate.ts`.
-
-```text
-Run exactly: echo '-- probe' >> migrations/0001_init.sql
-```
-
-**Expect:** the same refusal, for a shell write.
-**If not:** `writtenPaths` in `plugins/lib/src/tool-targets.ts`.
-
-```text
-Use the edit tool to add a name TEXT column to migrations/0002_b.sql, and create migrations/0003_c.sql with CREATE TABLE c (id INTEGER);
-```
-
-**Expect:** both are allowed: `0002_b.sql` is the latest, and `0003_c.sql` does not exist yet.
-**If not:** `latestMigration` in `plugins/rust/src/migration-gate.ts`.
 
 ### Advisory: `cargo install` in CI
 
@@ -1577,6 +1592,12 @@ Set up the Tauri v2 updater and code signing for my desktop app.
 ```
 
 **Expect:** `rust-tauri`.
+
+```text
+Profile this Rust binary and set up criterion benchmarks with a saved baseline.
+```
+
+**Expect:** `lang-rust-profiling` (samply, cargo flamegraph, criterion baselines).
 
 ## safety
 
@@ -1678,6 +1699,40 @@ Run exactly: git clean -fd
 
 **Expect:** a prompt (`deletes untracked files with git clean -f`). `git clean -nd` passes.
 **If not:** same file.
+
+### Gate `migration-edit`
+
+The scratch repo's `0001_init.sql` and `0002_b.sql` are on `main`, so both have shipped.
+
+```text
+Use the edit tool to add a column to migrations/0001_init.sql.
+```
+
+**Expect:** refused with `Blocked by safety (migration-edit): '.../migrations/0001_init.sql' is a migration that has shipped (it is on the default branch)...`.
+**If not:** `plugins/safety/src/migrations.ts`.
+
+```text
+Run exactly: echo '-- probe' >> migrations/0002_b.sql
+```
+
+**Expect:** the same refusal for `0002_b.sql`, for a shell write.
+**If not:** `writtenPaths` in `plugins/lib/src/tool-targets.ts`.
+
+```text
+Create migrations/0003_c.sql with CREATE TABLE c (id INTEGER); then use the edit tool to add a name TEXT column to it.
+```
+
+**Expect:** both are allowed: `0003_c.sql` is new on this branch (untracked), so it stays editable. Delete it afterwards.
+**If not:** the merge-base check in `plugins/safety/src/migrations.ts`; `SAFETY_ALLOW_MIGRATION_EDIT=1` or `disable: ["migration-edit"]` turns the gate off.
+
+### Check `external-directory`: directory flags
+
+```text
+Run exactly: git -C /tmp status
+```
+
+**Expect:** a permission prompt for `external_directory` on the `/tmp` directory, as for a `cd /tmp`. Reject it. `git -C . status` runs without a prompt.
+**If not:** `plugins/safety/src/flag-directories.ts`.
 
 ### Rewrite `close-keywords` (needs a GitHub repo)
 
@@ -1903,6 +1958,24 @@ Call subagent_worktree_merge with the child sessionID from that result and metho
 **Expect:** a permission check for `subagent_worktree_merge` on the lane branch (it prompts only when a rule asks), then `wt merge main --no-squash --no-ff --yes`. `hello.txt` lands on `main`, and the worktree is removed.
 **If not:** the overlap and dirty checks in `plugins/subagent-worktree/src/index.ts`; `wt` must be on `PATH`.
 
+### Argument: `worktree`
+
+Make a second worktree first: `git worktree add -q ../repo-side -b side`.
+
+```text
+Use the explore agent with worktree "side" to list the top-level files and report the absolute path of the directory you are in.
+```
+
+**Expect:** the child reports a path under `../repo-side`, not the main checkout. The `subagent` tool's input lists `worktree` next to `tier` when model-roles is installed.
+**If not:** `plugins/subagent-worktree/src/index.ts` (the `worktree` transform and the session move).
+
+```text
+Use the explore agent with worktree "/tmp" to list files.
+```
+
+**Expect:** refused with `worktree "/tmp" is not a worktree of this project; pass the path or branch of one of: ...`. Remove the side worktree afterwards with `git worktree remove ../repo-side`.
+**If not:** `plugins/subagent-worktree/src/lane.ts`.
+
 ### Hook: no-op lane cleanup
 
 ```text
@@ -1968,6 +2041,12 @@ Set CARGO_TARGET_DIR=~/.cache/cargo-target in my zshrc so all projects share it.
 ```
 
 **Expect:** `ops-no-global-cargo-target`, which advises against it.
+
+```text
+Write a GitHub Actions workflow for this TypeScript repo with a required-check gate, a matrix and pinned actions.
+```
+
+**Expect:** `ci-github-actions`.
 
 ### Listed skills
 
