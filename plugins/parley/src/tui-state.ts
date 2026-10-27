@@ -95,6 +95,32 @@ export function toSubmission(question: Question, draft: Draft): SubmittedAnswer 
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value))
 
+/** Kinds whose choices sit side by side, so ←/→ move between them. */
+const HORIZONTAL = new Set(["show_options", "emoji_react"])
+
+export type Arrow = "up" | "down" | "left" | "right"
+
+/** What an arrow key does on a card: move the row cursor, adjust a value, or go to another question. */
+export type ArrowAction = { readonly kind: "cursor" | "step" | "question"; readonly delta: number }
+
+/**
+ * ↑/↓ move between stacked rows and ←/→ adjust a slider or rating. Side-by-side choices
+ * (show_options, emoji_react) swap that: ←/→ move between them and ↑/↓ go to the previous or next
+ * question, as they do on cards without rows (slider, text).
+ */
+export function arrowAction(question: Question, key: Arrow): ArrowAction | undefined {
+  const delta = key === "up" || key === "left" ? -1 : 1
+  const vertical = key === "up" || key === "down"
+  if (HORIZONTAL.has(question.kind)) return { kind: vertical ? "question" : "cursor", delta }
+  if (!vertical) return question.kind === "slider" || question.kind === "rate" ? { kind: "step", delta } : undefined
+  return rows(question).length > 0 ? { kind: "cursor", delta } : { kind: "question", delta }
+}
+
+/** Whether enter in this card's text field inserts a newline instead of saving (code keeps its lines). */
+export function enterIsNewline(question: Question, field: "note" | "text") {
+  return field === "text" && question.kind === "ask_code"
+}
+
 export function moveCursor(question: Question, draft: Draft, delta: number): Draft {
   const count = rows(question).length
   if (count === 0) return draft
