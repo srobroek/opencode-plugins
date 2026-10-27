@@ -75,9 +75,20 @@ describe("composeAgents", () => {
   })
 
   test("every shipped agents.src file composes to its committed agents/ file", () => {
-    for (const name of ["agent-reviewer", "delivery", "design", "quality", "speckit"]) {
+    for (const name of ["agent-coder", "agent-reviewer", "delivery", "design", "quality", "speckit"]) {
       const dir = path.resolve(import.meta.dir, "../plugins", name)
       for (const output of composeAgents(dir)) expect(readFileSync(output.file, "utf8")).toBe(output.contents)
+    }
+  })
+
+  test("the coder and the delivery implementers compose the coding-core method", () => {
+    for (const [plugin, id] of [
+      ["agent-coder", "coder"],
+      ["delivery", "implementer"],
+      ["delivery", "implementer-high"],
+    ]) {
+      const source = readFileSync(path.resolve(import.meta.dir, "../plugins", plugin as string, "agents.src", `${id}.md`), "utf8")
+      expect({ id, includes: source.includes("{{include coding-core: method}}") }).toEqual({ id, includes: true })
     }
   })
 })
