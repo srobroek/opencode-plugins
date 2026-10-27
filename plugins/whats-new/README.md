@@ -16,8 +16,11 @@ The plugin is OpenCode-only and is not exported to Claude Code or Codex: its ski
 
 ## Agent
 
-The plugin adds a `whats-new` agent (mode `all`, so you can switch to it or launch
-it as a subagent). Report-only mode is this agent's permissions. They are added
+The plugin adds a `whats-new` agent as a subagent, so it stays out of the
+primary-agent cycle (shift+tab). Ask for it by name, for example "use the whats-new
+agent", and the session delegates to it; the `whats-new` skill also works in any
+session. An agent you configure with the id `whats-new` keeps its own mode.
+Report-only mode is this agent's permissions. They are added
 after any rules you configure for an agent with the same id:
 
 - `edit` is denied for dependency manifests and lockfiles at any depth:
