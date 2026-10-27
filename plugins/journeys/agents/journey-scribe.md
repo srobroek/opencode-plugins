@@ -1,6 +1,7 @@
 ---
 description: "Authors and amends user journeys with evidence-gated changes and stable IDs. Never drives the product or edits product code."
 mode: subagent
+hidden: true
 request:
   headers:
     x-opencode-model-role: standard
@@ -27,7 +28,7 @@ permissions:
     resource: "*"
     effect: allow
   - action: skill
-    resource: "*"
+    resource: "journey*"
     effect: allow
   - action: execute
     resource: "*"

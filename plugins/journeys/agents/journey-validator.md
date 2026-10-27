@@ -1,11 +1,15 @@
 ---
 description: "Validates one user journey against the running product, recording evidence, intent-gated triage, and run results. Never edits product code."
 mode: subagent
+hidden: true
 steps: 400
 request:
   headers:
     x-opencode-model-role: standard
 permissions:
+  - action: skill
+    resource: "*"
+    effect: deny
   - action: webfetch
     resource: "*"
     effect: deny
