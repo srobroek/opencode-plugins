@@ -50,21 +50,34 @@ jobs:
 
       # Check out the release branch with the App token persisted, so the sync
       # commit below also triggers CI on the PR.
+      # release-please only reports prs_created when it changed the PR, so look
+      # up the open release PR directly: the sync must also run when a push to
+      # main leaves the PR as it was but the branch still has a stale lockfile.
+      - name: Find the open release PR
+        id: release-pr
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          branch=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open \
+            --head release-please--branches--main --json headRefName \
+            --jq '.[0].headRefName // empty')
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
       - name: Checkout release branch
-        if: ${{ steps.release.outputs.prs_created == 'true' }}
+        if: ${{ steps.release-pr.outputs.branch != '' }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
+          ref: ${{ steps.release-pr.outputs.branch }}
           token: ${{ steps.app-token.outputs.token }}
 
       - name: Set up Bun
-        if: ${{ steps.release.outputs.prs_created == 'true' }}
+        if: ${{ steps.release-pr.outputs.branch != '' }}
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.4.3"
 
       - name: Sync bun.lock, plugin bundles and marketplaces on the release branch
-        if: ${{ steps.release.outputs.prs_created == 'true' }}
+        if: ${{ steps.release-pr.outputs.branch != '' }}
         run: |
           bun install
           bun run build
