@@ -87,6 +87,7 @@ describe("agent-reviewer", () => {
       expect(permissionEffect(code, "shell", command)).toBe("deny")
     for (const action of ["read", "grep", "glob", "lsp_diagnostics"]) expect(permissionEffect(code, action)).toBe("allow")
     for (const action of ["webfetch", "websearch"]) expect(permissionEffect(code, action)).toBe("deny")
+    expect(permissionEffect(code, "skill", "ast-grep-search")).toBe("allow")
   })
 
   test("security-reviewer reads code only: no shell, no web", async () => {
@@ -96,6 +97,7 @@ describe("agent-reviewer", () => {
     for (const action of ["read", "grep", "glob", "lsp_hover"]) expect(permissionEffect(security, action)).toBe("allow")
     for (const action of ["shell", "webfetch", "websearch"]) expect(permissionEffect(security, action)).toBe("deny")
     expect(permissionEffect(security, "skill", "review-security")).toBe("allow")
+    expect(permissionEffect(security, "skill", "ast-grep-search")).toBe("allow")
     expect(permissionEffect(security, "read", ".env")).toBe("ask")
     expect(file("security-reviewer").system).toContain("CWE id")
     expect(file("security-reviewer").system).toContain("VERDICT: PASS|MINOR|MAJOR")

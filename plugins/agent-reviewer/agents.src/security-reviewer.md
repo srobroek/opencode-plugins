@@ -32,6 +32,9 @@ permissions:
   - action: skill
     resource: "review-*"
     effect: allow
+  - action: skill
+    resource: "ast-grep-*"
+    effect: allow
   - action: external_directory
     resource: "*"
     effect: ask
