@@ -268,7 +268,7 @@ function selectedStore(cwd: string, root: string, commonDir: string, env: NodeJS
   }
 }
 
-async function repository(
+export async function repository(
   cwd: string,
   env: NodeJS.ProcessEnv,
   run: CommandRunner,

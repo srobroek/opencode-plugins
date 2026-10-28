@@ -7,9 +7,8 @@ semantic-release setup.
 
 Ported from the omp-plugins `trunk-dev` plugin. The omp rules
 `trunk-dev-workflow` and `trunk-dev-feature-flags` are skills here; the
-`trunk-dev-skip-ci-text` rule is code (below). The omp session-start reminders (stale
-claimed branches, a missing `stale-bead-branches` CI job) are not ported; the
-`trunk-dev-release-setup` skill still ships the CI templates.
+`trunk-dev-skip-ci-text` rule is code (below). Session-start reminders are delivered
+once on the first completed `shell`/`bash` result, never in the system prompt.
 
 Every check reads the command with the shared shell parser (`scanShell` from
 `@srobroek/opencode-lib`), never a regex over the tool input. Only top-level simple
@@ -68,6 +67,19 @@ exit non-zero. They never block.
 | Squash | `glab mr merge`/`gh pr merge` without `--squash`/`-s` in a release repository. |
 | Branch age | A branch push whose merge base with the default branch is more than two days old. |
 
+## Session reminders
+
+In a commit-released repository with a Beads ledger, the first completed shell
+result (including a failed command) receives any stale-branch or missing CI-job
+reminder. Only local branches linked by bead `metadata.branch` count: claims older
+than `TRUNK_DEV_STALE_HOURS` (default 48), or closed/merged beads with live branches.
+At most five branches are listed. Known GitHub/GitLab remotes are checked for the
+`stale-bead-branches` job; the release-setup skill ships its templates.
+
+Reads use supervised git (2 s) and readonly bd (5 s), without starting a Dolt
+server. Each session is probed once, including concurrent calls; failures and clean
+repositories are silent. Disable with `"session-reminders"` in `disable`.
+
 ## Flag-cleanup bead
 
 When a flagged `feat` request merges, trunk-dev creates one chore,
@@ -108,5 +120,5 @@ Registered through `ctx.skill.transform` (a user skill of the same name wins):
 ## Options
 
 ```json
-{ "disable": ["commit-gate", "skip-ci", "mr-advisory", "flag-cleanup"] }
+{ "disable": ["commit-gate", "skip-ci", "mr-advisory", "flag-cleanup", "session-reminders"] }
 ```

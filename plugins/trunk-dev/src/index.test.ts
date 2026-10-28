@@ -16,6 +16,7 @@ function setup(options: Record<string, unknown> = {}, overrides: Parameters<type
       merges.push([...found])
       return "trunk-dev: created cleanup bead c-1"
     },
+    reminder: async () => undefined,
     ...overrides,
   })
   return { fake, plugin, merges }
@@ -24,6 +25,25 @@ function setup(options: Record<string, unknown> = {}, overrides: Parameters<type
 const shellResult = (exit: number, output = "ok") => ({ output: { exit, output }, metadata: { exit }, content: output })
 
 describe("trunk-dev plugin", () => {
+  test("session reminder runs once across concurrent shell results, including failures", async () => {
+    let calls = 0
+    const { fake, plugin } = setup({}, { reminder: async () => { calls++; return "stale reminder" } })
+    const cleanup = await plugin.setup(fake.context)
+    const fire = (id: string) => fake.fire.tool("execute.after", { ...base, id, tool: "bash", input: { command: "false" }, status: "completed", result: shellResult(1) })
+    const events = await Promise.all([fire("c1"), fire("c2")])
+    expect(calls).toBe(1)
+    expect(events.filter((event) => String((event as { result: { content: unknown } }).result.content).includes("stale reminder"))).toHaveLength(1)
+    await cleanup?.()
+  })
+
+  test("disabled session reminders never probe", async () => {
+    let calls = 0
+    const { fake, plugin } = setup({ disable: ["session-reminders"] }, { reminder: async () => { calls++; return "note" } })
+    const cleanup = await plugin.setup(fake.context)
+    await fake.fire.tool("execute.after", { ...base, id: "c1", tool: "shell", input: { command: "true" }, status: "completed", result: shellResult(0) })
+    expect(calls).toBe(0)
+    await cleanup?.()
+  })
   test("the commit gate throws from execute.before on shell only", async () => {
     const { fake, plugin } = setup()
     const cleanup = await plugin.setup(fake.context)
