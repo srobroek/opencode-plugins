@@ -407,7 +407,16 @@ export function createLanes(
     input: MergeInput,
     tool: { sessionID: string; agent: string; messageID: string; id: string },
   ): Promise<Result> => {
-    if (input.method === "list") return list(tool.sessionID)
+    if (input.method === "list") {
+      await ctx.permission.assert({
+        sessionID: tool.sessionID,
+        agent: tool.agent,
+        action: MERGE_TOOL,
+        resources: ["list"],
+        source: { type: "tool", messageID: tool.messageID, id: tool.id },
+      } as never)
+      return list(tool.sessionID)
+    }
     if (!input.sessionID) {
       return { content: `${MERGE_TOOL}: sessionID is required for method "${input.method}"`, metadata: { ok: false } }
     }
