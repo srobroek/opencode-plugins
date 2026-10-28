@@ -84,6 +84,8 @@ Configure the git plugin to use a message such as `chore(release): ${nextRelease
 
 Every repository with a Beads ledger gets this job, on GitHub and on GitLab. Copy the matching template from the `templates/` directory beside this skill without renaming its `stale-bead-branches` job, so a reviewer, or a check that looks for the job by name, finds it.
 
+OpenCode trunk-dev checks for this job once per session on the first completed shell result in a commit-released Beads repository. The reminder does not modify the system prompt; disable it with the plugin's `session-reminders` option.
+
 **GitHub.**
 
 1. Copy `stale-branches.github.yml` to `.github/workflows/trunk-dev-stale-branches.yml` and merge it through an MR/PR.

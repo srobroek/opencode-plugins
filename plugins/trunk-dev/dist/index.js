@@ -1010,6 +1010,137 @@ async function registerSkills(skill, paths) {
         editor.add(info);
   });
 }
+// plugins/lib/src/subprocess.ts
+import { constants } from "os";
+var EXIT_GRACE_MS = 2000;
+var EXIT_POLL_MS = 100;
+function processAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+}
+function killChild(child, group) {
+  if (group) {
+    try {
+      process.kill(-child.pid, "SIGKILL");
+      return;
+    } catch {}
+  }
+  try {
+    child.kill("SIGKILL");
+  } catch {}
+}
+function unref(timer) {
+  timer.unref?.();
+}
+function capture(stream) {
+  if (!(stream instanceof ReadableStream))
+    return { text: Promise.resolve(""), snapshot: () => "", cancel: () => {} };
+  const reader = stream.getReader();
+  const decoder = new TextDecoder;
+  let collected = "";
+  const text = (async () => {
+    try {
+      for (;; ) {
+        const chunk = await reader.read();
+        if (chunk.done)
+          break;
+        collected += decoder.decode(chunk.value, { stream: true });
+      }
+    } catch {}
+    collected += decoder.decode();
+    return collected;
+  })();
+  const cancel = () => {
+    try {
+      reader.cancel().catch(() => {
+        return;
+      });
+    } catch {}
+  };
+  return { text, snapshot: () => collected, cancel };
+}
+function supervise(child, options = {}) {
+  const grace = Math.max(0, options.graceMs ?? EXIT_GRACE_MS);
+  const pollMs = Math.max(1, options.pollMs ?? EXIT_POLL_MS);
+  const alive = options.alive ?? processAlive;
+  const group = options.group ?? false;
+  const { signal, timeoutMs } = options;
+  const out = capture(child.stdout);
+  const err = capture(child.stderr);
+  return new Promise((resolve) => {
+    let ended = null;
+    let exitSeen = false;
+    let settled = false;
+    let goneSince = null;
+    let deadline;
+    let graceTimer;
+    const settle = (run) => {
+      if (settled)
+        return;
+      settled = true;
+      clearTimeout(deadline);
+      clearTimeout(graceTimer);
+      clearInterval(poller);
+      signal?.removeEventListener("abort", onAbort);
+      resolve(run);
+    };
+    const end = (cause) => {
+      if (ended !== null || settled)
+        return;
+      ended = cause;
+      if (cause !== "lost" || group)
+        killChild(child, group);
+      out.cancel();
+      err.cancel();
+      graceTimer = setTimeout(() => settle({ kind: cause, stdout: out.snapshot(), stderr: err.snapshot() }), grace);
+      if (options.unref)
+        unref(graceTimer);
+    };
+    const onAbort = () => end("aborted");
+    const poller = setInterval(() => {
+      if (exitSeen || ended !== null || settled)
+        return;
+      if (alive(child.pid)) {
+        goneSince = null;
+        return;
+      }
+      goneSince ??= Date.now();
+      if (Date.now() - goneSince >= grace)
+        end("lost");
+    }, pollMs);
+    unref(poller);
+    if (timeoutMs !== undefined && timeoutMs > 0 && Number.isFinite(timeoutMs)) {
+      deadline = setTimeout(() => end("timeout"), timeoutMs);
+      if (options.unref)
+        unref(deadline);
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted)
+      onAbort();
+    child.exited.then(() => {
+      exitSeen = true;
+    }, () => {
+      return;
+    });
+    Promise.all([child.exited, out.text, err.text]).then(([exitCode, stdout, stderr]) => {
+      if (ended !== null)
+        settle({ kind: ended, stdout, stderr });
+      else
+        settle({ kind: "exited", exitCode, signalCode: signalName(child.signalCode), stdout, stderr });
+    }, () => end("lost"));
+  });
+}
+function signalName(code) {
+  if (code === null || code === undefined)
+    return null;
+  if (typeof code === "string")
+    return code;
+  return Object.entries(constants.signals).find(([, n]) => n === code)?.[0] ?? String(code);
+}
 // plugins/lib/src/tool-targets.ts
 var WRITE_TOOLS = new Set(["edit", "write", "patch"]);
 var READ_TOOLS = new Set(["read"]);
@@ -2012,6 +2143,106 @@ function decideMrAdvisory(command, cwd, options = {}) {
   }
 }
 
+// plugins/trunk-dev/src/session-reminders.ts
+import { readdirSync as readdirSync4, readFileSync as readFileSync3 } from "fs";
+import { join as join2 } from "path";
+function staleThresholdHours(value) {
+  const hours = value !== undefined && /^\d+$/.test(value) ? Number(value) : 48;
+  return Number.isSafeInteger(hours) && hours > 0 ? hours : 48;
+}
+function decideStaleReminder(beads, branches, now, hours) {
+  if (!Array.isArray(beads))
+    return;
+  const live = new Set(branches);
+  const rows = [];
+  for (const bead of beads) {
+    if (bead === null || typeof bead !== "object")
+      continue;
+    const branch = bead.metadata?.branch;
+    if (typeof branch !== "string" || !live.has(branch) || typeof bead.id !== "string")
+      continue;
+    const started = typeof bead.started_at === "string" ? Date.parse(bead.started_at) : NaN;
+    const old = bead.status === "in_progress" && Number.isFinite(started) && now - started > hours * 3600000;
+    if (!old && bead.status !== "closed" && bead.status !== "merged")
+      continue;
+    rows.push(`- ${bead.id.replace(/[\r\n`]/g, "")}: ${branch.replace(/[\r\n`]/g, "")} (${old ? `claimed >${hours}h` : bead.status})`);
+    if (rows.length === 5)
+      break;
+  }
+  return rows.length ? `trunk-dev: stale bead branches:
+${rows.join(`
+`)}
+Land or split stale claims; remove landed branches after checking their work.` : undefined;
+}
+function forgeFromRemote(url) {
+  const host = /^[a-z][a-z0-9+.-]*:\/\/(?:[^@/]*@)?([^/:]+)/i.exec(url)?.[1] ?? /^(?:[^@]+@)?([^:/]+):/.exec(url)?.[1];
+  if (host && /(^|\.)github\./i.test(host))
+    return "github";
+  if (host && /(^|\.)gitlab\./i.test(host))
+    return "gitlab";
+  return;
+}
+function decideMissingStaleJob(forge, texts) {
+  if (!forge || texts.some((text) => /^\s*stale-bead-branches\s*:/m.test(text)))
+    return;
+  return "trunk-dev: missing daily stale-bead-branches CI job; run skill trunk-dev-release-setup to add it.";
+}
+function ciTexts(root, forge) {
+  const files = forge === "gitlab" ? [join2(root, ".gitlab-ci.yml")] : [];
+  const collect = (dir, depth) => {
+    try {
+      for (const entry of readdirSync4(dir, { withFileTypes: true }).slice(0, 100)) {
+        const path = join2(dir, entry.name);
+        if (entry.isFile() && /\.ya?ml$/i.test(entry.name))
+          files.push(path);
+        else if (entry.isDirectory() && depth > 0)
+          collect(path, depth - 1);
+      }
+    } catch {}
+  };
+  collect(join2(root, forge === "github" ? ".github/workflows" : ".gitlab"), forge === "github" ? 0 : 3);
+  return files.slice(0, 100).flatMap((file) => {
+    try {
+      return [readFileSync3(file, "utf8")];
+    } catch {
+      return [];
+    }
+  });
+}
+var read = async (cmd, cwd, env, timeoutMs) => {
+  try {
+    const result = await supervise(Bun.spawn({ cmd, cwd, env, stdin: "ignore", stdout: "pipe", stderr: "pipe" }), { timeoutMs });
+    return result.kind === "exited" ? { exitCode: result.exitCode, stdout: result.stdout } : undefined;
+  } catch {
+    return;
+  }
+};
+async function sessionReminder(cwd, env = process.env, run = read) {
+  const repo = await repository(cwd, env, run);
+  if (!repo || !isReleaseRepository(repo.root, { git: () => repo.root }))
+    return;
+  const [beads, branches, remote] = await Promise.all([
+    run(["bd", "--readonly", "list", "--all", "--json", "--limit", "0"], repo.root, bdEnvironment(env, repo.store), 5000),
+    run(["git", "for-each-ref", "--format=%(refname:short)", "refs/heads"], repo.root, env, 2000),
+    run(["git", "remote", "get-url", "origin"], repo.root, env, 2000)
+  ]);
+  const notes = [];
+  const forge = remote?.exitCode === 0 ? forgeFromRemote(remote.stdout.trim()) : undefined;
+  const missing = decideMissingStaleJob(forge, forge ? ciTexts(repo.root, forge) : []);
+  if (missing)
+    notes.push(missing);
+  if (beads?.exitCode === 0 && branches?.exitCode === 0) {
+    try {
+      const stale = decideStaleReminder(JSON.parse(beads.stdout), branches.stdout.trim().split(`
+`), Date.now(), staleThresholdHours(env.TRUNK_DEV_STALE_HOURS));
+      if (stale)
+        notes.push(stale);
+    } catch {}
+  }
+  return notes.length ? notes.join(`
+`) : undefined;
+}
+
 // plugins/trunk-dev/src/skip-ci.ts
 var MARKER = /\[(?:skip\s+ci|ci\s+skip|no\s+ci|skip\s+actions)\]/i;
 var SKIP_CI_ADVISORY = "trunk-dev: this command's commit/MR/PR text contains a skip-CI marker ([skip ci], [ci skip], [no ci] or [skip actions]). GitLab and GitHub skip the pipeline for it even when the marker is quoted as prose; remove the marker when CI must run.";
@@ -2056,7 +2287,7 @@ function skipCiAdvisory(command, cwd = "/") {
 var LAND_TOOL = "delivery_land";
 var SKILL_NAMES = ["trunk-dev-workflow", "trunk-dev-feature-flags", "trunk-dev-release-setup", "trunk-dev-guide"];
 var SKILL_PATHS = SKILL_NAMES.map((name) => fileURLToPath(new URL(`../skills/${name}/SKILL.md`, import.meta.url)));
-var FEATURE_IDS = ["commit-gate", "skip-ci", "mr-advisory", "flag-cleanup"];
+var FEATURE_IDS = ["commit-gate", "skip-ci", "mr-advisory", "flag-cleanup", "session-reminders"];
 function readOptions(options) {
   const raw = options?.disable;
   const list = Array.isArray(raw) ? raw.filter((id) => FEATURE_IDS.includes(id)) : [];
@@ -2085,6 +2316,7 @@ function createPlugin(overrides = {}) {
       const disabled = readOptions(ctx.options);
       const gate = overrides.commitGate ?? ((command, cwd) => decideCommitGate(command, cwd));
       const followUp = overrides.followUp ?? ((merges) => flagCleanupFollowUp(merges, process.env));
+      const reminded = new Set;
       const sessionDirectory = (sessionID) => ctx.session.get({ sessionID }).then((session) => session.location.directory).catch(() => ctx.location.directory);
       const before = await ctx.tool.hook("execute.before", async (event) => {
         if (disabled.has("commit-gate"))
@@ -2117,10 +2349,22 @@ function createPlugin(overrides = {}) {
             const call = shellCall(event.tool, event.input);
             if (call === undefined)
               return;
-            const exit = shellExit(event.result);
-            if (exit !== undefined && exit !== 0)
-              return;
             const cwd = shellCwd(call.workdir, directory);
+            if (!disabled.has("session-reminders") && !reminded.has(event.sessionID)) {
+              reminded.add(event.sessionID);
+              const note = await (overrides.reminder ?? sessionReminder)(cwd).catch(() => {
+                return;
+              });
+              if (note)
+                notes.push(note);
+            }
+            const exit = shellExit(event.result);
+            if (exit !== undefined && exit !== 0) {
+              if (notes.length)
+                event.result = appendResultText(event.result, notes.join(`
+`));
+              return;
+            }
             notes.push(...shellAdvisories(call.command, cwd, disabled, overrides.advise));
             if (exit === 0)
               merges = shellMerges(call.command, cwd);

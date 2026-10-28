@@ -6,6 +6,7 @@ import { registerSkills } from "@srobroek/opencode-lib/skill-files"
 import { decideCommitGate } from "./commit-gate.ts"
 import { flagCleanupFollowUp, landedMerge, type MergeRequest, shellMerges } from "./flag-cleanup.ts"
 import { decideMrAdvisory } from "./mr-advisory.ts"
+import { sessionReminder } from "./session-reminders.ts"
 import { skipCiAdvisory } from "./skip-ci.ts"
 
 export { COMMIT_OVERRIDE, conventional, decideCommitGate, MESSAGES, PUSH_OVERRIDE } from "./commit-gate.ts"
@@ -28,7 +29,7 @@ export const SKILL_PATHS = SKILL_NAMES.map((name) =>
   fileURLToPath(new URL(`../skills/${name}/SKILL.md`, import.meta.url)),
 )
 
-export const FEATURE_IDS = ["commit-gate", "skip-ci", "mr-advisory", "flag-cleanup"] as const
+export const FEATURE_IDS = ["commit-gate", "skip-ci", "mr-advisory", "flag-cleanup", "session-reminders"] as const
 export type FeatureID = (typeof FEATURE_IDS)[number]
 
 /** `{ disable: ["commit-gate", …] }` turns features off; unknown ids are ignored. */
@@ -65,6 +66,7 @@ export type Overrides = {
   commitGate?: (command: string, cwd: string) => { reason: string } | undefined
   advise?: (command: string, cwd: string) => string[]
   followUp?: (merges: readonly MergeRequest[]) => Promise<string | undefined>
+  reminder?: (cwd: string) => Promise<string | undefined>
 }
 
 export function createPlugin(overrides: Overrides = {}) {
@@ -74,6 +76,7 @@ export function createPlugin(overrides: Overrides = {}) {
       const disabled = readOptions(ctx.options as Record<string, unknown> | undefined)
       const gate = overrides.commitGate ?? ((command: string, cwd: string) => decideCommitGate(command, cwd))
       const followUp = overrides.followUp ?? ((merges) => flagCleanupFollowUp(merges, process.env))
+      const reminded = new Set<string>()
       const sessionDirectory = (sessionID: string): Promise<string> =>
         ctx.session
           .get({ sessionID } as never)
@@ -106,9 +109,17 @@ export function createPlugin(overrides: Overrides = {}) {
           } else {
             const call = shellCall(event.tool, event.input)
             if (call === undefined) return
-            const exit = shellExit(event.result)
-            if (exit !== undefined && exit !== 0) return
             const cwd = shellCwd(call.workdir, directory)
+            if (!disabled.has("session-reminders") && !reminded.has(event.sessionID)) {
+              reminded.add(event.sessionID)
+              const note = await (overrides.reminder ?? sessionReminder)(cwd).catch(() => undefined)
+              if (note) notes.push(note)
+            }
+            const exit = shellExit(event.result)
+            if (exit !== undefined && exit !== 0) {
+              if (notes.length) event.result = appendResultText(event.result, notes.join("\n"))
+              return
+            }
             notes.push(...shellAdvisories(call.command, cwd, disabled, overrides.advise))
             if (exit === 0) merges = shellMerges(call.command, cwd)
           }
