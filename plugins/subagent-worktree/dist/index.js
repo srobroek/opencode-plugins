@@ -853,8 +853,16 @@ ${note}`,
     return directory === undefined ? [] : git2.localFiles(directory);
   };
   const merge = async (input, tool) => {
-    if (input.method === "list")
+    if (input.method === "list") {
+      await ctx.permission.assert({
+        sessionID: tool.sessionID,
+        agent: tool.agent,
+        action: MERGE_TOOL,
+        resources: ["list"],
+        source: { type: "tool", messageID: tool.messageID, id: tool.id }
+      });
       return list(tool.sessionID);
+    }
     if (!input.sessionID) {
       return { content: `${MERGE_TOOL}: sessionID is required for method "${input.method}"`, metadata: { ok: false } };
     }

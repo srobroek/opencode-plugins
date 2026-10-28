@@ -94,7 +94,8 @@ branch. Only the session that spawned the subagent can merge. The merge is refus
 On success `wt` removes the worktree and branch, and the child moves back to the caller's checkout.
 On a conflict or any other failure the worktree is kept and the `wt` output is returned.
 
-`list` reads every stored lane in the caller's project and reports the branch, worktree path,
+`list` asserts the `subagent_worktree_merge` permission with resource `list` before reading any
+lane or session data. It reads every stored lane in the caller's project and reports the branch, worktree path,
 commits ahead, uncommitted changes, and whether the child and parent sessions still exist. Each
 session lookup has a 2 second limit and reports `unknown` when it runs out. Lanes whose child or
 parent session is gone, or whose worktree git cannot read, are flagged as orphans. `list` only

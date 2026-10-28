@@ -501,6 +501,26 @@ describe(MERGE_TOOL, () => {
     expect(setup.log.some((argv) => argv[0] === "wt")).toBe(false)
   })
 
+  test("list denial prevents lane and session reads", async () => {
+    const setup = await start({
+      assert: () => {
+        throw new Error("list denied")
+      },
+    })
+    Object.assign(setup.fake.context.storage, {
+      scan: async () => {
+        throw new Error("unexpected lane read")
+      },
+    })
+    Object.assign(setup.fake.context.session, {
+      get: async () => {
+        throw new Error("unexpected session read")
+      },
+    })
+    await expect(run(setup, { method: "list" })).rejects.toThrow("list denied")
+    expect(setup.log).toEqual([])
+  })
+
   test("list reports active lanes and flags orphans without removing anything", async () => {
     const orphan: Lane = {
       child: "ses_gone_child",
@@ -524,6 +544,13 @@ describe(MERGE_TOOL, () => {
         input.sessionID === "ses_fake1" ? new Promise(() => {}) : slow(input as never),
     })
     const result = await run(setup, { method: "list" })
+    expect(setup.fake.asserts.at(-1)).toEqual({
+      sessionID: PARENT,
+      agent: "build",
+      action: MERGE_TOOL,
+      resources: ["list"],
+      source: { type: "tool", messageID: "msg_2", id: "call_2" },
+    })
     expect(result.metadata.ok).toBe(true)
     expect(result.content).toContain('count="2"')
     expect(result.content).toContain(
