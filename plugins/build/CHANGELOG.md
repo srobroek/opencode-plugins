@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.3.0](https://github.com/srobroek/opencode-plugins/compare/build--v0.2.0...build--v0.3.0) (2026-10-27)
+
+
+### Features
+
+* **build:** allow repomix_pack for external-repo-worker ([b4e9f4c](https://github.com/srobroek/opencode-plugins/commit/b4e9f4cc288ae2eba28f137dfc42217fa99dbda4))
+
+
+### Bug Fixes
+
+* **lib:** keep a shipped agent hidden when the host prefills hidden: false ([6156c94](https://github.com/srobroek/opencode-plugins/commit/6156c946f8a5265ff5498bb4062a9d822bbd0555))
+
+
+### Performance
+
+* **build:** allow external-repo-worker coding skills by family ([177f3b9](https://github.com/srobroek/opencode-plugins/commit/177f3b912f31569273af520f08270abf7acda986))
+
 ## [0.2.0](https://github.com/srobroek/opencode-plugins/compare/build--v0.1.0...build--v0.2.0) (2026-10-27)
 
 

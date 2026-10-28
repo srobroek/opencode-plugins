@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/srobroek/opencode-plugins/compare/trunk-dev--v0.2.0...trunk-dev--v0.2.1) (2026-10-27)
+
+
+### Performance
+
+* **trunk-dev:** trigger the router on landing on main and feature flags ([efb0947](https://github.com/srobroek/opencode-plugins/commit/efb0947f2b8d7394a8fb770f5323fd39e1881405))
+
 ## [0.2.0](https://github.com/srobroek/opencode-plugins/compare/trunk-dev--v0.1.0...trunk-dev--v0.2.0) (2026-10-27)
 
 

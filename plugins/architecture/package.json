@@ -1,6 +1,6 @@
 {
   "name": "@srobroek/opencode-architecture",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Architecture skills (capability-first layout, ownership boundaries, durable docs/ knowledge) and a read-only architect subagent.",
   "private": true,
   "type": "module",

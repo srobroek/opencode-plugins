@@ -1,6 +1,6 @@
 {
   "name": "@srobroek/opencode-agent-mechanic",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "mechanic subagent: cheap, exact mechanical edits (renames, bulk edits, formatting, moving code) that run the given check.",
   "private": true,
   "type": "module",

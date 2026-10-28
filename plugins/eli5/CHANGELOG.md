@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/srobroek/opencode-plugins/compare/eli5--v0.2.0...eli5--v0.2.1) (2026-10-27)
+
+
+### Bug Fixes
+
+* **lib:** keep a shipped agent hidden when the host prefills hidden: false ([6156c94](https://github.com/srobroek/opencode-plugins/commit/6156c946f8a5265ff5498bb4062a9d822bbd0555))
+
 ## [0.2.0](https://github.com/srobroek/opencode-plugins/compare/eli5--v0.1.0...eli5--v0.2.0) (2026-10-27)
 
 

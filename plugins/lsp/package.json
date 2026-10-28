@@ -1,6 +1,6 @@
 {
   "name": "@srobroek/opencode-lsp",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Append new LSP errors to edit, write and patch results, using the lsp-tools-mcp diagnostics tool.",
   "private": true,
   "type": "module",

@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/srobroek/opencode-plugins/compare/lsp--v0.2.0...lsp--v0.2.1) (2026-10-27)
+
+
+### Documentation
+
+* **lsp:** mark opt-in, note stale diagnostics, suggest an LSP instruction ([59f9f8c](https://github.com/srobroek/opencode-plugins/commit/59f9f8c4f815126bcfc916eda48c3c5e86a0b339))
+
 ## [0.2.0](https://github.com/srobroek/opencode-plugins/compare/lsp--v0.1.0...lsp--v0.2.0) (2026-10-27)
 
 

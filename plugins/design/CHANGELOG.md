@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.3.0](https://github.com/srobroek/opencode-plugins/compare/design--v0.2.0...design--v0.3.0) (2026-10-27)
+
+
+### Features
+
+* **design:** add accessibility-scanner and wire-dsl MCP servers in frontend projects ([9895602](https://github.com/srobroek/opencode-plugins/commit/989560280d8e5c46b09f8cd5012e206473be6da9))
+
+
+### Bug Fixes
+
+* **lib:** keep a shipped agent hidden when the host prefills hidden: false ([6156c94](https://github.com/srobroek/opencode-plugins/commit/6156c946f8a5265ff5498bb4062a9d822bbd0555))
+
+
+### Performance
+
+* **design:** allow the design agents' skills by family ([d273ee4](https://github.com/srobroek/opencode-plugins/commit/d273ee4b201c71dc896b8e682aaccb884a5a9e06))
+
 ## [0.2.0](https://github.com/srobroek/opencode-plugins/compare/design--v0.1.0...design--v0.2.0) (2026-10-27)
 
 

@@ -1,6 +1,6 @@
 {
   "name": "@srobroek/opencode-agent-efficiency",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Cut agent tokens: run bash calls as the built-in shell tool, narrow explore to search and web tools, and trim read-only subagent prompts.",
   "private": true,
   "type": "module",
