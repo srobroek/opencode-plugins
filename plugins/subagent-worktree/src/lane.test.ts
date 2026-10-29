@@ -28,6 +28,7 @@ import {
   slug,
   startPrompt,
   tail,
+  targetsExternalDirectory,
   withoutWorktree,
   worktreeForBranch,
   worktreeName,
@@ -44,6 +45,17 @@ const lane: Lane = {
   parentDir: "/repo",
   state: "active",
 }
+
+test("external working-directory directives are conservative", () => {
+  expect(targetsExternalDirectory("Working directory: /other/repo", "/repo")).toBe(true)
+  expect(targetsExternalDirectory("Work in ~/.local/share/chezmoi", "/repo")).toBe(true)
+  expect(targetsExternalDirectory("Work in ~/repo", "/home/me/repo", "/home/me")).toBe(false)
+  expect(targetsExternalDirectory("Read /other/file.txt", "/repo")).toBe(false)
+  expect(targetsExternalDirectory("Repository: /repo/subdir", "/repo")).toBe(false)
+  expect(targetsExternalDirectory("Repo: /repo-other", "/repo")).toBe(true)
+  expect(targetsExternalDirectory("Repo: /other; repo: /repo", "/repo")).toBe(false)
+  expect(readSubagentInput({ agent: "general", prompt: "p", worktree: false })?.worktree).toBe(false)
+})
 
 describe("readOptions", () => {
   test("defaults", () => {
