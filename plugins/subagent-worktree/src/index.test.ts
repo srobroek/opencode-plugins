@@ -74,6 +74,7 @@ async function start(
     assert?: () => void
     strategy?: "wt" | "git"
     tools?: Array<Record<string, unknown> & { name: string }>
+    exists?: (path: string) => Promise<boolean>
   } = {},
 ): Promise<Setup> {
   const fake = createFakeContext({
@@ -122,7 +123,10 @@ async function start(
         if (options.strategy !== "git") repo.branch[directory] = String(input.name)
         return { directory }
       },
-      remove: async (input: Record<string, unknown>) => void worktree.calls.push({ method: "remove", input }),
+      remove: async (input: Record<string, unknown>) => {
+        expect(fake.sessions.get("ses_fake1")?.location).toEqual({ directory: REPO })
+        worktree.calls.push({ method: "remove", input })
+      },
       refresh: async (input: Record<string, unknown>) => void worktree.calls.push({ method: "refresh", input }),
     },
   })
@@ -130,7 +134,10 @@ async function start(
     remove: async (input: unknown) => void fake.calls.push({ method: "session.remove", input }),
   })
   const log: string[][] = []
-  const plugin = createPlugin({ run: fakeRun(repo, log), suffix: () => "abc123", lookupMs: 20 })
+  const plugin = createPlugin({ run: async (argv) => {
+    if (argv[0] === "wt") expect(fake.sessions.get("ses_fake1")?.location).toEqual({ directory: REPO })
+    return fakeRun(repo, log)(argv)
+  }, suffix: () => "abc123", lookupMs: 20, directoryExists: options.exists ?? (async () => true) })
   const cleanup = (await plugin.setup(fake.context)) as () => Promise<void>
   return { fake, repo, log, worktree, cleanup }
 }
@@ -173,6 +180,13 @@ describe("setup", () => {
 })
 
 describe("execute.before", () => {
+  test.each([{ worktree: false }, { prompt: "Working directory: /elsewhere/repo" }])("skips unneeded lanes: %j", async (input) => {
+    const setup = await start()
+    const event = await spawn(setup, input)
+    expect(setup.worktree.calls).toEqual([])
+    expect(setup.fake.calls.some((call) => call.method === "session.create")).toBe(false)
+    expect((event.input as Record<string, unknown>).worktree).toBeUndefined()
+  })
   test("runs an opted-in subagent in a new worktree", async () => {
     const setup = await start()
     const event = await spawn(setup)
@@ -362,6 +376,14 @@ describe("worktree argument", () => {
 })
 
 describe("execute.after", () => {
+  test("a failed move prevents removal", async () => {
+    const setup = await start()
+    await spawn(setup)
+    Object.assign(setup.fake.context.session, { move: async () => { throw new Error("move failed") } })
+    await setup.fake.fire.tool("execute.after", completed("ses_fake1"))
+    expect(setup.worktree.calls.map((call) => call.method)).toEqual(["create"])
+    expect(lane(setup.fake)?.state).toBe("active")
+  })
   test("annotates the result and keeps a lane with commits", async () => {
     const setup = await start()
     await spawn(setup)
@@ -451,6 +473,28 @@ describe(MERGE_TOOL, () => {
     ])
     expect(lane(setup.fake)?.state).toBe("merged")
     expect(setup.worktree.calls.at(-1)?.method).toBe("refresh")
+  })
+
+  test("list repairs externally deleted lanes and reports the moved session", async () => {
+    let present = true
+    const setup = await start({ exists: async () => present })
+    await spawn(setup)
+    present = false
+    const result = await run(setup, { method: "list" })
+    expect(result.content).toContain("moved child sessions back")
+    expect(result.metadata.repaired).toEqual(["ses_fake1"])
+    expect(setup.fake.sessions.get("ses_fake1")?.location).toEqual({ directory: REPO })
+    expect(lane(setup.fake)?.state).toBe("removed")
+    expect(setup.worktree.calls.map((call) => call.method)).toEqual(["create"])
+  })
+
+  test("a failed move prevents wt merge", async () => {
+    const setup = await start()
+    await spawn(setup)
+    setup.repo.ahead = 1
+    Object.assign(setup.fake.context.session, { move: async () => { throw new Error("move failed") } })
+    await expect(run(setup, { sessionID: "ses_fake1", method: "wt-merge" })).rejects.toThrow("move failed")
+    expect(setup.log.some((argv) => argv[0] === "wt")).toBe(false)
   })
 
   test("reports a conflict and keeps the worktree", async () => {

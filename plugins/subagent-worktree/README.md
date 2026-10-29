@@ -35,6 +35,7 @@ with `sessionID`. The argument is removed before the built-in tool runs.
 | Caller passes | Read-only or not opted-in agent | Opted-in writer |
 | --- | --- | --- |
 | `worktree` | a child session moved into that worktree before it starts | a fresh worktree branched from that worktree's `HEAD`, merged back into its branch |
+| `worktree: false` | the caller's directory | the caller's directory, without a lane |
 | nothing | the caller's directory | a fresh worktree branched from the caller's checkout |
 
 Child sessions start in the parent session's location, so a parent that already runs in a worktree
@@ -50,7 +51,10 @@ worktree like a read-only agent.
 `execute.before` on the `subagent` tool. It skips the call when it continues a session (`sessionID`
 is set), the agent is not opted in, unknown or primary, the agent is read-only (its last permission
 rule matching `edit` on `*` denies it), the caller is itself a child session, or the caller's
-directory is not a git work tree. Otherwise it:
+directory is not a git work tree. It also skips automatic isolation for `worktree: false` or a
+single explicit working-directory directive pointing outside the caller's checkout (including
+`~/` paths). Incidental file paths and ambiguous multi-repository briefs do not disable isolation;
+an explicit worktree path or branch takes precedence. Otherwise it:
 
 1. asserts the `subagent` permission for the agent;
 2. creates a worktree with `ctx.worktree.create` named `subagent-<description>-<random>`, starting
@@ -63,8 +67,8 @@ directory is not a git work tree. Otherwise it:
 
 `execute.after` on `subagent` appends a `<subagent-worktree>` block to the result with the branch,
 base, target, commit count, a diff command and how to merge. When the child finished with no
-commits and a clean tree, the worktree is removed and the child moves back to the caller's
-checkout. Continuing such a child later gives it a fresh worktree. Background runs are left alone
+commits and a clean tree, the child moves back to the parent's directory before the worktree is
+removed. Continuing such a child later gives it a fresh worktree. Background runs are left alone
 until merged. A lane with no commits but uncommitted changes gets a warning: its work exists only
 in the worktree, so continue the subagent and ask it to commit.
 
@@ -91,15 +95,17 @@ branch. Only the session that spawned the subagent can merge. The merge is refus
   lane changes (`git diff --name-only <target>...HEAD`). The refusal lists the files. A target that
   is not checked out anywhere has no local changes.
 
-On success `wt` removes the worktree and branch, and the child moves back to the caller's checkout.
-On a conflict or any other failure the worktree is kept and the `wt` output is returned.
+Before invoking `wt merge`, the child moves back to the parent's directory; if this move fails,
+the merge does not run. On success `wt` removes the worktree and branch. On a conflict or other
+failure the worktree is kept, the child moves back into it, and the `wt` output is returned.
 
 `list` asserts the `subagent_worktree_merge` permission with resource `list` before reading any
 lane or session data. It reads every stored lane in the caller's project and reports the branch, worktree path,
 commits ahead, uncommitted changes, and whether the child and parent sessions still exist. Each
 session lookup has a 2 second limit and reports `unknown` when it runs out. Lanes whose child or
 parent session is gone, or whose worktree git cannot read, are flagged as orphans. `list` only
-reports. It removes nothing.
+repairs missing worktrees by moving their child sessions back to the parent's directory and
+marking the lanes removed, and reports these repairs. It does not delete any worktree.
 
 ## Credits
 

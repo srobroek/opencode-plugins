@@ -6,7 +6,7 @@ export const LANE_PREFIX = "lane/"
 export const SUBAGENT_PREAMBLE = "You are a subagent spawned by another session."
 export const WORKTREE_PARAM = "worktree"
 export const WORKTREE_PARAM_DESCRIPTION =
-  "Path or branch of an existing worktree of this project to run the subagent in; defaults to your directory."
+  "Path or branch of an existing worktree of this project; false disables automatic isolation."
 
 export const DEFAULT_AGENTS: readonly string[] = ["implementer", "implementer-high", "general"]
 
@@ -66,8 +66,8 @@ export type SubagentInput = {
   prompt: string
   sessionID?: string
   background?: boolean
-  /** An existing worktree (path or branch) to start the subagent in. */
-  worktree?: string
+  /** An existing worktree (path or branch), or false to disable automatic isolation. */
+  worktree?: string | false
 }
 
 export function readSubagentInput(input: unknown): SubagentInput | undefined {
@@ -81,6 +81,7 @@ export function readSubagentInput(input: unknown): SubagentInput | undefined {
   }
   if (typeof value.sessionID === "string" && value.sessionID !== "") read.sessionID = value.sessionID
   if (value.background === true) read.background = true
+  if (value[WORKTREE_PARAM] === false) read.worktree = false
   if (typeof value[WORKTREE_PARAM] === "string" && value[WORKTREE_PARAM].trim() !== "")
     read.worktree = value[WORKTREE_PARAM].trim()
   return read
@@ -168,6 +169,7 @@ export function planStart(facts: {
   runnable: boolean
 }): StartPlan {
   const { input, isolation, lookup } = facts
+  if (input.worktree === false) return { kind: "default" }
   if (input.worktree === undefined || lookup === undefined)
     return isolation.isolate ? { kind: "isolate", from: facts.parentDir } : { kind: "default" }
   if (!lookup.ok) return { kind: "refuse", reason: lookup.reason }
@@ -180,6 +182,8 @@ export function planStart(facts: {
 export const CONTINUE_WITH_WORKTREE = "worktree applies only to new subagents; omit it when passing sessionID"
 
 export type IsolationFacts = {
+  projectDir?: string
+  homeDir?: string
   tool: string
   input: SubagentInput | undefined
   options: Options
@@ -199,6 +203,9 @@ export function decideIsolation(facts: IsolationFacts): Isolation {
   const input = facts.input
   if (!input) return { isolate: false, reason: "unreadable input" }
   if (input.sessionID !== undefined) return { isolate: false, reason: "continues an existing session" }
+  if (input.worktree === false) return { isolate: false, reason: "explicit opt-out" }
+  if (input.worktree === undefined && facts.projectDir && targetsExternalDirectory(input.prompt, facts.projectDir, facts.homeDir))
+    return { isolate: false, reason: "task targets another directory" }
   const names = new Set([input.agent, facts.agent?.id, facts.agent?.name].filter((name) => name !== undefined))
   if (!facts.options.agents.some((agent) => names.has(agent))) return { isolate: false, reason: "agent not opted in" }
   if (!facts.agent) return { isolate: false, reason: "unknown agent" }
@@ -207,6 +214,16 @@ export function decideIsolation(facts: IsolationFacts): Isolation {
   if (facts.callerIsChild) return { isolate: false, reason: "caller is a child session" }
   if (!facts.isGit) return { isolate: false, reason: "not a git checkout" }
   return { isolate: true }
+}
+
+/** Only explicit working-directory directives count, not incidental absolute file paths. */
+export function targetsExternalDirectory(prompt: string, projectDir: string, homeDir?: string): boolean {
+  const paths = [...prompt.matchAll(/(?:working directory|workdir|repository|repo|checkout|work in|work at)\s*(?:is|:|=)?\s*[`"']?(\/[^\s`"',;]+|~\/[^\s`"',;]+)/gi)]
+    .map((match) => match[1]?.replace(/[.)]+$/, ""))
+    .filter((path): path is string => path !== undefined)
+    .map((path) => path.startsWith("~/") && homeDir ? `${homeDir}/${path.slice(2)}` : path)
+  // Ambiguous/multi-repository briefs keep isolation; explicit worktree arguments take precedence.
+  return paths.length === 1 && !within(paths[0] ?? "", projectDir)
 }
 
 /** OpenCode wildcard match: `*` matches any run of characters. */
@@ -252,7 +269,7 @@ export function shortSha(sha: string): string {
 export function notice(lane: Pick<Lane, "directory" | "branch" | "base">, fresh: boolean): string {
   const lines = [
     `You work in an isolated git worktree: ${lane.directory} (branch ${lane.branch}, based on ${shortSha(lane.base)}).`,
-    "Run every command and edit every file inside it, not in any other checkout. Commit your work on this branch before you finish; the parent session reviews and merges it.",
+    "Run every command and edit every file inside it, not in any other checkout. Commit changes before you finish; do not create empty commits. The parent session reviews and merges your work.",
   ]
   return fresh ? [SUBAGENT_PREAMBLE, ...lines].join("\n") : lines.join("\n")
 }

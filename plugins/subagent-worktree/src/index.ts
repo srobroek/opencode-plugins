@@ -1,10 +1,10 @@
-import { realpath } from "node:fs/promises"
+import { realpath, stat } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join, resolve } from "node:path"
 import { Plugin } from "@opencode/plugin"
 import type { Context } from "@opencode/plugin/promise/plugin"
 import { type Result, Error as ToolError } from "@opencode/plugin/promise/tool"
-import { withOptionalString } from "@srobroek/opencode-lib/tool-schema"
+import { toJsonSchema, withOptionalString } from "@srobroek/opencode-lib/tool-schema"
 import { createGit, type Git, type Runner, spawnRunner } from "./git.ts"
 import {
   annotation,
@@ -52,7 +52,7 @@ export const MERGE_DESCRIPTION =
   "and removes the worktree on success; a conflict keeps the worktree and reports the output. " +
   "The worktree must be committed and clean, and the target checkout must have no uncommitted or untracked changes to files the lane changes. " +
   'method "none" only reports the lane status. method "list" (no sessionID) reports every active lane in the project ' +
-  "with commits ahead, uncommitted changes, and lanes whose child or parent session is gone; it never removes anything."
+  "with commits ahead, uncommitted changes, and orphaned lanes; missing worktrees move their child sessions back."
 
 export const MERGE_INPUT = {
   type: "object",
@@ -81,7 +81,14 @@ type Session = {
 type AgentInfo = { id: string; name?: string; mode?: string; model?: Session["model"]; permissions?: unknown }
 
 /** Test seams; the host never passes these. */
-export type Overrides = { run?: Runner; suffix?: () => string; lookupMs?: number }
+export type Overrides = { run?: Runner; suffix?: () => string; lookupMs?: number; directoryExists?: (path: string) => Promise<boolean> }
+
+const directoryExists = async (path: string) => {
+  try { return (await stat(path)).isDirectory() } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false
+    throw error
+  }
+}
 
 const randomSuffix = () => crypto.randomUUID().slice(0, 6)
 
@@ -104,6 +111,7 @@ export function createLanes(
   git: Git,
   suffix: () => string,
   lookupMs = SESSION_LOOKUP_MS,
+  exists = directoryExists,
 ) {
   const load = async (child: string) => parseLane(await ctx.storage.get(laneKey(child)))
   const save = (lane: Lane) => ctx.storage.set(laneKey(lane.child), lane)
@@ -210,7 +218,7 @@ export function createLanes(
     if (!parent) return
     const parentDir = parent.location.directory
     const agent = await getAgent(input.agent, parentDir)
-    const start = input.worktree === undefined ? undefined : await locate(parentDir, input.worktree)
+    const start = typeof input.worktree === "string" ? await locate(parentDir, input.worktree) : undefined
     const isolation = decideIsolation({
       tool: event.tool,
       input,
@@ -218,6 +226,8 @@ export function createLanes(
       agent,
       callerIsChild: Boolean(parent.parentID),
       isGit: start ? start.lookup.ok : await git.isWorkTree(parentDir),
+      projectDir: parentDir,
+      homeDir: homedir(),
     })
     const plan = planStart({
       input,
@@ -272,7 +282,8 @@ export function createLanes(
     child: string,
     prompt: string,
   ) => {
-    const lane = await load(child)
+    let lane = await load(child)
+    if (lane) lane = await repair(lane)
     if (!lane || lane.state === "active" || lane.parent !== event.sessionID) return
     const parent = await getSession(event.sessionID)
     const session = await getSession(child)
@@ -288,17 +299,28 @@ export function createLanes(
       await save(next)
       event.input = { ...(event.input as object), prompt: rewritePrompt(prompt, next, false) }
     } catch (error) {
+      await moveHome(lane)
       await removeWorktree(parent.projectID, worktree.directory, true).catch(() => {})
       throw new Error(`subagent-worktree: ${errorMessage(error)}`)
     }
   }
 
-  /** Remove an empty lane's worktree and move the child back to the caller's checkout. */
+  const moveHome = async (lane: Lane) => {
+    const parent = await getSession(lane.parent)
+    const directory = parent?.location.directory ?? lane.parentDir
+    await ctx.session.move({ sessionID: lane.child, directory } as never)
+  }
+
   const retire = async (lane: Lane, state: "removed" | "merged") => {
     const next: Lane = { ...lane, state }
-    await ctx.session.move({ sessionID: lane.child, directory: lane.parentDir } as never).catch(() => {})
     await save(next)
     return next
+  }
+
+  const repair = async (lane: Lane) => {
+    if (lane.state !== "active" || await exists(lane.directory)) return lane
+    await moveHome(lane)
+    return retire(lane, "removed")
   }
 
   const after = async (
@@ -320,6 +342,7 @@ export function createLanes(
     let removed = false
     if (shouldRemove(status, resultStatus)) {
       try {
+        await moveHome(lane)
         await removeWorktree(lane.projectID, lane.directory, false)
         await git.deleteBranch(lane.parentDir, lane.branch)
         lane = await retire(lane, "removed")
@@ -367,8 +390,14 @@ export function createLanes(
       .filter((lane) => lane.state === "active")
       .filter((lane) => (session ? lane.projectID === session.projectID : lane.parent === caller))
       .sort((a, b) => a.branch.localeCompare(b.branch))
-    const reports: LaneReport[] = await Promise.all(
+    const repaired: string[] = []
+    const checked = await Promise.all(
       lanes.map(async (lane) => {
+        const fixed = await repair(lane)
+        if (fixed.state === "removed") {
+          repaired.push(lane.child)
+          return undefined
+        }
         const [status, child, parent] = await Promise.all([
           git.status(lane.directory, lane.base),
           alive(lane.child),
@@ -377,10 +406,12 @@ export function createLanes(
         return { lane, status, child, parent }
       }),
     )
+    const reports = checked.filter((report): report is LaneReport => report !== undefined)
     return {
-      content: formatLaneList(reports, caller),
+      content: formatLaneList(reports, caller) + (repaired.length ? `\nMissing worktrees: moved child sessions back to their parent directory: ${repaired.join(", ")}.` : ""),
       metadata: {
         ok: true,
+        repaired,
         lanes: reports.map(({ lane, status, child, parent }) => ({
           sessionID: lane.child,
           parent: lane.parent,
@@ -420,7 +451,7 @@ export function createLanes(
     if (!input.sessionID) {
       return { content: `${MERGE_TOOL}: sessionID is required for method "${input.method}"`, metadata: { ok: false } }
     }
-    const lane = await load(input.sessionID)
+    let lane = await load(input.sessionID)
     await ctx.permission.assert({
       sessionID: tool.sessionID,
       agent: tool.agent,
@@ -428,6 +459,7 @@ export function createLanes(
       resources: [lane?.branch ?? input.sessionID],
       source: { type: "tool", messageID: tool.messageID, id: tool.id },
     } as never)
+    if (lane) lane = await repair(lane)
     const status = lane && lane.state === "active" ? await git.status(lane.directory, lane.base) : undefined
     if (input.method === "none") {
       if (!lane) return { content: `${MERGE_TOOL}: no worktree lane for session ${input.sessionID}`, metadata: { ok: false } }
@@ -436,7 +468,7 @@ export function createLanes(
     const target = input.target ?? lane?.target
     const ready = lane?.state === "active" && lane.parent === tool.sessionID && target && status && status.ahead > 0
     const files =
-      ready && !status.dirty
+      ready && lane && !status.dirty
         ? { laneFiles: await git.changedFiles(lane.directory, target), localFiles: await targetChanges(lane, target) }
         : {}
     const decision = decideMerge({
@@ -451,11 +483,14 @@ export function createLanes(
       return { content: `${MERGE_TOOL}: not merged: ${reason}`, metadata: { ok: false, reason } }
     }
     const argv = mergeArgs(lane.directory, decision.target)
+    // wt merge removes the checkout itself. A failed move must prevent that removal.
+    await moveHome(lane)
     const result = await git.run(argv)
     const output = tail(`${result.stdout}\n${result.stderr}`)
     if (result.code !== 0) {
       const conflict = isConflict(output)
       const what = result.code === 127 ? "wt is not installed" : conflict ? "merge conflict" : `wt merge exited ${result.code}`
+      if (await exists(lane.directory)) await ctx.session.move({ sessionID: lane.child, directory: lane.directory } as never)
       return {
         content: [
           `${MERGE_TOOL}: not merged (${what}). The worktree is kept at ${lane.directory} on branch ${lane.branch}.`,
@@ -485,7 +520,7 @@ export function createPlugin(overrides: Overrides = {}) {
     async setup(ctx) {
       const options = readOptions(ctx.options)
       const git = createGit(overrides.run ?? spawnRunner)
-      const lanes = createLanes(ctx, options, git, overrides.suffix ?? randomSuffix, overrides.lookupMs)
+      const lanes = createLanes(ctx, options, git, overrides.suffix ?? randomSuffix, overrides.lookupMs, overrides.directoryExists)
       const registrations: { dispose: () => Promise<void> }[] = []
       const cleanup = async () => {
         for (const registration of registrations.reverse()) await registration.dispose()
@@ -507,7 +542,9 @@ export function createPlugin(overrides: Overrides = {}) {
           await ctx.tool.transform((editor) => {
             editor.update(SUBAGENT_TOOL, (tool) => {
               const input = withOptionalString(tool.input, WORKTREE_PARAM, WORKTREE_PARAM_DESCRIPTION)
-              if (input !== undefined) tool.input = input as typeof tool.input
+              const schema = toJsonSchema(input)
+              if (schema) schema.properties[WORKTREE_PARAM] = { anyOf: [{ type: "string" }, { const: false }], description: WORKTREE_PARAM_DESCRIPTION }
+              if (input !== undefined) tool.input = (schema ?? input) as typeof tool.input
             })
           }),
         )
