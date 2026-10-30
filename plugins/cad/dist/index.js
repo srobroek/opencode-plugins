@@ -479,7 +479,8 @@ var RUN_INPUT = {
   required: ["script"],
   additionalProperties: false
 };
-var STOP_DESCRIPTION = "Stop a background CAD script that cad_run started in this session, by its pid. " + "It knows only scripts started since OpenCode last started: after a restart it refuses an earlier server's pid; " + "stop that server with its skill's own stop command (cad-viewer/scripts/viewer.py stop) or let its idle timeout end it.";
+var STOP_DESCRIPTION = `Stop a background CAD script that cad_run started in this session, by its pid.
+` + "It knows only scripts started since OpenCode last started: after a restart it refuses an earlier server's pid; " + "stop that server with its skill's own stop command (cad-viewer/scripts/viewer.py stop) or let its idle timeout end it.";
 var STOP_INPUT = {
   type: "object",
   properties: { pid: { type: "number", description: "The pid cad_run reported for the background script" } },

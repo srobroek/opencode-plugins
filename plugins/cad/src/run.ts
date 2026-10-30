@@ -42,7 +42,7 @@ export const RUN_INPUT = {
 } as const
 
 export const STOP_DESCRIPTION =
-  "Stop a background CAD script that cad_run started in this session, by its pid. " +
+  "Stop a background CAD script that cad_run started in this session, by its pid.\n" +
   "It knows only scripts started since OpenCode last started: after a restart it refuses an earlier server's pid; " +
   "stop that server with its skill's own stop command (cad-viewer/scripts/viewer.py stop) or let its idle timeout end it."
 
