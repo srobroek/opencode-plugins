@@ -1,7 +1,18 @@
 import { describe, expect, test } from "bun:test"
 import { candidateStatus, checkRoles, formatCheck } from "./check.ts"
-import { failureNote, fallbackTarget, retryTarget, rolesListing, staysOnModel, subagentNote, switchNote } from "./fallback.ts"
-import { healthView, markUnhealthy } from "./health.ts"
+import {
+  failureNote,
+  fallbackTarget,
+  retriesOnModel,
+  retryDelay,
+  retryTarget,
+  rolesListing,
+  SAME_MODEL_RETRIES,
+  staysOnModel,
+  subagentNote,
+  switchNote,
+} from "./fallback.ts"
+import { healthView, markUnhealthy, RECENT_MS } from "./health.ts"
 import { parseOptions } from "./resolve.ts"
 
 const a = { providerID: "p", id: "a" }
@@ -49,6 +60,7 @@ describe("retry switch", () => {
     expect(staysOnModel("rate-limit", 2, 2)).toBe(true)
     expect(staysOnModel("server", 3, 2)).toBe(true)
     expect(staysOnModel("outage", 3, 2)).toBe(true)
+    expect(staysOnModel("credentials", 3, 2)).toBe(true)
     expect(staysOnModel("rate-limit", 4, 2)).toBe(false)
     expect(staysOnModel("rate-limit", 2, 0)).toBe(false)
     for (const kind of ["quota", "auth", "unavailable", "content-filter"] as const) expect(staysOnModel(kind, 2, 2)).toBe(false)
@@ -56,10 +68,28 @@ describe("retry switch", () => {
     expect(retryTarget({ ...base, kind: "quota", attempt: 2 })).toEqual({ role: "task", model: b })
   })
 
+  test("a transient failure the host gives up on is retried on its model with backoff, for about a minute", () => {
+    expect([2, 3, 4, 5, 6, 7].map(retryDelay)).toEqual([2_000, 4_000, 8_000, 16_000, 30_000, 30_000])
+    expect(retriesOnModel("credentials", 2, 2)).toBe(true)
+    expect(retriesOnModel("credentials", 2 + SAME_MODEL_RETRIES - 1, 2)).toBe(true)
+    expect(retriesOnModel("credentials", 2 + SAME_MODEL_RETRIES, 2)).toBe(false)
+    expect(retriesOnModel("server", 9, 8)).toBe(true)
+    expect(retriesOnModel("auth", 2, 2)).toBe(false)
+  })
+
   test("never onto a cooling-down model, so two failures cannot trade places", () => {
     const both = healthView(markUnhealthy(markUnhealthy({}, a, 0, 1_000, "x"), b, 0, 1_000, "y"), 1)
     expect(retryTarget({ ...base, health: both })).toBeUndefined()
     expect(retryTarget({ ...base, role: "slow" })).toBeUndefined()
+  })
+
+  test("never onto a model, or a provider, that failed recently even while it stays in use", () => {
+    // The failed model itself was just recorded, as the retry hook does before it looks for a target.
+    const recent = (key: string) =>
+      healthView({ "p/a": { failedAt: 5, until: 5, reason: "x" }, [key]: { failedAt: 0, until: 0, reason: "x" } }, 10, RECENT_MS)
+    expect(retryTarget({ ...base, health: recent("p/b") })).toBeUndefined()
+    expect(retryTarget({ ...base, kind: "credentials", health: recent("p/*") })).toBeUndefined()
+    expect(retryTarget({ ...base, health: recent("q/x") })).toEqual({ role: "task", model: b })
   })
 
   test("the switch note names both models", () => {
@@ -83,6 +113,16 @@ describe("retry switch", () => {
     const byRole = subagentNote({ ...facts, agent: "general", spawnRole: "task", resumable: "ses_c" })
     expect(byRole).toContain('Spawn it again with tier: "task"; that tier now runs p/b.')
     expect(byRole).toContain("resume it with sessionID ses_c")
+  })
+
+  test("a failure that sits nothing out says the model stays in use and the subagent can carry on", () => {
+    const facts = { failed: a, kind: "credentials" as const, cooldownMs: 0, target: { role: "task", model: b } }
+    expect(failureNote(facts)).toBe("Model p/a failed (credentials); it stays in use unless it keeps failing.")
+    expect(switchNote(facts)).toBe("Model p/a failed (credentials); it stays in use unless it keeps failing. The request was retried on p/b.")
+    expect(subagentNote({ ...facts, target: undefined, agent: "general", resumable: "ses_c" })).toBe(
+      "Subagent 'general' failed. Model p/a failed (credentials); it stays in use unless it keeps failing. Resume it with sessionID ses_c, or spawn it again.",
+    )
+    expect(subagentNote({ ...facts, target: undefined, agent: undefined })).toEndWith("The spawn may be retried as is.")
   })
 })
 

@@ -77,12 +77,16 @@ writes them for you.
   `cheap` at effort `none`, and `general` gets `standard` (unless `auto` is on).
 - `fallback`: only `"keep"` is supported. If nothing matches, the agent keeps
   its own model, or inherits one if it has none.
-- `cooldownMs`: how long a failed model sits out (default `600000`, 10 min).
-  See [Runtime fallback](#runtime-fallback).
+- `cooldownMs`: how long a failed model first sits out (default `60000`, 1 min).
+  Each cooldown in a row doubles it. See [Runtime fallback](#runtime-fallback).
+- `maxCooldownMs`: the longest cooldown (default `600000`, 10 min).
+- `flapCount` and `flapWindowMs`: a model sits out once it has failed in
+  `flapCount` separate episodes within `flapWindowMs` (defaults `3` and
+  `600000`, 10 min). Set `flapCount: 1` to sit it out on its first failure.
 - `quotaCooldownMs`: how long a spent quota sits out when the provider names
   no reset time (default `21600000`, 6 h).
-- `hostRetries`: how many retries the host may spend on the same model for a
-  transient failure before the plugin switches the request (default `2`).
+- `hostRetries`: how many retries a transient failure gets on the same model
+  before the plugin switches the request (default `2`).
 - `switchTimeoutMs`: how long the plugin waits for `session.switchModel`
   during a retry (default `2000`).
 - `guard`: see [Subagent model guard](#subagent-model-guard).
@@ -297,11 +301,12 @@ alike:
 
 1. It checks whether the model or provider caused the error, and how:
 
-   | Kind | Examples | Cools down | Budget |
+   | Kind | Examples | Counts against | Budget |
    | --- | --- | --- | --- |
    | `rate-limit` | 429, throttling | the model | transient |
    | `server` | 5xx, overloaded | the model | transient |
    | `outage` | connection refused, DNS, fetch failed | the provider | transient |
+   | `credentials` | credentials did not load locally, such as `AWS default credential chain failed` or a failing `credential_process` helper | the provider | transient |
    | `auth` | 401/403, bad or expired credentials or SSO | the provider | permanent |
    | `quota` | 402, spent quota, billing, weekly or daily usage limit, subscription session or usage limits (`claude_session_limit`, `usage_limit_reached`, `subscription_sharing_usage_limit_exceeded`) | the provider | permanent |
    | `unavailable` | unknown or retired model, Bedrock's `The provided model identifier is invalid` | the model | permanent |
@@ -310,14 +315,26 @@ alike:
    User interrupts, tool errors and context overflow don't count, and the
    host's own decision stands.
 2. A transient failure stays on the same model for the first `hostRetries`
-   retries. A permanent one switches on the first retry.
-3. The failed model, or its whole provider, is marked unhealthy in plugin
-   storage, under `health`. A model's variants share its health. The cooldown
-   is `cooldownMs`. A spent quota sits out until the reset time the error
-   reports (an ISO time, a unix `reset` stamp, a `resets_in_seconds` or
-   `Retry-After` count, or a span such as `resets in 3h 20m`), else for `quotaCooldownMs`. Tiers are resolved again,
-   so agents on that tier move to the next candidate. When a cooldown ends,
-   the tiers are resolved again.
+   retries. A permanent one switches on the first retry. When the host would
+   not retry a transient failure itself (it doesn't retry credentials that
+   failed to load), the plugin retries it after 2 s, then 4 s, doubling.
+3. The failure is recorded against the model, or its whole provider, in
+   plugin storage under `health`. A model's variants share its health. One
+   failure doesn't take a model out of use: it sits out new resolutions only
+   once it has failed in `flapCount` separate episodes within `flapWindowMs`.
+   Failures within 10 s of the first one in an episode count as that episode,
+   so parallel requests that hit the same blip count once. A model that keeps
+   failing for 20 s or more, or that fails again and again, sits out. The first
+   cooldown is `cooldownMs`. Once it ends, the next failure within
+   `flapWindowMs` puts the model out again at once, for twice as long, up to
+   `maxCooldownMs`. After a quiet `flapWindowMs`, the model starts from zero.
+   Two kinds sit out on their first failure. A spent quota sits out until the
+   reset time the error reports (an ISO time, a unix `reset` stamp, a
+   `resets_in_seconds` or `Retry-After` count, or a span such as `resets in
+   3h 20m`), else for `quotaCooldownMs`. A model the provider doesn't serve
+   sits out for `maxCooldownMs`. When a model starts or ends a cooldown, the
+   tiers are resolved again, so agents on that tier move to the next
+   candidate and back.
 4. The request moves to the next healthy candidate of the session's tier: the
    `tier` the session was spawned with, else its agent's tier, else the first
    tier that lists the failed model. The plugin calls `session.switchModel`
@@ -329,9 +346,12 @@ alike:
    own decision stands. The switch keeps landing in the background and is
    picked up by the next attempt. Until it lands, the session isn't switched
    again.
-6. A model that is cooling down is never a target, so two failing models
-   can't take turns. When no healthy candidate is left, the host's own
-   decision stands.
+6. A model that is cooling down, that the request already failed on, or that
+   failed (or whose provider failed) in the last minute, is never a target,
+   so two failing models can't take turns. When no healthy candidate is left,
+   or a switch is still landing, a transient failure keeps retrying on its
+   model, with the delay doubling up to 30 s, for up to 5 retries (about a
+   minute). Otherwise the host's own decision stands.
 
 Without the plugin's switch, the host retries a transient error on the same
 model about ten times over roughly 80 seconds (seen with a provider that keeps
@@ -340,19 +360,22 @@ candidate left, the switch happens after `hostRetries` retries.
 
 Some failures never reach the `retry` hook, such as a spawn whose model is
 unavailable. And sometimes nothing healthy is left. For those, on
-`session.execution.failed` or a failed `subagent` call, the plugin marks the
-model unhealthy and leaves a note that does not start a turn
+`session.execution.failed` or a failed `subagent` call, the plugin records the
+failure as above and leaves a note that does not start a turn
 (`session.synthetic`, steer):
 
-- A **root session** gets a note naming the failed model and what its tier
-  resolves to now. The plugin doesn't switch or wake it: switching an idle
-  session could change a turn the user starts later.
+- A **root session** gets a note when the failure took its model out of use,
+  naming the failed model and what its tier resolves to now. The plugin
+  doesn't switch or wake it: switching an idle session could change a turn
+  the user starts later.
 - A **subagent session**, or a failed `subagent` call, leaves the note in the
-  parent. The note names the failed model and the next one, and says the
-  spawn may be retried. The child's failure event and the tool error produce
-  one note between them. For a child spawned with `tier`, the plugin also
-  switches the child to the tier's next model, and the note says to spawn
-  again with the same `tier` or resume the child by `sessionID`.
+  parent. The child's failure event and the tool error produce one note
+  between them. While the model stays in use, the note says to resume the
+  child by `sessionID` or spawn it again. Once the model sits out, the note
+  names the next model and says the spawn may be retried. For a child
+  spawned with `tier`, the plugin then also switches the child to the tier's
+  next model, and the note says to spawn again with the same `tier` or
+  resume the child by `sessionID`.
 
 Every fallback is logged (`console.warn`). The model is the one the error
 names (`Model unavailable: provider/model`), else the session's model, found
