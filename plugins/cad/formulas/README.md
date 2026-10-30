@@ -1,6 +1,6 @@
 # CAD Beads formulas
 
-The three `cad-*` formulas are poured roots; the eight `mol-cad-*` formulas are bondable molecules. A formula's canonical identity is its `.formula.toml` filename stem. Copy the formula files into a project's `.beads/formulas/` directory (or the user's Beads formulas directory), with the CAD skills and agents installed as `cad/README.md` describes.
+The three `cad-*` formulas are poured roots; the eight `mol-cad-*` formulas are bondable molecules. A formula's canonical identity is its `.formula.toml` filename stem. The plugin's `cad_setup` tool copies them into a Beads workspace's `.beads/formulas/`; the plugin itself provides the CAD skills and agents.
 
 ## Roots and stages
 
@@ -30,7 +30,7 @@ GROUND, INTENT, SPECIFY, LAYOUT, BOM, and RELEASE stay with the lead.
 | `mol-cad-iterate` | a change after DESIGN freeze | classify, INTENT gate, reopen-fanout, reopen-integrate, DETAIL gate, analysis-fanout, analysis-integrate, DESIGN freeze gate | lead, bonding `mol-cad-detail` and `mol-cad-analysis` |
 | `mol-cad-release` | release package | gather, validate, RELEASE gate, assemble | lead |
 
-Every worker step carries `execution_mode = "subagent"` and an `execution_agent_type` that names an agent in `cad/agents/`. A part designer builds only a scratch copy and delivers canonical record-source files for authorized parts via `scratch.py`; generated outputs, stray paths and unauthorized PNs are refused. New PN records are authorized at `init`. Conflicts write nothing. The lead alone integrates accepted proposals and builds versions.
+Every worker step carries `execution_mode = "subagent"` and an `execution_agent_type` that names an agent the plugin ships (`agents/`), so the beads subagent-routing gate admits it. A part designer builds only a scratch copy and delivers canonical record-source files for authorized parts via `scratch.py`; generated outputs, stray paths and unauthorized PNs are refused. New PN records are authorized at `init`. Conflicts write nothing. The lead alone integrates accepted proposals and builds versions.
 
 ## Bonding
 
@@ -58,8 +58,6 @@ Each L1 to L4 commit batch runs `cad-model run`, then `cad-model check`. A block
 Before freezing an existing project, run `validate.py PROJECT --migration-plan`; it is read-only. Layout findings warn before `design_freeze`, error from freeze on, and remain errors after `flow.frozen` or any release. Nothing moves automatically. Legacy versions and v1 releases remain as they are and are never reissued.
 Custom-made parts receive checked manufacturing geometry during build; manufacturing completeness is required at freeze and release and failures cannot be waived. Before DESIGN freeze, set released part revisions and build the exact version; pin its label, manifest SHA-256 and approved decision in `flow.frozen`. Verification rows must pass or be waived and cite evidence from the frozen version. Any post-freeze record/model change needs an approved ECO, new version and re-freeze before release.
 
-Run `cad/formulas/smoke-pour.sh` to copy the formula set into a temporary Beads workspace, pour each root, bond each molecule onto its fan-out step, check that every worker step names a shipped agent, and show that one approved gate makes a whole batch ready at once. It prints each formula's step, gate, and worker-step counts. The full canonical hardware path table is generated at `cad/skills/cad-record/references/layout.md`; use `layout-api.md` from commands instead of writing alternate path conventions.
+Run `plugins/cad/formulas/smoke-pour.sh` to copy the formula set into a temporary Beads workspace, pour each root, bond each molecule onto its fan-out step, check that every worker step names a shipped agent, and show that one approved gate makes a whole batch ready at once. It prints each formula's step, gate, and worker-step counts. The full canonical hardware path table is generated at the cad-record skill's `references/layout.md`; use `layout-api.md` from commands instead of writing alternate path conventions.
 
 The RELEASE gate comes before `release.py`, which seals `hw/releases/<REV>/` for good: after approval the lead records it as `decisions/DR-###`, then runs `release.py` with that decision. Release gates and package reports MUST show print/make files, buy rows (including OPEN identity fields and reasons), assembly steps, and checks as structured lists or tables. Give every cited file as a separate absolute-path line; never inline comma prose.
-
-Run `cad/formulas/smoke-pour.sh` to copy the formula set into a temporary Beads workspace, pour each root, bond each molecule onto its fan-out step, check that every worker step names a shipped agent, and show that one approved gate makes a whole batch ready at once. It prints each formula's step, gate, and worker-step counts.

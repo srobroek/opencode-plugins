@@ -1,6 +1,6 @@
 # Build guide
 
-Generate this page from the project record and built version with `uv run --script cad/skills/cad-record/scripts/build_guide.py hw --version vN --out docs`.
+Generate this page from the project record and built version with `cad_run cad-record/scripts/build_guide.py hw --version vN --out docs`.
 
 <!-- The generator keeps the parts source in sync with hw/bom.csv. -->
 <parts src="../hw/bom.csv" />

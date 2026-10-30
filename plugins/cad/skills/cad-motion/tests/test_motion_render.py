@@ -2,7 +2,7 @@
 """cad-motion motion plans and motion renders: plan validation and coverage, the animated GLB, the
 FreeCAD cross-check's spec and comparison, the MP4 timing check, and the render path end to end.
 
-Run: python3 -m unittest discover -s cad/skills/cad-motion/tests -p test_motion_render.py -v
+Run: python3 -m unittest discover -s plugins/cad/skills/cad-motion/tests -p test_motion_render.py -v
 The plan, coverage, GLB and cross-check tests need no kernel. The MP4 test needs `uv` (imageio-ffmpeg
 from motion.py's header); the end-to-end render also needs Playwright Chromium; the FreeCAD
 cross-check needs `uv` and freecadcmd. Each skips without its tool.

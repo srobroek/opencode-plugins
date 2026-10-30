@@ -36,7 +36,7 @@ id = "classify-change"
 title = "Define changed intent and affected parts"
 type = "task"
 labels = ["cad", "phase:iterate"]
-description = "Run skill://cad-recheck against the frozen design record. Record {{change}}, why the approved intent changes, and the exact direct-plus-dependent part set represented by {{affected_parts}}. A change after DESIGN freeze reopens only those affected parts; leave every other part frozen."
+description = "Run the cad-recheck skill against the frozen design record. Record {{change}}, why the approved intent changes, and the exact direct-plus-dependent part set represented by {{affected_parts}}. A change after DESIGN freeze reopens only those affected parts; leave every other part frozen."
 
 [steps.metadata]
 skill_hints = "cad-flow, cad-record, cad-recheck"
@@ -60,7 +60,7 @@ title = "Reopen only {{affected_parts}}: one detail molecule per affected part"
 type = "task"
 needs = ["intent-gate"]
 labels = ["cad", "phase:iterate", "fanout"]
-description = "Bond one mol-cad-detail per part in the approved impact set {{affected_parts}} onto this step before dispatch: `bd mol bond mol-cad-detail <this-step> --type parallel --ref detail-<PN> --var product={{product}} --var scope={{scope}} --var part=<PN> --var kernel={{kernel}} --var process_default={{process_default}} --var change='{{change}}: <change for this part>'`. Do not touch or reopen any unaffected part, revision, or evidence. Dispatch every ready subagent step below this step in ONE parallel batch of cad-part-designer workers, as skill://cad-flow Delegation describes. Close each molecule's steps and root from its worker's report; dispatch a failed part again in the next batch. Close this step when every child is closed."
+description = "Bond one mol-cad-detail per part in the approved impact set {{affected_parts}} onto this step before dispatch: `bd mol bond mol-cad-detail <this-step> --type parallel --ref detail-<PN> --var product={{product}} --var scope={{scope}} --var part=<PN> --var kernel={{kernel}} --var process_default={{process_default}} --var change='{{change}}: <change for this part>'`. Do not touch or reopen any unaffected part, revision, or evidence. Dispatch every ready subagent step below this step in ONE parallel batch of cad-part-designer workers, as the cad-flow skill's Delegation section describes. Close each molecule's steps and root from its worker's report; dispatch a failed part again in the next batch. Close this step when every child is closed."
 
 [steps.metadata]
 skill_hints = "cad-flow, cad-record"
@@ -95,7 +95,7 @@ title = "Recheck L4 analysis for {{affected_parts}}: one analysis molecule per c
 type = "task"
 needs = ["detail-gate"]
 labels = ["cad", "phase:analysis", "fanout"]
-description = "List the analysis cases that cover {{affected_parts}}: the joint sweep, the FreeCAD assembly check, tolerance stack-ups, static FEA at the worst-case pose, and motion cases whose joints moved. Bond each case that needs no other case's output onto this step before dispatch: `bd mol bond mol-cad-analysis <this-step> --type parallel --ref analysis-<case> --var product={{product}} --var scope={{scope}} --var case=<id> --var kind=sweep|assembly|stackup|fea|motion --var version=vN`. Dispatch every ready subagent step below this step in ONE parallel batch of cad-analyst workers, as skill://cad-flow Delegation describes. An FEA case at the worst-case pose waits for the sweep molecule, then runs as the next batch. Close this step when every child is closed."
+description = "List the analysis cases that cover {{affected_parts}}: the joint sweep, the FreeCAD assembly check, tolerance stack-ups, static FEA at the worst-case pose, and motion cases whose joints moved. Bond each case that needs no other case's output onto this step before dispatch: `bd mol bond mol-cad-analysis <this-step> --type parallel --ref analysis-<case> --var product={{product}} --var scope={{scope}} --var case=<id> --var kind=sweep|assembly|stackup|fea|motion --var version=vN`. Dispatch every ready subagent step below this step in ONE parallel batch of cad-analyst workers, as the cad-flow skill's Delegation section describes. An FEA case at the worst-case pose waits for the sweep molecule, then runs as the next batch. Close this step when every child is closed."
 
 [steps.metadata]
 skill_hints = "cad-flow, cad-motion, cad-analysis"

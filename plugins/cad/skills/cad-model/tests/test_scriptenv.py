@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """cadmodel.scriptenv: PEP 723 header reading and the shared-environment launch command.
 
-Run: python3 -m unittest discover -s cad/skills/cad-model/tests -p test_scriptenv.py -v
+Run: python3 -m unittest discover -s plugins/cad/skills/cad-model/tests -p test_scriptenv.py -v
 Standard library only; needs neither uv nor OCP.
 """
 

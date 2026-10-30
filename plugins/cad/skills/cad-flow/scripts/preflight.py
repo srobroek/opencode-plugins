@@ -3,7 +3,7 @@
 # requires-python = ">=3.11"
 # dependencies = []
 # ///
-"""Check the CAD plugin's required local tools and optional harness installation.
+"""Check the CAD plugin's required local tools, its OpenCode plugin and the optional Beads workspace.
 
 `--warm` also fetches what the checks need (Playwright Chromium, the pinned three.js modules), and
 its checks first-load every runtime environment, so the first build afterwards starts warm. Each
@@ -31,6 +31,8 @@ from typing import Any, Mapping, Sequence
 
 CAD_ROOT = Path(__file__).resolve().parents[3]
 SKILLS = CAD_ROOT / "skills"
+FORMULAS = CAD_ROOT / "formulas"
+INSTALL_COMMAND = "opencode plugin add 'github:srobroek/opencode-plugins::path:plugins/cad'"
 FREECAD_RUNTIME = SKILLS / "cad-drawings" / "scripts"
 CONCEPT_SCRIPTS = SKILLS / "cad-concept" / "scripts"
 MODEL_SCRIPTS = SKILLS / "cad-model" / "scripts"
@@ -390,85 +392,36 @@ def beads_workspace(cwd: Path, environ: Mapping[str, str]) -> Path | None:
 def _beads_check(cwd: Path, environ: Mapping[str, str]) -> Check:
     bd = shutil.which("bd", path=environ.get("PATH"))
     workspace = beads_workspace(cwd, environ)
-    has_workspace = workspace is not None
-    if bd and has_workspace:
-        return _check("beads", "Beads", "pass", f"bd at {bd}; workspace at {workspace}.", "", required=False)
+    if bd and workspace is not None:
+        shipped = sorted(path.name for path in FORMULAS.glob("*.formula.toml"))
+        missing = [name for name in shipped if not (workspace / "formulas" / name).is_file()]
+        if missing:
+            return _check("beads", "Beads", "warn",
+                          f"bd at {bd}; workspace at {workspace}; {len(missing)} of {len(shipped)} cad formulas "
+                          f"are missing from {workspace / 'formulas'}.",
+                          "Run the cad_setup tool to install the CAD formulas.", required=False)
+        return _check("beads", "Beads", "pass",
+                      f"bd at {bd}; workspace at {workspace}; all {len(shipped)} cad formulas installed.", "",
+                      required=False)
     absent = []
     if not bd:
         absent.append("bd is not on PATH")
-    if not has_workspace:
+    if workspace is None:
         absent.append("no .beads workspace was found from the current directory or BEADS_DIR")
     return _check("beads", "Beads", "warn", "; ".join(absent) + ".",
-                  "Install bd and initialize a Beads workspace if using the workflow formulas and approval gates.",
+                  "Install bd, run `bd init`, then the cad_setup tool, if using the workflow formulas and approval gates.",
                   required=False)
 
 
-def _plugin_named(value: Any) -> bool:
-    if isinstance(value, dict):
-        names = [value.get(key) for key in ("name", "id", "plugin", "package")]
-        matches = any(isinstance(name, str) and (name == "cad" or name.startswith("cad@")
-                                                  or name.endswith("/cad")) for name in names)
-        install_path = value.get("installPath") or value.get("path")
-        if matches and install_path is not None:
-            return Path(str(install_path)).exists()
-        return matches or any(_plugin_named(child) for child in value.values())
-    if isinstance(value, list):
-        return any(_plugin_named(child) for child in value)
-    return False
-
-
-def _harness_check(harness: str, cwd: Path, home: Path, environ: Mapping[str, str]) -> Check:
-    if harness == "opencode":
-        skills = sorted(path.name for path in (cwd / ".opencode" / "skills").glob("cad-*") if path.is_dir())
-        agents = sorted(path.name for path in (cwd / ".opencode" / "agents").glob("cad-*"))
-        present = bool(skills and agents)
-        detail = f"Found {len(skills)} cad-* skill(s) and {len(agents)} cad-* agent(s) under .opencode/."
-        fix = "Copy the generated cad skills and agents into .opencode/skills/ and .opencode/agents/ as in cad/README.md."
-    elif harness == "kiro":
-        agents_dir = cwd / ".kiro" / "agents"
-        agents = sorted(agents_dir.glob("cad-*.json")) if agents_dir.is_dir() else []
-        link = cwd / "cad"
-        linked = link.is_dir() and (link / "skills").is_dir()
-        present = bool(agents and linked)
-        detail = f"Found {len(agents)} cad reviewer agent(s) in .kiro/agents; cad link {'is' if linked else 'is not'} present."
-        fix = "Link the plugin to workspace cad/ and copy harness/kiro/agents/*.json to .kiro/agents/ as in cad/README.md."
-    elif harness == "claude":
-        claude_home = Path(environ.get("CLAUDE_CONFIG_DIR") or (home / ".claude"))
-        settings = (cwd / ".claude" / "settings.json", cwd / ".claude" / "settings.local.json",
-                    claude_home / "settings.json", claude_home / "settings.local.json")
-        enabled = False
-        for path in settings:
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            enabled_plugins = data.get("enabledPlugins", {}) if isinstance(data, dict) else {}
-            enabled |= isinstance(enabled_plugins, dict) and any(
-                str(key).startswith("cad@") and value is True for key, value in enabled_plugins.items())
-        cache = claude_home / "plugins" / "cache"
-        cached = any((path / "plugin.json").is_file() for path in cache.glob("**/cad/**")) if cache.exists() else False
-        present = enabled or cached
-        detail = "Claude Code cad plugin is enabled or cached." if present else "Claude Code cad plugin enablement/cache was not detected."
-        fix = "Install or load the cad plugin with `claude plugin install cad@srobroek-omp` (or `--plugin-dir` for a checkout)."
-    else:
-        omp = shutil.which("omp", path=environ.get("PATH"))
-        present = False
-        detail = "OMP plugin was not detected."
-        if omp:
-            try:
-                result = subprocess.run([omp, "plugin", "list", "--json"], capture_output=True, text=True,
-                                        timeout=15, check=False, cwd=cwd, env=dict(environ))
-                if result.returncode == 0:
-                    present = _plugin_named(json.loads(result.stdout))
-                    detail = "OMP cad plugin is present in `omp plugin list --json`." if present else \
-                        "OMP plugin list did not report an installed cad plugin."
-                else:
-                    detail = "Could not read `omp plugin list --json`; OMP plugin state is unknown."
-            except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
-                detail = "Could not read `omp plugin list --json`; OMP plugin state is unknown."
-        fix = "Install the cad plugin from its marketplace with `omp plugin install cad@srobroek-omp`."
-    return _check(f"harness-{harness}", f"{harness.title()} installation", "pass" if present else "warn",
-                  detail, "" if present else fix, required=False)
+def _opencode_check(environ: Mapping[str, str]) -> Check:
+    """The srobroek.cad OpenCode plugin's cad_run tool sets CAD_OPENCODE_PLUGIN for every script it starts."""
+    plugin = environ.get("CAD_OPENCODE_PLUGIN")
+    if plugin:
+        return _check("opencode-plugin", "OpenCode cad plugin", "pass",
+                      f"Running under the cad_run tool of {plugin}.", "", required=False)
+    return _check("opencode-plugin", "OpenCode cad plugin", "warn",
+                  "Not started by the cad_run tool, so the cad skills, agents and tools may not be loaded.",
+                  f"Install the plugin with `{INSTALL_COMMAND}` and run preflight through cad_run.", required=False)
 
 
 def _run_uv_check(environ: Mapping[str, str]) -> tuple[Check, str | None]:
@@ -495,7 +448,7 @@ def _run_check(name: str, function: Any) -> Check:
 
 
 def run_checks(environ: Mapping[str, str] | None = None, cwd: Path | None = None,
-               home: Path | None = None, harness: str | None = None, warm: bool = False,
+               home: Path | None = None, warm: bool = False,
                cad_checks: Sequence[Check] | None = None) -> Report:
     """Run checks, beginning with the CAD tool needed by every other operation."""
     env = os.environ if environ is None else environ
@@ -517,9 +470,7 @@ def run_checks(environ: Mapping[str, str] | None = None, cwd: Path | None = None
                       for name in (*(runtime.id for runtime in RUNTIMES), CHROMIUM.id))
     checks.append(_run_check("three-vendor-cache", lambda: _vendor_check(env, fill=warm)))
     checks.append(_run_check("beads", lambda: _beads_check(workdir, env)))
-    harnesses = (harness,) if harness else ("omp", "claude", "opencode", "kiro")
-    checks.extend(_run_check(f"harness-{name}", lambda name=name: _harness_check(name, workdir, home_dir, env))
-                  for name in harnesses)
+    checks.append(_run_check("opencode-plugin", lambda: _opencode_check(env)))
     return Report(tuple(checks))
 
 
@@ -560,19 +511,18 @@ def _alive(pid: Any) -> bool:
     return True
 
 
-def warm(environ: Mapping[str, str] | None = None, cwd: Path | None = None, home: Path | None = None,
-         harness: str | None = None) -> Report:
+def warm(environ: Mapping[str, str] | None = None, cwd: Path | None = None, home: Path | None = None) -> Report:
     """`run_checks(warm=True)`, recorded as running and then with its report for `--status`."""
     env = os.environ if environ is None else environ
     path = warm_record_path(env)
     running = {"state": "running", "pid": os.getpid(), "plugin": str(CAD_ROOT), "started_at": _now()}
     _write_record(path, running)
-    report = run_checks(env, cwd, home, harness, warm=True)
+    report = run_checks(env, cwd, home, warm=True)
     _write_record(path, {**running, "state": "finished", "finished_at": _now(), "report": report.as_json()})
     return report
 
 
-def start_background(environ: Mapping[str, str] | None = None, harness: str | None = None) -> dict[str, Any]:
+def start_background(environ: Mapping[str, str] | None = None) -> dict[str, Any]:
     """Start `--warm` in its own session, detached from the caller's shell, and return once it has
     recorded itself as running; a warm-up of this plugin copy that is still running is reused."""
     env = os.environ if environ is None else environ
@@ -582,7 +532,7 @@ def start_background(environ: Mapping[str, str] | None = None, harness: str | No
     if record and record.get("state") == "running" and _alive(record.get("pid")):
         return {"started": False, "pid": record["pid"], "record": str(path), "log": str(log)}
     path.parent.mkdir(parents=True, exist_ok=True)
-    command = [sys.executable, str(Path(__file__).resolve()), "--warm", *(["--harness", harness] if harness else [])]
+    command = [sys.executable, str(Path(__file__).resolve()), "--warm"]
     with log.open("w", encoding="utf-8") as output:
         child = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,
                                  start_new_session=True, env=dict(env))
@@ -640,8 +590,6 @@ def render_text(report: Report) -> str:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--json", action="store_true", help="print the complete report as JSON")
-    parser.add_argument("--harness", choices=("omp", "claude", "opencode", "kiro"),
-                        help="check only this harness (default: check all harnesses)")
     parser.add_argument("--warm", action="store_true",
                         help="also install Playwright Chromium and fill the three.js cache; record the run for --status")
     parser.add_argument("--background", action="store_true",
@@ -664,7 +612,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                           "record": _read_record(warm_record_path(os.environ))}, indent=2) if args.json else text)
         return code
     if args.background:
-        started = start_background(harness=args.harness)
+        started = start_background()
         if args.json:
             print(json.dumps(started, indent=2))
         elif "error" in started:
@@ -672,9 +620,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             verb = "started" if started["started"] else "is already running"
             print(f"Warm-up {verb} in the background (pid {started['pid']}); progress in {started['log']}. "
-                  "Check it with `preflight.py --status`.")
+                  "Check it with `cad_run cad-flow/scripts/preflight.py --status`.")
         return EXIT_NO_WARM if "error" in started else 0
-    report = warm(harness=args.harness) if args.warm else run_checks(harness=args.harness)
+    report = warm() if args.warm else run_checks()
     if args.json:
         print(json.dumps(report.as_json(), indent=2))
     else:

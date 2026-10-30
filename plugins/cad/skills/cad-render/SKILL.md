@@ -1,27 +1,27 @@
 ---
 name: cad-render
-description: Renders cad-model versions into PBR product PNGs (iso, front, side, exploded, close-ups, part views) for stage gates. Triggers on "render v3", "show me the renders".
+description: Renders cad-model versions into PBR product PNGs for stage gates. Triggers on "render v3", "show me the renders".
 ---
 
 # CAD Product Render
 
 Stages L1 LAYOUT to L4 ANALYSIS: every commit batch renders its version after `cad-model run`,
 and every stage gate shows the renders. Use `cad-concept` for L0 CONCEPT variants.
-Paths below are relative to this skill's directory, `skill://cad-render/`.
+Paths below are relative to this skill's base directory.
 Interactive look-dev (environment, exposure, shadow and AO tuning by eye) runs in OCP CAD
 Viewer Studio mode through `cad-viewer`; this skill is the unattended renderer.
 
 TRIGGER
 + "render v3", "show me the renders", "what does it look like now", "product shot"
-+ an L1 to L4 commit batch after `cad-model run`, or any stage gate in `skill://cad-flow`
-- L0 concept variants -> `skill://cad-concept`
++ an L1 to L4 commit batch after `cad-model run`, or any stage gate in the `cad-flow` skill
+- L0 concept variants -> the `cad-concept` skill
 - interactive look-dev, orbiting, section or explode by hand -> `cad-viewer` (OCP CAD Viewer Studio mode)
-- a check result (validity, interference) -> `skill://cad-model` `check`; a render is never one
+- a check result (validity, interference) -> the `cad-model` skill's `check`; a render is never one
 
 ## Workflow
 
-1. Build first: `skill://cad-model` `run` writes `hw/versions/vN/` and `latest.json`.
-2. Render: `uv run --script skill://cad-flow/scripts/run.py cad-render/scripts/render.py hw [--version latest|vN] [--views ...] [--size WxH] [--subject S] [--replace] [--out-dir .cad-work/...]`
+1. Build first: the `cad-model` skill's `run` writes `hw/versions/vN/` and `latest.json`.
+2. Render: `cad_run cad-render/scripts/render.py hw [--version latest|vN] [--views ...] [--size WxH] [--subject S] [--replace] [--out-dir .cad-work/...]`
    -> immutable `hw/renders/<vN>/<subject>/` bundles with requested PNGs, `render.json`, and `manifest.json`.
    The bundle manifest seals its files and binds the bundle to the version manifest. `render.json` holds
    quality, retry, material and input decisions. A same-recipe bundle is reused, including with `--replace`;
@@ -33,7 +33,7 @@ TRIGGER
    for five 800x600 views. Use higher values when tests on the target hardware show a benefit.
    The render metadata records page-load, view-capture, renderer, and PNG-encoding times.
    Per-view PNG SHA-256 values verify cache integrity. From this skill directory, run
-   `uv run --script scripts/compare_renders.py DIR_A DIR_B` to compare render decisions and PNG pixels.
+   `cad_run cad-render/scripts/compare_renders.py DIR_A DIR_B` to compare render decisions and PNG pixels.
    At default 1600x1200, Mac serial runs and pace serial-vs-serial / serial-vs-jobs2 runs (30 views) matched
    byte-for-byte. The comparator uses exact parity.
    Each capture seeds GTAO noise from the view and retry index. The floor-shadow bake key includes visible part transforms and sampling settings.
@@ -79,7 +79,7 @@ Repeating the same version and subject reuses its verified immutable bundle, inc
 
 MUST Treat exit 1 as a failed render for the batch; report unusable findings and metrics verbatim.
 MUST Keep warning-only renders; report warning, retry strategy, and each requested view's absolute PNG path.
-MUST Install the headless browser once per machine: `uv run --with playwright==1.64.1 playwright install chromium`. The manifest's `renderer.playwright` is the installed version.
+MUST Install the headless browser once per machine: `cad_run cad-flow/scripts/preflight.py --warm` installs the pinned Playwright Chromium (1.64.1). The manifest's `renderer.playwright` is the installed version.
 DEFAULT Default views are iso, front, side, and exploded at 1600x1200; `--size WxH` overrides.
 NOT Render L0 concept variants here; `cad-concept` owns them.
 NOT Hand-edit `hw/renders/`; it is derived and replaced whole on every miss.

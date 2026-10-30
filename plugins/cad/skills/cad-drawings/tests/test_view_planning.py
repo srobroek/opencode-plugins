@@ -2,7 +2,7 @@
 """View planning and size statements without FreeCAD: sheets, sections through a reference's centre,
 grids of holes stated once, width callouts over inclined ribs, their callout text, and sheet planning.
 
-Run: uv run --with pyyaml --with defusedxml --with jsonschema python -m unittest discover -s cad/skills/cad-drawings/tests -p test_view_planning.py
+Run: uv run --with pyyaml --with defusedxml --with jsonschema python -m unittest discover -s plugins/cad/skills/cad-drawings/tests -p test_view_planning.py
 """
 
 from __future__ import annotations

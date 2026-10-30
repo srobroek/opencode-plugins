@@ -5,7 +5,7 @@ Each case in CASES is one part built from tests/fixtures/<kernel>/hole_case.py. 
 metrics.json must equal the listed holes exactly, in both kernels. cad-design's form check runs on
 the same parts to show that bores stay out of its CNC corner-radius rule.
 
-Run: python3 -m unittest discover -s cad/skills/cad-model/tests -p test_holes.py -v
+Run: python3 -m unittest discover -s plugins/cad/skills/cad-model/tests -p test_holes.py -v
 Needs `uv`; the first run creates the uv environments (see test_cad_model.py).
 """
 

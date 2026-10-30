@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """cad-design tests: reference lamp-arm models in both kernels, and the block-like detector.
 
-Run: python3 -m unittest discover -s cad/skills/cad-design/tests -v
+Run: python3 -m unittest discover -s plugins/cad/skills/cad-design/tests -v
 Needs `uv`; the first run creates the CadQuery and build123d environments, and a cold
 OCP import can take minutes, so the builds have no short timeout.
 """

@@ -113,8 +113,8 @@ class LayoutData(TempProject):
 
     def test_layout_md_is_generated_from_layout_json(self) -> None:
         self.assertEqual((SKILL / "references" / "layout.md").read_text(encoding="utf-8"), layout.markdown(),
-                         "regenerate: python3 cad/skills/cad-record/scripts/layout.py --markdown "
-                         "> cad/skills/cad-record/references/layout.md")
+                         "regenerate: python3 plugins/cad/skills/cad-record/scripts/layout.py --markdown "
+                         "> plugins/cad/skills/cad-record/references/layout.md")
 
     def test_every_canonical_row_classifies_as_its_entry(self) -> None:
         lay = layout.load()

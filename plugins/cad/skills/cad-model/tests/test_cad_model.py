@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """cad-model tests: a two-part project built, checked, and diffed in both kernels, plus check rules.
 
-Run: python3 -m unittest discover -s cad/skills/cad-model/tests -v
+Run: python3 -m unittest discover -s plugins/cad/skills/cad-model/tests -v
 Needs `uv`; the first run creates three uv environments (orchestrator, CadQuery, build123d) and
 their first OCP imports take minutes. Wall times are printed to stderr. The rule tests import
 cadmodel directly and need neither uv nor OCP.

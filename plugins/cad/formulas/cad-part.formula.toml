@@ -1,7 +1,7 @@
 # cad-part: full prototype-to-release workflow for a one-part product.
 # Pour with --var product=<id> --var scope=<paths>; kernel defaults to cadquery.
 # Each *-fanout step bonds one molecule per unit in one batch; its *-integrate step waits for all of them,
-# then one human gate closes the stage. skill://cad-flow lists the units, agents, and ownership per stage.
+# then one human gate closes the stage. the cad-flow skill lists the units, agents, and ownership per stage.
 formula = "cad-part"
 description = "Full single-part CAD flow for {{product}} in {{scope}}: worker batches for concept, part, sourcing, detail, and analysis, one lead integration and one gate per stage, through release"
 type = "workflow"
@@ -30,7 +30,7 @@ title = "GROUND the product and existing design record"
 type = "task"
 priority = 1
 labels = ["cad", "phase:ground"]
-description = "Run skill://cad-flow and skill://cad-record over {{scope}}. Establish product context, requirements, units, rigor, regime, constraints, and record gaps from the existing hw/ files. For each stage, draft, preview live, and gather user feedback; on 'commit batch', commit the design-record entry and bead note. For each L1 to L4 batch, run cad-model run, then cad-model check (a blocking failure stops the batch), then cad-render for the same version. Before LAYOUT freeze, defer the broader recheck; at or after LAYOUT freeze, run skill://cad-recheck on changed parts plus dependents with this stage's checks and every earlier stage's checks. Ask 'More detail?'; otherwise request that stage's human gate."
+description = "Run the cad-flow skill and the cad-record skill over {{scope}}. Establish product context, requirements, units, rigor, regime, constraints, and record gaps from the existing hw/ files. For each stage, draft, preview live, and gather user feedback; on 'commit batch', commit the design-record entry and bead note. For each L1 to L4 batch, run cad-model run, then cad-model check (a blocking failure stops the batch), then cad-render for the same version. Before LAYOUT freeze, defer the broader recheck; at or after LAYOUT freeze, run the cad-recheck skill on changed parts plus dependents with this stage's checks and every earlier stage's checks. Ask 'More detail?'; otherwise request that stage's human gate."
 
 [steps.metadata]
 skill_hints = "cad-flow, cad-record"
@@ -53,7 +53,7 @@ title = "SPECIFY requirements and verification"
 type = "task"
 needs = ["intent-gate"]
 labels = ["cad", "phase:specify"]
-description = "Run skill://cad-record. Write traceable REQ-### entries with rationale, source, priority, verification method and criteria; define interfaces and measurable acceptance conditions. Record the approved design intent before modeling. Follow the stage loop in skill://cad-flow."
+description = "Run the cad-record skill. Write traceable REQ-### entries with rationale, source, priority, verification method and criteria; define interfaces and measurable acceptance conditions. Record the approved design intent before modeling. Follow the stage loop in the cad-flow skill."
 
 [steps.metadata]
 skill_hints = "cad-record, cad-flow"
@@ -64,7 +64,7 @@ title = "L0 CONCEPT: fan out one variant molecule per concept"
 type = "task"
 needs = ["specify"]
 labels = ["cad", "phase:concept", "fanout"]
-description = "Choose 2-4 distinct answers to the main trade-off and one shared node-id vocabulary. Bond one mol-cad-variant per variant onto this step, all before dispatch: `bd mol bond mol-cad-variant <this-step> --type parallel --ref variant-<id> --var product={{product}} --var scope={{scope}} --var variant=<id> --var tradeoff='<answer>'`. Dispatch every ready subagent step below this step in ONE parallel batch, one cad-concept-designer per variant, as skill://cad-flow Delegation describes. Close each molecule's step and root from its worker's report; dispatch a failed variant again in the next batch. Close this step when every child is closed."
+description = "Choose 2-4 distinct answers to the main trade-off and one shared node-id vocabulary. Bond one mol-cad-variant per variant onto this step, all before dispatch: `bd mol bond mol-cad-variant <this-step> --type parallel --ref variant-<id> --var product={{product}} --var scope={{scope}} --var variant=<id> --var tradeoff='<answer>'`. Dispatch every ready subagent step below this step in ONE parallel batch, one cad-concept-designer per variant, as the cad-flow skill's Delegation section describes. Close each molecule's step and root from its worker's report; dispatch a failed variant again in the next batch. Close this step when every child is closed."
 
 [steps.metadata]
 skill_hints = "cad-flow, cad-concept"
@@ -76,7 +76,7 @@ type = "task"
 needs = ["concept-fanout"]
 waits_for = "all-children"
 labels = ["cad", "phase:concept"]
-description = "Merge the drafted variants into `hw/concept/<product-id>.scene.json`, keeping their ids. Check it with `uv run --script skill://cad-concept/scripts/concept.py check <scene>` and serve the live preview as a background job with `uv run --script skill://cad-concept/scripts/serve.py --scene-dir hw/concept`; send the user the `url` from its first stdout line, and stop the server as skill://cad-concept describes once the VARIANT gate passes. Gather feedback; refine, merge, or drop as directed, or bond mol-cad-concept onto the VARIANT gate for a further worker round. Before LAYOUT freeze, concept commit batches save screenshots and defer the broader recheck. Record candidates and feedback."
+description = "Merge the drafted variants into `hw/concept/<product-id>.scene.json`, keeping their ids. Check it with `cad_run cad-concept/scripts/concept.py check <scene>` and serve the live preview with `cad_run cad-concept/scripts/serve.py --scene-dir hw/concept` and `background: true`; send the user the `url` from its first stdout line, and stop the server as the cad-concept skill describes once the VARIANT gate passes. Gather feedback; refine, merge, or drop as directed, or bond mol-cad-concept onto the VARIANT gate for a further worker round. Before LAYOUT freeze, concept commit batches save screenshots and defer the broader recheck. Record candidates and feedback."
 
 [steps.metadata]
 skill_hints = "cad-concept, cad-flow"
@@ -100,7 +100,7 @@ title = "L1 LAYOUT: define the single-part envelope and interfaces"
 type = "task"
 needs = ["variant-gate"]
 labels = ["cad", "phase:layout"]
-description = "Run skill://cad-model and skill://cad-record. After explicit VARIANT selection, export the chosen concept with `uv run --script skill://cad-concept/scripts/concept.py handoff <scene> --out <new scratch path under .cad-work/>`. Define the one-part subassembly, labelled interfaces, envelope, datums, constraints, joints and motion limits when applicable, plus an EBOM skeleton. See cad-record/references/layout.md for path ownership; use its layout API rather than restating paths. Before an existing project freezes, run `uv run --script skill://cad-record/scripts/validate.py <project-dir> --migration-plan` (read-only). For each L1 commit batch, run `cad-model run`, `cad-model check` and `cad-render` for that version; once it has an independent movable joint, also run `cad-motion` `motion.py render --hw hw --version vN --case default --outputs glb,sheet`, whose exit 1 blocks the gate. Matching recipes reuse immutable bundles; changed recipes require `--replace` and retain the prior bundle. Explicit outputs must be new paths under `.cad-work/`. Record the design entry and bead note."
+description = "Run the cad-model skill and the cad-record skill. After explicit VARIANT selection, export the chosen concept with `cad_run cad-concept/scripts/concept.py handoff <scene> --out <new scratch path under .cad-work/>`. Define the one-part subassembly, labelled interfaces, envelope, datums, constraints, joints and motion limits when applicable, plus an EBOM skeleton. See cad-record/references/layout.md for path ownership; use its layout API rather than restating paths. Before an existing project freezes, run `cad_run cad-record/scripts/validate.py <project-dir> --migration-plan` (read-only). For each L1 commit batch, run `cad-model run`, `cad-model check` and `cad-render` for that version; once it has an independent movable joint, also run `cad-motion` `motion.py render --hw hw --version vN --case default --outputs glb,sheet`, whose exit 1 blocks the gate. Matching recipes reuse immutable bundles; changed recipes require `--replace` and retain the prior bundle. Explicit outputs must be new paths under `.cad-work/`. Record the design entry and bead note."
 
 [steps.metadata]
 skill_hints = "cad-model, cad-record, cad-flow"
@@ -123,7 +123,7 @@ title = "L2 PARTS: fan out the part molecule and one sourcing molecule per purch
 type = "task"
 needs = ["layout-freeze-gate"]
 labels = ["cad", "phase:parts", "fanout"]
-description = "Bond the part and its purchased families onto this step before dispatch: one `bd mol bond mol-cad-part <this-step> --type parallel --ref part-<PN> --var product={{product}} --var scope={{scope}} --var subassembly=<PN> --var change='<change for the part>' --var kernel={{kernel}} --var process_default={{process_default}}` for the part, and one `bd mol bond mol-cad-sourcing <this-step> --type parallel --ref source-<family> --var product={{product}} --var scope={{scope}} --var family=<id> --var parts=<PN,PN>` per purchased family in hw/bom.csv (make_buy buy). Dispatch every ready subagent step below this step in ONE parallel batch (cad-part-designer, cad-sourcing-researcher), as skill://cad-flow Delegation describes. Close each molecule's steps and root from its worker's report; dispatch a failed unit again in the next batch. Close this step when every child is closed."
+description = "Bond the part and its purchased families onto this step before dispatch: one `bd mol bond mol-cad-part <this-step> --type parallel --ref part-<PN> --var product={{product}} --var scope={{scope}} --var subassembly=<PN> --var change='<change for the part>' --var kernel={{kernel}} --var process_default={{process_default}}` for the part, and one `bd mol bond mol-cad-sourcing <this-step> --type parallel --ref source-<family> --var product={{product}} --var scope={{scope}} --var family=<id> --var parts=<PN,PN>` per purchased family in hw/bom.csv (make_buy buy). Dispatch every ready subagent step below this step in ONE parallel batch (cad-part-designer, cad-sourcing-researcher), as the cad-flow skill's Delegation section describes. Close each molecule's steps and root from its worker's report; dispatch a failed unit again in the next batch. Close this step when every child is closed."
 
 [steps.metadata]
 skill_hints = "cad-flow"
@@ -158,7 +158,7 @@ title = "L3 DETAIL: fan out the detail molecule"
 type = "task"
 needs = ["parts-gate"]
 labels = ["cad", "phase:detail", "fanout"]
-description = "Bond one mol-cad-detail for the made part onto this step: `bd mol bond mol-cad-detail <this-step> --type parallel --ref detail-<PN> --var product={{product}} --var scope={{scope}} --var part=<PN> --var change='<detail for the part>' --var kernel={{kernel}} --var process_default={{process_default}}`. Dispatch every ready subagent step below this step to a cad-part-designer worker, as skill://cad-flow Delegation describes. Close each molecule's steps and root from its worker's report; dispatch it again after a failure. Close this step when every child is closed."
+description = "Bond one mol-cad-detail for the made part onto this step: `bd mol bond mol-cad-detail <this-step> --type parallel --ref detail-<PN> --var product={{product}} --var scope={{scope}} --var part=<PN> --var change='<detail for the part>' --var kernel={{kernel}} --var process_default={{process_default}}`. Dispatch every ready subagent step below this step to a cad-part-designer worker, as the cad-flow skill's Delegation section describes. Close each molecule's steps and root from its worker's report; dispatch it again after a failure. Close this step when every child is closed."
 
 [steps.metadata]
 skill_hints = "cad-flow"
@@ -170,7 +170,7 @@ type = "task"
 needs = ["detail-fanout"]
 waits_for = "all-children"
 labels = ["cad", "phase:detail"]
-description = "Accept a delivery only with its passing F3 scratch build. Decide every fit, interface, and limit proposal and apply accepted ones to shared records. Commit one batch: cad-model run then check (a blocking failure stops it), form_check on the built version at F3 (every made part needs F3), and render. Use cad-drawings to draft, review and publish the version-bound part drawing; use its scratch output paths and the canonical layout API rather than hand-choosing roots. Recheck changed parts and dependents with skill://cad-recheck. Record the design entry and bead note."
+description = "Accept a delivery only with its passing F3 scratch build. Decide every fit, interface, and limit proposal and apply accepted ones to shared records. Commit one batch: cad-model run then check (a blocking failure stops it), form_check on the built version at F3 (every made part needs F3), and render. Use cad-drawings to draft, review and publish the version-bound part drawing; use its scratch output paths and the canonical layout API rather than hand-choosing roots. Recheck changed parts and dependents with the cad-recheck skill. Record the design entry and bead note."
 
 [steps.metadata]
 skill_hints = "cad-fits, cad-drawings, cad-design, cad-recheck, cad-record, cad-flow"
@@ -193,7 +193,7 @@ title = "EBOM: complete the product bill of materials"
 type = "task"
 needs = ["detail-gate"]
 labels = ["cad", "phase:bom"]
-description = "Run skill://cad-bom to reconcile BOM skeleton, part records, quantities, make/buy, suppliers, materials, and revisions into hw/bom.csv, using the accepted sourcing findings. Draft and preview, collect feedback, then on a commit batch recheck the changed part and dependents at this stage and all earlier stages. Record the design-record entry and bead note."
+description = "Run the cad-bom skill to reconcile BOM skeleton, part records, quantities, make/buy, suppliers, materials, and revisions into hw/bom.csv, using the accepted sourcing findings. Draft and preview, collect feedback, then on a commit batch recheck the changed part and dependents at this stage and all earlier stages. Record the design-record entry and bead note."
 
 [steps.metadata]
 skill_hints = "cad-bom, cad-recheck, cad-record, cad-flow"
@@ -204,7 +204,7 @@ title = "L4 ANALYSIS: fan out one analysis molecule per case"
 type = "task"
 needs = ["bom"]
 labels = ["cad", "phase:analysis", "fanout"]
-description = "Build and check the version vN that L4 analyses when the record changed since the last integrated version. List the cases: the joint sweep, the FreeCAD assembly check, each tolerance stack-up, each static FEA case, and each motion case the use cases need. Bond every case that needs no other case's output onto this step before dispatch: `bd mol bond mol-cad-analysis <this-step> --type parallel --ref analysis-<case> --var product={{product}} --var scope={{scope}} --var case=<id> --var kind=sweep|assembly|stackup|fea|motion --var version=vN`. Dispatch every ready subagent step below this step in ONE parallel batch of cad-analyst workers, as skill://cad-flow Delegation describes. An FEA case at the worst-case pose sets `evidence:` to the sweep's `worst.step.json`: bond and dispatch those cases as the next batch once the sweep molecule closes. Close each molecule from its worker's report. Close this step when every child is closed."
+description = "Build and check the version vN that L4 analyses when the record changed since the last integrated version. List the cases: the joint sweep, the FreeCAD assembly check, each tolerance stack-up, each static FEA case, and each motion case the use cases need. Bond every case that needs no other case's output onto this step before dispatch: `bd mol bond mol-cad-analysis <this-step> --type parallel --ref analysis-<case> --var product={{product}} --var scope={{scope}} --var case=<id> --var kind=sweep|assembly|stackup|fea|motion --var version=vN`. Dispatch every ready subagent step below this step in ONE parallel batch of cad-analyst workers, as the cad-flow skill's Delegation section describes. An FEA case at the worst-case pose sets `evidence:` to the sweep's `worst.step.json`: bond and dispatch those cases as the next batch once the sweep molecule closes. Close each molecule from its worker's report. Close this step when every child is closed."
 
 [steps.metadata]
 skill_hints = "cad-flow, cad-motion, cad-analysis"
@@ -265,7 +265,7 @@ title = "RECONCILE design and manufacturing findings"
 type = "task"
 needs = ["mech-critique", "dfm-critique"]
 labels = ["cad", "phase:reconcile"]
-description = "Reconcile both read-only reports against the model and record. Resolve every reproducible MAJOR and agreed MINOR finding, routing part changes through a new L2 or L3 batch; report unreproduced findings rather than silently dropping them. Recheck only changed assertions and their dependent parts using skill://cad-recheck. Record the disposition and evidence."
+description = "Reconcile both read-only reports against the model and record. Resolve every reproducible MAJOR and agreed MINOR finding, routing part changes through a new L2 or L3 batch; report unreproduced findings rather than silently dropping them. Recheck only changed assertions and their dependent parts using the cad-recheck skill. Record the disposition and evidence."
 
 [steps.metadata]
 skill_hints = "cad-flow, cad-recheck, cad-record"
@@ -288,7 +288,7 @@ title = "RELEASE gate for {{product}}"
 type = "task"
 needs = ["design-freeze-gate"]
 labels = ["cad", "phase:gate"]
-description = "Run skill://cad-record `validate.py` on the record and confirm flow.frozen names the version to release. Present that version and its manifest SHA-256, the unused revision letter to issue, and print/make files, buy items including OPEN identity fields and reasons, assembly steps, and checks as structured lists or tables. Give every referenced file on its own absolute-path line. Obtain explicit user approval to release that version as that revision; nothing is sealed before this gate. An incomplete or failed verification matrix blocks approval. Only bd gate resolve closes the gate."
+description = "Run the cad-record skill's `validate.py` on the record and confirm flow.frozen names the version to release. Present that version and its manifest SHA-256, the unused revision letter to issue, and print/make files, buy items including OPEN identity fields and reasons, assembly steps, and checks as structured lists or tables. Give every referenced file on its own absolute-path line. Obtain explicit user approval to release that version as that revision; nothing is sealed before this gate. An incomplete or failed verification matrix blocks approval. Only bd gate resolve closes the gate."
 
 [steps.gate]
 type = "human"
@@ -300,7 +300,7 @@ title = "RELEASE: seal the approved package"
 type = "task"
 needs = ["release-gate"]
 labels = ["cad", "phase:release"]
-description = "Record the RELEASE gate's approval as decisions/DR-###, then seal the approved version and letter with `uv run --script skill://cad-record/scripts/release.py hw --rev <letter> --version <vN> --decision <DR-###>`. Set the part revision to its released letter before building the version to freeze; record flow.frozen with exact version, manifest SHA-256 and decision. Run release.py instead of writing an inventory: missing, stale or failing inputs refuse and manufacturing failures cannot be waived. Never reuse a revision. Use cad-record's layout API for bundle paths; it owns exact manufacturing, drawing, analysis and evidence inventory and copied release contents. A refusal seals nothing: rebuild or republish named failed/stale inputs and retry; a record or model change needs an ECO, a new version, a re-freeze and a new RELEASE gate. Report print/make files, buy items and OPEN reasons, assembly steps, and checks as structured lists/tables with absolute paths."
+description = "Record the RELEASE gate's approval as decisions/DR-###, then seal the approved version and letter with `cad_run cad-record/scripts/release.py hw --rev <letter> --version <vN> --decision <DR-###>`. Set the part revision to its released letter before building the version to freeze; record flow.frozen with exact version, manifest SHA-256 and decision. Run release.py instead of writing an inventory: missing, stale or failing inputs refuse and manufacturing failures cannot be waived. Never reuse a revision. Use cad-record's layout API for bundle paths; it owns exact manufacturing, drawing, analysis and evidence inventory and copied release contents. A refusal seals nothing: rebuild or republish named failed/stale inputs and retry; a record or model change needs an ECO, a new version, a re-freeze and a new RELEASE gate. Report print/make files, buy items and OPEN reasons, assembly steps, and checks as structured lists/tables with absolute paths."
 
 [steps.metadata]
 skill_hints = "cad-record, cad-bom, cad-drawings"

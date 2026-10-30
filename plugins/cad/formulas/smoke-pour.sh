@@ -6,10 +6,10 @@ set -euo pipefail
 
 work=$(mktemp -d)
 trap 'rm -rf -- "$work"' EXIT
-repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+plugin=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
 mkdir -p "$work/.beads/formulas"
-cp "$repo"/cad/formulas/*.formula.toml "$work/.beads/formulas/"
+cp "$plugin"/formulas/*.formula.toml "$work/.beads/formulas/"
 cd "$work"
 export BEADS_DIR="$work/.beads"
 export BEADS_ACTOR=cad-formula-smoke
@@ -21,12 +21,12 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 
 # Static routing: every worker step names an agent the plugin ships, and every step of a
 # worker molecule runs as a subagent.
-for agent in $(sed -n 's/^execution_agent_type = "\(.*\)"$/\1/p' "$repo"/cad/formulas/*.formula.toml | sort -u); do
-  [[ -f "$repo/cad/agents/$agent.md" ]] || fail "execution_agent_type $agent has no cad/agents/$agent.md"
-  echo "agent $agent: cad/agents/$agent.md"
+for agent in $(sed -n 's/^execution_agent_type = "\(.*\)"$/\1/p' "$plugin"/formulas/*.formula.toml | sort -u); do
+  [[ -f "$plugin/agents/$agent.md" ]] || fail "execution_agent_type $agent has no agents/$agent.md"
+  echo "agent $agent: agents/$agent.md"
 done
 for formula in mol-cad-variant mol-cad-part mol-cad-sourcing mol-cad-detail mol-cad-analysis; do
-  file="$repo/cad/formulas/$formula.formula.toml"
+  file="$plugin/formulas/$formula.formula.toml"
   [[ $(grep -c '^\[\[steps\]\]$' "$file") == $(grep -c '^execution_mode = "subagent"$' "$file") ]] \
     || fail "$formula has a step that does not run as a subagent"
 done

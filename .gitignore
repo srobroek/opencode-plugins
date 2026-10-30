@@ -9,6 +9,9 @@
 # Dependencies. Plugin build output (plugins/*/dist) is committed; see AGENTS.md.
 node_modules/
 
+# Python bytecode from the plugins' Python scripts and tests.
+__pycache__/
+
 # Beads / Dolt runtime state. .beads/.gitignore owns the files inside .beads/.
 .dolt/
 *.db

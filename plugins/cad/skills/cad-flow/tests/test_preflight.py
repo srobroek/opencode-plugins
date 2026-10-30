@@ -170,21 +170,50 @@ class WarmPlanTests(unittest.TestCase):
                 patch.object(preflight, "_vendor_check", side_effect=vendor), \
                 patch.object(preflight, "_timed_freecad_checks", side_effect=lambda env, home: [preflight.Check("freecad-command", "FreeCAD command", "pass", True, "", ""), preflight.Check("freecad-version", "FreeCAD version", "pass", True, "", ""), preflight.Check("techdraw-templates", "TechDraw templates", "pass", True, "", "")]), \
                 patch.object(preflight, "_beads_check", side_effect=lambda cwd, env: passing("beads")), \
-                patch.object(preflight, "_harness_check", side_effect=lambda name, *a: passing(f"harness-{name}")), \
+                patch.object(preflight, "_opencode_check", side_effect=lambda env: passing("opencode-plugin")), \
                 patch("sys.stderr"):
-            report = preflight.run_checks({"HOME": "/nowhere"}, Path("/p"), Path("/nowhere"), "omp", warm=warm)
+            report = preflight.run_checks({"HOME": "/nowhere"}, Path("/p"), Path("/nowhere"), warm=warm)
         self.assertEqual(order, ["uv", "cadquery", "build123d", "cad-model", "ocp-viewer",
-                                 "playwright-chromium", "three-vendor-cache", "beads", "harness-omp"])
+                                 "playwright-chromium", "three-vendor-cache", "beads", "opencode-plugin"])
         return order, seen
 
     def test_warm_first_loads_every_runtime_after_cad_tool_and_fetches_what_checks_need(self) -> None:
         order, seen = self.plan(warm=True)
         self.assertEqual(order[:9], ["uv", "cadquery", "build123d", "cad-model", "ocp-viewer",
-                                    "playwright-chromium", "three-vendor-cache", "beads", "harness-omp"])
+                                    "playwright-chromium", "three-vendor-cache", "beads", "opencode-plugin"])
         self.assertEqual(seen, {"install": True, "fill": True})
 
     def test_plain_preflight_installs_and_fetches_nothing(self) -> None:
         self.assertEqual(self.plan(warm=False)[1], {"install": False, "fill": False})
+
+
+class OptionalCheckTests(unittest.TestCase):
+    def test_opencode_check_passes_only_under_cad_run(self) -> None:
+        under = preflight._opencode_check({"CAD_OPENCODE_PLUGIN": "srobroek.cad /plugins/cad"})
+        self.assertEqual((under.id, under.status, under.required), ("opencode-plugin", "pass", False))
+        self.assertIn("srobroek.cad /plugins/cad", under.detail)
+        outside = preflight._opencode_check({})
+        self.assertEqual(outside.status, "warn")
+        self.assertIn(preflight.INSTALL_COMMAND, outside.fix)
+
+    def test_beads_check_names_cad_setup_until_every_formula_is_installed(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            beads = Path(folder) / ".beads"
+            (beads / "formulas").mkdir(parents=True)
+            bin_dir = Path(folder) / "bin"
+            bin_dir.mkdir()
+            bd = bin_dir / "bd"
+            bd.write_text("#!/bin/sh\n", encoding="utf-8")
+            bd.chmod(0o755)
+            environ = {"BEADS_DIR": str(beads), "PATH": str(bin_dir)}
+            missing = preflight._beads_check(Path(folder), environ)
+            self.assertEqual(missing.status, "warn")
+            self.assertIn("cad_setup", missing.fix)
+            for source in preflight.FORMULAS.glob("*.formula.toml"):
+                (beads / "formulas" / source.name).write_bytes(source.read_bytes())
+            installed = preflight._beads_check(Path(folder), environ)
+            self.assertEqual(installed.status, "pass", installed.detail)
+            self.assertIn("all 11 cad formulas", installed.detail)
 
 
 class WarmRecordTests(unittest.TestCase):
@@ -246,10 +275,10 @@ class WarmRecordTests(unittest.TestCase):
 
         self_path = self.path
         with patch.object(preflight.subprocess, "Popen", Child):
-            started = preflight.start_background(self.environ, harness="omp")
+            started = preflight.start_background(self.environ)
         self.assertTrue(started["started"], started)
         command, kwargs = spawned[0]
-        self.assertEqual(command[1:], [str(SCRIPT), "--warm", "--harness", "omp"])
+        self.assertEqual(command[1:], [str(SCRIPT), "--warm"])
         self.assertTrue(kwargs["start_new_session"])
         self.assertIs(kwargs["stdin"], subprocess.DEVNULL)
         self.assertEqual(started["log"], str(self.path.with_suffix(".log")))
@@ -266,7 +295,7 @@ class MainTests(unittest.TestCase):
     def test_main_returns_report_exit_code_and_json(self) -> None:
         report = preflight.Report((preflight.Check("uv", "uv", "fail", True, "missing", "install"),))
         with patch.object(preflight, "run_checks", return_value=report), patch("sys.stdout") as stdout:
-            result = preflight.main(["--json", "--harness", "omp"])
+            result = preflight.main(["--json"])
         self.assertEqual(result, 1)
         output = "".join(call.args[0] for call in stdout.write.call_args_list)
         self.assertIn('"exit_code": 1', output)

@@ -5,7 +5,7 @@
 `hw/versions/vN/`, written to a hidden partial folder and renamed when complete; a failed run
 leaves nothing, and `latest.json` keeps naming the previous version. Labels increase: `run` refuses
 an existing label and any label at or below the newest built version. Paths follow the cad-record
-layout (`skill://cad-record/references/layout.md`); `run` refuses to seal a file the layout does not
+layout (`../cad-record/references/layout.md`); `run` refuses to seal a file the layout does not
 admit.
 
 | File | Content |

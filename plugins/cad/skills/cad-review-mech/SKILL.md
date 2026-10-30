@@ -1,6 +1,6 @@
 ---
 name: cad-review-mech
-description: Reviews a CAD design for requirements, load paths, mechanics, fits, and FEA with measured evidence. Use when a mechanical design needs independent review.
+description: Reviews a CAD design's requirements, load paths, fits and FEA with measured evidence, as an independent review.
 ---
 
 # Mechanical Design Review

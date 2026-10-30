@@ -5,7 +5,7 @@ request checks and its capture guard (stand-in ocp_viewer module and presenter),
 part-map loading, check findings, holes, joint limits, the fan-out to both viewer pairs, and the
 capture's pixel helpers.
 
-Run: python3 -m unittest discover -s cad/skills/cad-viewer/tests -v  (needs PyYAML and Pillow)
+Run: python3 -m unittest discover -s plugins/cad/skills/cad-viewer/tests -v  (needs PyYAML and Pillow)
 """
 
 from __future__ import annotations
@@ -194,21 +194,20 @@ class SessionIdentity(unittest.TestCase):
         self.assertNotEqual(worker_a, worker_b)
         with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(state),
                                           "CAD_VIEWER_SESSION": str(Path("/tmp/explicit.json")),
-                                          "PI_SESSION_ID": "harness-session"}, clear=True):
+                                          "CAD_SESSION_ID": "ses_harness"}, clear=True):
             self.assertEqual(session.session_path(other_project, "worker"), Path("/tmp/explicit.json"))
 
-    def test_harness_session_ids_and_explicit_names_split_hosts(self) -> None:
+    def test_opencode_session_ids_and_explicit_names_split_hosts(self) -> None:
         project = Path("/tmp/project-a")
-        with mock.patch.dict(os.environ, {"XDG_STATE_HOME": "/tmp/private-state", "PI_SESSION_ID": "omp-a"},
+        with mock.patch.dict(os.environ, {"XDG_STATE_HOME": "/tmp/private-state", "CAD_SESSION_ID": "ses_a"},
                              clear=True):
-            omp_a = session.session_path(project)
-            with mock.patch.dict(os.environ, {"PI_SESSION_ID": "omp-b"}):
-                omp_b = session.session_path(project)
-        self.assertNotEqual(omp_a, omp_b)
-        with mock.patch.dict(os.environ, {"XDG_STATE_HOME": "/tmp/private-state",
-                                          "CLAUDE_CODE_SESSION_ID": "claude-a"}, clear=True):
-            claude = session.session_path(project)
-        self.assertNotEqual(omp_a, claude)
+            session_a = session.session_path(project)
+            with mock.patch.dict(os.environ, {"CAD_SESSION_ID": "ses_b"}):
+                session_b = session.session_path(project)
+        self.assertNotEqual(session_a, session_b)
+        with mock.patch.dict(os.environ, {"XDG_STATE_HOME": "/tmp/private-state"}, clear=True):
+            outside = session.session_path(project)
+        self.assertNotEqual(session_a, outside)
         with mock.patch.dict(os.environ, {"XDG_STATE_HOME": "/tmp/private-state"}, clear=True):
             self.assertNotEqual(session.session_path(project, "worker-a"),
                                 session.session_path(project, "worker-b"))

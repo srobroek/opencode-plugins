@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Regression tests for cad-render heuristics, cache, renderer assets and policy.
 
-Run: python3 -m unittest discover -s cad/skills/cad-render/tests
+Run: python3 -m unittest discover -s plugins/cad/skills/cad-render/tests
 Pillow is only needed by the standalone image comparator's tests.
 """
 

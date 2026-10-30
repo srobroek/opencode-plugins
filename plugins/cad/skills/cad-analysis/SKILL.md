@@ -1,6 +1,6 @@
 ---
 name: cad-analysis
-description: Use for static FreeCAD finite-element analysis of a hardware case, producing checked stress, displacement, and yield-safety results.
+description: Static FreeCAD finite-element analysis of a hardware case, with checked stress, displacement and yield safety (FEA).
 ---
 
 # CAD Analysis
