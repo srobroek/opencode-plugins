@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, test } from "bun:test"
+import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -89,9 +89,11 @@ test("registers the CAD skills, the six subagents and three tools, and disposes 
   expect(fake.tools.size).toBe(0)
 })
 
-describe("agent boundaries", async () => {
+describe("agent boundaries", () => {
   const fake = createFakeContext()
-  await plugin.setup(fake.context)
+  beforeAll(async () => {
+    await plugin.setup(fake.context)
+  })
   const rules = (id: string) => fake.agents.get(id)?.permissions as Rule[]
 
   test("writers edit only .cad-work and run scripts through cad_run, with no shell", () => {
@@ -235,16 +237,23 @@ describe("session cleanup", () => {
     expect(runs).toHaveLength(2)
   })
 
-  test("a background script reports its first line, stops by pid, and is stopped on dispose", async () => {
+  /** Background starts that print a URL, signals sent through process.kill, and each child's exit. */
+  function backgroundHarness() {
     const live = new Set<number>()
-    let nextPid = 900_000
+    const exits = new Map<number, () => void>()
     const killed: number[] = []
-    const { fake, instance, tool } = harness({
+    let nextPid = 900_000
+    const setup = harness({
       start: (_argv, { stdout }) => {
         writeFileSync(stdout, '{"url": "http://127.0.0.1:5173/"}\n')
         const pid = nextPid++
         live.add(pid)
-        return { pid }
+        let exit = () => {}
+        const exited = new Promise<void>((resolve) => {
+          exit = resolve
+        })
+        exits.set(pid, exit)
+        return { pid, exited, kill: () => killed.push(-1) }
       },
       alive: (pid) => live.has(pid),
       stopGraceMs: 0,
@@ -254,13 +263,18 @@ describe("session cleanup", () => {
       const target = Math.abs(pid)
       if (signal === 0) return live.has(target)
       if (!live.has(target)) throw Object.assign(new Error("ESRCH"), { code: "ESRCH" })
-      killed.push(target)
+      killed.push(pid)
       live.delete(target)
       return true
     }) as typeof process.kill
+    return { ...setup, live, exits, killed, restore: () => (process.kill = realKill) }
+  }
+  const serve = { script: "cad-concept/scripts/serve.py", args: ["--scene-dir", "hw/concept"], background: true }
+
+  test("a background script reports its first line, stops by pid, and is stopped on dispose", async () => {
+    const { fake, instance, tool, killed, restore } = backgroundHarness()
     try {
       const cleanup = await instance.setup(fake.context)
-      const serve = { script: "cad-concept/scripts/serve.py", args: ["--scene-dir", "hw/concept"], background: true }
       const first = await tool(RUN_TOOL)(serve, call("ses_root"))
       expect(first.metadata).toMatchObject({ ok: true, pid: 900_000 })
       expect(first.content).toContain('{"url": "http://127.0.0.1:5173/"}')
@@ -269,9 +283,28 @@ describe("session cleanup", () => {
       expect((await tool(STOP_TOOL)({ pid: 900_000 }, call("ses_root"))).metadata.ok).toBe(false)
       await tool(RUN_TOOL)(serve, call("ses_root"))
       await cleanup?.()
-      expect(killed).toEqual([900_000, 900_001])
+      // Each job's process group gets one SIGTERM, which ends it.
+      expect(killed).toEqual([-900_000, -900_001])
     } finally {
-      process.kill = realKill
+      restore()
+    }
+  })
+
+  test("a background script that exits on its own is forgotten, so its reused pid is never signalled", async () => {
+    const { fake, instance, tool, exits, killed, settle, restore } = backgroundHarness()
+    try {
+      const cleanup = await instance.setup(fake.context)
+      await tool(RUN_TOOL)(serve, call("ses_root"))
+      // serve.py's idle timeout ends it; its pid now belongs to an unrelated process.
+      exits.get(900_000)?.()
+      await Bun.sleep(0)
+      expect((await tool(STOP_TOOL)({ pid: 900_000 }, call("ses_root"))).metadata.ok).toBe(false)
+      fake.emit({ type: "session.deleted", data: { sessionID: "ses_root" } })
+      await settle(1)
+      await cleanup?.()
+      expect(killed).toEqual([])
+    } finally {
+      restore()
     }
   })
 })

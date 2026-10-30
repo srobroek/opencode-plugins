@@ -58,6 +58,9 @@ plugins/cad/
   process group.
 - Background: stdout and stderr go to files; the call returns once stdout has a first line (or
   the process exits, or `timeout` passes, default 120 s), with the pid and both file paths.
+  The plugin keeps the child's handle: a script that exits on its own (the preview's idle
+  timeout) is forgotten, and `cad_stop` or cleanup signals a process group only while that
+  handle reports it running, so a reused pid is never signalled.
 
 Shell commands remain possible for the lead (`uv run --script <base directory>/scripts/x.py`),
 but every skill, agent and formula names `cad_run`, so workers carry no shell at all. That is a

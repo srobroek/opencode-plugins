@@ -21,9 +21,9 @@ Usage (run viewer through cad-flow's shared environment):
     cad_run cad-viewer/scripts/viewer.py studio [OPTIONS] [--session NAME]
     cad_run cad-viewer/scripts/viewer.py capture --view VIEW --out PNG [--session NAME]
 
-`serve` reuses one detached host per project and session. Session files use an automatic OMP or
-Claude Code session ID when available, or a `--session` / `CAD_VIEWER_SESSION_NAME` value, plus
-the project root. The project root is the directory containing `hw/`. `CAD_VIEWER_SESSION` keeps
+`serve` reuses one detached host per project and session. Session files are keyed by the root
+OpenCode session id that the cad plugin's cad_run tool sets in `CAD_SESSION_ID`, a `--session` /
+`CAD_VIEWER_SESSION_NAME` value, and the project root. The project root is the directory containing `hw/`. `CAD_VIEWER_SESSION` keeps
 its legacy behavior and overrides the session-file path.
 
 stdout: one JSON object per command. Exit 0 = done; 1 = a joint value outside its limits

@@ -9,9 +9,8 @@ numbers are the same on every sheet. Every sheet has:
 - a parts list generated from `bom.csv`;
 - numbered assembly notes.
 
-```sh
-cad_run cad-drawings/scripts/assembly_drawing.py HW \
-  --version vN --output-dir OUT [--timeout SECONDS]
+```text
+cad_run cad-drawings/scripts/assembly_drawing.py HW --version vN --output-dir OUT [--timeout SECONDS]
 cad_run cad-drawings/scripts/assembly_check.py OUT
 ```
 

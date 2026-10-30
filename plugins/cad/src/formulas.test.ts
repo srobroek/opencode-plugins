@@ -83,15 +83,38 @@ describe("formula content", () => {
   }
 })
 
+/** Every Python file under skills/: script docstrings and usage text reach the model through cad_run output. */
+function python(): { path: string; text: string }[] {
+  return [...new Bun.Glob("**/*.py").scanSync(skillsDir)].sort().map((file) => ({
+    path: `skills/${file}`,
+    text: readFileSync(join(skillsDir, file), "utf8"),
+  }))
+}
+
+const OMP_WORDING = /skill:\/\/|uv run --script (?:skill|cad\/skills|\.opencode)|\bOMP\b|\bomp plugin\b|PI_SESSION_ID|CLAUDE_CODE_SESSION_ID|Claude Code|\bKiro\b/g
+
 describe("OpenCode wording", () => {
   const files = prose()
 
-  test("no file names an OMP launcher, URI or harness", () => {
+  test("no Markdown or formula names an OMP launcher, URI or harness", () => {
+    for (const { path, text } of files) expect({ path, hits: text.match(OMP_WORDING) }).toEqual({ path, hits: null })
+  })
+
+  test("no Python script or test names an OMP launcher, URI or harness", () => {
+    const sources = python()
+    expect(sources.length).toBeGreaterThan(100)
+    for (const { path, text } of sources) expect({ path, hits: text.match(OMP_WORDING) }).toEqual({ path, hits: null })
+  })
+
+  test("cad_run examples sit in text blocks, never in shell blocks a reader would paste", () => {
     for (const { path, text } of files) {
-      expect({ path, hits: text.match(/skill:\/\/|uv run --script (?:skill|cad\/skills|\.opencode)|\bOMP\b|PI_SESSION_ID/g) }).toEqual({
-        path,
-        hits: null,
-      })
+      let fence: string | null = null
+      for (const line of text.split("\n")) {
+        const open = /^\s*```(\w*)/.exec(line)
+        if (open) fence = fence === null ? open[1] || "text" : null
+        else if (fence !== null && /^(?:ba|z)?sh$|^shell$|^console$/.test(fence) && line.includes("cad_run"))
+          expect({ path, fence, line }).toEqual({ path, fence: "text", line })
+      }
     }
   })
 

@@ -34,6 +34,12 @@ export class CadSessions {
     return job
   }
 
+  /** Forget a job that exited on its own; a newer job that reused its pid stays. */
+  removeJob(root: string, job: BackgroundJob): void {
+    const jobs = this.owned.get(root)?.jobs
+    if (jobs?.get(job.pid) === job) jobs.delete(job.pid)
+  }
+
   addViewer(root: string, host: ViewerHost): void {
     this.entry(root).viewers.set(key(host), host)
   }

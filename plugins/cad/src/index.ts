@@ -109,7 +109,7 @@ export async function setupCad(ctx: Context, moduleUrl: string, overrides: Overr
   const stopOwned = async (root: string) => {
     const { jobs, viewers } = owned.take(root)
     await Promise.allSettled([
-      ...jobs.map((job) => stopJob(job.pid, grace, alive)),
+      ...jobs.map((job) => stopJob(job, grace)),
       ...viewers.map((host) =>
         exec(runArgv(skillsDir, VIEWER_SCRIPT, viewerStopArgs(host.session)), {
           cwd: host.cwd,
@@ -185,7 +185,13 @@ export async function setupCad(ctx: Context, moduleUrl: string, overrides: Overr
                 start,
                 alive,
               )
-              if (started.job) owned.addJob(root, started.job)
+              if (started.job) {
+                const tracked = started.job
+                owned.addJob(root, tracked)
+                // A script that exits on its own (serve.py's idle timeout) leaves nothing to stop.
+                const forget = () => owned.removeJob(root, tracked)
+                tracked.child.exited.then(forget, forget)
+              }
               if (!started.ok) return { content: started.text, metadata: { ok: false, script, pid: started.job?.pid } }
               const { job } = started
               return {
@@ -233,7 +239,7 @@ export async function setupCad(ctx: Context, moduleUrl: string, overrides: Overr
                 content: `${STOP_TOOL}: pid ${pid} is not a background script ${RUN_TOOL} started in this session`,
                 metadata: { ok: false },
               }
-            const state = await stopJob(pid, grace, alive)
+            const state = await stopJob(job, grace)
             return {
               content: `${STOP_TOOL}: ${job.script} (pid ${pid}) ${state === "gone" ? "had already exited" : "stopped"}`,
               metadata: { ok: true, pid, state },

@@ -1199,9 +1199,9 @@ class CheckRuleTests(unittest.TestCase):
         self.assertTrue(all(item["classification"] == "interference" for item in declared))
 
     def test_an_installed_plugin_copy_classifies_press_fits_with_its_own_cad_fits(self) -> None:
-        """The plugin runs from OMP's cache or a --plugin-dir, where nothing above it is this repository."""
+        """The plugin runs from OpenCode's plugin cache, where nothing above it is this repository."""
         with tempfile.TemporaryDirectory() as tmp:
-            plugin = Path(tmp) / "cache" / "srobroek-omp___cad___0.0.0"  # never named `cad`, unlike the repository's
+            plugin = Path(tmp) / "cache" / "opencode-cad-0.0.0"  # never named `cad`, unlike the repository's
             shutil.copytree(HERE.parents[2], plugin, ignore=shutil.ignore_patterns("__pycache__"))
             hw = Path(tmp) / "hw"
             hw.mkdir()
