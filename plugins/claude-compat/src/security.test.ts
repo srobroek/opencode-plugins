@@ -3,12 +3,13 @@
 // collisions), S4 (symlink containment), P1b (moved sessions), P2a (dispose during a hook)
 // and P2b (unsupported SessionStart matchers).
 import { afterEach, expect, test } from "bun:test"
+import { execFileSync } from "node:child_process"
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
 import { CHECK_TOOL, setupClaudeCompat, TRUST_COMMAND } from "./index.ts"
-import { PROJECT_FILE } from "./source.ts"
+import { gitCachePath, PROJECT_FILE } from "./source.ts"
 import { TRUST_ACTION } from "./trust.ts"
 
 const MARKETPLACE = realpathSync(join(import.meta.dir, "..", "fixtures", "marketplace"))
@@ -131,6 +132,45 @@ test("S1: source changes during the permission prompt invalidate approval", asyn
   expect(registered(fake)).toBe(0)
   expect(fake.storage.size).toBe(0)
   await cleanup()
+})
+
+test("S1: approving an uncached Git source only downloads it; its contents need approval before activation", async () => {
+  const root = directory()
+  plugin(root, "echo git-started")
+  const git = (...args: string[]) => execFileSync("git", ["-C", root, "-c", "core.hooksPath=/dev/null", ...args], { encoding: "utf8" }).trim()
+  git("init", "--quiet")
+  git("add", ".")
+  git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--quiet", "-m", "Fixture")
+  const source = { git: root, ref: git("rev-parse", "HEAD") }
+  const cacheBefore = process.env.XDG_CACHE_HOME
+  process.env.XDG_CACHE_HOME = directory()
+  const cache = gitCachePath(source)
+  scratch.push(cache)
+  const repo = directory()
+  put(repo, PROJECT_FILE, JSON.stringify({ sources: [source] }))
+  const fake = createFakeContext({
+    directory: repo,
+    options: { projectFile: true, mcp: "always" },
+    sessions: [{ id: "ses_a", location: { directory: repo } }],
+  })
+  const cleanup = await setupClaudeCompat(fake.context, deps)
+  try {
+    const approve = () => fake.commands.get(TRUST_COMMAND)?.execute({ sessionID: "ses_a", prompt: { text: "" }, delivery: "queue" } as never)
+    await approve()
+    expect(registered(fake)).toBe(0)
+    expect((await report(fake)).diagnostics.some((issue) => issue.message.includes("not approved"))).toBe(true)
+    expect(fake.asserts).toHaveLength(1)
+    await approve()
+    expect(fake.asserts).toHaveLength(2)
+    expect(fake.asserts[1]?.resources).not.toEqual(fake.asserts[0]?.resources)
+    expect(fake.skills.has("bundled-skill")).toBe(true)
+    expect(fake.agents.has("bundled:helper")).toBe(true)
+    expect(fake.mcp.has("bundled")).toBe(true)
+  } finally {
+    await cleanup()
+    if (cacheBefore === undefined) delete process.env.XDG_CACHE_HOME
+    else process.env.XDG_CACHE_HOME = cacheBefore
+  }
 })
 
 test("S1: hooks get only the allowlisted environment plus the env option's names", async () => {

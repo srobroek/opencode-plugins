@@ -914,8 +914,8 @@ async function runHook(spec, payload, env, cwd, signal) {
 }
 
 // plugins/claude-compat/src/load.ts
-import { readdirSync as readdirSync2, readFileSync as readFileSync4, realpathSync as realpathSync2, statSync } from "fs";
-import { basename, join as join2 } from "path";
+import { readdirSync as readdirSync3, readFileSync as readFileSync5, realpathSync as realpathSync3, statSync } from "fs";
+import { basename, join as join3 } from "path";
 
 // plugins/claude-compat/src/source.ts
 import { execFile } from "child_process";
@@ -1079,6 +1079,86 @@ function discoverPlugins(root, report) {
   return plugins;
 }
 
+// plugins/claude-compat/src/trust.ts
+import { createHash as createHash2 } from "crypto";
+import { existsSync as existsSync3, lstatSync, readdirSync as readdirSync2, readFileSync as readFileSync4, readlinkSync, realpathSync as realpathSync2 } from "fs";
+import { join as join2, resolve as resolve2 } from "path";
+var TRUST_ACTION = "claude_compat_trust";
+var TRUST_PREFIX = "trust/";
+var MAX_TRUST_FILES = 20000;
+var MAX_TRUST_BYTES = 64 * 1024 * 1024;
+var MAX_REMEMBERED = 20;
+var sha256 = (data) => createHash2("sha256").update(data).digest("hex");
+function treeDigest(dir, limits = { files: MAX_TRUST_FILES, bytes: MAX_TRUST_BYTES }) {
+  const hash = createHash2("sha256");
+  let files = 0;
+  let bytes = 0;
+  const walk = (path, rel) => {
+    for (const name of readdirSync2(path).sort()) {
+      const full = join2(path, name);
+      const key = rel ? `${rel}/${name}` : name;
+      const stat = lstatSync(full);
+      if (++files > limits.files)
+        throw new Error(`${dir}: more than ${limits.files} files; too large to verify`);
+      if (stat.isSymbolicLink())
+        hash.update(`L\x00${key}\x00${readlinkSync(full)}\x00`);
+      else if (stat.isDirectory()) {
+        hash.update(`D\x00${key}\x00`);
+        walk(full, key);
+      } else if (stat.isFile()) {
+        bytes += stat.size;
+        if (bytes > limits.bytes)
+          throw new Error(`${dir}: more than ${limits.bytes} bytes; too large to verify`);
+        hash.update(`F\x00${key}\x00${stat.mode & 73 ? "x" : "-"}\x00${sha256(readFileSync4(full))}\x00`);
+      }
+    }
+  };
+  walk(dir, "");
+  return hash.digest("hex");
+}
+function projectFileDigest(group, project) {
+  const parts = [`file\x00${group.projectFile?.text ?? ""}`];
+  for (const source of group.sources) {
+    if ("git" in source) {
+      if (!/^[0-9a-f]{40}$/i.test(source.ref))
+        throw new Error("Project-file git sources must pin a full commit SHA");
+      parts.push(`git\x00${source.git}\x00${source.ref}`);
+      const cached = gitCachePath(source);
+      if (existsSync3(cached))
+        parts.push(`checkout\x00${realpathSync2(cached)}\x00${treeDigest(cached)}`);
+    } else {
+      const path = realpathSync2(resolve2(project, expandHome(source.path)));
+      parts.push(`path\x00${source.path}\x00${path}\x00${treeDigest(path)}`);
+    }
+  }
+  return sha256(parts.join("\x00\x00"));
+}
+function verifyProjectApproval(group, project) {
+  const file = group.projectFile;
+  if (!file)
+    return;
+  if (!file.digest || readFileSync4(file.path, "utf8") !== file.text || projectFileDigest(group, project) !== file.digest)
+    throw new Error("Project file or source contents changed; not approved for activation. Run /claude-compat-trust again");
+}
+function trustResource(path, digest) {
+  return `${path}#sha256:${digest}`;
+}
+var keyFor = (path) => `${TRUST_PREFIX}${sha256(path)}`;
+function remembered(value, path) {
+  const record = value;
+  if (record?.path !== path || !Array.isArray(record.digests))
+    return [];
+  return record.digests.filter((digest) => typeof digest === "string");
+}
+async function isTrusted(storage, path, digest) {
+  return remembered(await storage.get(keyFor(path)), path).includes(digest);
+}
+async function rememberTrust(storage, path, digest) {
+  const digests = remembered(await storage.get(keyFor(path)), path).filter((known) => known !== digest);
+  digests.push(digest);
+  await storage.set(keyFor(path), { path, digests: digests.slice(-MAX_REMEMBERED) });
+}
+
 // plugins/claude-compat/src/load.ts
 var isRecord3 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 function componentPaths(plugin, key, fallback, diagnostics) {
@@ -1098,13 +1178,13 @@ function componentPaths(plugin, key, fallback, diagnostics) {
 }
 function entries(root, dir, diagnostics) {
   const found = [];
-  for (const name of readdirSync2(dir).sort()) {
+  for (const name of readdirSync3(dir).sort()) {
     try {
-      const real = containedPath(root, join2(dir, name));
+      const real = containedPath(root, join3(dir, name));
       if (real !== undefined)
         found.push({ name, real, directory: statSync(real).isDirectory() });
     } catch (error) {
-      diagnostics.push({ where: join2(dir, name), message: String(error) });
+      diagnostics.push({ where: join3(dir, name), message: String(error) });
     }
   }
   return found;
@@ -1140,11 +1220,11 @@ function markdownFiles(root, path, diagnostics) {
 }
 function pluginFile(root, path) {
   const real = containedPath(root, path);
-  return real === undefined ? undefined : { path: real, text: readFileSync4(real, "utf8") };
+  return real === undefined ? undefined : { path: real, text: readFileSync5(real, "utf8") };
 }
 function loadPlugin(plugin, settings) {
   const { name, manifest } = plugin;
-  const root = realpathSync2(plugin.root);
+  const root = realpathSync3(plugin.root);
   const out = { skills: [], agents: [], commands: [], mcp: [], hooks: [], instructions: [], diagnostics: [] };
   const report = (where, error) => out.diagnostics.push({ where, message: String(error) });
   for (const key of ["lspServers", "outputStyles"])
@@ -1163,7 +1243,7 @@ function loadPlugin(plugin, settings) {
   for (const dir of componentPaths({ ...plugin, root }, "agents", "agents", out.diagnostics))
     for (const { file, name: agentName } of markdownFiles(root, dir, out.diagnostics)) {
       try {
-        const converted = convertAgent(readFileSync4(file, "utf8"), { plugin: name, name: agentName, root }, settings);
+        const converted = convertAgent(readFileSync5(file, "utf8"), { plugin: name, name: agentName, root }, settings);
         out.agents.push(converted.agent);
         out.diagnostics.push(...converted.diagnostics);
       } catch (error) {
@@ -1173,7 +1253,7 @@ function loadPlugin(plugin, settings) {
   for (const dir of componentPaths({ ...plugin, root }, "commands", "commands", out.diagnostics))
     for (const { file, name: commandName } of markdownFiles(root, dir, out.diagnostics)) {
       try {
-        const converted = convertCommand(readFileSync4(file, "utf8"), `${name}:${commandName}`, root);
+        const converted = convertCommand(readFileSync5(file, "utf8"), `${name}:${commandName}`, root);
         out.commands.push({ ...converted.command, plugin: name });
         out.diagnostics.push(...converted.diagnostics);
       } catch (error) {
@@ -1188,7 +1268,7 @@ function loadPlugin(plugin, settings) {
       mcpDocuments.push([JSON.parse(file.text), file.path]);
     if (typeof manifest.mcpServers === "string") {
       const path = inside(root, manifest.mcpServers);
-      mcpDocuments.push([JSON.parse(readFileSync4(path, "utf8")), path]);
+      mcpDocuments.push([JSON.parse(readFileSync5(path, "utf8")), path]);
     } else if (isRecord3(manifest.mcpServers))
       mcpDocuments.push([{ mcpServers: manifest.mcpServers }, `${name}: manifest mcpServers`]);
   } catch (error) {
@@ -1205,7 +1285,7 @@ function loadPlugin(plugin, settings) {
     out.mcp.push({ plugin: name, root, servers });
   const hookDocuments = [];
   try {
-    const file = pluginFile(root, join2("hooks", "hooks.json"));
+    const file = pluginFile(root, join3("hooks", "hooks.json"));
     const path = file?.path;
     if (file)
       hookDocuments.push([JSON.parse(file.text), file.path]);
@@ -1213,7 +1293,7 @@ function loadPlugin(plugin, settings) {
       if (typeof item === "string") {
         const file = inside(root, item);
         if (file !== path)
-          hookDocuments.push([JSON.parse(readFileSync4(file, "utf8")), file]);
+          hookDocuments.push([JSON.parse(readFileSync5(file, "utf8")), file]);
       } else
         hookDocuments.push([isRecord3(item) && "hooks" in item ? item : { hooks: item }, `${name}: manifest hooks`]);
     }
@@ -1245,10 +1325,30 @@ async function loadBundle(project, groups, settings, resolve = sourcePath) {
   const ids = { skills: new Set, agents: new Set, commands: new Set, mcp: new Set };
   for (const group of groups) {
     const found = new Set;
+    const sources = [];
+    try {
+      verifyProjectApproval(group, project);
+    } catch (error) {
+      bundle.diagnostics.push({ where: group.origin, message: String(error) });
+      continue;
+    }
     for (const source of group.sources) {
+      try {
+        sources.push({ source, path: await resolve(source, project) });
+      } catch (error) {
+        bundle.diagnostics.push({ where: `${group.origin}: ${JSON.stringify(source)}`, message: String(error) });
+      }
+    }
+    try {
+      verifyProjectApproval(group, project);
+    } catch (error) {
+      bundle.diagnostics.push({ where: group.origin, message: String(error) });
+      continue;
+    }
+    for (const { source, path } of sources) {
       let plugins;
       try {
-        plugins = discoverPlugins(await resolve(source, project), (where, message) => bundle.diagnostics.push({ where, message }));
+        plugins = discoverPlugins(path, (where, message) => bundle.diagnostics.push({ where, message }));
       } catch (error) {
         bundle.diagnostics.push({ where: `${group.origin}: ${JSON.stringify(source)}`, message: String(error) });
         continue;
@@ -1257,7 +1357,7 @@ async function loadBundle(project, groups, settings, resolve = sourcePath) {
         if (group.plugins && !group.plugins.includes(plugin.name))
           continue;
         found.add(plugin.name);
-        const real = realpathSync2(plugin.root);
+        const real = realpathSync3(plugin.root);
         if (roots.has(real)) {
           bundle.diagnostics.push({ where: plugin.name, message: `Already loaded from ${real}; skipped` });
           continue;
@@ -1332,79 +1432,6 @@ async function acquireBundle(key, load) {
   }
 }
 
-// plugins/claude-compat/src/trust.ts
-import { createHash as createHash2 } from "crypto";
-import { existsSync as existsSync3, lstatSync, readdirSync as readdirSync3, readFileSync as readFileSync5, readlinkSync, realpathSync as realpathSync3 } from "fs";
-import { join as join3, resolve as resolve2 } from "path";
-var TRUST_ACTION = "claude_compat_trust";
-var TRUST_PREFIX = "trust/";
-var MAX_TRUST_FILES = 20000;
-var MAX_TRUST_BYTES = 64 * 1024 * 1024;
-var MAX_REMEMBERED = 20;
-var sha256 = (data) => createHash2("sha256").update(data).digest("hex");
-function treeDigest(dir, limits = { files: MAX_TRUST_FILES, bytes: MAX_TRUST_BYTES }) {
-  const hash = createHash2("sha256");
-  let files = 0;
-  let bytes = 0;
-  const walk = (path, rel) => {
-    for (const name of readdirSync3(path).sort()) {
-      const full = join3(path, name);
-      const key = rel ? `${rel}/${name}` : name;
-      const stat = lstatSync(full);
-      if (++files > limits.files)
-        throw new Error(`${dir}: more than ${limits.files} files; too large to verify`);
-      if (stat.isSymbolicLink())
-        hash.update(`L\x00${key}\x00${readlinkSync(full)}\x00`);
-      else if (stat.isDirectory()) {
-        hash.update(`D\x00${key}\x00`);
-        walk(full, key);
-      } else if (stat.isFile()) {
-        bytes += stat.size;
-        if (bytes > limits.bytes)
-          throw new Error(`${dir}: more than ${limits.bytes} bytes; too large to verify`);
-        hash.update(`F\x00${key}\x00${stat.mode & 73 ? "x" : "-"}\x00${sha256(readFileSync5(full))}\x00`);
-      }
-    }
-  };
-  walk(dir, "");
-  return hash.digest("hex");
-}
-function projectFileDigest(group, project) {
-  const parts = [`file\x00${group.projectFile?.text ?? ""}`];
-  for (const source of group.sources) {
-    if ("git" in source) {
-      if (!/^[0-9a-f]{40}$/i.test(source.ref))
-        throw new Error("Project-file git sources must pin a full commit SHA");
-      parts.push(`git\x00${source.git}\x00${source.ref}`);
-      const cached = gitCachePath(source);
-      if (existsSync3(cached))
-        parts.push(`checkout\x00${realpathSync3(cached)}\x00${treeDigest(cached)}`);
-    } else {
-      const path = realpathSync3(resolve2(project, expandHome(source.path)));
-      parts.push(`path\x00${source.path}\x00${path}\x00${treeDigest(path)}`);
-    }
-  }
-  return sha256(parts.join("\x00\x00"));
-}
-function trustResource(path, digest) {
-  return `${path}#sha256:${digest}`;
-}
-var keyFor = (path) => `${TRUST_PREFIX}${sha256(path)}`;
-function remembered(value, path) {
-  const record = value;
-  if (record?.path !== path || !Array.isArray(record.digests))
-    return [];
-  return record.digests.filter((digest) => typeof digest === "string");
-}
-async function isTrusted(storage, path, digest) {
-  return remembered(await storage.get(keyFor(path)), path).includes(digest);
-}
-async function rememberTrust(storage, path, digest) {
-  const digests = remembered(await storage.get(keyFor(path)), path).filter((known) => known !== digest);
-  digests.push(digest);
-  await storage.set(keyFor(path), { path, digests: digests.slice(-MAX_REMEMBERED) });
-}
-
 // plugins/claude-compat/src/index.ts
 var ID = "srobroek.claude-compat";
 var CHECK_TOOL = "claude_compat_check";
@@ -1454,21 +1481,27 @@ async function setupClaudeCompat(ctx, deps = { warn: console.warn, env: process.
   const config = configGroups(options, project);
   const trusted = [];
   const pending = [];
-  for (const group of config.groups) {
-    if (!group.projectFile) {
-      trusted.push(group);
-      continue;
+  const refreshTrust = async () => {
+    trusted.length = 0;
+    pending.length = 0;
+    const fresh = configGroups(options, project);
+    config.diagnostics = fresh.diagnostics;
+    for (const group of fresh.groups) {
+      if (!group.projectFile) {
+        trusted.push(group);
+        continue;
+      }
+      try {
+        const digest = projectFileDigest(group, project);
+        if (await isTrusted(ctx.storage, group.projectFile.path, digest))
+          trusted.push({ ...group, projectFile: { ...group.projectFile, digest } });
+        else
+          pending.push({ group, path: group.projectFile.path, digest });
+      } catch (error) {
+        config.diagnostics.push({ where: group.projectFile.path, message: `Project sources could not be verified; not loaded: ${String(error)}` });
+      }
     }
-    try {
-      const digest = projectFileDigest(group, project);
-      if (await isTrusted(ctx.storage, group.projectFile.path, digest))
-        trusted.push({ ...group, projectFile: { ...group.projectFile, digest } });
-      else
-        pending.push({ group, path: group.projectFile.path, digest });
-    } catch (error) {
-      config.diagnostics.push({ where: group.projectFile.path, message: `Project sources could not be verified; not loaded: ${String(error)}` });
-    }
-  }
+  };
   let activation;
   let disposed = false;
   let queue = Promise.resolve();
@@ -1485,7 +1518,9 @@ async function setupClaudeCompat(ctx, deps = { warn: console.warn, env: process.
     const previous = activation;
     activation = undefined;
     await previous?.dispose();
+    await refreshTrust();
     activation = await activate(ctx, project, [...trusted], settings, deps);
+    await refreshTrust();
   });
   const pendingDiagnostics = () => pending.map(({ path, digest }) => ({
     where: path,
@@ -1563,7 +1598,7 @@ async function setupClaudeCompat(ctx, deps = { warn: console.warn, env: process.
           const report = activation?.report;
           await ctx.session.synthetic({
             sessionID: input.sessionID,
-            text: approved.length > 0 ? `claude-compat: approved ${approved.join(", ")}; loaded plugins: ${report?.plugins.join(", ") || "none"}.` : "claude-compat: no project file is waiting for approval.",
+            text: approved.length > 0 ? `claude-compat: approved ${approved.join(", ")}; loaded plugins: ${report?.plugins.join(", ") || "none"}.${pending.length > 0 ? ` Downloaded source contents still need approval; run /${TRUST_COMMAND} again.` : ""}` : "claude-compat: no project file is waiting for approval.",
             description: "claude-compat trust",
             metadata: { source: ID, kind: "trust" },
             delivery: "steer",

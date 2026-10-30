@@ -21,6 +21,7 @@ import {
 } from "./convert.ts"
 import { type HookSpec, parseHooks } from "./hooks.ts"
 import { type ClaudePlugin, containedPath, discoverPlugins, type Group, inside, sourcePath } from "./source.ts"
+import { verifyProjectApproval } from "./trust.ts"
 
 export type Settings = AgentSettings & { hooks: boolean; instructions: boolean }
 
@@ -215,10 +216,32 @@ export async function loadBundle(project: string, groups: readonly Group[], sett
   const ids = { skills: new Set<string>(), agents: new Set<string>(), commands: new Set<string>(), mcp: new Set<string>() }
   for (const group of groups) {
     const found = new Set<string>()
+    const sources: { source: Group["sources"][number]; path: string }[] = []
+    try {
+      verifyProjectApproval(group, project)
+    } catch (error) {
+      bundle.diagnostics.push({ where: group.origin, message: String(error) })
+      continue
+    }
     for (const source of group.sources) {
+      try {
+        sources.push({ source, path: await resolve(source, project) })
+      } catch (error) {
+        bundle.diagnostics.push({ where: `${group.origin}: ${JSON.stringify(source)}`, message: String(error) })
+      }
+    }
+    // A first clone changes a URL/ref approval into a content approval. Do not even
+    // parse the new plugin files, let alone register their executable capabilities.
+    try {
+      verifyProjectApproval(group, project)
+    } catch (error) {
+      bundle.diagnostics.push({ where: group.origin, message: String(error) })
+      continue
+    }
+    for (const { source, path } of sources) {
       let plugins: ClaudePlugin[]
       try {
-        plugins = discoverPlugins(await resolve(source, project), (where, message) => bundle.diagnostics.push({ where, message }))
+        plugins = discoverPlugins(path, (where, message) => bundle.diagnostics.push({ where, message }))
       } catch (error) {
         bundle.diagnostics.push({ where: `${group.origin}: ${JSON.stringify(source)}`, message: String(error) })
         continue

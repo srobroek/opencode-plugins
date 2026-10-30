@@ -72,6 +72,14 @@ export function projectFileDigest(group: Group, project: string): string {
   return sha256(parts.join("\0\0"))
 }
 
+/** Recheck the approval at activation, after asynchronous source downloads have finished. */
+export function verifyProjectApproval(group: Group, project: string): void {
+  const file = group.projectFile
+  if (!file) return
+  if (!file.digest || readFileSync(file.path, "utf8") !== file.text || projectFileDigest(group, project) !== file.digest)
+    throw new Error("Project file or source contents changed; not approved for activation. Run /claude-compat-trust again")
+}
+
 /** The permission resource the approval asks for: the canonical file path and its digest. */
 export function trustResource(path: string, digest: string): string {
   return `${path}#sha256:${digest}`

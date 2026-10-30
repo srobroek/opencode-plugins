@@ -61,7 +61,9 @@ started in a subdirectory or a worktree still finds them).
    approval again on reload. Unreadable/oversized sources cannot be approved. Git
    sources in project files must pin a full commit SHA; their URL and SHA are hashed
    without fetching unapproved content. An existing cached checkout is also hashed;
-   the first clone changes the digest, so approve its contents again on the next reload.
+    the first approval permits downloading only. The clone changes the digest and stays
+    inactive until you run `/claude-compat-trust` again to approve its contents. No reload
+    is needed. Activation rechecks the approval after downloads, before reading plugins.
    A change while the prompt is open invalidates
    the approval. Configure only trusted sources in plugin options or the `projects`
    map: those are explicit installs and do not use this gate.

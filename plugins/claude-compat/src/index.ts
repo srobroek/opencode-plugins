@@ -87,18 +87,24 @@ export async function setupClaudeCompat(ctx: Context, deps: Deps = { warn: conso
   const config = configGroups(options, project)
   const trusted: Group[] = []
   const pending: Pending[] = []
-  for (const group of config.groups) {
-    if (!group.projectFile) {
-      trusted.push(group)
-      continue
-    }
-    try {
-      const digest = projectFileDigest(group, project)
-      if (await isTrusted(ctx.storage, group.projectFile.path, digest))
-        trusted.push({ ...group, projectFile: { ...group.projectFile, digest } })
-      else pending.push({ group, path: group.projectFile.path, digest })
-    } catch (error) {
-      config.diagnostics.push({ where: group.projectFile.path, message: `Project sources could not be verified; not loaded: ${String(error)}` })
+  const refreshTrust = async () => {
+    trusted.length = 0
+    pending.length = 0
+    const fresh = configGroups(options, project)
+    config.diagnostics = fresh.diagnostics
+    for (const group of fresh.groups) {
+      if (!group.projectFile) {
+        trusted.push(group)
+        continue
+      }
+      try {
+        const digest = projectFileDigest(group, project)
+        if (await isTrusted(ctx.storage, group.projectFile.path, digest))
+          trusted.push({ ...group, projectFile: { ...group.projectFile, digest } })
+        else pending.push({ group, path: group.projectFile.path, digest })
+      } catch (error) {
+        config.diagnostics.push({ where: group.projectFile.path, message: `Project sources could not be verified; not loaded: ${String(error)}` })
+      }
     }
   }
 
@@ -116,7 +122,11 @@ export async function setupClaudeCompat(ctx: Context, deps: Deps = { warn: conso
       const previous = activation
       activation = undefined
       await previous?.dispose()
+      await refreshTrust()
       activation = await activate(ctx, project, [...trusted], settings, deps)
+      // A download may have changed the digest. Keep the trust command usable so
+      // the downloaded content can be approved without waiting for a reload.
+      await refreshTrust()
     })
   const pendingDiagnostics = () =>
     pending.map(({ path, digest }) => ({
@@ -201,7 +211,7 @@ export async function setupClaudeCompat(ctx: Context, deps: Deps = { warn: conso
                 sessionID: input.sessionID,
                 text:
                   approved.length > 0
-                    ? `claude-compat: approved ${approved.join(", ")}; loaded plugins: ${report?.plugins.join(", ") || "none"}.`
+                    ? `claude-compat: approved ${approved.join(", ")}; loaded plugins: ${report?.plugins.join(", ") || "none"}.${pending.length > 0 ? ` Downloaded source contents still need approval; run /${TRUST_COMMAND} again.` : ""}`
                     : "claude-compat: no project file is waiting for approval.",
                 description: "claude-compat trust",
                 metadata: { source: ID, kind: "trust" },
