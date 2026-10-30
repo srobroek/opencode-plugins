@@ -185,6 +185,19 @@
         "@opencode/plugin",
       ],
     },
+    "plugins/claude-compat": {
+      "name": "@srobroek/opencode-claude-compat",
+      "version": "0.1.0",
+      "devDependencies": {
+        "@srobroek/opencode-lib": "workspace:*",
+      },
+      "peerDependencies": {
+        "@opencode/plugin": "^2.1.4",
+      },
+      "optionalPeers": [
+        "@opencode/plugin",
+      ],
+    },
     "plugins/debate": {
       "name": "@srobroek/opencode-debate",
       "version": "0.2.1",
@@ -888,6 +901,8 @@
     "@srobroek/opencode-cad": ["@srobroek/opencode-cad@workspace:plugins/cad"],
 
     "@srobroek/opencode-chezmoi": ["@srobroek/opencode-chezmoi@workspace:plugins/chezmoi"],
+
+    "@srobroek/opencode-claude-compat": ["@srobroek/opencode-claude-compat@workspace:plugins/claude-compat"],
 
     "@srobroek/opencode-debate": ["@srobroek/opencode-debate@workspace:plugins/debate"],
 

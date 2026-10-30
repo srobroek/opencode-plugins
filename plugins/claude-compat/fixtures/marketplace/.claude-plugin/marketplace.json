@@ -1,0 +1,8 @@
+{
+  "name": "fixture-marketplace",
+  "plugins": [
+    { "name": "demo", "source": "./plugins/demo" },
+    { "name": "other", "source": "./plugins/other" },
+    { "name": "remote", "source": { "source": "github", "repo": "example/remote" } }
+  ]
+}
