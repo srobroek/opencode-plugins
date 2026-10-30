@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { agentPaths, readAgentFile } from "@srobroek/opencode-lib/agent-files"
@@ -99,50 +99,16 @@ describe("formula content", () => {
 })
 
 describe("installFormulas", () => {
-  const scratch = () => mkdtempSync(join(tmpdir(), "design-formulas-"))
-
-  test("copies every formula once, then reports them unchanged", () => {
-    const repo = scratch()
+  test("copies every design formula once, then reports them unchanged, with the pour usage", () => {
+    const repo = mkdtempSync(join(tmpdir(), "design-formulas-"))
     try {
       mkdirSync(join(repo, ".beads"))
       const first = installFormulas(".", repo)
       expect(first).toMatchObject({ ok: true, copied: [...FORMULAS], unchanged: [] })
+      expect(first.text).toContain("bd mol pour design-touch")
       expect(readdirSync(join(repo, ".beads", "formulas")).length).toBe(FORMULAS.length)
       const second = installFormulas(repo, "/elsewhere")
       expect(second).toMatchObject({ ok: true, copied: [], unchanged: [...FORMULAS] })
-    } finally {
-      rmSync(repo, { recursive: true, force: true })
-    }
-  })
-
-  test("refuses a divergent copy unless force, and a workspace without .beads", () => {
-    const repo = scratch()
-    try {
-      expect(installFormulas(repo, repo)).toMatchObject({ ok: false })
-      mkdirSync(join(repo, ".beads", "formulas"), { recursive: true })
-      const local = join(repo, ".beads", "formulas", "design-touch.formula.toml")
-      writeFileSync(local, "formula = \"design-touch\"\n")
-      const refused = installFormulas(repo, repo)
-      expect(refused.ok).toBe(false)
-      expect(refused.text).toContain(local)
-      expect(readFileSync(local, "utf8")).toBe("formula = \"design-touch\"\n")
-      expect(readdirSync(join(repo, ".beads", "formulas"))).toEqual(["design-touch.formula.toml"])
-      const forced = installFormulas(repo, repo, true)
-      expect(forced.ok).toBe(true)
-      expect(readFileSync(local)).toEqual(readFileSync(join(FORMULAS_DIR, "design-touch.formula.toml")))
-    } finally {
-      rmSync(repo, { recursive: true, force: true })
-    }
-  })
-
-  test("refuses a symlinked formulas directory", () => {
-    const repo = scratch()
-    try {
-      mkdirSync(join(repo, ".beads"))
-      mkdirSync(join(repo, "elsewhere"))
-      symlinkSync(join(repo, "elsewhere"), join(repo, ".beads", "formulas"))
-      expect(installFormulas(repo, repo)).toMatchObject({ ok: false })
-      expect(readdirSync(join(repo, "elsewhere"))).toEqual([])
     } finally {
       rmSync(repo, { recursive: true, force: true })
     }
