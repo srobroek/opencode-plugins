@@ -93,12 +93,12 @@ Read every report of the batch before you change anything. Accept a part deliver
 A part designer works in `.cad-work/<unit>/` next to `hw/`; `scratch.py` writes a `.gitignore` there so git ignores the directory.
 
 - `cad_run cad-flow/scripts/scratch.py init --hw hw --unit <unit> --part <PN> [--part <PN> ...]` copies `hw/` without `versions/`, `renders/`, `releases/`, or `.git/` and records a baseline.
- - `scratch.py deliver --hw hw --unit <unit>` accepts only canonical source files under authorized part records (including a PN authorized at `init`), rejects generated subtrees, stray paths and unauthorized PNs, and writes nothing when a conflict is detected. The lead integrates the returned part files only after the passing scratch build.
+- `scratch.py deliver --hw hw --unit <unit>` accepts only canonical source files under authorized part records, including PNs authorized at `init`. It ignores generated `versions/`, `renders/`, and `releases/` output. It rejects other generated subtrees, stray paths, and unauthorized PNs, and writes nothing when a conflict exists. The lead integrates the returned part files only after the passing scratch build.
 
 Every path in its JSON output is absolute. `.cad-work/` is disposable once the stage gate passes.
 
 ## Gate control
 
-Gates remain open until explicit user approval is recorded through `bd gate resolve`. Never infer approval from silence, a preview, a successful build, an agent verdict, or a release artifact. If the current harness or workspace cannot resolve the gate through that command, leave it open and hand the gate to someone who can; do not substitute another gate-closing mechanism.
+Gates remain open until explicit user approval is recorded through `bd gate resolve`. If you cannot ask the user, list open questions and proposed assumptions in the gate summary, keep the gate open and the stage unchanged, then stop; do not proceed on assumptions. Never infer approval from silence, a preview, a successful build, an agent verdict, or a release artifact. If the current harness or workspace cannot resolve the gate through that command, leave it open and hand the gate to someone who can; do not substitute another gate-closing mechanism.
 
 Every gate report, question, and summary gives each file it mentions as an absolute path on its own line: records, decisions, model.py, STEP and GLB, check JSON, renders, captures, drawing previews and PDFs, and the BOM. A relative path such as `hw/renders/v2/iso.png` is not enough. Add the URL of the live viewer or preview gallery while one runs.
