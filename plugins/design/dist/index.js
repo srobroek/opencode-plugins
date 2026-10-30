@@ -130,10 +130,23 @@ function shapeAgent(agent, file, created) {
 }
 async function registerAgents(agent, paths, extra = []) {
   const files = paths.map(readAgentFile).map((file) => ({ ...file, permissions: [...file.permissions, ...extra] }));
+  return registerAgentFiles(agent, files);
+}
+async function registerAgentFiles(agent, files, options = {}) {
   return agent.transform((editor) => {
     for (const file of files) {
       const created = editor.get(file.id) === undefined;
-      editor.update(file.id, (info) => shapeAgent(info, file, created));
+      if (!created && options.onExisting) {
+        options.onExisting(file.id);
+        continue;
+      }
+      editor.update(file.id, (info) => {
+        const mutable = info;
+        const existing = [...mutable.permissions ?? []];
+        shapeAgent(mutable, file, created);
+        if (options.permissions)
+          mutable.permissions = options.permissions(existing, file, editor);
+      });
     }
   });
 }
