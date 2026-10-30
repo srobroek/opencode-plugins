@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/srobroek/opencode-plugins/compare/design--v0.3.0...design--v0.3.1) (2026-10-30)
+
+
+### Refactors
+
+* **design:** install formulas through the shared lib installer ([4b6861d](https://github.com/srobroek/opencode-plugins/commit/4b6861d621a1f4e73686ec31248513e489117d56))
+
 ## [0.3.0](https://github.com/srobroek/opencode-plugins/compare/design--v0.2.0...design--v0.3.0) (2026-10-27)
 
 

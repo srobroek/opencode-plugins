@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/srobroek/opencode-plugins/compare/agent-seance--v0.2.1...agent-seance--v0.2.2) (2026-10-30)
+
+
+### Refactors
+
+* **lib:** share the beads formula installer and take runtime agent rules ([0efdd40](https://github.com/srobroek/opencode-plugins/commit/0efdd40d9b2a2f98118eda686792f0d60f537a81))
+
 ## [0.2.1](https://github.com/srobroek/opencode-plugins/compare/agent-seance--v0.2.0...agent-seance--v0.2.1) (2026-10-27)
 
 
