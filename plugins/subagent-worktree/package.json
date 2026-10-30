@@ -1,6 +1,6 @@
 {
   "name": "@srobroek/opencode-subagent-worktree",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Runs opted-in subagents in their own git worktree and merges their branch back with wt merge.",
   "private": true,
   "type": "module",

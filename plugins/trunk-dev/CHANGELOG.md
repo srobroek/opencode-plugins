@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/srobroek/opencode-plugins/compare/trunk-dev--v0.2.1...trunk-dev--v0.3.0) (2026-10-30)
+
+
+### Features
+
+* **trunk-dev:** add once-per-session stale branch reminders ([5d7b40c](https://github.com/srobroek/opencode-plugins/commit/5d7b40cd8a3a3bf96298535a58d21c5c3ea3c2c9))
+
 ## [0.2.1](https://github.com/srobroek/opencode-plugins/compare/trunk-dev--v0.2.0...trunk-dev--v0.2.1) (2026-10-27)
 
 

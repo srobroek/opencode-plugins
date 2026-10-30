@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/srobroek/opencode-plugins/compare/speckit--v0.3.0...speckit--v0.3.1) (2026-10-30)
+
+
+### Refactors
+
+* **lib:** share the beads formula installer and take runtime agent rules ([0efdd40](https://github.com/srobroek/opencode-plugins/commit/0efdd40d9b2a2f98118eda686792f0d60f537a81))
+
 ## [0.3.0](https://github.com/srobroek/opencode-plugins/compare/speckit--v0.2.1...speckit--v0.3.0) (2026-10-27)
 
 
