@@ -3,7 +3,10 @@ import {
   childSessionID,
   classifyFailure,
   cooldownFor,
+  type FailureClass,
+  type FailureInput,
   failureScope,
+  type HealthState,
   healthEntry,
   healthView,
   isTransient,
@@ -12,7 +15,9 @@ import {
   nextExpiry,
   pruneHealth,
   quotaReset,
+  RECENT_MS,
   readHealth,
+  recordFailure,
 } from "./health.ts"
 import { parseOptions, resolveRole } from "./resolve.ts"
 
@@ -22,7 +27,13 @@ describe("classifyFailure", () => {
     expect(classifyFailure({ message: "Subagent failed (ses_1): Model unavailable: nope/x" })).toBe("unavailable")
     expect(classifyFailure({ type: "api", message: "nope", status: 401 })).toBe("auth")
     expect(classifyFailure({ message: "The security token included in the request is expired" })).toBe("auth")
-    expect(classifyFailure({ message: "Could not load credentials from any providers" })).toBe("auth")
+    expect(classifyFailure({ message: "Could not load credentials from any providers" })).toBe("credentials")
+    // OpenCode's Bedrock route, when the AWS chain (a credential_process helper) fails before any request is sent.
+    expect(
+      classifyFailure({ type: "provider.auth", message: "AWS default credential chain failed: Could not load credentials from any providers" }),
+    ).toBe("credentials")
+    expect(classifyFailure({ message: "Error when retrieving credentials from custom-process: exit 1" })).toBe("credentials")
+    expect(classifyFailure({ message: "Invalid credentials", status: 400 })).toBe("auth")
     expect(classifyFailure({ type: "api", message: "slow down", status: 429 })).toBe("rate-limit")
     expect(classifyFailure({ message: "ThrottlingException: Too many requests" })).toBe("rate-limit")
     expect(classifyFailure({ message: "Overloaded" })).toBe("server")
@@ -115,7 +126,12 @@ describe("failure classes and scope", () => {
   })
 
   test("provider-scoped and transient kinds", () => {
-    expect(["auth", "quota", "outage"].map((k) => failureScope(k as never))).toEqual(["provider", "provider", "provider"])
+    expect(["auth", "credentials", "quota", "outage"].map((k) => failureScope(k as never))).toEqual([
+      "provider",
+      "provider",
+      "provider",
+      "provider",
+    ])
     expect(["unavailable", "content-filter", "rate-limit", "server"].map((k) => failureScope(k as never))).toEqual([
       "model",
       "model",
@@ -123,6 +139,8 @@ describe("failure classes and scope", () => {
       "model",
     ])
     expect(isTransient("rate-limit")).toBe(true)
+    expect(isTransient("credentials")).toBe(true)
+    expect(isTransient("auth")).toBe(false)
     expect(isTransient("quota")).toBe(false)
   })
 
@@ -144,10 +162,18 @@ describe("failure classes and scope", () => {
     expect(quotaReset({ message: "retry-after: 90 seconds" }, now)).toBe(now + 90_000)
     expect(quotaReset({ message: `"reset": ${Math.floor(now / 1_000) + 60}` }, now)).toBe(now + 60_000)
     expect(quotaReset({ message: "resets at 2020-01-01T00:00:00Z" }, now)).toBeUndefined()
-    const options = { cooldownMs: 600_000, quotaCooldownMs: 6 * 3_600_000 }
-    expect(cooldownFor("quota", { message: "quota exceeded" }, now, options)).toBe(6 * 3_600_000)
-    expect(cooldownFor("quota", { message: "resets in 2h" }, now, options)).toBe(7_200_000)
-    expect(cooldownFor("auth", { message: "resets in 2h" }, now, options)).toBe(600_000)
+    const policy = { cooldownMs: 60_000, maxCooldownMs: 600_000, quotaCooldownMs: 6 * 3_600_000, flapCount: 3, flapWindowMs: 600_000 }
+    expect(cooldownFor("quota", { message: "quota exceeded" }, now, policy)).toBe(6 * 3_600_000)
+    expect(cooldownFor("quota", { message: "resets in 2h" }, now, policy, 3)).toBe(7_200_000)
+    expect(cooldownFor("auth", { message: "resets in 2h" }, now, policy)).toBe(60_000)
+  })
+
+  test("cooldowns double in a row up to the longest; an unknown model gets the longest at once", () => {
+    const policy = { cooldownMs: 60_000, maxCooldownMs: 600_000, quotaCooldownMs: 1, flapCount: 3, flapWindowMs: 600_000 }
+    expect([0, 1, 2, 3, 4, 9].map((strikes) => cooldownFor("server", {}, 0, policy, strikes))).toEqual([
+      60_000, 120_000, 240_000, 480_000, 600_000, 600_000,
+    ])
+    expect(cooldownFor("unavailable", {}, 0, policy)).toBe(600_000)
   })
 })
 
@@ -189,9 +215,89 @@ describe("health state", () => {
     expect(readHealth({ x: { failedAt: 1, until: 2 }, y: { failedAt: "1" }, z: 3 })).toEqual({
       x: { failedAt: 1, until: 2, reason: "" },
     })
+    expect(readHealth({ x: { failedAt: 1, until: 2, reason: "r", episodes: [1], strikes: 2 }, y: { failedAt: 1, until: 2, episodes: ["1"], strikes: -1 } })).toEqual({
+      x: { failedAt: 1, until: 2, reason: "r", episodes: [1], strikes: 2 },
+      y: { failedAt: 1, until: 2, reason: "" },
+    })
     expect(readHealth([1])).toEqual({})
   })
 
+})
+
+describe("recordFailure", () => {
+  const a = { providerID: "p", id: "a" }
+  const b = { providerID: "p", id: "b" }
+  const policy = { cooldownMs: 60_000, maxCooldownMs: 600_000, quotaCooldownMs: 3_600_000, flapCount: 3, flapWindowMs: 600_000 }
+  const fail = (state: HealthState, now: number, kind: FailureClass = "credentials", ref = a, error: FailureInput = {}) =>
+    recordFailure(state, ref, kind, error, now, policy, `${kind}: x`)
+
+  test("a blip, even across parallel requests, keeps the model and its provider in use", () => {
+    let record = fail({}, 0)
+    record = fail(record.state, 500, "credentials", b)
+    expect(record).toMatchObject({ cooldownMs: 0, tripped: false })
+    expect(record.state["p/*"]?.episodes).toEqual([0])
+    expect(healthView(record.state, 600)(a)).toBeUndefined()
+    // A request is not switched onto it for a while, though.
+    expect(healthView(record.state, 600, RECENT_MS)(b)).toBe(500)
+    expect(healthView(record.state, 600 + RECENT_MS, RECENT_MS)(b)).toBeUndefined()
+  })
+
+  test("failures spread over more than the flap window never sit it out", () => {
+    let state = fail({}, 0, "server").state
+    state = fail(state, 300_000, "server").state
+    const record = fail(state, 650_000, "server")
+    expect(record).toMatchObject({ cooldownMs: 0, tripped: false })
+    expect(record.state["p/a"]?.episodes).toEqual([300_000, 650_000])
+  })
+
+  test("repeated episodes sit it out, and each cooldown in a row doubles", () => {
+    let state = fail({}, 0).state
+    state = fail(state, 15_000).state
+    let record = fail(state, 30_000)
+    expect(record).toMatchObject({ cooldownMs: 60_000, tripped: true })
+    expect(healthView(record.state, 30_001)({ ...b, variant: "high" })).toBe(30_000)
+    expect(nextExpiry(record.state, 30_001)).toBe(90_000)
+    // Failing during the cooldown does not extend it.
+    record = fail(record.state, 40_000)
+    expect(record).toMatchObject({ cooldownMs: 50_000, tripped: false })
+    expect(record.state["p/*"]?.until).toBe(90_000)
+    // The first failure after it, within the flap window, sits it out again for twice as long.
+    record = fail(record.state, 95_000)
+    expect(record).toMatchObject({ cooldownMs: 120_000, tripped: true })
+    record = fail(record.state, 220_000)
+    expect(record).toMatchObject({ cooldownMs: 240_000, tripped: true })
+    // A flap window without failures after a cooldown forgets it.
+    const quiet = 460_000 + policy.flapWindowMs
+    expect(pruneHealth(record.state, quiet - 1, policy.flapWindowMs)).toHaveProperty("p/*")
+    expect(pruneHealth(record.state, quiet, policy.flapWindowMs)).toEqual({})
+    expect(fail(record.state, quiet)).toMatchObject({ cooldownMs: 0, tripped: false })
+  })
+
+  test("a model's failures only count for that model", () => {
+    let state = fail({}, 0, "server").state
+    state = fail(state, 15_000, "server", b).state
+    const record = fail(state, 30_000, "server")
+    expect(record.tripped).toBe(false)
+    expect(Object.keys(record.state).sort()).toEqual(["p/a", "p/b"])
+  })
+
+  test("a spent quota and an unknown model sit out at once", () => {
+    const quota = fail({}, 0, "quota", a, { message: "quota exceeded, resets in 2h" })
+    expect(quota).toMatchObject({ cooldownMs: 7_200_000, tripped: true })
+    expect(Object.keys(quota.state)).toEqual(["p/*"])
+    // A later reset while it sits out moves the cooldown on.
+    expect(fail(quota.state, 1_000, "quota", a, { message: "resets in 3h" })).toMatchObject({ cooldownMs: 3 * 3_600_000, tripped: true })
+    const unknown = fail({}, 0, "unavailable")
+    expect(unknown).toMatchObject({ cooldownMs: 600_000, tripped: true })
+    expect(Object.keys(unknown.state)).toEqual(["p/a"])
+  })
+
+  test("pruning keeps a failure for the flap window", () => {
+    const state = fail({}, 1_000, "server").state
+    expect(pruneHealth(state, 1_000 + policy.flapWindowMs - 1, policy.flapWindowMs)).toHaveProperty("p/a")
+    expect(pruneHealth(state, 1_000 + policy.flapWindowMs, policy.flapWindowMs)).toEqual({})
+    expect(pruneHealth(state, 1_001)).toEqual({})
+  })
 })
 
 describe("resolveRole with health", () => {

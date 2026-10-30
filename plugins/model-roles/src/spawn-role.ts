@@ -6,7 +6,13 @@
 
 import { DEFAULT_HOST_RETRIES, DEFAULT_SWITCH_TIMEOUT_MS } from "./fallback.ts"
 import { type GuardModel, inputCost } from "./guard.ts"
-import { DEFAULT_COOLDOWN_MS, DEFAULT_QUOTA_COOLDOWN_MS } from "./health.ts"
+import {
+  DEFAULT_COOLDOWN_MS,
+  DEFAULT_FLAP_COUNT,
+  DEFAULT_FLAP_WINDOW_MS,
+  DEFAULT_MAX_COOLDOWN_MS,
+  DEFAULT_QUOTA_COOLDOWN_MS,
+} from "./health.ts"
 import {
   type AvailableModel,
   type HealthView,
@@ -40,9 +46,16 @@ export const ROLE_TOOL_NOTE =
 export const ROLE_ALIAS_DESCRIPTION = "Deprecated: use `tier`. Also accepts the old role names (smol, task, slow, challenger and the like)."
 
 export type RuntimeOptions = {
+  /** The first cooldown of a failed model; each further one in a row doubles it. */
   cooldownMs: number
+  /** The longest cooldown. */
+  maxCooldownMs: number
   /** How long a spent quota sits out when the provider names no reset time. */
   quotaCooldownMs: number
+  /** Failure episodes within `flapWindowMs` that sit a model out. */
+  flapCount: number
+  /** How long failure episodes count. */
+  flapWindowMs: number
   /** Retries the host spends on the same model for a transient failure before the retry hook switches. */
   hostRetries: number
   /** How long the retry hook waits for `session.switchModel`. */
@@ -71,9 +84,13 @@ export function parseRuntime(raw: unknown, options: Options): RuntimeOptions {
     typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : fallback
   const span = (value: unknown, fallback: number) =>
     typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback
+  const flapCount = count(input.flapCount, DEFAULT_FLAP_COUNT)
   return {
     cooldownMs,
+    maxCooldownMs: Math.max(cooldownMs, span(input.maxCooldownMs, DEFAULT_MAX_COOLDOWN_MS)),
     quotaCooldownMs: span(input.quotaCooldownMs, DEFAULT_QUOTA_COOLDOWN_MS),
+    flapCount: flapCount >= 1 ? flapCount : DEFAULT_FLAP_COUNT,
+    flapWindowMs: span(input.flapWindowMs, DEFAULT_FLAP_WINDOW_MS),
     hostRetries: count(input.hostRetries, DEFAULT_HOST_RETRIES),
     switchTimeoutMs: span(input.switchTimeoutMs, DEFAULT_SWITCH_TIMEOUT_MS),
     purposes,
