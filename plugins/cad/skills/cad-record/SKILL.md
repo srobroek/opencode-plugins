@@ -49,7 +49,7 @@ The plan lists built versions without complete manufacturing outputs, and versio
 
 `scripts/release.py` issues a release of the frozen version. It copies sealed files and never builds, slices or tessellates.
 
-```bash
+```text
 cad_run cad-record/scripts/release.py hw --rev A --version vN --decision DR-###
 ```
 

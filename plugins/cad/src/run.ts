@@ -180,7 +180,8 @@ export function formatRun(script: string, run: SupervisedRun, seconds: number, d
   return { ok: exitCode === 0, text: lines.join("\n"), exitCode, status: run.kind }
 }
 
-export type BackgroundChild = { pid: number }
+/** A spawned background script: its pid, its exit, and a kill that is a no-op once it is reaped. */
+export type BackgroundChild = { pid: number; exited: Promise<unknown>; kill(signal?: NodeJS.Signals): void }
 export type Start = (argv: string[], options: { cwd: string; env: Record<string, string>; stdout: string; stderr: string }) => BackgroundChild
 
 export const startBackground: Start = (argv, { cwd, env, stdout, stderr }) => {
@@ -194,10 +195,22 @@ export const startBackground: Start = (argv, { cwd, env, stdout, stderr }) => {
     detached: true,
   })
   child.unref()
-  return { pid: child.pid }
+  return { pid: child.pid, exited: child.exited, kill: (signal) => child.kill(signal) }
 }
 
-export type BackgroundJob = { pid: number; script: string; stdout: string; stderr: string; cwd: string }
+export type BackgroundJob = {
+  pid: number
+  script: string
+  stdout: string
+  stderr: string
+  cwd: string
+  child: BackgroundChild
+  /**
+   * The script has not reported its exit and its pid still exists. Once it exits its pid can
+   * belong to another process, so nothing signals a job that is not running.
+   */
+  running: () => boolean
+}
 
 export type BackgroundStart =
   | { ok: true; job: BackgroundJob; firstLine: string }
@@ -239,12 +252,18 @@ export async function runBackground(
   } catch (error) {
     return { ok: false, text: `${RUN_TOOL} ${options.script}: could not start: ${String(error)}` }
   }
-  const job: BackgroundJob = { pid: child.pid, script: options.script, stdout, stderr, cwd: options.cwd }
+  let exited = false
+  const settle = () => {
+    exited = true
+  }
+  child.exited.then(settle, settle)
+  const running = () => !exited && alive(child.pid)
+  const job: BackgroundJob = { pid: child.pid, script: options.script, stdout, stderr, cwd: options.cwd, child, running }
   const deadline = Date.now() + options.timeoutSeconds * 1000
   for (;;) {
     const line = firstLine(stdout)
     if (line !== null) return { ok: true, job, firstLine: line }
-    if (!alive(child.pid)) {
+    if (!running()) {
       const err = tail(stderr)
       return {
         ok: false,
@@ -263,27 +282,27 @@ export async function runBackground(
   }
 }
 
-/** SIGTERM a background job's process group, then SIGKILL it if it outlives `graceMs`. */
-export async function stopJob(
-  pid: number,
-  graceMs = 5_000,
-  alive: (pid: number) => boolean = processAlive,
-  wait: Wait = sleep,
-): Promise<"stopped" | "gone"> {
-  if (!alive(pid)) return "gone"
+/**
+ * SIGTERM a running background job's process group, then SIGKILL it if it outlives
+ * `graceMs`. Like lib's `killChild`, the group is signalled first and the child handle after;
+ * a job that is no longer running is never signalled, because its pid may have been reused.
+ */
+export async function stopJob(job: BackgroundJob, graceMs = 5_000, wait: Wait = sleep): Promise<"stopped" | "gone"> {
+  if (!job.running()) return "gone"
   const signal = (name: NodeJS.Signals) => {
+    if (!job.running()) return
     try {
-      process.kill(-pid, name)
+      process.kill(-job.pid, name)
     } catch {
       try {
-        process.kill(pid, name)
+        job.child.kill(name)
       } catch {
-        // Already gone.
+        // Already reaped.
       }
     }
   }
   signal("SIGTERM")
-  for (let waited = 0; waited < graceMs && alive(pid); waited += 100) await wait(100)
-  if (alive(pid)) signal("SIGKILL")
+  for (let waited = 0; waited < graceMs && job.running(); waited += 100) await wait(100)
+  signal("SIGKILL")
   return "stopped"
 }

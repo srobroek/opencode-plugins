@@ -1,4 +1,4 @@
-"""The viewer session: one host process per harness session, found through a session file.
+"""The viewer session: one host process per OpenCode session, found through a session file.
 
 `serve` starts `viewer.py host` detached and records its ports and PID; every other command
 reads the session file and talks to the host over loopback HTTP. Stdlib only.

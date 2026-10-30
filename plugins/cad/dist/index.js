@@ -595,7 +595,7 @@ var startBackground = (argv, { cwd, env, stdout, stderr }) => {
     detached: true
   });
   child.unref();
-  return { pid: child.pid };
+  return { pid: child.pid, exited: child.exited, kill: (signal) => child.kill(signal) };
 };
 function firstLine(path) {
   const text = lstatSync2(path, { throwIfNoEntry: false }) ? readFileSync4(path, "utf8") : "";
@@ -619,13 +619,19 @@ async function runBackground(argv, options, start = startBackground, alive = pro
   } catch (error) {
     return { ok: false, text: `${RUN_TOOL} ${options.script}: could not start: ${String(error)}` };
   }
-  const job = { pid: child.pid, script: options.script, stdout, stderr, cwd: options.cwd };
+  let exited = false;
+  const settle = () => {
+    exited = true;
+  };
+  child.exited.then(settle, settle);
+  const running = () => !exited && alive(child.pid);
+  const job = { pid: child.pid, script: options.script, stdout, stderr, cwd: options.cwd, child, running };
   const deadline = Date.now() + options.timeoutSeconds * 1000;
   for (;; ) {
     const line = firstLine(stdout);
     if (line !== null)
       return { ok: true, job, firstLine: line };
-    if (!alive(child.pid)) {
+    if (!running()) {
       const err = tail(stderr);
       return {
         ok: false,
@@ -643,23 +649,24 @@ ${err}`].filter(Boolean).join(`
     await wait(100);
   }
 }
-async function stopJob(pid, graceMs = 5000, alive = processAlive, wait = sleep) {
-  if (!alive(pid))
+async function stopJob(job, graceMs = 5000, wait = sleep) {
+  if (!job.running())
     return "gone";
   const signal = (name) => {
+    if (!job.running())
+      return;
     try {
-      process.kill(-pid, name);
+      process.kill(-job.pid, name);
     } catch {
       try {
-        process.kill(pid, name);
+        job.child.kill(name);
       } catch {}
     }
   };
   signal("SIGTERM");
-  for (let waited = 0;waited < graceMs && alive(pid); waited += 100)
+  for (let waited = 0;waited < graceMs && job.running(); waited += 100)
     await wait(100);
-  if (alive(pid))
-    signal("SIGKILL");
+  signal("SIGKILL");
   return "stopped";
 }
 
@@ -684,6 +691,11 @@ class CadSessions {
     if (job !== undefined)
       this.owned.get(root)?.jobs.delete(pid);
     return job;
+  }
+  removeJob(root, job) {
+    const jobs = this.owned.get(root)?.jobs;
+    if (jobs?.get(job.pid) === job)
+      jobs.delete(job.pid);
   }
   addViewer(root, host) {
     this.entry(root).viewers.set(key(host), host);
@@ -749,7 +761,7 @@ async function setupCad(ctx, moduleUrl, overrides = {}) {
   const stopOwned = async (root) => {
     const { jobs, viewers } = owned.take(root);
     await Promise.allSettled([
-      ...jobs.map((job) => stopJob(job.pid, grace, alive)),
+      ...jobs.map((job) => stopJob(job, grace)),
       ...viewers.map((host) => exec(runArgv(skillsDir, VIEWER_SCRIPT, viewerStopArgs(host.session)), {
         cwd: host.cwd,
         env: runEnv(process.env, root, marker),
@@ -820,8 +832,12 @@ async function setupCad(ctx, moduleUrl, overrides = {}) {
           const env = runEnv(process.env, root, marker);
           if (params.background) {
             const started = await runBackground(argv, { cwd: directory, env, script, timeoutSeconds: params.timeoutSeconds, dir: outputDir(root), signal: context.signal }, start, alive);
-            if (started.job)
-              owned.addJob(root, started.job);
+            if (started.job) {
+              const tracked = started.job;
+              owned.addJob(root, tracked);
+              const forget = () => owned.removeJob(root, tracked);
+              tracked.child.exited.then(forget, forget);
+            }
             if (!started.ok)
               return { content: started.text, metadata: { ok: false, script, pid: started.job?.pid } };
             const { job } = started;
@@ -873,7 +889,7 @@ async function setupCad(ctx, moduleUrl, overrides = {}) {
               content: `${STOP_TOOL}: pid ${pid} is not a background script ${RUN_TOOL} started in this session`,
               metadata: { ok: false }
             };
-          const state = await stopJob(pid, grace, alive);
+          const state = await stopJob(job, grace);
           return {
             content: `${STOP_TOOL}: ${job.script} (pid ${pid}) ${state === "gone" ? "had already exited" : "stopped"}`,
             metadata: { ok: true, pid, state }

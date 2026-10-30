@@ -117,6 +117,7 @@ describe("formatRun", () => {
 describe("runBackground", () => {
   const options = (dir: string) => ({ cwd: dir, env: {}, script: "cad-concept/scripts/serve.py", timeoutSeconds: 1, dir })
   const noWait = async () => {}
+  const child = (pid: number, exited: Promise<unknown> = new Promise(() => {})) => ({ pid, exited, kill: () => {} })
 
   test("returns the first stdout line of a running script", async () => {
     const dir = temp()
@@ -125,7 +126,7 @@ describe("runBackground", () => {
       options(dir),
       (_argv, { stdout }) => {
         writeFileSync(stdout, '{"url": "u"}\nmore\n')
-        return { pid: 42 }
+        return child(42)
       },
       () => true,
       noWait,
@@ -140,7 +141,7 @@ describe("runBackground", () => {
       options(dir),
       (_argv, { stderr }) => {
         writeFileSync(stderr, "boom\n")
-        return { pid: 43 }
+        return child(43)
       },
       () => false,
       noWait,
@@ -148,11 +149,44 @@ describe("runBackground", () => {
     expect(exited).toMatchObject({ ok: false })
     expect(exited.ok ? "" : exited.text).toContain("boom")
     expect("job" in exited && exited.job).toBeFalsy()
-    const silent = await runBackground(["uv"], { ...options(dir), timeoutSeconds: 0.05 }, () => ({ pid: 44 }), () => true, () => Bun.sleep(10))
+    const silent = await runBackground(["uv"], { ...options(dir), timeoutSeconds: 0.05 }, () => child(44), () => true, () => Bun.sleep(10))
     expect(silent).toMatchObject({ ok: false, job: { pid: 44 } })
+  })
+
+  test("a job whose exit was reported stops running even when its pid is reused", async () => {
+    const dir = temp()
+    let exit = () => {}
+    const exited = new Promise<void>((resolve) => {
+      exit = resolve
+    })
+    const result = await runBackground(
+      ["uv"],
+      options(dir),
+      (_argv, { stdout }) => {
+        writeFileSync(stdout, "{}\n")
+        return child(45, exited)
+      },
+      () => true,
+      noWait,
+    )
+    if (!result.ok) throw new Error(result.text)
+    expect(result.job.running()).toBe(true)
+    exit()
+    await Bun.sleep(0)
+    expect(result.job.running()).toBe(false)
+    expect(await stopJob(result.job, 0, noWait)).toBe("gone")
   })
 })
 
-test("stopJob reports a job that is already gone", async () => {
-  expect(await stopJob(1, 0, () => false)).toBe("gone")
+test("stopJob reports a job that is no longer running without signalling it", async () => {
+  const job = {
+    pid: 1,
+    script: "x.py",
+    stdout: "",
+    stderr: "",
+    cwd: "/",
+    child: { pid: 1, exited: Promise.resolve(), kill: () => {} },
+    running: () => false,
+  }
+  expect(await stopJob(job, 0)).toBe("gone")
 })
