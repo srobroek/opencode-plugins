@@ -68,11 +68,12 @@ def pinned(script: Path, distribution: str) -> str:
 def python_command(script: Path, *python_args: str, uv: str = "uv") -> list[str]:
     """argv running `python *python_args` in the environment shared by `script`'s dependency set."""
     command = [uv, "run", "--quiet", "--isolated", "--no-project"]
-    requires = metadata(script).get("requires-python")
+    header = metadata(script)
+    requires = header.get("requires-python")
     if requires is not None:
         command += ["--python", requires]
     if script.name in RESERVED_REQUIREMENTS_NAMES:
-        for dependency in metadata(script).get("dependencies", []):
+        for dependency in header.get("dependencies", []):
             command += ["--with", dependency]
         return [*command, "python", *python_args]
     return [*command, "--with-requirements", str(script), "python", *python_args]
