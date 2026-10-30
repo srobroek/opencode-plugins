@@ -34,13 +34,18 @@ exported to Claude Code or Codex.
 | Tool | What it does |
 | --- | --- |
 | `cad_run` | Runs `<skill>/scripts/<script>.py` with `args` through cad-flow's `run.py`, from the session directory, in uv's environment for the script's PEP 723 dependencies. Default timeout 20 minutes (at most 60). `background: true` starts a server and returns its pid and first stdout line. Asks permission per script. |
-| `cad_stop` | Stops a background script `cad_run` started in this session. |
+| `cad_stop` | Stops a background script `cad_run` started in this session. It knows only the scripts this OpenCode process started; after OpenCode restarts it refuses an earlier pid (see below). |
 | `cad_setup` | Copies the eleven formulas into a beads workspace's `.beads/formulas/`. Identical copies stay; divergent ones need `force=true`; symlinked paths are refused. |
 
 `cad_run` sets `CAD_SESSION_ID` to the root OpenCode session (a subagent's session resolves to
 the session that spawned it), so each session gets its own CAD viewer host, and
 `CAD_OPENCODE_PLUGIN`, which preflight reports. Deleting a session stops its viewer hosts and
 background scripts; disposing the plugin stops all of them.
+
+After OpenCode restarts, `cad_stop` no longer knows servers started before the restart and
+refuses their pids. Stop such a server with its skill's own stop command, such as
+`cad_run cad-viewer/scripts/viewer.py stop`, or let its idle timeout end it: the concept server
+(`cad-concept/scripts/serve.py`) has no stop command and exits after 30 idle minutes by default.
 
 ## Skills
 
