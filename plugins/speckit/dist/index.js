@@ -129,8 +129,8 @@ function shapeAgent(agent, file, created) {
     agent.request = { ...agent.request, headers: { ...file.request.headers, ...agent.request?.headers } };
   agent.permissions = [...agent.permissions ?? [], ...file.permissions];
 }
-async function registerAgents(agent, paths) {
-  const files = paths.map(readAgentFile);
+async function registerAgents(agent, paths, extra = []) {
+  const files = paths.map(readAgentFile).map((file) => ({ ...file, permissions: [...file.permissions, ...extra] }));
   return agent.transform((editor) => {
     for (const file of files) {
       const created = editor.get(file.id) === undefined;
