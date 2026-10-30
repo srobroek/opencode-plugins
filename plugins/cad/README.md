@@ -92,7 +92,8 @@ write where their documented CLI writes (for example `scratch.py deliver` writes
 ## Formulas
 
 With [beads](../beads/README.md), run `bd init`, then the `cad_setup` tool. The three roots are
-poured; the eight `mol-cad-*` molecules are bonded onto a root's fan-out steps, one per unit:
+poured; the eight `mol-cad-*` molecules are bonded onto a root's fan-out or full-check steps, one
+per unit:
 
 ```sh
 bd mol pour cad-part --var product=lamp --var scope=hw/       # one-part product
@@ -101,9 +102,13 @@ bd mol pour cad-touch --var product=lamp --var scope=hw/ ...  # ECO on a release
 ```
 
 Worker steps carry `execution_mode = "subagent"` and an `execution_agent_type` naming one of the
-agents above, so the beads routing gate admits exactly that agent. Each stage's lead integration
-step waits for every unit and is followed by its provisional gate, the full check and the human
-gate, which is resolved only with `bd gate resolve` after explicit approval.
+agents above, so the beads routing gate admits exactly that agent. Each built version is checked
+fail-fast, cheapest first. LAYOUT freeze, PARTS, DETAIL and ANALYSIS each pass two gates; INTENT,
+VARIANT, DESIGN freeze and RELEASE are single human gates. The lead resolves the provisional gate
+once every fast check passes, which lets the next stage start; the human gate opens after the full
+check passes and is resolved only with `bd gate resolve` after explicit approval. A failed full
+check, a MAJOR L2 light-review finding or a change the user names at the human gate voids the
+provisional approval and reopens the stage. Nothing is frozen or released before the human gates.
 [formulas/README.md](formulas/README.md) has the bonding commands;
 `formulas/smoke-pour.sh` pours and bonds every formula in a scratch workspace.
 
