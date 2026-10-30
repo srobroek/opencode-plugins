@@ -32,7 +32,7 @@ afterEach(() => {
 })
 
 const fakeFor = (directory: string, options: Record<string, unknown>, extra: Parameters<typeof createFakeContext>[0] = {}) =>
-  createFakeContext({ directory, options, sessions: [{ id: "ses_a", location: { directory } }], ...extra })
+  createFakeContext({ directory, options: { enabled: true, ...options }, sessions: [{ id: "ses_a", location: { directory } }], ...extra })
 
 async function check(fake: ReturnType<typeof createFakeContext>) {
   const tool = fake.tools.get(CHECK_TOOL) as unknown as { execute: (input: unknown) => Promise<{ content: string }> }
@@ -127,7 +127,7 @@ test("the first prompt of a new session waits for SessionStart; old sessions and
   const now = Date.now()
   const fake = createFakeContext({
     directory: dir,
-    options: { sources: [{ path: MARKETPLACE }], plugins: ["demo"], mcp: "off" },
+    options: { enabled: true, sources: [{ path: MARKETPLACE }], plugins: ["demo"], mcp: "off" },
     sessions: [
       { id: "ses_new", location: { directory: dir }, time: { created: now + 60_000 } },
       { id: "ses_old", location: { directory: dir }, time: { created: now - 60_000 } },
@@ -147,7 +147,7 @@ test("two projects are isolated: project A's plugins never appear in project B",
   const a = project()
   const b = project()
   // One shared (global) options object for both, as a global config entry would give.
-  const options = { mcp: "always", projects: { [a]: { sources: [{ path: MARKETPLACE }] } } }
+  const options = { enabled: true, mcp: "always", projects: { [a]: { sources: [{ path: MARKETPLACE }] } } }
   const fakeA = fakeFor(a, options)
   const fakeB = createFakeContext({ directory: b, options, sessions: [{ id: "ses_b", location: { directory: b } }, { id: "ses_a", location: { directory: a } }] })
   const [cleanupA, cleanupB] = await Promise.all([setupClaudeCompat(fakeA.context, deps), setupClaudeCompat(fakeB.context, deps)])
@@ -169,7 +169,7 @@ test("two projects are isolated: project A's plugins never appear in project B",
 
 test("relative paths resolve against the project root; locations of one project share a bundle until released", async () => {
   const root = project()
-  const options = { projects: { [root]: { sources: [{ path: "./vendor/marketplace" }], plugins: ["other"] } } }
+  const options = { enabled: true, projects: { [root]: { sources: [{ path: "./vendor/marketplace" }], plugins: ["other"] } } }
   mkdirSync(join(root, "vendor"), { recursive: true })
   const { symlinkSync } = await import("node:fs")
   symlinkSync(MARKETPLACE, join(root, "vendor", "marketplace"))
@@ -219,11 +219,21 @@ test("user definitions win over plugin ones", async () => {
   await cleanup()
 })
 
+test("the enabled rollout flag defaults off and disabling it loads no capabilities", async () => {
+  for (const enabled of [undefined, false]) {
+    const fake = createFakeContext({ directory: project(), options: { enabled, sources: [{ path: MARKETPLACE }], projectFile: true } })
+    const cleanup = await setupClaudeCompat(fake.context, deps)
+    expect(fake.active()).toBe(0)
+    expect(fake.skills.size + fake.agents.size + fake.commands.size + fake.tools.size + fake.mcp.size).toBe(0)
+    await cleanup()
+  }
+})
+
 test("malformed options are rejected before anything registers; no sources registers only the check tool", async () => {
   const bad = createFakeContext({ options: { untypedAgents: "all" } })
   await expect(setupClaudeCompat(bad.context, deps)).rejects.toThrow("untypedAgents must be inherit or deny")
   expect(bad.active()).toBe(0)
-  const empty = createFakeContext({ directory: project() })
+  const empty = createFakeContext({ directory: project(), options: { enabled: true } })
   const cleanup = await setupClaudeCompat(empty.context, deps)
   expect([...empty.tools.keys()]).toEqual([CHECK_TOOL])
   await cleanup()

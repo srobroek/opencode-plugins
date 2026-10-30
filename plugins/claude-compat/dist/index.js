@@ -1441,13 +1441,14 @@ function parseSettings(options) {
   const untyped = options.untypedAgents ?? "inherit";
   if (untyped !== "inherit" && untyped !== "deny")
     throw new Error("claude-compat: untypedAgents must be inherit or deny");
-  for (const key of ["hooks", "instructions", "toolNote", "projectFile"])
+  for (const key of ["enabled", "hooks", "instructions", "toolNote", "projectFile"])
     if (options[key] !== undefined && typeof options[key] !== "boolean")
       throw new Error(`claude-compat: ${key} must be a boolean`);
   const env = options.env ?? [];
   if (!Array.isArray(env) || !env.every((name) => typeof name === "string"))
     throw new Error("claude-compat: env must be a list of names");
   return {
+    enabled: options.enabled === true,
     untypedAgents: untyped,
     toolNote: options.toolNote !== false,
     hooks: options.hooks !== false,
@@ -1477,6 +1478,8 @@ function hookWarnings(bundle) {
 async function setupClaudeCompat(ctx, deps = { warn: console.warn, env: process.env }) {
   const options = ctx.options;
   const settings = parseSettings(options);
+  if (!settings.enabled)
+    return async () => {};
   const project = projectRoot(ctx);
   const config = configGroups(options, project);
   const trusted = [];
@@ -1614,7 +1617,7 @@ async function setupClaudeCompat(ctx, deps = { warn: console.warn, env: process.
   }
 }
 async function activate(ctx, project, groups, settings, deps) {
-  const { env: extraEnv, ...bundleSettings } = settings;
+  const { enabled: _enabled, env: extraEnv, ...bundleSettings } = settings;
   const { bundle, release } = await acquireBundle(bundleKey(project, groups, bundleSettings), () => loadBundle(project, groups, bundleSettings));
   const diagnostics = [...bundle.diagnostics];
   const loaded = { skills: [], agents: [], commands: [], mcp: [], hooks: [] };

@@ -26,17 +26,18 @@ export const HOOK_ASK_ACTION = "claude_hook"
 
 type Registration = { dispose: () => Promise<void> }
 
-export type Options = Settings & { env: string[] }
+export type Options = Settings & { enabled: boolean; env: string[] }
 
 /** The plugin options that change what loads and how hooks run. Throws on a malformed value. */
 export function parseSettings(options: Record<string, unknown>): Options {
   const untyped = options.untypedAgents ?? "inherit"
   if (untyped !== "inherit" && untyped !== "deny") throw new Error("claude-compat: untypedAgents must be inherit or deny")
-  for (const key of ["hooks", "instructions", "toolNote", "projectFile"])
+  for (const key of ["enabled", "hooks", "instructions", "toolNote", "projectFile"])
     if (options[key] !== undefined && typeof options[key] !== "boolean") throw new Error(`claude-compat: ${key} must be a boolean`)
   const env = options.env ?? []
   if (!Array.isArray(env) || !env.every((name) => typeof name === "string")) throw new Error("claude-compat: env must be a list of names")
   return {
+    enabled: options.enabled === true,
     untypedAgents: untyped,
     toolNote: options.toolNote !== false,
     hooks: options.hooks !== false,
@@ -83,6 +84,7 @@ type Pending = { group: Group; path: string; digest: string }
 export async function setupClaudeCompat(ctx: Context, deps: Deps = { warn: console.warn, env: process.env }) {
   const options = ctx.options as Record<string, unknown>
   const settings = parseSettings(options)
+  if (!settings.enabled) return async () => {}
   const project = projectRoot(ctx)
   const config = configGroups(options, project)
   const trusted: Group[] = []
@@ -232,7 +234,7 @@ export async function setupClaudeCompat(ctx: Context, deps: Deps = { warn: conso
 
 /** Register one bundle. The returned dispose aborts running hooks and waits for them. */
 async function activate(ctx: Context, project: string, groups: Group[], settings: Options, deps: Deps): Promise<Activation> {
-  const { env: extraEnv, ...bundleSettings } = settings
+  const { enabled: _enabled, env: extraEnv, ...bundleSettings } = settings
   const { bundle, release } = await acquireBundle(bundleKey(project, groups, bundleSettings), () => loadBundle(project, groups, bundleSettings))
   const diagnostics: Diagnostic[] = [...bundle.diagnostics]
   const loaded = { skills: [] as string[], agents: [] as string[], commands: [] as string[], mcp: [] as string[], hooks: [] as string[] }

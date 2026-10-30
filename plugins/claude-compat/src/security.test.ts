@@ -56,7 +56,7 @@ test("S1: a project file is ignored by default, even when it names a plugin insi
   const repo = directory()
   plugin(join(repo, "bundled"), "touch ran")
   put(repo, PROJECT_FILE, JSON.stringify({ sources: [{ path: "./bundled" }] }))
-  const fake = createFakeContext({ directory: repo })
+  const fake = createFakeContext({ directory: repo, options: { enabled: true } })
   const cleanup = await setupClaudeCompat(fake.context, deps)
   expect(registered(fake)).toBe(0)
   expect(fake.commands.has(TRUST_COMMAND)).toBe(false)
@@ -68,7 +68,7 @@ test("S1: with projectFile, nothing loads before approval; approval is remembere
   plugin(join(repo, "bundled"), "echo started")
   put(repo, "bundled/.mcp.json", JSON.stringify({ mcpServers: { bundled: { type: "http", url: "https://example.invalid/mcp", headers: { Authorization: "${SECRET_TOKEN}" } } } }))
   put(repo, PROJECT_FILE, JSON.stringify({ sources: [{ path: "./bundled" }] }))
-  const options = { projectFile: true, mcp: "always" }
+  const options = { enabled: true, projectFile: true, mcp: "always" }
   const sessions = [{ id: "ses_a", location: { directory: repo } }]
 
   // Refused approval: still nothing from the file.
@@ -126,7 +126,7 @@ test("S1: source changes during the permission prompt invalidate approval", asyn
   const repo = directory()
   plugin(join(repo, "bundled"), "echo x")
   put(repo, PROJECT_FILE, JSON.stringify({ sources: [{ path: "./bundled" }] }))
-  const fake = createFakeContext({ directory: repo, options: { projectFile: true }, assert: () => put(repo, "bundled/new.txt", "changed") })
+  const fake = createFakeContext({ directory: repo, options: { enabled: true, projectFile: true }, assert: () => put(repo, "bundled/new.txt", "changed") })
   const cleanup = await setupClaudeCompat(fake.context, deps)
   await expect(fake.commands.get(TRUST_COMMAND)?.execute({ sessionID: "ses_a" } as never)).rejects.toThrow("changed during approval")
   expect(registered(fake)).toBe(0)
@@ -150,7 +150,7 @@ test("S1: approving an uncached Git source only downloads it; its contents need 
   put(repo, PROJECT_FILE, JSON.stringify({ sources: [source] }))
   const fake = createFakeContext({
     directory: repo,
-    options: { projectFile: true, mcp: "always" },
+    options: { enabled: true, projectFile: true, mcp: "always" },
     sessions: [{ id: "ses_a", location: { directory: repo } }],
   })
   const cleanup = await setupClaudeCompat(fake.context, deps)
@@ -179,7 +179,7 @@ test("S1: hooks get only the allowlisted environment plus the env option's names
   const project = directory()
   const fake = createFakeContext({
     directory: project,
-    options: { sources: [{ path: root }], env: ["EXTRA_OK"], mcp: "off" },
+    options: { enabled: true, sources: [{ path: root }], env: ["EXTRA_OK"], mcp: "off" },
     sessions: [{ id: "ses_new", location: { directory: project } }],
   })
   const env = { PATH: process.env.PATH, SECRET_TOKEN: "s3cr3t", EXTRA_OK: "yes" }
@@ -196,7 +196,7 @@ test("S2: an imported agent whose id already exists is refused and reported, not
   const project = directory()
   const fake = createFakeContext({
     directory: project,
-    options: { sources: [{ path: MARKETPLACE }], plugins: ["demo"], mcp: "off", hooks: false },
+    options: { enabled: true, sources: [{ path: MARKETPLACE }], plugins: ["demo"], mcp: "off", hooks: false },
     agents: [{ id: "demo:reader", system: "Mine", permissions: [{ action: "*", resource: "*", effect: "ask" }] }],
   })
   const cleanup = await setupClaudeCompat(fake.context, deps)
@@ -211,7 +211,7 @@ test("S2: newly registered agents inherit the native build agent's configured us
   const project = directory()
   const fake = createFakeContext({
     directory: project,
-    options: { sources: [{ path: MARKETPLACE }], plugins: ["demo"], mcp: "off", hooks: false },
+    options: { enabled: true, sources: [{ path: MARKETPLACE }], plugins: ["demo"], mcp: "off", hooks: false },
     agents: [{ id: "build", permissions: [
       { action: "*", resource: "*", effect: "allow" },
       { action: "read", resource: "*notes.txt", effect: "deny" },
@@ -246,7 +246,7 @@ test("S4: default component directories, skill leaves, agent files and CLAUDE.md
   mkdirSync(join(root, "hooks"))
   symlinkSync(join(outside, "hooks.json"), join(root, "hooks", "hooks.json"))
   const project = directory()
-  const fake = createFakeContext({ directory: project, options: { sources: [{ path: root }], instructions: true } })
+  const fake = createFakeContext({ directory: project, options: { enabled: true, sources: [{ path: root }], instructions: true } })
   const cleanup = await setupClaudeCompat(fake.context, deps)
   expect(fake.skills.size).toBe(0)
   expect(fake.agents.size).toBe(0)
@@ -261,7 +261,7 @@ test("P1b: the session directory is looked up per call, so a session moved out o
   const project = directory()
   const fake = createFakeContext({
     directory: project,
-    options: { sources: [{ path: MARKETPLACE }], plugins: ["demo"], mcp: "off", instructions: true },
+    options: { enabled: true, sources: [{ path: MARKETPLACE }], plugins: ["demo"], mcp: "off", instructions: true },
     sessions: [{ id: "ses_a", location: { directory: project } }],
   })
   const cleanup = await setupClaudeCompat(fake.context, deps)
@@ -293,7 +293,7 @@ test("P2a/P2b: cleanup kills a running SessionStart hook and drops its late resu
     }),
   )
   const project = directory()
-  const fake = createFakeContext({ directory: project, options: { sources: [{ path: root }], mcp: "off" } })
+  const fake = createFakeContext({ directory: project, options: { enabled: true, sources: [{ path: root }], mcp: "off" } })
   const cleanup = await setupClaudeCompat(fake.context, deps)
   const result = await report(fake)
   expect(result.loaded.hooks).toEqual(["bundled:SessionStart(startup)"])
