@@ -174,9 +174,17 @@ export function shapeAgent(agent: MutableAgent, file: AgentFile, created: boolea
   agent.permissions = [...(agent.permissions ?? []), ...file.permissions]
 }
 
-/** Register every agent file. Files are read once, before the transform registers. */
-export async function registerAgents(agent: Context["agent"], paths: readonly string[]) {
-  const files = paths.map(readAgentFile)
+/**
+ * Register every agent file. Files are read once, before the transform registers. `extra`
+ * rules go after each file's own, for boundaries only known at runtime, such as the
+ * plugin's install directory.
+ */
+export async function registerAgents(
+  agent: Context["agent"],
+  paths: readonly string[],
+  extra: readonly AgentPermission[] = [],
+) {
+  const files = paths.map(readAgentFile).map((file) => ({ ...file, permissions: [...file.permissions, ...extra] }))
   return agent.transform((editor) => {
     for (const file of files) {
       const created = editor.get(file.id) === undefined
