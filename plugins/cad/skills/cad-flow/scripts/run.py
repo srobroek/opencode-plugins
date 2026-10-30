@@ -9,8 +9,9 @@ Usage: uv run --script <skills>/cad-flow/scripts/run.py <skill>/scripts/<script.
 
 The target path is relative to the plugin's skills/ directory; the cad_run tool of the
 srobroek.cad OpenCode plugin starts this launcher. `cadmodel.scriptenv` reads the target's
-PEP 723 header and starts it with `--with-requirements`, which keys uv's cache by
-the dependency set and interpreter rather than the target file's path.
+PEP 723 header and starts it with `--with-requirements` (or individual `--with` dependencies for
+uv-reserved basenames such as setup.py), which keys uv's cache by the dependency set and
+interpreter rather than the target file's path.
 """
 
 from __future__ import annotations
