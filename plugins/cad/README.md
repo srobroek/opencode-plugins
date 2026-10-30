@@ -56,7 +56,7 @@ refuses their pids. Stop such a server with its skill's own stop command, such a
 | `cad-concept` | Rapid three.js concept variants in a live viewer |
 | `cad-model` | Build, check and diff parametric CadQuery/build123d models |
 | `cad-design` | F0 to F3 product fidelity and form-check gates |
-| `cad-motion` | Pose assemblies, sweep joints, pick worst-case poses, motion renders |
+| `cad-motion` | Pose assemblies, sweep joints with between-sample proofs and subsystem runs, pick worst-case poses, motion renders |
 | `cad-render` | three.js PBR version renders and the image gallery |
 | `cad-viewer` | Interactive OCP CAD Viewer inspection and Studio look-dev |
 | `cad-analysis` | Static FreeCAD finite-element analysis at worst-case poses |
@@ -101,8 +101,9 @@ bd mol pour cad-touch --var product=lamp --var scope=hw/ ...  # ECO on a release
 ```
 
 Worker steps carry `execution_mode = "subagent"` and an `execution_agent_type` naming one of the
-agents above, so the beads routing gate admits exactly that agent. Each stage closes with one
-human gate, resolved only with `bd gate resolve` after explicit approval.
+agents above, so the beads routing gate admits exactly that agent. Each stage's lead integration
+step waits for every unit and is followed by its provisional gate, the full check and the human
+gate, which is resolved only with `bd gate resolve` after explicit approval.
 [formulas/README.md](formulas/README.md) has the bonding commands;
 `formulas/smoke-pour.sh` pours and bonds every formula in a scratch workspace.
 
