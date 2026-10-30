@@ -128,8 +128,8 @@ function shapeAgent(agent, file, created) {
     agent.request = { ...agent.request, headers: { ...file.request.headers, ...agent.request?.headers } };
   agent.permissions = [...agent.permissions ?? [], ...file.permissions];
 }
-async function registerAgents(agent, paths) {
-  const files = paths.map(readAgentFile);
+async function registerAgents(agent, paths, extra = []) {
+  const files = paths.map(readAgentFile).map((file) => ({ ...file, permissions: [...file.permissions, ...extra] }));
   return agent.transform((editor) => {
     for (const file of files) {
       const created = editor.get(file.id) === undefined;
@@ -450,47 +450,38 @@ function isFrontendProject(directory) {
 }
 
 // plugins/design/src/formulas.ts
-import { copyFileSync, lstatSync, mkdirSync, readFileSync as readFileSync5 } from "fs";
-import { dirname, isAbsolute, join as join4, resolve } from "path";
+import { dirname, join as join5 } from "path";
 import { fileURLToPath as fileURLToPath3 } from "url";
-var SETUP_TOOL = "design_setup";
-var FORMULAS = [
-  "design-touch",
-  "design-surface",
-  "design-system",
-  "mol-design-a11y",
-  "mol-design-component",
-  "mol-design-iterate",
-  "mol-design-motion",
-  "mol-design-responsive",
-  "mol-design-tokens"
-];
-var FORMULAS_DIR = join4(dirname(fileURLToPath3(import.meta.url)), "..", "formulas");
+
+// plugins/lib/src/formulas.ts
+import { copyFileSync, lstatSync, mkdirSync, readFileSync as readFileSync5 } from "fs";
+import { isAbsolute, join as join4, resolve } from "path";
 function symlinkBelow(repo) {
   for (const path of [join4(repo, ".beads"), join4(repo, ".beads", "formulas")])
     if (lstatSync(path, { throwIfNoEntry: false })?.isSymbolicLink())
       return path;
   return null;
 }
-function installFormulas(workspace, cwd, force = false, sourceDir = FORMULAS_DIR) {
+function installFormulas(options) {
+  const { workspace, cwd, names, sourceDir, force = false } = options;
   const repo = isAbsolute(workspace) ? workspace : resolve(cwd, workspace);
-  const fail = (text) => ({ ok: false, text, copied: [], unchanged: [] });
   const beads = join4(repo, ".beads");
-  const destDir = join4(beads, "formulas");
+  const destination = join4(beads, "formulas");
+  const fail = (text) => ({ ok: false, text, copied: [], unchanged: [], destination });
   const link = symlinkBelow(repo);
   if (link)
     return fail(`refusing symlinked path: ${link}`);
   if (!lstatSync(beads, { throwIfNoEntry: false })?.isDirectory())
     return fail(`not a beads workspace: ${repo} has no .beads/ (run bd init there first)`);
-  const destStat = lstatSync(destDir, { throwIfNoEntry: false });
+  const destStat = lstatSync(destination, { throwIfNoEntry: false });
   if (destStat && !destStat.isDirectory())
-    return fail(`formula destination is not a directory: ${destDir}`);
+    return fail(`formula destination is not a directory: ${destination}`);
   const copies = [];
   const unchanged = [];
   const divergent = [];
-  for (const name of FORMULAS) {
+  for (const name of names) {
     const src = join4(sourceDir, `${name}.formula.toml`);
-    const dest = join4(destDir, `${name}.formula.toml`);
+    const dest = join4(destination, `${name}.formula.toml`);
     const srcStat = lstatSync(src, { throwIfNoEntry: false });
     if (!srcStat?.isFile() || srcStat.isSymbolicLink())
       return fail(`shipped formula missing or unsafe: ${src}`);
@@ -507,17 +498,36 @@ function installFormulas(workspace, cwd, force = false, sourceDir = FORMULAS_DIR
   }
   if (divergent.length > 0 && !force)
     return fail(`refusing to overwrite divergent formulas (pass force=true to replace them): ${divergent.join(", ")}`);
-  mkdirSync(destDir, { recursive: true });
+  mkdirSync(destination, { recursive: true });
   for (const { src, dest } of copies)
     copyFileSync(src, dest);
   const copied = copies.map(({ name }) => name);
-  const lines = [
-    copied.length > 0 ? `copied ${copied.join(", ")} into ${destDir}` : `every design formula already in ${destDir}`,
-    "Pour a tier with: bd mol pour design-touch --var surface=<route> --var scope=<paths>",
-    "Bond a sub-process with: bd mol bond mol-design-<name> <step-id> --var surface=<route> --var node=<step-id>"
-  ];
-  return { ok: true, text: lines.join(`
-`), copied, unchanged };
+  const text = copied.length > 0 ? `copied ${copied.join(", ")} into ${destination}` : `every formula already in ${destination}`;
+  return { ok: true, text, copied, unchanged, destination };
+}
+
+// plugins/design/src/formulas.ts
+var SETUP_TOOL = "design_setup";
+var FORMULAS = [
+  "design-touch",
+  "design-surface",
+  "design-system",
+  "mol-design-a11y",
+  "mol-design-component",
+  "mol-design-iterate",
+  "mol-design-motion",
+  "mol-design-responsive",
+  "mol-design-tokens"
+];
+var FORMULAS_DIR = join5(dirname(fileURLToPath3(import.meta.url)), "..", "formulas");
+var USAGE = [
+  "Pour a tier with: bd mol pour design-touch --var surface=<route> --var scope=<paths>",
+  "Bond a sub-process with: bd mol bond mol-design-<name> <step-id> --var surface=<route> --var node=<step-id>"
+];
+function installFormulas2(workspace, cwd, force = false) {
+  const result = installFormulas({ workspace, cwd, force, names: FORMULAS, sourceDir: FORMULAS_DIR });
+  return result.ok ? { ...result, text: [result.text, ...USAGE].join(`
+`) } : result;
 }
 
 // plugins/design/src/impeccable.ts
@@ -851,7 +861,7 @@ async function setupDesign(ctx, moduleUrl, overrides = {}) {
           const cwd = await directory(context.sessionID);
           const target = resolve3(cwd, typeof workspace === "string" ? workspace : ".");
           await assert(context, SETUP_TOOL, [target], { workspace: target, force: force === true });
-          const result = installFormulas(target, cwd, force === true);
+          const result = installFormulas2(target, cwd, force === true);
           return {
             content: result.ok ? result.text : `${SETUP_TOOL}: ${result.text}`,
             metadata: { ok: result.ok, copied: result.copied, unchanged: result.unchanged }
@@ -913,7 +923,7 @@ export {
   countFindings,
   createPlugin,
   src_default as default,
-  installFormulas,
+  installFormulas2 as installFormulas,
   interpretScan,
   isFrontendProject,
   parseOptions,
