@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """cad-motion tests: pure kinematics and frame checks, then STEP runs through OCP and FreeCAD.
 
-Run: python3 -m unittest discover -s cad/skills/cad-motion/tests -v
+Run: python3 -m unittest discover -s plugins/cad/skills/cad-motion/tests -v
 The STEP tests need `uv`; the FreeCAD test also needs freecadcmd and skips without it.
 """
 

@@ -3,7 +3,7 @@
 (render captions, captures, drawings with their PDFs, concept screenshots), the file route's
 path checks, and the host's gallery routes on a real loopback server.
 
-Run: python3 -m unittest discover -s cad/skills/cad-viewer/tests -p 'test_gallery.py' -v  (needs PyYAML)
+Run: python3 -m unittest discover -s plugins/cad/skills/cad-viewer/tests -p 'test_gallery.py' -v  (needs PyYAML)
 """
 
 from __future__ import annotations

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Part drawings: annotation-class layout rules, and the completeness gate on real lamp template parts.
 
-Run: uv run --with pyyaml --with defusedxml --with jsonschema python -m unittest discover -s cad/skills/cad-drawings/tests
+Run: uv run --with pyyaml --with defusedxml --with jsonschema python -m unittest discover -s plugins/cad/skills/cad-drawings/tests
 The gate tests build the lamp template through ``cad_model.py run`` (CadQuery runner, needs ``uv``;
 a cold OCP import can take minutes) and draw the LMP-0005 pin and the catalogue parts in FreeCAD's freecadcmd.
 """

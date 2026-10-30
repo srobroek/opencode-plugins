@@ -4,7 +4,7 @@
 Expected values are worked out by hand or from the mechanism's geometry (the rod's crank end must land on
 the crankpin), never by calling the law under test.
 
-Run: python3 -m unittest discover -s cad/skills/cad-motion/tests -v
+Run: python3 -m unittest discover -s plugins/cad/skills/cad-motion/tests -v
 """
 
 from __future__ import annotations

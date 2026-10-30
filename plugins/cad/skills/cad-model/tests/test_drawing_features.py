@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """drawing_features hook capture, feature-specific fit endpoints and heat-set inserts in check.
 
-Run: python3 -m unittest discover -s cad/skills/cad-model/tests -p 'test_drawing_features.py' -v
+Run: python3 -m unittest discover -s plugins/cad/skills/cad-model/tests -p 'test_drawing_features.py' -v
 The capture tests build small two-part projects through `cad_model.py run` in both kernels and need
 `uv`; the locator, endpoint and heat-set rule tests import cadmodel directly and need no OCP.
 """

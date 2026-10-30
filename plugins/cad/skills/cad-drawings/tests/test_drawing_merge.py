@@ -3,7 +3,7 @@
 
 Kernel-free: the project and its version folder are written by test_drawing_framework.write_project,
 hashed as ``cad_model.py run`` writes them, with a ``bed_face`` drawing_features locator.
-Run: uv run --with pyyaml --with defusedxml --with jsonschema python -m unittest discover -s cad/skills/cad-drawings/tests -p test_drawing_merge.py
+Run: uv run --with pyyaml --with defusedxml --with jsonschema python -m unittest discover -s plugins/cad/skills/cad-drawings/tests -p test_drawing_merge.py
 """
 
 from __future__ import annotations

@@ -1,6 +1,6 @@
 ---
 name: cad-review-dfm
-description: Reviews part manufacturability against its declared FDM or CNC process with measured evidence. Use when a design needs an independent manufacturing review.
+description: Reviews part manufacturability against its FDM or CNC process with measured evidence, for an independent DFM review.
 ---
 
 # Design for Manufacturing Review

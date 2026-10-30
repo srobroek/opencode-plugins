@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Assembly drawings without a kernel: intent, reconciliation, balloons, parts list, notes and sheet checks.
 
-Run: uv run --with pyyaml --with defusedxml --with jsonschema python -m unittest discover -s cad/skills/cad-drawings/tests
+Run: uv run --with pyyaml --with defusedxml --with jsonschema python -m unittest discover -s plugins/cad/skills/cad-drawings/tests
 """
 
 from __future__ import annotations

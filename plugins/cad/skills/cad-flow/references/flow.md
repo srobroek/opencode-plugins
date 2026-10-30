@@ -6,7 +6,7 @@ Keep the source of truth in the hardware project's `hw/` design record. `cad-rec
 
 | Stage | Work and user gate | Design-record output | Skill / command |
 |---|---|---|---|
-| GROUND | Inspect needs and existing hardware; on an existing project run `validate.py PROJECT --migration-plan` before freezing. | Product identity, rigor, units, regime, tolerances; initial requirements and interface evidence. The migration plan is read-only; nothing is moved. | `cad-record`: `uv run --script skill://cad-record/scripts/validate.py <project-dir> [--migration-plan]` |
+| GROUND | Inspect needs and existing hardware; on an existing project run `validate.py PROJECT --migration-plan` before freezing. | Product identity, rigor, units, regime, tolerances; initial requirements and interface evidence. The migration plan is read-only; nothing is moved. | `cad-record`: `cad_run cad-record/scripts/validate.py <project-dir> [--migration-plan]` |
 | INTENT | Present purpose, users, envelope, constraints, unknowns; wait for approval. | Approved intent, requirement sources, rationales, priorities, and gate decision. | `cad-record`: validate project |
 | SPECIFY | Set measurable requirements and verification criteria. | Requirements with rationale, source, priority, verification method and criteria; updated interfaces. | `cad-record`: validate project |
 | concept | One `cad-concept-designer` per variant drafts 2-4 rapid three.js variants in one batch; merge them, then refine, merge, or drop by feedback. | Scene, options and selection in a decision record. Preview is not verified CAD. | `cad-concept`: `concept.py check <scene>`; handoff: `concept.py handoff <scene>` |
@@ -36,10 +36,9 @@ Draft, show live previews, and collect feedback. Continue until the user says â€
 - The user's commit, the layout threshold, or the hardware git pre-commit hook triggers broader changed-parts/dependents recheck. Use `flow.recheck_from` and applicable earlier-stage checks; stamp the exact staged `hw/` only after every required check passes.
 - Record changed items, dependents, checks, results, and artifacts. A later edit starts a new batch on the next commit.
 - After DESIGN freeze, reopen only affected parts and dependents. Preserve unaffected parts and their evidence. Before another release, build a new version and re-freeze its exact manifest anchor.
-- Before using `uv run --script skill://<name>/scripts/...` on a non-OMP harness, resolve `skill://<name>/` to that skill's base directory; OMP resolves the URI directly.
 - A preview or render is not a check result. Tie reported checks to a design revision/configuration.
 
-Once a version has an independent movable joint, each commit batch also runs the default motion render beside cad-render: `uv run --script skill://cad-flow/scripts/run.py cad-motion/scripts/motion.py render --hw hw --version vN --case default --outputs glb,sheet`. Only the contact-sheet tiles render, so it takes seconds to a minute. Exit 1, a coverage gap or a limit finding, blocks the gate; exit 2 is no result. The LAYOUT freeze gate shows:
+Once a version has an independent movable joint, each commit batch also runs the default motion render beside cad-render: `cad_run cad-motion/scripts/motion.py render --hw hw --version vN --case default --outputs glb,sheet`. Only the contact-sheet tiles render, so it takes seconds to a minute. Exit 1, a coverage gap or a limit finding, blocks the gate; exit 2 is no result. The LAYOUT freeze gate shows:
 
 ```text
 L1 MOTION RENDER vN default: PASS|FLAGGED|FAIL, {frames} frames, {segments} segments, {timings_s.total} s
@@ -93,7 +92,7 @@ Read every report of the batch before you change anything. Accept a part deliver
 
 A part designer works in `.cad-work/<unit>/` next to `hw/`; `scratch.py` writes a `.gitignore` there so git ignores the directory.
 
-- `uv run --script skill://cad-flow/scripts/scratch.py init --hw hw --unit <unit> --part <PN> [--part <PN> ...]` copies `hw/` without `versions/`, `renders/`, `releases/`, or `.git/` and records a baseline.
+- `cad_run cad-flow/scripts/scratch.py init --hw hw --unit <unit> --part <PN> [--part <PN> ...]` copies `hw/` without `versions/`, `renders/`, `releases/`, or `.git/` and records a baseline.
  - `scratch.py deliver --hw hw --unit <unit>` accepts only canonical source files under authorized part records (including a PN authorized at `init`), rejects generated subtrees, stray paths and unauthorized PNs, and writes nothing when a conflict is detected. The lead integrates the returned part files only after the passing scratch build.
 
 Every path in its JSON output is absolute. `.cad-work/` is disposable once the stage gate passes.

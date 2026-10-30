@@ -12,10 +12,10 @@
 """Review renders of the cad-design reference lamp arm, one PNG set per kernel.
 
 Usage:
-    uv run --script skill://cad-flow/scripts/run.py cad-design/scripts/review_render.py --out DIR [--kernels cadquery build123d]
+    cad_run cad-design/scripts/review_render.py --out DIR [--kernels cadquery build123d]
         [--parts-root DIR] [--hw HW] [--pose nominal|zero] [--port 0]
 
-Builds the checkout's `cad/examples/lamp-arm` parts with build_reference.py into
+Builds the checkout's `plugins/cad/examples/lamp-arm` parts with build_reference.py into
 DIR/<kernel>/parts (or reads `<kernel>/<PN>.step` under --parts-root), poses
 them with cad-motion's chain at the joints' nominal values, adds ISO 4762 M6
 socket head cap screws from bd_warehouse in the base counterbores, and renders
@@ -229,10 +229,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=0)
     args = parser.parse_args(argv)
     if args.hw == DEFAULT_HW and not DEFAULT_HW.is_dir():
-        print(json.dumps({"error": f"cad/examples/lamp-arm example is missing: expected {DEFAULT_HW}"}))
+        print(json.dumps({"error": f"plugins/cad/examples/lamp-arm example is missing: expected {DEFAULT_HW}"}))
         return 2
     if not BASE_MODEL.is_file():
-        print(json.dumps({"error": f"cad/examples/lamp-arm base model is missing: expected {BASE_MODEL}"}))
+        print(json.dumps({"error": f"plugins/cad/examples/lamp-arm base model is missing: expected {BASE_MODEL}"}))
         return 2
     args.out.mkdir(parents=True, exist_ok=True)
     try:

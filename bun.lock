@@ -159,6 +159,19 @@
         "@opencode/plugin",
       ],
     },
+    "plugins/cad": {
+      "name": "@srobroek/opencode-cad",
+      "version": "0.1.0",
+      "devDependencies": {
+        "@srobroek/opencode-lib": "workspace:*",
+      },
+      "peerDependencies": {
+        "@opencode/plugin": "^2.1.4",
+      },
+      "optionalPeers": [
+        "@opencode/plugin",
+      ],
+    },
     "plugins/chezmoi": {
       "name": "@srobroek/opencode-chezmoi",
       "version": "0.2.0",
@@ -871,6 +884,8 @@
     "@srobroek/opencode-beads": ["@srobroek/opencode-beads@workspace:plugins/beads"],
 
     "@srobroek/opencode-build": ["@srobroek/opencode-build@workspace:plugins/build"],
+
+    "@srobroek/opencode-cad": ["@srobroek/opencode-cad@workspace:plugins/cad"],
 
     "@srobroek/opencode-chezmoi": ["@srobroek/opencode-chezmoi@workspace:plugins/chezmoi"],
 

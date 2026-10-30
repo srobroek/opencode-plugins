@@ -4,7 +4,7 @@
 The fixture is a 80 x 40 x 6 mm plate with one pin definition placed twice (``@pin-a``, ``@pin-b``),
 written through cad-motion's STEP writers. The cases run the real CLI in its uv environment and the
 real freecadcmd (FREECADCMD, PATH or the macOS app); they are skipped only when FreeCAD is absent.
-Run: uv run --with pyyaml --with defusedxml --with jsonschema python -m unittest discover -s cad/skills/cad-drawings/tests
+Run: uv run --with pyyaml --with defusedxml --with jsonschema python -m unittest discover -s plugins/cad/skills/cad-drawings/tests
 """
 
 from __future__ import annotations

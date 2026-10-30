@@ -177,6 +177,10 @@
     "plugins/ast-grep": {
       "release-type": "node",
       "component": "ast-grep"
+    },
+    "plugins/cad": {
+      "release-type": "node",
+      "component": "cad"
     }
   }
 }

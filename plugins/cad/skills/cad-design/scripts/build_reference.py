@@ -10,10 +10,10 @@ Usage:
         [--models DIR] [--hw HW] [--only PN ...]
 
 --models  directory of `<PN>.py` or `parts/<PN>/model.py` files (default:
-          cad/examples/lamp-arm/reference/<kernel> for build123d, and the
+          plugins/cad/examples/lamp-arm/reference/<kernel> for build123d, and the
           example record's parts for cadquery).
 --hw      design record whose parts/<PN>/part.yaml titles name STEP products
-          `<PN> <title>` (default: cad/examples/lamp-arm/hw).
+          `<PN> <title>` (default: plugins/cad/examples/lamp-arm/hw).
 --out     receives `<PN>.step` per part plus `build.json`.
 
 The parts are built by cad-model's kernel runner (`run_cadquery.py` or
@@ -139,7 +139,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.hw is None and not DEFAULT_HW.is_dir():
         print(json.dumps({"kernel": args.kernel, "parts": {},
-                          "errors": [f"cad/examples/lamp-arm example is missing: expected {DEFAULT_HW}"]}))
+                          "errors": [f"plugins/cad/examples/lamp-arm example is missing: expected {DEFAULT_HW}"]}))
         return 2
     hw = args.hw or DEFAULT_HW
     models = args.models or (CADQUERY_PARTS if args.kernel == "cadquery" else REFERENCE / args.kernel)

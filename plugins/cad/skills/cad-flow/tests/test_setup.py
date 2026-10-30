@@ -52,26 +52,18 @@ class PlanTests(unittest.TestCase):
         self.assertTrue(all(identifier in {"uv", "warm-cadquery", "manual-libraries"} for identifier in identifiers))
         self.assertIn("https://astral.sh/uv/install.sh", items[0].command)
 
-    def test_formula_copy_is_idempotent(self) -> None:
+    def test_beads_workspace_plans_nothing_for_formulas(self) -> None:
         beads = self.root / "workspace" / ".beads"
         beads.mkdir(parents=True)
         env = {**self.env, "BEADS_DIR": str(beads)}
         planned = [item.id for item in setup.plan(report(), self.root, self.home, env)]
-        self.assertIn("formulas", planned)
-        self.assertTrue(all(identifier in {"formulas", "manual-libraries"} for identifier in planned))
-        setup._copy_formulas(self.root, env)
-        planned = [item.id for item in setup.plan(report(), self.root, self.home, env)]
-        self.assertNotIn("formulas", planned)
         self.assertTrue(all(identifier == "manual-libraries" for identifier in planned))
-        self.assertEqual({path.name for path in (beads / "formulas").glob("*.formula.toml")},
-                         {path.name for path in setup.FORMULAS.glob("*.formula.toml")})
+        self.assertFalse((beads / "formulas").exists())
 
-    def test_requested_harness_is_planned_but_not_implicit(self) -> None:
-        with patch.object(setup, "_harness_needed", return_value=True):
-            implicit = setup.plan(report(), self.root, self.home, self.env)
-            requested = setup.plan(report(), self.root, self.home, self.env, "opencode")
-        self.assertFalse(any(item.id.startswith("harness-") for item in implicit))
-        self.assertIn("harness-opencode", [item.id for item in requested])
+    def test_setup_has_no_harness_option(self) -> None:
+        with self.assertRaises(SystemExit), redirect_stdout(io.StringIO()), \
+                patch("sys.stderr", io.StringIO()):
+            setup.main(["--harness", "opencode"])
 
     def test_linux_browser_libraries_offer_playwright_deps_for_debian_and_ubuntu_derivatives(self) -> None:
         check = setup.preflight.Check(

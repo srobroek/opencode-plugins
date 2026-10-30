@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """cad-flow scratch workspace tests: a worker's copy, build, and delivery never touch the lead's records.
 
-Run: python3 -m unittest discover -s cad/skills/cad-flow/tests -v
+Run: python3 -m unittest discover -s plugins/cad/skills/cad-flow/tests -v
 The init and deliver tests are stdlib-only. The build test needs `uv`; it builds a copy of the
 checkout's lamp example (seven CadQuery parts) in a scratch workspace, so a cold uv cache adds minutes.
 """

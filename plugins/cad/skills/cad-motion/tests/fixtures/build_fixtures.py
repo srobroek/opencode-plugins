@@ -8,7 +8,7 @@ Usage: uv run --script build_fixtures.py OUT_DIR
 
 OUT_DIR/lamp/       LMP-0001..LMP-0011 as one STEP per part definition, plus
                     lamp-arm.step (one assembly STEP placing every occurrence of
-                    cad/examples/lamp-arm/hw/assembly.yaml: each part once, the
+                    plugins/cad/examples/lamp-arm/hw/assembly.yaml: each part once, the
                     LMP-0011 ring three times. The geometry is a stand-in for the
                     example's models; it follows the example's joint origins and
                     axes: the arm lies straight along +X at the zero pose. LMP-0011

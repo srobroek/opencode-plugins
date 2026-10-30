@@ -4,7 +4,7 @@
 The pure cases build cut faces by hand; the FreeCAD cases cut real solids through techdraw_job.py: a
 tube (2 mm wall) across its axis, one annular face with its own inner loop; a 4 mm plate and a 20 mm
 block through the axis of their Ø10 through hole, two faces either side of the hole.
-Run: uv run --with pyyaml --with defusedxml --with jsonschema python -m unittest discover -s cad/skills/cad-drawings/tests
+Run: uv run --with pyyaml --with defusedxml --with jsonschema python -m unittest discover -s plugins/cad/skills/cad-drawings/tests
 """
 
 from __future__ import annotations

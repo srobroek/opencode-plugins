@@ -3,7 +3,7 @@
 
 The FreeCAD cases run tests/freecad_views_job.py through the real freecadcmd (FREECADCMD, PATH or the
 macOS app) and export through it; they are skipped only when no FreeCAD is installed.
-Run: uv run --with pyyaml --with defusedxml --with jsonschema python -m unittest discover -s cad/skills/cad-drawings/tests
+Run: uv run --with pyyaml --with defusedxml --with jsonschema python -m unittest discover -s plugins/cad/skills/cad-drawings/tests
 """
 
 from __future__ import annotations

@@ -4,7 +4,7 @@
 The fixtures are built and recognised in freecadcmd (tests/fixtures/recognition_fixtures_job.py);
 the cases are skipped only when no FreeCAD is installed. The gate cases run feature_coverage on that
 recognition with a binding and measured characteristics made here.
-Run: uv run --with pyyaml --with defusedxml --with jsonschema python -m unittest discover -s cad/skills/cad-drawings/tests
+Run: uv run --with pyyaml --with defusedxml --with jsonschema python -m unittest discover -s plugins/cad/skills/cad-drawings/tests
 """
 
 from __future__ import annotations
