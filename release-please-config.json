@@ -180,7 +180,8 @@
     },
     "plugins/cad": {
       "release-type": "node",
-      "component": "cad"
+      "component": "cad",
+      "bump-minor-pre-major": true
     }
   }
 }
