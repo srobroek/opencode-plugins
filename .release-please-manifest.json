@@ -1,5 +1,5 @@
 {
-  "plugins/claude-compat": "0.1.0",
+  "plugins/claude-compat": "0.2.0",
   "plugins/example": "0.2.0",
   "plugins/model-roles": "0.2.1",
   "plugins/worktrunk": "0.2.0",
@@ -27,19 +27,19 @@
   "plugins/quality": "0.4.0",
   "plugins/toolchain": "0.3.1",
   "plugins/aws": "0.3.0",
-  "plugins/design": "0.3.1",
+  "plugins/design": "0.4.0",
   "plugins/safety": "0.3.0",
   "plugins/find-tools": "0.2.0",
   "plugins/trunk-dev": "0.3.0",
-  "plugins/speckit": "0.3.1",
+  "plugins/speckit": "0.4.0",
   "plugins/agent-efficiency": "0.5.0",
   "plugins/agent-researcher": "0.3.0",
-  "plugins/agent-seance": "0.2.2",
+  "plugins/agent-seance": "0.3.0",
   "plugins/agent-mechanic": "0.2.1",
   "plugins/agent-coder": "0.4.0",
   "plugins/agent-reviewer": "0.3.0",
   "plugins/repomix": "0.2.0",
   "plugins/docs": "0.2.0",
   "plugins/ast-grep": "0.2.0",
-  "plugins/cad": "0.3.1"
+  "plugins/cad": "0.4.0"
 }
