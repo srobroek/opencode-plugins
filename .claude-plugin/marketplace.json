@@ -53,7 +53,7 @@
       "name": "design",
       "source": "./plugins/design",
       "description": "UI and UX design skills: design-system audit, DESIGN.md, rendered-surface review, accessibility audit, motion, microcopy, prototypes, and wireframes.",
-      "version": "0.3.1",
+      "version": "0.4.0",
       "category": "development"
     },
     {
