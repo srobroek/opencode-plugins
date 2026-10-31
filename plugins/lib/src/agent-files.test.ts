@@ -7,6 +7,7 @@ import {
   agentPaths,
   parseAgentFile,
   permissionEffect,
+  registerAgentFiles,
   registerAgents,
   shapeAgent,
 } from "./agent-files.ts"
@@ -166,5 +167,26 @@ describe("registerAgents", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+})
+
+describe("registerAgentFiles", () => {
+  const file = { id: "x:a", mode: "subagent" as const, system: "S", permissions: [{ action: "*", resource: "*", effect: "deny" as const }] }
+  test("onExisting skips and reports an id the host already has, leaving it untouched", async () => {
+    const fake = createFakeContext({ agents: [{ id: "x:a", system: "Mine", permissions: [] }] })
+    const skipped: string[] = []
+    await registerAgentFiles(fake.context.agent, [file, { ...file, id: "x:b" }], { onExisting: (id) => skipped.push(id) })
+    expect(skipped).toEqual(["x:a"])
+    expect(fake.agents.get("x:a")).toEqual({ id: "x:a", system: "Mine", permissions: [] })
+    expect(fake.agents.get("x:b")).toMatchObject({ system: "S", mode: "subagent" })
+  })
+
+  test("permissions combines the agent's prior rules with the file's", async () => {
+    const fake = createFakeContext()
+    await registerAgentFiles(fake.context.agent, [file], { permissions: (existing, f) => [...f.permissions, ...existing, { action: "z", resource: "*", effect: "ask" }] })
+    expect((fake.agents.get("x:a") as unknown as { permissions: unknown[] }).permissions).toEqual([
+      { action: "*", resource: "*", effect: "deny" },
+      { action: "z", resource: "*", effect: "ask" },
+    ])
   })
 })

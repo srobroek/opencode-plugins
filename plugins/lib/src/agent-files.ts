@@ -185,10 +185,38 @@ export async function registerAgents(
   extra: readonly AgentPermission[] = [],
 ) {
   const files = paths.map(readAgentFile).map((file) => ({ ...file, permissions: [...file.permissions, ...extra] }))
+  return registerAgentFiles(agent, files)
+}
+
+export type RegisterAgentOptions = {
+  /** When set, a file whose id the host already has is skipped (and reported here) instead of merged. */
+  onExisting?: (id: string) => void
+  /** Combines the agent's rules before shaping with the file's; by default the file's are appended. */
+  permissions?: (existing: AgentPermission[], file: AgentFile, editor: Parameters<Parameters<Context["agent"]["transform"]>[0]>[0]) => AgentPermission[]
+}
+
+/**
+ * Register parsed agents, creating each one the host does not have yet. For plugins that
+ * build {@link AgentFile}s from another format instead of reading V2 agent markdown.
+ */
+export async function registerAgentFiles(
+  agent: Context["agent"],
+  files: readonly AgentFile[],
+  options: RegisterAgentOptions = {},
+) {
   return agent.transform((editor) => {
     for (const file of files) {
       const created = editor.get(file.id) === undefined
-      editor.update(file.id, (info) => shapeAgent(info as unknown as MutableAgent, file, created))
+      if (!created && options.onExisting) {
+        options.onExisting(file.id)
+        continue
+      }
+      editor.update(file.id, (info) => {
+        const mutable = info as unknown as MutableAgent
+        const existing = [...(mutable.permissions ?? [])]
+        shapeAgent(mutable, file, created)
+        if (options.permissions) mutable.permissions = options.permissions(existing, file, editor)
+      })
     }
   })
 }
