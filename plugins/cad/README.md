@@ -108,7 +108,8 @@ VARIANT, DESIGN freeze and RELEASE are single human gates. The lead resolves the
 once every fast check passes, which lets the next stage start; the human gate opens after the full
 check passes and is resolved only with `bd gate resolve` after explicit approval. A failed full
 check, a MAJOR L2 light-review finding or a change the user names at the human gate voids the
-provisional approval and reopens the stage. Nothing is frozen or released before the human gates.
+provisional approval and reopens the stage and every later step built on that version. Nothing is
+frozen or released before the human gates.
 [formulas/README.md](formulas/README.md) has the bonding commands;
 `formulas/smoke-pour.sh` pours and bonds every formula in a scratch workspace.
 
