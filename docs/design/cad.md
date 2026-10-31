@@ -1,8 +1,8 @@
 # cad: porting the OMP CAD plugin to OpenCode V2
 
 Status: built in bead `opencode-plugins-net.9` as `plugins/cad` (id `srobroek.cad`). Source:
-`srobroek/omp-plugins` at `ab1dac9e48`, directory `cad/`. Checked against OpenCode 2.2.1 and
-`@opencode/plugin` 2.1.4.
+`srobroek/omp-plugins` at `dc89664da1` (first ported at `ab1dac9e48`), directory `cad/`. Checked
+against OpenCode 2.2.1 and `@opencode/plugin` 2.1.4.
 
 ## What moves and what stays
 
@@ -36,9 +36,9 @@ plugins/cad/
 | OMP `autoloadSkills` | Prompt step "Load the `<skill>` skill first" plus a `skill` allow rule for `cad-*` | V2 agents have no preload field; the skill tool is the documented loader. |
 | Viewer session key from `PI_SESSION_ID` / `CLAUDE_CODE_SESSION_ID` | `cad_run` sets `CAD_SESSION_ID` to the root OpenCode session id; `session.py` reads it | The tool context carries the session id. Subagent sessions resolve to their root session through `parentID`, so a worker's capture reaches the lead's viewer host. |
 | Viewer left running when a session ends | `session.deleted` event: stop that session's viewer hosts (`viewer.py stop` with the recorded `--session`) and its background jobs; plugin cleanup stops all of them | `ctx.event.subscribe` carries `session.deleted`. OpenCode has no separate exit event; the returned cleanup runs on dispose. The 30-minute idle timeout stays as the fallback. |
-| `setup.py` copies formulas; `--harness opencode|kiro|claude` copies generated files | `cad_setup` installs the formulas; setup.py keeps only runtime provisioning (FreeCAD check, uv, warm-up) | One formula installer. The plugin itself provides skills and agents, so there is nothing to copy. |
+| `setup.py` copies formulas; `--harness opencode|kiro|claude` copies generated files | `cad_setup` installs the formulas; setup.py keeps runtime provisioning (FreeCAD check, uv, warm-up) and the project's git storage rules (`--storage`) | One formula installer. The plugin itself provides skills and agents, so there is nothing to copy. |
 | `preflight.py` harness checks (OMP, Claude, OpenCode copies, Kiro) | One optional `opencode-plugin` check: passes when preflight runs under `cad_run` (`CAD_OPENCODE_PLUGIN` is set), warns with the install command otherwise. The Beads check also reports missing cad formulas and names `cad_setup` | The skills ship only through this plugin, so the other harness checks no longer describe a supported install. Inside OpenCode, running under `cad_run` is proof the plugin loaded. |
-| Beads formulas with `skill://` text and `uv run --script skill://…` steps | Same formulas; text names skills and `cad_run` calls. Worker steps keep `execution_mode = "subagent"` and `execution_agent_type = "<cad agent>"` | `plugins/beads` routes subagent calls on `execution_agent_type` (`decideRouting`), so formula steps and agent ids must match; a test checks it. Gates stay `bd gate resolve`, as in the original. |
+| Beads formulas with `skill://` text and `uv run --script skill://…` steps | Same formulas; text names skills and `cad_run` calls. Worker steps keep `execution_mode = "subagent"` and `execution_agent_type = "<cad agent>"` | `plugins/beads` routes subagent calls on `execution_agent_type` (`decideRouting`), so formula steps and agent ids must match; a test checks it. Human gates stay `bd gate resolve` and provisional gates stay plain steps the lead closes, as in the original. |
 | cad-recheck git hook | Unchanged and opt-in: `cad_run cad-recheck/scripts/install-hook.py` | It is plain git (`core.hooksPath=.githooks`) and copies its helpers into the project, so it needs no harness. |
 
 ### `cad_run`
