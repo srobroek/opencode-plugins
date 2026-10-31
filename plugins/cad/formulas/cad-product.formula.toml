@@ -2,7 +2,7 @@
 # Pour with --var product=<id> --var scope=<paths>; kernel/process defaults are cadquery/fdm.
 # Each *-fanout step bonds one molecule per unit in one batch; its *-integrate step waits for all of them.
 # A stage that builds a version then closes with a provisional gate the lead resolves after the fast checks,
-# a full check, and a human gate. the cad-flow skill lists the units, agents, gates, and ownership per stage.
+# a full check, and a human gate. The cad-flow skill lists the units, agents, gates, and ownership per stage.
 formula = "cad-product"
 description = "Full multi-part CAD flow for {{product}} in {{scope}}: parallel worker batches per stage, one lead integration per stage, provisional and human gates per built stage, through validated release"
 type = "workflow"
