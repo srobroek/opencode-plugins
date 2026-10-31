@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/srobroek/opencode-plugins/compare/speckit--v0.3.1...speckit--v0.4.0) (2026-10-31)
+
+
+### Features
+
+* **claude-compat:** load trusted Claude Code plugins per project ([#89](https://github.com/srobroek/opencode-plugins/issues/89)) ([5143689](https://github.com/srobroek/opencode-plugins/commit/5143689de3933c3fe8a266d94e0e1355dfb42229))
+
 ## [0.3.1](https://github.com/srobroek/opencode-plugins/compare/speckit--v0.3.0...speckit--v0.3.1) (2026-10-30)
 
 

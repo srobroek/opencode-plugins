@@ -83,7 +83,7 @@
     },
     "plugins/agent-seance": {
       "name": "@srobroek/opencode-agent-seance",
-      "version": "0.2.2",
+      "version": "0.3.0",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
       },
@@ -161,7 +161,7 @@
     },
     "plugins/cad": {
       "name": "@srobroek/opencode-cad",
-      "version": "0.3.1",
+      "version": "0.4.0",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
       },
@@ -187,7 +187,7 @@
     },
     "plugins/claude-compat": {
       "name": "@srobroek/opencode-claude-compat",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
       },
@@ -240,7 +240,7 @@
     },
     "plugins/design": {
       "name": "@srobroek/opencode-design",
-      "version": "0.3.1",
+      "version": "0.4.0",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
       },
@@ -497,7 +497,7 @@
     },
     "plugins/speckit": {
       "name": "@srobroek/opencode-speckit",
-      "version": "0.3.1",
+      "version": "0.4.0",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
       },
