@@ -1,7 +1,7 @@
 # cad: porting the OMP CAD plugin to OpenCode V2
 
 Status: built in bead `opencode-plugins-net.9` as `plugins/cad` (id `srobroek.cad`). Source:
-`srobroek/omp-plugins` at `dc89664da1` (first ported at `ab1dac9e48`), directory `cad/`. Checked
+`srobroek/omp-plugins` at `b476fb9b9b` (first ported at `ab1dac9e48`), directory `cad/`. Checked
 against OpenCode 2.2.1 and `@opencode/plugin` 2.1.4.
 
 ## What moves and what stays
