@@ -1,6 +1,6 @@
 {
   "name": "@srobroek/opencode-cad",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Agent-assisted mechanical CAD from a rapid concept to a released STEP AP242 design: fifteen CAD skills with their Python scripts, six worker subagents, eleven beads formulas with a cad_setup installer, and the cad_run and cad_stop script tools.",
   "private": true,
   "type": "module",
