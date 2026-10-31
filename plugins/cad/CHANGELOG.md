@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/srobroek/opencode-plugins/compare/cad--v0.3.0...cad--v0.3.1) (2026-10-31)
+
+
+### Documentation
+
+* **cad:** tighten skill prose flagged by slopvac (omp b476fb9b9b) ([#93](https://github.com/srobroek/opencode-plugins/issues/93)) ([83ce12e](https://github.com/srobroek/opencode-plugins/commit/83ce12e2ad83b013f9aa849f14b2723c6dc32fc5))
+
 ## [0.3.0](https://github.com/srobroek/opencode-plugins/compare/cad--v0.2.0...cad--v0.3.0) (2026-10-31)
 
 

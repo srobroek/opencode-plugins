@@ -40,5 +40,5 @@
   "plugins/repomix": "0.2.0",
   "plugins/docs": "0.2.0",
   "plugins/ast-grep": "0.2.0",
-  "plugins/cad": "0.3.0"
+  "plugins/cad": "0.3.1"
 }
