@@ -82,7 +82,7 @@ jobs:
           headers = {m["content"] for f in files.split("\0") if f for m in block.finditer(open(f, encoding="utf-8").read())}
           print("".join(sorted(headers)), end="")
           EOF
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
           cache-dependency-glob: cad-pep723-headers.txt
