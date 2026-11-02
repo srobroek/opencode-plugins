@@ -28,3 +28,73 @@ jobs:
       - run: bun test
       - run: bun run build:check
       - run: bun run marketplaces:check
+
+  # Actions has no job-level `paths` filter, so this job works out whether a push
+  # or pull request touched the files the path-filtered `cad` job covers.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      cad: ${{ steps.diff.outputs.cad }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - id: diff
+        env:
+          # A pull request is checked out as its merge commit, whose first parent is
+          # the base branch; a push compares against the commit it replaced.
+          BASE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || github.event.before }}
+        run: |
+          if ! git rev-parse --verify --quiet "$BASE^{commit}" >/dev/null; then
+            cad=true  # no base to compare against: a new branch or a force push
+          elif git diff --quiet "$BASE" HEAD -- plugins/cad .github/workflows/ci.yml; then
+            cad=false
+          else
+            cad=true
+          fi
+          echo "cad=$cad" >> "$GITHUB_OUTPUT"
+
+  # The cad Python suites start CadQuery, build123d and OCP scripts whose
+  # environments uv builds from their PEP 723 headers. In omp-plugins, with the
+  # FreeCAD tests skipped as they are here, this took 24 minutes with an empty uv
+  # cache and 3.5 minutes with a warm one; the timeout leaves headroom over the
+  # cold run.
+  cad:
+    needs: changes
+    if: needs.changes.outputs.cad == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The uv cache holds those script environments, so its key is the dependency
+      # headers alone: editing a script body reuses the cache, and changing a
+      # dependency rebuilds it.
+      - name: Collect the PEP 723 dependency headers
+        run: |
+          python3 - > cad-pep723-headers.txt <<'EOF'
+          import re
+          import subprocess
+
+          block = re.compile(r"(?m)^# /// script$\s(?P<content>(^#(| .*)$\s)+)^# ///$")
+          files = subprocess.run(["git", "ls-files", "-z", "plugins/cad/*.py"], capture_output=True, text=True, check=True).stdout
+          headers = {m["content"] for f in files.split("\0") if f for m in block.finditer(open(f, encoding="utf-8").read())}
+          print("".join(sorted(headers)), end="")
+          EOF
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: cad-pep723-headers.txt
+
+      # The suites' own interpreter needs pyyaml and jsonschema, plus defusedxml for
+      # the cad-drawings modules its tests import; the scripts they start through
+      # `uv run --script` bring their own environments. Each file runs on its own.
+      - name: CAD skill tests
+        run: |
+          status=0
+          while IFS= read -r test; do
+            uv run --no-project --with pyyaml==6.0.3 --with jsonschema==4.26.0 --with defusedxml==0.7.1 \
+              python -m unittest discover -s "$(dirname "$test")" -p "$(basename "$test")" -v || status=1
+          done < <(git ls-files 'plugins/cad/skills/*/test_*.py')
+          exit $status

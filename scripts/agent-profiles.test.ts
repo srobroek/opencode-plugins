@@ -40,6 +40,12 @@ const PROFILES: Readonly<Record<string, Profile>> = {
   "speckit-sync": { hidden: true, codeMode: [], web: false },
   "speckit-verify": { hidden: true, codeMode: [], web: false },
   spec: { hidden: false, codeMode: ["parley", "speckit_setup", "speckit_start"], web: false },
+  "cad-analyst": { hidden: false, codeMode: ["cad_run"], web: false },
+  "cad-concept-designer": { hidden: false, codeMode: ["cad_run"], web: false },
+  "cad-part-designer": { hidden: false, codeMode: ["cad_run"], web: false },
+  "cad-sourcing-researcher": { hidden: false, codeMode: [], web: true },
+  "cad-mech-reviewer": { hidden: false, codeMode: [], web: false },
+  "cad-dfm-reviewer": { hidden: false, codeMode: [], web: false },
 }
 
 /** Agents that keep a denylist: journey-validator drives the product through MCP tools named per project. */

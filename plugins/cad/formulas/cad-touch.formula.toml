@@ -1,0 +1,245 @@
+# cad-touch: ECO-style change to a released part, with an explicit revision bump.
+# Pour with product, scope, part, from_rev, to_rev, release_rev, decision, and change vars.
+# Revised parts and recheck cases fan out as bonded molecules; each batch ends in one lead integration, then a
+# provisional gate the lead resolves after the fast checks, a full check, and a human gate.
+formula = "cad-touch"
+description = "ECO-style released-part change for {{product}} / {{part}}: record impact, bump revision, recheck affected design, and release"
+type = "workflow"
+
+[vars.product]
+required = true
+description = "hardware product id"
+
+[vars.scope]
+required = true
+description = "hardware project paths this change may affect"
+
+[vars.part]
+required = true
+pattern = "^[A-Z]{2,5}-[0-9]{4}$"
+description = "released part number"
+
+[vars.from_rev]
+required = true
+pattern = "^[A-HJ-NPRTUVWY]$"
+description = "current released revision of the part"
+
+[vars.to_rev]
+required = true
+pattern = "^[A-HJ-NPRTUVWY]$"
+description = "next valid released revision; must be the immediate revision successor"
+
+[vars.release_rev]
+required = true
+pattern = "^[A-HJ-NPRTUVWY]$"
+description = "product release revision letter to issue, an unused one; independent of the part's to_rev"
+
+[vars.decision]
+required = true
+pattern = "^DR-[0-9]{3}$"
+description = "design-record decision entry used as the ECO change record"
+
+[vars.change]
+required = true
+description = "approved requested change and reason"
+
+[vars.kernel]
+default = "cadquery"
+pattern = "^(cadquery|build123d)$"
+description = "modeling kernel environment; keep the two kernel environments separate"
+
+[vars.process_default]
+default = "fdm"
+pattern = "^(fdm|cnc)$"
+description = "default manufacturing process"
+
+[[steps]]
+id = "eco-impact"
+title = "Record ECO {{decision}} and impact for {{part}}"
+type = "task"
+priority = 1
+labels = ["cad", "phase:eco"]
+description = "Run the cad-record skill and the cad-recheck skill on the released baseline for {{product}}. Record {{change}} as decisions/{{decision}}. Identify the changed part and only its affected dependents from assembly/interfaces/BOM; state the baseline {{from_rev}} and proposed immediate successor {{to_rev}}. This is a released design after LAYOUT and DESIGN freeze. Before an existing record is changed, read cad-record/references/layout.md and run the read-only `validate.py PROJECT --migration-plan`; layout findings are sticky once frozen or released. Never rerun or reopen unaffected parts."
+
+[steps.metadata]
+skill_hints = "cad-record, cad-recheck, cad-flow"
+
+[[steps]]
+id = "intent-gate"
+title = "INTENT gate: approve ECO {{decision}}"
+type = "task"
+needs = ["eco-impact"]
+labels = ["cad", "phase:gate"]
+description = "Present the ECO rationale, changed part, impact set, and proposed revision bump. Ask whether a changed process or material can still meet each appearance or property requirement (a transparent part printed in FDM is a known contradiction). When product.yaml has no `storage.results_in_git`, ask explicitly whether generated results (STEP, GLB, renders, check bundles) are stored in git and record the answer there with a DR; only true tracks them, with Git LFS for STEP and GLB. Then write the git rules for that answer with `cad_run cad-flow/scripts/setup.py --storage --yes` from the project root. Obtain explicit approval of this intent and its affected-part/dependent set. Do not treat the original release or a recommendation as consent. Only bd gate resolve closes this human gate."
+
+[steps.gate]
+type = "human"
+timeout = "72h"
+
+[[steps]]
+id = "revise-fanout"
+title = "Fan out one revision molecule per part in the ECO {{decision}} impact set"
+type = "task"
+needs = ["intent-gate"]
+labels = ["cad", "phase:eco", "fanout"]
+description = "Bond one mol-cad-detail per part in the approved impact set onto this step before dispatch, with the full command shown above. {{part}} goes from {{from_rev}} to {{to_rev}}, the immediate successor under the design-record revision sequence; an impacted dependent bumps only when its geometry changes. Keep unaffected part files and revisions unchanged. Run `validate.py PROJECT --migration-plan` before planning legacy paths; workers deliver only canonical record sources for authorized parts via scratch.py. Dispatch every ready subagent step below this step in ONE parallel batch of cad-part-designer workers, as the cad-flow skill's Delegation section describes. Close each molecule from its worker's report; close this step when every child is closed."
+
+[steps.metadata]
+skill_hints = "cad-flow, cad-record"
+
+[[steps]]
+id = "revise-integrate"
+title = "Integrate the revised parts for ECO {{decision}} and build one version"
+type = "task"
+needs = ["revise-fanout"]
+waits_for = "all-children"
+labels = ["cad", "phase:eco", "phase:parts"]
+description = "Accept a delivery only with its passing F3 scratch build and the revision the brief named. Decide every proposal and apply accepted ones to shared records. Commit one batch and check its version vN in the cad-flow skill's fail-fast order, steps 1-4 in parallel where they do not depend on each other: cad-model run and `validate.py`, form_check at F3, `cad-model check vN --hw hw --changed-only`, the smoke sweep once a joint moves, and render with the visibility check; then recheck. A blocking failure stops the batch. Do not write release inventories or place explicit outputs outside `.cad-work/`. Record the decision/design entry and bead note."
+
+[steps.metadata]
+skill_hints = "cad-model, cad-design, cad-drawings, cad-render, cad-record"
+
+[[steps]]
+id = "revision-provisional-gate"
+title = "REVISION provisional gate for ECO {{decision}}"
+type = "task"
+needs = ["revise-integrate"]
+labels = ["cad", "phase:gate", "provisional"]
+description = "Resolve this gate yourself, without the user, once the revised version vN passed every fast check of the cad-flow skill's fail-fast order (steps 1-4), the F3 form check included. It is no Beads gate: close it with `bd close <this-step> --reason 'PROVISIONAL, temporary until revision-full-check: vN passed fast checks 1-4: <result files>'` and mark the ECO record provisional. It lets the recheck cases start on vN; it approves and freezes nothing."
+
+[[steps]]
+id = "revision-full-check"
+title = "REVISION full check and drawings for ECO {{decision}}"
+type = "task"
+needs = ["revision-provisional-gate"]
+labels = ["cad", "phase:eco", "full-check"]
+description = "Run the full check on the provisionally approved vN as long jobs, as the cad-flow skill describes: `cad-model check vN --hw hw` over every pair and, once a joint moves, `sweep.py --hw hw --version vN` with its between-sample check. Wait for each result file. While they run, use cad-drawings to draft, review and publish the version-bound drawings, following its documented output options and cad-record's layout API, and prepare the REVISION gate packet, listing the sweep's unproved between-sample intervals; a between-sample finding fails the check. Close this step with the result files once both pass. A failure, or a change the user names at the REVISION gate, voids the provisional approval and reopens the stage and every later step built on vN, also after this step closed, as the cad-flow skill's Gate control section describes: `bd reopen <revise-integrate-step> <revision-provisional-gate-step> <revision-full-check-step> <later closed steps> --reason 'VOID: vN <cause>: <result file>'`, where `<later closed steps>` are the ids `bd dep tree <revision-provisional-gate-step> --direction=up --status=closed --json` lists, except steps labelled `fanout` and bonded molecules (`<step-id>.<ref>`). Build the fixed version in revise-integrate, draw it again, and leave this step open until a full check on it passes."
+
+[steps.metadata]
+skill_hints = "cad-model, cad-motion, cad-drawings, cad-flow"
+
+[[steps]]
+id = "revision-gate"
+title = "REVISION gate: approve the revised parts for ECO {{decision}}"
+type = "task"
+needs = ["revision-full-check"]
+labels = ["cad", "phase:gate"]
+description = "Opens only after revision-full-check passed. Present the revised parts, their revisions, renders, fast and full check and F3 form results, and drawings, each file as an absolute path on its own line, plus the viewer URL when it runs. When the sweep left unproved between-sample intervals, the user accepts them with a DR or asks for a finer run, as the cad-flow skill's Gate control section describes. Ask the user to approve the revision or name changes; a named change voids the provisional approval and reopens the stage as revision-full-check describes. Only bd gate resolve after explicit approval closes this human gate."
+
+[steps.gate]
+type = "human"
+timeout = "72h"
+
+[[steps]]
+id = "analysis-fanout"
+title = "Fan out the L3-L4 recheck cases for the ECO impact set"
+type = "task"
+needs = ["revision-provisional-gate"]
+labels = ["cad", "phase:analysis", "fanout"]
+description = "List analysis cases covering {{part}} or an impacted dependent. The joint sweep and the FEA cases at its worst pose are the stage's full check, which analysis-full-check bonds; bond every other case onto this step. Analysts read the selected version snapshot and publish versioned evidence bundles by default; scratch overrides are new paths under `.cad-work/` only. See cad-record/references/layout.md and each producer's skill for its CLI. Close each molecule from its worker's report and this step when every child is closed."
+
+[steps.metadata]
+skill_hints = "cad-flow, cad-motion, cad-analysis"
+
+[[steps]]
+id = "analysis-integrate"
+title = "Record the ECO recheck evidence for the impact set"
+type = "task"
+needs = ["analysis-fanout", "revision-provisional-gate"]
+waits_for = "all-children"
+labels = ["cad", "phase:detail", "phase:analysis"]
+description = "Check each case's inputs and warnings, then update verification.csv and the ECO record yourself for {{part}} and affected dependents only, tied to version vN. Recheck the affected design with the cad-recheck skill; preserve evidence for untouched parts. An edit after freeze must use an approved ECO, a new built version, and a re-freeze before release. A failed case blocks the gate."
+
+[steps.metadata]
+skill_hints = "cad-analysis, cad-recheck, cad-bom, cad-record"
+
+[[steps]]
+id = "analysis-provisional-gate"
+title = "ANALYSIS provisional gate for ECO {{decision}}"
+type = "task"
+needs = ["analysis-integrate"]
+labels = ["cad", "phase:gate", "provisional"]
+description = "Resolve this gate yourself, without the user, once every analysis-fanout case passed. It is no Beads gate: close it with `bd close <this-step> --reason 'PROVISIONAL, temporary until analysis-full-check: vN fan-out cases passed: <result files>'` and mark the ECO record provisional. It lets CRITIQUE start on vN; it approves and freezes nothing."
+
+[[steps]]
+id = "analysis-full-check"
+title = "ANALYSIS full check for ECO {{decision}}: joint sweep, then FEA at its worst pose"
+type = "task"
+needs = ["analysis-provisional-gate"]
+labels = ["cad", "phase:analysis", "full-check"]
+description = "When a moving part is in the impact set, bond the joint sweep case onto this step: `bd mol bond mol-cad-analysis <this-step> --type parallel --ref analysis-sweep-<vN> --var product={{product}} --var scope={{scope}} --var case=sweep --var kind=sweep --var version=vN`; it runs a smoke sweep, then the full sweep with its between-sample check. Once it closes, bond each static FEA case at its worst pose the same way (`--ref analysis-<case>-<vN> --var kind=fea`) and dispatch them as the next batch, as the cad-flow skill's Delegation section describes. While they run, prepare the ANALYSIS gate packet, listing the sweep's unproved between-sample intervals; a between-sample finding fails the case. Write their verification rows, and close this step once every child closed and passed. A failed case, or a change the user names at the ANALYSIS gate, voids the provisional approval and reopens the stage and every later step built on vN, also after this step closed, as the cad-flow skill's Gate control section describes: `bd reopen <analysis-integrate-step> <analysis-provisional-gate-step> <analysis-full-check-step> <later closed steps> --reason 'VOID: vN <cause>: <result file>'`, where `<later closed steps>` are the ids `bd dep tree <analysis-provisional-gate-step> --direction=up --status=closed --json` lists, except steps labelled `fanout` and bonded molecules (`<step-id>.<ref>`). Route the fix through a new revision batch, bond the reruns with the fixed version in their refs, and leave this step open until the cases pass on the fixed version."
+
+[steps.metadata]
+skill_hints = "cad-flow, cad-motion, cad-analysis"
+
+[[steps]]
+id = "analysis-gate"
+title = "ANALYSIS gate for ECO {{decision}}"
+type = "task"
+needs = ["analysis-full-check", "revision-gate"]
+labels = ["cad", "phase:gate"]
+description = "Opens only after analysis-full-check passed and the REVISION gate was approved. Present each case's verdict and key numbers and the updated verification rows for the impact set, each result file as an absolute path on its own line. When the sweep left unproved between-sample intervals, the user accepts them with a DR or asks for a finer run, as the cad-flow skill's Gate control section describes. Ask the user to approve the recheck or name changes; a named change voids the provisional approval and reopens the stage as analysis-full-check describes. Only bd gate resolve after explicit approval closes this human gate."
+
+[steps.gate]
+type = "human"
+timeout = "72h"
+
+[[steps]]
+id = "mech-critique"
+title = "CRITIQUE ECO mechanical change"
+type = "task"
+needs = ["analysis-provisional-gate"]
+labels = ["cad", "phase:critique"]
+description = "Spawn cad-mech-reviewer read-only in the SAME parallel batch as dfm-critique. It may start on the provisional ANALYSIS approval while analysis-full-check runs; have it report evidence that is still pending as untested. Review the delta, load paths, interfaces, tolerances, failure modes, and changed verification evidence only. Return PASS, MINOR, or MAJOR with named evidence; do not edit files or ask the user."
+
+[steps.metadata]
+skill_hints = "cad-review-mech"
+execution_agent_type = "cad-mech-reviewer"
+execution_mode = "subagent"
+
+[[steps]]
+id = "dfm-critique"
+title = "CRITIQUE ECO manufacturability"
+type = "task"
+needs = ["analysis-provisional-gate"]
+labels = ["cad", "phase:critique"]
+description = "Spawn cad-dfm-reviewer read-only in the SAME parallel batch as mech-critique. It may start on the provisional ANALYSIS approval while analysis-full-check runs; have it report evidence that is still pending as untested. Review only affected parts: process, access, stock/tool access, tolerances, material, finish, and drawing. Return PASS, MINOR, or MAJOR with named evidence; do not edit files or ask the user."
+
+[steps.metadata]
+skill_hints = "cad-review-dfm"
+execution_agent_type = "cad-dfm-reviewer"
+execution_mode = "subagent"
+
+[[steps]]
+id = "reconcile"
+title = "Reconcile ECO findings and update release records"
+type = "task"
+needs = ["mech-critique", "dfm-critique", "analysis-provisional-gate"]
+labels = ["cad", "phase:reconcile"]
+description = "Reconcile both critiques against the ECO delta and test evidence. Resolve reproducible MAJOR and agreed MINOR findings; report unreproduced findings. Update BOM and verification records for affected parts only, preserve unaffected release evidence, and record the final disposition in decisions/{{decision}}."
+
+[steps.metadata]
+skill_hints = "cad-record, cad-bom, cad-recheck"
+
+[[steps]]
+id = "release-gate"
+title = "RELEASE gate: approve ECO {{decision}} as release {{release_rev}}"
+type = "task"
+needs = ["reconcile", "analysis-gate"]
+labels = ["cad", "phase:gate"]
+description = "Run the cad-record skill's `validate.py` on the record and confirm flow.frozen names the re-frozen ECO version. Present the ECO record, immediate revision bump, impact set, revised artifacts, that version and its manifest SHA-256, and release revision {{release_rev}}, plus structured lists or tables of print/make files, buy items including OPEN identities and reasons, assembly steps, and checks. Give every referenced file on its own absolute-path line. Obtain explicit user approval to release the change as {{release_rev}}; nothing is sealed before this gate, and the ECO record {{decision}} is not that approval. Leave unresolved otherwise. Only bd gate resolve closes this human gate."
+
+[steps.gate]
+type = "human"
+timeout = "72h"
+
+[[steps]]
+id = "release-package"
+title = "Seal ECO release {{release_rev}}"
+type = "task"
+needs = ["release-gate"]
+labels = ["cad", "phase:release"]
+description = "Record the RELEASE gate's approval as a new decisions/DR-###, then run `cad_run cad-record/scripts/release.py hw --rev {{release_rev}} --version <frozen-vN> --decision <DR-###>` to validate and seal the ECO release; never author an inventory or reuse a revision. Keep the frozen anchor bound to the exact new version and manifest SHA-256. A missing, stale or failed input, including any manufacturing failure, refuses and seals nothing; fix it, rebuild or republish, and retry. Use the cad-record layout API for all version and bundle paths. Preserve unchanged artifacts. Report print/make files, buy items with OPEN reasons, assembly steps, and checks in structured lists/tables with every referenced file on its own absolute-path line."
+
+[steps.metadata]
+skill_hints = "cad-record, cad-bom, cad-drawings"

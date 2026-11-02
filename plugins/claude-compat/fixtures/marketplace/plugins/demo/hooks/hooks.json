@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      { "matcher": "Bash", "hooks": [{ "type": "command", "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/guard.sh\"", "timeout": 10 }] },
+      { "matcher": "Write|Edit", "hooks": [{ "type": "agent", "prompt": "Verify the write.", "timeout": 30 }] }
+    ],
+    "PostToolUse": [
+      { "matcher": "Read", "hooks": [{ "type": "command", "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/after-read.sh\"" }] }
+    ],
+    "SessionStart": [
+      { "matcher": "startup", "hooks": [{ "type": "command", "command": "echo \"Fixture session context from $CLAUDE_PROJECT_DIR\"" }] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "echo prompt" }] }
+    ]
+  }
+}

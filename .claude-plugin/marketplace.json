@@ -53,7 +53,7 @@
       "name": "design",
       "source": "./plugins/design",
       "description": "UI and UX design skills: design-system audit, DESIGN.md, rendered-surface review, accessibility audit, motion, microcopy, prototypes, and wireframes.",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "category": "development"
     },
     {
@@ -123,7 +123,7 @@
       "name": "trunk-dev",
       "source": "./plugins/trunk-dev",
       "description": "Trunk-based delivery for OpenCode: a Conventional Commit and main-push gate, skip-CI and MR/PR advisories, a feature-flag cleanup bead after each flagged merge, and release-setup skills.",
-      "version": "0.2.1",
+      "version": "0.3.0",
       "category": "development"
     },
     {

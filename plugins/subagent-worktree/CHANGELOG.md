@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.1](https://github.com/srobroek/opencode-plugins/compare/subagent-worktree--v0.2.0...subagent-worktree--v0.2.1) (2026-10-30)
+
+
+### Bug Fixes
+
+* **subagent-worktree:** guard lane listing with permission ([85883ff](https://github.com/srobroek/opencode-plugins/commit/85883ff5f9b636cefd5f2bbba000a0ae33d6f477))
+* **subagent-worktree:** move sessions before cleanup and skip unneeded lanes ([0671175](https://github.com/srobroek/opencode-plugins/commit/06711754dde181e1613980cc4049d142780ca68e))
+
 ## [0.2.0](https://github.com/srobroek/opencode-plugins/compare/subagent-worktree--v0.1.0...subagent-worktree--v0.2.0) (2026-10-27)
 
 

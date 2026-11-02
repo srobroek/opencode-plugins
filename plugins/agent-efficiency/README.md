@@ -83,7 +83,8 @@ file, including `instructions` entries from your config, is `project-instruction
 
 The default agents are read-only: `explore`, `pr-reviewer`, `adversarial-challenger`,
 `design-critic`, `a11y-auditor`, `speckit-verify` and `speckit-sync`, plus `seance`,
-`security-reviewer`, `code-reviewer`, `researcher` and `architect`. They keep every
+`security-reviewer`, `code-reviewer`, `researcher`, `architect`, and cad's
+`cad-mech-reviewer`, `cad-dfm-reviewer` and `cad-sourcing-researcher`. They keep every
 AGENTS.md, so the project's still shapes their output. `journey-validator` writes run
 files, so it is left out. Agents that change code
 (`general`, `implementer*`, `operator`, `shepherd`, `mechanic`, `ui-implementer`) are

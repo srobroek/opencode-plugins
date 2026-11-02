@@ -176,7 +176,10 @@ var DEFAULT_LEAN_AGENTS = [
   "code-reviewer",
   "researcher",
   "architect",
-  "speckit-sync"
+  "speckit-sync",
+  "cad-mech-reviewer",
+  "cad-dfm-reviewer",
+  "cad-sourcing-researcher"
 ];
 var IDENTITY = `# Your Model
 - Name: `;

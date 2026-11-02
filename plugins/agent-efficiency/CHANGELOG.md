@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/srobroek/opencode-plugins/compare/agent-efficiency--v0.4.0...agent-efficiency--v0.5.0) (2026-10-30)
+
+
+### Features
+
+* **agent-efficiency:** trim the cad read-only agents by default ([9e3b8a3](https://github.com/srobroek/opencode-plugins/commit/9e3b8a3b4f6f1cc36369373620ea1e284ec0ff3a))
+
 ## [0.4.0](https://github.com/srobroek/opencode-plugins/compare/agent-efficiency--v0.3.0...agent-efficiency--v0.4.0) (2026-10-27)
 
 
