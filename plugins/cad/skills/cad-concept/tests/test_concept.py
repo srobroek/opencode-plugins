@@ -2,7 +2,9 @@
 """Regression tests for the cad-concept scene checker, handoff export, and live server.
 
 Stdlib only, so CI runs them with plain python3. The JSON Schema checks need the
-PEP 723 environment and run only when `uv` is on PATH.
+PEP 723 environment and run only when `uv` is on PATH. The viewer test presses Save in
+headless Chromium through cad-render's Playwright environment and runs only when `uv` and
+Playwright Chromium are installed.
 """
 
 from __future__ import annotations
@@ -11,8 +13,10 @@ import base64
 import hashlib
 import importlib.util
 import json
+import os
 import shutil
 import signal
+import struct
 import subprocess
 import sys
 import tempfile
@@ -21,6 +25,7 @@ import threading
 import unittest
 import urllib.error
 import urllib.request
+import zlib
 from pathlib import Path
 
 
@@ -28,6 +33,8 @@ SKILL = Path(__file__).resolve().parent.parent
 EXAMPLE = SKILL / "assets" / "examples" / "lamp-arm.scene.json"
 CONCEPT_PY = SKILL / "scripts" / "concept.py"
 SERVE_PY = SKILL / "scripts" / "serve.py"
+RENDER_PY = SKILL.parent / "cad-render" / "scripts" / "render.py"
+PRESS_SAVE = Path(__file__).resolve().parent / "fixtures" / "press_save.py"
 
 def project_for_scene(temp: Path, scene_path: Path) -> Path:
     """Make a minimal project whose layout owns this concept scene and part."""
@@ -55,6 +62,7 @@ def load(name: str, path: Path):
 
 concept = load("cad_concept", CONCEPT_PY)
 serve = load("cad_concept_serve", SERVE_PY)
+scriptenv = load("cadmodel_scriptenv", SKILL.parent / "cad-model" / "scripts" / "cadmodel" / "scriptenv.py")
 
 
 def example() -> dict:
@@ -396,6 +404,7 @@ class ServerLive(unittest.TestCase):
         self.proc.send_signal(signal.SIGTERM)
         self.assertEqual(self.proc.wait(timeout=5), 0)
 
+
 class ServerVendor(unittest.TestCase):
     def test_vendor_routes_serve_preseeded_pinned_module_without_network(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -459,7 +468,9 @@ class ServerVendor(unittest.TestCase):
                 thread.join(timeout=2)
                 serve.VIEWER_DIR = original_viewer_dir
 
+
 class ServerTimeout(unittest.TestCase):
+
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.dir = Path(self.tmp.name)
@@ -545,6 +556,106 @@ class ServerUsage(unittest.TestCase):
                                     capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 2)
         self.assertIn("--allow-remote", result.stderr)
+
+
+def chromium_installed() -> bool:
+    roots = [os.environ.get("PLAYWRIGHT_BROWSERS_PATH"), Path.home() / "Library" / "Caches" / "ms-playwright",
+             Path.home() / ".cache" / "ms-playwright"]
+    return any(root and Path(root).is_dir() and any(Path(root).glob("chromium*")) for root in roots)
+
+
+def png_size(data: bytes) -> tuple[int, int]:
+    """Return dimensions after checking PNG chunks, CRCs, and unfiltered image-data size."""
+    if not data.startswith(serve.PNG_MAGIC):
+        raise ValueError("no PNG signature")
+    chunks, pos = [], len(serve.PNG_MAGIC)
+    while pos < len(data):
+        length, kind = struct.unpack_from(">I4s", data, pos)
+        end = pos + 8 + length
+        if end + 4 > len(data):
+            raise ValueError("truncated PNG chunk")
+        body = data[pos + 8:end]
+        (crc,) = struct.unpack_from(">I", data, end)
+        if zlib.crc32(kind + body) != crc:
+            raise ValueError(f"{kind!r} chunk CRC mismatch")
+        chunks.append((kind, body))
+        pos = end + 4
+    if not chunks or chunks[0][0] != b"IHDR" or chunks[-1][0] != b"IEND":
+        raise ValueError("PNG must start with IHDR and end with IEND")
+    width, height, depth, color, _, _, interlace = struct.unpack(">IIBBBBB", chunks[0][1])
+    channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}[color]
+    pixels = zlib.decompress(b"".join(body for kind, body in chunks if kind == b"IDAT"))
+    if interlace or len(pixels) != height * (1 + (width * channels * depth + 7) // 8):
+        raise ValueError("image data does not fill the IHDR size")
+    return width, height
+
+
+@unittest.skipUnless(shutil.which("uv") and chromium_installed(), "needs uv and Playwright Chromium")
+class ViewerSaveInBrowser(unittest.TestCase):
+    """Save through the real viewer in headless Chromium against the pinned three.js modules."""
+
+    def test_save_button_publishes_the_selected_variant_as_a_content_bound_bundle(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="cad-concept-save-") as tmp:
+            project = project_for_scene(Path(tmp), EXAMPLE)
+            scene_dir = project / "hw" / "concept"
+            cache_dir = serve.default_cache_dir()
+            vendor_paths = serve.vendor_integrity(serve.VIEWER_DIR / "index.html")
+            if not all((cache_dir / path.removeprefix("/vendor/")).is_file() for path in vendor_paths):
+                self.skipTest("pinned three.js vendor cache is empty; browser test needs network to warm it")
+            proc = subprocess.Popen(
+                [sys.executable, str(SERVE_PY), "--scene-dir", str(scene_dir), "--project-root", str(project),
+                 "--port", "0", "--idle-timeout", "0"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+            )
+            assert proc.stdout
+            try:
+                url = json.loads(proc.stdout.readline())["url"]
+                driver = subprocess.run(
+                    scriptenv.python_command(RENDER_PY, str(PRESS_SAVE), url, "square-base"),
+                    capture_output=True, text=True, timeout=600,
+                )
+            finally:
+                proc.terminate()
+                proc.wait(timeout=5)
+                proc.stdout.close()
+            if driver.returncode != 0 and "cannot fetch https://cdn.jsdelivr.net/npm/" in driver.stderr:
+                self.skipTest("pinned three.js vendor cache could not be filled because the network is unavailable")
+            self.assertEqual(driver.returncode, 0, driver.stdout[-3000:] + driver.stderr[-3000:])
+            report = json.loads(driver.stdout)
+            self.assertTrue(report["result"].startswith("Saved "), report)
+            self.assertEqual(report["errors"], [])
+
+            saved = Path(report["result"].removeprefix("Saved "))
+            manifest = json.loads((saved.parent / "manifest.json").read_text(encoding="utf-8"))
+            capture = manifest["recipe"]["capture"]
+            scene_sha = hashlib.sha256((scene_dir / "lamp-arm.scene.json").read_bytes()).hexdigest()
+            capture_sha = hashlib.sha256(serve.layout.canonical_json(capture)).hexdigest()
+            self.assertEqual(
+                saved.resolve(),
+                (scene_dir / "screenshots" / scene_sha / capture_sha / "preview.png").resolve(),
+            )
+            self.assertEqual(
+                (capture["scene"], capture["scene_sha256"], capture["variant"]),
+                ("lamp-arm.scene.json", scene_sha, "square-base"),
+            )
+            self.assertEqual(
+                (manifest["layout"], manifest["recipe"]["scene_sha256"], manifest["recipe"]["capture_sha256"]),
+                ("concept.screenshot", scene_sha, capture_sha),
+            )
+            png = saved.read_bytes()
+            self.assertEqual(manifest["files"]["preview.png"], hashlib.sha256(png).hexdigest())
+            dpr = report["device_pixel_ratio"]
+            width, height = (side * dpr for side in report["stage"])
+            self.assertEqual(png_size(png), (width, height))
+            self.assertEqual(
+                capture["viewport"], {"width": width, "height": height, "device_pixel_ratio": dpr},
+            )
+            validator = SKILL.parent / "cad-record" / "scripts" / "validate.py"
+            checked = subprocess.run(
+                [sys.executable, str(validator), str(project)], capture_output=True, text=True, timeout=60,
+            )
+            self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+            self.assertEqual(json.loads(checked.stdout), {"ok": True, "findings": []})
 
 
 if __name__ == "__main__":
