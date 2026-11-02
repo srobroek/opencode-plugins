@@ -1,28 +1,47 @@
 /**
  * Runtime model health for `srobroek.model-roles`: which failures are the model's or
- * provider's fault, how long a failed model sits out, and when a session may be
- * retried. Pure; the plugin keeps the state in `ctx.storage`.
+ * provider's fault, when repeated failures sit a model out and for how long, and when
+ * a session may be retried. Pure; the plugin keeps the state in `ctx.storage`.
  */
 
 import { type HealthView, type ModelRef, parseCandidate } from "./resolve.ts"
 
-export const DEFAULT_COOLDOWN_MS = 600_000
+/** The first cooldown; each further one in a row doubles it. */
+export const DEFAULT_COOLDOWN_MS = 60_000
+
+/** The longest cooldown, and how long a model the provider does not serve sits out. */
+export const DEFAULT_MAX_COOLDOWN_MS = 600_000
 
 /** How long a spent quota sits out when the provider names no reset time. */
 export const DEFAULT_QUOTA_COOLDOWN_MS = 6 * 60 * 60_000
 
+/** Failure episodes within the flap window that sit a model out. */
+export const DEFAULT_FLAP_COUNT = 3
+
+/** How long failure episodes count, and how long after a cooldown the next failure doubles it. */
+export const DEFAULT_FLAP_WINDOW_MS = 600_000
+
+/** Failures this soon after an episode began belong to it, so parallel requests failing together count once. */
+export const EPISODE_MS = 10_000
+
+/** A request is never switched onto a model that failed this recently, so two failing models cannot trade places. */
+export const RECENT_MS = 60_000
+
 /** Storage key for the health map. */
 export const HEALTH_KEY = "health"
 
-export type FailureClass = "unavailable" | "content-filter" | "auth" | "quota" | "outage" | "rate-limit" | "server"
+export type FailureClass = "unavailable" | "content-filter" | "auth" | "credentials" | "quota" | "outage" | "rate-limit" | "server"
 
 /** Whether a failure cools down the whole provider or only the model that failed. */
 export type FailureScope = "provider" | "model"
 
-const PROVIDER_SCOPED: ReadonlySet<FailureClass> = new Set(["auth", "quota", "outage"])
+const PROVIDER_SCOPED: ReadonlySet<FailureClass> = new Set(["auth", "credentials", "quota", "outage"])
 
-/** Failures the host may retry on the same model first; the rest switch at once. */
-const TRANSIENT: ReadonlySet<FailureClass> = new Set(["rate-limit", "server", "outage"])
+/** Failures retried on the same model first; the rest switch at once. */
+const TRANSIENT: ReadonlySet<FailureClass> = new Set(["rate-limit", "server", "outage", "credentials"])
+
+/** Failures that sit out at once instead of after repeated episodes. */
+const DECISIVE: ReadonlySet<FailureClass> = new Set(["quota", "unavailable"])
 
 export const failureScope = (kind: FailureClass): FailureScope => (PROVIDER_SCOPED.has(kind) ? "provider" : "model")
 
@@ -38,7 +57,17 @@ export type FailureInput = {
   retryAfterMs?: number
 }
 
-export type HealthEntry = { failedAt: number; until: number; reason: string }
+export type HealthEntry = {
+  /** The latest failure. */
+  failedAt: number
+  /** Sits out new resolutions until then; a past time when it is in use. */
+  until: number
+  reason: string
+  /** When each failure episode in the flap window began, oldest first. */
+  episodes?: number[]
+  /** Cooldowns in a row; the next one lasts `cooldownMs * 2^strikes`. */
+  strikes?: number
+}
 
 /** Health by `provider/model`. A model's variants share its health. */
 export type HealthState = Record<string, HealthEntry>
@@ -66,6 +95,8 @@ const QUOTA_TYPE = /^provider\.(?:quota|free-limit)$/
 const PATTERNS: ReadonlyArray<[FailureClass, RegExp]> = [
   ["quota", QUOTA],
   ["content-filter", /content[_ -]?(?:filter|policy|management policy)|blocked by (?:the )?safety|safety (?:filter|system)|responsible ai polic/i],
+  // Loading credentials locally (the AWS chain, a credential_process helper) failed: no request was sent.
+  ["credentials", /credential (?:chain|provider|process)|credential_process|(?:could not|unable to|failed to|error when|error) (?:load|locat|resolv|refresh|retriev)\w* credentials/i],
   ["outage", /econnrefused|enotfound|econnreset|getaddrinfo|connection refused|unable to connect|fetch failed|network error|socket hang up/i],
   ["unavailable", /model (?:unavailable|not found|not available|is not supported)|unknown model|no such model|model_not_found|model identifier is invalid|not ready|modelnotready/i],
   ["auth", /credential|unauthori[sz]ed|forbidden|access ?denied|api[ _-]?key|authenticat|security token|token (?:has )?expired|sso session|permission denied for model/i],
@@ -147,14 +178,35 @@ export function quotaReset(error: FailureInput, now: number): number | undefined
   return undefined
 }
 
-export type CooldownOptions = { cooldownMs: number; quotaCooldownMs: number }
-
-/** How long a failure sits out: a spent quota until its reset, else the configured span. */
-export function cooldownFor(kind: FailureClass, error: FailureInput, now: number, options: CooldownOptions): number {
-  if (kind !== "quota") return options.cooldownMs
-  const reset = quotaReset(error, now)
-  return reset === undefined ? options.quotaCooldownMs : reset - now
+/** When failures sit a model out, and for how long. */
+export type HealthPolicy = {
+  /** The first cooldown; each further one in a row doubles it. */
+  cooldownMs: number
+  /** The longest cooldown. */
+  maxCooldownMs: number
+  /** How long a spent quota sits out when the provider names no reset time. */
+  quotaCooldownMs: number
+  /** Failure episodes within `flapWindowMs` that sit a model out. */
+  flapCount: number
+  /** How long failure episodes count, and how long after a cooldown the next failure doubles it. */
+  flapWindowMs: number
 }
+
+/**
+ * How long a failure sits out once it does: a spent quota until its reset, a model the
+ * provider does not serve for the longest cooldown, anything else for `cooldownMs`
+ * doubled for each cooldown in a row (`strikes`), at most `maxCooldownMs`.
+ */
+export function cooldownFor(kind: FailureClass, error: FailureInput, now: number, policy: HealthPolicy, strikes = 0): number {
+  if (kind === "quota") {
+    const reset = quotaReset(error, now)
+    return reset === undefined ? policy.quotaCooldownMs : reset - now
+  }
+  if (kind === "unavailable") return policy.maxCooldownMs
+  return Math.min(policy.maxCooldownMs, policy.cooldownMs * 2 ** strikes)
+}
+
+const isTime = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value)
 
 /** The stored health map, dropping malformed entries. */
 export function readHealth(value: unknown): HealthState {
@@ -162,16 +214,19 @@ export function readHealth(value: unknown): HealthState {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return state
   for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
     if (entry === null || typeof entry !== "object") continue
-    const { failedAt, until, reason } = entry as Record<string, unknown>
-    if (typeof failedAt === "number" && typeof until === "number")
-      state[key] = { failedAt, until, reason: typeof reason === "string" ? reason : "" }
+    const { failedAt, until, reason, episodes, strikes } = entry as Record<string, unknown>
+    if (typeof failedAt !== "number" || typeof until !== "number") continue
+    const read: HealthEntry = { failedAt, until, reason: typeof reason === "string" ? reason : "" }
+    if (Array.isArray(episodes) && episodes.every(isTime)) read.episodes = episodes
+    if (typeof strikes === "number" && Number.isInteger(strikes) && strikes > 0) read.strikes = strikes
+    state[key] = read
   }
   return state
 }
 
 /**
  * A copy of `state` with `ref` (or, for a provider-scoped failure, its whole provider)
- * cooling down from `now`, and expired entries dropped.
+ * sitting out for `cooldownMs` from `now`, and expired entries dropped.
  */
 export function markUnhealthy(
   state: HealthState,
@@ -187,6 +242,55 @@ export function markUnhealthy(
   return next
 }
 
+export type FailureRecord = {
+  state: HealthState
+  /** How long the model or provider now sits out; 0 while it stays in use. */
+  cooldownMs: number
+  /** Whether this failure started or extended a cooldown, so tiers resolve differently. */
+  tripped: boolean
+}
+
+/**
+ * Record a failure of `ref` (or, for a provider-scoped kind, its provider). A spent quota
+ * or a model the provider does not serve sits out at once. Anything else stays in use
+ * until it has failed in `flapCount` episodes within `flapWindowMs`: a burst of parallel
+ * failures is one episode, a blip that clears is not enough, and a model that keeps
+ * failing or keeps coming back and failing again is. After a cooldown the next failure
+ * episode within the flap window starts the next one, twice as long.
+ */
+export function recordFailure(
+  state: HealthState,
+  ref: ModelRef,
+  kind: FailureClass,
+  error: FailureInput,
+  now: number,
+  policy: HealthPolicy,
+  reason: string,
+): FailureRecord {
+  const next = pruneHealth(state, now, policy.flapWindowMs)
+  const key = failureScope(kind) === "provider" ? providerKey(ref.providerID) : healthKey(ref)
+  const prior = next[key]
+  const strikes = prior?.strikes ?? 0
+  if (prior !== undefined && prior.until > now) {
+    // Already sitting out: only a quota that resets later than the cooldown moves it.
+    const until = kind === "quota" ? Math.max(prior.until, now + cooldownFor(kind, error, now, policy)) : prior.until
+    next[key] = { ...prior, failedAt: now, ...(until > prior.until ? { until, reason } : {}) }
+    return { state: next, cooldownMs: until - now, tripped: until > prior.until }
+  }
+  const episodes = (prior?.episodes ?? []).filter((at) => now - at < policy.flapWindowMs)
+  const last = episodes.at(-1)
+  const fresh = last === undefined || now - last >= EPISODE_MS
+  if (fresh) episodes.push(now)
+  const trips = DECISIVE.has(kind) || episodes.length >= policy.flapCount || (strikes > 0 && fresh)
+  const cooldownMs = trips ? cooldownFor(kind, error, now, policy, strikes) : 0
+  if (cooldownMs <= 0) {
+    next[key] = { failedAt: now, until: prior?.until ?? now, reason, episodes, ...(strikes > 0 ? { strikes } : {}) }
+    return { state: next, cooldownMs: 0, tripped: false }
+  }
+  next[key] = { failedAt: now, until: now + cooldownMs, reason, episodes: [], strikes: kind === "quota" ? strikes : strikes + 1 }
+  return { state: next, cooldownMs, tripped: true }
+}
+
 /** The live entry that covers `ref`: its own or its provider's, whichever failed last. */
 export function healthEntry(state: HealthState, ref: Pick<ModelRef, "providerID" | "id">, now: number): HealthEntry | undefined {
   let found: HealthEntry | undefined
@@ -197,15 +301,28 @@ export function healthEntry(state: HealthState, ref: Pick<ModelRef, "providerID"
   return found
 }
 
-export function pruneHealth(state: HealthState, now: number): HealthState {
+/** `state` without the entries that have sat out their cooldown and, for `keepMs` after it or their last failure, not failed again. */
+export function pruneHealth(state: HealthState, now: number, keepMs = 0): HealthState {
   const next: HealthState = {}
-  for (const [key, entry] of Object.entries(state)) if (entry.until > now) next[key] = entry
+  for (const [key, entry] of Object.entries(state)) if (Math.max(entry.until, entry.failedAt) + keepMs > now) next[key] = entry
   return next
 }
 
-/** A resolver view of `state` at `now`. */
-export function healthView(state: HealthState, now: number): HealthView {
-  return (ref) => healthEntry(state, ref, now)?.failedAt
+/**
+ * A resolver view of `state` at `now`: models sitting out, and with `recentMs` also those
+ * (or whose provider) failed within that span.
+ */
+export function healthView(state: HealthState, now: number, recentMs = 0): HealthView {
+  return (ref) => {
+    const live = healthEntry(state, ref, now)?.failedAt
+    if (live !== undefined || recentMs <= 0) return live
+    let latest: number | undefined
+    for (const key of [healthKey(ref), providerKey(ref.providerID)]) {
+      const failedAt = state[key]?.failedAt
+      if (failedAt !== undefined && now - failedAt < recentMs && (latest === undefined || failedAt > latest)) latest = failedAt
+    }
+    return latest
+  }
 }
 
 /** The next time a cooldown ends, after `now`. */

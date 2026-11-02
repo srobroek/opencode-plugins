@@ -154,11 +154,17 @@ function stripRoleHeader(headers) {
 }
 
 // plugins/model-roles/src/health.ts
-var DEFAULT_COOLDOWN_MS = 600000;
+var DEFAULT_COOLDOWN_MS = 60000;
+var DEFAULT_MAX_COOLDOWN_MS = 600000;
 var DEFAULT_QUOTA_COOLDOWN_MS = 6 * 60 * 60000;
+var DEFAULT_FLAP_COUNT = 3;
+var DEFAULT_FLAP_WINDOW_MS = 600000;
+var EPISODE_MS = 1e4;
+var RECENT_MS = 60000;
 var HEALTH_KEY = "health";
-var PROVIDER_SCOPED = new Set(["auth", "quota", "outage"]);
-var TRANSIENT = new Set(["rate-limit", "server", "outage"]);
+var PROVIDER_SCOPED = new Set(["auth", "credentials", "quota", "outage"]);
+var TRANSIENT = new Set(["rate-limit", "server", "outage", "credentials"]);
+var DECISIVE = new Set(["quota", "unavailable"]);
 var failureScope = (kind) => PROVIDER_SCOPED.has(kind) ? "provider" : "model";
 var isTransient = (kind) => TRANSIENT.has(kind);
 var NOT_MODEL = [
@@ -170,6 +176,7 @@ var QUOTA_TYPE = /^provider\.(?:quota|free-limit)$/;
 var PATTERNS = [
   ["quota", QUOTA],
   ["content-filter", /content[_ -]?(?:filter|policy|management policy)|blocked by (?:the )?safety|safety (?:filter|system)|responsible ai polic/i],
+  ["credentials", /credential (?:chain|provider|process)|credential_process|(?:could not|unable to|failed to|error when|error) (?:load|locat|resolv|refresh|retriev)\w* credentials/i],
   ["outage", /econnrefused|enotfound|econnreset|getaddrinfo|connection refused|unable to connect|fetch failed|network error|socket hang up/i],
   ["unavailable", /model (?:unavailable|not found|not available|is not supported)|unknown model|no such model|model_not_found|model identifier is invalid|not ready|modelnotready/i],
   ["auth", /credential|unauthori[sz]ed|forbidden|access ?denied|api[ _-]?key|authenticat|security token|token (?:has )?expired|sso session|permission denied for model/i],
@@ -245,12 +252,16 @@ function quotaReset(error, now) {
     return now + error.retryAfterMs;
   return;
 }
-function cooldownFor(kind, error, now, options) {
-  if (kind !== "quota")
-    return options.cooldownMs;
-  const reset = quotaReset(error, now);
-  return reset === undefined ? options.quotaCooldownMs : reset - now;
+function cooldownFor(kind, error, now, policy, strikes = 0) {
+  if (kind === "quota") {
+    const reset = quotaReset(error, now);
+    return reset === undefined ? policy.quotaCooldownMs : reset - now;
+  }
+  if (kind === "unavailable")
+    return policy.maxCooldownMs;
+  return Math.min(policy.maxCooldownMs, policy.cooldownMs * 2 ** strikes);
 }
+var isTime = (value) => typeof value === "number" && Number.isFinite(value);
 function readHealth(value) {
   const state = {};
   if (value === null || typeof value !== "object" || Array.isArray(value))
@@ -258,9 +269,15 @@ function readHealth(value) {
   for (const [key, entry] of Object.entries(value)) {
     if (entry === null || typeof entry !== "object")
       continue;
-    const { failedAt, until, reason } = entry;
-    if (typeof failedAt === "number" && typeof until === "number")
-      state[key] = { failedAt, until, reason: typeof reason === "string" ? reason : "" };
+    const { failedAt, until, reason, episodes, strikes } = entry;
+    if (typeof failedAt !== "number" || typeof until !== "number")
+      continue;
+    const read = { failedAt, until, reason: typeof reason === "string" ? reason : "" };
+    if (Array.isArray(episodes) && episodes.every(isTime))
+      read.episodes = episodes;
+    if (typeof strikes === "number" && Number.isInteger(strikes) && strikes > 0)
+      read.strikes = strikes;
+    state[key] = read;
   }
   return state;
 }
@@ -269,6 +286,30 @@ function markUnhealthy(state, ref, now, cooldownMs, reason, scope = "model") {
   const key = scope === "provider" ? providerKey(ref.providerID) : healthKey(ref);
   next[key] = { failedAt: now, until: now + cooldownMs, reason };
   return next;
+}
+function recordFailure(state, ref, kind, error, now, policy, reason) {
+  const next = pruneHealth(state, now, policy.flapWindowMs);
+  const key = failureScope(kind) === "provider" ? providerKey(ref.providerID) : healthKey(ref);
+  const prior = next[key];
+  const strikes = prior?.strikes ?? 0;
+  if (prior !== undefined && prior.until > now) {
+    const until = kind === "quota" ? Math.max(prior.until, now + cooldownFor(kind, error, now, policy)) : prior.until;
+    next[key] = { ...prior, failedAt: now, ...until > prior.until ? { until, reason } : {} };
+    return { state: next, cooldownMs: until - now, tripped: until > prior.until };
+  }
+  const episodes = (prior?.episodes ?? []).filter((at) => now - at < policy.flapWindowMs);
+  const last = episodes.at(-1);
+  const fresh = last === undefined || now - last >= EPISODE_MS;
+  if (fresh)
+    episodes.push(now);
+  const trips = DECISIVE.has(kind) || episodes.length >= policy.flapCount || strikes > 0 && fresh;
+  const cooldownMs = trips ? cooldownFor(kind, error, now, policy, strikes) : 0;
+  if (cooldownMs <= 0) {
+    next[key] = { failedAt: now, until: prior?.until ?? now, reason, episodes, ...strikes > 0 ? { strikes } : {} };
+    return { state: next, cooldownMs: 0, tripped: false };
+  }
+  next[key] = { failedAt: now, until: now + cooldownMs, reason, episodes: [], strikes: kind === "quota" ? strikes : strikes + 1 };
+  return { state: next, cooldownMs, tripped: true };
 }
 function healthEntry(state, ref, now) {
   let found;
@@ -279,15 +320,26 @@ function healthEntry(state, ref, now) {
   }
   return found;
 }
-function pruneHealth(state, now) {
+function pruneHealth(state, now, keepMs = 0) {
   const next = {};
   for (const [key, entry] of Object.entries(state))
-    if (entry.until > now)
+    if (Math.max(entry.until, entry.failedAt) + keepMs > now)
       next[key] = entry;
   return next;
 }
-function healthView(state, now) {
-  return (ref) => healthEntry(state, ref, now)?.failedAt;
+function healthView(state, now, recentMs = 0) {
+  return (ref) => {
+    const live = healthEntry(state, ref, now)?.failedAt;
+    if (live !== undefined || recentMs <= 0)
+      return live;
+    let latest;
+    for (const key of [healthKey(ref), providerKey(ref.providerID)]) {
+      const failedAt = state[key]?.failedAt;
+      if (failedAt !== undefined && now - failedAt < recentMs && (latest === undefined || failedAt > latest))
+        latest = failedAt;
+    }
+    return latest;
+  };
 }
 function nextExpiry(state, now) {
   let next;
@@ -316,9 +368,16 @@ function fallbackTarget(options, available, health, role, failed) {
   return;
 }
 var DEFAULT_HOST_RETRIES = 2;
+var SAME_MODEL_RETRIES = 5;
 var DEFAULT_SWITCH_TIMEOUT_MS = 2000;
 function staysOnModel(kind, attempt, hostRetries) {
   return isTransient(kind) && attempt - 1 <= hostRetries;
+}
+function retriesOnModel(kind, attempt, hostRetries) {
+  return isTransient(kind) && attempt - 1 <= Math.max(hostRetries, SAME_MODEL_RETRIES);
+}
+function retryDelay(attempt) {
+  return Math.min(30000, 1000 * 2 ** Math.max(1, attempt - 1));
 }
 function retryTarget(facts) {
   if (staysOnModel(facts.kind, facts.attempt, facts.hostRetries))
@@ -342,9 +401,12 @@ function duration(ms) {
   return `${Math.round(ms / 3600000 * 10) / 10} h`;
 }
 function failureNote(facts) {
+  const failed = `Model ${label(facts.failed)} failed (${facts.kind})`;
+  if (facts.cooldownMs <= 0)
+    return `${failed}; it stays in use unless it keeps failing.`;
   const scope = facts.scope ?? failureScope(facts.kind);
   const who = scope === "provider" ? `every ${facts.failed.providerID} model` : "it";
-  const head = `Model ${label(facts.failed)} failed (${facts.kind}); ${who} sits out new resolutions for ${duration(facts.cooldownMs)}.`;
+  const head = `${failed}; ${who} sits out new resolutions for ${duration(facts.cooldownMs)}.`;
   if (facts.target === undefined)
     return `${head} No other candidate is available for it.`;
   return `${head} Tier ${facts.target.role} now resolves to ${label(facts.target.model)}.`;
@@ -355,7 +417,9 @@ function switchNote(facts) {
 function subagentNote(facts) {
   const who = facts.agent === undefined ? "A subagent" : `Subagent '${facts.agent}'`;
   let retry;
-  if (facts.target === undefined)
+  if (facts.cooldownMs <= 0)
+    retry = facts.resumable === undefined ? "The spawn may be retried as is." : `Resume it with sessionID ${facts.resumable}, or spawn it again.`;
+  else if (facts.target === undefined)
     retry = "Retrying it would hit the same model; pick another agent or tier.";
   else if (facts.spawnRole !== undefined) {
     retry = `Spawn it again with tier: "${facts.spawnRole}"; that tier now runs ${label(facts.target.model)}.`;
@@ -1034,9 +1098,13 @@ function parseRuntime(raw, options) {
   }
   const count = (value, fallback) => typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : fallback;
   const span = (value, fallback) => typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback;
+  const flapCount = count(input.flapCount, DEFAULT_FLAP_COUNT);
   return {
     cooldownMs,
+    maxCooldownMs: Math.max(cooldownMs, span(input.maxCooldownMs, DEFAULT_MAX_COOLDOWN_MS)),
     quotaCooldownMs: span(input.quotaCooldownMs, DEFAULT_QUOTA_COOLDOWN_MS),
+    flapCount: flapCount >= 1 ? flapCount : DEFAULT_FLAP_COUNT,
+    flapWindowMs: span(input.flapWindowMs, DEFAULT_FLAP_WINDOW_MS),
     hostRetries: count(input.hostRetries, DEFAULT_HOST_RETRIES),
     switchTimeoutMs: span(input.switchTimeoutMs, DEFAULT_SWITCH_TIMEOUT_MS),
     purposes
@@ -3232,7 +3300,7 @@ var src_default = Plugin.define({
     });
     let health2 = {};
     try {
-      health2 = pruneHealth(readHealth(await ctx.storage.get(HEALTH_KEY)), Date.now());
+      health2 = pruneHealth(readHealth(await ctx.storage.get(HEALTH_KEY)), Date.now(), runtime.flapWindowMs);
     } catch {
       health2 = {};
     }
@@ -3338,7 +3406,7 @@ ${refs.size}`;
       if (at === undefined || controller.signal.aborted)
         return;
       expiry = setTimeout(() => void queue(async () => {
-        health2 = pruneHealth(health2, Date.now());
+        health2 = pruneHealth(health2, Date.now(), runtime.flapWindowMs);
         attempts = 0;
         await check2(true);
         scheduleExpiry();
@@ -3347,17 +3415,18 @@ ${refs.size}`;
     };
     scheduleExpiry();
     const markFailed = async (ref, kind, error) => {
-      const now = Date.now();
-      const cooldownMs = cooldownFor(kind, error, now, runtime);
       const reason = `${kind}: ${oneLine(error.message ?? "")}`;
-      health2 = markUnhealthy(health2, ref, now, cooldownMs, reason, failureScope(kind));
+      const record = recordFailure(health2, ref, kind, error, Date.now(), runtime, reason);
+      health2 = record.state;
       try {
         await ctx.storage.set(HEALTH_KEY, health2);
       } catch {}
-      attempts = 0;
-      await check2(true);
-      scheduleExpiry();
-      return cooldownMs;
+      if (record.tripped) {
+        attempts = 0;
+        await check2(true);
+        scheduleExpiry();
+      }
+      return record.cooldownMs;
     };
     const notify = async (sessionID, text, kind) => {
       console.warn(`${SOURCE}: ${text}`);
@@ -3478,11 +3547,11 @@ ${refs.size}`;
       const isChild = typeof session.parentID === "string" && session.parentID !== "";
       const spawnRole = isChild ? await spawnRoleOf(sessionID) : undefined;
       const role = spawnRole ?? (agent === undefined ? undefined : roleOf(agent, options.agents, options.implicit));
-      const target = fallbackTarget(options, available, view(), role, failed);
+      const target = cooldownMs > 0 ? fallbackTarget(options, available, view(), role, failed) : undefined;
       const facts = { failed, kind, cooldownMs, target };
       if (isChild) {
         childFailures.set(session.parentID, Date.now());
-        let resumable;
+        let resumable = cooldownMs > 0 ? undefined : sessionID;
         if (spawnRole !== undefined && target !== undefined) {
           try {
             await ctx.session.switchModel({ sessionID, model: target.model });
@@ -3493,7 +3562,10 @@ ${refs.size}`;
         await notifyParentOnce(session.parentID, failed, note);
         return;
       }
-      await notify(sessionID, failureNote(facts), "fallback");
+      if (cooldownMs > 0)
+        await notify(sessionID, failureNote(facts), "fallback");
+      else
+        console.warn(`${SOURCE}: session ${sessionID}: ${failureNote(facts)}`);
     };
     const switching = new Map;
     const switchWithin = async (sessionID, model) => {
@@ -3511,24 +3583,39 @@ ${refs.size}`;
       clearTimeout(timer);
       return outcome;
     };
+    const keepOnModel = (event, kind, failed) => {
+      if (event.decision.retry || !retriesOnModel(kind, event.attempt, runtime.hostRetries))
+        return;
+      const delay = retryDelay(event.attempt);
+      event.decision = { retry: true, delay };
+      console.warn(`${SOURCE}: session ${event.sessionID}: ${modelLabel(failed)} failed (${kind}); retrying it in ${duration(delay)}.`);
+    };
+    const triedModels = new Map;
     const retries = await ctx.session.hook("retry", async (event) => {
+      if (event.attempt <= 2)
+        triedModels.delete(event.sessionID);
       const error = event.error;
       const kind = classifyFailure(error);
-      if (kind === undefined || staysOnModel(kind, event.attempt, runtime.hostRetries))
-        return;
-      if (switching.has(event.sessionID))
+      if (kind === undefined)
         return;
       const { providerID, id, variant } = event.model;
       const failed = variant ? { providerID, id, variant } : { providerID, id };
+      if (staysOnModel(kind, event.attempt, runtime.hostRetries))
+        return keepOnModel(event, kind, failed);
+      if (switching.has(event.sessionID))
+        return keepOnModel(event, kind, failed);
       try {
         await queue(async () => {
           const cooldownMs = await markFailed(failed, kind, error);
           const agent = (await listAgents()).find((a) => a.id === event.agent);
           const role = await spawnRoleOf(event.sessionID) ?? (agent === undefined ? undefined : roleOf(agent, options.agents, options.implicit));
+          const tried = triedModels.get(event.sessionID) ?? new Set;
+          triedModels.set(event.sessionID, tried.add(healthKey(failed)));
+          const recent = healthView(health2, Date.now(), RECENT_MS);
           const target = retryTarget({
             options,
             available,
-            health: view(),
+            health: (ref) => tried.has(healthKey(ref)) ? 0 : recent(ref),
             role,
             failed,
             kind,
@@ -3536,14 +3623,16 @@ ${refs.size}`;
             hostRetries: runtime.hostRetries
           });
           if (target === undefined)
-            return;
+            return keepOnModel(event, kind, failed);
           const outcome = await switchWithin(event.sessionID, target.model);
           const note = switchNote({ failed, kind, cooldownMs, target });
           if (outcome === "switched") {
             event.decision = { retry: true, delay: 0 };
             console.warn(`${SOURCE}: session ${event.sessionID}: ${note}`);
-          } else
-            console.warn(`${SOURCE}: session ${event.sessionID}: switching to ${target.model.providerID}/${target.model.id} ${outcome === "late" ? "is still pending" : "failed"}; the host's retry decision stands.`);
+            return;
+          }
+          console.warn(`${SOURCE}: session ${event.sessionID}: switching to ${target.model.providerID}/${target.model.id} ${outcome === "late" ? "is still pending" : "failed"}.`);
+          keepOnModel(event, kind, failed);
         });
       } catch (error) {
         console.warn(`${SOURCE}: could not switch the failing request to another model`, error);
@@ -3934,9 +4023,10 @@ ${refs.size}`;
             return;
           const cooldownMs = await markFailed(failed, kind, { message });
           const role = spawn?.role ?? (agent === undefined ? undefined : roleOf(agent, options.agents, options.implicit));
-          const target = fallbackTarget(options, available, view(), role, failed);
+          const target = cooldownMs > 0 ? fallbackTarget(options, available, view(), role, failed) : undefined;
           const facts = { failed, kind, cooldownMs, target };
-          await notifyParentOnce(event.sessionID, failed, subagentNote({ ...facts, agent: agentID, spawnRole: spawn?.role }));
+          const resumable = cooldownMs > 0 ? undefined : childSessionID(message);
+          await notifyParentOnce(event.sessionID, failed, subagentNote({ ...facts, agent: agentID, spawnRole: spawn?.role, resumable }));
         });
       } catch (error) {
         console.warn(`${SOURCE}: could not record the subagent failure`, error);
@@ -3994,6 +4084,7 @@ ${refs.size}`;
       await references.dispose();
       notices.clear();
       childFailures.clear();
+      triedModels.clear();
       pending.clear();
       childRoles.clear();
       autoHistory = [];
@@ -4017,8 +4108,11 @@ export {
   DEFAULT_AUTO_TIMEOUT_MS,
   DEFAULT_COOLDOWN_MS,
   DEFAULT_DECIDER,
+  DEFAULT_FLAP_COUNT,
+  DEFAULT_FLAP_WINDOW_MS,
   DEFAULT_HOST_RETRIES,
   DEFAULT_INCLUDE,
+  DEFAULT_MAX_COOLDOWN_MS,
   DEFAULT_PREMIUM,
   DEFAULT_QUOTA_COOLDOWN_MS,
   DEFAULT_SWITCH_TIMEOUT_MS,
@@ -4029,6 +4123,7 @@ export {
   DROPPED_LIMIT,
   EFFORT_CHOICES,
   EFFORT_SCALE,
+  EPISODE_MS,
   FALLBACK_HEADER,
   GENERAL_TIER,
   HEALTH_KEY,
@@ -4038,12 +4133,14 @@ export {
   NOTICE_DEDUPE_MS,
   PENDING_SPAWN_MS,
   PLUGIN_SPEC,
+  RECENT_MS,
   REFERENCE_PROVIDERS,
   ROLE_ALIAS_DESCRIPTION,
   ROLE_HEADER,
   ROLE_PARAM,
   ROLE_PURPOSE,
   ROLE_TOOL_NOTE,
+  SAME_MODEL_RETRIES,
   SOURCE,
   SPAWN_ROLE_KEY_PREFIX,
   STALE_MS,
@@ -4143,9 +4240,12 @@ export {
   readHealth,
   readState,
   readTiers,
+  recordFailure,
   remainingModels,
   resolveRole,
   resolveTier,
+  retriesOnModel,
+  retryDelay,
   retryTarget,
   roleChoices,
   roleCosts,

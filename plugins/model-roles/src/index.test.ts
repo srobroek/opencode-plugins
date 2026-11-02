@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test"
+import { describe, expect, setSystemTime, test } from "bun:test"
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
@@ -211,8 +211,11 @@ function createHost(input: {
     agents: () => agents,
     transform,
     /** Run the `retry` hooks as the host does before each retry; returns the final decision. */
-    fireRetry: async (event: { sessionID: string; agent: string; model: ModelRef; error: Record<string, unknown>; attempt: number }) => {
-      const payload: Record<string, unknown> = { ...event, decision: { retry: true, delay: 1_500 } }
+    fireRetry: async (
+      event: { sessionID: string; agent: string; model: ModelRef; error: Record<string, unknown>; attempt: number },
+      decision: { retry: boolean; delay?: number } = { retry: true, delay: 1_500 },
+    ) => {
+      const payload: Record<string, unknown> = { ...event, decision }
       for (const hook of hooks) if (hook.name === "retry") await hook.callback(payload)
       return payload.decision
     },
@@ -693,9 +696,10 @@ describe("runtime fallback", () => {
     expect(methods(host, "switchModel").map((c) => c.input)).toEqual([{ sessionID: "r", model: haiku }])
     expect(methods(host, "prompt")).toHaveLength(0)
     expect(Object.keys(host.storage.get("health") as object)).toEqual(["amazon-bedrock/claude-sonnet"])
-    expect(host.agents().get("general")?.model).toEqual(haiku)
+    // One failure moves the request, not the tier.
+    expect(host.agents().get("general")?.model).toEqual(sonnet)
 
-    // The next model fails too: nothing healthy is left, so the host's own decision stands.
+    // The next model fails too, and the first one just failed: there is nowhere to switch, so the host's own decision stands.
     const again = await host.fireRetry({ sessionID: "r", agent: "build", model: haiku, error, attempt: 5 })
     expect(again).toEqual({ retry: true, delay: 1_500 })
     expect(methods(host, "switchModel")).toHaveLength(1)
@@ -740,7 +744,7 @@ describe("runtime fallback", () => {
     await cleanup()
   })
 
-  test("a provider-scoped failure cools down every model of the provider", async () => {
+  test("a provider-scoped failure moves the request past every model of that provider, without sitting it out", async () => {
     const roles = { ...fallbackOptions, roles: { task: ["amazon-bedrock/claude-sonnet#high", "amazon-bedrock/other", "anthropic/claude-haiku"] } }
     const all = [...models, { providerID: "amazon-bedrock", id: "other", variants: [] }]
     const host = createHost({ agents: [{ id: "build" }], models: all, options: roles })
@@ -749,6 +753,7 @@ describe("runtime fallback", () => {
     expect(await host.fireRetry({ sessionID: "r", agent: "build", model: sonnet, error: sso, attempt: 2 })).toEqual({ retry: true, delay: 0 })
     expect(Object.keys(host.storage.get("health") as object)).toEqual(["amazon-bedrock/*"])
     expect(methods(host, "switchModel").map((c) => c.input)).toEqual([{ sessionID: "r", model: haiku }])
+    expect(host.agents().get("build")?.model).toEqual(sonnet)
     host.close()
     await cleanup()
   })
@@ -762,6 +767,109 @@ describe("runtime fallback", () => {
     await host.fireRetry({ sessionID: "r", agent: "build", model: sonnet, error: invalid, attempt: 2 })
     expect(Object.keys(host.storage.get("health") as object)).toEqual(["amazon-bedrock/claude-sonnet"])
     expect(methods(host, "switchModel").map((c) => c.input)).toEqual([{ sessionID: "r", model: { providerID: "amazon-bedrock", id: "other" } }])
+    host.close()
+    await cleanup()
+  })
+
+  const chain = { type: "provider.auth", message: "AWS default credential chain failed: Could not load credentials from any providers" }
+  const declined = { retry: false }
+
+  test("a credentials blip is retried on the same model with backoff though the host would not, and nothing sits out", async () => {
+    const host = createHost({ agents: [{ id: "build" }], models, options: fallbackOptions })
+    const cleanup = await setup(host)
+    const base = { sessionID: "r", agent: "build", model: sonnet, error: chain }
+    expect(await host.fireRetry({ ...base, attempt: 2 }, declined)).toEqual({ retry: true, delay: 2_000 })
+    expect(await host.fireRetry({ ...base, attempt: 3 }, declined)).toEqual({ retry: true, delay: 4_000 })
+    expect(host.storage.has("health")).toBe(false)
+    expect(methods(host, "switchModel")).toHaveLength(0)
+    // Past the budget the request moves to another provider; the tier stays where it was.
+    expect(await host.fireRetry({ ...base, attempt: 4 }, declined)).toEqual({ retry: true, delay: 0 })
+    expect(methods(host, "switchModel").map((c) => c.input)).toEqual([{ sessionID: "r", model: haiku }])
+    expect(Object.keys(host.storage.get("health") as object)).toEqual(["amazon-bedrock/*"])
+    expect(host.agents().get("build")?.model).toEqual(sonnet)
+    host.close()
+    await cleanup()
+  })
+
+  test("with nowhere to switch, a transient failure keeps retrying on its model for about a minute", async () => {
+    const roles = { ...fallbackOptions, roles: { task: ["amazon-bedrock/claude-sonnet#high", "amazon-bedrock/other"] } }
+    const all = [...models, { providerID: "amazon-bedrock", id: "other", variants: [] }]
+    const host = createHost({ agents: [{ id: "build" }], models: all, options: roles })
+    const cleanup = await setup(host)
+    const base = { sessionID: "r", agent: "build", model: sonnet, error: chain }
+    const delays = []
+    for (let attempt = 2; attempt <= 7; attempt++) delays.push((await host.fireRetry({ ...base, attempt }, declined)) as { delay?: number })
+    expect(delays.map((decision) => decision.delay)).toEqual([2_000, 4_000, 8_000, 16_000, 30_000, undefined])
+    expect(methods(host, "switchModel")).toHaveLength(0)
+    // A permanent failure the host gives up on is left alone.
+    const auth = { type: "provider.auth", message: "Unauthorized", status: 401 }
+    expect(await host.fireRetry({ ...base, error: auth, attempt: 2 }, declined)).toEqual(declined)
+    host.close()
+    await cleanup()
+  })
+
+  test("a provider that keeps failing sits out, and for twice as long when it fails again after", async () => {
+    const host = createHost({ agents: [{ id: "build" }], models, options: fallbackOptions })
+    const cleanup = await setup(host)
+    const start = Date.now()
+    const at = async (offset: number, sessionID: string) => {
+      setSystemTime(new Date(start + offset))
+      await host.fireRetry({ sessionID, agent: "build", model: sonnet, error: chain, attempt: 4 }, declined)
+      return (host.storage.get("health") as Record<string, { until: number }>)["amazon-bedrock/*"]?.until ?? 0
+    }
+    try {
+      // Parallel requests failing together are one episode; three episodes ten seconds apart sit it out.
+      await at(0, "r1")
+      await at(500, "r2")
+      await at(15_000, "r3")
+      expect(host.agents().get("build")?.model).toEqual(sonnet)
+      expect(await at(30_000, "r4")).toBe(start + 30_000 + 60_000)
+      expect(host.agents().get("build")?.model).toEqual(haiku)
+      expect(await at(95_000, "r5")).toBe(start + 95_000 + 120_000)
+    } finally {
+      setSystemTime()
+    }
+    host.close()
+    await cleanup()
+  })
+
+  test("a request never switches back to a model it already failed on, however slowly they fail", async () => {
+    const host = createHost({ agents: [{ id: "build" }], models, options: fallbackOptions })
+    const cleanup = await setup(host)
+    const error = { type: "provider.internal", message: "Service Unavailable", status: 503 }
+    const start = Date.now()
+    const fire = (offset: number, model: ModelRef, attempt: number) => {
+      setSystemTime(new Date(start + offset))
+      return host.fireRetry({ sessionID: "r", agent: "build", model, error, attempt }, declined)
+    }
+    try {
+      expect(await fire(0, sonnet, 4)).toEqual({ retry: true, delay: 0 })
+      // Long after sonnet's failure stopped being recent, haiku fails too: no switch back, only same-model retries.
+      expect(await fire(200_000, haiku, 5)).toEqual({ retry: true, delay: 16_000 })
+      expect(await fire(400_000, haiku, 7)).toEqual(declined)
+      expect(methods(host, "switchModel")).toHaveLength(1)
+      // The next request starts afresh.
+      await fire(500_000, haiku, 2)
+      expect(await fire(510_000, haiku, 4)).toEqual({ retry: true, delay: 0 })
+      expect(methods(host, "switchModel").map((c) => (c.input as { model: ModelRef }).model)).toEqual([haiku, sonnet])
+    } finally {
+      setSystemTime()
+    }
+    host.close()
+    await cleanup()
+  })
+
+  test("while a switch is still landing, a transient failure the host gives up on keeps its retries", async () => {
+    const host = createHost({ agents: [{ id: "build" }], models, options: { ...fallbackOptions, switchTimeoutMs: 20 } })
+    host.context.session.switchModel = (payload: unknown) => {
+      host.calls.push({ method: "switchModel", input: payload })
+      return new Promise<undefined>(() => {})
+    }
+    const cleanup = await setup(host)
+    const base = { sessionID: "r", agent: "build", model: sonnet, error: chain }
+    expect(await host.fireRetry({ ...base, attempt: 4 }, declined)).toEqual({ retry: true, delay: 8_000 })
+    expect(await host.fireRetry({ ...base, attempt: 5 }, declined)).toEqual({ retry: true, delay: 16_000 })
+    expect(methods(host, "switchModel")).toHaveLength(1)
     host.close()
     await cleanup()
   })
@@ -831,10 +939,11 @@ describe("runtime fallback", () => {
     expect(notes).toHaveLength(1)
     expect(notes[0]?.sessionID).toBe("r")
     expect(notes[0]?.text).toContain("Subagent 'general' failed")
-    expect(notes[0]?.text).toContain("may be retried")
+    expect(notes[0]?.text).toContain("stays in use")
+    expect(notes[0]?.text).toContain("Resume it with sessionID c, or spawn it again.")
     expect(Object.keys(host.storage.get("health") as object)).toEqual(["amazon-bedrock/claude-sonnet"])
     expect(methods(host, "switchModel")).toHaveLength(0)
-    expect(host.agents().get("general")?.model).toEqual(haiku)
+    expect(host.agents().get("general")?.model).toEqual(sonnet)
     host.close()
     await cleanup()
   })
@@ -858,6 +967,8 @@ describe("runtime fallback", () => {
     await settle()
     expect(Object.keys(host.storage.get("health") as object)).toEqual(["amazon-bedrock/claude-sonnet"])
     expect(methods(host, "switchModel")).toHaveLength(0)
+    // One failure moves nothing, so the root session gets no note.
+    expect(methods(host, "synthetic")).toHaveLength(0)
     host.close()
     await cleanup()
   })
@@ -891,7 +1002,7 @@ describe("runtime fallback", () => {
   })
 
   test("a child spawned with a role falls back within that role and can be resumed on the next model", async () => {
-    const host = createHost({ agents: [{ id: "plain" }], models, options: fallbackOptions })
+    const host = createHost({ agents: [{ id: "plain" }], models, options: { ...fallbackOptions, flapCount: 1 } })
     host.sessions.set("r", { id: "r" })
     host.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: sonnet })
     const cleanup = await setup(host)
@@ -915,7 +1026,7 @@ describe("runtime fallback", () => {
   })
 
   test("a role spawn whose tool call fails names the role in the parent's note", async () => {
-    const host = createHost({ agents: [{ id: "plain" }], models, options: fallbackOptions })
+    const host = createHost({ agents: [{ id: "plain" }], models, options: { ...fallbackOptions, flapCount: 1 } })
     const cleanup = await setup(host)
     const input = await host.spawn("subagent", { agent: "plain", prompt: "x", role: "task" }, "build", "r", "call-1")
     await host.spawnFailed(input, "Subagent failed (sessionID: gone): Service Unavailable", "r", "call-1")

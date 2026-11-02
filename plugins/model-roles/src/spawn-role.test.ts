@@ -70,21 +70,42 @@ const effectInput = {
 describe("runtime options", () => {
   test("defaults, and purposes only for configured roles", () => {
     expect(parseRuntime({}, options)).toEqual({
-      cooldownMs: 600_000,
+      cooldownMs: 60_000,
+      maxCooldownMs: 600_000,
       quotaCooldownMs: 21_600_000,
+      flapCount: 3,
+      flapWindowMs: 600_000,
       hostRetries: 2,
       switchTimeoutMs: 2_000,
       purposes: {},
     })
-    const raw = { cooldownMs: 5, quotaCooldownMs: 7, hostRetries: 0, switchTimeoutMs: 9, purposes: { custom: " mine ", nope: "x", task: 3 } }
+    const raw = {
+      cooldownMs: 5,
+      maxCooldownMs: 50,
+      quotaCooldownMs: 7,
+      flapCount: 1,
+      flapWindowMs: 8,
+      hostRetries: 0,
+      switchTimeoutMs: 9,
+      purposes: { custom: " mine ", nope: "x", task: 3 },
+    }
     expect(parseRuntime(raw, options)).toEqual({
       cooldownMs: 5,
+      maxCooldownMs: 50,
       quotaCooldownMs: 7,
+      flapCount: 1,
+      flapWindowMs: 8,
       hostRetries: 0,
       switchTimeoutMs: 9,
       purposes: { custom: "mine" },
     })
-    expect(parseRuntime({ hostRetries: 1.5, switchTimeoutMs: 0 }, options)).toMatchObject({ hostRetries: 2, switchTimeoutMs: 2_000 })
+    expect(parseRuntime({ hostRetries: 1.5, switchTimeoutMs: 0, flapCount: 0 }, options)).toMatchObject({
+      hostRetries: 2,
+      switchTimeoutMs: 2_000,
+      flapCount: 3,
+    })
+    // The longest cooldown is never shorter than the first.
+    expect(parseRuntime({ cooldownMs: 900_000 }, options)).toMatchObject({ cooldownMs: 900_000, maxCooldownMs: 900_000 })
   })
 })
 

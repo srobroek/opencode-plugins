@@ -1,6 +1,7 @@
 import { homedir } from "node:os"
 import { Plugin } from "@opencode/plugin"
 import type { Context } from "@opencode/plugin/promise/plugin"
+import type { SessionRetry } from "@opencode/plugin/promise/session"
 import {
   type AutoOptions,
   type AutoReason,
@@ -35,9 +36,12 @@ import {
 } from "./classify.ts"
 import { globalConfigDir, pickConfigFile, readConfigFiles, readTiers, writeTier } from "./config-edit.ts"
 import {
+  duration,
   failureNote,
   fallbackTarget,
   type NoteFacts,
+  retriesOnModel,
+  retryDelay,
   retryTarget,
   SOURCE,
   staysOnModel,
@@ -56,19 +60,18 @@ import {
 import {
   childSessionID,
   classifyFailure,
-  cooldownFor,
   type FailureClass,
   type FailureInput,
-  failureScope,
   HEALTH_KEY,
   type HealthState,
   healthKey,
   healthView,
-  markUnhealthy,
   modelFromError,
   nextExpiry,
   pruneHealth,
+  RECENT_MS,
   readHealth,
+  recordFailure,
 } from "./health.ts"
 import {
   type AvailableModel,
@@ -233,7 +236,7 @@ export default Plugin.define({
     })
     let health: HealthState = {}
     try {
-      health = pruneHealth(readHealth(await ctx.storage.get(HEALTH_KEY)), Date.now())
+      health = pruneHealth(readHealth(await ctx.storage.get(HEALTH_KEY)), Date.now(), runtime.flapWindowMs)
     } catch {
       health = {}
     }
@@ -350,7 +353,7 @@ export default Plugin.define({
       expiry = setTimeout(
         () =>
           void queue(async () => {
-            health = pruneHealth(health, Date.now())
+            health = pruneHealth(health, Date.now(), runtime.flapWindowMs)
             attempts = 0
             await check(true)
             scheduleExpiry()
@@ -361,21 +364,25 @@ export default Plugin.define({
     }
     scheduleExpiry()
 
-    /** Mark `ref` (or its provider) unhealthy; returns the cooldown it got. */
+    /**
+     * Record a failure of `ref` (or its provider); returns how long it now sits out, 0
+     * while it stays in use. Tiers are resolved again only when that changed.
+     */
     const markFailed = async (ref: ModelRef, kind: FailureClass, error: FailureInput): Promise<number> => {
-      const now = Date.now()
-      const cooldownMs = cooldownFor(kind, error, now, runtime)
       const reason = `${kind}: ${oneLine(error.message ?? "")}`
-      health = markUnhealthy(health, ref, now, cooldownMs, reason, failureScope(kind))
+      const record = recordFailure(health, ref, kind, error, Date.now(), runtime, reason)
+      health = record.state
       try {
         await ctx.storage.set(HEALTH_KEY, health)
       } catch {
         // In-memory health still steers this instance.
       }
-      attempts = 0
-      await check(true)
-      scheduleExpiry()
-      return cooldownMs
+      if (record.tripped) {
+        attempts = 0
+        await check(true)
+        scheduleExpiry()
+      }
+      return record.cooldownMs
     }
 
     const notify = async (sessionID: string, text: string, kind: string) => {
@@ -513,12 +520,13 @@ export default Plugin.define({
       const isChild = typeof session.parentID === "string" && session.parentID !== ""
       const spawnRole = isChild ? await spawnRoleOf(sessionID) : undefined
       const role = spawnRole ?? (agent === undefined ? undefined : roleOf(agent, options.agents, options.implicit))
-      const target = fallbackTarget(options, available, view(), role, failed)
+      // A model that stays in use keeps its tier where it was: nothing moves.
+      const target = cooldownMs > 0 ? fallbackTarget(options, available, view(), role, failed) : undefined
       const facts: NoteFacts = { failed, kind, cooldownMs, target }
       if (isChild) {
         childFailures.set(session.parentID as string, Date.now())
         // A child spawned with a role follows that role: move it on, so resuming it continues on the next model.
-        let resumable: string | undefined
+        let resumable: string | undefined = cooldownMs > 0 ? undefined : sessionID
         if (spawnRole !== undefined && target !== undefined) {
           try {
             await ctx.session.switchModel({ sessionID, model: target.model })
@@ -531,7 +539,8 @@ export default Plugin.define({
         await notifyParentOnce(session.parentID as string, failed, note)
         return
       }
-      await notify(sessionID, failureNote(facts), "fallback")
+      if (cooldownMs > 0) await notify(sessionID, failureNote(facts), "fallback")
+      else console.warn(`${SOURCE}: session ${sessionID}: ${failureNote(facts)}`)
     }
 
     /**
@@ -564,39 +573,62 @@ export default Plugin.define({
       return outcome
     }
 
+    /** Retry a transient failure on its model with backoff when the host would not retry it. */
+    const keepOnModel = (event: SessionRetry, kind: FailureClass, failed: ModelRef) => {
+      if (event.decision.retry || !retriesOnModel(kind, event.attempt, runtime.hostRetries)) return
+      const delay = retryDelay(event.attempt)
+      event.decision = { retry: true, delay }
+      console.warn(`${SOURCE}: session ${event.sessionID}: ${modelLabel(failed)} failed (${kind}); retrying it in ${duration(delay)}.`)
+    }
+
+    /**
+     * The models each session's current run of retries already failed on, by health key. A
+     * request never goes back to one, however slowly they fail, so switching ends.
+     */
+    const triedModels = new Map<string, Set<string>>()
+
     const retries = await ctx.session.hook("retry", async (event) => {
+      // The first retry of a request starts a fresh run.
+      if (event.attempt <= 2) triedModels.delete(event.sessionID)
       const error = event.error as FailureInput
       const kind = classifyFailure(error)
-      if (kind === undefined || staysOnModel(kind, event.attempt, runtime.hostRetries)) return
-      // A switch from an earlier retry is still landing: the host's next attempt reloads it.
-      if (switching.has(event.sessionID)) return
+      if (kind === undefined) return
       const { providerID, id, variant } = event.model as { providerID: string; id: string; variant?: string }
       const failed: ModelRef = variant ? { providerID, id, variant } : { providerID, id }
+      if (staysOnModel(kind, event.attempt, runtime.hostRetries)) return keepOnModel(event, kind, failed)
+      // A switch from an earlier retry is still landing: the host's next attempt reloads it.
+      if (switching.has(event.sessionID)) return keepOnModel(event, kind, failed)
       try {
         await queue(async () => {
           const cooldownMs = await markFailed(failed, kind, error)
           const agent = (await listAgents()).find((a) => a.id === event.agent)
           const role = (await spawnRoleOf(event.sessionID)) ?? (agent === undefined ? undefined : roleOf(agent, options.agents, options.implicit))
+          const tried = triedModels.get(event.sessionID) ?? new Set<string>()
+          triedModels.set(event.sessionID, tried.add(healthKey(failed)))
+          const recent = healthView(health, Date.now(), RECENT_MS)
           const target = retryTarget({
             options,
             available,
-            health: view(),
+            health: (ref) => (tried.has(healthKey(ref)) ? 0 : recent(ref)),
             role,
             failed,
             kind,
             attempt: event.attempt,
             hostRetries: runtime.hostRetries,
           })
-          if (target === undefined) return
+          if (target === undefined) return keepOnModel(event, kind, failed)
           const outcome = await switchWithin(event.sessionID, target.model)
           const note = switchNote({ failed, kind, cooldownMs, target })
           if (outcome === "switched") {
             event.decision = { retry: true, delay: 0 }
             console.warn(`${SOURCE}: session ${event.sessionID}: ${note}`)
-          } else
-            console.warn(
-              `${SOURCE}: session ${event.sessionID}: switching to ${target.model.providerID}/${target.model.id} ${outcome === "late" ? "is still pending" : "failed"}; the host's retry decision stands.`,
-            )
+            return
+          }
+          console.warn(
+            `${SOURCE}: session ${event.sessionID}: switching to ${target.model.providerID}/${target.model.id} ${outcome === "late" ? "is still pending" : "failed"}.`,
+          )
+          // The switch did not happen this time: a transient failure still gets its retry.
+          keepOnModel(event, kind, failed)
         })
       } catch (error) {
         // The host's own retry decision stands.
@@ -1024,9 +1056,10 @@ export default Plugin.define({
           if (failed === undefined) return
           const cooldownMs = await markFailed(failed, kind, { message })
           const role = spawn?.role ?? (agent === undefined ? undefined : roleOf(agent, options.agents, options.implicit))
-          const target = fallbackTarget(options, available, view(), role, failed)
+          const target = cooldownMs > 0 ? fallbackTarget(options, available, view(), role, failed) : undefined
           const facts: NoteFacts = { failed, kind, cooldownMs, target }
-          await notifyParentOnce(event.sessionID, failed, subagentNote({ ...facts, agent: agentID, spawnRole: spawn?.role }))
+          const resumable = cooldownMs > 0 ? undefined : childSessionID(message)
+          await notifyParentOnce(event.sessionID, failed, subagentNote({ ...facts, agent: agentID, spawnRole: spawn?.role, resumable }))
         })
       } catch (error) {
         console.warn(`${SOURCE}: could not record the subagent failure`, error)
@@ -1082,6 +1115,7 @@ export default Plugin.define({
       await references.dispose()
       notices.clear()
       childFailures.clear()
+      triedModels.clear()
       pending.clear()
       childRoles.clear()
       autoHistory = []
