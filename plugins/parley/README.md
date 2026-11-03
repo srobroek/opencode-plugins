@@ -205,7 +205,15 @@ named …".
 
 ## TUI panel
 
-A round opens the session's tab and sends an attention notification. A round
+A round opens the session's tab and sends an attention notification. If the
+current tab already has an unanswered round, questions arriving in another
+session stay pending in the background and show a toast instead of replacing
+the foreground question. Select that session's tab to show them, or use
+`/parley` / `alt+p`; both sessions keep their answers and drafts. Completing or
+dismissing one session's round does not close another session's panel. Existing
+timeouts and explicit tool aborts still apply.
+
+A round
 with one question shows as a compact card above the prompt. The card takes
 focus and uses the keys below, with `enter` to submit (it also picks the row
 under the cursor if nothing is chosen), `j` / `k` to move between choices, `f`

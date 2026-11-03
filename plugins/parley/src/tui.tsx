@@ -3,9 +3,10 @@ import path from "node:path"
 import type { LocationRef } from "@opencode/client"
 import { Plugin } from "@opencode/plugin/tui"
 import { SyntaxStyle } from "@opentui/core"
-import { createSignal, Show } from "solid-js"
+import { createEffect, createSignal, Show } from "solid-js"
 import type { SubmittedAnswer } from "./answers.ts"
 import { createRoundStore, InlineCard, PANEL, RoundPanel } from "./panel.tsx"
+import { canAutoPresent, canCloseRoundPanel } from "./presentation.ts"
 import type { RoundView } from "./rounds.ts"
 import { ParleyRpc, type RoundEvent } from "./rpc.ts"
 import { inlineEligible } from "./tui-state.ts"
@@ -53,6 +54,15 @@ export default Plugin.define({
     const [focusRequest, setFocusRequest] = createSignal(0)
     // Sessions whose one-question round shows as the inline card (cleared by esc, kept across round updates).
     const [inline, setInline] = createSignal<ReadonlySet<string>>(new Set())
+    // Opened elsewhere while another question owns the foreground. Present on an
+    // intentional visit to that tab, not by replacing the user's pending question.
+    const [deferred, setDeferred] = createSignal<ReadonlySet<string>>(new Set())
+    const deferPresentation = (sessionID: string, on: boolean) => setDeferred((current) => {
+      const next = new Set(current)
+      if (on) next.add(sessionID)
+      else next.delete(sessionID)
+      return next
+    })
     const showInline = (sessionID: string, on: boolean) =>
       setInline((current) => {
         const next = new Set(current)
@@ -110,18 +120,30 @@ export default Plugin.define({
     const single = (sessionID: string) => inlineEligible(forSession(sessionID)?.view.questions ?? [])
 
     const openPanel = (sessionID: string, delay = 0) => {
+      const roundID = forSession(sessionID)?.view.roundID
       showInline(sessionID, false)
       // Let the route switch before the panel opens in the now-current session.
       void sleep(delay).then(() => {
         if (disposed) return
+        const route = context.ui.router.current()
+        if (route.type !== "session" || route.sessionID !== sessionID || forSession(sessionID)?.view.roundID !== roundID) return
+        if (roundID === undefined) return
         context.ui.panel.open(PANEL, { presentation: "fullscreen" })
       })
     }
 
-    const present = (sessionID: string) => {
+    const present = (sessionID: string, automatic = false) => {
       const entry = forSession(sessionID)
       if (!entry) return
       const route = context.ui.router.current()
+      const current = route.type === "session" ? route.sessionID : undefined
+      if (automatic && !canAutoPresent(sessionID, current, rounds().map((item) => item.view.sessionID))) {
+        deferPresentation(sessionID, true)
+        if (single(sessionID)) showInline(sessionID, true)
+        context.ui.toast.show({ title: "Parley", message: "Questions waiting in another tab", sessionID })
+        return
+      }
+      deferPresentation(sessionID, false)
       const here = route.type === "session" && route.sessionID === sessionID
       if (!here && !context.ui.tabs.focus(sessionID)) context.ui.router.navigate({ type: "session", sessionID })
       // One question shows as a card above the prompt; a larger round takes the screen.
@@ -173,7 +195,7 @@ export default Plugin.define({
       }
       await refresh(location)
       if (disposed) return
-      if (data.action === "opened") present(data.sessionID)
+      if (data.action === "opened") present(data.sessionID, true)
       else if (data.action === "updated") {
         if (inline().has(data.sessionID) && !single(data.sessionID)) {
           openPanel(data.sessionID)
@@ -186,7 +208,7 @@ export default Plugin.define({
         const open = context.ui.panel.current()
         if (open?.name === PANEL && open.sessionID === data.sessionID && !forSession(data.sessionID))
           context.ui.panel.close()
-        if (!forSession(data.sessionID)) showInline(data.sessionID, false)
+        if (!forSession(data.sessionID)) { showInline(data.sessionID, false); deferPresentation(data.sessionID, false) }
         if (data.action === "ended" && data.message)
           context.ui.toast.show({ title: "Parley", message: data.message, sessionID: data.sessionID })
         else if (data.reason === "timeout")
@@ -241,8 +263,9 @@ export default Plugin.define({
         context.ui.toast.show({ message: "Answers sent", variant: "success", duration: 2000 })
         await refresh(entry.location)
         if (disposed) return []
-        if (context.ui.panel.current()?.name === PANEL) context.ui.panel.close()
-        showInline(view.sessionID, false)
+        const stillPending = forSession(view.sessionID) !== undefined
+        if (canCloseRoundPanel(context.ui.panel.current(), PANEL, view.sessionID, stillPending)) context.ui.panel.close()
+        if (!stillPending) showInline(view.sessionID, false)
         return []
       } catch (error) {
         return [error instanceof Error ? error.message : String(error)]
@@ -265,8 +288,9 @@ export default Plugin.define({
       await rpc.cancel({ roundID: view.roundID, reason: "user_closed" }, { location: entry.location }).catch(() => {})
       await refresh(entry.location)
       if (disposed) return
-      if (context.ui.panel.current()?.name === PANEL) context.ui.panel.close()
-      showInline(view.sessionID, false)
+      const stillPending = forSession(view.sessionID) !== undefined
+      if (canCloseRoundPanel(context.ui.panel.current(), PANEL, view.sessionID, stillPending)) context.ui.panel.close()
+      if (!stillPending) showInline(view.sessionID, false)
     }
 
     const directoryOf = (sessionID: string) =>
@@ -291,8 +315,8 @@ export default Plugin.define({
     const disposeSlot = context.ui.slot({
       append: "session.panel",
       render: (panel) => (
-        <Show when={panel.name === PANEL}>
-          <RoundPanel
+        <Show when={panel.name === PANEL ? forSession(panel.sessionID)?.view.roundID : undefined} keyed>
+          {() => <RoundPanel
             store={store}
             context={context}
             panel={panel}
@@ -307,7 +331,7 @@ export default Plugin.define({
               context.ui.panel.close()
               showInline(panel.sessionID, true)
             }}
-          />
+          />}
         </Show>
       ),
     })
@@ -343,6 +367,10 @@ export default Plugin.define({
     const disposeCommands = context.ui.slot({
       append: "app",
       render: () => {
+        createEffect(() => {
+          const sessionID = currentSession()
+          if (sessionID && deferred().has(sessionID) && forSession(sessionID)) present(sessionID)
+        })
         context.keymap.layer(() => ({
           mode: "global",
           commands: [
