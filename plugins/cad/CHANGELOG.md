@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.0](https://github.com/srobroek/opencode-plugins/compare/cad--v0.3.1...cad--v0.4.0) (2026-11-03)
+
+
+### Features
+
+* **claude-compat:** load trusted Claude Code plugins per project ([#89](https://github.com/srobroek/opencode-plugins/issues/89)) ([5143689](https://github.com/srobroek/opencode-plugins/commit/5143689de3933c3fe8a266d94e0e1355dfb42229))
+
+
+### Bug Fixes
+
+* **cad:** restore the concept viewer controls ([#103](https://github.com/srobroek/opencode-plugins/issues/103)) ([4435e9b](https://github.com/srobroek/opencode-plugins/commit/4435e9b2b2ef026c5236cc6f3e39862a5d764456))
+
 ## [0.3.1](https://github.com/srobroek/opencode-plugins/compare/cad--v0.3.0...cad--v0.3.1) (2026-10-31)
 
 

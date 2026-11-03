@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/srobroek/opencode-plugins/compare/parley--v0.3.0...parley--v0.3.1) (2026-11-03)
+
+
+### Bug Fixes
+
+* **parley:** preserve pending questions across session tabs ([#104](https://github.com/srobroek/opencode-plugins/issues/104)) ([d03fbd6](https://github.com/srobroek/opencode-plugins/commit/d03fbd6b475fa8c160fea5cfb5104e6d95950ee3))
+
 ## [0.3.0](https://github.com/srobroek/opencode-plugins/compare/parley--v0.2.0...parley--v0.3.0) (2026-10-27)
 
 

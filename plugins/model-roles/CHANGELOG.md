@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/srobroek/opencode-plugins/compare/model-roles--v0.2.1...model-roles--v0.2.2) (2026-11-03)
+
+
+### Bug Fixes
+
+* **model-roles:** sit models out only when they stay down or flap ([#88](https://github.com/srobroek/opencode-plugins/issues/88)) ([992034a](https://github.com/srobroek/opencode-plugins/commit/992034a269acf8affb6be9a87706d043de1c9e1d))
+
 ## [0.2.1](https://github.com/srobroek/opencode-plugins/compare/model-roles--v0.2.0...model-roles--v0.2.1) (2026-10-27)
 
 
