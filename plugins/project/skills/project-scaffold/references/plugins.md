@@ -51,7 +51,6 @@ Use any of these; the first two give descriptions to match against the project:
 | `ast-grep` | structural search or rewrites in a large codebase |
 | LSP plugin (`plugins/lsp`) | edit results should carry new language-server errors |
 | `cad` | mechanical CAD work |
-| `goal` | `/goal` and `/loop` modes |
 
 Ask before adding any plugin that is not obviously needed. Plugins with MCP servers
 (`ast-grep`, `design`, `aws`, `docs`) start them only where their marker check matches.
