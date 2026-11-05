@@ -77,7 +77,7 @@ codex plugin add worktrunk@srobroek-opencode
 | `lang-rust` | Router skill `lang-rust` and skills `lang-rust-quality`, `lang-rust-testing`, `lang-rust-profiling`, `lang-rust-packaging`, `lang-rust-persistence`, `lang-rust-ci`, `lang-rust-tauri` |
 | `debate` | Skills `debate`, `grilling`, `to-questionnaire` |
 | `eli5` | Skill `eli5` |
-| `project` | Skill `license-picker` |
+| `project` | Skills `license-picker`, `project-scaffold`, `project-secrets` (the `/new-project` command and OpenCode config steps are OpenCode-only) |
 | `architecture` | Router skill `architecture-guide` and skills `architecture-docs-files`, `architecture-ownership`, `architecture-top-level` (no `architect` agent) |
 | `quality` | Skills `prototype-logic`, `quality-code-design`, `quality-code-policy`, `quality-profiling`, `quality-testing` (no `adversarial-challenger` agent) |
 | `agent-reviewer` | Skill `review-security` (no reviewer agents) |
