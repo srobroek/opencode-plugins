@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/srobroek/opencode-plugins/compare/project--v0.3.0...project--v0.3.1) (2026-11-05)
+
+
+### Bug Fixes
+
+* **project:** describe the host fnox providers as they are now ([#107](https://github.com/srobroek/opencode-plugins/issues/107)) ([25df1c6](https://github.com/srobroek/opencode-plugins/commit/25df1c6e02194e4c1eb095deaf9922595cdb900d))
+
 ## [0.3.0](https://github.com/srobroek/opencode-plugins/compare/project--v0.2.1...project--v0.3.0) (2026-11-05)
 
 
