@@ -38,7 +38,6 @@ skill listing, its agents in the `@` picker, and its tools in a Code Mode `searc
   [design](#design) ·
   [eli5](#eli5) ·
   [find-tools](#find-tools) ·
-  [goal](#goal) ·
   [journeys](#journeys) ·
   [lang-go, lang-python, lang-typescript](#lang-go-lang-python-lang-typescript) ·
   [lang-rust](#lang-rust) ·
@@ -90,7 +89,7 @@ All of them at once (statusline is TUI-only, see below):
 ```sh
 for p in agent-coder agent-efficiency agent-mechanic agent-researcher agent-reviewer \
   agent-seance architecture aws beads build chezmoi debate delivery dep-update design \
-  eli5 find-tools goal journeys lang-go lang-python lang-typescript lang-rust lsp \
+  eli5 find-tools journeys lang-go lang-python lang-typescript lang-rust lsp \
   model-roles parley project quality repomix safety session speckit subagent-worktree \
   toolchain trunk-dev whats-new worktrunk; do
   opencode plugin add "github:srobroek/opencode-plugins#main::path:plugins/$p"
@@ -243,16 +242,7 @@ Run exactly: wt merge epic
 **Expect:** refused with `worker-to-epic merges must preserve history; retry with wt merge epic --no-squash --no-ff`.
 **If not:** `plugins/worktrunk/src/merge-gate.ts`; `git symbolic-ref refs/remotes/origin/HEAD` must print `origin/main`.
 
-**9. goal: the slash command answers**
-
-```text
-/goal show
-```
-
-**Expect:** `No goal is set for this session.`
-**If not:** `plugins/goal/src/index.ts` (command registration).
-
-**10. statusline: the row renders**
+**9. statusline: the row renders**
 
 Look above the composer.
 
@@ -1097,73 +1087,6 @@ Find a tool for generating changelogs from Conventional Commits. Should I adopt 
 
 **Expect:** loads `find-tools`, scans, vets, and ends with a decision table (`Use existing`, `Adopt`, `Trial`, `Reject` or `Build`) without installing anything.
 **If not:** `plugins/find-tools/skills/find-tools/SKILL.md`.
-
-## goal
-
-**Install:** `opencode plugin add 'github:srobroek/opencode-plugins#main::path:plugins/goal'`.
-Options `delayMs`, `maxContinuations` and `conditionTimeoutMs`.
-
-### Command `/goal`
-
-```text
-/goal Create notes.txt containing the word done, verify it with cat, then finish the goal.
-```
-
-**Expect:** the agent works on it, synthetic "Goal: continue #n" turns follow, and it ends by calling `goal_complete`, with `Goal complete. Automatic continuation has stopped...`.
-**If not:** `plugins/goal/src/controller.ts`; goals do not run in subagents or with the `plan` agent.
-
-```text
-/goal show
-```
-
-**Expect:** `Goal (<status>)`, the objective and usage; with no goal, `No goal is set for this session.`
-**If not:** `plugins/goal/src/goal.ts`.
-
-```text
-/goal budget 50k
-```
-
-**Expect:** `Goal budget updated.` followed by the goal description.
-**If not:** `parseBudget` in `plugins/goal/src/goal.ts`.
-
-```text
-/goal pause
-```
-
-**Expect:** `Goal paused. /goal resume continues it.` Then `/goal resume` restarts it, and `/goal drop` answers `Goal dropped.`
-**If not:** `goalCommand` in `plugins/goal/src/controller.ts`.
-
-### Tools `goal_get` and `goal_complete`
-
-```text
-/goal Say hello. Then call goal_get and show me its output, then call goal_complete with empty evidence.
-```
-
-**Expect:** `goal_get` returns the objective, status and budget. `goal_complete` with empty evidence is rejected, either by its input schema or with `goal_complete needs evidence: ...`, and the goal stays active.
-**If not:** `plugins/goal/src/goal.ts`.
-
-### Command `/loop`
-
-```text
-/loop 2 append the current time to loop.txt
-```
-
-**Expect:** the prompt runs, then repeats twice, then `Loop limit reached. Loop mode disabled.`
-**If not:** `plugins/goal/src/loop.ts`.
-
-```text
-/loop --until 'test -f done.txt' if done.txt does not exist, create it
-```
-
-**Expect:** it stops with `Loop condition test -f done.txt is now satisfied. Loop mode disabled.`
-**If not:** `plugins/goal/src/condition.ts`.
-
-```text
-/loop
-```
-
-**Expect:** `Loop mode enabled. ...`. Sending `/loop` again answers `Loop mode disabled.` With a loop on, `/goal x` is refused.
-**If not:** `loopCommand` in `plugins/goal/src/controller.ts`.
 
 ## journeys
 
