@@ -94,7 +94,7 @@
     {
       "name": "project",
       "source": "./plugins/project",
-      "description": "Project lifecycle: pick an OSI-approved license from the project's constraints.",
+      "description": "Project lifecycle: scaffold a project with /new-project, set up fnox and 1Password secrets, and pick an OSI-approved license.",
       "version": "0.2.1",
       "category": "productivity"
     },
