@@ -3,8 +3,9 @@
  *
  * - A root session that stops with tracked claims is nudged once, with the guarded
  *   release commands, and continues (`synthetic`, `resume: true`). A real user prompt
- *   re-arms the nudge. While the goal plugin will continue the session, the nudge stands
- *   down: the goal turn is not a stop.
+ *   re-arms the nudge. While OpenCode's built-in goal is active the nudge stands down: the
+ *   goal may continue the session. The stop is deferred, and runs again as a clean stop
+ *   when the goal ends (`rpc.opencode.goal.changed`) unless a new execution starts first.
  * - A root session that stops again, still holding them, gets them released.
  * - A subagent's claims are released when it finishes. A foreground subagent's release
  *   is reported in its `subagent` tool result; a background one's in a synthetic message
@@ -16,6 +17,7 @@ import type { Context } from "@opencode/plugin/promise/plugin"
 import type { Result } from "@opencode/plugin/promise/tool"
 import { type ClaimState, readClaimState, type TrackedClaim } from "./claims.ts"
 import type { BdRun } from "./gate-admission.ts"
+import { GOAL_SOURCE, isGoalActive } from "./goal.ts"
 import { type Heartbeats, readLeases } from "./heartbeat.ts"
 import { heldClaimsAdvisory, RELEASE_CEILING_MS, type ReleaseOutcome, releaseClaims, releaseReport } from "./release.ts"
 
@@ -43,24 +45,24 @@ export function childFinished(end: ExecutionEnd): boolean {
   return end.kind !== "interrupted" || end.reason !== "superseded"
 }
 
-/** True for prompt metadata this plugin or the goal plugin wrote, which is not the user speaking. */
+/** True for prompt metadata this plugin or the built-in goal wrote, which is not the user speaking. */
 export function isPluginPrompt(metadata: unknown): boolean {
   const source = (metadata as { source?: unknown } | null | undefined)?.source
-  return source === BEADS_SOURCE || source === "srobroek.goal"
+  return source === BEADS_SOURCE || source === GOAL_SOURCE
 }
 
-/** The goal plugin's continuation for `sessionID`, read from its process-wide registry without importing it. */
-export function goalContinuation(sessionID: string): string | undefined {
-  const holder = globalThis as { [key: symbol]: unknown }
-  const registry = holder[Symbol.for("srobroek.goal.continuations")]
-  return registry instanceof Map ? (registry.get(sessionID) as string | undefined) : undefined
+/** Whether a goal `changed` event ends the deferral of a stop: the goal has stopped driving the session. */
+export function goalEnded(goal: unknown): boolean {
+  return !isGoalActive(goal)
 }
 
-type ExecutionEvent = { id?: string; type: string; sessionID: string; end?: ExecutionEnd }
+export const GOAL_CHANGED = "rpc.opencode.goal.changed"
+
+type ExecutionEvent = { id?: string; type: string; sessionID: string; end?: ExecutionEnd; goal?: unknown }
 
 /** The parts of an event the lifecycle reads, or `undefined` for every other event. */
 export function readExecutionEvent(event: unknown): ExecutionEvent | undefined {
-  const record = event as { id?: unknown; type?: unknown; data?: { sessionID?: unknown; reason?: unknown } } | null
+  const record = event as { id?: unknown; type?: unknown; data?: { sessionID?: unknown; reason?: unknown; goal?: unknown } } | null
   const type = record?.type
   const sessionID = record?.data?.sessionID
   if (typeof type !== "string" || typeof sessionID !== "string") return undefined
@@ -69,6 +71,8 @@ export function readExecutionEvent(event: unknown): ExecutionEvent | undefined {
     case "session.execution.started":
     case "session.deleted":
       return { id, type, sessionID }
+    case GOAL_CHANGED:
+      return { id, type, sessionID, goal: record?.data?.goal }
     case "session.execution.succeeded":
       return { id, type, sessionID, end: { kind: "succeeded" } }
     case "session.execution.failed":
@@ -94,6 +98,8 @@ export function subagentChild(result: Result | undefined): { sessionID: string; 
 type Shared = {
   /** Event ids already handled by some instance of this plugin. */
   events: Set<string>
+  /** Root sessions whose stop stood down for an active goal, awaiting the goal's end. */
+  deferred: Set<string>
   /** Foreground `subagent` calls in flight, by parent session. */
   foreground: Map<string, Set<string>>
   /** Child releases in flight. */
@@ -107,7 +113,7 @@ const SHARED: unique symbol = Symbol.for("srobroek.beads.lifecycle") as never
 /** State every instance of this plugin in the process shares, so one event is handled once. */
 function shared(): Shared {
   const holder = globalThis as { [SHARED]?: Shared }
-  holder[SHARED] ??= { events: new Set(), foreground: new Map(), releases: new Map(), reported: new WeakSet() }
+  holder[SHARED] ??= { events: new Set(), deferred: new Set(), foreground: new Map(), releases: new Map(), reported: new WeakSet() }
   return holder[SHARED]
 }
 
@@ -121,6 +127,8 @@ export type LifecycleDeps = {
   heartbeats: Heartbeats
   nudge: boolean
   release: boolean
+  /** The session's built-in goal state; a rejection counts as no goal. */
+  goal: (sessionID: string) => Promise<unknown>
   /** Receives every detached task; tests join them. */
   detach: (task: Promise<unknown>) => void
 }
@@ -159,7 +167,14 @@ export class Lifecycle {
       if (seen.size > MAX_EVENTS) seen.delete(seen.values().next().value as string)
     }
     const { sessionID } = event
+    if (event.type === GOAL_CHANGED) {
+      if (!shared().deferred.has(sessionID) || !goalEnded(event.goal)) return
+      shared().deferred.delete(sessionID)
+      if ((await this.parentOf(sessionID)) === undefined) await this.#rootStop(sessionID, { kind: "succeeded" }, false)
+      return
+    }
     if (event.type === "session.execution.started") {
+      shared().deferred.delete(sessionID)
       const leases = readLeases(await this.#deps.ctx.storage.get(`leases/${sessionID}`))
       this.#deps.heartbeats.run(sessionID, leases, true)
       return
@@ -169,6 +184,7 @@ export class Lifecycle {
       await this.#deps.ctx.storage.remove(`leases/${sessionID}`)
       await this.#deps.ctx.storage.remove(`nudged/${sessionID}`)
       this.#parents.delete(sessionID)
+      shared().deferred.delete(sessionID)
       return
     }
     if (event.end === undefined) return
@@ -210,17 +226,20 @@ export class Lifecycle {
       : releaseReport(`finished subagent session ${child.sessionID}`, released.claims, released.outcome)
   }
 
-  async #rootStop(sessionID: string, end: ExecutionEnd): Promise<void> {
+  async #rootStop(sessionID: string, end: ExecutionEnd, checkGoal = true): Promise<void> {
     if (!this.#deps.nudge) return
     const storage = this.#deps.ctx.storage
+    const continuing = checkGoal && end.kind === "succeeded" && (await this.#goalActive(sessionID))
     const action = await this.#deps.queue(`stop/${sessionID}`, async () => {
       const state = readClaimState(await storage.get(`claims/${sessionID}`))
       const next = rootStopAction(end, {
         claims: Object.keys(state.claims).length,
         nudged: (await storage.get(`nudged/${sessionID}`)) === true,
-        continuing: goalContinuation(sessionID) !== undefined,
+        continuing,
       })
       if (next === "nudge") await storage.set(`nudged/${sessionID}`, true)
+      if (continuing && rootStopAction(end, { claims: Object.keys(state.claims).length, nudged: false, continuing: false }) !== "none")
+        shared().deferred.add(sessionID)
       return { next, state }
     })
     if (action.next === "nudge") {
@@ -236,6 +255,14 @@ export class Lifecycle {
           if (text !== undefined) await this.#send(sessionID, text, false, "release")
         }),
       )
+    }
+  }
+
+  async #goalActive(sessionID: string): Promise<boolean> {
+    try {
+      return isGoalActive(await this.#deps.goal(sessionID))
+    } catch {
+      return false
     }
   }
 
