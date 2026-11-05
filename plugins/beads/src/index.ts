@@ -19,6 +19,7 @@ import {
   runBdResult,
   staleSkipNotice,
 } from "./gate-admission.ts"
+import { GoalRpc } from "./goal.ts"
 import { type HeartbeatClock, Heartbeats, heartbeatOnce, leaseEndingIds, nextLeases, readLeases } from "./heartbeat.ts"
 import {
   agentActor,
@@ -109,6 +110,8 @@ export type AdapterDeps = {
   clock?: HeartbeatClock
   /** Receives every detached task (claim releases); tests join them. */
   detach?: (task: Promise<unknown>) => void
+  /** The session's built-in goal state; production asks OpenCode's `opencode.goal` RPC. */
+  goal?: (sessionID: string) => Promise<unknown>
   eventHandled?: (event: unknown) => void
   skillsDirectory?: string
   start?: Pick<StartDeps, "hooksAdvisory" | "identity">
@@ -167,6 +170,7 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
     heartbeats,
     nudge: on("beads-stop-nudge"),
     release: on("beads-claim-release"),
+    goal: deps.goal ?? (async (sessionID) => ctx.rpc(GoalRpc).get({ sessionID })),
     detach,
   })
 

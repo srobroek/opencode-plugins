@@ -4,12 +4,13 @@ import { join } from "node:path"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
 import { setBdShowRunForTests } from "./bd-close-gate.ts"
 import type { BdRun } from "./gate-admission.ts"
+import { GOAL_SOURCE, isGoalActive } from "./goal.ts"
 import { HEARTBEAT_INTERVAL_MS, type HeartbeatClock } from "./heartbeat.ts"
 import { type AdapterDeps, SKILL_NAMES, setupBeads } from "./index.ts"
 import {
   BEADS_SOURCE,
   childFinished,
-  goalContinuation,
+  goalEnded,
   isPluginPrompt,
   readExecutionEvent,
   rootStopAction,
@@ -22,7 +23,7 @@ describe("decisions", () => {
     expect(rootStopAction({ kind: "succeeded" }, state)).toBe("nudge")
     expect(rootStopAction({ kind: "succeeded" }, { ...state, nudged: true })).toBe("release")
   })
-  test("no claims, a goal continuation, a failure or an interrupt does nothing", () => {
+  test("no claims, an active goal, a failure or an interrupt does nothing", () => {
     expect(rootStopAction({ kind: "succeeded" }, { ...state, claims: 0 })).toBe("none")
     expect(rootStopAction({ kind: "succeeded" }, { ...state, continuing: true })).toBe("none")
     expect(rootStopAction({ kind: "failed" }, state)).toBe("none")
@@ -36,22 +37,26 @@ describe("decisions", () => {
     expect(childFinished({ kind: "interrupted", reason: "superseded" })).toBe(false)
   })
   test("goal and beads prompts are not the user speaking", () => {
-    expect(isPluginPrompt({ source: "srobroek.goal" })).toBe(true)
+    expect(isPluginPrompt({ source: "goal" })).toBe(true)
     expect(isPluginPrompt({ source: BEADS_SOURCE })).toBe(true)
     expect(isPluginPrompt({ source: "user" })).toBe(false)
     expect(isPluginPrompt(undefined)).toBe(false)
   })
-  test("the goal registry is read through its global symbol", () => {
-    const holder = globalThis as { [key: symbol]: unknown }
-    const key = Symbol.for("srobroek.goal.continuations")
-    const previous = holder[key]
-    holder[key] = new Map([["ses_goal", "goal"]])
-    try {
-      expect(goalContinuation("ses_goal")).toBe("goal")
-      expect(goalContinuation("ses_other")).toBeUndefined()
-    } finally {
-      holder[key] = previous
-    }
+  test("only an active goal state is active", () => {
+    expect(GOAL_SOURCE).toBe("goal")
+    expect(isGoalActive({ status: "active" })).toBe(true)
+    for (const state of [{ status: "complete" }, { status: "paused" }, {}, null, undefined, "active"])
+      expect(isGoalActive(state)).toBe(false)
+    expect(goalEnded({ status: "active" })).toBe(false)
+    expect(goalEnded(null)).toBe(true)
+  })
+  test("a goal changed event is read with its goal", () => {
+    expect(readExecutionEvent({ id: "e2", type: "rpc.opencode.goal.changed", data: { sessionID: "s", goal: null } })).toEqual({
+      id: "e2",
+      type: "rpc.opencode.goal.changed",
+      sessionID: "s",
+      goal: null,
+    })
   })
   test("execution events are read; other events are not", () => {
     expect(readExecutionEvent({ id: "e1", type: "session.execution.interrupted", data: { sessionID: "s", reason: "user" } })).toEqual({
@@ -203,29 +208,67 @@ describe("stop nudge and release in a root session", () => {
     const t = await start([{ id: root }], { run: ledger().run })
     await t.shell(root, "BEADS_ACTOR=me/main bd update proj-1 --claim", "✓ Claimed proj-1")
     await t.emit("session.execution.succeeded", root)
-    await t.fake.fire.session("prompt", { sessionID: root, metadata: { source: "srobroek.goal" }, prompt: { text: "continue" } })
+    await t.fake.fire.session("prompt", { sessionID: root, metadata: { source: "goal" }, prompt: { text: "continue" } })
     expect(t.fake.storage.get(`nudged/${root}`)).toBe(true)
     await t.cleanup()
   })
 
-  test("stands down while the goal plugin continues the session", async () => {
-    const root = sid("root")
-    const holder = globalThis as { [key: symbol]: unknown }
-    const key = Symbol.for("srobroek.goal.continuations")
-    const previous = holder[key]
-    holder[key] = new Map([[root, "goal"]])
-    const t = await start([{ id: root }], { run: ledger().run })
-    try {
+  describe("built-in goal", () => {
+    const claimed = async (goal: AdapterDeps["goal"]) => {
+      const root = sid("root")
+      const t = await start([{ id: root }], { run: ledger().run, goal })
       await t.shell(root, "BEADS_ACTOR=me/main bd update proj-1 --claim", "✓ Claimed proj-1")
+      return { root, t }
+    }
+    const changed = "rpc.opencode.goal.changed"
+
+    test("stands down while the goal is active, then nudges when it completes", async () => {
+      const { root, t } = await claimed(async () => ({ status: "active" }))
       await t.emit("session.execution.succeeded", root)
       expect(t.synthetics()).toEqual([])
-      ;(holder[key] as Map<string, string>).delete(root)
+      await t.emit(changed, root, { goal: { status: "active" } })
+      expect(t.synthetics()).toEqual([])
+      await t.emit(changed, root, { goal: { status: "complete" } })
+      expect(t.synthetics()).toHaveLength(1)
+      expect(t.synthetics()[0]).toMatchObject({ resume: true })
+      await t.emit(changed, root, { goal: null })
+      expect(t.synthetics()).toHaveLength(1)
+      await t.cleanup()
+    })
+
+    test("a new execution clears the deferral", async () => {
+      const { root, t } = await claimed(async () => ({ status: "active" }))
+      await t.emit("session.execution.succeeded", root)
+      await t.emit("session.execution.started", root)
+      await t.emit(changed, root, { goal: { status: "paused" } })
+      expect(t.synthetics()).toEqual([])
+      await t.cleanup()
+    })
+
+    test("a changed event for a session that is not deferred does nothing", async () => {
+      const { root, t } = await claimed(async () => null)
+      await t.emit(changed, root, { goal: { status: "complete" } })
+      expect(t.synthetics()).toEqual([])
+      await t.cleanup()
+    })
+
+    test("an interrupt or failure under an active goal creates no deferral", async () => {
+      const { root, t } = await claimed(async () => ({ status: "active" }))
+      await t.emit("session.execution.interrupted", root, { reason: "user" })
+      await t.emit("session.execution.failed", root)
+      await t.emit(changed, root, { goal: { status: "complete" } })
+      expect(t.synthetics()).toEqual([])
+      await t.cleanup()
+    })
+
+    test("a rejecting lookup means no goal", async () => {
+      const { root, t } = await claimed(async () => {
+        throw new Error("no such rpc")
+      })
       await t.emit("session.execution.succeeded", root)
       expect(t.synthetics()).toHaveLength(1)
-    } finally {
-      holder[key] = previous
       await t.cleanup()
-    }
+    })
   })
 
   test("a user interrupt, a shutdown or a failure is not a stop", async () => {
