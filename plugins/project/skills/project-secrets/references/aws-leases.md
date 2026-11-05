@@ -35,7 +35,8 @@ fnox exec -- aws sts get-caller-identity     # shows the assumed role; leaks no 
 `sts:AssumeRole` on the role. Assuming a role from an SSO session is role chaining, which
 AWS limits to 1 hour, so keep `duration` at `"1h"` or less for that setup. The session
 name appears in CloudTrail as `fnox-exec-<lease>`. If leases are not reused between runs,
-check `fnox lease list` and that `default_provider` can encrypt (age).
+check `fnox lease list` and that the project's `default_provider` can encrypt (a project
+age provider); the user's global config has none.
 
 Without a `profile`, fnox uses the SDK's default chain (env keys, `AWS_PROFILE`,
 `~/.aws/config`). Under `fnox exec`, missing bootstrap credentials only skip the lease
