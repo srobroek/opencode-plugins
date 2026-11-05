@@ -432,7 +432,7 @@
     },
     "plugins/project": {
       "name": "@srobroek/opencode-project",
-      "version": "0.3.2",
+      "version": "0.3.3",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
       },
@@ -471,7 +471,7 @@
     },
     "plugins/safety": {
       "name": "@srobroek/opencode-safety",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
       },
@@ -523,7 +523,7 @@
     },
     "plugins/subagent-worktree": {
       "name": "@srobroek/opencode-subagent-worktree",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
       },
