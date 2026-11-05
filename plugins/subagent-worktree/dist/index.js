@@ -195,52 +195,6 @@ function signalName(code) {
   return Object.entries(constants.signals).find(([, n]) => n === code)?.[0] ?? String(code);
 }
 
-// plugins/subagent-worktree/src/git.ts
-var GIT_TIMEOUT_MS = 60000;
-var spawnRunner = async (argv) => {
-  try {
-    const child = Bun.spawn(argv, { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
-    const run = await supervise(child, argv[0] === "git" ? { timeoutMs: GIT_TIMEOUT_MS } : {});
-    if (run.kind === "exited")
-      return { code: run.exitCode, stdout: run.stdout, stderr: run.stderr };
-    const why = run.kind === "timeout" ? `timed out after ${GIT_TIMEOUT_MS / 1000}s` : "ended without an exit status";
-    return { code: 124, stdout: run.stdout, stderr: `${run.stderr}
-${argv[0]} ${why}`.trim() };
-  } catch (error) {
-    return { code: 127, stdout: "", stderr: error instanceof Error ? error.message : String(error) };
-  }
-};
-function createGit(run) {
-  const git = async (directory, ...args) => {
-    const result = await run(["git", "-C", directory, ...args]);
-    return result.code === 0 ? result.stdout.trim() : undefined;
-  };
-  const files = (output) => output?.split("\x00").filter((file) => file !== "");
-  return {
-    run,
-    isWorkTree: async (directory) => await git(directory, "rev-parse", "--is-inside-work-tree") === "true",
-    commit: (directory, ref) => git(directory, "rev-parse", "--verify", "--quiet", `${ref}^{commit}`),
-    branch: (directory) => git(directory, "symbolic-ref", "--quiet", "--short", "HEAD"),
-    isLocalBranch: async (directory, name) => await git(directory, "show-ref", "--verify", "--quiet", `refs/heads/${name}`) !== undefined,
-    createBranch: async (directory, name) => await git(directory, "switch", "--quiet", "-c", name) !== undefined,
-    deleteBranch: async (directory, name) => await git(directory, "branch", "--quiet", "-d", name) !== undefined,
-    status: async (directory, base) => {
-      const ahead = await git(directory, "rev-list", "--count", `${base}..HEAD`);
-      const porcelain = await git(directory, "status", "--porcelain");
-      if (ahead === undefined || porcelain === undefined)
-        return;
-      return { ahead: Number.parseInt(ahead, 10) || 0, dirty: porcelain !== "" };
-    },
-    changedFiles: async (directory, target) => files(await git(directory, "diff", "--name-only", "-z", `${target}...HEAD`)),
-    localFiles: async (directory) => {
-      const changed = files(await git(directory, "diff", "--name-only", "-z", "HEAD"));
-      const untracked = files(await git(directory, "ls-files", "--others", "--exclude-standard", "--full-name", "-z"));
-      return changed && untracked ? [...changed, ...untracked] : undefined;
-    },
-    worktrees: (directory) => git(directory, "worktree", "list", "--porcelain")
-  };
-}
-
 // plugins/subagent-worktree/src/lane.ts
 var SUBAGENT_TOOL = "subagent";
 var MERGE_TOOL = "subagent_worktree_merge";
@@ -355,6 +309,10 @@ function planStart(facts) {
     return { kind: "default" };
   return { kind: "move", worktree: lookup.worktree };
 }
+function isUnbornHead(facts) {
+  return facts.head === undefined && Boolean(facts.symbolic) && facts.refs === "";
+}
+var UNBORN_NOTE = "subagent-worktree: this repository has no commits yet, so the subagent ran in place without a worktree. Commit once to enable isolation.";
 var CONTINUE_WITH_WORKTREE = "worktree applies only to new subagents; omit it when passing sessionID";
 function decideIsolation(facts) {
   if (facts.tool !== SUBAGENT_TOOL)
@@ -574,6 +532,63 @@ function tail(text, lines = 40) {
 `);
 }
 
+// plugins/subagent-worktree/src/git.ts
+var GIT_TIMEOUT_MS = 60000;
+var spawnRunner = async (argv) => {
+  try {
+    const child = Bun.spawn(argv, { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+    const run = await supervise(child, argv[0] === "git" ? { timeoutMs: GIT_TIMEOUT_MS } : {});
+    if (run.kind === "exited")
+      return { code: run.exitCode, stdout: run.stdout, stderr: run.stderr };
+    const why = run.kind === "timeout" ? `timed out after ${GIT_TIMEOUT_MS / 1000}s` : "ended without an exit status";
+    return { code: 124, stdout: run.stdout, stderr: `${run.stderr}
+${argv[0]} ${why}`.trim() };
+  } catch (error) {
+    return { code: 127, stdout: "", stderr: error instanceof Error ? error.message : String(error) };
+  }
+};
+async function readHeadFacts(run, directory) {
+  const out = async (...args) => {
+    const result = await run(["git", "-C", directory, ...args]);
+    return result.code === 0 ? result.stdout.trim() : undefined;
+  };
+  const head = await out("rev-parse", "--verify", "--quiet", "HEAD^{commit}");
+  if (head !== undefined)
+    return { head, symbolic: undefined, refs: undefined };
+  return { head, symbolic: await out("symbolic-ref", "--quiet", "HEAD"), refs: await out("for-each-ref", "--count=1") };
+}
+function createGit(run) {
+  const git = async (directory, ...args) => {
+    const result = await run(["git", "-C", directory, ...args]);
+    return result.code === 0 ? result.stdout.trim() : undefined;
+  };
+  const files = (output) => output?.split("\x00").filter((file) => file !== "");
+  return {
+    run,
+    isWorkTree: async (directory) => await git(directory, "rev-parse", "--is-inside-work-tree") === "true",
+    commit: (directory, ref) => git(directory, "rev-parse", "--verify", "--quiet", `${ref}^{commit}`),
+    isUnborn: async (directory) => isUnbornHead(await readHeadFacts(run, directory)),
+    branch: (directory) => git(directory, "symbolic-ref", "--quiet", "--short", "HEAD"),
+    isLocalBranch: async (directory, name) => await git(directory, "show-ref", "--verify", "--quiet", `refs/heads/${name}`) !== undefined,
+    createBranch: async (directory, name) => await git(directory, "switch", "--quiet", "-c", name) !== undefined,
+    deleteBranch: async (directory, name) => await git(directory, "branch", "--quiet", "-d", name) !== undefined,
+    status: async (directory, base) => {
+      const ahead = await git(directory, "rev-list", "--count", `${base}..HEAD`);
+      const porcelain = await git(directory, "status", "--porcelain");
+      if (ahead === undefined || porcelain === undefined)
+        return;
+      return { ahead: Number.parseInt(ahead, 10) || 0, dirty: porcelain !== "" };
+    },
+    changedFiles: async (directory, target) => files(await git(directory, "diff", "--name-only", "-z", `${target}...HEAD`)),
+    localFiles: async (directory) => {
+      const changed = files(await git(directory, "diff", "--name-only", "-z", "HEAD"));
+      const untracked = files(await git(directory, "ls-files", "--others", "--exclude-standard", "--full-name", "-z"));
+      return changed && untracked ? [...changed, ...untracked] : undefined;
+    },
+    worktrees: (directory) => git(directory, "worktree", "list", "--porcelain")
+  };
+}
+
 // plugins/subagent-worktree/src/index.ts
 var MERGE_DESCRIPTION = `Merge a subagent's worktree branch back, report one lane, or list every active lane.
 ` + "The subagent tool result names the lane (branch, base, sessionID). " + 'method "wt-merge" runs `wt merge <target> --no-squash --no-ff --yes` from the subagent worktree, keeping its commits, ' + "and removes the worktree on success; a conflict keeps the worktree and reports the output. " + "The worktree must be committed and clean, and the target checkout must have no uncommitted or untracked changes to files the lane changes. " + 'method "none" only reports the lane status. method "list" (no sessionID) reports every active lane in the project ' + "with commits ahead, uncommitted changes, and orphaned lanes; missing worktrees move their child sessions back.";
@@ -678,6 +693,7 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
     const current = entries && containingWorktree(await normalize(parentDir), entries)?.directory;
     return { lookup: findWorktree(requested, path, entries), current };
   };
+  const notes = new Map;
   const before = async (event) => {
     if (event.tool !== SUBAGENT_TOOL)
       return;
@@ -730,6 +746,10 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
           await ctx.session.remove({ sessionID: child }).catch(() => {});
         throw new Error(`subagent-worktree: ${errorMessage(error)}`);
       }
+      return;
+    }
+    if (await git2.isUnborn(plan.from)) {
+      notes.set(event.id, UNBORN_NOTE);
       return;
     }
     const worktree = await provision(parent, input.description || input.agent, plan.from, input.worktree !== undefined);
@@ -801,6 +821,23 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
   const after = async (event) => {
     if (event.tool !== SUBAGENT_TOOL)
       return;
+    const skipped = event.id === undefined ? undefined : notes.get(event.id);
+    if (event.id !== undefined)
+      notes.delete(event.id);
+    if (skipped) {
+      if (event.status === "completed")
+        event.result = { ...event.result, content: appendContent(event.result.content, skipped) };
+      else {
+        const previous = event.error;
+        event.error = new ToolError({
+          message: `${previous.message}
+
+${skipped}`,
+          ...previous.error === undefined ? {} : { error: previous.error },
+          ...previous.metadata === undefined ? {} : { metadata: previous.metadata }
+        });
+      }
+    }
     const metadata = event.status === "completed" ? event.result.metadata ?? {} : event.error.metadata ?? {};
     const child = typeof metadata.sessionID === "string" ? metadata.sessionID : readSubagentInput(event.input)?.sessionID;
     if (!child)
@@ -1027,6 +1064,7 @@ export {
   SESSION_LOOKUP_MS,
   SUBAGENT_PREAMBLE,
   SUBAGENT_TOOL,
+  UNBORN_NOTE,
   WORKTREE_PARAM,
   WORKTREE_PARAM_DESCRIPTION,
   annotation,
@@ -1041,6 +1079,7 @@ export {
   findWorktree,
   formatLaneList,
   isConflict,
+  isUnbornHead,
   isUncommittedOnly,
   laneKey,
   liveness,

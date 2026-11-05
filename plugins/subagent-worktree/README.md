@@ -54,7 +54,9 @@ rule matching `edit` on `*` denies it), the caller is itself a child session, or
 directory is not a git work tree. It also skips automatic isolation for `worktree: false` or a
 single explicit working-directory directive pointing outside the caller's checkout (including
 `~/` paths). Incidental file paths and ambiguous multi-repository briefs do not disable isolation;
-an explicit worktree path or branch takes precedence. Otherwise it:
+an explicit worktree path or branch takes precedence. A repository with no commit yet (fresh `git init`) has no HEAD to branch from, so the subagent runs
+in place and the result carries a short note; other failures to resolve the base still fail the call.
+Otherwise it:
 
 1. asserts the `subagent` permission for the agent;
 2. creates a worktree with `ctx.worktree.create` named `subagent-<description>-<random>`, starting
