@@ -1,5 +1,6 @@
 import { isAbsolute, resolve } from "node:path"
 import { Plugin } from "@opencode/plugin"
+import { Error as ToolError } from "@opencode/plugin/promise/tool"
 import { appendResultText, isShellTool, leadingCdCwd, shellCall, WRITE_TOOLS } from "@srobroek/opencode-lib"
 import { rewriteCloseKeywords } from "./close-keywords.ts"
 import { externalDirectories, sessionRoots, shellFlagDirectories } from "./flag-directories.ts"
@@ -7,6 +8,7 @@ import { GUARD_IDS, type GuardID, hardGate } from "./guards.ts"
 import { decideToolCall, type MigrationOptions, migrationOverride } from "./migrations.ts"
 import { createPackageAdvisor } from "./package-investigate.ts"
 import { type Decision, type DecisionID, type ReviewOptions, reviewPermission } from "./permission.ts"
+import { createRedactor, type RedactOptions, readRedactOptions } from "./redact.ts"
 
 export { normalize as normalizeCloseKeywords, rewriteCloseKeywords } from "./close-keywords.ts"
 export { externalDirectories, flagDirectories, shellFlagDirectories } from "./flag-directories.ts"
@@ -14,6 +16,15 @@ export { hardGate, MESSAGES } from "./guards.ts"
 export { decidePath as decideMigrationPath, latestMigration, migrationTarget } from "./migrations.ts"
 export { INVESTIGATE_NOTICE, packagesToInvestigate } from "./package-investigate.ts"
 export { reviewPermission } from "./permission.ts"
+export {
+  collectSecrets,
+  createRedactor,
+  looksSecret,
+  orderSecrets,
+  readRedactOptions,
+  redactText,
+  redactValue,
+} from "./redact.ts"
 
 export type FeatureID =
   | GuardID
@@ -34,13 +45,16 @@ export const FEATURE_IDS: readonly FeatureID[] = [
   "external-directory",
 ]
 
-export type SafetyOptions = { disabled: ReadonlySet<FeatureID> }
+export type SafetyOptions = { disabled: ReadonlySet<FeatureID>; redact: RedactOptions }
 
-/** `{ disable: ["git-defender", …] }` turns features off; unknown ids are ignored. */
+/**
+ * `{ disable: ["git-defender", …] }` turns features off; unknown ids are ignored.
+ * `redactSecrets`, `redactNames` and `redactExclude` configure secret redaction.
+ */
 export function readOptions(options: Readonly<Record<string, unknown>> | undefined): SafetyOptions {
   const raw = options?.disable
   const list = Array.isArray(raw) ? raw.filter((id): id is FeatureID => FEATURE_IDS.includes(id as FeatureID)) : []
-  return { disabled: new Set(list) }
+  return { disabled: new Set(list), redact: readRedactOptions(options) }
 }
 
 /** The directory a shell call runs in: its `workdir`, resolved against the session's directory. */
@@ -103,7 +117,7 @@ export function createPlugin(overrides: Overrides = {}) {
   return Plugin.define({
     id: "srobroek.safety",
     async setup(ctx) {
-      const { disabled } = readOptions(ctx.options)
+      const { disabled, redact } = readOptions(ctx.options)
       const on = (id: FeatureID) => !disabled.has(id)
       const guardOptions = { disabled: disabled as ReadonlySet<GuardID> }
       const reviewOptions: ReviewOptions = { ...overrides.review, disabled: disabled as ReadonlySet<DecisionID> }
@@ -191,7 +205,32 @@ export function createPlugin(overrides: Overrides = {}) {
         if (notice !== undefined) event.result = appendResultText(event.result, notice)
       })
 
+      // Registered last so it also sees the notices the hooks above append.
+      const redactor = redact.enabled ? createRedactor(() => overrides.env ?? process.env, redact) : undefined
+      const redacting = redactor
+        ? [
+            await ctx.shell.hook("create.before", (event) => redactor.absorb(event.env)),
+            await ctx.tool.hook("execute.after", (event) => {
+              redactor.refresh()
+              if (redactor.secrets().length === 0) return
+              if (event.status === "completed") {
+                event.result = redactor.value(event.result)
+                return
+              }
+              const { message, error, metadata } = event.error
+              const clean = { message: redactor.text(message), error: redactor.value(error), metadata: redactor.value(metadata) }
+              if (clean.message === message && clean.error === error && clean.metadata === metadata) return
+              event.error = new ToolError({
+                message: clean.message,
+                ...(clean.error === undefined ? {} : { error: clean.error }),
+                ...(clean.metadata === undefined ? {} : { metadata: clean.metadata }),
+              })
+            }),
+          ]
+        : []
+
       return async () => {
+        for (const registration of redacting.reverse()) await registration.dispose()
         await after.dispose()
         await gate.dispose()
         await migrations.dispose()

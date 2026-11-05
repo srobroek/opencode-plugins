@@ -2,8 +2,8 @@
 
 Guards for the shell tool in OpenCode V2: hard gates for commands that should never run unreviewed,
 permission checks for commands that destroy work, a gate that keeps shipped migrations append-only,
-an `external_directory` check for directory flags, a PR close-keyword rewrite, and a package-vetting
-advisory. Ported from the omp-plugins `safety` package.
+an `external_directory` check for directory flags, a PR close-keyword rewrite, a package-vetting
+advisory, and redaction of secret environment values from tool output. Ported from the omp-plugins `safety` package.
 
 Every check reads the command with the shared shell parser (`@srobroek/opencode-lib`), not a regex
 over the tool call. A hazard quoted as data (`grep 'rm -rf $X'`, a commit message, a here-document
@@ -125,6 +125,32 @@ rather than passes.
   - lockfile restores such as `bun install` and `npm install`;
   - read-only lookups such as `npm view` and `cargo search`.
 
+## Secret redaction
+
+The OpenCode service inherits the machine's API keys, and every shell call inherits the service
+environment. An env dump (`env`, `printenv`, `export -p`, `set`, `declare -x`, `Get-ChildItem env:`,
+a script printing `os.environ`, `echo $TAVILY_API_KEY`) would put real keys into the transcript. A
+second `tool.hook("execute.after")` redacts them before the result reaches the model.
+
+- **What is secret.** The value of an environment variable of the OpenCode process whose name ends
+  in `_API_KEY`, `_TOKEN`, `_SECRET`, `_PASSWORD`, or contains `_ACCESS_KEY` or `_CREDENTIAL`
+  (case-insensitive), plus the names in `redactNames`. Values shorter than 12 characters are never
+  redacted. Names in `redactExclude` never are.
+- **What happens.** Every occurrence of the value, anywhere in the text, becomes
+  `[REDACTED:NAME]`. A name alone never triggers it. When two variables hold the same value, the
+  first name alphabetically is used.
+- **Where.** The hook covers every tool result that reaches `execute.after`: the text, the
+  structured `output`, the metadata, and the message of a failed call. That includes `read` of a
+  file that holds a key. The OpenCode docs describe `execute.after` for tools in general and do not
+  say whether MCP tool calls pass through it; this plugin could not verify that.
+- **When.** The secrets are snapshotted at setup, re-read from the environment on every result
+  (a few hundred names), and extended with the environment of each shell call (`shell.hook("create.before")`). The set only grows: a variable unset later stays redacted.
+- **Limits.** It matches literal values. A base64, URL-encoded, split, reversed or otherwise
+  transformed copy passes through, and so does a secret whose name does not look secret and is not
+  in `redactNames`. It does not stop a command from using or sending a key. It is not an isolation
+  boundary; keep keys out of the service environment where you can. There is no deny list for
+  env-dump commands, because redaction is the protection and a command list would be easy to evade.
+
 ## Commit-msg hook
 
 The `attribution` gate only sees commits the agent makes. `hooks/commit-msg` applies the same
@@ -201,8 +227,12 @@ installer.
 | --- | --- | --- |
 | `disable` | `[]` | Feature ids to turn off: `indirection`, `remote-exec`, `attribution`, `worktree-tmp`, `git-defender`, `force-push`, `sudo-destructive`, `worktree-destruction`, `close-keywords`, `package-investigate`, `migration-edit`, `external-directory`. |
 
+| `redactSecrets` | `true` | Set `false` to turn secret redaction off. |
+| `redactNames` | `[]` | Extra variable names whose values are always treated as secret. |
+| `redactExclude` | `[]` | Variable names whose values are never redacted. |
+
 ```jsonc
-{ "plugins": [{ "package": "...", "options": { "disable": ["git-defender"] } }] }
+{ "plugins": [{ "package": "...", "options": { "disable": ["git-defender"], "redactNames": ["DATABASE_URL"] } }] }
 ```
 
 ## Static permission rules (optional)

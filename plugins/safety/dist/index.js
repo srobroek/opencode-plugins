@@ -3,6 +3,7 @@
 // plugins/safety/src/index.ts
 import { isAbsolute as isAbsolute7, resolve as resolve8 } from "path";
 import { Plugin } from "@opencode/plugin";
+import { Error as ToolError } from "@opencode/plugin/promise/tool";
 // plugins/lib/src/shell-tokenizer.ts
 var SEPARATORS = new Set([";", "&", "|", "(", ")", `
 `]);
@@ -3591,6 +3592,88 @@ ${branches.message}`);
 `) };
 }
 
+// plugins/safety/src/redact.ts
+var MIN_SECRET_LENGTH = 12;
+var SECRET_NAME = /(?:^|_)(?:API_KEY|TOKEN|SECRET|PASSWORD|PASSWD)$|(?:^|_)(?:ACCESS_KEY|CREDENTIALS?)(?:_|$)/i;
+var DEFAULT_REDACT = { enabled: true, names: [], exclude: [], minLength: MIN_SECRET_LENGTH };
+var strings = (value) => Array.isArray(value) ? value.filter((item) => typeof item === "string" && item !== "") : [];
+function readRedactOptions(options) {
+  return {
+    ...DEFAULT_REDACT,
+    enabled: options?.redactSecrets !== false,
+    names: strings(options?.redactNames),
+    exclude: strings(options?.redactExclude)
+  };
+}
+function looksSecret(name) {
+  return SECRET_NAME.test(name);
+}
+function collectSecrets(env, options = DEFAULT_REDACT) {
+  const listed = new Set(options.names);
+  const excluded = new Set(options.exclude);
+  const found = [];
+  for (const name of Object.keys(env).sort()) {
+    const value = env[name];
+    if (value === undefined || value.length < options.minLength || excluded.has(name))
+      continue;
+    if (listed.has(name) || looksSecret(name))
+      found.push({ name, value });
+  }
+  return found;
+}
+function orderSecrets(secrets) {
+  const byValue = new Map;
+  for (const secret of secrets)
+    if (!byValue.has(secret.value))
+      byValue.set(secret.value, secret);
+  return [...byValue.values()].sort((a, b) => b.value.length - a.value.length);
+}
+var marker = (name) => `[REDACTED:${name}]`;
+function redactText(text, secrets) {
+  let out = text;
+  for (const secret of secrets)
+    if (out.includes(secret.value))
+      out = out.split(secret.value).join(marker(secret.name));
+  return out;
+}
+var MAX_DEPTH2 = 32;
+function redactValue(value, secrets, depth = 0) {
+  if (secrets.length === 0 || depth > MAX_DEPTH2)
+    return value;
+  if (typeof value === "string")
+    return redactText(value, secrets);
+  if (Array.isArray(value)) {
+    const next = value.map((item) => redactValue(item, secrets, depth + 1));
+    return next.some((item, index) => item !== value[index]) ? next : value;
+  }
+  if (value !== null && typeof value === "object" && Object.getPrototypeOf(value) === Object.prototype) {
+    const entries = Object.entries(value);
+    const next = entries.map(([key, item]) => [key, redactValue(item, secrets, depth + 1)]);
+    return next.some(([, item], index) => item !== entries[index]?.[1]) ? Object.fromEntries(next) : value;
+  }
+  return value;
+}
+function createRedactor(env, options = DEFAULT_REDACT) {
+  const known = new Map;
+  let ordered = [];
+  const add = (secrets) => {
+    const before = known.size;
+    for (const secret of secrets)
+      if (!known.has(secret.value))
+        known.set(secret.value, secret);
+    if (known.size !== before)
+      ordered = orderSecrets([...known.values()]);
+  };
+  add(collectSecrets(env(), options));
+  return {
+    refresh: () => add(collectSecrets(env(), options)),
+    absorb: (extra) => add(collectSecrets(extra, options)),
+    secrets: () => ordered,
+    text: (text) => redactText(text, ordered),
+    value: (value) => redactValue(value, ordered)
+  };
+}
+
 // plugins/safety/src/index.ts
 var FEATURE_IDS = [
   ...GUARD_IDS,
@@ -3605,7 +3688,7 @@ var FEATURE_IDS = [
 function readOptions(options) {
   const raw = options?.disable;
   const list = Array.isArray(raw) ? raw.filter((id) => FEATURE_IDS.includes(id)) : [];
-  return { disabled: new Set(list) };
+  return { disabled: new Set(list), redact: readRedactOptions(options) };
 }
 function shellCwd(workdir, sessionDirectory) {
   if (workdir === undefined)
@@ -3647,7 +3730,7 @@ function createPlugin(overrides = {}) {
   return Plugin.define({
     id: "srobroek.safety",
     async setup(ctx) {
-      const { disabled } = readOptions(ctx.options);
+      const { disabled, redact } = readOptions(ctx.options);
       const on = (id) => !disabled.has(id);
       const guardOptions = { disabled };
       const reviewOptions = { ...overrides.review, disabled };
@@ -3728,7 +3811,31 @@ function createPlugin(overrides = {}) {
         if (notice !== undefined)
           event.result = appendResultText(event.result, notice);
       });
+      const redactor = redact.enabled ? createRedactor(() => overrides.env ?? process.env, redact) : undefined;
+      const redacting = redactor ? [
+        await ctx.shell.hook("create.before", (event) => redactor.absorb(event.env)),
+        await ctx.tool.hook("execute.after", (event) => {
+          redactor.refresh();
+          if (redactor.secrets().length === 0)
+            return;
+          if (event.status === "completed") {
+            event.result = redactor.value(event.result);
+            return;
+          }
+          const { message, error, metadata } = event.error;
+          const clean = { message: redactor.text(message), error: redactor.value(error), metadata: redactor.value(metadata) };
+          if (clean.message === message && clean.error === error && clean.metadata === metadata)
+            return;
+          event.error = new ToolError({
+            message: clean.message,
+            ...clean.error === undefined ? {} : { error: clean.error },
+            ...clean.metadata === undefined ? {} : { metadata: clean.metadata }
+          });
+        })
+      ] : [];
       return async () => {
+        for (const registration of redacting.reverse())
+          await registration.dispose();
         await after.dispose();
         await gate.dispose();
         await migrations.dispose();
@@ -3744,17 +3851,24 @@ export {
   INVESTIGATE_NOTICE,
   MESSAGES,
   applyDecision,
+  collectSecrets,
   createPlugin,
+  createRedactor,
   decidePath as decideMigrationPath,
   src_default as default,
   externalDirectories,
   flagDirectories,
   hardGate,
   latestMigration,
+  looksSecret,
   migrationTarget,
   normalize as normalizeCloseKeywords,
+  orderSecrets,
   packagesToInvestigate,
   readOptions,
+  readRedactOptions,
+  redactText,
+  redactValue,
   review,
   reviewPermission,
   rewriteCloseKeywords,
