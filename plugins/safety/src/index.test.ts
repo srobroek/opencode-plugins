@@ -2,6 +2,7 @@ import { describe, expect, setDefaultTimeout, test } from "bun:test"
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { Error as ToolError } from "@opencode/plugin/promise/tool"
 import { createFakeContext, type FakeAssert } from "@srobroek/opencode-lib/testing"
 import plugin, { applyDecision, createPlugin, type Evaluation, readOptions, shellCwd } from "./index.ts"
 import { INVESTIGATE_NOTICE } from "./package-investigate.ts"
@@ -51,7 +52,8 @@ async function load(options: Record<string, unknown> = {}, more: Load = {}) {
 describe("setup", () => {
   test("registers its hooks and disposes them", async () => {
     const { fake, cleanup } = await load()
-    expect(fake.hooks("tool")).toEqual(["execute.before", "execute.before", "execute.after"])
+    expect(fake.hooks("tool")).toEqual(["execute.before", "execute.before", "execute.after", "execute.after"])
+    expect(fake.hooks("shell")).toEqual(["create.before"])
     expect(fake.hooks("permission")).toEqual(["evaluate"])
     await cleanup?.()
     expect(fake.active()).toBe(0)
@@ -243,6 +245,86 @@ describe("package advisory", () => {
     expect(String(first.result.content)).toStartWith("installed\n")
     expect(String((await after(fake, "c2", "bun add left-pad")).result.content)).toBe("installed")
     expect(String((await after(fake, "c3", "bun install")).result.content)).toBe("installed")
+  })
+})
+
+describe("secret redaction", () => {
+  const KEY = "tvly-dummy-0123456789abcdef"
+  const run = async (options: Record<string, unknown>, env: NodeJS.ProcessEnv, result: Record<string, unknown>) => {
+    const { fake } = await load(options, { env })
+    return fake.fire.tool("execute.after", {
+      ...call,
+      id: "c1",
+      tool: "shell",
+      input: { command: "env" },
+      status: "completed",
+      result,
+    })
+  }
+
+  test("redacts the service's secret values from a shell result", async () => {
+    const event = await run({}, { TAVILY_API_KEY: KEY, PATH: "/bin" }, {
+      content: `PATH=/bin\nTAVILY_API_KEY=${KEY}`,
+      output: { output: `TAVILY_API_KEY=${KEY}`, exit: 0 },
+    })
+    expect(event.result).toEqual({
+      content: "PATH=/bin\nTAVILY_API_KEY=[REDACTED:TAVILY_API_KEY]",
+      output: { output: "TAVILY_API_KEY=[REDACTED:TAVILY_API_KEY]", exit: 0 },
+    })
+  })
+
+  test("redacts any tool's result, not only the shell's", async () => {
+    const { fake } = await load({}, { env: { TAVILY_API_KEY: KEY } })
+    const event = await fake.fire.tool("execute.after", {
+      ...call,
+      id: "c2",
+      tool: "read",
+      input: { filePath: "/p/.env" },
+      status: "completed",
+      result: { content: [{ type: "text", text: `TAVILY_API_KEY=${KEY}` }] },
+    })
+    expect(event.result.content).toEqual([{ type: "text", text: "TAVILY_API_KEY=[REDACTED:TAVILY_API_KEY]" }])
+  })
+
+  test("redacts an error result", async () => {
+    const { fake } = await load({}, { env: { TAVILY_API_KEY: KEY } })
+    const event = await fake.fire.tool("execute.after", {
+      ...call,
+      id: "c3",
+      tool: "shell",
+      input: { command: "x" },
+      status: "error",
+      error: new ToolError({ message: `failed with ${KEY}` }),
+    })
+    expect(event.error.message).toBe("failed with [REDACTED:TAVILY_API_KEY]")
+  })
+
+  test("learns secrets from the shell call's own environment", async () => {
+    const { fake } = await load()
+    await fake.fire.shell("create.before", { command: "env", cwd: "/p", timeout: 1, shell: "sh", env: { GH_TOKEN: KEY } })
+    const event = await fake.fire.tool("execute.after", {
+      ...call,
+      id: "c4",
+      tool: "shell",
+      input: { command: "env" },
+      status: "completed",
+      result: { content: KEY },
+    })
+    expect(event.result.content).toBe("[REDACTED:GH_TOKEN]")
+  })
+
+  test("honours the extra names and the off switch", async () => {
+    const env = { CUSTOM: "custom-value-123456", TAVILY_API_KEY: KEY }
+    const named = await run({ redactNames: ["CUSTOM"], redactExclude: ["TAVILY_API_KEY"] }, env, { content: `${env.CUSTOM} ${KEY}` })
+    expect(named.result.content).toBe(`[REDACTED:CUSTOM] ${KEY}`)
+    const off = await run({ redactSecrets: false }, env, { content: KEY })
+    expect(off.result.content).toBe(KEY)
+  })
+
+  test("a disabled plugin registers no redaction hooks", async () => {
+    const { fake } = await load({ redactSecrets: false })
+    expect(fake.hooks("tool")).toEqual(["execute.before", "execute.before", "execute.after"])
+    expect(fake.hooks("shell")).toEqual([])
   })
 })
 
