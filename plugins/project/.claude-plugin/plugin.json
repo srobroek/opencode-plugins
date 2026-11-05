@@ -1,6 +1,6 @@
 {
   "name": "project",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Project lifecycle: scaffold a project with /new-project, set up fnox and 1Password secrets, and pick an OSI-approved license.",
   "author": {
     "name": "Sjors Robroek",
