@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/srobroek/opencode-plugins/compare/project--v0.2.1...project--v0.3.0) (2026-11-05)
+
+
+### Features
+
+* **project:** add /new-project with project-scaffold and project-secrets skills ([#105](https://github.com/srobroek/opencode-plugins/issues/105)) ([1c96349](https://github.com/srobroek/opencode-plugins/commit/1c96349220473d0fbc25c8cf2b0ad2c5e052dba4))
+
 ## [0.2.1](https://github.com/srobroek/opencode-plugins/compare/project--v0.2.0...project--v0.2.1) (2026-10-27)
 
 
