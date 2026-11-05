@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { createFakeContext, type FakeContext } from "@srobroek/opencode-lib/testing"
 import type { RunResult } from "./git.ts"
 import { createPlugin } from "./index.ts"
-import { type Lane, laneKey, MERGE_TOOL, SUBAGENT_PREAMBLE } from "./lane.ts"
+import { type Lane, laneKey, MERGE_TOOL, SUBAGENT_PREAMBLE, UNBORN_NOTE } from "./lane.ts"
 
 const BASE = "0123456789abcdef0123456789abcdef01234567"
 const PARENT = "ses_parent"
@@ -12,6 +12,8 @@ const OTHER_HEAD = "fedcba9876543210fedcba9876543210fedcba98"
 
 type Repo = {
   git: boolean
+  /** A repository without a commit: HEAD does not resolve. */
+  unborn?: boolean
   branch: Record<string, string | undefined>
   ahead: number
   dirty: boolean
@@ -34,6 +36,9 @@ function fakeRun(repo: Repo, log: string[][]) {
     const [, , dir = "", ...args] = argv
     const cmd = args.join(" ")
     if (cmd === "rev-parse --is-inside-work-tree") return repo.git ? ok("true\n") : fail
+    if (repo.unborn && cmd.startsWith("rev-parse --verify")) return fail
+    if (repo.unborn && cmd === "symbolic-ref --quiet HEAD") return ok("refs/heads/main\n")
+    if (repo.unborn && cmd === "for-each-ref --count=1") return ok()
     if (cmd.startsWith("rev-parse --verify")) return ok(`${repo.heads[dir] ?? BASE}\n`)
     if (cmd === "symbolic-ref --quiet --short HEAD") {
       const branch = repo.branch[dir]
@@ -226,6 +231,20 @@ describe("execute.before", () => {
     expect(input.prompt.startsWith(SUBAGENT_PREAMBLE)).toBe(true)
     expect(input.prompt).toContain("/wt/subagent-write-hello-abc123")
     expect(input.prompt.endsWith("Write hello.txt")).toBe(true)
+  })
+
+  test("runs in place and notes it when the repository has no commit yet", async () => {
+    const setup = await start({ repo: { unborn: true } })
+    const event = await spawn(setup)
+    expect(setup.worktree.calls).toEqual([])
+    expect(setup.fake.calls.some((call) => call.method === "session.create")).toBe(false)
+    expect((event.input as { sessionID?: string }).sessionID).toBeUndefined()
+    const result = await setup.fake.fire.tool("execute.after", {
+      ...completed("ses_x"),
+      input: { agent: "general", prompt: "x" },
+      result: { content: "<subagent>done</subagent>", metadata: {} },
+    })
+    expect((result as { result: { content: string } }).result.content).toContain(UNBORN_NOTE)
   })
 
   test("gives a detached worktree (git strategy) a branch", async () => {

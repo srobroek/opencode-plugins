@@ -35,6 +35,7 @@ import {
   shouldRemove,
   startPrompt,
   tail,
+  UNBORN_NOTE,
   WORKTREE_PARAM,
   WORKTREE_PARAM_DESCRIPTION,
   withoutWorktree,
@@ -197,6 +198,9 @@ export function createLanes(
     return { lookup: findWorktree(requested, path, entries), current }
   }
 
+  /** Skip notes by tool call id, appended to that call's result by `after`. */
+  const notes = new Map<string, string>()
+
   const before = async (event: {
     tool: string
     sessionID: string
@@ -254,6 +258,10 @@ export function createLanes(
       return
     }
 
+    if (await git.isUnborn(plan.from)) {
+      notes.set(event.id, UNBORN_NOTE)
+      return
+    }
     const worktree = await provision(parent, input.description || input.agent, plan.from, input.worktree !== undefined)
     let child: string | undefined
     try {
@@ -324,12 +332,25 @@ export function createLanes(
   }
 
   const after = async (
-    event: { tool: string; input: unknown } & (
+    event: { tool: string; input: unknown; id?: string } & (
       | { status: "completed"; result: Result }
       | { status: "error"; error: InstanceType<typeof ToolError> }
     ),
   ) => {
     if (event.tool !== SUBAGENT_TOOL) return
+    const skipped = event.id === undefined ? undefined : notes.get(event.id)
+    if (event.id !== undefined) notes.delete(event.id)
+    if (skipped) {
+      if (event.status === "completed") event.result = { ...event.result, content: appendContent(event.result.content, skipped) }
+      else {
+        const previous = event.error
+        event.error = new ToolError({
+          message: `${previous.message}\n\n${skipped}`,
+          ...(previous.error === undefined ? {} : { error: previous.error }),
+          ...(previous.metadata === undefined ? {} : { metadata: previous.metadata }),
+        })
+      }
+    }
     const metadata = event.status === "completed" ? (event.result.metadata ?? {}) : (event.error.metadata ?? {})
     const child =
       typeof metadata.sessionID === "string" ? metadata.sessionID : readSubagentInput(event.input)?.sessionID

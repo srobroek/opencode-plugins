@@ -179,6 +179,28 @@ export function planStart(facts: {
   return { kind: "move", worktree: lookup.worktree }
 }
 
+/** What `git` reported while checking whether HEAD names a commit; undefined means the command failed. */
+export type HeadFacts = {
+  /** `rev-parse --verify HEAD^{commit}` */
+  head: string | undefined
+  /** `symbolic-ref --quiet HEAD`: the branch HEAD points at, even when it has no commit. */
+  symbolic: string | undefined
+  /** `for-each-ref --count=1`: empty output means the repository has no refs at all. */
+  refs: string | undefined
+}
+
+/**
+ * Whether HEAD is unborn: a repository after `git init` and before its first commit.
+ * Any other failure (not a repository, corrupt refs, a timeout, a detached HEAD that
+ * does not resolve) is not unborn, so the call still fails loudly.
+ */
+export function isUnbornHead(facts: HeadFacts): boolean {
+  return facts.head === undefined && Boolean(facts.symbolic) && facts.refs === ""
+}
+
+export const UNBORN_NOTE =
+  "subagent-worktree: this repository has no commits yet, so the subagent ran in place without a worktree. Commit once to enable isolation."
+
 export const CONTINUE_WITH_WORKTREE = "worktree applies only to new subagents; omit it when passing sessionID"
 
 export type IsolationFacts = {

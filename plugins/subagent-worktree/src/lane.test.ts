@@ -10,6 +10,7 @@ import {
   formatLaneList,
   type IsolationFacts,
   isConflict,
+  isUnbornHead,
   type Lane,
   type LaneReport,
   liveness,
@@ -419,4 +420,16 @@ describe("parseLane", () => {
 
 test("tail strips ANSI and keeps the last lines", () => {
   expect(tail("\x1b[31ma\x1b[0m\nb\nc", 2)).toBe("b\nc")
+})
+
+describe("isUnbornHead", () => {
+  test.each([
+    ["a fresh git init", { head: undefined, symbolic: "refs/heads/main", refs: "" }, true],
+    ["a resolving HEAD", { head: "abc", symbolic: undefined, refs: undefined }, false],
+    ["a repository with other refs", { head: undefined, symbolic: "refs/heads/main", refs: "abc refs/heads/x" }, false],
+    ["a detached HEAD that does not resolve", { head: undefined, symbolic: undefined, refs: "" }, false],
+    ["a failed refs listing", { head: undefined, symbolic: "refs/heads/main", refs: undefined }, false],
+  ])("%s", (_name, facts, expected) => {
+    expect(isUnbornHead(facts)).toBe(expected)
+  })
 })

@@ -1,6 +1,7 @@
 /** The git and wt commands the plugin runs, behind a replaceable runner. */
 
 import { supervise } from "@srobroek/opencode-lib/subprocess"
+import { type HeadFacts, isUnbornHead } from "./lane.ts"
 
 export type RunResult = { code: number; stdout: string; stderr: string }
 export type Runner = (argv: string[]) => Promise<RunResult>
@@ -23,6 +24,17 @@ export const spawnRunner: Runner = async (argv) => {
   }
 }
 
+/** The raw git facts `isUnbornHead` decides on, from one directory. */
+async function readHeadFacts(run: Runner, directory: string): Promise<HeadFacts> {
+  const out = async (...args: string[]) => {
+    const result = await run(["git", "-C", directory, ...args])
+    return result.code === 0 ? result.stdout.trim() : undefined
+  }
+  const head = await out("rev-parse", "--verify", "--quiet", "HEAD^{commit}")
+  if (head !== undefined) return { head, symbolic: undefined, refs: undefined }
+  return { head, symbolic: await out("symbolic-ref", "--quiet", "HEAD"), refs: await out("for-each-ref", "--count=1") }
+}
+
 export function createGit(run: Runner) {
   const git = async (directory: string, ...args: string[]) => {
     const result = await run(["git", "-C", directory, ...args])
@@ -33,6 +45,8 @@ export function createGit(run: Runner) {
     run,
     isWorkTree: async (directory: string) => (await git(directory, "rev-parse", "--is-inside-work-tree")) === "true",
     commit: (directory: string, ref: string) => git(directory, "rev-parse", "--verify", "--quiet", `${ref}^{commit}`),
+    /** True in a repository that has no commit yet; false for any other reason HEAD may not resolve. */
+    isUnborn: async (directory: string) => isUnbornHead(await readHeadFacts(run, directory)),
     /** The checked-out branch, or undefined on a detached HEAD. */
     branch: (directory: string) => git(directory, "symbolic-ref", "--quiet", "--short", "HEAD"),
     isLocalBranch: async (directory: string, name: string) =>
