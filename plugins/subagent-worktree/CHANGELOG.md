@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/srobroek/opencode-plugins/compare/subagent-worktree--v0.2.1...subagent-worktree--v0.2.2) (2026-11-05)
+
+
+### Bug Fixes
+
+* **subagent-worktree:** run in place when the repository has no commit yet ([#111](https://github.com/srobroek/opencode-plugins/issues/111)) ([d0ec69f](https://github.com/srobroek/opencode-plugins/commit/d0ec69f3f6f7cba13a5c833a5bf05f7d18ba90be))
+
 ## [0.2.1](https://github.com/srobroek/opencode-plugins/compare/subagent-worktree--v0.2.0...subagent-worktree--v0.2.1) (2026-10-30)
 
 

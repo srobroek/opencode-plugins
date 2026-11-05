@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/srobroek/opencode-plugins/compare/safety--v0.3.0...safety--v0.4.0) (2026-11-05)
+
+
+### Features
+
+* **safety:** redact secret environment values from tool output ([#113](https://github.com/srobroek/opencode-plugins/issues/113)) ([5ca701a](https://github.com/srobroek/opencode-plugins/commit/5ca701adb139a7a93b7134406467dd703fd84dec))
+
 ## [0.3.0](https://github.com/srobroek/opencode-plugins/compare/safety--v0.2.0...safety--v0.3.0) (2026-10-27)
 
 
