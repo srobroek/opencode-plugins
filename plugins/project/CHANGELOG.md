@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.3](https://github.com/srobroek/opencode-plugins/compare/project--v0.3.2...project--v0.3.3) (2026-11-05)
+
+
+### Bug Fixes
+
+* **project:** document fixer hooks in the scaffold just check convention ([#112](https://github.com/srobroek/opencode-plugins/issues/112)) ([a417bdc](https://github.com/srobroek/opencode-plugins/commit/a417bdcce2fae1fd66503bbea17f2be73bfe72a3))
+
 ## [0.3.2](https://github.com/srobroek/opencode-plugins/compare/project--v0.3.1...project--v0.3.2) (2026-11-05)
 
 
