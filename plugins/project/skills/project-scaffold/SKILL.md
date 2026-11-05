@@ -56,7 +56,8 @@ in the final report instead of inventing a value.
    tools; the language's own file pins the rest (`rust-toolchain.toml`, `go.mod`,
    `requires-python`, `package.json` `packageManager`).
 3. Add a `justfile` with the quality gate as one `just check` recipe (the commands
-   from the language reference) and `just fmt` / `just test`. Task runner choice is
+   from the language reference) and `just fmt` / `just test`. `check` runs no formatter in
+   write mode; the hygiene hooks may rewrite files, so rerun it (`references/justfile.md`). Task runner choice is
    `toolchain-stack-defaults`; a larger monorepo may want `moon` (ask).
 4. Run the language setup from `references/<lang>.md`: `rust.md`, `python.md`,
    `go.md`, `typescript.md`. Several languages or packages: `references/monorepo.md`.
@@ -124,7 +125,8 @@ workflow, show the shortlist with one line each, install only what the user acce
 ## 7. First commit and verify
 
 1. Run the full gate (`just check`, or the language commands) and fix it until green.
-   A tool that cannot run is "not run", never a pass.
+   A tool that cannot run is "not run", never a pass. The hygiene fixer hooks may rewrite
+   files and fail the first run; review the diff and rerun until it passes.
 2. Start OpenCode checks: the project config parses (`opencode.jsonc` valid JSONC),
    new skills show up, the added plugins load (`opencode plugin list`).
 3. `git add` specific files, review `git status`, then commit once:

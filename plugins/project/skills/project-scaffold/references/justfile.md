@@ -13,7 +13,7 @@ features (macOS ships bash 3.2: no `mapfile`).
 | --- | --- |
 | `setup` | fresh clone: `mise trust --yes`, `mise install --yes`, per-language install tasks, hook install (`prek install --git-dir "$(git rev-parse --absolute-git-dir)"`), capability installs |
 | `setup-worktree` | the shorter list for a linked worktree after copied caches: trust, per-language install (cheap refresh), hook install (a worktree's git dir differs, so shims must be installed per worktree), capability installs |
-| `check` | checks only, never rewrites: hooks on all files, then each language gate and each capability gate present |
+| `check` | no formatter or lint fixer in write mode; the baseline hygiene hooks may rewrite (see Fixer hooks): hooks on all files, then each language gate and each capability gate present |
 | `each <phase>` | one phase (`fmt`, `lint`, `test`, `types`, `cov`) across every language |
 | `fmt` | the writers |
 | `dev` / `run` | only if the project serves or runs something |
@@ -21,6 +21,18 @@ features (macOS ships bash 3.2: no `mapfile`).
 When mise scopes matter, `mise install` with a global config installs the developer's whole
 collection; install the project's tools only (point `MISE_GLOBAL_CONFIG_FILE` at an empty
 file for that one command).
+
+## Fixer hooks in `check`
+
+`check` runs the prek hooks on all files, and the baseline hygiene hooks (trailing-whitespace,
+end-of-file-fixer, mixed-line-ending) fix files as well as report them. On a local run they may
+rewrite files and exit non-zero; that is expected, so review the diff and rerun the gate until
+it passes. CI runs the same hooks and fails on any change, so commit what they rewrote. Do not
+claim `check` "only checks" or skip these hooks to keep it read-only.
+
+Formatters and safe lint fixes (`cargo fmt`, `ruff format`, `ruff check --fix`, `gofmt -w`,
+`biome check --write`) stay in `just fmt`. Never let `check` run a formatter in write mode; it
+uses the `fmt-check` form instead.
 
 ## Per-language tasks (names `<lang>-<phase>`)
 
@@ -33,6 +45,6 @@ file for that one command).
 
 Capability gates join `check`: `api` (`api-lint`, `api-breaking`), `i18n`, `a11y`,
 `aws-cdk` (synth). Docs checks: `python-docs` style advisory tasks (`ruff check --select D
---exit-zero`) never fail the gate. A check that rewrites files does not belong in `check`.
+--exit-zero`) never fail the gate. A formatter or safe lint fix does not belong in `check` (see Fixer hooks).
 Dependency bumps are the Renovate or Dependabot job; do not look up latest versions during
 setup beyond picking current stable.

@@ -22,6 +22,11 @@ revision; install shims per worktree (`just setup-worktree`). Hooks run via `jus
 and local agree. Ask before adding the attribution and force-push guards (they are personal
 policy). Run groups: hygiene, security, quality, docs.
 
+Fixer hooks: trailing-whitespace, end-of-file-fixer and mixed-line-ending rewrite files. A local
+`just check` may therefore change files and fail once; rerun the gate. CI runs the same hooks and
+fails on any change. Formatters and safe lint fixes stay in `just fmt`, never in a hook that
+`check` runs in write mode (`references/justfile.md`, Fixer hooks).
+
 ## CI jobs
 
 - Per language: lint and test jobs using the same `just` tasks, each with a timeout
