@@ -7,7 +7,7 @@ description: "Use for secrets, API keys, .env, fnox, 1Password, credentials or C
 
 Per-project secrets with fnox (https://fnox.jdx.dev/) on top of 1Password. A committed
 `fnox.toml` holds references only; values stay in 1Password (or age ciphertext), are
-cached locally in a gitignored file, and reach commands through `fnox exec`. Guidance,
+cached in memory by the fnox daemon, and reach commands through `fnox exec`. Guidance,
 not a script: ask, then do the smallest setup that fits. Verify any command with
 `fnox <cmd> --help` (written against fnox 1.47) before relying on it.
 
@@ -24,20 +24,22 @@ not a script: ask, then do the smallest setup that fits. Verify any command with
 ## Host assumptions
 
 Check, do not assume: `fnox --version`, `fnox provider list`, `fnox config-files`, `op whoami`.
-On the user's 1Password hosts the global `~/.config/fnox/config.toml` declares only the
-age providers `age` and `age-work` (the sync cache; identity `~/.config/fnox/age.txt`)
-and imports shared machine keys (Tavily, Exa, Firecrawl, TinyFish, Context7, Brave).
-It has no 1Password provider on purpose, so shells never call `op`; a project that reads
-1Password declares its own named provider. Every interactive shell runs `fnox activate`.
-Consequences:
+On the user's 1Password hosts the global `~/.config/fnox/config.toml` declares the
+1Password provider `op`, `[daemon] enabled = true` (resolved values stay in memory for
+the session, so repeated `fnox exec` calls do not ask 1Password again) and the shared
+machine keys (Tavily, Exa, Firecrawl, TinyFish, Context7, Brave). Each interactive shell
+loads those machine keys once at start; there is no `fnox activate` hook, so a project's
+`fnox.toml` is never loaded into the shell on `cd`. Consequences:
 
 - Global layer loads under every project. Providers and secrets merge by name and a
-  later definition replaces the whole entry, so never name a project provider `age`,
-  `age-work` or `onepassword-producer`, and never redeclare those shared keys. Top-level
-  `env` and `if_missing` take the closest file's value, so also set them per secret.
+  later definition replaces the whole entry, so never name a project provider `op`,
+  and never redeclare those shared keys. Top-level `env` and `if_missing` take the
+  closest file's value, so also set them per secret.
 - A machine-wide key (every shell on every host) is not a project secret: it is declared
-  in the chezmoi source and published with `fnox-refresh`. Follow `docs/secrets.md` in the
+  in the chezmoi source (`.chezmoidata/fnox.toml`). Follow `docs/secrets.md` in the
   chezmoi repository instead of this skill.
+- After a value changes in 1Password, `fnox daemon clear NAME` drops the cached copy and
+  the next `fnox exec` re-reads it. (`fnox get --refresh` does the same but prints the value.)
 - Anything with `env = true` is in the shell that starts OpenCode, so the agent can read
   it. Give project secrets `env = "exec"` so only `fnox exec` injects them.
 - Headless hosts (pace, work-linux) may have no fnox or 1Password. Say so and stop at
@@ -58,7 +60,7 @@ the project need a different value per environment (profiles)?
 | One user, one machine, one project | Private vault, item `<project> <purpose>`, tag `<project>` |
 | Cross-project key that CI or collaborators need | Shared vault `dev-shared`, provider `shared` |
 | Project with collaborators or its own CI service account | Vault `proj-<name>`, provider `proj` |
-| Local-only generated value (dev DB password) | Predeclare `[secrets.NAME] env = "exec"` in `fnox.local.toml`, then `fnox -c fnox.local.toml set NAME --generate --provider age` (value not shown; `set` has no `env` flag and a new entry defaults to `env = true`) |
+| Local-only generated value (dev DB password) | OS keychain: add `[providers.keychain] type = "keychain"`, `service = "fnox-<project>"` to `fnox.local.toml`, predeclare `[secrets.NAME] env = "exec"` there, then `fnox -c fnox.local.toml set NAME --generate --provider keychain` (value not shown; `set` has no `env` flag and a new entry defaults to `env = true`). macOS and Windows only; on Linux it needs a running Secret Service |
 
 A vault per project is worth it only when access differs: service accounts are scoped to
 vaults fixed at creation and cannot see Private, Personal, Employee or the default Shared
@@ -73,9 +75,9 @@ both kinds exist; each is its own named provider. Ask before creating any vault.
 2. Create the empty item without the value (`op item create --category "API Credential"
    --vault <v> --title "<title>" --tags <project>`), then tell the user which item and
    field `credential` to fill in 1Password. Alternatively the user runs
-   `fnox set NAME --provider <age-provider>` themselves for age-stored values.
-3. After the user says it is filled: `fnox check` (resolves without printing), then
-   `fnox sync -p age --local-file --force` to refresh the offline cache.
+   `fnox set NAME --provider <keychain-or-age-provider>` themselves for locally stored values.
+3. After the user says it is filled: `fnox check` (resolves without printing). The daemon
+   caches it in memory; add a local sync cache only for offline use (`references/fnox-config.md`).
 4. Use: `fnox exec -- <cmd>`, `--only NAME` to resolve a subset, or a mise task
    (`run = "fnox exec -- bun test"`). Shell expansion happens first, so use
    `fnox exec -- sh -c '... "$NAME" ...'` when the command line needs the value.
@@ -93,4 +95,4 @@ both kinds exist; each is its own named provider. Ask before creating any vault.
 Further reading: fnox ships its own agent skill at https://github.com/jdx/fnox/tree/main/skills/fnox.
 Final checks: nothing sensitive in `git status`, `fnox check` passes, CI uses
 `--non-interactive --if-missing error`, and the user knows how to rotate (change in
-1Password, then re-sync, and `fnox push` where used).
+1Password, `fnox daemon clear NAME`, re-sync if a local cache exists, `fnox push` where used).

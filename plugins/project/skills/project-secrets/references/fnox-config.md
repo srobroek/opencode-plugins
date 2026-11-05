@@ -18,7 +18,7 @@ file defines each secret.
 ## Committed `fnox.toml`
 
 ```toml
-# Providers: distinct names. Never `age`, `age-work` or `onepassword-producer` (the global config owns those).
+# Providers: distinct names. Never `op` (the global config owns it).
 [providers.proj]               # per-project vault
 type = "1password"
 vault = "proj-myapp"           # omit the whole provider if the project uses only `shared`
@@ -33,8 +33,9 @@ vault = "dev-shared"
 # which ignores the provider's vault. API Credential items keep the value in `credential`.
 STRIPE_KEY   = { provider = "proj",   value = "myapp stripe/credential", env = "exec", if_missing = "error" }
 SENTRY_TOKEN = { provider = "shared", value = "sentry/credential",       env = "exec", if_missing = "warn" }
-# Optional secret: only reference items that exist. A secret that resolves to nothing is
-# retried on every prompt by the shell hook.
+# Optional secret: only reference items that exist. The user's shells do not load project
+# secrets, but anyone who runs `fnox activate` retries a secret that resolves to nothing at
+# every prompt.
 LOG_LEVEL    = { default = "info", env = true }   # not secret: fine in the shell
 ```
 
@@ -53,24 +54,37 @@ profile replaces the whole entry. Pick one: `fnox -P production exec -- ...`. A 
 secret in `fnox.local.toml` overrides it in every profile, so put cached production
 entries under `[profiles.production.secrets]`.
 
-## Local sync cache
+## Local sync cache (offline only)
+
+The global daemon already keeps resolved values in memory, so most projects need no
+cache file. Add one only when reads must work offline or survive a reboot without
+1Password. The global config has no age provider, so the project declares its own in
+`fnox.local.toml`, encrypted to a key the user creates deliberately:
+
+```toml
+# fnox.local.toml (gitignored)
+[providers.local-age]
+type = "age"
+recipients = ["age1..."]          # age-keygen -y <key file>
+key_file = "~/.config/fnox/age.txt"
+```
 
 ```sh
-fnox sync -p age --local-file            # provider `age` from the global config
-fnox sync -p age --local-file --force    # refresh after a vault change (never automatic)
-fnox sync -p age --local-file --dry-run  # preview; KEYS or --filter <regex> narrow it
+age-keygen -o ~/.config/fnox/age.txt     # once per machine, by the user (mode 600)
+fnox sync -p local-age --local-file            # writes the cache
+fnox sync -p local-age --local-file --force    # refresh after a vault change (never automatic)
+fnox sync -p local-age --local-file --dry-run  # preview; KEYS or --filter <regex> narrow it
 ```
 
 Writes `fnox.local.toml` with, per secret, a `[secrets.NAME.sync]` table (`provider`,
 `value` ciphertext). Reads then use the cache offline, with no 1Password prompt. Run it
-from the project directory without `-c`. The cache is skipped in CI. If the user's
-global config names the sync provider differently, use that name (`fnox provider list`).
-Only sync items that exist.
+from the project directory without `-c`. The cache is skipped in CI. Only sync items
+that exist.
 
 ## Values stored in git (no vault)
 
 For a CI-only or solo project with no 1Password: an age provider with the CI key and the
-user's public key as recipients (`age-keygen -y ~/.config/fnox/age.txt`), name it
+user's public key as recipients (`age-keygen -y` of the user's key file), name it
 `proj-age`; the user stores each value with `fnox set NAME --provider proj-age` (hidden prompt). Ciphertext in `fnox.toml` is safe to commit. See https://fnox.jdx.dev/providers/age.
 
 ## Using it

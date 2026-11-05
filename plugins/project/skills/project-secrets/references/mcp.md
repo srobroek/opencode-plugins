@@ -19,10 +19,12 @@ secrets = ["STRIPE_KEY", "SENTRY_TOKEN"]   # allowlist; default is every secret 
 - `request_secret` asks the agent's client for a one-time local page where the user types the
   value; the model never sees it. It needs MCP URL-mode elicitation; otherwise fnox tells
   the agent to ask the user to run `fnox set NAME`. fnox refuses plaintext storage: the
-  secret's provider (or `default_provider`) must encrypt (age) or be remote (1password,
-  which is read-only for `fnox set`, so prefer an age provider here).
-- Under shell integration, secrets already loaded into the shell stay readable by the
-  agent regardless of `[mcp]`; keep `env = "exec"`.
+  secret's provider (or `default_provider`) must encrypt (age), be a local store
+  (`keychain`), or be remote (1password, which is read-only for `fnox set`, so prefer a
+  keychain or age provider here).
+- The machine keys the user's shells load at start, and anything the OpenCode service
+  inherited, stay readable by the agent regardless of `[mcp]`; keep project secrets
+  `env = "exec"`.
 
 OpenCode project config (`opencode.jsonc`, V2 `mcp.servers`; start from the project
 directory so `fnox.toml` is found, and sign in to providers first because the server
