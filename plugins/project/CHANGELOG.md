@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.2](https://github.com/srobroek/opencode-plugins/compare/project--v0.3.1...project--v0.3.2) (2026-11-05)
+
+
+### Bug Fixes
+
+* **project:** match project-secrets to live 1Password lookups through the fnox daemon ([#109](https://github.com/srobroek/opencode-plugins/issues/109)) ([759b836](https://github.com/srobroek/opencode-plugins/commit/759b836c50021b67c64aa81a3ae37789382d9783))
+
 ## [0.3.1](https://github.com/srobroek/opencode-plugins/compare/project--v0.3.0...project--v0.3.1) (2026-11-05)
 
 
