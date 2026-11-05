@@ -18,7 +18,7 @@ file defines each secret.
 ## Committed `fnox.toml`
 
 ```toml
-# Providers: distinct names. Never `op` or `age` (the global config owns those).
+# Providers: distinct names. Never `age`, `age-work` or `onepassword-producer` (the global config owns those).
 [providers.proj]               # per-project vault
 type = "1password"
 vault = "proj-myapp"           # omit the whole provider if the project uses only `shared`

@@ -24,15 +24,20 @@ not a script: ask, then do the smallest setup that fits. Verify any command with
 ## Host assumptions
 
 Check, do not assume: `fnox --version`, `fnox provider list`, `fnox config-files`, `op whoami`.
-On the user's 1Password hosts the global `~/.config/fnox/config.toml` already declares
-providers `op` (1password) and `age` (the sync cache; identity `~/.config/fnox/age.txt`)
+On the user's 1Password hosts the global `~/.config/fnox/config.toml` declares only the
+age providers `age` and `age-work` (the sync cache; identity `~/.config/fnox/age.txt`)
 and imports shared machine keys (Tavily, Exa, Firecrawl, TinyFish, Context7, Brave).
-Every interactive shell runs `fnox activate`. Consequences:
+It has no 1Password provider on purpose, so shells never call `op`; a project that reads
+1Password declares its own named provider. Every interactive shell runs `fnox activate`.
+Consequences:
 
 - Global layer loads under every project. Providers and secrets merge by name and a
-  later definition replaces the whole entry, so never name a project provider `op` or
-  `age`, and never redeclare those shared keys. Top-level `env` and `if_missing` take
-  the closest file's value, so also set them per secret.
+  later definition replaces the whole entry, so never name a project provider `age`,
+  `age-work` or `onepassword-producer`, and never redeclare those shared keys. Top-level
+  `env` and `if_missing` take the closest file's value, so also set them per secret.
+- A machine-wide key (every shell on every host) is not a project secret: it is declared
+  in the chezmoi source and published with `fnox-refresh`. Follow `docs/secrets.md` in the
+  chezmoi repository instead of this skill.
 - Anything with `env = true` is in the shell that starts OpenCode, so the agent can read
   it. Give project secrets `env = "exec"` so only `fnox exec` injects them.
 - Headless hosts (pace, work-linux) may have no fnox or 1Password. Say so and stop at
