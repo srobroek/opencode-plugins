@@ -20,7 +20,8 @@ export async function setupAws(ctx: Context, moduleUrl: string) {
       // The first start downloads the uvx environment, which outlasts the default startup timeout.
       extra: {
         "aws-mcp": { timeout: { startup: 120000, execution: 100000 } },
-        "aws-pricing": { timeout: { startup: 120000 } },
+        // Speaks MCP 2026-07-28 and needs no project directory, so one process serves every location.
+        "aws-pricing": { timeout: { startup: 120000 }, cwd: "~", pool: true },
       },
     })
     registrations.push(mcp.registration)
