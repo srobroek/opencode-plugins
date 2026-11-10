@@ -24,7 +24,7 @@
     {
       "name": "ast-grep",
       "source": "./plugins/ast-grep",
-      "description": "Structural code search with ast-grep: the ast-grep MCP server and a skill on patterns, preview-only rewrites and language-server CLI checks.",
+      "description": "Structural code search with the ast-grep CLI, plus when to use Semgrep or rust-analyzer instead.",
       "version": "0.2.0",
       "category": "development"
     },

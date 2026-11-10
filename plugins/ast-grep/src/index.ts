@@ -1,14 +1,11 @@
 import { accessSync, constants, statSync } from "node:fs"
 import { delimiter, join } from "node:path"
-import { fileURLToPath } from "node:url"
 import { Plugin } from "@opencode/plugin"
 import type { Context } from "@opencode/plugin/promise/plugin"
 import { contentPaths } from "@srobroek/opencode-lib/content-plugin"
-import { loadMcpJson, parseMcpOptions, registerMcp } from "@srobroek/opencode-lib/mcp"
 import { registerSkills } from "@srobroek/opencode-lib/skill-files"
 
 export const SOURCE = "srobroek.ast-grep"
-export const SERVER = "ast-grep"
 
 type Env = Record<string, string | undefined>
 
@@ -42,38 +39,29 @@ export function astGrepAvailable(env: Env = process.env, executable = isExecutab
   return onPath("ast-grep", env, executable, platform)
 }
 
-// The first start builds the uvx environment from git (about 18 s cold), past the 30 s default on slow links.
-export const EXTRA = { [SERVER]: { timeout: { startup: 120000 } } }
-
 let warned = false
 
 /** Test seam; the host never passes it. */
 export type Overrides = { env?: Env; available?: () => boolean; warn?: (text: string) => void }
 
+/**
+ * Register the skills. The skills drive the `ast-grep` CLI through the shell; there is no MCP
+ * server (its cold start was ~10 s and `find_code` returned unbounded output). Without the
+ * binary the skills still load and fall back to grep, and one warning says why.
+ */
 export async function setupAstGrep(ctx: Context, moduleUrl: string, overrides: Overrides = {}) {
   const env = overrides.env ?? process.env
   const { skills } = contentPaths(moduleUrl)
-  const registrations: { dispose: () => Promise<void> }[] = []
-  const cleanup = async () => {
-    for (const registration of registrations.reverse()) await registration.dispose()
+  const registration = skills.length > 0 ? await registerSkills(ctx.skill, skills) : undefined
+  const available = overrides.available ?? (() => astGrepAvailable(env))
+  if (!warned && !available()) {
+    warned = true
+    const warn = overrides.warn ?? ((text: string) => console.warn(text))
+    warn(`${SOURCE}: ast-grep is not on PATH, so the ast-grep-search skill falls back to grep; install ast-grep and run /reload`)
   }
-  try {
-    if (skills.length > 0) registrations.push(await registerSkills(ctx.skill, skills))
-    const servers = loadMcpJson(fileURLToPath(new URL("../.mcp.json", moduleUrl)))
-    const options = parseMcpOptions(ctx.options as Record<string, unknown>)
-    const available = overrides.available ?? (() => astGrepAvailable(env))
-    const mcp = await registerMcp(ctx, servers, options, { relevant: available, extra: EXTRA, env })
-    registrations.push(mcp.registration)
-    if (!warned && mcp.plan.skipped.some((skip) => skip.reason === "not relevant here")) {
-      warned = true
-      const warn = overrides.warn ?? ((text: string) => console.warn(text))
-      warn(`${SOURCE}: ast-grep is not on PATH, so the ${SERVER} MCP server is not added; install ast-grep and run /reload`)
-    }
-  } catch (error) {
-    await cleanup()
-    throw error
+  return async () => {
+    await registration?.dispose()
   }
-  return cleanup
 }
 
 /** Test seam: let the one-time warning fire again. */
