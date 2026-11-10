@@ -5,7 +5,7 @@ import plugin, { CONTEXT7_URL, OPENAI_DOCS_URL, setupDocs } from "./index.ts"
 test("adds context7 in every project and disposes it", async () => {
   const fake = createFakeContext()
   const cleanup = await plugin.setup(fake.context)
-  expect(fake.mcp.get("context7")).toMatchObject({ type: "remote", url: CONTEXT7_URL, oauth: false, codemode: true })
+  expect(fake.mcp.get("context7")).toMatchObject({ type: "remote", url: CONTEXT7_URL, oauth: false, pool: true, codemode: true })
   expect(fake.mcp.has("openaiDeveloperDocs")).toBe(false)
   await cleanup?.()
   expect(fake.mcp.size).toBe(0)
