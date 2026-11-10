@@ -37,7 +37,10 @@ test("adds both pinned servers in an AWS project and removes them on cleanup", a
   expect(fake.mcp.get("aws-pricing")).toMatchObject({
     command: ["uvx", "--with", "botocore[crt]", "awslabs.aws-pricing-mcp-server@1.1.1"],
     environment: { AWS_REGION: "us-east-1", FASTMCP_LOG_LEVEL: "ERROR" },
+    cwd: "~",
+    pool: true,
   })
+  expect(fake.mcp.get("aws-mcp")).not.toHaveProperty("pool")
   await cleanup?.()
   expect(fake.mcp.size).toBe(0)
 })
