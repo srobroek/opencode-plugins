@@ -57,6 +57,36 @@ permissions:
   - action: shell
     resource: "git * --output*"
     effect: deny
+  - action: shell
+    resource: "ast-grep run *"
+    effect: allow
+  - action: shell
+    resource: "ast-grep scan *"
+    effect: allow
+  - action: shell
+    resource: "semgrep scan *"
+    effect: allow
+  - action: shell
+    resource: "head *"
+    effect: allow
+  - action: shell
+    resource: "ast-grep * -U*"
+    effect: deny
+  - action: shell
+    resource: "ast-grep *--update-all*"
+    effect: deny
+  - action: shell
+    resource: "ast-grep * -i*"
+    effect: deny
+  - action: shell
+    resource: "ast-grep *--interactive*"
+    effect: deny
+  - action: shell
+    resource: "semgrep *--autofix*"
+    effect: deny
+  - action: shell
+    resource: "semgrep *-a *"
+    effect: deny
   - action: external_directory
     resource: "*"
     effect: ask
