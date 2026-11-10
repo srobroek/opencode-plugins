@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/srobroek/opencode-plugins/compare/agent-reviewer--v0.3.0...agent-reviewer--v0.4.0) (2026-11-10)
+
+
+### Features
+
+* **agent-reviewer:** let code-reviewer run ast-grep and semgrep read-only ([f3baf1a](https://github.com/srobroek/opencode-plugins/commit/f3baf1aab2e972ce9aa929e6dabb34442970e206))
+
 ## [0.3.0](https://github.com/srobroek/opencode-plugins/compare/agent-reviewer--v0.2.0...agent-reviewer--v0.3.0) (2026-10-27)
 
 
