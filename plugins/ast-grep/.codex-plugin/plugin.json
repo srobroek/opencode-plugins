@@ -1,6 +1,6 @@
 {
   "name": "ast-grep",
-  "version": "0.2.0",
+  "version": "1.0.0",
   "description": "Structural code search with the ast-grep CLI, plus when to use Semgrep or rust-analyzer instead.",
   "author": {
     "name": "Sjors Robroek",

@@ -11,7 +11,7 @@
       "name": "agent-reviewer",
       "source": "./plugins/agent-reviewer",
       "description": "A security review skill: trace untrusted input to sinks, tag CWE ids and check cross-boundary dispatch.",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "category": "development"
     },
     {
@@ -25,14 +25,14 @@
       "name": "ast-grep",
       "source": "./plugins/ast-grep",
       "description": "Structural code search with the ast-grep CLI, plus when to use Semgrep or rust-analyzer instead.",
-      "version": "0.2.0",
+      "version": "1.0.0",
       "category": "development"
     },
     {
       "name": "aws",
       "source": "./plugins/aws",
       "description": "AWS working guidance: route AWS tasks through the AWS MCP Server's guided skills, verify against AWS documentation, and price with the AWS Pricing MCP server.",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "category": "development"
     },
     {

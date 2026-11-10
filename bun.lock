@@ -70,7 +70,7 @@
     },
     "plugins/agent-reviewer": {
       "name": "@srobroek/opencode-agent-reviewer",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
       },
@@ -109,7 +109,7 @@
     },
     "plugins/ast-grep": {
       "name": "@srobroek/opencode-ast-grep",
-      "version": "0.2.0",
+      "version": "1.0.0",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
       },
@@ -122,7 +122,7 @@
     },
     "plugins/aws": {
       "name": "@srobroek/opencode-aws",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
       },
@@ -253,7 +253,7 @@
     },
     "plugins/docs": {
       "name": "@srobroek/opencode-docs",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
       },
