@@ -1,6 +1,6 @@
 {
   "name": "@srobroek/opencode-ast-grep",
-  "version": "0.2.0",
+  "version": "1.0.0",
   "description": "Structural code search with the ast-grep CLI: a skill on patterns, Rust macro and Go call gotchas, bounded output, preview-only rewrites, and when to use Semgrep or rust-analyzer instead.",
   "private": true,
   "type": "module",
