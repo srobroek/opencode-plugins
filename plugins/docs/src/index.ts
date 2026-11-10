@@ -21,7 +21,8 @@ export function docsServers(env: Record<string, string | undefined> = process.en
 }
 
 // Both servers answer without sign-in; OpenCode would otherwise try OAuth on a remote server.
-const EXTRA = { context7: { oauth: false }, openaiDeveloperDocs: { oauth: false } }
+// Both speak MCP 2026-07-28, so `pool` shares one connection across locations.
+const EXTRA = { context7: { oauth: false, pool: true }, openaiDeveloperDocs: { oauth: false, pool: true } }
 
 export async function setupDocs(ctx: Context, env: Record<string, string | undefined> = process.env) {
   const options = parseMcpOptions(ctx.options as Record<string, unknown>)
