@@ -26,7 +26,10 @@ many false hits or misses multi-line code.
 - MCP server `ast-grep`: `find_code` (pattern), `find_code_by_rule` (YAML rule),
   `dump_syntax_tree` (debug a pattern) and `test_match_code_rule` (check a rule on a
   snippet). `project_folder` must be an absolute path. In OpenCode Code Mode:
-  `tools["ast-grep"].find_code({ project_folder, pattern, language })`.
+  `tools["ast-grep"].find_code({ project_folder, pattern, language, max_results: 50 })`.
+  Always pass `max_results`: it defaults to unlimited and prints every match in full, so a
+  broad pattern can return megabytes. The header reports the total (`showing first 50 of
+  11219`); narrow the pattern or the folder rather than raising the limit.
 - CLI, when the server is missing: `ast-grep run -p '<pattern>' -l <lang> <path>`, with
   `--json=compact` for machine-readable output, and
   `ast-grep scan --inline-rules '<yaml>' <path>` for a rule.
@@ -60,14 +63,32 @@ Search once per language the project has, and check the file extensions first (`
       stopBy: end
   ```
 
+- A rule with `regex` (or `inside`/`has`) also needs a node `kind` or `pattern`, or it
+  can silently match nothing: `{ kind: generic_type, regex: '^Result' }`, not
+  `{ regex: '^Result' }`.
 - When a pattern finds nothing, run `dump_syntax_tree` with `format: pattern` (CLI:
   `--debug-query=pattern`) to see how it parsed, and `format: cst` on the target code to
   get node kinds.
 
 ## Language gotchas
 
-- Rust: macro arguments are token trees, so `helper($A)` misses `println!("{}", helper(2))`
-  and `vec![helper(3)]`. Grep for calls inside macros.
+- Rust: macro arguments and `macro_rules!` bodies are token trees, so `helper($A)` misses
+  `println!("{}", helper(2))`, `assert!(x.unwrap())` and `vec![helper(3)]` (about 1 in 10
+  `.unwrap()` calls in a large codebase). Add a text arm on the innermost token tree, which
+  keeps the structural matches and still skips comments:
+
+  ```yaml
+  rule:
+    any:
+      - pattern: $X.unwrap()
+      - kind: token_tree
+        regex: '\.unwrap\(\)'
+        not: { has: { kind: token_tree, regex: '\.unwrap\(\)' } }
+  ```
+
+  The token-tree arm is text matching, so it can hit a string inside the macro call.
+- Go: a qualified call alone parses as a type conversion, so `fmt.Println($A)` matches
+  nothing. Wrap it: `pattern: { context: 'func t() { fmt.Println($$$) }', selector: call_expression }`.
 - A fragment that does not parse on its own (a class field, an object key, a Go struct
   field) matches nothing. Wrap it in a rule:
   `pattern: { context: 'class C { $F = $V }', selector: public_field_definition }`.
