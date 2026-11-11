@@ -22,6 +22,8 @@ The guard checks command positions in chains, pipelines, loops and subshells, in
 Quoted data such as `echo "sleep 5"` passes. Shell calls with `background: true` pass.
 Here-document text passed to non-shell commands also passes, unless it contains an executable command substitution.
 Shell scripts supplied through `-c` flags (including `-lc` and `-ec`) or standard-input here-documents are checked.
+The guard also checks `eval` scripts and commands supplied to `xargs`.
+Parameter expansions such as `${sleep}` are data; command substitutions inside them are checked.
 Use a background watcher such as `gh pr checks 12 --watch` instead of foreground polling.
 Set `waitGuard: false` to disable the guard.
 
@@ -31,6 +33,7 @@ Set `waitGuard: false` to disable the guard.
 The root is the real path of `os.tmpdir()` plus `opencode`. With `/tmp` as the temporary directory, it resolves to `/tmp/opencode` on Linux or `/private/tmp/opencode` on macOS.
 Shell destinations include literal `mkdir` paths and `mktemp` templates. Dynamic paths that cannot be resolved statically are skipped.
 Destinations follow literal `cd` commands, subshell scopes and wrapper working directories.
+Creators inside shell scripts, `eval`, `xargs` and loop bodies use the same script discovery as the wait guard.
 When a completed call creates a top-level scratch entry, its tool result asks the subagent to delete that entry before reporting.
 Entries present before the call are never noted. Each session receives at most three notes, with each entry noted once.
 Deleting a session clears its cached directory, pending calls and reminder history.

@@ -479,7 +479,7 @@ function perlPaths(args) {
   }
   return inplace ? files : [];
 }
-function simpleCommandTargets(words) {
+function simpleCommandTargets(words, normalizeWords) {
   const redirects = [];
   const args = [];
   for (let i = 0;i < words.length; i++) {
@@ -510,7 +510,7 @@ function simpleCommandTargets(words) {
     if (target)
       redirects.push({ path: target });
   }
-  const { argv, directories } = commandWords(args);
+  const { argv, directories } = commandWords(normalizeWords?.(args) ?? args);
   const name = basename(argv[0] ?? "");
   const rest = argv.slice(1);
   const writes = [];
@@ -548,7 +548,7 @@ function cdTarget(args, cwd) {
     return null;
   return literalPath(dir, cwd) ?? null;
 }
-function shellWriteTargets(command, cwd, additionalWrites) {
+function shellWriteTargets(command, cwd, additionalWrites, normalizeWords) {
   const out = [];
   let dir = cwd;
   const saved = [];
@@ -572,7 +572,7 @@ function shellWriteTargets(command, cwd, additionalWrites) {
     words = [];
     if (segment.length === 0)
       return;
-    const { argv, directories, redirects, writes } = simpleCommandTargets(segment);
+    const { argv, directories, redirects, writes } = simpleCommandTargets(segment, normalizeWords);
     resolveInto(redirects, dir);
     if (argv[0] === "cd") {
       dir = cdTarget(argv.slice(1), dir);
@@ -938,145 +938,8 @@ import { readdirSync, realpathSync } from "fs";
 import { tmpdir } from "os";
 import { isAbsolute as isAbsolute2, join as join2, relative as relative2, resolve as resolve2, sep } from "path";
 
-// plugins/lib/src/shell-result.ts
-function record(value) {
-  return value !== null && typeof value === "object" ? value : undefined;
-}
-function shellOutput(result) {
-  const output = record(result?.output)?.output;
-  return typeof output === "string" ? output : undefined;
-}
-function appendResultText(result, text) {
-  const content = result.content;
-  if (Array.isArray(content))
-    return { ...result, content: [...content, { type: "text", text }] };
-  const base = typeof content === "string" ? content : shellOutput(result) ?? "";
-  return { ...result, content: base === "" ? text : `${base}${base.endsWith(`
-`) ? "" : `
-`}${text}` };
-}
-
-// plugins/agent-efficiency/src/scratch.ts
-function scratchEntry(target, cwd, root) {
-  const rel = relative2(root, resolve2(cwd, target));
-  if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute2(rel))
-    return;
-  return join2(root, rel.split(sep)[0]);
-}
-function scratchEntries(tool, input, cwd, root) {
-  const call = shellCall(tool, input);
-  const dir = call?.workdir ? resolve2(cwd, call.workdir) : cwd;
-  const targets = call ? shellWriteTargets(call.command, dir, scratchShellWrites) : writeTargets(tool, input);
-  return [...new Set(targets.flatMap((target) => {
-    if (/[$`]/.test(target))
-      return [];
-    const entry = scratchEntry(target, dir, root);
-    return entry ? [entry] : [];
-  }))];
-}
-function scratchShellWrites(argv, cwd) {
-  const targets = [];
-  const name = argv[0]?.split("/").pop();
-  const args = argv.slice(1);
-  if (name === "mkdir") {
-    for (let i = 0;i < args.length; i++) {
-      if (args[i] === "-m" || args[i] === "--mode")
-        i++;
-      else if (!args[i]?.startsWith("-"))
-        targets.push(args[i]);
-    }
-  }
-  if (name === "mktemp") {
-    let base = cwd;
-    let template;
-    let temporaryDirectory = false;
-    for (let i = 0;i < args.length; i++) {
-      const arg = args[i];
-      if (arg === "-p" || arg === "--tmpdir") {
-        const directory = args[++i] ?? "";
-        base = isAbsolute2(directory) ? directory : cwd === null ? null : resolve2(cwd, directory);
-        temporaryDirectory = true;
-      } else if (arg.startsWith("--tmpdir=")) {
-        const directory = arg.slice(9);
-        base = isAbsolute2(directory) ? directory : cwd === null ? null : resolve2(cwd, directory);
-        temporaryDirectory = true;
-      } else if (!arg.startsWith("-"))
-        template = arg;
-    }
-    if (template && isAbsolute2(template))
-      targets.push(template);
-    else if (base !== null && (template || temporaryDirectory))
-      targets.push(resolve2(base, template ?? "tmp.XXXXXXXXXX"));
-  }
-  return targets;
-}
-function entries(root) {
-  try {
-    return readdirSync(root).map((entry) => join2(root, entry));
-  } catch {
-    return [];
-  }
-}
-function newScratchEntries(candidates, before, after, noted) {
-  const matches = (candidate, entry) => {
-    if (candidate === entry)
-      return true;
-    const pattern = candidate.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/X{4,}/g, (xs) => `[A-Za-z0-9]{${xs.length}}`);
-    return new RegExp(`^${pattern}$`).test(entry);
-  };
-  return after.filter((entry) => !before.has(entry) && !noted.has(entry) && candidates.some((candidate) => matches(candidate, entry))).slice(0, Math.max(0, 3 - noted.size));
-}
-async function setupScratch(ctx) {
-  const root = join2(realpathSync(tmpdir()), "opencode");
-  const children = new Map;
-  const pending = new Map;
-  const noted = new Map;
-  const stop = onSessionDeleted(ctx, (sessionID) => {
-    children.delete(sessionID);
-    noted.delete(sessionID);
-    for (const [id, call] of pending)
-      if (call.sessionID === sessionID)
-        pending.delete(id);
-  });
-  const before = await ctx.tool.hook("execute.before", async (event) => {
-    let child = children.get(event.sessionID);
-    if (!child) {
-      child = ctx.session.get({ sessionID: event.sessionID }).then((session) => typeof session.parentID === "string" ? session.location.directory : undefined).catch(() => {
-        return;
-      });
-      children.set(event.sessionID, child);
-    }
-    const cwd = await child;
-    if (cwd === undefined || children.get(event.sessionID) !== child)
-      return;
-    const candidates = scratchEntries(event.tool, event.input, cwd, root);
-    if (candidates.length)
-      pending.set(event.id, { sessionID: event.sessionID, candidates, existed: new Set(entries(root)) });
-  });
-  const after = await ctx.tool.hook("execute.after", (event) => {
-    const saved = pending.get(event.id);
-    pending.delete(event.id);
-    if (!saved || event.status !== "completed")
-      return;
-    const seen = noted.get(saved.sessionID) ?? new Set;
-    noted.set(saved.sessionID, seen);
-    for (const entry of newScratchEntries(saved.candidates, saved.existed, entries(root), seen)) {
-      seen.add(entry);
-      event.result = appendResultText(event.result, `Scratch: you created ${entry}. Delete it before your final report unless your brief says to keep it.`);
-    }
-  });
-  return async () => {
-    await stop();
-    await after.dispose();
-    await before.dispose();
-    children.clear();
-    pending.clear();
-    noted.clear();
-  };
-}
-
 // plugins/lib/src/shell-command.ts
-function scanShell(source) {
+function scanShell(source, options = {}) {
   const items = [];
   const substitutions = [];
   let complete = true;
@@ -1126,8 +989,12 @@ function scanShell(source) {
     items.push({ kind: "operator", operator: value });
   };
   const substitution = (expansion) => {
-    if (expansion.inner !== undefined)
-      substitutions.push(expansion.inner);
+    if (expansion.inner !== undefined) {
+      if (!options.executableSubstitutionsOnly || expansion.executable)
+        substitutions.push(expansion.inner);
+      else
+        substitutions.push(...scanShell(expansion.inner, options).substitutions);
+    }
     if (!expansion.closed)
       complete = false;
   };
@@ -1320,6 +1187,7 @@ function expansionAt(text, at) {
     return {
       end: closed ? j + 1 : text.length,
       inner: text.slice(at + 1, Math.min(j, text.length)),
+      executable: true,
       expands: true,
       closed
     };
@@ -1331,6 +1199,7 @@ function expansionAt(text, at) {
     return {
       end: closed ? close + 1 : text.length,
       inner: text.slice(at + 2, closed ? close : text.length),
+      executable: next === "(" && text[at + 2] !== "(",
       expands: true,
       closed
     };
@@ -1386,19 +1255,240 @@ function bodySubstitutions(body) {
   return found;
 }
 
+// plugins/lib/src/shell-result.ts
+function record(value) {
+  return value !== null && typeof value === "object" ? value : undefined;
+}
+function shellOutput(result) {
+  const output = record(result?.output)?.output;
+  return typeof output === "string" ? output : undefined;
+}
+function appendResultText(result, text) {
+  const content = result.content;
+  if (Array.isArray(content))
+    return { ...result, content: [...content, { type: "text", text }] };
+  const base = typeof content === "string" ? content : shellOutput(result) ?? "";
+  return { ...result, content: base === "" ? text : `${base}${base.endsWith(`
+`) ? "" : `
+`}${text}` };
+}
+
+// plugins/agent-efficiency/src/shell-scripts.ts
+var CONTROL_PREFIXES = new Set(["if", "then", "elif", "else", "while", "until", "do", "!"]);
+function controlWords(argv) {
+  let at = 0;
+  while (CONTROL_PREFIXES.has(argv[at] ?? ""))
+    at++;
+  return argv.slice(at);
+}
+function invocationSource(argv) {
+  return argv.map((word) => /^[A-Za-z0-9_./-]+$/.test(word) ? word : `'${word.replaceAll("'", "'\\''")}'`).join(" ");
+}
+function commandScripts(argv, documents = []) {
+  const name = argv[0]?.split("/").pop();
+  if (name === "eval")
+    return [argv.slice(argv[1] === "--" ? 2 : 1).join(" ")];
+  if (name === "xargs") {
+    let at = 1;
+    while (argv[at]?.startsWith("-")) {
+      const flag = argv[at++];
+      if (flag === "--")
+        break;
+      if (["--arg-file", "--delimiter", "--max-lines", "--max-args", "--max-procs", "--max-chars", "--process-slot-var"].includes(flag))
+        at++;
+      else if (!flag.startsWith("--")) {
+        const valued = [...flag.slice(1)].findIndex((letter) => "adEILnPs".includes(letter));
+        if (valued >= 0 && valued === flag.length - 2)
+          at++;
+      }
+    }
+    return at < argv.length ? [invocationSource(argv.slice(at))] : [];
+  }
+  if (!["sh", "bash", "zsh", "dash", "ksh"].includes(name ?? ""))
+    return [];
+  let stdin = true;
+  let stdinFlag = false;
+  for (let i = 1;i < argv.length; i++) {
+    const arg = argv[i];
+    if (/^-[^-]*c/.test(arg))
+      return [argv[i + 1] ?? ""];
+    if (/^-[^-]*[oO]$/.test(arg) || arg === "--rcfile" || arg === "--init-file") {
+      i++;
+      continue;
+    }
+    if (/^-[^-]*s/.test(arg))
+      stdinFlag = true;
+    if (arg === "--")
+      continue;
+    if (!arg.startsWith("-")) {
+      stdin = stdinFlag;
+      break;
+    }
+  }
+  return stdin ? documents.map((document) => document.body) : [];
+}
+
+// plugins/agent-efficiency/src/scratch.ts
+function scratchEntry(target, cwd, root) {
+  const rel = relative2(root, resolve2(cwd, target));
+  if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute2(rel))
+    return;
+  return join2(root, rel.split(sep)[0]);
+}
+function scratchEntries(tool, input, cwd, root) {
+  const call = shellCall(tool, input);
+  const dir = call?.workdir ? resolve2(cwd, call.workdir) : cwd;
+  const targets = call ? scratchCommandTargets(call.command, dir) : writeTargets(tool, input);
+  return [...new Set(targets.flatMap((target) => {
+    if (/[$`]/.test(target))
+      return [];
+    const entry = scratchEntry(target, dir, root);
+    return entry ? [entry] : [];
+  }))];
+}
+function scratchCommandTargets(command, cwd, depth = 0) {
+  if (depth > 32)
+    return [];
+  const scripts = new Map;
+  const discover = (source, nested) => {
+    if (nested > 32)
+      return;
+    const scan = scanShell(source, { executableSubstitutionsOnly: true });
+    for (const item of scan.items) {
+      if (item.kind !== "command")
+        continue;
+      const { argv } = commandWords(controlWords(item.words.map((word) => word.value)));
+      const key = JSON.stringify(argv);
+      scripts.set(key, [...scripts.get(key) ?? [], ...commandScripts(argv, item.hereDocuments)]);
+    }
+    for (const substitution of scan.substitutions)
+      discover(substitution, nested + 1);
+  };
+  discover(command, depth);
+  return shellWriteTargets(command, cwd, (argv, dir) => {
+    const targets = scratchShellWrites(argv, dir);
+    if (dir !== null) {
+      for (const source of new Set([...commandScripts(argv), ...scripts.get(JSON.stringify(argv)) ?? []])) {
+        targets.push(...scratchCommandTargets(source, dir, depth + 1));
+      }
+    }
+    return targets;
+  }, controlWords);
+}
+function scratchShellWrites(argv, cwd) {
+  const targets = [];
+  const name = argv[0]?.split("/").pop();
+  const args = argv.slice(1);
+  if (name === "mkdir") {
+    for (let i = 0;i < args.length; i++) {
+      if (args[i] === "-m" || args[i] === "--mode")
+        i++;
+      else if (!args[i]?.startsWith("-"))
+        targets.push(args[i]);
+    }
+  }
+  if (name === "mktemp") {
+    let base = cwd;
+    let template;
+    let temporaryDirectory = false;
+    for (let i = 0;i < args.length; i++) {
+      const arg = args[i];
+      if (arg === "-p" || arg === "--tmpdir") {
+        const directory = args[++i] ?? "";
+        base = isAbsolute2(directory) ? directory : cwd === null ? null : resolve2(cwd, directory);
+        temporaryDirectory = true;
+      } else if (arg.startsWith("--tmpdir=")) {
+        const directory = arg.slice(9);
+        base = isAbsolute2(directory) ? directory : cwd === null ? null : resolve2(cwd, directory);
+        temporaryDirectory = true;
+      } else if (!arg.startsWith("-"))
+        template = arg;
+    }
+    if (template && isAbsolute2(template))
+      targets.push(template);
+    else if (base !== null && (template || temporaryDirectory))
+      targets.push(resolve2(base, template ?? "tmp.XXXXXXXXXX"));
+  }
+  return targets;
+}
+function entries(root) {
+  try {
+    return readdirSync(root).map((entry) => join2(root, entry));
+  } catch {
+    return [];
+  }
+}
+function newScratchEntries(candidates, before, after, noted) {
+  const matches = (candidate, entry) => {
+    if (candidate === entry)
+      return true;
+    const pattern = candidate.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/X{4,}/g, (xs) => `[A-Za-z0-9]{${xs.length}}`);
+    return new RegExp(`^${pattern}$`).test(entry);
+  };
+  return after.filter((entry) => !before.has(entry) && !noted.has(entry) && candidates.some((candidate) => matches(candidate, entry))).slice(0, Math.max(0, 3 - noted.size));
+}
+async function setupScratch(ctx) {
+  const root = join2(realpathSync(tmpdir()), "opencode");
+  const children = new Map;
+  const pending = new Map;
+  const noted = new Map;
+  const stop = onSessionDeleted(ctx, (sessionID) => {
+    children.delete(sessionID);
+    noted.delete(sessionID);
+    for (const [id, call] of pending)
+      if (call.sessionID === sessionID)
+        pending.delete(id);
+  });
+  const before = await ctx.tool.hook("execute.before", async (event) => {
+    let child = children.get(event.sessionID);
+    if (!child) {
+      child = ctx.session.get({ sessionID: event.sessionID }).then((session) => typeof session.parentID === "string" ? session.location.directory : undefined).catch(() => {
+        return;
+      });
+      children.set(event.sessionID, child);
+    }
+    const cwd = await child;
+    if (cwd === undefined || children.get(event.sessionID) !== child)
+      return;
+    const candidates = scratchEntries(event.tool, event.input, cwd, root);
+    if (candidates.length)
+      pending.set(event.id, { sessionID: event.sessionID, candidates, existed: new Set(entries(root)) });
+  });
+  const after = await ctx.tool.hook("execute.after", (event) => {
+    const saved = pending.get(event.id);
+    pending.delete(event.id);
+    if (!saved || event.status !== "completed")
+      return;
+    const seen = noted.get(saved.sessionID) ?? new Set;
+    noted.set(saved.sessionID, seen);
+    for (const entry of newScratchEntries(saved.candidates, saved.existed, entries(root), seen)) {
+      seen.add(entry);
+      event.result = appendResultText(event.result, `Scratch: you created ${entry}. Delete it before your final report unless your brief says to keep it.`);
+    }
+  });
+  return async () => {
+    await stop();
+    await after.dispose();
+    await before.dispose();
+    children.clear();
+    pending.clear();
+    noted.clear();
+  };
+}
+
 // plugins/agent-efficiency/src/wait.ts
 var WAIT_REFUSAL = "agent-efficiency wait-guard: foreground `sleep` is refused. Run the wait as a background shell call (`background: true`), for example `gh pr checks 12 --watch`, `gh run watch 123 --exit-status`, or a loop that polls and exits; you are notified when it finishes. To wait for a local server, use `curl --retry 10 --retry-connrefused --retry-delay 1 <url>`.";
 function runsSleep(command, depth = 0) {
   if (depth > 32)
     return false;
-  const scan = scanShell(command);
+  const scan = scanShell(command, { executableSubstitutionsOnly: true });
   if (scan.substitutions.some((source) => runsSleep(source, depth + 1)))
     return true;
   for (const item of scan.items) {
     if (item.kind !== "command")
       continue;
     const words = [...item.words];
-    while (words[0] && !words[0].quoted && ["if", "then", "elif", "else", "while", "until", "do", "!"].includes(words[0].value))
+    while (words[0] && !words[0].quoted && CONTROL_PREFIXES.has(words[0].value))
       words.shift();
     const { argv } = commandWords(words.map((word) => word.value));
     const executable = words[words.length - argv.length];
@@ -1407,32 +1497,7 @@ function runsSleep(command, depth = 0) {
     const name = argv[0]?.split("/").pop();
     if (name === "sleep")
       return true;
-    if (!["sh", "bash", "zsh", "dash", "ksh"].includes(name ?? ""))
-      continue;
-    let stdin = true;
-    let stdinFlag = false;
-    for (let i = 1;i < argv.length; i++) {
-      const arg = argv[i];
-      if (/^-[^-]*c/.test(arg)) {
-        if (runsSleep(argv[i + 1] ?? "", depth + 1))
-          return true;
-        stdin = false;
-        break;
-      }
-      if (/^-[^-]*[oO]$/.test(arg) || arg === "--rcfile" || arg === "--init-file") {
-        i++;
-        continue;
-      }
-      if (/^-[^-]*s/.test(arg))
-        stdinFlag = true;
-      if (arg === "--")
-        continue;
-      if (!arg.startsWith("-")) {
-        stdin = stdinFlag;
-        break;
-      }
-    }
-    if (stdin && item.hereDocuments.some((document) => runsSleep(document.body, depth + 1)))
+    if (commandScripts(argv, item.hereDocuments).some((source) => runsSleep(source, depth + 1)))
       return true;
   }
   return false;
@@ -1557,6 +1622,7 @@ export {
   parseLeanOptions,
   routeShellAlias,
   runsSleep,
+  scratchCommandTargets,
   scratchEntries,
   scratchEntry,
   scratchShellWrites,

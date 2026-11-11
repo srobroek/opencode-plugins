@@ -29,6 +29,14 @@ describe("lead routing", () => {
 })
 
 describe("sleep guard", () => {
+  test("parameter and arithmetic expansions are data, but nested executable substitutions run", () => {
+    for (const command of [`printf '%s' "\${sleep}"`, `printf '%s' "\${sleep:-sleep 5}"`, `printf '%s' "$((sleep + 5))"`]) expect(runsSleep(command)).toBe(false)
+    for (const command of ["echo $(sleep 5)", "echo `sleep 5`", "cat <(sleep 5)", "cat >(sleep 5)", `echo "\${value:-$(sleep 5)}"`, `cat <<EOF\n\${value:-$(sleep 5)}\nEOF`]) expect(runsSleep(command)).toBe(true)
+  })
+  test("eval scripts and xargs invocations run while ordinary quoted arguments stay data", () => {
+    for (const command of ["eval 'sleep 9'", "eval sleep 9", "printf '9' | xargs sleep", "printf '9' | xargs -n 1 -P 2 sleep", "printf '9' | xargs -rn 1 sleep", "printf '9' | xargs --max-args=1 -- sleep", "printf '9' | xargs -I '{}' sh -c 'sleep 9'"]) expect(runsSleep(command)).toBe(true)
+    for (const command of ["echo 'eval sleep 9'", "printf '%s' 'xargs sleep'", "printf '9' | xargs echo sleep", "eval 'echo sleep'", "echo 'sh -c sleep'"]) expect(runsSleep(command)).toBe(false)
+  })
   test("here-document text and shell-looking quoted arguments are data", () => {
     for (const command of ["cat <<EOF\nsleep 5\nEOF", "cat <<'EOF'\nsleep 5\nEOF", `echo 'sh -c "sleep 7"'`, `echo 'bash -lc "sleep 7"'`, `echo 'zsh -ec "sleep 7"'`]) expect(runsSleep(command)).toBe(false)
     expect(runsSleep("cat <<EOF\n$(sleep 5)\nEOF")).toBe(true)
@@ -38,7 +46,7 @@ describe("sleep guard", () => {
     for (const command of [`sh -lc "sleep 7"`, `bash -lc "sleep 7"`, `zsh -c "sleep 7"`, `sh -ec "sleep 7"`, `bash -lec "sleep 7"`, `bash -o pipefail -c "sleep 5"`, "bash -s argument <<'EOF'\nsleep 5\nEOF", "bash <<'EOF'\nsleep 5\nEOF", "bash <<EOF\nsleep 5\nEOF"]) expect(runsSleep(command)).toBe(true)
   })
   test("detects command positions and timeout wrappers", () => {
-    for (const command of ["sleep 5", "true && sleep 5", "true; sleep 5", "sleep 5 | cat", "while true; do sleep 5; done", "for x in a b; do sleep 5; done", "if true; then sleep 5; fi", "(sleep 5)", "timeout 10 sleep 5", "timeout -k 2 10 sleep 5", "echo $(sleep 5)"]) expect(runsSleep(command)).toBe(true)
+    for (const command of ["sleep 5", "true && sleep 5", "true; sleep 5", "sleep 5 | cat", "while true; do sleep 5; done", "for x in a b; do sleep 5; done", "if true; then sleep 5; fi", "if false; then :; else sleep 5; fi", "(sleep 5)", "timeout 10 sleep 5", "timeout -k 2 10 sleep 5", "echo $(sleep 5)"]) expect(runsSleep(command)).toBe(true)
   })
   test("does not treat quoted words or arguments as commands", () => {
     for (const command of ['echo "sleep 5"', "grep sleep log", 'git commit -m "sleep"', "echo sleep", "'sleep' 5", "timeout 5 echo sleep"]) expect(runsSleep(command)).toBe(false)
@@ -58,6 +66,12 @@ describe("sleep guard", () => {
 })
 
 describe("scratch entries", () => {
+  test("script and loop creators share traversal while retaining effective directories", () => {
+    for (const command of ["sh -c 'mkdir /tmp/opencode/fresh-entry'", "sh -c 'cd /tmp/opencode; mkdir fresh-entry'", "cd /tmp/opencode; sh -c 'mkdir fresh-entry'", "for x in one; do mkdir /tmp/opencode/fresh-entry; done", "while false; do mktemp -d /tmp/opencode/fresh-entry/XXXXXX; done", "for x in one; do cd /tmp/opencode; mkdir fresh-entry; done", "sh -c 'while false; do cd /tmp/opencode; mktemp -d fresh-entry/XXXXXX; done'", "bash <<'EOF'\ncd /tmp/opencode\nmkdir fresh-entry\nEOF", "eval 'mkdir /tmp/opencode/fresh-entry'", "printf 'x' | xargs mkdir /tmp/opencode/fresh-entry", "echo $(sh -c 'mkdir /tmp/opencode/fresh-entry')"]) expect(scratchEntries("shell", { command }, "/repo", "/tmp/opencode")).toEqual(["/tmp/opencode/fresh-entry"])
+    expect(scratchEntries("shell", { command: "echo 'sh -c mkdir /tmp/opencode/data-entry'" }, "/repo", "/tmp/opencode")).toEqual([])
+    expect(scratchEntries("shell", { command: "if false; then :; else mkdir /tmp/opencode/fresh-entry; fi" }, "/repo", "/tmp/opencode")).toEqual(["/tmp/opencode/fresh-entry"])
+    expect(scratchEntries("shell", { command: "(cd /tmp/opencode; sh -c 'mkdir fresh-entry'); sh -c 'mkdir outside'" }, "/repo", "/tmp/opencode")).toEqual(["/tmp/opencode/fresh-entry"])
+  })
   test("mkdir and mktemp inherit effective cd, subshell and wrapper directories", () => {
     for (const command of ["cd /tmp/opencode && mkdir x", "cd /tmp/opencode && mktemp -d x/XXXXXX", "(cd /tmp/opencode; mkdir x); mkdir outside", "env -C /tmp/opencode mkdir x", "cd /tmp/opencode && mktemp -d -p x"]) expect(scratchEntries("shell", { command }, "/repo", "/tmp/opencode")).toEqual(["/tmp/opencode/x"])
     expect(scratchEntries("shell", { command: "cd /tmp/opencode; mkdir x; cd /repo; mkdir outside" }, "/repo", "/tmp/opencode")).toEqual(["/tmp/opencode/x"])

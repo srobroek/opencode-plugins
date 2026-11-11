@@ -2,10 +2,13 @@ import { readdirSync, realpathSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { isAbsolute, join, relative, resolve, sep } from "node:path"
 import type { Context } from "@opencode/plugin/promise/plugin"
+import { commandWords } from "@srobroek/opencode-lib/command-words"
+import { scanShell } from "@srobroek/opencode-lib/shell-command"
 import { appendResultText } from "@srobroek/opencode-lib/shell-result"
 import { shellWriteTargets } from "@srobroek/opencode-lib/shell-write-targets"
 import { shellCall, writeTargets } from "@srobroek/opencode-lib/tool-targets"
 import { onSessionDeleted } from "./session-cache.ts"
+import { commandScripts, controlWords } from "./shell-scripts.ts"
 
 export function scratchEntry(target: string, cwd: string, root: string): string | undefined {
   const rel = relative(root, resolve(cwd, target))
@@ -16,12 +19,38 @@ export function scratchEntry(target: string, cwd: string, root: string): string 
 export function scratchEntries(tool: string, input: unknown, cwd: string, root: string): string[] {
   const call = shellCall(tool, input)
   const dir = call?.workdir ? resolve(cwd, call.workdir) : cwd
-  const targets = call ? shellWriteTargets(call.command, dir, scratchShellWrites) : writeTargets(tool, input)
+  const targets = call ? scratchCommandTargets(call.command, dir) : writeTargets(tool, input)
   return [...new Set(targets.flatMap((target) => {
     if (/[$`]/.test(target)) return []
     const entry = scratchEntry(target, dir, root)
     return entry ? [entry] : []
   }))]
+}
+
+export function scratchCommandTargets(command: string, cwd: string, depth = 0): string[] {
+  if (depth > 32) return []
+  const scripts = new Map<string, string[]>()
+  const discover = (source: string, nested: number): void => {
+    if (nested > 32) return
+    const scan = scanShell(source, { executableSubstitutionsOnly: true })
+    for (const item of scan.items) {
+      if (item.kind !== "command") continue
+      const { argv } = commandWords(controlWords(item.words.map((word) => word.value)))
+      const key = JSON.stringify(argv)
+      scripts.set(key, [...(scripts.get(key) ?? []), ...commandScripts(argv, item.hereDocuments)])
+    }
+    for (const substitution of scan.substitutions) discover(substitution, nested + 1)
+  }
+  discover(command, depth)
+  return shellWriteTargets(command, cwd, (argv, dir) => {
+    const targets = scratchShellWrites(argv, dir)
+    if (dir !== null) {
+      for (const source of new Set([...commandScripts(argv), ...(scripts.get(JSON.stringify(argv)) ?? [])])) {
+        targets.push(...scratchCommandTargets(source, dir, depth + 1))
+      }
+    }
+    return targets
+  }, controlWords)
 }
 
 export function scratchShellWrites(argv: string[], cwd: string | null): string[] {

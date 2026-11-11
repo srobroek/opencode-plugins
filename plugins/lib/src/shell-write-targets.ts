@@ -161,7 +161,7 @@ type CommandTargets = {
 }
 
 /** Redirect targets plus the write destinations of one simple command. */
-function simpleCommandTargets(words: ShellToken[]): CommandTargets {
+function simpleCommandTargets(words: ShellToken[], normalizeWords?: (argv: readonly string[]) => string[]): CommandTargets {
   const redirects: RawTarget[] = []
   const args: string[] = []
   for (let i = 0; i < words.length; i++) {
@@ -188,7 +188,7 @@ function simpleCommandTargets(words: ShellToken[]): CommandTargets {
     if (!target) target = words[++i]?.value ?? ""
     if (target) redirects.push({ path: target })
   }
-  const { argv, directories } = commandWords(args)
+  const { argv, directories } = commandWords(normalizeWords?.(args) ?? args)
   const name = basename(argv[0] ?? "")
   const rest = argv.slice(1)
   const writes: RawTarget[] = []
@@ -228,8 +228,9 @@ function cdTarget(args: string[], cwd: string | null): string | null {
  * Absolute paths a shell command would write, by static reading of literal words.
  * `cd` inside `( … )` or `$( … )` applies only until the group closes.
  * `additionalWrites` adds command destinations using the effective wrapper directory.
+ * `normalizeWords` removes caller-specific control prefixes before directory tracking.
  */
-export function shellWriteTargets(command: string, cwd: string, additionalWrites?: (argv: string[], cwd: string | null) => readonly string[]): string[] {
+export function shellWriteTargets(command: string, cwd: string, additionalWrites?: (argv: string[], cwd: string | null) => readonly string[], normalizeWords?: (argv: readonly string[]) => string[]): string[] {
   const out: string[] = []
   let dir: string | null = cwd
   const saved: (string | null)[] = []
@@ -250,7 +251,7 @@ export function shellWriteTargets(command: string, cwd: string, additionalWrites
     const segment = words
     words = []
     if (segment.length === 0) return
-    const { argv, directories, redirects, writes } = simpleCommandTargets(segment)
+    const { argv, directories, redirects, writes } = simpleCommandTargets(segment, normalizeWords)
     resolveInto(redirects, dir)
     if (argv[0] === "cd") {
       dir = cdTarget(argv.slice(1), dir)
