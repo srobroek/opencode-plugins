@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/srobroek/opencode-plugins/compare/agent-efficiency--v0.6.0...agent-efficiency--v0.7.0) (2026-11-11)
+
+
+### Features
+
+* **agent-efficiency:** refuse untargeted reads of large text files ([#127](https://github.com/srobroek/opencode-plugins/issues/127)) ([6ee4eb2](https://github.com/srobroek/opencode-plugins/commit/6ee4eb2eec7d5a44a85a8f4ce7665303f446fb97))
+
 ## [0.6.0](https://github.com/srobroek/opencode-plugins/compare/agent-efficiency--v0.5.0...agent-efficiency--v0.6.0) (2026-11-11)
 
 
