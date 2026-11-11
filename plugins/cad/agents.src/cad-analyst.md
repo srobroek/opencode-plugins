@@ -1,6 +1,7 @@
 ---
 description: "Runs one L4 analysis case (sweep, FreeCAD assembly, stack-up, FEA, motion) on an integrated CAD version and proposes verification rows."
 mode: subagent
+steps: 100
 request:
   headers:
     x-opencode-model-role: strong

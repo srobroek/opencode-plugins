@@ -1,6 +1,7 @@
 ---
 description: "Read-only critique of rendered surfaces for hierarchy, rhythm and generated-UI tells; spawned at CRITIQUE beside a11y-auditor."
 mode: subagent
+steps: 60
 request:
   headers:
     x-opencode-model-role: reviewer

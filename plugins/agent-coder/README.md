@@ -8,7 +8,7 @@ for non-code tasks; `general`'s requests carry every tool and skill.
 
 ## Agent
 
-`coder` (mode `subagent`):
+`coder` (mode `subagent`, steps 150):
 
 - reads the brief, the relevant code and the repository's AGENTS.md, and finds the
   repo's check commands;

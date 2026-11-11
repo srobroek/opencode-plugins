@@ -36,6 +36,7 @@ export type AgentFile = {
   mode: string
   model?: string
   hidden?: boolean
+  steps?: number
   request?: { headers?: Record<string, string> }
   permissions: AgentPermission[]
   system: string
@@ -53,12 +54,15 @@ export function parseAgentFile(id: string, text: string): AgentFile {
   if (!match) throw new Error(`agents/${id}.md has no frontmatter`)
   const data = (Bun.YAML.parse(match[1] ?? "") ?? {}) as Record<string, unknown>
   const permissions = Array.isArray(data.permissions) ? (data.permissions as AgentPermission[]) : []
+  if (data.steps !== undefined && (typeof data.steps !== "number" || !Number.isInteger(data.steps) || data.steps <= 0))
+    throw new Error(`agents/${id}.md: steps must be a positive integer`)
   return {
     id,
     description: typeof data.description === "string" ? data.description : undefined,
     mode: typeof data.mode === "string" ? data.mode : "subagent",
     model: typeof data.model === "string" ? data.model : undefined,
     ...(typeof data.hidden === "boolean" ? { hidden: data.hidden } : {}),
+    ...(typeof data.steps === "number" ? { steps: data.steps } : {}),
     ...(data.request && typeof data.request === "object" ? { request: data.request as AgentFile["request"] } : {}),
     permissions,
     system: text.slice(match[0].length).trim(),
@@ -94,6 +98,7 @@ export type AgentDraft = {
   mode?: string
   model?: unknown
   hidden?: boolean
+  steps?: number
   system?: string
   request?: { headers?: Record<string, string> }
   permissions?: unknown[]
@@ -115,6 +120,7 @@ export function shapeAgent(draft: AgentDraft, file: AgentFile, model: AgentModel
   if (created || draft.mode === undefined) draft.mode = file.mode
   if (created || draft.system === undefined) draft.system = file.system
   if (file.hidden !== undefined && (created || draft.hidden === undefined)) draft.hidden = file.hidden
+  if (file.steps !== undefined) draft.steps ??= file.steps
   const { fallback, ...ref } = model ?? {}
   const setModel = model !== undefined && (created || draft.model === undefined)
   if (setModel) draft.model = ref

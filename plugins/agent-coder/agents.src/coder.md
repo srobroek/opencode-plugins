@@ -1,6 +1,7 @@
 ---
 description: "Use for any code development (implement, fix, refactor, debug, test, build, profile, upgrade deps, code questions); general only for non-code work."
 mode: subagent
+steps: 150
 request:
   headers:
     x-opencode-model-role: standard

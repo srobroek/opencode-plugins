@@ -39,7 +39,7 @@ already exists:
 The plugin adds two subagents from `agents/`, converted from the omp agents with
 `scripts/convert-agent.ts`:
 
-- `journey-scribe`: writes and amends journey documents; never drives the product.
+- `journey-scribe` (steps 100): writes and amends journey documents; never drives the product.
   Its permissions are a tool allowlist: read, grep, glob, edit, shell, the `journey*`
   skills, Code Mode, the `lsp_*` tools and the journeys tools. Everything else, including web
   access and subagents, is denied and left out of its requests.

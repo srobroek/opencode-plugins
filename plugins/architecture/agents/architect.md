@@ -1,6 +1,7 @@
 ---
 description: "Read-only architect for software, system, module and API design and complex plans. Spawn before nontrivial structural work."
 mode: subagent
+steps: 80
 request:
   headers:
     x-opencode-model-role: strong

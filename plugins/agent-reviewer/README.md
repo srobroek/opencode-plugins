@@ -7,10 +7,10 @@ skill they load.
 
 | Agent | Reviews | Tools | Verdict | In the subagent catalog |
 | --- | --- | --- | --- | --- |
-| `pr-reviewer` | One GitHub pull request, against the caller's classification and accepted request | shell `gh pr view *`, `gh pr diff *` only | `APPROVE\|REQUEST-CHANGES\|COMMENT` | no (`hidden: true`) |
-| `code-reviewer` | A local diff: working tree, branch range or commits | read, grep, glob, `lsp_*`; shell `git diff`, `git log`, `git show` only, never `--output` | `APPROVE\|REQUEST-CHANGES\|COMMENT` | yes |
-| `security-reviewer` | A repository scope or the files a change touches, source to sink, CWE-tagged | read, grep, glob, `lsp_*`; no shell, no web | `PASS\|MINOR\|MAJOR` | yes |
-| `adversarial-challenger` | A claim, plan, design or decision, with evidence-backed counter-arguments | read, grep, glob, `lsp_*`, webfetch, websearch | `HOLDS\|WEAKENED\|REFUTED` | yes |
+| `pr-reviewer` (steps 80) | One GitHub pull request, against the caller's classification and accepted request | shell `gh pr view *`, `gh pr diff *` only | `APPROVE\|REQUEST-CHANGES\|COMMENT` | no (`hidden: true`) |
+| `code-reviewer` (steps 80) | A local diff: working tree, branch range or commits | read, grep, glob, `lsp_*`; shell `git diff`, `git log`, `git show` only, never `--output` | `APPROVE\|REQUEST-CHANGES\|COMMENT` | yes |
+| `security-reviewer` (steps 80) | A repository scope or the files a change touches, source to sink, CWE-tagged | read, grep, glob, `lsp_*`; no shell, no web | `PASS\|MINOR\|MAJOR` | yes |
+| `adversarial-challenger` (steps 60) | A claim, plan, design or decision, with evidence-backed counter-arguments | read, grep, glob, `lsp_*`, webfetch, websearch | `HOLDS\|WEAKENED\|REFUTED` | yes |
 
 Every reply starts with its `VERDICT:` line. The delivery plugin's verdict hook parses
 `pr-reviewer`'s, and accepts that line below a preamble or inside a code fence too.

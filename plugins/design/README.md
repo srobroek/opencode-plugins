@@ -38,10 +38,10 @@ load by name:
 
 | Agent | Role | Permissions |
 | --- | --- | --- |
-| `ui-ux-specialist` | Leads multi-component UI work through GROUND, GATE INTENT, SPECIFY, BUILD, VERIFY, CRITIQUE, RECONCILE, GATE ACCEPT | may spawn only `design-critic`, `a11y-auditor`, `explore` and `general` |
-| `ui-implementer` | Builds one UI unit on existing tokens and components, verified at 1440, 768 and 375 px; escalates anything bigger | no web search or fetch, no subagents |
-| `design-critic` | Read-only critique for hierarchy, rhythm and generated-UI tells | no edit, shell or subagents |
-| `a11y-auditor` | Read-only WCAG 2.2 AA audit with measured values | no edit or subagents; shell only for preflight probes and the axe CLI fallback, by prompt |
+| `ui-ux-specialist` (steps 150) | Leads multi-component UI work through GROUND, GATE INTENT, SPECIFY, BUILD, VERIFY, CRITIQUE, RECONCILE, GATE ACCEPT | may spawn only `design-critic`, `a11y-auditor`, `explore` and `general` |
+| `ui-implementer` (steps 150) | Builds one UI unit on existing tokens and components, verified at 1440, 768 and 375 px; escalates anything bigger | no web search or fetch, no subagents |
+| `design-critic` (steps 60) | Read-only critique for hierarchy, rhythm and generated-UI tells | no edit, shell or subagents |
+| `a11y-auditor` (steps 60) | Read-only WCAG 2.2 AA audit with measured values | no edit or subagents; shell only for preflight probes and the axe CLI fallback, by prompt |
 
 All four are `subagent` agents converted with `scripts/convert-agent.ts`.
 `design-critic` and `a11y-auditor` are composed by `bun run build` from
@@ -59,7 +59,7 @@ for `a11y-auditor`, the rest of the design skills (`accessibility-audit`,
 upstream skills `design-upstream-preflight` routes to for `ui-ux-specialist`. Rules are added after any you
 configure for an agent with the same id. `ui-ux-specialist`
 spawning children while it runs as a subagent needs `experimental.subagent_depth`
-of 2 or more. `ui-ux-specialist` runs at most 400 steps. The agents pin no model;
+of 2 or more. `ui-ux-specialist` runs at most 150 steps. The agents pin no model;
 each declares a model tier through the `x-opencode-model-role` request header, so
 with the model-roles plugin that tier picks its model, and without it the agent
 inherits the caller's model:

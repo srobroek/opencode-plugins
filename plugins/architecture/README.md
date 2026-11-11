@@ -20,7 +20,7 @@ references, which now name the skill (`architecture-docs-files` points at the
 
 ## Agent
 
-`architect` (mode `subagent`) designs systems, modules and APIs and turns a hard
+`architect` (mode `subagent`, steps 80) designs systems, modules and APIs and turns a hard
 change into an ordered implementation plan. It starts its reply with
 `VERDICT: DESIGNED|PARTIAL|BLOCKED`. Its permissions are an allowlist: every tool
 is denied except read, grep, glob, the `lsp_*` tools, webfetch, websearch, `subagent`

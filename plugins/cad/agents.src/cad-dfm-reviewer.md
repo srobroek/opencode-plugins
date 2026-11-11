@@ -1,6 +1,7 @@
 ---
 description: "Reviews per-part FDM or CNC manufacturability with measured evidence. Spawn at the L2 light review and at CRITIQUE; never edits."
 mode: subagent
+steps: 60
 request:
   headers:
     x-opencode-model-role: reviewer

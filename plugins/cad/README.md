@@ -75,12 +75,12 @@ design record, build `hw/versions/`, write the beads ledger or ask the user.
 
 | Agent | Role | Model tier | Permissions |
 | --- | --- | --- | --- |
-| `cad-concept-designer` | Drafts one L0 concept variant | `standard` | read; edit `.cad-work/*`; `cad_run` |
-| `cad-part-designer` | Designs or details one unit's parts in a scratch copy and delivers them | `strong` | read; edit `.cad-work/*`; `cad_run` |
-| `cad-sourcing-researcher` | Cited research for one purchased-part family | `standard` | read; web fetch and search |
-| `cad-analyst` | Runs one L4 analysis case on an integrated version | `strong` | read; edit `.cad-work/*`; `cad_run` |
-| `cad-mech-reviewer` | Read-only mechanical critique | `reviewer` | read |
-| `cad-dfm-reviewer` | Read-only FDM/CNC critique | `reviewer` | read |
+| `cad-concept-designer` (steps 100) | Drafts one L0 concept variant | `standard` | read; edit `.cad-work/*`; `cad_run` |
+| `cad-part-designer` (steps 150) | Designs or details one unit's parts in a scratch copy and delivers them | `strong` | read; edit `.cad-work/*`; `cad_run` |
+| `cad-sourcing-researcher` (steps 80) | Cited research for one purchased-part family | `standard` | read; web fetch and search |
+| `cad-analyst` (steps 100) | Runs one L4 analysis case on an integrated version | `strong` | read; edit `.cad-work/*`; `cad_run` |
+| `cad-mech-reviewer` (steps 60) | Read-only mechanical critique | `reviewer` | read |
+| `cad-dfm-reviewer` (steps 60) | Read-only FDM/CNC critique | `reviewer` | read |
 
 Every agent denies everything else, including shell and spawning subagents, loads only `cad-*`
 skills, and may read the installed CAD skills outside the project without a prompt. The model

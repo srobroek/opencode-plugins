@@ -1,6 +1,7 @@
 ---
 description: "Implements one UI unit on the project's tokens and components at three widths; escalates direction work to ui-ux-specialist."
 mode: subagent
+steps: 150
 request:
   headers:
     x-opencode-model-role: strong

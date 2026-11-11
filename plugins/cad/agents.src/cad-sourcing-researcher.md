@@ -1,6 +1,7 @@
 ---
 description: "Researches one purchased-part family with cited designations, datasheets, installation limits and materials. Read-only; spawned at L2 PARTS."
 mode: subagent
+steps: 80
 request:
   headers:
     x-opencode-model-role: standard

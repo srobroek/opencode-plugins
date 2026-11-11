@@ -24,7 +24,7 @@ its description matches. To make it always on, copy its body into your global
 
 ## Agent
 
-`adversarial-challenger` (mode `subagent`) stress-tests a claim, plan, design or
+`adversarial-challenger` (mode `subagent`, steps 60) stress-tests a claim, plan, design or
 decision from a brief of observable facts and returns evidence-backed
 counter-arguments and alternatives, starting with `VERDICT: HOLDS|WEAKENED|REFUTED`.
 It belongs to the [`agent-reviewer`](../agent-reviewer/README.md) plugin, which
