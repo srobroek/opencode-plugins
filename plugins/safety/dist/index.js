@@ -637,7 +637,7 @@ function leadingCdCwd(command, cwd) {
     return cwd;
   return dir.startsWith("/") ? dir : resolve(cwd, dir);
 }
-function scanShell(source) {
+function scanShell(source, options = {}) {
   const items = [];
   const substitutions = [];
   let complete = true;
@@ -687,8 +687,12 @@ function scanShell(source) {
     items.push({ kind: "operator", operator: value });
   };
   const substitution = (expansion) => {
-    if (expansion.inner !== undefined)
-      substitutions.push(expansion.inner);
+    if (expansion.inner !== undefined) {
+      if (!options.executableSubstitutionsOnly || expansion.executable)
+        substitutions.push(expansion.inner);
+      else
+        substitutions.push(...scanShell(expansion.inner, options).substitutions);
+    }
     if (!expansion.closed)
       complete = false;
   };
@@ -881,6 +885,7 @@ function expansionAt(text, at) {
     return {
       end: closed ? j + 1 : text.length,
       inner: text.slice(at + 1, Math.min(j, text.length)),
+      executable: true,
       expands: true,
       closed
     };
@@ -892,6 +897,7 @@ function expansionAt(text, at) {
     return {
       end: closed ? close + 1 : text.length,
       inner: text.slice(at + 2, closed ? close : text.length),
+      executable: next === "(" && text[at + 2] !== "(",
       expands: true,
       closed
     };
@@ -1099,7 +1105,7 @@ function perlPaths(args) {
   }
   return inplace ? files : [];
 }
-function simpleCommandTargets(words) {
+function simpleCommandTargets(words, normalizeWords) {
   const redirects = [];
   const args = [];
   for (let i = 0;i < words.length; i++) {
@@ -1130,7 +1136,7 @@ function simpleCommandTargets(words) {
     if (target)
       redirects.push({ path: target });
   }
-  const { argv, directories } = commandWords(args);
+  const { argv, directories } = commandWords(normalizeWords?.(args) ?? args);
   const name = basename(argv[0] ?? "");
   const rest = argv.slice(1);
   const writes = [];
@@ -1168,7 +1174,7 @@ function cdTarget(args, cwd) {
     return null;
   return literalPath(dir, cwd) ?? null;
 }
-function shellWriteTargets(command, cwd) {
+function shellWriteTargets(command, cwd, additionalWrites, normalizeWords) {
   const out = [];
   let dir = cwd;
   const saved = [];
@@ -1192,7 +1198,7 @@ function shellWriteTargets(command, cwd) {
     words = [];
     if (segment.length === 0)
       return;
-    const { argv, directories, redirects, writes } = simpleCommandTargets(segment);
+    const { argv, directories, redirects, writes } = simpleCommandTargets(segment, normalizeWords);
     resolveInto(redirects, dir);
     if (argv[0] === "cd") {
       dir = cdTarget(argv.slice(1), dir);
@@ -1201,6 +1207,7 @@ function shellWriteTargets(command, cwd) {
     let commandDir = dir;
     for (const directory of directories)
       commandDir = literalPath(directory, commandDir) ?? null;
+    writes.push(...(additionalWrites?.(argv, commandDir) ?? []).map((path) => ({ path })));
     resolveInto(writes, commandDir);
   };
   for (const token of tokenizeShell(command, { hereDocumentSubstitutionsOnly: true })) {

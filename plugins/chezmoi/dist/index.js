@@ -553,7 +553,7 @@ function perlPaths(args) {
   }
   return inplace ? files : [];
 }
-function simpleCommandTargets(words) {
+function simpleCommandTargets(words, normalizeWords) {
   const redirects = [];
   const args = [];
   for (let i = 0;i < words.length; i++) {
@@ -584,7 +584,7 @@ function simpleCommandTargets(words) {
     if (target)
       redirects.push({ path: target });
   }
-  const { argv, directories } = commandWords(args);
+  const { argv, directories } = commandWords(normalizeWords?.(args) ?? args);
   const name = basename(argv[0] ?? "");
   const rest = argv.slice(1);
   const writes = [];
@@ -622,7 +622,7 @@ function cdTarget(args, cwd) {
     return null;
   return literalPath(dir, cwd) ?? null;
 }
-function shellWriteTargets(command, cwd) {
+function shellWriteTargets(command, cwd, additionalWrites, normalizeWords) {
   const out = [];
   let dir = cwd;
   const saved = [];
@@ -646,7 +646,7 @@ function shellWriteTargets(command, cwd) {
     words = [];
     if (segment.length === 0)
       return;
-    const { argv, directories, redirects, writes } = simpleCommandTargets(segment);
+    const { argv, directories, redirects, writes } = simpleCommandTargets(segment, normalizeWords);
     resolveInto(redirects, dir);
     if (argv[0] === "cd") {
       dir = cdTarget(argv.slice(1), dir);
@@ -655,6 +655,7 @@ function shellWriteTargets(command, cwd) {
     let commandDir = dir;
     for (const directory of directories)
       commandDir = literalPath(directory, commandDir) ?? null;
+    writes.push(...(additionalWrites?.(argv, commandDir) ?? []).map((path) => ({ path })));
     resolveInto(writes, commandDir);
   };
   for (const token of tokenizeShell(command, { hereDocumentSubstitutionsOnly: true })) {

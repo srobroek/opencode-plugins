@@ -6,6 +6,40 @@ Cuts tokens and wasted turns for agents running in OpenCode V2:
 - narrows the built-in `explore` agent to search and web tools with a short scout prompt;
 - trims the system prompt of read-only subagents.
 
+## Lead routing
+
+`lead` defaults to `true`. Primary sessions with the `subagent` tool receive delegation instructions on context, compaction and generate requests.
+The instructions route code work to `coder`, lookups to `explore`, bounded commands to `operator`, and reviews to the reviewer agents.
+The plugin removes bullets whose agent ids are all unregistered. The session's filtered text stays fixed for prompt caching.
+Deleting a session evicts its cached text.
+Child sessions receive no lead block. Set `lead: false` to disable it.
+When delivery also loads, set delivery's `fanOut: false` to avoid two lead blocks.
+
+## Foreground wait guard
+
+`waitGuard` defaults to `true`. Foreground shell calls that run `sleep` are refused, including aliases mapped to `shell`.
+The guard checks command positions in chains, pipelines, loops and subshells, including `timeout N sleep`.
+Quoted data such as `echo "sleep 5"` passes. Shell calls with `background: true` pass.
+Here-document text passed to non-shell commands also passes, unless it contains an executable command substitution.
+Shell scripts supplied through `-c` flags (including `-lc` and `-ec`) or standard-input here-documents are checked.
+The guard also checks `eval` scripts and commands supplied to `xargs`.
+Parameter expansions such as `${sleep}` are data; command substitutions inside them are checked.
+Use a background watcher such as `gh pr checks 12 --watch` instead of foreground polling.
+Set `waitGuard: false` to disable the guard.
+
+## Subagent scratch reminders
+
+`scratchReminder` defaults to `true`. In child sessions, the plugin watches write, edit, patch and shell write destinations under the scratch root.
+The root is the real path of `os.tmpdir()` plus `opencode`. With `/tmp` as the temporary directory, it resolves to `/tmp/opencode` on Linux or `/private/tmp/opencode` on macOS.
+Shell destinations include literal `mkdir` paths and `mktemp` templates. Dynamic paths that cannot be resolved statically are skipped.
+Destinations follow literal `cd` commands, subshell scopes and wrapper working directories.
+Creators inside shell scripts, `eval`, `xargs` and loop bodies use the same script discovery as the wait guard.
+When a completed call creates a top-level scratch entry, its tool result asks the subagent to delete that entry before reporting.
+Entries present before the call are never noted. Each session receives at most three notes, with each entry noted once.
+Deleting a session clears its cached directory, pending calls and reminder history.
+Subsequent calls retain the session's reminder counts unless the session is deleted.
+Reminders do not change the system prompt. Set `scratchReminder: false` to disable them.
+
 ## Install
 
 ```sh
@@ -54,6 +88,7 @@ The plugin reshapes the built-in `explore` agent:
   shell tool description is not sent. Skills and `execute` (the Code Mode catalog)
   stay denied.
 - Reading `.env` files and leaving the working directory ask first.
+- Steps: 60. On the final step, OpenCode removes tools and asks for a summary.
 - The prompt asks for a summary, the relevant files as `path:start-end` with what
   each holds, how the pieces connect, and the URLs of web sources.
 
@@ -144,6 +179,9 @@ starts with, rejects it. Moving the call into `workdir` does not help: OpenCode 
 | Option | Default | Effect |
 | --- | --- | --- |
 | `bashAlias` | `true` | `false` leaves `bash` calls to fail as unknown tools. |
+| `lead` | `true` | Adds primary-only delegation instructions. |
+| `waitGuard` | `true` | Refuses foreground shell commands that run `sleep`. |
+| `scratchReminder` | `true` | Notes newly created scratch entries in child-session tool results. |
 | `explore` | `true` | `false` keeps the built-in `explore` agent as OpenCode and your config define it. |
 | `leanSubagents` | the read-only agents above | Agent ids whose child sessions get the trimmed prompt. `false` or `[]` turns it off. |
 | `leanDrop` | `["identity", "worktree"]` | Which segments to remove: `global-instructions`, `project-instructions`, `identity`, `worktree`. `instructions` stands for both AGENTS.md segments. |

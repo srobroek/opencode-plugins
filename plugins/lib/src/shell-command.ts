@@ -198,7 +198,7 @@ export type ShellScan = {
   complete: boolean
 }
 
-type Expansion = { end: number; inner?: string; expands: boolean; closed: boolean }
+type Expansion = { end: number; inner?: string; expands: boolean; closed: boolean; executable?: boolean }
 
 /**
  * Split shell source into simple commands with exact word offsets, without evaluating it.
@@ -207,8 +207,9 @@ type Expansion = { end: number; inner?: string; expands: boolean; closed: boolea
  * place needs to know where each word starts, and needs `2>&1`, `&>` and `>&` read as
  * redirections rather than as background operators. Nothing is expanded or run;
  * every substitution is returned as source for the caller to judge on its own.
+ * With `executableSubstitutionsOnly`, only executable substitutions contribute source, including those inside parameter or arithmetic expansions.
  */
-export function scanShell(source: string): ShellScan {
+export function scanShell(source: string, options: { executableSubstitutionsOnly?: boolean } = {}): ShellScan {
   const items: (SimpleCommand | ShellOperator)[] = []
   const substitutions: string[] = []
   let complete = true
@@ -259,7 +260,10 @@ export function scanShell(source: string): ShellScan {
     items.push({ kind: "operator", operator: value })
   }
   const substitution = (expansion: Expansion): void => {
-    if (expansion.inner !== undefined) substitutions.push(expansion.inner)
+    if (expansion.inner !== undefined) {
+      if (!options.executableSubstitutionsOnly || expansion.executable) substitutions.push(expansion.inner)
+      else substitutions.push(...scanShell(expansion.inner, options).substitutions)
+    }
     if (!expansion.closed) complete = false
   }
   /** Read every here-document queued on the line that just ended; returns the next offset. */
@@ -436,6 +440,7 @@ function expansionAt(text: string, at: number): Expansion {
     return {
       end: closed ? j + 1 : text.length,
       inner: text.slice(at + 1, Math.min(j, text.length)),
+      executable: true,
       expands: true,
       closed,
     }
@@ -447,6 +452,7 @@ function expansionAt(text: string, at: number): Expansion {
     return {
       end: closed ? close + 1 : text.length,
       inner: text.slice(at + 2, closed ? close : text.length),
+      executable: next === "(" && text[at + 2] !== "(",
       expands: true,
       closed,
     }

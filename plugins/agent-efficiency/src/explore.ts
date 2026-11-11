@@ -32,10 +32,11 @@ export const EXPLORE_PERMISSIONS: ReadonlyArray<Rule> = [
   { action: "external_directory", resource: "*", effect: "ask" },
 ]
 
-type ExploreDraft = { system?: string; permissions: Rule[] }
+type ExploreDraft = { system?: string; permissions: Rule[]; steps?: number }
 
 /** Narrow the built-in explore agent to search and web tools with the scout prompt. Model and tier are untouched. */
 export function shapeExplore(draft: ExploreDraft): void {
   draft.system = EXPLORE_PROMPT
+  draft.steps = 60
   draft.permissions.push(...EXPLORE_PERMISSIONS.map((rule) => ({ ...rule })))
 }

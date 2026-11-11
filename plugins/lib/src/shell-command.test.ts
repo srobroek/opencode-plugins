@@ -10,6 +10,18 @@ import {
   scanShell,
 } from "./shell-command.ts"
 
+test("executable-only substitutions omit parameter and arithmetic sources without changing the default", () => {
+  const source = `echo "\${sleep}" "$((sleep + 1))" "\${value:-$(sleep 5)}" \`sleep 6\` <(sleep 7)`
+  const original = scanShell(source)
+  expect(original.substitutions).toContain("sleep")
+  expect(original.substitutions).toContain("(sleep + 1)")
+  expect(original.substitutions).toContain("value:-$(sleep 5)")
+  const executable = scanShell(source, { executableSubstitutionsOnly: true })
+  expect(executable.substitutions).toEqual(["sleep 5", "sleep 6", "sleep 7"])
+  expect(executable.items).toEqual(original.items)
+  expect(scanShell(`cat <<EOF\n\${sleep}\n\${value:-$(sleep 5)}\nEOF`, { executableSubstitutionsOnly: true }).substitutions).toEqual(["sleep 5"])
+})
+
 /** Each item as text: an operator as itself, a command as its words. */
 function outline(scan: ShellScan): string[] {
   return scan.items.map((item) =>
