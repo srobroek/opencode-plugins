@@ -102,7 +102,7 @@
       "name": "quality",
       "source": "./plugins/quality",
       "description": "Code design and review guidance, an always-on style code-quality policy, performance profiling, and throwaway logic prototypes.",
-      "version": "0.5.0",
+      "version": "0.6.0",
       "category": "development"
     },
     {
@@ -123,7 +123,7 @@
       "name": "trunk-dev",
       "source": "./plugins/trunk-dev",
       "description": "Trunk-based delivery for OpenCode: a Conventional Commit and main-push gate, skip-CI and MR/PR advisories, a feature-flag cleanup bead after each flagged merge, and release-setup skills.",
-      "version": "0.4.0",
+      "version": "0.5.0",
       "category": "development"
     },
     {

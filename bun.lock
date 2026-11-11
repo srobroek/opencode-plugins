@@ -18,7 +18,7 @@
     },
     "plugins/agent-coder": {
       "name": "@srobroek/opencode-agent-coder",
-      "version": "0.5.0",
+      "version": "0.6.0",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
       },
@@ -31,7 +31,7 @@
     },
     "plugins/agent-efficiency": {
       "name": "@srobroek/opencode-agent-efficiency",
-      "version": "0.6.0",
+      "version": "0.7.0",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
       },
@@ -213,7 +213,7 @@
     },
     "plugins/delivery": {
       "name": "@srobroek/opencode-delivery",
-      "version": "0.4.0",
+      "version": "0.5.0",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
       },
@@ -445,7 +445,7 @@
     },
     "plugins/quality": {
       "name": "@srobroek/opencode-quality",
-      "version": "0.5.0",
+      "version": "0.6.0",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
       },
@@ -549,7 +549,7 @@
     },
     "plugins/trunk-dev": {
       "name": "@srobroek/opencode-trunk-dev",
-      "version": "0.4.0",
+      "version": "0.5.0",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
       },
