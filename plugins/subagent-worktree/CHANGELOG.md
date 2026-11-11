@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.3](https://github.com/srobroek/opencode-plugins/compare/subagent-worktree--v0.2.2...subagent-worktree--v0.2.3) (2026-11-11)
+
+
+### Bug Fixes
+
+* **subagent-worktree:** ignore worktree on resume, opt coder in, and skip lanes for dirty checkouts ([#121](https://github.com/srobroek/opencode-plugins/issues/121)) ([c1f1c47](https://github.com/srobroek/opencode-plugins/commit/c1f1c47e8d821ee198562dda3199c07446416656))
+
 ## [0.2.2](https://github.com/srobroek/opencode-plugins/compare/subagent-worktree--v0.2.1...subagent-worktree--v0.2.2) (2026-11-05)
 
 

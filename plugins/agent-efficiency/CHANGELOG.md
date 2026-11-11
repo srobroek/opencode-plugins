@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/srobroek/opencode-plugins/compare/agent-efficiency--v0.5.0...agent-efficiency--v0.6.0) (2026-11-11)
+
+
+### Features
+
+* **agent-efficiency:** add lead routing, a foreground sleep guard and subagent scratch reminders ([#122](https://github.com/srobroek/opencode-plugins/issues/122)) ([34bdb2d](https://github.com/srobroek/opencode-plugins/commit/34bdb2d512109065956f88397bd2dc8e6e99ecd3))
+
 ## [0.5.0](https://github.com/srobroek/opencode-plugins/compare/agent-efficiency--v0.4.0...agent-efficiency--v0.5.0) (2026-10-30)
 
 

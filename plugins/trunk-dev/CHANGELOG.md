@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/srobroek/opencode-plugins/compare/trunk-dev--v0.3.0...trunk-dev--v0.4.0) (2026-11-11)
+
+
+### Features
+
+* **agent-efficiency:** add lead routing, a foreground sleep guard and subagent scratch reminders ([#122](https://github.com/srobroek/opencode-plugins/issues/122)) ([34bdb2d](https://github.com/srobroek/opencode-plugins/commit/34bdb2d512109065956f88397bd2dc8e6e99ecd3))
+
 ## [0.3.0](https://github.com/srobroek/opencode-plugins/compare/trunk-dev--v0.2.1...trunk-dev--v0.3.0) (2026-10-30)
 
 

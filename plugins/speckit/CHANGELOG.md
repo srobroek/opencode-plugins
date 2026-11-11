@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.0](https://github.com/srobroek/opencode-plugins/compare/speckit--v0.4.0...speckit--v0.5.0) (2026-11-11)
+
+
+### Features
+
+* **agent-efficiency:** add lead routing, a foreground sleep guard and subagent scratch reminders ([#122](https://github.com/srobroek/opencode-plugins/issues/122)) ([34bdb2d](https://github.com/srobroek/opencode-plugins/commit/34bdb2d512109065956f88397bd2dc8e6e99ecd3))
+* cap every shipped agent with a step limit ([#123](https://github.com/srobroek/opencode-plugins/issues/123)) ([7b3b60f](https://github.com/srobroek/opencode-plugins/commit/7b3b60f84ac4aabcf8d5d649042e26054f79b0f4))
+
 ## [0.4.0](https://github.com/srobroek/opencode-plugins/compare/speckit--v0.3.1...speckit--v0.4.0) (2026-11-03)
 
 
