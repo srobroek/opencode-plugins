@@ -51,6 +51,7 @@ function fakeRun(repo: Repo, log: string[][]) {
     }
     if (cmd.startsWith("rev-list --count")) return ok(`${repo.ahead}\n`)
     if (cmd === "status --porcelain") return ok(repo.dirty ? " M a.txt\n" : "")
+    if (cmd === "status --porcelain --untracked-files=no") return ok(repo.local[dir]?.changed.length ? " M a.txt\n" : "")
     if (cmd.startsWith("branch --quiet -d")) return ok()
     if (cmd === "worktree list --porcelain") return repo.git ? ok(repo.porcelain) : fail
     if (cmd === "diff --name-only -z HEAD") return ok(repo.local[dir]?.changed.map((file) => `${file}\0`).join("") ?? "")
@@ -86,6 +87,7 @@ async function start(
     directory: REPO,
     options: options.opts ?? {},
     agents: [
+      { id: "coder", name: "coder", mode: "subagent" },
       { id: "general", name: "general", mode: "subagent" },
       { id: "explore", name: "explore", mode: "subagent" },
       { id: "build", name: "build", mode: "primary" },
@@ -185,6 +187,41 @@ describe("setup", () => {
 })
 
 describe("execute.before", () => {
+  test("coder gets an automatic lane by default", async () => {
+    const setup = await start()
+    await spawn(setup, { agent: "coder" })
+    expect(setup.worktree.calls[0]?.method).toBe("create")
+  })
+
+  test.each([OTHER, false] as const)("resuming with worktree %j keeps the session in place and notes it once", async (worktree) => {
+    const setup = await start()
+    const event = await spawn(setup, { sessionID: "ses_in_other", worktree })
+    expect(event.input).toEqual(call({ sessionID: "ses_in_other" }).input)
+    expect(setup.worktree.calls).toEqual([])
+    expect(setup.fake.calls.some((entry) => entry.method === "session.move")).toBe(false)
+    const result = await setup.fake.fire.tool("execute.after", completed("ses_in_other"))
+    expect((result.result as { content: string }).content).toContain("subagent-worktree: ignored `worktree` on a resumed session; it keeps its directory.")
+    const again = await setup.fake.fire.tool("execute.after", completed("ses_in_other"))
+    expect((again.result as { content: string }).content).toBe("<subagent>done</subagent>")
+  })
+
+  test("dirty caller tracked files keep an automatic coder in place with an explanation", async () => {
+    const setup = await start({ repo: { local: { [OTHER]: { changed: ["a.ts"], untracked: [] } } } })
+    const event = await spawn(setup, { agent: "coder" }, "ses_in_other")
+    expect((event.input as { sessionID?: string }).sessionID).toBeUndefined()
+    expect(setup.worktree.calls).toEqual([])
+    const result = await setup.fake.fire.tool("execute.after", completed("ses_x"))
+    expect((result.result as { content: string }).content).toContain("uncommitted changes to tracked files")
+    expect((result.result as { content: string }).content).toContain("Passing `worktree` forces a lane.")
+    await spawn(setup, { agent: "coder", worktree: "feat" }, "ses_in_other")
+    expect(setup.worktree.calls[0]?.method).toBe("create")
+  })
+
+  test("untracked caller files alone do not skip isolation", async () => {
+    const setup = await start({ repo: { local: { [REPO]: { changed: [], untracked: ["new.ts"] } } } })
+    await spawn(setup, { agent: "coder" })
+    expect(setup.worktree.calls[0]?.method).toBe("create")
+  })
   test.each([{ worktree: false }, { prompt: "Working directory: /elsewhere/repo" }])("skips unneeded lanes: %j", async (input) => {
     const setup = await start()
     const event = await spawn(setup, input)
@@ -315,7 +352,7 @@ describe("worktree argument", () => {
     const { fake, cleanup } = await start({ tools: [subagentTool] })
     const input = fake.tools.get("subagent")?.input as { properties: Record<string, { description: string }>; required: string[] }
     expect(Object.keys(input.properties)).toEqual(["agent", "worktree"])
-    expect(input.properties.worktree?.description).toStartWith("Path or branch of an existing worktree")
+    expect(input.properties.worktree?.description).toStartWith("New spawns only. Omit for defaults:")
     expect(input.required).toEqual(["agent"])
     expect(fake.tools.get("subagent")?.description).toBe("Spawns an agent")
     await cleanup()
@@ -374,7 +411,6 @@ describe("worktree argument", () => {
   test.each([
     ["a path outside the project", { worktree: "/elsewhere" }, {}, "is not a worktree of this project"],
     ["a non-git caller", { agent: "explore", worktree: OTHER }, { git: false }, "not in a git checkout"],
-    ["a continuation", { sessionID: "ses_other", worktree: OTHER }, {}, "only to new subagents"],
   ] as const)("refuses %s", async (_name, input, repo, message) => {
     const setup = await start({ repo })
     await expect(spawn(setup, input)).rejects.toThrow(message)
@@ -532,7 +568,7 @@ describe(MERGE_TOOL, () => {
     const setup = await start({
       repo: { laneFiles: ["a.ts", "hello.txt"], local: { [REPO]: { changed: ["a.ts"], untracked: ["hello.txt", "x"] } } },
     })
-    await spawn(setup)
+    await spawn(setup, { worktree: "main" })
     setup.repo.ahead = 1
     const result = await run(setup, { sessionID: "ses_fake1", method: "wt-merge" })
     expect(result.metadata.ok).toBe(false)
@@ -548,7 +584,7 @@ describe(MERGE_TOOL, () => {
 
   test("a target that is not checked out anywhere has no local changes", async () => {
     const setup = await start({ repo: { local: { [REPO]: { changed: ["hello.txt"], untracked: [] } } } })
-    await spawn(setup)
+    await spawn(setup, { worktree: "main" })
     setup.repo.ahead = 1
     const result = await run(setup, { sessionID: "ses_fake1", method: "wt-merge", target: "release" })
     expect(result.metadata.ok).toBe(true)

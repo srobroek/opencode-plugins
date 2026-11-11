@@ -65,6 +65,12 @@ export function createGit(run: Runner) {
     /** Files HEAD changes since its merge base with `target`. */
     changedFiles: async (directory: string, target: string) =>
       files(await git(directory, "diff", "--name-only", "-z", `${target}...HEAD`)),
+    /** Staged or unstaged tracked changes; untracked files do not affect automatic isolation. */
+    trackedDirty: async (directory: string) => {
+      const changed = await git(directory, "status", "--porcelain", "--untracked-files=no")
+      if (changed === undefined) throw new Error(`subagent-worktree: cannot read tracked changes in ${directory}`)
+      return changed !== ""
+    },
     /** Uncommitted (staged or not) and untracked files, relative to the work tree root. */
     localFiles: async (directory: string) => {
       const changed = files(await git(directory, "diff", "--name-only", "-z", "HEAD"))
