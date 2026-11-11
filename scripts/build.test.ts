@@ -81,6 +81,12 @@ describe("composeAgents", () => {
     }
   })
 
+  test("the composed coder prompt carries the quality line", () => {
+    const prompt = readFileSync(path.resolve(import.meta.dir, "../plugins/agent-coder/agents/coder.md"), "utf8")
+    expect(prompt).toContain("skip `quality-code-policy`")
+    expect(prompt).toContain("only for new behavior")
+  })
+
   test("the coder and the delivery implementers compose the coding-core method", () => {
     for (const [plugin, id] of [
       ["agent-coder", "coder"],

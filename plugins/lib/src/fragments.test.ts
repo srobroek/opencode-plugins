@@ -87,7 +87,7 @@ describe("coding-core", () => {
   const parts = fragmentParts("coding-core", readFragment("coding-core"))
 
   test("has the method and the rule parts", () => {
-    expect([...parts.keys()]).toEqual(["method", "agents-md", "scope", "paths", "blocked"])
+    expect([...parts.keys()]).toEqual(["method", "quality", "agents-md", "scope", "paths", "blocked"])
   })
 
   test("carries the shared coding method and rules", () => {

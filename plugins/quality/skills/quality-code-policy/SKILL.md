@@ -1,11 +1,11 @@
 ---
 name: quality-code-policy
-description: The always-on code-quality policy (SOLID, invariants, DRY, reuse, scoped refactors); load at the start of code tasks.
+description: Code-quality policy (SOLID, invariants, DRY, reuse, scoped refactors); load before code changes when no agent prompt already carries it.
 ---
 
 # Maintainable code
 
-MUST Before designing, investigating, writing, changing, or reviewing code, load the `quality-code-design` skill and only its task-relevant references. Read-only roles stay read-only; non-code tasks need neither.
+MUST Load the `quality-code-design` skill (and only its task-relevant references) only for: adding new behavior or a capability, a refactor, a hard bug (root cause not obvious after reading the failure), or a code review. Small edits, mechanical changes, test-only fixes, config, docs and command runs do not need it. Read-only roles stay read-only.
 
 MUST Prioritize SOLID, encapsulation, and protected invariants over YAGNI when they protect a real responsibility or boundary, using the language's own idioms. A library, ORM, or boundary with one consumer is justified when it reduces present total complexity; consumer count alone decides nothing.
 

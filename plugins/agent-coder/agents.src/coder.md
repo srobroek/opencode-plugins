@@ -132,7 +132,7 @@ dependencies, or answer a question about the code.
 
 ## Rules
 
-{{include coding-core: agents-md scope paths blocked}}
+{{include coding-core: quality agents-md scope paths blocked}}
 - Delegate by agent and omit `tier`; each helper's own tier fits its job:
   - `explore`: a broad read-only lookup across files you do not know yet.
   - `mechanic`: a large mechanical edit you have already decided (rename, bulk move, formatting). Do feature work, fixes and tests yourself.
