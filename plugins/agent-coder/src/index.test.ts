@@ -23,6 +23,7 @@ test("registers the standard-tier coder subagent and disposes it", async () => {
   expect(agent?.model).toBeUndefined()
   expect(agent?.description).toContain("general only for non-code work")
   expect(agent?.system).toContain("VERDICT: DONE|PARTIAL|BLOCKED")
+  expect(agent?.system).toContain("omit `tier`")
   await cleanup?.()
   expect(fake.active()).toBe(0)
 })
@@ -38,9 +39,9 @@ test("allows only coding tools", async () => {
   expect(permissionEffect(rules, "external_directory", "/tmp/x/*")).toBe("ask")
 })
 
-test("spawns only explore and mechanic", async () => {
+test("spawns only explore, mechanic, code-reviewer and operator", async () => {
   const { rules } = await setup()
-  for (const child of ["explore", "mechanic"]) expect(permissionEffect(rules, "subagent", child)).toBe("allow")
+  for (const child of ["explore", "mechanic", "code-reviewer", "operator"]) expect(permissionEffect(rules, "subagent", child)).toBe("allow")
   for (const child of ["general", "coder", "implementer", "researcher"])
     expect(permissionEffect(rules, "subagent", child)).toBe("deny")
 })
@@ -50,8 +51,8 @@ test("allowlists coding skills by id or family prefix and denies the rest", asyn
   const skills = allowedSkills(rules)
   expect(skills).not.toContain("*")
   const ids = ["quality-code-policy", "lang-typescript-quality", "lang-rust-quality", "lang-go", "shell-language", "dep-update", "ast-grep-search"]
-  for (const id of [...ids, "whats-new"]) expect(permissionEffect(rules, "skill", id)).toBe("allow")
-  const excluded = ["design-md", "journey-write", "speckit-bugfix", "delivery-fan-out", "delivery-git-workflow", "debate"]
+  for (const id of [...ids, "whats-new", "delivery-git-workflow"]) expect(permissionEffect(rules, "skill", id)).toBe("allow")
+  const excluded = ["design-md", "journey-write", "speckit-bugfix", "delivery-fan-out", "debate"]
   for (const id of [...excluded, "license-picker", "beads-ledger", "find-tools", "prototype-logic"])
     expect(permissionEffect(rules, "skill", id)).toBe("deny")
 })
