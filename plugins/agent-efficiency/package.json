@@ -9,7 +9,8 @@
   },
   "files": [
     "dist",
-    "index.js"
+    "index.js",
+    "instructions"
   ],
   "peerDependencies": {
     "@opencode/plugin": "^2.1.4"
