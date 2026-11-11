@@ -6,9 +6,9 @@ export const LANE_PREFIX = "lane/"
 export const SUBAGENT_PREAMBLE = "You are a subagent spawned by another session."
 export const WORKTREE_PARAM = "worktree"
 export const WORKTREE_PARAM_DESCRIPTION =
-  "Path or branch of an existing worktree of this project; false disables automatic isolation."
+  "New spawns only. Omit for defaults: opted-in writers get a fresh lane; others start in your directory. Path or branch starts in another existing worktree; false keeps an opted-in writer in your directory."
 
-export const DEFAULT_AGENTS: readonly string[] = ["implementer", "implementer-high", "general"]
+export const DEFAULT_AGENTS: readonly string[] = ["coder", "implementer", "implementer-high", "general"]
 
 export type Options = {
   /** Agents (id or name) whose subagent calls get a worktree. */
@@ -146,14 +146,14 @@ export function findWorktree(requested: string, path: string | undefined, entrie
 
 /** Where a new subagent starts. */
 export type StartPlan =
-  | { kind: "default" }
+  | { kind: "default"; note?: string }
   | { kind: "isolate"; from: string }
   | { kind: "move"; worktree: WorktreeEntry }
   | { kind: "refuse"; reason: string }
 
 /**
- * Where a subagent call starts. Without `worktree` it is today's behaviour: a fresh
- * worktree from the caller's checkout when the agent is isolated, else the caller's
+ * Where a subagent call starts. Without `worktree`, a clean caller gets a fresh
+ * worktree when the agent is isolated; dirty tracked files keep it in the caller's
  * directory (child sessions inherit the parent's location). With `worktree`, an isolated
  * agent gets a fresh worktree branched from that worktree, and any other agent runs in it.
  */
@@ -167,9 +167,14 @@ export function planStart(facts: {
   lookup?: WorktreeLookup
   /** Whether the host can run the agent as a subagent (known, not primary). */
   runnable: boolean
+  trackedDirty?: boolean
 }): StartPlan {
   const { input, isolation, lookup } = facts
+  if (input.sessionID !== undefined)
+    return { kind: "default", ...(resumeWorktreeNote(input) ? { note: RESUME_WORKTREE_NOTE } : {}) }
   if (input.worktree === false) return { kind: "default" }
+  if (input.worktree === undefined && isolation.isolate && facts.trackedDirty)
+    return { kind: "default", note: DIRTY_CHECKOUT_NOTE }
   if (input.worktree === undefined || lookup === undefined)
     return isolation.isolate ? { kind: "isolate", from: facts.parentDir } : { kind: "default" }
   if (!lookup.ok) return { kind: "refuse", reason: lookup.reason }
@@ -201,7 +206,12 @@ export function isUnbornHead(facts: HeadFacts): boolean {
 export const UNBORN_NOTE =
   "subagent-worktree: this repository has no commits yet, so the subagent ran in place without a worktree. Commit once to enable isolation."
 
-export const CONTINUE_WITH_WORKTREE = "worktree applies only to new subagents; omit it when passing sessionID"
+export const RESUME_WORKTREE_NOTE = "subagent-worktree: ignored `worktree` on a resumed session; it keeps its directory."
+export function resumeWorktreeNote(input: SubagentInput): string | undefined {
+  return input.sessionID !== undefined && input.worktree !== undefined ? RESUME_WORKTREE_NOTE : undefined
+}
+export const DIRTY_CHECKOUT_NOTE =
+  "subagent-worktree: the caller checkout has uncommitted changes to tracked files, so the writer ran in place without a lane. Passing `worktree` forces a lane."
 
 export type IsolationFacts = {
   projectDir?: string

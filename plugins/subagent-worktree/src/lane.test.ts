@@ -3,6 +3,7 @@ import {
   annotation,
   containingWorktree,
   DEFAULT_AGENTS,
+  DIRTY_CHECKOUT_NOTE,
   decideIsolation,
   decideMerge,
   diffCommand,
@@ -20,6 +21,7 @@ import {
   parseLane,
   parseWorktrees,
   planStart,
+  RESUME_WORKTREE_NOTE,
   readOptions,
   readSubagentInput,
   rewritePrompt,
@@ -60,6 +62,7 @@ test("external working-directory directives are conservative", () => {
 
 describe("readOptions", () => {
   test("defaults", () => {
+    expect(DEFAULT_AGENTS).toEqual(["coder", "implementer", "implementer-high", "general"])
     expect(readOptions(undefined)).toEqual({ agents: DEFAULT_AGENTS, base: "HEAD" })
   })
   test("reads agents and base, dropping junk", () => {
@@ -155,6 +158,16 @@ describe("planStart", () => {
   const base = { parentDir: "/repo", current: "/repo", runnable: true }
   const input = { agent: "explore", description: "d", prompt: "p" }
   const named = { ...input, worktree: "feat" }
+
+  test.each(["feat", false] as const)("ignores worktree %j on resumes", (worktree) => {
+    expect(planStart({ ...base, input: { ...input, sessionID: "ses_x", worktree }, isolation: isolate })).toEqual({ kind: "default", note: RESUME_WORKTREE_NOTE })
+  })
+
+  test("dirty tracked files skip only automatic writer lanes", () => {
+    expect(planStart({ ...base, input, isolation: isolate, trackedDirty: true })).toEqual({ kind: "default", note: DIRTY_CHECKOUT_NOTE })
+    expect(planStart({ ...base, input, isolation: shared, trackedDirty: true })).toEqual({ kind: "default" })
+    expect(planStart({ ...base, input: named, isolation: isolate, trackedDirty: true, lookup: { ok: true, worktree: feat } })).toEqual({ kind: "isolate", from: "/wt/feat" })
+  })
 
   test("without worktree keeps today's behaviour", () => {
     expect(planStart({ ...base, input, isolation: isolate })).toEqual({ kind: "isolate", from: "/repo" })

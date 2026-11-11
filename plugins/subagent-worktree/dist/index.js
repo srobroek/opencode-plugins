@@ -201,8 +201,8 @@ var MERGE_TOOL = "subagent_worktree_merge";
 var LANE_PREFIX = "lane/";
 var SUBAGENT_PREAMBLE = "You are a subagent spawned by another session.";
 var WORKTREE_PARAM = "worktree";
-var WORKTREE_PARAM_DESCRIPTION = "Path or branch of an existing worktree of this project; false disables automatic isolation.";
-var DEFAULT_AGENTS = ["implementer", "implementer-high", "general"];
+var WORKTREE_PARAM_DESCRIPTION = "New spawns only. Omit for defaults: opted-in writers get a fresh lane; others start in your directory. Path or branch starts in another existing worktree; false keeps an opted-in writer in your directory.";
+var DEFAULT_AGENTS = ["coder", "implementer", "implementer-high", "general"];
 function readOptions(options) {
   const agents = Array.isArray(options?.agents) ? options.agents.filter((agent) => typeof agent === "string" && agent !== "") : DEFAULT_AGENTS;
   const base = typeof options?.base === "string" && options.base.trim() !== "" ? options.base.trim() : "HEAD";
@@ -295,8 +295,12 @@ function findWorktree(requested, path, entries) {
 }
 function planStart(facts) {
   const { input, isolation, lookup } = facts;
+  if (input.sessionID !== undefined)
+    return { kind: "default", ...resumeWorktreeNote(input) ? { note: RESUME_WORKTREE_NOTE } : {} };
   if (input.worktree === false)
     return { kind: "default" };
+  if (input.worktree === undefined && isolation.isolate && facts.trackedDirty)
+    return { kind: "default", note: DIRTY_CHECKOUT_NOTE };
   if (input.worktree === undefined || lookup === undefined)
     return isolation.isolate ? { kind: "isolate", from: facts.parentDir } : { kind: "default" };
   if (!lookup.ok)
@@ -313,7 +317,11 @@ function isUnbornHead(facts) {
   return facts.head === undefined && Boolean(facts.symbolic) && facts.refs === "";
 }
 var UNBORN_NOTE = "subagent-worktree: this repository has no commits yet, so the subagent ran in place without a worktree. Commit once to enable isolation.";
-var CONTINUE_WITH_WORKTREE = "worktree applies only to new subagents; omit it when passing sessionID";
+var RESUME_WORKTREE_NOTE = "subagent-worktree: ignored `worktree` on a resumed session; it keeps its directory.";
+function resumeWorktreeNote(input) {
+  return input.sessionID !== undefined && input.worktree !== undefined ? RESUME_WORKTREE_NOTE : undefined;
+}
+var DIRTY_CHECKOUT_NOTE = "subagent-worktree: the caller checkout has uncommitted changes to tracked files, so the writer ran in place without a lane. Passing `worktree` forces a lane.";
 function decideIsolation(facts) {
   if (facts.tool !== SUBAGENT_TOOL)
     return { isolate: false, reason: "not the subagent tool" };
@@ -580,6 +588,12 @@ function createGit(run) {
       return { ahead: Number.parseInt(ahead, 10) || 0, dirty: porcelain !== "" };
     },
     changedFiles: async (directory, target) => files(await git(directory, "diff", "--name-only", "-z", `${target}...HEAD`)),
+    trackedDirty: async (directory) => {
+      const changed = await git(directory, "status", "--porcelain", "--untracked-files=no");
+      if (changed === undefined)
+        throw new Error(`subagent-worktree: cannot read tracked changes in ${directory}`);
+      return changed !== "";
+    },
     localFiles: async (directory) => {
       const changed = files(await git(directory, "diff", "--name-only", "-z", "HEAD"));
       const untracked = files(await git(directory, "ls-files", "--others", "--exclude-standard", "--full-name", "-z"));
@@ -702,8 +716,11 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
       return;
     event.input = withoutWorktree(event.input);
     if (input.sessionID !== undefined) {
-      if (input.worktree !== undefined)
-        throw new Error(`subagent-worktree: ${CONTINUE_WITH_WORKTREE}`);
+      const note = resumeWorktreeNote(input);
+      if (note) {
+        notes.set(event.id, note);
+        return;
+      }
       return revive(event, input.sessionID, input.prompt);
     }
     const parent = await getSession(event.sessionID);
@@ -728,11 +745,17 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
       parentDir,
       current: start?.current,
       ...start ? { lookup: start.lookup } : {},
-      runnable: agent !== undefined && agent.mode !== "primary"
+      runnable: agent !== undefined && agent.mode !== "primary",
+      trackedDirty: input.worktree === undefined && isolation.isolate ? await git2.trackedDirty(parentDir) : false
     });
     if (plan.kind === "refuse")
       throw new Error(`subagent-worktree: ${plan.reason}`);
-    if (plan.kind === "default" || !agent)
+    if (plan.kind === "default") {
+      if (plan.note)
+        notes.set(event.id, plan.note);
+      return;
+    }
+    if (!agent)
       return;
     await assertSubagent(event, agent.id);
     if (plan.kind === "move") {
@@ -1054,13 +1077,14 @@ function createPlugin(overrides = {}) {
 }
 var src_default = createPlugin();
 export {
-  CONTINUE_WITH_WORKTREE,
   DEFAULT_AGENTS,
+  DIRTY_CHECKOUT_NOTE,
   GIT_TIMEOUT_MS,
   LANE_PREFIX,
   MERGE_DESCRIPTION,
   MERGE_INPUT,
   MERGE_TOOL,
+  RESUME_WORKTREE_NOTE,
   SESSION_LOOKUP_MS,
   SUBAGENT_PREAMBLE,
   SUBAGENT_TOOL,
@@ -1092,6 +1116,7 @@ export {
   planStart,
   readOptions,
   readSubagentInput,
+  resumeWorktreeNote,
   rewritePrompt,
   rulesAreReadOnly,
   shortSha,

@@ -8,7 +8,6 @@ import { toJsonSchema, withOptionalString } from "@srobroek/opencode-lib/tool-sc
 import { createGit, type Git, type Runner, spawnRunner } from "./git.ts"
 import {
   annotation,
-  CONTINUE_WITH_WORKTREE,
   containingWorktree,
   decideIsolation,
   decideMerge,
@@ -28,6 +27,7 @@ import {
   planStart,
   readOptions,
   readSubagentInput,
+  resumeWorktreeNote,
   rewritePrompt,
   SESSION_LOOKUP_MS,
   SUBAGENT_TOOL,
@@ -214,7 +214,11 @@ export function createLanes(
     if (!input) return
     event.input = withoutWorktree(event.input)
     if (input.sessionID !== undefined) {
-      if (input.worktree !== undefined) throw new Error(`subagent-worktree: ${CONTINUE_WITH_WORKTREE}`)
+      const note = resumeWorktreeNote(input)
+      if (note) {
+        notes.set(event.id, note)
+        return
+      }
       return revive(event, input.sessionID, input.prompt)
     }
 
@@ -240,9 +244,14 @@ export function createLanes(
       current: start?.current,
       ...(start ? { lookup: start.lookup } : {}),
       runnable: agent !== undefined && agent.mode !== "primary",
+      trackedDirty: input.worktree === undefined && isolation.isolate ? await git.trackedDirty(parentDir) : false,
     })
     if (plan.kind === "refuse") throw new Error(`subagent-worktree: ${plan.reason}`)
-    if (plan.kind === "default" || !agent) return
+    if (plan.kind === "default") {
+      if (plan.note) notes.set(event.id, plan.note)
+      return
+    }
+    if (!agent) return
 
     await assertSubagent(event, agent.id)
     if (plan.kind === "move") {
