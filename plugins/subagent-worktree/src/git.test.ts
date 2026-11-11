@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createGit, spawnRunner } from "./git.ts"
 
@@ -15,7 +16,7 @@ describe("createGit().isUnborn on real repositories", () => {
   }
 
   beforeAll(async () => {
-    root = await mkdtemp(join("/tmp/opencode", "subagent-worktree-unborn-"))
+    root = await mkdtemp(join(tmpdir(), "subagent-worktree-unborn-"))
   })
   afterAll(() => rm(root, { recursive: true, force: true }))
 
