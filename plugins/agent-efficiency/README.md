@@ -35,10 +35,10 @@ An untargeted `read` of a big text file costs far more tokens than the part an a
 - A `read` with no `offset` and no `limit` of a text file over `bytes` or `lines` is refused. A read with `offset` or `limit` always passes, as do images, PDFs and other binary files, directories and missing files.
 - A shell command that runs `cat`, `less` or `more` on such a file is refused when its output is not piped or redirected. This covers `sh -c`, loops and `cd dir && cat file`. `head`, `tail`, `sed -n`, `grep`, `rg`, `wc`, `cat file | filter` and `cat > file` pass.
 - Each path is refused once per session. A second untargeted read of the same path passes, so an agent that needs the whole file gets it.
-- The size check reads at most 1 MiB, so the line count of a larger file is a lower bound.
+- The size check reads at most 1 MiB, so the line count of a larger file is a lower bound. It runs asynchronously with a 500 ms deadline (`timeoutMs`); on a timeout, an error or a failed session lookup the read is allowed.
 
 ```jsonc
-{ "options": { "largeRead": { "bytes": 32768, "lines": 350, "agents": ["coder", "general", "implementer", "implementer-high"] } } }
+{ "options": { "largeRead": { "bytes": 32768, "lines": 350, "timeoutMs": 500, "agents": ["coder", "general", "implementer", "implementer-high"] } } }
 ```
 
 ## Subagent scratch reminders
@@ -195,7 +195,7 @@ starts with, rejects it. Moving the call into `workdir` does not help: OpenCode 
 | `bashAlias` | `true` | `false` leaves `bash` calls to fail as unknown tools. |
 | `lead` | `true` | Adds primary-only delegation instructions. |
 | `waitGuard` | `true` | Refuses foreground shell commands that run `sleep`. |
-| `largeRead` | `true` | Refuses a first untargeted read of a large text file. `false` turns it off; an object sets `bytes` (32768), `lines` (350) and `agents` (`coder`, `general`, `implementer`, `implementer-high`). |
+| `largeRead` | `true` | Refuses a first untargeted read of a large text file. `false` turns it off; an object sets `bytes` (32768), `lines` (350), `timeoutMs` (500) and `agents` (`coder`, `general`, `implementer`, `implementer-high`). |
 | `scratchReminder` | `true` | Notes newly created scratch entries in child-session tool results. |
 | `explore` | `true` | `false` keeps the built-in `explore` agent as OpenCode and your config define it. |
 | `leanSubagents` | the read-only agents above | Agent ids whose child sessions get the trimmed prompt. `false` or `[]` turns it off. |

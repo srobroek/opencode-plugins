@@ -748,7 +748,7 @@ function shapeExplore(draft) {
 }
 
 // plugins/agent-efficiency/src/large-read.ts
-import { closeSync, openSync, readSync, statSync as statSync2 } from "fs";
+import { stat as fsStat, open } from "fs/promises";
 import { isAbsolute as isAbsolute2, resolve as resolve2 } from "path";
 
 // plugins/lib/src/shell-command.ts
@@ -1215,22 +1215,33 @@ function parseLargeReadOptions(options) {
   return {
     agents: new Set(agents),
     bytes: positive(value.bytes, DEFAULT_LARGE_READ_BYTES),
-    lines: positive(value.lines, DEFAULT_LARGE_READ_LINES)
+    lines: positive(value.lines, DEFAULT_LARGE_READ_LINES),
+    timeoutMs: positive(value.timeoutMs, DEFAULT_LARGE_READ_TIMEOUT_MS)
   };
 }
-function largeFile(path, limits) {
-  const extension = path.includes(".") ? path.slice(path.lastIndexOf(".") + 1).toLowerCase() : "";
-  if (BINARY_EXTENSIONS.has(extension))
-    return;
-  let fd;
+var DEFAULT_LARGE_READ_TIMEOUT_MS = 500;
+async function withDeadline(work, ms) {
+  let timer;
+  const deadline = new Promise((done) => {
+    timer = setTimeout(done, ms, undefined);
+  });
   try {
-    const stat = statSync2(path);
-    if (!stat.isFile() || stat.size === 0)
-      return;
+    return await Promise.race([work, deadline]);
+  } catch {
+    return;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+async function inspect(path, limits) {
+  const stat = await fsStat(path);
+  if (!stat.isFile() || stat.size === 0)
+    return;
+  const handle = await open(path, "r");
+  try {
     const buffer = Buffer.alloc(Math.min(stat.size, SNIFF_LIMIT));
-    fd = openSync(path, "r");
-    const read = readSync(fd, buffer, 0, buffer.length, 0);
-    const sample = buffer.subarray(0, read);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    const sample = buffer.subarray(0, bytesRead);
     if (sample.subarray(0, 8192).includes(0))
       return;
     let lines = 0;
@@ -1241,12 +1252,15 @@ function largeFile(path, limits) {
     if (stat.size <= limits.bytes && lines <= limits.lines)
       return;
     return { bytes: stat.size, lines, truncated: stat.size > SNIFF_LIMIT };
-  } catch {
-    return;
   } finally {
-    if (fd !== undefined)
-      closeSync(fd);
+    await handle.close();
   }
+}
+async function largeFile(path, limits, timeoutMs = DEFAULT_LARGE_READ_TIMEOUT_MS) {
+  const extension = path.includes(".") ? path.slice(path.lastIndexOf(".") + 1).toLowerCase() : "";
+  if (BINARY_EXTENSIONS.has(extension))
+    return;
+  return withDeadline(inspect(path, limits), timeoutMs);
 }
 function largeReadRefusal(path, file) {
   const lines = file.truncated ? `${file.lines}+` : `${file.lines}`;
@@ -1263,50 +1277,67 @@ function untargetedReadPath(tool, input) {
 }
 var WHOLE_FILE_READERS = new Set(["cat", "less", "more"]);
 var PIPES = new Set(["|", "|&"]);
-var OPEN_GROUPS = new Set(["(", "{"]);
-var CLOSE_GROUPS = new Set([")", "}"]);
+var LOOP_STARTS = new Set(["for", "while", "until", "select", "if"]);
+var LOOP_ENDS = new Set(["done", "fi"]);
 function writesStdout(source, start) {
-  return /(?:^|[^\d])\d{0,1}(?:>>?|>\|)\s*$/.test(source.slice(0, start)) && !/(?:^|[^\d])2(?:>>?|>\|)\s*$/.test(source.slice(0, start));
+  const before = source.slice(0, start);
+  return /(?:^|[^\d])\d?(?:>>?|>\|)\s*$/.test(before) && !/(?:^|[^\d])2(?:>>?|>\|)\s*$/.test(before);
 }
-function cdTarget2(args, dir, expands) {
-  const target = args[0] === "--" ? args[1] : args[0];
-  if (dir === null || expands || target === undefined || target === "-" || target.startsWith("~") || /[$`]/.test(target))
+function readsStdin(source, start) {
+  return /(?:^|[^<\d])0?<\s*$/.test(source.slice(0, start));
+}
+function literalDirectory(dir, target, expands) {
+  if (dir === null || expands || target === undefined || target === "-" || target.startsWith("~") || /[$`*?]/.test(target))
     return null;
   return resolve2(dir, target);
 }
+function cdTarget2(args, dir, expands) {
+  return literalDirectory(dir, args[0] === "--" ? args[1] : args[0], expands);
+}
+var closesWith = (operator) => (item) => item.kind === "operator" && item.operator === operator;
+var firstWord = (item) => item.words[0] && !item.words[0].quoted ? item.words[0].value : undefined;
 function wholeFileReads(command, cwd, depth = 0) {
   if (depth > 32)
     return [];
   const found = [];
   let dir = cwd;
-  const saved = [];
+  const scopes = [];
   const scan = scanShell(command, { executableSubstitutionsOnly: true });
   for (const source of scan.substitutions)
     found.push(...wholeFileReads(source, dir ?? cwd, depth + 1));
   const { items } = scan;
+  const silenced = (item, next) => next?.kind === "operator" && PIPES.has(next.operator) || (item?.redirects.some((redirect) => writesStdout(command, redirect.start)) ?? false);
   for (let index = 0;index < items.length; index++) {
     const item = items[index];
     if (item === undefined)
       continue;
+    const next = items[index + 1];
     if (item.kind === "operator") {
-      if (OPEN_GROUPS.has(item.operator))
-        saved.push({ dir, start: found.length });
-      else if (CLOSE_GROUPS.has(item.operator)) {
-        const group = saved.pop();
-        if (group !== undefined) {
-          if (item.operator === ")")
-            dir = group.dir;
-          const next = items[index + 1];
-          if (next?.kind === "operator" && PIPES.has(next.operator))
-            found.length = group.start;
-        }
+      if (item.operator === "(" || item.operator === "{") {
+        scopes.push({ closes: closesWith(item.operator === "(" ? ")" : "}"), dir, start: found.length, restore: item.operator === "(" });
+      } else if (scopes[scopes.length - 1]?.closes(item)) {
+        const scope = scopes.pop();
+        if (scope.restore)
+          dir = scope.dir;
+        const trailing = next?.kind === "command" && next.words.length === 0 ? next : undefined;
+        if (silenced(trailing, next))
+          found.length = scope.start;
       }
+      continue;
+    }
+    const head = firstWord(item);
+    if (head !== undefined && LOOP_STARTS.has(head)) {
+      scopes.push({ closes: (candidate) => candidate.kind === "command" && LOOP_ENDS.has(firstWord(candidate) ?? ""), dir, start: found.length, restore: false });
+    } else if (scopes[scopes.length - 1]?.closes(item)) {
+      const scope = scopes.pop();
+      if (silenced(item, next))
+        found.length = scope.start;
       continue;
     }
     const words = [...item.words];
     while (words[0] && !words[0].quoted && CONTROL_PREFIXES.has(words[0].value))
       words.shift();
-    const { argv } = commandWords(words.map((word) => word.value));
+    const { argv, directories } = commandWords(words.map((word) => word.value));
     const offset = words.length - argv.length;
     const executable = words[offset];
     if (!executable || executable.quoted || executable.expands)
@@ -1316,24 +1347,38 @@ function wholeFileReads(command, cwd, depth = 0) {
       dir = cdTarget2(argv.slice(1), dir, words.slice(offset + 1).some((word) => word.expands));
       continue;
     }
-    for (const source of commandScripts(argv, item.hereDocuments))
-      found.push(...wholeFileReads(source, dir ?? cwd, depth + 1));
-    if (!WHOLE_FILE_READERS.has(name))
+    let commandDir = dir;
+    for (const wrapper of directories)
+      commandDir = literalDirectory(commandDir, wrapper, false);
+    const quiet = silenced(item, next);
+    if (!quiet)
+      for (const source of commandScripts(argv, item.hereDocuments))
+        found.push(...wholeFileReads(source, commandDir ?? cwd, depth + 1));
+    if (!WHOLE_FILE_READERS.has(name) || quiet)
       continue;
-    const next = items[index + 1];
-    if (next?.kind === "operator" && PIPES.has(next.operator))
-      continue;
-    if (item.redirects.some((redirect) => writesStdout(command, redirect.start)))
-      continue;
+    const operands = [];
     for (let at = 1;at < argv.length; at++) {
       const word = words[offset + at];
       const arg = argv[at];
-      if (!word || arg === "--" || arg === "-" || arg.startsWith("-") || word.expands || /[$`]/.test(arg))
+      if (arg === "--" || arg.startsWith("-") && arg !== "-")
+        continue;
+      operands.push(arg);
+      if (!word || arg === "-" || word.expands || /[$`]/.test(arg))
         continue;
       if (isAbsolute2(arg))
         found.push(arg);
-      else if (dir !== null)
-        found.push(resolve2(dir, arg));
+      else if (commandDir !== null)
+        found.push(resolve2(commandDir, arg));
+    }
+    if (operands.length === 0 || operands.includes("-")) {
+      for (const redirect of item.redirects) {
+        if (!readsStdin(command, redirect.start) || redirect.expands || /[$`]/.test(redirect.value))
+          continue;
+        if (isAbsolute2(redirect.value))
+          found.push(redirect.value);
+        else if (dir !== null)
+          found.push(resolve2(dir, redirect.value));
+      }
     }
   }
   return found;
@@ -1341,37 +1386,38 @@ function wholeFileReads(command, cwd, depth = 0) {
 async function setupLargeRead(ctx, options) {
   const sessions = new Map;
   const stop = onSessionDeleted(ctx, (sessionID) => sessions.delete(sessionID));
-  const fallback = process.cwd();
-  const stateFor = (sessionID) => {
-    let state = sessions.get(sessionID);
-    if (state === undefined) {
-      const info = ctx.session.get({ sessionID }).then((session) => {
-        const found = session;
-        return { child: typeof found.parentID === "string", directory: found.location?.directory ?? fallback };
-      }).catch(() => ({ child: true, directory: fallback }));
-      state = { info, seen: new Set };
-      sessions.set(sessionID, state);
-    }
-    return state;
-  };
   const hook = await ctx.tool.hook("execute.before", async (event) => {
     const shell = shellCall(event.tool, event.input);
     const target = shell ? undefined : untargetedReadPath(event.tool, event.input);
     if (!shell && target === undefined)
       return;
-    const state = stateFor(event.sessionID);
-    const { child, directory } = await state.info;
-    if (child && !options.agents.has(event.agent) || sessions.get(event.sessionID) !== state)
+    let found;
+    try {
+      found = await ctx.session.get({ sessionID: event.sessionID });
+    } catch {
       return;
+    }
+    const directory = found?.location?.directory;
+    if (directory === undefined)
+      return;
+    if (typeof found.parentID === "string" && !options.agents.has(event.agent))
+      return;
+    let state = sessions.get(event.sessionID);
+    if (state === undefined) {
+      state = { seen: new Set };
+      sessions.set(event.sessionID, state);
+    }
     const base = shell?.workdir ? resolve2(directory, shell.workdir) : directory;
     const paths = shell ? wholeFileReads(shell.command, base) : [resolve2(base, target)];
     const reasons = [];
     for (const path of new Set(paths)) {
       if (state.seen.has(path))
         continue;
-      const file = largeFile(path, options);
+      const file = await largeFile(path, options, options.timeoutMs);
       if (file === undefined)
         continue;
+      if (sessions.get(event.sessionID) !== state)
+        return;
       state.seen.add(path);
       reasons.push(largeReadRefusal(path, file));
     }
@@ -1850,6 +1896,7 @@ export {
   DEFAULT_LARGE_READ_AGENTS,
   DEFAULT_LARGE_READ_BYTES,
   DEFAULT_LARGE_READ_LINES,
+  DEFAULT_LARGE_READ_TIMEOUT_MS,
   DEFAULT_LEAN_AGENTS,
   EXPLORE_ID,
   EXPLORE_PERMISSIONS,
@@ -1881,5 +1928,6 @@ export {
   shapeExplore,
   untargetedReadPath,
   waitRefusal,
-  wholeFileReads
+  wholeFileReads,
+  withDeadline
 };

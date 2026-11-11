@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
-import plugin, { filterLeadRouting, largeFile, newScratchEntries, runsSleep, scratchEntries, scratchEntry, wholeFileReads } from "./index.ts"
+import plugin, { filterLeadRouting, largeFile, newScratchEntries, runsSleep, scratchEntries, scratchEntry, wholeFileReads, withDeadline } from "./index.ts"
 
 describe("lead routing", () => {
   test("keeps a reviewer bullet if either reviewer exists, but ignores ids in its description", () => {
@@ -181,8 +181,14 @@ describe("session cache deletion", () => {
   })
 })
 
+const scratchDir = () => {
+  const root = join(realpathSync(tmpdir()), "opencode")
+  mkdirSync(root, { recursive: true })
+  return mkdtempSync(join(root, "large-read-"))
+}
+
 describe("large-read guard", () => {
-  const dir = mkdtempSync(join(realpathSync(tmpdir()), "opencode-large-read-"))
+  const dir = scratchDir()
   const lines = (count: number) => `${Array.from({ length: count }, (_, i) => `line ${i}`).join("\n")}\n`
   const limits = { bytes: 32768, lines: 350 }
   const write = (name: string, content: string | Buffer) => {
@@ -193,20 +199,65 @@ describe("large-read guard", () => {
   const big = write("sub/big.md", lines(400))
   write("small.md", lines(10))
 
-  test("classifies size, lines, binary and missing files", () => {
-    expect(largeFile(big, limits)).toMatchObject({ lines: 400, truncated: false })
-    expect(largeFile(write("exact.txt", lines(350)), limits)).toBeUndefined()
-    expect(largeFile(write("small.md", lines(10)), limits)).toBeUndefined()
-    expect(largeFile(write("wide.txt", "x".repeat(40000)), limits)).toMatchObject({ lines: 1, bytes: 40000 })
-    expect(largeFile(write("shot.png", Buffer.alloc(100000, 1)), limits)).toBeUndefined()
-    expect(largeFile(write("blob", Buffer.concat([Buffer.alloc(100, 0), Buffer.alloc(100000, 65)])), limits)).toBeUndefined()
-    expect(largeFile(dir, limits)).toBeUndefined()
-    expect(largeFile(join(dir, "missing.txt"), limits)).toBeUndefined()
+  test("classifies size, lines, binary and missing files", async () => {
+    expect(await largeFile(big, limits)).toMatchObject({ lines: 400, truncated: false })
+    expect(await largeFile(write("exact.txt", lines(350)), limits)).toBeUndefined()
+    expect(await largeFile(write("small.md", lines(10)), limits)).toBeUndefined()
+    expect(await largeFile(write("wide.txt", "x".repeat(40000)), limits)).toMatchObject({ lines: 1, bytes: 40000 })
+    expect(await largeFile(write("shot.png", Buffer.alloc(100000, 1)), limits)).toBeUndefined()
+    expect(await largeFile(write("blob", Buffer.concat([Buffer.alloc(100, 0), Buffer.alloc(100000, 65)])), limits)).toBeUndefined()
+    expect(await largeFile(dir, limits)).toBeUndefined()
+    expect(await largeFile(join(dir, "missing.txt"), limits)).toBeUndefined()
   })
-  test("counts at most 1 MiB", () => {
+  test("counts at most 1 MiB", async () => {
     const huge = write("huge.log", lines(300000))
-    expect(largeFile(huge, limits)).toMatchObject({ truncated: true })
-    expect(largeFile(huge, limits)?.lines).toBeLessThan(300000)
+    expect(await largeFile(huge, limits)).toMatchObject({ truncated: true })
+    expect((await largeFile(huge, limits))?.lines).toBeLessThan(300000)
+  })
+  test("fails open when the filesystem does not answer or errors", async () => {
+    expect(await withDeadline(new Promise<number>(() => {}), 20)).toBeUndefined()
+    expect(await withDeadline(Promise.reject(new Error("EIO")), 20)).toBeUndefined()
+    expect(await withDeadline(Promise.resolve(7), 20)).toBe(7)
+  })
+  test("pipes and redirects on scripts, groups, loops and xargs cover the reads inside", () => {
+    const at = join(dir, "sub")
+    for (const command of ["sh -c 'cat big.md' | grep x", "{ cat big.md; } > out", "(cat big.md) >out 2>&1", "for f in a; do cat big.md; done > out", "for f in a; do cat big.md; done | wc -l", "xargs cat < list | wc -l", "xargs cat big.md | wc -l", "eval 'cat big.md' > out"]) expect(wholeFileReads(command, at)).toEqual([])
+    expect(wholeFileReads("sh -c 'cat big.md' 2>/dev/null", at)).toEqual([join(at, "big.md")])
+    expect(wholeFileReads("{ cat big.md; }", at)).toEqual([join(at, "big.md")])
+  })
+  test("resolves operands and scripts against wrapper directories", () => {
+    expect(wholeFileReads("env -C sub cat big.md", dir)).toEqual([big])
+    expect(wholeFileReads("env -C sub sh -c 'cat big.md'", dir)).toEqual([big])
+  })
+  test("counts a literal stdin redirect when the reader consumes stdin", () => {
+    const at = join(dir, "sub")
+    for (const command of ["cat < big.md", "less < big.md", "cat - < big.md", "0< big.md cat"]) expect(wholeFileReads(command, at)).toEqual([join(at, "big.md")])
+    expect(wholeFileReads("cat small.md < big.md", at)).toEqual([join(at, "small.md")])
+    for (const command of ["cat < big.md | wc -l", "cat <<EOF\nx\nEOF", "cat <<< word", "cat < $F"]) expect(wholeFileReads(command, at)).toEqual([])
+  })
+  test("follows a session move and skips a failed lookup without caching it", async () => {
+    const other = scratchDir()
+    writeFileSync(join(other, "big.md"), lines(500))
+    const fake = createFakeContext({ sessions: [{ id: "root", location: { directory: dir } }] })
+    const cleanup = await plugin.setup(fake.context)
+    const read = (path: string) => fake.fire.tool("execute.before", { id: path, sessionID: "root", agent: "build", tool: "read", input: { path } })
+    try {
+      await expect(read("sub/big.md")).rejects.toThrow("has 400 lines")
+      await expect(read("sub/big.md")).resolves.toBeDefined()
+      await fake.context.session.move({ sessionID: "root", directory: other } as never)
+      await expect(read("big.md")).rejects.toThrow("has 500 lines")
+      await expect(read("sub/big.md")).resolves.toBeDefined()
+      const stored = fake.sessions.get("root")
+      fake.sessions.delete("root")
+      await expect(read("big.md")).resolves.toBeDefined()
+      fake.sessions.set("root", { ...stored, id: "root", location: { directory: dir } })
+      await expect(read("sub/big.md")).resolves.toBeDefined()
+      fake.sessions.set("root", { id: "root", location: { directory: other } })
+      await expect(read("big.md")).resolves.toBeDefined()
+    } finally {
+      await cleanup?.()
+      rmSync(other, { recursive: true, force: true })
+    }
   })
   test("finds whole-file shell reads", () => {
     for (const command of ["cat big.md", `sh -c "cat big.md"`, "cd sub && cat big.md", "for f in a; do cat big.md; done", "less big.md", "cat -n big.md 2>/dev/null"]) {
