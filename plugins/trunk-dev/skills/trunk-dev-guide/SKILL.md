@@ -5,9 +5,16 @@ description: "Use when branching, landing on main, opening or merging a PR/MR, a
 
 # Trunk-based development guide
 
-This guide only routes. Before you answer or act, load the matching skill with the skill
-tool, by id, in this same turn, and every other row the task spans. Answer from the loaded
-skill, not from this table.
+## Essentials
+
+- One short-lived branch per change, cut from the default branch and merged within hours to about two days.
+- Keep PRs small.
+- The PR title is a Conventional Commit header; it becomes the squash subject.
+- CI must pass before merge.
+- Squash into the default branch unless the repo says otherwise.
+- Delete the branch after merge.
+
+Load a row below only for its situation, by id with the skill tool, in this same turn.
 
 | Situation | Load skill |
 | --- | --- |
