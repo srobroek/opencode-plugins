@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs"
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
-import plugin, { filterLeadRouting, newScratchEntries, runsSleep, scratchEntries, scratchEntry } from "./index.ts"
+import plugin, { filterLeadRouting, largeFile, newScratchEntries, runsSleep, scratchEntries, scratchEntry, wholeFileReads } from "./index.ts"
 
 describe("lead routing", () => {
   test("keeps a reviewer bullet if either reviewer exists, but ignores ids in its description", () => {
@@ -178,5 +178,63 @@ describe("session cache deletion", () => {
       await cleanup?.()
       for (const path of [fixture, entry, pending]) rmSync(path, { recursive: true, force: true })
     }
+  })
+})
+
+describe("large-read guard", () => {
+  const dir = mkdtempSync(join(realpathSync(tmpdir()), "opencode-large-read-"))
+  const lines = (count: number) => `${Array.from({ length: count }, (_, i) => `line ${i}`).join("\n")}\n`
+  const limits = { bytes: 32768, lines: 350 }
+  const write = (name: string, content: string | Buffer) => {
+    mkdirSync(join(dir, "sub"), { recursive: true })
+    writeFileSync(join(dir, name), content)
+    return join(dir, name)
+  }
+  const big = write("sub/big.md", lines(400))
+  write("small.md", lines(10))
+
+  test("classifies size, lines, binary and missing files", () => {
+    expect(largeFile(big, limits)).toMatchObject({ lines: 400, truncated: false })
+    expect(largeFile(write("exact.txt", lines(350)), limits)).toBeUndefined()
+    expect(largeFile(write("small.md", lines(10)), limits)).toBeUndefined()
+    expect(largeFile(write("wide.txt", "x".repeat(40000)), limits)).toMatchObject({ lines: 1, bytes: 40000 })
+    expect(largeFile(write("shot.png", Buffer.alloc(100000, 1)), limits)).toBeUndefined()
+    expect(largeFile(write("blob", Buffer.concat([Buffer.alloc(100, 0), Buffer.alloc(100000, 65)])), limits)).toBeUndefined()
+    expect(largeFile(dir, limits)).toBeUndefined()
+    expect(largeFile(join(dir, "missing.txt"), limits)).toBeUndefined()
+  })
+  test("counts at most 1 MiB", () => {
+    const huge = write("huge.log", lines(300000))
+    expect(largeFile(huge, limits)).toMatchObject({ truncated: true })
+    expect(largeFile(huge, limits)?.lines).toBeLessThan(300000)
+  })
+  test("finds whole-file shell reads", () => {
+    for (const command of ["cat big.md", `sh -c "cat big.md"`, "cd sub && cat big.md", "for f in a; do cat big.md; done", "less big.md", "cat -n big.md 2>/dev/null"]) {
+      expect(wholeFileReads(command, join(dir, command.includes("cd sub") ? "" : "sub")).map((path) => path.split("/").pop())).toContain("big.md")
+    }
+    for (const command of ["cat big.md | grep x", "head -n 50 big.md", "cat > out <<EOF\nx\nEOF", "cat big.md > out", "grep x big.md", "sed -n '1,5p' big.md", "wc -l big.md", "(cat big.md) | grep x", "cat $FILE"]) {
+      expect(wholeFileReads(command, join(dir, "sub"))).toEqual([])
+    }
+    expect(wholeFileReads("cd sub && cat big.md", dir)).toEqual([big])
+  })
+  test("refuses each path once, for primary sessions and listed child agents only", async () => {
+    const fake = createFakeContext({ sessions: [{ id: "root", location: { directory: dir } }, { id: "kid", parentID: "root", location: { directory: dir } }] })
+    const cleanup = await plugin.setup(fake.context)
+    const call = (sessionID: string, agent: string, tool: string, input: unknown, id = Math.random().toString()) => fake.fire.tool("execute.before", { id, sessionID, agent, tool, input })
+    try {
+      await expect(call("kid", "explore", "read", { path: big })).resolves.toBeDefined()
+      await expect(call("root", "build", "read", { path: big, limit: 50 })).resolves.toBeDefined()
+      await expect(call("root", "build", "read", { path: join(dir, "small.md") })).resolves.toBeDefined()
+      await expect(call("root", "build", "read", { path: big })).rejects.toThrow(`agent-efficiency large-read: ${big} has 400 lines`)
+      await expect(call("root", "build", "read", { path: big })).resolves.toBeDefined()
+      await expect(call("root", "build", "shell", { command: "cat sub/big.md" })).resolves.toBeDefined()
+      await expect(call("kid", "coder", "shell", { command: "cat sub/big.md" })).rejects.toThrow("large-read")
+      await expect(call("kid", "coder", "bash", { command: "less big.md", cwd: join(dir, "sub") })).resolves.toBeDefined()
+    } finally { await cleanup?.() }
+    const off = createFakeContext({ options: { largeRead: false }, sessions: [{ id: "root", location: { directory: dir } }] })
+    const dispose = await plugin.setup(off.context)
+    await off.fire.tool("execute.before", { id: "x", sessionID: "root", agent: "build", tool: "read", input: { path: big } })
+    await dispose?.()
+    rmSync(dir, { recursive: true, force: true })
   })
 })

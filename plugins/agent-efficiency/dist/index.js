@@ -747,196 +747,9 @@ function shapeExplore(draft) {
   draft.permissions.push(...EXPLORE_PERMISSIONS.map((rule) => ({ ...rule })));
 }
 
-// plugins/agent-efficiency/src/lead.ts
-import { readFileSync } from "fs";
-import { fileURLToPath } from "url";
-
-// plugins/agent-efficiency/src/session-cache.ts
-function onSessionDeleted(ctx, evict) {
-  const controller = new AbortController;
-  const iterator = ctx.event.subscribe({ signal: controller.signal })[Symbol.asyncIterator]();
-  const listening = (async () => {
-    try {
-      while (!controller.signal.aborted) {
-        const next = await iterator.next();
-        if (next.done)
-          break;
-        const event = next.value;
-        if (event.type === "session.deleted")
-          evict(event.data.sessionID);
-      }
-    } catch (error) {
-      if (!controller.signal.aborted)
-        throw error;
-    }
-  })();
-  listening.catch(() => {});
-  return async () => {
-    controller.abort();
-    await iterator.return?.();
-  };
-}
-
-// plugins/agent-efficiency/src/lead.ts
-var LEAD_PATH = fileURLToPath(new URL("../instructions/lead-routing.md", import.meta.url));
-function filterLeadRouting(text, registered) {
-  return text.split(`
-`).filter((line) => {
-    if (!line.startsWith("- "))
-      return true;
-    const ids = [...line.split(":")[0]?.matchAll(/`([^`]+)`/g) ?? []].map((match) => match[1]);
-    return ids.length === 0 || ids.some((id) => registered.has(id));
-  }).join(`
-`);
-}
-async function setupLead(ctx) {
-  const text = readFileSync(LEAD_PATH, "utf8").trim();
-  const cached = new Map;
-  const stop = onSessionDeleted(ctx, (sessionID) => cached.delete(sessionID));
-  const forSession = async (sessionID) => {
-    try {
-      const session = await ctx.session.get({ sessionID });
-      if (session.parentID != null)
-        return;
-      const agents = await ctx.agent.list();
-      const listed = Array.isArray(agents) ? agents : agents.data;
-      return filterLeadRouting(text, new Set(listed.map((agent) => agent.id)));
-    } catch {
-      return;
-    }
-  };
-  const inject = async (event) => {
-    if (!("subagent" in event.tools))
-      return;
-    let known = cached.get(event.sessionID);
-    if (!known) {
-      known = forSession(event.sessionID);
-      cached.set(event.sessionID, known);
-    }
-    const routing = await known;
-    if (routing)
-      event.system.push({ type: "text", text: routing });
-  };
-  const hooks = [await ctx.session.hook("context", inject), await ctx.session.hook("compaction", inject), await ctx.session.hook("generate", inject)];
-  return async () => {
-    await stop();
-    for (const hook of hooks)
-      await hook.dispose();
-    cached.clear();
-  };
-}
-
-// plugins/agent-efficiency/src/lean.ts
-import path from "path";
-var SEGMENTS = ["global-instructions", "project-instructions", "identity", "worktree"];
-var DEFAULT_DROP = ["identity", "worktree"];
-var ALIASES = {
-  instructions: ["global-instructions", "project-instructions"]
-};
-var DEFAULT_LEAN_AGENTS = [
-  "explore",
-  "pr-reviewer",
-  "adversarial-challenger",
-  "design-critic",
-  "a11y-auditor",
-  "speckit-verify",
-  "seance",
-  "security-reviewer",
-  "code-reviewer",
-  "researcher",
-  "architect",
-  "speckit-sync",
-  "cad-mech-reviewer",
-  "cad-dfm-reviewer",
-  "cad-sourcing-researcher"
-];
-var IDENTITY = `# Your Model
-- Name: `;
-var WORKTREE = "When you create a worktree outside the current working directory and intend to use it";
-var DATE = `
-
-Today's date: `;
-var SEPARATOR = `
-
-`;
-var HEADER = /(?:^|\n\n)Instructions from: ((?:\/|[A-Za-z]:[\\/]|https?:\/\/)[^\n]*)\n/g;
-function globalConfigDirs(env, home) {
-  const dirs = [env.OPENCODE_CONFIG_DIR, env.XDG_CONFIG_HOME && path.join(env.XDG_CONFIG_HOME, "opencode")];
-  if (home)
-    dirs.push(path.join(home, ".config", "opencode"));
-  return [...new Set(dirs.filter((dir) => typeof dir === "string" && dir.length > 0))];
-}
-function isUnder(file, dirs) {
-  return dirs.some((dir) => {
-    const root = dir.replace(/[\\/]+$/, "");
-    return file.startsWith(`${root}/`) || file.startsWith(`${root}\\`);
-  });
-}
-function dropInstructions(text, drop = () => true) {
-  const headers = [...text.matchAll(HEADER)].map((match) => ({
-    at: match.index + (match[0].startsWith(SEPARATOR) ? SEPARATOR.length : 0),
-    file: match[1]
-  }));
-  const first = headers[0];
-  if (first === undefined)
-    return text;
-  const end = text.indexOf(DATE, first.at);
-  if (end === -1)
-    return text;
-  const inside = headers.filter((header) => header.at < end);
-  const sections = inside.map((header, index) => ({
-    file: header.file,
-    text: text.slice(header.at, index + 1 < inside.length ? inside[index + 1].at - SEPARATOR.length : end)
-  }));
-  const kept = sections.filter((section) => !drop(section.file));
-  if (kept.length === sections.length)
-    return text;
-  const before = text.slice(0, first.at);
-  const after = text.slice(end);
-  if (kept.length > 0)
-    return before + kept.map((section) => section.text).join(SEPARATOR) + after;
-  return first.at === 0 ? after.slice(SEPARATOR.length) : before.slice(0, -SEPARATOR.length) + after;
-}
-function leanSystem(system, drop, globalDirs = []) {
-  const global = drop.has("global-instructions");
-  const project = drop.has("project-instructions");
-  const select = (file) => isUnder(file, globalDirs) ? global : project;
-  return system.flatMap((part) => {
-    if (part.type !== "text")
-      return [part];
-    if (drop.has("identity") && part.text.startsWith(IDENTITY))
-      return [];
-    if (drop.has("worktree") && part.text.startsWith(WORKTREE))
-      return [];
-    if (global || project) {
-      const text = dropInstructions(part.text, select);
-      if (text !== part.text)
-        return [{ ...part, text }];
-    }
-    return [part];
-  });
-}
-function parseLeanOptions(options) {
-  const agents = options.leanSubagents;
-  if (agents === false)
-    return;
-  const ids = Array.isArray(agents) ? agents.filter((id) => typeof id === "string") : DEFAULT_LEAN_AGENTS;
-  const drop = Array.isArray(options.leanDrop) ? options.leanDrop.flatMap((name) => {
-    if (typeof name !== "string")
-      return [];
-    if (SEGMENTS.includes(name))
-      return [name];
-    return ALIASES[name] ?? [];
-  }) : DEFAULT_DROP;
-  if (ids.length === 0 || drop.length === 0)
-    return;
-  return { agents: new Set(ids), drop: new Set(drop) };
-}
-
-// plugins/agent-efficiency/src/scratch.ts
-import { readdirSync, realpathSync } from "fs";
-import { tmpdir } from "os";
-import { isAbsolute as isAbsolute2, join as join2, relative as relative2, resolve as resolve2, sep } from "path";
+// plugins/agent-efficiency/src/large-read.ts
+import { closeSync, openSync, readSync, statSync as statSync2 } from "fs";
+import { isAbsolute as isAbsolute2, resolve as resolve2 } from "path";
 
 // plugins/lib/src/shell-command.ts
 function scanShell(source, options = {}) {
@@ -1255,22 +1068,30 @@ function bodySubstitutions(body) {
   return found;
 }
 
-// plugins/lib/src/shell-result.ts
-function record(value) {
-  return value !== null && typeof value === "object" ? value : undefined;
-}
-function shellOutput(result) {
-  const output = record(result?.output)?.output;
-  return typeof output === "string" ? output : undefined;
-}
-function appendResultText(result, text) {
-  const content = result.content;
-  if (Array.isArray(content))
-    return { ...result, content: [...content, { type: "text", text }] };
-  const base = typeof content === "string" ? content : shellOutput(result) ?? "";
-  return { ...result, content: base === "" ? text : `${base}${base.endsWith(`
-`) ? "" : `
-`}${text}` };
+// plugins/agent-efficiency/src/session-cache.ts
+function onSessionDeleted(ctx, evict) {
+  const controller = new AbortController;
+  const iterator = ctx.event.subscribe({ signal: controller.signal })[Symbol.asyncIterator]();
+  const listening = (async () => {
+    try {
+      while (!controller.signal.aborted) {
+        const next = await iterator.next();
+        if (next.done)
+          break;
+        const event = next.value;
+        if (event.type === "session.deleted")
+          evict(event.data.sessionID);
+      }
+    } catch (error) {
+      if (!controller.signal.aborted)
+        throw error;
+    }
+  })();
+  listening.catch(() => {});
+  return async () => {
+    controller.abort();
+    await iterator.return?.();
+  };
 }
 
 // plugins/agent-efficiency/src/shell-scripts.ts
@@ -1328,16 +1149,434 @@ function commandScripts(argv, documents = []) {
   return stdin ? documents.map((document) => document.body) : [];
 }
 
+// plugins/agent-efficiency/src/large-read.ts
+var DEFAULT_LARGE_READ_AGENTS = ["coder", "general", "implementer", "implementer-high"];
+var DEFAULT_LARGE_READ_BYTES = 32768;
+var DEFAULT_LARGE_READ_LINES = 350;
+var SNIFF_LIMIT = 1024 * 1024;
+var BINARY_EXTENSIONS = new Set([
+  "png",
+  "jpg",
+  "jpeg",
+  "gif",
+  "webp",
+  "bmp",
+  "ico",
+  "tif",
+  "tiff",
+  "avif",
+  "heic",
+  "svgz",
+  "pdf",
+  "zip",
+  "gz",
+  "tgz",
+  "bz2",
+  "xz",
+  "zst",
+  "7z",
+  "rar",
+  "tar",
+  "jar",
+  "wasm",
+  "so",
+  "dylib",
+  "dll",
+  "exe",
+  "bin",
+  "o",
+  "a",
+  "mp3",
+  "mp4",
+  "mov",
+  "avi",
+  "mkv",
+  "webm",
+  "wav",
+  "flac",
+  "ogg",
+  "ttf",
+  "otf",
+  "woff",
+  "woff2",
+  "sqlite",
+  "db",
+  "parquet",
+  "pyc",
+  "class"
+]);
+function parseLargeReadOptions(options) {
+  const raw = options.largeRead;
+  if (raw === false)
+    return;
+  const value = raw !== null && typeof raw === "object" ? raw : {};
+  const positive = (field, fallback) => typeof field === "number" && Number.isFinite(field) && field > 0 ? field : fallback;
+  const agents = Array.isArray(value.agents) ? value.agents.filter((id) => typeof id === "string") : DEFAULT_LARGE_READ_AGENTS;
+  return {
+    agents: new Set(agents),
+    bytes: positive(value.bytes, DEFAULT_LARGE_READ_BYTES),
+    lines: positive(value.lines, DEFAULT_LARGE_READ_LINES)
+  };
+}
+function largeFile(path, limits) {
+  const extension = path.includes(".") ? path.slice(path.lastIndexOf(".") + 1).toLowerCase() : "";
+  if (BINARY_EXTENSIONS.has(extension))
+    return;
+  let fd;
+  try {
+    const stat = statSync2(path);
+    if (!stat.isFile() || stat.size === 0)
+      return;
+    const buffer = Buffer.alloc(Math.min(stat.size, SNIFF_LIMIT));
+    fd = openSync(path, "r");
+    const read = readSync(fd, buffer, 0, buffer.length, 0);
+    const sample = buffer.subarray(0, read);
+    if (sample.subarray(0, 8192).includes(0))
+      return;
+    let lines = 0;
+    for (let at = sample.indexOf(10);at >= 0; at = sample.indexOf(10, at + 1))
+      lines++;
+    if (sample.length > 0 && sample[sample.length - 1] !== 10)
+      lines++;
+    if (stat.size <= limits.bytes && lines <= limits.lines)
+      return;
+    return { bytes: stat.size, lines, truncated: stat.size > SNIFF_LIMIT };
+  } catch {
+    return;
+  } finally {
+    if (fd !== undefined)
+      closeSync(fd);
+  }
+}
+function largeReadRefusal(path, file) {
+  const lines = file.truncated ? `${file.lines}+` : `${file.lines}`;
+  const kib = Math.ceil(file.bytes / 1024);
+  return `agent-efficiency large-read: ${path} has ${lines} lines / ${kib} KiB. Read the part you need with \`read\` offset/limit, or search it with \`grep\`. To get a summary or the relevant lines from a large file or log, delegate to \`explore\` (files) or \`operator\` (logs and command output), and ask for line numbers.`;
+}
+function untargetedReadPath(tool, input) {
+  if (tool !== "read" || input === null || typeof input !== "object")
+    return;
+  const value = input;
+  if (value.offset != null || value.limit != null)
+    return;
+  return typeof value.path === "string" && value.path ? value.path : undefined;
+}
+var WHOLE_FILE_READERS = new Set(["cat", "less", "more"]);
+var PIPES = new Set(["|", "|&"]);
+var OPEN_GROUPS = new Set(["(", "{"]);
+var CLOSE_GROUPS = new Set([")", "}"]);
+function writesStdout(source, start) {
+  return /(?:^|[^\d])\d{0,1}(?:>>?|>\|)\s*$/.test(source.slice(0, start)) && !/(?:^|[^\d])2(?:>>?|>\|)\s*$/.test(source.slice(0, start));
+}
+function cdTarget2(args, dir, expands) {
+  const target = args[0] === "--" ? args[1] : args[0];
+  if (dir === null || expands || target === undefined || target === "-" || target.startsWith("~") || /[$`]/.test(target))
+    return null;
+  return resolve2(dir, target);
+}
+function wholeFileReads(command, cwd, depth = 0) {
+  if (depth > 32)
+    return [];
+  const found = [];
+  let dir = cwd;
+  const saved = [];
+  const scan = scanShell(command, { executableSubstitutionsOnly: true });
+  for (const source of scan.substitutions)
+    found.push(...wholeFileReads(source, dir ?? cwd, depth + 1));
+  const { items } = scan;
+  for (let index = 0;index < items.length; index++) {
+    const item = items[index];
+    if (item === undefined)
+      continue;
+    if (item.kind === "operator") {
+      if (OPEN_GROUPS.has(item.operator))
+        saved.push({ dir, start: found.length });
+      else if (CLOSE_GROUPS.has(item.operator)) {
+        const group = saved.pop();
+        if (group !== undefined) {
+          if (item.operator === ")")
+            dir = group.dir;
+          const next = items[index + 1];
+          if (next?.kind === "operator" && PIPES.has(next.operator))
+            found.length = group.start;
+        }
+      }
+      continue;
+    }
+    const words = [...item.words];
+    while (words[0] && !words[0].quoted && CONTROL_PREFIXES.has(words[0].value))
+      words.shift();
+    const { argv } = commandWords(words.map((word) => word.value));
+    const offset = words.length - argv.length;
+    const executable = words[offset];
+    if (!executable || executable.quoted || executable.expands)
+      continue;
+    const name = argv[0]?.split("/").pop() ?? "";
+    if (name === "cd") {
+      dir = cdTarget2(argv.slice(1), dir, words.slice(offset + 1).some((word) => word.expands));
+      continue;
+    }
+    for (const source of commandScripts(argv, item.hereDocuments))
+      found.push(...wholeFileReads(source, dir ?? cwd, depth + 1));
+    if (!WHOLE_FILE_READERS.has(name))
+      continue;
+    const next = items[index + 1];
+    if (next?.kind === "operator" && PIPES.has(next.operator))
+      continue;
+    if (item.redirects.some((redirect) => writesStdout(command, redirect.start)))
+      continue;
+    for (let at = 1;at < argv.length; at++) {
+      const word = words[offset + at];
+      const arg = argv[at];
+      if (!word || arg === "--" || arg === "-" || arg.startsWith("-") || word.expands || /[$`]/.test(arg))
+        continue;
+      if (isAbsolute2(arg))
+        found.push(arg);
+      else if (dir !== null)
+        found.push(resolve2(dir, arg));
+    }
+  }
+  return found;
+}
+async function setupLargeRead(ctx, options) {
+  const sessions = new Map;
+  const stop = onSessionDeleted(ctx, (sessionID) => sessions.delete(sessionID));
+  const fallback = process.cwd();
+  const stateFor = (sessionID) => {
+    let state = sessions.get(sessionID);
+    if (state === undefined) {
+      const info = ctx.session.get({ sessionID }).then((session) => {
+        const found = session;
+        return { child: typeof found.parentID === "string", directory: found.location?.directory ?? fallback };
+      }).catch(() => ({ child: true, directory: fallback }));
+      state = { info, seen: new Set };
+      sessions.set(sessionID, state);
+    }
+    return state;
+  };
+  const hook = await ctx.tool.hook("execute.before", async (event) => {
+    const shell = shellCall(event.tool, event.input);
+    const target = shell ? undefined : untargetedReadPath(event.tool, event.input);
+    if (!shell && target === undefined)
+      return;
+    const state = stateFor(event.sessionID);
+    const { child, directory } = await state.info;
+    if (child && !options.agents.has(event.agent) || sessions.get(event.sessionID) !== state)
+      return;
+    const base = shell?.workdir ? resolve2(directory, shell.workdir) : directory;
+    const paths = shell ? wholeFileReads(shell.command, base) : [resolve2(base, target)];
+    const reasons = [];
+    for (const path of new Set(paths)) {
+      if (state.seen.has(path))
+        continue;
+      const file = largeFile(path, options);
+      if (file === undefined)
+        continue;
+      state.seen.add(path);
+      reasons.push(largeReadRefusal(path, file));
+    }
+    if (reasons.length)
+      throw new Error(reasons.join(`
+`));
+  });
+  return async () => {
+    await stop();
+    await hook.dispose();
+    sessions.clear();
+  };
+}
+
+// plugins/agent-efficiency/src/lead.ts
+import { readFileSync } from "fs";
+import { fileURLToPath } from "url";
+var LEAD_PATH = fileURLToPath(new URL("../instructions/lead-routing.md", import.meta.url));
+function filterLeadRouting(text, registered) {
+  return text.split(`
+`).filter((line) => {
+    if (!line.startsWith("- "))
+      return true;
+    const ids = [...line.split(":")[0]?.matchAll(/`([^`]+)`/g) ?? []].map((match) => match[1]);
+    return ids.length === 0 || ids.some((id) => registered.has(id));
+  }).join(`
+`);
+}
+async function setupLead(ctx) {
+  const text = readFileSync(LEAD_PATH, "utf8").trim();
+  const cached = new Map;
+  const stop = onSessionDeleted(ctx, (sessionID) => cached.delete(sessionID));
+  const forSession = async (sessionID) => {
+    try {
+      const session = await ctx.session.get({ sessionID });
+      if (session.parentID != null)
+        return;
+      const agents = await ctx.agent.list();
+      const listed = Array.isArray(agents) ? agents : agents.data;
+      return filterLeadRouting(text, new Set(listed.map((agent) => agent.id)));
+    } catch {
+      return;
+    }
+  };
+  const inject = async (event) => {
+    if (!("subagent" in event.tools))
+      return;
+    let known = cached.get(event.sessionID);
+    if (!known) {
+      known = forSession(event.sessionID);
+      cached.set(event.sessionID, known);
+    }
+    const routing = await known;
+    if (routing)
+      event.system.push({ type: "text", text: routing });
+  };
+  const hooks = [await ctx.session.hook("context", inject), await ctx.session.hook("compaction", inject), await ctx.session.hook("generate", inject)];
+  return async () => {
+    await stop();
+    for (const hook of hooks)
+      await hook.dispose();
+    cached.clear();
+  };
+}
+
+// plugins/agent-efficiency/src/lean.ts
+import path from "path";
+var SEGMENTS = ["global-instructions", "project-instructions", "identity", "worktree"];
+var DEFAULT_DROP = ["identity", "worktree"];
+var ALIASES = {
+  instructions: ["global-instructions", "project-instructions"]
+};
+var DEFAULT_LEAN_AGENTS = [
+  "explore",
+  "pr-reviewer",
+  "adversarial-challenger",
+  "design-critic",
+  "a11y-auditor",
+  "speckit-verify",
+  "seance",
+  "security-reviewer",
+  "code-reviewer",
+  "researcher",
+  "architect",
+  "speckit-sync",
+  "cad-mech-reviewer",
+  "cad-dfm-reviewer",
+  "cad-sourcing-researcher"
+];
+var IDENTITY = `# Your Model
+- Name: `;
+var WORKTREE = "When you create a worktree outside the current working directory and intend to use it";
+var DATE = `
+
+Today's date: `;
+var SEPARATOR = `
+
+`;
+var HEADER = /(?:^|\n\n)Instructions from: ((?:\/|[A-Za-z]:[\\/]|https?:\/\/)[^\n]*)\n/g;
+function globalConfigDirs(env, home) {
+  const dirs = [env.OPENCODE_CONFIG_DIR, env.XDG_CONFIG_HOME && path.join(env.XDG_CONFIG_HOME, "opencode")];
+  if (home)
+    dirs.push(path.join(home, ".config", "opencode"));
+  return [...new Set(dirs.filter((dir) => typeof dir === "string" && dir.length > 0))];
+}
+function isUnder(file, dirs) {
+  return dirs.some((dir) => {
+    const root = dir.replace(/[\\/]+$/, "");
+    return file.startsWith(`${root}/`) || file.startsWith(`${root}\\`);
+  });
+}
+function dropInstructions(text, drop = () => true) {
+  const headers = [...text.matchAll(HEADER)].map((match) => ({
+    at: match.index + (match[0].startsWith(SEPARATOR) ? SEPARATOR.length : 0),
+    file: match[1]
+  }));
+  const first = headers[0];
+  if (first === undefined)
+    return text;
+  const end = text.indexOf(DATE, first.at);
+  if (end === -1)
+    return text;
+  const inside = headers.filter((header) => header.at < end);
+  const sections = inside.map((header, index) => ({
+    file: header.file,
+    text: text.slice(header.at, index + 1 < inside.length ? inside[index + 1].at - SEPARATOR.length : end)
+  }));
+  const kept = sections.filter((section) => !drop(section.file));
+  if (kept.length === sections.length)
+    return text;
+  const before = text.slice(0, first.at);
+  const after = text.slice(end);
+  if (kept.length > 0)
+    return before + kept.map((section) => section.text).join(SEPARATOR) + after;
+  return first.at === 0 ? after.slice(SEPARATOR.length) : before.slice(0, -SEPARATOR.length) + after;
+}
+function leanSystem(system, drop, globalDirs = []) {
+  const global = drop.has("global-instructions");
+  const project = drop.has("project-instructions");
+  const select = (file) => isUnder(file, globalDirs) ? global : project;
+  return system.flatMap((part) => {
+    if (part.type !== "text")
+      return [part];
+    if (drop.has("identity") && part.text.startsWith(IDENTITY))
+      return [];
+    if (drop.has("worktree") && part.text.startsWith(WORKTREE))
+      return [];
+    if (global || project) {
+      const text = dropInstructions(part.text, select);
+      if (text !== part.text)
+        return [{ ...part, text }];
+    }
+    return [part];
+  });
+}
+function parseLeanOptions(options) {
+  const agents = options.leanSubagents;
+  if (agents === false)
+    return;
+  const ids = Array.isArray(agents) ? agents.filter((id) => typeof id === "string") : DEFAULT_LEAN_AGENTS;
+  const drop = Array.isArray(options.leanDrop) ? options.leanDrop.flatMap((name) => {
+    if (typeof name !== "string")
+      return [];
+    if (SEGMENTS.includes(name))
+      return [name];
+    return ALIASES[name] ?? [];
+  }) : DEFAULT_DROP;
+  if (ids.length === 0 || drop.length === 0)
+    return;
+  return { agents: new Set(ids), drop: new Set(drop) };
+}
+
+// plugins/agent-efficiency/src/scratch.ts
+import { readdirSync, realpathSync } from "fs";
+import { tmpdir } from "os";
+import { isAbsolute as isAbsolute3, join as join2, relative as relative2, resolve as resolve3, sep } from "path";
+
+// plugins/lib/src/shell-result.ts
+function record(value) {
+  return value !== null && typeof value === "object" ? value : undefined;
+}
+function shellOutput(result) {
+  const output = record(result?.output)?.output;
+  return typeof output === "string" ? output : undefined;
+}
+function appendResultText(result, text) {
+  const content = result.content;
+  if (Array.isArray(content))
+    return { ...result, content: [...content, { type: "text", text }] };
+  const base = typeof content === "string" ? content : shellOutput(result) ?? "";
+  return { ...result, content: base === "" ? text : `${base}${base.endsWith(`
+`) ? "" : `
+`}${text}` };
+}
+
 // plugins/agent-efficiency/src/scratch.ts
 function scratchEntry(target, cwd, root) {
-  const rel = relative2(root, resolve2(cwd, target));
-  if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute2(rel))
+  const rel = relative2(root, resolve3(cwd, target));
+  if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute3(rel))
     return;
   return join2(root, rel.split(sep)[0]);
 }
 function scratchEntries(tool, input, cwd, root) {
   const call = shellCall(tool, input);
-  const dir = call?.workdir ? resolve2(cwd, call.workdir) : cwd;
+  const dir = call?.workdir ? resolve3(cwd, call.workdir) : cwd;
   const targets = call ? scratchCommandTargets(call.command, dir) : writeTargets(tool, input);
   return [...new Set(targets.flatMap((target) => {
     if (/[$`]/.test(target))
@@ -1395,19 +1634,19 @@ function scratchShellWrites(argv, cwd) {
       const arg = args[i];
       if (arg === "-p" || arg === "--tmpdir") {
         const directory = args[++i] ?? "";
-        base = isAbsolute2(directory) ? directory : cwd === null ? null : resolve2(cwd, directory);
+        base = isAbsolute3(directory) ? directory : cwd === null ? null : resolve3(cwd, directory);
         temporaryDirectory = true;
       } else if (arg.startsWith("--tmpdir=")) {
         const directory = arg.slice(9);
-        base = isAbsolute2(directory) ? directory : cwd === null ? null : resolve2(cwd, directory);
+        base = isAbsolute3(directory) ? directory : cwd === null ? null : resolve3(cwd, directory);
         temporaryDirectory = true;
       } else if (!arg.startsWith("-"))
         template = arg;
     }
-    if (template && isAbsolute2(template))
+    if (template && isAbsolute3(template))
       targets.push(template);
     else if (base !== null && (template || temporaryDirectory))
-      targets.push(resolve2(base, template ?? "tmp.XXXXXXXXXX"));
+      targets.push(resolve3(base, template ?? "tmp.XXXXXXXXXX"));
   }
   return targets;
 }
@@ -1551,6 +1790,9 @@ var src_default = Plugin.define({
       });
       disposers.push(() => guard.dispose());
     }
+    const largeRead = parseLargeReadOptions(options);
+    if (largeRead !== undefined)
+      disposers.push(await setupLargeRead(ctx, largeRead));
     if (options.scratchReminder !== false)
       disposers.push(await setupScratch(ctx));
     if (options.explore !== false) {
@@ -1605,20 +1847,27 @@ var src_default = Plugin.define({
 });
 export {
   DEFAULT_DROP,
+  DEFAULT_LARGE_READ_AGENTS,
+  DEFAULT_LARGE_READ_BYTES,
+  DEFAULT_LARGE_READ_LINES,
   DEFAULT_LEAN_AGENTS,
   EXPLORE_ID,
   EXPLORE_PERMISSIONS,
   EXPLORE_PROMPT,
   LEAD_PATH,
   SEGMENTS,
+  SNIFF_LIMIT,
   WAIT_REFUSAL,
   src_default as default,
   dropInstructions,
   filterLeadRouting,
   globalConfigDirs,
   isUnder,
+  largeFile,
+  largeReadRefusal,
   leanSystem,
   newScratchEntries,
+  parseLargeReadOptions,
   parseLeanOptions,
   routeShellAlias,
   runsSleep,
@@ -1626,8 +1875,11 @@ export {
   scratchEntries,
   scratchEntry,
   scratchShellWrites,
+  setupLargeRead,
   setupLead,
   setupScratch,
   shapeExplore,
-  waitRefusal
+  untargetedReadPath,
+  waitRefusal,
+  wholeFileReads
 };

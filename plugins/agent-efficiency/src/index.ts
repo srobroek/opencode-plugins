@@ -3,12 +3,14 @@ import { homedir } from "node:os"
 import { Plugin } from "@opencode/plugin"
 import { SHELL_ALIASES, SHELL_TOOL, shellAliasInput } from "@srobroek/opencode-lib/tool-targets"
 import { EXPLORE_ID, shapeExplore } from "./explore.ts"
+import { parseLargeReadOptions, setupLargeRead } from "./large-read.ts"
 import { setupLead } from "./lead.ts"
 import { globalConfigDirs, leanSystem, parseLeanOptions } from "./lean.ts"
 import { setupScratch } from "./scratch.ts"
 import { waitRefusal } from "./wait.ts"
 
 export * from "./explore.ts"
+export * from "./large-read.ts"
 export * from "./lead.ts"
 export * from "./lean.ts"
 export * from "./scratch.ts"
@@ -66,6 +68,8 @@ export default Plugin.define({
       })
       disposers.push(() => guard.dispose())
     }
+    const largeRead = parseLargeReadOptions(options)
+    if (largeRead !== undefined) disposers.push(await setupLargeRead(ctx, largeRead))
     if (options.scratchReminder !== false) disposers.push(await setupScratch(ctx))
 
     if (options.explore !== false) {
