@@ -2,10 +2,10 @@ import { readdirSync, realpathSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { isAbsolute, join, relative, resolve, sep } from "node:path"
 import type { Context } from "@opencode/plugin/promise/plugin"
-import { parse, parsedInvocations } from "@srobroek/opencode-lib/shell-command"
 import { appendResultText } from "@srobroek/opencode-lib/shell-result"
 import { shellWriteTargets } from "@srobroek/opencode-lib/shell-write-targets"
 import { shellCall, writeTargets } from "@srobroek/opencode-lib/tool-targets"
+import { onSessionDeleted } from "./session-cache.ts"
 
 export function scratchEntry(target: string, cwd: string, root: string): string | undefined {
   const rel = relative(root, resolve(cwd, target))
@@ -16,38 +16,44 @@ export function scratchEntry(target: string, cwd: string, root: string): string 
 export function scratchEntries(tool: string, input: unknown, cwd: string, root: string): string[] {
   const call = shellCall(tool, input)
   const dir = call?.workdir ? resolve(cwd, call.workdir) : cwd
-  const targets = call ? shellWriteTargets(call.command, dir) : writeTargets(tool, input)
-  if (call) {
-    const parsed = parse(call.command)
-    for (const { args } of parsedInvocations(parsed, "mkdir")) {
-      for (let i = 0; i < args.length; i++) {
-        if (args[i] === "-m" || args[i] === "--mode") i++
-        else if (!args[i]?.startsWith("-")) targets.push(args[i] as string)
-      }
-    }
-    for (const { args } of parsedInvocations(parsed, "mktemp")) {
-      let base = dir
-      let template: string | undefined
-      let temporaryDirectory = false
-      for (let i = 0; i < args.length; i++) {
-        const arg = args[i] as string
-        if (arg === "-p" || arg === "--tmpdir") {
-          base = resolve(dir, args[++i] ?? "")
-          temporaryDirectory = true
-        } else if (arg.startsWith("--tmpdir=")) {
-          base = resolve(dir, arg.slice(9))
-          temporaryDirectory = true
-        }
-        else if (!arg.startsWith("-")) template = arg
-      }
-      if (template || temporaryDirectory) targets.push(resolve(base, template ?? "tmp.XXXXXXXXXX"))
-    }
-  }
+  const targets = call ? shellWriteTargets(call.command, dir, scratchShellWrites) : writeTargets(tool, input)
   return [...new Set(targets.flatMap((target) => {
     if (/[$`]/.test(target)) return []
     const entry = scratchEntry(target, dir, root)
     return entry ? [entry] : []
   }))]
+}
+
+export function scratchShellWrites(argv: string[], cwd: string | null): string[] {
+  const targets: string[] = []
+  const name = argv[0]?.split("/").pop()
+  const args = argv.slice(1)
+  if (name === "mkdir") {
+    for (let i = 0; i < args.length; i++) {
+      if (args[i] === "-m" || args[i] === "--mode") i++
+      else if (!args[i]?.startsWith("-")) targets.push(args[i] as string)
+    }
+  }
+  if (name === "mktemp") {
+    let base = cwd
+    let template: string | undefined
+    let temporaryDirectory = false
+    for (let i = 0; i < args.length; i++) {
+      const arg = args[i] as string
+      if (arg === "-p" || arg === "--tmpdir") {
+        const directory = args[++i] ?? ""
+        base = isAbsolute(directory) ? directory : cwd === null ? null : resolve(cwd, directory)
+        temporaryDirectory = true
+      } else if (arg.startsWith("--tmpdir=")) {
+        const directory = arg.slice(9)
+        base = isAbsolute(directory) ? directory : cwd === null ? null : resolve(cwd, directory)
+        temporaryDirectory = true
+      } else if (!arg.startsWith("-")) template = arg
+    }
+    if (template && isAbsolute(template)) targets.push(template)
+    else if (base !== null && (template || temporaryDirectory)) targets.push(resolve(base, template ?? "tmp.XXXXXXXXXX"))
+  }
+  return targets
 }
 
 function entries(root: string): string[] {
@@ -68,6 +74,11 @@ export async function setupScratch(ctx: Context): Promise<() => Promise<void>> {
   const children = new Map<string, Promise<string | undefined>>()
   const pending = new Map<string, { sessionID: string; candidates: string[]; existed: Set<string> }>()
   const noted = new Map<string, Set<string>>()
+  const stop = onSessionDeleted(ctx, (sessionID) => {
+    children.delete(sessionID)
+    noted.delete(sessionID)
+    for (const [id, call] of pending) if (call.sessionID === sessionID) pending.delete(id)
+  })
   const before = await ctx.tool.hook("execute.before", async (event) => {
     let child = children.get(event.sessionID)
     if (!child) {
@@ -75,7 +86,7 @@ export async function setupScratch(ctx: Context): Promise<() => Promise<void>> {
       children.set(event.sessionID, child)
     }
     const cwd = await child
-    if (cwd === undefined) return
+    if (cwd === undefined || children.get(event.sessionID) !== child) return
     const candidates = scratchEntries(event.tool, event.input, cwd, root)
     if (candidates.length) pending.set(event.id, { sessionID: event.sessionID, candidates, existed: new Set(entries(root)) })
   })
@@ -91,6 +102,7 @@ export async function setupScratch(ctx: Context): Promise<() => Promise<void>> {
     }
   })
   return async () => {
+    await stop()
     await after.dispose()
     await before.dispose()
     children.clear()

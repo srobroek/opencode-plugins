@@ -11,6 +11,7 @@ Cuts tokens and wasted turns for agents running in OpenCode V2:
 `lead` defaults to `true`. Primary sessions with the `subagent` tool receive delegation instructions on context, compaction and generate requests.
 The instructions route code work to `coder`, lookups to `explore`, bounded commands to `operator`, and reviews to the reviewer agents.
 The plugin removes bullets whose agent ids are all unregistered. The session's filtered text stays fixed for prompt caching.
+Deleting a session evicts its cached text.
 Child sessions receive no lead block. Set `lead: false` to disable it.
 When delivery also loads, set delivery's `fanOut: false` to avoid two lead blocks.
 
@@ -19,6 +20,8 @@ When delivery also loads, set delivery's `fanOut: false` to avoid two lead block
 `waitGuard` defaults to `true`. Foreground shell calls that run `sleep` are refused, including aliases mapped to `shell`.
 The guard checks command positions in chains, pipelines, loops and subshells, including `timeout N sleep`.
 Quoted data such as `echo "sleep 5"` passes. Shell calls with `background: true` pass.
+Here-document text passed to non-shell commands also passes, unless it contains an executable command substitution.
+Shell scripts supplied through `-c` flags (including `-lc` and `-ec`) or standard-input here-documents are checked.
 Use a background watcher such as `gh pr checks 12 --watch` instead of foreground polling.
 Set `waitGuard: false` to disable the guard.
 
@@ -27,8 +30,11 @@ Set `waitGuard: false` to disable the guard.
 `scratchReminder` defaults to `true`. In child sessions, the plugin watches write, edit, patch and shell write destinations under the scratch root.
 The root is the real path of `os.tmpdir()` plus `opencode`. With `/tmp` as the temporary directory, it resolves to `/tmp/opencode` on Linux or `/private/tmp/opencode` on macOS.
 Shell destinations include literal `mkdir` paths and `mktemp` templates. Dynamic paths that cannot be resolved statically are skipped.
+Destinations follow literal `cd` commands, subshell scopes and wrapper working directories.
 When a completed call creates a top-level scratch entry, its tool result asks the subagent to delete that entry before reporting.
 Entries present before the call are never noted. Each session receives at most three notes, with each entry noted once.
+Deleting a session clears its cached directory, pending calls and reminder history.
+Subsequent calls retain the session's reminder counts unless the session is deleted.
 Reminders do not change the system prompt. Set `scratchReminder: false` to disable them.
 
 ## Install

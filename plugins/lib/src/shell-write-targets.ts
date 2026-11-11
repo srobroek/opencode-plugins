@@ -227,8 +227,9 @@ function cdTarget(args: string[], cwd: string | null): string | null {
 /**
  * Absolute paths a shell command would write, by static reading of literal words.
  * `cd` inside `( … )` or `$( … )` applies only until the group closes.
+ * `additionalWrites` adds command destinations using the effective wrapper directory.
  */
-export function shellWriteTargets(command: string, cwd: string): string[] {
+export function shellWriteTargets(command: string, cwd: string, additionalWrites?: (argv: string[], cwd: string | null) => readonly string[]): string[] {
   const out: string[] = []
   let dir: string | null = cwd
   const saved: (string | null)[] = []
@@ -257,6 +258,7 @@ export function shellWriteTargets(command: string, cwd: string): string[] {
     }
     let commandDir = dir
     for (const directory of directories) commandDir = literalPath(directory, commandDir) ?? null
+    writes.push(...(additionalWrites?.(argv, commandDir) ?? []).map((path) => ({ path })))
     resolveInto(writes, commandDir)
   }
   for (const token of tokenizeShell(command, { hereDocumentSubstitutionsOnly: true })) {

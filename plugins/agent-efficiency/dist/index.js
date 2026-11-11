@@ -119,24 +119,6 @@ function tokenizeShell(command, options = {}) {
   flush();
   return out;
 }
-function shellQuoteBalanced(command) {
-  if (typeof command !== "string")
-    return true;
-  let quote = null;
-  for (let i = 0;i < command.length; i++) {
-    const ch = command[i];
-    if (quote !== null) {
-      if (ch === quote)
-        quote = null;
-      continue;
-    }
-    if (ch === '"' || ch === "'")
-      quote = ch;
-    else if (ch === "\\")
-      i++;
-  }
-  return quote === null;
-}
 function hereDocumentOperator(command, start) {
   let i = start + 2;
   const stripTabs = command[i] === "-";
@@ -566,7 +548,7 @@ function cdTarget(args, cwd) {
     return null;
   return literalPath(dir, cwd) ?? null;
 }
-function shellWriteTargets(command, cwd) {
+function shellWriteTargets(command, cwd, additionalWrites) {
   const out = [];
   let dir = cwd;
   const saved = [];
@@ -599,6 +581,7 @@ function shellWriteTargets(command, cwd) {
     let commandDir = dir;
     for (const directory of directories)
       commandDir = literalPath(directory, commandDir) ?? null;
+    writes.push(...(additionalWrites?.(argv, commandDir) ?? []).map((path) => ({ path })));
     resolveInto(writes, commandDir);
   };
   for (const token of tokenizeShell(command, { hereDocumentSubstitutionsOnly: true })) {
@@ -767,6 +750,34 @@ function shapeExplore(draft) {
 // plugins/agent-efficiency/src/lead.ts
 import { readFileSync } from "fs";
 import { fileURLToPath } from "url";
+
+// plugins/agent-efficiency/src/session-cache.ts
+function onSessionDeleted(ctx, evict) {
+  const controller = new AbortController;
+  const iterator = ctx.event.subscribe({ signal: controller.signal })[Symbol.asyncIterator]();
+  const listening = (async () => {
+    try {
+      while (!controller.signal.aborted) {
+        const next = await iterator.next();
+        if (next.done)
+          break;
+        const event = next.value;
+        if (event.type === "session.deleted")
+          evict(event.data.sessionID);
+      }
+    } catch (error) {
+      if (!controller.signal.aborted)
+        throw error;
+    }
+  })();
+  listening.catch(() => {});
+  return async () => {
+    controller.abort();
+    await iterator.return?.();
+  };
+}
+
+// plugins/agent-efficiency/src/lead.ts
 var LEAD_PATH = fileURLToPath(new URL("../instructions/lead-routing.md", import.meta.url));
 function filterLeadRouting(text, registered) {
   return text.split(`
@@ -781,6 +792,7 @@ function filterLeadRouting(text, registered) {
 async function setupLead(ctx) {
   const text = readFileSync(LEAD_PATH, "utf8").trim();
   const cached = new Map;
+  const stop = onSessionDeleted(ctx, (sessionID) => cached.delete(sessionID));
   const forSession = async (sessionID) => {
     try {
       const session = await ctx.session.get({ sessionID });
@@ -807,6 +819,7 @@ async function setupLead(ctx) {
   };
   const hooks = [await ctx.session.hook("context", inject), await ctx.session.hook("compaction", inject), await ctx.session.hook("generate", inject)];
   return async () => {
+    await stop();
     for (const hook of hooks)
       await hook.dispose();
     cached.clear();
@@ -925,248 +938,6 @@ import { readdirSync, realpathSync } from "fs";
 import { tmpdir } from "os";
 import { isAbsolute as isAbsolute2, join as join2, relative as relative2, resolve as resolve2, sep } from "path";
 
-// plugins/lib/src/shell-command.ts
-var OPERATORS = {
-  ";": true,
-  "&&": true,
-  "||": true,
-  "&": true,
-  "|": true,
-  "\n": true,
-  "(": true,
-  ")": true,
-  "{": true,
-  "}": true
-};
-var WRAPPERS2 = {
-  mise: true,
-  env: true,
-  command: true,
-  exec: true,
-  nohup: true,
-  nice: true,
-  sudo: true,
-  xargs: true,
-  time: true,
-  "!": true,
-  if: true,
-  elif: true,
-  else: true,
-  while: true,
-  until: true,
-  do: true
-};
-function tokenize(segment) {
-  return tokenizeShell(segment, { preserveBackslashes: true }).map(({ value, startsQuoted }) => ({
-    value,
-    quoted: startsQuoted
-  }));
-}
-function splitCommands(source) {
-  const positions = [];
-  let current = [];
-  const flush = () => {
-    if (current.length === 0)
-      return;
-    const words = [...current];
-    const argv = words.map((word) => word.value);
-    let index = 0;
-    while (index < words.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[index]?.value ?? "") || words[index]?.value === "!"))
-      index++;
-    while (index < words.length && WRAPPERS2[words[index]?.value.split("/").pop() ?? words[index]?.value ?? ""] === true) {
-      const wrapper = words[index]?.value.split("/").pop() ?? words[index]?.value ?? "";
-      index++;
-      if (wrapper === "env")
-        while (index < words.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[index]?.value ?? "") || words[index]?.value?.startsWith("-") === true))
-          index++;
-      if (wrapper === "xargs")
-        while (index < words.length && words[index]?.value?.startsWith("-") === true)
-          index++;
-      if (wrapper === "sudo")
-        while (index < words.length && words[index]?.value?.startsWith("-") === true) {
-          index++;
-          if (index < words.length && words[index]?.value?.startsWith("-") === false)
-            index++;
-        }
-    }
-    const executable = words[index] && !words[index]?.quoted ? words[index]?.value : undefined;
-    const raw = words.map((word) => word.quoted ? `'${word.value.replaceAll("'", "'\\''")}'` : word.value).join(" ");
-    positions.push({ raw, words, argv, executable });
-    current = [];
-  };
-  for (const token of tokenize(source)) {
-    if (OPERATORS[token.value] === true) {
-      flush();
-      continue;
-    }
-    current.push(token);
-  }
-  flush();
-  return positions;
-}
-function nestedSources(source) {
-  const sources = [];
-  let unknown = false;
-  let depth = 0;
-  let start = -1;
-  let quote = null;
-  for (let i = 0;i < source.length; i++) {
-    const ch = source[i];
-    if (quote === "'") {
-      if (ch === "'")
-        quote = null;
-      continue;
-    }
-    if (quote === '"') {
-      if (ch === "\\")
-        i++;
-      else if (ch === '"')
-        quote = null;
-      continue;
-    }
-    if (ch === "'") {
-      quote = "'";
-      continue;
-    }
-    if (ch === '"') {
-      quote = '"';
-      continue;
-    }
-    if (ch === "`") {
-      const end = source.indexOf("`", i + 1);
-      if (end < 0)
-        return { sources, unknown: true };
-      sources.push(source.slice(i + 1, end));
-      i = end;
-      continue;
-    }
-    if (source.startsWith("$(", i)) {
-      if (depth++ === 0)
-        start = i + 2;
-      i++;
-      continue;
-    }
-    if (depth > 0 && ch === ")") {
-      if (--depth === 0)
-        sources.push(source.slice(start, i));
-    }
-  }
-  if (depth !== 0)
-    unknown = true;
-  for (const match of source.matchAll(/"((?:\\.|[^"\\])*)"/g)) {
-    const body = match[1] ?? "";
-    for (const substitution of body.matchAll(/\$\(([^()]*)\)/g))
-      if (substitution[1] !== undefined)
-        sources.push(substitution[1]);
-    for (const substitution of body.matchAll(/`([^`]*)`/g))
-      if (substitution[1] !== undefined)
-        sources.push(substitution[1]);
-  }
-  for (const match of source.matchAll(/\b(?:bash|sh|zsh|dash|ksh)\s+-c\s+((?:'[^']*')|(?:"[^"]*")|[^\s;&|]+)/g)) {
-    const value = match[1];
-    if (!value || value.startsWith('"$') || value.startsWith("'$"))
-      unknown = true;
-    else
-      sources.push(value.replace(/^['"]|['"]$/g, ""));
-  }
-  for (const match of source.matchAll(/\beval\s+((?:'[^']*')|(?:"[^"]*")|[^\s;&|]+)/g)) {
-    const value = match[1];
-    if (value?.startsWith("$"))
-      unknown = true;
-    else if (value)
-      sources.push(value.replace(/^['"]|['"]$/g, ""));
-  }
-  for (const match of source.matchAll(/\bxargs(?:\s+-[^\s;&|]+)*\s+([^;&|]+?)(?=\s*(?:[;&|]|$))/g)) {
-    const value = match[1]?.trim();
-    if (value?.startsWith("$"))
-      unknown = true;
-    else if (value)
-      sources.push(value.replace(/^['"]|['"]$/g, ""));
-  }
-  return { sources, unknown };
-}
-function staticParse(command) {
-  if (command.length > 64000)
-    return {
-      kind: "parse-failure",
-      reason: "input exceeds 64000 characters",
-      command,
-      segments: [],
-      commands: [],
-      unknown: true,
-      nested: []
-    };
-  if (!shellQuoteBalanced(command))
-    return {
-      kind: "parse-failure",
-      reason: "unbalanced shell quote",
-      command,
-      segments: [],
-      commands: [],
-      unknown: true,
-      nested: []
-    };
-  const commands = splitCommands(command);
-  const nested = nestedSources(command);
-  const children = nested.sources.map(staticParse);
-  const unknown = nested.unknown || children.some((child) => child.unknown);
-  return {
-    command,
-    segments: commands.map((position) => position.argv),
-    commands,
-    unknown,
-    nested: children
-  };
-}
-function parse(command) {
-  if (typeof command !== "string") {
-    return {
-      kind: "parse-failure",
-      reason: "command is not a string",
-      command: "",
-      segments: [],
-      commands: [],
-      unknown: true,
-      nested: []
-    };
-  }
-  return staticParse(command);
-}
-function parsedInvocations(parsed, executable, booleanFlags = []) {
-  if (parsed.unknown)
-    return [];
-  const found = [];
-  for (const position of parsed.commands) {
-    const executableName = position.executable?.split("/").pop();
-    const index = executableName === executable ? position.argv.findIndex((word, i) => !position.words[i]?.quoted && (word.split("/").pop() ?? word) === executable) : -1;
-    if (index < 0)
-      continue;
-    const args = position.argv.slice(index + 1);
-    const globals = [];
-    let verb;
-    for (let i = 0;i < args.length; i++) {
-      const word = args[i];
-      if (word === undefined)
-        continue;
-      if (word.startsWith("-") && verb === undefined) {
-        globals.push(word);
-        const next = args[i + 1];
-        if (!booleanFlags.includes(word) && !word.includes("=") && next !== undefined && !next.startsWith("-")) {
-          globals.push(next);
-          i++;
-        }
-        continue;
-      }
-      if (verb === undefined && !word.startsWith("\x00"))
-        verb = word;
-    }
-    found.push({ position, command: position.raw, args, verb, globals });
-  }
-  for (const child of parsed.nested)
-    found.push(...parsedInvocations(child, executable, booleanFlags));
-  return found;
-}
-
 // plugins/lib/src/shell-result.ts
 function record(value) {
   return value !== null && typeof value === "object" ? value : undefined;
@@ -1195,42 +966,49 @@ function scratchEntry(target, cwd, root) {
 function scratchEntries(tool, input, cwd, root) {
   const call = shellCall(tool, input);
   const dir = call?.workdir ? resolve2(cwd, call.workdir) : cwd;
-  const targets = call ? shellWriteTargets(call.command, dir) : writeTargets(tool, input);
-  if (call) {
-    const parsed = parse(call.command);
-    for (const { args } of parsedInvocations(parsed, "mkdir")) {
-      for (let i = 0;i < args.length; i++) {
-        if (args[i] === "-m" || args[i] === "--mode")
-          i++;
-        else if (!args[i]?.startsWith("-"))
-          targets.push(args[i]);
-      }
-    }
-    for (const { args } of parsedInvocations(parsed, "mktemp")) {
-      let base = dir;
-      let template;
-      let temporaryDirectory = false;
-      for (let i = 0;i < args.length; i++) {
-        const arg = args[i];
-        if (arg === "-p" || arg === "--tmpdir") {
-          base = resolve2(dir, args[++i] ?? "");
-          temporaryDirectory = true;
-        } else if (arg.startsWith("--tmpdir=")) {
-          base = resolve2(dir, arg.slice(9));
-          temporaryDirectory = true;
-        } else if (!arg.startsWith("-"))
-          template = arg;
-      }
-      if (template || temporaryDirectory)
-        targets.push(resolve2(base, template ?? "tmp.XXXXXXXXXX"));
-    }
-  }
+  const targets = call ? shellWriteTargets(call.command, dir, scratchShellWrites) : writeTargets(tool, input);
   return [...new Set(targets.flatMap((target) => {
     if (/[$`]/.test(target))
       return [];
     const entry = scratchEntry(target, dir, root);
     return entry ? [entry] : [];
   }))];
+}
+function scratchShellWrites(argv, cwd) {
+  const targets = [];
+  const name = argv[0]?.split("/").pop();
+  const args = argv.slice(1);
+  if (name === "mkdir") {
+    for (let i = 0;i < args.length; i++) {
+      if (args[i] === "-m" || args[i] === "--mode")
+        i++;
+      else if (!args[i]?.startsWith("-"))
+        targets.push(args[i]);
+    }
+  }
+  if (name === "mktemp") {
+    let base = cwd;
+    let template;
+    let temporaryDirectory = false;
+    for (let i = 0;i < args.length; i++) {
+      const arg = args[i];
+      if (arg === "-p" || arg === "--tmpdir") {
+        const directory = args[++i] ?? "";
+        base = isAbsolute2(directory) ? directory : cwd === null ? null : resolve2(cwd, directory);
+        temporaryDirectory = true;
+      } else if (arg.startsWith("--tmpdir=")) {
+        const directory = arg.slice(9);
+        base = isAbsolute2(directory) ? directory : cwd === null ? null : resolve2(cwd, directory);
+        temporaryDirectory = true;
+      } else if (!arg.startsWith("-"))
+        template = arg;
+    }
+    if (template && isAbsolute2(template))
+      targets.push(template);
+    else if (base !== null && (template || temporaryDirectory))
+      targets.push(resolve2(base, template ?? "tmp.XXXXXXXXXX"));
+  }
+  return targets;
 }
 function entries(root) {
   try {
@@ -1253,6 +1031,13 @@ async function setupScratch(ctx) {
   const children = new Map;
   const pending = new Map;
   const noted = new Map;
+  const stop = onSessionDeleted(ctx, (sessionID) => {
+    children.delete(sessionID);
+    noted.delete(sessionID);
+    for (const [id, call] of pending)
+      if (call.sessionID === sessionID)
+        pending.delete(id);
+  });
   const before = await ctx.tool.hook("execute.before", async (event) => {
     let child = children.get(event.sessionID);
     if (!child) {
@@ -1262,7 +1047,7 @@ async function setupScratch(ctx) {
       children.set(event.sessionID, child);
     }
     const cwd = await child;
-    if (cwd === undefined)
+    if (cwd === undefined || children.get(event.sessionID) !== child)
       return;
     const candidates = scratchEntries(event.tool, event.input, cwd, root);
     if (candidates.length)
@@ -1281,6 +1066,7 @@ async function setupScratch(ctx) {
     }
   });
   return async () => {
+    await stop();
     await after.dispose();
     await before.dispose();
     children.clear();
@@ -1289,28 +1075,367 @@ async function setupScratch(ctx) {
   };
 }
 
+// plugins/lib/src/shell-command.ts
+function scanShell(source) {
+  const items = [];
+  const substitutions = [];
+  let complete = true;
+  let command = { kind: "command", words: [], redirects: [], hereDocuments: [] };
+  let word;
+  let target;
+  const pending = [];
+  const append = (at, text, quoted = false, expands = false) => {
+    word ??= { start: at, value: "", quoted: false, expands: false };
+    word.value += text;
+    word.quoted ||= quoted;
+    word.expands ||= expands;
+  };
+  const endCommand = () => {
+    if (command.words.length > 0 || command.redirects.length > 0)
+      items.push(command);
+    command = { kind: "command", words: [], redirects: [], hereDocuments: [] };
+  };
+  const flush = (end) => {
+    if (word === undefined)
+      return;
+    const done = { start: word.start, end, value: word.value, quoted: word.quoted, expands: word.expands };
+    word = undefined;
+    if (target !== undefined) {
+      command.redirects.push(done);
+      if (target !== "redirect")
+        pending.push({
+          delimiter: done.value,
+          stripTabs: target === "here-document-tabs",
+          quoted: done.quoted,
+          owner: command
+        });
+      target = undefined;
+      return;
+    }
+    if (command.words.length === 0 && !done.quoted && (done.value === "{" || done.value === "}")) {
+      endCommand();
+      items.push({ kind: "operator", operator: done.value });
+      return;
+    }
+    command.words.push(done);
+  };
+  const operator = (at, value) => {
+    flush(at);
+    target = undefined;
+    endCommand();
+    items.push({ kind: "operator", operator: value });
+  };
+  const substitution = (expansion) => {
+    if (expansion.inner !== undefined)
+      substitutions.push(expansion.inner);
+    if (!expansion.closed)
+      complete = false;
+  };
+  const hereDocuments = (from) => {
+    let at = from;
+    while (pending.length > 0) {
+      const document = pending.shift();
+      if (document === undefined)
+        break;
+      const bodyStart = at;
+      let bodyEnd = -1;
+      while (at <= source.length) {
+        const newline = source.indexOf(`
+`, at);
+        const lineEnd = newline < 0 ? source.length : newline;
+        const line = source.slice(at, lineEnd);
+        if ((document.stripTabs ? line.replace(/^\t+/, "") : line) === document.delimiter) {
+          bodyEnd = at;
+          at = newline < 0 ? source.length : newline + 1;
+          break;
+        }
+        at = lineEnd + 1;
+      }
+      const body = source.slice(bodyStart, bodyEnd < 0 ? source.length : bodyEnd);
+      document.owner.hereDocuments.push({ body, quoted: document.quoted });
+      if (!document.quoted)
+        for (const found of bodySubstitutions(body))
+          substitution(found);
+      if (bodyEnd < 0) {
+        complete = false;
+        return source.length;
+      }
+    }
+    return at;
+  };
+  for (let i = 0;i < source.length; i++) {
+    const ch = source[i];
+    const next = source[i + 1];
+    if (ch === "\\") {
+      if (next === `
+`)
+        i++;
+      else if (next === undefined)
+        append(i, ch);
+      else
+        append(i++, next, true);
+      continue;
+    }
+    if (ch === "'") {
+      const close = source.indexOf("'", i + 1);
+      if (close < 0)
+        complete = false;
+      append(i, source.slice(i + 1, close < 0 ? source.length : close), true);
+      i = close < 0 ? source.length : close;
+      continue;
+    }
+    if (ch === "$" && next === "'") {
+      let j = i + 2;
+      while (j < source.length && source[j] !== "'")
+        j += source[j] === "\\" ? 2 : 1;
+      if (j >= source.length)
+        complete = false;
+      append(i, source.slice(i + 2, Math.min(j, source.length)), true);
+      i = j;
+      continue;
+    }
+    if (ch === '"' || ch === "$" && next === '"') {
+      const open = ch === '"' ? i : i + 1;
+      let j = open + 1;
+      let text = "";
+      let expands = false;
+      while (j < source.length && source[j] !== '"') {
+        const c = source[j];
+        const escaped = source[j + 1];
+        if (c === "\\" && escaped !== undefined) {
+          if (escaped !== `
+`)
+            text += '$`"\\'.includes(escaped) ? escaped : `\\${escaped}`;
+          j += 2;
+          continue;
+        }
+        if (c === "$" || c === "`") {
+          const expansion = expansionAt(source, j);
+          substitution(expansion);
+          text += source.slice(j, expansion.end);
+          expands ||= expansion.expands;
+          j = expansion.end;
+          continue;
+        }
+        text += c;
+        j++;
+      }
+      if (j >= source.length)
+        complete = false;
+      append(i, text, true, expands);
+      i = j;
+      continue;
+    }
+    if (ch === "$" || ch === "`") {
+      const expansion = expansionAt(source, i);
+      substitution(expansion);
+      append(i, source.slice(i, expansion.end), false, expansion.expands);
+      i = expansion.end - 1;
+      continue;
+    }
+    if ((ch === "<" || ch === ">") && next === "(") {
+      const close = closingIndex(source, i + 2, "(", ")");
+      const end = close < 0 ? source.length : close;
+      substitutions.push(source.slice(i + 2, end));
+      if (close < 0)
+        complete = false;
+      append(i, source.slice(i, close < 0 ? end : end + 1), false, true);
+      i = end;
+      continue;
+    }
+    if (ch === "#" && word === undefined) {
+      const newline = source.indexOf(`
+`, i);
+      i = (newline < 0 ? source.length : newline) - 1;
+      continue;
+    }
+    if (ch === " " || ch === "\t") {
+      flush(i);
+      continue;
+    }
+    if (ch === `
+`) {
+      operator(i, `
+`);
+      i = hereDocuments(i + 1) - 1;
+      continue;
+    }
+    if (ch === ";") {
+      const length = next === ";" ? source[i + 2] === "&" ? 3 : 2 : next === "&" ? 2 : 1;
+      operator(i, length === 1 ? ";" : ";;");
+      i += length - 1;
+      continue;
+    }
+    if (ch === "&" && next === ">") {
+      flush(i);
+      target = "redirect";
+      i += source[i + 2] === ">" ? 2 : 1;
+      continue;
+    }
+    if (ch === "&" || ch === "|") {
+      const value = next === ch ? `${ch}${ch}` : ch === "|" && next === "&" ? "|&" : ch;
+      operator(i, value);
+      i += value.length - 1;
+      continue;
+    }
+    if (ch === "(" || ch === ")") {
+      operator(i, ch);
+      continue;
+    }
+    if (ch === "<" || ch === ">") {
+      if (word !== undefined && !word.quoted && !word.expands && /^(?:\d+|\{[A-Za-z_]\w*\})$/.test(word.value))
+        word = undefined;
+      else
+        flush(i);
+      if (source.startsWith("<<<", i)) {
+        target = "redirect";
+        i += 2;
+      } else if (source.startsWith("<<-", i)) {
+        target = "here-document-tabs";
+        i += 2;
+      } else if (source.startsWith("<<", i)) {
+        target = "here-document";
+        i += 1;
+      } else {
+        target = "redirect";
+        if (next === ">" || next === "&" || next === "|" || ch === "<" && next === ">")
+          i += 1;
+      }
+      continue;
+    }
+    append(i, ch, false, "*?[{}".includes(ch) || ch === "~" && word === undefined);
+  }
+  flush(source.length);
+  endCommand();
+  if (pending.length > 0)
+    complete = false;
+  return { items, substitutions, complete };
+}
+function expansionAt(text, at) {
+  if (text[at] === "`") {
+    let j = at + 1;
+    while (j < text.length && text[j] !== "`")
+      j += text[j] === "\\" ? 2 : 1;
+    const closed = j < text.length;
+    return {
+      end: closed ? j + 1 : text.length,
+      inner: text.slice(at + 1, Math.min(j, text.length)),
+      expands: true,
+      closed
+    };
+  }
+  const next = text[at + 1];
+  if (next === "(" || next === "{") {
+    const close = closingIndex(text, at + 2, next, next === "(" ? ")" : "}");
+    const closed = close >= 0;
+    return {
+      end: closed ? close + 1 : text.length,
+      inner: text.slice(at + 2, closed ? close : text.length),
+      expands: true,
+      closed
+    };
+  }
+  if (next !== undefined && /[A-Za-z_]/.test(next)) {
+    let j = at + 2;
+    while (j < text.length && /\w/.test(text[j]))
+      j++;
+    return { end: j, expands: true, closed: true };
+  }
+  if (next !== undefined && /[0-9@*#?$!-]/.test(next))
+    return { end: at + 2, expands: true, closed: true };
+  return { end: at + 1, expands: false, closed: true };
+}
+function closingIndex(text, from, open, close) {
+  let depth = 1;
+  for (let j = from;j < text.length; j++) {
+    const c = text[j];
+    if (c === "\\") {
+      j++;
+      continue;
+    }
+    if (c === "'" || c === '"' || c === "`") {
+      let k = j + 1;
+      while (k < text.length && text[k] !== c)
+        k += c !== "'" && text[k] === "\\" ? 2 : 1;
+      if (k >= text.length)
+        return -1;
+      j = k;
+      continue;
+    }
+    if (c === open)
+      depth++;
+    else if (c === close && --depth === 0)
+      return j;
+  }
+  return -1;
+}
+function bodySubstitutions(body) {
+  const found = [];
+  for (let j = 0;j < body.length; j++) {
+    const c = body[j];
+    if (c === "\\") {
+      j++;
+      continue;
+    }
+    if (c !== "$" && c !== "`")
+      continue;
+    const expansion = expansionAt(body, j);
+    found.push(expansion);
+    j = expansion.end - 1;
+  }
+  return found;
+}
+
 // plugins/agent-efficiency/src/wait.ts
 var WAIT_REFUSAL = "agent-efficiency wait-guard: foreground `sleep` is refused. Run the wait as a background shell call (`background: true`), for example `gh pr checks 12 --watch`, `gh run watch 123 --exit-status`, or a loop that polls and exits; you are notified when it finishes. To wait for a local server, use `curl --retry 10 --retry-connrefused --retry-delay 1 <url>`.";
-function runsSleep(command) {
-  const parsed = parse(command);
-  if (parsedInvocations(parsed, "sleep").length > 0)
+function runsSleep(command, depth = 0) {
+  if (depth > 32)
+    return false;
+  const scan = scanShell(command);
+  if (scan.substitutions.some((source) => runsSleep(source, depth + 1)))
     return true;
-  if (parsed.commands.some((position) => position.executable === "then" && runsSleep(position.raw.slice(4))))
-    return true;
-  return parsedInvocations(parsed, "timeout", ["--foreground", "--preserve-status"]).some(({ position, args }) => {
-    let at = 0;
-    while (args[at]?.startsWith("-")) {
-      const flag = args[at++];
-      if (flag === "--")
+  for (const item of scan.items) {
+    if (item.kind !== "command")
+      continue;
+    const words = [...item.words];
+    while (words[0] && !words[0].quoted && ["if", "then", "elif", "else", "while", "until", "do", "!"].includes(words[0].value))
+      words.shift();
+    const { argv } = commandWords(words.map((word) => word.value));
+    const executable = words[words.length - argv.length];
+    if (!executable || executable.quoted || executable.expands)
+      continue;
+    const name = argv[0]?.split("/").pop();
+    if (name === "sleep")
+      return true;
+    if (!["sh", "bash", "zsh", "dash", "ksh"].includes(name ?? ""))
+      continue;
+    let stdin = true;
+    let stdinFlag = false;
+    for (let i = 1;i < argv.length; i++) {
+      const arg = argv[i];
+      if (/^-[^-]*c/.test(arg)) {
+        if (runsSleep(argv[i + 1] ?? "", depth + 1))
+          return true;
+        stdin = false;
         break;
-      if (["-s", "--signal", "-k", "--kill-after"].includes(flag ?? ""))
-        at++;
+      }
+      if (/^-[^-]*[oO]$/.test(arg) || arg === "--rcfile" || arg === "--init-file") {
+        i++;
+        continue;
+      }
+      if (/^-[^-]*s/.test(arg))
+        stdinFlag = true;
+      if (arg === "--")
+        continue;
+      if (!arg.startsWith("-")) {
+        stdin = stdinFlag;
+        break;
+      }
     }
-    at++;
-    const word = args[at];
-    const offset = position.argv.length - args.length + at;
-    return word?.split("/").pop() === "sleep" && !position.words[offset]?.quoted;
-  });
+    if (stdin && item.hereDocuments.some((document) => runsSleep(document.body, depth + 1)))
+      return true;
+  }
+  return false;
 }
 function waitRefusal(tool, input) {
   const call = shellCall(tool, input);
@@ -1434,6 +1559,7 @@ export {
   runsSleep,
   scratchEntries,
   scratchEntry,
+  scratchShellWrites,
   setupLead,
   setupScratch,
   shapeExplore,

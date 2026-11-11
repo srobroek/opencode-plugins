@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import type { Context } from "@opencode/plugin/promise/plugin"
+import { onSessionDeleted } from "./session-cache.ts"
 
 export const LEAD_PATH = fileURLToPath(new URL("../instructions/lead-routing.md", import.meta.url))
 
@@ -15,6 +16,7 @@ export function filterLeadRouting(text: string, registered: ReadonlySet<string>)
 export async function setupLead(ctx: Context): Promise<() => Promise<void>> {
   const text = readFileSync(LEAD_PATH, "utf8").trim()
   const cached = new Map<string, Promise<string | undefined>>()
+  const stop = onSessionDeleted(ctx, (sessionID) => cached.delete(sessionID))
   const forSession = async (sessionID: string): Promise<string | undefined> => {
     try {
       const session = await ctx.session.get({ sessionID })
@@ -37,6 +39,7 @@ export async function setupLead(ctx: Context): Promise<() => Promise<void>> {
   }
   const hooks = [await ctx.session.hook("context", inject), await ctx.session.hook("compaction", inject), await ctx.session.hook("generate", inject)]
   return async () => {
+    await stop()
     for (const hook of hooks) await hook.dispose()
     cached.clear()
   }
