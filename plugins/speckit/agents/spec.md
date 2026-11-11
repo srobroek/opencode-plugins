@@ -1,6 +1,7 @@
 ---
 description: "Drives a SpecKit feature from setup through specify, clarify, plan, tasks as beads and analyze; edits only specs/ and .specify/."
 mode: primary
+steps: 100
 hidden: false
 request:
   headers:

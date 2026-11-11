@@ -2,10 +2,18 @@ import { describe, expect, test } from "bun:test"
 import path from "node:path"
 import { checkAgent, checkFiles, checkFragment, shippedAgents } from "./check-agent-roles.ts"
 
-const agent = (frontmatter: string) => `---\ndescription: x\nmode: subagent\n${frontmatter}---\nbody\n`
+const agent = (frontmatter: string, steps = "steps: 80\n") => `---\ndescription: x\nmode: subagent\n${steps}${frontmatter}---\nbody\n`
 const role = (name: string) => `request:\n  headers:\n    x-opencode-model-role: ${name}\n`
 
 describe("checkAgent", () => {
+  test("requires positive integer steps", () => {
+    for (const steps of ["", "steps: 0\n", "steps: -1\n", "steps: 1.5\n", 'steps: "80"\n', "steps: true\n"]) {
+      expect(checkAgent("a.md", agent(role("standard"), steps), false).findings).toEqual([
+        { file: "a.md", reason: "steps must be a positive integer" },
+      ])
+    }
+    expect(checkAgent("a.md", agent(role("standard"), "steps: 1\n"), false).findings).toEqual([])
+  })
   test("accepts a tier and an old role name", () => {
     expect(checkAgent("a.md", agent(role("standard")), false)).toEqual({ role: "standard", findings: [] })
     expect(checkAgent("a.md", agent(role("task")), false)).toEqual({ role: "task", findings: [] })
@@ -30,7 +38,7 @@ describe("checkFragment", () => {
   })
 })
 
-test("every shipped agent declares a known model tier", () => {
+test("every shipped agent declares a known model tier and positive integer steps", () => {
   const root = path.resolve(import.meta.dir, "..")
   const files = shippedAgents(path.join(root, "plugins"))
   expect(files.length).toBeGreaterThan(0)

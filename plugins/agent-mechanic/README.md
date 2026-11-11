@@ -5,7 +5,7 @@ moving code, where the caller has already decided the change.
 
 ## Agent
 
-`mechanic` (mode `subagent`):
+`mechanic` (mode `subagent`, steps 60):
 
 - does exactly the described change, with no redesign or unrelated cleanup;
 - finds every occurrence first, including imports, tests and docs;

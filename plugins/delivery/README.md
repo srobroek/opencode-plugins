@@ -118,12 +118,12 @@ The plugin registers these subagents from `agents/*.md` through
 
 | Agent | Job | Model tier | Fallback model |
 | --- | --- | --- | --- |
-| `implementer` | One bead or task in its own worktree; `DONE`/`BLOCKED`/`SPLIT` | `standard` | `amazon-bedrock/global.anthropic.claude-sonnet-5-5#medium` |
-| `implementer-high` | Root cause, concurrency, contracts, precision, design judgment | `strong` | `amazon-bedrock/global.anthropic.claude-opus-5-5#high` |
-| `researcher` | One cited answer; no product edits (fallback copy, see below) | `standard` | `amazon-bedrock/global.anthropic.claude-sonnet-5-5#medium` |
-| `pr-reviewer` | Read-only diff review through `gh pr view` / `gh pr diff`; `VERDICT:` first line (fallback copy, see below) | `reviewer` | `amazon-bedrock/global.anthropic.claude-opus-5-5#high` |
-| `operator` | One exact bounded command | `cheap` | `amazon-bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0` |
-| `shepherd` | Lands one approved PR with `delivery_land` (approval and checks required), closes beads, cleans up | `standard` | `amazon-bedrock/global.anthropic.claude-sonnet-5-5#medium` |
+| `implementer` (steps 150) | One bead or task in its own worktree; `DONE`/`BLOCKED`/`SPLIT` | `standard` | `amazon-bedrock/global.anthropic.claude-sonnet-5-5#medium` |
+| `implementer-high` (steps 200) | Root cause, concurrency, contracts, precision, design judgment | `strong` | `amazon-bedrock/global.anthropic.claude-opus-5-5#high` |
+| `researcher` (steps 80) | One cited answer; no product edits (fallback copy, see below) | `standard` | `amazon-bedrock/global.anthropic.claude-sonnet-5-5#medium` |
+| `pr-reviewer` (steps 80) | Read-only diff review through `gh pr view` / `gh pr diff`; `VERDICT:` first line (fallback copy, see below) | `reviewer` | `amazon-bedrock/global.anthropic.claude-opus-5-5#high` |
+| `operator` (steps 30) | One exact bounded command | `cheap` | `amazon-bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0` |
+| `shepherd` (steps 60) | Lands one approved PR with `delivery_land` (approval and checks required), closes beads, cleans up | `standard` | `amazon-bedrock/global.anthropic.claude-sonnet-5-5#medium` |
 
 - `researcher` belongs to the [`agent-researcher`](../agent-researcher/README.md)
   plugin. Delivery ships the same agent as a fallback, so `execution_agent_type=researcher`

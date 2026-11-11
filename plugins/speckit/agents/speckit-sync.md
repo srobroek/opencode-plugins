@@ -1,6 +1,7 @@
 ---
 description: "Audits SpecKit artifacts; spawn with scope drift, conflicts, or both."
 mode: subagent
+steps: 60
 hidden: true
 request:
   headers:

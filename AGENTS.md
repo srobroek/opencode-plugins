@@ -19,7 +19,7 @@ package whose entry point default-exports `Plugin.define({ id, setup })` from
 - `bun run marketplaces` regenerates the Claude Code and Codex marketplaces.
 - `bun run marketplaces:check` fails when committed marketplace files are stale.
 - `bun run agent-roles` fails when a shipped agent lacks a known tier in its
-  `x-opencode-model-role` header.
+  `x-opencode-model-role` header or a positive integer `steps` limit.
 - `bun run descriptions` fails when a tool's first description line passes 120
   characters, a direct tool's schema passes 1.5k (Code Mode 3k), `codemode: false`
   lacks a `check-descriptions: direct <reason>` comment, a skill description passes

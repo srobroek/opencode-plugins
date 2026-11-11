@@ -1,6 +1,7 @@
 ---
 description: "Mechanical tier: runs one exact bounded command, formatting step or inventory over explicit targets and records the result."
 mode: subagent
+steps: 30
 hidden: true
 model: "amazon-bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0"
 request:

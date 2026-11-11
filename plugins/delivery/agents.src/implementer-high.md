@@ -1,6 +1,7 @@
 ---
 description: "Reasoning tier for root-cause debugging, concurrency, data integrity, cross-module contracts, numeric precision or design judgment."
 mode: subagent
+steps: 200
 hidden: true
 model: "amazon-bedrock/global.anthropic.claude-opus-5-5#high"
 request:

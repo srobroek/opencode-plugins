@@ -5,7 +5,7 @@ project.
 
 ## Agent
 
-`external-repo-worker` (mode `subagent`) is for a task that names a repo URL,
+`external-repo-worker` (mode `subagent`, steps 150) is for a task that names a repo URL,
 `org/name` or an external checkout path. It:
 
 - clones into a unique `mktemp -d /tmp/agentic/external-repos/<repo>-XXXXXX`

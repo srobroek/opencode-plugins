@@ -1,6 +1,7 @@
 ---
 description: "Drafts one assigned L0 concept variant as a checked one-variant three.js scene in its work directory. Spawned by cad-flow; never edits hw/."
 mode: subagent
+steps: 100
 request:
   headers:
     x-opencode-model-role: standard

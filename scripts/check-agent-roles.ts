@@ -3,7 +3,8 @@
  * Fail when a shipped agent (`plugins/<name>/agents/*.md`) does not declare a model-roles
  * tier in its `x-opencode-model-role` request header, declares a value that is neither a
  * tier nor an accepted old role name, or pins a model in a plugin that does not treat it as a fallback. A plugin's
- * `agents/roles.json` fragment, when present, must match the headers.
+ * `agents/roles.json` fragment, when present, must match the headers. Every agent must
+ * declare a positive integer `steps` limit.
  *
  *   bun scripts/check-agent-roles.ts           check plugins/*
  *   bun scripts/check-agent-roles.ts <files>   check the named agent files
@@ -39,6 +40,8 @@ export function checkAgent(file: string, text: string, allowModel: boolean): { r
     findings.push({ file, reason: `unknown model tier ${JSON.stringify(role)}; use one of ${MODEL_TIERS.join(", ")}` })
   if (data.model !== undefined && !allowModel)
     findings.push({ file, reason: "pins a model; declare a tier and let the agent inherit without model-roles" })
+  if (typeof data.steps !== "number" || !Number.isInteger(data.steps) || data.steps <= 0)
+    findings.push({ file, reason: "steps must be a positive integer" })
   return { ...(isModelRole(role) ? { role } : {}), findings }
 }
 
@@ -99,7 +102,7 @@ function main(argv: string[]): number {
     console.error(`check-agent-roles: ${findings.length} finding(s)`)
     return 1
   }
-  console.log(`check-agent-roles: ${files.length} agent(s) declare a model tier`)
+  console.log(`check-agent-roles: ${files.length} agent(s) declare a model tier and positive integer steps`)
   return 0
 }
 

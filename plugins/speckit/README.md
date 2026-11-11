@@ -125,6 +125,7 @@ and through `tools.parley_ask` for rounds of several questions.
 
 | Boundary | Allowed |
 | --- | --- |
+| Steps | 100 |
 | Edits | `specs/*` and `.specify/*` only |
 | Shell | `bd` (including the beads write-lock runner), `specify`, `.specify/` scripts, and `git` status, diff, log, show, branch, rev-parse, ls-files, merge-base, switch, `add specs/` / `add .specify/`, commit |
 | Tools | read, grep, glob, LSP, `question`, `execute` (for `parley_ask`, `speckit_setup`, `speckit_start`), `speckit_*` |
@@ -147,8 +148,8 @@ that creates `.specify/` at the location registers it without a restart.
 
 | Agent | Spawn with |
 | --- | --- |
-| `speckit-sync` | `scope: drift` / `conflicts` / `both` |
-| `speckit-verify` | `mode: requirements` / `tasks` / `review` |
+| `speckit-sync` (steps 60) | `scope: drift` / `conflicts` / `both` |
+| `speckit-verify` (steps 60) | `mode: requirements` / `tasks` / `review` |
 
 The two subagents are read-only (edits denied) and carry the `reviewer` model tier in
 `request.headers.x-opencode-model-role`; with the model-roles plugin they run on that
