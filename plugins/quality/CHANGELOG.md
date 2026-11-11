@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/srobroek/opencode-plugins/compare/quality--v0.4.0...quality--v0.5.0) (2026-11-11)
+
+
+### Features
+
+* cap every shipped agent with a step limit ([#123](https://github.com/srobroek/opencode-plugins/issues/123)) ([7b3b60f](https://github.com/srobroek/opencode-plugins/commit/7b3b60f84ac4aabcf8d5d649042e26054f79b0f4))
+
 ## [0.4.0](https://github.com/srobroek/opencode-plugins/compare/quality--v0.3.0...quality--v0.4.0) (2026-10-27)
 
 

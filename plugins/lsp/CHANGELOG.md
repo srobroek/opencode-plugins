@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/srobroek/opencode-plugins/compare/lsp--v0.2.1...lsp--v0.3.0) (2026-11-11)
+
+
+### Features
+
+* **agent-efficiency:** add lead routing, a foreground sleep guard and subagent scratch reminders ([#122](https://github.com/srobroek/opencode-plugins/issues/122)) ([34bdb2d](https://github.com/srobroek/opencode-plugins/commit/34bdb2d512109065956f88397bd2dc8e6e99ecd3))
+
 ## [0.2.1](https://github.com/srobroek/opencode-plugins/compare/lsp--v0.2.0...lsp--v0.2.1) (2026-10-27)
 
 

@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.0](https://github.com/srobroek/opencode-plugins/compare/agent-coder--v0.4.0...agent-coder--v0.5.0) (2026-11-11)
+
+
+### Features
+
+* **agent-coder:** route reviews to code-reviewer and long commands to operator ([#120](https://github.com/srobroek/opencode-plugins/issues/120)) ([8a22f42](https://github.com/srobroek/opencode-plugins/commit/8a22f42b35dec7d47d2b7fcb533df7413de8a481))
+* cap every shipped agent with a step limit ([#123](https://github.com/srobroek/opencode-plugins/issues/123)) ([7b3b60f](https://github.com/srobroek/opencode-plugins/commit/7b3b60f84ac4aabcf8d5d649042e26054f79b0f4))
+
 ## [0.4.0](https://github.com/srobroek/opencode-plugins/compare/agent-coder--v0.3.0...agent-coder--v0.4.0) (2026-10-27)
 
 

@@ -1,6 +1,6 @@
 {
   "name": "@srobroek/opencode-journeys",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Author, validate and maintain user journeys: journeys.py tools, six skills and the journey-scribe and journey-validator subagents.",
   "private": true,
   "type": "module",
