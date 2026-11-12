@@ -25,6 +25,7 @@
   },
   "opencode-plugins": {
     "claude": false,
-    "codex": false
+    "codex": false,
+    "scope": "global"
   }
 }

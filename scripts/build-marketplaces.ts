@@ -7,6 +7,8 @@
 //
 //   "opencode-plugins": { "claude": false, "codex": false, "category": "...", "description": "..." }
 //
+// "scope", "signals" and "requires" feed scripts/build-plugin-table.ts and are ignored here.
+//
 // Outputs (all generated, never hand-edited):
 //   .claude-plugin/marketplace.json            Claude Code marketplace
 //   .agents/plugins/marketplace.json           Codex marketplace
@@ -56,7 +58,7 @@ function parseConfig(where: string, value: unknown): Config {
   if (typeof value !== "object" || value === null || Array.isArray(value)) fail(where, `"${CONFIG_KEY}" must be an object`)
   const config = value as Record<string, unknown>
   for (const key of Object.keys(config)) {
-    if (!["claude", "codex", "category", "description"].includes(key)) fail(where, `unknown "${CONFIG_KEY}" key "${key}"`)
+    if (!["claude", "codex", "category", "description", "scope", "signals", "requires"].includes(key)) fail(where, `unknown "${CONFIG_KEY}" key "${key}"`)
   }
   for (const key of TARGETS) {
     if (config[key] !== undefined && typeof config[key] !== "boolean") fail(where, `"${CONFIG_KEY}.${key}" must be a boolean`)

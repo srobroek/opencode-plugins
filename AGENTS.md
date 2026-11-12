@@ -18,6 +18,9 @@ package whose entry point default-exports `Plugin.define({ id, setup })` from
 - `bun run build:check` fails when committed build output is stale.
 - `bun run marketplaces` regenerates the Claude Code and Codex marketplaces.
 - `bun run marketplaces:check` fails when committed marketplace files are stale.
+- `bun run plugin-table` regenerates the plugin table in
+  `plugins/project/skills/project-scaffold/references/plugins.md`.
+- `bun run plugin-table:check` fails when that table is stale or a plugin lacks a scope.
 - `bun run agent-roles` fails when a shipped agent lacks a known tier in its
   `x-opencode-model-role` header or a positive integer `steps` limit.
 - `bun run descriptions` fails when a tool's first description line passes 120
@@ -25,7 +28,7 @@ package whose entry point default-exports `Plugin.define({ id, setup })` from
   lacks a `check-descriptions: direct <reason>` comment, a skill description passes
   160 characters, an agent description 150, or an `instructions/` block 1k.
 - `bun run check` runs typecheck, lint, test, build:check, marketplaces:check,
-  steering, agent-roles and descriptions before you hand work off.
+  plugin-table:check, steering, agent-roles and descriptions before you hand work off.
 
 ## Conventions
 
@@ -49,6 +52,11 @@ package whose entry point default-exports `Plugin.define({ id, setup })` from
   `skills/` and `.mcp.json` reach Claude Code and Codex. A plugin with `skills/`
   is exported by default; set `"opencode-plugins": { "claude": false, "codex": false }`
   when its skills depend on OpenCode tools.
+- `scripts/build-plugin-table.ts` generates the plugin table between the markers in
+  `plugins/project/skills/project-scaffold/references/plugins.md` from each plugin's
+  `"opencode-plugins"` object. A new plugin needs `scope` (`global`, `project` or
+  `internal`), and a project plugin also needs `signals` (what an agent can check in a
+  repository) and optionally `requires`. Run `bun run plugin-table` and commit the output.
 - Runtime `dependencies` must be published on npm. Workspace packages are only
   available at build time.
 - `@opentui/*` and `solid-js` are host modules (`HOST_MODULES` in `scripts/build.ts`):

@@ -14,7 +14,8 @@
     "skills"
   ],
   "opencode-plugins": {
-    "description": "A security review skill: trace untrusted input to sinks, tag CWE ids and check cross-boundary dispatch."
+    "description": "A security review skill: trace untrusted input to sinks, tag CWE ids and check cross-boundary dispatch.",
+    "scope": "global"
   },
   "peerDependencies": {
     "@opencode/plugin": "^2.1.4"

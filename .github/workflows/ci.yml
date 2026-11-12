@@ -28,6 +28,7 @@ jobs:
       - run: bun test
       - run: bun run build:check
       - run: bun run marketplaces:check
+      - run: bun run plugin-table:check
 
   # Actions has no job-level `paths` filter, so this job works out whether a push
   # or pull request touched the files the path-filtered `cad` job covers.
