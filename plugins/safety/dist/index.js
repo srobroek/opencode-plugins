@@ -2497,7 +2497,11 @@ function hardGate(source, cwd, options = {}) {
     let reason;
     try {
       const analyze = options.analyzeOp ?? opGuard;
-      reason = analyze(walkShell(source).commands, options.opAllow) ?? "";
+      const walk = walkShell(source);
+      if (!walk.complete && /\b(?:op|fnox)\b/.test(source))
+        reason = NESTING_MESSAGE;
+      else
+        reason = analyze(walk.commands, options.opAllow) ?? "";
     } catch {
       reason = CHECK_FAILED_MESSAGE;
     }

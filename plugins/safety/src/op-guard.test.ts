@@ -220,6 +220,17 @@ describe("op-guard cycles, depth and failure", () => {
     expect(await throughHook(NESTED(2))).toBe("allowed")
   })
 
+  test("an op call past the walk's 8-level sh -c limit is refused", async () => {
+    const deep = (levels: number, inner: string): string =>
+      levels === 0 ? inner : `sh -c '${deep(levels - 1, inner).replaceAll("'", "'\\''")}'`
+    expect(gate(deep(9, "op read x"))?.reason).toBe(NESTING_MESSAGE)
+    expect(gate(deep(9, "fnox get X"))?.reason).toBe(NESTING_MESSAGE)
+    expect(gate(deep(9, "echo hi"))).toBeUndefined()
+    expect(gate(deep(3, "op read x"))?.reason).toBe(OP_MESSAGE)
+    expect(await throughHook(deep(9, "op read x"))).toContain("nesting is too deep")
+    expect(await throughHook(deep(9, "echo hi"))).toBe("allowed")
+  })
+
   test("op-guard fails closed when its analysis throws", async () => {
     expect(gate("echo hi", throwing)).toEqual({ guard: "op-guard", reason: CHECK_FAILED_MESSAGE })
     expect(await throughHook("echo hi", throwing)).toContain("could not check this command")

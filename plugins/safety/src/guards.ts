@@ -8,7 +8,7 @@
 import { readFileSync } from "node:fs"
 import { isAbsolute, resolve } from "node:path"
 import { hasAttribution } from "./attribution.ts"
-import { CHECK_FAILED_MESSAGE, OP_MESSAGE, opGuard } from "./op-guard.ts"
+import { CHECK_FAILED_MESSAGE, NESTING_MESSAGE, OP_MESSAGE, opGuard } from "./op-guard.ts"
 import {
   base,
   type Command,
@@ -297,7 +297,10 @@ export function hardGate(source: string, cwd: string, options: GuardOptions = {}
     let reason: string
     try {
       const analyze = options.analyzeOp ?? opGuard
-      reason = analyze(walkShell(source).commands, options.opAllow) ?? ""
+      const walk = walkShell(source)
+      // An unfinished walk hides commands; refuse when `op` or `fnox` could be among them.
+      if (!walk.complete && /\b(?:op|fnox)\b/.test(source)) reason = NESTING_MESSAGE
+      else reason = analyze(walk.commands, options.opAllow) ?? ""
     } catch {
       reason = CHECK_FAILED_MESSAGE
     }
