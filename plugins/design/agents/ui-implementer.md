@@ -118,7 +118,7 @@ NOT Report a state as handled when no interaction rendered it.
 - Defaults: cross-cutting concerns (auth, validation, request ids, logs, traces, metrics, error
   mapping, timeouts, retries, rate limits) go in the framework's middleware, one model per HTTP
   surface (Hono for TypeScript, Lambda included; ASGI/FastAPI; net/http wrappers; tower). Lambda
-  handlers stay thin on Powertools for AWS Lambda. Telemetry is OpenTelemetry over OTLP.
+  handlers stay thin, on Powertools for AWS Lambda where it exists. Telemetry is OpenTelemetry over OTLP.
 
 ## Output
 

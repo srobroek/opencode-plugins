@@ -28,7 +28,7 @@ Official for Python (major 3), TypeScript (major 2), Java (major 2) and .NET (ma
 | SQS, Kinesis and DynamoDB stream batches | Batch Processing with `ReportBatchItemFailures` enabled in the event source mapping | Whole-batch retries for one bad record |
 | Cached secrets, parameters, AppConfig | Parameters | A fetch per invocation or an unbounded cache |
 | Event parsing and validation | Parser (Pydantic, Zod), Validation (JSON Schema), event source data classes | Ad hoc envelope decoding and casts |
-| HTTP, AppSync and Bedrock Agents routing | Event Handler (Python, TypeScript) | Hand-written proxy-event routing |
+| Lambda-only HTTP routing (Python), AppSync and Bedrock Agents routing (Python, TypeScript) | Event Handler; TypeScript HTTP uses Hono | Hand-written proxy-event routing |
 | Feature rules, data masking, large-object streaming, Kafka deserialization | Feature Flags, Data Masking, Streaming (Python), Kafka | A rules engine, masking crypto, whole-object loads, schema-registry decoding |
 
 ## Telemetry on Lambda
@@ -42,7 +42,7 @@ Official for Python (major 3), TypeScript (major 2), Java (major 2) and .NET (ma
 
 - Logging: JSON log format with Lambda advanced logging controls, INFO by default, a retention period, no payload logging by default.
 - Architecture: arm64 after a benchmark; x86_64 for native dependencies that need it. Check that every layer and extension supports arm64.
-- Cold starts: SnapStart for latency-sensitive Java 11+, Python 3.12+ and .NET 8+ functions after restore testing (no unique ids, credentials or connections captured in the snapshot); provisioned concurrency for stricter targets. Keep bundles small and measure Init Duration.
+- Cold starts: SnapStart for latency-sensitive functions on Java 11 or later, Python 3.12 or later, or .NET 8 or later, after restore testing (no unique ids, credentials or connections captured in the snapshot); provisioned concurrency for stricter targets. Keep bundles small and measure Init Duration.
 - Delivery is at least once: idempotent handlers, partial batch responses, dead-letter queues or on-failure destinations; never claim exactly-once side effects.
 - Long workflows: Lambda durable functions (SDKs for JS/TS, Python, Java, Go, .NET) for code-centric steps and waits; Step Functions for cross-service orchestration. Never sleep inside a billed handler.
 - Testing: unit-test the business function; replay synthetic events against the handler; run deployed integration tests that cover IAM, retries, partial batches and telemetry. Local emulation (SAM local, LocalStack, moto, DynamoDB Local) does not prove cloud behavior.

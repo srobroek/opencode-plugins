@@ -157,7 +157,7 @@ dependencies, or answer a question about the code.
 - Defaults: cross-cutting concerns (auth, validation, request ids, logs, traces, metrics, error
   mapping, timeouts, retries, rate limits) go in the framework's middleware, one model per HTTP
   surface (Hono for TypeScript, Lambda included; ASGI/FastAPI; net/http wrappers; tower). Lambda
-  handlers stay thin on Powertools for AWS Lambda. Telemetry is OpenTelemetry over OTLP.
+  handlers stay thin, on Powertools for AWS Lambda where it exists. Telemetry is OpenTelemetry over OTLP.
 - MUST follow AGENTS.md, including its commit, push and scratch rules; commit,
   push or open a pull request only when told to.
 - MUST stay in scope: no unrelated cleanup, redesign or drive-by fixes; mention them

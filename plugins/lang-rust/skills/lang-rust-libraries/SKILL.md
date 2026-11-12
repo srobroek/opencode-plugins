@@ -14,7 +14,7 @@ Checked 2026-11-12.
 - The project's existing choice wins unless the task is a migration. Prefer repository code, the standard library, framework features, then a listed crate.
 - Otherwise use the default. An alternative needs its listed condition. A departure from both needs a named gap; report the departure and reason.
 - Re-check fast-moving MCP, LLM and OTel rows on the registry before adding them. Pin additions; check features, target support, MSRV and the resolved dependency graph.
-- A dependency this guide does not name needs approval. Add only what the concern needs, not the whole stack.
+- A dependency the request did not name needs approval, even when this guide lists it. Add only what the concern needs, not the whole stack.
 - Versions are observed major/minor lines, not upgrade instructions or compatibility guarantees. Defaults and selection rules are recommendations, not measured performance rankings.
 - Load `toolchain-api` for API style, standards and contract tooling. Load `quality-code-design`'s `middleware.md` and `telemetry.md` for shared design rules. Use `aws-guidance` for Lambda architecture.
 - Commands belong in `lang-rust-quality` and `lang-rust-testing`. Desktop/Tauri details belong in `lang-rust-tauri`.

@@ -22,7 +22,7 @@ Never wrap Hono in Middy. Keep existing frameworks unless migration is requested
 
 | Concern | Default | Use instead when | Avoid (why) |
 | --- | --- | --- | --- |
-| Portable API | `hono` `4` | `fastify` `5` for Node-first schema/hooks/plugins; `elysia` `1` for Bun-first inferred APIs. | Picking from trivial throughput benchmarks rather than workload/runtime requirements. |
+| New HTTP API | `hono` `4` | Existing `fastify` `5` or `elysia` `1` services keep their framework. A new Fastify or Elysia service is a departure to report with its gap, for example a required Fastify plugin. | Picking from trivial throughput benchmarks rather than workload/runtime requirements. |
 | Existing service | Keep `express` `5`, `koa` `3`, or `@nestjs/core` `12` | Nest for existing DI/module conventions; Express for middleware investment. | Calling these abandoned without evidence; replacing a working framework just for this list. |
 | Hono middleware | Built-in `hono/cors`, `hono/secure-headers`, `hono/request-id`, `hono/body-limit`, `hono/timeout`, `hono/compress` in `4` | `hono-rate-limiter` `0.5` with shared storage for distributed quotas. | CORS as authorization; client-supplied request IDs without validation; timeout without cancelling downstream work. |
 | Hono tokens | Built-in `hono/jwt` or `hono/jwk` in `4` | `jose` `6` for explicit JOSE/JWKS policy. | Signature-only verification without issuer/audience checks. |

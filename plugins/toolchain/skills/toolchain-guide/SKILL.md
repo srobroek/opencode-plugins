@@ -12,7 +12,7 @@ skill, not from this table.
 | Situation | Load skill |
 | --- | --- |
 | Choosing or changing a project stack, package manager or task runner, or adding a dependency | `toolchain-stack-defaults` |
-| Picking per-language libraries or tools, or about to write your own code for a common concern | `toolchain-languages` |
+| Picking per-language libraries or tools, choosing a programming language, or about to write your own code for a common concern | `toolchain-languages` |
 | Choosing or designing an API: REST/OpenAPI, gRPC, Connect, GraphQL, events, webhooks, MCP; API design rules and API tests | `toolchain-api` |
 | Choosing a frontend framework, UI kit, or client or server state library | `toolchain-frontend` |
 | Choosing Terraform, OpenTofu, CDK, Kubernetes or Helm | `toolchain-infrastructure` |

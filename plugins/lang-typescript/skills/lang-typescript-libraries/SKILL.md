@@ -16,8 +16,8 @@ Checked 2026-11-12.
 - Otherwise use the default below. Use an alternative only for its listed condition.
 - A departure from both needs a named gap; report the departure and why.
 - Re-check fast-moving MCP, LLM SDK and OpenTelemetry releases on the registry before
-  adding them. Pin the chosen version. Commit the lockfile. A package not named
-  here needs approval. A registry `latest` tag can point to a prerelease.
+  adding them. Pin the chosen version. Commit the lockfile. A dependency the request did
+  not name needs approval, even when this guide lists it. A registry `latest` tag can point to a prerelease.
 - These defaults are engineering recommendations. Test the
   actual Node or Bun runtime, native binaries, adapters and instrumentation you ship.
 - Use `toolchain-api` for API style and contract rules, `quality-code-design`'s

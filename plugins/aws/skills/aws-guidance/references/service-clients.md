@@ -20,8 +20,8 @@ Read before you write code that talks to an AWS service. Checked 2026-11-12. Use
 
 Rules:
 
-1. Prefer an official SDK helper before a third-party framework.
-2. A single-table library must fit the access patterns, not just offer models.
+1. Choose by the work removed. A maintained third-party library that is markedly simpler or covers more of the access pattern (ElectroDB, PynamoDB, GLIDE) beats the official helper. The official helper wins a tie, and wins when the library lags service features you need, mishandles credential refresh, or shows an archive or maintenance notice.
+2. Choose a single-table library for how it models your access patterns.
 3. Require documented conditional-write, retry and pagination semantics from any data library.
 4. IAM support means credential refresh, reconnection and expiry handling, not only signing.
 5. Cache only with acceptable staleness and verified invalidation.

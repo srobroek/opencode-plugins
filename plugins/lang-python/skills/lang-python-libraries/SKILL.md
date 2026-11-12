@@ -13,7 +13,7 @@ Checked 2026-11-12.
 
 - Keep the project's existing choice unless the task is a migration. Prefer repository code, the standard library, framework features, then a listed library.
 - Otherwise use the default below. Choose an alternative only for its listed condition.
-- A departure from both needs a named gap; report the choice and reason. An unlisted dependency needs approval.
+- A departure from both needs a named gap; report the choice and reason. A dependency the request did not name needs approval, even when this guide lists it.
 - Re-check fast-moving MCP, LLM SDK and OpenTelemetry rows on the package registry before adding them. Pin application additions and lock transitive dependencies; libraries declare tested ranges.
 - Load the matching reference before designing or writing code for that concern. Defaults and selection conditions are recommendations, not upstream endorsements.
 - Load `toolchain-api` for API style, contract standards and API test tooling. Load `quality-code-design` and its `middleware.md` and `telemetry.md` references for shared design rules.

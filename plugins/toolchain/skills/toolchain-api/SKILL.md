@@ -24,7 +24,14 @@ Checked 2026-11-12. Per-language frameworks and generators are in the `lang-<lan
 | Tools for AI agents | MCP (spec 2026-07-28) over stdio locally or Streamable HTTP remotely | - | Protocol version negotiation, tool schemas, authorization, host permissions; JSON-RPC alone is not MCP |
 | Command-style RPC an ecosystem requires | JSON-RPC 2.0 | - | Discovery, auth, schemas and versioning are separate work; HTTP caching and status codes fit poorly |
 
-Decision order: AI tools, MCP; durable asynchronous notifications, AsyncAPI with CloudEvents, or Standard Webhooks for partners; browser push, SSE; browser bidirectional, WebSockets; typed internal RPC or bidirectional streams, gRPC; typed browser RPC, Connect; graph-shaped client queries, GraphQL; everything else, HTTP+JSON with OpenAPI.
+Decision order:
+
+1. Tools for AI agents: MCP.
+2. Durable asynchronous notifications: AsyncAPI with CloudEvents; Standard Webhooks for partners.
+3. Server push to browsers: SSE. Bidirectional browser traffic: WebSockets.
+4. Typed internal RPC or bidirectional streams: gRPC. Typed RPC from browsers: Connect.
+5. Graph-shaped client queries: GraphQL.
+6. Everything else: HTTP+JSON with OpenAPI.
 
 Connect is its own protocol, not gRPC over HTTP/1.1: one Connect server also speaks gRPC and gRPC-Web, unary and server streaming work over HTTP/1.1, and it avoids trailers. Connect for Python is in beta.
 
@@ -78,7 +85,7 @@ Connect is its own protocol, not gRPC over HTTP/1.1: one Connect server also spe
 | API2 broken authentication | Validate issuer, audience, signature, algorithm and expiry; rotate credentials; throttle authentication |
 | API4, API6 resource consumption and sensitive business flows | Limits on body, decompression, depth, page size, query cost, concurrency and time; per-principal quotas and abuse controls |
 | API7 SSRF | Outbound allowlists; block private, link-local and metadata addresses; revalidate DNS and redirects for webhooks |
-| API8, API9 misconfiguration and inventory | TLS; explicit CORS origins and credentials; CSRF protection with cookie auth; an inventory of versions; no debug endpoints in production. CORS is not authorization |
+| API8, API9 misconfiguration and inventory | TLS, explicit CORS origins and credentials, and CSRF protection with cookie auth. Keep an inventory of versions and no debug endpoints in production. CORS does not authorize anyone |
 | API10 unsafe API consumption | Validate upstream responses; bounded timeouts and retries; redacted logs with trace correlation |
 
 ## Quality gates and tools

@@ -15,7 +15,7 @@ Checked 2026-11-12.
 - Otherwise use the default below. An alternative needs its listed condition. A departure from both needs a named gap; report the choice and reason.
 - Read the relevant reference before designing or writing code. The defaults are recommendations with conditions for alternatives.
 - Re-check fast-moving rows, especially MCP, LLM SDKs and OpenTelemetry, on the registry before adding them. Pin the exact version added; these tables name major or minor lines.
-- A dependency not named here needs approval. Do not add unused parts of this stack.
+- A dependency the request did not name needs approval, even when this guide lists it. Do not add unused parts of this stack.
 - Use `toolchain-api` for API style, contracts and API test tools. Use `quality-code-design` and its `middleware.md` and `telemetry.md` references for shared design rules.
 - Use `lang-go-quality` and `lang-go-testing` for commands. Use `aws-guidance` for Lambda and AWS deployment decisions.
 

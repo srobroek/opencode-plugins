@@ -1,6 +1,6 @@
 # Go AWS and Lambda
 
-Use official SDK helpers for their lifecycle guarantees, with thin Lambda adapters and manual OpenTelemetry.
+Use official SDK helpers unless a maintained library removes markedly more work (see `aws-guidance`'s `service-clients.md`), with thin Lambda adapters and manual OpenTelemetry.
 
 Checked 2026-11-12. Standard-library entries use Go `1.27`; use `aws-guidance` for deployment and service constraints.
 
