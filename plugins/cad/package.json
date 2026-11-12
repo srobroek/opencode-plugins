@@ -17,7 +17,11 @@
   ],
   "opencode-plugins": {
     "claude": false,
-    "codex": false
+    "codex": false,
+    "scope": "project",
+    "signals": [
+      "*.step, *.stp, *.FCStd or *.scad design files"
+    ]
   },
   "peerDependencies": {
     "@opencode/plugin": "^2.1.4"

@@ -13,7 +13,11 @@
     "skills"
   ],
   "opencode-plugins": {
-    "description": "Worktrunk (wt) skills: work in linked worktrees and run deterministic preflight checks before an agent run or merge."
+    "description": "Worktrunk (wt) skills: work in linked worktrees and run deterministic preflight checks before an agent run or merge.",
+    "scope": "project",
+    "signals": [
+      ".config/wt.toml"
+    ]
   },
   "peerDependencies": {
     "@opencode/plugin": "^2.1.4"

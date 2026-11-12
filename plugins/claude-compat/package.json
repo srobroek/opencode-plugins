@@ -20,5 +20,11 @@
   },
   "devDependencies": {
     "@srobroek/opencode-lib": "workspace:*"
+  },
+  "opencode-plugins": {
+    "scope": "project",
+    "signals": [
+      "Claude Code plugins to load from a repository"
+    ]
   }
 }

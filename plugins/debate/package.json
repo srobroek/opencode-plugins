@@ -13,7 +13,8 @@
     "skills"
   ],
   "opencode-plugins": {
-    "category": "productivity"
+    "category": "productivity",
+    "scope": "global"
   },
   "peerDependencies": {
     "@opencode/plugin": "^2.1.4"
