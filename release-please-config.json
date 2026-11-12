@@ -100,8 +100,7 @@
     },
     "plugins/project": {
       "release-type": "node",
-      "component": "project",
-      "release-as": "0.5.0"
+      "component": "project"
     },
     "plugins/architecture": {
       "release-type": "node",
