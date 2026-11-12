@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/srobroek/opencode-plugins/compare/beads--v0.4.0...beads--v0.4.1) (2026-11-12)
+
+
+### Bug Fixes
+
+* **beads:** stand down while OpenCode's built-in goal drives a session ([81c7d74](https://github.com/srobroek/opencode-plugins/commit/81c7d742a9890510c7cfb42da90d3ff8b168f107))
+
 ## [0.4.0](https://github.com/srobroek/opencode-plugins/compare/beads--v0.3.0...beads--v0.4.0) (2026-11-12)
 
 

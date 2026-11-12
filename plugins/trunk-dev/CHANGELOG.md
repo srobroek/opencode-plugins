@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.7.0](https://github.com/srobroek/opencode-plugins/compare/trunk-dev--v0.6.0...trunk-dev--v0.7.0) (2026-11-12)
+
+
+### Features
+
+* **quality:** OpenFeature flags with a flags.yaml, SSM or AppConfig provider; code and storage guidance ([20baffa](https://github.com/srobroek/opencode-plugins/commit/20baffae842836d814f1f5c3e2cd410c5bde0dd4))
+* **trunk-dev:** Flag: none with a reason is valid for a feat with nothing to switch off ([f311c5f](https://github.com/srobroek/opencode-plugins/commit/f311c5fa0c72ed58165f926a987b9fcd9c29e08b))
+
 ## [0.6.0](https://github.com/srobroek/opencode-plugins/compare/trunk-dev--v0.5.0...trunk-dev--v0.6.0) (2026-11-12)
 
 

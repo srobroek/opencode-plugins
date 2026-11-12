@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.2](https://github.com/srobroek/opencode-plugins/compare/parley--v0.3.1...parley--v0.3.2) (2026-11-12)
+
+
+### Bug Fixes
+
+* **parley:** enter saves a field instead of submitting, and pick_many "other" fits on top of max ([ae6d0c7](https://github.com/srobroek/opencode-plugins/commit/ae6d0c71764bf2ec7cbdc455bc719be503370e8c))
+
 ## [0.3.1](https://github.com/srobroek/opencode-plugins/compare/parley--v0.3.0...parley--v0.3.1) (2026-11-03)
 
 

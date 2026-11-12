@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/srobroek/opencode-plugins/compare/agent-reviewer--v0.5.0...agent-reviewer--v0.6.0) (2026-11-12)
+
+
+### Features
+
+* **quality:** testing standards: behavior tests, test budget, same-change maintenance, reviewers check test changes ([dcdf941](https://github.com/srobroek/opencode-plugins/commit/dcdf9413b6793ed06ef8978a0084d9f50d30b00c))
+
 ## [0.5.0](https://github.com/srobroek/opencode-plugins/compare/agent-reviewer--v0.4.0...agent-reviewer--v0.5.0) (2026-11-11)
 
 

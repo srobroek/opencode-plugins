@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0](https://github.com/srobroek/opencode-plugins/compare/ast-grep--v1.0.0...ast-grep--v1.1.0) (2026-11-12)
+
+
+### Features
+
+* **quality:** research-first engineering standards and per-language library standards for every coding agent ([09e8d46](https://github.com/srobroek/opencode-plugins/commit/09e8d461bb2b7654788a588ef6932929ff564d28))
+
 ## [1.0.0](https://github.com/srobroek/opencode-plugins/compare/ast-grep--v0.2.0...ast-grep--v1.0.0) (2026-11-10)
 
 

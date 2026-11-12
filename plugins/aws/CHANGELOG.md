@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.0](https://github.com/srobroek/opencode-plugins/compare/aws--v0.4.0...aws--v0.5.0) (2026-11-12)
+
+
+### Features
+
+* **quality:** OpenFeature flags with a flags.yaml, SSM or AppConfig provider; code and storage guidance ([20baffa](https://github.com/srobroek/opencode-plugins/commit/20baffae842836d814f1f5c3e2cd410c5bde0dd4))
+* **quality:** research-first engineering standards and per-language library standards for every coding agent ([09e8d46](https://github.com/srobroek/opencode-plugins/commit/09e8d461bb2b7654788a588ef6932929ff564d28))
+
 ## [0.4.0](https://github.com/srobroek/opencode-plugins/compare/aws--v0.3.0...aws--v0.4.0) (2026-11-10)
 
 
