@@ -8,6 +8,11 @@ updates:
       opencode:
         patterns:
           - "@opencode/*"
+    # Host modules: OpenCode supplies them at runtime. Pin them by hand to the versions in
+    # the catalog of the OpenCode release that @opencode/plugin targets (see AGENTS.md).
+    ignore:
+      - dependency-name: "@opentui/*"
+      - dependency-name: "solid-js"
   - package-ecosystem: github-actions
     directory: /
     schedule:
