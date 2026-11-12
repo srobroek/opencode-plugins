@@ -1,7 +1,8 @@
 # quality
 
-Code design and review guidance, a short code-quality policy, performance profiling, throwaway logic
-prototypes, and a read-only `adversarial-challenger` subagent.
+Code design and review guidance, a short code-quality policy, testing standards and an on-demand
+test audit with two helper tools, performance profiling, throwaway logic prototypes, and a read-only
+`adversarial-challenger` subagent.
 
 | Skill | When |
 | --- | --- |
@@ -9,6 +10,7 @@ prototypes, and a read-only `adversarial-challenger` subagent.
 | `quality-code-design` | Code design, investigation, implementation, refactoring, review, debugging or test-first work in any language. Picks IMPLEMENT, INVESTIGATE or REVIEW and loads only the references the task needs from `references/`, including `middleware.md` (handlers versus middleware, stack order, one error mapper), `telemetry.md` (OpenTelemetry setup and rules) and `feature-flags.md` (typed decisions, safe defaults, storage and removal) |
 | `quality-profiling` | Slow or memory-heavy code, endpoints, builds or CLIs: set a target, reproduce with a fixed workload, baseline with variance, pick the profiler, change one thing, re-measure, report before/after. hyperfine, Linux perf and macOS Instruments live in `references/`; language tooling is the `lang-<language>-profiling` skills in the `lang-<language>` plugins |
 | `quality-testing` | What to test and how many tests to keep. A workflow and five rules, with references for good and bad tests (`good-tests.md`, `bad-tests.md`), test levels (`what-to-test.md`), the test budget against sprawl (`test-budget.md`), maintenance and deletion with the code (`maintenance.md`), doubles (`doubles.md`), coverage and mutation signals (`signals.md`) and reviewing test changes (`review-tests.md`). Points to the `lang-<language>-testing` skills and their `references/practice.md` for tooling |
+| `quality-test-audit` | Run on demand to audit one test scope. It takes a baseline of repeated random-order runs, coverage and mutation testing. It classifies tests to prune, assets to purge, tests to fix and tests to speed up. A challenger checks the plan before you approve it. Each applied batch must keep every mutant that the baseline killed. `references/` holds the catalog, the commands per runner and the report template |
 | `prototype-logic` | A throwaway single-file HTML demo over a pure reducer or state machine, to test a state model before building it |
 
 Other plugins point at these: `architecture` and the `architect` agent load
@@ -56,6 +58,21 @@ always-on skill, so the rule ships as the `quality-code-policy` skill, loaded wh
 its description matches; the standards blocks above cover its research, library and testing
 rules in every session. To make the whole policy always on, copy its body into your
 global `AGENTS.md` or into a file listed under `instructions` in your config.
+
+## Test audit tools
+
+Two tools back the `quality-test-audit` skill. Both refuse paths outside the session
+directory. Claude Code and Codex get the skill without the tools; it falls back to the
+shell commands in its `references/evidence.md`.
+
+| Tool | Does |
+| --- | --- |
+| `quality_test_repeat` | Runs one test command (`sh -c`) 1 to 50 times, 5 by default, with a per-run timeout. With `junit`, it reads the JUnit report after each run that wrote it (pytest, Vitest, bun test, gotestsum, cargo-nextest) and reports flaky tests, tests that failed in every run, tests retried within a run, and the 10 slowest by median time. It asks permission first |
+| `quality_test_compare` | Read-only. Compares a baseline and a candidate report: coverage (LCOV, Cobertura XML, Go cover profile) for lost lines and branches, or mutation (mutation-testing-report JSON from Stryker, cargo-mutants `outcomes.json`, Gremlins JSON) for mutants the baseline killed that now survive. Missing branch data is "not measured", not zero. mutmut is not supported: it exports summary counts only |
+
+| Option | Default | Effect |
+| --- | --- | --- |
+| `confirmTestRuns` | `true` | `false` lets an allowed `quality_test_repeat` run without a prompt; a configured deny still applies |
 
 ## Agent
 
