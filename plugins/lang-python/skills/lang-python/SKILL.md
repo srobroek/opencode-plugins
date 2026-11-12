@@ -11,6 +11,7 @@ skill, not from this table.
 
 | Situation | Load skill |
 | --- | --- |
+| Choosing a library or tool, or about to write your own code for a common concern (web, data, messaging, AWS, MCP, telemetry, CLI, testing, security) | `lang-python-libraries` |
 | Running Python lock, lint, format, type-check and test checks, locally or in CI | `lang-python-quality` |
 | Writing or fixing Python tests: pytest fixtures, parametrize, monkeypatch, Hypothesis property tests, coverage | `lang-python-testing` |
 | Python package layout: src layout, `__init__` facades and `__all__`, import-linter, uv workspaces, dependency groups | `lang-python-packaging` |

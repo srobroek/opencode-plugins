@@ -34,6 +34,8 @@ The plugin registers these skills from `skills/`, unless a skill with the same i
 already exists:
 
 - `lang-python`: the router.
+- `lang-python-libraries`: compare library defaults before writing code for services,
+  data, messaging, AWS, MCP, telemetry, CLI, testing and security.
 - `lang-python-quality`: `uv lock --check`, `ruff check`, `ruff format --check`, mypy or
   pyright strict, `pytest -x`, in that order; uv workspace narrowing and CI.
 - `lang-python-testing`: pytest fixtures, parametrize, monkeypatch, Hypothesis, coverage.
