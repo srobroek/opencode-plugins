@@ -11,9 +11,9 @@ Annotated reference for `fnox.toml`. Sources: https://fnox.jdx.dev/guide/config-
 | `fnox.<profile>.toml` | yes | one environment (loaded only for that profile, `-P`/`FNOX_PROFILE`) |
 | `fnox.local.toml` | no | the encrypted sync cache and personal overrides |
 
-Load order: global config, then `fnox.toml`, profile files, `fnox.local.toml`, closer
-directories last. `fnox config-files` lists what loaded; `fnox list --sources` shows which
-file defines each secret.
+Load order: global config, `fnox.toml`, profile files, `fnox.local.toml`. Closer
+directories load last. `fnox config-files` lists the loaded files. `fnox list --sources`
+shows which file defines each secret.
 
 ## Committed `fnox.toml`
 
@@ -39,18 +39,24 @@ SENTRY_TOKEN = { provider = "shared", value = "sentry/credential",       env = "
 LOG_LEVEL    = { default = "info", env = true }   # not secret: fine in the shell
 ```
 
-`env`: `true` injects into the shell and `fnox exec`; `"exec"` only into `fnox exec`;
-`false` never (still usable by leases and other secrets). `if_missing`: `error`, `warn`
-or `ignore`. The 1Password provider is read-only: `fnox set` only records a reference;
-see `references/store.md`. fnox resolves a provider's secrets with one `op inject`, falling back
-to `op read` per secret.
+`env` takes one of three values:
+
+- `true` injects into the shell and `fnox exec`.
+- `"exec"` injects only into `fnox exec`.
+- `false` keeps it out of both. Leases and other secrets can still use it.
+
+`if_missing` takes `error`, `warn` or `ignore`.
+
+The 1Password provider cannot write, so `fnox set` only records a reference (see
+`references/store.md`). fnox resolves the provider's secrets with one `op inject`. If that
+fails, it falls back to one `op read` per secret.
 
 ## Local sync cache (opt-in, offline only)
 
 The global daemon already keeps resolved values in memory, so most projects need no
-cache file. Add one only when reads must work offline or survive a reboot without
-1Password. It is opt-in, not the default. A 1Password host has no age provider, so the project
-declares its own in `fnox.local.toml`, encrypted to a key the user creates deliberately:
+cache file. Add one only for reads that must work offline, or that must survive a restart
+without 1Password. It is opt-in, not the default. A 1Password host has no age provider.
+The project declares its own in `fnox.local.toml`, encrypted to a key the user creates:
 
 ```toml
 # fnox.local.toml (gitignored)
@@ -67,10 +73,10 @@ fnox sync -p local-age --local-file --force    # refresh after a vault change (n
 fnox sync -p local-age --local-file --dry-run  # preview; KEYS or --filter <regex> narrow it
 ```
 
-Writes `fnox.local.toml` with, per secret, a `[secrets.NAME.sync]` table (`provider`,
-`value` ciphertext). Reads then use the cache offline, with no 1Password prompt. Run it
-from the project directory without `-c`. The cache is skipped in CI. Only sync items
-that exist.
+The sync writes `fnox.local.toml` with a `[secrets.NAME.sync]` table per secret
+(`provider`, `value` ciphertext). Reads use the cache offline, with no 1Password prompt.
+Run it from the project directory without `-c`. CI skips the cache. Sync only items that
+exist.
 
 ## Values stored in git (no vault)
 

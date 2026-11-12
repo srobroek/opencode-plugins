@@ -17,9 +17,15 @@ chezmoi source (`.chezmoidata/fnox.toml`). Follow `docs/secrets.md` in that repo
 ## When a vault is worth it
 
 A vault pays off only when access differs. A service account sees only the vaults fixed at
-its creation. It cannot see Private, Personal, Employee or the default Shared vault, so CI
-needs its secrets in a non-Private vault. For a solo project keep items in Private. When
-both needs exist, use two vaults (`dev-shared` plus `proj-<name>`).
+its creation. It cannot see these vaults:
+
+- Private
+- Personal
+- Employee
+- the default Shared vault
+
+So CI needs its secrets in a non-Private vault. For a solo project, keep items in Private.
+When both needs exist, use two vaults (`dev-shared` plus `proj-<name>`).
 
 ## Create a per-project vault
 
@@ -38,9 +44,15 @@ vault = "proj-myapp"
 
 ## Provider names
 
-The global config owns `op` and (on headless hosts) `host`. A project provider with the
-same name replaces the whole global entry, so name project providers `proj`, `shared` or
-`proj-age`. Do not redeclare the shared machine keys: Tavily, Exa, Firecrawl,
-TinyFish, Context7 and Brave.
+The global config owns `op` and, on headless hosts, `host`. A project provider with the
+same name replaces the whole global entry. Name project providers `proj`, `shared` or
+`proj-age` instead. Never redeclare the shared machine keys. They cover these services:
+
+- Tavily
+- Exa
+- Firecrawl
+- TinyFish
+- Context7
+- Brave
 
 Top-level `env` and `if_missing` take the closest file's value, so set them on each secret.

@@ -17,4 +17,4 @@ fnox profiles                         # list profiles
 - `FNOX_PROFILE=production` selects a profile for a session.
 - A profile is a separate daemon cache entry, so it costs another approval. Group the
   commands for one environment in one `fnox exec`.
-- Keep production values in their own vault or provider, and get the user's approval before you touch them.
+- Before you touch production values, get the user's approval. Keep them in their own vault or provider.
