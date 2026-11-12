@@ -61,7 +61,7 @@ real profile before relying on it.
 
 ## IAM user keys (last resort)
 
-Only when no SSO or role is possible. Create the item in 1Password (the user fills it),
+Only when no SSO or role is possible. Create the item in 1Password. The agent can store a key from `aws iam create-access-key` with the forms in `references/store.md`,
 reference it as the lease's bootstrap, and keep it out of commands:
 
 ```toml

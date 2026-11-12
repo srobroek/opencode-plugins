@@ -28,4 +28,4 @@ fnox scan --values --staged    # staged files that contain a real secret value
 | Unknown provider | Compare `fnox provider list` with the secret's `provider`. A project provider named `op` or `host` replaces the global one. |
 | A rotation does not show | `fnox daemon clear NAME`, then rerun. |
 | Different value in one directory | A `fnox.local.toml` entry overrides it. Use `fnox list --sources`. |
-| `no identity matched` or identity file not found (`host`, age) | The host's `~/.config/fnox/age.txt` does not match the value's recipient. The user stores it again with `fnox set NAME --provider host`. |
+| `no identity matched` or identity file not found (`host`, age) | The host's `~/.config/fnox/age.txt` does not match the value's recipient. Store it again (the agent for its own values, else the user) with `fnox set NAME --provider host`. |
