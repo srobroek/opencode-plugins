@@ -6,7 +6,7 @@ Read when you choose a test level, or decide whether something needs a test at a
 
 | Level | Exercises | Pays off for | Cost |
 | --- | --- | --- | --- |
-| Unit | One function or module, in process, no I/O | Domain rules, parsers, calculations, state machines | Milliseconds; breaks on interface changes only |
+| Unit | One function or module, in process, no I/O | Domain rules, parsers, calculations, state machines | Milliseconds; survives internal refactors |
 | Integration | Your code with a real dependency: database, filesystem, HTTP server, queue | Queries, transactions, serialization, framework configuration, adapter error mapping | Seconds; needs setup and isolation |
 | End-to-end | The deployed or fully assembled system through its real entry point | A few critical user journeys and wiring | Slow and less reliable; keep the set small |
 

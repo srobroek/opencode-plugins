@@ -47,8 +47,9 @@ Rules for every test author, human or agent:
 
 1. Write the behavior list first. Each test maps to one item.
 2. Watch every new test fail for the expected reason. For a test of code that already
-   works, break the code briefly, see the test fail, and restore the code (the
-   `quality-code-design` skill's `test-first.md`).
+   works, introduce a controlled fault and confirm that the test fails. Then restore the
+   code and check the restore with a diff (the `quality-code-design` skill's
+   `test-first.md`).
 3. Keep a test only when it protects a named behavior, passes on repeated runs and
    fails for a plausible wrong implementation. The best evidence is a mutant that the
    test kills and no other test kills. Added coverage supports a test; it is not the
@@ -60,13 +61,14 @@ Rules for every test author, human or agent:
 
 ## Test generators
 
-Coverage-driven generators add tests until coverage rises, and none of them prunes. Do
-not make one the default source of tests.
+TestGen-LLM and Cover-Agent add tests until coverage rises; they do not prune the
+existing suite. Do not make a coverage-driven generator the default source of tests.
 
-- Meta published TestGen-LLM as a paper only; there is no public tool to install.
+- Meta described TestGen-LLM in a paper. No public distribution of the tool was found
+  on 2026-11-12.
 - Qodo's Cover-Agent (`qodo-cover`) README has said that the project is no longer
-  maintained since 2025-06-15. Its last release is `0.3` (2025-05), and its licence is
-  AGPL-3.0.
+  maintained since 2025-06-15. Its latest release is `0.3.10` (2025-05-21), and its
+  licence is AGPL-3.0.
 - Apply the rules above to every generated test, whatever tool or agent wrote it.
 
 Sources: [TestGen-LLM, arXiv 2402.09171](https://arxiv.org/abs/2402.09171),

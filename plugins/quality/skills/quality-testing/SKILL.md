@@ -21,8 +21,9 @@ loop and evidence rules are in the `quality-code-design` skill's `test-first.md`
 3. Search the existing tests for each behavior. Decide per behavior: add a test, update
    a test, delete a test, or add nothing because a test already protects it.
 4. Pick the lowest level that can catch each failure.
-5. Work test-first where the change allows: write one failing test, watch it fail for
-   the expected reason, make it pass with the least code, refactor, repeat.
+5. Work test-first where the change allows. Write one failing test, and confirm that
+   it fails for the expected reason. Make it pass with the least code. Refactor, then
+   repeat.
 6. Run the touched tests and the suite the project gates on. Report a test that did not
    run as not run.
 7. Before hand-off, read the test diff beside the code diff with
