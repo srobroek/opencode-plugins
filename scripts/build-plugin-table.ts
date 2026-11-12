@@ -57,7 +57,9 @@ export function parseEntry(name: string, manifest: Record<string, unknown>): Ent
   if (scope === "project" && signals.length === 0) fail(where, `a project plugin needs "${CONFIG_KEY}.signals"`)
   if (scope !== "project" && signals.length > 0) fail(where, `"${CONFIG_KEY}.signals" applies to project plugins only`)
   const requires = config.requires === undefined ? [] : stringList(where, "requires", config.requires)
-  const description = config.description ?? manifest.description
+  // The package description describes the OpenCode plugin; `opencode-plugins.description`
+  // describes only the skills that Claude Code and Codex get, so it is the fallback here.
+  const description = manifest.description ?? config.description
   if (typeof description !== "string" || !description.trim()) fail(where, "description must be a non-empty string")
   return { name, description: description.trim(), scope: scope as Scope, signals, requires }
 }

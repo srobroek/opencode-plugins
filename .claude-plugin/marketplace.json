@@ -101,7 +101,7 @@
     {
       "name": "quality",
       "source": "./plugins/quality",
-      "description": "Code design and review guidance, an always-on style code-quality policy, performance profiling, and throwaway logic prototypes.",
+      "description": "Code design and review guidance, a code-quality policy, testing standards and a test audit, performance profiling, and throwaway logic prototypes.",
       "version": "0.7.0",
       "category": "development"
     },

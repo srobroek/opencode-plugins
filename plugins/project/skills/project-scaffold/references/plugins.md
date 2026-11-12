@@ -53,11 +53,11 @@ Loaded in every project by the global configuration. Do not add them per project
 | agent-efficiency | Cut agent tokens: run bash calls as the built-in shell tool, narrow explore to search and web tools, and trim read-only subagent prompts |
 | agent-mechanic | mechanic subagent: cheap, exact mechanical edits (renames, bulk edits, formatting, moving code) that run the given check |
 | agent-researcher | The researcher subagent: answers one scoped question from code, docs and the web with cited observations and inferences, and records it on a bead when given one |
-| agent-reviewer | A security review skill: trace untrusted input to sinks, tag CWE ids and check cross-boundary dispatch |
+| agent-reviewer | Read-only reviewer subagents (pull request, local diff, security, adversarial challenge) sharing one review core, and a security review skill |
 | agent-seance | seance subagent and read-only seance_read tool: answer a question from a past session and its subagent transcripts |
-| architecture | Architecture skills: capability-first top-level layout, ownership boundaries, and durable docs/ project knowledge |
-| ast-grep | Structural code search with the ast-grep CLI, plus when to use Semgrep or rust-analyzer instead |
-| aws | AWS working guidance: route AWS tasks through the AWS MCP Server's guided skills, verify against AWS documentation, and price with the AWS Pricing MCP server |
+| architecture | Architecture skills (capability-first layout, ownership boundaries, durable docs/ knowledge) and a read-only architect subagent |
+| ast-grep | Structural code search with the ast-grep CLI: a skill on patterns, Rust macro and Go call gotchas, bounded output, preview-only rewrites, and when to use Semgrep or rust-analyzer instead |
+| aws | AWS working guidance as a skill, plus the read-only AWS MCP Server and the AWS Pricing MCP server, added in AWS projects |
 | chezmoi | Refuse edits and shell writes to chezmoi-managed live files, naming the source to edit, plus the chezmoi-editor skill |
 | debate | Stress-test a decision from both sides, grill a plan in frontier rounds, or write a questionnaire for someone else |
 | delivery | Pull-request landing with merge proof and receipts, receipt-driven worktree cleanup, delivery agents and fan-out instructions for OpenCode V2 |
@@ -72,8 +72,8 @@ Loaded in every project by the global configuration. Do not add them per project
 | model-roles | Give agents a model tier (cheap, standard, strong, reviewer) derived from the model catalog, and resolve each tier to the first available candidate |
 | parley | Ask the user rounds of typed questions in a TUI panel, with recommended answers, notes and deferrals |
 | project | Project lifecycle: scaffold a project with /new-project, set up fnox and 1Password secrets, and pick an OSI-approved license |
-| quality | Code design and review guidance, an always-on style code-quality policy, performance profiling, and throwaway logic prototypes |
-| repomix | Pack a local or remote repo into one file with repomix for bulk context: external repos, module packs and version diffs |
+| quality | Code design and review guidance, a code-quality policy, testing standards with a test audit and its two tools, performance profiling, logic prototyping, and a read-only adversarial-challenger subagent |
+| repomix | Pack a local or remote repo into one file for bulk context with repomix: a repomix_pack tool that returns only the path and metrics, and a recipes skill |
 | safety | Hard gates and permission checks for destructive, indirect, remote-exec and attributed shell commands, shipped-migration edits and external directory flags, plus close-keyword and package-vetting help and redaction of secret environment values from tool output |
 | session | Read-only handoff from an earlier session: session_resume tool and resume-session skill |
 | statusline | omp-style status line above the OpenCode session composer |
@@ -104,8 +104,9 @@ Ask before adding any plugin that is not obviously needed. Plugins with MCP serv
 
 ## 4. Install into the project
 
-Spec: `github:srobroek/opencode-plugins::path:plugins/<name>`; append `#<tag>` (for example
-`#lang-rust--v0.2.0`, see `git ls-remote --tags` on the repository) to pin, which stops
+Spec: `github:srobroek/opencode-plugins#main::path:plugins/<name>`, which follows `main`.
+To pin a release instead, replace `#main` with its tag (for example
+`#lang-rust--v0.3.0`, see `git ls-remote --tags` on the repository); a pin stops
 automatic updates. Check `opencode plugin add --help`: in OpenCode 2.2.5 it writes the
 global configuration, so for a project edit the project's `plugins` array instead:
 
@@ -113,8 +114,8 @@ global configuration, so for a project edit the project's `plugins` array instea
 {
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
-    "github:srobroek/opencode-plugins::path:plugins/lang-rust",
-    "github:srobroek/opencode-plugins::path:plugins/beads"
+    "github:srobroek/opencode-plugins#main::path:plugins/beads",
+    "github:srobroek/opencode-plugins#main::path:plugins/speckit"
   ]
 }
 ```

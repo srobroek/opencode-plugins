@@ -18,9 +18,14 @@ describe("parseEntry", () => {
     })
   })
 
-  test("prefers the opencode-plugins description", () => {
-    const entry = parseEntry("a", manifest({ scope: "global", description: "Short." }))
-    expect(entry.description).toBe("Short.")
+  test("uses the package description, which describes the OpenCode plugin", () => {
+    const entry = parseEntry("a", manifest({ scope: "global", description: "Skills only." }))
+    expect(entry.description).toBe("Does a thing. Then more.")
+  })
+
+  test("falls back to the opencode-plugins description without a package description", () => {
+    const entry = parseEntry("a", { "opencode-plugins": { scope: "global", description: "Skills only." } })
+    expect(entry.description).toBe("Skills only.")
   })
 
   test("rejects a plugin without scope", () => {
