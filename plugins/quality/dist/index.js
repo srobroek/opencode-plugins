@@ -4834,6 +4834,8 @@ function confirmTestRepeat(evaluation) {
   evaluation.message = `Run \`${evaluation.resources.join(" ")}\` ${typeof runs === "number" ? `${runs} times` : "repeatedly"}? The command runs with your permissions and may leave files behind.`;
 }
 function parseTestAuditOptions(options) {
+  if (options.testAudit === false)
+    return;
   return { confirm: options.confirmTestRuns !== false };
 }
 function parseRepeatInput(input) {
@@ -4925,6 +4927,8 @@ function compareReports(root, input) {
   }
 }
 async function setupTestAudit(ctx, options) {
+  if (options === undefined)
+    return async () => {};
   const root = ctx.location.directory;
   const tools = await ctx.tool.transform((editor) => {
     editor.add({

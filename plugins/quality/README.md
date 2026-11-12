@@ -72,6 +72,7 @@ shell commands in its `references/evidence.md`.
 
 | Option | Default | Effect |
 | --- | --- | --- |
+| `testAudit` | `true` | `false` turns both tools off; the skill then uses the shell commands |
 | `confirmTestRuns` | `true` | `false` lets an allowed `quality_test_repeat` run without a prompt; a configured deny still applies |
 
 ## Agent

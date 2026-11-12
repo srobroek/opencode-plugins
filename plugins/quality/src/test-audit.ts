@@ -32,8 +32,11 @@ export function confirmTestRepeat(evaluation: Evaluation): void {
   evaluation.message = `Run \`${evaluation.resources.join(" ")}\` ${typeof runs === "number" ? `${runs} times` : "repeatedly"}? The command runs with your permissions and may leave files behind.`
 }
 
-/** The `confirmTestRuns` plugin option: on unless it is exactly `false`. */
-export function parseTestAuditOptions(options: Readonly<Record<string, unknown>>): { confirm: boolean } {
+export type TestAuditOptions = { confirm: boolean } | undefined
+
+/** `testAudit: false` turns both tools off; `confirmTestRuns` keeps the run prompt unless it is exactly `false`. */
+export function parseTestAuditOptions(options: Readonly<Record<string, unknown>>): TestAuditOptions {
+  if (options.testAudit === false) return undefined
   return { confirm: options.confirmTestRuns !== false }
 }
 
@@ -149,8 +152,9 @@ export function compareReports(root: string, input: CompareInput): { content: st
   }
 }
 
-/** Register both tools and, with `confirm`, the evaluate hook. Returns the disposer. */
-export async function setupTestAudit(ctx: Context, options: { confirm: boolean }): Promise<() => Promise<void>> {
+/** Register both tools and, with `confirm`, the evaluate hook, unless the options turn them off. Returns the disposer. */
+export async function setupTestAudit(ctx: Context, options: TestAuditOptions): Promise<() => Promise<void>> {
+  if (options === undefined) return async () => {}
   const root = ctx.location.directory
   const tools = await ctx.tool.transform((editor) => {
     editor.add({
