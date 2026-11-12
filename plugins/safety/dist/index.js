@@ -317,8 +317,16 @@ function readOption(words, at, wrapper) {
   return null;
 }
 function commandWords(input) {
+  const { argv, directories } = stripWrappers(input);
+  return { argv, directories };
+}
+function commandWrappers(input) {
+  return stripWrappers(input).wrappers;
+}
+function stripWrappers(input) {
   const words = [...input];
   const directories = [];
+  const wrappers = [];
   let i = 0;
   while (i < words.length) {
     const word = words[i];
@@ -329,6 +337,7 @@ function commandWords(input) {
     const wrapper = WRAPPERS.get(word.slice(word.lastIndexOf("/") + 1));
     if (wrapper === undefined)
       break;
+    wrappers.push(word.slice(word.lastIndexOf("/") + 1));
     i++;
     while (i < words.length) {
       const option = words[i];
@@ -344,13 +353,13 @@ function commandWords(input) {
         break;
       const read = readOption(words, i, wrapper);
       if (read === "lookup")
-        return { argv: [], directories };
+        return { argv: [], directories, wrappers };
       if (read === null) {
         i++;
         continue;
       }
       if (read.value === undefined)
-        return { argv: [], directories };
+        return { argv: [], directories, wrappers };
       if (wrapper.split?.has(read.name)) {
         words.splice(i, read.span, ...tokenizeShell(read.value).map((token) => token.value));
         continue;
@@ -361,7 +370,7 @@ function commandWords(input) {
     }
     i += Math.min(wrapper.operands ?? 0, words.length - i);
   }
-  return { argv: words.slice(i), directories };
+  return { argv: words.slice(i), directories, wrappers };
 }
 // node_modules/.bun/smol-toml@1.9.0/node_modules/smol-toml/dist/error.js
 /*!
@@ -1712,18 +1721,6 @@ var RESERVED = new Set([
   "until",
   "time"
 ]);
-var WRAPPER_NAMES = new Set([
-  "sudo",
-  "doas",
-  "env",
-  "nice",
-  "timeout",
-  "stdbuf",
-  "exec",
-  "command",
-  "time",
-  "nohup"
-]);
 var XARGS_VALUED = new Set(["-I", "-n", "-P", "-L", "-l", "-d", "-s", "-E", "-e", "-a"]);
 var ASSIGNMENT2 = /^[A-Za-z_][A-Za-z0-9_]*=/;
 var MAX_DEPTH = 8;
@@ -1805,14 +1802,7 @@ function walkShell(source) {
           break;
         assignments.push(value);
       }
-      const wrappers = [];
-      for (const value of values) {
-        if (ASSIGNMENT2.test(value) || value.startsWith("-"))
-          continue;
-        if (!WRAPPER_NAMES.has(base(value)))
-          break;
-        wrappers.push(base(value));
-      }
+      const wrappers = commandWrappers(values);
       const argv = commandWords(values).argv;
       const offset = values.length - argv.length;
       const aligned = argv.every((value, i) => values[offset + i] === value) ? words.slice(offset) : undefined;
@@ -2109,10 +2099,16 @@ var OP_VALUED = new Set([
 function isOp(name) {
   return name === "op" || name === "op.exe";
 }
-function setsFieldValues(command, args) {
-  if (command.stage > 0 || command.hereDocuments.length > 0 || command.redirects.length > 0)
+function readsInput(command) {
+  return command.redirects.some((word) => /<[<&>-]?\s*$/.test(command.source.slice(0, word.start)));
+}
+function stdinFed(command) {
+  return command.stage > 0 || command.hereDocuments.length > 0 || readsInput(command);
+}
+function setsFieldValues(command, args, fed) {
+  if (fed || stdinFed(command))
     return true;
-  return args.some((arg) => arg === "-" || arg === "--template" || arg.startsWith("--template=") || !arg.startsWith("-") && arg.includes("="));
+  return args.some((arg) => arg === "-" || arg === "--template" || arg.startsWith("--template=") || arg === "--generate-password" || arg.startsWith("--generate-password=") || !arg.startsWith("-") && arg.includes("="));
 }
 function allowed(words, allow) {
   return allow.some((entry) => {
@@ -2120,7 +2116,7 @@ function allowed(words, allow) {
     return prefix.length > 0 && prefix.every((word, i) => words[i] === word);
   });
 }
-function opCall(command, allow = []) {
+function opCall(command, allow = [], fed = false) {
   if (!isOp(base(command.argv[0])))
     return false;
   const args = command.argv.slice(1);
@@ -2131,23 +2127,22 @@ function opCall(command, allow = []) {
   const words = positionals(args, OP_VALUED);
   if (words[0] === "whoami")
     return false;
-  if (words[0] === "item" && words[1] === "create" && !setsFieldValues(command, args))
+  if (words[0] === "item" && words[1] === "create" && !setsFieldValues(command, args, fed))
     return false;
   if (words[0] === "vault" && words[1] === "create" && words[2] !== undefined)
     return false;
   return !allowed(words, allow);
 }
 var FNOX_VALUED = new Set(["-P", "--profile", "-c", "--config", "--age-key-file"]);
-var ENV_DUMPERS = new Set(["env", "printenv", "set"]);
 function dumpsEnvironment(command) {
   if (command.argv.length === 0)
-    return command.wrappers.includes("env");
+    return command.wrappers.at(-1) === "env";
   const name = base(command.argv[0]);
   const args = command.argv.slice(1);
-  if (name === "env")
-    return !args.some((arg) => !arg.startsWith("-") && !arg.includes("="));
-  if (ENV_DUMPERS.has(name))
+  if (name === "printenv")
     return true;
+  if (name === "set")
+    return args.length === 0;
   if (name === "export")
     return hasFlag(args, "p", []);
   if (name === "declare" || name === "typeset")
@@ -2171,7 +2166,7 @@ function execInner(args) {
   }
   return [];
 }
-function fnoxRefusal(command, allow = []) {
+function fnoxRefusal(command, allow = [], inheritedStdin = false) {
   if (base(command.argv[0]) !== "fnox")
     return;
   const argv = command.argv;
@@ -2199,13 +2194,16 @@ function fnoxRefusal(command, allow = []) {
   const inner = execInner(args);
   if (inner.length === 0)
     return;
-  const { commands } = walkShell(inner.map(quote2).join(" "));
-  for (const nested of commands) {
+  const fed = inheritedStdin || stdinFed(command);
+  const children = walkShell(inner.map(quote2).join(" ")).commands;
+  const scripts = SHELLS.has(base(inner[0])) && !inner.some((word) => /^-[A-Za-z]*c[A-Za-z]*$/.test(word));
+  const bodies = scripts ? command.hereDocuments.flatMap((document) => walkShell(document.body).commands) : [];
+  for (const nested of [...children, ...bodies]) {
     if (dumpsEnvironment(nested))
       return "dump";
-    if (opCall(nested, allow))
+    if (opCall(nested, allow, fed))
       return "op";
-    const again = fnoxRefusal(nested, allow);
+    const again = fnoxRefusal(nested, allow, fed);
     if (again !== undefined)
       return again;
   }

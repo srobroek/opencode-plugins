@@ -4,7 +4,7 @@
  * 1Password session and prompts the user.
  */
 
-import { base, type Command, hasFlag, positionals, walkShell } from "./shell.ts"
+import { base, type Command, hasFlag, positionals, SHELLS, walkShell } from "./shell.ts"
 
 export const OP_MESSAGE =
   "safety op-guard: do not call the 1Password CLI directly; each call opens a new 1Password session and asks the user to approve. Run the command through fnox, which reuses its cached session: `fnox exec -- <cmd>`, or `fnox exec --only NAME -- <cmd>`. If the secret is not declared, load the `project-secrets` skill and declare it; if it does not exist yet, ask the user to create it. To find items, run `fnox provider discover <provider> --tags project/<name>`."
@@ -26,12 +26,27 @@ function isOp(name: string): boolean {
   return name === "op" || name === "op.exe"
 }
 
-/** Whether an `op item create` call sets a field value: an assignment, a template or stdin. */
-function setsFieldValues(command: Command, args: readonly string[]): boolean {
-  if (command.stage > 0 || command.hereDocuments.length > 0 || command.redirects.length > 0) return true
+/** Whether a redirection reads input: `<`, `<<`, `<<<`, `<<-`, `<&` or `<>`. */
+function readsInput(command: Command): boolean {
+  return command.redirects.some((word) => /<[<&>-]?\s*$/.test(command.source.slice(0, word.start)))
+}
+
+/** Whether a command's stdin comes from a pipe, a here-document or an input redirection. */
+function stdinFed(command: Command): boolean {
+  return command.stage > 0 || command.hereDocuments.length > 0 || readsInput(command)
+}
+
+/** Whether an `op item create` call sets a field value: an assignment, a password, a template or stdin. */
+function setsFieldValues(command: Command, args: readonly string[], fed: boolean): boolean {
+  if (fed || stdinFed(command)) return true
   return args.some(
     (arg) =>
-      arg === "-" || arg === "--template" || arg.startsWith("--template=") || (!arg.startsWith("-") && arg.includes("=")),
+      arg === "-" ||
+      arg === "--template" ||
+      arg.startsWith("--template=") ||
+      arg === "--generate-password" ||
+      arg.startsWith("--generate-password=") ||
+      (!arg.startsWith("-") && arg.includes("=")),
   )
 }
 
@@ -44,29 +59,27 @@ function allowed(words: readonly string[], allow: readonly string[]): boolean {
 }
 
 /** An `op` call that is not one of the read-only or empty-create exceptions nor in `allow`. */
-export function opCall(command: Command, allow: readonly string[] = []): boolean {
+export function opCall(command: Command, allow: readonly string[] = [], fed = false): boolean {
   if (!isOp(base(command.argv[0]))) return false
   const args = command.argv.slice(1)
   if (args.includes("--help") || args.includes("-h")) return false
   if (args.length === 1 && args[0] === "--version") return false
   const words = positionals(args, OP_VALUED)
   if (words[0] === "whoami") return false
-  if (words[0] === "item" && words[1] === "create" && !setsFieldValues(command, args)) return false
+  if (words[0] === "item" && words[1] === "create" && !setsFieldValues(command, args, fed)) return false
   if (words[0] === "vault" && words[1] === "create" && words[2] !== undefined) return false
   return !allowed(words, allow)
 }
 
 const FNOX_VALUED: ReadonlySet<string> = new Set(["-P", "--profile", "-c", "--config", "--age-key-file"])
-const ENV_DUMPERS: ReadonlySet<string> = new Set(["env", "printenv", "set"])
-
-/** `env`, `printenv`, `set`, `export -p` or `declare -x` printing the environment. */
+/** `env`, `printenv`, a bare `set`, `export -p` or `declare -x` printing the environment. */
 function dumpsEnvironment(command: Command): boolean {
-  // The walk drops `env` as a wrapper, so a bare `env` has no argv left.
-  if (command.argv.length === 0) return command.wrappers.includes("env")
+  // The walk drops wrappers, so a bare `env` (possibly behind `timeout 5` or `sudo -u x`) has no argv left.
+  if (command.argv.length === 0) return command.wrappers.at(-1) === "env"
   const name = base(command.argv[0])
   const args = command.argv.slice(1)
-  if (name === "env") return !args.some((arg) => !arg.startsWith("-") && !arg.includes("="))
-  if (ENV_DUMPERS.has(name)) return true
+  if (name === "printenv") return true
+  if (name === "set") return args.length === 0
   if (name === "export") return hasFlag(args, "p", [])
   if (name === "declare" || name === "typeset") return hasFlag(args, "x", [])
   return false
@@ -90,7 +103,11 @@ function execInner(args: readonly string[]): string[] {
 }
 
 /** What `fnox` does with this command: dump values, or run an inner command that is refused. */
-export function fnoxRefusal(command: Command, allow: readonly string[] = []): "op" | "dump" | undefined {
+export function fnoxRefusal(
+  command: Command,
+  allow: readonly string[] = [],
+  inheritedStdin = false,
+): "op" | "dump" | undefined {
   if (base(command.argv[0]) !== "fnox") return undefined
   const argv = command.argv
   let at = 1
@@ -112,11 +129,16 @@ export function fnoxRefusal(command: Command, allow: readonly string[] = []): "o
   if (sub !== "exec") return undefined
   const inner = execInner(args)
   if (inner.length === 0) return undefined
-  const { commands } = walkShell(inner.map(quote).join(" "))
-  for (const nested of commands) {
+  // The child inherits fnox's stdin, so a fed `op item create` may carry field values.
+  const fed = inheritedStdin || stdinFed(command)
+  const children = walkShell(inner.map(quote).join(" ")).commands
+  // A here-document fed to a shell started by fnox is that shell's script.
+  const scripts = SHELLS.has(base(inner[0])) && !inner.some((word) => /^-[A-Za-z]*c[A-Za-z]*$/.test(word))
+  const bodies = scripts ? command.hereDocuments.flatMap((document) => walkShell(document.body).commands) : []
+  for (const nested of [...children, ...bodies]) {
     if (dumpsEnvironment(nested)) return "dump"
-    if (opCall(nested, allow)) return "op"
-    const again = fnoxRefusal(nested, allow)
+    if (opCall(nested, allow, fed)) return "op"
+    const again = fnoxRefusal(nested, allow, fed)
     if (again !== undefined) return again
   }
   return undefined
