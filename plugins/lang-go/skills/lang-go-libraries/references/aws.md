@@ -23,7 +23,7 @@ Official Powertools has no Go distribution. Do not label community ports AWS-sup
 | Concern | Default | Use instead when | Avoid (why) |
 | --- | --- | --- | --- |
 | Logger | `log/slog` JSON with invocation-scoped request ID, cold-start and active trace/span attributes | Existing structured logger | Payloads/secrets in logs; ordinary slog does not add trace correlation automatically. |
-| Metrics | OTel metrics `1` and collector when already standardized | An approved EMF library for CloudWatch business metrics; evaluate and pin before use | Casual handwritten EMF wire formats or duplicate metric publication. |
+| Metrics | OTel metrics `1` and collector when already standardized | `prozz/aws-embedded-metrics-golang` (last release 2021-09-30; review ownership and pin) for CloudWatch business metrics without a Collector | Casual handwritten EMF wire formats or duplicate metric publication. |
 | Parser/validation | Lambda runtime `1` event types, `encoding/json` and explicit checks | Validator `10` for DTO tags | Recreating AWS event schemas or treating decoding as authorization. |
 | Batch | Lambda runtime `1` partial-response types plus a reviewed shared processor | Event-specific adapter when response semantics differ | Whole-batch retry for isolated failures; silently acknowledging failed records. |
 | Idempotency | SDK v2 DynamoDB conditional writes, in-progress/completed state and TTL | Downstream stable operation token | Handler-local check-then-write deduplication or invocation IDs as keys. |

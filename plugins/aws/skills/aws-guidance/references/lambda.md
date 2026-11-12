@@ -38,6 +38,21 @@ Official for Python (major 3), TypeScript (major 2), Java (major 2) and .NET (ma
 - Go and Rust: OTel SDK with manual instrumentation (`otellambda.InstrumentHandler` in Go; `tracing-opentelemetry` in Rust), the ADOT Collector extension, and a flush at the end of every invocation. The X-Ray OTLP endpoint needs Transaction Search enabled.
 - Keep Powertools Logger and Metrics. Add the active OTel `trace_id` and `span_id` to log entries, keep the Lambda request id as its own field, and set `OTEL_SERVICE_NAME` and `POWERTOOLS_SERVICE_NAME` to the same value. Business metrics stay EMF; never publish the same metric through both EMF and OTel.
 
+## Logging and metrics on Lambda
+
+With the JSON log format, Python `logging` and Node `console` already get `timestamp`, `level`, `message` and `requestId` from the runtime. Go and Rust format their own JSON. Custom JSON needs a string `level` and an RFC 3339 `timestamp`, or log-level filtering treats the line as INFO.
+
+| Language | Default | Choose instead when | Avoid |
+| --- | --- | --- | --- |
+| Python | Powertools Logger and Metrics | Plain `logging` for small functions with no business metrics; `structlog` or `loguru` only where the project already standardizes on them; `aws-embedded-metrics` 3 for metrics-only code shared with containers | Invocation keys left bound across warm calls; a queue sink that is not flushed before the handler returns |
+| TypeScript | Powertools Logger and Metrics | `console` for minimal functions; Pino with `pino-lambda` 4 (its `StructuredLogFormatter`) for an existing Pino setup, after checking it works with Pino 10; `aws-embedded-metrics` 4.1.1 or later for metrics-only code | The `pino-lambda` default text formatter; raw numeric Pino levels with log-level filtering |
+| Go | `log/slog` JSON with a handler that adds the invocation request id, cold start and active trace ids | `prozz/aws-embedded-metrics-golang` for business metrics after an ownership review (last release 2021); OTel metrics through the Collector on an OTel platform | Community Powertools ports presented as official; shared mutable invocation attributes |
+| Rust | `tracing-subscriber` JSON with invocation spans carrying the request id | `metrics_cloudwatch_embedded` 0.10 for business metrics (flushes per invocation; histograms keep 100 samples and error on overflow); OTel metrics through the Collector | Timer-only flushing; ignored histogram overflow |
+
+- EMF limits: 30 dimensions per set (29 user dimensions in Powertools), 100 metric definitions and 100 values per array in one event, 1 MB per event. Every distinct dimension combination is a new metric: put request ids in properties, never in dimensions.
+- Application Signals gives request, latency, error and fault metrics plus traces for the APM view. It does not replace business metrics or logging.
+- The OpenTelemetry Lambda Collector extension exports traces and metrics by default but not logs; configure a logs pipeline explicitly if you want OTLP logs. Test flushing before the runtime freezes, on Collector shutdown and on export failure; synchronous export adds latency to billed duration.
+
 ## Runtime defaults
 
 - Logging: JSON log format with Lambda advanced logging controls, INFO by default, a retention period, no payload logging by default.

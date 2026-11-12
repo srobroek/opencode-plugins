@@ -25,7 +25,7 @@ The research identified no official Rust Powertools distribution. Compose the fo
 | Concern | Default | Use instead when | Avoid (why) |
 | --- | --- | --- | --- |
 | Logger/context | `tracing` `0.1`, `tracing-subscriber` `0.3` JSON | Existing approved structured logger | Unredacted events; leaked request fields across reused invocations. |
-| Metrics | OTel metrics `0.33` through collector | Approved EMF utility when CloudWatch-specific metrics need it | Casual handwritten EMF wire format; duplicate business metrics. |
+| Metrics | OTel metrics `0.33` through collector | `metrics_cloudwatch_embedded` `0.10` for CloudWatch business metrics without a Collector (per-invocation flush; histograms keep 100 samples and error on overflow) | Casual handwritten EMF wire format; duplicate business metrics. |
 | Traces | OTel `0.33`, tracing bridge `0.34`, explicit invocation span/context | Approved collector/vendor extension | Assuming the managed-runtime auto-instrumentation layer covers Rust. |
 | Parser/validation | `serde` `1`, `validator` `0.21` plus official event types | `garde` `0.23` contextual validation | Recreated event schemas; unchecked payload assumptions. |
 | Idempotency | `aws-sdk-dynamodb` `1` conditional writes, TTL and in-progress/completed records | Downstream operation token or an existing reviewed shared component | Handler-local check-then-write or invocation IDs as business deduplication keys. |
