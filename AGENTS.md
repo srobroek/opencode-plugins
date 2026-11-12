@@ -51,6 +51,10 @@ package whose entry point default-exports `Plugin.define({ id, setup })` from
   when its skills depend on OpenCode tools.
 - Runtime `dependencies` must be published on npm. Workspace packages are only
   available at build time.
+- `@opentui/*` and `solid-js` are host modules (`HOST_MODULES` in `scripts/build.ts`):
+  OpenCode supplies them at runtime. When you bump `@opencode/*`, pin them in the
+  root `package.json` to the versions in that OpenCode release's root catalog.
+  Dependabot ignores them.
 - Plugin ids: `srobroek.<name>`. Tool names: `<name>_<verb>`.
 - Shipped agents name a model-roles tier (`cheap`, `standard`, `strong`,
   `reviewer`) in the `x-opencode-model-role` request header (see
