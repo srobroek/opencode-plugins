@@ -83,6 +83,7 @@ exist.
 A project may declare its own age provider when CI or collaborators need committed
 ciphertext, because the global `host` key belongs to one machine. For a CI-only or solo
 project with no 1Password, name the provider `proj-age`. Give it the CI key and the user's
-public key as recipients (`age-keygen -y` of the user's key file). The user stores each
-value with `fnox set NAME --provider proj-age` at a hidden prompt. Ciphertext in
+public key as recipients (`age-keygen -y` of the user's key file). The agent stores generated or tool-issued
+values with `fnox set NAME --provider proj-age` (see `references/store.md`); the user types
+user-only values at a hidden prompt. Ciphertext in
 `fnox.toml` is safe to commit. See https://fnox.jdx.dev/providers/age.

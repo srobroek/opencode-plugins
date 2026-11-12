@@ -7,26 +7,34 @@ description: "Use for secrets, credentials, API keys, fnox, 1Password, .env, vau
 
 Manage project secrets with fnox (https://fnox.jdx.dev/, written against 1.47). A committed
 `fnox.toml` holds references only. Values stay in 1Password (or age ciphertext) and reach
-commands through `fnox exec`. Ask the user, and do the smallest setup that fits.
+commands through `fnox exec`. Do the smallest setup that fits. The agent writes values it generates or
+a tool hands it. It asks the user for values only the user has (`references/store.md`).
 
 ## Never
 
 - Put a value in the transcript. These commands print values, so never run them:
   - `fnox get`, `fnox export`, `fnox env`, `fnox list --values`
   - `op read`, `cat .env`, `echo $KEY`
-- Run `op` directly, except a value-free `op item create` and an approved `op vault create`.
-  The op-guard refuses the rest. Use `fnox exec` and `fnox provider discover` instead.
+- Run `op` directly, except the forms in `references/store.md` and an approved
+  `op vault create`. The op-guard refuses the rest:
+  - `--reveal`
+  - `op item get`
+  - `op read`
+  - `op inject`
+  - `op run`
+  Use `fnox exec` and `fnox provider discover` instead.
+- Write a value literally in a command or a file. Never let it reach tool output.
 - Commit any of these:
   - values and `.env`
   - `fnox.local.toml`
   - age identities and tokens
-- Ask the user to paste a value into chat, or pass one as an argument.
+- Ask the user to paste a value into chat, or pass a value as an argument.
 
 ## Hosts
 
 The laptop uses 1Password through fnox's `op` provider, plus the daemon's in-memory cache
 (8h idle timeout). `pace` and `work-linux` have no 1Password. They have a global `host`
-age store, and the user types each value with `fnox set NAME --provider host`. Check with
+age store. The agent pipes values into `fnox set NAME --provider host`. Check with
 `fnox provider list` and `fnox config-files`.
 
 ## Fewer approvals
