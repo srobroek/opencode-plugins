@@ -53,7 +53,6 @@ IaC (`CDK` or `Terraform`) owns applications, environments, profiles, validators
 - Python freeform rules: https://docs.powertools.aws.dev/lambda/python/latest/utilities/feature_flags/
 - Evidently API notice: https://docs.aws.amazon.com/cloudwatchevidently/latest/APIReference/Welcome.html
 - Evidently announcement: https://aws.amazon.com/blogs/mt/support-for-amazon-cloudwatch-evidently-ending-soon
-
 - boto3 resources (no new features): https://boto3.amazonaws.com/v1/documentation/api/latest/guide/resources.html
 - Valkey GLIDE: https://github.com/valkey-io/valkey-glide
 - GLIDE client-side caching: https://glide.valkey.io/concepts/client-features/client-side-caching/
