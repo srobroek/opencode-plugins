@@ -1,5 +1,20 @@
-import { describe, expect, test } from "bun:test"
-import { END, type Entry, firstSentence, parseEntry, renderBlock, replaceBlock, START } from "./build-plugin-table.ts"
+import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import os from "node:os"
+import path from "node:path"
+import {
+  checkTable,
+  END,
+  type Entry,
+  firstSentence,
+  parseEntry,
+  planTable,
+  renderBlock,
+  replaceBlock,
+  START,
+  TABLE_FILE,
+  writeTable,
+} from "./build-plugin-table.ts"
 
 const manifest = (config: Record<string, unknown>, extra: Record<string, unknown> = {}) => ({
   description: "Does a thing. Then more.",
@@ -89,5 +104,110 @@ describe("replaceBlock", () => {
 
   test("throws when markers are missing", () => {
     expect(() => replaceBlock("no markers", "x")).toThrow("needs")
+  })
+})
+
+describe("replaceBlock markers", () => {
+  const block = `${START}\nnew\n${END}`
+
+  test("leaves an inline or code-span mention before the table alone", () => {
+    const doc = `Text with ${START} inline and \`${END}\` in a span.\n\n${START}\nold\n${END}\n`
+    expect(replaceBlock(doc, block)).toBe(`Text with ${START} inline and \`${END}\` in a span.\n\n${block}\n`)
+  })
+
+  test.each([
+    ["duplicate start", `${START}\n${START}\n${END}`, "found 2 and 1"],
+    ["duplicate end", `${START}\n${END}\n${END}`, "found 1 and 2"],
+    ["missing end", `${START}\n`, "found 1 and 0"],
+    ["out of order", `${END}\n${START}`, "before"],
+  ])("fails on %s", (_name, doc, message) => {
+    expect(() => replaceBlock(doc, block)).toThrow(message)
+  })
+})
+
+describe("marker text in entries", () => {
+  test("rejects an end marker in a description", () => {
+    expect(() => parseEntry("a", manifest({ scope: "global" }, { description: `Bad ${END} text.` }))).toThrow("marker")
+  })
+
+  test("rejects a start marker in a signal", () => {
+    expect(() => parseEntry("a", manifest({ scope: "project", signals: [START] }))).toThrow("marker")
+  })
+})
+
+describe("planTable", () => {
+  let root: string
+
+  function plugin(name: string, config: Record<string, unknown>) {
+    const dir = path.join(root, "plugins", name)
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(path.join(dir, "package.json"), JSON.stringify({ description: `${name} does work.`, "opencode-plugins": config }))
+  }
+
+  function tableFile(contents: string) {
+    const file = path.join(root, TABLE_FILE)
+    mkdirSync(path.dirname(file), { recursive: true })
+    writeFileSync(file, contents)
+    return file
+  }
+
+  const read = () => readFileSync(path.join(root, TABLE_FILE), "utf8")
+  const skeleton = `# Title\n\n${START}\nold\n${END}\n\nTail\n`
+
+  beforeEach(() => {
+    const base = path.join(realpathSync(os.tmpdir()), "opencode")
+    mkdirSync(base, { recursive: true })
+    root = mkdtempSync(path.join(base, "plugin-table-"))
+    plugin("project", { scope: "global" })
+    plugin("alpha", { scope: "global" })
+    plugin("beads", { scope: "project", signals: [".beads/"] })
+  })
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  test("a fresh table is not stale and check writes nothing", () => {
+    tableFile(skeleton)
+    writeTable(root)
+    const fresh = read()
+    expect(checkTable(root).stale).toBe(false)
+    expect(read()).toBe(fresh)
+    expect(fresh).toContain("| alpha | alpha does work |")
+    expect(fresh).toContain("| beads | .beads/ | none |")
+    expect(fresh.endsWith("\nTail\n")).toBe(true)
+  })
+
+  test("a stale table is reported and check leaves the file unchanged", () => {
+    tableFile(skeleton)
+    const plan = checkTable(root)
+    expect(plan.stale).toBe(true)
+    expect(plan.contents).toContain("### Global plugins")
+    expect(read()).toBe(skeleton)
+  })
+
+  test("a plugin without scope fails", () => {
+    tableFile(skeleton)
+    plugin("noscope", {})
+    expect(() => planTable(root)).toThrow("plugins/noscope/package.json")
+  })
+
+  test("a project plugin without signals fails", () => {
+    tableFile(skeleton)
+    plugin("nosignals", { scope: "project" })
+    expect(() => planTable(root)).toThrow("needs")
+  })
+
+  test("requires naming an unknown plugin fails", () => {
+    tableFile(skeleton)
+    plugin("needy", { scope: "project", signals: ["x/"], requires: ["ghost"] })
+    expect(() => planTable(root)).toThrow('requires unknown plugin "ghost"')
+  })
+
+  test("bad markers fail before anything is written", () => {
+    const bad = `${START}\n${START}\n${END}\n`
+    tableFile(bad)
+    expect(() => writeTable(root)).toThrow("exactly one")
+    expect(read()).toBe(bad)
   })
 })

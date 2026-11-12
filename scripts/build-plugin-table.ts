@@ -15,8 +15,6 @@
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs"
 import path from "node:path"
 
-export type Output = { file: string; contents: string }
-
 export const SCOPES = ["global", "project", "internal"] as const
 export type Scope = (typeof SCOPES)[number]
 
@@ -61,6 +59,9 @@ export function parseEntry(name: string, manifest: Record<string, unknown>): Ent
   // describes only the skills that Claude Code and Codex get, so it is the fallback here.
   const description = manifest.description ?? config.description
   if (typeof description !== "string" || !description.trim()) fail(where, "description must be a non-empty string")
+  for (const text of [description, ...signals, ...requires]) {
+    if (text.includes(START) || text.includes(END)) fail(where, "text must not contain a plugin-table marker")
+  }
   return { name, description: description.trim(), scope: scope as Scope, signals, requires }
 }
 
@@ -137,39 +138,54 @@ export function renderBlock(entries: Entry[]): string {
   ].join("\n")
 }
 
-/** Replace the marked block in a document; throws when the markers are missing or misordered. */
+/** Replace the marked block in a document. The markers must be standalone lines: one start, then one end. */
 export function replaceBlock(document: string, block: string): string {
-  const start = document.indexOf(START)
-  const end = document.indexOf(END)
-  if (start === -1 || end === -1 || end < start) throw new Error(`${TABLE_FILE}: needs ${START} then ${END}`)
-  return document.slice(0, start) + block + document.slice(end + END.length)
+  const lines = document.split("\n")
+  const starts: number[] = []
+  const ends: number[] = []
+  lines.forEach((line, index) => {
+    if (line.trim() === START) starts.push(index)
+    if (line.trim() === END) ends.push(index)
+  })
+  const [start, end] = [starts[0], ends[0]]
+  if (starts.length !== 1 || ends.length !== 1 || start === undefined || end === undefined) {
+    fail(TABLE_FILE, `needs exactly one ${START} line and one ${END} line, found ${starts.length} and ${ends.length}`)
+  }
+  if (end < start) fail(TABLE_FILE, `${END} comes before ${START}`)
+  return [...lines.slice(0, start), block, ...lines.slice(end + 1)].join("\n")
 }
 
-export function render(root: string, entries: Entry[]): Output[] {
+export type Plan = { file: string; contents: string; stale: boolean }
+
+/** What the table file should contain and whether the committed file differs. Writes nothing. */
+export function planTable(root: string): Plan {
   const file = path.join(root, TABLE_FILE)
-  return [{ file, contents: replaceBlock(readFileSync(file, "utf8"), renderBlock(entries)) }]
+  const current = readFileSync(file, "utf8")
+  const contents = replaceBlock(current, renderBlock(readEntries(root)))
+  return { file, contents, stale: contents !== current }
 }
 
-/** Output files whose committed contents differ from the generated ones. */
-export function drift(outputs: Output[]): string[] {
-  return outputs
-    .filter(({ file, contents }) => !existsSync(file) || readFileSync(file, "utf8") !== contents)
-    .map(({ file }) => file)
+/** Check mode: the plan, with the file left untouched. */
+export const checkTable = planTable
+
+/** Write mode: apply the plan. */
+export function writeTable(root: string): Plan {
+  const plan = planTable(root)
+  if (plan.stale) writeFileSync(plan.file, plan.contents)
+  return plan
 }
 
 function main(check: boolean) {
   const root = path.resolve(import.meta.dir, "..")
-  const outputs = render(root, readEntries(root))
-  if (check) {
-    const stale = drift(outputs)
-    if (stale.length > 0) {
-      console.error("The plugin table is stale. Run `bun run plugin-table` and commit the result:")
-      for (const file of stale) console.error(`  ${path.relative(root, file)}`)
-      process.exit(1)
-    }
+  if (!check) {
+    writeTable(root)
     return
   }
-  for (const { file, contents } of outputs) writeFileSync(file, contents)
+  const plan = checkTable(root)
+  if (plan.stale) {
+    console.error(`The plugin table is stale. Run \`bun run plugin-table\` and commit the result:\n  ${path.relative(root, plan.file)}`)
+    process.exit(1)
+  }
 }
 
 if (import.meta.main) {
