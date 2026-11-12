@@ -396,7 +396,7 @@ describe("options and messages", () => {
 
   test("every refusal names its guard and the way forward", () => {
     for (const [guard, message] of Object.entries(MESSAGES)) {
-      expect(message).toStartWith("Blocked by safety")
+      expect(message).toMatch(/^(Blocked by )?safety/)
       expect(message.length).toBeGreaterThan(80)
       expect(guard).toMatch(/^[a-z-]+$/)
     }

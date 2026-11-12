@@ -2094,14 +2094,152 @@ function hasAttribution(text) {
   return ATTRIBUTION.test(text);
 }
 
+// plugins/safety/src/op-guard.ts
+var OP_MESSAGE = "safety op-guard: do not call the 1Password CLI directly; each call opens a new 1Password session and asks the user to approve. Run the command through fnox, which reuses its cached session: `fnox exec -- <cmd>`, or `fnox exec --only NAME -- <cmd>`. If the secret is not declared, load the `project-secrets` skill and declare it; if it does not exist yet, ask the user to create it. To find items, run `fnox provider discover <provider> --tags project/<name>`.";
+var FNOX_DUMP_MESSAGE = "safety op-guard: this fnox command prints secret values into the transcript. Use `fnox check` or `fnox list` to inspect, and `fnox exec -- <cmd>` to use a value.";
+var OP_VALUED = new Set([
+  "--account",
+  "--config",
+  "--session",
+  "--format",
+  "--cache",
+  "--vault",
+  "--encoding"
+]);
+function isOp(name) {
+  return name === "op" || name === "op.exe";
+}
+function setsFieldValues(command, args) {
+  if (command.stage > 0 || command.hereDocuments.length > 0 || command.redirects.length > 0)
+    return true;
+  return args.some((arg) => arg === "-" || arg === "--template" || arg.startsWith("--template=") || !arg.startsWith("-") && arg.includes("="));
+}
+function allowed(words, allow) {
+  return allow.some((entry) => {
+    const prefix = entry.trim().split(/\s+/).filter(Boolean);
+    return prefix.length > 0 && prefix.every((word, i) => words[i] === word);
+  });
+}
+function opCall(command, allow = []) {
+  if (!isOp(base(command.argv[0])))
+    return false;
+  const args = command.argv.slice(1);
+  if (args.includes("--help") || args.includes("-h"))
+    return false;
+  if (args.length === 1 && args[0] === "--version")
+    return false;
+  const words = positionals(args, OP_VALUED);
+  if (words[0] === "whoami")
+    return false;
+  if (words[0] === "item" && words[1] === "create" && !setsFieldValues(command, args))
+    return false;
+  if (words[0] === "vault" && words[1] === "create" && words[2] !== undefined)
+    return false;
+  return !allowed(words, allow);
+}
+var FNOX_VALUED = new Set(["-P", "--profile", "-c", "--config", "--age-key-file"]);
+var ENV_DUMPERS = new Set(["env", "printenv", "set"]);
+function dumpsEnvironment(command) {
+  if (command.argv.length === 0)
+    return command.wrappers.includes("env");
+  const name = base(command.argv[0]);
+  const args = command.argv.slice(1);
+  if (name === "env")
+    return !args.some((arg) => !arg.startsWith("-") && !arg.includes("="));
+  if (ENV_DUMPERS.has(name))
+    return true;
+  if (name === "export")
+    return hasFlag(args, "p", []);
+  if (name === "declare" || name === "typeset")
+    return hasFlag(args, "x", []);
+  return false;
+}
+function quote2(word) {
+  return `'${word.replaceAll("'", "'\\''")}'`;
+}
+function execInner(args) {
+  const dash = args.indexOf("--");
+  if (dash >= 0)
+    return args.slice(dash + 1);
+  const valued = new Set(["--only", "-i", "--if-missing", "-P", "--profile", "-c", "--config"]);
+  for (let i = 0;i < args.length; i++) {
+    const arg = args[i];
+    if (!arg.startsWith("-"))
+      return args.slice(i);
+    if (valued.has(arg))
+      i++;
+  }
+  return [];
+}
+function fnoxRefusal(command, allow = []) {
+  if (base(command.argv[0]) !== "fnox")
+    return;
+  const argv = command.argv;
+  let at = 1;
+  for (;at < argv.length; at++) {
+    const word = argv[at];
+    const [flag] = word.split("=", 1);
+    if (FNOX_VALUED.has(flag)) {
+      if (!word.includes("="))
+        at++;
+      continue;
+    }
+    if (word.startsWith("-"))
+      continue;
+    break;
+  }
+  const sub = argv[at];
+  const args = argv.slice(at + 1);
+  if (sub === "get" || sub === "export" || sub === "env")
+    return "dump";
+  if (sub === "list" || sub === "ls" || sub === "secrets")
+    return hasFlag(args, "V", ["--values"]) ? "dump" : undefined;
+  if (sub !== "exec")
+    return;
+  const inner = execInner(args);
+  if (inner.length === 0)
+    return;
+  const { commands } = walkShell(inner.map(quote2).join(" "));
+  for (const nested of commands) {
+    if (dumpsEnvironment(nested))
+      return "dump";
+    if (opCall(nested, allow))
+      return "op";
+    const again = fnoxRefusal(nested, allow);
+    if (again !== undefined)
+      return again;
+  }
+  return;
+}
+function opGuard(commands, allow = []) {
+  for (const command of commands) {
+    if (opCall(command, allow))
+      return OP_MESSAGE;
+    const fnox = fnoxRefusal(command, allow);
+    if (fnox === "op")
+      return OP_MESSAGE;
+    if (fnox === "dump")
+      return FNOX_DUMP_MESSAGE;
+  }
+  return;
+}
+
 // plugins/safety/src/guards.ts
-var GUARD_IDS = ["indirection", "remote-exec", "attribution", "worktree-tmp", "git-defender"];
+var GUARD_IDS = [
+  "indirection",
+  "remote-exec",
+  "attribution",
+  "worktree-tmp",
+  "git-defender",
+  "op-guard"
+];
 var MESSAGES = {
   indirection: "Blocked by safety (bash-indirection-guard): this destructive command targets an unexpanded variable, command substitution, or backtick expression, so its path cannot be verified. Resolve the target and re-issue a literal command; a quoted variable is accepted only after a bare `--` end-of-options marker.",
   "remote-exec": "Blocked by safety (remote-exec-guard): this command would execute content fetched from the network without review: a download piped into a shell, a shell or `eval` running a fetch's output, or a netcat invocation with an exec flag. Download to a file, inspect it, and run only an explicitly reviewed script.",
   attribution: "Blocked by safety (attribution-guard): this commit message carries AI-assistant attribution (a Co-authored-by trailer naming an assistant, a 'Generated with' line, or an assistant noreply address). Rewrite the `-m`/`--message` text, the `--trailer`, or the file supplied to `-F`/`--file`, so the commit names only the human author.",
   "worktree-tmp": "Blocked by safety (worktree-tmp-guard): do not create a worktree under /tmp or /private/tmp, where a container bind mount cannot see it. Use a path under $HOME, such as ~/tmp/worktrees/<repo>/<branch>.",
-  "git-defender": "Blocked by safety (git-defender-user-only): only the user runs the Git Defender CLI. It acts under the user's corporate identity, so every subcommand is refused, read-looking ones included. Name the exact command you would have run and why, hand it to the user to run in their own terminal, and report the outcome you needed as unknown. Do not retry through eval, a wrapper, a script or a subagent."
+  "git-defender": "Blocked by safety (git-defender-user-only): only the user runs the Git Defender CLI. It acts under the user's corporate identity, so every subcommand is refused, read-looking ones included. Name the exact command you would have run and why, hand it to the user to run in their own terminal, and report the outcome you needed as unknown. Do not retry through eval, a wrapper, a script or a subagent.",
+  "op-guard": OP_MESSAGE
 };
 var DESTRUCTIVE = new Set(["rm", "rmdir", "dd", "shred", "truncate", "unlink", "wipefs"]);
 function destructive(name) {
@@ -2326,6 +2464,11 @@ function hardGate(source, cwd, options = {}) {
     return refuse("attribution");
   if (on("worktree-tmp") && commands.some((command) => worktreeTmp(command, cwd)))
     return refuse("worktree-tmp");
+  if (on("op-guard")) {
+    const reason = opGuard(commands, options.opAllow);
+    if (reason !== undefined)
+      return { guard: "op-guard", reason };
+  }
   return;
 }
 
@@ -3695,7 +3838,9 @@ var FEATURE_IDS = [
 function readOptions(options) {
   const raw = options?.disable;
   const list = Array.isArray(raw) ? raw.filter((id) => FEATURE_IDS.includes(id)) : [];
-  return { disabled: new Set(list), redact: readRedactOptions(options) };
+  const allow = options?.opAllow;
+  const opAllow = Array.isArray(allow) ? allow.filter((entry) => typeof entry === "string") : [];
+  return { disabled: new Set(list), redact: readRedactOptions(options), opAllow };
 }
 function shellCwd(workdir, sessionDirectory) {
   if (workdir === undefined)
@@ -3737,9 +3882,9 @@ function createPlugin(overrides = {}) {
   return Plugin.define({
     id: "srobroek.safety",
     async setup(ctx) {
-      const { disabled, redact } = readOptions(ctx.options);
+      const { disabled, redact, opAllow } = readOptions(ctx.options);
       const on = (id) => !disabled.has(id);
-      const guardOptions = { disabled };
+      const guardOptions = { disabled, opAllow };
       const reviewOptions = { ...overrides.review, disabled };
       const pending = new Map;
       const advisor = createPackageAdvisor();

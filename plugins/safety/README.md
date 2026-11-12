@@ -31,6 +31,7 @@ and the command does not run.
 | `attribution` | `git commit` (or `dgit commit`) whose `-m`, `--message`, `--trailer` or `-F`/`--file` message names an AI assistant. That covers a `Co-authored-by` trailer naming Claude, Codex, GPT, Copilot, Cursor, Devin, Gemini, Anthropic or OpenAI, a `Generated with …` line, and an `@anthropic.com`/`@openai.com` noreply address. A `-F` file is read from disk, and the gate also reads what earlier commands in the same call wrote into it. `-F -` reads the command's here-document. |
 | `worktree-tmp` | `git worktree add` with a path under `/tmp` or `/private/tmp`. Relative paths resolve against the call's directory. Also `wt switch\|new\|co\|agent` naming such a path. |
 | `git-defender` | The Git Defender CLI (`git defender …`, `git-defender`) in any command position. Only the user runs it. |
+| `op-guard` | The 1Password CLI `op` (also `op.exe` or a path ending in `/op`) in any command position, with any subcommand. It passes `op whoami`, `op --version`, `--help`, `op vault create <name>`, and `op item create` that sets no field value (no `field=value`, `--template` or stdin). Other `op vault` subcommands stay refused, and `opAllow` adds more. Each direct call opens a new 1Password session and prompts the user, so the refusal points to `fnox exec -- <cmd>` and `fnox provider discover <provider> --tags project/<name>`. Also refused: `fnox get`, `fnox export`, `fnox env`, `fnox list --values` (`-V`), and `fnox exec` running `env`, `printenv`, `export -p`, `set` or `declare -x`. They print secret values into the transcript. |
 
 ## Migration-edit
 
@@ -225,7 +226,8 @@ installer.
 
 | Option | Default | Effect |
 | --- | --- | --- |
-| `disable` | `[]` | Feature ids to turn off: `indirection`, `remote-exec`, `attribution`, `worktree-tmp`, `git-defender`, `force-push`, `sudo-destructive`, `worktree-destruction`, `close-keywords`, `package-investigate`, `migration-edit`, `external-directory`. |
+| `disable` | `[]` | Feature ids to turn off: `indirection`, `remote-exec`, `attribution`, `worktree-tmp`, `git-defender`, `op-guard`, `force-push`, `sudo-destructive`, `worktree-destruction`, `close-keywords`, `package-investigate`, `migration-edit`, `external-directory`. |
+| `opAllow` | `[]` | Extra `op` subcommand prefixes the `op-guard` allows, such as `"vault list"`. |
 
 | `redactSecrets` | `true` | Set `false` to turn secret redaction off. |
 | `redactNames` | `[]` | Extra variable names whose values are always treated as secret. |

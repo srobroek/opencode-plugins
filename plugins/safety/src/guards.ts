@@ -8,6 +8,7 @@
 import { readFileSync } from "node:fs"
 import { isAbsolute, resolve } from "node:path"
 import { hasAttribution } from "./attribution.ts"
+import { OP_MESSAGE, opGuard } from "./op-guard.ts"
 import {
   base,
   type Command,
@@ -21,9 +22,16 @@ import {
   wtInvocation,
 } from "./shell.ts"
 
-export type GuardID = "indirection" | "remote-exec" | "attribution" | "worktree-tmp" | "git-defender"
+export type GuardID = "indirection" | "remote-exec" | "attribution" | "worktree-tmp" | "git-defender" | "op-guard"
 
-export const GUARD_IDS: readonly GuardID[] = ["indirection", "remote-exec", "attribution", "worktree-tmp", "git-defender"]
+export const GUARD_IDS: readonly GuardID[] = [
+  "indirection",
+  "remote-exec",
+  "attribution",
+  "worktree-tmp",
+  "git-defender",
+  "op-guard",
+]
 
 export type Refusal = { guard: GuardID; reason: string }
 
@@ -38,6 +46,7 @@ export const MESSAGES: Record<GuardID, string> = {
     "Blocked by safety (worktree-tmp-guard): do not create a worktree under /tmp or /private/tmp, where a container bind mount cannot see it. Use a path under $HOME, such as ~/tmp/worktrees/<repo>/<branch>.",
   "git-defender":
     "Blocked by safety (git-defender-user-only): only the user runs the Git Defender CLI. It acts under the user's corporate identity, so every subcommand is refused, read-looking ones included. Name the exact command you would have run and why, hand it to the user to run in their own terminal, and report the outcome you needed as unknown. Do not retry through eval, a wrapper, a script or a subagent.",
+  "op-guard": OP_MESSAGE,
 }
 
 const DESTRUCTIVE: ReadonlySet<string> = new Set(["rm", "rmdir", "dd", "shred", "truncate", "unlink", "wipefs"])
@@ -258,6 +267,8 @@ export type GuardOptions = {
   /** Guards to skip. */
   disabled?: ReadonlySet<GuardID>
   read?: FileReader
+  /** Extra `op` subcommand prefixes the op-guard allows, such as "vault list". */
+  opAllow?: readonly string[]
 }
 
 /** The first hard gate `source` trips, or `undefined`. */
@@ -270,5 +281,9 @@ export function hardGate(source: string, cwd: string, options: GuardOptions = {}
   if (on("indirection") && commands.some(indirection)) return refuse("indirection")
   if (on("attribution") && attribution(commands, cwd, options.read)) return refuse("attribution")
   if (on("worktree-tmp") && commands.some((command) => worktreeTmp(command, cwd))) return refuse("worktree-tmp")
+  if (on("op-guard")) {
+    const reason = opGuard(commands, options.opAllow)
+    if (reason !== undefined) return { guard: "op-guard", reason }
+  }
   return undefined
 }
