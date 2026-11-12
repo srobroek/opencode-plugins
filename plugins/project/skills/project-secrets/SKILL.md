@@ -75,7 +75,7 @@ the project need a different value per environment (profiles)?
 | Situation | Where it lives |
 | --- | --- |
 | Machine or personal key used across projects (already in the global config) | Nothing in the project |
-| One user, one machine, one project | Private vault, item `<project> <purpose>`, tag `<project>` |
+| One user, one machine, one project | Private vault, item `<project> <purpose>`, tag `project/<project>` |
 | Cross-project key that CI or collaborators need | Shared vault `dev-shared`, provider `shared` |
 | Project with collaborators or its own CI service account | Vault `proj-<name>`, provider `proj` |
 | Any secret on a headless host (no 1Password) | Global `host` age provider: the user runs `fnox set NAME --provider host` in the project |
@@ -85,17 +85,19 @@ A vault per project is worth it only when access differs: service accounts are s
 vaults fixed at creation and cannot see Private, Personal, Employee or the default Shared
 vault, so CI needs the secrets in a non-Private vault. For a solo project keep items in
 Private and skip the extra vault. Use two vaults (`dev-shared` plus `proj-<name>`) when
-both kinds exist; each is its own named provider. Ask before creating any vault.
+both kinds exist. Each is its own named provider.
+
+Always ask the user before creating a vault. Once the user agrees, run
+`op vault create proj-<name>` once (the op-guard allows it). Then declare
+`[providers.proj] type = "1password"`, `vault = "proj-<name>"` in the project `fnox.toml`.
+Only the user creates service accounts, in 1Password.
 
 ## 3. Declare, create, fill
 
 1. Add to `fnox.toml` (annotated examples: `references/fnox-config.md`): provider
    `proj` or `shared`, and each secret with `env = "exec"` and `if_missing = "error"` when required.
-2. Create the empty item without the value (`op item create --category "API Credential"
-   --vault <v> --title "<title>" --tags <project>`), then tell the user which item and
-   field `credential` to fill in 1Password. Alternatively the user runs
-   `fnox set NAME --provider <host-or-keychain>` themselves for locally stored values.
-3. After the user says it is filled: `fnox check` (resolves without printing). The daemon
+2. Store the credential as the next table shows.
+3. After the user says it is filled, run `fnox check` (resolves without printing). The daemon
    caches it in memory; add a local sync cache only for offline use (`references/fnox-config.md`).
 4. Use: `fnox exec -- <cmd>`, `--only NAME` to resolve a subset, or a mise task
    (`run = "fnox exec -- bun test"`). Shell expansion happens first, so use
@@ -103,6 +105,22 @@ both kinds exist; each is its own named provider. Ask before creating any vault.
 5. `.gitignore`: `fnox.local.toml`, `.fnox.local.toml`, `.env*` (keep `.env.example` with
    names only). `fnox scan` finds plaintext secrets already in the tree.
 6. Document in `docs/operations.md` (names, vaults, who can fill them), not values.
+
+### Store a credential
+
+| Provider | Steps |
+| --- | --- |
+| 1Password (read-only in fnox) | 1. No item yet: the agent runs `op item create --category "API Credential" --vault <vault> --title "<project> <purpose>" --tags project/<project>` with no field values. The user fills the `credential` field in 1Password. 2. The agent records the reference: `fnox set NAME "<item>/credential" --provider <proj\|shared>`. A read-only provider stores the value as the reference. 3. The agent runs `fnox check` |
+| Headless host (`host` age provider) | The user runs `fnox set NAME --provider host` and types the value at the hidden prompt |
+| Local-only on macOS (keychain) | The existing keychain row in section 2 |
+
+### Find an item
+
+Run `fnox provider discover <provider> --tags project/<project>` (add `--json` for
+machine output). It runs `op item list` through fnox and returns metadata only: IDs,
+titles, tags and vault. Tag matching includes nested tags, so `project/<project>` also finds
+`project/<project>/dev`. Never run `op item list` or `op item get` directly. Tag new items
+`project/<project>`.
 
 ## 4. Other consumers
 

@@ -123,10 +123,16 @@ mise's own fnox integration is experimental, so wrap with `fnox exec` instead.
 
 ## Creating the 1Password item (no value in the transcript)
 
+The op-guard allows `op item create` only without field values.
+
 ```sh
 op item create --category "API Credential" --vault proj-myapp \
-  --title "myapp stripe" --tags myapp
+  --title "myapp stripe" --tags project/myapp
+fnox set STRIPE_KEY "myapp stripe/credential" --provider proj   # records the reference
+fnox provider discover proj --tags project/myapp                 # metadata only
 ```
 
 Then the user types the value into the `credential` field. Do not use assignment
-statements with the value. Never create a vault or service account without asking.
+statements with the value. A short reference like `Item/field` needs `vault` on the
+provider. Ask first, then create a vault with `op vault create proj-myapp`. The user
+creates service accounts in 1Password.
