@@ -1,6 +1,6 @@
 {
   "name": "@srobroek/opencode-project",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Project lifecycle: scaffold a project with /new-project, set up fnox and 1Password secrets, and pick an OSI-approved license.",
   "private": true,
   "type": "module",

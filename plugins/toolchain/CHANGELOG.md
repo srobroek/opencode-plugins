@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.4.0](https://github.com/srobroek/opencode-plugins/compare/toolchain--v0.3.1...toolchain--v0.4.0) (2026-11-12)
+
+
+### Features
+
+* **quality:** OpenFeature flags with a flags.yaml, SSM or AppConfig provider; code and storage guidance ([20baffa](https://github.com/srobroek/opencode-plugins/commit/20baffae842836d814f1f5c3e2cd410c5bde0dd4))
+* **quality:** research-first engineering standards and per-language library standards for every coding agent ([09e8d46](https://github.com/srobroek/opencode-plugins/commit/09e8d461bb2b7654788a588ef6932929ff564d28))
+* **toolchain:** compare Connect, gRPC and OpenAPI, and use Connect for RPC beside Hono for HTTP ([d62b5c7](https://github.com/srobroek/opencode-plugins/commit/d62b5c79f355c687a9d53333c64cc583dcabfea8))
+
 ## [0.3.1](https://github.com/srobroek/opencode-plugins/compare/toolchain--v0.3.0...toolchain--v0.3.1) (2026-10-27)
 
 

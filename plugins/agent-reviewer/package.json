@@ -1,6 +1,6 @@
 {
   "name": "@srobroek/opencode-agent-reviewer",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Read-only reviewer subagents (pull request, local diff, security, adversarial challenge) sharing one review core, and a security review skill.",
   "private": true,
   "type": "module",

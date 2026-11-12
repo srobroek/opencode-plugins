@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.6.0](https://github.com/srobroek/opencode-plugins/compare/design--v0.5.0...design--v0.6.0) (2026-11-12)
+
+
+### Features
+
+* **quality:** research-first engineering standards and per-language library standards for every coding agent ([09e8d46](https://github.com/srobroek/opencode-plugins/commit/09e8d461bb2b7654788a588ef6932929ff564d28))
+* **quality:** testing standards: behavior tests, test budget, same-change maintenance, reviewers check test changes ([dcdf941](https://github.com/srobroek/opencode-plugins/commit/dcdf9413b6793ed06ef8978a0084d9f50d30b00c))
+* **toolchain:** compare Connect, gRPC and OpenAPI, and use Connect for RPC beside Hono for HTTP ([d62b5c7](https://github.com/srobroek/opencode-plugins/commit/d62b5c79f355c687a9d53333c64cc583dcabfea8))
+
 ## [0.5.0](https://github.com/srobroek/opencode-plugins/compare/design--v0.4.0...design--v0.5.0) (2026-11-11)
 
 

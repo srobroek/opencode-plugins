@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.5.0](https://github.com/srobroek/opencode-plugins/compare/project--v0.4.0...project--v0.5.0) (2026-11-12)
+
+
+### ⚠ BREAKING CHANGES
+
+* the srobroek.goal plugin is gone. Remove github:srobroek/opencode-plugins#main::path:plugins/goal from the plugins list. /goal comes from OpenCode itself. The plugin's /loop command has no built-in replacement.
+
+### Features
+
+* **quality:** research-first engineering standards and per-language library standards for every coding agent ([09e8d46](https://github.com/srobroek/opencode-plugins/commit/09e8d461bb2b7654788a588ef6932929ff564d28))
+
+
+### Refactors
+
+* drop the goal plugin now that OpenCode ships /goal ([dee39af](https://github.com/srobroek/opencode-plugins/commit/dee39afc5f8cdc37f6602ecdb88324f962a3a769))
+
 ## [0.4.0](https://github.com/srobroek/opencode-plugins/compare/project--v0.3.3...project--v0.4.0) (2026-11-12)
 
 
