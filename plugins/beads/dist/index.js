@@ -3741,6 +3741,31 @@ function contentionAdvisory(output) {
   return CONTENTION.some((pattern) => pattern.test(output)) ? CONTENTION_ADVISORY : undefined;
 }
 
+// plugins/beads/src/goal.ts
+import { Rpc } from "@opencode/plugin/rpc";
+var GOAL_SOURCE = "goal";
+var GoalRpc = Rpc.define({
+  id: "opencode.goal",
+  methods: {
+    get: {
+      input: { type: "object", required: ["sessionID"], properties: { sessionID: { type: "string" } } },
+      output: {}
+    }
+  },
+  events: {
+    changed: {
+      schema: {
+        type: "object",
+        required: ["sessionID"],
+        properties: { sessionID: { type: "string" }, goal: {} }
+      }
+    }
+  }
+});
+function isGoalActive(state) {
+  return state?.status === "active";
+}
+
 // plugins/beads/src/heartbeat.ts
 import { dirname as dirname5 } from "path";
 
@@ -4064,13 +4089,12 @@ function childFinished(end) {
 }
 function isPluginPrompt(metadata) {
   const source = metadata?.source;
-  return source === BEADS_SOURCE || source === "srobroek.goal";
+  return source === BEADS_SOURCE || source === GOAL_SOURCE;
 }
-function goalContinuation(sessionID) {
-  const holder = globalThis;
-  const registry = holder[Symbol.for("srobroek.goal.continuations")];
-  return registry instanceof Map ? registry.get(sessionID) : undefined;
+function goalEnded(goal) {
+  return !isGoalActive(goal);
 }
+var GOAL_CHANGED = "rpc.opencode.goal.changed";
 function readExecutionEvent(event) {
   const record = event;
   const type = record?.type;
@@ -4082,6 +4106,8 @@ function readExecutionEvent(event) {
     case "session.execution.started":
     case "session.deleted":
       return { id, type, sessionID };
+    case GOAL_CHANGED:
+      return { id, type, sessionID, goal: record?.data?.goal };
     case "session.execution.succeeded":
       return { id, type, sessionID, end: { kind: "succeeded" } };
     case "session.execution.failed":
@@ -4104,7 +4130,7 @@ function subagentChild(result) {
 var SHARED = Symbol.for("srobroek.beads.lifecycle");
 function shared() {
   const holder = globalThis;
-  holder[SHARED] ??= { events: new Set, foreground: new Map, releases: new Map, reported: new WeakSet };
+  holder[SHARED] ??= { events: new Set, deferred: new Set, foreground: new Map, releases: new Map, reported: new WeakSet };
   return holder[SHARED];
 }
 var MAX_EVENTS = 2000;
@@ -4139,7 +4165,16 @@ class Lifecycle {
         seen.delete(seen.values().next().value);
     }
     const { sessionID } = event;
+    if (event.type === GOAL_CHANGED) {
+      if (!shared().deferred.has(sessionID) || !goalEnded(event.goal))
+        return;
+      shared().deferred.delete(sessionID);
+      if (await this.parentOf(sessionID) === undefined)
+        await this.#rootStop(sessionID, { kind: "succeeded" }, false);
+      return;
+    }
     if (event.type === "session.execution.started") {
+      shared().deferred.delete(sessionID);
       const leases = readLeases(await this.#deps.ctx.storage.get(`leases/${sessionID}`));
       this.#deps.heartbeats.run(sessionID, leases, true);
       return;
@@ -4149,6 +4184,7 @@ class Lifecycle {
       await this.#deps.ctx.storage.remove(`leases/${sessionID}`);
       await this.#deps.ctx.storage.remove(`nudged/${sessionID}`);
       this.#parents.delete(sessionID);
+      shared().deferred.delete(sessionID);
       return;
     }
     if (event.end === undefined)
@@ -4189,19 +4225,22 @@ class Lifecycle {
     const released = await task;
     return released === undefined ? undefined : releaseReport(`finished subagent session ${child.sessionID}`, released.claims, released.outcome);
   }
-  async#rootStop(sessionID, end) {
+  async#rootStop(sessionID, end, checkGoal = true) {
     if (!this.#deps.nudge)
       return;
     const storage = this.#deps.ctx.storage;
+    const continuing = checkGoal && end.kind === "succeeded" && await this.#goalActive(sessionID);
     const action = await this.#deps.queue(`stop/${sessionID}`, async () => {
       const state = readClaimState(await storage.get(`claims/${sessionID}`));
       const next = rootStopAction(end, {
         claims: Object.keys(state.claims).length,
         nudged: await storage.get(`nudged/${sessionID}`) === true,
-        continuing: goalContinuation(sessionID) !== undefined
+        continuing
       });
       if (next === "nudge")
         await storage.set(`nudged/${sessionID}`, true);
+      if (continuing && rootStopAction(end, { claims: Object.keys(state.claims).length, nudged: false, continuing: false }) !== "none")
+        shared().deferred.add(sessionID);
       return { next, state };
     });
     if (action.next === "nudge") {
@@ -4218,6 +4257,13 @@ class Lifecycle {
         if (text !== undefined)
           await this.#send(sessionID, text, false, "release");
       }));
+    }
+  }
+  async#goalActive(sessionID) {
+    try {
+      return isGoalActive(await this.#deps.goal(sessionID));
+    } catch {
+      return false;
     }
   }
   #childEnd(sessionID, parentID, end) {
@@ -5332,6 +5378,7 @@ async function setupBeads(ctx, deps = {}) {
     heartbeats,
     nudge: on("beads-stop-nudge"),
     release: on("beads-claim-release"),
+    goal: deps.goal ?? (async (sessionID) => ctx.rpc(GoalRpc).get({ sessionID })),
     detach
   });
   const cachedPinFor = (cwd) => {

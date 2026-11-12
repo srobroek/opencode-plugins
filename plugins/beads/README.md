@@ -54,9 +54,10 @@ message it sends is a `session.synthetic` with `metadata.source: "srobroek.beads
 - **Stop nudge.** When a root session's execution succeeds while it holds tracked
   claims, it gets one queued message listing each claim with its guarded release
   command, and resumes. A real user prompt (`session.hook("prompt")`, not one from
-  this plugin or `srobroek.goal`) re-arms the nudge. Nothing happens while the goal
-  plugin will continue the session (its `Symbol.for("srobroek.goal.continuations")`
-  registry), or when the execution failed or was interrupted.
+  this plugin or OpenCode's built-in goal) re-arms the nudge. Nothing happens when the
+  execution failed or was interrupted. While the built-in goal is active (the
+  `opencode.goal` RPC's `get`) the stop is deferred: the nudge runs when the goal ends
+  (`rpc.opencode.goal.changed`), unless a new execution starts first.
 - **Release.** When the nudged session stops again still holding claims, they are
   released in the background (at most 120 s): `bd show`, then
   `bd unclaim <id> --if-assignee <holder>`, then, for a parked claim,
