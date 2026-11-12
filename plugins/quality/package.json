@@ -25,6 +25,7 @@
     }
   },
   "devDependencies": {
-    "@srobroek/opencode-lib": "workspace:*"
+    "@srobroek/opencode-lib": "workspace:*",
+    "fast-xml-parser": "5.12.0"
   }
 }

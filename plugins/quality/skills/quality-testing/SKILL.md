@@ -10,7 +10,8 @@ with the code. For a language's runner, idioms and tool choices, also load the
 `lang-<language>-testing` skill and its `references/practice.md` when one is listed;
 if none is, follow the project's existing tests and test configuration. The test-first
 loop and evidence rules are in the `quality-code-design` skill's `test-first.md` and
-`verification.md` references.
+`verification.md` references. To audit, prune or speed up an existing suite on demand,
+load the `quality-test-audit` skill.
 
 ## Workflow
 

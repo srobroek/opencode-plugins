@@ -23,6 +23,7 @@ test("registers the quality skills and the read-only challenger", async () => {
     "quality-code-design",
     "quality-code-policy",
     "quality-profiling",
+    "quality-test-audit",
     "quality-testing",
   ])
   expect(fake.agents.get("adversarial-challenger")).toMatchObject({ mode: "subagent" })
@@ -35,6 +36,17 @@ test("registers the quality skills and the read-only challenger", async () => {
   expect(permissionEffect(rules, "skill", "other")).toBe("deny")
   await cleanup?.()
   expect(fake.active()).toBe(0)
+})
+
+test("every reference the testing and audit skills link resolves beside them", async () => {
+  const fake = createFakeContext()
+  await plugin.setup(fake.context)
+  for (const id of ["quality-testing", "quality-test-audit"]) {
+    const skill = fake.skills.get(id) as unknown as { path: string; content: string }
+    const links = [...skill.content.matchAll(/\]\((references\/[\w-]+\.md)\)/g)].map((match) => match[1] ?? "")
+    expect(links.length).toBeGreaterThan(2)
+    for (const link of links) expect(existsSync(join(dirname(skill.path), link))).toBe(true)
+  }
 })
 
 test("every reference the code-design skill links resolves beside it", async () => {

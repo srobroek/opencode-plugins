@@ -423,6 +423,4427 @@ async function setupStandards(ctx, options) {
   };
 }
 
+// plugins/quality/src/audit-util.ts
+import { readFileSync as readFileSync3, realpathSync, statSync } from "fs";
+import { tmpdir } from "os";
+import { isAbsolute, join as join3, relative, resolve, sep } from "path";
+var TEXT_CAP = 4000;
+function capText(lines, cap = TEXT_CAP) {
+  const text = lines.join(`
+`);
+  if (text.length <= cap)
+    return text;
+  return `${text.slice(0, cap - 24).trimEnd()}
+... (output truncated)`;
+}
+function median(values) {
+  if (values.length === 0)
+    return Number.NaN;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = sorted.length >> 1;
+  return sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+function compactRanges(lines, maxRanges = 12) {
+  const sorted = [...new Set(lines)].sort((a, b) => a - b);
+  const ranges = [];
+  let start = 0;
+  for (let i = 0;i < sorted.length; i++) {
+    const current = sorted[i];
+    if (i + 1 < sorted.length && sorted[i + 1] === current + 1)
+      continue;
+    const first = sorted[start];
+    ranges.push(first === current ? `${current}` : `${first}-${current}`);
+    start = i + 1;
+  }
+  if (ranges.length <= maxRanges)
+    return ranges.join(",");
+  return `${ranges.slice(0, maxRanges).join(",")},... (+${ranges.length - maxRanges} ranges)`;
+}
+function percent(part, whole) {
+  return whole === 0 ? 100 : Math.round(part / whole * 1000) / 10;
+}
+function inside(root, target) {
+  const rel = relative(root, target);
+  return rel === "" || rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
+}
+
+class PathError extends Error {
+}
+function opencodeTempDir() {
+  return join3(realpathSync(tmpdir()), "opencode");
+}
+function reportRoots(sessionDirectory) {
+  const real = (path) => {
+    try {
+      return realpathSync(path);
+    } catch {
+      return resolve(path);
+    }
+  };
+  return [real(sessionDirectory), opencodeTempDir()];
+}
+var MAX_REPORT_BYTES = 200 * 1024 * 1024;
+function readReportFile(sessionDirectory, path, roots = reportRoots(sessionDirectory)) {
+  const target = isAbsolute(path) ? path : resolve(sessionDirectory, path);
+  let real;
+  try {
+    real = realpathSync(target);
+  } catch {
+    const lexical = [...roots, resolve(sessionDirectory), join3(tmpdir(), "opencode")];
+    if (!lexical.some((root) => inside(root, resolve(target))))
+      throw new PathError(`${path} is outside the session and OpenCode temp directories`);
+    throw new Error(`${path} does not exist`);
+  }
+  if (!roots.some((root) => inside(root, real)))
+    throw new PathError(`${path} is outside the session and OpenCode temp directories`);
+  if (statSync(real).size > MAX_REPORT_BYTES)
+    throw new Error(`${path} is larger than ${MAX_REPORT_BYTES / 1024 / 1024} MB`);
+  return readFileSync3(real, "utf8");
+}
+
+// node_modules/.bun/fast-xml-parser@5.12.0/node_modules/fast-xml-parser/src/util.js
+var nameStartChar = ":A-Za-z_\\u00C0-\\u00D6\\u00D8-\\u00F6\\u00F8-\\u02FF\\u0370-\\u037D\\u037F-\\u1FFF\\u200C-\\u200D\\u2070-\\u218F\\u2C00-\\u2FEF\\u3001-\\uD7FF\\uF900-\\uFDCF\\uFDF0-\\uFFFD";
+var nameChar = nameStartChar + "\\-.\\d\\u00B7\\u0300-\\u036F\\u203F-\\u2040";
+var nameRegexp = "[" + nameStartChar + "][" + nameChar + "]*";
+var regexName = new RegExp("^" + nameRegexp + "$");
+function getAllMatches(string, regex) {
+  const matches = [];
+  let match = regex.exec(string);
+  while (match) {
+    const allmatches = [];
+    allmatches.startIndex = regex.lastIndex - match[0].length;
+    const len = match.length;
+    for (let index = 0;index < len; index++) {
+      allmatches.push(match[index]);
+    }
+    matches.push(allmatches);
+    match = regex.exec(string);
+  }
+  return matches;
+}
+var isName = function(string) {
+  const match = regexName.exec(string);
+  return !(match === null || typeof match === "undefined");
+};
+function isExist(v) {
+  return typeof v !== "undefined";
+}
+var DANGEROUS_PROPERTY_NAMES = [
+  "hasOwnProperty",
+  "toString",
+  "valueOf",
+  "__defineGetter__",
+  "__defineSetter__",
+  "__lookupGetter__",
+  "__lookupSetter__"
+];
+var criticalProperties = ["__proto__", "constructor", "prototype"];
+
+// node_modules/.bun/fast-xml-parser@5.12.0/node_modules/fast-xml-parser/src/validator.js
+var defaultOptions = {
+  allowBooleanAttributes: false,
+  unpairedTags: []
+};
+function validate(xmlData, options) {
+  options = Object.assign({}, defaultOptions, options);
+  const tags = [];
+  let tagFound = false;
+  let reachedRoot = false;
+  if (xmlData[0] === "\uFEFF") {
+    xmlData = xmlData.substr(1);
+  }
+  for (let i = 0;i < xmlData.length; i++) {
+    if (xmlData[i] === "<" && xmlData[i + 1] === "?") {
+      i += 2;
+      i = readPI(xmlData, i);
+      if (i.err)
+        return i;
+    } else if (xmlData[i] === "<") {
+      let tagStartPos = i;
+      i++;
+      if (xmlData[i] === "!") {
+        i = readCommentAndCDATA(xmlData, i);
+        continue;
+      } else {
+        let closingTag = false;
+        if (xmlData[i] === "/") {
+          closingTag = true;
+          i++;
+        }
+        let tagName = "";
+        for (;i < xmlData.length && xmlData[i] !== ">" && xmlData[i] !== " " && xmlData[i] !== "\t" && xmlData[i] !== `
+` && xmlData[i] !== "\r"; i++) {
+          tagName += xmlData[i];
+        }
+        tagName = tagName.trim();
+        if (tagName[tagName.length - 1] === "/") {
+          tagName = tagName.substring(0, tagName.length - 1);
+          i--;
+        }
+        if (!validateTagName(tagName)) {
+          let msg;
+          if (tagName.trim().length === 0) {
+            msg = "Invalid space after '<'.";
+          } else {
+            msg = "Tag '" + tagName + "' is an invalid name.";
+          }
+          return getErrorObject("InvalidTag", msg, getLineNumberForPosition(xmlData, i));
+        }
+        const result = readAttributeStr(xmlData, i);
+        if (result === false) {
+          return getErrorObject("InvalidAttr", "Attributes for '" + tagName + "' have open quote.", getLineNumberForPosition(xmlData, i));
+        }
+        let attrStr = result.value;
+        i = result.index;
+        if (attrStr[attrStr.length - 1] === "/") {
+          const attrStrStart = i - attrStr.length;
+          attrStr = attrStr.substring(0, attrStr.length - 1);
+          const isValid = validateAttributeString(attrStr, options);
+          if (isValid === true) {
+            tagFound = true;
+          } else {
+            return getErrorObject(isValid.err.code, isValid.err.msg, getLineNumberForPosition(xmlData, attrStrStart + isValid.err.line));
+          }
+        } else if (closingTag) {
+          if (!result.tagClosed) {
+            return getErrorObject("InvalidTag", "Closing tag '" + tagName + "' doesn't have proper closing.", getLineNumberForPosition(xmlData, i));
+          } else if (attrStr.trim().length > 0) {
+            return getErrorObject("InvalidTag", "Closing tag '" + tagName + "' can't have attributes or invalid starting.", getLineNumberForPosition(xmlData, tagStartPos));
+          } else if (tags.length === 0) {
+            return getErrorObject("InvalidTag", "Closing tag '" + tagName + "' has not been opened.", getLineNumberForPosition(xmlData, tagStartPos));
+          } else {
+            const otg = tags.pop();
+            if (tagName !== otg.tagName) {
+              let openPos = getLineNumberForPosition(xmlData, otg.tagStartPos);
+              return getErrorObject("InvalidTag", "Expected closing tag '" + otg.tagName + "' (opened in line " + openPos.line + ", col " + openPos.col + ") instead of closing tag '" + tagName + "'.", getLineNumberForPosition(xmlData, tagStartPos));
+            }
+            if (tags.length == 0) {
+              reachedRoot = true;
+            }
+          }
+        } else {
+          const isValid = validateAttributeString(attrStr, options);
+          if (isValid !== true) {
+            return getErrorObject(isValid.err.code, isValid.err.msg, getLineNumberForPosition(xmlData, i - attrStr.length + isValid.err.line));
+          }
+          if (reachedRoot === true) {
+            return getErrorObject("InvalidXml", "Multiple possible root nodes found.", getLineNumberForPosition(xmlData, i));
+          } else if (options.unpairedTags.indexOf(tagName) !== -1) {} else {
+            tags.push({ tagName, tagStartPos });
+          }
+          tagFound = true;
+        }
+        for (i++;i < xmlData.length; i++) {
+          if (xmlData[i] === "<") {
+            if (xmlData[i + 1] === "!") {
+              i++;
+              i = readCommentAndCDATA(xmlData, i);
+              continue;
+            } else if (xmlData[i + 1] === "?") {
+              i = readPI(xmlData, ++i);
+              if (i.err)
+                return i;
+            } else {
+              break;
+            }
+          } else if (xmlData[i] === "&") {
+            const afterAmp = validateAmpersand(xmlData, i);
+            if (afterAmp == -1)
+              return getErrorObject("InvalidChar", "char '&' is not expected.", getLineNumberForPosition(xmlData, i));
+            i = afterAmp;
+          } else {
+            if (reachedRoot === true && !isWhiteSpace(xmlData[i])) {
+              return getErrorObject("InvalidXml", "Extra text at the end", getLineNumberForPosition(xmlData, i));
+            }
+          }
+        }
+        if (xmlData[i] === "<") {
+          i--;
+        }
+      }
+    } else {
+      if (isWhiteSpace(xmlData[i])) {
+        continue;
+      }
+      return getErrorObject("InvalidChar", "char '" + xmlData[i] + "' is not expected.", getLineNumberForPosition(xmlData, i));
+    }
+  }
+  if (!tagFound) {
+    return getErrorObject("InvalidXml", "Start tag expected.", 1);
+  } else if (tags.length == 1) {
+    return getErrorObject("InvalidTag", "Unclosed tag '" + tags[0].tagName + "'.", getLineNumberForPosition(xmlData, tags[0].tagStartPos));
+  } else if (tags.length > 0) {
+    return getErrorObject("InvalidXml", "Invalid '" + JSON.stringify(tags.map((t) => t.tagName), null, 4).replace(/\r?\n/g, "") + "' found.", { line: 1, col: 1 });
+  }
+  return true;
+}
+function isWhiteSpace(char) {
+  return char === " " || char === "\t" || char === `
+` || char === "\r";
+}
+function readPI(xmlData, i) {
+  const start = i;
+  for (;i < xmlData.length; i++) {
+    if (xmlData[i] == "?" || xmlData[i] == " ") {
+      const tagname = xmlData.substr(start, i - start);
+      if (i > 5 && tagname === "xml") {
+        return getErrorObject("InvalidXml", "XML declaration allowed only at the start of the document.", getLineNumberForPosition(xmlData, i));
+      } else if (xmlData[i] == "?" && xmlData[i + 1] == ">") {
+        i++;
+        break;
+      } else {
+        continue;
+      }
+    }
+  }
+  return i;
+}
+function readCommentAndCDATA(xmlData, i) {
+  if (xmlData.length > i + 5 && xmlData[i + 1] === "-" && xmlData[i + 2] === "-") {
+    for (i += 3;i < xmlData.length; i++) {
+      if (xmlData[i] === "-" && xmlData[i + 1] === "-" && xmlData[i + 2] === ">") {
+        i += 2;
+        break;
+      }
+    }
+  } else if (xmlData.length > i + 8 && xmlData[i + 1] === "D" && xmlData[i + 2] === "O" && xmlData[i + 3] === "C" && xmlData[i + 4] === "T" && xmlData[i + 5] === "Y" && xmlData[i + 6] === "P" && xmlData[i + 7] === "E") {
+    let angleBracketsCount = 1;
+    for (i += 8;i < xmlData.length; i++) {
+      if (xmlData[i] === "<") {
+        angleBracketsCount++;
+      } else if (xmlData[i] === ">") {
+        angleBracketsCount--;
+        if (angleBracketsCount === 0) {
+          break;
+        }
+      }
+    }
+  } else if (xmlData.length > i + 9 && xmlData[i + 1] === "[" && xmlData[i + 2] === "C" && xmlData[i + 3] === "D" && xmlData[i + 4] === "A" && xmlData[i + 5] === "T" && xmlData[i + 6] === "A" && xmlData[i + 7] === "[") {
+    for (i += 8;i < xmlData.length; i++) {
+      if (xmlData[i] === "]" && xmlData[i + 1] === "]" && xmlData[i + 2] === ">") {
+        i += 2;
+        break;
+      }
+    }
+  }
+  return i;
+}
+var doubleQuote = '"';
+var singleQuote = "'";
+function readAttributeStr(xmlData, i) {
+  let attrStr = "";
+  let startChar = "";
+  let tagClosed = false;
+  for (;i < xmlData.length; i++) {
+    if (xmlData[i] === doubleQuote || xmlData[i] === singleQuote) {
+      if (startChar === "") {
+        startChar = xmlData[i];
+      } else if (startChar !== xmlData[i]) {} else {
+        startChar = "";
+      }
+    } else if (xmlData[i] === ">") {
+      if (startChar === "") {
+        tagClosed = true;
+        break;
+      }
+    }
+    attrStr += xmlData[i];
+  }
+  if (startChar !== "") {
+    return false;
+  }
+  return {
+    value: attrStr,
+    index: i,
+    tagClosed
+  };
+}
+function scanAttributeTokens(attrStr) {
+  const tokens = [];
+  const len = attrStr.length;
+  let i = 0;
+  while (i < len) {
+    const tokenStart = i;
+    while (i < len && isWhiteSpace(attrStr[i]))
+      i++;
+    if (i >= len)
+      break;
+    if (attrStr[i] === "=") {
+      i = tokenStart + 1;
+      continue;
+    }
+    const leadingWs = attrStr.slice(tokenStart, i);
+    const nameStart = i;
+    while (i < len && !isWhiteSpace(attrStr[i]) && attrStr[i] !== "=")
+      i++;
+    const name = attrStr.slice(nameStart, i);
+    let equalsGroup;
+    let j = i;
+    while (j < len && isWhiteSpace(attrStr[j]))
+      j++;
+    if (j < len && attrStr[j] === "=") {
+      equalsGroup = attrStr.slice(i, j + 1);
+      i = j + 1;
+    }
+    let quoteChar;
+    let value;
+    let k = i;
+    while (k < len && isWhiteSpace(attrStr[k]))
+      k++;
+    if (k < len && (attrStr[k] === '"' || attrStr[k] === "'")) {
+      const valueStart = k + 1;
+      const closeIdx = attrStr.indexOf(attrStr[k], valueStart);
+      if (closeIdx !== -1) {
+        quoteChar = attrStr[k];
+        value = attrStr.slice(valueStart, closeIdx);
+        i = closeIdx + 1;
+      }
+    }
+    const token = { startIndex: tokenStart };
+    token[1] = leadingWs;
+    token[2] = name;
+    token[3] = equalsGroup;
+    token[4] = quoteChar !== undefined ? true : undefined;
+    token[5] = quoteChar;
+    token[6] = value;
+    tokens.push(token);
+  }
+  return tokens;
+}
+function validateAttributeString(attrStr, options) {
+  const matches = scanAttributeTokens(attrStr);
+  const attrNames = {};
+  for (let i = 0;i < matches.length; i++) {
+    if (matches[i][1].length === 0) {
+      return getErrorObject("InvalidAttr", "Attribute '" + matches[i][2] + "' has no space in starting.", getPositionFromMatch(matches[i]));
+    } else if (matches[i][3] !== undefined && matches[i][4] === undefined) {
+      return getErrorObject("InvalidAttr", "Attribute '" + matches[i][2] + "' is without value.", getPositionFromMatch(matches[i]));
+    } else if (matches[i][3] === undefined && !options.allowBooleanAttributes) {
+      return getErrorObject("InvalidAttr", "boolean attribute '" + matches[i][2] + "' is not allowed.", getPositionFromMatch(matches[i]));
+    }
+    const attrName = matches[i][2];
+    if (!validateAttrName(attrName)) {
+      return getErrorObject("InvalidAttr", "Attribute '" + attrName + "' is an invalid name.", getPositionFromMatch(matches[i]));
+    }
+    if (!Object.prototype.hasOwnProperty.call(attrNames, attrName)) {
+      attrNames[attrName] = 1;
+    } else {
+      return getErrorObject("InvalidAttr", "Attribute '" + attrName + "' is repeated.", getPositionFromMatch(matches[i]));
+    }
+  }
+  return true;
+}
+function validateNumberAmpersand(xmlData, i) {
+  let re = /\d/;
+  if (xmlData[i] === "x") {
+    i++;
+    re = /[\da-fA-F]/;
+  }
+  for (;i < xmlData.length; i++) {
+    if (xmlData[i] === ";")
+      return i;
+    if (!xmlData[i].match(re))
+      break;
+  }
+  return -1;
+}
+function validateAmpersand(xmlData, i) {
+  i++;
+  if (xmlData[i] === ";")
+    return -1;
+  if (xmlData[i] === "#") {
+    i++;
+    return validateNumberAmpersand(xmlData, i);
+  }
+  let count = 0;
+  for (;i < xmlData.length; i++, count++) {
+    if (xmlData[i].match(/\w/) && count < 20)
+      continue;
+    if (xmlData[i] === ";")
+      break;
+    return -1;
+  }
+  return i;
+}
+function getErrorObject(code, message, lineNumber) {
+  return {
+    err: {
+      code,
+      msg: message,
+      line: lineNumber.line || lineNumber,
+      col: lineNumber.col
+    }
+  };
+}
+function validateAttrName(attrName) {
+  return isName(attrName);
+}
+function validateTagName(tagname) {
+  return isName(tagname);
+}
+function getLineNumberForPosition(xmlData, index) {
+  const lines = xmlData.substring(0, index).split(/\r?\n/);
+  return {
+    line: lines.length,
+    col: lines[lines.length - 1].length + 1
+  };
+}
+function getPositionFromMatch(match) {
+  return match.startIndex + match[1].length;
+}
+
+// node_modules/.bun/@nodable+entities@3.1.0/node_modules/@nodable/entities/src/entities.js
+var CURRENCY = {
+  cent: "\xA2",
+  pound: "\xA3",
+  curren: "\xA4",
+  yen: "\xA5",
+  euro: "\u20AC",
+  dollar: "$",
+  fnof: "\u0192",
+  inr: "\u20B9",
+  af: "\u060B",
+  birr: "\u1265\u122D",
+  peso: "\u20B1",
+  rub: "\u20BD",
+  won: "\u20A9",
+  yuan: "\xA5",
+  cedil: "\xB8"
+};
+var XML = {
+  amp: "&",
+  apos: "'",
+  gt: ">",
+  lt: "<",
+  quot: '"'
+};
+var COMMON_HTML = {
+  nbsp: "\xA0",
+  copy: "\xA9",
+  reg: "\xAE",
+  trade: "\u2122",
+  mdash: "\u2014",
+  ndash: "\u2013",
+  hellip: "\u2026",
+  laquo: "\xAB",
+  raquo: "\xBB",
+  lsquo: "\u2018",
+  rsquo: "\u2019",
+  ldquo: "\u201C",
+  rdquo: "\u201D",
+  bull: "\u2022",
+  para: "\xB6",
+  sect: "\xA7",
+  deg: "\xB0",
+  frac12: "\xBD",
+  frac14: "\xBC",
+  frac34: "\xBE"
+};
+
+// node_modules/.bun/@nodable+entities@3.1.0/node_modules/@nodable/entities/src/EntityDecoder.js
+var ENTITY_ACTION = Object.freeze({
+  ALLOW: "allow",
+  BLOCK: "block",
+  THROW: "throw"
+});
+var SPECIAL_CHARS = new Set("!?\\\\/[]$%{}^&*()<>|+");
+function validateEntityName(name) {
+  if (name[0] === "#") {
+    throw new Error(`[EntityReplacer] Invalid character '#' in entity name: "${name}"`);
+  }
+  for (const ch of name) {
+    if (SPECIAL_CHARS.has(ch)) {
+      throw new Error(`[EntityReplacer] Invalid character '${ch}' in entity name: "${name}"`);
+    }
+  }
+  return name;
+}
+function mergeEntityMaps(...maps) {
+  const out = Object.create(null);
+  for (const map of maps) {
+    if (!map)
+      continue;
+    for (const key of Object.keys(map)) {
+      const raw = map[key];
+      if (typeof raw === "string") {
+        out[key] = raw;
+      } else if (raw && typeof raw === "object" && raw.val !== undefined) {
+        const val = raw.val;
+        if (typeof val === "string") {
+          out[key] = val;
+        }
+      }
+    }
+  }
+  return out;
+}
+var LIMIT_TIER_EXTERNAL = "external";
+var LIMIT_TIER_BASE = "base";
+var LIMIT_TIER_ALL = "all";
+function parseLimitTiers(raw) {
+  if (!raw || raw === LIMIT_TIER_EXTERNAL)
+    return new Set([LIMIT_TIER_EXTERNAL]);
+  if (raw === LIMIT_TIER_ALL)
+    return new Set([LIMIT_TIER_ALL]);
+  if (raw === LIMIT_TIER_BASE)
+    return new Set([LIMIT_TIER_BASE]);
+  if (Array.isArray(raw))
+    return new Set(raw);
+  return new Set([LIMIT_TIER_EXTERNAL]);
+}
+var NCR_LEVEL = Object.freeze({ allow: 0, leave: 1, remove: 2, throw: 3 });
+var XML10_ALLOWED_C0 = new Set([9, 10, 13]);
+function parseNCRConfig(ncr) {
+  if (!ncr) {
+    return { xmlVersion: 1, onLevel: NCR_LEVEL.allow, nullLevel: NCR_LEVEL.remove };
+  }
+  const xmlVersion = ncr.xmlVersion === 1.1 ? 1.1 : 1;
+  const onLevel = NCR_LEVEL[ncr.onNCR] ?? NCR_LEVEL.allow;
+  const nullLevel = NCR_LEVEL[ncr.nullNCR] ?? NCR_LEVEL.remove;
+  const clampedNull = Math.max(nullLevel, NCR_LEVEL.remove);
+  return { xmlVersion, onLevel, nullLevel: clampedNull };
+}
+
+class EntityDecoder {
+  constructor(options = {}) {
+    this._limit = options.limit || {};
+    this._maxTotalExpansions = this._limit.maxTotalExpansions || 0;
+    this._maxExpandedLength = this._limit.maxExpandedLength || 0;
+    this._postCheck = typeof options.postCheck === "function" ? options.postCheck : (r) => r;
+    this._limitTiers = parseLimitTiers(this._limit.applyLimitsTo ?? LIMIT_TIER_EXTERNAL);
+    this._numericAllowed = options.numericAllowed ?? true;
+    this._baseMap = mergeEntityMaps(XML, options.namedEntities || null);
+    this._externalMap = Object.create(null);
+    this._inputMap = Object.create(null);
+    this._totalExpansions = 0;
+    this._expandedLength = 0;
+    this._removeSet = new Set(options.remove && Array.isArray(options.remove) ? options.remove : []);
+    this._leaveSet = new Set(options.leave && Array.isArray(options.leave) ? options.leave : []);
+    const ncrCfg = parseNCRConfig(options.ncr);
+    this._ncrXmlVersion = ncrCfg.xmlVersion;
+    this._ncrOnLevel = ncrCfg.onLevel;
+    this._ncrNullLevel = ncrCfg.nullLevel;
+    this._onExternalEntity = typeof options.onExternalEntity === "function" ? options.onExternalEntity : null;
+    this._onInputEntity = typeof options.onInputEntity === "function" ? options.onInputEntity : null;
+  }
+  _applyRegistrationHook(hook, name, value, context) {
+    if (!hook)
+      return true;
+    const action = hook(name, value);
+    if (action === ENTITY_ACTION.BLOCK)
+      return false;
+    if (action === ENTITY_ACTION.THROW) {
+      throw new Error(`[EntityDecoder] Registration of ${context} entity "&${name};" was rejected by hook`);
+    }
+    return true;
+  }
+  setExternalEntities(map) {
+    if (map) {
+      for (const key of Object.keys(map)) {
+        validateEntityName(key);
+      }
+    }
+    if (!this._onExternalEntity) {
+      this._externalMap = mergeEntityMaps(map);
+      return;
+    }
+    const flat = mergeEntityMaps(map);
+    const filtered = Object.create(null);
+    for (const [name, value] of Object.entries(flat)) {
+      if (this._applyRegistrationHook(this._onExternalEntity, name, value, "external")) {
+        filtered[name] = value;
+      }
+    }
+    this._externalMap = filtered;
+  }
+  addExternalEntity(key, value) {
+    validateEntityName(key);
+    if (typeof value === "string" && value.indexOf("&") === -1) {
+      if (this._applyRegistrationHook(this._onExternalEntity, key, value, "external")) {
+        this._externalMap[key] = value;
+      }
+    }
+  }
+  addInputEntities(map) {
+    this._totalExpansions = 0;
+    this._expandedLength = 0;
+    if (!this._onInputEntity) {
+      this._inputMap = mergeEntityMaps(map);
+      return;
+    }
+    const flat = mergeEntityMaps(map);
+    const filtered = Object.create(null);
+    for (const [name, value] of Object.entries(flat)) {
+      if (this._applyRegistrationHook(this._onInputEntity, name, value, "input")) {
+        filtered[name] = value;
+      }
+    }
+    this._inputMap = filtered;
+  }
+  reset() {
+    this._inputMap = Object.create(null);
+    this._totalExpansions = 0;
+    this._expandedLength = 0;
+    return this;
+  }
+  setXmlVersion(version) {
+    this._ncrXmlVersion = version === 1.1 ? 1.1 : 1;
+  }
+  decode(str) {
+    if (typeof str !== "string" || str.length === 0)
+      return str;
+    if (str.indexOf("&") === -1)
+      return str;
+    const original = str;
+    const chunks = [];
+    const len = str.length;
+    let last = 0;
+    let i = 0;
+    const limitExpansions = this._maxTotalExpansions > 0;
+    const limitLength = this._maxExpandedLength > 0;
+    const checkLimits = limitExpansions || limitLength;
+    while (i < len) {
+      if (str.charCodeAt(i) !== 38) {
+        i++;
+        continue;
+      }
+      let j = i + 1;
+      while (j < len && str.charCodeAt(j) !== 59 && j - i <= 32)
+        j++;
+      if (j >= len || str.charCodeAt(j) !== 59) {
+        i++;
+        continue;
+      }
+      const token = str.slice(i + 1, j);
+      if (token.length === 0) {
+        i++;
+        continue;
+      }
+      let replacement;
+      let tier;
+      if (this._removeSet.has(token)) {
+        replacement = "";
+        if (tier === undefined) {
+          tier = LIMIT_TIER_EXTERNAL;
+        }
+      } else if (this._leaveSet.has(token)) {
+        i++;
+        continue;
+      } else if (token.charCodeAt(0) === 35) {
+        const ncrResult = this._resolveNCR(token);
+        if (ncrResult === undefined) {
+          i++;
+          continue;
+        }
+        replacement = ncrResult;
+        tier = LIMIT_TIER_BASE;
+      } else {
+        const resolved = this._resolveName(token);
+        replacement = resolved?.value;
+        tier = resolved?.tier;
+      }
+      if (replacement === undefined) {
+        i++;
+        continue;
+      }
+      if (i > last)
+        chunks.push(str.slice(last, i));
+      chunks.push(replacement);
+      last = j + 1;
+      i = last;
+      if (checkLimits && this._tierCounts(tier)) {
+        if (limitExpansions) {
+          this._totalExpansions++;
+          if (this._totalExpansions > this._maxTotalExpansions) {
+            throw new Error(`[EntityReplacer] Entity expansion count limit exceeded: ` + `${this._totalExpansions} > ${this._maxTotalExpansions}`);
+          }
+        }
+        if (limitLength) {
+          const delta = replacement.length - (token.length + 2);
+          if (delta > 0) {
+            this._expandedLength += delta;
+            if (this._expandedLength > this._maxExpandedLength) {
+              throw new Error(`[EntityReplacer] Expanded content length limit exceeded: ` + `${this._expandedLength} > ${this._maxExpandedLength}`);
+            }
+          }
+        }
+      }
+    }
+    if (last < len)
+      chunks.push(str.slice(last));
+    const result = chunks.length === 0 ? str : chunks.join("");
+    return this._postCheck(result, original);
+  }
+  _tierCounts(tier) {
+    if (this._limitTiers.has(LIMIT_TIER_ALL))
+      return true;
+    return this._limitTiers.has(tier);
+  }
+  _resolveName(name) {
+    if (name in this._inputMap)
+      return { value: this._inputMap[name], tier: LIMIT_TIER_EXTERNAL };
+    if (name in this._externalMap)
+      return { value: this._externalMap[name], tier: LIMIT_TIER_EXTERNAL };
+    if (name in this._baseMap)
+      return { value: this._baseMap[name], tier: LIMIT_TIER_BASE };
+    return;
+  }
+  _classifyNCR(cp) {
+    if (cp === 0)
+      return this._ncrNullLevel;
+    if (cp >= 55296 && cp <= 57343)
+      return NCR_LEVEL.remove;
+    if (this._ncrXmlVersion === 1) {
+      if (cp >= 1 && cp <= 31 && !XML10_ALLOWED_C0.has(cp))
+        return NCR_LEVEL.remove;
+    }
+    return -1;
+  }
+  _applyNCRAction(action, token, cp) {
+    switch (action) {
+      case NCR_LEVEL.allow:
+        return String.fromCodePoint(cp);
+      case NCR_LEVEL.remove:
+        return "";
+      case NCR_LEVEL.leave:
+        return;
+      case NCR_LEVEL.throw:
+        throw new Error(`[EntityDecoder] Prohibited numeric character reference ` + `&${token}; (U+${cp.toString(16).toUpperCase().padStart(4, "0")})`);
+      default:
+        return String.fromCodePoint(cp);
+    }
+  }
+  _resolveNCR(token) {
+    const second = token.charCodeAt(1);
+    let cp;
+    if (second === 120 || second === 88) {
+      cp = parseInt(token.slice(2), 16);
+    } else {
+      cp = parseInt(token.slice(1), 10);
+    }
+    if (Number.isNaN(cp) || cp < 0 || cp > 1114111)
+      return;
+    const minimum = this._classifyNCR(cp);
+    if (!this._numericAllowed && minimum < NCR_LEVEL.remove)
+      return;
+    const effective = minimum === -1 ? this._ncrOnLevel : Math.max(this._ncrOnLevel, minimum);
+    return this._applyNCRAction(effective, token, cp);
+  }
+}
+// node_modules/.bun/fast-xml-parser@5.12.0/node_modules/fast-xml-parser/src/xmlparser/OptionsBuilder.js
+var defaultOnDangerousProperty = (name) => {
+  if (DANGEROUS_PROPERTY_NAMES.includes(name)) {
+    return "__" + name;
+  }
+  return name;
+};
+var defaultOptions2 = {
+  preserveOrder: false,
+  attributeNamePrefix: "@_",
+  attributesGroupName: false,
+  textNodeName: "#text",
+  ignoreAttributes: true,
+  removeNSPrefix: false,
+  allowBooleanAttributes: false,
+  parseTagValue: true,
+  parseAttributeValue: false,
+  trimValues: true,
+  cdataPropName: false,
+  numberParseOptions: {
+    hex: true,
+    leadingZeros: true,
+    eNotation: true,
+    unicode: false
+  },
+  tagValueProcessor: function(tagName, val) {
+    return val;
+  },
+  attributeValueProcessor: function(attrName, val) {
+    return val;
+  },
+  stopNodes: [],
+  alwaysCreateTextNode: false,
+  isArray: () => false,
+  commentPropName: false,
+  unpairedTags: [],
+  processEntities: true,
+  htmlEntities: false,
+  entityDecoder: null,
+  ignoreDeclaration: false,
+  ignorePiTags: false,
+  transformTagName: false,
+  transformAttributeName: false,
+  updateTag: function(tagName, jPath, attrs) {
+    return tagName;
+  },
+  captureMetaData: false,
+  maxNestedTags: 100,
+  strictReservedNames: true,
+  jPath: true,
+  onDangerousProperty: defaultOnDangerousProperty
+};
+function validatePropertyName(propertyName, optionName) {
+  if (typeof propertyName !== "string") {
+    return;
+  }
+  const normalized = propertyName.toLowerCase();
+  if (DANGEROUS_PROPERTY_NAMES.some((dangerous) => normalized === dangerous.toLowerCase())) {
+    throw new Error(`[SECURITY] Invalid ${optionName}: "${propertyName}" is a reserved JavaScript keyword that could cause prototype pollution`);
+  }
+  if (criticalProperties.some((dangerous) => normalized === dangerous.toLowerCase())) {
+    throw new Error(`[SECURITY] Invalid ${optionName}: "${propertyName}" is a reserved JavaScript keyword that could cause prototype pollution`);
+  }
+}
+function normalizeProcessEntities(value, htmlEntities) {
+  if (typeof value === "boolean") {
+    return {
+      enabled: value,
+      maxEntitySize: 1e4,
+      maxExpansionDepth: 1e4,
+      maxTotalExpansions: Infinity,
+      maxExpandedLength: 1e5,
+      maxEntityCount: 1000,
+      allowedTags: null,
+      tagFilter: null,
+      appliesTo: "all"
+    };
+  }
+  if (typeof value === "object" && value !== null) {
+    return {
+      enabled: value.enabled !== false,
+      maxEntitySize: Math.max(1, value.maxEntitySize ?? 1e4),
+      maxExpansionDepth: Math.max(1, value.maxExpansionDepth ?? 1e4),
+      maxTotalExpansions: Math.max(1, value.maxTotalExpansions ?? Infinity),
+      maxExpandedLength: Math.max(1, value.maxExpandedLength ?? 1e5),
+      maxEntityCount: Math.max(1, value.maxEntityCount ?? 1000),
+      allowedTags: value.allowedTags ?? null,
+      tagFilter: value.tagFilter ?? null,
+      appliesTo: value.appliesTo ?? "all"
+    };
+  }
+  return normalizeProcessEntities(true);
+}
+var buildOptions = function(options) {
+  const built = Object.assign({}, defaultOptions2, options);
+  const propertyNameOptions = [
+    { value: built.attributeNamePrefix, name: "attributeNamePrefix" },
+    { value: built.attributesGroupName, name: "attributesGroupName" },
+    { value: built.textNodeName, name: "textNodeName" },
+    { value: built.cdataPropName, name: "cdataPropName" },
+    { value: built.commentPropName, name: "commentPropName" }
+  ];
+  for (const { value, name } of propertyNameOptions) {
+    if (value) {
+      validatePropertyName(value, name);
+    }
+  }
+  if (built.onDangerousProperty === null) {
+    built.onDangerousProperty = defaultOnDangerousProperty;
+  }
+  built.processEntities = normalizeProcessEntities(built.processEntities, built.htmlEntities);
+  built.unpairedTagsSet = new Set(built.unpairedTags);
+  if (built.stopNodes && Array.isArray(built.stopNodes)) {
+    built.stopNodes = built.stopNodes.map((node) => {
+      if (typeof node === "string" && node.startsWith("*.")) {
+        return ".." + node.substring(2);
+      }
+      return node;
+    });
+  }
+  return built;
+};
+
+// node_modules/.bun/fast-xml-parser@5.12.0/node_modules/fast-xml-parser/src/xmlparser/xmlNode.js
+var METADATA_SYMBOL;
+if (typeof Symbol !== "function") {
+  METADATA_SYMBOL = "@@xmlMetadata";
+} else {
+  METADATA_SYMBOL = Symbol("XML Node Metadata");
+}
+
+class XmlNode {
+  constructor(tagname) {
+    this.tagname = tagname;
+    this.child = [];
+    this[":@"] = Object.create(null);
+  }
+  add(key, val) {
+    if (key === "__proto__")
+      key = "#__proto__";
+    this.child.push({ [key]: val });
+  }
+  addChild(node, startIndex) {
+    if (node.tagname === "__proto__")
+      node.tagname = "#__proto__";
+    if (node[":@"] && Object.keys(node[":@"]).length > 0) {
+      this.child.push({ [node.tagname]: node.child, [":@"]: node[":@"] });
+    } else {
+      this.child.push({ [node.tagname]: node.child });
+    }
+    this.addStartIndex(startIndex);
+  }
+  addStartIndex(startIndex) {
+    if (startIndex !== undefined) {
+      this.child[this.child.length - 1][METADATA_SYMBOL] = { startIndex };
+    }
+  }
+  addEndIndex(endIndex) {
+    const lastChild = this.child[this.child.length - 1];
+    if (lastChild !== undefined && lastChild[METADATA_SYMBOL] !== undefined && lastChild[METADATA_SYMBOL].endIndex === undefined) {
+      lastChild[METADATA_SYMBOL].endIndex = endIndex;
+    }
+  }
+  static getMetaDataSymbol() {
+    return METADATA_SYMBOL;
+  }
+}
+
+// node_modules/.bun/xml-naming@0.3.0/node_modules/xml-naming/src/index.js
+var nameStartChar10 = ":A-Za-z_" + "\xC0-\xD6\xD8-\xF6\xF8-\u02FF" + "\u0370-\u037D" + "\u037F-\u0486\u0488-\u1FFF" + "\u200C-\u200D" + "\u2070-\u218F" + "\u2C00-\u2FEF" + "\u3001-\uD7FF" + "\uF900-\uFDCF" + "\uFDF0-\uFFFD";
+var nameChar10 = nameStartChar10 + "\\-\\.\\d" + "\xB7" + "\u0300-\u036F" + "\u203F-\u2040";
+var nameStartChar11 = ":A-Za-z_" + "\xC0-\u02FF" + "\u0370-\u037D" + "\u037F-\u0486\u0488-\u1FFF" + "\u200C-\u200D" + "\u2070-\u218F" + "\u2C00-\u2FEF" + "\u3001-\uD7FF" + "\uF900-\uFDCF" + "\uFDF0-\uFFFD" + "\uD800\uDC00-\uDB7F\uDFFF";
+var nameChar11 = nameStartChar11 + "\\-\\.\\d" + "\xB7" + "\u0300-\u036F" + "\u0487" + "\u203F-\u2040";
+var buildRegexes = (startChar, char, flags = "") => {
+  const ncStart = startChar.replace(":", "");
+  const ncChar = char.replace(":", "");
+  const ncNamePat = `[${ncStart}][${ncChar}]*`;
+  return {
+    name: new RegExp(`^[${startChar}][${char}]*$`, flags),
+    ncName: new RegExp(`^${ncNamePat}$`, flags),
+    qName: new RegExp(`^${ncNamePat}(?::${ncNamePat})?$`, flags),
+    nmToken: new RegExp(`^[${char}]+$`, flags),
+    nmTokens: new RegExp(`^[${char}]+(?:\\s+[${char}]+)*$`, flags)
+  };
+};
+var regexes10 = buildRegexes(nameStartChar10, nameChar10);
+var regexes11 = buildRegexes(nameStartChar11, nameChar11, "u");
+var nameStartCharAscii = ":A-Za-z_";
+var nameCharAscii = nameStartCharAscii + "\\-\\.\\d";
+var regexesAscii = buildRegexes(nameStartCharAscii, nameCharAscii);
+var getRegexes = (xmlVersion = "1.0", asciiOnly = false) => {
+  if (asciiOnly)
+    return regexesAscii;
+  return xmlVersion === "1.1" ? regexes11 : regexes10;
+};
+var qName = (str, { xmlVersion = "1.0", asciiOnly = false } = {}) => getRegexes(xmlVersion, asciiOnly).qName.test(str);
+
+// node_modules/.bun/fast-xml-parser@5.12.0/node_modules/fast-xml-parser/src/xmlparser/DocTypeReader.js
+class DocTypeReader {
+  constructor(options, xmlVersion) {
+    this.suppressValidationErr = !options;
+    this.options = options;
+    this.xmlVersion = xmlVersion || 1;
+  }
+  setXmlVersion(xmlVersion = 1) {
+    this.xmlVersion = xmlVersion;
+  }
+  readDocType(xmlData, i) {
+    const entities = Object.create(null);
+    let entityCount = 0;
+    if (xmlData[i + 3] === "O" && xmlData[i + 4] === "C" && xmlData[i + 5] === "T" && xmlData[i + 6] === "Y" && xmlData[i + 7] === "P" && xmlData[i + 8] === "E") {
+      i = i + 9;
+      let angleBracketsCount = 1;
+      let hasBody = false, comment = false;
+      let quoteChar = null;
+      let exp = "";
+      for (;i < xmlData.length; i++) {
+        if (quoteChar !== null) {
+          if (xmlData[i] === quoteChar)
+            quoteChar = null;
+          exp += xmlData[i];
+          continue;
+        }
+        if (!hasBody && !comment && (xmlData[i] === '"' || xmlData[i] === "'")) {
+          quoteChar = xmlData[i];
+          exp += xmlData[i];
+          continue;
+        }
+        if (xmlData[i] === "<" && !comment) {
+          if (hasBody && hasSeq(xmlData, "!ENTITY", i)) {
+            i += 7;
+            let entityName, val;
+            [entityName, val, i] = this.readEntityExp(xmlData, i + 1, this.suppressValidationErr);
+            if (val.indexOf("&") === -1) {
+              if (this.options.enabled !== false && this.options.maxEntityCount != null && entityCount >= this.options.maxEntityCount) {
+                throw new Error(`Entity count (${entityCount + 1}) exceeds maximum allowed (${this.options.maxEntityCount})`);
+              }
+              entities[entityName] = val;
+              entityCount++;
+            }
+          } else if (hasBody && hasSeq(xmlData, "!ELEMENT", i)) {
+            i += 8;
+            const { index } = this.readElementExp(xmlData, i + 1);
+            i = index;
+          } else if (hasBody && hasSeq(xmlData, "!ATTLIST", i)) {
+            i += 8;
+          } else if (hasBody && hasSeq(xmlData, "!NOTATION", i)) {
+            i += 9;
+            const { index } = this.readNotationExp(xmlData, i + 1, this.suppressValidationErr);
+            i = index;
+          } else if (hasSeq(xmlData, "!--", i))
+            comment = true;
+          else
+            throw new Error(`Invalid DOCTYPE`);
+          angleBracketsCount++;
+          exp = "";
+        } else if (xmlData[i] === ">") {
+          if (comment) {
+            if (xmlData[i - 1] === "-" && xmlData[i - 2] === "-") {
+              comment = false;
+              angleBracketsCount--;
+            }
+          } else {
+            angleBracketsCount--;
+          }
+          if (angleBracketsCount === 0) {
+            break;
+          }
+        } else if (xmlData[i] === "[") {
+          hasBody = true;
+        } else {
+          exp += xmlData[i];
+        }
+      }
+      if (quoteChar !== null || angleBracketsCount !== 0) {
+        throw new Error(`Unclosed DOCTYPE`);
+      }
+    } else {
+      throw new Error(`Invalid Tag instead of DOCTYPE`);
+    }
+    return { entities, i };
+  }
+  readEntityExp(xmlData, i) {
+    i = skipWhitespace(xmlData, i);
+    const startIndex = i;
+    while (i < xmlData.length && !/\s/.test(xmlData[i]) && xmlData[i] !== '"' && xmlData[i] !== "'") {
+      i++;
+    }
+    let entityName = xmlData.substring(startIndex, i);
+    validateEntityName2(entityName, { xmlVersion: this.xmlVersion });
+    i = skipWhitespace(xmlData, i);
+    if (!this.suppressValidationErr) {
+      if (xmlData.substring(i, i + 6).toUpperCase() === "SYSTEM") {
+        throw new Error("External entities are not supported");
+      } else if (xmlData[i] === "%") {
+        throw new Error("Parameter entities are not supported");
+      }
+    }
+    let entityValue = "";
+    [i, entityValue] = this.readIdentifierVal(xmlData, i, "entity");
+    if (this.options.enabled !== false && this.options.maxEntitySize != null && entityValue.length > this.options.maxEntitySize) {
+      throw new Error(`Entity "${entityName}" size (${entityValue.length}) exceeds maximum allowed size (${this.options.maxEntitySize})`);
+    }
+    i--;
+    return [entityName, entityValue, i];
+  }
+  readNotationExp(xmlData, i) {
+    i = skipWhitespace(xmlData, i);
+    const startIndex = i;
+    while (i < xmlData.length && !/\s/.test(xmlData[i])) {
+      i++;
+    }
+    let notationName = xmlData.substring(startIndex, i);
+    !this.suppressValidationErr && validateEntityName2(notationName, { xmlVersion: this.xmlVersion });
+    i = skipWhitespace(xmlData, i);
+    const identifierType = xmlData.substring(i, i + 6).toUpperCase();
+    if (!this.suppressValidationErr && identifierType !== "SYSTEM" && identifierType !== "PUBLIC") {
+      throw new Error(`Expected SYSTEM or PUBLIC, found "${identifierType}"`);
+    }
+    i += identifierType.length;
+    i = skipWhitespace(xmlData, i);
+    let publicIdentifier = null;
+    let systemIdentifier = null;
+    if (identifierType === "PUBLIC") {
+      [i, publicIdentifier] = this.readIdentifierVal(xmlData, i, "publicIdentifier");
+      i = skipWhitespace(xmlData, i);
+      if (xmlData[i] === '"' || xmlData[i] === "'") {
+        [i, systemIdentifier] = this.readIdentifierVal(xmlData, i, "systemIdentifier");
+      }
+    } else if (identifierType === "SYSTEM") {
+      [i, systemIdentifier] = this.readIdentifierVal(xmlData, i, "systemIdentifier");
+      if (!this.suppressValidationErr && !systemIdentifier) {
+        throw new Error("Missing mandatory system identifier for SYSTEM notation");
+      }
+    }
+    return { notationName, publicIdentifier, systemIdentifier, index: --i };
+  }
+  readIdentifierVal(xmlData, i, type) {
+    let identifierVal = "";
+    const startChar = xmlData[i];
+    if (startChar !== '"' && startChar !== "'") {
+      throw new Error(`Expected quoted string, found "${startChar}"`);
+    }
+    i++;
+    const startIndex = i;
+    while (i < xmlData.length && xmlData[i] !== startChar) {
+      i++;
+    }
+    identifierVal = xmlData.substring(startIndex, i);
+    if (xmlData[i] !== startChar) {
+      throw new Error(`Unterminated ${type} value`);
+    }
+    i++;
+    return [i, identifierVal];
+  }
+  readElementExp(xmlData, i) {
+    i = skipWhitespace(xmlData, i);
+    const startIndex = i;
+    while (i < xmlData.length && !/\s/.test(xmlData[i])) {
+      i++;
+    }
+    let elementName = xmlData.substring(startIndex, i);
+    if (!this.suppressValidationErr && !qName(elementName, { xmlVersion: this.xmlVersion })) {
+      throw new Error(`Invalid element name: "${elementName}"`);
+    }
+    i = skipWhitespace(xmlData, i);
+    let contentModel = "";
+    if (xmlData[i] === "E" && hasSeq(xmlData, "MPTY", i))
+      i += 4;
+    else if (xmlData[i] === "A" && hasSeq(xmlData, "NY", i))
+      i += 2;
+    else if (xmlData[i] === "(") {
+      i++;
+      const startIndex = i;
+      while (i < xmlData.length && xmlData[i] !== ")") {
+        i++;
+      }
+      contentModel = xmlData.substring(startIndex, i);
+      if (xmlData[i] !== ")") {
+        throw new Error("Unterminated content model");
+      }
+    } else if (!this.suppressValidationErr) {
+      throw new Error(`Invalid Element Expression, found "${xmlData[i]}"`);
+    }
+    return {
+      elementName,
+      contentModel: contentModel.trim(),
+      index: i
+    };
+  }
+  readAttlistExp(xmlData, i) {
+    i = skipWhitespace(xmlData, i);
+    let startIndex = i;
+    while (i < xmlData.length && !/\s/.test(xmlData[i])) {
+      i++;
+    }
+    let elementName = xmlData.substring(startIndex, i);
+    validateEntityName2(elementName, { xmlVersion: this.xmlVersion });
+    i = skipWhitespace(xmlData, i);
+    startIndex = i;
+    while (i < xmlData.length && !/\s/.test(xmlData[i])) {
+      i++;
+    }
+    let attributeName = xmlData.substring(startIndex, i);
+    if (!validateEntityName2(attributeName, { xmlVersion: this.xmlVersion })) {
+      throw new Error(`Invalid attribute name: "${attributeName}"`);
+    }
+    i = skipWhitespace(xmlData, i);
+    let attributeType = "";
+    if (xmlData.substring(i, i + 8).toUpperCase() === "NOTATION") {
+      attributeType = "NOTATION";
+      i += 8;
+      i = skipWhitespace(xmlData, i);
+      if (xmlData[i] !== "(") {
+        throw new Error(`Expected '(', found "${xmlData[i]}"`);
+      }
+      i++;
+      let allowedNotations = [];
+      while (i < xmlData.length && xmlData[i] !== ")") {
+        const startIndex = i;
+        while (i < xmlData.length && xmlData[i] !== "|" && xmlData[i] !== ")") {
+          i++;
+        }
+        let notation = xmlData.substring(startIndex, i);
+        notation = notation.trim();
+        if (!validateEntityName2(notation, { xmlVersion: this.xmlVersion })) {
+          throw new Error(`Invalid notation name: "${notation}"`);
+        }
+        allowedNotations.push(notation);
+        if (xmlData[i] === "|") {
+          i++;
+          i = skipWhitespace(xmlData, i);
+        }
+      }
+      if (xmlData[i] !== ")") {
+        throw new Error("Unterminated list of notations");
+      }
+      i++;
+      attributeType += " (" + allowedNotations.join("|") + ")";
+    } else {
+      const startIndex = i;
+      while (i < xmlData.length && !/\s/.test(xmlData[i])) {
+        i++;
+      }
+      attributeType += xmlData.substring(startIndex, i);
+      const validTypes = ["CDATA", "ID", "IDREF", "IDREFS", "ENTITY", "ENTITIES", "NMTOKEN", "NMTOKENS"];
+      if (!this.suppressValidationErr && !validTypes.includes(attributeType.toUpperCase())) {
+        throw new Error(`Invalid attribute type: "${attributeType}"`);
+      }
+    }
+    i = skipWhitespace(xmlData, i);
+    let defaultValue = "";
+    if (xmlData.substring(i, i + 8).toUpperCase() === "#REQUIRED") {
+      defaultValue = "#REQUIRED";
+      i += 8;
+    } else if (xmlData.substring(i, i + 7).toUpperCase() === "#IMPLIED") {
+      defaultValue = "#IMPLIED";
+      i += 7;
+    } else {
+      [i, defaultValue] = this.readIdentifierVal(xmlData, i, "ATTLIST");
+    }
+    return {
+      elementName,
+      attributeName,
+      attributeType,
+      defaultValue,
+      index: i
+    };
+  }
+}
+var skipWhitespace = (data, index) => {
+  while (index < data.length && /\s/.test(data[index])) {
+    index++;
+  }
+  return index;
+};
+function hasSeq(data, seq, i) {
+  for (let j = 0;j < seq.length; j++) {
+    if (seq[j] !== data[i + j + 1])
+      return false;
+  }
+  return true;
+}
+function validateEntityName2(name, xmlVersion) {
+  if (qName(name, { xmlVersion }))
+    return name;
+  else
+    throw new Error(`Invalid entity name ${name}`);
+}
+
+// node_modules/.bun/anynum@1.0.1/node_modules/anynum/digitTable.js
+var SCRIPT_ZEROS = [
+  48,
+  1632,
+  1776,
+  2406,
+  2534,
+  2662,
+  2790,
+  2918,
+  3046,
+  3174,
+  3302,
+  3430,
+  3558,
+  3664,
+  3792,
+  3872,
+  4160,
+  4240,
+  6112,
+  6160,
+  6470,
+  6608,
+  6784,
+  6800,
+  6992,
+  7088,
+  7232,
+  7248,
+  65296,
+  120782,
+  120792,
+  120802,
+  120812,
+  120822,
+  66720,
+  68912,
+  69734,
+  69872,
+  69942,
+  70096,
+  70384,
+  70736,
+  70864,
+  71248,
+  71360,
+  71472,
+  71904,
+  72016,
+  72688,
+  72784,
+  73040,
+  73120,
+  73552,
+  92768,
+  92864,
+  93008,
+  123200,
+  123632,
+  124144,
+  125264,
+  130032
+];
+var NOT_DIGIT = 255;
+var HIGH_MAP = new Map;
+var LOW_MAX = 65535;
+var LOW_MIN = 1632;
+var TABLE_OFFSET = LOW_MIN;
+var TABLE_SIZE = LOW_MAX - LOW_MIN + 1;
+var TABLE = new Uint8Array(TABLE_SIZE).fill(NOT_DIGIT);
+for (const zero of SCRIPT_ZEROS) {
+  for (let d = 0;d < 10; d++) {
+    const cp = zero + d;
+    if (cp <= LOW_MAX) {
+      TABLE[cp - TABLE_OFFSET] = d;
+    } else {
+      HIGH_MAP.set(cp, d);
+    }
+  }
+}
+
+// node_modules/.bun/anynum@1.0.1/node_modules/anynum/anynum.js
+var CHAR_0 = 48;
+var CHAR_9 = 57;
+var CHAR_MINUS = 45;
+var MINUS_SET = new Set([8722, 65293, 65123]);
+function anynum(str) {
+  if (typeof str !== "string")
+    return str;
+  const len = str.length;
+  if (len === 0)
+    return str;
+  let firstHit = -1;
+  for (let i = 0;i < len; i++) {
+    const cc = str.charCodeAt(i);
+    if (cc >= CHAR_0 && cc <= CHAR_9 || cc === CHAR_MINUS)
+      continue;
+    if (cc < TABLE_OFFSET) {
+      if (MINUS_SET.has(cc)) {
+        firstHit = i;
+        break;
+      }
+      continue;
+    }
+    if (cc >= 55296 && cc <= 56319) {
+      if (i + 1 < len) {
+        const low = str.charCodeAt(i + 1);
+        if (low >= 56320 && low <= 57343) {
+          const cp = 65536 + (cc - 55296 << 10) + (low - 56320);
+          if (HIGH_MAP.has(cp)) {
+            firstHit = i;
+            break;
+          }
+        }
+      }
+      continue;
+    }
+    if (TABLE[cc - TABLE_OFFSET] !== NOT_DIGIT || MINUS_SET.has(cc)) {
+      firstHit = i;
+      break;
+    }
+  }
+  if (firstHit === -1)
+    return str;
+  const chars = [];
+  if (firstHit > 0)
+    chars.push(str.slice(0, firstHit));
+  for (let i = firstHit;i < len; i++) {
+    const cc = str.charCodeAt(i);
+    if (cc >= CHAR_0 && cc <= CHAR_9 || cc === CHAR_MINUS) {
+      chars.push(str[i]);
+      continue;
+    }
+    if (cc < TABLE_OFFSET) {
+      chars.push(MINUS_SET.has(cc) ? "-" : str[i]);
+      continue;
+    }
+    if (cc >= 55296 && cc <= 56319) {
+      if (i + 1 < len) {
+        const low = str.charCodeAt(i + 1);
+        if (low >= 56320 && low <= 57343) {
+          const cp = 65536 + (cc - 55296 << 10) + (low - 56320);
+          const d = HIGH_MAP.get(cp);
+          if (d !== undefined) {
+            chars.push(String.fromCharCode(d + 48));
+            i++;
+            continue;
+          }
+        }
+      }
+      chars.push(str[i]);
+      continue;
+    }
+    if (MINUS_SET.has(cc)) {
+      chars.push("-");
+      continue;
+    }
+    const d = TABLE[cc - TABLE_OFFSET];
+    chars.push(d !== NOT_DIGIT ? String.fromCharCode(d + 48) : str[i]);
+  }
+  return chars.join("");
+}
+var anynum_default = anynum;
+
+// node_modules/.bun/strnum@2.5.1/node_modules/strnum/strnum.js
+var hexRegex = /^[-+]?0x[a-fA-F0-9]+$/;
+var binRegex = /^0b[01]+$/;
+var octRegex = /^0o[0-7]+$/;
+var numRegex = /^([\-\+])?(0*)([0-9]*(\.[0-9]*)?)$/;
+var consider = {
+  hex: true,
+  binary: false,
+  octal: false,
+  leadingZeros: true,
+  decimalPoint: ".",
+  eNotation: true,
+  infinity: "original",
+  unicode: false
+};
+function toNumber(str, options = {}) {
+  options = Object.assign({}, consider, options);
+  if (!str || typeof str !== "string")
+    return str;
+  let trimmedStr = str.trim();
+  if (trimmedStr.length === 0)
+    return str;
+  else if (options.skipLike !== undefined && options.skipLike.test(trimmedStr))
+    return str;
+  else if (trimmedStr === "0")
+    return 0;
+  if (options.unicode) {
+    trimmedStr = anynum_default(trimmedStr);
+    if (trimmedStr === "0")
+      return 0;
+  }
+  if (options.hex && hexRegex.test(trimmedStr)) {
+    return parse_int(trimmedStr, 16);
+  } else if (options.binary && binRegex.test(trimmedStr)) {
+    return parse_int(trimmedStr, 2);
+  } else if (options.octal && octRegex.test(trimmedStr)) {
+    return parse_int(trimmedStr, 8);
+  } else if (!isFinite(trimmedStr)) {
+    const num = Number(trimmedStr);
+    if (Number.isNaN(num))
+      return str;
+    return handleInfinity(str, num, options);
+  } else if (trimmedStr.includes("e") || trimmedStr.includes("E")) {
+    return resolveEnotation(str, trimmedStr, options);
+  } else {
+    const match = numRegex.exec(trimmedStr);
+    if (match) {
+      const sign = match[1] || "";
+      const leadingZeros = match[2];
+      let numTrimmedByZeros = trimZeros(match[3]);
+      const decimalAdjacentToLeadingZeros = sign ? trimmedStr[leadingZeros.length + 1] === "." : trimmedStr[leadingZeros.length] === ".";
+      if (!options.leadingZeros && (leadingZeros.length > 1 || leadingZeros.length === 1 && !decimalAdjacentToLeadingZeros)) {
+        return str;
+      } else {
+        const num = Number(trimmedStr);
+        const parsedStr = String(num);
+        if (num === 0)
+          return num;
+        if (parsedStr.search(/[eE]/) !== -1) {
+          if (options.eNotation)
+            return num;
+          else
+            return str;
+        } else if (trimmedStr.indexOf(".") !== -1) {
+          if (parsedStr === "0")
+            return num;
+          else if (parsedStr === numTrimmedByZeros)
+            return num;
+          else if (parsedStr === `${sign}${numTrimmedByZeros}`)
+            return num;
+          else
+            return str;
+        }
+        let n = leadingZeros ? numTrimmedByZeros : trimmedStr;
+        if (leadingZeros) {
+          return n === parsedStr || sign + n === parsedStr ? num : str;
+        } else {
+          return n === parsedStr || n === sign + parsedStr ? num : str;
+        }
+      }
+    } else {
+      return str;
+    }
+  }
+}
+var eNotationRegx = /^([-+])?(0*)(\d*(\.\d*)?[eE][-\+]?\d+)$/;
+function resolveEnotation(str, trimmedStr, options) {
+  if (!options.eNotation)
+    return str;
+  const notation = trimmedStr.match(eNotationRegx);
+  if (notation) {
+    let sign = notation[1] || "";
+    const eChar = notation[3].indexOf("e") === -1 ? "E" : "e";
+    const leadingZeros = notation[2];
+    const eAdjacentToLeadingZeros = sign ? trimmedStr[leadingZeros.length + 1] === eChar : trimmedStr[leadingZeros.length] === eChar;
+    if (leadingZeros.length > 1 && eAdjacentToLeadingZeros)
+      return str;
+    else if (leadingZeros.length === 1 && (notation[3].startsWith(`.${eChar}`) || notation[3][0] === eChar)) {
+      return Number(trimmedStr);
+    } else if (leadingZeros.length > 0) {
+      if (options.leadingZeros && !eAdjacentToLeadingZeros) {
+        return Number(trimmedStr);
+      } else
+        return str;
+    } else {
+      return Number(trimmedStr);
+    }
+  } else {
+    return str;
+  }
+}
+function trimZeros(numStr) {
+  if (numStr && numStr.indexOf(".") !== -1) {
+    let end = numStr.length;
+    while (end > 0 && numStr.charCodeAt(end - 1) === 48)
+      end--;
+    numStr = numStr.slice(0, end);
+    if (numStr === ".")
+      numStr = "0";
+    else if (numStr[0] === ".")
+      numStr = "0" + numStr;
+    else if (numStr[numStr.length - 1] === ".")
+      numStr = numStr.substring(0, numStr.length - 1);
+    return numStr;
+  }
+  return numStr;
+}
+function parse_int(numStr, base) {
+  const str = numStr.trim();
+  if (base === 2 || base === 8)
+    numStr = str.substring(2);
+  if (parseInt)
+    return parseInt(numStr, base);
+  else if (Number.parseInt)
+    return Number.parseInt(numStr, base);
+  else if (window && window.parseInt)
+    return window.parseInt(numStr, base);
+  else
+    throw new Error("parseInt, Number.parseInt, window.parseInt are not supported");
+}
+function handleInfinity(str, num, options) {
+  const isPositive = num === Infinity;
+  switch (options.infinity.toLowerCase()) {
+    case "null":
+      return null;
+    case "infinity":
+      return num;
+    case "string":
+      return isPositive ? "Infinity" : "-Infinity";
+    case "original":
+    default:
+      return str;
+  }
+}
+
+// node_modules/.bun/fast-xml-parser@5.12.0/node_modules/fast-xml-parser/src/ignoreAttributes.js
+function getIgnoreAttributesFn(ignoreAttributes) {
+  if (typeof ignoreAttributes === "function") {
+    return ignoreAttributes;
+  }
+  if (Array.isArray(ignoreAttributes)) {
+    return (attrName) => {
+      for (const pattern of ignoreAttributes) {
+        if (typeof pattern === "string" && attrName === pattern) {
+          return true;
+        }
+        if (pattern instanceof RegExp && pattern.test(attrName)) {
+          return true;
+        }
+      }
+    };
+  }
+  return () => false;
+}
+
+// node_modules/.bun/path-expression-matcher@1.6.2/node_modules/path-expression-matcher/src/Expression.js
+class Expression {
+  constructor(pattern, options = {}, data) {
+    this.pattern = pattern;
+    this.separator = options.separator || ".";
+    this.segments = this._parse(pattern);
+    this.data = data;
+    this._hasDeepWildcard = this.segments.some((seg) => seg.type === "deep-wildcard");
+    this._hasAttributeCondition = this.segments.some((seg) => seg.attrName !== undefined);
+    this._hasPositionSelector = this.segments.some((seg) => seg.position !== undefined);
+  }
+  _parse(pattern) {
+    const segments = [];
+    let i = 0;
+    let currentPart = "";
+    while (i < pattern.length) {
+      if (pattern[i] === this.separator) {
+        if (i + 1 < pattern.length && pattern[i + 1] === this.separator) {
+          if (currentPart.trim()) {
+            segments.push(this._parseSegment(currentPart.trim()));
+            currentPart = "";
+          }
+          segments.push({ type: "deep-wildcard" });
+          i += 2;
+        } else {
+          if (currentPart.trim()) {
+            segments.push(this._parseSegment(currentPart.trim()));
+          }
+          currentPart = "";
+          i++;
+        }
+      } else {
+        currentPart += pattern[i];
+        i++;
+      }
+    }
+    if (currentPart.trim()) {
+      segments.push(this._parseSegment(currentPart.trim()));
+    }
+    return segments;
+  }
+  _parseSegment(part) {
+    const segment = { type: "tag" };
+    let bracketContent = null;
+    let withoutBrackets = part;
+    const bracketMatch = part.match(/^([^\[]+)(\[[^\]]*\])(.*)$/);
+    if (bracketMatch) {
+      withoutBrackets = bracketMatch[1] + bracketMatch[3];
+      if (bracketMatch[2]) {
+        const content = bracketMatch[2].slice(1, -1);
+        if (content) {
+          bracketContent = content;
+        }
+      }
+    }
+    let namespace = undefined;
+    let tagAndPosition = withoutBrackets;
+    if (withoutBrackets.includes("::")) {
+      const nsIndex = withoutBrackets.indexOf("::");
+      namespace = withoutBrackets.substring(0, nsIndex).trim();
+      tagAndPosition = withoutBrackets.substring(nsIndex + 2).trim();
+      if (!namespace) {
+        throw new Error(`Invalid namespace in pattern: ${part}`);
+      }
+    }
+    let tag = undefined;
+    let positionMatch = null;
+    if (tagAndPosition.includes(":")) {
+      const colonIndex = tagAndPosition.lastIndexOf(":");
+      const tagPart = tagAndPosition.substring(0, colonIndex).trim();
+      const posPart = tagAndPosition.substring(colonIndex + 1).trim();
+      const isPositionKeyword = ["first", "last", "odd", "even"].includes(posPart) || /^nth\(\d+\)$/.test(posPart);
+      if (isPositionKeyword) {
+        tag = tagPart;
+        positionMatch = posPart;
+      } else {
+        tag = tagAndPosition;
+      }
+    } else {
+      tag = tagAndPosition;
+    }
+    if (!tag) {
+      throw new Error(`Invalid segment pattern: ${part}`);
+    }
+    segment.tag = tag;
+    if (namespace) {
+      segment.namespace = namespace;
+    }
+    if (bracketContent) {
+      if (bracketContent.includes("=")) {
+        const eqIndex = bracketContent.indexOf("=");
+        segment.attrName = bracketContent.substring(0, eqIndex).trim();
+        segment.attrValue = bracketContent.substring(eqIndex + 1).trim();
+      } else {
+        segment.attrName = bracketContent.trim();
+      }
+    }
+    if (positionMatch) {
+      const nthMatch = positionMatch.match(/^nth\((\d+)\)$/);
+      if (nthMatch) {
+        segment.position = "nth";
+        segment.positionValue = parseInt(nthMatch[1], 10);
+      } else {
+        segment.position = positionMatch;
+      }
+    }
+    return segment;
+  }
+  get length() {
+    return this.segments.length;
+  }
+  hasDeepWildcard() {
+    return this._hasDeepWildcard;
+  }
+  hasAttributeCondition() {
+    return this._hasAttributeCondition;
+  }
+  hasPositionSelector() {
+    return this._hasPositionSelector;
+  }
+  toString() {
+    return this.pattern;
+  }
+}
+
+// node_modules/.bun/path-expression-matcher@1.6.2/node_modules/path-expression-matcher/src/ExpressionSet.js
+class ExpressionSet {
+  constructor() {
+    this._byDepthAndTag = new Map;
+    this._wildcardByDepth = new Map;
+    this._deepWildcards = [];
+    this._deepByTerminalTag = new Map;
+    this._patterns = new Set;
+    this._sealed = false;
+  }
+  add(expression) {
+    if (this._sealed) {
+      throw new TypeError("ExpressionSet is sealed. Create a new ExpressionSet to add more expressions.");
+    }
+    if (this._patterns.has(expression.pattern))
+      return this;
+    this._patterns.add(expression.pattern);
+    if (expression.hasDeepWildcard()) {
+      const lastSeg = expression.segments[expression.segments.length - 1];
+      if (lastSeg && lastSeg.type !== "deep-wildcard" && lastSeg.tag !== "*") {
+        const tag = lastSeg.tag;
+        if (!this._deepByTerminalTag.has(tag))
+          this._deepByTerminalTag.set(tag, []);
+        this._deepByTerminalTag.get(tag).push(expression);
+      } else {
+        this._deepWildcards.push(expression);
+      }
+      return this;
+    }
+    const depth = expression.length;
+    const lastSeg = expression.segments[expression.segments.length - 1];
+    const tag = lastSeg?.tag;
+    if (!tag || tag === "*") {
+      if (!this._wildcardByDepth.has(depth))
+        this._wildcardByDepth.set(depth, []);
+      this._wildcardByDepth.get(depth).push(expression);
+    } else {
+      const key = `${depth}:${tag}`;
+      if (!this._byDepthAndTag.has(key))
+        this._byDepthAndTag.set(key, []);
+      this._byDepthAndTag.get(key).push(expression);
+    }
+    return this;
+  }
+  addAll(expressions) {
+    for (const expr of expressions)
+      this.add(expr);
+    return this;
+  }
+  has(expression) {
+    return this._patterns.has(expression.pattern);
+  }
+  get size() {
+    return this._patterns.size;
+  }
+  seal() {
+    this._sealed = true;
+    return this;
+  }
+  get isSealed() {
+    return this._sealed;
+  }
+  matchesAny(matcher) {
+    return this.findMatch(matcher) !== null;
+  }
+  findMatch(matcher) {
+    const depth = matcher.getDepth();
+    const tag = matcher.getCurrentTag();
+    const exactKey = `${depth}:${tag}`;
+    const exactBucket = this._byDepthAndTag.get(exactKey);
+    if (exactBucket) {
+      for (let i = 0;i < exactBucket.length; i++) {
+        if (matcher.matches(exactBucket[i]))
+          return exactBucket[i];
+      }
+    }
+    const wildcardBucket = this._wildcardByDepth.get(depth);
+    if (wildcardBucket) {
+      for (let i = 0;i < wildcardBucket.length; i++) {
+        if (matcher.matches(wildcardBucket[i]))
+          return wildcardBucket[i];
+      }
+    }
+    const deepBucket = this._deepByTerminalTag.get(tag);
+    if (deepBucket) {
+      for (let i = 0;i < deepBucket.length; i++) {
+        if (matcher.matches(deepBucket[i]))
+          return deepBucket[i];
+      }
+    }
+    for (let i = 0;i < this._deepWildcards.length; i++) {
+      if (matcher.matches(this._deepWildcards[i]))
+        return this._deepWildcards[i];
+    }
+    return null;
+  }
+}
+
+// node_modules/.bun/path-expression-matcher@1.6.2/node_modules/path-expression-matcher/src/Matcher.js
+class MatcherView {
+  constructor(matcher) {
+    this._matcher = matcher;
+  }
+  get separator() {
+    return this._matcher.separator;
+  }
+  getCurrentTag() {
+    const path = this._matcher.path;
+    return path.length > 0 ? path[path.length - 1].tag : undefined;
+  }
+  getCurrentNamespace() {
+    const path = this._matcher.path;
+    return path.length > 0 ? path[path.length - 1].namespace : undefined;
+  }
+  getAttrValue(attrName) {
+    const path = this._matcher.path;
+    if (path.length === 0)
+      return;
+    return path[path.length - 1].values?.[attrName];
+  }
+  hasAttr(attrName) {
+    const path = this._matcher.path;
+    if (path.length === 0)
+      return false;
+    const current = path[path.length - 1];
+    return current.values !== undefined && attrName in current.values;
+  }
+  getAnyParentAttr(attrName) {
+    return this._matcher.getAnyParentAttr(attrName);
+  }
+  hasAnyParentAttr(attrName) {
+    return this._matcher.hasAnyParentAttr(attrName);
+  }
+  getPosition() {
+    const path = this._matcher.path;
+    if (path.length === 0)
+      return -1;
+    return path[path.length - 1].position ?? 0;
+  }
+  getCounter() {
+    const path = this._matcher.path;
+    if (path.length === 0)
+      return -1;
+    return path[path.length - 1].counter ?? 0;
+  }
+  getIndex() {
+    return this.getPosition();
+  }
+  getDepth() {
+    return this._matcher.path.length;
+  }
+  toString(separator, includeNamespace = true) {
+    return this._matcher.toString(separator, includeNamespace);
+  }
+  toArray() {
+    return this._matcher.path.map((n) => n.tag);
+  }
+  matches(expression) {
+    return this._matcher.matches(expression);
+  }
+  matchesAny(exprSet) {
+    return exprSet.matchesAny(this._matcher);
+  }
+}
+
+class Matcher {
+  constructor(options = {}) {
+    this.separator = options.separator || ".";
+    this.path = [];
+    this.siblingStacks = [];
+    this._pathStringCache = null;
+    this._view = new MatcherView(this);
+    this._keptAttrs = [];
+  }
+  push(tagName, attrValues = null, namespace = null, options = null) {
+    this._pathStringCache = null;
+    if (this.path.length > 0) {
+      this.path[this.path.length - 1].values = undefined;
+    }
+    const currentLevel = this.path.length;
+    let level = this.siblingStacks[currentLevel];
+    if (!level) {
+      level = { counts: new Map, total: 0 };
+      this.siblingStacks[currentLevel] = level;
+    }
+    const siblingKey = namespace ? `${namespace}:${tagName}` : tagName;
+    const counter = level.counts.get(siblingKey) || 0;
+    const position = level.total;
+    level.counts.set(siblingKey, counter + 1);
+    level.total++;
+    const node = {
+      tag: tagName,
+      position,
+      counter
+    };
+    if (namespace !== null && namespace !== undefined) {
+      node.namespace = namespace;
+    }
+    if (attrValues !== null && attrValues !== undefined) {
+      node.values = attrValues;
+    }
+    this.path.push(node);
+    const depth = this.path.length;
+    const keep = options !== null ? options.keep : null;
+    if (keep !== null && keep !== undefined && keep.length > 0 && attrValues) {
+      for (let i = 0;i < keep.length; i++) {
+        const name = keep[i];
+        if (attrValues[name] !== undefined) {
+          this._keptAttrs.push({ depth, name, value: attrValues[name] });
+        }
+      }
+    }
+  }
+  pop() {
+    if (this.path.length === 0)
+      return;
+    this._pathStringCache = null;
+    const node = this.path.pop();
+    if (this.siblingStacks.length > this.path.length + 1) {
+      this.siblingStacks.length = this.path.length + 1;
+    }
+    const poppedDepth = this.path.length + 1;
+    while (this._keptAttrs.length > 0 && this._keptAttrs[this._keptAttrs.length - 1].depth >= poppedDepth) {
+      this._keptAttrs.pop();
+    }
+    return node;
+  }
+  updateCurrent(attrValues) {
+    if (this.path.length > 0) {
+      const current = this.path[this.path.length - 1];
+      if (attrValues !== null && attrValues !== undefined) {
+        current.values = attrValues;
+      }
+    }
+  }
+  getCurrentTag() {
+    return this.path.length > 0 ? this.path[this.path.length - 1].tag : undefined;
+  }
+  getCurrentNamespace() {
+    return this.path.length > 0 ? this.path[this.path.length - 1].namespace : undefined;
+  }
+  getAttrValue(attrName) {
+    if (this.path.length === 0)
+      return;
+    return this.path[this.path.length - 1].values?.[attrName];
+  }
+  hasAttr(attrName) {
+    if (this.path.length === 0)
+      return false;
+    const current = this.path[this.path.length - 1];
+    return current.values !== undefined && attrName in current.values;
+  }
+  getAnyParentAttr(attrName) {
+    const kept = this._keptAttrs;
+    for (let i = kept.length - 1;i >= 0; i--) {
+      if (kept[i].name === attrName)
+        return kept[i].value;
+    }
+    return;
+  }
+  hasAnyParentAttr(attrName) {
+    const kept = this._keptAttrs;
+    for (let i = kept.length - 1;i >= 0; i--) {
+      if (kept[i].name === attrName)
+        return true;
+    }
+    return false;
+  }
+  getPosition() {
+    if (this.path.length === 0)
+      return -1;
+    return this.path[this.path.length - 1].position ?? 0;
+  }
+  getCounter() {
+    if (this.path.length === 0)
+      return -1;
+    return this.path[this.path.length - 1].counter ?? 0;
+  }
+  getIndex() {
+    return this.getPosition();
+  }
+  getDepth() {
+    return this.path.length;
+  }
+  toString(separator, includeNamespace = true) {
+    const sep = separator || this.separator;
+    const isDefault = sep === this.separator && includeNamespace === true;
+    if (isDefault) {
+      if (this._pathStringCache !== null) {
+        return this._pathStringCache;
+      }
+      const result = this.path.map((n) => n.namespace ? `${n.namespace}:${n.tag}` : n.tag).join(sep);
+      this._pathStringCache = result;
+      return result;
+    }
+    return this.path.map((n) => includeNamespace && n.namespace ? `${n.namespace}:${n.tag}` : n.tag).join(sep);
+  }
+  toArray() {
+    return this.path.map((n) => n.tag);
+  }
+  reset() {
+    this._pathStringCache = null;
+    this.path = [];
+    this.siblingStacks = [];
+    this._keptAttrs = [];
+  }
+  matches(expression) {
+    const segments = expression.segments;
+    if (segments.length === 0) {
+      return false;
+    }
+    if (expression.hasDeepWildcard()) {
+      return this._matchWithDeepWildcard(segments);
+    }
+    return this._matchSimple(segments);
+  }
+  _matchSimple(segments) {
+    if (this.path.length !== segments.length) {
+      return false;
+    }
+    for (let i = 0;i < segments.length; i++) {
+      if (!this._matchSegment(segments[i], this.path[i], i === this.path.length - 1)) {
+        return false;
+      }
+    }
+    return true;
+  }
+  _matchWithDeepWildcard(segments) {
+    let pathIdx = this.path.length - 1;
+    let segIdx = segments.length - 1;
+    while (segIdx >= 0 && pathIdx >= 0) {
+      const segment = segments[segIdx];
+      if (segment.type === "deep-wildcard") {
+        segIdx--;
+        if (segIdx < 0) {
+          return true;
+        }
+        const nextSeg = segments[segIdx];
+        let found = false;
+        for (let i = pathIdx;i >= 0; i--) {
+          if (this._matchSegment(nextSeg, this.path[i], i === this.path.length - 1)) {
+            pathIdx = i - 1;
+            segIdx--;
+            found = true;
+            break;
+          }
+        }
+        if (!found) {
+          return false;
+        }
+      } else {
+        if (!this._matchSegment(segment, this.path[pathIdx], pathIdx === this.path.length - 1)) {
+          return false;
+        }
+        pathIdx--;
+        segIdx--;
+      }
+    }
+    return segIdx < 0;
+  }
+  _matchSegment(segment, node, isCurrentNode) {
+    if (segment.tag !== "*" && segment.tag !== node.tag) {
+      return false;
+    }
+    if (segment.namespace !== undefined) {
+      if (segment.namespace !== "*" && segment.namespace !== node.namespace) {
+        return false;
+      }
+    }
+    if (segment.attrName !== undefined) {
+      if (!isCurrentNode) {
+        return false;
+      }
+      if (!node.values || !(segment.attrName in node.values)) {
+        return false;
+      }
+      if (segment.attrValue !== undefined) {
+        if (String(node.values[segment.attrName]) !== String(segment.attrValue)) {
+          return false;
+        }
+      }
+    }
+    if (segment.position !== undefined) {
+      if (!isCurrentNode) {
+        return false;
+      }
+      const counter = node.counter ?? 0;
+      if (segment.position === "first" && counter !== 0) {
+        return false;
+      } else if (segment.position === "odd" && counter % 2 !== 1) {
+        return false;
+      } else if (segment.position === "even" && counter % 2 !== 0) {
+        return false;
+      } else if (segment.position === "nth" && counter !== segment.positionValue) {
+        return false;
+      }
+    }
+    return true;
+  }
+  matchesAny(exprSet) {
+    return exprSet.matchesAny(this);
+  }
+  snapshot() {
+    return {
+      path: this.path.map((node) => ({ ...node })),
+      siblingStacks: this.siblingStacks.map((level) => level ? { counts: new Map(level.counts), total: level.total } : level),
+      keptAttrs: this._keptAttrs.map((entry) => ({ ...entry }))
+    };
+  }
+  restore(snapshot) {
+    this._pathStringCache = null;
+    this.path = snapshot.path.map((node) => ({ ...node }));
+    this.siblingStacks = snapshot.siblingStacks.map((level) => level ? { counts: new Map(level.counts), total: level.total } : level);
+    this._keptAttrs = (snapshot.keptAttrs || []).map((entry) => ({ ...entry }));
+  }
+  readOnly() {
+    return this._view;
+  }
+}
+
+// node_modules/.bun/is-unsafe@2.0.3/node_modules/is-unsafe/src/contexts/html.js
+var HTML_PATTERNS = [
+  {
+    id: "html-script-open",
+    description: "<script opening tag",
+    pattern: /<script[\s>/]/i
+  },
+  {
+    id: "html-script-close",
+    description: "</script closing tag",
+    pattern: /<\/script[\s>]/i
+  },
+  {
+    id: "html-javascript-protocol",
+    description: "javascript: URI scheme (with optional whitespace/encoding)",
+    pattern: /j[\t\n\r ]*a[\t\n\r ]*v[\t\n\r ]*a[\t\n\r ]*s[\t\n\r ]*c[\t\n\r ]*r[\t\n\r ]*i[\t\n\r ]*p[\t\n\r ]*t[\t\n\r ]*:/i
+  },
+  {
+    id: "html-vbscript-protocol",
+    description: "vbscript: URI scheme",
+    pattern: /vbscript[\t\n\r ]*:/i
+  },
+  {
+    id: "html-data-html",
+    description: "data:text/html URI \u2014 can execute scripts in browsers",
+    pattern: /data[\t\n\r ]*:[\t\n\r ]*text\/html/i
+  },
+  {
+    id: "html-data-xhtml",
+    description: "data:application/xhtml+xml URI",
+    pattern: /data[\t\n\r ]*:[\t\n\r ]*application\/xhtml/i
+  },
+  {
+    id: "html-data-svg",
+    description: "data:image/svg+xml URI \u2014 can execute scripts",
+    pattern: /data[\t\n\r ]*:[\t\n\r ]*image\/svg\+xml/i
+  },
+  {
+    id: "html-inline-event-handler",
+    description: "Inline event handler attributes: onclick=, onerror=, onload=, etc.",
+    pattern: /\bon\w{1,30}\s*=/i
+  },
+  {
+    id: "html-entity-obfuscated-script",
+    description: "HTML-entity-encoded <script (e.g. &#x3C;script or &lt;script)",
+    pattern: /(?:&#x0*3[Cc];?|&#0*60;?|&lt;)\s*script/i
+  },
+  {
+    id: "html-entity-obfuscated-javascript",
+    description: 'HTML-entity-encoded javascript: (partial \u2014 catches common &#106; or &#x6a; for "j")',
+    pattern: /(?:&#x0*6[Aa];?|&#0*106;?)\s*(?:&#x0*61;?|a)[\s\S]{0,80}script\s*:/i
+  },
+  {
+    id: "html-style-expression",
+    description: "CSS expression() \u2014 IE-era code execution in style attributes",
+    pattern: /style[\s\S]{0,20}expression\s*\(/i
+  },
+  {
+    id: "html-object-embed",
+    description: "<object or <embed tags that can load active content",
+    pattern: /<(?:object|embed)[\s>/]/i
+  },
+  {
+    id: "html-base-tag",
+    description: "<base href= \u2014 can hijack all relative URLs on a page",
+    pattern: /<base[\s>]/i
+  },
+  {
+    id: "html-meta-refresh",
+    description: '<meta http-equiv="refresh" \u2014 can redirect users',
+    pattern: /<meta[\s\S]{0,40}http-equiv[\s\S]{0,20}refresh/i
+  },
+  {
+    id: "html-srcdoc",
+    description: "srcdoc= attribute on iframes \u2014 embeds HTML that can run scripts",
+    pattern: /srcdoc\s*=/i
+  },
+  {
+    id: "html-iframe",
+    description: "<iframe tag",
+    pattern: /<iframe[\s>/]/i
+  },
+  {
+    id: "html-form",
+    description: "<form tag \u2014 can be used for phishing / credential harvesting injection",
+    pattern: /<form[\s>/]/i
+  }
+];
+var html_default = HTML_PATTERNS;
+// node_modules/.bun/is-unsafe@2.0.3/node_modules/is-unsafe/src/contexts/xml.js
+var XML_PATTERNS = [
+  {
+    id: "xml-cdata-injection",
+    description: "CDATA section injection: <![CDATA[ breaks out of text node context",
+    pattern: /<!\[CDATA\[/i
+  },
+  {
+    id: "xml-cdata-close",
+    description: "CDATA close sequence: ]]> can terminate an enclosing CDATA section",
+    pattern: /\]\]>/
+  },
+  {
+    id: "xml-processing-instruction",
+    description: "XML processing instruction: <?xml-stylesheet or <?php etc.",
+    pattern: /<\?(?:xml[\- ]|php|asp)/i
+  },
+  {
+    id: "xml-doctype-injection",
+    description: "DOCTYPE declaration embedded in content \u2014 can define entities",
+    pattern: /<!DOCTYPE(?:[\s[]|$)/i
+  },
+  {
+    id: "xml-entity-system",
+    description: "SYSTEM keyword \u2014 used in external entity declarations (XXE)",
+    pattern: /\bSYSTEM\s+["']/i
+  },
+  {
+    id: "xml-entity-public",
+    description: "PUBLIC keyword \u2014 used in external entity declarations (XXE)",
+    pattern: /\bPUBLIC\s+["']/i
+  },
+  {
+    id: "xml-entity-declaration",
+    description: "<!ENTITY declaration \u2014 defines entities, potential XXE or entity expansion",
+    pattern: /<!ENTITY[\s%]/i
+  },
+  {
+    id: "xml-billion-laughs",
+    description: "Entity reference chaining / billion laughs: repeated &eX; style references",
+    pattern: /(?:&\w{1,20};){3,}/
+  },
+  {
+    id: "xml-namespace-confusion",
+    description: "xmlns: attribute injection \u2014 can redefine namespaces to confuse parsers",
+    pattern: /\bxmlns(?::\w{1,40})?\s*=/i
+  },
+  {
+    id: "xml-comment-injection",
+    description: "<!-- comment injection \u2014 can hide content from some parsers",
+    pattern: /<!--/
+  },
+  {
+    id: "xml-comment-close",
+    description: "--> closes an enclosing XML comment",
+    pattern: /-->/
+  },
+  {
+    id: "xml-pi-close",
+    description: "?> closes an enclosing processing instruction",
+    pattern: /\?>/
+  }
+];
+var xml_default = XML_PATTERNS;
+// node_modules/.bun/is-unsafe@2.0.3/node_modules/is-unsafe/src/contexts/svg.js
+var SVG_PATTERNS = [
+  {
+    id: "svg-script-element",
+    description: "<script element inside SVG executes JavaScript",
+    pattern: /<script[\s>/]/i
+  },
+  {
+    id: "svg-xlink-href-javascript",
+    description: "xlink:href with javascript: \u2014 classic SVG XSS via <a> or <use>",
+    pattern: /xlink\s*:\s*href\s*=\s*["']?\s*javascript\s*:/i
+  },
+  {
+    id: "svg-href-javascript",
+    description: "href= with javascript: in SVG context (<a>, <animate>, etc.)",
+    pattern: /href\s*=\s*["']?\s*javascript\s*:/i
+  },
+  {
+    id: "svg-foreignobject",
+    description: "<foreignObject embeds HTML inside SVG \u2014 can execute scripts",
+    pattern: /<foreignObject[\s>/]/i
+  },
+  {
+    id: "svg-use-external",
+    description: "<use xlink:href or href pointing to external resource (non-fragment URL)",
+    pattern: /<use[\s\S]{0,60}(?:xlink\s*:\s*)?href\s*=\s*(?:["'][^#]|[^"'#\s>])/i
+  },
+  {
+    id: "svg-animate-href",
+    description: '<animate attributeName="href" \u2014 can dynamically change href to javascript:',
+    pattern: /<animate[\s\S]{0,80}attributeName\s*=\s*["'][\s]*href["']/i
+  },
+  {
+    id: "svg-animate-xlinkhref",
+    description: '<animate attributeName="xlink:href"',
+    pattern: /<animate[\s\S]{0,80}attributeName\s*=\s*["'][\s]*xlink\s*:\s*href["']/i
+  },
+  {
+    id: "svg-set-javascript",
+    description: '<set to="javascript:..." \u2014 sets an attribute to a javascript: URI',
+    pattern: /<set[\s\S]{0,80}to\s*=\s*["']?\s*javascript\s*:/i
+  },
+  {
+    id: "svg-event-handler",
+    description: "SVG-specific event handler attributes: onload=, onerror=, onactivate=, etc.",
+    pattern: /\bon(?:load|error|activate|begin|end|repeat|focus|blur|click|mouse\w{1,20}|key\w{1,20})\s*=/i
+  },
+  {
+    id: "svg-handler-generic",
+    description: "Generic on* handler catch-all for SVG attributes",
+    pattern: /\bon\w{1,30}\s*=/i
+  },
+  {
+    id: "svg-filter-feimage",
+    description: "<feImage href= \u2014 filter primitive that can load external resources",
+    pattern: /<feImage[\s\S]{0,80}(?:xlink\s*:\s*)?href\s*=/i
+  },
+  {
+    id: "svg-image-external",
+    description: "<image xlink:href with http/https or javascript protocol",
+    pattern: /<image[\s\S]{0,80}(?:xlink\s*:\s*)?href\s*=\s*["']?\s*(?:https?|javascript)\s*:/i
+  },
+  {
+    id: "svg-style-javascript",
+    description: "style= attribute containing javascript: (e.g. background:url(javascript:...))",
+    pattern: /style\s*=[\s\S]{0,60}javascript\s*:/i
+  }
+];
+var svg_default = SVG_PATTERNS;
+
+// node_modules/.bun/is-unsafe@2.0.3/node_modules/is-unsafe/src/contexts/sql.js
+var SQL_PATTERNS = [
+  {
+    id: "sql-block-comment-open",
+    description: "SQL block comment open: /* ... */ \u2014 unusual in legitimate user text",
+    pattern: /\/\*/
+  },
+  {
+    id: "sql-union-select",
+    description: "UNION SELECT \u2014 most common SQL injection aggregation attack",
+    pattern: /\bUNION\s{1,20}(?:ALL\s{1,20})?SELECT\b/i
+  },
+  {
+    id: "sql-drop-table",
+    description: "DROP TABLE \u2014 destructive DDL injection",
+    pattern: /\bDROP\s{1,20}TABLE\b/i
+  },
+  {
+    id: "sql-drop-database",
+    description: "DROP DATABASE \u2014 destructive DDL injection",
+    pattern: /\bDROP\s{1,20}DATABASE\b/i
+  },
+  {
+    id: "sql-insert-into",
+    description: "INSERT INTO \u2014 data injection",
+    pattern: /\bINSERT\s{1,20}INTO\b/i
+  },
+  {
+    id: "sql-delete-from",
+    description: "DELETE FROM \u2014 data deletion injection",
+    pattern: /\bDELETE\s{1,20}FROM\b/i
+  },
+  {
+    id: "sql-update-set",
+    description: "UPDATE ... SET \u2014 data modification injection",
+    pattern: /\bUPDATE\b[\s\S]{1,60}\bSET\b/i
+  },
+  {
+    id: "sql-exec-xp",
+    description: "EXEC xp_ \u2014 MSSQL extended stored procedure execution",
+    pattern: /\bEXEC(?:UTE)?\s{1,20}xp_/i
+  },
+  {
+    id: "sql-tautology-string",
+    description: `Classic string tautology: ' OR '1'='1 or " OR "1"="1"`,
+    pattern: /'\s{0,10}OR\s{0,10}'[^']{0,20}'\s*=\s*'[^']{0,20}/i
+  },
+  {
+    id: "sql-tautology-numeric",
+    description: "Numeric tautology: OR 1=1",
+    pattern: /\bOR\s{1,10}1\s*=\s*1\b/i
+  },
+  {
+    id: "sql-always-true-zero",
+    description: "Numeric tautology: OR 0=0",
+    pattern: /\bOR\s{1,10}0\s*=\s*0\b/i
+  },
+  {
+    id: "sql-sleep-benchmark",
+    description: "Time-based blind injection: SLEEP() or BENCHMARK()",
+    pattern: /\b(?:SLEEP|BENCHMARK)\s*\(/i
+  },
+  {
+    id: "sql-waitfor-delay",
+    description: "MSSQL time-based blind injection: WAITFOR DELAY",
+    pattern: /\bWAITFOR\s{1,20}DELAY\b/i
+  },
+  {
+    id: "sql-char-function",
+    description: "CHAR() function \u2014 used to obfuscate injected strings",
+    pattern: /\bCHAR\s*\(\s*\d{1,3}/i
+  },
+  {
+    id: "sql-information-schema",
+    description: "INFORMATION_SCHEMA \u2014 reconnaissance query for table/column enumeration",
+    pattern: /\bINFORMATION_SCHEMA\b/i
+  }
+];
+var sql_default = SQL_PATTERNS;
+
+// node_modules/.bun/is-unsafe@2.0.3/node_modules/is-unsafe/src/contexts/shell.js
+var SHELL_PATTERNS = [
+  {
+    id: "shell-path-traversal-unix",
+    description: "Unix path traversal: ../  \u2014 climbing the directory tree",
+    pattern: /\.\.\//
+  },
+  {
+    id: "shell-path-traversal-windows",
+    description: "Windows path traversal: ..\\ \u2014 climbing the directory tree",
+    pattern: /\.\.\\/
+  },
+  {
+    id: "shell-path-traversal-encoded",
+    description: "URL-encoded path traversal: %2e%2e or %2f variants",
+    pattern: /%2e%2e|%2f\.\.|\.\.%2f/i
+  },
+  {
+    id: "shell-null-byte",
+    description: "Null byte injection: \\x00 or %00 \u2014 truncates strings in C-backed functions",
+    pattern: /\x00|%00/
+  },
+  {
+    id: "shell-semicolon",
+    description: "Semicolon command separator: cmd1; cmd2",
+    pattern: /;/
+  },
+  {
+    id: "shell-pipe",
+    description: "Pipe operator: cmd1 | cmd2",
+    pattern: /\|/
+  },
+  {
+    id: "shell-and-operator",
+    description: "AND operator: cmd1 && cmd2",
+    pattern: /&&/
+  },
+  {
+    id: "shell-or-operator",
+    description: "OR operator: cmd1 || cmd2",
+    pattern: /\|\|/
+  },
+  {
+    id: "shell-backtick",
+    description: "Backtick command substitution: `cmd`",
+    pattern: /`/
+  },
+  {
+    id: "shell-dollar-paren",
+    description: "Dollar-paren command substitution: $(cmd)",
+    pattern: /\$\(/
+  },
+  {
+    id: "shell-dollar-brace",
+    description: "Dollar-brace variable expansion: ${var} \u2014 can be abused for injection",
+    pattern: /\$\{/
+  },
+  {
+    id: "shell-redirect-out",
+    description: "Output redirection: cmd > file or cmd >> file",
+    pattern: />{1,2}/
+  },
+  {
+    id: "shell-redirect-in",
+    description: "Input redirection: cmd < file",
+    pattern: /</
+  },
+  {
+    id: "shell-newline-injection",
+    description: "Newline injection: \\n or \\r \u2014 can inject new shell commands",
+    pattern: /[\n\r]/
+  },
+  {
+    id: "shell-glob-star",
+    description: "Glob expansion: * or ? \u2014 can expand to unintended files",
+    pattern: /[/\\][*?]/
+  },
+  {
+    id: "shell-absolute-root",
+    description: "Absolute root path injection: string starting with / or \\ (Windows UNC)",
+    pattern: /^(?:\/|\\\\)/
+  },
+  {
+    id: "shell-windows-drive",
+    description: "Windows drive letter path injection: C:\\ or D:/",
+    pattern: /^[a-zA-Z]:[/\\]/
+  },
+  {
+    id: "shell-curl-wget",
+    description: "curl/wget with URL or flags \u2014 can exfiltrate data or download payloads",
+    pattern: /\b(?:curl|wget)\s+(?:https?:\/\/|ftp:\/\/|-)/i
+  }
+];
+var shell_default = SHELL_PATTERNS;
+
+// node_modules/.bun/is-unsafe@2.0.3/node_modules/is-unsafe/src/contexts/redos.js
+var REDOS_PATTERNS = [
+  {
+    id: "redos-nested-quantifier-plus",
+    description: "Nested + quantifier inside a group with outer quantifier: (a+)+, (.+b)*, etc.",
+    pattern: /\([^)]*\+[^)]*\)[+*]/
+  },
+  {
+    id: "redos-nested-quantifier-star",
+    description: "Nested * quantifier: (a*)* or (a*)+ \u2014 catastrophic backtracking",
+    pattern: /\([^)]*\*[^)]*\)[*+]/
+  },
+  {
+    id: "redos-nested-groups",
+    description: "Doubly nested quantified groups: ((a+)+) \u2014 guaranteed catastrophic",
+    pattern: /\(\([^)]{0,40}\)[+*]\)[+*]/
+  },
+  {
+    id: "redos-alternation-overlap",
+    description: "Overlapping alternation under quantifier: (a|a)+ \u2014 ambiguous NFA paths",
+    pattern: /\(([^|()]{1,20})\|(?:\1)(?:\|[^|()]{1,20}){0,5}\)[+*?]{1,2}/
+  },
+  {
+    id: "redos-star-plus-concat",
+    description: "(x*x)+ pattern \u2014 triggers super-linear backtracking",
+    pattern: /\([^)]{0,10}\*[^)]{0,10}\)[+*]/
+  },
+  {
+    id: "redos-dot-star-greedy",
+    description: "(.*){n,} or (.+){n,} \u2014 repeated greedy dot quantifiers",
+    pattern: /\(\.[*+]\)\{?\d/
+  },
+  {
+    id: "redos-large-repetition",
+    description: "Very large fixed or range repetition count {1000,} or {1000,n} \u2014 denial of service via backtracking",
+    pattern: /\{\d{4,}(?:,\d*)?\}/
+  },
+  {
+    id: "redos-catastrophic-alternation",
+    description: "Long alternation with many similar branches \u2014 polynomial backtracking risk",
+    pattern: /\([^)]{0,200}(?:\|[^|)]{0,50}){9,}\)/
+  }
+];
+var redos_default = REDOS_PATTERNS;
+
+// node_modules/.bun/is-unsafe@2.0.3/node_modules/is-unsafe/src/contexts/nosql.js
+var sep2 = `["'\\s]*:`;
+var NOSQL_PATTERNS = [
+  {
+    id: "nosql-where-operator",
+    description: "$where \u2014 executes arbitrary JavaScript server-side in MongoDB",
+    pattern: new RegExp(`\\$where${sep2}`, "i")
+  },
+  {
+    id: "nosql-ne-operator",
+    description: '$ne \u2014 "not equal" operator used to bypass equality checks',
+    pattern: new RegExp(`\\$ne${sep2}`, "i")
+  },
+  {
+    id: "nosql-gt-operator",
+    description: '$gt \u2014 "greater than" used to bypass password/value checks',
+    pattern: new RegExp(`\\$gte?${sep2}`, "i")
+  },
+  {
+    id: "nosql-lt-operator",
+    description: '$lt / $lte \u2014 "less than" bypass variants',
+    pattern: new RegExp(`\\$lte?${sep2}`, "i")
+  },
+  {
+    id: "nosql-regex-operator",
+    description: "$regex \u2014 can be used to extract data character by character (blind injection)",
+    pattern: new RegExp(`\\$regex${sep2}`, "i")
+  },
+  {
+    id: "nosql-or-operator",
+    description: "$or \u2014 logical OR; used to create always-true conditions",
+    pattern: new RegExp(`\\$or${sep2}\\s*\\[`, "i")
+  },
+  {
+    id: "nosql-and-operator",
+    description: "$and \u2014 logical AND operator injection",
+    pattern: new RegExp(`\\$and${sep2}\\s*\\[`, "i")
+  },
+  {
+    id: "nosql-nor-operator",
+    description: "$nor \u2014 logical NOR operator injection",
+    pattern: new RegExp(`\\$nor${sep2}\\s*\\[`, "i")
+  },
+  {
+    id: "nosql-exists-operator",
+    description: "$exists \u2014 can enumerate fields to determine schema",
+    pattern: new RegExp(`\\$exists${sep2}`, "i")
+  },
+  {
+    id: "nosql-in-operator",
+    description: "$in \u2014 matches any value in a list; can enumerate values",
+    pattern: new RegExp(`\\$in${sep2}\\s*\\[`, "i")
+  },
+  {
+    id: "nosql-expr-operator",
+    description: "$expr \u2014 allows aggregation expressions in queries (MongoDB 3.6+)",
+    pattern: new RegExp(`\\$expr${sep2}`, "i")
+  },
+  {
+    id: "nosql-function-operator",
+    description: "$function \u2014 executes arbitrary JavaScript in MongoDB 4.4+",
+    pattern: new RegExp(`\\$function${sep2}`, "i")
+  },
+  {
+    id: "nosql-accumulator-operator",
+    description: "$accumulator \u2014 custom aggregation with arbitrary JS execution",
+    pattern: new RegExp(`\\$accumulator${sep2}`, "i")
+  },
+  {
+    id: "nosql-proto-pollution",
+    description: "__proto__ \u2014 prototype pollution via object key injection",
+    pattern: /__proto__/
+  },
+  {
+    id: "nosql-constructor-prototype",
+    description: "constructor.prototype \u2014 alternative prototype pollution vector (dot notation or JSON key)",
+    pattern: /constructor[\s"':.,{\[]*prototype/i
+  },
+  {
+    id: "nosql-proto-bracket",
+    description: '["__proto__"] \u2014 bracket-notation prototype pollution',
+    pattern: /\[["']__proto__["']\]/
+  }
+];
+var nosql_default = NOSQL_PATTERNS;
+
+// node_modules/.bun/is-unsafe@2.0.3/node_modules/is-unsafe/src/contexts/log.js
+var LOG_PATTERNS = [
+  {
+    id: "log-crlf-injection",
+    description: "CRLF injection: literal \\r or \\n embeds fake log lines",
+    pattern: /[\r\n]/
+  },
+  {
+    id: "log-url-encoded-crlf",
+    description: "URL-encoded CRLF: %0d, %0a, %0D, %0A \u2014 decoded by some log parsers",
+    pattern: /%0[dDaA]/
+  },
+  {
+    id: "log-unicode-newline",
+    description: "Unicode newline variants: U+2028 (line separator), U+2029 (paragraph separator)",
+    pattern: /[\u2028\u2029]/
+  },
+  {
+    id: "log-log4shell-jndi",
+    description: "Log4Shell: ${jndi:...} triggers remote code execution in Apache Log4j",
+    pattern: /\$\{jndi\s*:/i
+  },
+  {
+    id: "log-log4shell-obfuscated",
+    description: "Obfuscated Log4Shell: ${::-j}... lookup-bypass prefix used to evade WAF detection",
+    pattern: /\$\{::-/
+  },
+  {
+    id: "log-log4j-lookup",
+    description: "Log4j lookup syntax: ${env:...}, ${sys:...}, ${ctx:...} \u2014 data exfiltration",
+    pattern: /\$\{(?:env|sys|ctx|main|map|sd|web|docker|k8s|spring)\s*:/i
+  },
+  {
+    id: "log-ssti-double-brace",
+    description: "SSTI double-brace: {{expression}} \u2014 Jinja2, Twig, Handlebars, etc.",
+    pattern: /\{\{[\s\S]{0,80}\}\}/
+  },
+  {
+    id: "log-ssti-hash-brace",
+    description: "SSTI hash-brace: #{expression} \u2014 Thymeleaf, Velocity, Ruby ERB",
+    pattern: /#\{[\s\S]{0,80}\}/
+  },
+  {
+    id: "log-ssti-dollar-brace",
+    description: "SSTI/EL injection: ${expression with operators or method calls} \u2014 JSP EL, Freemarker, SpEL",
+    pattern: /\$\{[^}]*(?:\.|\(|\*|\+|\bclass\b|\bruntime\b|\bprocess\b|\bexec\b)[^}]{0,80}\}/i
+  },
+  {
+    id: "log-ssti-percent-tag",
+    description: "SSTI ERB/ASP tag: <%= expression %> \u2014 Ruby ERB, ASP",
+    pattern: /<%=[\s\S]{0,80}%>/
+  },
+  {
+    id: "log-null-byte",
+    description: "Null byte: \\x00 or %00 \u2014 can truncate log entries in C-backed loggers",
+    pattern: /\x00|%00/
+  },
+  {
+    id: "log-ansi-escape",
+    description: "ANSI escape sequence: ESC[ \u2014 can manipulate terminal output when logs are tailed",
+    pattern: /\x1b\[/
+  }
+];
+var log_default = LOG_PATTERNS;
+
+// node_modules/.bun/is-unsafe@2.0.3/node_modules/is-unsafe/src/contexts/sql-strict.js
+var SQL_STRICT_EXTRA = [
+  {
+    id: "sql-line-comment",
+    description: "SQL line comment: -- followed by whitespace or end of string",
+    pattern: /--(?:\s|$)/
+  },
+  {
+    id: "sql-stacked-query",
+    description: "Stacked queries: semicolon immediately followed by a SQL keyword",
+    pattern: /;\s{0,10}(?:SELECT|INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|EXEC)\b/i
+  },
+  {
+    id: "sql-hex-encoding",
+    description: "Hex-encoded string injection: 0x41414141 style (MySQL)",
+    pattern: /\b0x[0-9a-f]{4,}/i
+  }
+];
+var SQL_STRICT_PATTERNS = [...sql_default, ...SQL_STRICT_EXTRA];
+var sql_strict_default = SQL_STRICT_PATTERNS;
+
+// node_modules/.bun/is-unsafe@2.0.3/node_modules/is-unsafe/src/util/decode-entities.js
+var NAMED = Object.freeze({
+  colon: ":",
+  Tab: "\t",
+  NewLine: `
+`
+});
+var ENTITY_RE = /&(?:#[xX]0*([0-9a-fA-F]{1,6});?|#0*([0-9]{1,7});?|([a-zA-Z][a-zA-Z0-9]{1,15});)/g;
+function decodeEntities(input) {
+  if (input.indexOf("&") === -1)
+    return input;
+  return input.replace(ENTITY_RE, (match, hex, dec, name) => {
+    if (name !== undefined) {
+      return Object.prototype.hasOwnProperty.call(NAMED, name) ? NAMED[name] : match;
+    }
+    const cp = hex !== undefined ? parseInt(hex, 16) : parseInt(dec, 10);
+    if (!Number.isFinite(cp) || cp > 1114111)
+      return match;
+    return String.fromCodePoint(cp);
+  });
+}
+
+// node_modules/.bun/is-unsafe@2.0.3/node_modules/is-unsafe/src/index.js
+html_default.label = "HTML";
+xml_default.label = "XML";
+svg_default.label = "SVG";
+html_default.decodeEntities = true;
+xml_default.decodeEntities = true;
+svg_default.decodeEntities = true;
+sql_default.label = "SQL";
+sql_strict_default.label = "SQL-STRICT";
+shell_default.label = "SHELL";
+redos_default.label = "REDOS";
+nosql_default.label = "NOSQL";
+log_default.label = "LOG";
+var VALID_CONTEXTS = Object.freeze({
+  HTML: html_default,
+  XML: xml_default,
+  SVG: svg_default,
+  SQL: sql_default,
+  "SQL-STRICT": sql_strict_default,
+  SHELL: shell_default,
+  REDOS: redos_default,
+  NOSQL: nosql_default,
+  LOG: log_default
+});
+function assertString(value) {
+  if (typeof value !== "string") {
+    throw new TypeError(`is-unsafe: first argument must be a string, got ${typeof value}`);
+  }
+}
+function assertContext(context) {
+  if (context instanceof RegExp)
+    return;
+  if (Array.isArray(context)) {
+    if (context.length === 0) {
+      throw new TypeError("is-unsafe: context must not be an empty array");
+    }
+    if (Array.isArray(context[0])) {
+      for (const list of context) {
+        if (!Array.isArray(list) || list.length === 0) {
+          throw new TypeError("is-unsafe: each context in the array must be a non-empty pattern array (PatternList)");
+        }
+      }
+    }
+    return;
+  }
+  throw new TypeError(`is-unsafe: second argument must be a PatternList (e.g. HTML), ` + `an array of PatternLists (e.g. [HTML, XML]), or a RegExp. Got: ${typeof context}`);
+}
+function normalise(context) {
+  if (context instanceof RegExp)
+    return { lists: null, regex: context };
+  if (Array.isArray(context[0]))
+    return { lists: context, regex: null };
+  return { lists: [context], regex: null };
+}
+function decodedCopy(value, list) {
+  if (!list.decodeEntities)
+    return null;
+  const decoded = decodeEntities(value);
+  return decoded === value ? null : decoded;
+}
+function matchList(value, list) {
+  const label = list.label ?? "CUSTOM";
+  const decoded = decodedCopy(value, list);
+  for (const rule of list) {
+    if (rule.pattern.test(value) || decoded !== null && rule.pattern.test(decoded)) {
+      return { context: label, id: rule.id, description: rule.description, pattern: rule.pattern };
+    }
+  }
+  return null;
+}
+function isUnsafe(value, context) {
+  assertString(value);
+  assertContext(context);
+  const { lists, regex } = normalise(context);
+  if (regex)
+    return regex.test(value);
+  for (const list of lists) {
+    if (matchList(value, list) !== null)
+      return true;
+  }
+  return false;
+}
+
+// node_modules/.bun/fast-xml-parser@5.12.0/node_modules/fast-xml-parser/src/xmlparser/OrderedObjParser.js
+function extractRawAttributes(prefixedAttrs, options) {
+  if (!prefixedAttrs)
+    return {};
+  const attrs = options.attributesGroupName ? prefixedAttrs[options.attributesGroupName] : prefixedAttrs;
+  if (!attrs)
+    return {};
+  const rawAttrs = {};
+  for (const key in attrs) {
+    if (key.startsWith(options.attributeNamePrefix)) {
+      const rawName = key.substring(options.attributeNamePrefix.length);
+      rawAttrs[rawName] = attrs[key];
+    } else {
+      rawAttrs[key] = attrs[key];
+    }
+  }
+  return rawAttrs;
+}
+function extractNamespace(rawTagName) {
+  if (!rawTagName || typeof rawTagName !== "string")
+    return;
+  const colonIndex = rawTagName.indexOf(":");
+  if (colonIndex !== -1 && colonIndex > 0) {
+    const ns = rawTagName.substring(0, colonIndex);
+    if (ns !== "xmlns") {
+      return ns;
+    }
+  }
+  return;
+}
+
+class OrderedObjParser {
+  constructor(options, externalEntities) {
+    this.options = options;
+    this.currentNode = null;
+    this.tagsNodeStack = [];
+    this.parseXml = parseXml;
+    this.parseTextData = parseTextData;
+    this.resolveNameSpace = resolveNameSpace;
+    this.buildAttributesMap = buildAttributesMap;
+    this.isItStopNode = isItStopNode;
+    this.replaceEntitiesValue = replaceEntitiesValue;
+    this.readStopNodeData = readStopNodeData;
+    this.saveTextToParentTag = saveTextToParentTag;
+    this.addChild = addChild;
+    this.ignoreAttributesFn = getIgnoreAttributesFn(this.options.ignoreAttributes);
+    this.entityExpansionCount = 0;
+    this.currentExpandedLength = 0;
+    this.doctypefound = false;
+    let namedEntities = { ...XML };
+    if (this.options.entityDecoder) {
+      this.entityDecoder = this.options.entityDecoder;
+    } else {
+      if (typeof this.options.htmlEntities === "object")
+        namedEntities = this.options.htmlEntities;
+      else if (this.options.htmlEntities === true)
+        namedEntities = { ...COMMON_HTML, ...CURRENCY };
+      this.entityDecoder = new EntityDecoder({
+        namedEntities: { ...namedEntities, ...externalEntities },
+        numericAllowed: this.options.htmlEntities,
+        limit: {
+          maxTotalExpansions: this.options.processEntities.maxTotalExpansions,
+          maxExpandedLength: this.options.processEntities.maxExpandedLength,
+          applyLimitsTo: this.options.processEntities.appliesTo
+        },
+        onInputEntity: (name, value) => isUnsafe(value, [html_default, xml_default]) ? ENTITY_ACTION.BLOCK : ENTITY_ACTION.ALLOW
+      });
+    }
+    this.matcher = new Matcher;
+    this.readonlyMatcher = this.matcher.readOnly();
+    this.isCurrentNodeStopNode = false;
+    this.stopNodeExpressionsSet = new ExpressionSet;
+    const stopNodesOpts = this.options.stopNodes;
+    if (stopNodesOpts && stopNodesOpts.length > 0) {
+      for (let i = 0;i < stopNodesOpts.length; i++) {
+        const stopNodeExp = stopNodesOpts[i];
+        if (typeof stopNodeExp === "string") {
+          this.stopNodeExpressionsSet.add(new Expression(stopNodeExp));
+        } else if (stopNodeExp instanceof Expression) {
+          this.stopNodeExpressionsSet.add(stopNodeExp);
+        }
+      }
+      this.stopNodeExpressionsSet.seal();
+    }
+  }
+}
+function parseTextData(val, tagName, jPath, dontTrim, hasAttributes, isLeafNode, escapeEntities) {
+  const options = this.options;
+  if (val !== undefined) {
+    if (options.trimValues && !dontTrim) {
+      val = val.trim();
+    }
+    if (val.length > 0) {
+      if (!escapeEntities)
+        val = this.replaceEntitiesValue(val, tagName, jPath);
+      const jPathOrMatcher = options.jPath ? jPath.toString() : jPath;
+      const newval = options.tagValueProcessor(tagName, val, jPathOrMatcher, hasAttributes, isLeafNode);
+      if (newval === null || newval === undefined) {
+        return val;
+      } else if (typeof newval !== typeof val || newval !== val) {
+        return newval;
+      } else if (options.trimValues) {
+        return parseValue(val, options.parseTagValue, options.numberParseOptions);
+      } else {
+        const trimmedVal = val.trim();
+        if (trimmedVal === val) {
+          return parseValue(val, options.parseTagValue, options.numberParseOptions);
+        } else {
+          return val;
+        }
+      }
+    }
+  }
+}
+function resolveNameSpace(tagname) {
+  if (this.options.removeNSPrefix) {
+    const tags = tagname.split(":");
+    const prefix = tagname.charAt(0) === "/" ? "/" : "";
+    if (tags[0] === "xmlns") {
+      return "";
+    }
+    if (tags.length === 2) {
+      tagname = prefix + tags[1];
+    }
+  }
+  return tagname;
+}
+var attrsRegx = new RegExp(`([^\\s=]+)\\s*(=\\s*(['"])([\\s\\S]*?)\\3)?`, "gm");
+function buildAttributesMap(attrStr, jPath, tagName, force = false) {
+  const options = this.options;
+  if (force === true || options.ignoreAttributes !== true && typeof attrStr === "string") {
+    const matches = getAllMatches(attrStr, attrsRegx);
+    const len = matches.length;
+    const attrs = {};
+    const processedVals = new Array(len);
+    let hasRawAttrs = false;
+    const rawAttrsForMatcher = {};
+    for (let i = 0;i < len; i++) {
+      const attrName = this.resolveNameSpace(matches[i][1]);
+      const oldVal = matches[i][4];
+      if (attrName.length && oldVal !== undefined) {
+        let val = oldVal;
+        if (options.trimValues)
+          val = val.trim();
+        val = this.replaceEntitiesValue(val, tagName, this.readonlyMatcher);
+        processedVals[i] = val;
+        rawAttrsForMatcher[attrName] = val;
+        hasRawAttrs = true;
+      }
+    }
+    if (hasRawAttrs && typeof jPath === "object" && jPath.updateCurrent) {
+      jPath.updateCurrent(rawAttrsForMatcher);
+    }
+    const jPathStr = options.jPath ? jPath.toString() : this.readonlyMatcher;
+    let hasAttrs = false;
+    for (let i = 0;i < len; i++) {
+      const attrName = this.resolveNameSpace(matches[i][1]);
+      if (this.ignoreAttributesFn(attrName, jPathStr))
+        continue;
+      let aName = options.attributeNamePrefix + attrName;
+      if (attrName.length) {
+        if (options.transformAttributeName) {
+          aName = options.transformAttributeName(aName);
+        }
+        aName = sanitizeName(aName, options);
+        if (matches[i][4] !== undefined) {
+          const oldVal = processedVals[i];
+          const newVal = options.attributeValueProcessor(attrName, oldVal, jPathStr);
+          if (newVal === null || newVal === undefined) {
+            attrs[aName] = oldVal;
+          } else if (typeof newVal !== typeof oldVal || newVal !== oldVal) {
+            attrs[aName] = newVal;
+          } else {
+            attrs[aName] = parseValue(oldVal, options.parseAttributeValue, options.numberParseOptions);
+          }
+          hasAttrs = true;
+        } else if (options.allowBooleanAttributes) {
+          attrs[aName] = true;
+          hasAttrs = true;
+        }
+      }
+    }
+    if (!hasAttrs)
+      return;
+    if (options.attributesGroupName && !options.preserveOrder) {
+      const attrCollection = {};
+      attrCollection[options.attributesGroupName] = attrs;
+      return attrCollection;
+    }
+    return attrs;
+  }
+}
+var parseXml = function(xmlData) {
+  const options = this.options;
+  const crlfPositions = options.captureMetaData ? [] : undefined;
+  xmlData = xmlData.replace(/\r\n?/g, options.captureMetaData ? (newline, index) => {
+    if (newline.length === 2) {
+      crlfPositions.push(index - crlfPositions.length);
+    }
+    return `
+`;
+  } : `
+`);
+  const xmlObj = new XmlNode("!xml");
+  let currentNode = xmlObj;
+  let textData = "";
+  this.matcher.reset();
+  this.entityDecoder.reset();
+  this.entityExpansionCount = 0;
+  this.currentExpandedLength = 0;
+  this.doctypefound = false;
+  const docTypeReader = new DocTypeReader(options.processEntities);
+  const xmlLen = xmlData.length;
+  for (let i = 0;i < xmlLen; i++) {
+    const ch = xmlData[i];
+    if (ch === "<") {
+      const c1 = xmlData.charCodeAt(i + 1);
+      if (c1 === 47) {
+        const closeIndex = findClosingIndex(xmlData, ">", i, "Closing Tag is not closed.");
+        let tagName = xmlData.substring(i + 2, closeIndex).trim();
+        if (options.removeNSPrefix) {
+          const colonIndex = tagName.indexOf(":");
+          if (colonIndex !== -1) {
+            tagName = tagName.substr(colonIndex + 1);
+          }
+        }
+        tagName = transformTagName(options.transformTagName, tagName, "", options).tagName;
+        if (currentNode) {
+          textData = this.saveTextToParentTag(textData, currentNode, this.readonlyMatcher);
+        }
+        const lastTagName = this.matcher.getCurrentTag();
+        if (tagName && options.unpairedTagsSet.has(tagName)) {
+          throw new Error(`Unpaired tag can not be used as closing tag: </${tagName}>`);
+        }
+        if (lastTagName && options.unpairedTagsSet.has(lastTagName)) {
+          this.matcher.pop();
+          this.tagsNodeStack.pop();
+        }
+        this.matcher.pop();
+        this.isCurrentNodeStopNode = false;
+        currentNode = this.tagsNodeStack.pop() || xmlObj;
+        if (options.captureMetaData && currentNode) {
+          currentNode.addEndIndex(getOriginalIndex(closeIndex + 1, crlfPositions));
+        }
+        textData = "";
+        i = closeIndex;
+      } else if (c1 === 63) {
+        let tagData = readTagExp(xmlData, i, false, "?>");
+        if (!tagData)
+          throw new Error("Pi Tag is not closed.");
+        textData = this.saveTextToParentTag(textData, currentNode, this.readonlyMatcher);
+        const attsMap = this.buildAttributesMap(tagData.tagExp, this.matcher, tagData.tagName, true);
+        if (attsMap) {
+          const ver = attsMap[this.options.attributeNamePrefix + "version"];
+          this.entityDecoder.setXmlVersion(Number(ver) || 1);
+          docTypeReader.setXmlVersion(Number(ver) || 1);
+        }
+        if (options.ignoreDeclaration && tagData.tagName === "?xml" || options.ignorePiTags) {} else {
+          const childNode = new XmlNode(tagData.tagName);
+          childNode.add(options.textNodeName, "");
+          if (tagData.tagName !== tagData.tagExp && tagData.attrExpPresent && options.ignoreAttributes !== true) {
+            childNode[":@"] = attsMap;
+          }
+          const startIndex = options.captureMetaData ? getOriginalIndex(i, crlfPositions) : i;
+          this.addChild(currentNode, childNode, this.readonlyMatcher, startIndex);
+          if (options.captureMetaData) {
+            currentNode.addEndIndex(getOriginalIndex(tagData.closeIndex + 2, crlfPositions));
+          }
+        }
+        i = tagData.closeIndex + 1;
+      } else if (c1 === 33 && xmlData.charCodeAt(i + 2) === 45 && xmlData.charCodeAt(i + 3) === 45) {
+        const endIndex = findClosingIndex(xmlData, "-->", i + 4, "Comment is not closed.");
+        if (options.commentPropName) {
+          const comment = xmlData.substring(i + 4, endIndex - 2);
+          textData = this.saveTextToParentTag(textData, currentNode, this.readonlyMatcher);
+          currentNode.add(options.commentPropName, [{ [options.textNodeName]: comment }]);
+        }
+        i = endIndex;
+      } else if (c1 === 33 && xmlData.charCodeAt(i + 2) === 68) {
+        if (this.doctypefound)
+          throw new Error("Multiple DOCTYPE declarations found.");
+        this.doctypefound = true;
+        const result = docTypeReader.readDocType(xmlData, i);
+        this.entityDecoder.addInputEntities(result.entities);
+        i = result.i;
+      } else if (c1 === 33 && xmlData.charCodeAt(i + 2) === 91) {
+        const closeIndex = findClosingIndex(xmlData, "]]>", i, "CDATA is not closed.") - 2;
+        const tagExp = xmlData.substring(i + 9, closeIndex);
+        textData = this.saveTextToParentTag(textData, currentNode, this.readonlyMatcher);
+        let val = this.parseTextData(tagExp, currentNode.tagname, this.readonlyMatcher, true, false, true, true);
+        if (val == undefined)
+          val = "";
+        if (options.cdataPropName) {
+          currentNode.add(options.cdataPropName, [{ [options.textNodeName]: tagExp }]);
+        } else {
+          currentNode.add(options.textNodeName, val);
+        }
+        i = closeIndex + 2;
+      } else {
+        let result = readTagExp(xmlData, i, options.removeNSPrefix);
+        if (!result) {
+          const context = xmlData.substring(Math.max(0, i - 50), Math.min(xmlLen, i + 50));
+          throw new Error(`readTagExp returned undefined at position ${i}. Context: "${context}"`);
+        }
+        let tagName = result.tagName;
+        const rawTagName = result.rawTagName;
+        let tagExp = result.tagExp;
+        let attrExpPresent = result.attrExpPresent;
+        let closeIndex = result.closeIndex;
+        ({ tagName, tagExp } = transformTagName(options.transformTagName, tagName, tagExp, options));
+        if (options.strictReservedNames && (tagName === options.commentPropName || tagName === options.cdataPropName || tagName === options.textNodeName || tagName === options.attributesGroupName)) {
+          throw new Error(`Invalid tag name: ${tagName}`);
+        }
+        if (currentNode && textData) {
+          if (currentNode.tagname !== "!xml") {
+            textData = this.saveTextToParentTag(textData, currentNode, this.readonlyMatcher, false);
+          }
+        }
+        const lastTag = currentNode;
+        if (lastTag && options.unpairedTagsSet.has(lastTag.tagname)) {
+          currentNode = this.tagsNodeStack.pop();
+          this.matcher.pop();
+        }
+        let isSelfClosing = false;
+        if (tagExp.length > 0 && tagExp.lastIndexOf("/") === tagExp.length - 1) {
+          isSelfClosing = true;
+          if (tagName[tagName.length - 1] === "/") {
+            tagName = tagName.substr(0, tagName.length - 1);
+            tagExp = tagName;
+          } else {
+            tagExp = tagExp.substr(0, tagExp.length - 1);
+          }
+          attrExpPresent = tagName !== tagExp;
+        }
+        let prefixedAttrs = null;
+        let rawAttrs = {};
+        let namespace = undefined;
+        namespace = extractNamespace(rawTagName);
+        if (tagName !== xmlObj.tagname) {
+          this.matcher.push(tagName, {}, namespace);
+        }
+        if (tagName !== tagExp && attrExpPresent) {
+          prefixedAttrs = this.buildAttributesMap(tagExp, this.matcher, tagName);
+          if (prefixedAttrs) {
+            rawAttrs = extractRawAttributes(prefixedAttrs, options);
+          }
+        }
+        if (tagName !== xmlObj.tagname) {
+          this.isCurrentNodeStopNode = this.isItStopNode();
+        }
+        const startIndex = options.captureMetaData ? getOriginalIndex(i, crlfPositions) : i;
+        if (this.isCurrentNodeStopNode) {
+          let tagContent = "";
+          if (isSelfClosing) {
+            i = result.closeIndex;
+          } else if (options.unpairedTagsSet.has(tagName)) {
+            i = result.closeIndex;
+          } else {
+            const result = this.readStopNodeData(xmlData, rawTagName, closeIndex + 1);
+            if (!result)
+              throw new Error(`Unexpected end of ${rawTagName}`);
+            i = result.i;
+            tagContent = result.tagContent;
+          }
+          const childNode = new XmlNode(tagName);
+          if (prefixedAttrs) {
+            childNode[":@"] = prefixedAttrs;
+          }
+          childNode.add(options.textNodeName, tagContent);
+          this.matcher.pop();
+          this.isCurrentNodeStopNode = false;
+          this.addChild(currentNode, childNode, this.readonlyMatcher, startIndex);
+          if (options.captureMetaData) {
+            currentNode.addEndIndex(getOriginalIndex(i + 1, crlfPositions));
+          }
+        } else {
+          if (isSelfClosing) {
+            ({ tagName, tagExp } = transformTagName(options.transformTagName, tagName, tagExp, options));
+            const childNode = new XmlNode(tagName);
+            if (prefixedAttrs) {
+              childNode[":@"] = prefixedAttrs;
+            }
+            this.addChild(currentNode, childNode, this.readonlyMatcher, startIndex);
+            if (options.captureMetaData) {
+              currentNode.addEndIndex(getOriginalIndex(closeIndex + 1, crlfPositions));
+            }
+            this.matcher.pop();
+            this.isCurrentNodeStopNode = false;
+          } else if (options.unpairedTagsSet.has(tagName)) {
+            const childNode = new XmlNode(tagName);
+            if (prefixedAttrs) {
+              childNode[":@"] = prefixedAttrs;
+            }
+            this.addChild(currentNode, childNode, this.readonlyMatcher, startIndex);
+            if (options.captureMetaData) {
+              currentNode.addEndIndex(getOriginalIndex(result.closeIndex + 1, crlfPositions));
+            }
+            this.matcher.pop();
+            this.isCurrentNodeStopNode = false;
+            i = result.closeIndex;
+            continue;
+          } else {
+            const childNode = new XmlNode(tagName);
+            if (this.tagsNodeStack.length > options.maxNestedTags) {
+              throw new Error("Maximum nested tags exceeded");
+            }
+            this.tagsNodeStack.push(currentNode);
+            if (prefixedAttrs) {
+              childNode[":@"] = prefixedAttrs;
+            }
+            this.addChild(currentNode, childNode, this.readonlyMatcher, startIndex);
+            currentNode = childNode;
+          }
+          textData = "";
+          i = closeIndex;
+        }
+      }
+    } else {
+      textData += xmlData[i];
+    }
+  }
+  return xmlObj.child;
+};
+function getOriginalIndex(index, crlfPositions) {
+  let low = 0;
+  let high = crlfPositions.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (crlfPositions[middle] < index)
+      low = middle + 1;
+    else
+      high = middle;
+  }
+  return index + low;
+}
+function addChild(currentNode, childNode, matcher, startIndex) {
+  if (!this.options.captureMetaData)
+    startIndex = undefined;
+  const jPathOrMatcher = this.options.jPath ? matcher.toString() : matcher;
+  const result = this.options.updateTag(childNode.tagname, jPathOrMatcher, childNode[":@"]);
+  if (result === false) {} else if (typeof result === "string") {
+    childNode.tagname = result;
+    currentNode.addChild(childNode, startIndex);
+  } else {
+    currentNode.addChild(childNode, startIndex);
+  }
+}
+function replaceEntitiesValue(val, tagName, jPath) {
+  const entityConfig = this.options.processEntities;
+  if (!entityConfig || !entityConfig.enabled) {
+    return val;
+  }
+  if (entityConfig.allowedTags) {
+    const jPathOrMatcher = this.options.jPath ? jPath.toString() : jPath;
+    const allowed = Array.isArray(entityConfig.allowedTags) ? entityConfig.allowedTags.includes(tagName) : entityConfig.allowedTags(tagName, jPathOrMatcher);
+    if (!allowed) {
+      return val;
+    }
+  }
+  if (entityConfig.tagFilter) {
+    const jPathOrMatcher = this.options.jPath ? jPath.toString() : jPath;
+    if (!entityConfig.tagFilter(tagName, jPathOrMatcher)) {
+      return val;
+    }
+  }
+  return this.entityDecoder.decode(val);
+}
+function saveTextToParentTag(textData, parentNode, matcher, isLeafNode) {
+  if (textData) {
+    if (isLeafNode === undefined)
+      isLeafNode = parentNode.child.length === 0;
+    textData = this.parseTextData(textData, parentNode.tagname, matcher, false, parentNode[":@"] ? Object.keys(parentNode[":@"]).length !== 0 : false, isLeafNode);
+    if (textData !== undefined && textData !== "")
+      parentNode.add(this.options.textNodeName, textData);
+    textData = "";
+  }
+  return textData;
+}
+function isItStopNode() {
+  if (this.stopNodeExpressionsSet.size === 0)
+    return false;
+  return this.matcher.matchesAny(this.stopNodeExpressionsSet);
+}
+function tagExpWithClosingIndex(xmlData, i, closingChar = ">") {
+  let attrBoundary = 0;
+  const len = xmlData.length;
+  const closeCode0 = closingChar.charCodeAt(0);
+  const closeCode1 = closingChar.length > 1 ? closingChar.charCodeAt(1) : -1;
+  let result = "";
+  let segmentStart = i;
+  for (let index = i;index < len; index++) {
+    const code = xmlData.charCodeAt(index);
+    if (attrBoundary) {
+      if (code === attrBoundary)
+        attrBoundary = 0;
+    } else if (code === 34 || code === 39) {
+      attrBoundary = code;
+    } else if (code === closeCode0) {
+      if (closeCode1 !== -1) {
+        if (xmlData.charCodeAt(index + 1) === closeCode1) {
+          result += xmlData.substring(segmentStart, index);
+          return { data: result, index };
+        }
+      } else {
+        result += xmlData.substring(segmentStart, index);
+        return { data: result, index };
+      }
+    } else if (code === 9 && !attrBoundary) {
+      result += xmlData.substring(segmentStart, index) + " ";
+      segmentStart = index + 1;
+    }
+  }
+}
+function findClosingIndex(xmlData, str, i, errMsg) {
+  const closingIndex = xmlData.indexOf(str, i);
+  if (closingIndex === -1) {
+    throw new Error(errMsg);
+  } else {
+    return closingIndex + str.length - 1;
+  }
+}
+function findClosingChar(xmlData, char, i, errMsg) {
+  const closingIndex = xmlData.indexOf(char, i);
+  if (closingIndex === -1)
+    throw new Error(errMsg);
+  return closingIndex;
+}
+function readTagExp(xmlData, i, removeNSPrefix, closingChar = ">") {
+  const result = tagExpWithClosingIndex(xmlData, i + 1, closingChar);
+  if (!result)
+    return;
+  let tagExp = result.data;
+  const closeIndex = result.index;
+  const separatorIndex = tagExp.search(/\s/);
+  let tagName = tagExp;
+  let attrExpPresent = true;
+  if (separatorIndex !== -1) {
+    tagName = tagExp.substring(0, separatorIndex);
+    tagExp = tagExp.substring(separatorIndex + 1).trimStart();
+  }
+  const rawTagName = tagName;
+  if (removeNSPrefix) {
+    const colonIndex = tagName.indexOf(":");
+    if (colonIndex !== -1) {
+      tagName = tagName.substr(colonIndex + 1);
+      attrExpPresent = tagName !== result.data.substr(colonIndex + 1);
+    }
+  }
+  return {
+    tagName,
+    tagExp,
+    closeIndex,
+    attrExpPresent,
+    rawTagName
+  };
+}
+function readStopNodeData(xmlData, tagName, i) {
+  const startIndex = i;
+  let openTagCount = 1;
+  let lenient = false;
+  let nextGt = -1;
+  const xmllen = xmlData.length;
+  for (;i < xmllen; i++) {
+    if (xmlData[i] === "<") {
+      const c1 = xmlData.charCodeAt(i + 1);
+      if (c1 === 47) {
+        const closeIndex = findClosingChar(xmlData, ">", i, `${tagName} is not closed`);
+        let closeTagName = xmlData.substring(i + 2, closeIndex).trim();
+        if (closeTagName === tagName) {
+          openTagCount--;
+          if (openTagCount === 0) {
+            return {
+              tagContent: xmlData.substring(startIndex, i),
+              i: closeIndex
+            };
+          }
+        }
+        i = closeIndex;
+      } else if (c1 === 63) {
+        const closeIndex = findClosingIndex(xmlData, "?>", i + 1, "StopNode is not closed.");
+        i = closeIndex;
+      } else if (c1 === 33 && xmlData.charCodeAt(i + 2) === 45 && xmlData.charCodeAt(i + 3) === 45) {
+        const closeIndex = findClosingIndex(xmlData, "-->", i + 3, "StopNode is not closed.");
+        i = closeIndex;
+      } else if (c1 === 33 && xmlData.charCodeAt(i + 2) === 91) {
+        const closeIndex = findClosingIndex(xmlData, "]]>", i, "StopNode is not closed.") - 2;
+        i = closeIndex;
+      } else {
+        const tagData = lenient ? undefined : readTagExp(xmlData, i, false);
+        if (tagData) {
+          const openTagName = tagData.tagName;
+          if (openTagName === tagName && tagData.tagExp[tagData.tagExp.length - 1] !== "/") {
+            openTagCount++;
+          }
+          i = tagData.closeIndex;
+        } else {
+          lenient = true;
+          if (nextGt < i) {
+            nextGt = xmlData.indexOf(">", i);
+            if (nextGt === -1)
+              return;
+          }
+          const nextLt = xmlData.indexOf("<", i + 1);
+          if (nextLt === -1 || nextLt > nextGt) {
+            const exp = xmlData.substring(i + 1, nextGt);
+            const sep = exp.search(/\s/);
+            const name = sep === -1 ? exp : exp.substring(0, sep);
+            if (name === tagName && exp[exp.length - 1] !== "/")
+              openTagCount++;
+            i = nextGt;
+          }
+        }
+      }
+    }
+  }
+}
+function parseValue(val, shouldParse, options) {
+  if (shouldParse && typeof val === "string") {
+    const newval = val.trim();
+    if (newval === "true")
+      return true;
+    else if (newval === "false")
+      return false;
+    else
+      return toNumber(val, options);
+  } else {
+    if (isExist(val)) {
+      return val;
+    } else {
+      return "";
+    }
+  }
+}
+function transformTagName(fn, tagName, tagExp, options) {
+  if (fn) {
+    const newTagName = fn(tagName);
+    if (tagExp === tagName) {
+      tagExp = newTagName;
+    }
+    tagName = newTagName;
+  }
+  tagName = sanitizeName(tagName, options);
+  return { tagName, tagExp };
+}
+function sanitizeName(name, options) {
+  if (criticalProperties.includes(name)) {
+    throw new Error(`[SECURITY] Invalid name: "${name}" is a reserved JavaScript keyword that could cause prototype pollution`);
+  } else if (DANGEROUS_PROPERTY_NAMES.includes(name)) {
+    return options.onDangerousProperty(name);
+  }
+  return name;
+}
+
+// node_modules/.bun/fast-xml-parser@5.12.0/node_modules/fast-xml-parser/src/xmlparser/node2json.js
+var METADATA_SYMBOL2 = XmlNode.getMetaDataSymbol();
+function stripAttributePrefix(attrs, prefix) {
+  if (!attrs || typeof attrs !== "object")
+    return {};
+  if (!prefix)
+    return attrs;
+  const rawAttrs = {};
+  for (const key in attrs) {
+    if (key.startsWith(prefix)) {
+      const rawName = key.substring(prefix.length);
+      rawAttrs[rawName] = attrs[key];
+    } else {
+      rawAttrs[key] = attrs[key];
+    }
+  }
+  return rawAttrs;
+}
+function prettify(node, options, matcher, readonlyMatcher) {
+  return compress(node, options, matcher, readonlyMatcher);
+}
+function compress(arr, options, matcher, readonlyMatcher) {
+  let text;
+  const compressedObj = {};
+  for (let i = 0;i < arr.length; i++) {
+    const tagObj = arr[i];
+    const property = propName(tagObj);
+    if (property !== undefined && property !== options.textNodeName) {
+      const rawAttrs = stripAttributePrefix(tagObj[":@"] || {}, options.attributeNamePrefix);
+      matcher.push(property, rawAttrs);
+    }
+    if (property === options.textNodeName) {
+      if (text === undefined)
+        text = tagObj[property];
+      else
+        text += "" + tagObj[property];
+    } else if (property === undefined) {
+      continue;
+    } else if (tagObj[property]) {
+      let val = compress(tagObj[property], options, matcher, readonlyMatcher);
+      const isLeaf = isLeafTag(val, options);
+      if (Object.keys(val).length === 0 && options.alwaysCreateTextNode) {
+        val[options.textNodeName] = "";
+      }
+      if (tagObj[":@"]) {
+        assignAttributes(val, tagObj[":@"], readonlyMatcher, options);
+      } else if (Object.keys(val).length === 1 && val[options.textNodeName] !== undefined && !options.alwaysCreateTextNode) {
+        val = val[options.textNodeName];
+      } else if (Object.keys(val).length === 0) {
+        if (options.alwaysCreateTextNode)
+          val[options.textNodeName] = "";
+        else
+          val = "";
+      }
+      if (tagObj[METADATA_SYMBOL2] !== undefined && typeof val === "object" && val !== null) {
+        val[METADATA_SYMBOL2] = tagObj[METADATA_SYMBOL2];
+      }
+      if (compressedObj[property] !== undefined && Object.prototype.hasOwnProperty.call(compressedObj, property)) {
+        if (!Array.isArray(compressedObj[property])) {
+          compressedObj[property] = [compressedObj[property]];
+        }
+        compressedObj[property].push(val);
+      } else {
+        const jPathOrMatcher = options.jPath ? readonlyMatcher.toString() : readonlyMatcher;
+        if (options.isArray(property, jPathOrMatcher, isLeaf)) {
+          compressedObj[property] = [val];
+        } else {
+          compressedObj[property] = val;
+        }
+      }
+      if (property !== undefined && property !== options.textNodeName) {
+        matcher.pop();
+      }
+    }
+  }
+  if (typeof text === "string") {
+    if (text.length > 0)
+      compressedObj[options.textNodeName] = text;
+  } else if (text !== undefined)
+    compressedObj[options.textNodeName] = text;
+  return compressedObj;
+}
+function propName(obj) {
+  const keys = Object.keys(obj);
+  for (let i = 0;i < keys.length; i++) {
+    const key = keys[i];
+    if (key !== ":@")
+      return key;
+  }
+}
+function assignAttributes(obj, attrMap, readonlyMatcher, options) {
+  if (attrMap) {
+    const keys = Object.keys(attrMap);
+    const len = keys.length;
+    for (let i = 0;i < len; i++) {
+      const atrrName = keys[i];
+      const rawAttrName = atrrName.startsWith(options.attributeNamePrefix) ? atrrName.substring(options.attributeNamePrefix.length) : atrrName;
+      const jPathOrMatcher = options.jPath ? readonlyMatcher.toString() + "." + rawAttrName : readonlyMatcher;
+      if (options.isArray(atrrName, jPathOrMatcher, true, true)) {
+        obj[atrrName] = [attrMap[atrrName]];
+      } else {
+        obj[atrrName] = attrMap[atrrName];
+      }
+    }
+  }
+}
+function isLeafTag(obj, options) {
+  const { textNodeName } = options;
+  const propCount = Object.keys(obj).length;
+  if (propCount === 0) {
+    return true;
+  }
+  if (propCount === 1 && (obj[textNodeName] || typeof obj[textNodeName] === "boolean" || obj[textNodeName] === 0)) {
+    return true;
+  }
+  return false;
+}
+
+// node_modules/.bun/fast-xml-parser@5.12.0/node_modules/fast-xml-parser/src/xmlparser/XMLParser.js
+class XMLParser {
+  constructor(options) {
+    this.externalEntities = {};
+    this.options = buildOptions(options);
+  }
+  parse(xmlData, validationOption) {
+    if (typeof xmlData !== "string" && xmlData.toString) {
+      if (xmlData instanceof Uint8Array && !(typeof Buffer !== "undefined" && Buffer.isBuffer(xmlData))) {
+        xmlData = new TextDecoder("utf-8", { ignoreBOM: true }).decode(xmlData);
+      } else {
+        xmlData = xmlData.toString();
+      }
+    } else if (typeof xmlData !== "string") {
+      throw new Error("XML data is accepted in String or Bytes[] form.");
+    }
+    if (validationOption) {
+      if (validationOption === true)
+        validationOption = {};
+      const result = validate(xmlData, validationOption);
+      if (result !== true) {
+        throw Error(`${result.err.msg}:${result.err.line}:${result.err.col}`);
+      }
+    }
+    const orderedObjParser = new OrderedObjParser(this.options, this.externalEntities);
+    const orderedResult = orderedObjParser.parseXml(xmlData);
+    if (this.options.preserveOrder || orderedResult === undefined)
+      return orderedResult;
+    else
+      return prettify(orderedResult, this.options, orderedObjParser.matcher, orderedObjParser.readonlyMatcher);
+  }
+  addEntity(key, value) {
+    if (value.indexOf("&") !== -1) {
+      throw new Error("Entity value can't have '&'");
+    } else if (key.indexOf("&") !== -1 || key.indexOf(";") !== -1) {
+      throw new Error("An entity must be set without '&' and ';'. Eg. use '#xD' for '&#xD;'");
+    } else if (value === "&") {
+      throw new Error("An entity with value '&' is not permitted");
+    } else {
+      this.externalEntities[key] = value;
+    }
+  }
+  static getMetaDataSymbol() {
+    return XmlNode.getMetaDataSymbol();
+  }
+}
+
+// node_modules/.bun/fast-xml-parser@5.12.0/node_modules/fast-xml-parser/src/fxp.js
+var XMLValidator = {
+  validate
+};
+
+// plugins/quality/src/coverage.ts
+var normalizePath = (path, root) => {
+  let p = path.trim().replaceAll("\\", "/");
+  if (root !== undefined) {
+    const prefix = `${root.replaceAll("\\", "/").replace(/\/+$/, "")}/`;
+    if (p.startsWith(prefix))
+      p = p.slice(prefix.length);
+  }
+  return p.replace(/^(\.\/)+/, "");
+};
+function file(report, path) {
+  let entry = report.get(path);
+  if (entry === undefined) {
+    entry = { lines: new Map, branches: new Map };
+    report.set(path, entry);
+  }
+  return entry;
+}
+function mark(map, key, covered) {
+  map.set(key, (map.get(key) ?? false) || covered);
+}
+var round2 = (n) => Math.round(n * 100) / 100;
+function addBranches(entry, line, covered, total) {
+  const prior = entry.branches.get(line);
+  entry.branches.set(line, {
+    covered: round2(Math.max(prior?.covered ?? 0, covered)),
+    total: Math.max(prior?.total ?? 0, total)
+  });
+}
+function detectCoverageFormat(text) {
+  const head = text.trimStart();
+  if (head.startsWith("mode:"))
+    return "gocover";
+  if (head.startsWith("<"))
+    return "cobertura";
+  if (/^SF:/m.test(head))
+    return "lcov";
+  return;
+}
+function parseLcov(text, root) {
+  const files = new Map;
+  let current;
+  let hasBranches = false;
+  const perLine = new Map;
+  const flush = () => {
+    for (const [no, c] of perLine)
+      if (current !== undefined)
+        addBranches(current, Number(no), c.covered, c.total);
+    perLine.clear();
+  };
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (line.startsWith("SF:")) {
+      flush();
+      current = file(files, normalizePath(line.slice(3), root));
+    } else if (line === "end_of_record") {
+      flush();
+      current = undefined;
+    } else if (current !== undefined && line.startsWith("DA:")) {
+      const [no, hits] = line.slice(3).split(",");
+      const n = Number(no);
+      if (Number.isInteger(n))
+        mark(current.lines, n, Number(hits) > 0);
+    } else if (current !== undefined && line.startsWith("BRDA:")) {
+      const [no, , , taken] = line.slice(5).split(",");
+      hasBranches = true;
+      const c = perLine.get(no) ?? { covered: 0, total: 0 };
+      c.total++;
+      if (taken !== "-" && Number(taken) > 0)
+        c.covered++;
+      perLine.set(no, c);
+    }
+  }
+  flush();
+  return { format: "lcov", files, hasBranches };
+}
+var xml = new XMLParser({
+  ignoreAttributes: false,
+  attributeNamePrefix: "@_",
+  parseAttributeValue: false,
+  parseTagValue: false,
+  isArray: (name) => ["package", "class", "line", "condition"].includes(name)
+});
+var asNodes = (value) => Array.isArray(value) ? value.filter((v) => typeof v === "object" && v !== null) : [];
+function parseCobertura(text, root) {
+  const valid = XMLValidator.validate(text);
+  if (valid !== true)
+    throw new Error(`invalid Cobertura XML: ${valid.err.msg} (line ${valid.err.line})`);
+  const doc = xml.parse(text);
+  if (doc.coverage === undefined || typeof doc.coverage !== "object")
+    throw new Error("not a Cobertura report: no coverage element");
+  const files = new Map;
+  let hasBranches = false;
+  const packages = asNodes(doc.coverage.packages?.package);
+  for (const pkg of packages) {
+    for (const cls of asNodes(pkg.classes?.class)) {
+      const name = String(cls["@_filename"] ?? "");
+      if (!name)
+        continue;
+      const entry = file(files, normalizePath(name, root));
+      for (const line of asNodes(cls.lines?.line)) {
+        const n = Number(line["@_number"]);
+        if (!Number.isInteger(n))
+          continue;
+        mark(entry.lines, n, Number(line["@_hits"]) > 0);
+        const conditions = asNodes(line.conditions?.condition);
+        const summary = /\((\d+)\/(\d+)\)/.exec(String(line["@_condition-coverage"] ?? ""));
+        if (summary !== null) {
+          hasBranches = true;
+          addBranches(entry, n, Number(summary[1]), Number(summary[2]));
+        } else if (conditions.length > 0) {
+          hasBranches = true;
+          let covered = 0;
+          for (const c of conditions)
+            covered += Math.min(100, Math.max(0, Number.parseFloat(String(c["@_coverage"] ?? "0")) || 0)) / 100;
+          addBranches(entry, n, covered, conditions.length);
+        }
+      }
+    }
+  }
+  return { format: "cobertura", files, hasBranches };
+}
+function parseGoCover(text, root) {
+  const files = new Map;
+  for (const raw of text.split(/\r?\n/)) {
+    const m = /^(.+):(\d+)\.\d+,(\d+)\.\d+ \d+ (\d+)$/.exec(raw.trim());
+    if (m === null)
+      continue;
+    const entry = file(files, normalizePath(m[1], root));
+    for (let n = Number(m[2]);n <= Number(m[3]); n++)
+      mark(entry.lines, n, Number(m[4]) > 0);
+  }
+  return { format: "gocover", files, hasBranches: false };
+}
+function parseCoverage(text, format, root) {
+  const kind = format ?? detectCoverageFormat(text);
+  if (kind === undefined)
+    throw new Error("cannot detect the coverage format; pass format: lcov, cobertura or gocover");
+  if (kind === "lcov")
+    return parseLcov(text, root);
+  if (kind === "cobertura")
+    return parseCobertura(text, root);
+  return parseGoCover(text, root);
+}
+function totals(report, branches) {
+  let covered = 0;
+  let total = 0;
+  for (const f of report.files.values()) {
+    if (branches) {
+      for (const count of f.branches.values()) {
+        total += count.total;
+        covered += count.covered;
+      }
+      continue;
+    }
+    for (const hit of f.lines.values()) {
+      total++;
+      if (hit)
+        covered++;
+    }
+  }
+  return { covered: round2(covered), total, percent: percent(covered, total) };
+}
+function compareCoverage(baseline, candidate) {
+  const bothBranches = baseline.hasBranches && candidate.hasBranches;
+  const lost = [];
+  const disappeared = [];
+  let gained = 0;
+  for (const [name, base] of baseline.files) {
+    const cand = candidate.files.get(name);
+    const baseLines = [...base.lines].filter(([, hit]) => hit).map(([n]) => n);
+    if (cand === undefined) {
+      if (baseLines.length > 0 || bothBranches && [...base.branches.values()].some((c) => c.covered > 0))
+        disappeared.push({ file: name, coveredLines: baseLines.length });
+      continue;
+    }
+    const lines = baseLines.filter((n) => cand.lines.get(n) !== true).sort((a, b) => a - b);
+    const branches = [];
+    let lostBranchCount = 0;
+    if (bothBranches) {
+      for (const [n, count] of [...base.branches].sort((x, y) => x[0] - y[0])) {
+        const now = cand.branches.get(n);
+        if (count.covered > (now?.covered ?? 0)) {
+          branches.push(`${n} (${count.covered}/${count.total} -> ${now?.covered ?? 0}/${now?.total ?? 0})`);
+          lostBranchCount = round2(lostBranchCount + count.covered - (now?.covered ?? 0));
+        }
+      }
+    }
+    if (lines.length > 0 || branches.length > 0)
+      lost.push({ file: name, lines, branches, lostLineCount: lines.length, lostBranchCount });
+  }
+  for (const [name, cand] of candidate.files) {
+    const base = baseline.files.get(name);
+    for (const [n, hit] of cand.lines)
+      if (hit && base?.lines.get(n) !== true)
+        gained++;
+  }
+  return {
+    kind: "coverage",
+    baselineFormat: baseline.format,
+    candidateFormat: candidate.format,
+    lines: { baseline: totals(baseline, false), candidate: totals(candidate, false) },
+    branches: bothBranches ? { baseline: totals(baseline, true), candidate: totals(candidate, true) } : null,
+    lost: lost.sort((a, b) => b.lostLineCount + b.lostBranchCount - (a.lostLineCount + a.lostBranchCount) || a.file.localeCompare(b.file)),
+    disappeared: disappeared.sort((a, b) => a.file.localeCompare(b.file)),
+    gained
+  };
+}
+var fmt = (t) => `${t.percent}% (${t.covered}/${t.total})`;
+function formatCoverage(c, maxFiles = 15) {
+  const lines = [
+    `coverage: lines ${fmt(c.lines.baseline)} -> ${fmt(c.lines.candidate)}`,
+    c.branches ? `branches ${fmt(c.branches.baseline)} -> ${fmt(c.branches.candidate)}` : "branches: not measured (a report has no branch data)"
+  ];
+  const nothing = c.lost.length === 0 && c.disappeared.length === 0;
+  lines.push(nothing ? "no baseline-covered line or branch is uncovered in the candidate" : "LOST COVERAGE (covered in baseline, not in candidate):");
+  for (const f of c.lost.slice(0, maxFiles)) {
+    const parts = [];
+    if (f.lines.length > 0)
+      parts.push(`lines ${compactRanges(f.lines)}`);
+    if (f.branches.length > 0)
+      parts.push(`${f.lostBranchCount} branch(es) ${f.branches.slice(0, 6).join(" ")}${f.branches.length > 6 ? " ..." : ""}`);
+    lines.push(`  ${f.file}: ${parts.join("; ")}`);
+  }
+  if (c.lost.length > maxFiles)
+    lines.push(`  ... +${c.lost.length - maxFiles} more files`);
+  if (c.disappeared.length > 0) {
+    lines.push(`files missing from the candidate (${c.disappeared.length}):`);
+    for (const d of c.disappeared.slice(0, maxFiles))
+      lines.push(`  ${d.file} (${d.coveredLines} covered lines in baseline)`);
+    if (c.disappeared.length > maxFiles)
+      lines.push(`  ... +${c.disappeared.length - maxFiles} more`);
+  }
+  if (c.gained > 0)
+    lines.push(`lines newly covered in the candidate: ${c.gained}`);
+  return capText(lines);
+}
+
+// plugins/quality/src/junit.ts
+var parser = new XMLParser({
+  ignoreAttributes: false,
+  attributeNamePrefix: "@_",
+  parseAttributeValue: false,
+  parseTagValue: false,
+  trimValues: true,
+  isArray: (name) => name === "testcase"
+});
+var isNode = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+function count(value) {
+  return Array.isArray(value) ? value.length : value === undefined ? 0 : 1;
+}
+function caseStatus(node) {
+  if ("failure" in node || "rerunFailure" in node)
+    return "failed";
+  if ("error" in node || "rerunError" in node)
+    return "error";
+  if ("skipped" in node)
+    return "skipped";
+  return "passed";
+}
+function collect(node, out) {
+  if (Array.isArray(node)) {
+    for (const item of node)
+      collect(item, out);
+    return;
+  }
+  if (!isNode(node))
+    return;
+  for (const [key, value] of Object.entries(node)) {
+    if (key.startsWith("@_"))
+      continue;
+    if (key !== "testcase") {
+      collect(value, out);
+      continue;
+    }
+    for (const raw of value) {
+      const tc = isNode(raw) ? raw : {};
+      const name = String(tc["@_name"] ?? "");
+      const classname = String(tc["@_classname"] ?? "");
+      const file = tc["@_file"] === undefined ? "" : String(tc["@_file"]);
+      const label = [classname, name].filter(Boolean).join(" :: ");
+      const time = Number.parseFloat(String(tc["@_time"] ?? "0"));
+      out.push({
+        id: file ? `${file} :: ${label}` : label,
+        status: caseStatus(tc),
+        time: Number.isFinite(time) ? time : 0,
+        retries: count(tc.flakyFailure) + count(tc.flakyError)
+      });
+    }
+  }
+}
+function parseJunit(xml) {
+  const valid = XMLValidator.validate(xml);
+  if (valid !== true)
+    throw new Error(`invalid XML: ${valid.err.msg} (line ${valid.err.line})`);
+  const doc = parser.parse(xml);
+  if (!("testsuites" in doc) && !("testsuite" in doc))
+    throw new Error("not a JUnit report: no testsuite element");
+  const out = [];
+  collect(doc, out);
+  return out;
+}
+
+// plugins/quality/src/mutation.ts
+var isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+function detectMutationFormat(data) {
+  if (!isObj(data))
+    return;
+  if (isObj(data.files) && "schemaVersion" in data)
+    return "mutation-testing";
+  if (Array.isArray(data.outcomes))
+    return "cargo-mutants";
+  if (Array.isArray(data.files) && "go_module" in data)
+    return "gremlins";
+  return;
+}
+function add(into, mutant) {
+  const base = `${mutant.file}|${mutant.mutator}|${mutant.location}|${mutant.replacement}`;
+  let key = base;
+  for (let n = 2;into.has(key); n++)
+    key = `${base}#${n}`;
+  into.set(key, { ...mutant, key });
+}
+var STRYKER = {
+  Killed: "detected",
+  Timeout: "detected",
+  Survived: "survived",
+  NoCoverage: "nocoverage"
+};
+var pos = (p) => isObj(p) ? `${p.line}:${p.column}` : "?";
+var span = (loc) => isObj(loc) ? `${pos(loc.start)}-${pos(loc.end)}` : "?";
+function parseMutationTesting(data) {
+  const mutants = new Map;
+  for (const [name, entry] of Object.entries(isObj(data.files) ? data.files : {})) {
+    if (!isObj(entry) || !Array.isArray(entry.mutants))
+      continue;
+    for (const m of entry.mutants) {
+      if (!isObj(m))
+        continue;
+      const status = String(m.status ?? "");
+      add(mutants, {
+        file: name.replaceAll("\\", "/"),
+        mutator: String(m.mutatorName ?? ""),
+        location: span(m.location),
+        replacement: typeof m.replacement === "string" ? m.replacement : "",
+        status,
+        class: STRYKER[status] ?? "ignored"
+      });
+    }
+  }
+  return { format: "mutation-testing", mutants };
+}
+var CARGO = { CaughtMutant: "detected", Timeout: "detected", MissedMutant: "survived" };
+function parseCargoMutants(data) {
+  const mutants = new Map;
+  for (const outcome of Array.isArray(data.outcomes) ? data.outcomes : []) {
+    if (!isObj(outcome) || !isObj(outcome.scenario) || !isObj(outcome.scenario.Mutant))
+      continue;
+    const m = outcome.scenario.Mutant;
+    const status = String(outcome.summary ?? "");
+    add(mutants, {
+      file: String(m.file ?? "").replaceAll("\\", "/"),
+      mutator: String(m.genre ?? ""),
+      location: span(m.span),
+      replacement: String(m.replacement ?? ""),
+      status,
+      class: CARGO[status] ?? "ignored"
+    });
+  }
+  return { format: "cargo-mutants", mutants };
+}
+var GREMLINS = {
+  KILLED: "detected",
+  "TIMED OUT": "detected",
+  LIVED: "survived",
+  "NOT COVERED": "nocoverage"
+};
+function parseGremlins(data) {
+  const mutants = new Map;
+  for (const f of Array.isArray(data.files) ? data.files : []) {
+    if (!isObj(f) || !Array.isArray(f.mutations))
+      continue;
+    for (const m of f.mutations) {
+      if (!isObj(m))
+        continue;
+      const status = String(m.status ?? "");
+      add(mutants, {
+        file: String(f.file_name ?? "").replaceAll("\\", "/"),
+        mutator: String(m.type ?? ""),
+        location: `${m.line}:${m.column}`,
+        replacement: "",
+        status,
+        class: GREMLINS[status] ?? "ignored"
+      });
+    }
+  }
+  return { format: "gremlins", mutants };
+}
+function parseMutation(text, format) {
+  const data = JSON.parse(text);
+  const kind = format ?? detectMutationFormat(data);
+  if (kind === undefined || !isObj(data))
+    throw new Error("cannot detect the mutation format; pass format: mutation-testing, cargo-mutants or gremlins");
+  if (kind === "mutation-testing")
+    return parseMutationTesting(data);
+  if (kind === "cargo-mutants")
+    return parseCargoMutants(data);
+  return parseGremlins(data);
+}
+function scoreOf(report) {
+  const s = { detected: 0, survived: 0, nocoverage: 0, ignored: 0, score: 0 };
+  for (const m of report.mutants.values())
+    s[m.class]++;
+  s.score = percent(s.detected, s.detected + s.survived + s.nocoverage);
+  return s;
+}
+var ref = (m, other) => ({
+  key: m.key,
+  file: m.file,
+  mutator: m.mutator,
+  location: m.location,
+  replacement: m.replacement,
+  was: m.status,
+  now: other?.status ?? "absent"
+});
+var undetected = (c) => c === "survived" || c === "nocoverage";
+function compareMutation(baseline, candidate) {
+  const lostProtection = [];
+  const newlyKilled = [];
+  const onlyInBaseline = [];
+  const onlyInCandidate = [];
+  for (const [key, base] of baseline.mutants) {
+    const cand = candidate.mutants.get(key);
+    if (cand === undefined)
+      onlyInBaseline.push(ref(base));
+    else if (base.class === "detected" && undetected(cand.class))
+      lostProtection.push(ref(base, cand));
+    else if (undetected(base.class) && cand.class === "detected")
+      newlyKilled.push({ ...ref(base, cand) });
+  }
+  for (const [key, cand] of candidate.mutants)
+    if (!baseline.mutants.has(key))
+      onlyInCandidate.push(ref(cand));
+  return {
+    kind: "mutation",
+    baselineFormat: baseline.format,
+    candidateFormat: candidate.format,
+    baseline: scoreOf(baseline),
+    candidate: scoreOf(candidate),
+    lostProtection,
+    newlyKilled,
+    onlyInBaseline,
+    onlyInCandidate
+  };
+}
+var describe = (r) => `${r.file}:${r.location.split("-")[0]} ${r.mutator}${r.replacement ? ` -> ${r.replacement.replace(/\s+/g, " ").slice(0, 40)}` : ""}`;
+function section(title, refs, limit, show) {
+  if (refs.length === 0)
+    return [];
+  const out = [`${title} (${refs.length}):`, ...refs.slice(0, limit).map((r) => `  ${show(r)}`)];
+  if (refs.length > limit)
+    out.push(`  ... +${refs.length - limit} more`);
+  return out;
+}
+var fmtScore = (s) => `${s.score}% (${s.detected} detected, ${s.survived} survived, ${s.nocoverage} no coverage, ${s.ignored} ignored)`;
+function formatMutation(c) {
+  const lines = [`mutation score: ${fmtScore(c.baseline)} -> ${fmtScore(c.candidate)}`];
+  lines.push(...section("LOST PROTECTION (detected in baseline, survived or uncovered in candidate)", c.lostProtection, 25, (r) => `${describe(r)}  [${r.was} -> ${r.now}]`));
+  if (c.lostProtection.length === 0)
+    lines.push("lost protection: none");
+  lines.push(...section("newly killed", c.newlyKilled, 8, describe), ...section("only in baseline (candidate has no such mutant)", c.onlyInBaseline, 8, (r) => `${describe(r)}  [${r.was}]`), ...section("only in candidate", c.onlyInCandidate, 8, (r) => `${describe(r)}  [${r.was}]`));
+  return capText(lines);
+}
+
+// plugins/quality/src/test-repeat.ts
+var SLOWEST = 10;
+function foldRun(cases) {
+  const folded = new Map;
+  for (const c of cases) {
+    const status = c.status === "error" || c.status === "failed" ? "failed" : c.status;
+    const prior = folded.get(c.id);
+    if (prior === undefined) {
+      folded.set(c.id, { status, time: c.time, retries: c.retries });
+      continue;
+    }
+    prior.time += c.time;
+    prior.retries += c.retries;
+    if (status === "failed" || status === "passed" && prior.status === "skipped")
+      prior.status = status;
+  }
+  return folded;
+}
+function summarizeRuns(records) {
+  const used = records.filter((r) => r.report === "used");
+  const perTest = new Map;
+  for (const record of used) {
+    for (const [id, c] of foldRun(record.cases)) {
+      const stats = perTest.get(id) ?? { passed: 0, failed: 0, skipped: 0, times: [], retried: 0 };
+      stats[c.status]++;
+      if (c.status !== "skipped")
+        stats.times.push(c.time);
+      if (c.retries > 0)
+        stats.retried++;
+      perTest.set(id, stats);
+    }
+  }
+  const all = [...perTest].map(([id, s]) => ({
+    id,
+    passed: s.passed,
+    failed: s.failed,
+    skipped: s.skipped,
+    medianSeconds: median(s.times),
+    retried: s.retried
+  }));
+  const byId = (a, b) => a.id.localeCompare(b.id);
+  const given = records.some((r) => r.exitCode !== undefined);
+  const exitCodes = given ? records.map((r) => r.exitCode ?? null) : null;
+  const knownCodes = exitCodes?.filter((c) => c !== null);
+  const known = knownCodes === undefined || knownCodes.length === 0 ? null : knownCodes;
+  return {
+    runs: records.length,
+    exitCodes,
+    exitCodesAgree: known === null ? null : new Set(known).size <= 1,
+    exitCodesUnknown: exitCodes === null ? 0 : exitCodes.length - (known?.length ?? 0),
+    reportRuns: used.length,
+    unreadable: records.filter((r) => r.report !== "used").map((r) => ({ run: r.run, reason: r.reason ?? "unreadable" })),
+    totalCases: all.length,
+    flaky: all.filter((t) => t.passed > 0 && t.failed > 0).sort(byId),
+    failedEveryRun: all.filter((t) => used.length > 0 && t.failed === used.length).sort(byId),
+    slowest: all.filter((t) => Number.isFinite(t.medianSeconds)).sort((a, b) => b.medianSeconds - a.medianSeconds || byId(a, b)).slice(0, SLOWEST),
+    retriedInRun: all.filter((t) => t.retried > 0 && t.failed === 0).map((t) => t.id).sort()
+  };
+}
+var secs = (n) => `${n < 10 ? n.toFixed(2) : n.toFixed(1)}s`;
+function list(title, items, show, limit) {
+  if (items.length === 0)
+    return [];
+  const lines = [`${title} (${items.length}):`, ...items.slice(0, limit).map((i) => `  ${show(i)}`)];
+  if (items.length > limit)
+    lines.push(`  ... +${items.length - limit} more`);
+  return lines;
+}
+function formatSummary(summary) {
+  const lines = [`Summarized ${summary.runs} report(s); readable: ${summary.reportRuns}; test cases: ${summary.totalCases}`];
+  if (summary.exitCodes !== null) {
+    const known = summary.exitCodes.filter((c) => c !== null);
+    const failed = known.filter((c) => c !== 0).length;
+    lines.push(`exit codes: ${summary.exitCodes.map((c) => c === null ? "unknown" : String(c)).join(" ")} (${known.length - failed} zero, ${failed} non-zero, ${summary.exitCodesUnknown} unknown)`);
+    if (summary.exitCodesAgree === false)
+      lines.push("exit codes differ between runs: the suite is flaky");
+  }
+  for (const { run, reason } of summary.unreadable.slice(0, 10))
+    lines.push(`report ${run}: unreadable (${reason})`);
+  lines.push(...list("flaky (passed and failed)", summary.flaky, (t) => `${t.id}  pass ${t.passed} / fail ${t.failed}`, 15), ...list("failed in every report", summary.failedEveryRun, (t) => `${t.id}  fail ${t.failed}`, 15), ...list("retried inside a run, then passed", summary.retriedInRun, (id) => id, 5), ...list("slowest by median", summary.slowest, (t) => `${secs(t.medianSeconds).padStart(7)}  ${t.id}`, SLOWEST));
+  if (summary.reportRuns > 0 && summary.flaky.length === 0 && summary.failedEveryRun.length === 0)
+    lines.push("no test both passed and failed; none failed in every report");
+  return capText(lines);
+}
+
+// plugins/quality/src/test-audit.ts
+var TEST_SUMMARIZE_TOOL = "quality_test_summarize";
+var TEST_COMPARE_TOOL = "quality_test_compare";
+var MAX_REPORTS = 50;
+function parseTestAuditOptions(options) {
+  return options.testAudit === false ? undefined : { enabled: true };
+}
+function parseSummarizeInput(input) {
+  const raw = input ?? {};
+  const { reports, exitCodes } = raw;
+  if (!Array.isArray(reports) || reports.length < 1 || reports.length > MAX_REPORTS || reports.some((r) => typeof r !== "string" || r === ""))
+    return `reports must be 1 to ${MAX_REPORTS} non-empty paths`;
+  if (exitCodes !== undefined) {
+    if (!Array.isArray(exitCodes) || exitCodes.length !== reports.length || exitCodes.some((c) => c !== null && !Number.isInteger(c)))
+      return "exitCodes must be integers or null, one per report";
+  }
+  return { reports, exitCodes };
+}
+function summarizeReports(root, raw) {
+  const fail = (message) => ({ content: `${TEST_SUMMARIZE_TOOL}: ${message}`, metadata: { error: message } });
+  const input = parseSummarizeInput(raw);
+  if (typeof input === "string")
+    return fail(input);
+  const roots = reportRoots(root);
+  const records = [];
+  for (const [i, path] of input.reports.entries()) {
+    const record = { run: i + 1, exitCode: input.exitCodes?.[i], report: "unreadable", cases: [] };
+    try {
+      record.cases = parseJunit(readReportFile(root, path, roots));
+      record.report = "used";
+    } catch (error) {
+      if (error instanceof PathError)
+        return fail(`refused: ${error.message}`);
+      record.reason = error instanceof Error ? error.message : String(error);
+    }
+    records.push(record);
+  }
+  const summary = summarizeRuns(records);
+  return { content: formatSummary(summary), metadata: { ...summary } };
+}
+var COVERAGE_FORMATS = ["lcov", "cobertura", "gocover"];
+var MUTATION_FORMATS = ["mutation-testing", "cargo-mutants", "gremlins"];
+function compareReports(root, input) {
+  const fail = (message) => ({ content: `${TEST_COMPARE_TOOL}: ${message}`, metadata: { error: message } });
+  if (input.kind !== "coverage" && input.kind !== "mutation")
+    return fail("kind must be coverage or mutation");
+  if (typeof input.baseline !== "string" || typeof input.candidate !== "string")
+    return fail("baseline and candidate must be paths");
+  const allowed = input.kind === "coverage" ? COVERAGE_FORMATS : MUTATION_FORMATS;
+  if (input.format !== undefined && !allowed.includes(input.format))
+    return fail(`format for ${input.kind} must be one of ${allowed.join(", ")}`);
+  try {
+    const roots = reportRoots(root);
+    const baseText = readReportFile(root, input.baseline, roots);
+    const candText = readReportFile(root, input.candidate, roots);
+    if (input.kind === "coverage") {
+      const format = input.format;
+      const result = compareCoverage(parseCoverage(baseText, format, root), parseCoverage(candText, format, root));
+      return { content: formatCoverage(result), metadata: { ...result } };
+    }
+    const format = input.format;
+    const result = compareMutation(parseMutation(baseText, format), parseMutation(candText, format));
+    const cap = (list) => list.slice(0, 200);
+    return {
+      content: formatMutation(result),
+      metadata: {
+        ...result,
+        lostProtection: cap(result.lostProtection),
+        newlyKilled: cap(result.newlyKilled),
+        onlyInBaseline: cap(result.onlyInBaseline),
+        onlyInCandidate: cap(result.onlyInCandidate),
+        lostProtectionCount: result.lostProtection.length
+      }
+    };
+  } catch (error) {
+    if (error instanceof PathError)
+      return fail(`refused: ${error.message}`);
+    return fail(error instanceof Error ? error.message : String(error));
+  }
+}
+async function setupTestAudit(ctx, options) {
+  if (options === undefined)
+    return async () => {};
+  const root = ctx.location.directory;
+  const tools = await ctx.tool.transform((editor) => {
+    editor.add({
+      name: TEST_SUMMARIZE_TOOL,
+      description: `Read-only: summarize JUnit XML reports from repeated test runs; flaky, always-failing and slow tests.
+` + "Run the test command several times through the shell, writing one JUnit report per run, then pass the paths in run " + "order. Reads pytest, Vitest, bun test, gotestsum and cargo-nextest JUnit. Paths must be in the session or OpenCode temp directory.",
+      input: {
+        type: "object",
+        properties: {
+          reports: {
+            type: "array",
+            items: { type: "string" },
+            minItems: 1,
+            maxItems: MAX_REPORTS,
+            description: "JUnit XML paths, one per run, in run order"
+          },
+          exitCodes: {
+            type: "array",
+            items: { type: ["integer", "null"] },
+            description: "Exit code of each run, same length as reports; null when unknown"
+          }
+        },
+        required: ["reports"],
+        additionalProperties: false
+      },
+      execute: async (raw) => summarizeReports(root, raw)
+    });
+    editor.add({
+      name: TEST_COMPARE_TOOL,
+      description: `Read-only: compare a baseline and a candidate coverage or mutation report to show lost test protection.
+` + "Coverage: LCOV, Cobertura XML, Go cover profile. Mutation: Stryker/mutation-testing-report JSON, cargo-mutants " + "outcomes.json, Gremlins JSON. Both paths must be in the session or OpenCode temp directory.",
+      input: {
+        type: "object",
+        properties: {
+          kind: { type: "string", enum: ["coverage", "mutation"], description: "Report kind" },
+          baseline: { type: "string", description: "Report before the change; relative to the session directory or absolute" },
+          candidate: { type: "string", description: "Report after the change; same rules" },
+          format: {
+            type: "string",
+            enum: [...COVERAGE_FORMATS, ...MUTATION_FORMATS],
+            description: "Report format; detected when omitted"
+          }
+        },
+        required: ["kind", "baseline", "candidate"],
+        additionalProperties: false
+      },
+      execute: async (raw) => compareReports(root, raw)
+    });
+  });
+  return async () => {
+    await tools.dispose();
+  };
+}
+
 // plugins/quality/src/index.ts
 var FALLBACK_AGENTS = { "adversarial-challenger": "agent-reviewer" };
 var content = contentPlugin("srobroek.quality", import.meta.url, { fallbacks: FALLBACK_AGENTS });
@@ -437,7 +4858,16 @@ var src_default = Plugin2.define({
       await disposeContent?.();
       throw error;
     }
+    let disposeAudit;
+    try {
+      disposeAudit = await setupTestAudit(ctx, parseTestAuditOptions(ctx.options));
+    } catch (error) {
+      await disposeStandards();
+      await disposeContent?.();
+      throw error;
+    }
     return async () => {
+      await disposeAudit();
       await disposeStandards();
       await disposeContent?.();
     };
@@ -446,11 +4876,19 @@ var src_default = Plugin2.define({
 export {
   DEFAULT_STANDARDS_SUBAGENTS,
   FALLBACK_AGENTS,
+  MAX_REPORTS,
   STANDARDS_BLOCKS,
   STANDARDS_TEXT,
   TESTING_TEXT,
+  TEST_COMPARE_TOOL,
+  TEST_SUMMARIZE_TOOL,
+  compareReports,
   src_default as default,
   parseStandardsOptions,
+  parseSummarizeInput,
+  parseTestAuditOptions,
   setupStandards,
+  setupTestAudit,
+  summarizeReports,
   wantsStandards
 };
