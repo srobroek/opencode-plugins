@@ -88,6 +88,48 @@ const REFUSED_PIPED = [
   "echo ok && echo hunter2 | op item create -",
 ]
 
+const REFUSED_MIXED = [
+  "op item create --title t \"credential=sk-abc$X\"",
+  "op item create --title t \"password=$(cmd)x\"",
+  "op item edit x \"f[password]=pre$A$B\"",
+  "op item create --title t 'password=$X'",
+  "fnox set NAME \"sk-abc$X\" --provider host",
+  "fnox set NAME \"$X-literal\" --provider age",
+  "fnox set NAME --default \"sk-$X\" --provider host",
+  "fnox set NAME --default=\"sk-$X\" --provider host",
+  "op item create --title t - <<< \"sk-$X\"",
+  "op item create --title t - <<< 'plain'",
+  "echo \"sk-$X\" | op item create -",
+  "echo \"$X$(cmd)lit\" | op item create -",
+  "printf '%s' \"a$X\" | op item create -",
+  "jq -n --arg v \"sk-$X\" '{}' | op item create -",
+]
+
+const REFUSED_JQ_ARGS = [
+  "jq --arg v hunter2 '{title:$v}' | op item create -",
+  "jq -c --arg v hunter2 '{}' | op item create -",
+  "jq -r --argjson v '\"hunter2\"' '{}' | fnox set NAME --provider host",
+  "jq --arg a \"$A\" --arg v hunter2 '{}' | op item create -",
+]
+
+const REFUSED_PRINTF = [
+  "printf 'hunter2\\n' | op item create -",
+  "printf 'pw=%s' \"$X\" | op item create -",
+  "printf '%s9' \"$X\" | op item create -",
+  "printf '{\"password\":\"%s\"}' \"$TOKEN\" | op item create -",
+]
+
+function nested(levels: number, inner: string): string {
+  return levels === 0 ? inner : `sh -c '${nested(levels - 1, inner).replaceAll("'", "'\\''")}'`
+}
+
+const REFUSED_DEEP = [
+  `fnox exec -- ${nested(9, "op read x")}`,
+  `fnox exec -- ${nested(9, "echo hi; op item get x")}`,
+  `fnox exec -- bash <<'EOF'\n${nested(9, "op read x")}\nEOF`,
+  `fnox exec -- fnox exec -- ${nested(9, "fnox get X")}`,
+]
+
 const REFUSED_DEFAULT = [
   "fnox set NAME --default hunter2 --provider host",
   "fnox set NAME --default=hunter2 --provider host",
@@ -184,9 +226,15 @@ const PASSED = [
   "echo | op item create -",
   "printf '%s' \"$TOKEN\" | op item create -",
   "printf '%s' \"$(cmd)\" | op item edit x -",
-  "printf '{\"password\":\"%s\"}' \"$TOKEN\" | op item create -",
+  "printf '%s\\n' \"$TOKEN\" | op item create -",
+  "printf '%s %d%%\\t' \"$A\" \"$B\" | op item create -",
+  "printf '{%s}' \"$A\" | op item create -",
   "printf \"$FMT\" \"$TOKEN\" | op item create -",
   "jq -n --arg v \"$(cmd)\" '{title:$v}' | op item create --vault V -",
+  "jq --arg v \"$(cmd)\" '{title:$v}' | op item create -",
+  "echo \"$(cmd ')')\" | op item create -",
+  "op item create --title t \"password=$(cmd ')' )\"",
+  "fnox set NAME \"$(cmd ')')\" --provider host",
   "jq -n --arg v \"$TOKEN\" --argjson n \"$N\" '{}' | op item create -",
   "jq -n '{title:\"x\"}' | op item create -",
   "cat <<EOF | op item create -\n{\"password\":\"$TOKEN\"}\nEOF",
@@ -259,6 +307,9 @@ const PASSED = [
   "fnox provider discover op --tags project/x",
 ]
 
+/** `fnox set` refusals carry the fnox-set text; the rest the literal-secret text. */
+const expectedMixed = (command: string) => (command.startsWith("fnox set") ? FNOX_SET_MESSAGE : LITERAL_MESSAGE)
+
 describe("op-guard", () => {
   for (const command of REFUSED_OP)
     test(`refuses ${command}`, () => {
@@ -271,6 +322,22 @@ describe("op-guard", () => {
   for (const command of REFUSED_PIPED)
     test(`refuses piped literal ${command}`, () => {
       expect(gate(command)).toEqual({ guard: "op-guard", reason: LITERAL_MESSAGE })
+    })
+  for (const command of REFUSED_MIXED)
+    test(`refuses mixed literal ${command}`, () => {
+      expect(gate(command)).toEqual({ guard: "op-guard", reason: expectedMixed(command) })
+    })
+  for (const command of REFUSED_JQ_ARGS)
+    test(`refuses jq args without -n ${command}`, () => {
+      expect(gate(command)?.reason).toBe(LITERAL_MESSAGE)
+    })
+  for (const command of REFUSED_PRINTF)
+    test(`refuses printf format ${command}`, () => {
+      expect(gate(command)?.reason).toBe(LITERAL_MESSAGE)
+    })
+  for (const command of REFUSED_DEEP)
+    test(`refuses hidden deep nesting ${command.slice(0, 40)}`, () => {
+      expect(gate(command)?.reason).toBe(NESTING_MESSAGE)
     })
   for (const command of REFUSED_DEFAULT)
     test(`refuses fnox set default ${command}`, () => {

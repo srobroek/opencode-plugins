@@ -2115,25 +2115,49 @@ function isOp(name) {
 var PLAIN_TYPES = new Set(["text", "url", "email", "date", "monthyear", "phone", "delete"]);
 var PLAIN_FIELDS = new Set(["username", "url", "notesPlain"]);
 var ITEM_VALUED = new Set([...OP_VALUED, "--title", "--category", "--url", "--tags", "--template"]);
-function literalStdin(command) {
-  return command.hereDocuments.some((document) => document.quoted || !/[$`]/.test(document.body)) || command.redirects.some((word) => word.hereString === true && !word.expands);
-}
-function wholeExpansion(text) {
-  if (/^\$[A-Za-z_][A-Za-z0-9_]*$/.test(text) || /^\$\{[^}]*\}$/.test(text) || /^`[^`]*`$/.test(text))
-    return true;
-  if (!text.startsWith("$(") || !text.endsWith(")"))
-    return false;
+function commandSubstitutionEnd(text, at) {
   let depth = 0;
-  for (let i = 1;i < text.length; i++) {
-    if (text[i] === "(")
+  let quote;
+  for (let i = at + 1;i < text.length; i++) {
+    const c = text[i];
+    if (c === "\\" && quote !== "'") {
+      i++;
+    } else if (quote) {
+      if (c === quote)
+        quote = undefined;
+    } else if (c === "'" || c === '"') {
+      quote = c;
+    } else if (c === "(") {
       depth++;
-    else if (text[i] === ")" && --depth === 0)
-      return i === text.length - 1;
+    } else if (c === ")" && --depth === 0) {
+      return i + 1;
+    }
   }
-  return false;
+  return -1;
 }
-function expansionOnly(command, at) {
-  return command.words?.[at]?.expands !== false && wholeExpansion(command.argv[at]);
+function onlyExpansions(text) {
+  let i = 0;
+  while (i < text.length) {
+    const rest = text.slice(i);
+    const simple = /^\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[^}]*\}|[0-9@*#?!$-])|^`[^`]*`/.exec(rest);
+    if (simple) {
+      i += simple[0].length;
+    } else if (rest.startsWith("$(")) {
+      const end = commandSubstitutionEnd(text, i);
+      if (end < 0)
+        return false;
+      i = end;
+    } else {
+      return false;
+    }
+  }
+  return true;
+}
+function expansionOnly(command, at, skip = 0) {
+  return command.words?.[at]?.expands !== false && onlyExpansions(command.argv[at].slice(skip));
+}
+function literalStdin(command) {
+  return command.hereDocuments.some((document) => document.quoted || !/[$`]/.test(document.body)) || command.redirects.some((word) => word.hereString === true && !(word.expands && onlyExpansions(word.value)));
 }
 function literalWriter(command) {
   const name = base(command.argv[0]);
@@ -2141,23 +2165,20 @@ function literalWriter(command) {
   if (name === "cat")
     return literalStdin(command);
   if (name === "echo") {
-    const operands = args.map((arg, i) => i + 1).filter((at) => !/^-[neE]+$/.test(command.argv[at]));
+    const operands = args.map((_, i) => i + 1).filter((at) => !/^-[neE]+$/.test(command.argv[at]));
     return operands.some((at) => !expansionOnly(command, at));
   }
   if (name === "printf") {
-    const operands = args.map((arg, i) => i + 1).filter((at) => command.argv[at] !== "--");
+    const operands = args.map((_, i) => i + 1).filter((at) => command.argv[at] !== "--");
     const [format, ...fill] = operands;
     if (format === undefined)
       return false;
-    const text = command.argv[format];
-    const converts = /%[^%]/.test(text.replaceAll("%%", ""));
-    if (!converts && !expansionOnly(command, format))
+    const text = command.argv[format].replace(/%(?:%|[-+ #0]*\d*(?:\.\d+)?[A-Za-z])/g, "").replace(/\\(?:[0-7]{1,3}|x[0-9a-fA-F]{1,2}|u[0-9a-fA-F]{1,4}|.)/g, "");
+    if (/[A-Za-z0-9]/.test(text) && !expansionOnly(command, format))
       return true;
     return fill.some((at) => !expansionOnly(command, at));
   }
   if (name === "jq") {
-    if (!args.some((arg) => arg === "--null-input" || /^-[A-Za-z]+$/.test(arg) && arg.includes("n")))
-      return false;
     for (let i = 0;i < args.length; i++) {
       if (args[i] === "--arg" || args[i] === "--argjson") {
         if (!expansionOnly(command, i + 3))
@@ -2186,7 +2207,7 @@ function literalSecret(command, args, inheritedLiteral) {
       continue;
     if (eq === arg.length - 1)
       continue;
-    if (expandsParameter(command, offset + i))
+    if (expansionOnly(command, offset + i, eq + 1))
       continue;
     const field = arg.slice(0, eq);
     const typed = /^(.*)\[([^\]]*)\]$/.exec(field);
@@ -2237,6 +2258,12 @@ function dumpsEnvironment(command) {
   if (name === "declare" || name === "typeset")
     return hasFlag(args, "x", []);
   return false;
+}
+function walkComplete(source) {
+  const walk = walkShell(source);
+  if (!walk.complete && /\b(?:op|fnox)\b/.test(source))
+    throw new NestingTooDeep;
+  return walk.commands;
 }
 function quote2(word) {
   return `'${word.replaceAll("'", "'\\''")}'`;
@@ -2289,9 +2316,9 @@ function fnoxSetRefusal(command, at, fed) {
     else if (arg.startsWith("-p") && !arg.startsWith("--"))
       provider = arg.slice(2);
     else if (arg === "--default")
-      defaults.push(at + 1 + ++i);
+      defaults.push({ at: at + 1 + ++i, skip: 0 });
     else if (arg.startsWith("--default="))
-      defaults.push(at + 1 + i);
+      defaults.push({ at: at + 1 + i, skip: "--default=".length });
     else if (arg === "--generate" || arg === "--from-file" || arg.startsWith("--from-file=")) {
       reads = false;
       if (arg === "--from-file")
@@ -2304,9 +2331,10 @@ function fnoxSetRefusal(command, at, fed) {
   if (provider === undefined || !plainProvider(provider))
     return;
   const value = positional[1];
+  const defaultLiteral = defaults.some((d) => !expansionOnly(command, d.at, d.skip));
   if (value !== undefined)
-    return expandsParameter(command, value) && defaults.every((d) => expandsParameter(command, d)) ? undefined : "set";
-  if (defaults.some((d) => !expandsParameter(command, d)))
+    return expansionOnly(command, value) && !defaultLiteral ? undefined : "set";
+  if (defaultLiteral)
     return "set";
   return reads && fed ? "literal" : undefined;
 }
@@ -2350,9 +2378,9 @@ function fnoxRefusal(command, allow = [], inherited = {
   const inner = argv.slice(first);
   const documents = [...inherited.documents, ...command.hereDocuments];
   const literal = inherited.literal || literalStdin(command);
-  const children = walkShell(inner.map((word, i) => wordText(command, first + i) ?? quote2(word)).join(" ")).commands;
+  const children = walkComplete(inner.map((word, i) => wordText(command, first + i) ?? quote2(word)).join(" "));
   const scripts = children.filter((nested) => nested.context === "top" && SHELLS.has(base(nested.argv[0]))).filter((nested) => !nested.argv.some((word) => /^-[A-Za-z]*c[A-Za-z]*$/.test(word)));
-  const bodies = scripts.length === 0 ? [] : documents.flatMap((document) => walkShell(document.body).commands);
+  const bodies = scripts.length === 0 ? [] : documents.flatMap((document) => walkComplete(document.body));
   const rest = scripts.length === 0 ? documents : [];
   const check = (nested, fed) => {
     if (dumpsEnvironment(nested))
