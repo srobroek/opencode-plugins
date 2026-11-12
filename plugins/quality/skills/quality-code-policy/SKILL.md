@@ -11,7 +11,7 @@ MUST Prioritize SOLID, encapsulation, and protected invariants over YAGNI when t
 
 MUST Apply DRY to knowledge that must change together, not to code that merely looks alike. Revisit structure whenever behavior changes.
 
-MUST Read feature flags through one flag module, decide once at the request or job edge, default to existing behavior, and choose storage per `quality-code-design`'s `feature-flags.md`.
+MUST Use OpenFeature through one flag module with one provider over flags.yaml, SSM or AppConfig, chosen by need; ask before writing a missing provider. Decide once at the request or job edge and default to existing behavior. Libraries take caller decisions; OpenCode plugins keep options. See `quality-code-design`'s `feature-flags.md`.
 
 MUST Before designing or writing code for a concern, research current best practice (official docs, context7, the web) and compare the plan with the preferred-library standards: `lang-<language>-libraries`, `toolchain-api` for API styles, `aws-guidance` for AWS Lambda and service clients, else `toolchain-languages`. Prefer the repository's code, the standard library, the framework's features, then a listed library; write your own only for a named gap, and report each departure from a standard. A dependency the request did not name needs the user's approval.
 

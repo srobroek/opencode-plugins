@@ -30,16 +30,15 @@ or review date) in one module. Feature code calls that module, never environment
 config, SSM or AppConfig directly. Keep boolean and variant types explicit.
 **Do not:** scatter string keys, backend reads or fallback values across callers.
 
-Applications and services evaluate through the OpenFeature SDK when a maintained
-provider exists. Otherwise the module wraps the backend behind the same
-`isEnabled(key, context)` shape, with typed accessors for non-boolean values.
-Writing a custom OpenFeature provider needs approval. Review third-party providers
-as dependencies. A provider swap keeps the API. Targeting, bucketing and analytics
-need separate migration checks. Verify context mappings and behavior before migration.
+Applications, services and CLIs use the OpenFeature client through that module,
+with one provider over the backend chosen below. If no maintained provider exists
+for the backend in that language, stop and ask before writing one; never silently
+substitute a backend wrapper. Review third-party providers as dependencies.
+A provider swap keeps the API; targeting, bucketing and analytics need separate
+migration checks. Verify context mappings and behavior before migration.
 
-**Exception:** CLIs and OpenCode plugins use a local option or environment accessor.
-Libraries accept the decision as an option from their caller and never fetch flags.
-Do not add a remote dependency to make a local switch look like a service flag.
+**Exception:** OpenCode plugins keep plugin options: the host config is their backend.
+Libraries take decisions from their caller and never evaluate flags.
 
 ## Decide at the edge, inject the decision
 
@@ -78,27 +77,24 @@ An experiment needs stable exposure attribution as well as an evaluation result.
 **Do:** initialize the client once, bound the startup wait, refresh in the background
 and dispose background work on shutdown. Monitor readiness and cache age.
 Test cold startup without a cache separately from refresh failure with a cache.
-**Do not:** block every request on backend retrieval or promise instant fleet changes.
+**Do not:** promise instant fleet changes. Check provider retrieval and cache behavior.
 
 AppConfig Agent, including its Lambda extension, polls every 45 seconds by default
 and serves the cached value when a refresh times out (checked 2026-11-12).
 Choose a poll interval and staleness budget that meet the kill switch's response time.
 
-## Choose storage by the need
+## Choose the backend by need
 
 | Need | Store | Who owns the definition |
 | --- | --- | --- |
-| Static per-environment setting | Config or env; SSM Parameter Store when it must be central | Code/config owner, Git or IaC |
-| Runtime kill switch | AWS AppConfig feature flag profile through the Agent | IaC resources; audited operator values |
-| Gradual or percentage rollout | AppConfig native flags through the Agent, or an existing managed platform | Reviewed rollout rules and deployments |
-| Per-tenant/user overrides and entitlements | Domain database, for example DynamoDB; layer rollout separately | Application's domain-data workflow |
-| Experiments with metrics | Experiment platform or hosted flag service | Product and engineering own hypothesis, exposure and metrics |
-| Several teams or non-AWS | Hosted service with an OpenFeature provider, or `flagd` | Platform team; `flagd` needs an owned control plane |
-| CLIs, libraries and plugins | Options or env; caller decisions for libraries | Code/config owner |
+| Local development, CLIs, services outside AWS, or flags changed with a deploy | Repository `flags.yaml` in flagd format | Code/config owner, reviewed in Git |
+| Simple runtime on/off toggles on AWS without staged rollout | SSM Parameter Store | IaC resources; audited operator values |
+| Kill switches, gradual or percentage rollout | AppConfig feature flag profile through the Agent | Reviewed deployments with validators, strategies and alarm rollback |
 
-AppConfig provides validators, deployment strategies and alarm rollback. SSM is
-a settings store, not the default rollout engine. `flagd` evaluates flags. Its team
-must supply management and persistence. Validate experiment analytics; an SDK is not statistics.
+Entitlements and tenant permissions stay in the domain database, for example
+DynamoDB; they are not flags. Keep an existing repository flag service. Adding a
+hosted flag service needs approval. Experiments need exposure and outcome metrics;
+choosing an experiment platform needs approval. An SDK is not statistics.
 
 **Do:** let IaC (`CDK` or `Terraform`) own applications, environments, profiles,
 validators, deployment strategies and IAM. Say who changes live values, retain an
@@ -111,11 +107,51 @@ notice says October 16 and its announcement says October 17 (checked 2026-11-12)
 See `aws-guidance` for prices, quotas and the distinction between native AppConfig
 flags and Python Powertools Feature Flags' freeform rules. Do not stack rule engines.
 
+## flags.yaml
+
+Use the flagd flag-definition format: top-level `flags`, each with `state`
+(`ENABLED` or `DISABLED`), same-typed `variants`, an explicit `defaultVariant`,
+and optional JsonLogic `targeting` that returns a variant name.
+
+```yaml
+$schema: https://flagd.dev/schema/v0/flags.json
+flags:
+  new-ui:
+    state: ENABLED
+    variants: {"on": true, "off": false}
+    defaultVariant: "off"
+```
+
+Node and Rust file providers accept JSON only. Generate `flags.json` from
+`flags.yaml` during the build and check for drift; do not maintain two definitions.
+Offline flagd file providers poll every 5 seconds by default.
+
+## Providers
+
+Provider facts checked 2026-11-12. "Ask first" means no maintained provider was
+found: stop and ask the user before writing one, not a silent wrapper fallback.
+
+| Language | flags.yaml | SSM | AppConfig |
+| --- | --- | --- | --- |
+| Python | `openfeature-provider-flagd` `0.6`, `ResolverType.FILE`, `offline_flag_source_path`; YAML requires `.yaml` | `openfeature-provider-aws-ssm` `0.1` (contrib); set TTL cache, default LRU has no timed refresh | Ask first; provider would read Agent HTTP |
+| TypeScript (Node) | `@openfeature/flagd-provider` `0.18`, in-process, `offlineFlagSourcePath`; generated JSON | `@openfeature/aws-ssm-provider` `0.1`; cache off by default, only boolean/string results cached | Ask first |
+| Go | Contrib `providers/flagd` `0.8`, `WithOfflineFilePath`; `.yaml`, `.yml`, `.json` | Contrib `providers/aws-ssm` `1.0`; `GetParameter` every evaluation, no cache, shared 40 TPS default; evaluate once per request; object flags return default | Third-party `github.com/Arthur1/openfeature-provider-go-aws-appconfig` `0.4`; Agent only, boolean flags; dependency review required |
+| Rust | `open-feature-flagd` `0.3`, file resolver; generated JSON | Ask first | Ask first |
+| Browser | No local file; evaluate on server and send decisions, or ask first | Same | Same; never expose AWS credentials or Agent |
+
+An approved custom provider uses `FLAG_NOT_FOUND`, `TYPE_MISMATCH`, `PARSE_ERROR`
+and `GENERAL`, never a silent false. The Agent endpoint is
+`http://localhost:2772/applications/<app>/environments/<env>/configurations/<profile>`;
+use `?flag=<key>` for one flag and `Context: key=value` headers for multi-variant evaluation.
+
 ## Test decisions and failures
 
 **Do:** test default and new states, plus named interactions, not every combination.
 Test the outage default, missing key, wrong type and stale-cache boundary. Use the
 SDK's in-memory provider or inject the decision; do not require a backend in unit tests.
+Python uses `InMemoryProvider` from `openfeature.provider.in_memory_provider`, JS
+uses the SDK's `InMemoryProvider`, and Go uses `memprovider.NewInMemoryProvider`.
+Rust `0.3` has no shipped in-memory provider; use `MockFeatureProvider` with `test-util`.
 **Do not:** test only the enabled branch or assume a missing key is always harmless.
 Use the `quality-testing` skill for test level, doubles and integration coverage.
 
@@ -142,6 +178,7 @@ automate dead-branch removal; review its output and run the relevant tests.
 
 - Toggle kinds and architecture: https://martinfowler.com/articles/feature-toggles.html
 - OpenFeature evaluation: https://openfeature.dev/specification/sections/flag-evaluation/
+- flagd definitions and file providers: https://flagd.dev/reference/flag-definitions/ and https://flagd.dev/providers/
 - Rust SDK and error handling: https://openfeature.dev/docs/reference/sdks/server/rust/
 - Provider portability limits: https://docs.growthbook.io/lib/openfeature
 - AppConfig Agent: https://docs.aws.amazon.com/appconfig/latest/userguide/appconfig-agent-how-to-use.html

@@ -29,13 +29,23 @@ Rules:
 
 ## Feature flags
 
-Default AWS runtime flags to an AppConfig feature flag profile through the AppConfig Agent (Lambda extension on Lambda), behind a typed flag module. Use validators, deployment strategies and CloudWatch alarms for rollback. Applications use OpenFeature when a maintained provider exists; otherwise the module wraps Agent reads. A custom provider needs approval. Code and storage rules are in `quality-code-design`'s `feature-flags.md`; SDKs are in `lang-<language>-libraries`.
+Use OpenFeature through one typed flag module and one provider. Choose SSM Parameter Store for simple runtime on/off toggles without staged rollout. Choose an AppConfig feature flag profile through the Agent (Lambda extension on Lambda) for kill switches and gradual or percentage rollout, with validators, deployment strategies and alarm rollback. Repository `flags.yaml` in flagd format fits local development and flags changed with a deploy. If no maintained provider exists in the language, stop and ask before writing one; never silently wrap backend reads. Code and storage rules are in `quality-code-design`'s `feature-flags.md`; SDKs are in `lang-<language>-libraries`.
+
+| Language | SSM provider | AppConfig provider |
+| --- | --- | --- |
+| Python | `openfeature-provider-aws-ssm` `0.1` (contrib); set TTL cache, default LRU has no timed refresh | None found; ask first before writing an Agent HTTP provider |
+| TypeScript (Node) | `@openfeature/aws-ssm-provider` `0.1`; cache off by default, only boolean/string results cached | None found; ask first |
+| Go | Contrib `providers/aws-ssm` `1.0`. Calls `GetParameter` per evaluation without a cache. With the shared 40 TPS default, evaluate once per request. Object flags return the default. | Third-party `github.com/Arthur1/openfeature-provider-go-aws-appconfig` `0.4`; Agent only, boolean flags; dependency review required |
+| Rust | None found; ask first | None found; ask first |
+| Browser | Evaluate on server and send decisions, or ask first | Same; never expose AWS credentials or Agent |
+
+An approved AppConfig provider reads `http://localhost:2772/applications/<app>/environments/<env>/configurations/<profile>`, with `?flag=<key>` for one flag and `Context: key=value` headers for multi-variant evaluation.
 
 Facts checked 2026-11-12:
 
 - AppConfig charges $0.0000002 per request and $0.0008 per configuration received. Local multi-variant reads of the same version do not add configuration-received charges. Experimentation tools are listed at $0.90 per experiment-hour; validate exposure and analytics requirements before choosing them.
 - Agent and Lambda extension polling defaults to 45 seconds. A refresh timeout serves cached data; cold startup without a cache needs its own fallback. Choose the poll interval and maximum staleness for the kill switch's required response time.
-- SSM Parameter Store is for static, infrequently changed settings, not the default rollout engine. Standard supports 10,000 parameters of 4 KB with no additional storage charge; advanced supports 100,000 of 8 KB at $0.05 per parameter-month.
+- SSM Parameter Store supports simple runtime on/off toggles, not staged rollout. Standard supports 10,000 parameters of 4 KB with no additional storage charge; advanced supports 100,000 of 8 KB at $0.05 per parameter-month.
 - SSM default reads share 40 TPS. Higher throughput supports `GetParameter` at 10,000 TPS, `GetParameters` at 1,000 TPS and `GetParametersByPath` at 100 TPS. Advanced interactions, and standard interactions with higher throughput enabled, cost $0.05 per 10,000; each parameter counts as an interaction. Cache with a stated freshness policy.
 - DynamoDB fits domain-owned tenant/user overrides and entitlements; layer rollout separately, never grant authorization through a flag. US-East Standard on-demand pricing is $0.625 per million WRUs, $0.125 per million RRUs and $0.25 per GB-month. Eventual reads consume half the units of strong reads; caching adds staleness.
 - Python Powertools Feature Flags is its own rules engine over an AppConfig freeform profile, not native AppConfig feature flag profiles or OpenFeature. Use it only when those freeform rules are wanted; do not stack two engines. Other language utility parity was not verified.
