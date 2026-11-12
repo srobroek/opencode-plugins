@@ -165,6 +165,84 @@ Do not install blanket retries. Keep retries off by default and record first fai
 Quarantine needs an issue, owner, expiry, and a separate reporting/failing lane;
 do not silently delete the scenario or permanently skip it.
 
+## Bad tests and fixes
+
+See the `quality-testing` skill's `references/bad-tests.md` for language-neutral pairs covering removal checks, copied oracles, call-order mocks, side channels, copies instead of parameters, logic in tests, sleeps, assertion-free tests, eager tests, mystery guests, type re-checks, tampering, and whole-object snapshots.
+
+### Hidden autouse state
+
+Bad:
+
+```python
+@pytest.fixture(autouse=True)
+def sandbox(monkeypatch):
+    monkeypatch.setenv("PAYMENT_MODE", "sandbox")
+
+def test_checkout_uses_sandbox():
+    assert checkout().gateway == "sandbox"
+```
+
+The outcome depends on an environment change that the test never requests.
+
+Fix:
+
+```python
+@pytest.fixture
+def sandbox(monkeypatch):
+    monkeypatch.setenv("PAYMENT_MODE", "sandbox")
+
+def test_checkout_uses_sandbox(sandbox):
+    assert checkout().gateway == "sandbox"
+```
+
+### Patching the wrong name without a spec
+
+Bad:
+
+```python
+from unittest.mock import MagicMock, patch
+from payments import checkout
+
+def test_payment_is_declined():
+    with patch("payments.client.charge", new=MagicMock()) as charge:
+        charge.return_value = "declined"
+        assert checkout.pay(10) == "declined"
+```
+
+If `payments.checkout` imports `charge` directly, this patches the unused definition while a bare `MagicMock` accepts nonexistent attributes.
+
+Fix:
+
+```python
+from unittest.mock import patch
+from payments import checkout
+
+def test_payment_is_declined():
+    with patch("payments.checkout.charge", autospec=True) as charge:
+        charge.return_value = "declined"
+        assert checkout.pay(10) == "declined"
+```
+
+### Catching any exception
+
+Bad:
+
+```python
+def test_empty_duration_is_rejected():
+    with pytest.raises(Exception):
+        parse_seconds("")
+```
+
+An unrelated exception can satisfy this assertion without the promised validation error.
+
+Fix:
+
+```python
+def test_empty_duration_is_rejected():
+    with pytest.raises(ValueError, match=r"^empty duration$"):
+        parse_seconds("")
+```
+
 ## Do not write
 
 Do delete obsolete tests and unused fixtures with removed behavior. Refuse tests

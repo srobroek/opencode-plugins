@@ -173,6 +173,92 @@ Use `serial_test` only as a last resort for unavoidable shared resources; its
 process-local locks do not coordinate nextest processes. File locks or runner-level
 resource scheduling must cover the actual sharing scope.
 
+## Bad tests and fixes
+
+See the `quality-testing` skill's `references/bad-tests.md` for language-neutral pairs covering removal checks, copied oracles, call-order mocks, side channels, copies instead of parameters, logic in tests, sleeps, assertion-free tests, eager tests, mystery guests, type re-checks, tampering, and whole-object snapshots.
+
+### Real-time delays in async tests
+
+Bad:
+
+```rust
+#[tokio::test]
+async fn lease_expires() {
+    let lease = Lease::new(std::time::Duration::from_secs(30));
+    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+    assert!(lease.is_expired());
+}
+```
+
+Waiting on real time makes this test slow and dependent on wall-clock scheduling rather than controlled Tokio time.
+
+Fix:
+
+```rust
+#[tokio::test(start_paused = true)]
+async fn lease_expires() {
+    let lease = Lease::new(std::time::Duration::from_secs(30));
+    tokio::time::advance(std::time::Duration::from_secs(30)).await;
+    assert!(lease.is_expired());
+}
+```
+
+### Mocking a test-only internal trait
+
+Bad:
+
+```rust
+#[mockall::automock]
+trait PriceStep { fn subtotal(&self) -> u32; }
+#[test]
+fn adds_shipping() {
+    let mut step = MockPriceStep::new();
+    step.expect_subtotal().times(1).return_const(20_u32);
+    assert_eq!(total_with_step(&step), 25);
+}
+```
+
+A trait created only to mock an internal step and a `.times(1)` expectation lock the test to implementation details.
+
+Fix:
+
+```rust
+struct FakeQuotes;
+impl QuoteClient for FakeQuotes {
+    fn price(&self, _sku: &str) -> u32 { 20 }
+}
+#[test]
+fn adds_shipping() {
+    assert_eq!(order_total("book", &FakeQuotes), 25);
+}
+```
+
+### Unexplained fallible setup
+
+Bad:
+
+```rust
+#[test]
+fn receipt_total_is_preserved() {
+    let receipt = parse_receipt(&load_fixture("receipt.json").unwrap()).unwrap();
+    assert_eq!(receipt.total, 25);
+}
+```
+
+Chained `.unwrap()` calls obscure which setup operation failed and why success was expected.
+
+Fix:
+
+```rust
+#[test]
+fn receipt_total_is_preserved() -> Result<(), Box<dyn std::error::Error>> {
+    let text = load_fixture("receipt.json")?;
+    let receipt = parse_receipt(&text)?;
+    assert_eq!(receipt.total, 25);
+    Ok(())
+}
+```
+
 ## Do not write
 
 - `trybuild` or compile-fail tests added only to prove a removed item is gone.

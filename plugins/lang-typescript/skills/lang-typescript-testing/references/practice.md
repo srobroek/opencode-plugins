@@ -167,6 +167,80 @@ test("round-trips every supported label", () => {
   Quarantine only with an issue, owner, expiry, and a separate reporting lane.
 - Do not make failures green with blanket retries or permanent skips.
 
+## Bad tests and fixes
+
+See the `quality-testing` skill's `references/bad-tests.md` for language-neutral pairs covering removal checks, copied oracles, call-order mocks, side channels, copies instead of parameters, logic in tests, sleeps, assertion-free tests, eager tests, mystery guests, type re-checks, tampering, and whole-object snapshots.
+
+### Automocking the pricing behavior
+
+Bad:
+
+```ts
+import { priceOrder } from "./pricing"
+vi.mock("./pricing")
+test("adds shipping to the quoted price", async () => {
+  vi.mocked(priceOrder).mockResolvedValue(25)
+  expect(await priceOrder("order-1")).toBe(25)
+})
+```
+
+This checks the configured mock rather than the pricing module's calculation.
+
+Fix:
+
+```ts
+import { priceOrder } from "./pricing"
+test("adds shipping to the quoted price", async () => {
+  const http = { get: async (_url: string) => ({ price: 20 }) }
+  expect(await priceOrder("order-1", http)).toBe(25)
+})
+```
+
+### Unawaited rejection assertions
+
+Bad:
+
+```ts
+test("rejects an expired token", () => {
+  expect(authenticate("expired")).rejects.toThrow("Expired token")
+})
+```
+
+The test does not wait for its assertion; `Vitest 5` fails unawaited async assertions instead of allowing a false pass.
+
+Fix:
+
+```ts
+test("rejects an expired token", async () => {
+  await expect(authenticate("expired")).rejects.toThrow("Expired token")
+})
+```
+
+### Frozen timers without restoration
+
+Bad:
+
+```ts
+test("expires after the deadline", async () => {
+  vi.useFakeTimers()
+  await expect(waitForExpiry(1000)).resolves.toBe("expired")
+})
+```
+
+The timer never advances, so the test hangs until timeout and leaves fake timers active for later tests.
+
+Fix:
+
+```ts
+afterEach(() => vi.useRealTimers())
+test("expires after the deadline", async () => {
+  vi.useFakeTimers()
+  const pending = waitForExpiry(1000)
+  await vi.advanceTimersByTimeAsync(1000)
+  await expect(pending).resolves.toBe("expired")
+})
+```
+
 ## Do not write
 
 - Do delete obsolete tests with removed behavior. Do not replace them with structural
