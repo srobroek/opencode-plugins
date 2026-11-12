@@ -31,7 +31,7 @@
     },
     "plugins/agent-efficiency": {
       "name": "@srobroek/opencode-agent-efficiency",
-      "version": "0.7.0",
+      "version": "0.8.0",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
       },
@@ -135,7 +135,7 @@
     },
     "plugins/beads": {
       "name": "@srobroek/opencode-beads",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
       },
@@ -174,7 +174,7 @@
     },
     "plugins/chezmoi": {
       "name": "@srobroek/opencode-chezmoi",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
       },
@@ -226,7 +226,7 @@
     },
     "plugins/dep-update": {
       "name": "@srobroek/opencode-dep-update",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
         "smol-toml": "1.9.0",
@@ -292,7 +292,7 @@
     },
     "plugins/find-tools": {
       "name": "@srobroek/opencode-find-tools",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
       },
@@ -393,7 +393,7 @@
     },
     "plugins/lsp": {
       "name": "@srobroek/opencode-lsp",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
       },
@@ -432,7 +432,7 @@
     },
     "plugins/project": {
       "name": "@srobroek/opencode-project",
-      "version": "0.3.3",
+      "version": "0.4.0",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
       },
@@ -471,7 +471,7 @@
     },
     "plugins/safety": {
       "name": "@srobroek/opencode-safety",
-      "version": "0.5.0",
+      "version": "0.6.0",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
       },
@@ -497,7 +497,7 @@
     },
     "plugins/speckit": {
       "name": "@srobroek/opencode-speckit",
-      "version": "0.5.0",
+      "version": "0.6.0",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
       },
@@ -549,7 +549,7 @@
     },
     "plugins/trunk-dev": {
       "name": "@srobroek/opencode-trunk-dev",
-      "version": "0.5.0",
+      "version": "0.6.0",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
       },
@@ -562,7 +562,7 @@
     },
     "plugins/whats-new": {
       "name": "@srobroek/opencode-whats-new",
-      "version": "0.2.1",
+      "version": "0.3.0",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
       },
@@ -575,7 +575,7 @@
     },
     "plugins/worktrunk": {
       "name": "@srobroek/opencode-worktrunk",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
       },
