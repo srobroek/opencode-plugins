@@ -7,11 +7,13 @@ metadata:
 
 # Feature flag decisions
 
-Gate every new feature behind a default-off flag. This includes breaking `feat!` changes.
+Flag a feature when it changes runtime behavior that is unfinished, risky, or needs a gradual rollout or a kill switch. This includes breaking `feat!` changes.
 
 - The flag lets unfinished work merge to the default branch without exposing it, so the branch stays releasable.
 - Turning the flag off rolls the feature back without a revert.
-- Fixes, refactors, chores, docs, and other non-feature changes need no flag.
+- No flag is needed for guidance, documentation and skill content, a new tool or command that runs only when called, build, CI and test changes, or a complete, low-risk change that a revert undoes.
+- Fixes, refactors, chores and docs need no flag.
+- Record the decision either way: a named flag, or `Flag: none` with a reason.
 
 Keep flags cheap and short-lived. [Fowler](https://martinfowler.com/articles/feature-toggles.html) explains the carrying cost of toggles. [LaunchDarkly](https://launchdarkly.com/docs/guides/flags/technical-debt) warns that stale flags become debt. [DORA](https://dora.dev/capabilities/working-in-small-batches/) recommends small batches. [Feature flag guidance](https://docs.getunleash.io/concepts/feature-flags) separates temporary release flags from long-lived operational controls.
 
@@ -23,9 +25,9 @@ Add exactly one `Flag:` line to the MR/PR description (and therefore to the squa
 
 <code>Flag: &lt;flag-name&gt; (enable; owner &lt;alias&gt;; remove by YYYY-MM-DD)</code> for the rollout PR that turns an existing flag on for users
 
-<code>Flag: none &mdash; &lt;one-line reason&gt;</code> (non-feature changes only, such as a breaking `fix!` or `refactor!`)
+<code>Flag: none -- &lt;one-line reason&gt;</code> for any change without a flag, including a `feat` with nothing to switch off
 
-A `feat` MR/PR names a real flag; `Flag: none` is not valid for it. A rollout PR keeps the flag's original owner and removal date. Do not retype a feature as `fix` or `chore` to avoid the flag. Do not substitute other field names or omit the owner or removal date for a temporary flag. A no-flag decision includes a concise reason.
+Every `feat` or breaking MR/PR has one `Flag:` line; `Flag: none` needs a reason. A rollout PR keeps the flag's original owner and removal date. Do not retype a feature as `fix` or `chore` to avoid the decision. Do not substitute other field names or omit the owner or removal date for a temporary flag. A no-flag decision includes a concise reason.
 
 ## Choose the mechanism
 

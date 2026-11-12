@@ -19,5 +19,5 @@ Load a row below only for its situation, by id with the skill tool, in this same
 | Situation | Load skill |
 | --- | --- |
 | Branching, opening, merging or landing an MR/PR in a repo with CI or automated releases | `trunk-dev-workflow` |
-| A `feat` change, a PR `Flag:` line, or rolling out or removing a default-off feature flag | `trunk-dev-feature-flags` |
+| A `feat` change, a PR `Flag:` line (a flag or `Flag: none` with a reason), or rolling out or removing a default-off feature flag | `trunk-dev-feature-flags` |
 | Setting up semantic-release on GitHub or GitLab with Conventional Commits and synced manifests | `trunk-dev-release-setup` |
