@@ -163,11 +163,13 @@ export function choose(question: Question, draft: Draft, index = draft.cursor): 
     case "show_options":
       return { ...next, value: { selected: id } }
     case "pick_many": {
-      const current = ((draft.value as { selected?: string[] } | undefined)?.selected ?? []).slice()
+      const previous = draft.value as { selected?: string[]; other?: string } | undefined
+      const current = (previous?.selected ?? []).slice()
       const at = current.indexOf(id)
       if (at >= 0) current.splice(at, 1)
       else if (question.max === undefined || current.length < question.max) current.push(id)
-      return { ...next, value: { selected: ids.filter((option) => current.includes(option)) } }
+      const selected = ids.filter((option) => current.includes(option))
+      return { ...next, value: previous?.other === undefined ? { selected } : { selected, other: previous.other } }
     }
     case "confirm":
     case "thumbs":
@@ -480,11 +482,7 @@ export function keyHints(
   single = false,
 ): string {
   if (editing) {
-    const enter = editing.enterSaves
-      ? surface === "card"
-        ? "enter submit · shift+enter newline"
-        : "enter save · shift+enter newline"
-      : "enter newline"
+    const enter = editing.enterSaves ? "enter save · shift+enter newline" : "enter newline"
     const paths =
       editing.field === "text" && question && PATH_KINDS.has(question.kind)
         ? editing.suggestions
