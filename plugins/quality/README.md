@@ -5,10 +5,10 @@ prototypes, and a read-only `adversarial-challenger` subagent.
 
 | Skill | When |
 | --- | --- |
-| `quality-code-policy` | The short policy: SOLID and invariants over YAGNI, DRY for knowledge that changes together, research first and compare with the library standards before building, middleware for cross-cutting concerns, Powertools on Lambda, OpenTelemetry by default, planning scaled by risk, a type check after multi-file or signature edits, refactors scoped to the change. It requires `quality-code-design` only for new behavior, refactors, hard bugs and reviews |
+| `quality-code-policy` | The short policy: SOLID and invariants over YAGNI, DRY for knowledge that changes together, research first and compare with the library standards before building, middleware for cross-cutting concerns, Powertools on Lambda, OpenTelemetry by default, tests kept in step with the code, planning scaled by risk, a type check after multi-file or signature edits, refactors scoped to the change. It requires `quality-code-design` only for new behavior, refactors, hard bugs and reviews |
 | `quality-code-design` | Code design, investigation, implementation, refactoring, review, debugging or test-first work in any language. Picks IMPLEMENT, INVESTIGATE or REVIEW and loads only the references the task needs from `references/`, including `middleware.md` (handlers versus middleware, stack order, one error mapper) and `telemetry.md` (OpenTelemetry setup and rules) |
 | `quality-profiling` | Slow or memory-heavy code, endpoints, builds or CLIs: set a target, reproduce with a fixed workload, baseline with variance, pick the profiler, change one thing, re-measure, report before/after. hyperfine, Linux perf and macOS Instruments live in `references/`; language tooling is the `lang-<language>-profiling` skills in the `lang-<language>` plugins |
-| `quality-testing` | What to test and at which level, test doubles, flaky tests, test data, property-based tests, coverage; points to `lang-<language>-testing` skills for tooling |
+| `quality-testing` | What to test and how many tests to keep. A workflow and five rules, with references for good and bad tests (`good-tests.md`, `bad-tests.md`), test levels (`what-to-test.md`), the test budget against sprawl (`test-budget.md`), maintenance and deletion with the code (`maintenance.md`), doubles (`doubles.md`), coverage and mutation signals (`signals.md`) and reviewing test changes (`review-tests.md`). Points to the `lang-<language>-testing` skills and their `references/practice.md` for tooling |
 | `prototype-logic` | A throwaway single-file HTML demo over a pure reducer or state machine, to test a state model before building it |
 
 Other plugins point at these: `architecture` and the `architect` agent load
@@ -17,21 +17,28 @@ to it.
 
 ## Engineering standards in the system prompt
 
-Every primary session and every `general` subagent gets one static block at the end of
-its system prompt: the `standards` part of the shared coding core
-(`plugins/lib/src/coding-core.md`). It tells the agent to research current best practice
-and compare its plan with the `lang-<language>-libraries`, `toolchain-api`, `aws-guidance`
-and `toolchain-languages` standards before it writes its own code, to report each
-departure, to put cross-cutting concerns in middleware, to keep Lambda handlers thin on
-Powertools for AWS Lambda, and to use OpenTelemetry. The `coder`, `implementer`,
-`implementer-high` and `ui-implementer` agents carry the same part in their composed
-prompts, so they are not given it twice. The block is under 1000 characters and never
-changes between requests, so the provider's prompt cache holds.
+Every primary session and every `general` subagent gets two static blocks at the end of
+its system prompt, from the shared coding core (`plugins/lib/src/coding-core.md`):
+
+- `# Engineering standards`, the `standards` part. It tells the agent to research current
+  best practice and compare its plan with the `lang-<language>-libraries`, `toolchain-api`,
+  `aws-guidance` and `toolchain-languages` standards before it writes its own code, to
+  report each departure, to put cross-cutting concerns in middleware, to keep Lambda
+  handlers thin on Powertools for AWS Lambda, and to use OpenTelemetry.
+- `# Testing standards`, the `testing` part. It tells the agent to list the behaviors a
+  change adds, changes or removes, to test each behavior once through the public
+  interface, to give each test a distinct risk, to change and delete tests with the code,
+  and never to write tests that only check removed code is gone or to weaken assertions
+  to pass.
+
+The `coder`, `implementer`, `implementer-high` and `ui-implementer` agents carry the same
+parts in their composed prompts, so they are not given them twice. Each block is under
+1000 characters and never changes between requests, so the provider's prompt cache holds.
 
 | Option | Default | Effect |
 | --- | --- | --- |
-| `standards` | `true` | `false` turns the block off |
-| `standardsSubagents` | `["general"]` | Subagent ids whose child sessions also get the block; primary sessions always do |
+| `standards` | `true` | `false` turns both blocks off |
+| `standardsSubagents` | `["general"]` | Subagent ids whose child sessions also get the blocks; primary sessions always do |
 
 ```jsonc
 {
@@ -46,7 +53,7 @@ changes between requests, so the provider's prompt cache holds.
 
 On omp `quality-code-design` was also an always-applied rule. OpenCode has no
 always-on skill, so the rule ships as the `quality-code-policy` skill, loaded when
-its description matches; the standards block above covers its research and library
+its description matches; the standards blocks above cover its research, library and testing
 rules in every session. To make the whole policy always on, copy its body into your
 global `AGENTS.md` or into a file listed under `instructions` in your config.
 

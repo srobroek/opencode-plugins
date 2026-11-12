@@ -39,7 +39,8 @@ already exists:
 - `lang-go-quality`: `go build`, `golangci-lint fmt --diff` or `gofmt -l`, `golangci-lint run`
   or `go vet`, `go test -race`, `go mod tidy -diff`, `govulncheck`, in that order, and CI.
 - `lang-go-testing`: table tests and subtests, go-cmp, golden files, fuzzing, httptest,
-  `testing/synctest`.
+  `testing/synctest`; `references/practice.md` has tool choices, bad tests with fixes,
+  and defaults by use case.
 - `lang-go-packaging`: one module with `cmd/` and `internal/`, `go.work`, `tool`
   directives, build tags for debug code, depguard import rules.
 - `lang-go-profiling`: pprof, `go test -bench`, `go tool trace`, benchstat. The method is

@@ -38,7 +38,8 @@ already exists:
   data, messaging, AWS, MCP, telemetry, CLI, testing and security.
 - `lang-python-quality`: `uv lock --check`, `ruff check`, `ruff format --check`, mypy or
   pyright strict, `pytest -x`, in that order; uv workspace narrowing and CI.
-- `lang-python-testing`: pytest fixtures, parametrize, monkeypatch, Hypothesis, coverage.
+- `lang-python-testing`: pytest fixtures, parametrize, monkeypatch, Hypothesis, coverage;
+  `references/practice.md` has tool choices, bad tests with fixes, and defaults by use case.
 - `lang-python-packaging`: src layout, `__init__` facades and `__all__`, import-linter,
   uv workspaces, PEP 735 dependency groups.
 - `lang-python-types`: mypy and pyright strict, typing idioms, pydantic v2 boundary

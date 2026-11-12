@@ -44,8 +44,9 @@ already exists:
 - `lang-rust`: the router.
 - `lang-rust-libraries`: compare preferred libraries before writing code for common concerns; versioned picks and sources.
 - `lang-rust-quality`: format, lint and test commands.
-- `lang-rust-testing`: unit and integration layout, nextest, doc tests, proptest, insta,
-  tokio paused time.
+- `lang-rust-testing`: unit and integration layout, nextest by default, doc tests,
+  proptest, insta, tokio paused time; `references/practice.md` has tool choices, bad
+  tests with fixes, and defaults by use case.
 - `lang-rust-packaging`: crate splits, `lib.rs` facades, workspace manifest, lints and
   dependencies, feature-gated dev code.
 - `lang-rust-ci`: rust-cache, `CARGO_INCREMENTAL`, linker placement, prebuilt tools,
