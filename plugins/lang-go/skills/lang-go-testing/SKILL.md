@@ -9,9 +9,10 @@ metadata:
 
 Sources: [`testing`](https://pkg.go.dev/testing), `go help testflag` (Go 1.27), [Go fuzzing](https://go.dev/doc/security/fuzz/), [`testing/synctest`](https://pkg.go.dev/testing/synctest), [go-cmp](https://pkg.go.dev/github.com/google/go-cmp/cmp).
 
-What to test and which double to use is the `quality-testing` skill. This skill is the
-Go idioms. Follow the existing tests' style first: if the package uses testify, keep
-using it; do not add it to a package that does not.
+Read [practice.md](references/practice.md) for Go idioms and tool choices. Use
+`quality-testing` for what to test, behavior budgets, maintenance and review rules.
+Follow the existing tests' style first: if the package uses `testify`, keep using
+it; do not add it to a package that does not.
 
 ## Table tests with subtests
 
@@ -41,7 +42,9 @@ func TestParseDuration(t *testing.T) {
 }
 ```
 
-- Since Go 1.22 each loop iteration has its own `tt`; drop the old `tt := tt` copy.
+- Under Go `1.22` language semantics, newly declared loop variables have their own
+  per-iteration identity; older language versions still need `tt := tt`. Shared
+  referenced data and variables reused with `=` are not isolated.
 - Messages read `Func(input) = got, want want`. `t.Fatalf` stops this subtest,
   `t.Errorf` keeps checking.
 - Compare structs and slices with `cmp.Diff(want, got)` from go-cmp
@@ -69,7 +72,7 @@ go test -coverprofile=cover.out ./... && go tool cover -func=cover.out
 
 ## Golden files
 
-Store large expected outputs under `testdata/` (the go tool ignores it as a package)
+Store stable, reviewable expected outputs under `testdata/` (ignored as a package)
 and regenerate them behind a flag:
 
 ```go
@@ -77,12 +80,14 @@ var update = flag.Bool("update", false, "rewrite golden files")
 
 golden := filepath.Join("testdata", tt.name+".golden")
 if *update {
-	os.WriteFile(golden, got, 0o644)
+	if err := os.WriteFile(golden, got, 0o644); err != nil { t.Fatal(err) }
 }
-want, _ := os.ReadFile(golden)
+want, err := os.ReadFile(golden)
+if err != nil { t.Fatal(err) }
 ```
 
 Run `go test ./pkg -update`, then review the golden diff like code before committing.
+This is a custom flag, not a built-in Go flag. Never auto-update in CI.
 
 ## Fuzzing
 
@@ -111,10 +116,11 @@ replays the seeds and that corpus as regular tests, so the bug stays fixed.
 
 ## Time, concurrency and I/O
 
-- Code that sleeps, uses timers or tickers, or waits on goroutines: test it inside
-  `synctest.Test(t, func(t *testing.T) { … })` (Go 1.25+). Time is fake and advances
-  only when every goroutine in the bubble is blocked, so a 30 s timeout test runs
-  instantly. `synctest.Wait()` waits for the bubble to go idle.
+- Supported in-process timer/concurrency tests can use
+  `synctest.Test(t, func(t *testing.T) { /* scenario */ })` (Go `1.25`+). Fake time
+  advances when every goroutine in the bubble is durably blocked;
+  `synctest.Wait()` waits for quiescence. Network I/O and mutex waits are not
+  durably blocking; this does not replace network integration or explore all schedules.
 - HTTP clients: point them at `httptest.NewServer(handler)`; HTTP handlers: call
   them with `httptest.NewRecorder()` and `httptest.NewRequest`.
 - Slow or external integration tests go behind `//go:build integration` (run with

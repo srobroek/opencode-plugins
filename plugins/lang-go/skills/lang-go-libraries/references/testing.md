@@ -1,12 +1,14 @@
 # Go testing libraries
 
 Use the standard testing stack first and add specialized tools for the behavior being verified.
+See `lang-go-testing`'s [practice reference](../../lang-go-testing/references/practice.md)
+for Go idioms and tool choices; use `quality-testing` for suite design and maintenance.
 
 Checked 2026-11-12. Standard-library entries use Go `1.27`; commands belong in `lang-go-testing` and `lang-go-quality`.
 
 | Concern | Default | Use instead when | Avoid (why) |
 | --- | --- | --- | --- |
-| Unit tests | `testing`, table tests and subtests; standard library is sufficient | `github.com/google/go-cmp` `0.7` for structural diffs; `github.com/stretchr/testify` `1` for existing assertions | A test framework solely to wrap basic checks; assertions that obscure useful failures. |
+| Unit tests | `testing`, table tests and subtests; standard library is sufficient | `github.com/google/go-cmp` `0.7` for compound-value diffs; keep existing `github.com/stretchr/testify` `1` or `github.com/matryer/is` `1` assertions | A test framework solely to wrap basic checks; assertions that obscure useful failures. |
 | Concurrent/time-dependent tests | `testing/synctest`; standard library is sufficient for supported in-process concurrency | Real infrastructure tests for sockets and external systems | Sleep-based synchronization; synctest as a replacement for network integration. |
 | Property tests | `pgregory.net/rapid` `1` for domain generators/shrinking | Native fuzzing for parser/input boundaries | Random inputs without stated invariants or reproducible failures. |
 | Fuzzing | Native Go fuzzing; standard library is sufficient | Specialized domain generators when byte mutations are inadequate | Third-party fuzz framework by habit; discarded failing seeds. |
@@ -20,8 +22,9 @@ Checked 2026-11-12. Standard-library entries use Go `1.27`; commands belong in `
 | API schema/property checks | Tools selected by `toolchain-api` | `Schemathesis` `4` for schema-driven checks | Archived Dredd for new work; generated types presented as runtime validation. |
 | HTTP load | `github.com/tsenart/vegeta/v12` `12` for rate tests | `k6` CLI `2` for scripted scenarios/protocol breadth | A single throughput number as realistic capacity; k6 Go-module `1` confused with checked CLI `2`. |
 | Mutation | Optional `github.com/go-gremlins/gremlins` `0.6` pilot on critical code | Compatible evaluated alternative fork for unsupported syntax | Whole-project mutation as an unconditional PR gate; stale original go-mutesting snapshots. |
-| Benchmarks | `testing.B`, allocation reports and profiles; standard library is sufficient | Project comparison tooling selected by `lang-go-profiling` for repeated runs | One noisy run or microbenchmark as proof of system performance. |
+| Benchmarks | `testing.B` with `b.Loop` on Go `1.24`+, allocation reports and profiles | Project comparison tooling selected by `lang-go-profiling` for repeated runs | Mixing `b.Loop` with `b.N`; one noisy run as proof of system performance. |
 | Coverage | Native Go coverage and changed-code review; standard library is sufficient | Existing coverage aggregation for multiple modules | Universal percentages presented as proof of behavioral coverage. |
+| CI reporting/flakes | `go test`, shuffle/repeat diagnosis; optional `gotest.tools/gotestsum` `1` artifacts | Explicit diagnostic reruns preserving initial failures | `--rerun-fails` silently turning intermittent defects green. |
 | Telemetry | OTel SDK `1` in-memory trace facilities and signal readers | Real collector/backend smoke test for export wiring | Random ID/time assertions or missing failure/secret checks. |
 
 ## Rules
