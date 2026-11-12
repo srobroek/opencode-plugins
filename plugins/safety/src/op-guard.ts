@@ -5,13 +5,19 @@
  */
 
 import type { HereDocument } from "@srobroek/opencode-lib"
-import { base, type Command, hasFlag, positionals, SHELLS, walkShell } from "./shell.ts"
+import { base, type Command, expandsParameter, hasFlag, positionals, SHELLS, walkShell, wordText } from "./shell.ts"
 
 export const OP_MESSAGE =
   "safety op-guard: do not call the 1Password CLI directly; each call opens a new 1Password session and asks the user to approve. Run the command through fnox, which reuses its cached session: `fnox exec -- <cmd>`, or `fnox exec --only NAME -- <cmd>`. If the secret is not declared, load the `project-secrets` skill and declare it; if it does not exist yet, ask the user to create it. To find items, run `fnox provider discover <provider> --tags project/<name>`."
 
 export const FNOX_DUMP_MESSAGE =
   "safety op-guard: this fnox command prints secret values into the transcript. Use `fnox check` or `fnox list` to inspect, and `fnox exec -- <cmd>` to use a value."
+
+export const LITERAL_MESSAGE =
+  "safety op-guard: a literal secret in the command lands in the transcript; pass it from a command or variable (`credential=$(cmd)`), or pipe a JSON template to `op item create -`."
+
+export const FNOX_SET_MESSAGE =
+  "safety op-guard: pipe the value into `fnox set NAME --provider host` from a command; a literal value lands in the transcript."
 
 export const NESTING_MESSAGE =
   "safety op-guard: command nesting is too deep to check; run it without nested shells"
@@ -38,28 +44,41 @@ function isOp(name: string): boolean {
   return name === "op" || name === "op.exe"
 }
 
-/** Whether a redirection reads input: `<`, `<<`, `<<<`, `<<-`, `<&` or `<>`, as the scanner parsed it. */
-function readsInput(command: Command): boolean {
-  return command.redirects.some((word) => word.input === true)
-}
+/** Typed fields that hold no secret: a literal value is fine. */
+const PLAIN_TYPES: ReadonlySet<string> = new Set(["text", "url", "email", "date", "monthyear", "phone", "delete"])
+/** Built-in fields that hold no secret, when written without a type. */
+const PLAIN_FIELDS: ReadonlySet<string> = new Set(["username", "url", "notesPlain"])
+/** `op item create|edit` options that take the next word, which may itself contain `=`. */
+const ITEM_VALUED: ReadonlySet<string> = new Set([...OP_VALUED, "--title", "--category", "--url", "--tags", "--template"])
 
-/** Whether a command's stdin comes from a pipe, a here-document or an input redirection. */
-function stdinFed(command: Command): boolean {
-  return command.stage > 0 || command.hereDocuments.length > 0 || readsInput(command)
-}
-
-/** Whether an `op item create` call sets a field value: an assignment, a password, a template or stdin. */
-function setsFieldValues(command: Command, args: readonly string[], fed: boolean): boolean {
-  if (fed || stdinFed(command)) return true
-  return args.some(
-    (arg) =>
-      arg === "-" ||
-      arg === "--template" ||
-      arg.startsWith("--template=") ||
-      arg === "--generate-password" ||
-      arg.startsWith("--generate-password=") ||
-      (!arg.startsWith("-") && arg.includes("=")),
+/** Whether a here-document or here-string feeds literal text, with no expansion to fill in a value. */
+function literalStdin(command: Command): boolean {
+  return (
+    command.hereDocuments.some((document) => document.quoted || !/[$`]/.test(document.body)) ||
+    command.redirects.some((word) => word.hereString === true && !word.expands)
   )
+}
+
+/** Whether `op item create|edit` writes a literal value into a field that may be a secret. */
+function literalSecret(command: Command, args: readonly string[], inheritedLiteral: boolean): boolean {
+  if (inheritedLiteral || literalStdin(command)) return true
+  const offset = command.argv.length - args.length
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i] as string
+    if (ITEM_VALUED.has(arg)) {
+      i++
+      continue
+    }
+    const eq = arg.indexOf("=")
+    if (arg.startsWith("-") || eq < 0) continue
+    if (eq === arg.length - 1) continue
+    if (expandsParameter(command, offset + i)) continue
+    const field = arg.slice(0, eq)
+    const typed = /^(.*)\[([^\]]*)\]$/.exec(field)
+    if (typed ? PLAIN_TYPES.has((typed[2] as string).toLowerCase()) : PLAIN_FIELDS.has(field)) continue
+    return true
+  }
+  return false
 }
 
 /** The words of `allow` (such as "vault list") match the start of the subcommand words. */
@@ -70,17 +89,24 @@ function allowed(words: readonly string[], allow: readonly string[]): boolean {
   })
 }
 
-/** An `op` call that is not one of the read-only or empty-create exceptions nor in `allow`. */
-export function opCall(command: Command, allow: readonly string[] = [], fed = false): boolean {
-  if (!isOp(base(command.argv[0]))) return false
+/**
+ * Why an `op` call is refused: `op` for any call but the exceptions, `literal` for an item write that puts
+ * a possible secret in the command text. `item create|edit`, `whoami`, `vault create <name>`, help, `--version`
+ * and the `allow` prefixes pass. `inheritedLiteral`: a `fnox exec` parent feeds the call literal stdin.
+ */
+export function opRefusal(command: Command, allow: readonly string[] = [], inheritedLiteral = false): "op" | "literal" | undefined {
+  if (!isOp(base(command.argv[0]))) return undefined
   const args = command.argv.slice(1)
-  if (args.includes("--help") || args.includes("-h")) return false
-  if (args.length === 1 && args[0] === "--version") return false
+  if (args.includes("--help") || args.includes("-h")) return undefined
+  if (args.length === 1 && args[0] === "--version") return undefined
   const words = positionals(args, OP_VALUED)
-  if (words[0] === "whoami") return false
-  if (words[0] === "item" && words[1] === "create" && !setsFieldValues(command, args, fed)) return false
-  if (words[0] === "vault" && words[1] === "create" && words[2] !== undefined) return false
-  return !allowed(words, allow)
+  if (words[0] === "whoami") return undefined
+  if (words[0] === "item" && (words[1] === "create" || words[1] === "edit")) {
+    if (args.some((arg) => arg === "--reveal" || arg.startsWith("--reveal="))) return "op"
+    return literalSecret(command, args, inheritedLiteral) ? "literal" : undefined
+  }
+  if (words[0] === "vault" && words[1] === "create" && words[2] !== undefined) return undefined
+  return allowed(words, allow) ? undefined : "op"
 }
 
 const FNOX_VALUED: ReadonlySet<string> = new Set(["-P", "--profile", "-c", "--config", "--age-key-file"])
@@ -101,29 +127,72 @@ function quote(word: string): string {
   return `'${word.replaceAll("'", "'\\''")}'`
 }
 
-/** The command a `fnox exec` runs: after `--`, else its first positional onward. */
-function execInner(args: readonly string[]): string[] {
+/** Index in `args` where the command a `fnox exec` runs begins: after `--`, else the first positional; -1 if none. */
+function execInner(args: readonly string[]): number {
   const dash = args.indexOf("--")
-  if (dash >= 0) return args.slice(dash + 1)
+  if (dash >= 0) return dash + 1 < args.length ? dash + 1 : -1
   const valued = new Set(["--only", "-i", "--if-missing", "-P", "--profile", "-c", "--config"])
   for (let i = 0; i < args.length; i++) {
     const arg = args[i] as string
-    if (!arg.startsWith("-")) return args.slice(i)
+    if (!arg.startsWith("-")) return i
     if (valued.has(arg)) i++
   }
-  return []
+  return -1
+}
+
+export type Verdict = "op" | "dump" | "literal" | "set"
+
+const SET_VALUED: ReadonlySet<string> = new Set([
+  "-d",
+  "--description",
+  "-k",
+  "--key-name",
+  "-p",
+  "--provider",
+  "--default",
+  "--file",
+  "--from-file",
+  "--generate-type",
+  "--if-missing",
+  "--length",
+  "--source",
+])
+
+/** Providers that keep a pasted value in the config or on the host: `host`, and names with an `age` or `keychain` part. */
+function plainProvider(name: string): boolean {
+  const lower = name.toLowerCase()
+  return lower === "host" || lower.split(/[-_.:]/).some((part) => part === "age" || part === "keychain")
+}
+
+/** `fnox set NAME <literal>` with a provider that stores what it is given, with the value in the command text. */
+function literalFnoxSet(command: Command, at: number): boolean {
+  const args = command.argv.slice(at + 1)
+  let provider: string | undefined
+  const positional: number[] = []
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i] as string
+    if (arg === "--provider" || arg === "-p") provider = args[++i]
+    else if (arg.startsWith("--provider=")) provider = arg.slice("--provider=".length)
+    else if (arg.startsWith("-p") && !arg.startsWith("--")) provider = arg.slice(2)
+    else if (SET_VALUED.has(arg)) i++
+    else if (!arg.startsWith("-") || arg === "-") positional.push(at + 1 + i)
+  }
+  // KEY, then VALUE: a second positional that is not an expansion is a literal.
+  const value = positional[1]
+  if (value === undefined || provider === undefined || !plainProvider(provider)) return false
+  return !expandsParameter(command, value)
 }
 
 /** What `fnox` does with this command: dump values, or run an inner command that is refused. */
 export function fnoxRefusal(
   command: Command,
   allow: readonly string[] = [],
-  inherited: { fed: boolean; documents: readonly HereDocument[]; depth: number } = {
-    fed: false,
+  inherited: { literal: boolean; documents: readonly HereDocument[]; depth: number } = {
+    literal: false,
     documents: [],
     depth: 0,
   },
-): "op" | "dump" | undefined {
+): Verdict | undefined {
   if (inherited.depth > MAX_NESTING) throw new NestingTooDeep()
   if (base(command.argv[0]) !== "fnox") return undefined
   const argv = command.argv
@@ -143,13 +212,17 @@ export function fnoxRefusal(
   if (sub === "get" || sub === "export" || sub === "env") return "dump"
   if (sub === "list" || sub === "ls" || sub === "secrets")
     return hasFlag(args, "V", ["--values"]) ? "dump" : undefined
+  if (sub === "set" || sub === "s") return literalFnoxSet(command, at) ? "set" : undefined
   if (sub !== "exec") return undefined
-  const inner = execInner(args)
-  if (inner.length === 0) return undefined
+  const start = execInner(args)
+  if (start < 0) return undefined
+  const first = at + 1 + start
+  // Rebuild the child from its source words so an expansion stays an expansion.
+  const inner = argv.slice(first)
   // The child inherits fnox's stdin and here-documents, through wrappers and nested fnox.
   const documents = [...inherited.documents, ...command.hereDocuments]
-  const fed = inherited.fed || stdinFed(command)
-  const children = walkShell(inner.map(quote).join(" ")).commands
+  const literal = inherited.literal || literalStdin(command)
+  const children = walkShell(inner.map((word, i) => wordText(command, first + i) ?? quote(word)).join(" ")).commands
   // A here-document fed to the shell left after the wrappers is that shell's script. The shell
   // reads all of stdin, so a parsed document is consumed: an inner level never gets it again.
   const scripts = children
@@ -157,23 +230,36 @@ export function fnoxRefusal(
     .filter((nested) => !nested.argv.some((word) => /^-[A-Za-z]*c[A-Za-z]*$/.test(word)))
   const bodies = scripts.length === 0 ? [] : documents.flatMap((document) => walkShell(document.body).commands)
   const rest = scripts.length === 0 ? documents : []
-  for (const nested of [...children, ...bodies]) {
+  const check = (nested: Command, literalStdin: boolean): Verdict | undefined => {
     if (dumpsEnvironment(nested)) return "dump"
-    if (opCall(nested, allow, fed)) return "op"
-    const again = fnoxRefusal(nested, allow, { fed, documents: rest, depth: inherited.depth + 1 })
-    if (again !== undefined) return again
+    const op = opRefusal(nested, allow, literalStdin)
+    if (op !== undefined) return op
+    return fnoxRefusal(nested, allow, { literal: literalStdin, documents: rest, depth: inherited.depth + 1 })
+  }
+  for (const nested of children) {
+    const found = check(nested, literal)
+    if (found !== undefined) return found
+  }
+  for (const nested of bodies) {
+    const found = check(nested, false)
+    if (found !== undefined) return found
   }
   return undefined
+}
+
+const MESSAGES: Record<Verdict, string> = {
+  op: OP_MESSAGE,
+  dump: FNOX_DUMP_MESSAGE,
+  literal: LITERAL_MESSAGE,
+  set: FNOX_SET_MESSAGE,
 }
 
 /** The op-guard verdict for a call's commands, or `undefined`. Fails closed when its own analysis throws. */
 export function opGuard(commands: readonly Command[], allow: readonly string[] = []): string | undefined {
   try {
     for (const command of commands) {
-      if (opCall(command, allow)) return OP_MESSAGE
-      const fnox = fnoxRefusal(command, allow)
-      if (fnox === "op") return OP_MESSAGE
-      if (fnox === "dump") return FNOX_DUMP_MESSAGE
+      const found = opRefusal(command, allow) ?? fnoxRefusal(command, allow)
+      if (found !== undefined) return MESSAGES[found]
     }
     return undefined
   } catch (error) {

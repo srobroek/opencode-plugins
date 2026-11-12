@@ -653,7 +653,7 @@ function scanShell(source, options = {}) {
   let command = { kind: "command", words: [], redirects: [], hereDocuments: [] };
   let word;
   let target;
-  let targetReadsInput = false;
+  let targetHereString = false;
   const pending = [];
   const append = (at, text, quoted = false, expands = false) => {
     word ??= { start: at, value: "", quoted: false, expands: false };
@@ -672,8 +672,8 @@ function scanShell(source, options = {}) {
     const done = { start: word.start, end, value: word.value, quoted: word.quoted, expands: word.expands };
     word = undefined;
     if (target !== undefined) {
-      if (targetReadsInput)
-        done.input = true;
+      if (targetHereString)
+        done.hereString = true;
       command.redirects.push(done);
       if (target !== "redirect")
         pending.push({
@@ -846,7 +846,7 @@ function scanShell(source, options = {}) {
     if (ch === "&" && next === ">") {
       flush(i);
       target = "redirect";
-      targetReadsInput = false;
+      targetHereString = false;
       i += source[i + 2] === ">" ? 2 : 1;
       continue;
     }
@@ -865,7 +865,7 @@ function scanShell(source, options = {}) {
         word = undefined;
       else
         flush(i);
-      targetReadsInput = ch === "<";
+      targetHereString = source.startsWith("<<<", i);
       if (source.startsWith("<<<", i)) {
         target = "redirect";
         i += 2;
@@ -2092,6 +2092,8 @@ function hasAttribution(text) {
 // plugins/safety/src/op-guard.ts
 var OP_MESSAGE = "safety op-guard: do not call the 1Password CLI directly; each call opens a new 1Password session and asks the user to approve. Run the command through fnox, which reuses its cached session: `fnox exec -- <cmd>`, or `fnox exec --only NAME -- <cmd>`. If the secret is not declared, load the `project-secrets` skill and declare it; if it does not exist yet, ask the user to create it. To find items, run `fnox provider discover <provider> --tags project/<name>`.";
 var FNOX_DUMP_MESSAGE = "safety op-guard: this fnox command prints secret values into the transcript. Use `fnox check` or `fnox list` to inspect, and `fnox exec -- <cmd>` to use a value.";
+var LITERAL_MESSAGE = "safety op-guard: a literal secret in the command lands in the transcript; pass it from a command or variable (`credential=$(cmd)`), or pipe a JSON template to `op item create -`.";
+var FNOX_SET_MESSAGE = "safety op-guard: pipe the value into `fnox set NAME --provider host` from a command; a literal value lands in the transcript.";
 var NESTING_MESSAGE = "safety op-guard: command nesting is too deep to check; run it without nested shells";
 var CHECK_FAILED_MESSAGE = "safety op-guard: could not check this command; run `op` and fnox commands directly, without nesting";
 var MAX_NESTING = 16;
@@ -2110,16 +2112,36 @@ var OP_VALUED = new Set([
 function isOp(name) {
   return name === "op" || name === "op.exe";
 }
-function readsInput(command) {
-  return command.redirects.some((word) => word.input === true);
+var PLAIN_TYPES = new Set(["text", "url", "email", "date", "monthyear", "phone", "delete"]);
+var PLAIN_FIELDS = new Set(["username", "url", "notesPlain"]);
+var ITEM_VALUED = new Set([...OP_VALUED, "--title", "--category", "--url", "--tags", "--template"]);
+function literalStdin(command) {
+  return command.hereDocuments.some((document) => document.quoted || !/[$`]/.test(document.body)) || command.redirects.some((word) => word.hereString === true && !word.expands);
 }
-function stdinFed(command) {
-  return command.stage > 0 || command.hereDocuments.length > 0 || readsInput(command);
-}
-function setsFieldValues(command, args, fed) {
-  if (fed || stdinFed(command))
+function literalSecret(command, args, inheritedLiteral) {
+  if (inheritedLiteral || literalStdin(command))
     return true;
-  return args.some((arg) => arg === "-" || arg === "--template" || arg.startsWith("--template=") || arg === "--generate-password" || arg.startsWith("--generate-password=") || !arg.startsWith("-") && arg.includes("="));
+  const offset = command.argv.length - args.length;
+  for (let i = 0;i < args.length; i++) {
+    const arg = args[i];
+    if (ITEM_VALUED.has(arg)) {
+      i++;
+      continue;
+    }
+    const eq = arg.indexOf("=");
+    if (arg.startsWith("-") || eq < 0)
+      continue;
+    if (eq === arg.length - 1)
+      continue;
+    if (expandsParameter(command, offset + i))
+      continue;
+    const field = arg.slice(0, eq);
+    const typed = /^(.*)\[([^\]]*)\]$/.exec(field);
+    if (typed ? PLAIN_TYPES.has(typed[2].toLowerCase()) : PLAIN_FIELDS.has(field))
+      continue;
+    return true;
+  }
+  return false;
 }
 function allowed(words, allow) {
   return allow.some((entry) => {
@@ -2127,22 +2149,25 @@ function allowed(words, allow) {
     return prefix.length > 0 && prefix.every((word, i) => words[i] === word);
   });
 }
-function opCall(command, allow = [], fed = false) {
+function opRefusal(command, allow = [], inheritedLiteral = false) {
   if (!isOp(base(command.argv[0])))
-    return false;
+    return;
   const args = command.argv.slice(1);
   if (args.includes("--help") || args.includes("-h"))
-    return false;
+    return;
   if (args.length === 1 && args[0] === "--version")
-    return false;
+    return;
   const words = positionals(args, OP_VALUED);
   if (words[0] === "whoami")
-    return false;
-  if (words[0] === "item" && words[1] === "create" && !setsFieldValues(command, args, fed))
-    return false;
+    return;
+  if (words[0] === "item" && (words[1] === "create" || words[1] === "edit")) {
+    if (args.some((arg) => arg === "--reveal" || arg.startsWith("--reveal=")))
+      return "op";
+    return literalSecret(command, args, inheritedLiteral) ? "literal" : undefined;
+  }
   if (words[0] === "vault" && words[1] === "create" && words[2] !== undefined)
-    return false;
-  return !allowed(words, allow);
+    return;
+  return allowed(words, allow) ? undefined : "op";
 }
 var FNOX_VALUED = new Set(["-P", "--profile", "-c", "--config", "--age-key-file"]);
 function dumpsEnvironment(command) {
@@ -2166,19 +2191,60 @@ function quote2(word) {
 function execInner(args) {
   const dash = args.indexOf("--");
   if (dash >= 0)
-    return args.slice(dash + 1);
+    return dash + 1 < args.length ? dash + 1 : -1;
   const valued = new Set(["--only", "-i", "--if-missing", "-P", "--profile", "-c", "--config"]);
   for (let i = 0;i < args.length; i++) {
     const arg = args[i];
     if (!arg.startsWith("-"))
-      return args.slice(i);
+      return i;
     if (valued.has(arg))
       i++;
   }
-  return [];
+  return -1;
+}
+var SET_VALUED = new Set([
+  "-d",
+  "--description",
+  "-k",
+  "--key-name",
+  "-p",
+  "--provider",
+  "--default",
+  "--file",
+  "--from-file",
+  "--generate-type",
+  "--if-missing",
+  "--length",
+  "--source"
+]);
+function plainProvider(name) {
+  const lower = name.toLowerCase();
+  return lower === "host" || lower.split(/[-_.:]/).some((part) => part === "age" || part === "keychain");
+}
+function literalFnoxSet(command, at) {
+  const args = command.argv.slice(at + 1);
+  let provider;
+  const positional = [];
+  for (let i = 0;i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--provider" || arg === "-p")
+      provider = args[++i];
+    else if (arg.startsWith("--provider="))
+      provider = arg.slice("--provider=".length);
+    else if (arg.startsWith("-p") && !arg.startsWith("--"))
+      provider = arg.slice(2);
+    else if (SET_VALUED.has(arg))
+      i++;
+    else if (!arg.startsWith("-") || arg === "-")
+      positional.push(at + 1 + i);
+  }
+  const value = positional[1];
+  if (value === undefined || provider === undefined || !plainProvider(provider))
+    return false;
+  return !expandsParameter(command, value);
 }
 function fnoxRefusal(command, allow = [], inherited = {
-  fed: false,
+  literal: false,
   documents: [],
   depth: 0
 }) {
@@ -2206,38 +2272,53 @@ function fnoxRefusal(command, allow = [], inherited = {
     return "dump";
   if (sub === "list" || sub === "ls" || sub === "secrets")
     return hasFlag(args, "V", ["--values"]) ? "dump" : undefined;
+  if (sub === "set" || sub === "s")
+    return literalFnoxSet(command, at) ? "set" : undefined;
   if (sub !== "exec")
     return;
-  const inner = execInner(args);
-  if (inner.length === 0)
+  const start = execInner(args);
+  if (start < 0)
     return;
+  const first = at + 1 + start;
+  const inner = argv.slice(first);
   const documents = [...inherited.documents, ...command.hereDocuments];
-  const fed = inherited.fed || stdinFed(command);
-  const children = walkShell(inner.map(quote2).join(" ")).commands;
+  const literal = inherited.literal || literalStdin(command);
+  const children = walkShell(inner.map((word, i) => wordText(command, first + i) ?? quote2(word)).join(" ")).commands;
   const scripts = children.filter((nested) => nested.context === "top" && SHELLS.has(base(nested.argv[0]))).filter((nested) => !nested.argv.some((word) => /^-[A-Za-z]*c[A-Za-z]*$/.test(word)));
   const bodies = scripts.length === 0 ? [] : documents.flatMap((document) => walkShell(document.body).commands);
   const rest = scripts.length === 0 ? documents : [];
-  for (const nested of [...children, ...bodies]) {
+  const check = (nested, literalStdin) => {
     if (dumpsEnvironment(nested))
       return "dump";
-    if (opCall(nested, allow, fed))
-      return "op";
-    const again = fnoxRefusal(nested, allow, { fed, documents: rest, depth: inherited.depth + 1 });
-    if (again !== undefined)
-      return again;
+    const op = opRefusal(nested, allow, literalStdin);
+    if (op !== undefined)
+      return op;
+    return fnoxRefusal(nested, allow, { literal: literalStdin, documents: rest, depth: inherited.depth + 1 });
+  };
+  for (const nested of children) {
+    const found = check(nested, literal);
+    if (found !== undefined)
+      return found;
+  }
+  for (const nested of bodies) {
+    const found = check(nested, false);
+    if (found !== undefined)
+      return found;
   }
   return;
 }
+var MESSAGES = {
+  op: OP_MESSAGE,
+  dump: FNOX_DUMP_MESSAGE,
+  literal: LITERAL_MESSAGE,
+  set: FNOX_SET_MESSAGE
+};
 function opGuard(commands, allow = []) {
   try {
     for (const command of commands) {
-      if (opCall(command, allow))
-        return OP_MESSAGE;
-      const fnox = fnoxRefusal(command, allow);
-      if (fnox === "op")
-        return OP_MESSAGE;
-      if (fnox === "dump")
-        return FNOX_DUMP_MESSAGE;
+      const found = opRefusal(command, allow) ?? fnoxRefusal(command, allow);
+      if (found !== undefined)
+        return MESSAGES[found];
     }
     return;
   } catch (error) {
@@ -2254,7 +2335,7 @@ var GUARD_IDS = [
   "git-defender",
   "op-guard"
 ];
-var MESSAGES = {
+var MESSAGES2 = {
   indirection: "Blocked by safety (bash-indirection-guard): this destructive command targets an unexpanded variable, command substitution, or backtick expression, so its path cannot be verified. Resolve the target and re-issue a literal command; a quoted variable is accepted only after a bare `--` end-of-options marker.",
   "remote-exec": "Blocked by safety (remote-exec-guard): this command would execute content fetched from the network without review: a download piped into a shell, a shell or `eval` running a fetch's output, or a netcat invocation with an exec flag. Download to a file, inspect it, and run only an explicitly reviewed script.",
   attribution: "Blocked by safety (attribution-guard): this commit message carries AI-assistant attribution (a Co-authored-by trailer naming an assistant, a 'Generated with' line, or an assistant noreply address). Rewrite the `-m`/`--message` text, the `--trailer`, or the file supplied to `-F`/`--file`, so the commit names only the human author.",
@@ -2473,7 +2554,7 @@ function gitDefender(command) {
 }
 function hardGate(source, cwd, options = {}) {
   const on = (guard) => options.disabled?.has(guard) !== true;
-  const refuse = (guard) => ({ guard, reason: MESSAGES[guard] });
+  const refuse = (guard) => ({ guard, reason: MESSAGES2[guard] });
   let failure;
   let refusal;
   try {
@@ -4042,7 +4123,7 @@ var src_default = createPlugin();
 export {
   FEATURE_IDS,
   INVESTIGATE_NOTICE,
-  MESSAGES,
+  MESSAGES2 as MESSAGES,
   applyDecision,
   collectSecrets,
   createPlugin,

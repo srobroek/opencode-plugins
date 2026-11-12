@@ -170,8 +170,8 @@ export type ShellWord = {
    * or process substitution, a leading tilde, or an unquoted glob or brace pattern.
    */
   expands: boolean
-  /** On a redirection word: the operator reads input (`<`, `<<`, `<<<`, `<&`, `<>`). */
-  input?: true
+  /** On a redirection word: the operator is `<<<`, so the word is the here-string text. */
+  hereString?: true
 }
 
 export type HereDocument = { body: string; quoted: boolean }
@@ -218,7 +218,7 @@ export function scanShell(source: string, options: { executableSubstitutionsOnly
   let command: SimpleCommand = { kind: "command", words: [], redirects: [], hereDocuments: [] }
   let word: { start: number; value: string; quoted: boolean; expands: boolean } | undefined
   let target: "redirect" | "here-document" | "here-document-tabs" | undefined
-  let targetReadsInput = false
+  let targetHereString = false
   const pending: { delimiter: string; stripTabs: boolean; quoted: boolean; owner: SimpleCommand }[] = []
 
   const append = (at: number, text: string, quoted = false, expands = false): void => {
@@ -236,7 +236,7 @@ export function scanShell(source: string, options: { executableSubstitutionsOnly
     const done: ShellWord = { start: word.start, end, value: word.value, quoted: word.quoted, expands: word.expands }
     word = undefined
     if (target !== undefined) {
-      if (targetReadsInput) done.input = true
+      if (targetHereString) done.hereString = true
       command.redirects.push(done)
       if (target !== "redirect")
         pending.push({
@@ -394,7 +394,7 @@ export function scanShell(source: string, options: { executableSubstitutionsOnly
     if (ch === "&" && next === ">") {
       flush(i)
       target = "redirect"
-      targetReadsInput = false
+      targetHereString = false
       i += source[i + 2] === ">" ? 2 : 1
       continue
     }
@@ -413,7 +413,7 @@ export function scanShell(source: string, options: { executableSubstitutionsOnly
       if (word !== undefined && !word.quoted && !word.expands && /^(?:\d+|\{[A-Za-z_]\w*\})$/.test(word.value))
         word = undefined
       else flush(i)
-      targetReadsInput = ch === "<"
+      targetHereString = source.startsWith("<<<", i)
       if (source.startsWith("<<<", i)) {
         target = "redirect"
         i += 2

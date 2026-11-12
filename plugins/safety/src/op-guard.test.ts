@@ -3,7 +3,12 @@ import { Error as ToolError } from "@opencode/plugin/promise/tool"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
 import { type GuardOptions, hardGate } from "./guards.ts"
 import { createPlugin, readOptions } from "./index.ts"
-import { CHECK_FAILED_MESSAGE, FNOX_DUMP_MESSAGE, MAX_NESTING, NESTING_MESSAGE, OP_MESSAGE } from "./op-guard.ts"
+import {
+  CHECK_FAILED_MESSAGE,
+  FNOX_DUMP_MESSAGE,
+  FNOX_SET_MESSAGE,
+  LITERAL_MESSAGE,
+  MAX_NESTING, NESTING_MESSAGE, OP_MESSAGE } from "./op-guard.ts"
 
 const gate = (command: string, options: GuardOptions = {}) => hardGate(command, "/", options)
 
@@ -23,12 +28,6 @@ const REFUSED_OP = [
   "command op read op://x",
   "for i in 1 2; do op read $i; done",
   "if true; then op read x; else op signin; fi",
-  "op item create --title t foo=bar",
-  "op item create --title t 'f[password]=bar'",
-  "op item create --template t.json",
-  "op item create -",
-  "cat t.json | op item create",
-  "op item create < t.json",
   "op vault list",
   "op vault delete x",
   "op vault edit x",
@@ -37,22 +36,55 @@ const REFUSED_OP = [
   "fnox exec -- bash -c 'op read x'",
   "fnox exec -- bash <<'EOF'\nop read op://x\nEOF",
   "fnox exec -- sh <<EOF\nenv A=1 op item get x\nEOF",
-  "fnox exec -- op item create --title t <<EOF\n{}\nEOF",
-  "cat t.json | fnox exec -- op item create --title t",
-  "fnox exec -- op item create --title t < t.json",
-  "op item create --title t --generate-password",
-  "op item create --title t --generate-password=letters,digits,32",
-  "op item create --title t --generate-password < /dev/null",
-  "op item create --title t <&3",
-  "op item create --title t <<< x",
   "fnox exec -- env bash <<'EOF'\nop read x\nEOF",
   "fnox exec -- timeout 5 sh <<'EOF'\nop read x\nEOF",
   "fnox exec -- fnox exec -- bash <<'EOF'\nop read x\nEOF",
   "fnox exec -- sudo -u x env bash -s <<'EOF'\nop read x\nEOF",
-  "op item create --title t <\\\nfile",
-  "op item create --title t 0<\\\nfile",
-  "fnox exec -- op item create --title t <\\\nfile",
-  "fnox exec -- fnox exec -- op item create --title t < file",
+]
+
+const REFUSED_LITERAL = [
+  "op item create --title t foo=bar",
+  "op item create --title t 'f[password]=bar'",
+  "op item create --title t 'f[concealed]=bar'",
+  "op item create --title t password=hunter2",
+  "op item create --title t credential=abc",
+  "op item create --title t 'credential=$TOKEN'",
+  "op item edit x password=hunter2",
+  "op item edit x 'f[password]=abc'",
+  "op item create --title t 'sec.f=abc'",
+  "op item create --title t 'f[otp]=abc'",
+  "op item create --title t 'url=https://x' password=abc",
+  "op item create --title t <<< x",
+  "op item create --title t - <<< '{\"password\":\"x\"}'",
+  "op item create - <<'EOF'\n{\"password\":\"x\"}\nEOF",
+  "op item create - <<EOF\n{\"password\":\"x\"}\nEOF",
+  "fnox exec -- op item create - <<'EOF'\n{\"password\":\"x\"}\nEOF",
+  "fnox exec -- fnox exec -- op item create - <<EOF\n{}\nEOF",
+  "fnox exec -- op item create --title t password=abc",
+  "bash -c 'op item edit x password=abc'",
+]
+
+const REFUSED_REVEAL = [
+  "op item create --title t --reveal",
+  "op item edit x --reveal",
+  "op item edit x --reveal=true",
+  "fnox exec -- op item edit x --reveal",
+  "op item create - --reveal < t.json",
+]
+
+const REFUSED_SET = [
+  "fnox set NAME hunter2 --provider host",
+  "fnox set NAME hunter2 -p host",
+  "fnox set NAME hunter2 -phost",
+  "fnox set NAME hunter2 --provider=host",
+  "fnox set NAME hunter2 --provider age",
+  "fnox set NAME hunter2 --provider team-age",
+  "fnox set NAME hunter2 --provider keychain",
+  "fnox set NAME --provider host hunter2",
+  "fnox -P prod set NAME hunter2 --provider host",
+  "fnox set NAME 'a b' --provider host -d desc",
+  "fnox exec -- fnox set NAME hunter2 --provider host",
+  "bash -c 'fnox set NAME hunter2 --provider host'",
 ]
 
 const REFUSED_DUMP = [
@@ -85,6 +117,48 @@ const REFUSED_DUMP = [
 ]
 
 const PASSED = [
+  // item writes: values from stdin, a template, a generator, an expansion or a plain typed field
+  "op item create --title t - < t.json",
+  "op item create --vault v - < t.json",
+  "cat t.json | op item create -",
+  "cat t.json | op item create --vault V",
+  "jq -n --arg v \"$(openssl rand -hex 32)\" '{title:$v}' | op item create --vault V -",
+  "op item create --template t.json --vault v",
+  "op item create --template=t.json",
+  "op item edit x --template t.json",
+  "op item create --title t --generate-password",
+  "op item create --title t --generate-password=letters,digits,32",
+  "op item edit x --generate-password",
+  "op item create --title t \"credential=$TOKEN\"",
+  "op item create --title t \"password=$(cmd)\"",
+  "op item edit x \"f[password]=$(cmd)\"",
+  "op item create --title t 'host[text]=db.example.com'",
+  "op item create --title t 'site[url]=https://x.example'",
+  "op item create --title t 'mail[email]=a@b.c'",
+  "op item create --title t 'd[date]=2026-01-01' 'm[monthYear]=202601' 'p[phone]=555'",
+  "op item create --title t username=alice url=https://x notesPlain=hello",
+  "op item edit x username=alice",
+  "op item create --title 'a=b' --url 'https://x?a=b' --vault v",
+  "op item create --title t > out.json",
+  "op item create --title t - < t.json > out.json 2>/dev/null",
+  "fnox exec -- op item create --title t - < t.json",
+  "cat t.json | fnox exec -- op item create -",
+  "fnox exec -- fnox exec -- op item create --title t \"password=$X\"",
+  "fnox exec -- bash <<'EOF'\nop item create --title t --generate-password\nEOF",
+  // fnox set
+  "fnox set NAME --provider host",
+  "printf '%s' \"$TOKEN\" | fnox set NAME --provider host",
+  "cmd | fnox set NAME -p host",
+  "fnox set NAME --provider host --generate",
+  "fnox set NAME --generate --length 48 --provider age",
+  "fnox set NAME \"$TOKEN\" --provider host",
+  "fnox set NAME \"$(cmd)\" --provider host",
+  "fnox set NAME --from-file key.txt --provider host",
+  "fnox set NAME 'item/field' --provider proj",
+  "fnox set NAME 'item/field' --provider op",
+  "fnox set NAME hunter2",
+  "fnox set NAME hunter2 --provider other",
+  "fnox set NAME hunter2 --provider team",
   "echo \"op read\"",
   "grep 'op read' f",
   "git commit -m \"op read\"",
@@ -129,6 +203,18 @@ describe("op-guard", () => {
   for (const command of REFUSED_OP)
     test(`refuses ${command}`, () => {
       expect(gate(command)).toEqual({ guard: "op-guard", reason: OP_MESSAGE })
+    })
+  for (const command of REFUSED_LITERAL)
+    test(`refuses literal ${command}`, () => {
+      expect(gate(command)).toEqual({ guard: "op-guard", reason: LITERAL_MESSAGE })
+    })
+  for (const command of REFUSED_REVEAL)
+    test(`refuses reveal ${command}`, () => {
+      expect(gate(command)).toEqual({ guard: "op-guard", reason: OP_MESSAGE })
+    })
+  for (const command of REFUSED_SET)
+    test(`refuses fnox set ${command}`, () => {
+      expect(gate(command)).toEqual({ guard: "op-guard", reason: FNOX_SET_MESSAGE })
     })
   for (const command of REFUSED_DUMP)
     test(`refuses dump ${command}`, () => {
