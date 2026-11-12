@@ -29,24 +29,16 @@ A `feat` MR/PR names a real flag; `Flag: none` is not valid for it. A rollout PR
 
 ## Choose the mechanism
 
-Follow the repository's existing flag mechanism when it has one. Otherwise:
+Follow the repository's existing flag mechanism when it has one, keeping these boundaries:
 
-- **Applications and services:** evaluate flags through the [OpenFeature](https://openfeature.dev/docs/reference/concepts/evaluation-api) SDK for the language. The code calls one vendor-neutral API, and a [provider](https://openfeature.dev/specification/sections/providers/) connects it to the backend. When both the old and new backend have a provider, moving from a config file to SSM Parameter Store or a hosted service changes only the provider, not every call site. OpenFeature is only the API: when no maintained provider exists for the backend in your language, write one in the repository's flag module and test it, including the fall back to off.
-- **CLIs, libraries, OpenCode plugins, and developer tools:** use one small accessor module over an environment variable or command-line option, such as `isEnabled("tally-priority")` reading `TALLY_PRIORITY=1`. A flag SDK is more machinery than a local switch needs, and a library should not impose one on its callers. Keep the accessor's shape (`isEnabled(name)` with an off default) so a later move to OpenFeature changes only that module.
+- Put typed keys, defaults and metadata in one flag module. Feature code never reads environment, config, SSM or AppConfig directly. Decide once at the request or job edge and inject the decision.
+- **Applications and services:** use the [OpenFeature](https://openfeature.dev/docs/reference/concepts/evaluation-api) SDK when a maintained provider exists. Otherwise wrap the backend in the flag module behind `isEnabled(key, context)`. A custom provider needs approval. A provider swap preserves the API. Targeting, bucketing and analytics need separate migration checks.
+- **CLIs, libraries and OpenCode plugins:** use a local option or environment accessor, such as `isEnabled("tally-priority")` reading `TALLY_PRIORITY=1`. Libraries take caller decisions and never fetch flags.
+- **AWS runtime flags:** default to an [AppConfig feature flag profile](https://docs.aws.amazon.com/appconfig/latest/userguide/appconfig-creating-configuration-and-profile-feature-flags.html) through the AppConfig Agent (Lambda extension on Lambda), with validators, deployment strategies and alarm rollback. SSM Parameter Store is for static settings, not the default rollout engine. Entitlements and tenant permissions belong in the domain database; rollout flags may restrict authorized access, never grant it.
+- Temporary release flags default off to preserve existing behavior. Give each flag an explicit outage default and staleness policy; `false` must not disable a protection. Rust OpenFeature returns errors that the module maps to that default.
 
-Pick the backend by where the code runs:
+For code and storage details, read `quality-code-design`'s `feature-flags.md`; for AWS service specifics, read `aws-guidance`. Several teams or non-AWS services can use a hosted service with an OpenFeature provider or `flagd`; experiments need exposure and outcome metrics.
 
-| Where the code runs | Backend (OpenFeature provider) | How it is switched |
-| --- | --- | --- |
-| Application with a config file | A file- or environment-based provider, or a small one in the repository's flag module | Config change, no rebuild |
-| Service on AWS (default) | [AWS Systems Manager Parameter Store](https://docs.aws.amazon.com/systems-manager/latest/userguide/systems-manager-parameter-store.html), through OpenFeature's AWS SSM provider for [Go](https://pkg.go.dev/github.com/open-feature/go-sdk-contrib/providers/aws-ssm) or [Python](https://pypi.org/project/openfeature-provider-aws-ssm/) | Update the parameter, for example `aws ssm put-parameter --overwrite`; the change applies on the provider's next read |
-| Service on AWS needing gradual rollout or segment targeting | An [AWS AppConfig feature flag profile](https://docs.aws.amazon.com/appconfig/latest/userguide/appconfig-creating-configuration-and-profile-feature-flags.html), read through the AppConfig Agent or Lambda extension | An AppConfig [deployment](https://docs.aws.amazon.com/appconfig/latest/userguide/deploying-feature-flags.html) with a deployment strategy, which supports gradual rollout and rollback |
-| Several teams, percentage targeting, or experiments | A hosted flag service's OpenFeature provider | The flag service's console or API |
-
-Check provider availability for your language before choosing a backend. The AWS SSM providers above are maintained in OpenFeature's own contrib projects; no JavaScript or TypeScript SSM provider was found when this guidance was written. AppConfig has no AWS- or OpenFeature-maintained provider, only third-party ones for [Go](https://github.com/Arthur1/openfeature-provider-go-aws-appconfig) and [Java](https://github.com/lavenderses/aws-appconfig-openfeature-provider-java). Without a maintained provider, write a thin one in the repository's flag module rather than calling SSM or AppConfig from feature code. Pin and review third-party providers like any dependency.
-
-- Read every flag through one place: the OpenFeature client or the accessor module. Do not scatter raw environment, config, SSM, or AppConfig reads through the code.
-- Make "off" the default in code, so a missing flag, an unreachable backend, or no provider at all disables the feature. Without a provider, OpenFeature's evaluation API returns the supplied default.
 - In tests, use the SDK's in-memory provider (for example the [JavaScript](https://github.com/open-feature/js-sdk/blob/main/packages/server/src/provider/in-memory-provider/in-memory-provider.ts), [Go](https://pkg.go.dev/github.com/open-feature/go-sdk/openfeature/memprovider), or [Java](https://github.com/open-feature/java-sdk/blob/main/src/main/java/dev/openfeature/sdk/providers/memory/InMemoryProvider.java) one) to run both flag states without a backend.
 - Use the same name in code, config, the backend, and the `Flag:` line.
 - State in the MR/PR description how to turn the flag on, for example `TALLY_PRIORITY=1` or the AppConfig profile and flag key.

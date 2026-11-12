@@ -31,7 +31,7 @@ The research identified no official Rust Powertools distribution. Compose the fo
 | Idempotency | `aws-sdk-dynamodb` `1` conditional writes, TTL and in-progress/completed records | Downstream operation token or an existing reviewed shared component | Handler-local check-then-write or invocation IDs as business deduplication keys. |
 | Batch failures | Official event types and partial-response contract | Existing reviewed batch component | Silent acknowledgment, full-batch replay for isolated failure, broken FIFO ordering. |
 | Parameters | SDK `1` with extension/agent or bounded TTL cache | Direct SDK for writes/strict freshness | Fetching unchanged secrets per record. |
-| Feature flags | AppConfig agent and typed evaluation | Existing reviewed provider | Inventing Powertools/OpenFeature Rust support or a custom rules engine. |
+| Feature flags | AppConfig native feature flag profile through Agent Lambda extension and a typed module; `open-feature` `0.3` (pre-1.0) with a maintained provider | Typed Agent wrapper when no maintained provider exists; map SDK errors to explicit defaults | Inventing official Rust Powertools or automatic defaults; see `aws-guidance` and `quality-code-design`'s `feature-flags.md`. |
 
 ## Service clients: library versus raw SDK
 

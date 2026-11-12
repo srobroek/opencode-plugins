@@ -68,7 +68,7 @@ Starting points, not rules:
 | Background work | A durable queue or workflow engine with idempotent handlers, never in-process fire-and-forget for work that must survive |
 | Service clients | The SDK for control-plane calls and simple exact requests; a maintained higher-level library when it removes a concrete burden (mapping, pagination, multipart, leasing, caching, replay) or is markedly simpler, even when an official helper exists |
 | IDs and time | UUIDv7 for sortable ids (UUIDv4 when creation time must stay private); timezone-aware UTC instants |
-| Feature flags | OpenFeature SDK with the provider you use |
+| Feature flags | Applications/services: OpenFeature SDK with a maintained provider, else a typed backend wrapper; CLIs/libraries/plugins: local accessor or caller option. See `quality-code-design`'s `feature-flags.md` |
 | MCP | The official SDK for the language, pinned; stdio locally, Streamable HTTP remotely |
 | Tests | The language's standard runner, property tests for invariants, real dependencies in containers for integration tests |
 
