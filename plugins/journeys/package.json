@@ -15,7 +15,11 @@
   ],
   "opencode-plugins": {
     "claude": false,
-    "codex": false
+    "codex": false,
+    "scope": "project",
+    "signals": [
+      "journeys/"
+    ]
   },
   "peerDependencies": {
     "@opencode/plugin": "^2.1.4"

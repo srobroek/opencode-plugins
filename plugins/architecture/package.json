@@ -14,7 +14,8 @@
     "agents"
   ],
   "opencode-plugins": {
-    "description": "Architecture skills: capability-first top-level layout, ownership boundaries, and durable docs/ project knowledge."
+    "description": "Architecture skills: capability-first top-level layout, ownership boundaries, and durable docs/ project knowledge.",
+    "scope": "global"
   },
   "peerDependencies": {
     "@opencode/plugin": "^2.1.4"

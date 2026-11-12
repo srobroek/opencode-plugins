@@ -86,6 +86,15 @@ describe("readPlugin", () => {
 })
 
 describe("render and write", () => {
+  test("accepts plugin-table keys and renders the same output without them", () => {
+    plugin("alpha", { "opencode-plugins": { scope: "project", signals: ["x/"], requires: ["beta"] } }, { one: skill("one") })
+    plugin("beta", { "opencode-plugins": { scope: "global" } }, { two: skill("two") })
+    const withKeys = render(root, readPlugins(root))
+    plugin("alpha", {}, { one: skill("one") })
+    plugin("beta", {}, { two: skill("two") })
+    expect(render(root, readPlugins(root))).toEqual(withKeys)
+  })
+
   test("writes both marketplaces and per-plugin manifests for exported plugins only", () => {
     plugin("alpha", {}, { one: skill("one") })
     plugin("beta", { "opencode-plugins": { codex: false } }, { two: skill("two") })
