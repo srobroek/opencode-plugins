@@ -13,7 +13,8 @@
     "skills"
   ],
   "opencode-plugins": {
-    "description": "Pack a local or remote repo into one file with repomix for bulk context: external repos, module packs and version diffs."
+    "description": "Pack a local or remote repo into one file with repomix for bulk context: external repos, module packs and version diffs.",
+    "scope": "global"
   },
   "peerDependencies": {
     "@opencode/plugin": "^2.1.4"

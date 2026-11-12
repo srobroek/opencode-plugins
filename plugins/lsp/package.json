@@ -21,5 +21,11 @@
   },
   "devDependencies": {
     "@srobroek/opencode-lib": "workspace:*"
+  },
+  "opencode-plugins": {
+    "scope": "project",
+    "signals": [
+      "edit results should carry language-server errors, and lsp-tools-mcp is installed"
+    ]
   }
 }

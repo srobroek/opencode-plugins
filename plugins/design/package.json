@@ -16,7 +16,12 @@
     ".mcp.json"
   ],
   "opencode-plugins": {
-    "description": "UI and UX design skills: design-system audit, DESIGN.md, rendered-surface review, accessibility audit, motion, microcopy, prototypes, and wireframes."
+    "description": "UI and UX design skills: design-system audit, DESIGN.md, rendered-surface review, accessibility audit, motion, microcopy, prototypes, and wireframes.",
+    "scope": "project",
+    "signals": [
+      "a frontend project: package.json depends on react, vue, svelte, astro, next, nuxt, solid-js or another UI framework, or .storybook/, DESIGN.md, index.html or a Tailwind config",
+      "a web or desktop UI"
+    ]
   },
   "peerDependencies": {
     "@opencode/plugin": "^2.1.4"

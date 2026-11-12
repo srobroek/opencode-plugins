@@ -14,7 +14,8 @@
     "agents"
   ],
   "opencode-plugins": {
-    "description": "Code design and review guidance, an always-on style code-quality policy, performance profiling, and throwaway logic prototypes."
+    "description": "Code design and review guidance, an always-on style code-quality policy, performance profiling, and throwaway logic prototypes.",
+    "scope": "global"
   },
   "peerDependencies": {
     "@opencode/plugin": "^2.1.4"

@@ -13,7 +13,8 @@
     "skills"
   ],
   "opencode-plugins": {
-    "description": "Structural code search with the ast-grep CLI, plus when to use Semgrep or rust-analyzer instead."
+    "description": "Structural code search with the ast-grep CLI, plus when to use Semgrep or rust-analyzer instead.",
+    "scope": "global"
   },
   "peerDependencies": {
     "@opencode/plugin": "^2.1.4"
