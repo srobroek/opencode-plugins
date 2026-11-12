@@ -1,6 +1,6 @@
 # Plan and report templates
 
-Read in steps 4 and 8 of the audit.
+Read in steps 4, 6 and 8 of the audit.
 
 ## Plan table
 
@@ -13,8 +13,27 @@ file and line.
 | 2 | `src/billing.test.ts > legacy export is gone` | Removal check | Asserts `"legacyTotal" in mod` is false | Nothing | Not needed | Delete | None |
 | 3 | `pkg/store/store_test.go:TestSaveCallsDB` | Coupled to the implementation | Asserts mock call count; kills 0 of 4 mutants in `Save` | Save persists the record | `TestSaveThenLoad` kills all 4 | Delete | None |
 | 4 | `tests/flows.rs::sync_completes` | Flaky | 3 failures in 20 runs; `tokio::time::sleep` on real time | Sync completes | Itself, after the fix | Fix with paused time | Low |
+| 5 | `test_discount[...]` (new case) | Surviving mutant | `discount.py:14` `>` to `>=` survives | A total of exactly 100 gets no discount | The new case | Extend `test_discount` with `total=100, expected=0` | None |
 
 Group the rows by action. Put every row whose risk is not "None" first.
+
+## Recommendations
+
+Write the recommendations as a list grouped by action, worst first. Each item names the
+tests or files, the evidence and the expected gain. Include them even when the user
+applies nothing.
+
+- **Drop:** tests to delete, with the test that keeps each one's protection.
+- **Merge:** copied tests to fold into parametrized ones.
+- **Rewrite:** tests to move to the public interface, a real object or a fake.
+- **Simplify:** tests to make readable: hidden data to build in the test, large shared
+  fixtures to replace with builders, helpers that hide the action or the expected values.
+- **Fix:** flaky tests and their causes; weak assertions to make exact.
+- **Add:** the behaviors that no test protects, and the existing test to extend for each.
+- **Speed up:** the slowest tests and the cost behind each.
+- **Clean up:** unused snapshots, fixtures, builders and test data; expired quarantines.
+- **Suite practices:** runner settings, CI lanes, coverage settings, shared setup,
+  conventions and missing tools, from the catalog's Suite practices list.
 
 ## Report
 
@@ -34,6 +53,9 @@ Batches
 
 Kept on purpose
   <test>: <reason>
+
+Recommendations not applied
+  <action>: <tests or files>, <evidence>, <expected gain>
 
 Gaps
   <what was not measured, and why>
