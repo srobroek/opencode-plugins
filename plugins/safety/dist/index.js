@@ -653,6 +653,7 @@ function scanShell(source, options = {}) {
   let command = { kind: "command", words: [], redirects: [], hereDocuments: [] };
   let word;
   let target;
+  let targetReadsInput = false;
   const pending = [];
   const append = (at, text, quoted = false, expands = false) => {
     word ??= { start: at, value: "", quoted: false, expands: false };
@@ -671,6 +672,8 @@ function scanShell(source, options = {}) {
     const done = { start: word.start, end, value: word.value, quoted: word.quoted, expands: word.expands };
     word = undefined;
     if (target !== undefined) {
+      if (targetReadsInput)
+        done.input = true;
       command.redirects.push(done);
       if (target !== "redirect")
         pending.push({
@@ -843,6 +846,7 @@ function scanShell(source, options = {}) {
     if (ch === "&" && next === ">") {
       flush(i);
       target = "redirect";
+      targetReadsInput = false;
       i += source[i + 2] === ">" ? 2 : 1;
       continue;
     }
@@ -861,6 +865,7 @@ function scanShell(source, options = {}) {
         word = undefined;
       else
         flush(i);
+      targetReadsInput = ch === "<";
       if (source.startsWith("<<<", i)) {
         target = "redirect";
         i += 2;
@@ -2100,7 +2105,7 @@ function isOp(name) {
   return name === "op" || name === "op.exe";
 }
 function readsInput(command) {
-  return command.redirects.some((word) => /<[<&>-]?\s*$/.test(command.source.slice(0, word.start)));
+  return command.redirects.some((word) => word.input === true);
 }
 function stdinFed(command) {
   return command.stage > 0 || command.hereDocuments.length > 0 || readsInput(command);
@@ -2166,7 +2171,7 @@ function execInner(args) {
   }
   return [];
 }
-function fnoxRefusal(command, allow = [], inheritedStdin = false) {
+function fnoxRefusal(command, allow = [], inherited = { fed: false, documents: [] }) {
   if (base(command.argv[0]) !== "fnox")
     return;
   const argv = command.argv;
@@ -2194,16 +2199,16 @@ function fnoxRefusal(command, allow = [], inheritedStdin = false) {
   const inner = execInner(args);
   if (inner.length === 0)
     return;
-  const fed = inheritedStdin || stdinFed(command);
+  const documents = [...inherited.documents, ...command.hereDocuments];
+  const fed = inherited.fed || stdinFed(command);
   const children = walkShell(inner.map(quote2).join(" ")).commands;
-  const scripts = SHELLS.has(base(inner[0])) && !inner.some((word) => /^-[A-Za-z]*c[A-Za-z]*$/.test(word));
-  const bodies = scripts ? command.hereDocuments.flatMap((document) => walkShell(document.body).commands) : [];
+  const bodies = children.filter((nested) => nested.context === "top" && SHELLS.has(base(nested.argv[0]))).filter((nested) => !nested.argv.some((word) => /^-[A-Za-z]*c[A-Za-z]*$/.test(word))).flatMap(() => documents.flatMap((document) => walkShell(document.body).commands));
   for (const nested of [...children, ...bodies]) {
     if (dumpsEnvironment(nested))
       return "dump";
     if (opCall(nested, allow, fed))
       return "op";
-    const again = fnoxRefusal(nested, allow, fed);
+    const again = fnoxRefusal(nested, allow, { fed, documents });
     if (again !== undefined)
       return again;
   }

@@ -4,6 +4,7 @@
  * 1Password session and prompts the user.
  */
 
+import type { HereDocument } from "@srobroek/opencode-lib"
 import { base, type Command, hasFlag, positionals, SHELLS, walkShell } from "./shell.ts"
 
 export const OP_MESSAGE =
@@ -26,9 +27,9 @@ function isOp(name: string): boolean {
   return name === "op" || name === "op.exe"
 }
 
-/** Whether a redirection reads input: `<`, `<<`, `<<<`, `<<-`, `<&` or `<>`. */
+/** Whether a redirection reads input: `<`, `<<`, `<<<`, `<<-`, `<&` or `<>`, as the scanner parsed it. */
 function readsInput(command: Command): boolean {
-  return command.redirects.some((word) => /<[<&>-]?\s*$/.test(command.source.slice(0, word.start)))
+  return command.redirects.some((word) => word.input === true)
 }
 
 /** Whether a command's stdin comes from a pipe, a here-document or an input redirection. */
@@ -106,7 +107,7 @@ function execInner(args: readonly string[]): string[] {
 export function fnoxRefusal(
   command: Command,
   allow: readonly string[] = [],
-  inheritedStdin = false,
+  inherited: { fed: boolean; documents: readonly HereDocument[] } = { fed: false, documents: [] },
 ): "op" | "dump" | undefined {
   if (base(command.argv[0]) !== "fnox") return undefined
   const argv = command.argv
@@ -129,16 +130,19 @@ export function fnoxRefusal(
   if (sub !== "exec") return undefined
   const inner = execInner(args)
   if (inner.length === 0) return undefined
-  // The child inherits fnox's stdin, so a fed `op item create` may carry field values.
-  const fed = inheritedStdin || stdinFed(command)
+  // The child inherits fnox's stdin and here-documents, through wrappers and nested fnox.
+  const documents = [...inherited.documents, ...command.hereDocuments]
+  const fed = inherited.fed || stdinFed(command)
   const children = walkShell(inner.map(quote).join(" ")).commands
-  // A here-document fed to a shell started by fnox is that shell's script.
-  const scripts = SHELLS.has(base(inner[0])) && !inner.some((word) => /^-[A-Za-z]*c[A-Za-z]*$/.test(word))
-  const bodies = scripts ? command.hereDocuments.flatMap((document) => walkShell(document.body).commands) : []
+  // A here-document fed to the shell left after the wrappers is that shell's script.
+  const bodies = children
+    .filter((nested) => nested.context === "top" && SHELLS.has(base(nested.argv[0])))
+    .filter((nested) => !nested.argv.some((word) => /^-[A-Za-z]*c[A-Za-z]*$/.test(word)))
+    .flatMap(() => documents.flatMap((document) => walkShell(document.body).commands))
   for (const nested of [...children, ...bodies]) {
     if (dumpsEnvironment(nested)) return "dump"
     if (opCall(nested, allow, fed)) return "op"
-    const again = fnoxRefusal(nested, allow, fed)
+    const again = fnoxRefusal(nested, allow, { fed, documents })
     if (again !== undefined) return again
   }
   return undefined

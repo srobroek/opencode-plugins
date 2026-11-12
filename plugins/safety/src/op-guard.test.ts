@@ -43,6 +43,14 @@ const REFUSED_OP = [
   "op item create --title t --generate-password < /dev/null",
   "op item create --title t <&3",
   "op item create --title t <<< x",
+  "fnox exec -- env bash <<'EOF'\nop read x\nEOF",
+  "fnox exec -- timeout 5 sh <<'EOF'\nop read x\nEOF",
+  "fnox exec -- fnox exec -- bash <<'EOF'\nop read x\nEOF",
+  "fnox exec -- sudo -u x env bash -s <<'EOF'\nop read x\nEOF",
+  "op item create --title t <\\\nfile",
+  "op item create --title t 0<\\\nfile",
+  "fnox exec -- op item create --title t <\\\nfile",
+  "fnox exec -- fnox exec -- op item create --title t < file",
 ]
 
 const REFUSED_DUMP = [
@@ -70,6 +78,8 @@ const REFUSED_DUMP = [
   "fnox exec -- bash <<'EOF'\nenv\nEOF",
   "fnox exec -- sh -c 'timeout 5 env'",
   "fnox exec -- bash -c set",
+  "fnox exec -- env bash <<'EOF'\nenv\nEOF",
+  "fnox exec -- fnox exec -- bash <<'EOF'\nprintenv\nEOF",
 ]
 
 const PASSED = [
@@ -99,6 +109,8 @@ const PASSED = [
   "fnox exec -- op item create --title t > out.json",
   "op item create --title t > out.json",
   "op item create --title t 2>/dev/null",
+  "op item create --title t >\\\nout.json",
+  "fnox exec -- env bash <<'EOF'\necho hi\nEOF",
   "op item create --title t --format json >out.json 2>&1",
   "fnox check",
   "fnox list",
