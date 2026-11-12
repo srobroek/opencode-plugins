@@ -56,7 +56,7 @@ Starting points, not rules:
 
 | Concern | Default |
 | --- | --- |
-| Cross-cutting concerns | The framework's middleware, interceptors, layers or decorators; one middleware model per HTTP surface |
+| Cross-cutting concerns | The framework's middleware, interceptors, layers or decorators; one middleware model per surface (an HTTP API, an RPC API) |
 | Telemetry | OpenTelemetry SDK, OTLP over `http/protobuf` to a Collector; structured JSON logs carrying `trace_id` and `span_id` |
 | AWS Lambda (Python, TypeScript, Java, .NET) | Powertools for AWS Lambda utilities over hand-rolled code; ADOT/Application Signals layer for traces; Powertools Logger and Metrics without its X-Ray Tracer |
 | AWS Lambda (Go, Rust) | No Powertools: the official runtime crate or module, the language's structured logger, the OTel SDK with the Collector extension |

@@ -29,14 +29,14 @@ Checked 2026-11-12.
 | Concern | Default | Notes |
 | --- | --- | --- |
 | Runtime | Node `24` LTS; Bun `1.4` for Bun projects | Check deployment support; Node `26` has native `Temporal`. |
-| All new HTTP | `hono` `4` | Same app on Lambda Event/Web Functions and Node/Bun containers. |
+| All new HTTP APIs | `hono` `4` | Same app on Lambda Event/Web Functions and Node/Bun containers. RPC APIs use Connect. |
 | Existing Node HTTP | Keep the existing framework | `fastify` `5` alternative for required schema/hooks/plugin integration. |
 | Middleware | Framework built-ins/hooks | Cross-cutting behavior does not belong in each endpoint. |
 | Schemas | `zod` `4` | `zod/mini` for bundle pressure; validate trust boundaries. |
 | OpenAPI | `@hono/zod-openapi` `1`; `@fastify/swagger` `9` | Generate from framework schemas; test the emitted contract. |
 | API clients | `openapi-typescript` `7`; native `fetch` | `orval` `8` when generated query hooks are needed. |
-| Typed RPC | `@orpc/server` `1` | `@trpc/server` `11` for a shared TypeScript-only stack. |
-| Protobuf RPC | `@connectrpc/connect` `2` | Use a server adapter and `@bufbuild/protobuf` `2`. |
+| RPC APIs | `@connectrpc/connect` `2` with its Node server adapter and `@bufbuild/protobuf` `2` | A separate surface beside Hono, with Connect interceptors. `@grpc/grpc-js` `1` only to call or serve native gRPC. |
+| TypeScript-only typed RPC | `@orpc/server` `1` | Only inside a TypeScript-only app that wants no protobuf contract; `@trpc/server` `11` for an existing tRPC stack. Report it as a departure from Connect. |
 | GraphQL | `graphql-yoga` `6` | Fetch-oriented; only when GraphQL is the chosen API style. |
 | Streaming | `hono` `4` SSE; `ws` `8` on Node | Native Bun server WebSockets on Bun. |
 | Auth tokens | `jose` `6` | Verify issuer, audience and algorithms, not just signature. |

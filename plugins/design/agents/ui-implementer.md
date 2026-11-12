@@ -116,8 +116,9 @@ NOT Report a state as handled when no interaction rendered it.
   code, the standard library, the framework's features, then a listed library. Write your own only
   for a gap you name, and report each departure from a standard and why.
 - Defaults: cross-cutting concerns (auth, validation, request ids, logs, traces, metrics, error
-  mapping, timeouts, retries, rate limits) go in the framework's middleware, one model per HTTP
-  surface (Hono for TypeScript, Lambda included; ASGI/FastAPI; net/http wrappers; tower). Lambda
+  mapping, timeouts, retries, rate limits) go in the framework's middleware, one model per
+  surface (TypeScript: Hono for HTTP APIs, Lambda included, Connect for RPC; ASGI/FastAPI;
+  net/http wrappers; tower). Lambda
   handlers stay thin, on Powertools for AWS Lambda where it exists. Telemetry is OpenTelemetry over OTLP.
 
 ## Output

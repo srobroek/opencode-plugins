@@ -14,8 +14,8 @@ Good: one auth middleware or dependency, one telemetry layer, one error mapper; 
 
 ## One middleware model per surface
 
-**Do:** use one framework, and so one middleware model, for every HTTP surface of a service, including its Lambda deployment, and keep event consumers (queues, streams, schedules) on plain handlers plus the platform's utilities.
-**Do not:** wrap one middleware engine in another (an HTTP framework inside a Lambda middleware engine), or run two body parsers, two error mappers or two loggers over the same request.
+**Do:** use one framework, and so one middleware model, per surface of a service. An HTTP API is one surface, including its Lambda deployment; an RPC API is another (in TypeScript: Hono for the HTTP API, Connect for RPC, each with its own middleware or interceptors). Keep event consumers (queues, streams, schedules) on plain handlers plus the platform's utilities. Share cross-cutting logic between surfaces as plain functions, such as one token verifier and one logger setup, that each surface's chain calls.
+**Do not:** wrap one middleware engine in another (an HTTP framework inside a Lambda middleware engine, or an RPC framework inside an HTTP framework without a documented adapter), or run two body parsers, two error mappers or two loggers over the same request.
 
 ## Order the stack
 
