@@ -229,7 +229,7 @@
       "version": "0.3.0",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
-        "smol-toml": "1.9.0",
+        "smol-toml": "1.9.1",
       },
       "peerDependencies": {
         "@opencode/plugin": "^2.1.4",
@@ -385,7 +385,7 @@
       "name": "@srobroek/opencode-lib",
       "version": "0.0.0",
       "dependencies": {
-        "smol-toml": "1.9.0",
+        "smol-toml": "1.9.1",
       },
       "peerDependencies": {
         "@opencode/plugin": "^2.1.4",
@@ -1348,7 +1348,7 @@
 
     "smart-buffer": ["smart-buffer@4.2.0", "", {}, "sha512-94hK0Hh8rPqQl2xXc3HsaBoOXKV20MToPkcXvwbISWLEs+64sBq5kFgn2kJDHb1Pry9yrP0dxrCI9RRci7RXKg=="],
 
-    "smol-toml": ["smol-toml@1.9.0", "", {}, "sha512-hpd+HLON7HdZXqYchMM/+LaTTbdK0AU3NngIJ4KVyWbY9bfQqdL9cD+4yf6dUoU2Ap4VsU0JkQi6FxAI1B2mXQ=="],
+    "smol-toml": ["smol-toml@1.9.1", "", {}, "sha512-j7WyPdf0CJoutMzMoPLF/bVXHtKZIT9Rb4eGeEbWw8X2t5oirjPgpL+OpaENZrILYaXqYwnVH+qgUwVbl+pUJQ=="],
 
     "socks": ["socks@2.8.10", "", { "dependencies": { "ip-address": "^10.1.1", "smart-buffer": "^4.2.0" } }, "sha512-e0VyvkVTwVYViNovRkZ9aodhxVlyoMn7eJhVUPxZ+eK9P/7CBkxvvsBOHqFPEH416726W8tLXXXjKwqgTErrCQ=="],
 
