@@ -11,8 +11,12 @@ Flag a feature when it changes runtime behavior that is unfinished, risky, or ne
 
 - The flag lets unfinished work merge to the default branch without exposing it, so the branch stays releasable.
 - Turning the flag off rolls the feature back without a revert.
-- No flag is needed for guidance, documentation and skill content, a new tool or command that runs only when called, build, CI and test changes, or a complete, low-risk change that a revert undoes.
-- Fixes, refactors, chores and docs need no flag.
+- These changes need no flag:
+  - fixes, refactors and chores;
+  - guidance, documentation and skill content;
+  - a new tool or command that runs only when called;
+  - build, CI and test changes;
+  - a complete, low-risk change that a revert undoes.
 - Record the decision either way: a named flag, or `Flag: none` with a reason.
 
 Keep flags cheap and short-lived. [Fowler](https://martinfowler.com/articles/feature-toggles.html) explains the carrying cost of toggles. [LaunchDarkly](https://launchdarkly.com/docs/guides/flags/technical-debt) warns that stale flags become debt. [DORA](https://dora.dev/capabilities/working-in-small-batches/) recommends small batches. [Feature flag guidance](https://docs.getunleash.io/concepts/feature-flags) separates temporary release flags from long-lived operational controls.
