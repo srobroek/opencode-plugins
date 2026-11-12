@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.0](https://github.com/srobroek/opencode-plugins/compare/project--v0.3.3...project--v0.4.0) (2026-11-12)
+
+
+### Features
+
+* **project:** let agents store generated and tool-issued secrets themselves in project-secrets ([#130](https://github.com/srobroek/opencode-plugins/issues/130)) ([ceec8c0](https://github.com/srobroek/opencode-plugins/commit/ceec8c0c52a2d15c38c5b8094371888bc3363fa6))
+* **project:** restructure project-secrets into a router with per-task fnox references ([#128](https://github.com/srobroek/opencode-plugins/issues/128)) ([8645784](https://github.com/srobroek/opencode-plugins/commit/8645784a7bba4ca45971c815da3903835426d13f))
+
 ## [0.3.3](https://github.com/srobroek/opencode-plugins/compare/project--v0.3.2...project--v0.3.3) (2026-11-05)
 
 

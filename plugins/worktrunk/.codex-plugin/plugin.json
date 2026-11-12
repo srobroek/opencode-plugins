@@ -1,6 +1,6 @@
 {
   "name": "worktrunk",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Worktrunk (wt) skills: work in linked worktrees and run deterministic preflight checks before an agent run or merge.",
   "author": {
     "name": "Sjors Robroek",

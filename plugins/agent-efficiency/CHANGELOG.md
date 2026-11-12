@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/srobroek/opencode-plugins/compare/agent-efficiency--v0.7.0...agent-efficiency--v0.8.0) (2026-11-12)
+
+
+### Features
+
+* **safety:** refuse direct 1Password reads and literal secrets in commands, pointing to fnox ([#131](https://github.com/srobroek/opencode-plugins/issues/131)) ([36cd391](https://github.com/srobroek/opencode-plugins/commit/36cd3912e954c1078b808802b069d7010d8f319f))
+
 ## [0.7.0](https://github.com/srobroek/opencode-plugins/compare/agent-efficiency--v0.6.0...agent-efficiency--v0.7.0) (2026-11-11)
 
 
