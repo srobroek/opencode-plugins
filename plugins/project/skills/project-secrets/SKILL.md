@@ -42,8 +42,26 @@ loads those machine keys once at start; there is no `fnox activate` hook, so a p
   the next `fnox exec` re-reads it. (`fnox get --refresh` does the same but prints the value.)
 - Anything with `env = true` is in the shell that starts OpenCode, so the agent can read
   it. Give project secrets `env = "exec"` so only `fnox exec` injects them.
-- Headless hosts (pace, work-linux) may have no fnox or 1Password. Say so and stop at
-  declaring the config; do not install credentials there unprompted.
+- On a 1Password host, `op` plus the daemon's in-memory cache (idle timeout 8h) is the
+  only store. It keeps no age cache on disk.
+- Headless hosts (`pace`, `work-linux`) have no 1Password. They have a global age provider
+  `host` (`key_file = "~/.config/fnox/age.txt"`). The user stores each value with
+  `fnox set NAME --provider host` at a hidden prompt, in the project. Give the user that
+  exact command and never handle the value. Agents consume it with `fnox exec`.
+  Never name a project provider `host` either.
+
+## Fewer approvals
+
+Each new 1Password session asks the user again. Keep it to one per session:
+
+1. Consume only with `fnox exec`, never `op` directly. Each direct `op` call opens a new
+   1Password session.
+2. Run project commands from the project root, so every call loads the same config files
+   and shares one daemon cache entry. A different directory, a `-c` flag or a profile is a
+   separate entry and needs another approval.
+3. Group commands that need the same secrets in one `fnox exec`.
+4. Do not change fnox config files mid-session, because a change clears the cache.
+5. If an approval fails or times out, stop and report the secret name. Never retry in a loop.
 
 ## 1. Ask
 
@@ -60,6 +78,7 @@ the project need a different value per environment (profiles)?
 | One user, one machine, one project | Private vault, item `<project> <purpose>`, tag `<project>` |
 | Cross-project key that CI or collaborators need | Shared vault `dev-shared`, provider `shared` |
 | Project with collaborators or its own CI service account | Vault `proj-<name>`, provider `proj` |
+| Any secret on a headless host (no 1Password) | Global `host` age provider: the user runs `fnox set NAME --provider host` in the project |
 | Local-only generated value (dev DB password) | OS keychain: add `[providers.keychain] type = "keychain"`, `service = "fnox-<project>"` to `fnox.local.toml`, predeclare `[secrets.NAME] env = "exec"` there, then `fnox -c fnox.local.toml set NAME --generate --provider keychain` (value not shown; `set` has no `env` flag and a new entry defaults to `env = true`). macOS and Windows only; on Linux it needs a running Secret Service |
 
 A vault per project is worth it only when access differs: service accounts are scoped to
@@ -75,7 +94,7 @@ both kinds exist; each is its own named provider. Ask before creating any vault.
 2. Create the empty item without the value (`op item create --category "API Credential"
    --vault <v> --title "<title>" --tags <project>`), then tell the user which item and
    field `credential` to fill in 1Password. Alternatively the user runs
-   `fnox set NAME --provider <keychain-or-age-provider>` themselves for locally stored values.
+   `fnox set NAME --provider <host-or-keychain>` themselves for locally stored values.
 3. After the user says it is filled: `fnox check` (resolves without printing). The daemon
    caches it in memory; add a local sync cache only for offline use (`references/fnox-config.md`).
 4. Use: `fnox exec -- <cmd>`, `--only NAME` to resolve a subset, or a mise task

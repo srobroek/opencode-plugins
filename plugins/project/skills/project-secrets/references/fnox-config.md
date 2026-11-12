@@ -18,7 +18,7 @@ file defines each secret.
 ## Committed `fnox.toml`
 
 ```toml
-# Providers: distinct names. Never `op` (the global config owns it).
+# Providers: distinct names. Never `op` or `host` (the global config owns them).
 [providers.proj]               # per-project vault
 type = "1password"
 vault = "proj-myapp"           # omit the whole provider if the project uses only `shared`
@@ -54,12 +54,29 @@ profile replaces the whole entry. Pick one: `fnox -P production exec -- ...`. A 
 secret in `fnox.local.toml` overrides it in every profile, so put cached production
 entries under `[profiles.production.secrets]`.
 
-## Local sync cache (offline only)
+## Headless hosts: the `host` age store
+
+`pace` and `work-linux` have no 1Password. Their global config declares an age provider
+`host` (`key_file = "~/.config/fnox/age.txt"`), so the project declares none. Do not name a
+project provider `host` or `op`: a same-named project entry replaces the global one.
+
+The user stores each value, and the agent does not see it.
+
+```sh
+fnox set NAME --provider host    # hidden prompt
+```
+
+Declare the secret with `env = "exec"` and consume it with `fnox exec`. `fnox set` may
+write the ciphertext into the committed `fnox.toml`. Only the host's recipient can decrypt
+it, so other machines and CI cannot read it. Keep it out of git with
+`fnox -c fnox.local.toml set NAME --provider host`.
+
+## Local sync cache (opt-in, offline only)
 
 The global daemon already keeps resolved values in memory, so most projects need no
 cache file. Add one only when reads must work offline or survive a reboot without
-1Password. The global config has no age provider, so the project declares its own in
-`fnox.local.toml`, encrypted to a key the user creates deliberately:
+1Password. It is opt-in, not the default. A 1Password host has no age provider, so the project
+declares its own in `fnox.local.toml`, encrypted to a key the user creates deliberately:
 
 ```toml
 # fnox.local.toml (gitignored)
@@ -83,7 +100,9 @@ that exist.
 
 ## Values stored in git (no vault)
 
-For a CI-only or solo project with no 1Password: an age provider with the CI key and the
+A project may still declare its own age provider when CI or collaborators need committed
+ciphertext, because the global `host` key belongs to one machine. For a CI-only or solo
+project with no 1Password, use an age provider with the CI key and the
 user's public key as recipients (`age-keygen -y` of the user's key file), name it
 `proj-age`; the user stores each value with `fnox set NAME --provider proj-age` (hidden prompt). Ciphertext in `fnox.toml` is safe to commit. See https://fnox.jdx.dev/providers/age.
 
