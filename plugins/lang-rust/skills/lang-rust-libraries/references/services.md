@@ -26,7 +26,7 @@ The research found no controlled current-version framework benchmark. For Actix,
 | Code-first OpenAPI | `utoipa` `6` | `aide` `0.15` for schema-aware routing | Treating generated documentation as runtime validation. |
 | Schema-first clients | `progenitor` `0.16` | Broader generator through `toolchain-api` after support fixtures pass | Assuming its documented OpenAPI `3.0.x` support covers `3.1` or `3.2`. |
 | gRPC/code generation | `tonic` `0.14`, `prost` `0.14` | `buffa` `0.9` when editions/borrowed views/unknown fields are required | Assuming codec changes are drop-in tonic integration; stale build recipes. |
-| Connect | No Rust default established | A maintained implementation passes required protocol fixtures | Rebranding gRPC/HTTP JSON as Connect or hand-writing its protocol. |
+| Connect | `tonic` `0.14` stays the Rust RPC default | `connectrpc` `0.9` (official, pre-1.0, conformance-tested) when browsers or HTTP/1.1 proxies must reach a Rust RPC server; integration-test it and pin it | Treating its pre-1.0 API as stable; rebranding plain HTTP JSON as Connect. |
 | GraphQL | `async-graphql` `7.2` | `juniper` `0.18` for existing integrations; audit current DoS advisories | Unlimited query cost/depth; resolver-only authentication without object authorization. |
 | WebSockets/SSE | `axum` `0.8` built-in `ws` and SSE | `tokio-tungstenite` `0.30` standalone; `fastwebsockets` `0.10` for measured low-level needs | Unbounded messages/queues; assuming Lambda HTTP adaptation supplies WebSockets. |
 | JWT/JOSE | `jsonwebtoken` `11` | `josekit` `0.10` for JWE/broader JOSE | Decoding without signature, algorithm, issuer, audience and expiry checks. |

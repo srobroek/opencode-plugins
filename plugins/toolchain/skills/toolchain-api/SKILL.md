@@ -29,7 +29,7 @@ Decision order:
 1. Tools for AI agents: MCP.
 2. Durable asynchronous notifications: AsyncAPI with CloudEvents; Standard Webhooks for partners.
 3. Server push to browsers: SSE. Bidirectional browser traffic: WebSockets.
-4. Typed internal RPC or bidirectional streams: gRPC. Typed RPC from browsers: Connect.
+4. RPC, where you own both ends and calls are actions rather than resources: Connect; gRPC when existing gRPC infrastructure or the language requires it (see below).
 5. Graph-shaped client queries: GraphQL.
 6. Everything else: HTTP+JSON with OpenAPI.
 
@@ -44,7 +44,68 @@ Connect is an RPC protocol and a family of libraries. ConnectRPC is a CNCF sandb
 - **Implementations:** Go `connect-go` 2 (module `connectrpc.com/connect/v2`) and TypeScript `connect-es` 2 (browser, Node; Bun needs its own adapter) are established; Swift 1 and Dart 2 clients; Python `connect-python` 0.13, Kotlin 0.10 and Rust `connectrpc` 0.9 are pre-1.0 and need integration tests.
 - **Tooling:** `buf curl` calls any method; Protovalidate adds CEL validation rules (choosing Connect does not validate anything by itself).
 
-Choose Connect for protobuf-first APIs used from browsers, mobile apps and backends that also want gRPC interoperability and plain-HTTP debugging. Choose gRPC for existing gRPC infrastructure or a language Connect does not cover well, and REST with OpenAPI for resource semantics, the broadest public ecosystem and HTTP caching.
+## Protobuf, gRPC, Connect and OpenAPI
+
+They sit at different layers:
+
+- **Protobuf** describes data: a schema language (`.proto`) and a compact binary encoding. It is not a network protocol; it also serves for queue messages and files.
+- **gRPC** is an RPC protocol over HTTP/2 with trailers, usually carrying protobuf.
+- **Connect** is an RPC protocol for the same `.proto` services over ordinary HTTP. A Connect server also answers gRPC and gRPC-Web.
+- **OpenAPI** describes an HTTP+JSON (REST) API: paths, methods, parameters, status codes and JSON Schema bodies. The protocol is plain HTTP.
+
+Protobuf is to gRPC and Connect what JSON Schema is to OpenAPI. One `.proto` service on a Connect server can be called by a browser, a gRPC client and `curl` with JSON; the REST equivalent is a resource such as `GET /orders/{id}` described in an OpenAPI document.
+
+| | OpenAPI (REST) | gRPC | Connect |
+| --- | --- | --- | --- |
+| Contract | OpenAPI document | `.proto` | the same `.proto` |
+| Data | JSON | binary protobuf | JSON or binary protobuf |
+| Shape | Resources and HTTP methods | Calls such as `OrderService.GetOrder` | Calls; unary is `POST /orders.v1.OrderService/GetOrder` |
+| Transport | Any HTTP version | HTTP/2 with trailers | HTTP/1.1 or HTTP/2, no trailers; bidirectional streams need HTTP/2 |
+| Browsers | Yes | Only through gRPC-Web and a proxy | Directly, for unary and server streaming |
+| `curl` and ordinary proxies | Yes | Awkward | Yes |
+| Streaming | SSE or WebSockets beside the API | Server, client, bidirectional | Server, client; bidirectional over HTTP/2 |
+| HTTP caching | Yes | No | Only `GET` for methods marked side-effect-free |
+| Talks to gRPC services | No | Yes | Yes: Connect clients can use a gRPC transport, and Connect servers accept gRPC clients |
+
+### Connect or gRPC
+
+They interoperate, so the choice can change later without breaking clients.
+
+Choose Connect when:
+
+- browsers or mobile web call the API directly;
+- traffic crosses load balancers, CDNs, API gateways or proxies that mishandle HTTP/2 trailers or speak only HTTP/1.1;
+- you want `curl` and JSON for debugging;
+- the server is in Go or TypeScript, where Connect is mature, and one server should answer Connect, gRPC and gRPC-Web clients.
+
+Choose gRPC when:
+
+- the services already run on gRPC infrastructure: a service mesh, Envoy, gRPC load balancing, health checks, reflection;
+- you need gRPC-specific features such as service-config retries and hedging, or xDS;
+- the language's Connect library is pre-1.0 or missing for your use (Python, Kotlin and Rust are pre-1.0);
+- you need bidirectional streaming everywhere, browsers included.
+
+### Connect or OpenAPI
+
+Choose OpenAPI and REST when:
+
+- it is a public or partner API whose consumers use any language and expect REST tooling (`curl`, Postman, ordinary HTTP clients, SDK generators);
+- the domain is resources with create, read, update and delete semantics;
+- you need HTTP features: CDN and `Cache-Control` caching, `ETag` with conditional requests, standard status codes;
+- you want the widest ecosystem for linting, breaking-change checks and docs.
+
+Choose Connect when:
+
+- you own both ends: your web app, mobile app or other services;
+- the calls are actions ("approve the order") rather than resources;
+- you want one strict schema with generated typed clients in each language, and field-level breaking-change checks with `buf breaking`;
+- you need streaming, or binary payloads where size matters.
+
+Connect gives up resource URLs (every path is `POST /<package>.<Service>/<Method>`) and most HTTP caching. Fewer third-party tools understand it, and outside developers know REST better. A common split is OpenAPI at the public edge and Connect for first-party clients and internal calls.
+
+### HTTP and RPC in one TypeScript service
+
+Hono serves HTTP APIs and Connect serves RPC APIs. They are separate surfaces, each with its own middleware: Hono middleware for the HTTP API, Connect interceptors for RPC. Serve them on separate route prefixes or ports, and share token verification, logging setup and error policy as plain functions that both chains call. Do not mount one framework inside the other unless the framework documents that adapter.
 
 ## Specification versions
 

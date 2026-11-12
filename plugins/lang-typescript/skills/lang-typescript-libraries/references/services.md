@@ -20,6 +20,11 @@ reduce platform-specific code. Costs: adapter event compatibility and streaming 
 tests; Hono has no AWS-event batch/idempotency features, so those remain Powertools.
 Never wrap Hono in Middy. Keep existing frameworks unless migration is requested.
 
+RPC APIs use Connect, not Hono: a separate surface on its own route prefix or port,
+served through Connect's Node adapter, with Connect interceptors for its cross-cutting
+concerns. Share token verification, logging setup and error policy with the Hono
+middleware as plain functions. `toolchain-api` compares Connect, gRPC and OpenAPI.
+
 | Concern | Default | Use instead when | Avoid (why) |
 | --- | --- | --- | --- |
 | New HTTP API | `hono` `4` | Existing `fastify` `5` or `elysia` `1` services keep their framework. A new Fastify or Elysia service is a departure to report with its gap, for example a required Fastify plugin. | Picking from trivial throughput benchmarks rather than workload/runtime requirements. |
@@ -33,8 +38,8 @@ Never wrap Hono in Middy. Keep existing frameworks unless migration is requested
 | Code-first OpenAPI | `@hono/zod-openapi` `1`; `@fastify/swagger` `9` | `hono-openapi` `1` for Standard Schema integrations. | Publishing untested generated schemas or assuming every tool supports OpenAPI `3.2`. |
 | Schema-first clients | `openapi-typescript` `7` | `orval` `8` for query hooks; `@hey-api/openapi-ts` `0.99` for generated SDK workflows. | Handwritten duplicate DTOs when generation fits. |
 | API reference UI | `@scalar/hono-api-reference` `0.12` for Hono | Existing documentation UI with verified schema support. | Assuming the UI validates the server's actual behavior. |
-| Typed RPC | `@orpc/server` `1` for typed RPC plus public HTTP/OpenAPI | `@trpc/server` `11` for a shared TypeScript stack. | TypeScript-only contracts as the sole public integration surface. |
-| Protobuf RPC | `@connectrpc/connect` `2`, `@connectrpc/connect-node` `2`, `@bufbuild/protobuf` `2`, `@bufbuild/protoc-gen-es` `2` | `@grpc/grpc-js` `1` for native-gRPC integrations; matching Fastify adapter in Fastify apps. | Assuming Connect core serves HTTP; assuming Node HTTP/2 behavior on Bun without tests. |
+| TypeScript-only typed RPC | Connect (row below) | `@orpc/server` `1` inside a TypeScript-only app that wants no protobuf contract; `@trpc/server` `11` for an existing tRPC stack. Report either as a departure from Connect. | TypeScript-only contracts as the sole public integration surface. |
+| RPC APIs | `@connectrpc/connect` `2`, `@connectrpc/connect-node` `2`, `@bufbuild/protobuf` `2`, `@bufbuild/protoc-gen-es` `2` | `@grpc/grpc-js` `1` for native-gRPC integrations; matching Fastify adapter in Fastify apps. | Assuming Connect core serves HTTP; assuming Node HTTP/2 behavior on Bun without tests. |
 | GraphQL | `graphql-yoga` `6`; `@pothos/core` `4` for code-first schema building | `@apollo/server` `5` for GraphOS; `mercurius` `16` in Fastify. | Apollo Server `4` and earlier: end of support; resolver auth and query-cost limits left implicit. |
 | GraphQL clients | `gql.tada` `1` typed documents; `urql` `5` transport/cache | `@apollo/client` `4` for its cache/ecosystem. | Treating typed documents as a network client. |
 | WebSockets/SSE | `ws` `8` on Node; Bun native server sockets; Hono streaming helpers in `4` | `socket.io` `4` when rooms/reconnection/protocol features are required. | Treating Socket.IO as raw WebSocket wire compatibility; unbounded buffers. |
