@@ -7,6 +7,7 @@ test("registers the typescript skills and disposes them", async () => {
   const cleanup = await plugin.setup(fake.context)
   expect([...fake.skills.keys()].sort()).toEqual([
     "lang-typescript",
+    "lang-typescript-libraries",
     "lang-typescript-packaging",
     "lang-typescript-profiling",
     "lang-typescript-quality",

@@ -35,6 +35,8 @@ The plugin registers these skills from `skills/`, unless a skill with the same i
 already exists:
 
 - `lang-typescript`: the router.
+- `lang-typescript-libraries`: compare Node and Bun library defaults before writing
+  code; web, data, messaging, AWS, telemetry, AI, CLI, testing and security references.
 - `lang-typescript-quality`: frozen-lockfile install, Biome or ESLint, `tsc -b` or
   `tsc --noEmit`, the test script, in that order; workspace filters and CI.
 - `lang-typescript-testing`: bun test and vitest, module mocks, snapshots, msw, fake
