@@ -51,7 +51,7 @@ answers come back keyed by it.
 | --- | --- | --- |
 | `pick_one` (`allow_other`, default true) | option id | `{ selected }` or `{ other }` |
 | `show_options` (options with `pros`/`cons`, side by side) | option id | `{ selected }` |
-| `pick_many` (`min`, `max`, `allow_other`, default true) | option ids | `{ selected[], other? }` |
+| `pick_many` (`min`, `max`, `allow_other`, default true) | option ids | `{ selected[], other? }`. `max` limits `selected`, and `other` can be one more |
 | `confirm` (`yes_label`, `no_label`) | `yes` / `no` | `{ choice }` |
 | `rank` | option ids, highest first | `{ order[] }` |
 | `slider` (`min`, `max`, `step`, `unit`, `labels`, `allow_other`, default false) | number | `{ value }` or `{ other }` |
@@ -250,10 +250,13 @@ input mode and restore normal prompt behaviour.
 | `D` | Dismiss the round (the agent gets `cancelled`; a taken-over `question` call ends the turn) |
 | `esc` | Minimise |
 
-In a note or text field, `enter` saves it and returns to the card (on the inline
-card it saves and submits), `shift+enter` adds a line, `esc` saves too, and
-`ctrl+enter` / `ctrl+s` submit. In `ask_code` answers `enter` adds a line; the
-code shows as a highlighted block. Text pastes with the terminal's own paste.
+In a note or text field, `enter` saves the field and returns to the card. This
+applies on the panel and on the inline card. In the field, `shift+enter` adds a
+line and `esc` also saves. Both `ctrl+enter` and `ctrl+s` save the field and
+submit the round. Toggling options on a pick_many card keeps its "other" answer.
+
+In `ask_code` answers, `enter` adds a line. The code shows as a highlighted
+block. Text pastes with the terminal's own paste.
 
 In a path field, suggestions from the session directory (fuzzy, `.gitignore`
 respected, filtered to images or `accept` extensions) list under the field as
@@ -289,8 +292,8 @@ with `action` `opened`, `updated`, `closed` or `ended`.
    `esc`, run `/parley`, check the edits survived, press `ctrl+s`.
 4. The tool result lists each id with its status and note.
 5. Ask the model to use the `question` tool with one question: the card shows
-   above the prompt. Choose with `2`, add a note with `n` and press `enter`:
-   the card submits. The result reads like the built-in tool's, plus a
+   above the prompt. Choose with `2`, add a note with `n`, press `enter` to save
+   it and `enter` again: the card submits. The result reads like the built-in tool's, plus a
    `Note on …` line. Ask again and press `D`: the turn ends as it does when you
    dismiss the built-in form.
 6. Repeat with `opencode run` (no TUI): the call returns `unavailable`, or with

@@ -767,11 +767,11 @@ export function InlineCard(props: InlineCardProps) {
       ...controls.pathKeys(),
       {
         bind: "return",
-        title: "Save and submit",
+        title: "Save",
         group: "Parley",
         run: () => {
           if (!enterSaves()) return newline()
-          void saveAndSend()
+          void done()
         },
       },
       { bind: "ctrl+return", title: "Submit", group: "Parley", run: () => void saveAndSend() },

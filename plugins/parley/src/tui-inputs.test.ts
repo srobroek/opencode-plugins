@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { describeValue } from "./answers.ts"
+import { describeValue, validateValue } from "./answers.ts"
 import { fileURLs } from "./clipboard.ts"
 import { type Question, sliderText } from "./questions.ts"
 import {
@@ -79,6 +79,26 @@ describe("pick_many other", () => {
     const draft = setText(question, choose(question, initialDraft(question), 0), "D")
     expect(toSubmission(question, draft)).toEqual({ id: "m", status: "answered", value: { selected: ["a"], other: "D" } })
   })
+
+  test("survives choosing options after it is typed, and comes on top of max", () => {
+    const question: Question = { id: "m", title: "M", kind: "pick_many", options, max: 2 }
+    let draft = choose(question, setText(question, initialDraft(question), "D"), 1)
+    expect(draft.value).toEqual({ selected: ["b"], other: "D" })
+    draft = choose(question, draft, 2)
+    expect(draft.value).toEqual({ selected: ["b", "c"], other: "D" })
+    draft = choose(question, draft, 0)
+    expect(draft.value).toEqual({ selected: ["b", "c"], other: "D" })
+    draft = choose(question, draft, 1)
+    expect(draft.value).toEqual({ selected: ["c"], other: "D" })
+  })
+
+  test("typed after max options, it still submits", () => {
+    const question: Question = { id: "m", title: "M", kind: "pick_many", options, max: 2 }
+    const draft = setText(question, choose(question, choose(question, initialDraft(question), 0), 1), "D")
+    const submitted = toSubmission(question, draft)
+    expect(submitted).toEqual({ id: "m", status: "answered", value: { selected: ["a", "b"], other: "D" } })
+    expect(validateValue(question, submitted?.value)).toEqual({ value: { selected: ["a", "b"], other: "D" } })
+  })
 })
 
 describe("files and path completion", () => {
@@ -138,6 +158,15 @@ describe("key hints", () => {
     })
     expect(editing).toContain("tab complete")
     expect(editing).toContain("ctrl+v paste")
+  })
+
+  test("enter in a field saves it on every surface; only ctrl+s submits", () => {
+    const pick: Question = { id: "p", title: "P", kind: "pick_many", options }
+    for (const surface of ["card", "panel"] as const) {
+      const hint = keyHints(pick, surface, { field: "note", enterSaves: true })
+      expect(hint).toStartWith("enter save")
+      expect(hint).toContain("ctrl+s submit")
+    }
   })
 })
 
