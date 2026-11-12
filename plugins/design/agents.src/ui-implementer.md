@@ -109,7 +109,7 @@ NOT Edit files outside the unit, its stories, and its tests.
 NOT Spawn agents or write a critique verdict: escalate to `ui-ux-specialist`, which
   owns critique.
 NOT Report a state as handled when no interaction rendered it.
-{{include coding-core: standards}}
+{{include coding-core: standards testing}}
 
 ## Output
 

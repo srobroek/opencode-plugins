@@ -40,7 +40,8 @@ already exists:
 - `lang-typescript-quality`: frozen-lockfile install, Biome or ESLint, `tsc -b` or
   `tsc --noEmit`, the test script, in that order; workspace filters and CI.
 - `lang-typescript-testing`: bun test and vitest, module mocks, snapshots, msw, fake
-  timers, fast-check.
+  timers, fast-check; `references/practice.md` has tool choices, bad tests with fixes,
+  and defaults by use case.
 - `lang-typescript-packaging`: project references and `tsc -b`, `exports` maps, barrel
   files, catalogs, `--define` dead-code removal.
 - `lang-typescript-types`: strict tsconfig flags, union and `satisfies` patterns, zod at

@@ -39,7 +39,8 @@ package whose entry point default-exports `Plugin.define({ id, setup })` from
 - An agent with a source `agents.src/<id>.md` is composed by `bun run build` into
   the committed `agents/<id>.md`: a line `{{include <fragment>}}` (or
   `{{include <fragment>: <part> ...}}`) inlines `plugins/lib/src/<fragment>.md`.
-  Reviewer agents include `review-core`. Edit the source, never the composed file.
+  Reviewer agents include `review-core`; `code-reviewer` and the `pr-reviewer`
+  copies also include `review-tests`. Edit the source, never the composed file.
 - `scripts/build-marketplaces.ts` generates `.claude-plugin/marketplace.json`,
   `.agents/plugins/marketplace.json` and every `plugins/<name>/.claude-plugin/`
   and `plugins/<name>/.codex-plugin/` manifest. Never hand-edit them; change the

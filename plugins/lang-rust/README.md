@@ -10,7 +10,7 @@ The plugin ships no hooks.
 Replaces the former `rust` plugin, ported from the omp-plugins `rust` plugin. The omp
 `rust_quality` tool is not ported: `rustfmt` runs as OpenCode's built-in formatter
 (`"formatter": true`, see [docs/formatters.md](../../docs/formatters.md)), and the
-`lang-rust-quality` skill lists the `cargo fmt`, `cargo clippy` and `cargo test` commands to
+`lang-rust-quality` skill lists the `cargo fmt`, `cargo clippy` and `cargo nextest` commands to
 run through the shell tool. The `rust` plugin's advisories are gone: the `cargo install`
 and `RUSTFLAGS` linker advice is in `lang-rust-ci`, and the toolchain plugin's
 `ops-no-global-cargo-target` skill covers a global target directory (the advisory's
@@ -44,8 +44,9 @@ already exists:
 - `lang-rust`: the router.
 - `lang-rust-libraries`: compare preferred libraries before writing code for common concerns; versioned picks and sources.
 - `lang-rust-quality`: format, lint and test commands.
-- `lang-rust-testing`: unit and integration layout, nextest, doc tests, proptest, insta,
-  tokio paused time.
+- `lang-rust-testing`: unit and integration layout, nextest by default, doc tests,
+  proptest, insta, tokio paused time; `references/practice.md` has tool choices, bad
+  tests with fixes, and defaults by use case.
 - `lang-rust-packaging`: crate splits, `lib.rs` facades, workspace manifest, lints and
   dependencies, feature-gated dev code.
 - `lang-rust-ci`: rust-cache, `CARGO_INCREMENTAL`, linker placement, prebuilt tools,

@@ -1,10 +1,10 @@
 <!-- The coding method every code-changing agent shares (agent-coder's coder, delivery's implementers,
 design's ui-implementer). scripts/build.ts inlines this file where an agent source in agents.src/ has
 `{{include coding-core}}` (every part) or `{{include coding-core: <part> ...}}`. The quality plugin
-also adds the `standards` part to the system prompt of primary sessions and `general` subagents
-(see plugins/lib/src/coding-core.ts), so keep that part under 1000 characters. Keep every part
-agent-neutral: verdicts, ledgers and report fields stay in each agent. Every includer pays for these
-lines on every request: keep the whole file near 600 tokens. -->
+also adds the `standards` and `testing` parts to the system prompt of primary sessions and `general`
+subagents (see plugins/lib/src/coding-core.ts), so keep each of those parts under 1000 characters.
+Keep every part agent-neutral: verdicts, ledgers and report fields stay in each agent. Every includer
+pays for these lines on every request: keep the whole file near 850 tokens. -->
 <!-- part: method -->
 1. Understand: read the brief, the code and AGENTS.md; find the repo's check commands
    (package scripts, task runner, CI). Load a matching skill if one applies.
@@ -32,6 +32,16 @@ lines on every request: keep the whole file near 600 tokens. -->
   surface (TypeScript: Hono for HTTP APIs, Lambda included, Connect for RPC; ASGI/FastAPI;
   net/http wrappers; tower). Lambda
   handlers stay thin, on Powertools for AWS Lambda where it exists. Telemetry is OpenTelemetry over OTLP.
+<!-- part: testing -->
+- Tests (`quality-testing`; idioms in `lang-<language>-testing`): list the behaviors the change
+  adds, changes or removes, and search the existing tests for each. Work test-first where the
+  change allows. Test one behavior per test through the public interface, with expected values
+  worked out apart from the code. Each test protects a distinct risk: parametrize cases that differ
+  only in data, use the lowest level that catches the fault, and skip what a test already covers.
+  Tests change with the code: a refactor leaves them alone; removed behavior takes its tests and
+  fixtures. Never write a test that only checks code is gone, mirrors the implementation,
+  re-checks what the compiler proves or exists for coverage. Never weaken an assertion, edit an
+  expected value or update a snapshot just to pass.
 <!-- part: agents-md -->
 - MUST follow AGENTS.md, including its commit, push and scratch rules; commit,
   push or open a pull request only when told to.

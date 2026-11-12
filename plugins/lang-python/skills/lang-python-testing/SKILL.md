@@ -9,8 +9,9 @@ metadata:
 
 Sources: [pytest](https://docs.pytest.org/en/stable/) (9.x: [fixtures](https://docs.pytest.org/en/stable/how-to/fixtures.html), [parametrize](https://docs.pytest.org/en/stable/how-to/parametrize.html), [good practices](https://docs.pytest.org/en/stable/explanation/goodpractices.html)), [Hypothesis](https://hypothesis.readthedocs.io/), [pytest-cov](https://pytest-cov.readthedocs.io/), [coverage.py](https://coverage.readthedocs.io/).
 
-What to test and which double to use is the `quality-testing` skill. This skill is the
-pytest and Hypothesis idioms. Follow the project's existing tests, `conftest.py` and
+Read [practice.md](references/practice.md) for Python idioms and tool choices.
+Use `quality-testing` for what to test, the test budget, maintenance, and review rules.
+Follow the project's existing tests, `conftest.py` and
 `[tool.pytest.ini_options]` first. Run commands through the project runner
 (`uv run python -m pytest …`), as in `lang-python-quality`.
 
@@ -58,14 +59,14 @@ def test_saves_order(repo: Repo) -> None:
     ("raw", "expected"),
     [
         pytest.param("5m", timedelta(minutes=5), id="minutes"),
-        pytest.param("", None, id="empty", marks=pytest.mark.xfail(raises=ValueError)),
+        pytest.param("0s", timedelta(0), id="zero"),
     ],
 )
-def test_parse_duration(raw: str, expected: timedelta | None) -> None:
+def test_parse_duration(raw: str, expected: timedelta) -> None:
     assert parse_duration(raw) == expected
 ```
 
-Give each case an `id` so a failure reads `test_parse_duration[empty]`. Assert errors
+Give each case an `id` so a failure reads `test_parse_duration[zero]`. Assert errors
 with `with pytest.raises(ValueError, match=r"empty duration"):`; `match` is a regex
 searched in the message.
 
@@ -104,7 +105,8 @@ python -m pytest --cov=billing --cov-branch --cov-report=term-missing
 
 Read the `Missing` column for untested behavior; `--cov-fail-under` belongs in config
 only when the project already gates on it. Async tests need the plugin the project
-uses (`pytest-asyncio` with `@pytest.mark.asyncio` or `asyncio_mode = "auto"`, or
-`anyio`'s `@pytest.mark.anyio`). For HTTP clients, stub the transport
+uses (`pytest-asyncio` with `@pytest.mark.asyncio`, or
+`anyio`'s `@pytest.mark.anyio`); do not enable both plugins' auto modes.
+For HTTP clients, stub the transport
 (`httpx.MockTransport`, or `respx` / `responses` when the project already uses them),
 not the client class.
