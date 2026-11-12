@@ -46,7 +46,10 @@ load by name:
 All four are `subagent` agents converted with `scripts/convert-agent.ts`.
 `design-critic` and `a11y-auditor` are composed by `bun run build` from
 `agents.src/<id>.md` and the shared review core (`plugins/lib/src/review-core.md`,
-see [agent-reviewer](../agent-reviewer/README.md)); edit the source, not `agents/`. Their
+see [agent-reviewer](../agent-reviewer/README.md)); `ui-implementer` is composed the
+same way and includes the `standards` part of the shared coding core
+(`plugins/lib/src/coding-core.md`): research first and compare with the
+`lang-<language>-libraries` standards before writing your own code. Edit the source, not `agents/`. Their
 first line is `VERDICT: PASS|MINOR|MAJOR`. Their
 permissions are tool allowlists (a deny on every action, then allows), so a tool an
 agent does not need is left out of its requests: each gets read, grep, glob, Code
