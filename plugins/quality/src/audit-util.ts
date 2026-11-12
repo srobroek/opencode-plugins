@@ -1,5 +1,6 @@
-import { existsSync, realpathSync } from "node:fs"
-import { dirname, isAbsolute, relative, resolve, sep } from "node:path"
+import { readFileSync, realpathSync, statSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { isAbsolute, join, relative, resolve, sep } from "node:path"
 
 /** The most characters a helper tool puts in its text result. */
 export const TEXT_CAP = 4000
@@ -40,20 +41,6 @@ export function percent(part: number, whole: number): number {
   return whole === 0 ? 100 : Math.round((part / whole) * 1000) / 10
 }
 
-/** The nearest existing ancestor of `path`, resolved through symlinks, with the missing tail re-appended. */
-function realish(path: string): string {
-  let existing = path
-  const tail: string[] = []
-  while (!existsSync(existing)) {
-    const parent = dirname(existing)
-    if (parent === existing) break
-    tail.unshift(existing.slice(parent.length).replace(/^[\\/]+/, ""))
-    existing = parent
-  }
-  const real = existsSync(existing) ? realpathSync(existing) : existing
-  return tail.length === 0 ? real : resolve(real, ...tail)
-}
-
 function inside(root: string, target: string): boolean {
   const rel = relative(root, target)
   return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))
@@ -61,14 +48,44 @@ function inside(root: string, target: string): boolean {
 
 export class PathError extends Error {}
 
+/** The OpenCode temp directory, where the audit keeps its reports. */
+export function opencodeTempDir(): string {
+  return join(realpathSync(tmpdir()), "opencode")
+}
+
+/** The directories a report may live in: the session directory and the OpenCode temp directory. */
+export function reportRoots(sessionDirectory: string): string[] {
+  const real = (path: string): string => {
+    try {
+      return realpathSync(path)
+    } catch {
+      return resolve(path)
+    }
+  }
+  return [real(sessionDirectory), opencodeTempDir()]
+}
+
+export const MAX_REPORT_BYTES = 200 * 1024 * 1024
+
 /**
- * Resolve `path` against `base` (absolute paths are kept) and require the result to stay inside
- * `root`, both lexically and after following symlinks. Throws {@link PathError} otherwise.
+ * Read a report. A relative path resolves against the session directory. The file is resolved with
+ * `realpathSync` at read time and its real path must be inside one of the roots, so a link that
+ * points elsewhere is refused. Throws {@link PathError} for a path outside the roots; a missing
+ * file or an oversized one throws a plain Error.
  */
-export function resolveInside(root: string, base: string, path: string | undefined): string {
-  const target = path === undefined || path === "" ? base : isAbsolute(path) ? path : resolve(base, path)
-  const lexical = resolve(target)
-  if (!inside(resolve(root), lexical) || !inside(realish(root), realish(lexical)))
-    throw new PathError(`${path ?? target} is outside the session directory ${root}`)
-  return lexical
+export function readReportFile(sessionDirectory: string, path: string, roots = reportRoots(sessionDirectory)): string {
+  const target = isAbsolute(path) ? path : resolve(sessionDirectory, path)
+  let real: string
+  try {
+    real = realpathSync(target)
+  } catch {
+    // Nothing to follow yet: judge the lexical path, so a missing file elsewhere is still a refusal.
+    const lexical = [...roots, resolve(sessionDirectory), join(tmpdir(), "opencode")]
+    if (!lexical.some((root) => inside(root, resolve(target))))
+      throw new PathError(`${path} is outside the session and OpenCode temp directories`)
+    throw new Error(`${path} does not exist`)
+  }
+  if (!roots.some((root) => inside(root, real))) throw new PathError(`${path} is outside the session and OpenCode temp directories`)
+  if (statSync(real).size > MAX_REPORT_BYTES) throw new Error(`${path} is larger than ${MAX_REPORT_BYTES / 1024 / 1024} MB`)
+  return readFileSync(real, "utf8")
 }

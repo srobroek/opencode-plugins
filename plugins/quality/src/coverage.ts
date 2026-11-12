@@ -1,10 +1,17 @@
-import { XMLParser } from "fast-xml-parser"
+import { XMLParser, XMLValidator } from "fast-xml-parser"
 import { capText, compactRanges, percent } from "./audit-util.ts"
 
 export type CoverageFormat = "lcov" | "cobertura" | "gocover"
 
-/** Per file: line number to covered, branch key to covered. */
-export type FileCoverage = { lines: Map<number, boolean>; branches: Map<string, boolean> }
+/**
+ * Per file: line number to covered, branch key to covered, and for reports that give only a
+ * count per line (Cobertura `condition-coverage="50% (1/2)"`) the covered and total branches of that line.
+ */
+export type FileCoverage = {
+  lines: Map<number, boolean>
+  branches: Map<string, boolean>
+  branchCounts: Map<number, { covered: number; total: number }>
+}
 
 export type CoverageReport = {
   format: CoverageFormat
@@ -25,7 +32,7 @@ const normalizePath = (path: string, root?: string): string => {
 function file(report: Map<string, FileCoverage>, path: string): FileCoverage {
   let entry = report.get(path)
   if (entry === undefined) {
-    entry = { lines: new Map(), branches: new Map() }
+    entry = { lines: new Map(), branches: new Map(), branchCounts: new Map() }
     report.set(path, entry)
   }
   return entry
@@ -79,6 +86,8 @@ const asNodes = (value: unknown): Node[] => (Array.isArray(value) ? value.filter
 
 /** Cobertura XML: `class@filename`, `line@number/hits`, `condition-coverage="50% (1/2)"` or `conditions`. */
 export function parseCobertura(text: string, root?: string): CoverageReport {
+  const valid = XMLValidator.validate(text)
+  if (valid !== true) throw new Error(`invalid Cobertura XML: ${valid.err.msg} (line ${valid.err.line})`)
   const doc = xml.parse(text) as { coverage?: Node }
   if (doc.coverage === undefined || typeof doc.coverage !== "object") throw new Error("not a Cobertura report: no coverage element")
   const files = new Map<string, FileCoverage>()
@@ -102,10 +111,13 @@ export function parseCobertura(text: string, root?: string): CoverageReport {
         }
         const summary = /\((\d+)\/(\d+)\)/.exec(String(line["@_condition-coverage"] ?? ""))
         if (summary !== null) {
-          // Only counts are given, so branches are positional: the first `covered` slots count as taken.
+          // Only counts are given: keep them per line instead of guessing which branches were taken.
           hasBranches = true
-          const covered = Number(summary[1])
-          for (let i = 0; i < Number(summary[2]); i++) mark(entry.branches, `${n}:${i}`, i < covered)
+          const prior = entry.branchCounts.get(n)
+          entry.branchCounts.set(n, {
+            covered: Math.max(prior?.covered ?? 0, Number(summary[1])),
+            total: Math.max(prior?.total ?? 0, Number(summary[2])),
+          })
         }
       }
     }
@@ -149,19 +161,26 @@ export type CoverageComparison = {
   gained: number
 }
 
-function totals(report: CoverageReport, pick: (f: FileCoverage) => Map<unknown, boolean>): Totals {
+function totals(report: CoverageReport, branches: boolean): Totals {
   let covered = 0
   let total = 0
-  for (const f of report.files.values())
-    for (const hit of pick(f).values()) {
+  for (const f of report.files.values()) {
+    for (const hit of (branches ? f.branches : f.lines).values()) {
       total++
       if (hit) covered++
     }
+    if (branches)
+      for (const count of f.branchCounts.values()) {
+        total += count.total
+        covered += count.covered
+      }
+  }
   return { covered, total, percent: percent(covered, total) }
 }
 
 /** What the baseline covered and the candidate does not, per file; files missing from the candidate listed apart. */
 export function compareCoverage(baseline: CoverageReport, candidate: CoverageReport): CoverageComparison {
+  const bothBranches = baseline.hasBranches && candidate.hasBranches
   const lost: FileLoss[] = []
   const disappeared: CoverageComparison["disappeared"] = []
   let gained = 0
@@ -169,26 +188,40 @@ export function compareCoverage(baseline: CoverageReport, candidate: CoverageRep
     const cand = candidate.files.get(name)
     const baseLines = [...base.lines].filter(([, hit]) => hit).map(([n]) => n)
     if (cand === undefined) {
-      if (baseLines.length > 0 || [...base.branches.values()].some(Boolean)) disappeared.push({ file: name, coveredLines: baseLines.length })
+      if (baseLines.length > 0 || (bothBranches && [...base.branches.values()].some(Boolean))) disappeared.push({ file: name, coveredLines: baseLines.length })
       continue
     }
     const lines = baseLines.filter((n) => cand.lines.get(n) !== true).sort((a, b) => a - b)
-    const branches = [...base.branches].filter(([k, hit]) => hit && cand.branches.get(k) !== true).map(([k]) => k)
+    const branches: string[] = []
+    let lostBranchCount = 0
+    if (bothBranches) {
+      for (const [k, hit] of base.branches)
+        if (hit && cand.branches.get(k) !== true) {
+          branches.push(k)
+          lostBranchCount++
+        }
+      for (const [n, count] of base.branchCounts) {
+        const now = cand.branchCounts.get(n)?.covered ?? 0
+        if (count.covered > now) {
+          branches.push(`${n} (${count.covered}/${count.total} -> ${now}/${cand.branchCounts.get(n)?.total ?? 0})`)
+          lostBranchCount += count.covered - now
+        }
+      }
+    }
     if (lines.length > 0 || branches.length > 0)
-      lost.push({ file: name, lines, branches, lostLineCount: lines.length, lostBranchCount: branches.length })
+      lost.push({ file: name, lines, branches, lostLineCount: lines.length, lostBranchCount })
   }
   for (const [name, cand] of candidate.files) {
     const base = baseline.files.get(name)
     for (const [n, hit] of cand.lines) if (hit && base?.lines.get(n) !== true) gained++
   }
-  const bothBranches = baseline.hasBranches && candidate.hasBranches
   return {
     kind: "coverage",
     baselineFormat: baseline.format,
     candidateFormat: candidate.format,
-    lines: { baseline: totals(baseline, (f) => f.lines), candidate: totals(candidate, (f) => f.lines) },
+    lines: { baseline: totals(baseline, false), candidate: totals(candidate, false) },
     branches: bothBranches
-      ? { baseline: totals(baseline, (f) => f.branches), candidate: totals(candidate, (f) => f.branches) }
+      ? { baseline: totals(baseline, true), candidate: totals(candidate, true) }
       : null,
     lost: lost.sort((a, b) => b.lostLineCount + b.lostBranchCount - (a.lostLineCount + a.lostBranchCount) || a.file.localeCompare(b.file)),
     disappeared: disappeared.sort((a, b) => a.file.localeCompare(b.file)),
@@ -210,7 +243,7 @@ export function formatCoverage(c: CoverageComparison, maxFiles = 15): string {
   for (const f of c.lost.slice(0, maxFiles)) {
     const parts = [] as string[]
     if (f.lines.length > 0) parts.push(`lines ${compactRanges(f.lines)}`)
-    if (f.branches.length > 0) parts.push(`${f.branches.length} branch(es) ${f.branches.slice(0, 6).join(" ")}${f.branches.length > 6 ? " ..." : ""}`)
+    if (f.branches.length > 0) parts.push(`${f.lostBranchCount} branch(es) ${f.branches.slice(0, 6).join(" ")}${f.branches.length > 6 ? " ..." : ""}`)
     lines.push(`  ${f.file}: ${parts.join("; ")}`)
   }
   if (c.lost.length > maxFiles) lines.push(`  ... +${c.lost.length - maxFiles} more files`)

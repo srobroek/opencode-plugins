@@ -1,26 +1,26 @@
 import { describe, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
-import { compactRanges, PathError, resolveInside } from "./audit-util.ts"
+import { compactRanges, opencodeTempDir, PathError, readReportFile } from "./audit-util.ts"
 import { compareCoverage, detectCoverageFormat, formatCoverage, parseCoverage } from "./coverage.ts"
 import plugin from "./index.ts"
 import { parseJunit } from "./junit.ts"
 import { compareMutation, detectMutationFormat, formatMutation, parseMutation } from "./mutation.ts"
 import { BUN, GOTESTSUM, NEXTEST, PYTEST, VITEST } from "./test-audit.fixtures.ts"
-import {
-  compareReports,
-  confirmTestRepeat,
-  parseRepeatInput,
-  parseTestAuditOptions,
-  repeatRuns,
-  TEST_REPEAT_ACTION,
-} from "./test-audit.ts"
-import { formatRepeat, isFresh, markFile, type RunRecord, summarizeRuns } from "./test-repeat.ts"
+import { compareReports, parseSummarizeInput, parseTestAuditOptions, summarizeReports } from "./test-audit.ts"
+import { formatSummary, type RunRecord, summarizeRuns } from "./test-repeat.ts"
 
+/** A directory inside the OpenCode temp directory. */
 function scratch(): string {
-  return mkdtempSync(join(tmpdir(), "quality-audit-"))
+  mkdirSync(opencodeTempDir(), { recursive: true })
+  return mkdtempSync(join(opencodeTempDir(), "quality-audit-"))
+}
+
+/** A directory in the system temp directory but outside the OpenCode temp directory. */
+function outsideScratch(): string {
+  return mkdtempSync(join(realpathSync(tmpdir()), "quality-audit-"))
 }
 
 describe("parseJunit", () => {
@@ -58,18 +58,21 @@ describe("parseJunit", () => {
     expect(cases.map((c) => c.status)).toEqual(["passed", "failed", "passed"])
     expect(cases[2]?.retries).toBe(2)
   })
+  test("rejects truncated or malformed XML", () => {
+    expect(() => parseJunit(PYTEST.slice(0, -40))).toThrow(/invalid XML/)
+    expect(() => parseJunit("<testsuites><testsuite><testcase></testsuite></testsuites>")).toThrow(/invalid XML/)
+  })
   test("rejects non-JUnit input", () => {
     expect(() => parseJunit("<html/>")).toThrow()
     expect(() => parseJunit("")).toThrow()
   })
 })
 
-const rec = (run: number, report: RunRecord["report"], statuses: Record<string, "passed" | "failed" | "skipped">, exit = 0): RunRecord => ({
+const rec = (run: number, report: RunRecord["report"], statuses: Record<string, "passed" | "failed" | "skipped">, exit?: number): RunRecord => ({
   run,
   exitCode: exit,
-  outcome: "exited",
-  seconds: run,
   report,
+  reason: report === "used" ? undefined : "invalid XML",
   cases: Object.entries(statuses).map(([id, status]) => ({ id, status, time: run / 10, retries: 0 })),
 })
 
@@ -77,118 +80,106 @@ describe("summarizeRuns", () => {
   const records = [
     rec(1, "used", { a: "passed", b: "failed", c: "passed", d: "skipped" }, 1),
     rec(2, "used", { a: "failed", b: "failed", c: "passed", d: "skipped" }, 1),
-    rec(3, "stale", { a: "passed" }),
+    rec(3, "unreadable", { a: "passed" }, 0),
     rec(4, "used", { a: "passed", b: "failed", c: "passed", d: "skipped" }, 1),
   ]
   const summary = summarizeRuns(records)
-  test("flaky, always failing, slowest; stale reports ignored", () => {
+  test("flaky, always failing, slowest; unreadable reports ignored", () => {
     expect(summary.flaky.map((t) => [t.id, t.passed, t.failed])).toEqual([["a", 2, 1]])
     expect(summary.failedEveryRun.map((t) => t.id)).toEqual(["b"])
     expect(summary.slowest[0]?.id).toBeDefined()
     expect(summary.slowest.map((t) => t.id)).not.toContain("d")
     expect(summary.reportRuns).toBe(3)
-    expect(summary.badReports).toEqual([{ run: 3, state: "stale" }])
-    expect(summary.wallSeconds).toEqual({ min: 1, median: 2.5, max: 4 })
+    expect(summary.unreadable).toEqual([{ run: 3, reason: "invalid XML" }])
+    expect(summary.exitCodes).toEqual([1, 1, 0, 1])
+    expect(summary.exitCodesAgree).toBe(false)
   })
   test("text names the sections and stays under the cap", () => {
-    const text = formatRepeat(summary, { command: "t", cwd: "/x", requested: 4, junit: true })
+    const text = formatSummary(summary)
     expect(text).toContain("flaky (passed and failed) (1)")
-    expect(text).toContain("failed in every run (1)")
-    expect(text).toContain("run 3: report stale")
+    expect(text).toContain("failed in every report (1)")
+    expect(text).toContain("report 3: unreadable (invalid XML)")
+    expect(text).toContain("exit codes differ")
     const many = Object.fromEntries(Array.from({ length: 800 }, (_, i) => [`very-long-test-name-${"x".repeat(40)}-${i}`, i % 2 ? "passed" : "failed"]))
     const big = summarizeRuns([rec(1, "used", many as never), rec(2, "used", Object.fromEntries(Object.keys(many).map((k) => [k, "failed"])) as never)])
-    expect(formatRepeat(big, { command: "t", cwd: "/x", requested: 2, junit: true }).length).toBeLessThanOrEqual(4000)
+    expect(formatSummary(big).length).toBeLessThanOrEqual(4000)
   })
-  test("reports differing exit codes without a junit file", () => {
-    const text = formatRepeat(summarizeRuns([rec(1, "none", {}, 0), rec(2, "none", {}, 1)]), { command: "t", cwd: "/x", requested: 2, junit: false })
-    expect(text).toContain("exit codes differ")
+  test("without exit codes there is no agreement claim", () => {
+    const plain = summarizeRuns([rec(1, "used", { a: "passed" })])
+    expect(plain.exitCodes).toBeNull()
+    expect(plain.exitCodesAgree).toBeNull()
+    expect(formatSummary(plain)).not.toContain("exit codes")
   })
-})
-
-describe("report freshness", () => {
-  test("missing, unchanged and rewritten files", () => {
-    const dir = scratch()
-    try {
-      const path = join(dir, "r.xml")
-      expect(markFile(path)).toBeUndefined()
-      writeFileSync(path, "a")
-      const before = markFile(path)
-      expect(isFresh(before, markFile(path))).toBe(false)
-      writeFileSync(path, "b")
-      expect(isFresh(before, markFile(path))).toBe(true)
-      writeFileSync(path, "a")
-      utimesSync(path, 1, 1)
-      expect(isFresh(before, markFile(path))).toBe(true)
-      expect(isFresh(undefined, markFile(path))).toBe(true)
-    } finally {
-      rmSync(dir, { recursive: true, force: true })
-    }
+  test("nextest retries are listed", () => {
+    const cases = parseJunit(NEXTEST)
+    const s = summarizeRuns([{ run: 1, report: "used", cases }])
+    expect(s.retriedInRun).toEqual(["fixture-project::basic :: test_flaky_mod_4"])
   })
 })
 
-describe("repeatRuns", () => {
-  test("runs a real command, reads only reports each run wrote, leaves files in place", async () => {
-    const dir = scratch()
-    try {
-      // Writes a report on runs 1 and 3 only, with a test that fails on run 2.
-      const script = `n=$(cat count 2>/dev/null || echo 0); n=$((n+1)); echo $n > count
-if [ $n -ne 2 ]; then printf '<testsuites><testsuite name="s"><testcase classname="c" name="t" time="0.1"/><testcase classname="c" name="u" time="0.2">%s</testcase></testsuite></testsuites>' "$([ $n -eq 3 ] && echo '<failure/>')" > r.xml; fi
-[ $n -ne 3 ]`
-      const { records } = await repeatRuns({ command: script, runs: 3, cwd: dir, junitPath: join(dir, "r.xml"), timeoutSeconds: 30 }, undefined)
-      expect(records.map((r) => r.exitCode)).toEqual([0, 0, 1])
-      expect(records.map((r) => r.report)).toEqual(["used", "stale", "used"])
-      const summary = summarizeRuns(records)
-      expect(summary.flaky.map((t) => t.id)).toEqual(["c :: u"])
-      expect(await Bun.file(join(dir, "r.xml")).exists()).toBe(true)
-    } finally {
-      rmSync(dir, { recursive: true, force: true })
-    }
-  })
-  test("a timeout kills the process group", async () => {
-    const dir = scratch()
-    try {
-      const { records } = await repeatRuns({ command: "sleep 30 & wait", runs: 1, cwd: dir, timeoutSeconds: 0.2 }, undefined)
-      expect(records[0]).toMatchObject({ exitCode: null, outcome: "timeout" })
-    } finally {
-      rmSync(dir, { recursive: true, force: true })
-    }
-  })
-  test("cancellation stops the loop", async () => {
-    const dir = scratch()
-    try {
-      const controller = new AbortController()
-      setTimeout(() => controller.abort(), 100)
-      const result = await repeatRuns({ command: "sleep 30", runs: 5, cwd: dir, timeoutSeconds: 60 }, controller.signal)
-      expect(result.records).toHaveLength(1)
-      expect(result.records[0]?.outcome).toBe("aborted")
-      expect(result.interrupted).toContain("cancelled")
-    } finally {
-      rmSync(dir, { recursive: true, force: true })
-    }
+describe("parseSummarizeInput", () => {
+  test("bounds and exit code shape", () => {
+    expect(parseSummarizeInput({ reports: ["a"] })).toEqual({ reports: ["a"], exitCodes: undefined })
+    expect(parseSummarizeInput({ reports: ["a", "b"], exitCodes: [0, null] })).toMatchObject({ exitCodes: [0, null] })
+    for (const bad of [{}, { reports: [] }, { reports: Array(51).fill("a") }, { reports: [""] }, { reports: ["a"], exitCodes: [] }, { reports: ["a"], exitCodes: [1.5] }, { reports: ["a"], exitCodes: ["0"] }])
+      expect(typeof parseSummarizeInput(bad)).toBe("string")
   })
 })
 
-describe("parseRepeatInput", () => {
-  test("defaults and bounds", () => {
-    expect(parseRepeatInput({ command: "x" })).toEqual({ command: "x", runs: 5, cwd: undefined, junit: undefined, timeoutSeconds: 600 })
-    for (const bad of [{}, { command: " " }, { command: "x", runs: 0 }, { command: "x", runs: 51 }, { command: "x", runs: 1.5 }, { command: "x", timeoutSeconds: 3601 }, { command: "x", timeoutSeconds: 0 }])
-      expect(typeof parseRepeatInput(bad)).toBe("string")
-  })
-})
-
-describe("resolveInside", () => {
-  test("refuses escapes, including through symlinks", () => {
+describe("summarizeReports", () => {
+  test("reads reports in the session and temp directories; unreadable ones are marked", () => {
     const root = scratch()
-    const outside = scratch()
+    const outside = outsideScratch()
     try {
-      writeFileSync(join(outside, "x"), "")
-      symlinkSync(outside, join(root, "link"))
-      expect(resolveInside(root, root, "a/b.txt")).toBe(join(root, "a/b.txt"))
-      expect(() => resolveInside(root, root, "../x")).toThrow(PathError)
-      expect(() => resolveInside(root, root, join(outside, "x"))).toThrow(PathError)
-      expect(() => resolveInside(root, root, "link/x")).toThrow(PathError)
+      const ok = (failed: boolean) => `<testsuites><testsuite name="s"><testcase classname="c" name="t" time="0.1">${failed ? "<failure/>" : ""}</testcase></testsuite></testsuites>`
+      writeFileSync(join(root, "r1.xml"), ok(false))
+      writeFileSync(join(root, "r2.xml"), ok(true))
+      writeFileSync(join(root, "truncated.xml"), ok(false).slice(0, -20))
+      const result = summarizeReports(root, { reports: ["r1.xml", join(root, "r2.xml"), "truncated.xml", "missing.xml"], exitCodes: [0, 1, 1, null] })
+      expect(result.metadata.reportRuns).toBe(2)
+      expect((result.metadata.flaky as unknown[]).length).toBe(1)
+      expect((result.metadata.unreadable as Array<{ run: number }>).map((u) => u.run)).toEqual([3, 4])
+      expect(result.content).toContain("report 3: unreadable")
+      const refused = summarizeReports(root, { reports: ["r1.xml", join(outside, "r.xml")] })
+      expect(refused.content).toContain("refused")
     } finally {
       rmSync(root, { recursive: true, force: true })
+      rmSync(outside, { recursive: true, force: true })
+    }
+  })
+})
+
+describe("readReportFile", () => {
+  test("accepts the session and OpenCode temp directories, refuses everything else", () => {
+    const session = outsideScratch()
+    const temp = scratch()
+    const outside = outsideScratch()
+    try {
+      writeFileSync(join(session, "a"), "A")
+      writeFileSync(join(temp, "b"), "B")
+      writeFileSync(join(outside, "c"), "C")
+      expect(readReportFile(session, "a")).toBe("A")
+      expect(readReportFile(session, join(temp, "b"))).toBe("B")
+      expect(() => readReportFile(session, join(outside, "c"))).toThrow(PathError)
+      expect(() => readReportFile(session, "../x")).toThrow(PathError)
+      expect(() => readReportFile(session, join(outside, "missing"))).toThrow(PathError)
+      expect(() => readReportFile(session, "missing")).toThrow(/does not exist/)
+    } finally {
+      for (const d of [session, temp, outside]) rmSync(d, { recursive: true, force: true })
+    }
+  })
+  test("a symlink to an outside file is refused, also one that dangled when created", () => {
+    const session = outsideScratch()
+    const outside = outsideScratch()
+    try {
+      symlinkSync(join(outside, "later"), join(session, "dangling"))
+      symlinkSync(join(outside, "c"), join(session, "live"))
+      writeFileSync(join(outside, "c"), "C")
+      expect(() => readReportFile(session, "live")).toThrow(PathError)
+      writeFileSync(join(outside, "later"), "L")
+      expect(() => readReportFile(session, "dangling")).toThrow(PathError)
+    } finally {
+      rmSync(session, { recursive: true, force: true })
       rmSync(outside, { recursive: true, force: true })
     }
   })
@@ -237,10 +228,27 @@ describe("coverage", () => {
     expect(text).toContain("lines 2-3")
     expect(text).toContain("src/gone.ts")
   })
-  test("Cobertura (coverage.py shape): positional branches from condition-coverage", () => {
+  test("Cobertura condition-coverage keeps covered/total per line: 2/2 to 1/2 loses a branch", () => {
     const c = compareCoverage(parseCoverage(COB(1, "100% (2/2)"), undefined), parseCoverage(COB(0, "50% (1/2)"), undefined))
-    expect(c.lost[0]).toMatchObject({ file: "m.py", lines: [3], branches: ["2:1"] })
+    expect(c.lost[0]).toMatchObject({ file: "m.py", lines: [3], lostBranchCount: 1 })
+    expect(c.lost[0]?.branches[0]).toContain("2/2 -> 1/2")
     expect(c.branches?.baseline).toEqual({ covered: 2, total: 2, percent: 100 })
+    expect(c.branches?.candidate).toEqual({ covered: 1, total: 2, percent: 50 })
+    const same = compareCoverage(parseCoverage(COB(1, "50% (1/2)"), undefined), parseCoverage(COB(1, "50% (1/2)"), undefined))
+    expect(same.lost).toEqual([])
+  })
+  test("branches are not reported lost when either report has no branch data", () => {
+    const withBranches = parseCoverage(LCOV_A, undefined)
+    const without = parseCoverage("SF:src/a.ts\nDA:1,1\nDA:2,1\nDA:3,1\nDA:4,1\nend_of_record\n", undefined)
+    for (const c of [compareCoverage(withBranches, without), compareCoverage(without, withBranches)]) {
+      expect(c.branches).toBeNull()
+      for (const f of c.lost) expect(f.branches).toEqual([])
+      for (const f of c.lost) expect(f.lostBranchCount).toBe(0)
+      expect(formatCoverage(c)).toContain("branches: not measured")
+    }
+  })
+  test("truncated Cobertura XML is rejected", () => {
+    expect(() => parseCoverage(COB(1, "50% (1/2)").slice(0, -25), "cobertura")).toThrow(/invalid Cobertura XML/)
   })
   test("Cobertura conditions elements", () => {
     const xml = `<coverage><packages><package><classes><class filename="a"><lines><line number="1" hits="1" branch="true"><conditions><condition number="0" type="jump" coverage="100%"/><condition number="1" type="jump" coverage="0%"/></conditions></line></lines></class></classes></package></packages></coverage>`
@@ -336,8 +344,8 @@ describe("mutation", () => {
 
 describe("compareReports", () => {
   test("reads inside the session directory and refuses outside paths", () => {
-    const root = scratch()
-    const outside = scratch()
+    const root = outsideScratch()
+    const outside = outsideScratch()
     try {
       mkdirSync(join(root, "r"))
       writeFileSync(join(root, "r/a.info"), LCOV_A)
@@ -353,6 +361,11 @@ describe("compareReports", () => {
       expect(compareReports(root, { kind: "mutation", baseline: "r/a.info", candidate: "r/b.info" }).content).toContain("quality_test_compare:")
       expect(compareReports(root, { kind: "coverage", baseline: "r/a.info", candidate: "r/b.info", format: "gremlins" }).content).toContain("format")
       expect(compareReports(root, { kind: "x" }).content).toContain("kind")
+      writeFileSync(join(root, "bad.xml"), COB(1, "50% (1/2)").slice(0, -30))
+      writeFileSync(join(root, "good.xml"), COB(1, "50% (1/2)"))
+      const truncated = compareReports(root, { kind: "coverage", baseline: "good.xml", candidate: "bad.xml" })
+      expect(truncated.content).toContain("invalid")
+      expect(truncated.metadata.error).toBeDefined()
     } finally {
       rmSync(root, { recursive: true, force: true })
       rmSync(outside, { recursive: true, force: true })
@@ -364,11 +377,11 @@ type Execute = (input: unknown, context: unknown) => Promise<{ content: string; 
 const call = { sessionID: "ses_1", agent: "build", messageID: "msg_1", id: "call_1" }
 
 describe("plugin wiring", () => {
-  test("registers both tools and the confirm hook, and disposes them", async () => {
+  test("registers both read-only tools and no hooks, and disposes them", async () => {
     const fake = createFakeContext()
     const cleanup = await plugin.setup(fake.context)
-    expect([...fake.tools.keys()]).toEqual(["quality_test_repeat", "quality_test_compare"])
-    expect(fake.hooks("permission")).toEqual(["evaluate"])
+    expect([...fake.tools.keys()]).toEqual(["quality_test_summarize", "quality_test_compare"])
+    expect(fake.hooks("permission")).toEqual([])
     for (const tool of fake.tools.values()) {
       expect((tool.description as string).split("\n")[0]?.length).toBeLessThanOrEqual(120)
       expect(JSON.stringify(tool.input).length).toBeLessThan(3000)
@@ -379,77 +392,33 @@ describe("plugin wiring", () => {
     expect(fake.tools.size).toBe(0)
   })
 
-  test("confirmTestRuns: false drops the hook", async () => {
-    const fake = createFakeContext({ options: { confirmTestRuns: false } })
-    await plugin.setup(fake.context)
-    expect(fake.hooks("permission")).toEqual([])
-    expect(parseTestAuditOptions({})).toEqual({ confirm: true })
-  })
-
-  test("testAudit: false registers neither tool nor the hook", async () => {
+  test("testAudit: false registers neither tool", async () => {
     const fake = createFakeContext({ options: { testAudit: false } })
     const cleanup = await plugin.setup(fake.context)
-    expect(fake.tools.has("quality_test_repeat")).toBe(false)
+    expect(fake.tools.has("quality_test_summarize")).toBe(false)
     expect(fake.tools.has("quality_test_compare")).toBe(false)
-    expect(fake.hooks("permission")).toEqual([])
-    expect(parseTestAuditOptions({ testAudit: false, confirmTestRuns: true })).toBeUndefined()
+    expect(parseTestAuditOptions({ testAudit: false })).toBeUndefined()
+    expect(parseTestAuditOptions({})).toEqual({ enabled: true })
     await cleanup?.()
     expect(fake.active()).toBe(0)
   })
 
-  test("quality_test_repeat asserts the permission, then runs; rejects bad cwd without a process", async () => {
-    const dir = scratch()
-    try {
-      const fake = createFakeContext({ directory: dir })
-      await plugin.setup(fake.context)
-      const run = fake.tools.get("quality_test_repeat")?.execute as Execute
-      const context = { ...call, signal: new AbortController().signal }
-      const result = await run({ command: "echo hi", runs: 2 }, context)
-      expect(fake.asserts).toHaveLength(1)
-      expect(fake.asserts[0]).toMatchObject({ action: TEST_REPEAT_ACTION, resources: ["echo hi"], metadata: { runs: 2 } })
-      expect(result.content).toContain("exit codes: 0 0")
-      expect(result.metadata.runs).toBe(2)
-      const refused = await run({ command: "echo hi", cwd: ".." }, context)
-      expect(refused.content).toContain("no process started")
-      expect(fake.asserts).toHaveLength(1)
-    } finally {
-      rmSync(dir, { recursive: true, force: true })
-    }
-  })
-
-  test("quality_test_compare needs no permission", async () => {
-    const dir = scratch()
+  test("both tools need no permission", async () => {
+    const dir = outsideScratch()
     try {
       writeFileSync(join(dir, "a"), LCOV_A)
+      writeFileSync(join(dir, "r.xml"), PYTEST)
       const fake = createFakeContext({ directory: dir })
       await plugin.setup(fake.context)
+      const context = { ...call, signal: new AbortController().signal }
       const compare = fake.tools.get("quality_test_compare")?.execute as Execute
-      const result = await compare({ kind: "coverage", baseline: "a", candidate: "a" }, { ...call, signal: new AbortController().signal })
-      expect(result.content).toContain("coverage: lines")
+      expect((await compare({ kind: "coverage", baseline: "a", candidate: "a" }, context)).content).toContain("coverage: lines")
+      const summarize = fake.tools.get("quality_test_summarize")?.execute as Execute
+      const result = await summarize({ reports: ["r.xml", "r.xml"], exitCodes: [1, 1] }, context)
+      expect(result.content).toContain("failed in every report")
       expect(fake.asserts).toHaveLength(0)
     } finally {
       rmSync(dir, { recursive: true, force: true })
-    }
-  })
-})
-
-describe("confirmTestRepeat", () => {
-  test("turns allow into ask naming command and run count; leaves other actions and denies", async () => {
-    const fake = createFakeContext()
-    await plugin.setup(fake.context)
-    const evaluation = await fake.fire.permission("evaluate", {
-      action: TEST_REPEAT_ACTION,
-      resources: ["bun test"],
-      metadata: { runs: 7 },
-      effect: "allow",
-    } as { action: string; resources: string[]; metadata: Record<string, unknown>; effect: string; message?: string })
-    expect(evaluation.effect).toBe("ask")
-    expect(evaluation.message).toContain("bun test")
-    expect(evaluation.message).toContain("7 times")
-    for (const [action, effect] of [["other", "allow"], [TEST_REPEAT_ACTION, "deny"]] as const) {
-      const e = { action, resources: ["x"], effect }
-      confirmTestRepeat(e)
-      expect(e.effect).toBe(effect)
     }
   })
 })

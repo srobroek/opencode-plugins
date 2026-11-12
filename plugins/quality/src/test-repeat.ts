@@ -1,17 +1,15 @@
-import { createHash } from "node:crypto"
-import { readFileSync, statSync } from "node:fs"
 import { capText, median } from "./audit-util.ts"
-import { parseJunit, type TestCase } from "./junit.ts"
+import type { TestCase } from "./junit.ts"
 
-export type ReportState = "none" | "used" | "missing" | "stale" | "unreadable"
+export type ReportState = "used" | "unreadable"
 
+/** One report, in run order. `exitCode` is what the caller observed for that run, when it said. */
 export type RunRecord = {
   run: number
-  /** Null when the process was killed (timeout, cancellation) or lost. */
-  exitCode: number | null
-  outcome: "exited" | "timeout" | "aborted" | "lost"
-  seconds: number
+  exitCode?: number | null
   report: ReportState
+  /** Why the report is unreadable. */
+  reason?: string
   cases: TestCase[]
 }
 
@@ -19,10 +17,12 @@ export type TestStats = { id: string; passed: number; failed: number; skipped: n
 
 export type RepeatSummary = {
   runs: number
-  exitCodes: Array<number | null>
-  wallSeconds: { min: number; median: number; max: number }
+  /** Null when the caller gave no exit codes. */
+  exitCodes: Array<number | null> | null
+  /** Whether every given exit code is the same; null without exit codes. */
+  exitCodesAgree: boolean | null
   reportRuns: number
-  badReports: Array<{ run: number; state: ReportState }>
+  unreadable: Array<{ run: number; reason: string }>
   totalCases: number
   flaky: TestStats[]
   failedEveryRun: TestStats[]
@@ -72,17 +72,14 @@ export function summarizeRuns(records: readonly RunRecord[]): RepeatSummary {
     retried: s.retried,
   }))
   const byId = (a: TestStats, b: TestStats) => a.id.localeCompare(b.id)
-  const seconds = records.map((r) => r.seconds)
+  const given = records.some((r) => r.exitCode !== undefined)
+  const exitCodes = given ? records.map((r) => r.exitCode ?? null) : null
   return {
     runs: records.length,
-    exitCodes: records.map((r) => r.exitCode),
-    wallSeconds: {
-      min: seconds.length ? Math.min(...seconds) : 0,
-      median: seconds.length ? median(seconds) : 0,
-      max: seconds.length ? Math.max(...seconds) : 0,
-    },
+    exitCodes,
+    exitCodesAgree: exitCodes === null ? null : new Set(exitCodes).size <= 1,
     reportRuns: used.length,
-    badReports: records.filter((r) => r.report !== "used" && r.report !== "none").map((r) => ({ run: r.run, state: r.report })),
+    unreadable: records.filter((r) => r.report !== "used").map((r) => ({ run: r.run, reason: r.reason ?? "unreadable" })),
     totalCases: all.length,
     flaky: all.filter((t) => t.passed > 0 && t.failed > 0).sort(byId),
     failedEveryRun: all.filter((t) => used.length > 0 && t.failed === used.length).sort(byId),
@@ -103,65 +100,24 @@ function list<T>(title: string, items: readonly T[], show: (item: T) => string, 
   return lines
 }
 
-/** The capped text a `quality_test_repeat` call returns. */
-export function formatRepeat(
-  summary: RepeatSummary,
-  options: { command: string; cwd: string; requested: number; junit: boolean; interrupted?: string },
-): string {
-  const command = options.command.length > 120 ? `${options.command.slice(0, 117)}...` : options.command
-  const codes = summary.exitCodes.map((c) => (c === null ? "killed" : String(c)))
-  const failedRuns = summary.exitCodes.filter((c) => c !== 0).length
-  const lines = [
-    `Ran \`${command}\` ${summary.runs}/${options.requested} times in ${options.cwd}`,
-    `exit codes: ${codes.join(" ")} (${summary.runs - failedRuns} passed, ${failedRuns} failed)`,
-    `wall time per run: min ${secs(summary.wallSeconds.min)}, median ${secs(summary.wallSeconds.median)}, max ${secs(summary.wallSeconds.max)}`,
-  ]
-  if (options.interrupted) lines.push(options.interrupted)
-  if (new Set(summary.exitCodes).size > 1 && !options.junit)
-    lines.push("exit codes differ between runs: the suite is flaky (no junit report to name the tests)")
-  if (options.junit) {
-    lines.push(`reports used: ${summary.reportRuns}/${summary.runs}; test cases: ${summary.totalCases}`)
-    for (const { run, state } of summary.badReports.slice(0, 10))
-      lines.push(`run ${run}: report ${state}${state === "stale" ? " (not written during this run)" : ""}`)
+/** The capped text a `quality_test_summarize` call returns. */
+export function formatSummary(summary: RepeatSummary): string {
+  const lines = [`Summarized ${summary.runs} report(s); readable: ${summary.reportRuns}; test cases: ${summary.totalCases}`]
+  if (summary.exitCodes !== null) {
+    const failed = summary.exitCodes.filter((c) => c !== 0).length
     lines.push(
-      ...list("flaky (passed and failed)", summary.flaky, (t) => `${t.id}  pass ${t.passed} / fail ${t.failed}`, 15),
-      ...list("failed in every run", summary.failedEveryRun, (t) => `${t.id}  fail ${t.failed}`, 15),
-      ...list("retried inside a run, then passed", summary.retriedInRun, (id) => id, 5),
-      ...list("slowest by median", summary.slowest, (t) => `${secs(t.medianSeconds).padStart(7)}  ${t.id}`, SLOWEST),
+      `exit codes: ${summary.exitCodes.map((c) => (c === null ? "unknown" : String(c))).join(" ")} (${summary.exitCodes.length - failed} zero, ${failed} non-zero)`,
     )
-    if (summary.reportRuns > 0 && summary.flaky.length === 0 && summary.failedEveryRun.length === 0)
-      lines.push("no test both passed and failed; none failed in every run")
+    if (!summary.exitCodesAgree) lines.push("exit codes differ between runs: the suite is flaky")
   }
+  for (const { run, reason } of summary.unreadable.slice(0, 10)) lines.push(`report ${run}: unreadable (${reason})`)
+  lines.push(
+    ...list("flaky (passed and failed)", summary.flaky, (t) => `${t.id}  pass ${t.passed} / fail ${t.failed}`, 15),
+    ...list("failed in every report", summary.failedEveryRun, (t) => `${t.id}  fail ${t.failed}`, 15),
+    ...list("retried inside a run, then passed", summary.retriedInRun, (id) => id, 5),
+    ...list("slowest by median", summary.slowest, (t) => `${secs(t.medianSeconds).padStart(7)}  ${t.id}`, SLOWEST),
+  )
+  if (summary.reportRuns > 0 && summary.flaky.length === 0 && summary.failedEveryRun.length === 0)
+    lines.push("no test both passed and failed; none failed in every report")
   return capText(lines)
-}
-
-export type FileMark = { mtimeMs: number; hash: string } | undefined
-
-/** The state of a report file used to tell whether a run rewrote it. Never throws. */
-export function markFile(path: string): FileMark {
-  try {
-    const stat = statSync(path)
-    if (!stat.isFile()) return undefined
-    return { mtimeMs: stat.mtimeMs, hash: createHash("sha256").update(readFileSync(path)).digest("hex") }
-  } catch {
-    return undefined
-  }
-}
-
-/** Whether the file at `after` was written or modified since `before` (by mtime or content). */
-export function isFresh(before: FileMark, after: FileMark): boolean {
-  if (after === undefined) return false
-  return before === undefined || after.mtimeMs !== before.mtimeMs || after.hash !== before.hash
-}
-
-/** Classify and read the report one run left. A stale or missing report yields no cases. */
-export function readReport(path: string, before: FileMark): { state: ReportState; cases: TestCase[] } {
-  const after = markFile(path)
-  if (after === undefined) return { state: "missing", cases: [] }
-  if (!isFresh(before, after)) return { state: "stale", cases: [] }
-  try {
-    return { state: "used", cases: parseJunit(readFileSync(path, "utf8")) }
-  } catch {
-    return { state: "unreadable", cases: [] }
-  }
 }

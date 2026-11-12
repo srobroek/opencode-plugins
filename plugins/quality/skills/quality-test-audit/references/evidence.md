@@ -15,9 +15,12 @@ default report file.
 | Go | `gotestsum --junitfile <path> -- ./pkg/...` (`go test` has no JUnit flag) | `go test -shuffle=on`; replay with `-shuffle=<seed>`; add `-count=1` to skip cached results |
 | Rust | `cargo nextest run --profile <name>` with `[profile.<name>.junit] path = "junit.xml"` in `.config/nextest.toml`; the report lands in `target/nextest/<name>/junit.xml` | nextest shuffle not verified. `cargo +nightly test -- -Z unstable-options --shuffle` and `--shuffle-seed <seed>` exist on nightly only |
 
-With the helper tool, pass the command and the report path to `quality_test_repeat`:
-`runs` 5 for the baseline, 20 for a suspected flaky test. Without it, run the command in
-a loop and keep each report under a distinct name.
+Run the command through the shell N times, 5 for the baseline and 20 for a suspected
+flaky test, with one report per run in the OpenCode temp directory, for example
+`for i in 1 2 3 4 5; do pytest --junitxml=<dir>/run-$i.xml; done`. Then call
+`quality_test_summarize` with `reports` (the paths in run order) and `exitCodes` (what
+each run returned, if you kept them). Without the tool, keep each report under a
+distinct name and read them.
 
 ## Coverage
 

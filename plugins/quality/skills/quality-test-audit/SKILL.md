@@ -21,8 +21,9 @@ skill's `references/practice.md`.
      project's configuration and the language's `practice.md`.
    - Keep reports and scratch files in the OpenCode temp directory, not the repository.
 2. **Baseline.** Measure the scope before you judge it ([evidence.md](references/evidence.md)):
-   - Repeat the scoped run 5 times in random order, with JUnit output, through
-     `quality_test_repeat`. Use 20 runs for a suspected flaky test.
+   - Repeat the scoped run 5 times in random order through the shell, with one JUnit
+     report per run in the OpenCode temp directory, then pass the report paths and the
+     exit codes to `quality_test_summarize`. Use 20 runs for a suspected flaky test.
    - Write a coverage report with branches, and per-test coverage where the runner has
      it.
    - Run mutation testing on the files under audit, and keep the report as the
@@ -53,9 +54,8 @@ skill's `references/practice.md`.
    after counts, runtime, flaky tests, coverage and mutation score, each batch with its
    commit, each approved loss, the gaps, and the follow-ups.
 
-Without the `quality_test_repeat` and `quality_test_compare` tools, run the commands in
-[evidence.md](references/evidence.md) through the shell, and compare the reports by
-reading them. Say in the report that the comparison was manual.
+Without the `quality_test_summarize` and `quality_test_compare` tools, run the commands
+in [evidence.md](references/evidence.md) through the shell, and read the reports by hand. Say in the report that the comparison was manual.
 
 ## Rules
 

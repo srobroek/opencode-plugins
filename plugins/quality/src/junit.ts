@@ -1,4 +1,4 @@
-import { XMLParser } from "fast-xml-parser"
+import { XMLParser, XMLValidator } from "fast-xml-parser"
 
 export type CaseStatus = "passed" | "failed" | "error" | "skipped"
 
@@ -71,6 +71,8 @@ function collect(node: unknown, out: TestCase[]): void {
  * `--junitfile` and cargo-nextest. Throws on input that is not XML with a `testsuite(s)` root.
  */
 export function parseJunit(xml: string): TestCase[] {
+  const valid = XMLValidator.validate(xml)
+  if (valid !== true) throw new Error(`invalid XML: ${valid.err.msg} (line ${valid.err.line})`)
   const doc = parser.parse(xml) as Node
   if (!("testsuites" in doc) && !("testsuite" in doc)) throw new Error("not a JUnit report: no testsuite element")
   const out: TestCase[] = []

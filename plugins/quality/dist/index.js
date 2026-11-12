@@ -423,144 +423,10 @@ async function setupStandards(ctx, options) {
   };
 }
 
-// plugins/quality/src/test-audit.ts
-import { readFileSync as readFileSync4, statSync as statSync2 } from "fs";
-
-// plugins/lib/src/subprocess.ts
-import { constants } from "os";
-var EXIT_GRACE_MS = 2000;
-var EXIT_POLL_MS = 100;
-function processAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error.code === "EPERM";
-  }
-}
-function killChild(child, group) {
-  if (group) {
-    try {
-      process.kill(-child.pid, "SIGKILL");
-      return;
-    } catch {}
-  }
-  try {
-    child.kill("SIGKILL");
-  } catch {}
-}
-function unref(timer) {
-  timer.unref?.();
-}
-function capture(stream) {
-  if (!(stream instanceof ReadableStream))
-    return { text: Promise.resolve(""), snapshot: () => "", cancel: () => {} };
-  const reader = stream.getReader();
-  const decoder = new TextDecoder;
-  let collected = "";
-  const text = (async () => {
-    try {
-      for (;; ) {
-        const chunk = await reader.read();
-        if (chunk.done)
-          break;
-        collected += decoder.decode(chunk.value, { stream: true });
-      }
-    } catch {}
-    collected += decoder.decode();
-    return collected;
-  })();
-  const cancel = () => {
-    try {
-      reader.cancel().catch(() => {
-        return;
-      });
-    } catch {}
-  };
-  return { text, snapshot: () => collected, cancel };
-}
-function supervise(child, options = {}) {
-  const grace = Math.max(0, options.graceMs ?? EXIT_GRACE_MS);
-  const pollMs = Math.max(1, options.pollMs ?? EXIT_POLL_MS);
-  const alive = options.alive ?? processAlive;
-  const group = options.group ?? false;
-  const { signal, timeoutMs } = options;
-  const out = capture(child.stdout);
-  const err = capture(child.stderr);
-  return new Promise((resolve) => {
-    let ended = null;
-    let exitSeen = false;
-    let settled = false;
-    let goneSince = null;
-    let deadline;
-    let graceTimer;
-    const settle = (run) => {
-      if (settled)
-        return;
-      settled = true;
-      clearTimeout(deadline);
-      clearTimeout(graceTimer);
-      clearInterval(poller);
-      signal?.removeEventListener("abort", onAbort);
-      resolve(run);
-    };
-    const end = (cause) => {
-      if (ended !== null || settled)
-        return;
-      ended = cause;
-      if (cause !== "lost" || group)
-        killChild(child, group);
-      out.cancel();
-      err.cancel();
-      graceTimer = setTimeout(() => settle({ kind: cause, stdout: out.snapshot(), stderr: err.snapshot() }), grace);
-      if (options.unref)
-        unref(graceTimer);
-    };
-    const onAbort = () => end("aborted");
-    const poller = setInterval(() => {
-      if (exitSeen || ended !== null || settled)
-        return;
-      if (alive(child.pid)) {
-        goneSince = null;
-        return;
-      }
-      goneSince ??= Date.now();
-      if (Date.now() - goneSince >= grace)
-        end("lost");
-    }, pollMs);
-    unref(poller);
-    if (timeoutMs !== undefined && timeoutMs > 0 && Number.isFinite(timeoutMs)) {
-      deadline = setTimeout(() => end("timeout"), timeoutMs);
-      if (options.unref)
-        unref(deadline);
-    }
-    signal?.addEventListener("abort", onAbort, { once: true });
-    if (signal?.aborted)
-      onAbort();
-    child.exited.then(() => {
-      exitSeen = true;
-    }, () => {
-      return;
-    });
-    Promise.all([child.exited, out.text, err.text]).then(([exitCode, stdout, stderr]) => {
-      if (ended !== null)
-        settle({ kind: ended, stdout, stderr });
-      else
-        settle({ kind: "exited", exitCode, signalCode: signalName(child.signalCode), stdout, stderr });
-    }, () => end("lost"));
-  });
-}
-function signalName(code) {
-  if (code === null || code === undefined)
-    return null;
-  if (typeof code === "string")
-    return code;
-  return Object.entries(constants.signals).find(([, n]) => n === code)?.[0] ?? String(code);
-}
-
 // plugins/quality/src/audit-util.ts
-import { existsSync as existsSync3, realpathSync } from "fs";
-import { dirname, isAbsolute, relative, resolve, sep } from "path";
+import { readFileSync as readFileSync3, realpathSync, statSync } from "fs";
+import { tmpdir } from "os";
+import { isAbsolute, join as join3, relative, resolve, sep } from "path";
 var TEXT_CAP = 4000;
 function capText(lines, cap = TEXT_CAP) {
   const text = lines.join(`
@@ -596,19 +462,6 @@ function compactRanges(lines, maxRanges = 12) {
 function percent(part, whole) {
   return whole === 0 ? 100 : Math.round(part / whole * 1000) / 10;
 }
-function realish(path) {
-  let existing = path;
-  const tail = [];
-  while (!existsSync3(existing)) {
-    const parent = dirname(existing);
-    if (parent === existing)
-      break;
-    tail.unshift(existing.slice(parent.length).replace(/^[\\/]+/, ""));
-    existing = parent;
-  }
-  const real = existsSync3(existing) ? realpathSync(existing) : existing;
-  return tail.length === 0 ? real : resolve(real, ...tail);
-}
 function inside(root, target) {
   const rel = relative(root, target);
   return rel === "" || rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
@@ -616,12 +469,36 @@ function inside(root, target) {
 
 class PathError extends Error {
 }
-function resolveInside(root, base, path) {
-  const target = path === undefined || path === "" ? base : isAbsolute(path) ? path : resolve(base, path);
-  const lexical = resolve(target);
-  if (!inside(resolve(root), lexical) || !inside(realish(root), realish(lexical)))
-    throw new PathError(`${path ?? target} is outside the session directory ${root}`);
-  return lexical;
+function opencodeTempDir() {
+  return join3(realpathSync(tmpdir()), "opencode");
+}
+function reportRoots(sessionDirectory) {
+  const real = (path) => {
+    try {
+      return realpathSync(path);
+    } catch {
+      return resolve(path);
+    }
+  };
+  return [real(sessionDirectory), opencodeTempDir()];
+}
+var MAX_REPORT_BYTES = 200 * 1024 * 1024;
+function readReportFile(sessionDirectory, path, roots = reportRoots(sessionDirectory)) {
+  const target = isAbsolute(path) ? path : resolve(sessionDirectory, path);
+  let real;
+  try {
+    real = realpathSync(target);
+  } catch {
+    const lexical = [...roots, resolve(sessionDirectory), join3(tmpdir(), "opencode")];
+    if (!lexical.some((root) => inside(root, resolve(target))))
+      throw new PathError(`${path} is outside the session and OpenCode temp directories`);
+    throw new Error(`${path} does not exist`);
+  }
+  if (!roots.some((root) => inside(root, real)))
+    throw new PathError(`${path} is outside the session and OpenCode temp directories`);
+  if (statSync(real).size > MAX_REPORT_BYTES)
+    throw new Error(`${path} is larger than ${MAX_REPORT_BYTES / 1024 / 1024} MB`);
+  return readFileSync3(real, "utf8");
 }
 
 // node_modules/.bun/fast-xml-parser@5.12.0/node_modules/fast-xml-parser/src/util.js
@@ -4266,6 +4143,11 @@ class XMLParser {
   }
 }
 
+// node_modules/.bun/fast-xml-parser@5.12.0/node_modules/fast-xml-parser/src/fxp.js
+var XMLValidator = {
+  validate
+};
+
 // plugins/quality/src/coverage.ts
 var normalizePath = (path, root) => {
   let p = path.trim().replaceAll("\\", "/");
@@ -4279,7 +4161,7 @@ var normalizePath = (path, root) => {
 function file(report, path) {
   let entry = report.get(path);
   if (entry === undefined) {
-    entry = { lines: new Map, branches: new Map };
+    entry = { lines: new Map, branches: new Map, branchCounts: new Map };
     report.set(path, entry);
   }
   return entry;
@@ -4329,6 +4211,9 @@ var xml = new XMLParser({
 });
 var asNodes = (value) => Array.isArray(value) ? value.filter((v) => typeof v === "object" && v !== null) : [];
 function parseCobertura(text, root) {
+  const valid = XMLValidator.validate(text);
+  if (valid !== true)
+    throw new Error(`invalid Cobertura XML: ${valid.err.msg} (line ${valid.err.line})`);
   const doc = xml.parse(text);
   if (doc.coverage === undefined || typeof doc.coverage !== "object")
     throw new Error("not a Cobertura report: no coverage element");
@@ -4356,9 +4241,11 @@ function parseCobertura(text, root) {
         const summary = /\((\d+)\/(\d+)\)/.exec(String(line["@_condition-coverage"] ?? ""));
         if (summary !== null) {
           hasBranches = true;
-          const covered = Number(summary[1]);
-          for (let i = 0;i < Number(summary[2]); i++)
-            mark(entry.branches, `${n}:${i}`, i < covered);
+          const prior = entry.branchCounts.get(n);
+          entry.branchCounts.set(n, {
+            covered: Math.max(prior?.covered ?? 0, Number(summary[1])),
+            total: Math.max(prior?.total ?? 0, Number(summary[2]))
+          });
         }
       }
     }
@@ -4387,18 +4274,25 @@ function parseCoverage(text, format, root) {
     return parseCobertura(text, root);
   return parseGoCover(text, root);
 }
-function totals(report, pick) {
+function totals(report, branches) {
   let covered = 0;
   let total = 0;
-  for (const f of report.files.values())
-    for (const hit of pick(f).values()) {
+  for (const f of report.files.values()) {
+    for (const hit of (branches ? f.branches : f.lines).values()) {
       total++;
       if (hit)
         covered++;
     }
+    if (branches)
+      for (const count of f.branchCounts.values()) {
+        total += count.total;
+        covered += count.covered;
+      }
+  }
   return { covered, total, percent: percent(covered, total) };
 }
 function compareCoverage(baseline, candidate) {
+  const bothBranches = baseline.hasBranches && candidate.hasBranches;
   const lost = [];
   const disappeared = [];
   let gained = 0;
@@ -4406,14 +4300,29 @@ function compareCoverage(baseline, candidate) {
     const cand = candidate.files.get(name);
     const baseLines = [...base.lines].filter(([, hit]) => hit).map(([n]) => n);
     if (cand === undefined) {
-      if (baseLines.length > 0 || [...base.branches.values()].some(Boolean))
+      if (baseLines.length > 0 || bothBranches && [...base.branches.values()].some(Boolean))
         disappeared.push({ file: name, coveredLines: baseLines.length });
       continue;
     }
     const lines = baseLines.filter((n) => cand.lines.get(n) !== true).sort((a, b) => a - b);
-    const branches = [...base.branches].filter(([k, hit]) => hit && cand.branches.get(k) !== true).map(([k]) => k);
+    const branches = [];
+    let lostBranchCount = 0;
+    if (bothBranches) {
+      for (const [k, hit] of base.branches)
+        if (hit && cand.branches.get(k) !== true) {
+          branches.push(k);
+          lostBranchCount++;
+        }
+      for (const [n, count] of base.branchCounts) {
+        const now = cand.branchCounts.get(n)?.covered ?? 0;
+        if (count.covered > now) {
+          branches.push(`${n} (${count.covered}/${count.total} -> ${now}/${cand.branchCounts.get(n)?.total ?? 0})`);
+          lostBranchCount += count.covered - now;
+        }
+      }
+    }
     if (lines.length > 0 || branches.length > 0)
-      lost.push({ file: name, lines, branches, lostLineCount: lines.length, lostBranchCount: branches.length });
+      lost.push({ file: name, lines, branches, lostLineCount: lines.length, lostBranchCount });
   }
   for (const [name, cand] of candidate.files) {
     const base = baseline.files.get(name);
@@ -4421,13 +4330,12 @@ function compareCoverage(baseline, candidate) {
       if (hit && base?.lines.get(n) !== true)
         gained++;
   }
-  const bothBranches = baseline.hasBranches && candidate.hasBranches;
   return {
     kind: "coverage",
     baselineFormat: baseline.format,
     candidateFormat: candidate.format,
-    lines: { baseline: totals(baseline, (f) => f.lines), candidate: totals(candidate, (f) => f.lines) },
-    branches: bothBranches ? { baseline: totals(baseline, (f) => f.branches), candidate: totals(candidate, (f) => f.branches) } : null,
+    lines: { baseline: totals(baseline, false), candidate: totals(candidate, false) },
+    branches: bothBranches ? { baseline: totals(baseline, true), candidate: totals(candidate, true) } : null,
     lost: lost.sort((a, b) => b.lostLineCount + b.lostBranchCount - (a.lostLineCount + a.lostBranchCount) || a.file.localeCompare(b.file)),
     disappeared: disappeared.sort((a, b) => a.file.localeCompare(b.file)),
     gained
@@ -4446,7 +4354,7 @@ function formatCoverage(c, maxFiles = 15) {
     if (f.lines.length > 0)
       parts.push(`lines ${compactRanges(f.lines)}`);
     if (f.branches.length > 0)
-      parts.push(`${f.branches.length} branch(es) ${f.branches.slice(0, 6).join(" ")}${f.branches.length > 6 ? " ..." : ""}`);
+      parts.push(`${f.lostBranchCount} branch(es) ${f.branches.slice(0, 6).join(" ")}${f.branches.length > 6 ? " ..." : ""}`);
     lines.push(`  ${f.file}: ${parts.join("; ")}`);
   }
   if (c.lost.length > maxFiles)
@@ -4461,6 +4369,71 @@ function formatCoverage(c, maxFiles = 15) {
   if (c.gained > 0)
     lines.push(`lines newly covered in the candidate: ${c.gained}`);
   return capText(lines);
+}
+
+// plugins/quality/src/junit.ts
+var parser = new XMLParser({
+  ignoreAttributes: false,
+  attributeNamePrefix: "@_",
+  parseAttributeValue: false,
+  parseTagValue: false,
+  trimValues: true,
+  isArray: (name) => name === "testcase"
+});
+var isNode = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+function count(value) {
+  return Array.isArray(value) ? value.length : value === undefined ? 0 : 1;
+}
+function caseStatus(node) {
+  if ("failure" in node || "rerunFailure" in node)
+    return "failed";
+  if ("error" in node || "rerunError" in node)
+    return "error";
+  if ("skipped" in node)
+    return "skipped";
+  return "passed";
+}
+function collect(node, out) {
+  if (Array.isArray(node)) {
+    for (const item of node)
+      collect(item, out);
+    return;
+  }
+  if (!isNode(node))
+    return;
+  for (const [key, value] of Object.entries(node)) {
+    if (key.startsWith("@_"))
+      continue;
+    if (key !== "testcase") {
+      collect(value, out);
+      continue;
+    }
+    for (const raw of value) {
+      const tc = isNode(raw) ? raw : {};
+      const name = String(tc["@_name"] ?? "");
+      const classname = String(tc["@_classname"] ?? "");
+      const file = tc["@_file"] === undefined ? "" : String(tc["@_file"]);
+      const label = [classname, name].filter(Boolean).join(" :: ");
+      const time = Number.parseFloat(String(tc["@_time"] ?? "0"));
+      out.push({
+        id: file ? `${file} :: ${label}` : label,
+        status: caseStatus(tc),
+        time: Number.isFinite(time) ? time : 0,
+        retries: count(tc.flakyFailure) + count(tc.flakyError)
+      });
+    }
+  }
+}
+function parseJunit(xml) {
+  const valid = XMLValidator.validate(xml);
+  if (valid !== true)
+    throw new Error(`invalid XML: ${valid.err.msg} (line ${valid.err.line})`);
+  const doc = parser.parse(xml);
+  if (!("testsuites" in doc) && !("testsuite" in doc))
+    throw new Error("not a JUnit report: no testsuite element");
+  const out = [];
+  collect(doc, out);
+  return out;
 }
 
 // plugins/quality/src/mutation.ts
@@ -4635,72 +4608,6 @@ function formatMutation(c) {
 }
 
 // plugins/quality/src/test-repeat.ts
-import { createHash } from "crypto";
-import { readFileSync as readFileSync3, statSync } from "fs";
-
-// plugins/quality/src/junit.ts
-var parser = new XMLParser({
-  ignoreAttributes: false,
-  attributeNamePrefix: "@_",
-  parseAttributeValue: false,
-  parseTagValue: false,
-  trimValues: true,
-  isArray: (name) => name === "testcase"
-});
-var isNode = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
-function count(value) {
-  return Array.isArray(value) ? value.length : value === undefined ? 0 : 1;
-}
-function caseStatus(node) {
-  if ("failure" in node || "rerunFailure" in node)
-    return "failed";
-  if ("error" in node || "rerunError" in node)
-    return "error";
-  if ("skipped" in node)
-    return "skipped";
-  return "passed";
-}
-function collect(node, out) {
-  if (Array.isArray(node)) {
-    for (const item of node)
-      collect(item, out);
-    return;
-  }
-  if (!isNode(node))
-    return;
-  for (const [key, value] of Object.entries(node)) {
-    if (key.startsWith("@_"))
-      continue;
-    if (key !== "testcase") {
-      collect(value, out);
-      continue;
-    }
-    for (const raw of value) {
-      const tc = isNode(raw) ? raw : {};
-      const name = String(tc["@_name"] ?? "");
-      const classname = String(tc["@_classname"] ?? "");
-      const file = tc["@_file"] === undefined ? "" : String(tc["@_file"]);
-      const label = [classname, name].filter(Boolean).join(" :: ");
-      const time = Number.parseFloat(String(tc["@_time"] ?? "0"));
-      out.push({
-        id: file ? `${file} :: ${label}` : label,
-        status: caseStatus(tc),
-        time: Number.isFinite(time) ? time : 0,
-        retries: count(tc.flakyFailure) + count(tc.flakyError)
-      });
-    }
-  }
-}
-function parseJunit(xml) {
-  const doc = parser.parse(xml);
-  if (!("testsuites" in doc) && !("testsuite" in doc))
-    throw new Error("not a JUnit report: no testsuite element");
-  const out = [];
-  collect(doc, out);
-  return out;
-}
-
-// plugins/quality/src/test-repeat.ts
 var SLOWEST = 10;
 function foldRun(cases) {
   const folded = new Map;
@@ -4741,17 +4648,14 @@ function summarizeRuns(records) {
     retried: s.retried
   }));
   const byId = (a, b) => a.id.localeCompare(b.id);
-  const seconds = records.map((r) => r.seconds);
+  const given = records.some((r) => r.exitCode !== undefined);
+  const exitCodes = given ? records.map((r) => r.exitCode ?? null) : null;
   return {
     runs: records.length,
-    exitCodes: records.map((r) => r.exitCode),
-    wallSeconds: {
-      min: seconds.length ? Math.min(...seconds) : 0,
-      median: seconds.length ? median(seconds) : 0,
-      max: seconds.length ? Math.max(...seconds) : 0
-    },
+    exitCodes,
+    exitCodesAgree: exitCodes === null ? null : new Set(exitCodes).size <= 1,
     reportRuns: used.length,
-    badReports: records.filter((r) => r.report !== "used" && r.report !== "none").map((r) => ({ run: r.run, state: r.report })),
+    unreadable: records.filter((r) => r.report !== "used").map((r) => ({ run: r.run, reason: r.reason ?? "unreadable" })),
     totalCases: all.length,
     flaky: all.filter((t) => t.passed > 0 && t.failed > 0).sort(byId),
     failedEveryRun: all.filter((t) => used.length > 0 && t.failed === used.length).sort(byId),
@@ -4768,127 +4672,64 @@ function list(title, items, show, limit) {
     lines.push(`  ... +${items.length - limit} more`);
   return lines;
 }
-function formatRepeat(summary, options) {
-  const command = options.command.length > 120 ? `${options.command.slice(0, 117)}...` : options.command;
-  const codes = summary.exitCodes.map((c) => c === null ? "killed" : String(c));
-  const failedRuns = summary.exitCodes.filter((c) => c !== 0).length;
-  const lines = [
-    `Ran \`${command}\` ${summary.runs}/${options.requested} times in ${options.cwd}`,
-    `exit codes: ${codes.join(" ")} (${summary.runs - failedRuns} passed, ${failedRuns} failed)`,
-    `wall time per run: min ${secs(summary.wallSeconds.min)}, median ${secs(summary.wallSeconds.median)}, max ${secs(summary.wallSeconds.max)}`
-  ];
-  if (options.interrupted)
-    lines.push(options.interrupted);
-  if (new Set(summary.exitCodes).size > 1 && !options.junit)
-    lines.push("exit codes differ between runs: the suite is flaky (no junit report to name the tests)");
-  if (options.junit) {
-    lines.push(`reports used: ${summary.reportRuns}/${summary.runs}; test cases: ${summary.totalCases}`);
-    for (const { run, state } of summary.badReports.slice(0, 10))
-      lines.push(`run ${run}: report ${state}${state === "stale" ? " (not written during this run)" : ""}`);
-    lines.push(...list("flaky (passed and failed)", summary.flaky, (t) => `${t.id}  pass ${t.passed} / fail ${t.failed}`, 15), ...list("failed in every run", summary.failedEveryRun, (t) => `${t.id}  fail ${t.failed}`, 15), ...list("retried inside a run, then passed", summary.retriedInRun, (id) => id, 5), ...list("slowest by median", summary.slowest, (t) => `${secs(t.medianSeconds).padStart(7)}  ${t.id}`, SLOWEST));
-    if (summary.reportRuns > 0 && summary.flaky.length === 0 && summary.failedEveryRun.length === 0)
-      lines.push("no test both passed and failed; none failed in every run");
+function formatSummary(summary) {
+  const lines = [`Summarized ${summary.runs} report(s); readable: ${summary.reportRuns}; test cases: ${summary.totalCases}`];
+  if (summary.exitCodes !== null) {
+    const failed = summary.exitCodes.filter((c) => c !== 0).length;
+    lines.push(`exit codes: ${summary.exitCodes.map((c) => c === null ? "unknown" : String(c)).join(" ")} (${summary.exitCodes.length - failed} zero, ${failed} non-zero)`);
+    if (!summary.exitCodesAgree)
+      lines.push("exit codes differ between runs: the suite is flaky");
   }
+  for (const { run, reason } of summary.unreadable.slice(0, 10))
+    lines.push(`report ${run}: unreadable (${reason})`);
+  lines.push(...list("flaky (passed and failed)", summary.flaky, (t) => `${t.id}  pass ${t.passed} / fail ${t.failed}`, 15), ...list("failed in every report", summary.failedEveryRun, (t) => `${t.id}  fail ${t.failed}`, 15), ...list("retried inside a run, then passed", summary.retriedInRun, (id) => id, 5), ...list("slowest by median", summary.slowest, (t) => `${secs(t.medianSeconds).padStart(7)}  ${t.id}`, SLOWEST));
+  if (summary.reportRuns > 0 && summary.flaky.length === 0 && summary.failedEveryRun.length === 0)
+    lines.push("no test both passed and failed; none failed in every report");
   return capText(lines);
-}
-function markFile(path) {
-  try {
-    const stat = statSync(path);
-    if (!stat.isFile())
-      return;
-    return { mtimeMs: stat.mtimeMs, hash: createHash("sha256").update(readFileSync3(path)).digest("hex") };
-  } catch {
-    return;
-  }
-}
-function isFresh(before, after) {
-  if (after === undefined)
-    return false;
-  return before === undefined || after.mtimeMs !== before.mtimeMs || after.hash !== before.hash;
-}
-function readReport(path, before) {
-  const after = markFile(path);
-  if (after === undefined)
-    return { state: "missing", cases: [] };
-  if (!isFresh(before, after))
-    return { state: "stale", cases: [] };
-  try {
-    return { state: "used", cases: parseJunit(readFileSync3(path, "utf8")) };
-  } catch {
-    return { state: "unreadable", cases: [] };
-  }
 }
 
 // plugins/quality/src/test-audit.ts
-var TEST_REPEAT_ACTION = "quality_test_repeat";
+var TEST_SUMMARIZE_TOOL = "quality_test_summarize";
 var TEST_COMPARE_TOOL = "quality_test_compare";
-var DEFAULT_RUNS = 5;
-var MAX_RUNS = 50;
-var DEFAULT_TIMEOUT_SECONDS = 600;
-var MAX_TIMEOUT_SECONDS = 3600;
-function confirmTestRepeat(evaluation) {
-  if (evaluation.action !== TEST_REPEAT_ACTION || evaluation.effect !== "allow")
-    return;
-  evaluation.effect = "ask";
-  const runs = evaluation.metadata?.runs;
-  evaluation.message = `Run \`${evaluation.resources.join(" ")}\` ${typeof runs === "number" ? `${runs} times` : "repeatedly"}? The command runs with your permissions and may leave files behind.`;
-}
+var MAX_REPORTS = 50;
 function parseTestAuditOptions(options) {
-  if (options.testAudit === false)
-    return;
-  return { confirm: options.confirmTestRuns !== false };
+  return options.testAudit === false ? undefined : { enabled: true };
 }
-function parseRepeatInput(input) {
+function parseSummarizeInput(input) {
   const raw = input ?? {};
-  if (typeof raw.command !== "string" || raw.command.trim() === "")
-    return "command must be a non-empty string";
-  const runs = raw.runs ?? DEFAULT_RUNS;
-  if (!Number.isInteger(runs) || runs < 1 || runs > MAX_RUNS)
-    return `runs must be an integer from 1 to ${MAX_RUNS}`;
-  const timeout = raw.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS;
-  if (typeof timeout !== "number" || !(timeout > 0) || timeout > MAX_TIMEOUT_SECONDS)
-    return `timeoutSeconds must be a number from 1 to ${MAX_TIMEOUT_SECONDS}`;
-  for (const key of ["cwd", "junit"])
-    if (raw[key] !== undefined && typeof raw[key] !== "string")
-      return `${key} must be a string`;
-  return {
-    command: raw.command,
-    runs,
-    cwd: raw.cwd,
-    junit: raw.junit,
-    timeoutSeconds: timeout
-  };
-}
-async function runOnce(command, cwd, timeoutMs, signal) {
-  const started = performance.now();
-  const child = Bun.spawn(["sh", "-c", command], { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", detached: true });
-  const run = await supervise(child, { timeoutMs, signal, group: true });
-  const seconds = (performance.now() - started) / 1000;
-  return run.kind === "exited" ? { exitCode: run.exitCode, outcome: "exited", seconds } : { exitCode: null, outcome: run.kind, seconds };
-}
-async function repeatRuns(input, signal, run = runOnce) {
-  const records = [];
-  for (let i = 1;i <= input.runs; i++) {
-    if (signal?.aborted)
-      return { records, interrupted: `cancelled before run ${i}` };
-    const before = input.junitPath === undefined ? undefined : markFile(input.junitPath);
-    const result = await run(input.command, input.cwd, input.timeoutSeconds * 1000, signal);
-    const report = input.junitPath === undefined || result.outcome === "aborted" ? { state: "none", cases: [] } : readReport(input.junitPath, before);
-    records.push({ run: i, ...result, report: report.state, cases: report.cases });
-    if (result.outcome === "aborted")
-      return { records, interrupted: `cancelled during run ${i}` };
+  const { reports, exitCodes } = raw;
+  if (!Array.isArray(reports) || reports.length < 1 || reports.length > MAX_REPORTS || reports.some((r) => typeof r !== "string" || r === ""))
+    return `reports must be 1 to ${MAX_REPORTS} non-empty paths`;
+  if (exitCodes !== undefined) {
+    if (!Array.isArray(exitCodes) || exitCodes.length !== reports.length || exitCodes.some((c) => c !== null && !Number.isInteger(c)))
+      return "exitCodes must be integers or null, one per report";
   }
-  return { records };
+  return { reports, exitCodes };
+}
+function summarizeReports(root, raw) {
+  const fail = (message) => ({ content: `${TEST_SUMMARIZE_TOOL}: ${message}`, metadata: { error: message } });
+  const input = parseSummarizeInput(raw);
+  if (typeof input === "string")
+    return fail(input);
+  const roots = reportRoots(root);
+  const records = [];
+  for (const [i, path] of input.reports.entries()) {
+    const record = { run: i + 1, exitCode: input.exitCodes?.[i], report: "unreadable", cases: [] };
+    try {
+      record.cases = parseJunit(readReportFile(root, path, roots));
+      record.report = "used";
+    } catch (error) {
+      if (error instanceof PathError)
+        return fail(`refused: ${error.message}`);
+      record.reason = error instanceof Error ? error.message : String(error);
+    }
+    records.push(record);
+  }
+  const summary = summarizeRuns(records);
+  return { content: formatSummary(summary), metadata: { ...summary } };
 }
 var COVERAGE_FORMATS = ["lcov", "cobertura", "gocover"];
 var MUTATION_FORMATS = ["mutation-testing", "cargo-mutants", "gremlins"];
-var MAX_REPORT_BYTES = 200 * 1024 * 1024;
-function readInside(root, path) {
-  const resolved = resolveInside(root, root, path);
-  if (statSync2(resolved).size > MAX_REPORT_BYTES)
-    throw new Error(`${path} is larger than ${MAX_REPORT_BYTES / 1024 / 1024} MB`);
-  return readFileSync4(resolved, "utf8");
-}
 function compareReports(root, input) {
   const fail = (message) => ({ content: `${TEST_COMPARE_TOOL}: ${message}`, metadata: { error: message } });
   if (input.kind !== "coverage" && input.kind !== "mutation")
@@ -4899,8 +4740,9 @@ function compareReports(root, input) {
   if (input.format !== undefined && !allowed.includes(input.format))
     return fail(`format for ${input.kind} must be one of ${allowed.join(", ")}`);
   try {
-    const baseText = readInside(root, input.baseline);
-    const candText = readInside(root, input.candidate);
+    const roots = reportRoots(root);
+    const baseText = readReportFile(root, input.baseline, roots);
+    const candText = readReportFile(root, input.candidate, roots);
     if (input.kind === "coverage") {
       const format = input.format;
       const result = compareCoverage(parseCoverage(baseText, format, root), parseCoverage(candText, format, root));
@@ -4932,61 +4774,34 @@ async function setupTestAudit(ctx, options) {
   const root = ctx.location.directory;
   const tools = await ctx.tool.transform((editor) => {
     editor.add({
-      name: TEST_REPEAT_ACTION,
-      description: `Run one test command several times; report flaky, always-failing and slow tests (JUnit XML optional).
-` + "Asks permission first. Each run is `sh -c <command>` in cwd with a timeout. With `junit`, the report is read " + "after every run and used only if that run wrote it. Reads pytest, Vitest, bun test, gotestsum and cargo-nextest JUnit.",
+      name: TEST_SUMMARIZE_TOOL,
+      description: `Read-only: summarize JUnit XML reports from repeated test runs; flaky, always-failing and slow tests.
+` + "Run the test command several times through the shell, writing one JUnit report per run, then pass the paths in run " + "order. Reads pytest, Vitest, bun test, gotestsum and cargo-nextest JUnit. Paths must be in the session or OpenCode temp directory.",
       input: {
         type: "object",
         properties: {
-          command: { type: "string", description: "Test command, run through sh -c" },
-          runs: { type: "integer", minimum: 1, maximum: MAX_RUNS, description: `Number of runs, default ${DEFAULT_RUNS}` },
-          cwd: { type: "string", description: "Working directory inside the session directory; default the session directory" },
-          junit: { type: "string", description: "JUnit XML path relative to cwd that the command writes on each run" },
-          timeoutSeconds: {
-            type: "number",
-            maximum: MAX_TIMEOUT_SECONDS,
-            description: `Per-run timeout, default ${DEFAULT_TIMEOUT_SECONDS}, max ${MAX_TIMEOUT_SECONDS}`
+          reports: {
+            type: "array",
+            items: { type: "string" },
+            minItems: 1,
+            maxItems: MAX_REPORTS,
+            description: "JUnit XML paths, one per run, in run order"
+          },
+          exitCodes: {
+            type: "array",
+            items: { type: ["integer", "null"] },
+            description: "Exit code of each run, same length as reports; null when unknown"
           }
         },
-        required: ["command"],
+        required: ["reports"],
         additionalProperties: false
       },
-      execute: async (raw, context) => {
-        const input = parseRepeatInput(raw);
-        if (typeof input === "string")
-          return { content: `${TEST_REPEAT_ACTION}: ${input}`, metadata: { error: input } };
-        let cwd;
-        let junitPath;
-        try {
-          cwd = resolveInside(root, root, input.cwd);
-          if (!statSync2(cwd).isDirectory())
-            throw new PathError(`${input.cwd} is not a directory`);
-          junitPath = input.junit === undefined ? undefined : resolveInside(root, cwd, input.junit);
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          return { content: `${TEST_REPEAT_ACTION}: ${message}; no process started`, metadata: { error: message } };
-        }
-        context.signal.throwIfAborted();
-        await ctx.permission.assert({
-          sessionID: context.sessionID,
-          agent: context.agent,
-          source: { type: "tool", messageID: context.messageID, id: context.id },
-          action: TEST_REPEAT_ACTION,
-          resources: [input.command],
-          metadata: { runs: input.runs, cwd }
-        });
-        const { records, interrupted } = await repeatRuns({ ...input, cwd, junitPath }, context.signal);
-        const summary = summarizeRuns(records);
-        return {
-          content: formatRepeat(summary, { command: input.command, cwd, requested: input.runs, junit: junitPath !== undefined, interrupted }),
-          metadata: { ...summary, cwd, requestedRuns: input.runs, interrupted: interrupted ?? null }
-        };
-      }
+      execute: async (raw) => summarizeReports(root, raw)
     });
     editor.add({
       name: TEST_COMPARE_TOOL,
       description: `Read-only: compare a baseline and a candidate coverage or mutation report to show lost test protection.
-` + "Coverage: LCOV, Cobertura XML, Go cover profile. Mutation: Stryker/mutation-testing-report JSON, cargo-mutants " + "outcomes.json, Gremlins JSON. Both paths must be inside the session directory.",
+` + "Coverage: LCOV, Cobertura XML, Go cover profile. Mutation: Stryker/mutation-testing-report JSON, cargo-mutants " + "outcomes.json, Gremlins JSON. Both paths must be in the session or OpenCode temp directory.",
       input: {
         type: "object",
         properties: {
@@ -5005,9 +4820,7 @@ async function setupTestAudit(ctx, options) {
       execute: async (raw) => compareReports(root, raw)
     });
   });
-  const gate = options.confirm ? await ctx.permission.hook("evaluate", confirmTestRepeat) : undefined;
   return async () => {
-    await gate?.dispose();
     await tools.dispose();
   };
 }
@@ -5042,26 +4855,21 @@ var src_default = Plugin2.define({
   }
 });
 export {
-  DEFAULT_RUNS,
   DEFAULT_STANDARDS_SUBAGENTS,
-  DEFAULT_TIMEOUT_SECONDS,
   FALLBACK_AGENTS,
-  MAX_RUNS,
-  MAX_TIMEOUT_SECONDS,
+  MAX_REPORTS,
   STANDARDS_BLOCKS,
   STANDARDS_TEXT,
   TESTING_TEXT,
   TEST_COMPARE_TOOL,
-  TEST_REPEAT_ACTION,
+  TEST_SUMMARIZE_TOOL,
   compareReports,
-  confirmTestRepeat,
   src_default as default,
-  parseRepeatInput,
   parseStandardsOptions,
+  parseSummarizeInput,
   parseTestAuditOptions,
-  repeatRuns,
-  runOnce,
   setupStandards,
   setupTestAudit,
+  summarizeReports,
   wantsStandards
 };
