@@ -40,22 +40,28 @@ not check.
 
 ## Tampering
 
-Flag each of these when no requirement states that the behavior changed:
+Tampering hides a behavior change or loses protection. Flag each of these when no
+requirement states that the behavior changed:
 
 - an assertion loosened, such as an exact value replaced by a not-null or a contains
   check;
 - an expected value edited to match the new output;
-- a test skipped, deleted, or marked as an expected failure;
+- a test skipped, deleted, or marked as an expected failure, with no remaining test that
+  gives its protection;
 - a tolerance widened, a timeout raised, or a retry added;
 - an exception handler that swallows a failure inside a test;
 - a coverage exclusion added;
 - many snapshots updated in one step without a reviewed diff.
 
+Maintenance is not tampering. Pruning a duplicate that another test covers, deleting
+the tests of removed behavior, and a quarantine with a tracked issue and a lane that
+still runs the test are correct changes ([maintenance.md](maintenance.md)).
+
 ## Severity
 
 | Finding | Disposition |
 | --- | --- |
-| Tampering that can hide a behavior change or a regression | Blocking |
+| Tampering that hides a behavior change or loses protection | Blocking |
 | Changed behavior or a bug fix with no test that fails without it, in code that has tests | Blocking |
 | A new test that only checks that removed code, an export or a file is gone | Blocking |
 | Tests or fixtures left behind for removed behavior | Non-blocking |
@@ -63,4 +69,4 @@ Flag each of these when no requirement states that the behavior changed:
 | Near-duplicate tests, copied cases, large snapshots | Non-blocking |
 
 Map these dispositions to the review's own scale. Cite each finding at `path:line` with
-the code hunk it fails to match.
+the code hunk it fails to match. Examples of each kind are in [bad-tests.md](bad-tests.md).

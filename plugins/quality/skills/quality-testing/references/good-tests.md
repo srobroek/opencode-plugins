@@ -68,7 +68,8 @@ A test has no branches or loops that decide what to assert. Parametrize instead.
 
 ## Test smells
 
-Treat a smell as a reason to look again, not as an automatic rejection.
+Treat a smell as a reason to look again, not as an automatic rejection. Each smell has
+a code example and a fix in [bad-tests.md](bad-tests.md).
 
 | Smell | Sign | Fix |
 | --- | --- | --- |

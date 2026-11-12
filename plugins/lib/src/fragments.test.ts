@@ -84,6 +84,21 @@ describe("review-core", () => {
   })
 })
 
+describe("review-tests", () => {
+  const parts = fragmentParts("review-tests", readFragment("review-tests"))
+
+  test("maps test changes to code changes and splits blocking from non-blocking findings", () => {
+    expect([...parts.keys()]).toEqual(["rules"])
+    const text = parts.get("rules") ?? ""
+    for (const rule of ["Map the test diff to the code diff", "blocking", "non-blocking", "only checks that removed code", "tampering", "maintenance, not tampering"])
+      expect(text).toContain(rule)
+  })
+
+  test("stays near 300 tokens (about 4 characters each)", () => {
+    expect([...parts.values()].join("\n").length).toBeLessThan(1400)
+  })
+})
+
 describe("coding-core", () => {
   const parts = fragmentParts("coding-core", readFragment("coding-core"))
 

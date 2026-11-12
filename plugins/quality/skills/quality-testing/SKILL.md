@@ -47,6 +47,7 @@ loop and evidence rules are in the `quality-code-design` skill's `test-first.md`
 | Read when | Reference |
 | --- | --- |
 | Writing a test, or judging whether one is worth keeping: structure, names, expected values, shared setup, test data, snapshots, test smells | [good-tests.md](references/good-tests.md) |
+| A concrete bad test and its fix: removal checks, copied expected values, call checks, sleeps, tampering, snapshots | [bad-tests.md](references/bad-tests.md) |
 | Choosing a test level, or deciding that something needs no test | [what-to-test.md](references/what-to-test.md) |
 | A behavior collects many tests, tests come from an agent or a generator, or the suite grows faster than the code | [test-budget.md](references/test-budget.md) |
 | Changing, removing or refactoring tested code; bug fixes, legacy code, flaky tests | [maintenance.md](references/maintenance.md) |
