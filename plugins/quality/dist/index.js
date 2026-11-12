@@ -313,9 +313,9 @@ lines on every request: keep the whole file near 600 tokens. -->
   code, the standard library, the framework's features, then a listed library. Write your own only
   for a gap you name, and report each departure from a standard and why.
 - Defaults: cross-cutting concerns (auth, validation, request ids, logs, traces, metrics, error
-  mapping, timeouts, retries, rate limits) go in the framework's middleware (Middy, ASGI/FastAPI,
-  Hono/Fastify, net/http wrappers, tower). Lambda handlers stay thin on Powertools for AWS Lambda.
-  Telemetry is OpenTelemetry over OTLP.
+  mapping, timeouts, retries, rate limits) go in the framework's middleware, one model per HTTP
+  surface (Hono for TypeScript, Lambda included; ASGI/FastAPI; net/http wrappers; tower). Lambda
+  handlers stay thin on Powertools for AWS Lambda. Telemetry is OpenTelemetry over OTLP.
 <!-- part: agents-md -->
 - MUST follow AGENTS.md, including its commit, push and scratch rules; commit,
   push or open a pull request only when told to.
