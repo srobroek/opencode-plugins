@@ -2490,7 +2490,7 @@ async function applyBump(ecosystem, name, version, root, options = {}) {
 
 // plugins/dep-update/src/scanner-install.ts
 var SCANNERS = new Set(["pip-audit", "osv-scanner", "cargo-audit", "govulncheck"]);
-var SCANNER_ADVISORY = "dep-update: this command installed a CVE scanner persistently. A dependency audit is read-only; " + "say in the report that the toolchain changed. Prefer an ephemeral runner (`uvx pip-audit`, " + "`go run golang.org/x/vuln/cmd/govulncheck@latest`, " + "`go run github.com/google/osv-scanner/v2/cmd/osv-scanner@latest`, or the package manager's own " + "`npm audit`/`pnpm audit`/`yarn npm audit`). `cargo-audit` has no ephemeral runner: use it only when " + "`command -v cargo-audit` finds it. A missing scanner is a reported coverage gap " + "(`scanner not available: <name>`), not a task; an unrun scanner never reads as clean.";
+var SCANNER_ADVISORY = "dep-update: this command installed a CVE scanner persistently. A dependency audit is read-only; " + "say in the report that the toolchain changed. Prefer `uvx pip-audit`, " + "project-pinned `go tool govulncheck ./...` or `osv-scanner scan source -r .` (OSV-Scanner v2), " + "or the package manager's own `bun audit`/`npm audit`/`pnpm audit`/`yarn npm audit`. " + "Never resolve `@latest` during a Go scanner check. `cargo-audit` has no ephemeral runner: use it only when " + "`command -v cargo-audit` finds it. A missing scanner is a reported coverage gap " + "(`scanner not available: <name>`), not a task; an unrun scanner never reads as clean.";
 var SEPARATORS2 = new Set([";", "&", "|", `
 `, "(", ")", "$("]);
 var KEYWORDS = new Set(["then", "do", "else", "elif", "if", "while", "until", "!", "{", "}"]);

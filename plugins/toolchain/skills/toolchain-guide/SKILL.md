@@ -12,10 +12,11 @@ skill, not from this table.
 | Situation | Load skill |
 | --- | --- |
 | Choosing or changing a project stack, package manager or task runner, or adding a dependency | `toolchain-stack-defaults` |
-| Picking per-language libraries, or test and lint tools the language does not imply | `toolchain-languages` |
+| Picking per-language libraries or tools, choosing a programming language, or about to write your own code for a common concern | `toolchain-languages` |
+| Choosing or designing an API: REST/OpenAPI, gRPC, Connect, GraphQL, events, webhooks, MCP; API design rules and API tests | `toolchain-api` |
 | Choosing a frontend framework, UI kit, or client or server state library | `toolchain-frontend` |
 | Choosing Terraform, OpenTofu, CDK, Kubernetes or Helm | `toolchain-infrastructure` |
-| Adding logging, tracing or security scanners to a service or worker | `toolchain-quality-observability` |
+| Adding logging, tracing, metrics, or quality and security scanners to a service, worker or CI | `toolchain-quality-observability` |
 | Adding or changing agentic assets: where OpenCode config, plugins, skills and agents live | `toolchain-asset-ownership` |
 | Writing or changing GitHub Actions workflows: required checks, matrices, caches, action pinning, attestation | `ci-github-actions` |
 | Configuring toolchain download or compiler caches, worktree build output, cache roots and sizes | `ops-toolchain-cache-policy` |

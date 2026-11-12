@@ -39,6 +39,9 @@ permissions:
     resource: "toolchain-*"
     effect: allow
   - action: skill
+    resource: aws-guidance
+    effect: allow
+  - action: skill
     resource: shell-language
     effect: allow
   - action: skill
@@ -123,7 +126,7 @@ Offload broad, mechanical, or blocking-question work with `subagent` (nesting ne
 </method>
 
 <critical>
-{{include coding-core: quality agents-md paths blocked}}
+{{include coding-core: quality standards agents-md paths blocked}}
 - MUST NOT spawn a reviewer: the dispatcher commissions review so its verdict stays independent. For a second opinion, use `researcher` or `explore`.
 - MUST use only the `bd` forms this prompt names for ledger operations.
 </critical>

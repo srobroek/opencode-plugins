@@ -15,6 +15,10 @@ for non-code tasks; `general`'s requests carry every tool and skill.
 - reproduces or measures a failure, slowdown or question before tracing it to a cause
   backed by command output or file lines;
 - makes the scoped change in the surrounding code's style, with no unrelated cleanup;
+- before it writes its own code for a concern, researches current best practice and
+  compares the plan with the `lang-<language>-libraries`, `toolchain-api` and
+  `aws-guidance` standards, reports each departure, and puts cross-cutting concerns
+  in middleware (the `standards` part of `plugins/lib/src/coding-core.md`);
 - runs the repo's format, lint, typecheck, test and build commands for the touched
   code, then reviews its own diff;
 - follows AGENTS.md (commit, push and scratch rules), and commits or pushes only when
@@ -70,6 +74,7 @@ plugin's family are allowed by id:
 | `ast-grep` | `ast-grep-*` |
 | `dep-update`, `whats-new` | `dep-update`, `whats-new` |
 | `delivery` | `delivery-git-workflow` |
+| `aws` | `aws-guidance` |
 
 `delivery-git-workflow` requires the delivery plugin; without it, the permission
 allow is inert. Other delivery skills, design, journeys, speckit, debate, beads and

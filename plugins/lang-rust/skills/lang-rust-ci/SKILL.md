@@ -31,6 +31,10 @@ This skill is what is specific to Rust.
   `cargo-deny`, `cargo-machete`, `cargo-audit`); `cargo binstall` covers the rest.
   Locally, try `cargo binstall <tool>` first and fall back to `cargo install --locked <tool>`
   only when the crate publishes no prebuilt artifact.
+- Pin installer actions to full SHAs and tool versions explicitly. Review their
+  transitive actions/downloads and verify downloaded artifact integrity (published
+  checksums/signatures or attestations) against trusted release metadata. A pinned
+  wrapper still needs separate binary version and authenticity checks.
 - Add `mold` (Linux) or `sccache` only when measurements show compile/link still
   dominates. With `sccache`, use an S3/GCS backend -- the GitHub Actions cache
   backend fights `rust-cache` for the 10 GB limit (verify with `sccache --show-stats`).

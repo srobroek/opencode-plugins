@@ -133,6 +133,13 @@ not text: `if err != nil { return err }` also finds `if err := f(); err != nil`,
 of the match text without an account, so use the plain output, which shows the lines.
 Prefer ast-grep, and reach for Semgrep when a pattern alone cannot say it.
 
+Choose `Semgrep CE` or `Opengrep` for context/SAST rules according to project needs.
+Their LGPL engines and rule licences are separate: `Semgrep`-maintained rules changed
+licence in December 2024, restricting competing/SaaS use. Check each rule's licence
+before reuse; engine compatibility does not grant permission. Curated `ast-grep`
+security rules supplement, not replace, a SAST programme. `CodeQL` is a CI option only
+for supported languages and repository entitlement; verify Rust support separately.
+
 ## Language-server CLI checks
 
 Use these where no LSP tool is connected. Each reads only:

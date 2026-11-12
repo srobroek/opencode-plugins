@@ -5,7 +5,7 @@ on, added in AWS projects.
 
 | Skill | When |
 | --- | --- |
-| `aws-guidance` | Any AWS task: search the AWS MCP Server for a guided AWS skill first, verify API details against AWS documentation, price with `aws-pricing`, and route secrets through the `aws-secrets-manager` skill |
+| `aws-guidance` | Any AWS task: search the AWS MCP Server for a guided AWS skill first, verify API details against AWS documentation, price with `aws-pricing`, and route secrets through the `aws-secrets-manager` skill. Two references: `lambda.md` (thin handlers, one middleware model per surface, Powertools for AWS Lambda, OpenTelemetry through the ADOT layer, runtime defaults) and `service-clients.md` (when a library beats the raw SDK for DynamoDB, Valkey, S3, SQS, secrets, Cognito, RDS, OpenSearch, Kinesis, MSK and Bedrock) |
 
 ## MCP servers
 

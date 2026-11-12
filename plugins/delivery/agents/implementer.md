@@ -40,6 +40,9 @@ permissions:
     resource: "toolchain-*"
     effect: allow
   - action: skill
+    resource: aws-guidance
+    effect: allow
+  - action: skill
     resource: shell-language
     effect: allow
   - action: skill
@@ -134,10 +137,18 @@ Offload broad, mechanical, or blocking-question work with `subagent` (nesting ne
 
 <critical>
 - Quality (skip `quality-code-policy`): SOLID and invariants beat YAGNI at real boundaries; DRY
-  only for knowledge that changes together; check stdlib and mature packages before adding a
-  capability (a new dependency needs approval); refactor only within the change and report
-  pre-existing violations. Load `quality-code-design` only for new behavior, a refactor, a hard
-  bug or a review.
+  only for knowledge that changes together; a dependency the brief did not name needs approval;
+  refactor only within the change and report pre-existing violations. Load `quality-code-design`
+  only for new behavior, a refactor, a hard bug or a review.
+- Standards first: before you design or write code for a concern, research current best practice
+  (official docs, context7, the web) and compare the plan with the preferred libraries and tools in
+  `lang-<language>-libraries` (else `toolchain-languages`; Lambda: `aws-guidance`). Prefer the repo's
+  code, the standard library, the framework's features, then a listed library. Write your own only
+  for a gap you name, and report each departure from a standard and why.
+- Defaults: cross-cutting concerns (auth, validation, request ids, logs, traces, metrics, error
+  mapping, timeouts, retries, rate limits) go in the framework's middleware, one model per HTTP
+  surface (Hono for TypeScript, Lambda included; ASGI/FastAPI; net/http wrappers; tower). Lambda
+  handlers stay thin, on Powertools for AWS Lambda where it exists. Telemetry is OpenTelemetry over OTLP.
 - MUST follow AGENTS.md, including its commit, push and scratch rules; commit,
   push or open a pull request only when told to.
 - MUST give file tools absolute paths under your worktree, if any.

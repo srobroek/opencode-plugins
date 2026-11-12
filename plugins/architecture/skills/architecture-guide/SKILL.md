@@ -13,4 +13,5 @@ skill, not from this table.
 | --- | --- |
 | Inferring a project's architecture or stack, or creating durable knowledge files under `docs/` | `architecture-docs-files` |
 | Choosing or changing top-level directories or a capability-first layout | `architecture-top-level` |
+| Choosing single-language, polyglot monorepo or several repositories; laying out, building, releasing or running CI for a repository with several languages | `architecture-repositories` |
 | Placing libs, owner-local assets, data, schemas, generated clients or UI primitives | `architecture-ownership` |

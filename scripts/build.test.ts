@@ -97,4 +97,16 @@ describe("composeAgents", () => {
       expect({ id, includes: source.includes("{{include coding-core: method}}") }).toEqual({ id, includes: true })
     }
   })
+
+  test("every code-writing agent composes the engineering standards", () => {
+    for (const [plugin, id] of [
+      ["agent-coder", "coder"],
+      ["delivery", "implementer"],
+      ["delivery", "implementer-high"],
+      ["design", "ui-implementer"],
+    ]) {
+      const prompt = readFileSync(path.resolve(import.meta.dir, "../plugins", plugin as string, "agents", `${id}.md`), "utf8")
+      expect({ id, standards: prompt.includes("- Standards first:") && prompt.includes("Powertools for AWS Lambda") }).toEqual({ id, standards: true })
+    }
+  })
 })

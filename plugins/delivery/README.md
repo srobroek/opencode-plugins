@@ -164,7 +164,9 @@ Each agent's permissions are a tool allowlist: a deny on every action, then allo
 for what the agent needs, so other tools are left out of its requests. The
 implementers get read, grep, glob, edit, shell, the `lsp_*` tools and the coding skill
 families (`lang-*`, `quality-*`, `toolchain-*`, `architecture-*`, `trunk-dev-*`,
-`worktrunk-*` and a few toolchain skills by id); `operator` read, grep, glob, edit and
+`worktrunk-*`, `aws-guidance` and a few toolchain skills by id); their prompts carry the
+coding core's `standards` part (research first, compare with the `lang-<language>-libraries`
+standards, middleware, Powertools, OpenTelemetry); `operator` read, grep, glob, edit and
 shell, no skills; `researcher` read-only tools, shell, the `repomix` skill, Code Mode for
 `repomix_pack`, webfetch and websearch; `shepherd` read-only tools, shell, the
 `delivery-*` skills and Code Mode for `delivery_land` / `delivery_cleanup`;
