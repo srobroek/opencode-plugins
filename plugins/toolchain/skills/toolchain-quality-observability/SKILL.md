@@ -1,15 +1,35 @@
 ---
 name: toolchain-quality-observability
-description: Use when adding logging, tracing, or security scanners to a service or worker.
+description: Use when adding logging, tracing, metrics, or quality and security scanners to a service, worker or CI.
 metadata:
   opencode/autoinvoke: false
 ---
 
-# Quality And Observability Defaults
+# Quality and observability defaults
 
-Use structured logging for services and workers. Add OpenTelemetry when a
-runtime boundary, distributed workflow, or production operation needs traceable
-behavior.
+Checked 2026-11-12.
 
-Use security scanners conditionally. Prefer checks that the project can run
-locally and in CI without creating noisy false positives.
+## Observability
+
+OpenTelemetry is the default for new services, workers, network-calling CLIs and Lambda functions: traces and metrics through the OTel SDK, OTLP to a Collector, and structured JSON logs that carry `trace_id` and `span_id`. Existing projects keep their stack unless the task is a migration.
+
+- Rules for setup, export, sampling, flushing, naming, cardinality, privacy and telemetry tests: `quality-code-design`'s `telemetry.md`.
+- SDK packages, bootstrap and signal stability per language: `lang-<language>-libraries`, `references/observability.md`.
+- Lambda: the ADOT/Application Signals layer for traces with Powertools Logger and Metrics, without Powertools Tracer (`aws-guidance`).
+
+## Quality and security scanners
+
+Choose scanners by capability, one tool per gate, and run what the project can run both locally and in CI.
+
+| Gate | Default | Notes |
+| --- | --- | --- |
+| Secrets | Offline Betterleaks or Gitleaks on changed content in the pre-commit hook; TruffleHog over history in CI; GitHub push protection where available | Verified-only results miss secrets that cannot be verified; review unverified findings |
+| Dependency vulnerabilities | The ecosystem's audit (`uv audit` preview or `pip-audit`, `bun audit` or `npm audit`, pinned `govulncheck`, `cargo-deny`) plus OSV-Scanner v2 | One updater (Renovate or Dependabot) with a cooldown |
+| Static analysis | The language's security lint (Ruff `S`, `gosec`, Clippy); Semgrep CE or Opengrep for custom rules; CodeQL in CI for supported languages | Semgrep-maintained rules carry a restrictive licence since 2024-12-13; the engines stay LGPL-2.1 |
+| Dead code | Vulture (Python), Knip 6 (TypeScript), Go `deadcode` beside `unused`, `cargo-machete` (Rust) | Start at high confidence; dynamic code yields false positives |
+| Duplication and complexity | The linter's native complexity check (Ruff `C901`, `gocyclo`/`gocognit`); `jscpd` as a report | Ratchet existing exceptions; do not gate on Clippy `cognitive_complexity` |
+| Containers and IaC | Hadolint; Grype with Syft, or Trivy as an explicit opt-in with verified artifacts; one IaC scanner (Checkov or KICS) and TFLint | Trivy binaries, images and actions were compromised in March 2026; tfsec now points to Trivy |
+| CI workflows | `zizmor`, `actionlint`, `pinact`; `harden-runner` where egress monitoring is wanted | See `ci-github-actions` |
+| SBOM, licences, provenance | Syft or cdxgen (CycloneDX or SPDX); a dependency licence inventory; trusted publishing with npm provenance or PyPI attestations | An SBOM is an inventory, not a vulnerability scan |
+
+Every suppression names an owner and an expiry. Rescan on a schedule as well as on pull requests. Commands per language are in the `lang-<language>-quality` skills; repository wiring is in `project-scaffold`'s `ci-hooks.md`.

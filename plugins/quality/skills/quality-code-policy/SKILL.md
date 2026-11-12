@@ -1,6 +1,6 @@
 ---
 name: quality-code-policy
-description: Code-quality policy (SOLID, invariants, DRY, reuse, scoped refactors); load before code changes when no agent prompt already carries it.
+description: "Code policy: SOLID, DRY, research-first reuse of standard libraries, middleware, OTel; load before code changes."
 ---
 
 # Maintainable code
@@ -11,7 +11,9 @@ MUST Prioritize SOLID, encapsulation, and protected invariants over YAGNI when t
 
 MUST Apply DRY to knowledge that must change together, not to code that merely looks alike. Revisit structure whenever behavior changes.
 
-MUST Before adding a capability the repository lacks, check the standard library and mature packages. A dependency the request did not name needs the user's approval.
+MUST Before designing or writing code for a concern, research current best practice (official docs, context7, the web) and compare the plan with the preferred-library standards: `lang-<language>-libraries`, `toolchain-api` for API styles, `aws-guidance` for AWS Lambda and service clients, else `toolchain-languages`. Prefer the repository's code, the standard library, the framework's features, then a listed library; write your own only for a named gap, and report each departure from a standard. A dependency the request did not name needs the user's approval.
+
+MUST Put cross-cutting concerns (auth, validation, request ids, logging, tracing, metrics, error mapping, timeouts, retries, rate limits) in the framework's middleware, interceptors or decorators, with one middleware model per HTTP surface (Hono for TypeScript HTTP, Lambda included; ASGI/FastAPI; `net/http` wrappers; tower). Keep AWS Lambda handlers thin on Powertools for AWS Lambda, and instrument with OpenTelemetry over OTLP by default. `quality-code-design` has the rules in its `middleware.md` and `telemetry.md` references; each `lang-<language>-libraries` skill has the framework and SDK specifics.
 
 MUST Scale planning and verification by uncertainty, consequences, and reversibility; file or line counts decide neither safety nor design. A PR request does not authorize a production release.
 
