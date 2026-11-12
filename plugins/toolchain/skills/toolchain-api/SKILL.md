@@ -35,13 +35,13 @@ Decision order:
 
 ## What ConnectRPC is
 
-Connect is an RPC protocol and a family of libraries created by Buf (a CNCF sandbox project). You define services in protobuf, as for gRPC, and generate clients and servers.
+Connect is an RPC protocol and a family of libraries. ConnectRPC is a CNCF sandbox project, originally created by Buf. You define services in protobuf, as for gRPC, and generate clients and servers.
 
 - **On the wire:** a unary call is an HTTP `POST` to `/<package>.<Service>/<Method>` with an unframed body: protobuf JSON (`application/json`) or binary protobuf (`application/proto`). Side-effect-free methods can use `GET`. Headers carry `Connect-Protocol-Version: 1` and `Connect-Timeout-Ms`. Unary errors are a non-200 status with a JSON body `{code, message, details}`. Streams use `application/connect+json` or `application/connect+proto` with length-prefixed envelopes; the final envelope carries the error and trailing metadata.
 - **No HTTP trailers:** unary trailing metadata travels as `Trailer-*` headers and streaming trailers in the body, so ordinary proxies, load balancers, `curl` and browsers work.
 - **HTTP versions:** unary, server streaming and client streaming work over HTTP/1.1 and HTTP/2; bidirectional streaming needs HTTP/2.
 - **Three protocols per server:** a Connect server also accepts gRPC and gRPC-Web on the same port, chosen per request by `Content-Type`. Clients pick a transport; nothing falls back automatically. Browsers call a Connect or gRPC-Web endpoint directly with no translating proxy, for unary and server streaming. An existing gRPC-only server needs a gRPC transport on the client.
-- **Implementations:** Go `connect-go` 2 and TypeScript `connect-es` 2 (browser, Node; Bun needs its own adapter) are established; Swift 1 and Dart 2 clients; Python `connect-python` 0.13, Kotlin 0.10 and Rust `connectrpc` 0.9 are pre-1.0 and need integration tests.
+- **Implementations:** Go `connect-go` 2 (module `connectrpc.com/connect/v2`) and TypeScript `connect-es` 2 (browser, Node; Bun needs its own adapter) are established; Swift 1 and Dart 2 clients; Python `connect-python` 0.13, Kotlin 0.10 and Rust `connectrpc` 0.9 are pre-1.0 and need integration tests.
 - **Tooling:** `buf curl` calls any method; Protovalidate adds CEL validation rules (choosing Connect does not validate anything by itself).
 
 Choose Connect for protobuf-first APIs used from browsers, mobile apps and backends that also want gRPC interoperability and plain-HTTP debugging. Choose gRPC for existing gRPC infrastructure or a language Connect does not cover well, and REST with OpenAPI for resource semantics, the broadest public ecosystem and HTTP caching.

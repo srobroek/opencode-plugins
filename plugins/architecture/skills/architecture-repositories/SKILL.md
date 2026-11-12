@@ -39,7 +39,7 @@ tools/  scripts/  docs/
 ```
 
 - Organize by deployable, never by a top-level `typescript/` and `python/` split.
-- Each language keeps its native workspace: bun (or pnpm, not both) for JavaScript, uv for Python, `go.work` for Go, a Cargo workspace for Rust. Each workspace selects its own members by glob.
+- Each language keeps its native workspace: bun (or pnpm, not both) for JavaScript, uv for Python, a Cargo workspace for Rust; bun, uv and Cargo select members by glob. Go starts with one module; a `go.work` file, which lists module directories with `use`, is for local development across several modules, and CI checks each module with `GOWORK=off`.
 - Keep one authoritative lockfile per dependency-resolution domain and install it frozen in CI. A uv workspace resolves all members together; give a Lambda function its own project and `uv.lock` when its dependencies conflict with the others or must stay minimal.
 - Package each Lambda function from its own dependency closure (ZIP or image), never from the shared development environment. Build native wheels for the Lambda architecture, and test the packaged artifact on its own: a workspace does not stop one member from importing another member's undeclared dependency.
 - Build container images with a per-service context; use named or pruned contexts when a service needs a shared package or the root lockfile.
@@ -48,7 +48,7 @@ tools/  scripts/  docs/
 ## Share contracts, not code
 
 - Keep the contract source in `schemas/` (or the owning service's `contracts/`): OpenAPI for HTTP, protobuf with Buf v2 configuration for RPC, JSON Schema for events and files. One authoritative contract per interface; do not maintain the same model in three languages by hand. The API style choice is in `toolchain-api`.
-- Generate a native client per language into its consumer or a versioned package. Pin generator versions and options. Commit the output and regenerate in CI with a drift check (`git diff --exit-code`, unexpected files included), or regenerate before every build; never hand-edit generated files.
+- Generate a native client per language into its consumer or a versioned package. Pin generator versions and options. Commit the output; in CI, regenerate and fail when `git diff --exit-code` reports changes or `git status --porcelain -- <generated dirs>` shows new files. Never hand-edit generated files.
 - A contract change selects every consumer's checks.
 - Never import across language or package boundaries through relative paths or path hacks.
 

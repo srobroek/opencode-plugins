@@ -16,8 +16,8 @@ Checked 2026-11-12. Standard-library entries use Go `1.27`.
 | Code-first OpenAPI | `github.com/danielgtaylor/huma/v2` `2` when schema generation is needed | Plain `net/http` for endpoints without generated contracts | Hand-maintaining separate schemas and handlers that can drift. |
 | Schema-first OpenAPI | `github.com/oapi-codegen/oapi-codegen/v2` `2` for ordinary handler integration | `github.com/ogen-go/ogen` `1` for generated client/server infrastructure | Old `deepmap` imports; assuming all generated handlers validate automatically. |
 | Protobuf runtime | `google.golang.org/protobuf` `1` | Existing generated runtime during a planned migration | Mixing incompatible generated files, compiler plugins and runtimes. |
-| HTTP-native RPC | `connectrpc.com/connect` `1` | `google.golang.org/grpc` `1` for native gRPC infrastructure/features | Bespoke RPC framing; assuming browser bidirectional streams work like native HTTP/2. |
-| RPC middleware | Connect `1` interceptors; gRPC `1` interceptors/stats handlers | `github.com/grpc-ecosystem/go-grpc-middleware/v2` `2` for reusable gRPC chains | Duplicate instrumentation or mismatched unary/stream policy. |
+| HTTP-native RPC | `connectrpc.com/connect/v2` `2` (`connectrpc.com/connect` `1` in existing code) | `google.golang.org/grpc` `1` for native gRPC infrastructure/features | Bespoke RPC framing; assuming browser bidirectional streams work like native HTTP/2. |
+| RPC middleware | Connect `2` interceptors; gRPC `1` interceptors/stats handlers | `github.com/grpc-ecosystem/go-grpc-middleware/v2` `2` for reusable gRPC chains | Duplicate instrumentation or mismatched unary/stream policy. |
 | GraphQL | `github.com/99designs/gqlgen` `0.17` for schema-first generated resolvers | `github.com/graphql-go/graphql` `0.8` for existing runtime-schema integrations | GraphQL without per-resolver auth, cost limits and N+1 controls. |
 | WebSockets | `github.com/coder/websocket` `1` | `github.com/gorilla/websocket` `1` for existing integrations | Old `nhooyr.io/websocket` imports; claiming Gorilla is still archived. |
 | SSE | `net/http`, flushing and request cancellation; standard library is sufficient | A replay/subscription layer when resumable delivery is required | WebSockets for one-way notifications; untested proxy buffering and reconnect behavior. |
@@ -41,7 +41,7 @@ Checked 2026-11-12. Standard-library entries use Go `1.27`.
 - Use `quality-code-design` and `middleware.md` for the language-neutral composition rules.
 - Use validator `10` with `WithRequiredStructEnabled` for its recommended struct behavior. Keep business invariants explicit.
 - Pin the Protobuf compiler and generation plugins together; use Buf's `v2` configuration for reproducible generation and compatibility gates. The configuration version is not the CLI major. See `toolchain-api` for the workflow.
-- Connect `1` was the registry line checked here, but current interceptor documentation uses `v2` APIs. Re-check the module and matching docs before copying signatures.
+- Connect `2` (2.0.2, October 2026) changed interceptor and handler APIs; follow the `v2` documentation and migrate `v1` code deliberately.
 
 ## Sources
 

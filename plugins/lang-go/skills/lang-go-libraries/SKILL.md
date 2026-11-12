@@ -30,7 +30,7 @@ Standard-library entries below use Go `1.27`; retain a supported lower minimum w
 | Middleware | `func(http.Handler) http.Handler` | Use framework middleware for cross-cutting concerns, not repeated handler code. |
 | Request validation | Explicit domain checks; `github.com/go-playground/validator/v10` `10` for tags | Standard library suffices for small boundary types. |
 | OpenAPI | `github.com/oapi-codegen/oapi-codegen/v2` `2` | Schema-first; `github.com/danielgtaylor/huma/v2` `2` for code-first. |
-| RPC | `connectrpc.com/connect` `1` | `google.golang.org/grpc` `1` for established gRPC infrastructure. |
+| RPC | `connectrpc.com/connect/v2` `2` | `google.golang.org/grpc` `1` for established gRPC infrastructure. |
 | GraphQL | `github.com/99designs/gqlgen` `0.17` | Only when graph-shaped client needs justify it. |
 | Streaming | `net/http` SSE | Standard library suffices for one-way notifications. |
 | JSON | `encoding/json` | Preserve existing wire semantics; JSON v2 is available in Go `1.27`. |
