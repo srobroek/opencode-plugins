@@ -23,6 +23,7 @@ Checked 2026-11-12.
 | Container assurance | `grype` `0.121` plus `syft` `1` | `trivy` `0.76` only with explicit artifact/action integrity review; `hadolint` `2` for Dockerfiles. | Ignoring Trivy's documented March `2026` supply-chain compromise or trusting mutable action tags. |
 | Workflow security | `zizmor` `1`, `actionlint` `1`, SHA pinning with `pinact` `5` when workflows exist | Existing organization workflow controls. | Assuming a pinned wrapper secures every transitive action/download. |
 | Dead code/dependencies | `knip` `6` | Compiler/linter unused-import checks for local concerns. | `unimported`: archived; claiming `ts-prune` is abandoned despite current activity. |
+| Cognitive complexity | Biome `2` `noExcessiveCognitiveComplexity` set to error, threshold 15 | `eslint-plugin-sonarjs` `4` (SonarSource's rule, LGPL-3.0) in an ESLint stack. Oxlint and typescript-eslint have no cognitive rule. | Gating total repository complexity instead of new functions. |
 | Duplication | `jscpd` `5` as reviewed report | Existing cross-language duplication scanner. | Mechanical deduplication of coincidentally similar code; arbitrary blocking thresholds. |
 
 ## Rules

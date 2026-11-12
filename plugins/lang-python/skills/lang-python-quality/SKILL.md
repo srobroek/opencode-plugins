@@ -72,7 +72,8 @@ root) before handing off a change to shared code.
 Keep configured deptry and import contracts in the gate, matching the scaffold.
 Optional dead-code/security policy is in `project-scaffold`'s `references/python.md`
 and `references/ci-hooks.md`: `Vulture` at 100% confidence with reviewed exceptions,
-`Ruff` `C901`/`S`, and a configured vulnerability audit. `Ruff` `F401`/`F841` do not
+`Ruff` `C901`/`S`, `complexipy` for cognitive complexity (threshold 15, with its
+snapshot baseline so only new violations fail), and a configured vulnerability audit. `Ruff` `F401`/`F841` do not
 establish whole-project reachability. Keep `mypy`/`Pyright`; `ty` is an opt-in beta pilot.
 
 Same steps, same order, one step per row. Install uv with `astral-sh/setup-uv`

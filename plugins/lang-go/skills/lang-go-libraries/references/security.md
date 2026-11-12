@@ -22,7 +22,7 @@ Checked 2026-11-12. Standard-library entries use Go `1.27`; commands belong in `
 | SBOM | `github.com/CycloneDX/cyclonedx-gomod` `1` for Go source modules | `Syft` `1` for images/artifacts; `cdxgen` `13` for multilingual source | SBOM generation presented as vulnerability detection. |
 | Dependency licences | `go-licenses` `2` inventory and project policy | Organization-approved compliance tooling | Repository-licence detection as equivalent to dependency compliance. |
 | Dead declarations | Configured `unused`/`staticcheck` in golangci `2` | `golang.org/x/tools/cmd/deadcode` `0.52` for whole-program executable/test-root reachability | Deleting exported library APIs solely because one executable does not reach them. |
-| Duplication/complexity | Existing native golangci `2` complexity checks and review | `jscpd` `5` or PMD CPD `7` optional duplication report | Multiple overlapping universal gates; generated-code duplication or arbitrary limits as defects. |
+| Duplication/complexity | `gocognit` `1` through golangci `2` at 15 (cognitive) and `gocyclo` at 10-12, with review | `jscpd` `5` or PMD CPD `7` optional duplication report | Multiple overlapping universal gates; generated-code duplication or arbitrary limits as defects. |
 | Container security | Verified `Grype` `0.121` plus `Syft` `1` when images ship | `Trivy` `0.76` only with explicit artifact/transitive-action review | Ignoring Trivy's documented March 2026 compromise or trusting mutable installer tags. |
 | Workflow security | `actionlint` `1`, `zizmor` `1`, `pinact` `5` when workflows exist | Scheduled Scorecard `5` assessment for repository posture | Treating an action SHA alone as proof of downloaded-tool integrity. |
 

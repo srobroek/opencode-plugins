@@ -45,6 +45,7 @@ Check the supported feature/target matrix before deleting dependencies or treati
 `dead_code` warnings; dependency scanners do not replace them. Clippy
 `cognitive_complexity` is an opt-in restriction lint whose documentation warns it
 does not measure true cognitive complexity; do not enable it as a universal gate.
+Use Lizard `-Ecognitive` (threshold 15) or SonarQube for cognitive complexity instead.
 
 Pin `cargo-nextest`, `cargo-deny`, `cargo-machete` and `cargo-llvm-cov` in mise (or install
 them in CI with `taiki-e/install-action`). Add `clippy.toml` with `allow-unwrap-in-tests = true`

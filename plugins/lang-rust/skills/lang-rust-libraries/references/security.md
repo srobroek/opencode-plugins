@@ -19,7 +19,7 @@ Checked 2026-11-12.
 | Advisories/licences/sources | `cargo-deny` `0.20` | `cargo-audit` `0.23` standalone advisory scan | Redundant mandatory tools; latest dependency mistaken for safe graph. |
 | Dependency review | `cargo-vet` `0.10` | Existing equivalent reviewed trust policy | Provenance/signature mistaken for harmless code. |
 | Unused dependencies | `cargo-machete` `0.9` | `cargo-shear` `1.14` pilot for misplaced dependencies; nightly `cargo-udeps` `0.1` investigation | Stacking scanners without purpose; textual matches as reachability proof. |
-| Duplication/complexity | Optional `jscpd` `5.4` report | `PMD CPD` `7.29` or `Lizard` `1.26` where useful | Generated-code noise; blanket thresholds as correctness rules. |
+| Duplication/complexity | Optional `jscpd` `5.4` report; `Lizard` `1.26` `-Ecognitive` for cognitive complexity (threshold 15) after checking representative files | `PMD CPD` `7.29`; SonarQube Cloud or Server for managed metrics; `rust-code-analysis-cli` for richer metric exports (last release 2023) | Generated-code noise; blanket thresholds as correctness rules. |
 | SBOM | `cargo-cyclonedx` `0.5` for Cargo; `Syft` `1.57` for artifacts/images | `cdxgen` `13.7` source inventory; `cargo-auditable` `0.7` embedded dependency metadata | SBOM mistaken for vulnerability remediation or license approval. |
 | Unsafe inventory | `cargo-geiger` `0.14` for review targeting | Direct unsafe-boundary audit | Unsafe count as risk score or safety proof. |
 | Container scans | `Grype` `0.121` with `Syft` `1.57` | Verified `Trivy` `0.76` explicit opt-in; `Docker Scout` `1.29` integrated workflow | Ignoring documented March 2026 Trivy compromise/transitive action integrity. |

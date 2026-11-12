@@ -46,9 +46,10 @@ fails on any change. Formatters and safe lint fixes stay in `just fmt`, never in
   --min-severity medium`, `taplo fmt --check --diff`, `markdownlint-cli2`, `cspell` spelling,
   `lychee --no-progress --accept 200,204,206,429 '**/*.md'` online link check, a
   Conventional Commits check across the PR's commit range (not just the commit-msg hook,
-  which `--no-verify` skips). Prefer native complexity checks (`Ruff` `C901`, `golangci-lint`
-  `gocyclo`/`gocognit`); `Lizard` is optional. Start cyclomatic limits at 10-12 and cognitive
-  limits around 15, ratcheting existing exceptions. Function length 80 and five arguments
+  which `--no-verify` skips). Cognitive complexity 15 per function on new code: `complexipy` (Python), Biome
+  `noExcessiveCognitiveComplexity` or `eslint-plugin-sonarjs` (TypeScript), `gocognit` (Go),
+  Lizard `-Ecognitive` (Rust, and as the cross-language option). Cyclomatic limits start at
+  10-12 (`Ruff` `C901`, `gocyclo`). Ratchet existing exceptions. Function length 80 and five arguments
   are review signals rather than mandatory gates. Report duplication with `jscpd` or `PMD CPD`
   before choosing a threshold; exclude generated code.
 - Path-based skipping inside the workflow with a path filter job feeding the gate's

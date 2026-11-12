@@ -27,8 +27,10 @@ Keep the scaffold's configured deny/machete gate: deny covers advisories, licenc
 bans and sources; machete covers unused dependencies, not rustc `dead_code` warnings.
 Check supported feature/target combinations before deleting findings. Optional
 `cargo-shear` pilot and nightly `cargo-udeps` fallback are in `project-scaffold`'s
-`references/rust.md`; do not stack them as mandatory gates or broadly enable Clippy
-`cognitive_complexity`.
+`references/rust.md`; do not stack them as mandatory gates. For cognitive complexity,
+run Lizard (`lizard -Ecognitive --CogC 15 src`) after checking its scores on a few
+representative files, or SonarQube Cloud or Server; do not gate on Clippy
+`cognitive_complexity`, which is not Sonar-equivalent and skips tests and macros.
 
 After an edit that spans files or changes a signature, run `cargo check --all-targets`
 (add `--workspace` in a workspace) once before handing back, or the project's own

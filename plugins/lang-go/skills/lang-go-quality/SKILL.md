@@ -25,7 +25,8 @@ then continue; later steps on code that does not build only add noise.
 
 The scaffold's `golangci-lint` v2 config includes `errcheck`, `govet`, `ineffassign`,
 `staticcheck`, `unused` and explicitly enabled `gosec`; `go vet` alone is not that
-gate. Optional `gocyclo`/`gocognit` limits ratchet reviewed exceptions. For executable
+gate. Enable `gocognit` at 15 (golangci-lint's own default reports only above 30) and
+`gocyclo` at 10-12, ratcheting reviewed exceptions. For executable
 packages, pinned `go tool deadcode -test ./...` reports whole-program reachability
 from executable/test roots, unlike declaration-level `unused`/`staticcheck` checks.
 Do not treat that report as proof a library's public API is safe to remove.
