@@ -1,8 +1,10 @@
 import { Plugin } from "@opencode/plugin"
 import { contentPlugin } from "@srobroek/opencode-lib/content-plugin"
 import { parseStandardsOptions, setupStandards } from "./standards.ts"
+import { parseTestAuditOptions, setupTestAudit } from "./test-audit.ts"
 
 export * from "./standards.ts"
+export * from "./test-audit.ts"
 
 /** `adversarial-challenger` is a fallback copy of agent-reviewer's, registered only without it. */
 export const FALLBACK_AGENTS = { "adversarial-challenger": "agent-reviewer" } as const
@@ -20,7 +22,16 @@ export default Plugin.define({
       await disposeContent?.()
       throw error
     }
+    let disposeAudit: () => Promise<void>
+    try {
+      disposeAudit = await setupTestAudit(ctx, parseTestAuditOptions(ctx.options as Record<string, unknown>))
+    } catch (error) {
+      await disposeStandards()
+      await disposeContent?.()
+      throw error
+    }
     return async () => {
+      await disposeAudit()
       await disposeStandards()
       await disposeContent?.()
     }
