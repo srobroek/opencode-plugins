@@ -13,6 +13,17 @@ export const OP_MESSAGE =
 export const FNOX_DUMP_MESSAGE =
   "safety op-guard: this fnox command prints secret values into the transcript. Use `fnox check` or `fnox list` to inspect, and `fnox exec -- <cmd>` to use a value."
 
+export const NESTING_MESSAGE =
+  "safety op-guard: command nesting is too deep to check; run it without nested shells"
+
+export const CHECK_FAILED_MESSAGE =
+  "safety op-guard: could not check this command; run `op` and fnox commands directly, without nesting"
+
+/** Levels of nested scripts, `fnox exec` and wrappers the guard follows before it refuses. */
+export const MAX_NESTING = 16
+
+class NestingTooDeep extends Error {}
+
 const OP_VALUED: ReadonlySet<string> = new Set([
   "--account",
   "--config",
@@ -107,8 +118,13 @@ function execInner(args: readonly string[]): string[] {
 export function fnoxRefusal(
   command: Command,
   allow: readonly string[] = [],
-  inherited: { fed: boolean; documents: readonly HereDocument[] } = { fed: false, documents: [] },
+  inherited: { fed: boolean; documents: readonly HereDocument[]; depth: number } = {
+    fed: false,
+    documents: [],
+    depth: 0,
+  },
 ): "op" | "dump" | undefined {
+  if (inherited.depth > MAX_NESTING) throw new NestingTooDeep()
   if (base(command.argv[0]) !== "fnox") return undefined
   const argv = command.argv
   let at = 1
@@ -134,27 +150,33 @@ export function fnoxRefusal(
   const documents = [...inherited.documents, ...command.hereDocuments]
   const fed = inherited.fed || stdinFed(command)
   const children = walkShell(inner.map(quote).join(" ")).commands
-  // A here-document fed to the shell left after the wrappers is that shell's script.
-  const bodies = children
+  // A here-document fed to the shell left after the wrappers is that shell's script. The shell
+  // reads all of stdin, so a parsed document is consumed: an inner level never gets it again.
+  const scripts = children
     .filter((nested) => nested.context === "top" && SHELLS.has(base(nested.argv[0])))
     .filter((nested) => !nested.argv.some((word) => /^-[A-Za-z]*c[A-Za-z]*$/.test(word)))
-    .flatMap(() => documents.flatMap((document) => walkShell(document.body).commands))
+  const bodies = scripts.length === 0 ? [] : documents.flatMap((document) => walkShell(document.body).commands)
+  const rest = scripts.length === 0 ? documents : []
   for (const nested of [...children, ...bodies]) {
     if (dumpsEnvironment(nested)) return "dump"
     if (opCall(nested, allow, fed)) return "op"
-    const again = fnoxRefusal(nested, allow, { fed, documents })
+    const again = fnoxRefusal(nested, allow, { fed, documents: rest, depth: inherited.depth + 1 })
     if (again !== undefined) return again
   }
   return undefined
 }
 
-/** The op-guard verdict for a call's commands, or `undefined`. */
+/** The op-guard verdict for a call's commands, or `undefined`. Fails closed when its own analysis throws. */
 export function opGuard(commands: readonly Command[], allow: readonly string[] = []): string | undefined {
-  for (const command of commands) {
-    if (opCall(command, allow)) return OP_MESSAGE
-    const fnox = fnoxRefusal(command, allow)
-    if (fnox === "op") return OP_MESSAGE
-    if (fnox === "dump") return FNOX_DUMP_MESSAGE
+  try {
+    for (const command of commands) {
+      if (opCall(command, allow)) return OP_MESSAGE
+      const fnox = fnoxRefusal(command, allow)
+      if (fnox === "op") return OP_MESSAGE
+      if (fnox === "dump") return FNOX_DUMP_MESSAGE
+    }
+    return undefined
+  } catch (error) {
+    return error instanceof NestingTooDeep ? NESTING_MESSAGE : CHECK_FAILED_MESSAGE
   }
-  return undefined
 }

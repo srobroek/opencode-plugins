@@ -1,9 +1,11 @@
-import { describe, expect, test } from "bun:test"
-import { hardGate } from "./guards.ts"
-import { readOptions } from "./index.ts"
-import { FNOX_DUMP_MESSAGE, OP_MESSAGE } from "./op-guard.ts"
+import { describe, expect, setDefaultTimeout, test } from "bun:test"
+import { Error as ToolError } from "@opencode/plugin/promise/tool"
+import { createFakeContext } from "@srobroek/opencode-lib/testing"
+import { type GuardOptions, hardGate } from "./guards.ts"
+import { createPlugin, readOptions } from "./index.ts"
+import { CHECK_FAILED_MESSAGE, FNOX_DUMP_MESSAGE, MAX_NESTING, NESTING_MESSAGE, OP_MESSAGE } from "./op-guard.ts"
 
-const gate = (command: string, options = {}) => hardGate(command, "/", options)
+const gate = (command: string, options: GuardOptions = {}) => hardGate(command, "/", options)
 
 const REFUSED_OP = [
   "op read op://x/y/z",
@@ -157,5 +159,80 @@ describe("op-guard", () => {
     const options = readOptions({ disable: ["op-guard"], opAllow: ["vault list", 3] })
     expect(options.disabled.has("op-guard")).toBe(true)
     expect(options.opAllow).toEqual(["vault list"])
+  })
+})
+
+setDefaultTimeout(60_000)
+
+const CYCLE = (tail: string) => `fnox exec -- bash <<'EOF'\nfnox exec -- bash\n${tail}\nEOF`
+const NESTED = (levels: number) => `${"fnox exec -- ".repeat(levels)}true`
+
+/** Run `command` through the plugin's execute.before hook. */
+async function throughHook(command: string, guard: GuardOptions = {}): Promise<unknown> {
+  const fake = createFakeContext({
+    directory: "/project",
+    sessions: [{ id: "ses_1", location: { directory: "/project" } }],
+    options: {},
+  })
+  await createPlugin({
+    review: { gh: async () => "[]", timeoutMs: 30_000, budgetMs: 120_000 },
+    env: {},
+    guard,
+  }).setup(fake.context)
+  try {
+    await fake.fire.tool("execute.before", {
+      sessionID: "ses_1",
+      agent: "build",
+      messageID: "msg_1",
+      id: "c1",
+      tool: "shell",
+      input: { command },
+    })
+    return "allowed"
+  } catch (error) {
+    return error instanceof ToolError || error instanceof Error ? error.message : String(error)
+  }
+}
+
+describe("op-guard cycles, depth and failure", () => {
+  const throwing: GuardOptions = {
+    analyzeOp: () => {
+      throw new Error("boom")
+    },
+  }
+
+  test("a parsed here-document is not handed to its own body", () => {
+    expect(gate(CYCLE("op read x"))?.reason).toBe(OP_MESSAGE)
+    expect(gate(CYCLE("env"))?.reason).toBe(FNOX_DUMP_MESSAGE)
+    expect(gate(CYCLE("echo hi"))).toBeUndefined()
+  })
+
+  test("the cyclic document is refused through the hook", async () => {
+    expect(await throughHook(CYCLE("op read x"))).toContain("do not call the 1Password CLI")
+    expect(await throughHook(CYCLE("env"))).toContain("prints secret values")
+    expect(await throughHook(CYCLE("echo hi"))).toBe("allowed")
+  })
+
+  test("nesting past the limit is refused", async () => {
+    expect(gate(NESTED(MAX_NESTING - 2))).toBeUndefined()
+    expect(gate(NESTED(MAX_NESTING + 4))?.reason).toBe(NESTING_MESSAGE)
+    expect(await throughHook(NESTED(MAX_NESTING + 4))).toContain("nesting is too deep")
+    expect(await throughHook(NESTED(2))).toBe("allowed")
+  })
+
+  test("op-guard fails closed when its analysis throws", async () => {
+    expect(gate("echo hi", throwing)).toEqual({ guard: "op-guard", reason: CHECK_FAILED_MESSAGE })
+    expect(await throughHook("echo hi", throwing)).toContain("could not check this command")
+    expect(gate("echo hi", { ...throwing, disabled: new Set(["op-guard"]) })).toBeUndefined()
+  })
+
+  test("the other gates still fail open", async () => {
+    const read: GuardOptions = {
+      read: () => {
+        throw new Error("boom")
+      },
+    }
+    expect(() => gate("git commit -F msg.txt", read)).toThrow("boom")
+    expect(await throughHook("git commit -F msg.txt", read)).toBe("allowed")
   })
 })

@@ -4,7 +4,7 @@ import { Error as ToolError } from "@opencode/plugin/promise/tool"
 import { appendResultText, isShellTool, leadingCdCwd, shellCall, WRITE_TOOLS } from "@srobroek/opencode-lib"
 import { rewriteCloseKeywords } from "./close-keywords.ts"
 import { externalDirectories, sessionRoots, shellFlagDirectories } from "./flag-directories.ts"
-import { GUARD_IDS, type GuardID, hardGate } from "./guards.ts"
+import { GUARD_IDS, type GuardID, type GuardOptions, hardGate } from "./guards.ts"
 import { decideToolCall, type MigrationOptions, migrationOverride } from "./migrations.ts"
 import { createPackageAdvisor } from "./package-investigate.ts"
 import { type Decision, type DecisionID, type ReviewOptions, reviewPermission } from "./permission.ts"
@@ -114,7 +114,12 @@ const PENDING_TTL_MS = 10 * 60_000
 type Pending = { sessionID: string; at: number; decision: Decision | undefined }
 
 /** Test seams; the host never passes these. */
-export type Overrides = { review?: ReviewOptions; migrations?: MigrationOptions; env?: NodeJS.ProcessEnv }
+export type Overrides = {
+  review?: ReviewOptions
+  migrations?: MigrationOptions
+  env?: NodeJS.ProcessEnv
+  guard?: Pick<GuardOptions, "read" | "analyzeOp">
+}
 
 export function createPlugin(overrides: Overrides = {}) {
   return Plugin.define({
@@ -122,7 +127,7 @@ export function createPlugin(overrides: Overrides = {}) {
     async setup(ctx) {
       const { disabled, redact, opAllow } = readOptions(ctx.options)
       const on = (id: FeatureID) => !disabled.has(id)
-      const guardOptions = { disabled: disabled as ReadonlySet<GuardID>, opAllow }
+      const guardOptions = { ...overrides.guard, disabled: disabled as ReadonlySet<GuardID>, opAllow }
       const reviewOptions: ReviewOptions = { ...overrides.review, disabled: disabled as ReadonlySet<DecisionID> }
       const pending = new Map<string, Pending>()
       const advisor = createPackageAdvisor()

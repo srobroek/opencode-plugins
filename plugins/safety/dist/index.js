@@ -2092,6 +2092,12 @@ function hasAttribution(text) {
 // plugins/safety/src/op-guard.ts
 var OP_MESSAGE = "safety op-guard: do not call the 1Password CLI directly; each call opens a new 1Password session and asks the user to approve. Run the command through fnox, which reuses its cached session: `fnox exec -- <cmd>`, or `fnox exec --only NAME -- <cmd>`. If the secret is not declared, load the `project-secrets` skill and declare it; if it does not exist yet, ask the user to create it. To find items, run `fnox provider discover <provider> --tags project/<name>`.";
 var FNOX_DUMP_MESSAGE = "safety op-guard: this fnox command prints secret values into the transcript. Use `fnox check` or `fnox list` to inspect, and `fnox exec -- <cmd>` to use a value.";
+var NESTING_MESSAGE = "safety op-guard: command nesting is too deep to check; run it without nested shells";
+var CHECK_FAILED_MESSAGE = "safety op-guard: could not check this command; run `op` and fnox commands directly, without nesting";
+var MAX_NESTING = 16;
+
+class NestingTooDeep extends Error {
+}
 var OP_VALUED = new Set([
   "--account",
   "--config",
@@ -2171,7 +2177,13 @@ function execInner(args) {
   }
   return [];
 }
-function fnoxRefusal(command, allow = [], inherited = { fed: false, documents: [] }) {
+function fnoxRefusal(command, allow = [], inherited = {
+  fed: false,
+  documents: [],
+  depth: 0
+}) {
+  if (inherited.depth > MAX_NESTING)
+    throw new NestingTooDeep;
   if (base(command.argv[0]) !== "fnox")
     return;
   const argv = command.argv;
@@ -2202,29 +2214,35 @@ function fnoxRefusal(command, allow = [], inherited = { fed: false, documents: [
   const documents = [...inherited.documents, ...command.hereDocuments];
   const fed = inherited.fed || stdinFed(command);
   const children = walkShell(inner.map(quote2).join(" ")).commands;
-  const bodies = children.filter((nested) => nested.context === "top" && SHELLS.has(base(nested.argv[0]))).filter((nested) => !nested.argv.some((word) => /^-[A-Za-z]*c[A-Za-z]*$/.test(word))).flatMap(() => documents.flatMap((document) => walkShell(document.body).commands));
+  const scripts = children.filter((nested) => nested.context === "top" && SHELLS.has(base(nested.argv[0]))).filter((nested) => !nested.argv.some((word) => /^-[A-Za-z]*c[A-Za-z]*$/.test(word)));
+  const bodies = scripts.length === 0 ? [] : documents.flatMap((document) => walkShell(document.body).commands);
+  const rest = scripts.length === 0 ? documents : [];
   for (const nested of [...children, ...bodies]) {
     if (dumpsEnvironment(nested))
       return "dump";
     if (opCall(nested, allow, fed))
       return "op";
-    const again = fnoxRefusal(nested, allow, { fed, documents });
+    const again = fnoxRefusal(nested, allow, { fed, documents: rest, depth: inherited.depth + 1 });
     if (again !== undefined)
       return again;
   }
   return;
 }
 function opGuard(commands, allow = []) {
-  for (const command of commands) {
-    if (opCall(command, allow))
-      return OP_MESSAGE;
-    const fnox = fnoxRefusal(command, allow);
-    if (fnox === "op")
-      return OP_MESSAGE;
-    if (fnox === "dump")
-      return FNOX_DUMP_MESSAGE;
+  try {
+    for (const command of commands) {
+      if (opCall(command, allow))
+        return OP_MESSAGE;
+      const fnox = fnoxRefusal(command, allow);
+      if (fnox === "op")
+        return OP_MESSAGE;
+      if (fnox === "dump")
+        return FNOX_DUMP_MESSAGE;
+    }
+    return;
+  } catch (error) {
+    return error instanceof NestingTooDeep ? NESTING_MESSAGE : CHECK_FAILED_MESSAGE;
   }
-  return;
 }
 
 // plugins/safety/src/guards.ts
@@ -2455,23 +2473,39 @@ function gitDefender(command) {
 }
 function hardGate(source, cwd, options = {}) {
   const on = (guard) => options.disabled?.has(guard) !== true;
-  const { commands } = walkShell(source);
   const refuse = (guard) => ({ guard, reason: MESSAGES[guard] });
-  if (on("git-defender") && commands.some(gitDefender))
-    return refuse("git-defender");
-  if (on("remote-exec") && remoteExec(commands))
-    return refuse("remote-exec");
-  if (on("indirection") && commands.some(indirection))
-    return refuse("indirection");
-  if (on("attribution") && attribution(commands, cwd, options.read))
-    return refuse("attribution");
-  if (on("worktree-tmp") && commands.some((command) => worktreeTmp(command, cwd)))
-    return refuse("worktree-tmp");
+  let failure;
+  let refusal;
+  try {
+    const { commands } = walkShell(source);
+    if (on("git-defender") && commands.some(gitDefender))
+      refusal = refuse("git-defender");
+    else if (on("remote-exec") && remoteExec(commands))
+      refusal = refuse("remote-exec");
+    else if (on("indirection") && commands.some(indirection))
+      refusal = refuse("indirection");
+    else if (on("attribution") && attribution(commands, cwd, options.read))
+      refusal = refuse("attribution");
+    else if (on("worktree-tmp") && commands.some((command) => worktreeTmp(command, cwd)))
+      refusal = refuse("worktree-tmp");
+  } catch (error) {
+    failure = { error };
+  }
+  if (refusal !== undefined)
+    return refusal;
   if (on("op-guard")) {
-    const reason = opGuard(commands, options.opAllow);
-    if (reason !== undefined)
+    let reason;
+    try {
+      const analyze = options.analyzeOp ?? opGuard;
+      reason = analyze(walkShell(source).commands, options.opAllow) ?? "";
+    } catch {
+      reason = CHECK_FAILED_MESSAGE;
+    }
+    if (reason !== "")
       return { guard: "op-guard", reason };
   }
+  if (failure !== undefined)
+    throw failure.error;
   return;
 }
 
@@ -3887,7 +3921,7 @@ function createPlugin(overrides = {}) {
     async setup(ctx) {
       const { disabled, redact, opAllow } = readOptions(ctx.options);
       const on = (id) => !disabled.has(id);
-      const guardOptions = { disabled, opAllow };
+      const guardOptions = { ...overrides.guard, disabled, opAllow };
       const reviewOptions = { ...overrides.review, disabled };
       const pending = new Map;
       const advisor = createPackageAdvisor();

@@ -8,7 +8,7 @@
 import { readFileSync } from "node:fs"
 import { isAbsolute, resolve } from "node:path"
 import { hasAttribution } from "./attribution.ts"
-import { OP_MESSAGE, opGuard } from "./op-guard.ts"
+import { CHECK_FAILED_MESSAGE, OP_MESSAGE, opGuard } from "./op-guard.ts"
 import {
   base,
   type Command,
@@ -269,21 +269,40 @@ export type GuardOptions = {
   read?: FileReader
   /** Extra `op` subcommand prefixes the op-guard allows, such as "vault list". */
   opAllow?: readonly string[]
+  /** Test seam: replaces the op-guard analysis. */
+  analyzeOp?: (commands: readonly Command[], allow: readonly string[] | undefined) => string | undefined
 }
 
 /** The first hard gate `source` trips, or `undefined`. */
 export function hardGate(source: string, cwd: string, options: GuardOptions = {}): Refusal | undefined {
   const on = (guard: GuardID) => options.disabled?.has(guard) !== true
-  const { commands } = walkShell(source)
   const refuse = (guard: GuardID): Refusal => ({ guard, reason: MESSAGES[guard] })
-  if (on("git-defender") && commands.some(gitDefender)) return refuse("git-defender")
-  if (on("remote-exec") && remoteExec(commands)) return refuse("remote-exec")
-  if (on("indirection") && commands.some(indirection)) return refuse("indirection")
-  if (on("attribution") && attribution(commands, cwd, options.read)) return refuse("attribution")
-  if (on("worktree-tmp") && commands.some((command) => worktreeTmp(command, cwd))) return refuse("worktree-tmp")
-  if (on("op-guard")) {
-    const reason = opGuard(commands, options.opAllow)
-    if (reason !== undefined) return { guard: "op-guard", reason }
+  // The other gates fail open (the caller treats a throw as "allow"); op-guard fails closed, so it
+  // runs on its own and a throw above never skips it.
+  let failure: { error: unknown } | undefined
+  let refusal: Refusal | undefined
+  try {
+    const { commands } = walkShell(source)
+    if (on("git-defender") && commands.some(gitDefender)) refusal = refuse("git-defender")
+    else if (on("remote-exec") && remoteExec(commands)) refusal = refuse("remote-exec")
+    else if (on("indirection") && commands.some(indirection)) refusal = refuse("indirection")
+    else if (on("attribution") && attribution(commands, cwd, options.read)) refusal = refuse("attribution")
+    else if (on("worktree-tmp") && commands.some((command) => worktreeTmp(command, cwd)))
+      refusal = refuse("worktree-tmp")
+  } catch (error) {
+    failure = { error }
   }
+  if (refusal !== undefined) return refusal
+  if (on("op-guard")) {
+    let reason: string
+    try {
+      const analyze = options.analyzeOp ?? opGuard
+      reason = analyze(walkShell(source).commands, options.opAllow) ?? ""
+    } catch {
+      reason = CHECK_FAILED_MESSAGE
+    }
+    if (reason !== "") return { guard: "op-guard", reason }
+  }
+  if (failure !== undefined) throw failure.error
   return undefined
 }
