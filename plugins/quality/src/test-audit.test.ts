@@ -386,6 +386,17 @@ describe("plugin wiring", () => {
     expect(parseTestAuditOptions({})).toEqual({ confirm: true })
   })
 
+  test("testAudit: false registers neither tool nor the hook", async () => {
+    const fake = createFakeContext({ options: { testAudit: false } })
+    const cleanup = await plugin.setup(fake.context)
+    expect(fake.tools.has("quality_test_repeat")).toBe(false)
+    expect(fake.tools.has("quality_test_compare")).toBe(false)
+    expect(fake.hooks("permission")).toEqual([])
+    expect(parseTestAuditOptions({ testAudit: false, confirmTestRuns: true })).toBeUndefined()
+    await cleanup?.()
+    expect(fake.active()).toBe(0)
+  })
+
   test("quality_test_repeat asserts the permission, then runs; rejects bad cwd without a process", async () => {
     const dir = scratch()
     try {
