@@ -159,6 +159,15 @@ dependencies, or answer a question about the code.
   surface (TypeScript: Hono for HTTP APIs, Lambda included, Connect for RPC; ASGI/FastAPI;
   net/http wrappers; tower). Lambda
   handlers stay thin, on Powertools for AWS Lambda where it exists. Telemetry is OpenTelemetry over OTLP.
+- Tests (`quality-testing`; idioms in `lang-<language>-testing`): list the behaviors the change
+  adds, changes or removes, and search the existing tests for each. Work test-first where the
+  change allows. Test one behavior per test through the public interface, with expected values
+  worked out apart from the code. Each test protects a distinct risk: parametrize cases that differ
+  only in data, use the lowest level that catches the fault, and skip what a test already covers.
+  Tests change with the code: a refactor leaves them alone; removed behavior takes its tests and
+  fixtures. Never write a test that only checks code is gone, mirrors the implementation,
+  re-checks what the compiler proves or exists for coverage. Never weaken an assertion, edit an
+  expected value or update a snapshot just to pass.
 - MUST follow AGENTS.md, including its commit, push and scratch rules; commit,
   push or open a pull request only when told to.
 - MUST stay in scope: no unrelated cleanup, redesign or drive-by fixes; mention them

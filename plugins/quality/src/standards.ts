@@ -1,5 +1,5 @@
 import type { Context } from "@opencode/plugin/promise/plugin"
-import { STANDARDS } from "@srobroek/opencode-lib/coding-core"
+import { STANDARDS, TESTING } from "@srobroek/opencode-lib/coding-core"
 
 /**
  * The engineering standards for agents whose prompt does not carry coding-core: research first,
@@ -7,6 +7,12 @@ import { STANDARDS } from "@srobroek/opencode-lib/coding-core"
  * provider's prompt cache holds.
  */
 export const STANDARDS_TEXT = `# Engineering standards\n\n${STANDARDS}`
+
+/** The testing standards from the same coding-core, as a second static block. */
+export const TESTING_TEXT = `# Testing standards\n\n${TESTING}`
+
+/** The blocks appended to each selected request, in order. */
+export const STANDARDS_BLOCKS: ReadonlyArray<string> = [STANDARDS_TEXT, TESTING_TEXT]
 
 /** Code-writing subagents without coding-core in their prompt. coder and the implementers include it. */
 export const DEFAULT_STANDARDS_SUBAGENTS: ReadonlyArray<string> = ["general"]
@@ -37,7 +43,7 @@ async function isPrimary(ctx: Context, sessionID: string): Promise<boolean> {
   }
 }
 
-/** Append the standards to the system prompt of the sessions `options` selects. */
+/** Append the standards blocks to the system prompt of the sessions `options` selects. */
 export async function setupStandards(ctx: Context, options: StandardsOptions): Promise<() => Promise<void>> {
   if (options === undefined) return async () => {}
   const primary = new Map<string, Promise<boolean>>()
@@ -48,7 +54,8 @@ export async function setupStandards(ctx: Context, options: StandardsOptions): P
       known = isPrimary(ctx, event.sessionID)
       primary.set(event.sessionID, known)
     }
-    if (wantsStandards(await known, event.agent, options.subagents)) event.system.push({ type: "text", text: STANDARDS_TEXT })
+    if (wantsStandards(await known, event.agent, options.subagents))
+      for (const text of STANDARDS_BLOCKS) event.system.push({ type: "text", text })
   }
   const hooks = [
     await ctx.session.hook("context", add),

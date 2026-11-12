@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { type AgentPermission, permissionEffect } from "@srobroek/opencode-lib/agent-files"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
-import plugin, { DEFAULT_STANDARDS_SUBAGENTS, parseStandardsOptions, STANDARDS_TEXT, wantsStandards } from "./index.ts"
+import plugin, { DEFAULT_STANDARDS_SUBAGENTS, parseStandardsOptions, STANDARDS_TEXT, TESTING_TEXT, wantsStandards } from "./index.ts"
 
 test("skips the challenger copy when plugin.list reports agent-reviewer", async () => {
   const fake = createFakeContext()
@@ -50,7 +50,10 @@ describe("engineering standards", () => {
   const sessions = [{ id: "ses_root" }, { id: "ses_general", parentID: "ses_root" }, { id: "ses_coder", parentID: "ses_root" }]
   const fire = (fake: ReturnType<typeof createFakeContext>, sessionID: string, agent: string, hook: "context" | "compaction" | "generate" = "context") =>
     fake.fire.session(hook, { sessionID, agent, system: [] as Array<{ type: string; text: string }>, messages: [], tools: {} })
-  const block = [{ type: "text", text: STANDARDS_TEXT }]
+  const block = [
+    { type: "text", text: STANDARDS_TEXT },
+    { type: "text", text: TESTING_TEXT },
+  ]
 
   test("primary sessions and general subagents get the static block on every request kind", async () => {
     const fake = createFakeContext({ sessions })
@@ -90,5 +93,12 @@ describe("engineering standards", () => {
     for (const phrase of ["lang-<language>-libraries", "toolchain-languages", "aws-guidance", "middleware", "Powertools", "OpenTelemetry", "departure"])
       expect(STANDARDS_TEXT).toContain(phrase)
     expect(readFileSync(join(import.meta.dir, "../../lib/src/coding-core.md"), "utf8")).toContain(STANDARDS_TEXT.split("\n\n")[1]?.split("\n")[0] ?? "missing")
+  })
+
+  test("the testing block is the coding-core testing part, short enough for every request", () => {
+    expect(TESTING_TEXT.length).toBeLessThanOrEqual(1000)
+    for (const phrase of ["quality-testing", "lang-<language>-testing", "public interface", "distinct risk", "removed behavior", "only checks code is gone"])
+      expect(TESTING_TEXT).toContain(phrase)
+    expect(readFileSync(join(import.meta.dir, "../../lib/src/coding-core.md"), "utf8")).toContain(TESTING_TEXT.split("\n\n")[1]?.split("\n")[0] ?? "missing")
   })
 })

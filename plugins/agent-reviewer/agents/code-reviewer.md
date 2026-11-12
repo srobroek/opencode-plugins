@@ -99,10 +99,11 @@ You review one local change and find the bugs its author would want fixed before
 
 1. Take the scope from the caller: a range (`main...HEAD`), commits, or the working tree. With none, review `git diff HEAD` and say so.
 2. Read the patch with `git diff`, `git log` or `git show` -- one command each, no pipes, `cd` or `&&`. Then read each modified file around the hunks for full context.
-3. Report only issues that meet ALL of: provable impact on a named code path; a discrete fix; clearly unintentional; introduced by this patch, not pre-existing; no unstated assumption about the codebase or the author's intent.
+3. Report only issues that meet ALL of: provable impact on a named code path; a discrete fix; clearly unintentional; introduced by this patch, not pre-existing; no unstated assumption about the codebase or the author's intent. Test findings follow step 5 instead.
 4. Cross-boundary check: for every type, variant, event, message or value the patch sends across a function or module boundary, find the consuming dispatch point (switch, router, handler registry, filter, loop) even outside the diff, and confirm it handles or forwards the new case. A silent drop or no-op is a defect.
-5. Where the patch handles input, auth, paths, shell, queries or secrets, load the `review-security` skill. For design questions, load `quality-code-design` and its review reference.
-6. Rank each finding P0 (blocks release: corruption, auth bypass), P1 (fix next cycle), P2 (edge case), P3 (nice to have).
+5. Test check: classify each code hunk (new behavior, bug fix, changed requirement, refactor, removal, no behavior) and confirm the test diff matches it, using the `quality-testing` skill's `review-tests.md`. P1: tampering without a stated requirement (a loosened assertion, an expected value edited to match new output, a skipped or deleted test, an added retry, unreviewed snapshot updates); changed behavior or a bug fix with no test that fails without it, in code that has tests; a new test that only checks removed code is gone. P2: tests or fixtures left for removed behavior; tests of private helpers, call order or internal mocks. P3: near-duplicate tests and copied cases.
+6. Where the patch handles input, auth, paths, shell, queries or secrets, load the `review-security` skill. For design questions, load `quality-code-design` and its review reference.
+7. Rank each finding P0 (blocks release: corruption, auth bypass), P1 (fix next cycle), P2 (edge case), P3 (nice to have).
 
 ## Rules
 

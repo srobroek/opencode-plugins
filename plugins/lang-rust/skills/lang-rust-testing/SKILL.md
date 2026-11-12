@@ -32,11 +32,11 @@ Run the suite as in `lang-rust-quality`.
 ## Running
 
 ```sh
-cargo nextest run                            # default locally and in CI
-cargo test --doc                             # nextest does not run doc tests; run them separately
-cargo nextest run -p billing refund          # one crate, tests whose name matches
-cargo test -p billing refund -- --nocapture  # cargo test: show println! output
-cargo nextest run --no-fail-fast             # report every failure, not the first
+cargo nextest run                                 # default locally and in CI
+cargo test --doc                                  # nextest does not run doc tests; run them separately
+cargo nextest run -p billing refund               # one crate, tests whose name matches
+cargo nextest run -p billing refund --no-capture  # show println! output; runs tests one at a time
+cargo nextest run --no-fail-fast                  # report every failure, not the first
 ```
 
 `cargo-nextest` provides process-per-test isolation, parallelism, retries that mark

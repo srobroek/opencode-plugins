@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { STANDARDS } from "./coding-core.ts"
+import { STANDARDS, TESTING } from "./coding-core.ts"
 import { composeAgent, composeAgentFile, fragmentParts, readFragment } from "./fragments.ts"
 
 const core = "<!-- maintainers only -->\n<!-- part: a -->\nRule A.\n<!-- part: b -->\nRule B1.\nRule B2.\n"
@@ -88,7 +88,7 @@ describe("coding-core", () => {
   const parts = fragmentParts("coding-core", readFragment("coding-core"))
 
   test("has the method and the rule parts", () => {
-    expect([...parts.keys()]).toEqual(["method", "quality", "standards", "agents-md", "scope", "paths", "blocked"])
+    expect([...parts.keys()]).toEqual(["method", "quality", "standards", "testing", "agents-md", "scope", "paths", "blocked"])
   })
 
   test("the standards part names the preferred-library skills and the defaults, and fits a system prompt", () => {
@@ -97,6 +97,14 @@ describe("coding-core", () => {
       expect(standards).toContain(phrase)
     expect(standards.length).toBeLessThan(1000)
     expect(STANDARDS).toBe(standards)
+  })
+
+  test("the testing part names the testing skills and the maintenance rules, and fits a system prompt", () => {
+    const testing = parts.get("testing") ?? ""
+    for (const phrase of ["quality-testing", "lang-<language>-testing", "public interface", "distinct risk", "removed behavior", "only checks code is gone", "weaken an assertion"])
+      expect(testing).toContain(phrase)
+    expect(testing.length).toBeLessThan(1000)
+    expect(TESTING).toBe(testing)
   })
 
   test("carries the shared coding method and rules", () => {
@@ -121,7 +129,7 @@ describe("coding-core", () => {
     for (const word of ["bd ", "bead", "VERDICT", "SPLIT", "PARTIAL"]) expect(text).not.toContain(word)
   })
 
-  test("stays near 600 tokens (about 4 characters each)", () => {
-    expect([...parts.values()].join("\n").length).toBeLessThan(2600)
+  test("stays near 850 tokens (about 4 characters each)", () => {
+    expect([...parts.values()].join("\n").length).toBeLessThan(3500)
   })
 })
