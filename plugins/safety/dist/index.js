@@ -2118,6 +2118,59 @@ var ITEM_VALUED = new Set([...OP_VALUED, "--title", "--category", "--url", "--ta
 function literalStdin(command) {
   return command.hereDocuments.some((document) => document.quoted || !/[$`]/.test(document.body)) || command.redirects.some((word) => word.hereString === true && !word.expands);
 }
+function wholeExpansion(text) {
+  if (/^\$[A-Za-z_][A-Za-z0-9_]*$/.test(text) || /^\$\{[^}]*\}$/.test(text) || /^`[^`]*`$/.test(text))
+    return true;
+  if (!text.startsWith("$(") || !text.endsWith(")"))
+    return false;
+  let depth = 0;
+  for (let i = 1;i < text.length; i++) {
+    if (text[i] === "(")
+      depth++;
+    else if (text[i] === ")" && --depth === 0)
+      return i === text.length - 1;
+  }
+  return false;
+}
+function expansionOnly(command, at) {
+  return command.words?.[at]?.expands !== false && wholeExpansion(command.argv[at]);
+}
+function literalWriter(command) {
+  const name = base(command.argv[0]);
+  const args = command.argv.slice(1);
+  if (name === "cat")
+    return literalStdin(command);
+  if (name === "echo") {
+    const operands = args.map((arg, i) => i + 1).filter((at) => !/^-[neE]+$/.test(command.argv[at]));
+    return operands.some((at) => !expansionOnly(command, at));
+  }
+  if (name === "printf") {
+    const operands = args.map((arg, i) => i + 1).filter((at) => command.argv[at] !== "--");
+    const [format, ...fill] = operands;
+    if (format === undefined)
+      return false;
+    const text = command.argv[format];
+    const converts = /%[^%]/.test(text.replaceAll("%%", ""));
+    if (!converts && !expansionOnly(command, format))
+      return true;
+    return fill.some((at) => !expansionOnly(command, at));
+  }
+  if (name === "jq") {
+    if (!args.some((arg) => arg === "--null-input" || /^-[A-Za-z]+$/.test(arg) && arg.includes("n")))
+      return false;
+    for (let i = 0;i < args.length; i++) {
+      if (args[i] === "--arg" || args[i] === "--argjson") {
+        if (!expansionOnly(command, i + 3))
+          return true;
+        i += 2;
+      }
+    }
+  }
+  return false;
+}
+function literalFed(command, commands) {
+  return literalStdin(command) || commands.some((other) => other.pipeline === command.pipeline && other.stage < command.stage && literalWriter(other));
+}
 function literalSecret(command, args, inheritedLiteral) {
   if (inheritedLiteral || literalStdin(command))
     return true;
@@ -2221,10 +2274,12 @@ function plainProvider(name) {
   const lower = name.toLowerCase();
   return lower === "host" || lower.split(/[-_.:]/).some((part) => part === "age" || part === "keychain");
 }
-function literalFnoxSet(command, at) {
+function fnoxSetRefusal(command, at, fed) {
   const args = command.argv.slice(at + 1);
   let provider;
+  let reads = true;
   const positional = [];
+  const defaults = [];
   for (let i = 0;i < args.length; i++) {
     const arg = args[i];
     if (arg === "--provider" || arg === "-p")
@@ -2233,15 +2288,27 @@ function literalFnoxSet(command, at) {
       provider = arg.slice("--provider=".length);
     else if (arg.startsWith("-p") && !arg.startsWith("--"))
       provider = arg.slice(2);
-    else if (SET_VALUED.has(arg))
+    else if (arg === "--default")
+      defaults.push(at + 1 + ++i);
+    else if (arg.startsWith("--default="))
+      defaults.push(at + 1 + i);
+    else if (arg === "--generate" || arg === "--from-file" || arg.startsWith("--from-file=")) {
+      reads = false;
+      if (arg === "--from-file")
+        i++;
+    } else if (SET_VALUED.has(arg))
       i++;
     else if (!arg.startsWith("-") || arg === "-")
       positional.push(at + 1 + i);
   }
+  if (provider === undefined || !plainProvider(provider))
+    return;
   const value = positional[1];
-  if (value === undefined || provider === undefined || !plainProvider(provider))
-    return false;
-  return !expandsParameter(command, value);
+  if (value !== undefined)
+    return expandsParameter(command, value) && defaults.every((d) => expandsParameter(command, d)) ? undefined : "set";
+  if (defaults.some((d) => !expandsParameter(command, d)))
+    return "set";
+  return reads && fed ? "literal" : undefined;
 }
 function fnoxRefusal(command, allow = [], inherited = {
   literal: false,
@@ -2273,7 +2340,7 @@ function fnoxRefusal(command, allow = [], inherited = {
   if (sub === "list" || sub === "ls" || sub === "secrets")
     return hasFlag(args, "V", ["--values"]) ? "dump" : undefined;
   if (sub === "set" || sub === "s")
-    return literalFnoxSet(command, at) ? "set" : undefined;
+    return fnoxSetRefusal(command, at, inherited.literal || literalStdin(command));
   if (sub !== "exec")
     return;
   const start = execInner(args);
@@ -2287,21 +2354,21 @@ function fnoxRefusal(command, allow = [], inherited = {
   const scripts = children.filter((nested) => nested.context === "top" && SHELLS.has(base(nested.argv[0]))).filter((nested) => !nested.argv.some((word) => /^-[A-Za-z]*c[A-Za-z]*$/.test(word)));
   const bodies = scripts.length === 0 ? [] : documents.flatMap((document) => walkShell(document.body).commands);
   const rest = scripts.length === 0 ? documents : [];
-  const check = (nested, literalStdin) => {
+  const check = (nested, fed) => {
     if (dumpsEnvironment(nested))
       return "dump";
-    const op = opRefusal(nested, allow, literalStdin);
+    const op = opRefusal(nested, allow, fed);
     if (op !== undefined)
       return op;
-    return fnoxRefusal(nested, allow, { literal: literalStdin, documents: rest, depth: inherited.depth + 1 });
+    return fnoxRefusal(nested, allow, { literal: fed, documents: rest, depth: inherited.depth + 1 });
   };
   for (const nested of children) {
-    const found = check(nested, literal);
+    const found = check(nested, literal || literalFed(nested, children));
     if (found !== undefined)
       return found;
   }
   for (const nested of bodies) {
-    const found = check(nested, false);
+    const found = check(nested, literalFed(nested, bodies));
     if (found !== undefined)
       return found;
   }
@@ -2316,7 +2383,8 @@ var MESSAGES = {
 function opGuard(commands, allow = []) {
   try {
     for (const command of commands) {
-      const found = opRefusal(command, allow) ?? fnoxRefusal(command, allow);
+      const fed = literalFed(command, commands);
+      const found = opRefusal(command, allow, fed) ?? fnoxRefusal(command, allow, { literal: fed, documents: [], depth: 0 });
       if (found !== undefined)
         return MESSAGES[found];
     }

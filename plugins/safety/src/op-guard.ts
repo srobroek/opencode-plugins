@@ -59,6 +59,61 @@ function literalStdin(command: Command): boolean {
   )
 }
 
+/** Whether `text` is one expansion and nothing else: `$VAR`, `${VAR}`, `$(cmd)` or a backtick command. */
+function wholeExpansion(text: string): boolean {
+  if (/^\$[A-Za-z_][A-Za-z0-9_]*$/.test(text) || /^\$\{[^}]*\}$/.test(text) || /^`[^`]*`$/.test(text)) return true
+  if (!text.startsWith("$(") || !text.endsWith(")")) return false
+  let depth = 0
+  for (let i = 1; i < text.length; i++) {
+    if (text[i] === "(") depth++
+    else if (text[i] === ")" && --depth === 0) return i === text.length - 1
+  }
+  return false
+}
+
+/** Whether word `at` of the command is entirely an expansion, so it holds no literal text. */
+function expansionOnly(command: Command, at: number): boolean {
+  return command.words?.[at]?.expands !== false && wholeExpansion(command.argv[at] as string)
+}
+
+/** Whether a stage prints literal text into a pipe: `echo`/`printf`, `jq -n --arg`, or `cat` of a literal here-document. */
+function literalWriter(command: Command): boolean {
+  const name = base(command.argv[0])
+  const args = command.argv.slice(1)
+  if (name === "cat") return literalStdin(command)
+  if (name === "echo") {
+    const operands = args.map((arg, i) => i + 1).filter((at) => !/^-[neE]+$/.test(command.argv[at] as string))
+    return operands.some((at) => !expansionOnly(command, at))
+  }
+  if (name === "printf") {
+    const operands = args.map((arg, i) => i + 1).filter((at) => (command.argv[at] as string) !== "--")
+    const [format, ...fill] = operands
+    if (format === undefined) return false
+    const text = command.argv[format] as string
+    const converts = /%[^%]/.test(text.replaceAll("%%", ""))
+    if (!converts && !expansionOnly(command, format)) return true
+    return fill.some((at) => !expansionOnly(command, at))
+  }
+  if (name === "jq") {
+    if (!args.some((arg) => arg === "--null-input" || (/^-[A-Za-z]+$/.test(arg) && arg.includes("n")))) return false
+    for (let i = 0; i < args.length; i++) {
+      if (args[i] === "--arg" || args[i] === "--argjson") {
+        if (!expansionOnly(command, i + 3)) return true
+        i += 2
+      }
+    }
+  }
+  return false
+}
+
+/** Whether the command's stdin carries literal text: a literal here-document, or an upstream stage that prints one. */
+function literalFed(command: Command, commands: readonly Command[]): boolean {
+  return (
+    literalStdin(command) ||
+    commands.some((other) => other.pipeline === command.pipeline && other.stage < command.stage && literalWriter(other))
+  )
+}
+
 /** Whether `op item create|edit` writes a literal value into a field that may be a secret. */
 function literalSecret(command: Command, args: readonly string[], inheritedLiteral: boolean): boolean {
   if (inheritedLiteral || literalStdin(command)) return true
@@ -164,23 +219,35 @@ function plainProvider(name: string): boolean {
   return lower === "host" || lower.split(/[-_.:]/).some((part) => part === "age" || part === "keychain")
 }
 
-/** `fnox set NAME <literal>` with a provider that stores what it is given, with the value in the command text. */
-function literalFnoxSet(command: Command, at: number): boolean {
+/**
+ * `fnox set` with a provider that stores what it is given and a value in the command text: a literal
+ * positional or `--default` (`set`), or a stdin value fed from a literal (`literal`).
+ */
+function fnoxSetRefusal(command: Command, at: number, fed: boolean): "set" | "literal" | undefined {
   const args = command.argv.slice(at + 1)
   let provider: string | undefined
+  let reads = true
   const positional: number[] = []
+  const defaults: number[] = []
   for (let i = 0; i < args.length; i++) {
     const arg = args[i] as string
     if (arg === "--provider" || arg === "-p") provider = args[++i]
     else if (arg.startsWith("--provider=")) provider = arg.slice("--provider=".length)
     else if (arg.startsWith("-p") && !arg.startsWith("--")) provider = arg.slice(2)
-    else if (SET_VALUED.has(arg)) i++
+    else if (arg === "--default") defaults.push(at + 1 + ++i)
+    else if (arg.startsWith("--default=")) defaults.push(at + 1 + i)
+    else if (arg === "--generate" || arg === "--from-file" || arg.startsWith("--from-file=")) {
+      reads = false
+      if (arg === "--from-file") i++
+    } else if (SET_VALUED.has(arg)) i++
     else if (!arg.startsWith("-") || arg === "-") positional.push(at + 1 + i)
   }
+  if (provider === undefined || !plainProvider(provider)) return undefined
   // KEY, then VALUE: a second positional that is not an expansion is a literal.
   const value = positional[1]
-  if (value === undefined || provider === undefined || !plainProvider(provider)) return false
-  return !expandsParameter(command, value)
+  if (value !== undefined) return expandsParameter(command, value) && defaults.every((d) => expandsParameter(command, d)) ? undefined : "set"
+  if (defaults.some((d) => !expandsParameter(command, d))) return "set"
+  return reads && fed ? "literal" : undefined
 }
 
 /** What `fnox` does with this command: dump values, or run an inner command that is refused. */
@@ -212,7 +279,7 @@ export function fnoxRefusal(
   if (sub === "get" || sub === "export" || sub === "env") return "dump"
   if (sub === "list" || sub === "ls" || sub === "secrets")
     return hasFlag(args, "V", ["--values"]) ? "dump" : undefined
-  if (sub === "set" || sub === "s") return literalFnoxSet(command, at) ? "set" : undefined
+  if (sub === "set" || sub === "s") return fnoxSetRefusal(command, at, inherited.literal || literalStdin(command))
   if (sub !== "exec") return undefined
   const start = execInner(args)
   if (start < 0) return undefined
@@ -230,18 +297,18 @@ export function fnoxRefusal(
     .filter((nested) => !nested.argv.some((word) => /^-[A-Za-z]*c[A-Za-z]*$/.test(word)))
   const bodies = scripts.length === 0 ? [] : documents.flatMap((document) => walkShell(document.body).commands)
   const rest = scripts.length === 0 ? documents : []
-  const check = (nested: Command, literalStdin: boolean): Verdict | undefined => {
+  const check = (nested: Command, fed: boolean): Verdict | undefined => {
     if (dumpsEnvironment(nested)) return "dump"
-    const op = opRefusal(nested, allow, literalStdin)
+    const op = opRefusal(nested, allow, fed)
     if (op !== undefined) return op
-    return fnoxRefusal(nested, allow, { literal: literalStdin, documents: rest, depth: inherited.depth + 1 })
+    return fnoxRefusal(nested, allow, { literal: fed, documents: rest, depth: inherited.depth + 1 })
   }
   for (const nested of children) {
-    const found = check(nested, literal)
+    const found = check(nested, literal || literalFed(nested, children))
     if (found !== undefined) return found
   }
   for (const nested of bodies) {
-    const found = check(nested, false)
+    const found = check(nested, literalFed(nested, bodies))
     if (found !== undefined) return found
   }
   return undefined
@@ -258,7 +325,8 @@ const MESSAGES: Record<Verdict, string> = {
 export function opGuard(commands: readonly Command[], allow: readonly string[] = []): string | undefined {
   try {
     for (const command of commands) {
-      const found = opRefusal(command, allow) ?? fnoxRefusal(command, allow)
+      const fed = literalFed(command, commands)
+      const found = opRefusal(command, allow, fed) ?? fnoxRefusal(command, allow, { literal: fed, documents: [], depth: 0 })
       if (found !== undefined) return MESSAGES[found]
     }
     return undefined

@@ -64,6 +64,38 @@ const REFUSED_LITERAL = [
   "bash -c 'op item edit x password=abc'",
 ]
 
+const REFUSED_PIPED = [
+  "echo hunter2 | op item create -",
+  "echo '{\"password\":\"x\"}' | op item create --vault V -",
+  "echo -n hunter2 | op item edit x -",
+  "printf 'hunter2' | op item create -",
+  "printf '%s' hunter2 | op item create -",
+  "printf '%s %s' \"$A\" literal | op item create -",
+  "jq -n --arg v hunter2 '{title:$v}' | op item create --vault V -",
+  "jq -n --argjson v '\"hunter2\"' '{title:$v}' | op item create -",
+  "jq -n --arg a \"$A\" --arg v hunter2 '{}' | op item create -",
+  "jq -n --arg v \"x$(cmd)\" '{}' | op item create -",
+  "cat <<'EOF' | op item create -\n{\"password\":\"x\"}\nEOF",
+  "cat <<< hunter2 | op item create -",
+  "echo hunter2 | tr a b | op item create -",
+  "echo hunter2 | fnox set NAME --provider host",
+  "printf hunter2 | fnox set NAME -p age",
+  "jq -n --arg v hunter2 '$v' | fnox set NAME --provider keychain",
+  "echo hunter2 | fnox exec -- op item create -",
+  "echo hunter2 | fnox exec -- fnox set NAME --provider host",
+  "fnox exec -- sh -c 'echo hunter2 | op item create -'",
+  "bash -c 'echo hunter2 | op item create -'",
+  "echo ok && echo hunter2 | op item create -",
+]
+
+const REFUSED_DEFAULT = [
+  "fnox set NAME --default hunter2 --provider host",
+  "fnox set NAME --default=hunter2 --provider host",
+  "fnox set NAME --provider age --default hunter2",
+  "fnox set NAME \"$X\" --default hunter2 -p keychain",
+  "fnox exec -- fnox set NAME --default hunter2 --provider host",
+]
+
 const REFUSED_REVEAL = [
   "op item create --title t --reveal",
   "op item edit x --reveal",
@@ -145,6 +177,34 @@ const PASSED = [
   "cat t.json | fnox exec -- op item create -",
   "fnox exec -- fnox exec -- op item create --title t \"password=$X\"",
   "fnox exec -- bash <<'EOF'\nop item create --title t --generate-password\nEOF",
+  // piped values from expansions only
+  "echo \"$TOKEN\" | op item create -",
+  "echo \"$(cmd)\" | op item create -",
+  "echo -n \"$TOKEN\" | op item create -",
+  "echo | op item create -",
+  "printf '%s' \"$TOKEN\" | op item create -",
+  "printf '%s' \"$(cmd)\" | op item edit x -",
+  "printf '{\"password\":\"%s\"}' \"$TOKEN\" | op item create -",
+  "printf \"$FMT\" \"$TOKEN\" | op item create -",
+  "jq -n --arg v \"$(cmd)\" '{title:$v}' | op item create --vault V -",
+  "jq -n --arg v \"$TOKEN\" --argjson n \"$N\" '{}' | op item create -",
+  "jq -n '{title:\"x\"}' | op item create -",
+  "cat <<EOF | op item create -\n{\"password\":\"$TOKEN\"}\nEOF",
+  "cat t.json | op item create -",
+  "echo hunter2 | cat > out.txt; op item create --title t",
+  "echo hunter2; op item create -",
+  "echo hunter2 && op item create --title t",
+  "echo hunter2 | tr a b",
+  "echo hunter2 | fnox set NAME --provider other",
+  "echo hunter2 | fnox set NAME --provider host --generate",
+  "echo hunter2 | fnox set NAME --provider host --from-file k.txt",
+  "printf '%s' \"$TOKEN\" | fnox set NAME --provider host",
+  "echo \"$TOKEN\" | fnox exec -- op item create -",
+  // fnox set --default
+  "fnox set NAME --default \"$X\" --provider host",
+  "fnox set NAME --default hunter2 --provider other",
+  "fnox set NAME --default hunter2",
+  "fnox set NAME --provider host --generate --default \"$X\"",
   // fnox set
   "fnox set NAME --provider host",
   "printf '%s' \"$TOKEN\" | fnox set NAME --provider host",
@@ -207,6 +267,14 @@ describe("op-guard", () => {
   for (const command of REFUSED_LITERAL)
     test(`refuses literal ${command}`, () => {
       expect(gate(command)).toEqual({ guard: "op-guard", reason: LITERAL_MESSAGE })
+    })
+  for (const command of REFUSED_PIPED)
+    test(`refuses piped literal ${command}`, () => {
+      expect(gate(command)).toEqual({ guard: "op-guard", reason: LITERAL_MESSAGE })
+    })
+  for (const command of REFUSED_DEFAULT)
+    test(`refuses fnox set default ${command}`, () => {
+      expect(gate(command)).toEqual({ guard: "op-guard", reason: FNOX_SET_MESSAGE })
     })
   for (const command of REFUSED_REVEAL)
     test(`refuses reveal ${command}`, () => {
