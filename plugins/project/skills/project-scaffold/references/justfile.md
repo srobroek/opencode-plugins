@@ -40,11 +40,13 @@ uses the `fmt-check` form instead.
 | --- | --- | --- | --- | --- | --- | --- |
 | Rust | `cargo fmt --all` / `--check` | `cargo clippy --all-targets --all-features -- -D warnings` | (clippy) | `cargo nextest run --all-features --no-tests=pass` | `cargo llvm-cov nextest --all-features --no-tests=pass --lcov --output-path lcov.info` | `cargo deny check`, `cargo machete`; install `cargo fetch --locked` |
 | Python | `uv run ruff format .` / `--check` | `uv run ruff check .` | `uv run pyright` | `uv run pytest` | `uv run pytest --cov --cov-report=term-missing --cov-report=lcov` | `uv run deptry .`; matrix `uv run nox`; install `uv sync --frozen` |
-| Go | `gofmt -w` / `golangci-lint fmt --diff` | `golangci-lint run ./...` | (vet/staticcheck in lint) | `go test -race ./...` | `go test -race -coverprofile=coverage.out -covermode=atomic ./...` then `go tool cover -func=coverage.out` | `govulncheck ./...`, `go mod tidy -diff`; install `go mod download` |
-| TypeScript | `bunx biome check --write .` / `biome check .` | `bunx oxlint` (optional, see `typescript.md`) | `bunx tsc --noEmit` | `bun test` or `vitest run` | `vitest run --coverage` or `bun test --coverage` | `bunx knip`; install `bun install --frozen-lockfile` |
+| Go | `gofmt -w` / `golangci-lint fmt --diff` | `golangci-lint run ./...` | (vet/staticcheck in lint) | `go test -race ./...` | `go test -race -coverprofile=coverage.out -covermode=atomic ./...` then `go tool cover -func=coverage.out` | `go tool govulncheck ./...`, `go mod tidy -diff`; install `go mod download` |
+| TypeScript | `bunx biome check --write .` / `biome check .` (or selected formatter) | Selected Biome 2, ESLint 10 or optional Oxlint stack (`typescript.md`), not mandatory Oxlint | `bunx tsc --noEmit` | `bun test` or `vitest run` | `vitest run --coverage` or `bun test --coverage` | Knip 6 (`bunx knip`); install `bun install --frozen-lockfile` |
 
 Capability gates join `check`: `api` (`api-lint`, `api-breaking`), `i18n`, `a11y`,
-`aws-cdk` (synth). Docs checks: `python-docs` style advisory tasks (`ruff check --select D
+`aws-cdk` (synth). Add `deadcode`, `audit` and `sbom` tasks only for configured scanners
+and release needs; use the language picks and `ci-hooks.md`, not mandatory duplicate scans.
+Python check tasks use `uv run --locked`; keep fixing separate. Docs checks: `python-docs` style advisory tasks (`ruff check --select D
 --exit-zero`) never fail the gate. A formatter or safe lint fix does not belong in `check` (see Fixer hooks).
 Dependency bumps are the Renovate or Dependabot job; do not look up latest versions during
 setup beyond picking current stable.

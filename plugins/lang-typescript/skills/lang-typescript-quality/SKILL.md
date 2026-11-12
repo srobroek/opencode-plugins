@@ -17,7 +17,7 @@ it, rerun that step, then continue. Prefer the project's own scripts (`bun run c
 | Step | Command |
 | --- | --- |
 | Install | The lockfile-respecting install: `bun install --frozen-lockfile`, `pnpm install --frozen-lockfile`, `npm ci`, `yarn install --immutable` |
-| Lint and format check | One tool, the first found: project-local Biome (`biome check .`, lint and format), else ESLint (`eslint .`) plus Prettier (`prettier --check .`) when configured |
+| Lint and format check | Selected project-local stack: `Biome` 2 (`biome check .`), or `ESLint` 10 flat config (`eslint .`) plus configured `Prettier` (`prettier --check .`); optional `Oxlint` 1 with `oxlint-tsgolint` for type-aware rules, not mandatory overlapping lint |
 | Type check | `tsc -b` when `tsconfig.json` has `references`, otherwise `tsc --noEmit` |
 | Test | The project's test script (`bun test`, `vitest run`, `npm test`, …) |
 | Fix | `biome check --write PATHS`, or `eslint --fix PATHS` and `prettier --write PATHS` |
@@ -35,6 +35,12 @@ it, rerun that step, then continue. Prefer the project's own scripts (`bun run c
 - Strict by default: `strict` is on by default since TypeScript 6.0. Do not loosen
   compiler options to make a check pass; the flags worth adding are in
   `lang-typescript-types`.
+- TypeScript 7's native compiler has no stable programmatic API. Validate framework
+  checkers and embedded-language tooling before migration; keep their TypeScript 6
+  compatibility path when needed. Run the framework-aware checker, not only `tsc`.
+- Run configured `Knip` 6 for unused files, exports and dependencies. Prefer its broader
+  coverage to archived `unimported`; do not describe `ts-prune` as abandoned without
+  checking its current status.
 - A test runner that finds no tests did not test anything; report it, do not call it
   a pass.
 - Fix mode on `.` rewrites files outside the task. Pass the touched paths, review the

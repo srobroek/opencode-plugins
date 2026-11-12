@@ -17,10 +17,11 @@ project has `uv.lock`, `poetry run` with `poetry.lock`.
 | Step | Command |
 | --- | --- |
 | Lockfile | `uv lock --check` (fails when `uv.lock` no longer matches `pyproject.toml`) |
-| Lint | `uv run ruff check .` |
-| Format check | `uv run ruff format --check .` |
-| Type check | `uv run mypy` or `uv run pyright`, whichever the project configures |
-| Test | `uv run pytest -x` |
+| Lint | `uv run --locked ruff check .` |
+| Format check | `uv run --locked ruff format --check .` |
+| Type check | `uv run --locked mypy` or `uv run --locked pyright`, whichever the project configures |
+| Test | `uv run --locked pytest -x` |
+| Dependencies | `uv run --locked deptry .` when configured; `uv run --locked lint-imports` when contracts exist |
 | Fix | `uv run ruff check --fix PATHS`, then `uv run ruff format PATHS` |
 
 - After an edit that spans modules or changes a signature, run the type check once
@@ -67,6 +68,12 @@ Run the whole workspace (`uv sync --locked --all-packages`, then each step from 
 root) before handing off a change to shared code.
 
 ## CI
+
+Keep configured deptry and import contracts in the gate, matching the scaffold.
+Optional dead-code/security policy is in `project-scaffold`'s `references/python.md`
+and `references/ci-hooks.md`: `Vulture` at 100% confidence with reviewed exceptions,
+`Ruff` `C901`/`S`, and a configured vulnerability audit. `Ruff` `F401`/`F841` do not
+establish whole-project reachability. Keep `mypy`/`Pyright`; `ty` is an opt-in beta pilot.
 
 Same steps, same order, one step per row. Install uv with `astral-sh/setup-uv`
 (`enable-cache: true`), then `uv sync --locked --all-packages` (add `--all-groups`
