@@ -1,6 +1,7 @@
 # Python testing libraries
 
 Choose tools by the behavior under test; `lang-python-testing` and `lang-python-quality` own test and check commands.
+See [Python testing practice](../../lang-python-testing/references/practice.md) for idioms and tool selection.
 
 Checked 2026-11-12.
 
@@ -13,7 +14,7 @@ Checked 2026-11-12.
 | Snapshots | `syrupy` `7` for external snapshots | `inline-snapshot` `0.36` for small reviewable inline expectations | Auto-accept in CI or unreviewed bulk updates |
 | HTTPX mocking | `respx` `0.23` | `pytest-httpx` `0.36` for fixture-oriented tests; actual ASGI app tests for route behavior | Mocked HTTP as proof of proxy/TLS/retry behavior |
 | HTTP recording | `pytest-recording` `0.14` with `vcrpy` `9` | Explicit mocks for narrow unit tests | Unredacted secrets/PII in cassettes; replay is not live integration coverage |
-| Factories | `polyfactory` `3` for typed models | `factory_boy` `3` for ORM-oriented factories | Random important fields without seeds or explicit values |
+| Factories | Plain functions with fresh deterministic defaults | `polyfactory` `3` for typed models; `factory_boy` `3` for ORM relationships | Random important fields without explicit values |
 | Real service integration | `testcontainers` `4` for database/broker containers | Platform-provided test service; isolated deployed tests for IAM/cloud behavior | SQLite/mocked DB as sole PostgreSQL evidence; unbounded container lifecycle |
 | AWS tests | `moto` `5` and SDK stubs for fast tests | DynamoDB Local, SAM local, LocalStack or isolated cloud tests as appropriate | Emulator success mistaken for production concurrency/IAM/service semantics |
 | API contracts | `schemathesis` `4` | `pact-python` `4` for consumer/provider agreements; shared API tools in `toolchain-api` | Destructive generated tests against production; new archived Dredd adoption |
@@ -21,7 +22,7 @@ Checked 2026-11-12.
 | Mutation | `mutmut` `3` for selected critical code | `cosmic-ray` `8` for configurable execution | Whole-project mandatory PR gate; mutmut needs fork, use WSL rather than native Windows |
 | Coverage-guided fuzzing | `atheris` `3` for parser/native risk | Hypothesis for normal property suites | Assuming identical platform/native toolchain requirements; losing failing seeds |
 | Benchmarks | `pytest-benchmark` `5` | `pytest-codspeed` `5` for managed regression tracking; profilers in `lang-python-profiling` | Noisy shared-runner timings as hard guarantees |
-| Coverage | `coverage` `7` | Existing compatible reporting integration | One universal coverage percentage as correctness evidence |
+| Coverage | `coverage` `7` branch coverage through `pytest-cov`; `diff-cover` for changed-line gaps | Existing compatible reporting integration | One universal coverage percentage as correctness evidence |
 | Telemetry | `opentelemetry-sdk` `1` in-memory exporter/readers | Export-pipeline integration tests for deployment behavior | Asserting random trace IDs/timestamps; SDK globals shared between tests |
 
 ## Rules
