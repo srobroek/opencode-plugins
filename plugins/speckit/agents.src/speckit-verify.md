@@ -1,6 +1,7 @@
 ---
 description: "Verifies SpecKit implementations; spawn with mode requirements, tasks or review."
 mode: subagent
+steps: 60
 hidden: true
 request:
   headers:

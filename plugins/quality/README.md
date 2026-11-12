@@ -1,30 +1,82 @@
 # quality
 
-Code design and review guidance, a short code-quality policy, performance profiling, throwaway logic
-prototypes, and a read-only `adversarial-challenger` subagent.
+Code design and review guidance, a short code-quality policy, testing standards and an on-demand
+test audit with two helper tools, performance profiling, throwaway logic prototypes, and a read-only
+`adversarial-challenger` subagent.
 
 | Skill | When |
 | --- | --- |
-| `quality-code-policy` | The seven-line policy: SOLID and invariants over YAGNI, DRY for knowledge that changes together, reuse before building, planning scaled by risk, a type check after multi-file or signature edits, refactors scoped to the change. Load at the start of any code task |
-| `quality-code-design` | Code design, investigation, implementation, refactoring, review, debugging or test-first work in any language. Picks IMPLEMENT, INVESTIGATE or REVIEW and loads only the references the task needs from `references/` |
+| `quality-code-policy` | The short policy: SOLID and invariants over YAGNI, DRY for knowledge that changes together, research first and compare with the library standards before building, middleware for cross-cutting concerns, Powertools on Lambda, OpenTelemetry by default, tests kept in step with the code, planning scaled by risk, a type check after multi-file or signature edits, refactors scoped to the change. It requires `quality-code-design` only for new behavior, refactors, hard bugs and reviews |
+| `quality-code-design` | Code design, investigation, implementation, refactoring, review, debugging or test-first work in any language. Picks IMPLEMENT, INVESTIGATE or REVIEW and loads only the references the task needs from `references/`, including `middleware.md` (handlers versus middleware, stack order, one error mapper), `telemetry.md` (OpenTelemetry setup and rules) and `feature-flags.md` (typed decisions, safe defaults, storage and removal) |
 | `quality-profiling` | Slow or memory-heavy code, endpoints, builds or CLIs: set a target, reproduce with a fixed workload, baseline with variance, pick the profiler, change one thing, re-measure, report before/after. hyperfine, Linux perf and macOS Instruments live in `references/`; language tooling is the `lang-<language>-profiling` skills in the `lang-<language>` plugins |
-| `quality-testing` | What to test and at which level, test doubles, flaky tests, test data, property-based tests, coverage; points to `lang-<language>-testing` skills for tooling |
+| `quality-testing` | What to test and how many tests to keep. A workflow and five rules, with references for good and bad tests (`good-tests.md`, `bad-tests.md`), test levels (`what-to-test.md`), the test budget against sprawl (`test-budget.md`), maintenance and deletion with the code (`maintenance.md`), doubles (`doubles.md`), coverage and mutation signals (`signals.md`) and reviewing test changes (`review-tests.md`). Points to the `lang-<language>-testing` skills and their `references/practice.md` for tooling |
+| `quality-test-audit` | Run on demand to audit one test scope. It takes a baseline of repeated random-order runs, coverage and mutation testing. It classifies tests to prune, assets to purge, tests to fix and tests to speed up. A challenger checks the plan before you approve it. Each applied batch must keep every mutant that the baseline killed. `references/` holds the catalog, the commands per runner and the report template |
 | `prototype-logic` | A throwaway single-file HTML demo over a pure reducer or state machine, to test a state model before building it |
 
 Other plugins point at these: `architecture` and the `architect` agent load
 `quality-code-design` references, and `toolchain` defers language design guidance
 to it.
 
+## Engineering standards in the system prompt
+
+Every primary session and every `general` subagent gets two static blocks at the end of
+its system prompt, from the shared coding core (`plugins/lib/src/coding-core.md`):
+
+- `# Engineering standards`, the `standards` part. It tells the agent to research current
+  best practice and compare its plan with the `lang-<language>-libraries`, `toolchain-api`,
+  `aws-guidance` and `toolchain-languages` standards before it writes its own code, to
+  report each departure, to put cross-cutting concerns in middleware, to keep Lambda
+  handlers thin on Powertools for AWS Lambda, and to use OpenTelemetry.
+- `# Testing standards`, the `testing` part. It tells the agent to list the behaviors a
+  change adds, changes or removes, to test each behavior once through the public
+  interface, to give each test a distinct risk, to change and delete tests with the code,
+  and never to write tests that only check removed code is gone or to weaken assertions
+  to pass.
+
+The `coder`, `implementer`, `implementer-high` and `ui-implementer` agents carry the same
+parts in their composed prompts, so they are not given them twice. Each block is under
+1000 characters and never changes between requests, so the provider's prompt cache holds.
+
+| Option | Default | Effect |
+| --- | --- | --- |
+| `standards` | `true` | `false` turns both blocks off |
+| `standardsSubagents` | `["general"]` | Subagent ids whose child sessions also get the blocks; primary sessions always do |
+
+```jsonc
+{
+  "plugins": [{
+    "package": "github:srobroek/opencode-plugins::path:plugins/quality",
+    "options": { "standardsSubagents": ["general", "my-writer"] }
+  }]
+}
+```
+
 ## Always-on policy
 
 On omp `quality-code-design` was also an always-applied rule. OpenCode has no
 always-on skill, so the rule ships as the `quality-code-policy` skill, loaded when
-its description matches. To make it always on, copy its body into your global
-`AGENTS.md` or into a file listed under `instructions` in your config.
+its description matches; the standards blocks above cover its research, library and testing
+rules in every session. To make the whole policy always on, copy its body into your
+global `AGENTS.md` or into a file listed under `instructions` in your config.
+
+## Test audit tools
+
+Two read-only tools back the `quality-test-audit` skill. Both refuse report paths outside
+the session directory and the OpenCode temp directory. Claude Code and Codex get the
+skill without the tools; it falls back to the shell commands in its `references/evidence.md`.
+
+| Tool | Does |
+| --- | --- |
+| `quality_test_summarize` | Read-only. Takes 1 to 50 JUnit XML paths, one per run in run order, and optional `exitCodes`. The agent runs the test command through the shell, one report per run. The tool reports flaky tests, tests that failed in every report, tests retried within a run, the 10 slowest by median time, unreadable or invalid reports and whether the exit codes agree (pytest, Vitest, bun test, gotestsum, cargo-nextest) |
+| `quality_test_compare` | Read-only. Compares a baseline and a candidate report: coverage (LCOV, Cobertura XML, Go cover profile) for lost lines and branches, or mutation (mutation-testing-report JSON from Stryker, cargo-mutants `outcomes.json`, Gremlins JSON) for mutants the baseline killed that now survive. Missing branch data is "not measured", not zero. mutmut is not supported: it exports summary counts only |
+
+| Option | Default | Effect |
+| --- | --- | --- |
+| `testAudit` | `true` | `false` turns both tools off; the skill then uses the shell commands |
 
 ## Agent
 
-`adversarial-challenger` (mode `subagent`) stress-tests a claim, plan, design or
+`adversarial-challenger` (mode `subagent`, steps 60) stress-tests a claim, plan, design or
 decision from a brief of observable facts and returns evidence-backed
 counter-arguments and alternatives, starting with `VERDICT: HOLDS|WEAKENED|REFUTED`.
 It belongs to the [`agent-reviewer`](../agent-reviewer/README.md) plugin, which

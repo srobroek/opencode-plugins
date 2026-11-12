@@ -81,6 +81,12 @@ describe("composeAgents", () => {
     }
   })
 
+  test("the composed coder prompt carries the quality line", () => {
+    const prompt = readFileSync(path.resolve(import.meta.dir, "../plugins/agent-coder/agents/coder.md"), "utf8")
+    expect(prompt).toContain("skip `quality-code-policy`")
+    expect(prompt).toContain("only for new behavior")
+  })
+
   test("the coder and the delivery implementers compose the coding-core method", () => {
     for (const [plugin, id] of [
       ["agent-coder", "coder"],
@@ -89,6 +95,30 @@ describe("composeAgents", () => {
     ]) {
       const source = readFileSync(path.resolve(import.meta.dir, "../plugins", plugin as string, "agents.src", `${id}.md`), "utf8")
       expect({ id, includes: source.includes("{{include coding-core: method}}") }).toEqual({ id, includes: true })
+    }
+  })
+
+  test("every code reviewer composes the test-change rules", () => {
+    for (const [plugin, id] of [
+      ["agent-reviewer", "code-reviewer"],
+      ["agent-reviewer", "pr-reviewer"],
+      ["delivery", "pr-reviewer"],
+    ]) {
+      const prompt = readFileSync(path.resolve(import.meta.dir, "../plugins", plugin as string, "agents", `${id}.md`), "utf8")
+      expect({ id, rules: prompt.includes("MUST Map the test diff to the code diff") && prompt.includes("maintenance, not tampering") }).toEqual({ id, rules: true })
+    }
+  })
+
+  test("every code-writing agent composes the engineering and testing standards", () => {
+    for (const [plugin, id] of [
+      ["agent-coder", "coder"],
+      ["delivery", "implementer"],
+      ["delivery", "implementer-high"],
+      ["design", "ui-implementer"],
+    ]) {
+      const prompt = readFileSync(path.resolve(import.meta.dir, "../plugins", plugin as string, "agents", `${id}.md`), "utf8")
+      expect({ id, standards: prompt.includes("- Standards first:") && prompt.includes("Powertools for AWS Lambda") }).toEqual({ id, standards: true })
+      expect({ id, testing: prompt.includes("- Tests (`quality-testing`") && prompt.includes("only checks code is gone") }).toEqual({ id, testing: true })
     }
   })
 })

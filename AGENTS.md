@@ -19,7 +19,7 @@ package whose entry point default-exports `Plugin.define({ id, setup })` from
 - `bun run marketplaces` regenerates the Claude Code and Codex marketplaces.
 - `bun run marketplaces:check` fails when committed marketplace files are stale.
 - `bun run agent-roles` fails when a shipped agent lacks a known tier in its
-  `x-opencode-model-role` header.
+  `x-opencode-model-role` header or a positive integer `steps` limit.
 - `bun run descriptions` fails when a tool's first description line passes 120
   characters, a direct tool's schema passes 1.5k (Code Mode 3k), `codemode: false`
   lacks a `check-descriptions: direct <reason>` comment, a skill description passes
@@ -39,7 +39,8 @@ package whose entry point default-exports `Plugin.define({ id, setup })` from
 - An agent with a source `agents.src/<id>.md` is composed by `bun run build` into
   the committed `agents/<id>.md`: a line `{{include <fragment>}}` (or
   `{{include <fragment>: <part> ...}}`) inlines `plugins/lib/src/<fragment>.md`.
-  Reviewer agents include `review-core`. Edit the source, never the composed file.
+  Reviewer agents include `review-core`; `code-reviewer` and the `pr-reviewer`
+  copies also include `review-tests`. Edit the source, never the composed file.
 - `scripts/build-marketplaces.ts` generates `.claude-plugin/marketplace.json`,
   `.agents/plugins/marketplace.json` and every `plugins/<name>/.claude-plugin/`
   and `plugins/<name>/.codex-plugin/` manifest. Never hand-edit them; change the

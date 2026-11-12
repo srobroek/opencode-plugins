@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/srobroek/opencode-plugins/compare/aws--v0.3.0...aws--v0.4.0) (2026-11-10)
+
+
+### Features
+
+* **aws:** pool the aws-pricing MCP server across directories ([64f77a0](https://github.com/srobroek/opencode-plugins/commit/64f77a05bb15c93ca0672474ed048a0a499b7564))
+
 ## [0.3.0](https://github.com/srobroek/opencode-plugins/compare/aws--v0.2.0...aws--v0.3.0) (2026-10-27)
 
 

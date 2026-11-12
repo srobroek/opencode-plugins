@@ -63,7 +63,7 @@ exit non-zero. They never block.
 | --- | --- |
 | Skip-CI | `git commit`, `glab mr …` or `gh pr …` whose words or here-document contain `[skip ci]`, `[ci skip]`, `[no ci]` or `[skip actions]`, case-insensitive. Forges skip the pipeline even for a marker quoted as prose. |
 | Title | `glab mr create`/`gh pr create` with a literal title that is not a Conventional Commit. |
-| Flag line | A `feat` or breaking create without a named `Flag:` line, or a `feat` with `Flag: none`. A body from a file, stdin or an expansion gets a reminder to review it. |
+| Flag line | A `feat` or breaking create without a `Flag:` line, or with `Flag: none` and no reason. `Flag: none -- <reason>` is valid. A body from a file, stdin or an expansion gets a reminder to review it. |
 | Squash | `glab mr merge`/`gh pr merge` without `--squash`/`-s` in a release repository. |
 | Branch age | A branch push whose merge base with the default branch is more than two days old. |
 
@@ -114,7 +114,7 @@ Registered through `ctx.skill.transform` (a user skill of the same name wins):
 | Name | When |
 | --- | --- |
 | `trunk-dev-workflow` | Branching, opening, merging or landing an MR/PR: small batches, short-lived branches, required CI, squash release units, exact-SHA previews, forge enforcement, skip-CI markers. |
-| `trunk-dev-feature-flags` | Adding a `feat`, writing the `Flag:` line, rolling out or removing a flag. |
+| `trunk-dev-feature-flags` | Adding a `feat`, writing the `Flag:` line, rolling out or removing a flag. Code and storage details live in `quality-code-design`'s `feature-flags.md`; AWS specifics live in `aws-guidance`. |
 | `trunk-dev-release-setup` | Setting up semantic-release on GitLab or GitHub, and the daily stale-branch CI job for Beads repositories (templates in `templates/`). |
 
 ## Options

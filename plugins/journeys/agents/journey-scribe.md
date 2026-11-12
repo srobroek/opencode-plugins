@@ -1,6 +1,7 @@
 ---
 description: "Authors and amends user journeys with evidence-gated changes and stable IDs. Never drives the product or edits product code."
 mode: subagent
+steps: 100
 hidden: true
 request:
   headers:

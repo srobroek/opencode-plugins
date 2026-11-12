@@ -1,98 +1,69 @@
 ---
 name: project-secrets
-description: "Use for secrets, API keys, .env, fnox, 1Password, credentials or CI secrets: per-project vaults, cache, leases."
+description: "Use for secrets, credentials, API keys, fnox, 1Password, .env, vault or rotate: store, use, inspect and rotate project secrets."
 ---
 
 # Project secrets
 
-Per-project secrets with fnox (https://fnox.jdx.dev/) on top of 1Password. A committed
-`fnox.toml` holds references only; values stay in 1Password (or age ciphertext), are
-cached in memory by the fnox daemon, and reach commands through `fnox exec`. Guidance,
-not a script: ask, then do the smallest setup that fits. Verify any command with
-`fnox <cmd> --help` (written against fnox 1.47) before relying on it.
+Manage project secrets with fnox (https://fnox.jdx.dev/, written against 1.47). A committed
+`fnox.toml` holds references only. Values stay in 1Password (or age ciphertext) and reach
+commands through `fnox exec`. Do the smallest setup that fits. The agent writes values it generates or
+a tool hands it. It asks the user for values only the user has (`references/store.md`).
 
 ## Never
 
-- Read a value into the transcript: no `fnox get`, `fnox export`, `fnox list --values`,
-  `fnox env`, `op read`, `cat` of `.env` or `fnox.local.toml`'s cached values, or `echo $KEY`.
-  Check with `fnox check` and `fnox list`; consume with `fnox exec`.
-- Ask the user to paste a value into chat, or pass one as an argument (shell history,
-  process list). Values go in through 1Password, a hidden prompt, or stdin.
-- Commit values, `.env`, `fnox.local.toml`, age identities or service-account tokens.
-- Redeclare what the host already provides (below), or set `GITHUB_*` names for push.
+- Put a value in the transcript. These commands print values, so never run them:
+  - `fnox get`, `fnox export`, `fnox env`, `fnox list --values`
+  - `op read`, `cat .env`, `echo $KEY`
+- Run `op` directly, except the forms in `references/store.md` and an approved
+  `op vault create`. The op-guard refuses the rest:
+  - `--reveal`
+  - `op item get`
+  - `op read`
+  - `op inject`
+  - `op run`
+  Use `fnox exec` and `fnox provider discover` instead.
+- Write a value literally in a command or a file. Never let it reach tool output.
+- Commit any of these:
+  - values and `.env`
+  - `fnox.local.toml`
+  - age identities and tokens
+- Ask the user to paste a value into chat, or pass a value as an argument.
 
-## Host assumptions
+## Hosts
 
-Check, do not assume: `fnox --version`, `fnox provider list`, `fnox config-files`, `op whoami`.
-On the user's 1Password hosts the global `~/.config/fnox/config.toml` declares the
-1Password provider `op`, `[daemon] enabled = true` (resolved values stay in memory for
-the session, so repeated `fnox exec` calls do not ask 1Password again) and the shared
-machine keys (Tavily, Exa, Firecrawl, TinyFish, Context7, Brave). Each interactive shell
-loads those machine keys once at start; there is no `fnox activate` hook, so a project's
-`fnox.toml` is never loaded into the shell on `cd`. Consequences:
+The laptop uses 1Password through fnox's `op` provider, plus the daemon's in-memory cache
+(8h idle timeout). `pace` and `work-linux` have no 1Password. They have a global `host`
+age store. The agent pipes values into `fnox set NAME --provider host`. Check with
+`fnox provider list` and `fnox config-files`.
 
-- Global layer loads under every project. Providers and secrets merge by name and a
-  later definition replaces the whole entry, so never name a project provider `op`,
-  and never redeclare those shared keys. Top-level `env` and `if_missing` take the
-  closest file's value, so also set them per secret.
-- A machine-wide key (every shell on every host) is not a project secret: it is declared
-  in the chezmoi source (`.chezmoidata/fnox.toml`). Follow `docs/secrets.md` in the
-  chezmoi repository instead of this skill.
-- After a value changes in 1Password, `fnox daemon clear NAME` drops the cached copy and
-  the next `fnox exec` re-reads it. (`fnox get --refresh` does the same but prints the value.)
-- Anything with `env = true` is in the shell that starts OpenCode, so the agent can read
-  it. Give project secrets `env = "exec"` so only `fnox exec` injects them.
-- Headless hosts (pace, work-linux) may have no fnox or 1Password. Say so and stop at
-  declaring the config; do not install credentials there unprompted.
+## Fewer approvals
 
-## 1. Ask
+Each new 1Password session asks the user again. Keep it to one per session:
 
-Which secrets (name, purpose, where it is created)? Who consumes each: local dev, tests,
-CI, a deployed runtime? Collaborators or a CI that must read them? A cloud account (AWS)
-needing temporary credentials? Is there an existing item to reference, or a new one? Does
-the project need a different value per environment (profiles)?
+1. Consume only with `fnox exec`, never `op` directly. Each direct `op` call opens a
+   new session.
+2. Run project commands from the project root.
+   - Every call loads the same config files and shares one daemon cache entry.
+   - A different directory, `-c` or profile is a separate entry and needs another approval.
+3. Group commands that need the same secrets in one `fnox exec`.
+4. Do not change fnox config files mid-session, because a change clears the cache.
+5. If an approval fails or times out, stop and report the secret name. Never retry in a loop.
 
-## 2. Place the secret
+## Find your task
 
-| Situation | Where it lives |
+| Task | Read |
 | --- | --- |
-| Machine or personal key used across projects (already in the global config) | Nothing in the project |
-| One user, one machine, one project | Private vault, item `<project> <purpose>`, tag `<project>` |
-| Cross-project key that CI or collaborators need | Shared vault `dev-shared`, provider `shared` |
-| Project with collaborators or its own CI service account | Vault `proj-<name>`, provider `proj` |
-| Local-only generated value (dev DB password) | OS keychain: add `[providers.keychain] type = "keychain"`, `service = "fnox-<project>"` to `fnox.local.toml`, predeclare `[secrets.NAME] env = "exec"` there, then `fnox -c fnox.local.toml set NAME --generate --provider keychain` (value not shown; `set` has no `env` flag and a new entry defaults to `env = true`). macOS and Windows only; on Linux it needs a running Secret Service |
+| Run a command with secrets | `references/use.md` |
+| List the declared secrets, or diagnose a failure | `references/inspect.md` |
+| Store or add a credential | `references/store.md` |
+| Find an existing 1Password item | `references/store.md#find` |
+| Choose where a secret lives, or configure a project, shared or per-project vault | `references/vaults.md` |
+| Rotate, revoke or remove a secret | `references/rotate.md` |
+| Environments, staging or production | `references/profiles.md` |
+| Cache values for offline use | `references/fnox-config.md` |
+| GitHub Actions | `references/ci-github.md` |
+| AWS temporary credentials | `references/aws-leases.md` |
+| Agent-side MCP | `references/mcp.md` |
 
-A vault per project is worth it only when access differs: service accounts are scoped to
-vaults fixed at creation and cannot see Private, Personal, Employee or the default Shared
-vault, so CI needs the secrets in a non-Private vault. For a solo project keep items in
-Private and skip the extra vault. Use two vaults (`dev-shared` plus `proj-<name>`) when
-both kinds exist; each is its own named provider. Ask before creating any vault.
-
-## 3. Declare, create, fill
-
-1. Add to `fnox.toml` (annotated examples: `references/fnox-config.md`): provider
-   `proj` or `shared`, and each secret with `env = "exec"` and `if_missing = "error"` when required.
-2. Create the empty item without the value (`op item create --category "API Credential"
-   --vault <v> --title "<title>" --tags <project>`), then tell the user which item and
-   field `credential` to fill in 1Password. Alternatively the user runs
-   `fnox set NAME --provider <keychain-or-age-provider>` themselves for locally stored values.
-3. After the user says it is filled: `fnox check` (resolves without printing). The daemon
-   caches it in memory; add a local sync cache only for offline use (`references/fnox-config.md`).
-4. Use: `fnox exec -- <cmd>`, `--only NAME` to resolve a subset, or a mise task
-   (`run = "fnox exec -- bun test"`). Shell expansion happens first, so use
-   `fnox exec -- sh -c '... "$NAME" ...'` when the command line needs the value.
-5. `.gitignore`: `fnox.local.toml`, `.fnox.local.toml`, `.env*` (keep `.env.example` with
-   names only). `fnox scan` finds plaintext secrets already in the tree.
-6. Document in `docs/operations.md` (names, vaults, who can fill them), not values.
-
-## 4. Other consumers
-
-- GitHub Actions: `references/ci-github.md` (service account token, or `fnox push`).
-- AWS in a personal org: `references/aws-leases.md`.
-- Agent-side tools (`fnox mcp`): `references/mcp.md`; off unless the user wants it.
-- Profiles (`fnox.<profile>.toml`, `-P`) for staging versus production.
-
-Further reading: fnox ships its own agent skill at https://github.com/jdx/fnox/tree/main/skills/fnox.
-Final checks: nothing sensitive in `git status`, `fnox check` passes, CI uses
-`--non-interactive --if-missing error`, and the user knows how to rotate (change in
-1Password, `fnox daemon clear NAME`, re-sync if a local cache exists, `fnox push` where used).
+Read the reference for your task only.

@@ -1069,7 +1069,7 @@ function validateValue(question, value) {
       const count = unique.length + (other === undefined ? 0 : 1);
       if (question.min !== undefined && count < question.min)
         return fail(`pick at least ${question.min}`);
-      if (question.max !== undefined && count > question.max)
+      if (question.max !== undefined && unique.length > question.max)
         return fail(`pick at most ${question.max}`);
       return { value: other === undefined ? { selected: unique } : { selected: unique, other } };
     }
@@ -1752,13 +1752,15 @@ function choose(question, draft, index = draft.cursor) {
     case "show_options":
       return { ...next, value: { selected: id } };
     case "pick_many": {
-      const current = (draft.value?.selected ?? []).slice();
+      const previous = draft.value;
+      const current = (previous?.selected ?? []).slice();
       const at = current.indexOf(id);
       if (at >= 0)
         current.splice(at, 1);
       else if (question.max === undefined || current.length < question.max)
         current.push(id);
-      return { ...next, value: { selected: ids.filter((option) => current.includes(option)) } };
+      const selected = ids.filter((option) => current.includes(option));
+      return { ...next, value: previous?.other === undefined ? { selected } : { selected, other: previous.other } };
     }
     case "confirm":
     case "thumbs":
@@ -2024,7 +2026,7 @@ function kindKeys(question) {
 var PATH_KINDS = new Set(["ask_image", "ask_file", "path", "tags"]);
 function keyHints(question, surface, editing, single = false) {
   if (editing) {
-    const enter = editing.enterSaves ? surface === "card" ? "enter submit \xB7 shift+enter newline" : "enter save \xB7 shift+enter newline" : "enter newline";
+    const enter = editing.enterSaves ? "enter save \xB7 shift+enter newline" : "enter newline";
     const paths = editing.field === "text" && question && PATH_KINDS.has(question.kind) ? editing.suggestions ? " \xB7 \u2191/\u2193 suggestion \xB7 tab complete" : " \xB7 tab complete" : "";
     const paste = editing.field === "text" && question && (question.kind === "ask_image" || question.kind === "ask_file") ? " \xB7 ctrl+v paste" : "";
     return `${enter}${paths}${paste} \xB7 esc done \xB7 ctrl+s submit`;
@@ -3278,12 +3280,12 @@ function InlineCard(props) {
       run: newline
     }, ...controls.pathKeys(), {
       bind: "return",
-      title: "Save and submit",
+      title: "Save",
       group: "Parley",
       run: () => {
         if (!enterSaves())
           return newline();
-        saveAndSend();
+        done();
       }
     }, {
       bind: "ctrl+return",

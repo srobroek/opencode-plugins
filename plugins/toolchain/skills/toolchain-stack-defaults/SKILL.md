@@ -25,5 +25,5 @@ Treat `just`, `mise`, and `moon` as independent setup choices:
 - `moon` for task orchestration in larger monorepos.
 
 Language plugins, when installed, add skills that run the project's own format,
-lint, and test tools. Language design guidance lives in the
-`quality-code-design` skill.
+lint, and test tools, and `lang-<language>-libraries` skills with the library
+standards. Language design guidance lives in the `quality-code-design` skill.

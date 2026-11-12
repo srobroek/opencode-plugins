@@ -170,6 +170,8 @@ export type ShellWord = {
    * or process substitution, a leading tilde, or an unquoted glob or brace pattern.
    */
   expands: boolean
+  /** On a redirection word: the operator is `<<<`, so the word is the here-string text. */
+  hereString?: true
 }
 
 export type HereDocument = { body: string; quoted: boolean }
@@ -198,7 +200,7 @@ export type ShellScan = {
   complete: boolean
 }
 
-type Expansion = { end: number; inner?: string; expands: boolean; closed: boolean }
+type Expansion = { end: number; inner?: string; expands: boolean; closed: boolean; executable?: boolean }
 
 /**
  * Split shell source into simple commands with exact word offsets, without evaluating it.
@@ -207,14 +209,16 @@ type Expansion = { end: number; inner?: string; expands: boolean; closed: boolea
  * place needs to know where each word starts, and needs `2>&1`, `&>` and `>&` read as
  * redirections rather than as background operators. Nothing is expanded or run;
  * every substitution is returned as source for the caller to judge on its own.
+ * With `executableSubstitutionsOnly`, only executable substitutions contribute source, including those inside parameter or arithmetic expansions.
  */
-export function scanShell(source: string): ShellScan {
+export function scanShell(source: string, options: { executableSubstitutionsOnly?: boolean } = {}): ShellScan {
   const items: (SimpleCommand | ShellOperator)[] = []
   const substitutions: string[] = []
   let complete = true
   let command: SimpleCommand = { kind: "command", words: [], redirects: [], hereDocuments: [] }
   let word: { start: number; value: string; quoted: boolean; expands: boolean } | undefined
   let target: "redirect" | "here-document" | "here-document-tabs" | undefined
+  let targetHereString = false
   const pending: { delimiter: string; stripTabs: boolean; quoted: boolean; owner: SimpleCommand }[] = []
 
   const append = (at: number, text: string, quoted = false, expands = false): void => {
@@ -232,6 +236,7 @@ export function scanShell(source: string): ShellScan {
     const done: ShellWord = { start: word.start, end, value: word.value, quoted: word.quoted, expands: word.expands }
     word = undefined
     if (target !== undefined) {
+      if (targetHereString) done.hereString = true
       command.redirects.push(done)
       if (target !== "redirect")
         pending.push({
@@ -259,7 +264,10 @@ export function scanShell(source: string): ShellScan {
     items.push({ kind: "operator", operator: value })
   }
   const substitution = (expansion: Expansion): void => {
-    if (expansion.inner !== undefined) substitutions.push(expansion.inner)
+    if (expansion.inner !== undefined) {
+      if (!options.executableSubstitutionsOnly || expansion.executable) substitutions.push(expansion.inner)
+      else substitutions.push(...scanShell(expansion.inner, options).substitutions)
+    }
     if (!expansion.closed) complete = false
   }
   /** Read every here-document queued on the line that just ended; returns the next offset. */
@@ -386,6 +394,7 @@ export function scanShell(source: string): ShellScan {
     if (ch === "&" && next === ">") {
       flush(i)
       target = "redirect"
+      targetHereString = false
       i += source[i + 2] === ">" ? 2 : 1
       continue
     }
@@ -404,6 +413,7 @@ export function scanShell(source: string): ShellScan {
       if (word !== undefined && !word.quoted && !word.expands && /^(?:\d+|\{[A-Za-z_]\w*\})$/.test(word.value))
         word = undefined
       else flush(i)
+      targetHereString = source.startsWith("<<<", i)
       if (source.startsWith("<<<", i)) {
         target = "redirect"
         i += 2
@@ -436,6 +446,7 @@ function expansionAt(text: string, at: number): Expansion {
     return {
       end: closed ? j + 1 : text.length,
       inner: text.slice(at + 1, Math.min(j, text.length)),
+      executable: true,
       expands: true,
       closed,
     }
@@ -447,6 +458,7 @@ function expansionAt(text: string, at: number): Expansion {
     return {
       end: closed ? close + 1 : text.length,
       inner: text.slice(at + 2, closed ? close : text.length),
+      executable: next === "(" && text[at + 2] !== "(",
       expands: true,
       closed,
     }

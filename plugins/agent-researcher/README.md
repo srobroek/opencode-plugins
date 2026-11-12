@@ -5,7 +5,7 @@ codebase, its docs and the web, with cited observations kept apart from inferenc
 
 ## Agent
 
-`researcher` (mode `subagent`) takes a question in its brief, or a bead id that
+`researcher` (mode `subagent`, steps 80) takes a question in its brief, or a bead id that
 holds one. It:
 
 - reads the narrowest relevant repository paths first, spawns `explore` for broad

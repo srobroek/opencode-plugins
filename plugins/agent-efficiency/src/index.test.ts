@@ -251,8 +251,8 @@ describe("plugin", () => {
     expect(event.tool).toBe("bash")
   })
 
-  test("bashAlias: false registers no tool hook", async () => {
-    const fake = createFakeContext({ options: { bashAlias: false } })
+  test("all tool features disabled registers no tool hook", async () => {
+    const fake = createFakeContext({ options: { bashAlias: false, waitGuard: false, scratchReminder: false, largeRead: false } })
     await plugin.setup(fake.context)
     expect(fake.hooks("tool")).toEqual([])
     const event = await fake.fire.tool("execute.before", call("bash", { command: "ls" }))
@@ -264,6 +264,7 @@ describe("plugin", () => {
     await plugin.setup(fake.context)
     const explore = fake.agents.get("explore") as ReturnType<typeof stockExplore>
     expect(explore.system).toBe(EXPLORE_PROMPT)
+    expect(explore).toHaveProperty("steps", 60)
     expect(explore).not.toHaveProperty("request")
     const rules = explore.permissions
     for (const tool of ["read", "grep", "glob", "websearch", "webfetch"]) expect(evaluate(rules, tool, "x")).toBe("allow")
@@ -326,7 +327,7 @@ describe("plugin", () => {
   test("compaction and generate requests get the same trimmed system prompt", async () => {
     const fake = createFakeContext({ sessions: [{ id: "ses_child", parentID: "ses_root" }, { id: "ses_root" }] })
     const cleanup = await plugin.setup(fake.context)
-    expect(fake.hooks("session")).toEqual(["context", "compaction", "generate"])
+    expect(fake.hooks("session")).toEqual(["context", "compaction", "generate", "context", "compaction", "generate"])
     const turn = (await fake.fire.session("context", context("ses_child", "pr-reviewer"))).system
     expect(turn).not.toEqual(system())
     for (const hook of ["compaction", "generate"] as const)
@@ -336,8 +337,8 @@ describe("plugin", () => {
     expect(fake.active()).toBe(0)
   })
 
-  test("leanSubagents: false registers no session hook", async () => {
-    const fake = createFakeContext({ options: { leanSubagents: false } })
+  test("all prompt features disabled registers no session hook", async () => {
+    const fake = createFakeContext({ options: { leanSubagents: false, lead: false } })
     await plugin.setup(fake.context)
     expect(fake.hooks("session")).toEqual([])
   })

@@ -142,6 +142,12 @@ describe("agents", () => {
     const { fake } = await load()
     const implementer = fake.agents.get("implementer") as Record<string, unknown>
     expect(implementer.mode).toBe("subagent")
+    expect(implementer.steps).toBe(150)
+    expect(fake.agents.get("implementer-high")?.steps).toBe(200)
+    expect(fake.agents.get("researcher")?.steps).toBe(80)
+    expect(fake.agents.get("pr-reviewer")?.steps).toBe(80)
+    expect(fake.agents.get("operator")?.steps).toBe(30)
+    expect(fake.agents.get("shepherd")?.steps).toBe(60)
     expect(String(implementer.system)).toContain("VERDICT: DONE|BLOCKED|SPLIT")
     expect(implementer.model).toBeUndefined()
     expect(implementer.request).toEqual({ headers: { "x-opencode-model-role": "standard" } })

@@ -13,7 +13,7 @@ TRIGGER
 + Review a branch, PR, or work-in-progress change since a fixed point.
 - Prose-only work or mechanical execution of an unchanged command needs no design analysis.
 - Tuning code-agent instructions, model routing, or tools against task cases → the `tune-model-prompt` skill when installed (an owner-local skill this repository does not ship).
-- Deciding what to test, at which level, with which doubles or test data → the `quality-testing` skill.
+- Deciding what to test, at which level, how many tests to keep, with which doubles or test data, or reviewing test changes → the `quality-testing` skill.
 - Checking whether a state model or logic holds up before building it → the `prototype-logic` skill.
 - Measuring, profiling or benchmarking slow or memory-heavy code → the `quality-profiling` skill.
 
@@ -36,7 +36,10 @@ References live in `references/` beside this file; the links below are relative 
 | State, objects, modules, abstraction, or composition → [encapsulation.md](references/encapsulation.md) | Encapsulation, information hiding, invariants, abstraction, inheritance, polymorphism, composition |
 | Module depth, seams, adapters, testability, or deepening shallow modules → [deep-modules.md](references/deep-modules.md) | Depth vocabulary, the seam rule, dependency categories, replace-don't-layer tests, optional design-it-twice |
 | Scope, duplication, or simplifying a solution → [simplicity.md](references/simplicity.md) | YAGNI, KISS, DRY, reversible design, refactoring scope, scripts, tests |
-| Adding a capability or dependency; library, ORM, or persistence choice → [dependencies.md](references/dependencies.md) | Repository and earlier-code reuse, mature packages, present value and boundaries |
+| Adding a capability or dependency; library, ORM, or persistence choice → [dependencies.md](references/dependencies.md) | Repository and earlier-code reuse, comparison with the preferred-library standards, mature packages, present value and boundaries |
+| Auth, validation, request ids, logging, error mapping, timeouts, retries, rate limits, or a new service, handler, consumer or client → [middleware.md](references/middleware.md) | Handlers vs middleware, one middleware model per surface, stack order, one error mapper, client and consumer middleware, middleware tests; framework mechanisms live in `lang-<language>-libraries` |
+| Logs, traces, metrics, or a new service, worker, CLI or Lambda function → [telemetry.md](references/telemetry.md) | OpenTelemetry by default: setup, export, propagation, sampling, flushing, span/metric/log rules, telemetry tests; SDK packages live in `lang-<language>-libraries` |
+| Feature flags, rollout decisions, outage defaults or flag storage → [feature-flags.md](references/feature-flags.md) | Typed flag module, edge decisions, safe defaults, storage, testing, telemetry and removal; process lives in `trunk-dev-feature-flags` |
 | Database state, transitions, migrations, dynamic SQL, or persistence tests → [persistence.md](references/persistence.md) | DB as the record, compare-and-set updates, append-only migrations, bound queries, real-database tests |
 | Generated bindings, IPC command names, wire casing, or client/server contract tests → [contracts.md](references/contracts.md) | Committed codegen with drift check, name conformance, one casing, tests against the real surface |
 | Plan/approve/apply flows, bulk or destructive file operations, path checks, audit trails → [safe-mutation.md](references/safe-mutation.md) | Apply-time approval tokens, freshness checks, traversal, append-only audit, reversible deletes |
@@ -49,7 +52,7 @@ References live in `references/` beside this file; the links below are relative 
 | Code, PR, or work-in-progress review → [review.md](references/review.md) | Fixed point and spec source, checklist, severity, evidence, exceptions, review examples |
 | Uncertain scope, work sequencing, durable tradeoff, domain terms, or recurring delivery problem → [lifecycle.md](references/lifecycle.md) | Risk, small batches, decision records, term discipline, feedback and outcome metrics |
 | Selecting tests or making verification/performance claims → [verification.md](references/verification.md) | Behavioral evidence, test fidelity, failure cases, proportional checks |
-| Test-first, TDD, or red-green-refactor → [test-first.md](references/test-first.md) | Vertical slices, red before green, mockable boundaries |
+| Test-first, TDD, or red-green-refactor → [test-first.md](references/test-first.md) | Vertical slices, seams, red before green, forced red, mockable boundaries |
 | Hard bug, flaky failure, or performance regression → [debugging.md](references/debugging.md) | Feedback loops, minimisation, falsifiable hypotheses, tagged instrumentation, regression seam, cleanup |
 | Untrusted input, identity, permissions, sensitive data, dependencies, or privileged automation → [security.md](references/security.md) | Trust boundaries, abuse cases, dependency and artifact assurance |
 | Persistent state, API/event compatibility, network effects, or release operations → [release.md](references/release.md) | Mixed versions, recovery, idempotency, observability, staged release, release-state evidence |

@@ -8,13 +8,17 @@ for non-code tasks; `general`'s requests carry every tool and skill.
 
 ## Agent
 
-`coder` (mode `subagent`):
+`coder` (mode `subagent`, steps 150):
 
 - reads the brief, the relevant code and the repository's AGENTS.md, and finds the
   repo's check commands;
 - reproduces or measures a failure, slowdown or question before tracing it to a cause
   backed by command output or file lines;
 - makes the scoped change in the surrounding code's style, with no unrelated cleanup;
+- before it writes its own code for a concern, researches current best practice and
+  compares the plan with the `lang-<language>-libraries`, `toolchain-api` and
+  `aws-guidance` standards, reports each departure, and puts cross-cutting concerns
+  in middleware (the `standards` part of `plugins/lib/src/coding-core.md`);
 - runs the repo's format, lint, typecheck, test and build commands for the touched
   code, then reviews its own diff;
 - follows AGENTS.md (commit, push and scratch rules), and commits or pushes only when
@@ -36,8 +40,22 @@ Its permissions are an allowlist; every other tool, questions included, is denie
 | `dep_scan`, `dep_apply` | Dependency upgrades (dep-update plugin); `dep_apply` still prompts per bump |
 | `version_gap_scan` | Offline dependency inventory for upgrade research (whats-new plugin) |
 
-It may spawn only `explore` and `mechanic`. `.env` reads and `external_directory`
-ask. `find_tools_scan` is denied: adopting new tools is not development work.
+It may spawn four helpers and names no `tier` in those calls; each helper uses its
+own tier:
+
+- `explore`: broad read-only lookups across unfamiliar files.
+- `mechanic`: decided mechanical edits, such as renames, bulk moves and formatting.
+  The coder does feature work, fixes and tests itself.
+- `operator`: one bounded command with long output, returning only the requested
+  lines.
+- `code-reviewer`: diff reviews when requested or when changes touch security, data
+  integrity, concurrency or a public contract.
+
+`operator` requires the delivery plugin; `code-reviewer` requires agent-reviewer.
+Without those plugins, their permission allows are inert.
+
+`.env` reads and `external_directory` ask. `find_tools_scan` is denied: adopting new
+tools is not development work.
 
 ## Skills
 
@@ -55,10 +73,13 @@ plugin's family are allowed by id:
 | `trunk-dev`, `worktrunk` | `trunk-dev-*`, `worktrunk-*` |
 | `ast-grep` | `ast-grep-*` |
 | `dep-update`, `whats-new` | `dep-update`, `whats-new` |
+| `delivery` | `delivery-git-workflow` |
+| `aws` | `aws-guidance` |
 
-Design, journeys, speckit, delivery, debate, beads and project-management skills are
-left out. A skill whose plugin is not installed is simply absent. To allow another
-skill, add a rule under `agents.coder.permissions`.
+`delivery-git-workflow` requires the delivery plugin; without it, the permission
+allow is inert. Other delivery skills, design, journeys, speckit, debate, beads and
+project-management skills are left out. A skill whose plugin is not installed is
+simply absent. To allow another skill, add a rule under `agents.coder.permissions`.
 
 ## Model
 

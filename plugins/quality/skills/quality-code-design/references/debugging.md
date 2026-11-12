@@ -5,8 +5,8 @@ evidence already settles it, and say which step you skipped.
 
 ## Build a feedback loop
 
-A tight pass/fail signal for this bug makes bisection, hypotheses, and instrumentation
-mechanical. Try these roughly in order:
+With a tight pass/fail signal for this bug, you can bisect, test hypotheses, and
+instrument mechanically. Try these roughly in order:
 
 1. A failing test at whatever seam reaches the bug: unit, integration, end-to-end.
 2. A curl or HTTP script against a running dev server.
@@ -27,6 +27,9 @@ isolate the filesystem, freeze the network). For a flaky bug, raise the reproduc
 rate instead of chasing a clean repro: loop the trigger, parallelise, add stress, inject
 sleeps. A 50% flake is debuggable; 1% is not.
 
+Before you claim a diagnosis, run the loop and see it fail with the user's exact symptom:
+the same error, value or behavior, not a nearby failure.
+
 No loop is possible: say so and list what you tried. Ask for an environment that
 reproduces it, a redacted captured artifact, or permission for temporary
 instrumentation when a user is reachable. Without a loop, diagnose from source and the
@@ -35,8 +38,10 @@ reported evidence, and label the conclusion unverified.
 ## Minimise
 
 Once the loop fails, cut inputs, callers, config, data, and steps one at a time,
-re-running after each cut, until every remaining element is load-bearing: removing any
-one makes the loop pass. The minimal case becomes the regression test.
+re-running after each cut, until every remaining element is needed: removing any one
+makes the loop pass. After each cut, check that the loop still fails with the
+original symptom; a cut that changes the failure leads to a different bug. The minimal
+case becomes the regression test.
 
 ## Hypothesise
 
@@ -61,7 +66,10 @@ Write the regression test at a seam that exercises the real bug pattern as it oc
 the call site. A test at a seam too shallow to replicate the triggering chain (for
 example, a single-caller unit test for a multi-caller bug) gives false confidence. When
 no correct seam exists, report that as a finding: the architecture prevents locking the
-bug down. Test selection and fidelity are in [verification.md](verification.md).
+bug down. Watch the regression test fail before the fix and pass after it. When you
+force the red by changing code or a fixture, diff against a pristine copy to prove the
+change landed and was undone. Test selection and fidelity are in
+[verification.md](verification.md); test maintenance is in the `quality-testing` skill.
 
 ## Redact and clean up
 

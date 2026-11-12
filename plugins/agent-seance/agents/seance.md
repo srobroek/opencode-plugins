@@ -1,6 +1,7 @@
 ---
 description: "Read-only consultant for one past session: reads its transcript and subagent transcripts with seance_read and answers a question."
 mode: subagent
+steps: 30
 request:
   headers:
     x-opencode-model-role: cheap

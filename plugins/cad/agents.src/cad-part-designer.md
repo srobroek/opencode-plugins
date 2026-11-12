@@ -1,6 +1,7 @@
 ---
 description: "Designs or details one assigned CAD unit's parts in a scratch copy of hw/, checks them there, and delivers only its own part directories."
 mode: subagent
+steps: 150
 request:
   headers:
     x-opencode-model-role: strong

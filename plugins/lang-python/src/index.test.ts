@@ -7,6 +7,7 @@ test("registers the python skills and disposes them", async () => {
   const cleanup = await plugin.setup(fake.context)
   expect([...fake.skills.keys()].sort()).toEqual([
     "lang-python",
+    "lang-python-libraries",
     "lang-python-packaging",
     "lang-python-persistence",
     "lang-python-profiling",

@@ -6,6 +6,7 @@ Parts of this plugin derive, in modified form, from:
   Project:     mattpocock-skills 1.2.3
   Repository:  https://github.com/mattpocock/skills
   Copied:      2026-10-08
+  Rechecked:   2026-11-12 against GitHub main 5863806 (package.json 1.3.2)
   Licence:     MIT License, Copyright (c) 2026 Matt Pocock
 
 This NOTICE sits in skills/quality-code-design/ so it travels with the skill. The
@@ -24,15 +25,23 @@ plugin's own guidance:
   references/debugging.md     <- skills/engineering/diagnosing-bugs/SKILL.md
                                  (feedback-loop catalogue, loop tightening,
                                  minimisation, ranked hypotheses, instrumentation,
-                                 regression seam, redaction and cleanup). Dropped: the
+                                 regression seam, redaction and cleanup). Added at the
+                                 1.3.2 recheck: the exact-symptom red loop before a
+                                 diagnosis, symptom checks while minimising, and the
+                                 pristine-copy diff for a forced red. Dropped: the
                                  hard no-hypothesis-without-a-loop gate, the CONTEXT.md
-                                 read, the interactive-user assumption, and
-                                 scripts/hitl-loop.template.sh.
-  references/test-first.md    <- skills/engineering/tdd/SKILL.md, mocking.md
+                                 and GLOSSARY.md reads, the interactive-user assumption,
+                                 and scripts/hitl-loop.template.sh.
+  references/test-first.md    <- skills/engineering/tdd/SKILL.md, tests.md, mocking.md
                                  (vertical slices, red before green, per-endpoint
-                                 injected clients). Dropped: the user-confirmed-seam
-                                 gate, the Skill-tool call, and "refactoring is not
-                                 part of the loop".
+                                 injected clients). Added at the 1.3.2 recheck: seams
+                                 stated with what they catch and miss, one logical
+                                 assertion per test, checks through the public read
+                                 interface, and the forced-red pristine-copy diff.
+                                 Changed: seam agreement with the user is needed only
+                                 when the interface or scope is unsettled. Dropped: the
+                                 user-confirmed-seam gate, the Skill-tool call, and
+                                 "refactoring is not part of the loop".
   references/deep-modules.md  <- skills/engineering/codebase-design/SKILL.md,
                                  DEEPENING.md, DESIGN-IT-TWICE.md (vocabulary, depth,
                                  seams, dependency categories, replace-don't-layer

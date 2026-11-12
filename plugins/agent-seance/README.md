@@ -6,7 +6,7 @@ Ported from the Oh My Pi built-in `seance` agent.
 
 ## Agent
 
-`seance` (mode `subagent`) takes a session (a `ses_` id or a description) and a
+`seance` (mode `subagent`, steps 30) takes a session (a `ses_` id or a description) and a
 question. It reads the session with `seance_read`, opens child transcripts when the
 answer lies in a subagent's work, and replies with `VERDICT: ANSWERED|PARTIAL|NOT_FOUND`,
 the answer, `ses_…[turn]` evidence and the gaps, in at most 250 words.

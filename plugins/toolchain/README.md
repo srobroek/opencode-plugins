@@ -13,8 +13,9 @@ every skill is listed and triggers directly.
 | `toolchain-stack-defaults` | Stack, package manager, task runner, adding a dependency (bun, uv, mise, just; deps through the package manager CLI) |
 | `toolchain-frontend` | Frontend framework, UI kit, client and server state |
 | `toolchain-infrastructure` | Terraform/OpenTofu vs CDK vs Kubernetes and Helm |
-| `toolchain-languages` | Per-language library and tool picks (Rust, TypeScript, Python, Go) |
-| `toolchain-quality-observability` | Logging, tracing, security scanners |
+| `toolchain-languages` | How to choose a library or tool, defaults that hold in every language, and where the per-language standards live (`lang-<language>-libraries`) |
+| `toolchain-api` | API style (REST/OpenAPI, gRPC, Connect, GraphQL, events, webhooks, MCP), spec versions, contract ownership, design rules, security baseline, API test tools |
+| `toolchain-quality-observability` | OpenTelemetry by default, and one scanner per gate: secrets, dependency audit, static analysis, dead code, duplication, containers and IaC, CI workflows, SBOM |
 | `toolchain-asset-ownership` | Where OpenCode config, plugins, skills and agents live: chezmoi, this repository |
 | `coexistence-worktree` | Other agents or humans editing the same checkout; moving to a linked worktree |
 | `shell-language` | Shell portability, quoting, command safety, shellcheck |

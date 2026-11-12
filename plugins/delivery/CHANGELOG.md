@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.5.0](https://github.com/srobroek/opencode-plugins/compare/delivery--v0.4.0...delivery--v0.5.0) (2026-11-11)
+
+
+### Features
+
+* **quality:** require quality-code-design only for new behavior, refactors, hard bugs and reviews ([#125](https://github.com/srobroek/opencode-plugins/issues/125)) ([774d73f](https://github.com/srobroek/opencode-plugins/commit/774d73f64e9966cdd1bbad40c13f152d17f2c61d))
+
+## [0.4.0](https://github.com/srobroek/opencode-plugins/compare/delivery--v0.3.0...delivery--v0.4.0) (2026-11-11)
+
+
+### Features
+
+* cap every shipped agent with a step limit ([#123](https://github.com/srobroek/opencode-plugins/issues/123)) ([7b3b60f](https://github.com/srobroek/opencode-plugins/commit/7b3b60f84ac4aabcf8d5d649042e26054f79b0f4))
+
 ## [0.3.0](https://github.com/srobroek/opencode-plugins/compare/delivery--v0.2.1...delivery--v0.3.0) (2026-10-27)
 
 

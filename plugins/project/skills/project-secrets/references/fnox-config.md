@@ -1,7 +1,7 @@
 # fnox.toml for a project
 
-Sources: https://fnox.jdx.dev/guide/config-files, /providers/1password, /guide/sync,
-/guide/running-commands, /guide/shell-integration, /guide/mise-integration.
+Annotated reference for `fnox.toml`. Sources: https://fnox.jdx.dev/guide/config-files,
+/providers/1password, /providers/age, /guide/sync.
 
 ## Files
 
@@ -11,14 +11,14 @@ Sources: https://fnox.jdx.dev/guide/config-files, /providers/1password, /guide/s
 | `fnox.<profile>.toml` | yes | one environment (loaded only for that profile, `-P`/`FNOX_PROFILE`) |
 | `fnox.local.toml` | no | the encrypted sync cache and personal overrides |
 
-Load order: global config, then `fnox.toml`, profile files, `fnox.local.toml`, closer
-directories last. `fnox config-files` lists what loaded; `fnox list --sources` shows which
-file defines each secret.
+Load order: global config, `fnox.toml`, profile files, `fnox.local.toml`. Closer
+directories load last. `fnox config-files` lists the loaded files. `fnox list --sources`
+shows which file defines each secret.
 
 ## Committed `fnox.toml`
 
 ```toml
-# Providers: distinct names. Never `op` (the global config owns it).
+# Providers: distinct names. Never `op` or `host` (the global config owns them).
 [providers.proj]               # per-project vault
 type = "1password"
 vault = "proj-myapp"           # omit the whole provider if the project uses only `shared`
@@ -39,27 +39,24 @@ SENTRY_TOKEN = { provider = "shared", value = "sentry/credential",       env = "
 LOG_LEVEL    = { default = "info", env = true }   # not secret: fine in the shell
 ```
 
-`env`: `true` injects into the shell and `fnox exec`; `"exec"` only into `fnox exec`;
-`false` never (still usable by leases and other secrets). `if_missing`: `error`, `warn`
-or `ignore`. The 1Password provider is read-only: `fnox set` only records a reference
-(`fnox set STRIPE_KEY "myapp stripe/credential" --provider proj`); create and edit the
-item in 1Password. fnox resolves a provider's secrets with one `op inject`, falling back
-to `op read` per secret.
+`env` takes one of three values:
 
-## Profiles
+- `true` injects into the shell and `fnox exec`.
+- `"exec"` injects only into `fnox exec`.
+- `false` keeps it out of both. Leases and other secrets can still use it.
 
-Put environment differences in `fnox.production.toml` (top-level entries there belong to
-the `production` profile) or `[profiles.production.secrets]`. A secret redefined in a
-profile replaces the whole entry. Pick one: `fnox -P production exec -- ...`. A top-level
-secret in `fnox.local.toml` overrides it in every profile, so put cached production
-entries under `[profiles.production.secrets]`.
+`if_missing` takes `error`, `warn` or `ignore`.
 
-## Local sync cache (offline only)
+The 1Password provider cannot write, so `fnox set` only records a reference (see
+`references/store.md`). fnox resolves the provider's secrets with one `op inject`. If that
+fails, it falls back to one `op read` per secret.
+
+## Local sync cache (opt-in, offline only)
 
 The global daemon already keeps resolved values in memory, so most projects need no
-cache file. Add one only when reads must work offline or survive a reboot without
-1Password. The global config has no age provider, so the project declares its own in
-`fnox.local.toml`, encrypted to a key the user creates deliberately:
+cache file. Add one only for reads that must work offline, or that must survive a restart
+without 1Password. It is opt-in, not the default. A 1Password host has no age provider.
+The project declares its own in `fnox.local.toml`, encrypted to a key the user creates:
 
 ```toml
 # fnox.local.toml (gitignored)
@@ -76,38 +73,17 @@ fnox sync -p local-age --local-file --force    # refresh after a vault change (n
 fnox sync -p local-age --local-file --dry-run  # preview; KEYS or --filter <regex> narrow it
 ```
 
-Writes `fnox.local.toml` with, per secret, a `[secrets.NAME.sync]` table (`provider`,
-`value` ciphertext). Reads then use the cache offline, with no 1Password prompt. Run it
-from the project directory without `-c`. The cache is skipped in CI. Only sync items
-that exist.
+The sync writes `fnox.local.toml` with a `[secrets.NAME.sync]` table per secret
+(`provider`, `value` ciphertext). Reads use the cache offline, with no 1Password prompt.
+Run it from the project directory without `-c`. CI skips the cache. Sync only items that
+exist.
 
 ## Values stored in git (no vault)
 
-For a CI-only or solo project with no 1Password: an age provider with the CI key and the
-user's public key as recipients (`age-keygen -y` of the user's key file), name it
-`proj-age`; the user stores each value with `fnox set NAME --provider proj-age` (hidden prompt). Ciphertext in `fnox.toml` is safe to commit. See https://fnox.jdx.dev/providers/age.
-
-## Using it
-
-```sh
-fnox check                    # config valid, required secrets resolve; prints no values
-fnox list                     # names, providers, source; no values
-fnox exec -- bun test
-fnox exec --only STRIPE_KEY --redact -- ./script.sh   # --redact masks piped output
-fnox provider test proj
-fnox doctor                   # config, providers, environment
-fnox scan --values --staged   # no committed copies of real values
-```
-
-mise task: `[tasks.test] run = "fnox exec -- bun test"`; pin fnox with `mise use fnox`.
-mise's own fnox integration is experimental, so wrap with `fnox exec` instead.
-
-## Creating the 1Password item (no value in the transcript)
-
-```sh
-op item create --category "API Credential" --vault proj-myapp \
-  --title "myapp stripe" --tags myapp
-```
-
-Then the user types the value into the `credential` field. Do not use assignment
-statements with the value. Never create a vault or service account without asking.
+A project may declare its own age provider when CI or collaborators need committed
+ciphertext, because the global `host` key belongs to one machine. For a CI-only or solo
+project with no 1Password, name the provider `proj-age`. Give it the CI key and the user's
+public key as recipients (`age-keygen -y` of the user's key file). The agent stores generated or tool-issued
+values with `fnox set NAME --provider proj-age` (see `references/store.md`); the user types
+user-only values at a hidden prompt. Ciphertext in
+`fnox.toml` is safe to commit. See https://fnox.jdx.dev/providers/age.

@@ -11,6 +11,7 @@ and Codex ignore that metadata, so there every skill is listed and triggers dire
 | --- | --- |
 | `architecture-top-level` | Choosing or changing top-level directories: `apps/`, `services/`, `functions/`, `workers/`, `libs/`, `packages/`, `schemas/`, `data/`, `infrastructure/`, `tools/`, ... |
 | `architecture-ownership` | Placing libs by architectural role, owner-local assets and data, schemas, generated clients, UI primitives and product agents |
+| `architecture-repositories` | Single-language repository, polyglot monorepo or several repositories; layout by deployable with native workspaces per language, shared contracts with generated clients, task runners and build tools, CI selection, ownership and per-component releases |
 | `architecture-docs-files` | Inferring architecture or stack, or creating durable project knowledge under `docs/` |
 
 On omp these were rules the host attached by description. Here they are skills the
@@ -20,7 +21,7 @@ references, which now name the skill (`architecture-docs-files` points at the
 
 ## Agent
 
-`architect` (mode `subagent`) designs systems, modules and APIs and turns a hard
+`architect` (mode `subagent`, steps 80) designs systems, modules and APIs and turns a hard
 change into an ordered implementation plan. It starts its reply with
 `VERDICT: DESIGNED|PARTIAL|BLOCKED`. Its permissions are an allowlist: every tool
 is denied except read, grep, glob, the `lsp_*` tools, webfetch, websearch, `subagent`

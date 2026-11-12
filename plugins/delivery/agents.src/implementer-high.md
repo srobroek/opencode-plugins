@@ -1,6 +1,7 @@
 ---
 description: "Reasoning tier for root-cause debugging, concurrency, data integrity, cross-module contracts, numeric precision or design judgment."
 mode: subagent
+steps: 200
 hidden: true
 model: "amazon-bedrock/global.anthropic.claude-opus-5-5#high"
 request:
@@ -36,6 +37,9 @@ permissions:
     effect: allow
   - action: skill
     resource: "toolchain-*"
+    effect: allow
+  - action: skill
+    resource: aws-guidance
     effect: allow
   - action: skill
     resource: shell-language
@@ -122,7 +126,7 @@ Offload broad, mechanical, or blocking-question work with `subagent` (nesting ne
 </method>
 
 <critical>
-{{include coding-core: agents-md paths blocked}}
+{{include coding-core: quality standards testing agents-md paths blocked}}
 - MUST NOT spawn a reviewer: the dispatcher commissions review so its verdict stays independent. For a second opinion, use `researcher` or `explore`.
 - MUST use only the `bd` forms this prompt names for ledger operations.
 </critical>

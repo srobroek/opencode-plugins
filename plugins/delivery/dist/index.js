@@ -134,12 +134,15 @@ function parseAgentFile(id, text) {
     throw new Error(`agents/${id}.md has no frontmatter`);
   const data = Bun.YAML.parse(match[1] ?? "") ?? {};
   const permissions = Array.isArray(data.permissions) ? data.permissions : [];
+  if (data.steps !== undefined && (typeof data.steps !== "number" || !Number.isInteger(data.steps) || data.steps <= 0))
+    throw new Error(`agents/${id}.md: steps must be a positive integer`);
   return {
     id,
     description: typeof data.description === "string" ? data.description : undefined,
     mode: typeof data.mode === "string" ? data.mode : "subagent",
     model: typeof data.model === "string" ? data.model : undefined,
     ...typeof data.hidden === "boolean" ? { hidden: data.hidden } : {},
+    ...typeof data.steps === "number" ? { steps: data.steps } : {},
     ...data.request && typeof data.request === "object" ? { request: data.request } : {},
     permissions,
     system: text.slice(match[0].length).trim()
@@ -177,6 +180,8 @@ function shapeAgent2(draft, file, model, created) {
     draft.system = file.system;
   if (file.hidden !== undefined && (created || draft.hidden === undefined))
     draft.hidden = file.hidden;
+  if (file.steps !== undefined)
+    draft.steps ??= file.steps;
   const { fallback, ...ref } = model ?? {};
   const setModel = model !== undefined && (created || draft.model === undefined);
   if (setModel)
@@ -212,7 +217,7 @@ import { isDeepStrictEqual } from "util";
 // plugins/delivery/package.json
 var package_default = {
   name: "@srobroek/opencode-delivery",
-  version: "0.3.0",
+  version: "0.5.0",
   description: "Pull-request landing with merge proof and receipts, receipt-driven worktree cleanup, delivery agents and fan-out instructions for OpenCode V2.",
   private: true,
   type: "module",

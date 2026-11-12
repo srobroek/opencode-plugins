@@ -23,7 +23,9 @@ of git (`lang-go-packaging`). Pin dev tools with `go get -tool <pkg>` and run th
 | Config | `koanf` for layered configuration |
 | Lint + format | `golangci-lint` v2: `.golangci.yml` with `version: "2"`, `linters.default: standard`, enable `errcheck govet ineffassign staticcheck unused` plus `gosec` (off in the standard set, so no security lint without it) and `revive` (its `exported` rule as a warning), `run.timeout: 5m`; formatters enabled; import layering with `depguard` rules |
 | Tests | `go test -race ./...`; table tests, `httptest`, fuzzing (`lang-go-testing`) |
-| Vulnerabilities | `govulncheck ./...` |
+| Vulnerabilities | Project-pinned `go tool govulncheck ./...` (`go get -tool golang.org/x/vuln/cmd/govulncheck@<version>` during setup) |
+| Dead code | Optional pinned `golang.org/x/tools/cmd/deadcode`: `go tool deadcode -test ./...` for executable/test roots; whole-program reachability complements `unused`/`staticcheck`, not a library API deletion list |
+| Complexity | Optional golangci-lint v2 `gocyclo`/`gocognit`; start at 10-12/15 and ratchet reviewed exceptions |
 | Vendoring | no `vendor/` unless the user wants it |
 
 HTTP router, database access and logging: ask the user (sources are silent; `log/slog`
@@ -32,5 +34,5 @@ is the standard-library option to propose). Observability per `toolchain-quality
 ## Gate (`just check`)
 
 `go build ./...`, `golangci-lint fmt --diff`, `golangci-lint run`, `go test -race ./...`,
-`go mod tidy -diff`, `govulncheck ./...`. CI: `actions/setup-go` with
+`go mod tidy -diff`, `go tool govulncheck ./...`. CI: `actions/setup-go` with
 `go-version-file: go.mod` and `golangci/golangci-lint-action`.

@@ -15,6 +15,9 @@ and the plugin sends it as the `CONTEXT7_API_KEY` header. OpenCode does not expa
 `{env:...}` in configs a plugin sets, so the plugin reads the variable itself when
 it loads.
 
+Both speak MCP 2026-07-28, so the plugin sets `pool: true`: on OpenCode 2.2.6 and later
+every directory shares one connection to each.
+
 Both servers run in Code Mode: their tools are listed in the Code Mode catalog and
 called through `execute`, instead of each tool schema going into every request.
 

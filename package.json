@@ -17,14 +17,14 @@
     "check": "bun run typecheck && bun run lint && bun run test && bun run build:check && bun run marketplaces:check && bun run steering && bun run agent-roles && bun run descriptions"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.6.2",
-    "@opencode/client": "2.1.4",
-    "@opencode/plugin": "2.1.4",
-    "@opencode/theme": "2.1.4",
+    "@biomejs/biome": "2.6.4",
+    "@opencode/client": "2.2.6",
+    "@opencode/plugin": "2.2.6",
+    "@opencode/theme": "2.2.6",
     "@opentui/core": "0.6.8",
     "@opentui/solid": "0.6.8",
     "@types/bun": "1.4.4",
-    "solid-js": "1.9.15",
+    "solid-js": "1.9.18",
     "typescript": "7.0.2"
   }
 }

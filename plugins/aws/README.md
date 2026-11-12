@@ -5,7 +5,7 @@ on, added in AWS projects.
 
 | Skill | When |
 | --- | --- |
-| `aws-guidance` | Any AWS task: search the AWS MCP Server for a guided AWS skill first, verify API details against AWS documentation, price with `aws-pricing`, and route secrets through the `aws-secrets-manager` skill |
+| `aws-guidance` | Any AWS task: search the AWS MCP Server for a guided AWS skill first, verify API details against AWS documentation, price with `aws-pricing`, and route secrets through the `aws-secrets-manager` skill. Two references: `lambda.md` (thin handlers, one middleware model per surface, Powertools for AWS Lambda, OpenTelemetry through the ADOT layer, runtime defaults) and `service-clients.md` (when a library beats the raw SDK for DynamoDB, Valkey, S3, SQS, secrets, Cognito, RDS, OpenSearch, Kinesis, MSK and Bedrock) |
 
 ## MCP servers
 
@@ -17,7 +17,10 @@ The plugin adds the servers in [`.mcp.json`](.mcp.json), with pinned versions:
 | `aws-pricing` | `uvx --with botocore[crt] awslabs.aws-pricing-mcp-server@1.1.1`, with `AWS_REGION=us-east-1` | AWS Price List queries in `us-east-1` and Terraform or CDK cost analysis. The `botocore[crt]` extra loads credentials created by `aws login` |
 
 In OpenCode both run in Code Mode with a 120 s startup timeout, since the first start
-downloads the `uvx` environment, and `aws-mcp` gets a 100 s execution timeout.
+downloads the `uvx` environment, and `aws-mcp` gets a 100 s execution timeout. `aws-pricing` speaks MCP 2026-07-28 and
+needs no project directory, so it runs from `~` with `pool: true`: on OpenCode 2.2.6 and
+later one process serves every directory. `aws-mcp` negotiates an older protocol and
+stays one per directory.
 
 Prerequisites: `uv` on `PATH`, and AWS credentials in the default chain for
 authenticated calls (set `AWS_PROFILE` before starting OpenCode to pick a profile).

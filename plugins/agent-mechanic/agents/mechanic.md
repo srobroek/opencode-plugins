@@ -1,6 +1,7 @@
 ---
 description: "Mechanical edits: renames, bulk edits, formatting, moving code. Does exactly the described change, runs the check, reports."
 mode: subagent
+steps: 60
 request:
   headers:
     x-opencode-model-role: cheap

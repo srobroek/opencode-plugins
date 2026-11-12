@@ -108,7 +108,7 @@ function docsServers(env = process.env) {
     openaiDeveloperDocs: { type: "http", url: OPENAI_DOCS_URL }
   };
 }
-var EXTRA = { context7: { oauth: false }, openaiDeveloperDocs: { oauth: false } };
+var EXTRA = { context7: { oauth: false, pool: true }, openaiDeveloperDocs: { oauth: false, pool: true } };
 async function setupDocs(ctx, env = process.env) {
   const options = parseMcpOptions(ctx.options);
   const { registration } = await registerMcp(ctx, docsServers(env), options, { off: OFF_BY_DEFAULT, extra: EXTRA, env });

@@ -8,6 +8,7 @@
 import { readFileSync } from "node:fs"
 import { isAbsolute, resolve } from "node:path"
 import { hasAttribution } from "./attribution.ts"
+import { CHECK_FAILED_MESSAGE, NESTING_MESSAGE, OP_MESSAGE, opGuard } from "./op-guard.ts"
 import {
   base,
   type Command,
@@ -21,9 +22,16 @@ import {
   wtInvocation,
 } from "./shell.ts"
 
-export type GuardID = "indirection" | "remote-exec" | "attribution" | "worktree-tmp" | "git-defender"
+export type GuardID = "indirection" | "remote-exec" | "attribution" | "worktree-tmp" | "git-defender" | "op-guard"
 
-export const GUARD_IDS: readonly GuardID[] = ["indirection", "remote-exec", "attribution", "worktree-tmp", "git-defender"]
+export const GUARD_IDS: readonly GuardID[] = [
+  "indirection",
+  "remote-exec",
+  "attribution",
+  "worktree-tmp",
+  "git-defender",
+  "op-guard",
+]
 
 export type Refusal = { guard: GuardID; reason: string }
 
@@ -38,6 +46,7 @@ export const MESSAGES: Record<GuardID, string> = {
     "Blocked by safety (worktree-tmp-guard): do not create a worktree under /tmp or /private/tmp, where a container bind mount cannot see it. Use a path under $HOME, such as ~/tmp/worktrees/<repo>/<branch>.",
   "git-defender":
     "Blocked by safety (git-defender-user-only): only the user runs the Git Defender CLI. It acts under the user's corporate identity, so every subcommand is refused, read-looking ones included. Name the exact command you would have run and why, hand it to the user to run in their own terminal, and report the outcome you needed as unknown. Do not retry through eval, a wrapper, a script or a subagent.",
+  "op-guard": OP_MESSAGE,
 }
 
 const DESTRUCTIVE: ReadonlySet<string> = new Set(["rm", "rmdir", "dd", "shred", "truncate", "unlink", "wipefs"])
@@ -258,17 +267,45 @@ export type GuardOptions = {
   /** Guards to skip. */
   disabled?: ReadonlySet<GuardID>
   read?: FileReader
+  /** Extra `op` subcommand prefixes the op-guard allows, such as "vault list". */
+  opAllow?: readonly string[]
+  /** Test seam: replaces the op-guard analysis. */
+  analyzeOp?: (commands: readonly Command[], allow: readonly string[] | undefined) => string | undefined
 }
 
 /** The first hard gate `source` trips, or `undefined`. */
 export function hardGate(source: string, cwd: string, options: GuardOptions = {}): Refusal | undefined {
   const on = (guard: GuardID) => options.disabled?.has(guard) !== true
-  const { commands } = walkShell(source)
   const refuse = (guard: GuardID): Refusal => ({ guard, reason: MESSAGES[guard] })
-  if (on("git-defender") && commands.some(gitDefender)) return refuse("git-defender")
-  if (on("remote-exec") && remoteExec(commands)) return refuse("remote-exec")
-  if (on("indirection") && commands.some(indirection)) return refuse("indirection")
-  if (on("attribution") && attribution(commands, cwd, options.read)) return refuse("attribution")
-  if (on("worktree-tmp") && commands.some((command) => worktreeTmp(command, cwd))) return refuse("worktree-tmp")
+  // The other gates fail open (the caller treats a throw as "allow"); op-guard fails closed, so it
+  // runs on its own and a throw above never skips it.
+  let failure: { error: unknown } | undefined
+  let refusal: Refusal | undefined
+  try {
+    const { commands } = walkShell(source)
+    if (on("git-defender") && commands.some(gitDefender)) refusal = refuse("git-defender")
+    else if (on("remote-exec") && remoteExec(commands)) refusal = refuse("remote-exec")
+    else if (on("indirection") && commands.some(indirection)) refusal = refuse("indirection")
+    else if (on("attribution") && attribution(commands, cwd, options.read)) refusal = refuse("attribution")
+    else if (on("worktree-tmp") && commands.some((command) => worktreeTmp(command, cwd)))
+      refusal = refuse("worktree-tmp")
+  } catch (error) {
+    failure = { error }
+  }
+  if (refusal !== undefined) return refusal
+  if (on("op-guard")) {
+    let reason: string
+    try {
+      const analyze = options.analyzeOp ?? opGuard
+      const walk = walkShell(source)
+      // An unfinished walk hides commands; refuse when `op` or `fnox` could be among them.
+      if (!walk.complete && /\b(?:op|fnox)\b/.test(source)) reason = NESTING_MESSAGE
+      else reason = analyze(walk.commands, options.opAllow) ?? ""
+    } catch {
+      reason = CHECK_FAILED_MESSAGE
+    }
+    if (reason !== "") return { guard: "op-guard", reason }
+  }
+  if (failure !== undefined) throw failure.error
   return undefined
 }

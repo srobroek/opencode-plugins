@@ -1,6 +1,7 @@
 ---
 description: "Lands one reviewed PR via delivery_land with exact-head approval and green checks, closes its beads, runs delivery_cleanup."
 mode: subagent
+steps: 60
 hidden: true
 model: "amazon-bedrock/global.anthropic.claude-sonnet-5-5#medium"
 request:

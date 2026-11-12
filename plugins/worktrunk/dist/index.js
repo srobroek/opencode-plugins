@@ -298,8 +298,13 @@ function readOption(words, at, wrapper) {
   return null;
 }
 function commandWords(input) {
+  const { argv, directories } = stripWrappers(input);
+  return { argv, directories };
+}
+function stripWrappers(input) {
   const words = [...input];
   const directories = [];
+  const wrappers = [];
   let i = 0;
   while (i < words.length) {
     const word = words[i];
@@ -310,6 +315,7 @@ function commandWords(input) {
     const wrapper = WRAPPERS.get(word.slice(word.lastIndexOf("/") + 1));
     if (wrapper === undefined)
       break;
+    wrappers.push(word.slice(word.lastIndexOf("/") + 1));
     i++;
     while (i < words.length) {
       const option = words[i];
@@ -325,13 +331,13 @@ function commandWords(input) {
         break;
       const read = readOption(words, i, wrapper);
       if (read === "lookup")
-        return { argv: [], directories };
+        return { argv: [], directories, wrappers };
       if (read === null) {
         i++;
         continue;
       }
       if (read.value === undefined)
-        return { argv: [], directories };
+        return { argv: [], directories, wrappers };
       if (wrapper.split?.has(read.name)) {
         words.splice(i, read.span, ...tokenizeShell(read.value).map((token) => token.value));
         continue;
@@ -342,9 +348,9 @@ function commandWords(input) {
     }
     i += Math.min(wrapper.operands ?? 0, words.length - i);
   }
-  return { argv: words.slice(i), directories };
+  return { argv: words.slice(i), directories, wrappers };
 }
-// node_modules/.bun/smol-toml@1.9.0/node_modules/smol-toml/dist/error.js
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/error.js
 /*!
  * Copyright (c) Squirrel Chat et al., All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause
@@ -373,7 +379,7 @@ function commandWords(input) {
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-// node_modules/.bun/smol-toml@1.9.0/node_modules/smol-toml/dist/primitive.js
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/primitive.js
 /*!
  * Copyright (c) Squirrel Chat et al., All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause
@@ -402,7 +408,7 @@ function commandWords(input) {
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-// node_modules/.bun/smol-toml@1.9.0/node_modules/smol-toml/dist/date.js
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/date.js
 /*!
  * Copyright (c) Squirrel Chat et al., All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause
@@ -431,7 +437,7 @@ function commandWords(input) {
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-// node_modules/.bun/smol-toml@1.9.0/node_modules/smol-toml/dist/extract.js
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/extract.js
 /*!
  * Copyright (c) Squirrel Chat et al., All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause
@@ -460,7 +466,7 @@ function commandWords(input) {
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-// node_modules/.bun/smol-toml@1.9.0/node_modules/smol-toml/dist/util.js
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/util.js
 /*!
  * Copyright (c) Squirrel Chat et al., All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause
@@ -489,7 +495,7 @@ function commandWords(input) {
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-// node_modules/.bun/smol-toml@1.9.0/node_modules/smol-toml/dist/struct.js
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/struct.js
 /*!
  * Copyright (c) Squirrel Chat et al., All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause
@@ -518,7 +524,7 @@ function commandWords(input) {
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-// node_modules/.bun/smol-toml@1.9.0/node_modules/smol-toml/dist/parse.js
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/parse.js
 /*!
  * Copyright (c) Squirrel Chat et al., All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause
@@ -547,7 +553,7 @@ function commandWords(input) {
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-// node_modules/.bun/smol-toml@1.9.0/node_modules/smol-toml/dist/stringify.js
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/stringify.js
 /*!
  * Copyright (c) Squirrel Chat et al., All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause
@@ -577,7 +583,7 @@ function commandWords(input) {
  */
 var HAS_WELLFORMED = !!"".isWellFormed;
 
-// node_modules/.bun/smol-toml@1.9.0/node_modules/smol-toml/dist/index.js
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/index.js
 /*!
  * Copyright (c) Squirrel Chat et al., All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause
@@ -618,13 +624,14 @@ function leadingCdCwd(command, cwd) {
     return cwd;
   return dir.startsWith("/") ? dir : resolve(cwd, dir);
 }
-function scanShell(source) {
+function scanShell(source, options = {}) {
   const items = [];
   const substitutions = [];
   let complete = true;
   let command = { kind: "command", words: [], redirects: [], hereDocuments: [] };
   let word;
   let target;
+  let targetHereString = false;
   const pending = [];
   const append = (at, text, quoted = false, expands = false) => {
     word ??= { start: at, value: "", quoted: false, expands: false };
@@ -643,6 +650,8 @@ function scanShell(source) {
     const done = { start: word.start, end, value: word.value, quoted: word.quoted, expands: word.expands };
     word = undefined;
     if (target !== undefined) {
+      if (targetHereString)
+        done.hereString = true;
       command.redirects.push(done);
       if (target !== "redirect")
         pending.push({
@@ -668,8 +677,12 @@ function scanShell(source) {
     items.push({ kind: "operator", operator: value });
   };
   const substitution = (expansion) => {
-    if (expansion.inner !== undefined)
-      substitutions.push(expansion.inner);
+    if (expansion.inner !== undefined) {
+      if (!options.executableSubstitutionsOnly || expansion.executable)
+        substitutions.push(expansion.inner);
+      else
+        substitutions.push(...scanShell(expansion.inner, options).substitutions);
+    }
     if (!expansion.closed)
       complete = false;
   };
@@ -811,6 +824,7 @@ function scanShell(source) {
     if (ch === "&" && next === ">") {
       flush(i);
       target = "redirect";
+      targetHereString = false;
       i += source[i + 2] === ">" ? 2 : 1;
       continue;
     }
@@ -829,6 +843,7 @@ function scanShell(source) {
         word = undefined;
       else
         flush(i);
+      targetHereString = source.startsWith("<<<", i);
       if (source.startsWith("<<<", i)) {
         target = "redirect";
         i += 2;
@@ -862,6 +877,7 @@ function expansionAt(text, at) {
     return {
       end: closed ? j + 1 : text.length,
       inner: text.slice(at + 1, Math.min(j, text.length)),
+      executable: true,
       expands: true,
       closed
     };
@@ -873,6 +889,7 @@ function expansionAt(text, at) {
     return {
       end: closed ? close + 1 : text.length,
       inner: text.slice(at + 2, closed ? close : text.length),
+      executable: next === "(" && text[at + 2] !== "(",
       expands: true,
       closed
     };

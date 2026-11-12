@@ -553,13 +553,14 @@ function leadingCdCwd(command, cwd) {
     return cwd;
   return dir.startsWith("/") ? dir : resolve(cwd, dir);
 }
-function scanShell(source) {
+function scanShell(source, options = {}) {
   const items = [];
   const substitutions = [];
   let complete = true;
   let command = { kind: "command", words: [], redirects: [], hereDocuments: [] };
   let word;
   let target;
+  let targetHereString = false;
   const pending = [];
   const append = (at, text, quoted = false, expands = false) => {
     word ??= { start: at, value: "", quoted: false, expands: false };
@@ -578,6 +579,8 @@ function scanShell(source) {
     const done = { start: word.start, end, value: word.value, quoted: word.quoted, expands: word.expands };
     word = undefined;
     if (target !== undefined) {
+      if (targetHereString)
+        done.hereString = true;
       command.redirects.push(done);
       if (target !== "redirect")
         pending.push({
@@ -603,8 +606,12 @@ function scanShell(source) {
     items.push({ kind: "operator", operator: value });
   };
   const substitution = (expansion) => {
-    if (expansion.inner !== undefined)
-      substitutions.push(expansion.inner);
+    if (expansion.inner !== undefined) {
+      if (!options.executableSubstitutionsOnly || expansion.executable)
+        substitutions.push(expansion.inner);
+      else
+        substitutions.push(...scanShell(expansion.inner, options).substitutions);
+    }
     if (!expansion.closed)
       complete = false;
   };
@@ -746,6 +753,7 @@ function scanShell(source) {
     if (ch === "&" && next === ">") {
       flush(i);
       target = "redirect";
+      targetHereString = false;
       i += source[i + 2] === ">" ? 2 : 1;
       continue;
     }
@@ -764,6 +772,7 @@ function scanShell(source) {
         word = undefined;
       else
         flush(i);
+      targetHereString = source.startsWith("<<<", i);
       if (source.startsWith("<<<", i)) {
         target = "redirect";
         i += 2;
@@ -797,6 +806,7 @@ function expansionAt(text, at) {
     return {
       end: closed ? j + 1 : text.length,
       inner: text.slice(at + 1, Math.min(j, text.length)),
+      executable: true,
       expands: true,
       closed
     };
@@ -808,6 +818,7 @@ function expansionAt(text, at) {
     return {
       end: closed ? close + 1 : text.length,
       inner: text.slice(at + 2, closed ? close : text.length),
+      executable: next === "(" && text[at + 2] !== "(",
       expands: true,
       closed
     };

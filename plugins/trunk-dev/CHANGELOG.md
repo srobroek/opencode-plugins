@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.6.0](https://github.com/srobroek/opencode-plugins/compare/trunk-dev--v0.5.0...trunk-dev--v0.6.0) (2026-11-12)
+
+
+### Features
+
+* **safety:** refuse direct 1Password reads and literal secrets in commands, pointing to fnox ([#131](https://github.com/srobroek/opencode-plugins/issues/131)) ([36cd391](https://github.com/srobroek/opencode-plugins/commit/36cd3912e954c1078b808802b069d7010d8f319f))
+
+## [0.5.0](https://github.com/srobroek/opencode-plugins/compare/trunk-dev--v0.4.0...trunk-dev--v0.5.0) (2026-11-11)
+
+
+### Features
+
+* **quality:** require quality-code-design only for new behavior, refactors, hard bugs and reviews ([#125](https://github.com/srobroek/opencode-plugins/issues/125)) ([774d73f](https://github.com/srobroek/opencode-plugins/commit/774d73f64e9966cdd1bbad40c13f152d17f2c61d))
+
+## [0.4.0](https://github.com/srobroek/opencode-plugins/compare/trunk-dev--v0.3.0...trunk-dev--v0.4.0) (2026-11-11)
+
+
+### Features
+
+* **agent-efficiency:** add lead routing, a foreground sleep guard and subagent scratch reminders ([#122](https://github.com/srobroek/opencode-plugins/issues/122)) ([34bdb2d](https://github.com/srobroek/opencode-plugins/commit/34bdb2d512109065956f88397bd2dc8e6e99ecd3))
+
 ## [0.3.0](https://github.com/srobroek/opencode-plugins/compare/trunk-dev--v0.2.1...trunk-dev--v0.3.0) (2026-10-30)
 
 

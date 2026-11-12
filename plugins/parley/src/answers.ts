@@ -82,7 +82,8 @@ export function validateValue(question: Question, value: unknown): { value: unkn
       if (other !== undefined && question.allow_other === false) return fail("free-text answer not allowed")
       const count = unique.length + (other === undefined ? 0 : 1)
       if (question.min !== undefined && count < question.min) return fail(`pick at least ${question.min}`)
-      if (question.max !== undefined && count > question.max) return fail(`pick at most ${question.max}`)
+      // `max` caps the listed options; a free-text answer may come on top.
+      if (question.max !== undefined && unique.length > question.max) return fail(`pick at most ${question.max}`)
       return { value: other === undefined ? { selected: unique } : { selected: unique, other } }
     }
     case "confirm":

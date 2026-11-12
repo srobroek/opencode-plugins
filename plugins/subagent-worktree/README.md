@@ -16,7 +16,7 @@ the `wt` strategy when the [worktrunk](../worktrunk) plugin is loaded, OpenCode'
 
 | Option | Default | Effect |
 | --- | --- | --- |
-| `agents` | `["implementer", "implementer-high", "general"]` | Agents (id or name) whose subagent calls get a worktree. |
+| `agents` | `["coder", "implementer", "implementer-high", "general"]` | Agents (id or name) whose subagent calls get a worktree. |
 | `base` | `"HEAD"` | Ref the worktree starts from, resolved in the caller's checkout. |
 
 ```jsonc
@@ -29,14 +29,18 @@ the `wt` strategy when the [worktrunk](../worktrunk) plugin is loaded, OpenCode'
 
 The plugin adds an optional `worktree` argument to the built-in `subagent` tool: the path (or a
 path inside it), the branch, or the directory name of an existing worktree of the caller's
-repository, as `git worktree list` reports it. Anything else is refused, as is `worktree` together
-with `sessionID`. The argument is removed before the built-in tool runs.
+repository, as `git worktree list` reports it. Unknown worktrees are refused on new spawns.
+Omit the argument for the default behavior. On resumes (`sessionID`), `worktree` is ignored:
+the session keeps its directory and the result explains that the argument was ignored.
+The argument is removed before the built-in tool runs.
 
 | Caller passes | Read-only or not opted-in agent | Opted-in writer |
 | --- | --- | --- |
 | `worktree` | a child session moved into that worktree before it starts | a fresh worktree branched from that worktree's `HEAD`, merged back into its branch |
 | `worktree: false` | the caller's directory | the caller's directory, without a lane |
-| nothing | the caller's directory | a fresh worktree branched from the caller's checkout |
+| nothing, clean tracked files | the caller's directory | a fresh worktree branched from the caller's checkout |
+| nothing, uncommitted tracked changes | the caller's directory | the caller's directory, without a lane; the result explains why |
+| `sessionID` with `worktree` | the resumed session's directory; `worktree` is ignored | the resumed session's directory; `worktree` is ignored |
 
 Child sessions start in the parent session's location, so a parent that already runs in a worktree
 (for example after `session_move`) passes it on without `worktree`. A child moved into a worktree
@@ -45,6 +49,11 @@ they do not ask for `external_directory`. With `worktree`, a writer branches fro
 `HEAD` even when `base` names another ref. Naming the worktree the caller is already in changes
 nothing. A writer that is not isolated (for example, one a child session spawns) runs in the named
 worktree like a read-only agent.
+
+Automatic lanes contain committed files, not the caller's uncommitted edits. When the caller's
+checkout has staged or unstaged changes to tracked files, automatic writers run in place.
+Untracked files alone do not skip isolation. Passing a worktree path or branch forces a lane
+for an otherwise eligible writer, even if the caller's checkout is dirty; those edits are not copied.
 
 ### Writers
 
@@ -70,7 +79,7 @@ Otherwise it:
 `execute.after` on `subagent` appends a `<subagent-worktree>` block to the result with the branch,
 base, target, commit count, a diff command and how to merge. When the child finished with no
 commits and a clean tree, the child moves back to the parent's directory before the worktree is
-removed. Continuing such a child later gives it a fresh worktree. Background runs are left alone
+removed. Continuing such a child later without `worktree` gives it a fresh worktree. Background runs are left alone
 until merged. A lane with no commits but uncommitted changes gets a warning: its work exists only
 in the worktree, so continue the subagent and ask it to commit.
 

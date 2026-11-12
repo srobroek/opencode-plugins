@@ -1,7 +1,7 @@
 {
   "name": "ast-grep",
-  "version": "0.2.0",
-  "description": "Structural code search with ast-grep: the ast-grep MCP server and a skill on patterns, preview-only rewrites and language-server CLI checks.",
+  "version": "1.0.0",
+  "description": "Structural code search with the ast-grep CLI, plus when to use Semgrep or rust-analyzer instead.",
   "author": {
     "name": "Sjors Robroek",
     "url": "https://github.com/srobroek"
@@ -10,10 +10,9 @@
   "repository": "https://github.com/srobroek/opencode-plugins",
   "license": "Apache-2.0",
   "skills": "./skills/",
-  "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Ast Grep",
-    "shortDescription": "Structural code search with ast-grep: the ast-grep MCP server and a skill on patterns, preview-only rewrites and language-server CLI checks.",
+    "shortDescription": "Structural code search with the ast-grep CLI, plus when to use Semgrep or rust-analyzer instead.",
     "developerName": "Sjors Robroek",
     "category": "development"
   }

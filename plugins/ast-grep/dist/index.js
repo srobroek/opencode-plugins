@@ -3,7 +3,6 @@
 // plugins/ast-grep/src/index.ts
 import { accessSync, constants, statSync } from "fs";
 import { delimiter, join as join3 } from "path";
-import { fileURLToPath as fileURLToPath2 } from "url";
 import { Plugin as Plugin2 } from "@opencode/plugin";
 
 // plugins/lib/src/content-plugin.ts
@@ -102,141 +101,8 @@ function contentPaths(moduleUrl) {
   };
 }
 
-// plugins/lib/src/mcp.ts
-import { existsSync as existsSync3, readFileSync as readFileSync3 } from "fs";
-var MCP_MODES = ["auto", "always", "off"];
-var isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
-var isStringRecord = (value) => isRecord(value) && Object.values(value).every((entry) => typeof entry === "string");
-function parseMcpJson(text, where = ".mcp.json") {
-  const document = JSON.parse(text);
-  if (!isRecord(document))
-    throw new Error(`${where}: expected an object`);
-  const servers = document.mcpServers ?? {};
-  if (!isRecord(servers))
-    throw new Error(`${where}: mcpServers must be an object`);
-  const result = {};
-  for (const [name, server] of Object.entries(servers)) {
-    const at = `${where}: ${name}`;
-    if (!isRecord(server))
-      throw new Error(`${at}: expected an object`);
-    const type = server.type ?? (server.url === undefined ? "stdio" : "http");
-    if (type !== "stdio" && type !== "http" && type !== "sse")
-      throw new Error(`${at}: unknown type ${String(type)}`);
-    if (type === "stdio") {
-      if (typeof server.command !== "string" || server.command === "")
-        throw new Error(`${at}: command is required`);
-      if (server.args !== undefined && !(Array.isArray(server.args) && server.args.every((a) => typeof a === "string")))
-        throw new Error(`${at}: args must be strings`);
-      if (server.env !== undefined && !isStringRecord(server.env))
-        throw new Error(`${at}: env must map to strings`);
-      if (server.cwd !== undefined && typeof server.cwd !== "string")
-        throw new Error(`${at}: cwd must be a string`);
-    } else {
-      if (typeof server.url !== "string" || server.url === "")
-        throw new Error(`${at}: url is required`);
-      if (server.headers !== undefined && !isStringRecord(server.headers))
-        throw new Error(`${at}: headers must map to strings`);
-    }
-    result[name] = { ...server, type };
-  }
-  return result;
-}
-function loadMcpJson(path) {
-  if (!existsSync3(path))
-    return {};
-  return parseMcpJson(readFileSync3(path, "utf8"), path);
-}
-var VARIABLE = /\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}/g;
-function expandVars(value, env, missing) {
-  return value.replace(VARIABLE, (_, name, fallback) => {
-    const found = env[name];
-    if (found !== undefined && found !== "")
-      return found;
-    if (fallback !== undefined)
-      return fallback;
-    if (found === undefined)
-      missing.add(name);
-    return "";
-  });
-}
-var expandRecord = (record, env, missing) => record === undefined ? undefined : Object.fromEntries(Object.entries(record).map(([key, value]) => [key, expandVars(value, env, missing)]));
-function toOpenCode(server, env) {
-  const missing = new Set;
-  let config;
-  if (server.type === "http" || server.type === "sse" || server.type === undefined && server.url !== undefined) {
-    const headers = expandRecord(server.headers, env, missing);
-    config = {
-      type: "remote",
-      url: expandVars(server.url ?? "", env, missing),
-      ...headers === undefined ? {} : { headers },
-      codemode: true
-    };
-  } else {
-    const environment = expandRecord(server.env, env, missing);
-    config = {
-      type: "local",
-      command: [server.command ?? "", ...server.args ?? []].map((part) => expandVars(part, env, missing)),
-      ...server.cwd === undefined ? {} : { cwd: expandVars(server.cwd, env, missing) },
-      ...environment === undefined ? {} : { environment },
-      codemode: true
-    };
-  }
-  if (missing.size > 0)
-    return { missing: [...missing].sort() };
-  return { config };
-}
-function parseMcpOptions(options) {
-  const mode = MCP_MODES.includes(options?.mcp) ? options?.mcp : "auto";
-  const servers = {};
-  if (isRecord(options?.mcpServers)) {
-    for (const [name, value] of Object.entries(options.mcpServers))
-      if (typeof value === "boolean")
-        servers[name] = value;
-  }
-  return { mode, servers };
-}
-function planMcp(servers, options, settings = {}) {
-  const plan = { add: [], skipped: [] };
-  const names = Object.keys(servers);
-  const skipAll = (reason) => ({ add: [], skipped: names.map((name) => ({ name, reason })) });
-  if (options.mode === "off")
-    return skipAll("mcp is off");
-  if (options.mode === "auto" && settings.relevant !== undefined && !settings.relevant())
-    return skipAll("not relevant here");
-  const off = new Set(settings.off ?? []);
-  for (const name of names) {
-    const server = servers[name];
-    if (!(options.servers[name] ?? !off.has(name))) {
-      plan.skipped.push({ name, reason: "turned off" });
-      continue;
-    }
-    const converted = toOpenCode(server, settings.env ?? process.env);
-    if ("missing" in converted) {
-      plan.skipped.push({ name, reason: `unset ${converted.missing.join(", ")}` });
-      continue;
-    }
-    plan.add.push([name, { ...converted.config, ...settings.extra?.[name] }]);
-  }
-  return plan;
-}
-function applyMcp(editor, add) {
-  for (const [name, config] of add) {
-    if (editor.get(name) !== undefined)
-      continue;
-    editor.set(name, structuredClone(config));
-  }
-}
-async function registerMcp(ctx, servers, options, settings = {}) {
-  const plan = planMcp(servers, options, settings);
-  if (plan.add.length === 0)
-    return { registration: { dispose: async () => {} }, plan };
-  const registration = await ctx.mcp.transform((editor) => applyMcp(editor, plan.add));
-  return { registration, plan };
-}
-
 // plugins/ast-grep/src/index.ts
 var SOURCE = "srobroek.ast-grep";
-var SERVER = "ast-grep";
 var isExecutable = (path) => {
   try {
     if (!statSync(path).isFile())
@@ -263,34 +129,20 @@ function astGrepAvailable(env = process.env, executable = isExecutable, platform
     return true;
   return onPath("ast-grep", env, executable, platform);
 }
-var EXTRA = { [SERVER]: { timeout: { startup: 120000 } } };
 var warned = false;
 async function setupAstGrep(ctx, moduleUrl, overrides = {}) {
   const env = overrides.env ?? process.env;
   const { skills } = contentPaths(moduleUrl);
-  const registrations = [];
-  const cleanup = async () => {
-    for (const registration of registrations.reverse())
-      await registration.dispose();
-  };
-  try {
-    if (skills.length > 0)
-      registrations.push(await registerSkills(ctx.skill, skills));
-    const servers = loadMcpJson(fileURLToPath2(new URL("../.mcp.json", moduleUrl)));
-    const options = parseMcpOptions(ctx.options);
-    const available = overrides.available ?? (() => astGrepAvailable(env));
-    const mcp = await registerMcp(ctx, servers, options, { relevant: available, extra: EXTRA, env });
-    registrations.push(mcp.registration);
-    if (!warned && mcp.plan.skipped.some((skip) => skip.reason === "not relevant here")) {
-      warned = true;
-      const warn = overrides.warn ?? ((text) => console.warn(text));
-      warn(`${SOURCE}: ast-grep is not on PATH, so the ${SERVER} MCP server is not added; install ast-grep and run /reload`);
-    }
-  } catch (error) {
-    await cleanup();
-    throw error;
+  const registration = skills.length > 0 ? await registerSkills(ctx.skill, skills) : undefined;
+  const available = overrides.available ?? (() => astGrepAvailable(env));
+  if (!warned && !available()) {
+    warned = true;
+    const warn = overrides.warn ?? ((text) => console.warn(text));
+    warn(`${SOURCE}: ast-grep is not on PATH, so the ast-grep-search skill falls back to grep; install ast-grep and run /reload`);
   }
-  return cleanup;
+  return async () => {
+    await registration?.dispose();
+  };
 }
 function resetWarning() {
   warned = false;
@@ -303,8 +155,6 @@ function createPlugin(overrides = {}) {
 }
 var src_default = createPlugin();
 export {
-  EXTRA,
-  SERVER,
   SOURCE,
   astGrepAvailable,
   createPlugin,

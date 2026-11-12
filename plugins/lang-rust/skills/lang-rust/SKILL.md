@@ -11,6 +11,7 @@ skill, not from this table.
 
 | Situation | Load skill |
 | --- | --- |
+| Choosing a library or tool, or about to write your own code for a common concern (web, data, messaging, AWS, MCP, telemetry, CLI, testing, security) | `lang-rust-libraries` |
 | Running Rust format, lint (clippy) or test checks | `lang-rust-quality` |
 | Writing or fixing Rust tests: unit and integration layout, nextest, doc tests, proptest, insta snapshots, tokio | `lang-rust-testing` |
 | Splitting crates, `lib.rs` facades, Cargo workspace layout, workspace lints and dependencies, feature-gated dev code | `lang-rust-packaging` |

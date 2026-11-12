@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/srobroek/opencode-plugins/compare/docs--v0.2.0...docs--v0.3.0) (2026-11-10)
+
+
+### Features
+
+* **docs:** pool the context7 and OpenAI docs MCP connections ([299e6aa](https://github.com/srobroek/opencode-plugins/commit/299e6aac6650815222386941071369ef8a0480e6))
+
 ## [0.2.0](https://github.com/srobroek/opencode-plugins/compare/docs--v0.1.0...docs--v0.2.0) (2026-10-27)
 
 

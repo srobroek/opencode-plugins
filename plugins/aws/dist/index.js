@@ -369,7 +369,7 @@ async function setupAws(ctx, moduleUrl) {
       relevant: isAwsProject,
       extra: {
         "aws-mcp": { timeout: { startup: 120000, execution: 1e5 } },
-        "aws-pricing": { timeout: { startup: 120000 } }
+        "aws-pricing": { timeout: { startup: 120000 }, cwd: "~", pool: true }
       }
     });
     registrations.push(mcp.registration);

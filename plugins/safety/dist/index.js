@@ -317,8 +317,16 @@ function readOption(words, at, wrapper) {
   return null;
 }
 function commandWords(input) {
+  const { argv, directories } = stripWrappers(input);
+  return { argv, directories };
+}
+function commandWrappers(input) {
+  return stripWrappers(input).wrappers;
+}
+function stripWrappers(input) {
   const words = [...input];
   const directories = [];
+  const wrappers = [];
   let i = 0;
   while (i < words.length) {
     const word = words[i];
@@ -329,6 +337,7 @@ function commandWords(input) {
     const wrapper = WRAPPERS.get(word.slice(word.lastIndexOf("/") + 1));
     if (wrapper === undefined)
       break;
+    wrappers.push(word.slice(word.lastIndexOf("/") + 1));
     i++;
     while (i < words.length) {
       const option = words[i];
@@ -344,13 +353,13 @@ function commandWords(input) {
         break;
       const read = readOption(words, i, wrapper);
       if (read === "lookup")
-        return { argv: [], directories };
+        return { argv: [], directories, wrappers };
       if (read === null) {
         i++;
         continue;
       }
       if (read.value === undefined)
-        return { argv: [], directories };
+        return { argv: [], directories, wrappers };
       if (wrapper.split?.has(read.name)) {
         words.splice(i, read.span, ...tokenizeShell(read.value).map((token) => token.value));
         continue;
@@ -361,9 +370,9 @@ function commandWords(input) {
     }
     i += Math.min(wrapper.operands ?? 0, words.length - i);
   }
-  return { argv: words.slice(i), directories };
+  return { argv: words.slice(i), directories, wrappers };
 }
-// node_modules/.bun/smol-toml@1.9.0/node_modules/smol-toml/dist/error.js
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/error.js
 /*!
  * Copyright (c) Squirrel Chat et al., All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause
@@ -392,7 +401,7 @@ function commandWords(input) {
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-// node_modules/.bun/smol-toml@1.9.0/node_modules/smol-toml/dist/primitive.js
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/primitive.js
 /*!
  * Copyright (c) Squirrel Chat et al., All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause
@@ -421,7 +430,7 @@ function commandWords(input) {
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-// node_modules/.bun/smol-toml@1.9.0/node_modules/smol-toml/dist/date.js
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/date.js
 /*!
  * Copyright (c) Squirrel Chat et al., All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause
@@ -450,7 +459,7 @@ function commandWords(input) {
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-// node_modules/.bun/smol-toml@1.9.0/node_modules/smol-toml/dist/extract.js
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/extract.js
 /*!
  * Copyright (c) Squirrel Chat et al., All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause
@@ -479,7 +488,7 @@ function commandWords(input) {
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-// node_modules/.bun/smol-toml@1.9.0/node_modules/smol-toml/dist/util.js
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/util.js
 /*!
  * Copyright (c) Squirrel Chat et al., All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause
@@ -508,7 +517,7 @@ function commandWords(input) {
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-// node_modules/.bun/smol-toml@1.9.0/node_modules/smol-toml/dist/struct.js
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/struct.js
 /*!
  * Copyright (c) Squirrel Chat et al., All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause
@@ -537,7 +546,7 @@ function commandWords(input) {
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-// node_modules/.bun/smol-toml@1.9.0/node_modules/smol-toml/dist/parse.js
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/parse.js
 /*!
  * Copyright (c) Squirrel Chat et al., All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause
@@ -566,7 +575,7 @@ function commandWords(input) {
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-// node_modules/.bun/smol-toml@1.9.0/node_modules/smol-toml/dist/stringify.js
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/stringify.js
 /*!
  * Copyright (c) Squirrel Chat et al., All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause
@@ -596,7 +605,7 @@ function commandWords(input) {
  */
 var HAS_WELLFORMED = !!"".isWellFormed;
 
-// node_modules/.bun/smol-toml@1.9.0/node_modules/smol-toml/dist/index.js
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/index.js
 /*!
  * Copyright (c) Squirrel Chat et al., All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause
@@ -637,13 +646,14 @@ function leadingCdCwd(command, cwd) {
     return cwd;
   return dir.startsWith("/") ? dir : resolve(cwd, dir);
 }
-function scanShell(source) {
+function scanShell(source, options = {}) {
   const items = [];
   const substitutions = [];
   let complete = true;
   let command = { kind: "command", words: [], redirects: [], hereDocuments: [] };
   let word;
   let target;
+  let targetHereString = false;
   const pending = [];
   const append = (at, text, quoted = false, expands = false) => {
     word ??= { start: at, value: "", quoted: false, expands: false };
@@ -662,6 +672,8 @@ function scanShell(source) {
     const done = { start: word.start, end, value: word.value, quoted: word.quoted, expands: word.expands };
     word = undefined;
     if (target !== undefined) {
+      if (targetHereString)
+        done.hereString = true;
       command.redirects.push(done);
       if (target !== "redirect")
         pending.push({
@@ -687,8 +699,12 @@ function scanShell(source) {
     items.push({ kind: "operator", operator: value });
   };
   const substitution = (expansion) => {
-    if (expansion.inner !== undefined)
-      substitutions.push(expansion.inner);
+    if (expansion.inner !== undefined) {
+      if (!options.executableSubstitutionsOnly || expansion.executable)
+        substitutions.push(expansion.inner);
+      else
+        substitutions.push(...scanShell(expansion.inner, options).substitutions);
+    }
     if (!expansion.closed)
       complete = false;
   };
@@ -830,6 +846,7 @@ function scanShell(source) {
     if (ch === "&" && next === ">") {
       flush(i);
       target = "redirect";
+      targetHereString = false;
       i += source[i + 2] === ">" ? 2 : 1;
       continue;
     }
@@ -848,6 +865,7 @@ function scanShell(source) {
         word = undefined;
       else
         flush(i);
+      targetHereString = source.startsWith("<<<", i);
       if (source.startsWith("<<<", i)) {
         target = "redirect";
         i += 2;
@@ -881,6 +899,7 @@ function expansionAt(text, at) {
     return {
       end: closed ? j + 1 : text.length,
       inner: text.slice(at + 1, Math.min(j, text.length)),
+      executable: true,
       expands: true,
       closed
     };
@@ -892,6 +911,7 @@ function expansionAt(text, at) {
     return {
       end: closed ? close + 1 : text.length,
       inner: text.slice(at + 2, closed ? close : text.length),
+      executable: next === "(" && text[at + 2] !== "(",
       expands: true,
       closed
     };
@@ -1099,7 +1119,7 @@ function perlPaths(args) {
   }
   return inplace ? files : [];
 }
-function simpleCommandTargets(words) {
+function simpleCommandTargets(words, normalizeWords) {
   const redirects = [];
   const args = [];
   for (let i = 0;i < words.length; i++) {
@@ -1130,7 +1150,7 @@ function simpleCommandTargets(words) {
     if (target)
       redirects.push({ path: target });
   }
-  const { argv, directories } = commandWords(args);
+  const { argv, directories } = commandWords(normalizeWords?.(args) ?? args);
   const name = basename(argv[0] ?? "");
   const rest = argv.slice(1);
   const writes = [];
@@ -1168,7 +1188,7 @@ function cdTarget(args, cwd) {
     return null;
   return literalPath(dir, cwd) ?? null;
 }
-function shellWriteTargets(command, cwd) {
+function shellWriteTargets(command, cwd, additionalWrites, normalizeWords) {
   const out = [];
   let dir = cwd;
   const saved = [];
@@ -1192,7 +1212,7 @@ function shellWriteTargets(command, cwd) {
     words = [];
     if (segment.length === 0)
       return;
-    const { argv, directories, redirects, writes } = simpleCommandTargets(segment);
+    const { argv, directories, redirects, writes } = simpleCommandTargets(segment, normalizeWords);
     resolveInto(redirects, dir);
     if (argv[0] === "cd") {
       dir = cdTarget(argv.slice(1), dir);
@@ -1201,6 +1221,7 @@ function shellWriteTargets(command, cwd) {
     let commandDir = dir;
     for (const directory of directories)
       commandDir = literalPath(directory, commandDir) ?? null;
+    writes.push(...(additionalWrites?.(argv, commandDir) ?? []).map((path) => ({ path })));
     resolveInto(writes, commandDir);
   };
   for (const token of tokenizeShell(command, { hereDocumentSubstitutionsOnly: true })) {
@@ -1705,18 +1726,6 @@ var RESERVED = new Set([
   "until",
   "time"
 ]);
-var WRAPPER_NAMES = new Set([
-  "sudo",
-  "doas",
-  "env",
-  "nice",
-  "timeout",
-  "stdbuf",
-  "exec",
-  "command",
-  "time",
-  "nohup"
-]);
 var XARGS_VALUED = new Set(["-I", "-n", "-P", "-L", "-l", "-d", "-s", "-E", "-e", "-a"]);
 var ASSIGNMENT2 = /^[A-Za-z_][A-Za-z0-9_]*=/;
 var MAX_DEPTH = 8;
@@ -1798,14 +1807,7 @@ function walkShell(source) {
           break;
         assignments.push(value);
       }
-      const wrappers = [];
-      for (const value of values) {
-        if (ASSIGNMENT2.test(value) || value.startsWith("-"))
-          continue;
-        if (!WRAPPER_NAMES.has(base(value)))
-          break;
-        wrappers.push(base(value));
-      }
+      const wrappers = commandWrappers(values);
       const argv = commandWords(values).argv;
       const offset = values.length - argv.length;
       const aligned = argv.every((value, i) => values[offset + i] === value) ? words.slice(offset) : undefined;
@@ -2087,14 +2089,355 @@ function hasAttribution(text) {
   return ATTRIBUTION.test(text);
 }
 
-// plugins/safety/src/guards.ts
-var GUARD_IDS = ["indirection", "remote-exec", "attribution", "worktree-tmp", "git-defender"];
+// plugins/safety/src/op-guard.ts
+var OP_MESSAGE = "safety op-guard: do not call the 1Password CLI directly; each call opens a new 1Password session and asks the user to approve. Run the command through fnox, which reuses its cached session: `fnox exec -- <cmd>`, or `fnox exec --only NAME -- <cmd>`. If the secret is not declared, load the `project-secrets` skill and declare it; if it does not exist yet, ask the user to create it. To find items, run `fnox provider discover <provider> --tags project/<name>`.";
+var FNOX_DUMP_MESSAGE = "safety op-guard: this fnox command prints secret values into the transcript. Use `fnox check` or `fnox list` to inspect, and `fnox exec -- <cmd>` to use a value.";
+var LITERAL_MESSAGE = "safety op-guard: a literal secret in the command lands in the transcript; pass it from a command or variable (`credential=$(cmd)`), or pipe a JSON template to `op item create -`.";
+var FNOX_SET_MESSAGE = "safety op-guard: pipe the value into `fnox set NAME --provider host` from a command; a literal value lands in the transcript.";
+var NESTING_MESSAGE = "safety op-guard: command nesting is too deep to check; run it without nested shells";
+var CHECK_FAILED_MESSAGE = "safety op-guard: could not check this command; run `op` and fnox commands directly, without nesting";
+var MAX_NESTING = 16;
+
+class NestingTooDeep extends Error {
+}
+var OP_VALUED = new Set([
+  "--account",
+  "--config",
+  "--session",
+  "--format",
+  "--cache",
+  "--vault",
+  "--encoding"
+]);
+function isOp(name) {
+  return name === "op" || name === "op.exe";
+}
+var PLAIN_TYPES = new Set(["text", "url", "email", "date", "monthyear", "phone", "delete"]);
+var PLAIN_FIELDS = new Set(["username", "url", "notesPlain"]);
+var ITEM_VALUED = new Set([...OP_VALUED, "--title", "--category", "--url", "--tags", "--template"]);
+function commandSubstitutionEnd(text, at) {
+  let depth = 0;
+  let quote;
+  for (let i = at + 1;i < text.length; i++) {
+    const c = text[i];
+    if (c === "\\" && quote !== "'") {
+      i++;
+    } else if (quote) {
+      if (c === quote)
+        quote = undefined;
+    } else if (c === "'" || c === '"') {
+      quote = c;
+    } else if (c === "(") {
+      depth++;
+    } else if (c === ")" && --depth === 0) {
+      return i + 1;
+    }
+  }
+  return -1;
+}
+function onlyExpansions(text) {
+  let i = 0;
+  while (i < text.length) {
+    const rest = text.slice(i);
+    const simple = /^\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[^}]*\}|[0-9@*#?!$-])|^`[^`]*`/.exec(rest);
+    if (simple) {
+      i += simple[0].length;
+    } else if (rest.startsWith("$(")) {
+      const end = commandSubstitutionEnd(text, i);
+      if (end < 0)
+        return false;
+      i = end;
+    } else {
+      return false;
+    }
+  }
+  return true;
+}
+function expansionOnly(command, at, skip = 0) {
+  return command.words?.[at]?.expands !== false && onlyExpansions(command.argv[at].slice(skip));
+}
+function literalStdin(command) {
+  return command.hereDocuments.some((document) => document.quoted || !/[$`]/.test(document.body)) || command.redirects.some((word) => word.hereString === true && !(word.expands && onlyExpansions(word.value)));
+}
+function literalWriter(command) {
+  const name = base(command.argv[0]);
+  const args = command.argv.slice(1);
+  if (name === "cat")
+    return literalStdin(command);
+  if (name === "echo") {
+    const operands = args.map((_, i) => i + 1).filter((at) => !/^-[neE]+$/.test(command.argv[at]));
+    return operands.some((at) => !expansionOnly(command, at));
+  }
+  if (name === "printf") {
+    const operands = args.map((_, i) => i + 1).filter((at) => command.argv[at] !== "--");
+    const [format, ...fill] = operands;
+    if (format === undefined)
+      return false;
+    const text = command.argv[format].replace(/%(?:%|[-+ #0]*\d*(?:\.\d+)?[A-Za-z])/g, "").replace(/\\(?:[0-7]{1,3}|x[0-9a-fA-F]{1,2}|u[0-9a-fA-F]{1,4}|.)/g, "");
+    if (/[A-Za-z0-9]/.test(text) && !expansionOnly(command, format))
+      return true;
+    return fill.some((at) => !expansionOnly(command, at));
+  }
+  if (name === "jq") {
+    for (let i = 0;i < args.length; i++) {
+      if (args[i] === "--arg" || args[i] === "--argjson") {
+        if (!expansionOnly(command, i + 3))
+          return true;
+        i += 2;
+      }
+    }
+  }
+  return false;
+}
+function literalFed(command, commands) {
+  return literalStdin(command) || commands.some((other) => other.pipeline === command.pipeline && other.stage < command.stage && literalWriter(other));
+}
+function literalSecret(command, args, inheritedLiteral) {
+  if (inheritedLiteral || literalStdin(command))
+    return true;
+  const offset = command.argv.length - args.length;
+  for (let i = 0;i < args.length; i++) {
+    const arg = args[i];
+    if (ITEM_VALUED.has(arg)) {
+      i++;
+      continue;
+    }
+    const eq = arg.indexOf("=");
+    if (arg.startsWith("-") || eq < 0)
+      continue;
+    if (eq === arg.length - 1)
+      continue;
+    if (expansionOnly(command, offset + i, eq + 1))
+      continue;
+    const field = arg.slice(0, eq);
+    const typed = /^(.*)\[([^\]]*)\]$/.exec(field);
+    if (typed ? PLAIN_TYPES.has(typed[2].toLowerCase()) : PLAIN_FIELDS.has(field))
+      continue;
+    return true;
+  }
+  return false;
+}
+function allowed(words, allow) {
+  return allow.some((entry) => {
+    const prefix = entry.trim().split(/\s+/).filter(Boolean);
+    return prefix.length > 0 && prefix.every((word, i) => words[i] === word);
+  });
+}
+function opRefusal(command, allow = [], inheritedLiteral = false) {
+  if (!isOp(base(command.argv[0])))
+    return;
+  const args = command.argv.slice(1);
+  if (args.includes("--help") || args.includes("-h"))
+    return;
+  if (args.length === 1 && args[0] === "--version")
+    return;
+  const words = positionals(args, OP_VALUED);
+  if (words[0] === "whoami")
+    return;
+  if (words[0] === "item" && (words[1] === "create" || words[1] === "edit")) {
+    if (args.some((arg) => arg === "--reveal" || arg.startsWith("--reveal=")))
+      return "op";
+    return literalSecret(command, args, inheritedLiteral) ? "literal" : undefined;
+  }
+  if (words[0] === "vault" && words[1] === "create" && words[2] !== undefined)
+    return;
+  return allowed(words, allow) ? undefined : "op";
+}
+var FNOX_VALUED = new Set(["-P", "--profile", "-c", "--config", "--age-key-file"]);
+function dumpsEnvironment(command) {
+  if (command.argv.length === 0)
+    return command.wrappers.at(-1) === "env";
+  const name = base(command.argv[0]);
+  const args = command.argv.slice(1);
+  if (name === "printenv")
+    return true;
+  if (name === "set")
+    return args.length === 0;
+  if (name === "export")
+    return hasFlag(args, "p", []);
+  if (name === "declare" || name === "typeset")
+    return hasFlag(args, "x", []);
+  return false;
+}
+function walkComplete(source) {
+  const walk = walkShell(source);
+  if (!walk.complete && /\b(?:op|fnox)\b/.test(source))
+    throw new NestingTooDeep;
+  return walk.commands;
+}
+function quote2(word) {
+  return `'${word.replaceAll("'", "'\\''")}'`;
+}
+function execInner(args) {
+  const dash = args.indexOf("--");
+  if (dash >= 0)
+    return dash + 1 < args.length ? dash + 1 : -1;
+  const valued = new Set(["--only", "-i", "--if-missing", "-P", "--profile", "-c", "--config"]);
+  for (let i = 0;i < args.length; i++) {
+    const arg = args[i];
+    if (!arg.startsWith("-"))
+      return i;
+    if (valued.has(arg))
+      i++;
+  }
+  return -1;
+}
+var SET_VALUED = new Set([
+  "-d",
+  "--description",
+  "-k",
+  "--key-name",
+  "-p",
+  "--provider",
+  "--default",
+  "--file",
+  "--from-file",
+  "--generate-type",
+  "--if-missing",
+  "--length",
+  "--source"
+]);
+function plainProvider(name) {
+  const lower = name.toLowerCase();
+  return lower === "host" || lower.split(/[-_.:]/).some((part) => part === "age" || part === "keychain");
+}
+function fnoxSetRefusal(command, at, fed) {
+  const args = command.argv.slice(at + 1);
+  let provider;
+  let reads = true;
+  const positional = [];
+  const defaults = [];
+  for (let i = 0;i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--provider" || arg === "-p")
+      provider = args[++i];
+    else if (arg.startsWith("--provider="))
+      provider = arg.slice("--provider=".length);
+    else if (arg.startsWith("-p") && !arg.startsWith("--"))
+      provider = arg.slice(2);
+    else if (arg === "--default")
+      defaults.push({ at: at + 1 + ++i, skip: 0 });
+    else if (arg.startsWith("--default="))
+      defaults.push({ at: at + 1 + i, skip: "--default=".length });
+    else if (arg === "--generate" || arg === "--from-file" || arg.startsWith("--from-file=")) {
+      reads = false;
+      if (arg === "--from-file")
+        i++;
+    } else if (SET_VALUED.has(arg))
+      i++;
+    else if (!arg.startsWith("-") || arg === "-")
+      positional.push(at + 1 + i);
+  }
+  if (provider === undefined || !plainProvider(provider))
+    return;
+  const value = positional[1];
+  const defaultLiteral = defaults.some((d) => !expansionOnly(command, d.at, d.skip));
+  if (value !== undefined)
+    return expansionOnly(command, value) && !defaultLiteral ? undefined : "set";
+  if (defaultLiteral)
+    return "set";
+  return reads && fed ? "literal" : undefined;
+}
+function fnoxRefusal(command, allow = [], inherited = {
+  literal: false,
+  documents: [],
+  depth: 0
+}) {
+  if (inherited.depth > MAX_NESTING)
+    throw new NestingTooDeep;
+  if (base(command.argv[0]) !== "fnox")
+    return;
+  const argv = command.argv;
+  let at = 1;
+  for (;at < argv.length; at++) {
+    const word = argv[at];
+    const [flag] = word.split("=", 1);
+    if (FNOX_VALUED.has(flag)) {
+      if (!word.includes("="))
+        at++;
+      continue;
+    }
+    if (word.startsWith("-"))
+      continue;
+    break;
+  }
+  const sub = argv[at];
+  const args = argv.slice(at + 1);
+  if (sub === "get" || sub === "export" || sub === "env")
+    return "dump";
+  if (sub === "list" || sub === "ls" || sub === "secrets")
+    return hasFlag(args, "V", ["--values"]) ? "dump" : undefined;
+  if (sub === "set" || sub === "s")
+    return fnoxSetRefusal(command, at, inherited.literal || literalStdin(command));
+  if (sub !== "exec")
+    return;
+  const start = execInner(args);
+  if (start < 0)
+    return;
+  const first = at + 1 + start;
+  const inner = argv.slice(first);
+  const documents = [...inherited.documents, ...command.hereDocuments];
+  const literal = inherited.literal || literalStdin(command);
+  const children = walkComplete(inner.map((word, i) => wordText(command, first + i) ?? quote2(word)).join(" "));
+  const scripts = children.filter((nested) => nested.context === "top" && SHELLS.has(base(nested.argv[0]))).filter((nested) => !nested.argv.some((word) => /^-[A-Za-z]*c[A-Za-z]*$/.test(word)));
+  const bodies = scripts.length === 0 ? [] : documents.flatMap((document) => walkComplete(document.body));
+  const rest = scripts.length === 0 ? documents : [];
+  const check = (nested, fed) => {
+    if (dumpsEnvironment(nested))
+      return "dump";
+    const op = opRefusal(nested, allow, fed);
+    if (op !== undefined)
+      return op;
+    return fnoxRefusal(nested, allow, { literal: fed, documents: rest, depth: inherited.depth + 1 });
+  };
+  for (const nested of children) {
+    const found = check(nested, literal || literalFed(nested, children));
+    if (found !== undefined)
+      return found;
+  }
+  for (const nested of bodies) {
+    const found = check(nested, literalFed(nested, bodies));
+    if (found !== undefined)
+      return found;
+  }
+  return;
+}
 var MESSAGES = {
+  op: OP_MESSAGE,
+  dump: FNOX_DUMP_MESSAGE,
+  literal: LITERAL_MESSAGE,
+  set: FNOX_SET_MESSAGE
+};
+function opGuard(commands, allow = []) {
+  try {
+    for (const command of commands) {
+      const fed = literalFed(command, commands);
+      const found = opRefusal(command, allow, fed) ?? fnoxRefusal(command, allow, { literal: fed, documents: [], depth: 0 });
+      if (found !== undefined)
+        return MESSAGES[found];
+    }
+    return;
+  } catch (error) {
+    return error instanceof NestingTooDeep ? NESTING_MESSAGE : CHECK_FAILED_MESSAGE;
+  }
+}
+
+// plugins/safety/src/guards.ts
+var GUARD_IDS = [
+  "indirection",
+  "remote-exec",
+  "attribution",
+  "worktree-tmp",
+  "git-defender",
+  "op-guard"
+];
+var MESSAGES2 = {
   indirection: "Blocked by safety (bash-indirection-guard): this destructive command targets an unexpanded variable, command substitution, or backtick expression, so its path cannot be verified. Resolve the target and re-issue a literal command; a quoted variable is accepted only after a bare `--` end-of-options marker.",
   "remote-exec": "Blocked by safety (remote-exec-guard): this command would execute content fetched from the network without review: a download piped into a shell, a shell or `eval` running a fetch's output, or a netcat invocation with an exec flag. Download to a file, inspect it, and run only an explicitly reviewed script.",
   attribution: "Blocked by safety (attribution-guard): this commit message carries AI-assistant attribution (a Co-authored-by trailer naming an assistant, a 'Generated with' line, or an assistant noreply address). Rewrite the `-m`/`--message` text, the `--trailer`, or the file supplied to `-F`/`--file`, so the commit names only the human author.",
   "worktree-tmp": "Blocked by safety (worktree-tmp-guard): do not create a worktree under /tmp or /private/tmp, where a container bind mount cannot see it. Use a path under $HOME, such as ~/tmp/worktrees/<repo>/<branch>.",
-  "git-defender": "Blocked by safety (git-defender-user-only): only the user runs the Git Defender CLI. It acts under the user's corporate identity, so every subcommand is refused, read-looking ones included. Name the exact command you would have run and why, hand it to the user to run in their own terminal, and report the outcome you needed as unknown. Do not retry through eval, a wrapper, a script or a subagent."
+  "git-defender": "Blocked by safety (git-defender-user-only): only the user runs the Git Defender CLI. It acts under the user's corporate identity, so every subcommand is refused, read-looking ones included. Name the exact command you would have run and why, hand it to the user to run in their own terminal, and report the outcome you needed as unknown. Do not retry through eval, a wrapper, a script or a subagent.",
+  "op-guard": OP_MESSAGE
 };
 var DESTRUCTIVE = new Set(["rm", "rmdir", "dd", "shred", "truncate", "unlink", "wipefs"]);
 function destructive(name) {
@@ -2307,18 +2650,43 @@ function gitDefender(command) {
 }
 function hardGate(source, cwd, options = {}) {
   const on = (guard) => options.disabled?.has(guard) !== true;
-  const { commands } = walkShell(source);
-  const refuse = (guard) => ({ guard, reason: MESSAGES[guard] });
-  if (on("git-defender") && commands.some(gitDefender))
-    return refuse("git-defender");
-  if (on("remote-exec") && remoteExec(commands))
-    return refuse("remote-exec");
-  if (on("indirection") && commands.some(indirection))
-    return refuse("indirection");
-  if (on("attribution") && attribution(commands, cwd, options.read))
-    return refuse("attribution");
-  if (on("worktree-tmp") && commands.some((command) => worktreeTmp(command, cwd)))
-    return refuse("worktree-tmp");
+  const refuse = (guard) => ({ guard, reason: MESSAGES2[guard] });
+  let failure;
+  let refusal;
+  try {
+    const { commands } = walkShell(source);
+    if (on("git-defender") && commands.some(gitDefender))
+      refusal = refuse("git-defender");
+    else if (on("remote-exec") && remoteExec(commands))
+      refusal = refuse("remote-exec");
+    else if (on("indirection") && commands.some(indirection))
+      refusal = refuse("indirection");
+    else if (on("attribution") && attribution(commands, cwd, options.read))
+      refusal = refuse("attribution");
+    else if (on("worktree-tmp") && commands.some((command) => worktreeTmp(command, cwd)))
+      refusal = refuse("worktree-tmp");
+  } catch (error) {
+    failure = { error };
+  }
+  if (refusal !== undefined)
+    return refusal;
+  if (on("op-guard")) {
+    let reason;
+    try {
+      const analyze = options.analyzeOp ?? opGuard;
+      const walk = walkShell(source);
+      if (!walk.complete && /\b(?:op|fnox)\b/.test(source))
+        reason = NESTING_MESSAGE;
+      else
+        reason = analyze(walk.commands, options.opAllow) ?? "";
+    } catch {
+      reason = CHECK_FAILED_MESSAGE;
+    }
+    if (reason !== "")
+      return { guard: "op-guard", reason };
+  }
+  if (failure !== undefined)
+    throw failure.error;
   return;
 }
 
@@ -3688,7 +4056,9 @@ var FEATURE_IDS = [
 function readOptions(options) {
   const raw = options?.disable;
   const list = Array.isArray(raw) ? raw.filter((id) => FEATURE_IDS.includes(id)) : [];
-  return { disabled: new Set(list), redact: readRedactOptions(options) };
+  const allow = options?.opAllow;
+  const opAllow = Array.isArray(allow) ? allow.filter((entry) => typeof entry === "string") : [];
+  return { disabled: new Set(list), redact: readRedactOptions(options), opAllow };
 }
 function shellCwd(workdir, sessionDirectory) {
   if (workdir === undefined)
@@ -3730,9 +4100,9 @@ function createPlugin(overrides = {}) {
   return Plugin.define({
     id: "srobroek.safety",
     async setup(ctx) {
-      const { disabled, redact } = readOptions(ctx.options);
+      const { disabled, redact, opAllow } = readOptions(ctx.options);
       const on = (id) => !disabled.has(id);
-      const guardOptions = { disabled };
+      const guardOptions = { ...overrides.guard, disabled, opAllow };
       const reviewOptions = { ...overrides.review, disabled };
       const pending = new Map;
       const advisor = createPackageAdvisor();
@@ -3849,7 +4219,7 @@ var src_default = createPlugin();
 export {
   FEATURE_IDS,
   INVESTIGATE_NOTICE,
-  MESSAGES,
+  MESSAGES2 as MESSAGES,
   applyDecision,
   collectSecrets,
   createPlugin,

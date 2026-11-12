@@ -8,7 +8,7 @@ import { Plugin } from "@opencode/plugin";
 // plugins/lib/src/dep-detect.ts
 import { statSync } from "fs";
 
-// node_modules/.bun/smol-toml@1.9.0/node_modules/smol-toml/dist/error.js
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/error.js
 /*!
  * Copyright (c) Squirrel Chat et al., All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause
@@ -81,7 +81,7 @@ ${codeblock}`, options);
   }
 }
 
-// node_modules/.bun/smol-toml@1.9.0/node_modules/smol-toml/dist/primitive.js
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/primitive.js
 /*!
  * Copyright (c) Squirrel Chat et al., All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause
@@ -201,7 +201,7 @@ function parseString(ctx) {
   TomlError.x("unfinished string", ctx, startPtr);
 }
 
-// node_modules/.bun/smol-toml@1.9.0/node_modules/smol-toml/dist/date.js
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/date.js
 /*!
  * Copyright (c) Squirrel Chat et al., All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause
@@ -344,7 +344,7 @@ class TomlDate extends Date {
   }
 }
 
-// node_modules/.bun/smol-toml@1.9.0/node_modules/smol-toml/dist/extract.js
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/extract.js
 /*!
  * Copyright (c) Squirrel Chat et al., All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause
@@ -456,7 +456,9 @@ function parseNumber(ctx, startPtr, startChr, sign, endChr) {
       state = 2;
     else if ((state === 1 || state === 3) && (c === 101 || c === 69))
       state = 4;
-    else if (state === 4 && (c === 43 || c === 45)) {} else if (!isDigit(c))
+    else if (state === 4 && (c === 43 || c === 45)) {
+      state = 6;
+    } else if (!isDigit(c))
       TomlError.x(`illegal character in numeric literal`, ctx);
     else if (state > 9)
       state -= 11;
@@ -576,7 +578,7 @@ function readDate(ctx, str, type, unsafeDelim, errPtr, temporalSuffix) {
   }
 }
 
-// node_modules/.bun/smol-toml@1.9.0/node_modules/smol-toml/dist/util.js
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/util.js
 /*!
  * Copyright (c) Squirrel Chat et al., All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause
@@ -629,7 +631,7 @@ function skipVoid(ctx, banNewLines, banComments) {
   }
 }
 
-// node_modules/.bun/smol-toml@1.9.0/node_modules/smol-toml/dist/struct.js
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/struct.js
 /*!
  * Copyright (c) Squirrel Chat et al., All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause
@@ -765,7 +767,7 @@ function parseArray(ctx) {
   TomlError.x("unfinished array", ctx, startPtr);
 }
 
-// node_modules/.bun/smol-toml@1.9.0/node_modules/smol-toml/dist/parse.js
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/parse.js
 /*!
  * Copyright (c) Squirrel Chat et al., All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause
@@ -917,7 +919,7 @@ function parse(toml, options = {}) {
   return res;
 }
 
-// node_modules/.bun/smol-toml@1.9.0/node_modules/smol-toml/dist/stringify.js
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/stringify.js
 /*!
  * Copyright (c) Squirrel Chat et al., All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause
@@ -947,7 +949,7 @@ function parse(toml, options = {}) {
  */
 var HAS_WELLFORMED = !!"".isWellFormed;
 
-// node_modules/.bun/smol-toml@1.9.0/node_modules/smol-toml/dist/index.js
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/index.js
 /*!
  * Copyright (c) Squirrel Chat et al., All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause
@@ -1722,8 +1724,13 @@ function readOption(words, at, wrapper) {
   return null;
 }
 function commandWords(input) {
+  const { argv, directories } = stripWrappers(input);
+  return { argv, directories };
+}
+function stripWrappers(input) {
   const words = [...input];
   const directories = [];
+  const wrappers = [];
   let i = 0;
   while (i < words.length) {
     const word = words[i];
@@ -1734,6 +1741,7 @@ function commandWords(input) {
     const wrapper = WRAPPERS.get(word.slice(word.lastIndexOf("/") + 1));
     if (wrapper === undefined)
       break;
+    wrappers.push(word.slice(word.lastIndexOf("/") + 1));
     i++;
     while (i < words.length) {
       const option = words[i];
@@ -1749,13 +1757,13 @@ function commandWords(input) {
         break;
       const read = readOption(words, i, wrapper);
       if (read === "lookup")
-        return { argv: [], directories };
+        return { argv: [], directories, wrappers };
       if (read === null) {
         i++;
         continue;
       }
       if (read.value === undefined)
-        return { argv: [], directories };
+        return { argv: [], directories, wrappers };
       if (wrapper.split?.has(read.name)) {
         words.splice(i, read.span, ...tokenizeShell(read.value).map((token) => token.value));
         continue;
@@ -1766,7 +1774,7 @@ function commandWords(input) {
     }
     i += Math.min(wrapper.operands ?? 0, words.length - i);
   }
-  return { argv: words.slice(i), directories };
+  return { argv: words.slice(i), directories, wrappers };
 }
 
 // plugins/whats-new/src/report-only.ts

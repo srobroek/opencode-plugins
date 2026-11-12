@@ -95,8 +95,11 @@ describe("normaliseAnswer", () => {
 })
 
 describe("validateValue", () => {
-  test("pick_many enforces max and allows other unless turned off", () => {
+  test("pick_many enforces max on options, takes other on top, and allows other unless turned off", () => {
     expect(validateValue(pickMany, { selected: ["sqlite", "pg", "redis"] })).toHaveProperty("error")
+    expect(validateValue(pickMany, { selected: ["sqlite", "pg", "redis"], other: "mongo" })).toHaveProperty("error")
+    expect(validateValue(pickMany, { selected: ["sqlite", "pg"], other: "mongo" })).toEqual({ value: { selected: ["sqlite", "pg"], other: "mongo" } })
+    expect(validateValue({ ...pickMany, min: 2 }, { selected: ["pg"], other: "mongo" })).toEqual({ value: { selected: ["pg"], other: "mongo" } })
     expect(validateValue(pickMany, { selected: [], other: "mongo" })).toEqual({ value: { selected: [], other: "mongo" } })
     expect(validateValue({ ...pickMany, allow_other: false }, { selected: [], other: "mongo" })).toHaveProperty("error")
   })

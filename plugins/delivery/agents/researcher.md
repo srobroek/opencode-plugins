@@ -1,6 +1,7 @@
 ---
 description: "Answers one scoped research question from code, docs and the web with cited observations and inferences; edits nothing."
 mode: subagent
+steps: 80
 model: "amazon-bedrock/global.anthropic.claude-sonnet-5-5#medium"
 request:
   headers:

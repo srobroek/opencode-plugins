@@ -6,6 +6,54 @@ Cuts tokens and wasted turns for agents running in OpenCode V2:
 - narrows the built-in `explore` agent to search and web tools with a short scout prompt;
 - trims the system prompt of read-only subagents.
 
+## Lead routing
+
+`lead` defaults to `true`. Primary sessions with the `subagent` tool receive delegation instructions on context, compaction and generate requests.
+The instructions route code work to `coder`, lookups to `explore`, bounded commands to `operator`, and reviews to the reviewer agents.
+The plugin removes bullets whose agent ids are all unregistered. The session's filtered text stays fixed for prompt caching.
+Deleting a session evicts its cached text.
+Child sessions receive no lead block. Set `lead: false` to disable it.
+When delivery also loads, set delivery's `fanOut: false` to avoid two lead blocks.
+
+## Foreground wait guard
+
+`waitGuard` defaults to `true`. Foreground shell calls that run `sleep` are refused, including aliases mapped to `shell`.
+The guard checks command positions in chains, pipelines, loops and subshells, including `timeout N sleep`.
+Quoted data such as `echo "sleep 5"` passes. Shell calls with `background: true` pass.
+Here-document text passed to non-shell commands also passes, unless it contains an executable command substitution.
+Shell scripts supplied through `-c` flags (including `-lc` and `-ec`) or standard-input here-documents are checked.
+The guard also checks `eval` scripts and commands supplied to `xargs`.
+Parameter expansions such as `${sleep}` are data; command substitutions inside them are checked.
+Use a background watcher such as `gh pr checks 12 --watch` instead of foreground polling.
+Set `waitGuard: false` to disable the guard.
+
+## Large-read guard
+
+An untargeted `read` of a big text file costs far more tokens than the part an agent needs. The guard refuses the first such read of each path in a session, with a message that points to `read` with `offset`/`limit`, `grep`, or delegating to `explore` (files) or `operator` (logs and command output). Spotify's "shunt" plugin ([Portal by Spotify cut my Claude Code token usage by 90%](https://engineering.atspotify.com/2026/9/portal-by-spotify-cut-my-claude-code-token-usage-by-90)) takes the same approach. It also found that summaries lack line numbers, so the message asks for them and exact reads stay possible.
+
+- It applies to primary sessions and to child sessions whose agent is in `largeRead.agents`. It never applies to `explore`, `operator`, `mechanic`, `researcher` or the reviewers.
+- A `read` with no `offset` and no `limit` of a text file over `bytes` or `lines` is refused. A read with `offset` or `limit` always passes, as do images, PDFs and other binary files, directories and missing files.
+- A shell command that runs `cat`, `less` or `more` on such a file is refused when its output is not piped or redirected. This covers `sh -c`, loops and `cd dir && cat file`. `head`, `tail`, `sed -n`, `grep`, `rg`, `wc`, `cat file | filter` and `cat > file` pass.
+- Each path is refused once per session. A second untargeted read of the same path passes, so an agent that needs the whole file gets it.
+- The size check reads at most 1 MiB, so the line count of a larger file is a lower bound. It runs asynchronously with a 500 ms deadline (`timeoutMs`); on a timeout, an error or a failed session lookup the read is allowed.
+
+```jsonc
+{ "options": { "largeRead": { "bytes": 32768, "lines": 350, "timeoutMs": 500, "agents": ["coder", "general", "implementer", "implementer-high"] } } }
+```
+
+## Subagent scratch reminders
+
+`scratchReminder` defaults to `true`. In child sessions, the plugin watches write, edit, patch and shell write destinations under the scratch root.
+The root is the real path of `os.tmpdir()` plus `opencode`. With `/tmp` as the temporary directory, it resolves to `/tmp/opencode` on Linux or `/private/tmp/opencode` on macOS.
+Shell destinations include literal `mkdir` paths and `mktemp` templates. Dynamic paths that cannot be resolved statically are skipped.
+Destinations follow literal `cd` commands, subshell scopes and wrapper working directories.
+Creators inside shell scripts, `eval`, `xargs` and loop bodies use the same script discovery as the wait guard.
+When a completed call creates a top-level scratch entry, its tool result asks the subagent to delete that entry before reporting.
+Entries present before the call are never noted. Each session receives at most three notes, with each entry noted once.
+Deleting a session clears its cached directory, pending calls and reminder history.
+Subsequent calls retain the session's reminder counts unless the session is deleted.
+Reminders do not change the system prompt. Set `scratchReminder: false` to disable them.
+
 ## Install
 
 ```sh
@@ -54,6 +102,7 @@ The plugin reshapes the built-in `explore` agent:
   shell tool description is not sent. Skills and `execute` (the Code Mode catalog)
   stay denied.
 - Reading `.env` files and leaving the working directory ask first.
+- Steps: 60. On the final step, OpenCode removes tools and asks for a summary.
 - The prompt asks for a summary, the relevant files as `path:start-end` with what
   each holds, how the pieces connect, and the URLs of web sources.
 
@@ -144,6 +193,10 @@ starts with, rejects it. Moving the call into `workdir` does not help: OpenCode 
 | Option | Default | Effect |
 | --- | --- | --- |
 | `bashAlias` | `true` | `false` leaves `bash` calls to fail as unknown tools. |
+| `lead` | `true` | Adds primary-only delegation instructions. |
+| `waitGuard` | `true` | Refuses foreground shell commands that run `sleep`. |
+| `largeRead` | `true` | Refuses a first untargeted read of a large text file. `false` turns it off; an object sets `bytes` (32768), `lines` (350), `timeoutMs` (500) and `agents` (`coder`, `general`, `implementer`, `implementer-high`). |
+| `scratchReminder` | `true` | Notes newly created scratch entries in child-session tool results. |
 | `explore` | `true` | `false` keeps the built-in `explore` agent as OpenCode and your config define it. |
 | `leanSubagents` | the read-only agents above | Agent ids whose child sessions get the trimmed prompt. `false` or `[]` turns it off. |
 | `leanDrop` | `["identity", "worktree"]` | Which segments to remove: `global-instructions`, `project-instructions`, `identity`, `worktree`. `instructions` stands for both AGENTS.md segments. |

@@ -1044,7 +1044,7 @@ function validateValue(question, value) {
       const count = unique.length + (other === undefined ? 0 : 1);
       if (question.min !== undefined && count < question.min)
         return fail(`pick at least ${question.min}`);
-      if (question.max !== undefined && count > question.max)
+      if (question.max !== undefined && unique.length > question.max)
         return fail(`pick at most ${question.max}`);
       return { value: other === undefined ? { selected: unique } : { selected: unique, other } };
     }

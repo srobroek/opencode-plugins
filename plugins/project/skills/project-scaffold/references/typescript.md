@@ -54,7 +54,7 @@ bun init                      # then `bun add -d typescript @types/bun @biomejs/
 | Need | Pick |
 | --- | --- |
 | Package manager | `bun` (pnpm only for existing pnpm monorepos); `bun add`/`bun remove` |
-| Lint + format | Biome (`biome check`) alone is the default. The old bootstrapper added `oxlint` with `oxlint-tsgolint` for type-aware rules on top of Biome (`bunx oxlint`); offer it as an option, do not impose it. `knip` (`bunx knip`) for unused exports and dependencies, in the gate |
+| Lint + format | `Biome` 2 (`biome check`) is the default; `ESLint` 10 flat config plus `Prettier` when required plugins need it. `Oxlint` 1 with `oxlint-tsgolint` is an optional type-aware alternative; avoid overlapping mandatory lint. `Knip` 6 (`bunx knip`) for unused files, exports and dependencies, in the gate |
 | Types | `tsc --noEmit` (`tsc -b` with project references), `strict` plus `noUncheckedIndexedAccess`, `verbatimModuleSyntax` (`lang-typescript-types`) |
 | Tests | Vitest (`vitest run`) per `toolchain-languages`, unless the project already uses `bun test`; the old scaffold used `bun test` with `bun test --coverage`. Keep one runner. `msw` for HTTP mocks |
 | Validation | Zod at runtime boundaries; OpenAPI for HTTP contracts |
@@ -62,8 +62,13 @@ bun init                      # then `bun add -d typescript @types/bun @biomejs/
 
 CLI framework, HTTP framework outside Better-T-Stack, and logging: ask the user.
 
+TypeScript 7 has a native compiler but no stable programmatic API. Validate framework
+checkers and embedded-language tools before migrating; retain their TypeScript 6
+compatibility path when needed, not just a passing `tsc` run.
+
 ## Gate (`just check`)
 
 `bun install --frozen-lockfile`, `biome check .`, `tsc --noEmit` (or `tsc -b`), the test
-script. CI: `oven-sh/setup-bun`, same steps. Commit `bun.lock`. `.gitignore`: `node_modules/`,
+script and configured `knip` task. Use the selected lint stack, not all alternatives.
+CI: `oven-sh/setup-bun`, same steps. Commit `bun.lock`. `.gitignore`: `node_modules/`,
 `dist/`, `.env*` (keep `.env.example`).

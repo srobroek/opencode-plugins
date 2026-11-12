@@ -7,7 +7,7 @@
  * command (`echo`, `grep`, `bun -e`, a commit message) stay data. Nothing is evaluated.
  */
 
-import { commandWords, type HereDocument, type ShellWord, scanShell } from "@srobroek/opencode-lib"
+import { commandWords, commandWrappers, type HereDocument, type ShellWord, scanShell } from "@srobroek/opencode-lib"
 
 /** Where a command was found. */
 export type Context = "top" | "substitution" | "shell" | "eval" | "xargs" | "here-document"
@@ -53,18 +53,6 @@ const RESERVED: ReadonlySet<string> = new Set([
   "while",
   "until",
   "time",
-])
-const WRAPPER_NAMES: ReadonlySet<string> = new Set([
-  "sudo",
-  "doas",
-  "env",
-  "nice",
-  "timeout",
-  "stdbuf",
-  "exec",
-  "command",
-  "time",
-  "nohup",
 ])
 const XARGS_VALUED: ReadonlySet<string> = new Set(["-I", "-n", "-P", "-L", "-l", "-d", "-s", "-E", "-e", "-a"])
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/
@@ -146,12 +134,7 @@ export function walkShell(source: string): Walk {
         if (!ASSIGNMENT.test(value)) break
         assignments.push(value)
       }
-      const wrappers: string[] = []
-      for (const value of values) {
-        if (ASSIGNMENT.test(value) || value.startsWith("-")) continue
-        if (!WRAPPER_NAMES.has(base(value))) break
-        wrappers.push(base(value))
-      }
+      const wrappers = commandWrappers(values)
       const argv = commandWords(values).argv
       const offset = values.length - argv.length
       const aligned = argv.every((value, i) => values[offset + i] === value) ? words.slice(offset) : undefined
