@@ -1,6 +1,6 @@
 {
   "name": "@srobroek/opencode-dep-update",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Classify dependency updates by semver safety and apply confirmed patch and minor bumps.",
   "private": true,
   "type": "module",
