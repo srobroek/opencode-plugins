@@ -7,6 +7,7 @@ test("registers the go skills and disposes them", async () => {
   const cleanup = await plugin.setup(fake.context)
   expect([...fake.skills.keys()].sort()).toEqual([
     "lang-go",
+    "lang-go-libraries",
     "lang-go-packaging",
     "lang-go-profiling",
     "lang-go-quality",

@@ -11,6 +11,7 @@ skill, not from this table.
 
 | Situation | Load skill |
 | --- | --- |
+| Choosing a library or tool, or about to write your own code for a common concern (web, data, messaging, AWS, MCP, telemetry, CLI, testing, security) | `lang-go-libraries` |
 | Running Go build, format, lint, vet, `go mod tidy`, govulncheck and test checks, locally or in CI | `lang-go-quality` |
 | Writing or fixing Go tests: table tests, subtests, `-race`, golden files, fuzzing, httptest, synctest | `lang-go-testing` |
 | Go module and package layout: monorepos, `cmd/`, `internal/`, `go.work`, build tags, depguard import rules | `lang-go-packaging` |
