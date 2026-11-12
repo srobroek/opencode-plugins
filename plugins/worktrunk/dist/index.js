@@ -298,8 +298,13 @@ function readOption(words, at, wrapper) {
   return null;
 }
 function commandWords(input) {
+  const { argv, directories } = stripWrappers(input);
+  return { argv, directories };
+}
+function stripWrappers(input) {
   const words = [...input];
   const directories = [];
+  const wrappers = [];
   let i = 0;
   while (i < words.length) {
     const word = words[i];
@@ -310,6 +315,7 @@ function commandWords(input) {
     const wrapper = WRAPPERS.get(word.slice(word.lastIndexOf("/") + 1));
     if (wrapper === undefined)
       break;
+    wrappers.push(word.slice(word.lastIndexOf("/") + 1));
     i++;
     while (i < words.length) {
       const option = words[i];
@@ -325,13 +331,13 @@ function commandWords(input) {
         break;
       const read = readOption(words, i, wrapper);
       if (read === "lookup")
-        return { argv: [], directories };
+        return { argv: [], directories, wrappers };
       if (read === null) {
         i++;
         continue;
       }
       if (read.value === undefined)
-        return { argv: [], directories };
+        return { argv: [], directories, wrappers };
       if (wrapper.split?.has(read.name)) {
         words.splice(i, read.span, ...tokenizeShell(read.value).map((token) => token.value));
         continue;
@@ -342,7 +348,7 @@ function commandWords(input) {
     }
     i += Math.min(wrapper.operands ?? 0, words.length - i);
   }
-  return { argv: words.slice(i), directories };
+  return { argv: words.slice(i), directories, wrappers };
 }
 // node_modules/.bun/smol-toml@1.9.0/node_modules/smol-toml/dist/error.js
 /*!
@@ -625,6 +631,7 @@ function scanShell(source, options = {}) {
   let command = { kind: "command", words: [], redirects: [], hereDocuments: [] };
   let word;
   let target;
+  let targetHereString = false;
   const pending = [];
   const append = (at, text, quoted = false, expands = false) => {
     word ??= { start: at, value: "", quoted: false, expands: false };
@@ -643,6 +650,8 @@ function scanShell(source, options = {}) {
     const done = { start: word.start, end, value: word.value, quoted: word.quoted, expands: word.expands };
     word = undefined;
     if (target !== undefined) {
+      if (targetHereString)
+        done.hereString = true;
       command.redirects.push(done);
       if (target !== "redirect")
         pending.push({
@@ -815,6 +824,7 @@ function scanShell(source, options = {}) {
     if (ch === "&" && next === ">") {
       flush(i);
       target = "redirect";
+      targetHereString = false;
       i += source[i + 2] === ">" ? 2 : 1;
       continue;
     }
@@ -833,6 +843,7 @@ function scanShell(source, options = {}) {
         word = undefined;
       else
         flush(i);
+      targetHereString = source.startsWith("<<<", i);
       if (source.startsWith("<<<", i)) {
         target = "redirect";
         i += 2;

@@ -123,8 +123,19 @@ function readOption(words: readonly string[], at: number, wrapper: Wrapper): Val
  * operands. Wrappers are matched by basename, so `/usr/bin/sudo` is one.
  */
 export function commandWords(input: readonly string[]): CommandWords {
+  const { argv, directories } = stripWrappers(input)
+  return { argv, directories }
+}
+
+/** Basenames of the wrappers `commandWords` drops from `input`, outermost first. */
+export function commandWrappers(input: readonly string[]): string[] {
+  return stripWrappers(input).wrappers
+}
+
+function stripWrappers(input: readonly string[]): CommandWords & { wrappers: string[] } {
   const words = [...input]
   const directories: string[] = []
+  const wrappers: string[] = []
   let i = 0
   while (i < words.length) {
     const word = words[i] as string
@@ -134,6 +145,7 @@ export function commandWords(input: readonly string[]): CommandWords {
     }
     const wrapper = WRAPPERS.get(word.slice(word.lastIndexOf("/") + 1))
     if (wrapper === undefined) break
+    wrappers.push(word.slice(word.lastIndexOf("/") + 1))
     i++
     while (i < words.length) {
       const option = words[i] as string
@@ -147,12 +159,12 @@ export function commandWords(input: readonly string[]): CommandWords {
       }
       if (!option.startsWith("-")) break
       const read = readOption(words, i, wrapper)
-      if (read === "lookup") return { argv: [], directories }
+      if (read === "lookup") return { argv: [], directories, wrappers }
       if (read === null) {
         i++
         continue
       }
-      if (read.value === undefined) return { argv: [], directories }
+      if (read.value === undefined) return { argv: [], directories, wrappers }
       if (wrapper.split?.has(read.name)) {
         words.splice(i, read.span, ...tokenizeShell(read.value).map((token) => token.value))
         continue
@@ -162,5 +174,5 @@ export function commandWords(input: readonly string[]): CommandWords {
     }
     i += Math.min(wrapper.operands ?? 0, words.length - i)
   }
-  return { argv: words.slice(i), directories }
+  return { argv: words.slice(i), directories, wrappers }
 }

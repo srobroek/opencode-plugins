@@ -560,6 +560,7 @@ function scanShell(source, options = {}) {
   let command = { kind: "command", words: [], redirects: [], hereDocuments: [] };
   let word;
   let target;
+  let targetHereString = false;
   const pending = [];
   const append = (at, text, quoted = false, expands = false) => {
     word ??= { start: at, value: "", quoted: false, expands: false };
@@ -578,6 +579,8 @@ function scanShell(source, options = {}) {
     const done = { start: word.start, end, value: word.value, quoted: word.quoted, expands: word.expands };
     word = undefined;
     if (target !== undefined) {
+      if (targetHereString)
+        done.hereString = true;
       command.redirects.push(done);
       if (target !== "redirect")
         pending.push({
@@ -750,6 +753,7 @@ function scanShell(source, options = {}) {
     if (ch === "&" && next === ">") {
       flush(i);
       target = "redirect";
+      targetHereString = false;
       i += source[i + 2] === ">" ? 2 : 1;
       continue;
     }
@@ -768,6 +772,7 @@ function scanShell(source, options = {}) {
         word = undefined;
       else
         flush(i);
+      targetHereString = source.startsWith("<<<", i);
       if (source.startsWith("<<<", i)) {
         target = "redirect";
         i += 2;

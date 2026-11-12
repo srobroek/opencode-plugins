@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
-import { commandWords } from "./command-words.ts"
+import { commandWords, commandWrappers } from "./command-words.ts"
 
 const words = (command: string): string[] => command.split(" ")
 
@@ -58,5 +58,13 @@ describe("commandWords", () => {
 
   test("words after the command are left alone", () => {
     expect(commandWords(words("npm exec sudo -u root x")).argv).toEqual(["npm", "exec", "sudo", "-u", "root", "x"])
+  })
+})
+
+describe("commandWrappers", () => {
+  test("names every wrapper dropped, including one behind an operand", () => {
+    expect(commandWrappers(words("timeout 5 env"))).toEqual(["timeout", "env"])
+    expect(commandWrappers(words("sudo -u x env A=1 npm ci"))).toEqual(["sudo", "env"])
+    expect(commandWrappers(words("npm ci"))).toEqual([])
   })
 })

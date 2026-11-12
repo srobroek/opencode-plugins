@@ -4,7 +4,7 @@ import { Error as ToolError } from "@opencode/plugin/promise/tool"
 import { appendResultText, isShellTool, leadingCdCwd, shellCall, WRITE_TOOLS } from "@srobroek/opencode-lib"
 import { rewriteCloseKeywords } from "./close-keywords.ts"
 import { externalDirectories, sessionRoots, shellFlagDirectories } from "./flag-directories.ts"
-import { GUARD_IDS, type GuardID, hardGate } from "./guards.ts"
+import { GUARD_IDS, type GuardID, type GuardOptions, hardGate } from "./guards.ts"
 import { decideToolCall, type MigrationOptions, migrationOverride } from "./migrations.ts"
 import { createPackageAdvisor } from "./package-investigate.ts"
 import { type Decision, type DecisionID, type ReviewOptions, reviewPermission } from "./permission.ts"
@@ -45,16 +45,19 @@ export const FEATURE_IDS: readonly FeatureID[] = [
   "external-directory",
 ]
 
-export type SafetyOptions = { disabled: ReadonlySet<FeatureID>; redact: RedactOptions }
+export type SafetyOptions = { disabled: ReadonlySet<FeatureID>; redact: RedactOptions; opAllow: string[] }
 
 /**
  * `{ disable: ["git-defender", …] }` turns features off; unknown ids are ignored.
+ * `opAllow` lists extra `op` subcommand prefixes the op-guard allows.
  * `redactSecrets`, `redactNames` and `redactExclude` configure secret redaction.
  */
 export function readOptions(options: Readonly<Record<string, unknown>> | undefined): SafetyOptions {
   const raw = options?.disable
   const list = Array.isArray(raw) ? raw.filter((id): id is FeatureID => FEATURE_IDS.includes(id as FeatureID)) : []
-  return { disabled: new Set(list), redact: readRedactOptions(options) }
+  const allow = options?.opAllow
+  const opAllow = Array.isArray(allow) ? allow.filter((entry): entry is string => typeof entry === "string") : []
+  return { disabled: new Set(list), redact: readRedactOptions(options), opAllow }
 }
 
 /** The directory a shell call runs in: its `workdir`, resolved against the session's directory. */
@@ -111,15 +114,20 @@ const PENDING_TTL_MS = 10 * 60_000
 type Pending = { sessionID: string; at: number; decision: Decision | undefined }
 
 /** Test seams; the host never passes these. */
-export type Overrides = { review?: ReviewOptions; migrations?: MigrationOptions; env?: NodeJS.ProcessEnv }
+export type Overrides = {
+  review?: ReviewOptions
+  migrations?: MigrationOptions
+  env?: NodeJS.ProcessEnv
+  guard?: Pick<GuardOptions, "read" | "analyzeOp">
+}
 
 export function createPlugin(overrides: Overrides = {}) {
   return Plugin.define({
     id: "srobroek.safety",
     async setup(ctx) {
-      const { disabled, redact } = readOptions(ctx.options)
+      const { disabled, redact, opAllow } = readOptions(ctx.options)
       const on = (id: FeatureID) => !disabled.has(id)
-      const guardOptions = { disabled: disabled as ReadonlySet<GuardID> }
+      const guardOptions = { ...overrides.guard, disabled: disabled as ReadonlySet<GuardID>, opAllow }
       const reviewOptions: ReviewOptions = { ...overrides.review, disabled: disabled as ReadonlySet<DecisionID> }
       const pending = new Map<string, Pending>()
       const advisor = createPackageAdvisor()
