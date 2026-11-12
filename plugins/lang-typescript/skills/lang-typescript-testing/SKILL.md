@@ -7,7 +7,10 @@ metadata:
 
 # TypeScript Testing
 
-Sources: [bun test](https://bun.com/docs/test) ([mocks](https://bun.com/docs/test/mocks), [snapshots](https://bun.com/docs/test/snapshots), [dates and times](https://bun.com/docs/test/time)), [Vitest module mocking](https://vitest.dev/guide/mocking/modules) and [snapshots](https://vitest.dev/guide/snapshot), [MSW in Node](https://mswjs.io/docs/integrations/node), [fast-check](https://fast-check.dev/). Checked with Bun 1.4.3, Vitest 5.0, msw 2 and 3, fast-check 4.
+Sources: [bun test](https://bun.com/docs/test) ([mocks](https://bun.com/docs/test/mocks), [snapshots](https://bun.com/docs/test/snapshots), [dates and times](https://bun.com/docs/test/time)), [Vitest module mocking](https://vitest.dev/guide/mocking/modules) and [snapshots](https://vitest.dev/guide/snapshot), [MSW in Node](https://mswjs.io/docs/integrations/node), [fast-check](https://fast-check.dev/). Documentation and release evidence checked 2026-11-12 for `Bun 1.4`, `Vitest 5.1`, `msw 3`, and `fast-check 4`; this does not establish runtime compatibility between them.
+
+Read [practice.md](references/practice.md) for idioms and tool choices. Follow
+`quality-testing` for what to test, the test budget, maintenance, and review.
 
 What to test and which double to use is the `quality-testing` skill. This skill is the
 runner idioms. Use the runner the project already has (`bun test`, `vitest`, `jest`,
@@ -50,8 +53,8 @@ vi.mock(import("./mailer.ts"), async (importOriginal) => ({
 }))
 ```
 
-- Bun runs all test files in one process by default, and `mock.restore()` does not undo
-  `mock.module()`. A module mock in one file leaks into every file that runs after it:
+- Bun runs all test files in one process by default, and `mock.restore()` leaves
+  `mock.module()` replacements in place. A module mock in one file leaks into later files:
   a test that passes alone fails in the full run. Run with `bun test --isolate` (or
   `--parallel`, which implies it), or put shared mocks in a `--preload` file.
 - Bun evaluates the real module before a `mock.module()` call that comes after its
@@ -79,10 +82,11 @@ test("surfaces a 500", async () => {
 })
 ```
 
-MSW intercepts at the network layer, so the real client code (headers, retries,
-parsing) runs. msw 3.0.3 did not intercept under Bun 1.4.3 (`Failed to replace a global
-value`) while msw 2 did, and msw 3 works under Node; pin msw 2 in Bun projects until that
-is fixed.
+Use MSW for outbound HTTP only, so the real client code (headers, retries, parsing)
+runs. Execute application handlers through the framework instead. `msw 3` requires
+ESM, `Node >=22`, and `TypeScript >=5.9`. Earlier local checks found an interception
+failure with `msw 3` on `Bun 1.4`; current-pair compatibility is unverified. Verify the
+pinned pair before upgrading a working Bun setup; do not assume Node interception parity.
 
 ## Snapshots
 
