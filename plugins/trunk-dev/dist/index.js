@@ -351,7 +351,7 @@ function stripWrappers(input) {
   }
   return { argv: words.slice(i), directories, wrappers };
 }
-// node_modules/.bun/smol-toml@1.9.0/node_modules/smol-toml/dist/error.js
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/error.js
 /*!
  * Copyright (c) Squirrel Chat et al., All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause
@@ -380,7 +380,7 @@ function stripWrappers(input) {
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-// node_modules/.bun/smol-toml@1.9.0/node_modules/smol-toml/dist/primitive.js
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/primitive.js
 /*!
  * Copyright (c) Squirrel Chat et al., All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause
@@ -409,7 +409,7 @@ function stripWrappers(input) {
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-// node_modules/.bun/smol-toml@1.9.0/node_modules/smol-toml/dist/date.js
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/date.js
 /*!
  * Copyright (c) Squirrel Chat et al., All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause
@@ -438,7 +438,7 @@ function stripWrappers(input) {
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-// node_modules/.bun/smol-toml@1.9.0/node_modules/smol-toml/dist/extract.js
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/extract.js
 /*!
  * Copyright (c) Squirrel Chat et al., All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause
@@ -467,7 +467,7 @@ function stripWrappers(input) {
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-// node_modules/.bun/smol-toml@1.9.0/node_modules/smol-toml/dist/util.js
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/util.js
 /*!
  * Copyright (c) Squirrel Chat et al., All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause
@@ -496,7 +496,7 @@ function stripWrappers(input) {
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-// node_modules/.bun/smol-toml@1.9.0/node_modules/smol-toml/dist/struct.js
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/struct.js
 /*!
  * Copyright (c) Squirrel Chat et al., All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause
@@ -525,7 +525,7 @@ function stripWrappers(input) {
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-// node_modules/.bun/smol-toml@1.9.0/node_modules/smol-toml/dist/parse.js
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/parse.js
 /*!
  * Copyright (c) Squirrel Chat et al., All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause
@@ -554,7 +554,7 @@ function stripWrappers(input) {
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-// node_modules/.bun/smol-toml@1.9.0/node_modules/smol-toml/dist/stringify.js
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/stringify.js
 /*!
  * Copyright (c) Squirrel Chat et al., All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause
@@ -584,7 +584,7 @@ function stripWrappers(input) {
  */
 var HAS_WELLFORMED = !!"".isWellFormed;
 
-// node_modules/.bun/smol-toml@1.9.0/node_modules/smol-toml/dist/index.js
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/index.js
 /*!
  * Copyright (c) Squirrel Chat et al., All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause
