@@ -29,7 +29,10 @@ Official for Python (major 3), TypeScript (major 2), Java (major 2) and .NET (ma
 | Cached secrets, parameters, AppConfig | Parameters | A fetch per invocation or an unbounded cache |
 | Event parsing and validation | Parser (Pydantic, Zod), Validation (JSON Schema), event source data classes | Ad hoc envelope decoding and casts |
 | Lambda-only HTTP routing (Python), AppSync and Bedrock Agents routing (Python, TypeScript) | Event Handler; TypeScript HTTP uses Hono | Hand-written proxy-event routing |
-| Feature rules, data masking, large-object streaming, Kafka deserialization | Feature Flags, Data Masking, Streaming (Python), Kafka | A rules engine, masking crypto, whole-object loads, schema-registry decoding |
+| Feature rules (verified in Python only) | Powertools Feature Flags only for its own freeform rules engine over an AppConfig freeform profile | Confusing it with native AppConfig flags or OpenFeature; stacking rule engines |
+| Data masking, large-object streaming, Kafka deserialization | Data Masking, Streaming (Python), Kafka | Masking crypto, whole-object loads, schema-registry decoding |
+
+For flags on Lambda, use OpenFeature through one typed flag module and one provider: SSM for simple runtime on/off toggles, or an AppConfig feature flag profile through the Agent Lambda extension for kill switches and gradual rollout. If no maintained provider exists in the language, ask before writing one. See `service-clients.md` for providers and `quality-code-design`'s `feature-flags.md` for code design.
 
 ## Telemetry on Lambda
 

@@ -114,7 +114,7 @@ Registered through `ctx.skill.transform` (a user skill of the same name wins):
 | Name | When |
 | --- | --- |
 | `trunk-dev-workflow` | Branching, opening, merging or landing an MR/PR: small batches, short-lived branches, required CI, squash release units, exact-SHA previews, forge enforcement, skip-CI markers. |
-| `trunk-dev-feature-flags` | Adding a `feat`, writing the `Flag:` line, rolling out or removing a flag. |
+| `trunk-dev-feature-flags` | Adding a `feat`, writing the `Flag:` line, rolling out or removing a flag. Code and storage details live in `quality-code-design`'s `feature-flags.md`; AWS specifics live in `aws-guidance`. |
 | `trunk-dev-release-setup` | Setting up semantic-release on GitLab or GitHub, and the daily stale-branch CI job for Beads repositories (templates in `templates/`). |
 
 ## Options
