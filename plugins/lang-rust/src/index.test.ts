@@ -8,6 +8,7 @@ test("registers the rust skills and disposes them", async () => {
   expect([...fake.skills.keys()].sort()).toEqual([
     "lang-rust",
     "lang-rust-ci",
+    "lang-rust-libraries",
     "lang-rust-packaging",
     "lang-rust-persistence",
     "lang-rust-profiling",

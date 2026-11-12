@@ -42,6 +42,7 @@ The plugin registers these skills from `skills/`, unless a skill with the same i
 already exists:
 
 - `lang-rust`: the router.
+- `lang-rust-libraries`: compare preferred libraries before writing code for common concerns; versioned picks and sources.
 - `lang-rust-quality`: format, lint and test commands.
 - `lang-rust-testing`: unit and integration layout, nextest, doc tests, proptest, insta,
   tokio paused time.
