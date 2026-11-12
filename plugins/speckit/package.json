@@ -17,7 +17,15 @@
   ],
   "opencode-plugins": {
     "claude": false,
-    "codex": false
+    "codex": false,
+    "scope": "project",
+    "signals": [
+      ".specify/",
+      "specs/*/tasks.md"
+    ],
+    "requires": [
+      "beads"
+    ]
   },
   "peerDependencies": {
     "@opencode/plugin": "^2.1.4"

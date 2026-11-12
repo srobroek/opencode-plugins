@@ -24,5 +24,8 @@
   },
   "devDependencies": {
     "@srobroek/opencode-lib": "workspace:*"
+  },
+  "opencode-plugins": {
+    "scope": "global"
   }
 }

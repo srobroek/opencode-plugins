@@ -16,7 +16,12 @@
   ],
   "opencode-plugins": {
     "claude": false,
-    "codex": false
+    "codex": false,
+    "scope": "project",
+    "signals": [
+      ".beads/ (skip under ~/pace, which inherits it, and with .beads/RETIRED)",
+      "every repository"
+    ]
   },
   "peerDependencies": {
     "@opencode/plugin": "^2.1.4"

@@ -22,5 +22,11 @@
   },
   "devDependencies": {
     "@srobroek/opencode-lib": "workspace:*"
+  },
+  "opencode-plugins": {
+    "scope": "project",
+    "signals": [
+      "work in a repository outside the current project"
+    ]
   }
 }

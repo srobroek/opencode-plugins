@@ -233,7 +233,8 @@ var package_default = {
   ],
   "opencode-plugins": {
     claude: false,
-    codex: false
+    codex: false,
+    scope: "global"
   },
   peerDependencies: {
     "@opencode/plugin": "^2.1.4"
