@@ -21,6 +21,8 @@ export type RepeatSummary = {
   exitCodes: Array<number | null> | null
   /** Whether every given exit code is the same; null without exit codes. */
   exitCodesAgree: boolean | null
+  /** Runs whose exit code the caller did not know; they take no part in the agreement or counts. */
+  exitCodesUnknown: number
   reportRuns: number
   unreadable: Array<{ run: number; reason: string }>
   totalCases: number
@@ -74,10 +76,13 @@ export function summarizeRuns(records: readonly RunRecord[]): RepeatSummary {
   const byId = (a: TestStats, b: TestStats) => a.id.localeCompare(b.id)
   const given = records.some((r) => r.exitCode !== undefined)
   const exitCodes = given ? records.map((r) => r.exitCode ?? null) : null
+  const knownCodes = exitCodes?.filter((c): c is number => c !== null)
+  const known = knownCodes === undefined || knownCodes.length === 0 ? null : knownCodes
   return {
     runs: records.length,
     exitCodes,
-    exitCodesAgree: exitCodes === null ? null : new Set(exitCodes).size <= 1,
+    exitCodesAgree: known === null ? null : new Set(known).size <= 1,
+    exitCodesUnknown: exitCodes === null ? 0 : exitCodes.length - (known?.length ?? 0),
     reportRuns: used.length,
     unreadable: records.filter((r) => r.report !== "used").map((r) => ({ run: r.run, reason: r.reason ?? "unreadable" })),
     totalCases: all.length,
@@ -104,11 +109,12 @@ function list<T>(title: string, items: readonly T[], show: (item: T) => string, 
 export function formatSummary(summary: RepeatSummary): string {
   const lines = [`Summarized ${summary.runs} report(s); readable: ${summary.reportRuns}; test cases: ${summary.totalCases}`]
   if (summary.exitCodes !== null) {
-    const failed = summary.exitCodes.filter((c) => c !== 0).length
+    const known = summary.exitCodes.filter((c): c is number => c !== null)
+    const failed = known.filter((c) => c !== 0).length
     lines.push(
-      `exit codes: ${summary.exitCodes.map((c) => (c === null ? "unknown" : String(c))).join(" ")} (${summary.exitCodes.length - failed} zero, ${failed} non-zero)`,
+      `exit codes: ${summary.exitCodes.map((c) => (c === null ? "unknown" : String(c))).join(" ")} (${known.length - failed} zero, ${failed} non-zero, ${summary.exitCodesUnknown} unknown)`,
     )
-    if (!summary.exitCodesAgree) lines.push("exit codes differ between runs: the suite is flaky")
+    if (summary.exitCodesAgree === false) lines.push("exit codes differ between runs: the suite is flaky")
   }
   for (const { run, reason } of summary.unreadable.slice(0, 10)) lines.push(`report ${run}: unreadable (${reason})`)
   lines.push(

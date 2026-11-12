@@ -4,13 +4,13 @@ import { capText, compactRanges, percent } from "./audit-util.ts"
 export type CoverageFormat = "lcov" | "cobertura" | "gocover"
 
 /**
- * Per file: line number to covered, branch key to covered, and for reports that give only a
- * count per line (Cobertura `condition-coverage="50% (1/2)"`) the covered and total branches of that line.
+ * Per file: line number to covered, and per line with branches the covered and total branch counts.
+ * Every format reduces to counts, so LCOV, detailed Cobertura conditions and count-only Cobertura
+ * compare line by line. `covered` may be fractional when a Cobertura condition is partly covered.
  */
 export type FileCoverage = {
   lines: Map<number, boolean>
-  branches: Map<string, boolean>
-  branchCounts: Map<number, { covered: number; total: number }>
+  branches: Map<number, { covered: number; total: number }>
 }
 
 export type CoverageReport = {
@@ -32,7 +32,7 @@ const normalizePath = (path: string, root?: string): string => {
 function file(report: Map<string, FileCoverage>, path: string): FileCoverage {
   let entry = report.get(path)
   if (entry === undefined) {
-    entry = { lines: new Map(), branches: new Map(), branchCounts: new Map() }
+    entry = { lines: new Map(), branches: new Map() }
     report.set(path, entry)
   }
   return entry
@@ -41,6 +41,17 @@ function file(report: Map<string, FileCoverage>, path: string): FileCoverage {
 /** Mark covered with OR semantics: a second record for the same line or branch can only add coverage. */
 function mark<K>(map: Map<K, boolean>, key: K, covered: boolean): void {
   map.set(key, (map.get(key) ?? false) || covered)
+}
+
+const round2 = (n: number): number => Math.round(n * 100) / 100
+
+/** Record a line's branch counts; a repeated record for the same line keeps the larger values. */
+function addBranches(entry: FileCoverage, line: number, covered: number, total: number): void {
+  const prior = entry.branches.get(line)
+  entry.branches.set(line, {
+    covered: round2(Math.max(prior?.covered ?? 0, covered)),
+    total: Math.max(prior?.total ?? 0, total),
+  })
 }
 
 export function detectCoverageFormat(text: string): CoverageFormat | undefined {
@@ -56,20 +67,33 @@ export function parseLcov(text: string, root?: string): CoverageReport {
   const files = new Map<string, FileCoverage>()
   let current: FileCoverage | undefined
   let hasBranches = false
+  const perLine = new Map<string, { covered: number; total: number }>()
+  const flush = (): void => {
+    for (const [no, c] of perLine) if (current !== undefined) addBranches(current, Number(no), c.covered, c.total)
+    perLine.clear()
+  }
   for (const raw of text.split(/\r?\n/)) {
     const line = raw.trim()
-    if (line.startsWith("SF:")) current = file(files, normalizePath(line.slice(3), root))
-    else if (line === "end_of_record") current = undefined
-    else if (current !== undefined && line.startsWith("DA:")) {
+    if (line.startsWith("SF:")) {
+      flush()
+      current = file(files, normalizePath(line.slice(3), root))
+    } else if (line === "end_of_record") {
+      flush()
+      current = undefined
+    } else if (current !== undefined && line.startsWith("DA:")) {
       const [no, hits] = line.slice(3).split(",")
       const n = Number(no)
       if (Number.isInteger(n)) mark(current.lines, n, Number(hits) > 0)
     } else if (current !== undefined && line.startsWith("BRDA:")) {
-      const [no, block, branch, taken] = line.slice(5).split(",")
+      const [no, , , taken] = line.slice(5).split(",")
       hasBranches = true
-      mark(current.branches, `${no},${block},${branch}`, taken !== "-" && Number(taken) > 0)
+      const c = perLine.get(no as string) ?? { covered: 0, total: 0 }
+      c.total++
+      if (taken !== "-" && Number(taken) > 0) c.covered++
+      perLine.set(no as string, c)
     }
   }
+  flush()
   return { format: "lcov", files, hasBranches }
 }
 
@@ -103,21 +127,17 @@ export function parseCobertura(text: string, root?: string): CoverageReport {
         if (!Number.isInteger(n)) continue
         mark(entry.lines, n, Number(line["@_hits"]) > 0)
         const conditions = asNodes((line.conditions as Node | undefined)?.condition)
-        if (conditions.length > 0) {
-          hasBranches = true
-          for (const [i, c] of conditions.entries())
-            mark(entry.branches, `${n}:${c["@_number"] ?? i}`, parseInt(String(c["@_coverage"] ?? "0"), 10) > 0)
-          continue
-        }
         const summary = /\((\d+)\/(\d+)\)/.exec(String(line["@_condition-coverage"] ?? ""))
         if (summary !== null) {
-          // Only counts are given: keep them per line instead of guessing which branches were taken.
+          // The line's own counts are authoritative.
           hasBranches = true
-          const prior = entry.branchCounts.get(n)
-          entry.branchCounts.set(n, {
-            covered: Math.max(prior?.covered ?? 0, Number(summary[1])),
-            total: Math.max(prior?.total ?? 0, Number(summary[2])),
-          })
+          addBranches(entry, n, Number(summary[1]), Number(summary[2]))
+        } else if (conditions.length > 0) {
+          // Each condition contributes its percentage, so a half-covered condition is half a branch.
+          hasBranches = true
+          let covered = 0
+          for (const c of conditions) covered += Math.min(100, Math.max(0, Number.parseFloat(String(c["@_coverage"] ?? "0")) || 0)) / 100
+          addBranches(entry, n, covered, conditions.length)
         }
       }
     }
@@ -165,17 +185,19 @@ function totals(report: CoverageReport, branches: boolean): Totals {
   let covered = 0
   let total = 0
   for (const f of report.files.values()) {
-    for (const hit of (branches ? f.branches : f.lines).values()) {
-      total++
-      if (hit) covered++
-    }
-    if (branches)
-      for (const count of f.branchCounts.values()) {
+    if (branches) {
+      for (const count of f.branches.values()) {
         total += count.total
         covered += count.covered
       }
+      continue
+    }
+    for (const hit of f.lines.values()) {
+      total++
+      if (hit) covered++
+    }
   }
-  return { covered, total, percent: percent(covered, total) }
+  return { covered: round2(covered), total, percent: percent(covered, total) }
 }
 
 /** What the baseline covered and the candidate does not, per file; files missing from the candidate listed apart. */
@@ -188,23 +210,18 @@ export function compareCoverage(baseline: CoverageReport, candidate: CoverageRep
     const cand = candidate.files.get(name)
     const baseLines = [...base.lines].filter(([, hit]) => hit).map(([n]) => n)
     if (cand === undefined) {
-      if (baseLines.length > 0 || (bothBranches && [...base.branches.values()].some(Boolean))) disappeared.push({ file: name, coveredLines: baseLines.length })
+      if (baseLines.length > 0 || (bothBranches && [...base.branches.values()].some((c) => c.covered > 0))) disappeared.push({ file: name, coveredLines: baseLines.length })
       continue
     }
     const lines = baseLines.filter((n) => cand.lines.get(n) !== true).sort((a, b) => a - b)
     const branches: string[] = []
     let lostBranchCount = 0
     if (bothBranches) {
-      for (const [k, hit] of base.branches)
-        if (hit && cand.branches.get(k) !== true) {
-          branches.push(k)
-          lostBranchCount++
-        }
-      for (const [n, count] of base.branchCounts) {
-        const now = cand.branchCounts.get(n)?.covered ?? 0
-        if (count.covered > now) {
-          branches.push(`${n} (${count.covered}/${count.total} -> ${now}/${cand.branchCounts.get(n)?.total ?? 0})`)
-          lostBranchCount += count.covered - now
+      for (const [n, count] of [...base.branches].sort((x, y) => x[0] - y[0])) {
+        const now = cand.branches.get(n)
+        if (count.covered > (now?.covered ?? 0)) {
+          branches.push(`${n} (${count.covered}/${count.total} -> ${now?.covered ?? 0}/${now?.total ?? 0})`)
+          lostBranchCount = round2(lostBranchCount + count.covered - (now?.covered ?? 0))
         }
       }
     }

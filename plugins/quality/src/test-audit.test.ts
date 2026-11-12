@@ -104,6 +104,17 @@ describe("summarizeRuns", () => {
     const big = summarizeRuns([rec(1, "used", many as never), rec(2, "used", Object.fromEntries(Object.keys(many).map((k) => [k, "failed"])) as never)])
     expect(formatSummary(big).length).toBeLessThanOrEqual(4000)
   })
+  test("unknown exit codes take no part in agreement or counts", () => {
+    const s = summarizeRuns([rec(1, "used", { a: "passed" }, 0), { ...rec(2, "used", { a: "passed" }), exitCode: null }])
+    expect(s.exitCodesAgree).toBe(true)
+    expect(s.exitCodesUnknown).toBe(1)
+    const text = formatSummary(s)
+    expect(text).toContain("1 zero, 0 non-zero, 1 unknown")
+    expect(text).not.toContain("differ")
+    const allUnknown = summarizeRuns([{ ...rec(1, "used", {}), exitCode: null }])
+    expect(allUnknown.exitCodesAgree).toBeNull()
+    expect(summarizeRuns([rec(1, "used", {}, 0), rec(2, "used", {}, 1)]).exitCodesAgree).toBe(false)
+  })
   test("without exit codes there is no agreement claim", () => {
     const plain = summarizeRuns([rec(1, "used", { a: "passed" })])
     expect(plain.exitCodes).toBeNull()
@@ -222,7 +233,7 @@ describe("coverage", () => {
     expect(c.lines.baseline).toEqual({ covered: 4, total: 5, percent: 80 })
     expect(c.lines.candidate).toEqual({ covered: 2, total: 4, percent: 50 })
     expect(c.branches?.baseline.covered).toBe(1)
-    expect(c.lost).toEqual([{ file: "src/a.ts", lines: [2, 3], branches: ["2,0,0"], lostLineCount: 2, lostBranchCount: 1 }])
+    expect(c.lost).toEqual([{ file: "src/a.ts", lines: [2, 3], branches: ["2 (1/2 -> 0/2)"], lostLineCount: 2, lostBranchCount: 1 }])
     expect(c.disappeared).toEqual([{ file: "src/gone.ts", coveredLines: 1 }])
     const text = formatCoverage(c)
     expect(text).toContain("lines 2-3")
@@ -236,6 +247,25 @@ describe("coverage", () => {
     expect(c.branches?.candidate).toEqual({ covered: 1, total: 2, percent: 50 })
     const same = compareCoverage(parseCoverage(COB(1, "50% (1/2)"), undefined), parseCoverage(COB(1, "50% (1/2)"), undefined))
     expect(same.lost).toEqual([])
+  })
+  test("a partly covered condition counts by its percentage", () => {
+    const cond = (a: number, b: number) =>
+      `<coverage><packages><package><classes><class filename="a"><lines><line number="1" hits="1" branch="true"><conditions><condition number="0" type="jump" coverage="${a}%"/><condition number="1" type="jump" coverage="${b}%"/></conditions></line></lines></class></classes></package></packages></coverage>`
+    const c = compareCoverage(parseCoverage(cond(100, 100), "cobertura"), parseCoverage(cond(100, 50), "cobertura"))
+    expect(c.branches?.baseline).toEqual({ covered: 2, total: 2, percent: 100 })
+    expect(c.branches?.candidate).toEqual({ covered: 1.5, total: 2, percent: 75 })
+    expect(c.lost[0]).toMatchObject({ file: "a", lostBranchCount: 0.5 })
+  })
+  test("count-only and detailed Cobertura lines compare by covered/total", () => {
+    const detailed = (a: number, b: number) =>
+      `<coverage><packages><package><classes><class filename="m.py"><lines><line number="2" hits="1" branch="true"><conditions><condition number="0" coverage="${a}%"/><condition number="1" coverage="${b}%"/></conditions></line></lines></class></classes></package></packages></coverage>`
+    const countOnly = (cov: string) => COB(1, cov)
+    const same = compareCoverage(parseCoverage(countOnly("100% (2/2)"), undefined), parseCoverage(detailed(100, 100), undefined))
+    expect(same.lost.flatMap((f) => f.branches)).toEqual([])
+    const reverse = compareCoverage(parseCoverage(detailed(100, 100), undefined), parseCoverage(countOnly("100% (2/2)"), undefined))
+    expect(reverse.lost.flatMap((f) => f.branches)).toEqual([])
+    const drop = compareCoverage(parseCoverage(countOnly("100% (2/2)"), undefined), parseCoverage(detailed(100, 0), undefined))
+    expect(drop.lost.flatMap((f) => f.branches)).toEqual(["2 (2/2 -> 1/2)"])
   })
   test("branches are not reported lost when either report has no branch data", () => {
     const withBranches = parseCoverage(LCOV_A, undefined)
@@ -253,7 +283,7 @@ describe("coverage", () => {
   test("Cobertura conditions elements", () => {
     const xml = `<coverage><packages><package><classes><class filename="a"><lines><line number="1" hits="1" branch="true"><conditions><condition number="0" type="jump" coverage="100%"/><condition number="1" type="jump" coverage="0%"/></conditions></line></lines></class></classes></package></packages></coverage>`
     const r = parseCoverage(xml, "cobertura")
-    expect([...(r.files.get("a")?.branches ?? [])]).toEqual([["1:0", true], ["1:1", false]])
+    expect([...(r.files.get("a")?.branches ?? [])]).toEqual([[1, { covered: 1, total: 2 }]])
   })
   test("Go profile: lines only, branches not measured", () => {
     const base = "mode: set\nex.com/m/a.go:3.10,5.2 2 1\nex.com/m/a.go:6.1,7.2 1 1\n"

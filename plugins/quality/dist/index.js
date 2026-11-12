@@ -4161,13 +4161,21 @@ var normalizePath = (path, root) => {
 function file(report, path) {
   let entry = report.get(path);
   if (entry === undefined) {
-    entry = { lines: new Map, branches: new Map, branchCounts: new Map };
+    entry = { lines: new Map, branches: new Map };
     report.set(path, entry);
   }
   return entry;
 }
 function mark(map, key, covered) {
   map.set(key, (map.get(key) ?? false) || covered);
+}
+var round2 = (n) => Math.round(n * 100) / 100;
+function addBranches(entry, line, covered, total) {
+  const prior = entry.branches.get(line);
+  entry.branches.set(line, {
+    covered: round2(Math.max(prior?.covered ?? 0, covered)),
+    total: Math.max(prior?.total ?? 0, total)
+  });
 }
 function detectCoverageFormat(text) {
   const head = text.trimStart();
@@ -4183,23 +4191,37 @@ function parseLcov(text, root) {
   const files = new Map;
   let current;
   let hasBranches = false;
+  const perLine = new Map;
+  const flush = () => {
+    for (const [no, c] of perLine)
+      if (current !== undefined)
+        addBranches(current, Number(no), c.covered, c.total);
+    perLine.clear();
+  };
   for (const raw of text.split(/\r?\n/)) {
     const line = raw.trim();
-    if (line.startsWith("SF:"))
+    if (line.startsWith("SF:")) {
+      flush();
       current = file(files, normalizePath(line.slice(3), root));
-    else if (line === "end_of_record")
+    } else if (line === "end_of_record") {
+      flush();
       current = undefined;
-    else if (current !== undefined && line.startsWith("DA:")) {
+    } else if (current !== undefined && line.startsWith("DA:")) {
       const [no, hits] = line.slice(3).split(",");
       const n = Number(no);
       if (Number.isInteger(n))
         mark(current.lines, n, Number(hits) > 0);
     } else if (current !== undefined && line.startsWith("BRDA:")) {
-      const [no, block, branch, taken] = line.slice(5).split(",");
+      const [no, , , taken] = line.slice(5).split(",");
       hasBranches = true;
-      mark(current.branches, `${no},${block},${branch}`, taken !== "-" && Number(taken) > 0);
+      const c = perLine.get(no) ?? { covered: 0, total: 0 };
+      c.total++;
+      if (taken !== "-" && Number(taken) > 0)
+        c.covered++;
+      perLine.set(no, c);
     }
   }
+  flush();
   return { format: "lcov", files, hasBranches };
 }
 var xml = new XMLParser({
@@ -4232,20 +4254,16 @@ function parseCobertura(text, root) {
           continue;
         mark(entry.lines, n, Number(line["@_hits"]) > 0);
         const conditions = asNodes(line.conditions?.condition);
-        if (conditions.length > 0) {
-          hasBranches = true;
-          for (const [i, c] of conditions.entries())
-            mark(entry.branches, `${n}:${c["@_number"] ?? i}`, parseInt(String(c["@_coverage"] ?? "0"), 10) > 0);
-          continue;
-        }
         const summary = /\((\d+)\/(\d+)\)/.exec(String(line["@_condition-coverage"] ?? ""));
         if (summary !== null) {
           hasBranches = true;
-          const prior = entry.branchCounts.get(n);
-          entry.branchCounts.set(n, {
-            covered: Math.max(prior?.covered ?? 0, Number(summary[1])),
-            total: Math.max(prior?.total ?? 0, Number(summary[2]))
-          });
+          addBranches(entry, n, Number(summary[1]), Number(summary[2]));
+        } else if (conditions.length > 0) {
+          hasBranches = true;
+          let covered = 0;
+          for (const c of conditions)
+            covered += Math.min(100, Math.max(0, Number.parseFloat(String(c["@_coverage"] ?? "0")) || 0)) / 100;
+          addBranches(entry, n, covered, conditions.length);
         }
       }
     }
@@ -4278,18 +4296,20 @@ function totals(report, branches) {
   let covered = 0;
   let total = 0;
   for (const f of report.files.values()) {
-    for (const hit of (branches ? f.branches : f.lines).values()) {
+    if (branches) {
+      for (const count of f.branches.values()) {
+        total += count.total;
+        covered += count.covered;
+      }
+      continue;
+    }
+    for (const hit of f.lines.values()) {
       total++;
       if (hit)
         covered++;
     }
-    if (branches)
-      for (const count of f.branchCounts.values()) {
-        total += count.total;
-        covered += count.covered;
-      }
   }
-  return { covered, total, percent: percent(covered, total) };
+  return { covered: round2(covered), total, percent: percent(covered, total) };
 }
 function compareCoverage(baseline, candidate) {
   const bothBranches = baseline.hasBranches && candidate.hasBranches;
@@ -4300,7 +4320,7 @@ function compareCoverage(baseline, candidate) {
     const cand = candidate.files.get(name);
     const baseLines = [...base.lines].filter(([, hit]) => hit).map(([n]) => n);
     if (cand === undefined) {
-      if (baseLines.length > 0 || bothBranches && [...base.branches.values()].some(Boolean))
+      if (baseLines.length > 0 || bothBranches && [...base.branches.values()].some((c) => c.covered > 0))
         disappeared.push({ file: name, coveredLines: baseLines.length });
       continue;
     }
@@ -4308,16 +4328,11 @@ function compareCoverage(baseline, candidate) {
     const branches = [];
     let lostBranchCount = 0;
     if (bothBranches) {
-      for (const [k, hit] of base.branches)
-        if (hit && cand.branches.get(k) !== true) {
-          branches.push(k);
-          lostBranchCount++;
-        }
-      for (const [n, count] of base.branchCounts) {
-        const now = cand.branchCounts.get(n)?.covered ?? 0;
-        if (count.covered > now) {
-          branches.push(`${n} (${count.covered}/${count.total} -> ${now}/${cand.branchCounts.get(n)?.total ?? 0})`);
-          lostBranchCount += count.covered - now;
+      for (const [n, count] of [...base.branches].sort((x, y) => x[0] - y[0])) {
+        const now = cand.branches.get(n);
+        if (count.covered > (now?.covered ?? 0)) {
+          branches.push(`${n} (${count.covered}/${count.total} -> ${now?.covered ?? 0}/${now?.total ?? 0})`);
+          lostBranchCount = round2(lostBranchCount + count.covered - (now?.covered ?? 0));
         }
       }
     }
@@ -4650,10 +4665,13 @@ function summarizeRuns(records) {
   const byId = (a, b) => a.id.localeCompare(b.id);
   const given = records.some((r) => r.exitCode !== undefined);
   const exitCodes = given ? records.map((r) => r.exitCode ?? null) : null;
+  const knownCodes = exitCodes?.filter((c) => c !== null);
+  const known = knownCodes === undefined || knownCodes.length === 0 ? null : knownCodes;
   return {
     runs: records.length,
     exitCodes,
-    exitCodesAgree: exitCodes === null ? null : new Set(exitCodes).size <= 1,
+    exitCodesAgree: known === null ? null : new Set(known).size <= 1,
+    exitCodesUnknown: exitCodes === null ? 0 : exitCodes.length - (known?.length ?? 0),
     reportRuns: used.length,
     unreadable: records.filter((r) => r.report !== "used").map((r) => ({ run: r.run, reason: r.reason ?? "unreadable" })),
     totalCases: all.length,
@@ -4675,9 +4693,10 @@ function list(title, items, show, limit) {
 function formatSummary(summary) {
   const lines = [`Summarized ${summary.runs} report(s); readable: ${summary.reportRuns}; test cases: ${summary.totalCases}`];
   if (summary.exitCodes !== null) {
-    const failed = summary.exitCodes.filter((c) => c !== 0).length;
-    lines.push(`exit codes: ${summary.exitCodes.map((c) => c === null ? "unknown" : String(c)).join(" ")} (${summary.exitCodes.length - failed} zero, ${failed} non-zero)`);
-    if (!summary.exitCodesAgree)
+    const known = summary.exitCodes.filter((c) => c !== null);
+    const failed = known.filter((c) => c !== 0).length;
+    lines.push(`exit codes: ${summary.exitCodes.map((c) => c === null ? "unknown" : String(c)).join(" ")} (${known.length - failed} zero, ${failed} non-zero, ${summary.exitCodesUnknown} unknown)`);
+    if (summary.exitCodesAgree === false)
       lines.push("exit codes differ between runs: the suite is flaky");
   }
   for (const { run, reason } of summary.unreadable.slice(0, 10))
