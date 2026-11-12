@@ -172,6 +172,86 @@ Quarantine only with an owner, issue, expiry and continued diagnostic execution.
 artifacts, but `--rerun-fails` can turn intermittent defects green. Preserve the
 initial failure and use reruns for diagnosis, not as a passing gate.
 
+## Bad tests and fixes
+
+See the `quality-testing` skill's `references/bad-tests.md` for language-neutral pairs covering removal checks, copied oracles, call-order mocks, side channels, copies instead of parameters, logic in tests, sleeps, assertion-free tests, eager tests, mystery guests, type re-checks, tampering, and whole-object snapshots.
+
+### Sleeping for a goroutine
+
+Bad:
+
+```go
+func TestRefresh(t *testing.T) {
+	go refresh()
+	time.Sleep(10 * time.Millisecond)
+	if got := cachedValue(); got != "fresh" { t.Fatalf("got %q, want fresh", got) }
+}
+```
+
+The delay neither guarantees completion nor synchronizes the worker's writes with the read.
+
+Fix:
+
+```go
+func TestRefresh(t *testing.T) {
+	done := make(chan struct{})
+	go func() { refresh(); close(done) }()
+	<-done
+	if got := cachedValue(); got != "fresh" { t.Fatalf("got %q, want fresh", got) }
+}
+```
+
+### Fatal assertions in a worker
+
+Bad:
+
+```go
+func TestSave(t *testing.T) {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if err := save(); err != nil { t.Fatal(err) }
+	}()
+	<-done
+}
+```
+
+`t.Fatal` calls `FailNow`, which must run in the test goroutine rather than a spawned worker.
+
+Fix:
+
+```go
+func TestSave(t *testing.T) {
+	errs := make(chan error, 1)
+	go func() { errs <- save() }()
+	if err := <-errs; err != nil { t.Fatalf("save: %v", err) }
+}
+```
+
+### Compound comparisons without a useful diff
+
+Bad:
+
+```go
+func TestReceipt(t *testing.T) {
+	got, want := receipt(), Receipt{Total: 25, Currency: "USD"}
+	if got != want { t.Error("wrong receipt") }
+}
+```
+
+The failure hides which field differs, and `!=` stops compiling if the struct gains a slice or map.
+
+Fix:
+
+```go
+func TestReceipt(t *testing.T) {
+	got, want := receipt(), Receipt{Total: 25, Currency: "USD"}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("receipt mismatch (-want +got):\n%s", diff)
+	}
+}
+```
+
 ## Do not write
 
 - Reflection checks such as `reflect.TypeOf(service).MethodByName("Removed")` to
