@@ -14,14 +14,20 @@ directory with `Cargo.toml`):
 | --- | --- |
 | Format check | `cargo fmt --check` |
 | Lint | `cargo clippy --all-targets --all-features -- -D warnings` |
-| Test | `cargo test` |
+| Test | `cargo nextest run` and `cargo test --doc` |
 | Dependencies | Configured `cargo deny check` and `cargo machete`, preferably through the project's `just` tasks |
 | Format fix | `cargo fmt` |
 
 Run them in that order and stop at the first failure you need to fix. In a
 workspace, add `--workspace` to clippy and test, or `-p <crate>` to narrow them.
-Use `cargo nextest run` instead of `cargo test` when the project already uses
-nextest, plus `cargo test --doc`, because nextest does not run doc tests.
+
+Default to `cargo-nextest` locally and in CI; run `cargo test --doc` beside it because
+nextest does not run doc tests. It provides process-per-test isolation, parallelism,
+retries that mark flaky tests, partitioning, and JUnit output. Costs are a separate
+binary and doctest run; assumptions about state shared across tests in one process
+break, usually revealing an isolation bug. Shared files, ports, and databases still
+need isolation. Keep retries off by default. Use plain `cargo test` only when nextest
+cannot be installed.
 
 Keep the scaffold's configured deny/machete gate: deny covers advisories, licences,
 bans and sources; machete covers unused dependencies, not rustc `dead_code` warnings.

@@ -9,8 +9,9 @@ metadata:
 
 Sources: [The Rust Book: test organization](https://doc.rust-lang.org/book/ch11-03-test-organization.html), [rustdoc documentation tests](https://doc.rust-lang.org/rustdoc/write-documentation/documentation-tests.html), [cargo-nextest](https://nexte.st/docs/running/), [proptest book](https://proptest-rs.github.io/proptest/), [insta](https://insta.rs/docs/), [`tokio::test`](https://docs.rs/tokio/latest/tokio/attr.test.html). Checked with cargo 1.99, cargo-nextest 0.9, proptest 1.12 and insta 1.49.
 
-What to test and which double to use is the `quality-testing` skill. This skill is the
-Rust idioms. Run the suite as in `lang-rust-quality`.
+Read [practice.md](references/practice.md) for Rust idioms and tool choices. Use
+`quality-testing` for what to test, test budgets, maintenance, and review rules.
+Run the suite as in `lang-rust-quality`.
 
 ## Layout
 
@@ -22,23 +23,27 @@ Rust idioms. Run the suite as in `lang-rust-quality`.
   module (`tests/common/mod.rs`), not a top-level `tests/common.rs`, which cargo would
   run as a test crate.
 - Doc tests: code blocks in `///` comments of a library crate are compiled and run.
-  Mark them `no_run` (compile only), `compile_fail`, `should_panic` or `ignore` rather
-  than deleting them; hide setup lines with a leading `# `.
-- Test against traits you own with hand-written fakes. Add `mockall` only when the
-  project already uses it.
+   Use `no_run` for compile-only examples, and `compile_fail` or `should_panic` for
+   genuine API contracts. Do not use `ignore` to hide broken examples; hide setup
+   lines with a leading `# `.
+- Test at owned boundaries with handwritten fakes. Use `mockall` when interaction
+  expectations at a real boundary are the contract, not to mock every helper.
 
 ## Running
 
 ```sh
-cargo nextest run                            # when the project uses nextest
+cargo nextest run                            # default locally and in CI
 cargo test --doc                             # nextest does not run doc tests; run them separately
 cargo nextest run -p billing refund          # one crate, tests whose name matches
 cargo test -p billing refund -- --nocapture  # cargo test: show println! output
 cargo nextest run --no-fail-fast             # report every failure, not the first
 ```
 
-nextest runs each test in its own process, so global state does not leak between
-tests and slow tests show up in its summary. CI settings (`fail-fast = false`, JUnit
+`cargo-nextest` provides process-per-test isolation, parallelism, retries that mark
+flaky tests, partitioning, and JUnit output. Costs are a separate binary and doctest
+run; tests relying on in-process state shared across tests break, usually exposing
+an isolation bug. Files, ports, and databases still need isolation. Plain `cargo test`
+is the fallback only when nextest cannot be installed. CI settings (`fail-fast = false`, JUnit
 output) go in a `[profile.ci]` section of `.config/nextest.toml`, selected with
 `--profile ci`. Do not add `retries` to hide a flaky test.
 
@@ -55,8 +60,8 @@ proptest! {
 }
 ```
 
-Use `prop_assert!` / `prop_assert_eq!` inside `proptest!`, so a failure shrinks instead of
-panicking out. Shrunk failures are saved under `proptest-regressions/`; commit that
+Use `prop_assert!` / `prop_assert_eq!` inside `proptest!` for useful shrunk failures.
+Regression seeds are saved under `proptest-regressions/`; commit that
 directory so CI and collaborators replay them. Build domain values with
 `any::<T>()`, ranges (`0u32..1000`), `prop::collection::vec(…, 0..10)` and
 `prop_compose!`.
@@ -74,8 +79,9 @@ fn renders_user() {
   `assert_yaml_snapshot!` / `assert_json_snapshot!` for `Serialize` (crate features
   `yaml` / `json`; redactions need `redactions`).
 - Review new and changed snapshots with `cargo insta review` (or `cargo insta test
-  --review`) and commit the `.snap` files. On CI, insta writes nothing and a mismatch
-  fails; `cargo insta test --unreferenced=reject` also fails on stale snapshot files.
+  --review`) and commit accepted `.snap` files and inline changes. Never auto-accept
+  snapshots in CI; a mismatch must fail. `cargo insta test --unreferenced=reject`
+  also fails on stale snapshot files.
 
 ## Async and time
 
