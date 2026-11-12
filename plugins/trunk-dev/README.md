@@ -63,7 +63,7 @@ exit non-zero. They never block.
 | --- | --- |
 | Skip-CI | `git commit`, `glab mr …` or `gh pr …` whose words or here-document contain `[skip ci]`, `[ci skip]`, `[no ci]` or `[skip actions]`, case-insensitive. Forges skip the pipeline even for a marker quoted as prose. |
 | Title | `glab mr create`/`gh pr create` with a literal title that is not a Conventional Commit. |
-| Flag line | A `feat` or breaking create without a named `Flag:` line, or a `feat` with `Flag: none`. A body from a file, stdin or an expansion gets a reminder to review it. |
+| Flag line | A `feat` or breaking create without a `Flag:` line, or with `Flag: none` and no reason. `Flag: none -- <reason>` is valid. A body from a file, stdin or an expansion gets a reminder to review it. |
 | Squash | `glab mr merge`/`gh pr merge` without `--squash`/`-s` in a release repository. |
 | Branch age | A branch push whose merge base with the default branch is more than two days old. |
 

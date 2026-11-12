@@ -34,19 +34,30 @@ describe("decideMrAdvisory create and merge hints", () => {
 
   test("does not judge descriptions supplied from file, editor or an expansion", () => {
     expect(advise("gh pr create -t 'feat: new feature' --body @description.md").join(" ")).toContain(
-      "review file/editor-provided text manually",
+      "file/editor-provided text manually",
     )
     expect(advise(`gh pr create -t 'feat: new feature' --body "$BODY"`).join(" ")).toContain("manually")
     expect(advise("gh pr create -t 'feat: new feature'").join(" ")).toContain("Flag:")
     expect(
       advise("gh pr create -t 'feat: new feature' --body 'Flag: new_ui (default off; owner x; remove by 2026-12-31)'"),
     ).toEqual([])
-    expect(advise("gh pr create -t 'feat: new feature' --body 'Flag: none — tiny'").join(" ")).toContain(
-      "only for non-feature changes",
+    for (const sep of ["--", "-", "\u2014", ":"]) {
+      expect(advise(`gh pr create -t 'feat: new feature' --body 'Flag: none ${sep} nothing to switch off'`)).toEqual([])
+    }
+    expect(advise("gh pr create -t 'feat(api)!: replace API' --body 'Flag: none -- complete change'")).toEqual([])
+  })
+
+  test("asks for a reason when Flag none has none", () => {
+    for (const body of ["Flag: none", "Flag: none --", "Flag: none \u2014 ", "Flag: none:"]) {
+      expect(advise(`gh pr create -t 'feat: new feature' --body '${body}'`).join(" ")).toContain("needs a one-line reason")
+    }
+    expect(advise("gh pr create -t 'feat(api)!: replace API' --body 'Flag: none'").join(" ")).toContain(
+      "needs a one-line reason",
     )
-    expect(advise("gh pr create -t 'feat(api)!: replace API' --body 'Flag: none — x'").join(" ")).toContain(
-      "only for non-feature changes",
-    )
+  })
+
+  test("advises a feat without a Flag line to add a flag or Flag none", () => {
+    expect(advise("gh pr create -t 'feat: x' --body 'body'").join(" ")).toContain("Flag: none -- <reason>")
   })
 
   test("advises forge merges without squash only in release repos", () => {

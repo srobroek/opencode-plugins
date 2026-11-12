@@ -9,27 +9,33 @@ import { gitInvocation, type Invocation, invocations } from "./shell.ts"
 
 const CONVENTIONAL_TITLE = /^[a-z]+(?:\([^)\r\n]+\))?!?: .+$/
 const FLAG_LINE = /^Flag:\s*\S/m
-const NO_FLAG_LINE = /^Flag:\s*none\b/im
+const NO_FLAG_LINE = /^Flag:[ \t]*none\b([^\r\n]*)/im
 const DAY_MS = 24 * 60 * 60 * 1000
 
 export const ADVICE = {
   title: "trunk-dev: MR/PR titles should use Conventional Commits, e.g. `feat(scope): summary`.",
   featFlagUnseen:
-    "trunk-dev: every `feat` MR/PR ships behind a feature flag; add a `Flag: <name> (default off; owner <alias>; remove by YYYY-MM-DD)` line, and review file/editor-provided text manually.",
+    "trunk-dev: add one `Flag:` line to this `feat` MR/PR: `Flag: <name> (default off; owner <alias>; remove by YYYY-MM-DD)`, or `Flag: none -- <reason>` when there is nothing to switch off. Review file/editor-provided text manually.",
   breakingFlagUnseen:
-    "trunk-dev: add a `Flag:` decision line to the MR/PR description (or `Flag: none — reason`); review file/editor-provided text manually.",
+    "trunk-dev: add one `Flag:` line to this breaking MR/PR: a named flag, or `Flag: none -- <reason>`. Review file/editor-provided text manually.",
   featFlagMissing:
-    "trunk-dev: every `feat` MR/PR ships behind a feature flag; add a `Flag: <name> (default off; owner <alias>; remove by YYYY-MM-DD)` line.",
+    "trunk-dev: add one `Flag:` line to this `feat` MR/PR: `Flag: <name> (default off; owner <alias>; remove by YYYY-MM-DD)`, or `Flag: none -- <reason>` when there is nothing to switch off.",
   breakingFlagMissing:
-    "trunk-dev: this breaking MR/PR needs a `Flag:` decision line in its description (for example `Flag: none — reason`).",
-  featFlagNone:
-    "trunk-dev: `Flag: none` is only for non-feature changes; gate this `feat` behind a default-off flag, or retype the change truthfully (`fix`, `refactor`, `chore`).",
+    "trunk-dev: this breaking MR/PR needs one `Flag:` line in its description: a named flag, or `Flag: none -- <reason>`.",
+  flagNoneReason:
+    "trunk-dev: `Flag: none` needs a one-line reason, for example `Flag: none -- nothing to switch off`.",
   squash: "trunk-dev: squash-merge this MR/PR so its Conventional Commit title is the release unit (`--squash`).",
 } as const
 
 function titleParts(title: string): { type: string; breaking: boolean } | undefined {
   const match = /^([a-z]+)(?:\([^)\r\n]+\))?(!)?: /.exec(title)
   return match ? { type: match[1] as string, breaking: Boolean(match[2]) } : undefined
+}
+
+/** True when a `Flag: none` line has nothing after `none` except separators (`--`, `-`, an em dash, `:`) and spaces. */
+function noReasonGiven(body: string): boolean {
+  const rest = NO_FLAG_LINE.exec(body)?.[1]
+  return rest !== undefined && rest.replace(/[\s\-\u2013\u2014:]+/g, "") === ""
 }
 
 type OptionValue = { value?: string; uncertain: boolean; missing: boolean }
@@ -130,7 +136,7 @@ function createAdvice(forge: Forge): string[] {
   if (body.uncertain || body.value === undefined || body.missing)
     out.push(feature ? ADVICE.featFlagUnseen : ADVICE.breakingFlagUnseen)
   else if (!FLAG_LINE.test(body.value)) out.push(feature ? ADVICE.featFlagMissing : ADVICE.breakingFlagMissing)
-  else if (feature && NO_FLAG_LINE.test(body.value)) out.push(ADVICE.featFlagNone)
+  else if (noReasonGiven(body.value)) out.push(ADVICE.flagNoneReason)
   return out
 }
 

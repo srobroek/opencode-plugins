@@ -24,7 +24,7 @@ The trunk-dev plugin's commit gate and advisories are best-effort, early local g
 
 - Protect the default branch. Developers and maintainers cannot push directly; changes merge only through an MR/PR with a required passing pipeline (`Pipelines must succeed` on GitLab or required status checks on GitHub). Require squash merge, or at minimum strongly encourage it and validate the squash title. The semantic-release token's bot identity must be the only identity permitted to push the release commit and tags; otherwise branch or tag protection will block the automated release.
 - Fail the MR/PR pipeline when its title (the future squash subject) is not a Conventional Commit. For example, run commitlint against `$CI_MERGE_REQUEST_TITLE` on GitLab or the pull-request title on GitHub.
-- Fail the pipeline when a `feat` MR/PR description lacks a named `Flag:` line (the `default off` or the `enable` form) or uses `Flag: none`.
+- Fail the pipeline when a `feat` or breaking MR/PR description has no `Flag:` line, or has `Flag: none` without a reason.
 - In a repository with a Beads ledger, add the daily stale-branch job on GitHub (scheduled workflow) or GitLab (job plus pipeline schedule) using step 7 of the trunk-dev-release-setup skill.
 
 These server-side checks make the policy enforceable; local guidance and the plugin's checks complement them.
