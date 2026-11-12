@@ -55,7 +55,8 @@ skill's `references/practice.md`.
    commit, each approved loss, the gaps, and the follow-ups.
 
 Without the `quality_test_summarize` and `quality_test_compare` tools, run the commands
-in [evidence.md](references/evidence.md) through the shell, and read the reports by hand. Say in the report that the comparison was manual.
+in [evidence.md](references/evidence.md) through the shell, and read the reports by hand.
+Say in the report that the comparison was manual.
 
 ## Rules
 
