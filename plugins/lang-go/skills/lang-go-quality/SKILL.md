@@ -23,6 +23,13 @@ then continue; later steps on code that does not build only add noise.
 | Vulnerabilities | `govulncheck ./...` (or `go tool govulncheck ./...` when it is a `tool` in `go.mod`) |
 | Format fix | `golangci-lint fmt`, or `gofmt -w .` |
 
+The scaffold's `golangci-lint` v2 config includes `errcheck`, `govet`, `ineffassign`,
+`staticcheck`, `unused` and explicitly enabled `gosec`; `go vet` alone is not that
+gate. Optional `gocyclo`/`gocognit` limits ratchet reviewed exceptions. For executable
+packages, pinned `go tool deadcode -test ./...` reports whole-program reachability
+from executable/test roots, unlike declaration-level `unused`/`staticcheck` checks.
+Do not treat that report as proof a library's public API is safe to remove.
+
 - After an edit that spans files or packages or changes a signature, run
   `go vet ./...` and `go build ./...` once before handing back (or the project's
   own `make`/task target for them when it has one).

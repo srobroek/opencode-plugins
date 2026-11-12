@@ -71,13 +71,15 @@ that ran, scanners that were absent. An unrun scanner never reads as clean.
 
 | Ecosystem | Scanner | Ephemeral runner |
 |-----------|---------|------------------|
-| python | `pip-audit` | `uvx pip-audit` |
-| node | `pnpm audit` / `npm audit` / `yarn npm audit` | Use the project package manager's audit command; do not install a persistent scanner. |
-| rust | `cargo-audit` | None: `cargo install`/`cargo binstall` are persistent installs. Use it only when `command -v cargo-audit` finds it; otherwise report the gap. |
-| go | `govulncheck` | `go run golang.org/x/vuln/cmd/govulncheck@latest` |
-| any | `osv-scanner` (supplemental) | `go run github.com/google/osv-scanner/v2/cmd/osv-scanner@latest` (not published to npm) |
+| python | `pip-audit`; optional `uv audit` | `uvx pip-audit` (pin the version for repeatable CI). `uv audit` exists as a preview option: validate the pinned uv version's preview policy before making it a gate. |
+| node | `bun audit` / `pnpm audit` / `npm audit` / `yarn npm audit` | Use the project package manager's audit command; do not install a persistent scanner. |
+| rust | `cargo-audit` or configured `cargo deny check` | None: `cargo install`/`cargo binstall` are persistent installs. Use the project-pinned tool; deny also checks licences/source policy, so avoid redundant mandatory scans. |
+| go | `govulncheck` | Project-pinned `go tool govulncheck ./...`, or the pinned binary; never resolve `@latest` inside a scan. |
+| any | OSV-Scanner v2 (supplemental) | Project-pinned `osv-scanner scan source -r .`; or `go tool osv-scanner scan source -r .` when its v2 module is already pinned in `go.mod` (not published to npm). |
 
 Guard each with `command -v`; missing → report "scanner not available: `<name>`" plus the runner.
+For Go `tool` directives, check the project pin and `go tool` availability instead of
+requiring a standalone binary. Pin scanner versions during setup, not this scan.
 A missing scanner is a reported coverage gap, not a task: provisioning one
 permanently is separate work on the user's ask. The plugin appends an advisory to
 the result of a shell call that installed a scanner persistently; it does not stop

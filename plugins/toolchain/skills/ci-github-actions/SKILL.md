@@ -38,6 +38,9 @@ lives in the language plugin's skills when installed.
 
 - Set `strategy.fail-fast: false` on OS or version matrices, so one failing cell
   does not cancel the others and hide whether the failure is platform-specific.
+- Shard tests deterministically; collect first-attempt failures separately from
+  diagnostic retries. Retries must not erase failures; quarantine needs an owner
+  and expiry. Review snapshots explicitly, never auto-accept them in CI.
 - Cancel superseded runs on CI workflows only:
 
   ```yaml
@@ -54,12 +57,21 @@ lives in the language plugin's skills when installed.
 - Pin every third-party action to a full commit SHA with the version in a comment
   (`uses: actions/checkout@<40-char sha> # v4.2.2`). `pinact` or `ratchet` pins
   existing workflows.
-- Let Dependabot (or Renovate) update the pins: add a `github-actions` ecosystem
-  entry to `.github/dependabot.yml`.
+- Let one updater own pins: configure Renovate action updates, or Dependabot's
+  `github-actions` ecosystem, with cooldowns. Do not add a second bot for the same pins.
+- Run `pinact run --check`, `actionlint` and `zizmor` when workflows exist. Review
+  transitive actions and downloaded artifacts too: downloads need separate version
+  pins. Verify their integrity against trusted release metadata; `Trivy`'s March
+  2026 compromise included retagged actions and malicious binaries/images.
 - Give each workflow `permissions: contents: read` at the top and widen per job.
 - Attest released artifacts with `actions/attest-build-provenance`; the job needs
   `id-token: write` and `attestations: write`. Consumers verify with
   `gh attestation verify`.
+- Prefer OIDC trusted publishing (npm/PyPI where supported) over long-lived tokens;
+  publish provenance and SBOM artifacts, and verify publisher/repository identity
+  when consuming attestations. Signatures do not prove code harmless.
+- Optional `step-security/harden-runner` monitors runner network access. Use
+  `Scorecard` or `poutine` for scheduled assessment, not every-commit gates.
 
 ## Speed
 

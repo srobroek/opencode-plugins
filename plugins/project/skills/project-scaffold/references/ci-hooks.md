@@ -8,11 +8,12 @@ Workflow structure, the single required `ci-gate` job, SHA pinning and caches ar
 
 Baseline: **trailing-whitespace, end-of-file-fixer, check-yaml, check-toml,
 check-merge-conflict (conflict markers), check-added-large-files `--maxkb=512`,
-mixed-line-ending, detect-private-key**; **conventional-pre-commit `--strict`** at commit-msg
-(add `--scopes a,b,c` only if the user chose scopes); **betterleaks** or **trufflehog verified
-secrets** (`trufflehog git file://. --since-commit HEAD --results=verified --fail --no-update`);
+mixed-line-ending, detect-private-key**. Add **conventional-pre-commit `--strict`** at commit-msg
+(add `--scopes a,b,c` only if the user chose scopes); **offline `Betterleaks` or `Gitleaks`**
+on changed content (no network verification in the hook);
 **typos**; **shellcheck**.
-Extras: `actionlint`, `zizmor --offline --persona regular` (workflow security), `taplo lint`,
+When workflows exist, include `actionlint`, `zizmor --offline --persona regular` and
+`pinact run --check`. Extras: `taplo lint`,
 `lychee --offline --no-progress` (offline link check), close-keyword normalisation (GitHub
 binds a closing keyword only to the first reference in `Closes #1, #2`; rewrite to
 `Closes #1, closes #2`), an attribution guard that rejects agent co-author trailers or
@@ -31,15 +32,25 @@ fails on any change. Formatters and safe lint fixes stay in `just fmt`, never in
 
 - Per language: lint and test jobs using the same `just` tasks, each with a timeout
   (default 15 minutes) and `permissions: contents: read`.
-- Security: secret scan (TruffleHog, verified results), CodeQL per detected language, OSV-Scanner
-  (SARIF upload), opengrep (SARIF), Trivy (filesystem; SARIF). SARIF upload and CodeQL need
-  GitHub code scanning on the repository; ask which jobs the user wants.
+- Security: separate `TruffleHog` history/verification scan; keep unverified findings
+  reviewable, not hidden by `--results=verified`. Enable push protection where available.
+  Choose jobs by capability: `CodeQL` for supported languages and repository entitlement;
+  `Semgrep CE` or `Opengrep` for SAST; `OSV-Scanner` v2 or the language-native SCA task.
+  `Semgrep`-maintained rules changed licence in December 2024: review rule licences
+  separately from the LGPL engine, especially for competing/SaaS use.
+  For containers, offer `Grype` plus `Syft`; `Trivy` is opt-in after its March 2026 compromise
+  (verify binaries/images and transitive action downloads). Add `Hadolint` for Dockerfiles;
+  choose one IaC scanner (`Checkov` or `KICS`), with `TFLint` for Terraform and `Conftest` for
+  project policy when needed. SARIF upload needs repository code-scanning support.
 - Quality: pinned-SHA action check (`pinact run --check`), `actionlint`, `zizmor
   --min-severity medium`, `taplo fmt --check --diff`, `markdownlint-cli2`, `cspell` spelling,
   `lychee --no-progress --accept 200,204,206,429 '**/*.md'` online link check, a
   Conventional Commits check across the PR's commit range (not just the commit-msg hook,
-  which `--no-verify` skips), and complexity with Lizard per language (CCN 12, function
-  length 80, 5 arguments).
+  which `--no-verify` skips). Prefer native complexity checks (`Ruff` `C901`, `golangci-lint`
+  `gocyclo`/`gocognit`); `Lizard` is optional. Start cyclomatic limits at 10-12 and cognitive
+  limits around 15, ratcheting existing exceptions. Function length 80 and five arguments
+  are review signals rather than mandatory gates. Report duplication with `jscpd` or `PMD CPD`
+  before choosing a threshold; exclude generated code.
 - Path-based skipping inside the workflow with a path filter job feeding the gate's
   allowed skips, never `paths:` on the trigger (see `ci-github-actions`).
 - Monorepo: one job per member path and language (`monorepo.md`).
@@ -51,6 +62,13 @@ fails on any change. Formatters and safe lint fixes stay in `just fmt`, never in
   (`node`, `rust`, `python`) or components for a monorepo with independent versions.
   GitLab uses semantic-release (`trunk-dev-release-setup`).
 - Renovate: `extends: ["config:recommended"]`, `dependencyDashboard: true`,
-  `rangeStrategy: "pin"`, `labels: ["dependencies"]`. Dependabot is the alternative; add its
-  `github-actions` ecosystem either way so action pins update.
+  `rangeStrategy: "pin"`, `labels: ["dependencies"]`. Choose Renovate or Dependabot, not
+  both; configure cooldowns and action-pin updates in that updater (Dependabot uses
+  `github-actions`). Schedule vulnerability rescans between dependency PRs.
+- Release artifacts: generate a CycloneDX/SPDX SBOM with `Syft` for images/artifacts or
+  `cdxgen` for source dependencies. Inventory dependency licences (`pip-licenses`,
+  `license-checker-rseidelsohn`, `go-licenses`, or `cargo-deny`) against project policy;
+  `licensee` detects the repository licence, not dependency compliance. Use OIDC trusted
+  publishing and attestations where supported; consumers verify provenance, which does
+  not prove code harmless (`ci-github-actions`).
 - The release baseline tag and bot credentials follow `trunk-dev-release-setup`.

@@ -21,12 +21,14 @@ workspace (`[tool.uv.workspace] members = ["packages/*"]`, `lang-python-packagin
 | --- | --- |
 | Packages / venv | `uv` (not pip, poetry) |
 | Lint + format | `ruff` (`ruff check`, `ruff format`); selected rules at least `E F I N W UP B SIM TC ANN RUF PERF C4 PT S`; per-file ignore `assert` and `ANN` in `tests/**` |
-| Types | `pyright` strict is the current preference (`toolchain-languages`, `lang-python-types`). The old bootstrapper used `ty`; no toolchain or `lang-python` skill recommends it, so use it only if the user asks |
+| Types | `pyright` strict is the preference; keep configured mypy (`lang-python-types`). `ty` is beta with no stable API: opt-in pilot, not the default gate |
 | Tests | `pytest` (`--strict-markers --strict-config`, `filterwarnings = error`); `hypothesis` for properties |
 | APIs | FastAPI with Pydantic; Litestar when the app needs stronger structure |
 | Database | SQLAlchemy + Alembic (`lang-python-persistence`) |
 | Import rules | `import-linter` (`lint-imports`) |
-| Unused or missing deps | `deptry` (`uv run deptry .`) in the gate |
+| Unused or missing deps | `deptry` (`uv run --locked deptry .`) in the gate |
+| Dead code | Optional `Vulture` (`uv run --locked vulture . --min-confidence 100`); baseline reviewed dynamic-use exceptions. `Ruff` `F401`/`F841` cover imports/local variables, not whole-project reachability |
+| Vulnerabilities | `pip-audit` or `OSV-Scanner` v2; `uv audit` only after validating the pinned version's preview policy |
 | Coverage | `pytest-cov` (`--cov --cov-report=term-missing --cov-report=lcov`); ask whether to enforce a threshold (`--cov-fail-under=N`); the old scaffold set none |
 | Matrix | `nox` for several Python versions only if the library supports more than one; ask |
 
@@ -35,8 +37,11 @@ silent). Logging for services follows `toolchain-quality-observability`.
 
 ## Gate (`just check`)
 
-`uv lock --check`, `uv run ruff check .`, `uv run ruff format --check .`,
-`uv run pyright`, `uv run pytest -x`, `uv run deptry .`; add `uv run lint-imports` when contracts exist.
+`uv lock --check`, `uv run --locked ruff check .`, `uv run --locked ruff format --check .`,
+`uv run --locked pyright`, `uv run --locked pytest -x`, `uv run --locked deptry .`;
+add `uv run --locked lint-imports` when contracts exist. Configure `Ruff` `S` rules for
+security and optional `C901` with a 10-12 complexity limit and reviewed exceptions.
+Add `Bandit` only for required checks not covered by configured `Ruff` `S` rules.
 CI: `astral-sh/setup-uv` with `enable-cache: true`, `uv sync --locked`, `uv run --locked`.
 
 ## Rules
