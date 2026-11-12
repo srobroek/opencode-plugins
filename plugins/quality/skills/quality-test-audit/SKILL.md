@@ -1,13 +1,13 @@
 ---
 name: quality-test-audit
-description: "Use to audit, prune or speed up a test suite on demand: flaky, slow, duplicate, obsolete and never-failing tests."
+description: "Use to audit, clean up, fix or strengthen a test suite on demand: flaky, slow, duplicate, obsolete and missing tests."
 ---
 
 # Test audit
 
-Audit one test scope, then prune, purge, fix and speed it up without losing protection.
-Steps 1 to 5 change nothing in the repository. Edit tests or code only after step 6
-approves a plan. The rules for good tests, the budget and maintenance are in the
+Audit one test scope and recommend what to drop, merge, rewrite, simplify, add, speed up
+and clean up. Then apply the approved changes without losing protection. Steps 1 to 5 change
+nothing in the repository. Edit tests or code only after step 6 approves a plan. The rules for good tests, the budget and maintenance are in the
 `quality-testing` skill; each language's tools are in the `lang-<language>-testing`
 skill's `references/practice.md`.
 
@@ -32,27 +32,36 @@ skill's `references/practice.md`.
    to mutate.
 3. **Classify.** Check each test against [catalog.md](references/catalog.md). For each
    candidate, record the test, the class, the evidence, the behavior it claims to protect,
-   and the test that keeps that protection.
+   and the test that keeps that protection. Then look for weak spots, the catalog's
+   Strengthen group: surviving mutants and uncovered branches of public behavior. Read
+   the suite as a whole too: its fixtures, conventions, runner settings and CI lanes.
 4. **Plan.** Give each candidate one action: delete, merge into a parametrized test,
-   rewrite through the public interface, move to a lower level, fix the flake at its
-   cause, quarantine, speed up, or keep. Use the plan table in
-   [report.md](references/report.md). A delete or a merge names the test that keeps the
-   protection and the mutants that prove it.
+   rewrite through the public interface, simplify, move to a lower level, fix the flake at
+   its cause, quarantine, speed up, extend an existing test, add a test, or keep. Use the plan
+   table in [report.md](references/report.md). A delete or a merge names the test that
+   keeps the protection and the mutants that prove it. An added test names the behavior,
+   the mutant or branch it covers, and why no existing test can be extended. Write the
+   suite-level recommendations in the report's Recommendations section.
 5. **Challenge.** Give the plan and its evidence to `refactor-challenger` when it is
    installed, otherwise to `adversarial-challenger`. Ask it to show, for each item, that
    the change loses protection or that the evidence does not support it. Drop or
    downgrade each refuted item.
-6. **Approve.** Show the plan table and ask with the `question` tool: apply all, apply a
-   selection, or apply none. Without a person to ask, report the plan and stop.
-7. **Apply in batches.** One kind of change in one area per batch, one commit per batch.
-   Apply it yourself or through the `coder` subagent. After each batch:
+6. **Approve.** Show the plan table and the recommendations, and ask with the
+   `question` tool: apply all, apply a selection, or report only. Without a person to ask,
+   report the plan and stop.
+7. **Apply in batches.** One kind of change in one area per batch, one commit per batch,
+   removals and additions in separate batches. Apply it yourself or through the `coder`
+   subagent. After each batch:
    - the scoped suite passes in repeated random-order runs;
    - `quality_test_compare` against the baseline shows no lost protection for coverage
      and for mutants. Each entry it lists is either an equivalent or irrelevant mutant
-     that the user approves, or the batch is reverted.
+     that the user approves, or the batch is reverted;
+   - each added test failed first against a forced fault, and now kills the mutant or
+     covers the branch it was written for.
 8. **Report.** Use the report template in [report.md](references/report.md): before and
    after counts, runtime, flaky tests, coverage and mutation score, each batch with its
-   commit, each approved loss, the gaps, and the follow-ups.
+   commit, each approved loss, the recommendations not applied, the gaps, and the
+   follow-ups.
 
 Without the `quality_test_summarize` and `quality_test_compare` tools, run the commands
 in [evidence.md](references/evidence.md) through the shell, and read the reports by hand.
@@ -74,3 +83,8 @@ Say in the report that the comparison was manual.
 - MUST count a test that passes only on a retry as flaky, not as a pass. Quarantine only
   with a tracked issue, an owner and an expiry date.
 - MUST commit each batch separately so that each one can be reverted.
+- MUST add a test only for a behavior that a surviving mutant, an uncovered public branch
+  or a reported bug shows is unprotected. Extend an existing test or a parametrized case
+  list before adding a new test, and follow the `quality-testing` rules: one behavior,
+  the public interface, expected values from the requirement. Never add a test to raise
+  coverage alone.
