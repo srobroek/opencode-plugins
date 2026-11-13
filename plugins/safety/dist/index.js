@@ -2789,15 +2789,19 @@ function externalDirectories(dirs, roots) {
 
 // plugins/safety/src/fnox-config.ts
 import { existsSync as existsSync2, readdirSync, readFileSync } from "fs";
-import { homedir as homedir3 } from "os";
-import { dirname as dirname2, join as join3 } from "path";
+import { homedir as homedir4 } from "os";
+import { dirname as dirname2, join as join4 } from "path";
 
 // plugins/safety/src/op-guard.ts
+import { homedir as homedir3 } from "os";
+import { join as join3 } from "path";
 var OP_MESSAGE = "safety op-guard: do not call the 1Password CLI directly; each call opens a new 1Password session and asks the user to approve. Run the command through fnox, which reuses its cached session: `fnox exec -- <cmd>`, or `fnox exec --only NAME -- <cmd>`. If the secret is not declared, load the `project-secrets` skill and declare it; if it does not exist yet, ask the user to create it. To find items, run `fnox provider discover <provider> --tags project/<name>`.";
 var FNOX_DUMP_MESSAGE = "safety op-guard: this fnox command prints secret values into the transcript. Use `fnox check` or `fnox list` to inspect, and `fnox exec -- <cmd>` to use a value.";
 var LITERAL_MESSAGE = "safety op-guard: a literal secret in the command lands in the transcript; pass it from a command or variable (`credential=$(cmd)`), or pipe a JSON template to `op item create -`.";
 var FNOX_SET_MESSAGE = "safety op-guard: pipe the value into `fnox set NAME --provider host` from a command; a literal value lands in the transcript.";
 var FNOX_STORE_MESSAGE = "safety op-guard: this fnox provider cannot store a value; `fnox set` would write a piped, generated or expanded value into fnox.toml as the item reference. Create the item first, `<json from a command> | op item create --vault V -`, then point fnox at it: `fnox set NAME '<item>/<field>' --provider <op-provider>`.";
+var FNOX_INDIRECT_MESSAGE = "safety op-guard: this command reaches `fnox set` or `op item create|edit` through an executor the guard cannot follow (a piped shell, xargs, find -exec, parallel, env -S, eval, source, an alias or function, an expanded command name, or a launcher such as nix, mise, uv or npx), so it cannot check where the value goes. Run it directly: `<json from a command> | op item create --vault V -`, then `fnox set NAME '<item>/<field>' --provider <op-provider>`.";
+var FNOX_CONFIG_MESSAGE = "safety op-guard: this command passes a value to `fnox set` and also changes fnox configuration (a write to fnox*.toml or ~/.config/fnox, `fnox config`/`fnox provider` changes, or a write whose target the guard cannot read), so the provider it checked may not be the one used. Change the configuration in one command and run `fnox set` in the next.";
 var NESTING_MESSAGE = "safety op-guard: command nesting is too deep to check; run it without nested shells";
 var CHECK_FAILED_MESSAGE = "safety op-guard: could not check this command; run `op` and fnox commands directly, without nesting";
 var MAX_NESTING = 16;
@@ -3013,7 +3017,14 @@ var VALUE_STORE_TYPES = new Set([
   "keychain",
   "keepass",
   "password-store",
-  "gopass"
+  "gopass",
+  "aws-sm",
+  "aws-ps",
+  "azure-sm",
+  "gcp-sm",
+  "bitwarden-sm",
+  "foks",
+  "vault"
 ]);
 var DIRECTORY_COMMANDS = new Set(["cd", "pushd", "popd", "chdir"]);
 var DIRECTORY_WRAPPERS = new Set(["env", "sudo", "doas", "chroot", "su", "runuser", "setpriv"]);
@@ -3025,7 +3036,12 @@ function expands(command, at) {
   const word = command.argv[at];
   return command.words?.[at]?.expands !== false && /[$`]|[<>]\(/.test(word);
 }
-function fnoxSetRefusal(command, at, fed, stdin, types, configured) {
+function valueSource(command, stdin, value, defaults) {
+  const piped = stdin || command.stage > 0 || command.redirects.length > 0 || command.hereDocuments.length > 0;
+  const substituted = command.argv.some((word) => /[<>]\(/.test(word));
+  return piped || substituted || defaults.some((d) => expands(command, d.at)) || value !== undefined && expands(command, value);
+}
+function parseSet(command, at) {
   const args = command.argv.slice(at + 1);
   let provider;
   let reads = true;
@@ -3054,14 +3070,14 @@ function fnoxSetRefusal(command, at, fed, stdin, types, configured) {
     else if (!arg.startsWith("-") || arg === "-")
       positional.push(at + 1 + i);
   }
+  return { provider, reads, sourced, positional, defaults };
+}
+function fnoxSetRefusal(command, at, fed, stdin, types, configured) {
+  const { provider, reads, sourced, positional, defaults } = parseSet(command, at);
   const type = provider === undefined || !configured ? undefined : types(provider);
   const value = positional[1];
   if (type === undefined || !VALUE_STORE_TYPES.has(type)) {
-    const piped = stdin || command.stage > 0 || command.redirects.length > 0 || command.hereDocuments.length > 0;
-    const substituted = command.argv.some((word) => /[<>]\(/.test(word));
-    const defaultExpands = defaults.some((d) => expands(command, d.at));
-    const expanded = value !== undefined && expands(command, value);
-    return sourced || piped || substituted || defaultExpands || expanded ? "store" : undefined;
+    return sourced || valueSource(command, stdin, value, defaults) ? "store" : undefined;
   }
   const defaultLiteral = defaults.some((d) => !expansionOnly(command, d.at, d.skip));
   if (value !== undefined)
@@ -3069,6 +3085,114 @@ function fnoxSetRefusal(command, at, fed, stdin, types, configured) {
   if (defaultLiteral)
     return "set";
   return reads && fed ? "literal" : undefined;
+}
+var FNOX_VALUED_GLOBAL = new Set(["-P", "--profile", "-c", "--config", "--age-key-file"]);
+function fnoxSubcommand(command) {
+  if (base(command.argv[0]) !== "fnox")
+    return;
+  for (let at = 1;at < command.argv.length; at++) {
+    const word = command.argv[at];
+    const [flag] = word.split("=", 1);
+    if (FNOX_VALUED_GLOBAL.has(flag)) {
+      if (!word.includes("="))
+        at++;
+      continue;
+    }
+    if (word.startsWith("-"))
+      continue;
+    return { sub: word, at };
+  }
+  return;
+}
+function setsWithValueSource(command) {
+  const found = fnoxSubcommand(command);
+  if (found === undefined)
+    return false;
+  if (found.sub === "exec")
+    return command.argv.includes("set") || command.argv.includes("s");
+  if (found.sub !== "set" && found.sub !== "s")
+    return false;
+  const { sourced, positional, defaults } = parseSet(command, found.at);
+  return sourced || valueSource(command, false, positional[1], defaults);
+}
+var CONFIG_SUBCOMMANDS = new Set(["config", "init", "import", "remove", "rm"]);
+var PROVIDER_CHANGES = new Set(["add", "a", "set", "remove", "rm", "delete"]);
+var FILE_COMMANDS = new Set(["tee", "cp", "mv", "ln", "rm", "install", "rsync", "dd", "touch", "truncate", "sed", "perl", "unlink", "shred"]);
+var CONFIG_FILE = /^\.?fnox(?:\.[^/]+)?\.toml$/;
+var WRITERS = new Set(["tee", "cp", "mv", "ln", "rm", "install", "rsync", "dd", "touch", "truncate", "sed", "perl", "unlink", "shred"]);
+function changesFnoxConfig(command) {
+  const found = fnoxSubcommand(command);
+  if (found === undefined)
+    return false;
+  if (CONFIG_SUBCOMMANDS.has(found.sub))
+    return true;
+  return found.sub === "provider" && PROVIDER_CHANGES.has(command.argv[found.at + 1] ?? "");
+}
+function uncertainWrite(command) {
+  if (command.redirects.some((word) => word.hereString !== true && word.expands))
+    return true;
+  return WRITERS.has(base(command.argv[0])) && command.argv.some((_, at) => at > 0 && expands(command, at));
+}
+function touchesConfigFile(command) {
+  return FILE_COMMANDS.has(base(command.argv[0])) && command.argv.slice(1).some((word) => CONFIG_FILE.test(base(word)) || /(?:^|\/)\.config\/fnox(?:\/|$)/.test(word));
+}
+function fnoxConfigPath(path, home = homedir3()) {
+  return CONFIG_FILE.test(base(path)) || path === join3(home, ".config", "fnox") || path.startsWith(join3(home, ".config", "fnox") + "/");
+}
+function configWriteBesideSet(commands, writes) {
+  if (!commands.some(setsWithValueSource))
+    return false;
+  return writes.some((path) => fnoxConfigPath(path)) || commands.some(touchesConfigFile) || commands.some(changesFnoxConfig) || commands.some(uncertainWrite);
+}
+var LAUNCHERS = new Map([
+  ["nix", new Set(["develop", "shell", "run"])],
+  ["direnv", new Set(["exec"])],
+  ["mise", new Set(["exec", "x"])],
+  ["asdf", new Set(["exec"])],
+  ["devbox", new Set(["run"])],
+  ["uv", new Set(["run"])],
+  ["poetry", new Set(["run"])],
+  ["pnpm", new Set(["dlx"])],
+  ["npx", true],
+  ["bunx", true]
+]);
+var SECRET_WRITE = /\bfnox\b[^|;&\n]*\b(?:set|s)\b|\bop\b[^|;&\n]*\bitem\s+(?:create|edit)\b/;
+var SECRET_WORDS = /\b(?:set|s)\b|\bitem\s+(?:create|edit)\b/;
+function indirectSecretWrite(commands) {
+  const whole = [...new Set(commands.map((command) => command.source))].join(`
+`);
+  const wholeHits = SECRET_WRITE.test(whole);
+  return commands.some((command) => {
+    if (command.argv.length === 0)
+      return false;
+    const name = base(command.argv[0]);
+    const inner = command.argv.slice(1).join(" ");
+    const innerHits = SECRET_WRITE.test(inner);
+    if (/[$`]/.test(command.argv[0]))
+      return SECRET_WORDS.test(inner) || wholeHits;
+    if (SHELLS.has(name)) {
+      const script = command.argv.findIndex((word, i) => i > 0 && /^-[A-Za-z]*c[A-Za-z]*$/.test(word));
+      if (script < 0)
+        return wholeHits && (command.stage > 0 || command.redirects.some((word) => word.hereString !== true));
+      return wholeHits && expands(command, script + 1);
+    }
+    if (name === "xargs" || name === "parallel" || name === "eval")
+      return innerHits;
+    if (name === "find")
+      return command.argv.some((word) => ["-exec", "-execdir", "-ok", "-okdir"].includes(word)) && innerHits;
+    if (name === "source" || name === "." || name === "alias")
+      return wholeHits;
+    if (command.wrappers.includes("env") && /\benv\s+(?:-\S+\s+)*(?:-[A-Za-z]*S|--split-string)/.test(command.source))
+      return SECRET_WRITE.test(command.argv.join(" ")) || wholeHits;
+    if (/\(\)\s*\{|\bfunction\s+[\w-]+/.test(command.source))
+      return wholeHits;
+    const launcher = LAUNCHERS.get(name);
+    if (launcher === true)
+      return innerHits;
+    if (launcher !== undefined)
+      return launcher.has(command.argv[1] ?? "") && innerHits;
+    return false;
+  });
 }
 function fnoxRefusal(command, allow = [], inherited = {
   literal: false,
@@ -3143,12 +3267,18 @@ var MESSAGES = {
   dump: FNOX_DUMP_MESSAGE,
   literal: LITERAL_MESSAGE,
   set: FNOX_SET_MESSAGE,
-  store: FNOX_STORE_MESSAGE
+  store: FNOX_STORE_MESSAGE,
+  indirect: FNOX_INDIRECT_MESSAGE,
+  config: FNOX_CONFIG_MESSAGE
 };
 function opGuard(commands, allow = [], types = () => {
   return;
-}) {
+}, writes = []) {
   try {
+    if (indirectSecretWrite(commands))
+      return MESSAGES.indirect;
+    if (configWriteBesideSet(commands, writes))
+      return MESSAGES.config;
     const known = changesDirectory(commands) ? () => {
       return;
     } : types;
@@ -3187,7 +3317,7 @@ function configs(cwd, home) {
       names = readdirSync(dir).filter((name) => CONFIG_NAME.test(name)).sort();
     } catch {}
     for (const name of names) {
-      const config = parse(readFileSync(join3(dir, name), "utf8"));
+      const config = parse(readFileSync(join4(dir, name), "utf8"));
       if ("import" in config)
         throw new Error("fnox config with import");
       found.push(config);
@@ -3197,12 +3327,12 @@ function configs(cwd, home) {
       break;
     dir = parent;
   }
-  const global = join3(home, ".config", "fnox", "config.toml");
+  const global = join4(home, ".config", "fnox", "config.toml");
   if (existsSync2(global))
     found.push(parse(readFileSync(global, "utf8")));
   return found;
 }
-function readProviderTypes(cwd, home = homedir3()) {
+function readProviderTypes(cwd, home = homedir4()) {
   let types;
   try {
     types = new Map;
@@ -3489,7 +3619,7 @@ function hardGate(source, cwd, options = {}) {
       if (!walk.complete && /\b(?:op|fnox)\b/.test(source))
         reason = NESTING_MESSAGE;
       else
-        reason = analyze(walk.commands, options.opAllow, options.providerTypes) ?? "";
+        reason = analyze(walk.commands, options.opAllow, options.providerTypes, shellWriteTargets(source, cwd)) ?? "";
     } catch {
       reason = CHECK_FAILED_MESSAGE;
     }
@@ -3503,7 +3633,7 @@ function hardGate(source, cwd, options = {}) {
 
 // plugins/safety/src/migrations.ts
 import { existsSync as existsSync3, readdirSync as readdirSync2, realpathSync } from "fs";
-import { dirname as dirname3, join as join4, relative as relative2 } from "path";
+import { dirname as dirname3, join as join5, relative as relative2 } from "path";
 
 // plugins/safety/src/probes.ts
 var CALL_TIMEOUT_MS = 1e4;
@@ -3633,7 +3763,7 @@ async function decidePath(path, options = {}) {
   const target = migrationTarget(path);
   if (!target || !existsSync3(path))
     return;
-  if (target.layout === "alembic" && !existsSync3(join4(dirname3(target.dir), "env.py")))
+  if (target.layout === "alembic" && !existsSync3(join5(dirname3(target.dir), "env.py")))
     return;
   const state = await shipped(path, options.run ?? budget({ timeoutMs: 5000, budgetMs: 1e4 }).run);
   if (state === true)
@@ -3713,12 +3843,12 @@ import { isAbsolute as isAbsolute6, resolve as resolve7 } from "path";
 
 // plugins/safety/src/branch-delete.ts
 import { realpathSync as realpathSync3 } from "fs";
-import { homedir as homedir4 } from "os";
+import { homedir as homedir5 } from "os";
 import { basename as basename2, isAbsolute as isAbsolute5, resolve as resolve6 } from "path";
 
 // plugins/safety/src/worktree-detached.ts
 import { realpathSync as realpathSync2 } from "fs";
-import { isAbsolute as isAbsolute4, join as join5, resolve as resolve5 } from "path";
+import { isAbsolute as isAbsolute4, join as join6, resolve as resolve5 } from "path";
 var MAX_COMMAND_LENGTH2 = 64000;
 var PREFIX = "Worktree removal refused";
 var OPAQUE = new Set(["ssh", "parallel"]);
@@ -3735,7 +3865,7 @@ var VALUE_FLAGS = new Set([
 function joinChdirs(chdirs) {
   if (chdirs.length === 0)
     return null;
-  return chdirs.reduce((at, next) => isAbsolute4(next) ? next : join5(at, next));
+  return chdirs.reduce((at, next) => isAbsolute4(next) ? next : join6(at, next));
 }
 function removals(command) {
   const found = [];
@@ -4058,7 +4188,7 @@ function untrusted(word) {
 }
 function pathOf(word) {
   if (!word.startsQuoted && (word.value === "~" || word.value.startsWith("~/")))
-    return homedir4() + word.value.slice(1);
+    return homedir5() + word.value.slice(1);
   return word.value;
 }
 function gitCommand(args) {
@@ -4278,7 +4408,7 @@ function directoryTarget(line, from) {
   if (line.name === "popd")
     return null;
   if (line.args.length === 0)
-    return line.name === "cd" ? homedir4() : null;
+    return line.name === "cd" ? homedir5() : null;
   const word = line.args[0];
   if (line.args.length > 1 || untrusted(word) || word.value === "" || word.value.startsWith("-"))
     return null;
@@ -4854,14 +4984,14 @@ function createRedactor(env, options = DEFAULT_REDACT) {
 }
 
 // plugins/safety/src/scratch-dirs.ts
-import { existsSync as existsSync4, realpathSync as realpathSync4 } from "fs";
-import { homedir as homedir5, tmpdir } from "os";
-import { basename as basename3, dirname as dirname4, isAbsolute as isAbsolute7, join as join6, relative as relative3 } from "path";
+import { existsSync as existsSync4, lstatSync, realpathSync as realpathSync4 } from "fs";
+import { homedir as homedir6, tmpdir } from "os";
+import { basename as basename3, dirname as dirname4, isAbsolute as isAbsolute7, join as join7, relative as relative3, sep } from "path";
 function scratchRoots(projectID, where = {}) {
-  const home = where.home ?? homedir5();
+  const home = where.home ?? homedir6();
   const env = where.env ?? process.env;
-  const data = env.XDG_DATA_HOME?.startsWith("/") ? env.XDG_DATA_HOME : join6(home, ".local", "share");
-  return [join6(where.temp ?? realpathSync4(tmpdir()), "opencode"), join6(data, "opencode", "worktree", projectID.slice(0, 6))];
+  const data = env.XDG_DATA_HOME?.startsWith("/") ? env.XDG_DATA_HOME : join7(home, ".local", "share");
+  return [join7(where.temp ?? realpathSync4(tmpdir()), "opencode"), join7(data, "opencode", "worktree", projectID.slice(0, 6))];
 }
 function resolved(path) {
   const missing = [];
@@ -4870,10 +5000,10 @@ function resolved(path) {
     missing.unshift(basename3(at));
     at = dirname4(at);
   }
-  return join6(realpathSync4(at), ...missing);
+  return join7(realpathSync4(at), ...missing);
 }
 function inside(resource, roots) {
-  const expanded = resource === "~" || resource.startsWith("~/") ? join6(homedir5(), resource.slice(1)) : resource;
+  const expanded = resource === "~" || resource.startsWith("~/") ? join7(homedir6(), resource.slice(1)) : resource;
   if (!isAbsolute7(expanded))
     return false;
   const path = expanded.replace(/\/\*{1,2}$/, "");
@@ -4885,12 +5015,29 @@ function inside(resource, roots) {
     return rel === "" || !rel.startsWith("..") && !isAbsolute7(rel);
   });
 }
-function allowScratch(evaluation, roots) {
+function pinned(root, uid = () => process.getuid?.()) {
+  try {
+    if (!isAbsolute7(root) || realpathSync4(root) !== root)
+      return false;
+    let at = sep;
+    for (const part of root.split(sep).filter(Boolean)) {
+      at = join7(at, part);
+      if (lstatSync(at).isSymbolicLink())
+        return false;
+    }
+    const owner = uid();
+    return owner === undefined || lstatSync(root).uid === owner;
+  } catch {
+    return false;
+  }
+}
+function allowScratch(evaluation, roots, uid) {
   if (evaluation.action !== "external_directory" || evaluation.effect !== "ask")
     return;
   if (evaluation.resources.length === 0)
     return;
-  if (evaluation.resources.every((resource) => inside(resource, roots)))
+  const trusted = roots.filter((root) => pinned(root, uid));
+  if (evaluation.resources.every((resource) => inside(resource, trusted)))
     evaluation.effect = "allow";
 }
 

@@ -4,6 +4,8 @@
  * 1Password session and prompts the user.
  */
 
+import { homedir } from "node:os"
+import { join } from "node:path"
 import type { HereDocument } from "@srobroek/opencode-lib"
 import { base, type Command, hasFlag, positionals, SHELLS, walkShell, wordText } from "./shell.ts"
 
@@ -21,6 +23,12 @@ export const FNOX_SET_MESSAGE =
 
 export const FNOX_STORE_MESSAGE =
   "safety op-guard: this fnox provider cannot store a value; `fnox set` would write a piped, generated or expanded value into fnox.toml as the item reference. Create the item first, `<json from a command> | op item create --vault V -`, then point fnox at it: `fnox set NAME '<item>/<field>' --provider <op-provider>`."
+
+export const FNOX_INDIRECT_MESSAGE =
+  "safety op-guard: this command reaches `fnox set` or `op item create|edit` through an executor the guard cannot follow (a piped shell, xargs, find -exec, parallel, env -S, eval, source, an alias or function, an expanded command name, or a launcher such as nix, mise, uv or npx), so it cannot check where the value goes. Run it directly: `<json from a command> | op item create --vault V -`, then `fnox set NAME '<item>/<field>' --provider <op-provider>`."
+
+export const FNOX_CONFIG_MESSAGE =
+  "safety op-guard: this command passes a value to `fnox set` and also changes fnox configuration (a write to fnox*.toml or ~/.config/fnox, `fnox config`/`fnox provider` changes, or a write whose target the guard cannot read), so the provider it checked may not be the one used. Change the configuration in one command and run `fnox set` in the next."
 
 export const NESTING_MESSAGE =
   "safety op-guard: command nesting is too deep to check; run it without nested shells"
@@ -236,7 +244,7 @@ function execInner(args: readonly string[]): number {
   return -1
 }
 
-export type Verdict = "op" | "dump" | "literal" | "set" | "store"
+export type Verdict = "op" | "dump" | "literal" | "set" | "store" | "indirect" | "config"
 
 const SET_VALUED: ReadonlySet<string> = new Set([
   "-d",
@@ -255,9 +263,10 @@ const SET_VALUED: ReadonlySet<string> = new Set([
 ])
 
 /**
- * fnox provider types that keep a value they are given locally: encryption in the config (the `*-kms`
- * types, age, FIDO2, YubiKey) or a local store (keychain, KeePass, password-store, gopass). `plain` is
- * left out (it writes the value to fnox.toml in clear text), as are the read-only types (1password and
+ * fnox provider types that keep a value they are given: encryption in the config (the `*-kms` types,
+ * age, FIDO2, YubiKey), a local store (keychain, KeePass, password-store, gopass) or a remote store the
+ * fnox docs list as written by `fnox set` (AWS Secrets Manager and Parameter Store, Azure Key Vault
+ * Secrets, Google Secret Manager, Bitwarden Secrets Manager, FOKS, HashiCorp Vault). `plain` is left out (it writes the value to fnox.toml in clear text), as are the read-only types (1password and
  * the rest, where `fnox set` records the value as the item reference) and `lua`.
  */
 export const VALUE_STORE_TYPES: ReadonlySet<string> = new Set([
@@ -271,6 +280,14 @@ export const VALUE_STORE_TYPES: ReadonlySet<string> = new Set([
   "keepass",
   "password-store",
   "gopass",
+  // Remote stores `fnox set` writes the value to; fnox.toml keeps only a reference.
+  "aws-sm",
+  "aws-ps",
+  "azure-sm",
+  "gcp-sm",
+  "bitwarden-sm",
+  "foks",
+  "vault",
 ])
 
 const DIRECTORY_COMMANDS: ReadonlySet<string> = new Set(["cd", "pushd", "popd", "chdir"])
@@ -303,22 +320,15 @@ function expands(command: Command, at: number): boolean {
   return command.words?.[at]?.expands !== false && /[$`]|[<>]\(/.test(word)
 }
 
-/**
- * `fnox set` that would put a value where it must not go. With a provider that stores a value (by its
- * resolved type), a literal positional or `--default` is `set` and a stdin value fed from a literal is
- * `literal`. With any other provider, or none, only the reference form passes: a literal positional
- * (or none, which prompts) with no expansion and no value source (`--generate`, `--from-file`, an expanded `--default`, a pipe,
- * redirect, here-document, here-string, process substitution or stdin inherited from `fnox exec`);
- * everything else is `store`, since fnox would record the value as the item reference in fnox.toml.
- */
-function fnoxSetRefusal(
-  command: Command,
-  at: number,
-  fed: boolean,
-  stdin: boolean,
-  types: ProviderTypes,
-  configured: boolean,
-): "set" | "literal" | "store" | undefined {
+/** Whether a `fnox set` takes its value from stdin, a substitution or an expansion rather than a literal. */
+function valueSource(command: Command, stdin: boolean, value: number | undefined, defaults: readonly { at: number }[]): boolean {
+  const piped = stdin || command.stage > 0 || command.redirects.length > 0 || command.hereDocuments.length > 0
+  const substituted = command.argv.some((word) => /[<>]\(/.test(word))
+  return piped || substituted || defaults.some((d) => expands(command, d.at)) || (value !== undefined && expands(command, value))
+}
+
+/** The options and positionals of the `fnox set` whose subcommand word is at `at`. */
+function parseSet(command: Command, at: number) {
   const args = command.argv.slice(at + 1)
   let provider: string | undefined
   let reads = true
@@ -339,21 +349,154 @@ function fnoxSetRefusal(
     } else if (SET_VALUED.has(arg)) i++
     else if (!arg.startsWith("-") || arg === "-") positional.push(at + 1 + i)
   }
+  return { provider, reads, sourced, positional, defaults }
+}
+
+/**
+ * `fnox set` that would put a value where it must not go. With a provider that stores a value (by its
+ * resolved type), a literal positional or `--default` is `set` and a stdin value fed from a literal is
+ * `literal`. With any other provider, or none, only the reference form passes: a literal positional
+ * (or none, which prompts) with no expansion and no value source (`--generate`, `--from-file`, an expanded `--default`, a pipe,
+ * redirect, here-document, here-string, process substitution or stdin inherited from `fnox exec`);
+ * everything else is `store`, since fnox would record the value as the item reference in fnox.toml.
+ */
+function fnoxSetRefusal(
+  command: Command,
+  at: number,
+  fed: boolean,
+  stdin: boolean,
+  types: ProviderTypes,
+  configured: boolean,
+): "set" | "literal" | "store" | undefined {
+  const { provider, reads, sourced, positional, defaults } = parseSet(command, at)
   const type = provider === undefined || !configured ? undefined : types(provider)
   const value = positional[1]
   if (type === undefined || !VALUE_STORE_TYPES.has(type)) {
-    const piped = stdin || command.stage > 0 || command.redirects.length > 0 || command.hereDocuments.length > 0
-    const substituted = command.argv.some((word) => /[<>]\(/.test(word))
-    const defaultExpands = defaults.some((d) => expands(command, d.at))
     // No value and no source is an interactive prompt or a settings update, which stores nothing from the agent.
-    const expanded = value !== undefined && expands(command, value)
-    return sourced || piped || substituted || defaultExpands || expanded ? "store" : undefined
+    return sourced || valueSource(command, stdin, value, defaults) ? "store" : undefined
   }
   const defaultLiteral = defaults.some((d) => !expansionOnly(command, d.at, d.skip))
   // KEY, then VALUE: a second positional that is not an expansion is a literal.
   if (value !== undefined) return expansionOnly(command, value) && !defaultLiteral ? undefined : "set"
   if (defaultLiteral) return "set"
   return reads && fed ? "literal" : undefined
+}
+
+const FNOX_VALUED_GLOBAL: ReadonlySet<string> = new Set(["-P", "--profile", "-c", "--config", "--age-key-file"])
+
+/** The subcommand of a `fnox` command and the index of its word, skipping global options. */
+function fnoxSubcommand(command: Command): { sub: string; at: number } | undefined {
+  if (base(command.argv[0]) !== "fnox") return undefined
+  for (let at = 1; at < command.argv.length; at++) {
+    const word = command.argv[at] as string
+    const [flag] = word.split("=", 1) as [string]
+    if (FNOX_VALUED_GLOBAL.has(flag)) {
+      if (!word.includes("=")) at++
+      continue
+    }
+    if (word.startsWith("-")) continue
+    return { sub: word, at }
+  }
+  return undefined
+}
+
+/** A `fnox set` that takes its value from a source (stdin, a substitution, `--generate`, …), or a `fnox exec` that may run one. */
+function setsWithValueSource(command: Command): boolean {
+  const found = fnoxSubcommand(command)
+  if (found === undefined) return false
+  if (found.sub === "exec") return command.argv.includes("set") || command.argv.includes("s")
+  if (found.sub !== "set" && found.sub !== "s") return false
+  const { sourced, positional, defaults } = parseSet(command, found.at)
+  return sourced || valueSource(command, false, positional[1], defaults)
+}
+
+const CONFIG_SUBCOMMANDS: ReadonlySet<string> = new Set(["config", "init", "import", "remove", "rm"])
+const PROVIDER_CHANGES: ReadonlySet<string> = new Set(["add", "a", "set", "remove", "rm", "delete"])
+const FILE_COMMANDS: ReadonlySet<string> = new Set(["tee", "cp", "mv", "ln", "rm", "install", "rsync", "dd", "touch", "truncate", "sed", "perl", "unlink", "shred"])
+const CONFIG_FILE = /^\.?fnox(?:\.[^/]+)?\.toml$/
+const WRITERS: ReadonlySet<string> = new Set(["tee", "cp", "mv", "ln", "rm", "install", "rsync", "dd", "touch", "truncate", "sed", "perl", "unlink", "shred"])
+
+/** Whether a `fnox` command changes configuration: `config`, `init`, `import`, `remove`, or a `provider` add, set or remove. */
+function changesFnoxConfig(command: Command): boolean {
+  const found = fnoxSubcommand(command)
+  if (found === undefined) return false
+  if (CONFIG_SUBCOMMANDS.has(found.sub)) return true
+  return found.sub === "provider" && PROVIDER_CHANGES.has(command.argv[found.at + 1] ?? "")
+}
+
+/** A write whose target is an expansion the guard cannot read: a redirect, or an argument of a command that writes files. */
+function uncertainWrite(command: Command): boolean {
+  if (command.redirects.some((word) => word.hereString !== true && word.expands)) return true
+  return WRITERS.has(base(command.argv[0])) && command.argv.some((_, at) => at > 0 && expands(command, at))
+}
+
+/** A file command (`rm`, `ln`, `mv`, `cp`, `tee`, …) with a word naming an fnox config file or `~/.config/fnox`. */
+function touchesConfigFile(command: Command): boolean {
+  return (
+    FILE_COMMANDS.has(base(command.argv[0])) &&
+    command.argv.slice(1).some((word) => CONFIG_FILE.test(base(word)) || /(?:^|\/)\.config\/fnox(?:\/|$)/.test(word))
+  )
+}
+
+/** Whether `path` is an fnox config file: `fnox*.toml`, `.fnox*.toml`, or anything in `~/.config/fnox`. */
+export function fnoxConfigPath(path: string, home: string = homedir()): boolean {
+  return CONFIG_FILE.test(base(path)) || path === join(home, ".config", "fnox") || path.startsWith(join(home, ".config", "fnox") + "/")
+}
+
+/**
+ * Whether a call passes a value to `fnox set` and also changes fnox configuration in the same command:
+ * a file write to fnox config, a `fnox config` or `provider` change, or a write target the guard cannot
+ * read. The provider type the guard checked may not be the one `fnox set` then uses.
+ */
+export function configWriteBesideSet(commands: readonly Command[], writes: readonly string[]): boolean {
+  if (!commands.some(setsWithValueSource)) return false
+  return writes.some((path) => fnoxConfigPath(path)) || commands.some(touchesConfigFile) || commands.some(changesFnoxConfig) || commands.some(uncertainWrite)
+}
+
+const LAUNCHERS: ReadonlyMap<string, ReadonlySet<string> | true> = new Map<string, ReadonlySet<string> | true>([
+  ["nix", new Set(["develop", "shell", "run"])],
+  ["direnv", new Set(["exec"])],
+  ["mise", new Set(["exec", "x"])],
+  ["asdf", new Set(["exec"])],
+  ["devbox", new Set(["run"])],
+  ["uv", new Set(["run"])],
+  ["poetry", new Set(["run"])],
+  ["pnpm", new Set(["dlx"])],
+  ["npx", true],
+  ["bunx", true],
+])
+const SECRET_WRITE = /\bfnox\b[^|;&\n]*\b(?:set|s)\b|\bop\b[^|;&\n]*\bitem\s+(?:create|edit)\b/
+const SECRET_WORDS = /\b(?:set|s)\b|\bitem\s+(?:create|edit)\b/
+
+/**
+ * Whether the call reaches `fnox set` or `op item create|edit` through an executor the walk cannot follow
+ * with certainty: a shell fed by a pipe or redirect, `xargs`, `find -exec`, `parallel`, `env -S`, `eval`,
+ * `source`, an alias or function, an expanded command name, or a launcher (`nix`, `mise`, `uv`, `npx`, …).
+ */
+export function indirectSecretWrite(commands: readonly Command[]): boolean {
+  const whole = [...new Set(commands.map((command) => command.source))].join("\n")
+  const wholeHits = SECRET_WRITE.test(whole)
+  return commands.some((command) => {
+    if (command.argv.length === 0) return false
+    const name = base(command.argv[0])
+    const inner = command.argv.slice(1).join(" ")
+    const innerHits = SECRET_WRITE.test(inner)
+    if (/[$`]/.test(command.argv[0] as string)) return SECRET_WORDS.test(inner) || wholeHits
+    if (SHELLS.has(name)) {
+      const script = command.argv.findIndex((word, i) => i > 0 && /^-[A-Za-z]*c[A-Za-z]*$/.test(word))
+      if (script < 0) return wholeHits && (command.stage > 0 || command.redirects.some((word) => word.hereString !== true))
+      return wholeHits && expands(command, script + 1)
+    }
+    if (name === "xargs" || name === "parallel" || name === "eval") return innerHits
+    if (name === "find") return command.argv.some((word) => ["-exec", "-execdir", "-ok", "-okdir"].includes(word)) && innerHits
+    if (name === "source" || name === "." || name === "alias") return wholeHits
+    if (command.wrappers.includes("env") && /\benv\s+(?:-\S+\s+)*(?:-[A-Za-z]*S|--split-string)/.test(command.source)) return SECRET_WRITE.test(command.argv.join(" ")) || wholeHits
+    if (/\(\)\s*\{|\bfunction\s+[\w-]+/.test(command.source)) return wholeHits
+    const launcher = LAUNCHERS.get(name)
+    if (launcher === true) return innerHits
+    if (launcher !== undefined) return launcher.has(command.argv[1] ?? "") && innerHits
+    return false
+  })
 }
 
 /** What `fnox` does with this command: dump values, or run an inner command that is refused. */
@@ -431,6 +574,8 @@ const MESSAGES: Record<Verdict, string> = {
   literal: LITERAL_MESSAGE,
   set: FNOX_SET_MESSAGE,
   store: FNOX_STORE_MESSAGE,
+  indirect: FNOX_INDIRECT_MESSAGE,
+  config: FNOX_CONFIG_MESSAGE,
 }
 
 /** The op-guard verdict for a call's commands, or `undefined`. Fails closed when its own analysis throws. */
@@ -438,8 +583,11 @@ export function opGuard(
   commands: readonly Command[],
   allow: readonly string[] = [],
   types: ProviderTypes = () => undefined,
+  writes: readonly string[] = [],
 ): string | undefined {
   try {
+    if (indirectSecretWrite(commands)) return MESSAGES.indirect
+    if (configWriteBesideSet(commands, writes)) return MESSAGES.config
     // Where fnox runs is unknown after a directory change, so no provider's config can be trusted.
     const known = changesDirectory(commands) ? () => undefined : types
     for (const command of commands) {

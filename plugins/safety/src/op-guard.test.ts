@@ -5,7 +5,9 @@ import { type GuardOptions, hardGate } from "./guards.ts"
 import { createPlugin, readOptions } from "./index.ts"
 import {
   CHECK_FAILED_MESSAGE,
+  FNOX_CONFIG_MESSAGE,
   FNOX_DUMP_MESSAGE,
+  FNOX_INDIRECT_MESSAGE,
   FNOX_SET_MESSAGE,
   FNOX_STORE_MESSAGE,
   LITERAL_MESSAGE,
@@ -101,6 +103,56 @@ const REFUSED_STORE = [
   "fnox set NAME \"item/$X\" --provider op",
   "cmd | fnox set NAME --provider unknown",
   "cmd | fnox -c my.toml set NAME --provider host",
+]
+
+const REFUSED_INDIRECT = [
+  "echo 'fnox set NAME item/f --provider op' | sh",
+  "cat run.sh | bash; fnox set NAME item/f --provider op",
+  "sh < run.sh; op item create --vault V -",
+  "bash -c \"$SCRIPT\"; fnox set NAME item/f --provider op",
+  "echo NAME | xargs fnox set --provider op",
+  "echo x | xargs -I{} op item create --vault V -",
+  "find . -name k -exec fnox set NAME item/f --provider op \\;",
+  "find . -execdir op item edit x - \\;",
+  "parallel fnox set {} item/f --provider op ::: A B",
+  "env -S 'fnox set NAME item/f --provider op'",
+  "eval 'fnox set NAME item/f --provider op'",
+  "source ./env.sh; fnox set NAME item/f --provider op",
+  ". ./env.sh; op item create --vault V -",
+  "alias s='fnox set'; s NAME item/f --provider op",
+  "f() { fnox set \"$@\"; }; f NAME item/f --provider op",
+  "function f { op item create --vault V -; }; f",
+  "$CD /x; cmd | fnox set NAME --provider host",
+  "F=fnox; $F set NAME item/f --provider op",
+  "$(echo op) item create --vault V -",
+  "nix develop -c fnox set NAME item/f --provider op",
+  "nix shell nixpkgs#fnox -c fnox set NAME item/f --provider op",
+  "nix run nixpkgs#fnox -- set NAME item/f --provider op",
+  "direnv exec . fnox set NAME item/f --provider op",
+  "mise exec -- fnox set NAME item/f --provider op",
+  "mise x -- op item create --vault V -",
+  "asdf exec fnox set NAME item/f --provider op",
+  "devbox run fnox set NAME item/f --provider op",
+  "uv run fnox set NAME item/f --provider op",
+  "poetry run fnox set NAME item/f --provider op",
+  "npx fnox set NAME item/f --provider op",
+  "bunx op item create --vault V -",
+  "pnpm dlx fnox set NAME item/f --provider op",
+]
+
+const REFUSED_CONFIG = [
+  "echo x > fnox.toml; cmd | fnox set NAME --provider host",
+  "cmd | fnox set NAME --provider host && mv /tmp/x .fnox.local.toml",
+  "cmd | fnox set NAME --provider host; cp a ~/.config/fnox/config.toml",
+  "cmd | fnox set NAME --provider host; rm fnox.toml",
+  "ln -sf /tmp/x fnox.toml; cmd | fnox set NAME --provider host",
+  "tee fnox.prod.toml < x; cmd | fnox set NAME --provider host",
+  "fnox provider add host age; cmd | fnox set NAME --provider host",
+  "fnox provider remove host; cmd | fnox set NAME --provider host",
+  "fnox config edit; cmd | fnox set NAME --provider host",
+  "cat x > \"$F\"; cmd | fnox set NAME --provider host",
+  "cmd | tee \"$F\"; cmd | fnox set NAME --provider host",
+  "cp a \"$HOME/x\"; cmd | fnox set NAME --provider host",
 ]
 
 const REFUSED_PIPED = [
@@ -302,6 +354,18 @@ const PASSED = [
   "fnox set NAME --from-file key.txt --provider host",
   "fnox set NAME 'item/field' --provider proj",
   "fnox set NAME 'item/field' --provider op",
+  "echo x > fnox.toml; fnox set NAME item/field --provider op",
+  "cmd | fnox set NAME --provider host; echo ok > out.txt",
+  "fnox provider list; cmd | fnox set NAME --provider host",
+  "jq -n --arg v \"$(cmd)\" '{}' | op item create --vault V - >/dev/null",
+  "nix develop -c cargo test",
+  "uv run pytest",
+  "npx tsc --noEmit",
+  "find . -name x -exec echo {} \\;",
+  "echo a | xargs echo",
+  "source ./env.sh; cargo build",
+  "mise exec -- node app.js",
+  "bash -c 'echo hi' > out.txt",
   "fnox set NAME 'op://vault/item/field' --provider op",
   "fnox set NAME --provider op",
   "op vault list",
@@ -366,6 +430,14 @@ describe("op-guard", () => {
     test(`refuses fnox set into a provider without storage ${command}`, () => {
       expect(gate(command)).toEqual({ guard: "op-guard", reason: FNOX_STORE_MESSAGE })
     })
+  for (const command of REFUSED_INDIRECT)
+    test(`refuses a secret write behind an executor ${command}`, () => {
+      expect(gate(command)).toEqual({ guard: "op-guard", reason: FNOX_INDIRECT_MESSAGE })
+    })
+  for (const command of REFUSED_CONFIG)
+    test(`refuses a fnox set beside a config write ${command}`, () => {
+      expect(gate(command)).toEqual({ guard: "op-guard", reason: FNOX_CONFIG_MESSAGE })
+    })
   for (const command of REFUSED_PIPED)
     test(`refuses piped literal ${command}`, () => {
       expect(gate(command)).toEqual({ guard: "op-guard", reason: LITERAL_MESSAGE })
@@ -420,7 +492,6 @@ describe("op-guard", () => {
       "sudo -D /x sh -c 'cmd | fnox set NAME --provider host'",
       "git -C /x status; cmd | fnox set NAME --provider host",
       "make --directory=/x; cmd | fnox set NAME --provider host",
-      "$CD /x; cmd | fnox set NAME --provider host",
     ])
       test(`refuses ${command}`, () => {
         expect(gate(command)).toEqual({ guard: "op-guard", reason: FNOX_STORE_MESSAGE })
@@ -444,6 +515,16 @@ describe("op-guard", () => {
   test("a provider whose type cannot be resolved is not a value store", () => {
     expect(gate("cmd | fnox set NAME --provider host", { providerTypes: () => undefined })?.reason).toBe(FNOX_STORE_MESSAGE)
   })
+
+  for (const type of ["aws-sm", "aws-ps", "azure-sm", "gcp-sm", "bitwarden-sm", "foks", "vault"])
+    test(`a provider of the cloud store type ${type} takes a piped value`, () => {
+      expect(gate("cmd | fnox set NAME --provider p", { providerTypes: () => type })).toBeUndefined()
+    })
+
+  for (const type of ["doppler", "infisical", "azure-ac", "kubernetes", "keeper-sm", "plain", "lua"])
+    test(`a provider of the read-only or plaintext type ${type} is not a value store`, () => {
+      expect(gate("cmd | fnox set NAME --provider p", { providerTypes: () => type })?.reason).toBe(FNOX_STORE_MESSAGE)
+    })
 
   test("a provider of type age takes a piped value whatever its name", () => {
     expect(gate("cmd | fnox set NAME --provider vault-keys", { providerTypes: () => "age" })).toBeUndefined()

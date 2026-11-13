@@ -4,9 +4,9 @@
  * turns it into an allow. A deny and every other action are left alone.
  */
 
-import { existsSync, realpathSync } from "node:fs"
+import { existsSync, lstatSync, realpathSync } from "node:fs"
 import { homedir, tmpdir } from "node:os"
-import { basename, dirname, isAbsolute, join, relative } from "node:path"
+import { basename, dirname, isAbsolute, join, relative, sep } from "node:path"
 
 type Evaluation = { readonly action: string; readonly resources: ReadonlyArray<string>; effect: string }
 
@@ -49,9 +49,30 @@ function inside(resource: string, roots: readonly string[]): boolean {
   })
 }
 
-/** Turn an `external_directory` ask into an allow when every resource is inside `roots`. */
-export function allowScratch(evaluation: Evaluation, roots: readonly string[]): void {
+/**
+ * Whether `root` is still the folder it was computed to be: it exists, no component of its path is a
+ * symlink, its real path equals the path, and the current user owns it. A folder swapped for a symlink
+ * (or made by someone else) after the path was computed is not trusted.
+ */
+export function pinned(root: string, uid: () => number | undefined = () => process.getuid?.()): boolean {
+  try {
+    if (!isAbsolute(root) || realpathSync(root) !== root) return false
+    let at: string = sep
+    for (const part of root.split(sep).filter(Boolean)) {
+      at = join(at, part)
+      if (lstatSync(at).isSymbolicLink()) return false
+    }
+    const owner = uid()
+    return owner === undefined || lstatSync(root).uid === owner
+  } catch {
+    return false
+  }
+}
+
+/** Turn an `external_directory` ask into an allow when every resource is inside a pinned root. */
+export function allowScratch(evaluation: Evaluation, roots: readonly string[], uid?: () => number | undefined): void {
   if (evaluation.action !== "external_directory" || evaluation.effect !== "ask") return
   if (evaluation.resources.length === 0) return
-  if (evaluation.resources.every((resource) => inside(resource, roots))) evaluation.effect = "allow"
+  const trusted = roots.filter((root) => pinned(root, uid))
+  if (evaluation.resources.every((resource) => inside(resource, trusted))) evaluation.effect = "allow"
 }

@@ -1,4 +1,4 @@
-import { describe, expect, setDefaultTimeout, test } from "bun:test"
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -19,6 +19,7 @@ type Load = {
   directory?: string
   env?: NodeJS.ProcessEnv
   projectID?: string
+  scratchRoots?: string[]
   assert?: (input: FakeAssert) => Promise<void> | void
 }
 
@@ -33,6 +34,7 @@ async function load(options: Record<string, unknown> = {}, more: Load = {}) {
   const cleanup = await createPlugin({
     review: { gh: async () => "[]", timeoutMs: 30_000, budgetMs: 120_000 },
     env: more.env ?? {},
+    ...(more.scratchRoots ? { scratch: { roots: more.scratchRoots } } : {}),
   }).setup(fake.context)
   const before = (id: string, command: string, workdir?: string) =>
     fake.fire.tool("execute.before", {
@@ -360,6 +362,14 @@ describe("fnox provider types from config", () => {
 })
 
 describe("scratch folders", () => {
+  let fixture: string
+  beforeAll(() => {
+    const base = join(realpathSync(tmpdir()), "opencode")
+    mkdirSync(base, { recursive: true })
+    fixture = mkdtempSync(join(base, "safety-scratch-"))
+  })
+  afterAll(() => rmSync(fixture, { recursive: true, force: true }))
+
   const ask = async (
     fake: Awaited<ReturnType<typeof load>>["fake"],
     resources: string[],
@@ -377,16 +387,16 @@ describe("scratch folders", () => {
     fake.fire.tool("execute.before", { ...call, id, tool, input } as never)
 
   test("allows a direct file tool in the session project's worktree folder only", async () => {
-    const { fake } = await load({}, { projectID: "41bad135688c6b4d" })
-    const [, worktrees] = scratchRoots("41bad135688c6b4d")
+    const { fake } = await load({}, { scratchRoots: [fixture] })
+    const worktrees = fixture
     await start(fake, "r1", "read", { filePath: "x" })
     expect((await ask(fake, [`${worktrees}/lane/src`], "r1")).effect).toBe("allow")
-    expect((await ask(fake, [`${worktrees?.replace("41bad1", "ffffff")}/lane/src`], "r1")).effect).toBe("ask")
+    expect((await ask(fake, [`${fixture}-other/lane/src`], "r1")).effect).toBe("ask")
   })
 
   test("allows each direct file tool", async () => {
-    const { fake } = await load({}, { projectID: "41bad135688c6b4d" })
-    const [, worktrees] = scratchRoots("41bad135688c6b4d")
+    const { fake } = await load({}, { scratchRoots: [fixture] })
+    const worktrees = fixture
     for (const tool of ["read", "edit", "write", "patch", "glob", "grep"]) {
       await start(fake, `t-${tool}`, tool, {})
       expect((await ask(fake, [`${worktrees}/x`], `t-${tool}`)).effect).toBe("allow")
@@ -394,22 +404,22 @@ describe("scratch folders", () => {
   })
 
   test("leaves a shell call's request asking", async () => {
-    const { fake } = await load({}, { projectID: "41bad135688c6b4d" })
-    const [, worktrees] = scratchRoots("41bad135688c6b4d")
+    const { fake } = await load({}, { scratchRoots: [fixture] })
+    const worktrees = fixture
     await start(fake, "s1", "shell", { command: `ls ${worktrees}/lane` })
     expect((await ask(fake, [`${worktrees}/lane`], "s1")).effect).toBe("ask")
   })
 
   test("leaves a request asking when its tool call is unknown or has no source", async () => {
-    const { fake } = await load({}, { projectID: "41bad135688c6b4d" })
-    const [, worktrees] = scratchRoots("41bad135688c6b4d")
+    const { fake } = await load({}, { scratchRoots: [fixture] })
+    const worktrees = fixture
     expect((await ask(fake, [`${worktrees}/lane`], "never-seen")).effect).toBe("ask")
     expect((await ask(fake, [`${worktrees}/lane`], undefined)).effect).toBe("ask")
   })
 
   test("leaves a request from a tool that can run code asking", async () => {
-    const { fake } = await load({}, { projectID: "41bad135688c6b4d" })
-    const [, worktrees] = scratchRoots("41bad135688c6b4d")
+    const { fake } = await load({}, { scratchRoots: [fixture] })
+    const worktrees = fixture
     await start(fake, "e1", "execute", { code: "x" })
     expect((await ask(fake, [`${worktrees}/lane`], "e1")).effect).toBe("ask")
   })

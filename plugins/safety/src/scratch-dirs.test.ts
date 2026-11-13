@@ -96,6 +96,36 @@ describe("allowScratch", () => {
     }
   })
 
+  test("leaves a root replaced by a symlink to an outside folder asking", () => {
+    const outside = join(dir, "outside")
+    mkdirSync(outside, { recursive: true })
+    const swapped = join(dir, "swapped")
+    symlinkSync(outside, swapped)
+    const e = evaluation([`${swapped}/pack.xml`])
+    allowScratch(e, [swapped])
+    expect(e.effect).toBe("ask")
+  })
+
+  test("leaves a root below a symlinked component asking", () => {
+    mkdirSync(join(dir, "real/inner"), { recursive: true })
+    symlinkSync(join(dir, "real"), join(dir, "alias"))
+    const e = evaluation([join(dir, "alias/inner/x")])
+    allowScratch(e, [join(dir, "alias/inner")])
+    expect(e.effect).toBe("ask")
+  })
+
+  test("leaves a root that does not exist asking", () => {
+    const e = evaluation([join(dir, "missing/x")])
+    allowScratch(e, [join(dir, "missing")])
+    expect(e.effect).toBe("ask")
+  })
+
+  test("leaves a root owned by another user asking", () => {
+    const e = evaluation([`${temp}/a`])
+    allowScratch(e, roots, () => (process.getuid?.() ?? 0) + 1)
+    expect(e.effect).toBe("ask")
+  })
+
   test("never changes a deny", () => {
     const e = evaluation([`${temp}/a`], "deny")
     allowScratch(e, roots)
