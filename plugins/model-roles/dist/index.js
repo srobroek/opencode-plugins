@@ -3462,13 +3462,6 @@ function configuredModels(row) {
   const model = row.configured?.model;
   return Array.isArray(model) ? [...model] : [];
 }
-function remainingModels(models, picked) {
-  const taken = new Set(picked.map((entry) => {
-    const candidate = parseCandidate(entry);
-    return candidate?.kind === "model" ? `${candidate.ref.providerID}/${candidate.ref.id}` : entry;
-  }));
-  return models.filter((m) => !taken.has(m.ref));
-}
 function compact(config) {
   const next = {};
   if (config.model !== undefined)
@@ -4764,7 +4757,6 @@ export {
   readState,
   readTiers,
   recordFailure,
-  remainingModels,
   resolveRole,
   resolveTier,
   retriesOnModel,

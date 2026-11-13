@@ -123,15 +123,30 @@ Headers and spawns that use the old role names keep working:
 
 The package also has a TUI entry (`./tui`), loaded from the same install. `/tiers`
 (slash command, or **Model tiers** in the command palette) lists the tiers with
-what they resolve to now, for the current session's location. Pick a tier, or
-**Add a tier…** (name, then purpose), and then:
+what they resolve to now, for the current session's location. Pick a tier to open
+its menu, **Agents…** to see which tier each agent uses and the model it resolves to
+(read-only), or **Add a tier…** (name, then purpose, then the same menu).
 
-- **Models**: pick models from the location's available models one at a time, in
-  fallback order, then **Done**; **Auto** drops the list.
-- **Effort**: a level, `auto`, or **Tier default** (removes the setting).
+Your changes live in a draft until you save. **Esc** goes back one level and keeps
+the draft. The tier menu has:
+
+- **Models**: one list of every available model. Selected models come first,
+  numbered in fallback order (`☑ 2. provider/model#high`); the rest are `☐`.
+  **Enter** selects or deselects the highlighted model and keeps the highlight on it.
+  Keys act on the highlighted model without closing the list:
+  - `ctrl+e`: set its variant, or **Inherit tier effort** to drop the `#variant`.
+  - `alt+up` / `alt+down`: move it earlier or later in the fallback order.
+  - `ctrl+s`: save the tier.
+- **Effort**: the tier's level, `auto`, or **Tier default** (removes the setting).
+  A model with its own `#variant` ignores it.
 - **Purpose**: the text the spawner sees.
+- **Preview**: what the tier resolves to with the draft, from the server.
 - **Reset to auto**: a built-in tier loses its settings; a custom tier keeps only
   its purpose.
+- **Save** writes the tier, applies it, shows a toast and returns to the tier list,
+  so the next edit starts from the saved state. A validation error keeps the draft
+  and returns to the menu.
+- **Cancel**, or **Esc** at the menu with unsaved changes, asks before discarding.
 
 Before it writes, `/tiers` checks every model you picked against what the
 providers list:
