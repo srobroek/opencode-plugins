@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
 import { setBdShowRunForTests } from "./bd-close-gate.ts"
@@ -11,7 +12,8 @@ afterEach(() => {
 })
 
 function scratch(withStore = false): string {
-  const root = mkdtempSync(join(Bun.env.TMPDIR ?? "/tmp", "beads-adapter-"))
+  // realpath: macOS hands out /var/folders/..., a symlink to /private/var/folders/...
+  const root = mkdtempSync(join(realpathSync(tmpdir()), "beads-adapter-"))
   roots.push(root)
   if (withStore) mkdirSync(join(root, ".beads"))
   return root

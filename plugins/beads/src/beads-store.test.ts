@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { configuredStore } from "./beads-store.ts"
 
@@ -8,7 +9,8 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
 function fixture() {
-  const root = mkdtempSync("/tmp/opencode/beads-store-")
+  // realpath: macOS hands out /var/folders/..., a symlink to /private/var/folders/...
+  const root = mkdtempSync(join(realpathSync(tmpdir()), "beads-store-"))
   roots.push(root)
   mkdirSync(join(root, "ledger"))
   return root
