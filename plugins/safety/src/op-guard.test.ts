@@ -7,6 +7,7 @@ import {
   CHECK_FAILED_MESSAGE,
   FNOX_DUMP_MESSAGE,
   FNOX_SET_MESSAGE,
+  FNOX_STORE_MESSAGE,
   LITERAL_MESSAGE,
   MAX_NESTING, NESTING_MESSAGE, OP_MESSAGE } from "./op-guard.ts"
 
@@ -28,7 +29,8 @@ const REFUSED_OP = [
   "command op read op://x",
   "for i in 1 2; do op read $i; done",
   "if true; then op read x; else op signin; fi",
-  "op vault list",
+  "op item list",
+  "op vault get x",
   "op vault delete x",
   "op vault edit x",
   "op vault create",
@@ -62,6 +64,19 @@ const REFUSED_LITERAL = [
   "fnox exec -- fnox exec -- op item create - <<EOF\n{}\nEOF",
   "fnox exec -- op item create --title t password=abc",
   "bash -c 'op item edit x password=abc'",
+]
+
+const REFUSED_STORE = [
+  "openssl rand -hex 8 | fnox set NAME --provider op",
+  "echo hunter2 | fnox set NAME --provider other",
+  "cmd | fnox set NAME -p op",
+  "cmd | fnox set NAME",
+  "fnox set NAME --generate --provider op",
+  "fnox set NAME --generate",
+  "fnox set NAME \"$(openssl rand -hex 8)\" --provider op",
+  "fnox set NAME \"$TOKEN\" --provider op",
+  "fnox set NAME --provider op <<<\"$TOKEN\"",
+  "fnox exec -- sh -c 'cmd | fnox set NAME --provider op'",
 ]
 
 const REFUSED_PIPED = [
@@ -243,7 +258,6 @@ const PASSED = [
   "echo hunter2; op item create -",
   "echo hunter2 && op item create --title t",
   "echo hunter2 | tr a b",
-  "echo hunter2 | fnox set NAME --provider other",
   "echo hunter2 | fnox set NAME --provider host --generate",
   "echo hunter2 | fnox set NAME --provider host --from-file k.txt",
   "printf '%s' \"$TOKEN\" | fnox set NAME --provider host",
@@ -264,6 +278,11 @@ const PASSED = [
   "fnox set NAME --from-file key.txt --provider host",
   "fnox set NAME 'item/field' --provider proj",
   "fnox set NAME 'item/field' --provider op",
+  "fnox set NAME 'op://vault/item/field' --provider op",
+  "fnox set NAME --provider op",
+  "op vault list",
+  "op vault list --format json",
+  "fnox exec -- op vault list",
   "fnox set NAME hunter2",
   "fnox set NAME hunter2 --provider other",
   "fnox set NAME hunter2 --provider team",
@@ -319,6 +338,10 @@ describe("op-guard", () => {
     test(`refuses literal ${command}`, () => {
       expect(gate(command)).toEqual({ guard: "op-guard", reason: LITERAL_MESSAGE })
     })
+  for (const command of REFUSED_STORE)
+    test(`refuses fnox set into a provider without storage ${command}`, () => {
+      expect(gate(command)).toEqual({ guard: "op-guard", reason: FNOX_STORE_MESSAGE })
+    })
   for (const command of REFUSED_PIPED)
     test(`refuses piped literal ${command}`, () => {
       expect(gate(command)).toEqual({ guard: "op-guard", reason: LITERAL_MESSAGE })
@@ -366,10 +389,9 @@ describe("op-guard", () => {
   })
 
   test("opAllow adds subcommand prefixes", () => {
-    expect(gate("op vault list")).toBeDefined()
-    expect(gate("op vault list --format json", { opAllow: ["vault list"] })).toBeUndefined()
-    expect(gate("op vault get x", { opAllow: ["vault list"] })).toBeDefined()
-    expect(gate("op item get x", { opAllow: ["vault list"] })).toBeDefined()
+    expect(gate("op item list")).toBeDefined()
+    expect(gate("op item list --format json", { opAllow: ["item list"] })).toBeUndefined()
+    expect(gate("op item get x", { opAllow: ["item list"] })).toBeDefined()
   })
 
   test("disabling the guard lets op through", () => {

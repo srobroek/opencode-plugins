@@ -34,6 +34,18 @@ permissions:
   - action: external_directory
     resource: "*"
     effect: ask
+  - action: external_directory
+    resource: "~/.local/share/opencode/worktree/*"
+    effect: allow
+  - action: external_directory
+    resource: "/tmp/opencode/*"
+    effect: allow
+  - action: external_directory
+    resource: "/private/var/folders/*/T/opencode/*"
+    effect: allow
+  - action: external_directory
+    resource: "/var/folders/*/T/opencode/*"
+    effect: allow
   - action: subagent
     resource: "*"
     effect: deny

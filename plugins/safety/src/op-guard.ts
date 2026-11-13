@@ -19,6 +19,9 @@ export const LITERAL_MESSAGE =
 export const FNOX_SET_MESSAGE =
   "safety op-guard: pipe the value into `fnox set NAME --provider host` from a command; a literal value lands in the transcript."
 
+export const FNOX_STORE_MESSAGE =
+  "safety op-guard: this fnox provider cannot store a value; `fnox set` would write a piped, generated or expanded value into fnox.toml as the item reference. Create the item first, `<json from a command> | op item create --vault V -`, then point fnox at it: `fnox set NAME '<item>/<field>' --provider <op-provider>`."
+
 export const NESTING_MESSAGE =
   "safety op-guard: command nesting is too deep to check; run it without nested shells"
 
@@ -190,6 +193,8 @@ export function opRefusal(command: Command, allow: readonly string[] = [], inher
     return literalSecret(command, args, inheritedLiteral) ? "literal" : undefined
   }
   if (words[0] === "vault" && words[1] === "create" && words[2] !== undefined) return undefined
+  // Names and ids only, no item content.
+  if (words[0] === "vault" && words[1] === "list") return undefined
   return allowed(words, allow) ? undefined : "op"
 }
 
@@ -231,7 +236,7 @@ function execInner(args: readonly string[]): number {
   return -1
 }
 
-export type Verdict = "op" | "dump" | "literal" | "set"
+export type Verdict = "op" | "dump" | "literal" | "set" | "store"
 
 const SET_VALUED: ReadonlySet<string> = new Set([
   "-d",
@@ -259,10 +264,11 @@ function plainProvider(name: string): boolean {
  * `fnox set` with a provider that stores what it is given and a value in the command text: a literal
  * positional or `--default` (`set`), or a stdin value fed from a literal (`literal`).
  */
-function fnoxSetRefusal(command: Command, at: number, fed: boolean): "set" | "literal" | undefined {
+function fnoxSetRefusal(command: Command, at: number, fed: boolean): "set" | "literal" | "store" | undefined {
   const args = command.argv.slice(at + 1)
   let provider: string | undefined
   let reads = true
+  let generates = false
   const positional: number[] = []
   const defaults: { at: number; skip: number }[] = []
   for (let i = 0; i < args.length; i++) {
@@ -274,11 +280,18 @@ function fnoxSetRefusal(command: Command, at: number, fed: boolean): "set" | "li
     else if (arg.startsWith("--default=")) defaults.push({ at: at + 1 + i, skip: "--default=".length })
     else if (arg === "--generate" || arg === "--from-file" || arg.startsWith("--from-file=")) {
       reads = false
+      if (arg === "--generate") generates = true
       if (arg === "--from-file") i++
     } else if (SET_VALUED.has(arg)) i++
     else if (!arg.startsWith("-") || arg === "-") positional.push(at + 1 + i)
   }
-  if (provider === undefined || !plainProvider(provider)) return undefined
+  if (provider === undefined || !plainProvider(provider)) {
+    // No value store: a value from stdin, `--generate` or an expansion would become the item reference.
+    const piped = command.stage > 0 || command.hereDocuments.length > 0 || command.redirects.some((word) => word.hereString === true)
+    const expanded = positional[1] !== undefined && expansionOnly(command, positional[1])
+    if (generates || expanded || (positional[1] === undefined && reads && (fed || piped))) return "store"
+    return undefined
+  }
   // KEY, then VALUE: a second positional that is not an expansion is a literal.
   const value = positional[1]
   const defaultLiteral = defaults.some((d) => !expansionOnly(command, d.at, d.skip))
@@ -356,6 +369,7 @@ const MESSAGES: Record<Verdict, string> = {
   dump: FNOX_DUMP_MESSAGE,
   literal: LITERAL_MESSAGE,
   set: FNOX_SET_MESSAGE,
+  store: FNOX_STORE_MESSAGE,
 }
 
 /** The op-guard verdict for a call's commands, or `undefined`. Fails closed when its own analysis throws. */

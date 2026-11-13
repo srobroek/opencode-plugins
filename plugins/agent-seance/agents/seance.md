@@ -36,6 +36,18 @@ permissions:
   - action: external_directory
     resource: "*"
     effect: ask
+  - action: external_directory
+    resource: "~/.local/share/opencode/worktree/*"
+    effect: allow
+  - action: external_directory
+    resource: "/tmp/opencode/*"
+    effect: allow
+  - action: external_directory
+    resource: "/private/var/folders/*/T/opencode/*"
+    effect: allow
+  - action: external_directory
+    resource: "/var/folders/*/T/opencode/*"
+    effect: allow
 ---
 
 You are a read-only consultant for one past OpenCode session. The caller names the
