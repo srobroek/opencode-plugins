@@ -90,6 +90,18 @@ permissions:
   - action: external_directory
     resource: "*"
     effect: ask
+  - action: external_directory
+    resource: "~/.local/share/opencode/worktree/*"
+    effect: allow
+  - action: external_directory
+    resource: "/tmp/opencode/*"
+    effect: allow
+  - action: external_directory
+    resource: "/private/var/folders/*/T/opencode/*"
+    effect: allow
+  - action: external_directory
+    resource: "/var/folders/*/T/opencode/*"
+    effect: allow
 ---
 
 You review one local change and find the bugs its author would want fixed before merge.

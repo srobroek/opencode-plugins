@@ -2094,6 +2094,7 @@ var OP_MESSAGE = "safety op-guard: do not call the 1Password CLI directly; each 
 var FNOX_DUMP_MESSAGE = "safety op-guard: this fnox command prints secret values into the transcript. Use `fnox check` or `fnox list` to inspect, and `fnox exec -- <cmd>` to use a value.";
 var LITERAL_MESSAGE = "safety op-guard: a literal secret in the command lands in the transcript; pass it from a command or variable (`credential=$(cmd)`), or pipe a JSON template to `op item create -`.";
 var FNOX_SET_MESSAGE = "safety op-guard: pipe the value into `fnox set NAME --provider host` from a command; a literal value lands in the transcript.";
+var FNOX_STORE_MESSAGE = "safety op-guard: this fnox provider cannot store a value; `fnox set` would write a piped, generated or expanded value into fnox.toml as the item reference. Create the item first, `<json from a command> | op item create --vault V -`, then point fnox at it: `fnox set NAME '<item>/<field>' --provider <op-provider>`.";
 var NESTING_MESSAGE = "safety op-guard: command nesting is too deep to check; run it without nested shells";
 var CHECK_FAILED_MESSAGE = "safety op-guard: could not check this command; run `op` and fnox commands directly, without nesting";
 var MAX_NESTING = 16;
@@ -2241,6 +2242,8 @@ function opRefusal(command, allow = [], inheritedLiteral = false) {
   }
   if (words[0] === "vault" && words[1] === "create" && words[2] !== undefined)
     return;
+  if (words[0] === "vault" && words[1] === "list")
+    return;
   return allowed(words, allow) ? undefined : "op";
 }
 var FNOX_VALUED = new Set(["-P", "--profile", "-c", "--config", "--age-key-file"]);
@@ -2305,6 +2308,7 @@ function fnoxSetRefusal(command, at, fed) {
   const args = command.argv.slice(at + 1);
   let provider;
   let reads = true;
+  let generates = false;
   const positional = [];
   const defaults = [];
   for (let i = 0;i < args.length; i++) {
@@ -2321,6 +2325,8 @@ function fnoxSetRefusal(command, at, fed) {
       defaults.push({ at: at + 1 + i, skip: "--default=".length });
     else if (arg === "--generate" || arg === "--from-file" || arg.startsWith("--from-file=")) {
       reads = false;
+      if (arg === "--generate")
+        generates = true;
       if (arg === "--from-file")
         i++;
     } else if (SET_VALUED.has(arg))
@@ -2328,8 +2334,13 @@ function fnoxSetRefusal(command, at, fed) {
     else if (!arg.startsWith("-") || arg === "-")
       positional.push(at + 1 + i);
   }
-  if (provider === undefined || !plainProvider(provider))
+  if (provider === undefined || !plainProvider(provider)) {
+    const piped = command.stage > 0 || command.hereDocuments.length > 0 || command.redirects.some((word) => word.hereString === true);
+    const expanded = positional[1] !== undefined && expansionOnly(command, positional[1]);
+    if (generates || expanded || positional[1] === undefined && reads && (fed || piped))
+      return "store";
     return;
+  }
   const value = positional[1];
   const defaultLiteral = defaults.some((d) => !expansionOnly(command, d.at, d.skip));
   if (value !== undefined)
@@ -2406,7 +2417,8 @@ var MESSAGES = {
   op: OP_MESSAGE,
   dump: FNOX_DUMP_MESSAGE,
   literal: LITERAL_MESSAGE,
-  set: FNOX_SET_MESSAGE
+  set: FNOX_SET_MESSAGE,
+  store: FNOX_STORE_MESSAGE
 };
 function opGuard(commands, allow = []) {
   try {
