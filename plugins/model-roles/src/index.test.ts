@@ -1611,18 +1611,25 @@ describe("tiers rpc", () => {
         const original = host.context.tool.transform
         let fail = true
         let movedWhenRefreshFailed: unknown
+        let beforeToolRestore: unknown
+        let toolRestores = 0
         host.context.tool.transform = async (callback) => {
           if (fail) {
             fail = false
             movedWhenRefreshFailed = host.agents().get("worker")?.model
             throw new Error("tool refresh refused")
           }
+          // The restore re-registers the tool right after it put the agents back. Event-driven checks
+          // cannot run yet (the reload holds the queue), so this view is the restore's own work.
+          if (++toolRestores === 1) beforeToolRestore = host.agents().get("worker")?.model
           return original(callback)
         }
         await expect(host.rpc("set", { tier: "cheap", value: { model: [sonnet55] } })).rejects.toThrow(/not applied: tool refresh refused/)
         // The agents had moved to the new tier when the refresh failed ...
         expect(movedWhenRefreshFailed).toEqual({ providerID: "amazon-bedrock", id: "global.anthropic.claude-sonnet-5-5", variant: "low" })
-        // ... and are back, as are spawns, their receipts and the tool.
+        // ... the restore itself put them back before it re-registered the tool, ...
+        expect(beforeToolRestore).toEqual({ providerID: "amazon-bedrock", id: "global.anthropic.claude-haiku-5-5", variant: "low" })
+        // ... and agents, spawns, their receipts and the tool are back.
         expect(host.agents().get("worker")?.model).toEqual({ providerID: "amazon-bedrock", id: "global.anthropic.claude-haiku-5-5", variant: "low" })
         expect((await host.spawn("subagent", { agent: "plain", prompt: "x", tier: "cheap" })).model).toBe(`${haiku55}#low`)
         expect((host.storage.get("receipts") as Array<{ model: string }>)[0]?.model).toBe(`${haiku55}#low`)
