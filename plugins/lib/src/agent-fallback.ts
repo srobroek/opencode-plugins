@@ -16,6 +16,7 @@
 
 import type { Context } from "@opencode/plugin/promise/plugin"
 import { type AgentFile, readAgentFile, shapeAgent } from "./agent-files.ts"
+import { grantTools, type ToolGrant } from "./agent-tools.ts"
 import { MODEL_FALLBACK_HEADER } from "./model-roles.ts"
 
 /** `plugin.list` during setup must not hold up startup; a slow answer counts as "not installed". */
@@ -92,9 +93,9 @@ export function applyOwnedAgent(draft: Draft, file: AgentFile, existing: { syste
   shapeAgent(draft as never, file, existing === undefined || copy)
 }
 
-/** Owner side: register every agent file, replacing fallback copies. */
-export async function registerOwnedAgents(agent: Context["agent"], paths: readonly string[]) {
-  const files = paths.map(readAgentFile)
+/** Owner side: register every agent file, replacing fallback copies. `grant` adds MCP tool rules to the agents it names. */
+export async function registerOwnedAgents(agent: Context["agent"], paths: readonly string[], grant?: ToolGrant) {
+  const files = paths.map(readAgentFile).map((file) => grantTools(file, grant))
   return agent.transform((editor) => {
     for (const file of files) {
       const existing = editor.get(file.id)
@@ -123,8 +124,13 @@ export async function listPlugins(plugin: Context["plugin"], ms = PLUGIN_LIST_TI
  * `registerAgents` does, except a fallback copy whose owner is installed or whose id an
  * earlier transform already added.
  */
-export async function registerFallbackAgents(ctx: Pick<Context, "agent" | "plugin">, paths: readonly string[], owners: FallbackOwners) {
-  const files = paths.map(readAgentFile)
+export async function registerFallbackAgents(
+  ctx: Pick<Context, "agent" | "plugin">,
+  paths: readonly string[],
+  owners: FallbackOwners,
+  grant?: ToolGrant,
+) {
+  const files = paths.map(readAgentFile).map((file) => grantTools(file, grant))
   const owned = files.some((file) => file.id in owners) ? ownedElsewhere(await listPlugins(ctx.plugin), owners) : new Set<string>()
   return ctx.agent.transform((editor) => {
     for (const file of files) {

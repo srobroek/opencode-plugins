@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url"
 import { Plugin } from "@opencode/plugin"
 import { registerOwnedAgents } from "@srobroek/opencode-lib/agent-fallback"
 import { agentPaths } from "@srobroek/opencode-lib/agent-files"
+import { toolRulesFromOption } from "@srobroek/opencode-lib/agent-tools"
 
 export const AGENTS_DIR = fileURLToPath(new URL("../agents", import.meta.url))
 export const RESEARCHER = "researcher"
@@ -19,7 +20,10 @@ export const RESEARCHER = "researcher"
 export default Plugin.define({
   id: "srobroek.agent-researcher",
   async setup(ctx) {
-    const agents = await registerOwnedAgents(ctx.agent, agentPaths(AGENTS_DIR))
+    const agents = await registerOwnedAgents(ctx.agent, agentPaths(AGENTS_DIR), {
+      agents: [RESEARCHER],
+      rules: toolRulesFromOption((ctx.options as Record<string, unknown> | undefined)?.tools),
+    })
     return () => agents.dispose()
   },
 })

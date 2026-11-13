@@ -9,7 +9,7 @@ export * from "./test-audit.ts"
 /** `adversarial-challenger` is a fallback copy of agent-reviewer's, registered only without it. */
 export const FALLBACK_AGENTS = { "adversarial-challenger": "agent-reviewer" } as const
 
-const content = contentPlugin("srobroek.quality", import.meta.url, { fallbacks: FALLBACK_AGENTS })
+const content = contentPlugin("srobroek.quality", import.meta.url, { fallbacks: FALLBACK_AGENTS, toolAgents: ["adversarial-challenger"] })
 
 export default Plugin.define({
   id: "srobroek.quality",

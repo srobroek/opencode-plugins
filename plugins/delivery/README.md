@@ -192,6 +192,20 @@ result gets a note naming the session to continue. Other agents' results are lef
 alone. Background subagent completions arrive as synthetic messages rather than
 tool results, so the hook does not see them.
 
+## MCP tools
+
+`implementer`, `implementer-high` and the fallback `researcher` cannot call MCP tools unless a rule allows them. The `tools` option adds allow rules for MCP tool patterns after the agent's own rules. OpenCode names an MCP tool's permission action `<server>_<tool>`, so `context7_*` allows every tool of the `context7` server and `context7_query-docs` allows one. Characters outside letters, digits, `_` and `-` become `_`.
+
+| Option | Default | Effect |
+| --- | --- | --- |
+| `tools` | `["context7_*", "aws-mcp_*"]` | An array of patterns replaces the defaults. `false` or `[]` allows none. |
+
+```jsonc
+"options": { "tools": ["context7_*", "<server>_<tool>"] }
+```
+
+Only add read-only tools: an allowed MCP tool runs without a prompt. The option refuses a pattern that matches a built-in action (`shell`, `edit`, `write`, `patch`, `external_directory`, `subagent`, `*` and the like) and logs a warning, so it cannot widen file or shell access. `pr-reviewer`, `operator` and `shepherd` get no MCP rules.
+
 ## Instructions and skill
 
 - **Fan-out rules.** `instructions/delivery-fan-out.md` is a short summary

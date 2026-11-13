@@ -132,6 +132,76 @@ function shapeAgent(agent, file, created) {
   agent.permissions = [...agent.permissions ?? [], ...file.permissions];
 }
 
+// plugins/lib/src/agent-tools.ts
+var DEFAULT_MCP_TOOLS = ["context7_*", "aws-mcp_*"];
+var BUILT_IN_ACTIONS = [
+  "shell",
+  "bash",
+  "edit",
+  "write",
+  "patch",
+  "apply_patch",
+  "multiedit",
+  "read",
+  "grep",
+  "glob",
+  "execute",
+  "external_directory",
+  "subagent",
+  "task",
+  "skill",
+  "question",
+  "webfetch",
+  "websearch",
+  "todowrite"
+];
+function matches(value, pattern) {
+  const source = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replaceAll("*", ".*");
+  return new RegExp(`^${source}$`, "s").test(value);
+}
+function refusedTool(pattern) {
+  if (typeof pattern !== "string" || pattern.trim() === "")
+    return "not a non-empty string";
+  const value = pattern.trim();
+  if (!/^[A-Za-z0-9_*-]+$/.test(value))
+    return "use only letters, digits, `_`, `-` and `*`";
+  const builtIn = BUILT_IN_ACTIONS.find((action) => matches(action, value));
+  if (builtIn !== undefined)
+    return `matches the built-in action ${builtIn}`;
+  return;
+}
+function parseToolsOption(raw, warn = (message) => console.warn(message)) {
+  if (raw === undefined)
+    return [...DEFAULT_MCP_TOOLS];
+  if (raw === false)
+    return [];
+  if (!Array.isArray(raw)) {
+    warn(`tools option ignored: expected an array of tool patterns or false, got ${typeof raw}`);
+    return [...DEFAULT_MCP_TOOLS];
+  }
+  const kept = [];
+  for (const entry of raw) {
+    const reason = refusedTool(entry);
+    if (reason)
+      warn(`tools option: refused ${JSON.stringify(entry)}: ${reason}`);
+    else if (!kept.includes(entry.trim()))
+      kept.push(entry.trim());
+  }
+  return kept;
+}
+function toolRules(patterns) {
+  return patterns.map((action) => ({ action, resource: "*", effect: "allow" }));
+}
+function toolRulesFromOption(raw, warn) {
+  return toolRules(parseToolsOption(raw, warn));
+}
+function withToolRules(file, rules) {
+  return rules.length === 0 ? file : { ...file, permissions: [...file.permissions, ...rules] };
+}
+function grantTools(file, grant) {
+  return grant !== undefined && grant.agents.includes(file.id) ? withToolRules(file, grant.rules) : file;
+}
+
 // plugins/lib/src/agent-fallback.ts
 var PLUGIN_LIST_TIMEOUT_MS = 2000;
 function listsPlugin(listed, name) {
@@ -163,8 +233,8 @@ async function listPlugins(plugin, ms = PLUGIN_LIST_TIMEOUT_MS) {
     clearTimeout(timer);
   }
 }
-async function registerFallbackAgents(ctx, paths, owners) {
-  const files = paths.map(readAgentFile);
+async function registerFallbackAgents(ctx, paths, owners, grant) {
+  const files = paths.map(readAgentFile).map((file) => grantTools(file, grant));
   const owned = files.some((file) => (file.id in owners)) ? ownedElsewhere(await listPlugins(ctx.plugin), owners) : new Set;
   return ctx.agent.transform((editor) => {
     for (const file of files) {
@@ -271,8 +341,11 @@ function contentPlugin(id, moduleUrl, options = {}) {
       try {
         if (skills.length > 0)
           registrations.push(await registerSkills(ctx.skill, skills));
-        if (agents.length > 0)
-          registrations.push(await registerFallbackAgents(ctx, agents, options.fallbacks ?? {}));
+        if (agents.length > 0) {
+          const toolAgents = options.toolAgents ?? [];
+          const grant = toolAgents.length === 0 ? undefined : { agents: toolAgents, rules: toolRulesFromOption(ctx.options?.tools) };
+          registrations.push(await registerFallbackAgents(ctx, agents, options.fallbacks ?? {}, grant));
+        }
       } catch (error) {
         await cleanup();
         throw error;

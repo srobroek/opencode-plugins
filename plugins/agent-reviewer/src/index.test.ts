@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { join } from "node:path"
 import { type AgentFile, type AgentPermission, permissionEffect, readAgentFile } from "@srobroek/opencode-lib/agent-files"
+import { DEFAULT_MCP_TOOLS, toolRules } from "@srobroek/opencode-lib/agent-tools"
 import { fragmentParts, readFragment } from "@srobroek/opencode-lib/fragments"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
 import { loadAgents } from "../../delivery/src/agents.ts"
@@ -127,11 +128,15 @@ const FALLBACKS: Fallback[] = [
   { id: "adversarial-challenger", owner: quality, ownerName: "srobroek.quality" },
 ]
 
+/** The file's rules plus the default MCP allow rules every agent but pr-reviewer gains. */
+const expectedRules = (id: string) =>
+  id === "pr-reviewer" ? file(id).permissions : [...file(id).permissions, ...toolRules(DEFAULT_MCP_TOOLS)]
+
 describe.each(FALLBACKS)("$ownerName fallback $id", ({ id, owner, ownerName }) => {
   const expectOne = (fake: Fake) => {
     const agent = fake.agents.get(id) as Record<string, unknown>
     expect(agent.system).toBe(file(id).system)
-    expect(agent.permissions).toEqual(file(id).permissions)
+    expect(agent.permissions).toEqual(expectedRules(id))
     expect(agent.model).toBeUndefined()
     expect(agent.request).toEqual(file(id).request)
     expect(agent.hidden).toBe(file(id).hidden)
@@ -141,7 +146,7 @@ describe.each(FALLBACKS)("$ownerName fallback $id", ({ id, owner, ownerName }) =
     const fake = createFakeContext()
     await owner.setup(fake.context)
     expect(fake.agents.get(id)?.system).toBe(file(id).system)
-    expect(fake.agents.get(id)?.permissions).toEqual(file(id).permissions)
+    expect(fake.agents.get(id)?.permissions).toEqual(expectedRules(id))
   })
 
   test("agent-reviewer then the fallback: the fallback leaves the agent alone", async () => {

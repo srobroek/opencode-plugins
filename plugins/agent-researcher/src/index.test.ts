@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { join } from "node:path"
 import { applyOwnedAgent, isCopyOf } from "@srobroek/opencode-lib/agent-fallback"
 import { type AgentPermission, permissionEffect, readAgentFile } from "@srobroek/opencode-lib/agent-files"
+import { DEFAULT_MCP_TOOLS, toolRules } from "@srobroek/opencode-lib/agent-tools"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
 import { decideRouting } from "../../beads/src/subagent-routing.ts"
 import { loadAgents } from "../../delivery/src/agents.ts"
@@ -75,7 +76,7 @@ describe("delivery fallback", () => {
   const expectOne = (fake: ReturnType<typeof createFakeContext>) => {
     const agent = fake.agents.get(RESEARCHER) as Record<string, unknown>
     expect(agent.system).toBe(file.system)
-    expect(agent.permissions).toEqual(file.permissions)
+    expect(agent.permissions).toEqual([...file.permissions, ...toolRules(DEFAULT_MCP_TOOLS)])
     expect(agent.model).toBeUndefined()
     expect(agent.request).toEqual(file.request)
   }

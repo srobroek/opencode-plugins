@@ -40,6 +40,20 @@ skips it when this plugin (`srobroek.agent-researcher`) is installed. If deliver
 copy registers first, this plugin replaces it rather than layering over it, so either load order leaves one
 agent.
 
+## MCP tools
+
+`researcher` cannot call MCP tools unless a rule allows them. The `tools` option adds allow rules for MCP tool patterns after the agent's own rules. OpenCode names an MCP tool's permission action `<server>_<tool>`, so `context7_*` allows every tool of the `context7` server and `context7_query-docs` allows one. Characters outside letters, digits, `_` and `-` become `_`.
+
+| Option | Default | Effect |
+| --- | --- | --- |
+| `tools` | `["context7_*", "aws-mcp_*"]` | An array of patterns replaces the defaults. `false` or `[]` allows none. |
+
+```jsonc
+"options": { "tools": ["context7_*", "<server>_<tool>"] }
+```
+
+Only add read-only tools: an allowed MCP tool runs without a prompt. The option refuses a pattern that matches a built-in action (`shell`, `edit`, `write`, `patch`, `external_directory`, `subagent`, `*` and the like) and logs a warning, so it cannot widen file or shell access.
+
 ## Install
 
 ```sh

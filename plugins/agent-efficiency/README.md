@@ -198,5 +198,6 @@ starts with, rejects it. Moving the call into `workdir` does not help: OpenCode 
 | `largeRead` | `true` | Refuses a first untargeted read of a large text file. `false` turns it off; an object sets `bytes` (32768), `lines` (350), `timeoutMs` (500) and `agents` (`coder`, `general`, `implementer`, `implementer-high`). |
 | `scratchReminder` | `true` | Notes newly created scratch entries in child-session tool results. |
 | `explore` | `true` | `false` keeps the built-in `explore` agent as OpenCode and your config define it. |
+| `tools` | `["context7_*", "aws-mcp_*"]` | MCP tool patterns the narrowed `explore` may call, named `<server>_<tool>` (for example `["context7_*", "<server>_<tool>"]`). `false` or `[]` allows none. Only read-only tools belong here; a pattern matching a built-in action such as `shell`, `edit` or `*` is refused with a warning. The rules go after explore's own, so they win over its leading `* deny`. |
 | `leanSubagents` | the read-only agents above | Agent ids whose child sessions get the trimmed prompt. `false` or `[]` turns it off. |
 | `leanDrop` | `["identity", "worktree"]` | Which segments to remove: `global-instructions`, `project-instructions`, `identity`, `worktree`. `instructions` stands for both AGENTS.md segments. |
