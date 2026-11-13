@@ -5,12 +5,27 @@ import { type GuardOptions, hardGate } from "./guards.ts"
 import { createPlugin, readOptions } from "./index.ts"
 import {
   CHECK_FAILED_MESSAGE,
+  FNOX_CONFIG_MESSAGE,
   FNOX_DUMP_MESSAGE,
+  FNOX_INDIRECT_MESSAGE,
   FNOX_SET_MESSAGE,
+  FNOX_STORE_MESSAGE,
   LITERAL_MESSAGE,
   MAX_NESTING, NESTING_MESSAGE, OP_MESSAGE } from "./op-guard.ts"
 
-const gate = (command: string, options: GuardOptions = {}) => hardGate(command, "/", options)
+/** Provider types as a fnox config would declare them. */
+const TYPES: Record<string, string> = {
+  host: "keychain",
+  age: "age",
+  "team-age": "age",
+  keychain: "keychain",
+  op: "1password",
+  proj: "1password",
+}
+/** An explicit config path resolves nowhere here, as when the file is missing. */
+const types = (name: string, config?: string) =>
+  config === undefined ? TYPES[name] : config === "custom.toml" ? TYPES[name] : undefined
+const gate = (command: string, options: GuardOptions = {}) => hardGate(command, "/", { providerTypes: types, ...options })
 
 const REFUSED_OP = [
   "op read op://x/y/z",
@@ -28,7 +43,8 @@ const REFUSED_OP = [
   "command op read op://x",
   "for i in 1 2; do op read $i; done",
   "if true; then op read x; else op signin; fi",
-  "op vault list",
+  "op item list",
+  "op vault get x",
   "op vault delete x",
   "op vault edit x",
   "op vault create",
@@ -62,6 +78,108 @@ const REFUSED_LITERAL = [
   "fnox exec -- fnox exec -- op item create - <<EOF\n{}\nEOF",
   "fnox exec -- op item create --title t password=abc",
   "bash -c 'op item edit x password=abc'",
+]
+
+const REFUSED_STORE = [
+  "openssl rand -hex 8 | fnox set NAME --provider op",
+  "echo hunter2 | fnox set NAME --provider other",
+  "cmd | fnox set NAME -p op",
+  "cmd | fnox set NAME",
+  "fnox set NAME --generate --provider op",
+  "fnox set NAME --generate",
+  "fnox set NAME \"$(openssl rand -hex 8)\" --provider op",
+  "fnox set NAME \"$TOKEN\" --provider op",
+  "fnox set NAME --provider op <<<\"$TOKEN\"",
+  "fnox exec -- sh -c 'cmd | fnox set NAME --provider op'",
+  "fnox set NAME --provider op < secret.txt",
+  "fnox set NAME --provider op <(openssl rand -hex 8)",
+  "fnox set NAME --from-file k.txt --provider op",
+  "fnox set NAME 'item/field' --from-file k.txt --provider op",
+  "fnox set NAME 'item/field' --generate --provider op",
+  "fnox set NAME 'item/field' --default \"$X\" --provider op",
+  "cmd | fnox set NAME 'item/field' --provider op",
+  "fnox set NAME 'item/field' --provider op <<EOF\nx\nEOF",
+  "cmd | fnox exec -- fnox set NAME --provider op",
+  "cmd | fnox exec -- sh -c 'fnox set NAME item/field --provider op'",
+  "fnox exec -- sh -c 'fnox set NAME item/field --provider op' < secret.txt",
+  "fnox set NAME \"item/$X\" --provider op",
+  "cmd | fnox set NAME --provider unknown",
+  "cmd | fnox -c my.toml set NAME --provider host",
+]
+
+const REFUSED_INDIRECT = [
+  "echo 'fnox set NAME item/f --provider op' | sh",
+  "cat run.sh | bash; fnox set NAME item/f --provider op",
+  "sh < run.sh; op item create --vault V -",
+  "bash -c \"$SCRIPT\"; fnox set NAME item/f --provider op",
+  "echo NAME | xargs fnox set --provider op",
+  "echo x | xargs -I{} op item create --vault V -",
+  "find . -name k -exec fnox set NAME item/f --provider op \\;",
+  "find . -execdir op item edit x - \\;",
+  "parallel fnox set {} item/f --provider op ::: A B",
+  "env -S 'fnox set NAME item/f --provider op'",
+  "eval 'fnox set NAME item/f --provider op'",
+  "source ./env.sh; fnox set NAME item/f --provider op",
+  ". ./env.sh; op item create --vault V -",
+  "alias s='fnox set'; s NAME item/f --provider op",
+  "f() { fnox set \"$@\"; }; f NAME item/f --provider op",
+  "function f { op item create --vault V -; }; f",
+  "$CD /x; cmd | fnox set NAME --provider host",
+  "F=fnox; $F set NAME item/f --provider op",
+  "$(echo op) item create --vault V -",
+  "nix develop -c fnox set NAME item/f --provider op",
+  "nix shell nixpkgs#fnox -c fnox set NAME item/f --provider op",
+  "nix run nixpkgs#fnox -- set NAME item/f --provider op",
+  "direnv exec . fnox set NAME item/f --provider op",
+  "mise exec -- fnox set NAME item/f --provider op",
+  "mise x -- op item create --vault V -",
+  "asdf exec fnox set NAME item/f --provider op",
+  "devbox run fnox set NAME item/f --provider op",
+  "uv run fnox set NAME item/f --provider op",
+  "poetry run fnox set NAME item/f --provider op",
+  "npx fnox set NAME item/f --provider op",
+  "bunx op item create --vault V -",
+  "pnpm dlx fnox set NAME item/f --provider op",
+]
+
+const REFUSED_CONFIG = [
+  "cp template.toml custom.toml && openssl rand -hex 8 | fnox set NAME -c custom.toml --provider age",
+  "openssl rand -hex 8 | fnox set NAME --config custom.toml --provider age; mv t.toml custom.toml",
+  "ln -sf t.toml custom.toml; fnox -c custom.toml set NAME --generate --provider age",
+  "rm custom.toml; cmd | fnox -c custom.toml set NAME --provider age",
+  "echo x > custom.toml; cmd | fnox -c custom.toml set NAME --provider age",
+  "fnox exec -- sh -c 'cp template.toml custom.toml && openssl rand -hex 8 | fnox set NAME -c custom.toml --provider age'",
+  "echo x > fnox.toml; cmd | fnox set NAME --provider host",
+  "cmd | fnox set NAME --provider host && mv /tmp/x .fnox.local.toml",
+  "cmd | fnox set NAME --provider host; cp a ~/.config/fnox/config.toml",
+  "cmd | fnox set NAME --provider host; rm fnox.toml",
+  "ln -sf /tmp/x fnox.toml; cmd | fnox set NAME --provider host",
+  "tee fnox.prod.toml < x; cmd | fnox set NAME --provider host",
+  "fnox provider add host age; cmd | fnox set NAME --provider host",
+  "fnox provider remove host; cmd | fnox set NAME --provider host",
+  "fnox config edit; cmd | fnox set NAME --provider host",
+  "cat x > \"$F\"; cmd | fnox set NAME --provider host",
+  "cmd | tee \"$F\"; cmd | fnox set NAME --provider host",
+  "cp a \"$HOME/x\"; cmd | fnox set NAME --provider host",
+]
+
+const REFUSED_NESTED_INDIRECT = [
+  "fnox exec -- sh -c 'cmd | xargs fnox set NAME --provider op'",
+  "fnox exec -- sh -c 'find . -exec fnox set NAME item/f --provider op \\;'",
+  "fnox exec -- sh -c 'parallel fnox set {} item/f --provider op ::: A'",
+  "fnox exec -- xargs fnox set NAME --provider op",
+  "fnox exec -- bash -c \"sh -c 'cmd | xargs fnox set NAME --provider op'\"",
+  "sh -c \"bash -c 'cmd | xargs fnox set NAME --provider op'\"",
+  "fnox exec -- sh -c \"bash -c 'uv run fnox set NAME item/f --provider op'\"",
+  "echo 'fnox set NAME item/f --provider op' | fnox exec -- sh",
+  "fnox exec -- sh -c 'echo x | sh; fnox set NAME item/f --provider op'",
+]
+
+const REFUSED_NESTED_CONFIG = [
+  "fnox exec -- sh -c 'echo x > fnox.toml; cmd | fnox set NAME --provider host'",
+  "fnox exec -- sh -c 'fnox provider add host age; cmd | fnox set NAME --provider host'",
+  "fnox exec -- sh -c 'cat x > \"$F\"; cmd | fnox set NAME --provider host'",
+  "fnox exec -- bash -c \"sh -c 'rm fnox.toml; cmd | fnox set NAME --provider host'\"",
 ]
 
 const REFUSED_PIPED = [
@@ -243,7 +361,6 @@ const PASSED = [
   "echo hunter2; op item create -",
   "echo hunter2 && op item create --title t",
   "echo hunter2 | tr a b",
-  "echo hunter2 | fnox set NAME --provider other",
   "echo hunter2 | fnox set NAME --provider host --generate",
   "echo hunter2 | fnox set NAME --provider host --from-file k.txt",
   "printf '%s' \"$TOKEN\" | fnox set NAME --provider host",
@@ -264,6 +381,33 @@ const PASSED = [
   "fnox set NAME --from-file key.txt --provider host",
   "fnox set NAME 'item/field' --provider proj",
   "fnox set NAME 'item/field' --provider op",
+  "echo x > fnox.toml; fnox set NAME item/field --provider op",
+  "cmd | fnox set NAME --provider host; echo ok > out.txt",
+  "fnox provider list; cmd | fnox set NAME --provider host",
+  "jq -n --arg v \"$(cmd)\" '{}' | op item create --vault V - >/dev/null",
+  "nix develop -c cargo test",
+  "uv run pytest",
+  "npx tsc --noEmit",
+  "find . -name x -exec echo {} \\;",
+  "echo a | xargs echo",
+  "source ./env.sh; cargo build",
+  "mise exec -- node app.js",
+  "bash -c 'echo hi' > out.txt",
+  "fnox exec -- sh -c 'cargo test | tee out.txt'",
+  "fnox exec -- sh -c 'find . -name x -exec echo {} \\;'",
+  "fnox exec -- sh -c 'cmd | fnox set NAME --provider host'",
+  "fnox exec -- sh -c 'echo ok > out.txt; fnox set NAME item/f --provider op'",
+  "fnox -c fnox.local.toml set NAME --provider host",
+  "openssl rand -hex 8 | fnox set NAME -c custom.toml --provider age",
+  "cp template.toml other.toml && openssl rand -hex 8 | fnox set NAME -c custom.toml --provider age",
+  "fnox -c fnox.local.toml set NAME --generate --provider keychain",
+  "cmd | fnox -c fnox.local.toml set NAME --provider host",
+  "fnox set NAME --generate --provider host",
+  "fnox set NAME 'op://vault/item/field' --provider op",
+  "fnox set NAME --provider op",
+  "op vault list",
+  "op vault list --format json",
+  "fnox exec -- op vault list",
   "fnox set NAME hunter2",
   "fnox set NAME hunter2 --provider other",
   "fnox set NAME hunter2 --provider team",
@@ -319,6 +463,26 @@ describe("op-guard", () => {
     test(`refuses literal ${command}`, () => {
       expect(gate(command)).toEqual({ guard: "op-guard", reason: LITERAL_MESSAGE })
     })
+  for (const command of REFUSED_STORE)
+    test(`refuses fnox set into a provider without storage ${command}`, () => {
+      expect(gate(command)).toEqual({ guard: "op-guard", reason: FNOX_STORE_MESSAGE })
+    })
+  for (const command of REFUSED_INDIRECT)
+    test(`refuses a secret write behind an executor ${command}`, () => {
+      expect(gate(command)).toEqual({ guard: "op-guard", reason: FNOX_INDIRECT_MESSAGE })
+    })
+  for (const command of REFUSED_NESTED_INDIRECT)
+    test(`refuses a nested secret write behind an executor ${command}`, () => {
+      expect(gate(command)).toEqual({ guard: "op-guard", reason: FNOX_INDIRECT_MESSAGE })
+    })
+  for (const command of REFUSED_NESTED_CONFIG)
+    test(`refuses a nested fnox set beside a config write ${command}`, () => {
+      expect(gate(command)).toEqual({ guard: "op-guard", reason: FNOX_CONFIG_MESSAGE })
+    })
+  for (const command of REFUSED_CONFIG)
+    test(`refuses a fnox set beside a config write ${command}`, () => {
+      expect(gate(command)).toEqual({ guard: "op-guard", reason: FNOX_CONFIG_MESSAGE })
+    })
   for (const command of REFUSED_PIPED)
     test(`refuses piped literal ${command}`, () => {
       expect(gate(command)).toEqual({ guard: "op-guard", reason: LITERAL_MESSAGE })
@@ -360,16 +524,99 @@ describe("op-guard", () => {
       expect(gate(command)).toBeUndefined()
     })
 
+  describe("an uncertain execution directory is not a value store", () => {
+    for (const command of [
+      "cd sub && cmd | fnox set NAME --provider host",
+      "cd 'sub dir' && cmd | fnox set NAME --provider host",
+      "cmd | fnox set NAME --provider host; cd /x",
+      "cd /x; cd /y; cmd | fnox set NAME --provider host",
+      "pushd /x && cmd | fnox set NAME --provider host",
+      "(cd /x && cmd | fnox set NAME --provider host)",
+      "bash -c 'cd /x && cmd | fnox set NAME --provider host'",
+      "env -C /x sh -c 'cmd | fnox set NAME --provider host'",
+      "sudo -D /x sh -c 'cmd | fnox set NAME --provider host'",
+      "git -C /x status; cmd | fnox set NAME --provider host",
+      "make --directory=/x; cmd | fnox set NAME --provider host",
+    ])
+      test(`refuses ${command}`, () => {
+        expect(gate(command)).toEqual({ guard: "op-guard", reason: FNOX_STORE_MESSAGE })
+      })
+  })
+
+  test("a value set with no directory change in the command uses the resolved type", () => {
+    expect(gate("cmd | fnox set NAME --provider host")).toBeUndefined()
+  })
+
+  describe("an explicit fnox config file", () => {
+    const explicit = (config: string | undefined) => ({
+      providerTypes: (name: string, path?: string) => (path === config && name === "host" ? "age" : undefined),
+    })
+
+    test("resolves providers from a literal path", () => {
+      expect(gate("cmd | fnox -c other.toml set NAME --provider host", explicit("other.toml"))).toBeUndefined()
+      expect(gate("cmd | fnox set NAME --config=other.toml --provider host", explicit("other.toml"))).toBeUndefined()
+    })
+
+    test("a file the resolver cannot read is not a store", () => {
+      expect(gate("cmd | fnox -c missing.toml set NAME --provider host", explicit("other.toml"))?.reason).toBe(
+        FNOX_STORE_MESSAGE,
+      )
+    })
+
+    test("an expanded path is not a store", () => {
+      expect(gate('cmd | fnox -c "$CFG" set NAME --provider host', { providerTypes: () => "age" })?.reason).toBe(
+        FNOX_STORE_MESSAGE,
+      )
+    })
+
+    test("two config files are not a store", () => {
+      expect(gate("cmd | fnox -c a.toml -c b.toml set NAME --provider host", { providerTypes: () => "age" })?.reason).toBe(
+        FNOX_STORE_MESSAGE,
+      )
+    })
+
+    test("a bare fnox file name resolves like the searched configs", () => {
+      expect(gate("cmd | fnox -c fnox.local.toml set NAME --provider host")).toBeUndefined()
+    })
+  })
+
+  test("a provider named host that is 1password is not a value store", () => {
+    const named = { providerTypes: (name: string) => (name === "host" ? "1password" : undefined) }
+    expect(gate("cmd | fnox set NAME --provider host", named)).toEqual({ guard: "op-guard", reason: FNOX_STORE_MESSAGE })
+  })
+
+  test("an age-named provider of another type is not a value store", () => {
+    const named = { providerTypes: (name: string) => (name === "x-age" ? "1password" : undefined) }
+    expect(gate("cmd | fnox set NAME --provider x-age", named)).toEqual({ guard: "op-guard", reason: FNOX_STORE_MESSAGE })
+  })
+
+  test("a provider whose type cannot be resolved is not a value store", () => {
+    expect(gate("cmd | fnox set NAME --provider host", { providerTypes: () => undefined })?.reason).toBe(FNOX_STORE_MESSAGE)
+  })
+
+  for (const type of ["aws-sm", "aws-ps", "azure-sm", "gcp-sm", "bitwarden-sm", "foks", "vault"])
+    test(`a provider of the cloud store type ${type} takes a piped value`, () => {
+      expect(gate("cmd | fnox set NAME --provider p", { providerTypes: () => type })).toBeUndefined()
+    })
+
+  for (const type of ["doppler", "infisical", "azure-ac", "kubernetes", "keeper-sm", "plain", "lua"])
+    test(`a provider of the read-only or plaintext type ${type} is not a value store`, () => {
+      expect(gate("cmd | fnox set NAME --provider p", { providerTypes: () => type })?.reason).toBe(FNOX_STORE_MESSAGE)
+    })
+
+  test("a provider of type age takes a piped value whatever its name", () => {
+    expect(gate("cmd | fnox set NAME --provider vault-keys", { providerTypes: () => "age" })).toBeUndefined()
+  })
+
   test("the refusal points to fnox exec and provider discover", () => {
     expect(OP_MESSAGE).toContain("fnox exec -- <cmd>")
     expect(OP_MESSAGE).toContain("fnox provider discover <provider> --tags project/<name>")
   })
 
   test("opAllow adds subcommand prefixes", () => {
-    expect(gate("op vault list")).toBeDefined()
-    expect(gate("op vault list --format json", { opAllow: ["vault list"] })).toBeUndefined()
-    expect(gate("op vault get x", { opAllow: ["vault list"] })).toBeDefined()
-    expect(gate("op item get x", { opAllow: ["vault list"] })).toBeDefined()
+    expect(gate("op item list")).toBeDefined()
+    expect(gate("op item list --format json", { opAllow: ["item list"] })).toBeUndefined()
+    expect(gate("op item get x", { opAllow: ["item list"] })).toBeDefined()
   })
 
   test("disabling the guard lets op through", () => {

@@ -23,7 +23,8 @@
     }
   },
   "devDependencies": {
-    "@srobroek/opencode-lib": "workspace:*"
+    "@srobroek/opencode-lib": "workspace:*",
+    "smol-toml": "1.9.1"
   },
   "opencode-plugins": {
     "scope": "global"

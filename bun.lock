@@ -462,6 +462,7 @@
       "version": "0.6.0",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
+        "smol-toml": "1.9.1",
       },
       "peerDependencies": {
         "@opencode/plugin": "^2.1.4",

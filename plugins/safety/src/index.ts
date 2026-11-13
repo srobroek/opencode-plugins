@@ -4,11 +4,13 @@ import { Error as ToolError } from "@opencode/plugin/promise/tool"
 import { appendResultText, isShellTool, leadingCdCwd, shellCall, WRITE_TOOLS } from "@srobroek/opencode-lib"
 import { rewriteCloseKeywords } from "./close-keywords.ts"
 import { externalDirectories, sessionRoots, shellFlagDirectories } from "./flag-directories.ts"
+import { readProviderTypes } from "./fnox-config.ts"
 import { GUARD_IDS, type GuardID, type GuardOptions, hardGate } from "./guards.ts"
 import { decideToolCall, type MigrationOptions, migrationOverride } from "./migrations.ts"
 import { createPackageAdvisor } from "./package-investigate.ts"
 import { type Decision, type DecisionID, type ReviewOptions, reviewPermission } from "./permission.ts"
 import { createRedactor, type RedactOptions, readRedactOptions } from "./redact.ts"
+import { allowScratch, scratchRoots } from "./scratch-dirs.ts"
 
 export { normalize as normalizeCloseKeywords, rewriteCloseKeywords } from "./close-keywords.ts"
 export { externalDirectories, flagDirectories, shellFlagDirectories } from "./flag-directories.ts"
@@ -45,11 +47,17 @@ export const FEATURE_IDS: readonly FeatureID[] = [
   "external-directory",
 ]
 
-export type SafetyOptions = { disabled: ReadonlySet<FeatureID>; redact: RedactOptions; opAllow: string[] }
+export type SafetyOptions = {
+  disabled: ReadonlySet<FeatureID>
+  redact: RedactOptions
+  opAllow: string[]
+  scratchDirs: boolean
+}
 
 /**
  * `{ disable: ["git-defender", …] }` turns features off; unknown ids are ignored.
  * `opAllow` lists extra `op` subcommand prefixes the op-guard allows.
+ * `scratchDirs: false` stops allowing the OpenCode temp folder and the project's worktree folder.
  * `redactSecrets`, `redactNames` and `redactExclude` configure secret redaction.
  */
 export function readOptions(options: Readonly<Record<string, unknown>> | undefined): SafetyOptions {
@@ -57,7 +65,7 @@ export function readOptions(options: Readonly<Record<string, unknown>> | undefin
   const list = Array.isArray(raw) ? raw.filter((id): id is FeatureID => FEATURE_IDS.includes(id as FeatureID)) : []
   const allow = options?.opAllow
   const opAllow = Array.isArray(allow) ? allow.filter((entry): entry is string => typeof entry === "string") : []
-  return { disabled: new Set(list), redact: readRedactOptions(options), opAllow }
+  return { disabled: new Set(list), redact: readRedactOptions(options), opAllow, scratchDirs: options?.scratchDirs !== false }
 }
 
 /** The directory a shell call runs in: its `workdir`, resolved against the session's directory. */
@@ -109,6 +117,9 @@ export async function review(command: string, cwd: string, options: ReviewOption
   }
 }
 
+/** Tools that open the path they were given themselves, with no shell between the check and the use. */
+export const DIRECT_FILE_TOOLS: ReadonlySet<string> = new Set(["read", "edit", "write", "patch", "apply_patch", "glob", "grep", "list"])
+
 const PENDING_TTL_MS = 10 * 60_000
 
 type Pending = { sessionID: string; at: number; decision: Decision | undefined }
@@ -118,14 +129,15 @@ export type Overrides = {
   review?: ReviewOptions
   migrations?: MigrationOptions
   env?: NodeJS.ProcessEnv
-  guard?: Pick<GuardOptions, "read" | "analyzeOp">
+  guard?: Pick<GuardOptions, "read" | "analyzeOp" | "providerTypes">
+  scratch?: { roots?: readonly string[] }
 }
 
 export function createPlugin(overrides: Overrides = {}) {
   return Plugin.define({
     id: "srobroek.safety",
     async setup(ctx) {
-      const { disabled, redact, opAllow } = readOptions(ctx.options)
+      const { disabled, redact, opAllow, scratchDirs } = readOptions(ctx.options)
       const on = (id: FeatureID) => !disabled.has(id)
       const guardOptions = { ...overrides.guard, disabled: disabled as ReadonlySet<GuardID>, opAllow }
       const reviewOptions: ReviewOptions = { ...overrides.review, disabled: disabled as ReadonlySet<DecisionID> }
@@ -138,12 +150,17 @@ export function createPlugin(overrides: Overrides = {}) {
           .then((session) => (session as { location: { directory: string } }).location.directory)
           .catch(() => ctx.location.directory as string)
 
+      // The tool behind each running call, so a permission request can be traced to it.
+      const running = new Map<string, { tool: string; at: number }>()
+
       const prune = () => {
         const cutoff = Date.now() - PENDING_TTL_MS
         for (const [id, entry] of pending) if (entry.at < cutoff) pending.delete(id)
+        for (const [id, entry] of running) if (entry.at < cutoff) running.delete(id)
       }
 
       const before = await ctx.tool.hook("execute.before", async (event) => {
+        running.set(event.id, { tool: event.tool, at: Date.now() })
         const call = shellCall(event.tool, event.input)
         if (call === undefined || call.command.trim() === "") return
         let command = call.command
@@ -155,7 +172,17 @@ export function createPlugin(overrides: Overrides = {}) {
           }
         }
         const cwd = shellCwd(call.workdir, await sessionDirectory(event.sessionID))
-        const refusal = safely(() => hardGate(command, leadingCdCwd(command, cwd), guardOptions))
+        const gateCwd = leadingCdCwd(command, cwd)
+        // The fnox config is read from the call's own directory, and only when the guard asks for a type;
+        // the guard ignores it when the command changes directory.
+        let types: ReturnType<typeof readProviderTypes> | undefined
+        const providerTypes =
+          guardOptions.providerTypes ??
+          ((name: string, config?: string) => {
+            types ??= readProviderTypes(cwd)
+            return types(name, config)
+          })
+        const refusal = safely(() => hardGate(command, gateCwd, { ...guardOptions, providerTypes }))
         if (refusal !== undefined) throw new Error(refusal.reason)
         if (on("external-directory")) {
           const sessionDir = await sessionDirectory(event.sessionID)
@@ -204,8 +231,27 @@ export function createPlugin(overrides: Overrides = {}) {
         applyDecision(evaluation as Evaluation, decision)
       })
 
+      const scratch = scratchDirs
+        ? await ctx.permission.hook("evaluate", async (evaluation) => {
+            if (evaluation.action !== "external_directory" || evaluation.effect !== "ask") return
+            // A shell command can swap a scratch folder for a symlink between this check and its use, so only
+            // direct file tools qualify; an unknown source stays an ask.
+            const source = evaluation.source
+            const tool = source?.type === "tool" ? running.get(source.id)?.tool : undefined
+            if (tool === undefined || !DIRECT_FILE_TOOLS.has(tool)) return
+            const roots =
+              overrides.scratch?.roots ??
+              (await ctx.session
+                .get({ sessionID: evaluation.sessionID } as never)
+                .then((session) => scratchRoots((session as { projectID: string }).projectID))
+                .catch(() => []))
+            allowScratch(evaluation, roots)
+          })
+        : undefined
+
       const after = await ctx.tool.hook("execute.after", (event) => {
         pending.delete(event.id)
+        running.delete(event.id)
         if (!on("package-investigate") || event.status !== "completed") return
         const call = shellCall(event.tool, event.input)
         if (call === undefined) return
@@ -240,6 +286,7 @@ export function createPlugin(overrides: Overrides = {}) {
       return async () => {
         for (const registration of redacting.reverse()) await registration.dispose()
         await after.dispose()
+        await scratch?.dispose()
         await gate.dispose()
         await migrations.dispose()
         await before.dispose()

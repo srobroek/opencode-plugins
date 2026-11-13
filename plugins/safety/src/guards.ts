@@ -7,8 +7,9 @@
 
 import { readFileSync } from "node:fs"
 import { isAbsolute, resolve } from "node:path"
+import { shellWriteTargets } from "@srobroek/opencode-lib"
 import { hasAttribution } from "./attribution.ts"
-import { CHECK_FAILED_MESSAGE, NESTING_MESSAGE, OP_MESSAGE, opGuard } from "./op-guard.ts"
+import { CHECK_FAILED_MESSAGE, NESTING_MESSAGE, OP_MESSAGE, opGuard, type ProviderTypes } from "./op-guard.ts"
 import {
   base,
   type Command,
@@ -270,7 +271,14 @@ export type GuardOptions = {
   /** Extra `op` subcommand prefixes the op-guard allows, such as "vault list". */
   opAllow?: readonly string[]
   /** Test seam: replaces the op-guard analysis. */
-  analyzeOp?: (commands: readonly Command[], allow: readonly string[] | undefined) => string | undefined
+  analyzeOp?: (
+    commands: readonly Command[],
+    allow: readonly string[] | undefined,
+    types: ProviderTypes | undefined,
+    writesOf: ((source: string) => readonly string[]) | undefined,
+  ) => string | undefined
+  /** The `type` of a fnox provider by name, from the fnox config that applies; unknown means not a value store. */
+  providerTypes?: ProviderTypes
 }
 
 /** The first hard gate `source` trips, or `undefined`. */
@@ -300,7 +308,7 @@ export function hardGate(source: string, cwd: string, options: GuardOptions = {}
       const walk = walkShell(source)
       // An unfinished walk hides commands; refuse when `op` or `fnox` could be among them.
       if (!walk.complete && /\b(?:op|fnox)\b/.test(source)) reason = NESTING_MESSAGE
-      else reason = analyze(walk.commands, options.opAllow) ?? ""
+      else reason = analyze(walk.commands, options.opAllow, options.providerTypes, (text) => shellWriteTargets(text, cwd)) ?? ""
     } catch {
       reason = CHECK_FAILED_MESSAGE
     }
