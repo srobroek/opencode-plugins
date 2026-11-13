@@ -1,9 +1,32 @@
 ---
 name: beads-setup
-description: "Use for Beads init and remotes: repos without .beads/, ledger clones, git/Dolt remotes, or no beads database found."
+description: "Use for Beads setup: init, remotes, ledger outside the checkout, separate beads repo, BEADS_DIR or no beads database found."
 metadata:
   opencode/autoinvoke: false
 ---
+
+# Ledger in a separate repo
+Choose this when the code host cannot store Dolt refs, or the ledger belongs in a
+separate planning repo. Initialize or clone that beads repo using the steps below;
+its remote owns `refs/dolt/data`, not the code remote. Then, in the code project's
+`.opencode/opencode.json`, add:
+
+```json
+{"plugins":[{"package":"github:srobroek/opencode-plugins#main::path:plugins/beads","options":{"store":"/absolute/path/to/ledger/.beads"}}]}
+```
+
+Match the inherited package target exactly. This entry REPLACES inherited options;
+copy any options you need to retain. For `bd` in shells, set `mise.local.toml`:
+
+```toml
+[env]
+BEADS_DIR = "/absolute/path/to/ledger/.beads"
+```
+
+The shared OpenCode server does not read mise, so the plugin needs `options.store`
+too. Run `mise exec -- bd where` from the code checkout and confirm the ledger
+path. See [Project ledger store](../../README.md#project-ledger-store) for path
+validation and precedence.
 
 # DETECT
 `bd where` exits 0 → Beads is initialized; skip initialization.

@@ -12,6 +12,25 @@ import { spawnSync } from "node:child_process"
 import { lstatSync, realpathSync, statSync } from "node:fs"
 import { dirname, isAbsolute, resolve } from "node:path"
 
+export function configuredStore(options: Readonly<Record<string, unknown>>, projectRoot: string): string | undefined {
+  if (!("store" in options)) return undefined
+  const value = options.store
+  const message = "Invalid beads store option: expected a path to a directory containing metadata.json or embeddeddolt/; fix or remove options.store in the project OpenCode config"
+  if (typeof value !== "string" || value.trim() === "") throw new Error(message)
+  try {
+    const store = realpathSync(resolve(projectRoot, value))
+    if (!statSync(store).isDirectory()) throw new Error(message)
+    let metadata = false
+    try {
+      metadata = statSync(resolve(store, "metadata.json")).isFile()
+    } catch {}
+    if (!metadata && !isDir(resolve(store, "embeddeddolt"))) throw new Error(message)
+    return store
+  } catch (cause) {
+    throw new Error(`${message} (configured path: ${JSON.stringify(value)})`, { cause })
+  }
+}
+
 /** The git common directory for `cwd`, or unknown when Git cannot answer. */
 export function repoIdentity(cwd: string): string | undefined {
   if (cwd.includes("\0")) return undefined

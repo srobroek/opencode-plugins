@@ -1667,6 +1667,28 @@ function decideActorGate(command, env = process.env) {
 import { spawnSync } from "child_process";
 import { lstatSync, realpathSync, statSync } from "fs";
 import { dirname, isAbsolute as isAbsolute2, resolve as resolve3 } from "path";
+function configuredStore(options, projectRoot) {
+  if (!("store" in options))
+    return;
+  const value = options.store;
+  const message = "Invalid beads store option: expected a path to a directory containing metadata.json or embeddeddolt/; fix or remove options.store in the project OpenCode config";
+  if (typeof value !== "string" || value.trim() === "")
+    throw new Error(message);
+  try {
+    const store = realpathSync(resolve3(projectRoot, value));
+    if (!statSync(store).isDirectory())
+      throw new Error(message);
+    let metadata = false;
+    try {
+      metadata = statSync(resolve3(store, "metadata.json")).isFile();
+    } catch {}
+    if (!metadata && !isDir(resolve3(store, "embeddeddolt")))
+      throw new Error(message);
+    return store;
+  } catch (cause) {
+    throw new Error(`${message} (configured path: ${JSON.stringify(value)})`, { cause });
+  }
+}
 function repoIdentity(cwd) {
   if (cwd.includes("\x00"))
     return;
@@ -1949,7 +1971,7 @@ function embedded(store) {
   try {
     config = readFileSync(join(store, "config.yaml"), "utf8");
   } catch {}
-  return metadata !== "" || config !== "";
+  return metadata !== "" || config !== "" || isDirectory(join(store, "embeddeddolt"));
 }
 function embeddedStoreFor(cwd, env = process.env) {
   const store = storeFor([], cwd, env);

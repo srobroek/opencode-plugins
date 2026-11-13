@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
 import { setBdShowRunForTests } from "./bd-close-gate.ts"
@@ -131,6 +131,59 @@ describe("gate admission on subagent", () => {
 })
 
 describe("shell create.before", () => {
+  test("project store overrides server env and reaches prime and shell children", async () => {
+    const root = scratch()
+    const store = join(root, "ledger")
+    mkdirSync(store)
+    writeFileSync(join(store, "metadata.json"), "{}")
+    const seen: string[] = []
+    const { fake, cleanup } = await start(root, {
+      env: { BEADS_DIR: "/server/.beads" },
+      run: async (_cwd, _args, _deadline, env) => {
+        seen.push(env?.BEADS_DIR ?? "")
+        return { output: "null" }
+      },
+    }, { store: "ledger" })
+    const event = await fake.fire.shell("create.before", {
+      command: "bd list", cwd: root, timeout: 0, shell: "/bin/zsh", env: { BEADS_DIR: "/server/.beads" },
+    })
+    expect(event.env.BEADS_DIR).toBe(store)
+    expect(seen.length).toBeGreaterThan(0)
+    expect(seen.every((value) => value === store)).toBe(true)
+    await cleanup()
+  })
+
+  test.each(["metadata.json", "embeddeddolt"])("two project roots share a canonical runner store with %s and a literal prefix overrides it", async (marker) => {
+    const ledger = scratch()
+    if (marker === "metadata.json") writeFileSync(join(ledger, marker), "{}")
+    else mkdirSync(join(ledger, marker))
+    const roots = [scratch(), scratch()]
+    for (const root of roots) {
+      symlinkSync(ledger, join(root, "ledger"))
+      const { fake, cleanup } = await start(root, {
+        runnerLookup: () => ({ interpreter: "/opt/bun", script: "/opt/runner.ts" }),
+      }, { store: "ledger", gates: { "beads-gate-admission": false } })
+      const event = await fake.fire.tool("execute.before", shellCall("bd create --title test", "ses_child"))
+      expect((event.input as { command: string }).command).toContain(`--beads-store '${ledger}'`)
+      const other = scratch()
+      writeFileSync(join(other, "metadata.json"), "{}")
+      const explicit = await fake.fire.tool("execute.before", shellCall(`BEADS_DIR=${other} bd create --title test`, "ses_child"))
+      expect((explicit.input as { command: string }).command).toContain(`--beads-store '${other}'`)
+      await cleanup()
+    }
+  })
+
+  test("an invalid project store keeps refusing writes without any internal bd command", async () => {
+    let calls = 0
+    const { fake, cleanup } = await start(scratch(), { run: async () => { calls++; return { output: "null" } } }, { store: "missing" })
+    await expect(fake.fire.tool("execute.before", shellCall("bd create --title test"))).rejects.toThrow(/Invalid beads store option/)
+    await expect(fake.fire.shell("create.before", {
+      command: "bd list", cwd: "/x", timeout: 0, shell: "/bin/zsh", env: {},
+    })).rejects.toThrow(/Invalid beads store option/)
+    expect(calls).toBe(0)
+    await cleanup()
+  })
+
   test("pins BEADS_DIR and clears the shared-server switch in the child env", async () => {
     const { fake, cleanup } = await start(scratch(), { pinFor: () => "/repo/.beads" })
     const event = await fake.fire.shell("create.before", {

@@ -1899,6 +1899,28 @@ function claimResultOutput(result) {
 import { spawnSync } from "child_process";
 import { lstatSync, realpathSync, statSync } from "fs";
 import { dirname, isAbsolute as isAbsolute2, resolve as resolve3 } from "path";
+function configuredStore(options, projectRoot) {
+  if (!("store" in options))
+    return;
+  const value = options.store;
+  const message = "Invalid beads store option: expected a path to a directory containing metadata.json or embeddeddolt/; fix or remove options.store in the project OpenCode config";
+  if (typeof value !== "string" || value.trim() === "")
+    throw new Error(message);
+  try {
+    const store = realpathSync(resolve3(projectRoot, value));
+    if (!statSync(store).isDirectory())
+      throw new Error(message);
+    let metadata = false;
+    try {
+      metadata = statSync(resolve3(store, "metadata.json")).isFile();
+    } catch {}
+    if (!metadata && !isDir(resolve3(store, "embeddeddolt")))
+      throw new Error(message);
+    return store;
+  } catch (cause) {
+    throw new Error(`${message} (configured path: ${JSON.stringify(value)})`, { cause });
+  }
+}
 function repoIdentity(cwd) {
   if (cwd.includes("\x00"))
     return;
@@ -2201,7 +2223,7 @@ function embedded(store) {
   try {
     config = readFileSync2(join(store, "config.yaml"), "utf8");
   } catch {}
-  return metadata !== "" || config !== "";
+  return metadata !== "" || config !== "" || isDirectory(join(store, "embeddeddolt"));
 }
 function embeddedStoreFor(cwd, env = process.env) {
   const store = storeFor([], cwd, env);
@@ -5328,10 +5350,32 @@ async function bounded(pending, ms, fallback) {
 async function setupBeads(ctx, deps = {}) {
   const options = ctx.options;
   const directory = ctx.location.directory;
+  let store;
+  try {
+    store = configuredStore(options, ctx.location.project?.directory ?? directory);
+  } catch (error) {
+    const refuse = () => {
+      throw error;
+    };
+    const tool = await ctx.tool.hook("execute.before", (event) => {
+      if (isShellTool(event.tool) || event.tool === SUBAGENT_TOOL)
+        refuse();
+    });
+    const shell = await ctx.shell.hook("create.before", refuse);
+    const context = await ctx.session.hook("context", refuse);
+    return async () => {
+      await tool.dispose();
+      await shell.dispose();
+      await context.dispose();
+    };
+  }
   const on = (gate) => gateEnabled(options, gate);
   const admitter = new GateAdmitter(deps.run);
-  const pinFor = deps.pinFor ?? sessionPinFor;
-  const baseEnv = () => deps.env ?? process.env;
+  const pinFor = store === undefined ? deps.pinFor ?? sessionPinFor : () => store;
+  const baseEnv = () => {
+    const env = deps.env ?? process.env;
+    return store === undefined ? env : { ...env, ...EMBEDDED_PIN_ENV, BEADS_DIR: store };
+  };
   const pending = new Map;
   const chains = new Map;
   const pins = new Map;
@@ -5442,13 +5486,13 @@ async function setupBeads(ctx, deps = {}) {
   });
   const routing = await registerAgentRouting(ctx, { run: deps.run, env: baseEnv });
   const pin = await ctx.shell.hook("create.before", (event) => {
-    if (!on("beads-dir-pin"))
+    if (!on("beads-dir-pin") && store === undefined)
       return;
     const cwd = isAbsolute6(event.cwd) ? event.cwd : resolve10(directory, event.cwd);
-    const store = shellPin(cwd, event.env, cachedPinFor);
-    if (store === undefined)
+    const selected = store ?? shellPin(cwd, event.env, cachedPinFor);
+    if (selected === undefined)
       return;
-    Object.assign(event.env, EMBEDDED_PIN_ENV, { BEADS_DIR: store });
+    Object.assign(event.env, EMBEDDED_PIN_ENV, { BEADS_DIR: selected });
   });
   const after = await ctx.tool.hook("execute.after", async (event) => {
     if (event.tool === SUBAGENT_TOOL) {
