@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.1](https://github.com/srobroek/opencode-plugins/compare/safety--v0.6.0...safety--v0.6.1) (2026-11-13)
+
+
+### Bug Fixes
+
+* **safety:** reference-only fnox set for read-only providers, op vault list, and scratch folders without prompts ([9b83124](https://github.com/srobroek/opencode-plugins/commit/9b831248b7b1a73a7f5677bd67153ee3182c0d13))
+
 ## [0.6.0](https://github.com/srobroek/opencode-plugins/compare/safety--v0.5.0...safety--v0.6.0) (2026-11-12)
 
 

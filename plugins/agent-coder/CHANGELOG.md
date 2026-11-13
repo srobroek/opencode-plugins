@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/srobroek/opencode-plugins/compare/agent-coder--v0.7.0...agent-coder--v0.8.0) (2026-11-13)
+
+
+### Features
+
+* **agents:** a tools option that lets read-only and coding agents call allowed MCP tools ([70558c3](https://github.com/srobroek/opencode-plugins/commit/70558c30dc450faec7e6012cdb0f678f1ecd7f01))
+
 ## [0.7.0](https://github.com/srobroek/opencode-plugins/compare/agent-coder--v0.6.0...agent-coder--v0.7.0) (2026-11-12)
 
 
