@@ -68,6 +68,8 @@ export type SubagentInput = {
   background?: boolean
   /** An existing worktree (path or branch), or false to disable automatic isolation. */
   worktree?: string | false
+  /** The model the call resolved (`provider/model` or `provider/model#variant`), e.g. from a model tier. */
+  model?: string
 }
 
 export function readSubagentInput(input: unknown): SubagentInput | undefined {
@@ -84,7 +86,20 @@ export function readSubagentInput(input: unknown): SubagentInput | undefined {
   if (value[WORKTREE_PARAM] === false) read.worktree = false
   if (typeof value[WORKTREE_PARAM] === "string" && value[WORKTREE_PARAM].trim() !== "")
     read.worktree = value[WORKTREE_PARAM].trim()
+  if (typeof value.model === "string" && value.model.trim() !== "") read.model = value.model.trim()
   return read
+}
+
+/** The model a `provider/model[#variant]` string names; undefined for anything else (such as `@role`). */
+export function parseModel(text: string): { providerID: string; id: string; variant?: string } | undefined {
+  const slash = text.indexOf("/")
+  if (slash <= 0) return undefined
+  const rest = text.slice(slash + 1)
+  const hash = rest.lastIndexOf("#")
+  const id = hash < 0 ? rest : rest.slice(0, hash)
+  const variant = hash < 0 ? undefined : rest.slice(hash + 1)
+  if (id === "" || variant === "") return undefined
+  return { providerID: text.slice(0, slash), id, ...(variant === undefined ? {} : { variant }) }
 }
 
 /** The `subagent` input without `worktree`, which the built-in tool does not know. */

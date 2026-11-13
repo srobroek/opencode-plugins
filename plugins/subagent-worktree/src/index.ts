@@ -23,6 +23,7 @@ import {
   mergeArgs,
   type Options,
   parseLane,
+  parseModel,
   parseWorktrees,
   planStart,
   readOptions,
@@ -173,7 +174,7 @@ export function createLanes(
   }
 
   const createChild = async (event: { sessionID: string }, input: SubagentInput, agent: AgentInfo, parent: Session) => {
-    const model = agent.model ?? parent.model
+    const model = (input.model === undefined ? undefined : parseModel(input.model)) ?? agent.model ?? parent.model
     const created = await ctx.session.create({
       parentID: event.sessionID,
       title: input.description,

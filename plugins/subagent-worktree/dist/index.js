@@ -246,7 +246,21 @@ function readSubagentInput(input) {
     read.worktree = false;
   if (typeof value[WORKTREE_PARAM] === "string" && value[WORKTREE_PARAM].trim() !== "")
     read.worktree = value[WORKTREE_PARAM].trim();
+  if (typeof value.model === "string" && value.model.trim() !== "")
+    read.model = value.model.trim();
   return read;
+}
+function parseModel(text) {
+  const slash = text.indexOf("/");
+  if (slash <= 0)
+    return;
+  const rest = text.slice(slash + 1);
+  const hash = rest.lastIndexOf("#");
+  const id = hash < 0 ? rest : rest.slice(0, hash);
+  const variant = hash < 0 ? undefined : rest.slice(hash + 1);
+  if (id === "" || variant === "")
+    return;
+  return { providerID: text.slice(0, slash), id, ...variant === undefined ? {} : { variant } };
 }
 function withoutWorktree(input) {
   if (input === null || typeof input !== "object" || Array.isArray(input) || !Object.hasOwn(input, WORKTREE_PARAM))
@@ -690,7 +704,7 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
     }
   };
   const createChild = async (event, input, agent, parent) => {
-    const model = agent.model ?? parent.model;
+    const model = (input.model === undefined ? undefined : parseModel(input.model)) ?? agent.model ?? parent.model;
     const created = await ctx.session.create({
       parentID: event.sessionID,
       title: input.description,
@@ -1112,6 +1126,7 @@ export {
   orphanReasons,
   overlap,
   parseLane,
+  parseModel,
   parseWorktrees,
   planStart,
   readOptions,
