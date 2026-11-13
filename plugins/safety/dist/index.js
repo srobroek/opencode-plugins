@@ -3005,7 +3005,11 @@ var SET_VALUED = new Set([
   "--generate-type",
   "--if-missing",
   "--length",
-  "--source"
+  "--source",
+  "-c",
+  "--config",
+  "-P",
+  "--profile"
 ]);
 var VALUE_STORE_TYPES = new Set([
   "age",
@@ -3154,13 +3158,25 @@ function uncertainWrite(command) {
 function touchesConfigFile(command) {
   return FILE_COMMANDS.has(base(command.argv[0])) && command.argv.slice(1).some((word) => CONFIG_FILE.test(base(word)) || /(?:^|\/)\.config\/fnox(?:\/|$)/.test(word));
 }
+function explicitConfigTargets(commands) {
+  return commands.filter(setsWithValueSource).flatMap((command) => {
+    const path = explicitConfig(command);
+    return typeof path === "string" ? [path] : [];
+  });
+}
+function sameFile(written, target) {
+  const clean = target.replace(/^\.\//, "");
+  return written === clean || written.endsWith(`/${clean}`);
+}
 function fnoxConfigPath(path, home = homedir3()) {
   return CONFIG_FILE.test(base(path)) || path === join3(home, ".config", "fnox") || path.startsWith(join3(home, ".config", "fnox") + "/");
 }
 function configWriteBesideSet(commands, writes) {
   if (!commands.some(setsWithValueSource))
     return false;
-  return writes.some((path) => fnoxConfigPath(path)) || commands.some(touchesConfigFile) || commands.some(changesFnoxConfig) || commands.some(uncertainWrite);
+  const explicit = explicitConfigTargets(commands);
+  const names = (command) => FILE_COMMANDS.has(base(command.argv[0])) && command.argv.slice(1).some((word) => explicit.some((target) => sameFile(word, target)));
+  return writes.some((path) => fnoxConfigPath(path) || explicit.some((target) => sameFile(path, target))) || commands.some(touchesConfigFile) || commands.some(names) || commands.some(changesFnoxConfig) || commands.some(uncertainWrite);
 }
 function opaqueRedirects(command) {
   return command.redirects.length > command.hereDocuments.length;

@@ -260,6 +260,10 @@ const SET_VALUED: ReadonlySet<string> = new Set([
   "--if-missing",
   "--length",
   "--source",
+  "-c",
+  "--config",
+  "-P",
+  "--profile",
 ])
 
 /**
@@ -461,6 +465,20 @@ function touchesConfigFile(command: Command): boolean {
   )
 }
 
+/** The explicit `-c`/`--config` files that value-sourced `fnox set` commands in the list name. */
+function explicitConfigTargets(commands: readonly Command[]): string[] {
+  return commands.filter(setsWithValueSource).flatMap((command) => {
+    const path = explicitConfig(command)
+    return typeof path === "string" ? [path] : []
+  })
+}
+
+/** Whether a written absolute path is the explicit config `target`, named absolute or relative to the call's directory. */
+function sameFile(written: string, target: string): boolean {
+  const clean = target.replace(/^\.\//, "")
+  return written === clean || written.endsWith(`/${clean}`)
+}
+
 /** Whether `path` is an fnox config file: `fnox*.toml`, `.fnox*.toml`, or anything in `~/.config/fnox`. */
 export function fnoxConfigPath(path: string, home: string = homedir()): boolean {
   return CONFIG_FILE.test(base(path)) || path === join(home, ".config", "fnox") || path.startsWith(join(home, ".config", "fnox") + "/")
@@ -473,7 +491,14 @@ export function fnoxConfigPath(path: string, home: string = homedir()): boolean 
  */
 export function configWriteBesideSet(commands: readonly Command[], writes: readonly string[]): boolean {
   if (!commands.some(setsWithValueSource)) return false
-  return writes.some((path) => fnoxConfigPath(path)) || commands.some(touchesConfigFile) || commands.some(changesFnoxConfig) || commands.some(uncertainWrite)
+  const explicit = explicitConfigTargets(commands)
+  const names = (command: Command) => FILE_COMMANDS.has(base(command.argv[0])) && command.argv.slice(1).some((word) => explicit.some((target) => sameFile(word, target)))
+  return (
+    writes.some((path) => fnoxConfigPath(path) || explicit.some((target) => sameFile(path, target))) ||
+    commands.some(touchesConfigFile) ||
+    commands.some(names) ||
+    commands.some(changesFnoxConfig)
+  ) || commands.some(uncertainWrite)
 }
 
 /** Whether a command has redirects other than its here-documents (whose bodies the walk reads): a file or here-string. */

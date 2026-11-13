@@ -23,7 +23,8 @@ const TYPES: Record<string, string> = {
   proj: "1password",
 }
 /** An explicit config path resolves nowhere here, as when the file is missing. */
-const types = (name: string, config?: string) => (config === undefined ? TYPES[name] : undefined)
+const types = (name: string, config?: string) =>
+  config === undefined ? TYPES[name] : config === "custom.toml" ? TYPES[name] : undefined
 const gate = (command: string, options: GuardOptions = {}) => hardGate(command, "/", { providerTypes: types, ...options })
 
 const REFUSED_OP = [
@@ -142,6 +143,12 @@ const REFUSED_INDIRECT = [
 ]
 
 const REFUSED_CONFIG = [
+  "cp template.toml custom.toml && openssl rand -hex 8 | fnox set NAME -c custom.toml --provider age",
+  "openssl rand -hex 8 | fnox set NAME --config custom.toml --provider age; mv t.toml custom.toml",
+  "ln -sf t.toml custom.toml; fnox -c custom.toml set NAME --generate --provider age",
+  "rm custom.toml; cmd | fnox -c custom.toml set NAME --provider age",
+  "echo x > custom.toml; cmd | fnox -c custom.toml set NAME --provider age",
+  "fnox exec -- sh -c 'cp template.toml custom.toml && openssl rand -hex 8 | fnox set NAME -c custom.toml --provider age'",
   "echo x > fnox.toml; cmd | fnox set NAME --provider host",
   "cmd | fnox set NAME --provider host && mv /tmp/x .fnox.local.toml",
   "cmd | fnox set NAME --provider host; cp a ~/.config/fnox/config.toml",
@@ -391,6 +398,8 @@ const PASSED = [
   "fnox exec -- sh -c 'cmd | fnox set NAME --provider host'",
   "fnox exec -- sh -c 'echo ok > out.txt; fnox set NAME item/f --provider op'",
   "fnox -c fnox.local.toml set NAME --provider host",
+  "openssl rand -hex 8 | fnox set NAME -c custom.toml --provider age",
+  "cp template.toml other.toml && openssl rand -hex 8 | fnox set NAME -c custom.toml --provider age",
   "fnox -c fnox.local.toml set NAME --generate --provider keychain",
   "cmd | fnox -c fnox.local.toml set NAME --provider host",
   "fnox set NAME --generate --provider host",
