@@ -34,9 +34,12 @@ export const EXPLORE_PERMISSIONS: ReadonlyArray<Rule> = [
 
 type ExploreDraft = { system?: string; permissions: Rule[]; steps?: number }
 
-/** Narrow the built-in explore agent to search and web tools with the scout prompt. Model and tier are untouched. */
-export function shapeExplore(draft: ExploreDraft): void {
+/**
+ * Narrow the built-in explore agent to search and web tools with the scout prompt. Model and tier
+ * are untouched. `tools` (MCP allow rules) go last, so they win over the leading `* deny`.
+ */
+export function shapeExplore(draft: ExploreDraft, tools: ReadonlyArray<Rule> = []): void {
   draft.system = EXPLORE_PROMPT
   draft.steps = 60
-  draft.permissions.push(...EXPLORE_PERMISSIONS.map((rule) => ({ ...rule })))
+  draft.permissions.push(...[...EXPLORE_PERMISSIONS, ...tools].map((rule) => ({ ...rule })))
 }

@@ -1,6 +1,7 @@
 import { realpathSync } from "node:fs"
 import { homedir } from "node:os"
 import { Plugin } from "@opencode/plugin"
+import { toolRulesFromOption } from "@srobroek/opencode-lib/agent-tools"
 import { SHELL_ALIASES, SHELL_TOOL, shellAliasInput } from "@srobroek/opencode-lib/tool-targets"
 import { EXPLORE_ID, shapeExplore } from "./explore.ts"
 import { parseLargeReadOptions, setupLargeRead } from "./large-read.ts"
@@ -73,9 +74,10 @@ export default Plugin.define({
     if (options.scratchReminder !== false) disposers.push(await setupScratch(ctx))
 
     if (options.explore !== false) {
+      const tools = toolRulesFromOption(options.tools)
       const agents = await ctx.agent.transform((editor) => {
         if (editor.get(EXPLORE_ID) === undefined) return
-        editor.update(EXPLORE_ID, (draft) => shapeExplore(draft as never))
+        editor.update(EXPLORE_ID, (draft) => shapeExplore(draft as never, tools))
       })
       disposers.push(() => agents.dispose())
     }

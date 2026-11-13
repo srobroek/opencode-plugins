@@ -13,18 +13,25 @@ import { fileURLToPath } from "node:url"
 import { Plugin } from "@opencode/plugin"
 import { registerOwnedAgents } from "@srobroek/opencode-lib/agent-fallback"
 import { agentPaths } from "@srobroek/opencode-lib/agent-files"
+import { toolRulesFromOption } from "@srobroek/opencode-lib/agent-tools"
 import { registerSkills, skillPaths } from "@srobroek/opencode-lib/skill-files"
 
 export const AGENTS_DIR = fileURLToPath(new URL("../agents", import.meta.url))
 export const SKILLS_DIR = fileURLToPath(new URL("../skills", import.meta.url))
 export const REVIEWERS = ["adversarial-challenger", "code-reviewer", "pr-reviewer", "security-reviewer"] as const
 
+/** Reviewers that gain the `tools` option's MCP rules. `pr-reviewer` is left out: it may only run two `gh` reads. */
+export const TOOL_REVIEWERS = ["adversarial-challenger", "code-reviewer", "security-reviewer"] as const
+
 export default Plugin.define({
   id: "srobroek.agent-reviewer",
   async setup(ctx) {
     const skills = await registerSkills(ctx.skill, skillPaths(SKILLS_DIR))
     try {
-      const agents = await registerOwnedAgents(ctx.agent, agentPaths(AGENTS_DIR))
+      const agents = await registerOwnedAgents(ctx.agent, agentPaths(AGENTS_DIR), {
+        agents: TOOL_REVIEWERS,
+        rules: toolRulesFromOption((ctx.options as Record<string, unknown> | undefined)?.tools),
+      })
       return async () => {
         await agents.dispose()
         await skills.dispose()
