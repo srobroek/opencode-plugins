@@ -1919,7 +1919,7 @@ function embedded(store) {
   try {
     config = readFileSync4(join6(store, "config.yaml"), "utf8");
   } catch {}
-  return metadata !== "" || config !== "";
+  return metadata !== "" || config !== "" || isDirectory2(join6(store, "embeddeddolt"));
 }
 function embeddedStoreFor(cwd, env = process.env) {
   const store = storeFor([], cwd, env);

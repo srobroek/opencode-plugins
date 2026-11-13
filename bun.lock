@@ -135,7 +135,7 @@
     },
     "plugins/beads": {
       "name": "@srobroek/opencode-beads",
-      "version": "0.4.1",
+      "version": "0.5.1",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
       },
@@ -486,7 +486,7 @@
     },
     "plugins/speckit": {
       "name": "@srobroek/opencode-speckit",
-      "version": "0.6.0",
+      "version": "0.7.0",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
       },
