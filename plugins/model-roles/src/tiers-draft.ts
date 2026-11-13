@@ -49,29 +49,36 @@ export function createDraft(row: TierRow, isNew = false): TierDraft {
 
 const withModels = (draft: TierDraft, models: string[]): TierDraft => ({ ...draft, models })
 
-/** Select a model at the end of the order, or drop it. */
-export function toggle(draft: TierDraft, ref: string): TierDraft {
-  const has = draft.models.some((e) => entryRef(e) === ref)
-  return withModels(draft, has ? draft.models.filter((e) => entryRef(e) !== ref) : [...draft.models, ref])
+/** The entry that names `entry`'s model with `variant` (none: inherit the tier effort). */
+export const withVariant = (entry: string, variant: string | undefined): string => (variant === undefined ? entryRef(entry) : `${entryRef(entry)}#${variant}`)
+
+/**
+ * Select a model (a bare `provider/model`) at the end of the order, or drop the entry
+ * given. Entries are identified by their whole text, so two rows of one model with
+ * different variants stay apart.
+ */
+export function toggle(draft: TierDraft, entry: string): TierDraft {
+  return withModels(draft, draft.models.includes(entry) ? draft.models.filter((e) => e !== entry) : [...draft.models, entry])
 }
 
-/** Move a selected model one place in the fallback order; the ends stay put. */
-export function move(draft: TierDraft, ref: string, direction: Direction): TierDraft {
-  const from = draft.models.findIndex((e) => entryRef(e) === ref)
+/** Move an entry one place in the fallback order; the ends stay put. */
+export function move(draft: TierDraft, entry: string, direction: Direction): TierDraft {
+  const from = draft.models.indexOf(entry)
   const to = direction === "up" ? from - 1 : from + 1
   if (from < 0 || to < 0 || to >= draft.models.length) return draft
   const models = [...draft.models]
-  const [entry] = models.splice(from, 1)
-  models.splice(to, 0, entry as string)
+  models.splice(from, 1)
+  models.splice(to, 0, entry)
   return withModels(draft, models)
 }
 
-/** Pin a selected model to a variant, or `undefined` to let it inherit the tier effort. */
-export function setVariant(draft: TierDraft, ref: string, variant: string | undefined): TierDraft {
-  return withModels(
-    draft,
-    draft.models.map((e) => (entryRef(e) === ref ? (variant === undefined ? ref : `${ref}#${variant}`) : e)),
-  )
+/** Pin one entry to a variant, or `undefined` to let it inherit the tier effort. */
+export function setVariant(draft: TierDraft, entry: string, variant: string | undefined): TierDraft {
+  const index = draft.models.indexOf(entry)
+  if (index < 0) return draft
+  const models = [...draft.models]
+  models[index] = withVariant(entry, variant)
+  return withModels(draft, models)
 }
 
 export function setEffort(draft: TierDraft, effort: string | undefined): TierDraft {
@@ -89,16 +96,14 @@ export function reset(draft: TierDraft): TierDraft {
   return { ...rest, models: [], purpose: draft.initial.purpose, reset: true }
 }
 
+const sameConfig = (a: TierConfig | undefined, b: TierConfig | undefined): boolean => {
+  const key = (c: TierConfig | undefined) => JSON.stringify(Object.entries(c ?? {}).sort(([x], [y]) => x.localeCompare(y)))
+  return key(a) === key(b)
+}
+
+/** Whether saving would change the tier: the draft's resulting config against the untouched draft's. */
 export function dirty(draft: TierDraft): boolean {
-  if (draft.isNew) return true
-  if (draft.reset) return draft.row.configured !== undefined
-  const { models, initial } = draft
-  return (
-    models.length !== initial.models.length ||
-    models.some((e, i) => e !== initial.models[i]) ||
-    draft.effort !== initial.effort ||
-    draft.purpose !== initial.purpose
-  )
+  return draft.isNew || !sameConfig(toConfig(draft), toConfig(createDraft(draft.row)))
 }
 
 /** The config to save (`undefined`: remove the entry). Goes through `applyEdit`; variants stay. */
@@ -114,7 +119,10 @@ export function toConfig(draft: TierDraft): TierConfig | undefined {
     const { configured: _old, ...rest } = row
     config = applyEdit(config === undefined ? rest : { ...rest, configured: config }, edit)
   }
-  step({ kind: "models", models: draft.models })
+  // An absent model setting stays absent (a legacy roles-backed tier keeps its candidates) until Models or Reset changes it.
+  const { models, initial } = draft
+  const touched = draft.isNew || draft.reset || models.length !== initial.models.length || models.some((e, i) => e !== initial.models[i])
+  if (touched) step({ kind: "models", models })
   step({ kind: "effort", effort: draft.effort })
   const purpose = draft.purpose.trim()
   if (purpose !== "" && purpose !== draft.initial.purpose) step({ kind: "purpose", purpose })
@@ -129,11 +137,15 @@ export type TierMenuValue = "models" | "effort" | "purpose" | "preview" | "reset
 const modelsSummary = (draft: TierDraft): string =>
   draft.models.length === 0 ? `auto: ${draft.row.candidates.join(", ") || "none"}` : draft.models.join(", ")
 
+/** An unset effort: the tier's own, with its level when the state knows it and the draft did not clear a saved one. */
+const tierEffortText = (draft: TierDraft): string =>
+  draft.row.effort !== undefined && draft.initial.effort === undefined ? `Tier default (${draft.row.effort})` : "Tier default"
+
 /** The tier menu: Models, Effort, Purpose, Preview, Reset, Save, Cancel. */
 export function tierMenuOptions(draft: TierDraft, preview: string | undefined): DialogSelectOption<TierMenuValue>[] {
   return [
     { title: "Models", value: "models", description: modelsSummary(draft) },
-    { title: "Effort", value: "effort", description: draft.effort ?? "model default" },
+    { title: "Effort", value: "effort", description: draft.effort ?? tierEffortText(draft) },
     { title: "Purpose", value: "purpose", description: draft.purpose },
     { title: `Preview: ${preview ?? "…"}`, value: "preview", description: "What this tier resolves to with the draft" },
     { title: "Reset to auto", value: "reset", description: draft.row.builtin ? "Remove this tier's settings" : "Keep only the purpose" },
@@ -159,7 +171,7 @@ export function modelOptions(draft: TierDraft, available: ReadonlyArray<PickMode
     const mark = MARK[health.get(entry) ?? ""]
     return {
       title: `☑ ${i + 1}. ${entry}`,
-      value: ref,
+      value: entry,
       description: [variant === undefined ? "inherits tier effort" : `variant ${variant}`, mark].filter(Boolean).join(", "),
       ...(!listed.has(ref) && !entry.startsWith("@") ? { footer: "not listed now" } : {}),
     }

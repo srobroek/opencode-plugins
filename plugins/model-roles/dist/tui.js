@@ -949,22 +949,27 @@ function createDraft(row, isNew = false) {
   };
 }
 var withModels = (draft, models) => ({ ...draft, models });
-function toggle(draft, ref) {
-  const has = draft.models.some((e) => entryRef(e) === ref);
-  return withModels(draft, has ? draft.models.filter((e) => entryRef(e) !== ref) : [...draft.models, ref]);
+var withVariant = (entry, variant) => variant === undefined ? entryRef(entry) : `${entryRef(entry)}#${variant}`;
+function toggle(draft, entry) {
+  return withModels(draft, draft.models.includes(entry) ? draft.models.filter((e) => e !== entry) : [...draft.models, entry]);
 }
-function move(draft, ref, direction) {
-  const from = draft.models.findIndex((e) => entryRef(e) === ref);
+function move(draft, entry, direction) {
+  const from = draft.models.indexOf(entry);
   const to = direction === "up" ? from - 1 : from + 1;
   if (from < 0 || to < 0 || to >= draft.models.length)
     return draft;
   const models = [...draft.models];
-  const [entry] = models.splice(from, 1);
+  models.splice(from, 1);
   models.splice(to, 0, entry);
   return withModels(draft, models);
 }
-function setVariant(draft, ref, variant) {
-  return withModels(draft, draft.models.map((e) => entryRef(e) === ref ? variant === undefined ? ref : `${ref}#${variant}` : e));
+function setVariant(draft, entry, variant) {
+  const index = draft.models.indexOf(entry);
+  if (index < 0)
+    return draft;
+  const models = [...draft.models];
+  models[index] = withVariant(entry, variant);
+  return withModels(draft, models);
 }
 function setEffort(draft, effort) {
   const { effort: _drop, ...rest } = draft;
@@ -977,13 +982,12 @@ function reset(draft) {
   const { effort: _drop, ...rest } = draft;
   return { ...rest, models: [], purpose: draft.initial.purpose, reset: true };
 }
+var sameConfig = (a, b) => {
+  const key = (c) => JSON.stringify(Object.entries(c ?? {}).sort(([x], [y]) => x.localeCompare(y)));
+  return key(a) === key(b);
+};
 function dirty(draft) {
-  if (draft.isNew)
-    return true;
-  if (draft.reset)
-    return draft.row.configured !== undefined;
-  const { models, initial } = draft;
-  return models.length !== initial.models.length || models.some((e, i) => e !== initial.models[i]) || draft.effort !== initial.effort || draft.purpose !== initial.purpose;
+  return draft.isNew || !sameConfig(toConfig(draft), toConfig(createDraft(draft.row)));
 }
 function toConfig(draft) {
   const { row } = draft;
@@ -993,7 +997,10 @@ function toConfig(draft) {
     const { configured: _old, ...rest } = row;
     config = applyEdit(config === undefined ? rest : { ...rest, configured: config }, edit);
   };
-  step({ kind: "models", models: draft.models });
+  const { models, initial } = draft;
+  const touched = draft.isNew || draft.reset || models.length !== initial.models.length || models.some((e, i) => e !== initial.models[i]);
+  if (touched)
+    step({ kind: "models", models });
   step({ kind: "effort", effort: draft.effort });
   const purpose = draft.purpose.trim();
   if (purpose !== "" && purpose !== draft.initial.purpose)
@@ -1002,10 +1009,11 @@ function toConfig(draft) {
 }
 var toPreviewDraft = (draft) => ({ [draft.row.name]: toConfig(draft) ?? null });
 var modelsSummary = (draft) => draft.models.length === 0 ? `auto: ${draft.row.candidates.join(", ") || "none"}` : draft.models.join(", ");
+var tierEffortText = (draft) => draft.row.effort !== undefined && draft.initial.effort === undefined ? `Tier default (${draft.row.effort})` : "Tier default";
 function tierMenuOptions(draft, preview) {
   return [
     { title: "Models", value: "models", description: modelsSummary(draft) },
-    { title: "Effort", value: "effort", description: draft.effort ?? "model default" },
+    { title: "Effort", value: "effort", description: draft.effort ?? tierEffortText(draft) },
     { title: "Purpose", value: "purpose", description: draft.purpose },
     { title: `Preview: ${preview ?? "\u2026"}`, value: "preview", description: "What this tier resolves to with the draft" },
     { title: "Reset to auto", value: "reset", description: draft.row.builtin ? "Remove this tier's settings" : "Keep only the purpose" },
@@ -1028,7 +1036,7 @@ function modelOptions(draft, available) {
     const mark = MARK[health.get(entry) ?? ""];
     return {
       title: `\u2611 ${i + 1}. ${entry}`,
-      value: ref,
+      value: entry,
       description: [variant === undefined ? "inherits tier effort" : `variant ${variant}`, mark].filter(Boolean).join(", "),
       ...!listed.has(ref) && !entry.startsWith("@") ? { footer: "not listed now" } : {}
     };
@@ -1112,18 +1120,23 @@ var tui_default = Plugin.define({
         return draft;
       return setEffort(draft, value === DEFAULT ? undefined : value);
     };
-    const pickVariant = async (draft, state, ref) => {
-      const entry = draft.models.find((e) => entryRef(e) === ref);
-      if (entry === undefined)
-        return draft;
+    const pickVariant = async (draft, state, entry) => {
+      const ref = entryRef(entry);
       const value = await dialog.select({
         title: `${ref}: variant`,
         options: variantOptions(state.models.find((m) => m.ref === ref)),
         current: entryVariant(entry) ?? INHERIT
       });
       if (value === undefined)
-        return draft;
-      return setVariant(draft, ref, value === INHERIT ? undefined : value);
+        return {
+          draft,
+          entry
+        };
+      const variant = value === INHERIT ? undefined : value;
+      return {
+        draft: setVariant(draft, entry, variant),
+        entry: withVariant(entry, variant)
+      };
     };
     const editModels = async (start, state) => {
       let draft = start;
@@ -1171,11 +1184,16 @@ var tui_default = Plugin.define({
               save: true
             };
           current = asked.ref;
-          if (!draft.models.some((e) => entryRef(e) === asked.ref)) {
+          if (!draft.models.includes(asked.ref)) {
             toast("Select the model first (Enter).");
             continue;
           }
-          draft = asked.kind === "variant" ? await pickVariant(draft, state, asked.ref) : move(draft, asked.ref, asked.kind);
+          if (asked.kind === "variant") {
+            const picked = await pickVariant(draft, state, asked.ref);
+            draft = picked.draft;
+            current = picked.entry;
+          } else
+            draft = move(draft, asked.ref, asked.kind);
           continue;
         }
         if (value === undefined)
