@@ -90,6 +90,7 @@ async function start(
       { id: "coder", name: "coder", mode: "subagent" },
       { id: "general", name: "general", mode: "subagent" },
       { id: "explore", name: "explore", mode: "subagent" },
+      { id: "pinned", name: "pinned", mode: "subagent", model: { id: "y", providerID: "prov" } },
       { id: "build", name: "build", mode: "primary" },
       {
         id: "reviewer",
@@ -268,6 +269,18 @@ describe("execute.before", () => {
     expect(input.prompt.startsWith(SUBAGENT_PREAMBLE)).toBe(true)
     expect(input.prompt).toContain("/wt/subagent-write-hello-abc123")
     expect(input.prompt.endsWith("Write hello.txt")).toBe(true)
+  })
+
+  test.each([
+    ["the spawn's model and variant", "pinned", { model: "prov/x#high" }, { providerID: "prov", id: "x", variant: "high" }],
+    ["the spawn's model without a variant", "pinned", { model: "prov/x" }, { providerID: "prov", id: "x" }],
+    ["the agent's model when the spawn names none", "pinned", {}, { id: "y", providerID: "prov" }],
+    ["the parent's model when neither names one", "general", {}, { id: "m", providerID: "p" }],
+  ])("starts the child on %s", async (_name, agent, extra, expected) => {
+    const setup = await start({ opts: { agents: ["pinned", "general"] } })
+    await spawn(setup, { agent, description: "Write hello", prompt: "Write hello.txt", ...extra })
+    const create = setup.fake.calls.find((entry) => entry.method === "session.create")
+    expect((create?.input as { model?: unknown } | undefined)?.model).toEqual(expected)
   })
 
   test("runs in place and notes it when the repository has no commit yet", async () => {
