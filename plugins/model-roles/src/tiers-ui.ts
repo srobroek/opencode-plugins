@@ -211,17 +211,6 @@ export function configuredModels(row: TierRow): string[] {
   return Array.isArray(model) ? [...model] : []
 }
 
-/** The models still to offer when picking in order: everything not picked yet. */
-export function remainingModels(models: ReadonlyArray<PickModel>, picked: ReadonlyArray<string>): PickModel[] {
-  const taken = new Set(
-    picked.map((entry) => {
-      const candidate = parseCandidate(entry)
-      return candidate?.kind === "model" ? `${candidate.ref.providerID}/${candidate.ref.id}` : entry
-    }),
-  )
-  return models.filter((m) => !taken.has(m.ref))
-}
-
 /** `config` without empty fields; `undefined` when nothing is left (the tier is fully auto). */
 export function compact(config: TierConfig): TierConfig | undefined {
   const next: TierConfig = {}

@@ -5,7 +5,6 @@ import {
   compact,
   readDraft,
   readState,
-  remainingModels,
   type TierRow,
   tierNameError,
   tierState,
@@ -46,11 +45,6 @@ describe("tier edits", () => {
 })
 
 describe("pickers", () => {
-  test("remaining models skip the picked ones, variants or not", () => {
-    const models = [{ ref: "a/b", variants: [] }, { ref: "c/d", variants: ["high"] }]
-    expect(remainingModels(models, ["c/d#high"]).map((m) => m.ref)).toEqual(["a/b"])
-  })
-
   test("tier names", () => {
     expect(tierNameError("docs", ["cheap"])).toBeUndefined()
     expect(tierNameError("cheap", ["cheap"])).toContain("already exists")

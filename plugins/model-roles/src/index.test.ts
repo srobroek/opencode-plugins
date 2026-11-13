@@ -1561,6 +1561,85 @@ describe("tiers rpc", () => {
     )
   })
 
+  test("a reload waits for a spawn already running, which keeps the old tier in its model and receipt", async () => {
+    await withConfig(
+      async (host) => {
+        const haiku55 = "amazon-bedrock/global.anthropic.claude-haiku-5-5"
+        const original = host.context.agent.list
+        let release = () => {}
+        const held = new Promise<void>((resolve) => {
+          release = resolve
+        })
+        let holdNext = true
+        host.context.agent.list = async () => {
+          if (holdNext) {
+            holdNext = false
+            await held
+          }
+          return original()
+        }
+        let model: unknown = "pending"
+        const spawning = host.spawn("subagent", { agent: "plain", prompt: "x", tier: "cheap" }).then((input) => {
+          model = input.model
+        })
+        await settle()
+        let saved = false
+        const saving = Promise.resolve(host.rpc("set", { tier: "cheap", value: { model: [sonnet55] } })).then(() => {
+          saved = true
+        })
+        await settle()
+        // The reload is queued behind the running spawn: nothing has moved.
+        expect(saved).toBe(false)
+        expect(host.agents().get("worker")?.model).toEqual({ providerID: "amazon-bedrock", id: "global.anthropic.claude-haiku-5-5", variant: "low" })
+        release()
+        await spawning
+        await saving
+        expect(model).toBe(`${haiku55}#low`)
+        expect((host.storage.get("receipts") as Array<{ model: string }>)[0]?.model).toBe(`${haiku55}#low`)
+        expect(host.agents().get("worker")?.model).toEqual({ providerID: "amazon-bedrock", id: "global.anthropic.claude-sonnet-5-5", variant: "low" })
+        expect((await host.spawn("subagent", { agent: "plain", prompt: "x", tier: "cheap" }, "build", "s1", "c2")).model).toBe(`${sonnet55}#low`)
+      },
+      [{ id: "worker", request: header("cheap") }],
+    )
+  })
+
+  test("a reload whose tool refresh fails after the agents moved puts agents, spawns and the tool back", async () => {
+    await withConfig(
+      async (host) => {
+        const haiku55 = "amazon-bedrock/global.anthropic.claude-haiku-5-5"
+        const toolBefore = JSON.stringify(host.subagent())
+        const original = host.context.tool.transform
+        let fail = true
+        let movedWhenRefreshFailed: unknown
+        let beforeToolRestore: unknown
+        let toolRestores = 0
+        host.context.tool.transform = async (callback) => {
+          if (fail) {
+            fail = false
+            movedWhenRefreshFailed = host.agents().get("worker")?.model
+            throw new Error("tool refresh refused")
+          }
+          // The restore re-registers the tool right after it put the agents back. Event-driven checks
+          // cannot run yet (the reload holds the queue), so this view is the restore's own work.
+          if (++toolRestores === 1) beforeToolRestore = host.agents().get("worker")?.model
+          return original(callback)
+        }
+        await expect(host.rpc("set", { tier: "cheap", value: { model: [sonnet55] } })).rejects.toThrow(/not applied: tool refresh refused/)
+        // The agents had moved to the new tier when the refresh failed ...
+        expect(movedWhenRefreshFailed).toEqual({ providerID: "amazon-bedrock", id: "global.anthropic.claude-sonnet-5-5", variant: "low" })
+        // ... the restore itself put them back before it re-registered the tool, ...
+        expect(beforeToolRestore).toEqual({ providerID: "amazon-bedrock", id: "global.anthropic.claude-haiku-5-5", variant: "low" })
+        // ... and agents, spawns, their receipts and the tool are back.
+        expect(host.agents().get("worker")?.model).toEqual({ providerID: "amazon-bedrock", id: "global.anthropic.claude-haiku-5-5", variant: "low" })
+        expect((await host.spawn("subagent", { agent: "plain", prompt: "x", tier: "cheap" })).model).toBe(`${haiku55}#low`)
+        expect((host.storage.get("receipts") as Array<{ model: string }>)[0]?.model).toBe(`${haiku55}#low`)
+        expect(JSON.stringify(host.subagent())).toBe(toolBefore)
+        expect(host.activeTransforms()).toBe(1)
+      },
+      [{ id: "worker", request: header("cheap") }],
+    )
+  })
+
   test("a reload whose agent update fails restores the previous tiers", async () => {
     await withConfig(
       async (host) => {

@@ -886,13 +886,6 @@ function configuredModels(row) {
   const model = row.configured?.model;
   return Array.isArray(model) ? [...model] : [];
 }
-function remainingModels(models, picked) {
-  const taken = new Set(picked.map((entry) => {
-    const candidate = parseCandidate(entry);
-    return candidate?.kind === "model" ? `${candidate.ref.providerID}/${candidate.ref.id}` : entry;
-  }));
-  return models.filter((m) => !taken.has(m.ref));
-}
 function compact(config) {
   const next = {};
   if (config.model !== undefined)
@@ -935,10 +928,145 @@ function applyEdit(row, edit) {
   return compact(current);
 }
 
+// plugins/model-roles/src/tiers-draft.ts
+var entryRef = (entry) => entry.split("#")[0] ?? entry;
+var entryVariant = (entry) => {
+  const at = entry.indexOf("#");
+  return at < 0 ? undefined : entry.slice(at + 1);
+};
+function createDraft(row, isNew = false) {
+  const models = configuredModels(row);
+  const purpose = row.configured?.purpose ?? row.purpose;
+  const effort = row.configured?.effort;
+  return {
+    row,
+    models: [...models],
+    purpose,
+    reset: false,
+    isNew,
+    initial: { models: [...models], purpose, ...effort === undefined ? {} : { effort } },
+    ...effort === undefined ? {} : { effort }
+  };
+}
+var withModels = (draft, models) => ({ ...draft, models });
+var withVariant = (entry, variant) => variant === undefined ? entryRef(entry) : `${entryRef(entry)}#${variant}`;
+function toggle(draft, entry) {
+  return withModels(draft, draft.models.includes(entry) ? draft.models.filter((e) => e !== entry) : [...draft.models, entry]);
+}
+function move(draft, entry, direction) {
+  const from = draft.models.indexOf(entry);
+  const to = direction === "up" ? from - 1 : from + 1;
+  if (from < 0 || to < 0 || to >= draft.models.length)
+    return draft;
+  const models = [...draft.models];
+  models.splice(from, 1);
+  models.splice(to, 0, entry);
+  return withModels(draft, models);
+}
+function setVariant(draft, entry, variant) {
+  const index = draft.models.indexOf(entry);
+  if (index < 0)
+    return draft;
+  const models = [...draft.models];
+  models[index] = withVariant(entry, variant);
+  return withModels(draft, models);
+}
+function setEffort(draft, effort) {
+  const { effort: _drop, ...rest } = draft;
+  return effort === undefined ? rest : { ...rest, effort };
+}
+function setPurpose(draft, purpose) {
+  return { ...draft, purpose };
+}
+function reset(draft) {
+  const { effort: _drop, ...rest } = draft;
+  return { ...rest, models: [], purpose: draft.initial.purpose, reset: true };
+}
+var sameConfig = (a, b) => {
+  const key = (c) => JSON.stringify(Object.entries(c ?? {}).sort(([x], [y]) => x.localeCompare(y)));
+  return key(a) === key(b);
+};
+function dirty(draft) {
+  return draft.isNew || !sameConfig(toConfig(draft), toConfig(createDraft(draft.row)));
+}
+function toConfig(draft) {
+  const { row } = draft;
+  const start = draft.reset ? row.builtin ? undefined : { model: "auto", purpose: draft.initial.purpose } : row.configured;
+  let config = start;
+  const step = (edit) => {
+    const { configured: _old, ...rest } = row;
+    config = applyEdit(config === undefined ? rest : { ...rest, configured: config }, edit);
+  };
+  const { models, initial } = draft;
+  const touched = draft.isNew || draft.reset || models.length !== initial.models.length || models.some((e, i) => e !== initial.models[i]);
+  if (touched)
+    step({ kind: "models", models });
+  step({ kind: "effort", effort: draft.effort });
+  const purpose = draft.purpose.trim();
+  if (purpose !== "" && purpose !== draft.initial.purpose)
+    step({ kind: "purpose", purpose });
+  return config;
+}
+var toPreviewDraft = (draft) => ({ [draft.row.name]: toConfig(draft) ?? null });
+var modelsSummary = (draft) => draft.models.length === 0 ? `auto: ${draft.row.candidates.join(", ") || "none"}` : draft.models.join(", ");
+var tierEffortText = (draft) => draft.row.effort !== undefined && draft.initial.effort === undefined ? `Tier default (${draft.row.effort})` : "Tier default";
+function tierMenuOptions(draft, preview) {
+  return [
+    { title: "Models", value: "models", description: modelsSummary(draft) },
+    { title: "Effort", value: "effort", description: draft.effort ?? tierEffortText(draft) },
+    { title: "Purpose", value: "purpose", description: draft.purpose },
+    { title: `Preview: ${preview ?? "\u2026"}`, value: "preview", description: "What this tier resolves to with the draft" },
+    { title: "Reset to auto", value: "reset", description: draft.row.builtin ? "Remove this tier's settings" : "Keep only the purpose" },
+    { title: dirty(draft) ? "Save *" : "Save", value: "save", description: "Write the tier and apply it" },
+    { title: "Cancel", value: "cancel", description: dirty(draft) ? "Discard the changes" : "Back to the tier list" }
+  ];
+}
+var MARK = {
+  unhealthy: "unhealthy",
+  "unknown-id": "unknown model",
+  "unknown-variant": "unknown variant",
+  "provider-unavailable": "not available now"
+};
+function modelOptions(draft, available) {
+  const health = new Map((draft.row.health ?? []).map((h) => [h.entry, h.status]));
+  const listed = new Set(available.map((m) => m.ref));
+  const selected = draft.models.map((entry, i) => {
+    const ref = entryRef(entry);
+    const variant = entryVariant(entry);
+    const mark = MARK[health.get(entry) ?? ""];
+    return {
+      title: `\u2611 ${i + 1}. ${entry}`,
+      value: entry,
+      description: [variant === undefined ? "inherits tier effort" : `variant ${variant}`, mark].filter(Boolean).join(", "),
+      ...!listed.has(ref) && !entry.startsWith("@") ? { footer: "not listed now" } : {}
+    };
+  });
+  const chosen = new Set(draft.models.map(entryRef));
+  const rest = available.filter((m) => !chosen.has(m.ref)).map((m) => ({
+    title: `\u2610 ${m.ref}`,
+    value: m.ref,
+    ...m.variants.length > 0 ? { description: `variants: ${m.variants.join(", ")}` } : {}
+  }));
+  return [...selected, ...rest];
+}
+var INHERIT = "\x00inherit";
+function variantOptions(model) {
+  return [
+    { title: "Inherit tier effort (\u2192 nearest variant)", value: INHERIT },
+    ...(model?.variants ?? []).map((v) => ({ title: v, value: v }))
+  ];
+}
+function agentOptions(agents) {
+  return agents.map((a) => ({
+    title: a.id,
+    value: a.id,
+    description: `${a.tier} \u2192 ${a.pinned !== undefined ? `${a.pinned} (own model)` : a.resolved ?? "nothing available"}`
+  }));
+}
+
 // plugins/model-roles/src/tui.tsx
 var ADD = "\x00add";
-var DONE = "\x00done";
-var AUTO = "\x00auto";
+var AGENTS = "\x00agents";
 var DEFAULT = "\x00default";
 var tui_default = Plugin.define({
   id: "srobroek.model-roles",
@@ -954,9 +1082,11 @@ var tui_default = Plugin.define({
       message,
       variant
     });
-    const load = async (at) => {
+    const load = async (at, draft) => {
       try {
-        return readState(await rpc.state({}, {
+        return readState(await rpc.state(draft === undefined ? {} : {
+          draft
+        }, {
           location: at
         }));
       } catch (error) {
@@ -964,41 +1094,15 @@ var tui_default = Plugin.define({
         return;
       }
     };
-    const pickModels = async (row, models) => {
-      const picked = [];
-      for (;; ) {
-        const remaining = remainingModels(models, picked);
-        const value = await dialog.select({
-          title: picked.length === 0 ? `${row.name}: first model` : `${row.name}: model ${picked.length + 1} (fallback order)`,
-          placeholder: "Search models",
-          options: [...picked.length > 0 ? [{
-            title: `Done (${picked.join(", ")})`,
-            value: DONE
-          }] : [], {
-            title: "Auto: derive from the catalog",
-            value: AUTO,
-            description: "Drop the list"
-          }, ...remaining.map((m) => ({
-            title: m.ref,
-            value: m.ref,
-            ...m.variants.length > 0 ? {
-              description: m.variants.join(", ")
-            } : {},
-            category: m.ref.split("/")[0] ?? ""
-          }))]
-        });
-        if (value === undefined)
-          return;
-        if (value === DONE)
-          return picked;
-        if (value === AUTO)
-          return "auto";
-        picked.push(value);
-      }
+    const previewOf = async (at, draft) => {
+      if (!dirty(draft))
+        return draft.row.resolved ?? "nothing available";
+      const state = await load(at, toPreviewDraft(draft));
+      return state?.tiers.find((t) => t.name === draft.row.name)?.resolved ?? "nothing available";
     };
-    const pickEffort = async (row) => {
+    const pickEffort = async (draft) => {
       const value = await dialog.select({
-        title: `${row.name}: effort`,
+        title: `${draft.row.name}: effort`,
         options: [{
           title: "Tier default",
           value: DEFAULT,
@@ -1010,87 +1114,156 @@ var tui_default = Plugin.define({
             description: "The auto decider picks per spawn; else the tier's default effort"
           } : {}
         }))],
-        ...row.configured?.effort !== undefined ? {
-          current: row.configured.effort
-        } : {}
+        current: draft.effort ?? DEFAULT
       });
       if (value === undefined)
-        return;
+        return draft;
+      return setEffort(draft, value === DEFAULT ? undefined : value);
+    };
+    const pickVariant = async (draft, state, entry) => {
+      const ref = entryRef(entry);
+      const value = await dialog.select({
+        title: `${ref}: variant`,
+        options: variantOptions(state.models.find((m) => m.ref === ref)),
+        current: entryVariant(entry) ?? INHERIT
+      });
+      if (value === undefined)
+        return {
+          draft,
+          entry
+        };
+      const variant = value === INHERIT ? undefined : value;
       return {
-        effort: value === DEFAULT ? undefined : value
+        draft: setVariant(draft, entry, variant),
+        entry: withVariant(entry, variant)
       };
+    };
+    const editModels = async (start, state) => {
+      let draft = start;
+      let current;
+      for (;; ) {
+        let intent;
+        const act = (kind) => (ref) => {
+          intent = {
+            kind,
+            ref
+          };
+          dialog.clear();
+        };
+        const value = await dialog.select({
+          title: `${draft.row.name}: models (fallback order)`,
+          placeholder: `Enter toggles. ${draft.row.cost || "Search models"}`,
+          options: modelOptions(draft, state.models),
+          ...current === undefined ? {} : {
+            current
+          },
+          actions: [{
+            bind: "ctrl+e",
+            title: "variant",
+            onTrigger: act("variant")
+          }, {
+            bind: "alt+up",
+            title: "up",
+            onTrigger: act("up")
+          }, {
+            bind: "alt+down",
+            title: "down",
+            onTrigger: act("down")
+          }, {
+            bind: "ctrl+s",
+            title: "save",
+            selection: "none",
+            onTrigger: () => act("save")("")
+          }]
+        });
+        const asked = intent;
+        if (asked !== undefined) {
+          if (asked.kind === "save")
+            return {
+              draft,
+              save: true
+            };
+          current = asked.ref;
+          if (!draft.models.includes(asked.ref)) {
+            toast("Select the model first (Enter).");
+            continue;
+          }
+          if (asked.kind === "variant") {
+            const picked = await pickVariant(draft, state, asked.ref);
+            draft = picked.draft;
+            current = picked.entry;
+          } else
+            draft = move(draft, asked.ref, asked.kind);
+          continue;
+        }
+        if (value === undefined)
+          return {
+            draft,
+            save: false
+          };
+        draft = toggle(draft, value);
+        current = value;
+      }
     };
     const saved = (result, what) => {
       const warnings = Array.isArray(result.warnings) ? result.warnings.filter((w) => typeof w === "string") : [];
       toast(`${what} ${result.path ?? "the global config"}.${warnings.length > 0 ? ` ${warnings.join(" ")}` : ""}`, warnings.length > 0 ? "info" : "success");
     };
-    const save = async (at, row, edit) => {
-      const value = applyEdit(row, edit);
+    const save = async (at, draft) => {
+      const name = draft.row.name;
       try {
         const result = await rpc.set({
-          tier: row.name,
-          value: value ?? null
+          tier: name,
+          value: toConfig(draft) ?? null
         }, {
           location: at
         });
-        saved(result, `Tier ${row.name} saved and applied; written to`);
+        saved(result, `Tier ${name} ${draft.isNew ? "added" : "saved"} and applied; written to`);
+        return true;
       } catch (error) {
-        toast(`Tier ${row.name} not saved: ${error.message}`, "error");
+        toast(`Tier ${name} not saved: ${error.message}`, "error");
+        return false;
       }
     };
-    const editTier = async (at, state, row) => {
-      const action = await dialog.select({
-        title: `Tier ${row.name}`,
-        placeholder: tierSummary(row),
-        options: [{
-          title: "Models",
-          value: "models",
-          description: configuredModels(row).join(", ") || `auto: ${row.candidates.join(", ") || "none"}`
-        }, {
-          title: "Effort",
-          value: "effort",
-          description: row.effort ?? "model default"
-        }, {
-          title: "Purpose",
-          value: "purpose",
-          description: row.purpose
-        }, {
-          title: "Reset to auto",
-          value: "reset",
-          description: row.builtin ? "Remove this tier's settings" : "Keep only the purpose"
-        }]
-      });
-      if (action === undefined)
-        return;
-      if (action === "models") {
-        const models = await pickModels(row, state.models);
-        if (models !== undefined)
-          await save(at, row, {
-            kind: "models",
-            models
-          });
-      } else if (action === "effort") {
-        const effort = await pickEffort(row);
-        if (effort !== undefined)
-          await save(at, row, {
-            kind: "effort",
-            effort: effort.effort
-          });
-      } else if (action === "purpose") {
-        const purpose = await dialog.prompt({
-          title: `${row.name}: purpose`,
-          description: "When should the spawner pick this tier?",
-          value: row.purpose
+    const discard = async (draft) => !dirty(draft) || await dialog.confirm({
+      title: `Discard changes to ${draft.row.name}?`,
+      message: "The models, effort and purpose you changed are not saved.",
+      label: {
+        confirm: "Discard",
+        cancel: "Keep editing"
+      }
+    }) === true;
+    const editTier = async (at, state, start) => {
+      let draft = start;
+      for (;; ) {
+        const action = await dialog.select({
+          title: `Tier ${draft.row.name}`,
+          placeholder: tierSummary(draft.row),
+          options: tierMenuOptions(draft, await previewOf(at, draft))
         });
-        if (purpose !== undefined && purpose.trim() !== "")
-          await save(at, row, {
-            kind: "purpose",
-            purpose
+        if (action === undefined || action === "cancel") {
+          if (await discard(draft))
+            return;
+        } else if (action === "models") {
+          const edited = await editModels(draft, state);
+          draft = edited.draft;
+          if (edited.save && await save(at, draft))
+            return;
+        } else if (action === "effort")
+          draft = await pickEffort(draft);
+        else if (action === "purpose") {
+          const purpose = await dialog.prompt({
+            title: `${draft.row.name}: purpose`,
+            description: "When should the spawner pick this tier?",
+            value: draft.purpose
           });
-      } else
-        await save(at, row, {
-          kind: "reset"
-        });
+          if (purpose !== undefined && purpose.trim() !== "")
+            draft = setPurpose(draft, purpose);
+        } else if (action === "reset")
+          draft = reset(draft);
+        else if (action === "save" && await save(at, draft))
+          return;
+      }
     };
     const addTier = async (at, state) => {
       const existing = state.tiers.map((t) => t.name);
@@ -1121,68 +1294,71 @@ var tui_default = Plugin.define({
         purpose,
         distinctVendor: false,
         cost: "",
-        candidates: []
-      };
-      const models = await pickModels(row, state.models);
-      if (models === undefined)
-        return;
-      const effort = await pickEffort(row);
-      const value = applyEdit({
-        ...row,
+        candidates: [],
         configured: {
-          purpose,
-          ...effort?.effort === undefined ? {} : {
-            effort: effort.effort
-          }
+          purpose
         }
-      }, {
-        kind: "models",
-        models
+      };
+      await editTier(at, state, createDraft(row, true));
+    };
+    const showAgents = async (state) => {
+      await dialog.select({
+        title: "Agents (read-only)",
+        placeholder: "Agent \u2192 tier \u2192 model it resolves to",
+        options: state.agents.length === 0 ? [{
+          title: "No tiered agents",
+          value: "",
+          disabled: true
+        }] : agentOptions(state.agents)
       });
-      try {
-        const result = await rpc.set({
-          tier: name,
-          value: value ?? null
-        }, {
-          location: at
-        });
-        saved(result, `Tier ${name} added and applied; written to`);
-      } catch (error) {
-        toast(`Tier ${name} not saved: ${error.message}`, "error");
-      }
     };
     const open = async () => {
       const at = location();
-      const state = await load(at);
-      if (state === undefined)
-        return;
-      if (state.error !== undefined) {
-        await dialog.alert({
-          title: "Tiers",
-          message: state.error
+      let current;
+      for (;; ) {
+        const state = await load(at);
+        if (state === undefined)
+          return;
+        if (state.error !== undefined) {
+          await dialog.alert({
+            title: "Tiers",
+            message: state.error
+          });
+          return;
+        }
+        const choice = await dialog.select({
+          title: "Model tiers",
+          placeholder: state.config === undefined ? "Pick a tier" : `Saved to ${state.config}`,
+          options: [...state.tiers.map((row) => ({
+            title: row.name,
+            value: row.name,
+            description: `${tierSummary(row)}${row.purposeMissing ? " (no purpose)" : ""}`,
+            footer: row.cost
+          })), {
+            title: "Agents\u2026",
+            value: AGENTS,
+            description: "Which tier each agent uses, and what it resolves to"
+          }, {
+            title: "Add a tier\u2026",
+            value: ADD
+          }],
+          ...current === undefined ? {} : {
+            current
+          }
         });
-        return;
+        if (choice === undefined)
+          return;
+        current = choice;
+        if (choice === ADD)
+          await addTier(at, state);
+        else if (choice === AGENTS)
+          await showAgents(state);
+        else {
+          const row = state.tiers.find((t) => t.name === choice);
+          if (row !== undefined)
+            await editTier(at, state, createDraft(row));
+        }
       }
-      const choice = await dialog.select({
-        title: "Model tiers",
-        placeholder: state.config === undefined ? "Pick a tier" : `Saved to ${state.config}`,
-        options: [...state.tiers.map((row) => ({
-          title: row.name,
-          value: row.name,
-          description: `${tierSummary(row)}${row.purposeMissing ? " (no purpose)" : ""}`,
-          footer: row.cost
-        })), {
-          title: "Add a tier\u2026",
-          value: ADD
-        }]
-      });
-      if (choice === undefined)
-        return;
-      if (choice === ADD)
-        return addTier(at, state);
-      const row = state.tiers.find((t) => t.name === choice);
-      if (row !== undefined)
-        await editTier(at, state, row);
     };
     const disposeCommands = context.ui.slot({
       append: "app",
