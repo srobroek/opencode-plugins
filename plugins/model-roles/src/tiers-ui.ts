@@ -4,11 +4,25 @@
  * a thin layer over `ui.dialog`.
  */
 
-import { type AvailableModel, type Options, parseCandidate, resolveRole } from "./resolve.ts"
-import { BUILTIN_TIERS, TIER_ALIASES, type TierConfig } from "./tiers.ts"
+import type { CandidateStatus } from "./check.ts"
+import {
+  type AgentLike,
+  type AgentTierSource,
+  type AvailableModel,
+  agentTier,
+  type HealthView,
+  modelText,
+  type Options,
+  parseCandidate,
+  resolveRole,
+  userPin,
+} from "./resolve.ts"
+import { BUILTIN_TIERS, parseTierConfig, TIER_ALIASES, type TierConfig } from "./tiers.ts"
 
 /** Effort choices, `auto` first. */
 export const EFFORT_CHOICES = ["auto", "none", "minimal", "low", "medium", "high", "xhigh", "max"] as const
+
+export type CandidateHealth = { entry: string } & CandidateStatus
 
 export type TierRow = {
   name: string
@@ -21,17 +35,23 @@ export type TierRow = {
   cost: string
   /** Current candidates, in order. */
   candidates: string[]
+  /** Each candidate's status now: available, unhealthy, unknown id or variant, provider unavailable. */
+  health?: CandidateHealth[]
   /** What resolves now, if anything. */
   resolved?: string
   /** The entry in `options.tiers`, as configured. */
   configured?: TierConfig
 }
 
+/** A tiered agent: its tier, where that comes from, and what it resolves to; `pinned` when its own model wins. */
+export type AgentRow = { id: string; tier: string; source: AgentTierSource; resolved?: string; pinned?: string }
+
 export type PickModel = { ref: string; variants: string[] }
 
 export type TierState = {
   tiers: TierRow[]
   models: PickModel[]
+  agents: AgentRow[]
   /** The config file `set` writes, or why there is none. */
   config?: string
   error?: string
@@ -45,9 +65,17 @@ export function tierState(input: {
   options: Options
   available: ReadonlyArray<AvailableModel>
   configured: Readonly<Record<string, TierConfig>>
+  agents?: ReadonlyArray<AgentLike>
+  health?: HealthView
+  /** A candidate's status, for the per-candidate health. */
+  status?: (entry: string) => CandidateStatus
   config?: string
   error?: string
 }): TierState {
+  const resolve = (name: string) => {
+    const model = resolveRole(input.options.roles, input.available, name, input.health).model
+    return model === undefined ? undefined : modelText(model)
+  }
   const tiers: TierRow[] = Object.entries(input.options.tiers ?? {}).map(([name, meta]) => {
     const row: TierRow = {
       name,
@@ -60,32 +88,110 @@ export function tierState(input: {
     }
     if (meta.effort !== undefined) row.effort = meta.effort
     if (meta.purposeMissing) row.purposeMissing = true
-    const resolved = resolveRole(input.options.roles, input.available, name).model
-    if (resolved !== undefined) row.resolved = `${resolved.providerID}/${resolved.id}${resolved.variant ? `#${resolved.variant}` : ""}`
+    const status = input.status
+    if (status !== undefined) row.health = row.candidates.map((entry) => ({ entry, ...status(entry) }))
+    const resolved = resolve(name)
+    if (resolved !== undefined) row.resolved = resolved
     const configured = input.configured[name]
     if (configured !== undefined) row.configured = configured
     return row
   })
+  const agents: AgentRow[] = []
+  for (const agent of [...(input.agents ?? [])].sort((a, b) => a.id.localeCompare(b.id))) {
+    const found = agentTier(agent, input.options.agents, input.options.implicit)
+    if (found === undefined) continue
+    const row: AgentRow = { id: agent.id, tier: found.tier, source: found.source }
+    const resolved = resolve(found.tier)
+    if (resolved !== undefined) row.resolved = resolved
+    const pin = userPin(agent)
+    if (pin !== undefined) row.pinned = modelText(pin)
+    agents.push(row)
+  }
   const models = input.available
     .filter((m) => m.enabled !== false)
     .map((m) => ({ ref: `${m.providerID}/${m.id}`, variants: (m.variants ?? []).map((v) => v.id) }))
     .sort((a, b) => a.ref.localeCompare(b.ref))
-  const state: TierState = { tiers, models }
+  const state: TierState = { tiers, models, agents }
   if (input.config !== undefined) state.config = input.config
   if (input.error !== undefined) state.error = input.error
   return state
 }
 
-/** Read a `state` reply defensively. */
+/** Read a `state` reply defensively; a reply without `agents` lists none. */
 export function readState(value: unknown): TierState | undefined {
   if (!isRecord(value) || !Array.isArray(value.tiers) || !Array.isArray(value.models)) return undefined
-  return value as TierState
+  return { ...(value as TierState), agents: Array.isArray(value.agents) ? (value.agents as AgentRow[]) : [] }
+}
+
+/** Tier names `set` and drafts accept. */
+export const TIER_NAME = /^[a-z][a-z0-9-]*$/
+
+/** The `draft` of a `state` call: tier configs to preview, `null` for a tier removed. Bad names are dropped. */
+export function readDraft(input: unknown): Record<string, TierConfig | null> {
+  const draft = isRecord(input) && isRecord(input.draft) ? input.draft : {}
+  const out: Record<string, TierConfig | null> = {}
+  for (const [name, value] of Object.entries(draft)) {
+    if (!TIER_NAME.test(name)) continue
+    out[name] = value === null ? null : parseTierConfig(value)
+  }
+  return out
+}
+
+/** The configured tiers with a draft laid over them. */
+export function applyDraft(
+  configured: Readonly<Record<string, TierConfig>>,
+  draft: Readonly<Record<string, TierConfig | null>>,
+): Record<string, TierConfig> {
+  const out: Record<string, TierConfig> = { ...configured }
+  for (const [name, value] of Object.entries(draft)) {
+    if (value === null) delete out[name]
+    else out[name] = value
+  }
+  return out
+}
+
+/**
+ * Check a tier config before `set` writes it. `listed` is what the host lists now (enabled or
+ * not), `catalog` every model the provider definitions know. An unknown model or a variant the
+ * model lacks is an error; a known model that is not available now is a warning.
+ */
+export function validateTierConfig(
+  config: TierConfig | undefined,
+  listed: ReadonlyArray<AvailableModel>,
+  catalog: ReadonlyArray<AvailableModel>,
+): { errors: string[]; warnings: string[] } {
+  const errors: string[] = []
+  const warnings: string[] = []
+  for (const entry of Array.isArray(config?.model) ? config.model : []) {
+    const candidate = parseCandidate(entry)
+    if (candidate === undefined) {
+      errors.push(`${JSON.stringify(entry)} is not provider/model, provider/model#variant or @tier.`)
+      continue
+    }
+    if (candidate.kind === "role") continue
+    const { ref } = candidate
+    const same = (m: AvailableModel) => m.providerID === ref.providerID && m.id === ref.id
+    const model = listed.find(same) ?? catalog.find(same)
+    const name = `${ref.providerID}/${ref.id}`
+    if (model === undefined) {
+      errors.push(`Unknown model ${name}: no provider lists it.`)
+      continue
+    }
+    const variants = (model.variants ?? []).map((v) => v.id)
+    if (ref.variant !== undefined && !variants.includes(ref.variant)) {
+      errors.push(`${name} has no variant ${ref.variant} (it has: ${variants.join(", ") || "none"}).`)
+      continue
+    }
+    if (!listed.some((m) => same(m) && m.enabled !== false))
+      warnings.push(`${name} is not available now (provider not connected, or disabled); the tier skips it until it is.`)
+  }
+  return { errors, warnings }
 }
 
 /** Why `name` cannot be a new tier, or `undefined` when it can. */
 export function tierNameError(name: string, existing: ReadonlyArray<string>): string | undefined {
   const text = name.trim()
-  if (!/^[a-z][a-z0-9-]*$/.test(text)) return "Use lowercase letters, digits and dashes, starting with a letter."
+  if (!TIER_NAME.test(text)) return "Use lowercase letters, digits and dashes, starting with a letter."
   if (existing.includes(text)) return `Tier ${text} already exists.`
   if (Object.hasOwn(TIER_ALIASES, text) || text === "default") return `${text} is an old role name for a built-in tier.`
   return undefined

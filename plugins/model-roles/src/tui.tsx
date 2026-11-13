@@ -79,7 +79,7 @@ export default Plugin.define({
           ...EFFORT_CHOICES.map((effort) => ({
             title: effort,
             value: effort,
-            ...(effort === "auto" ? { description: "The auto decider picks per spawn; else the model default" } : {}),
+            ...(effort === "auto" ? { description: "The auto decider picks per spawn; else the tier's default effort" } : {}),
           })),
         ],
         ...(row.configured?.effort !== undefined ? { current: row.configured.effort } : {}),
@@ -88,11 +88,17 @@ export default Plugin.define({
       return { effort: value === DEFAULT ? undefined : value }
     }
 
+    /** The toast after a save: where it went, and any model that is not available now. */
+    const saved = (result: { path?: string; warnings?: unknown }, what: string) => {
+      const warnings = Array.isArray(result.warnings) ? result.warnings.filter((w): w is string => typeof w === "string") : []
+      toast(`${what} ${result.path ?? "the global config"}.${warnings.length > 0 ? ` ${warnings.join(" ")}` : ""}`, warnings.length > 0 ? "info" : "success")
+    }
+
     const save = async (at: LocationRef, row: TierRow, edit: TierEdit) => {
       const value = applyEdit(row, edit)
       try {
-        const result = (await rpc.set({ tier: row.name, value: value ?? null }, { location: at })) as { path?: string }
-        toast(`Tier ${row.name} saved to ${result.path ?? "the global config"}; it applies once the config reloads.`, "success")
+        const result = (await rpc.set({ tier: row.name, value: value ?? null }, { location: at })) as { path?: string; warnings?: unknown }
+        saved(result, `Tier ${row.name} saved and applied; written to`)
       } catch (error) {
         toast(`Tier ${row.name} not saved: ${(error as Error).message}`, "error")
       }
@@ -147,8 +153,8 @@ export default Plugin.define({
         { kind: "models", models },
       )
       try {
-        const result = (await rpc.set({ tier: name, value: value ?? null }, { location: at })) as { path?: string }
-        toast(`Tier ${name} added to ${result.path ?? "the global config"}.`, "success")
+        const result = (await rpc.set({ tier: name, value: value ?? null }, { location: at })) as { path?: string; warnings?: unknown }
+        saved(result, `Tier ${name} added and applied; written to`)
       } catch (error) {
         toast(`Tier ${name} not saved: ${(error as Error).message}`, "error")
       }

@@ -179,7 +179,7 @@ describe("planSpawn", () => {
   })
 
   test("the role re-resolves around unhealthy models", () => {
-    const health = healthView(markUnhealthy({}, sonnet, 0, 1_000, "x"), 1)
+    const health = healthView(markUnhealthy({}, sonnet, 0, 1_000, "server"), 1)
     expect(planSpawn({ ...spawn, role: "task" }, options, available, health).input).toEqual({
       ...spawn,
       model: "anthropic/claude-haiku",

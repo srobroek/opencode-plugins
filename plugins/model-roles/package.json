@@ -14,10 +14,14 @@
     "tui.js"
   ],
   "peerDependencies": {
-    "@opencode/plugin": "^2.1.4"
+    "@opencode/plugin": "^2.1.4",
+    "effect": "^4.1.0"
   },
   "peerDependenciesMeta": {
     "@opencode/plugin": {
+      "optional": true
+    },
+    "effect": {
       "optional": true
     }
   },

@@ -22,19 +22,19 @@ const options = parseOptions({ roles: { task: ["p/a", "p/b"], slow: ["p/a"], oth
 
 describe("fallbackTarget", () => {
   test("moves the agent's role to its next healthy candidate", () => {
-    const health = healthView(markUnhealthy({}, a, 0, 1_000, "x"), 1)
+    const health = healthView(markUnhealthy({}, a, 0, 1_000, "server"), 1)
     expect(fallbackTarget(options, available, health, "task", a)).toEqual({ role: "task", model: b })
   })
 
   test("without a role, uses the first role that lists the failed model", () => {
     expect(rolesListing(options, { ...a, variant: "high" })).toEqual(["slow", "task"])
-    const health = healthView(markUnhealthy({}, a, 0, 1_000, "x"), 1)
+    const health = healthView(markUnhealthy({}, a, 0, 1_000, "server"), 1)
     expect(fallbackTarget(options, available, health, undefined, a)).toEqual({ role: "task", model: b })
     expect(fallbackTarget(options, available, health, "nope", b)).toBeUndefined()
   })
 
   test("no target when the role still resolves to the failed model", () => {
-    const health = healthView(markUnhealthy({}, a, 0, 1_000, "x"), 1)
+    const health = healthView(markUnhealthy({}, a, 0, 1_000, "server"), 1)
     expect(fallbackTarget(options, available, health, "slow", a)).toBeUndefined()
   })
 })
@@ -43,7 +43,7 @@ describe("retry switch", () => {
   const base = {
     options,
     available,
-    health: healthView(markUnhealthy({}, a, 0, 1_000, "x"), 1),
+    health: healthView(markUnhealthy({}, a, 0, 1_000, "server"), 1),
     role: "task",
     failed: a,
     kind: "server" as const,
@@ -78,7 +78,7 @@ describe("retry switch", () => {
   })
 
   test("never onto a cooling-down model, so two failures cannot trade places", () => {
-    const both = healthView(markUnhealthy(markUnhealthy({}, a, 0, 1_000, "x"), b, 0, 1_000, "y"), 1)
+    const both = healthView(markUnhealthy(markUnhealthy({}, a, 0, 1_000, "server"), b, 0, 1_000, "server"), 1)
     expect(retryTarget({ ...base, health: both })).toBeUndefined()
     expect(retryTarget({ ...base, role: "slow" })).toBeUndefined()
   })
@@ -86,7 +86,7 @@ describe("retry switch", () => {
   test("never onto a model, or a provider, that failed recently even while it stays in use", () => {
     // The failed model itself was just recorded, as the retry hook does before it looks for a target.
     const recent = (key: string) =>
-      healthView({ "p/a": { failedAt: 5, until: 5, reason: "x" }, [key]: { failedAt: 0, until: 0, reason: "x" } }, 10, RECENT_MS)
+      healthView({ "p/a": { failedAt: 5, until: 5, reason: "server" }, [key]: { failedAt: 0, until: 0, reason: "server" } }, 10, RECENT_MS)
     expect(retryTarget({ ...base, health: recent("p/b") })).toBeUndefined()
     expect(retryTarget({ ...base, kind: "credentials", health: recent("p/*") })).toBeUndefined()
     expect(retryTarget({ ...base, health: recent("q/x") })).toEqual({ role: "task", model: b })
@@ -131,9 +131,9 @@ describe("check", () => {
   const opts = { ...options, roles }
 
   test("candidate statuses across every listed model", () => {
-    const health = markUnhealthy({}, a, 0, 1_000, "auth: denied")
+    const health = markUnhealthy({}, a, 0, 1_000, "auth")
     const status = (entry: string) => candidateStatus(entry, available, roles, health, 10)
-    expect(status("p/a")).toEqual({ status: "unhealthy", until: 1_000, reason: "auth: denied" })
+    expect(status("p/a")).toEqual({ status: "unhealthy", until: 1_000, reason: "auth" })
     expect(status("p/b")).toEqual({ status: "available" })
     expect(status("q/x#high")).toEqual({ status: "available" })
     expect(status("q/x#low")).toEqual({ status: "unknown-variant", variants: ["high"] })
@@ -159,7 +159,7 @@ describe("check", () => {
   })
 
   test("a fully unhealthy role is marked degraded", () => {
-    const health = markUnhealthy({}, a, 0, 1_000, "x")
+    const health = markUnhealthy({}, a, 0, 1_000, "server")
     const report = checkRoles(opts, available, [], health, 10)
     expect(report.roles.find((role) => role.role === "slow")).toMatchObject({ resolved: a, degraded: true })
     expect(formatCheck(report)).toContain("Role slow → p/a (every candidate unhealthy; least recently failed)")
