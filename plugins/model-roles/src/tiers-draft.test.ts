@@ -41,14 +41,23 @@ describe("draft operations", () => {
     d = toggle(toggle(d, "b/two"), "a/one")
     expect(d.models).toEqual(["b/two", "a/one"])
     d = setVariant(d, "b/two", "high")
-    expect(toggle(d, "b/two").models).toEqual(["a/one"])
+    expect(toggle(d, "b/two#high").models).toEqual(["a/one"])
+  })
+
+  test("entries of the same model with different variants are separate rows", () => {
+    const d = createDraft(row({ configured: { model: ["a/one#low", "b/two", "a/one#high"] } }))
+    expect(setVariant(d, "a/one#high", undefined).models).toEqual(["a/one#low", "b/two", "a/one"])
+    expect(setVariant(d, "a/one#low", "high").models).toEqual(["a/one#high", "b/two", "a/one#high"])
+    expect(toggle(d, "a/one#high").models).toEqual(["a/one#low", "b/two"])
+    expect(move(d, "a/one#high", "up").models).toEqual(["a/one#low", "a/one#high", "b/two"])
+    expect(move(d, "a/one#low", "down").models).toEqual(["b/two", "a/one#low", "a/one#high"])
   })
 
   test("move swaps with the neighbour and stops at the ends", () => {
     const d = createDraft(row({ configured: { model: ["a/one#high", "b/two", "c/three"] } }))
     expect(move(d, "c/three", "up").models).toEqual(["a/one#high", "c/three", "b/two"])
-    expect(move(d, "a/one", "down").models).toEqual(["b/two", "a/one#high", "c/three"])
-    expect(move(d, "a/one", "up")).toBe(d)
+    expect(move(d, "a/one#high", "down").models).toEqual(["b/two", "a/one#high", "c/three"])
+    expect(move(d, "a/one#high", "up")).toBe(d)
     expect(move(d, "c/three", "down")).toBe(d)
     expect(move(d, "x/none", "up")).toBe(d)
   })
@@ -57,7 +66,7 @@ describe("draft operations", () => {
     const d = createDraft(row({ configured: { model: ["a/one", "b/two"] } }))
     const pinned = setVariant(d, "a/one", "low")
     expect(pinned.models).toEqual(["a/one#low", "b/two"])
-    expect(setVariant(pinned, "a/one", undefined).models).toEqual(["a/one", "b/two"])
+    expect(setVariant(pinned, "a/one#low", undefined).models).toEqual(["a/one", "b/two"])
   })
 
   test("effort and purpose set and clear", () => {
@@ -69,13 +78,22 @@ describe("draft operations", () => {
 })
 
 describe("draft config", () => {
+  test("untouched models stay as saved: a legacy roles-backed tier keeps its absent model", () => {
+    const legacy = row({ name: "task", builtin: false, source: "roles", candidates: ["x/legacy#high"], purpose: "p" })
+    expect(toConfig(setPurpose(createDraft({ ...legacy, configured: { purpose: "p" } }), "q"))).toEqual({ purpose: "q" })
+    expect(toConfig(setEffort(createDraft(legacy), "low"))).toEqual({ effort: "low" })
+    // Touching the models, or Reset, does write the model setting.
+    expect(toConfig(toggle(createDraft({ ...legacy, configured: { purpose: "p" } }), "a/one"))).toEqual({ model: ["a/one"], purpose: "p" })
+    expect(toConfig(reset(createDraft({ ...legacy, configured: { purpose: "p" } })))).toEqual({ model: "auto", purpose: "p" })
+  })
+
   test("keeps existing #variants when other models change", () => {
     const d = toggle(createDraft(row({ configured: { model: ["a/one#high"] } })), "b/two")
     expect(toConfig(d)).toEqual({ model: ["a/one#high", "b/two"] })
   })
 
   test("inherit drops the variant", () => {
-    const d = setVariant(createDraft(row({ configured: { model: ["a/one#high"] } })), "a/one", undefined)
+    const d = setVariant(createDraft(row({ configured: { model: ["a/one#high"] } })), "a/one#high", undefined)
     expect(toConfig(d)).toEqual({ model: ["a/one"] })
   })
 
@@ -114,6 +132,14 @@ describe("dirty", () => {
     expect(dirty(setVariant(d, "a/one", "low"))).toBe(true)
   })
 
+  test("edits after Reset still count: dirty compares the resulting config with the saved one", () => {
+    const fresh = reset(createDraft(row()))
+    expect(dirty(toggle(fresh, "b/two"))).toBe(true)
+    expect(dirty(setEffort(fresh, "low"))).toBe(true)
+    expect(dirty(setPurpose(fresh, "other"))).toBe(true)
+    expect(dirty(toggle(toggle(fresh, "b/two"), "b/two"))).toBe(false)
+  })
+
   test("a new tier is always dirty; reset is dirty only if something was saved", () => {
     expect(dirty(createDraft(row({ configured: { purpose: "p" } }), true))).toBe(true)
     expect(dirty(reset(createDraft(row())))).toBe(false)
@@ -122,6 +148,14 @@ describe("dirty", () => {
 })
 
 describe("menu options", () => {
+  test("an unset effort says Tier default, with the effective effort when the state knows it", () => {
+    const text = (d: ReturnType<typeof createDraft>) => tierMenuOptions(d, undefined)[1]?.description
+    expect(text(createDraft(row()))).toBe("Tier default")
+    expect(text(createDraft(row({ effort: "high" })))).toBe("Tier default (high)")
+    expect(text(createDraft(row({ effort: "low", configured: { effort: "low" } })))).toBe("low")
+    expect(text(setEffort(createDraft(row({ effort: "low", configured: { effort: "low" } })), undefined))).toBe("Tier default")
+  })
+
   test("tier menu order and the preview line", () => {
     const options = tierMenuOptions(createDraft(row()), "a/one#high")
     expect(options.map((o) => o.value)).toEqual(["models", "effort", "purpose", "preview", "reset", "save", "cancel"])
@@ -132,7 +166,7 @@ describe("menu options", () => {
     const d = createDraft(row({ configured: { model: ["c/three", "a/one#high"] } }))
     const options = modelOptions(d, available)
     expect(options.map((o) => o.title)).toEqual(["☑ 1. c/three", "☑ 2. a/one#high", "☐ b/two"])
-    expect(options.map((o) => o.value)).toEqual(["c/three", "a/one", "b/two"])
+    expect(options.map((o) => o.value)).toEqual(["c/three", "a/one#high", "b/two"])
     expect(options[1]?.description).toBe("variant high")
     expect(options[0]?.description).toBe("inherits tier effort")
   })

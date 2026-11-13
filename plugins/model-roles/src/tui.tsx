@@ -21,6 +21,7 @@ import {
   toggle,
   toPreviewDraft,
   variantOptions,
+  withVariant,
 } from "./tiers-draft.ts"
 import { EFFORT_CHOICES, readState, type TierRow, type TierState, tierNameError, tierSummary } from "./tiers-ui.ts"
 
@@ -78,16 +79,17 @@ export default Plugin.define({
       return setEffort(draft, value === DEFAULT ? undefined : value)
     }
 
-    const pickVariant = async (draft: TierDraft, state: TierState, ref: string): Promise<TierDraft> => {
-      const entry = draft.models.find((e) => entryRef(e) === ref)
-      if (entry === undefined) return draft
+    /** Pin or release the variant of one entry; returns the draft and the entry's new text. */
+    const pickVariant = async (draft: TierDraft, state: TierState, entry: string): Promise<{ draft: TierDraft; entry: string }> => {
+      const ref = entryRef(entry)
       const value = await dialog.select<string>({
         title: `${ref}: variant`,
         options: variantOptions(state.models.find((m) => m.ref === ref)),
         current: entryVariant(entry) ?? INHERIT,
       })
-      if (value === undefined) return draft
-      return setVariant(draft, ref, value === INHERIT ? undefined : value)
+      if (value === undefined) return { draft, entry }
+      const variant = value === INHERIT ? undefined : value
+      return { draft: setVariant(draft, entry, variant), entry: withVariant(entry, variant) }
     }
 
     /**
@@ -119,11 +121,15 @@ export default Plugin.define({
         if (asked !== undefined) {
           if (asked.kind === "save") return { draft, save: true }
           current = asked.ref
-          if (!draft.models.some((e) => entryRef(e) === asked.ref)) {
+          if (!draft.models.includes(asked.ref)) {
             toast("Select the model first (Enter).")
             continue
           }
-          draft = asked.kind === "variant" ? await pickVariant(draft, state, asked.ref) : move(draft, asked.ref, asked.kind)
+          if (asked.kind === "variant") {
+            const picked = await pickVariant(draft, state, asked.ref)
+            draft = picked.draft
+            current = picked.entry
+          } else draft = move(draft, asked.ref, asked.kind)
           continue
         }
         if (value === undefined) return { draft, save: false }

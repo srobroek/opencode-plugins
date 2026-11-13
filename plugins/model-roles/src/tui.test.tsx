@@ -31,7 +31,7 @@ const tier = (name: string, configured?: Record<string, unknown>) => ({
   ...(configured === undefined ? {} : { configured }),
 })
 
-function harness(script: Step[], opts: { setFails?: string } = {}) {
+function harness(script: Step[], opts: { setFails?: string; persist?: (value: Record<string, unknown>) => Record<string, unknown> } = {}) {
   const saved: Record<string, Record<string, unknown>> = {}
   const setCalls: Array<{ tier: string; value: unknown }> = []
   const stateCalls: unknown[] = []
@@ -77,7 +77,7 @@ function harness(script: Step[], opts: { setFails?: string } = {}) {
       if (opts.setFails !== undefined) throw new Error(opts.setFails)
       setCalls.push(input)
       if (input.value === null) delete saved[input.tier]
-      else saved[input.tier] = input.value
+      else saved[input.tier] = opts.persist?.(input.value) ?? input.value
       return { path: "/cfg", warnings: [] }
     },
   }
@@ -140,6 +140,57 @@ describe("/tiers editor", () => {
     expect(h.stateCalls.length).toBeGreaterThanOrEqual(2)
   })
 
+  test("after Save the tier is reopened from the reloaded state, not the draft", async () => {
+    // The server stores what it normalised: an extra effort the draft never had.
+    const h = harness(
+      [
+        pick("strong"),
+        pick("models"),
+        pick("a/one"),
+        () => key("ctrl+e", "a/one"),
+        pick("high"),
+        esc,
+        pick("save"),
+        pick("strong"), // reopen the saved tier
+        (o) => {
+          expect(o.options?.find((x) => x.value === "models")).toMatchObject({ description: "a/one#high" })
+          expect(o.options?.find((x) => x.value === "effort")).toMatchObject({ description: "max" })
+          return "models"
+        },
+        (o) => {
+          expect(titles(o)[0]).toBe("☑ 1. a/one#high")
+          return ESC
+        },
+        esc,
+        esc,
+      ],
+      { persist: (value) => ({ ...value, effort: "max" }) },
+    )
+    await h.run()
+    expect(h.setCalls).toHaveLength(1)
+  })
+
+  test("Reset then a change still asks before discarding, and previews the draft", async () => {
+    let asked = false
+    const h = harness([
+      pick("strong"),
+      pick("reset"),
+      pick("models"),
+      pick("b/two"),
+      esc,
+      esc, // Esc at the menu with a change after Reset
+      () => {
+        asked = true
+        return true
+      },
+      esc,
+    ])
+    await h.run()
+    expect(asked).toBe(true)
+    expect(h.setCalls).toEqual([])
+    expect(h.stateCalls).toContainEqual({ draft: { strong: { model: ["b/two"] } } })
+  })
+
   test("two tiers edited in one session start fresh each time", async () => {
     const h = harness([
       pick("cheap"),
@@ -183,7 +234,7 @@ describe("/tiers editor", () => {
       },
       (o) => {
         expect(titles(o)[0]).toBe("☑ 1. a/one#high")
-        expect(o.current).toBe("a/one")
+        expect(o.current).toBe("a/one#high")
         return ESC
       },
       (o) => {
