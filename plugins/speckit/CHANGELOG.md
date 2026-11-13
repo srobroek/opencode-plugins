@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/srobroek/opencode-plugins/compare/speckit--v0.6.0...speckit--v0.7.0) (2026-11-13)
+
+
+### Features
+
+* **beads:** support per-project ledger stores ([#149](https://github.com/srobroek/opencode-plugins/issues/149)) ([af200e8](https://github.com/srobroek/opencode-plugins/commit/af200e8726bf029069a17919ca9c38ec8cbd657c))
+
 ## [0.6.0](https://github.com/srobroek/opencode-plugins/compare/speckit--v0.5.0...speckit--v0.6.0) (2026-11-12)
 
 
