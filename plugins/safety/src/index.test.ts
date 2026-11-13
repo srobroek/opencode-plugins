@@ -1,12 +1,14 @@
 import { describe, expect, setDefaultTimeout, test } from "bun:test"
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Error as ToolError } from "@opencode/plugin/promise/tool"
 import { createFakeContext, type FakeAssert } from "@srobroek/opencode-lib/testing"
 import plugin, { applyDecision, createPlugin, type Evaluation, readOptions, shellCwd } from "./index.ts"
+import { FNOX_STORE_MESSAGE } from "./op-guard.ts"
 import { INVESTIGATE_NOTICE } from "./package-investigate.ts"
 import { FORCE_PUSH_MESSAGE } from "./permission.ts"
+import { scratchRoots } from "./scratch-dirs.ts"
 
 // Every decision spawns real git processes; a loaded machine can take seconds.
 setDefaultTimeout(60_000)
@@ -16,6 +18,7 @@ const call = { sessionID: "ses_1", agent: "build", messageID: "msg_1" }
 type Load = {
   directory?: string
   env?: NodeJS.ProcessEnv
+  projectID?: string
   assert?: (input: FakeAssert) => Promise<void> | void
 }
 
@@ -23,7 +26,7 @@ async function load(options: Record<string, unknown> = {}, more: Load = {}) {
   const directory = more.directory ?? "/project"
   const fake = createFakeContext({
     directory,
-    sessions: [{ id: "ses_1", location: { directory } }],
+    sessions: [{ id: "ses_1", location: { directory }, ...(more.projectID ? { projectID: more.projectID } : {}) }],
     options,
     ...(more.assert ? { assert: more.assert } : {}),
   })
@@ -54,7 +57,7 @@ describe("setup", () => {
     const { fake, cleanup } = await load()
     expect(fake.hooks("tool")).toEqual(["execute.before", "execute.before", "execute.after", "execute.after"])
     expect(fake.hooks("shell")).toEqual(["create.before"])
-    expect(fake.hooks("permission")).toEqual(["evaluate"])
+    expect(fake.hooks("permission")).toEqual(["evaluate", "evaluate"])
     await cleanup?.()
     expect(fake.active()).toBe(0)
   })
@@ -325,6 +328,61 @@ describe("secret redaction", () => {
     const { fake } = await load({ redactSecrets: false })
     expect(fake.hooks("tool")).toEqual(["execute.before", "execute.before", "execute.after"])
     expect(fake.hooks("shell")).toEqual([])
+  })
+})
+
+describe("fnox provider types from config", () => {
+  const withConfig = async (type: string, run: (dir: string) => Promise<void>) => {
+    const base = join(realpathSync(tmpdir()), "opencode")
+    mkdirSync(base, { recursive: true })
+    const dir = mkdtempSync(join(base, "safety-fnox-"))
+    try {
+      writeFileSync(join(dir, "fnox.toml"), `[providers.host]\ntype = "${type}"\n`)
+      await run(dir)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  test("a piped fnox set is refused when the project's host provider is 1password", async () => {
+    await withConfig("1password", async (dir) => {
+      const { before } = await load()
+      await expect(before("c1", "cmd | fnox set NAME --provider host", dir)).rejects.toThrow(FNOX_STORE_MESSAGE)
+    })
+  })
+
+  test("a piped fnox set passes when the project's host provider is age", async () => {
+    await withConfig("age", async (dir) => {
+      const { before } = await load()
+      await before("c2", "cmd | fnox set NAME --provider host", dir)
+    })
+  })
+})
+
+describe("scratch folders", () => {
+  const ask = (fake: Awaited<ReturnType<typeof load>>["fake"], resources: string[], action = "external_directory") =>
+    fake.fire.permission("evaluate", { sessionID: "ses_1", action, resources, effect: "ask" } as Evaluation)
+
+  test("asks about external_directory outside the session project's worktree folder", async () => {
+    const { fake } = await load({}, { projectID: "41bad135688c6b4d" })
+    const [, worktrees] = scratchRoots("41bad135688c6b4d")
+    expect((await ask(fake, [`${worktrees}/lane/src`])).effect).toBe("allow")
+    expect((await ask(fake, [`${worktrees?.replace("41bad1", "ffffff")}/lane/src`])).effect).toBe("ask")
+  })
+
+  test("a session lookup that fails leaves the ask", async () => {
+    const { fake } = await load()
+    expect((await ask(fake, [`${scratchRoots("41bad135")[1]}/x`])).effect).toBe("ask")
+  })
+
+  test("scratchDirs: false registers no hook", async () => {
+    const { fake } = await load({ scratchDirs: false })
+    expect(fake.hooks("permission")).toEqual(["evaluate"])
+  })
+
+  test("readOptions defaults scratchDirs to true", () => {
+    expect(readOptions(undefined).scratchDirs).toBe(true)
+    expect(readOptions({ scratchDirs: false }).scratchDirs).toBe(false)
   })
 })
 

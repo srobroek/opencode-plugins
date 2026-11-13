@@ -30,11 +30,6 @@ export const EXPLORE_PERMISSIONS: ReadonlyArray<Rule> = [
   { action: "websearch", resource: "*", effect: "allow" },
   { action: "webfetch", resource: "*", effect: "allow" },
   { action: "external_directory", resource: "*", effect: "ask" },
-  // Later rules win: the OpenCode worktree and temp folders (Linux, macOS) never prompt.
-  { action: "external_directory", resource: "~/.local/share/opencode/worktree/*", effect: "allow" },
-  { action: "external_directory", resource: "/tmp/opencode/*", effect: "allow" },
-  { action: "external_directory", resource: "/private/var/folders/*/T/opencode/*", effect: "allow" },
-  { action: "external_directory", resource: "/var/folders/*/T/opencode/*", effect: "allow" },
 ]
 
 type ExploreDraft = { system?: string; permissions: Rule[]; steps?: number }

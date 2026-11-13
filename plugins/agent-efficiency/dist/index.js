@@ -745,11 +745,7 @@ var EXPLORE_PERMISSIONS = [
   { action: "glob", resource: "*", effect: "allow" },
   { action: "websearch", resource: "*", effect: "allow" },
   { action: "webfetch", resource: "*", effect: "allow" },
-  { action: "external_directory", resource: "*", effect: "ask" },
-  { action: "external_directory", resource: "~/.local/share/opencode/worktree/*", effect: "allow" },
-  { action: "external_directory", resource: "/tmp/opencode/*", effect: "allow" },
-  { action: "external_directory", resource: "/private/var/folders/*/T/opencode/*", effect: "allow" },
-  { action: "external_directory", resource: "/var/folders/*/T/opencode/*", effect: "allow" }
+  { action: "external_directory", resource: "*", effect: "ask" }
 ];
 function shapeExplore(draft) {
   draft.system = EXPLORE_PROMPT;

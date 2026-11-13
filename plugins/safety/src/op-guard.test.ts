@@ -11,7 +11,17 @@ import {
   LITERAL_MESSAGE,
   MAX_NESTING, NESTING_MESSAGE, OP_MESSAGE } from "./op-guard.ts"
 
-const gate = (command: string, options: GuardOptions = {}) => hardGate(command, "/", options)
+/** Provider types as a fnox config would declare them. */
+const TYPES: Record<string, string> = {
+  host: "keychain",
+  age: "age",
+  "team-age": "age",
+  keychain: "keychain",
+  op: "1password",
+  proj: "1password",
+}
+const types = (name: string) => TYPES[name]
+const gate = (command: string, options: GuardOptions = {}) => hardGate(command, "/", { providerTypes: types, ...options })
 
 const REFUSED_OP = [
   "op read op://x/y/z",
@@ -77,6 +87,20 @@ const REFUSED_STORE = [
   "fnox set NAME \"$TOKEN\" --provider op",
   "fnox set NAME --provider op <<<\"$TOKEN\"",
   "fnox exec -- sh -c 'cmd | fnox set NAME --provider op'",
+  "fnox set NAME --provider op < secret.txt",
+  "fnox set NAME --provider op <(openssl rand -hex 8)",
+  "fnox set NAME --from-file k.txt --provider op",
+  "fnox set NAME 'item/field' --from-file k.txt --provider op",
+  "fnox set NAME 'item/field' --generate --provider op",
+  "fnox set NAME 'item/field' --default \"$X\" --provider op",
+  "cmd | fnox set NAME 'item/field' --provider op",
+  "fnox set NAME 'item/field' --provider op <<EOF\nx\nEOF",
+  "cmd | fnox exec -- fnox set NAME --provider op",
+  "cmd | fnox exec -- sh -c 'fnox set NAME item/field --provider op'",
+  "fnox exec -- sh -c 'fnox set NAME item/field --provider op' < secret.txt",
+  "fnox set NAME \"item/$X\" --provider op",
+  "cmd | fnox set NAME --provider unknown",
+  "cmd | fnox -c my.toml set NAME --provider host",
 ]
 
 const REFUSED_PIPED = [
@@ -382,6 +406,24 @@ describe("op-guard", () => {
     test(`passes ${command}`, () => {
       expect(gate(command)).toBeUndefined()
     })
+
+  test("a provider named host that is 1password is not a value store", () => {
+    const named = { providerTypes: (name: string) => (name === "host" ? "1password" : undefined) }
+    expect(gate("cmd | fnox set NAME --provider host", named)).toEqual({ guard: "op-guard", reason: FNOX_STORE_MESSAGE })
+  })
+
+  test("an age-named provider of another type is not a value store", () => {
+    const named = { providerTypes: (name: string) => (name === "x-age" ? "1password" : undefined) }
+    expect(gate("cmd | fnox set NAME --provider x-age", named)).toEqual({ guard: "op-guard", reason: FNOX_STORE_MESSAGE })
+  })
+
+  test("a provider whose type cannot be resolved is not a value store", () => {
+    expect(gate("cmd | fnox set NAME --provider host", { providerTypes: () => undefined })?.reason).toBe(FNOX_STORE_MESSAGE)
+  })
+
+  test("a provider of type age takes a piped value whatever its name", () => {
+    expect(gate("cmd | fnox set NAME --provider vault-keys", { providerTypes: () => "age" })).toBeUndefined()
+  })
 
   test("the refusal points to fnox exec and provider discover", () => {
     expect(OP_MESSAGE).toContain("fnox exec -- <cmd>")

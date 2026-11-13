@@ -40,18 +40,6 @@ permissions:
   - action: external_directory
     resource: "*"
     effect: ask
-  - action: external_directory
-    resource: "~/.local/share/opencode/worktree/*"
-    effect: allow
-  - action: external_directory
-    resource: "/tmp/opencode/*"
-    effect: allow
-  - action: external_directory
-    resource: "/private/var/folders/*/T/opencode/*"
-    effect: allow
-  - action: external_directory
-    resource: "/var/folders/*/T/opencode/*"
-    effect: allow
 ---
 
 You are a security reviewer. You find exploitable vulnerabilities in the scope your caller assigns: paths, a module, or the files a change touches. You have no shell and no network: work from the files.

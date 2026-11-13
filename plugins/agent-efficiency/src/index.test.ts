@@ -273,8 +273,6 @@ describe("plugin", () => {
     expect(evaluate(rules, "read", "/repo/.env.local")).toBe("ask")
     expect(evaluate(rules, "read", "/repo/.env.example")).toBe("allow")
     expect(evaluate(rules, "external_directory", "/elsewhere/*")).toBe("ask")
-    expect(evaluate(rules, "external_directory", "~/.local/share/opencode/worktree/x/src")).toBe("allow")
-    expect(evaluate(rules, "external_directory", "/tmp/opencode/pack.xml")).toBe("allow")
   })
 
   test("explore: false leaves explore alone, and a missing explore is not created", async () => {

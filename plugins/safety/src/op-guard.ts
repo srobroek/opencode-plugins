@@ -254,21 +254,54 @@ const SET_VALUED: ReadonlySet<string> = new Set([
   "--source",
 ])
 
-/** Providers that keep a pasted value in the config or on the host: `host`, and names with an `age` or `keychain` part. */
-function plainProvider(name: string): boolean {
-  const lower = name.toLowerCase()
-  return lower === "host" || lower.split(/[-_.:]/).some((part) => part === "age" || part === "keychain")
+/**
+ * fnox provider types that keep a value they are given locally: encryption in the config (the `*-kms`
+ * types, age, FIDO2, YubiKey) or a local store (keychain, KeePass, password-store, gopass). `plain` is
+ * left out (it writes the value to fnox.toml in clear text), as are the read-only types (1password and
+ * the rest, where `fnox set` records the value as the item reference) and `lua`.
+ */
+export const VALUE_STORE_TYPES: ReadonlySet<string> = new Set([
+  "age",
+  "fido2",
+  "yubikey",
+  "aws-kms",
+  "azure-kms",
+  "gcp-kms",
+  "keychain",
+  "keepass",
+  "password-store",
+  "gopass",
+])
+
+/** The `type` of the fnox provider `name` in the configuration that applies, or `undefined` when unknown. */
+export type ProviderTypes = (name: string) => string | undefined
+
+/** Whether a word holds an expansion, backticks or a process substitution: its value is not known from the text. */
+function expands(command: Command, at: number): boolean {
+  const word = command.argv[at] as string
+  return command.words?.[at]?.expands !== false && /[$`]|[<>]\(/.test(word)
 }
 
 /**
- * `fnox set` with a provider that stores what it is given and a value in the command text: a literal
- * positional or `--default` (`set`), or a stdin value fed from a literal (`literal`).
+ * `fnox set` that would put a value where it must not go. With a provider that stores a value (by its
+ * resolved type), a literal positional or `--default` is `set` and a stdin value fed from a literal is
+ * `literal`. With any other provider, or none, only the reference form passes: a literal positional
+ * (or none, which prompts) with no expansion and no value source (`--generate`, `--from-file`, an expanded `--default`, a pipe,
+ * redirect, here-document, here-string, process substitution or stdin inherited from `fnox exec`);
+ * everything else is `store`, since fnox would record the value as the item reference in fnox.toml.
  */
-function fnoxSetRefusal(command: Command, at: number, fed: boolean): "set" | "literal" | "store" | undefined {
+function fnoxSetRefusal(
+  command: Command,
+  at: number,
+  fed: boolean,
+  stdin: boolean,
+  types: ProviderTypes,
+  configured: boolean,
+): "set" | "literal" | "store" | undefined {
   const args = command.argv.slice(at + 1)
   let provider: string | undefined
   let reads = true
-  let generates = false
+  let sourced = false
   const positional: number[] = []
   const defaults: { at: number; skip: number }[] = []
   for (let i = 0; i < args.length; i++) {
@@ -280,21 +313,23 @@ function fnoxSetRefusal(command: Command, at: number, fed: boolean): "set" | "li
     else if (arg.startsWith("--default=")) defaults.push({ at: at + 1 + i, skip: "--default=".length })
     else if (arg === "--generate" || arg === "--from-file" || arg.startsWith("--from-file=")) {
       reads = false
-      if (arg === "--generate") generates = true
+      sourced = true
       if (arg === "--from-file") i++
     } else if (SET_VALUED.has(arg)) i++
     else if (!arg.startsWith("-") || arg === "-") positional.push(at + 1 + i)
   }
-  if (provider === undefined || !plainProvider(provider)) {
-    // No value store: a value from stdin, `--generate` or an expansion would become the item reference.
-    const piped = command.stage > 0 || command.hereDocuments.length > 0 || command.redirects.some((word) => word.hereString === true)
-    const expanded = positional[1] !== undefined && expansionOnly(command, positional[1])
-    if (generates || expanded || (positional[1] === undefined && reads && (fed || piped))) return "store"
-    return undefined
-  }
-  // KEY, then VALUE: a second positional that is not an expansion is a literal.
+  const type = provider === undefined || !configured ? undefined : types(provider)
   const value = positional[1]
+  if (type === undefined || !VALUE_STORE_TYPES.has(type)) {
+    const piped = stdin || command.stage > 0 || command.redirects.length > 0 || command.hereDocuments.length > 0
+    const substituted = command.argv.some((word) => /[<>]\(/.test(word))
+    const defaultExpands = defaults.some((d) => expands(command, d.at))
+    // No value and no source is an interactive prompt or a settings update, which stores nothing from the agent.
+    const expanded = value !== undefined && expands(command, value)
+    return sourced || piped || substituted || defaultExpands || expanded ? "store" : undefined
+  }
   const defaultLiteral = defaults.some((d) => !expansionOnly(command, d.at, d.skip))
+  // KEY, then VALUE: a second positional that is not an expansion is a literal.
   if (value !== undefined) return expansionOnly(command, value) && !defaultLiteral ? undefined : "set"
   if (defaultLiteral) return "set"
   return reads && fed ? "literal" : undefined
@@ -304,16 +339,19 @@ function fnoxSetRefusal(command: Command, at: number, fed: boolean): "set" | "li
 export function fnoxRefusal(
   command: Command,
   allow: readonly string[] = [],
-  inherited: { literal: boolean; documents: readonly HereDocument[]; depth: number } = {
+  inherited: { literal: boolean; stdin?: boolean; documents: readonly HereDocument[]; depth: number } = {
     literal: false,
     documents: [],
     depth: 0,
   },
+  types: ProviderTypes = () => undefined,
 ): Verdict | undefined {
   if (inherited.depth > MAX_NESTING) throw new NestingTooDeep()
   if (base(command.argv[0]) !== "fnox") return undefined
   const argv = command.argv
   let at = 1
+  // An explicit `-c`/`--config` loads files the resolver did not read.
+  const configured = !argv.some((word) => word === "-c" || word === "--config" || word.startsWith("--config="))
   for (; at < argv.length; at++) {
     const word = argv[at] as string
     const [flag] = word.split("=", 1) as [string]
@@ -329,7 +367,7 @@ export function fnoxRefusal(
   if (sub === "get" || sub === "export" || sub === "env") return "dump"
   if (sub === "list" || sub === "ls" || sub === "secrets")
     return hasFlag(args, "V", ["--values"]) ? "dump" : undefined
-  if (sub === "set" || sub === "s") return fnoxSetRefusal(command, at, inherited.literal || literalStdin(command))
+  if (sub === "set" || sub === "s") return fnoxSetRefusal(command, at, inherited.literal || literalStdin(command), inherited.stdin === true, types, configured)
   if (sub !== "exec") return undefined
   const start = execInner(args)
   if (start < 0) return undefined
@@ -339,6 +377,8 @@ export function fnoxRefusal(
   // The child inherits fnox's stdin and here-documents, through wrappers and nested fnox.
   const documents = [...inherited.documents, ...command.hereDocuments]
   const literal = inherited.literal || literalStdin(command)
+  const stdin =
+    inherited.stdin === true || command.stage > 0 || command.redirects.length > 0 || command.hereDocuments.length > 0
   const children = walkComplete(inner.map((word, i) => wordText(command, first + i) ?? quote(word)).join(" "))
   // A here-document fed to the shell left after the wrappers is that shell's script. The shell
   // reads all of stdin, so a parsed document is consumed: an inner level never gets it again.
@@ -351,7 +391,7 @@ export function fnoxRefusal(
     if (dumpsEnvironment(nested)) return "dump"
     const op = opRefusal(nested, allow, fed)
     if (op !== undefined) return op
-    return fnoxRefusal(nested, allow, { literal: fed, documents: rest, depth: inherited.depth + 1 })
+    return fnoxRefusal(nested, allow, { literal: fed, stdin, documents: rest, depth: inherited.depth + 1 }, types)
   }
   for (const nested of children) {
     const found = check(nested, literal || literalFed(nested, children))
@@ -373,11 +413,15 @@ const MESSAGES: Record<Verdict, string> = {
 }
 
 /** The op-guard verdict for a call's commands, or `undefined`. Fails closed when its own analysis throws. */
-export function opGuard(commands: readonly Command[], allow: readonly string[] = []): string | undefined {
+export function opGuard(
+  commands: readonly Command[],
+  allow: readonly string[] = [],
+  types: ProviderTypes = () => undefined,
+): string | undefined {
   try {
     for (const command of commands) {
       const fed = literalFed(command, commands)
-      const found = opRefusal(command, allow, fed) ?? fnoxRefusal(command, allow, { literal: fed, documents: [], depth: 0 })
+      const found = opRefusal(command, allow, fed) ?? fnoxRefusal(command, allow, { literal: fed, documents: [], depth: 0 }, types)
       if (found !== undefined) return MESSAGES[found]
     }
     return undefined
