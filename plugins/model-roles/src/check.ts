@@ -6,7 +6,7 @@
 
 import type { Derived } from "./catalog.ts"
 import { type GuardModel, tierNames } from "./guard.ts"
-import { type HealthState, healthEntry, healthView } from "./health.ts"
+import { type FailureReason, type HealthState, healthEntry, healthView } from "./health.ts"
 import {
   type AgentLike,
   type AvailableModel,
@@ -23,7 +23,7 @@ import { type TierMeta, tierOf } from "./tiers.ts"
 
 export type CandidateStatus =
   | { status: "available" }
-  | { status: "unhealthy"; until: number; reason: string }
+  | { status: "unhealthy"; until: number; reason: FailureReason }
   | { status: "unknown-id" }
   | { status: "unknown-variant"; variants: string[] }
   | { status: "provider-unavailable" }
@@ -164,7 +164,8 @@ function formatDerived(derived: Pick<Derived, "lineups" | "dropped">): string[] 
 
 const label = modelText
 
-function describe(candidate: CandidateReport): string {
+/** A candidate status in words, as the check prints it. */
+export function describeCandidate(candidate: CandidateStatus): string {
   switch (candidate.status) {
     case "available":
       return "available"
@@ -196,7 +197,7 @@ export function formatCheck(report: CheckReport): string {
         .join(", ")
       lines.push(`Tier ${role.role} (${facts}) → ${resolved}`)
     } else lines.push(`Role ${role.role} → ${resolved}`)
-    for (const candidate of role.candidates) lines.push(`  - ${candidate.entry}: ${describe(candidate)}`)
+    for (const candidate of role.candidates) lines.push(`  - ${candidate.entry}: ${describeCandidate(candidate)}`)
   }
   if (report.agents.length > 0) {
     lines.push("", "Agents:")

@@ -160,17 +160,29 @@ export function userPin(agent: AgentLike): ModelRef | undefined {
   return agent.model
 }
 
+/** Where an agent's tier comes from: the `agents` option, its request header, or a built-in default or classification. */
+export type AgentTierSource = "options" | "header" | "implicit"
+
+/** The tier an agent declares and where from: plugin options win over the request header, which wins over `implicit`. */
+export function agentTier(
+  agent: AgentLike,
+  agents: Readonly<Record<string, string>>,
+  implicit: Readonly<Record<string, string>> = {},
+): { tier: string; source: AgentTierSource } | undefined {
+  if (Object.hasOwn(agents, agent.id)) return { tier: agents[agent.id] as string, source: "options" }
+  const header = headerValue(agent, ROLE_HEADER)
+  if (header !== undefined) return { tier: header, source: "header" }
+  if (Object.hasOwn(implicit, agent.id)) return { tier: implicit[agent.id] as string, source: "implicit" }
+  return undefined
+}
+
 /** The tier an agent declares: plugin options win over the request header, which wins over `implicit`. */
 export function roleOf(
   agent: AgentLike,
   agents: Readonly<Record<string, string>>,
   implicit: Readonly<Record<string, string>> = {},
 ): string | undefined {
-  if (Object.hasOwn(agents, agent.id)) return agents[agent.id]
-  const header = headerValue(agent, ROLE_HEADER)
-  if (header !== undefined) return header
-  if (Object.hasOwn(implicit, agent.id)) return implicit[agent.id]
-  return undefined
+  return agentTier(agent, agents, implicit)?.tier
 }
 
 /**

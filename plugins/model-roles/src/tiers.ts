@@ -14,6 +14,7 @@ import {
   canonical,
   DEFAULT_PREMIUM,
   DEFAULT_TIER_EFFORT,
+  DERIVED_TIERS,
   type Derived,
   type DeriveOptions,
   deriveTiers,
@@ -104,11 +105,18 @@ export type TierSettings = {
 /** Where a tier's candidates come from. */
 export type TierSource = "config" | "roles" | "derived" | "strong" | "standard"
 
+/** Where a tier's effort comes from: its own setting, its built-in default, or its base tier. */
+export type EffortSource = "tier" | "builtin" | "base"
+
 export type TierMeta = {
   purpose: string
   /** A custom tier with no purpose of its own. */
   purposeMissing?: true
   effort?: string
+  effortFrom?: EffortSource
+  /** For `effort: "auto"`: the effort a spawn runs at when the decider does not pick one. */
+  autoFallback?: string
+  autoFallbackFrom?: Exclude<EffortSource, "tier">
   distinctVendor: boolean
   source: TierSource
   /** Cost class of the first available candidate, for the spawner. */
@@ -178,6 +186,47 @@ export function parseTierSettings(raw: unknown): TierSettings {
 
 /** The tier an alias (or a tier name) stands for. */
 export const tierOf = (name: string): string => TIER_ALIASES[name]?.tier ?? name
+
+/** The tier whose candidates a tier without its own borrows, and whose effort it inherits; none for the derived tiers. */
+export function baseTier(name: string): string | undefined {
+  if ((DERIVED_TIERS as readonly string[]).includes(name)) return undefined
+  return name === "reviewer" ? "strong" : "standard"
+}
+
+export type TierEffort = { effort?: string; from?: EffortSource }
+
+/** A tier's effort: its own setting, else its built-in default, else its base tier's effort. */
+export function tierEffort(settings: Pick<TierSettings, "tiers">, name: string): TierEffort {
+  const own = settings.tiers[name]?.effort
+  if (own !== undefined) return { effort: own, from: "tier" }
+  const builtin = DEFAULT_TIER_EFFORT[name]
+  if (builtin !== undefined) return { effort: builtin, from: "builtin" }
+  const base = baseTier(name)
+  const inherited = base === undefined ? undefined : tierEffort(settings, base).effort
+  return inherited === undefined ? {} : { effort: inherited, from: "base" }
+}
+
+/** The effort an `auto` tier runs at when the decider picks none: the effort it would have without `auto`. */
+export function autoFallbackEffort(settings: Pick<TierSettings, "tiers">, name: string): { effort: string; from: "builtin" | "base" } | undefined {
+  const builtin = DEFAULT_TIER_EFFORT[name]
+  if (builtin !== undefined) return { effort: builtin, from: "builtin" }
+  const base = baseTier(name)
+  if (base === undefined) return undefined
+  const inherited = tierEffort(settings, base).effort
+  if (inherited === undefined) return undefined
+  if (inherited !== "auto") return { effort: inherited, from: "base" }
+  const next = autoFallbackEffort(settings, base)
+  return next === undefined ? undefined : { effort: next.effort, from: "base" }
+}
+
+/** The candidates a tier's config (or the legacy role that seeds it) lists, as written, before any effort applies. */
+export function explicitCandidates(settings: TierSettings, name: string): string[] {
+  const config = settings.tiers[name]
+  if (Array.isArray(config?.model)) return [...config.model]
+  if (config?.model === "auto") return []
+  const seed = seedsOf(name).find((role) => Object.hasOwn(settings.legacy, role))
+  return seed === undefined ? [] : [...(settings.legacy[seed] ?? [])]
+}
 
 const findModel = (models: ReadonlyArray<CatalogModel>, ref: ModelRef): CatalogModel | undefined =>
   models.find((m) => m.providerID === ref.providerID && m.id === ref.id)
@@ -262,7 +311,7 @@ export function buildTiers(settings: TierSettings, models: ReadonlyArray<Catalog
   const derived = deriveTiers(usable, refs, settings.derive)
   const roles: Record<string, string[]> = {}
   const sources: Record<string, TierSource> = {}
-  const effortOf = (name: string): string | undefined => settings.tiers[name]?.effort ?? DEFAULT_TIER_EFFORT[name]
+  const effortOf = (name: string): string | undefined => tierEffort(settings, name).effort
 
   const customLegacy = Object.keys(settings.legacy).filter(
     (name) => !Object.hasOwn(TIER_ALIASES, name) && !INHERIT_NAMES.includes(name) && !(BUILTIN_TIERS as readonly string[]).includes(name),
@@ -299,8 +348,8 @@ export function buildTiers(settings: TierSettings, models: ReadonlyArray<Catalog
       roles[name] = list
       continue
     }
-    const base = name === "reviewer" ? "strong" : "standard"
-    sources[name] = base
+    const base = baseTier(name) ?? "standard"
+    sources[name] = base as TierSource
     roles[name] = withEffort(roles[base] ?? [], effortOf(name), usable)
   }
 
@@ -337,11 +386,50 @@ export function buildTiers(settings: TierSettings, models: ReadonlyArray<Catalog
     }
     if (purpose === undefined) meta.purposeMissing = true
     // A legacy role list is used verbatim, so no tier effort applies to it.
-    const effort = meta.source === "roles" ? config?.effort : effortOf(name)
-    if (effort !== undefined) meta.effort = effort
+    const effort = meta.source === "roles" ? { effort: config?.effort, from: "tier" as const } : tierEffort(settings, name)
+    if (effort.effort !== undefined) {
+      meta.effort = effort.effort
+      if (effort.from !== undefined) meta.effortFrom = effort.from
+    }
+    if (effort.effort === "auto") {
+      const fallback = autoFallbackEffort(settings, name)
+      if (fallback !== undefined) {
+        meta.autoFallback = fallback.effort
+        meta.autoFallbackFrom = fallback.from
+      }
+    }
     tiers[name] = meta
   }
   return { roles, tiers, classes, derived }
+}
+
+/** Candidates that do not run at their tier's effort, or are skipped for a variant their model lacks. */
+export function tierWarnings(settings: TierSettings, set: Pick<TierSet, "roles" | "tiers">, models: ReadonlyArray<CatalogModel>): string[] {
+  const out: string[] = []
+  for (const [name, meta] of Object.entries(set.tiers)) {
+    const effort = meta.effort
+    const explicit = new Set(explicitCandidates(settings, name))
+    for (const entry of set.roles[name] ?? []) {
+      const candidate = parseCandidate(entry)
+      if (candidate?.kind !== "model") continue
+      const model = findModel(models, candidate.ref)
+      // An id no provider lists shows up in the candidate statuses.
+      if (model === undefined) continue
+      const { variant } = candidate.ref
+      const variants = model.variants ?? []
+      if (variant !== undefined && !variants.some((v) => v.id === variant)) {
+        out.push(`Tier ${name}: ${entry} is skipped: the model has no variant ${variant}.`)
+        continue
+      }
+      if (effort === undefined || effort === "auto") continue
+      if (variant !== undefined) {
+        if (explicit.has(entry) && nearestVariant(variants, effort) !== variant)
+          out.push(`Tier ${name}: ${entry} sets its own variant, which wins over the tier effort ${effort}.`)
+      } else if (variants.length === 0) out.push(`Tier ${name}: ${entry} has no variants; it runs at the model default, not effort ${effort}.`)
+      else out.push(`Tier ${name}: ${entry} has no variant near effort ${effort}; it runs at the model default.`)
+    }
+  }
+  return out
 }
 
 /** The tier table entry for a tier or one of its aliases. */
@@ -361,6 +449,21 @@ export function rankOf(ref: Pick<ModelRef, "providerID" | "id">, classes: Readon
   return entry.premium ? 2 : entry.rank
 }
 
+/** Whether a tier puts candidates from another vendor than the caller's first. */
+const movesVendor = (options: Pick<Options, "roles" | "tiers">, name: string, callerVendor: string | undefined): callerVendor is string =>
+  tierMeta(options, name)?.distinctVendor === true && callerVendor !== undefined && Object.hasOwn(options.roles, name)
+
+/** A tier's model candidates, `@links` expanded, in the order it resolves them. */
+export function candidateOrder(options: Pick<Options, "roles" | "tiers">, name: string, callerVendor?: string): string[] {
+  const flat = expandRole(options.roles, name)
+  if (!movesVendor(options, name, callerVendor)) return flat
+  const other = flat.filter((entry) => {
+    const candidate = parseCandidate(entry)
+    return candidate?.kind === "model" && vendorOf(candidate.ref) !== callerVendor
+  })
+  return [...other, ...flat.filter((entry) => !other.includes(entry))]
+}
+
 /**
  * Resolve a tier (or alias). With `distinctVendor` and a known caller vendor, candidates
  * from another vendor come first; the rest keep their order behind them.
@@ -372,14 +475,6 @@ export function resolveTier(
   health?: HealthView,
   callerVendor?: string,
 ): Resolution {
-  const meta = tierMeta(options, name)
-  if (meta?.distinctVendor !== true || callerVendor === undefined || !Object.hasOwn(options.roles, name))
-    return resolveRole(options.roles, available, name, health)
-  const flat = expandRole(options.roles, name)
-  const other = flat.filter((entry) => {
-    const candidate = parseCandidate(entry)
-    return candidate?.kind === "model" && vendorOf(candidate.ref) !== callerVendor
-  })
-  const same = flat.filter((entry) => !other.includes(entry))
-  return resolveRole({ ...options.roles, [name]: [...other, ...same] }, available, name, health)
+  if (!movesVendor(options, name, callerVendor)) return resolveRole(options.roles, available, name, health)
+  return resolveRole({ ...options.roles, [name]: candidateOrder(options, name, callerVendor) }, available, name, health)
 }
