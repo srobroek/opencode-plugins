@@ -36,6 +36,37 @@ const BUILT_IN_ACTIONS: readonly string[] = [
   "todowrite",
 ]
 
+/**
+ * Tool namespaces that plugins in this repository or OpenCode itself register (`dep_apply`,
+ * `delivery_land`, `quality_test_*`, `lsp_*`, `opencode_*`). The option is for MCP server tools only,
+ * and some of these write or merge, so a pattern that could match one is refused. Keep in step with
+ * the plugins' tool names; `agent-tools.plugins.test.ts` fails when a plugin adds an uncovered one.
+ */
+export const RESERVED_TOOL_PREFIXES: readonly string[] = [
+  "cad_",
+  "claude_",
+  "dep_",
+  "delivery_",
+  "design_",
+  "example_",
+  "find_tools_",
+  "journey_",
+  "journeys_",
+  "lsp_",
+  "model_roles_",
+  "opencode_",
+  "parley_",
+  "quality_",
+  "repomix_",
+  "seance_",
+  "session_",
+  "sniff_",
+  "speckit_",
+  "subagent_",
+  "tui_",
+  "version_gap_",
+]
+
 function matches(value: string, pattern: string): boolean {
   const source = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replaceAll("*", ".*")
   return new RegExp(`^${source}$`, "s").test(value)
@@ -48,6 +79,13 @@ export function refusedTool(pattern: unknown): string | undefined {
   if (!/^[A-Za-z0-9_*-]+$/.test(value)) return "use only letters, digits, `_`, `-` and `*`"
   const builtIn = BUILT_IN_ACTIONS.find((action) => matches(action, value))
   if (builtIn !== undefined) return `matches the built-in action ${builtIn}`
+  const head = value.split("*")[0] ?? ""
+  if (head === "") return "must start with the MCP server name, not a wildcard"
+  const hasWildcard = value.includes("*")
+  const owner = RESERVED_TOOL_PREFIXES.find(
+    (prefix) => head.startsWith(prefix) || (hasWildcard && prefix.startsWith(head)),
+  )
+  if (owner !== undefined) return `could match ${owner}* tools from a plugin or OpenCode, not an MCP server`
   return undefined
 }
 

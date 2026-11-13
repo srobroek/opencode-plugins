@@ -28,6 +28,30 @@ var BUILT_IN_ACTIONS = [
   "websearch",
   "todowrite"
 ];
+var RESERVED_TOOL_PREFIXES = [
+  "cad_",
+  "claude_",
+  "dep_",
+  "delivery_",
+  "design_",
+  "example_",
+  "find_tools_",
+  "journey_",
+  "journeys_",
+  "lsp_",
+  "model_roles_",
+  "opencode_",
+  "parley_",
+  "quality_",
+  "repomix_",
+  "seance_",
+  "session_",
+  "sniff_",
+  "speckit_",
+  "subagent_",
+  "tui_",
+  "version_gap_"
+];
 function matches(value, pattern) {
   const source = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replaceAll("*", ".*");
   return new RegExp(`^${source}$`, "s").test(value);
@@ -41,6 +65,13 @@ function refusedTool(pattern) {
   const builtIn = BUILT_IN_ACTIONS.find((action) => matches(action, value));
   if (builtIn !== undefined)
     return `matches the built-in action ${builtIn}`;
+  const head = value.split("*")[0] ?? "";
+  if (head === "")
+    return "must start with the MCP server name, not a wildcard";
+  const hasWildcard = value.includes("*");
+  const owner = RESERVED_TOOL_PREFIXES.find((prefix) => head.startsWith(prefix) || hasWildcard && prefix.startsWith(head));
+  if (owner !== undefined)
+    return `could match ${owner}* tools from a plugin or OpenCode, not an MCP server`;
   return;
 }
 function parseToolsOption(raw, warn = (message) => console.warn(message)) {

@@ -35,6 +35,25 @@ describe("parseToolsOption", () => {
     expect(warnings[0]).toContain(reason)
   })
 
+  test.each([
+    ["dep_*", "plugin"],
+    ["dep_apply", "plugin"],
+    ["delivery_*", "plugin"],
+    ["de*", "plugin"],
+    ["dep*", "plugin"],
+    ["*_apply", "server"],
+    ["*", "built-in"],
+  ])("refuses the plugin tool pattern %p", (pattern, reason) => {
+    expect(refusedTool(pattern)).toContain(reason)
+  })
+
+  test.each(["context7_*", "aws-mcp_*", "context7_query-docs", "deploy_*", "depot_*", "demo-server_lookup"])(
+    "accepts the MCP pattern %p",
+    (pattern) => {
+      expect(refusedTool(pattern)).toBeUndefined()
+    },
+  )
+
   test("refuses a non-string entry and a non-array option", () => {
     const warnings: string[] = []
     expect(parseToolsOption([42, null], (message) => warnings.push(message))).toEqual([])
