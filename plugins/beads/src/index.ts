@@ -7,7 +7,7 @@ import { registerSkills } from "@srobroek/opencode-lib/skill-files"
 import { isShellTool, SHELL_TOOL, shellAliasInput } from "@srobroek/opencode-lib/tool-targets"
 import { bdInvocations, isMutatingBdCommand } from "./bd-actor-gate.ts"
 import { claimResultOutput } from "./bd-lease-gate.ts"
-import { sessionPinFor } from "./beads-store.ts"
+import { configuredStore, sessionPinFor } from "./beads-store.ts"
 import { contentionAdvisory, readClaimState, recordClaimTransitions } from "./claims.ts"
 import {
   type BdRun,
@@ -120,10 +120,29 @@ export type AdapterDeps = {
 export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<() => Promise<void>> {
   const options = ctx.options as Options
   const directory = ctx.location.directory
+  let store: string | undefined
+  try {
+    store = configuredStore(options, ctx.location.project?.directory ?? directory)
+  } catch (error) {
+    const refuse = () => { throw error }
+    const tool = await ctx.tool.hook("execute.before", (event) => {
+      if (isShellTool(event.tool) || event.tool === SUBAGENT_TOOL) refuse()
+    })
+    const shell = await ctx.shell.hook("create.before", refuse)
+    const context = await ctx.session.hook("context", refuse)
+    return async () => {
+      await tool.dispose()
+      await shell.dispose()
+      await context.dispose()
+    }
+  }
   const on = (gate: Parameters<typeof gateEnabled>[1]) => gateEnabled(options, gate)
   const admitter = new GateAdmitter(deps.run)
-  const pinFor = deps.pinFor ?? sessionPinFor
-  const baseEnv = (): NodeJS.ProcessEnv => deps.env ?? process.env
+  const pinFor = store === undefined ? (deps.pinFor ?? sessionPinFor) : () => store
+  const baseEnv = (): NodeJS.ProcessEnv => {
+    const env = deps.env ?? process.env
+    return store === undefined ? env : { ...env, ...EMBEDDED_PIN_ENV, BEADS_DIR: store }
+  }
   const pending = new Map<string, PendingCall>()
   const chains = new Map<string, Promise<SessionChain>>()
   const pins = new Map<string, { at: number; pin: string | undefined }>()
@@ -239,11 +258,11 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
   const routing = await registerAgentRouting(ctx, { run: deps.run, env: baseEnv })
 
   const pin = await ctx.shell.hook("create.before", (event) => {
-    if (!on("beads-dir-pin")) return
+    if (!on("beads-dir-pin") && store === undefined) return
     const cwd = isAbsolute(event.cwd) ? event.cwd : resolve(directory, event.cwd)
-    const store = shellPin(cwd, event.env, cachedPinFor)
-    if (store === undefined) return
-    Object.assign(event.env, EMBEDDED_PIN_ENV, { BEADS_DIR: store })
+    const selected = store ?? shellPin(cwd, event.env, cachedPinFor)
+    if (selected === undefined) return
+    Object.assign(event.env, EMBEDDED_PIN_ENV, { BEADS_DIR: selected })
   })
 
   const after = await ctx.tool.hook("execute.after", async (event) => {
