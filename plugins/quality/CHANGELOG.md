@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/srobroek/opencode-plugins/compare/quality--v0.7.0...quality--v0.8.0) (2026-11-13)
+
+
+### Features
+
+* **quality:** the test audit recommends drops, rewrites, simplifications, new tests and suite practices ([39eca1a](https://github.com/srobroek/opencode-plugins/commit/39eca1a29a13d09bb810320c2288c43ad06b0c6a))
+
 ## [0.7.0](https://github.com/srobroek/opencode-plugins/compare/quality--v0.6.0...quality--v0.7.0) (2026-11-12)
 
 
