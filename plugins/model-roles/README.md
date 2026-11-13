@@ -54,8 +54,11 @@ writes them for you.
     applied to every candidate without its own `#effort`, mapped to the nearest
     variant the model has (ties go lower; a model with no variants gets none).
     `"auto"` leaves the variant to the [auto decider](#auto-routing) per spawn when
-    `auto` is on, else to the model's default. Defaults: `cheap` low, `standard`
-    medium, `strong` and `reviewer` high; custom tiers none.
+    `auto` is on. When `auto` is off, or the decider fails, times out or gives no
+    valid effort, the spawn runs at the effort the tier would have without
+    `"auto"`. Defaults: `cheap` low, `standard` medium, `strong` and `reviewer`
+    high. A custom tier takes its base tier's effort (`standard`'s, configured or
+    built in) unless it sets its own. See [Precedence](#precedence).
   - `purpose`: when the spawner should pick the tier. The built-in tiers have
     texts of their own; set one for every custom tier, or `model_roles_check` warns.
   - `distinctVendor`: put candidates from another vendor than the calling
@@ -130,16 +133,43 @@ what they resolve to now, for the current session's location. Pick a tier, or
 - **Reset to auto**: a built-in tier loses its settings; a custom tier keeps only
   its purpose.
 
-Each answer is saved at once to `options.tiers` of the model-roles entry in the
-global config: `$OPENCODE_CONFIG_DIR`, else `$XDG_CONFIG_HOME/opencode`, else
-`~/.config/opencode`, in `opencode.jsonc` when it has the entry, else
+Before it writes, `/tiers` checks every model you picked against what the
+providers list:
+
+- A model no provider knows, or a `#variant` the model does not have, is refused
+  with an error, and nothing is written.
+- A known model that is not available now (its provider is not connected, or the
+  model is disabled) is saved with a warning.
+
+A save goes to `options.tiers` of the model-roles entry in the global config:
+`$OPENCODE_CONFIG_DIR`, else `$XDG_CONFIG_HOME/opencode`, else
+`~/.config/opencode`. The file is `opencode.jsonc` when it has the entry, else
 `opencode.json`. The edit keeps comments and formatting, and turns a bare string
-plugin entry into `{ "package": …, "options": … }`. OpenCode reloads the config
-on its own, so the new tiers apply without a restart. Spawns resolve the new
-tiers at once; the `tier` parameter's text and enum change only for sessions
-started after the edit, so running sessions keep their prompt cache. A config with no
-model-roles entry in the global files (for example, only in a project config) is
-not edited; `/tiers` says so.
+plugin entry into `{ "package": …, "options": … }`.
+
+### Live config
+
+The running plugin applies a save straight away. It reads the global file again,
+rebuilds the tiers, and moves the agents that are now on another model. On the
+host's `config.updated` event it does the same when the file's tiers changed, so
+a hand edit applies too. Spawns resolve the new tiers at once. The `tier`
+parameter's text and enum change only for sessions started after the edit, so
+running sessions keep their prompt cache.
+
+A config with no model-roles entry in the global files (for example, only in a
+project config) is not edited; `/tiers` says so. While that file has an entry,
+its tiers replace the ones the plugin got at startup each time they change.
+
+The dialog's `state` call takes an optional `draft`: tier name to a tier config,
+or `null` for a tier removed. The reply resolves the saved tiers with those edits
+on top, without saving them, so the dialog can show an edit before you keep it.
+The reply also has:
+
+- each candidate's status: available, unhealthy, unknown id or variant, or
+  provider unavailable;
+- every tiered agent with its tier and where the tier comes from (`options`,
+  `header`, or `implicit` for a built-in default or a classification);
+- what each agent resolves to, and its own model when that model pins it.
 
 The server side is the RPC `model-roles` (`state`, `set`), which scripts can call
 through `POST /api/rpc/model-roles/{state|set}` with `{ "input": … }`; `set` takes
@@ -240,7 +270,59 @@ Config and markdown agents load after user plugins. On `agent.updated`,
 `model.updated` and `provider.updated` the plugin re-registers its agent
 transform, which puts it last again; it still leaves pinned agents alone. It does this only when an agent's model is
 out of date or availability has changed. It gives up after three attempts in a
-row that don't converge.
+row that don't converge, logs which agents are still off their tier's model, and
+`model_roles_check` lists them under its warnings.
+
+## Precedence
+
+For each spawn, the first rule that applies decides the model and its variant:
+
+1. **Explicit model.** A `model` on the spawn wins over any `tier`.
+2. **Agent's own model.** A model pinned on the agent (`agents.<id>.model` in
+   config, or `model:` in an agent file) wins over the tier the agent declares and
+   over a `tier` the spawn passes. See [Model pins win over tiers](#model-pins-win-over-tiers).
+3. **Candidate variant.** A candidate written as `provider/model#variant` keeps
+   that variant, even when the tier's effort says otherwise. This holds within
+   the tier that lists it: a tier that borrows those candidates (`reviewer` from
+   `strong`, a custom tier from `standard`) sets them to its own effort.
+4. **Tier effort.** The tier's own `effort`, mapped to the nearest variant.
+5. **Built-in default.** `cheap` low, `standard` medium, `strong` and `reviewer`
+   high.
+6. **Base tier effort.** A custom tier with no effort of its own takes
+   `standard`'s, as configured, else as built in.
+7. **Model default.** A model with no variants, or none near the effort, runs
+   without one.
+
+`effort: "auto"` sits at rule 4: the [decider](#auto-routing) picks the variant per
+spawn, for a spawn that passes the tier, an agent that declares it, and an
+auto-routed spawn. When the decider cannot pick, the spawn falls back to rule 5,
+else 6, else 7. A candidate variant the tier itself lists (rule 3) still wins
+over `auto`; a variant that comes through an `@tier` link does not.
+
+The tier itself comes from the first of these that names one:
+
+1. the spawn's `tier`, or the old `role`;
+2. the agent's tier: the `agents` option, its header, or a built-in default or
+   classification;
+3. [auto routing](#auto-routing), for `general`.
+
+### Spawn receipts
+
+Each spawn the plugin routes leaves a receipt with:
+
+- the tier it asked for and where it came from (`tier` or `role` parameter, the
+  agent's tier, or auto routing), with the old role name if one was used;
+- the `provider/model#variant` it runs on;
+- the precedence rule that won;
+- the candidates it fell back past, with the reason (provider unavailable, unknown
+  id or variant, unhealthy);
+- warnings for settings that were dropped. That covers a spawn model or agent pin
+  over a tier, a candidate variant over the tier effort, a model with no variant
+  near the effort, and `auto` falling back.
+
+The last 50 receipts are kept in plugin storage. `model_roles_check` lists them
+newest first, one line each. Every warning also goes to the OpenCode log
+(`opencode.log`).
 
 ## Subagent model guard
 
@@ -437,7 +519,10 @@ Experimental, and off unless you set `auto`. When a fresh `general` spawn names
 no `model` and no `tier`, a small model picks a tier for it through
 `ctx.generate.text`. Other agents get a tier [once, from their
 description](#agents-that-declare-no-tier) instead. With `auto` on, a tier whose
-`effort` is `"auto"` also gets its variant from the decider on each spawn.
+`effort` is `"auto"` also gets its variant from the decider on each spawn: a
+spawn that passes the tier, an agent on that tier, and an auto-routed spawn. When
+the decider cannot pick, the tier's default effort applies (see
+[Precedence](#precedence)).
 
 ```jsonc
 "auto": {
@@ -488,11 +573,19 @@ candidates come from (`config`, `roles`, `derived`, or borrowed from `strong` or
 every candidate against `ctx.model.list()` across all providers, enabled or not,
 and reports one of: available, unknown id, unknown variant (listing the ones that
 exist), provider unavailable, unhealthy until a time, or a link to another tier.
-It also shows old role names with lists of their own, the model each tiered agent
-ends up on, the values the `subagent` tool's `tier` parameter offers with their
-purpose and cost class, warnings (a custom tier with no purpose, a tier with no
-candidates), the derived lineups, every model the derivation dropped grouped by
-reason, and the recent [auto routing](#auto-routing) decisions.
+It also shows:
+
+- old role names with lists of their own;
+- the model each tiered agent ends up on;
+- the values the `subagent` tool's `tier` parameter offers, with their purpose
+  and cost class;
+- warnings: a custom tier with no purpose, a tier with no candidates, a candidate
+  whose own variant wins over the tier effort, a candidate skipped for a variant
+  its model lacks, a model with no variant near the effort, and agents that
+  re-registering gave up on;
+- the derived lineups, and every model the derivation dropped, grouped by reason;
+- the recent [spawn receipts](#spawn-receipts) and [auto routing](#auto-routing)
+  decisions.
 
 The same check is exported for scripts: `checkRoles(options, models, agents,
 health?, now?, purposes?, derived?)` returns the report, and `formatCheck(report)`

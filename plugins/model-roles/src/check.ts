@@ -164,7 +164,8 @@ function formatDerived(derived: Pick<Derived, "lineups" | "dropped">): string[] 
 
 const label = modelText
 
-function describe(candidate: CandidateReport): string {
+/** A candidate status in words, as the check prints it. */
+export function describeCandidate(candidate: CandidateStatus): string {
   switch (candidate.status) {
     case "available":
       return "available"
@@ -196,7 +197,7 @@ export function formatCheck(report: CheckReport): string {
         .join(", ")
       lines.push(`Tier ${role.role} (${facts}) → ${resolved}`)
     } else lines.push(`Role ${role.role} → ${resolved}`)
-    for (const candidate of role.candidates) lines.push(`  - ${candidate.entry}: ${describe(candidate)}`)
+    for (const candidate of role.candidates) lines.push(`  - ${candidate.entry}: ${describeCandidate(candidate)}`)
   }
   if (report.agents.length > 0) {
     lines.push("", "Agents:")

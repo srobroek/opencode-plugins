@@ -21,7 +21,7 @@ import {
   withAutoTag,
 } from "./auto.ts"
 import { buildReferenceIndex, type CatalogModel, type Derived, nearestVariant, type ReferenceIndex, vendorOf } from "./catalog.ts"
-import { checkRoles, formatCheck } from "./check.ts"
+import { candidateStatus, checkRoles, formatCheck } from "./check.ts"
 import {
   AUTO_AGENT,
   agentHash,
@@ -73,12 +73,15 @@ import {
   readHealth,
   recordFailure,
 } from "./health.ts"
+import { hostWarn } from "./log.ts"
+import { explainSpawn, formatReceipts, pushReceipt, RECEIPTS_KEY, type Receipt, readReceipts, type SpawnRule, type SpawnSource } from "./receipt.ts"
 import {
   type AvailableModel,
   desiredModels,
   FALLBACK_HEADER,
   type ModelRef,
   type Options,
+  parseCandidate,
   parseOptions,
   ROLE_HEADER,
   resolveRole,
@@ -110,8 +113,22 @@ import {
   withRoleNote,
   withRoleParam,
 } from "./spawn-role.ts"
-import { buildTiers, parseTierConfig, parseTierSettings, rankOf, resolveTier, type TierConfig, tierMeta } from "./tiers.ts"
-import { compact, tierState } from "./tiers-ui.ts"
+import {
+  buildTiers,
+  candidateOrder,
+  explicitCandidates,
+  INHERIT_NAMES,
+  parseTierConfig,
+  parseTierSettings,
+  rankOf,
+  resolveTier,
+  TIER_ALIASES,
+  type TierConfig,
+  tierMeta,
+  tierOf,
+  tierWarnings,
+} from "./tiers.ts"
+import { applyDraft, compact, readDraft, TIER_NAME, tierState, validateTierConfig } from "./tiers-ui.ts"
 
 export * from "./auto.ts"
 export * from "./catalog.ts"
@@ -121,6 +138,7 @@ export * from "./config-edit.ts"
 export * from "./fallback.ts"
 export * from "./guard.ts"
 export * from "./health.ts"
+export * from "./receipt.ts"
 export * from "./resolve.ts"
 export { TiersRpc } from "./rpc.ts"
 export * from "./spawn-role.ts"
@@ -142,6 +160,8 @@ const REFRESH_EVENTS = new Set(["model.updated", "provider.updated"])
 const CHECK_EVENTS = new Set(["agent.updated", ...REFRESH_EVENTS])
 const FAILED_EVENT = "session.execution.failed"
 const CREATED_EVENT = "session.created"
+/** The host reloaded its config; a `/tiers` save or a hand edit of the global file lands here too. */
+const CONFIG_EVENT = "config.updated"
 
 /** How long a spawn waits to be matched with the child session it creates. */
 export const PENDING_SPAWN_MS = 10 * 60_000
@@ -202,7 +222,9 @@ function serial() {
 export default Plugin.define({
   id: "srobroek.model-roles",
   async setup(ctx) {
-    const settings = parseTierSettings(ctx.options)
+    // Bound to the fiber running setup, so it must come before the first await.
+    const warn = hostWarn(SOURCE)
+    let settings = parseTierSettings(ctx.options)
     const options: Options = { ...parseOptions(ctx.options), tiers: {}, classes: {}, implicit: {} }
     const runtime = parseRuntime(ctx.options, options)
     const guard = parseGuard(isRecord(ctx.options) ? ctx.options.guard : undefined)
@@ -210,6 +232,8 @@ export default Plugin.define({
     let available: GuardModel[] = []
     let availableKey = ""
     let refs: ReferenceIndex = new Map()
+    /** Every model the provider definitions know, connected or not, for validating `/tiers` saves. */
+    let catalog: CatalogModel[] = []
     let derived: Derived | undefined
     /** Cached classifications of agents that declare no tier, by agent id. */
     const classified: Record<string, Classification> = {}
@@ -229,7 +253,8 @@ export default Plugin.define({
     // subscription models. Read-only: nothing is edited.
     const references = await ctx.model.transform((editor) => {
       try {
-        refs = buildReferenceIndex(editor.provider.list().flatMap((definition) => [...definition.models.values()] as CatalogModel[]))
+        catalog = editor.provider.list().flatMap((definition) => [...definition.models.values()] as CatalogModel[])
+        refs = buildReferenceIndex(catalog)
       } catch {
         // Keep the last index.
       }
@@ -307,6 +332,8 @@ export default Plugin.define({
     }
     let registration = await ctx.agent.transform(apply)
     let attempts = 0
+    /** Agents still off their tier's model after re-registering gave up. */
+    let stuck: string[] = []
     const controller = new AbortController()
 
     // Config and markdown agents load after user plugins, so their `model:` can
@@ -327,11 +354,19 @@ export default Plugin.define({
       options.implicit = { ...options.implicit, ...late.implicit }
       if (late.pending.length > 0) scheduleClassify(late.pending)
       const desired: Map<string, ModelRef> = desiredModels(agents, options, available, view())
-      if (!force && staleAgents(agents, desired).length === 0) {
+      const stale = staleAgents(agents, desired)
+      if (!force && stale.length === 0) {
         attempts = 0
+        stuck = []
         return
       }
-      if (attempts >= MAX_REREGISTER || controller.signal.aborted) return
+      if (controller.signal.aborted) return
+      if (attempts >= MAX_REREGISTER) {
+        if (stale.join("\0") !== stuck.join("\0") && stale.length > 0)
+          warn(`re-registering gave up after ${MAX_REREGISTER} tries; agents ${stale.join(", ")} still run another model than their tier resolves to`)
+        stuck = stale
+        return
+      }
       attempts++
       const next = await ctx.agent.transform(apply)
       if (controller.signal.aborted) {
@@ -386,7 +421,7 @@ export default Plugin.define({
     }
 
     const notify = async (sessionID: string, text: string, kind: string) => {
-      console.warn(`${SOURCE}: ${text}`)
+      warn(text)
       try {
         await ctx.session.synthetic({
           sessionID,
@@ -471,6 +506,19 @@ export default Plugin.define({
     /** The role each child session was spawned with. */
     const childRoles = new Map<string, string>()
 
+    /** The last spawns this plugin routed, newest first. */
+    let receipts: Receipt[] = readReceipts(await ctx.storage.get(RECEIPTS_KEY).catch(() => undefined))
+    const recordReceipt = async (receipt: Receipt) => {
+      receipts = pushReceipt(receipts, receipt)
+      const asked = receipt.tier === undefined ? "" : ` (tier ${receipt.tier})`
+      for (const warning of receipt.warnings) warn(`spawn of '${receipt.agent}'${asked}: ${warning}`)
+      try {
+        await ctx.storage.set(RECEIPTS_KEY, receipts as never)
+      } catch {
+        // The in-memory receipts still show in the check.
+      }
+    }
+
     const recordChildRole = async (childID: string, role: string) => {
       if (childRoles.get(childID) === role) return
       childRoles.set(childID, role)
@@ -513,7 +561,7 @@ export default Plugin.define({
       const agent = agents.find((a) => a.id === session.agent)
       const failed = modelFromError(error.message ?? "") ?? (await runningModel(session, agents))
       if (failed === undefined) {
-        console.warn(`${SOURCE}: session ${sessionID} failed (${kind}) on an unknown model; nothing marked unhealthy`)
+        warn(`session ${sessionID} failed (${kind}) on an unknown model; nothing marked unhealthy`)
         return
       }
       const cooldownMs = await markFailed(failed, kind, error)
@@ -540,7 +588,7 @@ export default Plugin.define({
         return
       }
       if (cooldownMs > 0) await notify(sessionID, failureNote(facts), "fallback")
-      else console.warn(`${SOURCE}: session ${sessionID}: ${failureNote(facts)}`)
+      else warn(`session ${sessionID}: ${failureNote(facts)}`)
     }
 
     /**
@@ -578,7 +626,7 @@ export default Plugin.define({
       if (event.decision.retry || !retriesOnModel(kind, event.attempt, runtime.hostRetries)) return
       const delay = retryDelay(event.attempt)
       event.decision = { retry: true, delay }
-      console.warn(`${SOURCE}: session ${event.sessionID}: ${modelLabel(failed)} failed (${kind}); retrying it in ${duration(delay)}.`)
+      warn(`session ${event.sessionID}: ${modelLabel(failed)} failed (${kind}); retrying it in ${duration(delay)}.`)
     }
 
     /**
@@ -621,18 +669,18 @@ export default Plugin.define({
           const note = switchNote({ failed, kind, cooldownMs, target })
           if (outcome === "switched") {
             event.decision = { retry: true, delay: 0 }
-            console.warn(`${SOURCE}: session ${event.sessionID}: ${note}`)
+            warn(`session ${event.sessionID}: ${note}`)
             return
           }
-          console.warn(
-            `${SOURCE}: session ${event.sessionID}: switching to ${target.model.providerID}/${target.model.id} ${outcome === "late" ? "is still pending" : "failed"}.`,
+          warn(
+            `session ${event.sessionID}: switching to ${target.model.providerID}/${target.model.id} ${outcome === "late" ? "is still pending" : "failed"}.`,
           )
           // The switch did not happen this time: a transient failure still gets its retry.
           keepOnModel(event, kind, failed)
         })
       } catch (error) {
         // The host's own retry decision stands.
-        console.warn(`${SOURCE}: could not switch the failing request to another model`, error)
+        warn(`could not switch the failing request to another model`, { error: String(error) })
       }
     })
 
@@ -645,14 +693,19 @@ export default Plugin.define({
         name: CHECK_TOOL,
         description:
           "Read-only report of every model tier's candidates, the model each tiered agent resolves to, and recent routing.\n" +
-          "Lists every model tier's candidates with their status (available, unknown id, unknown variant, provider unavailable, unhealthy until a time) against all providers, the model each tiered agent resolves to, the tiers the subagent tool's `tier` parameter offers, the derived lineups and dropped models, and recent auto routing decisions.",
+          "Lists every model tier's candidates with their status (available, unknown id, unknown variant, provider unavailable, unhealthy until a time) against all providers, the model each tiered agent resolves to, the tiers the subagent tool's `tier` parameter offers, the derived lineups and dropped models, warnings about candidates that drop the tier effort, recent spawn receipts (tier and where from, model, winning precedence rule, fallbacks), and recent auto routing decisions.",
         input: { type: "object", properties: {}, additionalProperties: false },
         execute: async () => {
           await refresh()
           const agents = await listAgents()
           const report = checkRoles(options, available, agents, health, Date.now(), runtime.purposes, derived)
-          const content = [formatCheck(report), ...formatHistory(autoHistory)].join("\n")
-          return { content, metadata: { roles: report.roles.length, agents: report.agents.length, auto: autoHistory.length } }
+          report.warnings.push(...tierWarnings(settings, { roles: options.roles, tiers: options.tiers ?? {} }, available as CatalogModel[]))
+          if (stuck.length > 0)
+            report.warnings.push(
+              `Agents ${stuck.join(", ")} still run another model than their tier resolves to: re-registering gave up after ${MAX_REREGISTER} tries (a later plugin or config keeps setting their model).`,
+            )
+          const content = [formatCheck(report), ...formatReceipts(receipts), ...formatHistory(autoHistory)].join("\n")
+          return { content, metadata: { roles: report.roles.length, agents: report.agents.length, auto: autoHistory.length, spawns: receipts.length } }
         },
       })
     })
@@ -792,7 +845,7 @@ export default Plugin.define({
       const tier = reply.text === undefined ? undefined : parseClassification(reply.text, Object.keys(tiers))
       if (tier === undefined) {
         unclassifiable.add(`${agent.id}\0${hash}`)
-        console.warn(`${SOURCE}: could not classify agent '${agent.id}' (${reply.failure ?? "invalid reply"}); it runs on the standard tier for now`)
+        warn(`could not classify agent '${agent.id}' (${reply.failure ?? "invalid reply"}); it runs on the standard tier for now`)
         return true
       }
       const value: Classification = { hash, tier }
@@ -802,7 +855,7 @@ export default Plugin.define({
       } catch {
         // The in-memory classification still steers this instance.
       }
-      console.warn(`${SOURCE}: classified agent '${agent.id}' as tier ${tier}`)
+      warn(`classified agent '${agent.id}' as tier ${tier}`)
       return true
     }
 
@@ -819,7 +872,7 @@ export default Plugin.define({
               await check(true)
             })
           })
-          .catch((error) => console.warn(`${SOURCE}: classifying agent '${agent.id}' failed`, error))
+          .catch((error) => warn(`classifying agent '${agent.id}' failed`, { error: String(error) }))
           .finally(() => classifying.delete(key))
       }
     }
@@ -837,18 +890,41 @@ export default Plugin.define({
       }
     }
 
-    /** For a tier whose effort is `"auto"`, let the decider pick the model's variant. */
-    const withAutoEffort = async (
-      input: Record<string, unknown>,
-      role: string,
-      model: ModelRef,
-    ): Promise<{ input: Record<string, unknown>; model: ModelRef }> => {
-      if (auto === undefined || tierMeta(options, role)?.effort !== "auto") return { input, model }
+    /** What `withAutoEffort` decided, for the receipt: the rule, and why `auto` fell back if it did. */
+    type AutoEffort = { rule: SpawnRule; fallback?: string }
+    type Tuned = { input: Record<string, unknown>; model: ModelRef; effort?: AutoEffort }
+
+    /**
+     * For a tier whose effort is `"auto"`, let the decider pick the model's variant. When it
+     * cannot (auto routing off, no decider model, a failed, slow or invalid reply), the spawn
+     * runs at the effort the tier would have without `auto`. A candidate's own variant wins.
+     */
+    const withAutoEffort = async (input: Record<string, unknown>, role: string, model: ModelRef): Promise<Tuned> => {
+      const meta = tierMeta(options, role)
+      // An old role name with an effort of its own (`tiny`) keeps it.
+      if (meta?.effort !== "auto" || TIER_ALIASES[role]?.effort !== undefined) return { input, model }
+      // Only a variant the tier's own candidate names wins; one a linked tier set is the decider's to pick.
+      const explicit = explicitCandidates(settings, tierOf(role)).some((entry) => {
+        const candidate = parseCandidate(entry)
+        return candidate?.kind === "model" && candidate.ref.variant !== undefined && sameModel(candidate.ref, model)
+      })
+      if (explicit) return { input, model }
       const listed = available.find((m) => m.providerID === model.providerID && m.id === model.id)
       const variants = (listed?.variants ?? []).map((v) => v.id)
       if (variants.length === 0) return { input, model }
+      const at = (variant: string, effort: AutoEffort): Tuned => {
+        const next: ModelRef = { providerID: model.providerID, id: model.id, variant }
+        return { input: { ...input, model: modelLabel(next) }, model: next, effort }
+      }
+      const fallBack = (reason: string): Tuned => {
+        const fallback = `effort auto fell back to ${meta.autoFallback ?? "the model default"}: ${reason}`
+        const variant = meta.autoFallback === undefined ? undefined : nearestVariant(listed?.variants, meta.autoFallback)
+        if (variant === undefined) return { input, model, effort: { rule: "model-default", fallback } }
+        return at(variant, { rule: meta.autoFallbackFrom === "base" ? "base-tier-effort" : "builtin-effort", fallback })
+      }
+      if (auto === undefined) return fallBack("auto routing is off")
       const decider = deciderModel(auto, options, available, view())
-      if (decider === undefined) return { input, model }
+      if (decider === undefined) return fallBack("no decider model is available")
       const prompt = buildEffortPrompt({
         tier: role,
         variants,
@@ -856,11 +932,39 @@ export default Plugin.define({
         prompt: typeof input.prompt === "string" ? input.prompt : "",
       })
       const reply = await decide(auto, decider, prompt)
-      const effort = reply.text === undefined ? undefined : parseEffort(reply.text, variants)
-      if (effort === undefined) return { input, model }
-      const variant = nearestVariant(listed?.variants, effort) ?? effort
-      const next: ModelRef = { providerID: model.providerID, id: model.id, variant }
-      return { input: { ...input, model: modelLabel(next) }, model: next }
+      if (reply.failure !== undefined) return fallBack(`the decider ${reply.failure === "timeout" ? "timed out" : "failed"}`)
+      const effort = parseEffort(reply.text ?? "", variants)
+      if (effort === undefined) return fallBack("the decider gave no valid effort")
+      return at(nearestVariant(listed?.variants, effort) ?? effort, { rule: "auto-effort" })
+    }
+
+    /** Where a spawn's tier came from, and the old role name when it passed one. */
+    type Asked = { source: SpawnSource; name: string }
+
+    /** The receipt for a spawn that runs on a tier's model. */
+    const tierReceipt = (agent: string, asked: Asked, tuned: Tuned, callerVendor?: string): Receipt => {
+      const tier = tierOf(asked.name)
+      const aliasEffort = TIER_ALIASES[asked.name]?.effort
+      const base = tierMeta(options, asked.name)
+      const meta = base === undefined || aliasEffort === undefined ? base : { ...base, effort: aliasEffort, effortFrom: "tier" as const }
+      const explained = explainSpawn({
+        tier,
+        model: tuned.model,
+        meta,
+        explicit: explicitCandidates(settings, tier),
+        order: candidateOrder(options, asked.name, callerVendor),
+        models: available,
+        roles: options.roles,
+        health,
+        now: Date.now(),
+      })
+      const receipt: Receipt = { at: Date.now(), agent, source: asked.source, tier, model: modelLabel(tuned.model), ...explained }
+      if (asked.name !== tier) receipt.alias = asked.name
+      if (tuned.effort !== undefined) {
+        receipt.rule = tuned.effort.rule
+        if (tuned.effort.fallback !== undefined) receipt.warnings = [...receipt.warnings, tuned.effort.fallback]
+      }
+      return receipt
     }
 
     type Routed = { input: Record<string, unknown>; role: string; model: ModelRef }
@@ -926,65 +1030,117 @@ export default Plugin.define({
       const record: AutoRecord = { at: started, agent: target, role, reason: picked.reason, model: plan.model, ms: Date.now() - started }
       if (capped !== undefined) record.capped = capped
       autoHistory = pushHistory(autoHistory, record)
-      console.warn(`${SOURCE}: auto-routed '${target}' to role ${role} (${picked.reason}${capped ? `, capped from ${capped}` : ""})`)
+      warn(`auto-routed '${target}' to role ${role} (${picked.reason}${capped ? `, capped from ${capped}` : ""})`)
       return { input: { ...plan.input, description: withAutoTag(input.description, record) }, role, model: plan.model }
     }
 
-    /** The tier a spawn passes (`tier`, else the deprecated `role`). */
-    const passedTier = (input: unknown): string | undefined => {
+    /** The tier a spawn passes (`tier`, else the deprecated `role`), and which parameter it came in. */
+    const passedTier = (input: unknown): Asked | undefined => {
       if (!isRecord(input)) return undefined
-      for (const key of [TIER_PARAM, ROLE_PARAM]) {
+      for (const [key, source] of [
+        [TIER_PARAM, "tier-param"],
+        [ROLE_PARAM, "role-param"],
+      ] as const) {
         const value = input[key]
-        if (typeof value === "string" && value.trim() !== "") return value.trim()
+        if (typeof value === "string" && value.trim() !== "") return { name: value.trim(), source }
       }
       return undefined
     }
 
     const spawns = await ctx.tool.hook("execute.before", async (event) => {
       if (event.tool !== SUBAGENT_TOOL) return
-      const passed = passedTier(event.input)
+      const asked = passedTier(event.input)
+      const passed = asked?.name
       const named = spawnTarget(event.input)
       const agent = named === undefined ? undefined : (await listAgents().catch(() => [] as Agents)).find((a) => a.id === named)
       // A model the user pinned on the target wins over any tier, passed or its own.
-      const pinned = agent !== undefined && userPin(agent) !== undefined
+      const pin = agent === undefined ? undefined : userPin(agent)
+      const pinned = pin !== undefined
       const vendor = passed !== undefined && !pinned && tierMeta(options, passed)?.distinctVendor ? await callerVendor(event) : undefined
       let plan = planSpawn(event.input, options, available, view(), vendor, pinned)
       if (plan.error !== undefined) throw new Error(plan.error)
       if (plan.input !== event.input) event.input = plan.input
       const target = spawnTarget(plan.input)
       if (target === undefined) return
-      // An agent on a tier that wants another vendor than the caller's is moved per spawn.
-      if (plan.role === undefined && !pinned && inputModel(plan.input) === undefined && isRecord(plan.input)) {
-        const own = agent === undefined ? undefined : roleOf(agent, options.agents, options.implicit)
-        if (own !== undefined && tierMeta(options, own)?.distinctVendor) {
-          const model = resolveTier(options, available, own, view(), await callerVendor(event)).model
+      const own = agent === undefined ? undefined : roleOf(agent, options.agents, options.implicit)
+      const override = inputModel(plan.input)
+      // A passed tier that does not apply: the spawn's own model or the agent's pin wins.
+      const dropped = asked !== undefined && !INHERIT_NAMES.includes(asked.name) && plan.role === undefined ? asked : undefined
+      const bypassed: Asked | undefined = dropped ?? (own === undefined ? undefined : { source: "agent", name: own })
+      if (override !== undefined && bypassed !== undefined) {
+        const tier = tierOf(bypassed.name)
+        await recordReceipt({
+          at: Date.now(),
+          agent: target,
+          source: bypassed.source,
+          tier,
+          ...(bypassed.name === tier ? {} : { alias: bypassed.name }),
+          model: modelLabel(override),
+          rule: "explicit-model",
+          fallbacks: [],
+          warnings: [`the spawn's own model wins over tier ${tier}`],
+        })
+      } else if (override === undefined && pin !== undefined && bypassed !== undefined) {
+        const tier = tierOf(bypassed.name)
+        await recordReceipt({
+          at: Date.now(),
+          agent: target,
+          source: bypassed.source,
+          tier,
+          model: modelLabel(pin),
+          rule: "agent-pin",
+          fallbacks: [],
+          warnings: [`the agent's own model (config or frontmatter) wins over tier ${tier}`],
+        })
+      }
+      let source: SpawnSource | undefined = asked?.source
+      let tierName = passed
+      // An agent on a tier that wants another vendor than the caller's, or whose effort the decider picks, is moved per spawn.
+      if (plan.role === undefined && !pinned && override === undefined && isRecord(plan.input) && own !== undefined) {
+        const meta = tierMeta(options, own)
+        if (meta?.distinctVendor || meta?.effort === "auto") {
+          const callerVendorOf = meta.distinctVendor ? await callerVendor(event) : undefined
+          const model = resolveTier(options, available, own, view(), callerVendorOf).model
           if (model !== undefined) {
             plan = { input: { ...plan.input, model: modelLabel(model) }, role: own, model }
             event.input = plan.input
+            source = "agent"
+            tierName = own
           }
         }
       }
       if (plan.role !== undefined && plan.model !== undefined) {
-        let model = plan.model
+        let tuned: Tuned = { input: isRecord(plan.input) ? plan.input : {}, model: plan.model }
         if (isRecord(plan.input)) {
-          const tuned = await withAutoEffort(plan.input, plan.role, plan.model).catch(() => undefined)
-          if (tuned !== undefined) {
-            event.input = tuned.input
-            model = tuned.model
-          }
+          tuned = await withAutoEffort(plan.input, plan.role, plan.model).catch(() => ({ input: tuned.input, model: plan.model as ModelRef }))
+          event.input = tuned.input
         }
-        pending.set(event.id, { parentID: event.sessionID, agent: target, role: plan.role, model, at: Date.now() })
+        pending.set(event.id, { parentID: event.sessionID, agent: target, role: plan.role, model: tuned.model, at: Date.now() })
+        const vendorOfCaller = tierMeta(options, plan.role)?.distinctVendor ? await callerVendor(event) : undefined
+        await recordReceipt(tierReceipt(target, { source: source ?? "agent", name: tierName ?? plan.role }, tuned, vendorOfCaller))
         return
       }
-      const override = inputModel(plan.input)
       const unroled = override === undefined && plan.role === undefined
-      const accept = (routed: Routed) => {
-        event.input = routed.input
-        pending.set(event.id, { parentID: event.sessionID, agent: target, role: routed.role, model: routed.model, at: Date.now() })
+      const accept = async (routed: Routed) => {
+        const tuned = await withAutoEffort(routed.input, routed.role, routed.model).catch(() => ({ input: routed.input, model: routed.model }) as Tuned)
+        event.input = tuned.input
+        pending.set(event.id, { parentID: event.sessionID, agent: target, role: routed.role, model: tuned.model, at: Date.now() })
+        const vendorOfCaller = tierMeta(options, routed.role)?.distinctVendor ? await callerVendor(event) : undefined
+        await recordReceipt(tierReceipt(target, { source: "auto", name: routed.role }, tuned, vendorOfCaller))
       }
       if (unroled && auto !== undefined) {
         const routed = await route(event, target, plan.input, auto, false).catch(() => undefined)
         if (routed !== undefined) return accept(routed)
+      }
+      // An agent on its own tier runs the model this plugin set on it.
+      if (unroled && !pinned && own !== undefined && agent !== undefined) {
+        const model = resolveTier(options, available, own, view()).model
+        if (model !== undefined) {
+          const receipt = tierReceipt(target, { source: "agent", name: own }, { input: {}, model })
+          if (agent.model !== undefined && !sameModel(agent.model, model))
+            receipt.warnings = [...receipt.warnings, `the agent still runs ${modelLabel(agent.model)}: its model has not caught up with the tier`]
+          await recordReceipt(receipt)
+        }
       }
       const reason = await judge(event, target, override)
       if (reason === undefined) return
@@ -997,25 +1153,60 @@ export default Plugin.define({
 
     // The `/tiers` TUI dialog reads the tier table and writes `options.tiers` through these.
     const configDir = () => globalConfigDir(process.env, homedir())
+    const globalFile = () => {
+      try {
+        return pickConfigFile(readConfigFiles(configDir()))
+      } catch {
+        return undefined
+      }
+    }
+    const pluginOptions = isRecord(ctx.options) ? ctx.options : {}
+    /** The global file's tiers as last applied (or seen at setup), so an unrelated config change keeps the options this instance got. */
+    let fileTiers = (() => {
+      const file = globalFile()
+      return file === undefined ? undefined : JSON.stringify(readTiers(file.text))
+    })()
+
+    /**
+     * Apply the global file's tiers to the running instance when they changed (or always with
+     * `force`): resolution, agent models and the `tier` parameter for new sessions follow;
+     * running sessions keep the parameter they first saw.
+     */
+    const reloadTiers = async (force: boolean) => {
+      const file = globalFile()
+      if (file === undefined) return
+      const tiers = readTiers(file.text)
+      const key = JSON.stringify(tiers)
+      if (!force && key === fileTiers) return
+      settings = parseTierSettings({ ...pluginOptions, tiers })
+      rebuild()
+      attempts = 0
+      await check(true)
+      await refreshSubagentTool()
+      // Marked applied only once everything above went through, so a failed reload is retried on the next event.
+      fileTiers = key
+      warn(`applied the tiers from ${file.path}`)
+    }
+
     const rpc = await ctx.rpc.register(TiersRpc, {
-      state: async () => {
+      state: async (input) => {
         await queue(async () => {
           await refresh()
         })
-        const file = (() => {
-          try {
-            return pickConfigFile(readConfigFiles(configDir()))
-          } catch {
-            return undefined
-          }
-        })()
-        const configured: Record<string, TierConfig> = {}
-        for (const [name, value] of Object.entries(file === undefined ? settings.tiers : readTiers(file.text)))
-          configured[name] = parseTierConfig(value)
+        const file = globalFile()
+        const saved: Record<string, TierConfig> = {}
+        for (const [name, value] of Object.entries(file === undefined ? settings.tiers : readTiers(file.text))) saved[name] = parseTierConfig(value)
+        // The file with the draft laid over it, resolved fresh, so the dialog can preview an edit.
+        const configured = applyDraft(saved, readDraft(input))
+        const preview = buildTiers(parseTierSettings({ ...pluginOptions, tiers: configured }), available as CatalogModel[], refs)
+        const now = Date.now()
         return tierState({
-          options,
+          options: { ...options, roles: preview.roles, tiers: preview.tiers, classes: preview.classes },
           available,
           configured,
+          agents: await listAgents().catch(() => [] as Agents),
+          health: view(),
+          status: (entry) => candidateStatus(entry, available, preview.roles, health, now),
           ...(file === undefined
             ? { error: `No model-roles plugin entry in the global config (${configDir()}); /tiers cannot save.` }
             : { config: file.path }),
@@ -1023,11 +1214,18 @@ export default Plugin.define({
       },
       set: async (input) => {
         const { tier, value } = (input ?? {}) as { tier?: unknown; value?: unknown }
-        if (typeof tier !== "string" || !/^[a-z][a-z0-9-]*$/.test(tier)) throw new Error(`Invalid tier name ${JSON.stringify(tier)}`)
+        if (typeof tier !== "string" || !TIER_NAME.test(tier)) throw new Error(`Invalid tier name ${JSON.stringify(tier)}`)
         const config = value === null || value === undefined ? undefined : compact(parseTierConfig(value))
+        await queue(async () => {
+          await refresh()
+        })
+        const { errors, warnings } = validateTierConfig(config, available, catalog)
+        if (errors.length > 0) throw new Error(`Tier ${tier} not saved: ${errors.join(" ")}`)
         const result = writeTier(configDir(), tier, config)
-        console.warn(`${SOURCE}: ${config === undefined ? "removed" : "set"} tier ${tier} in ${result.path}`)
-        return result
+        warn(`${config === undefined ? "removed" : "set"} tier ${tier} in ${result.path}`)
+        for (const warning of warnings) warn(`tier ${tier}: ${warning}`)
+        await queue(() => reloadTiers(true))
+        return { ...result, warnings }
       },
     })
 
@@ -1062,7 +1260,7 @@ export default Plugin.define({
           await notifyParentOnce(event.sessionID, failed, subagentNote({ ...facts, agent: agentID, spawnRole: spawn?.role, resumable }))
         })
       } catch (error) {
-        console.warn(`${SOURCE}: could not record the subagent failure`, error)
+        warn(`could not record the subagent failure`, { error: String(error) })
       }
     })
 
@@ -1076,13 +1274,17 @@ export default Plugin.define({
           const sessionID = data.sessionID
           const error = data.error as { type?: string; message?: string; status?: number }
           await queue(() => onSessionFailed(sessionID, error)).catch((error) =>
-            console.warn(`${SOURCE}: fallback after a failed execution did not complete`, error),
+            warn(`fallback after a failed execution did not complete`, { error: String(error) }),
           )
           continue
         }
         if (type === CREATED_EVENT) {
           const data = (event as { data?: unknown }).data
           if (isRecord(data)) await onSessionCreated(data).catch(() => {})
+          continue
+        }
+        if (type === CONFIG_EVENT) {
+          await queue(() => reloadTiers(false)).catch((error) => warn("could not apply the reloaded config", { error: String(error) }))
           continue
         }
         if (typeof type !== "string" || !CHECK_EVENTS.has(type)) continue

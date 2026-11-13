@@ -6,12 +6,12 @@ export const RPC_ID = "model-roles"
 export const TiersRpc = Rpc.define({
   id: RPC_ID,
   methods: {
-    /** The tier table, the models this location can pick from, and the config file `set` writes. */
+    /** The current tier table, or a draft of it previewed: tier configs to try, `null` for a tier removed. */
     state: {
-      input: { type: "object", properties: {} },
+      input: { type: "object", properties: { draft: { type: "object" } } },
       output: { type: "object" },
     },
-    /** Set one tier's config (`value`), or remove it (`value` null), in the global config file. */
+    /** Set one tier's config (`value`), or remove it (`value` null), in the global config file; the running instance applies it. */
     set: {
       input: {
         type: "object",

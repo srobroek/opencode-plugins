@@ -12,6 +12,7 @@ import {
   resolveTier,
   TIER_PURPOSE,
   tierMeta,
+  tierWarnings,
   withEffort,
 } from "./tiers.ts"
 
@@ -82,6 +83,7 @@ describe("buildTiers", () => {
       source: "derived",
       cost: "metered, $0.1/M input tokens",
       effort: "low",
+      effortFrom: "builtin",
     })
     expect(set.tiers.reviewer?.distinctVendor).toBe(true)
     expect(set.tiers.reviewer?.source).toBe("strong")
@@ -108,6 +110,38 @@ describe("buildTiers", () => {
     const set = build({ tiers: { cheap: { effort: "auto" } } })
     expect(set.roles.cheap).toEqual([bedrock("anthropic.claude-haiku-5-5"), bedrock("openai.gpt-6-luna")])
     expect(set.tiers.cheap?.effort).toBe("auto")
+  })
+
+  test("a custom tier without an effort takes its base tier's effort, configured or built in", () => {
+    const own = build({ tiers: { coding: { model: [bedrock("openai.gpt-6.1-sol")], purpose: "code" } } })
+    expect(own.roles.coding).toEqual([bedrock("openai.gpt-6.1-sol", "medium")])
+    expect(own.tiers.coding).toMatchObject({ effort: "medium", effortFrom: "base" })
+    const borrowed = build({ tiers: { standard: { effort: "low" }, coding: { purpose: "code" } } })
+    expect(borrowed.roles.coding).toEqual([bedrock("openai.gpt-6.1-sol", "low"), bedrock("anthropic.claude-sonnet-5-5", "low")])
+    expect(borrowed.tiers.coding?.effort).toBe("low")
+  })
+
+  test("effort auto names the effort a spawn falls back to when the decider picks none", () => {
+    const set = build({ tiers: { cheap: { effort: "auto" }, coding: { effort: "auto" }, docs: { effort: "auto" }, standard: { effort: "auto" } } })
+    expect(set.tiers.cheap).toMatchObject({ autoFallback: "low", autoFallbackFrom: "builtin" })
+    expect(set.tiers.coding).toMatchObject({ autoFallback: "medium", autoFallbackFrom: "base" })
+    expect(build({ tiers: { standard: { effort: "high" }, docs: { effort: "auto" } } }).tiers.docs).toMatchObject({ autoFallback: "high" })
+    expect(set.tiers.strong?.autoFallback).toBeUndefined()
+  })
+
+  test("warnings name the candidates that drop the tier effort", () => {
+    const listed = [...models, { providerID: "opencode", id: "flint", variants: [] }]
+    const settings = parseTierSettings({
+      tiers: {
+        strong: { model: [bedrock("anthropic.claude-opus-5-5", "max"), bedrock("openai.gpt-6.1-sol", "bogus")], effort: "xhigh" },
+        cheap: { model: ["opencode/flint"] },
+      },
+    })
+    expect(tierWarnings(settings, buildTiers(settings, listed, refs), listed)).toEqual([
+      `Tier cheap: opencode/flint has no variants; it runs at the model default, not effort low.`,
+      `Tier strong: ${bedrock("anthropic.claude-opus-5-5", "max")} sets its own variant, which wins over the tier effort xhigh.`,
+      `Tier strong: ${bedrock("openai.gpt-6.1-sol", "bogus")} is skipped: the model has no variant bogus.`,
+    ])
   })
 
   test("the deprecated roles seed their tiers verbatim and keep their own names", () => {

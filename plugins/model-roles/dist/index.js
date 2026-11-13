@@ -104,15 +104,18 @@ function userPin(agent) {
     return;
   return agent.model;
 }
-function roleOf(agent, agents, implicit = {}) {
+function agentTier(agent, agents, implicit = {}) {
   if (Object.hasOwn(agents, agent.id))
-    return agents[agent.id];
+    return { tier: agents[agent.id], source: "options" };
   const header = headerValue(agent, ROLE_HEADER);
   if (header !== undefined)
-    return header;
+    return { tier: header, source: "header" };
   if (Object.hasOwn(implicit, agent.id))
-    return implicit[agent.id];
+    return { tier: implicit[agent.id], source: "implicit" };
   return;
+}
+function roleOf(agent, agents, implicit = {}) {
+  return agentTier(agent, agents, implicit)?.tier;
 }
 function desiredModels(agents, options, available, health) {
   const result = new Map;
@@ -748,6 +751,46 @@ function parseTierSettings(raw) {
   return { tiers, legacy, purposes, derive };
 }
 var tierOf = (name) => TIER_ALIASES[name]?.tier ?? name;
+function baseTier(name) {
+  if (DERIVED_TIERS.includes(name))
+    return;
+  return name === "reviewer" ? "strong" : "standard";
+}
+function tierEffort(settings, name) {
+  const own = settings.tiers[name]?.effort;
+  if (own !== undefined)
+    return { effort: own, from: "tier" };
+  const builtin = DEFAULT_TIER_EFFORT[name];
+  if (builtin !== undefined)
+    return { effort: builtin, from: "builtin" };
+  const base = baseTier(name);
+  const inherited = base === undefined ? undefined : tierEffort(settings, base).effort;
+  return inherited === undefined ? {} : { effort: inherited, from: "base" };
+}
+function autoFallbackEffort(settings, name) {
+  const builtin = DEFAULT_TIER_EFFORT[name];
+  if (builtin !== undefined)
+    return { effort: builtin, from: "builtin" };
+  const base = baseTier(name);
+  if (base === undefined)
+    return;
+  const inherited = tierEffort(settings, base).effort;
+  if (inherited === undefined)
+    return;
+  if (inherited !== "auto")
+    return { effort: inherited, from: "base" };
+  const next = autoFallbackEffort(settings, base);
+  return next === undefined ? undefined : { effort: next.effort, from: "base" };
+}
+function explicitCandidates(settings, name) {
+  const config = settings.tiers[name];
+  if (Array.isArray(config?.model))
+    return [...config.model];
+  if (config?.model === "auto")
+    return [];
+  const seed = seedsOf(name).find((role) => Object.hasOwn(settings.legacy, role));
+  return seed === undefined ? [] : [...settings.legacy[seed] ?? []];
+}
 var findModel = (models, ref) => models.find((m) => m.providerID === ref.providerID && m.id === ref.id);
 function withEffort(list, effort, models, keepExplicit = false) {
   if (effort === undefined)
@@ -826,7 +869,7 @@ function buildTiers(settings, models, refs) {
   const derived = deriveTiers(usable, refs, settings.derive);
   const roles = {};
   const sources = {};
-  const effortOf = (name) => settings.tiers[name]?.effort ?? DEFAULT_TIER_EFFORT[name];
+  const effortOf = (name) => tierEffort(settings, name).effort;
   const customLegacy = Object.keys(settings.legacy).filter((name) => !Object.hasOwn(TIER_ALIASES, name) && !INHERIT_NAMES.includes(name) && !BUILTIN_TIERS.includes(name));
   const custom = [...new Set([...Object.keys(settings.tiers), ...customLegacy])].filter((name) => !BUILTIN_TIERS.includes(name) && !Object.hasOwn(TIER_ALIASES, name)).sort();
   const names = [...BUILTIN_TIERS, ...custom];
@@ -857,7 +900,7 @@ function buildTiers(settings, models, refs) {
       roles[name] = list;
       continue;
     }
-    const base = name === "reviewer" ? "strong" : "standard";
+    const base = baseTier(name) ?? "standard";
     sources[name] = base;
     roles[name] = withEffort(roles[base] ?? [], effortOf(name), usable);
   }
@@ -892,12 +935,53 @@ function buildTiers(settings, models, refs) {
     };
     if (purpose === undefined)
       meta.purposeMissing = true;
-    const effort = meta.source === "roles" ? config?.effort : effortOf(name);
-    if (effort !== undefined)
-      meta.effort = effort;
+    const effort = meta.source === "roles" ? { effort: config?.effort, from: "tier" } : tierEffort(settings, name);
+    if (effort.effort !== undefined) {
+      meta.effort = effort.effort;
+      if (effort.from !== undefined)
+        meta.effortFrom = effort.from;
+    }
+    if (effort.effort === "auto") {
+      const fallback = autoFallbackEffort(settings, name);
+      if (fallback !== undefined) {
+        meta.autoFallback = fallback.effort;
+        meta.autoFallbackFrom = fallback.from;
+      }
+    }
     tiers[name] = meta;
   }
   return { roles, tiers, classes, derived };
+}
+function tierWarnings(settings, set, models) {
+  const out = [];
+  for (const [name, meta] of Object.entries(set.tiers)) {
+    const effort = meta.effort;
+    const explicit = new Set(explicitCandidates(settings, name));
+    for (const entry of set.roles[name] ?? []) {
+      const candidate = parseCandidate(entry);
+      if (candidate?.kind !== "model")
+        continue;
+      const model = findModel(models, candidate.ref);
+      if (model === undefined)
+        continue;
+      const { variant } = candidate.ref;
+      const variants = model.variants ?? [];
+      if (variant !== undefined && !variants.some((v) => v.id === variant)) {
+        out.push(`Tier ${name}: ${entry} is skipped: the model has no variant ${variant}.`);
+        continue;
+      }
+      if (effort === undefined || effort === "auto")
+        continue;
+      if (variant !== undefined) {
+        if (explicit.has(entry) && nearestVariant(variants, effort) !== variant)
+          out.push(`Tier ${name}: ${entry} sets its own variant, which wins over the tier effort ${effort}.`);
+      } else if (variants.length === 0)
+        out.push(`Tier ${name}: ${entry} has no variants; it runs at the model default, not effort ${effort}.`);
+      else
+        out.push(`Tier ${name}: ${entry} has no variant near effort ${effort}; it runs at the model default.`);
+    }
+  }
+  return out;
 }
 function tierMeta(options, name) {
   return options.tiers?.[name] ?? options.tiers?.[tierOf(name)];
@@ -911,17 +995,21 @@ function rankOf(ref, classes) {
     return;
   return entry.premium ? 2 : entry.rank;
 }
-function resolveTier(options, available, name, health, callerVendor) {
-  const meta = tierMeta(options, name);
-  if (meta?.distinctVendor !== true || callerVendor === undefined || !Object.hasOwn(options.roles, name))
-    return resolveRole(options.roles, available, name, health);
+var movesVendor = (options, name, callerVendor) => tierMeta(options, name)?.distinctVendor === true && callerVendor !== undefined && Object.hasOwn(options.roles, name);
+function candidateOrder(options, name, callerVendor) {
   const flat = expandRole(options.roles, name);
+  if (!movesVendor(options, name, callerVendor))
+    return flat;
   const other = flat.filter((entry) => {
     const candidate = parseCandidate(entry);
     return candidate?.kind === "model" && vendorOf(candidate.ref) !== callerVendor;
   });
-  const same = flat.filter((entry) => !other.includes(entry));
-  return resolveRole({ ...options.roles, [name]: [...other, ...same] }, available, name, health);
+  return [...other, ...flat.filter((entry) => !other.includes(entry))];
+}
+function resolveTier(options, available, name, health, callerVendor) {
+  if (!movesVendor(options, name, callerVendor))
+    return resolveRole(options.roles, available, name, health);
+  return resolveRole({ ...options.roles, [name]: candidateOrder(options, name, callerVendor) }, available, name, health);
 }
 
 // plugins/model-roles/src/guard.ts
@@ -1578,7 +1666,7 @@ function formatDerived(derived) {
   return lines;
 }
 var label3 = modelText;
-function describe(candidate) {
+function describeCandidate(candidate) {
   switch (candidate.status) {
     case "available":
       return "available";
@@ -1608,7 +1696,7 @@ function formatCheck(report) {
     } else
       lines.push(`Role ${role.role} \u2192 ${resolved}`);
     for (const candidate of role.candidates)
-      lines.push(`  - ${candidate.entry}: ${describe(candidate)}`);
+      lines.push(`  - ${candidate.entry}: ${describeCandidate(candidate)}`);
   }
   if (report.agents.length > 0) {
     lines.push("", "Agents:");
@@ -3097,6 +3185,114 @@ function writeTier(dir, name, value) {
   return { path: file.path, tiers: readTiers(next) };
 }
 
+// plugins/model-roles/src/log.ts
+import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
+function hostWarn(source) {
+  const services = Fiber.getCurrent()?.context;
+  return (message, data) => {
+    const text = `${source}: ${message}`;
+    if (services !== undefined) {
+      try {
+        Effect.runForkWith(services)(data === undefined ? Effect.logWarning(text) : Effect.logWarning(text, data));
+        return;
+      } catch {}
+    }
+    if (data === undefined)
+      console.warn(text);
+    else
+      console.warn(text, data);
+  };
+}
+
+// plugins/model-roles/src/receipt.ts
+var RECEIPTS_KEY = "receipts";
+var RECEIPT_LIMIT = 50;
+function pushReceipt(list, receipt, limit = RECEIPT_LIMIT) {
+  return [receipt, ...list].slice(0, limit);
+}
+var isRecord6 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+var isStrings = (value) => Array.isArray(value) && value.every((v) => typeof v === "string");
+function readReceipts(value) {
+  if (!Array.isArray(value))
+    return [];
+  return value.filter((r) => isRecord6(r) && typeof r.at === "number" && typeof r.agent === "string" && typeof r.source === "string" && typeof r.rule === "string" && isStrings(r.fallbacks) && isStrings(r.warnings));
+}
+var bare = (ref) => `${ref.providerID}/${ref.id}`;
+function explainSpawn(input) {
+  const { model, meta } = input;
+  const listed = input.models.find((m) => m.providerID === model.providerID && m.id === model.id);
+  const variants = listed?.variants ?? [];
+  const effort = meta?.effort === "auto" ? undefined : meta?.effort;
+  const warnings = [];
+  let rule;
+  if (model.variant !== undefined) {
+    const explicit = input.explicit.some((entry) => {
+      const candidate = parseCandidate(entry);
+      return candidate?.kind === "model" && bare(candidate.ref) === bare(model) && candidate.ref.variant === model.variant;
+    });
+    if (explicit || effort === undefined) {
+      rule = "candidate-variant";
+      if (effort !== undefined && nearestVariant(variants, effort) !== model.variant)
+        warnings.push(`${modelText(model)} sets its own variant, which wins over the tier effort ${effort}`);
+    } else
+      rule = meta?.effortFrom === "base" ? "base-tier-effort" : meta?.effortFrom === "builtin" ? "builtin-effort" : "tier-effort";
+  } else {
+    rule = "model-default";
+    if (effort !== undefined)
+      warnings.push(variants.length === 0 ? `${modelText(model)} has no variants; it runs at the model default, not effort ${effort}` : `${modelText(model)} has no variant near effort ${effort}; it runs at the model default`);
+  }
+  return { rule, fallbacks: fallbacksBefore(input), warnings };
+}
+function fallbacksBefore(input) {
+  const out = [];
+  for (const entry of input.order) {
+    const candidate = parseCandidate(entry);
+    if (candidate?.kind !== "model")
+      continue;
+    const { ref } = candidate;
+    if (bare(ref) === bare(input.model) && (ref.variant === undefined || ref.variant === input.model.variant))
+      break;
+    const status = candidateStatus(entry, input.models, input.roles, input.health, input.now);
+    if (status.status !== "available")
+      out.push(`${entry}: ${describeCandidate(status)}`);
+  }
+  return out;
+}
+var SOURCE_TEXT = {
+  "tier-param": "tier param",
+  "role-param": "role param",
+  agent: "agent tier",
+  auto: "auto routing"
+};
+var RULE_TEXT = {
+  "explicit-model": "explicit model",
+  "agent-pin": "the agent's own model",
+  "candidate-variant": "candidate variant",
+  "tier-effort": "tier effort",
+  "base-tier-effort": "base tier effort",
+  "builtin-effort": "built-in effort",
+  "auto-effort": "auto effort",
+  "model-default": "model default"
+};
+function formatReceipts(list) {
+  if (list.length === 0)
+    return [];
+  const lines = ["", "Recent spawns (newest first):"];
+  for (const r of list) {
+    const time = new Date(r.at).toISOString().slice(11, 19);
+    const source = SOURCE_TEXT[r.source] ?? r.source;
+    const asked = r.tier === undefined ? source : `tier ${r.tier} (${r.alias === undefined ? "" : `${r.alias}, `}${source})`;
+    const parts = [`${time} ${r.agent}: ${asked} \u2192 ${r.model ?? "the agent's model"} by ${RULE_TEXT[r.rule] ?? r.rule}`];
+    if (r.fallbacks.length > 0)
+      parts.push(`fell back past ${r.fallbacks.join(", ")}`);
+    for (const warning of r.warnings)
+      parts.push(`warning: ${warning}`);
+    lines.push(`  - ${parts.join("; ")}`);
+  }
+  return lines;
+}
+
 // plugins/model-roles/src/rpc.ts
 import { Rpc } from "@opencode/plugin/rpc";
 var RPC_ID = "model-roles";
@@ -3104,7 +3300,7 @@ var TiersRpc = Rpc.define({
   id: RPC_ID,
   methods: {
     state: {
-      input: { type: "object", properties: {} },
+      input: { type: "object", properties: { draft: { type: "object" } } },
       output: { type: "object" }
     },
     set: {
@@ -3121,8 +3317,12 @@ var TiersRpc = Rpc.define({
 
 // plugins/model-roles/src/tiers-ui.ts
 var EFFORT_CHOICES = ["auto", "none", "minimal", "low", "medium", "high", "xhigh", "max"];
-var isRecord6 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+var isRecord7 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 function tierState(input) {
+  const resolve = (name) => {
+    const model = resolveRole(input.options.roles, input.available, name, input.health).model;
+    return model === undefined ? undefined : modelText(model);
+  };
   const tiers = Object.entries(input.options.tiers ?? {}).map(([name, meta]) => {
     const row = {
       name,
@@ -3137,16 +3337,33 @@ function tierState(input) {
       row.effort = meta.effort;
     if (meta.purposeMissing)
       row.purposeMissing = true;
-    const resolved = resolveRole(input.options.roles, input.available, name).model;
+    const status = input.status;
+    if (status !== undefined)
+      row.health = row.candidates.map((entry) => ({ entry, ...status(entry) }));
+    const resolved = resolve(name);
     if (resolved !== undefined)
-      row.resolved = `${resolved.providerID}/${resolved.id}${resolved.variant ? `#${resolved.variant}` : ""}`;
+      row.resolved = resolved;
     const configured = input.configured[name];
     if (configured !== undefined)
       row.configured = configured;
     return row;
   });
+  const agents = [];
+  for (const agent of [...input.agents ?? []].sort((a, b) => a.id.localeCompare(b.id))) {
+    const found = agentTier(agent, input.options.agents, input.options.implicit);
+    if (found === undefined)
+      continue;
+    const row = { id: agent.id, tier: found.tier, source: found.source };
+    const resolved = resolve(found.tier);
+    if (resolved !== undefined)
+      row.resolved = resolved;
+    const pin = userPin(agent);
+    if (pin !== undefined)
+      row.pinned = modelText(pin);
+    agents.push(row);
+  }
   const models = input.available.filter((m) => m.enabled !== false).map((m) => ({ ref: `${m.providerID}/${m.id}`, variants: (m.variants ?? []).map((v) => v.id) })).sort((a, b) => a.ref.localeCompare(b.ref));
-  const state = { tiers, models };
+  const state = { tiers, models, agents };
   if (input.config !== undefined)
     state.config = input.config;
   if (input.error !== undefined)
@@ -3154,13 +3371,63 @@ function tierState(input) {
   return state;
 }
 function readState(value) {
-  if (!isRecord6(value) || !Array.isArray(value.tiers) || !Array.isArray(value.models))
+  if (!isRecord7(value) || !Array.isArray(value.tiers) || !Array.isArray(value.models))
     return;
-  return value;
+  return { ...value, agents: Array.isArray(value.agents) ? value.agents : [] };
+}
+var TIER_NAME = /^[a-z][a-z0-9-]*$/;
+function readDraft(input) {
+  const draft = isRecord7(input) && isRecord7(input.draft) ? input.draft : {};
+  const out = {};
+  for (const [name, value] of Object.entries(draft)) {
+    if (!TIER_NAME.test(name))
+      continue;
+    out[name] = value === null ? null : parseTierConfig(value);
+  }
+  return out;
+}
+function applyDraft(configured, draft) {
+  const out = { ...configured };
+  for (const [name, value] of Object.entries(draft)) {
+    if (value === null)
+      delete out[name];
+    else
+      out[name] = value;
+  }
+  return out;
+}
+function validateTierConfig(config, listed, catalog) {
+  const errors = [];
+  const warnings = [];
+  for (const entry of Array.isArray(config?.model) ? config.model : []) {
+    const candidate = parseCandidate(entry);
+    if (candidate === undefined) {
+      errors.push(`${JSON.stringify(entry)} is not provider/model, provider/model#variant or @tier.`);
+      continue;
+    }
+    if (candidate.kind === "role")
+      continue;
+    const { ref } = candidate;
+    const same = (m) => m.providerID === ref.providerID && m.id === ref.id;
+    const model = listed.find(same) ?? catalog.find(same);
+    const name = `${ref.providerID}/${ref.id}`;
+    if (model === undefined) {
+      errors.push(`Unknown model ${name}: no provider lists it.`);
+      continue;
+    }
+    const variants = (model.variants ?? []).map((v) => v.id);
+    if (ref.variant !== undefined && !variants.includes(ref.variant)) {
+      errors.push(`${name} has no variant ${ref.variant} (it has: ${variants.join(", ") || "none"}).`);
+      continue;
+    }
+    if (!listed.some((m) => same(m) && m.enabled !== false))
+      warnings.push(`${name} is not available now (provider not connected, or disabled); the tier skips it until it is.`);
+  }
+  return { errors, warnings };
 }
 function tierNameError(name, existing) {
   const text = name.trim();
-  if (!/^[a-z][a-z0-9-]*$/.test(text))
+  if (!TIER_NAME.test(text))
     return "Use lowercase letters, digits and dashes, starting with a letter.";
   if (existing.includes(text))
     return `Tier ${text} already exists.`;
@@ -3236,6 +3503,7 @@ var REFRESH_EVENTS = new Set(["model.updated", "provider.updated"]);
 var CHECK_EVENTS = new Set(["agent.updated", ...REFRESH_EVENTS]);
 var FAILED_EVENT = "session.execution.failed";
 var CREATED_EVENT = "session.created";
+var CONFIG_EVENT = "config.updated";
 var PENDING_SPAWN_MS = 10 * 60000;
 function withRoleField(input, description) {
   const schema = input;
@@ -3247,9 +3515,9 @@ function withRoleField(input, description) {
   return schema.mapFields((fields) => ({ ...fields, [TIER_PARAM]: tier, [ROLE_PARAM]: role }));
 }
 var SUBAGENT_TOOL = "subagent";
-var isRecord7 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+var isRecord8 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 function spawnTarget(input) {
-  if (!isRecord7(input) || typeof input.agent !== "string" || input.agent === "")
+  if (!isRecord8(input) || typeof input.agent !== "string" || input.agent === "")
     return;
   if (typeof input.sessionID === "string" && input.sessionID !== "")
     return;
@@ -3274,14 +3542,16 @@ function serial() {
 var src_default = Plugin.define({
   id: "srobroek.model-roles",
   async setup(ctx) {
-    const settings = parseTierSettings(ctx.options);
+    const warn = hostWarn(SOURCE);
+    let settings = parseTierSettings(ctx.options);
     const options = { ...parseOptions(ctx.options), tiers: {}, classes: {}, implicit: {} };
     const runtime = parseRuntime(ctx.options, options);
-    const guard2 = parseGuard(isRecord7(ctx.options) ? ctx.options.guard : undefined);
+    const guard2 = parseGuard(isRecord8(ctx.options) ? ctx.options.guard : undefined);
     let autoHistory = [];
     let available = [];
     let availableKey = "";
     let refs = new Map;
+    let catalog2 = [];
     let derived;
     const classified = {};
     const unclassifiable = new Set;
@@ -3295,7 +3565,8 @@ var src_default = Plugin.define({
     };
     const references = await ctx.model.transform((editor) => {
       try {
-        refs = buildReferenceIndex(editor.provider.list().flatMap((definition) => [...definition.models.values()]));
+        catalog2 = editor.provider.list().flatMap((definition) => [...definition.models.values()]);
+        refs = buildReferenceIndex(catalog2);
       } catch {}
     });
     let health2 = {};
@@ -3352,7 +3623,7 @@ ${refs.size}`;
       }
     };
     await refresh();
-    const auto2 = parseAuto(isRecord7(ctx.options) ? ctx.options.auto : undefined, options);
+    const auto2 = parseAuto(isRecord8(ctx.options) ? ctx.options.auto : undefined, options);
     const deciderSettings = auto2 ?? parseAuto(true, options);
     const guardAuto = guard2?.mode === "auto" ? deciderSettings : undefined;
     try {
@@ -3365,6 +3636,7 @@ ${refs.size}`;
     } catch {}
     let registration = await ctx.agent.transform(apply);
     let attempts = 0;
+    let stuck = [];
     const controller = new AbortController;
     const check2 = async (force) => {
       const agents = (await ctx.agent.list()).data;
@@ -3380,12 +3652,20 @@ ${refs.size}`;
       if (late.pending.length > 0)
         scheduleClassify(late.pending);
       const desired = desiredModels(agents, options, available, view());
-      if (!force && staleAgents(agents, desired).length === 0) {
+      const stale = staleAgents(agents, desired);
+      if (!force && stale.length === 0) {
         attempts = 0;
+        stuck = [];
         return;
       }
-      if (attempts >= MAX_REREGISTER || controller.signal.aborted)
+      if (controller.signal.aborted)
         return;
+      if (attempts >= MAX_REREGISTER) {
+        if (stale.join("\x00") !== stuck.join("\x00") && stale.length > 0)
+          warn(`re-registering gave up after ${MAX_REREGISTER} tries; agents ${stale.join(", ")} still run another model than their tier resolves to`);
+        stuck = stale;
+        return;
+      }
       attempts++;
       const next = await ctx.agent.transform(apply);
       if (controller.signal.aborted) {
@@ -3429,7 +3709,7 @@ ${refs.size}`;
       return record.cooldownMs;
     };
     const notify = async (sessionID, text, kind) => {
-      console.warn(`${SOURCE}: ${text}`);
+      warn(text);
       try {
         await ctx.session.synthetic({
           sessionID,
@@ -3495,6 +3775,18 @@ ${refs.size}`;
     const listAgents = async () => (await ctx.agent.list()).data;
     const pending = new Map;
     const childRoles = new Map;
+    let receipts = readReceipts(await ctx.storage.get(RECEIPTS_KEY).catch(() => {
+      return;
+    }));
+    const recordReceipt = async (receipt2) => {
+      receipts = pushReceipt(receipts, receipt2);
+      const asked = receipt2.tier === undefined ? "" : ` (tier ${receipt2.tier})`;
+      for (const warning of receipt2.warnings)
+        warn(`spawn of '${receipt2.agent}'${asked}: ${warning}`);
+      try {
+        await ctx.storage.set(RECEIPTS_KEY, receipts);
+      } catch {}
+    };
     const recordChildRole = async (childID, role) => {
       if (childRoles.get(childID) === role)
         return;
@@ -3513,7 +3805,7 @@ ${refs.size}`;
       return typeof stored === "string" && Object.hasOwn(options.roles, stored) ? stored : undefined;
     };
     const onSessionCreated = async (data) => {
-      if (typeof data.sessionID !== "string" || typeof data.parentID !== "string" || !isRecord7(data.model))
+      if (typeof data.sessionID !== "string" || typeof data.parentID !== "string" || !isRecord8(data.model))
         return;
       const model = data.model;
       const now = Date.now();
@@ -3540,7 +3832,7 @@ ${refs.size}`;
       const agent = agents.find((a) => a.id === session.agent);
       const failed = modelFromError(error.message ?? "") ?? await runningModel(session, agents);
       if (failed === undefined) {
-        console.warn(`${SOURCE}: session ${sessionID} failed (${kind}) on an unknown model; nothing marked unhealthy`);
+        warn(`session ${sessionID} failed (${kind}) on an unknown model; nothing marked unhealthy`);
         return;
       }
       const cooldownMs = await markFailed(failed, kind, error);
@@ -3565,7 +3857,7 @@ ${refs.size}`;
       if (cooldownMs > 0)
         await notify(sessionID, failureNote(facts), "fallback");
       else
-        console.warn(`${SOURCE}: session ${sessionID}: ${failureNote(facts)}`);
+        warn(`session ${sessionID}: ${failureNote(facts)}`);
     };
     const switching = new Map;
     const switchWithin = async (sessionID, model) => {
@@ -3588,7 +3880,7 @@ ${refs.size}`;
         return;
       const delay = retryDelay(event.attempt);
       event.decision = { retry: true, delay };
-      console.warn(`${SOURCE}: session ${event.sessionID}: ${modelLabel(failed)} failed (${kind}); retrying it in ${duration(delay)}.`);
+      warn(`session ${event.sessionID}: ${modelLabel(failed)} failed (${kind}); retrying it in ${duration(delay)}.`);
     };
     const triedModels = new Map;
     const retries = await ctx.session.hook("retry", async (event) => {
@@ -3628,14 +3920,14 @@ ${refs.size}`;
           const note = switchNote({ failed, kind, cooldownMs, target });
           if (outcome === "switched") {
             event.decision = { retry: true, delay: 0 };
-            console.warn(`${SOURCE}: session ${event.sessionID}: ${note}`);
+            warn(`session ${event.sessionID}: ${note}`);
             return;
           }
-          console.warn(`${SOURCE}: session ${event.sessionID}: switching to ${target.model.providerID}/${target.model.id} ${outcome === "late" ? "is still pending" : "failed"}.`);
+          warn(`session ${event.sessionID}: switching to ${target.model.providerID}/${target.model.id} ${outcome === "late" ? "is still pending" : "failed"}.`);
           keepOnModel(event, kind, failed);
         });
       } catch (error) {
-        console.warn(`${SOURCE}: could not switch the failing request to another model`, error);
+        warn(`could not switch the failing request to another model`, { error: String(error) });
       }
     });
     const strip = await ctx.session.hook("model.request", (request) => {
@@ -3645,15 +3937,18 @@ ${refs.size}`;
       editor.add({
         name: CHECK_TOOL,
         description: `Read-only report of every model tier's candidates, the model each tiered agent resolves to, and recent routing.
-` + "Lists every model tier's candidates with their status (available, unknown id, unknown variant, provider unavailable, unhealthy until a time) against all providers, the model each tiered agent resolves to, the tiers the subagent tool's `tier` parameter offers, the derived lineups and dropped models, and recent auto routing decisions.",
+` + "Lists every model tier's candidates with their status (available, unknown id, unknown variant, provider unavailable, unhealthy until a time) against all providers, the model each tiered agent resolves to, the tiers the subagent tool's `tier` parameter offers, the derived lineups and dropped models, warnings about candidates that drop the tier effort, recent spawn receipts (tier and where from, model, winning precedence rule, fallbacks), and recent auto routing decisions.",
         input: { type: "object", properties: {}, additionalProperties: false },
         execute: async () => {
           await refresh();
           const agents = await listAgents();
           const report = checkRoles(options, available, agents, health2, Date.now(), runtime.purposes, derived);
-          const content = [formatCheck(report), ...formatHistory(autoHistory)].join(`
+          report.warnings.push(...tierWarnings(settings, { roles: options.roles, tiers: options.tiers ?? {} }, available));
+          if (stuck.length > 0)
+            report.warnings.push(`Agents ${stuck.join(", ")} still run another model than their tier resolves to: re-registering gave up after ${MAX_REREGISTER} tries (a later plugin or config keeps setting their model).`);
+          const content = [formatCheck(report), ...formatReceipts(receipts), ...formatHistory(autoHistory)].join(`
 `);
-          return { content, metadata: { roles: report.roles.length, agents: report.agents.length, auto: autoHistory.length } };
+          return { content, metadata: { roles: report.roles.length, agents: report.agents.length, auto: autoHistory.length, spawns: receipts.length } };
         }
       });
     });
@@ -3766,7 +4061,7 @@ ${refs.size}`;
       const tier = reply.text === undefined ? undefined : parseClassification(reply.text, Object.keys(tiers2));
       if (tier === undefined) {
         unclassifiable.add(`${agent.id}\x00${hash}`);
-        console.warn(`${SOURCE}: could not classify agent '${agent.id}' (${reply.failure ?? "invalid reply"}); it runs on the standard tier for now`);
+        warn(`could not classify agent '${agent.id}' (${reply.failure ?? "invalid reply"}); it runs on the standard tier for now`);
         return true;
       }
       const value = { hash, tier };
@@ -3774,7 +4069,7 @@ ${refs.size}`;
       try {
         await ctx.storage.set(storageKey, value);
       } catch {}
-      console.warn(`${SOURCE}: classified agent '${agent.id}' as tier ${tier}`);
+      warn(`classified agent '${agent.id}' as tier ${tier}`);
       return true;
     };
     scheduleClassify = (agents) => {
@@ -3790,7 +4085,7 @@ ${refs.size}`;
             attempts = 0;
             await check2(true);
           });
-        }).catch((error) => console.warn(`${SOURCE}: classifying agent '${agent.id}' failed`, error)).finally(() => classifying.delete(key));
+        }).catch((error) => warn(`classifying agent '${agent.id}' failed`, { error: String(error) })).finally(() => classifying.delete(key));
       }
     };
     scheduleClassify(unscheduled);
@@ -3805,15 +4100,35 @@ ${refs.size}`;
       }
     };
     const withAutoEffort = async (input, role, model) => {
-      if (auto2 === undefined || tierMeta(options, role)?.effort !== "auto")
+      const meta = tierMeta(options, role);
+      if (meta?.effort !== "auto" || TIER_ALIASES[role]?.effort !== undefined)
+        return { input, model };
+      const explicit = explicitCandidates(settings, tierOf(role)).some((entry) => {
+        const candidate = parseCandidate(entry);
+        return candidate?.kind === "model" && candidate.ref.variant !== undefined && sameModel(candidate.ref, model);
+      });
+      if (explicit)
         return { input, model };
       const listed = available.find((m) => m.providerID === model.providerID && m.id === model.id);
       const variants = (listed?.variants ?? []).map((v) => v.id);
       if (variants.length === 0)
         return { input, model };
+      const at = (variant, effort) => {
+        const next = { providerID: model.providerID, id: model.id, variant };
+        return { input: { ...input, model: modelLabel(next) }, model: next, effort };
+      };
+      const fallBack = (reason) => {
+        const fallback2 = `effort auto fell back to ${meta.autoFallback ?? "the model default"}: ${reason}`;
+        const variant = meta.autoFallback === undefined ? undefined : nearestVariant(listed?.variants, meta.autoFallback);
+        if (variant === undefined)
+          return { input, model, effort: { rule: "model-default", fallback: fallback2 } };
+        return at(variant, { rule: meta.autoFallbackFrom === "base" ? "base-tier-effort" : "builtin-effort", fallback: fallback2 });
+      };
+      if (auto2 === undefined)
+        return fallBack("auto routing is off");
       const decider = deciderModel(auto2, options, available, view());
       if (decider === undefined)
-        return { input, model };
+        return fallBack("no decider model is available");
       const prompt = buildEffortPrompt({
         tier: role,
         variants,
@@ -3821,19 +4136,45 @@ ${refs.size}`;
         prompt: typeof input.prompt === "string" ? input.prompt : ""
       });
       const reply = await decide(auto2, decider, prompt);
-      const effort = reply.text === undefined ? undefined : parseEffort(reply.text, variants);
+      if (reply.failure !== undefined)
+        return fallBack(`the decider ${reply.failure === "timeout" ? "timed out" : "failed"}`);
+      const effort = parseEffort(reply.text ?? "", variants);
       if (effort === undefined)
-        return { input, model };
-      const variant = nearestVariant(listed?.variants, effort) ?? effort;
-      const next = { providerID: model.providerID, id: model.id, variant };
-      return { input: { ...input, model: modelLabel(next) }, model: next };
+        return fallBack("the decider gave no valid effort");
+      return at(nearestVariant(listed?.variants, effort) ?? effort, { rule: "auto-effort" });
+    };
+    const tierReceipt = (agent, asked, tuned, callerVendor) => {
+      const tier = tierOf(asked.name);
+      const aliasEffort = TIER_ALIASES[asked.name]?.effort;
+      const base = tierMeta(options, asked.name);
+      const meta = base === undefined || aliasEffort === undefined ? base : { ...base, effort: aliasEffort, effortFrom: "tier" };
+      const explained = explainSpawn({
+        tier,
+        model: tuned.model,
+        meta,
+        explicit: explicitCandidates(settings, tier),
+        order: candidateOrder(options, asked.name, callerVendor),
+        models: available,
+        roles: options.roles,
+        health: health2,
+        now: Date.now()
+      });
+      const receipt2 = { at: Date.now(), agent, source: asked.source, tier, model: modelLabel(tuned.model), ...explained };
+      if (asked.name !== tier)
+        receipt2.alias = asked.name;
+      if (tuned.effort !== undefined) {
+        receipt2.rule = tuned.effort.rule;
+        if (tuned.effort.fallback !== undefined)
+          receipt2.warnings = [...receipt2.warnings, tuned.effort.fallback];
+      }
+      return receipt2;
     };
     const route = async (event, target, input, settings, cheapOnly) => {
       const agents = await listAgents();
       const agent = agents.find((a) => a.id === target);
       if (!cheapOnly && target !== AUTO_AGENT)
         return;
-      if (!autoEligible(input, agent, options) || !isRecord7(input))
+      if (!autoEligible(input, agent, options) || !isRecord8(input))
         return;
       const health2 = view();
       const choices = choicesFor(settings.roles, options, available, runtime.purposes).filter((choice) => {
@@ -3881,32 +4222,37 @@ ${refs.size}`;
       }
       const vendor = tierMeta(options, role)?.distinctVendor ? await callerVendor(event) : undefined;
       const plan = planSpawn({ ...input, tier: role }, options, available, health2, vendor);
-      if (plan.model === undefined || !isRecord7(plan.input))
+      if (plan.model === undefined || !isRecord8(plan.input))
         return;
       const record = { at: started, agent: target, role, reason: picked.reason, model: plan.model, ms: Date.now() - started };
       if (capped !== undefined)
         record.capped = capped;
       autoHistory = pushHistory(autoHistory, record);
-      console.warn(`${SOURCE}: auto-routed '${target}' to role ${role} (${picked.reason}${capped ? `, capped from ${capped}` : ""})`);
+      warn(`auto-routed '${target}' to role ${role} (${picked.reason}${capped ? `, capped from ${capped}` : ""})`);
       return { input: { ...plan.input, description: withAutoTag(input.description, record) }, role, model: plan.model };
     };
     const passedTier = (input) => {
-      if (!isRecord7(input))
+      if (!isRecord8(input))
         return;
-      for (const key of [TIER_PARAM, ROLE_PARAM]) {
+      for (const [key, source] of [
+        [TIER_PARAM, "tier-param"],
+        [ROLE_PARAM, "role-param"]
+      ]) {
         const value = input[key];
         if (typeof value === "string" && value.trim() !== "")
-          return value.trim();
+          return { name: value.trim(), source };
       }
       return;
     };
     const spawns = await ctx.tool.hook("execute.before", async (event) => {
       if (event.tool !== SUBAGENT_TOOL)
         return;
-      const passed = passedTier(event.input);
+      const asked = passedTier(event.input);
+      const passed = asked?.name;
       const named = spawnTarget(event.input);
       const agent = named === undefined ? undefined : (await listAgents().catch(() => [])).find((a) => a.id === named);
-      const pinned = agent !== undefined && userPin(agent) !== undefined;
+      const pin = agent === undefined ? undefined : userPin(agent);
+      const pinned = pin !== undefined;
       const vendor = passed !== undefined && !pinned && tierMeta(options, passed)?.distinctVendor ? await callerVendor(event) : undefined;
       let plan = planSpawn(event.input, options, available, view(), vendor, pinned);
       if (plan.error !== undefined)
@@ -3916,35 +4262,69 @@ ${refs.size}`;
       const target = spawnTarget(plan.input);
       if (target === undefined)
         return;
-      if (plan.role === undefined && !pinned && inputModel(plan.input) === undefined && isRecord7(plan.input)) {
-        const own = agent === undefined ? undefined : roleOf(agent, options.agents, options.implicit);
-        if (own !== undefined && tierMeta(options, own)?.distinctVendor) {
-          const model = resolveTier(options, available, own, view(), await callerVendor(event)).model;
+      const own = agent === undefined ? undefined : roleOf(agent, options.agents, options.implicit);
+      const override = inputModel(plan.input);
+      const dropped = asked !== undefined && !INHERIT_NAMES.includes(asked.name) && plan.role === undefined ? asked : undefined;
+      const bypassed = dropped ?? (own === undefined ? undefined : { source: "agent", name: own });
+      if (override !== undefined && bypassed !== undefined) {
+        const tier = tierOf(bypassed.name);
+        await recordReceipt({
+          at: Date.now(),
+          agent: target,
+          source: bypassed.source,
+          tier,
+          ...bypassed.name === tier ? {} : { alias: bypassed.name },
+          model: modelLabel(override),
+          rule: "explicit-model",
+          fallbacks: [],
+          warnings: [`the spawn's own model wins over tier ${tier}`]
+        });
+      } else if (override === undefined && pin !== undefined && bypassed !== undefined) {
+        const tier = tierOf(bypassed.name);
+        await recordReceipt({
+          at: Date.now(),
+          agent: target,
+          source: bypassed.source,
+          tier,
+          model: modelLabel(pin),
+          rule: "agent-pin",
+          fallbacks: [],
+          warnings: [`the agent's own model (config or frontmatter) wins over tier ${tier}`]
+        });
+      }
+      let source = asked?.source;
+      let tierName = passed;
+      if (plan.role === undefined && !pinned && override === undefined && isRecord8(plan.input) && own !== undefined) {
+        const meta = tierMeta(options, own);
+        if (meta?.distinctVendor || meta?.effort === "auto") {
+          const callerVendorOf = meta.distinctVendor ? await callerVendor(event) : undefined;
+          const model = resolveTier(options, available, own, view(), callerVendorOf).model;
           if (model !== undefined) {
             plan = { input: { ...plan.input, model: modelLabel(model) }, role: own, model };
             event.input = plan.input;
+            source = "agent";
+            tierName = own;
           }
         }
       }
       if (plan.role !== undefined && plan.model !== undefined) {
-        let model = plan.model;
-        if (isRecord7(plan.input)) {
-          const tuned = await withAutoEffort(plan.input, plan.role, plan.model).catch(() => {
-            return;
-          });
-          if (tuned !== undefined) {
-            event.input = tuned.input;
-            model = tuned.model;
-          }
+        let tuned = { input: isRecord8(plan.input) ? plan.input : {}, model: plan.model };
+        if (isRecord8(plan.input)) {
+          tuned = await withAutoEffort(plan.input, plan.role, plan.model).catch(() => ({ input: tuned.input, model: plan.model }));
+          event.input = tuned.input;
         }
-        pending.set(event.id, { parentID: event.sessionID, agent: target, role: plan.role, model, at: Date.now() });
+        pending.set(event.id, { parentID: event.sessionID, agent: target, role: plan.role, model: tuned.model, at: Date.now() });
+        const vendorOfCaller = tierMeta(options, plan.role)?.distinctVendor ? await callerVendor(event) : undefined;
+        await recordReceipt(tierReceipt(target, { source: source ?? "agent", name: tierName ?? plan.role }, tuned, vendorOfCaller));
         return;
       }
-      const override = inputModel(plan.input);
       const unroled = override === undefined && plan.role === undefined;
-      const accept = (routed) => {
-        event.input = routed.input;
-        pending.set(event.id, { parentID: event.sessionID, agent: target, role: routed.role, model: routed.model, at: Date.now() });
+      const accept = async (routed) => {
+        const tuned = await withAutoEffort(routed.input, routed.role, routed.model).catch(() => ({ input: routed.input, model: routed.model }));
+        event.input = tuned.input;
+        pending.set(event.id, { parentID: event.sessionID, agent: target, role: routed.role, model: tuned.model, at: Date.now() });
+        const vendorOfCaller = tierMeta(options, routed.role)?.distinctVendor ? await callerVendor(event) : undefined;
+        await recordReceipt(tierReceipt(target, { source: "auto", name: routed.role }, tuned, vendorOfCaller));
       };
       if (unroled && auto2 !== undefined) {
         const routed = await route(event, target, plan.input, auto2, false).catch(() => {
@@ -3952,6 +4332,15 @@ ${refs.size}`;
         });
         if (routed !== undefined)
           return accept(routed);
+      }
+      if (unroled && !pinned && own !== undefined && agent !== undefined) {
+        const model = resolveTier(options, available, own, view()).model;
+        if (model !== undefined) {
+          const receipt2 = tierReceipt(target, { source: "agent", name: own }, { input: {}, model });
+          if (agent.model !== undefined && !sameModel(agent.model, model))
+            receipt2.warnings = [...receipt2.warnings, `the agent still runs ${modelLabel(agent.model)}: its model has not caught up with the tier`];
+          await recordReceipt(receipt2);
+        }
       }
       const reason = await judge(event, target, override);
       if (reason === undefined)
@@ -3966,36 +4355,73 @@ ${refs.size}`;
       throw new Error(reason);
     });
     const configDir = () => globalConfigDir(process.env, homedir());
+    const globalFile = () => {
+      try {
+        return pickConfigFile(readConfigFiles(configDir()));
+      } catch {
+        return;
+      }
+    };
+    const pluginOptions = isRecord8(ctx.options) ? ctx.options : {};
+    let fileTiers = (() => {
+      const file = globalFile();
+      return file === undefined ? undefined : JSON.stringify(readTiers(file.text));
+    })();
+    const reloadTiers = async (force) => {
+      const file = globalFile();
+      if (file === undefined)
+        return;
+      const tiers2 = readTiers(file.text);
+      const key = JSON.stringify(tiers2);
+      if (!force && key === fileTiers)
+        return;
+      settings = parseTierSettings({ ...pluginOptions, tiers: tiers2 });
+      rebuild();
+      attempts = 0;
+      await check2(true);
+      await refreshSubagentTool();
+      fileTiers = key;
+      warn(`applied the tiers from ${file.path}`);
+    };
     const rpc = await ctx.rpc.register(TiersRpc, {
-      state: async () => {
+      state: async (input) => {
         await queue(async () => {
           await refresh();
         });
-        const file = (() => {
-          try {
-            return pickConfigFile(readConfigFiles(configDir()));
-          } catch {
-            return;
-          }
-        })();
-        const configured = {};
+        const file = globalFile();
+        const saved = {};
         for (const [name, value] of Object.entries(file === undefined ? settings.tiers : readTiers(file.text)))
-          configured[name] = parseTierConfig(value);
+          saved[name] = parseTierConfig(value);
+        const configured = applyDraft(saved, readDraft(input));
+        const preview = buildTiers(parseTierSettings({ ...pluginOptions, tiers: configured }), available, refs);
+        const now = Date.now();
         return tierState({
-          options,
+          options: { ...options, roles: preview.roles, tiers: preview.tiers, classes: preview.classes },
           available,
           configured,
+          agents: await listAgents().catch(() => []),
+          health: view(),
+          status: (entry) => candidateStatus(entry, available, preview.roles, health2, now),
           ...file === undefined ? { error: `No model-roles plugin entry in the global config (${configDir()}); /tiers cannot save.` } : { config: file.path }
         });
       },
       set: async (input) => {
         const { tier, value } = input ?? {};
-        if (typeof tier !== "string" || !/^[a-z][a-z0-9-]*$/.test(tier))
+        if (typeof tier !== "string" || !TIER_NAME.test(tier))
           throw new Error(`Invalid tier name ${JSON.stringify(tier)}`);
         const config = value === null || value === undefined ? undefined : compact(parseTierConfig(value));
+        await queue(async () => {
+          await refresh();
+        });
+        const { errors, warnings } = validateTierConfig(config, available, catalog2);
+        if (errors.length > 0)
+          throw new Error(`Tier ${tier} not saved: ${errors.join(" ")}`);
         const result = writeTier(configDir(), tier, config);
-        console.warn(`${SOURCE}: ${config === undefined ? "removed" : "set"} tier ${tier} in ${result.path}`);
-        return result;
+        warn(`${config === undefined ? "removed" : "set"} tier ${tier} in ${result.path}`);
+        for (const warning of warnings)
+          warn(`tier ${tier}: ${warning}`);
+        await queue(() => reloadTiers(true));
+        return { ...result, warnings };
       }
     });
     const spawnResults = await ctx.tool.hook("execute.after", async (event) => {
@@ -4013,7 +4439,7 @@ ${refs.size}`;
       const kind = classifyFailure({ message });
       if (kind === undefined)
         return;
-      const agentID = isRecord7(event.input) && typeof event.input.agent === "string" ? event.input.agent : undefined;
+      const agentID = isRecord8(event.input) && typeof event.input.agent === "string" ? event.input.agent : undefined;
       try {
         await queue(async () => {
           const agents = await listAgents();
@@ -4029,27 +4455,31 @@ ${refs.size}`;
           await notifyParentOnce(event.sessionID, failed, subagentNote({ ...facts, agent: agentID, spawnRole: spawn?.role, resumable }));
         });
       } catch (error) {
-        console.warn(`${SOURCE}: could not record the subagent failure`, error);
+        warn(`could not record the subagent failure`, { error: String(error) });
       }
     });
     (async () => {
       for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
         if (controller.signal.aborted)
           break;
-        const type = isRecord7(event) ? event.type : undefined;
+        const type = isRecord8(event) ? event.type : undefined;
         if (type === FAILED_EVENT) {
           const data = event.data;
-          if (typeof data?.sessionID !== "string" || !isRecord7(data.error))
+          if (typeof data?.sessionID !== "string" || !isRecord8(data.error))
             continue;
           const sessionID = data.sessionID;
           const error = data.error;
-          await queue(() => onSessionFailed(sessionID, error)).catch((error) => console.warn(`${SOURCE}: fallback after a failed execution did not complete`, error));
+          await queue(() => onSessionFailed(sessionID, error)).catch((error) => warn(`fallback after a failed execution did not complete`, { error: String(error) }));
           continue;
         }
         if (type === CREATED_EVENT) {
           const data = event.data;
-          if (isRecord7(data))
+          if (isRecord8(data))
             await onSessionCreated(data).catch(() => {});
+          continue;
+        }
+        if (type === CONFIG_EVENT) {
+          await queue(() => reloadTiers(false)).catch((error) => warn("could not apply the reloaded config", { error: String(error) }));
           continue;
         }
         if (typeof type !== "string" || !CHECK_EVENTS.has(type))
@@ -4133,6 +4563,8 @@ export {
   NOTICE_DEDUPE_MS,
   PENDING_SPAWN_MS,
   PLUGIN_SPEC,
+  RECEIPTS_KEY,
+  RECEIPT_LIMIT,
   RECENT_MS,
   REFERENCE_PROVIDERS,
   ROLE_ALIAS_DESCRIPTION,
@@ -4147,16 +4579,21 @@ export {
   SUMMARY_LIMIT,
   TIER_ALIASES,
   TIER_FREEZE_KEY_PREFIX,
+  TIER_NAME,
   TIER_PARAM,
   TIER_PURPOSE,
   TIER_SEEDS,
   TiersRpc,
   agentHash,
+  agentTier,
+  applyDraft,
   applyEdit2 as applyEdit,
   applyFrozenTierParam,
   autoEligible,
+  autoFallbackEffort,
   autoTag,
   basePrice,
+  baseTier,
   billingOf,
   buildClassifyPrompt,
   buildDeciderPrompt,
@@ -4164,6 +4601,7 @@ export {
   buildReferenceIndex,
   buildTiers,
   candidateFor,
+  candidateOrder,
   candidateStatus,
   canonical,
   capRole,
@@ -4183,16 +4621,20 @@ export {
   deciderModel,
   src_default as default,
   deriveTiers,
+  describeCandidate,
   describeChoice,
   desiredModels,
   duration,
   expandRole,
+  explainSpawn,
+  explicitCandidates,
   failureNote,
   failureScope,
   fallbackTarget,
   findPluginEntry,
   formatCheck,
   formatHistory,
+  formatReceipts,
   globalConfigDir,
   healthEntry,
   healthKey,
@@ -4232,12 +4674,15 @@ export {
   providerKey,
   pruneHealth,
   pushHistory,
+  pushReceipt,
   quotaReset,
   rankOf,
   readClassification,
   readConfigFiles,
+  readDraft,
   readFrozenTierParam,
   readHealth,
+  readReceipts,
   readState,
   readTiers,
   recordFailure,
@@ -4262,6 +4707,7 @@ export {
   summarize,
   switchNote,
   textHash,
+  tierEffort,
   tierMeta,
   tierNameError,
   tierNames,
@@ -4269,8 +4715,10 @@ export {
   tierOrder,
   tierState,
   tierSummary,
+  tierWarnings,
   toJsonSchema,
   userPin,
+  validateTierConfig,
   vendorOf,
   withAutoTag,
   withEffort,

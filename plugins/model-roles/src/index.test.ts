@@ -354,6 +354,8 @@ describe("setup", () => {
     await settle()
     expect(host.transformCalls()).toBe(1 + MAX_REREGISTER)
     expect(host.activeTransforms()).toBe(1)
+    const check = await host.tools.get("model_roles_check")?.execute({})
+    expect(check?.content).toContain(`Agents general still run another model than their tier resolves to: re-registering gave up after ${MAX_REREGISTER} tries`)
     host.close()
     await cleanup()
   })
@@ -1300,7 +1302,90 @@ describe("tiers", () => {
       "amazon-bedrock/global.openai.gpt-6.1-sol#xhigh",
     )
     host.setGenerate(async () => ({ text: "?" }))
-    expect((await host.spawn("subagent", { agent: "plain", prompt: "x", tier: "standard" })).model).toBe("amazon-bedrock/global.openai.gpt-6.1-sol")
+    // No valid pick: the tier's default effort, not the bare model.
+    expect((await host.spawn("subagent", { agent: "plain", prompt: "x", tier: "standard" })).model).toBe(
+      "amazon-bedrock/global.openai.gpt-6.1-sol#medium",
+    )
+    host.close()
+    await cleanup()
+  })
+
+  test("effort auto without the auto option runs at the tier's default effort", async () => {
+    const options = { tiers: { standard: { effort: "auto" }, coding: { effort: "auto", purpose: "code" } } }
+    const host = createHost({ agents: [{ id: "plain" }], models: workModels, references, options, sessionModel: opus55 })
+    const cleanup = await setup(host)
+    expect((await host.spawn("subagent", { agent: "plain", prompt: "x", tier: "standard" })).model).toBe(
+      "amazon-bedrock/global.openai.gpt-6.1-sol#medium",
+    )
+    expect((await host.spawn("subagent", { agent: "plain", prompt: "x", tier: "coding" })).model).toBe(
+      "amazon-bedrock/global.openai.gpt-6.1-sol#medium",
+    )
+    expect(generations(host)).toHaveLength(0)
+    const check = await host.tools.get("model_roles_check")?.execute({})
+    expect(check?.content).toContain("by built-in effort; warning: effort auto fell back to medium: auto routing is off")
+    host.close()
+    await cleanup()
+  })
+
+  test("an auto-routed spawn and an agent on an auto-effort tier ask the decider for the effort", async () => {
+    const options = { tiers: { standard: { effort: "auto" } }, auto: true }
+    const agents: Agent[] = [{ id: "general" }, { id: "worker", request: header("standard") }]
+    const host = createHost({ agents, models: workModels, references, options, sessionModel: opus55 })
+    host.setGenerate(async () => ({ text: '{"role": "standard", "confident": true, "effort": "xhigh"}' }))
+    const cleanup = await setup(host)
+    expect((await host.spawn("subagent", { agent: "general", description: "d", prompt: "x" })).model).toBe(
+      "amazon-bedrock/global.openai.gpt-6.1-sol#xhigh",
+    )
+    expect((await host.spawn("subagent", { agent: "worker", prompt: "x" })).model).toBe("amazon-bedrock/global.openai.gpt-6.1-sol#xhigh")
+    const check = await host.tools.get("model_roles_check")?.execute({})
+    expect(check?.content).toContain("worker: tier standard (agent tier) → amazon-bedrock/global.openai.gpt-6.1-sol#xhigh by auto effort")
+    expect(check?.content).toContain("general: tier standard (auto routing) → amazon-bedrock/global.openai.gpt-6.1-sol#xhigh by auto effort")
+    host.close()
+    await cleanup()
+  })
+
+  test("a candidate's own variant wins over effort auto; a variant a linked tier sets does not", async () => {
+    const sol = "amazon-bedrock/global.openai.gpt-6.1-sol"
+    const options = { tiers: { standard: { model: [`${sol}#low`], effort: "auto" }, docs: { model: ["@strong"], effort: "auto", purpose: "d" } }, auto: true }
+    const host = createHost({ agents: [{ id: "plain" }], models: workModels, references, options, sessionModel: opus55 })
+    host.setGenerate(async () => ({ text: '{"effort": "xhigh"}' }))
+    const cleanup = await setup(host)
+    expect((await host.spawn("subagent", { agent: "plain", prompt: "x", tier: "standard" })).model).toBe(`${sol}#low`)
+    expect((await host.spawn("subagent", { agent: "plain", prompt: "x", tier: "docs" })).model).toBe(
+      "amazon-bedrock/global.anthropic.claude-opus-5-5#xhigh",
+    )
+    const check = await host.tools.get("model_roles_check")?.execute({})
+    expect(check?.content).toContain(`plain: tier standard (tier param) → ${sol}#low by candidate variant`)
+    host.close()
+    await cleanup()
+  })
+
+  test("a spawn model wins over a pinned agent's tier in the receipt too", async () => {
+    const haiku55 = { providerID: "amazon-bedrock", id: "global.anthropic.claude-haiku-5-5" }
+    const host = createHost({ agents: [{ id: "critic", model: haiku55, request: header("reviewer") }], models: workModels, references, options: {}, sessionModel: opus55 })
+    const cleanup = await setup(host)
+    await host.spawn("subagent", { agent: "critic", prompt: "x", model: "amazon-bedrock/global.openai.gpt-6.1-sol" })
+    const check = await host.tools.get("model_roles_check")?.execute({})
+    expect(check?.content).toContain(
+      "critic: tier reviewer (agent tier) → amazon-bedrock/global.openai.gpt-6.1-sol by explicit model; warning: the spawn's own model wins over tier reviewer",
+    )
+    host.close()
+    await cleanup()
+  })
+
+  test("each routed spawn leaves a receipt: tier, source, model, winning rule and dropped settings", async () => {
+    const host = createHost({ agents: [{ id: "plain" }], models: workModels, references, options: {}, sessionModel: opus55 })
+    const cleanup = await setup(host)
+    await host.spawn("subagent", { agent: "plain", prompt: "x", role: "smol" })
+    await host.spawn("subagent", { agent: "plain", prompt: "x", tier: "cheap", model: "amazon-bedrock/global.openai.gpt-6.1-sol" })
+    const check = await host.tools.get("model_roles_check")?.execute({})
+    const lines = (check?.content ?? "").split("\n")
+    const at = lines.indexOf("Recent spawns (newest first):")
+    expect(lines[at + 1]).toEndWith(
+      "plain: tier cheap (tier param) → amazon-bedrock/global.openai.gpt-6.1-sol by explicit model; warning: the spawn's own model wins over tier cheap",
+    )
+    expect(lines[at + 2]).toEndWith("plain: tier cheap (smol, role param) → amazon-bedrock/global.anthropic.claude-haiku-5-5#low by built-in effort")
+    expect(host.storage.get("receipts")).toHaveLength(2)
     host.close()
     await cleanup()
   })
@@ -1335,5 +1420,86 @@ describe("tiers rpc", () => {
       else process.env.OPENCODE_CONFIG_DIR = previous
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+
+  /** Run `body` against a plugin whose global config dir holds a model-roles entry. */
+  const withConfig = async (body: (host: ReturnType<typeof createHost>, file: string) => Promise<void>, agents: Agent[] = []) => {
+    const dir = mkdtempSync(path.join(tmpdir(), "model-roles-rpc-"))
+    const previous = process.env.OPENCODE_CONFIG_DIR
+    process.env.OPENCODE_CONFIG_DIR = dir
+    const file = path.join(dir, "opencode.json")
+    try {
+      writeFileSync(file, '{ "plugins": [{ "package": "/x/plugins/model-roles", "options": {} }] }\n')
+      const host = createHost({ agents, models: work as unknown as Model[], references: reference as unknown as Model[], options: {} })
+      const cleanup = await setup(host)
+      try {
+        await body(host, file)
+      } finally {
+        host.close()
+        await cleanup()
+      }
+    } finally {
+      if (previous === undefined) delete process.env.OPENCODE_CONFIG_DIR
+      else process.env.OPENCODE_CONFIG_DIR = previous
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+  const sonnet55 = "amazon-bedrock/global.anthropic.claude-sonnet-5-5"
+
+  test("set refuses an unknown model or variant and writes nothing; it warns about an unavailable one", async () => {
+    await withConfig(async (host, file) => {
+      const before = readFileSync(file, "utf8")
+      await expect(host.rpc("set", { tier: "cheap", value: { model: [`${sonnet55}#bogus`] } })).rejects.toThrow(
+        /global\.anthropic\.claude-sonnet-5-5 has no variant bogus \(it has: /,
+      )
+      await expect(host.rpc("set", { tier: "cheap", value: { model: ["nope/x"] } })).rejects.toThrow("Unknown model nope/x: no provider lists it.")
+      expect(readFileSync(file, "utf8")).toBe(before)
+      // openai/gpt-daybreak-blue-latest is in the catalog, not on this machine.
+      const result = (await host.rpc("set", { tier: "cheap", value: { model: ["openai/gpt-daybreak-blue-latest", sonnet55] } })) as { warnings?: string[] }
+      expect(result.warnings).toEqual([
+        "openai/gpt-daybreak-blue-latest is not available now (provider not connected, or disabled); the tier skips it until it is.",
+      ])
+    })
+  })
+
+  test("a saved tier applies to the running instance at once, and so does a config reload", async () => {
+    await withConfig(
+      async (host, file) => {
+        const before = await host.fireContext("s1")
+        await host.rpc("set", { tier: "cheap", value: { model: [sonnet55] } })
+        expect((await host.spawn("subagent", { agent: "plain", prompt: "x", tier: "cheap" })).model).toBe(`${sonnet55}#low`)
+        // Agents on the tier move, a new session sees the new tier, a running one keeps its parameter.
+        expect(host.agents().get("worker")?.model).toEqual({ providerID: "amazon-bedrock", id: "global.anthropic.claude-sonnet-5-5", variant: "low" })
+        await host.rpc("set", { tier: "coding", value: { purpose: "writing code" } })
+        expect((await host.fireContext("s2")).input.properties.tier?.enum).toContain("coding")
+        expect(JSON.stringify(await host.fireContext("s1"))).toBe(JSON.stringify(before))
+        writeFileSync(file, `{ "plugins": [{ "package": "/x/plugins/model-roles", "options": { "tiers": { "cheap": { "model": ["${sonnet55}"], "effort": "high" } } } }] }\n`)
+        host.emit({ type: "config.updated", data: {} })
+        await settle()
+        expect((await host.spawn("subagent", { agent: "plain", prompt: "x", tier: "cheap" })).model).toBe(`${sonnet55}#high`)
+      },
+      [{ id: "worker", request: header("cheap") }],
+    )
+  })
+
+  test("state previews a draft without saving it, and lists every tiered agent", async () => {
+    await withConfig(
+      async (host) => {
+        const state = (await host.rpc("state", { draft: { cheap: { model: [sonnet55] }, coding: { purpose: "code" } } })) as {
+          tiers: Array<{ name: string; resolved?: string; health?: Array<{ entry: string; status: string }> }>
+          agents: Array<{ id: string; tier: string; source: string; resolved?: string }>
+        }
+        const cheap = state.tiers.find((t) => t.name === "cheap")
+        expect(cheap?.resolved).toBe(`${sonnet55}#low`)
+        expect(cheap?.health).toEqual([{ entry: `${sonnet55}#low`, status: "available" }])
+        expect(state.tiers.find((t) => t.name === "coding")?.resolved).toBe("amazon-bedrock/global.openai.gpt-6.1-sol#medium")
+        expect(state.agents).toContainEqual({ id: "worker", tier: "strong", source: "header", resolved: "amazon-bedrock/global.anthropic.claude-opus-5-5#high" })
+        // Nothing was saved: a spawn still gets the running cheap tier.
+        expect((await host.spawn("subagent", { agent: "worker", prompt: "x", tier: "cheap" })).model).toBe(
+          "amazon-bedrock/global.anthropic.claude-haiku-5-5#low",
+        )
+      },
+      [{ id: "worker", request: header("strong") }],
+    )
   })
 })
