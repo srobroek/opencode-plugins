@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.4](https://github.com/srobroek/opencode-plugins/compare/subagent-worktree--v0.2.3...subagent-worktree--v0.2.4) (2026-11-13)
+
+
+### Bug Fixes
+
+* **subagent-worktree:** start the child on the spawn's resolved model and variant ([0f1f2d4](https://github.com/srobroek/opencode-plugins/commit/0f1f2d4bf60c3d04a4bd104f9847e95bf508bbba))
+
 ## [0.2.3](https://github.com/srobroek/opencode-plugins/compare/subagent-worktree--v0.2.2...subagent-worktree--v0.2.3) (2026-11-11)
 
 

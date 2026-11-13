@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.0](https://github.com/srobroek/opencode-plugins/compare/model-roles--v0.2.2...model-roles--v0.3.0) (2026-11-13)
+
+
+### Features
+
+* **model-roles:** /tiers editor with model checkboxes, fallback order, per-model effort and a saved draft ([f5b9f20](https://github.com/srobroek/opencode-plugins/commit/f5b9f203144627e31e4c966318a0c716048cbf33))
+
+
+### Bug Fixes
+
+* **model-roles:** effort for custom and auto tiers, live config after /tiers saves, spawn receipts, validation and precedence docs ([ad60e50](https://github.com/srobroek/opencode-plugins/commit/ad60e50f01729b45c181a3e1793f79948f0ab9e9))
+
 ## [0.2.2](https://github.com/srobroek/opencode-plugins/compare/model-roles--v0.2.1...model-roles--v0.2.2) (2026-11-03)
 
 

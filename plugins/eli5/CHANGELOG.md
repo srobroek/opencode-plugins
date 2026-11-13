@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/srobroek/opencode-plugins/compare/eli5--v0.2.1...eli5--v0.3.0) (2026-11-13)
+
+
+### Features
+
+* **agents:** a tools option that lets read-only and coding agents call allowed MCP tools ([70558c3](https://github.com/srobroek/opencode-plugins/commit/70558c30dc450faec7e6012cdb0f678f1ecd7f01))
+
 ## [0.2.1](https://github.com/srobroek/opencode-plugins/compare/eli5--v0.2.0...eli5--v0.2.1) (2026-10-27)
 
 
