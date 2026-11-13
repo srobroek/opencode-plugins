@@ -7,7 +7,7 @@
   "plugins/dep-update": "0.4.0",
   "plugins/whats-new": "0.3.0",
   "plugins/statusline": "0.3.0",
-  "plugins/beads": "0.5.0",
+  "plugins/beads": "0.5.1",
   "plugins/lsp": "0.4.0",
   "plugins/subagent-worktree": "0.2.3",
   "plugins/parley": "0.3.2",

@@ -6,6 +6,13 @@
 
 * Add `options.store` for project-specific ledger paths, canonical shared write locks, and consistent `BEADS_DIR` on plugin commands.
 
+## [0.5.1](https://github.com/srobroek/opencode-plugins/compare/beads--v0.5.0...beads--v0.5.1) (2026-11-13)
+
+
+### Bug Fixes
+
+* **beads:** steer setup for ledgers outside the checkout ([a3e00df](https://github.com/srobroek/opencode-plugins/commit/a3e00dfaa7622a406e56ceeca1558670fe9168d4))
+
 ## [0.5.0](https://github.com/srobroek/opencode-plugins/compare/beads--v0.4.1...beads--v0.5.0) (2026-11-13)
 
 
