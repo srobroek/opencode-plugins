@@ -9,7 +9,7 @@
 
 import { existsSync, readdirSync, readFileSync } from "node:fs"
 import { homedir } from "node:os"
-import { dirname, join } from "node:path"
+import { dirname, isAbsolute, join } from "node:path"
 import { parse } from "smol-toml"
 import { type ProviderTypes, VALUE_STORE_TYPES } from "./op-guard.ts"
 
@@ -52,25 +52,61 @@ function configs(cwd: string, home: string): Record<string, unknown>[] {
   return found
 }
 
+/** Every definition of each provider name in `found`, as the declared type values. */
+function collect(found: readonly Record<string, unknown>[]): Map<string, unknown[]> {
+  const types = new Map<string, unknown[]>()
+  for (const config of found) for (const [name, type] of declared(config)) types.set(name, [...(types.get(name) ?? []), type])
+  return types
+}
+
+/** One type for a name: a non-store one if any definition has it, `undefined` when unknown or untyped. */
+function resolve(types: Map<string, unknown[]>, name: string): string | undefined {
+  const all = types.get(name)
+  if (all === undefined || all.length === 0 || all.some((type) => typeof type !== "string")) return undefined
+  const names = all as string[]
+  return names.find((type) => !VALUE_STORE_TYPES.has(type)) ?? names[0]
+}
+
+/** The global config, when present. */
+function globalConfig(home: string): Record<string, unknown>[] {
+  const global = join(home, ".config", "fnox", "config.toml")
+  return existsSync(global) ? [parse(readFileSync(global, "utf8"))] : []
+}
+
+/** `path` and the global config. Throws when `path` is missing, does not parse or has an import. */
+function explicitConfigs(path: string, home: string): Record<string, unknown>[] {
+  const config = parse(readFileSync(path, "utf8"))
+  if ("import" in config) throw new Error("fnox config with import")
+  return [config, ...globalConfig(home)]
+}
+
 /**
- * Provider types by name for the configs that apply to `cwd`. When every definition of a name is a
+ * Provider types by name for the configs that apply to `cwd`, or for an explicit `-c` file (read with
+ * the global config, since fnox loads only those then). When every definition of a name is a
  * value-store type the answer is one of them; if any definition is another type the answer is that
  * type. A missing provider, a definition without a type or an unreadable config give `undefined`,
  * which the op-guard treats as no value store.
  */
 export function readProviderTypes(cwd: string, home: string = homedir()): ProviderTypes {
-  let types: Map<string, unknown[]>
-  try {
-    types = new Map()
-    for (const config of configs(cwd, home))
-      for (const [name, type] of declared(config)) types.set(name, [...(types.get(name) ?? []), type])
-  } catch {
-    return () => undefined
-  }
-  return (name) => {
-    const all = types.get(name)
-    if (all === undefined || all.length === 0 || all.some((type) => typeof type !== "string")) return undefined
-    const names = all as string[]
-    return names.find((type) => !VALUE_STORE_TYPES.has(type)) ?? names[0]
+  const searched = (() => {
+    try {
+      return collect(configs(cwd, home))
+    } catch {
+      return undefined
+    }
+  })()
+  const explicit = new Map<string, Map<string, unknown[]> | undefined>()
+  return (name, config) => {
+    if (config === undefined) return searched === undefined ? undefined : resolve(searched, name)
+    const path = isAbsolute(config) ? config : join(cwd, config)
+    if (!explicit.has(path)) {
+      try {
+        explicit.set(path, collect(explicitConfigs(path, home)))
+      } catch {
+        explicit.set(path, undefined)
+      }
+    }
+    const types = explicit.get(path)
+    return types === undefined ? undefined : resolve(types, name)
   }
 }

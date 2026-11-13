@@ -5,7 +5,7 @@ import { join } from "node:path"
 import { Error as ToolError } from "@opencode/plugin/promise/tool"
 import { createFakeContext, type FakeAssert } from "@srobroek/opencode-lib/testing"
 import plugin, { applyDecision, createPlugin, type Evaluation, readOptions, shellCwd } from "./index.ts"
-import { FNOX_STORE_MESSAGE } from "./op-guard.ts"
+import { FNOX_CONFIG_MESSAGE, FNOX_INDIRECT_MESSAGE, FNOX_STORE_MESSAGE } from "./op-guard.ts"
 import { INVESTIGATE_NOTICE } from "./package-investigate.ts"
 import { FORCE_PUSH_MESSAGE } from "./permission.ts"
 import { scratchRoots } from "./scratch-dirs.ts"
@@ -358,6 +358,52 @@ describe("fnox provider types from config", () => {
       const { before } = await load()
       await before("c2", "cmd | fnox set NAME --provider host", dir)
     })
+  })
+})
+
+describe("nested commands through the hook", () => {
+  for (const command of [
+    "fnox exec -- sh -c 'cmd | xargs fnox set NAME --provider op'",
+    "fnox exec -- sh -c 'find . -exec fnox set NAME item/f --provider op \\;'",
+    "fnox exec -- sh -c 'parallel fnox set {} item/f --provider op ::: A'",
+    "fnox exec -- bash -c \"sh -c 'cmd | xargs fnox set NAME --provider op'\"",
+  ])
+    test(`refuses an executor ${command}`, async () => {
+      const { before } = await load()
+      await expect(before("n1", command)).rejects.toThrow(FNOX_INDIRECT_MESSAGE)
+    })
+
+  test("refuses a config write beside a nested fnox set", async () => {
+    const { before } = await load()
+    await expect(
+      before("n2", "fnox exec -- sh -c 'echo x > fnox.toml; cmd | fnox set NAME --provider host'"),
+    ).rejects.toThrow(FNOX_CONFIG_MESSAGE)
+  })
+
+  test("the keychain recipe with an explicit local config passes", async () => {
+    const base = join(realpathSync(tmpdir()), "opencode")
+    mkdirSync(base, { recursive: true })
+    const dir = mkdtempSync(join(base, "safety-recipe-"))
+    try {
+      writeFileSync(join(dir, "fnox.local.toml"), '[providers.keychain]\ntype = "keychain"\nservice = "fnox-x"\n')
+      const { before } = await load()
+      await before("n3", "fnox -c fnox.local.toml set NAME --generate --provider keychain", dir)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("an explicit config file that defines the provider as age lets a piped value through", async () => {
+    const base = join(realpathSync(tmpdir()), "opencode")
+    mkdirSync(base, { recursive: true })
+    const dir = mkdtempSync(join(base, "safety-recipe-"))
+    try {
+      writeFileSync(join(dir, "other.toml"), '[providers.host]\ntype = "age"\n')
+      const { before } = await load()
+      await before("n4", "cmd | fnox -c other.toml set NAME --provider host", dir)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
 

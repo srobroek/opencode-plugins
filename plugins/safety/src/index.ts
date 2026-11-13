@@ -178,9 +178,9 @@ export function createPlugin(overrides: Overrides = {}) {
         let types: ReturnType<typeof readProviderTypes> | undefined
         const providerTypes =
           guardOptions.providerTypes ??
-          ((name: string) => {
+          ((name: string, config?: string) => {
             types ??= readProviderTypes(cwd)
-            return types(name)
+            return types(name, config)
           })
         const refusal = safely(() => hardGate(command, gateCwd, { ...guardOptions, providerTypes }))
         if (refusal !== undefined) throw new Error(refusal.reason)

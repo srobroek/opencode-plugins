@@ -311,8 +311,8 @@ export function changesDirectory(commands: readonly Command[]): boolean {
   )
 }
 
-/** The `type` of the fnox provider `name` in the configuration that applies, or `undefined` when unknown. */
-export type ProviderTypes = (name: string) => string | undefined
+/** The `type` of the fnox provider `name` in the configuration that applies (or in the explicit file `config`), or `undefined` when unknown. */
+export type ProviderTypes = (name: string, config?: string) => string | undefined
 
 /** Whether a word holds an expansion, backticks or a process substitution: its value is not known from the text. */
 function expands(command: Command, at: number): boolean {
@@ -325,6 +325,29 @@ function valueSource(command: Command, stdin: boolean, value: number | undefined
   const piped = stdin || command.stage > 0 || command.redirects.length > 0 || command.hereDocuments.length > 0
   const substituted = command.argv.some((word) => /[<>]\(/.test(word))
   return piped || substituted || defaults.some((d) => expands(command, d.at)) || (value !== undefined && expands(command, value))
+}
+
+const SEARCHED_CONFIGS: ReadonlySet<string> = new Set(["fnox.toml", ".fnox.toml", "fnox.local.toml", ".fnox.local.toml"])
+
+/**
+ * The explicit config file a `fnox` command names with `-c`/`--config`: `undefined` for none (or one of
+ * the bare names fnox searches for up the tree, which the resolver already reads), the path for a literal
+ * file, `null` when the path is an expansion or more than one is given.
+ */
+function explicitConfig(command: Command): string | null | undefined {
+  const found: (string | null)[] = []
+  command.argv.forEach((word, at) => {
+    if (word === "-c" || word === "--config") {
+      const value = command.argv[at + 1]
+      found.push(value === undefined || expands(command, at + 1) ? null : value)
+    } else if (word.startsWith("--config=")) {
+      found.push(expands(command, at) ? null : word.slice("--config=".length))
+    }
+  })
+  if (found.length === 0) return undefined
+  const [only] = found
+  if (found.length > 1 || only === null || only === undefined) return null
+  return SEARCHED_CONFIGS.has(only) ? undefined : only
 }
 
 /** The options and positionals of the `fnox set` whose subcommand word is at `at`. */
@@ -366,10 +389,10 @@ function fnoxSetRefusal(
   fed: boolean,
   stdin: boolean,
   types: ProviderTypes,
-  configured: boolean,
+  config: string | null | undefined,
 ): "set" | "literal" | "store" | undefined {
   const { provider, reads, sourced, positional, defaults } = parseSet(command, at)
-  const type = provider === undefined || !configured ? undefined : types(provider)
+  const type = provider === undefined || config === null ? undefined : types(provider, config)
   const value = positional[1]
   if (type === undefined || !VALUE_STORE_TYPES.has(type)) {
     // No value and no source is an interactive prompt or a settings update, which stores nothing from the agent.
@@ -453,6 +476,11 @@ export function configWriteBesideSet(commands: readonly Command[], writes: reado
   return writes.some((path) => fnoxConfigPath(path)) || commands.some(touchesConfigFile) || commands.some(changesFnoxConfig) || commands.some(uncertainWrite)
 }
 
+/** Whether a command has redirects other than its here-documents (whose bodies the walk reads): a file or here-string. */
+function opaqueRedirects(command: Command): boolean {
+  return command.redirects.length > command.hereDocuments.length
+}
+
 const LAUNCHERS: ReadonlyMap<string, ReadonlySet<string> | true> = new Map<string, ReadonlySet<string> | true>([
   ["nix", new Set(["develop", "shell", "run"])],
   ["direnv", new Set(["exec"])],
@@ -473,8 +501,8 @@ const SECRET_WORDS = /\b(?:set|s)\b|\bitem\s+(?:create|edit)\b/
  * with certainty: a shell fed by a pipe or redirect, `xargs`, `find -exec`, `parallel`, `env -S`, `eval`,
  * `source`, an alias or function, an expanded command name, or a launcher (`nix`, `mise`, `uv`, `npx`, …).
  */
-export function indirectSecretWrite(commands: readonly Command[]): boolean {
-  const whole = [...new Set(commands.map((command) => command.source))].join("\n")
+export function indirectSecretWrite(commands: readonly Command[], inheritedStdin = false, outer = ""): boolean {
+  const whole = [outer, ...new Set(commands.map((command) => command.source))].join("\n")
   const wholeHits = SECRET_WRITE.test(whole)
   return commands.some((command) => {
     if (command.argv.length === 0) return false
@@ -484,7 +512,8 @@ export function indirectSecretWrite(commands: readonly Command[]): boolean {
     if (/[$`]/.test(command.argv[0] as string)) return SECRET_WORDS.test(inner) || wholeHits
     if (SHELLS.has(name)) {
       const script = command.argv.findIndex((word, i) => i > 0 && /^-[A-Za-z]*c[A-Za-z]*$/.test(word))
-      if (script < 0) return wholeHits && (command.stage > 0 || command.redirects.some((word) => word.hereString !== true))
+      if (script < 0)
+        return wholeHits && (inheritedStdin || command.stage > 0 || opaqueRedirects(command))
       return wholeHits && expands(command, script + 1)
     }
     if (name === "xargs" || name === "parallel" || name === "eval") return innerHits
@@ -503,7 +532,7 @@ export function indirectSecretWrite(commands: readonly Command[]): boolean {
 export function fnoxRefusal(
   command: Command,
   allow: readonly string[] = [],
-  inherited: { literal: boolean; stdin?: boolean; documents: readonly HereDocument[]; depth: number } = {
+  inherited: { literal: boolean; stdin?: boolean; piped?: boolean; documents: readonly HereDocument[]; depth: number; writesOf?: WritesOf } = {
     literal: false,
     documents: [],
     depth: 0,
@@ -514,8 +543,7 @@ export function fnoxRefusal(
   if (base(command.argv[0]) !== "fnox") return undefined
   const argv = command.argv
   let at = 1
-  // An explicit `-c`/`--config` loads files the resolver did not read.
-  const configured = !argv.some((word) => word === "-c" || word === "--config" || word.startsWith("--config="))
+  const config = explicitConfig(command)
   for (; at < argv.length; at++) {
     const word = argv[at] as string
     const [flag] = word.split("=", 1) as [string]
@@ -531,7 +559,7 @@ export function fnoxRefusal(
   if (sub === "get" || sub === "export" || sub === "env") return "dump"
   if (sub === "list" || sub === "ls" || sub === "secrets")
     return hasFlag(args, "V", ["--values"]) ? "dump" : undefined
-  if (sub === "set" || sub === "s") return fnoxSetRefusal(command, at, inherited.literal || literalStdin(command), inherited.stdin === true, types, configured)
+  if (sub === "set" || sub === "s") return fnoxSetRefusal(command, at, inherited.literal || literalStdin(command), inherited.stdin === true, types, config)
   if (sub !== "exec") return undefined
   const start = execInner(args)
   if (start < 0) return undefined
@@ -543,6 +571,8 @@ export function fnoxRefusal(
   const literal = inherited.literal || literalStdin(command)
   const stdin =
     inherited.stdin === true || command.stage > 0 || command.redirects.length > 0 || command.hereDocuments.length > 0
+  // A pipe or redirect feeds text the walk cannot read; a here-document it does read.
+  const piped = inherited.piped === true || command.stage > 0 || opaqueRedirects(command)
   const children = walkComplete(inner.map((word, i) => wordText(command, first + i) ?? quote(word)).join(" "))
   // A here-document fed to the shell left after the wrappers is that shell's script. The shell
   // reads all of stdin, so a parsed document is consumed: an inner level never gets it again.
@@ -551,11 +581,15 @@ export function fnoxRefusal(
     .filter((nested) => !nested.argv.some((word) => /^-[A-Za-z]*c[A-Za-z]*$/.test(word)))
   const bodies = scripts.length === 0 ? [] : documents.flatMap((document) => walkComplete(document.body))
   const rest = scripts.length === 0 ? documents : []
+  const writesOf = inherited.writesOf ?? (() => [])
+  const policy = listPolicy(children, writesOf, piped, command.source) ??
+    (bodies.length > 0 ? listPolicy(bodies, writesOf, piped, command.source) : undefined)
+  if (policy !== undefined) return policy
   const check = (nested: Command, fed: boolean): Verdict | undefined => {
     if (dumpsEnvironment(nested)) return "dump"
     const op = opRefusal(nested, allow, fed)
     if (op !== undefined) return op
-    return fnoxRefusal(nested, allow, { literal: fed, stdin, documents: rest, depth: inherited.depth + 1 }, types)
+    return fnoxRefusal(nested, allow, { literal: fed, stdin, piped, documents: rest, depth: inherited.depth + 1, writesOf }, types)
   }
   for (const nested of children) {
     const found = check(nested, literal || literalFed(nested, children))
@@ -565,6 +599,27 @@ export function fnoxRefusal(
     const found = check(nested, literalFed(nested, bodies))
     if (found !== undefined) return found
   }
+  return undefined
+}
+
+/** Where each source's file writes land; the guard supplies it with the call's directory. */
+export type WritesOf = (source: string) => readonly string[]
+
+/**
+ * The rules that look at a whole command list rather than one command: the executor rule and the
+ * config-write rule. They run for the top-level commands and for every child a `fnox exec` runs,
+ * so a nested command gets the same checks. `stdin` is true when the list's shells inherit stdin.
+ */
+export function listPolicy(
+  commands: readonly Command[],
+  writesOf: WritesOf,
+  stdin = false,
+  outer = "",
+): "indirect" | "config" | undefined {
+  if (indirectSecretWrite(commands, stdin, outer)) return "indirect"
+  // Every source in the list: the top text and each script it runs, since a quoted script hides its writes.
+  const writes = [...new Set(commands.map((command) => command.source))].flatMap((source) => writesOf(source))
+  if (configWriteBesideSet(commands, writes)) return "config"
   return undefined
 }
 
@@ -583,16 +638,16 @@ export function opGuard(
   commands: readonly Command[],
   allow: readonly string[] = [],
   types: ProviderTypes = () => undefined,
-  writes: readonly string[] = [],
+  writesOf: WritesOf = () => [],
 ): string | undefined {
   try {
-    if (indirectSecretWrite(commands)) return MESSAGES.indirect
-    if (configWriteBesideSet(commands, writes)) return MESSAGES.config
+    const policy = listPolicy(commands, writesOf)
+    if (policy !== undefined) return MESSAGES[policy]
     // Where fnox runs is unknown after a directory change, so no provider's config can be trusted.
     const known = changesDirectory(commands) ? () => undefined : types
     for (const command of commands) {
       const fed = literalFed(command, commands)
-      const found = opRefusal(command, allow, fed) ?? fnoxRefusal(command, allow, { literal: fed, documents: [], depth: 0 }, known)
+      const found = opRefusal(command, allow, fed) ?? fnoxRefusal(command, allow, { literal: fed, documents: [], depth: 0, writesOf }, known)
       if (found !== undefined) return MESSAGES[found]
     }
     return undefined

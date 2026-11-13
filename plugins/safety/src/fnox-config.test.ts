@@ -116,4 +116,40 @@ describe("readProviderTypes", () => {
     const { home, cwd } = tree({ "proj/fnox.toml": '[providers.a]\nvault = "x"\n' })
     expect(readProviderTypes(cwd, home)("a")).toBeUndefined()
   })
+
+  describe("an explicit config file", () => {
+    test("reads that file and the global config only", () => {
+      const { home, cwd } = tree({
+        "proj/sub/other.toml": provider("host", "age"),
+        "proj/fnox.toml": provider("host", "1password"),
+        "home/.config/fnox/config.toml": provider("g", "keychain"),
+      })
+      const types = readProviderTypes(cwd, home)
+      expect([types("host", "other.toml"), types("g", "other.toml")]).toEqual(["age", "keychain"])
+    })
+
+    test("a global definition of the same name must also be a store", () => {
+      const { home, cwd } = tree({
+        "proj/sub/other.toml": provider("host", "age"),
+        "home/.config/fnox/config.toml": provider("host", "1password"),
+      })
+      expect(readProviderTypes(cwd, home)("host", "other.toml")).toBe("1password")
+    })
+
+    test("a missing file resolves to unknown", () => {
+      const { home, cwd } = tree({})
+      expect(readProviderTypes(cwd, home)("host", "nope.toml")).toBeUndefined()
+    })
+
+    test("an unparsable file or one with an import resolves to unknown", () => {
+      const { home, cwd } = tree({ "proj/sub/bad.toml": "[providers\n", "proj/sub/imp.toml": `import = ["x"]\n${provider("host", "age")}` })
+      const types = readProviderTypes(cwd, home)
+      expect([types("host", "bad.toml"), types("host", "imp.toml")]).toEqual([undefined, undefined])
+    })
+
+    test("an absolute path is read as given", () => {
+      const { home, cwd } = tree({ "elsewhere/c.toml": provider("host", "age") })
+      expect(readProviderTypes(cwd, home)("host", join(cwd, "../../elsewhere/c.toml"))).toBe("age")
+    })
+  })
 })

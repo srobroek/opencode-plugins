@@ -22,7 +22,8 @@ const TYPES: Record<string, string> = {
   op: "1password",
   proj: "1password",
 }
-const types = (name: string) => TYPES[name]
+/** An explicit config path resolves nowhere here, as when the file is missing. */
+const types = (name: string, config?: string) => (config === undefined ? TYPES[name] : undefined)
 const gate = (command: string, options: GuardOptions = {}) => hardGate(command, "/", { providerTypes: types, ...options })
 
 const REFUSED_OP = [
@@ -153,6 +154,25 @@ const REFUSED_CONFIG = [
   "cat x > \"$F\"; cmd | fnox set NAME --provider host",
   "cmd | tee \"$F\"; cmd | fnox set NAME --provider host",
   "cp a \"$HOME/x\"; cmd | fnox set NAME --provider host",
+]
+
+const REFUSED_NESTED_INDIRECT = [
+  "fnox exec -- sh -c 'cmd | xargs fnox set NAME --provider op'",
+  "fnox exec -- sh -c 'find . -exec fnox set NAME item/f --provider op \\;'",
+  "fnox exec -- sh -c 'parallel fnox set {} item/f --provider op ::: A'",
+  "fnox exec -- xargs fnox set NAME --provider op",
+  "fnox exec -- bash -c \"sh -c 'cmd | xargs fnox set NAME --provider op'\"",
+  "sh -c \"bash -c 'cmd | xargs fnox set NAME --provider op'\"",
+  "fnox exec -- sh -c \"bash -c 'uv run fnox set NAME item/f --provider op'\"",
+  "echo 'fnox set NAME item/f --provider op' | fnox exec -- sh",
+  "fnox exec -- sh -c 'echo x | sh; fnox set NAME item/f --provider op'",
+]
+
+const REFUSED_NESTED_CONFIG = [
+  "fnox exec -- sh -c 'echo x > fnox.toml; cmd | fnox set NAME --provider host'",
+  "fnox exec -- sh -c 'fnox provider add host age; cmd | fnox set NAME --provider host'",
+  "fnox exec -- sh -c 'cat x > \"$F\"; cmd | fnox set NAME --provider host'",
+  "fnox exec -- bash -c \"sh -c 'rm fnox.toml; cmd | fnox set NAME --provider host'\"",
 ]
 
 const REFUSED_PIPED = [
@@ -366,6 +386,14 @@ const PASSED = [
   "source ./env.sh; cargo build",
   "mise exec -- node app.js",
   "bash -c 'echo hi' > out.txt",
+  "fnox exec -- sh -c 'cargo test | tee out.txt'",
+  "fnox exec -- sh -c 'find . -name x -exec echo {} \\;'",
+  "fnox exec -- sh -c 'cmd | fnox set NAME --provider host'",
+  "fnox exec -- sh -c 'echo ok > out.txt; fnox set NAME item/f --provider op'",
+  "fnox -c fnox.local.toml set NAME --provider host",
+  "fnox -c fnox.local.toml set NAME --generate --provider keychain",
+  "cmd | fnox -c fnox.local.toml set NAME --provider host",
+  "fnox set NAME --generate --provider host",
   "fnox set NAME 'op://vault/item/field' --provider op",
   "fnox set NAME --provider op",
   "op vault list",
@@ -434,6 +462,14 @@ describe("op-guard", () => {
     test(`refuses a secret write behind an executor ${command}`, () => {
       expect(gate(command)).toEqual({ guard: "op-guard", reason: FNOX_INDIRECT_MESSAGE })
     })
+  for (const command of REFUSED_NESTED_INDIRECT)
+    test(`refuses a nested secret write behind an executor ${command}`, () => {
+      expect(gate(command)).toEqual({ guard: "op-guard", reason: FNOX_INDIRECT_MESSAGE })
+    })
+  for (const command of REFUSED_NESTED_CONFIG)
+    test(`refuses a nested fnox set beside a config write ${command}`, () => {
+      expect(gate(command)).toEqual({ guard: "op-guard", reason: FNOX_CONFIG_MESSAGE })
+    })
   for (const command of REFUSED_CONFIG)
     test(`refuses a fnox set beside a config write ${command}`, () => {
       expect(gate(command)).toEqual({ guard: "op-guard", reason: FNOX_CONFIG_MESSAGE })
@@ -500,6 +536,39 @@ describe("op-guard", () => {
 
   test("a value set with no directory change in the command uses the resolved type", () => {
     expect(gate("cmd | fnox set NAME --provider host")).toBeUndefined()
+  })
+
+  describe("an explicit fnox config file", () => {
+    const explicit = (config: string | undefined) => ({
+      providerTypes: (name: string, path?: string) => (path === config && name === "host" ? "age" : undefined),
+    })
+
+    test("resolves providers from a literal path", () => {
+      expect(gate("cmd | fnox -c other.toml set NAME --provider host", explicit("other.toml"))).toBeUndefined()
+      expect(gate("cmd | fnox set NAME --config=other.toml --provider host", explicit("other.toml"))).toBeUndefined()
+    })
+
+    test("a file the resolver cannot read is not a store", () => {
+      expect(gate("cmd | fnox -c missing.toml set NAME --provider host", explicit("other.toml"))?.reason).toBe(
+        FNOX_STORE_MESSAGE,
+      )
+    })
+
+    test("an expanded path is not a store", () => {
+      expect(gate('cmd | fnox -c "$CFG" set NAME --provider host', { providerTypes: () => "age" })?.reason).toBe(
+        FNOX_STORE_MESSAGE,
+      )
+    })
+
+    test("two config files are not a store", () => {
+      expect(gate("cmd | fnox -c a.toml -c b.toml set NAME --provider host", { providerTypes: () => "age" })?.reason).toBe(
+        FNOX_STORE_MESSAGE,
+      )
+    })
+
+    test("a bare fnox file name resolves like the searched configs", () => {
+      expect(gate("cmd | fnox -c fnox.local.toml set NAME --provider host")).toBeUndefined()
+    })
   })
 
   test("a provider named host that is 1password is not a value store", () => {

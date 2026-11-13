@@ -275,7 +275,7 @@ export type GuardOptions = {
     commands: readonly Command[],
     allow: readonly string[] | undefined,
     types: ProviderTypes | undefined,
-    writes: readonly string[] | undefined,
+    writesOf: ((source: string) => readonly string[]) | undefined,
   ) => string | undefined
   /** The `type` of a fnox provider by name, from the fnox config that applies; unknown means not a value store. */
   providerTypes?: ProviderTypes
@@ -308,7 +308,7 @@ export function hardGate(source: string, cwd: string, options: GuardOptions = {}
       const walk = walkShell(source)
       // An unfinished walk hides commands; refuse when `op` or `fnox` could be among them.
       if (!walk.complete && /\b(?:op|fnox)\b/.test(source)) reason = NESTING_MESSAGE
-      else reason = analyze(walk.commands, options.opAllow, options.providerTypes, shellWriteTargets(source, cwd)) ?? ""
+      else reason = analyze(walk.commands, options.opAllow, options.providerTypes, (text) => shellWriteTargets(text, cwd)) ?? ""
     } catch {
       reason = CHECK_FAILED_MESSAGE
     }
