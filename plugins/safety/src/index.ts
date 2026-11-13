@@ -117,6 +117,9 @@ export async function review(command: string, cwd: string, options: ReviewOption
   }
 }
 
+/** Tools that open the path they were given themselves, with no shell between the check and the use. */
+export const DIRECT_FILE_TOOLS: ReadonlySet<string> = new Set(["read", "edit", "write", "patch", "apply_patch", "glob", "grep", "list"])
+
 const PENDING_TTL_MS = 10 * 60_000
 
 type Pending = { sessionID: string; at: number; decision: Decision | undefined }
@@ -147,12 +150,17 @@ export function createPlugin(overrides: Overrides = {}) {
           .then((session) => (session as { location: { directory: string } }).location.directory)
           .catch(() => ctx.location.directory as string)
 
+      // The tool behind each running call, so a permission request can be traced to it.
+      const running = new Map<string, { tool: string; at: number }>()
+
       const prune = () => {
         const cutoff = Date.now() - PENDING_TTL_MS
         for (const [id, entry] of pending) if (entry.at < cutoff) pending.delete(id)
+        for (const [id, entry] of running) if (entry.at < cutoff) running.delete(id)
       }
 
       const before = await ctx.tool.hook("execute.before", async (event) => {
+        running.set(event.id, { tool: event.tool, at: Date.now() })
         const call = shellCall(event.tool, event.input)
         if (call === undefined || call.command.trim() === "") return
         let command = call.command
@@ -165,12 +173,13 @@ export function createPlugin(overrides: Overrides = {}) {
         }
         const cwd = shellCwd(call.workdir, await sessionDirectory(event.sessionID))
         const gateCwd = leadingCdCwd(command, cwd)
-        // Read the fnox config only when the guard asks for a provider's type.
+        // The fnox config is read from the call's own directory, and only when the guard asks for a type;
+        // the guard ignores it when the command changes directory.
         let types: ReturnType<typeof readProviderTypes> | undefined
         const providerTypes =
           guardOptions.providerTypes ??
           ((name: string) => {
-            types ??= readProviderTypes(gateCwd)
+            types ??= readProviderTypes(cwd)
             return types(name)
           })
         const refusal = safely(() => hardGate(command, gateCwd, { ...guardOptions, providerTypes }))
@@ -225,6 +234,11 @@ export function createPlugin(overrides: Overrides = {}) {
       const scratch = scratchDirs
         ? await ctx.permission.hook("evaluate", async (evaluation) => {
             if (evaluation.action !== "external_directory" || evaluation.effect !== "ask") return
+            // A shell command can swap a scratch folder for a symlink between this check and its use, so only
+            // direct file tools qualify; an unknown source stays an ask.
+            const source = evaluation.source
+            const tool = source?.type === "tool" ? running.get(source.id)?.tool : undefined
+            if (tool === undefined || !DIRECT_FILE_TOOLS.has(tool)) return
             const roots =
               overrides.scratch?.roots ??
               (await ctx.session
@@ -237,6 +251,7 @@ export function createPlugin(overrides: Overrides = {}) {
 
       const after = await ctx.tool.hook("execute.after", (event) => {
         pending.delete(event.id)
+        running.delete(event.id)
         if (!on("package-investigate") || event.status !== "completed") return
         const call = shellCall(event.tool, event.input)
         if (call === undefined) return

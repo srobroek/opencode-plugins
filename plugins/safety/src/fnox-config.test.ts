@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { readProviderTypes } from "./fnox-config.ts"
+import { VALUE_STORE_TYPES } from "./op-guard.ts"
 
 const base = join(realpathSync(tmpdir()), "opencode")
 let root: string
@@ -64,12 +65,12 @@ describe("readProviderTypes", () => {
     expect(readProviderTypes(cwd, home)("missing")).toBeUndefined()
   })
 
-  test("definitions that disagree resolve to unknown", () => {
+  test("definitions that disagree resolve to the non-store type", () => {
     const { home, cwd } = tree({
       "proj/fnox.toml": provider("host", "age"),
       "proj/sub/fnox.local.toml": provider("host", "1password"),
     })
-    expect(readProviderTypes(cwd, home)("host")).toBeUndefined()
+    expect(readProviderTypes(cwd, home)("host")).toBe("1password")
   })
 
   test("a config that does not parse resolves everything to unknown", () => {
@@ -77,12 +78,42 @@ describe("readProviderTypes", () => {
     expect(readProviderTypes(cwd, home)("a")).toBeUndefined()
   })
 
-  test("stops climbing at a config that sets root = true", () => {
+  test("reads configs above a root = true file, which does not end the search", () => {
     const { home, cwd } = tree({
-      "proj/fnox.toml": provider("above", "age"),
-      "proj/sub/fnox.toml": `root = true\n${provider("below", "keychain")}`,
+      "proj/fnox.toml": provider("host", "1password"),
+      "proj/sub/fnox.toml": `root = true\n${provider("host", "age")}`,
     })
-    const types = readProviderTypes(cwd, home)
-    expect([types("above"), types("below")]).toEqual([undefined, "keychain"])
+    expect(readProviderTypes(cwd, home)("host")).not.toBe("age")
+  })
+
+  test("reads the whole path to the filesystem root", () => {
+    const { home, cwd } = tree({ "fnox.toml": provider("host", "1password"), "proj/sub/fnox.toml": provider("host", "age") })
+    expect(readProviderTypes(cwd, home)("host")).toBe("1password")
+  })
+
+  test("a non-store definition in any profile makes the provider not a store", () => {
+    const { home, cwd } = tree({
+      "proj/fnox.toml": provider("host", "age"),
+      "proj/sub/fnox.prod.toml": provider("host", "1password"),
+    })
+    expect(readProviderTypes(cwd, home)("host")).toBe("1password")
+  })
+
+  test("a provider defined as two store types is still a store", () => {
+    const { home, cwd } = tree({
+      "proj/fnox.toml": provider("host", "age"),
+      "proj/sub/fnox.local.toml": provider("host", "keychain"),
+    })
+    expect(VALUE_STORE_TYPES.has(readProviderTypes(cwd, home)("host") ?? "")).toBe(true)
+  })
+
+  test("a config with an import resolves everything to unknown", () => {
+    const { home, cwd } = tree({ "proj/sub/fnox.toml": `import = ["other.toml"]\n${provider("a", "age")}` })
+    expect(readProviderTypes(cwd, home)("a")).toBeUndefined()
+  })
+
+  test("a definition without a type is not a store", () => {
+    const { home, cwd } = tree({ "proj/fnox.toml": '[providers.a]\nvault = "x"\n' })
+    expect(readProviderTypes(cwd, home)("a")).toBeUndefined()
   })
 })

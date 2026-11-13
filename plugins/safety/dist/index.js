@@ -2791,72 +2791,6 @@ function externalDirectories(dirs, roots) {
 import { existsSync as existsSync2, readdirSync, readFileSync } from "fs";
 import { homedir as homedir3 } from "os";
 import { dirname as dirname2, join as join3 } from "path";
-var CONFIG_NAME = /^\.?fnox(?:\.[^/]+)?\.toml$/;
-function isTable(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-function declared(config) {
-  const tables = [config.providers];
-  if (isTable(config.profiles)) {
-    for (const profile of Object.values(config.profiles))
-      if (isTable(profile))
-        tables.push(profile.providers);
-  }
-  return tables.filter(isTable).flatMap((table) => Object.entries(table).map(([name, entry]) => [name, isTable(entry) ? entry.type : undefined]));
-}
-function configs(cwd, home) {
-  const found = [];
-  let dir = cwd;
-  for (;; ) {
-    let root = false;
-    let names = [];
-    try {
-      names = readdirSync(dir).filter((name) => CONFIG_NAME.test(name)).sort();
-    } catch {}
-    for (const name of names) {
-      const config = parse(readFileSync(join3(dir, name), "utf8"));
-      found.push(config);
-      if (config.root === true)
-        root = true;
-    }
-    const parent = dirname2(dir);
-    if (root || parent === dir)
-      break;
-    dir = parent;
-  }
-  const global = join3(home, ".config", "fnox", "config.toml");
-  if (existsSync2(global))
-    found.push(parse(readFileSync(global, "utf8")));
-  return found;
-}
-function readProviderTypes(cwd, home = homedir3()) {
-  let types;
-  try {
-    types = new Map;
-    for (const config of configs(cwd, home))
-      for (const [name, type] of declared(config))
-        types.set(name, (types.get(name) ?? new Set).add(type));
-  } catch {
-    return () => {
-      return;
-    };
-  }
-  return (name) => {
-    const set = types.get(name);
-    const [only] = set ?? [];
-    return set?.size === 1 && typeof only === "string" ? only : undefined;
-  };
-}
-
-// plugins/safety/src/guards.ts
-import { readFileSync as readFileSync2 } from "fs";
-import { isAbsolute as isAbsolute3, resolve as resolve4 } from "path";
-
-// plugins/safety/src/attribution.ts
-var ATTRIBUTION = /co-authored-by:[^\n]{0,120}(?:claude|codex|gpt|copilot|cursor|devin|anthropic|openai|gemini)|generated (?:with|by) [[(]?(?:claude|codex|copilot|opencode|gemini)|noreply@(?:anthropic|openai)\.com/i;
-function hasAttribution(text) {
-  return ATTRIBUTION.test(text);
-}
 
 // plugins/safety/src/op-guard.ts
 var OP_MESSAGE = "safety op-guard: do not call the 1Password CLI directly; each call opens a new 1Password session and asks the user to approve. Run the command through fnox, which reuses its cached session: `fnox exec -- <cmd>`, or `fnox exec --only NAME -- <cmd>`. If the secret is not declared, load the `project-secrets` skill and declare it; if it does not exist yet, ask the user to create it. To find items, run `fnox provider discover <provider> --tags project/<name>`.";
@@ -3081,6 +3015,12 @@ var VALUE_STORE_TYPES = new Set([
   "password-store",
   "gopass"
 ]);
+var DIRECTORY_COMMANDS = new Set(["cd", "pushd", "popd", "chdir"]);
+var DIRECTORY_WRAPPERS = new Set(["env", "sudo", "doas", "chroot", "su", "runuser", "setpriv"]);
+var DIRECTORY_FLAG = /^(?:-C|-D|--chdir|--cwd|--directory|--working-directory|--workdir|--cd)(?:=|$)/;
+function changesDirectory(commands) {
+  return commands.some((command) => command.wrappers.some((wrapper) => DIRECTORY_WRAPPERS.has(wrapper)) || command.argv.length > 0 && (DIRECTORY_COMMANDS.has(base(command.argv[0])) || /[$`]/.test(command.argv[0]) || command.argv.some((word) => DIRECTORY_FLAG.test(word))));
+}
 function expands(command, at) {
   const word = command.argv[at];
   return command.words?.[at]?.expands !== false && /[$`]|[<>]\(/.test(word);
@@ -3209,9 +3149,12 @@ function opGuard(commands, allow = [], types = () => {
   return;
 }) {
   try {
+    const known = changesDirectory(commands) ? () => {
+      return;
+    } : types;
     for (const command of commands) {
       const fed = literalFed(command, commands);
-      const found = opRefusal(command, allow, fed) ?? fnoxRefusal(command, allow, { literal: fed, documents: [], depth: 0 }, types);
+      const found = opRefusal(command, allow, fed) ?? fnoxRefusal(command, allow, { literal: fed, documents: [], depth: 0 }, known);
       if (found !== undefined)
         return MESSAGES[found];
     }
@@ -3219,6 +3162,75 @@ function opGuard(commands, allow = [], types = () => {
   } catch (error) {
     return error instanceof NestingTooDeep ? NESTING_MESSAGE : CHECK_FAILED_MESSAGE;
   }
+}
+
+// plugins/safety/src/fnox-config.ts
+var CONFIG_NAME = /^\.?fnox(?:\.[^/]+)?\.toml$/;
+function isTable(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function declared(config) {
+  const tables = [config.providers];
+  if (isTable(config.profiles)) {
+    for (const profile of Object.values(config.profiles))
+      if (isTable(profile))
+        tables.push(profile.providers);
+  }
+  return tables.filter(isTable).flatMap((table) => Object.entries(table).map(([name, entry]) => [name, isTable(entry) ? entry.type : undefined]));
+}
+function configs(cwd, home) {
+  const found = [];
+  let dir = cwd;
+  for (;; ) {
+    let names = [];
+    try {
+      names = readdirSync(dir).filter((name) => CONFIG_NAME.test(name)).sort();
+    } catch {}
+    for (const name of names) {
+      const config = parse(readFileSync(join3(dir, name), "utf8"));
+      if ("import" in config)
+        throw new Error("fnox config with import");
+      found.push(config);
+    }
+    const parent = dirname2(dir);
+    if (parent === dir)
+      break;
+    dir = parent;
+  }
+  const global = join3(home, ".config", "fnox", "config.toml");
+  if (existsSync2(global))
+    found.push(parse(readFileSync(global, "utf8")));
+  return found;
+}
+function readProviderTypes(cwd, home = homedir3()) {
+  let types;
+  try {
+    types = new Map;
+    for (const config of configs(cwd, home))
+      for (const [name, type] of declared(config))
+        types.set(name, [...types.get(name) ?? [], type]);
+  } catch {
+    return () => {
+      return;
+    };
+  }
+  return (name) => {
+    const all = types.get(name);
+    if (all === undefined || all.length === 0 || all.some((type) => typeof type !== "string"))
+      return;
+    const names = all;
+    return names.find((type) => !VALUE_STORE_TYPES.has(type)) ?? names[0];
+  };
+}
+
+// plugins/safety/src/guards.ts
+import { readFileSync as readFileSync2 } from "fs";
+import { isAbsolute as isAbsolute3, resolve as resolve4 } from "path";
+
+// plugins/safety/src/attribution.ts
+var ATTRIBUTION = /co-authored-by:[^\n]{0,120}(?:claude|codex|gpt|copilot|cursor|devin|anthropic|openai|gemini)|generated (?:with|by) [[(]?(?:claude|codex|copilot|opencode|gemini)|noreply@(?:anthropic|openai)\.com/i;
+function hasAttribution(text) {
+  return ATTRIBUTION.test(text);
 }
 
 // plugins/safety/src/guards.ts
@@ -4935,6 +4947,7 @@ async function review(command, cwd, options) {
     };
   }
 }
+var DIRECT_FILE_TOOLS = new Set(["read", "edit", "write", "patch", "apply_patch", "glob", "grep", "list"]);
 var PENDING_TTL_MS = 10 * 60000;
 function createPlugin(overrides = {}) {
   return Plugin.define({
@@ -4947,13 +4960,18 @@ function createPlugin(overrides = {}) {
       const pending = new Map;
       const advisor = createPackageAdvisor();
       const sessionDirectory = (sessionID) => ctx.session.get({ sessionID }).then((session) => session.location.directory).catch(() => ctx.location.directory);
+      const running = new Map;
       const prune = () => {
         const cutoff = Date.now() - PENDING_TTL_MS;
         for (const [id, entry] of pending)
           if (entry.at < cutoff)
             pending.delete(id);
+        for (const [id, entry] of running)
+          if (entry.at < cutoff)
+            running.delete(id);
       };
       const before = await ctx.tool.hook("execute.before", async (event) => {
+        running.set(event.id, { tool: event.tool, at: Date.now() });
         const call = shellCall(event.tool, event.input);
         if (call === undefined || call.command.trim() === "")
           return;
@@ -4969,7 +4987,7 @@ function createPlugin(overrides = {}) {
         const gateCwd = leadingCdCwd(command, cwd);
         let types;
         const providerTypes = guardOptions.providerTypes ?? ((name) => {
-          types ??= readProviderTypes(gateCwd);
+          types ??= readProviderTypes(cwd);
           return types(name);
         });
         const refusal = safely(() => hardGate(command, gateCwd, { ...guardOptions, providerTypes }));
@@ -5019,11 +5037,16 @@ function createPlugin(overrides = {}) {
       const scratch = scratchDirs ? await ctx.permission.hook("evaluate", async (evaluation) => {
         if (evaluation.action !== "external_directory" || evaluation.effect !== "ask")
           return;
+        const source = evaluation.source;
+        const tool = source?.type === "tool" ? running.get(source.id)?.tool : undefined;
+        if (tool === undefined || !DIRECT_FILE_TOOLS.has(tool))
+          return;
         const roots = overrides.scratch?.roots ?? await ctx.session.get({ sessionID: evaluation.sessionID }).then((session) => scratchRoots(session.projectID)).catch(() => []);
         allowScratch(evaluation, roots);
       }) : undefined;
       const after = await ctx.tool.hook("execute.after", (event) => {
         pending.delete(event.id);
+        running.delete(event.id);
         if (!on("package-investigate") || event.status !== "completed")
           return;
         const call = shellCall(event.tool, event.input);
@@ -5070,6 +5093,7 @@ function createPlugin(overrides = {}) {
 }
 var src_default = createPlugin();
 export {
+  DIRECT_FILE_TOOLS,
   FEATURE_IDS,
   INVESTIGATE_NOTICE,
   MESSAGES2 as MESSAGES,

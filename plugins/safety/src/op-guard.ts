@@ -273,6 +273,27 @@ export const VALUE_STORE_TYPES: ReadonlySet<string> = new Set([
   "gopass",
 ])
 
+const DIRECTORY_COMMANDS: ReadonlySet<string> = new Set(["cd", "pushd", "popd", "chdir"])
+/** Wrappers that take a directory option the walk drops from `argv`. */
+const DIRECTORY_WRAPPERS: ReadonlySet<string> = new Set(["env", "sudo", "doas", "chroot", "su", "runuser", "setpriv"])
+const DIRECTORY_FLAG = /^(?:-C|-D|--chdir|--cwd|--directory|--working-directory|--workdir|--cd)(?:=|$)/
+
+/**
+ * Whether any command could change the directory a later `fnox` runs in: a `cd`, `pushd` or `popd`, a
+ * wrapper with a directory option, a `-C`/`--chdir`-style flag, or a command name that is itself an
+ * expansion. The config lookup uses the tool call's directory, so it is only right when this is false.
+ */
+export function changesDirectory(commands: readonly Command[]): boolean {
+  return commands.some(
+    (command) =>
+      command.wrappers.some((wrapper) => DIRECTORY_WRAPPERS.has(wrapper)) ||
+      (command.argv.length > 0 &&
+        (DIRECTORY_COMMANDS.has(base(command.argv[0])) ||
+          /[$`]/.test(command.argv[0] as string) ||
+          command.argv.some((word) => DIRECTORY_FLAG.test(word)))),
+  )
+}
+
 /** The `type` of the fnox provider `name` in the configuration that applies, or `undefined` when unknown. */
 export type ProviderTypes = (name: string) => string | undefined
 
@@ -419,9 +440,11 @@ export function opGuard(
   types: ProviderTypes = () => undefined,
 ): string | undefined {
   try {
+    // Where fnox runs is unknown after a directory change, so no provider's config can be trusted.
+    const known = changesDirectory(commands) ? () => undefined : types
     for (const command of commands) {
       const fed = literalFed(command, commands)
-      const found = opRefusal(command, allow, fed) ?? fnoxRefusal(command, allow, { literal: fed, documents: [], depth: 0 }, types)
+      const found = opRefusal(command, allow, fed) ?? fnoxRefusal(command, allow, { literal: fed, documents: [], depth: 0 }, known)
       if (found !== undefined) return MESSAGES[found]
     }
     return undefined

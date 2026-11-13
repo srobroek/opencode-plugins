@@ -360,19 +360,64 @@ describe("fnox provider types from config", () => {
 })
 
 describe("scratch folders", () => {
-  const ask = (fake: Awaited<ReturnType<typeof load>>["fake"], resources: string[], action = "external_directory") =>
-    fake.fire.permission("evaluate", { sessionID: "ses_1", action, resources, effect: "ask" } as Evaluation)
+  const ask = async (
+    fake: Awaited<ReturnType<typeof load>>["fake"],
+    resources: string[],
+    id: string | undefined,
+    action = "external_directory",
+  ) =>
+    fake.fire.permission("evaluate", {
+      sessionID: "ses_1",
+      action,
+      resources,
+      effect: "ask",
+      ...(id === undefined ? {} : { source: { type: "tool", messageID: "msg_1", id } }),
+    } as Evaluation)
+  const start = (fake: Awaited<ReturnType<typeof load>>["fake"], id: string, tool: string, input: object) =>
+    fake.fire.tool("execute.before", { ...call, id, tool, input } as never)
 
-  test("asks about external_directory outside the session project's worktree folder", async () => {
+  test("allows a direct file tool in the session project's worktree folder only", async () => {
     const { fake } = await load({}, { projectID: "41bad135688c6b4d" })
     const [, worktrees] = scratchRoots("41bad135688c6b4d")
-    expect((await ask(fake, [`${worktrees}/lane/src`])).effect).toBe("allow")
-    expect((await ask(fake, [`${worktrees?.replace("41bad1", "ffffff")}/lane/src`])).effect).toBe("ask")
+    await start(fake, "r1", "read", { filePath: "x" })
+    expect((await ask(fake, [`${worktrees}/lane/src`], "r1")).effect).toBe("allow")
+    expect((await ask(fake, [`${worktrees?.replace("41bad1", "ffffff")}/lane/src`], "r1")).effect).toBe("ask")
+  })
+
+  test("allows each direct file tool", async () => {
+    const { fake } = await load({}, { projectID: "41bad135688c6b4d" })
+    const [, worktrees] = scratchRoots("41bad135688c6b4d")
+    for (const tool of ["read", "edit", "write", "patch", "glob", "grep"]) {
+      await start(fake, `t-${tool}`, tool, {})
+      expect((await ask(fake, [`${worktrees}/x`], `t-${tool}`)).effect).toBe("allow")
+    }
+  })
+
+  test("leaves a shell call's request asking", async () => {
+    const { fake } = await load({}, { projectID: "41bad135688c6b4d" })
+    const [, worktrees] = scratchRoots("41bad135688c6b4d")
+    await start(fake, "s1", "shell", { command: `ls ${worktrees}/lane` })
+    expect((await ask(fake, [`${worktrees}/lane`], "s1")).effect).toBe("ask")
+  })
+
+  test("leaves a request asking when its tool call is unknown or has no source", async () => {
+    const { fake } = await load({}, { projectID: "41bad135688c6b4d" })
+    const [, worktrees] = scratchRoots("41bad135688c6b4d")
+    expect((await ask(fake, [`${worktrees}/lane`], "never-seen")).effect).toBe("ask")
+    expect((await ask(fake, [`${worktrees}/lane`], undefined)).effect).toBe("ask")
+  })
+
+  test("leaves a request from a tool that can run code asking", async () => {
+    const { fake } = await load({}, { projectID: "41bad135688c6b4d" })
+    const [, worktrees] = scratchRoots("41bad135688c6b4d")
+    await start(fake, "e1", "execute", { code: "x" })
+    expect((await ask(fake, [`${worktrees}/lane`], "e1")).effect).toBe("ask")
   })
 
   test("a session lookup that fails leaves the ask", async () => {
     const { fake } = await load()
-    expect((await ask(fake, [`${scratchRoots("41bad135")[1]}/x`])).effect).toBe("ask")
+    await start(fake, "r2", "read", {})
+    expect((await ask(fake, [`${scratchRoots("41bad135")[1]}/x`], "r2")).effect).toBe("ask")
   })
 
   test("scratchDirs: false registers no hook", async () => {

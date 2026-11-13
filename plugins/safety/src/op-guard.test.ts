@@ -407,6 +407,30 @@ describe("op-guard", () => {
       expect(gate(command)).toBeUndefined()
     })
 
+  describe("an uncertain execution directory is not a value store", () => {
+    for (const command of [
+      "cd sub && cmd | fnox set NAME --provider host",
+      "cd 'sub dir' && cmd | fnox set NAME --provider host",
+      "cmd | fnox set NAME --provider host; cd /x",
+      "cd /x; cd /y; cmd | fnox set NAME --provider host",
+      "pushd /x && cmd | fnox set NAME --provider host",
+      "(cd /x && cmd | fnox set NAME --provider host)",
+      "bash -c 'cd /x && cmd | fnox set NAME --provider host'",
+      "env -C /x sh -c 'cmd | fnox set NAME --provider host'",
+      "sudo -D /x sh -c 'cmd | fnox set NAME --provider host'",
+      "git -C /x status; cmd | fnox set NAME --provider host",
+      "make --directory=/x; cmd | fnox set NAME --provider host",
+      "$CD /x; cmd | fnox set NAME --provider host",
+    ])
+      test(`refuses ${command}`, () => {
+        expect(gate(command)).toEqual({ guard: "op-guard", reason: FNOX_STORE_MESSAGE })
+      })
+  })
+
+  test("a value set with no directory change in the command uses the resolved type", () => {
+    expect(gate("cmd | fnox set NAME --provider host")).toBeUndefined()
+  })
+
   test("a provider named host that is 1password is not a value store", () => {
     const named = { providerTypes: (name: string) => (name === "host" ? "1password" : undefined) }
     expect(gate("cmd | fnox set NAME --provider host", named)).toEqual({ guard: "op-guard", reason: FNOX_STORE_MESSAGE })
