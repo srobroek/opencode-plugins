@@ -2,25 +2,34 @@ import type { LocationRef } from "@opencode/client"
 import { Plugin } from "@opencode/plugin/tui"
 import { TiersRpc } from "./rpc.ts"
 import {
-  applyEdit,
-  configuredModels,
-  EFFORT_CHOICES,
-  type PickModel,
-  readState,
-  remainingModels,
-  type TierEdit,
-  type TierRow,
-  type TierState,
-  tierNameError,
-  tierSummary,
-} from "./tiers-ui.ts"
+  agentOptions,
+  createDraft,
+  dirty,
+  entryRef,
+  entryVariant,
+  INHERIT,
+  modelOptions,
+  move,
+  reset,
+  setEffort,
+  setPurpose,
+  setVariant,
+  type TierDraft,
+  type TierMenuValue,
+  tierMenuOptions,
+  toConfig,
+  toggle,
+  toPreviewDraft,
+  variantOptions,
+} from "./tiers-draft.ts"
+import { EFFORT_CHOICES, readState, type TierRow, type TierState, tierNameError, tierSummary } from "./tiers-ui.ts"
 
 const ADD = "\u0000add"
-const DONE = "\u0000done"
-const AUTO = "\u0000auto"
+const AGENTS = "\u0000agents"
 const DEFAULT = "\u0000default"
 
-type Action = "models" | "effort" | "purpose" | "reset"
+/** What a key action in the Models screen asked for before it closed the dialog. */
+type Intent = { kind: "variant" | "up" | "down" | "save"; ref: string }
 
 export default Plugin.define({
   id: "srobroek.model-roles",
@@ -36,44 +45,25 @@ export default Plugin.define({
 
     const toast = (message: string, variant: "info" | "success" | "error" = "info") => context.ui.toast.show({ message, variant })
 
-    const load = async (at: LocationRef): Promise<TierState | undefined> => {
+    const load = async (at: LocationRef, draft?: Record<string, unknown>): Promise<TierState | undefined> => {
       try {
-        return readState((await rpc.state({}, { location: at })) as unknown)
+        return readState((await rpc.state(draft === undefined ? {} : { draft }, { location: at })) as unknown)
       } catch (error) {
         toast(`Tiers: ${(error as Error).message}`, "error")
         return undefined
       }
     }
 
-    /** Pick models in fallback order until Done; Auto resets the list. */
-    const pickModels = async (row: TierRow, models: ReadonlyArray<PickModel>): Promise<string[] | "auto" | undefined> => {
-      const picked: string[] = []
-      for (;;) {
-        const remaining = remainingModels(models, picked)
-        const value = await dialog.select<string>({
-          title: picked.length === 0 ? `${row.name}: first model` : `${row.name}: model ${picked.length + 1} (fallback order)`,
-          placeholder: "Search models",
-          options: [
-            ...(picked.length > 0 ? [{ title: `Done (${picked.join(", ")})`, value: DONE }] : []),
-            { title: "Auto: derive from the catalog", value: AUTO, description: "Drop the list" },
-            ...remaining.map((m) => ({
-              title: m.ref,
-              value: m.ref,
-              ...(m.variants.length > 0 ? { description: m.variants.join(", ") } : {}),
-              category: m.ref.split("/")[0] ?? "",
-            })),
-          ],
-        })
-        if (value === undefined) return undefined
-        if (value === DONE) return picked
-        if (value === AUTO) return "auto"
-        picked.push(value)
-      }
+    /** What the tier resolves to with the draft laid over the saved config. */
+    const previewOf = async (at: LocationRef, draft: TierDraft): Promise<string | undefined> => {
+      if (!dirty(draft)) return draft.row.resolved ?? "nothing available"
+      const state = await load(at, toPreviewDraft(draft))
+      return state?.tiers.find((t) => t.name === draft.row.name)?.resolved ?? "nothing available"
     }
 
-    const pickEffort = async (row: TierRow): Promise<{ effort: string | undefined } | undefined> => {
+    const pickEffort = async (draft: TierDraft): Promise<TierDraft> => {
       const value = await dialog.select<string>({
-        title: `${row.name}: effort`,
+        title: `${draft.row.name}: effort`,
         options: [
           { title: "Tier default", value: DEFAULT, description: "Remove the setting" },
           ...EFFORT_CHOICES.map((effort) => ({
@@ -82,10 +72,64 @@ export default Plugin.define({
             ...(effort === "auto" ? { description: "The auto decider picks per spawn; else the tier's default effort" } : {}),
           })),
         ],
-        ...(row.configured?.effort !== undefined ? { current: row.configured.effort } : {}),
+        current: draft.effort ?? DEFAULT,
       })
-      if (value === undefined) return undefined
-      return { effort: value === DEFAULT ? undefined : value }
+      if (value === undefined) return draft
+      return setEffort(draft, value === DEFAULT ? undefined : value)
+    }
+
+    const pickVariant = async (draft: TierDraft, state: TierState, ref: string): Promise<TierDraft> => {
+      const entry = draft.models.find((e) => entryRef(e) === ref)
+      if (entry === undefined) return draft
+      const value = await dialog.select<string>({
+        title: `${ref}: variant`,
+        options: variantOptions(state.models.find((m) => m.ref === ref)),
+        current: entryVariant(entry) ?? INHERIT,
+      })
+      if (value === undefined) return draft
+      return setVariant(draft, ref, value === INHERIT ? undefined : value)
+    }
+
+    /**
+     * One select over every model; Enter toggles, keys act on the highlighted row. An action
+     * records its intent and closes the select, and the loop opens it again.
+     */
+    const editModels = async (start: TierDraft, state: TierState): Promise<{ draft: TierDraft; save: boolean }> => {
+      let draft = start
+      let current: string | undefined
+      for (;;) {
+        let intent: Intent | undefined
+        const act = (kind: Intent["kind"]) => (ref: string) => {
+          intent = { kind, ref }
+          dialog.clear()
+        }
+        const value = await dialog.select<string>({
+          title: `${draft.row.name}: models (fallback order)`,
+          placeholder: `Enter toggles. ${draft.row.cost || "Search models"}`,
+          options: modelOptions(draft, state.models),
+          ...(current === undefined ? {} : { current }),
+          actions: [
+            { bind: "ctrl+e", title: "variant", onTrigger: act("variant") },
+            { bind: "alt+up", title: "up", onTrigger: act("up") },
+            { bind: "alt+down", title: "down", onTrigger: act("down") },
+            { bind: "ctrl+s", title: "save", selection: "none", onTrigger: () => act("save")("") },
+          ],
+        })
+        const asked = intent as Intent | undefined
+        if (asked !== undefined) {
+          if (asked.kind === "save") return { draft, save: true }
+          current = asked.ref
+          if (!draft.models.some((e) => entryRef(e) === asked.ref)) {
+            toast("Select the model first (Enter).")
+            continue
+          }
+          draft = asked.kind === "variant" ? await pickVariant(draft, state, asked.ref) : move(draft, asked.ref, asked.kind)
+          continue
+        }
+        if (value === undefined) return { draft, save: false }
+        draft = toggle(draft, value)
+        current = value
+      }
     }
 
     /** The toast after a save: where it went, and any model that is not available now. */
@@ -94,42 +138,48 @@ export default Plugin.define({
       toast(`${what} ${result.path ?? "the global config"}.${warnings.length > 0 ? ` ${warnings.join(" ")}` : ""}`, warnings.length > 0 ? "info" : "success")
     }
 
-    const save = async (at: LocationRef, row: TierRow, edit: TierEdit) => {
-      const value = applyEdit(row, edit)
+    const save = async (at: LocationRef, draft: TierDraft): Promise<boolean> => {
+      const name = draft.row.name
       try {
-        const result = (await rpc.set({ tier: row.name, value: value ?? null }, { location: at })) as { path?: string; warnings?: unknown }
-        saved(result, `Tier ${row.name} saved and applied; written to`)
+        const result = (await rpc.set({ tier: name, value: toConfig(draft) ?? null }, { location: at })) as { path?: string; warnings?: unknown }
+        saved(result, `Tier ${name} ${draft.isNew ? "added" : "saved"} and applied; written to`)
+        return true
       } catch (error) {
-        toast(`Tier ${row.name} not saved: ${(error as Error).message}`, "error")
+        toast(`Tier ${name} not saved: ${(error as Error).message}`, "error")
+        return false
       }
     }
 
-    const editTier = async (at: LocationRef, state: TierState, row: TierRow) => {
-      const action = await dialog.select<Action>({
-        title: `Tier ${row.name}`,
-        placeholder: tierSummary(row),
-        options: [
-          {
-            title: "Models",
-            value: "models",
-            description: configuredModels(row).join(", ") || `auto: ${row.candidates.join(", ") || "none"}`,
-          },
-          { title: "Effort", value: "effort", description: row.effort ?? "model default" },
-          { title: "Purpose", value: "purpose", description: row.purpose },
-          { title: "Reset to auto", value: "reset", description: row.builtin ? "Remove this tier's settings" : "Keep only the purpose" },
-        ],
-      })
-      if (action === undefined) return
-      if (action === "models") {
-        const models = await pickModels(row, state.models)
-        if (models !== undefined) await save(at, row, { kind: "models", models })
-      } else if (action === "effort") {
-        const effort = await pickEffort(row)
-        if (effort !== undefined) await save(at, row, { kind: "effort", effort: effort.effort })
-      } else if (action === "purpose") {
-        const purpose = await dialog.prompt({ title: `${row.name}: purpose`, description: "When should the spawner pick this tier?", value: row.purpose })
-        if (purpose !== undefined && purpose.trim() !== "") await save(at, row, { kind: "purpose", purpose })
-      } else await save(at, row, { kind: "reset" })
+    const discard = async (draft: TierDraft): Promise<boolean> =>
+      !dirty(draft) ||
+      (await dialog.confirm({
+        title: `Discard changes to ${draft.row.name}?`,
+        message: "The models, effort and purpose you changed are not saved.",
+        label: { confirm: "Discard", cancel: "Keep editing" },
+      })) === true
+
+    /** The tier menu: leaves on a save or a confirmed discard; a sub-screen's Esc keeps the draft. */
+    const editTier = async (at: LocationRef, state: TierState, start: TierDraft): Promise<void> => {
+      let draft = start
+      for (;;) {
+        const action = await dialog.select<TierMenuValue>({
+          title: `Tier ${draft.row.name}`,
+          placeholder: tierSummary(draft.row),
+          options: tierMenuOptions(draft, await previewOf(at, draft)),
+        })
+        if (action === undefined || action === "cancel") {
+          if (await discard(draft)) return
+        } else if (action === "models") {
+          const edited = await editModels(draft, state)
+          draft = edited.draft
+          if (edited.save && (await save(at, draft))) return
+        } else if (action === "effort") draft = await pickEffort(draft)
+        else if (action === "purpose") {
+          const purpose = await dialog.prompt({ title: `${draft.row.name}: purpose`, description: "When should the spawner pick this tier?", value: draft.purpose })
+          if (purpose !== undefined && purpose.trim() !== "") draft = setPurpose(draft, purpose)
+        } else if (action === "reset") draft = reset(draft)
+        else if (action === "save" && (await save(at, draft))) return
+      }
     }
 
     const addTier = async (at: LocationRef, state: TierState) => {
@@ -144,47 +194,52 @@ export default Plugin.define({
       }
       const purpose = (await dialog.prompt({ title: `${name}: purpose`, description: "When should the spawner pick this tier?" }))?.trim()
       if (purpose === undefined || purpose === "") return
-      const row: TierRow = { name, builtin: false, source: "standard", purpose, distinctVendor: false, cost: "", candidates: [] }
-      const models = await pickModels(row, state.models)
-      if (models === undefined) return
-      const effort = await pickEffort(row)
-      const value = applyEdit(
-        { ...row, configured: { purpose, ...(effort?.effort === undefined ? {} : { effort: effort.effort }) } },
-        { kind: "models", models },
-      )
-      try {
-        const result = (await rpc.set({ tier: name, value: value ?? null }, { location: at })) as { path?: string; warnings?: unknown }
-        saved(result, `Tier ${name} added and applied; written to`)
-      } catch (error) {
-        toast(`Tier ${name} not saved: ${(error as Error).message}`, "error")
-      }
+      const row: TierRow = { name, builtin: false, source: "standard", purpose, distinctVendor: false, cost: "", candidates: [], configured: { purpose } }
+      await editTier(at, state, createDraft(row, true))
+    }
+
+    const showAgents = async (state: TierState) => {
+      await dialog.select<string>({
+        title: "Agents (read-only)",
+        placeholder: "Agent → tier → model it resolves to",
+        options: state.agents.length === 0 ? [{ title: "No tiered agents", value: "", disabled: true }] : agentOptions(state.agents),
+      })
     }
 
     const open = async () => {
       const at = location()
-      const state = await load(at)
-      if (state === undefined) return
-      if (state.error !== undefined) {
-        await dialog.alert({ title: "Tiers", message: state.error })
-        return
+      let current: string | undefined
+      for (;;) {
+        const state = await load(at)
+        if (state === undefined) return
+        if (state.error !== undefined) {
+          await dialog.alert({ title: "Tiers", message: state.error })
+          return
+        }
+        const choice = await dialog.select<string>({
+          title: "Model tiers",
+          placeholder: state.config === undefined ? "Pick a tier" : `Saved to ${state.config}`,
+          options: [
+            ...state.tiers.map((row) => ({
+              title: row.name,
+              value: row.name,
+              description: `${tierSummary(row)}${row.purposeMissing ? " (no purpose)" : ""}`,
+              footer: row.cost,
+            })),
+            { title: "Agents…", value: AGENTS, description: "Which tier each agent uses, and what it resolves to" },
+            { title: "Add a tier…", value: ADD },
+          ],
+          ...(current === undefined ? {} : { current }),
+        })
+        if (choice === undefined) return
+        current = choice
+        if (choice === ADD) await addTier(at, state)
+        else if (choice === AGENTS) await showAgents(state)
+        else {
+          const row = state.tiers.find((t) => t.name === choice)
+          if (row !== undefined) await editTier(at, state, createDraft(row))
+        }
       }
-      const choice = await dialog.select<string>({
-        title: "Model tiers",
-        placeholder: state.config === undefined ? "Pick a tier" : `Saved to ${state.config}`,
-        options: [
-          ...state.tiers.map((row) => ({
-            title: row.name,
-            value: row.name,
-            description: `${tierSummary(row)}${row.purposeMissing ? " (no purpose)" : ""}`,
-            footer: row.cost,
-          })),
-          { title: "Add a tier…", value: ADD },
-        ],
-      })
-      if (choice === undefined) return
-      if (choice === ADD) return addTier(at, state)
-      const row = state.tiers.find((t) => t.name === choice)
-      if (row !== undefined) await editTier(at, state, row)
     }
 
     const disposeCommands = context.ui.slot({
