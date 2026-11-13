@@ -5,6 +5,107 @@ import { readFileSync as readFileSync4 } from "fs";
 import { fileURLToPath as fileURLToPath2 } from "url";
 import { Plugin } from "@opencode/plugin";
 
+// plugins/lib/src/agent-tools.ts
+var DEFAULT_MCP_TOOLS = ["context7_*", "aws-mcp_*"];
+var BUILT_IN_ACTIONS = [
+  "shell",
+  "bash",
+  "edit",
+  "write",
+  "patch",
+  "apply_patch",
+  "multiedit",
+  "read",
+  "grep",
+  "glob",
+  "execute",
+  "external_directory",
+  "subagent",
+  "task",
+  "skill",
+  "question",
+  "webfetch",
+  "websearch",
+  "todowrite"
+];
+var RESERVED_TOOL_PREFIXES = [
+  "cad_",
+  "claude_",
+  "dep_",
+  "delivery_",
+  "design_",
+  "example_",
+  "find_tools_",
+  "journey_",
+  "journeys_",
+  "lsp_",
+  "model_roles_",
+  "opencode_",
+  "parley_",
+  "quality_",
+  "repomix_",
+  "seance_",
+  "session_",
+  "sniff_",
+  "speckit_",
+  "subagent_",
+  "tui_",
+  "version_gap_"
+];
+function matches(value, pattern) {
+  const source = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replaceAll("*", ".*");
+  return new RegExp(`^${source}$`, "s").test(value);
+}
+function refusedTool(pattern) {
+  if (typeof pattern !== "string" || pattern.trim() === "")
+    return "not a non-empty string";
+  const value = pattern.trim();
+  if (!/^[A-Za-z0-9_*-]+$/.test(value))
+    return "use only letters, digits, `_`, `-` and `*`";
+  const builtIn = BUILT_IN_ACTIONS.find((action) => matches(action, value));
+  if (builtIn !== undefined)
+    return `matches the built-in action ${builtIn}`;
+  const head = value.split("*")[0] ?? "";
+  if (head === "")
+    return "must start with the MCP server name, not a wildcard";
+  const hasWildcard = value.includes("*");
+  const owner = RESERVED_TOOL_PREFIXES.find((prefix) => head.startsWith(prefix) || hasWildcard && prefix.startsWith(head));
+  if (owner !== undefined)
+    return `could match ${owner}* tools from a plugin or OpenCode, not an MCP server`;
+  return;
+}
+function parseToolsOption(raw, warn = (message) => console.warn(message)) {
+  if (raw === undefined)
+    return [...DEFAULT_MCP_TOOLS];
+  if (raw === false)
+    return [];
+  if (!Array.isArray(raw)) {
+    warn(`tools option ignored: expected an array of tool patterns or false, got ${typeof raw}`);
+    return [...DEFAULT_MCP_TOOLS];
+  }
+  const kept = [];
+  for (const entry of raw) {
+    const reason = refusedTool(entry);
+    if (reason)
+      warn(`tools option: refused ${JSON.stringify(entry)}: ${reason}`);
+    else if (!kept.includes(entry.trim()))
+      kept.push(entry.trim());
+  }
+  return kept;
+}
+function toolRules(patterns) {
+  return patterns.map((action) => ({ action, resource: "*", effect: "allow" }));
+}
+function toolRulesFromOption(raw, warn) {
+  return toolRules(parseToolsOption(raw, warn));
+}
+function withToolRules(file, rules) {
+  return rules.length === 0 ? file : { ...file, permissions: [...file.permissions, ...rules] };
+}
+function grantTools(file, grant) {
+  return grant !== undefined && grant.agents.includes(file.id) ? withToolRules(file, grant.rules) : file;
+}
+
 // plugins/lib/src/model-roles.ts
 var MODEL_FALLBACK_HEADER = "x-opencode-model-fallback";
 
@@ -3360,6 +3461,7 @@ var SKILL_PATH = fileURLToPath2(new URL("../skills/delivery-git-workflow/SKILL.m
 var FAN_OUT_SKILL_PATH = fileURLToPath2(new URL("../skills/delivery-fan-out/SKILL.md", import.meta.url));
 var FAN_OUT_PATH = fileURLToPath2(new URL("../instructions/delivery-fan-out.md", import.meta.url));
 var PLUGIN_LIST_TIMEOUT_MS = 2000;
+var TOOL_AGENTS = ["implementer", "implementer-high", "researcher"];
 function withTimeout(promise, ms) {
   let timer;
   const timeout = new Promise((_, reject) => {
@@ -3590,13 +3692,17 @@ receipt: ${result.path}` : `delivery_cleanup refused: ${result.reason}`;
     } catch {
       modelRoles = false;
     }
+    const grant = {
+      agents: TOOL_AGENTS,
+      rules: toolRulesFromOption(ctx.options?.tools)
+    };
     const agents = await ctx.agent.transform((editor) => {
       for (const file of files) {
         const created = editor.get(file.id) === undefined;
         if (!keepFallback(file.id, FALLBACK_AGENTS, owned, !created))
           continue;
         const model = fallbackModel(file, options.models[file.id], modelRoles, available);
-        editor.update(file.id, (draft) => shapeAgent2(draft, file, model, created));
+        editor.update(file.id, (draft) => shapeAgent2(draft, grantTools(file, grant), model, created));
       }
     });
     disposers.push(() => agents.dispose());

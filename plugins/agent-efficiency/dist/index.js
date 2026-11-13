@@ -5,6 +5,101 @@ import { realpathSync as realpathSync2 } from "fs";
 import { homedir as homedir2 } from "os";
 import { Plugin } from "@opencode/plugin";
 
+// plugins/lib/src/agent-tools.ts
+var DEFAULT_MCP_TOOLS = ["context7_*", "aws-mcp_*"];
+var BUILT_IN_ACTIONS = [
+  "shell",
+  "bash",
+  "edit",
+  "write",
+  "patch",
+  "apply_patch",
+  "multiedit",
+  "read",
+  "grep",
+  "glob",
+  "execute",
+  "external_directory",
+  "subagent",
+  "task",
+  "skill",
+  "question",
+  "webfetch",
+  "websearch",
+  "todowrite"
+];
+var RESERVED_TOOL_PREFIXES = [
+  "cad_",
+  "claude_",
+  "dep_",
+  "delivery_",
+  "design_",
+  "example_",
+  "find_tools_",
+  "journey_",
+  "journeys_",
+  "lsp_",
+  "model_roles_",
+  "opencode_",
+  "parley_",
+  "quality_",
+  "repomix_",
+  "seance_",
+  "session_",
+  "sniff_",
+  "speckit_",
+  "subagent_",
+  "tui_",
+  "version_gap_"
+];
+function matches(value, pattern) {
+  const source = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replaceAll("*", ".*");
+  return new RegExp(`^${source}$`, "s").test(value);
+}
+function refusedTool(pattern) {
+  if (typeof pattern !== "string" || pattern.trim() === "")
+    return "not a non-empty string";
+  const value = pattern.trim();
+  if (!/^[A-Za-z0-9_*-]+$/.test(value))
+    return "use only letters, digits, `_`, `-` and `*`";
+  const builtIn = BUILT_IN_ACTIONS.find((action) => matches(action, value));
+  if (builtIn !== undefined)
+    return `matches the built-in action ${builtIn}`;
+  const head = value.split("*")[0] ?? "";
+  if (head === "")
+    return "must start with the MCP server name, not a wildcard";
+  const hasWildcard = value.includes("*");
+  const owner = RESERVED_TOOL_PREFIXES.find((prefix) => head.startsWith(prefix) || hasWildcard && prefix.startsWith(head));
+  if (owner !== undefined)
+    return `could match ${owner}* tools from a plugin or OpenCode, not an MCP server`;
+  return;
+}
+function parseToolsOption(raw, warn = (message) => console.warn(message)) {
+  if (raw === undefined)
+    return [...DEFAULT_MCP_TOOLS];
+  if (raw === false)
+    return [];
+  if (!Array.isArray(raw)) {
+    warn(`tools option ignored: expected an array of tool patterns or false, got ${typeof raw}`);
+    return [...DEFAULT_MCP_TOOLS];
+  }
+  const kept = [];
+  for (const entry of raw) {
+    const reason = refusedTool(entry);
+    if (reason)
+      warn(`tools option: refused ${JSON.stringify(entry)}: ${reason}`);
+    else if (!kept.includes(entry.trim()))
+      kept.push(entry.trim());
+  }
+  return kept;
+}
+function toolRules(patterns) {
+  return patterns.map((action) => ({ action, resource: "*", effect: "allow" }));
+}
+function toolRulesFromOption(raw, warn) {
+  return toolRules(parseToolsOption(raw, warn));
+}
+
 // plugins/lib/src/shell-write-targets.ts
 import { statSync } from "fs";
 import { homedir } from "os";
@@ -747,10 +842,10 @@ var EXPLORE_PERMISSIONS = [
   { action: "webfetch", resource: "*", effect: "allow" },
   { action: "external_directory", resource: "*", effect: "ask" }
 ];
-function shapeExplore(draft) {
+function shapeExplore(draft, tools = []) {
   draft.system = EXPLORE_PROMPT;
   draft.steps = 60;
-  draft.permissions.push(...EXPLORE_PERMISSIONS.map((rule) => ({ ...rule })));
+  draft.permissions.push(...[...EXPLORE_PERMISSIONS, ...tools].map((rule) => ({ ...rule })));
 }
 
 // plugins/agent-efficiency/src/large-read.ts
@@ -1853,10 +1948,11 @@ var src_default = Plugin.define({
     if (options.scratchReminder !== false)
       disposers.push(await setupScratch(ctx));
     if (options.explore !== false) {
+      const tools = toolRulesFromOption(options.tools);
       const agents = await ctx.agent.transform((editor) => {
         if (editor.get(EXPLORE_ID) === undefined)
           return;
-        editor.update(EXPLORE_ID, (draft) => shapeExplore(draft));
+        editor.update(EXPLORE_ID, (draft) => shapeExplore(draft, tools));
       });
       disposers.push(() => agents.dispose());
     }
