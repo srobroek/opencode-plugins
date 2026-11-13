@@ -145,3 +145,51 @@ read, and a location without a store are all allowed. Gate name:
 ```sh
 opencode plugin add 'github:srobroek/opencode-plugins::path:plugins/beads'
 ```
+# Project ledger store
+
+Set `options.store` when the project's ledger lives outside its checkout:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": [
+    {
+      "package": "@srobroek/opencode-beads",
+      "options": { "store": "/absolute/path/to/ledger/.beads" }
+    }
+  ]
+}
+```
+
+Relative store paths resolve from OpenCode's project root
+(`location.project.directory`), not from the config file or a shell call's
+working directory. The plugin resolves symlinks and requires a directory with
+`metadata.json` or `embeddeddolt/`. For invalid values the plugin installs refusal
+hooks that block shell tools, shell creation, dispatch and session context with
+an `Invalid beads store option` error. It runs no internal `bd` commands.
+Fix the config before running ledger writes.
+
+For ordinary `bd` calls, precedence is a literal command-local `BEADS_DIR=`,
+then `options.store`, then the server's `BEADS_DIR`, then checkout discovery.
+Explicit database/directory CLI flags retain their existing semantics.
+The configured store supplies `BEADS_DIR` to shell children and every internal
+`bd` command, including admission checks and `bd prime`. This explicit selection
+also applies when the automatic `beads-dir-pin` gate is disabled. The write
+runner uses the canonical store path, so projects and worktrees sharing a ledger
+use its same `omp-embedded-write.lock` file.
+
+OpenCode V2 searches project config through all ancestors, including above a Git
+root. Either `opencode.json` or `.opencode/opencode.json` works; all discovered
+`.opencode` configs take precedence over direct configs. Plugin arrays are
+processed from lower to higher precedence. In the current V2 implementation,
+a later entry with the **same package target** replaces its earlier options;
+it does not deep-merge them. Repeat any global gate options you want to retain,
+and match the global target exactly, including its version or Git specification.
+Different targets exporting the same plugin ID can be reported as duplicates,
+with the first instance retained. Use the package target, not `srobroek.beads`,
+to supply options: an ID entry only enables the plugin.
+
+Sources: [V2 config](https://opencode.ai/v2/docs/config),
+[V2 plugins](https://opencode.ai/v2/docs/plugins), and
+[`PluginSupervisor.resolve`](https://github.com/anomalyco/opencode/blob/dev/packages/core/src/plugin/supervisor.ts)
+with [`PluginModule.load`](https://github.com/anomalyco/opencode/blob/dev/packages/core/src/plugin/module.ts).

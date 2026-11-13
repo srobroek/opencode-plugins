@@ -494,7 +494,7 @@ function embedded(store: string): boolean {
   } catch {
     // Same.
   }
-  return metadata !== "" || config !== ""
+  return metadata !== "" || config !== "" || isDirectory(join(store, "embeddeddolt"))
 }
 
 /**
