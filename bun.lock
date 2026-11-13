@@ -432,7 +432,7 @@
     },
     "plugins/quality": {
       "name": "@srobroek/opencode-quality",
-      "version": "0.7.0",
+      "version": "0.8.0",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
         "fast-xml-parser": "5.12.0",
