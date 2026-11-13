@@ -204,11 +204,6 @@ const availabilityKey = (models: ReadonlyArray<AvailableModel>): string =>
     .sort()
     .join("\n")
 
-const oneLine = (text: string): string => {
-  const line = text.replace(/\s+/g, " ").trim()
-  return line.length > 160 ? `${line.slice(0, 157)}...` : line
-}
-
 /** Run tasks one at a time, in call order. */
 function serial() {
   let tail: Promise<unknown> = Promise.resolve()
@@ -404,8 +399,8 @@ export default Plugin.define({
      * while it stays in use. Tiers are resolved again only when that changed.
      */
     const markFailed = async (ref: ModelRef, kind: FailureClass, error: FailureInput): Promise<number> => {
-      const reason = `${kind}: ${oneLine(error.message ?? "")}`
-      const record = recordFailure(health, ref, kind, error, Date.now(), runtime, reason)
+      // Health keeps the failure class only: the provider's message can hold prompt text or credentials.
+      const record = recordFailure(health, ref, kind, error, Date.now(), runtime)
       health = record.state
       try {
         await ctx.storage.set(HEALTH_KEY, health)
@@ -1047,8 +1042,47 @@ export default Plugin.define({
       return undefined
     }
 
-    const spawns = await ctx.tool.hook("execute.before", async (event) => {
-      if (event.tool !== SUBAGENT_TOOL) return
+    /**
+     * Each spawn resolves against one tier state, model and receipt alike: a reload waits for
+     * the spawns already running, and spawns that arrive during a reload wait for it.
+     */
+    let reloading: Promise<void> | undefined
+    let inFlight = 0
+    let idle: (() => void) | undefined
+    const whileSpawning = async (task: () => Promise<void>): Promise<void> => {
+      while (reloading !== undefined) await reloading
+      inFlight++
+      try {
+        await task()
+      } finally {
+        inFlight--
+        if (inFlight === 0) idle?.()
+      }
+    }
+    const exclusive = async (task: () => Promise<void>): Promise<void> => {
+      while (reloading !== undefined) await reloading
+      let done = () => {}
+      reloading = new Promise<void>((resolve) => {
+        done = resolve
+      })
+      try {
+        if (inFlight > 0)
+          await new Promise<void>((resolve) => {
+            idle = resolve
+          })
+        await task()
+      } finally {
+        idle = undefined
+        reloading = undefined
+        done()
+      }
+    }
+
+    type SpawnEvent = { id: string; sessionID: string; agent: string; input: unknown }
+
+    const handleSpawn = async (event: SpawnEvent) => {
+      // Read before the tier rewrites `model`: only a model the caller passed counts as explicit.
+      const explicitModel = inputModel(event.input)
       const asked = passedTier(event.input)
       const passed = asked?.name
       const named = spawnTarget(event.input)
@@ -1063,40 +1097,36 @@ export default Plugin.define({
       const target = spawnTarget(plan.input)
       if (target === undefined) return
       const own = agent === undefined ? undefined : roleOf(agent, options.agents, options.implicit)
-      const override = inputModel(plan.input)
-      // A passed tier that does not apply: the spawn's own model or the agent's pin wins.
+      // The tier that does not apply when the spawn's own model or the agent's pin wins.
       const dropped = asked !== undefined && !INHERIT_NAMES.includes(asked.name) && plan.role === undefined ? asked : undefined
       const bypassed: Asked | undefined = dropped ?? (own === undefined ? undefined : { source: "agent", name: own })
-      if (override !== undefined && bypassed !== undefined) {
+      const bypass = (rule: "explicit-model" | "agent-pin", model: ModelRef, warning: string): Receipt | undefined => {
+        if (bypassed === undefined) return undefined
         const tier = tierOf(bypassed.name)
-        await recordReceipt({
+        return {
           at: Date.now(),
           agent: target,
           source: bypassed.source,
           tier,
           ...(bypassed.name === tier ? {} : { alias: bypassed.name }),
-          model: modelLabel(override),
-          rule: "explicit-model",
+          model: modelLabel(model),
+          rule,
           fallbacks: [],
-          warnings: [`the spawn's own model wins over tier ${tier}`],
-        })
-      } else if (override === undefined && pin !== undefined && bypassed !== undefined) {
-        const tier = tierOf(bypassed.name)
-        await recordReceipt({
-          at: Date.now(),
-          agent: target,
-          source: bypassed.source,
-          tier,
-          model: modelLabel(pin),
-          rule: "agent-pin",
-          fallbacks: [],
-          warnings: [`the agent's own model (config or frontmatter) wins over tier ${tier}`],
-        })
+          warnings: [`${warning} ${tier}`],
+        }
+      }
+      if (explicitModel !== undefined) {
+        // The caller's model runs as given; only the guard may refuse it.
+        const reason = await judge(event, target, explicitModel)
+        if (reason !== undefined) throw new Error(reason)
+        const receipt = bypass("explicit-model", explicitModel, "the spawn's own model wins over tier")
+        if (receipt !== undefined) await recordReceipt(receipt)
+        return
       }
       let source: SpawnSource | undefined = asked?.source
       let tierName = passed
       // An agent on a tier that wants another vendor than the caller's, or whose effort the decider picks, is moved per spawn.
-      if (plan.role === undefined && !pinned && override === undefined && isRecord(plan.input) && own !== undefined) {
+      if (plan.role === undefined && !pinned && isRecord(plan.input) && own !== undefined) {
         const meta = tierMeta(options, own)
         if (meta?.distinctVendor || meta?.effort === "auto") {
           const callerVendorOf = meta.distinctVendor ? await callerVendor(event) : undefined
@@ -1120,7 +1150,7 @@ export default Plugin.define({
         await recordReceipt(tierReceipt(target, { source: source ?? "agent", name: tierName ?? plan.role }, tuned, vendorOfCaller))
         return
       }
-      const unroled = override === undefined && plan.role === undefined
+      const unroled = plan.role === undefined
       const accept = async (routed: Routed) => {
         const tuned = await withAutoEffort(routed.input, routed.role, routed.model).catch(() => ({ input: routed.input, model: routed.model }) as Tuned)
         event.input = tuned.input
@@ -1132,23 +1162,33 @@ export default Plugin.define({
         const routed = await route(event, target, plan.input, auto, false).catch(() => undefined)
         if (routed !== undefined) return accept(routed)
       }
-      // An agent on its own tier runs the model this plugin set on it.
-      if (unroled && !pinned && own !== undefined && agent !== undefined) {
-        const model = resolveTier(options, available, own, view()).model
-        if (model !== undefined) {
-          const receipt = tierReceipt(target, { source: "agent", name: own }, { input: {}, model })
-          if (agent.model !== undefined && !sameModel(agent.model, model))
-            receipt.warnings = [...receipt.warnings, `the agent still runs ${modelLabel(agent.model)}: its model has not caught up with the tier`]
-          await recordReceipt(receipt)
+      const reason = await judge(event, target, undefined)
+      if (reason === undefined) {
+        // The spawn goes ahead on the agent's own model: its pin, or the model this plugin set for its tier.
+        if (pin !== undefined) {
+          const receipt = bypass("agent-pin", pin, "the agent's own model (config or frontmatter) wins over tier")
+          if (receipt !== undefined) await recordReceipt(receipt)
+        } else if (own !== undefined && agent !== undefined) {
+          const model = resolveTier(options, available, own, view()).model
+          if (model !== undefined) {
+            const receipt = tierReceipt(target, { source: "agent", name: own }, { input: {}, model })
+            if (agent.model !== undefined && !sameModel(agent.model, model))
+              receipt.warnings = [...receipt.warnings, `the agent still runs ${modelLabel(agent.model)}: its model has not caught up with the tier`]
+            await recordReceipt(receipt)
+          }
         }
+        return
       }
-      const reason = await judge(event, target, override)
-      if (reason === undefined) return
       if (unroled && guardAuto !== undefined) {
         const routed = await route(event, target, plan.input, guardAuto, true).catch(() => undefined)
         if (routed !== undefined) return accept(routed)
       }
       throw new Error(reason)
+    }
+
+    const spawns = await ctx.tool.hook("execute.before", async (event) => {
+      if (event.tool !== SUBAGENT_TOOL) return
+      await whileSpawning(() => handleSpawn(event))
     })
 
     // The `/tiers` TUI dialog reads the tier table and writes `options.tiers` through these.
@@ -1178,11 +1218,30 @@ export default Plugin.define({
       const tiers = readTiers(file.text)
       const key = JSON.stringify(tiers)
       if (!force && key === fileTiers) return
-      settings = parseTierSettings({ ...pluginOptions, tiers })
-      rebuild()
-      attempts = 0
-      await check(true)
-      await refreshSubagentTool()
+      await exclusive(async () => {
+        const previous = { settings, roles: options.roles, tiers: options.tiers, classes: options.classes, derived }
+        const restore = () => {
+          settings = previous.settings
+          options.roles = previous.roles
+          options.tiers = previous.tiers
+          options.classes = previous.classes
+          derived = previous.derived
+        }
+        try {
+          // Spawns wait in `exclusive`, so they see either the old tiers or the new ones once agents and tools follow.
+          settings = parseTierSettings({ ...pluginOptions, tiers })
+          rebuild()
+          attempts = 0
+          await check(true)
+          await refreshSubagentTool()
+        } catch (error) {
+          restore()
+          attempts = 0
+          await check(true).catch(() => {})
+          await refreshSubagentTool().catch(() => {})
+          throw error
+        }
+      })
       // Marked applied only once everything above went through, so a failed reload is retried on the next event.
       fileTiers = key
       warn(`applied the tiers from ${file.path}`)
@@ -1224,7 +1283,12 @@ export default Plugin.define({
         const result = writeTier(configDir(), tier, config)
         warn(`${config === undefined ? "removed" : "set"} tier ${tier} in ${result.path}`)
         for (const warning of warnings) warn(`tier ${tier}: ${warning}`)
-        await queue(() => reloadTiers(true))
+        try {
+          await queue(() => reloadTiers(true))
+        } catch (error) {
+          warn(`tier ${tier} was written to ${result.path} but not applied`, { error: String(error) })
+          throw new Error(`Tier ${tier} was written to ${result.path} but not applied: ${(error as Error).message}. The previous tiers stay in use until the config reloads.`)
+        }
         return { ...result, warnings }
       },
     })

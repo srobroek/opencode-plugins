@@ -165,6 +165,22 @@ var DEFAULT_FLAP_WINDOW_MS = 600000;
 var EPISODE_MS = 1e4;
 var RECENT_MS = 60000;
 var HEALTH_KEY = "health";
+var FAILURE_CLASSES = [
+  "unavailable",
+  "content-filter",
+  "auth",
+  "credentials",
+  "quota",
+  "outage",
+  "rate-limit",
+  "server"
+];
+function failureReason(value) {
+  if (typeof value !== "string")
+    return "unknown";
+  const head = value.split(":", 1)[0]?.trim() ?? "";
+  return FAILURE_CLASSES.includes(head) ? head : "unknown";
+}
 var PROVIDER_SCOPED = new Set(["auth", "credentials", "quota", "outage"]);
 var TRANSIENT = new Set(["rate-limit", "server", "outage", "credentials"]);
 var DECISIVE = new Set(["quota", "unavailable"]);
@@ -275,7 +291,7 @@ function readHealth(value) {
     const { failedAt, until, reason, episodes, strikes } = entry;
     if (typeof failedAt !== "number" || typeof until !== "number")
       continue;
-    const read = { failedAt, until, reason: typeof reason === "string" ? reason : "" };
+    const read = { failedAt, until, reason: failureReason(reason) };
     if (Array.isArray(episodes) && episodes.every(isTime))
       read.episodes = episodes;
     if (typeof strikes === "number" && Number.isInteger(strikes) && strikes > 0)
@@ -290,7 +306,8 @@ function markUnhealthy(state, ref, now, cooldownMs, reason, scope = "model") {
   next[key] = { failedAt: now, until: now + cooldownMs, reason };
   return next;
 }
-function recordFailure(state, ref, kind, error, now, policy, reason) {
+function recordFailure(state, ref, kind, error, now, policy) {
+  const reason = kind;
   const next = pruneHealth(state, now, policy.flapWindowMs);
   const key = failureScope(kind) === "provider" ? providerKey(ref.providerID) : healthKey(ref);
   const prior = next[key];
@@ -3525,10 +3542,6 @@ function spawnTarget(input) {
 }
 var availabilityKey = (models) => models.filter((m) => m.enabled !== false).map((m) => `${m.providerID}/${m.id}#${(m.variants ?? []).map((v) => v.id).join(",")}`).sort().join(`
 `);
-var oneLine = (text) => {
-  const line = text.replace(/\s+/g, " ").trim();
-  return line.length > 160 ? `${line.slice(0, 157)}...` : line;
-};
 function serial() {
   let tail = Promise.resolve();
   return (task) => {
@@ -3695,8 +3708,7 @@ ${refs.size}`;
     };
     scheduleExpiry();
     const markFailed = async (ref, kind, error) => {
-      const reason = `${kind}: ${oneLine(error.message ?? "")}`;
-      const record = recordFailure(health2, ref, kind, error, Date.now(), runtime, reason);
+      const record = recordFailure(health2, ref, kind, error, Date.now(), runtime);
       health2 = record.state;
       try {
         await ctx.storage.set(HEALTH_KEY, health2);
@@ -4244,9 +4256,42 @@ ${refs.size}`;
       }
       return;
     };
-    const spawns = await ctx.tool.hook("execute.before", async (event) => {
-      if (event.tool !== SUBAGENT_TOOL)
-        return;
+    let reloading;
+    let inFlight = 0;
+    let idle;
+    const whileSpawning = async (task) => {
+      while (reloading !== undefined)
+        await reloading;
+      inFlight++;
+      try {
+        await task();
+      } finally {
+        inFlight--;
+        if (inFlight === 0)
+          idle?.();
+      }
+    };
+    const exclusive = async (task) => {
+      while (reloading !== undefined)
+        await reloading;
+      let done = () => {};
+      reloading = new Promise((resolve2) => {
+        done = resolve2;
+      });
+      try {
+        if (inFlight > 0)
+          await new Promise((resolve2) => {
+            idle = resolve2;
+          });
+        await task();
+      } finally {
+        idle = undefined;
+        reloading = undefined;
+        done();
+      }
+    };
+    const handleSpawn = async (event) => {
+      const explicitModel = inputModel(event.input);
       const asked = passedTier(event.input);
       const passed = asked?.name;
       const named = spawnTarget(event.input);
@@ -4263,38 +4308,36 @@ ${refs.size}`;
       if (target === undefined)
         return;
       const own = agent === undefined ? undefined : roleOf(agent, options.agents, options.implicit);
-      const override = inputModel(plan.input);
       const dropped = asked !== undefined && !INHERIT_NAMES.includes(asked.name) && plan.role === undefined ? asked : undefined;
       const bypassed = dropped ?? (own === undefined ? undefined : { source: "agent", name: own });
-      if (override !== undefined && bypassed !== undefined) {
+      const bypass = (rule, model, warning) => {
+        if (bypassed === undefined)
+          return;
         const tier = tierOf(bypassed.name);
-        await recordReceipt({
+        return {
           at: Date.now(),
           agent: target,
           source: bypassed.source,
           tier,
           ...bypassed.name === tier ? {} : { alias: bypassed.name },
-          model: modelLabel(override),
-          rule: "explicit-model",
+          model: modelLabel(model),
+          rule,
           fallbacks: [],
-          warnings: [`the spawn's own model wins over tier ${tier}`]
-        });
-      } else if (override === undefined && pin !== undefined && bypassed !== undefined) {
-        const tier = tierOf(bypassed.name);
-        await recordReceipt({
-          at: Date.now(),
-          agent: target,
-          source: bypassed.source,
-          tier,
-          model: modelLabel(pin),
-          rule: "agent-pin",
-          fallbacks: [],
-          warnings: [`the agent's own model (config or frontmatter) wins over tier ${tier}`]
-        });
+          warnings: [`${warning} ${tier}`]
+        };
+      };
+      if (explicitModel !== undefined) {
+        const reason = await judge(event, target, explicitModel);
+        if (reason !== undefined)
+          throw new Error(reason);
+        const receipt2 = bypass("explicit-model", explicitModel, "the spawn's own model wins over tier");
+        if (receipt2 !== undefined)
+          await recordReceipt(receipt2);
+        return;
       }
       let source = asked?.source;
       let tierName = passed;
-      if (plan.role === undefined && !pinned && override === undefined && isRecord8(plan.input) && own !== undefined) {
+      if (plan.role === undefined && !pinned && isRecord8(plan.input) && own !== undefined) {
         const meta = tierMeta(options, own);
         if (meta?.distinctVendor || meta?.effort === "auto") {
           const callerVendorOf = meta.distinctVendor ? await callerVendor(event) : undefined;
@@ -4318,7 +4361,7 @@ ${refs.size}`;
         await recordReceipt(tierReceipt(target, { source: source ?? "agent", name: tierName ?? plan.role }, tuned, vendorOfCaller));
         return;
       }
-      const unroled = override === undefined && plan.role === undefined;
+      const unroled = plan.role === undefined;
       const accept = async (routed) => {
         const tuned = await withAutoEffort(routed.input, routed.role, routed.model).catch(() => ({ input: routed.input, model: routed.model }));
         event.input = tuned.input;
@@ -4333,18 +4376,23 @@ ${refs.size}`;
         if (routed !== undefined)
           return accept(routed);
       }
-      if (unroled && !pinned && own !== undefined && agent !== undefined) {
-        const model = resolveTier(options, available, own, view()).model;
-        if (model !== undefined) {
-          const receipt2 = tierReceipt(target, { source: "agent", name: own }, { input: {}, model });
-          if (agent.model !== undefined && !sameModel(agent.model, model))
-            receipt2.warnings = [...receipt2.warnings, `the agent still runs ${modelLabel(agent.model)}: its model has not caught up with the tier`];
-          await recordReceipt(receipt2);
+      const reason = await judge(event, target, undefined);
+      if (reason === undefined) {
+        if (pin !== undefined) {
+          const receipt2 = bypass("agent-pin", pin, "the agent's own model (config or frontmatter) wins over tier");
+          if (receipt2 !== undefined)
+            await recordReceipt(receipt2);
+        } else if (own !== undefined && agent !== undefined) {
+          const model = resolveTier(options, available, own, view()).model;
+          if (model !== undefined) {
+            const receipt2 = tierReceipt(target, { source: "agent", name: own }, { input: {}, model });
+            if (agent.model !== undefined && !sameModel(agent.model, model))
+              receipt2.warnings = [...receipt2.warnings, `the agent still runs ${modelLabel(agent.model)}: its model has not caught up with the tier`];
+            await recordReceipt(receipt2);
+          }
         }
-      }
-      const reason = await judge(event, target, override);
-      if (reason === undefined)
         return;
+      }
       if (unroled && guardAuto !== undefined) {
         const routed = await route(event, target, plan.input, guardAuto, true).catch(() => {
           return;
@@ -4353,6 +4401,11 @@ ${refs.size}`;
           return accept(routed);
       }
       throw new Error(reason);
+    };
+    const spawns = await ctx.tool.hook("execute.before", async (event) => {
+      if (event.tool !== SUBAGENT_TOOL)
+        return;
+      await whileSpawning(() => handleSpawn(event));
     });
     const configDir = () => globalConfigDir(process.env, homedir());
     const globalFile = () => {
@@ -4375,11 +4428,29 @@ ${refs.size}`;
       const key = JSON.stringify(tiers2);
       if (!force && key === fileTiers)
         return;
-      settings = parseTierSettings({ ...pluginOptions, tiers: tiers2 });
-      rebuild();
-      attempts = 0;
-      await check2(true);
-      await refreshSubagentTool();
+      await exclusive(async () => {
+        const previous = { settings, roles: options.roles, tiers: options.tiers, classes: options.classes, derived };
+        const restore = () => {
+          settings = previous.settings;
+          options.roles = previous.roles;
+          options.tiers = previous.tiers;
+          options.classes = previous.classes;
+          derived = previous.derived;
+        };
+        try {
+          settings = parseTierSettings({ ...pluginOptions, tiers: tiers2 });
+          rebuild();
+          attempts = 0;
+          await check2(true);
+          await refreshSubagentTool();
+        } catch (error) {
+          restore();
+          attempts = 0;
+          await check2(true).catch(() => {});
+          await refreshSubagentTool().catch(() => {});
+          throw error;
+        }
+      });
       fileTiers = key;
       warn(`applied the tiers from ${file.path}`);
     };
@@ -4420,7 +4491,12 @@ ${refs.size}`;
         warn(`${config === undefined ? "removed" : "set"} tier ${tier} in ${result.path}`);
         for (const warning of warnings)
           warn(`tier ${tier}: ${warning}`);
-        await queue(() => reloadTiers(true));
+        try {
+          await queue(() => reloadTiers(true));
+        } catch (error) {
+          warn(`tier ${tier} was written to ${result.path} but not applied`, { error: String(error) });
+          throw new Error(`Tier ${tier} was written to ${result.path} but not applied: ${error.message}. The previous tiers stay in use until the config reloads.`);
+        }
         return { ...result, warnings };
       }
     });
@@ -4554,6 +4630,7 @@ export {
   EFFORT_CHOICES,
   EFFORT_SCALE,
   EPISODE_MS,
+  FAILURE_CLASSES,
   FALLBACK_HEADER,
   GENERAL_TIER,
   HEALTH_KEY,
@@ -4629,6 +4706,7 @@ export {
   explainSpawn,
   explicitCandidates,
   failureNote,
+  failureReason,
   failureScope,
   fallbackTarget,
   findPluginEntry,

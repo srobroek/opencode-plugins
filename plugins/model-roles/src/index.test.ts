@@ -2,6 +2,8 @@ import { describe, expect, setSystemTime, test } from "bun:test"
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
+import * as Effect from "effect/Effect"
+import * as Logger from "effect/Logger"
 import { withOptionalString } from "../../lib/src/tool-schema.ts"
 import { WORKTREE_PARAM, WORKTREE_PARAM_DESCRIPTION } from "../../subagent-worktree/src/lane.ts"
 import reference from "./fixtures/reference.json"
@@ -950,6 +952,28 @@ describe("runtime fallback", () => {
     await cleanup()
   })
 
+  test("a provider's failure text never reaches health storage, receipts or the check: only its class", async () => {
+    const host = createHost({ agents: [{ id: "general" }, { id: "plain" }], models, options: fallbackOptions })
+    const cleanup = await setup(host)
+    const secret = "sk-live-FAKE0123456789"
+    const prompt = "PROMPT: summarise the merger memo for Alice"
+    await host.spawnFailed(
+      { agent: "general", prompt: "x" },
+      `Subagent failed (c): Model unavailable: amazon-bedrock/claude-sonnet (key ${secret}; request ${prompt})`,
+    )
+    await settle()
+    await host.spawn("subagent", { agent: "plain", prompt: "x", tier: "task" })
+    const check = (await host.tools.get("model_roles_check")?.execute({}))?.content ?? ""
+    expect(check).toContain("amazon-bedrock/claude-sonnet#high: unhealthy until")
+    expect(check).toContain("(unavailable)")
+    for (const text of [JSON.stringify([...host.storage.entries()]), check]) {
+      expect(text).not.toContain(secret)
+      expect(text).not.toContain("merger memo")
+    }
+    host.close()
+    await cleanup()
+  })
+
   test("a spawn that fails with Model unavailable marks that model", async () => {
     const host = createHost({ agents: [{ id: "general" }], models, options: fallbackOptions })
     const cleanup = await setup(host)
@@ -1373,6 +1397,31 @@ describe("tiers", () => {
     await cleanup()
   })
 
+  test("warnings after setup's awaits reach the logger of the fiber that ran setup", async () => {
+    const lines: unknown[] = []
+    const capture = Logger.make(({ message }) => {
+      lines.push(message)
+    })
+    const host = createHost({ agents: [{ id: "worker", request: header("cheap") }], models: workModels, references, options: {} })
+    const cleanup = await Effect.runPromise(Effect.promise(() => setup(host)).pipe(Effect.provide(Logger.layer([capture]))))
+    await host.spawn("subagent", { agent: "worker", prompt: "x", model: "amazon-bedrock/global.openai.gpt-6.1-sol" })
+    await settle()
+    expect(lines).toContainEqual(["srobroek.model-roles: spawn of 'worker' (tier cheap): the spawn's own model wins over tier cheap"])
+    host.close()
+    await cleanup()
+  })
+
+  test("a passed tier on an agent with its own tier leaves one receipt, for the tier", async () => {
+    const host = createHost({ agents: [{ id: "worker", request: header("cheap") }], models: workModels, references, options: {}, sessionModel: opus55 })
+    const cleanup = await setup(host)
+    await host.spawn("subagent", { agent: "worker", prompt: "x", tier: "strong" })
+    expect(host.storage.get("receipts")).toEqual([
+      expect.objectContaining({ agent: "worker", source: "tier-param", tier: "strong", rule: "builtin-effort", warnings: [] }),
+    ])
+    host.close()
+    await cleanup()
+  })
+
   test("each routed spawn leaves a receipt: tier, source, model, winning rule and dropped settings", async () => {
     const host = createHost({ agents: [{ id: "plain" }], models: workModels, references, options: {}, sessionModel: opus55 })
     const cleanup = await setup(host)
@@ -1477,6 +1526,57 @@ describe("tiers rpc", () => {
         host.emit({ type: "config.updated", data: {} })
         await settle()
         expect((await host.spawn("subagent", { agent: "plain", prompt: "x", tier: "cheap" })).model).toBe(`${sonnet55}#high`)
+      },
+      [{ id: "worker", request: header("cheap") }],
+    )
+  })
+
+  test("a spawn during a reload waits for it, then resolves and records the new tier", async () => {
+    await withConfig(
+      async (host) => {
+        const original = host.context.agent.transform
+        let release = () => {}
+        const held = new Promise<void>((resolve) => {
+          release = resolve
+        })
+        host.context.agent.transform = async (callback) => {
+          await held
+          return original(callback)
+        }
+        const saving = host.rpc("set", { tier: "cheap", value: { model: [sonnet55] } })
+        await settle()
+        let model: unknown = "pending"
+        const spawning = host.spawn("subagent", { agent: "plain", prompt: "x", tier: "cheap" }).then((input) => {
+          model = input.model
+        })
+        await settle()
+        expect(model).toBe("pending")
+        release()
+        await saving
+        await spawning
+        expect(model).toBe(`${sonnet55}#low`)
+        expect((host.storage.get("receipts") as Array<{ model: string }>)[0]?.model).toBe(`${sonnet55}#low`)
+      },
+      [{ id: "worker", request: header("cheap") }],
+    )
+  })
+
+  test("a reload whose agent update fails restores the previous tiers", async () => {
+    await withConfig(
+      async (host) => {
+        const original = host.context.agent.transform
+        let fail = true
+        host.context.agent.transform = async (callback) => {
+          if (fail) {
+            fail = false
+            throw new Error("transform refused")
+          }
+          return original(callback)
+        }
+        await expect(host.rpc("set", { tier: "cheap", value: { model: [sonnet55] } })).rejects.toThrow(/not applied: transform refused/)
+        const haiku55 = "amazon-bedrock/global.anthropic.claude-haiku-5-5"
+        expect((await host.spawn("subagent", { agent: "plain", prompt: "x", tier: "cheap" })).model).toBe(`${haiku55}#low`)
+        expect(host.agents().get("worker")?.model).toEqual({ providerID: "amazon-bedrock", id: "global.anthropic.claude-haiku-5-5", variant: "low" })
       },
       [{ id: "worker", request: header("cheap") }],
     )

@@ -32,6 +32,31 @@ export const HEALTH_KEY = "health"
 
 export type FailureClass = "unavailable" | "content-filter" | "auth" | "credentials" | "quota" | "outage" | "rate-limit" | "server"
 
+/** Every failure class, the allowlist a stored or shown health reason is held to. */
+export const FAILURE_CLASSES: ReadonlyArray<FailureClass> = [
+  "unavailable",
+  "content-filter",
+  "auth",
+  "credentials",
+  "quota",
+  "outage",
+  "rate-limit",
+  "server",
+]
+
+/**
+ * Why a model sits out: its failure class only. The provider's message is never kept, since
+ * it can hold prompt text or credentials, and health is persisted and shown by the check.
+ */
+export type FailureReason = FailureClass | "unknown"
+
+/** The failure class a stored reason names, else `unknown`. Older entries kept `class: message`; the message is dropped. */
+export function failureReason(value: unknown): FailureReason {
+  if (typeof value !== "string") return "unknown"
+  const head = value.split(":", 1)[0]?.trim() ?? ""
+  return (FAILURE_CLASSES as readonly string[]).includes(head) ? (head as FailureClass) : "unknown"
+}
+
 /** Whether a failure cools down the whole provider or only the model that failed. */
 export type FailureScope = "provider" | "model"
 
@@ -62,7 +87,7 @@ export type HealthEntry = {
   failedAt: number
   /** Sits out new resolutions until then; a past time when it is in use. */
   until: number
-  reason: string
+  reason: FailureReason
   /** When each failure episode in the flap window began, oldest first. */
   episodes?: number[]
   /** Cooldowns in a row; the next one lasts `cooldownMs * 2^strikes`. */
@@ -216,7 +241,7 @@ export function readHealth(value: unknown): HealthState {
     if (entry === null || typeof entry !== "object") continue
     const { failedAt, until, reason, episodes, strikes } = entry as Record<string, unknown>
     if (typeof failedAt !== "number" || typeof until !== "number") continue
-    const read: HealthEntry = { failedAt, until, reason: typeof reason === "string" ? reason : "" }
+    const read: HealthEntry = { failedAt, until, reason: failureReason(reason) }
     if (Array.isArray(episodes) && episodes.every(isTime)) read.episodes = episodes
     if (typeof strikes === "number" && Number.isInteger(strikes) && strikes > 0) read.strikes = strikes
     state[key] = read
@@ -233,7 +258,7 @@ export function markUnhealthy(
   ref: ModelRef,
   now: number,
   cooldownMs: number,
-  reason: string,
+  reason: FailureReason,
   scope: FailureScope = "model",
 ): HealthState {
   const next = pruneHealth(state, now)
@@ -265,8 +290,8 @@ export function recordFailure(
   error: FailureInput,
   now: number,
   policy: HealthPolicy,
-  reason: string,
 ): FailureRecord {
+  const reason: FailureReason = kind
   const next = pruneHealth(state, now, policy.flapWindowMs)
   const key = failureScope(kind) === "provider" ? providerKey(ref.providerID) : healthKey(ref)
   const prior = next[key]

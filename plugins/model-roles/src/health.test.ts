@@ -145,7 +145,7 @@ describe("failure classes and scope", () => {
   })
 
   test("a provider entry covers every model of it", () => {
-    const state = markUnhealthy({}, { providerID: "p", id: "a" }, 1_000, 500, "auth: x", "provider")
+    const state = markUnhealthy({}, { providerID: "p", id: "a" }, 1_000, 500, "auth", "provider")
     expect(Object.keys(state)).toEqual(["p/*"])
     expect(healthView(state, 1_200)({ providerID: "p", id: "zzz" })).toBe(1_000)
     expect(healthView(state, 1_200)({ providerID: "q", id: "a" })).toBeUndefined()
@@ -199,27 +199,29 @@ describe("childSessionID", () => {
 describe("health state", () => {
   const a = { providerID: "p", id: "a" }
   test("marks, views, prunes and expires", () => {
-    const state = markUnhealthy({}, a, 1_000, 500, "auth: x")
-    expect(state).toEqual({ "p/a": { failedAt: 1_000, until: 1_500, reason: "auth: x" } })
+    const state = markUnhealthy({}, a, 1_000, 500, "auth")
+    expect(state).toEqual({ "p/a": { failedAt: 1_000, until: 1_500, reason: "auth" } })
     expect(healthView(state, 1_200)({ ...a, variant: "high" })).toBe(1_000)
     expect(healthView(state, 1_500)(a)).toBeUndefined()
     expect(nextExpiry(state, 1_200)).toBe(1_500)
     expect(nextExpiry(state, 1_600)).toBeUndefined()
     expect(pruneHealth(state, 1_600)).toEqual({})
-    expect(markUnhealthy(state, { providerID: "p", id: "b" }, 2_000, 10, "r")).toEqual({
-      "p/b": { failedAt: 2_000, until: 2_010, reason: "r" },
+    expect(markUnhealthy(state, { providerID: "p", id: "b" }, 2_000, 10, "server")).toEqual({
+      "p/b": { failedAt: 2_000, until: 2_010, reason: "server" },
     })
   })
 
   test("readHealth drops junk", () => {
     expect(readHealth({ x: { failedAt: 1, until: 2 }, y: { failedAt: "1" }, z: 3 })).toEqual({
-      x: { failedAt: 1, until: 2, reason: "" },
+      x: { failedAt: 1, until: 2, reason: "unknown" },
     })
-    expect(readHealth({ x: { failedAt: 1, until: 2, reason: "r", episodes: [1], strikes: 2 }, y: { failedAt: 1, until: 2, episodes: ["1"], strikes: -1 } })).toEqual({
-      x: { failedAt: 1, until: 2, reason: "r", episodes: [1], strikes: 2 },
-      y: { failedAt: 1, until: 2, reason: "" },
+    expect(readHealth({ x: { failedAt: 1, until: 2, reason: "quota", episodes: [1], strikes: 2 }, y: { failedAt: 1, until: 2, episodes: ["1"], strikes: -1 } })).toEqual({
+      x: { failedAt: 1, until: 2, reason: "quota", episodes: [1], strikes: 2 },
+      y: { failedAt: 1, until: 2, reason: "unknown" },
     })
     expect(readHealth([1])).toEqual({})
+    // Older entries kept the provider's message after the class; only the class survives.
+    expect(readHealth({ x: { failedAt: 1, until: 2, reason: "rate-limit: key sk-FAKE in prompt" } }).x?.reason).toBe("rate-limit")
   })
 
 })
@@ -229,7 +231,7 @@ describe("recordFailure", () => {
   const b = { providerID: "p", id: "b" }
   const policy = { cooldownMs: 60_000, maxCooldownMs: 600_000, quotaCooldownMs: 3_600_000, flapCount: 3, flapWindowMs: 600_000 }
   const fail = (state: HealthState, now: number, kind: FailureClass = "credentials", ref = a, error: FailureInput = {}) =>
-    recordFailure(state, ref, kind, error, now, policy, `${kind}: x`)
+    recordFailure(state, ref, kind, error, now, policy)
 
   test("a blip, even across parallel requests, keeps the model and its provider in use", () => {
     let record = fail({}, 0)
@@ -309,14 +311,14 @@ describe("resolveRole with health", () => {
   const { roles } = parseOptions({ roles: { r: ["p/a", "@s"], s: ["p/b", "p/c"] } })
 
   test("skips unhealthy candidates, following links", () => {
-    const state = markUnhealthy({}, { providerID: "p", id: "a" }, 0, 1_000, "x")
+    const state = markUnhealthy({}, { providerID: "p", id: "a" }, 0, 1_000, "server")
     expect(resolveRole(roles, available, "r", healthView(state, 10)).model).toEqual({ providerID: "p", id: "b" })
   })
 
   test("all unhealthy: the least recently failed wins and is flagged", () => {
-    let state = markUnhealthy({}, { providerID: "p", id: "a" }, 30, 1_000, "x")
-    state = { ...state, ...markUnhealthy({}, { providerID: "p", id: "b" }, 10, 1_000, "x") }
-    state = { ...state, ...markUnhealthy({}, { providerID: "p", id: "c" }, 20, 1_000, "x") }
+    let state = markUnhealthy({}, { providerID: "p", id: "a" }, 30, 1_000, "server")
+    state = { ...state, ...markUnhealthy({}, { providerID: "p", id: "b" }, 10, 1_000, "server") }
+    state = { ...state, ...markUnhealthy({}, { providerID: "p", id: "c" }, 20, 1_000, "server") }
     const resolution = resolveRole(roles, available, "r", healthView(state, 40))
     expect(resolution).toEqual({ model: { providerID: "p", id: "b" }, via: ["r", "s"], unhealthy: true })
   })

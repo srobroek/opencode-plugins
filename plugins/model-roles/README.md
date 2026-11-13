@@ -152,7 +152,10 @@ plugin entry into `{ "package": …, "options": … }`.
 The running plugin applies a save straight away. It reads the global file again,
 rebuilds the tiers, and moves the agents that are now on another model. On the
 host's `config.updated` event it does the same when the file's tiers changed, so
-a hand edit applies too. Spawns resolve the new tiers at once. The `tier`
+a hand edit applies too. A spawn that starts during a reload waits for it, so its
+model and receipt both come from the new tiers. If moving the agents or the tool
+fails, the previous tiers stay in use, the save reports that it was written but
+not applied, and the next config reload tries again. The `tier`
 parameter's text and enum change only for sessions started after the edit, so
 running sessions keep their prompt cache.
 
@@ -572,7 +575,10 @@ candidates come from (`config`, `roles`, `derived`, or borrowed from `strong` or
 `standard`), its effort and whether it puts another vendor first, then checks
 every candidate against `ctx.model.list()` across all providers, enabled or not,
 and reports one of: available, unknown id, unknown variant (listing the ones that
-exist), provider unavailable, unhealthy until a time, or a link to another tier.
+exist), provider unavailable, unhealthy until a time with its failure class, or a
+link to another tier. Health keeps only the failure class (such as `rate-limit`,
+`unavailable` or `auth`), never the provider's message, which can hold prompt text
+or credentials.
 It also shows:
 
 - old role names with lists of their own;
