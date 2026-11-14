@@ -219,7 +219,7 @@ test("user definitions win over plugin ones", async () => {
   await cleanup()
 })
 
-test("the enabled rollout flag defaults off and disabling it loads no capabilities", async () => {
+test("the enabled kill switch defaults off and disabling it loads no capabilities", async () => {
   for (const enabled of [undefined, false]) {
     const fake = createFakeContext({ directory: project(), options: { enabled, sources: [{ path: MARKETPLACE }], projectFile: true } })
     const cleanup = await setupClaudeCompat(fake.context, deps)
