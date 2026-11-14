@@ -263,7 +263,7 @@ export default Plugin.define({
         const id = await dialog.select<string>({
           title: "Agents",
           placeholder: "Enter shows an agent and changes its tier",
-          options: state.agents.length === 0 ? [{ title: "No agents", value: "", disabled: true }] : agentOptions(state.agents),
+          options: state.agents.length === 0 ? [{ title: "No agents", value: "", disabled: true }] : agentOptions(state.agents, state.agentConfig),
           ...(current === undefined ? {} : { current }),
         })
         if (id === undefined) return

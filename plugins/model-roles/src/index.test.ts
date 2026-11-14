@@ -44,6 +44,7 @@ function createHost(input: {
   defaultModel?: ModelRef
   references?: Array<Model & { family?: string; time?: { released?: number } }>
   directory?: string
+  plugin?: unknown
 }) {
   const toolHooks: Array<{ name: string; callback: (payload: unknown) => Promise<void> }> = []
   let sessionGet: (id: string) => Promise<unknown> = async (id) =>
@@ -122,6 +123,7 @@ function createHost(input: {
   const context = {
     options: input.options,
     ...(input.directory === undefined ? {} : { location: { directory: input.directory } }),
+    ...(input.plugin === undefined ? {} : { plugin: input.plugin }),
     agent: {
       transform,
       list: async () => ({ data: listOverride ? listOverride() : [...agents.values()].map((a) => structuredClone(a)) }),
@@ -1477,7 +1479,7 @@ describe("tiers rpc", () => {
   const withConfig = async (
     body: (host: ReturnType<typeof createHost>, file: string) => Promise<void>,
     agents: Agent[] = [],
-    given: { options?: unknown; fileText?: string; project?: Record<string, string> } = {},
+    given: { options?: unknown; fileText?: string; project?: Record<string, string>; plugin?: unknown } = {},
   ) => {
     const dir = mkdtempSync(path.join(tmpdir(), "model-roles-rpc-"))
     const previous = process.env.OPENCODE_CONFIG_DIR
@@ -1491,7 +1493,7 @@ describe("tiers rpc", () => {
         mkdirSync(path.dirname(path.join(projectDir, name)), { recursive: true })
         writeFileSync(path.join(projectDir, name), text)
       }
-      const host = createHost({ agents, models: work as unknown as Model[], references: reference as unknown as Model[], options: given.options ?? {}, directory: projectDir })
+      const host = createHost({ agents, models: work as unknown as Model[], references: reference as unknown as Model[], options: given.options ?? {}, directory: projectDir, plugin: given.plugin })
       const cleanup = await setup(host)
       try {
         await body(host, file)
@@ -1606,6 +1608,63 @@ describe("tiers rpc", () => {
       },
       agentFixtures,
       { options: { agents: { glob: "reviewer" } }, fileText: entry({ glob: "reviewer" }), project: { "opencode.json": projectEntry({ glob: "reviewer" }) } },
+    )
+  })
+
+  test("a project entry under another package string does not shadow the global one; the list is told", async () => {
+    await withConfig(
+      async (host) => {
+        expect(await agentRow(host, "glob")).toMatchObject({ tier: "reviewer", source: "options" })
+        await host.rpc("setAgent", { agent: "glob", tier: "standard" })
+        expect(await agentRow(host, "glob")).toMatchObject({ tier: "standard", source: "options" })
+        const state = (await host.rpc("state")) as { agentConfig?: { origin: string; alsoLoads?: string } }
+        expect(state.agentConfig?.origin).toBe("global")
+        expect(state.agentConfig?.alsoLoads).toEndWith(path.join("project", "sub", "opencode.json"))
+      },
+      agentFixtures,
+      {
+        options: { agents: { glob: "reviewer" } },
+        fileText: entry({ glob: "reviewer" }),
+        project: { "opencode.json": entry({ glob: "strong" }).replace("/x/plugins/model-roles", "/y/plugins/model-roles") },
+      },
+    )
+  })
+
+  test("the host's own package target picks and writes only the entry with that exact string", async () => {
+    const two = `{ "plugins": [{ "package": "/x/plugins/model-roles", "options": { "agents": { "glob": "cheap" } } }, { "package": "/z/plugins/model-roles", "options": { "agents": { "glob": "reviewer" } } }] }\n`
+    await withConfig(
+      async (host, file) => {
+        expect(await agentRow(host, "glob")).toMatchObject({ tier: "reviewer", source: "options" })
+        await host.rpc("setAgent", { agent: "glob", tier: "strong" })
+        const written = JSON.parse(readFileSync(file, "utf8")).plugins
+        expect(written[0].options.agents).toEqual({ glob: "cheap" })
+        expect(written[1].options.agents).toEqual({ glob: "strong" })
+      },
+      agentFixtures,
+      {
+        options: { agents: { glob: "reviewer" } },
+        fileText: two,
+        plugin: { list: async () => ({ data: [{ id: "srobroek.model-roles", source: { type: "package", target: "/z/plugins/model-roles" } }] }) },
+      },
+    )
+  })
+
+  test("a project-only config (no global entry): a hand edit and a reload apply", async () => {
+    await withConfig(
+      async (host, file) => {
+        const projectFile = path.join(path.dirname(file), "project", "sub", "opencode.json")
+        expect(await agentRow(host, "glob")).toMatchObject({ tier: "reviewer", source: "options" })
+        writeFileSync(projectFile, entry({ glob: "strong" }))
+        host.emit({ type: "config.updated", data: {} })
+        await settle()
+        expect(await agentRow(host, "glob")).toMatchObject({ tier: "strong", source: "options" })
+        writeFileSync(projectFile, entry({}))
+        host.emit({ type: "config.updated", data: {} })
+        await settle()
+        expect(await agentRow(host, "glob")).toMatchObject({ tier: "cheap", source: "header" })
+      },
+      agentFixtures,
+      { options: { agents: { glob: "reviewer" } }, fileText: "{}\n", project: { "opencode.json": entry({ glob: "reviewer" }) } },
     )
   })
 

@@ -201,12 +201,15 @@ export function variantOptions(model: PickModel | undefined): DialogSelectOption
 }
 
 /** Short rows: a DialogSelect row has room for an id and a few words, so the model and description live in the details menu. */
-export function agentOptions(agents: ReadonlyArray<AgentRow>): DialogSelectOption<string>[] {
-  return agents.map((a) => ({
+export function agentOptions(agents: ReadonlyArray<AgentRow>, config?: { alsoLoads?: string }): DialogSelectOption<string>[] {
+  const rows = agents.map((a) => ({
     title: a.id,
     value: a.id,
     description: `${a.tier ?? "no tier"}${a.pinned !== undefined ? " · own model" : ""}`,
   }))
+  if (config?.alsoLoads === undefined) return rows
+  // One short note: a project entry under another package string runs as a second instance.
+  return [{ title: "A second model-roles entry also loads", value: "", disabled: true, description: config.alsoLoads }, ...rows]
 }
 
 const SOURCE_TEXT: Record<AgentTierSource, string> = {

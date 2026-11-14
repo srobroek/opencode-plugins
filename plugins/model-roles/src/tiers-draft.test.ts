@@ -204,6 +204,14 @@ describe("menu options", () => {
     ])
   })
 
+  test("a project entry under another package string adds one short note to the list", () => {
+    const rows = agentOptions([{ id: "build" }], { alsoLoads: "/p/opencode.json" })
+    expect(rows.map((r) => [r.title, r.disabled ?? false, r.description])).toEqual([
+      ["A second model-roles entry also loads", true, "/p/opencode.json"],
+      ["build", false, "no tier"],
+    ])
+  })
+
   test("agent details: one disabled row per fact, long text wrapped, then the actions", () => {
     const rows = agentDetailOptions({ id: "own", tier: "cheap", source: "header", resolved: "a/one#low", pinned: "b/two", description: "word ".repeat(30).trim() })
     const facts = rows.filter((r) => r.disabled)

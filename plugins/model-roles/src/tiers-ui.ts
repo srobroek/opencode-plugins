@@ -65,7 +65,7 @@ export type TierState = {
   /** The config file `set` writes, or why there is none. */
   config?: string
   /** Where the agent assignments come from; a project's entry shadows the global file `set` writes. */
-  agentConfig?: { origin: "global" | "project"; path?: string }
+  agentConfig?: { origin: "global" | "project"; path?: string; alsoLoads?: string }
   error?: string
 }
 
@@ -82,7 +82,7 @@ export function tierState(input: {
   /** A candidate's status, for the per-candidate health. */
   status?: (entry: string) => CandidateStatus
   config?: string
-  agentConfig?: { origin: "global" | "project"; path?: string }
+  agentConfig?: { origin: "global" | "project"; path?: string; alsoLoads?: string }
   error?: string
 }): TierState {
   const resolve = (name: string) => {

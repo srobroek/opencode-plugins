@@ -188,7 +188,10 @@ in the session's directory or an ancestor) replaces the global entry as a whole,
 its `agents` are the ones in force. The details then say `Set by project config (<path>)`,
 and **Change tier…** warns that a save goes to the global config and will not change
 this project; if you continue, the toast says nothing changed here. Edits to the
-project file apply on the next config reload.
+project file apply on the next config reload, also when the global file has no entry.
+OpenCode keys plugin entries by the exact package string: only a project entry with
+the same string as the global one shadows it. One with another string runs as a second
+instance, and the Agents list notes it.
 
 ### Live config
 

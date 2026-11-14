@@ -186,6 +186,26 @@ describe("effectiveAgents", () => {
     expect(effectiveAgents([{ path: "/p/opencode.json", text: entry() }], global)).toEqual({ origin: "project", path: "/p/opencode.json", agents: {} })
   })
 
+  test("a project entry under another package string is a second instance: it never shadows, and is reported", () => {
+    const other = { path: "/p/opencode.json", text: `{ "plugins": [{ "package": "/x/plugins/model-roles", "options": { "agents": { "a": "strong" } } }] }` }
+    expect(effectiveAgents([other], global)).toEqual({ origin: "global", path: "/g/opencode.json", agents: { a: "cheap" }, alsoLoads: "/p/opencode.json" })
+    // The host's own target decides when it is known: the global entry under another string is then not ours.
+    expect(effectiveAgents([other], { path: "/g/opencode.json", text: entry({ a: "cheap" }) }, "/x/plugins/model-roles")).toMatchObject({
+      origin: "project",
+      path: "/p/opencode.json",
+      agents: { a: "strong" },
+    })
+  })
+
+  test("only entries with the exact string are read and written when the spec is known", () => {
+    const text = `{ "plugins": ["${SPEC}", { "package": "/x/plugins/model-roles", "options": { "agents": { "z": "cheap" } } }] }`
+    expect(readAgents(text, "/x/plugins/model-roles")).toEqual({ z: "cheap" })
+    expect(readAgents(text, SPEC)).toEqual({})
+    expect(parse(setAgentTier(text, "b", "strong", "/x/plugins/model-roles") as string).plugins[1].options.agents).toEqual({ z: "cheap", b: "strong" })
+    expect(setAgentTier(text, "b", "strong", "other")).toBeUndefined()
+    expect(pickConfigFile([{ path: "/d/opencode.json", text }], "other")).toBeUndefined()
+  })
+
   test("the highest-precedence project entry wins", () => {
     const files = [
       { path: "/p/opencode.json", text: entry({ a: "strong" }) },

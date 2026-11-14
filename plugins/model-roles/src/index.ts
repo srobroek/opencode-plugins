@@ -1193,9 +1193,27 @@ export default Plugin.define({
 
     // The `/tiers` TUI dialog reads the tier table and writes `options.tiers` through these.
     const configDir = () => globalConfigDir(process.env, homedir())
+    /**
+     * This instance's own package string, when the host says: the `package` source target of the one
+     * loaded plugin with this id. Else undefined, and the global entry's exact string is the identity.
+     */
+    const ownSpec = await (async (): Promise<string | undefined> => {
+      try {
+        const listed = (await ctx.plugin.list()) as unknown
+        const rows = (Array.isArray(listed) ? listed : isRecord(listed) && Array.isArray(listed.data) ? listed.data : []) as Array<{
+          id?: unknown
+          source?: { type?: unknown; target?: unknown }
+        }>
+        const mine = rows.filter((row) => row.id === "srobroek.model-roles")
+        const target = mine.length === 1 ? mine[0]?.source : undefined
+        return target?.type === "package" && typeof target.target === "string" ? target.target : undefined
+      } catch {
+        return undefined
+      }
+    })()
     const globalFile = () => {
       try {
-        return pickConfigFile(readConfigFiles(configDir()))
+        return pickConfigFile(readConfigFiles(configDir()), ownSpec)
       } catch {
         return undefined
       }
@@ -1204,7 +1222,7 @@ export default Plugin.define({
     /** The global file's tiers as last applied (or seen at setup), so an unrelated config change keeps the options this instance got. */
     let fileTiers = (() => {
       const file = globalFile()
-      return file === undefined ? undefined : JSON.stringify(readTiers(file.text))
+      return file === undefined ? undefined : JSON.stringify(readTiers(file.text, ownSpec))
     })()
     /**
      * Where the `agents` option comes from: the model-roles entry of the highest-precedence project config
@@ -1218,7 +1236,7 @@ export default Plugin.define({
       } catch {
         // No project files.
       }
-      return effectiveAgents(project, globalFile())
+      return effectiveAgents(project, globalFile(), ownSpec)
     }
     const agentsKeyOf = (config: AgentConfig) => JSON.stringify({ origin: config.origin, path: config.path, agents: parseOptions({ agents: config.agents }).agents })
     const startupConfig = agentConfig()
@@ -1235,15 +1253,15 @@ export default Plugin.define({
      */
     const reloadTiers = async (force: boolean) => {
       const file = globalFile()
-      if (file === undefined) return
-      const tiers = readTiers(file.text)
-      const key = JSON.stringify(tiers)
       const config = agentConfig()
       const agentsKey = agentsKeyOf(config)
       const wanted = parseOptions({ agents: config.agents }).agents
       // A reload caused by the tiers alone keeps the agents it has.
       const agentsChanged = agentsKey !== fileAgents
-      if (!force && key === fileTiers && !agentsChanged) return
+      // With no global entry only the agents can change (from a project entry).
+      const tiers = file === undefined ? undefined : readTiers(file.text, ownSpec)
+      const key = tiers === undefined ? fileTiers : JSON.stringify(tiers)
+      if (file === undefined ? !agentsChanged : !force && key === fileTiers && !agentsChanged) return
       await exclusive(async () => {
         const previous = { settings, agents: options.agents, roles: options.roles, tiers: options.tiers, classes: options.classes, derived }
         const restore = () => {
@@ -1256,7 +1274,7 @@ export default Plugin.define({
         }
         try {
           // Spawns wait in `exclusive`, so they see either the old tiers or the new ones once agents and tools follow.
-          settings = parseTierSettings({ ...pluginOptions, tiers })
+          if (tiers !== undefined) settings = parseTierSettings({ ...pluginOptions, tiers })
           if (agentsChanged) options.agents = config.origin === "project" ? wanted : { ...otherAgents, ...wanted }
           rebuild()
           attempts = 0
@@ -1273,7 +1291,7 @@ export default Plugin.define({
       // Marked applied only once everything above went through, so a failed reload is retried on the next event.
       fileTiers = key
       fileAgents = agentsKey
-      warn(`applied the tiers from ${file.path}`)
+      warn(`applied the tiers from ${file?.path ?? config.path ?? "the project config"}`)
     }
 
     const rpc = await ctx.rpc.register(TiersRpc, {
@@ -1283,7 +1301,7 @@ export default Plugin.define({
         })
         const file = globalFile()
         const saved: Record<string, TierConfig> = {}
-        for (const [name, value] of Object.entries(file === undefined ? settings.tiers : readTiers(file.text))) saved[name] = parseTierConfig(value)
+        for (const [name, value] of Object.entries(file === undefined ? settings.tiers : readTiers(file.text, ownSpec))) saved[name] = parseTierConfig(value)
         // The file with the draft laid over it, resolved fresh, so the dialog can preview an edit.
         const configured = applyDraft(saved, readDraft(input))
         const preview = buildTiers(parseTierSettings({ ...pluginOptions, tiers: configured }), available as CatalogModel[], refs)
@@ -1298,7 +1316,11 @@ export default Plugin.define({
           ...(file === undefined
             ? { error: `No model-roles plugin entry in the global config (${configDir()}); /tiers cannot save.` }
             : { config: file.path }),
-          agentConfig: (({ origin, path: from }) => ({ origin, ...(from === undefined ? {} : { path: from }) }))(agentConfig()),
+          agentConfig: (({ origin, path: from, alsoLoads }) => ({
+            origin,
+            ...(from === undefined ? {} : { path: from }),
+            ...(alsoLoads === undefined ? {} : { alsoLoads }),
+          }))(agentConfig()),
         })
       },
       set: async (input) => {
@@ -1310,7 +1332,7 @@ export default Plugin.define({
         })
         const { errors, warnings } = validateTierConfig(config, available, catalog)
         if (errors.length > 0) throw new Error(`Tier ${tier} not saved: ${errors.join(" ")}`)
-        const result = writeTier(configDir(), tier, config)
+        const result = writeTier(configDir(), tier, config, ownSpec)
         warn(`${config === undefined ? "removed" : "set"} tier ${tier} in ${result.path}`)
         for (const warning of warnings) warn(`tier ${tier}: ${warning}`)
         try {
@@ -1333,7 +1355,7 @@ export default Plugin.define({
           if (error !== undefined) throw new Error(`Agent ${agent} not saved: ${error}`)
         }
         if (!(await listAgents()).some((a) => a.id === agent)) throw new Error(`Agent ${agent} not saved: the host lists no such agent.`)
-        const result = writeAgentTier(configDir(), agent, value as string | undefined)
+        const result = writeAgentTier(configDir(), agent, value as string | undefined, ownSpec)
         warn(`${value === undefined ? "removed the tier of" : "set the tier of"} agent ${agent} in ${result.path}`)
         try {
           await queue(() => reloadTiers(true))

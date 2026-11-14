@@ -1075,12 +1075,15 @@ function variantOptions(model) {
     ...(model?.variants ?? []).map((v) => ({ title: v, value: v }))
   ];
 }
-function agentOptions(agents) {
-  return agents.map((a) => ({
+function agentOptions(agents, config) {
+  const rows = agents.map((a) => ({
     title: a.id,
     value: a.id,
     description: `${a.tier ?? "no tier"}${a.pinned !== undefined ? " \xB7 own model" : ""}`
   }));
+  if (config?.alsoLoads === undefined)
+    return rows;
+  return [{ title: "A second model-roles entry also loads", value: "", disabled: true, description: config.alsoLoads }, ...rows];
 }
 var SOURCE_TEXT = {
   options: "your setting",
@@ -1445,7 +1448,7 @@ var tui_default = Plugin.define({
             title: "No agents",
             value: "",
             disabled: true
-          }] : agentOptions(state.agents),
+          }] : agentOptions(state.agents, state.agentConfig),
           ...current === undefined ? {} : {
             current
           }
