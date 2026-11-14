@@ -1692,6 +1692,40 @@ describe("tiers rpc", () => {
     await refused({ list: async () => ({ data: [row("/x/plugins/model-roles"), row("/z/plugins/model-roles")] }) }, /Two model-roles entries are loaded \(\/x\/plugins\/model-roles, \/z\/plugins\/model-roles\); \/tiers can't tell which one to edit/)
   })
 
+  test("the host lists this plugin only after setup: the first save after that works, and the identity is kept", async () => {
+    let listed = false
+    const plugin = { list: async () => ({ data: listed ? [row("/x/plugins/model-roles")] : [] }) }
+    await withConfig(
+      async (host, file) => {
+        await expect(host.rpc("setAgent", { agent: "glob", tier: "strong" })).rejects.toThrow(/did not say which model-roles entry/)
+        listed = true
+        await host.rpc("setAgent", { agent: "glob", tier: "strong" })
+        expect(readAgents(readFileSync(file, "utf8"))).toEqual({ glob: "strong" })
+        // A unique answer is cached: later saves do not depend on the host listing again.
+        listed = false
+        await host.rpc("setAgent", { agent: "glob", tier: "standard" })
+        expect(readAgents(readFileSync(file, "utf8"))).toEqual({ glob: "standard" })
+      },
+      agentFixtures,
+      { plugin },
+    )
+  })
+
+  test("an ambiguous answer is not cached: a later unique one lets saves through", async () => {
+    let rows = [row("/x/plugins/model-roles"), row("/z/plugins/model-roles")]
+    const plugin = { list: async () => ({ data: rows }) }
+    await withConfig(
+      async (host, file) => {
+        await expect(host.rpc("setAgent", { agent: "glob", tier: "strong" })).rejects.toThrow(/Two model-roles entries are loaded/)
+        rows = [row("/x/plugins/model-roles")]
+        await host.rpc("setAgent", { agent: "glob", tier: "strong" })
+        expect(readAgents(readFileSync(file, "utf8"))).toEqual({ glob: "strong" })
+      },
+      agentFixtures,
+      { plugin },
+    )
+  })
+
   test("no host answer: saves refuse too", async () => {
     await refused({ list: async () => Promise.reject(new Error("down")) }, /did not say which model-roles entry/)
   })

@@ -4467,7 +4467,7 @@ ${refs.size}`;
       await whileSpawning(() => handleSpawn(event));
     });
     const configDir = () => globalConfigDir(process.env, homedir());
-    const identity = await (async () => {
+    const lookupIdentity = async () => {
       try {
         const listed = await ctx.plugin.list();
         const rows = Array.isArray(listed) ? listed : isRecord8(listed) && Array.isArray(listed.data) ? listed.data : [];
@@ -4479,9 +4479,19 @@ ${refs.size}`;
       } catch {
         return { kind: "unknown" };
       }
-    })();
-    const ownSpec = identity.kind === "unique" ? identity.spec : undefined;
-    const writableSpec = () => {
+    };
+    let known = { kind: "unknown" };
+    const resolveIdentity = async () => {
+      if (known.kind === "unique")
+        return known;
+      const found = await lookupIdentity();
+      if (found.kind === "unique")
+        known = found;
+      return found;
+    };
+    const ownSpec = () => known.kind === "unique" ? known.spec : undefined;
+    const writableSpec = async () => {
+      const identity = await resolveIdentity();
       if (identity.kind === "ambiguous")
         throw new Error(`Two model-roles entries are loaded (${identity.targets.join(", ")}); /tiers can't tell which one to edit. Edit the config by hand or remove one entry.`);
       if (identity.kind === "unknown")
@@ -4490,7 +4500,7 @@ ${refs.size}`;
     };
     const globalFile = () => {
       try {
-        return pickConfigFile(readConfigFiles(configDir()), ownSpec);
+        return pickConfigFile(readConfigFiles(configDir()), ownSpec());
       } catch {
         return;
       }
@@ -4498,7 +4508,7 @@ ${refs.size}`;
     const pluginOptions = isRecord8(ctx.options) ? ctx.options : {};
     let fileTiers = (() => {
       const file = globalFile();
-      return file === undefined ? undefined : JSON.stringify(readTiers(file.text, ownSpec));
+      return file === undefined ? undefined : JSON.stringify(readTiers(file.text, ownSpec()));
     })();
     const agentConfig = () => {
       let project = [];
@@ -4507,7 +4517,7 @@ ${refs.size}`;
         if (typeof directory === "string")
           project = readProjectFiles(directory, configDir());
       } catch {}
-      return effectiveAgents(project, globalFile(), ownSpec);
+      return effectiveAgents(project, globalFile(), ownSpec());
     };
     const agentsKeyOf = (config) => JSON.stringify({ origin: config.origin, path: config.path, agents: parseOptions({ agents: config.agents }).agents });
     const startupConfig = agentConfig();
@@ -4515,12 +4525,13 @@ ${refs.size}`;
     const otherAgents = Object.fromEntries(Object.entries(options.agents).filter(([agent]) => !Object.hasOwn(startupAgents, agent)));
     let fileAgents = agentsKeyOf(startupConfig);
     const reloadTiers = async (force) => {
+      const identity = await resolveIdentity();
       const file = globalFile();
       const config = agentConfig();
       const agentsKey = agentsKeyOf(config);
       const wanted = parseOptions({ agents: config.agents }).agents;
       const agentsChanged = identity.kind === "unique" && agentsKey !== fileAgents;
-      const tiers2 = file === undefined ? undefined : readTiers(file.text, ownSpec);
+      const tiers2 = file === undefined ? undefined : readTiers(file.text, ownSpec());
       const key = tiers2 === undefined ? fileTiers : JSON.stringify(tiers2);
       if (file === undefined ? !agentsChanged : !force && key === fileTiers && !agentsChanged)
         return;
@@ -4562,7 +4573,7 @@ ${refs.size}`;
         });
         const file = globalFile();
         const saved = {};
-        for (const [name, value] of Object.entries(file === undefined ? settings.tiers : readTiers(file.text, ownSpec)))
+        for (const [name, value] of Object.entries(file === undefined ? settings.tiers : readTiers(file.text, ownSpec())))
           saved[name] = parseTierConfig(value);
         const configured = applyDraft(saved, readDraft(input));
         const preview = buildTiers(parseTierSettings({ ...pluginOptions, tiers: configured }), available, refs);
@@ -4584,7 +4595,7 @@ ${refs.size}`;
       },
       set: async (input) => {
         const { tier, value } = input ?? {};
-        const spec = writableSpec();
+        const spec = await writableSpec();
         if (typeof tier !== "string" || !TIER_NAME.test(tier))
           throw new Error(`Invalid tier name ${JSON.stringify(tier)}`);
         const config = value === null || value === undefined ? undefined : compact(parseTierConfig(value));
@@ -4608,7 +4619,7 @@ ${refs.size}`;
       },
       setAgent: async (input) => {
         const { agent, tier } = input ?? {};
-        const spec = writableSpec();
+        const spec = await writableSpec();
         if (typeof agent !== "string" || agent.trim() === "")
           throw new Error(`Invalid agent ${JSON.stringify(agent)}`);
         const value = tier === null || tier === undefined ? undefined : tier;
