@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.2](https://github.com/srobroek/opencode-plugins/compare/model-roles--v0.3.1...model-roles--v0.3.2) (2026-11-14)
+
+
+### Bug Fixes
+
+* **model-roles:** a child keeps its resolved model and effort for its lifetime and on resume ([e2596dc](https://github.com/srobroek/opencode-plugins/commit/e2596dc58e4a63cce2edfea5eb55f7926b8ac641))
+
 ## [0.3.1](https://github.com/srobroek/opencode-plugins/compare/model-roles--v0.3.0...model-roles--v0.3.1) (2026-11-14)
 
 
