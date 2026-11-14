@@ -22,7 +22,7 @@ import { setProp as _$setProp } from "@opentui/solid";
 import { use as _$use } from "@opentui/solid";
 import { createElement as _$createElement } from "@opentui/solid";
 import { EditBufferRenderable, TextAttributes } from "@opentui/core";
-import { createEffect, createMemo, createSignal, For, Match, on, onCleanup, onMount, Show, Switch } from "solid-js";
+import { createEffect, createMemo, createSignal, For, Match, on, onCleanup, onMount, Show, Switch, untrack } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 
 // plugins/parley/src/clipboard.ts
@@ -3062,7 +3062,7 @@ function exclusiveFocus(context, target, field, scope) {
   return {
     paused: () => suspended() || yielding(),
     reclaim: () => {
-      guard.reclaim();
+      untrack(() => guard.reclaim());
       grab();
     },
     suspend: async (operation) => {

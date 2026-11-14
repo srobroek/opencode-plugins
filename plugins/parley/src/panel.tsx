@@ -9,7 +9,7 @@ import {
   TextAttributes,
   type TextareaRenderable,
 } from "@opentui/core"
-import { createEffect, createMemo, createSignal, For, Match, on, onCleanup, onMount, Show, Switch } from "solid-js"
+import { createEffect, createMemo, createSignal, For, Match, on, onCleanup, onMount, Show, Switch, untrack } from "solid-js"
 import { createStore, reconcile } from "solid-js/store"
 import type { FileValue, SubmittedAnswer } from "./answers.ts"
 import { clipboardFiles, copyText } from "./clipboard.ts"
@@ -650,7 +650,8 @@ function exclusiveFocus(context: Plugin.Context, target: () => Renderable | unde
   return {
     /** A dialog owns input: parley's own confirmation, or one another plugin or the host opened. */
     paused: () => suspended() || yielding(),
-    reclaim: () => { guard.reclaim(); grab() },
+    // Untracked: a focus-request effect must not subscribe to the mode it re-pushes, or it reruns forever.
+    reclaim: () => { untrack(() => guard.reclaim()); grab() },
     // Host confirmation dialogs own their own keyboard scope. Temporarily hand the lease to them,
     // never to the prompt, and reacquire only if this surface survived the dialog.
     suspend: async (operation: () => Promise<void>) => {
