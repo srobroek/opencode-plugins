@@ -160,7 +160,14 @@ A save goes to `options.tiers` of the model-roles entry in the global config:
 `$OPENCODE_CONFIG_DIR`, else `$XDG_CONFIG_HOME/opencode`, else
 `~/.config/opencode`. The file is `opencode.jsonc` when it has the entry, else
 `opencode.json`. The edit keeps comments and formatting, and turns a bare string
-plugin entry into `{ "package": …, "options": … }`.
+plugin entry into `{ "package": …, "options": … }`. The write is atomic: the new
+text goes to a temp file in the same directory, is synced, then renamed over the
+config, which keeps its file mode, owner and group, so a crash never leaves a
+half-written config. A config owned by another user is refused rather than
+re-owned. Before the rename the old content is copied to `<config>.model-roles.bak`,
+and the directory is synced after it. There is
+one backup per file, overwritten on each save, so it holds the config as it was
+before the last save.
 
 ### Agents
 
@@ -185,9 +192,12 @@ The `setAgent` call (`{ agent, tier }`, `tier` null to remove) does the write.
 
 A model-roles entry in a project config (`opencode.json(c)` or `.opencode/opencode.json(c)`
 in the session's directory or an ancestor) replaces the global entry as a whole, so
-its `agents` are the ones in force. The details then say `Set by project config (<path>)`,
-and **Change tier…** warns that a save goes to the global config and will not change
-this project; if you continue, the toast says nothing changed here. Edits to the
+its `tiers` and `agents` are the ones in force. In the tier list, the tiers then say
+`overridden by the project config`, and **Save** in a tier asks first: a save goes to
+the global config and will not change this project's tiers; if you continue, the
+toast says nothing changed here. A global save or hand edit never replaces a
+project entry's tiers in the running plugin. On the Agents screen the details then say `Set by project config (<path>)`,
+and **Change tier…** warns the same way. Edits to the
 project file apply on the next config reload, also when the global file has no entry.
 OpenCode keys plugin entries by the exact package string: only a project entry with
 the same string as the global one shadows it. One with another string runs as a second

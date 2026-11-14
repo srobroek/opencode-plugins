@@ -31,7 +31,7 @@ const tier = (name: string, configured?: Record<string, unknown>) => ({
   ...(configured === undefined ? {} : { configured }),
 })
 
-function harness(script: Step[], opts: { project?: string; setFails?: string; setAgentFails?: string; persist?: (value: Record<string, unknown>) => Record<string, unknown> } = {}) {
+function harness(script: Step[], opts: { project?: string; setFails?: string; setAgentFails?: string; persist?: (value: Record<string, unknown>) => Record<string, unknown>; writeWarning?: string } = {}) {
   const saved: Record<string, Record<string, unknown>> = {}
   const setCalls: Array<{ tier: string; value: unknown }> = []
   const agentCalls: Array<{ agent: string; tier: string | null }> = []
@@ -86,14 +86,14 @@ function harness(script: Step[], opts: { project?: string; setFails?: string; se
       agentCalls.push(input)
       if (input.tier === null) delete savedAgents[input.agent]
       else savedAgents[input.agent] = input.tier
-      return { path: "/cfg", ...(opts.project === undefined ? {} : { shadowedBy: opts.project }) }
+      return { path: "/cfg", ...(opts.writeWarning === undefined ? {} : { warnings: [opts.writeWarning] }), ...(opts.project === undefined ? {} : { shadowedBy: opts.project }) }
     },
     set: async (input: { tier: string; value: Record<string, unknown> | null }) => {
       if (opts.setFails !== undefined) throw new Error(opts.setFails)
       setCalls.push(input)
       if (input.value === null) delete saved[input.tier]
       else saved[input.tier] = opts.persist?.(input.value) ?? input.value
-      return { path: "/cfg", warnings: [] }
+      return { path: "/cfg", warnings: opts.writeWarning === undefined ? [] : [opts.writeWarning], ...(opts.project === undefined ? {} : { shadowedBy: opts.project }) }
     },
   }
   let command: (() => void) | undefined
@@ -440,6 +440,65 @@ describe("/tiers editor", () => {
     expect(h.toasts).toHaveLength(1)
     expect(h.toasts[0]?.message).toContain("/p/opencode.json overrides it here")
     expect(h.toasts[0]?.message).not.toContain("applied")
+  })
+
+  test("under a project config the tier list marks the tiers as shadowed", async () => {
+    const h = harness(
+      [
+        (o) => {
+          expect(String(o.placeholder)).toContain("/p/opencode.json")
+          expect((o.options as unknown as Array<{ title: string; description?: string }>).find((x) => x.title === "cheap")?.description).toContain("overridden by the project config")
+          return ESC
+        },
+      ],
+      { project: "/p/opencode.json" },
+    )
+    await h.run()
+  })
+
+  test("Save of a shadowed tier warns first; Cancel writes nothing", async () => {
+    const h = harness(
+      [
+        pick("strong"),
+        pick("models"),
+        pick("b/two"),
+        esc,
+        pick("save"),
+        (o) => {
+          expect(o.title).toBe("A project config sets the tiers")
+          expect(String(o.message)).toContain("will not change this project's tiers")
+          return false
+        },
+        pick("cancel"),
+        () => true, // discard
+        esc,
+      ],
+      { project: "/p/opencode.json" },
+    )
+    await h.run()
+    expect(h.setCalls).toEqual([])
+    expect(h.toasts).toEqual([])
+  })
+
+  test("a shadowed tier save after Save to global anyway says it changed nothing here", async () => {
+    const h = harness([pick("strong"), pick("models"), pick("b/two"), esc, pick("save"), () => true, esc], { project: "/p/opencode.json" })
+    await h.run()
+    expect(h.setCalls).toEqual([{ tier: "strong", value: { model: ["b/two"] } }])
+    expect(h.toasts).toHaveLength(1)
+    expect(h.toasts[0]?.message).toContain("/p/opencode.json overrides it here")
+    expect(h.toasts[0]?.message).not.toContain("applied")
+  })
+
+  test("a write warning shows in the agent and tier save toasts", async () => {
+    const warning = "written; durability unconfirmed (EIO)"
+    const a = harness([pick("\u0000agents"), pick("plan"), pick("\u0000change"), pick("cheap"), esc, esc, esc], { writeWarning: warning })
+    await a.run()
+    expect(a.toasts).toHaveLength(1)
+    expect(a.toasts[0]).toMatchObject({ variant: "info" })
+    expect(a.toasts[0]?.message).toContain(warning)
+    const t = harness([pick("strong"), pick("models"), pick("b/two"), esc, pick("save"), esc], { writeWarning: warning })
+    await t.run()
+    expect(t.toasts[0]?.message).toContain(warning)
   })
 
   test("Esc in the tier picker writes nothing", async () => {

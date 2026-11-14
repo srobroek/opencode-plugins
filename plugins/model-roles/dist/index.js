@@ -1818,7 +1818,7 @@ function readClassification(value) {
 }
 
 // plugins/model-roles/src/config-edit.ts
-import { readFileSync, writeFileSync } from "fs";
+import { closeSync, copyFileSync, fchmodSync, fchownSync, fsyncSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeSync } from "fs";
 import path from "path";
 
 // node_modules/.bun/jsonc-parser@3.3.1/node_modules/jsonc-parser/lib/esm/impl/scanner.js
@@ -3193,6 +3193,68 @@ function readConfigFiles(dir) {
   }
   return files;
 }
+var BACKUP_SUFFIX = ".model-roles.bak";
+var NO_DIRECTORY_SYNC = new Set(["EINVAL", "ENOTSUP", "EOPNOTSUPP", "EISDIR", "EPERM", "EACCES"]);
+var REAL_IO = { writeSync, renameSync, fchownSync, openSync, fsyncSync, closeSync };
+function writeAll(io, fd, bytes) {
+  for (let done = 0;done < bytes.length; ) {
+    const n = io.writeSync(fd, bytes, done, bytes.length - done);
+    if (n <= 0)
+      throw new Error("Short write: the file system accepted no more bytes.");
+    done += n;
+  }
+}
+function writeFileAtomic(file, text, io = REAL_IO) {
+  const target = realpathSync(file);
+  const { mode, uid, gid } = statSync(target);
+  const temp = `${target}.model-roles.${process.pid}.tmp`;
+  const backup = target + BACKUP_SUFFIX;
+  let fd;
+  try {
+    fd = io.openSync(temp, "wx", mode & 511);
+    fchmodSync(fd, mode & 511);
+    try {
+      io.fchownSync(fd, uid, gid);
+    } catch (error) {
+      if (error.code === "EPERM")
+        throw new Error(`${target} belongs to another user (uid ${uid}, gid ${gid}); model-roles will not change its ownership, so the save is refused. Edit it by hand or fix its ownership.`);
+      throw error;
+    }
+    writeAll(io, fd, new TextEncoder().encode(text));
+    io.fsyncSync(fd);
+    io.closeSync(fd);
+    fd = undefined;
+    copyFileSync(target, backup);
+    const saved = io.openSync(backup, "r");
+    try {
+      io.fsyncSync(saved);
+    } finally {
+      io.closeSync(saved);
+    }
+    io.renameSync(temp, target);
+  } catch (error) {
+    if (fd !== undefined)
+      io.closeSync(fd);
+    try {
+      unlinkSync(temp);
+    } catch {}
+    throw error;
+  }
+  try {
+    const dir = io.openSync(path.dirname(target), "r");
+    try {
+      io.fsyncSync(dir);
+    } finally {
+      io.closeSync(dir);
+    }
+  } catch (error) {
+    const code = error.code ?? "unknown error";
+    if (NO_DIRECTORY_SYNC.has(code))
+      return;
+    return `written; durability unconfirmed (${code})`;
+  }
+  return;
+}
 function writeEntry(dir, edit, spec) {
   const file = pickConfigFile(readConfigFiles(dir), spec);
   if (file === undefined)
@@ -3200,19 +3262,18 @@ function writeEntry(dir, edit, spec) {
   const next = edit(file.text);
   if (next === undefined)
     throw new Error(`No model-roles plugin entry in ${file.path}.`);
-  if (next !== file.text)
-    writeFileSync(file.path, next.endsWith(`
+  const warning = next === file.text ? undefined : writeFileAtomic(file.path, next.endsWith(`
 `) ? next : `${next}
 `);
-  return { path: file.path, text: next };
+  return { path: file.path, text: next, warnings: warning === undefined ? [] : [warning] };
 }
 function writeTier(dir, name, value, spec) {
-  const { path: file, text } = writeEntry(dir, (current) => setTier(current, name, value, spec), spec);
-  return { path: file, tiers: readTiers(text, spec) };
+  const { path: file, text, warnings } = writeEntry(dir, (current) => setTier(current, name, value, spec), spec);
+  return { path: file, tiers: readTiers(text, spec), warnings };
 }
 function writeAgentTier(dir, agent, tier, spec) {
-  const { path: file, text } = writeEntry(dir, (current) => setAgentTier(current, agent, tier, spec), spec);
-  return { path: file, agents: readAgents(text, spec) };
+  const { path: file, text, warnings } = writeEntry(dir, (current) => setAgentTier(current, agent, tier, spec), spec);
+  return { path: file, agents: readAgents(text, spec), warnings };
 }
 function projectConfigPaths(directory, globalDir) {
   const ancestors = [];
@@ -3236,17 +3297,17 @@ function readProjectFiles(directory, globalDir) {
   }
   return files;
 }
-function effectiveAgents(project, global, spec) {
+function effectiveConfig(project, global, spec) {
   const identity = spec ?? (global === undefined ? undefined : findPluginEntry(global.text, spec)?.spec);
   const newestFirst = [...project].reverse();
   const same = newestFirst.find((f) => findPluginEntry(f.text, identity) !== undefined);
   const other = identity === undefined ? undefined : newestFirst.find((f) => findPluginEntry(f.text) !== undefined && findPluginEntry(f.text, identity) === undefined);
   const extra = other === undefined ? {} : { alsoLoads: other.path };
   if (same !== undefined)
-    return { origin: "project", path: same.path, agents: readAgents(same.text, identity), ...extra };
+    return { origin: "project", path: same.path, tiers: readTiers(same.text, identity), agents: readAgents(same.text, identity), ...extra };
   if (global === undefined)
-    return { origin: "global", agents: {}, ...extra };
-  return { origin: "global", path: global.path, agents: readAgents(global.text, identity), ...extra };
+    return { origin: "global", tiers: {}, agents: {}, ...extra };
+  return { origin: "global", path: global.path, tiers: readTiers(global.text, identity), agents: readAgents(global.text, identity), ...extra };
 }
 
 // plugins/model-roles/src/log.ts
@@ -4506,10 +4567,6 @@ ${refs.size}`;
       }
     };
     const pluginOptions = isRecord8(ctx.options) ? ctx.options : {};
-    let fileTiers = (() => {
-      const file = globalFile();
-      return file === undefined ? undefined : JSON.stringify(readTiers(file.text, ownSpec()));
-    })();
     const agentConfig = () => {
       let project = [];
       try {
@@ -4517,23 +4574,23 @@ ${refs.size}`;
         if (typeof directory === "string")
           project = readProjectFiles(directory, configDir());
       } catch {}
-      return effectiveAgents(project, globalFile(), ownSpec());
+      return effectiveConfig(project, globalFile(), ownSpec());
     };
     const agentsKeyOf = (config) => JSON.stringify({ origin: config.origin, path: config.path, agents: parseOptions({ agents: config.agents }).agents });
     const startupConfig = agentConfig();
+    let fileTiers = startupConfig.path === undefined ? undefined : JSON.stringify(startupConfig.tiers);
     const startupAgents = parseOptions({ agents: startupConfig.agents }).agents;
     const otherAgents = Object.fromEntries(Object.entries(options.agents).filter(([agent]) => !Object.hasOwn(startupAgents, agent)));
     let fileAgents = agentsKeyOf(startupConfig);
     const reloadTiers = async (force) => {
       const identity = await resolveIdentity();
-      const file = globalFile();
       const config = agentConfig();
       const agentsKey = agentsKeyOf(config);
       const wanted = parseOptions({ agents: config.agents }).agents;
       const agentsChanged = identity.kind === "unique" && agentsKey !== fileAgents;
-      const tiers2 = file === undefined ? undefined : readTiers(file.text, ownSpec());
+      const tiers2 = config.path === undefined || config.origin === "project" && identity.kind !== "unique" ? undefined : config.tiers;
       const key = tiers2 === undefined ? fileTiers : JSON.stringify(tiers2);
-      if (file === undefined ? !agentsChanged : !force && key === fileTiers && !agentsChanged)
+      if (tiers2 === undefined ? !agentsChanged : !force && key === fileTiers && !agentsChanged)
         return;
       await exclusive(async () => {
         const previous = { settings, agents: options.agents, roles: options.roles, tiers: options.tiers, classes: options.classes, derived };
@@ -4564,7 +4621,7 @@ ${refs.size}`;
       });
       fileTiers = key;
       fileAgents = agentsKey;
-      warn(`applied the tiers from ${file?.path ?? config.path ?? "the project config"}`);
+      warn(`applied the tiers from ${config.path ?? "the project config"}`);
     };
     const rpc = await ctx.rpc.register(TiersRpc, {
       state: async (input) => {
@@ -4609,13 +4666,17 @@ ${refs.size}`;
         warn(`${config === undefined ? "removed" : "set"} tier ${tier} in ${result.path}`);
         for (const warning of warnings)
           warn(`tier ${tier}: ${warning}`);
+        for (const warning of result.warnings)
+          warn(`tier ${tier}: ${warning}`);
         try {
           await queue(() => reloadTiers(true));
         } catch (error) {
           warn(`tier ${tier} was written to ${result.path} but not applied`, { error: String(error) });
           throw new Error(`Tier ${tier} was written to ${result.path} but not applied: ${error.message}. The previous tiers stay in use until the config reloads.`);
         }
-        return { ...result, warnings };
+        const effective = agentConfig();
+        const all = [...result.warnings, ...warnings];
+        return effective.origin === "project" ? { ...result, warnings: all, shadowedBy: effective.path } : { ...result, warnings: all };
       },
       setAgent: async (input) => {
         const { agent, tier } = input ?? {};
@@ -4635,6 +4696,8 @@ ${refs.size}`;
           throw new Error(`Agent ${agent} not saved: the host lists no such agent.`);
         const result = writeAgentTier(configDir(), agent, value, spec);
         warn(`${value === undefined ? "removed the tier of" : "set the tier of"} agent ${agent} in ${result.path}`);
+        for (const warning of result.warnings)
+          warn(`agent ${agent}: ${warning}`);
         try {
           await queue(() => reloadTiers(true));
         } catch (error) {
@@ -4746,6 +4809,7 @@ export {
   AGENT_HINT_LIMIT,
   AUTO_AGENT,
   AUTO_HISTORY_LIMIT,
+  BACKUP_SUFFIX,
   BUILTIN_AGENT_TIERS,
   BUILTIN_TIERS,
   CATALOG_LIMIT,
@@ -4848,7 +4912,7 @@ export {
   describeChoice,
   desiredModels,
   duration,
-  effectiveAgents,
+  effectiveConfig,
   expandRole,
   explainSpawn,
   explicitCandidates,
@@ -4954,5 +5018,6 @@ export {
   withRoleNote,
   withRoleParam,
   writeAgentTier,
+  writeFileAtomic,
   writeTier
 };

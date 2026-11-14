@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test"
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, closeSync, existsSync, fchownSync, fsyncSync, lstatSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync, writeSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { parse } from "jsonc-parser"
-import { effectiveAgents, findPluginEntry, globalConfigDir, pickConfigFile, projectConfigPaths, readAgents, readTiers, setAgentTier, setTier, writeAgentTier, writeTier } from "./config-edit.ts"
+import { BACKUP_SUFFIX, effectiveConfig, findPluginEntry, globalConfigDir, pickConfigFile, projectConfigPaths, readAgents, readTiers, setAgentTier, setTier, writeAgentTier, writeFileAtomic, writeTier } from "./config-edit.ts"
 
 const SPEC = "github:srobroek/opencode-plugins#main::path:plugins/model-roles"
 
@@ -119,7 +119,7 @@ describe("pickConfigFile and writeTier", () => {
       const file = path.join(dir, "opencode.jsonc")
       writeFileSync(file, `{\n  // keep me\n  "plugins": ["${SPEC}"]\n}\n`)
       const result = writeTier(dir, "cheap", { effort: "none" })
-      expect(result).toEqual({ path: file, tiers: { cheap: { effort: "none" } } })
+      expect(result).toEqual({ path: file, tiers: { cheap: { effort: "none" } }, warnings: [] })
       const written = readFileSync(file, "utf8")
       expect(written).toContain("// keep me")
       expect(written.endsWith("\n")).toBe(true)
@@ -136,9 +136,9 @@ describe("writeAgentTier", () => {
     try {
       const file = path.join(dir, "opencode.jsonc")
       writeFileSync(file, `{\n  // keep me\n  "plugins": ["${SPEC}"]\n}\n`)
-      expect(writeAgentTier(dir, "build", "strong")).toEqual({ path: file, agents: { build: "strong" } })
+      expect(writeAgentTier(dir, "build", "strong")).toEqual({ path: file, agents: { build: "strong" }, warnings: [] })
       expect(readFileSync(file, "utf8")).toContain("// keep me")
-      expect(writeAgentTier(dir, "build", undefined)).toEqual({ path: file, agents: {} })
+      expect(writeAgentTier(dir, "build", undefined)).toEqual({ path: file, agents: {}, warnings: [] })
       expect(() => writeAgentTier(path.join(dir, "missing"), "build", "cheap")).toThrow(/No model-roles plugin entry/)
     } finally {
       rmSync(dir, { recursive: true, force: true })
@@ -166,31 +166,32 @@ describe("projectConfigPaths", () => {
   })
 })
 
-describe("effectiveAgents", () => {
+describe("effectiveConfig", () => {
   const entry = (agents?: Record<string, string>) =>
     `{ "plugins": [{ "package": "${SPEC}"${agents === undefined ? "" : `, "options": { "agents": ${JSON.stringify(agents)} }`} }] }`
   const global = { path: "/g/opencode.json", text: entry({ a: "cheap" }) }
 
   test("no project entry: the global one", () => {
-    expect(effectiveAgents([], global)).toEqual({ origin: "global", path: "/g/opencode.json", agents: { a: "cheap" } })
-    expect(effectiveAgents([{ path: "/p/opencode.json", text: '{ "plugins": ["other"] }' }], global).origin).toBe("global")
-    expect(effectiveAgents([], undefined)).toEqual({ origin: "global", agents: {} })
+    expect(effectiveConfig([], global)).toEqual({ origin: "global", path: "/g/opencode.json", tiers: {}, agents: { a: "cheap" } })
+    expect(effectiveConfig([{ path: "/p/opencode.json", text: '{ "plugins": ["other"] }' }], global).origin).toBe("global")
+    expect(effectiveConfig([], undefined)).toEqual({ origin: "global", tiers: {}, agents: {} })
   })
 
   test("a project entry replaces the global one, even with the same value or without agents", () => {
-    expect(effectiveAgents([{ path: "/p/opencode.json", text: entry({ a: "cheap" }) }], global)).toEqual({
+    expect(effectiveConfig([{ path: "/p/opencode.json", text: entry({ a: "cheap" }) }], global)).toEqual({
       origin: "project",
       path: "/p/opencode.json",
+      tiers: {},
       agents: { a: "cheap" },
     })
-    expect(effectiveAgents([{ path: "/p/opencode.json", text: entry() }], global)).toEqual({ origin: "project", path: "/p/opencode.json", agents: {} })
+    expect(effectiveConfig([{ path: "/p/opencode.json", text: entry() }], global)).toEqual({ origin: "project", path: "/p/opencode.json", tiers: {}, agents: {} })
   })
 
   test("a project entry under another package string is a second instance: it never shadows, and is reported", () => {
     const other = { path: "/p/opencode.json", text: `{ "plugins": [{ "package": "/x/plugins/model-roles", "options": { "agents": { "a": "strong" } } }] }` }
-    expect(effectiveAgents([other], global)).toEqual({ origin: "global", path: "/g/opencode.json", agents: { a: "cheap" }, alsoLoads: "/p/opencode.json" })
+    expect(effectiveConfig([other], global)).toEqual({ origin: "global", path: "/g/opencode.json", tiers: {}, agents: { a: "cheap" }, alsoLoads: "/p/opencode.json" })
     // The host's own target decides when it is known: the global entry under another string is then not ours.
-    expect(effectiveAgents([other], { path: "/g/opencode.json", text: entry({ a: "cheap" }) }, "/x/plugins/model-roles")).toMatchObject({
+    expect(effectiveConfig([other], { path: "/g/opencode.json", text: entry({ a: "cheap" }) }, "/x/plugins/model-roles")).toMatchObject({
       origin: "project",
       path: "/p/opencode.json",
       agents: { a: "strong" },
@@ -206,12 +207,238 @@ describe("effectiveAgents", () => {
     expect(pickConfigFile([{ path: "/d/opencode.json", text }], "other")).toBeUndefined()
   })
 
+  test("tiers follow the same entry as agents: a project entry's tiers replace the global ones whole", () => {
+    const withTiers = (tiers: Record<string, unknown>) => `{ "plugins": [{ "package": "${SPEC}", "options": { "tiers": ${JSON.stringify(tiers)} } }] }`
+    const g = { path: "/g/opencode.json", text: withTiers({ cheap: { effort: "low" } }) }
+    expect(effectiveConfig([], g)).toMatchObject({ origin: "global", tiers: { cheap: { effort: "low" } } })
+    expect(effectiveConfig([{ path: "/p/opencode.json", text: withTiers({ docs: { purpose: "d" } }) }], g)).toMatchObject({ origin: "project", tiers: { docs: { purpose: "d" } } })
+    expect(effectiveConfig([{ path: "/p/opencode.json", text: entry() }], g)).toMatchObject({ origin: "project", tiers: {} })
+  })
+
   test("the highest-precedence project entry wins", () => {
     const files = [
       { path: "/p/opencode.json", text: entry({ a: "strong" }) },
       { path: "/p/.opencode/opencode.json", text: entry({ b: "cheap" }) },
       { path: "/p/.opencode/opencode.jsonc", text: '{ "plugins": [] }' },
     ]
-    expect(effectiveAgents(files, global)).toMatchObject({ origin: "project", path: "/p/.opencode/opencode.json", agents: { b: "cheap" } })
+    expect(effectiveConfig(files, global)).toMatchObject({ origin: "project", path: "/p/.opencode/opencode.json", agents: { b: "cheap" } })
+  })
+})
+
+describe("atomic config writes", () => {
+  const fixture = (mode?: number) => {
+    const dir = mkdtempSync(path.join(tmpdir(), "model-roles-atomic-"))
+    const file = path.join(dir, "opencode.json")
+    writeFileSync(file, `{ "plugins": ["${SPEC}"] }\n`)
+    if (mode !== undefined) chmodSync(file, mode)
+    return { dir, file, done: () => rmSync(dir, { recursive: true, force: true }) }
+  }
+
+  const REAL = { writeSync, renameSync, fchownSync, openSync, fsyncSync, closeSync }
+
+  test("the original survives a failure while writing, and no temp file is left", () => {
+    const { dir, file, done } = fixture()
+    try {
+      const before = readFileSync(file, "utf8")
+      const torn = {
+        ...REAL,
+        writeSync: (fd: number, buf: Uint8Array, off: number) => {
+          writeSync(fd, buf, off, 5) // a partial write, then the disk fails
+          throw new Error("ENOSPC")
+        },
+      }
+      expect(() => writeFileAtomic(file, "{ new }\n", torn)).toThrow("ENOSPC")
+      expect(readFileSync(file, "utf8")).toBe(before)
+      expect(readdirSync(dir)).toEqual(["opencode.json"])
+    } finally {
+      done()
+    }
+  })
+
+  test("a short write is completed, multibyte text included", () => {
+    const { file, done } = fixture()
+    try {
+      const calls: number[] = []
+      const short = {
+        ...REAL,
+        writeSync: (fd: number, buf: Uint8Array, off: number, len: number) => {
+          calls.push(len)
+          return writeSync(fd, buf, off, Math.min(len, 3)) // never more than 3 bytes, no error
+        },
+      }
+      const text = '{ "plugins": ["é→x"] }\n'
+      writeFileAtomic(file, text, short)
+      expect(readFileSync(file, "utf8")).toBe(text)
+      expect(calls.length).toBeGreaterThan(2)
+    } finally {
+      done()
+    }
+  })
+
+  test("a write that takes no bytes fails and leaves the original", () => {
+    const { dir, file, done } = fixture()
+    try {
+      const before = readFileSync(file, "utf8")
+      expect(() => writeFileAtomic(file, "{ new }\n", { ...REAL, writeSync: () => 0 })).toThrow("Short write")
+      expect(readFileSync(file, "utf8")).toBe(before)
+      expect(readdirSync(dir)).toEqual(["opencode.json"])
+    } finally {
+      done()
+    }
+  })
+
+  test("the original survives a failed rename", () => {
+    const { dir, file, done } = fixture()
+    try {
+      const before = readFileSync(file, "utf8")
+      const io = {
+        ...REAL,
+        renameSync: () => {
+          throw new Error("EXDEV")
+        },
+      }
+      expect(() => writeFileAtomic(file, "{ new }\n", io)).toThrow("EXDEV")
+      expect(readFileSync(file, "utf8")).toBe(before)
+      expect(readdirSync(dir).filter((n) => n.includes("tmp"))).toEqual([])
+    } finally {
+      done()
+    }
+  })
+
+  test("the temp file takes the original's owner and group; EPERM refuses the save", () => {
+    const { dir, file, done } = fixture()
+    try {
+      const { uid, gid } = statSync(file)
+      const owners: Array<[number, number]> = []
+      writeFileAtomic(file, "{ a }\n", { ...REAL, fchownSync: (_fd, u, g) => owners.push([u, g]) })
+      expect(owners).toEqual([[uid, gid]])
+      const before = readFileSync(file, "utf8")
+      const denied = {
+        ...REAL,
+        fchownSync: () => {
+          throw Object.assign(new Error("operation not permitted"), { code: "EPERM" })
+        },
+      }
+      expect(() => writeFileAtomic(file, "{ b }\n", denied)).toThrow(/belongs to another user.*will not change its ownership/)
+      expect(readFileSync(file, "utf8")).toBe(before)
+      expect(readdirSync(dir).filter((n) => n.includes("tmp"))).toEqual([])
+    } finally {
+      done()
+    }
+  })
+
+  test("the backup and the directory are synced; a directory that rejects fsync does not fail the save", () => {
+    const { dir, file, done } = fixture()
+    try {
+      const real = realpathSync(dir)
+      const opened = new Map<number, string>()
+      const synced: string[] = []
+      const watching = {
+        ...REAL,
+        openSync: ((p: string, ...rest: [string, number?]) => {
+          const fd = openSync(p, ...(rest as [string, number?]))
+          opened.set(fd, p)
+          return fd
+        }) as typeof openSync,
+        fsyncSync: (fd: number) => {
+          synced.push(opened.get(fd) ?? "temp")
+          const p = opened.get(fd)
+          if (p === real) throw Object.assign(new Error("invalid"), { code: "EINVAL" })
+          fsyncSync(fd)
+        },
+      }
+      writeFileAtomic(file, "{ a }\n", watching)
+      expect(synced).toContain(path.join(real, `opencode.json${BACKUP_SUFFIX}`))
+      expect(synced.at(-1)).toBe(real) // the directory comes last, after the rename
+      expect(readFileSync(file, "utf8")).toBe("{ a }\n")
+    } finally {
+      done()
+    }
+  })
+
+  const failingDirSync = (code: string) => {
+    const dirs = new Set<number>()
+    return {
+      ...REAL,
+      openSync: ((p: string, ...rest: [string, number?]) => {
+        const fd = openSync(p, ...(rest as [string, number?]))
+        if (statSync(p).isDirectory()) dirs.add(fd)
+        return fd
+      }) as typeof openSync,
+      fsyncSync: (fd: number) => {
+        if (dirs.has(fd)) throw Object.assign(new Error(code), { code })
+        fsyncSync(fd)
+      },
+    }
+  }
+
+  test.each(["EINVAL", "ENOTSUP", "EOPNOTSUPP", "EISDIR", "EPERM", "EACCES"])("a directory that cannot be synced (%s) is ignored", (code) => {
+    const { file, done } = fixture()
+    try {
+      expect(writeFileAtomic(file, "{ a }\n", failingDirSync(code))).toBeUndefined()
+      expect(readFileSync(file, "utf8")).toBe("{ a }\n")
+    } finally {
+      done()
+    }
+  })
+
+  test("a real directory sync failure (EIO) is a warning; the new content is written", () => {
+    const { file, done } = fixture()
+    try {
+      expect(writeFileAtomic(file, "{ a }\n", failingDirSync("EIO"))).toBe("written; durability unconfirmed (EIO)")
+      expect(readFileSync(file, "utf8")).toBe("{ a }\n")
+    } finally {
+      done()
+    }
+  })
+
+  test("the file mode is kept", () => {
+    const { file, done } = fixture(0o600)
+    try {
+      writeTier(path.dirname(file), "cheap", { effort: "low" }, SPEC)
+      expect(statSync(file).mode & 0o777).toBe(0o600)
+      expect(readTiers(readFileSync(file, "utf8"))).toEqual({ cheap: { effort: "low" } })
+    } finally {
+      done()
+    }
+  })
+
+  test("one rolling backup holds the content before the latest save", () => {
+    const { file, done } = fixture()
+    try {
+      const original = readFileSync(file, "utf8")
+      writeTier(path.dirname(file), "cheap", { effort: "low" }, SPEC)
+      const first = readFileSync(file, "utf8")
+      expect(readFileSync(file + BACKUP_SUFFIX, "utf8")).toBe(original)
+      writeAgentTier(path.dirname(file), "worker", "cheap", SPEC)
+      expect(readFileSync(file + BACKUP_SUFFIX, "utf8")).toBe(first)
+      expect(readdirSync(path.dirname(file)).sort()).toEqual(["opencode.json", `opencode.json${BACKUP_SUFFIX}`])
+    } finally {
+      done()
+    }
+  })
+
+  test("an unchanged save touches nothing and leaves no backup", () => {
+    const { file, done } = fixture()
+    try {
+      writeTier(path.dirname(file), "cheap", undefined, SPEC)
+      expect(existsSync(file + BACKUP_SUFFIX)).toBe(false)
+    } finally {
+      done()
+    }
+  })
+
+  test("a symlinked config is written through, not replaced", () => {
+    const { dir, file, done } = fixture()
+    try {
+      const real = path.join(dir, "real")
+      renameSync(file, real)
+      symlinkSync(real, file)
+      writeTier(dir, "cheap", { effort: "low" }, SPEC)
+      expect(readTiers(readFileSync(real, "utf8"))).toEqual({ cheap: { effort: "low" } })
+      expect(lstatSync(file).isSymbolicLink()).toBe(true)
+    } finally {
+      done()
+    }
   })
 })

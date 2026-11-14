@@ -5,7 +5,7 @@
  * `writeTier`, which reads and writes the chosen file.
  */
 
-import { readFileSync, writeFileSync } from "node:fs"
+import { closeSync, copyFileSync, fchmodSync, fchownSync, fsyncSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeSync } from "node:fs"
 import path from "node:path"
 import { applyEdits, findNodeAtLocation, getNodeValue, modify, type Node, parseTree } from "jsonc-parser"
 
@@ -122,30 +122,123 @@ export function readConfigFiles(dir: string): ConfigFile[] {
   return files
 }
 
-export type WriteResult = { path: string; tiers: Record<string, unknown> }
-export type AgentWriteResult = { path: string; agents: Record<string, unknown> }
+export type WriteResult = { path: string; tiers: Record<string, unknown>; warnings: string[] }
+export type AgentWriteResult = { path: string; agents: Record<string, unknown>; warnings: string[] }
+
+/** Suffix of the rolling backup next to a config file. */
+export const BACKUP_SUFFIX = ".model-roles.bak"
+
+/**
+ * Errors that mean this platform or file system cannot fsync a directory, not that the sync failed:
+ * EINVAL and ENOTSUP/EOPNOTSUPP (the file system has no directory sync), EISDIR (Windows, which cannot open
+ * a directory as a file), EPERM and EACCES (opening a directory for fsync is refused). Anything else, such
+ * as EIO, is a real failure.
+ */
+const NO_DIRECTORY_SYNC = new Set(["EINVAL", "ENOTSUP", "EOPNOTSUPP", "EISDIR", "EPERM", "EACCES"])
+
+/** The file-system calls `writeFileAtomic` makes, so a test can make one of them fail or fall short. */
+export type AtomicIo = {
+  writeSync: (fd: number, buffer: Uint8Array, offset: number, length: number) => number
+  renameSync: (from: string, to: string) => void
+  fchownSync: (fd: number, uid: number, gid: number) => void
+  openSync: typeof openSync
+  fsyncSync: (fd: number) => void
+  closeSync: (fd: number) => void
+}
+const REAL_IO: AtomicIo = { writeSync, renameSync, fchownSync, openSync, fsyncSync, closeSync }
+
+/** Write every byte of `bytes`: `writeSync` may take fewer than asked, and a 0-byte write would loop forever. */
+function writeAll(io: AtomicIo, fd: number, bytes: Uint8Array): void {
+  for (let done = 0; done < bytes.length; ) {
+    const n = io.writeSync(fd, bytes, done, bytes.length - done)
+    if (n <= 0) throw new Error("Short write: the file system accepted no more bytes.")
+    done += n
+  }
+}
+
+/**
+ * Replace `file` with `text` so a crash or full disk never leaves a torn config: write a temp file in the
+ * same directory (so the rename stays on one filesystem), fsync it, then rename it over the original and
+ * fsync the directory so the new entry survives a power loss. The original's mode, owner and group are
+ * kept, and a symlinked config is written through. Before the rename the old content is copied to
+ * `<file>.model-roles.bak` and synced. That is one rolling backup, overwritten on each save: it is a safety
+ * net for the last edit, and a backup per save would pile up files in the user's config directory.
+ * Returns a warning when the directory sync failed for a real reason; the save still stands.
+ */
+export function writeFileAtomic(file: string, text: string, io: AtomicIo = REAL_IO): string | undefined {
+  const target = realpathSync(file)
+  const { mode, uid, gid } = statSync(target)
+  const temp = `${target}.model-roles.${process.pid}.tmp`
+  const backup = target + BACKUP_SUFFIX
+  let fd: number | undefined
+  try {
+    fd = io.openSync(temp, "wx", mode & 0o777)
+    fchmodSync(fd, mode & 0o777) // the umask must not narrow the original's mode
+    try {
+      io.fchownSync(fd, uid, gid)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EPERM")
+        throw new Error(`${target} belongs to another user (uid ${uid}, gid ${gid}); model-roles will not change its ownership, so the save is refused. Edit it by hand or fix its ownership.`)
+      throw error
+    }
+    writeAll(io, fd, new TextEncoder().encode(text))
+    io.fsyncSync(fd)
+    io.closeSync(fd)
+    fd = undefined
+    copyFileSync(target, backup)
+    const saved = io.openSync(backup, "r")
+    try {
+      io.fsyncSync(saved)
+    } finally {
+      io.closeSync(saved)
+    }
+    io.renameSync(temp, target)
+  } catch (error) {
+    if (fd !== undefined) io.closeSync(fd)
+    try {
+      unlinkSync(temp)
+    } catch {
+      // Never created, or already moved.
+    }
+    throw error
+  }
+  try {
+    const dir = io.openSync(path.dirname(target), "r")
+    try {
+      io.fsyncSync(dir)
+    } finally {
+      io.closeSync(dir)
+    }
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code ?? "unknown error"
+    if (NO_DIRECTORY_SYNC.has(code)) return undefined
+    // The rename happened, so the save stands; only its durability is in doubt.
+    return `written; durability unconfirmed (${code})`
+  }
+  return undefined
+}
 
 /** Apply `edit` to the global config file that holds the model-roles entry, and write it. */
-function writeEntry(dir: string, edit: (text: string) => string | undefined, spec?: string): { path: string; text: string } {
+function writeEntry(dir: string, edit: (text: string) => string | undefined, spec?: string): { path: string; text: string; warnings: string[] } {
   const file = pickConfigFile(readConfigFiles(dir), spec)
   if (file === undefined)
     throw new Error(`No model-roles plugin entry in ${CONFIG_NAMES.map((n) => path.join(dir, n)).join(" or ")}; add the plugin to the global config first.`)
   const next = edit(file.text)
   if (next === undefined) throw new Error(`No model-roles plugin entry in ${file.path}.`)
-  if (next !== file.text) writeFileSync(file.path, next.endsWith("\n") ? next : `${next}\n`)
-  return { path: file.path, text: next }
+  const warning = next === file.text ? undefined : writeFileAtomic(file.path, next.endsWith("\n") ? next : `${next}\n`)
+  return { path: file.path, text: next, warnings: warning === undefined ? [] : [warning] }
 }
 
 /** Set one tier in the global config file that holds the model-roles entry, and write it. */
 export function writeTier(dir: string, name: string, value: unknown, spec?: string): WriteResult {
-  const { path: file, text } = writeEntry(dir, (current) => setTier(current, name, value, spec), spec)
-  return { path: file, tiers: readTiers(text, spec) }
+  const { path: file, text, warnings } = writeEntry(dir, (current) => setTier(current, name, value, spec), spec)
+  return { path: file, tiers: readTiers(text, spec), warnings }
 }
 
 /** Set (or with `undefined` remove) one agent's tier override in that file, and write it. */
 export function writeAgentTier(dir: string, agent: string, tier: string | undefined, spec?: string): AgentWriteResult {
-  const { path: file, text } = writeEntry(dir, (current) => setAgentTier(current, agent, tier, spec), spec)
-  return { path: file, agents: readAgents(text, spec) }
+  const { path: file, text, warnings } = writeEntry(dir, (current) => setAgentTier(current, agent, tier, spec), spec)
+  return { path: file, agents: readAgents(text, spec), warnings }
 }
 
 /**
@@ -181,30 +274,34 @@ export function readProjectFiles(directory: string, globalDir: string): ConfigFi
   return files
 }
 
-export type AgentConfig = (
-  | { origin: "global"; path?: string; agents: Record<string, unknown> }
-  | { origin: "project"; path: string; agents: Record<string, unknown> }
+export type EffectiveConfig = (
+  | { origin: "global"; path?: string }
+  | { origin: "project"; path: string }
 ) & {
+  /** `options.tiers` of the effective entry. */
+  tiers: Record<string, unknown>
+  /** `options.agents` of the effective entry. */
+  agents: Record<string, unknown>
   /** A project config naming model-roles by another package string: OpenCode loads it as a second instance. */
   alsoLoads?: string
 }
 
 /**
- * Where the model-roles `agents` come from. OpenCode keys plugin entries by the exact package string and a
- * project entry with the same string replaces the inherited one as a whole (options are not merged). This
- * instance's identity is `spec` (its own package target, when the host says), else the global entry's string.
- * The highest-precedence project file with an entry of that string is the effective one; the global file does
- * not count then. A project entry with another string is a second instance: it never shadows, and its path is
- * reported as `alsoLoads`. With no identity at all (no host answer, no global entry), any model-roles-looking
- * project entry counts. `project` is lowest precedence first.
+ * Where the model-roles options (`tiers` and `agents`) come from. OpenCode keys plugin entries by the exact
+ * package string and a project entry with the same string replaces the inherited one as a whole (options are
+ * not merged). This instance's identity is `spec` (its own package target, when the host says), else the global
+ * entry's string. The highest-precedence project file with an entry of that string is the effective one; the
+ * global file does not count then. A project entry with another string is a second instance: it never shadows,
+ * and its path is reported as `alsoLoads`. With no identity at all (no host answer, no global entry), any
+ * model-roles-looking project entry counts. `project` is lowest precedence first.
  */
-export function effectiveAgents(project: ReadonlyArray<ConfigFile>, global: ConfigFile | undefined, spec?: string): AgentConfig {
+export function effectiveConfig(project: ReadonlyArray<ConfigFile>, global: ConfigFile | undefined, spec?: string): EffectiveConfig {
   const identity = spec ?? (global === undefined ? undefined : findPluginEntry(global.text, spec)?.spec)
   const newestFirst = [...project].reverse()
   const same = newestFirst.find((f) => findPluginEntry(f.text, identity) !== undefined)
   const other = identity === undefined ? undefined : newestFirst.find((f) => findPluginEntry(f.text) !== undefined && findPluginEntry(f.text, identity) === undefined)
   const extra = other === undefined ? {} : { alsoLoads: other.path }
-  if (same !== undefined) return { origin: "project", path: same.path, agents: readAgents(same.text, identity), ...extra }
-  if (global === undefined) return { origin: "global", agents: {}, ...extra }
-  return { origin: "global", path: global.path, agents: readAgents(global.text, identity), ...extra }
+  if (same !== undefined) return { origin: "project", path: same.path, tiers: readTiers(same.text, identity), agents: readAgents(same.text, identity), ...extra }
+  if (global === undefined) return { origin: "global", tiers: {}, agents: {}, ...extra }
+  return { origin: "global", path: global.path, tiers: readTiers(global.text, identity), agents: readAgents(global.text, identity), ...extra }
 }
