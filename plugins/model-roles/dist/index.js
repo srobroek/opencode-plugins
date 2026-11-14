@@ -3194,6 +3194,7 @@ function readConfigFiles(dir) {
   return files;
 }
 var BACKUP_SUFFIX = ".model-roles.bak";
+var NO_DIRECTORY_SYNC = new Set(["EINVAL", "ENOTSUP", "EOPNOTSUPP", "EISDIR", "EPERM", "EACCES"]);
 var REAL_IO = { writeSync, renameSync, fchownSync, openSync, fsyncSync, closeSync };
 function writeAll(io, fd, bytes) {
   for (let done = 0;done < bytes.length; ) {
@@ -3246,7 +3247,13 @@ function writeFileAtomic(file, text, io = REAL_IO) {
     } finally {
       io.closeSync(dir);
     }
-  } catch {}
+  } catch (error) {
+    const code = error.code ?? "unknown error";
+    if (NO_DIRECTORY_SYNC.has(code))
+      return;
+    return `written; durability unconfirmed (${code})`;
+  }
+  return;
 }
 function writeEntry(dir, edit, spec) {
   const file = pickConfigFile(readConfigFiles(dir), spec);
@@ -3255,19 +3262,18 @@ function writeEntry(dir, edit, spec) {
   const next = edit(file.text);
   if (next === undefined)
     throw new Error(`No model-roles plugin entry in ${file.path}.`);
-  if (next !== file.text)
-    writeFileAtomic(file.path, next.endsWith(`
+  const warning = next === file.text ? undefined : writeFileAtomic(file.path, next.endsWith(`
 `) ? next : `${next}
 `);
-  return { path: file.path, text: next };
+  return { path: file.path, text: next, warnings: warning === undefined ? [] : [warning] };
 }
 function writeTier(dir, name, value, spec) {
-  const { path: file, text } = writeEntry(dir, (current) => setTier(current, name, value, spec), spec);
-  return { path: file, tiers: readTiers(text, spec) };
+  const { path: file, text, warnings } = writeEntry(dir, (current) => setTier(current, name, value, spec), spec);
+  return { path: file, tiers: readTiers(text, spec), warnings };
 }
 function writeAgentTier(dir, agent, tier, spec) {
-  const { path: file, text } = writeEntry(dir, (current) => setAgentTier(current, agent, tier, spec), spec);
-  return { path: file, agents: readAgents(text, spec) };
+  const { path: file, text, warnings } = writeEntry(dir, (current) => setAgentTier(current, agent, tier, spec), spec);
+  return { path: file, agents: readAgents(text, spec), warnings };
 }
 function projectConfigPaths(directory, globalDir) {
   const ancestors = [];
@@ -4660,6 +4666,8 @@ ${refs.size}`;
         warn(`${config === undefined ? "removed" : "set"} tier ${tier} in ${result.path}`);
         for (const warning of warnings)
           warn(`tier ${tier}: ${warning}`);
+        for (const warning of result.warnings)
+          warn(`tier ${tier}: ${warning}`);
         try {
           await queue(() => reloadTiers(true));
         } catch (error) {
@@ -4667,7 +4675,8 @@ ${refs.size}`;
           throw new Error(`Tier ${tier} was written to ${result.path} but not applied: ${error.message}. The previous tiers stay in use until the config reloads.`);
         }
         const effective = agentConfig();
-        return effective.origin === "project" ? { ...result, warnings, shadowedBy: effective.path } : { ...result, warnings };
+        const all = [...result.warnings, ...warnings];
+        return effective.origin === "project" ? { ...result, warnings: all, shadowedBy: effective.path } : { ...result, warnings: all };
       },
       setAgent: async (input) => {
         const { agent, tier } = input ?? {};
@@ -4687,6 +4696,8 @@ ${refs.size}`;
           throw new Error(`Agent ${agent} not saved: the host lists no such agent.`);
         const result = writeAgentTier(configDir(), agent, value, spec);
         warn(`${value === undefined ? "removed the tier of" : "set the tier of"} agent ${agent} in ${result.path}`);
+        for (const warning of result.warnings)
+          warn(`agent ${agent}: ${warning}`);
         try {
           await queue(() => reloadTiers(true));
         } catch (error) {

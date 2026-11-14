@@ -1423,11 +1423,12 @@ var tui_default = Plugin.define({
         }, {
           location: at
         });
+        const note = Array.isArray(result.warnings) ? result.warnings.filter((w) => typeof w === "string").join(" ") : "";
         if (result.shadowedBy !== undefined) {
-          toast(`Agent ${agent.id}: written to ${result.path ?? "the global config"}, but ${result.shadowedBy} overrides it here, so nothing changed in this project.`, "info");
+          toast(`Agent ${agent.id}: written to ${result.path ?? "the global config"}, but ${result.shadowedBy} overrides it here, so nothing changed in this project.${note === "" ? "" : ` ${note}`}`, "info");
           return true;
         }
-        toast(`Agent ${agent.id} ${value === AGENT_DEFAULT ? "uses its default tier" : `uses tier ${value}`}; applied, written to ${result.path ?? "the global config"}.`, "success");
+        toast(`Agent ${agent.id} ${value === AGENT_DEFAULT ? "uses its default tier" : `uses tier ${value}`}; applied, written to ${result.path ?? "the global config"}.${note === "" ? "" : ` ${note}`}`, note === "" ? "success" : "info");
         return true;
       } catch (error) {
         toast(`Agent ${agent.id} not saved: ${error.message}`, "error");

@@ -240,12 +240,13 @@ export default Plugin.define({
       })
       if (value === undefined) return false
       try {
-        const result = (await rpc.setAgent({ agent: agent.id, tier: value === AGENT_DEFAULT ? null : value }, { location: at })) as { path?: string; shadowedBy?: string }
+        const result = (await rpc.setAgent({ agent: agent.id, tier: value === AGENT_DEFAULT ? null : value }, { location: at })) as { path?: string; shadowedBy?: string; warnings?: unknown }
+        const note = Array.isArray(result.warnings) ? result.warnings.filter((w): w is string => typeof w === "string").join(" ") : ""
         if (result.shadowedBy !== undefined) {
-          toast(`Agent ${agent.id}: written to ${result.path ?? "the global config"}, but ${result.shadowedBy} overrides it here, so nothing changed in this project.`, "info")
+          toast(`Agent ${agent.id}: written to ${result.path ?? "the global config"}, but ${result.shadowedBy} overrides it here, so nothing changed in this project.${note === "" ? "" : ` ${note}`}`, "info")
           return true
         }
-        toast(`Agent ${agent.id} ${value === AGENT_DEFAULT ? "uses its default tier" : `uses tier ${value}`}; applied, written to ${result.path ?? "the global config"}.`, "success")
+        toast(`Agent ${agent.id} ${value === AGENT_DEFAULT ? "uses its default tier" : `uses tier ${value}`}; applied, written to ${result.path ?? "the global config"}.${note === "" ? "" : ` ${note}`}`, note === "" ? "success" : "info")
         return true
       } catch (error) {
         toast(`Agent ${agent.id} not saved: ${(error as Error).message}`, "error")

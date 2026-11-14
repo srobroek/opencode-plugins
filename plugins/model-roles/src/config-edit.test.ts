@@ -119,7 +119,7 @@ describe("pickConfigFile and writeTier", () => {
       const file = path.join(dir, "opencode.jsonc")
       writeFileSync(file, `{\n  // keep me\n  "plugins": ["${SPEC}"]\n}\n`)
       const result = writeTier(dir, "cheap", { effort: "none" })
-      expect(result).toEqual({ path: file, tiers: { cheap: { effort: "none" } } })
+      expect(result).toEqual({ path: file, tiers: { cheap: { effort: "none" } }, warnings: [] })
       const written = readFileSync(file, "utf8")
       expect(written).toContain("// keep me")
       expect(written.endsWith("\n")).toBe(true)
@@ -136,9 +136,9 @@ describe("writeAgentTier", () => {
     try {
       const file = path.join(dir, "opencode.jsonc")
       writeFileSync(file, `{\n  // keep me\n  "plugins": ["${SPEC}"]\n}\n`)
-      expect(writeAgentTier(dir, "build", "strong")).toEqual({ path: file, agents: { build: "strong" } })
+      expect(writeAgentTier(dir, "build", "strong")).toEqual({ path: file, agents: { build: "strong" }, warnings: [] })
       expect(readFileSync(file, "utf8")).toContain("// keep me")
-      expect(writeAgentTier(dir, "build", undefined)).toEqual({ path: file, agents: {} })
+      expect(writeAgentTier(dir, "build", undefined)).toEqual({ path: file, agents: {}, warnings: [] })
       expect(() => writeAgentTier(path.join(dir, "missing"), "build", "cheap")).toThrow(/No model-roles plugin entry/)
     } finally {
       rmSync(dir, { recursive: true, force: true })
@@ -350,6 +350,42 @@ describe("atomic config writes", () => {
       writeFileAtomic(file, "{ a }\n", watching)
       expect(synced).toContain(path.join(real, `opencode.json${BACKUP_SUFFIX}`))
       expect(synced.at(-1)).toBe(real) // the directory comes last, after the rename
+      expect(readFileSync(file, "utf8")).toBe("{ a }\n")
+    } finally {
+      done()
+    }
+  })
+
+  const failingDirSync = (code: string) => {
+    const dirs = new Set<number>()
+    return {
+      ...REAL,
+      openSync: ((p: string, ...rest: [string, number?]) => {
+        const fd = openSync(p, ...(rest as [string, number?]))
+        if (statSync(p).isDirectory()) dirs.add(fd)
+        return fd
+      }) as typeof openSync,
+      fsyncSync: (fd: number) => {
+        if (dirs.has(fd)) throw Object.assign(new Error(code), { code })
+        fsyncSync(fd)
+      },
+    }
+  }
+
+  test.each(["EINVAL", "ENOTSUP", "EOPNOTSUPP", "EISDIR", "EPERM", "EACCES"])("a directory that cannot be synced (%s) is ignored", (code) => {
+    const { file, done } = fixture()
+    try {
+      expect(writeFileAtomic(file, "{ a }\n", failingDirSync(code))).toBeUndefined()
+      expect(readFileSync(file, "utf8")).toBe("{ a }\n")
+    } finally {
+      done()
+    }
+  })
+
+  test("a real directory sync failure (EIO) is a warning; the new content is written", () => {
+    const { file, done } = fixture()
+    try {
+      expect(writeFileAtomic(file, "{ a }\n", failingDirSync("EIO"))).toBe("written; durability unconfirmed (EIO)")
       expect(readFileSync(file, "utf8")).toBe("{ a }\n")
     } finally {
       done()

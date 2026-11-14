@@ -1356,6 +1356,7 @@ export default Plugin.define({
         const result = writeTier(configDir(), tier, config, spec)
         warn(`${config === undefined ? "removed" : "set"} tier ${tier} in ${result.path}`)
         for (const warning of warnings) warn(`tier ${tier}: ${warning}`)
+        for (const warning of result.warnings) warn(`tier ${tier}: ${warning}`)
         try {
           await queue(() => reloadTiers(true))
         } catch (error) {
@@ -1363,7 +1364,8 @@ export default Plugin.define({
           throw new Error(`Tier ${tier} was written to ${result.path} but not applied: ${(error as Error).message}. The previous tiers stay in use until the config reloads.`)
         }
         const effective = agentConfig()
-        return effective.origin === "project" ? { ...result, warnings, shadowedBy: effective.path } : { ...result, warnings }
+        const all = [...result.warnings, ...warnings]
+        return effective.origin === "project" ? { ...result, warnings: all, shadowedBy: effective.path } : { ...result, warnings: all }
       },
       setAgent: async (input) => {
         const { agent, tier } = (input ?? {}) as { agent?: unknown; tier?: unknown }
@@ -1380,6 +1382,7 @@ export default Plugin.define({
         if (!(await listAgents()).some((a) => a.id === agent)) throw new Error(`Agent ${agent} not saved: the host lists no such agent.`)
         const result = writeAgentTier(configDir(), agent, value as string | undefined, spec)
         warn(`${value === undefined ? "removed the tier of" : "set the tier of"} agent ${agent} in ${result.path}`)
+        for (const warning of result.warnings) warn(`agent ${agent}: ${warning}`)
         try {
           await queue(() => reloadTiers(true))
         } catch (error) {

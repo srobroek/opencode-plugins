@@ -122,11 +122,19 @@ export function readConfigFiles(dir: string): ConfigFile[] {
   return files
 }
 
-export type WriteResult = { path: string; tiers: Record<string, unknown> }
-export type AgentWriteResult = { path: string; agents: Record<string, unknown> }
+export type WriteResult = { path: string; tiers: Record<string, unknown>; warnings: string[] }
+export type AgentWriteResult = { path: string; agents: Record<string, unknown>; warnings: string[] }
 
 /** Suffix of the rolling backup next to a config file. */
 export const BACKUP_SUFFIX = ".model-roles.bak"
+
+/**
+ * Errors that mean this platform or file system cannot fsync a directory, not that the sync failed:
+ * EINVAL and ENOTSUP/EOPNOTSUPP (the file system has no directory sync), EISDIR (Windows, which cannot open
+ * a directory as a file), EPERM and EACCES (opening a directory for fsync is refused). Anything else, such
+ * as EIO, is a real failure.
+ */
+const NO_DIRECTORY_SYNC = new Set(["EINVAL", "ENOTSUP", "EOPNOTSUPP", "EISDIR", "EPERM", "EACCES"])
 
 /** The file-system calls `writeFileAtomic` makes, so a test can make one of them fail or fall short. */
 export type AtomicIo = {
@@ -155,8 +163,9 @@ function writeAll(io: AtomicIo, fd: number, bytes: Uint8Array): void {
  * kept, and a symlinked config is written through. Before the rename the old content is copied to
  * `<file>.model-roles.bak` and synced. That is one rolling backup, overwritten on each save: it is a safety
  * net for the last edit, and a backup per save would pile up files in the user's config directory.
+ * Returns a warning when the directory sync failed for a real reason; the save still stands.
  */
-export function writeFileAtomic(file: string, text: string, io: AtomicIo = REAL_IO): void {
+export function writeFileAtomic(file: string, text: string, io: AtomicIo = REAL_IO): string | undefined {
   const target = realpathSync(file)
   const { mode, uid, gid } = statSync(target)
   const temp = `${target}.model-roles.${process.pid}.tmp`
@@ -200,32 +209,36 @@ export function writeFileAtomic(file: string, text: string, io: AtomicIo = REAL_
     } finally {
       io.closeSync(dir)
     }
-  } catch {
-    // Some platforms (Windows) cannot fsync a directory; the file itself is already synced and renamed.
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code ?? "unknown error"
+    if (NO_DIRECTORY_SYNC.has(code)) return undefined
+    // The rename happened, so the save stands; only its durability is in doubt.
+    return `written; durability unconfirmed (${code})`
   }
+  return undefined
 }
 
 /** Apply `edit` to the global config file that holds the model-roles entry, and write it. */
-function writeEntry(dir: string, edit: (text: string) => string | undefined, spec?: string): { path: string; text: string } {
+function writeEntry(dir: string, edit: (text: string) => string | undefined, spec?: string): { path: string; text: string; warnings: string[] } {
   const file = pickConfigFile(readConfigFiles(dir), spec)
   if (file === undefined)
     throw new Error(`No model-roles plugin entry in ${CONFIG_NAMES.map((n) => path.join(dir, n)).join(" or ")}; add the plugin to the global config first.`)
   const next = edit(file.text)
   if (next === undefined) throw new Error(`No model-roles plugin entry in ${file.path}.`)
-  if (next !== file.text) writeFileAtomic(file.path, next.endsWith("\n") ? next : `${next}\n`)
-  return { path: file.path, text: next }
+  const warning = next === file.text ? undefined : writeFileAtomic(file.path, next.endsWith("\n") ? next : `${next}\n`)
+  return { path: file.path, text: next, warnings: warning === undefined ? [] : [warning] }
 }
 
 /** Set one tier in the global config file that holds the model-roles entry, and write it. */
 export function writeTier(dir: string, name: string, value: unknown, spec?: string): WriteResult {
-  const { path: file, text } = writeEntry(dir, (current) => setTier(current, name, value, spec), spec)
-  return { path: file, tiers: readTiers(text, spec) }
+  const { path: file, text, warnings } = writeEntry(dir, (current) => setTier(current, name, value, spec), spec)
+  return { path: file, tiers: readTiers(text, spec), warnings }
 }
 
 /** Set (or with `undefined` remove) one agent's tier override in that file, and write it. */
 export function writeAgentTier(dir: string, agent: string, tier: string | undefined, spec?: string): AgentWriteResult {
-  const { path: file, text } = writeEntry(dir, (current) => setAgentTier(current, agent, tier, spec), spec)
-  return { path: file, agents: readAgents(text, spec) }
+  const { path: file, text, warnings } = writeEntry(dir, (current) => setAgentTier(current, agent, tier, spec), spec)
+  return { path: file, agents: readAgents(text, spec), warnings }
 }
 
 /**
