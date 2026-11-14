@@ -3330,6 +3330,103 @@ function hostWarn(source) {
   };
 }
 
+// plugins/model-roles/src/outage.ts
+var NOTICE_DEDUPE_MS = 60000;
+var OUTAGE_STALE_MS = 15 * 60000;
+var newNoticeState = () => ({ outages: new Map, notices: new Map });
+var stoppedKey = (report) => report.subagent?.sessionID ?? `${report.notifyTo}\x00${report.subagent?.agent ?? ""}`;
+var stoppedLine = (stopped, provider, kind, first) => {
+  const who = stopped.agent === undefined ? "A subagent" : `Subagent '${stopped.agent}'`;
+  const retry = stopped.sessionID === undefined ? "spawn it again" : `resume it with sessionID ${stopped.sessionID}`;
+  return first ? `${who} stopped: ${retry} when the provider is back.` : `${who} stopped by the ${provider} outage (${kind}): ${retry} when the provider is back.`;
+};
+function decideFailureNotice(state, report) {
+  const { failed, kind, now, notifyTo } = report;
+  if (failureScope(kind) === "provider")
+    return decideOutage(state, report);
+  const key = `${notifyTo}\x00${healthKey(failed)}\x00${kind}`;
+  const last = state.notices.get(key);
+  if (last !== undefined && now - last < NOTICE_DEDUPE_MS)
+    return;
+  state.notices.set(key, now);
+  return { sessionID: notifyTo, text: report.plain ?? failureNote(report) };
+}
+var MAX_STOPPED = 20;
+var MAX_TRACKED = 500;
+function remember(outage, id, stopped) {
+  if (outage.stopped.has(id))
+    return false;
+  outage.stopped.set(id, stopped);
+  if (outage.stopped.size > MAX_TRACKED)
+    outage.stopped.delete(outage.stopped.keys().next().value);
+  return true;
+}
+function decideOutage(state, report) {
+  const { failed, kind, now, notifyTo } = report;
+  const provider = failed.providerID;
+  const key = `${provider}\x00${kind}`;
+  const found = state.outages.get(key);
+  const outage = found ?? { providerID: provider, kind, lastAt: now, notifyTo, stopped: new Map };
+  const announce = found === undefined || now - found.lastAt >= OUTAGE_STALE_MS;
+  state.outages.set(key, outage);
+  outage.lastAt = now;
+  let line;
+  if (report.subagent !== undefined) {
+    const stopped = { agent: report.subagent.agent, sessionID: report.subagent.sessionID };
+    if (remember(outage, stoppedKey(report), stopped))
+      line = stoppedLine(stopped, provider, kind, announce);
+  }
+  if (!announce)
+    return line === undefined ? undefined : { sessionID: notifyTo, text: line };
+  outage.notifyTo = notifyTo;
+  const phase = report.cooldownMs > 0 ? "down" : "failing";
+  const head = `Provider ${provider} is ${phase} (${kind}). ${failureNote(report)}`;
+  return { sessionID: notifyTo, text: line === undefined ? head : `${head} ${line}` };
+}
+function forgetSession(state, sessionID) {
+  for (const outage of state.outages.values()) {
+    outage.stopped.delete(sessionID);
+  }
+}
+function decideRecovery(state, model) {
+  const notices = [];
+  for (const [key, outage] of state.outages) {
+    if (outage.providerID !== model.providerID)
+      continue;
+    state.outages.delete(key);
+    let text = `Provider ${outage.providerID} recovered (${outage.kind}).`;
+    const resumable = [...outage.stopped.values()].filter((s) => s.sessionID !== undefined);
+    if (resumable.length > 0) {
+      const list = resumable.slice(0, MAX_STOPPED).map((s) => `${s.agent ?? "subagent"} (${s.sessionID})`);
+      if (resumable.length > MAX_STOPPED)
+        list.push(`+${resumable.length - MAX_STOPPED} more`);
+      text += ` Resume the stopped subagents: ${list.join(", ")}.`;
+    }
+    notices.push({ sessionID: outage.notifyTo, text });
+  }
+  return notices;
+}
+var MAX_REQUESTS = 8;
+function recordRequest(log, sessionID, model, at) {
+  const list = log.get(sessionID) ?? [];
+  list.push({ at, model: { providerID: model.providerID, id: model.id } });
+  if (list.length > MAX_REQUESTS)
+    list.shift();
+  log.set(sessionID, list);
+}
+function settleRequest(log, sessionID, endedAt) {
+  const list = log.get(sessionID);
+  if (list === undefined)
+    return;
+  const done = list.filter((entry) => entry.at < endedAt);
+  const rest = list.filter((entry) => entry.at >= endedAt);
+  if (rest.length > 0)
+    log.set(sessionID, rest);
+  else
+    log.delete(sessionID);
+  return done.at(-1)?.model;
+}
+
 // plugins/model-roles/src/receipt.ts
 var RECEIPTS_KEY = "receipts";
 var RECEIPT_LIMIT = 50;
@@ -3633,12 +3730,18 @@ function applyEdit2(row, edit) {
 
 // plugins/model-roles/src/index.ts
 var MAX_REREGISTER = 3;
-var NOTICE_DEDUPE_MS = 60000;
 var CHECK_TOOL = "model_roles_check";
 var MAX_SESSION_DEPTH = 8;
 var REFRESH_EVENTS = new Set(["model.updated", "provider.updated"]);
 var CHECK_EVENTS = new Set(["agent.updated", ...REFRESH_EVENTS]);
 var FAILED_EVENT = "session.execution.failed";
+var INTERRUPTED_EVENT = "session.execution.interrupted";
+var DELETED_EVENT = "session.deleted";
+var endedAt = (event) => {
+  const created = event.created;
+  return typeof created === "number" && Number.isFinite(created) ? created : Number.POSITIVE_INFINITY;
+};
+var SUCCEEDED_EVENT = "session.execution.succeeded";
 var CREATED_EVENT = "session.created";
 var CONFIG_EVENT = "config.updated";
 var PENDING_SPAWN_MS = 10 * 60000;
@@ -3710,7 +3813,7 @@ var src_default = Plugin.define({
     }
     const view = () => healthView(health2, Date.now());
     const queue = serial();
-    const notices = new Map;
+    const noticeState = newNoticeState();
     const childFailures = new Map;
     const refresh = async () => {
       try {
@@ -3853,14 +3956,19 @@ ${refs.size}`;
         });
       } catch {}
     };
-    const notifyParentOnce = async (parentID, failed, text) => {
-      const key = `${parentID}\x00${healthKey(failed)}`;
-      const now = Date.now();
-      const last = notices.get(key);
-      if (last !== undefined && now - last < NOTICE_DEDUPE_MS)
+    const announce = async (report) => {
+      const notice = decideFailureNotice(noticeState, report);
+      if (notice === undefined)
         return;
-      notices.set(key, now);
-      await notify(parentID, text, "subagent-fallback");
+      await notify(notice.sessionID, notice.text, report.subagent === undefined ? "fallback" : "subagent-fallback");
+    };
+    const requestLog = new Map;
+    const onSessionSucceeded = async (sessionID, model) => {
+      forgetSession(noticeState, sessionID);
+      if (model === undefined)
+        return;
+      for (const notice of decideRecovery(noticeState, model))
+        await notify(notice.sessionID, notice.text, "recovery");
     };
     const childModel = async (message) => {
       const id = childSessionID(message);
@@ -3983,11 +4091,17 @@ ${refs.size}`;
           } catch {}
         }
         const note = subagentNote({ ...facts, agent: session.agent, spawnRole, resumable });
-        await notifyParentOnce(session.parentID, failed, note);
+        await announce({
+          ...facts,
+          now: Date.now(),
+          notifyTo: session.parentID,
+          subagent: { agent: session.agent, sessionID },
+          plain: note
+        });
         return;
       }
-      if (cooldownMs > 0)
-        await notify(sessionID, failureNote(facts), "fallback");
+      if (failureScope(kind) === "provider" || cooldownMs > 0)
+        await announce({ ...facts, now: Date.now(), notifyTo: sessionID });
       else
         warn(`session ${sessionID}: ${failureNote(facts)}`);
     };
@@ -4064,6 +4178,9 @@ ${refs.size}`;
     });
     const strip = await ctx.session.hook("model.request", (request) => {
       stripRoleHeader(request.headers);
+      const { sessionID, model, kind } = request;
+      if (typeof sessionID === "string" && model !== undefined && (kind === undefined || kind === "primary"))
+        recordRequest(requestLog, sessionID, model, Date.now());
     });
     const tools = await ctx.tool.transform((editor) => {
       editor.add({
@@ -4736,7 +4853,13 @@ ${refs.size}`;
           const target = cooldownMs > 0 ? fallbackTarget(options, available, view(), role, failed) : undefined;
           const facts = { failed, kind, cooldownMs, target };
           const resumable = cooldownMs > 0 ? undefined : childSessionID(message);
-          await notifyParentOnce(event.sessionID, failed, subagentNote({ ...facts, agent: agentID, spawnRole: spawn?.role, resumable }));
+          await announce({
+            ...facts,
+            now: Date.now(),
+            notifyTo: event.sessionID,
+            subagent: { agent: agentID, sessionID: childSessionID(message) },
+            plain: subagentNote({ ...facts, agent: agentID, spawnRole: spawn?.role, resumable })
+          });
         });
       } catch (error) {
         warn(`could not record the subagent failure`, { error: String(error) });
@@ -4752,8 +4875,32 @@ ${refs.size}`;
           if (typeof data?.sessionID !== "string" || !isRecord8(data.error))
             continue;
           const sessionID = data.sessionID;
+          settleRequest(requestLog, sessionID, endedAt(event));
           const error = data.error;
           await queue(() => onSessionFailed(sessionID, error)).catch((error) => warn(`fallback after a failed execution did not complete`, { error: String(error) }));
+          continue;
+        }
+        if (type === SUCCEEDED_EVENT) {
+          const sessionID = event.data?.sessionID;
+          if (typeof sessionID !== "string")
+            continue;
+          const model = settleRequest(requestLog, sessionID, endedAt(event));
+          if (noticeState.outages.size > 0)
+            await queue(() => onSessionSucceeded(sessionID, model)).catch(() => {});
+          continue;
+        }
+        if (type === INTERRUPTED_EVENT) {
+          const sessionID = event.data?.sessionID;
+          if (typeof sessionID === "string")
+            settleRequest(requestLog, sessionID, endedAt(event));
+          continue;
+        }
+        if (type === DELETED_EVENT) {
+          const sessionID = event.data?.sessionID;
+          if (typeof sessionID === "string") {
+            requestLog.delete(sessionID);
+            forgetSession(noticeState, sessionID);
+          }
           continue;
         }
         if (type === CREATED_EVENT) {
@@ -4796,8 +4943,10 @@ ${refs.size}`;
       await retries.dispose();
       await registration.dispose();
       await references.dispose();
-      notices.clear();
+      noticeState.outages.clear();
+      noticeState.notices.clear();
       childFailures.clear();
+      requestLog.clear();
       triedModels.clear();
       pending.clear();
       childRoles.clear();

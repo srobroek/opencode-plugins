@@ -225,8 +225,8 @@ function createHost(input: {
       for (const hook of hooks) if (hook.name === "retry") await hook.callback(payload)
       return payload.decision
     },
-    fireModelRequest: (headers: Record<string, string>) => {
-      for (const hook of hooks) if (hook.name === "model.request") hook.callback({ headers })
+    fireModelRequest: (headers: Record<string, string>, extra: { sessionID?: string; model?: ModelRef; kind?: string } = {}) => {
+      for (const hook of hooks) if (hook.name === "model.request") hook.callback({ headers, ...extra })
       return headers
     },
     /** Run the `context` hooks on the current subagent tool as the host does for one request. */
@@ -952,6 +952,141 @@ describe("runtime fallback", () => {
     expect(Object.keys(host.storage.get("health") as object)).toEqual(["amazon-bedrock/claude-sonnet"])
     expect(methods(host, "switchModel")).toHaveLength(0)
     expect(host.agents().get("general")?.model).toEqual(sonnet)
+    host.close()
+    await cleanup()
+  })
+
+  test("repeated credential failures across sessions are one outage notice, then one recovery on the first success", async () => {
+    const host = createHost({ agents: [{ id: "general" }], models, options: fallbackOptions })
+    host.sessions.set("r", { id: "r" })
+    for (const id of ["c1", "c2"]) host.sessions.set(id, { id, parentID: "r", agent: "general", model: sonnet })
+    const cleanup = await setup(host)
+    const error = { type: "provider.auth", message: "Unable to locate credentials" }
+    for (let i = 0; i < 6; i++) {
+      host.emit(failed(i % 2 === 0 ? "c1" : "c2", error))
+      await settle()
+    }
+    const texts = () => methods(host, "synthetic").map((c) => (c.input as { text: string }).text)
+    expect(texts()).toHaveLength(2)
+    expect(texts()[0]).toContain("Provider amazon-bedrock is")
+    expect(texts()[0]).toContain("resume it with sessionID c1")
+    expect(texts()[1]).toContain("Subagent 'general' stopped by the amazon-bedrock outage (credentials): resume it with sessionID c2")
+    host.fireModelRequest({}, { sessionID: "c1", model: sonnet, kind: "primary" })
+    host.emit({ type: "session.execution.succeeded", data: { sessionID: "c1" } })
+    await settle()
+    expect(texts()).toHaveLength(3)
+    // c1 ran again and succeeded, so only c2 still needs resuming.
+    expect(texts()[2]).toContain("Provider amazon-bedrock recovered (credentials). Resume the stopped subagents: general (c2).")
+    host.close()
+    await cleanup()
+  })
+
+  const outageHost = async () => {
+    const host = createHost({ agents: [{ id: "general" }], models, options: fallbackOptions })
+    host.sessions.set("r", { id: "r", agent: "general", model: sonnet })
+    const cleanup = await setup(host)
+    host.emit(failed("r", { type: "provider.auth", message: "Unable to locate credentials" }))
+    await settle()
+    const texts = () => methods(host, "synthetic").map((c) => (c.input as { text: string }).text)
+    return { host, cleanup, texts }
+  }
+
+  test("a success on the failed provider ends its outage even after the session moved to another provider", async () => {
+    const { host, cleanup, texts } = await outageHost()
+    host.fireModelRequest({}, { sessionID: "r", model: sonnet, kind: "primary" })
+    // The session is moved off the provider before the success is handled.
+    host.sessions.set("r", { id: "r", agent: "general", model: haiku })
+    host.emit({ type: "session.execution.succeeded", data: { sessionID: "r" } })
+    await settle()
+    expect(texts()).toHaveLength(2)
+    expect(texts()[1]).toContain("Provider amazon-bedrock recovered (credentials)")
+    host.close()
+    await cleanup()
+  })
+
+  test("a success on another provider does not end the outage, even if the session was on the failed one", async () => {
+    const { host, cleanup, texts } = await outageHost()
+    host.fireModelRequest({}, { sessionID: "r", model: haiku, kind: "primary" })
+    host.emit({ type: "session.execution.succeeded", data: { sessionID: "r" } })
+    await settle()
+    expect(texts()).toHaveLength(1)
+    // A success that no request was seen for is credited to nobody.
+    host.emit({ type: "session.execution.succeeded", data: { sessionID: "r" } })
+    await settle()
+    expect(texts()).toHaveLength(1)
+    host.close()
+    await cleanup()
+  })
+
+  test("a success is credited to its own execution's provider when a later execution already made its request", async () => {
+    const { host, cleanup, texts } = await outageHost()
+    host.fireModelRequest({}, { sessionID: "r", model: sonnet, kind: "primary" })
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    const ended = Date.now()
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    // The next execution is on another provider and has asked before the first success is handled.
+    host.fireModelRequest({}, { sessionID: "r", model: haiku, kind: "primary" })
+    host.emit({ type: "session.execution.succeeded", created: ended, data: { sessionID: "r" } })
+    await settle()
+    expect(texts()).toHaveLength(2)
+    expect(texts()[1]).toContain("Provider amazon-bedrock recovered")
+    // The second execution's success is credited to its own provider, which had no outage.
+    host.emit({ type: "session.execution.succeeded", created: Date.now(), data: { sessionID: "r" } })
+    await settle()
+    expect(texts()).toHaveLength(2)
+    host.close()
+    await cleanup()
+  })
+
+  test("the earlier execution is on the other provider: its success must not end the outage", async () => {
+    const { host, cleanup, texts } = await outageHost()
+    host.fireModelRequest({}, { sessionID: "r", model: haiku, kind: "primary" })
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    const ended = Date.now()
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    host.fireModelRequest({}, { sessionID: "r", model: sonnet, kind: "primary" })
+    host.emit({ type: "session.execution.succeeded", created: ended, data: { sessionID: "r" } })
+    await settle()
+    expect(texts()).toHaveLength(1)
+    host.close()
+    await cleanup()
+  })
+
+  test("an interrupted execution is neither a success nor a failure and clears its request", async () => {
+    const { host, cleanup, texts } = await outageHost()
+    const health = structuredClone(host.storage.get("health"))
+    host.fireModelRequest({}, { sessionID: "r", model: sonnet, kind: "primary" })
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    host.emit({ type: "session.execution.interrupted", created: Date.now(), data: { sessionID: "r", reason: "user" } })
+    await settle()
+    expect(texts()).toHaveLength(1)
+    // A success with no request of its own recovers nothing: the interrupted request is gone.
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    host.emit({ type: "session.execution.succeeded", created: Date.now(), data: { sessionID: "r" } })
+    await settle()
+    expect(texts()).toHaveLength(1)
+    expect(host.storage.get("health")).toEqual(health)
+    host.close()
+    await cleanup()
+  })
+
+  test("a root session's credential failures give one notice from the first failure, with no cooldown, and none after", async () => {
+    const host = createHost({ agents: [{ id: "general" }], models, options: fallbackOptions })
+    host.sessions.set("r", { id: "r", agent: "general", model: sonnet })
+    const cleanup = await setup(host)
+    const error = { type: "provider.auth", message: "Unable to locate credentials" }
+    host.emit(failed("r", error))
+    await settle()
+    const texts = () => methods(host, "synthetic").map((c) => c.input as { sessionID: string; text: string })
+    expect(texts()).toHaveLength(1)
+    expect(texts()[0]?.sessionID).toBe("r")
+    expect(texts()[0]?.text).toContain("Provider amazon-bedrock is failing (credentials)")
+    expect(texts()[0]?.text).toContain("stays in use")
+    for (let i = 0; i < 4; i++) {
+      host.emit(failed("r", error))
+      await settle()
+    }
+    expect(texts()).toHaveLength(1)
     host.close()
     await cleanup()
   })

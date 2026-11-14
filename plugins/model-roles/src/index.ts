@@ -62,6 +62,7 @@ import {
   classifyFailure,
   type FailureClass,
   type FailureInput,
+  failureScope,
   HEALTH_KEY,
   type HealthState,
   healthKey,
@@ -74,6 +75,7 @@ import {
   recordFailure,
 } from "./health.ts"
 import { hostWarn } from "./log.ts"
+import { decideFailureNotice, decideRecovery, type FailureReport, forgetSession, NOTICE_DEDUPE_MS, newNoticeState, type RequestLog, recordRequest, settleRequest } from "./outage.ts"
 import { explainSpawn, formatReceipts, pushReceipt, RECEIPTS_KEY, type Receipt, readReceipts, type SpawnRule, type SpawnSource } from "./receipt.ts"
 import {
   type AvailableModel,
@@ -148,8 +150,7 @@ export * from "./tiers-ui.ts"
 /** Re-registrations allowed in a row without the agents converging, before giving up until inputs change. */
 export const MAX_REREGISTER = 3
 
-/** A parent hears about one failed model once in this window, from either the tool error or the child's event. */
-export const NOTICE_DEDUPE_MS = 60_000
+export { NOTICE_DEDUPE_MS }
 
 export const CHECK_TOOL = "model_roles_check"
 
@@ -159,6 +160,14 @@ export const MAX_SESSION_DEPTH = 8
 const REFRESH_EVENTS = new Set(["model.updated", "provider.updated"])
 const CHECK_EVENTS = new Set(["agent.updated", ...REFRESH_EVENTS])
 const FAILED_EVENT = "session.execution.failed"
+const INTERRUPTED_EVENT = "session.execution.interrupted"
+const DELETED_EVENT = "session.deleted"
+/** When an event happened (`created`, ms), else unbounded, so every recorded request counts. */
+const endedAt = (event: unknown): number => {
+  const created = (event as { created?: unknown }).created
+  return typeof created === "number" && Number.isFinite(created) ? created : Number.POSITIVE_INFINITY
+}
+const SUCCEEDED_EVENT = "session.execution.succeeded"
 const CREATED_EVENT = "session.created"
 /** The host reloaded its config; a `/tiers` save or a hand edit of the global file lands here too. */
 const CONFIG_EVENT = "config.updated"
@@ -262,7 +271,7 @@ export default Plugin.define({
     }
     const view = () => healthView(health, Date.now())
     const queue = serial()
-    const notices = new Map<string, number>()
+    const noticeState = newNoticeState()
     /** When a child of each parent last reported a model failure through its own event. */
     const childFailures = new Map<string, number>()
 
@@ -431,13 +440,24 @@ export default Plugin.define({
       }
     }
 
-    const notifyParentOnce = async (parentID: string, failed: ModelRef, text: string) => {
-      const key = `${parentID}\0${healthKey(failed)}`
-      const now = Date.now()
-      const last = notices.get(key)
-      if (last !== undefined && now - last < NOTICE_DEDUPE_MS) return
-      notices.set(key, now)
-      await notify(parentID, text, "subagent-fallback")
+    /** Tell `report.notifyTo` about a failure unless an outage or an earlier note already did. */
+    const announce = async (report: FailureReport) => {
+      const notice = decideFailureNotice(noticeState, report)
+      if (notice === undefined) return
+      await notify(notice.sessionID, notice.text, report.subagent === undefined ? "fallback" : "subagent-fallback")
+    }
+
+    /**
+     * Primary requests by session, from the `model.request` hook. An execution's end event
+     * carries only its session and `created` time, so it is matched to the request started by then.
+     */
+    const requestLog: RequestLog = new Map()
+
+    /** A request succeeded on `model`: end the provider outages it was in, and forget `sessionID` as stopped. */
+    const onSessionSucceeded = async (sessionID: string, model: ModelRef | undefined) => {
+      forgetSession(noticeState, sessionID)
+      if (model === undefined) return
+      for (const notice of decideRecovery(noticeState, model)) await notify(notice.sessionID, notice.text, "recovery")
     }
 
     /** The model of the child session a `Subagent failed (sessionID: <id>)` message names. */
@@ -579,10 +599,16 @@ export default Plugin.define({
           }
         }
         const note = subagentNote({ ...facts, agent: session.agent, spawnRole, resumable })
-        await notifyParentOnce(session.parentID as string, failed, note)
+        await announce({
+          ...facts,
+          now: Date.now(),
+          notifyTo: session.parentID as string,
+          subagent: { agent: session.agent, sessionID },
+          plain: note,
+        })
         return
       }
-      if (cooldownMs > 0) await notify(sessionID, failureNote(facts), "fallback")
+      if (failureScope(kind) === "provider" || cooldownMs > 0) await announce({ ...facts, now: Date.now(), notifyTo: sessionID })
       else warn(`session ${sessionID}: ${failureNote(facts)}`)
     }
 
@@ -681,6 +707,9 @@ export default Plugin.define({
 
     const strip = await ctx.session.hook("model.request", (request) => {
       stripRoleHeader(request.headers)
+      const { sessionID, model, kind } = request as { sessionID?: string; model?: ModelRef; kind?: string }
+      if (typeof sessionID === "string" && model !== undefined && (kind === undefined || kind === "primary"))
+        recordRequest(requestLog, sessionID, model, Date.now())
     })
 
     const tools = await ctx.tool.transform((editor) => {
@@ -1422,7 +1451,13 @@ export default Plugin.define({
           const target = cooldownMs > 0 ? fallbackTarget(options, available, view(), role, failed) : undefined
           const facts: NoteFacts = { failed, kind, cooldownMs, target }
           const resumable = cooldownMs > 0 ? undefined : childSessionID(message)
-          await notifyParentOnce(event.sessionID, failed, subagentNote({ ...facts, agent: agentID, spawnRole: spawn?.role, resumable }))
+          await announce({
+            ...facts,
+            now: Date.now(),
+            notifyTo: event.sessionID,
+            subagent: { agent: agentID, sessionID: childSessionID(message) },
+            plain: subagentNote({ ...facts, agent: agentID, spawnRole: spawn?.role, resumable }),
+          })
         })
       } catch (error) {
         warn(`could not record the subagent failure`, { error: String(error) })
@@ -1437,10 +1472,32 @@ export default Plugin.define({
           const data = (event as { data?: { sessionID?: unknown; error?: unknown } }).data
           if (typeof data?.sessionID !== "string" || !isRecord(data.error)) continue
           const sessionID = data.sessionID
+          settleRequest(requestLog, sessionID, endedAt(event))
           const error = data.error as { type?: string; message?: string; status?: number }
           await queue(() => onSessionFailed(sessionID, error)).catch((error) =>
             warn(`fallback after a failed execution did not complete`, { error: String(error) }),
           )
+          continue
+        }
+        if (type === SUCCEEDED_EVENT) {
+          const sessionID = (event as { data?: { sessionID?: unknown } }).data?.sessionID
+          if (typeof sessionID !== "string") continue
+          const model = settleRequest(requestLog, sessionID, endedAt(event))
+          if (noticeState.outages.size > 0) await queue(() => onSessionSucceeded(sessionID, model)).catch(() => {})
+          continue
+        }
+        if (type === INTERRUPTED_EVENT) {
+          // Neither a success nor a failure: the interrupted request only leaves the log.
+          const sessionID = (event as { data?: { sessionID?: unknown } }).data?.sessionID
+          if (typeof sessionID === "string") settleRequest(requestLog, sessionID, endedAt(event))
+          continue
+        }
+        if (type === DELETED_EVENT) {
+          const sessionID = (event as { data?: { sessionID?: unknown } }).data?.sessionID
+          if (typeof sessionID === "string") {
+            requestLog.delete(sessionID)
+            forgetSession(noticeState, sessionID)
+          }
           continue
         }
         if (type === CREATED_EVENT) {
@@ -1480,8 +1537,10 @@ export default Plugin.define({
       await retries.dispose()
       await registration.dispose()
       await references.dispose()
-      notices.clear()
+      noticeState.outages.clear()
+      noticeState.notices.clear()
       childFailures.clear()
+      requestLog.clear()
       triedModels.clear()
       pending.clear()
       childRoles.clear()
