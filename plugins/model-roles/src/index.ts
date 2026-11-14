@@ -74,6 +74,7 @@ import {
   readHealth,
   recordFailure,
 } from "./health.ts"
+import { createLedgerStore, LEDGER_DISPOSE_TIMEOUT_MS, type Usage } from "./ledger.ts"
 import { hostWarn } from "./log.ts"
 import { decideFailureNotice, decideRecovery, type FailureReport, forgetSession, NOTICE_DEDUPE_MS, newNoticeState, type RequestLog, recordRequest, settleRequest } from "./outage.ts"
 import { explainSpawn, formatReceipts, pushReceipt, RECEIPTS_KEY, type Receipt, readReceipts, type SpawnRule, type SpawnSource } from "./receipt.ts"
@@ -141,6 +142,7 @@ export * from "./config-edit.ts"
 export * from "./fallback.ts"
 export * from "./guard.ts"
 export * from "./health.ts"
+export * from "./ledger.ts"
 export * from "./receipt.ts"
 export * from "./resolve.ts"
 export { TiersRpc } from "./rpc.ts"
@@ -167,6 +169,13 @@ const DELETED_EVENT = "session.deleted"
 const endedAt = (event: unknown): number => {
   const created = (event as { created?: unknown }).created
   return typeof created === "number" && Number.isFinite(created) ? created : Number.POSITIVE_INFINITY
+}
+const STEP_ENDED_EVENT = "session.step.ended"
+const COMPACTION_ENDED_EVENT = "session.compaction.ended"
+/** When an execution ended, for the outcome ledger: the event's time, else now. */
+const finishedAt = (event: unknown): number => {
+  const at = endedAt(event)
+  return Number.isFinite(at) ? at : Date.now()
 }
 const SUCCEEDED_EVENT = "session.execution.succeeded"
 const CREATED_EVENT = "session.created"
@@ -348,6 +357,8 @@ export default Plugin.define({
     } catch {
       // Stale snapshots wait for the next start.
     }
+    const outcomes = createLedgerStore(ctx.storage as never, { warn })
+    await outcomes.load()
     let registration = await ctx.agent.transform(apply)
     let attempts = 0
     /** Agents still off their tier's model after re-registering gave up. */
@@ -530,7 +541,17 @@ export default Plugin.define({
     const listAgents = async (): Promise<Agents> => (await ctx.agent.list()).data as Agents
 
     /** Spawns that passed a role, by tool call id, until they finish. */
-    type PendingSpawn = { parentID: string; agent: string; role: string; model: ModelRef; revision: string; at: number; childID?: string }
+    type PendingSpawn = {
+      parentID: string
+      agent: string
+      role: string
+      model: ModelRef
+      revision: string
+      at: number
+      childID?: string
+      /** What this spawn's own receipt said, for its outcome record. */
+      routed?: Pick<Receipt, "tier" | "source" | "rule">
+    }
     const pending = new Map<string, PendingSpawn>()
     /** The role each child session was spawned with. */
     const childRoles = new Map<string, string>()
@@ -546,6 +567,13 @@ export default Plugin.define({
       } catch {
         // The in-memory receipts still show in the check.
       }
+    }
+
+    /** Record the receipt, and keep its routing facts on the spawn it belongs to. */
+    const recordSpawnReceipt = async (callID: string, receipt: Receipt) => {
+      const spawn = pending.get(callID)
+      if (spawn !== undefined) spawn.routed = { tier: receipt.tier, source: receipt.source, rule: receipt.rule }
+      await recordReceipt(receipt)
     }
 
     const recordChildRole = async (childID: string, role: string) => {
@@ -580,13 +608,38 @@ export default Plugin.define({
       return readSnapshot(await ctx.storage.get(`${SPAWN_MODEL_KEY_PREFIX}${childID}`).catch(() => undefined))
     }
 
+    /** Storage writes of one child's snapshot, in order; each saves the snapshot as it is when it runs. */
+    const snapshotWrites = new Map<string, Promise<void>>()
+    /** Snapshot work still running, so cleanup can drain it; and whether cleanup is past that point. */
+    const snapshotWork = new Set<Promise<void>>()
+    let snapshotsClosed = false
+    const trackSnapshotWork = (work: Promise<void>): void => {
+      snapshotWork.add(work)
+      void work.finally(() => snapshotWork.delete(work))
+    }
+    const persistSnapshot = (childID: string): Promise<void> => {
+      const run: Promise<void> = (snapshotWrites.get(childID) ?? Promise.resolve()).then(async () => {
+        // A snapshot that is gone (or a plugin that is shut down) writes nothing, so no key comes back.
+        const snapshot = childModels.get(childID)
+        if (snapshot === undefined || snapshotsClosed) return
+        try {
+          await ctx.storage.set(`${SPAWN_MODEL_KEY_PREFIX}${childID}`, snapshot as never)
+        } catch {
+          // The in-memory snapshot still steers this instance.
+        }
+      })
+      snapshotWrites.set(childID, run)
+      trackSnapshotWork(run)
+      void run.then(() => {
+        if (snapshotWrites.get(childID) === run) snapshotWrites.delete(childID)
+      })
+      return run
+    }
+
+    /** The memory map is authoritative over storage: it is set first, storage follows. */
     const writeSnapshot = async (childID: string, snapshot: ModelSnapshot) => {
       childModels.set(childID, snapshot)
-      try {
-        await ctx.storage.set(`${SPAWN_MODEL_KEY_PREFIX}${childID}`, snapshot as never)
-      } catch {
-        // The in-memory snapshot still steers this instance.
-      }
+      await persistSnapshot(childID)
     }
 
     /**
@@ -622,26 +675,72 @@ export default Plugin.define({
         (open.length === 1 ? open[0] : undefined)
       if (picked === undefined) return false
       const [callID, spawn] = picked
-      spawn.childID = data.sessionID
-      await recordChildModel(data.sessionID, spawn, actual)
+      // Taken before any await: the call can complete, and drop both entries, while a write is pending.
       const roleSpawn = pending.get(callID)
+      spawn.childID = data.sessionID
+      if (roleSpawn !== undefined) roleSpawn.childID = data.sessionID
+      await recordChildModel(data.sessionID, spawn, actual)
       if (roleSpawn !== undefined) {
-        roleSpawn.childID = data.sessionID
         await recordChildRole(data.sessionID, roleSpawn.role)
+        await recordOutcomeSpawn(roleSpawn, data.sessionID)
       }
       return true
     }
 
-    /** Failover moved a child: a resume continues on the model that worked, and an evaluation can tell. */
-    const recordFailover = async (childID: string, model: ModelRef, role: string | undefined) => {
-      const known = await snapshotOf(childID)
-      if (known === undefined && role === undefined) return
-      await writeSnapshot(childID, {
-        ...(known ?? { configRevision: configRevision(options) }),
-        ...(known?.tier === undefined && role !== undefined ? { tier: role } : {}),
-        model: modelLabel(model),
-        at: Date.now(),
-        failedOver: true,
+    const failoverSnapshot = (base: ModelSnapshot | undefined, model: ModelRef, role: string | undefined): ModelSnapshot => ({
+      ...(base ?? { configRevision: configRevision(options) }),
+      ...(base?.tier === undefined && role !== undefined ? { tier: role } : {}),
+      model: modelLabel(model),
+      at: Date.now(),
+      failedOver: true,
+    })
+
+    /**
+     * Failover moved a child: a resume continues on the model that worked, and an evaluation can tell.
+     * The in-memory snapshot changes before this returns, so a resume right after the switch sees it;
+     * storage follows in the background.
+     */
+    const noteFailover = (childID: string, model: ModelRef, role: string | undefined): void => {
+      if (snapshotsClosed) return
+      const known = childModels.get(childID)
+      // Published now, from what is known; a child with nothing in memory gets a minimal snapshot.
+      const mine = failoverSnapshot(known, model, role)
+      childModels.set(childID, mine)
+      const background = (async () => {
+        if (known === undefined) {
+          // A cold child's stored snapshot may carry a tier and revision. Memory keeps its model.
+          const stored = readSnapshot(await ctx.storage.get(`${SPAWN_MODEL_KEY_PREFIX}${childID}`).catch(() => undefined))
+          if (snapshotsClosed || childModels.get(childID) !== mine) return
+          if (stored !== undefined) childModels.set(childID, failoverSnapshot(stored, model, role))
+          else if (role === undefined) {
+            // Not a child this plugin knows (a root session switched): nothing to keep or store.
+            childModels.delete(childID)
+            return
+          }
+        }
+        await persistSnapshot(childID)
+      })().catch(() => {})
+      trackSnapshotWork(background)
+    }
+
+    /** Memory holds at most as many snapshots, and as old, as storage keeps; a snapshot with a write pending stays. */
+    const pruneChildModels = () => {
+      const entries = [...childModels].map(([id, value]) => ({ key: `${SPAWN_MODEL_KEY_PREFIX}${id}`, value }))
+      for (const key of staleSnapshots(entries, Date.now())) {
+        const id = key.slice(SPAWN_MODEL_KEY_PREFIX.length)
+        if (!snapshotWrites.has(id)) childModels.delete(id)
+      }
+    }
+
+    /** Start the child's outcome record from the routing facts its own spawn captured. */
+    const recordOutcomeSpawn = async (spawn: PendingSpawn, childID: string) => {
+      await outcomes.spawn(childID, {
+        at: spawn.at,
+        agent: spawn.agent,
+        model: modelLabel(spawn.model),
+        parentID: spawn.parentID,
+        tier: spawn.routed?.tier ?? spawn.role,
+        ...(spawn.routed === undefined ? {} : { source: spawn.routed.source, rule: spawn.routed.rule }),
       })
     }
 
@@ -659,6 +758,7 @@ export default Plugin.define({
         if (healthKey(spawn.model) !== healthKey(model)) continue
         spawn.childID = data.sessionID
         await recordChildRole(data.sessionID, spawn.role)
+        await recordOutcomeSpawn(spawn, data.sessionID)
         return
       }
     }
@@ -688,7 +788,8 @@ export default Plugin.define({
         if (spawnRole !== undefined && target !== undefined) {
           try {
             await ctx.session.switchModel({ sessionID, model: target.model })
-            await recordFailover(sessionID, target.model, spawnRole)
+            noteFailover(sessionID, target.model, spawnRole)
+            await outcomes.failover(sessionID)
             resumable = sessionID
           } catch {
             // Spawning again with the role still works.
@@ -721,13 +822,18 @@ export default Plugin.define({
       const tracked: Promise<boolean> = Promise.resolve()
         .then(() => ctx.session.switchModel({ sessionID, model }))
         .then(
-          // A switch that lands after the timeout still moved the child: its snapshot follows.
-          async () => {
-            await recordFailover(sessionID, model, role).catch(() => {})
-            return true
-          },
+          () => true,
           () => false,
         )
+        .then((ok) => {
+          // A switch that lands after the timeout still moved the child. The snapshot changes in memory
+          // before the switch reports success; storage and the ledger follow without being awaited.
+          if (ok) {
+            noteFailover(sessionID, model, role)
+            void outcomes.failover(sessionID).catch(() => {})
+          }
+          return ok
+        })
         .finally(() => {
           if (switching.get(sessionID) === tracked) switching.delete(sessionID)
         })
@@ -829,7 +935,7 @@ export default Plugin.define({
             report.warnings.push(
               `Agents ${stuck.join(", ")} still run another model than their tier resolves to: re-registering gave up after ${MAX_REREGISTER} tries (a later plugin or config keeps setting their model).`,
             )
-          const content = [formatCheck(report), ...formatReceipts(receipts), ...formatHistory(autoHistory)].join("\n")
+          const content = [formatCheck(report), ...formatReceipts(receipts), ...formatHistory(autoHistory), `outcome ledger: ${outcomes.size()} spawns recorded`].join("\n")
           return { content, metadata: { roles: report.roles.length, agents: report.agents.length, auto: autoHistory.length, spawns: receipts.length } }
         },
       })
@@ -1349,7 +1455,7 @@ export default Plugin.define({
         pending.set(event.id, { parentID: event.sessionID, agent: target, role: plan.role, model: tuned.model, revision: configRevision(options), at: Date.now() })
         expectChild(event.id, event, target, tuned.model, plan.role)
         const vendorOfCaller = tierMeta(options, plan.role)?.distinctVendor ? await callerVendor(event) : undefined
-        await recordReceipt(tierReceipt(target, { source: source ?? "agent", name: tierName ?? plan.role }, tuned, vendorOfCaller))
+        await recordSpawnReceipt(event.id, tierReceipt(target, { source: source ?? "agent", name: tierName ?? plan.role }, tuned, vendorOfCaller))
         return
       }
       const unroled = plan.role === undefined
@@ -1359,7 +1465,7 @@ export default Plugin.define({
         pending.set(event.id, { parentID: event.sessionID, agent: target, role: routed.role, model: tuned.model, revision: configRevision(options), at: Date.now() })
         expectChild(event.id, event, target, tuned.model, routed.role)
         const vendorOfCaller = tierMeta(options, routed.role)?.distinctVendor ? await callerVendor(event) : undefined
-        await recordReceipt(tierReceipt(target, { source: "auto", name: routed.role }, tuned, vendorOfCaller))
+        await recordSpawnReceipt(event.id, tierReceipt(target, { source: "auto", name: routed.role }, tuned, vendorOfCaller))
       }
       if (unroled && auto !== undefined) {
         const routed = await route(event, target, plan.input, auto, false).catch(() => undefined)
@@ -1605,6 +1711,8 @@ export default Plugin.define({
       pending.delete(event.id)
       const expected = expectedChildren.get(event.id)
       expectedChildren.delete(event.id)
+      const resumed = isRecord(event.input) ? event.input.sessionID : undefined
+      if (typeof resumed === "string" && resumed !== "") await outcomes.resume(resumed)
       if (event.status === "completed") {
         const childID = (event.result.metadata as { sessionID?: unknown } | undefined)?.sessionID
         if (spawn !== undefined && typeof childID === "string") await recordChildRole(childID, spawn.role)
@@ -1657,6 +1765,8 @@ export default Plugin.define({
           const sessionID = data.sessionID
           settleRequest(requestLog, sessionID, endedAt(event))
           const error = data.error as { type?: string; message?: string; status?: number }
+          await outcomes.end(sessionID, `failed:${classifyFailure(error) ?? "other"}`, finishedAt(event))
+          pruneChildModels()
           await queue(() => onSessionFailed(sessionID, error)).catch((error) =>
             warn(`fallback after a failed execution did not complete`, { error: String(error) }),
           )
@@ -1666,13 +1776,25 @@ export default Plugin.define({
           const sessionID = (event as { data?: { sessionID?: unknown } }).data?.sessionID
           if (typeof sessionID !== "string") continue
           const model = settleRequest(requestLog, sessionID, endedAt(event))
+          await outcomes.end(sessionID, "succeeded", finishedAt(event))
+          pruneChildModels()
           if (noticeState.outages.size > 0) await queue(() => onSessionSucceeded(sessionID, model)).catch(() => {})
           continue
         }
         if (type === INTERRUPTED_EVENT) {
           // Neither a success nor a failure: the interrupted request only leaves the log.
           const sessionID = (event as { data?: { sessionID?: unknown } }).data?.sessionID
-          if (typeof sessionID === "string") settleRequest(requestLog, sessionID, endedAt(event))
+          if (typeof sessionID === "string") {
+            settleRequest(requestLog, sessionID, endedAt(event))
+            await outcomes.end(sessionID, "interrupted", finishedAt(event))
+            pruneChildModels()
+          }
+          continue
+        }
+        if (type === STEP_ENDED_EVENT || type === COMPACTION_ENDED_EVENT) {
+          const data = (event as { data?: { sessionID?: unknown } & Usage }).data
+          if (typeof data?.sessionID !== "string") continue
+          await (type === STEP_ENDED_EVENT ? outcomes.step : outcomes.compaction)(data.sessionID, data)
           continue
         }
         if (type === DELETED_EVENT) {
@@ -1707,8 +1829,10 @@ export default Plugin.define({
     })().catch(() => {})
 
     return async () => {
+      const disposeStart = Date.now()
       controller.abort()
       if (expiry !== undefined) clearTimeout(expiry)
+      await outcomes.dispose(LEDGER_DISPOSE_TIMEOUT_MS)
       await spawnResults.dispose()
       await rpc.dispose()
       await spawns.dispose()
@@ -1727,6 +1851,20 @@ export default Plugin.define({
       triedModels.clear()
       pending.clear()
       childRoles.clear()
+      // Pending snapshot work finishes before the map goes, within what is left of the dispose budget;
+      // after that no snapshot operation writes anything.
+      const budgetLeft = Math.max(0, LEDGER_DISPOSE_TIMEOUT_MS - (Date.now() - disposeStart))
+      let budget: ReturnType<typeof setTimeout> | undefined
+      const outOfTime = new Promise<"late">((resolve) => {
+        budget = setTimeout(() => resolve("late"), budgetLeft)
+      })
+      const drainedSnapshots = (async () => {
+        while (snapshotWork.size > 0) await Promise.all([...snapshotWork])
+        return "drained" as const
+      })()
+      if ((await Promise.race([drainedSnapshots, outOfTime])) === "late") warn(`snapshot writes still running after the ${LEDGER_DISPOSE_TIMEOUT_MS}ms dispose budget; leaving them`)
+      clearTimeout(budget)
+      snapshotsClosed = true
       childModels.clear()
       expectedChildren.clear()
       autoHistory = []

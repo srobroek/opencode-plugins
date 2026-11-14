@@ -1201,6 +1201,170 @@ describe("runtime fallback", () => {
     await cleanup()
   })
 
+  test("records an outcome per child: usage and success, then a credentials failure", async () => {
+    const host = createHost({ agents: [{ id: "plain" }], models, options: fallbackOptions })
+    host.sessions.set("r", { id: "r" })
+    host.sessions.set("c1", { id: "c1", parentID: "r", agent: "plain", model: sonnet })
+    host.sessions.set("c2", { id: "c2", parentID: "r", agent: "plain", model: sonnet })
+    const cleanup = await setup(host)
+    const usage = (sessionID: string, input: number, cost: number) => ({
+      type: "session.step.ended",
+      data: { sessionID, cost, tokens: { input, output: 10, reasoning: 2, cache: { read: 5, write: 1 } } },
+    })
+    const input1 = await host.spawn("subagent", { agent: "plain", prompt: "secret prompt", role: "task" }, "build", "r", "call-1")
+    host.emit({ type: "session.created", data: { sessionID: "c1", parentID: "r", agent: "plain", model: sonnet } })
+    host.emit(usage("c1", 100, 0.5))
+    host.emit(usage("c1", 200, 0.25))
+    host.emit({ type: "session.execution.succeeded", created: Date.now() + 1000, data: { sessionID: "c1" } })
+    await host.spawn("subagent", { agent: "plain", prompt: "x", role: "task" }, "build", "r", "call-2")
+    host.emit({ type: "session.created", data: { sessionID: "c2", parentID: "r", agent: "plain", model: sonnet } })
+    host.emit({ type: "session.execution.failed", data: { sessionID: "c2", error: { type: "api", message: "invalid credentials", status: 401 } } })
+    await settle()
+    await host.spawnDone({ ...input1, sessionID: "c1" }, { sessionID: "c1" }, "r", "call-3")
+    const first = host.storage.get("outcome:c1") as Record<string, unknown>
+    expect(first).toMatchObject({
+      agent: "plain",
+      tier: "standard",
+      model: "amazon-bedrock/claude-sonnet#high",
+      source: "role-param",
+      ms: 1000,
+      parentID: "r",
+      inputTokens: 300,
+      outputTokens: 20,
+      reasoningTokens: 4,
+      cacheReadTokens: 10,
+      cacheWriteTokens: 2,
+      cost: 0.75,
+      steps: 2,
+      outcome: "succeeded",
+      resumes: 1,
+    })
+    expect(JSON.stringify(first)).not.toContain("secret prompt")
+    expect(host.storage.get("outcome:c2")).toMatchObject({ outcome: "failed:auth", steps: 0 })
+    const check = (await host.tools.get("model_roles_check")?.execute({}))?.content
+    expect(check).toContain("outcome ledger: 2 spawns recorded")
+    host.close()
+    await cleanup()
+  })
+
+  describe("outcome ledger", () => {
+    const created = (id: string, model: ModelRef = sonnet) => ({ type: "session.created", data: { sessionID: id, parentID: "r", agent: "plain", model } })
+    const withChild = async (opts: Record<string, unknown> = fallbackOptions, model: ModelRef = sonnet) => {
+      const host = createHost({ agents: [{ id: "plain" }], models, options: opts })
+      host.sessions.set("r", { id: "r" })
+      host.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model })
+      const cleanup = await setup(host)
+      await host.spawn("subagent", { agent: "plain", prompt: "x", role: "task" }, "build", "r", "call-1")
+      host.emit(created("c", model))
+      await settle()
+      return { host, cleanup }
+    }
+
+    test("a failover by a failed execution marks the child", async () => {
+      const { host, cleanup } = await withChild({ ...fallbackOptions, flapCount: 1 })
+      host.emit(failed("c", { type: "api", message: "ThrottlingException", status: 429 }))
+      await settle()
+      expect(host.storage.get("outcome:c")).toMatchObject({ outcome: "failed:rate-limit", failedOver: true })
+      host.close()
+      await cleanup()
+    })
+
+    test("a failover by the retry hook marks the child", async () => {
+      const roles = { ...fallbackOptions, roles: { ...fallbackOptions.roles, cheap: ["anthropic/claude-haiku", "opencode/flint"] } }
+      const host = createHost({ agents: [{ id: "plain" }], models, options: roles })
+      const cleanup = await setup(host)
+      await host.spawn("subagent", { agent: "plain", prompt: "x", role: "cheap" }, "build", "r", "call-1")
+      host.emit(created("c", haiku))
+      await settle()
+      expect(host.storage.get("outcome:c")).not.toHaveProperty("failedOver")
+      const error = { type: "provider.internal", message: "Overloaded", status: 529 }
+      await host.fireRetry({ sessionID: "c", agent: "plain", model: haiku, error, attempt: 4 })
+      await settle()
+      expect(host.storage.get("outcome:c")).toMatchObject({ failedOver: true })
+      host.close()
+      await cleanup()
+    })
+
+    test("a switch that lands after the timeout still marks the child", async () => {
+      const host = createHost({ agents: [{ id: "plain" }], models, options: { ...fallbackOptions, switchTimeoutMs: 20 } })
+      let land: (() => void) | undefined
+      host.context.session.switchModel = () =>
+        new Promise<undefined>((resolve) => {
+          land = () => resolve(undefined)
+        })
+      const cleanup = await setup(host)
+      await host.spawn("subagent", { agent: "plain", prompt: "x", role: "task" }, "build", "r", "call-1")
+      host.emit(created("c"))
+      await settle()
+      const auth = { type: "provider.auth", message: "Unauthorized", status: 401 }
+      await host.fireRetry({ sessionID: "c", agent: "plain", model: sonnet, error: auth, attempt: 2 })
+      expect(host.storage.get("outcome:c")).not.toHaveProperty("failedOver")
+      land?.()
+      await settle()
+      expect(host.storage.get("outcome:c")).toMatchObject({ failedOver: true })
+      host.close()
+      await cleanup()
+    })
+
+    test("slow ledger storage never turns a landed switch into a late one", async () => {
+      const roles = { ...fallbackOptions, switchTimeoutMs: 20, roles: { ...fallbackOptions.roles, cheap: ["anthropic/claude-haiku", "opencode/flint"] } }
+      const host = createHost({ agents: [{ id: "plain" }], models, options: roles })
+      const cleanup = await setup(host)
+      await host.spawn("subagent", { agent: "plain", prompt: "x", role: "cheap" }, "build", "r", "call-1")
+      host.emit(created("c", haiku))
+      await settle()
+      const set = host.context.storage.set
+      host.context.storage.set = async (key: string, value: unknown) => {
+        if (key.startsWith("outcome:")) await new Promise((r) => setTimeout(r, 200))
+        return set(key, value)
+      }
+      const error = { type: "provider.internal", message: "Overloaded", status: 529 }
+      const decision = await host.fireRetry({ sessionID: "c", agent: "plain", model: haiku, error, attempt: 4 })
+      expect(decision).toEqual({ retry: true, delay: 0 })
+      expect(methods(host, "switchModel").map((c) => c.input)).toEqual([{ sessionID: "c", model: flint }])
+      host.close()
+      await cleanup()
+      expect(host.storage.get("outcome:c")).toMatchObject({ failedOver: true })
+    })
+
+    test("an interrupted execution is recorded as interrupted", async () => {
+      const { host, cleanup } = await withChild()
+      host.emit({ type: "session.execution.interrupted", created: Date.now() + 500, data: { sessionID: "c" } })
+      await settle()
+      expect(host.storage.get("outcome:c")).toMatchObject({ outcome: "interrupted" })
+      host.close()
+      await cleanup()
+    })
+
+    test("a compaction adds its cost and tokens without counting a step, and is flushed at shutdown", async () => {
+      const { host, cleanup } = await withChild()
+      host.emit({
+        type: "session.compaction.ended",
+        data: { sessionID: "c", cost: 0.4, tokens: { input: 50, output: 5, reasoning: 0, cache: { read: 7, write: 3 } } },
+      })
+      await settle()
+      host.close()
+      await cleanup()
+      expect(host.storage.get("outcome:c")).toMatchObject({ cost: 0.4, inputTokens: 50, outputTokens: 5, cacheReadTokens: 7, cacheWriteTokens: 3, steps: 0 })
+    })
+
+    test("concurrent spawns of one agent and model each keep their own tier", async () => {
+      const roles = { ...fallbackOptions, roles: { ...fallbackOptions.roles, extra: ["amazon-bedrock/claude-sonnet#high"] } }
+      const host = createHost({ agents: [{ id: "plain" }], models, options: roles })
+      const cleanup = await setup(host)
+      await host.spawn("subagent", { agent: "plain", prompt: "x", role: "task" }, "build", "r", "call-1")
+      await host.spawn("subagent", { agent: "plain", prompt: "x", role: "extra" }, "build", "r", "call-2")
+      host.emit(created("c1"))
+      host.emit(created("c2"))
+      await settle()
+      const tiers = ["c1", "c2"].map((id) => (host.storage.get(`outcome:${id}`) as { tier: string }).tier)
+      expect(tiers[0]).not.toBe(tiers[1])
+      expect(tiers[1]).toBe("extra")
+      host.close()
+      await cleanup()
+    })
+  })
+
   test("a role spawn whose tool call fails names the role in the parent's note", async () => {
     const host = createHost({ agents: [{ id: "plain" }], models, options: { ...fallbackOptions, flapCount: 1 } })
     const cleanup = await setup(host)
@@ -2342,6 +2506,111 @@ describe("a child keeps its resolved model", () => {
     await host.spawnDone(input, { sessionID: "c" }, "r", "call-1")
     expect(host.storage.get("spawn-model:c")).toMatchObject({ model: "anthropic/claude-haiku", failedOver: true })
     expect((await host.spawn("subagent", resume, "build", "r", "call-2")).model).toBe("anthropic/claude-haiku")
+    host.close()
+    await cleanup()
+  })
+
+
+  test("a failover is visible to a resume at once, even when the stored snapshot is slow to read and write", async () => {
+    const { again, cleanupAgain } = await spawnThenReload(first)
+    again.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: sonnet })
+    // The stored snapshot (still the old model) is slow to read, and writes never land during the test.
+    const { get, set } = again.context.storage
+    again.context.storage.get = async (key: string) => {
+      if (key.startsWith("spawn-model:")) await new Promise((r) => setTimeout(r, 150))
+      return get(key)
+    }
+    again.context.storage.set = async (key: string, value: unknown) => {
+      if (key.startsWith("spawn-model:")) await new Promise((r) => setTimeout(r, 400))
+      return set(key, value)
+    }
+    const auth = { type: "provider.auth", message: "Unauthorized", status: 401 }
+    expect(await again.fireRetry({ sessionID: "c", agent: "plain", model: sonnet, error: auth, attempt: 2 })).toEqual({ retry: true, delay: 0 })
+    expect(methods(again, "switchModel")).toHaveLength(1)
+    expect((await again.spawn("subagent", resume, "build", "r", "call-2")).model).toBe("anthropic/claude-haiku")
+    again.close()
+    await cleanupAgain()
+  })
+
+  const slowSnapshotStorage = (host: ReturnType<typeof createHost>, readMs: number, writeMs: number) => {
+    const { get, set } = host.context.storage
+    host.context.storage.get = async (key: string) => {
+      if (key.startsWith("spawn-model:")) await new Promise((r) => setTimeout(r, readMs))
+      return get(key)
+    }
+    host.context.storage.set = async (key: string, value: unknown) => {
+      if (key.startsWith("spawn-model:")) await new Promise((r) => setTimeout(r, writeMs))
+      return set(key, value)
+    }
+  }
+  const auth = { type: "provider.auth", message: "Unauthorized", status: 401 }
+
+  test("a reloaded child with no stored spawn tier is also on its new model at once", async () => {
+    const { again, cleanupAgain } = await spawnThenReload({ ...first, agents: { ...first.agents, plain: "task" } })
+    again.storage.delete("spawn-role:c")
+    again.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: sonnet })
+    slowSnapshotStorage(again, 150, 400)
+    expect(await again.fireRetry({ sessionID: "c", agent: "plain", model: sonnet, error: auth, attempt: 2 })).toEqual({ retry: true, delay: 0 })
+    expect(methods(again, "switchModel")).toHaveLength(1)
+    expect((await again.spawn("subagent", resume, "build", "r", "call-2")).model).toBe("anthropic/claude-haiku")
+    again.close()
+    await cleanupAgain()
+  })
+
+  test("shutdown waits for the failover snapshot write, so a reload keeps the new model", async () => {
+    const { again, cleanupAgain } = await spawnThenReload(first)
+    again.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: sonnet })
+    slowSnapshotStorage(again, 0, 150)
+    await again.fireRetry({ sessionID: "c", agent: "plain", model: sonnet, error: auth, attempt: 2 })
+    again.close()
+    await cleanupAgain()
+    expect(again.storage.get("spawn-model:c")).toMatchObject({ model: "anthropic/claude-haiku", failedOver: true })
+  })
+
+  test("memory drops snapshots older than the storage limit when a child ends, and reads storage again", async () => {
+    const host = createHost({ agents: [{ id: "plain" }], models, options: first })
+    host.sessions.set("r", { id: "r" })
+    const cleanup = await setup(host)
+    const input = await host.spawn("subagent", { agent: "plain", prompt: "x", tier: "task" }, "build", "r", "call-1")
+    host.emit({ type: "session.created", data: { sessionID: "c", parentID: "r", agent: "plain", model: sonnet } })
+    await settle()
+    await host.spawnDone(input, { sessionID: "c" }, "r", "call-1")
+    host.storage.set("spawn-model:c", { ...(host.storage.get("spawn-model:c") as object), model: "opencode/flint" })
+    // Still in memory: the resume uses the memory snapshot, not the changed storage.
+    expect((await host.spawn("subagent", resume, "build", "r", "call-2")).model).toBe(sonnetHigh)
+    setSystemTime(new Date(Date.now() + 31 * 24 * 60 * 60 * 1000))
+    try {
+      host.emit({ type: "session.execution.succeeded", data: { sessionID: "other" } })
+      await settle()
+      expect((await host.spawn("subagent", resume, "build", "r", "call-3")).model).toBe("opencode/flint")
+    } finally {
+      setSystemTime()
+    }
+    host.close()
+    await cleanup()
+  })
+
+  test("a call that completes while the child's snapshot is being written still leaves its ledger record", async () => {
+    const host = createHost({ agents: [{ id: "plain" }], models, options: first })
+    host.sessions.set("r", { id: "r" })
+    const cleanup = await setup(host)
+    const input = await host.spawn("subagent", { agent: "plain", prompt: "x", tier: "task" }, "build", "r", "call-1")
+    const set = host.context.storage.set
+    let release: () => void = () => {}
+    const slow = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    host.context.storage.set = async (key: string, value: unknown) => {
+      if (key.startsWith("spawn-model:")) await slow
+      return set(key, value)
+    }
+    host.emit({ type: "session.created", data: { sessionID: "c", parentID: "r", agent: "plain", model: sonnet } })
+    await settle()
+    await host.spawnDone(input, { sessionID: "c" }, "r", "call-1") // drops the pending spawn while the snapshot write waits
+    release()
+    await settle()
+    expect(host.storage.get("outcome:c")).toMatchObject({ agent: "plain", source: "tier-param", parentID: "r" })
+    expect(host.storage.get("spawn-role:c")).toBe("task")
     host.close()
     await cleanup()
   })

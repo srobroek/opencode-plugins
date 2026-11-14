@@ -385,6 +385,29 @@ The last 50 receipts are kept in plugin storage. `model_roles_check` lists them
 newest first, one line each. Every warning also goes to the OpenCode log
 (`opencode.log`).
 
+## Outcome ledger
+
+The plugin keeps one record per child session in plugin storage, under
+`outcome:<sessionID>`: the agent, tier, model, routing source and rule, parent
+session, how often the child was resumed, summed tokens (input, output, reasoning,
+cache read and write), cost, step count, elapsed time, how the run ended
+(`succeeded`, `failed:<class>` or `interrupted`) and whether a failover moved it.
+It stores no prompt, description, result or command text. Nothing reads the ledger
+yet; it is the evidence for later evaluation-based routing.
+
+This first phase records only tier-routed spawns: those that reach a session
+through a tier, role or `auto` decision, which the plugin links to the child
+session it created. Not recorded: spawns without a tier (the agent keeps its own
+model), spawns whose explicit `model` or agent pin wins, resumed children with
+no earlier record, and the parent session itself. Records older than 90 days go,
+and only the newest 1000 stay; `model_roles_check` reports how many exist.
+
+The ledger is advisory telemetry: nothing decides anything from it. Writes to one
+record land in order, and the plugin assumes plugin storage calls settle. At shutdown
+it waits up to 10 seconds for pending writes and logs what stays unwritten. A write
+still in flight after that can finish after a reload and overwrite the new instance's
+write for the same record. That is accepted.
+
 ## Subagent model guard
 
 An agent with no model and no resolvable tier inherits the session's model. The
