@@ -188,7 +188,7 @@
     },
     "plugins/claude-compat": {
       "name": "@srobroek/opencode-claude-compat",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
       },
@@ -394,7 +394,7 @@
     },
     "plugins/model-roles": {
       "name": "@srobroek/opencode-model-roles",
-      "version": "0.3.1",
+      "version": "0.3.2",
       "dependencies": {
         "jsonc-parser": "3.3.1",
       },
