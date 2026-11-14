@@ -1818,7 +1818,7 @@ function readClassification(value) {
 }
 
 // plugins/model-roles/src/config-edit.ts
-import { readFileSync, writeFileSync } from "fs";
+import { closeSync, copyFileSync, fchmodSync, fsyncSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeSync } from "fs";
 import path from "path";
 
 // node_modules/.bun/jsonc-parser@3.3.1/node_modules/jsonc-parser/lib/esm/impl/scanner.js
@@ -3193,6 +3193,31 @@ function readConfigFiles(dir) {
   }
   return files;
 }
+var BACKUP_SUFFIX = ".model-roles.bak";
+var REAL_IO = { writeSync: (fd, data) => writeSync(fd, data), renameSync };
+function writeFileAtomic(file, text, io = REAL_IO) {
+  const target = realpathSync(file);
+  const { mode } = statSync(target);
+  const temp = `${target}.model-roles.${process.pid}.tmp`;
+  let fd;
+  try {
+    fd = openSync(temp, "wx", mode & 511);
+    fchmodSync(fd, mode & 511);
+    io.writeSync(fd, text);
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = undefined;
+    copyFileSync(target, target + BACKUP_SUFFIX);
+    io.renameSync(temp, target);
+  } catch (error) {
+    if (fd !== undefined)
+      closeSync(fd);
+    try {
+      unlinkSync(temp);
+    } catch {}
+    throw error;
+  }
+}
 function writeEntry(dir, edit, spec) {
   const file = pickConfigFile(readConfigFiles(dir), spec);
   if (file === undefined)
@@ -3201,7 +3226,7 @@ function writeEntry(dir, edit, spec) {
   if (next === undefined)
     throw new Error(`No model-roles plugin entry in ${file.path}.`);
   if (next !== file.text)
-    writeFileSync(file.path, next.endsWith(`
+    writeFileAtomic(file.path, next.endsWith(`
 `) ? next : `${next}
 `);
   return { path: file.path, text: next };
@@ -4743,6 +4768,7 @@ export {
   AGENT_HINT_LIMIT,
   AUTO_AGENT,
   AUTO_HISTORY_LIMIT,
+  BACKUP_SUFFIX,
   BUILTIN_AGENT_TIERS,
   BUILTIN_TIERS,
   CATALOG_LIMIT,
@@ -4951,5 +4977,6 @@ export {
   withRoleNote,
   withRoleParam,
   writeAgentTier,
+  writeFileAtomic,
   writeTier
 };

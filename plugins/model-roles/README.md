@@ -160,7 +160,12 @@ A save goes to `options.tiers` of the model-roles entry in the global config:
 `$OPENCODE_CONFIG_DIR`, else `$XDG_CONFIG_HOME/opencode`, else
 `~/.config/opencode`. The file is `opencode.jsonc` when it has the entry, else
 `opencode.json`. The edit keeps comments and formatting, and turns a bare string
-plugin entry into `{ "package": …, "options": … }`.
+plugin entry into `{ "package": …, "options": … }`. The write is atomic: the new
+text goes to a temp file in the same directory, is synced, then renamed over the
+config, which keeps its file mode, so a crash never leaves a half-written config.
+Before the rename the old content is copied to `<config>.model-roles.bak`. There is
+one backup per file, overwritten on each save, so it holds the config as it was
+before the last save.
 
 ### Agents
 

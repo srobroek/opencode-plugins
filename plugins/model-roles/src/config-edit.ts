@@ -5,7 +5,7 @@
  * `writeTier`, which reads and writes the chosen file.
  */
 
-import { readFileSync, writeFileSync } from "node:fs"
+import { closeSync, copyFileSync, fchmodSync, fsyncSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeSync } from "node:fs"
 import path from "node:path"
 import { applyEdits, findNodeAtLocation, getNodeValue, modify, type Node, parseTree } from "jsonc-parser"
 
@@ -125,6 +125,44 @@ export function readConfigFiles(dir: string): ConfigFile[] {
 export type WriteResult = { path: string; tiers: Record<string, unknown> }
 export type AgentWriteResult = { path: string; agents: Record<string, unknown> }
 
+/** Suffix of the rolling backup next to a config file. */
+export const BACKUP_SUFFIX = ".model-roles.bak"
+
+type AtomicIo = { writeSync: (fd: number, data: string) => unknown; renameSync: (from: string, to: string) => void }
+const REAL_IO: AtomicIo = { writeSync: (fd, data) => writeSync(fd, data), renameSync }
+
+/**
+ * Replace `file` with `text` so a crash or full disk never leaves a torn config: write a temp file in the
+ * same directory (so the rename stays on one filesystem), fsync it, then rename it over the original. The
+ * original's mode is kept, and a symlinked config is written through. Before the rename the old content is
+ * copied to `<file>.model-roles.bak`. That is one rolling backup, overwritten on each save: it is a safety
+ * net for the last edit, and a backup per save would pile up files in the user's config directory.
+ */
+export function writeFileAtomic(file: string, text: string, io: AtomicIo = REAL_IO): void {
+  const target = realpathSync(file)
+  const { mode } = statSync(target)
+  const temp = `${target}.model-roles.${process.pid}.tmp`
+  let fd: number | undefined
+  try {
+    fd = openSync(temp, "wx", mode & 0o777)
+    fchmodSync(fd, mode & 0o777) // the umask must not narrow the original's mode
+    io.writeSync(fd, text)
+    fsyncSync(fd)
+    closeSync(fd)
+    fd = undefined
+    copyFileSync(target, target + BACKUP_SUFFIX)
+    io.renameSync(temp, target)
+  } catch (error) {
+    if (fd !== undefined) closeSync(fd)
+    try {
+      unlinkSync(temp)
+    } catch {
+      // Never created, or already moved.
+    }
+    throw error
+  }
+}
+
 /** Apply `edit` to the global config file that holds the model-roles entry, and write it. */
 function writeEntry(dir: string, edit: (text: string) => string | undefined, spec?: string): { path: string; text: string } {
   const file = pickConfigFile(readConfigFiles(dir), spec)
@@ -132,7 +170,7 @@ function writeEntry(dir: string, edit: (text: string) => string | undefined, spe
     throw new Error(`No model-roles plugin entry in ${CONFIG_NAMES.map((n) => path.join(dir, n)).join(" or ")}; add the plugin to the global config first.`)
   const next = edit(file.text)
   if (next === undefined) throw new Error(`No model-roles plugin entry in ${file.path}.`)
-  if (next !== file.text) writeFileSync(file.path, next.endsWith("\n") ? next : `${next}\n`)
+  if (next !== file.text) writeFileAtomic(file.path, next.endsWith("\n") ? next : `${next}\n`)
   return { path: file.path, text: next }
 }
 

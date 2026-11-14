@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test"
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, lstatSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync, writeSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { parse } from "jsonc-parser"
-import { effectiveConfig, findPluginEntry, globalConfigDir, pickConfigFile, projectConfigPaths, readAgents, readTiers, setAgentTier, setTier, writeAgentTier, writeTier } from "./config-edit.ts"
+import { BACKUP_SUFFIX, effectiveConfig, findPluginEntry, globalConfigDir, pickConfigFile, projectConfigPaths, readAgents, readTiers, setAgentTier, setTier, writeAgentTier, writeFileAtomic, writeTier } from "./config-edit.ts"
 
 const SPEC = "github:srobroek/opencode-plugins#main::path:plugins/model-roles"
 
@@ -222,5 +222,102 @@ describe("effectiveConfig", () => {
       { path: "/p/.opencode/opencode.jsonc", text: '{ "plugins": [] }' },
     ]
     expect(effectiveConfig(files, global)).toMatchObject({ origin: "project", path: "/p/.opencode/opencode.json", agents: { b: "cheap" } })
+  })
+})
+
+describe("atomic config writes", () => {
+  const fixture = (mode?: number) => {
+    const dir = mkdtempSync(path.join(tmpdir(), "model-roles-atomic-"))
+    const file = path.join(dir, "opencode.json")
+    writeFileSync(file, `{ "plugins": ["${SPEC}"] }\n`)
+    if (mode !== undefined) chmodSync(file, mode)
+    return { dir, file, done: () => rmSync(dir, { recursive: true, force: true }) }
+  }
+
+  test("the original survives a failure while writing, and no temp file is left", () => {
+    const { dir, file, done } = fixture()
+    try {
+      const before = readFileSync(file, "utf8")
+      const torn = {
+        writeSync: (fd: number, data: string) => {
+          writeSync(fd, data.slice(0, 5)) // a partial write, then the disk fails
+          throw new Error("ENOSPC")
+        },
+        renameSync,
+      }
+      expect(() => writeFileAtomic(file, "{ new }\n", torn)).toThrow("ENOSPC")
+      expect(readFileSync(file, "utf8")).toBe(before)
+      expect(readdirSync(dir)).toEqual(["opencode.json"])
+    } finally {
+      done()
+    }
+  })
+
+  test("the original survives a failed rename", () => {
+    const { dir, file, done } = fixture()
+    try {
+      const before = readFileSync(file, "utf8")
+      const io = {
+        writeSync,
+        renameSync: () => {
+          throw new Error("EXDEV")
+        },
+      }
+      expect(() => writeFileAtomic(file, "{ new }\n", io)).toThrow("EXDEV")
+      expect(readFileSync(file, "utf8")).toBe(before)
+      expect(readdirSync(dir).filter((n) => n.includes("tmp"))).toEqual([])
+    } finally {
+      done()
+    }
+  })
+
+  test("the file mode is kept", () => {
+    const { file, done } = fixture(0o600)
+    try {
+      writeTier(path.dirname(file), "cheap", { effort: "low" }, SPEC)
+      expect(statSync(file).mode & 0o777).toBe(0o600)
+      expect(readTiers(readFileSync(file, "utf8"))).toEqual({ cheap: { effort: "low" } })
+    } finally {
+      done()
+    }
+  })
+
+  test("one rolling backup holds the content before the latest save", () => {
+    const { file, done } = fixture()
+    try {
+      const original = readFileSync(file, "utf8")
+      writeTier(path.dirname(file), "cheap", { effort: "low" }, SPEC)
+      const first = readFileSync(file, "utf8")
+      expect(readFileSync(file + BACKUP_SUFFIX, "utf8")).toBe(original)
+      writeAgentTier(path.dirname(file), "worker", "cheap", SPEC)
+      expect(readFileSync(file + BACKUP_SUFFIX, "utf8")).toBe(first)
+      expect(readdirSync(path.dirname(file)).sort()).toEqual(["opencode.json", `opencode.json${BACKUP_SUFFIX}`])
+    } finally {
+      done()
+    }
+  })
+
+  test("an unchanged save touches nothing and leaves no backup", () => {
+    const { file, done } = fixture()
+    try {
+      writeTier(path.dirname(file), "cheap", undefined, SPEC)
+      expect(existsSync(file + BACKUP_SUFFIX)).toBe(false)
+    } finally {
+      done()
+    }
+  })
+
+  test("a symlinked config is written through, not replaced", () => {
+    const { dir, file, done } = fixture()
+    try {
+      const real = path.join(dir, "real")
+      renameSync(file, real)
+      symlinkSync(real, file)
+      writeTier(dir, "cheap", { effort: "low" }, SPEC)
+      expect(readTiers(readFileSync(real, "utf8"))).toEqual({ cheap: { effort: "low" } })
+      expect(lstatSync(file).isSymbolicLink()).toBe(true)
+    } finally {
+      done()
+    }
   })
 })
