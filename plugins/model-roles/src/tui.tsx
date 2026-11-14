@@ -144,15 +144,28 @@ export default Plugin.define({
     }
 
     /** The toast after a save: where it went, and any model that is not available now. */
-    const saved = (result: { path?: string; warnings?: unknown }, what: string) => {
+    const saved = (result: { path?: string; warnings?: unknown }, what: string, shadowed?: string) => {
       const warnings = Array.isArray(result.warnings) ? result.warnings.filter((w): w is string => typeof w === "string") : []
-      toast(`${what} ${result.path ?? "the global config"}.${warnings.length > 0 ? ` ${warnings.join(" ")}` : ""}`, warnings.length > 0 ? "info" : "success")
+      const note = [...(shadowed === undefined ? [] : [shadowed]), ...warnings].join(" ")
+      toast(`${what} ${result.path ?? "the global config"}.${note === "" ? "" : ` ${note}`}`, note === "" ? "success" : "info")
     }
 
-    const save = async (at: LocationRef, draft: TierDraft): Promise<boolean> => {
+    const save = async (at: LocationRef, state: TierState, draft: TierDraft): Promise<boolean> => {
       const name = draft.row.name
+      if (state.agentConfig?.origin === "project") {
+        const go = await dialog.confirm({
+          title: "A project config sets the tiers",
+          message: `${state.agentConfig.path ?? "A project config"} has its own model-roles entry. A save here goes to the global config and will not change this project's tiers.`,
+          label: { confirm: "Save to global anyway", cancel: "Cancel" },
+        })
+        if (go !== true) return false
+      }
       try {
-        const result = (await rpc.set({ tier: name, value: toConfig(draft) ?? null }, { location: at })) as { path?: string; warnings?: unknown }
+        const result = (await rpc.set({ tier: name, value: toConfig(draft) ?? null }, { location: at })) as { path?: string; warnings?: unknown; shadowedBy?: string }
+        if (result.shadowedBy !== undefined) {
+          saved(result, `Tier ${name} ${draft.isNew ? "added" : "saved"}; written to`, `${result.shadowedBy} overrides it here, so nothing changed in this project.`)
+          return true
+        }
         saved(result, `Tier ${name} ${draft.isNew ? "added" : "saved"} and applied; written to`)
         return true
       } catch (error) {
@@ -183,13 +196,13 @@ export default Plugin.define({
         } else if (action === "models") {
           const edited = await editModels(draft, state)
           draft = edited.draft
-          if (edited.save && (await save(at, draft))) return
+          if (edited.save && (await save(at, state, draft))) return
         } else if (action === "effort") draft = await pickEffort(draft)
         else if (action === "purpose") {
           const purpose = await dialog.prompt({ title: `${draft.row.name}: purpose`, description: "When should the spawner pick this tier?", value: draft.purpose })
           if (purpose !== undefined && purpose.trim() !== "") draft = setPurpose(draft, purpose)
         } else if (action === "reset") draft = reset(draft)
-        else if (action === "save" && (await save(at, draft))) return
+        else if (action === "save" && (await save(at, state, draft))) return
       }
     }
 
@@ -286,12 +299,17 @@ export default Plugin.define({
         }
         const choice = await dialog.select<string>({
           title: "Model tiers",
-          placeholder: state.config === undefined ? "Pick a tier" : `Saved to ${state.config}`,
+          placeholder:
+            state.config === undefined
+              ? "Pick a tier"
+              : state.agentConfig?.origin === "project"
+                ? `Saved to ${state.config}; ${state.agentConfig.path ?? "the project config"} overrides the tiers here`
+                : `Saved to ${state.config}`,
           options: [
             ...state.tiers.map((row) => ({
               title: row.name,
               value: row.name,
-              description: `${tierSummary(row)}${row.purposeMissing ? " (no purpose)" : ""}`,
+              description: `${tierSummary(row)}${row.purposeMissing ? " (no purpose)" : ""}${state.agentConfig?.origin === "project" ? " · overridden by the project config" : ""}`,
               footer: row.cost,
             })),
             { title: "Agents…", value: AGENTS, description: "See each agent's tier and change it" },

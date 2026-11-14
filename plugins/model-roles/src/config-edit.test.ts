@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { parse } from "jsonc-parser"
-import { effectiveAgents, findPluginEntry, globalConfigDir, pickConfigFile, projectConfigPaths, readAgents, readTiers, setAgentTier, setTier, writeAgentTier, writeTier } from "./config-edit.ts"
+import { effectiveConfig, findPluginEntry, globalConfigDir, pickConfigFile, projectConfigPaths, readAgents, readTiers, setAgentTier, setTier, writeAgentTier, writeTier } from "./config-edit.ts"
 
 const SPEC = "github:srobroek/opencode-plugins#main::path:plugins/model-roles"
 
@@ -166,31 +166,32 @@ describe("projectConfigPaths", () => {
   })
 })
 
-describe("effectiveAgents", () => {
+describe("effectiveConfig", () => {
   const entry = (agents?: Record<string, string>) =>
     `{ "plugins": [{ "package": "${SPEC}"${agents === undefined ? "" : `, "options": { "agents": ${JSON.stringify(agents)} }`} }] }`
   const global = { path: "/g/opencode.json", text: entry({ a: "cheap" }) }
 
   test("no project entry: the global one", () => {
-    expect(effectiveAgents([], global)).toEqual({ origin: "global", path: "/g/opencode.json", agents: { a: "cheap" } })
-    expect(effectiveAgents([{ path: "/p/opencode.json", text: '{ "plugins": ["other"] }' }], global).origin).toBe("global")
-    expect(effectiveAgents([], undefined)).toEqual({ origin: "global", agents: {} })
+    expect(effectiveConfig([], global)).toEqual({ origin: "global", path: "/g/opencode.json", tiers: {}, agents: { a: "cheap" } })
+    expect(effectiveConfig([{ path: "/p/opencode.json", text: '{ "plugins": ["other"] }' }], global).origin).toBe("global")
+    expect(effectiveConfig([], undefined)).toEqual({ origin: "global", tiers: {}, agents: {} })
   })
 
   test("a project entry replaces the global one, even with the same value or without agents", () => {
-    expect(effectiveAgents([{ path: "/p/opencode.json", text: entry({ a: "cheap" }) }], global)).toEqual({
+    expect(effectiveConfig([{ path: "/p/opencode.json", text: entry({ a: "cheap" }) }], global)).toEqual({
       origin: "project",
       path: "/p/opencode.json",
+      tiers: {},
       agents: { a: "cheap" },
     })
-    expect(effectiveAgents([{ path: "/p/opencode.json", text: entry() }], global)).toEqual({ origin: "project", path: "/p/opencode.json", agents: {} })
+    expect(effectiveConfig([{ path: "/p/opencode.json", text: entry() }], global)).toEqual({ origin: "project", path: "/p/opencode.json", tiers: {}, agents: {} })
   })
 
   test("a project entry under another package string is a second instance: it never shadows, and is reported", () => {
     const other = { path: "/p/opencode.json", text: `{ "plugins": [{ "package": "/x/plugins/model-roles", "options": { "agents": { "a": "strong" } } }] }` }
-    expect(effectiveAgents([other], global)).toEqual({ origin: "global", path: "/g/opencode.json", agents: { a: "cheap" }, alsoLoads: "/p/opencode.json" })
+    expect(effectiveConfig([other], global)).toEqual({ origin: "global", path: "/g/opencode.json", tiers: {}, agents: { a: "cheap" }, alsoLoads: "/p/opencode.json" })
     // The host's own target decides when it is known: the global entry under another string is then not ours.
-    expect(effectiveAgents([other], { path: "/g/opencode.json", text: entry({ a: "cheap" }) }, "/x/plugins/model-roles")).toMatchObject({
+    expect(effectiveConfig([other], { path: "/g/opencode.json", text: entry({ a: "cheap" }) }, "/x/plugins/model-roles")).toMatchObject({
       origin: "project",
       path: "/p/opencode.json",
       agents: { a: "strong" },
@@ -206,12 +207,20 @@ describe("effectiveAgents", () => {
     expect(pickConfigFile([{ path: "/d/opencode.json", text }], "other")).toBeUndefined()
   })
 
+  test("tiers follow the same entry as agents: a project entry's tiers replace the global ones whole", () => {
+    const withTiers = (tiers: Record<string, unknown>) => `{ "plugins": [{ "package": "${SPEC}", "options": { "tiers": ${JSON.stringify(tiers)} } }] }`
+    const g = { path: "/g/opencode.json", text: withTiers({ cheap: { effort: "low" } }) }
+    expect(effectiveConfig([], g)).toMatchObject({ origin: "global", tiers: { cheap: { effort: "low" } } })
+    expect(effectiveConfig([{ path: "/p/opencode.json", text: withTiers({ docs: { purpose: "d" } }) }], g)).toMatchObject({ origin: "project", tiers: { docs: { purpose: "d" } } })
+    expect(effectiveConfig([{ path: "/p/opencode.json", text: entry() }], g)).toMatchObject({ origin: "project", tiers: {} })
+  })
+
   test("the highest-precedence project entry wins", () => {
     const files = [
       { path: "/p/opencode.json", text: entry({ a: "strong" }) },
       { path: "/p/.opencode/opencode.json", text: entry({ b: "cheap" }) },
       { path: "/p/.opencode/opencode.jsonc", text: '{ "plugins": [] }' },
     ]
-    expect(effectiveAgents(files, global)).toMatchObject({ origin: "project", path: "/p/.opencode/opencode.json", agents: { b: "cheap" } })
+    expect(effectiveConfig(files, global)).toMatchObject({ origin: "project", path: "/p/.opencode/opencode.json", agents: { b: "cheap" } })
   })
 })

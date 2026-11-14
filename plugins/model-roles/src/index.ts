@@ -34,7 +34,7 @@ import {
   planImplicit,
   readClassification,
 } from "./classify.ts"
-import { type AgentConfig, type ConfigFile, effectiveAgents, globalConfigDir, pickConfigFile, readConfigFiles, readProjectFiles, readTiers, writeAgentTier, writeTier } from "./config-edit.ts"
+import { type ConfigFile, type EffectiveConfig, effectiveConfig, globalConfigDir, pickConfigFile, readConfigFiles, readProjectFiles, readTiers, writeAgentTier, writeTier } from "./config-edit.ts"
 import {
   duration,
   failureNote,
@@ -1241,16 +1241,11 @@ export default Plugin.define({
       }
     }
     const pluginOptions = isRecord(ctx.options) ? ctx.options : {}
-    /** The global file's tiers as last applied (or seen at setup), so an unrelated config change keeps the options this instance got. */
-    let fileTiers = (() => {
-      const file = globalFile()
-      return file === undefined ? undefined : JSON.stringify(readTiers(file.text, ownSpec()))
-    })()
     /**
-     * Where the `agents` option comes from: the model-roles entry of the highest-precedence project config
-     * that has one (it replaces the global entry as a whole), else the global file's.
+     * Where the `tiers` and `agents` options come from: the model-roles entry of the highest-precedence project
+     * config that has one (it replaces the global entry as a whole), else the global file's.
      */
-    const agentConfig = (): AgentConfig => {
+    const agentConfig = (): EffectiveConfig => {
       let project: ConfigFile[] = []
       try {
         const directory = (ctx as { location?: { directory?: unknown } }).location?.directory
@@ -1258,10 +1253,12 @@ export default Plugin.define({
       } catch {
         // No project files.
       }
-      return effectiveAgents(project, globalFile(), ownSpec())
+      return effectiveConfig(project, globalFile(), ownSpec())
     }
-    const agentsKeyOf = (config: AgentConfig) => JSON.stringify({ origin: config.origin, path: config.path, agents: parseOptions({ agents: config.agents }).agents })
+    const agentsKeyOf = (config: EffectiveConfig) => JSON.stringify({ origin: config.origin, path: config.path, agents: parseOptions({ agents: config.agents }).agents })
     const startupConfig = agentConfig()
+    /** The effective entry's tiers as last applied (or seen at setup), so an unrelated config change keeps the options this instance got. */
+    let fileTiers = startupConfig.path === undefined ? undefined : JSON.stringify(startupConfig.tiers)
     const startupAgents = parseOptions({ agents: startupConfig.agents }).agents
     /** Assignments in `ctx.options` that neither config file held at startup (another source); a global edit keeps them. */
     const otherAgents = Object.fromEntries(Object.entries(options.agents).filter(([agent]) => !Object.hasOwn(startupAgents, agent)))
@@ -1269,22 +1266,22 @@ export default Plugin.define({
     let fileAgents = agentsKeyOf(startupConfig)
 
     /**
-     * Apply the global file's tiers to the running instance when they changed (or always with
+     * Apply the effective entry's tiers to the running instance when they changed (or always with
      * `force`): resolution, agent models and the `tier` parameter for new sessions follow;
      * running sessions keep the parameter they first saw.
      */
     const reloadTiers = async (force: boolean) => {
       const identity = await resolveIdentity()
-      const file = globalFile()
       const config = agentConfig()
       const agentsKey = agentsKeyOf(config)
       const wanted = parseOptions({ agents: config.agents }).agents
       // A reload caused by the tiers alone keeps the agents it has.
       const agentsChanged = identity.kind === "unique" && agentsKey !== fileAgents
-      // With no global entry only the agents can change (from a project entry).
-      const tiers = file === undefined ? undefined : readTiers(file.text, ownSpec())
+      // A project entry's tiers count only when the host named this instance: on a guess they stay as they are.
+      // With no entry anywhere only the agents can change.
+      const tiers = config.path === undefined || (config.origin === "project" && identity.kind !== "unique") ? undefined : config.tiers
       const key = tiers === undefined ? fileTiers : JSON.stringify(tiers)
-      if (file === undefined ? !agentsChanged : !force && key === fileTiers && !agentsChanged) return
+      if (tiers === undefined ? !agentsChanged : !force && key === fileTiers && !agentsChanged) return
       await exclusive(async () => {
         const previous = { settings, agents: options.agents, roles: options.roles, tiers: options.tiers, classes: options.classes, derived }
         const restore = () => {
@@ -1314,7 +1311,7 @@ export default Plugin.define({
       // Marked applied only once everything above went through, so a failed reload is retried on the next event.
       fileTiers = key
       fileAgents = agentsKey
-      warn(`applied the tiers from ${file?.path ?? config.path ?? "the project config"}`)
+      warn(`applied the tiers from ${config.path ?? "the project config"}`)
     }
 
     const rpc = await ctx.rpc.register(TiersRpc, {
@@ -1365,7 +1362,8 @@ export default Plugin.define({
           warn(`tier ${tier} was written to ${result.path} but not applied`, { error: String(error) })
           throw new Error(`Tier ${tier} was written to ${result.path} but not applied: ${(error as Error).message}. The previous tiers stay in use until the config reloads.`)
         }
-        return { ...result, warnings }
+        const effective = agentConfig()
+        return effective.origin === "project" ? { ...result, warnings, shadowedBy: effective.path } : { ...result, warnings }
       },
       setAgent: async (input) => {
         const { agent, tier } = (input ?? {}) as { agent?: unknown; tier?: unknown }

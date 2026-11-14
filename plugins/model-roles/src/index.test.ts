@@ -1611,6 +1611,58 @@ describe("tiers rpc", () => {
     )
   })
 
+  const tierEntry = (tiers: Record<string, unknown>) =>
+    `{ "plugins": [{ "package": "/x/plugins/model-roles", "options": { "tiers": ${JSON.stringify(tiers)} } }] }\n`
+  const workerModel = (host: ReturnType<typeof createHost>) => host.agents().get("worker")?.model
+  const haikuLow = { providerID: "amazon-bedrock", id: "global.anthropic.claude-haiku-5-5", variant: "low" }
+  const projectTiers = { cheap: { model: [`${sonnet55}#low`] } }
+  const projectOnly = { options: { tiers: projectTiers }, fileText: tierEntry({}), project: { "opencode.json": tierEntry(projectTiers) } }
+  const worker: Agent[] = [{ id: "worker", request: header("cheap") }]
+
+  test("a project entry owns the tiers: a global save does not replace them, and state says the save is shadowed", async () => {
+    await withConfig(
+      async (host, file) => {
+        const projectModel = workerModel(host)
+        expect(projectModel).toMatchObject({ id: "global.anthropic.claude-sonnet-5-5" })
+        const saved = (await host.rpc("set", { tier: "cheap", value: { model: ["amazon-bedrock/global.anthropic.claude-haiku-5-5#low"] } })) as { shadowedBy?: string }
+        expect(saved.shadowedBy).toEndWith(path.join("project", "sub", "opencode.json"))
+        expect(readTiers(readFileSync(file, "utf8"))).toEqual({ cheap: { model: ["amazon-bedrock/global.anthropic.claude-haiku-5-5#low"] } })
+        expect(workerModel(host)).toEqual(projectModel)
+        const state = (await host.rpc("state")) as { agentConfig?: { origin: string } }
+        expect(state.agentConfig?.origin).toBe("project")
+      },
+      worker,
+      projectOnly,
+    )
+  })
+
+  test("a hand edit of the global tiers does not replace the tiers of a project entry", async () => {
+    await withConfig(
+      async (host, file) => {
+        const projectModel = workerModel(host)
+        writeFileSync(file, tierEntry({ cheap: { model: ["amazon-bedrock/global.anthropic.claude-haiku-5-5#low"] } }))
+        host.emit({ type: "config.updated", data: {} })
+        await settle()
+        expect(workerModel(host)).toEqual(projectModel)
+      },
+      worker,
+      projectOnly,
+    )
+  })
+
+  test("without a project entry a global tier save still applies at once and is not shadowed", async () => {
+    await withConfig(
+      async (host) => {
+        expect(workerModel(host)).toEqual(haikuLow)
+        const saved = (await host.rpc("set", { tier: "cheap", value: { model: [`${sonnet55}#low`] } })) as { shadowedBy?: string }
+        expect(saved.shadowedBy).toBeUndefined()
+        expect(workerModel(host)).toMatchObject({ id: "global.anthropic.claude-sonnet-5-5" })
+      },
+      worker,
+      { fileText: tierEntry({}) },
+    )
+  })
+
   test("a project entry under another package string does not shadow the global one; the list is told", async () => {
     await withConfig(
       async (host) => {

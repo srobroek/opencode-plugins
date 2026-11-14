@@ -181,30 +181,34 @@ export function readProjectFiles(directory: string, globalDir: string): ConfigFi
   return files
 }
 
-export type AgentConfig = (
-  | { origin: "global"; path?: string; agents: Record<string, unknown> }
-  | { origin: "project"; path: string; agents: Record<string, unknown> }
+export type EffectiveConfig = (
+  | { origin: "global"; path?: string }
+  | { origin: "project"; path: string }
 ) & {
+  /** `options.tiers` of the effective entry. */
+  tiers: Record<string, unknown>
+  /** `options.agents` of the effective entry. */
+  agents: Record<string, unknown>
   /** A project config naming model-roles by another package string: OpenCode loads it as a second instance. */
   alsoLoads?: string
 }
 
 /**
- * Where the model-roles `agents` come from. OpenCode keys plugin entries by the exact package string and a
- * project entry with the same string replaces the inherited one as a whole (options are not merged). This
- * instance's identity is `spec` (its own package target, when the host says), else the global entry's string.
- * The highest-precedence project file with an entry of that string is the effective one; the global file does
- * not count then. A project entry with another string is a second instance: it never shadows, and its path is
- * reported as `alsoLoads`. With no identity at all (no host answer, no global entry), any model-roles-looking
- * project entry counts. `project` is lowest precedence first.
+ * Where the model-roles options (`tiers` and `agents`) come from. OpenCode keys plugin entries by the exact
+ * package string and a project entry with the same string replaces the inherited one as a whole (options are
+ * not merged). This instance's identity is `spec` (its own package target, when the host says), else the global
+ * entry's string. The highest-precedence project file with an entry of that string is the effective one; the
+ * global file does not count then. A project entry with another string is a second instance: it never shadows,
+ * and its path is reported as `alsoLoads`. With no identity at all (no host answer, no global entry), any
+ * model-roles-looking project entry counts. `project` is lowest precedence first.
  */
-export function effectiveAgents(project: ReadonlyArray<ConfigFile>, global: ConfigFile | undefined, spec?: string): AgentConfig {
+export function effectiveConfig(project: ReadonlyArray<ConfigFile>, global: ConfigFile | undefined, spec?: string): EffectiveConfig {
   const identity = spec ?? (global === undefined ? undefined : findPluginEntry(global.text, spec)?.spec)
   const newestFirst = [...project].reverse()
   const same = newestFirst.find((f) => findPluginEntry(f.text, identity) !== undefined)
   const other = identity === undefined ? undefined : newestFirst.find((f) => findPluginEntry(f.text) !== undefined && findPluginEntry(f.text, identity) === undefined)
   const extra = other === undefined ? {} : { alsoLoads: other.path }
-  if (same !== undefined) return { origin: "project", path: same.path, agents: readAgents(same.text, identity), ...extra }
-  if (global === undefined) return { origin: "global", agents: {}, ...extra }
-  return { origin: "global", path: global.path, agents: readAgents(global.text, identity), ...extra }
+  if (same !== undefined) return { origin: "project", path: same.path, tiers: readTiers(same.text, identity), agents: readAgents(same.text, identity), ...extra }
+  if (global === undefined) return { origin: "global", tiers: {}, agents: {}, ...extra }
+  return { origin: "global", path: global.path, tiers: readTiers(global.text, identity), agents: readAgents(global.text, identity), ...extra }
 }

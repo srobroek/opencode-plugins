@@ -3236,17 +3236,17 @@ function readProjectFiles(directory, globalDir) {
   }
   return files;
 }
-function effectiveAgents(project, global, spec) {
+function effectiveConfig(project, global, spec) {
   const identity = spec ?? (global === undefined ? undefined : findPluginEntry(global.text, spec)?.spec);
   const newestFirst = [...project].reverse();
   const same = newestFirst.find((f) => findPluginEntry(f.text, identity) !== undefined);
   const other = identity === undefined ? undefined : newestFirst.find((f) => findPluginEntry(f.text) !== undefined && findPluginEntry(f.text, identity) === undefined);
   const extra = other === undefined ? {} : { alsoLoads: other.path };
   if (same !== undefined)
-    return { origin: "project", path: same.path, agents: readAgents(same.text, identity), ...extra };
+    return { origin: "project", path: same.path, tiers: readTiers(same.text, identity), agents: readAgents(same.text, identity), ...extra };
   if (global === undefined)
-    return { origin: "global", agents: {}, ...extra };
-  return { origin: "global", path: global.path, agents: readAgents(global.text, identity), ...extra };
+    return { origin: "global", tiers: {}, agents: {}, ...extra };
+  return { origin: "global", path: global.path, tiers: readTiers(global.text, identity), agents: readAgents(global.text, identity), ...extra };
 }
 
 // plugins/model-roles/src/log.ts
@@ -4506,10 +4506,6 @@ ${refs.size}`;
       }
     };
     const pluginOptions = isRecord8(ctx.options) ? ctx.options : {};
-    let fileTiers = (() => {
-      const file = globalFile();
-      return file === undefined ? undefined : JSON.stringify(readTiers(file.text, ownSpec()));
-    })();
     const agentConfig = () => {
       let project = [];
       try {
@@ -4517,23 +4513,23 @@ ${refs.size}`;
         if (typeof directory === "string")
           project = readProjectFiles(directory, configDir());
       } catch {}
-      return effectiveAgents(project, globalFile(), ownSpec());
+      return effectiveConfig(project, globalFile(), ownSpec());
     };
     const agentsKeyOf = (config) => JSON.stringify({ origin: config.origin, path: config.path, agents: parseOptions({ agents: config.agents }).agents });
     const startupConfig = agentConfig();
+    let fileTiers = startupConfig.path === undefined ? undefined : JSON.stringify(startupConfig.tiers);
     const startupAgents = parseOptions({ agents: startupConfig.agents }).agents;
     const otherAgents = Object.fromEntries(Object.entries(options.agents).filter(([agent]) => !Object.hasOwn(startupAgents, agent)));
     let fileAgents = agentsKeyOf(startupConfig);
     const reloadTiers = async (force) => {
       const identity = await resolveIdentity();
-      const file = globalFile();
       const config = agentConfig();
       const agentsKey = agentsKeyOf(config);
       const wanted = parseOptions({ agents: config.agents }).agents;
       const agentsChanged = identity.kind === "unique" && agentsKey !== fileAgents;
-      const tiers2 = file === undefined ? undefined : readTiers(file.text, ownSpec());
+      const tiers2 = config.path === undefined || config.origin === "project" && identity.kind !== "unique" ? undefined : config.tiers;
       const key = tiers2 === undefined ? fileTiers : JSON.stringify(tiers2);
-      if (file === undefined ? !agentsChanged : !force && key === fileTiers && !agentsChanged)
+      if (tiers2 === undefined ? !agentsChanged : !force && key === fileTiers && !agentsChanged)
         return;
       await exclusive(async () => {
         const previous = { settings, agents: options.agents, roles: options.roles, tiers: options.tiers, classes: options.classes, derived };
@@ -4564,7 +4560,7 @@ ${refs.size}`;
       });
       fileTiers = key;
       fileAgents = agentsKey;
-      warn(`applied the tiers from ${file?.path ?? config.path ?? "the project config"}`);
+      warn(`applied the tiers from ${config.path ?? "the project config"}`);
     };
     const rpc = await ctx.rpc.register(TiersRpc, {
       state: async (input) => {
@@ -4615,7 +4611,8 @@ ${refs.size}`;
           warn(`tier ${tier} was written to ${result.path} but not applied`, { error: String(error) });
           throw new Error(`Tier ${tier} was written to ${result.path} but not applied: ${error.message}. The previous tiers stay in use until the config reloads.`);
         }
-        return { ...result, warnings };
+        const effective = agentConfig();
+        return effective.origin === "project" ? { ...result, warnings, shadowedBy: effective.path } : { ...result, warnings };
       },
       setAgent: async (input) => {
         const { agent, tier } = input ?? {};
@@ -4848,7 +4845,7 @@ export {
   describeChoice,
   desiredModels,
   duration,
-  effectiveAgents,
+  effectiveConfig,
   expandRole,
   explainSpawn,
   explicitCandidates,

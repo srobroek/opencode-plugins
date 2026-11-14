@@ -1282,12 +1282,25 @@ var tui_default = Plugin.define({
         current = value;
       }
     };
-    const saved = (result, what) => {
+    const saved = (result, what, shadowed) => {
       const warnings = Array.isArray(result.warnings) ? result.warnings.filter((w) => typeof w === "string") : [];
-      toast(`${what} ${result.path ?? "the global config"}.${warnings.length > 0 ? ` ${warnings.join(" ")}` : ""}`, warnings.length > 0 ? "info" : "success");
+      const note = [...shadowed === undefined ? [] : [shadowed], ...warnings].join(" ");
+      toast(`${what} ${result.path ?? "the global config"}.${note === "" ? "" : ` ${note}`}`, note === "" ? "success" : "info");
     };
-    const save = async (at, draft) => {
+    const save = async (at, state, draft) => {
       const name = draft.row.name;
+      if (state.agentConfig?.origin === "project") {
+        const go = await dialog.confirm({
+          title: "A project config sets the tiers",
+          message: `${state.agentConfig.path ?? "A project config"} has its own model-roles entry. A save here goes to the global config and will not change this project's tiers.`,
+          label: {
+            confirm: "Save to global anyway",
+            cancel: "Cancel"
+          }
+        });
+        if (go !== true)
+          return false;
+      }
       try {
         const result = await rpc.set({
           tier: name,
@@ -1295,6 +1308,10 @@ var tui_default = Plugin.define({
         }, {
           location: at
         });
+        if (result.shadowedBy !== undefined) {
+          saved(result, `Tier ${name} ${draft.isNew ? "added" : "saved"}; written to`, `${result.shadowedBy} overrides it here, so nothing changed in this project.`);
+          return true;
+        }
         saved(result, `Tier ${name} ${draft.isNew ? "added" : "saved"} and applied; written to`);
         return true;
       } catch (error) {
@@ -1324,7 +1341,7 @@ var tui_default = Plugin.define({
         } else if (action === "models") {
           const edited = await editModels(draft, state);
           draft = edited.draft;
-          if (edited.save && await save(at, draft))
+          if (edited.save && await save(at, state, draft))
             return;
         } else if (action === "effort")
           draft = await pickEffort(draft);
@@ -1338,7 +1355,7 @@ var tui_default = Plugin.define({
             draft = setPurpose(draft, purpose);
         } else if (action === "reset")
           draft = reset(draft);
-        else if (action === "save" && await save(at, draft))
+        else if (action === "save" && await save(at, state, draft))
           return;
       }
     };
@@ -1478,11 +1495,11 @@ var tui_default = Plugin.define({
         }
         const choice = await dialog.select({
           title: "Model tiers",
-          placeholder: state.config === undefined ? "Pick a tier" : `Saved to ${state.config}`,
+          placeholder: state.config === undefined ? "Pick a tier" : state.agentConfig?.origin === "project" ? `Saved to ${state.config}; ${state.agentConfig.path ?? "the project config"} overrides the tiers here` : `Saved to ${state.config}`,
           options: [...state.tiers.map((row) => ({
             title: row.name,
             value: row.name,
-            description: `${tierSummary(row)}${row.purposeMissing ? " (no purpose)" : ""}`,
+            description: `${tierSummary(row)}${row.purposeMissing ? " (no purpose)" : ""}${state.agentConfig?.origin === "project" ? " \xB7 overridden by the project config" : ""}`,
             footer: row.cost
           })), {
             title: "Agents\u2026",
