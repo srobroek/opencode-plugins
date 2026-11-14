@@ -449,6 +449,14 @@ describe("/tiers editor", () => {
     expect(h.toasts).toEqual([])
   })
 
+  test("an ambiguous-instance refusal shows like any save error", async () => {
+    const message = "Two model-roles entries are loaded (a, b); /tiers can't tell which one to edit. Edit the config by hand or remove one entry."
+    const h = harness([pick("\u0000agents"), pick("build"), pick("\u0000change"), pick("cheap"), esc, esc, esc], { setAgentFails: message })
+    await h.run()
+    expect(h.agentCalls).toEqual([])
+    expect(h.toasts).toEqual([{ message: `Agent build not saved: ${message}`, variant: "error" }])
+  })
+
   test("a refused agent save shows an error and keeps the details menu", async () => {
     const h = harness(
       [

@@ -191,7 +191,9 @@ this project; if you continue, the toast says nothing changed here. Edits to the
 project file apply on the next config reload, also when the global file has no entry.
 OpenCode keys plugin entries by the exact package string: only a project entry with
 the same string as the global one shadows it. One with another string runs as a second
-instance, and the Agents list notes it.
+instance, and the Agents list notes it. A save needs the host to name exactly one
+loaded model-roles entry that matches a config entry; with two loaded, or no answer,
+`/tiers` refuses before writing and reloads keep the agents from startup.
 
 ### Live config
 

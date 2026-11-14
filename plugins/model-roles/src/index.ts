@@ -1194,10 +1194,12 @@ export default Plugin.define({
     // The `/tiers` TUI dialog reads the tier table and writes `options.tiers` through these.
     const configDir = () => globalConfigDir(process.env, homedir())
     /**
-     * This instance's own package string, when the host says: the `package` source target of the one
-     * loaded plugin with this id. Else undefined, and the global entry's exact string is the identity.
+     * Which config entry this instance is, from the host: exactly one loaded plugin with this id whose
+     * `package` source target is the entry's exact string. Anything else (two instances, no answer) leaves
+     * the identity open, and then nothing may be written or reloaded on a guess.
      */
-    const ownSpec = await (async (): Promise<string | undefined> => {
+    type Identity = { kind: "unique"; spec: string } | { kind: "ambiguous"; targets: string[] } | { kind: "unknown" }
+    const identity = await (async (): Promise<Identity> => {
       try {
         const listed = (await ctx.plugin.list()) as unknown
         const rows = (Array.isArray(listed) ? listed : isRecord(listed) && Array.isArray(listed.data) ? listed.data : []) as Array<{
@@ -1205,12 +1207,22 @@ export default Plugin.define({
           source?: { type?: unknown; target?: unknown }
         }>
         const mine = rows.filter((row) => row.id === "srobroek.model-roles")
-        const target = mine.length === 1 ? mine[0]?.source : undefined
-        return target?.type === "package" && typeof target.target === "string" ? target.target : undefined
+        if (mine.length > 1) return { kind: "ambiguous", targets: mine.map((row) => String(row.source?.target ?? row.source?.type ?? "unknown")) }
+        const source = mine[0]?.source
+        return source?.type === "package" && typeof source.target === "string" ? { kind: "unique", spec: source.target } : { kind: "unknown" }
       } catch {
-        return undefined
+        return { kind: "unknown" }
       }
     })()
+    /** For display and reads only; a loose match (no spec) may stand in when the identity is open. */
+    const ownSpec = identity.kind === "unique" ? identity.spec : undefined
+    /** The exact package string a write may target, or an error: a guess never authorises a write. */
+    const writableSpec = (): string => {
+      if (identity.kind === "ambiguous")
+        throw new Error(`Two model-roles entries are loaded (${identity.targets.join(", ")}); /tiers can't tell which one to edit. Edit the config by hand or remove one entry.`)
+      if (identity.kind === "unknown") throw new Error("The host did not say which model-roles entry this instance is, so /tiers can't tell which one to edit. Edit the config by hand.")
+      return identity.spec
+    }
     const globalFile = () => {
       try {
         return pickConfigFile(readConfigFiles(configDir()), ownSpec)
@@ -1257,7 +1269,7 @@ export default Plugin.define({
       const agentsKey = agentsKeyOf(config)
       const wanted = parseOptions({ agents: config.agents }).agents
       // A reload caused by the tiers alone keeps the agents it has.
-      const agentsChanged = agentsKey !== fileAgents
+      const agentsChanged = identity.kind === "unique" && agentsKey !== fileAgents
       // With no global entry only the agents can change (from a project entry).
       const tiers = file === undefined ? undefined : readTiers(file.text, ownSpec)
       const key = tiers === undefined ? fileTiers : JSON.stringify(tiers)
@@ -1325,6 +1337,7 @@ export default Plugin.define({
       },
       set: async (input) => {
         const { tier, value } = (input ?? {}) as { tier?: unknown; value?: unknown }
+        const spec = writableSpec()
         if (typeof tier !== "string" || !TIER_NAME.test(tier)) throw new Error(`Invalid tier name ${JSON.stringify(tier)}`)
         const config = value === null || value === undefined ? undefined : compact(parseTierConfig(value))
         await queue(async () => {
@@ -1332,7 +1345,7 @@ export default Plugin.define({
         })
         const { errors, warnings } = validateTierConfig(config, available, catalog)
         if (errors.length > 0) throw new Error(`Tier ${tier} not saved: ${errors.join(" ")}`)
-        const result = writeTier(configDir(), tier, config, ownSpec)
+        const result = writeTier(configDir(), tier, config, spec)
         warn(`${config === undefined ? "removed" : "set"} tier ${tier} in ${result.path}`)
         for (const warning of warnings) warn(`tier ${tier}: ${warning}`)
         try {
@@ -1345,6 +1358,7 @@ export default Plugin.define({
       },
       setAgent: async (input) => {
         const { agent, tier } = (input ?? {}) as { agent?: unknown; tier?: unknown }
+        const spec = writableSpec()
         if (typeof agent !== "string" || agent.trim() === "") throw new Error(`Invalid agent ${JSON.stringify(agent)}`)
         const value = tier === null || tier === undefined ? undefined : tier
         await queue(async () => {
@@ -1355,7 +1369,7 @@ export default Plugin.define({
           if (error !== undefined) throw new Error(`Agent ${agent} not saved: ${error}`)
         }
         if (!(await listAgents()).some((a) => a.id === agent)) throw new Error(`Agent ${agent} not saved: the host lists no such agent.`)
-        const result = writeAgentTier(configDir(), agent, value as string | undefined, ownSpec)
+        const result = writeAgentTier(configDir(), agent, value as string | undefined, spec)
         warn(`${value === undefined ? "removed the tier of" : "set the tier of"} agent ${agent} in ${result.path}`)
         try {
           await queue(() => reloadTiers(true))

@@ -123,7 +123,7 @@ function createHost(input: {
   const context = {
     options: input.options,
     ...(input.directory === undefined ? {} : { location: { directory: input.directory } }),
-    ...(input.plugin === undefined ? {} : { plugin: input.plugin }),
+    plugin: input.plugin ?? { list: async () => ({ data: [{ id: "srobroek.model-roles", source: { type: "package", target: "/x/plugins/model-roles" } }] }) },
     agent: {
       transform,
       list: async () => ({ data: listOverride ? listOverride() : [...agents.values()].map((a) => structuredClone(a)) }),
@@ -1665,6 +1665,46 @@ describe("tiers rpc", () => {
       },
       agentFixtures,
       { options: { agents: { glob: "reviewer" } }, fileText: "{}\n", project: { "opencode.json": entry({ glob: "reviewer" }) } },
+    )
+  })
+
+  const row = (target: string) => ({ id: "srobroek.model-roles", source: { type: "package", target } })
+  const refused = async (plugin: unknown, message: RegExp) => {
+    const two = `{ "plugins": [{ "package": "/x/plugins/model-roles", "options": { "agents": { "glob": "cheap" } } }, { "package": "/z/plugins/model-roles", "options": { "agents": { "glob": "reviewer" } } }] }\n`
+    await withConfig(
+      async (host, file) => {
+        const before = readFileSync(file, "utf8")
+        await expect(host.rpc("setAgent", { agent: "glob", tier: "strong" })).rejects.toThrow(message)
+        await expect(host.rpc("set", { tier: "cheap", value: { effort: "high" } })).rejects.toThrow(message)
+        expect(readFileSync(file, "utf8")).toBe(before)
+        // A reload keeps the startup assignments instead of applying another entry's.
+        writeFileSync(file, two.replace('"glob": "reviewer"', '"glob": "strong"'))
+        host.emit({ type: "config.updated", data: {} })
+        await settle()
+        expect(await agentRow(host, "glob")).toMatchObject({ tier: "reviewer", source: "options" })
+      },
+      agentFixtures,
+      { options: { agents: { glob: "reviewer" } }, fileText: two, plugin },
+    )
+  }
+
+  test("two loaded instances with this id: saves refuse before writing, reloads keep the startup agents", async () => {
+    await refused({ list: async () => ({ data: [row("/x/plugins/model-roles"), row("/z/plugins/model-roles")] }) }, /Two model-roles entries are loaded \(\/x\/plugins\/model-roles, \/z\/plugins\/model-roles\); \/tiers can't tell which one to edit/)
+  })
+
+  test("no host answer: saves refuse too", async () => {
+    await refused({ list: async () => Promise.reject(new Error("down")) }, /did not say which model-roles entry/)
+  })
+
+  test("one row whose target names no config entry refuses without writing", async () => {
+    await withConfig(
+      async (host, file) => {
+        const before = readFileSync(file, "utf8")
+        await expect(host.rpc("setAgent", { agent: "glob", tier: "strong" })).rejects.toThrow(/No model-roles plugin entry/)
+        expect(readFileSync(file, "utf8")).toBe(before)
+      },
+      agentFixtures,
+      { plugin: { list: async () => ({ data: [row("/nowhere/model-roles")] }) } },
     )
   })
 
