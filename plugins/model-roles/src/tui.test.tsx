@@ -4,7 +4,7 @@ import tui from "./tui.tsx"
 
 type Opts = {
   title: string
-  options?: ReadonlyArray<{ title: string; value: unknown }>
+  options?: ReadonlyArray<{ title: string; value: unknown; description?: string; disabled?: boolean }>
   current?: unknown
   actions?: ReadonlyArray<{ bind: string; onTrigger: (value?: never) => void }>
   [key: string]: unknown
@@ -31,7 +31,7 @@ const tier = (name: string, configured?: Record<string, unknown>) => ({
   ...(configured === undefined ? {} : { configured }),
 })
 
-function harness(script: Step[], opts: { project?: string; setFails?: string; setAgentFails?: string; persist?: (value: Record<string, unknown>) => Record<string, unknown>; writeWarning?: string } = {}) {
+function harness(script: Step[], opts: { project?: string; setFails?: string; setAgentFails?: string; persist?: (value: Record<string, unknown>) => Record<string, unknown>; writeWarning?: string; usage?: unknown } = {}) {
   const saved: Record<string, Record<string, unknown>> = {}
   const setCalls: Array<{ tier: string; value: unknown }> = []
   const agentCalls: Array<{ agent: string; tier: string | null }> = []
@@ -81,6 +81,7 @@ function harness(script: Step[], opts: { project?: string; setFails?: string; se
       const agents = [agentRow("build", { tier: "strong", source: "header" }), agentRow("plan")]
       return { tiers, models, agents, config: "/cfg", ...(opts.project === undefined ? {} : { agentConfig: { origin: "project", path: opts.project } }) }
     },
+    usage: async () => opts.usage ?? { days: 90, tiers: [] },
     setAgent: async (input: { agent: string; tier: string | null }) => {
       if (opts.setAgentFails !== undefined) throw new Error(opts.setAgentFails)
       agentCalls.push(input)
@@ -541,5 +542,70 @@ describe("/tiers editor", () => {
     const h = harness([pick("\u0000add"), () => "docs", () => "writing docs", pick("models"), pick("b/two"), esc, pick("save"), esc])
     await h.run()
     expect(h.setCalls).toEqual([{ tier: "docs", value: { model: ["b/two"], purpose: "writing docs" } }])
+  })
+})
+
+describe("/tiers usage", () => {
+  const stats = (n: number, succeeded: number, cost?: number) => ({
+    n,
+    succeeded,
+    failed: n - succeeded,
+    interrupted: 0,
+    successRate: succeeded / n,
+    ms: { mean: 2000, p50: 2000, p90: 3000 },
+    failoverRate: 0,
+    resumes: 0,
+    ...(cost === undefined ? {} : { cost }),
+  })
+  const usage = {
+    days: 90,
+    tiers: [
+      { tier: "cheap", total: stats(4, 3, 0.5), agents: [{ agent: "explore", ...stats(3, 3, 0.4) }, { agent: "build", ...stats(1, 0) }] },
+      { tier: "strong", total: stats(1, 1, 2), agents: [{ agent: "plan", ...stats(1, 1, 2) }] },
+    ],
+  }
+
+  test("lists a short row per tier; Enter shows the agents as disabled rows; Esc goes back", async () => {
+    const h = harness(
+      [
+        pick("\u0000usage"),
+        (o) => {
+          expect(o.title).toBe("Usage per tier")
+          expect(o.options).toEqual([
+            { title: "cheap", value: "cheap", description: "4 runs · 75% ok · p50 2s · $0.500" },
+            { title: "strong", value: "strong", description: "1 run · 100% ok · p50 2s · $2.00" },
+          ])
+          return "cheap"
+        },
+        (o) => {
+          expect(o.title).toBe("Usage: cheap")
+          expect(o.options).toEqual([
+            { title: "explore", value: "explore", description: "3 runs · 100% ok · p50 2s · $0.400", disabled: true },
+            { title: "build", value: "build", description: "1 run · 0% ok · p50 2s · n/a", disabled: true },
+          ])
+          return ESC
+        },
+        esc, // back from the tier list
+        (o) => {
+          expect(o.title).toBe("Model tiers")
+          return ESC
+        },
+      ],
+      { usage },
+    )
+    await h.run()
+    expect(h.setCalls).toEqual([])
+  })
+
+  test("an empty ledger shows one disabled row", async () => {
+    const h = harness([
+      pick("\u0000usage"),
+      (o) => {
+        expect(o.options).toEqual([{ title: "No finished spawns recorded", value: "", disabled: true }])
+        return ESC
+      },
+      esc,
+    ])
+    await h.run()
   })
 })

@@ -78,6 +78,7 @@ import { createLedgerStore, LEDGER_DISPOSE_TIMEOUT_MS, type Usage } from "./ledg
 import { hostWarn } from "./log.ts"
 import { decideFailureNotice, decideRecovery, type FailureReport, forgetSession, NOTICE_DEDUPE_MS, newNoticeState, type RequestLog, recordRequest, settleRequest } from "./outage.ts"
 import { explainSpawn, formatReceipts, pushReceipt, RECEIPTS_KEY, type Receipt, readReceipts, type SpawnRule, type SpawnSource } from "./receipt.ts"
+import { formatUsage, summarizeUsage } from "./report.ts"
 import {
   type AvailableModel,
   desiredModels,
@@ -144,6 +145,7 @@ export * from "./guard.ts"
 export * from "./health.ts"
 export * from "./ledger.ts"
 export * from "./receipt.ts"
+export * from "./report.ts"
 export * from "./resolve.ts"
 export { TiersRpc } from "./rpc.ts"
 export * from "./spawn-role.ts"
@@ -935,7 +937,7 @@ export default Plugin.define({
             report.warnings.push(
               `Agents ${stuck.join(", ")} still run another model than their tier resolves to: re-registering gave up after ${MAX_REREGISTER} tries (a later plugin or config keeps setting their model).`,
             )
-          const content = [formatCheck(report), ...formatReceipts(receipts), ...formatHistory(autoHistory), `outcome ledger: ${outcomes.size()} spawns recorded`].join("\n")
+          const content = [formatCheck(report), ...formatReceipts(receipts), ...formatHistory(autoHistory), ...formatUsage(summarizeUsage(await outcomes.records(), Date.now()))].join("\n")
           return { content, metadata: { roles: report.roles.length, agents: report.agents.length, auto: autoHistory.length, spawns: receipts.length } }
         },
       })
@@ -1626,6 +1628,10 @@ export default Plugin.define({
     }
 
     const rpc = await ctx.rpc.register(TiersRpc, {
+      usage: async (input) => {
+        const days = (input as { days?: unknown } | undefined)?.days
+        return summarizeUsage(await outcomes.records(), Date.now(), typeof days === "number" ? days : undefined)
+      },
       state: async (input) => {
         await queue(async () => {
           await refresh()

@@ -392,15 +392,39 @@ The plugin keeps one record per child session in plugin storage, under
 session, how often the child was resumed, summed tokens (input, output, reasoning,
 cache read and write), cost, step count, elapsed time, how the run ended
 (`succeeded`, `failed:<class>` or `interrupted`) and whether a failover moved it.
-It stores no prompt, description, result or command text. Nothing reads the ledger
-yet; it is the evidence for later evaluation-based routing.
+It stores no prompt, description, result or command text. Nothing decides from the
+ledger; it is the evidence for later evaluation-based routing, and a read-only
+usage report (below) summarises it.
 
 This first phase records only tier-routed spawns: those that reach a session
 through a tier, role or `auto` decision, which the plugin links to the child
 session it created. Not recorded: spawns without a tier (the agent keeps its own
 model), spawns whose explicit `model` or agent pin wins, resumed children with
 no earlier record, and the parent session itself. Records older than 90 days go,
-and only the newest 1000 stay; `model_roles_check` reports how many exist.
+and only the newest 1000 stay.
+
+### Usage report
+
+`model_roles_check` ends with a "Usage per tier" section, and `/tiers` has a
+read-only "Usage…" entry (Enter on a tier lists its agents; Esc goes back). Both
+come from one pure summary over the ledger, covering the whole 90-day retention.
+Per tier, and per agent within it (the check shows the top 3 agents), it gives:
+
+- `n`: runs that ended, with the succeeded, failed and interrupted counts and the
+  success rate (succeeded ÷ n). A record still running is not counted.
+- Elapsed time: mean, p50 and p90 (nearest rank), from the first spawn to the last end.
+- Tokens: totals and per-run means for input, output, reasoning, cache read and
+  cache write, over the runs that reported tokens. Cache share is
+  read ÷ (input + read).
+- Cost: the sum as the host reported it, and cost per success, which is all cost
+  of the group (failed runs too) ÷ the successes; n/a without a success.
+- Fallback rate: the share of runs a failover moved to another model, and the
+  resume count.
+
+The ledger stores 0 for tokens or cost the host never reported, so a run with no
+tokens (or zero cost) counts as unreported: it is left out of the token means and
+the cost sum, and a group with none shows n/a, never 0. Spawns without a tier
+appear under `(none)`.
 
 The ledger is advisory telemetry: nothing decides anything from it. Writes to one
 record land in order, and the plugin assumes plugin storage calls settle. At shutdown

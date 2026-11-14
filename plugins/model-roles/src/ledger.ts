@@ -392,6 +392,28 @@ export function createLedgerStore(storage: LedgerStorage, options: LedgerStoreOp
       }
     },
     size: () => index.size,
+    /**
+     * Every record, read-only: stored ones plus the running or unwritten ones in memory,
+     * which are newer. A storage failure yields what was read.
+     */
+    records: async (): Promise<OutcomeRecord[]> => {
+      const found = new Map<string, OutcomeRecord>()
+      try {
+        let after: string | undefined
+        do {
+          const page = await storage.scan(after === undefined ? { prefix: OUTCOME_KEY_PREFIX } : { prefix: OUTCOME_KEY_PREFIX, after })
+          for (const entry of page.entries) {
+            const record = readOutcome(entry.value)
+            if (record !== undefined) found.set(entry.key.slice(OUTCOME_KEY_PREFIX.length), record)
+          }
+          after = page.next
+        } while (after !== undefined)
+      } catch (error) {
+        warn("outcome ledger: could not read the records for the report", { error: String(error) })
+      }
+      for (const [id, record] of active) if (index.has(id)) found.set(id, record)
+      return [...found.values()]
+    },
     /** Records held in memory. */
     active: () => active.size,
     /** Counted operations waiting on this child. */

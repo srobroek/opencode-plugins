@@ -3573,6 +3573,27 @@ function createLedgerStore(storage, options = {}) {
       }
     },
     size: () => index.size,
+    records: async () => {
+      const found = new Map;
+      try {
+        let after;
+        do {
+          const page = await storage.scan(after === undefined ? { prefix: OUTCOME_KEY_PREFIX } : { prefix: OUTCOME_KEY_PREFIX, after });
+          for (const entry of page.entries) {
+            const record = readOutcome(entry.value);
+            if (record !== undefined)
+              found.set(entry.key.slice(OUTCOME_KEY_PREFIX.length), record);
+          }
+          after = page.next;
+        } while (after !== undefined);
+      } catch (error) {
+        warn("outcome ledger: could not read the records for the report", { error: String(error) });
+      }
+      for (const [id, record] of active)
+        if (index.has(id))
+          found.set(id, record);
+      return [...found.values()];
+    },
     active: () => active.size,
     queued: (id) => depth.get(id) ?? 0,
     spawn: async (id, facts) => {
@@ -3839,6 +3860,138 @@ function formatReceipts(list) {
   return lines;
 }
 
+// plugins/model-roles/src/report.ts
+var DAY_MS = 24 * 60 * 60 * 1000;
+var REPORT_DEFAULT_DAYS = LEDGER_MAX_AGE_MS / DAY_MS;
+var CHECK_TOP_AGENTS = 3;
+var NO_TIER = "(none)";
+var finite = (value) => typeof value === "number" && Number.isFinite(value) ? value : undefined;
+var kindOf = (outcome) => {
+  if (outcome === "succeeded" || outcome === "interrupted")
+    return outcome;
+  return typeof outcome === "string" && outcome.startsWith("failed:") ? "failed" : undefined;
+};
+var percentile = (sorted, p) => sorted[Math.max(0, Math.ceil(p * sorted.length) - 1)] ?? 0;
+var TOKEN_FIELDS = [
+  ["input", "inputTokens"],
+  ["output", "outputTokens"],
+  ["reasoning", "reasoningTokens"],
+  ["cacheRead", "cacheReadTokens"],
+  ["cacheWrite", "cacheWriteTokens"]
+];
+function stats(records) {
+  const kinds = { succeeded: 0, failed: 0, interrupted: 0 };
+  const times = [];
+  const total = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 };
+  let tokenRuns = 0;
+  let cost = 0;
+  let costRuns = 0;
+  let failovers = 0;
+  let resumes = 0;
+  for (const r of records) {
+    const kind = kindOf(r.outcome);
+    if (kind !== undefined)
+      kinds[kind]++;
+    times.push(finite(r.ms) ?? 0);
+    const values = TOKEN_FIELDS.map(([, field]) => finite(r[field]) ?? 0);
+    if (values.some((v) => v > 0)) {
+      tokenRuns++;
+      TOKEN_FIELDS.forEach(([key], i) => {
+        total[key] += values[i] ?? 0;
+      });
+    }
+    const c = finite(r.cost) ?? 0;
+    if (c > 0) {
+      cost += c;
+      costRuns++;
+    }
+    if (r.failedOver === true)
+      failovers++;
+    resumes += finite(r.resumes) ?? 0;
+  }
+  const n = records.length;
+  const sorted = [...times].sort((a, b) => a - b);
+  const out = {
+    n,
+    ...kinds,
+    successRate: kinds.succeeded / n,
+    ms: { mean: times.reduce((a, b) => a + b, 0) / n, p50: percentile(sorted, 0.5), p90: percentile(sorted, 0.9) },
+    failoverRate: failovers / n,
+    resumes
+  };
+  if (tokenRuns > 0) {
+    const mean = Object.fromEntries(Object.entries(total).map(([k, v]) => [k, v / tokenRuns]));
+    const denominator = total.input + total.cacheRead;
+    out.tokens = { runs: tokenRuns, total, mean, ...denominator > 0 ? { cacheShare: total.cacheRead / denominator } : {} };
+  }
+  if (costRuns > 0) {
+    out.cost = cost;
+    if (kinds.succeeded > 0)
+      out.costPerSuccess = cost / kinds.succeeded;
+  }
+  return out;
+}
+var byName = (a, b) => a < b ? -1 : a > b ? 1 : 0;
+function summarizeUsage(records, now, days) {
+  const window = days !== undefined && Number.isFinite(days) && days > 0 ? days : REPORT_DEFAULT_DAYS;
+  const since = now - window * DAY_MS;
+  const byTier = new Map;
+  for (const r of records) {
+    if (kindOf(r.outcome) === undefined || !(r.at >= since))
+      continue;
+    const tier = r.tier ?? NO_TIER;
+    const agents = byTier.get(tier) ?? new Map;
+    agents.set(r.agent, [...agents.get(r.agent) ?? [], r]);
+    byTier.set(tier, agents);
+  }
+  const tiers = [...byTier.entries()].sort(([a], [b]) => byName(a, b)).map(([tier, agents]) => ({
+    tier,
+    total: stats([...agents.values()].flat()),
+    agents: [...agents.entries()].map(([agent, rs]) => ({ agent, ...stats(rs) })).sort((a, b) => b.n - a.n || byName(a.agent, b.agent))
+  }));
+  return { days: window, tiers };
+}
+function readUsage(value) {
+  if (typeof value !== "object" || value === null)
+    return;
+  const { tiers, days } = value;
+  return Array.isArray(tiers) && typeof days === "number" ? value : undefined;
+}
+var NA = "n/a";
+var percent = (v) => v === undefined ? NA : `${Math.round(v * 100)}%`;
+var count = (v) => v >= 1e6 ? `${+(v / 1e6).toFixed(1)}M` : v >= 1000 ? `${+(v / 1000).toFixed(1)}k` : `${Math.round(v)}`;
+var money = (v) => v === undefined ? NA : `$${v.toFixed(v >= 1 ? 2 : 3)}`;
+var duration2 = (ms) => ms < 1000 ? `${Math.round(ms)}ms` : ms < 60000 ? `${+(ms / 1000).toFixed(1)}s` : `${+(ms / 60000).toFixed(1)}m`;
+var plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+function usageBrief(s) {
+  return `${plural(s.n, "run")} \xB7 ${percent(s.successRate)} ok \xB7 p50 ${duration2(s.ms.p50)} \xB7 ${money(s.cost)}`;
+}
+function usageLine(s) {
+  const t = s.tokens;
+  const tokens = t === undefined ? "tokens n/a" : `in ${count(t.total.input)} out ${count(t.total.output)} reasoning ${count(t.total.reasoning)} cache r${count(t.total.cacheRead)}/w${count(t.total.cacheWrite)} (${percent(t.cacheShare)} read)`;
+  return [
+    `${plural(s.n, "run")}: ${s.succeeded} ok, ${s.failed} failed, ${s.interrupted} interrupted (${percent(s.successRate)})`,
+    `time mean ${duration2(s.ms.mean)} p50 ${duration2(s.ms.p50)} p90 ${duration2(s.ms.p90)}`,
+    tokens,
+    `cost ${money(s.cost)} (${money(s.costPerSuccess)}/success)`,
+    `failover ${percent(s.failoverRate)}`,
+    plural(s.resumes, "resume")
+  ].join(", ");
+}
+function formatUsage(report) {
+  const lines = [`Usage per tier (last ${plural(report.days, "day")}):`];
+  if (report.tiers.length === 0)
+    return [...lines, "  no finished spawns recorded"];
+  for (const { tier, total, agents } of report.tiers) {
+    lines.push(`  ${tier}: ${usageLine(total)}`);
+    for (const a of agents.slice(0, CHECK_TOP_AGENTS))
+      lines.push(`    - ${a.agent}: ${usageBrief(a)}`);
+    if (agents.length > CHECK_TOP_AGENTS)
+      lines.push(`    - ${agents.length - CHECK_TOP_AGENTS} more agents`);
+  }
+  return lines;
+}
+
 // plugins/model-roles/src/rpc.ts
 import { Rpc } from "@opencode/plugin/rpc";
 var RPC_ID = "model-roles";
@@ -3847,6 +4000,10 @@ var TiersRpc = Rpc.define({
   methods: {
     state: {
       input: { type: "object", properties: { draft: { type: "object" } } },
+      output: { type: "object" }
+    },
+    usage: {
+      input: { type: "object", properties: { days: { type: "number" } } },
       output: { type: "object" }
     },
     set: {
@@ -4355,11 +4512,11 @@ ${refs.size}`;
         });
       } catch {}
     };
-    const announce = async (report) => {
-      const notice = decideFailureNotice(noticeState, report);
+    const announce = async (report2) => {
+      const notice = decideFailureNotice(noticeState, report2);
       if (notice === undefined)
         return;
-      await notify(notice.sessionID, notice.text, report.subagent === undefined ? "fallback" : "subagent-fallback");
+      await notify(notice.sessionID, notice.text, report2.subagent === undefined ? "fallback" : "subagent-fallback");
     };
     const requestLog = new Map;
     const onSessionSucceeded = async (sessionID, model) => {
@@ -4733,13 +4890,13 @@ ${refs.size}`;
         execute: async () => {
           await refresh();
           const agents = await listAgents();
-          const report = checkRoles(options, available, agents, health2, Date.now(), runtime.purposes, derived);
-          report.warnings.push(...tierWarnings(settings, { roles: options.roles, tiers: options.tiers ?? {} }, available));
+          const report2 = checkRoles(options, available, agents, health2, Date.now(), runtime.purposes, derived);
+          report2.warnings.push(...tierWarnings(settings, { roles: options.roles, tiers: options.tiers ?? {} }, available));
           if (stuck.length > 0)
-            report.warnings.push(`Agents ${stuck.join(", ")} still run another model than their tier resolves to: re-registering gave up after ${MAX_REREGISTER} tries (a later plugin or config keeps setting their model).`);
-          const content = [formatCheck(report), ...formatReceipts(receipts), ...formatHistory(autoHistory), `outcome ledger: ${outcomes.size()} spawns recorded`].join(`
+            report2.warnings.push(`Agents ${stuck.join(", ")} still run another model than their tier resolves to: re-registering gave up after ${MAX_REREGISTER} tries (a later plugin or config keeps setting their model).`);
+          const content = [formatCheck(report2), ...formatReceipts(receipts), ...formatHistory(autoHistory), ...formatUsage(summarizeUsage(await outcomes.records(), Date.now()))].join(`
 `);
-          return { content, metadata: { roles: report.roles.length, agents: report.agents.length, auto: autoHistory.length, spawns: receipts.length } };
+          return { content, metadata: { roles: report2.roles.length, agents: report2.agents.length, auto: autoHistory.length, spawns: receipts.length } };
         }
       });
     });
@@ -5354,6 +5511,10 @@ ${refs.size}`;
       warn(`applied the tiers from ${config.path ?? "the project config"}`);
     };
     const rpc = await ctx.rpc.register(TiersRpc, {
+      usage: async (input) => {
+        const days = input?.days;
+        return summarizeUsage(await outcomes.records(), Date.now(), typeof days === "number" ? days : undefined);
+      },
       state: async (input) => {
         await queue(async () => {
           await refresh();
@@ -5619,6 +5780,7 @@ export {
   BUILTIN_TIERS,
   CATALOG_LIMIT,
   CHECK_TOOL,
+  CHECK_TOP_AGENTS,
   CLASSIFY_FALLBACK,
   CLASSIFY_KEY_PREFIX,
   CLASSIFY_TIMEOUT_MS,
@@ -5658,6 +5820,7 @@ export {
   MAX_REREGISTER,
   MAX_SESSION_DEPTH,
   NOTICE_DEDUPE_MS,
+  NO_TIER,
   OUTCOME_KEY_PREFIX,
   PENDING_SPAWN_MS,
   PLUGIN_SPEC,
@@ -5665,6 +5828,7 @@ export {
   RECEIPT_LIMIT,
   RECENT_MS,
   REFERENCE_PROVIDERS,
+  REPORT_DEFAULT_DAYS,
   ROLE_ALIAS_DESCRIPTION,
   ROLE_HEADER,
   ROLE_PARAM,
@@ -5737,6 +5901,7 @@ export {
   formatCheck,
   formatHistory,
   formatReceipts,
+  formatUsage,
   globalConfigDir,
   healthEntry,
   healthKey,
@@ -5800,6 +5965,7 @@ export {
   readReceipts,
   readState,
   readTiers,
+  readUsage,
   recordFailure,
   resolveRole,
   resolveTier,
@@ -5821,6 +5987,7 @@ export {
   stripRoleHeader,
   subagentNote,
   summarize,
+  summarizeUsage,
   switchNote,
   textHash,
   tierEffort,
@@ -5833,6 +6000,8 @@ export {
   tierSummary,
   tierWarnings,
   toJsonSchema,
+  usageBrief,
+  usageLine,
   userPin,
   validateTierConfig,
   vendorOf,

@@ -1245,7 +1245,8 @@ describe("runtime fallback", () => {
       expect(JSON.stringify(first)).not.toContain("secret prompt")
       expect(host.storage.get("outcome:c2")).toMatchObject({ outcome: "failed:auth", steps: 0 })
       const check = (await host.tools.get("model_roles_check")?.execute({}))?.content
-      expect(check).toContain("outcome ledger: 2 spawns recorded")
+      expect(check).toContain("Usage per tier (last 90 days):")
+      expect(check).toContain("  standard: 2 runs: 1 ok, 1 failed, 0 interrupted (50%)")
       host.close()
       await cleanup()
     } finally {
