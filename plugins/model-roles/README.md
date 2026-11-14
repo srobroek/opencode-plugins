@@ -402,6 +402,12 @@ model), spawns whose explicit `model` or agent pin wins, resumed children with
 no earlier record, and the parent session itself. Records older than 90 days go,
 and only the newest 1000 stay; `model_roles_check` reports how many exist.
 
+The ledger is advisory telemetry: nothing decides anything from it. Writes to one
+record land in order, and the plugin assumes plugin storage calls settle. At shutdown
+it waits up to 10 seconds for pending writes and logs what stays unwritten. A write
+still in flight after that can finish after a reload and overwrite the new instance's
+write for the same record. That is accepted.
+
 ## Subagent model guard
 
 An agent with no model and no resolvable tier inherits the session's model. The

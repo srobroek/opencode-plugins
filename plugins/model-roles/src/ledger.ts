@@ -199,6 +199,10 @@ const addUsages = (a: Usage, b: Usage): Usage => ({
  * because a call that was given up on cannot be cancelled and could still land after a newer
  * write. The store assumes the host's plugin storage calls settle. After `dispose` begins no
  * new operation is admitted.
+ *
+ * Design limit: a writer still in flight when `dispose`'s bound runs out can complete after a
+ * reload and overwrite the new instance's write for that key. That is accepted: storage is
+ * assumed to settle, and the ledger is advisory telemetry, never read for a decision.
  */
 export function createLedgerStore(storage: LedgerStorage, options: LedgerStoreOptions = {}) {
   const debounceMs = options.debounceMs ?? LEDGER_DEBOUNCE_MS
@@ -417,10 +421,10 @@ export function createLedgerStore(storage: LedgerStorage, options: LedgerStoreOp
     flush,
     /**
      * Admits nothing new, writes what is waiting, drains every child's queue, then retries the
-     * records whose write failed through the same queues and drains again. After `disposeTimeoutMs`
+     * records whose write failed through the same queues and drains again. After `timeoutMs` (default `disposeTimeoutMs`)
      * it logs what is left unwritten and returns; nothing is cancelled or reordered.
      */
-    async dispose() {
+    async dispose(timeoutMs: number = disposeTimeoutMs) {
       const flushing = flush(false)
       closed = true
       const drain = async () => {
@@ -436,13 +440,13 @@ export function createLedgerStore(storage: LedgerStorage, options: LedgerStoreOp
       })()
       let bound: ReturnType<typeof setTimeout> | undefined
       const expired = new Promise<"expired">((resolve) => {
-        bound = setTimeout(() => resolve("expired"), disposeTimeoutMs)
+        bound = setTimeout(() => resolve("expired"), timeoutMs)
         ;(bound as { unref?: () => void }).unref?.()
       })
       const result = await Promise.race([drained, expired])
       clearTimeout(bound)
       const left = unwritten()
-      if (result === "expired") warn(`outcome ledger: dispose gave up after ${disposeTimeoutMs}ms with ${outstanding.size} operations unfinished; unwritten: ${left.join(", ") || "none"}`)
+      if (result === "expired") warn(`outcome ledger: dispose gave up after ${timeoutMs}ms with ${outstanding.size} operations unfinished; unwritten: ${left.join(", ") || "none"}`)
       else if (left.length > 0) warn(`outcome ledger: ${left.length} records could not be written: ${left.join(", ")}`)
     },
   }

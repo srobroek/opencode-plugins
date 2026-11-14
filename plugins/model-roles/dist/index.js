@@ -3602,7 +3602,7 @@ function createLedgerStore(storage, options = {}) {
     end: (id, outcome, at) => change(id, (l, i) => onEnd(l, i, outcome, at), "end"),
     failover: (id) => change(id, onFailover, "now"),
     flush,
-    async dispose() {
+    async dispose(timeoutMs = disposeTimeoutMs) {
       const flushing = flush(false);
       closed = true;
       const drain = async () => {
@@ -3619,14 +3619,14 @@ function createLedgerStore(storage, options = {}) {
       })();
       let bound;
       const expired = new Promise((resolve) => {
-        bound = setTimeout(() => resolve("expired"), disposeTimeoutMs);
+        bound = setTimeout(() => resolve("expired"), timeoutMs);
         bound.unref?.();
       });
       const result = await Promise.race([drained, expired]);
       clearTimeout(bound);
       const left = unwritten();
       if (result === "expired")
-        warn(`outcome ledger: dispose gave up after ${disposeTimeoutMs}ms with ${outstanding.size} operations unfinished; unwritten: ${left.join(", ") || "none"}`);
+        warn(`outcome ledger: dispose gave up after ${timeoutMs}ms with ${outstanding.size} operations unfinished; unwritten: ${left.join(", ") || "none"}`);
       else if (left.length > 0)
         warn(`outcome ledger: ${left.length} records could not be written: ${left.join(", ")}`);
     }
@@ -4463,16 +4463,23 @@ ${refs.size}`;
       }));
     };
     const snapshotWrites = new Map;
+    const snapshotWork = new Set;
+    let snapshotsClosed = false;
+    const trackSnapshotWork = (work) => {
+      snapshotWork.add(work);
+      work.finally(() => snapshotWork.delete(work));
+    };
     const persistSnapshot = (childID) => {
       const run = (snapshotWrites.get(childID) ?? Promise.resolve()).then(async () => {
         const snapshot = childModels.get(childID);
-        if (snapshot === undefined)
+        if (snapshot === undefined || snapshotsClosed)
           return;
         try {
           await ctx.storage.set(`${SPAWN_MODEL_KEY_PREFIX}${childID}`, snapshot);
         } catch {}
       });
       snapshotWrites.set(childID, run);
+      trackSnapshotWork(run);
       run.then(() => {
         if (snapshotWrites.get(childID) === run)
           snapshotWrites.delete(childID);
@@ -4526,28 +4533,36 @@ ${refs.size}`;
       failedOver: true
     });
     const noteFailover = (childID, model, role) => {
-      const storedOf = async () => readSnapshot(await ctx.storage.get(`${SPAWN_MODEL_KEY_PREFIX}${childID}`).catch(() => {
+      if (snapshotsClosed)
         return;
-      }));
       const known = childModels.get(childID);
-      if (known === undefined && role === undefined) {
-        (async () => {
-          const stored = await storedOf();
-          if (stored === undefined || childModels.has(childID))
-            return;
-          childModels.set(childID, failoverSnapshot(stored, model, role));
-          await persistSnapshot(childID);
-        })().catch(() => {});
-        return;
-      }
       const mine = failoverSnapshot(known, model, role);
       childModels.set(childID, mine);
-      (async () => {
-        const stored = known === undefined ? await storedOf() : undefined;
-        if (stored !== undefined && childModels.get(childID) === mine)
-          childModels.set(childID, failoverSnapshot(stored, model, role));
+      const background = (async () => {
+        if (known === undefined) {
+          const stored = readSnapshot(await ctx.storage.get(`${SPAWN_MODEL_KEY_PREFIX}${childID}`).catch(() => {
+            return;
+          }));
+          if (snapshotsClosed || childModels.get(childID) !== mine)
+            return;
+          if (stored !== undefined)
+            childModels.set(childID, failoverSnapshot(stored, model, role));
+          else if (role === undefined) {
+            childModels.delete(childID);
+            return;
+          }
+        }
         await persistSnapshot(childID);
       })().catch(() => {});
+      trackSnapshotWork(background);
+    };
+    const pruneChildModels = () => {
+      const entries = [...childModels].map(([id, value]) => ({ key: `${SPAWN_MODEL_KEY_PREFIX}${id}`, value }));
+      for (const key of staleSnapshots(entries, Date.now())) {
+        const id = key.slice(SPAWN_MODEL_KEY_PREFIX.length);
+        if (!snapshotWrites.has(id))
+          childModels.delete(id);
+      }
     };
     const recordOutcomeSpawn = async (spawn, childID) => {
       await outcomes.spawn(childID, {
@@ -5487,6 +5502,7 @@ ${refs.size}`;
           settleRequest(requestLog, sessionID, endedAt(event));
           const error = data.error;
           await outcomes.end(sessionID, `failed:${classifyFailure(error) ?? "other"}`, finishedAt(event));
+          pruneChildModels();
           await queue(() => onSessionFailed(sessionID, error)).catch((error) => warn(`fallback after a failed execution did not complete`, { error: String(error) }));
           continue;
         }
@@ -5496,6 +5512,7 @@ ${refs.size}`;
             continue;
           const model = settleRequest(requestLog, sessionID, endedAt(event));
           await outcomes.end(sessionID, "succeeded", finishedAt(event));
+          pruneChildModels();
           if (noticeState.outages.size > 0)
             await queue(() => onSessionSucceeded(sessionID, model)).catch(() => {});
           continue;
@@ -5505,6 +5522,7 @@ ${refs.size}`;
           if (typeof sessionID === "string") {
             settleRequest(requestLog, sessionID, endedAt(event));
             await outcomes.end(sessionID, "interrupted", finishedAt(event));
+            pruneChildModels();
           }
           continue;
         }
@@ -5548,10 +5566,11 @@ ${refs.size}`;
       }
     })().catch(() => {});
     return async () => {
+      const disposeStart = Date.now();
       controller.abort();
       if (expiry !== undefined)
         clearTimeout(expiry);
-      await outcomes.dispose();
+      await outcomes.dispose(LEDGER_DISPOSE_TIMEOUT_MS);
       await spawnResults.dispose();
       await rpc.dispose();
       await spawns.dispose();
@@ -5571,6 +5590,20 @@ ${refs.size}`;
       triedModels.clear();
       pending.clear();
       childRoles.clear();
+      const budgetLeft = Math.max(0, LEDGER_DISPOSE_TIMEOUT_MS - (Date.now() - disposeStart));
+      let budget;
+      const outOfTime = new Promise((resolve2) => {
+        budget = setTimeout(() => resolve2("late"), budgetLeft);
+      });
+      const drainedSnapshots = (async () => {
+        while (snapshotWork.size > 0)
+          await Promise.all([...snapshotWork]);
+        return "drained";
+      })();
+      if (await Promise.race([drainedSnapshots, outOfTime]) === "late")
+        warn(`snapshot writes still running after the ${LEDGER_DISPOSE_TIMEOUT_MS}ms dispose budget; leaving them`);
+      clearTimeout(budget);
+      snapshotsClosed = true;
       childModels.clear();
       expectedChildren.clear();
       autoHistory = [];

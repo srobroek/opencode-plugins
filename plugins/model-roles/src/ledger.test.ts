@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test"
+import { describe, expect, jest, test } from "bun:test"
 import {
   createLedgerStore,
   type LedgerStorage,
@@ -389,39 +389,63 @@ describe("store", () => {
       expect(warnings.some((w) => w.includes("dispose"))).toBe(true)
     })
 
-    test("a slow earlier write followed by an end write leaves storage in the end state", async () => {
-      const { data, storage, gate } = fake()
-      const store = make(storage, { debounceMs: 10_000 })
-      await store.spawn("ses_c", facts) // set call 1
-      const slow = hold()
-      gate.setHolds.set(2, slow.promise)
-      await store.step("ses_c", { cost: 1 })
-      const flushing = store.flush() // set call 2 starts and stays slow
-      await pause(10)
-      const ending = store.end("ses_c", "succeeded", 1500) // must land after call 2
-      await pause(100) // far longer than any deadline the store could have used
-      slow.release()
-      await Promise.all([flushing, ending])
-      await pause(30)
-      expect(data.get(key("ses_c"))).toMatchObject({ outcome: "succeeded", steps: 1 })
-      expect(gate.overlap).toBe(1)
-      await store.dispose()
+    /** Let queued promise work run; fake timers do not advance on their own. */
+    const ticks = async () => {
+      for (let i = 0; i < 50; i++) await Promise.resolve()
+    }
+    /** Longer than the 5 s deadline the store once put on each storage call. */
+    const PAST_OLD_DEADLINE_MS = 6000
+
+    test("a write held past the old deadline cannot overwrite a later end state when it lands", async () => {
+      jest.useFakeTimers()
+      try {
+        const { data, storage, gate } = fake()
+        const store = make(storage, { debounceMs: 10_000 })
+        await store.spawn("ses_c", facts) // set call 1
+        const slow = hold()
+        gate.setHolds.set(2, slow.promise)
+        await store.step("ses_c", { cost: 1 })
+        const flushing = store.flush() // set call 2 starts and stays held
+        await ticks()
+        const ending = store.end("ses_c", "succeeded", 1500)
+        await ticks()
+        jest.advanceTimersByTime(PAST_OLD_DEADLINE_MS)
+        await ticks()
+        // The end write waits behind the held one: nothing newer has landed yet.
+        expect((data.get(key("ses_c")) as { outcome?: string }).outcome).toBeUndefined()
+        slow.release()
+        await Promise.all([flushing, ending])
+        await ticks()
+        expect(data.get(key("ses_c"))).toMatchObject({ outcome: "succeeded", steps: 1 })
+        expect(gate.overlap).toBe(1)
+        await store.dispose()
+      } finally {
+        jest.useRealTimers()
+      }
     })
 
-    test("a prune while a write is slow leaves the key deleted", async () => {
-      const { data, storage, gate } = fake()
-      const store = make(storage, { debounceMs: 10_000, limits: { maxEntries: 1, maxAgeMs: 90 * DAY } })
-      const slow = hold()
-      gate.setHolds.set(1, slow.promise)
-      const first = store.spawn("old", { ...facts, at: 1000 }) // set call 1 stays slow
-      await pause(10)
-      const second = store.spawn("new", { ...facts, at: 1001 }) // the second entry prunes "old"
-      await pause(100)
-      slow.release()
-      await Promise.all([first, second])
-      await store.dispose()
-      expect(data.has(key("old"))).toBe(false)
-      expect(data.has(key("new"))).toBe(true)
+    test("a write held past the old deadline cannot bring back a pruned key when it lands", async () => {
+      jest.useFakeTimers()
+      try {
+        const { data, storage, gate } = fake()
+        const store = make(storage, { debounceMs: 10_000, limits: { maxEntries: 1, maxAgeMs: 90 * DAY } })
+        const slow = hold()
+        gate.setHolds.set(1, slow.promise)
+        const first = store.spawn("old", { ...facts, at: 1000 }) // set call 1 stays held
+        await ticks()
+        const second = store.spawn("new", { ...facts, at: 1001 }) // the second entry prunes "old"
+        await ticks()
+        jest.advanceTimersByTime(PAST_OLD_DEADLINE_MS)
+        await ticks()
+        slow.release()
+        await Promise.all([first, second])
+        await ticks()
+        expect(data.has(key("old"))).toBe(false)
+        expect(data.has(key("new"))).toBe(true)
+        await store.dispose()
+      } finally {
+        jest.useRealTimers()
+      }
     })
 
     test("dispose lets an admitted end land first, then retries a failed record, with no overlap", async () => {
