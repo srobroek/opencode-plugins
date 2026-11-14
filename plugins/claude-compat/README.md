@@ -21,10 +21,12 @@ Sources can be set in three places. All three apply together, and relative paths
 resolve against the **project root** (the location's project directory, so a session
 started in a subdirectory or a worktree still finds them).
 
-The loader is default-off during rollout: set `enabled: true` in its plugin options
-to activate it. With `enabled` absent or false, it discovers no sources and registers
-no skills, agents, commands, hooks or MCP servers. Setting it back to false disables
-the loader on config reload.
+The `enabled` option is the loader's kill switch, and it is off by default: set
+`enabled: true` in its plugin options to activate it. With `enabled` absent or false,
+it discovers no sources and registers no skills, agents, commands, hooks or MCP
+servers. Setting it back to false disables the loader on the next config reload. The
+switch is permanent, so keep the plugin installed and turn it off here instead of
+removing the entry.
 
 1. **Plugin options, for every project.** Put them in the global config
    (`~/.config/opencode/opencode.json`):
@@ -88,7 +90,7 @@ be local paths inside the marketplace, symlinks included. Remote entries (`githu
 
 | Option | Default | Effect |
 | --- | --- | --- |
-| `enabled` | `false` | Rollout switch: activate the loader; false registers nothing. |
+| `enabled` | `false` | Kill switch: activate the loader; false registers nothing. |
 | `sources`, `plugins` | none | Sources for every project that uses this entry. |
 | `projects` | none | Directory → `{ sources, plugins }`, applied to that project and the ones inside it. |
 | `projectFile` | `false` | Discover `<project>/.opencode/claude-compat.json`; load only after `/claude-compat-trust` approval. |
