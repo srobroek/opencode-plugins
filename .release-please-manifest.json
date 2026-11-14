@@ -1,7 +1,7 @@
 {
-  "plugins/claude-compat": "0.2.0",
+  "plugins/claude-compat": "0.2.1",
   "plugins/example": "0.2.0",
-  "plugins/model-roles": "0.3.1",
+  "plugins/model-roles": "0.3.2",
   "plugins/worktrunk": "0.4.0",
   "plugins/session": "0.2.0",
   "plugins/dep-update": "0.4.0",
