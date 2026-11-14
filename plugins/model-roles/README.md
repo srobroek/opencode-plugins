@@ -396,6 +396,27 @@ It stores no prompt, description, result or command text. Nothing decides from t
 ledger; it is the evidence for later evaluation-based routing, and a read-only
 usage report (below) summarises it.
 
+Three outcome signals come from the child's own session, as enums and a boolean
+only; the text and commands they are read from are parsed in memory and dropped:
+
+- `verdict` (`approve`, `request-changes` or `comment`): the last
+  `VERDICT: …` line of the child's final text; unset when there is none.
+- `tests` (`pass`, `fail` or `none`): the last shell call that ran a test command and
+  reported an exit status. `none` when the child ran none. A command counts after
+  `cd …;`/`&&` prefixes, env assignments and `bun run`/`npm run` wrappers. A result
+  without an exit status in its metadata (`exit` or `exitCode`) is not counted; the
+  host's types do not promise one, so such a run leaves `tests` at `none`.
+- `touchedTests` (boolean): any step's edited files (`session.step.ended.files`)
+  matched a test glob.
+
+Options, under `evaluate`; an array replaces its default:
+
+- `testCommands`: default `bun test`, `bun run test`, `bun run check`, `npm test`,
+  `pnpm test`, `yarn test`, `pytest`, `python -m pytest`, `go test`, `cargo test`,
+  `cargo nextest`.
+- `testGlobs`: default `**/*.test.*`, `**/*.spec.*`, `**/test/**`, `**/tests/**`,
+  `**/__tests__/**`, `**/*_test.go`, `**/test_*.py`.
+
 This first phase records only tier-routed spawns: those that reach a session
 through a tier, role or `auto` decision, which the plugin links to the child
 session it created. Not recorded: spawns without a tier (the agent keeps its own
