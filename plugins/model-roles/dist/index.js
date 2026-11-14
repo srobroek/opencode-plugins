@@ -3352,34 +3352,28 @@ function decideFailureNotice(state, report) {
   return { sessionID: notifyTo, text: report.plain ?? failureNote(report) };
 }
 var MAX_STOPPED = 20;
-var MAX_OVERFLOW = 500;
+var MAX_TRACKED = 500;
 function remember(outage, id, stopped) {
   if (outage.stopped.has(id))
-    return "known";
-  if (outage.stopped.size < MAX_STOPPED) {
-    outage.stopped.set(id, stopped);
-    return "new";
-  }
-  if (outage.overflow.has(id))
-    return "known";
-  outage.overflow.add(id);
-  if (outage.overflow.size > MAX_OVERFLOW)
-    outage.overflow.delete(outage.overflow.values().next().value);
-  return "counted";
+    return false;
+  outage.stopped.set(id, stopped);
+  if (outage.stopped.size > MAX_TRACKED)
+    outage.stopped.delete(outage.stopped.keys().next().value);
+  return true;
 }
 function decideOutage(state, report) {
   const { failed, kind, now, notifyTo } = report;
   const provider = failed.providerID;
   const key = `${provider}\x00${kind}`;
   const found = state.outages.get(key);
-  const outage = found ?? { providerID: provider, kind, lastAt: now, notifyTo, stopped: new Map, overflow: new Set };
+  const outage = found ?? { providerID: provider, kind, lastAt: now, notifyTo, stopped: new Map };
   const announce = found === undefined || now - found.lastAt >= OUTAGE_STALE_MS;
   state.outages.set(key, outage);
   outage.lastAt = now;
   let line;
   if (report.subagent !== undefined) {
     const stopped = { agent: report.subagent.agent, sessionID: report.subagent.sessionID };
-    if (remember(outage, stoppedKey(report), stopped) === "new")
+    if (remember(outage, stoppedKey(report), stopped))
       line = stoppedLine(stopped, provider, kind, announce);
   }
   if (!announce)
@@ -3392,7 +3386,6 @@ function decideOutage(state, report) {
 function forgetSession(state, sessionID) {
   for (const outage of state.outages.values()) {
     outage.stopped.delete(sessionID);
-    outage.overflow.delete(sessionID);
   }
 }
 function decideRecovery(state, model) {
@@ -3403,16 +3396,35 @@ function decideRecovery(state, model) {
     state.outages.delete(key);
     let text = `Provider ${outage.providerID} recovered (${outage.kind}).`;
     const resumable = [...outage.stopped.values()].filter((s) => s.sessionID !== undefined);
-    const more = outage.overflow.size;
-    if (resumable.length > 0 || more > 0) {
-      const list = resumable.map((s) => `${s.agent ?? "subagent"} (${s.sessionID})`);
-      if (more > 0)
-        list.push(`+${more} more`);
+    if (resumable.length > 0) {
+      const list = resumable.slice(0, MAX_STOPPED).map((s) => `${s.agent ?? "subagent"} (${s.sessionID})`);
+      if (resumable.length > MAX_STOPPED)
+        list.push(`+${resumable.length - MAX_STOPPED} more`);
       text += ` Resume the stopped subagents: ${list.join(", ")}.`;
     }
     notices.push({ sessionID: outage.notifyTo, text });
   }
   return notices;
+}
+var MAX_REQUESTS = 8;
+function recordRequest(log, sessionID, model, at) {
+  const list = log.get(sessionID) ?? [];
+  list.push({ at, model: { providerID: model.providerID, id: model.id } });
+  if (list.length > MAX_REQUESTS)
+    list.shift();
+  log.set(sessionID, list);
+}
+function settleRequest(log, sessionID, endedAt) {
+  const list = log.get(sessionID);
+  if (list === undefined)
+    return;
+  const done = list.filter((entry) => entry.at <= endedAt);
+  const rest = list.filter((entry) => entry.at > endedAt);
+  if (rest.length > 0)
+    log.set(sessionID, rest);
+  else
+    log.delete(sessionID);
+  return done.at(-1)?.model;
 }
 
 // plugins/model-roles/src/receipt.ts
@@ -3723,7 +3735,12 @@ var MAX_SESSION_DEPTH = 8;
 var REFRESH_EVENTS = new Set(["model.updated", "provider.updated"]);
 var CHECK_EVENTS = new Set(["agent.updated", ...REFRESH_EVENTS]);
 var FAILED_EVENT = "session.execution.failed";
+var INTERRUPTED_EVENT = "session.execution.interrupted";
 var DELETED_EVENT = "session.deleted";
+var endedAt = (event) => {
+  const created = event.created;
+  return typeof created === "number" && Number.isFinite(created) ? created : Number.POSITIVE_INFINITY;
+};
 var SUCCEEDED_EVENT = "session.execution.succeeded";
 var CREATED_EVENT = "session.created";
 var CONFIG_EVENT = "config.updated";
@@ -3945,7 +3962,7 @@ ${refs.size}`;
         return;
       await notify(notice.sessionID, notice.text, report.subagent === undefined ? "fallback" : "subagent-fallback");
     };
-    const requestModels = new Map;
+    const requestLog = new Map;
     const onSessionSucceeded = async (sessionID, model) => {
       forgetSession(noticeState, sessionID);
       if (model === undefined)
@@ -4163,7 +4180,7 @@ ${refs.size}`;
       stripRoleHeader(request.headers);
       const { sessionID, model, kind } = request;
       if (typeof sessionID === "string" && model !== undefined && (kind === undefined || kind === "primary"))
-        requestModels.set(sessionID, { providerID: model.providerID, id: model.id });
+        recordRequest(requestLog, sessionID, model, Date.now());
     });
     const tools = await ctx.tool.transform((editor) => {
       editor.add({
@@ -4858,7 +4875,7 @@ ${refs.size}`;
           if (typeof data?.sessionID !== "string" || !isRecord8(data.error))
             continue;
           const sessionID = data.sessionID;
-          requestModels.delete(sessionID);
+          settleRequest(requestLog, sessionID, endedAt(event));
           const error = data.error;
           await queue(() => onSessionFailed(sessionID, error)).catch((error) => warn(`fallback after a failed execution did not complete`, { error: String(error) }));
           continue;
@@ -4867,16 +4884,21 @@ ${refs.size}`;
           const sessionID = event.data?.sessionID;
           if (typeof sessionID !== "string")
             continue;
-          const model = requestModels.get(sessionID);
-          requestModels.delete(sessionID);
+          const model = settleRequest(requestLog, sessionID, endedAt(event));
           if (noticeState.outages.size > 0)
             await queue(() => onSessionSucceeded(sessionID, model)).catch(() => {});
+          continue;
+        }
+        if (type === INTERRUPTED_EVENT) {
+          const sessionID = event.data?.sessionID;
+          if (typeof sessionID === "string")
+            settleRequest(requestLog, sessionID, endedAt(event));
           continue;
         }
         if (type === DELETED_EVENT) {
           const sessionID = event.data?.sessionID;
           if (typeof sessionID === "string") {
-            requestModels.delete(sessionID);
+            requestLog.delete(sessionID);
             forgetSession(noticeState, sessionID);
           }
           continue;
@@ -4924,7 +4946,7 @@ ${refs.size}`;
       noticeState.outages.clear();
       noticeState.notices.clear();
       childFailures.clear();
-      requestModels.clear();
+      requestLog.clear();
       triedModels.clear();
       pending.clear();
       childRoles.clear();

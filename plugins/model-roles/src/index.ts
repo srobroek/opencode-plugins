@@ -75,7 +75,7 @@ import {
   recordFailure,
 } from "./health.ts"
 import { hostWarn } from "./log.ts"
-import { decideFailureNotice, decideRecovery, type FailureReport, forgetSession, NOTICE_DEDUPE_MS, newNoticeState } from "./outage.ts"
+import { decideFailureNotice, decideRecovery, type FailureReport, forgetSession, NOTICE_DEDUPE_MS, newNoticeState, type RequestLog, recordRequest, settleRequest } from "./outage.ts"
 import { explainSpawn, formatReceipts, pushReceipt, RECEIPTS_KEY, type Receipt, readReceipts, type SpawnRule, type SpawnSource } from "./receipt.ts"
 import {
   type AvailableModel,
@@ -160,7 +160,13 @@ export const MAX_SESSION_DEPTH = 8
 const REFRESH_EVENTS = new Set(["model.updated", "provider.updated"])
 const CHECK_EVENTS = new Set(["agent.updated", ...REFRESH_EVENTS])
 const FAILED_EVENT = "session.execution.failed"
+const INTERRUPTED_EVENT = "session.execution.interrupted"
 const DELETED_EVENT = "session.deleted"
+/** When an event happened (`created`, ms), else unbounded, so every recorded request counts. */
+const endedAt = (event: unknown): number => {
+  const created = (event as { created?: unknown }).created
+  return typeof created === "number" && Number.isFinite(created) ? created : Number.POSITIVE_INFINITY
+}
 const SUCCEEDED_EVENT = "session.execution.succeeded"
 const CREATED_EVENT = "session.created"
 /** The host reloaded its config; a `/tiers` save or a hand edit of the global file lands here too. */
@@ -442,11 +448,10 @@ export default Plugin.define({
     }
 
     /**
-     * The model of each session's latest primary request, from the `model.request` hook. A
-     * success is attributed to the model that served it, not to whatever the session or its
-     * agent resolves to by the time the event is handled.
+     * Primary requests by session, from the `model.request` hook. An execution's end event
+     * carries only its session and `created` time, so it is matched to the request started by then.
      */
-    const requestModels = new Map<string, ModelRef>()
+    const requestLog: RequestLog = new Map()
 
     /** A request succeeded on `model`: end the provider outages it was in, and forget `sessionID` as stopped. */
     const onSessionSucceeded = async (sessionID: string, model: ModelRef | undefined) => {
@@ -704,7 +709,7 @@ export default Plugin.define({
       stripRoleHeader(request.headers)
       const { sessionID, model, kind } = request as { sessionID?: string; model?: ModelRef; kind?: string }
       if (typeof sessionID === "string" && model !== undefined && (kind === undefined || kind === "primary"))
-        requestModels.set(sessionID, { providerID: model.providerID, id: model.id })
+        recordRequest(requestLog, sessionID, model, Date.now())
     })
 
     const tools = await ctx.tool.transform((editor) => {
@@ -1467,7 +1472,7 @@ export default Plugin.define({
           const data = (event as { data?: { sessionID?: unknown; error?: unknown } }).data
           if (typeof data?.sessionID !== "string" || !isRecord(data.error)) continue
           const sessionID = data.sessionID
-          requestModels.delete(sessionID)
+          settleRequest(requestLog, sessionID, endedAt(event))
           const error = data.error as { type?: string; message?: string; status?: number }
           await queue(() => onSessionFailed(sessionID, error)).catch((error) =>
             warn(`fallback after a failed execution did not complete`, { error: String(error) }),
@@ -1477,16 +1482,20 @@ export default Plugin.define({
         if (type === SUCCEEDED_EVENT) {
           const sessionID = (event as { data?: { sessionID?: unknown } }).data?.sessionID
           if (typeof sessionID !== "string") continue
-          // Read now: a later request of the session must not change what this success is credited to.
-          const model = requestModels.get(sessionID)
-          requestModels.delete(sessionID)
+          const model = settleRequest(requestLog, sessionID, endedAt(event))
           if (noticeState.outages.size > 0) await queue(() => onSessionSucceeded(sessionID, model)).catch(() => {})
+          continue
+        }
+        if (type === INTERRUPTED_EVENT) {
+          // Neither a success nor a failure: the interrupted request only leaves the log.
+          const sessionID = (event as { data?: { sessionID?: unknown } }).data?.sessionID
+          if (typeof sessionID === "string") settleRequest(requestLog, sessionID, endedAt(event))
           continue
         }
         if (type === DELETED_EVENT) {
           const sessionID = (event as { data?: { sessionID?: unknown } }).data?.sessionID
           if (typeof sessionID === "string") {
-            requestModels.delete(sessionID)
+            requestLog.delete(sessionID)
             forgetSession(noticeState, sessionID)
           }
           continue
@@ -1531,7 +1540,7 @@ export default Plugin.define({
       noticeState.outages.clear()
       noticeState.notices.clear()
       childFailures.clear()
-      requestModels.clear()
+      requestLog.clear()
       triedModels.clear()
       pending.clear()
       childRoles.clear()

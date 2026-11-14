@@ -1018,6 +1018,54 @@ describe("runtime fallback", () => {
     await cleanup()
   })
 
+  test("a success is credited to its own execution's provider when a later execution already made its request", async () => {
+    const { host, cleanup, texts } = await outageHost()
+    host.fireModelRequest({}, { sessionID: "r", model: sonnet, kind: "primary" })
+    const ended = Date.now()
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    // The next execution is on another provider and has asked before the first success is handled.
+    host.fireModelRequest({}, { sessionID: "r", model: haiku, kind: "primary" })
+    host.emit({ type: "session.execution.succeeded", created: ended, data: { sessionID: "r" } })
+    await settle()
+    expect(texts()).toHaveLength(2)
+    expect(texts()[1]).toContain("Provider amazon-bedrock recovered")
+    // The second execution's success is credited to its own provider, which had no outage.
+    host.emit({ type: "session.execution.succeeded", created: Date.now(), data: { sessionID: "r" } })
+    await settle()
+    expect(texts()).toHaveLength(2)
+    host.close()
+    await cleanup()
+  })
+
+  test("the earlier execution is on the other provider: its success must not end the outage", async () => {
+    const { host, cleanup, texts } = await outageHost()
+    host.fireModelRequest({}, { sessionID: "r", model: haiku, kind: "primary" })
+    const ended = Date.now()
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    host.fireModelRequest({}, { sessionID: "r", model: sonnet, kind: "primary" })
+    host.emit({ type: "session.execution.succeeded", created: ended, data: { sessionID: "r" } })
+    await settle()
+    expect(texts()).toHaveLength(1)
+    host.close()
+    await cleanup()
+  })
+
+  test("an interrupted execution is neither a success nor a failure and clears its request", async () => {
+    const { host, cleanup, texts } = await outageHost()
+    const health = structuredClone(host.storage.get("health"))
+    host.fireModelRequest({}, { sessionID: "r", model: sonnet, kind: "primary" })
+    host.emit({ type: "session.execution.interrupted", created: Date.now(), data: { sessionID: "r", reason: "user" } })
+    await settle()
+    expect(texts()).toHaveLength(1)
+    // A success with no request of its own recovers nothing: the interrupted request is gone.
+    host.emit({ type: "session.execution.succeeded", created: Date.now(), data: { sessionID: "r" } })
+    await settle()
+    expect(texts()).toHaveLength(1)
+    expect(host.storage.get("health")).toEqual(health)
+    host.close()
+    await cleanup()
+  })
+
   test("a root session's credential failures give one notice from the first failure, with no cooldown, and none after", async () => {
     const host = createHost({ agents: [{ id: "general" }], models, options: fallbackOptions })
     host.sessions.set("r", { id: "r", agent: "general", model: sonnet })

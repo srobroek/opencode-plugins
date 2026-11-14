@@ -25,8 +25,6 @@ type Outage = {
   /** The session that heard the outage start; the recovery goes there too. */
   notifyTo: string
   stopped: Map<string, Stopped>
-  /** Ids past `MAX_STOPPED`. */
-  overflow: Set<string>
 }
 
 export type NoticeState = {
@@ -70,26 +68,21 @@ export function decideFailureNotice(state: NoticeState, report: FailureReport): 
   return { sessionID: notifyTo, text: report.plain ?? failureNote(report) }
 }
 
-/**
- * The resume list and its dedupe state hold at most this many sessions, so an outage that
- * keeps failing new children cannot grow it without bound. Later children are only counted.
- */
+/** The recovery note names this many stopped sessions and counts the rest ("+N more"). */
 export const MAX_STOPPED = 20
 
-/** How many ids past `MAX_STOPPED` are remembered (to count each once); the oldest are forgotten. */
-const MAX_OVERFLOW = 500
+/**
+ * Stopped sessions an outage remembers, so a repeat failure of a child is not announced again.
+ * Past it the oldest are forgotten, so an outage that keeps failing new children stays bounded.
+ */
+export const MAX_TRACKED = 500
 
-/** Where a stopped session landed: a line of its own, already known, or past the cap. */
-function remember(outage: Outage, id: string, stopped: Stopped): "new" | "known" | "counted" {
-  if (outage.stopped.has(id)) return "known"
-  if (outage.stopped.size < MAX_STOPPED) {
-    outage.stopped.set(id, stopped)
-    return "new"
-  }
-  if (outage.overflow.has(id)) return "known"
-  outage.overflow.add(id)
-  if (outage.overflow.size > MAX_OVERFLOW) outage.overflow.delete(outage.overflow.values().next().value as string)
-  return "counted"
+/** Whether `id` is new to the outage; it is remembered either way. */
+function remember(outage: Outage, id: string, stopped: Stopped): boolean {
+  if (outage.stopped.has(id)) return false
+  outage.stopped.set(id, stopped)
+  if (outage.stopped.size > MAX_TRACKED) outage.stopped.delete(outage.stopped.keys().next().value as string)
+  return true
 }
 
 function decideOutage(state: NoticeState, report: FailureReport): Notice | undefined {
@@ -97,7 +90,7 @@ function decideOutage(state: NoticeState, report: FailureReport): Notice | undef
   const provider = failed.providerID
   const key = `${provider}\0${kind}`
   const found = state.outages.get(key)
-  const outage: Outage = found ?? { providerID: provider, kind, lastAt: now, notifyTo, stopped: new Map(), overflow: new Set() }
+  const outage: Outage = found ?? { providerID: provider, kind, lastAt: now, notifyTo, stopped: new Map() }
   // A quiet outage is announced again, but keeps its resume list and dedupe state.
   const announce = found === undefined || now - found.lastAt >= OUTAGE_STALE_MS
   state.outages.set(key, outage)
@@ -105,7 +98,7 @@ function decideOutage(state: NoticeState, report: FailureReport): Notice | undef
   let line: string | undefined
   if (report.subagent !== undefined) {
     const stopped = { agent: report.subagent.agent, sessionID: report.subagent.sessionID }
-    if (remember(outage, stoppedKey(report), stopped) === "new") line = stoppedLine(stopped, provider, kind, announce)
+    if (remember(outage, stoppedKey(report), stopped)) line = stoppedLine(stopped, provider, kind, announce)
   }
   if (!announce) return line === undefined ? undefined : { sessionID: notifyTo, text: line }
   outage.notifyTo = notifyTo
@@ -118,7 +111,6 @@ function decideOutage(state: NoticeState, report: FailureReport): Notice | undef
 export function forgetSession(state: NoticeState, sessionID: string): void {
   for (const outage of state.outages.values()) {
     outage.stopped.delete(sessionID)
-    outage.overflow.delete(sessionID)
   }
 }
 
@@ -130,13 +122,41 @@ export function decideRecovery(state: NoticeState, model: Pick<ModelRef, "provid
     state.outages.delete(key)
     let text = `Provider ${outage.providerID} recovered (${outage.kind}).`
     const resumable = [...outage.stopped.values()].filter((s) => s.sessionID !== undefined)
-    const more = outage.overflow.size
-    if (resumable.length > 0 || more > 0) {
-      const list = resumable.map((s) => `${s.agent ?? "subagent"} (${s.sessionID})`)
-      if (more > 0) list.push(`+${more} more`)
+    if (resumable.length > 0) {
+      const list = resumable.slice(0, MAX_STOPPED).map((s) => `${s.agent ?? "subagent"} (${s.sessionID})`)
+      if (resumable.length > MAX_STOPPED) list.push(`+${resumable.length - MAX_STOPPED} more`)
       text += ` Resume the stopped subagents: ${list.join(", ")}.`
     }
     notices.push({ sessionID: outage.notifyTo, text })
   }
   return notices
+}
+
+/** A model request that may still be running, by session, in order. */
+export type RequestLog = Map<string, Array<{ at: number; model: ModelRef }>>
+
+/** Requests kept per session; a session runs one at a time, so only a backlog of unhandled ends grows it. */
+const MAX_REQUESTS = 8
+
+export function recordRequest(log: RequestLog, sessionID: string, model: ModelRef, at: number): void {
+  const list = log.get(sessionID) ?? []
+  list.push({ at, model: { providerID: model.providerID, id: model.id } })
+  if (list.length > MAX_REQUESTS) list.shift()
+  log.set(sessionID, list)
+}
+
+/**
+ * The model of the request that an execution ending at `endedAt` ran: the session's latest
+ * request started by then. That request and every earlier one are consumed; later requests
+ * belong to later executions and stay. The host's end events carry only the session and a
+ * timestamp, so the time is the only link between an end and its request.
+ */
+export function settleRequest(log: RequestLog, sessionID: string, endedAt: number): ModelRef | undefined {
+  const list = log.get(sessionID)
+  if (list === undefined) return undefined
+  const done = list.filter((entry) => entry.at <= endedAt)
+  const rest = list.filter((entry) => entry.at > endedAt)
+  if (rest.length > 0) log.set(sessionID, rest)
+  else log.delete(sessionID)
+  return done.at(-1)?.model
 }

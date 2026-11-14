@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import type { FailureClass } from "./health.ts"
-import { decideFailureNotice, decideRecovery, type FailureReport, forgetSession, MAX_STOPPED, newNoticeState } from "./outage.ts"
+import { decideFailureNotice, decideRecovery, type FailureReport, forgetSession, MAX_STOPPED, MAX_TRACKED, newNoticeState, type RequestLog, recordRequest, settleRequest } from "./outage.ts"
 import type { ModelRef } from "./resolve.ts"
 
 const bedrock = (id: string): ModelRef => ({ providerID: "amazon-bedrock", id })
@@ -83,16 +83,25 @@ describe("provider outage", () => {
     )
   })
 
-  test("the resume list is capped and counts the rest once each", () => {
+  test("every new child is named once; the recovery summary names 20 and counts the rest", () => {
     const state = newNoticeState()
     const sub = (i: number) =>
       decideFailureNotice(state, report(bedrock("a"), "credentials", i, { subagent: { agent: "coder", sessionID: `c${i}` } }))
-    for (let i = 0; i < MAX_STOPPED + 5; i++) sub(i)
-    // Repeats of children past the cap add nothing and announce nothing.
-    expect(sub(MAX_STOPPED + 2)).toBeUndefined()
+    const notices = Array.from({ length: 25 }, (_, i) => sub(i)?.text ?? "")
+    for (const [i, text] of notices.entries()) expect(text).toContain(`sessionID c${i}`)
+    expect(sub(24)).toBeUndefined()
     const text = decideRecovery(state, bedrock("a"))[0]?.text ?? ""
     expect(text).toContain(`coder (c${MAX_STOPPED - 1}), +5 more.`)
     expect(text).not.toContain(`c${MAX_STOPPED})`)
+  })
+
+  test("the remembered stopped sessions are bounded, dropping the oldest", () => {
+    const state = newNoticeState()
+    const sub = (i: number) =>
+      decideFailureNotice(state, report(bedrock("a"), "credentials", i, { subagent: { agent: "coder", sessionID: `c${i}` } }))
+    for (let i = 0; i < MAX_TRACKED + 1; i++) sub(i)
+    expect(sub(MAX_TRACKED)).toBeUndefined()
+    expect(sub(0)?.text).toContain("sessionID c0")
   })
 
   test("subagent failures during an outage are one line per session, then folded into the recovery notice", () => {
@@ -145,5 +154,32 @@ describe("model failure", () => {
     const state = newNoticeState()
     decideFailureNotice(state, report(bedrock("a"), "rate-limit", 0, { plain: "x" }))
     expect(decideRecovery(state, bedrock("a"))).toEqual([])
+  })
+})
+
+describe("request log", () => {
+  test("an end is credited to the latest request started by then; later requests stay for later ends", () => {
+    const log: RequestLog = new Map()
+    recordRequest(log, "s", bedrock("a"), 100)
+    recordRequest(log, "s", openai("x"), 300)
+    expect(settleRequest(log, "s", 200)).toEqual(bedrock("a"))
+    expect(settleRequest(log, "s", 200)).toBeUndefined()
+    expect(settleRequest(log, "s", 400)).toEqual(openai("x"))
+    expect(log.size).toBe(0)
+  })
+
+  test("an end with no earlier request, and another session's request, are credited to nobody", () => {
+    const log: RequestLog = new Map()
+    recordRequest(log, "s", bedrock("a"), 100)
+    expect(settleRequest(log, "s", 50)).toBeUndefined()
+    expect(settleRequest(log, "other", 500)).toBeUndefined()
+    expect(settleRequest(log, "s", 500)).toEqual(bedrock("a"))
+  })
+
+  test("a backlog of unsettled requests stays bounded", () => {
+    const log: RequestLog = new Map()
+    for (let i = 0; i < 50; i++) recordRequest(log, "s", bedrock(`m${i}`), i)
+    expect(log.get("s")?.length).toBeLessThanOrEqual(8)
+    expect(settleRequest(log, "s", 1_000)).toEqual(bedrock("m49"))
   })
 })
