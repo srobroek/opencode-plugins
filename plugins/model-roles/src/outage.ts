@@ -147,15 +147,16 @@ export function recordRequest(log: RequestLog, sessionID: string, model: ModelRe
 
 /**
  * The model of the request that an execution ending at `endedAt` ran: the session's latest
- * request started by then. That request and every earlier one are consumed; later requests
+ * request started before then. That request and every earlier one are consumed; later requests
  * belong to later executions and stay. The host's end events carry only the session and a
  * timestamp, so the time is the only link between an end and its request.
  */
 export function settleRequest(log: RequestLog, sessionID: string, endedAt: number): ModelRef | undefined {
   const list = log.get(sessionID)
   if (list === undefined) return undefined
-  const done = list.filter((entry) => entry.at <= endedAt)
-  const rest = list.filter((entry) => entry.at > endedAt)
+  // Strict: a request's own end comes after its response, so one at the end's millisecond is the next execution's.
+  const done = list.filter((entry) => entry.at < endedAt)
+  const rest = list.filter((entry) => entry.at >= endedAt)
   if (rest.length > 0) log.set(sessionID, rest)
   else log.delete(sessionID)
   return done.at(-1)?.model

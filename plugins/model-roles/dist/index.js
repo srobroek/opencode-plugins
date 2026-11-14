@@ -3418,8 +3418,8 @@ function settleRequest(log, sessionID, endedAt) {
   const list = log.get(sessionID);
   if (list === undefined)
     return;
-  const done = list.filter((entry) => entry.at <= endedAt);
-  const rest = list.filter((entry) => entry.at > endedAt);
+  const done = list.filter((entry) => entry.at < endedAt);
+  const rest = list.filter((entry) => entry.at >= endedAt);
   if (rest.length > 0)
     log.set(sessionID, rest);
   else

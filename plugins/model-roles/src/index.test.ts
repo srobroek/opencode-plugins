@@ -1021,6 +1021,7 @@ describe("runtime fallback", () => {
   test("a success is credited to its own execution's provider when a later execution already made its request", async () => {
     const { host, cleanup, texts } = await outageHost()
     host.fireModelRequest({}, { sessionID: "r", model: sonnet, kind: "primary" })
+    await new Promise((resolve) => setTimeout(resolve, 5))
     const ended = Date.now()
     await new Promise((resolve) => setTimeout(resolve, 5))
     // The next execution is on another provider and has asked before the first success is handled.
@@ -1040,6 +1041,7 @@ describe("runtime fallback", () => {
   test("the earlier execution is on the other provider: its success must not end the outage", async () => {
     const { host, cleanup, texts } = await outageHost()
     host.fireModelRequest({}, { sessionID: "r", model: haiku, kind: "primary" })
+    await new Promise((resolve) => setTimeout(resolve, 5))
     const ended = Date.now()
     await new Promise((resolve) => setTimeout(resolve, 5))
     host.fireModelRequest({}, { sessionID: "r", model: sonnet, kind: "primary" })
@@ -1054,10 +1056,12 @@ describe("runtime fallback", () => {
     const { host, cleanup, texts } = await outageHost()
     const health = structuredClone(host.storage.get("health"))
     host.fireModelRequest({}, { sessionID: "r", model: sonnet, kind: "primary" })
+    await new Promise((resolve) => setTimeout(resolve, 5))
     host.emit({ type: "session.execution.interrupted", created: Date.now(), data: { sessionID: "r", reason: "user" } })
     await settle()
     expect(texts()).toHaveLength(1)
     // A success with no request of its own recovers nothing: the interrupted request is gone.
+    await new Promise((resolve) => setTimeout(resolve, 5))
     host.emit({ type: "session.execution.succeeded", created: Date.now(), data: { sessionID: "r" } })
     await settle()
     expect(texts()).toHaveLength(1)

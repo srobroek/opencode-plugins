@@ -168,6 +168,14 @@ describe("request log", () => {
     expect(log.size).toBe(0)
   })
 
+  test("a request in the millisecond of an end belongs to the next execution", () => {
+    const log: RequestLog = new Map()
+    recordRequest(log, "s", bedrock("a"), 100)
+    recordRequest(log, "s", openai("x"), 200)
+    expect(settleRequest(log, "s", 200)).toEqual(bedrock("a"))
+    expect(settleRequest(log, "s", 300)).toEqual(openai("x"))
+  })
+
   test("an end with no earlier request, and another session's request, are credited to nobody", () => {
     const log: RequestLog = new Map()
     recordRequest(log, "s", bedrock("a"), 100)
