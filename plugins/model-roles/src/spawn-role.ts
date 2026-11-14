@@ -40,7 +40,7 @@ export const ROLE_PURPOSE: Readonly<Record<string, string>> = {
 
 /** Appended to the `subagent` tool description when the `tier` parameter is offered. */
 export const ROLE_TOOL_NOTE =
-  "Set `tier` on every new spawn: it picks the model the subagent runs on. Choose the cheapest tier that fits the task. An explicit `model` overrides it; a resumed spawn (`sessionID`) keeps its model."
+  "Set `tier` on every new spawn: it picks the model the subagent runs on. Choose the cheapest tier that fits the task. An explicit `model` overrides it; a resumed spawn (`sessionID`) keeps its model unless it passes `tier` or `model`."
 
 /** The description of the deprecated `role` parameter. */
 export const ROLE_ALIAS_DESCRIPTION = "Deprecated: use `tier`. Also accepts the old role names (smol, task, slow, challenger and the like)."

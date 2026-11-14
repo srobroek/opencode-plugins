@@ -567,12 +567,23 @@ each spawn. The model is chosen in this order:
 5. the target agent's fallback model (marked in `x-opencode-model-fallback`)
 6. the session's model, which the child inherits
 
-The plugin never overrides an explicit `model` or a resumed spawn. An unknown
+The plugin never overrides an explicit `model`. An unknown
 tier refuses the spawn and lists the tiers. `default` passes no tier. A tier with
-nothing available falls through to step 4. A resumed spawn (with `sessionID`)
-keeps its model. The plugin records the tier each child was spawned with (in
+nothing available falls through to step 4. The plugin records the tier each child was spawned with (in
 plugin storage, under `spawn-role:<sessionID>`), so a fallback for that child
 stays in the same tier.
+
+### A child keeps its model
+
+When a spawn resolves, the plugin stores the child's `model#variant`, tier and a
+hash of the tier config (`configRevision`) under `spawn-model:<sessionID>`. A resume
+(`sessionID`) reuses that model and effort, even after a `/tiers` save or a reload.
+The receipt shows rule "the child's snapshot" with the `configRevision`. A `model` or
+`tier` on the resume is a deliberate reroute: it wins and replaces the snapshot.
+If the snapshot's model is no longer listed or enabled, the resume resolves as
+before and the receipt warns. When failover moves a child, its snapshot follows to the
+new model and gains `failedOver: true`, so an evaluation can leave it out. Snapshots
+older than 30 days, and all but the newest 1000, are removed at startup.
 
 ## Auto routing
 
