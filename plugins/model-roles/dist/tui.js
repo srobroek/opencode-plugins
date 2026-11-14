@@ -833,6 +833,14 @@ function agentTierError(tier, tiers) {
     return `Unknown tier ${JSON.stringify(tier)}.`;
   return;
 }
+function mergeAgents(given, startup, current) {
+  const project = {};
+  for (const [agent, tier] of Object.entries(given)) {
+    if (!(Object.hasOwn(startup, agent) && startup[agent] === tier))
+      project[agent] = tier;
+  }
+  return { ...current, ...project };
+}
 var TIER_NAME = /^[a-z][a-z0-9-]*$/;
 function readDraft(input) {
   const draft = isRecord3(input) && isRecord3(input.draft) ? input.draft : {};

@@ -4,6 +4,7 @@ import {
   applyDraft,
   applyEdit,
   compact,
+  mergeAgents,
   readDraft,
   readState,
   type TierRow,
@@ -142,5 +143,19 @@ describe("agentTierError", () => {
     expect(agentTierError("nope", tiers)).toBe('Unknown tier "nope".')
     expect(agentTierError(3, tiers)).toBe("Unknown tier 3.")
     expect(agentTierError("toString", tiers)).toBe('Unknown tier "toString".')
+  })
+})
+
+describe("mergeAgents", () => {
+  const startup = { a: "cheap", b: "strong" } // the global file at startup
+  test("a project assignment the global file never had is kept; global edits apply around it", () => {
+    const given = { a: "cheap", b: "strong", p: "reviewer" } // ctx.options at startup: global plus a project's p
+    expect(mergeAgents(given, startup, { a: "cheap", b: "strong" })).toEqual({ a: "cheap", b: "strong", p: "reviewer" })
+    expect(mergeAgents(given, startup, { a: "standard", c: "cheap" })).toEqual({ a: "standard", c: "cheap", p: "reviewer" })
+  })
+
+  test("a global assignment removed from the file is dropped; a project value that differs from it wins", () => {
+    expect(mergeAgents({ a: "cheap", b: "strong" }, startup, { a: "cheap" })).toEqual({ a: "cheap" })
+    expect(mergeAgents({ a: "reviewer", b: "strong" }, startup, { a: "standard", b: "strong" })).toEqual({ a: "reviewer", b: "strong" })
   })
 })

@@ -1472,14 +1472,18 @@ describe("tiers rpc", () => {
   })
 
   /** Run `body` against a plugin whose global config dir holds a model-roles entry. */
-  const withConfig = async (body: (host: ReturnType<typeof createHost>, file: string) => Promise<void>, agents: Agent[] = []) => {
+  const withConfig = async (
+    body: (host: ReturnType<typeof createHost>, file: string) => Promise<void>,
+    agents: Agent[] = [],
+    given: { options?: unknown; fileText?: string } = {},
+  ) => {
     const dir = mkdtempSync(path.join(tmpdir(), "model-roles-rpc-"))
     const previous = process.env.OPENCODE_CONFIG_DIR
     process.env.OPENCODE_CONFIG_DIR = dir
     const file = path.join(dir, "opencode.json")
     try {
-      writeFileSync(file, '{ "plugins": [{ "package": "/x/plugins/model-roles", "options": {} }] }\n')
-      const host = createHost({ agents, models: work as unknown as Model[], references: reference as unknown as Model[], options: {} })
+      writeFileSync(file, given.fileText ?? '{ "plugins": [{ "package": "/x/plugins/model-roles", "options": {} }] }\n')
+      const host = createHost({ agents, models: work as unknown as Model[], references: reference as unknown as Model[], options: given.options ?? {} })
       const cleanup = await setup(host)
       try {
         await body(host, file)
@@ -1547,6 +1551,77 @@ describe("tiers rpc", () => {
       const state = (await host.rpc("state")) as { agents: Array<Record<string, unknown>> }
       expect(state.agents).toEqual([{ id: "plain" }])
     }, [{ id: "plain" }])
+  })
+
+  type AgentView = { id: string; tier?: string; source?: string; resolved?: string }
+  const agentRow = async (host: ReturnType<typeof createHost>, id: string) =>
+    ((await host.rpc("state")) as { agents: AgentView[] }).agents.find((a) => a.id === id)
+  const entry = (agents: Record<string, string>) =>
+    `{ "plugins": [{ "package": "/x/plugins/model-roles", "options": { "agents": ${JSON.stringify(agents)} } }] }\n`
+  const agentFixtures: Agent[] = [
+    { id: "proj", request: header("cheap") },
+    { id: "glob", request: header("cheap") },
+  ]
+
+  test("project agent assignments survive tier saves and agent saves; global ones still change", async () => {
+    // ctx.options is what the host merged: the global assignment plus the project's `proj`.
+    await withConfig(
+      async (host) => {
+        expect(await agentRow(host, "proj")).toMatchObject({ tier: "strong", source: "options" })
+        await host.rpc("set", { tier: "docs", value: { purpose: "docs" } })
+        expect(await agentRow(host, "proj")).toMatchObject({ tier: "strong", source: "options" })
+        expect(await agentRow(host, "glob")).toMatchObject({ tier: "reviewer", source: "options" })
+        await host.rpc("setAgent", { agent: "glob", tier: "standard" })
+        expect(await agentRow(host, "proj")).toMatchObject({ tier: "strong", source: "options" })
+        expect(await agentRow(host, "glob")).toMatchObject({ tier: "standard", source: "options" })
+        await host.rpc("setAgent", { agent: "glob", tier: null })
+        expect(await agentRow(host, "glob")).toMatchObject({ tier: "cheap", source: "header" })
+        expect(await agentRow(host, "proj")).toMatchObject({ tier: "strong", source: "options" })
+      },
+      agentFixtures,
+      { options: { agents: { proj: "strong", glob: "reviewer" } }, fileText: entry({ glob: "reviewer" }) },
+    )
+  })
+
+  test("a hand edit of only the global agents fires config.updated and applies", async () => {
+    await withConfig(
+      async (host, file) => {
+        expect(await agentRow(host, "worker")).toMatchObject({ tier: "cheap", source: "header" })
+        writeFileSync(file, entry({ worker: "strong" }))
+        host.emit({ type: "config.updated", data: {} })
+        await settle()
+        expect(await agentRow(host, "worker")).toMatchObject({ tier: "strong", source: "options" })
+        expect(host.agents().get("worker")?.model).not.toEqual({ providerID: "amazon-bedrock", id: "global.anthropic.claude-haiku-5-5", variant: "low" })
+      },
+      [{ id: "worker", request: header("cheap") }],
+    )
+  })
+
+  test("a setAgent whose reload fails restores every agent's tier, source and model; a retry succeeds", async () => {
+    await withConfig(
+      async (host) => {
+        const views = async () => ({ rows: [await agentRow(host, "worker"), await agentRow(host, "other")], models: [host.agents().get("worker")?.model, host.agents().get("other")?.model] })
+        const before = await views()
+        const original = host.context.tool.transform
+        let fail = true
+        host.context.tool.transform = async (callback) => {
+          if (fail) {
+            fail = false
+            throw new Error("tool refresh refused")
+          }
+          return original(callback)
+        }
+        await expect(host.rpc("setAgent", { agent: "worker", tier: "strong" })).rejects.toThrow(/not applied: tool refresh refused/)
+        expect(await views()).toEqual(before)
+        await host.rpc("setAgent", { agent: "worker", tier: "strong" })
+        expect(await agentRow(host, "worker")).toMatchObject({ tier: "strong", source: "options" })
+        expect(await agentRow(host, "other")).toEqual(before.rows[1])
+      },
+      [
+        { id: "worker", request: header("cheap") },
+        { id: "other", request: header("standard") },
+      ],
+    )
   })
 
   test("a saved tier applies to the running instance at once, and so does a config reload", async () => {

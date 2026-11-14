@@ -128,7 +128,7 @@ import {
   tierOf,
   tierWarnings,
 } from "./tiers.ts"
-import { agentTierError, applyDraft, compact, readDraft, TIER_NAME, tierState, validateTierConfig } from "./tiers-ui.ts"
+import { agentTierError, applyDraft, compact, mergeAgents, readDraft, TIER_NAME, tierState, validateTierConfig } from "./tiers-ui.ts"
 
 export * from "./auto.ts"
 export * from "./catalog.ts"
@@ -1204,8 +1204,16 @@ export default Plugin.define({
     /** The global file's tiers as last applied (or seen at setup), so an unrelated config change keeps the options this instance got. */
     let fileTiers = (() => {
       const file = globalFile()
-      return file === undefined ? undefined : JSON.stringify({ tiers: readTiers(file.text), agents: readAgents(file.text) })
+      return file === undefined ? undefined : JSON.stringify(readTiers(file.text))
     })()
+    /** The global file's agent assignments at startup: told apart from `ctx.options`' own, they mark a project's. */
+    const startupAgents = parseOptions({ agents: (() => {
+      const file = globalFile()
+      return file === undefined ? {} : readAgents(file.text)
+    })() }).agents
+    const givenAgents = { ...options.agents }
+    /** The global file's `agents` as last applied. */
+    let fileAgents = JSON.stringify(startupAgents)
 
     /**
      * Apply the global file's tiers to the running instance when they changed (or always with
@@ -1216,9 +1224,12 @@ export default Plugin.define({
       const file = globalFile()
       if (file === undefined) return
       const tiers = readTiers(file.text)
-      const agents = parseOptions({ agents: readAgents(file.text) }).agents
-      const key = JSON.stringify({ tiers, agents: readAgents(file.text) })
-      if (!force && key === fileTiers) return
+      const key = JSON.stringify(tiers)
+      const fileAgentsNow = parseOptions({ agents: readAgents(file.text) }).agents
+      const agentsKey = JSON.stringify(fileAgentsNow)
+      // A reload caused by the tiers alone keeps the agents it has.
+      const agentsChanged = agentsKey !== fileAgents
+      if (!force && key === fileTiers && !agentsChanged) return
       await exclusive(async () => {
         const previous = { settings, agents: options.agents, roles: options.roles, tiers: options.tiers, classes: options.classes, derived }
         const restore = () => {
@@ -1232,7 +1243,7 @@ export default Plugin.define({
         try {
           // Spawns wait in `exclusive`, so they see either the old tiers or the new ones once agents and tools follow.
           settings = parseTierSettings({ ...pluginOptions, tiers })
-          options.agents = agents
+          if (agentsChanged) options.agents = mergeAgents(givenAgents, startupAgents, fileAgentsNow)
           rebuild()
           attempts = 0
           await check(true)
@@ -1247,6 +1258,7 @@ export default Plugin.define({
       })
       // Marked applied only once everything above went through, so a failed reload is retried on the next event.
       fileTiers = key
+      fileAgents = agentsKey
       warn(`applied the tiers from ${file.path}`)
     }
 

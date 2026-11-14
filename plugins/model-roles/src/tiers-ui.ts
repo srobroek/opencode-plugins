@@ -143,6 +143,24 @@ export function agentTierError(tier: unknown, tiers: Readonly<Record<string, unk
   return undefined
 }
 
+/**
+ * The agent assignments after the global file's `agents` changed. The host gives the plugin one merged
+ * `options`, so a project entry cannot be told from the global one directly; instead an assignment in
+ * `given` (the options at startup) that the global file did not hold at startup (`startup`) with the same
+ * value is the project's. Those stay and win; the global file's current map (`current`) fills the rest.
+ */
+export function mergeAgents(
+  given: Readonly<Record<string, string>>,
+  startup: Readonly<Record<string, string>>,
+  current: Readonly<Record<string, string>>,
+): Record<string, string> {
+  const project: Record<string, string> = {}
+  for (const [agent, tier] of Object.entries(given)) {
+    if (!(Object.hasOwn(startup, agent) && startup[agent] === tier)) project[agent] = tier
+  }
+  return { ...current, ...project }
+}
+
 /** Tier names `set` and drafts accept. */
 export const TIER_NAME = /^[a-z][a-z0-9-]*$/
 

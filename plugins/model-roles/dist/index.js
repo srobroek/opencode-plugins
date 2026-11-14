@@ -3421,6 +3421,14 @@ function agentTierError(tier, tiers) {
     return `Unknown tier ${JSON.stringify(tier)}.`;
   return;
 }
+function mergeAgents(given, startup, current) {
+  const project = {};
+  for (const [agent, tier] of Object.entries(given)) {
+    if (!(Object.hasOwn(startup, agent) && startup[agent] === tier))
+      project[agent] = tier;
+  }
+  return { ...current, ...project };
+}
 var TIER_NAME = /^[a-z][a-z0-9-]*$/;
 function readDraft(input) {
   const draft = isRecord7(input) && isRecord7(input.draft) ? input.draft : {};
@@ -4440,16 +4448,24 @@ ${refs.size}`;
     const pluginOptions = isRecord8(ctx.options) ? ctx.options : {};
     let fileTiers = (() => {
       const file = globalFile();
-      return file === undefined ? undefined : JSON.stringify({ tiers: readTiers(file.text), agents: readAgents(file.text) });
+      return file === undefined ? undefined : JSON.stringify(readTiers(file.text));
     })();
+    const startupAgents = parseOptions({ agents: (() => {
+      const file = globalFile();
+      return file === undefined ? {} : readAgents(file.text);
+    })() }).agents;
+    const givenAgents = { ...options.agents };
+    let fileAgents = JSON.stringify(startupAgents);
     const reloadTiers = async (force) => {
       const file = globalFile();
       if (file === undefined)
         return;
       const tiers2 = readTiers(file.text);
-      const agents = parseOptions({ agents: readAgents(file.text) }).agents;
-      const key = JSON.stringify({ tiers: tiers2, agents: readAgents(file.text) });
-      if (!force && key === fileTiers)
+      const key = JSON.stringify(tiers2);
+      const fileAgentsNow = parseOptions({ agents: readAgents(file.text) }).agents;
+      const agentsKey = JSON.stringify(fileAgentsNow);
+      const agentsChanged = agentsKey !== fileAgents;
+      if (!force && key === fileTiers && !agentsChanged)
         return;
       await exclusive(async () => {
         const previous = { settings, agents: options.agents, roles: options.roles, tiers: options.tiers, classes: options.classes, derived };
@@ -4463,7 +4479,8 @@ ${refs.size}`;
         };
         try {
           settings = parseTierSettings({ ...pluginOptions, tiers: tiers2 });
-          options.agents = agents;
+          if (agentsChanged)
+            options.agents = mergeAgents(givenAgents, startupAgents, fileAgentsNow);
           rebuild();
           attempts = 0;
           await check2(true);
@@ -4477,6 +4494,7 @@ ${refs.size}`;
         }
       });
       fileTiers = key;
+      fileAgents = agentsKey;
       warn(`applied the tiers from ${file.path}`);
     };
     const rpc = await ctx.rpc.register(TiersRpc, {
@@ -4779,6 +4797,7 @@ export {
   lineupRank,
   markUnhealthy,
   matchesPattern,
+  mergeAgents,
   modelFromError,
   modelLabel,
   modelText,
