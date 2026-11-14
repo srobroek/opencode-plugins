@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.3.1](https://github.com/srobroek/opencode-plugins/compare/model-roles--v0.3.0...model-roles--v0.3.1) (2026-11-14)
+
+
+### Bug Fixes
+
+* **model-roles:** /tiers Agents screen lists every agent and edits its tier ([234e712](https://github.com/srobroek/opencode-plugins/commit/234e7124b65317cfd4e5843bc2c9adc86bc4857e))
+* **model-roles:** one notice per provider outage instead of one per failed attempt ([0745fe6](https://github.com/srobroek/opencode-plugins/commit/0745fe66e35e884cadc2b75c1fe2a98e46befe4b))
+* **model-roles:** tiers follow the effective config entry; atomic config writes with a rolling backup ([27ff926](https://github.com/srobroek/opencode-plugins/commit/27ff926cc4d8ead79ee31f240eea272c3441568e))
+
 ## [0.3.0](https://github.com/srobroek/opencode-plugins/compare/model-roles--v0.2.2...model-roles--v0.3.0) (2026-11-13)
 
 

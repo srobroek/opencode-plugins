@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.3](https://github.com/srobroek/opencode-plugins/compare/parley--v0.3.2...parley--v0.3.3) (2026-11-14)
+
+
+### Bug Fixes
+
+* **parley:** yield keyboard and focus to host dialogs opened by other plugins ([39dca72](https://github.com/srobroek/opencode-plugins/commit/39dca7207b2bb87c5197ab1ae9fbfda48491cdf8))
+
 ## [0.3.2](https://github.com/srobroek/opencode-plugins/compare/parley--v0.3.1...parley--v0.3.2) (2026-11-12)
 
 

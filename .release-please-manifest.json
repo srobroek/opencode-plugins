@@ -1,7 +1,7 @@
 {
   "plugins/claude-compat": "0.2.0",
   "plugins/example": "0.2.0",
-  "plugins/model-roles": "0.3.0",
+  "plugins/model-roles": "0.3.1",
   "plugins/worktrunk": "0.4.0",
   "plugins/session": "0.2.0",
   "plugins/dep-update": "0.4.0",
@@ -10,7 +10,7 @@
   "plugins/beads": "0.5.1",
   "plugins/lsp": "0.4.0",
   "plugins/subagent-worktree": "0.2.4",
-  "plugins/parley": "0.3.2",
+  "plugins/parley": "0.3.3",
   "plugins/chezmoi": "0.4.0",
   "plugins/lang-go": "0.4.0",
   "plugins/lang-python": "0.4.0",
