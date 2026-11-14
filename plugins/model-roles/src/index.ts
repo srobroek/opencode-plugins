@@ -75,7 +75,7 @@ import {
   recordFailure,
 } from "./health.ts"
 import { hostWarn } from "./log.ts"
-import { decideFailureNotice, decideRecovery, type FailureReport, NOTICE_DEDUPE_MS, newNoticeState } from "./outage.ts"
+import { decideFailureNotice, decideRecovery, type FailureReport, forgetSession, NOTICE_DEDUPE_MS, newNoticeState } from "./outage.ts"
 import { explainSpawn, formatReceipts, pushReceipt, RECEIPTS_KEY, type Receipt, readReceipts, type SpawnRule, type SpawnSource } from "./receipt.ts"
 import {
   type AvailableModel,
@@ -160,6 +160,7 @@ export const MAX_SESSION_DEPTH = 8
 const REFRESH_EVENTS = new Set(["model.updated", "provider.updated"])
 const CHECK_EVENTS = new Set(["agent.updated", ...REFRESH_EVENTS])
 const FAILED_EVENT = "session.execution.failed"
+const DELETED_EVENT = "session.deleted"
 const SUCCEEDED_EVENT = "session.execution.succeeded"
 const CREATED_EVENT = "session.created"
 /** The host reloaded its config; a `/tiers` save or a hand edit of the global file lands here too. */
@@ -440,11 +441,16 @@ export default Plugin.define({
       await notify(notice.sessionID, notice.text, report.subagent === undefined ? "fallback" : "subagent-fallback")
     }
 
-    /** A call succeeded on `session`'s model: end the provider outages it was in. */
-    const onSessionSucceeded = async (sessionID: string) => {
-      if (noticeState.outages.size === 0) return
-      const session = (await ctx.session.get({ sessionID }).catch(() => undefined)) as SessionLike
-      const model = session === undefined ? undefined : await runningModel(session, await listAgents())
+    /**
+     * The model of each session's latest primary request, from the `model.request` hook. A
+     * success is attributed to the model that served it, not to whatever the session or its
+     * agent resolves to by the time the event is handled.
+     */
+    const requestModels = new Map<string, ModelRef>()
+
+    /** A request succeeded on `model`: end the provider outages it was in, and forget `sessionID` as stopped. */
+    const onSessionSucceeded = async (sessionID: string, model: ModelRef | undefined) => {
+      forgetSession(noticeState, sessionID)
       if (model === undefined) return
       for (const notice of decideRecovery(noticeState, model)) await notify(notice.sessionID, notice.text, "recovery")
     }
@@ -696,6 +702,9 @@ export default Plugin.define({
 
     const strip = await ctx.session.hook("model.request", (request) => {
       stripRoleHeader(request.headers)
+      const { sessionID, model, kind } = request as { sessionID?: string; model?: ModelRef; kind?: string }
+      if (typeof sessionID === "string" && model !== undefined && (kind === undefined || kind === "primary"))
+        requestModels.set(sessionID, { providerID: model.providerID, id: model.id })
     })
 
     const tools = await ctx.tool.transform((editor) => {
@@ -1458,6 +1467,7 @@ export default Plugin.define({
           const data = (event as { data?: { sessionID?: unknown; error?: unknown } }).data
           if (typeof data?.sessionID !== "string" || !isRecord(data.error)) continue
           const sessionID = data.sessionID
+          requestModels.delete(sessionID)
           const error = data.error as { type?: string; message?: string; status?: number }
           await queue(() => onSessionFailed(sessionID, error)).catch((error) =>
             warn(`fallback after a failed execution did not complete`, { error: String(error) }),
@@ -1466,7 +1476,19 @@ export default Plugin.define({
         }
         if (type === SUCCEEDED_EVENT) {
           const sessionID = (event as { data?: { sessionID?: unknown } }).data?.sessionID
-          if (typeof sessionID === "string") await queue(() => onSessionSucceeded(sessionID)).catch(() => {})
+          if (typeof sessionID !== "string") continue
+          // Read now: a later request of the session must not change what this success is credited to.
+          const model = requestModels.get(sessionID)
+          requestModels.delete(sessionID)
+          if (noticeState.outages.size > 0) await queue(() => onSessionSucceeded(sessionID, model)).catch(() => {})
+          continue
+        }
+        if (type === DELETED_EVENT) {
+          const sessionID = (event as { data?: { sessionID?: unknown } }).data?.sessionID
+          if (typeof sessionID === "string") {
+            requestModels.delete(sessionID)
+            forgetSession(noticeState, sessionID)
+          }
           continue
         }
         if (type === CREATED_EVENT) {
@@ -1509,6 +1531,7 @@ export default Plugin.define({
       noticeState.outages.clear()
       noticeState.notices.clear()
       childFailures.clear()
+      requestModels.clear()
       triedModels.clear()
       pending.clear()
       childRoles.clear()

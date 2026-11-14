@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import type { FailureClass } from "./health.ts"
-import { decideFailureNotice, decideRecovery, type FailureReport, newNoticeState } from "./outage.ts"
+import { decideFailureNotice, decideRecovery, type FailureReport, forgetSession, MAX_STOPPED, newNoticeState } from "./outage.ts"
 import type { ModelRef } from "./resolve.ts"
 
 const bedrock = (id: string): ModelRef => ({ providerID: "amazon-bedrock", id })
@@ -57,6 +57,42 @@ describe("provider outage", () => {
     const state = newNoticeState()
     decideFailureNotice(state, report(bedrock("a"), "credentials", 0))
     expect(decideFailureNotice(state, report(bedrock("a"), "credentials", 3_600_000))).toBeDefined()
+  })
+
+  test("a re-announced quiet outage keeps its resume list and does not repeat a child", () => {
+    const state = newNoticeState()
+    const sub = (id: string, now: number) =>
+      decideFailureNotice(state, report(bedrock("a"), "credentials", now, { subagent: { agent: "coder", sessionID: id } }))
+    sub("c1", 0)
+    const again = sub("c1", 3_600_000)
+    expect(again?.text).toContain("Provider amazon-bedrock is down (credentials)")
+    expect(again?.text).not.toContain("Subagent 'coder'")
+    const fresh = sub("c2", 3_601_000)
+    expect(fresh?.text).toContain("Subagent 'coder' stopped by the amazon-bedrock outage")
+    expect(decideRecovery(state, bedrock("a"))[0]?.text).toContain("coder (c1), coder (c2)")
+  })
+
+  test("sessions that succeeded or were deleted leave the resume list", () => {
+    const state = newNoticeState()
+    for (const id of ["c1", "c2", "c3"])
+      decideFailureNotice(state, report(bedrock("a"), "credentials", 0, { subagent: { agent: "coder", sessionID: id } }))
+    forgetSession(state, "c1")
+    forgetSession(state, "c3")
+    expect(decideRecovery(state, bedrock("a"))[0]?.text).toBe(
+      "Provider amazon-bedrock recovered (credentials). Resume the stopped subagents: coder (c2).",
+    )
+  })
+
+  test("the resume list is capped and counts the rest once each", () => {
+    const state = newNoticeState()
+    const sub = (i: number) =>
+      decideFailureNotice(state, report(bedrock("a"), "credentials", i, { subagent: { agent: "coder", sessionID: `c${i}` } }))
+    for (let i = 0; i < MAX_STOPPED + 5; i++) sub(i)
+    // Repeats of children past the cap add nothing and announce nothing.
+    expect(sub(MAX_STOPPED + 2)).toBeUndefined()
+    const text = decideRecovery(state, bedrock("a"))[0]?.text ?? ""
+    expect(text).toContain(`coder (c${MAX_STOPPED - 1}), +5 more.`)
+    expect(text).not.toContain(`c${MAX_STOPPED})`)
   })
 
   test("subagent failures during an outage are one line per session, then folded into the recovery notice", () => {

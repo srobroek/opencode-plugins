@@ -25,6 +25,8 @@ type Outage = {
   /** The session that heard the outage start; the recovery goes there too. */
   notifyTo: string
   stopped: Map<string, Stopped>
+  /** Ids past `MAX_STOPPED`. */
+  overflow: Set<string>
 }
 
 export type NoticeState = {
@@ -68,29 +70,56 @@ export function decideFailureNotice(state: NoticeState, report: FailureReport): 
   return { sessionID: notifyTo, text: report.plain ?? failureNote(report) }
 }
 
+/**
+ * The resume list and its dedupe state hold at most this many sessions, so an outage that
+ * keeps failing new children cannot grow it without bound. Later children are only counted.
+ */
+export const MAX_STOPPED = 20
+
+/** How many ids past `MAX_STOPPED` are remembered (to count each once); the oldest are forgotten. */
+const MAX_OVERFLOW = 500
+
+/** Where a stopped session landed: a line of its own, already known, or past the cap. */
+function remember(outage: Outage, id: string, stopped: Stopped): "new" | "known" | "counted" {
+  if (outage.stopped.has(id)) return "known"
+  if (outage.stopped.size < MAX_STOPPED) {
+    outage.stopped.set(id, stopped)
+    return "new"
+  }
+  if (outage.overflow.has(id)) return "known"
+  outage.overflow.add(id)
+  if (outage.overflow.size > MAX_OVERFLOW) outage.overflow.delete(outage.overflow.values().next().value as string)
+  return "counted"
+}
+
 function decideOutage(state: NoticeState, report: FailureReport): Notice | undefined {
   const { failed, kind, now, notifyTo } = report
-  const key = `${failed.providerID}\0${kind}`
-  const open = state.outages.get(key)
-  if (open !== undefined && now - open.lastAt < OUTAGE_STALE_MS) {
-    open.lastAt = now
-    if (report.subagent === undefined) return undefined
-    const id = stoppedKey(report)
-    if (open.stopped.has(id)) return undefined
-    const stopped = { agent: report.subagent.agent, sessionID: report.subagent.sessionID }
-    open.stopped.set(id, stopped)
-    return { sessionID: notifyTo, text: stoppedLine(stopped, failed.providerID, kind, false) }
-  }
-  const outage: Outage = { providerID: failed.providerID, kind, lastAt: now, notifyTo, stopped: new Map() }
+  const provider = failed.providerID
+  const key = `${provider}\0${kind}`
+  const found = state.outages.get(key)
+  const outage: Outage = found ?? { providerID: provider, kind, lastAt: now, notifyTo, stopped: new Map(), overflow: new Set() }
+  // A quiet outage is announced again, but keeps its resume list and dedupe state.
+  const announce = found === undefined || now - found.lastAt >= OUTAGE_STALE_MS
   state.outages.set(key, outage)
-  const phase = report.cooldownMs > 0 ? "down" : "failing"
-  let text = `Provider ${failed.providerID} is ${phase} (${kind}). ${failureNote(report)}`
+  outage.lastAt = now
+  let line: string | undefined
   if (report.subagent !== undefined) {
     const stopped = { agent: report.subagent.agent, sessionID: report.subagent.sessionID }
-    outage.stopped.set(stoppedKey(report), stopped)
-    text += ` ${stoppedLine(stopped, failed.providerID, kind, true)}`
+    if (remember(outage, stoppedKey(report), stopped) === "new") line = stoppedLine(stopped, provider, kind, announce)
   }
-  return { sessionID: notifyTo, text }
+  if (!announce) return line === undefined ? undefined : { sessionID: notifyTo, text: line }
+  outage.notifyTo = notifyTo
+  const phase = report.cooldownMs > 0 ? "down" : "failing"
+  const head = `Provider ${provider} is ${phase} (${kind}). ${failureNote(report)}`
+  return { sessionID: notifyTo, text: line === undefined ? head : `${head} ${line}` }
+}
+
+/** A session was deleted or has run successfully since: it no longer needs resuming. */
+export function forgetSession(state: NoticeState, sessionID: string): void {
+  for (const outage of state.outages.values()) {
+    outage.stopped.delete(sessionID)
+    outage.overflow.delete(sessionID)
+  }
 }
 
 /** The recovery notes for a call that succeeded on `model`: every open outage of its provider ends. */
@@ -101,7 +130,12 @@ export function decideRecovery(state: NoticeState, model: Pick<ModelRef, "provid
     state.outages.delete(key)
     let text = `Provider ${outage.providerID} recovered (${outage.kind}).`
     const resumable = [...outage.stopped.values()].filter((s) => s.sessionID !== undefined)
-    if (resumable.length > 0) text += ` Resume the stopped subagents: ${resumable.map((s) => `${s.agent ?? "subagent"} (${s.sessionID})`).join(", ")}.`
+    const more = outage.overflow.size
+    if (resumable.length > 0 || more > 0) {
+      const list = resumable.map((s) => `${s.agent ?? "subagent"} (${s.sessionID})`)
+      if (more > 0) list.push(`+${more} more`)
+      text += ` Resume the stopped subagents: ${list.join(", ")}.`
+    }
     notices.push({ sessionID: outage.notifyTo, text })
   }
   return notices
