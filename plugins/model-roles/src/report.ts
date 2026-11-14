@@ -3,7 +3,8 @@
  * runs ended how, how long they took, what tokens and cost they used. Pure: `summarizeUsage`
  * takes records and a clock, the formatters turn the result into text. A figure the ledger
  * never recorded is `undefined` ("n/a"), never 0: the ledger stores 0 for tokens and cost the
- * host did not report, so a record with all-zero tokens (or zero cost) counts as unreported.
+ * host did not report. Records from before the schema version (`v`) stored 0 for usage the host
+ * never reported, so their 0 is ambiguous and read as unknown; a version 2 record's 0 is a real 0.
  */
 
 import { LEDGER_MAX_AGE_MS, type OutcomeRecord } from "./ledger.ts"
@@ -27,11 +28,14 @@ export type Stats = {
   successRate: number
   /** Elapsed time of the runs, ms. */
   ms: { mean: number; p50: number; p90: number }
-  /** Over the runs that reported tokens; undefined when none did. */
-  tokens?: { runs: number; total: TokenTotals; mean: TokenTotals; cacheShare?: number }
-  /** Summed cost as the host reported it; undefined when no run reported one. */
+  /** Runs that reported tokens, and runs that reported cost: the coverage of the figures below. */
+  tokenRuns: number
+  costRuns: number
+  /** Over the `tokenRuns` runs; undefined when none reported. */
+  tokens?: { total: TokenTotals; mean: TokenTotals; cacheShare?: number }
+  /** Summed cost as the host reported it, over the `costRuns` runs; undefined when none reported. */
   cost?: number
-  /** cost ÷ succeeded; undefined without a cost or without a success. */
+  /** Cost of the runs with a known cost ÷ the successes among them; undefined without either. */
   costPerSuccess?: number
   /** Runs a failover moved to another model ÷ n. */
   failoverRate: number
@@ -61,6 +65,12 @@ const TOKEN_FIELDS = [
   ["cacheWrite", "cacheWriteTokens"],
 ] as const
 
+/** A usage value, unknown when absent or (on a legacy record) 0. */
+const known = (r: OutcomeRecord, value: unknown): number | undefined => {
+  const v = finite(value)
+  return v === undefined || (r.v === undefined && v === 0) ? undefined : v
+}
+
 /** `records` is not empty. */
 function stats(records: readonly OutcomeRecord[]): Stats {
   const kinds: Record<Kind, number> = { succeeded: 0, failed: 0, interrupted: 0 }
@@ -69,23 +79,25 @@ function stats(records: readonly OutcomeRecord[]): Stats {
   let tokenRuns = 0
   let cost = 0
   let costRuns = 0
+  let costSuccesses = 0
   let failovers = 0
   let resumes = 0
   for (const r of records) {
     const kind = kindOf(r.outcome)
     if (kind !== undefined) kinds[kind]++
     times.push(finite(r.ms) ?? 0)
-    const values = TOKEN_FIELDS.map(([, field]) => finite(r[field]) ?? 0)
-    if (values.some((v) => v > 0)) {
+    const values = TOKEN_FIELDS.map(([, field]) => known(r, r[field]))
+    if (values.some((v) => v !== undefined)) {
       tokenRuns++
       TOKEN_FIELDS.forEach(([key], i) => {
         total[key] += values[i] ?? 0
       })
     }
-    const c = finite(r.cost) ?? 0
-    if (c > 0) {
+    const c = known(r, r.cost)
+    if (c !== undefined) {
       cost += c
       costRuns++
+      if (kind === "succeeded") costSuccesses++
     }
     if (r.failedOver === true) failovers++
     resumes += finite(r.resumes) ?? 0
@@ -97,17 +109,19 @@ function stats(records: readonly OutcomeRecord[]): Stats {
     ...kinds,
     successRate: kinds.succeeded / n,
     ms: { mean: times.reduce((a, b) => a + b, 0) / n, p50: percentile(sorted, 0.5), p90: percentile(sorted, 0.9) },
+    tokenRuns,
+    costRuns,
     failoverRate: failovers / n,
     resumes,
   }
   if (tokenRuns > 0) {
     const mean = Object.fromEntries(Object.entries(total).map(([k, v]) => [k, v / tokenRuns])) as TokenTotals
     const denominator = total.input + total.cacheRead
-    out.tokens = { runs: tokenRuns, total, mean, ...(denominator > 0 ? { cacheShare: total.cacheRead / denominator } : {}) }
+    out.tokens = { total, mean, ...(denominator > 0 ? { cacheShare: total.cacheRead / denominator } : {}) }
   }
   if (costRuns > 0) {
     out.cost = cost
-    if (kinds.succeeded > 0) out.costPerSuccess = cost / kinds.succeeded
+    if (costSuccesses > 0) out.costPerSuccess = cost / costSuccesses
   }
   return out
 }
@@ -153,9 +167,12 @@ const money = (v: number | undefined) => (v === undefined ? NA : `$${v.toFixed(v
 const duration = (ms: number): string => (ms < 1000 ? `${Math.round(ms)}ms` : ms < 60_000 ? `${+(ms / 1000).toFixed(1)}s` : `${+(ms / 60_000).toFixed(1)}m`)
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`
 
+/** ` 12/20` when only some runs reported; nothing when all did or none did (n/a says so). */
+const coverage = (runs: number, n: number) => (runs > 0 && runs < n ? ` ${runs}/${n}` : "")
+
 /** Short text for a list row: runs, success rate, median time, cost. */
 export function usageBrief(s: Stats): string {
-  return `${plural(s.n, "run")} · ${percent(s.successRate)} ok · p50 ${duration(s.ms.p50)} · ${money(s.cost)}`
+  return `${plural(s.n, "run")} · ${percent(s.successRate)} ok · p50 ${duration(s.ms.p50)} · ${money(s.cost)}${coverage(s.costRuns, s.n)}`
 }
 
 /** Every figure of one group, on one line. */
@@ -164,12 +181,12 @@ export function usageLine(s: Stats): string {
   const tokens =
     t === undefined
       ? "tokens n/a"
-      : `in ${count(t.total.input)} out ${count(t.total.output)} reasoning ${count(t.total.reasoning)} cache r${count(t.total.cacheRead)}/w${count(t.total.cacheWrite)} (${percent(t.cacheShare)} read)`
+      : `${coverage(s.tokenRuns, s.n).trim() === "" ? "" : `tokens ${s.tokenRuns}/${s.n}: `}in ${count(t.total.input)} out ${count(t.total.output)} reasoning ${count(t.total.reasoning)} cache r${count(t.total.cacheRead)}/w${count(t.total.cacheWrite)} (${percent(t.cacheShare)} read)`
   return [
     `${plural(s.n, "run")}: ${s.succeeded} ok, ${s.failed} failed, ${s.interrupted} interrupted (${percent(s.successRate)})`,
     `time mean ${duration(s.ms.mean)} p50 ${duration(s.ms.p50)} p90 ${duration(s.ms.p90)}`,
     tokens,
-    `cost ${money(s.cost)} (${money(s.costPerSuccess)}/success)`,
+    `cost${coverage(s.costRuns, s.n)} ${money(s.cost)} (${money(s.costPerSuccess)}/success)`,
     `failover ${percent(s.failoverRate)}`,
     plural(s.resumes, "resume"),
   ].join(", ")

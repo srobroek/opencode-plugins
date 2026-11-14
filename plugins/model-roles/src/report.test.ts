@@ -6,6 +6,7 @@ const DAY = 24 * 60 * 60 * 1000
 const NOW = 100 * DAY
 
 const rec = (over: Partial<OutcomeRecord> = {}): OutcomeRecord => ({
+  v: 2,
   at: NOW - DAY,
   agent: "explore",
   tier: "cheap",
@@ -23,6 +24,7 @@ const rec = (over: Partial<OutcomeRecord> = {}): OutcomeRecord => ({
   outcome: "succeeded",
   ...over,
 })
+const unreported = { inputTokens: undefined, outputTokens: undefined, reasoningTokens: undefined, cacheReadTokens: undefined, cacheWriteTokens: undefined, cost: undefined }
 const only = (records: OutcomeRecord[], days?: number) => summarizeUsage(records, NOW, days).tiers[0]?.total
 
 describe("summarizeUsage", () => {
@@ -58,25 +60,37 @@ describe("summarizeUsage", () => {
       rec({ inputTokens: 300, outputTokens: 30, reasoningTokens: 0, cacheReadTokens: 100, cacheWriteTokens: 0 }),
     ])
     expect(total?.tokens).toEqual({
-      runs: 2,
       total: { input: 400, output: 40, reasoning: 4, cacheRead: 400, cacheWrite: 20 },
       mean: { input: 200, output: 20, reasoning: 2, cacheRead: 200, cacheWrite: 10 },
       cacheShare: 0.5,
     })
   })
 
-  test("a run with no tokens or cost does not drag the means or totals to 0", () => {
-    const total = only([rec({ inputTokens: 100, cost: 0.4 }), rec({ inputTokens: 0, outputTokens: 0, cost: 0 })])
-    expect(total?.tokens?.runs).toBe(1)
+  test("a run that reported no tokens or cost does not drag the means or totals to 0, and coverage shows it", () => {
+    const total = only([rec({ inputTokens: 100, cost: 0.4 }), rec(unreported)])
+    expect(total).toMatchObject({ n: 2, tokenRuns: 1, costRuns: 1, cost: 0.4 })
     expect(total?.tokens?.mean.input).toBe(100)
-    expect(total?.cost).toBe(0.4)
   })
 
-  test("no reported cost or tokens is undefined, not 0", () => {
-    const total = only([rec({ cost: 0, inputTokens: 0, outputTokens: 0 }), rec({ cost: Number.NaN, inputTokens: 0, outputTokens: 0 })])
+  test("nothing reported is undefined, not 0", () => {
+    const total = only([rec(unreported), rec({ ...unreported, cost: Number.NaN })])
+    expect(total).toMatchObject({ tokenRuns: 0, costRuns: 0 })
     expect(total?.cost).toBeUndefined()
     expect(total?.costPerSuccess).toBeUndefined()
     expect(total?.tokens).toBeUndefined()
+  })
+
+  test("a reported 0 on a current record is 0", () => {
+    const total = only([rec({ cost: 0, inputTokens: 0, outputTokens: 0, reasoningTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 })])
+    expect(total).toMatchObject({ costRuns: 1, cost: 0, costPerSuccess: 0, tokenRuns: 1 })
+    expect(total?.tokens?.total).toEqual({ input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 })
+  })
+
+  test("a legacy record (no version) reads its 0 usage as unknown but keeps a positive value", () => {
+    const legacy = (over: Partial<OutcomeRecord>) => ({ ...rec(over), v: undefined })
+    const zeros = legacy({ cost: 0, inputTokens: 0, outputTokens: 0, reasoningTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 })
+    expect(only([zeros])).toMatchObject({ tokenRuns: 0, costRuns: 0 })
+    expect(only([zeros, legacy({ cost: 0.3, inputTokens: 50, outputTokens: 0 })])).toMatchObject({ tokenRuns: 1, costRuns: 1, cost: 0.3, tokens: { total: { input: 50, output: 0 } } })
   })
 
   test("cost per success divides all cost by the successes; none without a success", () => {
@@ -84,6 +98,13 @@ describe("summarizeUsage", () => {
     const none = only([rec({ cost: 1, outcome: "failed:other" })])
     expect(none?.cost).toBe(1)
     expect(none?.costPerSuccess).toBeUndefined()
+  })
+
+  test("cost per success counts only records with a known cost", () => {
+    // 10 for two costed successes; a success with no cost and a costed failure add no successes.
+    const total = only([rec({ cost: 4 }), rec({ cost: 6 }), rec({ cost: undefined }), rec({ cost: 5, outcome: "failed:other" })])
+    expect(total).toMatchObject({ cost: 15, costRuns: 3, n: 4 })
+    expect(total?.costPerSuccess).toBe(7.5)
   })
 
   test("the window defaults to 90 days and takes days", () => {
@@ -136,11 +157,18 @@ describe("formatUsage", () => {
     ])
   })
 
+  test("partial reporting shows coverage, like cost 1/2", () => {
+    const [, line] = formatUsage(summarizeUsage([rec({ cost: 1 }), rec(unreported)], NOW))
+    expect(line).toContain("tokens 1/2: in 100")
+    expect(line).toContain("cost 1/2 $1.00 ($1.00/success)")
+    expect(usageBrief(summarizeUsage([rec({ cost: 1 }), rec(unreported)], NOW).tiers[0]?.total as never)).toBe("2 runs · 100% ok · p50 1s · $1.00 1/2")
+  })
+
   test("shows n/a for what was not reported, and a note when empty", () => {
-    const [header, line] = formatUsage(summarizeUsage([rec({ cost: 0, inputTokens: 0, outputTokens: 0 })], NOW))
+    const [header, line] = formatUsage(summarizeUsage([rec(unreported)], NOW))
     expect(header).toBe("Usage per tier (last 90 days):")
     expect(line).toContain("tokens n/a, cost n/a (n/a/success)")
     expect(formatUsage(summarizeUsage([], NOW, 30))).toEqual(["Usage per tier (last 30 days):", "  no finished spawns recorded"])
-    expect(usageBrief(summarizeUsage([rec({ cost: 0 })], NOW).tiers[0]?.total as never)).toBe("1 run · 100% ok · p50 1s · n/a")
+    expect(usageBrief(summarizeUsage([rec(unreported)], NOW).tiers[0]?.total as never)).toBe("1 run · 100% ok · p50 1s · n/a")
   })
 })

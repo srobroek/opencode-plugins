@@ -416,14 +416,19 @@ Per tier, and per agent within it (the check shows the top 3 agents), it gives:
 - Tokens: totals and per-run means for input, output, reasoning, cache read and
   cache write, over the runs that reported tokens. Cache share is
   read ÷ (input + read).
-- Cost: the sum as the host reported it, and cost per success, which is all cost
-  of the group (failed runs too) ÷ the successes; n/a without a success.
+- Cost: the sum as the host reported it, and cost per success: the cost of the
+  runs with a known cost ÷ the successes among them; n/a without either.
+- Coverage: when only some runs of a group reported cost or tokens, the line says
+  how many, for example `cost 12/20`. Totals and means cover those runs only.
 - Fallback rate: the share of runs a failover moved to another model, and the
   resume count.
 
-The ledger stores 0 for tokens or cost the host never reported, so a run with no
-tokens (or zero cost) counts as unreported: it is left out of the token means and
-the cost sum, and a group with none shows n/a, never 0. Spawns without a tier
+A usage field (tokens, cost) is stored only once the host reported it for a step;
+until then it is absent, and the report shows n/a, never 0. A reported 0 is 0.
+Records carry a schema version `v` (currently 2). Records without it are legacy:
+they stored 0 for usage the host never reported, so a legacy 0 is ambiguous and the
+report reads it as unknown. A resumed child counts as running from the start of its
+new run: it leaves the outcome counts until that run ends. Spawns without a tier
 appear under `(none)`.
 
 The ledger is advisory telemetry: nothing decides anything from it. Writes to one

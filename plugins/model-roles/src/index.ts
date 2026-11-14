@@ -1502,6 +1502,9 @@ export default Plugin.define({
     const spawns = await ctx.tool.hook("execute.before", async (event) => {
       if (event.tool !== SUBAGENT_TOOL) return
       await whileSpawning(() => handleSpawn(event))
+      // A resume starts a new run: the child counts as running until that run ends.
+      const resumed = isRecord(event.input) ? event.input.sessionID : undefined
+      if (typeof resumed === "string" && resumed !== "") await outcomes.resume(resumed)
     })
 
     // The `/tiers` TUI dialog reads the tier table and writes `options.tiers` through these.
@@ -1717,8 +1720,6 @@ export default Plugin.define({
       pending.delete(event.id)
       const expected = expectedChildren.get(event.id)
       expectedChildren.delete(event.id)
-      const resumed = isRecord(event.input) ? event.input.sessionID : undefined
-      if (typeof resumed === "string" && resumed !== "") await outcomes.resume(resumed)
       if (event.status === "completed") {
         const childID = (event.result.metadata as { sessionID?: unknown } | undefined)?.sessionID
         if (spawn !== undefined && typeof childID === "string") await recordChildRole(childID, spawn.role)
