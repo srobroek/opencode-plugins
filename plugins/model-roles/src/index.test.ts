@@ -956,6 +956,29 @@ describe("runtime fallback", () => {
     await cleanup()
   })
 
+  test("repeated credential failures across sessions are one outage notice, then one recovery on the first success", async () => {
+    const host = createHost({ agents: [{ id: "general" }], models, options: fallbackOptions })
+    host.sessions.set("r", { id: "r" })
+    for (const id of ["c1", "c2"]) host.sessions.set(id, { id, parentID: "r", agent: "general", model: sonnet })
+    const cleanup = await setup(host)
+    const error = { type: "provider.auth", message: "Unable to locate credentials" }
+    for (let i = 0; i < 6; i++) {
+      host.emit(failed(i % 2 === 0 ? "c1" : "c2", error))
+      await settle()
+    }
+    const texts = () => methods(host, "synthetic").map((c) => (c.input as { text: string }).text)
+    expect(texts()).toHaveLength(2)
+    expect(texts()[0]).toContain("Provider amazon-bedrock is")
+    expect(texts()[0]).toContain("resume it with sessionID c1")
+    expect(texts()[1]).toContain("Subagent 'general' stopped by the amazon-bedrock outage (credentials): resume it with sessionID c2")
+    host.emit({ type: "session.execution.succeeded", data: { sessionID: "c1" } })
+    await settle()
+    expect(texts()).toHaveLength(3)
+    expect(texts()[2]).toContain("Provider amazon-bedrock recovered (credentials). Resume the stopped subagents: general (c1), general (c2).")
+    host.close()
+    await cleanup()
+  })
+
   test("a provider's failure text never reaches health storage, receipts or the check: only its class", async () => {
     const host = createHost({ agents: [{ id: "general" }, { id: "plain" }], models, options: fallbackOptions })
     const cleanup = await setup(host)

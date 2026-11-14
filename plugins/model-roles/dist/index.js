@@ -3330,6 +3330,68 @@ function hostWarn(source) {
   };
 }
 
+// plugins/model-roles/src/outage.ts
+var NOTICE_DEDUPE_MS = 60000;
+var OUTAGE_STALE_MS = 15 * 60000;
+var newNoticeState = () => ({ outages: new Map, notices: new Map });
+var stoppedKey = (report) => report.subagent?.sessionID ?? `${report.notifyTo}\x00${report.subagent?.agent ?? ""}`;
+var stoppedLine = (stopped, provider, kind, first) => {
+  const who = stopped.agent === undefined ? "A subagent" : `Subagent '${stopped.agent}'`;
+  const retry = stopped.sessionID === undefined ? "spawn it again" : `resume it with sessionID ${stopped.sessionID}`;
+  return first ? `${who} stopped: ${retry} when the provider is back.` : `${who} stopped by the ${provider} outage (${kind}): ${retry} when the provider is back.`;
+};
+function decideFailureNotice(state, report) {
+  const { failed, kind, now, notifyTo } = report;
+  if (failureScope(kind) === "provider")
+    return decideOutage(state, report);
+  const key = `${notifyTo}\x00${healthKey(failed)}\x00${kind}`;
+  const last = state.notices.get(key);
+  if (last !== undefined && now - last < NOTICE_DEDUPE_MS)
+    return;
+  state.notices.set(key, now);
+  return { sessionID: notifyTo, text: report.plain ?? failureNote(report) };
+}
+function decideOutage(state, report) {
+  const { failed, kind, now, notifyTo } = report;
+  const key = `${failed.providerID}\x00${kind}`;
+  const open = state.outages.get(key);
+  if (open !== undefined && now - open.lastAt < OUTAGE_STALE_MS) {
+    open.lastAt = now;
+    if (report.subagent === undefined)
+      return;
+    const id = stoppedKey(report);
+    if (open.stopped.has(id))
+      return;
+    const stopped = { agent: report.subagent.agent, sessionID: report.subagent.sessionID };
+    open.stopped.set(id, stopped);
+    return { sessionID: notifyTo, text: stoppedLine(stopped, failed.providerID, kind, false) };
+  }
+  const outage = { providerID: failed.providerID, kind, lastAt: now, notifyTo, stopped: new Map };
+  state.outages.set(key, outage);
+  const phase = report.cooldownMs > 0 ? "down" : "failing";
+  let text = `Provider ${failed.providerID} is ${phase} (${kind}). ${failureNote(report)}`;
+  if (report.subagent !== undefined) {
+    const stopped = { agent: report.subagent.agent, sessionID: report.subagent.sessionID };
+    outage.stopped.set(stoppedKey(report), stopped);
+    text += ` ${stoppedLine(stopped, failed.providerID, kind, true)}`;
+  }
+  return { sessionID: notifyTo, text };
+}
+function decideRecovery(state, model) {
+  const notices = [];
+  for (const [key, outage] of state.outages) {
+    if (outage.providerID !== model.providerID)
+      continue;
+    state.outages.delete(key);
+    let text = `Provider ${outage.providerID} recovered (${outage.kind}).`;
+    const resumable = [...outage.stopped.values()].filter((s) => s.sessionID !== undefined);
+    if (resumable.length > 0)
+      text += ` Resume the stopped subagents: ${resumable.map((s) => `${s.agent ?? "subagent"} (${s.sessionID})`).join(", ")}.`;
+    notices.push({ sessionID: outage.notifyTo, text });
+  }
+  return notices;
+}
+
 // plugins/model-roles/src/receipt.ts
 var RECEIPTS_KEY = "receipts";
 var RECEIPT_LIMIT = 50;
@@ -3633,12 +3695,12 @@ function applyEdit2(row, edit) {
 
 // plugins/model-roles/src/index.ts
 var MAX_REREGISTER = 3;
-var NOTICE_DEDUPE_MS = 60000;
 var CHECK_TOOL = "model_roles_check";
 var MAX_SESSION_DEPTH = 8;
 var REFRESH_EVENTS = new Set(["model.updated", "provider.updated"]);
 var CHECK_EVENTS = new Set(["agent.updated", ...REFRESH_EVENTS]);
 var FAILED_EVENT = "session.execution.failed";
+var SUCCEEDED_EVENT = "session.execution.succeeded";
 var CREATED_EVENT = "session.created";
 var CONFIG_EVENT = "config.updated";
 var PENDING_SPAWN_MS = 10 * 60000;
@@ -3710,7 +3772,7 @@ var src_default = Plugin.define({
     }
     const view = () => healthView(health2, Date.now());
     const queue = serial();
-    const notices = new Map;
+    const noticeState = newNoticeState();
     const childFailures = new Map;
     const refresh = async () => {
       try {
@@ -3853,14 +3915,23 @@ ${refs.size}`;
         });
       } catch {}
     };
-    const notifyParentOnce = async (parentID, failed, text) => {
-      const key = `${parentID}\x00${healthKey(failed)}`;
-      const now = Date.now();
-      const last = notices.get(key);
-      if (last !== undefined && now - last < NOTICE_DEDUPE_MS)
+    const announce = async (report) => {
+      const notice = decideFailureNotice(noticeState, report);
+      if (notice === undefined)
         return;
-      notices.set(key, now);
-      await notify(parentID, text, "subagent-fallback");
+      await notify(notice.sessionID, notice.text, report.subagent === undefined ? "fallback" : "subagent-fallback");
+    };
+    const onSessionSucceeded = async (sessionID) => {
+      if (noticeState.outages.size === 0)
+        return;
+      const session = await ctx.session.get({ sessionID }).catch(() => {
+        return;
+      });
+      const model = session === undefined ? undefined : await runningModel(session, await listAgents());
+      if (model === undefined)
+        return;
+      for (const notice of decideRecovery(noticeState, model))
+        await notify(notice.sessionID, notice.text, "recovery");
     };
     const childModel = async (message) => {
       const id = childSessionID(message);
@@ -3983,11 +4054,17 @@ ${refs.size}`;
           } catch {}
         }
         const note = subagentNote({ ...facts, agent: session.agent, spawnRole, resumable });
-        await notifyParentOnce(session.parentID, failed, note);
+        await announce({
+          ...facts,
+          now: Date.now(),
+          notifyTo: session.parentID,
+          subagent: { agent: session.agent, sessionID },
+          plain: note
+        });
         return;
       }
-      if (cooldownMs > 0)
-        await notify(sessionID, failureNote(facts), "fallback");
+      if (failureScope(kind) === "provider" || cooldownMs > 0)
+        await announce({ ...facts, now: Date.now(), notifyTo: sessionID });
       else
         warn(`session ${sessionID}: ${failureNote(facts)}`);
     };
@@ -4736,7 +4813,13 @@ ${refs.size}`;
           const target = cooldownMs > 0 ? fallbackTarget(options, available, view(), role, failed) : undefined;
           const facts = { failed, kind, cooldownMs, target };
           const resumable = cooldownMs > 0 ? undefined : childSessionID(message);
-          await notifyParentOnce(event.sessionID, failed, subagentNote({ ...facts, agent: agentID, spawnRole: spawn?.role, resumable }));
+          await announce({
+            ...facts,
+            now: Date.now(),
+            notifyTo: event.sessionID,
+            subagent: { agent: agentID, sessionID: childSessionID(message) },
+            plain: subagentNote({ ...facts, agent: agentID, spawnRole: spawn?.role, resumable })
+          });
         });
       } catch (error) {
         warn(`could not record the subagent failure`, { error: String(error) });
@@ -4754,6 +4837,12 @@ ${refs.size}`;
           const sessionID = data.sessionID;
           const error = data.error;
           await queue(() => onSessionFailed(sessionID, error)).catch((error) => warn(`fallback after a failed execution did not complete`, { error: String(error) }));
+          continue;
+        }
+        if (type === SUCCEEDED_EVENT) {
+          const sessionID = event.data?.sessionID;
+          if (typeof sessionID === "string")
+            await queue(() => onSessionSucceeded(sessionID)).catch(() => {});
           continue;
         }
         if (type === CREATED_EVENT) {
@@ -4796,7 +4885,8 @@ ${refs.size}`;
       await retries.dispose();
       await registration.dispose();
       await references.dispose();
-      notices.clear();
+      noticeState.outages.clear();
+      noticeState.notices.clear();
       childFailures.clear();
       triedModels.clear();
       pending.clear();
