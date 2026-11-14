@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { chmodSync, existsSync, lstatSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync, writeSync } from "node:fs"
+import { chmodSync, closeSync, existsSync, fchownSync, fsyncSync, lstatSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync, writeSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { parse } from "jsonc-parser"
@@ -234,18 +234,52 @@ describe("atomic config writes", () => {
     return { dir, file, done: () => rmSync(dir, { recursive: true, force: true }) }
   }
 
+  const REAL = { writeSync, renameSync, fchownSync, openSync, fsyncSync, closeSync }
+
   test("the original survives a failure while writing, and no temp file is left", () => {
     const { dir, file, done } = fixture()
     try {
       const before = readFileSync(file, "utf8")
       const torn = {
-        writeSync: (fd: number, data: string) => {
-          writeSync(fd, data.slice(0, 5)) // a partial write, then the disk fails
+        ...REAL,
+        writeSync: (fd: number, buf: Uint8Array, off: number) => {
+          writeSync(fd, buf, off, 5) // a partial write, then the disk fails
           throw new Error("ENOSPC")
         },
-        renameSync,
       }
       expect(() => writeFileAtomic(file, "{ new }\n", torn)).toThrow("ENOSPC")
+      expect(readFileSync(file, "utf8")).toBe(before)
+      expect(readdirSync(dir)).toEqual(["opencode.json"])
+    } finally {
+      done()
+    }
+  })
+
+  test("a short write is completed, multibyte text included", () => {
+    const { file, done } = fixture()
+    try {
+      const calls: number[] = []
+      const short = {
+        ...REAL,
+        writeSync: (fd: number, buf: Uint8Array, off: number, len: number) => {
+          calls.push(len)
+          return writeSync(fd, buf, off, Math.min(len, 3)) // never more than 3 bytes, no error
+        },
+      }
+      const text = '{ "plugins": ["é→x"] }\n'
+      writeFileAtomic(file, text, short)
+      expect(readFileSync(file, "utf8")).toBe(text)
+      expect(calls.length).toBeGreaterThan(2)
+    } finally {
+      done()
+    }
+  })
+
+  test("a write that takes no bytes fails and leaves the original", () => {
+    const { dir, file, done } = fixture()
+    try {
+      const before = readFileSync(file, "utf8")
+      expect(() => writeFileAtomic(file, "{ new }\n", { ...REAL, writeSync: () => 0 })).toThrow("Short write")
       expect(readFileSync(file, "utf8")).toBe(before)
       expect(readdirSync(dir)).toEqual(["opencode.json"])
     } finally {
@@ -258,7 +292,7 @@ describe("atomic config writes", () => {
     try {
       const before = readFileSync(file, "utf8")
       const io = {
-        writeSync,
+        ...REAL,
         renameSync: () => {
           throw new Error("EXDEV")
         },
@@ -266,6 +300,57 @@ describe("atomic config writes", () => {
       expect(() => writeFileAtomic(file, "{ new }\n", io)).toThrow("EXDEV")
       expect(readFileSync(file, "utf8")).toBe(before)
       expect(readdirSync(dir).filter((n) => n.includes("tmp"))).toEqual([])
+    } finally {
+      done()
+    }
+  })
+
+  test("the temp file takes the original's owner and group; EPERM refuses the save", () => {
+    const { dir, file, done } = fixture()
+    try {
+      const { uid, gid } = statSync(file)
+      const owners: Array<[number, number]> = []
+      writeFileAtomic(file, "{ a }\n", { ...REAL, fchownSync: (_fd, u, g) => owners.push([u, g]) })
+      expect(owners).toEqual([[uid, gid]])
+      const before = readFileSync(file, "utf8")
+      const denied = {
+        ...REAL,
+        fchownSync: () => {
+          throw Object.assign(new Error("operation not permitted"), { code: "EPERM" })
+        },
+      }
+      expect(() => writeFileAtomic(file, "{ b }\n", denied)).toThrow(/belongs to another user.*will not change its ownership/)
+      expect(readFileSync(file, "utf8")).toBe(before)
+      expect(readdirSync(dir).filter((n) => n.includes("tmp"))).toEqual([])
+    } finally {
+      done()
+    }
+  })
+
+  test("the backup and the directory are synced; a directory that rejects fsync does not fail the save", () => {
+    const { dir, file, done } = fixture()
+    try {
+      const real = realpathSync(dir)
+      const opened = new Map<number, string>()
+      const synced: string[] = []
+      const watching = {
+        ...REAL,
+        openSync: ((p: string, ...rest: [string, number?]) => {
+          const fd = openSync(p, ...(rest as [string, number?]))
+          opened.set(fd, p)
+          return fd
+        }) as typeof openSync,
+        fsyncSync: (fd: number) => {
+          synced.push(opened.get(fd) ?? "temp")
+          const p = opened.get(fd)
+          if (p === real) throw Object.assign(new Error("invalid"), { code: "EINVAL" })
+          fsyncSync(fd)
+        },
+      }
+      writeFileAtomic(file, "{ a }\n", watching)
+      expect(synced).toContain(path.join(real, `opencode.json${BACKUP_SUFFIX}`))
+      expect(synced.at(-1)).toBe(real) // the directory comes last, after the rename
+      expect(readFileSync(file, "utf8")).toBe("{ a }\n")
     } finally {
       done()
     }

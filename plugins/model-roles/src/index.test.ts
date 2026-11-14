@@ -1650,6 +1650,66 @@ describe("tiers rpc", () => {
     )
   })
 
+  const haikuId = "global.anthropic.claude-haiku-5-5"
+  const sonnetId = "global.anthropic.claude-sonnet-5-5"
+  const projectFile = (globalFile: string) => path.join(path.dirname(globalFile), "project", "sub", "opencode.json")
+  const reload = async (host: ReturnType<typeof createHost>) => {
+    host.emit({ type: "config.updated", data: {} })
+    await settle()
+  }
+  /** The model a `role: "cheap"` spawn is sent to. */
+  const spawnModel = async (host: ReturnType<typeof createHost>) => (await host.spawn("subagent", { agent: "worker", prompt: "x", role: "cheap" })).model
+
+  test("an edit of the project entry's tiers applies on the next config reload, with a global entry present", async () => {
+    await withConfig(
+      async (host, file) => {
+        expect(workerModel(host)).toMatchObject({ id: sonnetId })
+        expect(await spawnModel(host)).toBe(`amazon-bedrock/${sonnetId}#low`)
+        writeFileSync(projectFile(file), tierEntry({ cheap: { model: [`amazon-bedrock/${haikuId}#low`] } }))
+        await reload(host)
+        expect(workerModel(host)).toEqual(haikuLow)
+        expect(await spawnModel(host)).toBe(`amazon-bedrock/${haikuId}#low`)
+      },
+      worker,
+      projectOnly,
+    )
+  })
+
+  test("an edit of the project entry's tiers applies when the global config has no entry at all", async () => {
+    await withConfig(
+      async (host, file) => {
+        expect(workerModel(host)).toMatchObject({ id: sonnetId })
+        writeFileSync(projectFile(file), tierEntry({ cheap: { model: [`amazon-bedrock/${haikuId}#low`] } }))
+        await reload(host)
+        expect(workerModel(host)).toEqual(haikuLow)
+        expect(await spawnModel(host)).toBe(`amazon-bedrock/${haikuId}#low`)
+      },
+      worker,
+      { ...projectOnly, fileText: '{ "plugins": [] }\n' },
+    )
+  })
+
+  test("project tiers wait for a unique identity: until the host names this instance the startup tiers stay", async () => {
+    let listed = false
+    const plugin = { list: async () => ({ data: listed ? [row("/x/plugins/model-roles")] : [] }) }
+    await withConfig(
+      async (host, file) => {
+        expect(workerModel(host)).toMatchObject({ id: sonnetId })
+        writeFileSync(projectFile(file), tierEntry({ cheap: { model: [`amazon-bedrock/${haikuId}#low`] } }))
+        await reload(host)
+        // Unknown identity: a guess must not apply the project's new tiers.
+        expect(workerModel(host)).toMatchObject({ id: sonnetId })
+        expect(await spawnModel(host)).toBe(`amazon-bedrock/${sonnetId}#low`)
+        listed = true
+        await reload(host)
+        expect(workerModel(host)).toEqual(haikuLow)
+        expect(await spawnModel(host)).toBe(`amazon-bedrock/${haikuId}#low`)
+      },
+      worker,
+      { ...projectOnly, plugin },
+    )
+  })
+
   test("without a project entry a global tier save still applies at once and is not shadowed", async () => {
     await withConfig(
       async (host) => {

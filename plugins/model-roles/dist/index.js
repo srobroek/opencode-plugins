@@ -1818,7 +1818,7 @@ function readClassification(value) {
 }
 
 // plugins/model-roles/src/config-edit.ts
-import { closeSync, copyFileSync, fchmodSync, fsyncSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeSync } from "fs";
+import { closeSync, copyFileSync, fchmodSync, fchownSync, fsyncSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeSync } from "fs";
 import path from "path";
 
 // node_modules/.bun/jsonc-parser@3.3.1/node_modules/jsonc-parser/lib/esm/impl/scanner.js
@@ -3194,29 +3194,59 @@ function readConfigFiles(dir) {
   return files;
 }
 var BACKUP_SUFFIX = ".model-roles.bak";
-var REAL_IO = { writeSync: (fd, data) => writeSync(fd, data), renameSync };
+var REAL_IO = { writeSync, renameSync, fchownSync, openSync, fsyncSync, closeSync };
+function writeAll(io, fd, bytes) {
+  for (let done = 0;done < bytes.length; ) {
+    const n = io.writeSync(fd, bytes, done, bytes.length - done);
+    if (n <= 0)
+      throw new Error("Short write: the file system accepted no more bytes.");
+    done += n;
+  }
+}
 function writeFileAtomic(file, text, io = REAL_IO) {
   const target = realpathSync(file);
-  const { mode } = statSync(target);
+  const { mode, uid, gid } = statSync(target);
   const temp = `${target}.model-roles.${process.pid}.tmp`;
+  const backup = target + BACKUP_SUFFIX;
   let fd;
   try {
-    fd = openSync(temp, "wx", mode & 511);
+    fd = io.openSync(temp, "wx", mode & 511);
     fchmodSync(fd, mode & 511);
-    io.writeSync(fd, text);
-    fsyncSync(fd);
-    closeSync(fd);
+    try {
+      io.fchownSync(fd, uid, gid);
+    } catch (error) {
+      if (error.code === "EPERM")
+        throw new Error(`${target} belongs to another user (uid ${uid}, gid ${gid}); model-roles will not change its ownership, so the save is refused. Edit it by hand or fix its ownership.`);
+      throw error;
+    }
+    writeAll(io, fd, new TextEncoder().encode(text));
+    io.fsyncSync(fd);
+    io.closeSync(fd);
     fd = undefined;
-    copyFileSync(target, target + BACKUP_SUFFIX);
+    copyFileSync(target, backup);
+    const saved = io.openSync(backup, "r");
+    try {
+      io.fsyncSync(saved);
+    } finally {
+      io.closeSync(saved);
+    }
     io.renameSync(temp, target);
   } catch (error) {
     if (fd !== undefined)
-      closeSync(fd);
+      io.closeSync(fd);
     try {
       unlinkSync(temp);
     } catch {}
     throw error;
   }
+  try {
+    const dir = io.openSync(path.dirname(target), "r");
+    try {
+      io.fsyncSync(dir);
+    } finally {
+      io.closeSync(dir);
+    }
+  } catch {}
 }
 function writeEntry(dir, edit, spec) {
   const file = pickConfigFile(readConfigFiles(dir), spec);

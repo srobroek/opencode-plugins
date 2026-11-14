@@ -162,8 +162,10 @@ A save goes to `options.tiers` of the model-roles entry in the global config:
 `opencode.json`. The edit keeps comments and formatting, and turns a bare string
 plugin entry into `{ "package": …, "options": … }`. The write is atomic: the new
 text goes to a temp file in the same directory, is synced, then renamed over the
-config, which keeps its file mode, so a crash never leaves a half-written config.
-Before the rename the old content is copied to `<config>.model-roles.bak`. There is
+config, which keeps its file mode, owner and group, so a crash never leaves a
+half-written config. A config owned by another user is refused rather than
+re-owned. Before the rename the old content is copied to `<config>.model-roles.bak`,
+and the directory is synced after it. There is
 one backup per file, overwritten on each save, so it holds the config as it was
 before the last save.
 

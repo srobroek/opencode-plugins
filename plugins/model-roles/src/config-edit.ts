@@ -5,7 +5,7 @@
  * `writeTier`, which reads and writes the chosen file.
  */
 
-import { closeSync, copyFileSync, fchmodSync, fsyncSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeSync } from "node:fs"
+import { closeSync, copyFileSync, fchmodSync, fchownSync, fsyncSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeSync } from "node:fs"
 import path from "node:path"
 import { applyEdits, findNodeAtLocation, getNodeValue, modify, type Node, parseTree } from "jsonc-parser"
 
@@ -128,38 +128,80 @@ export type AgentWriteResult = { path: string; agents: Record<string, unknown> }
 /** Suffix of the rolling backup next to a config file. */
 export const BACKUP_SUFFIX = ".model-roles.bak"
 
-type AtomicIo = { writeSync: (fd: number, data: string) => unknown; renameSync: (from: string, to: string) => void }
-const REAL_IO: AtomicIo = { writeSync: (fd, data) => writeSync(fd, data), renameSync }
+/** The file-system calls `writeFileAtomic` makes, so a test can make one of them fail or fall short. */
+export type AtomicIo = {
+  writeSync: (fd: number, buffer: Uint8Array, offset: number, length: number) => number
+  renameSync: (from: string, to: string) => void
+  fchownSync: (fd: number, uid: number, gid: number) => void
+  openSync: typeof openSync
+  fsyncSync: (fd: number) => void
+  closeSync: (fd: number) => void
+}
+const REAL_IO: AtomicIo = { writeSync, renameSync, fchownSync, openSync, fsyncSync, closeSync }
+
+/** Write every byte of `bytes`: `writeSync` may take fewer than asked, and a 0-byte write would loop forever. */
+function writeAll(io: AtomicIo, fd: number, bytes: Uint8Array): void {
+  for (let done = 0; done < bytes.length; ) {
+    const n = io.writeSync(fd, bytes, done, bytes.length - done)
+    if (n <= 0) throw new Error("Short write: the file system accepted no more bytes.")
+    done += n
+  }
+}
 
 /**
  * Replace `file` with `text` so a crash or full disk never leaves a torn config: write a temp file in the
- * same directory (so the rename stays on one filesystem), fsync it, then rename it over the original. The
- * original's mode is kept, and a symlinked config is written through. Before the rename the old content is
- * copied to `<file>.model-roles.bak`. That is one rolling backup, overwritten on each save: it is a safety
+ * same directory (so the rename stays on one filesystem), fsync it, then rename it over the original and
+ * fsync the directory so the new entry survives a power loss. The original's mode, owner and group are
+ * kept, and a symlinked config is written through. Before the rename the old content is copied to
+ * `<file>.model-roles.bak` and synced. That is one rolling backup, overwritten on each save: it is a safety
  * net for the last edit, and a backup per save would pile up files in the user's config directory.
  */
 export function writeFileAtomic(file: string, text: string, io: AtomicIo = REAL_IO): void {
   const target = realpathSync(file)
-  const { mode } = statSync(target)
+  const { mode, uid, gid } = statSync(target)
   const temp = `${target}.model-roles.${process.pid}.tmp`
+  const backup = target + BACKUP_SUFFIX
   let fd: number | undefined
   try {
-    fd = openSync(temp, "wx", mode & 0o777)
+    fd = io.openSync(temp, "wx", mode & 0o777)
     fchmodSync(fd, mode & 0o777) // the umask must not narrow the original's mode
-    io.writeSync(fd, text)
-    fsyncSync(fd)
-    closeSync(fd)
+    try {
+      io.fchownSync(fd, uid, gid)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EPERM")
+        throw new Error(`${target} belongs to another user (uid ${uid}, gid ${gid}); model-roles will not change its ownership, so the save is refused. Edit it by hand or fix its ownership.`)
+      throw error
+    }
+    writeAll(io, fd, new TextEncoder().encode(text))
+    io.fsyncSync(fd)
+    io.closeSync(fd)
     fd = undefined
-    copyFileSync(target, target + BACKUP_SUFFIX)
+    copyFileSync(target, backup)
+    const saved = io.openSync(backup, "r")
+    try {
+      io.fsyncSync(saved)
+    } finally {
+      io.closeSync(saved)
+    }
     io.renameSync(temp, target)
   } catch (error) {
-    if (fd !== undefined) closeSync(fd)
+    if (fd !== undefined) io.closeSync(fd)
     try {
       unlinkSync(temp)
     } catch {
       // Never created, or already moved.
     }
     throw error
+  }
+  try {
+    const dir = io.openSync(path.dirname(target), "r")
+    try {
+      io.fsyncSync(dir)
+    } finally {
+      io.closeSync(dir)
+    }
+  } catch {
+    // Some platforms (Windows) cannot fsync a directory; the file itself is already synced and renamed.
   }
 }
 
