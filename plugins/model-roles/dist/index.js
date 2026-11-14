@@ -4103,6 +4103,10 @@ ${refs.size}`;
         await ctx.storage.set(`${SPAWN_ROLE_KEY_PREFIX}${childID}`, role);
       } catch {}
     };
+    const forgetChildRole = async (childID) => {
+      childRoles.delete(childID);
+      await ctx.storage.remove(`${SPAWN_ROLE_KEY_PREFIX}${childID}`).catch(() => {});
+    };
     const spawnRoleOf = async (childID) => {
       const known = childRoles.get(childID);
       if (known !== undefined)
@@ -4127,10 +4131,38 @@ ${refs.size}`;
         await ctx.storage.set(`${SPAWN_MODEL_KEY_PREFIX}${childID}`, snapshot);
       } catch {}
     };
-    const recordChildModel = async (childID, spawn) => {
-      if (await snapshotOf(childID) !== undefined)
+    const expectedChildren = new Map;
+    const expectChild = (callID, event, agent, planned, tier) => {
+      expectedChildren.set(callID, { parentID: event.sessionID, agent, ...planned === undefined ? {} : { planned }, ...tier === undefined ? {} : { tier }, configRevision: configRevision(options), at: Date.now() });
+    };
+    const recordChildModel = async (childID, spawn, actual) => {
+      const model = actual ?? spawn.planned;
+      if (model === undefined || await snapshotOf(childID) !== undefined)
         return;
-      await writeSnapshot(childID, { model: modelLabel(spawn.model), tier: spawn.role, configRevision: spawn.revision, at: Date.now() });
+      await writeSnapshot(childID, { model: modelLabel(model), ...spawn.tier === undefined ? {} : { tier: spawn.tier }, configRevision: spawn.configRevision, at: Date.now() });
+    };
+    const matchExpected = async (data) => {
+      if (typeof data.sessionID !== "string" || typeof data.parentID !== "string" || !isRecord9(data.model))
+        return false;
+      const actual = data.model;
+      const now = Date.now();
+      for (const [id, spawn] of expectedChildren) {
+        if (now - spawn.at > PENDING_SPAWN_MS)
+          expectedChildren.delete(id);
+      }
+      const open = [...expectedChildren].filter(([, e]) => e.childID === undefined && e.parentID === data.parentID && e.agent === data.agent);
+      const picked = open.find(([, e]) => e.planned !== undefined && modelLabel(e.planned) === modelLabel(actual)) ?? open.find(([, e]) => e.planned !== undefined && healthKey(e.planned) === healthKey(actual)) ?? open.find(([, e]) => e.planned === undefined) ?? (open.length === 1 ? open[0] : undefined);
+      if (picked === undefined)
+        return false;
+      const [callID, spawn] = picked;
+      spawn.childID = data.sessionID;
+      await recordChildModel(data.sessionID, spawn, actual);
+      const roleSpawn = pending.get(callID);
+      if (roleSpawn !== undefined) {
+        roleSpawn.childID = data.sessionID;
+        await recordChildRole(data.sessionID, roleSpawn.role);
+      }
+      return true;
     };
     const recordFailover = async (childID, model, role) => {
       const known = await snapshotOf(childID);
@@ -4145,6 +4177,8 @@ ${refs.size}`;
       });
     };
     const onSessionCreated = async (data) => {
+      if (await matchExpected(data))
+        return;
       if (typeof data.sessionID !== "string" || typeof data.parentID !== "string" || !isRecord9(data.model))
         return;
       const model = data.model;
@@ -4160,7 +4194,6 @@ ${refs.size}`;
           continue;
         spawn.childID = data.sessionID;
         await recordChildRole(data.sessionID, spawn.role);
-        await recordChildModel(data.sessionID, spawn);
         return;
       }
     };
@@ -4208,8 +4241,11 @@ ${refs.size}`;
         warn(`session ${sessionID}: ${failureNote(facts)}`);
     };
     const switching = new Map;
-    const switchWithin = async (sessionID, model) => {
-      const tracked = Promise.resolve().then(() => ctx.session.switchModel({ sessionID, model })).then(() => true, () => false).finally(() => {
+    const switchWithin = async (sessionID, model, role) => {
+      const tracked = Promise.resolve().then(() => ctx.session.switchModel({ sessionID, model })).then(async () => {
+        await recordFailover(sessionID, model, role).catch(() => {});
+        return true;
+      }, () => false).finally(() => {
         if (switching.get(sessionID) === tracked)
           switching.delete(sessionID);
       });
@@ -4265,10 +4301,9 @@ ${refs.size}`;
           });
           if (target === undefined)
             return keepOnModel(event, kind, failed);
-          const outcome = await switchWithin(event.sessionID, target.model);
+          const outcome = await switchWithin(event.sessionID, target.model, spawnRole);
           const note = switchNote({ failed, kind, cooldownMs, target });
           if (outcome === "switched") {
-            await recordFailover(event.sessionID, target.model, spawnRole);
             event.decision = { retry: true, delay: 0 };
             warn(`session ${event.sessionID}: ${note}`);
             return;
@@ -4643,6 +4678,7 @@ ${refs.size}`;
       if (explicitModel !== undefined) {
         event.input = stripped;
         await writeSnapshot(childID, { model: modelLabel(explicitModel), configRevision: revision, at: Date.now() });
+        await forgetChildRole(childID);
         await recordReceipt({ at: Date.now(), agent, source: "agent", model: modelLabel(explicitModel), rule: "explicit-model", fallbacks: [], warnings: [] });
         return true;
       }
@@ -4666,7 +4702,8 @@ ${refs.size}`;
         return true;
       const model = snapshotModel(snapshot);
       const reason = model === undefined ? "the snapshot names no model" : unavailableReason(model, available);
-      if (model === undefined || reason !== undefined) {
+      const refused = model === undefined || reason !== undefined ? undefined : await judge(event, agent, model);
+      if (model === undefined || reason !== undefined || refused !== undefined) {
         await recordReceipt({
           at: Date.now(),
           agent,
@@ -4674,7 +4711,7 @@ ${refs.size}`;
           ...snapshot.tier === undefined ? {} : { tier: snapshot.tier },
           rule: "model-default",
           fallbacks: [],
-          warnings: [`the child's snapshot model ${snapshot.model} is not usable (${reason}); the resume resolves normally`]
+          warnings: [`the child's snapshot model ${snapshot.model} is not usable (${reason ?? refused}); the resume resolves normally`]
         });
         return true;
       }
@@ -4738,6 +4775,7 @@ ${refs.size}`;
         const receipt2 = bypass("explicit-model", explicitModel, "the spawn's own model wins over tier");
         if (receipt2 !== undefined)
           await recordReceipt(receipt2);
+        expectChild(event.id, event, target, explicitModel, undefined);
         return;
       }
       let source = asked?.source;
@@ -4762,6 +4800,7 @@ ${refs.size}`;
           event.input = tuned.input;
         }
         pending.set(event.id, { parentID: event.sessionID, agent: target, role: plan.role, model: tuned.model, revision: configRevision(options), at: Date.now() });
+        expectChild(event.id, event, target, tuned.model, plan.role);
         const vendorOfCaller = tierMeta(options, plan.role)?.distinctVendor ? await callerVendor(event) : undefined;
         await recordReceipt(tierReceipt(target, { source: source ?? "agent", name: tierName ?? plan.role }, tuned, vendorOfCaller));
         return;
@@ -4771,6 +4810,7 @@ ${refs.size}`;
         const tuned = await withAutoEffort(routed.input, routed.role, routed.model).catch(() => ({ input: routed.input, model: routed.model }));
         event.input = tuned.input;
         pending.set(event.id, { parentID: event.sessionID, agent: target, role: routed.role, model: tuned.model, revision: configRevision(options), at: Date.now() });
+        expectChild(event.id, event, target, tuned.model, routed.role);
         const vendorOfCaller = tierMeta(options, routed.role)?.distinctVendor ? await callerVendor(event) : undefined;
         await recordReceipt(tierReceipt(target, { source: "auto", name: routed.role }, tuned, vendorOfCaller));
       };
@@ -4783,6 +4823,8 @@ ${refs.size}`;
       }
       const reason = await judge(event, target, undefined);
       if (reason === undefined) {
+        const ownModel = pin ?? (own === undefined ? undefined : resolveTier(options, available, own, view()).model);
+        expectChild(event.id, event, target, ownModel, pin === undefined ? own : undefined);
         if (pin !== undefined) {
           const receipt2 = bypass("agent-pin", pin, "the agent's own model (config or frontmatter) wins over tier");
           if (receipt2 !== undefined)
@@ -4998,11 +5040,17 @@ ${refs.size}`;
         return;
       const spawn = pending.get(event.id);
       pending.delete(event.id);
+      const expected = expectedChildren.get(event.id);
+      expectedChildren.delete(event.id);
       if (event.status === "completed") {
         const childID = event.result.metadata?.sessionID;
-        if (spawn !== undefined && typeof childID === "string") {
+        if (spawn !== undefined && typeof childID === "string")
           await recordChildRole(childID, spawn.role);
-          await recordChildModel(childID, spawn);
+        if (expected !== undefined && typeof childID === "string" && await snapshotOf(childID) === undefined) {
+          const session = await ctx.session.get({ sessionID: childID }).catch(() => {
+            return;
+          });
+          await recordChildModel(childID, expected, session?.model);
         }
         return;
       }
@@ -5121,6 +5169,7 @@ ${refs.size}`;
       pending.clear();
       childRoles.clear();
       childModels.clear();
+      expectedChildren.clear();
       autoHistory = [];
     };
   }

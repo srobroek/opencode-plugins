@@ -558,6 +558,12 @@ export default Plugin.define({
       }
     }
 
+    /** A child rerouted to a bare model has no tier any more: a retry must not read the old one. */
+    const forgetChildRole = async (childID: string) => {
+      childRoles.delete(childID)
+      await ctx.storage.remove(`${SPAWN_ROLE_KEY_PREFIX}${childID}`).catch(() => {})
+    }
+
     const spawnRoleOf = async (childID: string): Promise<string | undefined> => {
       const known = childRoles.get(childID)
       if (known !== undefined) return known
@@ -583,10 +589,47 @@ export default Plugin.define({
       }
     }
 
-    /** Keep what a spawn resolved to for the child's lifetime. The first record wins: failover may have updated it since. */
-    const recordChildModel = async (childID: string, spawn: PendingSpawn) => {
-      if ((await snapshotOf(childID)) !== undefined) return
-      await writeSnapshot(childID, { model: modelLabel(spawn.model), tier: spawn.role, configRevision: spawn.revision, at: Date.now() })
+    /**
+     * Every fresh spawn that will create a child, by tool call id, until the child is matched or the call ends.
+     * `planned` is what the plugin resolved (none when the host decides); the child's own model is what counts.
+     */
+    type ExpectedChild = { parentID: string; agent: string; planned?: ModelRef; tier?: string; configRevision: string; at: number; childID?: string }
+    const expectedChildren = new Map<string, ExpectedChild>()
+    const expectChild = (callID: string, event: { sessionID: string }, agent: string, planned: ModelRef | undefined, tier: string | undefined) => {
+      expectedChildren.set(callID, { parentID: event.sessionID, agent, ...(planned === undefined ? {} : { planned }), ...(tier === undefined ? {} : { tier }), configRevision: configRevision(options), at: Date.now() })
+    }
+
+    /** Keep the model a child really got for its lifetime. The first record wins: failover may have updated it since. */
+    const recordChildModel = async (childID: string, spawn: ExpectedChild, actual: ModelRef | undefined) => {
+      const model = actual ?? spawn.planned
+      if (model === undefined || (await snapshotOf(childID)) !== undefined) return
+      await writeSnapshot(childID, { model: modelLabel(model), ...(spawn.tier === undefined ? {} : { tier: spawn.tier }), configRevision: spawn.configRevision, at: Date.now() })
+    }
+
+    /** Pair a new child with its own spawn call: the exact model and variant first, then the model, then a spawn the host decides, then the only one left. */
+    const matchExpected = async (data: { sessionID?: unknown; parentID?: unknown; agent?: unknown; model?: unknown }): Promise<boolean> => {
+      if (typeof data.sessionID !== "string" || typeof data.parentID !== "string" || !isRecord(data.model)) return false
+      const actual = data.model as ModelRef
+      const now = Date.now()
+      for (const [id, spawn] of expectedChildren) {
+        if (now - spawn.at > PENDING_SPAWN_MS) expectedChildren.delete(id)
+      }
+      const open = [...expectedChildren].filter(([, e]) => e.childID === undefined && e.parentID === data.parentID && e.agent === data.agent)
+      const picked =
+        open.find(([, e]) => e.planned !== undefined && modelLabel(e.planned) === modelLabel(actual)) ??
+        open.find(([, e]) => e.planned !== undefined && healthKey(e.planned) === healthKey(actual)) ??
+        open.find(([, e]) => e.planned === undefined) ??
+        (open.length === 1 ? open[0] : undefined)
+      if (picked === undefined) return false
+      const [callID, spawn] = picked
+      spawn.childID = data.sessionID
+      await recordChildModel(data.sessionID, spawn, actual)
+      const roleSpawn = pending.get(callID)
+      if (roleSpawn !== undefined) {
+        roleSpawn.childID = data.sessionID
+        await recordChildRole(data.sessionID, roleSpawn.role)
+      }
+      return true
     }
 
     /** Failover moved a child: a resume continues on the model that worked, and an evaluation can tell. */
@@ -604,6 +647,7 @@ export default Plugin.define({
 
     /** Match a new child session to the role spawn that created it: same parent, agent and model. */
     const onSessionCreated = async (data: { sessionID?: unknown; parentID?: unknown; agent?: unknown; model?: unknown }) => {
+      if (await matchExpected(data)) return
       if (typeof data.sessionID !== "string" || typeof data.parentID !== "string" || !isRecord(data.model)) return
       const model = data.model as ModelRef
       const now = Date.now()
@@ -615,7 +659,6 @@ export default Plugin.define({
         if (healthKey(spawn.model) !== healthKey(model)) continue
         spawn.childID = data.sessionID
         await recordChildRole(data.sessionID, spawn.role)
-        await recordChildModel(data.sessionID, spawn)
         return
       }
     }
@@ -674,11 +717,15 @@ export default Plugin.define({
     const switching = new Map<string, Promise<boolean>>()
 
     /** `session.switchModel` bounded by `switchTimeoutMs`: "late" leaves it landing in the background. */
-    const switchWithin = async (sessionID: string, model: ModelRef): Promise<"switched" | "late" | "failed"> => {
+    const switchWithin = async (sessionID: string, model: ModelRef, role: string | undefined): Promise<"switched" | "late" | "failed"> => {
       const tracked: Promise<boolean> = Promise.resolve()
         .then(() => ctx.session.switchModel({ sessionID, model }))
         .then(
-          () => true,
+          // A switch that lands after the timeout still moved the child: its snapshot follows.
+          async () => {
+            await recordFailover(sessionID, model, role).catch(() => {})
+            return true
+          },
           () => false,
         )
         .finally(() => {
@@ -740,10 +787,9 @@ export default Plugin.define({
             hostRetries: runtime.hostRetries,
           })
           if (target === undefined) return keepOnModel(event, kind, failed)
-          const outcome = await switchWithin(event.sessionID, target.model)
+          const outcome = await switchWithin(event.sessionID, target.model, spawnRole)
           const note = switchNote({ failed, kind, cooldownMs, target })
           if (outcome === "switched") {
-            await recordFailover(event.sessionID, target.model, spawnRole)
             event.decision = { retry: true, delay: 0 }
             warn(`session ${event.sessionID}: ${note}`)
             return
@@ -1181,6 +1227,7 @@ export default Plugin.define({
       if (explicitModel !== undefined) {
         event.input = stripped
         await writeSnapshot(childID, { model: modelLabel(explicitModel), configRevision: revision, at: Date.now() })
+        await forgetChildRole(childID)
         await recordReceipt({ at: Date.now(), agent, source: "agent", model: modelLabel(explicitModel), rule: "explicit-model", fallbacks: [], warnings: [] })
         return true
       }
@@ -1203,7 +1250,9 @@ export default Plugin.define({
       if (snapshot === undefined) return true
       const model = snapshotModel(snapshot)
       const reason = model === undefined ? "the snapshot names no model" : unavailableReason(model, available)
-      if (model === undefined || reason !== undefined) {
+      // A model that was allowed when the child was spawned may be guarded now.
+      const refused = model === undefined || reason !== undefined ? undefined : await judge(event, agent, model)
+      if (model === undefined || reason !== undefined || refused !== undefined) {
         await recordReceipt({
           at: Date.now(),
           agent,
@@ -1211,7 +1260,7 @@ export default Plugin.define({
           ...(snapshot.tier === undefined ? {} : { tier: snapshot.tier }),
           rule: "model-default",
           fallbacks: [],
-          warnings: [`the child's snapshot model ${snapshot.model} is not usable (${reason}); the resume resolves normally`],
+          warnings: [`the child's snapshot model ${snapshot.model} is not usable (${reason ?? refused}); the resume resolves normally`],
         })
         return true
       }
@@ -1272,6 +1321,7 @@ export default Plugin.define({
         if (reason !== undefined) throw new Error(reason)
         const receipt = bypass("explicit-model", explicitModel, "the spawn's own model wins over tier")
         if (receipt !== undefined) await recordReceipt(receipt)
+        expectChild(event.id, event, target, explicitModel, undefined)
         return
       }
       let source: SpawnSource | undefined = asked?.source
@@ -1297,6 +1347,7 @@ export default Plugin.define({
           event.input = tuned.input
         }
         pending.set(event.id, { parentID: event.sessionID, agent: target, role: plan.role, model: tuned.model, revision: configRevision(options), at: Date.now() })
+        expectChild(event.id, event, target, tuned.model, plan.role)
         const vendorOfCaller = tierMeta(options, plan.role)?.distinctVendor ? await callerVendor(event) : undefined
         await recordReceipt(tierReceipt(target, { source: source ?? "agent", name: tierName ?? plan.role }, tuned, vendorOfCaller))
         return
@@ -1306,6 +1357,7 @@ export default Plugin.define({
         const tuned = await withAutoEffort(routed.input, routed.role, routed.model).catch(() => ({ input: routed.input, model: routed.model }) as Tuned)
         event.input = tuned.input
         pending.set(event.id, { parentID: event.sessionID, agent: target, role: routed.role, model: tuned.model, revision: configRevision(options), at: Date.now() })
+        expectChild(event.id, event, target, tuned.model, routed.role)
         const vendorOfCaller = tierMeta(options, routed.role)?.distinctVendor ? await callerVendor(event) : undefined
         await recordReceipt(tierReceipt(target, { source: "auto", name: routed.role }, tuned, vendorOfCaller))
       }
@@ -1315,7 +1367,9 @@ export default Plugin.define({
       }
       const reason = await judge(event, target, undefined)
       if (reason === undefined) {
-        // The spawn goes ahead on the agent's own model: its pin, or the model this plugin set for its tier.
+        // The spawn goes ahead on the agent's own model: its pin, or the model this plugin set for its tier, else the host decides.
+        const ownModel = pin ?? (own === undefined ? undefined : resolveTier(options, available, own, view()).model)
+        expectChild(event.id, event, target, ownModel, pin === undefined ? own : undefined)
         if (pin !== undefined) {
           const receipt = bypass("agent-pin", pin, "the agent's own model (config or frontmatter) wins over tier")
           if (receipt !== undefined) await recordReceipt(receipt)
@@ -1549,11 +1603,15 @@ export default Plugin.define({
       if (event.tool !== SUBAGENT_TOOL) return
       const spawn = pending.get(event.id)
       pending.delete(event.id)
+      const expected = expectedChildren.get(event.id)
+      expectedChildren.delete(event.id)
       if (event.status === "completed") {
         const childID = (event.result.metadata as { sessionID?: unknown } | undefined)?.sessionID
-        if (spawn !== undefined && typeof childID === "string") {
-          await recordChildRole(childID, spawn.role)
-          await recordChildModel(childID, spawn)
+        if (spawn !== undefined && typeof childID === "string") await recordChildRole(childID, spawn.role)
+        // The child's own model, when its creation event was missed.
+        if (expected !== undefined && typeof childID === "string" && (await snapshotOf(childID)) === undefined) {
+          const session = (await ctx.session.get({ sessionID: childID }).catch(() => undefined)) as SessionLike
+          await recordChildModel(childID, expected, session?.model)
         }
         return
       }
@@ -1670,6 +1728,7 @@ export default Plugin.define({
       pending.clear()
       childRoles.clear()
       childModels.clear()
+      expectedChildren.clear()
       autoHistory = []
     }
   },
