@@ -22,7 +22,7 @@ import { setProp as _$setProp } from "@opentui/solid";
 import { use as _$use } from "@opentui/solid";
 import { createElement as _$createElement } from "@opentui/solid";
 import { EditBufferRenderable, TextAttributes } from "@opentui/core";
-import { createEffect, createMemo, createSignal, For, Match, onCleanup, onMount, Show, Switch } from "solid-js";
+import { createEffect, createMemo, createSignal, For, Match, on, onCleanup, onMount, Show, Switch } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 
 // plugins/parley/src/clipboard.ts
@@ -2200,30 +2200,46 @@ ${draft.note}`
 
 // plugins/parley/src/focus.ts
 var INPUT_MODE = "srobroek.parley";
+var BASE_MODE = "base";
+var foreignMode = (current) => current !== INPUT_MODE && current !== BASE_MODE;
 
 class FocusGuard {
   push;
+  current;
   #release;
-  constructor(push) {
+  #wanted = false;
+  constructor(push, current = () => BASE_MODE) {
     this.push = push;
+    this.current = current;
   }
   get active() {
     return this.#release !== undefined;
   }
+  get yielding() {
+    return foreignMode(this.current());
+  }
   acquire() {
-    if (!this.#release)
+    this.#wanted = true;
+    if (!this.#release && !this.yielding)
       this.#release = this.push(INPUT_MODE);
   }
+  resume() {
+    if (this.#wanted)
+      this.acquire();
+  }
   moved(inside) {
-    return this.active && !inside;
+    return this.active && !inside && !this.yielding;
   }
   reclaim() {
+    if (this.yielding)
+      return this.acquire();
     this.release();
     this.acquire();
   }
   release() {
     const release = this.#release;
     this.#release = undefined;
+    this.#wanted = false;
     release?.();
   }
 }
@@ -2983,11 +2999,12 @@ var within = (node, root) => {
 };
 var SETTLE_MS = [50, 200, 500, 1000, 2000];
 function exclusiveFocus(context, target, field, scope) {
-  const guard = new FocusGuard((mode) => context.keymap.mode.push(mode));
-  const [paused, setPaused] = createSignal(false);
+  const guard = new FocusGuard((mode) => context.keymap.mode.push(mode), () => context.keymap.mode.current());
+  const [suspended, setSuspended] = createSignal(false);
+  const yielding = createMemo(() => guard.yielding);
   let disposed = false;
   const focusNow = () => {
-    if (!guard.active)
+    if (!guard.active || guard.yielding)
       return;
     scope?.();
     const node = field() ?? target();
@@ -2995,6 +3012,14 @@ function exclusiveFocus(context, target, field, scope) {
       node.focus();
   };
   const grab = () => queueMicrotask(focusNow);
+  createEffect(on(yielding, (now) => {
+    if (now || disposed)
+      return;
+    guard.resume();
+    grab();
+  }, {
+    defer: true
+  }));
   onMount(() => {
     const renderer = context.renderer;
     const previous = renderer.currentFocusedRenderable;
@@ -3012,7 +3037,7 @@ function exclusiveFocus(context, target, field, scope) {
     };
     const onInput = () => {
       const focused = renderer.currentFocusedRenderable;
-      if (guard.active && focused instanceof EditBufferRenderable && !within(focused, target()))
+      if (focused instanceof EditBufferRenderable && guard.moved(within(focused, target())))
         focusNow();
       return false;
     };
@@ -3035,20 +3060,20 @@ function exclusiveFocus(context, target, field, scope) {
     });
   });
   return {
-    paused,
+    paused: () => suspended() || yielding(),
     reclaim: () => {
       guard.reclaim();
       grab();
     },
     suspend: async (operation) => {
-      setPaused(true);
+      setSuspended(true);
       guard.release();
       try {
         await operation();
       } finally {
         if (!disposed) {
           guard.acquire();
-          setPaused(false);
+          setSuspended(false);
           grab();
         }
       }
