@@ -357,7 +357,7 @@ export default Plugin.define({
     } catch {
       // Stale snapshots wait for the next start.
     }
-    const outcomes = createLedgerStore(ctx.storage as never)
+    const outcomes = createLedgerStore(ctx.storage as never, { warn })
     await outcomes.load()
     let registration = await ctx.agent.transform(apply)
     let attempts = 0

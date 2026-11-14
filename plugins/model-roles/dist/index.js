@@ -3358,6 +3358,7 @@ var addUsage = (r, usage) => ({
   cost: r.cost + num(usage.cost)
 });
 var onStep = (ledger, childID, usage) => update(ledger, childID, (r) => ({ ...addUsage(r, usage), steps: r.steps + 1 }));
+var onSteps = (ledger, childID, usage, steps) => update(ledger, childID, (r) => ({ ...addUsage(r, usage), steps: r.steps + steps }));
 var onCompaction = (ledger, childID, usage) => update(ledger, childID, (r) => addUsage(r, usage));
 var onEnd = (ledger, childID, outcome, at) => update(ledger, childID, (r) => ({ ...r, outcome, ms: Math.max(0, at - r.at) }));
 var onFailover = (ledger, childID) => update(ledger, childID, (r) => r.failedOver ? r : { ...r, failedOver: true });
@@ -3377,26 +3378,63 @@ function readOutcome(value) {
       return;
   return value;
 }
+var LEDGER_STORAGE_TIMEOUT_MS = 5000;
+var LEDGER_DISPOSE_TIMEOUT_MS = 1e4;
+var LEDGER_MAX_QUEUED = 50;
+var LEDGER_MAX_WRITE_ATTEMPTS = 3;
+var addUsages = (a, b) => ({
+  cost: num(a.cost) + num(b.cost),
+  tokens: {
+    input: num(a.tokens?.input) + num(b.tokens?.input),
+    output: num(a.tokens?.output) + num(b.tokens?.output),
+    reasoning: num(a.tokens?.reasoning) + num(b.tokens?.reasoning),
+    cache: { read: num(a.tokens?.cache?.read) + num(b.tokens?.cache?.read), write: num(a.tokens?.cache?.write) + num(b.tokens?.cache?.write) }
+  }
+});
 function createLedgerStore(storage, options = {}) {
   const debounceMs = options.debounceMs ?? LEDGER_DEBOUNCE_MS;
   const now = options.now ?? Date.now;
   const limits = options.limits ?? { maxEntries: LEDGER_MAX_ENTRIES, maxAgeMs: LEDGER_MAX_AGE_MS };
+  const storageTimeoutMs = options.storageTimeoutMs ?? LEDGER_STORAGE_TIMEOUT_MS;
+  const disposeTimeoutMs = options.disposeTimeoutMs ?? LEDGER_DISPOSE_TIMEOUT_MS;
+  const maxQueued = options.maxQueued ?? LEDGER_MAX_QUEUED;
+  const maxWriteAttempts = options.maxWriteAttempts ?? LEDGER_MAX_WRITE_ATTEMPTS;
+  const warn = options.warn ?? (() => {});
   const index = new Map;
   const active = new Map;
   const dirty = new Set;
+  const finished = new Set;
+  const failures = new Map;
+  const spill = new Map;
+  const depth = new Map;
   const queues = new Map;
   const outstanding = new Set;
   let timer;
   let closed = false;
+  let abandoned = false;
   const keyOf = (id) => `${OUTCOME_KEY_PREFIX}${id}`;
-  const run = (id, task) => {
+  const within = (call, what) => {
+    let timeout;
+    const deadline = new Promise((_, reject) => {
+      timeout = setTimeout(() => reject(new Error(`${what} timed out after ${storageTimeoutMs}ms`)), storageTimeoutMs);
+      timeout.unref?.();
+    });
+    return Promise.race([Promise.resolve().then(call), deadline]).finally(() => clearTimeout(timeout));
+  };
+  const run = (id, task, counted = true) => {
     if (closed)
       return Promise.resolve();
+    if (counted)
+      depth.set(id, (depth.get(id) ?? 0) + 1);
     const queued = (queues.get(id) ?? Promise.resolve()).then(task).catch(() => {});
     queues.set(id, queued);
     outstanding.add(queued);
     queued.then(() => {
       outstanding.delete(queued);
+      if (counted)
+        depth.set(id, (depth.get(id) ?? 1) - 1);
+      if (depth.get(id) === 0)
+        depth.delete(id);
       if (queues.get(id) === queued)
         queues.delete(id);
     });
@@ -3405,10 +3443,36 @@ function createLedgerStore(storage, options = {}) {
   const write = async (id) => {
     const record = active.get(id);
     if (record === undefined || !index.has(id))
-      return;
+      return true;
+    if (abandoned)
+      return false;
     try {
-      await storage.set(keyOf(id), record);
-    } catch {}
+      await within(() => storage.set(keyOf(id), record), `writing ${id}`);
+      failures.delete(id);
+      dirty.delete(id);
+      return true;
+    } catch (error) {
+      const attempts = (failures.get(id) ?? 0) + 1;
+      failures.set(id, attempts);
+      if (attempts >= maxWriteAttempts) {
+        warn(`outcome ledger: giving up writing ${id} after ${attempts} attempts`, { error: String(error) });
+        dirty.delete(id);
+        if (finished.delete(id))
+          active.delete(id);
+        failures.delete(id);
+      } else {
+        warn(`outcome ledger: could not write ${id} (attempt ${attempts}); it stays in memory`, { error: String(error) });
+        later(id);
+      }
+      return false;
+    }
+  };
+  const save = async (id) => {
+    const ok = await write(id);
+    if (ok && finished.has(id) && !dirty.has(id)) {
+      active.delete(id);
+      finished.delete(id);
+    }
   };
   const load1 = async (id) => {
     if (!index.has(id))
@@ -3416,9 +3480,9 @@ function createLedgerStore(storage, options = {}) {
     const known = active.get(id);
     if (known !== undefined)
       return known;
-    const stored = readOutcome(await storage.get(keyOf(id)).catch(() => {
+    if (abandoned)
       return;
-    }));
+    const stored = readOutcome(await within(() => storage.get(keyOf(id)), `reading ${id}`).catch((error) => (warn(`outcome ledger: could not read ${id}`, { error: String(error) }), undefined)));
     if (stored === undefined)
       return;
     active.set(id, stored);
@@ -3430,15 +3494,17 @@ function createLedgerStore(storage, options = {}) {
     timer = undefined;
     const ids = [...dirty];
     dirty.clear();
-    await Promise.all(ids.map((id) => run(id, () => write(id))));
+    await Promise.all(ids.map((id) => run(id, () => save(id).then(() => {
+      return;
+    }), false)));
   };
-  const later = (id) => {
+  function later(id) {
     dirty.add(id);
-    if (timer !== undefined)
+    if (timer !== undefined || closed)
       return;
     timer = setTimeout(() => void flush(), debounceMs);
     timer.unref?.();
-  };
+  }
   const retain = async () => {
     const kept = prune(Object.fromEntries([...index].map(([id, at]) => [id, { at }])), now(), limits);
     const gone = [...index.keys()].filter((id) => kept[id] === undefined);
@@ -3446,36 +3512,66 @@ function createLedgerStore(storage, options = {}) {
       index.delete(id);
       active.delete(id);
       dirty.delete(id);
+      finished.delete(id);
+      failures.delete(id);
+      spill.delete(id);
+      if (abandoned)
+        return;
       try {
-        await storage.remove?.(keyOf(id));
+        await within(async () => storage.remove?.(keyOf(id)), `removing ${id}`);
       } catch {}
     })));
   };
+  const applySpill = (id, record) => {
+    const pending = spill.get(id);
+    if (pending === undefined)
+      return record;
+    spill.delete(id);
+    return onSteps({ [id]: record }, id, pending.usage, pending.steps)[id] ?? record;
+  };
   const change = async (id, reduce, how) => {
     await run(id, async () => {
-      const record = await load1(id);
-      if (record === undefined)
+      const loaded = await load1(id);
+      if (loaded === undefined)
         return;
+      const record = applySpill(id, loaded);
       const next = reduce({ [id]: record }, id)[id];
-      if (next === undefined || next === record)
+      if (next === undefined)
+        return;
+      if (next === record && record === loaded && !dirty.has(id))
         return;
       active.set(id, next);
+      if (how === "end")
+        finished.add(id);
       if (how === "debounce" && !closed)
         return later(id);
       dirty.delete(id);
-      await write(id);
-      if (how === "end" && !dirty.has(id))
-        active.delete(id);
+      await save(id);
     });
     if (how === "end")
       await retain();
+  };
+  const coalescing = (id, usage, steps) => {
+    if ((depth.get(id) ?? 0) < maxQueued || !index.has(id))
+      return false;
+    const pending = spill.get(id);
+    spill.set(id, { usage: addUsages(pending?.usage ?? {}, usage), steps: (pending?.steps ?? 0) + steps });
+    if (pending === undefined)
+      run(id, async () => {
+        const record = active.get(id) ?? await load1(id);
+        if (record === undefined || !spill.has(id))
+          return;
+        active.set(id, applySpill(id, record));
+        later(id);
+      }, false);
+    return true;
   };
   return {
     async load() {
       try {
         let after;
         do {
-          const page = await storage.scan(after === undefined ? { prefix: OUTCOME_KEY_PREFIX } : { prefix: OUTCOME_KEY_PREFIX, after });
+          const page = await within(() => storage.scan(after === undefined ? { prefix: OUTCOME_KEY_PREFIX } : { prefix: OUTCOME_KEY_PREFIX, after }), "scanning");
           for (const entry of page.entries) {
             const record = readOutcome(entry.value);
             if (record !== undefined)
@@ -3484,10 +3580,13 @@ function createLedgerStore(storage, options = {}) {
           after = page.next;
         } while (after !== undefined);
         await retain();
-      } catch {}
+      } catch (error) {
+        warn("outcome ledger: could not read the stored records; starting with what was read", { error: String(error) });
+      }
     },
     size: () => index.size,
     active: () => active.size,
+    queued: (id) => depth.get(id) ?? 0,
     spawn: async (id, facts) => {
       await run(id, async () => {
         if (index.has(id))
@@ -3502,17 +3601,42 @@ function createLedgerStore(storage, options = {}) {
       await retain();
     },
     resume: (id) => change(id, onResume, "now"),
-    step: (id, usage) => change(id, (l, i) => onStep(l, i, usage), "debounce"),
-    compaction: (id, usage) => change(id, (l, i) => onCompaction(l, i, usage), "debounce"),
+    step: async (id, usage) => {
+      if (coalescing(id, usage, 1))
+        return;
+      await change(id, (l, i) => onStep(l, i, usage), "debounce");
+    },
+    compaction: async (id, usage) => {
+      if (coalescing(id, usage, 0))
+        return;
+      await change(id, (l, i) => onCompaction(l, i, usage), "debounce");
+    },
     end: (id, outcome, at) => change(id, (l, i) => onEnd(l, i, outcome, at), "end"),
     failover: (id) => change(id, onFailover, "now"),
     flush,
     async dispose() {
       const flushing = flush();
       closed = true;
-      await flushing;
-      while (outstanding.size > 0)
-        await Promise.all([...outstanding]);
+      let bound;
+      const expired = new Promise((resolve) => {
+        bound = setTimeout(() => resolve("expired"), disposeTimeoutMs);
+        bound.unref?.();
+      });
+      const drained = (async () => {
+        await flushing;
+        for (const id of [...active.keys()])
+          if (finished.has(id) || failures.has(id))
+            await write(id);
+        while (outstanding.size > 0)
+          await Promise.all([...outstanding]);
+        return "drained";
+      })();
+      const result = await Promise.race([drained, expired]);
+      clearTimeout(bound);
+      if (result === "expired") {
+        abandoned = true;
+        warn(`outcome ledger: dispose gave up after ${disposeTimeoutMs}ms with ${outstanding.size} operations unfinished`);
+      }
     }
   };
 }
@@ -4151,7 +4275,7 @@ ${refs.size}`;
       for (const key of staleSnapshots(entries, Date.now()))
         await ctx.storage.remove(key);
     } catch {}
-    const outcomes = createLedgerStore(ctx.storage);
+    const outcomes = createLedgerStore(ctx.storage, { warn });
     await outcomes.load();
     let registration = await ctx.agent.transform(apply);
     let attempts = 0;
@@ -5466,8 +5590,12 @@ export {
   HEALTH_KEY,
   INHERIT_NAMES,
   LEDGER_DEBOUNCE_MS,
+  LEDGER_DISPOSE_TIMEOUT_MS,
   LEDGER_MAX_AGE_MS,
   LEDGER_MAX_ENTRIES,
+  LEDGER_MAX_QUEUED,
+  LEDGER_MAX_WRITE_ATTEMPTS,
+  LEDGER_STORAGE_TIMEOUT_MS,
   MAX_REREGISTER,
   MAX_SESSION_DEPTH,
   NOTICE_DEDUPE_MS,
@@ -5577,6 +5705,7 @@ export {
   onResume,
   onSpawn,
   onStep,
+  onSteps,
   parseAuto,
   parseCandidate,
   parseClassification,

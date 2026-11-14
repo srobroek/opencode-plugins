@@ -119,14 +119,26 @@ describe("store", () => {
     const data = new Map<string, unknown>()
     const scans: Array<string | undefined> = []
     /** Holds a storage call until released: `setHolds` by the nth set call (1-based), `getHold` for every get. */
-    const gate = { setHolds: new Map<number, Promise<void>>(), getHold: undefined as Promise<void> | undefined, sets: 0 }
+    const gate = {
+      setHolds: new Map<number, Promise<void>>(),
+      getHold: undefined as Promise<void> | undefined,
+      sets: 0,
+      /** Sets reject while true. */
+      failSets: false,
+      /** Sets never settle while true. */
+      hangSets: false,
+    }
     const storage: LedgerStorage = {
       get: async (k) => {
+        // The value is read before the call blocks, as a real read in flight would.
+        const snapshot = structuredClone(data.get(k))
         await gate.getHold
-        return structuredClone(data.get(k))
+        return snapshot
       },
       set: async (k, value) => {
         const call = ++gate.sets
+        if (gate.hangSets) return new Promise<void>(() => {})
+        if (gate.failSets) throw new Error("storage down")
         const snapshot = structuredClone(value)
         await gate.setHolds.get(call)
         data.set(k, snapshot)
@@ -302,5 +314,97 @@ describe("store", () => {
     // A record from the last page is found again when its child resumes.
     await store.resume("f4")
     expect(data.get(key("f4"))).toMatchObject({ resumes: 1 })
+  })
+
+  describe("failures and bounds", () => {
+    const warnings: string[] = []
+    const make = (storage: LedgerStorage, extra: Record<string, unknown> = {}) =>
+      createLedgerStore(storage, { debounceMs: 5, now: () => 2000, warn: (message: string, extra?: unknown) => void warnings.push(`${message} ${JSON.stringify(extra ?? {})}`), ...extra })
+
+    test("a rejected end write keeps the record in memory, a resume continues from it, and dispose retries", async () => {
+      const { data, storage, gate } = fake()
+      const store = make(storage)
+      await store.spawn("ses_c", facts)
+      gate.failSets = true
+      await store.step("ses_c", { cost: 2, tokens: { input: 5 } })
+      await store.end("ses_c", "succeeded", 1500)
+      expect(store.active()).toBe(1)
+      expect((data.get(key("ses_c")) as { outcome?: string }).outcome).toBeUndefined()
+      await store.resume("ses_c")
+      gate.failSets = false
+      await store.end("ses_c", "succeeded", 1800)
+      expect(data.get(key("ses_c"))).toMatchObject({ cost: 2, inputTokens: 5, resumes: 1, outcome: "succeeded", ms: 800 })
+      expect(store.active()).toBe(0)
+      await store.dispose()
+    })
+
+    test("a record whose end write failed is written at dispose", async () => {
+      const { data, storage, gate } = fake()
+      const store = make(storage, { debounceMs: 10_000 })
+      await store.spawn("ses_c", facts)
+      gate.failSets = true
+      await store.end("ses_c", "failed:auth", 1500)
+      gate.failSets = false
+      await store.dispose()
+      expect(data.get(key("ses_c"))).toMatchObject({ outcome: "failed:auth" })
+    })
+
+    test("retries of a failing write are bounded and the give-up is logged", async () => {
+      const { storage, gate } = fake()
+      warnings.length = 0
+      const store = make(storage, { maxWriteAttempts: 3 })
+      await store.spawn("ses_c", facts)
+      gate.failSets = true
+      const before = gate.sets
+      await store.end("ses_c", "succeeded", 1500)
+      await pause(100)
+      expect(gate.sets - before).toBe(3)
+      expect(warnings.some((w) => w.includes("giving up"))).toBe(true)
+      await store.dispose()
+      expect(gate.sets - before).toBe(3)
+    })
+
+    test("a storage call that never settles times out and is logged", async () => {
+      const { storage, gate } = fake()
+      warnings.length = 0
+      const store = make(storage, { storageTimeoutMs: 20, debounceMs: 10_000 })
+      await store.spawn("ses_c", facts)
+      gate.hangSets = true
+      await store.end("ses_c", "succeeded", 1500)
+      expect(warnings.some((w) => w.includes("timed out"))).toBe(true)
+      expect(store.active()).toBe(1)
+      await store.dispose()
+    })
+
+    test("dispose returns after its bound when storage never settles, and logs it", async () => {
+      const { storage, gate } = fake()
+      warnings.length = 0
+      const store = make(storage, { storageTimeoutMs: 60_000, disposeTimeoutMs: 40 })
+      await store.spawn("ses_c", facts)
+      gate.hangSets = true
+      void store.end("ses_c", "succeeded", 1500)
+      await pause(5)
+      const started = Date.now()
+      await store.dispose()
+      expect(Date.now() - started).toBeLessThan(1000)
+      expect(warnings.some((w) => w.includes("dispose"))).toBe(true)
+    })
+
+    test("past the queue cap step updates coalesce without losing usage, and an end is never dropped", async () => {
+      const { data, storage, gate } = fake()
+      const store = make(storage, { debounceMs: 10_000, maxQueued: 3 })
+      await store.spawn("ses_c", facts)
+      await store.end("ses_c", "succeeded", 1500)
+      const slow = hold()
+      gate.getHold = slow.promise
+      const steps = Array.from({ length: 12 }, () => store.step("ses_c", { cost: 1, tokens: { input: 10 } }))
+      expect(store.queued("ses_c")).toBeLessThanOrEqual(3)
+      const ending = store.end("ses_c", "failed:quota", 2500)
+      expect(store.queued("ses_c")).toBeLessThanOrEqual(4)
+      slow.release()
+      await Promise.all([...steps, ending])
+      await store.dispose()
+      expect(data.get(key("ses_c"))).toMatchObject({ steps: 12, cost: 12, inputTokens: 120, outcome: "failed:quota" })
+    })
   })
 })
