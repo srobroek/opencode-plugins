@@ -98,10 +98,35 @@ export type CleanupDeps = {
    */
   signal?: AbortSignal
   /**
-   * Called once every proof has passed, immediately before `git worktree remove`. A
+   * Called once every proof has passed, immediately before the worktree removal. A
    * throw ends the call with nothing removed; the error propagates.
    */
   authorize?: (request: { worktree: string; branch: string; pr: number }) => Promise<void>
+  /**
+   * OpenCode's own worktree registry. A worktree it created is tracked there, and a
+   * `git worktree remove` behind its back leaves an entry the host can no longer
+   * remove, so a listed target is removed through `remove` instead (never forced).
+   */
+  host?: HostWorktrees
+}
+
+export type HostWorktrees = {
+  list: () => Promise<readonly { directory: string }[]>
+  /** Non-force removal; rejects with the host's reason when it refuses. */
+  remove: (directory: string) => Promise<void>
+}
+
+/**
+ * Which remover owns `target`: the host when its registry lists the same directory
+ * (compared by canonical path), git otherwise. Pure given `canonical`.
+ */
+export function removalRoute(
+  listed: readonly { directory: string }[],
+  target: string,
+  canonical: (path: string) => string = (path) => physicalPath(path) ?? path,
+): "host" | "git" {
+  const want = canonical(target)
+  return listed.some((entry) => canonical(entry.directory) === want) ? "host" : "git"
 }
 
 type WorktreeRecord = {
@@ -1034,9 +1059,23 @@ export async function cleanupDelivery(
   // with the worktree gone and no continuation receipt.
   if (signal?.aborted === true)
     return refuse("signal", "an abort", "no interrupt before git worktree remove; nothing was removed")
-  const removed = await runGit(commit, executionCwd, removeArgv, bounds.mutationMs)
-  if (!completed(removed)) {
-    return commandFailure("worktree.removed", ["git", ...removeArgv], removed, "exit 0 without --force")
+  const route = deps.host === undefined ? "git" : removalRoute(await deps.host.list().catch(() => []), targetPath)
+  if (route === "host" && deps.host !== undefined) {
+    try {
+      await deps.host.remove(targetPath)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      return refuse(
+        "worktree.removed",
+        `host worktree.remove ${JSON.stringify(targetPath)} (error ${message.trim().slice(0, 400)})`,
+        "host removal without force",
+      )
+    }
+  } else {
+    const removed = await runGit(commit, executionCwd, removeArgv, bounds.mutationMs)
+    if (!completed(removed)) {
+      return commandFailure("worktree.removed", ["git", ...removeArgv], removed, "exit 0 without --force")
+    }
   }
 
   const registration = await registrationAbsence(executionCwd, targetPath, commit, bounds.refReadMs)

@@ -89,8 +89,19 @@ A branch with no upstream (for example, the forge deleted it on merge and a fetc
 pruned it) counts as pushed. Its HEAD has already been checked against the merged
 PR's `headRefOid`. The receipt records this as `proof.evidence.pushed: "pr-head"`.
 
-Removal uses `git worktree remove` without `--force` and `git branch -d`, never
-`-D`.
+Removal never forces and uses `git branch -d`, never `-D`. A worktree that
+OpenCode tracks (one made by `opencode_worktree_create` or a subagent-worktree
+lane) is removed through the host's `worktree.remove`, so OpenCode's registry
+drops the entry; the host refuses a dirty tree and cleanup reports its reason
+without falling back to git. Any other worktree is removed with
+`git worktree remove`.
+
+A registry entry goes stale only when a removal bypasses the host (a manual
+`git worktree remove` or a deleted folder). `worktree.list` still returns such
+entries, and the host's `remove` then fails because the directory is gone. The
+plugin leaves them alone: OpenCode's `worktree.refresh` drops registry entries
+whose directory no longer exists. Upstream, `remove` could drop the entry when
+the directory is already gone.
 
 ## Permissions
 

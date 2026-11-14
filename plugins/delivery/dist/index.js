@@ -1762,6 +1762,10 @@ var MAX_CLI_JSON_BYTES = 1024 * 1024;
 var MAX_DIRTY_PATHS = 8;
 var LOCAL_REF_PREFIX = "refs/heads/";
 var PR_FIELDS = "number,url,state,baseRefName,headRefName,headRefOid,mergeCommit,mergedAt";
+function removalRoute(listed, target, canonical = (path) => physicalPath(path) ?? path) {
+  const want = canonical(target);
+  return listed.some((entry) => canonical(entry.directory) === want) ? "host" : "git";
+}
 function show2(value) {
   if (typeof value === "string")
     return JSON.stringify(value);
@@ -2414,9 +2418,19 @@ async function cleanupDelivery(params, cwd, deps = {}) {
   const removeArgv = ["worktree", "remove", targetPath];
   if (signal?.aborted === true)
     return refuse2("signal", "an abort", "no interrupt before git worktree remove; nothing was removed");
-  const removed = await runGit(commit, executionCwd, removeArgv, bounds.mutationMs);
-  if (!completed(removed)) {
-    return commandFailure("worktree.removed", ["git", ...removeArgv], removed, "exit 0 without --force");
+  const route = deps.host === undefined ? "git" : removalRoute(await deps.host.list().catch(() => []), targetPath);
+  if (route === "host" && deps.host !== undefined) {
+    try {
+      await deps.host.remove(targetPath);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return refuse2("worktree.removed", `host worktree.remove ${JSON.stringify(targetPath)} (error ${message.trim().slice(0, 400)})`, "host removal without force");
+    }
+  } else {
+    const removed = await runGit(commit, executionCwd, removeArgv, bounds.mutationMs);
+    if (!completed(removed)) {
+      return commandFailure("worktree.removed", ["git", ...removeArgv], removed, "exit 0 without --force");
+    }
   }
   const registration = await registrationAbsence(executionCwd, targetPath, commit, bounds.refReadMs);
   const pathGone = pathAbsence(targetPath);
@@ -3570,7 +3584,7 @@ var CLEANUP_OUTPUT = {
 var LAND_DESCRIPTION = `Merge a reviewed pull request at most once, prove it landed, and write one landing receipt.
 ` + "Refuses unless expectHeadSha names the PR head (required whenever the call would merge) " + "and, when worktree is given, its HEAD is that head. With requireApproval/requireGreenChecks it also requires an approval artifact on the PR for that exact head " + "and green checks before merging. Merges at most once (an already MERGED request is proved, not re-merged) with merge_method (squash by default, PR title as subject), " + "binds the merge to the head, re-reads it, fetches the landed commits and checks the method's commit shape, observes the remote branch, then writes the receipt. " + "Writes no Beads ledger: when beads.ledgerActive, run the returned next steps child-before-parent, then delivery_cleanup. " + "A refusal with mergeIssued true means the PR is merged: re-run with the same pr and expectHeadSha to write the receipt.";
 var CLEANUP_DESCRIPTION = `Remove a landed PR's worktree and local branch after proving the landing receipt, and write a continuation receipt.
-` + "Recomputes the ledger classification at the canonical root, proves the PR merged at the recorded head from the receipt's own remote, " + "checks every receipt bead is closed with metadata.merge_sha equal to the merge (read-only bd show), refuses to remove the worktree it runs from, a dirty tree or unpushed commits, " + "then runs git worktree remove (no force) and git branch -d and verifies four absences.";
+` + "Recomputes the ledger classification at the canonical root, proves the PR merged at the recorded head from the receipt's own remote, " + "checks every receipt bead is closed with metadata.merge_sha equal to the merge (read-only bd show), refuses to remove the worktree it runs from, a dirty tree or unpushed commits, " + "then removes the worktree (no force; through OpenCode when it tracks it, else git worktree remove) and runs git branch -d and verifies four absences.";
 function landOutput(outcome) {
   if (!outcome.ok) {
     return {
@@ -3604,6 +3618,15 @@ function cleanupOutput(result) {
 function metadataOf(output) {
   const { receipt: _receipt, ...rest } = output;
   return rest;
+}
+function hostWorktrees(ctx) {
+  const projectID = ctx.location.project?.id;
+  if (projectID === undefined)
+    return;
+  return {
+    list: () => ctx.worktree.list({ projectID }),
+    remove: (directory) => ctx.worktree.remove({ projectID, directory, force: false })
+  };
 }
 function environment(options) {
   return options.receiptsDirectory === undefined ? process.env : { ...process.env, DELIVERY_RECEIPTS_DIR: options.receiptsDirectory };
@@ -3661,7 +3684,8 @@ async function setupDelivery(ctx) {
         const result = await cleanupDelivery(input, directory, {
           env: environment(options),
           signal: context.signal,
-          authorize: (request) => ask(request.worktree, { ...request })
+          authorize: (request) => ask(request.worktree, { ...request }),
+          host: hostWorktrees(ctx)
         });
         const output = cleanupOutput(result);
         const text = result.ok ? `delivery_cleanup removed ${result.receipt.worktree.path} and branch ${result.receipt.branch.name}; remote branch ${result.remoteBranchAbsence}.
