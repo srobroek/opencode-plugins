@@ -20,6 +20,15 @@ export const TiersRpc = Rpc.define({
       },
       output: { type: "object" },
     },
+    /** Set one agent's tier (`tier`), or remove the override (`tier` null), in the global config file; the running instance applies it. */
+    setAgent: {
+      input: {
+        type: "object",
+        required: ["agent"],
+        properties: { agent: { type: "string" }, tier: {} },
+      },
+      output: { type: "object" },
+    },
   },
   events: {},
 })

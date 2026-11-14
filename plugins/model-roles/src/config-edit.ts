@@ -49,34 +49,48 @@ export function findPluginEntry(text: string): PluginEntry | undefined {
   return undefined
 }
 
-/** The `options.tiers` object of the model-roles entry, or `{}`. */
-export function readTiers(text: string): Record<string, unknown> {
+/** An `options` object of the model-roles entry that maps names to values. */
+export type Section = "tiers" | "agents"
+
+const readSection = (text: string, section: Section): Record<string, unknown> => {
   const entry = findPluginEntry(text)
   const root = parse(text)
   if (entry === undefined || entry.bare || root === undefined) return {}
-  const node = findNodeAtLocation(root, ["plugins", entry.index, "options", "tiers"])
+  const node = findNodeAtLocation(root, ["plugins", entry.index, "options", section])
   const value = node === undefined ? undefined : (getNodeValue(node) as unknown)
   return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : {}
 }
 
+/** The `options.tiers` object of the model-roles entry, or `{}`. */
+export const readTiers = (text: string): Record<string, unknown> => readSection(text, "tiers")
+
+/** The `options.agents` object (agent id to tier) of the model-roles entry, or `{}`. */
+export const readAgents = (text: string): Record<string, unknown> => readSection(text, "agents")
+
 /**
- * Set `options.tiers.<name>` of the model-roles entry to `value`, or remove it when
+ * Set `options.<section>.<name>` of the model-roles entry to `value`, or remove it when
  * `value` is undefined. A bare string entry becomes `{ "package": …, "options": … }`.
  * Returns `undefined` when the text has no model-roles entry.
  */
-export function setTier(text: string, name: string, value: unknown): string | undefined {
+export function setEntry(text: string, section: Section, name: string, value: unknown): string | undefined {
   const entry = findPluginEntry(text)
   if (entry === undefined) return undefined
   if (entry.bare) {
     if (value === undefined) return text
-    const replacement = { package: entry.spec, options: { tiers: { [name]: value } } }
+    const replacement = { package: entry.spec, options: { [section]: { [name]: value } } }
     return applyEdits(text, modify(text, ["plugins", entry.index], replacement, { formattingOptions: FORMATTING }))
   }
   return applyEdits(
     text,
-    modify(text, ["plugins", entry.index, "options", "tiers", name], value, { formattingOptions: FORMATTING }),
+    modify(text, ["plugins", entry.index, "options", section, name], value, { formattingOptions: FORMATTING }),
   )
 }
+
+/** Set or remove one `options.tiers` entry; see `setEntry`. */
+export const setTier = (text: string, name: string, value: unknown): string | undefined => setEntry(text, "tiers", name, value)
+
+/** Set or remove one `options.agents` entry; see `setEntry`. */
+export const setAgentTier = (text: string, agent: string, tier: string | undefined): string | undefined => setEntry(text, "agents", agent, tier)
 
 export type ConfigFile = { path: string; text: string }
 
@@ -104,14 +118,27 @@ export function readConfigFiles(dir: string): ConfigFile[] {
 }
 
 export type WriteResult = { path: string; tiers: Record<string, unknown> }
+export type AgentWriteResult = { path: string; agents: Record<string, unknown> }
 
-/** Set one tier in the global config file that holds the model-roles entry, and write it. */
-export function writeTier(dir: string, name: string, value: unknown): WriteResult {
+/** Apply `edit` to the global config file that holds the model-roles entry, and write it. */
+function writeEntry(dir: string, edit: (text: string) => string | undefined): { path: string; text: string } {
   const file = pickConfigFile(readConfigFiles(dir))
   if (file === undefined)
     throw new Error(`No model-roles plugin entry in ${CONFIG_NAMES.map((n) => path.join(dir, n)).join(" or ")}; add the plugin to the global config first.`)
-  const next = setTier(file.text, name, value)
+  const next = edit(file.text)
   if (next === undefined) throw new Error(`No model-roles plugin entry in ${file.path}.`)
   if (next !== file.text) writeFileSync(file.path, next.endsWith("\n") ? next : `${next}\n`)
-  return { path: file.path, tiers: readTiers(next) }
+  return { path: file.path, text: next }
+}
+
+/** Set one tier in the global config file that holds the model-roles entry, and write it. */
+export function writeTier(dir: string, name: string, value: unknown): WriteResult {
+  const { path: file, text } = writeEntry(dir, (current) => setTier(current, name, value))
+  return { path: file, tiers: readTiers(text) }
+}
+
+/** Set (or with `undefined` remove) one agent's tier override in that file, and write it. */
+export function writeAgentTier(dir: string, agent: string, tier: string | undefined): AgentWriteResult {
+  const { path: file, text } = writeEntry(dir, (current) => setAgentTier(current, agent, tier))
+  return { path: file, agents: readAgents(text) }
 }

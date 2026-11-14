@@ -8,7 +8,7 @@ import { withOptionalString } from "../../lib/src/tool-schema.ts"
 import { WORKTREE_PARAM, WORKTREE_PARAM_DESCRIPTION } from "../../subagent-worktree/src/lane.ts"
 import reference from "./fixtures/reference.json"
 import work from "./fixtures/work-models.json"
-import plugin, { MAX_REREGISTER, type ModelRef, readTiers, spawnTarget } from "./index.ts"
+import plugin, { MAX_REREGISTER, type ModelRef, readAgents, readTiers, spawnTarget } from "./index.ts"
 
 type Agent = { id: string; model?: ModelRef; request?: { headers?: Record<string, string> } }
 type Model = { providerID: string; id: string; variants: { id: string }[]; cost?: { input: number }[] }
@@ -1509,6 +1509,44 @@ describe("tiers rpc", () => {
         "openai/gpt-daybreak-blue-latest is not available now (provider not connected, or disabled); the tier skips it until it is.",
       ])
     })
+  })
+
+  test("setAgent writes options.agents, applies it at once and removes it again", async () => {
+    await withConfig(
+      async (host, file) => {
+        const cheapModel = { providerID: "amazon-bedrock", id: "global.anthropic.claude-haiku-5-5", variant: "low" }
+        expect(host.agents().get("worker")?.model).toEqual(cheapModel)
+        await host.rpc("setAgent", { agent: "worker", tier: "strong" })
+        expect(readAgents(readFileSync(file, "utf8"))).toEqual({ worker: "strong" })
+        expect(host.agents().get("worker")?.model).not.toEqual(cheapModel)
+        const state = (await host.rpc("state")) as { agents: Array<{ id: string; tier?: string; source?: string }> }
+        expect(state.agents.find((a) => a.id === "worker")).toMatchObject({ tier: "strong", source: "options" })
+        await host.rpc("setAgent", { agent: "worker", tier: null })
+        expect(readAgents(readFileSync(file, "utf8"))).toEqual({})
+        expect(host.agents().get("worker")?.model).toEqual(cheapModel)
+      },
+      [{ id: "worker", request: header("cheap") }],
+    )
+  })
+
+  test("setAgent refuses an unknown tier or agent and writes nothing", async () => {
+    await withConfig(
+      async (host, file) => {
+        const before = readFileSync(file, "utf8")
+        await expect(host.rpc("setAgent", { agent: "worker", tier: "nope" })).rejects.toThrow('Agent worker not saved: Unknown tier "nope".')
+        await expect(host.rpc("setAgent", { agent: "ghost", tier: "cheap" })).rejects.toThrow("the host lists no such agent")
+        await expect(host.rpc("setAgent", { agent: "", tier: "cheap" })).rejects.toThrow(/Invalid agent/)
+        expect(readFileSync(file, "utf8")).toBe(before)
+      },
+      [{ id: "worker", request: header("cheap") }],
+    )
+  })
+
+  test("state lists an agent without a tier", async () => {
+    await withConfig(async (host) => {
+      const state = (await host.rpc("state")) as { agents: Array<Record<string, unknown>> }
+      expect(state.agents).toEqual([{ id: "plain" }])
+    }, [{ id: "plain" }])
   })
 
   test("a saved tier applies to the running instance at once, and so does a config reload", async () => {

@@ -34,7 +34,7 @@ import {
   planImplicit,
   readClassification,
 } from "./classify.ts"
-import { globalConfigDir, pickConfigFile, readConfigFiles, readTiers, writeTier } from "./config-edit.ts"
+import { globalConfigDir, pickConfigFile, readAgents, readConfigFiles, readTiers, writeAgentTier, writeTier } from "./config-edit.ts"
 import {
   duration,
   failureNote,
@@ -128,7 +128,7 @@ import {
   tierOf,
   tierWarnings,
 } from "./tiers.ts"
-import { applyDraft, compact, readDraft, TIER_NAME, tierState, validateTierConfig } from "./tiers-ui.ts"
+import { agentTierError, applyDraft, compact, readDraft, TIER_NAME, tierState, validateTierConfig } from "./tiers-ui.ts"
 
 export * from "./auto.ts"
 export * from "./catalog.ts"
@@ -1204,7 +1204,7 @@ export default Plugin.define({
     /** The global file's tiers as last applied (or seen at setup), so an unrelated config change keeps the options this instance got. */
     let fileTiers = (() => {
       const file = globalFile()
-      return file === undefined ? undefined : JSON.stringify(readTiers(file.text))
+      return file === undefined ? undefined : JSON.stringify({ tiers: readTiers(file.text), agents: readAgents(file.text) })
     })()
 
     /**
@@ -1216,12 +1216,14 @@ export default Plugin.define({
       const file = globalFile()
       if (file === undefined) return
       const tiers = readTiers(file.text)
-      const key = JSON.stringify(tiers)
+      const agents = parseOptions({ agents: readAgents(file.text) }).agents
+      const key = JSON.stringify({ tiers, agents: readAgents(file.text) })
       if (!force && key === fileTiers) return
       await exclusive(async () => {
-        const previous = { settings, roles: options.roles, tiers: options.tiers, classes: options.classes, derived }
+        const previous = { settings, agents: options.agents, roles: options.roles, tiers: options.tiers, classes: options.classes, derived }
         const restore = () => {
           settings = previous.settings
+          options.agents = previous.agents
           options.roles = previous.roles
           options.tiers = previous.tiers
           options.classes = previous.classes
@@ -1230,6 +1232,7 @@ export default Plugin.define({
         try {
           // Spawns wait in `exclusive`, so they see either the old tiers or the new ones once agents and tools follow.
           settings = parseTierSettings({ ...pluginOptions, tiers })
+          options.agents = agents
           rebuild()
           attempts = 0
           await check(true)
@@ -1290,6 +1293,28 @@ export default Plugin.define({
           throw new Error(`Tier ${tier} was written to ${result.path} but not applied: ${(error as Error).message}. The previous tiers stay in use until the config reloads.`)
         }
         return { ...result, warnings }
+      },
+      setAgent: async (input) => {
+        const { agent, tier } = (input ?? {}) as { agent?: unknown; tier?: unknown }
+        if (typeof agent !== "string" || agent.trim() === "") throw new Error(`Invalid agent ${JSON.stringify(agent)}`)
+        const value = tier === null || tier === undefined ? undefined : tier
+        await queue(async () => {
+          await refresh()
+        })
+        if (value !== undefined) {
+          const error = agentTierError(value, options.tiers ?? {})
+          if (error !== undefined) throw new Error(`Agent ${agent} not saved: ${error}`)
+        }
+        if (!(await listAgents()).some((a) => a.id === agent)) throw new Error(`Agent ${agent} not saved: the host lists no such agent.`)
+        const result = writeAgentTier(configDir(), agent, value as string | undefined)
+        warn(`${value === undefined ? "removed the tier of" : "set the tier of"} agent ${agent} in ${result.path}`)
+        try {
+          await queue(() => reloadTiers(true))
+        } catch (error) {
+          warn(`agent ${agent} was written to ${result.path} but not applied`, { error: String(error) })
+          throw new Error(`Agent ${agent} was written to ${result.path} but not applied: ${(error as Error).message}. The previous tiers stay in use until the config reloads.`)
+        }
+        return result
       },
     })
 

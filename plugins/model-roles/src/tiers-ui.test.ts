@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import {
+  agentTierError,
   applyDraft,
   applyEdit,
   compact,
@@ -103,7 +104,7 @@ describe("drafts", () => {
 })
 
 describe("tierState", () => {
-  test("lists each tiered agent with its source and resolution, and each candidate's status", () => {
+  test("lists every agent with its source and resolution (none for an untiered one), and each candidate's status", () => {
     const options = {
       roles: { cheap: ["a/b#high"] },
       agents: { worker: "cheap" },
@@ -119,15 +120,27 @@ describe("tierState", () => {
         { id: "worker" },
         { id: "explore" },
         { id: "critic", request: { headers: { "x-opencode-model-role": "cheap" } }, model: { providerID: "c", id: "d" } },
-        { id: "plain" },
+        { id: "plain", description: "  Does plain things.  " },
       ],
       status: () => ({ status: "available" }),
     })
     expect(state.agents).toEqual([
       { id: "critic", tier: "cheap", source: "header", resolved: "a/b#high", pinned: "c/d" },
       { id: "explore", tier: "cheap", source: "implicit", resolved: "a/b#high" },
+      { id: "plain", description: "Does plain things." },
       { id: "worker", tier: "cheap", source: "options", resolved: "a/b#high" },
     ])
+    expect(state.agents.map((a) => a.id)).toEqual(["critic", "explore", "plain", "worker"])
     expect(state.tiers[0]?.health).toEqual([{ entry: "a/b#high", status: "available" }])
+  })
+})
+
+describe("agentTierError", () => {
+  test("accepts a known tier; refuses an unknown or non-string one", () => {
+    const tiers = { cheap: {}, docs: {} }
+    expect(agentTierError("docs", tiers)).toBeUndefined()
+    expect(agentTierError("nope", tiers)).toBe('Unknown tier "nope".')
+    expect(agentTierError(3, tiers)).toBe("Unknown tier 3.")
+    expect(agentTierError("toString", tiers)).toBe('Unknown tier "toString".')
   })
 })

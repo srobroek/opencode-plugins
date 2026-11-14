@@ -3153,27 +3153,31 @@ function findPluginEntry(text) {
   }
   return;
 }
-function readTiers(text) {
+var readSection = (text, section) => {
   const entry = findPluginEntry(text);
   const root = parse2(text);
   if (entry === undefined || entry.bare || root === undefined)
     return {};
-  const node = findNodeAtLocation2(root, ["plugins", entry.index, "options", "tiers"]);
+  const node = findNodeAtLocation2(root, ["plugins", entry.index, "options", section]);
   const value = node === undefined ? undefined : getNodeValue2(node);
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : {};
-}
-function setTier(text, name, value) {
+};
+var readTiers = (text) => readSection(text, "tiers");
+var readAgents = (text) => readSection(text, "agents");
+function setEntry(text, section, name, value) {
   const entry = findPluginEntry(text);
   if (entry === undefined)
     return;
   if (entry.bare) {
     if (value === undefined)
       return text;
-    const replacement = { package: entry.spec, options: { tiers: { [name]: value } } };
+    const replacement = { package: entry.spec, options: { [section]: { [name]: value } } };
     return applyEdits(text, modify(text, ["plugins", entry.index], replacement, { formattingOptions: FORMATTING }));
   }
-  return applyEdits(text, modify(text, ["plugins", entry.index, "options", "tiers", name], value, { formattingOptions: FORMATTING }));
+  return applyEdits(text, modify(text, ["plugins", entry.index, "options", section, name], value, { formattingOptions: FORMATTING }));
 }
+var setTier = (text, name, value) => setEntry(text, "tiers", name, value);
+var setAgentTier = (text, agent, tier) => setEntry(text, "agents", agent, tier);
 function pickConfigFile(files) {
   const order = (file) => CONFIG_NAMES.indexOf(path.basename(file.path));
   return [...files].sort((a, b) => order(b) - order(a)).find((file) => findPluginEntry(file.text) !== undefined);
@@ -3188,18 +3192,26 @@ function readConfigFiles(dir) {
   }
   return files;
 }
-function writeTier(dir, name, value) {
+function writeEntry(dir, edit) {
   const file = pickConfigFile(readConfigFiles(dir));
   if (file === undefined)
     throw new Error(`No model-roles plugin entry in ${CONFIG_NAMES.map((n) => path.join(dir, n)).join(" or ")}; add the plugin to the global config first.`);
-  const next = setTier(file.text, name, value);
+  const next = edit(file.text);
   if (next === undefined)
     throw new Error(`No model-roles plugin entry in ${file.path}.`);
   if (next !== file.text)
     writeFileSync(file.path, next.endsWith(`
 `) ? next : `${next}
 `);
-  return { path: file.path, tiers: readTiers(next) };
+  return { path: file.path, text: next };
+}
+function writeTier(dir, name, value) {
+  const { path: file, text } = writeEntry(dir, (current) => setTier(current, name, value));
+  return { path: file, tiers: readTiers(text) };
+}
+function writeAgentTier(dir, agent, tier) {
+  const { path: file, text } = writeEntry(dir, (current) => setAgentTier(current, agent, tier));
+  return { path: file, agents: readAgents(text) };
 }
 
 // plugins/model-roles/src/log.ts
@@ -3327,6 +3339,14 @@ var TiersRpc = Rpc.define({
         properties: { tier: { type: "string" }, value: {} }
       },
       output: { type: "object" }
+    },
+    setAgent: {
+      input: {
+        type: "object",
+        required: ["agent"],
+        properties: { agent: { type: "string" }, tier: {} }
+      },
+      output: { type: "object" }
     }
   },
   events: {}
@@ -3368,12 +3388,16 @@ function tierState(input) {
   const agents = [];
   for (const agent of [...input.agents ?? []].sort((a, b) => a.id.localeCompare(b.id))) {
     const found = agentTier(agent, input.options.agents, input.options.implicit);
-    if (found === undefined)
-      continue;
-    const row = { id: agent.id, tier: found.tier, source: found.source };
-    const resolved = resolve(found.tier);
-    if (resolved !== undefined)
-      row.resolved = resolved;
+    const row = { id: agent.id };
+    if (found !== undefined) {
+      row.tier = found.tier;
+      row.source = found.source;
+      const resolved = resolve(found.tier);
+      if (resolved !== undefined)
+        row.resolved = resolved;
+    }
+    if (agent.description !== undefined && agent.description.trim() !== "")
+      row.description = agent.description.trim();
     const pin = userPin(agent);
     if (pin !== undefined)
       row.pinned = modelText(pin);
@@ -3391,6 +3415,11 @@ function readState(value) {
   if (!isRecord7(value) || !Array.isArray(value.tiers) || !Array.isArray(value.models))
     return;
   return { ...value, agents: Array.isArray(value.agents) ? value.agents : [] };
+}
+function agentTierError(tier, tiers) {
+  if (typeof tier !== "string" || !Object.hasOwn(tiers, tier))
+    return `Unknown tier ${JSON.stringify(tier)}.`;
+  return;
 }
 var TIER_NAME = /^[a-z][a-z0-9-]*$/;
 function readDraft(input) {
@@ -4411,20 +4440,22 @@ ${refs.size}`;
     const pluginOptions = isRecord8(ctx.options) ? ctx.options : {};
     let fileTiers = (() => {
       const file = globalFile();
-      return file === undefined ? undefined : JSON.stringify(readTiers(file.text));
+      return file === undefined ? undefined : JSON.stringify({ tiers: readTiers(file.text), agents: readAgents(file.text) });
     })();
     const reloadTiers = async (force) => {
       const file = globalFile();
       if (file === undefined)
         return;
       const tiers2 = readTiers(file.text);
-      const key = JSON.stringify(tiers2);
+      const agents = parseOptions({ agents: readAgents(file.text) }).agents;
+      const key = JSON.stringify({ tiers: tiers2, agents: readAgents(file.text) });
       if (!force && key === fileTiers)
         return;
       await exclusive(async () => {
-        const previous = { settings, roles: options.roles, tiers: options.tiers, classes: options.classes, derived };
+        const previous = { settings, agents: options.agents, roles: options.roles, tiers: options.tiers, classes: options.classes, derived };
         const restore = () => {
           settings = previous.settings;
+          options.agents = previous.agents;
           options.roles = previous.roles;
           options.tiers = previous.tiers;
           options.classes = previous.classes;
@@ -4432,6 +4463,7 @@ ${refs.size}`;
         };
         try {
           settings = parseTierSettings({ ...pluginOptions, tiers: tiers2 });
+          options.agents = agents;
           rebuild();
           attempts = 0;
           await check2(true);
@@ -4491,6 +4523,31 @@ ${refs.size}`;
           throw new Error(`Tier ${tier} was written to ${result.path} but not applied: ${error.message}. The previous tiers stay in use until the config reloads.`);
         }
         return { ...result, warnings };
+      },
+      setAgent: async (input) => {
+        const { agent, tier } = input ?? {};
+        if (typeof agent !== "string" || agent.trim() === "")
+          throw new Error(`Invalid agent ${JSON.stringify(agent)}`);
+        const value = tier === null || tier === undefined ? undefined : tier;
+        await queue(async () => {
+          await refresh();
+        });
+        if (value !== undefined) {
+          const error = agentTierError(value, options.tiers ?? {});
+          if (error !== undefined)
+            throw new Error(`Agent ${agent} not saved: ${error}`);
+        }
+        if (!(await listAgents()).some((a) => a.id === agent))
+          throw new Error(`Agent ${agent} not saved: the host lists no such agent.`);
+        const result = writeAgentTier(configDir(), agent, value);
+        warn(`${value === undefined ? "removed the tier of" : "set the tier of"} agent ${agent} in ${result.path}`);
+        try {
+          await queue(() => reloadTiers(true));
+        } catch (error) {
+          warn(`agent ${agent} was written to ${result.path} but not applied`, { error: String(error) });
+          throw new Error(`Agent ${agent} was written to ${result.path} but not applied: ${error.message}. The previous tiers stay in use until the config reloads.`);
+        }
+        return result;
       }
     });
     const spawnResults = await ctx.tool.hook("execute.after", async (event) => {
@@ -4656,6 +4713,7 @@ export {
   TiersRpc,
   agentHash,
   agentTier,
+  agentTierError,
   applyDraft,
   applyEdit2 as applyEdit,
   applyFrozenTierParam,
@@ -4748,6 +4806,7 @@ export {
   pushReceipt,
   quotaReset,
   rankOf,
+  readAgents,
   readClassification,
   readConfigFiles,
   readDraft,
@@ -4768,6 +4827,8 @@ export {
   roleParamDescription,
   rolesListing,
   sameModel,
+  setAgentTier,
+  setEntry,
   setTier,
   spawnTarget,
   staleAgents,
@@ -4794,5 +4855,6 @@ export {
   withEffort,
   withRoleNote,
   withRoleParam,
+  writeAgentTier,
   writeTier
 };

@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { parse } from "jsonc-parser"
-import { findPluginEntry, globalConfigDir, pickConfigFile, readTiers, setTier, writeTier } from "./config-edit.ts"
+import { findPluginEntry, globalConfigDir, pickConfigFile, readAgents, readTiers, setAgentTier, setTier, writeAgentTier, writeTier } from "./config-edit.ts"
 
 const SPEC = "github:srobroek/opencode-plugins#main::path:plugins/model-roles"
 
@@ -81,6 +81,29 @@ describe("setTier", () => {
   })
 })
 
+describe("setAgentTier", () => {
+  test("a bare entry gains options.agents, keeping the entry's package", () => {
+    const next = setAgentTier(`{ "plugins": ["${SPEC}"] }`, "build", "strong") as string
+    expect(parse(next).plugins[0]).toEqual({ package: SPEC, options: { agents: { build: "strong" } } })
+    expect(readAgents(next)).toEqual({ build: "strong" })
+  })
+
+  test("sets, replaces and removes one agent; tiers and other agents stay", () => {
+    const text = `{ "plugins": [{ "package": "${SPEC}", "options": { "tiers": { "docs": { "purpose": "d" } }, "agents": { "a": "cheap", "b": "strong" } } }] }`
+    const replaced = setAgentTier(text, "a", "docs") as string
+    expect(readAgents(replaced)).toEqual({ a: "docs", b: "strong" })
+    const removed = setAgentTier(replaced, "b", undefined) as string
+    expect(readAgents(removed)).toEqual({ a: "docs" })
+    expect(readTiers(removed)).toEqual({ docs: { purpose: "d" } })
+  })
+
+  test("removing from a bare entry changes nothing; no entry gives undefined", () => {
+    const text = `{ "plugins": ["${SPEC}"] }`
+    expect(setAgentTier(text, "build", undefined)).toBe(text)
+    expect(setAgentTier("{}", "build", "cheap")).toBeUndefined()
+  })
+})
+
 describe("pickConfigFile and writeTier", () => {
   test("opencode.jsonc wins over opencode.json when both have the entry; else the one that has it", () => {
     const json = { path: "/d/opencode.json", text: `{ "plugins": ["${SPEC}"] }` }
@@ -101,6 +124,22 @@ describe("pickConfigFile and writeTier", () => {
       expect(written).toContain("// keep me")
       expect(written.endsWith("\n")).toBe(true)
       expect(() => writeTier(path.join(dir, "missing"), "cheap", {})).toThrow(/No model-roles plugin entry/)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe("writeAgentTier", () => {
+  test("writes the override in place and keeps comments; removing it deletes the key", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "model-roles-config-"))
+    try {
+      const file = path.join(dir, "opencode.jsonc")
+      writeFileSync(file, `{\n  // keep me\n  "plugins": ["${SPEC}"]\n}\n`)
+      expect(writeAgentTier(dir, "build", "strong")).toEqual({ path: file, agents: { build: "strong" } })
+      expect(readFileSync(file, "utf8")).toContain("// keep me")
+      expect(writeAgentTier(dir, "build", undefined)).toEqual({ path: file, agents: {} })
+      expect(() => writeAgentTier(path.join(dir, "missing"), "build", "cheap")).toThrow(/No model-roles plugin entry/)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

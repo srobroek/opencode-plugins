@@ -124,8 +124,8 @@ Headers and spawns that use the old role names keep working:
 The package also has a TUI entry (`./tui`), loaded from the same install. `/tiers`
 (slash command, or **Model tiers** in the command palette) lists the tiers with
 what they resolve to now, for the current session's location. Pick a tier to open
-its menu, **Agents…** to see which tier each agent uses and the model it resolves to
-(read-only), or **Add a tier…** (name, then purpose, then the same menu).
+its menu, **Agents…** to see every agent and change its tier, or **Add a tier…**
+(name, then purpose, then the same menu).
 
 Your changes live in a draft until you save. **Esc** goes back one level and keeps
 the draft. The tier menu has:
@@ -162,12 +162,33 @@ A save goes to `options.tiers` of the model-roles entry in the global config:
 `opencode.json`. The edit keeps comments and formatting, and turns a bare string
 plugin entry into `{ "package": …, "options": … }`.
 
+### Agents
+
+**Agents…** lists every agent the host reports, primary agents and subagents,
+sorted. A row is the agent id and its tier (or `no tier`, with `· own model` when
+the agent pins a model). **Enter** opens the agent's details, one row per fact:
+
+- **Tier**: the tier, or `no tier (session model)`.
+- **From**: `your setting` (`options.agents`), `agent default` (the agent's
+  request header), `auto-classified`, or `none`.
+- **Resolves to**: `provider/model#variant` the tier gives now.
+- **Own model**: the model the agent pins, which wins over its tier.
+- **About**: the agent's description, if the host gives one.
+
+**Change tier…** opens every tier with its summary, plus **Agent default**, which
+removes `options.agents.<agent>` so the header or classification applies again.
+The current choice is marked. A choice saves at once, the same way a tier save
+does: it writes the global config, refuses an unknown tier or agent without
+writing, applies live, and returns to the refreshed details. **Esc** or **Back**
+returns to the Agents list on the same row. **Esc** in the picker changes nothing.
+The `setAgent` call (`{ agent, tier }`, `tier` null to remove) does the write.
+
 ### Live config
 
 The running plugin applies a save straight away. It reads the global file again,
 rebuilds the tiers, and moves the agents that are now on another model. On the
 host's `config.updated` event it does the same when the file's tiers changed, so
-a hand edit applies too. A spawn that starts during a reload waits for it, so its
+a hand edit applies too, to the tiers and to `options.agents`. A spawn that starts during a reload waits for it, so its
 model and receipt both come from the new tiers. If moving the agents or the tool
 fails, the previous tiers stay in use, the save reports that it was written but
 not applied, and the next config reload tries again. The `tier`

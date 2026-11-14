@@ -5,8 +5,9 @@
  */
 
 import type { DialogSelectOption } from "@opencode/plugin/tui/context"
+import type { AgentTierSource } from "./resolve.ts"
 import type { TierConfig } from "./tiers.ts"
-import { applyEdit, configuredModels, type PickModel, type TierEdit, type TierRow } from "./tiers-ui.ts"
+import { type AgentRow, applyEdit, configuredModels, type PickModel, type TierEdit, type TierRow, tierSummary } from "./tiers-ui.ts"
 
 export type TierDraft = {
   row: TierRow
@@ -199,11 +200,76 @@ export function variantOptions(model: PickModel | undefined): DialogSelectOption
   ]
 }
 
-/** The read-only agents list: agent, tier, resolved model. */
-export function agentOptions(agents: ReadonlyArray<{ id: string; tier: string; resolved?: string; pinned?: string }>): DialogSelectOption<string>[] {
+/** Short rows: a DialogSelect row has room for an id and a few words, so the model and description live in the details menu. */
+export function agentOptions(agents: ReadonlyArray<AgentRow>): DialogSelectOption<string>[] {
   return agents.map((a) => ({
     title: a.id,
     value: a.id,
-    description: `${a.tier} → ${a.pinned !== undefined ? `${a.pinned} (own model)` : (a.resolved ?? "nothing available")}`,
+    description: `${a.tier ?? "no tier"}${a.pinned !== undefined ? " · own model" : ""}`,
   }))
 }
+
+const SOURCE_TEXT: Record<AgentTierSource, string> = {
+  options: "your setting",
+  header: "agent default",
+  implicit: "auto-classified",
+}
+
+/** Where an agent's tier comes from, in words. */
+export function sourceText(source: AgentTierSource | undefined): string {
+  return source === undefined ? "none" : SOURCE_TEXT[source]
+}
+
+/** Break `text` into lines of at most `width` characters, at spaces where it can. */
+export function wrap(text: string, width = 52): string[] {
+  const lines: string[] = []
+  let line = ""
+  for (const word of text.split(/\s+/).filter(Boolean)) {
+    for (let rest = word; rest !== ""; ) {
+      const room = line === "" ? width : width - line.length - 1
+      if (rest.length <= room) {
+        line = line === "" ? rest : `${line} ${rest}`
+        rest = ""
+      } else if (line !== "") {
+        lines.push(line)
+        line = ""
+      } else {
+        lines.push(rest.slice(0, width))
+        rest = rest.slice(width)
+      }
+    }
+  }
+  if (line !== "") lines.push(line)
+  return lines
+}
+
+export const CHANGE_TIER = "\u0000change"
+export const BACK = "\u0000back"
+
+/** The details menu of one agent: one disabled row per fact (long text wrapped over rows), then the actions. */
+export function agentDetailOptions(agent: AgentRow): DialogSelectOption<string>[] {
+  const fact = (label: string, value: string): DialogSelectOption<string>[] =>
+    wrap(`${label}: ${value}`).map((line, i) => ({ title: i === 0 ? line : `  ${line}`, value: "", disabled: true }))
+  return [
+    ...fact("Tier", agent.tier ?? "no tier (session model)"),
+    ...fact("From", sourceText(agent.source)),
+    ...fact("Resolves to", agent.tier === undefined ? "the session model" : (agent.resolved ?? "nothing available")),
+    ...(agent.pinned === undefined ? [] : fact("Own model", `${agent.pinned} (wins over the tier)`)),
+    ...(agent.description === undefined ? [] : fact("About", agent.description)),
+    { title: "Change tier…", value: CHANGE_TIER },
+    { title: "Back", value: BACK },
+  ]
+}
+
+export const AGENT_DEFAULT = "\u0000agent-default"
+
+/** The tier picker for one agent: the agent default first, then every tier with its summary. */
+export function agentTierOptions(tiers: ReadonlyArray<TierRow>): DialogSelectOption<string>[] {
+  return [
+    { title: "Agent default", value: AGENT_DEFAULT, description: "Remove your setting; the agent's own tier or auto-classification applies" },
+    ...tiers.map((t) => ({ title: t.name, value: t.name, description: tierSummary(t) })),
+  ]
+}
+
+/** The picker row to mark: the agent's own setting, else the agent default. */
+export const agentTierCurrent = (agent: AgentRow): string => (agent.source === "options" && agent.tier !== undefined ? agent.tier : AGENT_DEFAULT)
