@@ -153,6 +153,10 @@ function createHost(input: {
     storage: {
       get: async (key: string) => storage.get(key),
       set: async (key: string, value: unknown) => void storage.set(key, value),
+      remove: async (key: string) => void storage.delete(key),
+      scan: async ({ prefix }: { prefix: string }) => ({
+        entries: [...storage].filter(([key]) => key.startsWith(prefix)).map(([key, value]) => ({ key, value })),
+      }),
     },
     tool: {
       transform: async (callback: (editor: ToolEditor) => void) => {
@@ -650,10 +654,17 @@ describe("subagent role parameter", () => {
     // No role: the input is untouched and the host runs general on its role's model.
     expect(await host.spawn("subagent", { agent: "general", prompt: "x" })).toEqual({ agent: "general", prompt: "x" })
     expect(host.agents().get("general")?.model).toEqual(sonnet)
+    // A resume without a role or model keeps the child's model; a role on it is a deliberate reroute.
+    expect(await host.spawn("subagent", { agent: "general", prompt: "x", sessionID: "ses_1" })).toEqual({
+      agent: "general",
+      prompt: "x",
+      sessionID: "ses_1",
+    })
     expect(await host.spawn("subagent", { agent: "general", prompt: "x", role: "task", sessionID: "ses_1" })).toEqual({
       agent: "general",
       prompt: "x",
       sessionID: "ses_1",
+      model: "amazon-bedrock/claude-sonnet#high",
     })
     await expect(host.spawn("subagent", { agent: "general", prompt: "x", role: "huge" })).rejects.toThrow(
       "Unknown model tier 'huge'. Pass one of: cheap, standard, strong, reviewer, fake.",
@@ -2230,5 +2241,125 @@ describe("tiers rpc", () => {
       },
       [{ id: "worker", request: header("strong") }],
     )
+  })
+})
+
+describe("a child keeps its resolved model", () => {
+  const sonnetHigh = "amazon-bedrock/claude-sonnet#high"
+  const first: { roles: Record<string, string[]>; agents: Record<string, string> } = { roles: { task: ["amazon-bedrock/claude-sonnet#high", "anthropic/claude-haiku"] }, agents: { general: "task" } }
+  const changed = { roles: { task: ["amazon-bedrock/claude-sonnet", "anthropic/claude-haiku"] }, agents: { general: "task" } }
+  const withSonnetHigh: Model[] = models
+  const resume = { agent: "plain", prompt: "again", sessionID: "c" }
+  const methods = (host: ReturnType<typeof createHost>, method: string) => host.calls.filter((c) => c.method === method)
+  const receipts = (host: ReturnType<typeof createHost>) => host.storage.get("receipts") as Array<{ rule: string; model?: string; configRevision?: string; warnings: string[] }>
+
+  /** A host that spawned child `c` on tier `task`, then restarted on `next` options with the same storage. */
+  const spawnThenReload = async (next: typeof first, nextModels: Model[] = withSonnetHigh) => {
+    const host = createHost({ agents: [{ id: "plain" }], models, options: first })
+    host.sessions.set("r", { id: "r" })
+    const cleanup = await setup(host)
+    const input = await host.spawn("subagent", { agent: "plain", prompt: "x", tier: "task" }, "build", "r", "call-1")
+    await host.spawnDone(input, { sessionID: "c" }, "r", "call-1")
+    host.close()
+    await cleanup()
+    const again = createHost({ agents: [{ id: "plain" }], models: nextModels, options: next })
+    for (const [key, value] of host.storage) again.storage.set(key, value)
+    again.sessions.set("r", { id: "r" })
+    return { host, again, cleanupAgain: await setup(again) }
+  }
+
+  test("is written when the spawn resolves, and survives a plugin reload", async () => {
+    const { host, again, cleanupAgain } = await spawnThenReload(first)
+    expect(host.storage.get("spawn-model:c")).toMatchObject({ model: sonnetHigh, tier: "task" })
+    expect(again.storage.get("spawn-model:c")).toEqual(host.storage.get("spawn-model:c"))
+    expect(typeof (host.storage.get("spawn-model:c") as { configRevision: string }).configRevision).toBe("string")
+    again.close()
+    await cleanupAgain()
+  })
+
+  test("a resume after a tiers change keeps the snapshot's variant, and the receipt says so", async () => {
+    const { host, again, cleanupAgain } = await spawnThenReload(changed)
+    const snapshot = host.storage.get("spawn-model:c") as { configRevision: string }
+    // A fresh spawn on the changed tiers resolves to a different variant ...
+    expect((await again.spawn("subagent", { agent: "plain", prompt: "x", tier: "task" }, "build", "r", "call-2")).model).not.toBe(sonnetHigh)
+    // ... but the resume stays on the snapshot's.
+    const input = await again.spawn("subagent", resume, "build", "r", "call-3")
+    expect(input).toEqual({ ...resume, model: sonnetHigh })
+    const [receipt] = receipts(again)
+    expect(receipt).toMatchObject({ rule: "snapshot", model: sonnetHigh, configRevision: snapshot.configRevision })
+    expect(again.storage.get("spawn-model:c")).toEqual(snapshot)
+    again.close()
+    await cleanupAgain()
+  })
+
+  test("a tier on the resume reroutes and replaces the snapshot", async () => {
+    const { again, cleanupAgain } = await spawnThenReload({ ...first, roles: { ...first.roles, smol: ["anthropic/claude-haiku"] } })
+    const input = await again.spawn("subagent", { ...resume, tier: "smol" }, "build", "r", "call-2")
+    expect(input).toEqual({ ...resume, model: "anthropic/claude-haiku" })
+    expect(again.storage.get("spawn-model:c")).toMatchObject({ model: "anthropic/claude-haiku", tier: "smol" })
+    expect(receipts(again)[0]?.rule).not.toBe("snapshot")
+    again.close()
+    await cleanupAgain()
+  })
+
+  test("a model on the resume reroutes and replaces the snapshot", async () => {
+    const { again, cleanupAgain } = await spawnThenReload(first)
+    const input = await again.spawn("subagent", { ...resume, model: "opencode/flint" }, "build", "r", "call-2")
+    expect(input).toEqual({ ...resume, model: "opencode/flint" })
+    expect(again.storage.get("spawn-model:c")).toMatchObject({ model: "opencode/flint" })
+    expect((again.storage.get("spawn-model:c") as { tier?: string }).tier).toBeUndefined()
+    again.close()
+    await cleanupAgain()
+  })
+
+  test("a snapshot model that is no longer available falls back to normal resolution with a warning", async () => {
+    const { again, cleanupAgain } = await spawnThenReload(first, models.filter((m) => m.id !== "claude-sonnet"))
+    const input = await again.spawn("subagent", resume, "build", "r", "call-2")
+    expect(input).toEqual(resume)
+    const [receipt] = receipts(again)
+    expect(receipt?.rule).not.toBe("snapshot")
+    expect(receipt?.warnings[0]).toContain(`snapshot model ${sonnetHigh} is not usable (the model is unknown)`)
+    again.close()
+    await cleanupAgain()
+  })
+
+  test("failover updates the snapshot and marks it failed over; a resume continues on the model that worked", async () => {
+    const host = createHost({ agents: [{ id: "plain" }], models, options: { ...first, flapCount: 1 } })
+    host.sessions.set("r", { id: "r" })
+    host.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: sonnet })
+    const cleanup = await setup(host)
+    const input = await host.spawn("subagent", { agent: "plain", prompt: "x", tier: "task" }, "build", "r", "call-1")
+    host.emit({ type: "session.created", data: { sessionID: "c", parentID: "r", agent: "plain", model: sonnet } })
+    await settle()
+    expect((host.storage.get("spawn-model:c") as { failedOver?: true }).failedOver).toBeUndefined()
+    host.emit({ type: "session.execution.failed", data: { sessionID: "c", error: { type: "api", message: "ThrottlingException", status: 429 } } })
+    await settle()
+    expect(methods(host, "switchModel")).toHaveLength(1)
+    expect(host.storage.get("spawn-model:c")).toMatchObject({ model: "anthropic/claude-haiku", tier: "task", failedOver: true })
+    // The spawn's own completion does not undo it.
+    await host.spawnDone(input, { sessionID: "c" }, "r", "call-1")
+    expect(host.storage.get("spawn-model:c")).toMatchObject({ model: "anthropic/claude-haiku", failedOver: true })
+    expect((await host.spawn("subagent", resume, "build", "r", "call-2")).model).toBe("anthropic/claude-haiku")
+    host.close()
+    await cleanup()
+  })
+
+  test("setup prunes expired and surplus snapshots", async () => {
+    const host = createHost({ agents: [{ id: "plain" }], models, options: first })
+    const now = Date.now()
+    const entry = (at: number) => ({ model: sonnetHigh, configRevision: "x", at })
+    host.storage.set("spawn-model:old", entry(now - 31 * 24 * 60 * 60 * 1000))
+    host.storage.set("spawn-model:junk", "nope")
+    host.storage.set("spawn-model:fresh", entry(now - 1000))
+    for (let i = 0; i < 1000; i++) host.storage.set(`spawn-model:n${i}`, entry(now - 2000 - i))
+    const cleanup = await setup(host)
+    const kept = [...host.storage.keys()].filter((key) => key.startsWith("spawn-model:"))
+    expect(kept).toHaveLength(1000)
+    expect(kept).toContain("spawn-model:fresh")
+    expect(kept).not.toContain("spawn-model:old")
+    expect(kept).not.toContain("spawn-model:junk")
+    expect(kept).not.toContain("spawn-model:n999")
+    host.close()
+    await cleanup()
   })
 })

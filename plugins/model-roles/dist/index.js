@@ -1188,7 +1188,7 @@ var ROLE_PURPOSE = {
   slow: TIER_PURPOSE.strong,
   challenger: TIER_PURPOSE.reviewer
 };
-var ROLE_TOOL_NOTE = "Set `tier` on every new spawn: it picks the model the subagent runs on. Choose the cheapest tier that fits the task. An explicit `model` overrides it; a resumed spawn (`sessionID`) keeps its model.";
+var ROLE_TOOL_NOTE = "Set `tier` on every new spawn: it picks the model the subagent runs on. Choose the cheapest tier that fits the task. An explicit `model` overrides it; a resumed spawn (`sessionID`) keeps its model unless it passes `tier` or `model`.";
 var ROLE_ALIAS_DESCRIPTION = "Deprecated: use `tier`. Also accepts the old role names (smol, task, slow, challenger and the like).";
 var isRecord4 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 function parseRuntime(raw, options) {
@@ -3495,7 +3495,8 @@ var RULE_TEXT = {
   "base-tier-effort": "base tier effort",
   "builtin-effort": "built-in effort",
   "auto-effort": "auto effort",
-  "model-default": "model default"
+  "model-default": "model default",
+  snapshot: "the child's snapshot"
 };
 function formatReceipts(list) {
   if (list.length === 0)
@@ -3505,7 +3506,7 @@ function formatReceipts(list) {
     const time = new Date(r.at).toISOString().slice(11, 19);
     const source = SOURCE_TEXT[r.source] ?? r.source;
     const asked = r.tier === undefined ? source : `tier ${r.tier} (${r.alias === undefined ? "" : `${r.alias}, `}${source})`;
-    const parts = [`${time} ${r.agent}: ${asked} \u2192 ${r.model ?? "the agent's model"} by ${RULE_TEXT[r.rule] ?? r.rule}`];
+    const parts = [`${time} ${r.agent}: ${asked} \u2192 ${r.model ?? "the agent's model"} by ${RULE_TEXT[r.rule] ?? r.rule}${r.configRevision === undefined ? "" : ` (config ${r.configRevision})`}`];
     if (r.fallbacks.length > 0)
       parts.push(`fell back past ${r.fallbacks.join(", ")}`);
     for (const warning of r.warnings)
@@ -3545,9 +3546,65 @@ var TiersRpc = Rpc.define({
   events: {}
 });
 
+// plugins/model-roles/src/snapshot.ts
+var SPAWN_MODEL_KEY_PREFIX = "spawn-model:";
+var SNAPSHOT_LIMIT = 1000;
+var SNAPSHOT_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+var isRecord7 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+var stable = (value) => {
+  if (Array.isArray(value))
+    return `[${value.map(stable).join(",")}]`;
+  if (isRecord7(value)) {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stable(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+};
+var configRevision = (options) => textHash(stable({ roles: options.roles, tiers: options.tiers ?? {} }));
+function readSnapshot(value) {
+  if (!isRecord7(value) || typeof value.model !== "string" || typeof value.configRevision !== "string" || typeof value.at !== "number")
+    return;
+  if (parseCandidate(value.model)?.kind !== "model")
+    return;
+  const snapshot = { model: value.model, configRevision: value.configRevision, at: value.at };
+  if (typeof value.tier === "string")
+    snapshot.tier = value.tier;
+  if (value.failedOver === true)
+    snapshot.failedOver = true;
+  return snapshot;
+}
+function snapshotModel(snapshot) {
+  const candidate = parseCandidate(snapshot.model);
+  return candidate?.kind === "model" ? candidate.ref : undefined;
+}
+function unavailableReason(model, available) {
+  const listed = available.find((m) => m.providerID === model.providerID && m.id === model.id);
+  if (listed === undefined)
+    return "the model is unknown";
+  if (listed.enabled === false)
+    return "the model is unavailable";
+  if (model.variant !== undefined && !(listed.variants ?? []).some((v) => v.id === model.variant))
+    return `the model has no variant '${model.variant}'`;
+  return;
+}
+function staleSnapshots(entries, now, limit = SNAPSHOT_LIMIT, maxAgeMs = SNAPSHOT_MAX_AGE_MS) {
+  const stale = [];
+  const live = [];
+  for (const { key, value } of entries) {
+    const snapshot = readSnapshot(value);
+    if (snapshot === undefined || now - snapshot.at > maxAgeMs)
+      stale.push(key);
+    else
+      live.push({ key, at: snapshot.at });
+  }
+  live.sort((a, b) => b.at - a.at);
+  for (const { key } of live.slice(limit))
+    stale.push(key);
+  return stale;
+}
+
 // plugins/model-roles/src/tiers-ui.ts
 var EFFORT_CHOICES = ["auto", "none", "minimal", "low", "medium", "high", "xhigh", "max"];
-var isRecord7 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+var isRecord8 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 function tierState(input) {
   const resolve = (name) => {
     const model = resolveRole(input.options.roles, input.available, name, input.health).model;
@@ -3607,7 +3664,7 @@ function tierState(input) {
   return state;
 }
 function readState(value) {
-  if (!isRecord7(value) || !Array.isArray(value.tiers) || !Array.isArray(value.models))
+  if (!isRecord8(value) || !Array.isArray(value.tiers) || !Array.isArray(value.models))
     return;
   return { ...value, agents: Array.isArray(value.agents) ? value.agents : [] };
 }
@@ -3618,7 +3675,7 @@ function agentTierError(tier, tiers) {
 }
 var TIER_NAME = /^[a-z][a-z0-9-]*$/;
 function readDraft(input) {
-  const draft = isRecord7(input) && isRecord7(input.draft) ? input.draft : {};
+  const draft = isRecord8(input) && isRecord8(input.draft) ? input.draft : {};
   const out = {};
   for (const [name, value] of Object.entries(draft)) {
     if (!TIER_NAME.test(name))
@@ -3755,9 +3812,9 @@ function withRoleField(input, description) {
   return schema.mapFields((fields) => ({ ...fields, [TIER_PARAM]: tier, [ROLE_PARAM]: role }));
 }
 var SUBAGENT_TOOL = "subagent";
-var isRecord8 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+var isRecord9 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 function spawnTarget(input) {
-  if (!isRecord8(input) || typeof input.agent !== "string" || input.agent === "")
+  if (!isRecord9(input) || typeof input.agent !== "string" || input.agent === "")
     return;
   if (typeof input.sessionID === "string" && input.sessionID !== "")
     return;
@@ -3782,7 +3839,7 @@ var src_default = Plugin.define({
     let settings = parseTierSettings(ctx.options);
     const options = { ...parseOptions(ctx.options), tiers: {}, classes: {}, implicit: {} };
     const runtime = parseRuntime(ctx.options, options);
-    const guard2 = parseGuard(isRecord8(ctx.options) ? ctx.options.guard : undefined);
+    const guard2 = parseGuard(isRecord9(ctx.options) ? ctx.options.guard : undefined);
     let autoHistory = [];
     let available = [];
     let availableKey = "";
@@ -3859,7 +3916,7 @@ ${refs.size}`;
       }
     };
     await refresh();
-    const auto2 = parseAuto(isRecord8(ctx.options) ? ctx.options.auto : undefined, options);
+    const auto2 = parseAuto(isRecord9(ctx.options) ? ctx.options.auto : undefined, options);
     const deciderSettings = auto2 ?? parseAuto(true, options);
     const guardAuto = guard2?.mode === "auto" ? deciderSettings : undefined;
     try {
@@ -3869,6 +3926,17 @@ ${refs.size}`;
         if (value !== undefined)
           classified[entry.key.slice(CLASSIFY_KEY_PREFIX.length)] = value;
       }
+    } catch {}
+    try {
+      const entries = [];
+      let after;
+      do {
+        const page = await ctx.storage.scan({ prefix: SPAWN_MODEL_KEY_PREFIX, ...after === undefined ? {} : { after } });
+        entries.push(...page.entries);
+        after = page.next;
+      } while (after !== undefined);
+      for (const key of staleSnapshots(entries, Date.now()))
+        await ctx.storage.remove(key);
     } catch {}
     let registration = await ctx.agent.transform(apply);
     let attempts = 0;
@@ -4044,8 +4112,40 @@ ${refs.size}`;
       });
       return typeof stored === "string" && Object.hasOwn(options.roles, stored) ? stored : undefined;
     };
+    const childModels = new Map;
+    const snapshotOf = async (childID) => {
+      const known = childModels.get(childID);
+      if (known !== undefined)
+        return known;
+      return readSnapshot(await ctx.storage.get(`${SPAWN_MODEL_KEY_PREFIX}${childID}`).catch(() => {
+        return;
+      }));
+    };
+    const writeSnapshot = async (childID, snapshot) => {
+      childModels.set(childID, snapshot);
+      try {
+        await ctx.storage.set(`${SPAWN_MODEL_KEY_PREFIX}${childID}`, snapshot);
+      } catch {}
+    };
+    const recordChildModel = async (childID, spawn) => {
+      if (await snapshotOf(childID) !== undefined)
+        return;
+      await writeSnapshot(childID, { model: modelLabel(spawn.model), tier: spawn.role, configRevision: spawn.revision, at: Date.now() });
+    };
+    const recordFailover = async (childID, model, role) => {
+      const known = await snapshotOf(childID);
+      if (known === undefined && role === undefined)
+        return;
+      await writeSnapshot(childID, {
+        ...known ?? { configRevision: configRevision(options) },
+        ...known?.tier === undefined && role !== undefined ? { tier: role } : {},
+        model: modelLabel(model),
+        at: Date.now(),
+        failedOver: true
+      });
+    };
     const onSessionCreated = async (data) => {
-      if (typeof data.sessionID !== "string" || typeof data.parentID !== "string" || !isRecord8(data.model))
+      if (typeof data.sessionID !== "string" || typeof data.parentID !== "string" || !isRecord9(data.model))
         return;
       const model = data.model;
       const now = Date.now();
@@ -4060,6 +4160,7 @@ ${refs.size}`;
           continue;
         spawn.childID = data.sessionID;
         await recordChildRole(data.sessionID, spawn.role);
+        await recordChildModel(data.sessionID, spawn);
         return;
       }
     };
@@ -4087,6 +4188,7 @@ ${refs.size}`;
         if (spawnRole !== undefined && target !== undefined) {
           try {
             await ctx.session.switchModel({ sessionID, model: target.model });
+            await recordFailover(sessionID, target.model, spawnRole);
             resumable = sessionID;
           } catch {}
         }
@@ -4146,7 +4248,8 @@ ${refs.size}`;
         await queue(async () => {
           const cooldownMs = await markFailed(failed, kind, error);
           const agent = (await listAgents()).find((a) => a.id === event.agent);
-          const role = await spawnRoleOf(event.sessionID) ?? (agent === undefined ? undefined : roleOf(agent, options.agents, options.implicit));
+          const spawnRole = await spawnRoleOf(event.sessionID);
+          const role = spawnRole ?? (agent === undefined ? undefined : roleOf(agent, options.agents, options.implicit));
           const tried = triedModels.get(event.sessionID) ?? new Set;
           triedModels.set(event.sessionID, tried.add(healthKey(failed)));
           const recent = healthView(health2, Date.now(), RECENT_MS);
@@ -4165,6 +4268,7 @@ ${refs.size}`;
           const outcome = await switchWithin(event.sessionID, target.model);
           const note = switchNote({ failed, kind, cooldownMs, target });
           if (outcome === "switched") {
+            await recordFailover(event.sessionID, target.model, spawnRole);
             event.decision = { retry: true, delay: 0 };
             warn(`session ${event.sessionID}: ${note}`);
             return;
@@ -4423,7 +4527,7 @@ ${refs.size}`;
       const agent = agents.find((a) => a.id === target);
       if (!cheapOnly && target !== AUTO_AGENT)
         return;
-      if (!autoEligible(input, agent, options) || !isRecord8(input))
+      if (!autoEligible(input, agent, options) || !isRecord9(input))
         return;
       const health2 = view();
       const choices = choicesFor(settings.roles, options, available, runtime.purposes).filter((choice) => {
@@ -4471,7 +4575,7 @@ ${refs.size}`;
       }
       const vendor = tierMeta(options, role)?.distinctVendor ? await callerVendor(event) : undefined;
       const plan = planSpawn({ ...input, tier: role }, options, available, health2, vendor);
-      if (plan.model === undefined || !isRecord8(plan.input))
+      if (plan.model === undefined || !isRecord9(plan.input))
         return;
       const record = { at: started, agent: target, role, reason: picked.reason, model: plan.model, ms: Date.now() - started };
       if (capped !== undefined)
@@ -4481,7 +4585,7 @@ ${refs.size}`;
       return { input: { ...plan.input, description: withAutoTag(input.description, record) }, role, model: plan.model };
     };
     const passedTier = (input) => {
-      if (!isRecord8(input))
+      if (!isRecord9(input))
         return;
       for (const [key, source] of [
         [TIER_PARAM, "tier-param"],
@@ -4527,7 +4631,71 @@ ${refs.size}`;
         done();
       }
     };
+    const handleResume = async (event) => {
+      if (!isRecord9(event.input) || typeof event.input.sessionID !== "string" || event.input.sessionID === "")
+        return false;
+      const childID = event.input.sessionID;
+      const agent = typeof event.input.agent === "string" ? event.input.agent : "(resumed)";
+      const explicitModel = inputModel(event.input);
+      const asked = passedTier(event.input);
+      const revision = configRevision(options);
+      const stripped = planSpawn(event.input, options, available, view()).input;
+      if (explicitModel !== undefined) {
+        event.input = stripped;
+        await writeSnapshot(childID, { model: modelLabel(explicitModel), configRevision: revision, at: Date.now() });
+        await recordReceipt({ at: Date.now(), agent, source: "agent", model: modelLabel(explicitModel), rule: "explicit-model", fallbacks: [], warnings: [] });
+        return true;
+      }
+      if (asked !== undefined && !INHERIT_NAMES.includes(asked.name)) {
+        const { sessionID: _kept, ...fresh } = event.input;
+        const plan = planSpawn(fresh, options, available, view(), tierMeta(options, asked.name)?.distinctVendor ? await callerVendor(event) : undefined);
+        if (plan.error !== undefined)
+          throw new Error(plan.error);
+        if (plan.role !== undefined && plan.model !== undefined && isRecord9(plan.input)) {
+          const tuned = await withAutoEffort(plan.input, plan.role, plan.model).catch(() => ({ input: plan.input, model: plan.model }));
+          event.input = { ...tuned.input, sessionID: childID };
+          await writeSnapshot(childID, { model: modelLabel(tuned.model), tier: plan.role, configRevision: revision, at: Date.now() });
+          await recordChildRole(childID, plan.role);
+          await recordReceipt(tierReceipt(agent, asked, tuned));
+          return true;
+        }
+      }
+      event.input = stripped;
+      const snapshot = await snapshotOf(childID);
+      if (snapshot === undefined)
+        return true;
+      const model = snapshotModel(snapshot);
+      const reason = model === undefined ? "the snapshot names no model" : unavailableReason(model, available);
+      if (model === undefined || reason !== undefined) {
+        await recordReceipt({
+          at: Date.now(),
+          agent,
+          source: "agent",
+          ...snapshot.tier === undefined ? {} : { tier: snapshot.tier },
+          rule: "model-default",
+          fallbacks: [],
+          warnings: [`the child's snapshot model ${snapshot.model} is not usable (${reason}); the resume resolves normally`]
+        });
+        return true;
+      }
+      if (isRecord9(event.input))
+        event.input = { ...event.input, model: snapshot.model };
+      await recordReceipt({
+        at: Date.now(),
+        agent,
+        source: "agent",
+        ...snapshot.tier === undefined ? {} : { tier: snapshot.tier },
+        model: snapshot.model,
+        rule: "snapshot",
+        configRevision: snapshot.configRevision,
+        fallbacks: [],
+        warnings: []
+      });
+      return true;
+    };
     const handleSpawn = async (event) => {
+      if (await handleResume(event))
+        return;
       const explicitModel = inputModel(event.input);
       const asked = passedTier(event.input);
       const passed = asked?.name;
@@ -4574,7 +4742,7 @@ ${refs.size}`;
       }
       let source = asked?.source;
       let tierName = passed;
-      if (plan.role === undefined && !pinned && isRecord8(plan.input) && own !== undefined) {
+      if (plan.role === undefined && !pinned && isRecord9(plan.input) && own !== undefined) {
         const meta = tierMeta(options, own);
         if (meta?.distinctVendor || meta?.effort === "auto") {
           const callerVendorOf = meta.distinctVendor ? await callerVendor(event) : undefined;
@@ -4588,12 +4756,12 @@ ${refs.size}`;
         }
       }
       if (plan.role !== undefined && plan.model !== undefined) {
-        let tuned = { input: isRecord8(plan.input) ? plan.input : {}, model: plan.model };
-        if (isRecord8(plan.input)) {
+        let tuned = { input: isRecord9(plan.input) ? plan.input : {}, model: plan.model };
+        if (isRecord9(plan.input)) {
           tuned = await withAutoEffort(plan.input, plan.role, plan.model).catch(() => ({ input: tuned.input, model: plan.model }));
           event.input = tuned.input;
         }
-        pending.set(event.id, { parentID: event.sessionID, agent: target, role: plan.role, model: tuned.model, at: Date.now() });
+        pending.set(event.id, { parentID: event.sessionID, agent: target, role: plan.role, model: tuned.model, revision: configRevision(options), at: Date.now() });
         const vendorOfCaller = tierMeta(options, plan.role)?.distinctVendor ? await callerVendor(event) : undefined;
         await recordReceipt(tierReceipt(target, { source: source ?? "agent", name: tierName ?? plan.role }, tuned, vendorOfCaller));
         return;
@@ -4602,7 +4770,7 @@ ${refs.size}`;
       const accept = async (routed) => {
         const tuned = await withAutoEffort(routed.input, routed.role, routed.model).catch(() => ({ input: routed.input, model: routed.model }));
         event.input = tuned.input;
-        pending.set(event.id, { parentID: event.sessionID, agent: target, role: routed.role, model: tuned.model, at: Date.now() });
+        pending.set(event.id, { parentID: event.sessionID, agent: target, role: routed.role, model: tuned.model, revision: configRevision(options), at: Date.now() });
         const vendorOfCaller = tierMeta(options, routed.role)?.distinctVendor ? await callerVendor(event) : undefined;
         await recordReceipt(tierReceipt(target, { source: "auto", name: routed.role }, tuned, vendorOfCaller));
       };
@@ -4648,7 +4816,7 @@ ${refs.size}`;
     const lookupIdentity = async () => {
       try {
         const listed = await ctx.plugin.list();
-        const rows = Array.isArray(listed) ? listed : isRecord8(listed) && Array.isArray(listed.data) ? listed.data : [];
+        const rows = Array.isArray(listed) ? listed : isRecord9(listed) && Array.isArray(listed.data) ? listed.data : [];
         const mine = rows.filter((row) => row.id === "srobroek.model-roles");
         if (mine.length > 1)
           return { kind: "ambiguous", targets: mine.map((row) => String(row.source?.target ?? row.source?.type ?? "unknown")) };
@@ -4683,7 +4851,7 @@ ${refs.size}`;
         return;
       }
     };
-    const pluginOptions = isRecord8(ctx.options) ? ctx.options : {};
+    const pluginOptions = isRecord9(ctx.options) ? ctx.options : {};
     const agentConfig = () => {
       let project = [];
       try {
@@ -4832,15 +5000,17 @@ ${refs.size}`;
       pending.delete(event.id);
       if (event.status === "completed") {
         const childID = event.result.metadata?.sessionID;
-        if (spawn !== undefined && typeof childID === "string")
+        if (spawn !== undefined && typeof childID === "string") {
           await recordChildRole(childID, spawn.role);
+          await recordChildModel(childID, spawn);
+        }
         return;
       }
       const message = event.error.message;
       const kind = classifyFailure({ message });
       if (kind === undefined)
         return;
-      const agentID = isRecord8(event.input) && typeof event.input.agent === "string" ? event.input.agent : undefined;
+      const agentID = isRecord9(event.input) && typeof event.input.agent === "string" ? event.input.agent : undefined;
       try {
         await queue(async () => {
           const agents = await listAgents();
@@ -4869,10 +5039,10 @@ ${refs.size}`;
       for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
         if (controller.signal.aborted)
           break;
-        const type = isRecord8(event) ? event.type : undefined;
+        const type = isRecord9(event) ? event.type : undefined;
         if (type === FAILED_EVENT) {
           const data = event.data;
-          if (typeof data?.sessionID !== "string" || !isRecord8(data.error))
+          if (typeof data?.sessionID !== "string" || !isRecord9(data.error))
             continue;
           const sessionID = data.sessionID;
           settleRequest(requestLog, sessionID, endedAt(event));
@@ -4905,7 +5075,7 @@ ${refs.size}`;
         }
         if (type === CREATED_EVENT) {
           const data = event.data;
-          if (isRecord8(data))
+          if (isRecord9(data))
             await onSessionCreated(data).catch(() => {});
           continue;
         }
@@ -4950,6 +5120,7 @@ ${refs.size}`;
       triedModels.clear();
       pending.clear();
       childRoles.clear();
+      childModels.clear();
       autoHistory = [];
     };
   }

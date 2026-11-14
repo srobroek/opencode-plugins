@@ -23,6 +23,7 @@ export type SpawnRule =
   | "builtin-effort"
   | "auto-effort"
   | "model-default"
+  | "snapshot"
 
 export type Receipt = {
   at: number
@@ -34,6 +35,8 @@ export type Receipt = {
   /** `provider/model#variant` the spawn runs on, when the plugin knows it. */
   model?: string
   rule: SpawnRule
+  /** The tier config revision a `snapshot` rule reused. */
+  configRevision?: string
   /** Candidates skipped before the one that runs, each with its reason. */
   fallbacks: string[]
   warnings: string[]
@@ -143,6 +146,7 @@ const RULE_TEXT: Record<SpawnRule, string> = {
   "builtin-effort": "built-in effort",
   "auto-effort": "auto effort",
   "model-default": "model default",
+  snapshot: "the child's snapshot",
 }
 
 /** The receipts for `model_roles_check`, newest first, one line each. */
@@ -153,7 +157,7 @@ export function formatReceipts(list: ReadonlyArray<Receipt>): string[] {
     const time = new Date(r.at).toISOString().slice(11, 19)
     const source = SOURCE_TEXT[r.source as SpawnSource] ?? r.source
     const asked = r.tier === undefined ? source : `tier ${r.tier} (${r.alias === undefined ? "" : `${r.alias}, `}${source})`
-    const parts = [`${time} ${r.agent}: ${asked} → ${r.model ?? "the agent's model"} by ${RULE_TEXT[r.rule as SpawnRule] ?? r.rule}`]
+    const parts = [`${time} ${r.agent}: ${asked} → ${r.model ?? "the agent's model"} by ${RULE_TEXT[r.rule as SpawnRule] ?? r.rule}${r.configRevision === undefined ? "" : ` (config ${r.configRevision})`}`]
     if (r.fallbacks.length > 0) parts.push(`fell back past ${r.fallbacks.join(", ")}`)
     for (const warning of r.warnings) parts.push(`warning: ${warning}`)
     lines.push(`  - ${parts.join("; ")}`)
