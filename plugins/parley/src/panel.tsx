@@ -9,7 +9,7 @@ import {
   TextAttributes,
   type TextareaRenderable,
 } from "@opentui/core"
-import { createEffect, createMemo, createSignal, For, Match, onCleanup, onMount, Show, Switch } from "solid-js"
+import { createEffect, createMemo, createSignal, For, Match, on, onCleanup, onMount, Show, Switch, untrack } from "solid-js"
 import { createStore, reconcile } from "solid-js/store"
 import type { FileValue, SubmittedAnswer } from "./answers.ts"
 import { clipboardFiles, copyText } from "./clipboard.ts"
@@ -600,16 +600,23 @@ const SETTLE_MS = [50, 200, 500, 1000, 2000]
 
 /** Both surfaces need native focus AND an input-mode lease: either alone lets composer keys leak. */
 function exclusiveFocus(context: Plugin.Context, target: () => Renderable | undefined, field: () => Renderable | undefined, scope?: () => void) {
-  const guard = new FocusGuard((mode) => context.keymap.mode.push(mode))
-  const [paused, setPaused] = createSignal(false)
+  const guard = new FocusGuard((mode) => context.keymap.mode.push(mode), () => context.keymap.mode.current())
+  const [suspended, setSuspended] = createSignal(false)
+  // A host dialog pushes its own mode over parley's lease; the dialog keeps focus and keys until it closes.
+  const yielding = createMemo(() => guard.yielding)
   let disposed = false
   const focusNow = () => {
-    if (!guard.active) return
+    if (!guard.active || guard.yielding) return
     scope?.()
     const node = field() ?? target()
     if (node && !node.isDestroyed) node.focus()
   }
   const grab = () => queueMicrotask(focusNow)
+  createEffect(on(yielding, (now) => {
+    if (now || disposed) return
+    guard.resume()
+    grab()
+  }, { defer: true }))
   onMount(() => {
     const renderer = context.renderer
     const previous = renderer.currentFocusedRenderable
@@ -624,7 +631,7 @@ function exclusiveFocus(context: Plugin.Context, target: () => Renderable | unde
     }
     const onInput = () => {
       const focused = renderer.currentFocusedRenderable
-      if (guard.active && focused instanceof EditBufferRenderable && !within(focused, target())) focusNow()
+      if (focused instanceof EditBufferRenderable && guard.moved(within(focused, target()))) focusNow()
       return false
     }
     renderer.prependInputHandler(onInput)
@@ -641,15 +648,17 @@ function exclusiveFocus(context: Plugin.Context, target: () => Renderable | unde
     })
   })
   return {
-    paused,
-    reclaim: () => { guard.reclaim(); grab() },
+    /** A dialog owns input: parley's own confirmation, or one another plugin or the host opened. */
+    paused: () => suspended() || yielding(),
+    // Untracked: a focus-request effect must not subscribe to the mode it re-pushes, or it reruns forever.
+    reclaim: () => { untrack(() => guard.reclaim()); grab() },
     // Host confirmation dialogs own their own keyboard scope. Temporarily hand the lease to them,
     // never to the prompt, and reacquire only if this surface survived the dialog.
     suspend: async (operation: () => Promise<void>) => {
-      setPaused(true)
+      setSuspended(true)
       guard.release()
       try { await operation() } finally {
-        if (!disposed) { guard.acquire(); setPaused(false); grab() }
+        if (!disposed) { guard.acquire(); setSuspended(false); grab() }
       }
     },
   }
