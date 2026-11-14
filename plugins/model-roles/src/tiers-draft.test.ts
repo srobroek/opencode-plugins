@@ -223,6 +223,14 @@ describe("menu options", () => {
     ])
   })
 
+  test("agent details name a project config: set by it for its own assignments, else that it holds the entry", () => {
+    const project = { origin: "project", path: "/p/opencode.json" }
+    const titles = (rows: ReturnType<typeof agentDetailOptions>) => rows.filter((r) => r.disabled).map((r) => r.title)
+    expect(titles(agentDetailOptions({ id: "a", tier: "cheap", source: "options", resolved: "x" }, project))).toContain("Set by project config (/p/opencode.json)")
+    expect(titles(agentDetailOptions({ id: "a", tier: "cheap", source: "header" }, project)).join(" ")).toContain("Project config (/p/opencode.json) holds the")
+    expect(titles(agentDetailOptions({ id: "a" }, { origin: "global", path: "/g" })).join(" ")).not.toContain("project")
+  })
+
   test("source words", () => {
     expect([sourceText("options"), sourceText("header"), sourceText("implicit"), sourceText(undefined)]).toEqual([
       "your setting",

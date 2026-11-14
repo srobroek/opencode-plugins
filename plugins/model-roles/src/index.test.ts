@@ -1,5 +1,5 @@
 import { describe, expect, setSystemTime, test } from "bun:test"
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import * as Effect from "effect/Effect"
@@ -43,6 +43,7 @@ function createHost(input: {
   sessionModel?: ModelRef
   defaultModel?: ModelRef
   references?: Array<Model & { family?: string; time?: { released?: number } }>
+  directory?: string
 }) {
   const toolHooks: Array<{ name: string; callback: (payload: unknown) => Promise<void> }> = []
   let sessionGet: (id: string) => Promise<unknown> = async (id) =>
@@ -120,6 +121,7 @@ function createHost(input: {
   }
   const context = {
     options: input.options,
+    ...(input.directory === undefined ? {} : { location: { directory: input.directory } }),
     agent: {
       transform,
       list: async () => ({ data: listOverride ? listOverride() : [...agents.values()].map((a) => structuredClone(a)) }),
@@ -1475,7 +1477,7 @@ describe("tiers rpc", () => {
   const withConfig = async (
     body: (host: ReturnType<typeof createHost>, file: string) => Promise<void>,
     agents: Agent[] = [],
-    given: { options?: unknown; fileText?: string } = {},
+    given: { options?: unknown; fileText?: string; project?: Record<string, string> } = {},
   ) => {
     const dir = mkdtempSync(path.join(tmpdir(), "model-roles-rpc-"))
     const previous = process.env.OPENCODE_CONFIG_DIR
@@ -1483,7 +1485,13 @@ describe("tiers rpc", () => {
     const file = path.join(dir, "opencode.json")
     try {
       writeFileSync(file, given.fileText ?? '{ "plugins": [{ "package": "/x/plugins/model-roles", "options": {} }] }\n')
-      const host = createHost({ agents, models: work as unknown as Model[], references: reference as unknown as Model[], options: given.options ?? {} })
+      const projectDir = path.join(dir, "project", "sub")
+      mkdirSync(projectDir, { recursive: true })
+      for (const [name, text] of Object.entries(given.project ?? {})) {
+        mkdirSync(path.dirname(path.join(projectDir, name)), { recursive: true })
+        writeFileSync(path.join(projectDir, name), text)
+      }
+      const host = createHost({ agents, models: work as unknown as Model[], references: reference as unknown as Model[], options: given.options ?? {}, directory: projectDir })
       const cleanup = await setup(host)
       try {
         await body(host, file)
@@ -1563,23 +1571,72 @@ describe("tiers rpc", () => {
     { id: "glob", request: header("cheap") },
   ]
 
-  test("project agent assignments survive tier saves and agent saves; global ones still change", async () => {
-    // ctx.options is what the host merged: the global assignment plus the project's `proj`.
+  const projectEntry = (agents: Record<string, string>) => entry(agents)
+
+  test("a project entry owns the agents: it stays across global saves, edits and removals, even at the same value", async () => {
     await withConfig(
-      async (host) => {
-        expect(await agentRow(host, "proj")).toMatchObject({ tier: "strong", source: "options" })
-        await host.rpc("set", { tier: "docs", value: { purpose: "docs" } })
-        expect(await agentRow(host, "proj")).toMatchObject({ tier: "strong", source: "options" })
+      async (host, file) => {
+        // The project says glob is reviewer, the same as the global file; it leaves proj out of its map.
         expect(await agentRow(host, "glob")).toMatchObject({ tier: "reviewer", source: "options" })
+        await host.rpc("set", { tier: "docs", value: { purpose: "docs" } })
+        const saved = (await host.rpc("setAgent", { agent: "proj", tier: "strong" })) as { shadowedBy?: string }
+        expect(saved.shadowedBy).toEndWith(path.join("project", "sub", "opencode.json"))
+        expect(readAgents(readFileSync(file, "utf8"))).toEqual({ glob: "reviewer", proj: "strong" })
+        // A global edit and a global removal change neither the project's glob nor give proj back its global tier.
         await host.rpc("setAgent", { agent: "glob", tier: "standard" })
-        expect(await agentRow(host, "proj")).toMatchObject({ tier: "strong", source: "options" })
-        expect(await agentRow(host, "glob")).toMatchObject({ tier: "standard", source: "options" })
+        expect(await agentRow(host, "glob")).toMatchObject({ tier: "reviewer", source: "options" })
         await host.rpc("setAgent", { agent: "glob", tier: null })
-        expect(await agentRow(host, "glob")).toMatchObject({ tier: "cheap", source: "header" })
-        expect(await agentRow(host, "proj")).toMatchObject({ tier: "strong", source: "options" })
+        expect(await agentRow(host, "glob")).toMatchObject({ tier: "reviewer", source: "options" })
+        expect(await agentRow(host, "proj")).toMatchObject({ tier: "cheap", source: "header" })
+        const state = (await host.rpc("state")) as { agentConfig?: { origin: string; path?: string } }
+        expect(state.agentConfig).toMatchObject({ origin: "project" })
       },
       agentFixtures,
-      { options: { agents: { proj: "strong", glob: "reviewer" } }, fileText: entry({ glob: "reviewer" }) },
+      { options: { agents: { glob: "reviewer" } }, fileText: entry({ glob: "reviewer" }), project: { "opencode.json": projectEntry({ glob: "reviewer" }) } },
+    )
+  })
+
+  test("a hand edit of the global file does not touch the agents a project entry owns", async () => {
+    await withConfig(
+      async (host, file) => {
+        writeFileSync(file, entry({ glob: "strong" }))
+        host.emit({ type: "config.updated", data: {} })
+        await settle()
+        expect(await agentRow(host, "glob")).toMatchObject({ tier: "reviewer", source: "options" })
+      },
+      agentFixtures,
+      { options: { agents: { glob: "reviewer" } }, fileText: entry({ glob: "reviewer" }), project: { "opencode.json": projectEntry({ glob: "reviewer" }) } },
+    )
+  })
+
+  test("a hand edit of the project file applies", async () => {
+    await withConfig(
+      async (host, file) => {
+        const projectFile = path.join(path.dirname(file), "project", "sub", "opencode.json")
+        writeFileSync(projectFile, projectEntry({ glob: "strong" }))
+        host.emit({ type: "config.updated", data: {} })
+        await settle()
+        expect(await agentRow(host, "glob")).toMatchObject({ tier: "strong", source: "options" })
+      },
+      agentFixtures,
+      { options: { agents: { glob: "reviewer" } }, fileText: entry({ glob: "reviewer" }), project: { "opencode.json": projectEntry({ glob: "reviewer" }) } },
+    )
+  })
+
+  test("with no project entry, global saves, Agent default and edits apply; assignments from another source stay", async () => {
+    await withConfig(
+      async (host) => {
+        expect(await agentRow(host, "glob")).toMatchObject({ tier: "reviewer", source: "options" })
+        const state = (await host.rpc("state")) as { agentConfig?: { origin: string } }
+        expect(state.agentConfig?.origin).toBe("global")
+        await host.rpc("setAgent", { agent: "proj", tier: "strong" })
+        expect(await agentRow(host, "proj")).toMatchObject({ tier: "strong", source: "options" })
+        await host.rpc("setAgent", { agent: "glob", tier: null })
+        expect(await agentRow(host, "glob")).toMatchObject({ tier: "cheap", source: "header" })
+        expect(await agentRow(host, "other")).toMatchObject({ tier: "strong", source: "options" })
+      },
+      [...agentFixtures, { id: "other", request: header("cheap") }],
+      { options: { agents: { glob: "reviewer", other: "strong" } }, fileText: entry({ glob: "reviewer" }), project: { "opencode.json": '{ "plugins": ["other"] }' } },
     )
   })
 

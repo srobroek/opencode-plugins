@@ -64,6 +64,8 @@ export type TierState = {
   agents: AgentRow[]
   /** The config file `set` writes, or why there is none. */
   config?: string
+  /** Where the agent assignments come from; a project's entry shadows the global file `set` writes. */
+  agentConfig?: { origin: "global" | "project"; path?: string }
   error?: string
 }
 
@@ -80,6 +82,7 @@ export function tierState(input: {
   /** A candidate's status, for the per-candidate health. */
   status?: (entry: string) => CandidateStatus
   config?: string
+  agentConfig?: { origin: "global" | "project"; path?: string }
   error?: string
 }): TierState {
   const resolve = (name: string) => {
@@ -127,6 +130,7 @@ export function tierState(input: {
     .sort((a, b) => a.ref.localeCompare(b.ref))
   const state: TierState = { tiers, models, agents }
   if (input.config !== undefined) state.config = input.config
+  if (input.agentConfig !== undefined) state.agentConfig = input.agentConfig
   if (input.error !== undefined) state.error = input.error
   return state
 }
@@ -141,24 +145,6 @@ export function readState(value: unknown): TierState | undefined {
 export function agentTierError(tier: unknown, tiers: Readonly<Record<string, unknown>>): string | undefined {
   if (typeof tier !== "string" || !Object.hasOwn(tiers, tier)) return `Unknown tier ${JSON.stringify(tier)}.`
   return undefined
-}
-
-/**
- * The agent assignments after the global file's `agents` changed. The host gives the plugin one merged
- * `options`, so a project entry cannot be told from the global one directly; instead an assignment in
- * `given` (the options at startup) that the global file did not hold at startup (`startup`) with the same
- * value is the project's. Those stay and win; the global file's current map (`current`) fills the rest.
- */
-export function mergeAgents(
-  given: Readonly<Record<string, string>>,
-  startup: Readonly<Record<string, string>>,
-  current: Readonly<Record<string, string>>,
-): Record<string, string> {
-  const project: Record<string, string> = {}
-  for (const [agent, tier] of Object.entries(given)) {
-    if (!(Object.hasOwn(startup, agent) && startup[agent] === tier)) project[agent] = tier
-  }
-  return { ...current, ...project }
 }
 
 /** Tier names `set` and drafts accept. */

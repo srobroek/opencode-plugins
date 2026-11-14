@@ -211,6 +211,14 @@ export default Plugin.define({
 
     /** Pick the agent's tier and save it at once; true when the config changed. */
     const changeAgentTier = async (at: LocationRef, state: TierState, agent: AgentRow): Promise<boolean> => {
+      if (state.agentConfig?.origin === "project") {
+        const go = await dialog.confirm({
+          title: "A project config sets the agents",
+          message: `${state.agentConfig.path ?? "A project config"} has its own model-roles entry. A save here goes to the global config and will not change this project's tier for ${agent.id}.`,
+          label: { confirm: "Save to global anyway", cancel: "Cancel" },
+        })
+        if (go !== true) return false
+      }
       const value = await dialog.select<string>({
         title: `${agent.id}: tier`,
         placeholder: "Pick a tier, or the agent default",
@@ -219,7 +227,11 @@ export default Plugin.define({
       })
       if (value === undefined) return false
       try {
-        const result = (await rpc.setAgent({ agent: agent.id, tier: value === AGENT_DEFAULT ? null : value }, { location: at })) as { path?: string }
+        const result = (await rpc.setAgent({ agent: agent.id, tier: value === AGENT_DEFAULT ? null : value }, { location: at })) as { path?: string; shadowedBy?: string }
+        if (result.shadowedBy !== undefined) {
+          toast(`Agent ${agent.id}: written to ${result.path ?? "the global config"}, but ${result.shadowedBy} overrides it here, so nothing changed in this project.`, "info")
+          return true
+        }
         toast(`Agent ${agent.id} ${value === AGENT_DEFAULT ? "uses its default tier" : `uses tier ${value}`}; applied, written to ${result.path ?? "the global config"}.`, "success")
         return true
       } catch (error) {
@@ -234,7 +246,7 @@ export default Plugin.define({
       for (;;) {
         const agent = state.agents.find((a) => a.id === id)
         if (agent === undefined) return state
-        const action = await dialog.select<string>({ title: `Agent ${agent.id}`, options: agentDetailOptions(agent) })
+        const action = await dialog.select<string>({ title: `Agent ${agent.id}`, options: agentDetailOptions(agent, state.agentConfig) })
         if (action !== CHANGE_TIER) return state
         if (await changeAgentTier(at, state, agent)) {
           const fresh = await load(at)

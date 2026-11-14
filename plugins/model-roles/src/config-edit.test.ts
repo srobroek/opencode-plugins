@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { parse } from "jsonc-parser"
-import { findPluginEntry, globalConfigDir, pickConfigFile, readAgents, readTiers, setAgentTier, setTier, writeAgentTier, writeTier } from "./config-edit.ts"
+import { effectiveAgents, findPluginEntry, globalConfigDir, pickConfigFile, projectConfigPaths, readAgents, readTiers, setAgentTier, setTier, writeAgentTier, writeTier } from "./config-edit.ts"
 
 const SPEC = "github:srobroek/opencode-plugins#main::path:plugins/model-roles"
 
@@ -143,5 +143,55 @@ describe("writeAgentTier", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+})
+
+describe("projectConfigPaths", () => {
+  test("direct files farthest first, then .opencode files farthest first; the global dir's files are skipped", () => {
+    expect(projectConfigPaths("/r/p", "/g")).toEqual([
+      "/opencode.json",
+      "/opencode.jsonc",
+      "/r/opencode.json",
+      "/r/opencode.jsonc",
+      "/r/p/opencode.json",
+      "/r/p/opencode.jsonc",
+      "/.opencode/opencode.json",
+      "/.opencode/opencode.jsonc",
+      "/r/.opencode/opencode.json",
+      "/r/.opencode/opencode.jsonc",
+      "/r/p/.opencode/opencode.json",
+      "/r/p/.opencode/opencode.jsonc",
+    ])
+    expect(projectConfigPaths("/g/sub", "/g")).not.toContain("/g/opencode.json")
+  })
+})
+
+describe("effectiveAgents", () => {
+  const entry = (agents?: Record<string, string>) =>
+    `{ "plugins": [{ "package": "${SPEC}"${agents === undefined ? "" : `, "options": { "agents": ${JSON.stringify(agents)} }`} }] }`
+  const global = { path: "/g/opencode.json", text: entry({ a: "cheap" }) }
+
+  test("no project entry: the global one", () => {
+    expect(effectiveAgents([], global)).toEqual({ origin: "global", path: "/g/opencode.json", agents: { a: "cheap" } })
+    expect(effectiveAgents([{ path: "/p/opencode.json", text: '{ "plugins": ["other"] }' }], global).origin).toBe("global")
+    expect(effectiveAgents([], undefined)).toEqual({ origin: "global", agents: {} })
+  })
+
+  test("a project entry replaces the global one, even with the same value or without agents", () => {
+    expect(effectiveAgents([{ path: "/p/opencode.json", text: entry({ a: "cheap" }) }], global)).toEqual({
+      origin: "project",
+      path: "/p/opencode.json",
+      agents: { a: "cheap" },
+    })
+    expect(effectiveAgents([{ path: "/p/opencode.json", text: entry() }], global)).toEqual({ origin: "project", path: "/p/opencode.json", agents: {} })
+  })
+
+  test("the highest-precedence project entry wins", () => {
+    const files = [
+      { path: "/p/opencode.json", text: entry({ a: "strong" }) },
+      { path: "/p/.opencode/opencode.json", text: entry({ b: "cheap" }) },
+      { path: "/p/.opencode/opencode.jsonc", text: '{ "plugins": [] }' },
+    ]
+    expect(effectiveAgents(files, global)).toMatchObject({ origin: "project", path: "/p/.opencode/opencode.json", agents: { b: "cheap" } })
   })
 })

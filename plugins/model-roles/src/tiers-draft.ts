@@ -247,7 +247,9 @@ export const CHANGE_TIER = "\u0000change"
 export const BACK = "\u0000back"
 
 /** The details menu of one agent: one disabled row per fact (long text wrapped over rows), then the actions. */
-export function agentDetailOptions(agent: AgentRow): DialogSelectOption<string>[] {
+export function agentDetailOptions(agent: AgentRow, config?: { origin: string; path?: string }): DialogSelectOption<string>[] {
+  const note = (text: string): DialogSelectOption<string>[] => wrap(text).map((line, i) => ({ title: i === 0 ? line : `  ${line}`, value: "", disabled: true }))
+  const from = config?.origin === "project" ? `project config (${config.path ?? "unknown"})` : undefined
   const fact = (label: string, value: string): DialogSelectOption<string>[] =>
     wrap(`${label}: ${value}`).map((line, i) => ({ title: i === 0 ? line : `  ${line}`, value: "", disabled: true }))
   return [
@@ -256,6 +258,7 @@ export function agentDetailOptions(agent: AgentRow): DialogSelectOption<string>[
     ...fact("Resolves to", agent.tier === undefined ? "the session model" : (agent.resolved ?? "nothing available")),
     ...(agent.pinned === undefined ? [] : fact("Own model", `${agent.pinned} (wins over the tier)`)),
     ...(agent.description === undefined ? [] : fact("About", agent.description)),
+    ...(from === undefined ? [] : note(agent.source === "options" ? `Set by ${from}` : `Project config (${config?.path ?? "unknown"}) holds the model-roles entry`)),
     { title: "Change tier…", value: CHANGE_TIER },
     { title: "Back", value: BACK },
   ]

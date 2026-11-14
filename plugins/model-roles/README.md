@@ -183,6 +183,13 @@ writing, applies live, and returns to the refreshed details. **Esc** or **Back**
 returns to the Agents list on the same row. **Esc** in the picker changes nothing.
 The `setAgent` call (`{ agent, tier }`, `tier` null to remove) does the write.
 
+A model-roles entry in a project config (`opencode.json(c)` or `.opencode/opencode.json(c)`
+in the session's directory or an ancestor) replaces the global entry as a whole, so
+its `agents` are the ones in force. The details then say `Set by project config (<path>)`,
+and **Change tier…** warns that a save goes to the global config and will not change
+this project; if you continue, the toast says nothing changed here. Edits to the
+project file apply on the next config reload.
+
 ### Live config
 
 The running plugin applies a save straight away. It reads the global file again,

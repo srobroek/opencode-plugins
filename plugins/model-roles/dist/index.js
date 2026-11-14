@@ -3213,6 +3213,34 @@ function writeAgentTier(dir, agent, tier) {
   const { path: file, text } = writeEntry(dir, (current) => setAgentTier(current, agent, tier));
   return { path: file, agents: readAgents(text) };
 }
+function projectConfigPaths(directory, globalDir) {
+  const ancestors = [];
+  for (let dir = path.resolve(directory);; dir = path.dirname(dir)) {
+    ancestors.push(dir);
+    if (path.dirname(dir) === dir)
+      break;
+  }
+  const far = ancestors.reverse();
+  const direct = far.flatMap((dir) => CONFIG_NAMES.map((name) => path.join(dir, name)));
+  const dotted = far.flatMap((dir) => CONFIG_NAMES.map((name) => path.join(dir, ".opencode", name)));
+  const skip = new Set(CONFIG_NAMES.map((name) => path.join(path.resolve(globalDir), name)));
+  return [...direct, ...dotted].filter((file) => !skip.has(file));
+}
+function readProjectFiles(directory, globalDir) {
+  const files = [];
+  for (const file of projectConfigPaths(directory, globalDir)) {
+    try {
+      files.push({ path: file, text: readFileSync(file, "utf8") });
+    } catch {}
+  }
+  return files;
+}
+function effectiveAgents(project, global) {
+  const file = [...project].reverse().find((f) => findPluginEntry(f.text) !== undefined);
+  if (file !== undefined)
+    return { origin: "project", path: file.path, agents: readAgents(file.text) };
+  return global === undefined ? { origin: "global", agents: {} } : { origin: "global", path: global.path, agents: readAgents(global.text) };
+}
 
 // plugins/model-roles/src/log.ts
 import * as Effect from "effect/Effect";
@@ -3407,6 +3435,8 @@ function tierState(input) {
   const state = { tiers, models, agents };
   if (input.config !== undefined)
     state.config = input.config;
+  if (input.agentConfig !== undefined)
+    state.agentConfig = input.agentConfig;
   if (input.error !== undefined)
     state.error = input.error;
   return state;
@@ -3420,14 +3450,6 @@ function agentTierError(tier, tiers) {
   if (typeof tier !== "string" || !Object.hasOwn(tiers, tier))
     return `Unknown tier ${JSON.stringify(tier)}.`;
   return;
-}
-function mergeAgents(given, startup, current) {
-  const project = {};
-  for (const [agent, tier] of Object.entries(given)) {
-    if (!(Object.hasOwn(startup, agent) && startup[agent] === tier))
-      project[agent] = tier;
-  }
-  return { ...current, ...project };
 }
 var TIER_NAME = /^[a-z][a-z0-9-]*$/;
 function readDraft(input) {
@@ -4450,20 +4472,29 @@ ${refs.size}`;
       const file = globalFile();
       return file === undefined ? undefined : JSON.stringify(readTiers(file.text));
     })();
-    const startupAgents = parseOptions({ agents: (() => {
-      const file = globalFile();
-      return file === undefined ? {} : readAgents(file.text);
-    })() }).agents;
-    const givenAgents = { ...options.agents };
-    let fileAgents = JSON.stringify(startupAgents);
+    const agentConfig = () => {
+      let project = [];
+      try {
+        const directory = ctx.location?.directory;
+        if (typeof directory === "string")
+          project = readProjectFiles(directory, configDir());
+      } catch {}
+      return effectiveAgents(project, globalFile());
+    };
+    const agentsKeyOf = (config) => JSON.stringify({ origin: config.origin, path: config.path, agents: parseOptions({ agents: config.agents }).agents });
+    const startupConfig = agentConfig();
+    const startupAgents = parseOptions({ agents: startupConfig.agents }).agents;
+    const otherAgents = Object.fromEntries(Object.entries(options.agents).filter(([agent]) => !Object.hasOwn(startupAgents, agent)));
+    let fileAgents = agentsKeyOf(startupConfig);
     const reloadTiers = async (force) => {
       const file = globalFile();
       if (file === undefined)
         return;
       const tiers2 = readTiers(file.text);
       const key = JSON.stringify(tiers2);
-      const fileAgentsNow = parseOptions({ agents: readAgents(file.text) }).agents;
-      const agentsKey = JSON.stringify(fileAgentsNow);
+      const config = agentConfig();
+      const agentsKey = agentsKeyOf(config);
+      const wanted = parseOptions({ agents: config.agents }).agents;
       const agentsChanged = agentsKey !== fileAgents;
       if (!force && key === fileTiers && !agentsChanged)
         return;
@@ -4480,7 +4511,7 @@ ${refs.size}`;
         try {
           settings = parseTierSettings({ ...pluginOptions, tiers: tiers2 });
           if (agentsChanged)
-            options.agents = mergeAgents(givenAgents, startupAgents, fileAgentsNow);
+            options.agents = config.origin === "project" ? wanted : { ...otherAgents, ...wanted };
           rebuild();
           attempts = 0;
           await check2(true);
@@ -4516,7 +4547,8 @@ ${refs.size}`;
           agents: await listAgents().catch(() => []),
           health: view(),
           status: (entry) => candidateStatus(entry, available, preview.roles, health2, now),
-          ...file === undefined ? { error: `No model-roles plugin entry in the global config (${configDir()}); /tiers cannot save.` } : { config: file.path }
+          ...file === undefined ? { error: `No model-roles plugin entry in the global config (${configDir()}); /tiers cannot save.` } : { config: file.path },
+          agentConfig: (({ origin, path: from }) => ({ origin, ...from === undefined ? {} : { path: from } }))(agentConfig())
         });
       },
       set: async (input) => {
@@ -4565,7 +4597,8 @@ ${refs.size}`;
           warn(`agent ${agent} was written to ${result.path} but not applied`, { error: String(error) });
           throw new Error(`Agent ${agent} was written to ${result.path} but not applied: ${error.message}. The previous tiers stay in use until the config reloads.`);
         }
-        return result;
+        const effective = agentConfig();
+        return effective.origin === "project" ? { ...result, shadowedBy: effective.path } : result;
       }
     });
     const spawnResults = await ctx.tool.hook("execute.after", async (event) => {
@@ -4771,6 +4804,7 @@ export {
   describeChoice,
   desiredModels,
   duration,
+  effectiveAgents,
   expandRole,
   explainSpawn,
   explicitCandidates,
@@ -4797,7 +4831,6 @@ export {
   lineupRank,
   markUnhealthy,
   matchesPattern,
-  mergeAgents,
   modelFromError,
   modelLabel,
   modelText,
@@ -4819,6 +4852,7 @@ export {
   planImplicit,
   planSpawn,
   priceOf,
+  projectConfigPaths,
   providerKey,
   pruneHealth,
   pushHistory,
@@ -4831,6 +4865,7 @@ export {
   readDraft,
   readFrozenTierParam,
   readHealth,
+  readProjectFiles,
   readReceipts,
   readState,
   readTiers,

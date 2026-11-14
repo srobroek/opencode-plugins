@@ -819,6 +819,8 @@ function tierState(input) {
   const state = { tiers, models, agents };
   if (input.config !== undefined)
     state.config = input.config;
+  if (input.agentConfig !== undefined)
+    state.agentConfig = input.agentConfig;
   if (input.error !== undefined)
     state.error = input.error;
   return state;
@@ -832,14 +834,6 @@ function agentTierError(tier, tiers) {
   if (typeof tier !== "string" || !Object.hasOwn(tiers, tier))
     return `Unknown tier ${JSON.stringify(tier)}.`;
   return;
-}
-function mergeAgents(given, startup, current) {
-  const project = {};
-  for (const [agent, tier] of Object.entries(given)) {
-    if (!(Object.hasOwn(startup, agent) && startup[agent] === tier))
-      project[agent] = tier;
-  }
-  return { ...current, ...project };
 }
 var TIER_NAME = /^[a-z][a-z0-9-]*$/;
 function readDraft(input) {
@@ -1120,7 +1114,9 @@ function wrap(text, width = 52) {
 }
 var CHANGE_TIER = "\x00change";
 var BACK = "\x00back";
-function agentDetailOptions(agent) {
+function agentDetailOptions(agent, config) {
+  const note = (text) => wrap(text).map((line, i) => ({ title: i === 0 ? line : `  ${line}`, value: "", disabled: true }));
+  const from = config?.origin === "project" ? `project config (${config.path ?? "unknown"})` : undefined;
   const fact = (label, value) => wrap(`${label}: ${value}`).map((line, i) => ({ title: i === 0 ? line : `  ${line}`, value: "", disabled: true }));
   return [
     ...fact("Tier", agent.tier ?? "no tier (session model)"),
@@ -1128,6 +1124,7 @@ function agentDetailOptions(agent) {
     ...fact("Resolves to", agent.tier === undefined ? "the session model" : agent.resolved ?? "nothing available"),
     ...agent.pinned === undefined ? [] : fact("Own model", `${agent.pinned} (wins over the tier)`),
     ...agent.description === undefined ? [] : fact("About", agent.description),
+    ...from === undefined ? [] : note(agent.source === "options" ? `Set by ${from}` : `Project config (${config?.path ?? "unknown"}) holds the model-roles entry`),
     { title: "Change tier\u2026", value: CHANGE_TIER },
     { title: "Back", value: BACK }
   ];
@@ -1379,6 +1376,18 @@ var tui_default = Plugin.define({
       await editTier(at, state, createDraft(row, true));
     };
     const changeAgentTier = async (at, state, agent) => {
+      if (state.agentConfig?.origin === "project") {
+        const go = await dialog.confirm({
+          title: "A project config sets the agents",
+          message: `${state.agentConfig.path ?? "A project config"} has its own model-roles entry. A save here goes to the global config and will not change this project's tier for ${agent.id}.`,
+          label: {
+            confirm: "Save to global anyway",
+            cancel: "Cancel"
+          }
+        });
+        if (go !== true)
+          return false;
+      }
       const value = await dialog.select({
         title: `${agent.id}: tier`,
         placeholder: "Pick a tier, or the agent default",
@@ -1394,6 +1403,10 @@ var tui_default = Plugin.define({
         }, {
           location: at
         });
+        if (result.shadowedBy !== undefined) {
+          toast(`Agent ${agent.id}: written to ${result.path ?? "the global config"}, but ${result.shadowedBy} overrides it here, so nothing changed in this project.`, "info");
+          return true;
+        }
         toast(`Agent ${agent.id} ${value === AGENT_DEFAULT ? "uses its default tier" : `uses tier ${value}`}; applied, written to ${result.path ?? "the global config"}.`, "success");
         return true;
       } catch (error) {
@@ -1409,7 +1422,7 @@ var tui_default = Plugin.define({
           return state;
         const action = await dialog.select({
           title: `Agent ${agent.id}`,
-          options: agentDetailOptions(agent)
+          options: agentDetailOptions(agent, state.agentConfig)
         });
         if (action !== CHANGE_TIER)
           return state;

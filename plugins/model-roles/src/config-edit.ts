@@ -142,3 +142,49 @@ export function writeAgentTier(dir: string, agent: string, tier: string | undefi
   const { path: file, text } = writeEntry(dir, (current) => setAgentTier(current, agent, tier))
   return { path: file, agents: readAgents(text) }
 }
+
+/**
+ * Project config files that can hold a model-roles entry, lowest precedence first, as OpenCode
+ * 2.2.6 loads them (`config/discovery.ts:81-82,143` and `config.ts:369-370`): every ancestor of
+ * `directory`'s `opencode.json`, then `opencode.jsonc`, farthest first; then the same names inside each
+ * ancestor's `.opencode/`, farthest first, so a `.opencode` file outranks every direct one. The global
+ * config directory's own files are not project files.
+ */
+export function projectConfigPaths(directory: string, globalDir: string): string[] {
+  const ancestors: string[] = []
+  for (let dir = path.resolve(directory); ; dir = path.dirname(dir)) {
+    ancestors.push(dir)
+    if (path.dirname(dir) === dir) break
+  }
+  const far = ancestors.reverse()
+  const direct = far.flatMap((dir) => CONFIG_NAMES.map((name) => path.join(dir, name)))
+  const dotted = far.flatMap((dir) => CONFIG_NAMES.map((name) => path.join(dir, ".opencode", name)))
+  const skip = new Set(CONFIG_NAMES.map((name) => path.join(path.resolve(globalDir), name)))
+  return [...direct, ...dotted].filter((file) => !skip.has(file))
+}
+
+/** The project config files that exist, in `projectConfigPaths` order. */
+export function readProjectFiles(directory: string, globalDir: string): ConfigFile[] {
+  const files: ConfigFile[] = []
+  for (const file of projectConfigPaths(directory, globalDir)) {
+    try {
+      files.push({ path: file, text: readFileSync(file, "utf8") })
+    } catch {
+      // Not there.
+    }
+  }
+  return files
+}
+
+export type AgentConfig = { origin: "global"; path?: string; agents: Record<string, unknown> } | { origin: "project"; path: string; agents: Record<string, unknown> }
+
+/**
+ * Where the model-roles `agents` come from. A project file's model-roles entry replaces the inherited one
+ * as a whole (options are not merged), so the highest-precedence project file with an entry is the effective
+ * one and the global file does not count; with none, the global entry is. `project` is lowest precedence first.
+ */
+export function effectiveAgents(project: ReadonlyArray<ConfigFile>, global: ConfigFile | undefined): AgentConfig {
+  const file = [...project].reverse().find((f) => findPluginEntry(f.text) !== undefined)
+  if (file !== undefined) return { origin: "project", path: file.path, agents: readAgents(file.text) }
+  return global === undefined ? { origin: "global", agents: {} } : { origin: "global", path: global.path, agents: readAgents(global.text) }
+}

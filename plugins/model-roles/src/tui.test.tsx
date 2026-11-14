@@ -31,7 +31,7 @@ const tier = (name: string, configured?: Record<string, unknown>) => ({
   ...(configured === undefined ? {} : { configured }),
 })
 
-function harness(script: Step[], opts: { setFails?: string; setAgentFails?: string; persist?: (value: Record<string, unknown>) => Record<string, unknown> } = {}) {
+function harness(script: Step[], opts: { project?: string; setFails?: string; setAgentFails?: string; persist?: (value: Record<string, unknown>) => Record<string, unknown> } = {}) {
   const saved: Record<string, Record<string, unknown>> = {}
   const setCalls: Array<{ tier: string; value: unknown }> = []
   const agentCalls: Array<{ agent: string; tier: string | null }> = []
@@ -79,14 +79,14 @@ function harness(script: Step[], opts: { setFails?: string; setAgentFails?: stri
         return tierName === undefined ? { id } : { id, tier: tierName, source, resolved: "a/one#high" }
       }
       const agents = [agentRow("build", { tier: "strong", source: "header" }), agentRow("plan")]
-      return { tiers, models, agents, config: "/cfg" }
+      return { tiers, models, agents, config: "/cfg", ...(opts.project === undefined ? {} : { agentConfig: { origin: "project", path: opts.project } }) }
     },
     setAgent: async (input: { agent: string; tier: string | null }) => {
       if (opts.setAgentFails !== undefined) throw new Error(opts.setAgentFails)
       agentCalls.push(input)
       if (input.tier === null) delete savedAgents[input.agent]
       else savedAgents[input.agent] = input.tier
-      return { path: "/cfg" }
+      return { path: "/cfg", ...(opts.project === undefined ? {} : { shadowedBy: opts.project }) }
     },
     set: async (input: { tier: string; value: Record<string, unknown> | null }) => {
       if (opts.setFails !== undefined) throw new Error(opts.setFails)
@@ -401,6 +401,45 @@ describe("/tiers editor", () => {
       { agent: "plan", tier: null },
     ])
     expect(h.toasts.map((t) => t.variant)).toEqual(["success", "success"])
+  })
+
+  test("under a project config the details say so, and Change tier warns first; Cancel writes nothing", async () => {
+    const h = harness(
+      [
+        pick("\u0000agents"),
+        pick("build"),
+        (o) => {
+          expect(titles(o).join(" ")).toContain("Project config (/p/opencode.json) holds the")
+          return pick("\u0000change")(o)
+        },
+        (o) => {
+          expect(o.title).toBe("A project config sets the agents")
+          expect(String(o.message)).toContain("will not change this project's tier")
+          return false
+        },
+        (o) => {
+          expect(o.title).toBe("Agent build")
+          return ESC
+        },
+        esc,
+        esc,
+      ],
+      { project: "/p/opencode.json" },
+    )
+    await h.run()
+    expect(h.agentCalls).toEqual([])
+  })
+
+  test("a shadowed save after Save to global anyway says it changed nothing here", async () => {
+    const h = harness(
+      [pick("\u0000agents"), pick("plan"), pick("\u0000change"), () => true, pick("cheap"), esc, esc, esc],
+      { project: "/p/opencode.json" },
+    )
+    await h.run()
+    expect(h.agentCalls).toEqual([{ agent: "plan", tier: "cheap" }])
+    expect(h.toasts).toHaveLength(1)
+    expect(h.toasts[0]?.message).toContain("/p/opencode.json overrides it here")
+    expect(h.toasts[0]?.message).not.toContain("applied")
   })
 
   test("Esc in the tier picker writes nothing", async () => {
