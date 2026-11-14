@@ -123,11 +123,15 @@ describe("store", () => {
       setHolds: new Map<number, Promise<void>>(),
       getHold: undefined as Promise<void> | undefined,
       sets: 0,
+      /** Writes in the order they landed, as `<key> <outcome>`, and the most that ran at once on one key. */
+      log: [] as string[],
+      overlap: 0,
       /** Sets reject while true. */
       failSets: false,
       /** Sets never settle while true. */
       hangSets: false,
     }
+    const running = new Map<string, number>()
     const storage: LedgerStorage = {
       get: async (k) => {
         // The value is read before the call blocks, as a real read in flight would.
@@ -139,9 +143,16 @@ describe("store", () => {
         const call = ++gate.sets
         if (gate.hangSets) return new Promise<void>(() => {})
         if (gate.failSets) throw new Error("storage down")
-        const snapshot = structuredClone(value)
-        await gate.setHolds.get(call)
-        data.set(k, snapshot)
+        const snapshot = structuredClone(value) as { resumes?: number; outcome?: string }
+        running.set(k, (running.get(k) ?? 0) + 1)
+        gate.overlap = Math.max(gate.overlap, running.get(k) ?? 0)
+        try {
+          await gate.setHolds.get(call)
+          data.set(k, snapshot)
+          gate.log.push(`${k} ${snapshot.outcome ?? "-"}`)
+        } finally {
+          running.set(k, (running.get(k) ?? 1) - 1)
+        }
       },
       remove: async (k) => void data.delete(k),
       scan: async ({ prefix, after }) => {
@@ -364,22 +375,10 @@ describe("store", () => {
       expect(gate.sets - before).toBe(3)
     })
 
-    test("a storage call that never settles times out and is logged", async () => {
-      const { storage, gate } = fake()
-      warnings.length = 0
-      const store = make(storage, { storageTimeoutMs: 20, debounceMs: 10_000 })
-      await store.spawn("ses_c", facts)
-      gate.hangSets = true
-      await store.end("ses_c", "succeeded", 1500)
-      expect(warnings.some((w) => w.includes("timed out"))).toBe(true)
-      expect(store.active()).toBe(1)
-      await store.dispose()
-    })
-
     test("dispose returns after its bound when storage never settles, and logs it", async () => {
       const { storage, gate } = fake()
       warnings.length = 0
-      const store = make(storage, { storageTimeoutMs: 60_000, disposeTimeoutMs: 40 })
+      const store = make(storage, { disposeTimeoutMs: 40 })
       await store.spawn("ses_c", facts)
       gate.hangSets = true
       void store.end("ses_c", "succeeded", 1500)
@@ -388,6 +387,67 @@ describe("store", () => {
       await store.dispose()
       expect(Date.now() - started).toBeLessThan(1000)
       expect(warnings.some((w) => w.includes("dispose"))).toBe(true)
+    })
+
+    test("a slow earlier write followed by an end write leaves storage in the end state", async () => {
+      const { data, storage, gate } = fake()
+      const store = make(storage, { debounceMs: 10_000 })
+      await store.spawn("ses_c", facts) // set call 1
+      const slow = hold()
+      gate.setHolds.set(2, slow.promise)
+      await store.step("ses_c", { cost: 1 })
+      const flushing = store.flush() // set call 2 starts and stays slow
+      await pause(10)
+      const ending = store.end("ses_c", "succeeded", 1500) // must land after call 2
+      await pause(100) // far longer than any deadline the store could have used
+      slow.release()
+      await Promise.all([flushing, ending])
+      await pause(30)
+      expect(data.get(key("ses_c"))).toMatchObject({ outcome: "succeeded", steps: 1 })
+      expect(gate.overlap).toBe(1)
+      await store.dispose()
+    })
+
+    test("a prune while a write is slow leaves the key deleted", async () => {
+      const { data, storage, gate } = fake()
+      const store = make(storage, { debounceMs: 10_000, limits: { maxEntries: 1, maxAgeMs: 90 * DAY } })
+      const slow = hold()
+      gate.setHolds.set(1, slow.promise)
+      const first = store.spawn("old", { ...facts, at: 1000 }) // set call 1 stays slow
+      await pause(10)
+      const second = store.spawn("new", { ...facts, at: 1001 }) // the second entry prunes "old"
+      await pause(100)
+      slow.release()
+      await Promise.all([first, second])
+      await store.dispose()
+      expect(data.has(key("old"))).toBe(false)
+      expect(data.has(key("new"))).toBe(true)
+    })
+
+    test("dispose lets an admitted end land first, then retries a failed record, with no overlap", async () => {
+      const { data, storage, gate } = fake()
+      const store = make(storage, { debounceMs: 10_000 })
+      await store.spawn("failed", facts)
+      await store.spawn("running", facts)
+      gate.failSets = true
+      await store.end("failed", "failed:auth", 1500) // the write fails; the record stays in memory
+      gate.failSets = false
+      gate.log.length = 0
+      const slow = hold()
+      gate.setHolds.set(gate.sets + 1, slow.promise)
+      const ending = store.end("running", "succeeded", 1600) // admitted: its write is slow
+      await pause(10)
+      let disposed = false
+      const disposing = store.dispose().then(() => {
+        disposed = true
+      })
+      await pause(30)
+      expect(disposed).toBe(false)
+      slow.release()
+      await Promise.all([ending, disposing])
+      expect(gate.log).toEqual([`${key("running")} succeeded`, `${key("failed")} failed:auth`])
+      expect(gate.overlap).toBe(1)
+      expect(data.get(key("failed"))).toMatchObject({ outcome: "failed:auth" })
     })
 
     test("past the queue cap step updates coalesce without losing usage, and an end is never dropped", async () => {

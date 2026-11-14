@@ -158,7 +158,6 @@ export type LedgerStorage = {
   scan(input: { prefix: string; after?: string }): Promise<{ entries: ReadonlyArray<{ key: string; value: unknown }>; next?: string }>
 }
 
-export const LEDGER_STORAGE_TIMEOUT_MS = 5000
 export const LEDGER_DISPOSE_TIMEOUT_MS = 10_000
 export const LEDGER_MAX_QUEUED = 50
 export const LEDGER_MAX_WRITE_ATTEMPTS = 3
@@ -167,8 +166,6 @@ export type LedgerStoreOptions = {
   debounceMs?: number
   now?: () => number
   limits?: PruneLimits
-  /** Deadline for each storage call. */
-  storageTimeoutMs?: number
   /** Bound on `dispose`. */
   disposeTimeoutMs?: number
   /** Waiting operations per child before step updates coalesce. */
@@ -194,16 +191,19 @@ const addUsages = (a: Usage, b: Usage): Usage => ({
  * spawn time) is all that is kept of it. Each child has one queue and every operation on
  * it, read, reduce and write, runs whole in that queue. Writes on end events are immediate,
  * writes during steps are debounced. A failed write keeps the record in memory and dirty
- * until a later write lands or the attempts run out. Every storage call has a deadline, a
- * child's queue is capped (step updates past it coalesce, nothing else is dropped), and
- * `dispose` is bounded. Retention removes a record through the same queue. After `dispose`
- * no operation runs.
+ * until a later write lands or the attempts run out. A child's queue is capped (step updates
+ * past it coalesce, nothing else is dropped), and `dispose` is bounded.
+ *
+ * Ordering: a key's next storage call starts only after the previous one settled, so writes
+ * land in issue order; retention deletes through the same queue. There is no per-call deadline,
+ * because a call that was given up on cannot be cancelled and could still land after a newer
+ * write. The store assumes the host's plugin storage calls settle. After `dispose` begins no
+ * new operation is admitted.
  */
 export function createLedgerStore(storage: LedgerStorage, options: LedgerStoreOptions = {}) {
   const debounceMs = options.debounceMs ?? LEDGER_DEBOUNCE_MS
   const now = options.now ?? Date.now
   const limits = options.limits ?? { maxEntries: LEDGER_MAX_ENTRIES, maxAgeMs: LEDGER_MAX_AGE_MS }
-  const storageTimeoutMs = options.storageTimeoutMs ?? LEDGER_STORAGE_TIMEOUT_MS
   const disposeTimeoutMs = options.disposeTimeoutMs ?? LEDGER_DISPOSE_TIMEOUT_MS
   const maxQueued = options.maxQueued ?? LEDGER_MAX_QUEUED
   const maxWriteAttempts = options.maxWriteAttempts ?? LEDGER_MAX_WRITE_ATTEMPTS
@@ -220,22 +220,11 @@ export function createLedgerStore(storage: LedgerStorage, options: LedgerStoreOp
   const outstanding = new Set<Promise<void>>()
   let timer: ReturnType<typeof setTimeout> | undefined
   let closed = false
-  let abandoned = false
   const keyOf = (id: string) => `${OUTCOME_KEY_PREFIX}${id}`
 
-  /** A storage call with a deadline; a call that never settles rejects with a timeout. */
-  const within = <T>(call: () => Promise<T>, what: string): Promise<T> => {
-    let timeout: ReturnType<typeof setTimeout> | undefined
-    const deadline = new Promise<never>((_, reject) => {
-      timeout = setTimeout(() => reject(new Error(`${what} timed out after ${storageTimeoutMs}ms`)), storageTimeoutMs)
-      ;(timeout as { unref?: () => void }).unref?.()
-    })
-    return Promise.race([Promise.resolve().then(call), deadline]).finally(() => clearTimeout(timeout))
-  }
-
-  /** Queue `task` behind the earlier operations on this child. Refused once the store is closed. */
-  const run = (id: string, task: () => Promise<void>, counted = true): Promise<void> => {
-    if (closed) return Promise.resolve()
+  /** Queue `task` behind the earlier operations on this child. Refused once the store is closed, except `force` (dispose's retries). */
+  const run = (id: string, task: () => Promise<void>, counted = true, force = false): Promise<void> => {
+    if (closed && !force) return Promise.resolve()
     if (counted) depth.set(id, (depth.get(id) ?? 0) + 1)
     const queued: Promise<void> = (queues.get(id) ?? Promise.resolve()).then(task).catch(() => {})
     queues.set(id, queued)
@@ -253,9 +242,8 @@ export function createLedgerStore(storage: LedgerStorage, options: LedgerStoreOp
   const write = async (id: string): Promise<boolean> => {
     const record = active.get(id)
     if (record === undefined || !index.has(id)) return true
-    if (abandoned) return false
     try {
-      await within(() => storage.set(keyOf(id), record as never), `writing ${id}`)
+      await storage.set(keyOf(id), record as never)
       failures.delete(id)
       dirty.delete(id)
       return true
@@ -289,18 +277,22 @@ export function createLedgerStore(storage: LedgerStorage, options: LedgerStoreOp
     if (!index.has(id)) return undefined
     const known = active.get(id)
     if (known !== undefined) return known
-    if (abandoned) return undefined
-    const stored = readOutcome(await within(() => storage.get(keyOf(id)), `reading ${id}`).catch((error) => (warn(`outcome ledger: could not read ${id}`, { error: String(error) }), undefined)))
+    const raw = await Promise.resolve(storage.get(keyOf(id))).catch((error) => {
+      warn(`outcome ledger: could not read ${id}`, { error: String(error) })
+      return undefined
+    })
+    const stored = readOutcome(raw)
     if (stored === undefined) return undefined
     active.set(id, stored)
     return stored
   }
 
-  const flush = async () => {
+  /** Write the waiting records. At dispose, records whose write failed wait for the retry pass after the drain. */
+  const flush = async (retryFailed = true) => {
     if (timer !== undefined) clearTimeout(timer)
     timer = undefined
-    const ids = [...dirty]
-    dirty.clear()
+    const ids = [...dirty].filter((id) => retryFailed || !failures.has(id))
+    for (const id of ids) dirty.delete(id)
     await Promise.all(ids.map((id) => run(id, () => save(id).then(() => undefined), false)))
   }
   function later(id: string) {
@@ -323,9 +315,8 @@ export function createLedgerStore(storage: LedgerStorage, options: LedgerStoreOp
           finished.delete(id)
           failures.delete(id)
           spill.delete(id)
-          if (abandoned) return
           try {
-            await within(async () => storage.remove?.(keyOf(id)), `removing ${id}`)
+            await storage.remove?.(keyOf(id))
           } catch {
             // It prunes again at the next start.
           }
@@ -384,10 +375,7 @@ export function createLedgerStore(storage: LedgerStorage, options: LedgerStoreOp
       try {
         let after: string | undefined
         do {
-          const page = await within(
-            () => storage.scan(after === undefined ? { prefix: OUTCOME_KEY_PREFIX } : { prefix: OUTCOME_KEY_PREFIX, after }),
-            "scanning",
-          )
+          const page = await storage.scan(after === undefined ? { prefix: OUTCOME_KEY_PREFIX } : { prefix: OUTCOME_KEY_PREFIX, after })
           for (const entry of page.entries) {
             const record = readOutcome(entry.value)
             if (record !== undefined) index.set(entry.key.slice(OUTCOME_KEY_PREFIX.length), record.at)
@@ -428,31 +416,34 @@ export function createLedgerStore(storage: LedgerStorage, options: LedgerStoreOp
     failover: (id: string) => change(id, onFailover, "now"),
     flush,
     /**
-     * Queues the waiting writes, refuses new operations, then waits for every queued one,
-     * reads included, and one more try for records whose write failed. After `disposeTimeoutMs`
-     * it logs and returns, and what is still queued does nothing.
+     * Admits nothing new, writes what is waiting, drains every child's queue, then retries the
+     * records whose write failed through the same queues and drains again. After `disposeTimeoutMs`
+     * it logs what is left unwritten and returns; nothing is cancelled or reordered.
      */
     async dispose() {
-      const flushing = flush()
+      const flushing = flush(false)
       closed = true
+      const drain = async () => {
+        while (outstanding.size > 0) await Promise.all([...outstanding])
+      }
+      const unwritten = () => [...active.keys()].filter((id) => dirty.has(id) || failures.has(id) || finished.has(id))
+      const drained = (async () => {
+        await flushing
+        await drain()
+        await Promise.all(unwritten().map((id) => run(id, () => save(id), false, true)))
+        await drain()
+        return "drained" as const
+      })()
       let bound: ReturnType<typeof setTimeout> | undefined
       const expired = new Promise<"expired">((resolve) => {
         bound = setTimeout(() => resolve("expired"), disposeTimeoutMs)
         ;(bound as { unref?: () => void }).unref?.()
       })
-      const drained = (async () => {
-        await flushing
-        // Failed writes get one more try: `closed` stops `run`, so write them in place.
-        for (const id of [...active.keys()]) if (finished.has(id) || failures.has(id)) await write(id)
-        while (outstanding.size > 0) await Promise.all([...outstanding])
-        return "drained" as const
-      })()
       const result = await Promise.race([drained, expired])
       clearTimeout(bound)
-      if (result === "expired") {
-        abandoned = true
-        warn(`outcome ledger: dispose gave up after ${disposeTimeoutMs}ms with ${outstanding.size} operations unfinished`)
-      }
+      const left = unwritten()
+      if (result === "expired") warn(`outcome ledger: dispose gave up after ${disposeTimeoutMs}ms with ${outstanding.size} operations unfinished; unwritten: ${left.join(", ") || "none"}`)
+      else if (left.length > 0) warn(`outcome ledger: ${left.length} records could not be written: ${left.join(", ")}`)
     },
   }
 }

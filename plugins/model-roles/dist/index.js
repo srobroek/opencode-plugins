@@ -3378,7 +3378,6 @@ function readOutcome(value) {
       return;
   return value;
 }
-var LEDGER_STORAGE_TIMEOUT_MS = 5000;
 var LEDGER_DISPOSE_TIMEOUT_MS = 1e4;
 var LEDGER_MAX_QUEUED = 50;
 var LEDGER_MAX_WRITE_ATTEMPTS = 3;
@@ -3395,7 +3394,6 @@ function createLedgerStore(storage, options = {}) {
   const debounceMs = options.debounceMs ?? LEDGER_DEBOUNCE_MS;
   const now = options.now ?? Date.now;
   const limits = options.limits ?? { maxEntries: LEDGER_MAX_ENTRIES, maxAgeMs: LEDGER_MAX_AGE_MS };
-  const storageTimeoutMs = options.storageTimeoutMs ?? LEDGER_STORAGE_TIMEOUT_MS;
   const disposeTimeoutMs = options.disposeTimeoutMs ?? LEDGER_DISPOSE_TIMEOUT_MS;
   const maxQueued = options.maxQueued ?? LEDGER_MAX_QUEUED;
   const maxWriteAttempts = options.maxWriteAttempts ?? LEDGER_MAX_WRITE_ATTEMPTS;
@@ -3411,18 +3409,9 @@ function createLedgerStore(storage, options = {}) {
   const outstanding = new Set;
   let timer;
   let closed = false;
-  let abandoned = false;
   const keyOf = (id) => `${OUTCOME_KEY_PREFIX}${id}`;
-  const within = (call, what) => {
-    let timeout;
-    const deadline = new Promise((_, reject) => {
-      timeout = setTimeout(() => reject(new Error(`${what} timed out after ${storageTimeoutMs}ms`)), storageTimeoutMs);
-      timeout.unref?.();
-    });
-    return Promise.race([Promise.resolve().then(call), deadline]).finally(() => clearTimeout(timeout));
-  };
-  const run = (id, task, counted = true) => {
-    if (closed)
+  const run = (id, task, counted = true, force = false) => {
+    if (closed && !force)
       return Promise.resolve();
     if (counted)
       depth.set(id, (depth.get(id) ?? 0) + 1);
@@ -3444,10 +3433,8 @@ function createLedgerStore(storage, options = {}) {
     const record = active.get(id);
     if (record === undefined || !index.has(id))
       return true;
-    if (abandoned)
-      return false;
     try {
-      await within(() => storage.set(keyOf(id), record), `writing ${id}`);
+      await storage.set(keyOf(id), record);
       failures.delete(id);
       dirty.delete(id);
       return true;
@@ -3480,20 +3467,23 @@ function createLedgerStore(storage, options = {}) {
     const known = active.get(id);
     if (known !== undefined)
       return known;
-    if (abandoned)
+    const raw = await Promise.resolve(storage.get(keyOf(id))).catch((error) => {
+      warn(`outcome ledger: could not read ${id}`, { error: String(error) });
       return;
-    const stored = readOutcome(await within(() => storage.get(keyOf(id)), `reading ${id}`).catch((error) => (warn(`outcome ledger: could not read ${id}`, { error: String(error) }), undefined)));
+    });
+    const stored = readOutcome(raw);
     if (stored === undefined)
       return;
     active.set(id, stored);
     return stored;
   };
-  const flush = async () => {
+  const flush = async (retryFailed = true) => {
     if (timer !== undefined)
       clearTimeout(timer);
     timer = undefined;
-    const ids = [...dirty];
-    dirty.clear();
+    const ids = [...dirty].filter((id) => retryFailed || !failures.has(id));
+    for (const id of ids)
+      dirty.delete(id);
     await Promise.all(ids.map((id) => run(id, () => save(id).then(() => {
       return;
     }), false)));
@@ -3515,10 +3505,8 @@ function createLedgerStore(storage, options = {}) {
       finished.delete(id);
       failures.delete(id);
       spill.delete(id);
-      if (abandoned)
-        return;
       try {
-        await within(async () => storage.remove?.(keyOf(id)), `removing ${id}`);
+        await storage.remove?.(keyOf(id));
       } catch {}
     })));
   };
@@ -3571,7 +3559,7 @@ function createLedgerStore(storage, options = {}) {
       try {
         let after;
         do {
-          const page = await within(() => storage.scan(after === undefined ? { prefix: OUTCOME_KEY_PREFIX } : { prefix: OUTCOME_KEY_PREFIX, after }), "scanning");
+          const page = await storage.scan(after === undefined ? { prefix: OUTCOME_KEY_PREFIX } : { prefix: OUTCOME_KEY_PREFIX, after });
           for (const entry of page.entries) {
             const record = readOutcome(entry.value);
             if (record !== undefined)
@@ -3615,28 +3603,32 @@ function createLedgerStore(storage, options = {}) {
     failover: (id) => change(id, onFailover, "now"),
     flush,
     async dispose() {
-      const flushing = flush();
+      const flushing = flush(false);
       closed = true;
+      const drain = async () => {
+        while (outstanding.size > 0)
+          await Promise.all([...outstanding]);
+      };
+      const unwritten = () => [...active.keys()].filter((id) => dirty.has(id) || failures.has(id) || finished.has(id));
+      const drained = (async () => {
+        await flushing;
+        await drain();
+        await Promise.all(unwritten().map((id) => run(id, () => save(id), false, true)));
+        await drain();
+        return "drained";
+      })();
       let bound;
       const expired = new Promise((resolve) => {
         bound = setTimeout(() => resolve("expired"), disposeTimeoutMs);
         bound.unref?.();
       });
-      const drained = (async () => {
-        await flushing;
-        for (const id of [...active.keys()])
-          if (finished.has(id) || failures.has(id))
-            await write(id);
-        while (outstanding.size > 0)
-          await Promise.all([...outstanding]);
-        return "drained";
-      })();
       const result = await Promise.race([drained, expired]);
       clearTimeout(bound);
-      if (result === "expired") {
-        abandoned = true;
-        warn(`outcome ledger: dispose gave up after ${disposeTimeoutMs}ms with ${outstanding.size} operations unfinished`);
-      }
+      const left = unwritten();
+      if (result === "expired")
+        warn(`outcome ledger: dispose gave up after ${disposeTimeoutMs}ms with ${outstanding.size} operations unfinished; unwritten: ${left.join(", ") || "none"}`);
+      else if (left.length > 0)
+        warn(`outcome ledger: ${left.length} records could not be written: ${left.join(", ")}`);
     }
   };
 }
@@ -4470,11 +4462,26 @@ ${refs.size}`;
         return;
       }));
     };
+    const snapshotWrites = new Map;
+    const persistSnapshot = (childID) => {
+      const run = (snapshotWrites.get(childID) ?? Promise.resolve()).then(async () => {
+        const snapshot = childModels.get(childID);
+        if (snapshot === undefined)
+          return;
+        try {
+          await ctx.storage.set(`${SPAWN_MODEL_KEY_PREFIX}${childID}`, snapshot);
+        } catch {}
+      });
+      snapshotWrites.set(childID, run);
+      run.then(() => {
+        if (snapshotWrites.get(childID) === run)
+          snapshotWrites.delete(childID);
+      });
+      return run;
+    };
     const writeSnapshot = async (childID, snapshot) => {
       childModels.set(childID, snapshot);
-      try {
-        await ctx.storage.set(`${SPAWN_MODEL_KEY_PREFIX}${childID}`, snapshot);
-      } catch {}
+      await persistSnapshot(childID);
     };
     const expectedChildren = new Map;
     const expectChild = (callID, event, agent, planned, tier) => {
@@ -4500,27 +4507,47 @@ ${refs.size}`;
       if (picked === undefined)
         return false;
       const [callID, spawn] = picked;
-      spawn.childID = data.sessionID;
-      await recordChildModel(data.sessionID, spawn, actual);
       const roleSpawn = pending.get(callID);
-      if (roleSpawn !== undefined) {
+      spawn.childID = data.sessionID;
+      if (roleSpawn !== undefined)
         roleSpawn.childID = data.sessionID;
+      await recordChildModel(data.sessionID, spawn, actual);
+      if (roleSpawn !== undefined) {
         await recordChildRole(data.sessionID, roleSpawn.role);
         await recordOutcomeSpawn(roleSpawn, data.sessionID);
       }
       return true;
     };
-    const recordFailover = async (childID, model, role) => {
-      const known = await snapshotOf(childID);
-      if (known === undefined && role === undefined)
+    const failoverSnapshot = (base, model, role) => ({
+      ...base ?? { configRevision: configRevision(options) },
+      ...base?.tier === undefined && role !== undefined ? { tier: role } : {},
+      model: modelLabel(model),
+      at: Date.now(),
+      failedOver: true
+    });
+    const noteFailover = (childID, model, role) => {
+      const storedOf = async () => readSnapshot(await ctx.storage.get(`${SPAWN_MODEL_KEY_PREFIX}${childID}`).catch(() => {
         return;
-      await writeSnapshot(childID, {
-        ...known ?? { configRevision: configRevision(options) },
-        ...known?.tier === undefined && role !== undefined ? { tier: role } : {},
-        model: modelLabel(model),
-        at: Date.now(),
-        failedOver: true
-      });
+      }));
+      const known = childModels.get(childID);
+      if (known === undefined && role === undefined) {
+        (async () => {
+          const stored = await storedOf();
+          if (stored === undefined || childModels.has(childID))
+            return;
+          childModels.set(childID, failoverSnapshot(stored, model, role));
+          await persistSnapshot(childID);
+        })().catch(() => {});
+        return;
+      }
+      const mine = failoverSnapshot(known, model, role);
+      childModels.set(childID, mine);
+      (async () => {
+        const stored = known === undefined ? await storedOf() : undefined;
+        if (stored !== undefined && childModels.get(childID) === mine)
+          childModels.set(childID, failoverSnapshot(stored, model, role));
+        await persistSnapshot(childID);
+      })().catch(() => {});
     };
     const recordOutcomeSpawn = async (spawn, childID) => {
       await outcomes.spawn(childID, {
@@ -4578,7 +4605,7 @@ ${refs.size}`;
         if (spawnRole !== undefined && target !== undefined) {
           try {
             await ctx.session.switchModel({ sessionID, model: target.model });
-            await recordFailover(sessionID, target.model, spawnRole);
+            noteFailover(sessionID, target.model, spawnRole);
             await outcomes.failover(sessionID);
             resumable = sessionID;
           } catch {}
@@ -4602,7 +4629,7 @@ ${refs.size}`;
     const switchWithin = async (sessionID, model, role) => {
       const tracked = Promise.resolve().then(() => ctx.session.switchModel({ sessionID, model })).then(() => true, () => false).then((ok) => {
         if (ok) {
-          recordFailover(sessionID, model, role).catch(() => {});
+          noteFailover(sessionID, model, role);
           outcomes.failover(sessionID).catch(() => {});
         }
         return ok;
@@ -5595,7 +5622,6 @@ export {
   LEDGER_MAX_ENTRIES,
   LEDGER_MAX_QUEUED,
   LEDGER_MAX_WRITE_ATTEMPTS,
-  LEDGER_STORAGE_TIMEOUT_MS,
   MAX_REREGISTER,
   MAX_SESSION_DEPTH,
   NOTICE_DEDUPE_MS,

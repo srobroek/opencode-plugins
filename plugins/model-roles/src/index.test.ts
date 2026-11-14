@@ -2510,6 +2510,53 @@ describe("a child keeps its resolved model", () => {
     await cleanup()
   })
 
+
+  test("a failover is visible to a resume at once, even when the stored snapshot is slow to read and write", async () => {
+    const { again, cleanupAgain } = await spawnThenReload(first)
+    again.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: sonnet })
+    // The stored snapshot (still the old model) is slow to read, and writes never land during the test.
+    const { get, set } = again.context.storage
+    again.context.storage.get = async (key: string) => {
+      if (key.startsWith("spawn-model:")) await new Promise((r) => setTimeout(r, 150))
+      return get(key)
+    }
+    again.context.storage.set = async (key: string, value: unknown) => {
+      if (key.startsWith("spawn-model:")) await new Promise((r) => setTimeout(r, 400))
+      return set(key, value)
+    }
+    const auth = { type: "provider.auth", message: "Unauthorized", status: 401 }
+    expect(await again.fireRetry({ sessionID: "c", agent: "plain", model: sonnet, error: auth, attempt: 2 })).toEqual({ retry: true, delay: 0 })
+    expect(methods(again, "switchModel")).toHaveLength(1)
+    expect((await again.spawn("subagent", resume, "build", "r", "call-2")).model).toBe("anthropic/claude-haiku")
+    again.close()
+    await cleanupAgain()
+  })
+
+  test("a call that completes while the child's snapshot is being written still leaves its ledger record", async () => {
+    const host = createHost({ agents: [{ id: "plain" }], models, options: first })
+    host.sessions.set("r", { id: "r" })
+    const cleanup = await setup(host)
+    const input = await host.spawn("subagent", { agent: "plain", prompt: "x", tier: "task" }, "build", "r", "call-1")
+    const set = host.context.storage.set
+    let release: () => void = () => {}
+    const slow = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    host.context.storage.set = async (key: string, value: unknown) => {
+      if (key.startsWith("spawn-model:")) await slow
+      return set(key, value)
+    }
+    host.emit({ type: "session.created", data: { sessionID: "c", parentID: "r", agent: "plain", model: sonnet } })
+    await settle()
+    await host.spawnDone(input, { sessionID: "c" }, "r", "call-1") // drops the pending spawn while the snapshot write waits
+    release()
+    await settle()
+    expect(host.storage.get("outcome:c")).toMatchObject({ agent: "plain", source: "tier-param", parentID: "r" })
+    expect(host.storage.get("spawn-role:c")).toBe("task")
+    host.close()
+    await cleanup()
+  })
+
   const created = (host: ReturnType<typeof createHost>, sessionID: string, agent: string, model: ModelRef) =>
     host.emit({ type: "session.created", data: { sessionID, parentID: "r", agent, model } })
 

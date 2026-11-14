@@ -608,13 +608,29 @@ export default Plugin.define({
       return readSnapshot(await ctx.storage.get(`${SPAWN_MODEL_KEY_PREFIX}${childID}`).catch(() => undefined))
     }
 
+    /** Storage writes of one child's snapshot, in order; each saves the snapshot as it is when it runs. */
+    const snapshotWrites = new Map<string, Promise<void>>()
+    const persistSnapshot = (childID: string): Promise<void> => {
+      const run: Promise<void> = (snapshotWrites.get(childID) ?? Promise.resolve()).then(async () => {
+        const snapshot = childModels.get(childID)
+        if (snapshot === undefined) return
+        try {
+          await ctx.storage.set(`${SPAWN_MODEL_KEY_PREFIX}${childID}`, snapshot as never)
+        } catch {
+          // The in-memory snapshot still steers this instance.
+        }
+      })
+      snapshotWrites.set(childID, run)
+      void run.then(() => {
+        if (snapshotWrites.get(childID) === run) snapshotWrites.delete(childID)
+      })
+      return run
+    }
+
+    /** The memory map is authoritative over storage: it is set first, storage follows. */
     const writeSnapshot = async (childID: string, snapshot: ModelSnapshot) => {
       childModels.set(childID, snapshot)
-      try {
-        await ctx.storage.set(`${SPAWN_MODEL_KEY_PREFIX}${childID}`, snapshot as never)
-      } catch {
-        // The in-memory snapshot still steers this instance.
-      }
+      await persistSnapshot(childID)
     }
 
     /**
@@ -650,28 +666,52 @@ export default Plugin.define({
         (open.length === 1 ? open[0] : undefined)
       if (picked === undefined) return false
       const [callID, spawn] = picked
-      spawn.childID = data.sessionID
-      await recordChildModel(data.sessionID, spawn, actual)
+      // Taken before any await: the call can complete, and drop both entries, while a write is pending.
       const roleSpawn = pending.get(callID)
+      spawn.childID = data.sessionID
+      if (roleSpawn !== undefined) roleSpawn.childID = data.sessionID
+      await recordChildModel(data.sessionID, spawn, actual)
       if (roleSpawn !== undefined) {
-        roleSpawn.childID = data.sessionID
         await recordChildRole(data.sessionID, roleSpawn.role)
         await recordOutcomeSpawn(roleSpawn, data.sessionID)
       }
       return true
     }
 
-    /** Failover moved a child: a resume continues on the model that worked, and an evaluation can tell. */
-    const recordFailover = async (childID: string, model: ModelRef, role: string | undefined) => {
-      const known = await snapshotOf(childID)
-      if (known === undefined && role === undefined) return
-      await writeSnapshot(childID, {
-        ...(known ?? { configRevision: configRevision(options) }),
-        ...(known?.tier === undefined && role !== undefined ? { tier: role } : {}),
-        model: modelLabel(model),
-        at: Date.now(),
-        failedOver: true,
-      })
+    const failoverSnapshot = (base: ModelSnapshot | undefined, model: ModelRef, role: string | undefined): ModelSnapshot => ({
+      ...(base ?? { configRevision: configRevision(options) }),
+      ...(base?.tier === undefined && role !== undefined ? { tier: role } : {}),
+      model: modelLabel(model),
+      at: Date.now(),
+      failedOver: true,
+    })
+
+    /**
+     * Failover moved a child: a resume continues on the model that worked, and an evaluation can tell.
+     * The in-memory snapshot changes before this returns, so a resume right after the switch sees it;
+     * storage follows in the background.
+     */
+    const noteFailover = (childID: string, model: ModelRef, role: string | undefined): void => {
+      const storedOf = async () => readSnapshot(await ctx.storage.get(`${SPAWN_MODEL_KEY_PREFIX}${childID}`).catch(() => undefined))
+      const known = childModels.get(childID)
+      if (known === undefined && role === undefined) {
+        // Nothing in memory and no tier: only a stored snapshot can say what this child resolved to.
+        void (async () => {
+          const stored = await storedOf()
+          if (stored === undefined || childModels.has(childID)) return
+          childModels.set(childID, failoverSnapshot(stored, model, role))
+          await persistSnapshot(childID)
+        })().catch(() => {})
+        return
+      }
+      const mine = failoverSnapshot(known, model, role)
+      childModels.set(childID, mine)
+      void (async () => {
+        // A cold child's stored snapshot may carry a tier and revision that memory does not.
+        const stored = known === undefined ? await storedOf() : undefined
+        if (stored !== undefined && childModels.get(childID) === mine) childModels.set(childID, failoverSnapshot(stored, model, role))
+        await persistSnapshot(childID)
+      })().catch(() => {})
     }
 
     /** Start the child's outcome record from the routing facts its own spawn captured. */
@@ -730,7 +770,7 @@ export default Plugin.define({
         if (spawnRole !== undefined && target !== undefined) {
           try {
             await ctx.session.switchModel({ sessionID, model: target.model })
-            await recordFailover(sessionID, target.model, spawnRole)
+            noteFailover(sessionID, target.model, spawnRole)
             await outcomes.failover(sessionID)
             resumable = sessionID
           } catch {
@@ -768,10 +808,10 @@ export default Plugin.define({
           () => false,
         )
         .then((ok) => {
-          // A switch that lands after the timeout still moved the child: its snapshot and ledger record follow.
-          // Neither is awaited: slow storage never changes the switch's result.
+          // A switch that lands after the timeout still moved the child. The snapshot changes in memory
+          // before the switch reports success; storage and the ledger follow without being awaited.
           if (ok) {
-            void recordFailover(sessionID, model, role).catch(() => {})
+            noteFailover(sessionID, model, role)
             void outcomes.failover(sessionID).catch(() => {})
           }
           return ok
