@@ -34,7 +34,7 @@ import {
   planImplicit,
   readClassification,
 } from "./classify.ts"
-import { globalConfigDir, pickConfigFile, readConfigFiles, readTiers, writeTier } from "./config-edit.ts"
+import { type AgentConfig, type ConfigFile, effectiveAgents, globalConfigDir, pickConfigFile, readConfigFiles, readProjectFiles, readTiers, writeAgentTier, writeTier } from "./config-edit.ts"
 import {
   duration,
   failureNote,
@@ -128,7 +128,7 @@ import {
   tierOf,
   tierWarnings,
 } from "./tiers.ts"
-import { applyDraft, compact, readDraft, TIER_NAME, tierState, validateTierConfig } from "./tiers-ui.ts"
+import { agentTierError, applyDraft, compact, readDraft, TIER_NAME, tierState, validateTierConfig } from "./tiers-ui.ts"
 
 export * from "./auto.ts"
 export * from "./catalog.ts"
@@ -1193,9 +1193,49 @@ export default Plugin.define({
 
     // The `/tiers` TUI dialog reads the tier table and writes `options.tiers` through these.
     const configDir = () => globalConfigDir(process.env, homedir())
+    /**
+     * Which config entry this instance is, from the host: exactly one loaded plugin with this id whose
+     * `package` source target is the entry's exact string. Anything else (two instances, no answer) leaves
+     * the identity open, and then nothing may be written or reloaded on a guess. The host lists a plugin only
+     * after its batch has set up (`plugin.ts:50-51,184`), so this is looked up when needed, not in setup;
+     * only a unique answer is kept.
+     */
+    type Identity = { kind: "unique"; spec: string } | { kind: "ambiguous"; targets: string[] } | { kind: "unknown" }
+    const lookupIdentity = async (): Promise<Identity> => {
+      try {
+        const listed = (await ctx.plugin.list()) as unknown
+        const rows = (Array.isArray(listed) ? listed : isRecord(listed) && Array.isArray(listed.data) ? listed.data : []) as Array<{
+          id?: unknown
+          source?: { type?: unknown; target?: unknown }
+        }>
+        const mine = rows.filter((row) => row.id === "srobroek.model-roles")
+        if (mine.length > 1) return { kind: "ambiguous", targets: mine.map((row) => String(row.source?.target ?? row.source?.type ?? "unknown")) }
+        const source = mine[0]?.source
+        return source?.type === "package" && typeof source.target === "string" ? { kind: "unique", spec: source.target } : { kind: "unknown" }
+      } catch {
+        return { kind: "unknown" }
+      }
+    }
+    let known: Identity = { kind: "unknown" }
+    const resolveIdentity = async (): Promise<Identity> => {
+      if (known.kind === "unique") return known
+      const found = await lookupIdentity()
+      if (found.kind === "unique") known = found
+      return found
+    }
+    /** For display and reads only; a loose match (no spec) may stand in when the identity is open. */
+    const ownSpec = () => (known.kind === "unique" ? known.spec : undefined)
+    /** The exact package string a write may target, or an error: a guess never authorises a write. */
+    const writableSpec = async (): Promise<string> => {
+      const identity = await resolveIdentity()
+      if (identity.kind === "ambiguous")
+        throw new Error(`Two model-roles entries are loaded (${identity.targets.join(", ")}); /tiers can't tell which one to edit. Edit the config by hand or remove one entry.`)
+      if (identity.kind === "unknown") throw new Error("The host did not say which model-roles entry this instance is, so /tiers can't tell which one to edit. Edit the config by hand.")
+      return identity.spec
+    }
     const globalFile = () => {
       try {
-        return pickConfigFile(readConfigFiles(configDir()))
+        return pickConfigFile(readConfigFiles(configDir()), ownSpec())
       } catch {
         return undefined
       }
@@ -1204,8 +1244,29 @@ export default Plugin.define({
     /** The global file's tiers as last applied (or seen at setup), so an unrelated config change keeps the options this instance got. */
     let fileTiers = (() => {
       const file = globalFile()
-      return file === undefined ? undefined : JSON.stringify(readTiers(file.text))
+      return file === undefined ? undefined : JSON.stringify(readTiers(file.text, ownSpec()))
     })()
+    /**
+     * Where the `agents` option comes from: the model-roles entry of the highest-precedence project config
+     * that has one (it replaces the global entry as a whole), else the global file's.
+     */
+    const agentConfig = (): AgentConfig => {
+      let project: ConfigFile[] = []
+      try {
+        const directory = (ctx as { location?: { directory?: unknown } }).location?.directory
+        if (typeof directory === "string") project = readProjectFiles(directory, configDir())
+      } catch {
+        // No project files.
+      }
+      return effectiveAgents(project, globalFile(), ownSpec())
+    }
+    const agentsKeyOf = (config: AgentConfig) => JSON.stringify({ origin: config.origin, path: config.path, agents: parseOptions({ agents: config.agents }).agents })
+    const startupConfig = agentConfig()
+    const startupAgents = parseOptions({ agents: startupConfig.agents }).agents
+    /** Assignments in `ctx.options` that neither config file held at startup (another source); a global edit keeps them. */
+    const otherAgents = Object.fromEntries(Object.entries(options.agents).filter(([agent]) => !Object.hasOwn(startupAgents, agent)))
+    /** The effective `agents` as last applied. */
+    let fileAgents = agentsKeyOf(startupConfig)
 
     /**
      * Apply the global file's tiers to the running instance when they changed (or always with
@@ -1213,15 +1274,22 @@ export default Plugin.define({
      * running sessions keep the parameter they first saw.
      */
     const reloadTiers = async (force: boolean) => {
+      const identity = await resolveIdentity()
       const file = globalFile()
-      if (file === undefined) return
-      const tiers = readTiers(file.text)
-      const key = JSON.stringify(tiers)
-      if (!force && key === fileTiers) return
+      const config = agentConfig()
+      const agentsKey = agentsKeyOf(config)
+      const wanted = parseOptions({ agents: config.agents }).agents
+      // A reload caused by the tiers alone keeps the agents it has.
+      const agentsChanged = identity.kind === "unique" && agentsKey !== fileAgents
+      // With no global entry only the agents can change (from a project entry).
+      const tiers = file === undefined ? undefined : readTiers(file.text, ownSpec())
+      const key = tiers === undefined ? fileTiers : JSON.stringify(tiers)
+      if (file === undefined ? !agentsChanged : !force && key === fileTiers && !agentsChanged) return
       await exclusive(async () => {
-        const previous = { settings, roles: options.roles, tiers: options.tiers, classes: options.classes, derived }
+        const previous = { settings, agents: options.agents, roles: options.roles, tiers: options.tiers, classes: options.classes, derived }
         const restore = () => {
           settings = previous.settings
+          options.agents = previous.agents
           options.roles = previous.roles
           options.tiers = previous.tiers
           options.classes = previous.classes
@@ -1229,7 +1297,8 @@ export default Plugin.define({
         }
         try {
           // Spawns wait in `exclusive`, so they see either the old tiers or the new ones once agents and tools follow.
-          settings = parseTierSettings({ ...pluginOptions, tiers })
+          if (tiers !== undefined) settings = parseTierSettings({ ...pluginOptions, tiers })
+          if (agentsChanged) options.agents = config.origin === "project" ? wanted : { ...otherAgents, ...wanted }
           rebuild()
           attempts = 0
           await check(true)
@@ -1244,7 +1313,8 @@ export default Plugin.define({
       })
       // Marked applied only once everything above went through, so a failed reload is retried on the next event.
       fileTiers = key
-      warn(`applied the tiers from ${file.path}`)
+      fileAgents = agentsKey
+      warn(`applied the tiers from ${file?.path ?? config.path ?? "the project config"}`)
     }
 
     const rpc = await ctx.rpc.register(TiersRpc, {
@@ -1254,7 +1324,7 @@ export default Plugin.define({
         })
         const file = globalFile()
         const saved: Record<string, TierConfig> = {}
-        for (const [name, value] of Object.entries(file === undefined ? settings.tiers : readTiers(file.text))) saved[name] = parseTierConfig(value)
+        for (const [name, value] of Object.entries(file === undefined ? settings.tiers : readTiers(file.text, ownSpec()))) saved[name] = parseTierConfig(value)
         // The file with the draft laid over it, resolved fresh, so the dialog can preview an edit.
         const configured = applyDraft(saved, readDraft(input))
         const preview = buildTiers(parseTierSettings({ ...pluginOptions, tiers: configured }), available as CatalogModel[], refs)
@@ -1269,10 +1339,16 @@ export default Plugin.define({
           ...(file === undefined
             ? { error: `No model-roles plugin entry in the global config (${configDir()}); /tiers cannot save.` }
             : { config: file.path }),
+          agentConfig: (({ origin, path: from, alsoLoads }) => ({
+            origin,
+            ...(from === undefined ? {} : { path: from }),
+            ...(alsoLoads === undefined ? {} : { alsoLoads }),
+          }))(agentConfig()),
         })
       },
       set: async (input) => {
         const { tier, value } = (input ?? {}) as { tier?: unknown; value?: unknown }
+        const spec = await writableSpec()
         if (typeof tier !== "string" || !TIER_NAME.test(tier)) throw new Error(`Invalid tier name ${JSON.stringify(tier)}`)
         const config = value === null || value === undefined ? undefined : compact(parseTierConfig(value))
         await queue(async () => {
@@ -1280,7 +1356,7 @@ export default Plugin.define({
         })
         const { errors, warnings } = validateTierConfig(config, available, catalog)
         if (errors.length > 0) throw new Error(`Tier ${tier} not saved: ${errors.join(" ")}`)
-        const result = writeTier(configDir(), tier, config)
+        const result = writeTier(configDir(), tier, config, spec)
         warn(`${config === undefined ? "removed" : "set"} tier ${tier} in ${result.path}`)
         for (const warning of warnings) warn(`tier ${tier}: ${warning}`)
         try {
@@ -1290,6 +1366,30 @@ export default Plugin.define({
           throw new Error(`Tier ${tier} was written to ${result.path} but not applied: ${(error as Error).message}. The previous tiers stay in use until the config reloads.`)
         }
         return { ...result, warnings }
+      },
+      setAgent: async (input) => {
+        const { agent, tier } = (input ?? {}) as { agent?: unknown; tier?: unknown }
+        const spec = await writableSpec()
+        if (typeof agent !== "string" || agent.trim() === "") throw new Error(`Invalid agent ${JSON.stringify(agent)}`)
+        const value = tier === null || tier === undefined ? undefined : tier
+        await queue(async () => {
+          await refresh()
+        })
+        if (value !== undefined) {
+          const error = agentTierError(value, options.tiers ?? {})
+          if (error !== undefined) throw new Error(`Agent ${agent} not saved: ${error}`)
+        }
+        if (!(await listAgents()).some((a) => a.id === agent)) throw new Error(`Agent ${agent} not saved: the host lists no such agent.`)
+        const result = writeAgentTier(configDir(), agent, value as string | undefined, spec)
+        warn(`${value === undefined ? "removed the tier of" : "set the tier of"} agent ${agent} in ${result.path}`)
+        try {
+          await queue(() => reloadTiers(true))
+        } catch (error) {
+          warn(`agent ${agent} was written to ${result.path} but not applied`, { error: String(error) })
+          throw new Error(`Agent ${agent} was written to ${result.path} but not applied: ${(error as Error).message}. The previous tiers stay in use until the config reloads.`)
+        }
+        const effective = agentConfig()
+        return effective.origin === "project" ? { ...result, shadowedBy: effective.path } : result
       },
     })
 

@@ -2,7 +2,12 @@ import type { LocationRef } from "@opencode/client"
 import { Plugin } from "@opencode/plugin/tui"
 import { TiersRpc } from "./rpc.ts"
 import {
+  AGENT_DEFAULT,
+  agentDetailOptions,
   agentOptions,
+  agentTierCurrent,
+  agentTierOptions,
+  CHANGE_TIER,
   createDraft,
   dirty,
   entryRef,
@@ -23,7 +28,7 @@ import {
   variantOptions,
   withVariant,
 } from "./tiers-draft.ts"
-import { EFFORT_CHOICES, readState, type TierRow, type TierState, tierNameError, tierSummary } from "./tiers-ui.ts"
+import { type AgentRow, EFFORT_CHOICES, readState, type TierRow, type TierState, tierNameError, tierSummary } from "./tiers-ui.ts"
 
 const ADD = "\u0000add"
 const AGENTS = "\u0000agents"
@@ -204,12 +209,69 @@ export default Plugin.define({
       await editTier(at, state, createDraft(row, true))
     }
 
-    const showAgents = async (state: TierState) => {
-      await dialog.select<string>({
-        title: "Agents (read-only)",
-        placeholder: "Agent → tier → model it resolves to",
-        options: state.agents.length === 0 ? [{ title: "No tiered agents", value: "", disabled: true }] : agentOptions(state.agents),
+    /** Pick the agent's tier and save it at once; true when the config changed. */
+    const changeAgentTier = async (at: LocationRef, state: TierState, agent: AgentRow): Promise<boolean> => {
+      if (state.agentConfig?.origin === "project") {
+        const go = await dialog.confirm({
+          title: "A project config sets the agents",
+          message: `${state.agentConfig.path ?? "A project config"} has its own model-roles entry. A save here goes to the global config and will not change this project's tier for ${agent.id}.`,
+          label: { confirm: "Save to global anyway", cancel: "Cancel" },
+        })
+        if (go !== true) return false
+      }
+      const value = await dialog.select<string>({
+        title: `${agent.id}: tier`,
+        placeholder: "Pick a tier, or the agent default",
+        options: agentTierOptions(state.tiers),
+        current: agentTierCurrent(agent),
       })
+      if (value === undefined) return false
+      try {
+        const result = (await rpc.setAgent({ agent: agent.id, tier: value === AGENT_DEFAULT ? null : value }, { location: at })) as { path?: string; shadowedBy?: string }
+        if (result.shadowedBy !== undefined) {
+          toast(`Agent ${agent.id}: written to ${result.path ?? "the global config"}, but ${result.shadowedBy} overrides it here, so nothing changed in this project.`, "info")
+          return true
+        }
+        toast(`Agent ${agent.id} ${value === AGENT_DEFAULT ? "uses its default tier" : `uses tier ${value}`}; applied, written to ${result.path ?? "the global config"}.`, "success")
+        return true
+      } catch (error) {
+        toast(`Agent ${agent.id} not saved: ${(error as Error).message}`, "error")
+        return false
+      }
+    }
+
+    /** One agent's facts and actions; a save reloads and shows the menu again. Esc or Back returns to the list. */
+    const showAgent = async (at: LocationRef, start: TierState, id: string): Promise<TierState | undefined> => {
+      let state = start
+      for (;;) {
+        const agent = state.agents.find((a) => a.id === id)
+        if (agent === undefined) return state
+        const action = await dialog.select<string>({ title: `Agent ${agent.id}`, options: agentDetailOptions(agent, state.agentConfig) })
+        if (action !== CHANGE_TIER) return state
+        if (await changeAgentTier(at, state, agent)) {
+          const fresh = await load(at)
+          if (fresh === undefined) return undefined
+          state = fresh
+        }
+      }
+    }
+
+    const showAgents = async (at: LocationRef, start: TierState) => {
+      let state = start
+      let current: string | undefined
+      for (;;) {
+        const id = await dialog.select<string>({
+          title: "Agents",
+          placeholder: "Enter shows an agent and changes its tier",
+          options: state.agents.length === 0 ? [{ title: "No agents", value: "", disabled: true }] : agentOptions(state.agents, state.agentConfig),
+          ...(current === undefined ? {} : { current }),
+        })
+        if (id === undefined) return
+        current = id
+        const next = await showAgent(at, state, id)
+        if (next === undefined) return
+        state = next
+      }
     }
 
     const open = async () => {
@@ -232,7 +294,7 @@ export default Plugin.define({
               description: `${tierSummary(row)}${row.purposeMissing ? " (no purpose)" : ""}`,
               footer: row.cost,
             })),
-            { title: "Agents…", value: AGENTS, description: "Which tier each agent uses, and what it resolves to" },
+            { title: "Agents…", value: AGENTS, description: "See each agent's tier and change it" },
             { title: "Add a tier…", value: ADD },
           ],
           ...(current === undefined ? {} : { current }),
@@ -240,7 +302,7 @@ export default Plugin.define({
         if (choice === undefined) return
         current = choice
         if (choice === ADD) await addTier(at, state)
-        else if (choice === AGENTS) await showAgents(state)
+        else if (choice === AGENTS) await showAgents(at, state)
         else {
           const row = state.tiers.find((t) => t.name === choice)
           if (row !== undefined) await editTier(at, state, createDraft(row))

@@ -31,9 +31,11 @@ const tier = (name: string, configured?: Record<string, unknown>) => ({
   ...(configured === undefined ? {} : { configured }),
 })
 
-function harness(script: Step[], opts: { setFails?: string; persist?: (value: Record<string, unknown>) => Record<string, unknown> } = {}) {
+function harness(script: Step[], opts: { project?: string; setFails?: string; setAgentFails?: string; persist?: (value: Record<string, unknown>) => Record<string, unknown> } = {}) {
   const saved: Record<string, Record<string, unknown>> = {}
   const setCalls: Array<{ tier: string; value: unknown }> = []
+  const agentCalls: Array<{ agent: string; tier: string | null }> = []
+  const savedAgents: Record<string, string> = {}
   const stateCalls: unknown[] = []
   const toasts: Array<{ message: string; variant?: string }> = []
   const seen: Opts[] = []
@@ -71,7 +73,20 @@ function harness(script: Step[], opts: { setFails?: string; persist?: (value: Re
         const d = input.draft?.[t.name]
         return d === undefined ? t : { ...t, resolved: d === null ? "auto/default" : `draft:${JSON.stringify(d)}` }
       })
-      return { tiers, models, agents: [{ id: "build", tier: "strong", source: "agent", resolved: "a/one#high" }], config: "/cfg" }
+      const agentRow = (id: string, fallback?: { tier: string; source: string }) => {
+        const tierName = savedAgents[id] ?? fallback?.tier
+        const source = savedAgents[id] === undefined ? fallback?.source : "options"
+        return tierName === undefined ? { id } : { id, tier: tierName, source, resolved: "a/one#high" }
+      }
+      const agents = [agentRow("build", { tier: "strong", source: "header" }), agentRow("plan")]
+      return { tiers, models, agents, config: "/cfg", ...(opts.project === undefined ? {} : { agentConfig: { origin: "project", path: opts.project } }) }
+    },
+    setAgent: async (input: { agent: string; tier: string | null }) => {
+      if (opts.setAgentFails !== undefined) throw new Error(opts.setAgentFails)
+      agentCalls.push(input)
+      if (input.tier === null) delete savedAgents[input.agent]
+      else savedAgents[input.agent] = input.tier
+      return { path: "/cfg", ...(opts.project === undefined ? {} : { shadowedBy: opts.project }) }
     },
     set: async (input: { tier: string; value: Record<string, unknown> | null }) => {
       if (opts.setFails !== undefined) throw new Error(opts.setFails)
@@ -109,7 +124,7 @@ function harness(script: Step[], opts: { setFails?: string; persist?: (value: Re
     await Bun.sleep(5)
     expect(queue).toHaveLength(0)
   }
-  return { run, saved, setCalls, stateCalls, toasts, seen }
+  return { run, saved, agentCalls, setCalls, stateCalls, toasts, seen }
 }
 
 const pick = (value: unknown): Step => () => value
@@ -323,17 +338,144 @@ describe("/tiers editor", () => {
     expect(h.setCalls).toEqual([{ tier: "strong", value: { effort: "high" } }])
   })
 
-  test("Agents shows each agent's tier and model, read-only", async () => {
+  test("Agents lists every agent in short rows; Enter opens its details, Esc goes back to the same row", async () => {
     const h = harness([
       pick("\u0000agents"),
       (o) => {
-        expect(o.options?.[0]).toMatchObject({ title: "build", description: "strong → a/one#high" })
+        expect(o.title).toBe("Agents")
+        expect(o.options).toMatchObject([
+          { title: "build", description: "strong" },
+          { title: "plan", description: "no tier" },
+        ])
+        return "plan"
+      },
+      (o) => {
+        expect(o.title).toBe("Agent plan")
+        expect(titles(o)).toEqual(["Tier: no tier (session model)", "From: none", "Resolves to: the session model", "Change tier…", "Back"])
+        return ESC
+      },
+      (o) => {
+        expect(o.current).toBe("plan")
         return ESC
       },
       esc,
     ])
     await h.run()
-    expect(h.setCalls).toEqual([])
+    expect(h.agentCalls).toEqual([])
+  })
+
+  test("Change tier saves the pick, shows the refreshed details, and the list stays on the row", async () => {
+    const h = harness([
+      pick("\u0000agents"),
+      pick("plan"),
+      pick("\u0000change"),
+      (o) => {
+        expect(o.title).toBe("plan: tier")
+        expect(o.current).toBe("\u0000agent-default")
+        expect(titles(o)).toEqual(["Agent default", "cheap", "strong"])
+        return "cheap"
+      },
+      (o) => {
+        expect(titles(o)[0]).toBe("Tier: cheap") // refreshed after the save
+        expect(titles(o)[1]).toBe("From: your setting")
+        return pick("\u0000change")(o)
+      },
+      (o) => {
+        expect(o.current).toBe("cheap") // the current choice is marked
+        return pick("\u0000agent-default")(o)
+      },
+      (o) => {
+        expect(titles(o)[0]).toBe("Tier: no tier (session model)")
+        return ESC
+      },
+      (o) => {
+        expect(o.title).toBe("Agents")
+        expect(o.current).toBe("plan")
+        return ESC
+      },
+      esc,
+    ])
+    await h.run()
+    expect(h.agentCalls).toEqual([
+      { agent: "plan", tier: "cheap" },
+      { agent: "plan", tier: null },
+    ])
+    expect(h.toasts.map((t) => t.variant)).toEqual(["success", "success"])
+  })
+
+  test("under a project config the details say so, and Change tier warns first; Cancel writes nothing", async () => {
+    const h = harness(
+      [
+        pick("\u0000agents"),
+        pick("build"),
+        (o) => {
+          expect(titles(o).join(" ")).toContain("Project config (/p/opencode.json) holds the")
+          return pick("\u0000change")(o)
+        },
+        (o) => {
+          expect(o.title).toBe("A project config sets the agents")
+          expect(String(o.message)).toContain("will not change this project's tier")
+          return false
+        },
+        (o) => {
+          expect(o.title).toBe("Agent build")
+          return ESC
+        },
+        esc,
+        esc,
+      ],
+      { project: "/p/opencode.json" },
+    )
+    await h.run()
+    expect(h.agentCalls).toEqual([])
+  })
+
+  test("a shadowed save after Save to global anyway says it changed nothing here", async () => {
+    const h = harness(
+      [pick("\u0000agents"), pick("plan"), pick("\u0000change"), () => true, pick("cheap"), esc, esc, esc],
+      { project: "/p/opencode.json" },
+    )
+    await h.run()
+    expect(h.agentCalls).toEqual([{ agent: "plan", tier: "cheap" }])
+    expect(h.toasts).toHaveLength(1)
+    expect(h.toasts[0]?.message).toContain("/p/opencode.json overrides it here")
+    expect(h.toasts[0]?.message).not.toContain("applied")
+  })
+
+  test("Esc in the tier picker writes nothing", async () => {
+    const h = harness([pick("\u0000agents"), pick("build"), pick("\u0000change"), esc, esc, esc, esc])
+    await h.run()
+    expect(h.agentCalls).toEqual([])
+    expect(h.toasts).toEqual([])
+  })
+
+  test("an ambiguous-instance refusal shows like any save error", async () => {
+    const message = "Two model-roles entries are loaded (a, b); /tiers can't tell which one to edit. Edit the config by hand or remove one entry."
+    const h = harness([pick("\u0000agents"), pick("build"), pick("\u0000change"), pick("cheap"), esc, esc, esc], { setAgentFails: message })
+    await h.run()
+    expect(h.agentCalls).toEqual([])
+    expect(h.toasts).toEqual([{ message: `Agent build not saved: ${message}`, variant: "error" }])
+  })
+
+  test("a refused agent save shows an error and keeps the details menu", async () => {
+    const h = harness(
+      [
+        pick("\u0000agents"),
+        pick("build"),
+        pick("\u0000change"),
+        pick("cheap"),
+        (o) => {
+          expect(o.title).toBe("Agent build")
+          return ESC
+        },
+        esc,
+        esc,
+      ],
+      { setAgentFails: "Unknown tier" },
+    )
+    await h.run()
+    expect(h.agentCalls).toEqual([])
+    expect(h.toasts).toEqual([{ message: "Agent build not saved: Unknown tier", variant: "error" }])
   })
 
   test("Add a tier asks name and purpose, then the same tier menu", async () => {

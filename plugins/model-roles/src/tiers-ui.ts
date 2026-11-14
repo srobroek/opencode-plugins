@@ -43,8 +43,18 @@ export type TierRow = {
   configured?: TierConfig
 }
 
-/** A tiered agent: its tier, where that comes from, and what it resolves to; `pinned` when its own model wins. */
-export type AgentRow = { id: string; tier: string; source: AgentTierSource; resolved?: string; pinned?: string }
+/**
+ * An agent the host reports: its tier and where that comes from (both absent when it has none and
+ * runs the session model), what the tier resolves to, its own model (`pinned`, which wins), and its description.
+ */
+export type AgentRow = {
+  id: string
+  tier?: string
+  source?: AgentTierSource
+  resolved?: string
+  pinned?: string
+  description?: string
+}
 
 export type PickModel = { ref: string; variants: string[] }
 
@@ -54,6 +64,8 @@ export type TierState = {
   agents: AgentRow[]
   /** The config file `set` writes, or why there is none. */
   config?: string
+  /** Where the agent assignments come from; a project's entry shadows the global file `set` writes. */
+  agentConfig?: { origin: "global" | "project"; path?: string; alsoLoads?: string }
   error?: string
 }
 
@@ -70,6 +82,7 @@ export function tierState(input: {
   /** A candidate's status, for the per-candidate health. */
   status?: (entry: string) => CandidateStatus
   config?: string
+  agentConfig?: { origin: "global" | "project"; path?: string; alsoLoads?: string }
   error?: string
 }): TierState {
   const resolve = (name: string) => {
@@ -99,10 +112,14 @@ export function tierState(input: {
   const agents: AgentRow[] = []
   for (const agent of [...(input.agents ?? [])].sort((a, b) => a.id.localeCompare(b.id))) {
     const found = agentTier(agent, input.options.agents, input.options.implicit)
-    if (found === undefined) continue
-    const row: AgentRow = { id: agent.id, tier: found.tier, source: found.source }
-    const resolved = resolve(found.tier)
-    if (resolved !== undefined) row.resolved = resolved
+    const row: AgentRow = { id: agent.id }
+    if (found !== undefined) {
+      row.tier = found.tier
+      row.source = found.source
+      const resolved = resolve(found.tier)
+      if (resolved !== undefined) row.resolved = resolved
+    }
+    if (agent.description !== undefined && agent.description.trim() !== "") row.description = agent.description.trim()
     const pin = userPin(agent)
     if (pin !== undefined) row.pinned = modelText(pin)
     agents.push(row)
@@ -113,6 +130,7 @@ export function tierState(input: {
     .sort((a, b) => a.ref.localeCompare(b.ref))
   const state: TierState = { tiers, models, agents }
   if (input.config !== undefined) state.config = input.config
+  if (input.agentConfig !== undefined) state.agentConfig = input.agentConfig
   if (input.error !== undefined) state.error = input.error
   return state
 }
@@ -121,6 +139,12 @@ export function tierState(input: {
 export function readState(value: unknown): TierState | undefined {
   if (!isRecord(value) || !Array.isArray(value.tiers) || !Array.isArray(value.models)) return undefined
   return { ...(value as TierState), agents: Array.isArray(value.agents) ? (value.agents as AgentRow[]) : [] }
+}
+
+/** Why `tier` cannot be an agent's tier, or `undefined` when it can. */
+export function agentTierError(tier: unknown, tiers: Readonly<Record<string, unknown>>): string | undefined {
+  if (typeof tier !== "string" || !Object.hasOwn(tiers, tier)) return `Unknown tier ${JSON.stringify(tier)}.`
+  return undefined
 }
 
 /** Tier names `set` and drafts accept. */

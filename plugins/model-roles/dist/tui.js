@@ -20,6 +20,14 @@ var TiersRpc = Rpc.define({
         properties: { tier: { type: "string" }, value: {} }
       },
       output: { type: "object" }
+    },
+    setAgent: {
+      input: {
+        type: "object",
+        required: ["agent"],
+        properties: { agent: { type: "string" }, tier: {} }
+      },
+      output: { type: "object" }
     }
   },
   events: {}
@@ -792,12 +800,16 @@ function tierState(input) {
   const agents = [];
   for (const agent of [...input.agents ?? []].sort((a, b) => a.id.localeCompare(b.id))) {
     const found = agentTier(agent, input.options.agents, input.options.implicit);
-    if (found === undefined)
-      continue;
-    const row = { id: agent.id, tier: found.tier, source: found.source };
-    const resolved = resolve(found.tier);
-    if (resolved !== undefined)
-      row.resolved = resolved;
+    const row = { id: agent.id };
+    if (found !== undefined) {
+      row.tier = found.tier;
+      row.source = found.source;
+      const resolved = resolve(found.tier);
+      if (resolved !== undefined)
+        row.resolved = resolved;
+    }
+    if (agent.description !== undefined && agent.description.trim() !== "")
+      row.description = agent.description.trim();
     const pin = userPin(agent);
     if (pin !== undefined)
       row.pinned = modelText(pin);
@@ -807,6 +819,8 @@ function tierState(input) {
   const state = { tiers, models, agents };
   if (input.config !== undefined)
     state.config = input.config;
+  if (input.agentConfig !== undefined)
+    state.agentConfig = input.agentConfig;
   if (input.error !== undefined)
     state.error = input.error;
   return state;
@@ -815,6 +829,11 @@ function readState(value) {
   if (!isRecord3(value) || !Array.isArray(value.tiers) || !Array.isArray(value.models))
     return;
   return { ...value, agents: Array.isArray(value.agents) ? value.agents : [] };
+}
+function agentTierError(tier, tiers) {
+  if (typeof tier !== "string" || !Object.hasOwn(tiers, tier))
+    return `Unknown tier ${JSON.stringify(tier)}.`;
+  return;
 }
 var TIER_NAME = /^[a-z][a-z0-9-]*$/;
 function readDraft(input) {
@@ -1056,13 +1075,71 @@ function variantOptions(model) {
     ...(model?.variants ?? []).map((v) => ({ title: v, value: v }))
   ];
 }
-function agentOptions(agents) {
-  return agents.map((a) => ({
+function agentOptions(agents, config) {
+  const rows = agents.map((a) => ({
     title: a.id,
     value: a.id,
-    description: `${a.tier} \u2192 ${a.pinned !== undefined ? `${a.pinned} (own model)` : a.resolved ?? "nothing available"}`
+    description: `${a.tier ?? "no tier"}${a.pinned !== undefined ? " \xB7 own model" : ""}`
   }));
+  if (config?.alsoLoads === undefined)
+    return rows;
+  return [{ title: "A second model-roles entry also loads", value: "", disabled: true, description: config.alsoLoads }, ...rows];
 }
+var SOURCE_TEXT = {
+  options: "your setting",
+  header: "agent default",
+  implicit: "auto-classified"
+};
+function sourceText(source) {
+  return source === undefined ? "none" : SOURCE_TEXT[source];
+}
+function wrap(text, width = 52) {
+  const lines = [];
+  let line = "";
+  for (const word of text.split(/\s+/).filter(Boolean)) {
+    for (let rest = word;rest !== ""; ) {
+      const room = line === "" ? width : width - line.length - 1;
+      if (rest.length <= room) {
+        line = line === "" ? rest : `${line} ${rest}`;
+        rest = "";
+      } else if (line !== "") {
+        lines.push(line);
+        line = "";
+      } else {
+        lines.push(rest.slice(0, width));
+        rest = rest.slice(width);
+      }
+    }
+  }
+  if (line !== "")
+    lines.push(line);
+  return lines;
+}
+var CHANGE_TIER = "\x00change";
+var BACK = "\x00back";
+function agentDetailOptions(agent, config) {
+  const note = (text) => wrap(text).map((line, i) => ({ title: i === 0 ? line : `  ${line}`, value: "", disabled: true }));
+  const from = config?.origin === "project" ? `project config (${config.path ?? "unknown"})` : undefined;
+  const fact = (label, value) => wrap(`${label}: ${value}`).map((line, i) => ({ title: i === 0 ? line : `  ${line}`, value: "", disabled: true }));
+  return [
+    ...fact("Tier", agent.tier ?? "no tier (session model)"),
+    ...fact("From", sourceText(agent.source)),
+    ...fact("Resolves to", agent.tier === undefined ? "the session model" : agent.resolved ?? "nothing available"),
+    ...agent.pinned === undefined ? [] : fact("Own model", `${agent.pinned} (wins over the tier)`),
+    ...agent.description === undefined ? [] : fact("About", agent.description),
+    ...from === undefined ? [] : note(agent.source === "options" ? `Set by ${from}` : `Project config (${config?.path ?? "unknown"}) holds the model-roles entry`),
+    { title: "Change tier\u2026", value: CHANGE_TIER },
+    { title: "Back", value: BACK }
+  ];
+}
+var AGENT_DEFAULT = "\x00agent-default";
+function agentTierOptions(tiers) {
+  return [
+    { title: "Agent default", value: AGENT_DEFAULT, description: "Remove your setting; the agent's own tier or auto-classification applies" },
+    ...tiers.map((t) => ({ title: t.name, value: t.name, description: tierSummary(t) }))
+  ];
+}
+var agentTierCurrent = (agent) => agent.source === "options" && agent.tier !== undefined ? agent.tier : AGENT_DEFAULT;
 
 // plugins/model-roles/src/tui.tsx
 var ADD = "\x00add";
@@ -1301,16 +1378,89 @@ var tui_default = Plugin.define({
       };
       await editTier(at, state, createDraft(row, true));
     };
-    const showAgents = async (state) => {
-      await dialog.select({
-        title: "Agents (read-only)",
-        placeholder: "Agent \u2192 tier \u2192 model it resolves to",
-        options: state.agents.length === 0 ? [{
-          title: "No tiered agents",
-          value: "",
-          disabled: true
-        }] : agentOptions(state.agents)
+    const changeAgentTier = async (at, state, agent) => {
+      if (state.agentConfig?.origin === "project") {
+        const go = await dialog.confirm({
+          title: "A project config sets the agents",
+          message: `${state.agentConfig.path ?? "A project config"} has its own model-roles entry. A save here goes to the global config and will not change this project's tier for ${agent.id}.`,
+          label: {
+            confirm: "Save to global anyway",
+            cancel: "Cancel"
+          }
+        });
+        if (go !== true)
+          return false;
+      }
+      const value = await dialog.select({
+        title: `${agent.id}: tier`,
+        placeholder: "Pick a tier, or the agent default",
+        options: agentTierOptions(state.tiers),
+        current: agentTierCurrent(agent)
       });
+      if (value === undefined)
+        return false;
+      try {
+        const result = await rpc.setAgent({
+          agent: agent.id,
+          tier: value === AGENT_DEFAULT ? null : value
+        }, {
+          location: at
+        });
+        if (result.shadowedBy !== undefined) {
+          toast(`Agent ${agent.id}: written to ${result.path ?? "the global config"}, but ${result.shadowedBy} overrides it here, so nothing changed in this project.`, "info");
+          return true;
+        }
+        toast(`Agent ${agent.id} ${value === AGENT_DEFAULT ? "uses its default tier" : `uses tier ${value}`}; applied, written to ${result.path ?? "the global config"}.`, "success");
+        return true;
+      } catch (error) {
+        toast(`Agent ${agent.id} not saved: ${error.message}`, "error");
+        return false;
+      }
+    };
+    const showAgent = async (at, start, id) => {
+      let state = start;
+      for (;; ) {
+        const agent = state.agents.find((a) => a.id === id);
+        if (agent === undefined)
+          return state;
+        const action = await dialog.select({
+          title: `Agent ${agent.id}`,
+          options: agentDetailOptions(agent, state.agentConfig)
+        });
+        if (action !== CHANGE_TIER)
+          return state;
+        if (await changeAgentTier(at, state, agent)) {
+          const fresh = await load(at);
+          if (fresh === undefined)
+            return;
+          state = fresh;
+        }
+      }
+    };
+    const showAgents = async (at, start) => {
+      let state = start;
+      let current;
+      for (;; ) {
+        const id = await dialog.select({
+          title: "Agents",
+          placeholder: "Enter shows an agent and changes its tier",
+          options: state.agents.length === 0 ? [{
+            title: "No agents",
+            value: "",
+            disabled: true
+          }] : agentOptions(state.agents, state.agentConfig),
+          ...current === undefined ? {} : {
+            current
+          }
+        });
+        if (id === undefined)
+          return;
+        current = id;
+        const next = await showAgent(at, state, id);
+        if (next === undefined)
+          return;
+        state = next;
+      }
     };
     const open = async () => {
       const at = location();
@@ -1337,7 +1487,7 @@ var tui_default = Plugin.define({
           })), {
             title: "Agents\u2026",
             value: AGENTS,
-            description: "Which tier each agent uses, and what it resolves to"
+            description: "See each agent's tier and change it"
           }, {
             title: "Add a tier\u2026",
             value: ADD
@@ -1352,7 +1502,7 @@ var tui_default = Plugin.define({
         if (choice === ADD)
           await addTier(at, state);
         else if (choice === AGENTS)
-          await showAgents(state);
+          await showAgents(at, state);
         else {
           const row = state.tiers.find((t) => t.name === choice);
           if (row !== undefined)

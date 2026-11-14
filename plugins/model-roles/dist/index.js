@@ -3136,47 +3136,52 @@ function globalConfigDir(env, home) {
   return path.join(env.XDG_CONFIG_HOME || path.join(home, ".config"), "opencode");
 }
 var parse2 = (text) => parseTree2(text, [], { allowTrailingComma: true, disallowComments: false });
-function findPluginEntry(text) {
+function findPluginEntry(text, spec) {
+  const named = (value) => spec === undefined ? PLUGIN_SPEC.test(value) : value === spec;
   const root = parse2(text);
   const plugins = root === undefined ? undefined : findNodeAtLocation2(root, ["plugins"]);
   if (plugins?.type !== "array")
     return;
   for (const [index, child] of (plugins.children ?? []).entries()) {
     const value = getNodeValue2(child);
-    if (typeof value === "string" && PLUGIN_SPEC.test(value))
+    if (typeof value === "string" && named(value))
       return { index, spec: value, bare: true };
     if (typeof value === "object" && value !== null && !Array.isArray(value)) {
-      const spec = value.package;
-      if (typeof spec === "string" && PLUGIN_SPEC.test(spec))
-        return { index, spec, bare: false };
+      const pkg = value.package;
+      if (typeof pkg === "string" && named(pkg))
+        return { index, spec: pkg, bare: false };
     }
   }
   return;
 }
-function readTiers(text) {
-  const entry = findPluginEntry(text);
+var readSection = (text, section, spec) => {
+  const entry = findPluginEntry(text, spec);
   const root = parse2(text);
   if (entry === undefined || entry.bare || root === undefined)
     return {};
-  const node = findNodeAtLocation2(root, ["plugins", entry.index, "options", "tiers"]);
+  const node = findNodeAtLocation2(root, ["plugins", entry.index, "options", section]);
   const value = node === undefined ? undefined : getNodeValue2(node);
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : {};
-}
-function setTier(text, name, value) {
-  const entry = findPluginEntry(text);
+};
+var readTiers = (text, spec) => readSection(text, "tiers", spec);
+var readAgents = (text, spec) => readSection(text, "agents", spec);
+function setEntry(text, section, name, value, spec) {
+  const entry = findPluginEntry(text, spec);
   if (entry === undefined)
     return;
   if (entry.bare) {
     if (value === undefined)
       return text;
-    const replacement = { package: entry.spec, options: { tiers: { [name]: value } } };
+    const replacement = { package: entry.spec, options: { [section]: { [name]: value } } };
     return applyEdits(text, modify(text, ["plugins", entry.index], replacement, { formattingOptions: FORMATTING }));
   }
-  return applyEdits(text, modify(text, ["plugins", entry.index, "options", "tiers", name], value, { formattingOptions: FORMATTING }));
+  return applyEdits(text, modify(text, ["plugins", entry.index, "options", section, name], value, { formattingOptions: FORMATTING }));
 }
-function pickConfigFile(files) {
+var setTier = (text, name, value, spec) => setEntry(text, "tiers", name, value, spec);
+var setAgentTier = (text, agent, tier, spec) => setEntry(text, "agents", agent, tier, spec);
+function pickConfigFile(files, spec) {
   const order = (file) => CONFIG_NAMES.indexOf(path.basename(file.path));
-  return [...files].sort((a, b) => order(b) - order(a)).find((file) => findPluginEntry(file.text) !== undefined);
+  return [...files].sort((a, b) => order(b) - order(a)).find((file) => findPluginEntry(file.text, spec) !== undefined);
 }
 function readConfigFiles(dir) {
   const files = [];
@@ -3188,18 +3193,60 @@ function readConfigFiles(dir) {
   }
   return files;
 }
-function writeTier(dir, name, value) {
-  const file = pickConfigFile(readConfigFiles(dir));
+function writeEntry(dir, edit, spec) {
+  const file = pickConfigFile(readConfigFiles(dir), spec);
   if (file === undefined)
     throw new Error(`No model-roles plugin entry in ${CONFIG_NAMES.map((n) => path.join(dir, n)).join(" or ")}; add the plugin to the global config first.`);
-  const next = setTier(file.text, name, value);
+  const next = edit(file.text);
   if (next === undefined)
     throw new Error(`No model-roles plugin entry in ${file.path}.`);
   if (next !== file.text)
     writeFileSync(file.path, next.endsWith(`
 `) ? next : `${next}
 `);
-  return { path: file.path, tiers: readTiers(next) };
+  return { path: file.path, text: next };
+}
+function writeTier(dir, name, value, spec) {
+  const { path: file, text } = writeEntry(dir, (current) => setTier(current, name, value, spec), spec);
+  return { path: file, tiers: readTiers(text, spec) };
+}
+function writeAgentTier(dir, agent, tier, spec) {
+  const { path: file, text } = writeEntry(dir, (current) => setAgentTier(current, agent, tier, spec), spec);
+  return { path: file, agents: readAgents(text, spec) };
+}
+function projectConfigPaths(directory, globalDir) {
+  const ancestors = [];
+  for (let dir = path.resolve(directory);; dir = path.dirname(dir)) {
+    ancestors.push(dir);
+    if (path.dirname(dir) === dir)
+      break;
+  }
+  const far = ancestors.reverse();
+  const direct = far.flatMap((dir) => CONFIG_NAMES.map((name) => path.join(dir, name)));
+  const dotted = far.flatMap((dir) => CONFIG_NAMES.map((name) => path.join(dir, ".opencode", name)));
+  const skip = new Set(CONFIG_NAMES.map((name) => path.join(path.resolve(globalDir), name)));
+  return [...direct, ...dotted].filter((file) => !skip.has(file));
+}
+function readProjectFiles(directory, globalDir) {
+  const files = [];
+  for (const file of projectConfigPaths(directory, globalDir)) {
+    try {
+      files.push({ path: file, text: readFileSync(file, "utf8") });
+    } catch {}
+  }
+  return files;
+}
+function effectiveAgents(project, global, spec) {
+  const identity = spec ?? (global === undefined ? undefined : findPluginEntry(global.text, spec)?.spec);
+  const newestFirst = [...project].reverse();
+  const same = newestFirst.find((f) => findPluginEntry(f.text, identity) !== undefined);
+  const other = identity === undefined ? undefined : newestFirst.find((f) => findPluginEntry(f.text) !== undefined && findPluginEntry(f.text, identity) === undefined);
+  const extra = other === undefined ? {} : { alsoLoads: other.path };
+  if (same !== undefined)
+    return { origin: "project", path: same.path, agents: readAgents(same.text, identity), ...extra };
+  if (global === undefined)
+    return { origin: "global", agents: {}, ...extra };
+  return { origin: "global", path: global.path, agents: readAgents(global.text, identity), ...extra };
 }
 
 // plugins/model-roles/src/log.ts
@@ -3327,6 +3374,14 @@ var TiersRpc = Rpc.define({
         properties: { tier: { type: "string" }, value: {} }
       },
       output: { type: "object" }
+    },
+    setAgent: {
+      input: {
+        type: "object",
+        required: ["agent"],
+        properties: { agent: { type: "string" }, tier: {} }
+      },
+      output: { type: "object" }
     }
   },
   events: {}
@@ -3368,12 +3423,16 @@ function tierState(input) {
   const agents = [];
   for (const agent of [...input.agents ?? []].sort((a, b) => a.id.localeCompare(b.id))) {
     const found = agentTier(agent, input.options.agents, input.options.implicit);
-    if (found === undefined)
-      continue;
-    const row = { id: agent.id, tier: found.tier, source: found.source };
-    const resolved = resolve(found.tier);
-    if (resolved !== undefined)
-      row.resolved = resolved;
+    const row = { id: agent.id };
+    if (found !== undefined) {
+      row.tier = found.tier;
+      row.source = found.source;
+      const resolved = resolve(found.tier);
+      if (resolved !== undefined)
+        row.resolved = resolved;
+    }
+    if (agent.description !== undefined && agent.description.trim() !== "")
+      row.description = agent.description.trim();
     const pin = userPin(agent);
     if (pin !== undefined)
       row.pinned = modelText(pin);
@@ -3383,6 +3442,8 @@ function tierState(input) {
   const state = { tiers, models, agents };
   if (input.config !== undefined)
     state.config = input.config;
+  if (input.agentConfig !== undefined)
+    state.agentConfig = input.agentConfig;
   if (input.error !== undefined)
     state.error = input.error;
   return state;
@@ -3391,6 +3452,11 @@ function readState(value) {
   if (!isRecord7(value) || !Array.isArray(value.tiers) || !Array.isArray(value.models))
     return;
   return { ...value, agents: Array.isArray(value.agents) ? value.agents : [] };
+}
+function agentTierError(tier, tiers) {
+  if (typeof tier !== "string" || !Object.hasOwn(tiers, tier))
+    return `Unknown tier ${JSON.stringify(tier)}.`;
+  return;
 }
 var TIER_NAME = /^[a-z][a-z0-9-]*$/;
 function readDraft(input) {
@@ -4401,9 +4467,40 @@ ${refs.size}`;
       await whileSpawning(() => handleSpawn(event));
     });
     const configDir = () => globalConfigDir(process.env, homedir());
+    const lookupIdentity = async () => {
+      try {
+        const listed = await ctx.plugin.list();
+        const rows = Array.isArray(listed) ? listed : isRecord8(listed) && Array.isArray(listed.data) ? listed.data : [];
+        const mine = rows.filter((row) => row.id === "srobroek.model-roles");
+        if (mine.length > 1)
+          return { kind: "ambiguous", targets: mine.map((row) => String(row.source?.target ?? row.source?.type ?? "unknown")) };
+        const source = mine[0]?.source;
+        return source?.type === "package" && typeof source.target === "string" ? { kind: "unique", spec: source.target } : { kind: "unknown" };
+      } catch {
+        return { kind: "unknown" };
+      }
+    };
+    let known = { kind: "unknown" };
+    const resolveIdentity = async () => {
+      if (known.kind === "unique")
+        return known;
+      const found = await lookupIdentity();
+      if (found.kind === "unique")
+        known = found;
+      return found;
+    };
+    const ownSpec = () => known.kind === "unique" ? known.spec : undefined;
+    const writableSpec = async () => {
+      const identity = await resolveIdentity();
+      if (identity.kind === "ambiguous")
+        throw new Error(`Two model-roles entries are loaded (${identity.targets.join(", ")}); /tiers can't tell which one to edit. Edit the config by hand or remove one entry.`);
+      if (identity.kind === "unknown")
+        throw new Error("The host did not say which model-roles entry this instance is, so /tiers can't tell which one to edit. Edit the config by hand.");
+      return identity.spec;
+    };
     const globalFile = () => {
       try {
-        return pickConfigFile(readConfigFiles(configDir()));
+        return pickConfigFile(readConfigFiles(configDir()), ownSpec());
       } catch {
         return;
       }
@@ -4411,27 +4508,48 @@ ${refs.size}`;
     const pluginOptions = isRecord8(ctx.options) ? ctx.options : {};
     let fileTiers = (() => {
       const file = globalFile();
-      return file === undefined ? undefined : JSON.stringify(readTiers(file.text));
+      return file === undefined ? undefined : JSON.stringify(readTiers(file.text, ownSpec()));
     })();
+    const agentConfig = () => {
+      let project = [];
+      try {
+        const directory = ctx.location?.directory;
+        if (typeof directory === "string")
+          project = readProjectFiles(directory, configDir());
+      } catch {}
+      return effectiveAgents(project, globalFile(), ownSpec());
+    };
+    const agentsKeyOf = (config) => JSON.stringify({ origin: config.origin, path: config.path, agents: parseOptions({ agents: config.agents }).agents });
+    const startupConfig = agentConfig();
+    const startupAgents = parseOptions({ agents: startupConfig.agents }).agents;
+    const otherAgents = Object.fromEntries(Object.entries(options.agents).filter(([agent]) => !Object.hasOwn(startupAgents, agent)));
+    let fileAgents = agentsKeyOf(startupConfig);
     const reloadTiers = async (force) => {
+      const identity = await resolveIdentity();
       const file = globalFile();
-      if (file === undefined)
-        return;
-      const tiers2 = readTiers(file.text);
-      const key = JSON.stringify(tiers2);
-      if (!force && key === fileTiers)
+      const config = agentConfig();
+      const agentsKey = agentsKeyOf(config);
+      const wanted = parseOptions({ agents: config.agents }).agents;
+      const agentsChanged = identity.kind === "unique" && agentsKey !== fileAgents;
+      const tiers2 = file === undefined ? undefined : readTiers(file.text, ownSpec());
+      const key = tiers2 === undefined ? fileTiers : JSON.stringify(tiers2);
+      if (file === undefined ? !agentsChanged : !force && key === fileTiers && !agentsChanged)
         return;
       await exclusive(async () => {
-        const previous = { settings, roles: options.roles, tiers: options.tiers, classes: options.classes, derived };
+        const previous = { settings, agents: options.agents, roles: options.roles, tiers: options.tiers, classes: options.classes, derived };
         const restore = () => {
           settings = previous.settings;
+          options.agents = previous.agents;
           options.roles = previous.roles;
           options.tiers = previous.tiers;
           options.classes = previous.classes;
           derived = previous.derived;
         };
         try {
-          settings = parseTierSettings({ ...pluginOptions, tiers: tiers2 });
+          if (tiers2 !== undefined)
+            settings = parseTierSettings({ ...pluginOptions, tiers: tiers2 });
+          if (agentsChanged)
+            options.agents = config.origin === "project" ? wanted : { ...otherAgents, ...wanted };
           rebuild();
           attempts = 0;
           await check2(true);
@@ -4445,7 +4563,8 @@ ${refs.size}`;
         }
       });
       fileTiers = key;
-      warn(`applied the tiers from ${file.path}`);
+      fileAgents = agentsKey;
+      warn(`applied the tiers from ${file?.path ?? config.path ?? "the project config"}`);
     };
     const rpc = await ctx.rpc.register(TiersRpc, {
       state: async (input) => {
@@ -4454,7 +4573,7 @@ ${refs.size}`;
         });
         const file = globalFile();
         const saved = {};
-        for (const [name, value] of Object.entries(file === undefined ? settings.tiers : readTiers(file.text)))
+        for (const [name, value] of Object.entries(file === undefined ? settings.tiers : readTiers(file.text, ownSpec())))
           saved[name] = parseTierConfig(value);
         const configured = applyDraft(saved, readDraft(input));
         const preview = buildTiers(parseTierSettings({ ...pluginOptions, tiers: configured }), available, refs);
@@ -4466,11 +4585,17 @@ ${refs.size}`;
           agents: await listAgents().catch(() => []),
           health: view(),
           status: (entry) => candidateStatus(entry, available, preview.roles, health2, now),
-          ...file === undefined ? { error: `No model-roles plugin entry in the global config (${configDir()}); /tiers cannot save.` } : { config: file.path }
+          ...file === undefined ? { error: `No model-roles plugin entry in the global config (${configDir()}); /tiers cannot save.` } : { config: file.path },
+          agentConfig: (({ origin, path: from, alsoLoads }) => ({
+            origin,
+            ...from === undefined ? {} : { path: from },
+            ...alsoLoads === undefined ? {} : { alsoLoads }
+          }))(agentConfig())
         });
       },
       set: async (input) => {
         const { tier, value } = input ?? {};
+        const spec = await writableSpec();
         if (typeof tier !== "string" || !TIER_NAME.test(tier))
           throw new Error(`Invalid tier name ${JSON.stringify(tier)}`);
         const config = value === null || value === undefined ? undefined : compact(parseTierConfig(value));
@@ -4480,7 +4605,7 @@ ${refs.size}`;
         const { errors, warnings } = validateTierConfig(config, available, catalog2);
         if (errors.length > 0)
           throw new Error(`Tier ${tier} not saved: ${errors.join(" ")}`);
-        const result = writeTier(configDir(), tier, config);
+        const result = writeTier(configDir(), tier, config, spec);
         warn(`${config === undefined ? "removed" : "set"} tier ${tier} in ${result.path}`);
         for (const warning of warnings)
           warn(`tier ${tier}: ${warning}`);
@@ -4491,6 +4616,33 @@ ${refs.size}`;
           throw new Error(`Tier ${tier} was written to ${result.path} but not applied: ${error.message}. The previous tiers stay in use until the config reloads.`);
         }
         return { ...result, warnings };
+      },
+      setAgent: async (input) => {
+        const { agent, tier } = input ?? {};
+        const spec = await writableSpec();
+        if (typeof agent !== "string" || agent.trim() === "")
+          throw new Error(`Invalid agent ${JSON.stringify(agent)}`);
+        const value = tier === null || tier === undefined ? undefined : tier;
+        await queue(async () => {
+          await refresh();
+        });
+        if (value !== undefined) {
+          const error = agentTierError(value, options.tiers ?? {});
+          if (error !== undefined)
+            throw new Error(`Agent ${agent} not saved: ${error}`);
+        }
+        if (!(await listAgents()).some((a) => a.id === agent))
+          throw new Error(`Agent ${agent} not saved: the host lists no such agent.`);
+        const result = writeAgentTier(configDir(), agent, value, spec);
+        warn(`${value === undefined ? "removed the tier of" : "set the tier of"} agent ${agent} in ${result.path}`);
+        try {
+          await queue(() => reloadTiers(true));
+        } catch (error) {
+          warn(`agent ${agent} was written to ${result.path} but not applied`, { error: String(error) });
+          throw new Error(`Agent ${agent} was written to ${result.path} but not applied: ${error.message}. The previous tiers stay in use until the config reloads.`);
+        }
+        const effective = agentConfig();
+        return effective.origin === "project" ? { ...result, shadowedBy: effective.path } : result;
       }
     });
     const spawnResults = await ctx.tool.hook("execute.after", async (event) => {
@@ -4656,6 +4808,7 @@ export {
   TiersRpc,
   agentHash,
   agentTier,
+  agentTierError,
   applyDraft,
   applyEdit2 as applyEdit,
   applyFrozenTierParam,
@@ -4695,6 +4848,7 @@ export {
   describeChoice,
   desiredModels,
   duration,
+  effectiveAgents,
   expandRole,
   explainSpawn,
   explicitCandidates,
@@ -4742,17 +4896,20 @@ export {
   planImplicit,
   planSpawn,
   priceOf,
+  projectConfigPaths,
   providerKey,
   pruneHealth,
   pushHistory,
   pushReceipt,
   quotaReset,
   rankOf,
+  readAgents,
   readClassification,
   readConfigFiles,
   readDraft,
   readFrozenTierParam,
   readHealth,
+  readProjectFiles,
   readReceipts,
   readState,
   readTiers,
@@ -4768,6 +4925,8 @@ export {
   roleParamDescription,
   rolesListing,
   sameModel,
+  setAgentTier,
+  setEntry,
   setTier,
   spawnTarget,
   staleAgents,
@@ -4794,5 +4953,6 @@ export {
   withEffort,
   withRoleNote,
   withRoleParam,
+  writeAgentTier,
   writeTier
 };

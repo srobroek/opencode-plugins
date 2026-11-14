@@ -29,6 +29,7 @@ export type AvailableModel = {
 export type AgentLike = {
   id: string
   model?: ModelRef
+  description?: string
   request?: { headers?: Readonly<Record<string, string>> }
 }
 

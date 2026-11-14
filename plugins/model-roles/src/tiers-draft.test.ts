@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test"
 import {
+  AGENT_DEFAULT,
+  agentDetailOptions,
   agentOptions,
+  agentTierCurrent,
+  agentTierOptions,
+  BACK,
+  CHANGE_TIER,
   createDraft,
   dirty,
   INHERIT,
@@ -10,6 +16,7 @@ import {
   setEffort,
   setPurpose,
   setVariant,
+  sourceText,
   tierMenuOptions,
   toConfig,
   toggle,
@@ -183,13 +190,73 @@ describe("menu options", () => {
     expect(variantOptions(undefined).map((o) => o.value)).toEqual([INHERIT])
   })
 
-  test("agents: tier and resolved model, an own model wins", () => {
+  test("agent rows are short: id, tier or no tier, a marker for an own model", () => {
     expect(
       agentOptions([
-        { id: "build", tier: "strong", resolved: "a/one#high" },
-        { id: "own", tier: "cheap", pinned: "b/two" },
-        { id: "none", tier: "cheap" },
-      ]).map((o) => o.description),
-    ).toEqual(["strong → a/one#high", "cheap → b/two (own model)", "cheap → nothing available"])
+        { id: "build", tier: "strong", source: "options", resolved: "a/one#high" },
+        { id: "own", tier: "cheap", source: "header", pinned: "b/two" },
+        { id: "none" },
+      ]).map((o) => [o.title, o.description]),
+    ).toEqual([
+      ["build", "strong"],
+      ["own", "cheap · own model"],
+      ["none", "no tier"],
+    ])
+  })
+
+  test("a project entry under another package string adds one short note to the list", () => {
+    const rows = agentOptions([{ id: "build" }], { alsoLoads: "/p/opencode.json" })
+    expect(rows.map((r) => [r.title, r.disabled ?? false, r.description])).toEqual([
+      ["A second model-roles entry also loads", true, "/p/opencode.json"],
+      ["build", false, "no tier"],
+    ])
+  })
+
+  test("agent details: one disabled row per fact, long text wrapped, then the actions", () => {
+    const rows = agentDetailOptions({ id: "own", tier: "cheap", source: "header", resolved: "a/one#low", pinned: "b/two", description: "word ".repeat(30).trim() })
+    const facts = rows.filter((r) => r.disabled)
+    expect(facts.slice(0, 4).map((r) => r.title)).toEqual(["Tier: cheap", "From: agent default", "Resolves to: a/one#low", "Own model: b/two (wins over the tier)"])
+    expect(facts.length).toBeGreaterThan(5)
+    expect(facts.every((r) => r.title.length <= 54)).toBe(true)
+    expect(rows.slice(-2).map((r) => r.value)).toEqual([CHANGE_TIER, BACK])
+  })
+
+  test("agent details without a tier, pin or description", () => {
+    expect(agentDetailOptions({ id: "x" }).map((r) => r.title)).toEqual([
+      "Tier: no tier (session model)",
+      "From: none",
+      "Resolves to: the session model",
+      "Change tier…",
+      "Back",
+    ])
+  })
+
+  test("agent details name a project config: set by it for its own assignments, else that it holds the entry", () => {
+    const project = { origin: "project", path: "/p/opencode.json" }
+    const titles = (rows: ReturnType<typeof agentDetailOptions>) => rows.filter((r) => r.disabled).map((r) => r.title)
+    expect(titles(agentDetailOptions({ id: "a", tier: "cheap", source: "options", resolved: "x" }, project))).toContain("Set by project config (/p/opencode.json)")
+    expect(titles(agentDetailOptions({ id: "a", tier: "cheap", source: "header" }, project)).join(" ")).toContain("Project config (/p/opencode.json) holds the")
+    expect(titles(agentDetailOptions({ id: "a" }, { origin: "global", path: "/g" })).join(" ")).not.toContain("project")
+  })
+
+  test("source words", () => {
+    expect([sourceText("options"), sourceText("header"), sourceText("implicit"), sourceText(undefined)]).toEqual([
+      "your setting",
+      "agent default",
+      "auto-classified",
+      "none",
+    ])
+  })
+
+  test("tier picker: agent default first, every tier with its summary; the current mark follows the setting", () => {
+    const options = agentTierOptions([{ name: "cheap", builtin: true, source: "derived", purpose: "p", distinctVendor: false, cost: "", candidates: [], resolved: "a/b" }])
+    expect(options.map((o) => [o.title, o.value])).toEqual([
+      ["Agent default", AGENT_DEFAULT],
+      ["cheap", "cheap"],
+    ])
+    expect(options[1]?.description).toBe("auto → a/b")
+    expect(agentTierCurrent({ id: "a", tier: "cheap", source: "options" })).toBe("cheap")
+    expect(agentTierCurrent({ id: "a", tier: "cheap", source: "header" })).toBe(AGENT_DEFAULT)
+    expect(agentTierCurrent({ id: "a" })).toBe(AGENT_DEFAULT)
   })
 })

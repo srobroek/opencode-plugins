@@ -1,5 +1,5 @@
 import { describe, expect, setSystemTime, test } from "bun:test"
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import * as Effect from "effect/Effect"
@@ -8,7 +8,7 @@ import { withOptionalString } from "../../lib/src/tool-schema.ts"
 import { WORKTREE_PARAM, WORKTREE_PARAM_DESCRIPTION } from "../../subagent-worktree/src/lane.ts"
 import reference from "./fixtures/reference.json"
 import work from "./fixtures/work-models.json"
-import plugin, { MAX_REREGISTER, type ModelRef, readTiers, spawnTarget } from "./index.ts"
+import plugin, { MAX_REREGISTER, type ModelRef, readAgents, readTiers, spawnTarget } from "./index.ts"
 
 type Agent = { id: string; model?: ModelRef; request?: { headers?: Record<string, string> } }
 type Model = { providerID: string; id: string; variants: { id: string }[]; cost?: { input: number }[] }
@@ -43,6 +43,8 @@ function createHost(input: {
   sessionModel?: ModelRef
   defaultModel?: ModelRef
   references?: Array<Model & { family?: string; time?: { released?: number } }>
+  directory?: string
+  plugin?: unknown
 }) {
   const toolHooks: Array<{ name: string; callback: (payload: unknown) => Promise<void> }> = []
   let sessionGet: (id: string) => Promise<unknown> = async (id) =>
@@ -120,6 +122,8 @@ function createHost(input: {
   }
   const context = {
     options: input.options,
+    ...(input.directory === undefined ? {} : { location: { directory: input.directory } }),
+    plugin: input.plugin ?? { list: async () => ({ data: [{ id: "srobroek.model-roles", source: { type: "package", target: "/x/plugins/model-roles" } }] }) },
     agent: {
       transform,
       list: async () => ({ data: listOverride ? listOverride() : [...agents.values()].map((a) => structuredClone(a)) }),
@@ -1472,14 +1476,24 @@ describe("tiers rpc", () => {
   })
 
   /** Run `body` against a plugin whose global config dir holds a model-roles entry. */
-  const withConfig = async (body: (host: ReturnType<typeof createHost>, file: string) => Promise<void>, agents: Agent[] = []) => {
+  const withConfig = async (
+    body: (host: ReturnType<typeof createHost>, file: string) => Promise<void>,
+    agents: Agent[] = [],
+    given: { options?: unknown; fileText?: string; project?: Record<string, string>; plugin?: unknown } = {},
+  ) => {
     const dir = mkdtempSync(path.join(tmpdir(), "model-roles-rpc-"))
     const previous = process.env.OPENCODE_CONFIG_DIR
     process.env.OPENCODE_CONFIG_DIR = dir
     const file = path.join(dir, "opencode.json")
     try {
-      writeFileSync(file, '{ "plugins": [{ "package": "/x/plugins/model-roles", "options": {} }] }\n')
-      const host = createHost({ agents, models: work as unknown as Model[], references: reference as unknown as Model[], options: {} })
+      writeFileSync(file, given.fileText ?? '{ "plugins": [{ "package": "/x/plugins/model-roles", "options": {} }] }\n')
+      const projectDir = path.join(dir, "project", "sub")
+      mkdirSync(projectDir, { recursive: true })
+      for (const [name, text] of Object.entries(given.project ?? {})) {
+        mkdirSync(path.dirname(path.join(projectDir, name)), { recursive: true })
+        writeFileSync(path.join(projectDir, name), text)
+      }
+      const host = createHost({ agents, models: work as unknown as Model[], references: reference as unknown as Model[], options: given.options ?? {}, directory: projectDir, plugin: given.plugin })
       const cleanup = await setup(host)
       try {
         await body(host, file)
@@ -1509,6 +1523,295 @@ describe("tiers rpc", () => {
         "openai/gpt-daybreak-blue-latest is not available now (provider not connected, or disabled); the tier skips it until it is.",
       ])
     })
+  })
+
+  test("setAgent writes options.agents, applies it at once and removes it again", async () => {
+    await withConfig(
+      async (host, file) => {
+        const cheapModel = { providerID: "amazon-bedrock", id: "global.anthropic.claude-haiku-5-5", variant: "low" }
+        expect(host.agents().get("worker")?.model).toEqual(cheapModel)
+        await host.rpc("setAgent", { agent: "worker", tier: "strong" })
+        expect(readAgents(readFileSync(file, "utf8"))).toEqual({ worker: "strong" })
+        expect(host.agents().get("worker")?.model).not.toEqual(cheapModel)
+        const state = (await host.rpc("state")) as { agents: Array<{ id: string; tier?: string; source?: string }> }
+        expect(state.agents.find((a) => a.id === "worker")).toMatchObject({ tier: "strong", source: "options" })
+        await host.rpc("setAgent", { agent: "worker", tier: null })
+        expect(readAgents(readFileSync(file, "utf8"))).toEqual({})
+        expect(host.agents().get("worker")?.model).toEqual(cheapModel)
+      },
+      [{ id: "worker", request: header("cheap") }],
+    )
+  })
+
+  test("setAgent refuses an unknown tier or agent and writes nothing", async () => {
+    await withConfig(
+      async (host, file) => {
+        const before = readFileSync(file, "utf8")
+        await expect(host.rpc("setAgent", { agent: "worker", tier: "nope" })).rejects.toThrow('Agent worker not saved: Unknown tier "nope".')
+        await expect(host.rpc("setAgent", { agent: "ghost", tier: "cheap" })).rejects.toThrow("the host lists no such agent")
+        await expect(host.rpc("setAgent", { agent: "", tier: "cheap" })).rejects.toThrow(/Invalid agent/)
+        expect(readFileSync(file, "utf8")).toBe(before)
+      },
+      [{ id: "worker", request: header("cheap") }],
+    )
+  })
+
+  test("state lists an agent without a tier", async () => {
+    await withConfig(async (host) => {
+      const state = (await host.rpc("state")) as { agents: Array<Record<string, unknown>> }
+      expect(state.agents).toEqual([{ id: "plain" }])
+    }, [{ id: "plain" }])
+  })
+
+  type AgentView = { id: string; tier?: string; source?: string; resolved?: string }
+  const agentRow = async (host: ReturnType<typeof createHost>, id: string) =>
+    ((await host.rpc("state")) as { agents: AgentView[] }).agents.find((a) => a.id === id)
+  const entry = (agents: Record<string, string>) =>
+    `{ "plugins": [{ "package": "/x/plugins/model-roles", "options": { "agents": ${JSON.stringify(agents)} } }] }\n`
+  const agentFixtures: Agent[] = [
+    { id: "proj", request: header("cheap") },
+    { id: "glob", request: header("cheap") },
+  ]
+
+  const projectEntry = (agents: Record<string, string>) => entry(agents)
+
+  test("a project entry owns the agents: it stays across global saves, edits and removals, even at the same value", async () => {
+    await withConfig(
+      async (host, file) => {
+        // The project says glob is reviewer, the same as the global file; it leaves proj out of its map.
+        expect(await agentRow(host, "glob")).toMatchObject({ tier: "reviewer", source: "options" })
+        await host.rpc("set", { tier: "docs", value: { purpose: "docs" } })
+        const saved = (await host.rpc("setAgent", { agent: "proj", tier: "strong" })) as { shadowedBy?: string }
+        expect(saved.shadowedBy).toEndWith(path.join("project", "sub", "opencode.json"))
+        expect(readAgents(readFileSync(file, "utf8"))).toEqual({ glob: "reviewer", proj: "strong" })
+        // A global edit and a global removal change neither the project's glob nor give proj back its global tier.
+        await host.rpc("setAgent", { agent: "glob", tier: "standard" })
+        expect(await agentRow(host, "glob")).toMatchObject({ tier: "reviewer", source: "options" })
+        await host.rpc("setAgent", { agent: "glob", tier: null })
+        expect(await agentRow(host, "glob")).toMatchObject({ tier: "reviewer", source: "options" })
+        expect(await agentRow(host, "proj")).toMatchObject({ tier: "cheap", source: "header" })
+        const state = (await host.rpc("state")) as { agentConfig?: { origin: string; path?: string } }
+        expect(state.agentConfig).toMatchObject({ origin: "project" })
+      },
+      agentFixtures,
+      { options: { agents: { glob: "reviewer" } }, fileText: entry({ glob: "reviewer" }), project: { "opencode.json": projectEntry({ glob: "reviewer" }) } },
+    )
+  })
+
+  test("a hand edit of the global file does not touch the agents a project entry owns", async () => {
+    await withConfig(
+      async (host, file) => {
+        writeFileSync(file, entry({ glob: "strong" }))
+        host.emit({ type: "config.updated", data: {} })
+        await settle()
+        expect(await agentRow(host, "glob")).toMatchObject({ tier: "reviewer", source: "options" })
+      },
+      agentFixtures,
+      { options: { agents: { glob: "reviewer" } }, fileText: entry({ glob: "reviewer" }), project: { "opencode.json": projectEntry({ glob: "reviewer" }) } },
+    )
+  })
+
+  test("a project entry under another package string does not shadow the global one; the list is told", async () => {
+    await withConfig(
+      async (host) => {
+        expect(await agentRow(host, "glob")).toMatchObject({ tier: "reviewer", source: "options" })
+        await host.rpc("setAgent", { agent: "glob", tier: "standard" })
+        expect(await agentRow(host, "glob")).toMatchObject({ tier: "standard", source: "options" })
+        const state = (await host.rpc("state")) as { agentConfig?: { origin: string; alsoLoads?: string } }
+        expect(state.agentConfig?.origin).toBe("global")
+        expect(state.agentConfig?.alsoLoads).toEndWith(path.join("project", "sub", "opencode.json"))
+      },
+      agentFixtures,
+      {
+        options: { agents: { glob: "reviewer" } },
+        fileText: entry({ glob: "reviewer" }),
+        project: { "opencode.json": entry({ glob: "strong" }).replace("/x/plugins/model-roles", "/y/plugins/model-roles") },
+      },
+    )
+  })
+
+  test("the host's own package target picks and writes only the entry with that exact string", async () => {
+    const two = `{ "plugins": [{ "package": "/x/plugins/model-roles", "options": { "agents": { "glob": "cheap" } } }, { "package": "/z/plugins/model-roles", "options": { "agents": { "glob": "reviewer" } } }] }\n`
+    await withConfig(
+      async (host, file) => {
+        expect(await agentRow(host, "glob")).toMatchObject({ tier: "reviewer", source: "options" })
+        await host.rpc("setAgent", { agent: "glob", tier: "strong" })
+        const written = JSON.parse(readFileSync(file, "utf8")).plugins
+        expect(written[0].options.agents).toEqual({ glob: "cheap" })
+        expect(written[1].options.agents).toEqual({ glob: "strong" })
+      },
+      agentFixtures,
+      {
+        options: { agents: { glob: "reviewer" } },
+        fileText: two,
+        plugin: { list: async () => ({ data: [{ id: "srobroek.model-roles", source: { type: "package", target: "/z/plugins/model-roles" } }] }) },
+      },
+    )
+  })
+
+  test("a project-only config (no global entry): a hand edit and a reload apply", async () => {
+    await withConfig(
+      async (host, file) => {
+        const projectFile = path.join(path.dirname(file), "project", "sub", "opencode.json")
+        expect(await agentRow(host, "glob")).toMatchObject({ tier: "reviewer", source: "options" })
+        writeFileSync(projectFile, entry({ glob: "strong" }))
+        host.emit({ type: "config.updated", data: {} })
+        await settle()
+        expect(await agentRow(host, "glob")).toMatchObject({ tier: "strong", source: "options" })
+        writeFileSync(projectFile, entry({}))
+        host.emit({ type: "config.updated", data: {} })
+        await settle()
+        expect(await agentRow(host, "glob")).toMatchObject({ tier: "cheap", source: "header" })
+      },
+      agentFixtures,
+      { options: { agents: { glob: "reviewer" } }, fileText: "{}\n", project: { "opencode.json": entry({ glob: "reviewer" }) } },
+    )
+  })
+
+  const row = (target: string) => ({ id: "srobroek.model-roles", source: { type: "package", target } })
+  const refused = async (plugin: unknown, message: RegExp) => {
+    const two = `{ "plugins": [{ "package": "/x/plugins/model-roles", "options": { "agents": { "glob": "cheap" } } }, { "package": "/z/plugins/model-roles", "options": { "agents": { "glob": "reviewer" } } }] }\n`
+    await withConfig(
+      async (host, file) => {
+        const before = readFileSync(file, "utf8")
+        await expect(host.rpc("setAgent", { agent: "glob", tier: "strong" })).rejects.toThrow(message)
+        await expect(host.rpc("set", { tier: "cheap", value: { effort: "high" } })).rejects.toThrow(message)
+        expect(readFileSync(file, "utf8")).toBe(before)
+        // A reload keeps the startup assignments instead of applying another entry's.
+        writeFileSync(file, two.replace('"glob": "reviewer"', '"glob": "strong"'))
+        host.emit({ type: "config.updated", data: {} })
+        await settle()
+        expect(await agentRow(host, "glob")).toMatchObject({ tier: "reviewer", source: "options" })
+      },
+      agentFixtures,
+      { options: { agents: { glob: "reviewer" } }, fileText: two, plugin },
+    )
+  }
+
+  test("two loaded instances with this id: saves refuse before writing, reloads keep the startup agents", async () => {
+    await refused({ list: async () => ({ data: [row("/x/plugins/model-roles"), row("/z/plugins/model-roles")] }) }, /Two model-roles entries are loaded \(\/x\/plugins\/model-roles, \/z\/plugins\/model-roles\); \/tiers can't tell which one to edit/)
+  })
+
+  test("the host lists this plugin only after setup: the first save after that works, and the identity is kept", async () => {
+    let listed = false
+    const plugin = { list: async () => ({ data: listed ? [row("/x/plugins/model-roles")] : [] }) }
+    await withConfig(
+      async (host, file) => {
+        await expect(host.rpc("setAgent", { agent: "glob", tier: "strong" })).rejects.toThrow(/did not say which model-roles entry/)
+        listed = true
+        await host.rpc("setAgent", { agent: "glob", tier: "strong" })
+        expect(readAgents(readFileSync(file, "utf8"))).toEqual({ glob: "strong" })
+        // A unique answer is cached: later saves do not depend on the host listing again.
+        listed = false
+        await host.rpc("setAgent", { agent: "glob", tier: "standard" })
+        expect(readAgents(readFileSync(file, "utf8"))).toEqual({ glob: "standard" })
+      },
+      agentFixtures,
+      { plugin },
+    )
+  })
+
+  test("an ambiguous answer is not cached: a later unique one lets saves through", async () => {
+    let rows = [row("/x/plugins/model-roles"), row("/z/plugins/model-roles")]
+    const plugin = { list: async () => ({ data: rows }) }
+    await withConfig(
+      async (host, file) => {
+        await expect(host.rpc("setAgent", { agent: "glob", tier: "strong" })).rejects.toThrow(/Two model-roles entries are loaded/)
+        rows = [row("/x/plugins/model-roles")]
+        await host.rpc("setAgent", { agent: "glob", tier: "strong" })
+        expect(readAgents(readFileSync(file, "utf8"))).toEqual({ glob: "strong" })
+      },
+      agentFixtures,
+      { plugin },
+    )
+  })
+
+  test("no host answer: saves refuse too", async () => {
+    await refused({ list: async () => Promise.reject(new Error("down")) }, /did not say which model-roles entry/)
+  })
+
+  test("one row whose target names no config entry refuses without writing", async () => {
+    await withConfig(
+      async (host, file) => {
+        const before = readFileSync(file, "utf8")
+        await expect(host.rpc("setAgent", { agent: "glob", tier: "strong" })).rejects.toThrow(/No model-roles plugin entry/)
+        expect(readFileSync(file, "utf8")).toBe(before)
+      },
+      agentFixtures,
+      { plugin: { list: async () => ({ data: [row("/nowhere/model-roles")] }) } },
+    )
+  })
+
+  test("a hand edit of the project file applies", async () => {
+    await withConfig(
+      async (host, file) => {
+        const projectFile = path.join(path.dirname(file), "project", "sub", "opencode.json")
+        writeFileSync(projectFile, projectEntry({ glob: "strong" }))
+        host.emit({ type: "config.updated", data: {} })
+        await settle()
+        expect(await agentRow(host, "glob")).toMatchObject({ tier: "strong", source: "options" })
+      },
+      agentFixtures,
+      { options: { agents: { glob: "reviewer" } }, fileText: entry({ glob: "reviewer" }), project: { "opencode.json": projectEntry({ glob: "reviewer" }) } },
+    )
+  })
+
+  test("with no project entry, global saves, Agent default and edits apply; assignments from another source stay", async () => {
+    await withConfig(
+      async (host) => {
+        expect(await agentRow(host, "glob")).toMatchObject({ tier: "reviewer", source: "options" })
+        const state = (await host.rpc("state")) as { agentConfig?: { origin: string } }
+        expect(state.agentConfig?.origin).toBe("global")
+        await host.rpc("setAgent", { agent: "proj", tier: "strong" })
+        expect(await agentRow(host, "proj")).toMatchObject({ tier: "strong", source: "options" })
+        await host.rpc("setAgent", { agent: "glob", tier: null })
+        expect(await agentRow(host, "glob")).toMatchObject({ tier: "cheap", source: "header" })
+        expect(await agentRow(host, "other")).toMatchObject({ tier: "strong", source: "options" })
+      },
+      [...agentFixtures, { id: "other", request: header("cheap") }],
+      { options: { agents: { glob: "reviewer", other: "strong" } }, fileText: entry({ glob: "reviewer" }), project: { "opencode.json": '{ "plugins": ["other"] }' } },
+    )
+  })
+
+  test("a hand edit of only the global agents fires config.updated and applies", async () => {
+    await withConfig(
+      async (host, file) => {
+        expect(await agentRow(host, "worker")).toMatchObject({ tier: "cheap", source: "header" })
+        writeFileSync(file, entry({ worker: "strong" }))
+        host.emit({ type: "config.updated", data: {} })
+        await settle()
+        expect(await agentRow(host, "worker")).toMatchObject({ tier: "strong", source: "options" })
+        expect(host.agents().get("worker")?.model).not.toEqual({ providerID: "amazon-bedrock", id: "global.anthropic.claude-haiku-5-5", variant: "low" })
+      },
+      [{ id: "worker", request: header("cheap") }],
+    )
+  })
+
+  test("a setAgent whose reload fails restores every agent's tier, source and model; a retry succeeds", async () => {
+    await withConfig(
+      async (host) => {
+        const views = async () => ({ rows: [await agentRow(host, "worker"), await agentRow(host, "other")], models: [host.agents().get("worker")?.model, host.agents().get("other")?.model] })
+        const before = await views()
+        const original = host.context.tool.transform
+        let fail = true
+        host.context.tool.transform = async (callback) => {
+          if (fail) {
+            fail = false
+            throw new Error("tool refresh refused")
+          }
+          return original(callback)
+        }
+        await expect(host.rpc("setAgent", { agent: "worker", tier: "strong" })).rejects.toThrow(/not applied: tool refresh refused/)
+        expect(await views()).toEqual(before)
+        await host.rpc("setAgent", { agent: "worker", tier: "strong" })
+        expect(await agentRow(host, "worker")).toMatchObject({ tier: "strong", source: "options" })
+        expect(await agentRow(host, "other")).toEqual(before.rows[1])
+      },
+      [
+        { id: "worker", request: header("cheap") },
+        { id: "other", request: header("standard") },
+      ],
+    )
   })
 
   test("a saved tier applies to the running instance at once, and so does a config reload", async () => {
