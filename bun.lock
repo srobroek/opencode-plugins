@@ -394,7 +394,7 @@
     },
     "plugins/model-roles": {
       "name": "@srobroek/opencode-model-roles",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "dependencies": {
         "jsonc-parser": "3.3.1",
       },
@@ -409,7 +409,7 @@
     },
     "plugins/parley": {
       "name": "@srobroek/opencode-parley",
-      "version": "0.3.2",
+      "version": "0.3.3",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
       },
