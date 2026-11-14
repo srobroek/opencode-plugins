@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import type { Plugin } from "@opencode/plugin/tui"
 import type { PanelInput } from "@opencode/plugin/tui/context"
-import { type CliRenderer, InputRenderable, type KeyEvent, type Renderable, RGBA, SyntaxStyle, TextareaRenderable } from "@opentui/core"
+import { type CliRenderer, EditBufferRenderable, InputRenderable, type KeyEvent, type Renderable, RGBA, SyntaxStyle, TextareaRenderable } from "@opentui/core"
 import { createTestRenderer, type MockInput } from "@opentui/core/testing"
 import { render } from "@opentui/solid"
 import { createMemo, createRoot, createSignal, getOwner, onCleanup, Show } from "solid-js"
@@ -201,7 +201,40 @@ async function setup(surface: "card" | "panel", options: { mounted?: boolean } =
   }
 }
 
+// "fade" is all parley keys: f toggles the view, a accepts, d defers and e edits.
+const TYPED = "fade"
+
 describe.each(["card", "panel"] as const)("another plugin's select dialog over the %s", (surface) => {
+  test.each([false, true])("owns typing and Esc, then focus and one lease return to parley (editing a note: %p)", async (editing) => {
+    const ui = await setup(surface)
+    expect(ui.parleyFocused()).toBe(true)
+    if (editing) {
+      await ui.input.typeText("n")
+      await settle()
+      expect(ui.renderer.currentFocusedRenderable).toBeInstanceOf(EditBufferRenderable)
+    }
+    const drafts = JSON.stringify(ui.store.drafts)
+    const dialog = openDialog(ui.renderer, ui.host, ui.composer)
+    await settle()
+    // A round event elsewhere asks parley for focus (`present`) while the dialog is open.
+    ui.requestFocus()
+    await settle()
+    await ui.input.typeText(TYPED)
+    await settle()
+    expect(ui.renderer.currentFocusedRenderable?.id).toBe(dialog.search.id)
+    expect(dialog.search.value).toBe(TYPED)
+    ui.input.pressEscape()
+    await settle()
+    expect(dialog.open()).toBe(false)
+    expect(ui.hidden()).toBe(0)
+    expect(JSON.stringify(ui.store.drafts)).toBe(drafts)
+    expect(ui.parleyFocused()).toBe(true)
+    // Still editing: the note field, not the card, has focus again.
+    expect(ui.renderer.currentFocusedRenderable instanceof EditBufferRenderable).toBe(editing)
+    expect(ui.host.held()).toBe(1)
+    expect(ui.host.current()).toBe(INPUT_MODE)
+  })
+
   test("a focus request re-pushes the lease once and later mode changes do not rerun it", async () => {
     const ui = await setup(surface)
     expect(ui.host.leases()).toBe(1)
@@ -215,5 +248,33 @@ describe.each(["card", "panel"] as const)("another plugin's select dialog over t
     expect(ui.host.leases()).toBe(2)
     expect(ui.host.held()).toBe(1)
     expect(ui.parleyFocused()).toBe(true)
+  })
+
+  test("mounting under the dialog waits for it to close before taking the lease and focus", async () => {
+    const ui = await setup(surface, { mounted: false })
+    const dialog = openDialog(ui.renderer, ui.host, ui.composer)
+    ui.mount()
+    await settle()
+    expect(ui.host.leases()).toBe(0)
+    expect(ui.renderer.currentFocusedRenderable?.id).toBe(dialog.search.id)
+    ui.input.pressEscape()
+    await settle()
+    expect(dialog.open()).toBe(false)
+    expect(ui.host.held()).toBe(1)
+    expect(ui.parleyFocused()).toBe(true)
+  })
+
+  test("unmounting while yielded to the dialog leaves no lease behind", async () => {
+    const ui = await setup(surface, { mounted: false })
+    const dialog = openDialog(ui.renderer, ui.host, ui.composer)
+    ui.mount()
+    await settle()
+    ui.unmount()
+    await settle()
+    dialog.close()
+    await settle()
+    expect(ui.host.leases()).toBe(0)
+    expect(ui.host.held()).toBe(0)
+    expect(ui.host.current()).toBe(BASE_MODE)
   })
 })
