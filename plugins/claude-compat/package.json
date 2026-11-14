@@ -1,6 +1,6 @@
 {
   "name": "@srobroek/opencode-claude-compat",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Load Claude Code plugin repos at runtime: skills, agents, commands, MCP servers and command hooks, per project.",
   "type": "module",
   "exports": {
