@@ -208,6 +208,24 @@ const MUST_FIRE: Case[] = [
     fire: "worktree-tmp",
     why: "valued option before the path",
   },
+  {
+    id: "delete hosted zone",
+    command: "aws route53 delete-hosted-zone --id Z123 --profile x",
+    fire: "dns-delegation",
+    why: "no parent-cleanup marker",
+  },
+  {
+    id: "delete hosted zone after a global flag",
+    command: "aws --region us-east-1 route53 delete-hosted-zone --id Z123 && echo done",
+    fire: "dns-delegation",
+    why: "global flag before the service",
+  },
+  {
+    id: "delete hosted zone in bash -c",
+    command: "bash -c 'aws route53 delete-hosted-zone --id Z123'",
+    fire: "dns-delegation",
+    why: "nested shell",
+  },
   { id: "git defender subcommand", command: "git defender status", fire: "git-defender", why: "" },
   { id: "git-defender binary", command: "/usr/local/bin/git-defender --setup", fire: "git-defender", why: "" },
   {
@@ -349,6 +367,19 @@ const MUST_NOT_FIRE: Case[] = [
   { id: "bd mention of /tmp", command: 'bd create --description "git worktree add /tmp/x"', why: "data" },
   { id: "worktree under /var/tmp", command: "git worktree add /var/tmp/release", why: "not /tmp" },
   { id: "worktree under the user tmp", command: "git worktree add ~/tmp/worktrees/r/b", why: "the advice" },
+  {
+    id: "marked delete hosted zone",
+    command: "DNS_PARENT_CHECKED=1 aws route53 delete-hosted-zone --id Z123",
+    why: "the session acknowledged the parent cleanup",
+  },
+  {
+    id: "exported marker",
+    command: "export DNS_PARENT_CHECKED=1; aws route53 delete-hosted-zone --id Z123",
+    why: "marker set earlier in the call",
+  },
+  { id: "list hosted zones", command: "aws route53 list-hosted-zones-by-name --dns-name x.example.com", why: "read only" },
+  { id: "delete a record set", command: "aws route53 change-resource-record-sets --hosted-zone-id Z1 --change-batch file://b.json", why: "not a zone delete" },
+  { id: "grep for the verb", command: "rg -n 'aws route53 delete-hosted-zone' docs/", why: "a search is data" },
   { id: "grep for git defender", command: "rg -n 'git defender' docs/", why: "a search is data" },
   { id: "git default branch", command: "git config init.defaultBranch main", why: "not the CLI" },
 ]
