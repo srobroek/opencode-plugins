@@ -48,23 +48,29 @@ export function parseEvaluate(raw: unknown): EvaluateOptions {
 }
 
 const VERDICT_LINE = /^VERDICT:\s*(APPROVE|REQUEST-CHANGES|COMMENT)\b/i
-const FENCE = /^ {0,3}(```|~~~)/
+const OPEN_FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/
+const CLOSE_FENCE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/
 
 /**
  * The verdict on the last `VERDICT:` line of `text`. A line in a fenced block, indented four
- * spaces or a tab, or quoted with `>` is someone else's text and does not count.
+ * spaces or a tab, or quoted with `>` is someone else's text and does not count. A fence
+ * closes only on a bare line of the same character at least as long as the opening (CommonMark).
  */
 export function parseVerdict(text: string): Verdict | undefined {
   let found: Verdict | undefined
-  let fence: string | undefined
+  let fence: { char: string; length: number } | undefined
   for (const line of text.split(/\r?\n/)) {
-    const opens = FENCE.exec(line)?.[1]
-    if (opens !== undefined) {
-      if (fence === undefined) fence = opens
-      else if (fence === opens) fence = undefined
+    if (fence !== undefined) {
+      const closes = CLOSE_FENCE.exec(line)?.[1]
+      if (closes?.startsWith(fence.char) && closes.length >= fence.length) fence = undefined
       continue
     }
-    if (fence !== undefined || /^(?: {4}|\t)/.test(line) || /^ {0,3}>/.test(line)) continue
+    const opens = OPEN_FENCE.exec(line)
+    if (opens?.[1] !== undefined && !(opens[1].startsWith("`") && opens[2]?.includes("`"))) {
+      fence = { char: opens[1].charAt(0), length: opens[1].length }
+      continue
+    }
+    if (/^(?: {4}|\t)/.test(line) || /^ {0,3}>/.test(line)) continue
     const match = VERDICT_LINE.exec(line.trim())
     if (match?.[1] !== undefined) found = match[1].toLowerCase() as Verdict
   }
@@ -72,7 +78,6 @@ export function parseVerdict(text: string): Verdict | undefined {
 }
 
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/
-const RUN_WRAPPER = /^(bun|npm|pnpm|yarn) run (?=\S)/
 const SEPARATORS = new Set([";", "&", "|", "(", ")", "\n", "$(", "<<<"])
 const JOINERS = new Set(["&&", ";", "\n"])
 
@@ -121,16 +126,18 @@ function isSetup(words: readonly string[]): boolean {
   return rest[0] === "export" && rest.length > 1 && rest.slice(1).every((w) => ASSIGNMENT.test(w))
 }
 
-/** The command forms to compare: as written, and `<tool> run x` as `<tool> x`. */
-function forms(command: string): string[] {
-  const wrapped = RUN_WRAPPER.exec(command)
-  return wrapped === null ? [command] : [command, `${wrapped[1]} ${command.slice(wrapped[0].length)}`]
+/** The words to compare: as written, and `<tool> run x` as `<tool> x`. */
+function forms(words: readonly string[]): string[][] {
+  const [tool, run, ...rest] = words
+  const wrapped = tool !== undefined && ["bun", "npm", "pnpm", "yarn"].includes(tool) && run === "run" && rest.length > 0
+  return wrapped ? [[...words], [tool, ...rest]] : [[...words]]
 }
 
-const startsWithCommand = (form: string, command: string): boolean => {
-  if (!form.startsWith(command)) return false
-  const next = form[command.length]
-  return next === undefined || next === ":" || /\s/.test(next)
+/** Whether `words` begin with the tokens of `command`; the last one may carry a `:script` suffix. */
+const startsWithCommand = (words: readonly string[], command: string): boolean => {
+  const tokens = command.trim().split(/\s+/)
+  if (tokens.length > words.length) return false
+  return tokens.every((token, i) => words[i] === token || (i === tokens.length - 1 && words[i]?.startsWith(`${token}:`) === true))
 }
 
 /**
@@ -138,37 +145,47 @@ const startsWithCommand = (form: string, command: string): boolean => {
  * test command is the last one, only setup (`cd <path>`, assignments, `export`) joined by `&&`
  * (or `;` or a newline) comes before it, and only a harmless redirect follows it. A pipe, `||`,
  * `&`, a subshell or a substitution, a later command, a here-document or an open quote make the
- * exit someone else's, or unknown.
+ * exit someone else's, or unknown. The test command is matched word by word, so a quoted
+ * `'bun test'` is one word and no test run. `setupFirst` is true when the test is joined to
+ * its setup by `&&`: it runs only if the setup succeeded, so a failing exit may be the setup's.
  */
-export function isTestCommand(command: string, testCommands: readonly string[]): boolean {
+export function parseTestCommand(command: string, testCommands: readonly string[]): { setupFirst: boolean } | undefined {
   const parts = items(command.trim())
-  if (parts === undefined || parts.length === 0) return false
+  if (parts === undefined || parts.length === 0) return undefined
   const segments: string[][] = [[]]
+  const joins: string[] = []
   let run = ""
   for (const part of parts) {
     if ("separator" in part) run += part.separator
     else {
       if (run !== "") {
-        if (!JOINERS.has(run)) return false
+        if (!JOINERS.has(run)) return undefined
+        joins.push(run)
         segments.push([])
         run = ""
       }
       segments[segments.length - 1]?.push(part.word)
     }
   }
-  if (run !== "" || segments.some((s) => s.length === 0)) return false
+  if (run !== "" || segments.some((s) => s.length === 0)) return undefined
   const last = segments.pop() ?? []
-  if (!segments.every(isSetup)) return false
+  if (!segments.every(isSetup)) return undefined
   let rest = last
   while (rest[0] !== undefined && ASSIGNMENT.test(rest[0])) rest = rest.slice(1)
-  const text = rest.join(" ")
-  return forms(text).some((form) => testCommands.some((tc) => startsWithCommand(form, tc.trim())))
+  if (!forms(rest).some((form) => testCommands.some((tc) => startsWithCommand(form, tc)))) return undefined
+  return { setupFirst: joins[joins.length - 1] === "&&" }
 }
 
-/** The result of a test run: undefined when `command` is no test run or its exit status is unknown. */
+/**
+ * The result of a test run: undefined when `command` is no test run, its exit status is unknown,
+ * or a failure could be the `&&` setup's rather than the test's.
+ */
 export function testRun(command: string, exitStatus: number | undefined, testCommands: readonly string[]): "pass" | "fail" | undefined {
-  if (exitStatus === undefined || !Number.isInteger(exitStatus) || !isTestCommand(command, testCommands)) return undefined
-  return exitStatus === 0 ? "pass" : "fail"
+  if (exitStatus === undefined || !Number.isInteger(exitStatus)) return undefined
+  const parsed = parseTestCommand(command, testCommands)
+  if (parsed === undefined) return undefined
+  if (exitStatus === 0) return "pass"
+  return parsed.setupFirst ? undefined : "fail"
 }
 
 const REGEX_SPECIAL = /[.+^${}()|[\]\\]/g

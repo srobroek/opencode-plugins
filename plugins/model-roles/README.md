@@ -407,7 +407,11 @@ only; the text and commands they are read from are parsed in memory and dropped:
   exit status for the whole invocation, so it counts only when that status is the
   test command's own: the test command is the last command, anything before it is
   setup (`cd <path>`, `NAME=value`, `export NAME=value`) joined by `&&` (or `;`), and
-  only a redirect such as `2>&1` or `> file` follows it. `bun test; echo ok`,
+  only a redirect such as `2>&1` or `> file` follows it. After `&&` setup the test runs
+  only if the setup succeeded, so a non-zero exit may be the setup's: that call leaves
+  `tests` unset (a zero exit still counts as `pass`). After `;` or a newline the test
+  always runs, so its exit counts. The test command is matched word by word, so a
+  quoted `'bun test'` is one word and not a test run. `bun test; echo ok`,
   `bun test && false`, `bun test | tail`, a subshell, a substitution, a here-document,
   `eval`, `sh -c` and unbalanced quotes are ambiguous: that call is ignored, and it
   neither sets nor clears an earlier result. A command counts after env assignments

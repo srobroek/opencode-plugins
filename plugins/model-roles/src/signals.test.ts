@@ -24,6 +24,14 @@ describe("parseVerdict", () => {
     ["VERDICT: COMMENT\n```\nVERDICT: APPROVE\n```", "comment"],
     ["VERDICT: REQUEST-CHANGES\n\n> VERDICT: APPROVE\n    VERDICT: APPROVE", "request-changes"],
     ["```\nVERDICT: APPROVE\n```\nVERDICT: APPROVE", "approve"],
+    // Fence length and character: only a closing line of the same character, at least as long, bare.
+    ["````\n```\nVERDICT: APPROVE\n```\n````", undefined],
+    ["VERDICT: COMMENT\n````\n```\n````\nVERDICT: APPROVE", "approve"],
+    ["VERDICT: COMMENT\n````\n```\nVERDICT: APPROVE\n````", "comment"],
+    ["```\n~~~\nVERDICT: APPROVE\n~~~\n```", undefined],
+    ["~~~\n```\nVERDICT: APPROVE\n```\n~~~\nVERDICT: REQUEST-CHANGES", "request-changes"],
+    ["```\n``` not a close\nVERDICT: APPROVE\n```", undefined],
+    ["~~~~\n~~~\nVERDICT: APPROVE\n~~~~\nVERDICT: COMMENT", "comment"],
     ["  VERDICT: APPROVE", "approve"],
   ])("%j -> %j", (text, expected) => {
     expect(parseVerdict(text)).toBe(expected)
@@ -37,19 +45,14 @@ describe("testRun", () => {
   test.each([
     "bun test",
     "bun test plugins/model-roles",
-    "cd /repo && bun test",
     "cd /repo; bun test",
-    "cd '/my repo' && bun test",
-    "export CI=1 && bun test",
-    "FOO=1 cd x && bun test",
-    "cd x && export A=1 && B=2 bun test",
     "CI=1 NODE_ENV='a b' bun test",
     "npm run test",
     "pnpm run test:unit",
     "bun run check",
     "python -m pytest -x",
     "cargo nextest run",
-    "cd x && FOO=1 go test ./...",
+    "FOO=1 go test ./...",
     "bun test 2>&1",
     "bun test > out.log 2>&1",
     "bun test >> out.log",
@@ -68,6 +71,11 @@ describe("testRun", () => {
     "echo bun test",
     'echo "bun test; ok"',
     "echo 'cd x && bun test'",
+    'echo "a; bun test src/x.test.ts"',
+    "echo 'a && bun test src/x.test.ts'",
+    "'bun test'",
+    '"bun test" src/x.test.ts',
+    "'bun' 'test' x 'a b'; 'bun test'",
     "bun run build",
     "ls && cat pytest.ini",
     "bun test; echo ok",
@@ -102,6 +110,28 @@ describe("testRun", () => {
   test("an unknown exit status is no result", () => {
     expect(run("bun test", undefined)).toBeUndefined()
   })
+
+  test("a quoted word is one token: bun 'test' runs bun test", () => {
+    expect(run("bun 'test' src/x.test.ts", 1)).toBe("fail")
+  })
+
+  // After `&&` setup a non-zero exit may be the setup's: unset. Zero means both ran and passed.
+  test.each(["cd /repo && bun test", "cd '/my repo' && bun test", "FOO=1 cd x && bun test", "cd x && export A=1 && B=2 bun test", "export CI=1 && bun test", "cd x && FOO=1 go test ./...", "cd x && FOO=1 bun test 2>&1", "cd a && cd b && bun test"])(
+    "setup joined by && in %j: pass counts, a failure is ambiguous",
+    (command) => {
+      expect(run(command, 0)).toBe("pass")
+      expect(run(command, 1)).toBeUndefined()
+    },
+  )
+
+  // After `;` or a newline the test always runs, so its exit counts.
+  test.each(["cd /repo; bun test", "cd /repo\nbun test", "export CI=1; bun test", "cd a && cd b; bun test"])(
+    "setup joined by ; or a newline in %j: the test's exit counts",
+    (command) => {
+      expect(run(command, 0)).toBe("pass")
+      expect(run(command, 1)).toBe("fail")
+    },
+  )
 
   test("a custom list replaces the defaults", () => {
     expect(testRun("make verify", 0, ["make verify"])).toBe("pass")
