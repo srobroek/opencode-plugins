@@ -551,6 +551,51 @@ describe("delivery_cleanup irreversible boundary", () => {
     expect(listReceipts(receiptDirectory(f.env, f.receipt.repo.key))).toHaveLength(2)
   }, 60_000)
 
+  test("cleans up from a session in another repository, given the receipt", async () => {
+    const f = fixture("cross-receipt")
+    const session = fixture("cross-session")
+    const scripted = runner(f, {})
+    const result = await cleanupDelivery({ receipt: f.receiptPath }, session.main, {
+      run: scripted.run,
+      now: () => NOW + 10,
+      env: f.env,
+      bounds: HEAVY_FIXTURE_BOUNDS,
+    })
+    expect(result.ok).toBe(true)
+    expect(existsSync(f.linked)).toBe(false)
+    expect(existsSync(session.linked)).toBe(true)
+    expect(gitExit(f.main, ["show-ref", "--verify", "--quiet", `refs/heads/${f.branch}`])).toBe(1)
+  }, 60_000)
+
+  test("cleans up from a session in another repository, given the landed worktree", async () => {
+    const f = fixture("cross-worktree")
+    const session = fixture("cross-worktree-session")
+    const scripted = runner(f, {})
+    const result = await cleanupDelivery({ pr: 17, worktree: f.linked }, session.main, {
+      run: scripted.run,
+      now: () => NOW + 10,
+      env: f.env,
+      bounds: HEAVY_FIXTURE_BOUNDS,
+    })
+    expect(result.ok).toBe(true)
+    expect(existsSync(f.linked)).toBe(false)
+    expect(existsSync(session.linked)).toBe(true)
+  }, 60_000)
+
+  test("from another repository, a pr without a worktree or receipt still finds no receipt", async () => {
+    const f = fixture("cross-bare-pr")
+    const session = fixture("cross-bare-pr-session")
+    const scripted = runner(f, {})
+    const result = await cleanupDelivery({ pr: 17 }, session.main, {
+      run: scripted.run,
+      now: () => NOW + 10,
+      env: f.env,
+      bounds: HEAVY_FIXTURE_BOUNDS,
+    })
+    expect(refusal(result)).toContain("receipt")
+    expect(existsSync(f.linked)).toBe(true)
+  }, 60_000)
+
   test("a retired ledger, agreed by the receipt and the canonical root, cleans up with no bd command", async () => {
     const f = fixture("inactive-ledger", "feat/inactive-ledger", "retired")
 

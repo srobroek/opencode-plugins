@@ -313,7 +313,7 @@ function loadAgents(ids = AGENT_IDS) {
 
 // plugins/delivery/src/cleanup.ts
 import { lstatSync as lstatSync2, realpathSync as realpathSync3 } from "fs";
-import { dirname as dirname2, isAbsolute as isAbsolute2, resolve as resolve2, sep } from "path";
+import { basename as basename2, dirname as dirname2, isAbsolute as isAbsolute2, resolve as resolve2, sep } from "path";
 import { isDeepStrictEqual } from "util";
 // plugins/delivery/package.json
 var package_default = {
@@ -1988,8 +1988,8 @@ function canonicalReceiptPath(raw, cwd, directory) {
   }
   return target;
 }
-function resolveReceipt(params, cwd, env, refReadMs) {
-  const key = repoKey(cwd, undefined, refReadMs);
+function resolveReceipt(params, cwd, repoCwd, env, refReadMs) {
+  const key = repoKey(repoCwd, undefined, refReadMs);
   if (key === null) {
     return {
       tag: "refused",
@@ -2365,6 +2365,30 @@ function nextReceiptEpoch(receipt, now) {
 function branchDeleteArgs(branch) {
   return ["branch", "-d", "--", branch];
 }
+async function cleanupRepositoryDirectory(params, cwd, run, refReadMs) {
+  const sessionKey = repoKey(cwd, undefined, refReadMs);
+  if (params.worktree !== undefined && params.worktree.trim() !== "") {
+    const worktree = resolve2(cwd, params.worktree.trim());
+    const worktreeKey = repoKey(worktree, undefined, refReadMs);
+    if (worktreeKey === null || worktreeKey === sessionKey)
+      return cwd;
+    const listed = await readWorktrees(worktree, run, refReadMs);
+    const main = Array.isArray(listed) ? listed[0] : undefined;
+    return main !== undefined && repoKey(main.path, undefined, refReadMs) === worktreeKey ? main.path : cwd;
+  }
+  if (params.receipt !== undefined) {
+    const path = resolve2(cwd, params.receipt);
+    const named = basename2(dirname2(path));
+    if (named === sessionKey)
+      return cwd;
+    const read = readReceipt(path);
+    if (!read.ok || read.receipt.repo.key !== named)
+      return cwd;
+    const root = read.receipt.repo.canonicalRoot;
+    return repoKey(root, undefined, refReadMs) === named ? root : cwd;
+  }
+  return cwd;
+}
 async function cleanupDelivery(params, cwd, deps = {}) {
   const { signal } = deps;
   const bounds = { ...CLEANUP_BOUNDS, ...deps.bounds };
@@ -2372,7 +2396,8 @@ async function cleanupDelivery(params, cwd, deps = {}) {
   const run = (argv, options) => commit(argv, { ...options, signal });
   const now = deps.now ?? Date.now;
   const env = deps.env ?? process.env;
-  const resolution = resolveReceipt(params, cwd, env, bounds.refReadMs);
+  const repoCwd = await cleanupRepositoryDirectory(params, cwd, run, bounds.refReadMs);
+  const resolution = resolveReceipt(params, cwd, repoCwd, env, bounds.refReadMs);
   if (resolution.tag === "refused")
     return resolution.failure;
   const receipt = resolution.receipt;
@@ -2385,7 +2410,7 @@ async function cleanupDelivery(params, cwd, deps = {}) {
   if (invocationInsideTarget(cwd, receipt.worktree.path)) {
     return refuse2("worktree.invocationCwd", cwd, `a directory outside the worktree this call would remove (${receipt.worktree.path}, resolved to ${physicalPath(receipt.worktree.path)})`);
   }
-  const identity = await verifyTargetIdentity(receipt, cwd, run, bounds.refReadMs);
+  const identity = await verifyTargetIdentity(receipt, repoCwd, run, bounds.refReadMs);
   if (isFailure(identity))
     return identity;
   const observed = await observePullRequest(receipt, run, identity.target.path, env, bounds.refReadMs);
@@ -2401,13 +2426,13 @@ async function cleanupDelivery(params, cwd, deps = {}) {
   const pushed = await verifyPushed(path, run, bounds.refReadMs);
   if (isFailure(pushed))
     return pushed;
-  const ledger = await verifyLedger(receipt, cwd, resolution.path, run, bounds.bdShowMs);
+  const ledger = await verifyLedger(receipt, repoCwd, resolution.path, run, bounds.bdShowMs);
   if (ledger !== null)
     return ledger;
-  const localRef = await verifyLocalRef(receipt, cwd, run, bounds.refReadMs);
+  const localRef = await verifyLocalRef(receipt, repoCwd, run, bounds.refReadMs);
   if (localRef !== null)
     return localRef;
-  const boundary = await revalidateBoundary(receipt, cwd, run, bounds);
+  const boundary = await revalidateBoundary(receipt, repoCwd, run, bounds);
   if (isFailure(boundary))
     return boundary;
   const executionCwd = safeExecutionCwd(receipt, boundary.records, cwd);
@@ -3040,6 +3065,29 @@ function observationMethod(argv) {
   const named = head.length === 3 && head.every((element) => element !== "" && !/\s/.test(element));
   return named ? head.join(" ") : RECEIPT_METHOD_UNKNOWN;
 }
+function selectRemoteForRepo(remotes, repo) {
+  const matching = remotes.filter((remote) => remote.path !== null && remote.path === repo);
+  return matching.find((remote) => remote.name === "origin")?.name ?? matching[0]?.name ?? null;
+}
+function inferWorktree(records, branch, head) {
+  const found = records.slice(1).find((record) => !record.prunable && !record.detached && record.branch === `refs/heads/${branch}` && record.head.toLowerCase() === head.toLowerCase());
+  return found?.path ?? null;
+}
+async function remotePaths(git) {
+  const listed = await git(["remote"]);
+  if (listed === null)
+    return [];
+  const remotes = [];
+  for (const name of listed.split(`
+`).filter((line) => REMOTE_NAME.test(line))) {
+    const printed = await git(["remote", "get-url", name]);
+    const url = printed === null ? null : singleRemoteRecord(printed);
+    const target = url === null ? null : forgeTarget(url);
+    const raw = url === null ? null : repoPathFromRemote(url);
+    remotes.push({ name, path: target === null || raw === null ? null : normalizeRepoPath(target.forge, raw) });
+  }
+  return remotes;
+}
 async function resolveLandingTarget(params, git, cwd, forgeEnv) {
   const explicitRepo = params.repo === undefined || params.repo.trim() === "" ? null : params.repo.trim();
   if (explicitRepo !== null && normalizeRepoPath("gitlab", explicitRepo) === null) {
@@ -3047,9 +3095,15 @@ async function resolveLandingTarget(params, git, cwd, forgeEnv) {
       reason: `repo: observed ${show3(explicitRepo)}, expected an unqualified "<owner>/<name>" or bounded GitLab "<group>/.../<project>" path`
     };
   }
-  const remote = params.remote === undefined || params.remote.trim() === "" ? "origin" : params.remote.trim();
+  let remote = params.remote === undefined || params.remote.trim() === "" ? "origin" : params.remote.trim();
   if (!REMOTE_NAME.test(remote))
     return { reason: `remote: observed ${show3(params.remote)}, expected a git remote name` };
+  if (explicitRepo !== null && (params.remote === undefined || params.remote.trim() === "")) {
+    const wanted = normalizeRepoPath("gitlab", explicitRepo);
+    const picked = wanted === null ? null : selectRemoteForRepo(await remotePaths(git), wanted);
+    if (picked !== null)
+      remote = picked;
+  }
   const repository = await observeRepository(git, cwd);
   if ("reason" in repository)
     return repository;
@@ -3117,7 +3171,11 @@ async function landPullRequest(params, deps = {}) {
   const env = deps.env ?? process.env;
   const forgeEnv = forgeEnvironment(env);
   const gitEnv = gitObservationEnvironment(env);
-  const git = (argv, input) => gitOutput(run, cwd, argv, gitEnv, input);
+  const explicitWorktree = params.worktree === undefined || params.worktree.trim() === "" ? null : resolve3(cwd, params.worktree.trim());
+  const commonDirOf = async (directory) => (await gitOutput(run, directory, REPOSITORY_OBSERVATION_ARGS, gitEnv))?.split(`
+`)[0] ?? null;
+  let gitCwd = cwd;
+  const git = (argv, input) => gitOutput(run, gitCwd, argv, gitEnv, input);
   const forgeRun = (argv, options) => run(argv, { ...options, env: options.env ?? forgeEnv });
   const now = deps.now?.() ?? Date.now();
   const observedAt = new Date(now).toISOString();
@@ -3137,7 +3195,12 @@ async function landPullRequest(params, deps = {}) {
   if (!Number.isSafeInteger(requested)) {
     return refuse(`pr: observed ${show3(params.pr)}, expected a positive integer of at most ${Number.MAX_SAFE_INTEGER}`);
   }
-  const resolved = await resolveLandingTarget(params, git, cwd, forgeEnv);
+  if (explicitWorktree !== null) {
+    const there = await commonDirOf(explicitWorktree);
+    if (there !== null && there !== await commonDirOf(cwd))
+      gitCwd = explicitWorktree;
+  }
+  const resolved = await resolveLandingTarget(params, git, gitCwd, forgeEnv);
   if ("reason" in resolved)
     return refuse(resolved.reason);
   const { remote, remoteUrl, forge, forgeHost, nameWithOwner, repository, cliRepo, forgeCommandEnv } = resolved;
@@ -3159,9 +3222,17 @@ async function landPullRequest(params, deps = {}) {
   } else if (expected.toLowerCase() !== head) {
     return refuse(`expectHeadSha: observed pr.headRefOid ${show3(first.pr.headRefOid)}, expected ${show3(expected)}; no merge was issued and no receipt was written`);
   }
-  const worktreePath = params.worktree === undefined || params.worktree.trim() === "" ? null : resolve3(cwd, params.worktree.trim());
   let worktree = null;
-  if (worktreePath !== null) {
+  const worktreePath = explicitWorktree;
+  if (worktreePath === null) {
+    const listed = await git(["worktree", "list", "--porcelain"]);
+    const inferred = listed === null ? null : inferWorktree(parseWorktreeList(listed), first.pr.headRefName, head);
+    if (inferred !== null) {
+      const held = await worktreeHead(run, inferred, gitEnv);
+      if (!("reason" in held) && held.head === head)
+        worktree = { path: inferred, head: held.head };
+    }
+  } else {
     const held = await worktreeHead(run, worktreePath, gitEnv);
     if ("reason" in held) {
       return refuse(`${held.reason} to compare with pr.headRefOid ${show3(first.pr.headRefOid)}; no merge was issued and no receipt was written`);
@@ -3268,7 +3339,7 @@ async function landPullRequest(params, deps = {}) {
   let localCommits = null;
   if (proved.state.trim().toUpperCase() === "MERGED" && FULL_OID.test(provedOid)) {
     const required = proofMethod === "rebase" && FULL_OID.test(head) && head !== provedOid ? [provedOid, head] : [provedOid];
-    const fetchRun = (argv) => Promise.resolve(run(argv, { cwd, timeoutMs: FETCH_TIMEOUT_MS, env: gitEnv }));
+    const fetchRun = (argv) => Promise.resolve(run(argv, { cwd: gitCwd, timeoutMs: FETCH_TIMEOUT_MS, env: gitEnv }));
     const local = await ensureLocalCommits(required, proved.baseRefName, remote, git, fetchRun, deps.sleep ?? abortableSleep, signal);
     if ("reason" in local) {
       const source = alreadyMerged ? "the pull request read" : `the re-read after ${(mergeArgv ?? []).join(" ")}`;
@@ -3287,7 +3358,7 @@ async function landPullRequest(params, deps = {}) {
   const unproven = missingBeadIdentity(proven.ids, proved.headRefName, repository.ledger);
   if (unproven !== null)
     return refuseMerged(unproven);
-  const verdict = await remoteBranchAbsent(remote, proved.headRefName, cwd, forgeRun, env);
+  const verdict = await remoteBranchAbsent(remote, proved.headRefName, gitCwd, forgeRun, env);
   if (verdict !== "absent") {
     notes.push(`The remote branch ${proved.headRefName} on ${remote} is ${verdict}, not proved absent, so branch.deletedRemote stays false and remoteAbsenceVerifiedAt stays null.`);
   }
@@ -3346,7 +3417,7 @@ async function landPullRequest(params, deps = {}) {
           remoteAbsenceVerifiedAt: verdict === "absent" ? observedAt : null,
           autoDeleteSetting: observedAutoDelete
         },
-        worktree: { path: worktreePath, removed: false, localRefDeleted: false, absenceVerifiedAt: null },
+        worktree: { path: worktree?.path ?? null, removed: false, localRefDeleted: false, absenceVerifiedAt: null },
         beads: { ids: proven.ids, ledgerActive: repository.ledger.active },
         proof: { method: observationMethod(observingArgv), observedAt, evidence },
         outcome: "landed",
@@ -3537,7 +3608,7 @@ var LAND_INPUT = {
     },
     requireGreenChecks: { type: "boolean", description: "Require every check on the head to pass" },
     setupAutoDelete: { type: "boolean", description: "Enable deletion-on-merge after the landing is proved" },
-    worktree: { type: "string", description: "The landing's worktree, for delivery_cleanup; HEAD must be the PR head" },
+    worktree: { type: "string", description: "Landed worktree for cleanup (HEAD = PR head); inferred if omitted" },
     beadId: {
       type: "string",
       description: "Bead this closes when the branch is not <omp|opencode>/agent/<bead-id>; required then on a ledger"

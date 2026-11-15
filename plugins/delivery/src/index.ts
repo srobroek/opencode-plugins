@@ -127,7 +127,7 @@ const LAND_INPUT = {
     },
     requireGreenChecks: { type: "boolean", description: "Require every check on the head to pass" },
     setupAutoDelete: { type: "boolean", description: "Enable deletion-on-merge after the landing is proved" },
-    worktree: { type: "string", description: "The landing's worktree, for delivery_cleanup; HEAD must be the PR head" },
+    worktree: { type: "string", description: "Landed worktree for cleanup (HEAD = PR head); inferred if omitted" },
     beadId: {
       type: "string",
       description: "Bead this closes when the branch is not <omp|opencode>/agent/<bead-id>; required then on a ledger",

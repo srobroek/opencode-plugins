@@ -1,5 +1,5 @@
 import { lstatSync, realpathSync, type Stats } from "node:fs"
-import { dirname, isAbsolute, resolve, sep } from "node:path"
+import { basename, dirname, isAbsolute, resolve, sep } from "node:path"
 import { isDeepStrictEqual } from "node:util"
 import pkg from "../package.json" with { type: "json" }
 import {
@@ -129,7 +129,7 @@ export function removalRoute(
   return listed.some((entry) => canonical(entry.directory) === want) ? "host" : "git"
 }
 
-type WorktreeRecord = {
+export type WorktreeRecord = {
   path: string
   head: string
   branch: string | null
@@ -511,10 +511,11 @@ function canonicalReceiptPath(raw: string, cwd: string, directory: string): stri
 function resolveReceipt(
   params: DeliveryCleanupParams,
   cwd: string,
+  repoCwd: string,
   env: NodeJS.ProcessEnv,
   refReadMs: number,
 ): ReceiptResolution {
-  const key = repoKey(cwd, undefined, refReadMs)
+  const key = repoKey(repoCwd, undefined, refReadMs)
   if (key === null) {
     return {
       tag: "refused",
@@ -985,6 +986,43 @@ export function branchDeleteArgs(branch: string): string[] {
   return ["branch", "-d", "--", branch]
 }
 
+/**
+ * The directory whose repository this cleanup is about.
+ *
+ * Normally the session directory. When the session runs in a different repository
+ * than the landing, the landed `worktree` (or the `receipt` path, whose directory is
+ * named by the repository key) says which repository is meant: the answer is that
+ * repository's main checkout, which is also never the worktree about to be removed.
+ * Any case it cannot settle falls back to the session directory, so the ordinary
+ * repository checks refuse as they always did.
+ */
+export async function cleanupRepositoryDirectory(
+  params: DeliveryCleanupParams,
+  cwd: string,
+  run: CliRunner,
+  refReadMs: number,
+): Promise<string> {
+  const sessionKey = repoKey(cwd, undefined, refReadMs)
+  if (params.worktree !== undefined && params.worktree.trim() !== "") {
+    const worktree = resolve(cwd, params.worktree.trim())
+    const worktreeKey = repoKey(worktree, undefined, refReadMs)
+    if (worktreeKey === null || worktreeKey === sessionKey) return cwd
+    const listed = await readWorktrees(worktree, run, refReadMs)
+    const main = Array.isArray(listed) ? listed[0] : undefined
+    return main !== undefined && repoKey(main.path, undefined, refReadMs) === worktreeKey ? main.path : cwd
+  }
+  if (params.receipt !== undefined) {
+    const path = resolve(cwd, params.receipt)
+    const named = basename(dirname(path))
+    if (named === sessionKey) return cwd
+    const read = readReceipt(path)
+    if (!read.ok || read.receipt.repo.key !== named) return cwd
+    const root = read.receipt.repo.canonicalRoot
+    return repoKey(root, undefined, refReadMs) === named ? root : cwd
+  }
+  return cwd
+}
+
 export async function cleanupDelivery(
   params: DeliveryCleanupParams,
   cwd: string,
@@ -998,7 +1036,8 @@ export async function cleanupDelivery(
   const run: CliRunner = (argv, options) => commit(argv, { ...options, signal })
   const now = deps.now ?? Date.now
   const env = deps.env ?? process.env
-  const resolution = resolveReceipt(params, cwd, env, bounds.refReadMs)
+  const repoCwd = await cleanupRepositoryDirectory(params, cwd, run, bounds.refReadMs)
+  const resolution = resolveReceipt(params, cwd, repoCwd, env, bounds.refReadMs)
   if (resolution.tag === "refused") return resolution.failure
   const receipt = resolution.receipt
 
@@ -1029,7 +1068,7 @@ export async function cleanupDelivery(
   // receipt's branch and head before it is used as a directory to run a command in,
   // and `revalidateBoundary` proves the same identity again immediately before the
   // irreversible step.
-  const identity = await verifyTargetIdentity(receipt, cwd, run, bounds.refReadMs)
+  const identity = await verifyTargetIdentity(receipt, repoCwd, run, bounds.refReadMs)
   if (isFailure(identity)) return identity
   const observed = await observePullRequest(receipt, run, identity.target.path, env, bounds.refReadMs)
   if (isFailure(observed)) return observed
@@ -1040,12 +1079,12 @@ export async function cleanupDelivery(
   if (dirty !== null) return dirty
   const pushed = await verifyPushed(path, run, bounds.refReadMs)
   if (isFailure(pushed)) return pushed
-  const ledger = await verifyLedger(receipt, cwd, resolution.path, run, bounds.bdShowMs)
+  const ledger = await verifyLedger(receipt, repoCwd, resolution.path, run, bounds.bdShowMs)
   if (ledger !== null) return ledger
 
-  const localRef = await verifyLocalRef(receipt, cwd, run, bounds.refReadMs)
+  const localRef = await verifyLocalRef(receipt, repoCwd, run, bounds.refReadMs)
   if (localRef !== null) return localRef
-  const boundary = await revalidateBoundary(receipt, cwd, run, bounds)
+  const boundary = await revalidateBoundary(receipt, repoCwd, run, bounds)
   if (isFailure(boundary)) return boundary
 
   const executionCwd = safeExecutionCwd(receipt, boundary.records, cwd)

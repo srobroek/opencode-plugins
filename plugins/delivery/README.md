@@ -39,7 +39,13 @@ Inputs: `pr`, and when needed `merge_method` (`squash` by default, `merge`,
 - `expectHeadSha` is required whenever the call would merge. The merge is bound to
   that head (`gh pr merge --match-head-commit`, `glab mr merge --sha`), so a push
   between the read and the merge fails at the forge.
-- `worktree` is recorded for cleanup, and its HEAD must be the PR head.
+- `worktree` is recorded for cleanup, and its HEAD must be the PR head. Without
+  it, the linked worktree that has the PR's branch checked out at the PR head is
+  recorded; if none does, no worktree is recorded.
+- `repo` names the repository to land. Run from another repository, pass `worktree`
+  as a checkout of `repo`: the remote whose URL names `repo` is used for the proof
+  and the branch-absence check, and `repo` still has to match that remote.
+  A landing needs a local checkout of `repo`; there is no API-only mode.
 - `requireApproval` reads the approval from the PR. On GitHub that is an
   `APPROVED` review whose commit is the head. If reviewer and author share one
   account, it can instead be a comment by that account whose first line is
@@ -71,7 +77,8 @@ Supported forges: `github.com` (including `ssh.github.com`), `gitlab.com`
 
 Inputs: `receipt`, `pr`, `branch`, `worktree`, `remote`. Any input you pass must
 match the selected receipt. Without `receipt`, the tool uses the newest receipt
-for the current repository.
+for the current repository. From a session in another repository, pass `receipt`
+or `worktree` so the tool can find the landed repository.
 
 The tool refuses in these cases:
 
