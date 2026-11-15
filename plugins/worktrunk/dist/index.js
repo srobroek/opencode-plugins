@@ -1396,6 +1396,33 @@ async function loadSkills(directory = SKILLS_DIRECTORY) {
   }));
 }
 
+// plugins/worktrunk/src/switch-timeout.ts
+var SWITCH_TIMEOUT_MS = 600000;
+var GLOBAL_VALUE_OPTIONS2 = new Set(["-C", "--config", "--config-set"]);
+function isSwitch(argv) {
+  if (argv[0]?.split("/").pop() !== "wt")
+    return false;
+  let index = 1;
+  while (argv[index]?.startsWith("-"))
+    index += GLOBAL_VALUE_OPTIONS2.has(argv[index] ?? "") ? 2 : 1;
+  return argv[index] === "switch" && !argv.includes("--help") && !argv.includes("-h");
+}
+function namesSwitchCommand(source) {
+  if (!/\bswitch\b/.test(source))
+    return false;
+  return scanShell(source).items.some((item) => item.kind === "command" && isSwitch(commandWords(item.words.map((word) => word.value)).argv));
+}
+function withSwitchTimeout(tool, input) {
+  const call = shellCall(tool, input);
+  if (!call || call.background === true || !namesSwitchCommand(call.command))
+    return;
+  if (call.timeout !== undefined && (call.timeout === 0 || call.timeout >= SWITCH_TIMEOUT_MS))
+    return;
+  if (typeof input !== "object" || input === null || Array.isArray(input))
+    return;
+  return { ...input, timeout: SWITCH_TIMEOUT_MS };
+}
+
 // plugins/worktrunk/src/worktree.ts
 import { stat } from "fs/promises";
 import { basename } from "path";
@@ -1580,6 +1607,9 @@ function createPlugin(overrides = {}) {
           registrations.push(await ctx.worktree.transform((editor) => editor.add(strategy)));
         }
         registrations.push(await ctx.tool.hook("execute.before", async (event) => {
+          const longer = withSwitchTimeout(event.tool, event.input);
+          if (longer)
+            event.input = longer;
           const call = mergeGateCall(event.tool, event.input);
           if (!call)
             return;

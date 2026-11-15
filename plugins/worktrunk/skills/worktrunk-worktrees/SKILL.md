@@ -52,3 +52,7 @@ From the canonical checkout, only this narrow bootstrap allowlist is permitted:
   `wt config show`, `wt step prune --dry-run`, and creating the worktree's parent directory;
 - read-only `git`: `rev-parse`, `status`, `worktree list`, `fetch`, `log`, and `branch --list`;
 - Beads reads, `bd create <title> <args>`, exactly `bd dolt pull`, and `bd update <id> --claim`.
+
+## Pitfalls
+
+When `wt switch` times out or a new worktree is half provisioned, read [references/pitfalls.md](references/pitfalls.md).

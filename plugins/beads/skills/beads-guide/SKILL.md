@@ -17,3 +17,5 @@ skill, not from this table.
 | Creating, planning or bulk-editing beads: acceptance, metadata, routing, deps | `beads-ledger` |
 | Closing or reviewing a bead: the evidence a close needs | `beads-evidence` |
 | `lock busy`, `workspace gate busy` or a failed `bd dolt pull`/`push` | `beads-contention-retry` |
+
+When a `bd` command is refused or its bead lands in the wrong ledger, read [references/pitfalls.md](references/pitfalls.md).

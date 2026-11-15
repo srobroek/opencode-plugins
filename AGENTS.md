@@ -21,6 +21,8 @@ package whose entry point default-exports `Plugin.define({ id, setup })` from
 - `bun run plugin-table` regenerates the plugin table in
   `plugins/project/skills/project-scaffold/references/plugins.md`.
 - `bun run plugin-table:check` fails when that table is stale or a plugin lacks a scope.
+- `bun run pitfalls` fails when a skill's `references/pitfalls.md` is not linked from its
+  `SKILL.md` or has an entry without Symptom, Cause and Fix lines.
 - `bun run agent-roles` fails when a shipped agent lacks a known tier in its
   `x-opencode-model-role` header or a positive integer `steps` limit.
 - `bun run descriptions` fails when a tool's first description line passes 120
@@ -28,7 +30,7 @@ package whose entry point default-exports `Plugin.define({ id, setup })` from
   lacks a `check-descriptions: direct <reason>` comment, a skill description passes
   160 characters, an agent description 150, or an `instructions/` block 1k.
 - `bun run check` runs typecheck, lint, test, build:check, marketplaces:check,
-  plugin-table:check, steering, agent-roles and descriptions before you hand work off.
+  plugin-table:check, steering, pitfalls, agent-roles and descriptions before you hand work off.
 
 ## Conventions
 
@@ -79,6 +81,17 @@ package whose entry point default-exports `Plugin.define({ id, setup })` from
   skills, agents or tool results load by id sets `metadata:` /
   `opencode/autoinvoke: false`. Shipped subagents deny `*` first and allow only the
   tools they use.
+- Skill pitfalls: a skill records the failures agents keep hitting in
+  `skills/<skill>/references/pitfalls.md`, never in a global steering file. This follows the
+  Agent Skills format (agentskills.io/specification): `references/` holds documentation
+  agents read on demand, one level deep from `SKILL.md`. `SKILL.md` carries one trigger line,
+  for example "When a `bd` command fails unexpectedly, read [references/pitfalls.md](references/pitfalls.md)."
+  Each entry is a `## <title>` with three lines: `**Symptom:**` the exact error text in a
+  code span, so a grep finds it; `**Cause:**`; `**Fix:**`. Keep an entry to a few lines and
+  fix the cause in code where you can, then delete the entry. Installed skills are a
+  read-only cache: an agent that finds a new pitfall reports it as a finding and opens a PR
+  against `srobroek/opencode-plugins` that adds the entry; it never edits the installed copy.
+  `bun run pitfalls` checks the link and the entry format.
 - Do not inject changing state into the system prompt on every request; it breaks
   provider prompt caching. Put live state in tool results.
 - Conventional Commits. Scope is the plugin name, for example `feat(beads): ...`.
