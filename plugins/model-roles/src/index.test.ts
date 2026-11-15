@@ -2894,6 +2894,17 @@ describe("a child keeps its resolved model", () => {
       await cleanupAgain()
     })
 
+    test("a guard-refused resume is not marked running: the child's outcome record is unchanged", async () => {
+      const { again, cleanupAgain } = await guardedReload(["amazon-bedrock/claude-opus"])
+      const before = structuredClone(again.storage.get("outcome:c"))
+      expect(before).toMatchObject({ agent: "plain" })
+      await expect(again.spawn("subagent", resume, "build", "r", "call-2")).rejects.toThrow(/resume would run on/)
+      await settle()
+      expect(again.storage.get("outcome:c")).toEqual(before)
+      again.close()
+      await cleanupAgain()
+    })
+
     test("a model the guard still allows resumes unchanged", async () => {
       const { again, cleanupAgain } = await guardedReload(["amazon-bedrock/claude-opus", "anthropic/claude-haiku"], { allowModels: ["amazon-bedrock/claude-opus"] })
       expect(await again.spawn("subagent", resume, "build", "r", "call-2")).toEqual({ ...resume, model: "amazon-bedrock/claude-opus" })
