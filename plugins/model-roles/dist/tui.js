@@ -66,6 +66,20 @@ var onStep = (ledger, childID, usage) => update(ledger, childID, (r) => ({ ...ad
 var onSteps = (ledger, childID, usage, steps) => update(ledger, childID, (r) => ({ ...addUsage(r, usage), steps: r.steps + steps }));
 var onCompaction = (ledger, childID, usage) => update(ledger, childID, (r) => addUsage(r, usage));
 var onEnd = (ledger, childID, outcome, at) => update(ledger, childID, (r) => ({ ...r, outcome, ms: Math.max(0, at - r.at) }));
+function onSignals(ledger, childID, signals) {
+  return update(ledger, childID, (r) => {
+    const next = { ...r };
+    if (signals.verdict !== undefined)
+      next.verdict = signals.verdict;
+    if (signals.tests === "pass" || signals.tests === "fail" || signals.tests === "none" && r.tests === undefined)
+      next.tests = signals.tests;
+    if (signals.touchedTests === true)
+      next.touchedTests = true;
+    else if (signals.touchedTests === false && r.touchedTests === undefined)
+      next.touchedTests = false;
+    return next.verdict === r.verdict && next.tests === r.tests && next.touchedTests === r.touchedTests ? r : next;
+  });
+}
 var onFailover = (ledger, childID) => update(ledger, childID, (r) => r.failedOver ? r : { ...r, failedOver: true });
 function prune(ledger, now, limits = { maxEntries: LEDGER_MAX_ENTRIES, maxAgeMs: LEDGER_MAX_AGE_MS }) {
   const kept = Object.entries(ledger).filter(([, r]) => now - r.at <= limits.maxAgeMs).sort((a, b) => b[1].at - a[1].at).slice(0, limits.maxEntries);
@@ -334,6 +348,7 @@ function createLedgerStore(storage, options = {}) {
       await change(id, (l, i) => onCompaction(l, i, usage), "debounce");
     },
     end: (id, outcome, at) => change(id, (l, i) => onEnd(l, i, outcome, at), "end"),
+    signals: (id, signals) => change(id, (l, i) => onSignals(l, i, signals), "debounce"),
     failover: (id) => change(id, onFailover, "now"),
     flush,
     async dispose(timeoutMs = disposeTimeoutMs) {

@@ -96,6 +96,7 @@ import {
   userPin,
 } from "./resolve.ts"
 import { TiersRpc } from "./rpc.ts"
+import { exitStatusOf, parseEvaluate, parseVerdict, testRun, touchesTests } from "./signals.ts"
 import { configRevision, type ModelSnapshot, readSnapshot, SPAWN_MODEL_KEY_PREFIX, snapshotModel, staleSnapshots, unavailableReason } from "./snapshot.ts"
 import {
   applyFrozenTierParam,
@@ -148,6 +149,7 @@ export * from "./receipt.ts"
 export * from "./report.ts"
 export * from "./resolve.ts"
 export { TiersRpc } from "./rpc.ts"
+export * from "./signals.ts"
 export * from "./spawn-role.ts"
 export * from "./tiers.ts"
 export * from "./tiers-ui.ts"
@@ -173,6 +175,9 @@ const endedAt = (event: unknown): number => {
   return typeof created === "number" && Number.isFinite(created) ? created : Number.POSITIVE_INFINITY
 }
 const STEP_ENDED_EVENT = "session.step.ended"
+const TEXT_ENDED_EVENT = "session.text.ended"
+/** At a run's end: an unset `tests` becomes `none` and an unset `touchedTests` false. */
+const NO_SIGNALS = { tests: "none", touchedTests: false } as const
 const COMPACTION_ENDED_EVENT = "session.compaction.ended"
 /** When an execution ended, for the outcome ledger: the event's time, else now. */
 const finishedAt = (event: unknown): number => {
@@ -244,6 +249,7 @@ export default Plugin.define({
     const options: Options = { ...parseOptions(ctx.options), tiers: {}, classes: {}, implicit: {} }
     const runtime = parseRuntime(ctx.options, options)
     const guard = parseGuard(isRecord(ctx.options) ? ctx.options.guard : undefined)
+    const evaluate = parseEvaluate(isRecord(ctx.options) ? ctx.options.evaluate : undefined)
     let autoHistory: AutoRecord[] = []
     let available: GuardModel[] = []
     let availableKey = ""
@@ -1714,7 +1720,16 @@ export default Plugin.define({
       },
     })
 
+    /** A finished shell call that ran a test command and reported an exit status updates the child's `tests`. */
+    const recordTestRun = async (event: { sessionID: string; input: unknown; status: string; result?: unknown }) => {
+      if (event.status !== "completed" || !isRecord(event.input) || typeof event.input.command !== "string") return
+      const metadata = isRecord(event.result) ? event.result.metadata : undefined
+      const tests = testRun(event.input.command, exitStatusOf(metadata), evaluate.testCommands)
+      if (tests !== undefined) await outcomes.signals(event.sessionID, { tests })
+    }
+
     const spawnResults = await ctx.tool.hook("execute.after", async (event) => {
+      await recordTestRun(event)
       if (event.tool !== SUBAGENT_TOOL) return
       const spawn = pending.get(event.id)
       pending.delete(event.id)
@@ -1772,6 +1787,7 @@ export default Plugin.define({
           const sessionID = data.sessionID
           settleRequest(requestLog, sessionID, endedAt(event))
           const error = data.error as { type?: string; message?: string; status?: number }
+          await outcomes.signals(sessionID, NO_SIGNALS)
           await outcomes.end(sessionID, `failed:${classifyFailure(error) ?? "other"}`, finishedAt(event))
           pruneChildModels()
           await queue(() => onSessionFailed(sessionID, error)).catch((error) =>
@@ -1783,6 +1799,7 @@ export default Plugin.define({
           const sessionID = (event as { data?: { sessionID?: unknown } }).data?.sessionID
           if (typeof sessionID !== "string") continue
           const model = settleRequest(requestLog, sessionID, endedAt(event))
+          await outcomes.signals(sessionID, NO_SIGNALS)
           await outcomes.end(sessionID, "succeeded", finishedAt(event))
           pruneChildModels()
           if (noticeState.outages.size > 0) await queue(() => onSessionSucceeded(sessionID, model)).catch(() => {})
@@ -1793,14 +1810,24 @@ export default Plugin.define({
           const sessionID = (event as { data?: { sessionID?: unknown } }).data?.sessionID
           if (typeof sessionID === "string") {
             settleRequest(requestLog, sessionID, endedAt(event))
+            await outcomes.signals(sessionID, NO_SIGNALS)
             await outcomes.end(sessionID, "interrupted", finishedAt(event))
             pruneChildModels()
           }
           continue
         }
+        if (type === TEXT_ENDED_EVENT) {
+          const data = (event as { data?: { sessionID?: unknown; text?: unknown } }).data
+          if (typeof data?.sessionID !== "string" || typeof data.text !== "string") continue
+          const verdict = parseVerdict(data.text)
+          if (verdict !== undefined) await outcomes.signals(data.sessionID, { verdict })
+          continue
+        }
         if (type === STEP_ENDED_EVENT || type === COMPACTION_ENDED_EVENT) {
-          const data = (event as { data?: { sessionID?: unknown } & Usage }).data
+          const data = (event as { data?: { sessionID?: unknown; files?: unknown } & Usage }).data
           if (typeof data?.sessionID !== "string") continue
+          if (type === STEP_ENDED_EVENT && Array.isArray(data.files) && touchesTests(data.files.filter((f): f is string => typeof f === "string"), evaluate.testGlobs))
+            await outcomes.signals(data.sessionID, { touchedTests: true })
           await (type === STEP_ENDED_EVENT ? outcomes.step : outcomes.compaction)(data.sessionID, data)
           continue
         }

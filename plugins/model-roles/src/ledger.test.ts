@@ -9,6 +9,7 @@ import {
   onEnd,
   onFailover,
   onResume,
+  onSignals,
   onSpawn,
   onStep,
   prune,
@@ -113,6 +114,21 @@ describe("reducers", () => {
     const record = ledger.ses_c as unknown as Record<string, unknown>
     const allowed = new Set(["v", "at", "agent", "tier", "model", "source", "rule", "parentID", "resumes", "inputTokens", "outputTokens", "reasoningTokens", "cacheReadTokens", "cacheWriteTokens", "cost", "steps", "ms", "outcome", "failedOver"])
     for (const key of Object.keys(record)) expect(allowed.has(key)).toBe(true)
+  })
+})
+
+describe("onSignals", () => {
+  test("verdict and pass/fail replace the earlier value; none and false only fill gaps; true stays", () => {
+    let ledger = onSignals(spawned(), "ses_c", { verdict: "approve", tests: "fail" })
+    ledger = onSignals(ledger, "ses_c", { verdict: "request-changes", tests: "pass", touchedTests: true })
+    ledger = onSignals(ledger, "ses_c", { tests: "none", touchedTests: false })
+    expect(ledger.ses_c).toMatchObject({ verdict: "request-changes", tests: "pass", touchedTests: true })
+  })
+
+  test("none and false fill an unset record, and an unknown child is ignored", () => {
+    expect(onSignals(spawned(), "ses_c", { tests: "none", touchedTests: false }).ses_c).toMatchObject({ tests: "none", touchedTests: false })
+    const before = spawned()
+    expect(onSignals(before, "other", { verdict: "comment" })).toBe(before)
   })
 })
 

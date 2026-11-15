@@ -8,6 +8,7 @@
 
 import type { FailureClass } from "./health.ts"
 import type { SpawnRule, SpawnSource } from "./receipt.ts"
+import type { TestResult, Verdict } from "./signals.ts"
 
 export const OUTCOME_KEY_PREFIX = "outcome:"
 export const LEDGER_MAX_ENTRIES = 1000
@@ -48,6 +49,12 @@ export type OutcomeRecord = {
   outcome?: Outcome
   /** A failover moved the child to another model. */
   failedOver?: boolean
+  // Outcome signals from the child's own session; enums and a boolean, never text.
+  verdict?: Verdict
+  /** The last test run of the child; `none` when it ran none. */
+  tests?: TestResult
+  /** Any step edited a test file. */
+  touchedTests?: boolean
   // Reserved for evaluation-based routing; unset until it exists.
   policy?: string
   eligible?: boolean
@@ -142,6 +149,24 @@ export const onCompaction = (ledger: Ledger, childID: string, usage: Usage): Led
 /** The child's run ended at `at`; a later run of a resumed child overwrites the outcome. */
 export const onEnd = (ledger: Ledger, childID: string, outcome: Outcome, at: number): Ledger =>
   update(ledger, childID, (r) => ({ ...r, outcome, ms: Math.max(0, at - r.at) }))
+
+export type Signals = { verdict?: Verdict; tests?: TestResult; touchedTests?: boolean }
+
+/**
+ * Outcome signals seen in the child's session. A verdict and a `pass`/`fail` result replace
+ * the earlier one (the last wins); `none` and `touchedTests: false` only fill an unset field,
+ * and `touchedTests: true` stays.
+ */
+export function onSignals(ledger: Ledger, childID: string, signals: Signals): Ledger {
+  return update(ledger, childID, (r) => {
+    const next: OutcomeRecord = { ...r }
+    if (signals.verdict !== undefined) next.verdict = signals.verdict
+    if (signals.tests === "pass" || signals.tests === "fail" || (signals.tests === "none" && r.tests === undefined)) next.tests = signals.tests
+    if (signals.touchedTests === true) next.touchedTests = true
+    else if (signals.touchedTests === false && r.touchedTests === undefined) next.touchedTests = false
+    return next.verdict === r.verdict && next.tests === r.tests && next.touchedTests === r.touchedTests ? r : next
+  })
+}
 
 export const onFailover = (ledger: Ledger, childID: string): Ledger => update(ledger, childID, (r) => (r.failedOver ? r : { ...r, failedOver: true }))
 
@@ -466,6 +491,7 @@ export function createLedgerStore(storage: LedgerStorage, options: LedgerStoreOp
       await change(id, (l, i) => onCompaction(l, i, usage), "debounce")
     },
     end: (id: string, outcome: Outcome, at: number) => change(id, (l, i) => onEnd(l, i, outcome, at), "end"),
+    signals: (id: string, signals: Signals) => change(id, (l, i) => onSignals(l, i, signals), "debounce"),
     failover: (id: string) => change(id, onFailover, "now"),
     flush,
     /**
