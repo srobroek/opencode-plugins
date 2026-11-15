@@ -35,6 +35,9 @@ async function readHeadFacts(run: Runner, directory: string): Promise<HeadFacts>
   return { head, symbolic: await out("symbolic-ref", "--quiet", "HEAD"), refs: await out("for-each-ref", "--count=1") }
 }
 
+/** The whole work tree except the Beads ledger directory, whatever subdirectory git runs in. */
+export const TRACKED_DIRTY_PATHSPEC = [":(top)", ":(top,exclude).beads"] as const
+
 export function createGit(run: Runner) {
   const git = async (directory: string, ...args: string[]) => {
     const result = await run(["git", "-C", directory, ...args])
@@ -65,9 +68,13 @@ export function createGit(run: Runner) {
     /** Files HEAD changes since its merge base with `target`. */
     changedFiles: async (directory: string, target: string) =>
       files(await git(directory, "diff", "--name-only", "-z", `${target}...HEAD`)),
-    /** Staged or unstaged tracked changes; untracked files do not affect automatic isolation. */
+    /**
+     * Staged or unstaged tracked changes; untracked files do not affect automatic isolation.
+     * The Beads ledger directory is ignored: bd rewrites its tracked export (`.beads/issues.jsonl`)
+     * on every write, and a lane does not need the caller's ledger state.
+     */
     trackedDirty: async (directory: string) => {
-      const changed = await git(directory, "status", "--porcelain", "--untracked-files=no")
+      const changed = await git(directory, "status", "--porcelain", "--untracked-files=no", "--", ...TRACKED_DIRTY_PATHSPEC)
       if (changed === undefined) throw new Error(`subagent-worktree: cannot read tracked changes in ${directory}`)
       return changed !== ""
     },
