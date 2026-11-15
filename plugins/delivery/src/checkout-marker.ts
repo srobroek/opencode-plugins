@@ -7,7 +7,7 @@
  * target is accepted only when it provably belongs to the session repository.
  */
 
-import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, realpathSync } from "node:fs"
+import { closeSync, constants, fstatSync, lstatSync, openSync, readlinkSync, readSync } from "node:fs"
 import { dirname, join } from "node:path"
 
 /** `.git` entries and `commondir` files are one short line; anything bigger is not read. */
@@ -48,18 +48,46 @@ export function readBounded(path: string): BoundedRead {
 
 export type MarkerState = "same" | "foreign" | "unsafe" | "absent"
 
+/** Symlinks followed in one resolution before it is treated as a loop (the usual `SYMLOOP_MAX`). */
+const MAX_LINKS = 40
+
 /**
- * The physical path of `path`, or null. `realpathSync.native` asks the OS to resolve
- * each component in turn, so a `..` that follows a symlink is resolved through the link
- * as Git would; the JavaScript `realpathSync` normalizes `..` lexically first and would
- * not.
+ * The physical path of `path`, or null if any component is missing or a link loops.
+ *
+ * Resolved component by component with `lstat` and `readlink`, the way `realpath(3)` and
+ * Git resolve it: a `..` pops the *physical* path reached so far, so it climbs out of the
+ * directory a symlink led into, not out of the directory that holds the link. Neither
+ * `realpathSync` (JavaScript, normalizes `..` lexically first) nor `realpathSync.native`
+ * can be relied on for that: Bun 1.4.3 on Linux normalizes `..` lexically in the native
+ * call as well, which is what let `<link>/../x` verify as a sibling of the link.
+ * Relative input is taken relative to the process directory.
  */
 export function physical(path: string): string | null {
-  try {
-    return realpathSync.native(path)
-  } catch {
-    return null
+  const pending = (path.startsWith("/") ? path : `${process.cwd()}/${path}`).split("/").reverse()
+  let resolved = ""
+  let links = 0
+  while (pending.length > 0) {
+    const part = pending.pop() as string
+    if (part === "" || part === ".") continue
+    if (part === "..") {
+      resolved = resolved.slice(0, resolved.lastIndexOf("/"))
+      continue
+    }
+    const candidate = `${resolved}/${part}`
+    try {
+      if (!lstatSync(candidate).isSymbolicLink()) {
+        resolved = candidate
+        continue
+      }
+      if (++links > MAX_LINKS) return null
+      const target = readlinkSync(candidate)
+      if (target.startsWith("/")) resolved = ""
+      pending.push(...target.split("/").reverse())
+    } catch {
+      return null
+    }
   }
+  return resolved === "" ? "/" : resolved
 }
 
 /**

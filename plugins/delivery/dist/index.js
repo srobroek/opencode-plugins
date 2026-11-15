@@ -312,7 +312,7 @@ function loadAgents(ids = AGENT_IDS) {
 }
 
 // plugins/delivery/src/cleanup.ts
-import { lstatSync as lstatSync3, realpathSync as realpathSync4 } from "fs";
+import { lstatSync as lstatSync3, realpathSync as realpathSync3 } from "fs";
 import { basename as basename2, dirname as dirname3, isAbsolute as isAbsolute2, resolve as resolve2, sep } from "path";
 import { isDeepStrictEqual } from "util";
 // plugins/delivery/package.json
@@ -351,7 +351,7 @@ var package_default = {
 };
 
 // plugins/delivery/src/checkout-marker.ts
-import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, realpathSync } from "fs";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readlinkSync, readSync } from "fs";
 import { dirname, join } from "path";
 var MAX_MARKER_BYTES = 64 * 1024;
 function readBounded(path) {
@@ -379,12 +379,36 @@ function readBounded(path) {
       closeSync(fd);
   }
 }
+var MAX_LINKS = 40;
 function physical(path) {
-  try {
-    return realpathSync.native(path);
-  } catch {
-    return null;
+  const pending = (path.startsWith("/") ? path : `${process.cwd()}/${path}`).split("/").reverse();
+  let resolved = "";
+  let links = 0;
+  while (pending.length > 0) {
+    const part = pending.pop();
+    if (part === "" || part === ".")
+      continue;
+    if (part === "..") {
+      resolved = resolved.slice(0, resolved.lastIndexOf("/"));
+      continue;
+    }
+    const candidate = `${resolved}/${part}`;
+    try {
+      if (!lstatSync(candidate).isSymbolicLink()) {
+        resolved = candidate;
+        continue;
+      }
+      if (++links > MAX_LINKS)
+        return null;
+      const target = readlinkSync(candidate);
+      if (target.startsWith("/"))
+        resolved = "";
+      pending.push(...target.split("/").reverse());
+    } catch {
+      return null;
+    }
   }
+  return resolved === "" ? "/" : resolved;
 }
 function physicalFrom(base, value) {
   return physical(value.startsWith("/") ? value : `${base}/${value}`);
@@ -449,7 +473,7 @@ function inspectCheckoutMarker(checkout, commonDir) {
 }
 
 // plugins/delivery/src/forge-adapter.ts
-import { mkdirSync, mkdtempSync, realpathSync as realpathSync2, rmSync, writeFileSync } from "fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "fs";
 import { devNull as devNull2, tmpdir } from "os";
 import { join as join2 } from "path";
 
@@ -1125,7 +1149,7 @@ function absenceProbe(remoteOrUrl, branch, cwd, environment) {
   if (forgeTarget(remoteOrUrl) !== null) {
     let neutral;
     try {
-      neutral = realpathSync2(mkdtempSync(join2(tmpdir(), "forge-ls-remote-")));
+      neutral = realpathSync(mkdtempSync(join2(tmpdir(), "forge-ls-remote-")));
     } catch {
       return null;
     }
@@ -1186,7 +1210,7 @@ import {
   openSync as openSync2,
   readFileSync as readFileSync3,
   readSync as readSync2,
-  realpathSync as realpathSync3,
+  realpathSync as realpathSync2,
   unlinkSync,
   writeFileSync as writeFileSync2
 } from "fs";
@@ -1230,7 +1254,7 @@ var REPOSITORY_OBSERVATION_ARGS = [
 ];
 function physicalDirectory(path) {
   try {
-    const real = realpathSync3(path);
+    const real = realpathSync2(path);
     return lstatSync2(real).isDirectory() ? real : null;
   } catch {
     return null;
@@ -2197,7 +2221,7 @@ function worktreePathState(path) {
   if (stat.isSymbolicLink() || !stat.isDirectory())
     return "unsafe";
   try {
-    realpathSync4(path);
+    realpathSync3(path);
     return "directory";
   } catch {
     return "unsafe";
@@ -2368,11 +2392,7 @@ async function isForeignCheckout(path, cwd, records, run, refReadMs) {
   return session !== null && ["foreign", "unsafe"].includes(inspectCheckoutMarker(path, session));
 }
 function physicalPath(path) {
-  try {
-    return realpathSync4(path);
-  } catch {
-    return null;
-  }
+  return physical(path);
 }
 function invocationInsideTarget(cwd, target) {
   const invocation = physicalPath(cwd);

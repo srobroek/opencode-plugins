@@ -2,7 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test"
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { commondirValue, gitFileValue, verifyCheckout } from "./checkout-marker.ts"
+import { commondirValue, gitFileValue, physical, verifyCheckout } from "./checkout-marker.ts"
 
 const roots: string[] = []
 afterAll(() => {
@@ -99,5 +99,41 @@ describe("verifyCheckout", () => {
     writeFileSync(join(admin, "commondir"), " ../..\n")
     writeFileSync(join(checkout, ".git"), `gitdir: ${admin}\n`)
     expect(verifyCheckout(checkout, common).state).toBe("unsafe")
+  })
+})
+
+describe("physical", () => {
+  test("a .. after a symlink climbs out of the directory the link led into", () => {
+    const { root } = layout()
+    mkdirSync(join(root, "deep", "real", "x"), { recursive: true })
+    mkdirSync(join(root, "deep", "real", "sub"))
+    symlinkSync(join(root, "deep", "real", "sub"), join(root, "lnk"))
+    // Lexically `root/lnk/../x` is `root/x`, which does not exist; through the link it is `deep/real/x`.
+    expect(physical(`${root}/lnk/../x`)).toBe(join(root, "deep", "real", "x"))
+  })
+
+  test("relative and absolute link targets, and chains of links, resolve", () => {
+    const { root } = layout()
+    mkdirSync(join(root, "a", "b"), { recursive: true })
+    symlinkSync("b", join(root, "a", "rel"))
+    symlinkSync(join(root, "a", "rel"), join(root, "abs"))
+    symlinkSync("abs", join(root, "chain"))
+    expect(physical(join(root, "chain"))).toBe(join(root, "a", "b"))
+    expect(physical(`${root}/a/./b/../b`)).toBe(join(root, "a", "b"))
+  })
+
+  test("a missing component, a link loop and a file used as a directory give null", () => {
+    const { root } = layout()
+    symlinkSync(join(root, "loop2"), join(root, "loop1"))
+    symlinkSync(join(root, "loop1"), join(root, "loop2"))
+    writeFileSync(join(root, "file"), "x")
+    expect(physical(join(root, "missing"))).toBeNull()
+    expect(physical(join(root, "loop1"))).toBeNull()
+    expect(physical(join(root, "file", "child"))).toBeNull()
+  })
+
+  test("the root is its own parent", () => {
+    expect(physical("/..")).toBe("/")
+    expect(physical("/")).toBe("/")
   })
 })
