@@ -42,10 +42,13 @@ Inputs: `pr`, and when needed `merge_method` (`squash` by default, `merge`,
 - `worktree` is recorded for cleanup, and its HEAD must be the PR head. Without
   it, the linked worktree that has the PR's branch checked out at the PR head is
   recorded; if none does, no worktree is recorded.
-- `repo` names the repository to land. Run from another repository, pass `worktree`
-  as a checkout of `repo`: the remote whose URL names `repo` is used for the proof
-  and the branch-absence check, and `repo` still has to match that remote.
-  A landing needs a local checkout of `repo`; there is no API-only mode.
+- `repo` selects, among the session repository's own remotes, the one whose URL
+  names `repo`; it must still match that remote. `delivery_land` works only in the
+  session repository: a `worktree` that is not one of its worktrees, or a `repo` it
+  has no remote for, is refused before any Git runs in the other checkout. To land a
+  pull request of another repository, run `delivery_land` from a session there.
+  Local reads also run with `GIT_NO_LAZY_FETCH=1` and `log.showSignature=false`;
+  the explicit fetch of the landed commits is the only network Git call.
 - `requireApproval` reads the approval from the PR. On GitHub that is an
   `APPROVED` review whose commit is the head. If reviewer and author share one
   account, it can instead be a comment by that account whose first line is
@@ -80,7 +83,9 @@ match the selected receipt. Without `receipt`, the tool uses the newest receipt
 for the current repository. A receipt or worktree of another repository is always
 refused, before any Git command runs in it: a foreign checkout's config can name
 programs (filter drivers, `include.path`), so run `delivery_cleanup` from a session
-in that repository. Git commands in the session repository's worktrees run with
+in that repository. A listed worktree is also checked first: its `.git` must be a
+regular file (never a symlink or FIFO, read with bounded no-follow reads) naming a
+directory under this repository's `worktrees/` whose `commondir` is this repository. Git commands in the session repository's worktrees run with
 `core.fsmonitor=false`, `core.hooksPath=/dev/null` and `--no-optional-locks`.
 
 The tool refuses in these cases:

@@ -186,7 +186,7 @@ const CLEANUP_OUTPUT = {
 const LAND_DESCRIPTION =
   "Merge a reviewed pull request at most once, prove it landed, and write one landing receipt.\n" +
   "Refuses unless expectHeadSha names the PR head (required whenever the call would merge) " +
-  "and, when worktree is given, its HEAD is that head. With requireApproval/requireGreenChecks it also requires an approval artifact on the PR for that exact head " +
+  "and, when worktree is given, it is a worktree of the session repository (never another repository's) whose HEAD is that head. With requireApproval/requireGreenChecks it also requires an approval artifact on the PR for that exact head " +
   "and green checks before merging. Merges at most once (an already MERGED request is proved, not re-merged) with merge_method (squash by default, PR title as subject), " +
   "binds the merge to the head, re-reads it, fetches the landed commits and checks the method's commit shape, observes the remote branch, then writes the receipt. " +
   "Writes no Beads ledger: when beads.ledgerActive, run the returned next steps child-before-parent, then delivery_cleanup. " +
