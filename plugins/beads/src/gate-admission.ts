@@ -13,7 +13,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path"
 import { supervise } from "@srobroek/opencode-lib/subprocess"
 
 import { type BdInvocation, bdInvocations, flagEnabled, globalValue, invocationFromArgv } from "./bd-actor-gate.ts"
-import { embeddedWriteTargets, withEmbeddedWriteLock, writesStore } from "./bd-embedded-write-lock.ts"
+import { DYNAMIC_CWD, embeddedWriteTargets, withEmbeddedWriteLock, writesStore } from "./bd-embedded-write-lock.ts"
 import { sessionPinFor } from "./beads-store.ts"
 import { leadingCdCwd } from "./shell.ts"
 
@@ -459,7 +459,7 @@ export async function admitBdMutation(
 ): Promise<Admission> {
   if (!command) return undefined
   if (/\bcd\s+(?:"[^"]*\$[^"]*"|'[^']*\$[^']*'|\$[A-Za-z_])/u.test(command)) {
-    return { block: true, reason: "cannot resolve the dynamic working directory before this mutation" }
+    return { block: true, reason: DYNAMIC_CWD }
   }
   const writes = bdInvocations(command).filter((invocation) => writesStore(invocation))
   if (

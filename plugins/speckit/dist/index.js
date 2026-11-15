@@ -1670,9 +1670,9 @@ import { join as join7 } from "path";
 // plugins/beads/src/bd-embedded-write-lock.ts
 import { spawnSync as spawnSync2 } from "child_process";
 import {
-  closeSync,
+  closeSync as closeSync2,
   existsSync as existsSync5,
-  openSync,
+  openSync as openSync2,
   readFileSync as readFileSync4,
   realpathSync as realpathSync2,
   statSync as statSync3,
@@ -1795,6 +1795,35 @@ function isDir(path) {
   }
 }
 
+// plugins/beads/src/bounded-read.ts
+import { closeSync, constants, fstatSync, lstatSync as lstatSync3, openSync, readSync } from "fs";
+var MAX_LEDGER_FILE_BYTES = 64 * 1024;
+function readBounded(path) {
+  let fd;
+  try {
+    if (!lstatSync3(path).isFile())
+      return { kind: "unreadable" };
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const info = fstatSync(fd);
+    if (!info.isFile() || info.size > MAX_LEDGER_FILE_BYTES)
+      return { kind: "unreadable" };
+    const buffer = Buffer.alloc(info.size);
+    let offset = 0;
+    while (offset < buffer.length) {
+      const read = readSync(fd, buffer, offset, buffer.length - offset, offset);
+      if (read === 0)
+        break;
+      offset += read;
+    }
+    return { kind: "text", text: buffer.toString("utf8", 0, offset) };
+  } catch (error) {
+    return error.code === "ENOENT" ? { kind: "absent" } : { kind: "unreadable" };
+  } finally {
+    if (fd !== undefined)
+      closeSync(fd);
+  }
+}
+
 // plugins/beads/src/bd-embedded-write-lock.ts
 var LOCK_NAME = "omp-embedded-write.lock";
 var STEAL_NAME = "omp-embedded-write-steal.lock";
@@ -1859,7 +1888,7 @@ function registry() {
     for (const [lock, held] of created.owned) {
       clearInterval(held.renew);
       try {
-        closeSync(held.fd);
+        closeSync2(held.fd);
       } catch {}
       try {
         withOwnership(lock, held.token, () => unlinkSync(lock));
@@ -1911,15 +1940,12 @@ function canonicalStore(store) {
   return store === undefined ? undefined : canonical(store);
 }
 function embedded(store) {
-  let metadata = "";
-  let config = "";
-  try {
-    metadata = readFileSync4(join6(store, "metadata.json"), "utf8");
-  } catch {}
-  try {
-    config = readFileSync4(join6(store, "config.yaml"), "utf8");
-  } catch {}
-  return metadata !== "" || config !== "" || isDirectory2(join6(store, "embeddeddolt"));
+  for (const file of ["metadata.json", "config.yaml"]) {
+    const read = readBounded(join6(store, file));
+    if (read.kind === "unreadable" || read.kind === "text" && read.text !== "")
+      return true;
+  }
+  return isDirectory2(join6(store, "embeddeddolt"));
 }
 function embeddedStoreFor(cwd, env = process.env) {
   const store = storeFor([], cwd, env);
@@ -1979,7 +2005,7 @@ function takeOverIfAbandoned(lock, steal) {
     return;
   let fd;
   try {
-    fd = openSync(steal, "wx");
+    fd = openSync2(steal, "wx");
   } catch (error) {
     if (error.code !== "EEXIST")
       return;
@@ -1995,7 +2021,7 @@ function takeOverIfAbandoned(lock, steal) {
     if (abandoned(lock))
       unlinkSync(lock);
   } catch {} finally {
-    closeSync(fd);
+    closeSync2(fd);
     try {
       unlinkSync(steal);
     } catch {}
@@ -2058,7 +2084,7 @@ async function hold(store, owner, waitMs = WAIT_MS, signal) {
         }
       } else if (queue[0] === ticket) {
         try {
-          const fd = openSync(lock, "wx");
+          const fd = openSync2(lock, "wx");
           const token = `${process.pid}-${Date.now()}-${(nextToken++).toString(36)}`;
           writeSync(fd, JSON.stringify(holderNow(owner, token, undefined)));
           const renew = setInterval(() => {
@@ -2116,7 +2142,7 @@ function withOwnership(storeLock, token, change) {
   const steal = join6(dirname4(storeLock), STEAL_NAME);
   let fd;
   try {
-    fd = openSync(steal, "wx");
+    fd = openSync2(steal, "wx");
   } catch (error) {
     if (error.code === "EEXIST")
       return "busy";
@@ -2128,7 +2154,7 @@ function withOwnership(storeLock, token, change) {
     change();
     return "done";
   } finally {
-    closeSync(fd);
+    closeSync2(fd);
     try {
       unlinkSync(steal);
     } catch {}
@@ -2153,7 +2179,7 @@ function release(store, owner) {
   owned.delete(lock);
   clearInterval(held.renew);
   try {
-    closeSync(held.fd);
+    closeSync2(held.fd);
   } catch {}
   try {
     withOwnership(lock, held.token, () => unlinkSync(lock));
@@ -2166,11 +2192,11 @@ function renewLease(lock, owner, token) {
   if (held === undefined || held.token !== token)
     return;
   const result = withOwnership(lock, token, () => {
-    const fd = openSync(lock, "w");
+    const fd = openSync2(lock, "w");
     try {
       writeSync(fd, JSON.stringify(holderNow(owner, token, held.writer, held.writerStart)));
     } finally {
-      closeSync(fd);
+      closeSync2(fd);
     }
   });
   if (result !== "lost")
@@ -2178,7 +2204,7 @@ function renewLease(lock, owner, token) {
   clearInterval(held.renew);
   owned.delete(lock);
   try {
-    closeSync(held.fd);
+    closeSync2(held.fd);
   } catch {}
 }
 async function withEmbeddedWriteLock(cwd, owner, write, env = process.env, deadline, signal) {

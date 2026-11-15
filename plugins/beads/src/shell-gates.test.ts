@@ -1,10 +1,11 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
+import { execFileSync } from "node:child_process"
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { setBdShowRunForTests } from "./bd-close-gate.ts"
 import { GateAdmitter } from "./gate-admission.ts"
 import { parse } from "./shell.ts"
-import { actorForCommand, decideShell, hasBdEdit, withActorPrefix } from "./shell-gates.ts"
+import { actorForCommand, createLedgerWarning, decideShell, hasBdEdit, withActorPrefix } from "./shell-gates.ts"
 import { gateDeps } from "./test-support.ts"
 
 describe("decideShell", () => {
@@ -68,6 +69,102 @@ describe("decideShell", () => {
       deps({ repositoryControl: () => ({ kind: "controlled" }) }),
     )
     expect(linked.kind).toBe("allow")
+  })
+
+  describe("ledger context wiring", () => {
+    let repoA = ""
+    let repoB = ""
+    beforeAll(() => {
+      repoA = join(root, "repo-a")
+      repoB = join(root, "repo-b")
+      for (const repo of [repoA, repoB]) {
+        mkdirSync(join(repo, ".beads"), { recursive: true })
+        writeFileSync(join(repo, ".beads", "metadata.json"), `{"dolt_database":"db_${repo.slice(-1)}"}`)
+        execFileSync("git", ["init", "-q", repo])
+      }
+    })
+
+    test("an allowed bd create into another repository's ledger carries the advisory", async () => {
+      const decision = await decideShell(
+        "bd create --title t",
+        repoA,
+        deps({ actor: "a/b/c", env: { PATH: process.env.PATH, BEADS_DIR: join(repoB, ".beads") } }),
+      )
+      if (decision.kind !== "allow") throw new Error(JSON.stringify(decision))
+      expect(decision.advisories.join("\n")).toContain(realpathSync(join(repoB, ".beads")))
+    })
+
+    test("a create into the repository's own ledger carries none", async () => {
+      const decision = await decideShell(
+        "bd create --title t",
+        repoA,
+        deps({ actor: "a/b/c", env: { PATH: process.env.PATH, BEADS_DIR: join(repoA, ".beads") } }),
+      )
+      expect(decision.kind === "allow" ? decision.advisories : ["x"]).toEqual([])
+    })
+
+    test("a PR-link refusal names the ledger it read and where it walked from", async () => {
+      const sub = join(repoA, "sub")
+      mkdirSync(sub, { recursive: true })
+      const decision = await decideShell(
+        'gh pr create --title t --body "no trailer"',
+        sub,
+        deps({ repositoryControl: () => ({ kind: "controlled" }) }),
+      )
+      if (decision.kind !== "block") throw new Error(JSON.stringify(decision))
+      expect(decision.cause).toContain(JSON.stringify(join(repoA, ".beads")))
+      expect(decision.cause).toContain('prefix "db_a"')
+      expect(decision.cause).toContain(`walking up from ${JSON.stringify(sub)}`)
+    })
+
+    test("with the write lock disabled, a hostile ledger file neither hangs nor yields an advisory", async () => {
+      const hostileRoot = join(root, "repo-fifo")
+      mkdirSync(join(hostileRoot, ".beads"), { recursive: true })
+      execFileSync("mkfifo", [join(hostileRoot, ".beads", "metadata.json")])
+      execFileSync("git", ["init", "-q", hostileRoot])
+      const env = { PATH: process.env.PATH, BEADS_DIR: join(hostileRoot, ".beads") }
+      const off = { gates: { "bd-embedded-write-lock": { enabled: false } } }
+      const decision = await decideShell("bd create --title t", repoA, deps({ actor: "a/b/c", env, options: off }))
+      expect(decision.kind === "allow" ? decision.advisories : ["x"]).toEqual([])
+      // Enabled, the same ledger still reaches the lock rather than skipping it.
+      const on = await decideShell("bd create --title t", repoA, deps({ actor: "a/b/c", env }))
+      expect(on.kind).toBe("allow")
+      expect(on.kind === "allow" ? on.command : "").toContain("bd-embedded-write-runner")
+    })
+
+    test("admission's dynamic-cwd refusal tells the agent to pass workdir", async () => {
+      const decision = await decideShell("cd $WORKTREE && bd update proj-1 --claim", root, deps({ actor: "a/b/c" }))
+      if (decision.kind !== "block") throw new Error(JSON.stringify(decision))
+      expect(decision.gate).toBe("beads-gate-admission")
+      expect(decision.cause).toContain("pass the shell tool's `workdir` parameter")
+    })
+
+    test("--actor and --json before create do not suppress the advisory", () => {
+      const env = { BEADS_DIR: join(repoB, ".beads") }
+      for (const command of ["bd --actor x create --title t", "bd --json create --title t"])
+        expect(createLedgerWarning(command, repoA, env)).toContain("`workdir`")
+    })
+
+    test("target selectors and help forms suppress it", () => {
+      const env = { BEADS_DIR: join(repoB, ".beads") }
+      for (const command of [
+        `bd -C ${repoB} create --title t`,
+        `bd --db ${join(repoB, ".beads")} create --title t`,
+        "bd --global create --title t",
+        "bd create --help",
+        "bd list",
+      ])
+        expect(createLedgerWarning(command, repoA, env)).toBeUndefined()
+    })
+
+    test("follows export and unset BEADS_DIR earlier in the command", () => {
+      const own = { BEADS_DIR: join(repoA, ".beads") }
+      expect(createLedgerWarning(`export BEADS_DIR=${join(repoB, ".beads")}; bd create --title t`, repoA, own)).toContain(
+        "belongs to",
+      )
+      const other = { BEADS_DIR: join(repoB, ".beads") }
+      expect(createLedgerWarning("unset BEADS_DIR; bd create --title t", repoA, other)).toBeUndefined()
+    })
   })
 
   test("runs an embedded write under the runner and keeps the actor prefix outermost", async () => {

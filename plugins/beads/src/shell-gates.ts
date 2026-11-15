@@ -8,14 +8,21 @@
  * sets `BEADS_DIR` in the child's environment.
  */
 
-import { bdInvocations, decideActorParsed, flagEnabled } from "./bd-actor-gate.ts"
+import { bdInvocations, decideActorParsed, flagEnabled, globalValue } from "./bd-actor-gate.ts"
 import { decideBdCloseParsed } from "./bd-close-gate.ts"
-import { decideEmbeddedWrite, type EmbeddedWriteRunnerLookup, embeddedWriteRunner } from "./bd-embedded-write-lock.ts"
+import {
+  decideEmbeddedWrite,
+  type EmbeddedWriteRunnerLookup,
+  embeddedWriteRunner,
+  planEmbeddedWrites,
+} from "./bd-embedded-write-lock.ts"
 import { decideBdUnclaimParsed } from "./bd-unclaim-gate.ts"
 import { decideBdUpdateCloseParsed } from "./bd-update-close-gate.ts"
+import { repoIdentity } from "./beads-store.ts"
 import { protectBinaryHookCommands } from "./binary-hooks.ts"
 import { admitBdMutation, type GateAdmitter } from "./gate-admission.ts"
 import { type Gate, gateEnabled, type Options } from "./host.ts"
+import { describeLedger, findLedger, ledgerRepoMismatch } from "./ledger-context.ts"
 import { decideCommandParsed, type RepositoryControl, repositoryControlFor } from "./pr-bead-link-gate.ts"
 import { type ParsedCommand, parse } from "./shell.ts"
 
@@ -74,6 +81,36 @@ export function actorForCommand(command: string, actor: string | undefined): str
 
 export function withActorPrefix(command: string, actor: string): string {
   return `export BEADS_ACTOR='${actor.replaceAll("'", "'\\''")}'; ${command}`
+}
+
+/** Global flags that name the store themselves; the advisory does not follow them. */
+const TARGET_SELECTORS = ["-C", "--directory", "--db", "--database"]
+
+/**
+ * Warns when a `bd create` in the command writes to a ledger of another git repository.
+ *
+ * Targets come from the write planner, so the advisory sees the same `cd`, `export`,
+ * `unset` and command-local `BEADS_DIR` state as the lock. A command the planner cannot
+ * place stays silent here; the lock refuses it.
+ */
+export function createLedgerWarning(
+  command: string,
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  identity: (dir: string) => string | undefined = repoIdentity,
+): string | undefined {
+  let warning: string | undefined
+  planEmbeddedWrites(command, cwd, env, {
+    classify: false,
+    observe: ({ invocation, store, cwd: dir }) => {
+      if (warning !== undefined || invocation.verb !== "create") return
+      if (flagEnabled(invocation.globals, ["--global"])) return
+      if (TARGET_SELECTORS.some((name) => globalValue(invocation.globals, [name]) !== undefined)) return
+      const target = store ?? findLedger(dir)?.store
+      if (target !== undefined) warning = ledgerRepoMismatch({ store: target, cwd: dir, identity })
+    },
+  })
+  return warning
 }
 
 /** Decide one `shell` call. Never throws: an unexpected error is a parse refusal. */
@@ -168,9 +205,19 @@ async function decide(original: string, cwd: string, deps: ShellGateDeps): Promi
     if (decision.kind === "advisory") advisories.push(decision.text)
   }
 
+  const crossRepo = on("bd-embedded-write-lock") ? createLedgerWarning(command, cwd, deps.env) : undefined
+  if (crossRepo !== undefined) advisories.push(crossRepo)
+
   if (on("pr-bead-link-gate")) {
     const control = deps.repositoryControl ?? repositoryControlFor
-    const decision = decideCommandParsed(parsed, (segment) => control(segment, cwd))
+    const decision = decideCommandParsed(
+      parsed,
+      (segment) => control(segment, cwd),
+      () => {
+        const ledger = findLedger(cwd)
+        return ledger === undefined ? undefined : describeLedger(ledger)
+      },
+    )
     if (decision) return block("pr-bead-link-gate", decision.reason, "add the bead trailer to the PR body and retry")
   }
 

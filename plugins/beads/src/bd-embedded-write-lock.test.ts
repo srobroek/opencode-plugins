@@ -376,10 +376,7 @@ test("accepts a literal cd prefix while refusing dynamic cwd", async () => {
       Date.now() + 2000,
       () => ({ interpreter: process.execPath, script: join(import.meta.dir, "bd-embedded-write-runner.ts") }),
     )
-    expect(refused).toEqual({
-      kind: "block",
-      reason: "This command changes directory dynamically; issue the `bd` command with the tool's cwd field instead.",
-    })
+    expect(refused).toEqual({ kind: "block", reason: expect.stringContaining("pass the shell tool's `workdir` parameter") })
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
@@ -641,8 +638,8 @@ describe("compound commands", () => {
       expect(reason).toContain(part)
       expect(reason).toContain("Accepted:")
     }
-    expect(await refusal("cd $WORKTREE; git pull && bd close bd-1")).toBe(
-      "This command changes directory dynamically; issue the `bd` command with the tool's cwd field instead.",
+    expect(await refusal("cd $WORKTREE; git pull && bd close bd-1")).toContain(
+      "pass the shell tool's `workdir` parameter",
     )
   })
 
