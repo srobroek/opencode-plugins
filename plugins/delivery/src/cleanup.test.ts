@@ -1967,6 +1967,26 @@ describe("delivery_cleanup host worktree registry", () => {
     }
   }
 
+  test("a cross-repository worktree is not removed behind another project's host registry", async () => {
+    const f = fixture("host-cross-repo")
+    const session = fixture("host-cross-repo-session")
+    const fake = fakeHost(f, [])
+    const scripted = runner(f, {})
+    const result = await cleanupDelivery({ receipt: f.receiptPath }, session.main, {
+      run: scripted.run,
+      now: () => NOW + 10,
+      env: f.env,
+      bounds: HEAVY_FIXTURE_BOUNDS,
+      host: fake.host,
+    })
+    const reason = refusal(result)
+    expect(reason).toContain("worktree.owner")
+    expect(reason).toContain("run from a session in that repository")
+    expect(fake.removes).toEqual([])
+    expect(mutationCalls(scripted.calls)).toEqual([])
+    expect(existsSync(f.linked)).toBe(true)
+  }, 60_000)
+
   test("a host-registered worktree is removed through the host, never by git, and leaves the registry", async () => {
     const f = fixture("host-registered")
     const listedPath = realpathSync(f.linked)

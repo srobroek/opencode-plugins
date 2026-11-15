@@ -2439,6 +2439,9 @@ async function cleanupDelivery(params, cwd, deps = {}) {
   if (executionCwd === null)
     return refuse2("worktree.executionCwd", null, "a different listed worktree for the same repository");
   const targetPath = boundary.target.path;
+  if (deps.host !== undefined && repoCwd !== cwd) {
+    return refuse2("worktree.owner", `${targetPath} belongs to a repository other than this session's, whose OpenCode worktree registry is not readable from here`, "delivery_cleanup run from a session in that repository, so its host registry removes the worktree; nothing was removed");
+  }
   await deps.authorize?.({ worktree: targetPath, branch: receipt.branch.name, pr: receipt.pr.number });
   const removeArgv = ["worktree", "remove", targetPath];
   let route = "git";

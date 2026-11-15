@@ -1091,6 +1091,17 @@ export async function cleanupDelivery(
   if (executionCwd === null)
     return refuse("worktree.executionCwd", null, "a different listed worktree for the same repository")
   const targetPath = boundary.target.path
+  // The host registry in `deps.host` belongs to the session's own project. A worktree of
+  // another repository may be tracked by that repository's project instead, and a plain
+  // `git worktree remove` from here would leave its entry stale. The registry for that
+  // repository is not reachable from this session, so refuse before anything is removed.
+  if (deps.host !== undefined && repoCwd !== cwd) {
+    return refuse(
+      "worktree.owner",
+      `${targetPath} belongs to a repository other than this session's, whose OpenCode worktree registry is not readable from here`,
+      "delivery_cleanup run from a session in that repository, so its host registry removes the worktree; nothing was removed",
+    )
+  }
   await deps.authorize?.({ worktree: targetPath, branch: receipt.branch.name, pr: receipt.pr.number })
   const removeArgv = ["worktree", "remove", targetPath]
   // Ownership is decided before the last abort check, so an interrupt during the

@@ -2043,6 +2043,26 @@ describe("choosing the remote and worktree of a landing", () => {
       ])
     })
 
+    test("fetches a landed commit that is missing locally in the supplied checkout, then proves and publishes", async () => {
+      const { a, b, run, calls } = twoRepositories({
+        prView: [completed(mergedGithubPr())],
+        present: [false, true],
+      })
+      const wt = join(b.canonical, "wt")
+      const receipts = temporaryDirectory("delivery-land-receipts-")
+      const outcome = await landPullRequest(
+        { pr: 470, repo: "srobroek/omp-plugins", worktree: wt },
+        { run, cwd: a.canonical, now: () => NOW, receiptsDirectory: receipts, env: {}, sleep: async () => {} },
+      )
+      if (!outcome.ok) throw new Error(outcome.reason)
+      const fetches = calls.filter((call) => call.argv.includes("fetch"))
+      expect(fetches).toHaveLength(1)
+      expect(fetches[0]?.cwd).toBe(wt)
+      expect(calls.filter((call) => call.cwd === a.canonical).some((call) => call.argv.includes("fetch"))).toBe(false)
+      expect(existsSync(outcome.receiptPath)).toBe(true)
+      expect(readReceipt(outcome.receiptPath).ok).toBe(true)
+    })
+
     test("refuses a repo that neither the session nor the worktree repository names", async () => {
       const { a, b, run } = twoRepositories({ prView: [completed(mergedGithubPr())] })
       const outcome = await landPullRequest(
