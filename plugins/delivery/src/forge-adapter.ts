@@ -258,6 +258,9 @@ export function gitObservationEnvironment(source: NodeJS.ProcessEnv = process.en
   }
   env.GIT_ALLOW_PROTOCOL = "file:https:ssh"
   env.GIT_TERMINAL_PROMPT = "0"
+  // A local read never fetches missing objects from a promisor remote (git >= 2.44;
+  // older Git ignores it). The explicit fetch stays the only network path.
+  env.GIT_NO_LAZY_FETCH = "1"
   return env
 }
 

@@ -2231,3 +2231,83 @@ describe("delivery_cleanup Git options in its own repository", () => {
     expect(readFileSync(indexPath).equals(before)).toBe(false)
   }, 60_000)
 })
+
+describe("delivery_cleanup refuses a registered worktree whose directory is not this repository's", () => {
+  /** Each way the directory behind an intact registration can stop belonging to the session repository. */
+  const replacements: Array<[string, (f: Fixture, foreign: Fixture) => void]> = [
+    [
+      ".git replaced by a symlink to another repository",
+      (f, foreign) => {
+        rmSync(join(f.linked, ".git"))
+        symlinkSync(join(foreign.main, ".git"), join(f.linked, ".git"))
+      },
+    ],
+    [
+      ".git file naming another repository's worktree admin directory",
+      (f, foreign) => {
+        writeFileSync(join(f.linked, ".git"), readFileSync(join(foreign.linked, ".git")))
+      },
+    ],
+    [
+      "directory replaced by another repository's checkout",
+      (f, foreign) => {
+        rmSync(f.linked, { recursive: true, force: true })
+        cpSync(foreign.main, f.linked, { recursive: true })
+      },
+    ],
+    [
+      ".git replaced by a FIFO",
+      (f) => {
+        rmSync(join(f.linked, ".git"))
+        Bun.spawnSync(["mkfifo", join(f.linked, ".git")])
+      },
+    ],
+    [
+      "gitdir whose commondir is a FIFO",
+      (f) => {
+        const evil = scratch("evil-gitdir")
+        Bun.spawnSync(["mkfifo", join(evil, "commondir")])
+        writeFileSync(join(f.linked, ".git"), `gitdir: ${evil}\n`)
+      },
+    ],
+    [
+      "gitdir whose commondir is a symlink to a FIFO",
+      (f) => {
+        const evil = scratch("evil-gitdir")
+        const fifo = join(scratch("fifo"), "pipe")
+        Bun.spawnSync(["mkfifo", fifo])
+        symlinkSync(fifo, join(evil, "commondir"))
+        writeFileSync(join(f.linked, ".git"), `gitdir: ${evil}\n`)
+      },
+    ],
+  ]
+
+  test.each(replacements)("%s", async (_name, replace) => {
+    const f = fixture("marker-target")
+    const foreign = fixture("marker-foreign")
+    const { markers } = hostileConfig(foreign)
+    for (const marker of Object.values(markers)) rmSync(marker, { force: true })
+    replace(f, foreign)
+    const target = realpathSync(f.linked)
+
+    const spawns = gitSpawnLog()
+    const scripted = runner(f, {})
+    try {
+      const result = await cleanupDelivery({ receipt: f.receiptPath }, f.main, {
+        run: scripted.run,
+        now: () => NOW + 10,
+        env: f.env,
+        bounds: HEAVY_FIXTURE_BOUNDS,
+      })
+      expect(refusal(result)).toContain("worktree.marker")
+      const entered = spawns.log().filter((dir) => dir === target || dir.startsWith(`${target}/`))
+      expect(entered).toEqual([])
+    } finally {
+      spawns.restore()
+    }
+    expect(ranMarkers(markers)).toEqual([])
+    expect(scripted.details.filter((call) => call.cwd === f.linked)).toEqual([])
+    expect(mutationCalls(scripted.calls)).toEqual([])
+    expect(existsSync(f.linked)).toBe(true)
+  }, 30_000)
+})

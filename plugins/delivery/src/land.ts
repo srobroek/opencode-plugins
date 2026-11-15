@@ -75,9 +75,11 @@
  * active ledger and no ids is a gate with nothing to check.
  */
 
+import { existsSync } from "node:fs"
 import { resolve } from "node:path"
 import pkg from "../package.json" with { type: "json" }
 import { readApproval, readChecks } from "./approval.ts"
+import { inspectCheckoutMarker } from "./checkout-marker.ts"
 import { parseWorktreeList, type WorktreeRecord } from "./cleanup.ts"
 import {
   allowMergeCommit,
@@ -592,7 +594,7 @@ async function mergeProof(pr: PrObservation, method: MergeMethod | null, git: Gi
   }
   const oid = pr.mergeCommitOid.trim().toLowerCase()
   const head = pr.headRefOid.trim().toLowerCase()
-  const output = await git(["show", "-s", "--format=%P", oid])
+  const output = await git(["-c", "log.showSignature=false", "show", "-s", "--format=%P", oid])
   if (output === null)
     return { reason: `git show -s --format=%P ${oid}: observed no completed read, expected the merge commit's parents` }
   const text = output.trim()
@@ -754,7 +756,7 @@ async function gitOutput(
 async function observeRepository(
   git: GitRead,
   cwd: string,
-): Promise<{ key: string; canonicalRoot: string; ledger: CanonicalLedger } | { reason: string }> {
+): Promise<{ key: string; canonicalRoot: string; commonDir: string; ledger: CanonicalLedger } | { reason: string }> {
   const printed = await git(REPOSITORY_OBSERVATION_ARGS)
   const repository = repositoryContext(cwd, (argv) =>
     argv.length === REPOSITORY_OBSERVATION_ARGS.length &&
@@ -767,7 +769,12 @@ async function observeRepository(
       reason: `git ${REPOSITORY_OBSERVATION_ARGS.join(" ")} in ${cwd}: observed no unambiguous repository paths, expected absolute git common directory and checkout top level`,
     }
   }
-  return { key: repository.key, canonicalRoot: repository.ledger.root, ledger: repository.ledger }
+  return {
+    key: repository.key,
+    canonicalRoot: repository.ledger.root,
+    commonDir: repository.commonDir,
+    ledger: repository.ledger,
+  }
 }
 
 /**
@@ -920,7 +927,7 @@ export type LandingTarget = {
   /** The canonical API host {@link forgeTarget} resolved for the remote's transport host. */
   forgeHost: "github.com" | GitlabHost
   nameWithOwner: string
-  repository: { key: string; canonicalRoot: string; ledger: CanonicalLedger }
+  repository: { key: string; canonicalRoot: string; commonDir: string; ledger: CanonicalLedger }
   /** `HOST/PATH`: the `--repo` every forge command is given. */
   cliRepo: string
   /** The forge environment with that verified host pinned. */
@@ -1025,7 +1032,7 @@ export async function resolveLandingTarget(
   // of neither.
   if (normalizedRemote !== null && nameWithOwner !== normalizedRemote) {
     return {
-      reason: `repo: observed ${show(nameWithOwner)}, expected ${show(normalizedRemote)} from remote ${remote}; the branch absence is verified against ${remote}, so both must name one repository`,
+      reason: `repo: observed ${show(nameWithOwner)}, expected ${show(normalizedRemote)} from remote ${remote}; the branch absence is verified against ${remote}, so both must name one repository; to land a pull request of another repository, run delivery_land from a session in that repository`,
     }
   }
   // Only now, on top of a normalized path, is the host added — and it is added to
@@ -1072,17 +1079,12 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
   const env = deps.env ?? process.env
   const forgeEnv = forgeEnvironment(env)
   const gitEnv = gitObservationEnvironment(env)
-  // The checkout every local Git read, fetch and remote probe runs in. The session
-  // directory is that checkout unless an explicit `worktree` belongs to another
-  // repository: then the worktree decides whose remotes and object store are
-  // consulted, so a session in one repository can land a pull request of another.
-  // A worktree of the session's own repository changes nothing here.
+  // Every local Git read, fetch and remote probe runs in the session directory: a
+  // checkout of any other repository is untrusted, since even object-only Git commands
+  // can start programs its config names (promisor lazy fetch, alternate-refs helpers).
   const explicitWorktree =
     params.worktree === undefined || params.worktree.trim() === "" ? null : resolve(cwd, params.worktree.trim())
-  const commonDirOf = async (directory: string): Promise<string | null> =>
-    (await gitOutput(run, directory, REPOSITORY_OBSERVATION_ARGS, gitEnv))?.split("\n")[0] ?? null
-  let gitCwd = cwd
-  const git: GitRead = (argv, input) => gitOutput(run, gitCwd, argv, gitEnv, input)
+  const git: GitRead = (argv, input) => gitOutput(run, cwd, argv, gitEnv, input)
   // Every adapter call runs with the same neutralised environment, except where the
   // adapter passes one of its own: `remoteBranchAbsent` hardens Git's environment
   // itself, and that choice belongs to the module that owns the observation.
@@ -1108,14 +1110,21 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
     return refuse(`pr: observed ${show(params.pr)}, expected a positive integer of at most ${Number.MAX_SAFE_INTEGER}`)
   }
 
-  if (explicitWorktree !== null) {
-    const there = await commonDirOf(explicitWorktree)
-    if (there !== null && there !== (await commonDirOf(cwd))) gitCwd = explicitWorktree
-  }
-  const resolved = await resolveLandingTarget(params, git, gitCwd, forgeEnv)
+  const resolved = await resolveLandingTarget(params, git, cwd, forgeEnv)
   if ("reason" in resolved) return refuse(resolved.reason)
   const { remote, remoteUrl, forge, forgeHost, nameWithOwner, repository, cliRepo, forgeCommandEnv } = resolved
   const gitlabHost: GitlabHost | undefined = forgeHost === "github.com" ? undefined : forgeHost
+  // A worktree is read with Git, so it must provably belong to the session repository
+  // first; this looks only at its `.git` entry and runs no Git process there.
+  const sessionCommonDir = repository.commonDir
+  if (explicitWorktree !== null) {
+    const state = sessionCommonDir === null ? "unsafe" : inspectCheckoutMarker(explicitWorktree, sessionCommonDir)
+    if (state === "foreign" || state === "unsafe" || (state === "absent" && existsSync(explicitWorktree))) {
+      return refuse(
+        `worktree: observed ${show(explicitWorktree)} as ${state === "foreign" ? "a checkout of another repository" : "not a checkout owned by this repository"}, expected a worktree of the session repository ${show(nameWithOwner)}; run delivery_land from a session in the pull request's repository; no Git ran there, no merge was issued and no receipt was written`,
+      )
+    }
+  }
   const boundForgeRun: CliRunner = (argv, options) => run(argv, { ...options, env: options.env ?? forgeCommandEnv })
 
   const first = await readPr(run, forge, cliRepo, number, FORGE_TIMEOUT_MS, forgeCommandEnv)
@@ -1153,7 +1162,9 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
     // refusal; the receipt then records no worktree, as it always did.
     const listed = await git(["worktree", "list", "--porcelain"])
     const inferred = listed === null ? null : inferWorktree(parseWorktreeList(listed), first.pr.headRefName, head)
-    if (inferred !== null) {
+    const owned =
+      inferred !== null && sessionCommonDir !== null && inspectCheckoutMarker(inferred, sessionCommonDir) === "same"
+    if (inferred !== null && owned) {
       const held = await worktreeHead(run, inferred, gitEnv)
       if (!("reason" in held) && held.head === head) worktree = { path: inferred, head: held.head }
     }
@@ -1301,7 +1312,7 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
     const required =
       proofMethod === "rebase" && FULL_OID.test(head) && head !== provedOid ? [provedOid, head] : [provedOid]
     const fetchRun = (argv: string[]): Promise<CliResult> =>
-      Promise.resolve(run(argv, { cwd: gitCwd, timeoutMs: FETCH_TIMEOUT_MS, env: gitEnv }))
+      Promise.resolve(run(argv, { cwd, timeoutMs: FETCH_TIMEOUT_MS, env: gitEnv }))
     const local = await ensureLocalCommits(
       required,
       proved.baseRefName,
@@ -1334,7 +1345,7 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
 
   // The probe is asked from the checkout that configures `remote`: a name only
   // resolves in the repository that owns it.
-  const verdict = await remoteBranchAbsent(remote, proved.headRefName, gitCwd, forgeRun, env)
+  const verdict = await remoteBranchAbsent(remote, proved.headRefName, cwd, forgeRun, env)
   if (verdict !== "absent") {
     notes.push(
       `The remote branch ${proved.headRefName} on ${remote} is ${verdict}, not proved absent, so branch.deletedRemote stays false and remoteAbsenceVerifiedAt stays null.`,

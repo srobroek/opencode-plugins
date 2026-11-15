@@ -1,7 +1,8 @@
-import { lstatSync, readFileSync, realpathSync, type Stats } from "node:fs"
-import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path"
+import { lstatSync, realpathSync, type Stats } from "node:fs"
+import { basename, dirname, isAbsolute, resolve, sep } from "node:path"
 import { isDeepStrictEqual } from "node:util"
 import pkg from "../package.json" with { type: "json" }
+import { inspectCheckoutMarker } from "./checkout-marker.ts"
 import {
   type CliResult,
   type CliRunner,
@@ -28,6 +29,7 @@ import {
   readReceipt,
   receiptDirectory,
   repoKey,
+  repositoryContext,
   validateReceipt,
   writeReceipt,
 } from "./landing-receipt.ts"
@@ -616,7 +618,7 @@ function verifyArguments(params: DeliveryCleanupParams, receipt: LandingReceipt)
 }
 
 async function runGit(run: CliRunner, cwd: string, args: string[], timeoutMs: number): Promise<CliResult> {
-  return run(["git", ...SAFE_GIT_ARGS, ...args], { cwd, timeoutMs })
+  return run(["git", ...SAFE_GIT_ARGS, ...args], { cwd, timeoutMs, env: gitObservationEnvironment(process.env) })
 }
 
 function worktreePathState(path: string): "directory" | "absent" | "unsafe" {
@@ -840,31 +842,6 @@ async function readWorktrees(
 }
 
 /**
- * The common Git directory a checkout claims, read from its `.git` entry with plain
- * filesystem reads. No Git process runs in `path`: a checkout of another repository
- * is untrusted, and even a read such as `git status` can run its configured drivers.
- * Null when the entry is missing or unreadable.
- */
-export function claimedCommonDirectory(path: string): string | null {
-  try {
-    const entry = join(path, ".git")
-    const stat = lstatSync(entry)
-    if (stat.isDirectory()) return realpathSync(entry)
-    if (!stat.isFile()) return null
-    const match = /^gitdir: (.+)\r?\n?$/.exec(readFileSync(entry, "utf8"))
-    if (match?.[1] === undefined) return null
-    const gitDir = realpathSync(resolve(path, match[1].trim()))
-    try {
-      return realpathSync(resolve(gitDir, readFileSync(join(gitDir, "commondir"), "utf8").trim()))
-    } catch {
-      return gitDir
-    }
-  } catch {
-    return null
-  }
-}
-
-/**
  * Whether `path` is provably a checkout of another repository than the session's.
  * A path the session repository itself lists is never foreign. The proof is only used
  * to choose the refusal; what lets Git run in a target is that the session lists it.
@@ -880,8 +857,7 @@ async function isForeignCheckout(
   const argv = ["rev-parse", "--path-format=absolute", "--git-common-dir"]
   const result = await runGit(run, cwd, argv, refReadMs)
   const session = completed(result) ? physicalPath(result.stdout.trim()) : null
-  const claimed = claimedCommonDirectory(path)
-  return session !== null && claimed !== null && claimed !== session
+  return session !== null && ["foreign", "unsafe"].includes(inspectCheckoutMarker(path, session))
 }
 
 function physicalPath(path: string): string | null {
@@ -948,6 +924,19 @@ async function verifyTargetIdentity(
     return refuse("worktree.path", path, "a worktree in the current repository")
   if (target === null || target.prunable)
     return refuse("worktree.path", path, "an exact live record in git worktree list --porcelain")
+  // The registration is the session repository's, but the directory behind it is
+  // whatever is on disk now: a replaced checkout, or a `.git` link into another
+  // repository, would make the Git commands below run in code this repository does
+  // not own. Nothing runs in the target until its marker provably belongs here.
+  const common = repositoryContext(cwd)?.commonDir ?? null
+  const marker = common === null ? "unsafe" : inspectCheckoutMarker(path, common)
+  if (marker !== "same") {
+    return refuse(
+      "worktree.marker",
+      `${path} (.git ${marker})`,
+      "a regular .git file naming a directory under this repository's worktrees/ whose commondir is this repository; nothing was read in the worktree",
+    )
+  }
   if (target.detached) return refuse("worktree.branch", "detached", `branch ${show(receipt.branch.name)}`)
   const expectedRef = `${LOCAL_REF_PREFIX}${receipt.branch.name}`
   const branchFailure = compare("worktree.branch", target.branch, expectedRef)
