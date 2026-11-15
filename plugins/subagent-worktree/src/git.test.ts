@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createGit, spawnRunner } from "./git.ts"
@@ -50,5 +50,22 @@ describe("createGit().isUnborn on real repositories", () => {
     expect(await git.trackedDirty(repo)).toBe(true)
     await sh(repo, "commit", "--quiet", "-m", "update")
     expect(await git.trackedDirty(repo)).toBe(false)
+  })
+
+  test("trackedDirty ignores the tracked Beads export, from any subdirectory", async () => {
+    const repo = await mkdtemp(join(root, "beads-"))
+    await sh(repo, "init", "--quiet")
+    await mkdir(join(repo, ".beads"))
+    await mkdir(join(repo, "sub"))
+    await writeFile(join(repo, ".beads", "issues.jsonl"), "{}\n")
+    await writeFile(join(repo, "sub", "tracked.txt"), "first")
+    await writeFile(join(repo, "top.txt"), "first")
+    await sh(repo, "add", ".")
+    await sh(repo, "commit", "--quiet", "-m", "init")
+    await writeFile(join(repo, ".beads", "issues.jsonl"), "{}\n{}\n")
+    expect(await git.trackedDirty(repo)).toBe(false)
+    expect(await git.trackedDirty(join(repo, "sub"))).toBe(false)
+    await writeFile(join(repo, "top.txt"), "second")
+    expect(await git.trackedDirty(join(repo, "sub"))).toBe(true)
   })
 })

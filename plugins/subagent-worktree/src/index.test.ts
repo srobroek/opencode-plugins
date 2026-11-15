@@ -51,7 +51,7 @@ function fakeRun(repo: Repo, log: string[][]) {
     }
     if (cmd.startsWith("rev-list --count")) return ok(`${repo.ahead}\n`)
     if (cmd === "status --porcelain") return ok(repo.dirty ? " M a.txt\n" : "")
-    if (cmd === "status --porcelain --untracked-files=no") return ok(repo.local[dir]?.changed.length ? " M a.txt\n" : "")
+    if (cmd === "status --porcelain --untracked-files=no -- :(top) :(top,exclude).beads") return ok(repo.local[dir]?.changed.length ? " M a.txt\n" : "")
     if (cmd.startsWith("branch --quiet -d")) return ok()
     if (cmd === "worktree list --porcelain") return repo.git ? ok(repo.porcelain) : fail
     if (cmd === "diff --name-only -z HEAD") return ok(repo.local[dir]?.changed.map((file) => `${file}\0`).join("") ?? "")

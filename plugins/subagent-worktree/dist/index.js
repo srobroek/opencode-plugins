@@ -579,6 +579,7 @@ async function readHeadFacts(run, directory) {
     return { head, symbolic: undefined, refs: undefined };
   return { head, symbolic: await out("symbolic-ref", "--quiet", "HEAD"), refs: await out("for-each-ref", "--count=1") };
 }
+var TRACKED_DIRTY_PATHSPEC = [":(top)", ":(top,exclude).beads"];
 function createGit(run) {
   const git = async (directory, ...args) => {
     const result = await run(["git", "-C", directory, ...args]);
@@ -603,7 +604,7 @@ function createGit(run) {
     },
     changedFiles: async (directory, target) => files(await git(directory, "diff", "--name-only", "-z", `${target}...HEAD`)),
     trackedDirty: async (directory) => {
-      const changed = await git(directory, "status", "--porcelain", "--untracked-files=no");
+      const changed = await git(directory, "status", "--porcelain", "--untracked-files=no", "--", ...TRACKED_DIRTY_PATHSPEC);
       if (changed === undefined)
         throw new Error(`subagent-worktree: cannot read tracked changes in ${directory}`);
       return changed !== "";
@@ -1102,6 +1103,7 @@ export {
   SESSION_LOOKUP_MS,
   SUBAGENT_PREAMBLE,
   SUBAGENT_TOOL,
+  TRACKED_DIRTY_PATHSPEC,
   UNBORN_NOTE,
   WORKTREE_PARAM,
   WORKTREE_PARAM_DESCRIPTION,
