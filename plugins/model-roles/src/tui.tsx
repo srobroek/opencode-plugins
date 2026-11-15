@@ -1,5 +1,6 @@
 import type { LocationRef } from "@opencode/client"
 import { Plugin } from "@opencode/plugin/tui"
+import { readUsage, type UsageReport, usageBrief } from "./report.ts"
 import { TiersRpc } from "./rpc.ts"
 import {
   AGENT_DEFAULT,
@@ -33,6 +34,7 @@ import { type AgentRow, EFFORT_CHOICES, readState, type TierRow, type TierState,
 const ADD = "\u0000add"
 const AGENTS = "\u0000agents"
 const DEFAULT = "\u0000default"
+const USAGE = "\u0000usage"
 
 /** What a key action in the Models screen asked for before it closed the dialog. */
 type Intent = { kind: "variant" | "up" | "down" | "save"; ref: string }
@@ -288,6 +290,39 @@ export default Plugin.define({
       }
     }
 
+    /** Read-only: one row per tier; Enter shows that tier's agents as disabled rows. Esc goes back. */
+    const showUsage = async (at: LocationRef) => {
+      let report: UsageReport | undefined
+      try {
+        report = readUsage((await rpc.usage({}, { location: at })) as unknown)
+      } catch (error) {
+        toast(`Usage: ${(error as Error).message}`, "error")
+        return
+      }
+      if (report === undefined) return
+      let current: string | undefined
+      for (;;) {
+        const tier = await dialog.select<string>({
+          title: "Usage per tier",
+          placeholder: `Last ${report.days} days. Enter shows a tier's agents`,
+          options:
+            report.tiers.length === 0
+              ? [{ title: "No finished spawns recorded", value: "", disabled: true }]
+              : report.tiers.map((t) => ({ title: t.tier, value: t.tier, description: usageBrief(t.total) })),
+          ...(current === undefined ? {} : { current }),
+        })
+        if (tier === undefined) return
+        current = tier
+        const row = report.tiers.find((t) => t.tier === tier)
+        if (row === undefined) continue
+        await dialog.select<string>({
+          title: `Usage: ${row.tier}`,
+          placeholder: "Per agent. Esc goes back",
+          options: row.agents.map((a) => ({ title: a.agent, value: a.agent, description: usageBrief(a), disabled: true })),
+        })
+      }
+    }
+
     const open = async () => {
       const at = location()
       let current: string | undefined
@@ -314,6 +349,7 @@ export default Plugin.define({
               footer: row.cost,
             })),
             { title: "Agents…", value: AGENTS, description: "See each agent's tier and change it" },
+            { title: "Usage…", value: USAGE, description: "Runs, success, time and cost per tier (read-only)" },
             { title: "Add a tier…", value: ADD },
           ],
           ...(current === undefined ? {} : { current }),
@@ -322,6 +358,7 @@ export default Plugin.define({
         current = choice
         if (choice === ADD) await addTier(at, state)
         else if (choice === AGENTS) await showAgents(at, state)
+        else if (choice === USAGE) await showUsage(at)
         else {
           const row = state.tiers.find((t) => t.name === choice)
           if (row !== undefined) await editTier(at, state, createDraft(row))

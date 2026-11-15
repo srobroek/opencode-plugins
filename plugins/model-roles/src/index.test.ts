@@ -263,6 +263,12 @@ function createHost(input: {
         if (hook.name === "execute.after")
           await hook.callback({ tool: "subagent", sessionID, agent: "build", id, input: payload, status: "completed", result: { metadata } })
     },
+    /** Run `execute.after` for any tool in `sessionID` (a child's own shell call). */
+    toolDone: async (tool: string, payload: unknown, metadata: unknown, sessionID: string, id: string) => {
+      for (const hook of toolHooks)
+        if (hook.name === "execute.after")
+          await hook.callback({ tool, sessionID, agent: "plain", id, input: payload, status: "completed", result: { metadata } })
+    },
     sessions,
     storage,
     rpc: (method: string, input: unknown = {}) => rpcHandlers[method]?.(input),
@@ -1218,10 +1224,17 @@ describe("runtime fallback", () => {
       host.emit({ type: "session.created", data: { sessionID: "c1", parentID: "r", agent: "plain", model: sonnet } })
       host.emit(usage("c1", 100, 0.5))
       host.emit(usage("c1", 200, 0.25))
-      host.emit({ type: "session.execution.succeeded", created: Date.now() + 1000, data: { sessionID: "c1" } })
+      const succeeded = { type: "session.execution.succeeded", created: Date.now() + 1000, data: { sessionID: "c1" } }
+      host.emit(succeeded)
       await host.spawn("subagent", { agent: "plain", prompt: "x", role: "task" }, "build", "r", "call-2")
       host.emit({ type: "session.created", data: { sessionID: "c2", parentID: "r", agent: "plain", model: sonnet } })
       host.emit({ type: "session.execution.failed", data: { sessionID: "c2", error: { type: "api", message: "invalid credentials", status: 401 } } })
+      await settle()
+      // c1 is resumed: it counts as running from the start of that run, not from its end.
+      await host.spawn("subagent", { agent: "plain", prompt: "again", sessionID: "c1" }, "build", "r", "call-3")
+      expect(host.storage.get("outcome:c1")).toMatchObject({ resumes: 1, steps: 2 })
+      expect(host.storage.get("outcome:c1")).not.toHaveProperty("outcome")
+      host.emit(succeeded)
       await settle()
       await host.spawnDone({ ...input1, sessionID: "c1" }, { sessionID: "c1" }, "r", "call-3")
       const first = host.storage.get("outcome:c1") as Record<string, unknown>
@@ -1245,12 +1258,54 @@ describe("runtime fallback", () => {
       expect(JSON.stringify(first)).not.toContain("secret prompt")
       expect(host.storage.get("outcome:c2")).toMatchObject({ outcome: "failed:auth", steps: 0 })
       const check = (await host.tools.get("model_roles_check")?.execute({}))?.content
-      expect(check).toContain("outcome ledger: 2 spawns recorded")
+      expect(check).toContain("Usage per tier (last 90 days):")
+      expect(check).toContain("  standard: 2 runs: 1 ok, 1 failed, 0 interrupted (50%)")
+      expect(check).toContain("cost 1/2 $0.750 ($0.750/success)") // c2 reported no usage at all
       host.close()
       await cleanup()
     } finally {
       setSystemTime()
     }
+  })
+
+  describe("usage rpc", () => {
+    const DAY = 24 * 60 * 60 * 1000
+    const stored = (ago: number, over: Record<string, unknown> = {}) => ({
+      v: 2,
+      at: Date.now() - ago * DAY,
+      agent: "explore",
+      tier: "cheap",
+      model: "secret-provider/secret-model#high",
+      parentID: "secret-parent-session",
+      resumes: 0,
+      inputTokens: 10,
+      outputTokens: 1,
+      cost: 0.5,
+      steps: 1,
+      ms: 100,
+      outcome: "succeeded",
+      ...over,
+    })
+
+    test("forwards the window and returns aggregates only", async () => {
+      const host = createHost({ agents: [{ id: "plain" }], models, options: fallbackOptions })
+      host.storage.set("outcome:session-recent-AAA", stored(1))
+      host.storage.set("outcome:session-old-BBB", stored(40, { outcome: "failed:server" }))
+      host.storage.set("outcome:session-running-CCC", stored(1, { outcome: undefined }))
+      const cleanup = await setup(host)
+      const all = (await host.rpc("usage", {})) as { days: number; tiers: Array<{ tier: string; total: { n: number; succeeded: number; failed: number }; agents: unknown[] }> }
+      expect(all.days).toBe(90)
+      expect(all.tiers).toHaveLength(1)
+      expect(all.tiers[0]).toMatchObject({ tier: "cheap", total: { n: 2, succeeded: 1, failed: 1 } })
+      const week = (await host.rpc("usage", { days: 7 })) as typeof all
+      expect(week.days).toBe(7)
+      expect(week.tiers[0]?.total).toMatchObject({ n: 1, succeeded: 1, failed: 0 })
+      expect(((await host.rpc("usage", { days: "7" })) as typeof all).days).toBe(90)
+      const text = JSON.stringify(all)
+      for (const secret of ["session-recent", "session-old", "secret-parent", "secret-provider", "secret-model", "outcome:"]) expect(text).not.toContain(secret)
+      host.close()
+      await cleanup()
+    })
   })
 
   describe("outcome ledger", () => {
@@ -1352,6 +1407,87 @@ describe("runtime fallback", () => {
       host.close()
       await cleanup()
       expect(host.storage.get("outcome:c")).toMatchObject({ cost: 0.4, inputTokens: 50, outputTokens: 5, cacheReadTokens: 7, cacheWriteTokens: 3, steps: 0 })
+    })
+
+    describe("outcome signals", () => {
+      const text = (text: string) => ({ type: "session.text.ended", data: { sessionID: "c", assistantMessageID: "m", ordinal: 0, text } })
+      const finish = (host: Awaited<ReturnType<typeof withChild>>["host"]) => host.emit({ type: "session.execution.succeeded", data: { sessionID: "c" } })
+
+      test("a reviewer's last VERDICT line is kept as an enum and no text", async () => {
+        const { host, cleanup } = await withChild()
+        host.emit(text("looks fine\nVERDICT: APPROVE"))
+        host.emit(text("On second thought, secret finding\nVERDICT: REQUEST-CHANGES"))
+        finish(host)
+        await settle()
+        const record = host.storage.get("outcome:c")
+        expect(record).toMatchObject({ verdict: "request-changes", tests: "none", touchedTests: false })
+        expect(JSON.stringify(record)).not.toContain("secret finding")
+        host.close()
+        await cleanup()
+      })
+
+      test("the last test run wins: a failing then a passing bun test", async () => {
+        const { host, cleanup } = await withChild()
+        await host.toolDone("bash", { command: "cd /repo && bun test", secret: "token-123" }, { exit: 1 }, "c", "t1")
+        await host.toolDone("bash", { command: "ls" }, { exit: 0 }, "c", "t2")
+        await host.toolDone("bash", { command: "CI=1 bun test" }, { exit: 0 }, "c", "t3")
+        await host.toolDone("bash", { command: "bun test" }, {}, "c", "t4")
+        finish(host)
+        await settle()
+        const record = host.storage.get("outcome:c")
+        expect(record).toMatchObject({ tests: "pass", touchedTests: false })
+        expect(record).not.toHaveProperty("verdict")
+        expect(JSON.stringify(record)).not.toContain("bun test")
+        host.close()
+        await cleanup()
+      })
+
+      test("a failing last run is recorded as fail", async () => {
+        const { host, cleanup } = await withChild()
+        await host.toolDone("bash", { command: "bun test" }, { exit: 0 }, "c", "t1")
+        await host.toolDone("bash", { command: "bun test" }, { exit: 1 }, "c", "t2")
+        finish(host)
+        await settle()
+        expect(host.storage.get("outcome:c")).toMatchObject({ tests: "fail" })
+        host.close()
+        await cleanup()
+      })
+
+      test("a step that edits a test file sets touchedTests for good", async () => {
+        const { host, cleanup } = await withChild()
+        const step = (files: string[]) => ({ type: "session.step.ended", data: { sessionID: "c", cost: 0, tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } }, files } })
+        host.emit(step(["src/a.ts"]))
+        host.emit(step(["src/a.test.ts"]))
+        host.emit(step(["src/b.ts"]))
+        finish(host)
+        await settle()
+        const record = host.storage.get("outcome:c")
+        expect(record).toMatchObject({ touchedTests: true, tests: "none", steps: 3 })
+        expect(JSON.stringify(record)).not.toContain("a.test.ts")
+        host.close()
+        await cleanup()
+      })
+
+      test("a session with no ledger record stores nothing", async () => {
+        const { host, cleanup } = await withChild()
+        host.emit({ type: "session.text.ended", data: { sessionID: "other", text: "VERDICT: APPROVE" } })
+        await host.toolDone("bash", { command: "bun test" }, { exit: 0 }, "other", "t1")
+        await settle()
+        expect(host.storage.has("outcome:other")).toBe(false)
+        host.close()
+        await cleanup()
+      })
+
+      test("evaluate.testCommands replaces the default list", async () => {
+        const { host, cleanup } = await withChild({ ...fallbackOptions, evaluate: { testCommands: ["make verify"] } })
+        await host.toolDone("bash", { command: "make verify" }, { exit: 0 }, "c", "t1")
+        await host.toolDone("bash", { command: "bun test" }, { exit: 1 }, "c", "t2")
+        finish(host)
+        await settle()
+        expect(host.storage.get("outcome:c")).toMatchObject({ tests: "pass" })
+        host.close()
+        await cleanup()
+      })
     })
 
     test("concurrent spawns of one agent and model each keep their own tier", async () => {

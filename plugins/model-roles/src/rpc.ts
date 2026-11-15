@@ -11,6 +11,11 @@ export const TiersRpc = Rpc.define({
       input: { type: "object", properties: { draft: { type: "object" } } },
       output: { type: "object" },
     },
+    /** The outcome ledger's usage report per tier and agent over the last `days` (default: the ledger's retention). */
+    usage: {
+      input: { type: "object", properties: { days: { type: "number" } } },
+      output: { type: "object" },
+    },
     /** Set one tier's config (`value`), or remove it (`value` null), in the global config file; the running instance applies it. */
     set: {
       input: {

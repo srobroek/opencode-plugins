@@ -58,6 +58,7 @@ import {
   invocationFromArgv,
 } from "./bd-actor-gate.ts"
 import { sessionPinFor } from "./beads-store.ts"
+import { readBounded } from "./bounded-read.ts"
 import {
   type ParsedCommand,
   type ShellScan,
@@ -482,19 +483,13 @@ function canonicalStore(store: string | undefined): string | undefined {
 }
 
 function embedded(store: string): boolean {
-  let metadata = ""
-  let config = ""
-  try {
-    metadata = readFileSync(join(store, "metadata.json"), "utf8")
-  } catch {
-    // An absent carrier proves nothing; the classifier reads both.
+  for (const file of ["metadata.json", "config.yaml"]) {
+    const read = readBounded(join(store, file))
+    // A carrier that is there but cannot be read safely (a symlink, a FIFO, an oversized
+    // file) still marks an embedded store: when in doubt the write is locked, never skipped.
+    if (read.kind === "unreadable" || (read.kind === "text" && read.text !== "")) return true
   }
-  try {
-    config = readFileSync(join(store, "config.yaml"), "utf8")
-  } catch {
-    // Same.
-  }
-  return metadata !== "" || config !== "" || isDirectory(join(store, "embeddeddolt"))
+  return isDirectory(join(store, "embeddeddolt"))
 }
 
 /**
@@ -620,8 +615,8 @@ const UNCERTAIN_AFTER: Record<string, true> = { "\n": true, "&": true, ";": true
 const RUNNER_SCRIPT = /^bd-embedded-write-runner\.(?:js|ts)$/
 
 /** The refusal for a write after a directory change whose target only the shell knows. */
-const DYNAMIC_CWD =
-  "This command changes directory dynamically; issue the `bd` command with the tool's cwd field instead."
+export const DYNAMIC_CWD =
+  "This command changes directory to a path only the shell can resolve (a variable, `~`, a glob, `cd -`). Do not use `cd`: pass the shell tool's `workdir` parameter instead. A literal `cd DIR && bd ...` prefix is accepted."
 
 const SOURCE_FIX =
   "Write each `bd` command directly in this command line instead of inside a string, script or here-document."
@@ -641,6 +636,12 @@ export type EmbeddedWrite = {
 export type WritePlan = { kind: "writes"; writes: EmbeddedWrite[] } | { kind: "refused"; reason: string }
 
 export type WriteTargets = { kind: "stores"; stores: string[] } | { kind: "refused"; reason: string }
+
+/**
+ * A `bd` write the planner resolved, embedded store or not: the invocation, the store it
+ * lands in (undefined when the planner cannot name one) and the directory it runs in.
+ */
+export type ResolvedWrite = { invocation: BdInvocation; store: string | undefined; cwd: string }
 
 /** The part of a command the lock cannot place, and the shape that works instead. */
 type Problem = { part: string; fix: string } | { exact: string }
@@ -682,7 +683,24 @@ type CommandShape =
  * command that mentions `bd`. Those are where reading shell semantics out of a string
  * gives confident wrong answers, so they fail closed instead of being modelled.
  */
-export function planEmbeddedWrites(command: string, cwd: string, env: NodeJS.ProcessEnv): WritePlan {
+export type PlanOptions = {
+  /** Called for each resolved `bd` write, before any store classification. */
+  observe?: (target: ResolvedWrite) => void
+  /**
+   * `false` resolves targets positionally only: no store is classified, so no ledger file
+   * is opened, and the plan is always `writes: []`. For advisories that only need targets.
+   */
+  classify?: boolean
+}
+
+export function planEmbeddedWrites(
+  command: string,
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  options: PlanOptions = {},
+): WritePlan {
+  const { observe, classify = true } = options
+  const embeddedStore = (store: string): boolean => classify && embedded(store)
   if (!BD_WORD.test(command)) return { kind: "writes", writes: [] }
   const scan = scanShell(command)
   const writes: EmbeddedWrite[] = []
@@ -740,7 +758,7 @@ export function planEmbeddedWrites(command: string, cwd: string, env: NodeJS.Pro
       if (child === undefined || !isWrite(child, argv)) continue
       const resolved = resolveWrite(child, shape.assignments, state, env, command)
       if ("problem" in resolved) refuse(resolved.problem)
-      else if (resolved.store !== undefined && embedded(resolved.store) && resolved.store !== canonical(shape.store)) {
+      else if (resolved.store !== undefined && embeddedStore(resolved.store) && resolved.store !== canonical(shape.store)) {
         refuse(
           {
             part: `a runner command holds \`${shape.store}\` while its \`bd ${child.verb}\` writes \`${resolved.store}\``,
@@ -760,7 +778,8 @@ export function planEmbeddedWrites(command: string, cwd: string, env: NodeJS.Pro
       continue
     }
     const store = resolved.store
-    if (store === undefined || !embedded(store)) continue
+    if (state.cwd.kind === "known") observe?.({ invocation, store, cwd: state.cwd.cwd })
+    if (store === undefined || !embeddedStore(store)) continue
     if (shape.condition !== undefined) {
       refuse(
         {
@@ -773,7 +792,7 @@ export function planEmbeddedWrites(command: string, cwd: string, env: NodeJS.Pro
     }
     writes.push({ store, offset: shape.head.start })
   }
-  if (problem === undefined) return { kind: "writes", writes }
+  if (problem === undefined || !classify) return { kind: "writes", writes }
   // An embedded store in reach is what gives this gate jurisdiction: the session's own,
   // one the command writes, or one it names with `-C` / `--db` / `BEADS_DIR=`.
   const at = writes[0]?.store ?? problemStore ?? embeddedStoreFor(cwd, env) ?? namedStore(command, cwd, env)

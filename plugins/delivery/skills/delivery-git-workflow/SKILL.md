@@ -51,3 +51,7 @@ An ambiguous or contradictory policy is a hold, not permission to guess. Pass th
 
 - Agent-created PRs in a live `.beads/` workspace link an existing governing bead in the body as `Bead: <id>`, `Closes-Bead: <id>` or `Bead-Id: <id>`, and stamp `pr` metadata on every implementing bead. Before acting on a bead carrying `pr`, read that PR. Absence of these trailers on an incoming human or bot PR is not a finding.
 - For PRs entering the merge queue, create one open, unassigned task bead labeled `pr:merge` and `agent:shepherd` with `branch`, `repo` and `origin_actor` metadata before the PR, add each closing work bead's dependency on it, and stamp PR/base/head anchors on it right after the PR exists. Draft PRs and automated release PRs are not ordinary merge-queue entries.
+
+## Pitfalls
+
+When `delivery_land`, `delivery_cleanup`, `gh pr create` or `gh pr checks` fails unexpectedly, read [references/pitfalls.md](references/pitfalls.md).

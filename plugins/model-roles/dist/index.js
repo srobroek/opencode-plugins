@@ -3315,23 +3315,19 @@ var OUTCOME_KEY_PREFIX = "outcome:";
 var LEDGER_MAX_ENTRIES = 1000;
 var LEDGER_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000;
 var LEDGER_DEBOUNCE_MS = 2000;
+var LEDGER_VERSION = 2;
 var newLedger = () => ({});
-var num = (value) => typeof value === "number" && Number.isFinite(value) ? value : 0;
+var add = (total, value) => typeof value === "number" && Number.isFinite(value) ? (total ?? 0) + value : total;
 function onSpawn(ledger, childID, facts) {
   if (ledger[childID] !== undefined)
     return ledger;
   const record = {
+    v: LEDGER_VERSION,
     at: facts.at,
     agent: facts.agent,
     model: facts.model,
     parentID: facts.parentID,
     resumes: 0,
-    inputTokens: 0,
-    outputTokens: 0,
-    reasoningTokens: 0,
-    cacheReadTokens: 0,
-    cacheWriteTokens: 0,
-    cost: 0,
     steps: 0,
     ms: 0
   };
@@ -3343,24 +3339,54 @@ function onSpawn(ledger, childID, facts) {
     record.rule = facts.rule;
   return { ...ledger, [childID]: record };
 }
+var USAGE_KEYS = ["inputTokens", "outputTokens", "reasoningTokens", "cacheReadTokens", "cacheWriteTokens", "cost"];
+var upgrade = (r) => {
+  if (r.v !== undefined)
+    return r;
+  const next = { ...r, v: LEDGER_VERSION };
+  for (const key of USAGE_KEYS)
+    if (next[key] === 0)
+      delete next[key];
+  return next;
+};
 var update = (ledger, childID, change) => {
   const record = ledger[childID];
-  return record === undefined ? ledger : { ...ledger, [childID]: change(record) };
+  return record === undefined ? ledger : { ...ledger, [childID]: change(upgrade(record)) };
 };
-var onResume = (ledger, childID) => update(ledger, childID, (r) => ({ ...r, resumes: r.resumes + 1 }));
+var onResume = (ledger, childID) => update(ledger, childID, (r) => {
+  const { outcome: _earlier, ...running } = r;
+  return { ...running, resumes: r.resumes + 1 };
+});
 var addUsage = (r, usage) => ({
   ...r,
-  inputTokens: r.inputTokens + num(usage.tokens?.input),
-  outputTokens: r.outputTokens + num(usage.tokens?.output),
-  reasoningTokens: r.reasoningTokens + num(usage.tokens?.reasoning),
-  cacheReadTokens: r.cacheReadTokens + num(usage.tokens?.cache?.read),
-  cacheWriteTokens: r.cacheWriteTokens + num(usage.tokens?.cache?.write),
-  cost: r.cost + num(usage.cost)
+  ...fields({
+    inputTokens: add(r.inputTokens, usage.tokens?.input),
+    outputTokens: add(r.outputTokens, usage.tokens?.output),
+    reasoningTokens: add(r.reasoningTokens, usage.tokens?.reasoning),
+    cacheReadTokens: add(r.cacheReadTokens, usage.tokens?.cache?.read),
+    cacheWriteTokens: add(r.cacheWriteTokens, usage.tokens?.cache?.write),
+    cost: add(r.cost, usage.cost)
+  })
 });
+var fields = (values) => Object.fromEntries(Object.entries(values).filter(([, v]) => v !== undefined));
 var onStep = (ledger, childID, usage) => update(ledger, childID, (r) => ({ ...addUsage(r, usage), steps: r.steps + 1 }));
 var onSteps = (ledger, childID, usage, steps) => update(ledger, childID, (r) => ({ ...addUsage(r, usage), steps: r.steps + steps }));
 var onCompaction = (ledger, childID, usage) => update(ledger, childID, (r) => addUsage(r, usage));
 var onEnd = (ledger, childID, outcome, at) => update(ledger, childID, (r) => ({ ...r, outcome, ms: Math.max(0, at - r.at) }));
+function onSignals(ledger, childID, signals) {
+  return update(ledger, childID, (r) => {
+    const next = { ...r };
+    if (signals.verdict !== undefined)
+      next.verdict = signals.verdict;
+    if (signals.tests === "pass" || signals.tests === "fail" || signals.tests === "none" && r.tests === undefined)
+      next.tests = signals.tests;
+    if (signals.touchedTests === true)
+      next.touchedTests = true;
+    else if (signals.touchedTests === false && r.touchedTests === undefined)
+      next.touchedTests = false;
+    return next.verdict === r.verdict && next.tests === r.tests && next.touchedTests === r.touchedTests ? r : next;
+  });
+}
 var onFailover = (ledger, childID) => update(ledger, childID, (r) => r.failedOver ? r : { ...r, failedOver: true });
 function prune(ledger, now, limits = { maxEntries: LEDGER_MAX_ENTRIES, maxAgeMs: LEDGER_MAX_AGE_MS }) {
   const kept = Object.entries(ledger).filter(([, r]) => now - r.at <= limits.maxAgeMs).sort((a, b) => b[1].at - a[1].at).slice(0, limits.maxEntries);
@@ -3373,8 +3399,11 @@ function readOutcome(value) {
   const { at, agent, model, parentID } = value;
   if (typeof at !== "number" || typeof agent !== "string" || typeof model !== "string" || typeof parentID !== "string")
     return;
-  for (const key of ["resumes", "inputTokens", "outputTokens", "reasoningTokens", "cacheReadTokens", "cacheWriteTokens", "cost", "steps", "ms"])
+  for (const key of ["resumes", "steps", "ms"])
     if (typeof value[key] !== "number")
+      return;
+  for (const key of ["inputTokens", "outputTokens", "reasoningTokens", "cacheReadTokens", "cacheWriteTokens", "cost"])
+    if (value[key] !== undefined && typeof value[key] !== "number")
       return;
   return value;
 }
@@ -3382,12 +3411,14 @@ var LEDGER_DISPOSE_TIMEOUT_MS = 1e4;
 var LEDGER_MAX_QUEUED = 50;
 var LEDGER_MAX_WRITE_ATTEMPTS = 3;
 var addUsages = (a, b) => ({
-  cost: num(a.cost) + num(b.cost),
+  ...fields({ cost: add(a.cost, b.cost) }),
   tokens: {
-    input: num(a.tokens?.input) + num(b.tokens?.input),
-    output: num(a.tokens?.output) + num(b.tokens?.output),
-    reasoning: num(a.tokens?.reasoning) + num(b.tokens?.reasoning),
-    cache: { read: num(a.tokens?.cache?.read) + num(b.tokens?.cache?.read), write: num(a.tokens?.cache?.write) + num(b.tokens?.cache?.write) }
+    ...fields({
+      input: add(a.tokens?.input, b.tokens?.input),
+      output: add(a.tokens?.output, b.tokens?.output),
+      reasoning: add(a.tokens?.reasoning, b.tokens?.reasoning)
+    }),
+    cache: fields({ read: add(a.tokens?.cache?.read, b.tokens?.cache?.read), write: add(a.tokens?.cache?.write, b.tokens?.cache?.write) })
   }
 });
 function createLedgerStore(storage, options = {}) {
@@ -3573,6 +3604,30 @@ function createLedgerStore(storage, options = {}) {
       }
     },
     size: () => index.size,
+    records: async () => {
+      const found = new Map;
+      try {
+        let after;
+        do {
+          const page = await storage.scan(after === undefined ? { prefix: OUTCOME_KEY_PREFIX } : { prefix: OUTCOME_KEY_PREFIX, after });
+          for (const entry of page.entries) {
+            const record = readOutcome(entry.value);
+            if (record !== undefined)
+              found.set(entry.key.slice(OUTCOME_KEY_PREFIX.length), record);
+          }
+          after = page.next;
+        } while (after !== undefined);
+      } catch (error) {
+        warn("outcome ledger: could not read the records for the report", { error: String(error) });
+      }
+      for (const id of [...found.keys()])
+        if (!index.has(id))
+          found.delete(id);
+      for (const [id, record] of active)
+        if (index.has(id))
+          found.set(id, record);
+      return [...found.values()].map((record) => ({ ...record }));
+    },
     active: () => active.size,
     queued: (id) => depth.get(id) ?? 0,
     spawn: async (id, facts) => {
@@ -3600,6 +3655,7 @@ function createLedgerStore(storage, options = {}) {
       await change(id, (l, i) => onCompaction(l, i, usage), "debounce");
     },
     end: (id, outcome, at) => change(id, (l, i) => onEnd(l, i, outcome, at), "end"),
+    signals: (id, signals) => change(id, (l, i) => onSignals(l, i, signals), "debounce"),
     failover: (id) => change(id, onFailover, "now"),
     flush,
     async dispose(timeoutMs = disposeTimeoutMs) {
@@ -3839,6 +3895,162 @@ function formatReceipts(list) {
   return lines;
 }
 
+// plugins/model-roles/src/report.ts
+var DAY_MS = 24 * 60 * 60 * 1000;
+var REPORT_DEFAULT_DAYS = LEDGER_MAX_AGE_MS / DAY_MS;
+var CHECK_TOP_AGENTS = 3;
+var NO_TIER = "(none)";
+var finite = (value) => typeof value === "number" && Number.isFinite(value) ? value : undefined;
+var kindOf = (outcome) => {
+  if (outcome === "succeeded" || outcome === "interrupted")
+    return outcome;
+  return typeof outcome === "string" && outcome.startsWith("failed:") ? "failed" : undefined;
+};
+var percentile = (sorted, p) => sorted[Math.max(0, Math.ceil(p * sorted.length) - 1)] ?? 0;
+var TOKEN_FIELDS = [
+  ["input", "inputTokens"],
+  ["output", "outputTokens"],
+  ["reasoning", "reasoningTokens"],
+  ["cacheRead", "cacheReadTokens"],
+  ["cacheWrite", "cacheWriteTokens"]
+];
+var known = (r, value) => {
+  const v = finite(value);
+  return v === undefined || r.v === undefined && v === 0 ? undefined : v;
+};
+function stats(records) {
+  const kinds = { succeeded: 0, failed: 0, interrupted: 0 };
+  const times = [];
+  const total = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 };
+  const seen = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 };
+  let shareInput = 0;
+  let shareRead = 0;
+  let tokenRuns = 0;
+  let cost = 0;
+  let costRuns = 0;
+  let costSuccesses = 0;
+  let failovers = 0;
+  let resumes = 0;
+  for (const r of records) {
+    const kind = kindOf(r.outcome);
+    if (kind !== undefined)
+      kinds[kind]++;
+    times.push(finite(r.ms) ?? 0);
+    const values = TOKEN_FIELDS.map(([, field]) => known(r, r[field]));
+    if (values.some((v) => v !== undefined)) {
+      tokenRuns++;
+      TOKEN_FIELDS.forEach(([key], i) => {
+        const v = values[i];
+        if (v === undefined)
+          return;
+        total[key] += v;
+        seen[key]++;
+      });
+      const [input, , , read] = values;
+      if (input !== undefined && read !== undefined) {
+        shareInput += input;
+        shareRead += read;
+      }
+    }
+    const c = known(r, r.cost);
+    if (c !== undefined) {
+      cost += c;
+      costRuns++;
+      if (kind === "succeeded")
+        costSuccesses++;
+    }
+    if (r.failedOver === true)
+      failovers++;
+    resumes += finite(r.resumes) ?? 0;
+  }
+  const n = records.length;
+  const sorted = [...times].sort((a, b) => a - b);
+  const out = {
+    n,
+    ...kinds,
+    successRate: kinds.succeeded / n,
+    ms: { mean: times.reduce((a, b) => a + b, 0) / n, p50: percentile(sorted, 0.5), p90: percentile(sorted, 0.9) },
+    tokenRuns,
+    costRuns,
+    failoverRate: failovers / n,
+    resumes
+  };
+  if (tokenRuns > 0) {
+    const reported = Object.keys(total).filter((k) => seen[k] > 0);
+    const totals = Object.fromEntries(reported.map((k) => [k, total[k]]));
+    const mean = Object.fromEntries(reported.map((k) => [k, total[k] / seen[k]]));
+    const denominator = shareInput + shareRead;
+    out.tokens = { total: totals, mean, ...denominator > 0 ? { cacheShare: shareRead / denominator } : {} };
+  }
+  if (costRuns > 0) {
+    out.cost = cost;
+    if (costSuccesses > 0)
+      out.costPerSuccess = cost / costSuccesses;
+  }
+  return out;
+}
+var byName = (a, b) => a < b ? -1 : a > b ? 1 : 0;
+function summarizeUsage(records, now, days) {
+  const window = days !== undefined && Number.isFinite(days) && days > 0 ? days : REPORT_DEFAULT_DAYS;
+  const since = now - window * DAY_MS;
+  const byTier = new Map;
+  for (const r of records) {
+    if (kindOf(r.outcome) === undefined || !(r.at >= since))
+      continue;
+    const tier = r.tier ?? NO_TIER;
+    const agents = byTier.get(tier) ?? new Map;
+    agents.set(r.agent, [...agents.get(r.agent) ?? [], r]);
+    byTier.set(tier, agents);
+  }
+  const tiers = [...byTier.entries()].sort(([a], [b]) => byName(a, b)).map(([tier, agents]) => ({
+    tier,
+    total: stats([...agents.values()].flat()),
+    agents: [...agents.entries()].map(([agent, rs]) => ({ agent, ...stats(rs) })).sort((a, b) => b.n - a.n || byName(a.agent, b.agent))
+  }));
+  return { days: window, tiers };
+}
+function readUsage(value) {
+  if (typeof value !== "object" || value === null)
+    return;
+  const { tiers, days } = value;
+  return Array.isArray(tiers) && typeof days === "number" ? value : undefined;
+}
+var NA = "n/a";
+var percent = (v) => v === undefined ? NA : `${Math.round(v * 100)}%`;
+var count = (v) => v === undefined ? NA : v >= 1e6 ? `${+(v / 1e6).toFixed(1)}M` : v >= 1000 ? `${+(v / 1000).toFixed(1)}k` : `${Math.round(v)}`;
+var money = (v) => v === undefined ? NA : `$${v.toFixed(v >= 1 ? 2 : 3)}`;
+var duration2 = (ms) => ms < 1000 ? `${Math.round(ms)}ms` : ms < 60000 ? `${+(ms / 1000).toFixed(1)}s` : `${+(ms / 60000).toFixed(1)}m`;
+var plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+var coverage = (runs, n) => runs > 0 && runs < n ? ` ${runs}/${n}` : "";
+function usageBrief(s) {
+  return `${plural(s.n, "run")} \xB7 ${percent(s.successRate)} ok \xB7 p50 ${duration2(s.ms.p50)} \xB7 ${money(s.cost)}${coverage(s.costRuns, s.n)}`;
+}
+function usageLine(s) {
+  const t = s.tokens;
+  const tokens = t === undefined ? "tokens n/a" : `${coverage(s.tokenRuns, s.n).trim() === "" ? "" : `tokens ${s.tokenRuns}/${s.n}: `}in ${count(t.total.input)} out ${count(t.total.output)} reasoning ${count(t.total.reasoning)} cache r${count(t.total.cacheRead)}/w${count(t.total.cacheWrite)} (${percent(t.cacheShare)} read)`;
+  return [
+    `${plural(s.n, "run")}: ${s.succeeded} ok, ${s.failed} failed, ${s.interrupted} interrupted (${percent(s.successRate)})`,
+    `time mean ${duration2(s.ms.mean)} p50 ${duration2(s.ms.p50)} p90 ${duration2(s.ms.p90)}`,
+    tokens,
+    `cost${coverage(s.costRuns, s.n)} ${money(s.cost)} (${money(s.costPerSuccess)}/success)`,
+    `failover ${percent(s.failoverRate)}`,
+    plural(s.resumes, "resume")
+  ].join(", ");
+}
+function formatUsage(report) {
+  const lines = [`Usage per tier (last ${plural(report.days, "day")}):`];
+  if (report.tiers.length === 0)
+    return [...lines, "  no finished spawns recorded"];
+  for (const { tier, total, agents } of report.tiers) {
+    lines.push(`  ${tier}: ${usageLine(total)}`);
+    for (const a of agents.slice(0, CHECK_TOP_AGENTS))
+      lines.push(`    - ${a.agent}: ${usageBrief(a)}`);
+    if (agents.length > CHECK_TOP_AGENTS)
+      lines.push(`    - ${agents.length - CHECK_TOP_AGENTS} more agents`);
+  }
+  return lines;
+}
+
 // plugins/model-roles/src/rpc.ts
 import { Rpc } from "@opencode/plugin/rpc";
 var RPC_ID = "model-roles";
@@ -3847,6 +4059,10 @@ var TiersRpc = Rpc.define({
   methods: {
     state: {
       input: { type: "object", properties: { draft: { type: "object" } } },
+      output: { type: "object" }
+    },
+    usage: {
+      input: { type: "object", properties: { days: { type: "number" } } },
       output: { type: "object" }
     },
     set: {
@@ -3868,6 +4084,762 @@ var TiersRpc = Rpc.define({
   },
   events: {}
 });
+// plugins/lib/src/shell-tokenizer.ts
+var SEPARATORS = new Set([";", "&", "|", "(", ")", `
+`]);
+function token(value, startsQuoted = false, sawQuote = false) {
+  return { value, startsQuoted, sawQuote };
+}
+function tokenizeShell(command, options = {}) {
+  if (typeof command !== "string")
+    return [];
+  const out = [];
+  let current = "";
+  let started = false;
+  let startsQuoted = false;
+  let sawQuote = false;
+  let quote = null;
+  const pending = [];
+  const flush = () => {
+    if (!started)
+      return;
+    out.push(token(current, startsQuoted, sawQuote));
+    current = "";
+    started = false;
+    startsQuoted = false;
+    sawQuote = false;
+  };
+  for (let i = 0;i < command.length; i++) {
+    const ch = command[i];
+    if (quote !== null) {
+      if (ch === quote) {
+        quote = null;
+        continue;
+      }
+      current += ch;
+      started = true;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      if (!started)
+        startsQuoted = true;
+      started = true;
+      sawQuote = true;
+      quote = ch;
+      continue;
+    }
+    if (ch === "\\" && i + 1 < command.length) {
+      if (options.preserveBackslashes)
+        current += ch;
+      current += command[++i];
+      started = true;
+      continue;
+    }
+    if (ch === "$" && command[i + 1] === "(") {
+      flush();
+      out.push(token("$("));
+      i++;
+      continue;
+    }
+    if (ch === "<" && command[i + 1] === "<" && command[i + 2] === "<") {
+      flush();
+      out.push(token("<<<"));
+      i += 2;
+      continue;
+    }
+    if (ch === "<" && command[i + 1] === "<") {
+      const operator = hereDocumentOperator(command, i);
+      if (operator !== null) {
+        flush();
+        pending.push(operator);
+        i = operator.end - 1;
+        continue;
+      }
+    }
+    if (ch === `
+`) {
+      flush();
+      out.push(token(ch));
+      let bodyStart = i + 1;
+      while (pending.length > 0) {
+        const document = pending.shift();
+        if (document === undefined)
+          break;
+        const body = hereDocumentBody(command, bodyStart, document);
+        if (!document.quoted) {
+          const source = command.slice(bodyStart, body.bodyEnd);
+          if (options.hereDocumentSubstitutionsOnly)
+            out.push(...substitutions(source, options));
+          else
+            out.push(...tokenizeShell(source, options));
+        }
+        i = body.terminatorEnd;
+        bodyStart = i + 1;
+      }
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      flush();
+      continue;
+    }
+    if (SEPARATORS.has(ch)) {
+      flush();
+      out.push(token(ch));
+      continue;
+    }
+    current += ch;
+    started = true;
+  }
+  flush();
+  return out;
+}
+function shellQuoteBalanced(command) {
+  if (typeof command !== "string")
+    return true;
+  let quote = null;
+  for (let i = 0;i < command.length; i++) {
+    const ch = command[i];
+    if (quote !== null) {
+      if (ch === quote)
+        quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'")
+      quote = ch;
+    else if (ch === "\\")
+      i++;
+  }
+  return quote === null;
+}
+function hereDocumentOperator(command, start) {
+  let i = start + 2;
+  const stripTabs = command[i] === "-";
+  if (stripTabs)
+    i++;
+  while (command[i] === " " || command[i] === "\t")
+    i++;
+  let delimiter = "";
+  let quoted = false;
+  let quote = null;
+  while (i < command.length) {
+    const ch = command[i];
+    if (quote !== null) {
+      if (ch === quote) {
+        quote = null;
+        i++;
+        continue;
+      }
+      delimiter += ch;
+      i++;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quoted = true;
+      quote = ch;
+      i++;
+      continue;
+    }
+    if (ch === "\\" && i + 1 < command.length) {
+      quoted = true;
+      delimiter += command[i + 1];
+      i += 2;
+      continue;
+    }
+    if (/\s|[;&|<>()]/.test(ch))
+      break;
+    delimiter += ch;
+    i++;
+  }
+  if (quote !== null || delimiter.length === 0)
+    return null;
+  return { delimiter, stripTabs, quoted, end: i };
+}
+function hereDocumentBody(command, from, document) {
+  let cursor = from;
+  while (cursor < command.length) {
+    let next = command.indexOf(`
+`, cursor);
+    if (next === -1)
+      next = command.length;
+    let line = command.slice(cursor, next);
+    if (document.stripTabs)
+      line = line.replace(/^\t+/, "");
+    if (line === document.delimiter)
+      return { bodyEnd: cursor, terminatorEnd: next };
+    if (next === command.length)
+      break;
+    cursor = next + 1;
+  }
+  return { bodyEnd: command.length, terminatorEnd: command.length };
+}
+function substitutions(body, options) {
+  const out = [];
+  for (let i = 0;i < body.length; i++) {
+    const ch = body[i];
+    if (ch === "\\") {
+      i++;
+      continue;
+    }
+    let inner;
+    if (ch === "$" && body[i + 1] === "(") {
+      const end = substitutionEnd(body, i + 2);
+      inner = body.slice(i + 2, end);
+      i = end;
+      if (inner.startsWith("("))
+        continue;
+    } else if (ch === "`") {
+      let end = i + 1;
+      while (end < body.length && body[end] !== "`")
+        end += body[end] === "\\" ? 2 : 1;
+      inner = body.slice(i + 1, end);
+      i = end;
+    } else {
+      continue;
+    }
+    out.push(token("$("), ...tokenizeShell(inner, options), token(")"));
+  }
+  return out;
+}
+function substitutionEnd(body, from) {
+  let depth = 1;
+  let quote = null;
+  for (let i = from;i < body.length; i++) {
+    const ch = body[i];
+    if (quote !== null) {
+      if (ch === quote)
+        quote = null;
+      else if (ch === "\\" && quote === '"')
+        i++;
+      continue;
+    }
+    if (ch === "\\")
+      i++;
+    else if (ch === '"' || ch === "'")
+      quote = ch;
+    else if (ch === "(")
+      depth++;
+    else if (ch === ")" && --depth === 0)
+      return i;
+  }
+  return body.length;
+}
+
+// plugins/lib/src/command-words.ts
+var NONE = new Set;
+var WRAPPERS = new Map([
+  [
+    "sudo",
+    {
+      valued: new Set([
+        "-C",
+        "-D",
+        "-g",
+        "-h",
+        "-p",
+        "-R",
+        "-r",
+        "-T",
+        "-t",
+        "-U",
+        "-u",
+        "--chdir",
+        "--chroot",
+        "--close-from",
+        "--command-timeout",
+        "--group",
+        "--host",
+        "--other-user",
+        "--prompt",
+        "--role",
+        "--type",
+        "--user"
+      ]),
+      chdir: new Set(["-D", "--chdir"])
+    }
+  ],
+  ["doas", { valued: new Set(["-C", "-u"]) }],
+  [
+    "env",
+    {
+      valued: new Set(["-C", "-L", "-P", "-S", "-U", "-u", "--chdir", "--split-string", "--unset"]),
+      chdir: new Set(["-C", "--chdir"]),
+      split: new Set(["-S", "--split-string"]),
+      assignments: true
+    }
+  ],
+  ["nice", { valued: new Set(["-n", "--adjustment"]) }],
+  ["timeout", { valued: new Set(["-k", "-s", "--kill-after", "--signal"]), operands: 1 }],
+  ["stdbuf", { valued: new Set(["-e", "-i", "-o", "--error", "--input", "--output"]) }],
+  ["exec", { valued: new Set(["-a"]) }],
+  ["command", { valued: NONE, lookup: new Set(["-V", "-v"]) }],
+  ["time", { valued: new Set(["-f", "-o", "--format", "--output"]) }],
+  ["nohup", { valued: NONE }]
+]);
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/error.js
+/*!
+ * Copyright (c) Squirrel Chat et al., All rights reserved.
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice, this
+ *    list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software without
+ *    specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/primitive.js
+/*!
+ * Copyright (c) Squirrel Chat et al., All rights reserved.
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice, this
+ *    list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software without
+ *    specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/date.js
+/*!
+ * Copyright (c) Squirrel Chat et al., All rights reserved.
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice, this
+ *    list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software without
+ *    specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/extract.js
+/*!
+ * Copyright (c) Squirrel Chat et al., All rights reserved.
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice, this
+ *    list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software without
+ *    specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/util.js
+/*!
+ * Copyright (c) Squirrel Chat et al., All rights reserved.
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice, this
+ *    list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software without
+ *    specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/struct.js
+/*!
+ * Copyright (c) Squirrel Chat et al., All rights reserved.
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice, this
+ *    list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software without
+ *    specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/parse.js
+/*!
+ * Copyright (c) Squirrel Chat et al., All rights reserved.
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice, this
+ *    list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software without
+ *    specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/stringify.js
+/*!
+ * Copyright (c) Squirrel Chat et al., All rights reserved.
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice, this
+ *    list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software without
+ *    specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+var HAS_WELLFORMED = !!"".isWellFormed;
+
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/index.js
+/*!
+ * Copyright (c) Squirrel Chat et al., All rights reserved.
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice, this
+ *    list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software without
+ *    specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+// plugins/lib/src/patterns.ts
+var compiled = new Map;
+// plugins/lib/src/tool-targets.ts
+var WRITE_TOOLS = new Set(["edit", "write", "patch"]);
+var READ_TOOLS = new Set(["read"]);
+var SHELL_ALIASES = new Set(["bash", "Bash"]);
+var SHELL_EXECUTABLES = new Set(["bash", "sh", "zsh", "dash", "ksh"]);
+// plugins/model-roles/src/signals.ts
+var DEFAULT_TEST_COMMANDS = [
+  "bun test",
+  "bun run test",
+  "bun run check",
+  "npm test",
+  "pnpm test",
+  "yarn test",
+  "pytest",
+  "python -m pytest",
+  "go test",
+  "cargo test",
+  "cargo nextest"
+];
+var DEFAULT_TEST_GLOBS = [
+  "**/*.test.*",
+  "**/*.spec.*",
+  "**/test/**",
+  "**/tests/**",
+  "**/__tests__/**",
+  "**/*_test.go",
+  "**/test_*.py"
+];
+var strings3 = (value) => Array.isArray(value) ? value.filter((v) => typeof v === "string" && v.trim() !== "").map((v) => v.trim()) : undefined;
+function parseEvaluate(raw) {
+  const input = typeof raw === "object" && raw !== null ? raw : {};
+  return {
+    testCommands: strings3(input.testCommands) ?? DEFAULT_TEST_COMMANDS,
+    testGlobs: strings3(input.testGlobs) ?? DEFAULT_TEST_GLOBS
+  };
+}
+var VERDICT_LINE = /^VERDICT:\s*(APPROVE|REQUEST-CHANGES|COMMENT)\b/i;
+var OPEN_FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+var CLOSE_FENCE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
+function parseVerdict(text) {
+  let found;
+  let fence;
+  for (const line of text.split(/\r?\n/)) {
+    if (fence !== undefined) {
+      const closes = CLOSE_FENCE.exec(line)?.[1];
+      if (closes?.startsWith(fence.char) && closes.length >= fence.length)
+        fence = undefined;
+      continue;
+    }
+    const opens = OPEN_FENCE.exec(line);
+    if (opens?.[1] !== undefined && !(opens[1].startsWith("`") && opens[2]?.includes("`"))) {
+      fence = { char: opens[1].charAt(0), length: opens[1].length };
+      continue;
+    }
+    if (/^(?: {4}|\t)/.test(line) || /^ {0,3}>/.test(line))
+      continue;
+    const match = VERDICT_LINE.exec(line.trim());
+    if (match?.[1] !== undefined)
+      found = match[1].toLowerCase();
+  }
+  return found;
+}
+var ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+var SEPARATORS2 = new Set([";", "&", "|", "(", ")", `
+`, "$(", "<<<"]);
+var JOINERS = new Set(["&&", ";", `
+`]);
+function items(command) {
+  if (!shellQuoteBalanced(command) || command.includes("`") || command.includes("<<"))
+    return;
+  const tokens = tokenizeShell(command);
+  const out = [];
+  const isSeparator = (i) => {
+    const t = tokens[i];
+    return t !== undefined && !t.sawQuote && SEPARATORS2.has(t.value);
+  };
+  const wordAt = (i) => tokens[i] !== undefined && !isSeparator(i) ? tokens[i] : undefined;
+  for (let i = 0;i < tokens.length; i++) {
+    const t = tokens[i];
+    if (t === undefined)
+      continue;
+    if (isSeparator(i)) {
+      out.push({ separator: t.value });
+      continue;
+    }
+    if (!t.sawQuote && /^\d*>>?$/.test(t.value)) {
+      if (isSeparator(i + 1) && tokens[i + 1]?.value === "&" && /^(\d+|-)$/.test(wordAt(i + 2)?.value ?? "x"))
+        i += 2;
+      else if (wordAt(i + 1) !== undefined)
+        i += 1;
+      else
+        return;
+      continue;
+    }
+    if (!t.sawQuote && /^\d*>>?[^>&]/.test(t.value))
+      continue;
+    out.push({ word: t.value });
+  }
+  return out;
+}
+function isSetup(words) {
+  let rest = words;
+  while (rest[0] !== undefined && ASSIGNMENT.test(rest[0]))
+    rest = rest.slice(1);
+  if (rest.length === 0)
+    return true;
+  if (rest[0] === "cd")
+    return rest.length === 2;
+  return rest[0] === "export" && rest.length > 1 && rest.slice(1).every((w) => ASSIGNMENT.test(w));
+}
+function forms(words) {
+  const [tool, run, ...rest] = words;
+  const wrapped = tool !== undefined && ["bun", "npm", "pnpm", "yarn"].includes(tool) && run === "run" && rest.length > 0;
+  return wrapped ? [[...words], [tool, ...rest]] : [[...words]];
+}
+var startsWithCommand = (words, command) => {
+  const tokens = command.trim().split(/\s+/);
+  if (tokens.length > words.length)
+    return false;
+  return tokens.every((token, i) => words[i] === token || i === tokens.length - 1 && words[i]?.startsWith(`${token}:`) === true);
+};
+function parseTestCommand(command, testCommands) {
+  const parts = items(command.trim());
+  if (parts === undefined || parts.length === 0)
+    return;
+  const segments = [[]];
+  const joins = [];
+  let run = "";
+  for (const part of parts) {
+    if ("separator" in part)
+      run += part.separator;
+    else {
+      if (run !== "") {
+        if (!JOINERS.has(run))
+          return;
+        joins.push(run);
+        segments.push([]);
+        run = "";
+      }
+      segments[segments.length - 1]?.push(part.word);
+    }
+  }
+  if (run !== "" || segments.some((s) => s.length === 0))
+    return;
+  const last = segments.pop() ?? [];
+  if (!segments.every(isSetup))
+    return;
+  let rest = last;
+  while (rest[0] !== undefined && ASSIGNMENT.test(rest[0]))
+    rest = rest.slice(1);
+  if (!forms(rest).some((form) => testCommands.some((tc) => startsWithCommand(form, tc))))
+    return;
+  return { setupFirst: joins[joins.length - 1] === "&&" };
+}
+function testRun(command, exitStatus, testCommands) {
+  if (exitStatus === undefined || !Number.isInteger(exitStatus))
+    return;
+  const parsed = parseTestCommand(command, testCommands);
+  if (parsed === undefined)
+    return;
+  if (exitStatus === 0)
+    return "pass";
+  return parsed.setupFirst ? undefined : "fail";
+}
+var REGEX_SPECIAL = /[.+^${}()|[\]\\]/g;
+function globToRegExp2(glob) {
+  let source = "";
+  for (let i = 0;i < glob.length; i++) {
+    const c = glob.charAt(i);
+    if (c === "*" && glob[i + 1] === "*") {
+      if (glob[i + 2] === "/") {
+        source += "(?:.*/)?";
+        i += 2;
+      } else {
+        source += ".*";
+        i += 1;
+      }
+    } else if (c === "*")
+      source += "[^/]*";
+    else if (c === "?")
+      source += "[^/]";
+    else
+      source += c.replace(REGEX_SPECIAL, "\\$&");
+  }
+  return new RegExp(`^${source}$`);
+}
+function touchesTests(files, testGlobs) {
+  const patterns = testGlobs.map(globToRegExp2);
+  return files.some((file) => {
+    const path = file.replace(/\\/g, "/").replace(/^\.\//, "");
+    return patterns.some((p) => p.test(path));
+  });
+}
+function exitStatusOf(metadata) {
+  if (typeof metadata !== "object" || metadata === null)
+    return;
+  const m = metadata;
+  for (const key of ["exit", "exitCode"])
+    if (typeof m[key] === "number")
+      return m[key];
+  return;
+}
 
 // plugins/model-roles/src/snapshot.ts
 var SPAWN_MODEL_KEY_PREFIX = "spawn-model:";
@@ -4122,6 +5094,8 @@ var endedAt = (event) => {
   return typeof created === "number" && Number.isFinite(created) ? created : Number.POSITIVE_INFINITY;
 };
 var STEP_ENDED_EVENT = "session.step.ended";
+var TEXT_ENDED_EVENT = "session.text.ended";
+var NO_SIGNALS = { tests: "none", touchedTests: false };
 var COMPACTION_ENDED_EVENT = "session.compaction.ended";
 var finishedAt = (event) => {
   const at = endedAt(event);
@@ -4169,6 +5143,7 @@ var src_default = Plugin.define({
     const options = { ...parseOptions(ctx.options), tiers: {}, classes: {}, implicit: {} };
     const runtime = parseRuntime(ctx.options, options);
     const guard2 = parseGuard(isRecord10(ctx.options) ? ctx.options.guard : undefined);
+    const evaluate = parseEvaluate(isRecord10(ctx.options) ? ctx.options.evaluate : undefined);
     let autoHistory = [];
     let available = [];
     let availableKey = "";
@@ -4355,11 +5330,11 @@ ${refs.size}`;
         });
       } catch {}
     };
-    const announce = async (report) => {
-      const notice = decideFailureNotice(noticeState, report);
+    const announce = async (report2) => {
+      const notice = decideFailureNotice(noticeState, report2);
       if (notice === undefined)
         return;
-      await notify(notice.sessionID, notice.text, report.subagent === undefined ? "fallback" : "subagent-fallback");
+      await notify(notice.sessionID, notice.text, report2.subagent === undefined ? "fallback" : "subagent-fallback");
     };
     const requestLog = new Map;
     const onSessionSucceeded = async (sessionID, model) => {
@@ -4733,13 +5708,13 @@ ${refs.size}`;
         execute: async () => {
           await refresh();
           const agents = await listAgents();
-          const report = checkRoles(options, available, agents, health2, Date.now(), runtime.purposes, derived);
-          report.warnings.push(...tierWarnings(settings, { roles: options.roles, tiers: options.tiers ?? {} }, available));
+          const report2 = checkRoles(options, available, agents, health2, Date.now(), runtime.purposes, derived);
+          report2.warnings.push(...tierWarnings(settings, { roles: options.roles, tiers: options.tiers ?? {} }, available));
           if (stuck.length > 0)
-            report.warnings.push(`Agents ${stuck.join(", ")} still run another model than their tier resolves to: re-registering gave up after ${MAX_REREGISTER} tries (a later plugin or config keeps setting their model).`);
-          const content = [formatCheck(report), ...formatReceipts(receipts), ...formatHistory(autoHistory), `outcome ledger: ${outcomes.size()} spawns recorded`].join(`
+            report2.warnings.push(`Agents ${stuck.join(", ")} still run another model than their tier resolves to: re-registering gave up after ${MAX_REREGISTER} tries (a later plugin or config keeps setting their model).`);
+          const content = [formatCheck(report2), ...formatReceipts(receipts), ...formatHistory(autoHistory), ...formatUsage(summarizeUsage(await outcomes.records(), Date.now()))].join(`
 `);
-          return { content, metadata: { roles: report.roles.length, agents: report.agents.length, auto: autoHistory.length, spawns: receipts.length } };
+          return { content, metadata: { roles: report2.roles.length, agents: report2.agents.length, auto: autoHistory.length, spawns: receipts.length } };
         }
       });
     });
@@ -5256,6 +6231,9 @@ ${refs.size}`;
       if (event.tool !== SUBAGENT_TOOL)
         return;
       await whileSpawning(() => handleSpawn(event));
+      const resumed = isRecord10(event.input) ? event.input.sessionID : undefined;
+      if (typeof resumed === "string" && resumed !== "")
+        await outcomes.resume(resumed);
     });
     const configDir = () => globalConfigDir(process.env, homedir());
     const lookupIdentity = async () => {
@@ -5354,6 +6332,10 @@ ${refs.size}`;
       warn(`applied the tiers from ${config.path ?? "the project config"}`);
     };
     const rpc = await ctx.rpc.register(TiersRpc, {
+      usage: async (input) => {
+        const days = input?.days;
+        return summarizeUsage(await outcomes.records(), Date.now(), typeof days === "number" ? days : undefined);
+      },
       state: async (input) => {
         await queue(async () => {
           await refresh();
@@ -5438,16 +6420,22 @@ ${refs.size}`;
         return effective.origin === "project" ? { ...result, shadowedBy: effective.path } : result;
       }
     });
+    const recordTestRun = async (event) => {
+      if (event.status !== "completed" || !isRecord10(event.input) || typeof event.input.command !== "string")
+        return;
+      const metadata = isRecord10(event.result) ? event.result.metadata : undefined;
+      const tests = testRun(event.input.command, exitStatusOf(metadata), evaluate.testCommands);
+      if (tests !== undefined)
+        await outcomes.signals(event.sessionID, { tests });
+    };
     const spawnResults = await ctx.tool.hook("execute.after", async (event) => {
+      await recordTestRun(event);
       if (event.tool !== SUBAGENT_TOOL)
         return;
       const spawn = pending.get(event.id);
       pending.delete(event.id);
       const expected = expectedChildren.get(event.id);
       expectedChildren.delete(event.id);
-      const resumed = isRecord10(event.input) ? event.input.sessionID : undefined;
-      if (typeof resumed === "string" && resumed !== "")
-        await outcomes.resume(resumed);
       if (event.status === "completed") {
         const childID = event.result.metadata?.sessionID;
         if (spawn !== undefined && typeof childID === "string")
@@ -5501,6 +6489,7 @@ ${refs.size}`;
           const sessionID = data.sessionID;
           settleRequest(requestLog, sessionID, endedAt(event));
           const error = data.error;
+          await outcomes.signals(sessionID, NO_SIGNALS);
           await outcomes.end(sessionID, `failed:${classifyFailure(error) ?? "other"}`, finishedAt(event));
           pruneChildModels();
           await queue(() => onSessionFailed(sessionID, error)).catch((error) => warn(`fallback after a failed execution did not complete`, { error: String(error) }));
@@ -5511,6 +6500,7 @@ ${refs.size}`;
           if (typeof sessionID !== "string")
             continue;
           const model = settleRequest(requestLog, sessionID, endedAt(event));
+          await outcomes.signals(sessionID, NO_SIGNALS);
           await outcomes.end(sessionID, "succeeded", finishedAt(event));
           pruneChildModels();
           if (noticeState.outages.size > 0)
@@ -5521,15 +6511,27 @@ ${refs.size}`;
           const sessionID = event.data?.sessionID;
           if (typeof sessionID === "string") {
             settleRequest(requestLog, sessionID, endedAt(event));
+            await outcomes.signals(sessionID, NO_SIGNALS);
             await outcomes.end(sessionID, "interrupted", finishedAt(event));
             pruneChildModels();
           }
+          continue;
+        }
+        if (type === TEXT_ENDED_EVENT) {
+          const data = event.data;
+          if (typeof data?.sessionID !== "string" || typeof data.text !== "string")
+            continue;
+          const verdict = parseVerdict(data.text);
+          if (verdict !== undefined)
+            await outcomes.signals(data.sessionID, { verdict });
           continue;
         }
         if (type === STEP_ENDED_EVENT || type === COMPACTION_ENDED_EVENT) {
           const data = event.data;
           if (typeof data?.sessionID !== "string")
             continue;
+          if (type === STEP_ENDED_EVENT && Array.isArray(data.files) && touchesTests(data.files.filter((f) => typeof f === "string"), evaluate.testGlobs))
+            await outcomes.signals(data.sessionID, { touchedTests: true });
           await (type === STEP_ENDED_EVENT ? outcomes.step : outcomes.compaction)(data.sessionID, data);
           continue;
         }
@@ -5619,6 +6621,7 @@ export {
   BUILTIN_TIERS,
   CATALOG_LIMIT,
   CHECK_TOOL,
+  CHECK_TOP_AGENTS,
   CLASSIFY_FALLBACK,
   CLASSIFY_KEY_PREFIX,
   CLASSIFY_TIMEOUT_MS,
@@ -5636,6 +6639,8 @@ export {
   DEFAULT_PREMIUM,
   DEFAULT_QUOTA_COOLDOWN_MS,
   DEFAULT_SWITCH_TIMEOUT_MS,
+  DEFAULT_TEST_COMMANDS,
+  DEFAULT_TEST_GLOBS,
   DEFAULT_TIER_EFFORT,
   DEFAULT_VARIANT,
   DERIVED_TIERS,
@@ -5655,9 +6660,11 @@ export {
   LEDGER_MAX_ENTRIES,
   LEDGER_MAX_QUEUED,
   LEDGER_MAX_WRITE_ATTEMPTS,
+  LEDGER_VERSION,
   MAX_REREGISTER,
   MAX_SESSION_DEPTH,
   NOTICE_DEDUPE_MS,
+  NO_TIER,
   OUTCOME_KEY_PREFIX,
   PENDING_SPAWN_MS,
   PLUGIN_SPEC,
@@ -5665,6 +6672,7 @@ export {
   RECEIPT_LIMIT,
   RECENT_MS,
   REFERENCE_PROVIDERS,
+  REPORT_DEFAULT_DAYS,
   ROLE_ALIAS_DESCRIPTION,
   ROLE_HEADER,
   ROLE_PARAM,
@@ -5726,6 +6734,7 @@ export {
   desiredModels,
   duration,
   effectiveConfig,
+  exitStatusOf,
   expandRole,
   explainSpawn,
   explicitCandidates,
@@ -5737,6 +6746,8 @@ export {
   formatCheck,
   formatHistory,
   formatReceipts,
+  formatUsage,
+  globToRegExp2 as globToRegExp,
   globalConfigDir,
   healthEntry,
   healthKey,
@@ -5762,6 +6773,7 @@ export {
   onEnd,
   onFailover,
   onResume,
+  onSignals,
   onSpawn,
   onStep,
   onSteps,
@@ -5770,11 +6782,14 @@ export {
   parseClassification,
   parseDecision,
   parseEffort,
+  parseEvaluate,
   parseGuard,
   parseOptions,
   parseRuntime,
+  parseTestCommand,
   parseTierConfig,
   parseTierSettings,
+  parseVerdict,
   pickConfigFile,
   pickRole,
   pinnedModel,
@@ -5800,6 +6815,7 @@ export {
   readReceipts,
   readState,
   readTiers,
+  readUsage,
   recordFailure,
   resolveRole,
   resolveTier,
@@ -5821,7 +6837,9 @@ export {
   stripRoleHeader,
   subagentNote,
   summarize,
+  summarizeUsage,
   switchNote,
+  testRun,
   textHash,
   tierEffort,
   tierMeta,
@@ -5833,6 +6851,9 @@ export {
   tierSummary,
   tierWarnings,
   toJsonSchema,
+  touchesTests,
+  usageBrief,
+  usageLine,
   userPin,
   validateTierConfig,
   vendorOf,

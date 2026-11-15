@@ -392,15 +392,78 @@ The plugin keeps one record per child session in plugin storage, under
 session, how often the child was resumed, summed tokens (input, output, reasoning,
 cache read and write), cost, step count, elapsed time, how the run ended
 (`succeeded`, `failed:<class>` or `interrupted`) and whether a failover moved it.
-It stores no prompt, description, result or command text. Nothing reads the ledger
-yet; it is the evidence for later evaluation-based routing.
+It stores no prompt, description, result or command text. Nothing decides from the
+ledger; it is the evidence for later evaluation-based routing, and a read-only
+usage report (below) summarises it.
+
+Three outcome signals come from the child's own session, as enums and a boolean
+only; the text and commands they are read from are parsed in memory and dropped:
+
+- `verdict` (`approve`, `request-changes` or `comment`): the last
+  `VERDICT: …` line of the child's final text, outside fenced code, indented code
+  (four spaces or a tab) and `>` quotes; unset when there is none.
+- `tests` (`pass`, `fail` or `none`): the last shell call that ran a test command and
+  reported an exit status. `none` when the child ran none. A shell call reports one
+  exit status for the whole invocation, so it counts only when that status is the
+  test command's own: the test command is the last command, anything before it is
+  setup (`cd <path>`, `NAME=value`, `export NAME=value`) joined by `&&` (or `;`), and
+  only a redirect such as `2>&1` or `> file` follows it. After `&&` setup the test runs
+  only if the setup succeeded, so a non-zero exit may be the setup's: that call leaves
+  `tests` unset (a zero exit still counts as `pass`). After `;` or a newline the test
+  always runs, so its exit counts. The test command is matched word by word, so a
+  quoted `'bun test'` is one word and not a test run. `bun test; echo ok`,
+  `bun test && false`, `bun test | tail`, a subshell, a substitution, a here-document,
+  `eval`, `sh -c` and unbalanced quotes are ambiguous: that call is ignored, and it
+  neither sets nor clears an earlier result. A command counts after env assignments
+  and `bun run`/`npm run` wrappers. Quoted text is data, not a command boundary
+  (the plugin reuses the repository's shell tokenizer). A result without an exit
+  status in its metadata (`exit` or `exitCode`) is not counted either; the host's
+  types do not promise one, so such a run leaves `tests` at `none`.
+- `touchedTests` (boolean): any step's edited files (`session.step.ended.files`)
+  matched a test glob.
+
+Options, under `evaluate`; an array replaces its default:
+
+- `testCommands`: default `bun test`, `bun run test`, `bun run check`, `npm test`,
+  `pnpm test`, `yarn test`, `pytest`, `python -m pytest`, `go test`, `cargo test`,
+  `cargo nextest`.
+- `testGlobs`: default `**/*.test.*`, `**/*.spec.*`, `**/test/**`, `**/tests/**`,
+  `**/__tests__/**`, `**/*_test.go`, `**/test_*.py`.
 
 This first phase records only tier-routed spawns: those that reach a session
 through a tier, role or `auto` decision, which the plugin links to the child
 session it created. Not recorded: spawns without a tier (the agent keeps its own
 model), spawns whose explicit `model` or agent pin wins, resumed children with
 no earlier record, and the parent session itself. Records older than 90 days go,
-and only the newest 1000 stay; `model_roles_check` reports how many exist.
+and only the newest 1000 stay.
+
+### Usage report
+
+`model_roles_check` ends with a "Usage per tier" section, and `/tiers` has a
+read-only "Usage…" entry (Enter on a tier lists its agents; Esc goes back). Both
+come from one pure summary over the ledger, covering the whole 90-day retention.
+Per tier, and per agent within it (the check shows the top 3 agents), it gives:
+
+- `n`: runs that ended, with the succeeded, failed and interrupted counts and the
+  success rate (succeeded ÷ n). A record still running is not counted.
+- Elapsed time: mean, p50 and p90 (nearest rank), from the first spawn to the last end.
+- Tokens: totals and per-run means for input, output, reasoning, cache read and
+  cache write, over the runs that reported tokens. Cache share is
+  read ÷ (input + read).
+- Cost: the sum as the host reported it, and cost per success: the cost of the
+  runs with a known cost ÷ the successes among them; n/a without either.
+- Coverage: when only some runs of a group reported cost or tokens, the line says
+  how many, for example `cost 12/20`. Totals and means cover those runs only.
+- Fallback rate: the share of runs a failover moved to another model, and the
+  resume count.
+
+A usage field (tokens, cost) is stored only once the host reported it for a step;
+until then it is absent, and the report shows n/a, never 0. A reported 0 is 0.
+Records carry a schema version `v` (currently 2). Records without it are legacy:
+they stored 0 for usage the host never reported, so a legacy 0 is ambiguous and the
+report reads it as unknown. A resumed child counts as running from the start of its
+new run: it leaves the outcome counts until that run ends. Spawns without a tier
+appear under `(none)`.
 
 The ledger is advisory telemetry: nothing decides anything from it. Writes to one
 record land in order, and the plugin assumes plugin storage calls settle. At shutdown

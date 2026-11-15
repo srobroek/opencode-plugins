@@ -3,6 +3,7 @@ import { Plugin, Skill, Worktree } from "@opencode/plugin"
 import { shellCall } from "@srobroek/opencode-lib"
 import { decideMergePolicy, type Probes } from "./merge-gate.ts"
 import { type LoadedSkill, loadSkills } from "./skills.ts"
+import { withSwitchTimeout } from "./switch-timeout.ts"
 import { createStrategy, type Runner } from "./worktree.ts"
 
 export { decideMergePolicy, MERGE_POLICY_REFUSAL, parseMergeInvocation } from "./merge-gate.ts"
@@ -67,6 +68,8 @@ export function createPlugin(overrides: Overrides = {}) {
 
         registrations.push(
           await ctx.tool.hook("execute.before", async (event) => {
+            const longer = withSwitchTimeout(event.tool, event.input)
+            if (longer) event.input = longer
             const call = mergeGateCall(event.tool, event.input)
             if (!call) return
             const sessionDirectory = await ctx.session

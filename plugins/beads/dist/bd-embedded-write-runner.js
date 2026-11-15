@@ -140,9 +140,9 @@ function signalName(code) {
 // plugins/beads/src/bd-embedded-write-lock.ts
 import { spawnSync as spawnSync2 } from "child_process";
 import {
-  closeSync,
+  closeSync as closeSync2,
   existsSync,
-  openSync,
+  openSync as openSync2,
   readFileSync,
   realpathSync as realpathSync2,
   statSync as statSync2,
@@ -1762,6 +1762,39 @@ function isDir(path) {
   }
 }
 
+// plugins/beads/src/bounded-read.ts
+import { closeSync, constants as constants2, fstatSync, lstatSync as lstatSync2, openSync, readSync } from "fs";
+var MAX_LEDGER_FILE_BYTES = 64 * 1024;
+function readBounded(path) {
+  let fd;
+  try {
+    if (!lstatSync2(path).isFile())
+      return { kind: "unreadable" };
+    fd = openSync(path, constants2.O_RDONLY | constants2.O_NOFOLLOW | constants2.O_NONBLOCK);
+    const info = fstatSync(fd);
+    if (!info.isFile() || info.size > MAX_LEDGER_FILE_BYTES)
+      return { kind: "unreadable" };
+    const buffer = Buffer.alloc(info.size);
+    let offset = 0;
+    while (offset < buffer.length) {
+      const read = readSync(fd, buffer, offset, buffer.length - offset, offset);
+      if (read === 0)
+        break;
+      offset += read;
+    }
+    return { kind: "text", text: buffer.toString("utf8", 0, offset) };
+  } catch (error) {
+    return error.code === "ENOENT" ? { kind: "absent" } : { kind: "unreadable" };
+  } finally {
+    if (fd !== undefined)
+      closeSync(fd);
+  }
+}
+function readSmallRegularFile(path) {
+  const read = readBounded(path);
+  return read.kind === "text" ? read.text : undefined;
+}
+
 // plugins/beads/src/bd-embedded-write-lock.ts
 var LOCK_NAME = "omp-embedded-write.lock";
 var STEAL_NAME = "omp-embedded-write-steal.lock";
@@ -1832,7 +1865,7 @@ function registry() {
     for (const [lock, held] of created.owned) {
       clearInterval(held.renew);
       try {
-        closeSync(held.fd);
+        closeSync2(held.fd);
       } catch {}
       try {
         withOwnership(lock, held.token, () => unlinkSync(lock));
@@ -1963,15 +1996,12 @@ function canonicalStore(store) {
   return store === undefined ? undefined : canonical(store);
 }
 function embedded(store) {
-  let metadata = "";
-  let config = "";
-  try {
-    metadata = readFileSync(join(store, "metadata.json"), "utf8");
-  } catch {}
-  try {
-    config = readFileSync(join(store, "config.yaml"), "utf8");
-  } catch {}
-  return metadata !== "" || config !== "" || isDirectory(join(store, "embeddeddolt"));
+  for (const file of ["metadata.json", "config.yaml"]) {
+    const read = readBounded(join(store, file));
+    if (read.kind === "unreadable" || read.kind === "text" && read.text !== "")
+      return true;
+  }
+  return isDirectory(join(store, "embeddeddolt"));
 }
 function embeddedStoreFor(cwd, env = process.env) {
   const store = storeFor([], cwd, env);
@@ -2049,10 +2079,12 @@ var ASSIGNING = {
 };
 var UNCERTAIN_AFTER = { "\n": true, "&": true, ";": true, ";;": true, "||": true };
 var RUNNER_SCRIPT2 = /^bd-embedded-write-runner\.(?:js|ts)$/;
-var DYNAMIC_CWD = "This command changes directory dynamically; issue the `bd` command with the tool's cwd field instead.";
+var DYNAMIC_CWD = "This command changes directory to a path only the shell can resolve (a variable, `~`, a glob, `cd -`). Do not use `cd`: pass the shell tool's `workdir` parameter instead. A literal `cd DIR && bd ...` prefix is accepted.";
 var SOURCE_FIX = "Write each `bd` command directly in this command line instead of inside a string, script or here-document.";
 var ACCEPTED_SHAPES = "Accepted: `bd` reads anywhere in pipes, `;` / `&&` / `||` lists, `( )` / `{ }` groups, loops and redirections; and each `bd` write written as its own simple command, `[VAR=literal ...] bd ...`, anywhere in such a command, which the lock runs under its serialising runner with a hold of its own.";
-function planEmbeddedWrites(command, cwd, env) {
+function planEmbeddedWrites(command, cwd, env, options = {}) {
+  const { observe, classify = true } = options;
+  const embeddedStore = (store) => classify && embedded(store);
   if (!BD_WORD.test(command))
     return { kind: "writes", writes: [] };
   const scan = scanShell(command);
@@ -2115,7 +2147,7 @@ function planEmbeddedWrites(command, cwd, env) {
       const resolved = resolveWrite(child, shape.assignments, state, env, command);
       if ("problem" in resolved)
         refuse(resolved.problem);
-      else if (resolved.store !== undefined && embedded(resolved.store) && resolved.store !== canonical(shape.store)) {
+      else if (resolved.store !== undefined && embeddedStore(resolved.store) && resolved.store !== canonical(shape.store)) {
         refuse({
           part: `a runner command holds \`${shape.store}\` while its \`bd ${child.verb}\` writes \`${resolved.store}\``,
           fix: "Write the plain `bd` command and let the lock generate the runner form."
@@ -2132,7 +2164,9 @@ function planEmbeddedWrites(command, cwd, env) {
       continue;
     }
     const store = resolved.store;
-    if (store === undefined || !embedded(store))
+    if (state.cwd.kind === "known")
+      observe?.({ invocation, store, cwd: state.cwd.cwd });
+    if (store === undefined || !embeddedStore(store))
       continue;
     if (shape.condition !== undefined) {
       refuse({
@@ -2143,7 +2177,7 @@ function planEmbeddedWrites(command, cwd, env) {
     }
     writes.push({ store, offset: shape.head.start });
   }
-  if (problem === undefined)
+  if (problem === undefined || !classify)
     return { kind: "writes", writes };
   const at = writes[0]?.store ?? problemStore ?? embeddedStoreFor(cwd, env) ?? namedStore(command, cwd, env);
   if (at === undefined)
@@ -2475,7 +2509,7 @@ function takeOverIfAbandoned(lock, steal) {
     return;
   let fd;
   try {
-    fd = openSync(steal, "wx");
+    fd = openSync2(steal, "wx");
   } catch (error) {
     if (error.code !== "EEXIST")
       return;
@@ -2491,7 +2525,7 @@ function takeOverIfAbandoned(lock, steal) {
     if (abandoned(lock))
       unlinkSync(lock);
   } catch {} finally {
-    closeSync(fd);
+    closeSync2(fd);
     try {
       unlinkSync(steal);
     } catch {}
@@ -2554,7 +2588,7 @@ async function hold(store, owner, waitMs = WAIT_MS, signal) {
         }
       } else if (queue[0] === ticket) {
         try {
-          const fd = openSync(lock, "wx");
+          const fd = openSync2(lock, "wx");
           const token = `${process.pid}-${Date.now()}-${(nextToken++).toString(36)}`;
           writeSync(fd, JSON.stringify(holderNow(owner, token, undefined)));
           const renew = setInterval(() => {
@@ -2612,7 +2646,7 @@ function withOwnership(storeLock, token, change) {
   const steal = join(dirname2(storeLock), STEAL_NAME);
   let fd;
   try {
-    fd = openSync(steal, "wx");
+    fd = openSync2(steal, "wx");
   } catch (error) {
     if (error.code === "EEXIST")
       return "busy";
@@ -2624,7 +2658,7 @@ function withOwnership(storeLock, token, change) {
     change();
     return "done";
   } finally {
-    closeSync(fd);
+    closeSync2(fd);
     try {
       unlinkSync(steal);
     } catch {}
@@ -2649,7 +2683,7 @@ function release(store, owner) {
   owned.delete(lock);
   clearInterval(held.renew);
   try {
-    closeSync(held.fd);
+    closeSync2(held.fd);
   } catch {}
   try {
     withOwnership(lock, held.token, () => unlinkSync(lock));
@@ -2701,11 +2735,11 @@ function renewLease(lock, owner, token) {
   if (held === undefined || held.token !== token)
     return;
   const result = withOwnership(lock, token, () => {
-    const fd = openSync(lock, "w");
+    const fd = openSync2(lock, "w");
     try {
       writeSync(fd, JSON.stringify(holderNow(owner, token, held.writer, held.writerStart)));
     } finally {
-      closeSync(fd);
+      closeSync2(fd);
     }
   });
   if (result !== "lost")
@@ -2713,7 +2747,7 @@ function renewLease(lock, owner, token) {
   clearInterval(held.renew);
   owned.delete(lock);
   try {
-    closeSync(held.fd);
+    closeSync2(held.fd);
   } catch {}
 }
 async function attachWriter(store, owner, pid, waitMs = RUNNER_WAIT_MS) {
@@ -2725,11 +2759,11 @@ async function attachWriter(store, owner, pid, waitMs = RUNNER_WAIT_MS) {
   const deadline = Date.now() + Math.max(0, waitMs);
   while (true) {
     const result = withOwnership(lock, held.token, () => {
-      const fd = openSync(lock, "w");
+      const fd = openSync2(lock, "w");
       try {
         writeSync(fd, JSON.stringify(holderNow(owner, held.token, pid, writerStart)));
       } finally {
-        closeSync(fd);
+        closeSync2(fd);
       }
     });
     if (result === "done") {

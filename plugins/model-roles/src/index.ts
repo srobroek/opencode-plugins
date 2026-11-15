@@ -78,6 +78,7 @@ import { createLedgerStore, LEDGER_DISPOSE_TIMEOUT_MS, type Usage } from "./ledg
 import { hostWarn } from "./log.ts"
 import { decideFailureNotice, decideRecovery, type FailureReport, forgetSession, NOTICE_DEDUPE_MS, newNoticeState, type RequestLog, recordRequest, settleRequest } from "./outage.ts"
 import { explainSpawn, formatReceipts, pushReceipt, RECEIPTS_KEY, type Receipt, readReceipts, type SpawnRule, type SpawnSource } from "./receipt.ts"
+import { formatUsage, summarizeUsage } from "./report.ts"
 import {
   type AvailableModel,
   desiredModels,
@@ -95,6 +96,7 @@ import {
   userPin,
 } from "./resolve.ts"
 import { TiersRpc } from "./rpc.ts"
+import { exitStatusOf, parseEvaluate, parseVerdict, testRun, touchesTests } from "./signals.ts"
 import { configRevision, type ModelSnapshot, readSnapshot, SPAWN_MODEL_KEY_PREFIX, snapshotModel, staleSnapshots, unavailableReason } from "./snapshot.ts"
 import {
   applyFrozenTierParam,
@@ -144,8 +146,10 @@ export * from "./guard.ts"
 export * from "./health.ts"
 export * from "./ledger.ts"
 export * from "./receipt.ts"
+export * from "./report.ts"
 export * from "./resolve.ts"
 export { TiersRpc } from "./rpc.ts"
+export * from "./signals.ts"
 export * from "./spawn-role.ts"
 export * from "./tiers.ts"
 export * from "./tiers-ui.ts"
@@ -171,6 +175,9 @@ const endedAt = (event: unknown): number => {
   return typeof created === "number" && Number.isFinite(created) ? created : Number.POSITIVE_INFINITY
 }
 const STEP_ENDED_EVENT = "session.step.ended"
+const TEXT_ENDED_EVENT = "session.text.ended"
+/** At a run's end: an unset `tests` becomes `none` and an unset `touchedTests` false. */
+const NO_SIGNALS = { tests: "none", touchedTests: false } as const
 const COMPACTION_ENDED_EVENT = "session.compaction.ended"
 /** When an execution ended, for the outcome ledger: the event's time, else now. */
 const finishedAt = (event: unknown): number => {
@@ -242,6 +249,7 @@ export default Plugin.define({
     const options: Options = { ...parseOptions(ctx.options), tiers: {}, classes: {}, implicit: {} }
     const runtime = parseRuntime(ctx.options, options)
     const guard = parseGuard(isRecord(ctx.options) ? ctx.options.guard : undefined)
+    const evaluate = parseEvaluate(isRecord(ctx.options) ? ctx.options.evaluate : undefined)
     let autoHistory: AutoRecord[] = []
     let available: GuardModel[] = []
     let availableKey = ""
@@ -935,7 +943,7 @@ export default Plugin.define({
             report.warnings.push(
               `Agents ${stuck.join(", ")} still run another model than their tier resolves to: re-registering gave up after ${MAX_REREGISTER} tries (a later plugin or config keeps setting their model).`,
             )
-          const content = [formatCheck(report), ...formatReceipts(receipts), ...formatHistory(autoHistory), `outcome ledger: ${outcomes.size()} spawns recorded`].join("\n")
+          const content = [formatCheck(report), ...formatReceipts(receipts), ...formatHistory(autoHistory), ...formatUsage(summarizeUsage(await outcomes.records(), Date.now()))].join("\n")
           return { content, metadata: { roles: report.roles.length, agents: report.agents.length, auto: autoHistory.length, spawns: receipts.length } }
         },
       })
@@ -1500,6 +1508,9 @@ export default Plugin.define({
     const spawns = await ctx.tool.hook("execute.before", async (event) => {
       if (event.tool !== SUBAGENT_TOOL) return
       await whileSpawning(() => handleSpawn(event))
+      // A resume starts a new run: the child counts as running until that run ends.
+      const resumed = isRecord(event.input) ? event.input.sessionID : undefined
+      if (typeof resumed === "string" && resumed !== "") await outcomes.resume(resumed)
     })
 
     // The `/tiers` TUI dialog reads the tier table and writes `options.tiers` through these.
@@ -1626,6 +1637,10 @@ export default Plugin.define({
     }
 
     const rpc = await ctx.rpc.register(TiersRpc, {
+      usage: async (input) => {
+        const days = (input as { days?: unknown } | undefined)?.days
+        return summarizeUsage(await outcomes.records(), Date.now(), typeof days === "number" ? days : undefined)
+      },
       state: async (input) => {
         await queue(async () => {
           await refresh()
@@ -1705,14 +1720,21 @@ export default Plugin.define({
       },
     })
 
+    /** A finished shell call that ran a test command and reported an exit status updates the child's `tests`. */
+    const recordTestRun = async (event: { sessionID: string; input: unknown; status: string; result?: unknown }) => {
+      if (event.status !== "completed" || !isRecord(event.input) || typeof event.input.command !== "string") return
+      const metadata = isRecord(event.result) ? event.result.metadata : undefined
+      const tests = testRun(event.input.command, exitStatusOf(metadata), evaluate.testCommands)
+      if (tests !== undefined) await outcomes.signals(event.sessionID, { tests })
+    }
+
     const spawnResults = await ctx.tool.hook("execute.after", async (event) => {
+      await recordTestRun(event)
       if (event.tool !== SUBAGENT_TOOL) return
       const spawn = pending.get(event.id)
       pending.delete(event.id)
       const expected = expectedChildren.get(event.id)
       expectedChildren.delete(event.id)
-      const resumed = isRecord(event.input) ? event.input.sessionID : undefined
-      if (typeof resumed === "string" && resumed !== "") await outcomes.resume(resumed)
       if (event.status === "completed") {
         const childID = (event.result.metadata as { sessionID?: unknown } | undefined)?.sessionID
         if (spawn !== undefined && typeof childID === "string") await recordChildRole(childID, spawn.role)
@@ -1765,6 +1787,7 @@ export default Plugin.define({
           const sessionID = data.sessionID
           settleRequest(requestLog, sessionID, endedAt(event))
           const error = data.error as { type?: string; message?: string; status?: number }
+          await outcomes.signals(sessionID, NO_SIGNALS)
           await outcomes.end(sessionID, `failed:${classifyFailure(error) ?? "other"}`, finishedAt(event))
           pruneChildModels()
           await queue(() => onSessionFailed(sessionID, error)).catch((error) =>
@@ -1776,6 +1799,7 @@ export default Plugin.define({
           const sessionID = (event as { data?: { sessionID?: unknown } }).data?.sessionID
           if (typeof sessionID !== "string") continue
           const model = settleRequest(requestLog, sessionID, endedAt(event))
+          await outcomes.signals(sessionID, NO_SIGNALS)
           await outcomes.end(sessionID, "succeeded", finishedAt(event))
           pruneChildModels()
           if (noticeState.outages.size > 0) await queue(() => onSessionSucceeded(sessionID, model)).catch(() => {})
@@ -1786,14 +1810,24 @@ export default Plugin.define({
           const sessionID = (event as { data?: { sessionID?: unknown } }).data?.sessionID
           if (typeof sessionID === "string") {
             settleRequest(requestLog, sessionID, endedAt(event))
+            await outcomes.signals(sessionID, NO_SIGNALS)
             await outcomes.end(sessionID, "interrupted", finishedAt(event))
             pruneChildModels()
           }
           continue
         }
+        if (type === TEXT_ENDED_EVENT) {
+          const data = (event as { data?: { sessionID?: unknown; text?: unknown } }).data
+          if (typeof data?.sessionID !== "string" || typeof data.text !== "string") continue
+          const verdict = parseVerdict(data.text)
+          if (verdict !== undefined) await outcomes.signals(data.sessionID, { verdict })
+          continue
+        }
         if (type === STEP_ENDED_EVENT || type === COMPACTION_ENDED_EVENT) {
-          const data = (event as { data?: { sessionID?: unknown } & Usage }).data
+          const data = (event as { data?: { sessionID?: unknown; files?: unknown } & Usage }).data
           if (typeof data?.sessionID !== "string") continue
+          if (type === STEP_ENDED_EVENT && Array.isArray(data.files) && touchesTests(data.files.filter((f): f is string => typeof f === "string"), evaluate.testGlobs))
+            await outcomes.signals(data.sessionID, { touchedTests: true })
           await (type === STEP_ENDED_EVENT ? outcomes.step : outcomes.compaction)(data.sessionID, data)
           continue
         }
