@@ -112,6 +112,9 @@ permissions:
   - action: skill
     resource: delivery-git-workflow
     effect: allow
+  - action: skill
+    resource: chezmoi-editor
+    effect: allow
   - action: subagent
     resource: explore
     effect: allow
