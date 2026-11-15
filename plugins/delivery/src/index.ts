@@ -16,7 +16,7 @@ import {
   loadAgents,
   shapeAgent,
 } from "./agents.ts"
-import { type CleanupResult, cleanupDelivery, type DeliveryCleanupParams } from "./cleanup.ts"
+import { type CleanupResult, cleanupDelivery, type DeliveryCleanupParams, type HostWorktrees } from "./cleanup.ts"
 import { MERGE_METHODS } from "./forge-adapter.ts"
 import { type LandOutcome, type LandParams, landPullRequest } from "./land.ts"
 import { malformedNote, parseVerdict } from "./verdict.ts"
@@ -196,7 +196,7 @@ const CLEANUP_DESCRIPTION =
   "Remove a landed PR's worktree and local branch after proving the landing receipt, and write a continuation receipt.\n" +
   "Recomputes the ledger classification at the canonical root, proves the PR merged at the recorded head from the receipt's own remote, " +
   "checks every receipt bead is closed with metadata.merge_sha equal to the merge (read-only bd show), refuses to remove the worktree it runs from, a dirty tree or unpushed commits, " +
-  "then runs git worktree remove (no force) and git branch -d and verifies four absences."
+  "then removes the worktree (no force; through OpenCode when it tracks it, else git worktree remove) and runs git branch -d and verifies four absences."
 
 function landOutput(outcome: LandOutcome) {
   if (!outcome.ok) {
@@ -233,6 +233,22 @@ function cleanupOutput(result: CleanupResult) {
 function metadataOf(output: Record<string, unknown>): Record<string, unknown> {
   const { receipt: _receipt, ...rest } = output
   return rest
+}
+
+/**
+ * OpenCode's worktree registry for this project. Undefined when the host reports no
+ * project or an older host has no `worktree` list/remove, so cleanup keeps the git path.
+ */
+export function hostWorktrees(ctx: Context): HostWorktrees | undefined {
+  const projectID = ctx.location.project?.id
+  const worktree = (ctx as { worktree?: Partial<Context["worktree"]> }).worktree
+  if (projectID === undefined) return undefined
+  if (typeof worktree?.list !== "function" || typeof worktree.remove !== "function") return undefined
+  const { list, remove } = worktree
+  return {
+    list: () => list.call(worktree, { projectID }),
+    remove: (directory) => remove.call(worktree, { projectID, directory, force: false }),
+  }
 }
 
 function environment(options: DeliveryOptions): NodeJS.ProcessEnv {
@@ -298,6 +314,7 @@ export async function setupDelivery(ctx: Context): Promise<() => Promise<void>> 
           env: environment(options),
           signal: context.signal,
           authorize: (request) => ask(request.worktree, { ...request }),
+          host: hostWorktrees(ctx),
         })
         const output = cleanupOutput(result)
         const text = result.ok

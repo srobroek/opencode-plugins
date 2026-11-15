@@ -27,9 +27,11 @@ import {
   branchDeleteArgs,
   CLEANUP_BOUNDS,
   type CleanupBounds,
+  type CleanupDeps,
   type CleanupResult,
   cleanupDelivery,
   type DeliveryCleanupParams,
+  removalRoute,
 } from "./cleanup.ts"
 import { type CliResult, type CliRunner, runCli } from "./forge-adapter.ts"
 import { landPullRequest } from "./land.ts"
@@ -453,6 +455,7 @@ async function invoke(
   f: Fixture,
   params: DeliveryCleanupParams = { receipt: f.receiptPath },
   options: RunnerOptions = {},
+  extra: Partial<CleanupDeps> = {},
 ): Promise<{
   result: CleanupResult
   calls: string[][]
@@ -464,6 +467,7 @@ async function invoke(
     now: () => NOW + 10,
     env: f.env,
     bounds: HEAVY_FIXTURE_BOUNDS,
+    ...extra,
   })
   return { result, calls: scripted.calls, details: scripted.details }
 }
@@ -1875,4 +1879,123 @@ describe("delivery_cleanup command bounds and interrupts", () => {
     expect(signalled.slice(0, removal).every((call) => call.signal)).toBe(true)
     expect(signalled.slice(removal).some((call) => call.signal)).toBe(false)
   })
+})
+
+describe("removalRoute", () => {
+  const identity = (path: string) => path
+  test.each([
+    { name: "a listed directory goes to the host", listed: ["/r", "/w/a"], target: "/w/a", route: "host" },
+    { name: "an unlisted directory goes to git", listed: ["/r", "/w/b"], target: "/w/a", route: "git" },
+    { name: "an empty registry goes to git", listed: [] as string[], target: "/w/a", route: "git" },
+  ])("$name", ({ listed, target, route }) => {
+    expect(
+      removalRoute(
+        listed.map((directory) => ({ directory })),
+        target,
+        identity,
+      ),
+    ).toBe(route)
+  })
+
+  test("paths are compared after canonicalisation, so an alias still matches", () => {
+    const canonical = (path: string) => path.replace("/alias", "/real")
+    expect(removalRoute([{ directory: "/real/w" }], "/alias/w", canonical)).toBe("host")
+  })
+})
+
+describe("delivery_cleanup host worktree registry", () => {
+  /** A fake host registry that removes through git like the host's git strategy; it refuses on request. */
+  function fakeHost(f: Fixture, registered: string[], refuse?: string) {
+    const entries = new Set(registered)
+    const removes: Array<{ directory: string }> = []
+    return {
+      removes,
+      host: {
+        list: async () => [...entries].map((directory) => ({ directory })),
+        remove: async (directory: string) => {
+          removes.push({ directory })
+          if (refuse !== undefined) throw new Error(refuse)
+          execFileSync("git", ["worktree", "remove", directory], { cwd: f.main })
+          entries.delete(directory)
+        },
+      },
+    }
+  }
+
+  test("a host-registered worktree is removed through the host, never by git, and leaves the registry", async () => {
+    const f = fixture("host-registered")
+    const listedPath = realpathSync(f.linked)
+    const fake = fakeHost(f, [listedPath])
+    const { result, calls } = await invoke(f, { receipt: f.receiptPath }, {}, { host: fake.host })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(fake.removes).toEqual([{ directory: listedPath }])
+    expect(await fake.host.list()).toEqual([])
+    expect(calls.filter((argv) => argv[1] === "worktree" && argv[2] === "remove")).toEqual([])
+    expect(mutationCalls(calls)).toEqual([["git", "branch", "-d", "--", f.branch]])
+    expect(existsSync(f.linked)).toBe(false)
+    expect(result.receipt.worktree.removed).toBe(true)
+    expect(result.receipt.proof.evidence).toMatchObject({ worktreeRegistration: "absent", worktreePath: "absent" })
+  }, 60_000)
+
+  test("a host whose listing fails leaves ownership unknown: refuse, remove nothing, no git fallback", async () => {
+    const f = fixture("host-list-fails")
+    const host = {
+      list: async () => {
+        throw new Error("registry offline")
+      },
+      remove: async () => {
+        throw new Error("must not be called")
+      },
+    }
+    const { result, calls } = await invoke(f, { receipt: f.receiptPath }, {}, { host })
+    const reason = refusal(result)
+    expect(reason).toContain("worktree.owner")
+    expect(reason).toContain("registry offline")
+    expect(reason).toContain("retry delivery_cleanup")
+    expect(mutationCalls(calls)).toEqual([])
+    expect(existsSync(f.linked)).toBe(true)
+  }, 60_000)
+
+  test("an abort during the host listing stops the call before any removal", async () => {
+    const f = fixture("host-list-abort")
+    const controller = new AbortController()
+    const removes: string[] = []
+    const host = {
+      list: async () => {
+        controller.abort()
+        return [{ directory: realpathSync(f.linked) }]
+      },
+      remove: async (directory: string) => {
+        removes.push(directory)
+      },
+    }
+    const { result, calls } = await invoke(f, { receipt: f.receiptPath }, {}, { host, signal: controller.signal })
+    expect(refusal(result)).toContain("signal")
+    expect(removes).toEqual([])
+    expect(mutationCalls(calls)).toEqual([])
+    expect(existsSync(f.linked)).toBe(true)
+  }, 60_000)
+
+  test("a worktree the host does not list is removed by git as before", async () => {
+    const f = fixture("host-unlisted")
+    const listedPath = realpathSync(f.linked)
+    const fake = fakeHost(f, [f.main])
+    const { result, calls } = await invoke(f, { receipt: f.receiptPath }, {}, { host: fake.host })
+    expect(result.ok).toBe(true)
+    expect(fake.removes).toEqual([])
+    expect(mutationCalls(calls)[0]).toEqual(["git", "worktree", "remove", listedPath])
+  }, 60_000)
+
+  test("a host refusal is reported and neither forced nor retried with git", async () => {
+    const f = fixture("host-refuses")
+    const fake = fakeHost(f, [realpathSync(f.linked)], "worktree contains modified files")
+    const { result, calls } = await invoke(f, { receipt: f.receiptPath }, {}, { host: fake.host })
+    const reason = refusal(result)
+    expect(reason).toContain("worktree.removed")
+    expect(reason).toContain("worktree contains modified files")
+    expect(mutationCalls(calls)).toEqual([])
+    expect(calls.flat()).not.toContain("--force")
+    expect(existsSync(f.linked)).toBe(true)
+  }, 60_000)
 })
