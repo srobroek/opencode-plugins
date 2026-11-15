@@ -4538,6 +4538,19 @@ function classifyFailure(node) {
 function stderrLines(value) {
   return elementText(value).split(/\r?\n/).filter((line) => line.trim() !== "").length;
 }
+function nestedStderrLines(node) {
+  if (Array.isArray(node))
+    return node.reduce((sum, item) => sum + nestedStderrLines(item), 0);
+  if (!isNode(node))
+    return 0;
+  let lines = 0;
+  for (const [key, value] of Object.entries(node)) {
+    if (key.startsWith("@_"))
+      continue;
+    lines += key === "system-err" ? stderrLines(value) : nestedStderrLines(value);
+  }
+  return lines;
+}
 function collect(node, out) {
   if (Array.isArray(node)) {
     for (const item of node)
@@ -4565,7 +4578,7 @@ function collect(node, out) {
       const label = [classname, name].filter(Boolean).join(" :: ");
       const time = Number.parseFloat(String(tc["@_time"] ?? "0"));
       const status = caseStatus(tc);
-      out.stderrLines += stderrLines(tc["system-err"]);
+      out.stderrLines += nestedStderrLines(tc);
       out.cases.push({
         id: file ? `${file} :: ${label}` : label,
         status,
@@ -4801,6 +4814,7 @@ function summarizeRuns(records, options = {}) {
   const used = records.filter((r) => r.report === "used");
   const perTest = new Map;
   const unshuffled = new Map;
+  const defaultRuns = used.filter((r) => !isShuffledMode(r.mode)).length;
   const shuffledTally = new Map;
   const failedModes = new Map;
   for (const record of used) {
@@ -4858,8 +4872,11 @@ function summarizeRuns(records, options = {}) {
   const defaultPass = (t) => (unshuffled.get(t.id)?.passed ?? 0) > 0;
   const defaultFail = (t) => (unshuffled.get(t.id)?.failed ?? 0) > 0;
   const orderDependent = shuffledFail.filter((t) => defaultPass(t) && !defaultFail(t)).map(withModes).sort(byId);
-  const inconclusive = shuffledFail.filter((t) => !defaultPass(t) && !defaultFail(t)).map(withModes).sort(byId);
-  const failedDefaultPassedShuffled = all.filter((t) => defaultFail(t) && !defaultPass(t) && (shuffledTally.get(t.id)?.passed ?? 0) > 0).sort(byId);
+  const failsDefaultPassesShuffled = (t) => defaultFail(t) && !defaultPass(t) && (shuffledTally.get(t.id)?.passed ?? 0) > 0;
+  const failsEveryDefault = (t) => (unshuffled.get(t.id)?.failed ?? 0) === defaultRuns;
+  const failedDefaultPassedShuffled = all.filter((t) => failsDefaultPassesShuffled(t) && failsEveryDefault(t)).sort(byId);
+  const incompleteDefaults = all.filter((t) => failsDefaultPassesShuffled(t) && !failsEveryDefault(t)).map(withModes);
+  const inconclusive = [...shuffledFail.filter((t) => !defaultPass(t) && !defaultFail(t)).map(withModes), ...incompleteDefaults].sort(byId);
   return {
     runs: records.length,
     exitCodes,
@@ -4891,7 +4908,7 @@ function list(title, items, show, limit) {
   return lines;
 }
 var failureSplit = (t) => `fail ${t.failed} (timeout ${t.timeouts}, assertion/error ${t.otherFailures})`;
-var mb = (bytes) => `${(bytes / 1e6).toFixed(1)} MB`;
+var mb = (bytes) => bytes < 1e6 ? `${bytes} bytes` : `${(bytes / 1e6).toFixed(1)} MB`;
 var LABEL_LIMIT = 30;
 var label = (text) => text.length > LABEL_LIMIT ? `${text.slice(0, LABEL_LIMIT - 3)}...` : text;
 function runLine(r) {
@@ -4902,6 +4919,13 @@ function runLine(r) {
   ].filter((p) => p !== undefined);
   return `run ${r.run}${r.mode === undefined ? "" : ` [${label(r.mode)}]`}: ${parts.join(", ")}${r.noisy ? "  NOISY" : ""}`;
 }
+var MAX_FAILED_MODES = 3;
+var failedIn = (t) => {
+  if (t.failedModes.length === 0)
+    return "default runs incomplete (skipped or absent)";
+  const more = t.failedModes.length > MAX_FAILED_MODES ? `, +${t.failedModes.length - MAX_FAILED_MODES} more` : "";
+  return `failed in ${t.failedModes.slice(0, MAX_FAILED_MODES).map(label).join(", ")}${more}`;
+};
 var MAX_RUN_LINES = 8;
 var MAX_MODES = 6;
 function formatSummary(summary) {
@@ -4915,7 +4939,7 @@ function formatSummary(summary) {
   }
   for (const { run, reason } of summary.unreadable.slice(0, 10))
     lines.push(`report ${run}: unreadable (${reason})`);
-  lines.push(...list("flaky (passed and failed in unshuffled runs)", summary.flaky, (t) => `${t.id}  pass ${t.passed} / ${failureSplit(t)}`, 15), ...list("order-dependent (failed only in shuffled runs)", summary.orderDependent, (t) => `${t.id}  ${failureSplit(t)}; failed in ${t.failedModes.map(label).join(", ")}`, 15), ...list("inconclusive (failed in shuffled runs, no default-order pass)", summary.inconclusive, (t) => `${t.id}  ${failureSplit(t)}; failed in ${t.failedModes.map(label).join(", ")}`, 15), ...list("failed in every default run, passed in a shuffled run", summary.failedDefaultPassedShuffled, (t) => `${t.id}  ${failureSplit(t)}`, 15), ...list("failed in every report", summary.failedEveryRun, (t) => `${t.id}  ${failureSplit(t)}`, 15), ...list("retried inside a run, then passed", summary.retriedInRun, (id) => id, 5), ...list("slowest by median", summary.slowest, (t) => `${secs(t.medianSeconds).padStart(7)}  ${t.id}`, SLOWEST));
+  lines.push(`findings: flaky ${summary.flaky.length}, order-dependent ${summary.orderDependent.length}, inconclusive ${summary.inconclusive.length}, failed-default-passed-shuffled ${summary.failedDefaultPassedShuffled.length}, failed-every-report ${summary.failedEveryRun.length}`, ...list("flaky (passed and failed in unshuffled runs)", summary.flaky, (t) => `${t.id}  pass ${t.passed} / ${failureSplit(t)}`, 15), ...list("order-dependent (failed only in shuffled runs)", summary.orderDependent, (t) => `${t.id}  ${failureSplit(t)}; ${failedIn(t)}`, 15), ...list("inconclusive (no complete default-order evidence)", summary.inconclusive, (t) => `${t.id}  ${failureSplit(t)}; ${failedIn(t)}`, 15), ...list("failed in every default run, passed in a shuffled run", summary.failedDefaultPassedShuffled, (t) => `${t.id}  ${failureSplit(t)}`, 15), ...list("failed in every report", summary.failedEveryRun, (t) => `${t.id}  ${failureSplit(t)}`, 15), ...list("retried inside a run, then passed", summary.retriedInRun, (id) => id, 5), ...list("slowest by median", summary.slowest, (t) => `${secs(t.medianSeconds).padStart(7)}  ${t.id}`, SLOWEST));
   const anyFinding = summary.flaky.length + summary.orderDependent.length + summary.inconclusive.length + summary.failedDefaultPassedShuffled.length + summary.failedEveryRun.length;
   if (summary.reportRuns > 0 && anyFinding === 0)
     lines.push("no test both passed and failed; none failed in every report");

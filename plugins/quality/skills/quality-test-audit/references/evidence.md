@@ -37,8 +37,10 @@ the same loop with `--sequence.shuffle.files` into `<dir>/files-$i.xml` and with
 `reports` (the paths in run order), `modes` (`default`, `shuffle-files` or `shuffle-tests` for
 each report, same length) and `exitCodes` (what each run returned, if you kept them). The
 summary calls a test order-dependent only when it passed in a default run and failed in a
-shuffled one; a shuffled failure without a default-order pass is inconclusive, and a test that
-failed in every default run but passed a shuffled run is listed on its own. Without the tool,
+shuffled one; a shuffled failure without a default-order pass is inconclusive. A test that failed in
+every default run but passed a shuffled run is listed on its own; when a default run skipped
+it or lacked it, it is inconclusive too. A `findings:` line opens the output with the count
+of each category. Without the tool,
 keep each report under a distinct name and read them.
 
 The tool also reports, per run, the report size in bytes, the number of lines in

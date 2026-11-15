@@ -128,6 +128,7 @@ export function summarizeRuns(records: readonly RunRecord[], options: SummaryOpt
   const used = records.filter((r) => r.report === "used")
   const perTest = new Map<string, Tally>()
   const unshuffled = new Map<string, Tally>()
+  const defaultRuns = used.filter((r) => !isShuffledMode(r.mode)).length
   const shuffledTally = new Map<string, Tally>()
   const failedModes = new Map<string, Set<string>>()
   for (const record of used) {
@@ -180,10 +181,13 @@ export function summarizeRuns(records: readonly RunRecord[], options: SummaryOpt
   const defaultPass = (t: TestStats) => (unshuffled.get(t.id)?.passed ?? 0) > 0
   const defaultFail = (t: TestStats) => (unshuffled.get(t.id)?.failed ?? 0) > 0
   const orderDependent = shuffledFail.filter((t) => defaultPass(t) && !defaultFail(t)).map(withModes).sort(byId)
-  const inconclusive = shuffledFail.filter((t) => !defaultPass(t) && !defaultFail(t)).map(withModes).sort(byId)
-  const failedDefaultPassedShuffled = all
-    .filter((t) => defaultFail(t) && !defaultPass(t) && (shuffledTally.get(t.id)?.passed ?? 0) > 0)
-    .sort(byId)
+  // Failing in every default run needs a failure in each readable default run: skipped or absent defaults are incomplete.
+  const failsDefaultPassesShuffled = (t: TestStats) =>
+    defaultFail(t) && !defaultPass(t) && (shuffledTally.get(t.id)?.passed ?? 0) > 0
+  const failsEveryDefault = (t: TestStats) => (unshuffled.get(t.id)?.failed ?? 0) === defaultRuns
+  const failedDefaultPassedShuffled = all.filter((t) => failsDefaultPassesShuffled(t) && failsEveryDefault(t)).sort(byId)
+  const incompleteDefaults = all.filter((t) => failsDefaultPassesShuffled(t) && !failsEveryDefault(t)).map(withModes)
+  const inconclusive = [...shuffledFail.filter((t) => !defaultPass(t) && !defaultFail(t)).map(withModes), ...incompleteDefaults].sort(byId)
   return {
     runs: records.length,
     exitCodes,
@@ -220,7 +224,7 @@ function list<T>(title: string, items: readonly T[], show: (item: T) => string, 
 
 const failureSplit = (t: TestStats): string => `fail ${t.failed} (timeout ${t.timeouts}, assertion/error ${t.otherFailures})`
 
-const mb = (bytes: number): string => `${(bytes / 1_000_000).toFixed(1)} MB`
+const mb = (bytes: number): string => (bytes < 1_000_000 ? `${bytes} bytes` : `${(bytes / 1_000_000).toFixed(1)} MB`)
 
 const LABEL_LIMIT = 30
 const label = (text: string): string => (text.length > LABEL_LIMIT ? `${text.slice(0, LABEL_LIMIT - 3)}...` : text)
@@ -232,6 +236,14 @@ function runLine(r: RunStats): string {
     r.testSeconds === undefined ? undefined : `summed test time ${secs(r.testSeconds)}`,
   ].filter((p): p is string => p !== undefined)
   return `run ${r.run}${r.mode === undefined ? "" : ` [${label(r.mode)}]`}: ${parts.join(", ")}${r.noisy ? "  NOISY" : ""}`
+}
+
+/** At most this many failed-mode labels are printed per test. */
+const MAX_FAILED_MODES = 3
+const failedIn = (t: OrderDependentStats): string => {
+  if (t.failedModes.length === 0) return "default runs incomplete (skipped or absent)"
+  const more = t.failedModes.length > MAX_FAILED_MODES ? `, +${t.failedModes.length - MAX_FAILED_MODES} more` : ""
+  return `failed in ${t.failedModes.slice(0, MAX_FAILED_MODES).map(label).join(", ")}${more}`
 }
 
 const MAX_RUN_LINES = 8
@@ -250,6 +262,7 @@ export function formatSummary(summary: RepeatSummary): string {
   }
   for (const { run, reason } of summary.unreadable.slice(0, 10)) lines.push(`report ${run}: unreadable (${reason})`)
   lines.push(
+    `findings: flaky ${summary.flaky.length}, order-dependent ${summary.orderDependent.length}, inconclusive ${summary.inconclusive.length}, failed-default-passed-shuffled ${summary.failedDefaultPassedShuffled.length}, failed-every-report ${summary.failedEveryRun.length}`,
     ...list(
       "flaky (passed and failed in unshuffled runs)",
       summary.flaky,
@@ -259,13 +272,13 @@ export function formatSummary(summary: RepeatSummary): string {
     ...list(
       "order-dependent (failed only in shuffled runs)",
       summary.orderDependent,
-      (t) => `${t.id}  ${failureSplit(t)}; failed in ${t.failedModes.map(label).join(", ")}`,
+      (t) => `${t.id}  ${failureSplit(t)}; ${failedIn(t)}`,
       15,
     ),
     ...list(
-      "inconclusive (failed in shuffled runs, no default-order pass)",
+      "inconclusive (no complete default-order evidence)",
       summary.inconclusive,
-      (t) => `${t.id}  ${failureSplit(t)}; failed in ${t.failedModes.map(label).join(", ")}`,
+      (t) => `${t.id}  ${failureSplit(t)}; ${failedIn(t)}`,
       15,
     ),
     ...list(

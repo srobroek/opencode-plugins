@@ -84,6 +84,18 @@ function stderrLines(value: unknown): number {
     .filter((line) => line.trim() !== "").length
 }
 
+/** Stderr lines of every `system-err` under `node`, at any depth, each counted once. */
+function nestedStderrLines(node: unknown): number {
+  if (Array.isArray(node)) return node.reduce<number>((sum, item) => sum + nestedStderrLines(item), 0)
+  if (!isNode(node)) return 0
+  let lines = 0
+  for (const [key, value] of Object.entries(node)) {
+    if (key.startsWith("@_")) continue
+    lines += key === "system-err" ? stderrLines(value) : nestedStderrLines(value)
+  }
+  return lines
+}
+
 type Collected = { cases: TestCase[]; stderrLines: number }
 
 function collect(node: unknown, out: Collected): void {
@@ -110,7 +122,7 @@ function collect(node: unknown, out: Collected): void {
       const label = [classname, name].filter(Boolean).join(" :: ")
       const time = Number.parseFloat(String(tc["@_time"] ?? "0"))
       const status = caseStatus(tc)
-      out.stderrLines += stderrLines(tc["system-err"])
+      out.stderrLines += nestedStderrLines(tc)
       out.cases.push({
         id: file ? `${file} :: ${label}` : label,
         status,
