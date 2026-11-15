@@ -23,7 +23,7 @@ import {
   wtInvocation,
 } from "./shell.ts"
 
-export type GuardID = "indirection" | "remote-exec" | "attribution" | "worktree-tmp" | "git-defender" | "op-guard"
+export type GuardID = "indirection" | "remote-exec" | "attribution" | "worktree-tmp" | "git-defender" | "op-guard" | "dns-delegation"
 
 export const GUARD_IDS: readonly GuardID[] = [
   "indirection",
@@ -32,6 +32,7 @@ export const GUARD_IDS: readonly GuardID[] = [
   "worktree-tmp",
   "git-defender",
   "op-guard",
+  "dns-delegation",
 ]
 
 export type Refusal = { guard: GuardID; reason: string }
@@ -48,6 +49,8 @@ export const MESSAGES: Record<GuardID, string> = {
   "git-defender":
     "Blocked by safety (git-defender-user-only): only the user runs the Git Defender CLI. It acts under the user's corporate identity, so every subcommand is refused, read-looking ones included. Name the exact command you would have run and why, hand it to the user to run in their own terminal, and report the outcome you needed as unknown. Do not retry through eval, a wrapper, a script or a subagent.",
   "op-guard": OP_MESSAGE,
+  "dns-delegation":
+    "Blocked by safety (dns-delegation-guard): deleting a Route 53 hosted zone leaves any parent zone delegating to the deleted nameservers, a subdomain-takeover risk. Read ~/.config/opencode/steering/dns-delegation-cleanup.md, find the parent zone, then re-run with `DNS_PARENT_CHECKED=1` in front of the command to confirm you will delete the parent's NS (and DS) record set for the child and verify it. Do not report the zone as torn down until the parent delegation is gone.",
 }
 
 const DESTRUCTIVE: ReadonlySet<string> = new Set(["rm", "rmdir", "dd", "shred", "truncate", "unlink", "wipefs"])
@@ -264,6 +267,27 @@ export function gitDefender(command: Command): boolean {
   return gitInvocation(command.argv)?.subcommand === "defender"
 }
 
+const DNS_MARKER = "DNS_PARENT_CHECKED=1"
+
+/** `aws route53 delete-hosted-zone` without the `DNS_PARENT_CHECKED=1` marker the steering asks for. */
+export function dnsDelegation(commands: readonly Command[]): boolean {
+  for (const command of commands) {
+    if (base(command.argv[0]) !== "aws") continue
+    const service = command.argv.indexOf("route53")
+    if (service < 0 || command.argv.indexOf("delete-hosted-zone", service) < 0) continue
+    const marked = (other: Command) => other.assignments.includes(DNS_MARKER)
+    const exported = commands.some(
+      (other) =>
+        other.source === command.source &&
+        other.index < command.index &&
+        other.argv[0] === "export" &&
+        other.argv.includes(DNS_MARKER),
+    )
+    if (!marked(command) && !exported && !command.argv.includes(DNS_MARKER)) return true
+  }
+  return false
+}
+
 export type GuardOptions = {
   /** Guards to skip. */
   disabled?: ReadonlySet<GuardID>
@@ -297,6 +321,7 @@ export function hardGate(source: string, cwd: string, options: GuardOptions = {}
     else if (on("attribution") && attribution(commands, cwd, options.read)) refusal = refuse("attribution")
     else if (on("worktree-tmp") && commands.some((command) => worktreeTmp(command, cwd)))
       refusal = refuse("worktree-tmp")
+    else if (on("dns-delegation") && dnsDelegation(commands)) refusal = refuse("dns-delegation")
   } catch (error) {
     failure = { error }
   }
