@@ -13,11 +13,13 @@ import { decideBdCloseParsed } from "./bd-close-gate.ts"
 import { decideEmbeddedWrite, type EmbeddedWriteRunnerLookup, embeddedWriteRunner } from "./bd-embedded-write-lock.ts"
 import { decideBdUnclaimParsed } from "./bd-unclaim-gate.ts"
 import { decideBdUpdateCloseParsed } from "./bd-update-close-gate.ts"
+import { repoIdentity } from "./beads-store.ts"
 import { protectBinaryHookCommands } from "./binary-hooks.ts"
 import { admitBdMutation, type GateAdmitter } from "./gate-admission.ts"
 import { type Gate, gateEnabled, type Options } from "./host.ts"
+import { createStore, describeLedger, findLedger, ledgerRepoMismatch } from "./ledger-context.ts"
 import { decideCommandParsed, type RepositoryControl, repositoryControlFor } from "./pr-bead-link-gate.ts"
-import { type ParsedCommand, parse } from "./shell.ts"
+import { leadingCdCwd, type ParsedCommand, parse } from "./shell.ts"
 
 /**
  * One budget for the whole call. OpenCode has no hook timeout, but a gate that waits
@@ -74,6 +76,27 @@ export function actorForCommand(command: string, actor: string | undefined): str
 
 export function withActorPrefix(command: string, actor: string): string {
   return `export BEADS_ACTOR='${actor.replaceAll("'", "'\\''")}'; ${command}`
+}
+
+/** Warns when a `bd create` in the command writes to a ledger of another git repository. */
+export function createLedgerWarning(
+  command: string,
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  identity: (dir: string) => string | undefined = repoIdentity,
+): string | undefined {
+  const dir = leadingCdCwd(command, cwd)
+  for (const invocation of bdInvocations(command)) {
+    if (invocation.verb !== "create") continue
+    // An explicit `--db`, `-C` or `--global` names its own target; this check does not follow it.
+    if (invocation.globals.length > 0 || flagEnabled(invocation.args, ["--help", "-h"])) continue
+    const local = invocation.prefix.findLast((token) => token.startsWith("BEADS_DIR="))?.slice("BEADS_DIR=".length)
+    const store = createStore(dir, local, env)
+    if (store === undefined) continue
+    const warning = ledgerRepoMismatch({ store, cwd: dir, identity })
+    if (warning !== undefined) return warning
+  }
+  return undefined
 }
 
 /** Decide one `shell` call. Never throws: an unexpected error is a parse refusal. */
@@ -168,9 +191,19 @@ async function decide(original: string, cwd: string, deps: ShellGateDeps): Promi
     if (decision.kind === "advisory") advisories.push(decision.text)
   }
 
+  const crossRepo = createLedgerWarning(command, cwd, deps.env)
+  if (crossRepo !== undefined) advisories.push(crossRepo)
+
   if (on("pr-bead-link-gate")) {
     const control = deps.repositoryControl ?? repositoryControlFor
-    const decision = decideCommandParsed(parsed, (segment) => control(segment, cwd))
+    const decision = decideCommandParsed(
+      parsed,
+      (segment) => control(segment, cwd),
+      () => {
+        const ledger = findLedger(cwd)
+        return ledger === undefined ? undefined : describeLedger(ledger)
+      },
+    )
     if (decision) return block("pr-bead-link-gate", decision.reason, "add the bead trailer to the PR body and retry")
   }
 

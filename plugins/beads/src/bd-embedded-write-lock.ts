@@ -620,8 +620,8 @@ const UNCERTAIN_AFTER: Record<string, true> = { "\n": true, "&": true, ";": true
 const RUNNER_SCRIPT = /^bd-embedded-write-runner\.(?:js|ts)$/
 
 /** The refusal for a write after a directory change whose target only the shell knows. */
-const DYNAMIC_CWD =
-  "This command changes directory dynamically; issue the `bd` command with the tool's cwd field instead."
+export const DYNAMIC_CWD =
+  "This command changes directory to a path only the shell can resolve (a variable, `~`, a glob, `cd -`). Do not use `cd`: pass the shell tool's `workdir` parameter instead. A literal `cd DIR && bd ...` prefix is accepted."
 
 const SOURCE_FIX =
   "Write each `bd` command directly in this command line instead of inside a string, script or here-document."

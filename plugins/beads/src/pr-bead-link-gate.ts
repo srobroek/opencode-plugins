@@ -49,6 +49,11 @@ const VALUE_FLAGS: Record<string, true> = {
 export const REASON =
   "This PR names no bead. A live ledger requires a Bead: <id>, Closes-Bead: <id>, or Bead-Id: <id> trailer. To opt out, retire the nearest ledger with this gate's regular-file .beads/RETIRED marker; No-Bead: is not accepted."
 
+function withLedger(reason: string, note: LedgerNote | undefined): string {
+  const text = note?.()
+  return text === undefined ? reason : `${reason} ${text}`
+}
+
 export function beadsActive(dir: string): boolean {
   let current = resolve(dir)
   for (;;) {
@@ -106,9 +111,13 @@ export function bodyOfGhCreate(segment: string): string | null {
 
 export type RepositoryControl = { kind: "controlled" } | { kind: "uncontrolled" } | { kind: "unknown"; reason: string }
 
+/** Names the ledger the gate read; called only when the gate is about to refuse. */
+export type LedgerNote = () => string | undefined
+
 export function decidePrCreate(
   body: string | null,
   active: boolean | RepositoryControl,
+  note?: LedgerNote,
 ): { block: true; reason: string } | null {
   if (active === false || (typeof active !== "boolean" && active.kind === "uncontrolled")) return null
   if (body === null) return null
@@ -116,10 +125,10 @@ export function decidePrCreate(
   if (typeof active !== "boolean" && active.kind === "unknown") {
     return {
       block: true,
-      reason: `${active.reason}. This PR must name a bead while repository control is unknown.`,
+      reason: withLedger(`${active.reason}. This PR must name a bead while repository control is unknown.`, note),
     }
   }
-  return { block: true, reason: REASON }
+  return { block: true, reason: withLedger(REASON, note) }
 }
 
 /**
@@ -131,6 +140,7 @@ export function decidePrCreate(
 export function decideCommand(
   command: string,
   active: boolean | RepositoryControl | ((segment: string) => boolean | RepositoryControl),
+  note?: LedgerNote,
 ): { block: true; reason: string } | null {
   if (command.length > MAX_COMMAND_LENGTH) return null
   for (const segment of commandSegments(command)) {
@@ -139,7 +149,7 @@ export function decideCommand(
     // every `active`. Resolving `active` ahead of them spent two synchronous `gh` API calls per
     // segment on every bash call, so a slow `gh` exhausted the handler's budget.
     if (body === null || BEAD_REF.test(body)) continue
-    const decision = decidePrCreate(body, typeof active === "function" ? active(segment) : active)
+    const decision = decidePrCreate(body, typeof active === "function" ? active(segment) : active, note)
     if (decision) return decision
   }
   return null
@@ -231,11 +241,12 @@ export function repositoryControlled(repo: string | null): RepositoryControl {
 export function decideCommandParsed(
   parsed: ParsedCommand,
   active: boolean | RepositoryControl | ((segment: string) => boolean | RepositoryControl),
+  note?: LedgerNote,
 ): { block: true; reason: string } | null {
-  const decision = decideCommand(parsed.command, active)
+  const decision = decideCommand(parsed.command, active, note)
   if (decision) return decision
   for (const child of parsed.nested) {
-    const nested = decideCommandParsed(child, active)
+    const nested = decideCommandParsed(child, active, note)
     if (nested) return nested
   }
   return null
