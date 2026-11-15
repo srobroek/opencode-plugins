@@ -642,6 +642,12 @@ export type WritePlan = { kind: "writes"; writes: EmbeddedWrite[] } | { kind: "r
 
 export type WriteTargets = { kind: "stores"; stores: string[] } | { kind: "refused"; reason: string }
 
+/**
+ * A `bd` write the planner resolved, embedded store or not: the invocation, the store it
+ * lands in (undefined when the planner cannot name one) and the directory it runs in.
+ */
+export type ResolvedWrite = { invocation: BdInvocation; store: string | undefined; cwd: string }
+
 /** The part of a command the lock cannot place, and the shape that works instead. */
 type Problem = { part: string; fix: string } | { exact: string }
 
@@ -682,7 +688,12 @@ type CommandShape =
  * command that mentions `bd`. Those are where reading shell semantics out of a string
  * gives confident wrong answers, so they fail closed instead of being modelled.
  */
-export function planEmbeddedWrites(command: string, cwd: string, env: NodeJS.ProcessEnv): WritePlan {
+export function planEmbeddedWrites(
+  command: string,
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  observe?: (target: ResolvedWrite) => void,
+): WritePlan {
   if (!BD_WORD.test(command)) return { kind: "writes", writes: [] }
   const scan = scanShell(command)
   const writes: EmbeddedWrite[] = []
@@ -760,6 +771,7 @@ export function planEmbeddedWrites(command: string, cwd: string, env: NodeJS.Pro
       continue
     }
     const store = resolved.store
+    if (state.cwd.kind === "known") observe?.({ invocation, store, cwd: state.cwd.cwd })
     if (store === undefined || !embedded(store)) continue
     if (shape.condition !== undefined) {
       refuse(

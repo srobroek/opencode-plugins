@@ -8,18 +8,23 @@
  * sets `BEADS_DIR` in the child's environment.
  */
 
-import { bdInvocations, decideActorParsed, flagEnabled } from "./bd-actor-gate.ts"
+import { bdInvocations, decideActorParsed, flagEnabled, globalValue } from "./bd-actor-gate.ts"
 import { decideBdCloseParsed } from "./bd-close-gate.ts"
-import { decideEmbeddedWrite, type EmbeddedWriteRunnerLookup, embeddedWriteRunner } from "./bd-embedded-write-lock.ts"
+import {
+  decideEmbeddedWrite,
+  type EmbeddedWriteRunnerLookup,
+  embeddedWriteRunner,
+  planEmbeddedWrites,
+} from "./bd-embedded-write-lock.ts"
 import { decideBdUnclaimParsed } from "./bd-unclaim-gate.ts"
 import { decideBdUpdateCloseParsed } from "./bd-update-close-gate.ts"
 import { repoIdentity } from "./beads-store.ts"
 import { protectBinaryHookCommands } from "./binary-hooks.ts"
 import { admitBdMutation, type GateAdmitter } from "./gate-admission.ts"
 import { type Gate, gateEnabled, type Options } from "./host.ts"
-import { createStore, describeLedger, findLedger, ledgerRepoMismatch } from "./ledger-context.ts"
+import { describeLedger, findLedger, ledgerRepoMismatch } from "./ledger-context.ts"
 import { decideCommandParsed, type RepositoryControl, repositoryControlFor } from "./pr-bead-link-gate.ts"
-import { leadingCdCwd, type ParsedCommand, parse } from "./shell.ts"
+import { type ParsedCommand, parse } from "./shell.ts"
 
 /**
  * One budget for the whole call. OpenCode has no hook timeout, but a gate that waits
@@ -78,25 +83,31 @@ export function withActorPrefix(command: string, actor: string): string {
   return `export BEADS_ACTOR='${actor.replaceAll("'", "'\\''")}'; ${command}`
 }
 
-/** Warns when a `bd create` in the command writes to a ledger of another git repository. */
+/** Global flags that name the store themselves; the advisory does not follow them. */
+const TARGET_SELECTORS = ["-C", "--directory", "--db", "--database"]
+
+/**
+ * Warns when a `bd create` in the command writes to a ledger of another git repository.
+ *
+ * Targets come from the write planner, so the advisory sees the same `cd`, `export`,
+ * `unset` and command-local `BEADS_DIR` state as the lock. A command the planner cannot
+ * place stays silent here; the lock refuses it.
+ */
 export function createLedgerWarning(
   command: string,
   cwd: string,
   env: NodeJS.ProcessEnv,
   identity: (dir: string) => string | undefined = repoIdentity,
 ): string | undefined {
-  const dir = leadingCdCwd(command, cwd)
-  for (const invocation of bdInvocations(command)) {
-    if (invocation.verb !== "create") continue
-    // An explicit `--db`, `-C` or `--global` names its own target; this check does not follow it.
-    if (invocation.globals.length > 0 || flagEnabled(invocation.args, ["--help", "-h"])) continue
-    const local = invocation.prefix.findLast((token) => token.startsWith("BEADS_DIR="))?.slice("BEADS_DIR=".length)
-    const store = createStore(dir, local, env)
-    if (store === undefined) continue
-    const warning = ledgerRepoMismatch({ store, cwd: dir, identity })
-    if (warning !== undefined) return warning
-  }
-  return undefined
+  let warning: string | undefined
+  planEmbeddedWrites(command, cwd, env, ({ invocation, store, cwd: dir }) => {
+    if (warning !== undefined || invocation.verb !== "create") return
+    if (flagEnabled(invocation.globals, ["--global"])) return
+    if (TARGET_SELECTORS.some((name) => globalValue(invocation.globals, [name]) !== undefined)) return
+    const target = store ?? findLedger(dir)?.store
+    if (target !== undefined) warning = ledgerRepoMismatch({ store: target, cwd: dir, identity })
+  })
+  return warning
 }
 
 /** Decide one `shell` call. Never throws: an unexpected error is a parse refusal. */

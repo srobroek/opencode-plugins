@@ -2052,7 +2052,7 @@ var RUNNER_SCRIPT2 = /^bd-embedded-write-runner\.(?:js|ts)$/;
 var DYNAMIC_CWD = "This command changes directory to a path only the shell can resolve (a variable, `~`, a glob, `cd -`). Do not use `cd`: pass the shell tool's `workdir` parameter instead. A literal `cd DIR && bd ...` prefix is accepted.";
 var SOURCE_FIX = "Write each `bd` command directly in this command line instead of inside a string, script or here-document.";
 var ACCEPTED_SHAPES = "Accepted: `bd` reads anywhere in pipes, `;` / `&&` / `||` lists, `( )` / `{ }` groups, loops and redirections; and each `bd` write written as its own simple command, `[VAR=literal ...] bd ...`, anywhere in such a command, which the lock runs under its serialising runner with a hold of its own.";
-function planEmbeddedWrites(command, cwd, env) {
+function planEmbeddedWrites(command, cwd, env, observe) {
   if (!BD_WORD.test(command))
     return { kind: "writes", writes: [] };
   const scan = scanShell(command);
@@ -2132,6 +2132,8 @@ function planEmbeddedWrites(command, cwd, env) {
       continue;
     }
     const store = resolved.store;
+    if (state.cwd.kind === "known")
+      observe?.({ invocation, store, cwd: state.cwd.cwd });
     if (store === undefined || !embedded(store))
       continue;
     if (shape.condition !== undefined) {
