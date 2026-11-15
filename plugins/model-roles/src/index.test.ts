@@ -1202,49 +1202,55 @@ describe("runtime fallback", () => {
   })
 
   test("records an outcome per child: usage and success, then a credentials failure", async () => {
-    const host = createHost({ agents: [{ id: "plain" }], models, options: fallbackOptions })
-    host.sessions.set("r", { id: "r" })
-    host.sessions.set("c1", { id: "c1", parentID: "r", agent: "plain", model: sonnet })
-    host.sessions.set("c2", { id: "c2", parentID: "r", agent: "plain", model: sonnet })
-    const cleanup = await setup(host)
-    const usage = (sessionID: string, input: number, cost: number) => ({
-      type: "session.step.ended",
-      data: { sessionID, cost, tokens: { input, output: 10, reasoning: 2, cache: { read: 5, write: 1 } } },
-    })
-    const input1 = await host.spawn("subagent", { agent: "plain", prompt: "secret prompt", role: "task" }, "build", "r", "call-1")
-    host.emit({ type: "session.created", data: { sessionID: "c1", parentID: "r", agent: "plain", model: sonnet } })
-    host.emit(usage("c1", 100, 0.5))
-    host.emit(usage("c1", 200, 0.25))
-    host.emit({ type: "session.execution.succeeded", created: Date.now() + 1000, data: { sessionID: "c1" } })
-    await host.spawn("subagent", { agent: "plain", prompt: "x", role: "task" }, "build", "r", "call-2")
-    host.emit({ type: "session.created", data: { sessionID: "c2", parentID: "r", agent: "plain", model: sonnet } })
-    host.emit({ type: "session.execution.failed", data: { sessionID: "c2", error: { type: "api", message: "invalid credentials", status: 401 } } })
-    await settle()
-    await host.spawnDone({ ...input1, sessionID: "c1" }, { sessionID: "c1" }, "r", "call-3")
-    const first = host.storage.get("outcome:c1") as Record<string, unknown>
-    expect(first).toMatchObject({
-      agent: "plain",
-      tier: "standard",
-      model: "amazon-bedrock/claude-sonnet#high",
-      source: "role-param",
-      ms: 1000,
-      parentID: "r",
-      inputTokens: 300,
-      outputTokens: 20,
-      reasoningTokens: 4,
-      cacheReadTokens: 10,
-      cacheWriteTokens: 2,
-      cost: 0.75,
-      steps: 2,
-      outcome: "succeeded",
-      resumes: 1,
-    })
-    expect(JSON.stringify(first)).not.toContain("secret prompt")
-    expect(host.storage.get("outcome:c2")).toMatchObject({ outcome: "failed:auth", steps: 0 })
-    const check = (await host.tools.get("model_roles_check")?.execute({}))?.content
-    expect(check).toContain("outcome ledger: 2 spawns recorded")
-    host.close()
-    await cleanup()
+    // `ms` is the end event's time minus the spawn's: pin the clock so a millisecond tick between them cannot change it.
+    setSystemTime(new Date(1_800_000_000_000))
+    try {
+      const host = createHost({ agents: [{ id: "plain" }], models, options: fallbackOptions })
+      host.sessions.set("r", { id: "r" })
+      host.sessions.set("c1", { id: "c1", parentID: "r", agent: "plain", model: sonnet })
+      host.sessions.set("c2", { id: "c2", parentID: "r", agent: "plain", model: sonnet })
+      const cleanup = await setup(host)
+      const usage = (sessionID: string, input: number, cost: number) => ({
+        type: "session.step.ended",
+        data: { sessionID, cost, tokens: { input, output: 10, reasoning: 2, cache: { read: 5, write: 1 } } },
+      })
+      const input1 = await host.spawn("subagent", { agent: "plain", prompt: "secret prompt", role: "task" }, "build", "r", "call-1")
+      host.emit({ type: "session.created", data: { sessionID: "c1", parentID: "r", agent: "plain", model: sonnet } })
+      host.emit(usage("c1", 100, 0.5))
+      host.emit(usage("c1", 200, 0.25))
+      host.emit({ type: "session.execution.succeeded", created: Date.now() + 1000, data: { sessionID: "c1" } })
+      await host.spawn("subagent", { agent: "plain", prompt: "x", role: "task" }, "build", "r", "call-2")
+      host.emit({ type: "session.created", data: { sessionID: "c2", parentID: "r", agent: "plain", model: sonnet } })
+      host.emit({ type: "session.execution.failed", data: { sessionID: "c2", error: { type: "api", message: "invalid credentials", status: 401 } } })
+      await settle()
+      await host.spawnDone({ ...input1, sessionID: "c1" }, { sessionID: "c1" }, "r", "call-3")
+      const first = host.storage.get("outcome:c1") as Record<string, unknown>
+      expect(first).toMatchObject({
+        agent: "plain",
+        tier: "standard",
+        model: "amazon-bedrock/claude-sonnet#high",
+        source: "role-param",
+        ms: 1000,
+        parentID: "r",
+        inputTokens: 300,
+        outputTokens: 20,
+        reasoningTokens: 4,
+        cacheReadTokens: 10,
+        cacheWriteTokens: 2,
+        cost: 0.75,
+        steps: 2,
+        outcome: "succeeded",
+        resumes: 1,
+      })
+      expect(JSON.stringify(first)).not.toContain("secret prompt")
+      expect(host.storage.get("outcome:c2")).toMatchObject({ outcome: "failed:auth", steps: 0 })
+      const check = (await host.tools.get("model_roles_check")?.execute({}))?.content
+      expect(check).toContain("outcome ledger: 2 spawns recorded")
+      host.close()
+      await cleanup()
+    } finally {
+      setSystemTime()
+    }
   })
 
   describe("outcome ledger", () => {
