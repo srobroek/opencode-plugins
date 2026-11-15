@@ -28,7 +28,7 @@ applies nothing.
 - **Rewrite:** tests to move to the public interface, a real object or a fake.
 - **Simplify:** tests to make readable: hidden data to build in the test, large shared
   fixtures to replace with builders, helpers that hide the action or the expected values.
-- **Fix:** flaky tests and their causes; weak assertions to make exact.
+- **Fix:** flaky tests and their causes (load-related or order-related); weak assertions to make exact.
 - **Add:** the behaviors that no test protects, and the existing test to extend for each.
 - **Speed up:** the slowest tests and the cost behind each.
 - **Clean up:** unused snapshots, fixtures, builders and test data; expired quarantines.
@@ -42,8 +42,12 @@ Test audit: <scope> at <commit>
 
                  before   after
 Tests            <n>      <n>
-Runtime (median) <s>      <s>
-Flaky            <n>      <n>
+Runtime (median) <s>      <s>   (wall)
+Test time (sum)  <s>      <s>   (summed test durations)
+User CPU         <s>      <s>
+Machine load     <load>   <load>  (what else was running)
+Flaky            <n>      <n>   (<n> load-related, <n> order-related)
+Order-dependent  <n>      <n>   (<modes that exposed them>)
 Line coverage    <%>      <%>
 Branch coverage  <%>      <%>
 Mutation score   <%>      <%>   (<tool>, <files mutated>)
@@ -63,6 +67,9 @@ Gaps
 Follow-ups
   <quarantined tests with issue, owner and expiry; slow tests left; tools to add>
 ```
+
+On a shared or busy machine, wall time is noise: lead with the summed test time and user
+CPU, and name the load. Count a run flagged noisy by the summary as a finding.
 
 State each number with the command or tool that produced it. Mark a manual comparison as
 manual.

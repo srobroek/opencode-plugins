@@ -1,7 +1,7 @@
 import type { Context } from "@opencode/plugin/promise/plugin"
 import { PathError, readReportFile, reportRoots } from "./audit-util.ts"
 import { type CoverageFormat, compareCoverage, formatCoverage, parseCoverage } from "./coverage.ts"
-import { parseJunit } from "./junit.ts"
+import { parseJunitReport } from "./junit.ts"
 import { compareMutation, formatMutation, type MutationFormat, parseMutation } from "./mutation.ts"
 import { formatSummary, type RunRecord, summarizeRuns } from "./test-repeat.ts"
 
@@ -16,19 +16,33 @@ export function parseTestAuditOptions(options: Readonly<Record<string, unknown>>
   return options.testAudit === false ? undefined : { enabled: true }
 }
 
-export type SummarizeInput = { reports: string[]; exitCodes?: Array<number | null> }
+export type SummarizeInput = { reports: string[]; exitCodes?: Array<number | null>; modes?: string[]; noisyStderrLines?: number; noisyFileBytes?: number }
+
+export const MAX_MODE_LENGTH = 60
 
 /** Validate the tool input; a string result is the error to return. */
 export function parseSummarizeInput(input: unknown): SummarizeInput | string {
   const raw = (input ?? {}) as Record<string, unknown>
-  const { reports, exitCodes } = raw
+  const { reports, exitCodes, modes, noisyStderrLines, noisyFileBytes } = raw
   if (!Array.isArray(reports) || reports.length < 1 || reports.length > MAX_REPORTS || reports.some((r) => typeof r !== "string" || r === ""))
     return `reports must be 1 to ${MAX_REPORTS} non-empty paths`
   if (exitCodes !== undefined) {
     if (!Array.isArray(exitCodes) || exitCodes.length !== reports.length || exitCodes.some((c) => c !== null && !Number.isInteger(c)))
       return "exitCodes must be integers or null, one per report"
   }
-  return { reports: reports as string[], exitCodes: exitCodes as Array<number | null> | undefined }
+  if (modes !== undefined) {
+    if (!Array.isArray(modes) || modes.length !== reports.length || modes.some((m) => typeof m !== "string" || m.trim() === "" || m.length > MAX_MODE_LENGTH))
+      return `modes must be non-empty strings of at most ${MAX_MODE_LENGTH} characters, one per report`
+  }
+  for (const [name, value] of [["noisyStderrLines", noisyStderrLines], ["noisyFileBytes", noisyFileBytes]] as const)
+    if (value !== undefined && (!Number.isInteger(value) || (value as number) < 1)) return `${name} must be a positive integer`
+  return {
+    reports: reports as string[],
+    exitCodes: exitCodes as Array<number | null> | undefined,
+    modes: modes as string[] | undefined,
+    noisyStderrLines: noisyStderrLines as number | undefined,
+    noisyFileBytes: noisyFileBytes as number | undefined,
+  }
 }
 
 /** Read and summarize one JUnit report per run, in run order. Pure apart from reading the files. */
@@ -39,9 +53,13 @@ export function summarizeReports(root: string, raw: unknown): { content: string;
   const roots = reportRoots(root)
   const records: RunRecord[] = []
   for (const [i, path] of input.reports.entries()) {
-    const record: RunRecord = { run: i + 1, exitCode: input.exitCodes?.[i], report: "unreadable", cases: [] }
+    const record: RunRecord = { run: i + 1, exitCode: input.exitCodes?.[i], mode: input.modes?.[i], report: "unreadable", cases: [] }
     try {
-      record.cases = parseJunit(readReportFile(root, path, roots))
+      const text = readReportFile(root, path, roots)
+      record.fileBytes = Buffer.byteLength(text)
+      const parsed = parseJunitReport(text)
+      record.cases = parsed.cases
+      record.stderrLines = parsed.stderrLines
       record.report = "used"
     } catch (error) {
       if (error instanceof PathError) return fail(`refused: ${error.message}`)
@@ -49,7 +67,7 @@ export function summarizeReports(root: string, raw: unknown): { content: string;
     }
     records.push(record)
   }
-  const summary = summarizeRuns(records)
+  const summary = summarizeRuns(records, { noisyStderrLines: input.noisyStderrLines, noisyFileBytes: input.noisyFileBytes })
   return { content: formatSummary(summary), metadata: { ...summary } }
 }
 
@@ -104,7 +122,9 @@ export async function setupTestAudit(ctx: Context, options: TestAuditOptions): P
       description:
         "Read-only: summarize JUnit XML reports from repeated test runs; flaky, always-failing and slow tests.\n" +
         "Run the test command several times through the shell, writing one JUnit report per run, then pass the paths in run " +
-        "order. Reads pytest, Vitest, bun test, gotestsum and cargo-nextest JUnit. Paths must be in the session or OpenCode temp directory.",
+        "order. Add modes (default, shuffle-files, shuffle-tests) to split order-dependent from flaky tests. Reports timeout vs " +
+        "assertion failures, file size and stderr lines. Reads pytest, Vitest, bun test, gotestsum and cargo-nextest JUnit. " +
+        "Paths must be in the session or OpenCode temp directory.",
       input: {
         type: "object",
         properties: {
@@ -119,6 +139,13 @@ export async function setupTestAudit(ctx: Context, options: TestAuditOptions): P
             type: "array",
             items: { type: ["integer", "null"] },
             description: "Exit code of each run, same length as reports; null when unknown",
+          },
+          noisyStderrLines: { type: "integer", minimum: 1, description: "Flag a run above this many stderr lines; default 1000" },
+          noisyFileBytes: { type: "integer", minimum: 1, description: "Flag a run whose report passes this many bytes; default 5000000" },
+          modes: {
+            type: "array",
+            items: { type: "string", maxLength: MAX_MODE_LENGTH },
+            description: "Order mode of each run, same length as reports: default, shuffle-files, shuffle-tests or free text",
           },
         },
         required: ["reports"],

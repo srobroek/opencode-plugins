@@ -166,6 +166,18 @@ test("round-trips every supported label", () => {
 - Do investigate leaked mocks, timers, randomness, and resource collisions.
   Quarantine only with an issue, owner, expiry, and a separate reporting lane.
 - Do not make failures green with blanket retries or permanent skips.
+- Do shuffle file order and test order separately: `--sequence.shuffle.files` (root config
+  only) and `--sequence.shuffle.tests`; `--sequence.shuffle` enables both. A dependence
+  between two tests in one file passes every file-order shuffle. Checked 2026-11-15
+  against the Vitest 5.0 docs.
+- Do enable isolation by default: `restoreMocks`, `mockReset`, `unstubGlobals`, `unstubEnvs`.
+  `restoreMocks` calls `vi.restoreAllMocks()`, which in current versions restores only
+  `vi.spyOn` spies; it does not reset `vi.fn()` implementations or automocks (`mockReset`
+  does), so enable both. These options can break concurrent tests.
+- Do prove the options reach every project. Inline `projects` inherit root options
+  (`extends` defaults to true in Vitest 5), but projects referenced as config files or
+  directories do not. Add a probe test per project that sets a stub or spy in one test and
+  asserts it is gone in the next; delete the probe or keep it as the guard.
 
 ## Bad tests and fixes
 

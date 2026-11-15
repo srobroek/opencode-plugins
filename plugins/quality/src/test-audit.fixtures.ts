@@ -63,3 +63,31 @@ export const NEXTEST = `<?xml version="1.0" encoding="UTF-8"?>
         </testcase>
     </testsuite>
 </testsuites>`
+
+/** Failures of both kinds, and stderr in a CDATA block and a plain element (hand-written; modeled on Vitest and pytest output). */
+export const TIMEOUTS = `<?xml version="1.0" encoding="UTF-8"?>
+<testsuites>
+  <testsuite name="t.test.ts">
+    <testcase classname="t.test.ts" name="slow one" time="5.0">
+      <failure message="Test timed out in 5000ms." type="Error">Error: Test timed out in 5000ms.</failure>
+    </testcase>
+    <testcase classname="t.test.ts" name="pytest timeout" time="2.0">
+      <failure message="Failed: Timeout >2.0s" type="Failed">Failed: Timeout</failure>
+    </testcase>
+    <testcase classname="t.test.ts" name="wrong value" time="0.1">
+      <failure message="expected 1 to be 2" type="AssertionError">AssertionError</failure>
+    </testcase>
+    <testcase classname="t.test.ts" name="crashes" time="0.1">
+      <error message="Cannot read properties of undefined" type="TypeError">TypeError</error>
+    </testcase>
+    <testcase classname="t.test.ts" name="fine" time="0.1" />
+    <system-err><![CDATA[connect ECONNREFUSED 127.0.0.1:80
+
+second line
+]]></system-err>
+  </testsuite>
+  <testsuite name="u.test.ts">
+    <testcase classname="u.test.ts" name="noisy" time="0.1"><system-err>one
+two</system-err></testcase>
+  </testsuite>
+</testsuites>`

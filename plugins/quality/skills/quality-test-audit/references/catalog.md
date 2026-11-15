@@ -37,6 +37,10 @@ Keep, then the suite-level practices. Examples of most classes are in the `quali
 | Checks around the interface | Reads a table, file or private field although a read operation exists | Read the test | Check through the read operation |
 | Logic in the test | `if`, loops or exception handlers decide what to assert | Read the test | Parametrize with explicit cases |
 | Eager | One test checks several behaviors | Several acts, or unrelated assertions | Split into one test per behavior |
+| Leaks state | A test passes alone and fails after another, or only in shuffled runs | Fails in a shuffled run (`order-dependent` in the summary) and passes in default order; the leaked-state checklist in `maintenance.md` names the source | Reset the state in setup or teardown; never lengthen a timeout |
+| Noisy run | Thousands of identical stderr errors, or a huge JUnit file | The summary's per-run stderr lines and file size; the repeated message | Fix the cause, usually a missing environment setup, so the run is quiet |
+| Unmocked I/O | Connection-refused or DNS lines in the output; tests that reach the network | The error lines name a host or port the test never set up | Fake the boundary, or fail the test on unexpected requests |
+| Silent skip or hidden prerequisite | Passes only after a build step or local service; a `skipIf` hides a failure | A run from a clean checkout without the build step, and the skip condition | Make the prerequisite explicit so the test fails with a clear message, or remove the skip |
 | Oversized snapshot | A snapshot of a whole object or a long output | Its size, and updates accepted without review in the history | Assert the part that the behavior is about |
 
 ## Speed up
@@ -46,6 +50,7 @@ Keep, then the suite-level practices. Examples of most classes are in the `quali
 | Slow | Among the slowest tests by median time | The repeat report's slowest list | Find the cost: real I/O, sleeps, broad fixtures, a high level |
 | Sleepy | Waits a fixed time | A sleep call in the test or its helpers | Await the condition, or fake the clock |
 | Wrong level | An end-to-end or integration test that checks pure logic | The logic has no I/O dependency | Move the cases to unit tests; keep one wiring test |
+| Speed-up that changes production code | An option that skips an expensive check in a tested function | Identical output on real data in full and partial mode | Make the partial mode visibly distinct (name, flag in the result) so it cannot pass as the full path |
 | Expensive setup | A fixture rebuilt for each test without need, or a session fixture that leaks state | Fixture scope and durations | Narrow or widen the scope to match what the tests change |
 
 ## Simplify: tests that are hard to read or change
@@ -82,8 +87,13 @@ requirement such as an audit log, a security exclusion or a public API. Record w
 Read the suite as a whole and recommend changes in the report. Each recommendation
 names the evidence and the place to change. Check:
 
-- **Runner settings:** random order with the seed printed. Retries off, or recorded as
-  flaky. A timeout per test, and parallel runs where the tests are isolated.
+- **Runner settings:** both kinds of random order (file order and test order within a
+  file) with the seed printed. Retries off, or recorded as flaky. A timeout per test, and
+  parallel runs where the tests are isolated.
+- **Isolation by default:** the runner resets mocks, spies, stubbed globals and
+  environment variables before each test. Check the setting reaches every project of a
+  workspace: root options may not apply to projects with their own config. Prove it with
+  a probe test that leaks state on purpose and fails when the next test sees it.
 - **CI lanes:** a fast unit lane on every change, an integration lane, mutation testing
   on changed files, and a flaky-test lane for quarantined tests with their issues.
 - **Coverage settings:** branch coverage on; exclusions that hide code nobody decided to
