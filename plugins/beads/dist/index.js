@@ -2004,9 +2004,9 @@ import { dirname as dirname3, isAbsolute as isAbsolute4, join as join2, resolve 
 // plugins/beads/src/bd-embedded-write-lock.ts
 import { spawnSync as spawnSync2 } from "child_process";
 import {
-  closeSync,
+  closeSync as closeSync2,
   existsSync as existsSync2,
-  openSync,
+  openSync as openSync2,
   readFileSync as readFileSync2,
   realpathSync as realpathSync2,
   statSync as statSync2,
@@ -2015,6 +2015,41 @@ import {
 } from "fs";
 import { hostname } from "os";
 import { basename, dirname as dirname2, isAbsolute as isAbsolute3, join, resolve as resolve4 } from "path";
+
+// plugins/beads/src/bounded-read.ts
+import { closeSync, constants as constants2, fstatSync, lstatSync as lstatSync2, openSync, readSync } from "fs";
+var MAX_LEDGER_FILE_BYTES = 64 * 1024;
+function readBounded(path) {
+  let fd;
+  try {
+    if (!lstatSync2(path).isFile())
+      return { kind: "unreadable" };
+    fd = openSync(path, constants2.O_RDONLY | constants2.O_NOFOLLOW | constants2.O_NONBLOCK);
+    const info = fstatSync(fd);
+    if (!info.isFile() || info.size > MAX_LEDGER_FILE_BYTES)
+      return { kind: "unreadable" };
+    const buffer = Buffer.alloc(info.size);
+    let offset = 0;
+    while (offset < buffer.length) {
+      const read = readSync(fd, buffer, offset, buffer.length - offset, offset);
+      if (read === 0)
+        break;
+      offset += read;
+    }
+    return { kind: "text", text: buffer.toString("utf8", 0, offset) };
+  } catch (error) {
+    return error.code === "ENOENT" ? { kind: "absent" } : { kind: "unreadable" };
+  } finally {
+    if (fd !== undefined)
+      closeSync(fd);
+  }
+}
+function readSmallRegularFile(path) {
+  const read = readBounded(path);
+  return read.kind === "text" ? read.text : undefined;
+}
+
+// plugins/beads/src/bd-embedded-write-lock.ts
 var LOCK_NAME = "omp-embedded-write.lock";
 var STEAL_NAME = "omp-embedded-write-steal.lock";
 var LEASE_MS = 120000;
@@ -2084,7 +2119,7 @@ function registry() {
     for (const [lock, held] of created.owned) {
       clearInterval(held.renew);
       try {
-        closeSync(held.fd);
+        closeSync2(held.fd);
       } catch {}
       try {
         withOwnership(lock, held.token, () => unlinkSync(lock));
@@ -2215,15 +2250,12 @@ function canonicalStore(store) {
   return store === undefined ? undefined : canonical(store);
 }
 function embedded(store) {
-  let metadata = "";
-  let config = "";
-  try {
-    metadata = readFileSync2(join(store, "metadata.json"), "utf8");
-  } catch {}
-  try {
-    config = readFileSync2(join(store, "config.yaml"), "utf8");
-  } catch {}
-  return metadata !== "" || config !== "" || isDirectory(join(store, "embeddeddolt"));
+  for (const file of ["metadata.json", "config.yaml"]) {
+    const read = readBounded(join(store, file));
+    if (read.kind === "unreadable" || read.kind === "text" && read.text !== "")
+      return true;
+  }
+  return isDirectory(join(store, "embeddeddolt"));
 }
 function embeddedStoreFor(cwd, env = process.env) {
   const store = storeFor([], cwd, env);
@@ -2304,7 +2336,9 @@ var RUNNER_SCRIPT2 = /^bd-embedded-write-runner\.(?:js|ts)$/;
 var DYNAMIC_CWD = "This command changes directory to a path only the shell can resolve (a variable, `~`, a glob, `cd -`). Do not use `cd`: pass the shell tool's `workdir` parameter instead. A literal `cd DIR && bd ...` prefix is accepted.";
 var SOURCE_FIX = "Write each `bd` command directly in this command line instead of inside a string, script or here-document.";
 var ACCEPTED_SHAPES = "Accepted: `bd` reads anywhere in pipes, `;` / `&&` / `||` lists, `( )` / `{ }` groups, loops and redirections; and each `bd` write written as its own simple command, `[VAR=literal ...] bd ...`, anywhere in such a command, which the lock runs under its serialising runner with a hold of its own.";
-function planEmbeddedWrites(command, cwd, env, observe) {
+function planEmbeddedWrites(command, cwd, env, options = {}) {
+  const { observe, classify = true } = options;
+  const embeddedStore = (store) => classify && embedded(store);
   if (!BD_WORD.test(command))
     return { kind: "writes", writes: [] };
   const scan = scanShell(command);
@@ -2367,7 +2401,7 @@ function planEmbeddedWrites(command, cwd, env, observe) {
       const resolved = resolveWrite(child, shape.assignments, state, env, command);
       if ("problem" in resolved)
         refuse(resolved.problem);
-      else if (resolved.store !== undefined && embedded(resolved.store) && resolved.store !== canonical(shape.store)) {
+      else if (resolved.store !== undefined && embeddedStore(resolved.store) && resolved.store !== canonical(shape.store)) {
         refuse({
           part: `a runner command holds \`${shape.store}\` while its \`bd ${child.verb}\` writes \`${resolved.store}\``,
           fix: "Write the plain `bd` command and let the lock generate the runner form."
@@ -2386,7 +2420,7 @@ function planEmbeddedWrites(command, cwd, env, observe) {
     const store = resolved.store;
     if (state.cwd.kind === "known")
       observe?.({ invocation, store, cwd: state.cwd.cwd });
-    if (store === undefined || !embedded(store))
+    if (store === undefined || !embeddedStore(store))
       continue;
     if (shape.condition !== undefined) {
       refuse({
@@ -2397,7 +2431,7 @@ function planEmbeddedWrites(command, cwd, env, observe) {
     }
     writes.push({ store, offset: shape.head.start });
   }
-  if (problem === undefined)
+  if (problem === undefined || !classify)
     return { kind: "writes", writes };
   const at = writes[0]?.store ?? problemStore ?? embeddedStoreFor(cwd, env) ?? namedStore(command, cwd, env);
   if (at === undefined)
@@ -2729,7 +2763,7 @@ function takeOverIfAbandoned(lock, steal) {
     return;
   let fd;
   try {
-    fd = openSync(steal, "wx");
+    fd = openSync2(steal, "wx");
   } catch (error) {
     if (error.code !== "EEXIST")
       return;
@@ -2745,7 +2779,7 @@ function takeOverIfAbandoned(lock, steal) {
     if (abandoned(lock))
       unlinkSync(lock);
   } catch {} finally {
-    closeSync(fd);
+    closeSync2(fd);
     try {
       unlinkSync(steal);
     } catch {}
@@ -2808,7 +2842,7 @@ async function hold(store, owner, waitMs = WAIT_MS, signal) {
         }
       } else if (queue[0] === ticket) {
         try {
-          const fd = openSync(lock, "wx");
+          const fd = openSync2(lock, "wx");
           const token = `${process.pid}-${Date.now()}-${(nextToken++).toString(36)}`;
           writeSync(fd, JSON.stringify(holderNow(owner, token, undefined)));
           const renew = setInterval(() => {
@@ -2866,7 +2900,7 @@ function withOwnership(storeLock, token, change) {
   const steal = join(dirname2(storeLock), STEAL_NAME);
   let fd;
   try {
-    fd = openSync(steal, "wx");
+    fd = openSync2(steal, "wx");
   } catch (error) {
     if (error.code === "EEXIST")
       return "busy";
@@ -2878,7 +2912,7 @@ function withOwnership(storeLock, token, change) {
     change();
     return "done";
   } finally {
-    closeSync(fd);
+    closeSync2(fd);
     try {
       unlinkSync(steal);
     } catch {}
@@ -2903,7 +2937,7 @@ function release(store, owner) {
   owned.delete(lock);
   clearInterval(held.renew);
   try {
-    closeSync(held.fd);
+    closeSync2(held.fd);
   } catch {}
   try {
     withOwnership(lock, held.token, () => unlinkSync(lock));
@@ -2955,11 +2989,11 @@ function renewLease(lock, owner, token) {
   if (held === undefined || held.token !== token)
     return;
   const result = withOwnership(lock, token, () => {
-    const fd = openSync(lock, "w");
+    const fd = openSync2(lock, "w");
     try {
       writeSync(fd, JSON.stringify(holderNow(owner, token, held.writer, held.writerStart)));
     } finally {
-      closeSync(fd);
+      closeSync2(fd);
     }
   });
   if (result !== "lost")
@@ -2967,7 +3001,7 @@ function renewLease(lock, owner, token) {
   clearInterval(held.renew);
   owned.delete(lock);
   try {
-    closeSync(held.fd);
+    closeSync2(held.fd);
   } catch {}
 }
 async function attachWriter(store, owner, pid, waitMs = RUNNER_WAIT_MS) {
@@ -2979,11 +3013,11 @@ async function attachWriter(store, owner, pid, waitMs = RUNNER_WAIT_MS) {
   const deadline = Date.now() + Math.max(0, waitMs);
   while (true) {
     const result = withOwnership(lock, held.token, () => {
-      const fd = openSync(lock, "w");
+      const fd = openSync2(lock, "w");
       try {
         writeSync(fd, JSON.stringify(holderNow(owner, held.token, pid, writerStart)));
       } finally {
-        closeSync(fd);
+        closeSync2(fd);
       }
     });
     if (result === "done") {
@@ -4381,7 +4415,7 @@ import { dirname as dirname6, join as join4, resolve as resolve8 } from "path";
 
 // plugins/beads/src/binary-hooks.ts
 import { spawnSync as spawnSync3 } from "child_process";
-import { closeSync as closeSync2, existsSync as existsSync4, openSync as openSync2, readdirSync as readdirSync2, readFileSync as readFileSync3, readSync, realpathSync as realpathSync4, statSync as statSync4 } from "fs";
+import { closeSync as closeSync3, existsSync as existsSync4, openSync as openSync3, readdirSync as readdirSync2, readFileSync as readFileSync3, readSync as readSync2, realpathSync as realpathSync4, statSync as statSync4 } from "fs";
 import { isAbsolute as isAbsolute5, join as join3, resolve as resolve7, sep } from "path";
 var BINARY_MAGICS = [
   [254, 237, 250, 206],
@@ -4425,16 +4459,16 @@ function hooksDirectory(cwd, git) {
   return existsSync4(conventional) ? conventional : undefined;
 }
 function fileHasMarker(path, magicsOnly = false) {
-  const fd = openSync2(path, "r");
+  const fd = openSync3(path, "r");
   try {
     const bytes = Buffer.alloc(SAMPLE_BYTES);
-    const count = readSync(fd, bytes, 0, bytes.length, 0);
+    const count = readSync2(fd, bytes, 0, bytes.length, 0);
     const sample = bytes.subarray(0, count);
     if (!magicsOnly && sample.includes(0))
       return true;
     return BINARY_MAGICS.some((magic) => sample.length >= magic.length && magic.every((byte, index) => sample[index] === byte));
   } finally {
-    closeSync2(fd);
+    closeSync3(fd);
   }
 }
 function hasBinaryHooks(cwd, git = runGit) {
@@ -4871,9 +4905,8 @@ function decideBdUpdateCloseParsed(parsed) {
 }
 
 // plugins/beads/src/ledger-context.ts
-import { closeSync as closeSync3, constants as constants2, existsSync as existsSync6, fstatSync, lstatSync as lstatSync2, openSync as openSync3, readSync as readSync2, realpathSync as realpathSync6 } from "fs";
+import { existsSync as existsSync6, lstatSync as lstatSync3, realpathSync as realpathSync6 } from "fs";
 import { dirname as dirname7, join as join5, resolve as resolve9 } from "path";
-var MAX_LEDGER_FILE_BYTES = 64 * 1024;
 var SAFE_PREFIX = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 function findLedger(from) {
   const start = resolve9(from);
@@ -4892,34 +4925,9 @@ function findLedger(from) {
 }
 function isRetired(store) {
   try {
-    return lstatSync2(join5(store, "RETIRED")).isFile();
+    return lstatSync3(join5(store, "RETIRED")).isFile();
   } catch {
     return false;
-  }
-}
-function readSmallRegularFile(path) {
-  let fd;
-  try {
-    if (!lstatSync2(path).isFile())
-      return;
-    fd = openSync3(path, constants2.O_RDONLY | constants2.O_NOFOLLOW | constants2.O_NONBLOCK);
-    const info = fstatSync(fd);
-    if (!info.isFile() || info.size > MAX_LEDGER_FILE_BYTES)
-      return;
-    const buffer = Buffer.alloc(info.size);
-    let offset = 0;
-    while (offset < buffer.length) {
-      const read = readSync2(fd, buffer, offset, buffer.length - offset, offset);
-      if (read === 0)
-        break;
-      offset += read;
-    }
-    return buffer.toString("utf8", 0, offset);
-  } catch {
-    return;
-  } finally {
-    if (fd !== undefined)
-      closeSync3(fd);
   }
 }
 function safePrefix(value) {
@@ -4969,7 +4977,7 @@ function ledgerRepoMismatch(input) {
 
 // plugins/beads/src/pr-bead-link-gate.ts
 import { execFileSync } from "child_process";
-import { existsSync as existsSync7, lstatSync as lstatSync3 } from "fs";
+import { existsSync as existsSync7, lstatSync as lstatSync4 } from "fs";
 import { dirname as dirname8, join as join6, resolve as resolve10 } from "path";
 var MAX_COMMAND_LENGTH = 64000;
 var BEAD_REF = /(?:^|\s)(?:Bead|Closes-Bead|Bead-Id):\s*[A-Za-z][A-Za-z0-9_-]*-[A-Za-z0-9]+/i;
@@ -5009,7 +5017,7 @@ function beadsActive(dir) {
     const beads = join6(current, ".beads");
     if (existsSync7(beads)) {
       try {
-        return !lstatSync3(join6(beads, "RETIRED")).isFile();
+        return !lstatSync4(join6(beads, "RETIRED")).isFile();
       } catch {
         return true;
       }
@@ -5190,16 +5198,19 @@ function withActorPrefix(command, actor) {
 var TARGET_SELECTORS = ["-C", "--directory", "--db", "--database"];
 function createLedgerWarning(command, cwd, env, identity = repoIdentity) {
   let warning;
-  planEmbeddedWrites(command, cwd, env, ({ invocation, store, cwd: dir }) => {
-    if (warning !== undefined || invocation.verb !== "create")
-      return;
-    if (flagEnabled(invocation.globals, ["--global"]))
-      return;
-    if (TARGET_SELECTORS.some((name) => globalValue(invocation.globals, [name]) !== undefined))
-      return;
-    const target = store ?? findLedger(dir)?.store;
-    if (target !== undefined)
-      warning = ledgerRepoMismatch({ store: target, cwd: dir, identity });
+  planEmbeddedWrites(command, cwd, env, {
+    classify: false,
+    observe: ({ invocation, store, cwd: dir }) => {
+      if (warning !== undefined || invocation.verb !== "create")
+        return;
+      if (flagEnabled(invocation.globals, ["--global"]))
+        return;
+      if (TARGET_SELECTORS.some((name) => globalValue(invocation.globals, [name]) !== undefined))
+        return;
+      const target = store ?? findLedger(dir)?.store;
+      if (target !== undefined)
+        warning = ledgerRepoMismatch({ store: target, cwd: dir, identity });
+    }
   });
   return warning;
 }
@@ -5265,7 +5276,7 @@ async function decide(original, cwd, deps) {
     if (decision.kind === "advisory")
       advisories.push(decision.text);
   }
-  const crossRepo = createLedgerWarning(command, cwd, deps.env);
+  const crossRepo = on("bd-embedded-write-lock") ? createLedgerWarning(command, cwd, deps.env) : undefined;
   if (crossRepo !== undefined)
     advisories.push(crossRepo);
   if (on("pr-bead-link-gate")) {

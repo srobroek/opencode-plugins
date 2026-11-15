@@ -58,6 +58,7 @@ import {
   invocationFromArgv,
 } from "./bd-actor-gate.ts"
 import { sessionPinFor } from "./beads-store.ts"
+import { readBounded } from "./bounded-read.ts"
 import {
   type ParsedCommand,
   type ShellScan,
@@ -482,19 +483,13 @@ function canonicalStore(store: string | undefined): string | undefined {
 }
 
 function embedded(store: string): boolean {
-  let metadata = ""
-  let config = ""
-  try {
-    metadata = readFileSync(join(store, "metadata.json"), "utf8")
-  } catch {
-    // An absent carrier proves nothing; the classifier reads both.
+  for (const file of ["metadata.json", "config.yaml"]) {
+    const read = readBounded(join(store, file))
+    // A carrier that is there but cannot be read safely (a symlink, a FIFO, an oversized
+    // file) still marks an embedded store: when in doubt the write is locked, never skipped.
+    if (read.kind === "unreadable" || (read.kind === "text" && read.text !== "")) return true
   }
-  try {
-    config = readFileSync(join(store, "config.yaml"), "utf8")
-  } catch {
-    // Same.
-  }
-  return metadata !== "" || config !== "" || isDirectory(join(store, "embeddeddolt"))
+  return isDirectory(join(store, "embeddeddolt"))
 }
 
 /**
@@ -688,12 +683,24 @@ type CommandShape =
  * command that mentions `bd`. Those are where reading shell semantics out of a string
  * gives confident wrong answers, so they fail closed instead of being modelled.
  */
+export type PlanOptions = {
+  /** Called for each resolved `bd` write, before any store classification. */
+  observe?: (target: ResolvedWrite) => void
+  /**
+   * `false` resolves targets positionally only: no store is classified, so no ledger file
+   * is opened, and the plan is always `writes: []`. For advisories that only need targets.
+   */
+  classify?: boolean
+}
+
 export function planEmbeddedWrites(
   command: string,
   cwd: string,
   env: NodeJS.ProcessEnv,
-  observe?: (target: ResolvedWrite) => void,
+  options: PlanOptions = {},
 ): WritePlan {
+  const { observe, classify = true } = options
+  const embeddedStore = (store: string): boolean => classify && embedded(store)
   if (!BD_WORD.test(command)) return { kind: "writes", writes: [] }
   const scan = scanShell(command)
   const writes: EmbeddedWrite[] = []
@@ -751,7 +758,7 @@ export function planEmbeddedWrites(
       if (child === undefined || !isWrite(child, argv)) continue
       const resolved = resolveWrite(child, shape.assignments, state, env, command)
       if ("problem" in resolved) refuse(resolved.problem)
-      else if (resolved.store !== undefined && embedded(resolved.store) && resolved.store !== canonical(shape.store)) {
+      else if (resolved.store !== undefined && embeddedStore(resolved.store) && resolved.store !== canonical(shape.store)) {
         refuse(
           {
             part: `a runner command holds \`${shape.store}\` while its \`bd ${child.verb}\` writes \`${resolved.store}\``,
@@ -772,7 +779,7 @@ export function planEmbeddedWrites(
     }
     const store = resolved.store
     if (state.cwd.kind === "known") observe?.({ invocation, store, cwd: state.cwd.cwd })
-    if (store === undefined || !embedded(store)) continue
+    if (store === undefined || !embeddedStore(store)) continue
     if (shape.condition !== undefined) {
       refuse(
         {
@@ -785,7 +792,7 @@ export function planEmbeddedWrites(
     }
     writes.push({ store, offset: shape.head.start })
   }
-  if (problem === undefined) return { kind: "writes", writes }
+  if (problem === undefined || !classify) return { kind: "writes", writes }
   // An embedded store in reach is what gives this gate jurisdiction: the session's own,
   // one the command writes, or one it names with `-C` / `--db` / `BEADS_DIR=`.
   const at = writes[0]?.store ?? problemStore ?? embeddedStoreFor(cwd, env) ?? namedStore(command, cwd, env)

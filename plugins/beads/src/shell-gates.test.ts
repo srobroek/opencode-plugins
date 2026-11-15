@@ -117,6 +117,28 @@ describe("decideShell", () => {
       expect(decision.cause).toContain(`walking up from ${JSON.stringify(sub)}`)
     })
 
+    test("with the write lock disabled, a hostile ledger file neither hangs nor yields an advisory", async () => {
+      const hostileRoot = join(root, "repo-fifo")
+      mkdirSync(join(hostileRoot, ".beads"), { recursive: true })
+      execFileSync("mkfifo", [join(hostileRoot, ".beads", "metadata.json")])
+      execFileSync("git", ["init", "-q", hostileRoot])
+      const env = { PATH: process.env.PATH, BEADS_DIR: join(hostileRoot, ".beads") }
+      const off = { gates: { "bd-embedded-write-lock": { enabled: false } } }
+      const decision = await decideShell("bd create --title t", repoA, deps({ actor: "a/b/c", env, options: off }))
+      expect(decision.kind === "allow" ? decision.advisories : ["x"]).toEqual([])
+      // Enabled, the same ledger still reaches the lock rather than skipping it.
+      const on = await decideShell("bd create --title t", repoA, deps({ actor: "a/b/c", env }))
+      expect(on.kind).toBe("allow")
+      expect(on.kind === "allow" ? on.command : "").toContain("bd-embedded-write-runner")
+    })
+
+    test("admission's dynamic-cwd refusal tells the agent to pass workdir", async () => {
+      const decision = await decideShell("cd $WORKTREE && bd update proj-1 --claim", root, deps({ actor: "a/b/c" }))
+      if (decision.kind !== "block") throw new Error(JSON.stringify(decision))
+      expect(decision.gate).toBe("beads-gate-admission")
+      expect(decision.cause).toContain("pass the shell tool's `workdir` parameter")
+    })
+
     test("--actor and --json before create do not suppress the advisory", () => {
       const env = { BEADS_DIR: join(repoB, ".beads") }
       for (const command of ["bd --actor x create --title t", "bd --json create --title t"])

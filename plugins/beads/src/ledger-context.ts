@@ -10,8 +10,9 @@
  * only a short identifier is quoted from them.
  */
 
-import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readSync, realpathSync } from "node:fs"
+import { existsSync, lstatSync, realpathSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"
+import { readSmallRegularFile } from "./bounded-read.ts"
 
 export type LedgerContext = {
   /** The directory the walk started from. */
@@ -22,9 +23,6 @@ export type LedgerContext = {
   prefix?: string
   retired: boolean
 }
-
-/** Ledger metadata is a few lines; anything bigger is not read. */
-const MAX_LEDGER_FILE_BYTES = 64 * 1024
 
 /** What a prefix may look like before it is shown to an agent. */
 const SAFE_PREFIX = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
@@ -50,32 +48,6 @@ function isRetired(store: string): boolean {
     return lstatSync(join(store, "RETIRED")).isFile()
   } catch {
     return false
-  }
-}
-
-/**
- * The text of a small regular file, or undefined. A symlink, a device, a FIFO, an
- * oversized file or any I/O failure all read as absent: this feeds a diagnostic only.
- */
-export function readSmallRegularFile(path: string): string | undefined {
-  let fd: number | undefined
-  try {
-    if (!lstatSync(path).isFile()) return undefined
-    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
-    const info = fstatSync(fd)
-    if (!info.isFile() || info.size > MAX_LEDGER_FILE_BYTES) return undefined
-    const buffer = Buffer.alloc(info.size)
-    let offset = 0
-    while (offset < buffer.length) {
-      const read = readSync(fd, buffer, offset, buffer.length - offset, offset)
-      if (read === 0) break
-      offset += read
-    }
-    return buffer.toString("utf8", 0, offset)
-  } catch {
-    return undefined
-  } finally {
-    if (fd !== undefined) closeSync(fd)
   }
 }
 

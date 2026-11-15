@@ -100,12 +100,15 @@ export function createLedgerWarning(
   identity: (dir: string) => string | undefined = repoIdentity,
 ): string | undefined {
   let warning: string | undefined
-  planEmbeddedWrites(command, cwd, env, ({ invocation, store, cwd: dir }) => {
-    if (warning !== undefined || invocation.verb !== "create") return
-    if (flagEnabled(invocation.globals, ["--global"])) return
-    if (TARGET_SELECTORS.some((name) => globalValue(invocation.globals, [name]) !== undefined)) return
-    const target = store ?? findLedger(dir)?.store
-    if (target !== undefined) warning = ledgerRepoMismatch({ store: target, cwd: dir, identity })
+  planEmbeddedWrites(command, cwd, env, {
+    classify: false,
+    observe: ({ invocation, store, cwd: dir }) => {
+      if (warning !== undefined || invocation.verb !== "create") return
+      if (flagEnabled(invocation.globals, ["--global"])) return
+      if (TARGET_SELECTORS.some((name) => globalValue(invocation.globals, [name]) !== undefined)) return
+      const target = store ?? findLedger(dir)?.store
+      if (target !== undefined) warning = ledgerRepoMismatch({ store: target, cwd: dir, identity })
+    },
   })
   return warning
 }
@@ -202,7 +205,7 @@ async function decide(original: string, cwd: string, deps: ShellGateDeps): Promi
     if (decision.kind === "advisory") advisories.push(decision.text)
   }
 
-  const crossRepo = createLedgerWarning(command, cwd, deps.env)
+  const crossRepo = on("bd-embedded-write-lock") ? createLedgerWarning(command, cwd, deps.env) : undefined
   if (crossRepo !== undefined) advisories.push(crossRepo)
 
   if (on("pr-bead-link-gate")) {
