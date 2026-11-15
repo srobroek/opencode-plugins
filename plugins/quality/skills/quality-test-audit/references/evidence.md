@@ -28,15 +28,21 @@ per run to `quality_test_summarize` (`default`, `shuffle-files`, `shuffle-tests`
 | Go | Not verified for package order | `go test -shuffle=on` shuffles tests and benchmarks of a package |
 | Rust | Not verified | Nightly `--shuffle` only |
 
-Run the command through the shell N times, 5 for the baseline and 20 for a suspected
-flaky test, with one report per run in the OpenCode temp directory, for example
-`for i in 1 2 3 4 5; do pytest --junitxml=<dir>/run-$i.xml; done`. Then call
-`quality_test_summarize` with `reports` (the paths in run order) and `exitCodes` (what
-each run returned, if you kept them). Without the tool, keep each report under a
-distinct name and read them.
+Run the command through the shell for the baseline: 3 default-order runs, 3 with file
+order shuffled and 3 with test order shuffled (20 runs of the suspected mode for a flaky
+test), with one report per run in the OpenCode temp directory, for example
+`for i in 1 2 3; do vitest run --reporter=junit --outputFile=<dir>/default-$i.xml; done`, then
+the same loop with `--sequence.shuffle.files` into `<dir>/files-$i.xml` and with
+`--sequence.shuffle.tests` into `<dir>/tests-$i.xml`. Then call `quality_test_summarize` with
+`reports` (the paths in run order), `modes` (`default`, `shuffle-files` or `shuffle-tests` for
+each report, same length) and `exitCodes` (what each run returned, if you kept them). The
+summary calls a test order-dependent only when it passed in a default run and failed in a
+shuffled one; a shuffled failure without a default-order pass is inconclusive, and a test that
+failed in every default run but passed a shuffled run is listed on its own. Without the tool,
+keep each report under a distinct name and read them.
 
 The tool also reports, per run, the report size in bytes, the number of lines in
-`system-err` elements (a run above 1000 lines or 5 MB is flagged noisy) and the summed
+`system-err` elements (a run above 1000 lines or 5 MB is flagged noisy; `noisyStderrLines` and `noisyFileBytes` change the limits) and the summed
 test duration, and for each failing test how many failures were timeouts and how many
 assertions or errors. The timeout class is a heuristic: the failure message or type
 matches "timeout", "timed out" or "time-out".
@@ -82,8 +88,11 @@ Vitest, bun test, Go or Rust; Stryker maps tests to mutants instead.
 
 When mutation testing cannot run on a scope (a runner pool requirement, a bundler step
 that breaks the mutation tool, a scope too slow), use hand-made forced faults as the
-evidence: change the code so the behavior is wrong, confirm the named test fails, and
-revert. Record each fault and its result, and say in the report that the evidence is manual.
+evidence. Steps 1 to 5 of the audit change nothing in the repository, so make the faults in
+a disposable copy outside it: export the commit into the OpenCode temp directory (for
+example `git archive HEAD | tar -x -C <dir>/faults`), install the dependencies there, change
+the code so the behavior is wrong, and confirm the named test fails. Delete the copy when
+done. Record each fault and its result, and say in the report that the evidence is manual.
 
 Run the same command for the baseline and after each batch. Stryker's `--incremental`
 reuses earlier results: run without it for the final comparison.

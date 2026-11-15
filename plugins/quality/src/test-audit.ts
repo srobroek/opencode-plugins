@@ -16,14 +16,14 @@ export function parseTestAuditOptions(options: Readonly<Record<string, unknown>>
   return options.testAudit === false ? undefined : { enabled: true }
 }
 
-export type SummarizeInput = { reports: string[]; exitCodes?: Array<number | null>; modes?: string[] }
+export type SummarizeInput = { reports: string[]; exitCodes?: Array<number | null>; modes?: string[]; noisyStderrLines?: number; noisyFileBytes?: number }
 
 export const MAX_MODE_LENGTH = 60
 
 /** Validate the tool input; a string result is the error to return. */
 export function parseSummarizeInput(input: unknown): SummarizeInput | string {
   const raw = (input ?? {}) as Record<string, unknown>
-  const { reports, exitCodes, modes } = raw
+  const { reports, exitCodes, modes, noisyStderrLines, noisyFileBytes } = raw
   if (!Array.isArray(reports) || reports.length < 1 || reports.length > MAX_REPORTS || reports.some((r) => typeof r !== "string" || r === ""))
     return `reports must be 1 to ${MAX_REPORTS} non-empty paths`
   if (exitCodes !== undefined) {
@@ -34,7 +34,15 @@ export function parseSummarizeInput(input: unknown): SummarizeInput | string {
     if (!Array.isArray(modes) || modes.length !== reports.length || modes.some((m) => typeof m !== "string" || m.trim() === "" || m.length > MAX_MODE_LENGTH))
       return `modes must be non-empty strings of at most ${MAX_MODE_LENGTH} characters, one per report`
   }
-  return { reports: reports as string[], exitCodes: exitCodes as Array<number | null> | undefined, modes: modes as string[] | undefined }
+  for (const [name, value] of [["noisyStderrLines", noisyStderrLines], ["noisyFileBytes", noisyFileBytes]] as const)
+    if (value !== undefined && (!Number.isInteger(value) || (value as number) < 1)) return `${name} must be a positive integer`
+  return {
+    reports: reports as string[],
+    exitCodes: exitCodes as Array<number | null> | undefined,
+    modes: modes as string[] | undefined,
+    noisyStderrLines: noisyStderrLines as number | undefined,
+    noisyFileBytes: noisyFileBytes as number | undefined,
+  }
 }
 
 /** Read and summarize one JUnit report per run, in run order. Pure apart from reading the files. */
@@ -59,7 +67,7 @@ export function summarizeReports(root: string, raw: unknown): { content: string;
     }
     records.push(record)
   }
-  const summary = summarizeRuns(records)
+  const summary = summarizeRuns(records, { noisyStderrLines: input.noisyStderrLines, noisyFileBytes: input.noisyFileBytes })
   return { content: formatSummary(summary), metadata: { ...summary } }
 }
 
@@ -132,6 +140,8 @@ export async function setupTestAudit(ctx: Context, options: TestAuditOptions): P
             items: { type: ["integer", "null"] },
             description: "Exit code of each run, same length as reports; null when unknown",
           },
+          noisyStderrLines: { type: "integer", minimum: 1, description: "Flag a run above this many stderr lines; default 1000" },
+          noisyFileBytes: { type: "integer", minimum: 1, description: "Flag a run whose report passes this many bytes; default 5000000" },
           modes: {
             type: "array",
             items: { type: "string", maxLength: MAX_MODE_LENGTH },

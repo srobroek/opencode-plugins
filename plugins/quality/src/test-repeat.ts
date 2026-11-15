@@ -44,9 +44,11 @@ export type RunStats = {
   noisy: boolean
 }
 
-/** A run is noisy above this many stderr lines or this many report bytes. */
+/** Defaults: a run is noisy above this many stderr lines or this many report bytes. */
 export const NOISY_STDERR_LINES = 1000
 export const NOISY_FILE_BYTES = 5_000_000
+
+export type SummaryOptions = { noisyStderrLines?: number; noisyFileBytes?: number }
 
 /** A mode counts as shuffled when its name says shuffle or random; any other mode is the unshuffled baseline. */
 export const isShuffledMode = (mode: string | undefined): boolean => mode !== undefined && /shuffle|random/i.test(mode)
@@ -64,8 +66,14 @@ export type RepeatSummary = {
   totalCases: number
   /** Mixed outcomes across the unshuffled runs (or across all runs when no mode is given). */
   flaky: TestStats[]
-  /** Failed in a shuffled run and never failed in an unshuffled one. Empty without run modes. */
+  /** Failed in a shuffled run, and passed in at least one unshuffled run without failing in any. */
   orderDependent: OrderDependentStats[]
+  /** Failed in a shuffled run with no observed default-order pass: absent, skipped, unreadable or no default run. */
+  inconclusive: OrderDependentStats[]
+  /** Failed in every default run, passed in at least one shuffled run. */
+  failedDefaultPassedShuffled: TestStats[]
+  noisyStderrLines: number
+  noisyFileBytes: number
   /** Runs per mode; empty when no run gave a mode. */
   modes: Array<{ mode: string; runs: number }>
   runStats: RunStats[]
@@ -101,7 +109,7 @@ function foldRun(cases: readonly TestCase[]): Map<string, Folded> {
 type Tally = { passed: number; failed: number; skipped: number; times: number[]; retried: number; timeouts: number; other: number }
 const newTally = (): Tally => ({ passed: 0, failed: 0, skipped: 0, times: [], retried: 0, timeouts: 0, other: 0 })
 
-function runStats(record: RunRecord): RunStats {
+function runStats(record: RunRecord, stderrLimit: number, bytesLimit: number): RunStats {
   const testSeconds = record.report === "used" ? record.cases.reduce((sum, c) => sum + c.time, 0) : undefined
   return {
     run: record.run,
@@ -109,15 +117,18 @@ function runStats(record: RunRecord): RunStats {
     fileBytes: record.fileBytes,
     stderrLines: record.stderrLines,
     testSeconds,
-    noisy: (record.stderrLines ?? 0) > NOISY_STDERR_LINES || (record.fileBytes ?? 0) > NOISY_FILE_BYTES,
+    noisy: (record.stderrLines ?? 0) > stderrLimit || (record.fileBytes ?? 0) > bytesLimit,
   }
 }
 
 /** Aggregate the runs: flaky (passed and failed), always failing, slowest by median time. */
-export function summarizeRuns(records: readonly RunRecord[]): RepeatSummary {
+export function summarizeRuns(records: readonly RunRecord[], options: SummaryOptions = {}): RepeatSummary {
+  const stderrLimit = options.noisyStderrLines ?? NOISY_STDERR_LINES
+  const bytesLimit = options.noisyFileBytes ?? NOISY_FILE_BYTES
   const used = records.filter((r) => r.report === "used")
   const perTest = new Map<string, Tally>()
   const unshuffled = new Map<string, Tally>()
+  const shuffledTally = new Map<string, Tally>()
   const failedModes = new Map<string, Set<string>>()
   for (const record of used) {
     const shuffled = isShuffledMode(record.mode)
@@ -133,8 +144,11 @@ export function summarizeRuns(records: readonly RunRecord[]): RepeatSummary {
         const base = unshuffled.get(id) ?? newTally()
         base[c.status]++
         unshuffled.set(id, base)
-      } else if (c.status === "failed") {
-        failedModes.set(id, (failedModes.get(id) ?? new Set()).add(record.mode as string))
+      } else {
+        const sh = shuffledTally.get(id) ?? newTally()
+        sh[c.status]++
+        shuffledTally.set(id, sh)
+        if (c.status === "failed") failedModes.set(id, (failedModes.get(id) ?? new Set()).add(record.mode as string))
       }
     }
   }
@@ -160,9 +174,15 @@ export function summarizeRuns(records: readonly RunRecord[]): RepeatSummary {
     const base = unshuffled.get(t.id)
     return base !== undefined && base.passed > 0 && base.failed > 0
   }
-  const orderDependent: OrderDependentStats[] = all
-    .filter((t) => failedModes.has(t.id) && (unshuffled.get(t.id)?.failed ?? 0) === 0)
-    .map((t) => ({ ...t, failedModes: [...(failedModes.get(t.id) ?? [])].sort() }))
+  const withModes = (t: TestStats): OrderDependentStats => ({ ...t, failedModes: [...(failedModes.get(t.id) ?? [])].sort() })
+  // A shuffled failure counts as order-dependent only when a default-order pass was observed.
+  const shuffledFail = all.filter((t) => failedModes.has(t.id))
+  const defaultPass = (t: TestStats) => (unshuffled.get(t.id)?.passed ?? 0) > 0
+  const defaultFail = (t: TestStats) => (unshuffled.get(t.id)?.failed ?? 0) > 0
+  const orderDependent = shuffledFail.filter((t) => defaultPass(t) && !defaultFail(t)).map(withModes).sort(byId)
+  const inconclusive = shuffledFail.filter((t) => !defaultPass(t) && !defaultFail(t)).map(withModes).sort(byId)
+  const failedDefaultPassedShuffled = all
+    .filter((t) => defaultFail(t) && !defaultPass(t) && (shuffledTally.get(t.id)?.passed ?? 0) > 0)
     .sort(byId)
   return {
     runs: records.length,
@@ -174,8 +194,12 @@ export function summarizeRuns(records: readonly RunRecord[]): RepeatSummary {
     totalCases: all.length,
     flaky: all.filter(flakyIn).sort(byId),
     orderDependent,
+    inconclusive,
+    failedDefaultPassedShuffled,
+    noisyStderrLines: stderrLimit,
+    noisyFileBytes: bytesLimit,
     modes: [...modeCounts].map(([mode, runs]) => ({ mode, runs })),
-    runStats: records.map(runStats),
+    runStats: records.map((r) => runStats(r, stderrLimit, bytesLimit)),
     failedEveryRun: all.filter((t) => used.length > 0 && t.failed === used.length).sort(byId),
     slowest: all
       .filter((t) => Number.isFinite(t.medianSeconds))
@@ -198,16 +222,22 @@ const failureSplit = (t: TestStats): string => `fail ${t.failed} (timeout ${t.ti
 
 const mb = (bytes: number): string => `${(bytes / 1_000_000).toFixed(1)} MB`
 
+const LABEL_LIMIT = 30
+const label = (text: string): string => (text.length > LABEL_LIMIT ? `${text.slice(0, LABEL_LIMIT - 3)}...` : text)
+
 function runLine(r: RunStats): string {
   const parts = [
     r.fileBytes === undefined ? undefined : mb(r.fileBytes),
     r.stderrLines === undefined ? undefined : `${r.stderrLines} stderr lines`,
     r.testSeconds === undefined ? undefined : `summed test time ${secs(r.testSeconds)}`,
   ].filter((p): p is string => p !== undefined)
-  return `run ${r.run}${r.mode === undefined ? "" : ` [${r.mode}]`}: ${parts.join(", ")}${r.noisy ? "  NOISY" : ""}`
+  return `run ${r.run}${r.mode === undefined ? "" : ` [${label(r.mode)}]`}: ${parts.join(", ")}${r.noisy ? "  NOISY" : ""}`
 }
 
-/** The capped text a `quality_test_summarize` call returns. */
+const MAX_RUN_LINES = 8
+const MAX_MODES = 6
+
+/** The capped text a `quality_test_summarize` call returns: failure categories first, measurements last. */
 export function formatSummary(summary: RepeatSummary): string {
   const lines = [`Summarized ${summary.runs} report(s); readable: ${summary.reportRuns}; test cases: ${summary.totalCases}`]
   if (summary.exitCodes !== null) {
@@ -219,16 +249,6 @@ export function formatSummary(summary: RepeatSummary): string {
     if (summary.exitCodesAgree === false) lines.push("exit codes differ between runs: the suite is flaky")
   }
   for (const { run, reason } of summary.unreadable.slice(0, 10)) lines.push(`report ${run}: unreadable (${reason})`)
-  if (summary.modes.length > 0) lines.push(`run modes: ${summary.modes.map((m) => `${m.mode} x${m.runs}`).join(", ")}`)
-  const measured = summary.runStats.filter((r) => r.fileBytes !== undefined || r.stderrLines !== undefined || r.testSeconds !== undefined)
-  const noisy = measured.filter((r) => r.noisy)
-  const shown = measured.slice(0, 6)
-  for (const r of noisy) if (!shown.includes(r)) shown.push(r)
-  lines.push(...list("per-run size, stderr and summed test time", shown, runLine, 12))
-  if (noisy.length > 0)
-    lines.push(
-      `noisy runs: ${noisy.map((r) => r.run).join(", ")} (above ${NOISY_STDERR_LINES} stderr lines or ${mb(NOISY_FILE_BYTES)}): check for a missing environment setup or unmocked I/O`,
-    )
   lines.push(
     ...list(
       "flaky (passed and failed in unshuffled runs)",
@@ -239,14 +259,40 @@ export function formatSummary(summary: RepeatSummary): string {
     ...list(
       "order-dependent (failed only in shuffled runs)",
       summary.orderDependent,
-      (t) => `${t.id}  ${failureSplit(t)}; failed in ${t.failedModes.join(", ")}`,
+      (t) => `${t.id}  ${failureSplit(t)}; failed in ${t.failedModes.map(label).join(", ")}`,
+      15,
+    ),
+    ...list(
+      "inconclusive (failed in shuffled runs, no default-order pass)",
+      summary.inconclusive,
+      (t) => `${t.id}  ${failureSplit(t)}; failed in ${t.failedModes.map(label).join(", ")}`,
+      15,
+    ),
+    ...list(
+      "failed in every default run, passed in a shuffled run",
+      summary.failedDefaultPassedShuffled,
+      (t) => `${t.id}  ${failureSplit(t)}`,
       15,
     ),
     ...list("failed in every report", summary.failedEveryRun, (t) => `${t.id}  ${failureSplit(t)}`, 15),
     ...list("retried inside a run, then passed", summary.retriedInRun, (id) => id, 5),
     ...list("slowest by median", summary.slowest, (t) => `${secs(t.medianSeconds).padStart(7)}  ${t.id}`, SLOWEST),
   )
-  if (summary.reportRuns > 0 && summary.flaky.length === 0 && summary.orderDependent.length === 0 && summary.failedEveryRun.length === 0)
-    lines.push("no test both passed and failed; none failed in every report")
+  const anyFinding =
+    summary.flaky.length + summary.orderDependent.length + summary.inconclusive.length + summary.failedDefaultPassedShuffled.length + summary.failedEveryRun.length
+  if (summary.reportRuns > 0 && anyFinding === 0) lines.push("no test both passed and failed; none failed in every report")
+  if (summary.modes.length > 0) {
+    const shownModes = summary.modes.slice(0, MAX_MODES).map((m) => `${label(m.mode)} x${m.runs}`)
+    const more = summary.modes.length > MAX_MODES ? `, +${summary.modes.length - MAX_MODES} more` : ""
+    lines.push(`run modes: ${shownModes.join(", ")}${more}`)
+  }
+  const measured = summary.runStats.filter((r) => r.fileBytes !== undefined || r.stderrLines !== undefined || r.testSeconds !== undefined)
+  const noisy = measured.filter((r) => r.noisy)
+  const shown = [...noisy.slice(0, MAX_RUN_LINES), ...measured.filter((r) => !r.noisy)].slice(0, MAX_RUN_LINES)
+  lines.push(...list("per-run size, stderr and summed test time", shown, runLine, MAX_RUN_LINES))
+  if (noisy.length > 0)
+    lines.push(
+      `noisy runs: ${noisy.slice(0, 20).map((r) => r.run).join(", ")}${noisy.length > 20 ? ", ..." : ""} (above ${summary.noisyStderrLines} stderr lines or ${mb(summary.noisyFileBytes)}): check for a missing environment setup or unmocked I/O`,
+    )
   return capText(lines)
 }

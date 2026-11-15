@@ -41,8 +41,9 @@ skill's `references/practice.md`.
      it.
    - Run mutation testing on the files under audit, and keep the report as the
      baseline. When it cannot run on the scope (a runner pool requirement, a bundler step
-     that breaks the mutation tool), use hand-made forced faults as the evidence and
-     record that.
+     that breaks the mutation tool), use hand-made forced faults as the evidence,
+     injected only into a disposable copy of the repository in the OpenCode temp
+     directory (never the working tree), discarded afterwards. Record that.
    - Read the output as evidence: thousands of identical stderr lines, a huge JUnit file
      or connection-refused lines are findings (the summary flags noisy runs).
    Record the gaps: a runner without JUnit output, no mutation tool, a scope too slow

@@ -73,6 +73,29 @@ describe("parseJunit", () => {
     expect(parseJunitReport(TIMEOUTS).stderrLines).toBe(4)
     expect(parseJunitReport(PYTEST).stderrLines).toBe(0)
   })
+  test("counts stderr lines per parsed element: empty and self-closing elements add none and swallow nothing", () => {
+    const xml = `<testsuites><testsuite name="s">
+<testcase classname="c" name="a"><system-err/></testcase>
+<testcase classname="c" name="b">
+<system-err>x</system-err></testcase>
+<testcase classname="c" name="d"><system-err></system-err></testcase>
+<testcase classname="c" name="e"><system-err>   </system-err></testcase>
+<system-err/>
+</testsuite></testsuites>`
+    expect(parseJunitReport(xml).stderrLines).toBe(1)
+  })
+  test("classifies each failure element on its own: a long first body does not hide a later timeout", () => {
+    const xml = `<testsuites><testsuite name="s"><testcase classname="c" name="t">
+<failure message="expected 1 to be 2" type="AssertionError">${"x".repeat(3000)}</failure>
+<rerunFailure message="Test timed out in 5000ms." type="Error">short</rerunFailure>
+</testcase></testsuite></testsuites>`
+    expect(parseJunit(xml)[0]?.failureKind).toBe("timeout")
+  })
+  test("a timeout word beyond the bounded body is not read", () => {
+    const xml = `<testsuites><testsuite name="s"><testcase classname="c" name="t">
+<failure message="boom" type="Error">${"x".repeat(3000)} timed out</failure></testcase></testsuite></testsuites>`
+    expect(parseJunit(xml)[0]?.failureKind).toBe("other")
+  })
   test("rejects truncated or malformed XML", () => {
     expect(() => parseJunit(PYTEST.slice(0, -40))).toThrow(/invalid XML/)
     expect(() => parseJunit("<testsuites><testsuite><testcase></testsuite></testsuites>")).toThrow(/invalid XML/)
@@ -188,7 +211,60 @@ describe("summarizeRuns with run modes", () => {
   })
 })
 
+describe("summarizeRuns category gaps", () => {
+  const m = (run: number, mode: string, statuses: Record<string, "passed" | "failed" | "skipped">, report: RunRecord["report"] = "used"): RunRecord => ({
+    ...rec(run, report, statuses),
+    mode,
+  })
+  test("a test failing every default run but passing a shuffled run stays visible without exit codes", () => {
+    const s = summarizeRuns([m(1, "default", { a: "failed" }), m(2, "default", { a: "failed" }), m(3, "shuffle-tests", { a: "passed" })])
+    expect(s.failedDefaultPassedShuffled.map((t) => t.id)).toEqual(["a"])
+    const text = formatSummary(s)
+    expect(text).toContain("failed in every default run, passed in a shuffled run (1)")
+    expect(text).not.toContain("no test both passed and failed")
+  })
+  test("order-dependent needs an observed default-order pass", () => {
+    const cases: Array<[string, RunRecord[]]> = [
+      ["only shuffled runs", [m(1, "shuffle-files", { a: "failed" }), m(2, "shuffle-tests", { a: "passed" })]],
+      ["unreadable default report", [m(1, "default", { a: "passed" }, "unreadable"), m(2, "shuffle-tests", { a: "failed" })]],
+      ["skipped in default", [m(1, "default", { a: "skipped" }), m(2, "shuffle-tests", { a: "failed" })]],
+      ["absent from default", [m(1, "default", {}), m(2, "shuffle-tests", { a: "failed" })]],
+    ]
+    for (const [name, records] of cases) {
+      const s = summarizeRuns(records)
+      expect([name, s.orderDependent.map((t) => t.id)]).toEqual([name, []])
+      expect([name, s.inconclusive.map((t) => t.id)]).toEqual([name, ["a"]])
+      expect(formatSummary(s)).toContain("inconclusive (failed in shuffled runs, no default-order pass) (1)")
+    }
+  })
+  test("long mode labels and many runs leave the failure categories in the text", () => {
+    const records: RunRecord[] = Array.from({ length: 40 }, (_, i) => ({
+      ...m(i + 1, `${"label-".repeat(40)}${i}`, { flaky: i % 2 ? "passed" : "failed", other: "passed" }),
+      fileBytes: 1_000,
+      stderrLines: 7,
+    }))
+    const base = records.map((r) => ({ ...r, mode: r.run % 2 ? "default" : r.mode }))
+    const text = formatSummary(summarizeRuns(base))
+    expect(text).toContain("flaky (passed and failed in unshuffled runs) (1)")
+    expect(text).toContain("flaky  pass")
+    expect(text).not.toContain("output truncated")
+  })
+})
+
 describe("failure kinds and noise per run", () => {
+  const noise = (bytes: number | undefined, lines: number | undefined, options?: Parameters<typeof summarizeRuns>[1]) =>
+    summarizeRuns([{ run: 1, report: "used", fileBytes: bytes, stderrLines: lines, cases: [] }], options).runStats[0]?.noisy
+  test("the stderr threshold alone flags a run, at the boundary", () => {
+    expect([noise(10, 1000), noise(10, 1001)]).toEqual([false, true])
+  })
+  test("the size threshold alone flags a run, at the boundary", () => {
+    expect([noise(5_000_000, 0), noise(5_000_001, 0)]).toEqual([false, true])
+  })
+  test("thresholds are options", () => {
+    expect(noise(10, 11, { noisyStderrLines: 10 })).toBe(true)
+    expect(noise(2_000, 0, { noisyFileBytes: 1_000 })).toBe(true)
+    expect(noise(2_000, 11, { noisyFileBytes: 10_000, noisyStderrLines: 20 })).toBe(false)
+  })
   test("counts timeouts and other failures per test", () => {
     const cases = parseJunit(TIMEOUTS)
     const timeoutThenAssert = (kind: "timeout" | "other") => cases.filter((c) => c.failureKind === kind).slice(0, 1)
@@ -218,8 +294,9 @@ describe("parseSummarizeInput", () => {
   test("bounds and exit code shape", () => {
     expect(parseSummarizeInput({ reports: ["a"] })).toEqual({ reports: ["a"], exitCodes: undefined })
     expect(parseSummarizeInput({ reports: ["a", "b"], exitCodes: [0, null] })).toMatchObject({ exitCodes: [0, null] })
+    expect(parseSummarizeInput({ reports: ["a"], noisyStderrLines: 5, noisyFileBytes: 10 })).toMatchObject({ noisyStderrLines: 5, noisyFileBytes: 10 })
     expect(parseSummarizeInput({ reports: ["a", "b"], modes: ["default", "shuffle-tests"] })).toMatchObject({ modes: ["default", "shuffle-tests"] })
-    for (const bad of [{}, { reports: [] }, { reports: Array(51).fill("a") }, { reports: [""] }, { reports: ["a"], exitCodes: [] }, { reports: ["a"], exitCodes: [1.5] }, { reports: ["a"], exitCodes: ["0"] }, { reports: ["a"], modes: [] }, { reports: ["a"], modes: [""] }, { reports: ["a"], modes: [1] }, { reports: ["a"], modes: ["x".repeat(61)] }])
+    for (const bad of [{}, { reports: [] }, { reports: Array(51).fill("a") }, { reports: [""] }, { reports: ["a"], exitCodes: [] }, { reports: ["a"], exitCodes: [1.5] }, { reports: ["a"], exitCodes: ["0"] }, { reports: ["a"], noisyStderrLines: 0 }, { reports: ["a"], noisyFileBytes: 1.5 }, { reports: ["a"], modes: [] }, { reports: ["a"], modes: [""] }, { reports: ["a"], modes: [1] }, { reports: ["a"], modes: ["x".repeat(61)] }])
       expect(typeof parseSummarizeInput(bad)).toBe("string")
   })
 })

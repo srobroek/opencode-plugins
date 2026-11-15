@@ -46,24 +46,47 @@ function caseStatus(node: Node): CaseStatus {
 
 const TIMEOUT = /time(?:d)?[\s-]?out/i
 const FAILURE_KEYS = ["failure", "error", "rerunFailure", "rerunError"] as const
+/** Only this many characters of each failure body are read; the message and type are read whole. */
+const BODY_LIMIT = 2000
 
-function textOf(value: unknown): string {
+const str = (value: unknown): string => (typeof value === "string" ? value : "")
+
+/** Text of an element: a plain string, or the `#text` of one that has attributes. */
+function elementText(value: unknown): string {
   if (typeof value === "string") return value
-  if (Array.isArray(value)) return value.map(textOf).join(" ")
-  if (!isNode(value)) return ""
-  return [value["@_message"], value["@_type"], value["#text"]].map((v) => (typeof v === "string" ? v : "")).join(" ")
+  if (Array.isArray(value)) return value.map(elementText).join("\n")
+  return isNode(value) ? str(value["#text"]) : ""
 }
 
 /**
- * Heuristic: a failure is a timeout when its message, type or the start of its body matches
- * "timeout", "timed out" or "time-out" (case-insensitive). Everything else is `other`.
+ * Heuristic: a failure is a timeout when the message or type of any one failure element, or the
+ * start of its body, matches "timeout", "timed out" or "time-out" (case-insensitive). Each element
+ * is read on its own, so a long body cannot hide the metadata of a later `rerunFailure`.
+ * Everything else is `other`.
  */
 export function classifyFailure(node: Node): FailureKind {
-  const text = FAILURE_KEYS.map((key) => textOf(node[key])).join(" ").slice(0, 2000)
-  return TIMEOUT.test(text) ? "timeout" : "other"
+  for (const key of FAILURE_KEYS) {
+    const value = node[key]
+    for (const item of Array.isArray(value) ? value : [value]) {
+      const fields = isNode(item)
+        ? [str(item["@_message"]), str(item["@_type"]), str(item["#text"]).slice(0, BODY_LIMIT)]
+        : [str(item).slice(0, BODY_LIMIT)]
+      if (fields.some((field) => TIMEOUT.test(field))) return "timeout"
+    }
+  }
+  return "other"
 }
 
-function collect(node: unknown, out: TestCase[]): void {
+/** Non-empty lines of the `system-err` element(s) under `value`. */
+function stderrLines(value: unknown): number {
+  return elementText(value)
+    .split(/\r?\n/)
+    .filter((line) => line.trim() !== "").length
+}
+
+type Collected = { cases: TestCase[]; stderrLines: number }
+
+function collect(node: unknown, out: Collected): void {
   if (Array.isArray(node)) {
     for (const item of node) collect(item, out)
     return
@@ -71,6 +94,10 @@ function collect(node: unknown, out: TestCase[]): void {
   if (!isNode(node)) return
   for (const [key, value] of Object.entries(node)) {
     if (key.startsWith("@_")) continue
+    if (key === "system-err") {
+      out.stderrLines += stderrLines(value)
+      continue
+    }
     if (key !== "testcase") {
       collect(value, out)
       continue
@@ -83,7 +110,8 @@ function collect(node: unknown, out: TestCase[]): void {
       const label = [classname, name].filter(Boolean).join(" :: ")
       const time = Number.parseFloat(String(tc["@_time"] ?? "0"))
       const status = caseStatus(tc)
-      out.push({
+      out.stderrLines += stderrLines(tc["system-err"])
+      out.cases.push({
         id: file ? `${file} :: ${label}` : label,
         status,
         time: Number.isFinite(time) ? time : 0,
@@ -103,25 +131,13 @@ export function parseJunit(xml: string): TestCase[] {
   return parseJunitReport(xml).cases
 }
 
-const STDERR = /<system-err\b[^>]*>([\s\S]*?)<\/system-err>/g
-
-/** Non-empty lines inside `system-err` elements, CDATA wrappers removed. */
-function countStderrLines(xml: string): number {
-  let lines = 0
-  for (const match of xml.matchAll(STDERR)) {
-    const body = (match[1] ?? "").replace(/<!\[CDATA\[|\]\]>/g, "")
-    lines += body.split("\n").filter((line) => line.trim() !== "").length
-  }
-  return lines
-}
-
 /** Like `parseJunit`, and also counts the stderr lines the report carries. */
 export function parseJunitReport(xml: string): JunitReport {
   const valid = XMLValidator.validate(xml)
   if (valid !== true) throw new Error(`invalid XML: ${valid.err.msg} (line ${valid.err.line})`)
   const doc = parser.parse(xml) as Node
   if (!("testsuites" in doc) && !("testsuite" in doc)) throw new Error("not a JUnit report: no testsuite element")
-  const out: TestCase[] = []
+  const out: Collected = { cases: [], stderrLines: 0 }
   collect(doc, out)
-  return { cases: out, stderrLines: countStderrLines(xml) }
+  return out
 }
