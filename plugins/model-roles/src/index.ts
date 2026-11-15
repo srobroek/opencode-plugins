@@ -190,6 +190,9 @@ const CREATED_EVENT = "session.created"
 /** The host reloaded its config; a `/tiers` save or a hand edit of the global file lands here too. */
 const CONFIG_EVENT = "config.updated"
 
+/** How long a resume waits for the child session's model before treating it as unknown. */
+export const CHILD_LOOKUP_MS = 3000
+
 /** How long a spawn waits to be matched with the child session it creates. */
 export const PENDING_SPAWN_MS = 10 * 60_000
 
@@ -1376,8 +1379,21 @@ export default Plugin.define({
       if (snapshot === undefined) {
         // No snapshot (a child from before snapshots, or one pruned): the child's own session says what it runs on.
         if (guard === undefined) return true
-        const session = (await ctx.session.get({ sessionID: childID }).catch(() => undefined)) as SessionLike
-        const running = session === undefined ? undefined : await runningModel(session, await listAgents().catch(() => [] as Agents)).catch(() => undefined)
+        // Bounded as a whole: a lookup that never settles must not hold the spawn (and with it every tier reload).
+        // Its answer is used only if it arrives in time, so a late one writes nothing.
+        const lookup = (async () => {
+          const session = (await ctx.session.get({ sessionID: childID }).catch(() => undefined)) as SessionLike
+          return session === undefined ? undefined : await runningModel(session, await listAgents().catch(() => [] as Agents)).catch(() => undefined)
+        })()
+        let timer: ReturnType<typeof setTimeout> | undefined
+        const expired = new Promise<"late">((resolve) => {
+          timer = setTimeout(() => resolve("late"), CHILD_LOOKUP_MS)
+          ;(timer as { unref?: () => void }).unref?.()
+        })
+        const found = await Promise.race([lookup, expired])
+        clearTimeout(timer)
+        if (found === "late") warn(`resume of ${childID}: the child's model lookup took longer than ${CHILD_LOOKUP_MS}ms; the guard is not applied`)
+        const running = found === "late" ? undefined : found
         if (running === undefined) {
           await recordReceipt({ at: Date.now(), agent, source: "agent", rule: "model-default", fallbacks: [], warnings: ["model unknown; guard not applied"] })
           return true

@@ -1,4 +1,4 @@
-import { describe, expect, setSystemTime, test } from "bun:test"
+import { describe, expect, jest, setSystemTime, test } from "bun:test"
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
@@ -8,7 +8,7 @@ import { withOptionalString } from "../../lib/src/tool-schema.ts"
 import { WORKTREE_PARAM, WORKTREE_PARAM_DESCRIPTION } from "../../subagent-worktree/src/lane.ts"
 import reference from "./fixtures/reference.json"
 import work from "./fixtures/work-models.json"
-import plugin, { MAX_REREGISTER, type ModelRef, readAgents, readTiers, spawnTarget } from "./index.ts"
+import plugin, { CHILD_LOOKUP_MS, MAX_REREGISTER, type ModelRef, readAgents, readTiers, spawnTarget } from "./index.ts"
 
 type Agent = { id: string; model?: ModelRef; request?: { headers?: Record<string, string> } }
 type Model = { providerID: string; id: string; variants: { id: string }[]; cost?: { input: number }[] }
@@ -2990,6 +2990,37 @@ describe("a child keeps its resolved model", () => {
       test("a known guarded model with no allowed candidate refuses the resume", async () => {
         const { host, cleanup } = await unsnapshotted(["amazon-bedrock/claude-opus"], { model: opus })
         await expect(host.spawn("subagent", resume, "build", "r", "call-2")).rejects.toThrow(/no candidate of tier 'task'/)
+        expect(methods(host, "switchModel")).toHaveLength(0)
+        host.close()
+        await cleanup()
+      })
+
+      test("a child lookup that never settles is bounded: the resume proceeds, a reload completes, and a late answer writes nothing", async () => {
+        const { host, cleanup } = await unsnapshotted(tiers, { model: opus })
+        let answer: (session: unknown) => void = () => {}
+        host.setSessionGet((id) => (id === "c" ? new Promise((resolve) => (answer = resolve)) : Promise.resolve({ id })))
+        jest.useFakeTimers()
+        try {
+          const resumed = host.spawn("subagent", resume, "build", "r", "call-2")
+          const flush = async () => {
+            for (let i = 0; i < 20; i++) await Promise.resolve()
+          }
+          await flush()
+          host.emit({ type: "config.updated", data: {} })
+          await flush()
+          jest.advanceTimersByTime(CHILD_LOOKUP_MS)
+          expect(await resumed).toEqual(resume)
+          await flush()
+          // The reload that waited on the resume is done: a spawn no longer waits on it.
+          await host.spawn("subagent", { agent: "plain", prompt: "x", tier: "task" }, "build", "r", "call-3")
+          expect(receipts(host).some((r) => r.warnings.includes("model unknown; guard not applied"))).toBe(true)
+          answer({ id: "c", parentID: "r", agent: "plain", model: opus })
+          await flush()
+        } finally {
+          jest.useRealTimers()
+        }
+        await settle()
+        expect(host.storage.get("spawn-model:c")).toBeUndefined()
         expect(methods(host, "switchModel")).toHaveLength(0)
         host.close()
         await cleanup()
