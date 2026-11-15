@@ -19,6 +19,7 @@ import {
 } from "node:fs"
 import { homedir } from "node:os"
 import { basename, dirname, isAbsolute, join, resolve } from "node:path"
+import { SAFE_GIT_ARGS } from "./safe-git.ts"
 
 /**
  * The landing receipt: the proof a branch landed, written by delivery and read by
@@ -248,7 +249,7 @@ export type GitRunner = (argv: readonly string[], cwd: string, timeoutMs: number
 
 const spawnGit: GitRunner = (argv, cwd, timeoutMs) => {
   try {
-    const proc = Bun.spawnSync(["git", ...argv], {
+    const proc = Bun.spawnSync(["git", ...SAFE_GIT_ARGS, ...argv], {
       cwd,
       stdout: "pipe",
       stderr: "pipe",

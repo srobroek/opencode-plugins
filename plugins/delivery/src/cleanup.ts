@@ -1,5 +1,5 @@
-import { lstatSync, realpathSync, type Stats } from "node:fs"
-import { basename, dirname, isAbsolute, resolve, sep } from "node:path"
+import { lstatSync, readFileSync, realpathSync, type Stats } from "node:fs"
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path"
 import { isDeepStrictEqual } from "node:util"
 import pkg from "../package.json" with { type: "json" }
 import {
@@ -509,14 +509,25 @@ function canonicalReceiptPath(raw: string, cwd: string, directory: string): stri
   return target
 }
 
+const FOREIGN_HINT =
+  "a worktree of a repository other than this session's is never read from here: run delivery_cleanup from a session in that repository"
+
+/** The refusal for a target repository other than the session's; nothing in the target was read. */
+function foreignRepository(): CleanupFailure {
+  return refuse(
+    "worktree.owner",
+    "a receipt or worktree of a repository other than this session's",
+    "delivery_cleanup run from a session in that repository; a checkout of another repository is untrusted, so nothing was read or removed",
+  )
+}
+
 function resolveReceipt(
   params: DeliveryCleanupParams,
   cwd: string,
-  repoCwd: string,
   env: NodeJS.ProcessEnv,
   refReadMs: number,
 ): ReceiptResolution {
-  const key = repoKey(repoCwd, undefined, refReadMs)
+  const key = repoKey(cwd, undefined, refReadMs)
   if (key === null) {
     return {
       tag: "refused",
@@ -527,6 +538,11 @@ function resolveReceipt(
   let receipt: LandingReceipt | null = null
   let receiptPath: string | null = null
   if (params.receipt !== undefined) {
+    // A receipt file sits in a directory named by its repository's key. One named for
+    // another repository is refused here, from the path alone: nothing in that
+    // repository's checkouts is read, because their config is not trusted.
+    const named = basename(dirname(resolve(cwd, params.receipt)))
+    if (/^[0-9a-f]{16}$/.test(named) && named !== key) return { tag: "refused", failure: foreignRepository() }
     const path = canonicalReceiptPath(params.receipt, cwd, directory)
     if (typeof path !== "string") return { tag: "refused", failure: path }
     const read = readReceipt(path)
@@ -557,7 +573,8 @@ function resolveReceipt(
         : params.branch !== undefined
           ? `branch ${show(params.branch)}`
           : `repo.key ${key}`
-    return { tag: "refused", failure: refuse("receipt", null, `the newest validated receipt for ${selector}`) }
+    const hint = params.worktree === undefined ? "" : `; ${FOREIGN_HINT}`
+    return { tag: "refused", failure: refuse("receipt", null, `the newest validated receipt for ${selector}${hint}`) }
   }
   if (receiptPath === null)
     return {
@@ -822,9 +839,49 @@ async function readWorktrees(
   return records
 }
 
-function isInsidePhysicalRepository(target: string, cwd: string, refReadMs: number): boolean {
-  const key = repoKey(target, undefined, refReadMs)
-  return key !== null && key === repoKey(cwd, undefined, refReadMs)
+/**
+ * The common Git directory a checkout claims, read from its `.git` entry with plain
+ * filesystem reads. No Git process runs in `path`: a checkout of another repository
+ * is untrusted, and even a read such as `git status` can run its configured drivers.
+ * Null when the entry is missing or unreadable.
+ */
+export function claimedCommonDirectory(path: string): string | null {
+  try {
+    const entry = join(path, ".git")
+    const stat = lstatSync(entry)
+    if (stat.isDirectory()) return realpathSync(entry)
+    if (!stat.isFile()) return null
+    const match = /^gitdir: (.+)\r?\n?$/.exec(readFileSync(entry, "utf8"))
+    if (match?.[1] === undefined) return null
+    const gitDir = realpathSync(resolve(path, match[1].trim()))
+    try {
+      return realpathSync(resolve(gitDir, readFileSync(join(gitDir, "commondir"), "utf8").trim()))
+    } catch {
+      return gitDir
+    }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Whether `path` is provably a checkout of another repository than the session's.
+ * A path the session repository itself lists is never foreign. The proof is only used
+ * to choose the refusal; what lets Git run in a target is that the session lists it.
+ */
+async function isForeignCheckout(
+  path: string,
+  cwd: string,
+  records: readonly WorktreeRecord[],
+  run: CliRunner,
+  refReadMs: number,
+): Promise<boolean> {
+  if (recordForTarget([...records], path) !== null) return false
+  const argv = ["rev-parse", "--path-format=absolute", "--git-common-dir"]
+  const result = await runGit(run, cwd, argv, refReadMs)
+  const session = completed(result) ? physicalPath(result.stdout.trim()) : null
+  const claimed = claimedCommonDirectory(path)
+  return session !== null && claimed !== null && claimed !== session
 }
 
 function physicalPath(path: string): string | null {
@@ -886,9 +943,9 @@ async function verifyTargetIdentity(
   if (main === undefined) return refuse("worktree.list", [], "a main worktree record")
   if (physicalPath(path) === physicalPath(main.path))
     return refuse("worktree.path", path, `a linked worktree other than main ${show(main.path)}`)
-  if (!isInsidePhysicalRepository(path, cwd, refReadMs))
-    return refuse("worktree.path", path, "a worktree in the current repository")
   const target = recordForTarget(listed, path)
+  if (target === null && (await isForeignCheckout(path, cwd, listed, run, refReadMs)))
+    return refuse("worktree.path", path, "a worktree in the current repository")
   if (target === null || target.prunable)
     return refuse("worktree.path", path, "an exact live record in git worktree list --porcelain")
   if (target.detached) return refuse("worktree.branch", "detached", `branch ${show(receipt.branch.name)}`)
@@ -987,43 +1044,6 @@ export function branchDeleteArgs(branch: string): string[] {
   return ["branch", "-d", "--", branch]
 }
 
-/**
- * The directory whose repository this cleanup is about.
- *
- * Normally the session directory. When the session runs in a different repository
- * than the landing, the landed `worktree` (or the `receipt` path, whose directory is
- * named by the repository key) says which repository is meant: the answer is that
- * repository's main checkout, which is also never the worktree about to be removed.
- * Any case it cannot settle falls back to the session directory, so the ordinary
- * repository checks refuse as they always did.
- */
-export async function cleanupRepositoryDirectory(
-  params: DeliveryCleanupParams,
-  cwd: string,
-  run: CliRunner,
-  refReadMs: number,
-): Promise<string> {
-  const sessionKey = repoKey(cwd, undefined, refReadMs)
-  if (params.worktree !== undefined && params.worktree.trim() !== "") {
-    const worktree = resolve(cwd, params.worktree.trim())
-    const worktreeKey = repoKey(worktree, undefined, refReadMs)
-    if (worktreeKey === null || worktreeKey === sessionKey) return cwd
-    const listed = await readWorktrees(worktree, run, refReadMs)
-    const main = Array.isArray(listed) ? listed[0] : undefined
-    return main !== undefined && repoKey(main.path, undefined, refReadMs) === worktreeKey ? main.path : cwd
-  }
-  if (params.receipt !== undefined) {
-    const path = resolve(cwd, params.receipt)
-    const named = basename(dirname(path))
-    if (named === sessionKey) return cwd
-    const read = readReceipt(path)
-    if (!read.ok || read.receipt.repo.key !== named) return cwd
-    const root = read.receipt.repo.canonicalRoot
-    return repoKey(root, undefined, refReadMs) === named ? root : cwd
-  }
-  return cwd
-}
-
 export async function cleanupDelivery(
   params: DeliveryCleanupParams,
   cwd: string,
@@ -1037,25 +1057,24 @@ export async function cleanupDelivery(
   const run: CliRunner = (argv, options) => commit(argv, { ...options, signal })
   const now = deps.now ?? Date.now
   const env = deps.env ?? process.env
-  const repoCwd = await cleanupRepositoryDirectory(params, cwd, run, bounds.refReadMs)
-  // The host registry in `deps.host` belongs to the session's own project. A worktree of
-  // another repository may be tracked by that repository's project instead, and a plain
-  // `git worktree remove` from here would leave its entry stale. That registry is not
-  // reachable from this session, so refuse before any Git command reads the foreign
-  // checkout: nothing in it is trusted yet.
-  if (deps.host !== undefined && repoCwd !== cwd) {
-    return refuse(
-      "worktree.owner",
-      "a worktree of a repository other than this session's, whose OpenCode worktree registry is not readable from here",
-      "delivery_cleanup run from a session in that repository, so its host registry removes the worktree; nothing was read or removed",
+  // A target of another repository is refused from the session repository's own
+  // worktree list and plain filesystem reads, before any Git process touches it. It is
+  // only looked for when the selectors have already failed to name a receipt of this
+  // repository, so an ordinary cleanup pays no extra read.
+  const foreignWorktree = async (): Promise<boolean> => {
+    if (params.worktree === undefined || params.worktree.trim() === "") return false
+    const listed = await readWorktrees(cwd, run, bounds.refReadMs)
+    return (
+      Array.isArray(listed) &&
+      (await isForeignCheckout(resolve(cwd, params.worktree.trim()), cwd, listed, run, bounds.refReadMs))
     )
   }
-  const resolution = resolveReceipt(params, cwd, repoCwd, env, bounds.refReadMs)
-  if (resolution.tag === "refused") return resolution.failure
+  const resolution = resolveReceipt(params, cwd, env, bounds.refReadMs)
+  if (resolution.tag === "refused") return (await foreignWorktree()) ? foreignRepository() : resolution.failure
   const receipt = resolution.receipt
 
   const argsFailure = verifyArguments(params, receipt)
-  if (argsFailure !== null) return argsFailure
+  if (argsFailure !== null) return (await foreignWorktree()) ? foreignRepository() : argsFailure
   if (typeof receipt.pr.mergeCommitOid !== "string" || receipt.pr.mergeCommitOid.trim() === "") {
     return refuse("pr.mergeCommitOid", receipt.pr.mergeCommitOid, "a non-empty merge commit oid before cleanup")
   }
@@ -1081,7 +1100,7 @@ export async function cleanupDelivery(
   // receipt's branch and head before it is used as a directory to run a command in,
   // and `revalidateBoundary` proves the same identity again immediately before the
   // irreversible step.
-  const identity = await verifyTargetIdentity(receipt, repoCwd, run, bounds.refReadMs)
+  const identity = await verifyTargetIdentity(receipt, cwd, run, bounds.refReadMs)
   if (isFailure(identity)) return identity
   const observed = await observePullRequest(receipt, run, identity.target.path, env, bounds.refReadMs)
   if (isFailure(observed)) return observed
@@ -1092,12 +1111,12 @@ export async function cleanupDelivery(
   if (dirty !== null) return dirty
   const pushed = await verifyPushed(path, run, bounds.refReadMs)
   if (isFailure(pushed)) return pushed
-  const ledger = await verifyLedger(receipt, repoCwd, resolution.path, run, bounds.bdShowMs)
+  const ledger = await verifyLedger(receipt, cwd, resolution.path, run, bounds.bdShowMs)
   if (ledger !== null) return ledger
 
-  const localRef = await verifyLocalRef(receipt, repoCwd, run, bounds.refReadMs)
+  const localRef = await verifyLocalRef(receipt, cwd, run, bounds.refReadMs)
   if (localRef !== null) return localRef
-  const boundary = await revalidateBoundary(receipt, repoCwd, run, bounds)
+  const boundary = await revalidateBoundary(receipt, cwd, run, bounds)
   if (isFailure(boundary)) return boundary
 
   const executionCwd = safeExecutionCwd(receipt, boundary.records, cwd)

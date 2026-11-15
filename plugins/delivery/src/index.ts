@@ -195,7 +195,7 @@ const LAND_DESCRIPTION =
 const CLEANUP_DESCRIPTION =
   "Remove a landed PR's worktree and local branch after proving the landing receipt, and write a continuation receipt.\n" +
   "Recomputes the ledger classification at the canonical root, proves the PR merged at the recorded head from the receipt's own remote, " +
-  "checks every receipt bead is closed with metadata.merge_sha equal to the merge (read-only bd show), refuses to remove the worktree it runs from, a dirty tree or unpushed commits, " +
+  "checks every receipt bead is closed with metadata.merge_sha equal to the merge (read-only bd show), refuses to remove the worktree it runs from, a dirty tree or unpushed commits, a receipt or worktree of another repository, " +
   "then removes the worktree (no force; through OpenCode when it tracks it, else git worktree remove) and runs git branch -d and verifies four absences."
 
 function landOutput(outcome: LandOutcome) {

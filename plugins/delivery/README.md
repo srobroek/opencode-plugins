@@ -77,8 +77,11 @@ Supported forges: `github.com` (including `ssh.github.com`), `gitlab.com`
 
 Inputs: `receipt`, `pr`, `branch`, `worktree`, `remote`. Any input you pass must
 match the selected receipt. Without `receipt`, the tool uses the newest receipt
-for the current repository. From a session in another repository, pass `receipt`
-or `worktree` so the tool can find the landed repository.
+for the current repository. A receipt or worktree of another repository is always
+refused, before any Git command runs in it: a foreign checkout's config can name
+programs (filter drivers, `include.path`), so run `delivery_cleanup` from a session
+in that repository. Git commands in the session repository's worktrees run with
+`core.fsmonitor=false`, `core.hooksPath=/dev/null` and `--no-optional-locks`.
 
 The tool refuses in these cases:
 

@@ -2103,7 +2103,13 @@ describe("choosing the remote and worktree of a landing", () => {
       const fetches = rawGitArgv.filter((argv) => argv.includes("fetch"))
       const reads = rawGitArgv.filter((argv) => !probes.includes(argv) && !fetches.includes(argv))
       expect(reads.length).toBeGreaterThan(0)
-      for (const argv of reads) expect(argv.slice(0, 1 + SAFE_GIT_ARGS.length)).toEqual(["git", ...SAFE_GIT_ARGS])
+      const literal = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "--no-optional-locks"]
+      for (const argv of reads) expect(argv.slice(0, 1 + literal.length)).toEqual(["git", ...literal])
+      // No command that could run a clean or smudge filter (status, diff, checkout, add, ...) is issued.
+      const verbs = new Set(rawGitArgv.map((argv) => argv.find((part, index) => index > 0 && !part.startsWith("-") && !part.startsWith("core.") && part !== "/dev/null" && !part.startsWith("protocol.") && !part.startsWith("credential.") && part !== "ssh" && part !== "")))
+      for (const verb of verbs) {
+        expect(["rev-parse", "remote", "worktree", "cat-file", "show", "fetch", "rev-list", "merge-base", "diff-tree", "patch-id", "ls-remote"]).toContain(verb as string)
+      }
       expect(fetches).toHaveLength(1)
       expect(fetches[0]).toContain("core.fsmonitor=false")
       expect(fetches[0]).toContain("core.hooksPath=/dev/null")
