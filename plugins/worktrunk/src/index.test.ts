@@ -120,6 +120,13 @@ describe("setup", () => {
     expect(ctx.active()).toBe(0)
   })
 
+  test("gives a wt switch call the long timeout", async () => {
+    const ctx = fakeContext({ strategy: false })
+    await createPlugin({ probes: probes() }).setup(ctx.fake.context)
+    const event = await ctx.fake.fire.tool("execute.before", shell("wt switch -y --create --no-cd feat"))
+    expect((event.input as Loose).timeout).toBe(600_000)
+  })
+
   test("keeps a skill the host already has", async () => {
     const ctx = fakeContext()
     ctx.skills.set("worktrunk-worktrees", { id: "worktrunk-worktrees", content: "user override" })
