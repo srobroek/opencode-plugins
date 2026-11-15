@@ -2416,9 +2416,17 @@ async function cleanupDelivery(params, cwd, deps = {}) {
   const targetPath = boundary.target.path;
   await deps.authorize?.({ worktree: targetPath, branch: receipt.branch.name, pr: receipt.pr.number });
   const removeArgv = ["worktree", "remove", targetPath];
+  let route = "git";
+  if (deps.host !== undefined) {
+    try {
+      route = removalRoute(await deps.host.list(), targetPath);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return refuse2("worktree.owner", `host worktree.list failed (${message.trim().slice(0, 400)})`, "a readable OpenCode worktree registry; nothing was removed, so retry delivery_cleanup once the host responds");
+    }
+  }
   if (signal?.aborted === true)
-    return refuse2("signal", "an abort", "no interrupt before git worktree remove; nothing was removed");
-  const route = deps.host === undefined ? "git" : removalRoute(await deps.host.list().catch(() => []), targetPath);
+    return refuse2("signal", "an abort", "no interrupt before the worktree removal; nothing was removed");
   if (route === "host" && deps.host !== undefined) {
     try {
       await deps.host.remove(targetPath);
@@ -3621,11 +3629,15 @@ function metadataOf(output) {
 }
 function hostWorktrees(ctx) {
   const projectID = ctx.location.project?.id;
+  const worktree = ctx.worktree;
   if (projectID === undefined)
     return;
+  if (typeof worktree?.list !== "function" || typeof worktree.remove !== "function")
+    return;
+  const { list, remove } = worktree;
   return {
-    list: () => ctx.worktree.list({ projectID }),
-    remove: (directory) => ctx.worktree.remove({ projectID, directory, force: false })
+    list: () => list.call(worktree, { projectID }),
+    remove: (directory) => remove.call(worktree, { projectID, directory, force: false })
   };
 }
 function environment(options) {
@@ -3804,6 +3816,7 @@ export {
   src_default as default,
   fallbackModel,
   hasModelRoles,
+  hostWorktrees,
   landPullRequest,
   parseAgentFile,
   parseModel,

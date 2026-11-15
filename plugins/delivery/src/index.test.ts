@@ -9,6 +9,7 @@ import plugin, {
   confirmDelivery,
   FAN_OUT_PATH,
   FAN_OUT_SKILL_PATH,
+  hostWorktrees,
   LAND_ACTION,
   parseOptions,
   SKILL_PATH,
@@ -103,6 +104,47 @@ describe("tools", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+})
+
+describe("hostWorktrees", () => {
+  type Ctx = Parameters<typeof hostWorktrees>[0]
+  const withHost = (project: unknown, worktree: unknown) =>
+    ({ location: { directory: "/w", project }, worktree }) as unknown as Ctx
+
+  test("forwards the project id and never forces; a removed entry leaves the registry", async () => {
+    const registry = new Set(["/w/a", "/w/b"])
+    const seen: unknown[] = []
+    const host = hostWorktrees(
+      withHost(
+        { id: "prj_1" },
+        {
+          list: async (input: unknown) => {
+            seen.push(input)
+            return [...registry].map((directory) => ({ directory }))
+          },
+          remove: async (input: { directory: string }) => {
+            seen.push(input)
+            registry.delete(input.directory)
+          },
+        },
+      ),
+    )
+    expect(host).toBeDefined()
+    await host?.remove("/w/a")
+    expect(await host?.list()).toEqual([{ directory: "/w/b" }])
+    expect(seen).toEqual([
+      { projectID: "prj_1", directory: "/w/a", force: false },
+      { projectID: "prj_1" },
+    ])
+  })
+
+  test.each([
+    { name: "no project", project: undefined, worktree: { list: async () => [], remove: async () => {} } },
+    { name: "an older host without ctx.worktree", project: { id: "p" }, worktree: undefined },
+    { name: "a worktree domain without list", project: { id: "p" }, worktree: { remove: async () => {} } },
+  ])("$name keeps the git route", ({ project, worktree }) => {
+    expect(hostWorktrees(withHost(project, worktree))).toBeUndefined()
   })
 })
 

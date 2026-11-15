@@ -235,13 +235,19 @@ function metadataOf(output: Record<string, unknown>): Record<string, unknown> {
   return rest
 }
 
-/** OpenCode's worktree registry for this project, or undefined when the host reports no project. */
-function hostWorktrees(ctx: Context): HostWorktrees | undefined {
+/**
+ * OpenCode's worktree registry for this project. Undefined when the host reports no
+ * project or an older host has no `worktree` list/remove, so cleanup keeps the git path.
+ */
+export function hostWorktrees(ctx: Context): HostWorktrees | undefined {
   const projectID = ctx.location.project?.id
+  const worktree = (ctx as { worktree?: Partial<Context["worktree"]> }).worktree
   if (projectID === undefined) return undefined
+  if (typeof worktree?.list !== "function" || typeof worktree.remove !== "function") return undefined
+  const { list, remove } = worktree
   return {
-    list: () => ctx.worktree.list({ projectID }),
-    remove: (directory) => ctx.worktree.remove({ projectID, directory, force: false }),
+    list: () => list.call(worktree, { projectID }),
+    remove: (directory) => remove.call(worktree, { projectID, directory, force: false }),
   }
 }
 

@@ -1054,12 +1054,27 @@ export async function cleanupDelivery(
   const targetPath = boundary.target.path
   await deps.authorize?.({ worktree: targetPath, branch: receipt.branch.name, pr: receipt.pr.number })
   const removeArgv = ["worktree", "remove", targetPath]
+  // Ownership is decided before the last abort check, so an interrupt during the
+  // listing still stops the call. A host that is present but cannot list leaves the
+  // owner unknown; removing with git could strand its registry entry, so refuse.
+  let route: "host" | "git" = "git"
+  if (deps.host !== undefined) {
+    try {
+      route = removalRoute(await deps.host.list(), targetPath)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      return refuse(
+        "worktree.owner",
+        `host worktree.list failed (${message.trim().slice(0, 400)})`,
+        "a readable OpenCode worktree registry; nothing was removed, so retry delivery_cleanup once the host responds",
+      )
+    }
+  }
   // The last point an interrupt is honoured. Past it the removal runs to completion or
   // to its bound, and the steps after it record what happened instead of stopping
   // with the worktree gone and no continuation receipt.
   if (signal?.aborted === true)
-    return refuse("signal", "an abort", "no interrupt before git worktree remove; nothing was removed")
-  const route = deps.host === undefined ? "git" : removalRoute(await deps.host.list().catch(() => []), targetPath)
+    return refuse("signal", "an abort", "no interrupt before the worktree removal; nothing was removed")
   if (route === "host" && deps.host !== undefined) {
     try {
       await deps.host.remove(targetPath)

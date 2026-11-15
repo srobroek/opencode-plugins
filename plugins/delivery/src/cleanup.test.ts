@@ -1938,6 +1938,45 @@ describe("delivery_cleanup host worktree registry", () => {
     expect(result.receipt.proof.evidence).toMatchObject({ worktreeRegistration: "absent", worktreePath: "absent" })
   }, 60_000)
 
+  test("a host whose listing fails leaves ownership unknown: refuse, remove nothing, no git fallback", async () => {
+    const f = fixture("host-list-fails")
+    const host = {
+      list: async () => {
+        throw new Error("registry offline")
+      },
+      remove: async () => {
+        throw new Error("must not be called")
+      },
+    }
+    const { result, calls } = await invoke(f, { receipt: f.receiptPath }, {}, { host })
+    const reason = refusal(result)
+    expect(reason).toContain("worktree.owner")
+    expect(reason).toContain("registry offline")
+    expect(reason).toContain("retry delivery_cleanup")
+    expect(mutationCalls(calls)).toEqual([])
+    expect(existsSync(f.linked)).toBe(true)
+  }, 60_000)
+
+  test("an abort during the host listing stops the call before any removal", async () => {
+    const f = fixture("host-list-abort")
+    const controller = new AbortController()
+    const removes: string[] = []
+    const host = {
+      list: async () => {
+        controller.abort()
+        return [{ directory: realpathSync(f.linked) }]
+      },
+      remove: async (directory: string) => {
+        removes.push(directory)
+      },
+    }
+    const { result, calls } = await invoke(f, { receipt: f.receiptPath }, {}, { host, signal: controller.signal })
+    expect(refusal(result)).toContain("signal")
+    expect(removes).toEqual([])
+    expect(mutationCalls(calls)).toEqual([])
+    expect(existsSync(f.linked)).toBe(true)
+  }, 60_000)
+
   test("a worktree the host does not list is removed by git as before", async () => {
     const f = fixture("host-unlisted")
     const listedPath = realpathSync(f.linked)
