@@ -56,12 +56,29 @@ export function safePrefix(value: unknown): string | undefined {
   return typeof value === "string" && SAFE_PREFIX.test(value) ? value : undefined
 }
 
+/**
+ * The `issue-prefix:` value from config.yaml text, parsed line by line in linear time
+ * (no backtracking regex over repository-controlled text).
+ */
+export function configIssuePrefix(config: string): string | undefined {
+  for (const line of config.split(/\r?\n/)) {
+    if (!line.startsWith("issue-prefix:")) continue
+    let value = line.slice("issue-prefix:".length)
+    const comment = value.indexOf("#")
+    if (comment !== -1) value = value.slice(0, comment)
+    value = value.trim()
+    const quote = value[0]
+    if ((quote === '"' || quote === "'") && value.length >= 2 && value.endsWith(quote)) value = value.slice(1, -1)
+    return value
+  }
+  return undefined
+}
+
 /** `issue-prefix:` from config.yaml, else the `dolt_database` name from metadata.json. */
 export function ledgerPrefix(store: string): string | undefined {
   const config = readSmallRegularFile(join(store, "config.yaml"))
   if (config !== undefined) {
-    const match = /^issue-prefix:[ \t]*["']?([^"'\r\n#]*?)["']?[ \t]*(?:#.*)?$/m.exec(config)
-    const prefix = safePrefix(match?.[1])
+    const prefix = safePrefix(configIssuePrefix(config))
     if (prefix !== undefined) return prefix
   }
   const metadata = readSmallRegularFile(join(store, "metadata.json"))
@@ -105,7 +122,8 @@ export function ledgerRepoMismatch(input: {
   const store = canonical(input.store)
   const ledgerRoot = dirname(store)
   const here = input.identity(input.cwd)
-  const there = input.identity(ledgerRoot)
+  // Ownership comes from the store itself: a store may be a repository root.
+  const there = input.identity(store)
   if (here === undefined || there === undefined) return undefined
   // `repoIdentity` answers the directory itself outside any repository.
   if (here === input.cwd) return undefined

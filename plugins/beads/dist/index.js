@@ -4933,11 +4933,26 @@ function isRetired(store) {
 function safePrefix(value) {
   return typeof value === "string" && SAFE_PREFIX.test(value) ? value : undefined;
 }
+function configIssuePrefix(config) {
+  for (const line of config.split(/\r?\n/)) {
+    if (!line.startsWith("issue-prefix:"))
+      continue;
+    let value = line.slice("issue-prefix:".length);
+    const comment = value.indexOf("#");
+    if (comment !== -1)
+      value = value.slice(0, comment);
+    value = value.trim();
+    const quote = value[0];
+    if ((quote === '"' || quote === "'") && value.length >= 2 && value.endsWith(quote))
+      value = value.slice(1, -1);
+    return value;
+  }
+  return;
+}
 function ledgerPrefix(store) {
   const config = readSmallRegularFile(join5(store, "config.yaml"));
   if (config !== undefined) {
-    const match = /^issue-prefix:[ \t]*["']?([^"'\r\n#]*?)["']?[ \t]*(?:#.*)?$/m.exec(config);
-    const prefix = safePrefix(match?.[1]);
+    const prefix = safePrefix(configIssuePrefix(config));
     if (prefix !== undefined)
       return prefix;
   }
@@ -4965,7 +4980,7 @@ function ledgerRepoMismatch(input) {
   const store = canonical3(input.store);
   const ledgerRoot = dirname7(store);
   const here = input.identity(input.cwd);
-  const there = input.identity(ledgerRoot);
+  const there = input.identity(store);
   if (here === undefined || there === undefined)
     return;
   if (here === input.cwd)

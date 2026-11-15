@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { describeLedger, findLedger, ledgerPrefix, ledgerRepoMismatch } from "./ledger-context.ts"
+import { configIssuePrefix, describeLedger, findLedger, ledgerPrefix, ledgerRepoMismatch } from "./ledger-context.ts"
 import { decideCommand, decidePrCreate } from "./pr-bead-link-gate.ts"
 
 let root = ""
@@ -67,7 +67,7 @@ describe("ledgerRepoMismatch", () => {
     const warning = ledgerRepoMismatch({
       store: "/a/.beads",
       cwd: "/b",
-      identity: identity({ "/a": "/a/.git", "/b": "/b/.git" }),
+      identity: identity({ "/a/.beads": "/a/.git", "/b": "/b/.git" }),
     })
     expect(warning).toContain("/a/.beads")
     expect(warning).toContain("`workdir`")
@@ -78,22 +78,28 @@ describe("ledgerRepoMismatch", () => {
       ledgerRepoMismatch({
         store: "/a/.beads",
         cwd: "/wt",
-        identity: identity({ "/a": "/a/.git", "/wt": "/a/.git" }),
+        identity: identity({ "/a/.beads": "/a/.git", "/wt": "/a/.git" }),
       }),
     ).toBeUndefined()
   })
 
   test("stays silent when git cannot answer or cwd is outside any repository", () => {
-    expect(ledgerRepoMismatch({ store: "/a/.beads", cwd: "/b", identity: identity({ "/a": "/a/.git" }) })).toBeUndefined()
+    expect(ledgerRepoMismatch({ store: "/a/.beads", cwd: "/b", identity: identity({ "/a/.beads": "/a/.git" }) })).toBeUndefined()
     expect(
-      ledgerRepoMismatch({ store: "/a/.beads", cwd: "/b", identity: identity({ "/a": "/a/.git", "/b": "/b" }) }),
+      ledgerRepoMismatch({ store: "/a/.beads", cwd: "/b", identity: identity({ "/a/.beads": "/a/.git", "/b": "/b" }) }),
     ).toBeUndefined()
   })
 
   test("warns when the ledger sits above the repository (home-directory ledger)", () => {
     expect(
-      ledgerRepoMismatch({ store: "/h/.beads", cwd: "/h/repo", identity: identity({ "/h": "/h", "/h/repo": "/h/repo/.git" }) }),
+      ledgerRepoMismatch({ store: "/h/.beads", cwd: "/h/repo", identity: identity({ "/h/.beads": "/h/.beads", "/h/repo": "/h/repo/.git" }) }),
     ).toContain("/h/repo")
+  })
+
+  test("stays silent for a store that is the repository root itself", () => {
+    expect(
+      ledgerRepoMismatch({ store: "/r", cwd: "/r/sub", identity: identity({ "/r": "/r/.git", "/r/sub": "/r/.git", "/": "/" }) }),
+    ).toBeUndefined()
   })
 })
 
@@ -149,5 +155,21 @@ describe("ledgerRepoMismatch canonicalises the store", () => {
     const identity = (dir: string) => (dir === realRoot ? "real-git" : dir === linkRoot ? "link-git" : "here-git")
     const warning = ledgerRepoMismatch({ store: join(linkRoot, ".beads"), cwd: linkRoot, identity })
     expect(warning).toContain(JSON.stringify(join(realRoot, ".beads")))
+  })
+})
+
+describe("configIssuePrefix", () => {
+  test("parses plain, quoted and commented values", () => {
+    expect(configIssuePrefix("a: 1\nissue-prefix: abc\n")).toBe("abc")
+    expect(configIssuePrefix('issue-prefix: "abc" # note')).toBe("abc")
+    expect(configIssuePrefix("issue-prefix: 'abc'\r\n")).toBe("abc")
+    expect(configIssuePrefix("other: x")).toBeUndefined()
+  })
+
+  test("stays linear on a hostile line near the read limit", () => {
+    const hostile = `issue-prefix:a${" ".repeat(60_000)}""x`
+    const started = performance.now()
+    configIssuePrefix(hostile)
+    expect(performance.now() - started).toBeLessThan(500)
   })
 })
