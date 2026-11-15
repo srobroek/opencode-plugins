@@ -51,6 +51,10 @@ When the contract is known, replace them with behavior tests.
 A test that sometimes fails is a bug in the test or in the code.
 
 1. Reproduce it: run it in a loop, in random order and in parallel until it fails.
+   Shuffle file order and test order within a file separately: they catch different
+   dependences. Reproduce a timing flake under deliberate CPU load too (busy loops or
+   parallel workers): one flake passed 0 of 80 idle runs failing and failed 19 of 60 with
+   the CPU saturated. Label each flake load-related or order-related.
 2. Find the source: state shared between tests, the real clock or sleeps, unseeded
    randomness, unordered collections, the network, port or file collisions, races.
 3. Fix the cause: inject a clock, seed randomness and print the seed, await the
@@ -58,6 +62,24 @@ A test that sometimes fails is a bug in the test or in the code.
 4. When it cannot be fixed now, quarantine it: a tracked issue with an owner and an
    expiry date, and a separate lane that keeps running it without blocking merges. At
    expiry, fix it or delete it.
+
+### Leaked-state checklist
+
+When a test fails only after another test or in shuffled order, look for state that
+outlives the test:
+
+- module-level fixture maps or caches;
+- singletons that survive a module reset, such as a global feature-flag provider;
+- framework global state left paused or changed, such as a query library's online manager;
+- mock return-value overrides that persist across tests;
+- spies that restore-all leaves in place;
+- UI overlays left open that lock the next test's page (body classes, `aria-hidden` on the
+  next page);
+- timers that outlive the test file after the DOM environment deletes globals;
+- async loads still pending at teardown.
+
+Fix the leak by resetting the state in setup or teardown. Never hide it with a longer
+timeout.
 
 Keep retries off by default. A retry that turns a failure green hides the flake unless
 the runner still records it as flaky.

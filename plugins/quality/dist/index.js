@@ -4512,6 +4512,21 @@ function caseStatus(node) {
     return "skipped";
   return "passed";
 }
+var TIMEOUT = /time(?:d)?[\s-]?out/i;
+var FAILURE_KEYS = ["failure", "error", "rerunFailure", "rerunError"];
+function textOf(value) {
+  if (typeof value === "string")
+    return value;
+  if (Array.isArray(value))
+    return value.map(textOf).join(" ");
+  if (!isNode(value))
+    return "";
+  return [value["@_message"], value["@_type"], value["#text"]].map((v) => typeof v === "string" ? v : "").join(" ");
+}
+function classifyFailure(node) {
+  const text = FAILURE_KEYS.map((key) => textOf(node[key])).join(" ").slice(0, 2000);
+  return TIMEOUT.test(text) ? "timeout" : "other";
+}
 function collect(node, out) {
   if (Array.isArray(node)) {
     for (const item of node)
@@ -4534,16 +4549,28 @@ function collect(node, out) {
       const file = tc["@_file"] === undefined ? "" : String(tc["@_file"]);
       const label = [classname, name].filter(Boolean).join(" :: ");
       const time = Number.parseFloat(String(tc["@_time"] ?? "0"));
+      const status = caseStatus(tc);
       out.push({
         id: file ? `${file} :: ${label}` : label,
-        status: caseStatus(tc),
+        status,
         time: Number.isFinite(time) ? time : 0,
-        retries: count(tc.flakyFailure) + count(tc.flakyError)
+        retries: count(tc.flakyFailure) + count(tc.flakyError),
+        ...status === "failed" || status === "error" ? { failureKind: classifyFailure(tc) } : {}
       });
     }
   }
 }
-function parseJunit(xml) {
+var STDERR = /<system-err\b[^>]*>([\s\S]*?)<\/system-err>/g;
+function countStderrLines(xml) {
+  let lines = 0;
+  for (const match of xml.matchAll(STDERR)) {
+    const body = (match[1] ?? "").replace(/<!\[CDATA\[|\]\]>/g, "");
+    lines += body.split(`
+`).filter((line) => line.trim() !== "").length;
+  }
+  return lines;
+}
+function parseJunitReport(xml) {
   const valid = XMLValidator.validate(xml);
   if (valid !== true)
     throw new Error(`invalid XML: ${valid.err.msg} (line ${valid.err.line})`);
@@ -4552,7 +4579,7 @@ function parseJunit(xml) {
     throw new Error("not a JUnit report: no testsuite element");
   const out = [];
   collect(doc, out);
-  return out;
+  return { cases: out, stderrLines: countStderrLines(xml) };
 }
 
 // plugins/quality/src/mutation.ts
@@ -4727,35 +4754,67 @@ function formatMutation(c) {
 }
 
 // plugins/quality/src/test-repeat.ts
+var NOISY_STDERR_LINES = 1000;
+var NOISY_FILE_BYTES = 5000000;
+var isShuffledMode = (mode) => mode !== undefined && /shuffle|random/i.test(mode);
 var SLOWEST = 10;
 function foldRun(cases) {
   const folded = new Map;
   for (const c of cases) {
     const status = c.status === "error" || c.status === "failed" ? "failed" : c.status;
+    const kind = status === "failed" ? c.failureKind ?? "other" : undefined;
     const prior = folded.get(c.id);
     if (prior === undefined) {
-      folded.set(c.id, { status, time: c.time, retries: c.retries });
+      folded.set(c.id, { status, time: c.time, retries: c.retries, kind });
       continue;
     }
     prior.time += c.time;
     prior.retries += c.retries;
+    if (status === "failed")
+      prior.kind = prior.kind === "timeout" || kind === "timeout" ? "timeout" : "other";
     if (status === "failed" || status === "passed" && prior.status === "skipped")
       prior.status = status;
   }
   return folded;
 }
+var newTally = () => ({ passed: 0, failed: 0, skipped: 0, times: [], retried: 0, timeouts: 0, other: 0 });
+function runStats(record) {
+  const testSeconds = record.report === "used" ? record.cases.reduce((sum, c) => sum + c.time, 0) : undefined;
+  return {
+    run: record.run,
+    mode: record.mode,
+    fileBytes: record.fileBytes,
+    stderrLines: record.stderrLines,
+    testSeconds,
+    noisy: (record.stderrLines ?? 0) > NOISY_STDERR_LINES || (record.fileBytes ?? 0) > NOISY_FILE_BYTES
+  };
+}
 function summarizeRuns(records) {
   const used = records.filter((r) => r.report === "used");
   const perTest = new Map;
+  const unshuffled = new Map;
+  const failedModes = new Map;
   for (const record of used) {
+    const shuffled = isShuffledMode(record.mode);
     for (const [id, c] of foldRun(record.cases)) {
-      const stats = perTest.get(id) ?? { passed: 0, failed: 0, skipped: 0, times: [], retried: 0 };
+      const stats = perTest.get(id) ?? newTally();
       stats[c.status]++;
       if (c.status !== "skipped")
         stats.times.push(c.time);
       if (c.retries > 0)
         stats.retried++;
+      if (c.kind === "timeout")
+        stats.timeouts++;
+      else if (c.kind === "other")
+        stats.other++;
       perTest.set(id, stats);
+      if (!shuffled) {
+        const base = unshuffled.get(id) ?? newTally();
+        base[c.status]++;
+        unshuffled.set(id, base);
+      } else if (c.status === "failed") {
+        failedModes.set(id, (failedModes.get(id) ?? new Set).add(record.mode));
+      }
     }
   }
   const all = [...perTest].map(([id, s]) => ({
@@ -4764,13 +4823,24 @@ function summarizeRuns(records) {
     failed: s.failed,
     skipped: s.skipped,
     medianSeconds: median(s.times),
-    retried: s.retried
+    retried: s.retried,
+    timeouts: s.timeouts,
+    otherFailures: s.other
   }));
   const byId = (a, b) => a.id.localeCompare(b.id);
   const given = records.some((r) => r.exitCode !== undefined);
   const exitCodes = given ? records.map((r) => r.exitCode ?? null) : null;
   const knownCodes = exitCodes?.filter((c) => c !== null);
   const known = knownCodes === undefined || knownCodes.length === 0 ? null : knownCodes;
+  const modeCounts = new Map;
+  for (const r of records)
+    if (r.mode !== undefined)
+      modeCounts.set(r.mode, (modeCounts.get(r.mode) ?? 0) + 1);
+  const flakyIn = (t) => {
+    const base = unshuffled.get(t.id);
+    return base !== undefined && base.passed > 0 && base.failed > 0;
+  };
+  const orderDependent = all.filter((t) => failedModes.has(t.id) && (unshuffled.get(t.id)?.failed ?? 0) === 0).map((t) => ({ ...t, failedModes: [...failedModes.get(t.id) ?? []].sort() })).sort(byId);
   return {
     runs: records.length,
     exitCodes,
@@ -4779,7 +4849,10 @@ function summarizeRuns(records) {
     reportRuns: used.length,
     unreadable: records.filter((r) => r.report !== "used").map((r) => ({ run: r.run, reason: r.reason ?? "unreadable" })),
     totalCases: all.length,
-    flaky: all.filter((t) => t.passed > 0 && t.failed > 0).sort(byId),
+    flaky: all.filter(flakyIn).sort(byId),
+    orderDependent,
+    modes: [...modeCounts].map(([mode, runs]) => ({ mode, runs })),
+    runStats: records.map(runStats),
     failedEveryRun: all.filter((t) => used.length > 0 && t.failed === used.length).sort(byId),
     slowest: all.filter((t) => Number.isFinite(t.medianSeconds)).sort((a, b) => b.medianSeconds - a.medianSeconds || byId(a, b)).slice(0, SLOWEST),
     retriedInRun: all.filter((t) => t.retried > 0 && t.failed === 0).map((t) => t.id).sort()
@@ -4794,6 +4867,16 @@ function list(title, items, show, limit) {
     lines.push(`  ... +${items.length - limit} more`);
   return lines;
 }
+var failureSplit = (t) => `fail ${t.failed} (timeout ${t.timeouts}, assertion/error ${t.otherFailures})`;
+var mb = (bytes) => `${(bytes / 1e6).toFixed(1)} MB`;
+function runLine(r) {
+  const parts = [
+    r.fileBytes === undefined ? undefined : mb(r.fileBytes),
+    r.stderrLines === undefined ? undefined : `${r.stderrLines} stderr lines`,
+    r.testSeconds === undefined ? undefined : `summed test time ${secs(r.testSeconds)}`
+  ].filter((p) => p !== undefined);
+  return `run ${r.run}${r.mode === undefined ? "" : ` [${r.mode}]`}: ${parts.join(", ")}${r.noisy ? "  NOISY" : ""}`;
+}
 function formatSummary(summary) {
   const lines = [`Summarized ${summary.runs} report(s); readable: ${summary.reportRuns}; test cases: ${summary.totalCases}`];
   if (summary.exitCodes !== null) {
@@ -4805,8 +4888,19 @@ function formatSummary(summary) {
   }
   for (const { run, reason } of summary.unreadable.slice(0, 10))
     lines.push(`report ${run}: unreadable (${reason})`);
-  lines.push(...list("flaky (passed and failed)", summary.flaky, (t) => `${t.id}  pass ${t.passed} / fail ${t.failed}`, 15), ...list("failed in every report", summary.failedEveryRun, (t) => `${t.id}  fail ${t.failed}`, 15), ...list("retried inside a run, then passed", summary.retriedInRun, (id) => id, 5), ...list("slowest by median", summary.slowest, (t) => `${secs(t.medianSeconds).padStart(7)}  ${t.id}`, SLOWEST));
-  if (summary.reportRuns > 0 && summary.flaky.length === 0 && summary.failedEveryRun.length === 0)
+  if (summary.modes.length > 0)
+    lines.push(`run modes: ${summary.modes.map((m) => `${m.mode} x${m.runs}`).join(", ")}`);
+  const measured = summary.runStats.filter((r) => r.fileBytes !== undefined || r.stderrLines !== undefined || r.testSeconds !== undefined);
+  const noisy = measured.filter((r) => r.noisy);
+  const shown = measured.slice(0, 6);
+  for (const r of noisy)
+    if (!shown.includes(r))
+      shown.push(r);
+  lines.push(...list("per-run size, stderr and summed test time", shown, runLine, 12));
+  if (noisy.length > 0)
+    lines.push(`noisy runs: ${noisy.map((r) => r.run).join(", ")} (above ${NOISY_STDERR_LINES} stderr lines or ${mb(NOISY_FILE_BYTES)}): check for a missing environment setup or unmocked I/O`);
+  lines.push(...list("flaky (passed and failed in unshuffled runs)", summary.flaky, (t) => `${t.id}  pass ${t.passed} / ${failureSplit(t)}`, 15), ...list("order-dependent (failed only in shuffled runs)", summary.orderDependent, (t) => `${t.id}  ${failureSplit(t)}; failed in ${t.failedModes.join(", ")}`, 15), ...list("failed in every report", summary.failedEveryRun, (t) => `${t.id}  ${failureSplit(t)}`, 15), ...list("retried inside a run, then passed", summary.retriedInRun, (id) => id, 5), ...list("slowest by median", summary.slowest, (t) => `${secs(t.medianSeconds).padStart(7)}  ${t.id}`, SLOWEST));
+  if (summary.reportRuns > 0 && summary.flaky.length === 0 && summary.orderDependent.length === 0 && summary.failedEveryRun.length === 0)
     lines.push("no test both passed and failed; none failed in every report");
   return capText(lines);
 }
@@ -4818,16 +4912,21 @@ var MAX_REPORTS = 50;
 function parseTestAuditOptions(options) {
   return options.testAudit === false ? undefined : { enabled: true };
 }
+var MAX_MODE_LENGTH = 60;
 function parseSummarizeInput(input) {
   const raw = input ?? {};
-  const { reports, exitCodes } = raw;
+  const { reports, exitCodes, modes } = raw;
   if (!Array.isArray(reports) || reports.length < 1 || reports.length > MAX_REPORTS || reports.some((r) => typeof r !== "string" || r === ""))
     return `reports must be 1 to ${MAX_REPORTS} non-empty paths`;
   if (exitCodes !== undefined) {
     if (!Array.isArray(exitCodes) || exitCodes.length !== reports.length || exitCodes.some((c) => c !== null && !Number.isInteger(c)))
       return "exitCodes must be integers or null, one per report";
   }
-  return { reports, exitCodes };
+  if (modes !== undefined) {
+    if (!Array.isArray(modes) || modes.length !== reports.length || modes.some((m) => typeof m !== "string" || m.trim() === "" || m.length > MAX_MODE_LENGTH))
+      return `modes must be non-empty strings of at most ${MAX_MODE_LENGTH} characters, one per report`;
+  }
+  return { reports, exitCodes, modes };
 }
 function summarizeReports(root, raw) {
   const fail = (message) => ({ content: `${TEST_SUMMARIZE_TOOL}: ${message}`, metadata: { error: message } });
@@ -4837,9 +4936,13 @@ function summarizeReports(root, raw) {
   const roots = reportRoots(root);
   const records = [];
   for (const [i, path] of input.reports.entries()) {
-    const record = { run: i + 1, exitCode: input.exitCodes?.[i], report: "unreadable", cases: [] };
+    const record = { run: i + 1, exitCode: input.exitCodes?.[i], mode: input.modes?.[i], report: "unreadable", cases: [] };
     try {
-      record.cases = parseJunit(readReportFile(root, path, roots));
+      const text = readReportFile(root, path, roots);
+      record.fileBytes = Buffer.byteLength(text);
+      const parsed = parseJunitReport(text);
+      record.cases = parsed.cases;
+      record.stderrLines = parsed.stderrLines;
       record.report = "used";
     } catch (error) {
       if (error instanceof PathError)
@@ -4899,7 +5002,7 @@ async function setupTestAudit(ctx, options) {
     editor.add({
       name: TEST_SUMMARIZE_TOOL,
       description: `Read-only: summarize JUnit XML reports from repeated test runs; flaky, always-failing and slow tests.
-` + "Run the test command several times through the shell, writing one JUnit report per run, then pass the paths in run " + "order. Reads pytest, Vitest, bun test, gotestsum and cargo-nextest JUnit. Paths must be in the session or OpenCode temp directory.",
+` + "Run the test command several times through the shell, writing one JUnit report per run, then pass the paths in run " + "order. Add modes (default, shuffle-files, shuffle-tests) to split order-dependent from flaky tests. Reports timeout vs " + "assertion failures, file size and stderr lines. Reads pytest, Vitest, bun test, gotestsum and cargo-nextest JUnit. " + "Paths must be in the session or OpenCode temp directory.",
       input: {
         type: "object",
         properties: {
@@ -4914,6 +5017,11 @@ async function setupTestAudit(ctx, options) {
             type: "array",
             items: { type: ["integer", "null"] },
             description: "Exit code of each run, same length as reports; null when unknown"
+          },
+          modes: {
+            type: "array",
+            items: { type: "string", maxLength: MAX_MODE_LENGTH },
+            description: "Order mode of each run, same length as reports: default, shuffle-files, shuffle-tests or free text"
           }
         },
         required: ["reports"],
@@ -4980,6 +5088,7 @@ var src_default = Plugin2.define({
 export {
   DEFAULT_STANDARDS_SUBAGENTS,
   FALLBACK_AGENTS,
+  MAX_MODE_LENGTH,
   MAX_REPORTS,
   STANDARDS_BLOCKS,
   STANDARDS_TEXT,

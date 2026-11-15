@@ -6,11 +6,11 @@ import { createFakeContext } from "@srobroek/opencode-lib/testing"
 import { compactRanges, opencodeTempDir, PathError, readReportFile } from "./audit-util.ts"
 import { compareCoverage, detectCoverageFormat, formatCoverage, parseCoverage } from "./coverage.ts"
 import plugin from "./index.ts"
-import { parseJunit } from "./junit.ts"
+import { parseJunit, parseJunitReport } from "./junit.ts"
 import { compareMutation, detectMutationFormat, formatMutation, parseMutation } from "./mutation.ts"
-import { BUN, GOTESTSUM, NEXTEST, PYTEST, VITEST } from "./test-audit.fixtures.ts"
+import { BUN, GOTESTSUM, NEXTEST, PYTEST, TIMEOUTS, VITEST } from "./test-audit.fixtures.ts"
 import { compareReports, parseSummarizeInput, parseTestAuditOptions, summarizeReports } from "./test-audit.ts"
-import { formatSummary, type RunRecord, summarizeRuns } from "./test-repeat.ts"
+import { formatSummary, NOISY_STDERR_LINES, type RunRecord, summarizeRuns } from "./test-repeat.ts"
 
 /** A directory inside the OpenCode temp directory. */
 function scratch(): string {
@@ -58,6 +58,21 @@ describe("parseJunit", () => {
     expect(cases.map((c) => c.status)).toEqual(["passed", "failed", "passed"])
     expect(cases[2]?.retries).toBe(2)
   })
+  test("classifies a failure as timeout or other from its message and type", () => {
+    const kinds = parseJunit(TIMEOUTS).map((c) => [c.id.split(" :: ")[1], c.failureKind])
+    expect(kinds).toEqual([
+      ["slow one", "timeout"],
+      ["pytest timeout", "timeout"],
+      ["wrong value", "other"],
+      ["crashes", "other"],
+      ["fine", undefined],
+      ["noisy", undefined],
+    ])
+  })
+  test("counts non-empty stderr lines in CDATA and plain system-err elements", () => {
+    expect(parseJunitReport(TIMEOUTS).stderrLines).toBe(4)
+    expect(parseJunitReport(PYTEST).stderrLines).toBe(0)
+  })
   test("rejects truncated or malformed XML", () => {
     expect(() => parseJunit(PYTEST.slice(0, -40))).toThrow(/invalid XML/)
     expect(() => parseJunit("<testsuites><testsuite><testcase></testsuite></testsuites>")).toThrow(/invalid XML/)
@@ -96,7 +111,7 @@ describe("summarizeRuns", () => {
   })
   test("text names the sections and stays under the cap", () => {
     const text = formatSummary(summary)
-    expect(text).toContain("flaky (passed and failed) (1)")
+    expect(text).toContain("flaky (passed and failed in unshuffled runs) (1)")
     expect(text).toContain("failed in every report (1)")
     expect(text).toContain("report 3: unreadable (invalid XML)")
     expect(text).toContain("exit codes differ")
@@ -128,11 +143,83 @@ describe("summarizeRuns", () => {
   })
 })
 
+describe("summarizeRuns with run modes", () => {
+  const modeRec = (run: number, mode: string | undefined, statuses: Record<string, "passed" | "failed">): RunRecord => ({
+    ...rec(run, "used", statuses),
+    mode,
+  })
+  const runs = [
+    modeRec(1, "default", { within: "passed", files: "passed", flake: "passed", plain: "failed" }),
+    modeRec(2, "default", { within: "passed", files: "passed", flake: "failed", plain: "failed" }),
+    modeRec(3, "shuffle-files", { within: "passed", files: "failed", flake: "passed", plain: "failed" }),
+    modeRec(4, "shuffle-tests", { within: "failed", files: "passed", flake: "passed", plain: "failed" }),
+    modeRec(5, "shuffle-tests", { within: "passed", files: "passed", flake: "passed", plain: "failed" }),
+  ]
+  const summary = summarizeRuns(runs)
+  test("a failure only in shuffled runs is order-dependent, not flaky", () => {
+    expect(summary.flaky.map((t) => t.id)).toEqual(["flake"])
+    expect(summary.orderDependent.map((t) => [t.id, t.failedModes])).toEqual([
+      ["files", ["shuffle-files"]],
+      ["within", ["shuffle-tests"]],
+    ])
+    expect(summary.failedEveryRun.map((t) => t.id)).toEqual(["plain"])
+    expect(summary.modes).toEqual([
+      { mode: "default", runs: 2 },
+      { mode: "shuffle-files", runs: 1 },
+      { mode: "shuffle-tests", runs: 2 },
+    ])
+  })
+  test("text lists the order-dependent section and the modes", () => {
+    const text = formatSummary(summary)
+    expect(text).toContain("order-dependent (failed only in shuffled runs) (2)")
+    expect(text).toContain("failed in shuffle-tests")
+    expect(text).toContain("run modes: default x2, shuffle-files x1, shuffle-tests x2")
+  })
+  test("without modes a mixed test stays flaky and nothing is order-dependent", () => {
+    const plain = summarizeRuns([rec(1, "used", { a: "passed" }), rec(2, "used", { a: "failed" })])
+    expect(plain.flaky.map((t) => t.id)).toEqual(["a"])
+    expect(plain.orderDependent).toEqual([])
+    expect(plain.modes).toEqual([])
+    expect(formatSummary(plain)).not.toContain("run modes")
+  })
+  test("free-text mode names containing random count as shuffled", () => {
+    const s = summarizeRuns([modeRec(1, "baseline", { a: "passed" }), modeRec(2, "random seed 7", { a: "failed" })])
+    expect(s.orderDependent.map((t) => t.id)).toEqual(["a"])
+  })
+})
+
+describe("failure kinds and noise per run", () => {
+  test("counts timeouts and other failures per test", () => {
+    const cases = parseJunit(TIMEOUTS)
+    const timeoutThenAssert = (kind: "timeout" | "other") => cases.filter((c) => c.failureKind === kind).slice(0, 1)
+    const s = summarizeRuns([
+      { run: 1, report: "used", cases: timeoutThenAssert("timeout") },
+      { run: 2, report: "used", cases: timeoutThenAssert("timeout").map((c) => ({ ...c, failureKind: "other" as const })) },
+      { run: 3, report: "used", cases: timeoutThenAssert("timeout") },
+    ])
+    const stats = s.failedEveryRun[0]
+    expect([stats?.timeouts, stats?.otherFailures]).toEqual([2, 1])
+    expect(formatSummary(s)).toContain("fail 3 (timeout 2, assertion/error 1)")
+  })
+  test("reports size, stderr lines and summed test time, and flags a noisy run", () => {
+    const quiet: RunRecord = { run: 1, report: "used", fileBytes: 2_000, stderrLines: 3, cases: parseJunit(VITEST) }
+    const loud: RunRecord = { run: 2, report: "used", fileBytes: 6_500_000, stderrLines: NOISY_STDERR_LINES + 1, cases: parseJunit(TIMEOUTS) }
+    const s = summarizeRuns([quiet, loud])
+    expect(s.runStats.map((r) => r.noisy)).toEqual([false, true])
+    expect(s.runStats[1]?.testSeconds).toBeCloseTo(7.4)
+    const text = formatSummary(s)
+    expect(text).toContain("run 2: 6.5 MB, 1001 stderr lines, summed test time 7.40s  NOISY")
+    expect(text).toContain("noisy runs: 2")
+    expect(formatSummary(summarizeRuns([{ run: 1, report: "used", cases: [] }]))).not.toContain("noisy")
+  })
+})
+
 describe("parseSummarizeInput", () => {
   test("bounds and exit code shape", () => {
     expect(parseSummarizeInput({ reports: ["a"] })).toEqual({ reports: ["a"], exitCodes: undefined })
     expect(parseSummarizeInput({ reports: ["a", "b"], exitCodes: [0, null] })).toMatchObject({ exitCodes: [0, null] })
-    for (const bad of [{}, { reports: [] }, { reports: Array(51).fill("a") }, { reports: [""] }, { reports: ["a"], exitCodes: [] }, { reports: ["a"], exitCodes: [1.5] }, { reports: ["a"], exitCodes: ["0"] }])
+    expect(parseSummarizeInput({ reports: ["a", "b"], modes: ["default", "shuffle-tests"] })).toMatchObject({ modes: ["default", "shuffle-tests"] })
+    for (const bad of [{}, { reports: [] }, { reports: Array(51).fill("a") }, { reports: [""] }, { reports: ["a"], exitCodes: [] }, { reports: ["a"], exitCodes: [1.5] }, { reports: ["a"], exitCodes: ["0"] }, { reports: ["a"], modes: [] }, { reports: ["a"], modes: [""] }, { reports: ["a"], modes: [1] }, { reports: ["a"], modes: ["x".repeat(61)] }])
       expect(typeof parseSummarizeInput(bad)).toBe("string")
   })
 })
@@ -151,6 +238,10 @@ describe("summarizeReports", () => {
       expect((result.metadata.flaky as unknown[]).length).toBe(1)
       expect((result.metadata.unreadable as Array<{ run: number }>).map((u) => u.run)).toEqual([3, 4])
       expect(result.content).toContain("report 3: unreadable")
+      writeFileSync(join(root, "e.xml"), TIMEOUTS)
+      const moded = summarizeReports(root, { reports: ["r1.xml", "r2.xml", "e.xml"], modes: ["default", "shuffle-tests", "shuffle-files"] })
+      expect(moded.metadata.runStats).toMatchObject([{ fileBytes: ok(false).length }, {}, { fileBytes: TIMEOUTS.length, stderrLines: 4, mode: "shuffle-files" }])
+      expect((moded.metadata.orderDependent as Array<{ id: string }>).map((t) => t.id)).toContain("c :: t")
       const refused = summarizeReports(root, { reports: ["r1.xml", join(outside, "r.xml")] })
       expect(refused.content).toContain("refused")
     } finally {
