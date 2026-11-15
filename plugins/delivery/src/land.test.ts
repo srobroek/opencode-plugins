@@ -14,9 +14,54 @@ import {
 import { devNull, tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import pkg from "../package.json" with { type: "json" }
-import { type CliResult, type CliRunner, runCli } from "./forge-adapter.ts"
-import { beadIdsFromBranch, type LandParams, landPullRequest, resolveLandingTarget } from "./land.ts"
+import { parseWorktreeList } from "./cleanup.ts"
+import { type CliResult, type CliRunner, runCli, SAFE_GIT_ARGS } from "./forge-adapter.ts"
+import {
+  beadIdsFromBranch,
+  inferWorktree,
+  type LandDeps,
+  type LandParams,
+  landPullRequest as landPullRequestUnwrapped,
+  resolveLandingTarget,
+  selectRemoteForRepo,
+} from "./land.ts"
 import { RECEIPT_SCHEMA, readReceipt, repoKey, writeReceipt } from "./landing-receipt.ts"
+
+/** Every raw git argv the tool issued, before the safe-option prefix is stripped for the mocks. */
+const rawGitArgv: string[][] = []
+
+/** Put a `git` shim first on PATH that logs the directory of every spawn, sync or async. */
+function gitSpawnLog(): { log: () => string[]; restore: () => void } {
+  const dir = temporaryDirectory("delivery-land-git-shim-")
+  const logFile = join(dir, "spawns.log")
+  const real = Bun.spawnSync(["which", "git"]).stdout.toString().trim()
+  writeFileSync(join(dir, "git"), `#!/bin/sh\npwd -P >> "${logFile}"\nexec "${real}" "$@"\n`, { mode: 0o755 })
+  const before = process.env.PATH
+  process.env.PATH = `${dir}:${before ?? ""}`
+  return {
+    log: () => (existsSync(logFile) ? readFileSync(logFile, "utf8").split("\n").filter(Boolean) : []),
+    restore: () => {
+      process.env.PATH = before
+    },
+  }
+}
+
+/** The argv without the safe-option prefix every checkout-bound Git command carries. */
+const withoutSafeGit = (argv: readonly string[]): string[] =>
+  argv[0] === "git" && SAFE_GIT_ARGS.every((part, index) => argv[index + 1] === part)
+    ? ["git", ...argv.slice(1 + SAFE_GIT_ARGS.length)]
+    : [...argv]
+
+/** `landPullRequest` whose runner sees Git argv with the safe prefix removed, so mocks match on the verb. */
+function landPullRequest(params: LandParams, deps: LandDeps = {}) {
+  const inner = deps.run
+  if (inner === undefined) return landPullRequestUnwrapped(params, deps)
+  const run: CliRunner = (argv, options) => {
+    if (argv[0] === "git") rawGitArgv.push([...argv])
+    return inner(withoutSafeGit(argv), options)
+  }
+  return landPullRequestUnwrapped(params, { ...deps, run })
+}
 
 type Call = {
   argv: string[]
@@ -83,6 +128,18 @@ function temporaryDirectory(prefix: string): string {
   return path
 }
 
+/** A linked worktree of `canonical`, as `git worktree add` lays it out: a `.git` file and an admin directory. */
+function linkedWorktree(canonical: string, name: string): string {
+  const path = join(temporaryDirectory("delivery-land-linked-"), name)
+  const admin = join(canonical, ".git", "worktrees", name)
+  mkdirSync(path, { recursive: true })
+  mkdirSync(admin, { recursive: true })
+  writeFileSync(join(path, ".git"), `gitdir: ${admin}\n`)
+  writeFileSync(join(admin, "commondir"), "../..\n")
+  return path
+}
+
+
 afterEach(() => {
   for (const path of pending.splice(0)) rmSync(path, { recursive: true, force: true })
 })
@@ -111,6 +168,8 @@ type Answers = {
   remoteUrl?: string
   /** What `git rev-parse --verify HEAD^{commit}` answers inside a supplied worktree. */
   worktreeHead?: CliResult
+  /** What `git worktree list --porcelain` prints in the repository; empty by default. */
+  worktrees?: string
   /** Whether each `git cat-file -e <oid>^{commit}` finds the object, in call order; present once the list is spent. */
   present?: boolean[]
   /** What each `git fetch` answers, in call order; exit 0 once the list is spent. */
@@ -139,13 +198,15 @@ function runner(answers: Answers, canonical: string): { run: CliRunner; calls: C
     if (command.startsWith("git rev-parse --path-format=absolute --git-common-dir --show-toplevel")) {
       return completed(`${join(canonical, ".git")}\n${canonical}\n`)
     }
-    if (argv[0] === "git" && argv[1] === "show" && argv[2] === "-s")
+    if (argv[0] === "git" && argv.includes("show") && argv.includes("-s"))
       return completed(`${answers.parents ?? BASE_OID}\n`)
     if (argv[0] === "git" && argv[1] === "cat-file" && argv[2] === "-e")
       return (present.shift() ?? true) ? completed("") : completed("", 1, "fatal: not a commit")
     if (argv[0] === "git" && argv.includes("fetch")) return fetches.shift() ?? completed("")
     if (command === "git rev-parse --verify HEAD^{commit}") return answers.worktreeHead ?? completed(`${HEAD_OID}\n`)
     if (command.startsWith("git remote get-url")) return completed(`${answers.remoteUrl ?? REMOTE_URL}\n`)
+    if (command === "git remote") return completed("origin\n")
+    if (command === "git worktree list --porcelain") return completed(answers.worktrees ?? "")
     if (argv[1] === "pr" && argv[2] === "view" && argv.includes("author,reviews,comments"))
       return answers.approval ?? completed("{}")
     if (argv[1] === "pr" && argv[2] === "checks") return answers.checks ?? completed("[]")
@@ -169,11 +230,15 @@ async function land(answers: Answers, params: Partial<LandParams> = {}, env: Nod
   const { canonical, receipts } = repository()
   mkdirSync(join(canonical, ".beads"))
   const { run, calls } = runner(answers, canonical)
+  // A `/tmp/worktrees/<name>` placeholder stands for a real linked worktree of the session
+  // repository: an explicit worktree is only read once it is verified to exist and belong there.
+  const wanted = params.worktree?.startsWith("/tmp/worktrees/") ? params.worktree : undefined
+  const worktreePath = wanted === undefined ? undefined : linkedWorktree(canonical, wanted.split("/").pop() ?? "wt")
   const outcome = await landPullRequest(
-    { pr: 470, ...params },
+    { pr: 470, ...params, ...(worktreePath === undefined ? {} : { worktree: worktreePath }) },
     { run, cwd: canonical, now: () => NOW, receiptsDirectory: receipts, env },
   )
-  return { outcome, calls, receipts, canonical, files: () => readdirSync(receipts) }
+  return { outcome, calls, receipts, canonical, worktreePath, files: () => readdirSync(receipts) }
 }
 function nativeNext(beadId: string, pr: number, mergeSha: string, receiptPath: string): string[] {
   return [
@@ -383,7 +448,7 @@ const merged = (argv: string[]): boolean => argv[2] === "merge"
 
 describe("delivery_land", () => {
   test("a clean land emits one receipt whose fields are the forge reads", async () => {
-    const { outcome, receipts, files, calls } = await land(
+    const { outcome, receipts, files, calls, worktreePath } = await land(
       {
         prView: [completed(githubPr()), completed(mergedGithubPr())],
         lsRemote: { ok: true, exitCode: 2, stdout: "", stderr: "" },
@@ -420,13 +485,13 @@ describe("delivery_land", () => {
       autoDeleteSetting: "off",
     })
     expect(receipt.beads.ids).toEqual(["omp-plugins-9ej3.5"])
-    expect(receipt.worktree.path).toBe("/tmp/worktrees/omp-agent-omp-plugins-9ej3.5")
+    expect(receipt.worktree.path).toBe(worktreePath ?? null)
     // The worktree is recorded only after its own HEAD was read and matched the PR head.
     expect(
       calls.filter((call) => call.argv.join(" ") === "git rev-parse --verify HEAD^{commit}").map((call) => call.cwd),
-    ).toEqual(["/tmp/worktrees/omp-agent-omp-plugins-9ej3.5"])
+    ).toEqual([realpathSync(worktreePath ?? "")])
     expect(receipt.proof.evidence).toMatchObject({
-      worktree: { path: "/tmp/worktrees/omp-agent-omp-plugins-9ej3.5", head: HEAD_OID },
+      worktree: { path: worktreePath, head: HEAD_OID },
     })
     expect(receipt.outcome).toBe("landed")
     expect(receipt.supersedes).toBeNull()
@@ -572,7 +637,7 @@ describe("delivery_land", () => {
     writeFileSync(join(canonical, ".beads", "RETIRED"), "retired\n")
     const { run } = runner({ prView: [completed(mergedGithubPr())] }, canonical)
     const outcome = await landPullRequest(
-      { pr: 470, worktree: "/tmp/worktrees/omp-agent-omp-plugins-9ej3.5" },
+      { pr: 470, worktree: linkedWorktree(canonical, "omp-agent-omp-plugins-9ej3.5") },
       { run, cwd: canonical, now: () => NOW, receiptsDirectory: receipts, env: {} },
     )
 
@@ -1504,8 +1569,9 @@ describe("delivery_land", () => {
     const { canonical, receipts } = repository()
     mkdirSync(join(canonical, ".beads"))
     const { run } = runner({ prView: [completed(githubPr()), completed(mergedGithubPr())] }, canonical)
+    const worktree = linkedWorktree(canonical, "omp-agent-omp-plugins-9ej3.5")
     const outcome = await landPullRequest(
-      { pr: 470, ...REVIEWED, worktree: "/tmp/worktrees/omp-agent-omp-plugins-9ej3.5" },
+      { pr: 470, ...REVIEWED, worktree },
       { run, cwd: canonical, now: () => NOW, receiptsDirectory: receipts, env: {} },
     )
 
@@ -1560,7 +1626,7 @@ describe("delivery_land", () => {
       autoDeleteSetting: "off",
     })
     expect(receipt.worktree).toEqual({
-      path: "/tmp/worktrees/omp-agent-omp-plugins-9ej3.5",
+      path: worktree,
       removed: false,
       localRefDeleted: false,
       absenceVerifiedAt: null,
@@ -1740,19 +1806,19 @@ describe("delivery_land", () => {
       ],
     ]
     for (const [label, answers, params] of cases) {
-      const { outcome, calls, files } = await land(answers, {
+      const { outcome, calls, files, worktreePath } = await land(answers, {
         ...params,
         worktree: "/tmp/worktrees/elsewhere",
         setupAutoDelete: true,
       })
       if (outcome.ok) throw new Error(`${label}: expected a refusal`)
       expect(outcome.reason).toContain("worktree")
-      expect(outcome.reason).toContain("/tmp/worktrees/elsewhere")
+      expect(outcome.reason).toContain(worktreePath ?? "")
       expect(outcome.reason).toContain(HEAD_OID)
       if (label.includes("another head")) expect(outcome.reason).toContain(elsewhere)
       expect(
         calls.filter((call) => call.argv.join(" ") === "git rev-parse --verify HEAD^{commit}").map((call) => call.cwd),
-      ).toEqual(["/tmp/worktrees/elsewhere"])
+      ).toEqual([realpathSync(worktreePath ?? "")])
       expect(calls.filter((call) => merged(call.argv))).toHaveLength(0)
       expect(calls.filter((call) => settingsCall(call.argv))).toHaveLength(0)
       expect(files()).toHaveLength(0)
@@ -1894,6 +1960,300 @@ describe("delivery_land", () => {
   }, 60_000)
 })
 
+const porcelain = (...records: Array<{ path: string; head: string; branch?: string; extra?: string }>): string =>
+  records
+    .map(
+      (record) =>
+        `worktree ${record.path}\nHEAD ${record.head}\n${record.branch === undefined ? "detached" : `branch refs/heads/${record.branch}`}\n${record.extra ?? ""}`,
+    )
+    .join("\n")
+
+describe("choosing the remote and worktree of a landing", () => {
+  test.each([
+    ["origin wins over an earlier match", [{ name: "fork", path: "a/b" }, { name: "origin", path: "a/b" }], "a/b", "origin"],
+    ["a non-origin remote is chosen when it alone matches", [{ name: "origin", path: "x/y" }, { name: "upstream", path: "a/b" }], "a/b", "upstream"],
+    ["no remote names the repository", [{ name: "origin", path: "x/y" }], "a/b", null],
+    ["a remote naming no repository never matches", [{ name: "origin", path: null }], "a/b", null],
+  ] as const)("selectRemoteForRepo: %s", (_name, remotes, repo, expected) => {
+    expect(selectRemoteForRepo(remotes, repo)).toBe(expected)
+  })
+
+  const main = { path: "/r", head: BASE_OID, branch: "main" }
+  test.each([
+    ["the linked worktree holding the branch at the head", [main, { path: "/r/wt", head: HEAD_OID, branch: BRANCH }], "/r/wt"],
+    ["the head compared case-insensitively", [main, { path: "/r/wt", head: HEAD_OID.toUpperCase(), branch: BRANCH }], "/r/wt"],
+    ["none when the branch moved past the head", [main, { path: "/r/wt", head: BASE_OID, branch: BRANCH }], null],
+    ["none when the branch is only in the main worktree", [{ path: "/r", head: HEAD_OID, branch: BRANCH }], null],
+    ["none when the worktree is detached", [main, { path: "/r/wt", head: HEAD_OID }], null],
+    ["none when the worktree is prunable", [main, { path: "/r/wt", head: HEAD_OID, branch: BRANCH, extra: "prunable gone" }], null],
+    ["none when another branch is checked out", [main, { path: "/r/wt", head: HEAD_OID, branch: "other" }], null],
+  ] as const)("inferWorktree: %s", (_name, records, expected) => {
+    expect(inferWorktree(parseWorktreeList(porcelain(...records)), BRANCH, HEAD_OID)).toBe(expected)
+  })
+
+  test("resolveLandingTarget picks the remote that names an explicit repo", async () => {
+    const { canonical } = repository()
+    const git = async (argv: readonly string[]): Promise<string | null> => {
+      const command = argv.join(" ")
+      if (argv[0] === "rev-parse") return `${join(canonical, ".git")}\n${canonical}\n`
+      if (command === "remote") return "origin\nupstream\n"
+      if (command === "remote get-url origin") return "https://github.com/srobroek/slopvac.git\n"
+      if (command === "remote get-url upstream") return `${REMOTE_URL}\n`
+      return null
+    }
+    const resolved = await resolveLandingTarget({ repo: "srobroek/omp-plugins" }, git, canonical, {})
+    if ("reason" in resolved) throw new Error(resolved.reason)
+    expect(resolved).toMatchObject({ remote: "upstream", nameWithOwner: "srobroek/omp-plugins" })
+  })
+
+  test("an explicit remote is never replaced by a matching one", async () => {
+    const { canonical } = repository()
+    const git = async (argv: readonly string[]): Promise<string | null> => {
+      if (argv[0] === "rev-parse") return `${join(canonical, ".git")}\n${canonical}\n`
+      if (argv.join(" ") === "remote get-url origin") return "https://github.com/srobroek/slopvac.git\n"
+      return null
+    }
+    const resolved = await resolveLandingTarget({ repo: "srobroek/omp-plugins", remote: "origin" }, git, canonical, {})
+    expect("reason" in resolved && resolved.reason).toContain("from remote origin")
+  })
+
+  /** One landing in a fresh session repository whose answers may depend on its path. */
+  async function landInSession(
+    build: (canonical: string) => { answers: Answers; params?: Partial<LandParams>; sleep?: boolean },
+  ) {
+    const { canonical, receipts } = repository()
+    mkdirSync(join(canonical, ".beads"))
+    const { answers, params, sleep } = build(canonical)
+    const { run, calls } = runner(answers, canonical)
+    rawGitArgv.length = 0
+    const outcome = await landPullRequest(
+      { pr: 470, ...params },
+      {
+        run,
+        cwd: canonical,
+        now: () => NOW,
+        receiptsDirectory: receipts,
+        env: {},
+        ...(sleep === true ? { sleep: async () => {} } : {}),
+      },
+    )
+    return { outcome, calls, canonical }
+  }
+
+  test("delivery_land records the linked worktree that holds the PR branch at its head", async () => {
+    let wt = ""
+    const { outcome } = await landInSession((canonical) => {
+      wt = linkedWorktree(canonical, "wt")
+      return {
+        answers: {
+          prView: [completed(mergedGithubPr())],
+          worktrees: porcelain(
+            { path: canonical, head: BASE_OID, branch: "main" },
+            { path: wt, head: HEAD_OID, branch: BRANCH },
+          ),
+        },
+      }
+    })
+    if (!outcome.ok) throw new Error(outcome.reason)
+    expect(outcome.receipt.worktree.path).toBe(wt)
+  })
+
+  test("delivery_land records no worktree when none holds the head", async () => {
+    const { outcome } = await landInSession((canonical) => ({
+      answers: {
+        prView: [completed(mergedGithubPr())],
+        worktrees: porcelain({ path: canonical, head: BASE_OID, branch: "main" }),
+      },
+    }))
+    if (!outcome.ok) throw new Error(outcome.reason)
+    expect(outcome.receipt.worktree.path).toBeNull()
+  })
+
+  test("delivery_land records no worktree when the inferred one no longer holds the head", async () => {
+    const { outcome } = await landInSession((canonical) => {
+      const wt = linkedWorktree(canonical, "wt")
+      return {
+        answers: {
+          prView: [completed(mergedGithubPr())],
+          worktreeHead: completed(`${BASE_OID}\n`),
+          worktrees: porcelain(
+            { path: canonical, head: BASE_OID, branch: "main" },
+            { path: wt, head: HEAD_OID, branch: BRANCH },
+          ),
+        },
+      }
+    })
+    if (!outcome.ok) throw new Error(outcome.reason)
+    expect(outcome.receipt.worktree.path).toBeNull()
+  })
+
+  test("delivery_land records no inferred worktree whose .git is a link into another repository", async () => {
+    const foreign = repository()
+    const { outcome, calls } = await landInSession((canonical) => {
+      const wt = linkedWorktree(canonical, "wt")
+      rmSync(join(wt, ".git"))
+      symlinkSync(join(foreign.canonical, ".git"), join(wt, ".git"))
+      return {
+        answers: {
+          prView: [completed(mergedGithubPr())],
+          worktrees: porcelain(
+            { path: canonical, head: BASE_OID, branch: "main" },
+            { path: wt, head: HEAD_OID, branch: BRANCH },
+          ),
+        },
+      }
+    })
+    if (!outcome.ok) throw new Error(outcome.reason)
+    expect(outcome.receipt.worktree.path).toBeNull()
+    expect(calls.some((call) => call.argv.join(" ") === "git rev-parse --verify HEAD^{commit}")).toBe(false)
+  })
+
+  test("an explicit worktree of the session repository is recorded, and Git is pinned to it", async () => {
+    let wt = ""
+    const { outcome, calls, canonical } = await landInSession((canonical) => {
+      wt = linkedWorktree(canonical, "wt")
+      return { answers: { prView: [completed(mergedGithubPr())] }, params: { worktree: wt } }
+    })
+    if (!outcome.ok) throw new Error(outcome.reason)
+    expect(outcome.receipt.worktree.path).toBe(wt)
+    const head = calls.find((call) => call.argv.join(" ") === "git rev-parse --verify HEAD^{commit}")
+    expect(head?.env?.GIT_DIR).toBe(join(realpathSync(canonical), ".git", "worktrees", "wt"))
+    expect(head?.env?.GIT_WORK_TREE).toBe(realpathSync(wt))
+    expect(head?.env?.GIT_COMMON_DIR).toBe(join(realpathSync(canonical), ".git"))
+  })
+
+  describe("a target outside the session repository is refused before Git runs there", () => {
+    /** Each way a `worktree` can fail to belong to the session repository. */
+    const foreignTargets: Array<[string, (canonical: string, foreign: { canonical: string }) => string]> = [
+      ["a checkout of another repository", (_c, foreign) => foreign.canonical],
+      [
+        "a .git symlink to another repository",
+        (_c, foreign) => {
+          const dir = temporaryDirectory("delivery-land-link-")
+          symlinkSync(join(foreign.canonical, ".git"), join(dir, ".git"))
+          return dir
+        },
+      ],
+      [
+        "a .git file naming another repository's worktree admin directory",
+        (_c, foreign) => {
+          const dir = temporaryDirectory("delivery-land-file-")
+          const admin = join(foreign.canonical, ".git", "worktrees", "x")
+          mkdirSync(admin, { recursive: true })
+          writeFileSync(join(admin, "commondir"), "../..\n")
+          writeFileSync(join(dir, ".git"), `gitdir: ${admin}\n`)
+          return dir
+        },
+      ],
+      [
+        "a .git file whose commondir is a FIFO",
+        (canonical) => {
+          const dir = linkedWorktree(canonical, "fifo")
+          const commondir = join(canonical, ".git", "worktrees", "fifo", "commondir")
+          rmSync(commondir)
+          Bun.spawnSync(["mkfifo", commondir])
+          return dir
+        },
+      ],
+      ["an existing directory that is not a checkout", () => temporaryDirectory("delivery-land-plain-")],
+    ]
+
+    test.each(foreignTargets)("%s", async (_name, make) => {
+      const foreign = repository()
+      const spawns = gitSpawnLog()
+      let target = ""
+      let outcome: Awaited<ReturnType<typeof landPullRequest>>
+      let calls: Call[] = []
+      try {
+        const landed = await landInSession((canonical) => {
+          target = make(canonical, foreign)
+          return { answers: { prView: [completed(mergedGithubPr())] }, params: { worktree: target } }
+        })
+        outcome = landed.outcome
+        calls = landed.calls
+      } finally {
+        spawns.restore()
+      }
+      expect(outcome.ok).toBe(false)
+      if (outcome.ok) throw new Error("expected a refusal")
+      expect(outcome.reason).toContain("run delivery_land from a session in the pull request's repository")
+      expect(outcome.reason).toContain("no Git ran there")
+      expect(calls.filter((call) => call.cwd === target)).toEqual([])
+      expect(calls.filter((call) => call.argv.includes("merge"))).toEqual([])
+      expect(spawns.log().filter((dir) => dir === realpathSync(target) || dir.startsWith(realpathSync(target)))).toEqual(
+        [],
+      )
+    }, 20_000)
+  })
+
+  test("a worktree that does not exist is refused before any forge read or Git read there", async () => {
+    const missing = join(temporaryDirectory("delivery-land-missing-"), "not-yet")
+    const spawns = gitSpawnLog()
+    let outcome: Awaited<ReturnType<typeof landPullRequest>>
+    let calls: Call[] = []
+    try {
+      const landed = await landInSession(() => ({
+        answers: { prView: [completed(mergedGithubPr())] },
+        params: { worktree: missing },
+      }))
+      outcome = landed.outcome
+      calls = landed.calls
+    } finally {
+      spawns.restore()
+    }
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) throw new Error("expected a refusal")
+    expect(outcome.reason).toContain("not an existing checkout")
+    expect(outcome.reason).toContain("no Git ran there")
+    // Nothing was read from the forge either, so a repository created at the path after this
+    // point is never entered: there is no later read to enter it.
+    expect(calls.filter((call) => call.argv[0] === "gh")).toEqual([])
+    expect(calls.filter((call) => call.cwd === missing)).toEqual([])
+    expect(spawns.log().filter((dir) => dir.endsWith("not-yet"))).toEqual([])
+  })
+
+  test("a repo of another repository is refused with the session-repository instruction", async () => {
+    const { outcome, calls } = await landInSession(() => ({
+      answers: { prView: [completed(mergedGithubPr())] },
+      params: { repo: "someone/else" },
+    }))
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) throw new Error("expected a refusal")
+    expect(outcome.reason).toContain("run delivery_land from a session in that repository")
+    expect(calls.filter((call) => call.argv[0] === "gh")).toEqual([])
+  })
+
+  test("local Git reads carry the literal options and lazy fetch is off; only the fetch uses the network", async () => {
+    const { outcome } = await landInSession(() => ({
+      answers: { prView: [completed(mergedGithubPr())], present: [false, true] },
+      sleep: true,
+    }))
+    if (!outcome.ok) throw new Error(outcome.reason)
+    const probes = rawGitArgv.filter((argv) => argv.includes("ls-remote"))
+    const fetches = rawGitArgv.filter((argv) => argv.includes("fetch"))
+    const reads = rawGitArgv.filter((argv) => !probes.includes(argv) && !fetches.includes(argv))
+    expect(reads.length).toBeGreaterThan(0)
+    const literal = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "--no-optional-locks"]
+    for (const argv of reads) expect(argv.slice(0, 1 + literal.length)).toEqual(["git", ...literal])
+    expect(fetches).toHaveLength(1)
+    expect(fetches[0]).toContain("core.fsmonitor=false")
+    expect(fetches[0]).toContain("core.hooksPath=/dev/null")
+    const shows = reads.filter((argv) => argv.includes("show"))
+    expect(shows.length).toBeGreaterThan(0)
+    for (const argv of shows) expect(argv).toContain("log.showSignature=false")
+    // No command that could run a clean or smudge filter (status, diff, checkout, add, ...) is issued.
+    const allowed = ["rev-parse", "remote", "worktree", "cat-file", "show", "fetch", "rev-list", "merge-base", "diff-tree", "patch-id"]
+    for (const argv of reads) expect(allowed.some((verb) => argv.includes(verb))).toBe(true)
+  })
+
+  test("local Git reads run with lazy fetch disabled", async () => {
+    const { calls } = await landInSession(() => ({ answers: { prView: [completed(mergedGithubPr())] } }))
+    const reads = calls.filter((call) => call.argv[0] === "git" && !call.argv.includes("ls-remote"))
+    expect(reads.length).toBeGreaterThan(0)
+    for (const call of reads) expect(call.env?.GIT_NO_LAZY_FETCH).toBe("1")
+  })
+})
+
 describe("branch reading", () => {
   test("bead ids come from the agent branch convention and nowhere else", () => {
     expect(beadIdsFromBranch("omp/agent/omp-plugins-9ej3.5")).toEqual(["omp-plugins-9ej3.5"])
@@ -1936,7 +2296,7 @@ describe("landing target resolution", () => {
     const { git, cwd } = gitAnswering(REMOTE_URL)
     const resolved = await resolveLandingTarget({ repo: "someone/else" }, git, cwd, {})
     expect("reason" in resolved && resolved.reason).toBe(
-      'repo: observed "someone/else", expected "srobroek/omp-plugins" from remote origin; the branch absence is verified against origin, so both must name one repository',
+      'repo: observed "someone/else", expected "srobroek/omp-plugins" from remote origin; the branch absence is verified against origin, so both must name one repository; to land a pull request of another repository, run delivery_land from a session in that repository',
     )
   })
 
@@ -1998,7 +2358,7 @@ describe("delivery_land brings the landed commits local before proving their sha
     const order = calls.map((call) => call.argv.join(" "))
     const merge = order.findIndex((command) => command.startsWith("gh pr merge"))
     const fetch = order.findIndex((command) => command.includes(" fetch "))
-    const show = order.findIndex((command) => command.startsWith("git show -s"))
+    const show = order.findIndex((command) => command.startsWith("git -c log.showSignature=false show -s"))
     expect(merge).toBeGreaterThanOrEqual(0)
     expect(merge).toBeLessThan(fetch)
     expect(fetch).toBeLessThan(show)
@@ -2064,7 +2424,7 @@ describe("delivery_land brings the landed commits local before proving their sha
     expect(first.outcome.reason).toContain(`re-run delivery_land with the same pr and expectHeadSha ${HEAD_OID}`)
     expect(first.slept).toEqual([0, 2_000, 5_000])
     expect(first.calls.filter((call) => merged(call.argv))).toHaveLength(1)
-    expect(first.calls.some((call) => call.argv[1] === "show")).toBe(false)
+    expect(first.calls.some((call) => call.argv.includes("show"))).toBe(false)
     expect(first.files()).toHaveLength(0)
 
     // The re-run the refusal names: the forge now reports MERGED and the commit is local.

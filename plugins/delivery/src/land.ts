@@ -78,6 +78,8 @@
 import { resolve } from "node:path"
 import pkg from "../package.json" with { type: "json" }
 import { readApproval, readChecks } from "./approval.ts"
+import { type GitPin, physical, verifyCheckout } from "./checkout-marker.ts"
+import { parseWorktreeList, type WorktreeRecord } from "./cleanup.ts"
 import {
   allowMergeCommit,
   autoDeleteSetting,
@@ -100,6 +102,7 @@ import {
   remoteBranchAbsent,
   repoPathFromRemote,
   runCli,
+  SAFE_GIT_ARGS,
   singleRemoteRecord,
 } from "./forge-adapter.ts"
 import {
@@ -590,7 +593,7 @@ async function mergeProof(pr: PrObservation, method: MergeMethod | null, git: Gi
   }
   const oid = pr.mergeCommitOid.trim().toLowerCase()
   const head = pr.headRefOid.trim().toLowerCase()
-  const output = await git(["show", "-s", "--format=%P", oid])
+  const output = await git(["-c", "log.showSignature=false", "show", "-s", "--format=%P", oid])
   if (output === null)
     return { reason: `git show -s --format=%P ${oid}: observed no completed read, expected the merge commit's parents` }
   const text = output.trim()
@@ -731,7 +734,7 @@ async function gitOutput(
   env: Readonly<Record<string, string>>,
   input?: string,
 ): Promise<string | null> {
-  const result = await run(["git", ...argv], { cwd, timeoutMs: GIT_TIMEOUT_MS, env, input })
+  const result = await run(["git", ...SAFE_GIT_ARGS, ...argv], { cwd, timeoutMs: GIT_TIMEOUT_MS, env, input })
   if (!result.ok || result.error !== undefined || result.exitCode !== 0) return null
   return result.stdout
 }
@@ -752,7 +755,7 @@ async function gitOutput(
 async function observeRepository(
   git: GitRead,
   cwd: string,
-): Promise<{ key: string; canonicalRoot: string; ledger: CanonicalLedger } | { reason: string }> {
+): Promise<{ key: string; canonicalRoot: string; commonDir: string; ledger: CanonicalLedger } | { reason: string }> {
   const printed = await git(REPOSITORY_OBSERVATION_ARGS)
   const repository = repositoryContext(cwd, (argv) =>
     argv.length === REPOSITORY_OBSERVATION_ARGS.length &&
@@ -765,7 +768,12 @@ async function observeRepository(
       reason: `git ${REPOSITORY_OBSERVATION_ARGS.join(" ")} in ${cwd}: observed no unambiguous repository paths, expected absolute git common directory and checkout top level`,
     }
   }
-  return { key: repository.key, canonicalRoot: repository.ledger.root, ledger: repository.ledger }
+  return {
+    key: repository.key,
+    canonicalRoot: repository.ledger.root,
+    commonDir: repository.commonDir,
+    ledger: repository.ledger,
+  }
 }
 
 /**
@@ -780,9 +788,10 @@ async function worktreeHead(
   run: CliRunner,
   path: string,
   env: Readonly<Record<string, string>>,
+  pin: GitPin,
 ): Promise<{ head: string } | { reason: string }> {
   const argv = ["rev-parse", "--verify", "HEAD^{commit}"]
-  const printed = await gitOutput(run, path, argv, env)
+  const printed = await gitOutput(run, path, argv, { ...env, ...pin })
   const head = printed?.trim().toLowerCase() ?? null
   if (head === null || !FULL_OID.test(head)) {
     return {
@@ -861,6 +870,54 @@ function observationMethod(argv: readonly string[]): string {
   return named ? head.join(" ") : RECEIPT_METHOD_UNKNOWN
 }
 
+/** One configured remote and the normalized repository path its URL names, or null when it names none. */
+export type RemotePath = { name: string; path: string | null }
+
+/**
+ * The remote that names `repo`, or null. `origin` wins when it matches, then the first
+ * match in the order given. The comparison is on normalized paths only; a remote that
+ * names no repository never matches, so the caller cannot be steered to a repository
+ * nobody named.
+ */
+export function selectRemoteForRepo(remotes: readonly RemotePath[], repo: string): string | null {
+  const matching = remotes.filter((remote) => remote.path !== null && remote.path === repo)
+  return matching.find((remote) => remote.name === "origin")?.name ?? matching[0]?.name ?? null
+}
+
+/**
+ * The linked worktree that has `branch` checked out at exactly `head`, or null. The
+ * main worktree is skipped: `delivery_cleanup` never removes it, so recording it
+ * would only make a later cleanup refuse. A prunable, detached or differently-headed
+ * record is skipped too, because the receipt must name a checkout holding the landed head.
+ */
+export function inferWorktree(records: readonly WorktreeRecord[], branch: string, head: string): string | null {
+  const found = records
+    .slice(1)
+    .find(
+      (record) =>
+        !record.prunable &&
+        !record.detached &&
+        record.branch === `refs/heads/${branch}` &&
+        record.head.toLowerCase() === head.toLowerCase(),
+    )
+  return found?.path ?? null
+}
+
+/** The remotes of the repository `git` reads, each with the normalized path its URL names. */
+async function remotePaths(git: GitRead): Promise<RemotePath[]> {
+  const listed = await git(["remote"])
+  if (listed === null) return []
+  const remotes: RemotePath[] = []
+  for (const name of listed.split("\n").filter((line) => REMOTE_NAME.test(line))) {
+    const printed = await git(["remote", "get-url", name])
+    const url = printed === null ? null : singleRemoteRecord(printed)
+    const target = url === null ? null : forgeTarget(url)
+    const raw = url === null ? null : repoPathFromRemote(url)
+    remotes.push({ name, path: target === null || raw === null ? null : normalizeRepoPath(target.forge, raw) })
+  }
+  return remotes
+}
+
 /** Where one landing's forge commands go, resolved from the configured remote before anything is merged. */
 export type LandingTarget = {
   remote: string
@@ -870,7 +927,7 @@ export type LandingTarget = {
   /** The canonical API host {@link forgeTarget} resolved for the remote's transport host. */
   forgeHost: "github.com" | GitlabHost
   nameWithOwner: string
-  repository: { key: string; canonicalRoot: string; ledger: CanonicalLedger }
+  repository: { key: string; canonicalRoot: string; commonDir: string; ledger: CanonicalLedger }
   /** `HOST/PATH`: the `--repo` every forge command is given. */
   cliRepo: string
   /** The forge environment with that verified host pinned. */
@@ -900,9 +957,17 @@ export async function resolveLandingTarget(
     }
   }
 
-  const remote = params.remote === undefined || params.remote.trim() === "" ? "origin" : params.remote.trim()
+  let remote = params.remote === undefined || params.remote.trim() === "" ? "origin" : params.remote.trim()
   if (!REMOTE_NAME.test(remote))
     return { reason: `remote: observed ${show(params.remote)}, expected a git remote name` }
+  // An explicit `repo` with no explicit `remote` selects the remote of this checkout
+  // that names that repository. The branch absence is still verified against the
+  // remote chosen here, so the repository verified is always the one `repo` names.
+  if (explicitRepo !== null && (params.remote === undefined || params.remote.trim() === "")) {
+    const wanted = normalizeRepoPath("gitlab", explicitRepo)
+    const picked = wanted === null ? null : selectRemoteForRepo(await remotePaths(git), wanted)
+    if (picked !== null) remote = picked
+  }
 
   const repository = await observeRepository(git, cwd)
   if ("reason" in repository) return repository
@@ -967,7 +1032,7 @@ export async function resolveLandingTarget(
   // of neither.
   if (normalizedRemote !== null && nameWithOwner !== normalizedRemote) {
     return {
-      reason: `repo: observed ${show(nameWithOwner)}, expected ${show(normalizedRemote)} from remote ${remote}; the branch absence is verified against ${remote}, so both must name one repository`,
+      reason: `repo: observed ${show(nameWithOwner)}, expected ${show(normalizedRemote)} from remote ${remote}; the branch absence is verified against ${remote}, so both must name one repository; to land a pull request of another repository, run delivery_land from a session in that repository`,
     }
   }
   // Only now, on top of a normalized path, is the host added — and it is added to
@@ -1014,6 +1079,11 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
   const env = deps.env ?? process.env
   const forgeEnv = forgeEnvironment(env)
   const gitEnv = gitObservationEnvironment(env)
+  // Every local Git read, fetch and remote probe runs in the session directory: a
+  // checkout of any other repository is untrusted, since even object-only Git commands
+  // can start programs its config names (promisor lazy fetch, alternate-refs helpers).
+  const explicitWorktree =
+    params.worktree === undefined || params.worktree.trim() === "" ? null : resolve(cwd, params.worktree.trim())
   const git: GitRead = (argv, input) => gitOutput(run, cwd, argv, gitEnv, input)
   // Every adapter call runs with the same neutralised environment, except where the
   // adapter passes one of its own: `remoteBranchAbsent` hardens Git's environment
@@ -1044,6 +1114,29 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
   if ("reason" in resolved) return refuse(resolved.reason)
   const { remote, remoteUrl, forge, forgeHost, nameWithOwner, repository, cliRepo, forgeCommandEnv } = resolved
   const gitlabHost: GitlabHost | undefined = forgeHost === "github.com" ? undefined : forgeHost
+  // A worktree is read with Git, so it must provably belong to the session repository
+  // first; this looks only at its `.git` entry and runs no Git process there.
+  const sessionCommonDir = repository.commonDir
+  // Only a worktree that provably belongs to this repository is read, and it is resolved
+  // exactly once: the verification, the pin and the HEAD read all use that one physical
+  // path. Anything else, a path that does not exist yet included, is refused before Git runs.
+  let explicitCheckout: { real: string; pin: GitPin } | null = null
+  if (explicitWorktree !== null) {
+    const real = physical(explicitWorktree)
+    const verdict = real === null ? ({ state: "absent" } as const) : verifyCheckout(real, sessionCommonDir)
+    if (real === null || verdict.state !== "same") {
+      const what =
+        verdict.state === "foreign"
+          ? "a checkout of another repository"
+          : verdict.state === "absent"
+            ? "not an existing checkout"
+            : "not a checkout owned by this repository"
+      return refuse(
+        `worktree: observed ${show(explicitWorktree)} as ${what}, expected a worktree of the session repository ${show(nameWithOwner)}; run delivery_land from a session in the pull request's repository; no Git ran there, no merge was issued and no receipt was written`,
+      )
+    }
+    explicitCheckout = { real, pin: verdict.pin }
+  }
   const boundForgeRun: CliRunner = (argv, options) => run(argv, { ...options, env: options.env ?? forgeCommandEnv })
 
   const first = await readPr(run, forge, cliRepo, number, FORGE_TIMEOUT_MS, forgeCommandEnv)
@@ -1073,11 +1166,22 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
 
   // The worktree is recorded for `delivery_cleanup` to remove, so it is read before
   // anything is merged or written, on either path: it must hold the head that lands.
-  const worktreePath =
-    params.worktree === undefined || params.worktree.trim() === "" ? null : resolve(cwd, params.worktree.trim())
   let worktree: { path: string; head: string } | null = null
-  if (worktreePath !== null) {
-    const held = await worktreeHead(run, worktreePath, gitEnv)
+  const worktreePath = explicitWorktree
+  if (worktreePath === null || explicitCheckout === null) {
+    // No worktree named: record the linked worktree that holds the PR's branch at the
+    // PR's head, so `delivery_cleanup` has something to remove. Finding none is not a
+    // refusal; the receipt then records no worktree, as it always did.
+    const listed = await git(["worktree", "list", "--porcelain"])
+    const inferred = listed === null ? null : inferWorktree(parseWorktreeList(listed), first.pr.headRefName, head)
+    const real = inferred === null ? null : physical(inferred)
+    const verdict = real === null ? null : verifyCheckout(real, sessionCommonDir)
+    if (inferred !== null && real !== null && verdict?.state === "same") {
+      const held = await worktreeHead(run, real, gitEnv, verdict.pin)
+      if (!("reason" in held) && held.head === head) worktree = { path: inferred, head: held.head }
+    }
+  } else {
+    const held = await worktreeHead(run, explicitCheckout.real, gitEnv, explicitCheckout.pin)
     if ("reason" in held) {
       return refuse(
         `${held.reason} to compare with pr.headRefOid ${show(first.pr.headRefOid)}; no merge was issued and no receipt was written`,
@@ -1251,8 +1355,8 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
   const unproven = missingBeadIdentity(proven.ids, proved.headRefName, repository.ledger)
   if (unproven !== null) return refuseMerged(unproven)
 
-  // The probe is asked from this call's own working directory: `remote` is a name,
-  // and a name only resolves in the repository that configures it.
+  // The probe is asked from the checkout that configures `remote`: a name only
+  // resolves in the repository that owns it.
   const verdict = await remoteBranchAbsent(remote, proved.headRefName, cwd, forgeRun, env)
   if (verdict !== "absent") {
     notes.push(
@@ -1334,7 +1438,7 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
           remoteAbsenceVerifiedAt: verdict === "absent" ? observedAt : null,
           autoDeleteSetting: observedAutoDelete,
         },
-        worktree: { path: worktreePath, removed: false, localRefDeleted: false, absenceVerifiedAt: null },
+        worktree: { path: worktree?.path ?? null, removed: false, localRefDeleted: false, absenceVerifiedAt: null },
         beads: { ids: proven.ids, ledgerActive: repository.ledger.active },
         proof: { method: observationMethod(observingArgv), observedAt, evidence },
         outcome: "landed",

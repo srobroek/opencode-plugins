@@ -29,12 +29,12 @@ import {
   type CleanupBounds,
   type CleanupDeps,
   type CleanupResult,
-  cleanupDelivery,
+  cleanupDelivery as cleanupDeliveryUnwrapped,
   type DeliveryCleanupParams,
   removalRoute,
 } from "./cleanup.ts"
-import { type CliResult, type CliRunner, runCli } from "./forge-adapter.ts"
-import { landPullRequest } from "./land.ts"
+import { type CliResult, type CliRunner, runCli, SAFE_GIT_ARGS } from "./forge-adapter.ts"
+import { type LandDeps, type LandParams, landPullRequest as landPullRequestUnwrapped } from "./land.ts"
 import {
   buildReceipt,
   type LandingReceipt,
@@ -67,6 +67,32 @@ type Fixture = {
 }
 
 type FixtureLayout = "normal" | "separate-git-dir" | "separate-dot-git-dir" | "submodule"
+
+/** Every raw git argv a wrapped call issued, with the safe-option prefix still on. */
+const rawGitArgv: string[][] = []
+
+/** The argv without the safe-option prefix every checkout-bound Git command carries. */
+const withoutSafeGit = (argv: readonly string[]): string[] =>
+  argv[0] === "git" && SAFE_GIT_ARGS.every((part, index) => argv[index + 1] === part)
+    ? ["git", ...argv.slice(1 + SAFE_GIT_ARGS.length)]
+    : [...argv]
+
+/** A runner that sees Git argv without the safe prefix, so scripted runners match on the verb. */
+const stripped =
+  (inner: CliRunner): CliRunner =>
+  (argv, options) => {
+    if (argv[0] === "git") rawGitArgv.push([...argv])
+    return inner(withoutSafeGit(argv), options)
+  }
+
+/** `cleanupDelivery` with a supplied runner seeing the stripped argv; without one it runs real Git, prefix and all. */
+function cleanupDelivery(params: DeliveryCleanupParams, cwd: string, deps: CleanupDeps = {}) {
+  return cleanupDeliveryUnwrapped(params, cwd, deps.run === undefined ? deps : { ...deps, run: stripped(deps.run) })
+}
+
+function landPullRequest(params: LandParams, deps: LandDeps = {}) {
+  return landPullRequestUnwrapped(params, deps.run === undefined ? deps : { ...deps, run: stripped(deps.run) })
+}
 
 type RecordedCall = {
   argv: string[]
@@ -167,6 +193,64 @@ function git(cwd: string, args: string[]): string {
     stdio: ["ignore", "pipe", "pipe"],
     env: { ...process.env, GIT_CONFIG_GLOBAL: devNull, GIT_CONFIG_NOSYSTEM: "1" },
   }).trim()
+}
+
+/**
+ * Make a fixture repository hostile: `core.fsmonitor`, a clean filter selected by
+ * `info/attributes`, a `filter.<x>.process` driver and `include.path` config each run a
+ * script that writes a marker file, and every hook writes one too.
+ */
+function hostileConfig(f: Fixture): { markers: Record<string, string> } {
+  const dir = scratch("hostile")
+  const markers: Record<string, string> = {}
+  const script = (name: string, body = "cat"): string => {
+    const marker = join(dir, `${name}.ran`)
+    markers[name] = marker
+    const path = join(dir, `${name}.sh`)
+    writeFileSync(path, `#!/bin/sh\ntouch "${marker}"\n${body}\n`, { mode: 0o755 })
+    return path
+  }
+  git(f.main, ["config", "core.fsmonitor", script("fsmonitor", "printf '\\0'")])
+  git(f.main, ["config", "filter.hostile.process", script("process")])
+  const included = join(dir, "included.config")
+  writeFileSync(included, `[filter "included"]\n\tclean = ${script("included")}\n`)
+  git(f.main, ["config", "include.path", included])
+  const tracked = git(f.linked, ["ls-files"]).split("\n").filter(Boolean)
+  // `included` is a clean driver from `include.path`, `hostile` a long-running process driver.
+  writeFileSync(join(f.main, ".git", "info", "attributes"), `* filter=included\n${tracked[0]} filter=hostile\n`)
+  const hooks = join(dir, "hooks")
+  mkdirSync(hooks)
+  for (const hook of ["post-checkout", "reference-transaction", "post-index-change", "pre-auto-gc"]) {
+    const marker = join(dir, `hook-${hook}.ran`)
+    markers[`hook-${hook}`] = marker
+    writeFileSync(join(hooks, hook), `#!/bin/sh\ntouch "${marker}"\nexit 0\n`, { mode: 0o755 })
+  }
+  git(f.main, ["config", "core.hooksPath", hooks])
+  // Make a tracked file stat-dirty so a status has to re-hash it through the clean filter.
+  for (const file of tracked) writeFileSync(join(f.linked, file), readFileSync(join(f.linked, file)))
+  return { markers }
+}
+
+const ranMarkers = (markers: Record<string, string>): string[] =>
+  Object.entries(markers)
+    .filter(([, marker]) => existsSync(marker))
+    .map(([name]) => name)
+    .sort()
+
+/** Put a `git` shim first on PATH that logs the directory of every spawn, sync or async. */
+function gitSpawnLog(): { log: () => string[]; restore: () => void } {
+  const dir = scratch("git-shim")
+  const logFile = join(dir, "spawns.log")
+  const real = execFileSync("which", ["git"], { encoding: "utf8" }).trim()
+  writeFileSync(join(dir, "git"), `#!/bin/sh\npwd -P >> "${logFile}"\nexec "${real}" "$@"\n`, { mode: 0o755 })
+  const before = process.env.PATH
+  process.env.PATH = `${dir}:${before ?? ""}`
+  return {
+    log: () => (existsSync(logFile) ? readFileSync(logFile, "utf8").split("\n").filter(Boolean) : []),
+    restore: () => {
+      process.env.PATH = before
+    },
+  }
 }
 
 function gitExit(cwd: string, args: string[]): number | null {
@@ -551,6 +635,20 @@ describe("delivery_cleanup irreversible boundary", () => {
     expect(listReceipts(receiptDirectory(f.env, f.receipt.repo.key))).toHaveLength(2)
   }, 60_000)
 
+  test("from another repository, a pr without a worktree or receipt still finds no receipt", async () => {
+    const f = fixture("cross-bare-pr")
+    const session = fixture("cross-bare-pr-session")
+    const scripted = runner(f, {})
+    const result = await cleanupDelivery({ pr: 17 }, session.main, {
+      run: scripted.run,
+      now: () => NOW + 10,
+      env: f.env,
+      bounds: HEAVY_FIXTURE_BOUNDS,
+    })
+    expect(refusal(result)).toContain("receipt")
+    expect(existsSync(f.linked)).toBe(true)
+  }, 60_000)
+
   test("a retired ledger, agreed by the receipt and the canonical root, cleans up with no bd command", async () => {
     const f = fixture("inactive-ledger", "feat/inactive-ledger", "retired")
 
@@ -905,9 +1003,12 @@ describe("delivery_cleanup irreversible boundary", () => {
     }
     const identityRead = details.find((call) => call.argv[1] === "remote" && call.argv[2] === "get-url")
     expect(identityRead?.argv).toEqual(["git", "remote", "get-url", "origin"])
-    for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_CONFIG_GLOBAL"]) {
-      expect(identityRead?.env?.[key]).toBeUndefined()
-    }
+    // The ambient selectors are gone; the only GIT_DIR / GIT_WORK_TREE are the ones the
+    // call pinned from the verified checkout, never the inherited "/elsewhere" values.
+    expect(identityRead?.env?.GIT_CONFIG_GLOBAL).toBeUndefined()
+    expect(identityRead?.env?.GIT_WORK_TREE).toBe(f.linked)
+    expect(identityRead?.env?.GIT_DIR?.startsWith(join(f.main, ".git", "worktrees"))).toBe(true)
+    expect(identityRead?.env?.GIT_COMMON_DIR).toBe(join(f.main, ".git"))
   }, 60_000)
 
   test("a valid receipt extension named ok cannot collide with cleanup's private resolution tag", async () => {
@@ -1998,4 +2099,327 @@ describe("delivery_cleanup host worktree registry", () => {
     expect(calls.flat()).not.toContain("--force")
     expect(existsSync(f.linked)).toBe(true)
   }, 60_000)
+})
+
+/** The options every checkout-bound Git command must carry, spelled out and independent of the source constant. */
+const EXPECTED_SAFE_GIT = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "--no-optional-locks"]
+
+describe("delivery_cleanup fails closed on another repository", () => {
+  const selectors = [
+    ["the receipt path", (f: Fixture): DeliveryCleanupParams => ({ receipt: f.receiptPath })],
+    ["the worktree", (f: Fixture): DeliveryCleanupParams => ({ pr: 17, worktree: f.linked })],
+  ] as const
+  const hosts = [
+    ["without a host registry", undefined],
+    [
+      "with a host registry",
+      {
+        list: async () => [],
+        remove: async () => {
+          throw new Error("the host remover must not be called")
+        },
+      },
+    ],
+  ] as const
+
+  describe.each(selectors)("selected by %s", (_selector, params) => {
+    test.each(hosts)("%s: refused before any Git process runs in the target", async (_name, host) => {
+      const f = fixture("foreign-target")
+      const session = fixture("foreign-session")
+      const { markers } = hostileConfig(f)
+      // Sanity: the same hostile checkout does run its programs under plain Git.
+      execFileSync("git", ["status", "--porcelain"], {
+        cwd: f.linked,
+        env: { ...process.env, GIT_CONFIG_GLOBAL: devNull, GIT_CONFIG_NOSYSTEM: "1" },
+      })
+      expect(ranMarkers(markers)).toEqual(expect.arrayContaining(["fsmonitor", "included", "process"]))
+      for (const marker of Object.values(markers)) rmSync(marker, { force: true })
+
+      const spawns = gitSpawnLog()
+      const scripted = runner(f, {})
+      try {
+        const result = await cleanupDelivery(params(f), session.main, {
+          run: scripted.run,
+          now: () => NOW + 10,
+          env: f.env,
+          bounds: HEAVY_FIXTURE_BOUNDS,
+          ...(host === undefined ? {} : { host }),
+        })
+        const reason = refusal(result)
+        expect(reason).toContain("worktree.owner")
+        expect(reason).toContain("from a session in that repository")
+        const foreign = [f.main, f.linked, dirname(f.main)].map((path) => realpathSync(path))
+        const entered = spawns.log().filter((dir) => foreign.some((path) => dir === path || dir.startsWith(`${path}/`)))
+        expect(entered).toEqual([])
+      } finally {
+        spawns.restore()
+      }
+      expect(ranMarkers(markers)).toEqual([])
+      expect(scripted.details.filter((call) => call.cwd !== undefined && call.cwd !== session.main)).toEqual([])
+      expect(mutationCalls(scripted.calls)).toEqual([])
+      expect(existsSync(f.linked)).toBe(true)
+    }, 60_000)
+  })
+})
+
+describe("delivery_cleanup Git options in its own repository", () => {
+  /** Cleanup with the real Git behind the runner, raw argv included, so overrides actually take effect. */
+  function realGitRunner(f: Fixture): { run: CliRunner; raw: string[][] } {
+    const scripted = runner(f, {})
+    const raw: string[][] = []
+    const run: CliRunner = (argv, options) => {
+      if (argv[0] === "git") raw.push([...argv])
+      const verb = withoutSafeGit(argv)
+      if (verb[0] !== "git" || verb[1] === "remote" || verb.includes("ls-remote")) return scripted.run(verb, options)
+      return runCli(argv, options)
+    }
+    return { run, raw }
+  }
+
+  test("every checkout-bound Git command carries the literal safe options", async () => {
+    const f = fixture("safe-literal")
+    const { run, raw } = realGitRunner(f)
+    const result = await cleanupDeliveryUnwrapped({ receipt: f.receiptPath }, f.main, {
+      run,
+      now: () => NOW + 10,
+      env: f.env,
+      bounds: HEAVY_FIXTURE_BOUNDS,
+    })
+    expect(result.ok).toBe(true)
+    const bound = raw.filter((argv) => !argv.includes("ls-remote"))
+    expect(bound.some((argv) => argv.includes("status"))).toBe(true)
+    for (const argv of bound) expect(argv.slice(0, 1 + EXPECTED_SAFE_GIT.length)).toEqual(["git", ...EXPECTED_SAFE_GIT])
+  }, 60_000)
+
+  test("hooks and filter drivers of the checkout do not run during a full cleanup", async () => {
+    const f = fixture("safe-hooks")
+    const { markers } = hostileConfig(f)
+    for (const marker of Object.values(markers)) rmSync(marker, { force: true }) // setup reads may have fired some
+    const { run } = realGitRunner(f)
+    const result = await cleanupDeliveryUnwrapped({ receipt: f.receiptPath }, f.main, {
+      run,
+      now: () => NOW + 10,
+      env: f.env,
+      bounds: HEAVY_FIXTURE_BOUNDS,
+    })
+    // The attribute-selected filter driver is not covered by the options; the hooks and
+    // the fsmonitor are. This is the session's own repository, which it already trusts.
+    expect(result.ok).toBe(true)
+    for (const name of ["fsmonitor", "hook-post-checkout", "hook-reference-transaction", "hook-post-index-change"]) {
+      expect(existsSync(markers[name] ?? "")).toBe(false)
+    }
+    // Sanity: plain Git does fire the reference-transaction hook for the same kind of write.
+    git(f.main, ["update-ref", "refs/heads/zz-sanity", "HEAD"])
+    expect(existsSync(markers["hook-reference-transaction"] ?? "")).toBe(true)
+  }, 60_000)
+
+  test("a refused cleanup leaves the index byte-identical", async () => {
+    const f = fixture("safe-index")
+    const indexPath = join(git(f.linked, ["rev-parse", "--absolute-git-dir"]), "index")
+    const tracked = git(f.linked, ["ls-files"]).split("\n")[0] ?? ""
+    writeFileSync(join(f.linked, tracked), readFileSync(join(f.linked, tracked)))
+    writeFileSync(join(f.linked, "untracked.txt"), "dirty\n")
+    const before = readFileSync(indexPath)
+    const { run } = realGitRunner(f)
+    const result = await cleanupDeliveryUnwrapped({ receipt: f.receiptPath }, f.main, {
+      run,
+      now: () => NOW + 10,
+      env: f.env,
+      bounds: HEAVY_FIXTURE_BOUNDS,
+    })
+    expect(refusal(result)).toContain("worktree.status")
+    expect(readFileSync(indexPath).equals(before)).toBe(true)
+    // Sanity: plain `git status` refreshes the stat-dirty entry, so the check above can fail.
+    git(f.linked, ["status", "--porcelain"])
+    expect(readFileSync(indexPath).equals(before)).toBe(false)
+  }, 60_000)
+})
+
+describe("delivery_cleanup pins Git to the verified worktree", () => {
+  test("a marker swapped after verification does not redirect Git", async () => {
+    const f = fixture("pinned-swap")
+    const foreign = fixture("pinned-swap-foreign")
+    const { markers } = hostileConfig(foreign)
+    for (const marker of Object.values(markers)) rmSync(marker, { force: true })
+    let swapped = false
+    const { result, details } = await invoke(
+      f,
+      { receipt: f.receiptPath },
+      {
+        before: (argv) => {
+          if (swapped || argv[1] !== "status") return
+          swapped = true
+          writeFileSync(join(f.linked, ".git"), readFileSync(join(foreign.linked, ".git")))
+        },
+      },
+    )
+    expect(swapped).toBe(true)
+    // The first status ran after the swap, yet against the verified repository: its env pins
+    // the session's admin directory and the worktree, so the changed marker was never consulted.
+    const status = details.find((call) => call.argv.includes("status"))
+    expect(status?.env?.GIT_DIR?.startsWith(join(f.main, ".git", "worktrees"))).toBe(true)
+    expect(status?.env?.GIT_WORK_TREE).toBe(f.linked)
+    expect(status?.env?.GIT_COMMON_DIR).toBe(join(f.main, ".git"))
+    // The next verification reads the swapped marker and refuses before the removal.
+    expect(refusal(result)).toContain("worktree.marker")
+    expect(ranMarkers(markers)).toEqual([])
+    expect(existsSync(f.linked)).toBe(true)
+  }, 60_000)
+
+  test("the removal and branch deletion run pinned to a verified main worktree", async () => {
+    const f = fixture("pinned-exec")
+    const { result, details } = await invoke(f)
+    expect(result.ok).toBe(true)
+    for (const verb of [["worktree", "remove"], ["branch", "-d"]]) {
+      const call = details.find((entry) => entry.argv.includes(verb[0] as string) && entry.argv.includes(verb[1] as string))
+      expect(call?.env?.GIT_DIR).toBe(join(f.main, ".git"))
+      expect(call?.env?.GIT_WORK_TREE).toBe(f.main)
+    }
+  }, 60_000)
+})
+
+describe("delivery_cleanup resolves the target path once", () => {
+  test("a symlinked parent switched between steps cannot move any step to another tree", async () => {
+    const f = fixture("resolve-once")
+    const foreign = fixture("resolve-once-foreign")
+    const alias = join(scratch("alias"), "parent")
+    symlinkSync(f.root, alias, "dir")
+    const viaAlias = join(alias, basename(f.linked))
+    const receipt = buildReceipt({
+      ...f.receipt,
+      now: NOW + 1,
+      worktree: { path: viaAlias, removed: false, localRefDeleted: false, absenceVerifiedAt: null },
+      continues: f.receipt,
+    })
+    const path = writeReceipt(receipt, receiptDirectory(f.env, receipt.repo.key))
+    let switched = false
+    const { result, details } = await invoke(
+      f,
+      { receipt: path },
+      {
+        before: (argv) => {
+          if (switched || argv[1] !== "status") return
+          switched = true
+          rmSync(alias)
+          symlinkSync(foreign.root, alias, "dir")
+        },
+      },
+    )
+    expect(switched).toBe(true)
+    // Every command run in the target used the one physical path, never the alias.
+    const inTarget = details.filter((call) => call.cwd !== undefined && call.cwd !== f.main && call.argv[0] === "git")
+    expect(inTarget.length).toBeGreaterThan(0)
+    for (const call of inTarget) {
+      expect(call.cwd).toBe(f.linked)
+      expect(call.env?.GIT_WORK_TREE).toBe(f.linked)
+    }
+    expect(details.some((call) => call.cwd?.includes(alias) === true)).toBe(false)
+    // The next verification resolves the receipt path afresh and no longer finds a registered worktree.
+    expect(refusal(result)).toContain("worktree.")
+    expect(mutationCalls(details.map((call) => call.argv))).toEqual([])
+    expect(existsSync(f.linked)).toBe(true)
+  }, 60_000)
+
+  test("a receipt path that does not resolve is refused before any Git runs in it", async () => {
+    const f = fixture("resolve-missing")
+    const receipt = buildReceipt({
+      ...f.receipt,
+      now: NOW + 1,
+      worktree: { path: join(f.root, "missing"), removed: false, localRefDeleted: false, absenceVerifiedAt: null },
+      continues: f.receipt,
+    })
+    const path = writeReceipt(receipt, receiptDirectory(f.env, receipt.repo.key))
+    const { result, details } = await invoke(f, { receipt: path })
+    expect(refusal(result)).toContain("worktree.path")
+    expect(details.filter((call) => call.cwd === join(f.root, "missing"))).toEqual([])
+  }, 60_000)
+})
+
+describe("delivery_cleanup refuses a registered worktree whose directory is not this repository's", () => {
+  /** Each way the directory behind an intact registration can stop belonging to the session repository. */
+  const replacements: Array<[string, (f: Fixture, foreign: Fixture) => void]> = [
+    [
+      ".git replaced by a symlink to another repository",
+      (f, foreign) => {
+        rmSync(join(f.linked, ".git"))
+        symlinkSync(join(foreign.main, ".git"), join(f.linked, ".git"))
+      },
+    ],
+    [
+      ".git file naming another repository's worktree admin directory",
+      (f, foreign) => {
+        writeFileSync(join(f.linked, ".git"), readFileSync(join(foreign.linked, ".git")))
+      },
+    ],
+    [
+      "directory replaced by another repository's checkout",
+      (f, foreign) => {
+        rmSync(f.linked, { recursive: true, force: true })
+        cpSync(foreign.main, f.linked, { recursive: true })
+      },
+    ],
+    [
+      ".git whose gitdir has a leading blank, so Git reads it as a relative name inside the target",
+      (f, foreign) => {
+        const admin = /^gitdir: (.+)$/m.exec(readFileSync(join(foreign.linked, ".git"), "utf8"))?.[1] ?? ""
+        mkdirSync(join(f.linked, ` ${admin}`), { recursive: true })
+        writeFileSync(join(f.linked, ` ${admin}`, "commondir"), `${join(f.main, ".git")}\n`)
+        writeFileSync(join(f.linked, ".git"), `gitdir:  ${admin}\n`)
+      },
+    ],
+    [
+      ".git replaced by a FIFO",
+      (f) => {
+        rmSync(join(f.linked, ".git"))
+        Bun.spawnSync(["mkfifo", join(f.linked, ".git")])
+      },
+    ],
+    [
+      "gitdir whose commondir is a FIFO",
+      (f) => {
+        const evil = scratch("evil-gitdir")
+        Bun.spawnSync(["mkfifo", join(evil, "commondir")])
+        writeFileSync(join(f.linked, ".git"), `gitdir: ${evil}\n`)
+      },
+    ],
+    [
+      "gitdir whose commondir is a symlink to a FIFO",
+      (f) => {
+        const evil = scratch("evil-gitdir")
+        const fifo = join(scratch("fifo"), "pipe")
+        Bun.spawnSync(["mkfifo", fifo])
+        symlinkSync(fifo, join(evil, "commondir"))
+        writeFileSync(join(f.linked, ".git"), `gitdir: ${evil}\n`)
+      },
+    ],
+  ]
+
+  test.each(replacements)("%s", async (_name, replace) => {
+    const f = fixture("marker-target")
+    const foreign = fixture("marker-foreign")
+    const { markers } = hostileConfig(foreign)
+    for (const marker of Object.values(markers)) rmSync(marker, { force: true })
+    replace(f, foreign)
+    const target = realpathSync(f.linked)
+
+    const spawns = gitSpawnLog()
+    const scripted = runner(f, {})
+    try {
+      const result = await cleanupDelivery({ receipt: f.receiptPath }, f.main, {
+        run: scripted.run,
+        now: () => NOW + 10,
+        env: f.env,
+        bounds: HEAVY_FIXTURE_BOUNDS,
+      })
+      expect(refusal(result)).toContain("worktree.marker")
+      const entered = spawns.log().filter((dir) => dir === target || dir.startsWith(`${target}/`))
+      expect(entered).toEqual([])
+    } finally {
+      spawns.restore()
+    }
+    expect(ranMarkers(markers)).toEqual([])
+    expect(scripted.details.filter((call) => call.cwd === f.linked)).toEqual([])
+    expect(mutationCalls(scripted.calls)).toEqual([])
+    expect(existsSync(f.linked)).toBe(true)
+  }, 30_000)
 })

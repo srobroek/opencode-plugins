@@ -40,6 +40,9 @@ import { devNull, tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { supervise } from "@srobroek/opencode-lib/subprocess"
+import { SAFE_GIT_ARGS } from "./safe-git.ts"
+
+export { SAFE_GIT_ARGS }
 
 export type Forge = "github" | "gitlab" | "unknown"
 /** The GitLab instances whose API this adapter addresses, by canonical API host. */
@@ -255,6 +258,9 @@ export function gitObservationEnvironment(source: NodeJS.ProcessEnv = process.en
   }
   env.GIT_ALLOW_PROTOCOL = "file:https:ssh"
   env.GIT_TERMINAL_PROMPT = "0"
+  // A local read never fetches missing objects from a promisor remote (git >= 2.44;
+  // older Git ignores it). The explicit fetch stays the only network path.
+  env.GIT_NO_LAZY_FETCH = "1"
   return env
 }
 
@@ -982,6 +988,8 @@ export function fetchCommitsArgv(
     ...LS_REMOTE_PROTOCOL_POLICY,
     "-c",
     `core.hooksPath=${devNull}`,
+    "-c",
+    "core.fsmonitor=false",
     "fetch",
     "--quiet",
     "--no-tags",

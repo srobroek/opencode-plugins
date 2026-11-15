@@ -1290,6 +1290,7 @@ describe("every issued command", () => {
       "FORGE_TIMEOUT_MS",
       "MERGE_METHODS",
       "REMOTE_NAME",
+      "SAFE_GIT_ARGS",
       "allowMergeCommit",
       "autoDeleteSetting",
       "detectForge",

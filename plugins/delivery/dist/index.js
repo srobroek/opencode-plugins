@@ -312,8 +312,8 @@ function loadAgents(ids = AGENT_IDS) {
 }
 
 // plugins/delivery/src/cleanup.ts
-import { lstatSync as lstatSync2, realpathSync as realpathSync3 } from "fs";
-import { dirname as dirname2, isAbsolute as isAbsolute2, resolve as resolve2, sep } from "path";
+import { lstatSync as lstatSync3, realpathSync as realpathSync3 } from "fs";
+import { basename as basename2, dirname as dirname3, isAbsolute as isAbsolute2, resolve as resolve2, sep } from "path";
 import { isDeepStrictEqual } from "util";
 // plugins/delivery/package.json
 var package_default = {
@@ -350,13 +350,140 @@ var package_default = {
   }
 };
 
+// plugins/delivery/src/checkout-marker.ts
+import { closeSync, constants, fstatSync, lstatSync, openSync, readlinkSync, readSync } from "fs";
+import { dirname, join } from "path";
+var MAX_MARKER_BYTES = 64 * 1024;
+function readBounded(path) {
+  let fd;
+  try {
+    if (!lstatSync(path).isFile())
+      return { kind: "unreadable" };
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const info = fstatSync(fd);
+    if (!info.isFile() || info.size > MAX_MARKER_BYTES)
+      return { kind: "unreadable" };
+    const buffer = Buffer.alloc(info.size);
+    let offset = 0;
+    while (offset < buffer.length) {
+      const read = readSync(fd, buffer, offset, buffer.length - offset, offset);
+      if (read === 0)
+        break;
+      offset += read;
+    }
+    return { kind: "text", text: buffer.toString("utf8", 0, offset) };
+  } catch (error) {
+    return error.code === "ENOENT" ? { kind: "absent" } : { kind: "unreadable" };
+  } finally {
+    if (fd !== undefined)
+      closeSync(fd);
+  }
+}
+var MAX_LINKS = 40;
+function physical(path) {
+  const pending = (path.startsWith("/") ? path : `${process.cwd()}/${path}`).split("/").reverse();
+  let resolved = "";
+  let isDirectory = true;
+  let links = 0;
+  while (pending.length > 0) {
+    const part = pending.pop();
+    if (!isDirectory)
+      return null;
+    if (part === "" || part === ".")
+      continue;
+    if (part === "..") {
+      resolved = resolved.slice(0, resolved.lastIndexOf("/"));
+      continue;
+    }
+    const candidate = `${resolved}/${part}`;
+    try {
+      const stat = lstatSync(candidate);
+      if (!stat.isSymbolicLink()) {
+        resolved = candidate;
+        isDirectory = stat.isDirectory();
+        continue;
+      }
+      if (++links > MAX_LINKS)
+        return null;
+      const target = readlinkSync(candidate);
+      if (target.startsWith("/"))
+        resolved = "";
+      pending.push(...target.split("/").reverse());
+    } catch {
+      return null;
+    }
+  }
+  return resolved === "" ? "/" : resolved;
+}
+function physicalFrom(base, value) {
+  return physical(value.startsWith("/") ? value : `${base}/${value}`);
+}
+function gitFileValue(text) {
+  if (!text.startsWith("gitdir: "))
+    return null;
+  const value = text.slice("gitdir: ".length).replace(/\r?\n$/, "");
+  return value === "" || /[\r\n]/.test(value) ? null : value;
+}
+function commondirValue(text) {
+  const value = text.replace(/\r?\n$/, "");
+  return value === "" || /[\r\n]/.test(value) ? null : value;
+}
+function verifyCheckout(checkout, commonDir) {
+  const entry = join(checkout, ".git");
+  const workTree = checkout;
+  let stat;
+  try {
+    stat = lstatSync(entry);
+  } catch (error) {
+    const code = error.code;
+    return { state: code === "ENOENT" || code === "ENOTDIR" ? "absent" : "unsafe" };
+  }
+  if (stat.isSymbolicLink())
+    return { state: "unsafe" };
+  const pin = (gitDir) => ({ GIT_DIR: gitDir, GIT_WORK_TREE: workTree, GIT_COMMON_DIR: commonDir });
+  if (stat.isDirectory()) {
+    const real = physical(entry);
+    return real === commonDir ? { state: "same", pin: pin(commonDir) } : { state: real === null ? "unsafe" : "foreign" };
+  }
+  if (!stat.isFile())
+    return { state: "unsafe" };
+  const marker = readBounded(entry);
+  if (marker.kind !== "text")
+    return { state: "unsafe" };
+  const named = gitFileValue(marker.text);
+  const gitDir = named === null ? null : physicalFrom(checkout, named);
+  if (gitDir === null)
+    return { state: "unsafe" };
+  let claimed = gitDir;
+  const commondir = readBounded(join(gitDir, "commondir"));
+  if (commondir.kind === "unreadable")
+    return { state: "unsafe" };
+  if (commondir.kind === "text") {
+    const value = commondirValue(commondir.text);
+    const resolved = value === null ? null : physicalFrom(gitDir, value);
+    if (resolved === null)
+      return { state: "unsafe" };
+    claimed = resolved;
+  }
+  if (claimed !== commonDir)
+    return { state: "foreign" };
+  if (gitDir === commonDir)
+    return { state: "same", pin: pin(gitDir) };
+  const worktrees = physical(join(commonDir, "worktrees"));
+  return worktrees !== null && dirname(gitDir) === worktrees ? { state: "same", pin: pin(gitDir) } : { state: "unsafe" };
+}
+function inspectCheckoutMarker(checkout, commonDir) {
+  const real = physical(checkout);
+  return real === null ? "absent" : verifyCheckout(real, commonDir).state;
+}
+
 // plugins/delivery/src/forge-adapter.ts
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "fs";
-import { devNull, tmpdir } from "os";
-import { join } from "path";
+import { devNull as devNull2, tmpdir } from "os";
+import { join as join2 } from "path";
 
 // plugins/lib/src/subprocess.ts
-import { constants } from "os";
+import { constants as constants2 } from "os";
 var EXIT_GRACE_MS = 2000;
 var EXIT_POLL_MS = 100;
 function processAlive(pid) {
@@ -484,8 +611,18 @@ function signalName(code) {
     return null;
   if (typeof code === "string")
     return code;
-  return Object.entries(constants.signals).find(([, n]) => n === code)?.[0] ?? String(code);
+  return Object.entries(constants2.signals).find(([, n]) => n === code)?.[0] ?? String(code);
 }
+
+// plugins/delivery/src/safe-git.ts
+import { devNull } from "os";
+var SAFE_GIT_ARGS = [
+  "-c",
+  "core.fsmonitor=false",
+  "-c",
+  `core.hooksPath=${devNull}`,
+  "--no-optional-locks"
+];
 
 // plugins/delivery/src/forge-adapter.ts
 var MERGE_METHODS = ["squash", "merge", "rebase"];
@@ -555,6 +692,7 @@ function gitObservationEnvironment(source = process.env) {
   }
   env.GIT_ALLOW_PROTOCOL = "file:https:ssh";
   env.GIT_TERMINAL_PROMPT = "0";
+  env.GIT_NO_LAZY_FETCH = "1";
   return env;
 }
 var GIT_OID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
@@ -965,7 +1103,9 @@ function fetchCommitsArgv(remote, wants) {
     "git",
     ...LS_REMOTE_PROTOCOL_POLICY,
     "-c",
-    `core.hooksPath=${devNull}`,
+    `core.hooksPath=${devNull2}`,
+    "-c",
+    "core.fsmonitor=false",
     "fetch",
     "--quiet",
     "--no-tags",
@@ -985,12 +1125,12 @@ var PROBE_CONFIG = `[core]
 	bare = true
 `;
 function isolatedProbeRepository(directory) {
-  const gitDir = join(directory, "probe.git");
+  const gitDir = join2(directory, "probe.git");
   try {
-    mkdirSync(join(gitDir, "objects"), { recursive: true });
-    mkdirSync(join(gitDir, "refs"), { recursive: true });
-    writeFileSync(join(gitDir, "HEAD"), PROBE_HEAD);
-    writeFileSync(join(gitDir, "config"), PROBE_CONFIG);
+    mkdirSync(join2(gitDir, "objects"), { recursive: true });
+    mkdirSync(join2(gitDir, "refs"), { recursive: true });
+    writeFileSync(join2(gitDir, "HEAD"), PROBE_HEAD);
+    writeFileSync(join2(gitDir, "config"), PROBE_CONFIG);
     return gitDir;
   } catch {
     return null;
@@ -998,7 +1138,7 @@ function isolatedProbeRepository(directory) {
 }
 function urlProbeEnvironment(source, url, probeDirectory, gitDir) {
   const env = Object.assign(Object.create(null), gitObservationEnvironment(source));
-  env.GIT_CONFIG_GLOBAL = devNull;
+  env.GIT_CONFIG_GLOBAL = devNull2;
   env.GIT_CONFIG_NOSYSTEM = "1";
   env.GIT_CONFIG_COUNT = "1";
   env.GIT_CONFIG_KEY_0 = `remote.${PROBE_REMOTE}.url`;
@@ -1014,7 +1154,7 @@ function absenceProbe(remoteOrUrl, branch, cwd, environment) {
   if (forgeTarget(remoteOrUrl) !== null) {
     let neutral;
     try {
-      neutral = realpathSync(mkdtempSync(join(tmpdir(), "forge-ls-remote-")));
+      neutral = realpathSync(mkdtempSync(join2(tmpdir(), "forge-ls-remote-")));
     } catch {
       return null;
     }
@@ -1064,23 +1204,23 @@ async function remoteBranchAbsent(remoteOrUrl, branch, cwd, run = runCli, enviro
 // plugins/delivery/src/landing-receipt.ts
 import { createHash, randomBytes } from "crypto";
 import {
-  closeSync,
-  constants as constants2,
+  closeSync as closeSync2,
+  constants as constants3,
   fchmodSync,
-  fstatSync,
+  fstatSync as fstatSync2,
   linkSync,
-  lstatSync,
+  lstatSync as lstatSync2,
   mkdirSync as mkdirSync2,
   opendirSync,
-  openSync,
+  openSync as openSync2,
   readFileSync as readFileSync3,
-  readSync,
+  readSync as readSync2,
   realpathSync as realpathSync2,
   unlinkSync,
   writeFileSync as writeFileSync2
 } from "fs";
 import { homedir } from "os";
-import { basename, dirname, isAbsolute, join as join2, resolve } from "path";
+import { basename, dirname as dirname2, isAbsolute, join as join3, resolve } from "path";
 var RECEIPT_SCHEMA = "omp.receipt.landing";
 var RECEIPT_SCHEMAS = [RECEIPT_SCHEMA, "delivery.receipt.landing"];
 var RECEIPT_VERSION = 1;
@@ -1098,7 +1238,7 @@ var RECEIPT_FILE = /^[0-9]{1,15}-(?:[0-9a-f]{12}|nomerge)\.json$/;
 var MERGE_OID = /^[0-9a-f]{12,}$/;
 var spawnGit = (argv, cwd, timeoutMs) => {
   try {
-    const proc = Bun.spawnSync(["git", ...argv], {
+    const proc = Bun.spawnSync(["git", ...SAFE_GIT_ARGS, ...argv], {
       cwd,
       stdout: "pipe",
       stderr: "pipe",
@@ -1120,15 +1260,15 @@ var REPOSITORY_OBSERVATION_ARGS = [
 function physicalDirectory(path) {
   try {
     const real = realpathSync2(path);
-    return lstatSync(real).isDirectory() ? real : null;
+    return lstatSync2(real).isDirectory() ? real : null;
   } catch {
     return null;
   }
 }
 function checkoutGitDirectory(checkout) {
-  const marker = join2(checkout, ".git");
+  const marker = join3(checkout, ".git");
   try {
-    const stat = lstatSync(marker);
+    const stat = lstatSync2(marker);
     if (stat.isDirectory())
       return physicalDirectory(marker);
     if (!stat.isFile() || stat.size > 4096)
@@ -1174,7 +1314,7 @@ function repositoryContext(cwd, run = spawnGit, timeoutMs = GIT_TIMEOUT_MS) {
     return null;
   let candidate = paths.topLevel;
   if (topLevelGitDir !== paths.commonDir) {
-    const canonicalCandidate = physicalDirectory(dirname(paths.commonDir));
+    const canonicalCandidate = physicalDirectory(dirname2(paths.commonDir));
     if (canonicalCandidate === null || checkoutGitDirectory(canonicalCandidate) !== paths.commonDir)
       return null;
     candidate = canonicalCandidate;
@@ -1203,17 +1343,17 @@ function repoKey(cwd, run = spawnGit, timeoutMs = GIT_TIMEOUT_MS) {
   return real === null ? null : createHash("sha256").update(real).digest("hex").slice(0, 16);
 }
 function ledgerActive(dir) {
-  const beads = join2(resolve(dir), ".beads");
+  const beads = join3(resolve(dir), ".beads");
   let beadsStat;
   try {
-    beadsStat = lstatSync(beads);
+    beadsStat = lstatSync2(beads);
   } catch (error) {
     return error.code !== "ENOENT";
   }
   if (!beadsStat.isDirectory())
     return true;
   try {
-    return !lstatSync(join2(beads, "RETIRED")).isFile();
+    return !lstatSync2(join3(beads, "RETIRED")).isFile();
   } catch {
     return true;
   }
@@ -1224,12 +1364,12 @@ function canonicalLedger(cwd, run = spawnGit) {
 function receiptDirectory(env = process.env, key) {
   const configured = env.DELIVERY_RECEIPTS_DIR?.trim() ?? "";
   const home = env.HOME?.trim() ?? "";
-  const receipts = configured === "" ? join2(home === "" ? homedir() : home, ".omp", "receipts") : resolve(configured);
+  const receipts = configured === "" ? join3(home === "" ? homedir() : home, ".omp", "receipts") : resolve(configured);
   if (key === undefined)
     return receipts;
   if (!REPO_KEY.test(key))
     throw new Error(`repo.key: observed ${show(key)}, expected ${REPO_KEY_TEXT}`);
-  return join2(receipts, key);
+  return join3(receipts, key);
 }
 function receiptId(now, mergeCommitOid) {
   if (!Number.isSafeInteger(now) || now < 0 || now > MAX_RECEIPT_EPOCH) {
@@ -1545,21 +1685,21 @@ function validateReceipt(value) {
   }
   return { ok: true, receipt: value };
 }
-function readBounded(path) {
+function readBounded2(path) {
   let fd;
   try {
-    fd = openSync(path, constants2.O_RDONLY | constants2.O_NONBLOCK | constants2.O_NOFOLLOW);
+    fd = openSync2(path, constants3.O_RDONLY | constants3.O_NONBLOCK | constants3.O_NOFOLLOW);
   } catch {
     return refuse("path", path, "a readable receipt file");
   }
   try {
-    const stat = fstatSync(fd);
+    const stat = fstatSync2(fd);
     if (!stat.isFile())
       return refuse("path", `${path} (not a regular file)`, "a regular file");
     const buffer = Buffer.allocUnsafe(MAX_RECEIPT_BYTES + 1);
     let filled = 0;
     while (filled < buffer.length) {
-      const read = readSync(fd, buffer, filled, buffer.length - filled, null);
+      const read = readSync2(fd, buffer, filled, buffer.length - filled, null);
       if (read === 0)
         break;
       filled += read;
@@ -1570,7 +1710,7 @@ function readBounded(path) {
     return { ok: true, text: buffer.toString("utf8", 0, filled) };
   } finally {
     try {
-      closeSync(fd);
+      closeSync2(fd);
     } catch {}
   }
 }
@@ -1584,10 +1724,10 @@ function publish(temporary, target, payload) {
   }
   let safeMetadata = false;
   try {
-    const stat = lstatSync(target);
+    const stat = lstatSync2(target);
     safeMetadata = !stat.isSymbolicLink() && stat.isFile() && (stat.mode & 511) === 384;
   } catch {}
-  const existing = safeMetadata ? readBounded(target) : null;
+  const existing = safeMetadata ? readBounded2(target) : null;
   if (existing?.ok && existing.text === payload)
     return;
   const detail = existing === null ? "unsafe metadata" : existing.ok ? "different content" : `unreadable content (${existing.reason})`;
@@ -1601,21 +1741,21 @@ function writeReceipt(receipt, directory, options) {
   mkdirSync2(into, { recursive: true, mode: 448 });
   let directoryFd;
   try {
-    directoryFd = openSync(into, constants2.O_RDONLY | constants2.O_DIRECTORY | constants2.O_NOFOLLOW);
+    directoryFd = openSync2(into, constants3.O_RDONLY | constants3.O_DIRECTORY | constants3.O_NOFOLLOW);
   } catch {
     throw new Error(`${into}: observed an unsafe receipt directory, expected a non-symlink directory`);
   }
   try {
-    const stat = fstatSync(directoryFd);
+    const stat = fstatSync2(directoryFd);
     if (!stat.isDirectory()) {
       throw new Error(`${into}: observed a non-directory, expected a non-symlink directory`);
     }
     fchmodSync(directoryFd, 448);
   } finally {
-    closeSync(directoryFd);
+    closeSync2(directoryFd);
   }
   const targetName = `${receipt.receiptId}.json`;
-  const target = join2(into, targetName);
+  const target = join3(into, targetName);
   const payload = `${JSON.stringify(receipt, null, 2)}
 `;
   const payloadBytes = Buffer.byteLength(payload, "utf8");
@@ -1630,9 +1770,9 @@ function writeReceipt(receipt, directory, options) {
     if (typeof temporaryName !== "string" || temporaryName === "" || temporaryName === "." || temporaryName === ".." || temporaryName === targetName || temporaryName.includes("/") || temporaryName.includes("\\") || temporaryName.includes("\x00")) {
       throw new Error(`temporary file: observed ${show(temporaryName)}, expected a safe basename distinct from ${JSON.stringify(targetName)}`);
     }
-    temporary = join2(into, temporaryName);
+    temporary = join3(into, temporaryName);
     try {
-      fd = openSync(temporary, "wx", 384);
+      fd = openSync2(temporary, "wx", 384);
     } catch (error) {
       if (error.code !== "EEXIST")
         throw error;
@@ -1644,13 +1784,13 @@ function writeReceipt(receipt, directory, options) {
   try {
     fchmodSync(fd, 384);
     writeFileSync2(fd, payload);
-    closeSync(fd);
+    closeSync2(fd);
     fd = undefined;
     publish(temporary, target, payload);
   } catch (error) {
     if (fd !== undefined) {
       try {
-        closeSync(fd);
+        closeSync2(fd);
       } catch {}
     }
     try {
@@ -1672,7 +1812,7 @@ function readReceipt(path) {
   if (!RECEIPT_FILE.test(name)) {
     return refuse("path", path, "a canonical receiptId.json basename");
   }
-  const read = readBounded(path);
+  const read = readBounded2(path);
   if (!read.ok)
     return read;
   let parsed;
@@ -1720,7 +1860,7 @@ function newestReceipts(directory) {
     for (let entry = dir.readSync();entry !== null; entry = dir.readSync()) {
       if (!entry.isFile() || !RECEIPT_FILE.test(entry.name))
         continue;
-      const result = readReceipt(join2(directory, entry.name));
+      const result = readReceipt(join3(directory, entry.name));
       if (!result.ok)
         continue;
       if (kept.length >= MAX_LISTED_RECEIPTS) {
@@ -1835,13 +1975,13 @@ function normalizedOid(value) {
   const oid = value.trim().toLowerCase();
   return oid === "" ? null : oid;
 }
-async function resolveRemoteIdentity(receipt, run, cwd, forgeEnv, env, refReadMs) {
+async function resolveRemoteIdentity(receipt, run, cwd, forgeEnv, env, refReadMs, pin) {
   const remote = receipt.repo.remote;
   if (!REMOTE_NAME.test(remote))
     return refuse2("repo.remote", remote, "a git remote name");
-  const argv = ["git", "remote", "get-url", remote];
+  const argv = ["git", ...SAFE_GIT_ARGS, "remote", "get-url", remote];
   const expected = `exactly one URL record for the configured remote ${remote} in ${cwd}`;
-  const result = await run(argv, { cwd, timeoutMs: refReadMs, env: gitObservationEnvironment(env) });
+  const result = await run(argv, { cwd, timeoutMs: refReadMs, env: { ...gitObservationEnvironment(env), ...pin } });
   if (!completed(result))
     return commandFailure("repo.remote", argv, result, expected);
   const remoteText = singleRemoteRecord(result.stdout);
@@ -1912,8 +2052,8 @@ async function gitlabObservation(receipt, identity, run) {
     method
   };
 }
-async function observePullRequest(receipt, run = runCli, cwd = receipt.repo.canonicalRoot, env = process.env, refReadMs = CLEANUP_BOUNDS.refReadMs) {
-  const identity = await resolveRemoteIdentity(receipt, run, cwd, forgeEnvironment(env), env, refReadMs);
+async function observePullRequest(receipt, run = runCli, cwd = receipt.repo.canonicalRoot, env = process.env, refReadMs = CLEANUP_BOUNDS.refReadMs, pin) {
+  const identity = await resolveRemoteIdentity(receipt, run, cwd, forgeEnvironment(env), env, refReadMs, pin);
   if (isFailure(identity))
     return identity;
   const pr = identity.forge === "github" ? await githubObservation(receipt, identity, run) : await gitlabObservation(receipt, identity, run);
@@ -1951,7 +2091,7 @@ function receiptDirectoryState(directory) {
   let current = resolve2(directory);
   for (;; ) {
     chain.push(current);
-    const parent = dirname2(current);
+    const parent = dirname3(current);
     if (parent === current)
       break;
     current = parent;
@@ -1960,7 +2100,7 @@ function receiptDirectoryState(directory) {
   for (const path of chain) {
     let stat;
     try {
-      stat = lstatSync2(path);
+      stat = lstatSync3(path);
     } catch (error) {
       return error.code === "ENOENT" ? "absent" : "unsafe";
     }
@@ -1971,7 +2111,7 @@ function receiptDirectoryState(directory) {
 }
 function canonicalReceiptPath(raw, cwd, directory) {
   const target = resolve2(cwd, raw);
-  if (dirname2(target) !== directory)
+  if (dirname3(target) !== directory)
     return refuse2("receipt.path", target, `a direct entry under ${show2(directory)}`);
   const directoryState = receiptDirectoryState(directory);
   if (directoryState !== "safe") {
@@ -1979,7 +2119,7 @@ function canonicalReceiptPath(raw, cwd, directory) {
   }
   let stat;
   try {
-    stat = lstatSync2(target);
+    stat = lstatSync3(target);
   } catch {
     return refuse2("receipt.path", target, "an existing canonical non-symlink receipt file");
   }
@@ -1987,6 +2127,10 @@ function canonicalReceiptPath(raw, cwd, directory) {
     return refuse2("receipt.path", target, "a canonical non-symlink regular receipt file");
   }
   return target;
+}
+var FOREIGN_HINT = "a worktree of a repository other than this session's is never read from here: run delivery_cleanup from a session in that repository";
+function foreignRepository() {
+  return refuse2("worktree.owner", "a receipt or worktree of a repository other than this session's", "delivery_cleanup run from a session in that repository; a checkout of another repository is untrusted, so nothing was read or removed");
 }
 function resolveReceipt(params, cwd, env, refReadMs) {
   const key = repoKey(cwd, undefined, refReadMs);
@@ -2000,6 +2144,9 @@ function resolveReceipt(params, cwd, env, refReadMs) {
   let receipt = null;
   let receiptPath = null;
   if (params.receipt !== undefined) {
+    const named = basename2(dirname3(resolve2(cwd, params.receipt)));
+    if (/^[0-9a-f]{16}$/.test(named) && named !== key)
+      return { tag: "refused", failure: foreignRepository() };
     const path = canonicalReceiptPath(params.receipt, cwd, directory);
     if (typeof path !== "string")
       return { tag: "refused", failure: path };
@@ -2024,7 +2171,8 @@ function resolveReceipt(params, cwd, env, refReadMs) {
   }
   if (receipt === null) {
     const selector = params.pr !== undefined ? `pr ${params.pr}` : params.branch !== undefined ? `branch ${show2(params.branch)}` : `repo.key ${key}`;
-    return { tag: "refused", failure: refuse2("receipt", null, `the newest validated receipt for ${selector}`) };
+    const hint = params.worktree === undefined ? "" : `; ${FOREIGN_HINT}`;
+    return { tag: "refused", failure: refuse2("receipt", null, `the newest validated receipt for ${selector}${hint}`) };
   }
   if (receiptPath === null)
     return {
@@ -2061,13 +2209,17 @@ function verifyArguments(params, receipt) {
   }
   return null;
 }
-async function runGit(run, cwd, args, timeoutMs) {
-  return run(["git", ...args], { cwd, timeoutMs });
+async function runGit(run, cwd, args, timeoutMs, pin) {
+  return run(["git", ...SAFE_GIT_ARGS, ...args], {
+    cwd,
+    timeoutMs,
+    env: { ...gitObservationEnvironment(process.env), ...pin }
+  });
 }
 function worktreePathState(path) {
   let stat;
   try {
-    stat = lstatSync2(path);
+    stat = lstatSync3(path);
   } catch (error) {
     return error.code === "ENOENT" ? "absent" : "unsafe";
   }
@@ -2083,12 +2235,12 @@ function worktreePathState(path) {
 function dirtyPaths(output) {
   return output.split(/\r?\n/).filter(Boolean).map((line) => line.length > 3 ? line.slice(3) : line).slice(0, MAX_DIRTY_PATHS);
 }
-async function verifyCleanTarget(path, run, timeoutMs) {
+async function verifyCleanTarget(path, run, timeoutMs, pin) {
   const state = worktreePathState(path);
   if (state !== "directory")
     return refuse2("worktree.path", `${path} (${state})`, "a present non-symlink directory");
   const argv = ["status", "--porcelain"];
-  const result = await runGit(run, path, argv, timeoutMs);
+  const result = await runGit(run, path, argv, timeoutMs, pin);
   if (!completed(result))
     return commandFailure("worktree.status", ["git", ...argv], result, "exit 0 with empty output");
   if (result.stdout !== "") {
@@ -2097,16 +2249,16 @@ async function verifyCleanTarget(path, run, timeoutMs) {
   }
   return null;
 }
-async function verifyPushed(path, run, refReadMs) {
+async function verifyPushed(path, run, refReadMs, pin) {
   const upstreamArgv = ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"];
-  const upstream = await runGit(run, path, upstreamArgv, refReadMs);
+  const upstream = await runGit(run, path, upstreamArgv, refReadMs, pin);
   if (upstream.error !== undefined || !upstream.ok) {
     return commandFailure("branch.upstream", ["git", ...upstreamArgv], upstream, "a completed upstream read");
   }
   if (upstream.exitCode !== 0 || upstream.stdout.trim() === "")
     return "pr-head";
   const countArgv = ["rev-list", "--count", "@{upstream}..HEAD"];
-  const countResult = await runGit(run, path, countArgv, refReadMs);
+  const countResult = await runGit(run, path, countArgv, refReadMs, pin);
   if (!completed(countResult)) {
     return commandFailure("branch.unpushed", ["git", ...countArgv], countResult, "exit 0 and count 0");
   }
@@ -2222,9 +2374,9 @@ function parseWorktreeList(output) {
     records.push(current);
   return records;
 }
-async function readWorktrees(cwd, run, refReadMs) {
+async function readWorktrees(cwd, run, refReadMs, pin) {
   const argv = ["worktree", "list", "--porcelain"];
-  const result = await runGit(run, cwd, argv, refReadMs);
+  const result = await runGit(run, cwd, argv, refReadMs, pin);
   if (!completed(result))
     return commandFailure("worktree.list", ["git", ...argv], result, "exit 0 porcelain records");
   const records = parseWorktreeList(result.stdout);
@@ -2235,16 +2387,17 @@ async function readWorktrees(cwd, run, refReadMs) {
     return refuse2("worktree.list.path", malformed.path, "a non-empty absolute path in every record");
   return records;
 }
-function isInsidePhysicalRepository(target, cwd, refReadMs) {
-  const key = repoKey(target, undefined, refReadMs);
-  return key !== null && key === repoKey(cwd, undefined, refReadMs);
+async function isForeignCheckout(path, cwd, records, run, refReadMs) {
+  const real = physicalPath(path);
+  if (real !== null && recordForTarget([...records], real) !== null)
+    return false;
+  const argv = ["rev-parse", "--path-format=absolute", "--git-common-dir"];
+  const result = await runGit(run, cwd, argv, refReadMs);
+  const session = completed(result) ? physicalPath(result.stdout.trim()) : null;
+  return session !== null && ["foreign", "unsafe"].includes(inspectCheckoutMarker(path, session));
 }
 function physicalPath(path) {
-  try {
-    return realpathSync3(path);
-  } catch {
-    return null;
-  }
+  return physical(path);
 }
 function invocationInsideTarget(cwd, target) {
   const invocation = physicalPath(cwd);
@@ -2253,10 +2406,7 @@ function invocationInsideTarget(cwd, target) {
     return false;
   return invocation === resolved || invocation.startsWith(`${resolved}${sep}`);
 }
-function recordForTarget(records, target) {
-  const expected = physicalPath(target);
-  if (expected === null)
-    return null;
+function recordForTarget(records, expected) {
   for (const item of records) {
     if (physicalPath(item.path) === expected)
       return item;
@@ -2279,13 +2429,21 @@ async function verifyTargetIdentity(receipt, cwd, run, refReadMs) {
   const main = listed[0];
   if (main === undefined)
     return refuse2("worktree.list", [], "a main worktree record");
-  if (physicalPath(path) === physicalPath(main.path))
+  const physicalTarget = physicalPath(path);
+  if (physicalTarget === null)
+    return refuse2("worktree.path", path, "an exact live record in git worktree list --porcelain");
+  if (physicalTarget === physicalPath(main.path))
     return refuse2("worktree.path", path, `a linked worktree other than main ${show2(main.path)}`);
-  if (!isInsidePhysicalRepository(path, cwd, refReadMs))
+  const target = recordForTarget(listed, physicalTarget);
+  if (target === null && await isForeignCheckout(path, cwd, listed, run, refReadMs))
     return refuse2("worktree.path", path, "a worktree in the current repository");
-  const target = recordForTarget(listed, path);
   if (target === null || target.prunable)
     return refuse2("worktree.path", path, "an exact live record in git worktree list --porcelain");
+  const common = repositoryContext(cwd)?.commonDir ?? null;
+  const verdict = common === null ? { state: "unsafe" } : verifyCheckout(physicalTarget, common);
+  if (verdict.state !== "same" || common === null) {
+    return refuse2("worktree.marker", `${path} (.git ${verdict.state})`, "a regular .git file naming a directory under this repository's worktrees/ whose commondir is this repository; nothing was read in the worktree");
+  }
   if (target.detached)
     return refuse2("worktree.branch", "detached", `branch ${show2(receipt.branch.name)}`);
   const expectedRef = `${LOCAL_REF_PREFIX}${receipt.branch.name}`;
@@ -2295,15 +2453,15 @@ async function verifyTargetIdentity(receipt, cwd, run, refReadMs) {
   const headFailure = compare("worktree.HEAD", target.head, receipt.pr.headRefOid);
   if (headFailure !== null)
     return headFailure;
-  if (worktreePathState(path) !== "directory") {
+  if (worktreePathState(physicalTarget) !== "directory" || worktreePathState(path) !== "directory") {
     return refuse2("worktree.path", `${path} (unsafe)`, "the listed non-symlink directory");
   }
-  return { records: listed, target, main };
+  return { records: listed, target, main, common, pin: verdict.pin, cwd: physicalTarget };
 }
-async function verifyLocalRef(receipt, cwd, run, refReadMs) {
+async function verifyLocalRef(receipt, cwd, run, refReadMs, pin) {
   const ref = `${LOCAL_REF_PREFIX}${receipt.branch.name}`;
   const argv = ["rev-parse", "--verify", ref];
-  const result = await runGit(run, cwd, argv, refReadMs);
+  const result = await runGit(run, cwd, argv, refReadMs, pin);
   if (!completed(result))
     return commandFailure("branch.localRef", ["git", ...argv], result, `exit 0 and oid ${receipt.pr.headRefOid}`);
   return compare("branch.localRef", result.stdout.trim(), receipt.pr.headRefOid);
@@ -2315,29 +2473,29 @@ async function revalidateBoundary(receipt, cwd, run, bounds) {
   const ref = await verifyLocalRef(receipt, cwd, run, bounds.refReadMs);
   if (ref !== null)
     return ref;
-  const clean = await verifyCleanTarget(identity.target.path, run, bounds.treeScanMs);
+  const clean = await verifyCleanTarget(identity.cwd, run, bounds.treeScanMs, identity.pin);
   if (clean !== null)
     return clean;
-  const pushed = await verifyPushed(identity.target.path, run, bounds.refReadMs);
+  const pushed = await verifyPushed(identity.cwd, run, bounds.refReadMs, identity.pin);
   return isFailure(pushed) ? pushed : identity;
 }
-async function registrationAbsence(cwd, trustedPath, run, refReadMs) {
-  const listed = await readWorktrees(cwd, run, refReadMs);
+async function registrationAbsence(cwd, trustedPath, run, refReadMs, pin) {
+  const listed = await readWorktrees(cwd, run, refReadMs, pin);
   if (!Array.isArray(listed))
     return "unknown";
   return storedRecordForTarget(listed, trustedPath) === null ? "absent" : "present";
 }
 function pathAbsence(path) {
   try {
-    lstatSync2(path);
+    lstatSync3(path);
     return "present";
   } catch (error) {
     return error.code === "ENOENT" ? "absent" : "unknown";
   }
 }
-async function localRefAbsence(cwd, branch, run, refReadMs) {
+async function localRefAbsence(cwd, branch, run, refReadMs, pin) {
   const argv = ["show-ref", "--verify", "--quiet", `${LOCAL_REF_PREFIX}${branch}`];
-  const result = await runGit(run, cwd, argv, refReadMs);
+  const result = await runGit(run, cwd, argv, refReadMs, pin);
   if (result.error !== undefined || !result.ok)
     return "unknown";
   if (result.exitCode === 0)
@@ -2372,13 +2530,19 @@ async function cleanupDelivery(params, cwd, deps = {}) {
   const run = (argv, options) => commit(argv, { ...options, signal });
   const now = deps.now ?? Date.now;
   const env = deps.env ?? process.env;
+  const foreignWorktree = async () => {
+    if (params.worktree === undefined || params.worktree.trim() === "")
+      return false;
+    const listed = await readWorktrees(cwd, run, bounds.refReadMs);
+    return Array.isArray(listed) && await isForeignCheckout(resolve2(cwd, params.worktree.trim()), cwd, listed, run, bounds.refReadMs);
+  };
   const resolution = resolveReceipt(params, cwd, env, bounds.refReadMs);
   if (resolution.tag === "refused")
-    return resolution.failure;
+    return await foreignWorktree() ? foreignRepository() : resolution.failure;
   const receipt = resolution.receipt;
   const argsFailure = verifyArguments(params, receipt);
   if (argsFailure !== null)
-    return argsFailure;
+    return await foreignWorktree() ? foreignRepository() : argsFailure;
   if (typeof receipt.pr.mergeCommitOid !== "string" || receipt.pr.mergeCommitOid.trim() === "") {
     return refuse2("pr.mergeCommitOid", receipt.pr.mergeCommitOid, "a non-empty merge commit oid before cleanup");
   }
@@ -2388,17 +2552,17 @@ async function cleanupDelivery(params, cwd, deps = {}) {
   const identity = await verifyTargetIdentity(receipt, cwd, run, bounds.refReadMs);
   if (isFailure(identity))
     return identity;
-  const observed = await observePullRequest(receipt, run, identity.target.path, env, bounds.refReadMs);
+  const observed = await observePullRequest(receipt, run, identity.cwd, env, bounds.refReadMs, identity.pin);
   if (isFailure(observed))
     return observed;
   const observedFailure = verifyObservation(receipt, observed.pr);
   if (observedFailure !== null)
     return observedFailure;
   const path = receipt.worktree.path;
-  const dirty = await verifyCleanTarget(path, run, bounds.treeScanMs);
+  const dirty = await verifyCleanTarget(identity.cwd, run, bounds.treeScanMs, identity.pin);
   if (dirty !== null)
     return dirty;
-  const pushed = await verifyPushed(path, run, bounds.refReadMs);
+  const pushed = await verifyPushed(identity.cwd, run, bounds.refReadMs, identity.pin);
   if (isFailure(pushed))
     return pushed;
   const ledger = await verifyLedger(receipt, cwd, resolution.path, run, bounds.bdShowMs);
@@ -2413,6 +2577,11 @@ async function cleanupDelivery(params, cwd, deps = {}) {
   const executionCwd = safeExecutionCwd(receipt, boundary.records, cwd);
   if (executionCwd === null)
     return refuse2("worktree.executionCwd", null, "a different listed worktree for the same repository");
+  const executionDir = physicalPath(executionCwd);
+  const executionVerdict = executionDir === null ? { state: "absent" } : verifyCheckout(executionDir, boundary.common);
+  if (executionDir === null || executionVerdict.state !== "same")
+    return refuse2("worktree.executionCwd", `${executionCwd} (.git ${executionVerdict.state})`, "a verified worktree of this repository");
+  const executionPin = executionVerdict.pin;
   const targetPath = boundary.target.path;
   await deps.authorize?.({ worktree: targetPath, branch: receipt.branch.name, pr: receipt.pr.number });
   const removeArgv = ["worktree", "remove", targetPath];
@@ -2435,29 +2604,29 @@ async function cleanupDelivery(params, cwd, deps = {}) {
       return refuse2("worktree.removed", `host worktree.remove ${JSON.stringify(targetPath)} (error ${message.trim().slice(0, 400)})`, "host removal without force");
     }
   } else {
-    const removed = await runGit(commit, executionCwd, removeArgv, bounds.mutationMs);
+    const removed = await runGit(commit, executionDir, removeArgv, bounds.mutationMs, executionPin);
     if (!completed(removed)) {
       return commandFailure("worktree.removed", ["git", ...removeArgv], removed, "exit 0 without --force");
     }
   }
-  const registration = await registrationAbsence(executionCwd, targetPath, commit, bounds.refReadMs);
+  const registration = await registrationAbsence(executionDir, targetPath, commit, bounds.refReadMs, executionPin);
   const pathGone = pathAbsence(targetPath);
   if (registration !== "absent")
     return refuse2("worktree.registrationAbsence", registration, '"absent" after removal');
   if (pathGone !== "absent")
     return refuse2("worktree.pathAbsence", pathGone, '"absent" after removal');
-  const refAfterWorktree = await verifyLocalRef(receipt, executionCwd, commit, bounds.refReadMs);
+  const refAfterWorktree = await verifyLocalRef(receipt, executionDir, commit, bounds.refReadMs, executionPin);
   if (refAfterWorktree !== null)
     return refAfterWorktree;
   const deleteArgv = branchDeleteArgs(receipt.branch.name);
-  const deleted = await runGit(commit, executionCwd, deleteArgv, bounds.mutationMs);
+  const deleted = await runGit(commit, executionDir, deleteArgv, bounds.mutationMs, executionPin);
   if (!completed(deleted)) {
     return commandFailure("worktree.localRefDeleted", ["git", ...deleteArgv], deleted, "exit 0 without -D");
   }
-  const localAbsence = await localRefAbsence(executionCwd, receipt.branch.name, commit, bounds.refReadMs);
+  const localAbsence = await localRefAbsence(executionDir, receipt.branch.name, commit, bounds.refReadMs, executionPin);
   if (localAbsence !== "absent")
     return refuse2("worktree.localRefAbsence", localAbsence, '"absent" after branch -d');
-  const remoteAbsence = await remoteBranchAbsent(observed.identity.remoteUrl, receipt.branch.name, executionCwd, commit);
+  const remoteAbsence = await remoteBranchAbsent(observed.identity.remoteUrl, receipt.branch.name, executionDir, commit);
   const issuedAt = nextReceiptEpoch(receipt, now);
   const verifiedAt = new Date(issuedAt).toISOString();
   const continued = buildReceipt({
@@ -2867,7 +3036,7 @@ async function mergeProof(pr, method, git) {
   }
   const oid = pr.mergeCommitOid.trim().toLowerCase();
   const head = pr.headRefOid.trim().toLowerCase();
-  const output = await git(["show", "-s", "--format=%P", oid]);
+  const output = await git(["-c", "log.showSignature=false", "show", "-s", "--format=%P", oid]);
   if (output === null)
     return { reason: `git show -s --format=%P ${oid}: observed no completed read, expected the merge commit's parents` };
   const text = output.trim();
@@ -2976,7 +3145,7 @@ async function ensureLocalCommits(required, baseBranch, remote, git, fetch, slee
   return { required: [...required], fetches };
 }
 async function gitOutput(run, cwd, argv, env, input) {
-  const result = await run(["git", ...argv], { cwd, timeoutMs: GIT_TIMEOUT_MS2, env, input });
+  const result = await run(["git", ...SAFE_GIT_ARGS, ...argv], { cwd, timeoutMs: GIT_TIMEOUT_MS2, env, input });
   if (!result.ok || result.error !== undefined || result.exitCode !== 0)
     return null;
   return result.stdout;
@@ -2989,11 +3158,16 @@ async function observeRepository(git, cwd) {
       reason: `git ${REPOSITORY_OBSERVATION_ARGS.join(" ")} in ${cwd}: observed no unambiguous repository paths, expected absolute git common directory and checkout top level`
     };
   }
-  return { key: repository.key, canonicalRoot: repository.ledger.root, ledger: repository.ledger };
+  return {
+    key: repository.key,
+    canonicalRoot: repository.ledger.root,
+    commonDir: repository.commonDir,
+    ledger: repository.ledger
+  };
 }
-async function worktreeHead(run, path, env) {
+async function worktreeHead(run, path, env, pin) {
   const argv = ["rev-parse", "--verify", "HEAD^{commit}"];
-  const printed = await gitOutput(run, path, argv, env);
+  const printed = await gitOutput(run, path, argv, { ...env, ...pin });
   const head = printed?.trim().toLowerCase() ?? null;
   if (head === null || !FULL_OID.test(head)) {
     return {
@@ -3040,6 +3214,29 @@ function observationMethod(argv) {
   const named = head.length === 3 && head.every((element) => element !== "" && !/\s/.test(element));
   return named ? head.join(" ") : RECEIPT_METHOD_UNKNOWN;
 }
+function selectRemoteForRepo(remotes, repo) {
+  const matching = remotes.filter((remote) => remote.path !== null && remote.path === repo);
+  return matching.find((remote) => remote.name === "origin")?.name ?? matching[0]?.name ?? null;
+}
+function inferWorktree(records, branch, head) {
+  const found = records.slice(1).find((record) => !record.prunable && !record.detached && record.branch === `refs/heads/${branch}` && record.head.toLowerCase() === head.toLowerCase());
+  return found?.path ?? null;
+}
+async function remotePaths(git) {
+  const listed = await git(["remote"]);
+  if (listed === null)
+    return [];
+  const remotes = [];
+  for (const name of listed.split(`
+`).filter((line) => REMOTE_NAME.test(line))) {
+    const printed = await git(["remote", "get-url", name]);
+    const url = printed === null ? null : singleRemoteRecord(printed);
+    const target = url === null ? null : forgeTarget(url);
+    const raw = url === null ? null : repoPathFromRemote(url);
+    remotes.push({ name, path: target === null || raw === null ? null : normalizeRepoPath(target.forge, raw) });
+  }
+  return remotes;
+}
 async function resolveLandingTarget(params, git, cwd, forgeEnv) {
   const explicitRepo = params.repo === undefined || params.repo.trim() === "" ? null : params.repo.trim();
   if (explicitRepo !== null && normalizeRepoPath("gitlab", explicitRepo) === null) {
@@ -3047,9 +3244,15 @@ async function resolveLandingTarget(params, git, cwd, forgeEnv) {
       reason: `repo: observed ${show3(explicitRepo)}, expected an unqualified "<owner>/<name>" or bounded GitLab "<group>/.../<project>" path`
     };
   }
-  const remote = params.remote === undefined || params.remote.trim() === "" ? "origin" : params.remote.trim();
+  let remote = params.remote === undefined || params.remote.trim() === "" ? "origin" : params.remote.trim();
   if (!REMOTE_NAME.test(remote))
     return { reason: `remote: observed ${show3(params.remote)}, expected a git remote name` };
+  if (explicitRepo !== null && (params.remote === undefined || params.remote.trim() === "")) {
+    const wanted = normalizeRepoPath("gitlab", explicitRepo);
+    const picked = wanted === null ? null : selectRemoteForRepo(await remotePaths(git), wanted);
+    if (picked !== null)
+      remote = picked;
+  }
   const repository = await observeRepository(git, cwd);
   if ("reason" in repository)
     return repository;
@@ -3093,7 +3296,7 @@ async function resolveLandingTarget(params, git, cwd, forgeEnv) {
   }
   if (normalizedRemote !== null && nameWithOwner !== normalizedRemote) {
     return {
-      reason: `repo: observed ${show3(nameWithOwner)}, expected ${show3(normalizedRemote)} from remote ${remote}; the branch absence is verified against ${remote}, so both must name one repository`
+      reason: `repo: observed ${show3(nameWithOwner)}, expected ${show3(normalizedRemote)} from remote ${remote}; the branch absence is verified against ${remote}, so both must name one repository; to land a pull request of another repository, run delivery_land from a session in that repository`
     };
   }
   const cliRepo = `${target.canonicalHost}/${nameWithOwner}`;
@@ -3117,6 +3320,7 @@ async function landPullRequest(params, deps = {}) {
   const env = deps.env ?? process.env;
   const forgeEnv = forgeEnvironment(env);
   const gitEnv = gitObservationEnvironment(env);
+  const explicitWorktree = params.worktree === undefined || params.worktree.trim() === "" ? null : resolve3(cwd, params.worktree.trim());
   const git = (argv, input) => gitOutput(run, cwd, argv, gitEnv, input);
   const forgeRun = (argv, options) => run(argv, { ...options, env: options.env ?? forgeEnv });
   const now = deps.now?.() ?? Date.now();
@@ -3142,6 +3346,17 @@ async function landPullRequest(params, deps = {}) {
     return refuse(resolved.reason);
   const { remote, remoteUrl, forge, forgeHost, nameWithOwner, repository, cliRepo, forgeCommandEnv } = resolved;
   const gitlabHost = forgeHost === "github.com" ? undefined : forgeHost;
+  const sessionCommonDir = repository.commonDir;
+  let explicitCheckout = null;
+  if (explicitWorktree !== null) {
+    const real = physical(explicitWorktree);
+    const verdict = real === null ? { state: "absent" } : verifyCheckout(real, sessionCommonDir);
+    if (real === null || verdict.state !== "same") {
+      const what = verdict.state === "foreign" ? "a checkout of another repository" : verdict.state === "absent" ? "not an existing checkout" : "not a checkout owned by this repository";
+      return refuse(`worktree: observed ${show3(explicitWorktree)} as ${what}, expected a worktree of the session repository ${show3(nameWithOwner)}; run delivery_land from a session in the pull request's repository; no Git ran there, no merge was issued and no receipt was written`);
+    }
+    explicitCheckout = { real, pin: verdict.pin };
+  }
   const boundForgeRun = (argv, options) => run(argv, { ...options, env: options.env ?? forgeCommandEnv });
   const first = await readPr(run, forge, cliRepo, number, FORGE_TIMEOUT_MS, forgeCommandEnv);
   if ("reason" in first)
@@ -3159,10 +3374,20 @@ async function landPullRequest(params, deps = {}) {
   } else if (expected.toLowerCase() !== head) {
     return refuse(`expectHeadSha: observed pr.headRefOid ${show3(first.pr.headRefOid)}, expected ${show3(expected)}; no merge was issued and no receipt was written`);
   }
-  const worktreePath = params.worktree === undefined || params.worktree.trim() === "" ? null : resolve3(cwd, params.worktree.trim());
   let worktree = null;
-  if (worktreePath !== null) {
-    const held = await worktreeHead(run, worktreePath, gitEnv);
+  const worktreePath = explicitWorktree;
+  if (worktreePath === null || explicitCheckout === null) {
+    const listed = await git(["worktree", "list", "--porcelain"]);
+    const inferred = listed === null ? null : inferWorktree(parseWorktreeList(listed), first.pr.headRefName, head);
+    const real = inferred === null ? null : physical(inferred);
+    const verdict = real === null ? null : verifyCheckout(real, sessionCommonDir);
+    if (inferred !== null && real !== null && verdict?.state === "same") {
+      const held = await worktreeHead(run, real, gitEnv, verdict.pin);
+      if (!("reason" in held) && held.head === head)
+        worktree = { path: inferred, head: held.head };
+    }
+  } else {
+    const held = await worktreeHead(run, explicitCheckout.real, gitEnv, explicitCheckout.pin);
     if ("reason" in held) {
       return refuse(`${held.reason} to compare with pr.headRefOid ${show3(first.pr.headRefOid)}; no merge was issued and no receipt was written`);
     }
@@ -3346,7 +3571,7 @@ async function landPullRequest(params, deps = {}) {
           remoteAbsenceVerifiedAt: verdict === "absent" ? observedAt : null,
           autoDeleteSetting: observedAutoDelete
         },
-        worktree: { path: worktreePath, removed: false, localRefDeleted: false, absenceVerifiedAt: null },
+        worktree: { path: worktree?.path ?? null, removed: false, localRefDeleted: false, absenceVerifiedAt: null },
         beads: { ids: proven.ids, ledgerActive: repository.ledger.active },
         proof: { method: observationMethod(observingArgv), observedAt, evidence },
         outcome: "landed",
@@ -3537,7 +3762,7 @@ var LAND_INPUT = {
     },
     requireGreenChecks: { type: "boolean", description: "Require every check on the head to pass" },
     setupAutoDelete: { type: "boolean", description: "Enable deletion-on-merge after the landing is proved" },
-    worktree: { type: "string", description: "The landing's worktree, for delivery_cleanup; HEAD must be the PR head" },
+    worktree: { type: "string", description: "Landed worktree for cleanup (HEAD = PR head); inferred if omitted" },
     beadId: {
       type: "string",
       description: "Bead this closes when the branch is not <omp|opencode>/agent/<bead-id>; required then on a ledger"
@@ -3590,9 +3815,9 @@ var CLEANUP_OUTPUT = {
   required: ["ok"]
 };
 var LAND_DESCRIPTION = `Merge a reviewed pull request at most once, prove it landed, and write one landing receipt.
-` + "Refuses unless expectHeadSha names the PR head (required whenever the call would merge) " + "and, when worktree is given, its HEAD is that head. With requireApproval/requireGreenChecks it also requires an approval artifact on the PR for that exact head " + "and green checks before merging. Merges at most once (an already MERGED request is proved, not re-merged) with merge_method (squash by default, PR title as subject), " + "binds the merge to the head, re-reads it, fetches the landed commits and checks the method's commit shape, observes the remote branch, then writes the receipt. " + "Writes no Beads ledger: when beads.ledgerActive, run the returned next steps child-before-parent, then delivery_cleanup. " + "A refusal with mergeIssued true means the PR is merged: re-run with the same pr and expectHeadSha to write the receipt.";
+` + "Refuses unless expectHeadSha names the PR head (required whenever the call would merge) " + "and, when worktree is given, it is a worktree of the session repository (never another repository's) whose HEAD is that head. With requireApproval/requireGreenChecks it also requires an approval artifact on the PR for that exact head " + "and green checks before merging. Merges at most once (an already MERGED request is proved, not re-merged) with merge_method (squash by default, PR title as subject), " + "binds the merge to the head, re-reads it, fetches the landed commits and checks the method's commit shape, observes the remote branch, then writes the receipt. " + "Writes no Beads ledger: when beads.ledgerActive, run the returned next steps child-before-parent, then delivery_cleanup. " + "A refusal with mergeIssued true means the PR is merged: re-run with the same pr and expectHeadSha to write the receipt.";
 var CLEANUP_DESCRIPTION = `Remove a landed PR's worktree and local branch after proving the landing receipt, and write a continuation receipt.
-` + "Recomputes the ledger classification at the canonical root, proves the PR merged at the recorded head from the receipt's own remote, " + "checks every receipt bead is closed with metadata.merge_sha equal to the merge (read-only bd show), refuses to remove the worktree it runs from, a dirty tree or unpushed commits, " + "then removes the worktree (no force; through OpenCode when it tracks it, else git worktree remove) and runs git branch -d and verifies four absences.";
+` + "Recomputes the ledger classification at the canonical root, proves the PR merged at the recorded head from the receipt's own remote, " + "checks every receipt bead is closed with metadata.merge_sha equal to the merge (read-only bd show), refuses to remove the worktree it runs from, a dirty tree or unpushed commits, a receipt or worktree of another repository, " + "then removes the worktree (no force; through OpenCode when it tracks it, else git worktree remove) and runs git branch -d and verifies four absences.";
 function landOutput(outcome) {
   if (!outcome.ok) {
     return {
