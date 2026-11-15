@@ -1218,10 +1218,17 @@ describe("runtime fallback", () => {
       host.emit({ type: "session.created", data: { sessionID: "c1", parentID: "r", agent: "plain", model: sonnet } })
       host.emit(usage("c1", 100, 0.5))
       host.emit(usage("c1", 200, 0.25))
-      host.emit({ type: "session.execution.succeeded", created: Date.now() + 1000, data: { sessionID: "c1" } })
+      const succeeded = { type: "session.execution.succeeded", created: Date.now() + 1000, data: { sessionID: "c1" } }
+      host.emit(succeeded)
       await host.spawn("subagent", { agent: "plain", prompt: "x", role: "task" }, "build", "r", "call-2")
       host.emit({ type: "session.created", data: { sessionID: "c2", parentID: "r", agent: "plain", model: sonnet } })
       host.emit({ type: "session.execution.failed", data: { sessionID: "c2", error: { type: "api", message: "invalid credentials", status: 401 } } })
+      await settle()
+      // c1 is resumed: it counts as running from the start of that run, not from its end.
+      await host.spawn("subagent", { agent: "plain", prompt: "again", sessionID: "c1" }, "build", "r", "call-3")
+      expect(host.storage.get("outcome:c1")).toMatchObject({ resumes: 1, steps: 2 })
+      expect(host.storage.get("outcome:c1")).not.toHaveProperty("outcome")
+      host.emit(succeeded)
       await settle()
       await host.spawnDone({ ...input1, sessionID: "c1" }, { sessionID: "c1" }, "r", "call-3")
       const first = host.storage.get("outcome:c1") as Record<string, unknown>
@@ -1245,12 +1252,54 @@ describe("runtime fallback", () => {
       expect(JSON.stringify(first)).not.toContain("secret prompt")
       expect(host.storage.get("outcome:c2")).toMatchObject({ outcome: "failed:auth", steps: 0 })
       const check = (await host.tools.get("model_roles_check")?.execute({}))?.content
-      expect(check).toContain("outcome ledger: 2 spawns recorded")
+      expect(check).toContain("Usage per tier (last 90 days):")
+      expect(check).toContain("  standard: 2 runs: 1 ok, 1 failed, 0 interrupted (50%)")
+      expect(check).toContain("cost 1/2 $0.750 ($0.750/success)") // c2 reported no usage at all
       host.close()
       await cleanup()
     } finally {
       setSystemTime()
     }
+  })
+
+  describe("usage rpc", () => {
+    const DAY = 24 * 60 * 60 * 1000
+    const stored = (ago: number, over: Record<string, unknown> = {}) => ({
+      v: 2,
+      at: Date.now() - ago * DAY,
+      agent: "explore",
+      tier: "cheap",
+      model: "secret-provider/secret-model#high",
+      parentID: "secret-parent-session",
+      resumes: 0,
+      inputTokens: 10,
+      outputTokens: 1,
+      cost: 0.5,
+      steps: 1,
+      ms: 100,
+      outcome: "succeeded",
+      ...over,
+    })
+
+    test("forwards the window and returns aggregates only", async () => {
+      const host = createHost({ agents: [{ id: "plain" }], models, options: fallbackOptions })
+      host.storage.set("outcome:session-recent-AAA", stored(1))
+      host.storage.set("outcome:session-old-BBB", stored(40, { outcome: "failed:server" }))
+      host.storage.set("outcome:session-running-CCC", stored(1, { outcome: undefined }))
+      const cleanup = await setup(host)
+      const all = (await host.rpc("usage", {})) as { days: number; tiers: Array<{ tier: string; total: { n: number; succeeded: number; failed: number }; agents: unknown[] }> }
+      expect(all.days).toBe(90)
+      expect(all.tiers).toHaveLength(1)
+      expect(all.tiers[0]).toMatchObject({ tier: "cheap", total: { n: 2, succeeded: 1, failed: 1 } })
+      const week = (await host.rpc("usage", { days: 7 })) as typeof all
+      expect(week.days).toBe(7)
+      expect(week.tiers[0]?.total).toMatchObject({ n: 1, succeeded: 1, failed: 0 })
+      expect(((await host.rpc("usage", { days: "7" })) as typeof all).days).toBe(90)
+      const text = JSON.stringify(all)
+      for (const secret of ["session-recent", "session-old", "secret-parent", "secret-provider", "secret-model", "outcome:"]) expect(text).not.toContain(secret)
+      host.close()
+      await cleanup()
+    })
   })
 
   describe("outcome ledger", () => {

@@ -3315,23 +3315,19 @@ var OUTCOME_KEY_PREFIX = "outcome:";
 var LEDGER_MAX_ENTRIES = 1000;
 var LEDGER_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000;
 var LEDGER_DEBOUNCE_MS = 2000;
+var LEDGER_VERSION = 2;
 var newLedger = () => ({});
-var num = (value) => typeof value === "number" && Number.isFinite(value) ? value : 0;
+var add = (total, value) => typeof value === "number" && Number.isFinite(value) ? (total ?? 0) + value : total;
 function onSpawn(ledger, childID, facts) {
   if (ledger[childID] !== undefined)
     return ledger;
   const record = {
+    v: LEDGER_VERSION,
     at: facts.at,
     agent: facts.agent,
     model: facts.model,
     parentID: facts.parentID,
     resumes: 0,
-    inputTokens: 0,
-    outputTokens: 0,
-    reasoningTokens: 0,
-    cacheReadTokens: 0,
-    cacheWriteTokens: 0,
-    cost: 0,
     steps: 0,
     ms: 0
   };
@@ -3343,20 +3339,36 @@ function onSpawn(ledger, childID, facts) {
     record.rule = facts.rule;
   return { ...ledger, [childID]: record };
 }
+var USAGE_KEYS = ["inputTokens", "outputTokens", "reasoningTokens", "cacheReadTokens", "cacheWriteTokens", "cost"];
+var upgrade = (r) => {
+  if (r.v !== undefined)
+    return r;
+  const next = { ...r, v: LEDGER_VERSION };
+  for (const key of USAGE_KEYS)
+    if (next[key] === 0)
+      delete next[key];
+  return next;
+};
 var update = (ledger, childID, change) => {
   const record = ledger[childID];
-  return record === undefined ? ledger : { ...ledger, [childID]: change(record) };
+  return record === undefined ? ledger : { ...ledger, [childID]: change(upgrade(record)) };
 };
-var onResume = (ledger, childID) => update(ledger, childID, (r) => ({ ...r, resumes: r.resumes + 1 }));
+var onResume = (ledger, childID) => update(ledger, childID, (r) => {
+  const { outcome: _earlier, ...running } = r;
+  return { ...running, resumes: r.resumes + 1 };
+});
 var addUsage = (r, usage) => ({
   ...r,
-  inputTokens: r.inputTokens + num(usage.tokens?.input),
-  outputTokens: r.outputTokens + num(usage.tokens?.output),
-  reasoningTokens: r.reasoningTokens + num(usage.tokens?.reasoning),
-  cacheReadTokens: r.cacheReadTokens + num(usage.tokens?.cache?.read),
-  cacheWriteTokens: r.cacheWriteTokens + num(usage.tokens?.cache?.write),
-  cost: r.cost + num(usage.cost)
+  ...fields({
+    inputTokens: add(r.inputTokens, usage.tokens?.input),
+    outputTokens: add(r.outputTokens, usage.tokens?.output),
+    reasoningTokens: add(r.reasoningTokens, usage.tokens?.reasoning),
+    cacheReadTokens: add(r.cacheReadTokens, usage.tokens?.cache?.read),
+    cacheWriteTokens: add(r.cacheWriteTokens, usage.tokens?.cache?.write),
+    cost: add(r.cost, usage.cost)
+  })
 });
+var fields = (values) => Object.fromEntries(Object.entries(values).filter(([, v]) => v !== undefined));
 var onStep = (ledger, childID, usage) => update(ledger, childID, (r) => ({ ...addUsage(r, usage), steps: r.steps + 1 }));
 var onSteps = (ledger, childID, usage, steps) => update(ledger, childID, (r) => ({ ...addUsage(r, usage), steps: r.steps + steps }));
 var onCompaction = (ledger, childID, usage) => update(ledger, childID, (r) => addUsage(r, usage));
@@ -3373,8 +3385,11 @@ function readOutcome(value) {
   const { at, agent, model, parentID } = value;
   if (typeof at !== "number" || typeof agent !== "string" || typeof model !== "string" || typeof parentID !== "string")
     return;
-  for (const key of ["resumes", "inputTokens", "outputTokens", "reasoningTokens", "cacheReadTokens", "cacheWriteTokens", "cost", "steps", "ms"])
+  for (const key of ["resumes", "steps", "ms"])
     if (typeof value[key] !== "number")
+      return;
+  for (const key of ["inputTokens", "outputTokens", "reasoningTokens", "cacheReadTokens", "cacheWriteTokens", "cost"])
+    if (value[key] !== undefined && typeof value[key] !== "number")
       return;
   return value;
 }
@@ -3382,12 +3397,14 @@ var LEDGER_DISPOSE_TIMEOUT_MS = 1e4;
 var LEDGER_MAX_QUEUED = 50;
 var LEDGER_MAX_WRITE_ATTEMPTS = 3;
 var addUsages = (a, b) => ({
-  cost: num(a.cost) + num(b.cost),
+  ...fields({ cost: add(a.cost, b.cost) }),
   tokens: {
-    input: num(a.tokens?.input) + num(b.tokens?.input),
-    output: num(a.tokens?.output) + num(b.tokens?.output),
-    reasoning: num(a.tokens?.reasoning) + num(b.tokens?.reasoning),
-    cache: { read: num(a.tokens?.cache?.read) + num(b.tokens?.cache?.read), write: num(a.tokens?.cache?.write) + num(b.tokens?.cache?.write) }
+    ...fields({
+      input: add(a.tokens?.input, b.tokens?.input),
+      output: add(a.tokens?.output, b.tokens?.output),
+      reasoning: add(a.tokens?.reasoning, b.tokens?.reasoning)
+    }),
+    cache: fields({ read: add(a.tokens?.cache?.read, b.tokens?.cache?.read), write: add(a.tokens?.cache?.write, b.tokens?.cache?.write) })
   }
 });
 function createLedgerStore(storage, options = {}) {
@@ -3573,6 +3590,30 @@ function createLedgerStore(storage, options = {}) {
       }
     },
     size: () => index.size,
+    records: async () => {
+      const found = new Map;
+      try {
+        let after;
+        do {
+          const page = await storage.scan(after === undefined ? { prefix: OUTCOME_KEY_PREFIX } : { prefix: OUTCOME_KEY_PREFIX, after });
+          for (const entry of page.entries) {
+            const record = readOutcome(entry.value);
+            if (record !== undefined)
+              found.set(entry.key.slice(OUTCOME_KEY_PREFIX.length), record);
+          }
+          after = page.next;
+        } while (after !== undefined);
+      } catch (error) {
+        warn("outcome ledger: could not read the records for the report", { error: String(error) });
+      }
+      for (const id of [...found.keys()])
+        if (!index.has(id))
+          found.delete(id);
+      for (const [id, record] of active)
+        if (index.has(id))
+          found.set(id, record);
+      return [...found.values()].map((record) => ({ ...record }));
+    },
     active: () => active.size,
     queued: (id) => depth.get(id) ?? 0,
     spawn: async (id, facts) => {
@@ -3839,6 +3880,162 @@ function formatReceipts(list) {
   return lines;
 }
 
+// plugins/model-roles/src/report.ts
+var DAY_MS = 24 * 60 * 60 * 1000;
+var REPORT_DEFAULT_DAYS = LEDGER_MAX_AGE_MS / DAY_MS;
+var CHECK_TOP_AGENTS = 3;
+var NO_TIER = "(none)";
+var finite = (value) => typeof value === "number" && Number.isFinite(value) ? value : undefined;
+var kindOf = (outcome) => {
+  if (outcome === "succeeded" || outcome === "interrupted")
+    return outcome;
+  return typeof outcome === "string" && outcome.startsWith("failed:") ? "failed" : undefined;
+};
+var percentile = (sorted, p) => sorted[Math.max(0, Math.ceil(p * sorted.length) - 1)] ?? 0;
+var TOKEN_FIELDS = [
+  ["input", "inputTokens"],
+  ["output", "outputTokens"],
+  ["reasoning", "reasoningTokens"],
+  ["cacheRead", "cacheReadTokens"],
+  ["cacheWrite", "cacheWriteTokens"]
+];
+var known = (r, value) => {
+  const v = finite(value);
+  return v === undefined || r.v === undefined && v === 0 ? undefined : v;
+};
+function stats(records) {
+  const kinds = { succeeded: 0, failed: 0, interrupted: 0 };
+  const times = [];
+  const total = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 };
+  const seen = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 };
+  let shareInput = 0;
+  let shareRead = 0;
+  let tokenRuns = 0;
+  let cost = 0;
+  let costRuns = 0;
+  let costSuccesses = 0;
+  let failovers = 0;
+  let resumes = 0;
+  for (const r of records) {
+    const kind = kindOf(r.outcome);
+    if (kind !== undefined)
+      kinds[kind]++;
+    times.push(finite(r.ms) ?? 0);
+    const values = TOKEN_FIELDS.map(([, field]) => known(r, r[field]));
+    if (values.some((v) => v !== undefined)) {
+      tokenRuns++;
+      TOKEN_FIELDS.forEach(([key], i) => {
+        const v = values[i];
+        if (v === undefined)
+          return;
+        total[key] += v;
+        seen[key]++;
+      });
+      const [input, , , read] = values;
+      if (input !== undefined && read !== undefined) {
+        shareInput += input;
+        shareRead += read;
+      }
+    }
+    const c = known(r, r.cost);
+    if (c !== undefined) {
+      cost += c;
+      costRuns++;
+      if (kind === "succeeded")
+        costSuccesses++;
+    }
+    if (r.failedOver === true)
+      failovers++;
+    resumes += finite(r.resumes) ?? 0;
+  }
+  const n = records.length;
+  const sorted = [...times].sort((a, b) => a - b);
+  const out = {
+    n,
+    ...kinds,
+    successRate: kinds.succeeded / n,
+    ms: { mean: times.reduce((a, b) => a + b, 0) / n, p50: percentile(sorted, 0.5), p90: percentile(sorted, 0.9) },
+    tokenRuns,
+    costRuns,
+    failoverRate: failovers / n,
+    resumes
+  };
+  if (tokenRuns > 0) {
+    const reported = Object.keys(total).filter((k) => seen[k] > 0);
+    const totals = Object.fromEntries(reported.map((k) => [k, total[k]]));
+    const mean = Object.fromEntries(reported.map((k) => [k, total[k] / seen[k]]));
+    const denominator = shareInput + shareRead;
+    out.tokens = { total: totals, mean, ...denominator > 0 ? { cacheShare: shareRead / denominator } : {} };
+  }
+  if (costRuns > 0) {
+    out.cost = cost;
+    if (costSuccesses > 0)
+      out.costPerSuccess = cost / costSuccesses;
+  }
+  return out;
+}
+var byName = (a, b) => a < b ? -1 : a > b ? 1 : 0;
+function summarizeUsage(records, now, days) {
+  const window = days !== undefined && Number.isFinite(days) && days > 0 ? days : REPORT_DEFAULT_DAYS;
+  const since = now - window * DAY_MS;
+  const byTier = new Map;
+  for (const r of records) {
+    if (kindOf(r.outcome) === undefined || !(r.at >= since))
+      continue;
+    const tier = r.tier ?? NO_TIER;
+    const agents = byTier.get(tier) ?? new Map;
+    agents.set(r.agent, [...agents.get(r.agent) ?? [], r]);
+    byTier.set(tier, agents);
+  }
+  const tiers = [...byTier.entries()].sort(([a], [b]) => byName(a, b)).map(([tier, agents]) => ({
+    tier,
+    total: stats([...agents.values()].flat()),
+    agents: [...agents.entries()].map(([agent, rs]) => ({ agent, ...stats(rs) })).sort((a, b) => b.n - a.n || byName(a.agent, b.agent))
+  }));
+  return { days: window, tiers };
+}
+function readUsage(value) {
+  if (typeof value !== "object" || value === null)
+    return;
+  const { tiers, days } = value;
+  return Array.isArray(tiers) && typeof days === "number" ? value : undefined;
+}
+var NA = "n/a";
+var percent = (v) => v === undefined ? NA : `${Math.round(v * 100)}%`;
+var count = (v) => v === undefined ? NA : v >= 1e6 ? `${+(v / 1e6).toFixed(1)}M` : v >= 1000 ? `${+(v / 1000).toFixed(1)}k` : `${Math.round(v)}`;
+var money = (v) => v === undefined ? NA : `$${v.toFixed(v >= 1 ? 2 : 3)}`;
+var duration2 = (ms) => ms < 1000 ? `${Math.round(ms)}ms` : ms < 60000 ? `${+(ms / 1000).toFixed(1)}s` : `${+(ms / 60000).toFixed(1)}m`;
+var plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+var coverage = (runs, n) => runs > 0 && runs < n ? ` ${runs}/${n}` : "";
+function usageBrief(s) {
+  return `${plural(s.n, "run")} \xB7 ${percent(s.successRate)} ok \xB7 p50 ${duration2(s.ms.p50)} \xB7 ${money(s.cost)}${coverage(s.costRuns, s.n)}`;
+}
+function usageLine(s) {
+  const t = s.tokens;
+  const tokens = t === undefined ? "tokens n/a" : `${coverage(s.tokenRuns, s.n).trim() === "" ? "" : `tokens ${s.tokenRuns}/${s.n}: `}in ${count(t.total.input)} out ${count(t.total.output)} reasoning ${count(t.total.reasoning)} cache r${count(t.total.cacheRead)}/w${count(t.total.cacheWrite)} (${percent(t.cacheShare)} read)`;
+  return [
+    `${plural(s.n, "run")}: ${s.succeeded} ok, ${s.failed} failed, ${s.interrupted} interrupted (${percent(s.successRate)})`,
+    `time mean ${duration2(s.ms.mean)} p50 ${duration2(s.ms.p50)} p90 ${duration2(s.ms.p90)}`,
+    tokens,
+    `cost${coverage(s.costRuns, s.n)} ${money(s.cost)} (${money(s.costPerSuccess)}/success)`,
+    `failover ${percent(s.failoverRate)}`,
+    plural(s.resumes, "resume")
+  ].join(", ");
+}
+function formatUsage(report) {
+  const lines = [`Usage per tier (last ${plural(report.days, "day")}):`];
+  if (report.tiers.length === 0)
+    return [...lines, "  no finished spawns recorded"];
+  for (const { tier, total, agents } of report.tiers) {
+    lines.push(`  ${tier}: ${usageLine(total)}`);
+    for (const a of agents.slice(0, CHECK_TOP_AGENTS))
+      lines.push(`    - ${a.agent}: ${usageBrief(a)}`);
+    if (agents.length > CHECK_TOP_AGENTS)
+      lines.push(`    - ${agents.length - CHECK_TOP_AGENTS} more agents`);
+  }
+  return lines;
+}
+
 // plugins/model-roles/src/rpc.ts
 import { Rpc } from "@opencode/plugin/rpc";
 var RPC_ID = "model-roles";
@@ -3847,6 +4044,10 @@ var TiersRpc = Rpc.define({
   methods: {
     state: {
       input: { type: "object", properties: { draft: { type: "object" } } },
+      output: { type: "object" }
+    },
+    usage: {
+      input: { type: "object", properties: { days: { type: "number" } } },
       output: { type: "object" }
     },
     set: {
@@ -4355,11 +4556,11 @@ ${refs.size}`;
         });
       } catch {}
     };
-    const announce = async (report) => {
-      const notice = decideFailureNotice(noticeState, report);
+    const announce = async (report2) => {
+      const notice = decideFailureNotice(noticeState, report2);
       if (notice === undefined)
         return;
-      await notify(notice.sessionID, notice.text, report.subagent === undefined ? "fallback" : "subagent-fallback");
+      await notify(notice.sessionID, notice.text, report2.subagent === undefined ? "fallback" : "subagent-fallback");
     };
     const requestLog = new Map;
     const onSessionSucceeded = async (sessionID, model) => {
@@ -4733,13 +4934,13 @@ ${refs.size}`;
         execute: async () => {
           await refresh();
           const agents = await listAgents();
-          const report = checkRoles(options, available, agents, health2, Date.now(), runtime.purposes, derived);
-          report.warnings.push(...tierWarnings(settings, { roles: options.roles, tiers: options.tiers ?? {} }, available));
+          const report2 = checkRoles(options, available, agents, health2, Date.now(), runtime.purposes, derived);
+          report2.warnings.push(...tierWarnings(settings, { roles: options.roles, tiers: options.tiers ?? {} }, available));
           if (stuck.length > 0)
-            report.warnings.push(`Agents ${stuck.join(", ")} still run another model than their tier resolves to: re-registering gave up after ${MAX_REREGISTER} tries (a later plugin or config keeps setting their model).`);
-          const content = [formatCheck(report), ...formatReceipts(receipts), ...formatHistory(autoHistory), `outcome ledger: ${outcomes.size()} spawns recorded`].join(`
+            report2.warnings.push(`Agents ${stuck.join(", ")} still run another model than their tier resolves to: re-registering gave up after ${MAX_REREGISTER} tries (a later plugin or config keeps setting their model).`);
+          const content = [formatCheck(report2), ...formatReceipts(receipts), ...formatHistory(autoHistory), ...formatUsage(summarizeUsage(await outcomes.records(), Date.now()))].join(`
 `);
-          return { content, metadata: { roles: report.roles.length, agents: report.agents.length, auto: autoHistory.length, spawns: receipts.length } };
+          return { content, metadata: { roles: report2.roles.length, agents: report2.agents.length, auto: autoHistory.length, spawns: receipts.length } };
         }
       });
     });
@@ -5256,6 +5457,9 @@ ${refs.size}`;
       if (event.tool !== SUBAGENT_TOOL)
         return;
       await whileSpawning(() => handleSpawn(event));
+      const resumed = isRecord10(event.input) ? event.input.sessionID : undefined;
+      if (typeof resumed === "string" && resumed !== "")
+        await outcomes.resume(resumed);
     });
     const configDir = () => globalConfigDir(process.env, homedir());
     const lookupIdentity = async () => {
@@ -5354,6 +5558,10 @@ ${refs.size}`;
       warn(`applied the tiers from ${config.path ?? "the project config"}`);
     };
     const rpc = await ctx.rpc.register(TiersRpc, {
+      usage: async (input) => {
+        const days = input?.days;
+        return summarizeUsage(await outcomes.records(), Date.now(), typeof days === "number" ? days : undefined);
+      },
       state: async (input) => {
         await queue(async () => {
           await refresh();
@@ -5445,9 +5653,6 @@ ${refs.size}`;
       pending.delete(event.id);
       const expected = expectedChildren.get(event.id);
       expectedChildren.delete(event.id);
-      const resumed = isRecord10(event.input) ? event.input.sessionID : undefined;
-      if (typeof resumed === "string" && resumed !== "")
-        await outcomes.resume(resumed);
       if (event.status === "completed") {
         const childID = event.result.metadata?.sessionID;
         if (spawn !== undefined && typeof childID === "string")
@@ -5619,6 +5824,7 @@ export {
   BUILTIN_TIERS,
   CATALOG_LIMIT,
   CHECK_TOOL,
+  CHECK_TOP_AGENTS,
   CLASSIFY_FALLBACK,
   CLASSIFY_KEY_PREFIX,
   CLASSIFY_TIMEOUT_MS,
@@ -5655,9 +5861,11 @@ export {
   LEDGER_MAX_ENTRIES,
   LEDGER_MAX_QUEUED,
   LEDGER_MAX_WRITE_ATTEMPTS,
+  LEDGER_VERSION,
   MAX_REREGISTER,
   MAX_SESSION_DEPTH,
   NOTICE_DEDUPE_MS,
+  NO_TIER,
   OUTCOME_KEY_PREFIX,
   PENDING_SPAWN_MS,
   PLUGIN_SPEC,
@@ -5665,6 +5873,7 @@ export {
   RECEIPT_LIMIT,
   RECENT_MS,
   REFERENCE_PROVIDERS,
+  REPORT_DEFAULT_DAYS,
   ROLE_ALIAS_DESCRIPTION,
   ROLE_HEADER,
   ROLE_PARAM,
@@ -5737,6 +5946,7 @@ export {
   formatCheck,
   formatHistory,
   formatReceipts,
+  formatUsage,
   globalConfigDir,
   healthEntry,
   healthKey,
@@ -5800,6 +6010,7 @@ export {
   readReceipts,
   readState,
   readTiers,
+  readUsage,
   recordFailure,
   resolveRole,
   resolveTier,
@@ -5821,6 +6032,7 @@ export {
   stripRoleHeader,
   subagentNote,
   summarize,
+  summarizeUsage,
   switchNote,
   textHash,
   tierEffort,
@@ -5833,6 +6045,8 @@ export {
   tierSummary,
   tierWarnings,
   toJsonSchema,
+  usageBrief,
+  usageLine,
   userPin,
   validateTierConfig,
   vendorOf,

@@ -3,6 +3,526 @@
 // plugins/model-roles/src/tui.tsx
 import { Plugin } from "@opencode/plugin/tui";
 
+// plugins/model-roles/src/ledger.ts
+var OUTCOME_KEY_PREFIX = "outcome:";
+var LEDGER_MAX_ENTRIES = 1000;
+var LEDGER_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000;
+var LEDGER_DEBOUNCE_MS = 2000;
+var LEDGER_VERSION = 2;
+var newLedger = () => ({});
+var add = (total, value) => typeof value === "number" && Number.isFinite(value) ? (total ?? 0) + value : total;
+function onSpawn(ledger, childID, facts) {
+  if (ledger[childID] !== undefined)
+    return ledger;
+  const record = {
+    v: LEDGER_VERSION,
+    at: facts.at,
+    agent: facts.agent,
+    model: facts.model,
+    parentID: facts.parentID,
+    resumes: 0,
+    steps: 0,
+    ms: 0
+  };
+  if (facts.tier !== undefined)
+    record.tier = facts.tier;
+  if (facts.source !== undefined)
+    record.source = facts.source;
+  if (facts.rule !== undefined)
+    record.rule = facts.rule;
+  return { ...ledger, [childID]: record };
+}
+var USAGE_KEYS = ["inputTokens", "outputTokens", "reasoningTokens", "cacheReadTokens", "cacheWriteTokens", "cost"];
+var upgrade = (r) => {
+  if (r.v !== undefined)
+    return r;
+  const next = { ...r, v: LEDGER_VERSION };
+  for (const key of USAGE_KEYS)
+    if (next[key] === 0)
+      delete next[key];
+  return next;
+};
+var update = (ledger, childID, change) => {
+  const record = ledger[childID];
+  return record === undefined ? ledger : { ...ledger, [childID]: change(upgrade(record)) };
+};
+var onResume = (ledger, childID) => update(ledger, childID, (r) => {
+  const { outcome: _earlier, ...running } = r;
+  return { ...running, resumes: r.resumes + 1 };
+});
+var addUsage = (r, usage) => ({
+  ...r,
+  ...fields({
+    inputTokens: add(r.inputTokens, usage.tokens?.input),
+    outputTokens: add(r.outputTokens, usage.tokens?.output),
+    reasoningTokens: add(r.reasoningTokens, usage.tokens?.reasoning),
+    cacheReadTokens: add(r.cacheReadTokens, usage.tokens?.cache?.read),
+    cacheWriteTokens: add(r.cacheWriteTokens, usage.tokens?.cache?.write),
+    cost: add(r.cost, usage.cost)
+  })
+});
+var fields = (values) => Object.fromEntries(Object.entries(values).filter(([, v]) => v !== undefined));
+var onStep = (ledger, childID, usage) => update(ledger, childID, (r) => ({ ...addUsage(r, usage), steps: r.steps + 1 }));
+var onSteps = (ledger, childID, usage, steps) => update(ledger, childID, (r) => ({ ...addUsage(r, usage), steps: r.steps + steps }));
+var onCompaction = (ledger, childID, usage) => update(ledger, childID, (r) => addUsage(r, usage));
+var onEnd = (ledger, childID, outcome, at) => update(ledger, childID, (r) => ({ ...r, outcome, ms: Math.max(0, at - r.at) }));
+var onFailover = (ledger, childID) => update(ledger, childID, (r) => r.failedOver ? r : { ...r, failedOver: true });
+function prune(ledger, now, limits = { maxEntries: LEDGER_MAX_ENTRIES, maxAgeMs: LEDGER_MAX_AGE_MS }) {
+  const kept = Object.entries(ledger).filter(([, r]) => now - r.at <= limits.maxAgeMs).sort((a, b) => b[1].at - a[1].at).slice(0, limits.maxEntries);
+  return kept.length === Object.keys(ledger).length ? ledger : Object.fromEntries(kept);
+}
+var isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+function readOutcome(value) {
+  if (!isRecord(value))
+    return;
+  const { at, agent, model, parentID } = value;
+  if (typeof at !== "number" || typeof agent !== "string" || typeof model !== "string" || typeof parentID !== "string")
+    return;
+  for (const key of ["resumes", "steps", "ms"])
+    if (typeof value[key] !== "number")
+      return;
+  for (const key of ["inputTokens", "outputTokens", "reasoningTokens", "cacheReadTokens", "cacheWriteTokens", "cost"])
+    if (value[key] !== undefined && typeof value[key] !== "number")
+      return;
+  return value;
+}
+var LEDGER_DISPOSE_TIMEOUT_MS = 1e4;
+var LEDGER_MAX_QUEUED = 50;
+var LEDGER_MAX_WRITE_ATTEMPTS = 3;
+var addUsages = (a, b) => ({
+  ...fields({ cost: add(a.cost, b.cost) }),
+  tokens: {
+    ...fields({
+      input: add(a.tokens?.input, b.tokens?.input),
+      output: add(a.tokens?.output, b.tokens?.output),
+      reasoning: add(a.tokens?.reasoning, b.tokens?.reasoning)
+    }),
+    cache: fields({ read: add(a.tokens?.cache?.read, b.tokens?.cache?.read), write: add(a.tokens?.cache?.write, b.tokens?.cache?.write) })
+  }
+});
+function createLedgerStore(storage, options = {}) {
+  const debounceMs = options.debounceMs ?? LEDGER_DEBOUNCE_MS;
+  const now = options.now ?? Date.now;
+  const limits = options.limits ?? { maxEntries: LEDGER_MAX_ENTRIES, maxAgeMs: LEDGER_MAX_AGE_MS };
+  const disposeTimeoutMs = options.disposeTimeoutMs ?? LEDGER_DISPOSE_TIMEOUT_MS;
+  const maxQueued = options.maxQueued ?? LEDGER_MAX_QUEUED;
+  const maxWriteAttempts = options.maxWriteAttempts ?? LEDGER_MAX_WRITE_ATTEMPTS;
+  const warn = options.warn ?? (() => {});
+  const index = new Map;
+  const active = new Map;
+  const dirty = new Set;
+  const finished = new Set;
+  const failures = new Map;
+  const spill = new Map;
+  const depth = new Map;
+  const queues = new Map;
+  const outstanding = new Set;
+  let timer;
+  let closed = false;
+  const keyOf = (id) => `${OUTCOME_KEY_PREFIX}${id}`;
+  const run = (id, task, counted = true, force = false) => {
+    if (closed && !force)
+      return Promise.resolve();
+    if (counted)
+      depth.set(id, (depth.get(id) ?? 0) + 1);
+    const queued = (queues.get(id) ?? Promise.resolve()).then(task).catch(() => {});
+    queues.set(id, queued);
+    outstanding.add(queued);
+    queued.then(() => {
+      outstanding.delete(queued);
+      if (counted)
+        depth.set(id, (depth.get(id) ?? 1) - 1);
+      if (depth.get(id) === 0)
+        depth.delete(id);
+      if (queues.get(id) === queued)
+        queues.delete(id);
+    });
+    return queued;
+  };
+  const write = async (id) => {
+    const record = active.get(id);
+    if (record === undefined || !index.has(id))
+      return true;
+    try {
+      await storage.set(keyOf(id), record);
+      failures.delete(id);
+      dirty.delete(id);
+      return true;
+    } catch (error) {
+      const attempts = (failures.get(id) ?? 0) + 1;
+      failures.set(id, attempts);
+      if (attempts >= maxWriteAttempts) {
+        warn(`outcome ledger: giving up writing ${id} after ${attempts} attempts`, { error: String(error) });
+        dirty.delete(id);
+        if (finished.delete(id))
+          active.delete(id);
+        failures.delete(id);
+      } else {
+        warn(`outcome ledger: could not write ${id} (attempt ${attempts}); it stays in memory`, { error: String(error) });
+        later(id);
+      }
+      return false;
+    }
+  };
+  const save = async (id) => {
+    const ok = await write(id);
+    if (ok && finished.has(id) && !dirty.has(id)) {
+      active.delete(id);
+      finished.delete(id);
+    }
+  };
+  const load1 = async (id) => {
+    if (!index.has(id))
+      return;
+    const known = active.get(id);
+    if (known !== undefined)
+      return known;
+    const raw = await Promise.resolve(storage.get(keyOf(id))).catch((error) => {
+      warn(`outcome ledger: could not read ${id}`, { error: String(error) });
+      return;
+    });
+    const stored = readOutcome(raw);
+    if (stored === undefined)
+      return;
+    active.set(id, stored);
+    return stored;
+  };
+  const flush = async (retryFailed = true) => {
+    if (timer !== undefined)
+      clearTimeout(timer);
+    timer = undefined;
+    const ids = [...dirty].filter((id) => retryFailed || !failures.has(id));
+    for (const id of ids)
+      dirty.delete(id);
+    await Promise.all(ids.map((id) => run(id, () => save(id).then(() => {
+      return;
+    }), false)));
+  };
+  function later(id) {
+    dirty.add(id);
+    if (timer !== undefined || closed)
+      return;
+    timer = setTimeout(() => void flush(), debounceMs);
+    timer.unref?.();
+  }
+  const retain = async () => {
+    const kept = prune(Object.fromEntries([...index].map(([id, at]) => [id, { at }])), now(), limits);
+    const gone = [...index.keys()].filter((id) => kept[id] === undefined);
+    await Promise.all(gone.map((id) => run(id, async () => {
+      index.delete(id);
+      active.delete(id);
+      dirty.delete(id);
+      finished.delete(id);
+      failures.delete(id);
+      spill.delete(id);
+      try {
+        await storage.remove?.(keyOf(id));
+      } catch {}
+    })));
+  };
+  const applySpill = (id, record) => {
+    const pending = spill.get(id);
+    if (pending === undefined)
+      return record;
+    spill.delete(id);
+    return onSteps({ [id]: record }, id, pending.usage, pending.steps)[id] ?? record;
+  };
+  const change = async (id, reduce, how) => {
+    await run(id, async () => {
+      const loaded = await load1(id);
+      if (loaded === undefined)
+        return;
+      const record = applySpill(id, loaded);
+      const next = reduce({ [id]: record }, id)[id];
+      if (next === undefined)
+        return;
+      if (next === record && record === loaded && !dirty.has(id))
+        return;
+      active.set(id, next);
+      if (how === "end")
+        finished.add(id);
+      if (how === "debounce" && !closed)
+        return later(id);
+      dirty.delete(id);
+      await save(id);
+    });
+    if (how === "end")
+      await retain();
+  };
+  const coalescing = (id, usage, steps) => {
+    if ((depth.get(id) ?? 0) < maxQueued || !index.has(id))
+      return false;
+    const pending = spill.get(id);
+    spill.set(id, { usage: addUsages(pending?.usage ?? {}, usage), steps: (pending?.steps ?? 0) + steps });
+    if (pending === undefined)
+      run(id, async () => {
+        const record = active.get(id) ?? await load1(id);
+        if (record === undefined || !spill.has(id))
+          return;
+        active.set(id, applySpill(id, record));
+        later(id);
+      }, false);
+    return true;
+  };
+  return {
+    async load() {
+      try {
+        let after;
+        do {
+          const page = await storage.scan(after === undefined ? { prefix: OUTCOME_KEY_PREFIX } : { prefix: OUTCOME_KEY_PREFIX, after });
+          for (const entry of page.entries) {
+            const record = readOutcome(entry.value);
+            if (record !== undefined)
+              index.set(entry.key.slice(OUTCOME_KEY_PREFIX.length), record.at);
+          }
+          after = page.next;
+        } while (after !== undefined);
+        await retain();
+      } catch (error) {
+        warn("outcome ledger: could not read the stored records; starting with what was read", { error: String(error) });
+      }
+    },
+    size: () => index.size,
+    records: async () => {
+      const found = new Map;
+      try {
+        let after;
+        do {
+          const page = await storage.scan(after === undefined ? { prefix: OUTCOME_KEY_PREFIX } : { prefix: OUTCOME_KEY_PREFIX, after });
+          for (const entry of page.entries) {
+            const record = readOutcome(entry.value);
+            if (record !== undefined)
+              found.set(entry.key.slice(OUTCOME_KEY_PREFIX.length), record);
+          }
+          after = page.next;
+        } while (after !== undefined);
+      } catch (error) {
+        warn("outcome ledger: could not read the records for the report", { error: String(error) });
+      }
+      for (const id of [...found.keys()])
+        if (!index.has(id))
+          found.delete(id);
+      for (const [id, record] of active)
+        if (index.has(id))
+          found.set(id, record);
+      return [...found.values()].map((record) => ({ ...record }));
+    },
+    active: () => active.size,
+    queued: (id) => depth.get(id) ?? 0,
+    spawn: async (id, facts) => {
+      await run(id, async () => {
+        if (index.has(id))
+          return;
+        const record = onSpawn(newLedger(), id, facts)[id];
+        if (record === undefined)
+          return;
+        index.set(id, record.at);
+        active.set(id, record);
+        await write(id);
+      });
+      await retain();
+    },
+    resume: (id) => change(id, onResume, "now"),
+    step: async (id, usage) => {
+      if (coalescing(id, usage, 1))
+        return;
+      await change(id, (l, i) => onStep(l, i, usage), "debounce");
+    },
+    compaction: async (id, usage) => {
+      if (coalescing(id, usage, 0))
+        return;
+      await change(id, (l, i) => onCompaction(l, i, usage), "debounce");
+    },
+    end: (id, outcome, at) => change(id, (l, i) => onEnd(l, i, outcome, at), "end"),
+    failover: (id) => change(id, onFailover, "now"),
+    flush,
+    async dispose(timeoutMs = disposeTimeoutMs) {
+      const flushing = flush(false);
+      closed = true;
+      const drain = async () => {
+        while (outstanding.size > 0)
+          await Promise.all([...outstanding]);
+      };
+      const unwritten = () => [...active.keys()].filter((id) => dirty.has(id) || failures.has(id) || finished.has(id));
+      const drained = (async () => {
+        await flushing;
+        await drain();
+        await Promise.all(unwritten().map((id) => run(id, () => save(id), false, true)));
+        await drain();
+        return "drained";
+      })();
+      let bound;
+      const expired = new Promise((resolve) => {
+        bound = setTimeout(() => resolve("expired"), timeoutMs);
+        bound.unref?.();
+      });
+      const result = await Promise.race([drained, expired]);
+      clearTimeout(bound);
+      const left = unwritten();
+      if (result === "expired")
+        warn(`outcome ledger: dispose gave up after ${timeoutMs}ms with ${outstanding.size} operations unfinished; unwritten: ${left.join(", ") || "none"}`);
+      else if (left.length > 0)
+        warn(`outcome ledger: ${left.length} records could not be written: ${left.join(", ")}`);
+    }
+  };
+}
+
+// plugins/model-roles/src/report.ts
+var DAY_MS = 24 * 60 * 60 * 1000;
+var REPORT_DEFAULT_DAYS = LEDGER_MAX_AGE_MS / DAY_MS;
+var CHECK_TOP_AGENTS = 3;
+var NO_TIER = "(none)";
+var finite = (value) => typeof value === "number" && Number.isFinite(value) ? value : undefined;
+var kindOf = (outcome) => {
+  if (outcome === "succeeded" || outcome === "interrupted")
+    return outcome;
+  return typeof outcome === "string" && outcome.startsWith("failed:") ? "failed" : undefined;
+};
+var percentile = (sorted, p) => sorted[Math.max(0, Math.ceil(p * sorted.length) - 1)] ?? 0;
+var TOKEN_FIELDS = [
+  ["input", "inputTokens"],
+  ["output", "outputTokens"],
+  ["reasoning", "reasoningTokens"],
+  ["cacheRead", "cacheReadTokens"],
+  ["cacheWrite", "cacheWriteTokens"]
+];
+var known = (r, value) => {
+  const v = finite(value);
+  return v === undefined || r.v === undefined && v === 0 ? undefined : v;
+};
+function stats(records) {
+  const kinds = { succeeded: 0, failed: 0, interrupted: 0 };
+  const times = [];
+  const total = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 };
+  const seen = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 };
+  let shareInput = 0;
+  let shareRead = 0;
+  let tokenRuns = 0;
+  let cost = 0;
+  let costRuns = 0;
+  let costSuccesses = 0;
+  let failovers = 0;
+  let resumes = 0;
+  for (const r of records) {
+    const kind = kindOf(r.outcome);
+    if (kind !== undefined)
+      kinds[kind]++;
+    times.push(finite(r.ms) ?? 0);
+    const values = TOKEN_FIELDS.map(([, field]) => known(r, r[field]));
+    if (values.some((v) => v !== undefined)) {
+      tokenRuns++;
+      TOKEN_FIELDS.forEach(([key], i) => {
+        const v = values[i];
+        if (v === undefined)
+          return;
+        total[key] += v;
+        seen[key]++;
+      });
+      const [input, , , read] = values;
+      if (input !== undefined && read !== undefined) {
+        shareInput += input;
+        shareRead += read;
+      }
+    }
+    const c = known(r, r.cost);
+    if (c !== undefined) {
+      cost += c;
+      costRuns++;
+      if (kind === "succeeded")
+        costSuccesses++;
+    }
+    if (r.failedOver === true)
+      failovers++;
+    resumes += finite(r.resumes) ?? 0;
+  }
+  const n = records.length;
+  const sorted = [...times].sort((a, b) => a - b);
+  const out = {
+    n,
+    ...kinds,
+    successRate: kinds.succeeded / n,
+    ms: { mean: times.reduce((a, b) => a + b, 0) / n, p50: percentile(sorted, 0.5), p90: percentile(sorted, 0.9) },
+    tokenRuns,
+    costRuns,
+    failoverRate: failovers / n,
+    resumes
+  };
+  if (tokenRuns > 0) {
+    const reported = Object.keys(total).filter((k) => seen[k] > 0);
+    const totals = Object.fromEntries(reported.map((k) => [k, total[k]]));
+    const mean = Object.fromEntries(reported.map((k) => [k, total[k] / seen[k]]));
+    const denominator = shareInput + shareRead;
+    out.tokens = { total: totals, mean, ...denominator > 0 ? { cacheShare: shareRead / denominator } : {} };
+  }
+  if (costRuns > 0) {
+    out.cost = cost;
+    if (costSuccesses > 0)
+      out.costPerSuccess = cost / costSuccesses;
+  }
+  return out;
+}
+var byName = (a, b) => a < b ? -1 : a > b ? 1 : 0;
+function summarizeUsage(records, now, days) {
+  const window = days !== undefined && Number.isFinite(days) && days > 0 ? days : REPORT_DEFAULT_DAYS;
+  const since = now - window * DAY_MS;
+  const byTier = new Map;
+  for (const r of records) {
+    if (kindOf(r.outcome) === undefined || !(r.at >= since))
+      continue;
+    const tier = r.tier ?? NO_TIER;
+    const agents = byTier.get(tier) ?? new Map;
+    agents.set(r.agent, [...agents.get(r.agent) ?? [], r]);
+    byTier.set(tier, agents);
+  }
+  const tiers = [...byTier.entries()].sort(([a], [b]) => byName(a, b)).map(([tier, agents]) => ({
+    tier,
+    total: stats([...agents.values()].flat()),
+    agents: [...agents.entries()].map(([agent, rs]) => ({ agent, ...stats(rs) })).sort((a, b) => b.n - a.n || byName(a.agent, b.agent))
+  }));
+  return { days: window, tiers };
+}
+function readUsage(value) {
+  if (typeof value !== "object" || value === null)
+    return;
+  const { tiers, days } = value;
+  return Array.isArray(tiers) && typeof days === "number" ? value : undefined;
+}
+var NA = "n/a";
+var percent = (v) => v === undefined ? NA : `${Math.round(v * 100)}%`;
+var count = (v) => v === undefined ? NA : v >= 1e6 ? `${+(v / 1e6).toFixed(1)}M` : v >= 1000 ? `${+(v / 1000).toFixed(1)}k` : `${Math.round(v)}`;
+var money = (v) => v === undefined ? NA : `$${v.toFixed(v >= 1 ? 2 : 3)}`;
+var duration = (ms) => ms < 1000 ? `${Math.round(ms)}ms` : ms < 60000 ? `${+(ms / 1000).toFixed(1)}s` : `${+(ms / 60000).toFixed(1)}m`;
+var plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+var coverage = (runs, n) => runs > 0 && runs < n ? ` ${runs}/${n}` : "";
+function usageBrief(s) {
+  return `${plural(s.n, "run")} \xB7 ${percent(s.successRate)} ok \xB7 p50 ${duration(s.ms.p50)} \xB7 ${money(s.cost)}${coverage(s.costRuns, s.n)}`;
+}
+function usageLine(s) {
+  const t = s.tokens;
+  const tokens = t === undefined ? "tokens n/a" : `${coverage(s.tokenRuns, s.n).trim() === "" ? "" : `tokens ${s.tokenRuns}/${s.n}: `}in ${count(t.total.input)} out ${count(t.total.output)} reasoning ${count(t.total.reasoning)} cache r${count(t.total.cacheRead)}/w${count(t.total.cacheWrite)} (${percent(t.cacheShare)} read)`;
+  return [
+    `${plural(s.n, "run")}: ${s.succeeded} ok, ${s.failed} failed, ${s.interrupted} interrupted (${percent(s.successRate)})`,
+    `time mean ${duration(s.ms.mean)} p50 ${duration(s.ms.p50)} p90 ${duration(s.ms.p90)}`,
+    tokens,
+    `cost${coverage(s.costRuns, s.n)} ${money(s.cost)} (${money(s.costPerSuccess)}/success)`,
+    `failover ${percent(s.failoverRate)}`,
+    plural(s.resumes, "resume")
+  ].join(", ");
+}
+function formatUsage(report) {
+  const lines = [`Usage per tier (last ${plural(report.days, "day")}):`];
+  if (report.tiers.length === 0)
+    return [...lines, "  no finished spawns recorded"];
+  for (const { tier, total, agents } of report.tiers) {
+    lines.push(`  ${tier}: ${usageLine(total)}`);
+    for (const a of agents.slice(0, CHECK_TOP_AGENTS))
+      lines.push(`    - ${a.agent}: ${usageBrief(a)}`);
+    if (agents.length > CHECK_TOP_AGENTS)
+      lines.push(`    - ${agents.length - CHECK_TOP_AGENTS} more agents`);
+  }
+  return lines;
+}
+
 // plugins/model-roles/src/rpc.ts
 import { Rpc } from "@opencode/plugin/rpc";
 var RPC_ID = "model-roles";
@@ -11,6 +531,10 @@ var TiersRpc = Rpc.define({
   methods: {
     state: {
       input: { type: "object", properties: { draft: { type: "object" } } },
+      output: { type: "object" }
+    },
+    usage: {
+      input: { type: "object", properties: { days: { type: "number" } } },
       output: { type: "object" }
     },
     set: {
@@ -36,18 +560,18 @@ var TiersRpc = Rpc.define({
 // plugins/model-roles/src/resolve.ts
 var ROLE_HEADER = "x-opencode-model-role";
 var FALLBACK_HEADER = "x-opencode-model-fallback";
-var isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+var isRecord2 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 function parseOptions(raw) {
-  const input = isRecord(raw) ? raw : {};
+  const input = isRecord2(raw) ? raw : {};
   const roles = {};
-  if (isRecord(input.roles)) {
+  if (isRecord2(input.roles)) {
     for (const [role, value] of Object.entries(input.roles)) {
       const list = typeof value === "string" ? [value] : Array.isArray(value) ? value : [];
       roles[role] = list.filter((entry) => typeof entry === "string" && entry.trim() !== "");
     }
   }
   const agents = {};
-  if (isRecord(input.agents)) {
+  if (isRecord2(input.agents)) {
     for (const [agent, role] of Object.entries(input.agents)) {
       if (typeof role === "string" && role.trim() !== "")
         agents[agent] = role.trim();
@@ -451,10 +975,10 @@ var BUILTIN_AGENT_TIERS = {
   compaction: "cheap"
 };
 var GENERAL_TIER = "standard";
-var isRecord2 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+var isRecord3 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 var strings = (value) => (typeof value === "string" ? [value] : Array.isArray(value) ? value : []).filter((v) => typeof v === "string" && v.trim() !== "").map((v) => v.trim());
 function parseTierConfig(raw) {
-  const input = isRecord2(raw) ? raw : { model: raw };
+  const input = isRecord3(raw) ? raw : { model: raw };
   const config = {};
   if (input.model === "auto")
     config.model = "auto";
@@ -471,9 +995,9 @@ function parseTierConfig(raw) {
   return config;
 }
 function parseTierSettings(raw) {
-  const input = isRecord2(raw) ? raw : {};
+  const input = isRecord3(raw) ? raw : {};
   const tiers = {};
-  if (isRecord2(input.tiers)) {
+  if (isRecord3(input.tiers)) {
     for (const [name, value] of Object.entries(input.tiers)) {
       const key = name.trim();
       if (key === "" || INHERIT_NAMES.includes(key))
@@ -482,11 +1006,11 @@ function parseTierSettings(raw) {
     }
   }
   const legacy = {};
-  if (isRecord2(input.roles))
+  if (isRecord3(input.roles))
     for (const [role, value] of Object.entries(input.roles))
       legacy[role] = strings(value);
   const purposes = {};
-  if (isRecord2(input.purposes)) {
+  if (isRecord3(input.purposes)) {
     for (const [role, text] of Object.entries(input.purposes))
       if (typeof text === "string" && text.trim() !== "")
         purposes[role] = text.trim();
@@ -766,7 +1290,7 @@ function resolveTier(options, available, name, health, callerVendor) {
 
 // plugins/model-roles/src/tiers-ui.ts
 var EFFORT_CHOICES = ["auto", "none", "minimal", "low", "medium", "high", "xhigh", "max"];
-var isRecord3 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+var isRecord4 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 function tierState(input) {
   const resolve = (name) => {
     const model = resolveRole(input.options.roles, input.available, name, input.health).model;
@@ -826,7 +1350,7 @@ function tierState(input) {
   return state;
 }
 function readState(value) {
-  if (!isRecord3(value) || !Array.isArray(value.tiers) || !Array.isArray(value.models))
+  if (!isRecord4(value) || !Array.isArray(value.tiers) || !Array.isArray(value.models))
     return;
   return { ...value, agents: Array.isArray(value.agents) ? value.agents : [] };
 }
@@ -837,7 +1361,7 @@ function agentTierError(tier, tiers) {
 }
 var TIER_NAME = /^[a-z][a-z0-9-]*$/;
 function readDraft(input) {
-  const draft = isRecord3(input) && isRecord3(input.draft) ? input.draft : {};
+  const draft = isRecord4(input) && isRecord4(input.draft) ? input.draft : {};
   const out = {};
   for (const [name, value] of Object.entries(draft)) {
     if (!TIER_NAME.test(name))
@@ -1145,6 +1669,7 @@ var agentTierCurrent = (agent) => agent.source === "options" && agent.tier !== u
 var ADD = "\x00add";
 var AGENTS = "\x00agents";
 var DEFAULT = "\x00default";
+var USAGE = "\x00usage";
 var tui_default = Plugin.define({
   id: "srobroek.model-roles",
   setup(context) {
@@ -1480,6 +2005,54 @@ var tui_default = Plugin.define({
         state = next;
       }
     };
+    const showUsage = async (at) => {
+      let report;
+      try {
+        report = readUsage(await rpc.usage({}, {
+          location: at
+        }));
+      } catch (error) {
+        toast(`Usage: ${error.message}`, "error");
+        return;
+      }
+      if (report === undefined)
+        return;
+      let current;
+      for (;; ) {
+        const tier = await dialog.select({
+          title: "Usage per tier",
+          placeholder: `Last ${report.days} days. Enter shows a tier's agents`,
+          options: report.tiers.length === 0 ? [{
+            title: "No finished spawns recorded",
+            value: "",
+            disabled: true
+          }] : report.tiers.map((t) => ({
+            title: t.tier,
+            value: t.tier,
+            description: usageBrief(t.total)
+          })),
+          ...current === undefined ? {} : {
+            current
+          }
+        });
+        if (tier === undefined)
+          return;
+        current = tier;
+        const row = report.tiers.find((t) => t.tier === tier);
+        if (row === undefined)
+          continue;
+        await dialog.select({
+          title: `Usage: ${row.tier}`,
+          placeholder: "Per agent. Esc goes back",
+          options: row.agents.map((a) => ({
+            title: a.agent,
+            value: a.agent,
+            description: usageBrief(a),
+            disabled: true
+          }))
+        });
+      }
+    };
     const open = async () => {
       const at = location();
       let current;
@@ -1507,6 +2080,10 @@ var tui_default = Plugin.define({
             value: AGENTS,
             description: "See each agent's tier and change it"
           }, {
+            title: "Usage\u2026",
+            value: USAGE,
+            description: "Runs, success, time and cost per tier (read-only)"
+          }, {
             title: "Add a tier\u2026",
             value: ADD
           }],
@@ -1521,6 +2098,8 @@ var tui_default = Plugin.define({
           await addTier(at, state);
         else if (choice === AGENTS)
           await showAgents(at, state);
+        else if (choice === USAGE)
+          await showUsage(at);
         else {
           const row = state.tiers.find((t) => t.name === choice);
           if (row !== undefined)

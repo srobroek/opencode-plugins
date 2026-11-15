@@ -15,9 +15,14 @@ export const LEDGER_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000
 /** Step events arrive often: their writes wait this long and merge. */
 export const LEDGER_DEBOUNCE_MS = 2000
 
+/** Version of the record shape. Without it a record is legacy: it stored 0 for usage the host never reported. */
+export const LEDGER_VERSION = 2
+
 export type Outcome = "succeeded" | "interrupted" | `failed:${FailureClass | "other"}`
 
 export type OutcomeRecord = {
+  /** Record schema version; absent on legacy records, whose 0 usage is ambiguous. */
+  v?: number
   // Spawn
   at: number
   agent: string
@@ -29,13 +34,13 @@ export type OutcomeRecord = {
   parentID: string
   /** How many times the child was resumed after its first run. */
   resumes: number
-  // Usage
-  inputTokens: number
-  outputTokens: number
-  reasoningTokens: number
-  cacheReadTokens: number
-  cacheWriteTokens: number
-  cost: number
+  // Usage: undefined until a step reports it; a reported 0 is 0.
+  inputTokens?: number
+  outputTokens?: number
+  reasoningTokens?: number
+  cacheReadTokens?: number
+  cacheWriteTokens?: number
+  cost?: number
   steps: number
   /** First spawn to last end, ms. */
   ms: number
@@ -62,23 +67,20 @@ export type Usage = {
 
 export const newLedger = (): Ledger => ({})
 
-const num = (value: unknown): number => (typeof value === "number" && Number.isFinite(value) ? value : 0)
+/** `total` plus a reported `value`; `total` itself while nothing is reported. */
+const add = (total: number | undefined, value: unknown): number | undefined =>
+  typeof value === "number" && Number.isFinite(value) ? (total ?? 0) + value : total
 
 /** A new child. A child already recorded keeps its record. */
 export function onSpawn(ledger: Ledger, childID: string, facts: SpawnFacts): Ledger {
   if (ledger[childID] !== undefined) return ledger
   const record: OutcomeRecord = {
+    v: LEDGER_VERSION,
     at: facts.at,
     agent: facts.agent,
     model: facts.model,
     parentID: facts.parentID,
     resumes: 0,
-    inputTokens: 0,
-    outputTokens: 0,
-    reasoningTokens: 0,
-    cacheReadTokens: 0,
-    cacheWriteTokens: 0,
-    cost: 0,
     steps: 0,
     ms: 0,
   }
@@ -88,23 +90,43 @@ export function onSpawn(ledger: Ledger, childID: string, facts: SpawnFacts): Led
   return { ...ledger, [childID]: record }
 }
 
-const update = (ledger: Ledger, childID: string, change: (r: OutcomeRecord) => OutcomeRecord): Ledger => {
-  const record = ledger[childID]
-  return record === undefined ? ledger : { ...ledger, [childID]: change(record) }
+const USAGE_KEYS = ["inputTokens", "outputTokens", "reasoningTokens", "cacheReadTokens", "cacheWriteTokens", "cost"] as const
+
+/** A legacy record stored 0 for usage the host never reported: drop those zeros and stamp the version, so new reports read as reported. */
+const upgrade = (r: OutcomeRecord): OutcomeRecord => {
+  if (r.v !== undefined) return r
+  const next: OutcomeRecord = { ...r, v: LEDGER_VERSION }
+  for (const key of USAGE_KEYS) if (next[key] === 0) delete next[key]
+  return next
 }
 
-/** The child was spawned again with its session id. */
-export const onResume = (ledger: Ledger, childID: string): Ledger => update(ledger, childID, (r) => ({ ...r, resumes: r.resumes + 1 }))
+const update = (ledger: Ledger, childID: string, change: (r: OutcomeRecord) => OutcomeRecord): Ledger => {
+  const record = ledger[childID]
+  return record === undefined ? ledger : { ...ledger, [childID]: change(upgrade(record)) }
+}
+
+/** The child was spawned again with its session id: it is running again, so its earlier outcome no longer stands. */
+export const onResume = (ledger: Ledger, childID: string): Ledger =>
+  update(ledger, childID, (r) => {
+    const { outcome: _earlier, ...running } = r
+    return { ...running, resumes: r.resumes + 1 }
+  })
 
 const addUsage = (r: OutcomeRecord, usage: Usage): OutcomeRecord => ({
   ...r,
-  inputTokens: r.inputTokens + num(usage.tokens?.input),
-  outputTokens: r.outputTokens + num(usage.tokens?.output),
-  reasoningTokens: r.reasoningTokens + num(usage.tokens?.reasoning),
-  cacheReadTokens: r.cacheReadTokens + num(usage.tokens?.cache?.read),
-  cacheWriteTokens: r.cacheWriteTokens + num(usage.tokens?.cache?.write),
-  cost: r.cost + num(usage.cost),
+  ...fields({
+    inputTokens: add(r.inputTokens, usage.tokens?.input),
+    outputTokens: add(r.outputTokens, usage.tokens?.output),
+    reasoningTokens: add(r.reasoningTokens, usage.tokens?.reasoning),
+    cacheReadTokens: add(r.cacheReadTokens, usage.tokens?.cache?.read),
+    cacheWriteTokens: add(r.cacheWriteTokens, usage.tokens?.cache?.write),
+    cost: add(r.cost, usage.cost),
+  }),
 })
+
+/** The defined entries only, so an unreported field stays absent from the record. */
+const fields = <T extends Record<string, number | undefined>>(values: T): Partial<Record<keyof T, number>> =>
+  Object.fromEntries(Object.entries(values).filter(([, v]) => v !== undefined)) as Partial<Record<keyof T, number>>
 
 /** A model step ended. */
 export const onStep = (ledger: Ledger, childID: string, usage: Usage): Ledger =>
@@ -145,8 +167,9 @@ export function readOutcome(value: unknown): OutcomeRecord | undefined {
   if (!isRecord(value)) return undefined
   const { at, agent, model, parentID } = value
   if (typeof at !== "number" || typeof agent !== "string" || typeof model !== "string" || typeof parentID !== "string") return undefined
-  for (const key of ["resumes", "inputTokens", "outputTokens", "reasoningTokens", "cacheReadTokens", "cacheWriteTokens", "cost", "steps", "ms"])
-    if (typeof value[key] !== "number") return undefined
+  for (const key of ["resumes", "steps", "ms"]) if (typeof value[key] !== "number") return undefined
+  for (const key of ["inputTokens", "outputTokens", "reasoningTokens", "cacheReadTokens", "cacheWriteTokens", "cost"])
+    if (value[key] !== undefined && typeof value[key] !== "number") return undefined
   return value as OutcomeRecord
 }
 
@@ -176,12 +199,14 @@ export type LedgerStoreOptions = {
 }
 
 const addUsages = (a: Usage, b: Usage): Usage => ({
-  cost: num(a.cost) + num(b.cost),
+  ...fields({ cost: add(a.cost, b.cost) }),
   tokens: {
-    input: num(a.tokens?.input) + num(b.tokens?.input),
-    output: num(a.tokens?.output) + num(b.tokens?.output),
-    reasoning: num(a.tokens?.reasoning) + num(b.tokens?.reasoning),
-    cache: { read: num(a.tokens?.cache?.read) + num(b.tokens?.cache?.read), write: num(a.tokens?.cache?.write) + num(b.tokens?.cache?.write) },
+    ...fields({
+      input: add(a.tokens?.input, b.tokens?.input),
+      output: add(a.tokens?.output, b.tokens?.output),
+      reasoning: add(a.tokens?.reasoning, b.tokens?.reasoning),
+    }),
+    cache: fields({ read: add(a.tokens?.cache?.read, b.tokens?.cache?.read), write: add(a.tokens?.cache?.write, b.tokens?.cache?.write) }),
   },
 })
 
@@ -392,6 +417,30 @@ export function createLedgerStore(storage: LedgerStorage, options: LedgerStoreOp
       }
     },
     size: () => index.size,
+    /**
+     * Every record, read-only: stored ones plus the running or unwritten ones in memory,
+     * which are newer. A storage failure yields what was read.
+     */
+    records: async (): Promise<OutcomeRecord[]> => {
+      const found = new Map<string, OutcomeRecord>()
+      try {
+        let after: string | undefined
+        do {
+          const page = await storage.scan(after === undefined ? { prefix: OUTCOME_KEY_PREFIX } : { prefix: OUTCOME_KEY_PREFIX, after })
+          for (const entry of page.entries) {
+            const record = readOutcome(entry.value)
+            if (record !== undefined) found.set(entry.key.slice(OUTCOME_KEY_PREFIX.length), record)
+          }
+          after = page.next
+        } while (after !== undefined)
+      } catch (error) {
+        warn("outcome ledger: could not read the records for the report", { error: String(error) })
+      }
+      // Only what retention keeps; running or unwritten records in memory are newer than the stored ones.
+      for (const id of [...found.keys()]) if (!index.has(id)) found.delete(id)
+      for (const [id, record] of active) if (index.has(id)) found.set(id, record)
+      return [...found.values()].map((record) => ({ ...record }))
+    },
     /** Records held in memory. */
     active: () => active.size,
     /** Counted operations waiting on this child. */

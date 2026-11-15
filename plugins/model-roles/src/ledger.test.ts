@@ -4,6 +4,7 @@ import {
   type LedgerStorage,
   newLedger,
   OUTCOME_KEY_PREFIX,
+  type OutcomeRecord,
   onCompaction,
   onEnd,
   onFailover,
@@ -12,23 +13,19 @@ import {
   onStep,
   prune,
 } from "./ledger.ts"
+import { summarizeUsage } from "./report.ts"
 
 const DAY = 24 * 60 * 60 * 1000
 const facts = { at: 1000, agent: "explore", model: "anthropic/haiku#low", parentID: "ses_p", tier: "cheap", source: "tier-param", rule: "tier-effort" } as const
 const spawned = () => onSpawn(newLedger(), "ses_c", facts)
 
 describe("reducers", () => {
-  test("a spawn starts a zeroed record with the routing facts and unset experiment fields", () => {
+  test("a spawn starts a versioned record with the routing facts, no usage and unset experiment fields", () => {
     const record = spawned().ses_c
     expect(record).toEqual({
       ...facts,
+      v: 2,
       resumes: 0,
-      inputTokens: 0,
-      outputTokens: 0,
-      reasoningTokens: 0,
-      cacheReadTokens: 0,
-      cacheWriteTokens: 0,
-      cost: 0,
       steps: 0,
       ms: 0,
     })
@@ -56,6 +53,35 @@ describe("reducers", () => {
     expect(ledger.ses_c).toMatchObject({ inputTokens: 100, outputTokens: 10, cacheReadTokens: 3, cacheWriteTokens: 4, cost: 1.5, steps: 1 })
   })
 
+  test("usage stays absent until a step reports it; a reported 0 is kept; fields fill in independently", () => {
+    let ledger = onStep(spawned(), "ses_c", {})
+    expect(ledger.ses_c).toMatchObject({ steps: 1 })
+    expect(Object.keys(ledger.ses_c ?? {})).not.toContain("cost")
+    expect(Object.keys(ledger.ses_c ?? {})).not.toContain("inputTokens")
+    ledger = onStep(ledger, "ses_c", { cost: 0, tokens: { input: 0 } })
+    expect(ledger.ses_c).toMatchObject({ cost: 0, inputTokens: 0 })
+    expect(Object.keys(ledger.ses_c ?? {})).not.toContain("outputTokens")
+    ledger = onStep(ledger, "ses_c", { cost: 0.5, tokens: { output: 7, cache: { read: 3 } } })
+    expect(ledger.ses_c).toMatchObject({ cost: 0.5, inputTokens: 0, outputTokens: 7, cacheReadTokens: 3 })
+    expect(Object.keys(ledger.ses_c ?? {})).not.toContain("cacheWriteTokens")
+    // A non-finite value is not a report.
+    expect(Object.keys(onStep(spawned(), "ses_c", { cost: Number.NaN }).ses_c ?? {})).not.toContain("cost")
+  })
+
+  test("the first update of a legacy record drops its ambiguous zeros and stamps the version; a resume then reports cost 0", () => {
+    const { v: _v, ...fresh } = spawned().ses_c as OutcomeRecord
+    const legacy: OutcomeRecord = { ...fresh, inputTokens: 0, outputTokens: 0, reasoningTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, cost: 0, steps: 1, outcome: "succeeded" }
+    const resumed = onResume({ ses_c: legacy }, "ses_c")
+    expect(resumed.ses_c?.v).toBe(2)
+    for (const key of ["inputTokens", "outputTokens", "reasoningTokens", "cacheReadTokens", "cacheWriteTokens", "cost"]) expect(Object.keys(resumed.ses_c ?? {})).not.toContain(key)
+    const stepped = onEnd(onStep(resumed, "ses_c", { cost: 0, tokens: { input: 40 } }), "ses_c", "succeeded", 5000)
+    const before = summarizeUsage([legacy], 2000).tiers[0]?.total
+    expect(before).toMatchObject({ costRuns: 0, tokenRuns: 0 }) // legacy zeros are unknown
+    const after = summarizeUsage([stepped.ses_c as OutcomeRecord], 2000).tiers[0]?.total
+    expect(after).toMatchObject({ costRuns: 1, cost: 0, tokenRuns: 1, tokens: { total: { input: 40 } } })
+    expect(after?.tokens?.total.output).toBeUndefined()
+  })
+
   test("usage for a session that was never spawned is ignored", () => {
     const ledger = spawned()
     expect(onStep(ledger, "ses_other", { cost: 1 })).toBe(ledger)
@@ -70,6 +96,8 @@ describe("reducers", () => {
   test("a resume counts on the same record and the time runs to the last end", () => {
     let ledger = onEnd(spawned(), "ses_c", "failed:quota", 2000)
     ledger = onResume(ledger, "ses_c")
+    expect(ledger.ses_c?.outcome).toBeUndefined() // running again: the earlier outcome no longer stands
+    expect(Object.keys(ledger.ses_c ?? {})).not.toContain("outcome")
     ledger = onSpawn(ledger, "ses_c", { ...facts, at: 9999 })
     ledger = onEnd(ledger, "ses_c", "succeeded", 7000)
     expect(Object.keys(ledger)).toEqual(["ses_c"])
@@ -83,7 +111,7 @@ describe("reducers", () => {
   test("a record holds only numbers and short labels, no free text", () => {
     const ledger = onEnd(onStep(spawned(), "ses_c", { cost: 1, tokens: { input: 1 } }), "ses_c", "failed:auth", 2000)
     const record = ledger.ses_c as unknown as Record<string, unknown>
-    const allowed = new Set(["at", "agent", "tier", "model", "source", "rule", "parentID", "resumes", "inputTokens", "outputTokens", "reasoningTokens", "cacheReadTokens", "cacheWriteTokens", "cost", "steps", "ms", "outcome", "failedOver"])
+    const allowed = new Set(["v", "at", "agent", "tier", "model", "source", "rule", "parentID", "resumes", "inputTokens", "outputTokens", "reasoningTokens", "cacheReadTokens", "cacheWriteTokens", "cost", "steps", "ms", "outcome", "failedOver"])
     for (const key of Object.keys(record)) expect(allowed.has(key)).toBe(true)
   })
 })
@@ -325,6 +353,80 @@ describe("store", () => {
     // A record from the last page is found again when its child resumes.
     await store.resume("f4")
     expect(data.get(key("f4"))).toMatchObject({ resumes: 1 })
+  })
+
+  describe("records", () => {
+    test("follows the scan cursor through every page", async () => {
+      const { storage, scans } = fake(2)
+      const store = createLedgerStore(storage, { now: () => 2000 })
+      for (let i = 0; i < 5; i++) await store.spawn(`s${i}`, { ...facts, at: 1000 + i })
+      scans.length = 0
+      const records = await store.records()
+      expect(records.map((r) => r.at).sort()).toEqual([1000, 1001, 1002, 1003, 1004])
+      expect(scans.length).toBeGreaterThan(2)
+    })
+
+    test("a record in memory overlays its older stored copy", async () => {
+      const { data, storage } = fake()
+      const store = createLedgerStore(storage, { debounceMs: 10_000, now: () => 2000 })
+      await store.spawn("ses_c", facts)
+      await store.step("ses_c", { cost: 2 }) // debounced: storage still has no cost
+      expect(data.get(key("ses_c"))).not.toHaveProperty("cost")
+      expect(await store.records()).toMatchObject([{ cost: 2, steps: 1 }])
+      await store.dispose()
+    })
+
+    test("a storage error yields what is in memory and warns", async () => {
+      const { storage } = fake()
+      const warn = jest.fn()
+      const store = createLedgerStore(storage, { debounceMs: 10_000, now: () => 2000, warn })
+      await store.spawn("ses_c", facts)
+      const failing: LedgerStorage = { ...storage, scan: async () => Promise.reject(new Error("scan down")) }
+      const broken = createLedgerStore(failing, { debounceMs: 10_000, now: () => 2000, warn })
+      await broken.spawn("ses_e", facts)
+      expect(await broken.records()).toMatchObject([{ agent: "explore" }]) // the unwritten-or-running record in memory
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("could not read the records"), expect.anything())
+      await store.dispose()
+      await broken.dispose()
+    })
+
+    test("returns copies: changing a returned record leaves the ledger alone", async () => {
+      const { storage } = fake()
+      const store = createLedgerStore(storage, { debounceMs: 10_000, now: () => 2000 })
+      await store.spawn("ses_c", facts)
+      const [first] = await store.records()
+      if (first === undefined) throw new Error("no record")
+      first.agent = "changed"
+      first.cost = 99
+      expect(await store.records()).toMatchObject([{ agent: "explore" }])
+      expect((await store.records())[0]?.cost).toBeUndefined()
+      await store.dispose()
+    })
+
+    test("leaves out a stored record that retention no longer keeps, such as one whose removal failed", async () => {
+      const { data, storage } = fake()
+      const failingRemove: LedgerStorage = { ...storage, remove: async () => Promise.reject(new Error("remove down")) }
+      const store = createLedgerStore(failingRemove, { debounceMs: 10_000, limits: { maxEntries: 2, maxAgeMs: 90 * DAY }, now: () => 2000 })
+      for (let i = 0; i < 4; i++) {
+        await store.spawn(`s${i}`, { ...facts, at: 1000 + i })
+        await store.end(`s${i}`, "succeeded", 1500)
+      }
+      expect(store.size()).toBe(2)
+      expect(data.has(key("s0"))).toBe(true) // still in storage
+      expect((await store.records()).map((r) => r.at).sort()).toEqual([1002, 1003])
+    })
+
+    test("a resumed child is a record without an outcome until its run ends", async () => {
+      const { storage } = fake()
+      const store = createLedgerStore(storage, { debounceMs: 10_000, now: () => 2000 })
+      await store.spawn("ses_c", facts)
+      await store.end("ses_c", "succeeded", 2000)
+      await store.resume("ses_c")
+      expect((await store.records())[0]).toMatchObject({ resumes: 1 })
+      expect((await store.records())[0]?.outcome).toBeUndefined()
+      await store.end("ses_c", "failed:quota", 3000)
+      expect((await store.records())[0]).toMatchObject({ outcome: "failed:quota" })
+    })
   })
 
   describe("failures and bounds", () => {
