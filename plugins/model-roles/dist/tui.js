@@ -32,9 +32,19 @@ function onSpawn(ledger, childID, facts) {
     record.rule = facts.rule;
   return { ...ledger, [childID]: record };
 }
+var USAGE_KEYS = ["inputTokens", "outputTokens", "reasoningTokens", "cacheReadTokens", "cacheWriteTokens", "cost"];
+var upgrade = (r) => {
+  if (r.v !== undefined)
+    return r;
+  const next = { ...r, v: LEDGER_VERSION };
+  for (const key of USAGE_KEYS)
+    if (next[key] === 0)
+      delete next[key];
+  return next;
+};
 var update = (ledger, childID, change) => {
   const record = ledger[childID];
-  return record === undefined ? ledger : { ...ledger, [childID]: change(record) };
+  return record === undefined ? ledger : { ...ledger, [childID]: change(upgrade(record)) };
 };
 var onResume = (ledger, childID) => update(ledger, childID, (r) => {
   const { outcome: _earlier, ...running } = r;
@@ -384,6 +394,9 @@ function stats(records) {
   const kinds = { succeeded: 0, failed: 0, interrupted: 0 };
   const times = [];
   const total = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 };
+  const seen = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 };
+  let shareInput = 0;
+  let shareRead = 0;
   let tokenRuns = 0;
   let cost = 0;
   let costRuns = 0;
@@ -399,8 +412,17 @@ function stats(records) {
     if (values.some((v) => v !== undefined)) {
       tokenRuns++;
       TOKEN_FIELDS.forEach(([key], i) => {
-        total[key] += values[i] ?? 0;
+        const v = values[i];
+        if (v === undefined)
+          return;
+        total[key] += v;
+        seen[key]++;
       });
+      const [input, , , read] = values;
+      if (input !== undefined && read !== undefined) {
+        shareInput += input;
+        shareRead += read;
+      }
     }
     const c = known(r, r.cost);
     if (c !== undefined) {
@@ -426,9 +448,11 @@ function stats(records) {
     resumes
   };
   if (tokenRuns > 0) {
-    const mean = Object.fromEntries(Object.entries(total).map(([k, v]) => [k, v / tokenRuns]));
-    const denominator = total.input + total.cacheRead;
-    out.tokens = { total, mean, ...denominator > 0 ? { cacheShare: total.cacheRead / denominator } : {} };
+    const reported = Object.keys(total).filter((k) => seen[k] > 0);
+    const totals = Object.fromEntries(reported.map((k) => [k, total[k]]));
+    const mean = Object.fromEntries(reported.map((k) => [k, total[k] / seen[k]]));
+    const denominator = shareInput + shareRead;
+    out.tokens = { total: totals, mean, ...denominator > 0 ? { cacheShare: shareRead / denominator } : {} };
   }
   if (costRuns > 0) {
     out.cost = cost;
@@ -465,7 +489,7 @@ function readUsage(value) {
 }
 var NA = "n/a";
 var percent = (v) => v === undefined ? NA : `${Math.round(v * 100)}%`;
-var count = (v) => v >= 1e6 ? `${+(v / 1e6).toFixed(1)}M` : v >= 1000 ? `${+(v / 1000).toFixed(1)}k` : `${Math.round(v)}`;
+var count = (v) => v === undefined ? NA : v >= 1e6 ? `${+(v / 1e6).toFixed(1)}M` : v >= 1000 ? `${+(v / 1000).toFixed(1)}k` : `${Math.round(v)}`;
 var money = (v) => v === undefined ? NA : `$${v.toFixed(v >= 1 ? 2 : 3)}`;
 var duration = (ms) => ms < 1000 ? `${Math.round(ms)}ms` : ms < 60000 ? `${+(ms / 1000).toFixed(1)}s` : `${+(ms / 60000).toFixed(1)}m`;
 var plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;

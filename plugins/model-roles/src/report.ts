@@ -16,7 +16,8 @@ export const CHECK_TOP_AGENTS = 3
 /** The tier of a record that has none. */
 export const NO_TIER = "(none)"
 
-export type TokenTotals = { input: number; output: number; reasoning: number; cacheRead: number; cacheWrite: number }
+/** A field is present only when some run reported it. */
+export type TokenTotals = { input?: number; output?: number; reasoning?: number; cacheRead?: number; cacheWrite?: number }
 
 export type Stats = {
   /** Runs that ended: unfinished records are not counted. */
@@ -75,7 +76,12 @@ const known = (r: OutcomeRecord, value: unknown): number | undefined => {
 function stats(records: readonly OutcomeRecord[]): Stats {
   const kinds: Record<Kind, number> = { succeeded: 0, failed: 0, interrupted: 0 }
   const times: number[] = []
-  const total: TokenTotals = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 }
+  const total: Record<keyof TokenTotals, number> = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 }
+  /** Runs that reported each field. */
+  const seen: Record<keyof TokenTotals, number> = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 }
+  /** Input and cache read over the runs that reported both. */
+  let shareInput = 0
+  let shareRead = 0
   let tokenRuns = 0
   let cost = 0
   let costRuns = 0
@@ -90,8 +96,16 @@ function stats(records: readonly OutcomeRecord[]): Stats {
     if (values.some((v) => v !== undefined)) {
       tokenRuns++
       TOKEN_FIELDS.forEach(([key], i) => {
-        total[key] += values[i] ?? 0
+        const v = values[i]
+        if (v === undefined) return
+        total[key] += v
+        seen[key]++
       })
+      const [input, , , read] = values
+      if (input !== undefined && read !== undefined) {
+        shareInput += input
+        shareRead += read
+      }
     }
     const c = known(r, r.cost)
     if (c !== undefined) {
@@ -115,9 +129,11 @@ function stats(records: readonly OutcomeRecord[]): Stats {
     resumes,
   }
   if (tokenRuns > 0) {
-    const mean = Object.fromEntries(Object.entries(total).map(([k, v]) => [k, v / tokenRuns])) as TokenTotals
-    const denominator = total.input + total.cacheRead
-    out.tokens = { total, mean, ...(denominator > 0 ? { cacheShare: total.cacheRead / denominator } : {}) }
+    const reported = (Object.keys(total) as Array<keyof TokenTotals>).filter((k) => seen[k] > 0)
+    const totals: TokenTotals = Object.fromEntries(reported.map((k) => [k, total[k]]))
+    const mean: TokenTotals = Object.fromEntries(reported.map((k) => [k, total[k] / seen[k]]))
+    const denominator = shareInput + shareRead
+    out.tokens = { total: totals, mean, ...(denominator > 0 ? { cacheShare: shareRead / denominator } : {}) }
   }
   if (costRuns > 0) {
     out.cost = cost
@@ -162,7 +178,7 @@ export function readUsage(value: unknown): UsageReport | undefined {
 
 const NA = "n/a"
 const percent = (v: number | undefined) => (v === undefined ? NA : `${Math.round(v * 100)}%`)
-const count = (v: number): string => (v >= 1e6 ? `${+(v / 1e6).toFixed(1)}M` : v >= 1e3 ? `${+(v / 1e3).toFixed(1)}k` : `${Math.round(v)}`)
+const count = (v: number | undefined): string => (v === undefined ? NA : v >= 1e6 ? `${+(v / 1e6).toFixed(1)}M` : v >= 1e3 ? `${+(v / 1e3).toFixed(1)}k` : `${Math.round(v)}`)
 const money = (v: number | undefined) => (v === undefined ? NA : `$${v.toFixed(v >= 1 ? 2 : 3)}`)
 const duration = (ms: number): string => (ms < 1000 ? `${Math.round(ms)}ms` : ms < 60_000 ? `${+(ms / 1000).toFixed(1)}s` : `${+(ms / 60_000).toFixed(1)}m`)
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`

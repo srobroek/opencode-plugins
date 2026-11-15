@@ -80,17 +80,37 @@ describe("summarizeUsage", () => {
     expect(total?.tokens).toBeUndefined()
   })
 
+  test("tokens are counted per field: a field nobody reported stays undefined, and means use that field's own runs", () => {
+    const total = only([
+      rec({ ...unreported, inputTokens: 100, outputTokens: 10 }),
+      rec({ ...unreported, outputTokens: 30 }),
+      rec({ ...unreported, outputTokens: 20, cacheReadTokens: 300 }),
+    ])
+    expect(total?.tokenRuns).toBe(3)
+    expect(total?.tokens?.total).toEqual({ input: 100, output: 60, cacheRead: 300 })
+    expect(total?.tokens?.mean).toEqual({ input: 100, output: 20, cacheRead: 300 })
+    expect(total?.tokens?.total.reasoning).toBeUndefined()
+    expect(total?.tokens?.mean.cacheWrite).toBeUndefined()
+    // Only the runs that reported both input and cache read count: none here.
+    expect(total?.tokens?.cacheShare).toBeUndefined()
+    const both = only([rec({ ...unreported, inputTokens: 100, cacheReadTokens: 100 }), rec({ ...unreported, inputTokens: 300 }), rec({ ...unreported, cacheReadTokens: 900 })])
+    expect(both?.tokens?.cacheShare).toBe(0.5)
+  })
+
   test("a reported 0 on a current record is 0", () => {
     const total = only([rec({ cost: 0, inputTokens: 0, outputTokens: 0, reasoningTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 })])
     expect(total).toMatchObject({ costRuns: 1, cost: 0, costPerSuccess: 0, tokenRuns: 1 })
     expect(total?.tokens?.total).toEqual({ input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 })
+    expect(total?.tokens?.cacheShare).toBeUndefined() // 0 ÷ 0
   })
 
   test("a legacy record (no version) reads its 0 usage as unknown but keeps a positive value", () => {
     const legacy = (over: Partial<OutcomeRecord>) => ({ ...rec(over), v: undefined })
     const zeros = legacy({ cost: 0, inputTokens: 0, outputTokens: 0, reasoningTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 })
     expect(only([zeros])).toMatchObject({ tokenRuns: 0, costRuns: 0 })
-    expect(only([zeros, legacy({ cost: 0.3, inputTokens: 50, outputTokens: 0 })])).toMatchObject({ tokenRuns: 1, costRuns: 1, cost: 0.3, tokens: { total: { input: 50, output: 0 } } })
+    const mixed = only([zeros, legacy({ cost: 0.3, inputTokens: 50, outputTokens: 0 })])
+    expect(mixed).toMatchObject({ tokenRuns: 1, costRuns: 1, cost: 0.3, tokens: { total: { input: 50 } } })
+    expect(mixed?.tokens?.total.output).toBeUndefined() // a legacy 0 is not a report
   })
 
   test("cost per success divides all cost by the successes; none without a success", () => {

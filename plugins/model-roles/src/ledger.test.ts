@@ -4,6 +4,7 @@ import {
   type LedgerStorage,
   newLedger,
   OUTCOME_KEY_PREFIX,
+  type OutcomeRecord,
   onCompaction,
   onEnd,
   onFailover,
@@ -12,6 +13,7 @@ import {
   onStep,
   prune,
 } from "./ledger.ts"
+import { summarizeUsage } from "./report.ts"
 
 const DAY = 24 * 60 * 60 * 1000
 const facts = { at: 1000, agent: "explore", model: "anthropic/haiku#low", parentID: "ses_p", tier: "cheap", source: "tier-param", rule: "tier-effort" } as const
@@ -64,6 +66,20 @@ describe("reducers", () => {
     expect(Object.keys(ledger.ses_c ?? {})).not.toContain("cacheWriteTokens")
     // A non-finite value is not a report.
     expect(Object.keys(onStep(spawned(), "ses_c", { cost: Number.NaN }).ses_c ?? {})).not.toContain("cost")
+  })
+
+  test("the first update of a legacy record drops its ambiguous zeros and stamps the version; a resume then reports cost 0", () => {
+    const { v: _v, ...fresh } = spawned().ses_c as OutcomeRecord
+    const legacy: OutcomeRecord = { ...fresh, inputTokens: 0, outputTokens: 0, reasoningTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, cost: 0, steps: 1, outcome: "succeeded" }
+    const resumed = onResume({ ses_c: legacy }, "ses_c")
+    expect(resumed.ses_c?.v).toBe(2)
+    for (const key of ["inputTokens", "outputTokens", "reasoningTokens", "cacheReadTokens", "cacheWriteTokens", "cost"]) expect(Object.keys(resumed.ses_c ?? {})).not.toContain(key)
+    const stepped = onEnd(onStep(resumed, "ses_c", { cost: 0, tokens: { input: 40 } }), "ses_c", "succeeded", 5000)
+    const before = summarizeUsage([legacy], 2000).tiers[0]?.total
+    expect(before).toMatchObject({ costRuns: 0, tokenRuns: 0 }) // legacy zeros are unknown
+    const after = summarizeUsage([stepped.ses_c as OutcomeRecord], 2000).tiers[0]?.total
+    expect(after).toMatchObject({ costRuns: 1, cost: 0, tokenRuns: 1, tokens: { total: { input: 40 } } })
+    expect(after?.tokens?.total.output).toBeUndefined()
   })
 
   test("usage for a session that was never spawned is ignored", () => {

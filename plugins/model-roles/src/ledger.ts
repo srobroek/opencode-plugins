@@ -90,9 +90,19 @@ export function onSpawn(ledger: Ledger, childID: string, facts: SpawnFacts): Led
   return { ...ledger, [childID]: record }
 }
 
+const USAGE_KEYS = ["inputTokens", "outputTokens", "reasoningTokens", "cacheReadTokens", "cacheWriteTokens", "cost"] as const
+
+/** A legacy record stored 0 for usage the host never reported: drop those zeros and stamp the version, so new reports read as reported. */
+const upgrade = (r: OutcomeRecord): OutcomeRecord => {
+  if (r.v !== undefined) return r
+  const next: OutcomeRecord = { ...r, v: LEDGER_VERSION }
+  for (const key of USAGE_KEYS) if (next[key] === 0) delete next[key]
+  return next
+}
+
 const update = (ledger: Ledger, childID: string, change: (r: OutcomeRecord) => OutcomeRecord): Ledger => {
   const record = ledger[childID]
-  return record === undefined ? ledger : { ...ledger, [childID]: change(record) }
+  return record === undefined ? ledger : { ...ledger, [childID]: change(upgrade(record)) }
 }
 
 /** The child was spawned again with its session id: it is running again, so its earlier outcome no longer stands. */
