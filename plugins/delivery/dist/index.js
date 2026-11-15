@@ -383,9 +383,12 @@ var MAX_LINKS = 40;
 function physical(path) {
   const pending = (path.startsWith("/") ? path : `${process.cwd()}/${path}`).split("/").reverse();
   let resolved = "";
+  let isDirectory = true;
   let links = 0;
   while (pending.length > 0) {
     const part = pending.pop();
+    if (!isDirectory)
+      return null;
     if (part === "" || part === ".")
       continue;
     if (part === "..") {
@@ -394,8 +397,10 @@ function physical(path) {
     }
     const candidate = `${resolved}/${part}`;
     try {
-      if (!lstatSync(candidate).isSymbolicLink()) {
+      const stat = lstatSync(candidate);
+      if (!stat.isSymbolicLink()) {
         resolved = candidate;
+        isDirectory = stat.isDirectory();
         continue;
       }
       if (++links > MAX_LINKS)

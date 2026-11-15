@@ -132,6 +132,44 @@ describe("physical", () => {
     expect(physical(join(root, "file", "child"))).toBeNull()
   })
 
+  test.each([
+    ["..", "file/../wt"],
+    ["/.", "file/."],
+    ["a trailing slash", "file/"],
+    ["a doubled slash", "file//wt"],
+  ])("a regular file followed by %s is not a directory", (_name, rest) => {
+    const { root } = layout()
+    mkdirSync(join(root, "wt"))
+    writeFileSync(join(root, "file"), "x")
+    expect(physical(`${root}/${rest}`)).toBeNull()
+  })
+
+  test("a symlink to a file followed by .. or a trailing slash is not a directory either", () => {
+    const { root } = layout()
+    mkdirSync(join(root, "wt"))
+    writeFileSync(join(root, "file"), "x")
+    symlinkSync(join(root, "file"), join(root, "abs-link"))
+    symlinkSync("file", join(root, "rel-link"))
+    for (const link of ["abs-link", "rel-link"]) {
+      expect(physical(`${root}/${link}/../wt`)).toBeNull()
+      expect(physical(`${root}/${link}/`)).toBeNull()
+      expect(physical(`${root}/${link}`)).toBe(join(root, "file"))
+    }
+  })
+
+  test("a link whose target is a file plus a slash is not followed into", () => {
+    const { root } = layout()
+    writeFileSync(join(root, "file"), "x")
+    symlinkSync(`${root}/file/`, join(root, "slashed"))
+    expect(physical(join(root, "slashed"))).toBeNull()
+  })
+
+  test("a file as the last component resolves", () => {
+    const { root } = layout()
+    writeFileSync(join(root, "file"), "x")
+    expect(physical(join(root, "file"))).toBe(join(root, "file"))
+  })
+
   test("the root is its own parent", () => {
     expect(physical("/..")).toBe("/")
     expect(physical("/")).toBe("/")

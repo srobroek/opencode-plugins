@@ -65,9 +65,13 @@ const MAX_LINKS = 40
 export function physical(path: string): string | null {
   const pending = (path.startsWith("/") ? path : `${process.cwd()}/${path}`).split("/").reverse()
   let resolved = ""
+  // Whether `resolved` is a directory (the root is). Any further component, even an empty
+  // one from a trailing or doubled slash, a `.` or a `..`, needs a directory before it.
+  let isDirectory = true
   let links = 0
   while (pending.length > 0) {
     const part = pending.pop() as string
+    if (!isDirectory) return null
     if (part === "" || part === ".") continue
     if (part === "..") {
       resolved = resolved.slice(0, resolved.lastIndexOf("/"))
@@ -75,8 +79,10 @@ export function physical(path: string): string | null {
     }
     const candidate = `${resolved}/${part}`
     try {
-      if (!lstatSync(candidate).isSymbolicLink()) {
+      const stat = lstatSync(candidate)
+      if (!stat.isSymbolicLink()) {
         resolved = candidate
+        isDirectory = stat.isDirectory()
         continue
       }
       if (++links > MAX_LINKS) return null
