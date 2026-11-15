@@ -2102,14 +2102,18 @@ describe("choosing the remote and worktree of a landing", () => {
     expect(calls.some((call) => call.argv.join(" ") === "git rev-parse --verify HEAD^{commit}")).toBe(false)
   })
 
-  test("an explicit worktree of the session repository is recorded", async () => {
+  test("an explicit worktree of the session repository is recorded, and Git is pinned to it", async () => {
     let wt = ""
-    const { outcome } = await landInSession((canonical) => {
+    const { outcome, calls, canonical } = await landInSession((canonical) => {
       wt = linkedWorktree(canonical, "wt")
       return { answers: { prView: [completed(mergedGithubPr())] }, params: { worktree: wt } }
     })
     if (!outcome.ok) throw new Error(outcome.reason)
     expect(outcome.receipt.worktree.path).toBe(wt)
+    const head = calls.find((call) => call.argv.join(" ") === "git rev-parse --verify HEAD^{commit}")
+    expect(head?.env?.GIT_DIR).toBe(join(realpathSync(canonical), ".git", "worktrees", "wt"))
+    expect(head?.env?.GIT_WORK_TREE).toBe(realpathSync(wt))
+    expect(head?.env?.GIT_COMMON_DIR).toBe(join(realpathSync(canonical), ".git"))
   })
 
   describe("a target outside the session repository is refused before Git runs there", () => {

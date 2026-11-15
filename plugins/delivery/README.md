@@ -47,8 +47,12 @@ Inputs: `pr`, and when needed `merge_method` (`squash` by default, `merge`,
   session repository: a `worktree` that is not one of its worktrees, or a `repo` it
   has no remote for, is refused before any Git runs in the other checkout. To land a
   pull request of another repository, run `delivery_land` from a session there.
-  Local reads also run with `GIT_NO_LAZY_FETCH=1` and `log.showSignature=false`;
-  the explicit fetch of the landed commits is the only network Git call.
+  Local reads also run with `GIT_NO_LAZY_FETCH=1` and `log.showSignature=false`.
+  The network Git operations are the explicit fetch of the landed commits and the
+  `git ls-remote` probe that checks whether the remote branch is gone; both run
+  against the selected remote of the session repository. A `worktree` that passes the
+  ownership check is pinned (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`), so Git does
+  not rediscover it through a `.git` marker that changes afterwards.
 - `requireApproval` reads the approval from the PR. On GitHub that is an
   `APPROVED` review whose commit is the head. If reviewer and author share one
   account, it can instead be a comment by that account whose first line is
@@ -85,8 +89,15 @@ refused, before any Git command runs in it: a foreign checkout's config can name
 programs (filter drivers, `include.path`), so run `delivery_cleanup` from a session
 in that repository. A listed worktree is also checked first: its `.git` must be a
 regular file (never a symlink or FIFO, read with bounded no-follow reads) naming a
-directory under this repository's `worktrees/` whose `commondir` is this repository. Git commands in the session repository's worktrees run with
-`core.fsmonitor=false`, `core.hooksPath=/dev/null` and `--no-optional-locks`.
+directory under this repository's `worktrees/` whose `commondir` is this repository. The values are read as Git reads them: `gitdir: `
+is stripped exactly (a leading blank makes the path relative), `..` is resolved through
+symlinks, and a blank-prefixed `commondir` is a relative name. Once verified, every Git
+command in that worktree, and in the worktree the removal runs from, is pinned with
+`GIT_DIR`, `GIT_WORK_TREE` and `GIT_COMMON_DIR`, so a marker swapped after the check
+cannot redirect it. They also run with `core.fsmonitor=false`,
+`core.hooksPath=/dev/null` and `--no-optional-locks`. `git worktree remove` itself
+re-reads the target's marker; the re-verification just before it narrows that window
+but cannot close it.
 
 The tool refuses in these cases:
 

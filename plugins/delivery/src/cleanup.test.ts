@@ -1003,9 +1003,12 @@ describe("delivery_cleanup irreversible boundary", () => {
     }
     const identityRead = details.find((call) => call.argv[1] === "remote" && call.argv[2] === "get-url")
     expect(identityRead?.argv).toEqual(["git", "remote", "get-url", "origin"])
-    for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_CONFIG_GLOBAL"]) {
-      expect(identityRead?.env?.[key]).toBeUndefined()
-    }
+    // The ambient selectors are gone; the only GIT_DIR / GIT_WORK_TREE are the ones the
+    // call pinned from the verified checkout, never the inherited "/elsewhere" values.
+    expect(identityRead?.env?.GIT_CONFIG_GLOBAL).toBeUndefined()
+    expect(identityRead?.env?.GIT_WORK_TREE).toBe(f.linked)
+    expect(identityRead?.env?.GIT_DIR?.startsWith(join(f.main, ".git", "worktrees"))).toBe(true)
+    expect(identityRead?.env?.GIT_COMMON_DIR).toBe(join(f.main, ".git"))
   }, 60_000)
 
   test("a valid receipt extension named ok cannot collide with cleanup's private resolution tag", async () => {
@@ -2232,6 +2235,49 @@ describe("delivery_cleanup Git options in its own repository", () => {
   }, 60_000)
 })
 
+describe("delivery_cleanup pins Git to the verified worktree", () => {
+  test("a marker swapped after verification does not redirect Git", async () => {
+    const f = fixture("pinned-swap")
+    const foreign = fixture("pinned-swap-foreign")
+    const { markers } = hostileConfig(foreign)
+    for (const marker of Object.values(markers)) rmSync(marker, { force: true })
+    let swapped = false
+    const { result, details } = await invoke(
+      f,
+      { receipt: f.receiptPath },
+      {
+        before: (argv) => {
+          if (swapped || argv[1] !== "status") return
+          swapped = true
+          writeFileSync(join(f.linked, ".git"), readFileSync(join(foreign.linked, ".git")))
+        },
+      },
+    )
+    expect(swapped).toBe(true)
+    // The first status ran after the swap, yet against the verified repository: its env pins
+    // the session's admin directory and the worktree, so the changed marker was never consulted.
+    const status = details.find((call) => call.argv.includes("status"))
+    expect(status?.env?.GIT_DIR?.startsWith(join(f.main, ".git", "worktrees"))).toBe(true)
+    expect(status?.env?.GIT_WORK_TREE).toBe(f.linked)
+    expect(status?.env?.GIT_COMMON_DIR).toBe(join(f.main, ".git"))
+    // The next verification reads the swapped marker and refuses before the removal.
+    expect(refusal(result)).toContain("worktree.marker")
+    expect(ranMarkers(markers)).toEqual([])
+    expect(existsSync(f.linked)).toBe(true)
+  }, 60_000)
+
+  test("the removal and branch deletion run pinned to a verified main worktree", async () => {
+    const f = fixture("pinned-exec")
+    const { result, details } = await invoke(f)
+    expect(result.ok).toBe(true)
+    for (const verb of [["worktree", "remove"], ["branch", "-d"]]) {
+      const call = details.find((entry) => entry.argv.includes(verb[0] as string) && entry.argv.includes(verb[1] as string))
+      expect(call?.env?.GIT_DIR).toBe(join(f.main, ".git"))
+      expect(call?.env?.GIT_WORK_TREE).toBe(f.main)
+    }
+  }, 60_000)
+})
+
 describe("delivery_cleanup refuses a registered worktree whose directory is not this repository's", () => {
   /** Each way the directory behind an intact registration can stop belonging to the session repository. */
   const replacements: Array<[string, (f: Fixture, foreign: Fixture) => void]> = [
@@ -2253,6 +2299,15 @@ describe("delivery_cleanup refuses a registered worktree whose directory is not 
       (f, foreign) => {
         rmSync(f.linked, { recursive: true, force: true })
         cpSync(foreign.main, f.linked, { recursive: true })
+      },
+    ],
+    [
+      ".git whose gitdir has a leading blank, so Git reads it as a relative name inside the target",
+      (f, foreign) => {
+        const admin = /^gitdir: (.+)$/m.exec(readFileSync(join(foreign.linked, ".git"), "utf8"))?.[1] ?? ""
+        mkdirSync(join(f.linked, ` ${admin}`), { recursive: true })
+        writeFileSync(join(f.linked, ` ${admin}`, "commondir"), `${join(f.main, ".git")}\n`)
+        writeFileSync(join(f.linked, ".git"), `gitdir:  ${admin}\n`)
       },
     ],
     [

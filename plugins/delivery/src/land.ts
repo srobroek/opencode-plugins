@@ -79,7 +79,7 @@ import { existsSync } from "node:fs"
 import { resolve } from "node:path"
 import pkg from "../package.json" with { type: "json" }
 import { readApproval, readChecks } from "./approval.ts"
-import { inspectCheckoutMarker } from "./checkout-marker.ts"
+import { type GitPin, verifyCheckout } from "./checkout-marker.ts"
 import { parseWorktreeList, type WorktreeRecord } from "./cleanup.ts"
 import {
   allowMergeCommit,
@@ -789,9 +789,10 @@ async function worktreeHead(
   run: CliRunner,
   path: string,
   env: Readonly<Record<string, string>>,
+  pin?: GitPin,
 ): Promise<{ head: string } | { reason: string }> {
   const argv = ["rev-parse", "--verify", "HEAD^{commit}"]
-  const printed = await gitOutput(run, path, argv, env)
+  const printed = await gitOutput(run, path, argv, { ...env, ...pin })
   const head = printed?.trim().toLowerCase() ?? null
   if (head === null || !FULL_OID.test(head)) {
     return {
@@ -1117,8 +1118,11 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
   // A worktree is read with Git, so it must provably belong to the session repository
   // first; this looks only at its `.git` entry and runs no Git process there.
   const sessionCommonDir = repository.commonDir
+  let explicitPin: GitPin | undefined
   if (explicitWorktree !== null) {
-    const state = sessionCommonDir === null ? "unsafe" : inspectCheckoutMarker(explicitWorktree, sessionCommonDir)
+    const verdict = verifyCheckout(explicitWorktree, sessionCommonDir)
+    const state = verdict.state
+    if (verdict.state === "same") explicitPin = verdict.pin
     if (state === "foreign" || state === "unsafe" || (state === "absent" && existsSync(explicitWorktree))) {
       return refuse(
         `worktree: observed ${show(explicitWorktree)} as ${state === "foreign" ? "a checkout of another repository" : "not a checkout owned by this repository"}, expected a worktree of the session repository ${show(nameWithOwner)}; run delivery_land from a session in the pull request's repository; no Git ran there, no merge was issued and no receipt was written`,
@@ -1162,14 +1166,13 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
     // refusal; the receipt then records no worktree, as it always did.
     const listed = await git(["worktree", "list", "--porcelain"])
     const inferred = listed === null ? null : inferWorktree(parseWorktreeList(listed), first.pr.headRefName, head)
-    const owned =
-      inferred !== null && sessionCommonDir !== null && inspectCheckoutMarker(inferred, sessionCommonDir) === "same"
-    if (inferred !== null && owned) {
-      const held = await worktreeHead(run, inferred, gitEnv)
+    const verdict = inferred === null ? null : verifyCheckout(inferred, sessionCommonDir)
+    if (inferred !== null && verdict?.state === "same") {
+      const held = await worktreeHead(run, inferred, gitEnv, verdict.pin)
       if (!("reason" in held) && held.head === head) worktree = { path: inferred, head: held.head }
     }
   } else {
-    const held = await worktreeHead(run, worktreePath, gitEnv)
+    const held = await worktreeHead(run, worktreePath, gitEnv, explicitPin)
     if ("reason" in held) {
       return refuse(
         `${held.reason} to compare with pr.headRefOid ${show(first.pr.headRefOid)}; no merge was issued and no receipt was written`,

@@ -2,7 +2,7 @@ import { lstatSync, realpathSync, type Stats } from "node:fs"
 import { basename, dirname, isAbsolute, resolve, sep } from "node:path"
 import { isDeepStrictEqual } from "node:util"
 import pkg from "../package.json" with { type: "json" }
-import { inspectCheckoutMarker } from "./checkout-marker.ts"
+import { type GitPin, inspectCheckoutMarker, verifyCheckout } from "./checkout-marker.ts"
 import {
   type CliResult,
   type CliRunner,
@@ -140,7 +140,15 @@ export type WorktreeRecord = {
   prunable: boolean
 }
 
-type TargetIdentity = { records: WorktreeRecord[]; target: WorktreeRecord; main: WorktreeRecord }
+type TargetIdentity = {
+  records: WorktreeRecord[]
+  target: WorktreeRecord
+  main: WorktreeRecord
+  /** The session repository's common directory, from which the target was verified. */
+  common: string
+  /** Pins Git to the verified admin directory and work tree, so the marker cannot redirect it later. */
+  pin: GitPin
+}
 
 /**
  * One observed pull request, in receipt spelling, plus the CLI and verb that
@@ -303,6 +311,7 @@ async function resolveRemoteIdentity(
   forgeEnv: Readonly<Record<string, string>>,
   env: NodeJS.ProcessEnv,
   refReadMs: number,
+  pin?: GitPin,
 ): Promise<RemoteIdentity | CleanupFailure> {
   // Tested exactly as recorded, not trimmed first: `" origin"` is not the name of a
   // remote, it is a receipt that does not say which remote, and normalising it here
@@ -311,7 +320,7 @@ async function resolveRemoteIdentity(
   if (!REMOTE_NAME.test(remote)) return refuse("repo.remote", remote, "a git remote name")
   const argv = ["git", ...SAFE_GIT_ARGS, "remote", "get-url", remote]
   const expected = `exactly one URL record for the configured remote ${remote} in ${cwd}`
-  const result = await run(argv, { cwd, timeoutMs: refReadMs, env: gitObservationEnvironment(env) })
+  const result = await run(argv, { cwd, timeoutMs: refReadMs, env: { ...gitObservationEnvironment(env), ...pin } })
   if (!completed(result)) return commandFailure("repo.remote", argv, result, expected)
   // Not trimmed: a trimmed value is what lets a malformed one through. `URL` deletes
   // embedded tabs and newlines before parsing, so a rewritten or multi-URL remote can
@@ -420,8 +429,9 @@ export async function observePullRequest(
   cwd: string = receipt.repo.canonicalRoot,
   env: NodeJS.ProcessEnv = process.env,
   refReadMs: number = CLEANUP_BOUNDS.refReadMs,
+  pin?: GitPin,
 ): Promise<Observation | CleanupFailure> {
-  const identity = await resolveRemoteIdentity(receipt, run, cwd, forgeEnvironment(env), env, refReadMs)
+  const identity = await resolveRemoteIdentity(receipt, run, cwd, forgeEnvironment(env), env, refReadMs, pin)
   if (isFailure(identity)) return identity
   const pr =
     identity.forge === "github"
@@ -617,8 +627,20 @@ function verifyArguments(params: DeliveryCleanupParams, receipt: LandingReceipt)
   return null
 }
 
-async function runGit(run: CliRunner, cwd: string, args: string[], timeoutMs: number): Promise<CliResult> {
-  return run(["git", ...SAFE_GIT_ARGS, ...args], { cwd, timeoutMs, env: gitObservationEnvironment(process.env) })
+async function runGit(
+  run: CliRunner,
+  cwd: string,
+  args: string[],
+  timeoutMs: number,
+  pin?: GitPin,
+): Promise<CliResult> {
+  // A pin fixes `GIT_DIR`, `GIT_WORK_TREE` and `GIT_COMMON_DIR` to what was verified, so
+  // Git does not rediscover the repository through a `.git` marker that may have changed.
+  return run(["git", ...SAFE_GIT_ARGS, ...args], {
+    cwd,
+    timeoutMs,
+    env: { ...gitObservationEnvironment(process.env), ...pin },
+  })
 }
 
 function worktreePathState(path: string): "directory" | "absent" | "unsafe" {
@@ -645,11 +667,16 @@ function dirtyPaths(output: string): string[] {
     .slice(0, MAX_DIRTY_PATHS)
 }
 
-async function verifyCleanTarget(path: string, run: CliRunner, timeoutMs: number): Promise<CleanupFailure | null> {
+async function verifyCleanTarget(
+  path: string,
+  run: CliRunner,
+  timeoutMs: number,
+  pin?: GitPin,
+): Promise<CleanupFailure | null> {
   const state = worktreePathState(path)
   if (state !== "directory") return refuse("worktree.path", `${path} (${state})`, "a present non-symlink directory")
   const argv = ["status", "--porcelain"]
-  const result = await runGit(run, path, argv, timeoutMs)
+  const result = await runGit(run, path, argv, timeoutMs, pin)
   if (!completed(result)) return commandFailure("worktree.status", ["git", ...argv], result, "exit 0 with empty output")
   if (result.stdout !== "") {
     const all = result.stdout.split(/\r?\n/).filter(Boolean)
@@ -676,15 +703,20 @@ async function verifyCleanTarget(path: string, run: CliRunner, timeoutMs: number
  */
 export type PushProof = "upstream" | "pr-head"
 
-async function verifyPushed(path: string, run: CliRunner, refReadMs: number): Promise<CleanupFailure | PushProof> {
+async function verifyPushed(
+  path: string,
+  run: CliRunner,
+  refReadMs: number,
+  pin?: GitPin,
+): Promise<CleanupFailure | PushProof> {
   const upstreamArgv = ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]
-  const upstream = await runGit(run, path, upstreamArgv, refReadMs)
+  const upstream = await runGit(run, path, upstreamArgv, refReadMs, pin)
   if (upstream.error !== undefined || !upstream.ok) {
     return commandFailure("branch.upstream", ["git", ...upstreamArgv], upstream, "a completed upstream read")
   }
   if (upstream.exitCode !== 0 || upstream.stdout.trim() === "") return "pr-head"
   const countArgv = ["rev-list", "--count", "@{upstream}..HEAD"]
-  const countResult = await runGit(run, path, countArgv, refReadMs)
+  const countResult = await runGit(run, path, countArgv, refReadMs, pin)
   if (!completed(countResult)) {
     return commandFailure("branch.unpushed", ["git", ...countArgv], countResult, "exit 0 and count 0")
   }
@@ -829,9 +861,10 @@ async function readWorktrees(
   cwd: string,
   run: CliRunner,
   refReadMs: number,
+  pin?: GitPin,
 ): Promise<WorktreeRecord[] | CleanupFailure> {
   const argv = ["worktree", "list", "--porcelain"]
-  const result = await runGit(run, cwd, argv, refReadMs)
+  const result = await runGit(run, cwd, argv, refReadMs, pin)
   if (!completed(result)) return commandFailure("worktree.list", ["git", ...argv], result, "exit 0 porcelain records")
   const records = parseWorktreeList(result.stdout)
   if (records.length === 0) return refuse("worktree.list", [], "at least the repository's main worktree")
@@ -929,11 +962,11 @@ async function verifyTargetIdentity(
   // repository, would make the Git commands below run in code this repository does
   // not own. Nothing runs in the target until its marker provably belongs here.
   const common = repositoryContext(cwd)?.commonDir ?? null
-  const marker = common === null ? "unsafe" : inspectCheckoutMarker(path, common)
-  if (marker !== "same") {
+  const verdict = common === null ? ({ state: "unsafe" } as const) : verifyCheckout(path, common)
+  if (verdict.state !== "same" || common === null) {
     return refuse(
       "worktree.marker",
-      `${path} (.git ${marker})`,
+      `${path} (.git ${verdict.state})`,
       "a regular .git file naming a directory under this repository's worktrees/ whose commondir is this repository; nothing was read in the worktree",
     )
   }
@@ -946,7 +979,7 @@ async function verifyTargetIdentity(
   if (worktreePathState(path) !== "directory") {
     return refuse("worktree.path", `${path} (unsafe)`, "the listed non-symlink directory")
   }
-  return { records: listed, target, main }
+  return { records: listed, target, main, common, pin: verdict.pin }
 }
 
 async function verifyLocalRef(
@@ -954,10 +987,11 @@ async function verifyLocalRef(
   cwd: string,
   run: CliRunner,
   refReadMs: number,
+  pin?: GitPin,
 ): Promise<CleanupFailure | null> {
   const ref = `${LOCAL_REF_PREFIX}${receipt.branch.name}`
   const argv = ["rev-parse", "--verify", ref]
-  const result = await runGit(run, cwd, argv, refReadMs)
+  const result = await runGit(run, cwd, argv, refReadMs, pin)
   if (!completed(result))
     return commandFailure("branch.localRef", ["git", ...argv], result, `exit 0 and oid ${receipt.pr.headRefOid}`)
   return compare("branch.localRef", result.stdout.trim(), receipt.pr.headRefOid)
@@ -973,9 +1007,9 @@ async function revalidateBoundary(
   if (isFailure(identity)) return identity
   const ref = await verifyLocalRef(receipt, cwd, run, bounds.refReadMs)
   if (ref !== null) return ref
-  const clean = await verifyCleanTarget(identity.target.path, run, bounds.treeScanMs)
+  const clean = await verifyCleanTarget(identity.target.path, run, bounds.treeScanMs, identity.pin)
   if (clean !== null) return clean
-  const pushed = await verifyPushed(identity.target.path, run, bounds.refReadMs)
+  const pushed = await verifyPushed(identity.target.path, run, bounds.refReadMs, identity.pin)
   return isFailure(pushed) ? pushed : identity
 }
 
@@ -984,8 +1018,9 @@ async function registrationAbsence(
   trustedPath: string,
   run: CliRunner,
   refReadMs: number,
+  pin?: GitPin,
 ): Promise<Absence> {
-  const listed = await readWorktrees(cwd, run, refReadMs)
+  const listed = await readWorktrees(cwd, run, refReadMs, pin)
   if (!Array.isArray(listed)) return "unknown"
   return storedRecordForTarget(listed, trustedPath) === null ? "absent" : "present"
 }
@@ -999,9 +1034,15 @@ function pathAbsence(path: string): Absence {
   }
 }
 
-async function localRefAbsence(cwd: string, branch: string, run: CliRunner, refReadMs: number): Promise<Absence> {
+async function localRefAbsence(
+  cwd: string,
+  branch: string,
+  run: CliRunner,
+  refReadMs: number,
+  pin?: GitPin,
+): Promise<Absence> {
   const argv = ["show-ref", "--verify", "--quiet", `${LOCAL_REF_PREFIX}${branch}`]
-  const result = await runGit(run, cwd, argv, refReadMs)
+  const result = await runGit(run, cwd, argv, refReadMs, pin)
   if (result.error !== undefined || !result.ok) return "unknown"
   if (result.exitCode === 0) return "present"
   if (result.exitCode === 1 && result.stdout === "" && result.stderr === "") return "absent"
@@ -1091,14 +1132,14 @@ export async function cleanupDelivery(
   // irreversible step.
   const identity = await verifyTargetIdentity(receipt, cwd, run, bounds.refReadMs)
   if (isFailure(identity)) return identity
-  const observed = await observePullRequest(receipt, run, identity.target.path, env, bounds.refReadMs)
+  const observed = await observePullRequest(receipt, run, identity.target.path, env, bounds.refReadMs, identity.pin)
   if (isFailure(observed)) return observed
   const observedFailure = verifyObservation(receipt, observed.pr)
   if (observedFailure !== null) return observedFailure
   const path = receipt.worktree.path as string
-  const dirty = await verifyCleanTarget(path, run, bounds.treeScanMs)
+  const dirty = await verifyCleanTarget(path, run, bounds.treeScanMs, identity.pin)
   if (dirty !== null) return dirty
-  const pushed = await verifyPushed(path, run, bounds.refReadMs)
+  const pushed = await verifyPushed(path, run, bounds.refReadMs, identity.pin)
   if (isFailure(pushed)) return pushed
   const ledger = await verifyLedger(receipt, cwd, resolution.path, run, bounds.bdShowMs)
   if (ledger !== null) return ledger
@@ -1111,6 +1152,12 @@ export async function cleanupDelivery(
   const executionCwd = safeExecutionCwd(receipt, boundary.records, cwd)
   if (executionCwd === null)
     return refuse("worktree.executionCwd", null, "a different listed worktree for the same repository")
+  // The directory the removal and the branch deletion run from is pinned the same way,
+  // so a marker swapped after this point cannot redirect them either.
+  const executionVerdict = verifyCheckout(executionCwd, boundary.common)
+  if (executionVerdict.state !== "same")
+    return refuse("worktree.executionCwd", `${executionCwd} (.git ${executionVerdict.state})`, "a verified worktree of this repository")
+  const executionPin = executionVerdict.pin
   const targetPath = boundary.target.path
   await deps.authorize?.({ worktree: targetPath, branch: receipt.branch.name, pr: receipt.pr.number })
   const removeArgv = ["worktree", "remove", targetPath]
@@ -1147,25 +1194,25 @@ export async function cleanupDelivery(
       )
     }
   } else {
-    const removed = await runGit(commit, executionCwd, removeArgv, bounds.mutationMs)
+    const removed = await runGit(commit, executionCwd, removeArgv, bounds.mutationMs, executionPin)
     if (!completed(removed)) {
       return commandFailure("worktree.removed", ["git", ...removeArgv], removed, "exit 0 without --force")
     }
   }
 
-  const registration = await registrationAbsence(executionCwd, targetPath, commit, bounds.refReadMs)
+  const registration = await registrationAbsence(executionCwd, targetPath, commit, bounds.refReadMs, executionPin)
   const pathGone = pathAbsence(targetPath)
   if (registration !== "absent") return refuse("worktree.registrationAbsence", registration, '"absent" after removal')
   if (pathGone !== "absent") return refuse("worktree.pathAbsence", pathGone, '"absent" after removal')
 
-  const refAfterWorktree = await verifyLocalRef(receipt, executionCwd, commit, bounds.refReadMs)
+  const refAfterWorktree = await verifyLocalRef(receipt, executionCwd, commit, bounds.refReadMs, executionPin)
   if (refAfterWorktree !== null) return refAfterWorktree
   const deleteArgv = branchDeleteArgs(receipt.branch.name)
-  const deleted = await runGit(commit, executionCwd, deleteArgv, bounds.mutationMs)
+  const deleted = await runGit(commit, executionCwd, deleteArgv, bounds.mutationMs, executionPin)
   if (!completed(deleted)) {
     return commandFailure("worktree.localRefDeleted", ["git", ...deleteArgv], deleted, "exit 0 without -D")
   }
-  const localAbsence = await localRefAbsence(executionCwd, receipt.branch.name, commit, bounds.refReadMs)
+  const localAbsence = await localRefAbsence(executionCwd, receipt.branch.name, commit, bounds.refReadMs, executionPin)
   if (localAbsence !== "absent") return refuse("worktree.localRefAbsence", localAbsence, '"absent" after branch -d')
 
   // The probe is given the URL the target resolved, not `repo.remote`. A name is
