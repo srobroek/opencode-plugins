@@ -14,6 +14,7 @@ describe("withSwitchTimeout", () => {
   test("raises a shorter timeout, also behind -C and in a chain", () => {
     expect(withSwitchTimeout("shell", { command: "wt -C /r switch -y x", timeout: 120000 })?.timeout).toBe(SWITCH_TIMEOUT_MS)
     expect(withSwitchTimeout("shell", { command: "mkdir -p d && wt switch -y x" })?.timeout).toBe(SWITCH_TIMEOUT_MS)
+    expect(withSwitchTimeout("bash", "wt switch -y x")).toBeUndefined()
   })
   test.each([
     ["a longer timeout", { command: switchCommand, timeout: 900000 }],

@@ -34,5 +34,7 @@ export function withSwitchTimeout(tool: string, input: unknown): Record<string, 
   const call = shellCall(tool, input)
   if (!call || call.background === true || !namesSwitchCommand(call.command)) return undefined
   if (call.timeout !== undefined && (call.timeout === 0 || call.timeout >= SWITCH_TIMEOUT_MS)) return undefined
+  // Only an object input has a timeout field to raise; a raw-string alias input stays as is.
+  if (typeof input !== "object" || input === null || Array.isArray(input)) return undefined
   return { ...(input as Record<string, unknown>), timeout: SWITCH_TIMEOUT_MS }
 }

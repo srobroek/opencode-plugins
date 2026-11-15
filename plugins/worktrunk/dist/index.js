@@ -1418,6 +1418,8 @@ function withSwitchTimeout(tool, input) {
     return;
   if (call.timeout !== undefined && (call.timeout === 0 || call.timeout >= SWITCH_TIMEOUT_MS))
     return;
+  if (typeof input !== "object" || input === null || Array.isArray(input))
+    return;
   return { ...input, timeout: SWITCH_TIMEOUT_MS };
 }
 
