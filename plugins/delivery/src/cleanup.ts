@@ -15,6 +15,7 @@ import {
   remoteBranchAbsent,
   repoPathFromRemote,
   runCli,
+  SAFE_GIT_ARGS,
   singleRemoteRecord,
 } from "./forge-adapter.ts"
 import {
@@ -306,7 +307,7 @@ async function resolveRemoteIdentity(
   // would let this call answer a question the receipt never asked.
   const remote = receipt.repo.remote
   if (!REMOTE_NAME.test(remote)) return refuse("repo.remote", remote, "a git remote name")
-  const argv = ["git", "remote", "get-url", remote]
+  const argv = ["git", ...SAFE_GIT_ARGS, "remote", "get-url", remote]
   const expected = `exactly one URL record for the configured remote ${remote} in ${cwd}`
   const result = await run(argv, { cwd, timeoutMs: refReadMs, env: gitObservationEnvironment(env) })
   if (!completed(result)) return commandFailure("repo.remote", argv, result, expected)
@@ -598,7 +599,7 @@ function verifyArguments(params: DeliveryCleanupParams, receipt: LandingReceipt)
 }
 
 async function runGit(run: CliRunner, cwd: string, args: string[], timeoutMs: number): Promise<CliResult> {
-  return run(["git", ...args], { cwd, timeoutMs })
+  return run(["git", ...SAFE_GIT_ARGS, ...args], { cwd, timeoutMs })
 }
 
 function worktreePathState(path: string): "directory" | "absent" | "unsafe" {
@@ -1037,6 +1038,18 @@ export async function cleanupDelivery(
   const now = deps.now ?? Date.now
   const env = deps.env ?? process.env
   const repoCwd = await cleanupRepositoryDirectory(params, cwd, run, bounds.refReadMs)
+  // The host registry in `deps.host` belongs to the session's own project. A worktree of
+  // another repository may be tracked by that repository's project instead, and a plain
+  // `git worktree remove` from here would leave its entry stale. That registry is not
+  // reachable from this session, so refuse before any Git command reads the foreign
+  // checkout: nothing in it is trusted yet.
+  if (deps.host !== undefined && repoCwd !== cwd) {
+    return refuse(
+      "worktree.owner",
+      "a worktree of a repository other than this session's, whose OpenCode worktree registry is not readable from here",
+      "delivery_cleanup run from a session in that repository, so its host registry removes the worktree; nothing was read or removed",
+    )
+  }
   const resolution = resolveReceipt(params, cwd, repoCwd, env, bounds.refReadMs)
   if (resolution.tag === "refused") return resolution.failure
   const receipt = resolution.receipt
@@ -1091,17 +1104,6 @@ export async function cleanupDelivery(
   if (executionCwd === null)
     return refuse("worktree.executionCwd", null, "a different listed worktree for the same repository")
   const targetPath = boundary.target.path
-  // The host registry in `deps.host` belongs to the session's own project. A worktree of
-  // another repository may be tracked by that repository's project instead, and a plain
-  // `git worktree remove` from here would leave its entry stale. The registry for that
-  // repository is not reachable from this session, so refuse before anything is removed.
-  if (deps.host !== undefined && repoCwd !== cwd) {
-    return refuse(
-      "worktree.owner",
-      `${targetPath} belongs to a repository other than this session's, whose OpenCode worktree registry is not readable from here`,
-      "delivery_cleanup run from a session in that repository, so its host registry removes the worktree; nothing was removed",
-    )
-  }
   await deps.authorize?.({ worktree: targetPath, branch: receipt.branch.name, pr: receipt.pr.number })
   const removeArgv = ["worktree", "remove", targetPath]
   // Ownership is decided before the last abort check, so an interrupt during the

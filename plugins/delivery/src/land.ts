@@ -101,6 +101,7 @@ import {
   remoteBranchAbsent,
   repoPathFromRemote,
   runCli,
+  SAFE_GIT_ARGS,
   singleRemoteRecord,
 } from "./forge-adapter.ts"
 import {
@@ -732,7 +733,7 @@ async function gitOutput(
   env: Readonly<Record<string, string>>,
   input?: string,
 ): Promise<string | null> {
-  const result = await run(["git", ...argv], { cwd, timeoutMs: GIT_TIMEOUT_MS, env, input })
+  const result = await run(["git", ...SAFE_GIT_ARGS, ...argv], { cwd, timeoutMs: GIT_TIMEOUT_MS, env, input })
   if (!result.ok || result.error !== undefined || result.exitCode !== 0) return null
   return result.stdout
 }

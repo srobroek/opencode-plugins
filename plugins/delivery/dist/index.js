@@ -546,6 +546,13 @@ var LS_REMOTE_PROTOCOL_POLICY = [
   "-c",
   "credential.interactive=never"
 ];
+var SAFE_GIT_ARGS = [
+  "-c",
+  "core.fsmonitor=false",
+  "-c",
+  `core.hooksPath=${devNull}`,
+  "--no-optional-locks"
+];
 function gitObservationEnvironment(source = process.env) {
   const env = Object.create(null);
   for (const [key, value] of Object.entries(source)) {
@@ -966,6 +973,8 @@ function fetchCommitsArgv(remote, wants) {
     ...LS_REMOTE_PROTOCOL_POLICY,
     "-c",
     `core.hooksPath=${devNull}`,
+    "-c",
+    "core.fsmonitor=false",
     "fetch",
     "--quiet",
     "--no-tags",
@@ -1839,7 +1848,7 @@ async function resolveRemoteIdentity(receipt, run, cwd, forgeEnv, env, refReadMs
   const remote = receipt.repo.remote;
   if (!REMOTE_NAME.test(remote))
     return refuse2("repo.remote", remote, "a git remote name");
-  const argv = ["git", "remote", "get-url", remote];
+  const argv = ["git", ...SAFE_GIT_ARGS, "remote", "get-url", remote];
   const expected = `exactly one URL record for the configured remote ${remote} in ${cwd}`;
   const result = await run(argv, { cwd, timeoutMs: refReadMs, env: gitObservationEnvironment(env) });
   if (!completed(result))
@@ -2062,7 +2071,7 @@ function verifyArguments(params, receipt) {
   return null;
 }
 async function runGit(run, cwd, args, timeoutMs) {
-  return run(["git", ...args], { cwd, timeoutMs });
+  return run(["git", ...SAFE_GIT_ARGS, ...args], { cwd, timeoutMs });
 }
 function worktreePathState(path) {
   let stat;
@@ -2397,6 +2406,9 @@ async function cleanupDelivery(params, cwd, deps = {}) {
   const now = deps.now ?? Date.now;
   const env = deps.env ?? process.env;
   const repoCwd = await cleanupRepositoryDirectory(params, cwd, run, bounds.refReadMs);
+  if (deps.host !== undefined && repoCwd !== cwd) {
+    return refuse2("worktree.owner", "a worktree of a repository other than this session's, whose OpenCode worktree registry is not readable from here", "delivery_cleanup run from a session in that repository, so its host registry removes the worktree; nothing was read or removed");
+  }
   const resolution = resolveReceipt(params, cwd, repoCwd, env, bounds.refReadMs);
   if (resolution.tag === "refused")
     return resolution.failure;
@@ -2439,9 +2451,6 @@ async function cleanupDelivery(params, cwd, deps = {}) {
   if (executionCwd === null)
     return refuse2("worktree.executionCwd", null, "a different listed worktree for the same repository");
   const targetPath = boundary.target.path;
-  if (deps.host !== undefined && repoCwd !== cwd) {
-    return refuse2("worktree.owner", `${targetPath} belongs to a repository other than this session's, whose OpenCode worktree registry is not readable from here`, "delivery_cleanup run from a session in that repository, so its host registry removes the worktree; nothing was removed");
-  }
   await deps.authorize?.({ worktree: targetPath, branch: receipt.branch.name, pr: receipt.pr.number });
   const removeArgv = ["worktree", "remove", targetPath];
   let route = "git";
@@ -3004,7 +3013,7 @@ async function ensureLocalCommits(required, baseBranch, remote, git, fetch, slee
   return { required: [...required], fetches };
 }
 async function gitOutput(run, cwd, argv, env, input) {
-  const result = await run(["git", ...argv], { cwd, timeoutMs: GIT_TIMEOUT_MS2, env, input });
+  const result = await run(["git", ...SAFE_GIT_ARGS, ...argv], { cwd, timeoutMs: GIT_TIMEOUT_MS2, env, input });
   if (!result.ok || result.error !== undefined || result.exitCode !== 0)
     return null;
   return result.stdout;

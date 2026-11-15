@@ -15,16 +15,37 @@ import { devNull, tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import pkg from "../package.json" with { type: "json" }
 import { parseWorktreeList } from "./cleanup.ts"
-import { type CliResult, type CliRunner, runCli } from "./forge-adapter.ts"
+import { type CliResult, type CliRunner, runCli, SAFE_GIT_ARGS } from "./forge-adapter.ts"
 import {
   beadIdsFromBranch,
   inferWorktree,
+  type LandDeps,
   type LandParams,
-  landPullRequest,
+  landPullRequest as landPullRequestUnwrapped,
   resolveLandingTarget,
   selectRemoteForRepo,
 } from "./land.ts"
 import { RECEIPT_SCHEMA, readReceipt, repoKey, writeReceipt } from "./landing-receipt.ts"
+
+/** Every raw git argv the tool issued, before the safe-option prefix is stripped for the mocks. */
+const rawGitArgv: string[][] = []
+
+/** The argv without the safe-option prefix every checkout-bound Git command carries. */
+const withoutSafeGit = (argv: readonly string[]): string[] =>
+  argv[0] === "git" && SAFE_GIT_ARGS.every((part, index) => argv[index + 1] === part)
+    ? ["git", ...argv.slice(1 + SAFE_GIT_ARGS.length)]
+    : [...argv]
+
+/** `landPullRequest` whose runner sees Git argv with the safe prefix removed, so mocks match on the verb. */
+function landPullRequest(params: LandParams, deps: LandDeps = {}) {
+  const inner = deps.run
+  if (inner === undefined) return landPullRequestUnwrapped(params, deps)
+  const run: CliRunner = (argv, options) => {
+    if (argv[0] === "git") rawGitArgv.push([...argv])
+    return inner(withoutSafeGit(argv), options)
+  }
+  return landPullRequestUnwrapped(params, { ...deps, run })
+}
 
 type Call = {
   argv: string[]
@@ -2061,6 +2082,31 @@ describe("choosing the remote and worktree of a landing", () => {
       expect(calls.filter((call) => call.cwd === a.canonical).some((call) => call.argv.includes("fetch"))).toBe(false)
       expect(existsSync(outcome.receiptPath)).toBe(true)
       expect(readReceipt(outcome.receiptPath).ok).toBe(true)
+    })
+
+    test("every checkout-bound Git command carries the executable-config overrides", async () => {
+      const { a, b, run } = twoRepositories({ prView: [completed(mergedGithubPr())], present: [false, true] })
+      rawGitArgv.length = 0
+      const outcome = await landPullRequest(
+        { pr: 470, repo: "srobroek/omp-plugins", worktree: join(b.canonical, "wt") },
+        {
+          run,
+          cwd: a.canonical,
+          now: () => NOW,
+          receiptsDirectory: temporaryDirectory("delivery-land-receipts-"),
+          env: {},
+          sleep: async () => {},
+        },
+      )
+      if (!outcome.ok) throw new Error(outcome.reason)
+      const probes = rawGitArgv.filter((argv) => argv.includes("ls-remote"))
+      const fetches = rawGitArgv.filter((argv) => argv.includes("fetch"))
+      const reads = rawGitArgv.filter((argv) => !probes.includes(argv) && !fetches.includes(argv))
+      expect(reads.length).toBeGreaterThan(0)
+      for (const argv of reads) expect(argv.slice(0, 1 + SAFE_GIT_ARGS.length)).toEqual(["git", ...SAFE_GIT_ARGS])
+      expect(fetches).toHaveLength(1)
+      expect(fetches[0]).toContain("core.fsmonitor=false")
+      expect(fetches[0]).toContain("core.hooksPath=/dev/null")
     })
 
     test("refuses a repo that neither the session nor the worktree repository names", async () => {

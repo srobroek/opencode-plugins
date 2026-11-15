@@ -29,12 +29,12 @@ import {
   type CleanupBounds,
   type CleanupDeps,
   type CleanupResult,
-  cleanupDelivery,
+  cleanupDelivery as cleanupDeliveryUnwrapped,
   type DeliveryCleanupParams,
   removalRoute,
 } from "./cleanup.ts"
-import { type CliResult, type CliRunner, runCli } from "./forge-adapter.ts"
-import { landPullRequest } from "./land.ts"
+import { type CliResult, type CliRunner, runCli, SAFE_GIT_ARGS } from "./forge-adapter.ts"
+import { type LandDeps, type LandParams, landPullRequest as landPullRequestUnwrapped } from "./land.ts"
 import {
   buildReceipt,
   type LandingReceipt,
@@ -67,6 +67,32 @@ type Fixture = {
 }
 
 type FixtureLayout = "normal" | "separate-git-dir" | "separate-dot-git-dir" | "submodule"
+
+/** Every raw git argv a wrapped call issued, with the safe-option prefix still on. */
+const rawGitArgv: string[][] = []
+
+/** The argv without the safe-option prefix every checkout-bound Git command carries. */
+const withoutSafeGit = (argv: readonly string[]): string[] =>
+  argv[0] === "git" && SAFE_GIT_ARGS.every((part, index) => argv[index + 1] === part)
+    ? ["git", ...argv.slice(1 + SAFE_GIT_ARGS.length)]
+    : [...argv]
+
+/** A runner that sees Git argv without the safe prefix, so scripted runners match on the verb. */
+const stripped =
+  (inner: CliRunner): CliRunner =>
+  (argv, options) => {
+    if (argv[0] === "git") rawGitArgv.push([...argv])
+    return inner(withoutSafeGit(argv), options)
+  }
+
+/** `cleanupDelivery` with a supplied runner seeing the stripped argv; without one it runs real Git, prefix and all. */
+function cleanupDelivery(params: DeliveryCleanupParams, cwd: string, deps: CleanupDeps = {}) {
+  return cleanupDeliveryUnwrapped(params, cwd, deps.run === undefined ? deps : { ...deps, run: stripped(deps.run) })
+}
+
+function landPullRequest(params: LandParams, deps: LandDeps = {}) {
+  return landPullRequestUnwrapped(params, deps.run === undefined ? deps : { ...deps, run: stripped(deps.run) })
+}
 
 type RecordedCall = {
   argv: string[]
@@ -167,6 +193,16 @@ function git(cwd: string, args: string[]): string {
     stdio: ["ignore", "pipe", "pipe"],
     env: { ...process.env, GIT_CONFIG_GLOBAL: devNull, GIT_CONFIG_NOSYSTEM: "1" },
   }).trim()
+}
+
+/** Point a fixture repository's `core.fsmonitor` at a script that writes a marker file when run. */
+function fsmonitorMarker(f: Fixture): { script: string; marker: string } {
+  const dir = scratch("fsmonitor")
+  const marker = join(dir, "ran")
+  const script = join(dir, "monitor.sh")
+  writeFileSync(script, `#!/bin/sh\ntouch "${marker}"\nprintf '\\0'\n`, { mode: 0o755 })
+  git(f.main, ["config", "core.fsmonitor", script])
+  return { script, marker }
 }
 
 function gitExit(cwd: string, args: string[]): number | null {
@@ -1985,6 +2021,60 @@ describe("delivery_cleanup host worktree registry", () => {
     expect(fake.removes).toEqual([])
     expect(mutationCalls(scripted.calls)).toEqual([])
     expect(existsSync(f.linked)).toBe(true)
+  }, 60_000)
+
+  test("a host registry refuses a cross-repository worktree before any Git command reads it", async () => {
+    const f = fixture("hostile-host")
+    const session = fixture("hostile-host-session")
+    const { script, marker } = fsmonitorMarker(f)
+    const fake = fakeHost(f, [])
+    const scripted = runner(f, {})
+    const result = await cleanupDelivery({ receipt: f.receiptPath }, session.main, {
+      run: scripted.run,
+      now: () => NOW + 10,
+      env: f.env,
+      bounds: HEAVY_FIXTURE_BOUNDS,
+      host: fake.host,
+    })
+    expect(refusal(result)).toContain("worktree.owner")
+    expect(existsSync(marker)).toBe(false)
+    expect(script).toBe(git(f.main, ["config", "core.fsmonitor"]))
+    expect(scripted.calls.filter((argv) => argv[1] === "status")).toEqual([])
+    expect(existsSync(f.linked)).toBe(true)
+  }, 60_000)
+
+  test("cross-repository cleanup without a host runs Git with executable config disabled", async () => {
+    const f = fixture("hostile-git")
+    const session = fixture("hostile-git-session")
+    const { marker } = fsmonitorMarker(f)
+    // Sanity: an unprotected `git status` in the foreign worktree does run the program.
+    execFileSync("git", ["status", "--porcelain"], {
+      cwd: f.linked,
+      env: { ...process.env, GIT_CONFIG_GLOBAL: devNull, GIT_CONFIG_NOSYSTEM: "1" },
+    })
+    expect(existsSync(marker)).toBe(true)
+    rmSync(marker)
+
+    const scripted = runner(f, {})
+    const run: CliRunner = (argv, options) => {
+      const verb = withoutSafeGit(argv)
+      if (argv[0] === "git") rawGitArgv.push([...argv])
+      if (verb[0] !== "git" || verb[1] === "remote" || verb.includes("ls-remote")) return scripted.run(verb, options)
+      return runCli(argv, options)
+    }
+    rawGitArgv.length = 0
+    const result = await cleanupDeliveryUnwrapped({ receipt: f.receiptPath }, session.main, {
+      run,
+      now: () => NOW + 10,
+      env: f.env,
+      bounds: HEAVY_FIXTURE_BOUNDS,
+    })
+    expect(result.ok).toBe(true)
+    expect(existsSync(marker)).toBe(false)
+    const checkoutBound = rawGitArgv.filter((argv) => !argv.includes("ls-remote"))
+    expect(checkoutBound.length).toBeGreaterThan(0)
+    for (const argv of checkoutBound) expect(argv.slice(0, 1 + SAFE_GIT_ARGS.length)).toEqual(["git", ...SAFE_GIT_ARGS])
+    expect(checkoutBound.some((argv) => argv.includes("status"))).toBe(true)
   }, 60_000)
 
   test("a host-registered worktree is removed through the host, never by git, and leaves the registry", async () => {
