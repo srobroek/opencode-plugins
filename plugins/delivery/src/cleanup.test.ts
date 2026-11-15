@@ -2278,6 +2278,63 @@ describe("delivery_cleanup pins Git to the verified worktree", () => {
   }, 60_000)
 })
 
+describe("delivery_cleanup resolves the target path once", () => {
+  test("a symlinked parent switched between steps cannot move any step to another tree", async () => {
+    const f = fixture("resolve-once")
+    const foreign = fixture("resolve-once-foreign")
+    const alias = join(scratch("alias"), "parent")
+    symlinkSync(f.root, alias, "dir")
+    const viaAlias = join(alias, basename(f.linked))
+    const receipt = buildReceipt({
+      ...f.receipt,
+      now: NOW + 1,
+      worktree: { path: viaAlias, removed: false, localRefDeleted: false, absenceVerifiedAt: null },
+      continues: f.receipt,
+    })
+    const path = writeReceipt(receipt, receiptDirectory(f.env, receipt.repo.key))
+    let switched = false
+    const { result, details } = await invoke(
+      f,
+      { receipt: path },
+      {
+        before: (argv) => {
+          if (switched || argv[1] !== "status") return
+          switched = true
+          rmSync(alias)
+          symlinkSync(foreign.root, alias, "dir")
+        },
+      },
+    )
+    expect(switched).toBe(true)
+    // Every command run in the target used the one physical path, never the alias.
+    const inTarget = details.filter((call) => call.cwd !== undefined && call.cwd !== f.main && call.argv[0] === "git")
+    expect(inTarget.length).toBeGreaterThan(0)
+    for (const call of inTarget) {
+      expect(call.cwd).toBe(f.linked)
+      expect(call.env?.GIT_WORK_TREE).toBe(f.linked)
+    }
+    expect(details.some((call) => call.cwd?.includes(alias) === true)).toBe(false)
+    // The next verification resolves the receipt path afresh and no longer finds a registered worktree.
+    expect(refusal(result)).toContain("worktree.")
+    expect(mutationCalls(details.map((call) => call.argv))).toEqual([])
+    expect(existsSync(f.linked)).toBe(true)
+  }, 60_000)
+
+  test("a receipt path that does not resolve is refused before any Git runs in it", async () => {
+    const f = fixture("resolve-missing")
+    const receipt = buildReceipt({
+      ...f.receipt,
+      now: NOW + 1,
+      worktree: { path: join(f.root, "missing"), removed: false, localRefDeleted: false, absenceVerifiedAt: null },
+      continues: f.receipt,
+    })
+    const path = writeReceipt(receipt, receiptDirectory(f.env, receipt.repo.key))
+    const { result, details } = await invoke(f, { receipt: path })
+    expect(refusal(result)).toContain("worktree.path")
+    expect(details.filter((call) => call.cwd === join(f.root, "missing"))).toEqual([])
+  }, 60_000)
+})
+
 describe("delivery_cleanup refuses a registered worktree whose directory is not this repository's", () => {
   /** Each way the directory behind an intact registration can stop belonging to the session repository. */
   const replacements: Array<[string, (f: Fixture, foreign: Fixture) => void]> = [

@@ -401,7 +401,7 @@ function commondirValue(text) {
 }
 function verifyCheckout(checkout, commonDir) {
   const entry = join(checkout, ".git");
-  const workTree = physical(checkout);
+  const workTree = checkout;
   let stat;
   try {
     stat = lstatSync(entry);
@@ -409,7 +409,7 @@ function verifyCheckout(checkout, commonDir) {
     const code = error.code;
     return { state: code === "ENOENT" || code === "ENOTDIR" ? "absent" : "unsafe" };
   }
-  if (workTree === null || stat.isSymbolicLink())
+  if (stat.isSymbolicLink())
     return { state: "unsafe" };
   const pin = (gitDir) => ({ GIT_DIR: gitDir, GIT_WORK_TREE: workTree, GIT_COMMON_DIR: commonDir });
   if (stat.isDirectory()) {
@@ -444,7 +444,8 @@ function verifyCheckout(checkout, commonDir) {
   return worktrees !== null && dirname(gitDir) === worktrees ? { state: "same", pin: pin(gitDir) } : { state: "unsafe" };
 }
 function inspectCheckoutMarker(checkout, commonDir) {
-  return verifyCheckout(checkout, commonDir).state;
+  const real = physical(checkout);
+  return real === null ? "absent" : verifyCheckout(real, commonDir).state;
 }
 
 // plugins/delivery/src/forge-adapter.ts
@@ -2358,7 +2359,8 @@ async function readWorktrees(cwd, run, refReadMs, pin) {
   return records;
 }
 async function isForeignCheckout(path, cwd, records, run, refReadMs) {
-  if (recordForTarget([...records], path) !== null)
+  const real = physicalPath(path);
+  if (real !== null && recordForTarget([...records], real) !== null)
     return false;
   const argv = ["rev-parse", "--path-format=absolute", "--git-common-dir"];
   const result = await runGit(run, cwd, argv, refReadMs);
@@ -2379,10 +2381,7 @@ function invocationInsideTarget(cwd, target) {
     return false;
   return invocation === resolved || invocation.startsWith(`${resolved}${sep}`);
 }
-function recordForTarget(records, target) {
-  const expected = physicalPath(target);
-  if (expected === null)
-    return null;
+function recordForTarget(records, expected) {
   for (const item of records) {
     if (physicalPath(item.path) === expected)
       return item;
@@ -2405,15 +2404,18 @@ async function verifyTargetIdentity(receipt, cwd, run, refReadMs) {
   const main = listed[0];
   if (main === undefined)
     return refuse2("worktree.list", [], "a main worktree record");
-  if (physicalPath(path) === physicalPath(main.path))
+  const physicalTarget = physicalPath(path);
+  if (physicalTarget === null)
+    return refuse2("worktree.path", path, "an exact live record in git worktree list --porcelain");
+  if (physicalTarget === physicalPath(main.path))
     return refuse2("worktree.path", path, `a linked worktree other than main ${show2(main.path)}`);
-  const target = recordForTarget(listed, path);
+  const target = recordForTarget(listed, physicalTarget);
   if (target === null && await isForeignCheckout(path, cwd, listed, run, refReadMs))
     return refuse2("worktree.path", path, "a worktree in the current repository");
   if (target === null || target.prunable)
     return refuse2("worktree.path", path, "an exact live record in git worktree list --porcelain");
   const common = repositoryContext(cwd)?.commonDir ?? null;
-  const verdict = common === null ? { state: "unsafe" } : verifyCheckout(path, common);
+  const verdict = common === null ? { state: "unsafe" } : verifyCheckout(physicalTarget, common);
   if (verdict.state !== "same" || common === null) {
     return refuse2("worktree.marker", `${path} (.git ${verdict.state})`, "a regular .git file naming a directory under this repository's worktrees/ whose commondir is this repository; nothing was read in the worktree");
   }
@@ -2426,10 +2428,10 @@ async function verifyTargetIdentity(receipt, cwd, run, refReadMs) {
   const headFailure = compare("worktree.HEAD", target.head, receipt.pr.headRefOid);
   if (headFailure !== null)
     return headFailure;
-  if (worktreePathState(path) !== "directory") {
+  if (worktreePathState(physicalTarget) !== "directory" || worktreePathState(path) !== "directory") {
     return refuse2("worktree.path", `${path} (unsafe)`, "the listed non-symlink directory");
   }
-  return { records: listed, target, main, common, pin: verdict.pin };
+  return { records: listed, target, main, common, pin: verdict.pin, cwd: physicalTarget };
 }
 async function verifyLocalRef(receipt, cwd, run, refReadMs, pin) {
   const ref = `${LOCAL_REF_PREFIX}${receipt.branch.name}`;
@@ -2446,10 +2448,10 @@ async function revalidateBoundary(receipt, cwd, run, bounds) {
   const ref = await verifyLocalRef(receipt, cwd, run, bounds.refReadMs);
   if (ref !== null)
     return ref;
-  const clean = await verifyCleanTarget(identity.target.path, run, bounds.treeScanMs, identity.pin);
+  const clean = await verifyCleanTarget(identity.cwd, run, bounds.treeScanMs, identity.pin);
   if (clean !== null)
     return clean;
-  const pushed = await verifyPushed(identity.target.path, run, bounds.refReadMs, identity.pin);
+  const pushed = await verifyPushed(identity.cwd, run, bounds.refReadMs, identity.pin);
   return isFailure(pushed) ? pushed : identity;
 }
 async function registrationAbsence(cwd, trustedPath, run, refReadMs, pin) {
@@ -2525,17 +2527,17 @@ async function cleanupDelivery(params, cwd, deps = {}) {
   const identity = await verifyTargetIdentity(receipt, cwd, run, bounds.refReadMs);
   if (isFailure(identity))
     return identity;
-  const observed = await observePullRequest(receipt, run, identity.target.path, env, bounds.refReadMs, identity.pin);
+  const observed = await observePullRequest(receipt, run, identity.cwd, env, bounds.refReadMs, identity.pin);
   if (isFailure(observed))
     return observed;
   const observedFailure = verifyObservation(receipt, observed.pr);
   if (observedFailure !== null)
     return observedFailure;
   const path = receipt.worktree.path;
-  const dirty = await verifyCleanTarget(path, run, bounds.treeScanMs, identity.pin);
+  const dirty = await verifyCleanTarget(identity.cwd, run, bounds.treeScanMs, identity.pin);
   if (dirty !== null)
     return dirty;
-  const pushed = await verifyPushed(path, run, bounds.refReadMs, identity.pin);
+  const pushed = await verifyPushed(identity.cwd, run, bounds.refReadMs, identity.pin);
   if (isFailure(pushed))
     return pushed;
   const ledger = await verifyLedger(receipt, cwd, resolution.path, run, bounds.bdShowMs);
@@ -2550,8 +2552,9 @@ async function cleanupDelivery(params, cwd, deps = {}) {
   const executionCwd = safeExecutionCwd(receipt, boundary.records, cwd);
   if (executionCwd === null)
     return refuse2("worktree.executionCwd", null, "a different listed worktree for the same repository");
-  const executionVerdict = verifyCheckout(executionCwd, boundary.common);
-  if (executionVerdict.state !== "same")
+  const executionDir = physicalPath(executionCwd);
+  const executionVerdict = executionDir === null ? { state: "absent" } : verifyCheckout(executionDir, boundary.common);
+  if (executionDir === null || executionVerdict.state !== "same")
     return refuse2("worktree.executionCwd", `${executionCwd} (.git ${executionVerdict.state})`, "a verified worktree of this repository");
   const executionPin = executionVerdict.pin;
   const targetPath = boundary.target.path;
@@ -2576,29 +2579,29 @@ async function cleanupDelivery(params, cwd, deps = {}) {
       return refuse2("worktree.removed", `host worktree.remove ${JSON.stringify(targetPath)} (error ${message.trim().slice(0, 400)})`, "host removal without force");
     }
   } else {
-    const removed = await runGit(commit, executionCwd, removeArgv, bounds.mutationMs, executionPin);
+    const removed = await runGit(commit, executionDir, removeArgv, bounds.mutationMs, executionPin);
     if (!completed(removed)) {
       return commandFailure("worktree.removed", ["git", ...removeArgv], removed, "exit 0 without --force");
     }
   }
-  const registration = await registrationAbsence(executionCwd, targetPath, commit, bounds.refReadMs, executionPin);
+  const registration = await registrationAbsence(executionDir, targetPath, commit, bounds.refReadMs, executionPin);
   const pathGone = pathAbsence(targetPath);
   if (registration !== "absent")
     return refuse2("worktree.registrationAbsence", registration, '"absent" after removal');
   if (pathGone !== "absent")
     return refuse2("worktree.pathAbsence", pathGone, '"absent" after removal');
-  const refAfterWorktree = await verifyLocalRef(receipt, executionCwd, commit, bounds.refReadMs, executionPin);
+  const refAfterWorktree = await verifyLocalRef(receipt, executionDir, commit, bounds.refReadMs, executionPin);
   if (refAfterWorktree !== null)
     return refAfterWorktree;
   const deleteArgv = branchDeleteArgs(receipt.branch.name);
-  const deleted = await runGit(commit, executionCwd, deleteArgv, bounds.mutationMs, executionPin);
+  const deleted = await runGit(commit, executionDir, deleteArgv, bounds.mutationMs, executionPin);
   if (!completed(deleted)) {
     return commandFailure("worktree.localRefDeleted", ["git", ...deleteArgv], deleted, "exit 0 without -D");
   }
-  const localAbsence = await localRefAbsence(executionCwd, receipt.branch.name, commit, bounds.refReadMs, executionPin);
+  const localAbsence = await localRefAbsence(executionDir, receipt.branch.name, commit, bounds.refReadMs, executionPin);
   if (localAbsence !== "absent")
     return refuse2("worktree.localRefAbsence", localAbsence, '"absent" after branch -d');
-  const remoteAbsence = await remoteBranchAbsent(observed.identity.remoteUrl, receipt.branch.name, executionCwd, commit);
+  const remoteAbsence = await remoteBranchAbsent(observed.identity.remoteUrl, receipt.branch.name, executionDir, commit);
   const issuedAt = nextReceiptEpoch(receipt, now);
   const verifiedAt = new Date(issuedAt).toISOString();
   const continued = buildReceipt({
@@ -2656,7 +2659,6 @@ async function cleanupDelivery(params, cwd, deps = {}) {
 }
 
 // plugins/delivery/src/land.ts
-import { existsSync as existsSync2 } from "fs";
 import { resolve as resolve3 } from "path";
 
 // plugins/delivery/src/approval.ts
@@ -3320,15 +3322,15 @@ async function landPullRequest(params, deps = {}) {
   const { remote, remoteUrl, forge, forgeHost, nameWithOwner, repository, cliRepo, forgeCommandEnv } = resolved;
   const gitlabHost = forgeHost === "github.com" ? undefined : forgeHost;
   const sessionCommonDir = repository.commonDir;
-  let explicitPin;
+  let explicitCheckout = null;
   if (explicitWorktree !== null) {
-    const verdict = verifyCheckout(explicitWorktree, sessionCommonDir);
-    const state = verdict.state;
-    if (verdict.state === "same")
-      explicitPin = verdict.pin;
-    if (state === "foreign" || state === "unsafe" || state === "absent" && existsSync2(explicitWorktree)) {
-      return refuse(`worktree: observed ${show3(explicitWorktree)} as ${state === "foreign" ? "a checkout of another repository" : "not a checkout owned by this repository"}, expected a worktree of the session repository ${show3(nameWithOwner)}; run delivery_land from a session in the pull request's repository; no Git ran there, no merge was issued and no receipt was written`);
+    const real = physical(explicitWorktree);
+    const verdict = real === null ? { state: "absent" } : verifyCheckout(real, sessionCommonDir);
+    if (real === null || verdict.state !== "same") {
+      const what = verdict.state === "foreign" ? "a checkout of another repository" : verdict.state === "absent" ? "not an existing checkout" : "not a checkout owned by this repository";
+      return refuse(`worktree: observed ${show3(explicitWorktree)} as ${what}, expected a worktree of the session repository ${show3(nameWithOwner)}; run delivery_land from a session in the pull request's repository; no Git ran there, no merge was issued and no receipt was written`);
     }
+    explicitCheckout = { real, pin: verdict.pin };
   }
   const boundForgeRun = (argv, options) => run(argv, { ...options, env: options.env ?? forgeCommandEnv });
   const first = await readPr(run, forge, cliRepo, number, FORGE_TIMEOUT_MS, forgeCommandEnv);
@@ -3349,17 +3351,18 @@ async function landPullRequest(params, deps = {}) {
   }
   let worktree = null;
   const worktreePath = explicitWorktree;
-  if (worktreePath === null) {
+  if (worktreePath === null || explicitCheckout === null) {
     const listed = await git(["worktree", "list", "--porcelain"]);
     const inferred = listed === null ? null : inferWorktree(parseWorktreeList(listed), first.pr.headRefName, head);
-    const verdict = inferred === null ? null : verifyCheckout(inferred, sessionCommonDir);
-    if (inferred !== null && verdict?.state === "same") {
-      const held = await worktreeHead(run, inferred, gitEnv, verdict.pin);
+    const real = inferred === null ? null : physical(inferred);
+    const verdict = real === null ? null : verifyCheckout(real, sessionCommonDir);
+    if (inferred !== null && real !== null && verdict?.state === "same") {
+      const held = await worktreeHead(run, real, gitEnv, verdict.pin);
       if (!("reason" in held) && held.head === head)
         worktree = { path: inferred, head: held.head };
     }
   } else {
-    const held = await worktreeHead(run, worktreePath, gitEnv, explicitPin);
+    const held = await worktreeHead(run, explicitCheckout.real, gitEnv, explicitCheckout.pin);
     if ("reason" in held) {
       return refuse(`${held.reason} to compare with pr.headRefOid ${show3(first.pr.headRefOid)}; no merge was issued and no receipt was written`);
     }

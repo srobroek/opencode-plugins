@@ -54,7 +54,7 @@ export type MarkerState = "same" | "foreign" | "unsafe" | "absent"
  * as Git would; the JavaScript `realpathSync` normalizes `..` lexically first and would
  * not.
  */
-function physical(path: string): string | null {
+export function physical(path: string): string | null {
   try {
     return realpathSync.native(path)
   } catch {
@@ -112,7 +112,10 @@ export type CheckoutVerdict = { state: Exclude<MarkerState, "same"> } | { state:
  */
 export function verifyCheckout(checkout: string, commonDir: string): CheckoutVerdict {
   const entry = join(checkout, ".git")
-  const workTree = physical(checkout)
+  // `checkout` must already be a physical path (resolve it once with `physical`): the
+  // marker reads and the pin below then all name the same tree, and nothing here
+  // re-resolves a path whose parent a caller could switch in between.
+  const workTree = checkout
   let stat: ReturnType<typeof lstatSync>
   try {
     stat = lstatSync(entry)
@@ -120,7 +123,7 @@ export function verifyCheckout(checkout: string, commonDir: string): CheckoutVer
     const code = (error as NodeJS.ErrnoException).code
     return { state: code === "ENOENT" || code === "ENOTDIR" ? "absent" : "unsafe" }
   }
-  if (workTree === null || stat.isSymbolicLink()) return { state: "unsafe" }
+  if (stat.isSymbolicLink()) return { state: "unsafe" }
   const pin = (gitDir: string): GitPin => ({ GIT_DIR: gitDir, GIT_WORK_TREE: workTree, GIT_COMMON_DIR: commonDir })
   if (stat.isDirectory()) {
     const real = physical(entry)
@@ -149,5 +152,6 @@ export function verifyCheckout(checkout: string, commonDir: string): CheckoutVer
 
 /** The state alone, for callers that only choose a refusal. */
 export function inspectCheckoutMarker(checkout: string, commonDir: string): MarkerState {
-  return verifyCheckout(checkout, commonDir).state
+  const real = physical(checkout)
+  return real === null ? "absent" : verifyCheckout(real, commonDir).state
 }

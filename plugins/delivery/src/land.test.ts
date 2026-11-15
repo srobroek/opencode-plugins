@@ -128,6 +128,18 @@ function temporaryDirectory(prefix: string): string {
   return path
 }
 
+/** A linked worktree of `canonical`, as `git worktree add` lays it out: a `.git` file and an admin directory. */
+function linkedWorktree(canonical: string, name: string): string {
+  const path = join(temporaryDirectory("delivery-land-linked-"), name)
+  const admin = join(canonical, ".git", "worktrees", name)
+  mkdirSync(path, { recursive: true })
+  mkdirSync(admin, { recursive: true })
+  writeFileSync(join(path, ".git"), `gitdir: ${admin}\n`)
+  writeFileSync(join(admin, "commondir"), "../..\n")
+  return path
+}
+
+
 afterEach(() => {
   for (const path of pending.splice(0)) rmSync(path, { recursive: true, force: true })
 })
@@ -218,11 +230,15 @@ async function land(answers: Answers, params: Partial<LandParams> = {}, env: Nod
   const { canonical, receipts } = repository()
   mkdirSync(join(canonical, ".beads"))
   const { run, calls } = runner(answers, canonical)
+  // A `/tmp/worktrees/<name>` placeholder stands for a real linked worktree of the session
+  // repository: an explicit worktree is only read once it is verified to exist and belong there.
+  const wanted = params.worktree?.startsWith("/tmp/worktrees/") ? params.worktree : undefined
+  const worktreePath = wanted === undefined ? undefined : linkedWorktree(canonical, wanted.split("/").pop() ?? "wt")
   const outcome = await landPullRequest(
-    { pr: 470, ...params },
+    { pr: 470, ...params, ...(worktreePath === undefined ? {} : { worktree: worktreePath }) },
     { run, cwd: canonical, now: () => NOW, receiptsDirectory: receipts, env },
   )
-  return { outcome, calls, receipts, canonical, files: () => readdirSync(receipts) }
+  return { outcome, calls, receipts, canonical, worktreePath, files: () => readdirSync(receipts) }
 }
 function nativeNext(beadId: string, pr: number, mergeSha: string, receiptPath: string): string[] {
   return [
@@ -432,7 +448,7 @@ const merged = (argv: string[]): boolean => argv[2] === "merge"
 
 describe("delivery_land", () => {
   test("a clean land emits one receipt whose fields are the forge reads", async () => {
-    const { outcome, receipts, files, calls } = await land(
+    const { outcome, receipts, files, calls, worktreePath } = await land(
       {
         prView: [completed(githubPr()), completed(mergedGithubPr())],
         lsRemote: { ok: true, exitCode: 2, stdout: "", stderr: "" },
@@ -469,13 +485,13 @@ describe("delivery_land", () => {
       autoDeleteSetting: "off",
     })
     expect(receipt.beads.ids).toEqual(["omp-plugins-9ej3.5"])
-    expect(receipt.worktree.path).toBe("/tmp/worktrees/omp-agent-omp-plugins-9ej3.5")
+    expect(receipt.worktree.path).toBe(worktreePath ?? null)
     // The worktree is recorded only after its own HEAD was read and matched the PR head.
     expect(
       calls.filter((call) => call.argv.join(" ") === "git rev-parse --verify HEAD^{commit}").map((call) => call.cwd),
-    ).toEqual(["/tmp/worktrees/omp-agent-omp-plugins-9ej3.5"])
+    ).toEqual([realpathSync(worktreePath ?? "")])
     expect(receipt.proof.evidence).toMatchObject({
-      worktree: { path: "/tmp/worktrees/omp-agent-omp-plugins-9ej3.5", head: HEAD_OID },
+      worktree: { path: worktreePath, head: HEAD_OID },
     })
     expect(receipt.outcome).toBe("landed")
     expect(receipt.supersedes).toBeNull()
@@ -621,7 +637,7 @@ describe("delivery_land", () => {
     writeFileSync(join(canonical, ".beads", "RETIRED"), "retired\n")
     const { run } = runner({ prView: [completed(mergedGithubPr())] }, canonical)
     const outcome = await landPullRequest(
-      { pr: 470, worktree: "/tmp/worktrees/omp-agent-omp-plugins-9ej3.5" },
+      { pr: 470, worktree: linkedWorktree(canonical, "omp-agent-omp-plugins-9ej3.5") },
       { run, cwd: canonical, now: () => NOW, receiptsDirectory: receipts, env: {} },
     )
 
@@ -1553,8 +1569,9 @@ describe("delivery_land", () => {
     const { canonical, receipts } = repository()
     mkdirSync(join(canonical, ".beads"))
     const { run } = runner({ prView: [completed(githubPr()), completed(mergedGithubPr())] }, canonical)
+    const worktree = linkedWorktree(canonical, "omp-agent-omp-plugins-9ej3.5")
     const outcome = await landPullRequest(
-      { pr: 470, ...REVIEWED, worktree: "/tmp/worktrees/omp-agent-omp-plugins-9ej3.5" },
+      { pr: 470, ...REVIEWED, worktree },
       { run, cwd: canonical, now: () => NOW, receiptsDirectory: receipts, env: {} },
     )
 
@@ -1609,7 +1626,7 @@ describe("delivery_land", () => {
       autoDeleteSetting: "off",
     })
     expect(receipt.worktree).toEqual({
-      path: "/tmp/worktrees/omp-agent-omp-plugins-9ej3.5",
+      path: worktree,
       removed: false,
       localRefDeleted: false,
       absenceVerifiedAt: null,
@@ -1789,19 +1806,19 @@ describe("delivery_land", () => {
       ],
     ]
     for (const [label, answers, params] of cases) {
-      const { outcome, calls, files } = await land(answers, {
+      const { outcome, calls, files, worktreePath } = await land(answers, {
         ...params,
         worktree: "/tmp/worktrees/elsewhere",
         setupAutoDelete: true,
       })
       if (outcome.ok) throw new Error(`${label}: expected a refusal`)
       expect(outcome.reason).toContain("worktree")
-      expect(outcome.reason).toContain("/tmp/worktrees/elsewhere")
+      expect(outcome.reason).toContain(worktreePath ?? "")
       expect(outcome.reason).toContain(HEAD_OID)
       if (label.includes("another head")) expect(outcome.reason).toContain(elsewhere)
       expect(
         calls.filter((call) => call.argv.join(" ") === "git rev-parse --verify HEAD^{commit}").map((call) => call.cwd),
-      ).toEqual(["/tmp/worktrees/elsewhere"])
+      ).toEqual([realpathSync(worktreePath ?? "")])
       expect(calls.filter((call) => merged(call.argv))).toHaveLength(0)
       expect(calls.filter((call) => settingsCall(call.argv))).toHaveLength(0)
       expect(files()).toHaveLength(0)
@@ -2000,17 +2017,6 @@ describe("choosing the remote and worktree of a landing", () => {
     expect("reason" in resolved && resolved.reason).toContain("from remote origin")
   })
 
-  /** A linked worktree of `canonical`, as `git worktree add` lays it out: a `.git` file and an admin directory. */
-  function linkedWorktree(canonical: string, name: string): string {
-    const path = join(temporaryDirectory("delivery-land-linked-"), name)
-    const admin = join(canonical, ".git", "worktrees", name)
-    mkdirSync(path, { recursive: true })
-    mkdirSync(admin, { recursive: true })
-    writeFileSync(join(path, ".git"), `gitdir: ${admin}\n`)
-    writeFileSync(join(admin, "commondir"), "../..\n")
-    return path
-  }
-
   /** One landing in a fresh session repository whose answers may depend on its path. */
   async function landInSession(
     build: (canonical: string) => { answers: Answers; params?: Partial<LandParams>; sleep?: boolean },
@@ -2178,6 +2184,32 @@ describe("choosing the remote and worktree of a landing", () => {
         [],
       )
     }, 20_000)
+  })
+
+  test("a worktree that does not exist is refused before any forge read or Git read there", async () => {
+    const missing = join(temporaryDirectory("delivery-land-missing-"), "not-yet")
+    const spawns = gitSpawnLog()
+    let outcome: Awaited<ReturnType<typeof landPullRequest>>
+    let calls: Call[] = []
+    try {
+      const landed = await landInSession(() => ({
+        answers: { prView: [completed(mergedGithubPr())] },
+        params: { worktree: missing },
+      }))
+      outcome = landed.outcome
+      calls = landed.calls
+    } finally {
+      spawns.restore()
+    }
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) throw new Error("expected a refusal")
+    expect(outcome.reason).toContain("not an existing checkout")
+    expect(outcome.reason).toContain("no Git ran there")
+    // Nothing was read from the forge either, so a repository created at the path after this
+    // point is never entered: there is no later read to enter it.
+    expect(calls.filter((call) => call.argv[0] === "gh")).toEqual([])
+    expect(calls.filter((call) => call.cwd === missing)).toEqual([])
+    expect(spawns.log().filter((dir) => dir.endsWith("not-yet"))).toEqual([])
   })
 
   test("a repo of another repository is refused with the session-repository instruction", async () => {
