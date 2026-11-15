@@ -6075,9 +6075,25 @@ ${refs.size}`;
         }
       }
       event.input = stripped;
-      const snapshot = await snapshotOf(childID);
-      if (snapshot === undefined)
-        return true;
+      let snapshot = await snapshotOf(childID);
+      let fromSession = false;
+      if (snapshot === undefined) {
+        if (guard2 === undefined)
+          return true;
+        const session = await ctx.session.get({ sessionID: childID }).catch(() => {
+          return;
+        });
+        const running = session === undefined ? undefined : await runningModel(session, await listAgents().catch(() => [])).catch(() => {
+          return;
+        });
+        if (running === undefined) {
+          await recordReceipt({ at: Date.now(), agent, source: "agent", rule: "model-default", fallbacks: [], warnings: ["model unknown; guard not applied"] });
+          return true;
+        }
+        const role = await spawnRoleOf(childID);
+        snapshot = { model: modelLabel(running), ...role === undefined ? {} : { tier: role }, configRevision: revision, at: Date.now() };
+        fromSession = true;
+      }
       const model = snapshotModel(snapshot);
       const reason = model === undefined ? "the snapshot names no model" : unavailableReason(model, available);
       const refused = model === undefined || reason !== undefined ? undefined : await judge(event, agent, model);
@@ -6093,6 +6109,8 @@ ${refs.size}`;
         });
         return true;
       }
+      if (fromSession)
+        await writeSnapshot(childID, snapshot);
       if (isRecord10(event.input))
         event.input = { ...event.input, model: snapshot.model };
       await recordReceipt({

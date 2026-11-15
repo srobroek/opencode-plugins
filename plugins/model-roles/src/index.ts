@@ -1371,8 +1371,21 @@ export default Plugin.define({
         }
       }
       event.input = stripped
-      const snapshot = await snapshotOf(childID)
-      if (snapshot === undefined) return true
+      let snapshot = await snapshotOf(childID)
+      let fromSession = false
+      if (snapshot === undefined) {
+        // No snapshot (a child from before snapshots, or one pruned): the child's own session says what it runs on.
+        if (guard === undefined) return true
+        const session = (await ctx.session.get({ sessionID: childID }).catch(() => undefined)) as SessionLike
+        const running = session === undefined ? undefined : await runningModel(session, await listAgents().catch(() => [] as Agents)).catch(() => undefined)
+        if (running === undefined) {
+          await recordReceipt({ at: Date.now(), agent, source: "agent", rule: "model-default", fallbacks: [], warnings: ["model unknown; guard not applied"] })
+          return true
+        }
+        const role = await spawnRoleOf(childID)
+        snapshot = { model: modelLabel(running), ...(role === undefined ? {} : { tier: role }), configRevision: revision, at: Date.now() }
+        fromSession = true
+      }
       const model = snapshotModel(snapshot)
       const reason = model === undefined ? "the snapshot names no model" : unavailableReason(model, available)
       if (model === undefined || reason !== undefined) {
@@ -1427,6 +1440,7 @@ export default Plugin.define({
         })
         return true
       }
+      if (fromSession) await writeSnapshot(childID, snapshot)
       if (isRecord(event.input)) event.input = { ...event.input, model: snapshot.model }
       await recordReceipt({
         at: Date.now(),
@@ -1443,6 +1457,8 @@ export default Plugin.define({
     }
 
     const handleSpawn = async (event: SpawnEvent) => {
+      // A resume ends here. A refused resume throws above, so it never reaches this return; keep it that way:
+      // anything that marks a resumed child as running must happen after a resume is accepted, not before.
       if (await handleResume(event)) return
       // Read before the tier rewrites `model`: only a model the caller passed counts as explicit.
       const explicitModel = inputModel(event.input)
