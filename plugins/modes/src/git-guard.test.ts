@@ -93,6 +93,7 @@ const REFUSED = [
   "/usr/bin/gi? push",
   "/usr/bin/[g]it push",
   "$G push; G=git",
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: a shell variable, not a template
   "G=git; ${G} push",
   "`echo git` push",
   "sudo git push",

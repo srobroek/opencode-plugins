@@ -64,7 +64,6 @@ const SAFE_CONFIG =
   /^(core\.(quotepath|autocrlf|whitespace|abbrev|precomposeunicode)|color\.[a-z.]+|diff\.(algorithm|renames|context|noprefix|mnemonicprefix)|log\.[a-z]+|user\.(name|email)|commit\.gpgsign|gc\.auto|advice\.[a-z]+|safe\.directory|protocol\.version|init\.defaultbranch)$/i
 const DANGEROUS_ENV =
   /^(GIT_(CONFIG[A-Z_0-9]*|SSH|SSH_COMMAND|ASKPASS|EXTERNAL_DIFF|PAGER|EDITOR|SEQUENCE_EDITOR|EXEC_PATH|PROXY_COMMAND|DIR|WORK_TREE|INDEX_FILE|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES|COMMON_DIR|TEMPLATE_DIR)|SSH_ASKPASS|EDITOR|VISUAL|PAGER)=/
-const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/
 /** Options that run a command chosen by the caller. Output paths are checked separately. */
 const RISKY_OPTION = /^--(upload-pack|receive-pack|exec|open-files-in-pager|ext-diff|textconv)(=|$)/
 const MENTIONS_GIT = /git/i
@@ -73,7 +72,7 @@ const WORTH_PARSING = /git|[{*?[$`]/i
 const KEYWORDS = new Set(["if", "then", "else", "elif", "while", "until", "do", "!", "{", "(", "coproc"])
 const INTERPRETERS = /^(python[0-9.]*|node|nodejs|perl|ruby|php|lua|awk|gawk|mawk|osascript|tclsh|Rscript)$/
 const INLINE_CODE_RUNNERS = /^(bun|deno)$/
-const unescape = (word: string) => word.replace(/\\(.)/gs, "$1")
+const unbackslash = (word: string) => word.replace(/\\(.)/gs, "$1")
 const escapeRegex = (text: string) => text.replace(/[.+^${}()|[\]\\*?]/g, "\\$&")
 
 /** A regular expression for the strings a glob or brace word can expand to. */
@@ -338,7 +337,7 @@ function runnerCommand(exe: string, args: readonly string[]): string[] {
 
 /** The command a simple command runs, with the directories its wrappers change into. */
 function realCommand(input: readonly string[]): { argv: string[]; directories: string[] } {
-  let current = input.map(unescape)
+  let current = input.map(unbackslash)
   const directories: string[] = []
   for (let round = 0; round < 6; round++) {
     let start = 0
@@ -365,7 +364,7 @@ type Ctx = {
 const deeper = (ctx: Ctx): Ctx => ({ ...ctx, depth: ctx.depth + 1 })
 
 function checkWords(input: readonly string[], ctx: Ctx): string | undefined {
-  const { agent, policy, mentions } = ctx
+  const { agent, mentions } = ctx
   if (ctx.depth > 6) return "the command nests too deeply to check its git use"
   const dangerous = input.find((word) => DANGEROUS_ENV.test(word))
   if (dangerous !== undefined) return `${dangerous.split("=")[0]} can make git run a command or read other config, which is not allowed for the ${agent} agent`
@@ -439,7 +438,7 @@ function checkParsed(parsed: ParsedCommand, ctx: Ctx): string | undefined {
 const onlyAndChains = (command: string) => !/[;|&(){}`\n]|\$\(/.test(command.replaceAll("&&", " "))
 
 function checkCommand(command: string, ctx: Ctx): string | undefined {
-  const text = unescape(command.replace(/['"]/g, ""))
+  const text = unbackslash(command.replace(/['"]/g, ""))
   if (!WORTH_PARSING.test(text)) return undefined
   const parsed = parse(command)
   if (parsed.unknown) return MENTIONS_GIT.test(text) || ctx.mentions ? "the command could not be parsed, so its git use cannot be checked" : undefined

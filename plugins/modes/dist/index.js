@@ -1097,7 +1097,7 @@ var WORTH_PARSING = /git|[{*?[$`]/i;
 var KEYWORDS = new Set(["if", "then", "else", "elif", "while", "until", "do", "!", "{", "(", "coproc"]);
 var INTERPRETERS = /^(python[0-9.]*|node|nodejs|perl|ruby|php|lua|awk|gawk|mawk|osascript|tclsh|Rscript)$/;
 var INLINE_CODE_RUNNERS = /^(bun|deno)$/;
-var unescape = (word) => word.replace(/\\(.)/gs, "$1");
+var unbackslash = (word) => word.replace(/\\(.)/gs, "$1");
 var escapeRegex = (text) => text.replace(/[.+^${}()|[\]\\*?]/g, "\\$&");
 function wordPattern(word) {
   let out = "";
@@ -1353,7 +1353,7 @@ function runnerCommand(exe, args) {
   return args.slice(i);
 }
 function realCommand(input) {
-  let current = input.map(unescape);
+  let current = input.map(unbackslash);
   const directories = [];
   for (let round = 0;round < 6; round++) {
     let start = 0;
@@ -1369,7 +1369,7 @@ function realCommand(input) {
 }
 var deeper = (ctx) => ({ ...ctx, depth: ctx.depth + 1 });
 function checkWords(input, ctx) {
-  const { agent, policy, mentions } = ctx;
+  const { agent, mentions } = ctx;
   if (ctx.depth > 6)
     return "the command nests too deeply to check its git use";
   const dangerous = input.find((word) => DANGEROUS_ENV.test(word));
@@ -1446,7 +1446,7 @@ function checkParsed(parsed, ctx) {
 }
 var onlyAndChains = (command) => !/[;|&(){}`\n]|\$\(/.test(command.replaceAll("&&", " "));
 function checkCommand(command, ctx) {
-  const text = unescape(command.replace(/['"]/g, ""));
+  const text = unbackslash(command.replace(/['"]/g, ""));
   if (!WORTH_PARSING.test(text))
     return;
   const parsed = parse(command);
