@@ -1,6 +1,14 @@
 import { resolve } from "node:path"
 import { shellQuoteBalanced, tokenizeShell } from "./shell-tokenizer.ts"
 
+/*
+ * Scope for every consumer of this parser (the beads close, update-close, unclaim and
+ * actor gates, the embedded-write lock, the agent-efficiency wait guard): commands an
+ * agent writes normally are in scope. Deliberately obfuscated shell is not. These gates
+ * catch an agent that forgot or misjudged a rule, not one that is working around it.
+ * Fix a parser bug that mishandles an ordinary command; do not chase evasion.
+ */
+
 /** A token in a command-position argv. Quoted words are data, not executable names. */
 export type Token = { value: string; quoted: boolean }
 
