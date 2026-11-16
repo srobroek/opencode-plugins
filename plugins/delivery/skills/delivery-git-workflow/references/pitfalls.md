@@ -33,11 +33,11 @@
 ## A draft PR reports no checks
 
 - **Symptom:** `no checks reported` on a draft PR
-- **Cause:** Expected. Repositories skip workflows for draft PRs and run them on `ready_for_review`.
+- **Cause:** Expected in repositories whose workflows skip drafts and run on `ready_for_review` (for example srobroek/slopvac). Elsewhere a draft still runs CI, and marking it ready may not start a new run.
 - **Fix:** Finish the work and pass local checks, then run `gh pr ready <n>`. For a fix round, run `gh pr ready <n> --undo`, push, and mark it ready again.
 
 ## Landing into a branch that requires a merge queue (interim until `delivery_land` supports merge queues)
 
-- **Symptom:** `delivery_land` refuses, or a direct merge fails with `Repository rule violations found` and `Changes must be made through the merge queue` (wording may vary by GitHub version)
-- **Cause:** The base branch (for example in `srobroek/slopvac`) requires a GitHub merge queue, and `delivery_land` merges directly. Interim guidance until `delivery_land` supports merge queues (PR #188).
-- **Fix:** Run `gh pr merge <n> --squash --match-head-commit <reviewed-sha>`, which enqueues the PR. The repository setting deletes the branch automatically. Close the bead by hand with the PR number and merge SHA. Never arm `--auto`.
+- **Symptom:** `delivery_land` refuses, or a direct merge fails with an error like "Repository rule violations found" or "Changes must be made through the merge queue" (approximate text, not an exact diagnostic)
+- **Cause:** The base branch (for example in `srobroek/slopvac`) requires a GitHub merge queue, and `delivery_land` merges directly. Interim guidance until `delivery_land` supports merge queues (PR #188). On a queue branch, `gh pr merge` enqueues only when the required checks are green; otherwise it silently enables auto-merge without `--auto`, and that stays armed across pushes.
+- **Fix:** Run `gh pr merge <n> --match-head-commit <reviewed-sha>` only after the required checks are green on the reviewed head; the queue's configured merge method applies. Immediately run `gh pr view <n> --json mergeStateStatus,autoMergeRequest,headRefOid`. If `autoMergeRequest` is set, run `gh pr merge <n> --disable-auto` and report it. The docs do not say whether `--match-head-commit` binds the enqueue, so also confirm `headRefOid` equals the reviewed SHA. The repository setting deletes the branch automatically. Close the bead by hand with the PR number and merge SHA. Never pass `--auto`.
