@@ -171,7 +171,7 @@ For unsafe code run Miri (`cargo +nightly miri nextest run`, with
 `MIRIFLAGS=-Zmiri-many-seeds` for schedules; no FFI) on a schedule, and optionally
 `cargo +nightly careful test`. Use AddressSanitizer or ThreadSanitizer
 (`-Zsanitizer=address|thread` with `-Zbuild-std`) or Valgrind for FFI. Skip all of
-these under `#![forbid(unsafe_code)]`. Tool choices are in `lang-rust-libraries`'
+these under `#![forbid(unsafe_code)]` only when no unsafe dependency is in scope. Tool choices are in `lang-rust-libraries`'
 `references/testing.md` and `references/quality.md`; detect a tool, recommend the
 install and ask before installing.
 

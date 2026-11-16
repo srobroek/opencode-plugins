@@ -20,6 +20,7 @@ project is missing.
 ## Install policy
 
 - Detect the tool with the first command in the row's Install cell before you rely on it.
+  Detect commands never install or sync: run them before you ask.
 - When it is missing, recommend the install command from the Install cell and ask the user
   for permission before you run it. Never install a tool, add a dependency or change a
   lockfile without that permission.

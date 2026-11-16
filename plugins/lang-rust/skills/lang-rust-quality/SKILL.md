@@ -41,7 +41,7 @@ not stack the scanners as mandatory gates.
 
 Run mutation under the default `cargo test` so doctests count; `--test-tool=nextest`
 skips them. A test-only diff selects no mutants. Run Miri or `cargo careful` on a
-schedule for crates with unsafe code, and skip them under `#![forbid(unsafe_code)]`.
+schedule for crates with unsafe code, and skip them under `#![forbid(unsafe_code)]` only when no unsafe dependency is in scope.
 Run `cargo semver-checks` for published libraries only.
 
 Tool choices per concern are in `lang-rust-libraries`' `references/testing.md` and
