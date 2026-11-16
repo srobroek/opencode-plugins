@@ -93,6 +93,15 @@ async function start(
       { id: "pinned", name: "pinned", mode: "subagent", model: { id: "y", providerID: "prov" } },
       { id: "build", name: "build", mode: "primary" },
       {
+        id: "asking",
+        name: "asking",
+        mode: "subagent",
+        permissions: [
+          { action: "edit", resource: "*", effect: "deny" },
+          { action: "edit", resource: "src/*", effect: "ask" },
+        ],
+      },
+      {
         id: "scoped",
         name: "scoped",
         mode: "subagent",
@@ -470,6 +479,31 @@ describe("worktree argument", () => {
       const setup = await start()
       writerIn(setup, "ses_limited", running, { agent: "pinned", permissions: [{ action: "edit", resource: "*", effect: "deny" }] })
       expect(sessionID(await spawn(setup, { agent: "pinned", worktree: "feat" }))).toBe("ses_fake1")
+    })
+
+    test("a read-only agent whose parent session grants scoped edit is guarded as a writer", async () => {
+      const setup = await start()
+      Object.assign(setup.fake.sessions.get(PARENT) ?? {}, { permissions: [{ action: "edit", resource: "src/*", effect: "allow" }] })
+      writerIn(setup, "ses_live", running)
+      await expect(spawn(setup, { agent: "reviewer", worktree: "feat" })).rejects.toThrow(/live writer session ses_live/)
+    })
+
+    test("a spawning agent with a scoped edit ask is guarded as a writer", async () => {
+      const setup = await start()
+      writerIn(setup, "ses_live", running)
+      await expect(spawn(setup, { agent: "asking", worktree: "feat" })).rejects.toThrow(/live writer session ses_live/)
+    })
+
+    test("a live agent with a scoped edit ask counts as a writer", async () => {
+      const setup = await start()
+      writerIn(setup, "ses_asking", running, { agent: "asking" })
+      await expect(spawn(setup, { agent: "pinned", worktree: "feat" })).rejects.toThrow(/live writer session ses_asking/)
+    })
+
+    test("a live reviewer whose session rules ask for scoped edit counts as a writer", async () => {
+      const setup = await start()
+      writerIn(setup, "ses_review", running, { agent: "reviewer", permissions: [{ action: "edit", resource: "src/*", effect: "ask" }] })
+      await expect(spawn(setup, { agent: "pinned", worktree: "feat" })).rejects.toThrow(/live writer session ses_review/)
     })
 
     test("a spawning agent with a scoped edit grant is guarded as a writer", async () => {

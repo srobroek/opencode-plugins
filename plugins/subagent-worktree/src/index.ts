@@ -82,6 +82,8 @@ type Session = {
   projectID: string
   model?: { id: string; providerID: string; variant?: string }
   location: { directory: string }
+  /** Rules evaluated after the agent's; children are created with their parent's. */
+  permissions?: unknown
 }
 
 type AgentInfo = { id: string; name?: string; mode?: string; model?: Session["model"]; permissions?: unknown }
@@ -298,6 +300,7 @@ export function createLanes(
       input,
       options,
       agent,
+      callerPermissions: parent.permissions,
       callerIsChild: Boolean(parent.parentID),
       isGit: start ? start.lookup.ok : await git.isWorkTree(parentDir),
       projectDir: parentDir,
@@ -315,7 +318,7 @@ export function createLanes(
     if (plan.kind === "refuse") throw new Error(`subagent-worktree: ${plan.reason}`)
     if (plan.kind !== "isolate" && start?.lookup.ok && agent && agent.mode !== "primary") {
       const guard = decideWriterGuard({
-        writer: !sessionIsReadOnly(agent.permissions, undefined),
+        writer: !sessionIsReadOnly(agent.permissions, parent.permissions),
         directory: start.lookup.worktree.directory,
         caller: event.sessionID,
         sessions: await sessionsIn(parent.projectID, start.lookup.worktree.directory),

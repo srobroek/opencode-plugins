@@ -239,6 +239,18 @@ describe("decideIsolation", () => {
     )
     expect(decision).toEqual({ isolate: true })
   })
+  test("a caller's scoped edit grant makes a denying agent a writer for isolation", () => {
+    const agent = { id: "general", permissions: [{ action: "edit", resource: "*", effect: "deny" }] }
+    const callerPermissions = [{ action: "edit", resource: "src/*", effect: "allow" }]
+    expect(decideIsolation(facts({ agent, callerPermissions }))).toEqual({ isolate: true })
+  })
+  test("an agent with a scoped edit ask after a blanket deny is still isolated as a writer", () => {
+    const permissions = [
+      { action: "edit", resource: "*", effect: "deny" },
+      { action: "edit", resource: "src/*", effect: "ask" },
+    ]
+    expect(decideIsolation(facts({ agent: { id: "general", permissions } }))).toEqual({ isolate: true })
+  })
   test("an agent with a scoped edit grant after a blanket deny is still isolated as a writer", () => {
     const permissions = [
       { action: "edit", resource: "*", effect: "deny" },
@@ -265,6 +277,8 @@ describe("sessionIsReadOnly", () => {
     ["agent denies, session allows edit", deny, [rule("edit", "*", "allow")], false],
     ["agent denies, session grants edit on a path", deny, [rule("edit", "src/*", "allow")], false],
     ["agent denies, session grants write on a path", deny, [rule("write", "src/*", "allow")], false],
+    ["agent denies, session asks for edit on a path", deny, [rule("edit", "src/*", "ask")], false],
+    ["agent denies, later ask for write on a path", deny, [rule("write", "docs/*", "ask")], false],
     ["agent allows, session denies then re-grants a path", allow, [...deny, rule("edit", "docs/*", "allow")], false],
     ["session denies, an earlier scoped grant is overridden", [], [rule("edit", "src/*", "allow"), ...deny], true],
     ["no rules", undefined, undefined, false],

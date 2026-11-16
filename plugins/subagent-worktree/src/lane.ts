@@ -238,6 +238,8 @@ export type IsolationFacts = {
   options: Options
   /** The resolved agent, or undefined when the host does not know it. */
   agent: { id: string; name?: string; mode?: string; permissions?: unknown } | undefined
+  /** The calling session's rules; a child starts with them, evaluated after the agent's. */
+  callerPermissions?: unknown
   /** Whether the calling session is itself a child session. */
   callerIsChild: boolean
   /** Whether the caller's directory is inside a git work tree. */
@@ -259,7 +261,7 @@ export function decideIsolation(facts: IsolationFacts): Isolation {
   if (!facts.options.agents.some((agent) => names.has(agent))) return { isolate: false, reason: "agent not opted in" }
   if (!facts.agent) return { isolate: false, reason: "unknown agent" }
   if (facts.agent.mode === "primary") return { isolate: false, reason: "primary agent" }
-  if (sessionIsReadOnly(facts.agent.permissions, undefined)) return { isolate: false, reason: "read-only agent (edit denied)" }
+  if (sessionIsReadOnly(facts.agent.permissions, facts.callerPermissions)) return { isolate: false, reason: "read-only agent (edit denied)" }
   if (facts.callerIsChild) return { isolate: false, reason: "caller is a child session" }
   if (!facts.isGit) return { isolate: false, reason: "not a git checkout" }
   return { isolate: true }
@@ -290,8 +292,8 @@ export function rulesAreReadOnly(rules: unknown): boolean {
 
 /**
  * Whether a session cannot edit: its agent's rules, then its own rules (evaluated after, the last
- * matching rule wins), deny `edit` everywhere and no later rule grants `edit` or `write`, even
- * on a scoped path. Conservative: any such grant makes the session a writer.
+ * matching rule wins), deny `edit` everywhere and no later rule grants `edit` or `write` (allow or
+ * ask), even on a scoped path. Conservative: any such grant makes the session a writer.
  */
 export function sessionIsReadOnly(agentRules: unknown, sessionRules: unknown): boolean {
   const rules = [...(Array.isArray(agentRules) ? agentRules : []), ...(Array.isArray(sessionRules) ? sessionRules : [])]
@@ -305,7 +307,7 @@ export function sessionIsReadOnly(agentRules: unknown, sessionRules: unknown): b
   )
   return !rules.slice(denied + 1).some(
     (rule: { action?: unknown; effect?: unknown } | null) =>
-      rule?.effect === "allow" &&
+      (rule?.effect === "allow" || rule?.effect === "ask") &&
       typeof rule.action === "string" &&
       (wildcard("edit", rule.action) || wildcard("write", rule.action)),
   )

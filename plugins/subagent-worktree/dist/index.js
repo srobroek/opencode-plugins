@@ -372,7 +372,7 @@ function decideIsolation(facts) {
     return { isolate: false, reason: "unknown agent" };
   if (facts.agent.mode === "primary")
     return { isolate: false, reason: "primary agent" };
-  if (sessionIsReadOnly(facts.agent.permissions, undefined))
+  if (sessionIsReadOnly(facts.agent.permissions, facts.callerPermissions))
     return { isolate: false, reason: "read-only agent (edit denied)" };
   if (facts.callerIsChild)
     return { isolate: false, reason: "caller is a child session" };
@@ -399,7 +399,7 @@ function sessionIsReadOnly(agentRules, sessionRules) {
   if (!rulesAreReadOnly(rules))
     return false;
   const denied = rules.findLastIndex((rule) => rule?.effect === "deny" && typeof rule.action === "string" && wildcardMatch("edit", rule.action) && (rule.resource === "*" || rule.resource === "**"));
-  return !rules.slice(denied + 1).some((rule) => rule?.effect === "allow" && typeof rule.action === "string" && (wildcardMatch("edit", rule.action) || wildcardMatch("write", rule.action)));
+  return !rules.slice(denied + 1).some((rule) => (rule?.effect === "allow" || rule?.effect === "ask") && typeof rule.action === "string" && (wildcardMatch("edit", rule.action) || wildcardMatch("write", rule.action)));
 }
 function slug(text, max = 32) {
   const value = text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, max).replace(/-+$/g, "");
@@ -843,6 +843,7 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
       input,
       options,
       agent,
+      callerPermissions: parent.permissions,
       callerIsChild: Boolean(parent.parentID),
       isGit: start ? start.lookup.ok : await git2.isWorkTree(parentDir),
       projectDir: parentDir,
@@ -861,7 +862,7 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
       throw new Error(`subagent-worktree: ${plan.reason}`);
     if (plan.kind !== "isolate" && start?.lookup.ok && agent && agent.mode !== "primary") {
       const guard = decideWriterGuard({
-        writer: !sessionIsReadOnly(agent.permissions, undefined),
+        writer: !sessionIsReadOnly(agent.permissions, parent.permissions),
         directory: start.lookup.worktree.directory,
         caller: event.sessionID,
         sessions: await sessionsIn(parent.projectID, start.lookup.worktree.directory)
