@@ -83,8 +83,20 @@ returns at once, so a skill can fall back to the `question` tool or a plain
 markdown round in chat.
 
 Uploaded images reach the model as image content. Text files are inlined in the
-result. Other files are written to a temporary directory on the server and the
-path is reported.
+result. Other files are reported by the path of their private copy. Every
+upload, final or not, is copied to a private temporary directory on the server
+(0700 directories, 0600 files) as soon as it is submitted, and parley's storage
+keeps only that path, not the bytes. After a reload, waits and messages read the
+upload back from the copy. Each upload gets its own directory under
+`parley/<round id>/`, so two files with the same name never overwrite each
+other, and the file keeps its original name. When the round
+closes, parley writes a `.closed` marker with the time into the round's
+directory. The files stay for 24 hours after that, even after the round record
+is pruned (30 minutes after it closes), because the agent may read them on a
+later turn. A round directory without a marker is removed after 48 hours with
+no change. Cleanup is lazy: parley sweeps expired files when it starts and every
+5 minutes while it runs, so expired files stay on disk while the plugin is not
+loaded.
 
 ## Phase three kinds
 
@@ -276,11 +288,68 @@ open rounds with `parley.pending` on start and after a reconnect. Desktop, web
 and `opencode run` have no panel, so calls from there get `unavailable` or the
 `question` fallback.
 
+## Reloads
+
+A plugin reload (for example `opencode plugin update`) restarts the server side
+of parley, and a waiting tool call cannot survive it. Open rounds are kept in
+the plugin's storage (questions, answers so far, delivery state; upload bytes
+are not kept) and restored at start. Closed rounds are dropped after 30 minutes
+and open ones after 24 hours.
+
+- A call that is waiting when the plugin reloads returns `unavailable` with the
+  reason `parley reloaded; the round stays open and its answers will arrive as
+  a message`. The round stays open.
+- When the user submits (or dismisses) a restored round, the answers reach the
+  session as a queued synthetic message in the usual result format. It wakes an
+  idle session. If the model calls `parley_wait` first, it gets the answers
+  there instead, and no message is sent. A message carries text only (the
+  session `synthetic` call takes no files): text uploads are inlined and other
+  uploads are written to the private upload directory and reported by path.
+  Where the files cannot be saved, a TUI fallback send fails and keeps the card
+  and its draft; for a restored round the answers stay for `parley_wait`.
+- Storage is shared by every location, so each round records its location and
+  an instance restores only rounds whose session belongs to its own location.
+  A round whose session cannot be placed is not restored. Invalid stored rounds
+  are skipped with a warning.
+- On dispose, queued saves finish (bounded at 2 s) before the next instance
+  restores.
+- Each message gets a host message id (`msg_...`) when it is planned, and every
+  retry reuses that id. The host admits a synthetic inbox id once and ignores a
+  retried payload (`specs/v2/session.md` in anomalyco/opencode), so a message
+  reaches the agent once.
+- A restored round's message is planned as the round closes and saved in the
+  same write as the closure. A reload at any point after that sends it on
+  restore. The answers are marked delivered only after the host admits the
+  message.
+- Collecting answers and sending the message take turns per round. Until the
+  first send starts, `parley_wait` may take the answers: all of them, or the ids
+  it asked for. Those answers leave the message. The message then carries the
+  rest, and it is dropped when nothing is left.
+- Once a send has started, the message owns its answers, because the host may
+  have admitted it even when the call failed. `parley_wait` then never returns
+  them as answers. It first sends the message again under the same id (a copy
+  the host already admitted is not repeated) and reports the answers in
+  `as_message`: `status` (`delivered`, `sending` with the error, or
+  `dismissed`) and their `ids`, with no content.
+- A failed send is retried after 2 s and 8 s. After 3 failed attempts the card
+  comes back with the user's answers and the error, and the TUI offers to send
+  the answers as a message or dismiss them. A dismissed message is not sent
+  again, and `parley_wait` reports its answers as `dismissed`.
+- The TUI notices the new server instance and fetches the round again; the
+  draft is kept. A round the server no longer lists after a reload stays on the
+  screen with its draft until you act. If a submit fails with `unknown round`,
+  the TUI shows the error once and offers to send the answers as a message or
+  dismiss the card. Retrying the send reuses one delivery id and one message id,
+  so the message arrives once.
+
 ## RPC
 
-`parley` methods: `attach { clientID, sessionIDs?, detach? }`,
-`pending { sessionID? }`, `submit { roundID, answers, final? }`,
-`cancel { roundID, reason? }`. Event `round { sessionID, roundID, action }`
+`parley` methods: `attach { clientID, sessionIDs?, detach? }` (replies with the
+server `instance` id), `pending { sessionID? }`,
+`submit { roundID, answers, final? }`,
+`deliver { sessionID, roundID?, number?, questions, answers, deliveryID? }` (send
+answers to the session as a message; for a round whose message failed, send that
+message again), `cancel { roundID, reason? }`. Event `round { sessionID, roundID, action }`
 with `action` `opened`, `updated`, `closed` or `ended`.
 
 ## Manual test

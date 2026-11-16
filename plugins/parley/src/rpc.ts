@@ -34,6 +34,21 @@ export const ParleyRpc = Rpc.define({
       },
       output: { type: "object" },
     },
+    deliver: {
+      input: {
+        type: "object",
+        required: ["sessionID", "questions", "answers"],
+        properties: {
+          sessionID: { type: "string" },
+          number: { type: "number" },
+          roundID: { type: "string" },
+          deliveryID: { type: "string" },
+          questions: { type: "array", items: { type: "object" } },
+          answers: { type: "array", items: { type: "object" } },
+        },
+      },
+      output: { type: "object" },
+    },
     cancel: {
       input: {
         type: "object",

@@ -7,9 +7,11 @@ import { createEffect, createSignal, Show } from "solid-js"
 import type { SubmittedAnswer } from "./answers.ts"
 import { createRoundStore, InlineCard, PANEL, RoundPanel } from "./panel.tsx"
 import { canAutoPresent, canCloseRoundPanel } from "./presentation.ts"
+import { instanceChanged, reconcileRounds } from "./reconcile.ts"
 import type { RoundView } from "./rounds.ts"
 import { ParleyRpc, type RoundEvent } from "./rpc.ts"
-import { inlineEligible } from "./tui-state.ts"
+import { type Outcome, submitRound } from "./submit.ts"
+import { draftFromAnswer, inlineEligible } from "./tui-state.ts"
 
 const HEARTBEAT_MS = 10_000
 /** When to look for the built-in form of a call handed to the built-in tool (ms since the last look). */
@@ -101,18 +103,36 @@ export default Plugin.define({
       return [...found.values()]
     }
 
-    const refresh = async (location: LocationRef) => {
+    // The server instance each location last answered from; a new one means the plugin reloaded there.
+    const instances = new Map<string, string>()
+    // Rounds the server no longer lists after a reload. They stay, with their drafts, until the user acts.
+    let lost: ReadonlySet<string> = new Set()
+    const refresh = async (location: LocationRef, reloaded = false) => {
       if (disposed) return
-      const result = (await rpc.pending({}, { location }).catch(() => undefined)) as { rounds?: RoundView[] } | undefined
+      const result = (await rpc.pending({}, { location }).catch(() => undefined)) as
+        | { rounds?: RoundView[]; instance?: string }
+        | undefined
       if (disposed || !result) return
       const key = locationKey(location)
-      const open = new Set((result.rounds ?? []).map((view) => view.roundID))
-      for (const entry of rounds())
-        if (locationKey(entry.location) === key && !open.has(entry.view.roundID)) store.forget(entry.view.roundID)
-      setRounds((all) => [
-        ...all.filter((entry) => locationKey(entry.location) !== key),
-        ...(result.rounds ?? []).map((view) => ({ view, location })),
-      ])
+      const merged = reconcileRounds({
+        current: rounds().filter((entry) => locationKey(entry.location) === key),
+        server: result.rounds ?? [],
+        lost,
+        reloaded: instanceChanged(instances, key, result.instance) || reloaded,
+        toEntry: (view): Entry => ({ view, location }),
+      })
+      lost = merged.lost
+      for (const id of merged.forget) store.forget(id)
+      // A round whose message to the agent failed comes back closed: its card shows the answers the user gave.
+      for (const entry of merged.entries) {
+        if (entry.view.undelivered === undefined) continue
+        for (const answer of entry.view.answers) {
+          const question = entry.view.questions.find((candidate) => candidate.id === answer.id)
+          const key = `${entry.view.roundID}\u0000${answer.id}`
+          if (question && store.drafts[key] === undefined) store.setDraft(key, draftFromAnswer(question, answer))
+        }
+      }
+      setRounds((all) => [...all.filter((entry) => locationKey(entry.location) !== key), ...merged.entries])
     }
 
     const forSession = (sessionID: string) => rounds().find((entry) => entry.view.sessionID === sessionID)
@@ -174,7 +194,12 @@ export default Plugin.define({
       const results = await Promise.all(
         locations().map((location) =>
           rpc.attach({ clientID }, { location }).then(
-            () => true,
+            (reply) => {
+              const instance = (reply as { instance?: string } | undefined)?.instance
+              // Fetch the restored rounds again. The round ids are unchanged, so drafts are kept.
+              if (instanceChanged(instances, locationKey(location), instance)) void refresh(location, true)
+              return true
+            },
             () => false,
           ),
         ),
@@ -195,7 +220,10 @@ export default Plugin.define({
       }
       await refresh(location)
       if (disposed) return
-      if (data.action === "opened") present(data.sessionID, true)
+      if (data.action === "opened" && data.status === "undelivered") {
+        context.ui.toast.show({ title: "Parley", message: data.reason || "Your answers did not reach the agent", variant: "warning", sessionID: data.sessionID })
+        present(data.sessionID, true)
+      } else if (data.action === "opened") present(data.sessionID, true)
       else if (data.action === "updated") {
         if (inline().has(data.sessionID) && !single(data.sessionID)) {
           openPanel(data.sessionID)
@@ -250,26 +278,48 @@ export default Plugin.define({
     for (const location of locations()) void refresh(location)
     const timer = setInterval(() => void heartbeat(), HEARTBEAT_MS)
 
+    // One id per round, reused when the user retries, so the server sends the message once.
+    const deliveryIDs = new Map<string, string>()
     const submit = async (view: RoundView, answers: SubmittedAnswer[]) => {
       const entry = rounds().find((item) => item.view.roundID === view.roundID)
       if (!entry) return ["This round is no longer open."]
-      try {
-        const result = (await rpc.submit({ roundID: view.roundID, answers, final: true }, { location: entry.location })) as {
-          ok: boolean
-          errors?: string[]
-        }
-        if (disposed) return []
-        if (!result.ok) return result.errors ?? ["Submit failed"]
-        context.ui.toast.show({ message: "Answers sent", variant: "success", duration: 2000 })
-        await refresh(entry.location)
-        if (disposed) return []
-        const stillPending = forSession(view.sessionID) !== undefined
-        if (canCloseRoundPanel(context.ui.panel.current(), PANEL, view.sessionID, stillPending)) context.ui.panel.close()
-        if (!stillPending) showInline(view.sessionID, false)
-        return []
-      } catch (error) {
-        return [error instanceof Error ? error.message : String(error)]
-      }
+      const problems = await submitRound({
+        submit: () => rpc.submit({ roundID: view.roundID, answers, final: true }, { location: entry.location }) as Promise<Outcome>,
+        deliver: () =>
+          rpc.deliver(
+            {
+              sessionID: view.sessionID,
+              roundID: view.roundID,
+              number: view.number,
+              questions: [...view.questions],
+              answers,
+              deliveryID: deliveryIDs.get(view.roundID) ?? deliveryIDs.set(view.roundID, crypto.randomUUID()).get(view.roundID),
+            },
+            { location: entry.location },
+          ) as Promise<Outcome>,
+        choose: async () =>
+          (await context.ui.dialog.confirm({
+            title: view.undelivered === undefined ? "This round is gone" : "Your answers did not reach the agent",
+            message:
+              view.undelivered === undefined
+                ? "The server lost this round. You can still send your answers to the agent as a message."
+                : "Sending them as a message failed. You can try again, or dismiss them.",
+            label: { confirm: "Send these answers as a message", cancel: "Dismiss" },
+          })) === true,
+        dismiss: async () => {
+          await rpc.cancel({ roundID: view.roundID, reason: "dismissed" }, { location: entry.location }).catch(() => {})
+        },
+        notify: (message, variant) => context.ui.toast.show({ message, ...(variant ? { variant } : {}), duration: 2000 }),
+        settle: async () => {
+          lost = new Set([...lost].filter((id) => id !== view.roundID))
+          await refresh(entry.location)
+          if (disposed) return
+          const stillPending = forSession(view.sessionID) !== undefined
+          if (canCloseRoundPanel(context.ui.panel.current(), PANEL, view.sessionID, stillPending)) context.ui.panel.close()
+          if (!stillPending) showInline(view.sessionID, false)
+        },
+      })
+      return disposed ? [] : problems
     }
 
     const dismiss = async (view: RoundView) => {
@@ -286,6 +336,7 @@ export default Plugin.define({
       if (disposed || !confirmed) return
       for (const callID of view.callIDs ?? []) dismissing.add(callID)
       await rpc.cancel({ roundID: view.roundID, reason: "user_closed" }, { location: entry.location }).catch(() => {})
+      lost = new Set([...lost].filter((id) => id !== view.roundID))
       await refresh(entry.location)
       if (disposed) return
       const stillPending = forSession(view.sessionID) !== undefined
