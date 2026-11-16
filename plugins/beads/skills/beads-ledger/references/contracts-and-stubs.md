@@ -142,9 +142,9 @@ S's id exists only after the create, so write the stub markers when T's work sta
 
 1. Check that edge 1 exists and that `bd show C` reports `closed`. If C is open, T cannot start.
    Work on C or on other ready work.
-2. Build T against a stub, for example a mock or a fixture-backed fake. The stub uses C's shared types and passes C's
-   conformance runner. Wire the stub into the runner in T's own tests. A stub
-   that has not passed the runner is not conforming.
+2. Build T against a stub. The code-level rules for writing and testing it
+   (shared types, conformance runner) are in the `quality-code-design` and
+   `quality-testing` skills.
 3. Mark every stub with a greppable marker that names S:
    `// STUB(<S-id>): what this fakes`. Use `#` in Python, TOML and YAML.
    A real marker holds a bead id, so `git grep -E 'STUB\([A-Za-z0-9._-]+\)'`
@@ -194,10 +194,8 @@ needs more, C had a gap. Fix C with a fixture that captures the gap.
 ## Rules
 
 - **Stub only against a closed contract bead (edge 1).** With no contract, write C first.
-- **A stub passes the contract's conformance runner and uses its shared types.**
-  Hand-written local copies of contract types are not allowed.
-- **Never stub across a recorded decision.** Do not swap in a different library
-  or engine "temporarily".
+- **Code-level stub rules live in the quality skills.** See `quality-code-policy`
+  (when to stub, never across a recorded decision) and `quality-code-design`.
 - **Each marker names exactly one swap bead.** One swap bead covers one or more markers.
 - **Point edge 3 at the bead that delivers what S needs.** When S needs one
   specific change, point edge 3 at that change's bead, not at a broad epic.
