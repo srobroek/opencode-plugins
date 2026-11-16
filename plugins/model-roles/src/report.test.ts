@@ -213,6 +213,11 @@ describe("arm rows", () => {
 })
 
 describe("arm rows and failover", () => {
+  test("a run a resume reroute moved off its arm is not credited to the arm", () => {
+    const report = summarizeUsage([rec({ arm: "p/m#high" }), rec({ arm: "p/m#high", leftArm: true })], NOW)
+    expect(report.tiers[0]?.arms?.map((a) => [a.arm, a.n])).toEqual([["p/m#high", 1]])
+  })
+
   test("a run a failover moved off its arm is not credited to the arm", () => {
     const report = summarizeUsage([rec({ arm: "p/m#high" }), rec({ arm: "p/m#high", failedOver: true }), rec({ arm: "p/m#low", failedOver: true })], NOW)
     const cheap = report.tiers[0]

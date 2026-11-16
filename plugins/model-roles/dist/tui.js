@@ -81,6 +81,7 @@ function onSignals(ledger, childID, signals) {
   });
 }
 var onFailover = (ledger, childID) => update(ledger, childID, (r) => r.failedOver ? r : { ...r, failedOver: true });
+var onLeftArm = (ledger, childID) => update(ledger, childID, (r) => r.arm === undefined || r.leftArm ? r : { ...r, leftArm: true });
 var onExploration = (ledger, childID, facts) => update(ledger, childID, (r) => r.arm !== undefined ? r : { ...r, policy: facts.policy, eligible: [...facts.eligible], arm: facts.arm, p: facts.p });
 function prune(ledger, now, limits = { maxEntries: LEDGER_MAX_ENTRIES, maxAgeMs: LEDGER_MAX_AGE_MS }) {
   const kept = Object.entries(ledger).filter(([, r]) => now - r.at <= limits.maxAgeMs).sort((a, b) => b[1].at - a[1].at).slice(0, limits.maxEntries);
@@ -351,6 +352,7 @@ function createLedgerStore(storage, options = {}) {
     end: (id, outcome, at) => change(id, (l, i) => onEnd(l, i, outcome, at), "end"),
     signals: (id, signals) => change(id, (l, i) => onSignals(l, i, signals), "debounce"),
     failover: (id) => change(id, onFailover, "now"),
+    leftArm: (id) => change(id, onLeftArm, "now"),
     exploration: (id, facts) => change(id, (l, i) => onExploration(l, i, facts), "now"),
     flush,
     async dispose(timeoutMs = disposeTimeoutMs) {
@@ -482,7 +484,7 @@ var byName = (a, b) => a < b ? -1 : a > b ? 1 : 0;
 function armUsage(records) {
   const byArm = new Map;
   for (const r of records)
-    if (r.arm !== undefined && r.failedOver !== true)
+    if (r.arm !== undefined && r.failedOver !== true && r.leftArm !== true)
       byArm.set(r.arm, [...byArm.get(r.arm) ?? [], r]);
   return [...byArm.entries()].map(([arm, rs]) => ({ arm, ...stats(rs) })).sort((a, b) => b.n - a.n || byName(a.arm, b.arm));
 }

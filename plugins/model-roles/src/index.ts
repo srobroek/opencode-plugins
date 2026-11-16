@@ -1560,6 +1560,7 @@ export default Plugin.define({
         if (refusal !== undefined) throw new Error(refusal)
         event.input = stripped
         await writeSnapshot(childID, { model: modelLabel(explicitModel), configRevision: revision, at: Date.now() })
+        await outcomes.leftArm(childID)
         await forgetChildRole(childID)
         await recordReceipt({ at: Date.now(), agent, source: "agent", model: modelLabel(explicitModel), rule: "explicit-model", fallbacks: [], warnings: [] })
         return true
@@ -1573,6 +1574,7 @@ export default Plugin.define({
           const tuned = await withAutoEffort(plan.input, plan.role, plan.model).catch(() => ({ input: plan.input as Record<string, unknown>, model: plan.model as ModelRef }) as Tuned)
           event.input = { ...tuned.input, sessionID: childID }
           await writeSnapshot(childID, { model: modelLabel(tuned.model), tier: plan.role, configRevision: revision, at: Date.now() })
+          await outcomes.leftArm(childID)
           await recordChildRole(childID, plan.role)
           await recordReceipt(tierReceipt(agent, asked, tuned))
           return true
@@ -1658,6 +1660,7 @@ export default Plugin.define({
         })
         if (outcome !== "switched") throw new Error(`This resume would run on ${modelLabel(model)}, which the guard refuses, and switching the child to ${modelLabel(to)} did not complete (${outcome}).`)
         if (isRecord(event.input)) event.input = { ...event.input, model: modelLabel(to) }
+        await outcomes.leftArm(childID)
         await recordReceipt({
           at: Date.now(),
           agent,

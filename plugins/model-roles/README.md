@@ -526,7 +526,7 @@ draw is logged too; without it the propensities cannot be corrected for. The mod
 snapshot keeps the same facts, so a resume stays on the arm and does not redraw. The
 receipt keeps its rule and adds `exploring arm <model#variant>` when the arm is not the
 control. `model_roles_check` shows `exploration: on for <agents>, ε=<x>`, and the usage
-report adds a row per arm under a tier that has any. A child that a failover or a context-overflow switch moved to another model left its arm: it keeps its `arm` facts and `failedOver`, but the arm rows do not count it.
+report adds a row per arm under a tier that has any. A child that a failover, a context-overflow switch or a resume reroute (an explicit `model` or `tier`, or a guard switch) moved to another model left its arm: it keeps its `arm` facts and `failedOver`, but the arm rows do not count it (the ledger marks a reroute `leftArm`).
 
 ## Subagent model guard
 

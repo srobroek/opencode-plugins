@@ -3590,6 +3590,56 @@ describe("exploration inside a tier", () => {
     }
   })
 
+  test("a resume reroute ends the arm: the ledger keeps the facts and marks leftArm, for a model, a tier and a guard switch", async () => {
+    const reroutes: Array<[string, Record<string, unknown>, Record<string, unknown>]> = [
+      ["an explicit model", { model: label("low") }, {}],
+      ["an explicit tier", { tier: "task" }, {}],
+      ["a guard switch", {}, { guard: { expensive: [haikuLabel] } }],
+    ]
+    for (const [name, change, extra] of reroutes) {
+      let kept = new Map<string, unknown>()
+      // The last alternative is the next candidate, haiku.
+      await withHost(on, 0.0999, async (host) => {
+        await spawnTier(host)
+        await born(host, { providerID: "anthropic", id: "claude-haiku" })
+        expect(host.storage.get("outcome:c"), name).toMatchObject({ arm: haikuLabel })
+        expect(host.storage.get("outcome:c"), name).not.toHaveProperty("leftArm")
+        kept = new Map(host.storage)
+      })
+      await withHost(
+        on,
+        0.5,
+        async (host) => {
+          await host.spawn("subagent", { agent: "plain", prompt: "again", sessionID: "c", ...change }, "build", "r", "call-2")
+          await settle()
+          expect(host.storage.get("outcome:c"), name).toMatchObject({ policy: "explore-v1", arm: haikuLabel, p: 0.1 / 3, leftArm: true, resumes: 1 })
+        },
+        extra,
+        kept,
+      )
+    }
+  })
+
+  test("a resume that keeps the child's model leaves it on its arm", async () => {
+    let kept = new Map<string, unknown>()
+    await withHost(on, 0, async (host) => {
+      await spawnTier(host)
+      await born(host, ref("high"))
+      kept = new Map(host.storage)
+    })
+    await withHost(
+      on,
+      0.5,
+      async (host) => {
+        await host.spawn("subagent", { agent: "plain", prompt: "again", sessionID: "c" }, "build", "r", "call-2")
+        await settle()
+        expect(host.storage.get("outcome:c")).not.toHaveProperty("leftArm")
+      },
+      {},
+      kept,
+    )
+  })
+
   test("a resume after a reload goes through the stored snapshot and keeps the arm", async () => {
     let kept = new Map<string, unknown>()
     await withHost(on, 0, async (host) => {
