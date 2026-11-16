@@ -41,6 +41,12 @@ Checked 2026-11-16.
 - **chai**: wins when a Mocha suite or existing chai code is in place; costs a second assertion style and ESM-only loading.
 - **node:assert**: wins under node:test or in a dependency-free library; costs no asymmetric matchers or rich diffs comparable to `expect`.
 
+### component
+
+- **jsdom**: wins on speed and no browser install when layout and CSS do not matter; costs no layout, and some browser APIs are missing.
+- **happy-dom**: wins on the fastest startup for the same cases; costs more behavior gaps against real browsers than jsdom.
+- **@storybook/addon-vitest**: wins when stories already exist and double as tests; costs Storybook in the toolchain.
+
 ### mutation
 
 - **@hughescr/stryker-bun-runner**: wins when Bun is the runner and per-test coverage keeps mutant runs fast; costs a single maintainer, serial test runs, and a `mock.module()` blind spot.
