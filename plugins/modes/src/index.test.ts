@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test"
+import { readFileSync } from "node:fs"
 import { homedir } from "node:os"
+import { join } from "node:path"
 import { agentPaths, permissionEffect, readAgentFile } from "@srobroek/opencode-lib/agent-files"
 import { MODEL_TIERS } from "@srobroek/opencode-lib/model-roles"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
@@ -91,6 +93,16 @@ describe("shipped agents", () => {
   ])("concept may load the %s skill, and not an unrelated one", (skill) => {
     expect(effect("concept", "skill", skill)).toBe("allow")
     expect(effect("concept", "skill", "dep-update")).toBe("deny")
+  })
+  test.each(["frontend-slides", "web-asset-generator", "design-evidence", "accessibility-audit", "accessibility"])(
+    "concept may load the %s skill",
+    (skill) => expect(effect("concept", "skill", skill)).toBe("allow"),
+  )
+  test("concept may load every skill that design-guide routes to", () => {
+    const guide = readFileSync(join(import.meta.dir, "../../design/skills/design-guide/SKILL.md"), "utf8")
+    const routed = [...guide.matchAll(/\|[^|]*\|\s*`([\w-]+)`\s*\|/g)].map((match) => match[1] as string)
+    expect(routed.length).toBeGreaterThan(10)
+    for (const skill of routed) expect({ skill, effect: effect("concept", "skill", skill) }).toEqual({ skill, effect: "allow" })
   })
   test("concept may drive a browser, and every curl asks", () => {
     expect(effect("concept", "browser")).toBe("allow")

@@ -105,6 +105,36 @@ permissions:
     resource: "wireloom"
     effect: allow
   - action: skill
+    resource: "design-md"
+    effect: allow
+  - action: skill
+    resource: "design-system-audit"
+    effect: allow
+  - action: skill
+    resource: "motion-design"
+    effect: allow
+  - action: skill
+    resource: "ui-microcopy"
+    effect: allow
+  - action: skill
+    resource: "accessibility-audit"
+    effect: allow
+  - action: skill
+    resource: "accessibility"
+    effect: allow
+  - action: skill
+    resource: "design-no-slop"
+    effect: allow
+  - action: skill
+    resource: "design-evidence"
+    effect: allow
+  - action: skill
+    resource: "design-token-discipline"
+    effect: allow
+  - action: skill
+    resource: "design-component-truth"
+    effect: allow
+  - action: skill
     resource: "design-upstream-preflight"
     effect: allow
   - action: skill
@@ -191,7 +221,7 @@ Each round ends with a `question`. With the parley plugin attached, use `tools.p
 
 ## Wireframes and prototypes
 
-- `design-guide` for design direction; `design-prototype` routes wireframe, mockup and prototype requests.
+- `design-guide` for design direction; it routes to the other design skills, all of which you may load. `design-prototype` routes wireframe, mockup and prototype requests. Use `design-evidence` for any claim about a rendered UI. These skills guide critique and options; you still edit only the paths above.
 - `wireloom` for inline SVG wireframes in Markdown; always available.
 - The `wire-dsl_*` tools, when that server is configured.
 - `prototype-logic` for state models.
