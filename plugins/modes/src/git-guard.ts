@@ -51,6 +51,39 @@ const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/
 /** Options that run a command or write to a path chosen by the caller. */
 const RISKY_OPTION = /^--(output|upload-pack|receive-pack|exec|open-files-in-pager|ext-diff|textconv)(=|$)/
 const MENTIONS_GIT = /git/i
+/** A command that is worth parsing: it mentions git or has a word that could expand into it. */
+const WORTH_PARSING = /git|[{*?[$`]/i
+const KEYWORDS = new Set(["if", "then", "else", "elif", "while", "until", "do", "!", "{", "(", "coproc"])
+const INTERPRETERS = /^(python[0-9.]*|node|nodejs|perl|ruby|php|lua|awk|gawk|mawk|osascript|tclsh|Rscript)$/
+const INLINE_CODE_RUNNERS = /^(bun|deno)$/
+const unescape = (word: string) => word.replace(/\\(.)/gs, "$1")
+const escapeRegex = (text: string) => text.replace(/[.+^${}()|[\]\\*?]/g, "\\$&")
+
+/** A regular expression for the strings a glob or brace word can expand to. */
+function wordPattern(word: string): RegExp {
+  let out = ""
+  for (let i = 0; i < word.length; i++) {
+    const c = word[i] as string
+    if (c === "*") out += ".*"
+    else if (c === "?") out += "."
+    else if (c === "[" && word.indexOf("]", i + 1) > 0) {
+      const end = word.indexOf("]", i + 1)
+      out += word.slice(i, end + 1)
+      i = end
+    } else if (c === "{" && word.indexOf("}", i + 1) > 0) {
+      const end = word.indexOf("}", i + 1)
+      out += `(?:${word.slice(i + 1, end).split(",").map(escapeRegex).join("|")})`
+      i = end
+    } else out += escapeRegex(c)
+  }
+  return new RegExp(`^${out}$`)
+}
+
+/** Whether a command word with a glob or brace could name the git executable. */
+function couldBeGit(word: string): boolean {
+  const pattern = wordPattern(word)
+  return ["git", "./git", "/usr/bin/git", "/usr/local/bin/git", "/opt/homebrew/bin/git", "/bin/git"].some((name) => pattern.test(name))
+}
 
 const basename = (word: string) => word.replace(/^\\+/, "").split("/").pop() ?? word
 /** Whether `arg` is `--full` or an abbreviation of it git would accept (three characters or more). */
@@ -152,61 +185,83 @@ function runnerCommand(exe: string, args: readonly string[]): string[] {
   return args.slice(i)
 }
 
-function checkWords(input: readonly string[], agent: string, policy: Policy, depth: number): string | undefined {
-  if (depth > 6) return "the command nests too deeply to check its git use"
+/** The command a simple command runs: reserved words, wrappers, assignments and backslash escapes dropped. */
+function realCommand(input: readonly string[]): string[] {
+  let current = input.map(unescape)
+  for (let round = 0; round < 6; round++) {
+    let start = 0
+    while (start < current.length && KEYWORDS.has(current[start] as string)) start++
+    const next = commandWords(current.slice(start)).argv
+    if (start === 0 && next.length === current.length) return next
+    current = next
+  }
+  return current
+}
+
+type Ctx = { agent: string; policy: Policy; mentions: boolean; depth: number }
+const deeper = (ctx: Ctx): Ctx => ({ ...ctx, depth: ctx.depth + 1 })
+
+function checkWords(input: readonly string[], ctx: Ctx): string | undefined {
+  const { agent, policy, mentions } = ctx
+  if (ctx.depth > 6) return "the command nests too deeply to check its git use"
   const dangerous = input.find((word) => DANGEROUS_ENV.test(word))
   if (dangerous !== undefined) return `${dangerous.split("=")[0]} can make git run a command or read other config, which is not allowed for the ${agent} agent`
-  const { argv } = commandWords(input)
+  const argv = realCommand(input)
   const first = argv[0]
   if (first === undefined) return undefined
   const exe = basename(first)
   const args = argv.slice(1)
-  if (/^[$`]/.test(first) || first.includes("$(")) return "a variable or substitution in command position cannot be checked"
-  if (exe === "git") {
-    return checkGit(args, agent, policy)
-  }
+  if (/[$`]/.test(first) && mentions) return "a variable or substitution in command position cannot be checked"
+  if (/[*?[{]/.test(first) && (mentions || couldBeGit(first))) return "a glob or brace in command position could name git, so it cannot be checked"
+  if (exe === "git") return checkGit(args, agent, policy)
+  if (
+    (INTERPRETERS.test(exe) || (INLINE_CODE_RUNNERS.test(exe) && args.some((arg) => ["-e", "--eval", "-p", "--print"].includes(arg)))) &&
+    args.some((arg) => MENTIONS_GIT.test(arg))
+  )
+    return "an interpreter running code that mentions git cannot be checked"
   if (SHELLS.has(exe)) {
     const flag = args.findIndex((arg) => /^-[a-zA-Z]*c[a-zA-Z]*$/.test(arg))
     const payload = flag >= 0 ? args[flag + 1] : undefined
-    if (payload === undefined) return `a shell reading its script from stdin or a file cannot be checked`
-    return checkCommand(payload, agent, policy, depth + 1)
+    if (payload === undefined) return "a shell reading its script from stdin or a file cannot be checked"
+    return checkCommand(payload, deeper(ctx))
   }
-  if (exe === "eval") return checkCommand(args.join(" "), agent, policy, depth + 1)
-  if (RUNNERS.has(exe)) return checkWords(runnerCommand(exe, args), agent, policy, depth + 1)
+  if (exe === "eval") return checkCommand(args.join(" "), deeper(ctx))
+  if (RUNNERS.has(exe)) return checkWords(runnerCommand(exe, args), deeper(ctx))
   if (exe === "find") {
     for (let i = 0; i < args.length; i++) {
       if (!["-exec", "-execdir", "-ok", "-okdir"].includes(args[i] as string)) continue
       const end = args.findIndex((arg, j) => j > i && (arg === ";" || arg === "+" || arg === "\\;"))
-      const reason = checkWords(args.slice(i + 1, end < 0 ? undefined : end), agent, policy, depth + 1)
+      const reason = checkWords(args.slice(i + 1, end < 0 ? undefined : end), deeper(ctx))
       if (reason !== undefined) return reason
     }
   }
   return undefined
 }
 
-function checkParsed(parsed: ParsedCommand, agent: string, policy: Policy, depth: number): string | undefined {
+function checkParsed(parsed: ParsedCommand, ctx: Ctx): string | undefined {
   for (const position of parsed.commands as CommandPosition[]) {
-    const reason = checkWords(position.argv, agent, policy, depth)
+    const reason = checkWords(position.argv, ctx)
     if (reason !== undefined) return reason
   }
   for (const child of parsed.nested) {
-    const reason = checkParsed(child, agent, policy, depth + 1)
+    const reason = checkParsed(child, deeper(ctx))
     if (reason !== undefined) return reason
   }
   return undefined
 }
 
-function checkCommand(command: string, agent: string, policy: Policy, depth: number): string | undefined {
-  if (!MENTIONS_GIT.test(command.replace(/['"\\]/g, ""))) return undefined
+function checkCommand(command: string, ctx: Ctx): string | undefined {
+  const text = unescape(command.replace(/['"]/g, ""))
+  if (!WORTH_PARSING.test(text)) return undefined
   const parsed = parse(command)
-  if (parsed.unknown) return "the command could not be parsed, so its git use cannot be checked"
-  return checkParsed(parsed, agent, policy, depth)
+  if (parsed.unknown) return MENTIONS_GIT.test(text) || ctx.mentions ? "the command could not be parsed, so its git use cannot be checked" : undefined
+  return checkParsed(parsed, { ...ctx, mentions: ctx.mentions || MENTIONS_GIT.test(text) })
 }
 
 /** Why `command` is refused for `agent`, or undefined when it may run. */
 export function forbiddenGit(command: string, agent: string): string | undefined {
   const policy = POLICIES[agent]
-  return policy === undefined ? undefined : checkCommand(command, agent, policy, 0)
+  return policy === undefined ? undefined : checkCommand(command, { agent, policy, mentions: false, depth: 0 })
 }
 
 /**

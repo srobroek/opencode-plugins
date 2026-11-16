@@ -997,6 +997,37 @@ var SAFE_CONFIG = /^(core\.(quotepath|autocrlf|whitespace|abbrev|precomposeunico
 var DANGEROUS_ENV = /^(GIT_(CONFIG[A-Z_0-9]*|SSH|SSH_COMMAND|ASKPASS|EXTERNAL_DIFF|PAGER|EDITOR|SEQUENCE_EDITOR|EXEC_PATH|PROXY_COMMAND|DIR|WORK_TREE|INDEX_FILE|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES|COMMON_DIR|TEMPLATE_DIR)|SSH_ASKPASS|EDITOR|VISUAL|PAGER)=/;
 var RISKY_OPTION = /^--(output|upload-pack|receive-pack|exec|open-files-in-pager|ext-diff|textconv)(=|$)/;
 var MENTIONS_GIT = /git/i;
+var WORTH_PARSING = /git|[{*?[$`]/i;
+var KEYWORDS = new Set(["if", "then", "else", "elif", "while", "until", "do", "!", "{", "(", "coproc"]);
+var INTERPRETERS = /^(python[0-9.]*|node|nodejs|perl|ruby|php|lua|awk|gawk|mawk|osascript|tclsh|Rscript)$/;
+var INLINE_CODE_RUNNERS = /^(bun|deno)$/;
+var unescape = (word) => word.replace(/\\(.)/gs, "$1");
+var escapeRegex = (text) => text.replace(/[.+^${}()|[\]\\*?]/g, "\\$&");
+function wordPattern(word) {
+  let out = "";
+  for (let i = 0;i < word.length; i++) {
+    const c = word[i];
+    if (c === "*")
+      out += ".*";
+    else if (c === "?")
+      out += ".";
+    else if (c === "[" && word.indexOf("]", i + 1) > 0) {
+      const end = word.indexOf("]", i + 1);
+      out += word.slice(i, end + 1);
+      i = end;
+    } else if (c === "{" && word.indexOf("}", i + 1) > 0) {
+      const end = word.indexOf("}", i + 1);
+      out += `(?:${word.slice(i + 1, end).split(",").map(escapeRegex).join("|")})`;
+      i = end;
+    } else
+      out += escapeRegex(c);
+  }
+  return new RegExp(`^${out}$`);
+}
+function couldBeGit(word) {
+  const pattern = wordPattern(word);
+  return ["git", "./git", "/usr/bin/git", "/usr/local/bin/git", "/opt/homebrew/bin/git", "/bin/git"].some((name) => pattern.test(name));
+}
 var basename2 = (word) => word.replace(/^\\+/, "").split("/").pop() ?? word;
 var longOption = (arg, full) => {
   const name = arg.split("=")[0] ?? arg;
@@ -1088,70 +1119,89 @@ function runnerCommand(exe, args) {
     i += exe === "xargs" && XARGS_VALUED.has(args[i]) ? 2 : 1;
   return args.slice(i);
 }
-function checkWords(input, agent, policy, depth) {
-  if (depth > 6)
+function realCommand(input) {
+  let current = input.map(unescape);
+  for (let round = 0;round < 6; round++) {
+    let start = 0;
+    while (start < current.length && KEYWORDS.has(current[start]))
+      start++;
+    const next = commandWords(current.slice(start)).argv;
+    if (start === 0 && next.length === current.length)
+      return next;
+    current = next;
+  }
+  return current;
+}
+var deeper = (ctx) => ({ ...ctx, depth: ctx.depth + 1 });
+function checkWords(input, ctx) {
+  const { agent, policy, mentions } = ctx;
+  if (ctx.depth > 6)
     return "the command nests too deeply to check its git use";
   const dangerous = input.find((word) => DANGEROUS_ENV.test(word));
   if (dangerous !== undefined)
     return `${dangerous.split("=")[0]} can make git run a command or read other config, which is not allowed for the ${agent} agent`;
-  const { argv } = commandWords(input);
+  const argv = realCommand(input);
   const first = argv[0];
   if (first === undefined)
     return;
   const exe = basename2(first);
   const args = argv.slice(1);
-  if (/^[$`]/.test(first) || first.includes("$("))
+  if (/[$`]/.test(first) && mentions)
     return "a variable or substitution in command position cannot be checked";
-  if (exe === "git") {
+  if (/[*?[{]/.test(first) && (mentions || couldBeGit(first)))
+    return "a glob or brace in command position could name git, so it cannot be checked";
+  if (exe === "git")
     return checkGit(args, agent, policy);
-  }
+  if ((INTERPRETERS.test(exe) || INLINE_CODE_RUNNERS.test(exe) && args.some((arg) => ["-e", "--eval", "-p", "--print"].includes(arg))) && args.some((arg) => MENTIONS_GIT.test(arg)))
+    return "an interpreter running code that mentions git cannot be checked";
   if (SHELLS.has(exe)) {
     const flag = args.findIndex((arg) => /^-[a-zA-Z]*c[a-zA-Z]*$/.test(arg));
     const payload = flag >= 0 ? args[flag + 1] : undefined;
     if (payload === undefined)
-      return `a shell reading its script from stdin or a file cannot be checked`;
-    return checkCommand(payload, agent, policy, depth + 1);
+      return "a shell reading its script from stdin or a file cannot be checked";
+    return checkCommand(payload, deeper(ctx));
   }
   if (exe === "eval")
-    return checkCommand(args.join(" "), agent, policy, depth + 1);
+    return checkCommand(args.join(" "), deeper(ctx));
   if (RUNNERS.has(exe))
-    return checkWords(runnerCommand(exe, args), agent, policy, depth + 1);
+    return checkWords(runnerCommand(exe, args), deeper(ctx));
   if (exe === "find") {
     for (let i = 0;i < args.length; i++) {
       if (!["-exec", "-execdir", "-ok", "-okdir"].includes(args[i]))
         continue;
       const end = args.findIndex((arg, j) => j > i && (arg === ";" || arg === "+" || arg === "\\;"));
-      const reason = checkWords(args.slice(i + 1, end < 0 ? undefined : end), agent, policy, depth + 1);
+      const reason = checkWords(args.slice(i + 1, end < 0 ? undefined : end), deeper(ctx));
       if (reason !== undefined)
         return reason;
     }
   }
   return;
 }
-function checkParsed(parsed, agent, policy, depth) {
+function checkParsed(parsed, ctx) {
   for (const position of parsed.commands) {
-    const reason = checkWords(position.argv, agent, policy, depth);
+    const reason = checkWords(position.argv, ctx);
     if (reason !== undefined)
       return reason;
   }
   for (const child of parsed.nested) {
-    const reason = checkParsed(child, agent, policy, depth + 1);
+    const reason = checkParsed(child, deeper(ctx));
     if (reason !== undefined)
       return reason;
   }
   return;
 }
-function checkCommand(command, agent, policy, depth) {
-  if (!MENTIONS_GIT.test(command.replace(/['"\\]/g, "")))
+function checkCommand(command, ctx) {
+  const text = unescape(command.replace(/['"]/g, ""));
+  if (!WORTH_PARSING.test(text))
     return;
   const parsed = parse(command);
   if (parsed.unknown)
-    return "the command could not be parsed, so its git use cannot be checked";
-  return checkParsed(parsed, agent, policy, depth);
+    return MENTIONS_GIT.test(text) || ctx.mentions ? "the command could not be parsed, so its git use cannot be checked" : undefined;
+  return checkParsed(parsed, { ...ctx, mentions: ctx.mentions || MENTIONS_GIT.test(text) });
 }
 function forbiddenGit(command, agent) {
   const policy = POLICIES[agent];
-  return policy === undefined ? undefined : checkCommand(command, agent, policy, 0);
+  return policy === undefined ? undefined : checkCommand(command, { agent, policy, mentions: false, depth: 0 });
 }
 function guardShellCall(tool, input, agent) {
   if (POLICIES[agent] === undefined || !isShellTool(tool))
