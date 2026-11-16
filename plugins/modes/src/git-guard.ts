@@ -45,7 +45,8 @@ const VALUED_GLOBALS = new Set(["--git-dir", "--work-tree", "--namespace", "--su
 /** `-c` keys that cannot run a command or rewrite an alias. */
 const SAFE_CONFIG =
   /^(core\.(quotepath|autocrlf|whitespace|abbrev|precomposeunicode)|color\.[a-z.]+|diff\.(algorithm|renames|context|noprefix|mnemonicprefix)|log\.[a-z]+|user\.(name|email)|commit\.gpgsign|gc\.auto|advice\.[a-z]+|safe\.directory|protocol\.version|init\.defaultbranch)$/i
-const DANGEROUS_ENV = /^GIT_(SSH|SSH_COMMAND|EXTERNAL_DIFF|PAGER|EDITOR|ASKPASS|CONFIG[A-Z_]*|EXEC_PATH|PROXY_COMMAND|SEQUENCE_EDITOR)=/
+const DANGEROUS_ENV =
+  /^(GIT_(CONFIG[A-Z_0-9]*|SSH|SSH_COMMAND|ASKPASS|EXTERNAL_DIFF|PAGER|EDITOR|SEQUENCE_EDITOR|EXEC_PATH|PROXY_COMMAND|DIR|WORK_TREE|INDEX_FILE|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES|COMMON_DIR|TEMPLATE_DIR)|SSH_ASKPASS|EDITOR|VISUAL|PAGER)=/
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/
 /** Options that run a command or write to a path chosen by the caller. */
 const RISKY_OPTION = /^--(output|upload-pack|receive-pack|exec|open-files-in-pager|ext-diff|textconv)(=|$)/
@@ -80,6 +81,9 @@ function checkGit(args: readonly string[], agent: string, policy: Policy): strin
       return refuse("git --exec-path")
     } else if (BOOLEAN_GLOBALS.has(word)) {
       // no value
+    } else if (word === "--config-env" || word.startsWith("--config-env=")) {
+      const value = word === "--config-env" ? args[++i] : word.slice("--config-env=".length)
+      if (value === undefined || !SAFE_CONFIG.test(value.split("=")[0] ?? "")) return refuse(`git --config-env ${value ?? ""}`)
     } else if (VALUED_GLOBALS.has(word)) {
       if (args[++i] === undefined) return refuse(`git ${word} without a value`)
     } else if (VALUED_GLOBALS.has(word.split("=")[0] ?? "") && word.includes("=")) {
@@ -150,7 +154,8 @@ function runnerCommand(exe: string, args: readonly string[]): string[] {
 
 function checkWords(input: readonly string[], agent: string, policy: Policy, depth: number): string | undefined {
   if (depth > 6) return "the command nests too deeply to check its git use"
-  const assignments = input.filter((word) => ASSIGNMENT.test(word))
+  const dangerous = input.find((word) => DANGEROUS_ENV.test(word))
+  if (dangerous !== undefined) return `${dangerous.split("=")[0]} can make git run a command or read other config, which is not allowed for the ${agent} agent`
   const { argv } = commandWords(input)
   const first = argv[0]
   if (first === undefined) return undefined
@@ -158,7 +163,6 @@ function checkWords(input: readonly string[], agent: string, policy: Policy, dep
   const args = argv.slice(1)
   if (/^[$`]/.test(first) || first.includes("$(")) return "a variable or substitution in command position cannot be checked"
   if (exe === "git") {
-    if (assignments.some((word) => DANGEROUS_ENV.test(word))) return `git with ${assignments.find((word) => DANGEROUS_ENV.test(word))} is not allowed for the ${agent} agent`
     return checkGit(args, agent, policy)
   }
   if (SHELLS.has(exe)) {
