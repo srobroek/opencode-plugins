@@ -553,13 +553,16 @@ function tail(text, lines = 40) {
 `).slice(-lines).join(`
 `);
 }
+function isRunning(session) {
+  return session.busy !== undefined && (session.idle === undefined || session.busy > session.idle);
+}
 var WRITER_LIVENESS_NOTE = "subagent-worktree: could not check whether the worktree already has a live writer session; the spawn went ahead. List your background work first.";
 function decideWriterGuard(facts) {
   if (!facts.writer)
     return { kind: "allow" };
   if (facts.sessions === undefined)
     return { kind: "allow", warn: WRITER_LIVENESS_NOTE };
-  const live = facts.sessions.find((session) => session.parentID !== undefined && session.id !== facts.caller && session.outcome === undefined);
+  const live = facts.sessions.find((session) => session.parentID !== undefined && session.id !== facts.caller && !session.readOnly && isRunning(session));
   if (!live)
     return { kind: "allow" };
   return {
@@ -657,6 +660,18 @@ var directoryExists = async (path) => {
     throw error;
   }
 };
+var TIMED_OUT = Symbol("timed out");
+function toMillis(value) {
+  if (typeof value === "number")
+    return value;
+  if (value instanceof Date)
+    return value.getTime();
+  if (typeof value === "string") {
+    const parsed = Date.parse(value);
+    return Number.isNaN(parsed) ? undefined : parsed;
+  }
+  return;
+}
 var randomSuffix = () => crypto.randomUUID().slice(0, 6);
 var normalize = (path) => realpath(path).catch(() => resolve(path));
 function appendContent(content, note) {
@@ -739,24 +754,44 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
   const sessionsIn = async (projectID, directory) => {
     let timer;
     const timeout = new Promise((done) => {
-      timer = setTimeout(() => done(undefined), lookupMs);
+      timer = setTimeout(() => done(TIMED_OUT), lookupMs);
     });
+    const within = (work) => Promise.race([work.catch(() => TIMED_OUT), timeout]);
     try {
-      const page = await Promise.race([
-        ctx.session.list({ project: projectID, directory, archived: false, limit: 100 }).then((value) => value, () => {
+      const raws = [];
+      let query = { project: projectID, directory, archived: false, limit: 100 };
+      for (;; ) {
+        const page = await within(Promise.resolve(ctx.session.list(query)));
+        if (page === TIMED_OUT || !Array.isArray(page.data))
           return;
-        }),
-        timeout
-      ]);
-      if (!page || !Array.isArray(page.data))
-        return;
-      return page.data.flatMap((raw) => typeof raw.id === "string" ? [
-        {
+        raws.push(...page.data);
+        const next = page.cursor?.next;
+        if (!next)
+          break;
+        query = { cursor: next };
+      }
+      const sessions = [];
+      for (const raw of raws) {
+        if (typeof raw.id !== "string")
+          continue;
+        const time = raw.time ?? {};
+        const busy = toMillis(time.busy);
+        const idle = toMillis(time.idle);
+        const session = {
           id: raw.id,
           ...typeof raw.parentID === "string" ? { parentID: raw.parentID } : {},
-          ...typeof raw.outcome === "string" ? { outcome: raw.outcome } : {}
+          ...busy === undefined ? {} : { busy },
+          ...idle === undefined ? {} : { idle }
+        };
+        if (session.parentID !== undefined && isRunning(session)) {
+          const agent = typeof raw.agent === "string" ? await within(getAgent(raw.agent, directory)) : undefined;
+          if (typeof agent === "symbol")
+            return;
+          session.readOnly = rulesAreReadOnly(raw.permissions) || rulesAreReadOnly(agent?.permissions);
         }
-      ] : []);
+        sessions.push(session);
+      }
+      return sessions;
     } finally {
       clearTimeout(timer);
     }
@@ -804,7 +839,7 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
     });
     if (plan.kind === "refuse")
       throw new Error(`subagent-worktree: ${plan.reason}`);
-    if (plan.kind === "move" && start?.lookup.ok && agent && agent.mode !== "primary") {
+    if (plan.kind !== "isolate" && start?.lookup.ok && agent && agent.mode !== "primary") {
       const guard = decideWriterGuard({
         writer: !rulesAreReadOnly(agent.permissions),
         directory: start.lookup.worktree.directory,
@@ -1172,6 +1207,7 @@ export {
   findWorktree,
   formatLaneList,
   isConflict,
+  isRunning,
   isUnbornHead,
   isUncommittedOnly,
   laneKey,

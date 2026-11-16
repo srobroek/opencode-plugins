@@ -450,19 +450,25 @@ describe("isUnbornHead", () => {
 })
 
 describe("decideWriterGuard", () => {
-  const live = { id: "ses_live", parentID: "ses_parent" }
+  const live = { id: "ses_live", parentID: "ses_parent", busy: 2000 }
   const facts = { writer: true, directory: "/wt/a", caller: "ses_parent" }
 
-  test("refuses when a child session without an outcome is in the worktree", () => {
+  test("refuses when a child session is running", () => {
     const guard = decideWriterGuard({ ...facts, sessions: [live] })
     expect(guard).toEqual({ kind: "refuse", reason: expect.stringContaining("live writer session ses_live") })
   })
 
+  test("refuses a resumed child whose latest run started after its previous one ended", () => {
+    const guard = decideWriterGuard({ ...facts, sessions: [{ ...live, idle: 1000 }] })
+    expect(guard.kind).toBe("refuse")
+  })
+
   test.each([
-    ["a finished writer", [{ ...live, outcome: "succeeded" }]],
-    ["an interrupted writer", [{ ...live, outcome: "interrupted" }]],
-    ["a root session", [{ id: "ses_root" }]],
-    ["the caller itself", [{ id: "ses_parent", parentID: "ses_gp" }]],
+    ["a child idle after its last run", [{ ...live, busy: 1000, idle: 2000 }]],
+    ["a child that never ran", [{ id: "ses_new", parentID: "ses_parent" }]],
+    ["a read-only child", [{ ...live, readOnly: true }]],
+    ["a root session", [{ id: "ses_root", busy: 2000 }]],
+    ["the caller itself", [{ id: "ses_parent", parentID: "ses_gp", busy: 2000 }]],
     ["no sessions", []],
   ])("allows with %s", (_name, sessions) => {
     expect(decideWriterGuard({ ...facts, sessions })).toEqual({ kind: "allow" })

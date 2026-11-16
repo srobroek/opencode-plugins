@@ -508,8 +508,17 @@ export function tail(text: string, lines = 40): string {
   return clean.split("\n").slice(-lines).join("\n")
 }
 
-/** A session in the target worktree, as `session.list` reports it. `outcome` is set once a run has ended. */
-export type WriterSession = { id: string; parentID?: string; outcome?: string }
+/**
+ * A session in the target worktree, as `session.list` reports it. `busy` is the start of its
+ * latest execution and `idle` the end of its latest completed one, both in epoch milliseconds.
+ * `readOnly` is true when the session's agent cannot edit.
+ */
+export type WriterSession = { id: string; parentID?: string; busy?: number; idle?: number; readOnly?: boolean }
+
+/** Whether the latest execution started and has not ended: it began after the last completed one ended. */
+export function isRunning(session: Pick<WriterSession, "busy" | "idle">): boolean {
+  return session.busy !== undefined && (session.idle === undefined || session.busy > session.idle)
+}
 
 export type WriterGuard = { kind: "allow"; warn?: string } | { kind: "refuse"; reason: string }
 
@@ -518,7 +527,8 @@ export const WRITER_LIVENESS_NOTE =
 
 /**
  * Whether a new writer subagent may start in an explicitly named worktree. A live writer is a
- * child session in that directory that has no `outcome` yet. `sessions` is undefined when the
+ * child session in that directory whose latest execution is still running (an earlier `outcome`
+ * does not matter: a resumed session keeps it while it runs again). `sessions` is undefined when the
  * lookup failed or timed out; uncertainty allows the spawn and warns.
  */
 export function decideWriterGuard(facts: {
@@ -531,7 +541,8 @@ export function decideWriterGuard(facts: {
   if (!facts.writer) return { kind: "allow" }
   if (facts.sessions === undefined) return { kind: "allow", warn: WRITER_LIVENESS_NOTE }
   const live = facts.sessions.find(
-    (session) => session.parentID !== undefined && session.id !== facts.caller && session.outcome === undefined,
+    (session) =>
+      session.parentID !== undefined && session.id !== facts.caller && !session.readOnly && isRunning(session),
   )
   if (!live) return { kind: "allow" }
   return {

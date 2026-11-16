@@ -405,43 +405,90 @@ describe("worktree argument", () => {
   })
 
   describe("single writer per worktree", () => {
-    const writerIn = (setup: Setup, id: string, extra: Record<string, unknown> = {}) =>
-      setup.fake.sessions.set(id, { id, parentID: PARENT, projectID: "prj", location: { directory: OTHER }, ...extra })
+    const running = { busy: 2000 }
+    const writerIn = (setup: Setup, id: string, time: Record<string, number>, extra: Record<string, unknown> = {}, directory = OTHER) =>
+      setup.fake.sessions.set(id, { id, parentID: PARENT, projectID: "prj", location: { directory }, time, ...extra })
+    const sessionID = (event: { input: unknown }) => (event.input as { sessionID?: string }).sessionID
 
     test("refuses a second writer and names the live session", async () => {
       const setup = await start()
-      writerIn(setup, "ses_live")
+      writerIn(setup, "ses_live", running)
       await expect(spawn(setup, { agent: "pinned", worktree: "feat" })).rejects.toThrow(
         /ses_live.*Send that session a follow-up \(pass sessionID: "ses_live"\).*or stop it first/s,
       )
       expect(setup.fake.calls.some((entry) => entry.method === "session.create")).toBe(false)
     })
 
-    test("allows a writer when the earlier one finished", async () => {
+    test("refuses a resumed writer that still shows its earlier outcome", async () => {
       const setup = await start()
-      writerIn(setup, "ses_done", { outcome: "succeeded" })
-      const event = await spawn(setup, { agent: "pinned", worktree: "feat" })
-      expect((event.input as { sessionID?: string }).sessionID).toBe("ses_fake1")
+      writerIn(setup, "ses_resumed", { idle: 1000, busy: 2000 }, { outcome: "interrupted" })
+      await expect(spawn(setup, { agent: "pinned", worktree: "feat" })).rejects.toThrow(/live writer session ses_resumed/)
+    })
+
+    test("allows a writer when the earlier one is idle after its last run", async () => {
+      const setup = await start()
+      writerIn(setup, "ses_done", { busy: 1000, idle: 2000 }, { outcome: "succeeded" })
+      expect(sessionID(await spawn(setup, { agent: "pinned", worktree: "feat" }))).toBe("ses_fake1")
+    })
+
+    test("checks the caller's own worktree when it is named", async () => {
+      const setup = await start()
+      writerIn(setup, "ses_live", running, {}, REPO)
+      await expect(spawn(setup, { agent: "pinned", worktree: "main" })).rejects.toThrow(/live writer session ses_live/)
+    })
+
+    test("does not check for an agent that gets a fresh lane", async () => {
+      const setup = await start()
+      writerIn(setup, "ses_live", running)
+      await spawn(setup, { agent: "general", worktree: "feat" })
+      expect(setup.worktree.calls[0]?.method).toBe("create")
+      expect(setup.fake.calls.some((entry) => entry.method === "session.list")).toBe(false)
     })
 
     test("a read-only agent is unaffected by a live writer", async () => {
       const setup = await start()
-      writerIn(setup, "ses_live")
-      const event = await spawn(setup, { agent: "reviewer", worktree: "feat" })
-      expect((event.input as { sessionID?: string }).sessionID).toBe("ses_fake1")
+      writerIn(setup, "ses_live", running)
+      expect(sessionID(await spawn(setup, { agent: "reviewer", worktree: "feat" }))).toBe("ses_fake1")
+    })
+
+    test("a live read-only reviewer does not block a writer", async () => {
+      const setup = await start()
+      writerIn(setup, "ses_review", running, { agent: "reviewer" })
+      expect(sessionID(await spawn(setup, { agent: "pinned", worktree: "feat" }))).toBe("ses_fake1")
     })
 
     test("resuming the live session itself still works", async () => {
       const setup = await start()
-      writerIn(setup, "ses_live")
-      const event = await spawn(setup, { agent: "pinned", sessionID: "ses_live", worktree: "feat" })
-      expect((event.input as { sessionID?: string }).sessionID).toBe("ses_live")
+      writerIn(setup, "ses_live", running)
+      expect(sessionID(await spawn(setup, { agent: "pinned", sessionID: "ses_live", worktree: "feat" }))).toBe("ses_live")
+    })
+
+    test("finds a live writer on a later page", async () => {
+      const setup = await start()
+      for (let n = 0; n < 101; n++) writerIn(setup, `ses_old${n}`, { busy: 1000, idle: 2000, updated: 5000 })
+      writerIn(setup, "ses_late", { ...running, updated: 1 })
+      await expect(spawn(setup, { agent: "pinned", worktree: "feat" })).rejects.toThrow(/live writer session ses_late/)
     })
 
     test("allows the spawn and warns when the host cannot list sessions", async () => {
       const setup = await start()
-      Object.assign(setup.fake.context.session, { list: async () => { throw new Error("unavailable") } })
+      Object.assign(setup.fake.context.session, {
+        list: async () => {
+          throw new Error("unavailable")
+        },
+      })
       await spawn(setup, { agent: "pinned", worktree: "feat" })
+      const result = await setup.fake.fire.tool("execute.after", completed("ses_fake1"))
+      expect((result.result as { content: string }).content).toContain("could not check whether the worktree already has a live writer")
+    })
+
+    test("allows the spawn within the deadline and warns when the list never settles", async () => {
+      const setup = await start()
+      Object.assign(setup.fake.context.session, { list: () => new Promise(() => {}) })
+      const started = Date.now()
+      const event = await spawn(setup, { agent: "pinned", worktree: "feat" })
+      expect(Date.now() - started).toBeLessThan(1000)
+      expect(sessionID(event)).toBe("ses_fake1")
       const result = await setup.fake.fire.tool("execute.after", completed("ses_fake1"))
       expect((result.result as { content: string }).content).toContain("could not check whether the worktree already has a live writer")
     })

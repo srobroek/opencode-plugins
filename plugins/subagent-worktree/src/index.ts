@@ -15,6 +15,7 @@ import {
   findWorktree,
   formatLaneList,
   isConflict,
+  isRunning,
   LANE_PREFIX,
   type Lane,
   type LaneReport,
@@ -93,6 +94,19 @@ const directoryExists = async (path: string) => {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return false
     throw error
   }
+}
+
+const TIMED_OUT = Symbol("timed out")
+
+/** Epoch milliseconds from a number, Date or date string; undefined otherwise. */
+function toMillis(value: unknown): number | undefined {
+  if (typeof value === "number") return value
+  if (value instanceof Date) return value.getTime()
+  if (typeof value === "string") {
+    const parsed = Date.parse(value)
+    return Number.isNaN(parsed) ? undefined : parsed
+  }
+  return undefined
 }
 
 const randomSuffix = () => crypto.randomUUID().slice(0, 6)
@@ -202,32 +216,49 @@ export function createLanes(
     return { lookup: findWorktree(requested, path, entries), current }
   }
 
-  /** The open sessions whose directory is `directory`; undefined when the host cannot answer within the lookup time. */
+  /**
+   * The open sessions whose directory is `directory`, following pagination; undefined when the
+   * lookup fails or does not finish within the lookup time (an incomplete answer is unknown).
+   */
   const sessionsIn = async (projectID: string, directory: string): Promise<WriterSession[] | undefined> => {
     let timer: ReturnType<typeof setTimeout> | undefined
-    const timeout = new Promise<undefined>((done) => {
-      timer = setTimeout(() => done(undefined), lookupMs)
+    const timeout = new Promise<typeof TIMED_OUT>((done) => {
+      timer = setTimeout(() => done(TIMED_OUT), lookupMs)
     })
+    const within = <T>(work: Promise<T>) => Promise.race([work.catch(() => TIMED_OUT), timeout])
     try {
-      const page = await Promise.race([
-        ctx.session.list({ project: projectID, directory, archived: false, limit: 100 } as never).then(
-          (value) => value as unknown as { data?: Array<Record<string, unknown>> },
-          () => undefined,
-        ),
-        timeout,
-      ])
-      if (!page || !Array.isArray(page.data)) return undefined
-      return page.data.flatMap((raw) =>
-        typeof raw.id === "string"
-          ? [
-              {
-                id: raw.id,
-                ...(typeof raw.parentID === "string" ? { parentID: raw.parentID } : {}),
-                ...(typeof raw.outcome === "string" ? { outcome: raw.outcome } : {}),
-              },
-            ]
-          : [],
-      )
+      const raws: Array<Record<string, unknown>> = []
+      let query: Record<string, unknown> = { project: projectID, directory, archived: false, limit: 100 }
+      for (;;) {
+        const page = (await within(Promise.resolve(ctx.session.list(query as never)) as Promise<unknown>)) as
+          | { data?: unknown; cursor?: { next?: string } }
+          | typeof TIMED_OUT
+        if (page === TIMED_OUT || !Array.isArray(page.data)) return undefined
+        raws.push(...(page.data as Array<Record<string, unknown>>))
+        const next = page.cursor?.next
+        if (!next) break
+        query = { cursor: next }
+      }
+      const sessions: WriterSession[] = []
+      for (const raw of raws) {
+        if (typeof raw.id !== "string") continue
+        const time = (raw.time ?? {}) as Record<string, unknown>
+        const busy = toMillis(time.busy)
+        const idle = toMillis(time.idle)
+        const session: WriterSession = {
+          id: raw.id,
+          ...(typeof raw.parentID === "string" ? { parentID: raw.parentID } : {}),
+          ...(busy === undefined ? {} : { busy }),
+          ...(idle === undefined ? {} : { idle }),
+        }
+        if (session.parentID !== undefined && isRunning(session)) {
+          const agent = typeof raw.agent === "string" ? await within(getAgent(raw.agent, directory)) : undefined
+          if (typeof agent === "symbol") return undefined
+          session.readOnly = rulesAreReadOnly(raw.permissions) || rulesAreReadOnly(agent?.permissions)
+        }
+        sessions.push(session)
+      }
+      return sessions
     } finally {
       clearTimeout(timer)
     }
@@ -282,7 +313,7 @@ export function createLanes(
       trackedDirty: input.worktree === undefined && isolation.isolate ? await git.trackedDirty(parentDir) : false,
     })
     if (plan.kind === "refuse") throw new Error(`subagent-worktree: ${plan.reason}`)
-    if (plan.kind === "move" && start?.lookup.ok && agent && agent.mode !== "primary") {
+    if (plan.kind !== "isolate" && start?.lookup.ok && agent && agent.mode !== "primary") {
       const guard = decideWriterGuard({
         writer: !rulesAreReadOnly(agent.permissions),
         directory: start.lookup.worktree.directory,
