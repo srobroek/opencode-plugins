@@ -18,17 +18,18 @@ On every `shell` call (`tool.hook("execute.before")`), in this order, with one
 5. `bd update --status closed|done` is refused in favour of `bd close --reason`.
 6. `bd close` on a gate bead is refused (looked up with `bd show`).
 7. `bd unclaim` without `--if-assignee` is refused.
-8. Claims and creates without an actor are refused; other unattributed writes get
-   an advisory in the tool result.
+8. Writes without an actor get an advisory in the tool result, since the plugin
+   injects one unless you set `BEADS_ACTOR` or `BD_ACTOR` (see item 11).
 9. `gh pr create` without a `Bead:`, `Closes-Bead:` or `Bead-Id:` trailer is
    refused in a repository with a live ledger that you can write to.
 10. Each `bd` write to an embedded store is rewritten to run under
     `bd-embedded-write-runner`, which holds the store's write lock for exactly the
     life of the `bd` process. The lock files are shared with the omp plugin.
-11. Every `bd` shell call gets `export BEADS_ACTOR=...` prefixed unless the command
-    or the environment already chooses an actor: `opencode/<root>/<agent>/<session>`
-    in a subagent session, `opencode/<agent>/<session>` in a main session. The actor
-    gate only warns when no actor could be injected.
+11. When neither `BEADS_ACTOR` nor `BD_ACTOR` is set, every `bd` shell call gets
+    `export BEADS_ACTOR=...` prefixed: `opencode/<root>/<agent>/<session>` in a subagent
+    session, `opencode/<agent>/<session>` in a main session. An actor set in the
+    environment or on the command always wins. The actor gate only warns when no actor
+    could be injected.
 
 A refusal is thrown, so the model sees it as the tool error.
 
