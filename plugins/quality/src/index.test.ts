@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { type AgentPermission, permissionEffect } from "@srobroek/opencode-lib/agent-files"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
-import plugin, { DEFAULT_STANDARDS_SUBAGENTS, parseStandardsOptions, STANDARDS_TEXT, TESTING_TEXT, wantsStandards } from "./index.ts"
+import plugin, { DEFAULT_STANDARDS_SUBAGENTS, parseStandardsOptions, REPO_DOC_TEXT, STANDARDS_TEXT, TESTING_TEXT, wantsStandards } from "./index.ts"
 
 test("skips the challenger copy when plugin.list reports agent-reviewer", async () => {
   const fake = createFakeContext()
@@ -64,6 +64,7 @@ describe("engineering standards", () => {
     fake.fire.session(hook, { sessionID, agent, system: [] as Array<{ type: string; text: string }>, messages: [], tools: {} })
   const block = [
     { type: "text", text: STANDARDS_TEXT },
+    { type: "text", text: REPO_DOC_TEXT },
     { type: "text", text: TESTING_TEXT },
   ]
 
@@ -80,10 +81,14 @@ describe("engineering standards", () => {
     expect(fake.active()).toBe(0)
   })
 
-  test("coder and other subagents get nothing: coder carries the same part in its prompt", async () => {
+  test("security-reviewer, which carries only review-standards, gets the block; agents with coding-core and explore get nothing", async () => {
     const fake = createFakeContext({ sessions })
     await plugin.setup(fake.context)
+    expect((await fire(fake, "ses_coder", "security-reviewer")).system).toEqual(block)
+    // coder, the implementers and the two reviewers carry the same parts in their prompts, so they would get them twice.
+    for (const agent of ["code-reviewer", "pr-reviewer"]) expect((await fire(fake, "ses_coder", agent)).system).toEqual([])
     expect((await fire(fake, "ses_coder", "coder")).system).toEqual([])
+    expect((await fire(fake, "ses_coder", "implementer")).system).toEqual([])
     expect((await fire(fake, "ses_coder", "explore")).system).toEqual([])
     expect((await fire(fake, "ses_unknown", "build")).system).toEqual([])
   })
@@ -105,6 +110,11 @@ describe("engineering standards", () => {
     for (const phrase of ["lang-<language>-libraries", "toolchain-languages", "aws-guidance", "middleware", "Powertools", "OpenTelemetry", "departure", "STUB(<task-id>)"])
       expect(STANDARDS_TEXT).toContain(phrase)
     expect(readFileSync(join(import.meta.dir, "../../lib/src/coding-core.md"), "utf8")).toContain(STANDARDS_TEXT.split("\n\n")[1]?.split("\n")[0] ?? "missing")
+  })
+
+  test("the repo-doc block is the coding-core repo-doc part, short enough for every request", () => {
+    expect(REPO_DOC_TEXT.length).toBeLessThanOrEqual(1000)
+    for (const phrase of ["docs/engineering.md", "AGENTS.md", "same change", "stale"]) expect(REPO_DOC_TEXT).toContain(phrase)
   })
 
   test("the testing block is the coding-core testing part, short enough for every request", () => {

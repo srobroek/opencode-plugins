@@ -23,7 +23,7 @@ scripts/               small project scripts the hooks and tasks call
 docs/
   architecture.md      system shape, boundaries, flows
   stack.md             languages, package manager, frameworks, quality tools, with versions
-  engineering.md       local workflow, test layout, commit and release rules, env variable names
+  engineering.md       agent-readable stack and engineering doc: stack and toolchain versions, layout and dependency direction, standards and departures, build/test/lint, commit and release rules, env variable names
   operations.md        optional: hosting, secrets handling, monitoring, runbooks
   product.md           optional: user and domain behaviour not owned by a spec
   adr/                 optional: decisions, written when a durable decision is made

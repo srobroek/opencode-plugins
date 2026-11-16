@@ -13,7 +13,8 @@ Preferred files:
 - `docs/architecture.md` for system shape, boundaries, runtime topology, and important flows.
 - `docs/stack.md` for languages, package managers, frameworks, infrastructure, data stores, and quality tools.
 - For durable architectural decisions, follow the `quality-code-design` skill's `references/lifecycle.md` (Durable decisions), which says when to record one and where.
-- `docs/engineering.md` for repo conventions, local workflows, and development constraints.
+- `docs/engineering.md` for the agent-readable engineering doc, linked from `AGENTS.md` and read before work in the repo. Sections: stack (languages, toolchain versions, frameworks, key libraries and why; link `docs/stack.md` instead of copying it when that file exists), layout and dependency direction, standards and approved departures with reasons, and how to build, test and lint, plus repo conventions and local workflows.
+  - Keep it current: a change that alters the stack (a new or removed dependency, a toolchain bump, a new crate or module, a new tool or a departure) updates it in the same PR, and a reviewer treats a stale doc as a finding. The `quality-code-policy` skill states the rule.
 - `docs/operations.md` for deployment, hosting, secrets, monitoring, and runbooks.
 - `docs/product.md` for user, domain, and product behavior that is not already owned by a spec.
 

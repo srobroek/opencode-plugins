@@ -19,14 +19,18 @@ to it.
 
 ## Engineering standards in the system prompt
 
-Every primary session and every `general` subagent gets two static blocks at the end of
-its system prompt, from the shared coding core (`plugins/lib/src/coding-core.md`):
+Every primary session, and the child sessions of `general`, `mechanic`, `code-reviewer`,
+`pr-reviewer` and `security-reviewer`, get three static blocks at the end of its system
+prompt, from the shared coding core (`plugins/lib/src/coding-core.md`):
 
 - `# Engineering standards`, the `standards` part. It tells the agent to research current
   best practice and compare its plan with the `lang-<language>-libraries`, `toolchain-api`,
   `aws-guidance` and `toolchain-languages` standards before it writes its own code, to
   report each departure, to put cross-cutting concerns in middleware, to keep Lambda
   handlers thin on Powertools for AWS Lambda, and to use OpenTelemetry.
+- `# Repository engineering doc`, the `repo-doc` part. It tells the agent to read
+  `docs/engineering.md` (or the path `AGENTS.md` names) first, to update it in the same
+  change as any stack change, and to report a missing or stale doc.
 - `# Testing standards`, the `testing` part. It tells the agent to list the behaviors a
   change adds, changes or removes, to test each behavior once through the public
   interface, to give each test a distinct risk, to change and delete tests with the code,
@@ -40,7 +44,7 @@ parts in their composed prompts, so they are not given them twice. Each block is
 | Option | Default | Effect |
 | --- | --- | --- |
 | `standards` | `true` | `false` turns both blocks off |
-| `standardsSubagents` | `["general"]` | Subagent ids whose child sessions also get the blocks; primary sessions always do |
+| `standardsSubagents` | `["general", "mechanic", "code-reviewer", "pr-reviewer", "security-reviewer"]` | Subagent ids whose child sessions also get the blocks; primary sessions always do |
 
 ```jsonc
 {

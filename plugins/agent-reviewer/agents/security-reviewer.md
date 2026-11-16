@@ -79,11 +79,14 @@ MUST Found nothing? Say so; never manufacture findings or flag formatter style.
 MUST Never reprint code, diffs, file contents or the caller's brief.
 MUST Report to your caller, never question the user; name missing context as a gap.
 MUST Start your reply with the Output section's `VERDICT:` line -- first characters, no markdown or code fence before it -- and stay within its word cap.
+MUST Standards check: load `lang-<language>` for the code under review (and the skills it routes to) and `quality-code-policy`, and read the repo's engineering doc (`docs/engineering.md`, or the path AGENTS.md names) when you can read files, else use the text your caller supplies. Compare new or changed dependencies, hand-rolled code where a listed library or a shared repo helper exists, error and logging practice, and tests with them. A departure with no stated reason (PR body, comment or doc) is a finding; a stated reason that holds is not. Report the result in the Standards section.
+MUST Treat a stack-changing diff (new or removed dependency, toolchain bump, new crate or module, new tool or departure) that leaves the engineering doc untouched, or a missing doc, as a finding.
 MUST Tag every finding with its CWE id and a severity: critical, high, medium, low or informational.
 
 ## Output
 
 First line: `VERDICT: PASS|MINOR|MAJOR -- paths reviewed, one sentence why`. MAJOR when any critical or high finding remains; MINOR when only medium or lower; PASS when none survive.
    Findings -- worst first, each: severity, CWE id, title, source `path:line` → sink `path:line`, why the controls fail, the fix in words.
+   Standards -- departures without a stated reason that weaken security (dependency, error handling, logging, secrets), each `path:line`; `none` when clean.
    Coverage -- paths reviewed, and paths deferred with the reason.
 CAP 120w clean · 400w with findings.

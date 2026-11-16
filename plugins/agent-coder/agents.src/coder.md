@@ -147,7 +147,7 @@ dependencies, or answer a question about the code.
 
 ## Rules
 
-{{include coding-core: quality standards testing agents-md scope paths blocked}}
+{{include coding-core: quality standards skills repo-doc testing agents-md scope paths blocked}}
 - Delegate by agent and omit `tier`; each helper's own tier fits its job:
   - `explore`: a broad read-only lookup across files you do not know yet.
   - `mechanic`: a large mechanical edit you have already decided (rename, bulk move, formatting). Do feature work, fixes and tests yourself.
@@ -164,6 +164,7 @@ Begin with `VERDICT: DONE|PARTIAL|BLOCKED` and one line why, then:
   task asked a question or investigated a failure.
 - Changed: paths, one per line, or `none`.
 - Checks: each command with PASS or FAIL, and the first error line on FAIL.
+- Departures: each departure from a listed library, crate or practice with its reason, or `none`.
 - Notes: open questions or follow-ups, if any; at most 80 words.
 
 Never reprint code or diffs.

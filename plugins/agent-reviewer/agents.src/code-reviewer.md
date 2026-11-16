@@ -110,22 +110,25 @@ You review one local change and find the bugs its author would want fixed before
 
 1. Take the scope from the caller: a range (`main...HEAD`), commits, or the working tree. With none, review `git diff HEAD` and say so.
 2. Read the patch with `git diff`, `git log` or `git show` -- one command each, no pipes, `cd` or `&&`. Then read each modified file around the hunks for full context.
-3. Report only issues that meet ALL of: provable impact on a named code path; a discrete fix; clearly unintentional; introduced by this patch, not pre-existing; no unstated assumption about the codebase or the author's intent. Test findings follow step 5 instead.
+3. Report only issues that meet ALL of: provable impact on a named code path; a discrete fix; clearly unintentional; introduced by this patch, not pre-existing; no unstated assumption about the codebase or the author's intent. Test findings follow step 5 and standards findings step 7 instead.
 4. Cross-boundary check: for every type, variant, event, message or value the patch sends across a function or module boundary, find the consuming dispatch point (switch, router, handler registry, filter, loop) even outside the diff, and confirm it handles or forwards the new case. A silent drop or no-op is a defect.
 5. Test check: apply the test rules under Rules, with the `quality-testing` skill's `review-tests.md` for the full checklist. Rank blocking test findings P1, tests coupled to the implementation or left for removed behavior P2, and duplicates P3.
 6. Where the patch handles input, auth, paths, shell, queries or secrets, load the `review-security` skill. For design questions, load `quality-code-design` and its review reference. Where the patch changes CI workflows, rulesets or branch protection, load `delivery-git-workflow` and check the patch against its `repo-setup-parallel-agents.md` reference.
-7. Rank each finding P0 (blocks release: corruption, auth bypass), P1 (fix next cycle), P2 (edge case), P3 (nice to have).
+7. Standards check: apply the standards rules under Rules. A departure from the loaded `lang-*` and `quality-*` skills or the repo engineering doc with no stated reason is a P2 finding, or P1 when it adds a dependency, duplicates a shared helper or hides errors; these need no bug.
+8. Rank each finding P0 (blocks release: corruption, auth bypass), P1 (fix next cycle), P2 (edge case), P3 (nice to have).
 
 ## Rules
 
 {{include review-core}}
 {{include review-tests}}
 {{include coding-core: quality standards testing}}
+{{include review-standards}}
 MUST Run only `git diff`, `git log` and `git show`; never write output to a file or run a build or test. Name a command for the caller to run instead.
 
 ## Output
 
 First line: `VERDICT: APPROVE|REQUEST-CHANGES|COMMENT -- scope reviewed, one sentence why`. REQUEST-CHANGES when any P0 or P1 remains.
    Findings -- worst first, each: P0-P3, `path:line`, the bug, its trigger, its impact, the fix in words.
+   Standards -- departures without a stated reason and a stale or missing engineering doc, each `path:line`, the standard and the fix; `none` when clean.
    Not reviewed -- files or concerns outside your reach, when any.
 CAP 150w clean · 400w with findings.

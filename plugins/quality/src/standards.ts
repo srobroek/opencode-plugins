@@ -1,5 +1,5 @@
 import type { Context } from "@opencode/plugin/promise/plugin"
-import { STANDARDS, TESTING } from "@srobroek/opencode-lib/coding-core"
+import { REPO_DOC, STANDARDS, TESTING } from "@srobroek/opencode-lib/coding-core"
 
 /**
  * The engineering standards for agents whose prompt does not carry coding-core: research first,
@@ -11,16 +11,20 @@ export const STANDARDS_TEXT = `# Engineering standards\n\n${STANDARDS}`
 /** The testing standards from the same coding-core, as a second static block. */
 export const TESTING_TEXT = `# Testing standards\n\n${TESTING}`
 
+/** The repo-doc part: read docs/engineering.md first, update it with the stack. */
+export const REPO_DOC_TEXT = `# Repository engineering doc\n\n${REPO_DOC}`
+
 /** The blocks appended to each selected request, in order. */
-export const STANDARDS_BLOCKS: ReadonlyArray<string> = [STANDARDS_TEXT, TESTING_TEXT]
+export const STANDARDS_BLOCKS: ReadonlyArray<string> = [STANDARDS_TEXT, REPO_DOC_TEXT, TESTING_TEXT]
 
 /**
  * Subagents that get the block at runtime. Shipped agents that carry coding-core in their own prompt
  * (coder, the implementers, ui-implementer, ui-ux-specialist, architect, researcher, code-reviewer and
- * pr-reviewer) need no entry. Built-in agents such as `general` do not, so they stay listed here.
+ * pr-reviewer) need no entry. Built-in agents such as `general` do not, so they stay listed here, and so
+ * does security-reviewer, which carries only the review-standards rules.
  * Primary sessions always get the block.
  */
-export const DEFAULT_STANDARDS_SUBAGENTS: ReadonlyArray<string> = ["general"]
+export const DEFAULT_STANDARDS_SUBAGENTS: ReadonlyArray<string> = ["general", "security-reviewer"]
 
 export type StandardsOptions = { subagents: ReadonlySet<string> } | undefined
 

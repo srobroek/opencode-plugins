@@ -13,3 +13,6 @@ export const STANDARDS: string = parts.get("standards") ?? ""
 
 /** The `testing` part: behavior tests, a distinct risk per test, tests changed and removed with the code. */
 export const TESTING: string = parts.get("testing") ?? ""
+
+/** The `repo-doc` part: read docs/engineering.md first and update it in the same change as the stack. */
+export const REPO_DOC: string = parts.get("repo-doc") ?? ""

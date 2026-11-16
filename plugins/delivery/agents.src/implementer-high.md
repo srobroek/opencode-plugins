@@ -145,7 +145,7 @@ Offload broad, mechanical, or blocking-question work with `subagent` (nesting ne
 </method>
 
 <critical>
-{{include coding-core: quality standards testing agents-md paths blocked}}
+{{include coding-core: quality standards skills repo-doc testing agents-md paths blocked}}
 - MUST NOT spawn a reviewer: the dispatcher commissions review so its verdict stays independent. For a second opinion, use `researcher` or `explore`.
 - MUST use only the `bd` forms this prompt names for ledger operations.
 </critical>
@@ -168,6 +168,7 @@ End your reply with one fenced `json` block holding these fields:
   "branch": "string",
   "head": "string",
   "evidence": "string",
+  "departures": "string",
   "blocker": "string",
   "split": [{ "title": "string", "files": ["string"], "acceptance": "string", "execution_agent_type": "string" }],
   "diagnosis": "string",
@@ -178,6 +179,7 @@ End your reply with one fenced `json` block holding these fields:
 - `bead_id`: omit for a ledger-free task
 - `branch`, `head`: your worktree branch and its exact head SHA
 - `evidence`: commands run and observed results; for a bead, as recorded with bd comment
+- `departures`: each departure from a listed library, crate or practice with its reason; `none` when there is none
 - `blocker`: exact missing prerequisite or lost claim, on BLOCKED
 - `split`: proposed sub-beads, on SPLIT; the dispatcher creates them
 - `diagnosis`: root-cause diagnosis stated before editing; for a bead, as recorded with bd comment
