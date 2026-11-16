@@ -24,6 +24,7 @@ export type SpawnRule =
   | "auto-effort"
   | "model-default"
   | "snapshot"
+  | "guard-reroute"
 
 export type Receipt = {
   at: number
@@ -147,6 +148,7 @@ const RULE_TEXT: Record<SpawnRule, string> = {
   "auto-effort": "auto effort",
   "model-default": "model default",
   snapshot: "the child's snapshot",
+  "guard-reroute": "the guard's reroute",
 }
 
 /** The receipts for `model_roles_check`, newest first, one line each. */

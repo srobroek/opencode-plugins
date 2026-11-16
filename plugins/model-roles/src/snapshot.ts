@@ -21,6 +21,8 @@ export type ModelSnapshot = {
   at: number
   /** Set when failover moved the child off the model it resolved to. */
   failedOver?: true
+  /** Set when the guard moved a resumed child off a model it now refuses. */
+  rule?: "guard-reroute"
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -49,6 +51,7 @@ export function readSnapshot(value: unknown): ModelSnapshot | undefined {
   const snapshot: ModelSnapshot = { model: value.model, configRevision: value.configRevision, at: value.at }
   if (typeof value.tier === "string") snapshot.tier = value.tier
   if (value.failedOver === true) snapshot.failedOver = true
+  if (value.rule === "guard-reroute") snapshot.rule = "guard-reroute"
   return snapshot
 }
 

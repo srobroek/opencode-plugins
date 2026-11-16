@@ -3875,7 +3875,8 @@ var RULE_TEXT = {
   "builtin-effort": "built-in effort",
   "auto-effort": "auto effort",
   "model-default": "model default",
-  snapshot: "the child's snapshot"
+  snapshot: "the child's snapshot",
+  "guard-reroute": "the guard's reroute"
 };
 function formatReceipts(list) {
   if (list.length === 0)
@@ -4049,6 +4050,35 @@ function formatUsage(report) {
       lines.push(`    - ${agents.length - CHECK_TOP_AGENTS} more agents`);
   }
   return lines;
+}
+
+// plugins/model-roles/src/resume-guard.ts
+function resumeGuard(facts) {
+  if (facts.current === undefined || facts.refused === undefined)
+    return { action: "keep" };
+  const allowed = facts.candidates.find((c) => c.allowed);
+  if (allowed !== undefined)
+    return { action: "switch", model: allowed.model };
+  const where = facts.tier === undefined ? "the child has no tier to switch within" : `no candidate of tier '${facts.tier}' passes the guard`;
+  return { action: "refuse", reason: `This resume would run on ${modelText(facts.current)}, which the guard refuses, and ${where}.
+${facts.refused}` };
+}
+function tierModels(roles, tier) {
+  const found = [];
+  const walk = (role, chain) => {
+    for (const entry of roles[role] ?? []) {
+      const candidate = parseCandidate(entry);
+      if (candidate === undefined)
+        continue;
+      if (candidate.kind === "model")
+        found.push(candidate.ref);
+      else if (!chain.includes(candidate.role) && Object.hasOwn(roles, candidate.role))
+        walk(candidate.role, [...chain, candidate.role]);
+    }
+  };
+  if (tier !== undefined && Object.hasOwn(roles, tier))
+    walk(tier, [tier]);
+  return found;
 }
 
 // plugins/model-roles/src/rpc.ts
@@ -4865,6 +4895,8 @@ function readSnapshot(value) {
     snapshot.tier = value.tier;
   if (value.failedOver === true)
     snapshot.failedOver = true;
+  if (value.rule === "guard-reroute")
+    snapshot.rule = "guard-reroute";
   return snapshot;
 }
 function snapshotModel(snapshot) {
@@ -5104,6 +5136,7 @@ var finishedAt = (event) => {
 var SUCCEEDED_EVENT = "session.execution.succeeded";
 var CREATED_EVENT = "session.created";
 var CONFIG_EVENT = "config.updated";
+var CHILD_LOOKUP_MS = 3000;
 var PENDING_SPAWN_MS = 10 * 60000;
 function withRoleField(input, description) {
   const schema = input;
@@ -5616,9 +5649,11 @@ ${refs.size}`;
         warn(`session ${sessionID}: ${failureNote(facts)}`);
     };
     const switching = new Map;
-    const switchWithin = async (sessionID, model, role) => {
+    const switchWithin = async (sessionID, model, role, onSwitched) => {
       const tracked = Promise.resolve().then(() => ctx.session.switchModel({ sessionID, model })).then(() => true, () => false).then((ok) => {
-        if (ok) {
+        if (ok && onSwitched !== undefined)
+          onSwitched();
+        else if (ok) {
           noteFailover(sessionID, model, role);
           outcomes.failover(sessionID).catch(() => {});
         }
@@ -6054,6 +6089,9 @@ ${refs.size}`;
       const revision = configRevision(options);
       const stripped = planSpawn(event.input, options, available, view()).input;
       if (explicitModel !== undefined) {
+        const refusal = await judge(event, agent, explicitModel);
+        if (refusal !== undefined)
+          throw new Error(refusal);
         event.input = stripped;
         await writeSnapshot(childID, { model: modelLabel(explicitModel), configRevision: revision, at: Date.now() });
         await forgetChildRole(childID);
@@ -6075,13 +6113,40 @@ ${refs.size}`;
         }
       }
       event.input = stripped;
-      const snapshot = await snapshotOf(childID);
-      if (snapshot === undefined)
-        return true;
+      let snapshot = await snapshotOf(childID);
+      let fromSession = false;
+      if (snapshot === undefined) {
+        if (guard2 === undefined)
+          return true;
+        const lookup = (async () => {
+          const session = await ctx.session.get({ sessionID: childID }).catch(() => {
+            return;
+          });
+          return session === undefined ? undefined : await runningModel(session, await listAgents().catch(() => [])).catch(() => {
+            return;
+          });
+        })();
+        let timer;
+        const expired = new Promise((resolve2) => {
+          timer = setTimeout(() => resolve2("late"), CHILD_LOOKUP_MS);
+          timer.unref?.();
+        });
+        const found = await Promise.race([lookup, expired]);
+        clearTimeout(timer);
+        if (found === "late")
+          warn(`resume of ${childID}: the child's model lookup took longer than ${CHILD_LOOKUP_MS}ms; the guard is not applied`);
+        const running = found === "late" ? undefined : found;
+        if (running === undefined) {
+          await recordReceipt({ at: Date.now(), agent, source: "agent", rule: "model-default", fallbacks: [], warnings: ["model unknown; guard not applied"] });
+          return true;
+        }
+        const role = await spawnRoleOf(childID);
+        snapshot = { model: modelLabel(running), ...role === undefined ? {} : { tier: role }, configRevision: revision, at: Date.now() };
+        fromSession = true;
+      }
       const model = snapshotModel(snapshot);
       const reason = model === undefined ? "the snapshot names no model" : unavailableReason(model, available);
-      const refused = model === undefined || reason !== undefined ? undefined : await judge(event, agent, model);
-      if (model === undefined || reason !== undefined || refused !== undefined) {
+      if (model === undefined || reason !== undefined) {
         await recordReceipt({
           at: Date.now(),
           agent,
@@ -6089,10 +6154,46 @@ ${refs.size}`;
           ...snapshot.tier === undefined ? {} : { tier: snapshot.tier },
           rule: "model-default",
           fallbacks: [],
-          warnings: [`the child's snapshot model ${snapshot.model} is not usable (${reason ?? refused}); the resume resolves normally`]
+          warnings: [`the child's snapshot model ${snapshot.model} is not usable (${reason}); the resume resolves normally`]
         });
         return true;
       }
+      const refused = await judge(event, agent, model);
+      const tier = snapshot.tier ?? await spawnRoleOf(childID);
+      const decision = resumeGuard({
+        current: model,
+        refused,
+        tier,
+        candidates: refused === undefined ? [] : await Promise.all(tierModels(options.roles, tier).filter((m) => unavailableReason(m, available) === undefined).sort((x, y) => Number(view()(x) !== undefined) - Number(view()(y) !== undefined)).map(async (m) => ({ model: m, allowed: await judge(event, agent, m) === undefined })))
+      });
+      if (decision.action === "refuse")
+        throw new Error(decision.reason);
+      if (decision.action === "switch") {
+        const to = decision.model;
+        const outcome = await switchWithin(childID, to, tier, () => {
+          if (snapshotsClosed)
+            return;
+          childModels.set(childID, { model: modelLabel(to), ...tier === undefined ? {} : { tier }, configRevision: configRevision(options), at: Date.now(), rule: "guard-reroute" });
+          persistSnapshot(childID);
+        });
+        if (outcome !== "switched")
+          throw new Error(`This resume would run on ${modelLabel(model)}, which the guard refuses, and switching the child to ${modelLabel(to)} did not complete (${outcome}).`);
+        if (isRecord10(event.input))
+          event.input = { ...event.input, model: modelLabel(to) };
+        await recordReceipt({
+          at: Date.now(),
+          agent,
+          source: "agent",
+          ...tier === undefined ? {} : { tier },
+          model: modelLabel(to),
+          rule: "guard-reroute",
+          fallbacks: [],
+          warnings: [`the child's model ${snapshot.model} is refused by the guard; switched to ${modelLabel(to)}${tier === undefined ? "" : ` (tier ${tier})`}`]
+        });
+        return true;
+      }
+      if (fromSession)
+        await writeSnapshot(childID, snapshot);
       if (isRecord10(event.input))
         event.input = { ...event.input, model: snapshot.model };
       await recordReceipt({
@@ -6622,6 +6723,7 @@ export {
   CATALOG_LIMIT,
   CHECK_TOOL,
   CHECK_TOP_AGENTS,
+  CHILD_LOOKUP_MS,
   CLASSIFY_FALLBACK,
   CLASSIFY_KEY_PREFIX,
   CLASSIFY_TIMEOUT_MS,

@@ -354,6 +354,8 @@ For each spawn, the first rule that applies decides the model and its variant:
 7. **Model default.** A model with no variants, or none near the effort, runs
    without one.
 
+A resume keeps its child's model, unless the [guard](#subagent-model-guard) refuses it now: the child then moves to its tier's first allowed candidate.
+
 `effort: "auto"` sits at rule 4: the [decider](#auto-routing) picks the variant per
 spawn, for a spawn that passes the tier, an agent that declares it, and an
 auto-routed spawn. When the decider cannot pick, the spawn falls back to rule 5,
@@ -518,8 +520,9 @@ one. The session model is
 `session.model`, else the calling agent's model, else the parent session's
 (a session that inherits carries no model), else the default model. A root
 session on the configured default model has no `session.model`. If any
-lookup fails, the spawn goes ahead. Resumed spawns (with `sessionID`) are not
-checked.
+lookup fails, the spawn goes ahead. A resume (`sessionID`) is judged on the model its child runs on:
+if the guard refuses it now, the child is switched to the first candidate of its tier the guard accepts
+(the receipt warns), or the resume is refused when none passes. A `model` on a resume is judged like a spawn's.
 
 ## Runtime fallback
 

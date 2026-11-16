@@ -95,6 +95,7 @@ import {
   stripRoleHeader,
   userPin,
 } from "./resolve.ts"
+import { resumeGuard, tierModels } from "./resume-guard.ts"
 import { TiersRpc } from "./rpc.ts"
 import { exitStatusOf, parseEvaluate, parseVerdict, testRun, touchesTests } from "./signals.ts"
 import { configRevision, type ModelSnapshot, readSnapshot, SPAWN_MODEL_KEY_PREFIX, snapshotModel, staleSnapshots, unavailableReason } from "./snapshot.ts"
@@ -188,6 +189,9 @@ const SUCCEEDED_EVENT = "session.execution.succeeded"
 const CREATED_EVENT = "session.created"
 /** The host reloaded its config; a `/tiers` save or a hand edit of the global file lands here too. */
 const CONFIG_EVENT = "config.updated"
+
+/** How long a resume waits for the child session's model before treating it as unknown. */
+export const CHILD_LOOKUP_MS = 3000
 
 /** How long a spawn waits to be matched with the child session it creates. */
 export const PENDING_SPAWN_MS = 10 * 60_000
@@ -826,7 +830,13 @@ export default Plugin.define({
     const switching = new Map<string, Promise<boolean>>()
 
     /** `session.switchModel` bounded by `switchTimeoutMs`: "late" leaves it landing in the background. */
-    const switchWithin = async (sessionID: string, model: ModelRef, role: string | undefined): Promise<"switched" | "late" | "failed"> => {
+    const switchWithin = async (
+      sessionID: string,
+      model: ModelRef,
+      role: string | undefined,
+      /** What a landed switch records; failover by default. */
+      onSwitched?: () => void,
+    ): Promise<"switched" | "late" | "failed"> => {
       const tracked: Promise<boolean> = Promise.resolve()
         .then(() => ctx.session.switchModel({ sessionID, model }))
         .then(
@@ -836,7 +846,8 @@ export default Plugin.define({
         .then((ok) => {
           // A switch that lands after the timeout still moved the child. The snapshot changes in memory
           // before the switch reports success; storage and the ledger follow without being awaited.
-          if (ok) {
+          if (ok && onSwitched !== undefined) onSwitched()
+          else if (ok) {
             noteFailover(sessionID, model, role)
             void outcomes.failover(sessionID).catch(() => {})
           }
@@ -1339,6 +1350,9 @@ export default Plugin.define({
       // Whatever the resume passes, the tier parameters themselves never reach the tool.
       const stripped = planSpawn(event.input, options, available, view()).input
       if (explicitModel !== undefined) {
+        // A deliberate model is judged as a fresh spawn's is.
+        const refusal = await judge(event, agent, explicitModel)
+        if (refusal !== undefined) throw new Error(refusal)
         event.input = stripped
         await writeSnapshot(childID, { model: modelLabel(explicitModel), configRevision: revision, at: Date.now() })
         await forgetChildRole(childID)
@@ -1360,13 +1374,37 @@ export default Plugin.define({
         }
       }
       event.input = stripped
-      const snapshot = await snapshotOf(childID)
-      if (snapshot === undefined) return true
+      let snapshot = await snapshotOf(childID)
+      let fromSession = false
+      if (snapshot === undefined) {
+        // No snapshot (a child from before snapshots, or one pruned): the child's own session says what it runs on.
+        if (guard === undefined) return true
+        // Bounded as a whole: a lookup that never settles must not hold the spawn (and with it every tier reload).
+        // Its answer is used only if it arrives in time, so a late one writes nothing.
+        const lookup = (async () => {
+          const session = (await ctx.session.get({ sessionID: childID }).catch(() => undefined)) as SessionLike
+          return session === undefined ? undefined : await runningModel(session, await listAgents().catch(() => [] as Agents)).catch(() => undefined)
+        })()
+        let timer: ReturnType<typeof setTimeout> | undefined
+        const expired = new Promise<"late">((resolve) => {
+          timer = setTimeout(() => resolve("late"), CHILD_LOOKUP_MS)
+          ;(timer as { unref?: () => void }).unref?.()
+        })
+        const found = await Promise.race([lookup, expired])
+        clearTimeout(timer)
+        if (found === "late") warn(`resume of ${childID}: the child's model lookup took longer than ${CHILD_LOOKUP_MS}ms; the guard is not applied`)
+        const running = found === "late" ? undefined : found
+        if (running === undefined) {
+          await recordReceipt({ at: Date.now(), agent, source: "agent", rule: "model-default", fallbacks: [], warnings: ["model unknown; guard not applied"] })
+          return true
+        }
+        const role = await spawnRoleOf(childID)
+        snapshot = { model: modelLabel(running), ...(role === undefined ? {} : { tier: role }), configRevision: revision, at: Date.now() }
+        fromSession = true
+      }
       const model = snapshotModel(snapshot)
       const reason = model === undefined ? "the snapshot names no model" : unavailableReason(model, available)
-      // A model that was allowed when the child was spawned may be guarded now.
-      const refused = model === undefined || reason !== undefined ? undefined : await judge(event, agent, model)
-      if (model === undefined || reason !== undefined || refused !== undefined) {
+      if (model === undefined || reason !== undefined) {
         await recordReceipt({
           at: Date.now(),
           agent,
@@ -1374,10 +1412,51 @@ export default Plugin.define({
           ...(snapshot.tier === undefined ? {} : { tier: snapshot.tier }),
           rule: "model-default",
           fallbacks: [],
-          warnings: [`the child's snapshot model ${snapshot.model} is not usable (${reason ?? refused}); the resume resolves normally`],
+          warnings: [`the child's snapshot model ${snapshot.model} is not usable (${reason}); the resume resolves normally`],
         })
         return true
       }
+      // The snapshot is the model the child runs on (failover keeps it current). A model allowed when the
+      // child spawned may be guarded now, and the host would keep the child on it: switch it to the tier's.
+      const refused = await judge(event, agent, model)
+      const tier = snapshot.tier ?? (await spawnRoleOf(childID))
+      const decision = resumeGuard({
+        current: model,
+        refused,
+        tier,
+        candidates:
+          refused === undefined
+            ? []
+            : await Promise.all(
+                tierModels(options.roles, tier)
+                  .filter((m) => unavailableReason(m, available) === undefined)
+                  .sort((x, y) => Number(view()(x) !== undefined) - Number(view()(y) !== undefined))
+                  .map(async (m) => ({ model: m, allowed: (await judge(event, agent, m)) === undefined })),
+              ),
+      })
+      if (decision.action === "refuse") throw new Error(decision.reason)
+      if (decision.action === "switch") {
+        const to = decision.model
+        const outcome = await switchWithin(childID, to, tier, () => {
+          if (snapshotsClosed) return
+          childModels.set(childID, { model: modelLabel(to), ...(tier === undefined ? {} : { tier }), configRevision: configRevision(options), at: Date.now(), rule: "guard-reroute" })
+          void persistSnapshot(childID)
+        })
+        if (outcome !== "switched") throw new Error(`This resume would run on ${modelLabel(model)}, which the guard refuses, and switching the child to ${modelLabel(to)} did not complete (${outcome}).`)
+        if (isRecord(event.input)) event.input = { ...event.input, model: modelLabel(to) }
+        await recordReceipt({
+          at: Date.now(),
+          agent,
+          source: "agent",
+          ...(tier === undefined ? {} : { tier }),
+          model: modelLabel(to),
+          rule: "guard-reroute",
+          fallbacks: [],
+          warnings: [`the child's model ${snapshot.model} is refused by the guard; switched to ${modelLabel(to)}${tier === undefined ? "" : ` (tier ${tier})`}`],
+        })
+        return true
+      }
+      if (fromSession) await writeSnapshot(childID, snapshot)
       if (isRecord(event.input)) event.input = { ...event.input, model: snapshot.model }
       await recordReceipt({
         at: Date.now(),
@@ -1394,6 +1473,8 @@ export default Plugin.define({
     }
 
     const handleSpawn = async (event: SpawnEvent) => {
+      // A resume ends here. A refused resume throws above, so it never reaches this return; keep it that way:
+      // anything that marks a resumed child as running must happen after a resume is accepted, not before.
       if (await handleResume(event)) return
       // Read before the tier rewrites `model`: only a model the caller passed counts as explicit.
       const explicitModel = inputModel(event.input)
