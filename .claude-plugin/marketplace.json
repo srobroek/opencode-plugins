@@ -88,7 +88,7 @@
       "name": "lang-typescript",
       "source": "./plugins/lang-typescript",
       "description": "TypeScript and JavaScript skills: install, lint, tsc and test checks, testing, monorepo packaging, type safety and zod, and Bun and Node profiling.",
-      "version": "0.4.0",
+      "version": "0.5.0",
       "category": "development"
     },
     {
@@ -102,7 +102,7 @@
       "name": "quality",
       "source": "./plugins/quality",
       "description": "Code design and review guidance, a code-quality policy, testing standards and a test audit, performance profiling, and throwaway logic prototypes.",
-      "version": "0.9.0",
+      "version": "0.10.0",
       "category": "development"
     },
     {
@@ -130,7 +130,7 @@
       "name": "worktrunk",
       "source": "./plugins/worktrunk",
       "description": "Worktrunk (wt) skills: work in linked worktrees and run deterministic preflight checks before an agent run or merge.",
-      "version": "0.4.0",
+      "version": "0.4.1",
       "category": "development"
     }
   ]

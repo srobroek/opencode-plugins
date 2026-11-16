@@ -19,7 +19,7 @@
     },
     "plugins/agent-coder": {
       "name": "@srobroek/opencode-agent-coder",
-      "version": "0.8.0",
+      "version": "0.8.1",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
       },
@@ -136,7 +136,7 @@
     },
     "plugins/beads": {
       "name": "@srobroek/opencode-beads",
-      "version": "0.5.1",
+      "version": "0.5.2",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
       },
@@ -214,7 +214,7 @@
     },
     "plugins/delivery": {
       "name": "@srobroek/opencode-delivery",
-      "version": "0.7.0",
+      "version": "0.7.1",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
       },
@@ -358,7 +358,7 @@
     },
     "plugins/lang-typescript": {
       "name": "@srobroek/opencode-lang-typescript",
-      "version": "0.4.0",
+      "version": "0.5.0",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
       },
@@ -394,7 +394,7 @@
     },
     "plugins/model-roles": {
       "name": "@srobroek/opencode-model-roles",
-      "version": "0.4.0",
+      "version": "0.5.0",
       "dependencies": {
         "jsonc-parser": "3.3.1",
       },
@@ -438,7 +438,7 @@
     },
     "plugins/quality": {
       "name": "@srobroek/opencode-quality",
-      "version": "0.9.0",
+      "version": "0.10.0",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
         "fast-xml-parser": "5.12.0",
@@ -465,7 +465,7 @@
     },
     "plugins/safety": {
       "name": "@srobroek/opencode-safety",
-      "version": "0.6.1",
+      "version": "0.7.0",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
         "smol-toml": "1.9.1",
@@ -492,7 +492,7 @@
     },
     "plugins/speckit": {
       "name": "@srobroek/opencode-speckit",
-      "version": "0.7.0",
+      "version": "0.7.1",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
       },
@@ -518,7 +518,7 @@
     },
     "plugins/subagent-worktree": {
       "name": "@srobroek/opencode-subagent-worktree",
-      "version": "0.2.4",
+      "version": "0.2.5",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
       },
@@ -570,7 +570,7 @@
     },
     "plugins/worktrunk": {
       "name": "@srobroek/opencode-worktrunk",
-      "version": "0.4.0",
+      "version": "0.4.1",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
       },
