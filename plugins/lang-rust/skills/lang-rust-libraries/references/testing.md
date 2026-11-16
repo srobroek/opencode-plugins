@@ -38,7 +38,7 @@ Checked 2026-11-16.
 ### assertions
 
 - **pretty_assertions**: wins for readable diffs of compound values; costs a dependency that shadows `assert_eq!`.
-- **similar-asserts**: wins for very large strings; costs a second diff crate.
+- **similar-asserts**: wins for large strings; costs a second diff crate.
 - **googletest**: wins for composable matchers and non-fatal checks; costs a pre-1.0 API.
 
 ### fuzz

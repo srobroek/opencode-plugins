@@ -8,19 +8,19 @@ Lint, SAST, dependency audit, unused dependencies, complexity and duplication ro
 
 | Concern | Default | Use instead when | Avoid (why) |
 | --- | --- | --- | --- |
-| TLS/crypto provider | `rustls` `0.23`, default `aws-lc-rs` `1.19` | `ring` `0.17` for target/dependency constraints; platform TLS for actual requirements | Handwritten crypto; unsupported generic FIPS claims; calling ring abandoned. |
-| Password hashes | RustCrypto `argon2` `0.6` | Existing audited password scheme with migration plan | Fast general-purpose hashes for passwords. |
-| JWT/JOSE | `jsonwebtoken` `11` | `josekit` `0.10` for broader JOSE/JWE | Unverified decoding for authorization; arbitrary algorithm acceptance. |
-| Secret values | `secrecy` `0.10`, `zeroize` `1.9` where appropriate | Deployment secret manager or extension for retrieval | Debug leaks; assuming wrappers erase all copies. |
-| Constant-time operations | `subtle` `2.6` through reviewed crypto | Established primitive in the chosen crypto provider | DIY comparison/crypto based only on timing intuition. |
-| SSRF | `reqwest` `0.13` with explicit destination/redirect policy | Existing reviewed outbound gateway | User-chosen URLs reaching private/link-local metadata addresses; unchecked redirects/DNS. |
-| HTML/parse budgets | `ammonia` `4.2`; bounded format parsers | Existing reviewed sanitization policy | Escaping mistaken for sanitizing; unlimited decompression/depth. |
-| Secret scanning | Offline `Betterleaks` `1.10` or `Gitleaks` `8.30` | `TruffleHog` `3.99` history/verification scan separately | Verified-only findings as the entire secret policy. |
-| Dependency review | `cargo-vet` `0.10` | Existing equivalent reviewed trust policy | Provenance/signature mistaken for harmless code. |
-| SBOM | `cargo-cyclonedx` `0.5` for Cargo; `Syft` `1.57` for artifacts/images | `cdxgen` `13.7` source inventory; `cargo-auditable` `0.7` embedded dependency metadata | SBOM mistaken for vulnerability remediation or license approval. |
-| Unsafe inventory | `cargo-geiger` `0.14` for review targeting | Direct unsafe-boundary audit | Unsafe count as risk score or safety proof. |
-| Container scans | `Grype` `0.121` with `Syft` `1.57` | Verified `Trivy` `0.76` explicit opt-in; `Docker Scout` `1.29` integrated workflow | Ignoring documented March 2026 Trivy compromise/transitive action integrity. |
-| Container/workflow lint | `Hadolint` `2.15`; `zizmor` `1.32`, `actionlint` `1.7`, `pinact` `5` when applicable | Existing equivalent policy checks | Pinning wrapper action while trusting unverified downloaded executables. |
+| TLS/crypto provider | `rustls` `>= 0.23`, default `aws-lc-rs` `>= 1.19` | `ring` `>= 0.17` for target/dependency constraints; platform TLS for actual requirements | Handwritten crypto; unsupported generic FIPS claims; calling ring abandoned. |
+| Password hashes | RustCrypto `argon2` `>= 0.6` | Existing audited password scheme with migration plan | Fast general-purpose hashes for passwords. |
+| JWT/JOSE | `jsonwebtoken` `>= 11` | `josekit` `>= 0.10` for broader JOSE/JWE | Unverified decoding for authorization; arbitrary algorithm acceptance. |
+| Secret values | `secrecy` `>= 0.10`, `zeroize` `>= 1.9` where appropriate | Deployment secret manager or extension for retrieval | Debug leaks; assuming wrappers erase all copies. |
+| Constant-time operations | `subtle` `>= 2.6` through reviewed crypto | Established primitive in the chosen crypto provider | DIY comparison/crypto based only on timing intuition. |
+| SSRF | `reqwest` `>= 0.13` with explicit destination/redirect policy | Existing reviewed outbound gateway | User-chosen URLs reaching private/link-local metadata addresses; unchecked redirects/DNS. |
+| HTML/parse budgets | `ammonia` `>= 4.2`; bounded format parsers | Existing reviewed sanitization policy | Escaping mistaken for sanitizing; unlimited decompression/depth. |
+| Secret scanning | Offline `Betterleaks` `>= 1.10` or `Gitleaks` `>= 8.30` | `TruffleHog` `>= 3.99` history/verification scan separately | Verified-only findings as the entire secret policy. |
+| Dependency review | `cargo-vet` `>= 0.10` | Existing equivalent reviewed trust policy | Provenance/signature mistaken for harmless code. |
+| SBOM | `cargo-cyclonedx` `>= 0.5` for Cargo; `Syft` `>= 1.57` for artifacts/images | `cdxgen` `>= 13.7` source inventory; `cargo-auditable` `>= 0.7` embedded dependency metadata | SBOM mistaken for vulnerability remediation or license approval. |
+| Unsafe inventory | `cargo-geiger` `>= 0.14` for review targeting | Direct unsafe-boundary audit | Unsafe count as risk score or safety proof. |
+| Container scans | `Grype` `>= 0.121` with `Syft` `>= 1.57` | Verified `Trivy` `>= 0.76` explicit opt-in; `Docker Scout` `>= 1.29` integrated workflow | Ignoring documented March 2026 Trivy compromise/transitive action integrity. |
+| Container/workflow lint | `Hadolint` `>= 2.15`; `zizmor` `>= 1.32`, `actionlint` `>= 1.7`, `pinact` `>= 5` when applicable | Existing equivalent policy checks | Pinning wrapper action while trusting unverified downloaded executables. |
 
 ## Rules
 
