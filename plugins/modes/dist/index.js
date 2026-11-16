@@ -239,7 +239,8 @@ async function registerModeReminders(ctx, modes, options = {}) {
 }
 
 // plugins/modes/src/git-guard.ts
-import { isAbsolute as isAbsolute2, resolve as resolve2 } from "path";
+import { homedir as homedir2 } from "os";
+import { isAbsolute as isAbsolute2 } from "path";
 
 // plugins/lib/src/shell-tokenizer.ts
 var SEPARATORS = new Set([";", "&", "|", "(", ")", `
@@ -932,10 +933,10 @@ function shellCall(tool, input) {
 // plugins/modes/src/path-guard.ts
 import { lstatSync, readlinkSync } from "fs";
 import { homedir } from "os";
-import { dirname, isAbsolute, join as join2, relative, resolve, sep } from "path";
+import { dirname, isAbsolute, join as join2, relative, sep } from "path";
 var MAX_LINKS = 40;
 function canonical(path) {
-  const pending = resolve(path).split(sep).filter((segment) => segment !== "");
+  const pending = (isAbsolute(path) ? path : `${process.cwd()}${sep}${path}`).split(sep).filter((segment) => segment !== "");
   let current = sep;
   let links = 0;
   while (pending.length > 0) {
@@ -953,7 +954,7 @@ function canonical(path) {
     } catch (error) {
       if (error.code !== "ENOENT")
         throw error;
-      return resolve(join2(next, ...pending));
+      return appendLexically(next, pending);
     }
     if (!stats.isSymbolicLink()) {
       current = next;
@@ -968,6 +969,21 @@ function canonical(path) {
   }
   return current;
 }
+function appendLexically(base, segments) {
+  const parts = base.split(sep).filter((part) => part !== "");
+  for (const segment of segments) {
+    if (segment === "..")
+      parts.pop();
+    else if (segment !== ".")
+      parts.push(segment);
+  }
+  return sep + parts.join(sep);
+}
+function readings(path) {
+  const absolute = isAbsolute(path) ? path : `${process.cwd()}${sep}${path}`;
+  const lexical = appendLexically(sep, absolute.split(sep).filter((part) => part !== ""));
+  return [canonical(absolute), canonical(lexical)];
+}
 var inside = (path, root) => {
   const rel = relative(root, path);
   return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
@@ -980,9 +996,16 @@ function checkDebugWrite(target, options) {
   }
 }
 function checkResolved(target, options) {
-  const home = canonical(options.home ?? homedir());
   const start = canonical(options.startDir);
-  const path = canonical(isAbsolute(target) ? target : resolve(start, target));
+  for (const path of readings(isAbsolute(target) ? target : `${start}${sep}${target}`)) {
+    const reason = checkReading(target, path, start, options);
+    if (reason !== undefined)
+      return reason;
+  }
+  return;
+}
+function checkReading(target, path, start, options) {
+  const home = canonical(options.home ?? homedir());
   if (path === start || inside(path, start))
     return `${target} is inside the directory this session started in`;
   if (inside(path, join2(home, ".opencode", "debug")))
@@ -999,14 +1022,15 @@ function isScratchPath(path, options) {
   try {
     const home = canonical(options.home ?? homedir());
     const start = canonical(options.startDir);
-    const resolved = canonical(isAbsolute(path) ? path : resolve(start, path));
-    if (resolved === start || inside(resolved, start))
-      return false;
     const worktrees = join2(home, ".local", "share", "opencode", "worktree");
-    if (!inside(resolved, worktrees))
-      return false;
-    const [hash, lane] = relative(worktrees, resolved).split(sep);
-    return hash !== undefined && lane !== undefined && /^debug-.+/.test(lane);
+    return readings(isAbsolute(path) ? path : `${start}${sep}${path}`).every((resolved) => {
+      if (resolved === start || inside(resolved, start))
+        return false;
+      if (!inside(resolved, worktrees))
+        return false;
+      const [hash, lane] = relative(worktrees, resolved).split(sep);
+      return hash !== undefined && lane !== undefined && /^debug-.+/.test(lane);
+    });
   } catch {
     return false;
   }
@@ -1130,10 +1154,12 @@ var longOption = (arg, full) => {
   return name.startsWith("--") && name.length >= 3 && full.startsWith(name);
 };
 var cluster = (arg, letters) => /^-[^-]/.test(arg) && [...arg.slice(1)].some((c) => letters.includes(c));
-function joinPath(base, path) {
+function joinPath(base, path, home) {
+  if (path === "~" || path.startsWith("~/"))
+    return `${(home ?? homedir2()).replace(/\/$/, "")}${path.slice(1)}`;
   if (isAbsolute2(path))
-    return resolve2(path);
-  return base === undefined ? undefined : resolve2(base, path);
+    return path;
+  return base === undefined ? undefined : `${base.replace(/\/$/, "")}/${path}`;
 }
 function checkGit(args, ctx, cwd) {
   const { agent, policy } = ctx;
@@ -1152,9 +1178,9 @@ function checkGit(args, ctx, cwd) {
       if (value === undefined)
         return refuse("git -C without a path");
       if (word === "-C")
-        tree = joinPath(tree, value);
+        tree = joinPath(tree, value, ctx.env.home);
     } else if (word.startsWith("-C")) {
-      tree = joinPath(tree, word.slice(2));
+      tree = joinPath(tree, word.slice(2), ctx.env.home);
     } else if (word.startsWith("-c")) {
       if (!SAFE_CONFIG.test(word.slice(2).split("=")[0] ?? ""))
         return refuse(`git ${word}`);
@@ -1170,7 +1196,7 @@ function checkGit(args, ctx, cwd) {
       if (value === undefined)
         return refuse(`git ${word} without a value`);
       if (name === "--work-tree")
-        tree = joinPath(tree, value);
+        tree = joinPath(tree, value, ctx.env.home);
       if (name === "--git-dir")
         gitDir = true;
     } else
@@ -1244,7 +1270,7 @@ function checkGit(args, ctx, cwd) {
         return refuse(`git worktree ${action}`);
       if (action === "add" || action === "remove") {
         const target = worktreeTarget(action, rest.slice(1));
-        const resolved = target === undefined ? undefined : joinPath(tree, target);
+        const resolved = target === undefined ? undefined : joinPath(tree, target, ctx.env.home);
         if (resolved === undefined || !scratch(resolved, ctx))
           return refuse(`git worktree ${action} outside a debug-* scratch worktree`);
       }
@@ -1276,7 +1302,7 @@ function checkRunner(runner, ctx, tree) {
     script = argv.slice(1).find((arg) => !arg.startsWith("-"));
   if (script === undefined)
     return;
-  const resolved = joinPath(tree, script);
+  const resolved = joinPath(tree, script, ctx.env.home);
   return resolved !== undefined && scratch(resolved, ctx) ? undefined : refuse(`${script}: a script outside a debug-* scratch worktree cannot be checked`);
 }
 function changesTree(sub, rest) {
@@ -1339,7 +1365,7 @@ function outputDestinations(sub, rest) {
 }
 function checkDestination(destination, tree, ctx) {
   const { startDir, home } = ctx.env;
-  const resolved = joinPath(tree, destination);
+  const resolved = joinPath(tree, destination, ctx.env.home);
   if (startDir === undefined || resolved === undefined)
     return "the destination or the start directory is unknown";
   if (scratch(resolved, ctx) || checkDebugWrite(resolved, { home, startDir }) === undefined)
@@ -1388,7 +1414,7 @@ function checkWords(input, ctx) {
   if (exe === "git") {
     let cwd = ctx.state.cwd;
     for (const directory of directories)
-      cwd = joinPath(cwd, directory);
+      cwd = joinPath(cwd, directory, ctx.env.home);
     return checkGit(args, ctx, cwd);
   }
   if ((INTERPRETERS.test(exe) || INLINE_CODE_RUNNERS.test(exe) && args.some((arg) => ["-e", "--eval", "-p", "--print"].includes(arg))) && args.some((arg) => MENTIONS_GIT.test(arg)))
@@ -1424,7 +1450,7 @@ function followDirectory(position, ctx) {
     ctx.state.cwd = undefined;
   else if (exe === "cd") {
     const target = argv[1];
-    ctx.state.cwd = ctx.trusted && target !== undefined && !target.startsWith("-") && !CD_UNSAFE.test(target) && argv.length === 2 ? joinPath(ctx.state.cwd, target) : undefined;
+    ctx.state.cwd = ctx.trusted && target !== undefined && !target.startsWith("-") && !CD_UNSAFE.test(target) && argv.length === 2 ? joinPath(ctx.state.cwd, target, ctx.env.home) : undefined;
   } else
     return false;
   return true;
@@ -1456,10 +1482,10 @@ function checkCommand(command, ctx) {
 }
 function startingDirectory(env) {
   if (env.workdir !== undefined && isAbsolute2(env.workdir))
-    return resolve2(env.workdir);
+    return env.workdir;
   if (env.startDir === undefined)
     return;
-  return env.workdir === undefined ? resolve2(env.startDir) : resolve2(env.startDir, env.workdir);
+  return env.workdir === undefined ? env.startDir : joinPath(env.startDir, env.workdir, env.home);
 }
 function forbiddenGit(command, agent, env = {}) {
   const policy = POLICIES[agent];

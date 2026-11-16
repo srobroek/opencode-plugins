@@ -1,4 +1,7 @@
-import { describe, expect, test } from "bun:test"
+import { afterAll, beforeAll, describe, expect, test } from "bun:test"
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { forbiddenGit, guardShellCall } from "./git-guard.ts"
 
 // Nothing here touches the disk: paths that do not exist resolve lexically.
@@ -407,6 +410,28 @@ describe("checkout boundary (debug only)", () => {
   test("the session's workdir is followed, and a call with no start directory is refused", () => {
     expect(forbiddenGit("git commit -m x", "debug", { home: HOME, startDir: CHECKOUT, workdir: "../.local/share/opencode/worktree/h1/debug-foo" })).toBeUndefined()
     expect(forbiddenGit("git commit -m x", "debug", { home: HOME })).toBeString()
+  })
+})
+
+describe("symlinks before dot-dot", () => {
+  let home = ""
+  beforeAll(() => {
+    home = realpathSync(mkdtempSync(join(tmpdir(), "modes-git-")))
+    mkdirSync(join(home, "repo/src"), { recursive: true })
+    mkdirSync(join(home, ".local/share/opencode/worktree/h1/debug-foo/src"), { recursive: true })
+    symlinkSync(join(home, "repo/src"), join(home, ".local/share/opencode/worktree/h1/debug-foo/up"))
+  })
+  afterAll(() => rmSync(home, { recursive: true, force: true }))
+  const real = () => ({ home, startDir: join(home, "repo"), workdir: `${home}/.local/share/opencode/worktree/h1/debug-foo` })
+
+  test("an output path that goes up from a scratch symlink lands in the checkout and is refused", () => {
+    const wt = real().workdir
+    expect(forbiddenGit(`git diff --output=${wt}/up/../x.patch`, "debug", real())).toBeString()
+    expect(forbiddenGit(`git diff --output=${wt}/src/../x.patch`, "debug", real())).toBeUndefined()
+  })
+  test("a worktree target that goes up from a scratch symlink is refused", () => {
+    const wt = real().workdir
+    expect(forbiddenGit(`git worktree add ${wt}/up/../debug-bar`, "debug", real())).toBeString()
   })
 })
 

@@ -16,7 +16,8 @@
  * worktree, but nothing else can be proven here.
  */
 
-import { isAbsolute, resolve } from "node:path"
+import { homedir } from "node:os"
+import { isAbsolute } from "node:path"
 import { commandWords } from "@srobroek/opencode-lib/command-words"
 import { type CommandPosition, type ParsedCommand, parse } from "@srobroek/opencode-lib/shell-command"
 import { isShellTool, shellCall } from "@srobroek/opencode-lib/tool-targets"
@@ -110,10 +111,15 @@ const longOption = (arg: string, full: string) => {
 /** Whether a short-option cluster such as `-dr` contains one of `letters`. */
 const cluster = (arg: string, letters: string) => /^-[^-]/.test(arg) && [...arg.slice(1)].some((c) => letters.includes(c))
 
-/** `path` resolved against `base`; undefined when a relative path has no known base. */
-function joinPath(base: string | undefined, path: string): string | undefined {
-  if (isAbsolute(path)) return resolve(path)
-  return base === undefined ? undefined : resolve(base, path)
+/**
+ * `path` placed after `base`, with `~/` expanded; undefined when a relative path has no known base.
+ * Nothing is normalised: `link/..` must reach the path guards as written, because only they know
+ * whether `link` is a symlink.
+ */
+function joinPath(base: string | undefined, path: string, home?: string): string | undefined {
+  if (path === "~" || path.startsWith("~/")) return `${(home ?? homedir()).replace(/\/$/, "")}${path.slice(1)}`
+  if (isAbsolute(path)) return path
+  return base === undefined ? undefined : `${base.replace(/\/$/, "")}/${path}`
 }
 
 /** Why `args` (the words after `git`) is refused for `policy`, or undefined. */
@@ -130,9 +136,9 @@ function checkGit(args: readonly string[], ctx: Ctx, cwd: string | undefined): s
       const value = args[++i]
       if (word === "-c" && (value === undefined || !SAFE_CONFIG.test(value.split("=")[0] ?? ""))) return refuse(`git -c ${value ?? ""}`)
       if (value === undefined) return refuse("git -C without a path")
-      if (word === "-C") tree = joinPath(tree, value)
+      if (word === "-C") tree = joinPath(tree, value, ctx.env.home)
     } else if (word.startsWith("-C")) {
-      tree = joinPath(tree, word.slice(2))
+      tree = joinPath(tree, word.slice(2), ctx.env.home)
     } else if (word.startsWith("-c")) {
       if (!SAFE_CONFIG.test(word.slice(2).split("=")[0] ?? "")) return refuse(`git ${word}`)
     } else if (word.startsWith("--exec-path")) {
@@ -147,7 +153,7 @@ function checkGit(args: readonly string[], ctx: Ctx, cwd: string | undefined): s
       const name = word.split("=")[0] as string
       const value = word.includes("=") ? word.slice(word.indexOf("=") + 1) : args[++i]
       if (value === undefined) return refuse(`git ${word} without a value`)
-      if (name === "--work-tree") tree = joinPath(tree, value)
+      if (name === "--work-tree") tree = joinPath(tree, value, ctx.env.home)
       if (name === "--git-dir") gitDir = true
     } else return refuse(`git option ${word}`)
   }
@@ -217,7 +223,7 @@ function checkGit(args: readonly string[], ctx: Ctx, cwd: string | undefined): s
       if (!["add", "list", "remove", "lock", "unlock", "move", "repair"].includes(action)) return refuse(`git worktree ${action}`)
       if (action === "add" || action === "remove") {
         const target = worktreeTarget(action, rest.slice(1))
-        const resolved = target === undefined ? undefined : joinPath(tree, target)
+        const resolved = target === undefined ? undefined : joinPath(tree, target, ctx.env.home)
         if (resolved === undefined || !scratch(resolved, ctx)) return refuse(`git worktree ${action} outside a debug-* scratch worktree`)
       }
       break
@@ -248,7 +254,7 @@ function checkRunner(runner: readonly string[], ctx: Ctx, tree: string | undefin
   if (first.includes("/")) script = first
   else if ((shell || INTERPRETERS.test(exe)) && !inline) script = argv.slice(1).find((arg) => !arg.startsWith("-"))
   if (script === undefined) return undefined
-  const resolved = joinPath(tree, script)
+  const resolved = joinPath(tree, script, ctx.env.home)
   return resolved !== undefined && scratch(resolved, ctx) ? undefined : refuse(`${script}: a script outside a debug-* scratch worktree cannot be checked`)
 }
 
@@ -322,7 +328,7 @@ function outputDestinations(sub: string, rest: readonly string[]): string[] | un
 /** Why a git output path is refused, or undefined when it lands in a scratch worktree or the debug ledger directory. */
 function checkDestination(destination: string, tree: string | undefined, ctx: Ctx): string | undefined {
   const { startDir, home } = ctx.env
-  const resolved = joinPath(tree, destination)
+  const resolved = joinPath(tree, destination, ctx.env.home)
   if (startDir === undefined || resolved === undefined) return "the destination or the start directory is unknown"
   if (scratch(resolved, ctx) || checkDebugWrite(resolved, { home, startDir }) === undefined) return undefined
   return "outside a debug-* scratch worktree and ~/.opencode/debug"
@@ -377,7 +383,7 @@ function checkWords(input: readonly string[], ctx: Ctx): string | undefined {
   if (/[*?[{]/.test(first) && (mentions || couldBeGit(first))) return "a glob or brace in command position could name git, so it cannot be checked"
   if (exe === "git") {
     let cwd = ctx.state.cwd
-    for (const directory of directories) cwd = joinPath(cwd, directory)
+    for (const directory of directories) cwd = joinPath(cwd, directory, ctx.env.home)
     return checkGit(args, ctx, cwd)
   }
   if (
@@ -415,7 +421,7 @@ function followDirectory(position: CommandPosition, ctx: Ctx): boolean {
     const target = argv[1]
     ctx.state.cwd =
       ctx.trusted && target !== undefined && !target.startsWith("-") && !CD_UNSAFE.test(target) && argv.length === 2
-        ? joinPath(ctx.state.cwd, target)
+        ? joinPath(ctx.state.cwd, target, ctx.env.home)
         : undefined
   } else return false
   return true
@@ -447,9 +453,9 @@ function checkCommand(command: string, ctx: Ctx): string | undefined {
 
 /** The directory a shell call starts in: its `workdir` against the session's start directory. */
 function startingDirectory(env: GitContext): string | undefined {
-  if (env.workdir !== undefined && isAbsolute(env.workdir)) return resolve(env.workdir)
+  if (env.workdir !== undefined && isAbsolute(env.workdir)) return env.workdir
   if (env.startDir === undefined) return undefined
-  return env.workdir === undefined ? resolve(env.startDir) : resolve(env.startDir, env.workdir)
+  return env.workdir === undefined ? env.startDir : joinPath(env.startDir, env.workdir, env.home)
 }
 
 /** Why `command` is refused for `agent`, or undefined when it may run. */

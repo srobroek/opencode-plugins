@@ -9,7 +9,7 @@
 
 import { lstatSync, readlinkSync } from "node:fs"
 import { homedir } from "node:os"
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
+import { dirname, isAbsolute, join, relative, sep } from "node:path"
 import { WRITE_TOOLS, writeTargets } from "@srobroek/opencode-lib/tool-targets"
 
 export type PathGuardOptions = {
@@ -28,7 +28,8 @@ const MAX_LINKS = 40
  * is then taken as written. Any other error, or too many links, throws so the caller fails closed.
  */
 export function canonical(path: string): string {
-  const pending = resolve(path).split(sep).filter((segment) => segment !== "")
+  // Not `resolve(path)`: that would collapse `link/..` lexically before the link is followed.
+  const pending = (isAbsolute(path) ? path : `${process.cwd()}${sep}${path}`).split(sep).filter((segment) => segment !== "")
   let current: string = sep
   let links = 0
   while (pending.length > 0) {
@@ -44,7 +45,7 @@ export function canonical(path: string): string {
       stats = lstatSync(next)
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
-      return resolve(join(next, ...pending))
+      return appendLexically(next, pending)
     }
     if (!stats.isSymbolicLink()) {
       current = next
@@ -56,6 +57,26 @@ export function canonical(path: string): string {
     pending.unshift(...target.split(sep).filter((part) => part !== ""))
   }
   return current
+}
+
+/** `base` followed by `segments`, with `.` and `..` applied by name (nothing is left to follow). */
+function appendLexically(base: string, segments: readonly string[]): string {
+  const parts = base.split(sep).filter((part) => part !== "")
+  for (const segment of segments) {
+    if (segment === "..") parts.pop()
+    else if (segment !== ".") parts.push(segment)
+  }
+  return sep + parts.join(sep)
+}
+
+/**
+ * The ways a tool may read a path: as the operating system does (symlinks first, then `..`), and as a
+ * tool that normalises `..` by name before it opens the file. A path must pass under both.
+ */
+function readings(path: string): string[] {
+  const absolute = isAbsolute(path) ? path : `${process.cwd()}${sep}${path}`
+  const lexical = appendLexically(sep, absolute.split(sep).filter((part) => part !== ""))
+  return [canonical(absolute), canonical(lexical)]
 }
 
 const inside = (path: string, root: string) => {
@@ -73,9 +94,16 @@ export function checkDebugWrite(target: string, options: PathGuardOptions): stri
 }
 
 function checkResolved(target: string, options: PathGuardOptions): string | undefined {
-  const home = canonical(options.home ?? homedir())
   const start = canonical(options.startDir)
-  const path = canonical(isAbsolute(target) ? target : resolve(start, target))
+  for (const path of readings(isAbsolute(target) ? target : `${start}${sep}${target}`)) {
+    const reason = checkReading(target, path, start, options)
+    if (reason !== undefined) return reason
+  }
+  return undefined
+}
+
+function checkReading(target: string, path: string, start: string, options: PathGuardOptions): string | undefined {
+  const home = canonical(options.home ?? homedir())
   if (path === start || inside(path, start)) return `${target} is inside the directory this session started in`
   if (inside(path, join(home, ".opencode", "debug"))) return undefined
   const worktrees = join(home, ".local", "share", "opencode", "worktree")
@@ -94,12 +122,13 @@ export function isScratchPath(path: string, options: PathGuardOptions): boolean 
   try {
     const home = canonical(options.home ?? homedir())
     const start = canonical(options.startDir)
-    const resolved = canonical(isAbsolute(path) ? path : resolve(start, path))
-    if (resolved === start || inside(resolved, start)) return false
     const worktrees = join(home, ".local", "share", "opencode", "worktree")
-    if (!inside(resolved, worktrees)) return false
-    const [hash, lane] = relative(worktrees, resolved).split(sep)
-    return hash !== undefined && lane !== undefined && /^debug-.+/.test(lane)
+    return readings(isAbsolute(path) ? path : `${start}${sep}${path}`).every((resolved) => {
+      if (resolved === start || inside(resolved, start)) return false
+      if (!inside(resolved, worktrees)) return false
+      const [hash, lane] = relative(worktrees, resolved).split(sep)
+      return hash !== undefined && lane !== undefined && /^debug-.+/.test(lane)
+    })
   } catch {
     return false
   }

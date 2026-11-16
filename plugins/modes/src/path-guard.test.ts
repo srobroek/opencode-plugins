@@ -24,6 +24,8 @@ beforeAll(() => {
   symlinkSync(join(worktrees, "debug-foo/chain-b"), join(worktrees, "debug-foo/chain-a"))
   symlinkSync(join(home, "repo/src/chained.ts"), join(worktrees, "debug-foo/chain-b"))
   symlinkSync("loop", join(worktrees, "debug-foo/loop"))
+  // a scratch symlink into a checkout subdirectory: `up/..` is the checkout, not the scratch worktree
+  symlinkSync(join(home, "repo/src"), join(worktrees, "debug-foo/up"))
 })
 afterAll(() => rmSync(home, { recursive: true, force: true }))
 
@@ -64,6 +66,13 @@ describe("checkDebugWrite", () => {
   test("a symlink loop fails closed", () => {
     expect(check(join(worktrees, "debug-foo/loop"))).toBeString()
   })
+  test("dot-dot after a symlink is applied to the link's target, not collapsed lexically", () => {
+    expect(check(`${worktrees}/debug-foo/up/../x.ts`)).toBeString()
+    expect(check(`${worktrees}/debug-foo/up/../../repo/x.ts`)).toBeString()
+  })
+  test("dot-dot that stays inside a plain scratch directory is allowed", () => {
+    expect(check(`${worktrees}/debug-foo/src/../a.ts`)).toBeUndefined()
+  })
   test("a symlink in the ledger directory that points elsewhere is refused", () => {
     expect(check(join(home, ".opencode/debug/escape/a.ts"))).toBeString()
   })
@@ -85,6 +94,10 @@ describe("isScratchPath", () => {
   test("a debug-* worktree and the files in it are scratch", () => {
     expect(scratch(join(worktrees, "debug-foo"))).toBe(true)
     expect(scratch(join(worktrees, "debug-foo/src/a.ts"))).toBe(true)
+  })
+  test("dot-dot after a scratch symlink into the checkout is not scratch", () => {
+    expect(scratch(`${worktrees}/debug-foo/up/..`)).toBe(false)
+    expect(scratch(`${worktrees}/debug-foo/src/..`)).toBe(true)
   })
   test("another lane, a nested debug-* directory, the checkout and a symlink out of the worktree are not", () => {
     expect(scratch(join(worktrees, "subagent-x"))).toBe(false)
