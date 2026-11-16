@@ -26,8 +26,9 @@ Read when a test needs a stand-in for a collaborator.
   - The contract owns the suite: valid and invalid fixtures, expected outputs, and for
     protocols recorded interaction transcripts, each replayed against the provider (recorded
     responses) and the consumer (recorded requests). Implementations run it; they do not fork it.
-  - A fixture that only one implementation passes means the contract is wrong or incomplete.
-    Fix the contract and the fixtures; do not special-case an implementation.
+  - When only one implementation passes a fixture, check the fixture against the specification.
+    If the fixture is right, fix the implementation; change the contract and its fixtures only
+    when they are wrong. Never special-case an implementation.
   - On a contract change, regenerate generated outputs in the same change. CI fails when
     generated types, docs or fixtures are stale (drift check in the `quality-code-design`
     skill's `contracts.md`).
