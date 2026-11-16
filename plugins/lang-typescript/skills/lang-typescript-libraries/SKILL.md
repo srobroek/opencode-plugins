@@ -7,7 +7,7 @@ metadata:
 
 # TypeScript library standards
 
-Checked 2026-11-12.
+Checked 2026-11-16.
 
 ## How to use
 
@@ -16,7 +16,7 @@ Checked 2026-11-12.
 - Otherwise use the default below. Use an alternative only for its listed condition.
 - A departure from both needs a named gap; report the departure and why.
 - Re-check fast-moving MCP, LLM SDK and OpenTelemetry releases on the registry before
-  adding them. Pin the chosen version. Commit the lockfile. A dependency the request did
+  adding them. Commit the lockfile. A dependency the request did
   not name needs approval, even when this guide lists it. A registry `latest` tag can point to a prerelease.
 - These defaults are engineering recommendations. Test the
   actual Node or Bun runtime, native binaries, adapters and instrumentation you ship.
@@ -56,12 +56,12 @@ Checked 2026-11-12.
 | LLM abstraction | `ai` `7` | Provider SDK when its native API is needed. |
 | CLI | `commander` `15`; `@clack/prompts` `1` | Bun/Node standard argument parsing for tiny CLIs. |
 | Configuration | Runtime env loading plus `zod` `4` | Validate once; do not expose server secrets to clients. |
-| Tests | `vitest` `5`; Bun's test runner on Bun | Match the repository runner and production runtime. |
+| Tests | `vitest` `5`; `bun test` on Bun; `node:test` for dependency-free Node libraries | One runner per project, matching the production runtime. Tables: [testing.md](references/testing.md). |
 | HTTP test doubles | `msw` `3` | Test Bun interception; real adapter tests remain necessary. |
-| Properties | `fast-check` `4` | Seed failures and retain shrunk regression cases. |
+| Properties | `fast-check` `4` | Seed failures and retain shrunk regression cases. Fuzz targets run on Node. |
 | Password hashing | `@node-rs/argon2` `2` | Bun native password APIs when intentionally Bun-only. |
 | Feature flags | `@openfeature/server-sdk` `1` | Inject a provider and define outage defaults. |
-| Build and quality | `typescript` `7`; repository lint/build | `tsdown` `0.23` for new libraries; no bundled type-check assumption. |
+| Build and quality | `typescript` `7`; `@biomejs/biome` `2` for lint and format | ESLint only for named gaps; `tsdown` `0.23` for new libraries; no bundled type-check assumption. Tables: [quality.md](references/quality.md). |
 
 ## References
 
@@ -74,6 +74,7 @@ Checked 2026-11-12.
 | [aws.md](references/aws.md) | Lambda and service clients. |
 | [ai.md](references/ai.md) | MCP and model integrations. |
 | [cli.md](references/cli.md) | Terminal interfaces and settings. |
-| [testing.md](references/testing.md) | Runtime tests and boundary verification. |
+| [testing.md](references/testing.md) | Test runner, property, fuzz, mutation, coverage and boundary verification. |
+| [quality.md](references/quality.md) | Lint, format, types, SAST, audit, dead code, complexity, API breaks and docs. |
 | [security.md](references/security.md) | Security controls and scanners. |
 | [runtime.md](references/runtime.md) | Deployment and shared runtime helpers. |

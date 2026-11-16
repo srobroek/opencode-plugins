@@ -2,12 +2,13 @@
 
 Choose supported runtimes and build tools, then add resilience or architecture helpers only for a named need.
 
-Checked 2026-11-12.
+Checked 2026-11-16.
+
+Type checking, docs generation and API-break rows live in [quality.md](quality.md).
 
 | Concern | Default | Use instead when | Avoid (why) |
 | --- | --- | --- | --- |
 | Runtime | Node `24` LTS for portable production; Bun `1.4` for Bun projects | Node `26` when its supported deployment/features are required. | Current releases as a substitute for deployment support policy; unsupported runtime floors. |
-| Type checking | `typescript` `7` through the repository script | Existing pinned compiler during a reviewed migration. | Node type stripping/Bun transpilation as type checking; unsupported syntax assumptions. |
 | Packaging | Explicit package exports and one reviewed module strategy | Existing CJS/dual package contract when consumers need it. | Unnecessary dual packages, broad barrel exports or accidental internal exports. |
 | Library build | `tsdown` `0.23` for a new bundled library | Existing compiler/build tool; Bun bundler for Bun-specific distribution. | Adopting a replacement solely from this list; bundling optional runtime dependencies blindly. |
 | App build | Existing framework tool; `vite` `8` for web apps | Bun bundler for Bun-targeted apps; `esbuild` `0.28` for direct bundles; `rolldown` `1` for custom tooling. | Bun-target bundles on Node; one bundle/config for browser and server secrets; assuming bundling checks types. |
@@ -27,7 +28,6 @@ Checked 2026-11-12.
 | Local event bus | `node:events` for Node servers | `mitt` `3` for tiny cross-runtime events; `eventemitter3` `5` for existing integrations. | Hiding dependencies behind events; local emitters as durable messaging. |
 | Utilities | Standard library | `es-toolkit` `1` for missing helpers; `remeda` `2` for typed pipelines; `immer` `11` for substantial immutable updates; `lodash-es` `4` for existing compatibility. | New utility dependency for one trivial operation or indiscriminate helper imports. |
 | Equality | Node `isDeepStrictEqual` or domain-specific comparison | `fast-deep-equal` `3` when its semantics fit. | Assuming different equality implementations handle prototypes, maps and cycles identically. |
-| Documentation | `typedoc` `0.28` for public TypeScript APIs | `@microsoft/api-extractor` `7` for declaration/API report governance. | Generated docs as a substitute for usage/contracts; unreviewed public API changes. |
 | Releases | Existing repository release automation | `@changesets/cli` `3` for multi-package release notes; `release-please` `17` for release PRs; `semantic-release` `25` for commit-driven publishing. | Competing release owners or new release tooling without approval. |
 | Frontend | `react` `19`, `vite` `8` when a React frontend is actually needed | `@tanstack/react-query` `5` for remote state, `@tanstack/react-router` `1` for typed routing, `tailwindcss` `4` for utility styling; existing UI stack wins. | Adding frontend libraries to backends; assuming copied shadcn/ui components update like runtime packages. |
 
@@ -52,4 +52,4 @@ Checked 2026-11-12.
 - [Node releases](https://nodejs.org/en/about/previous-releases), [Node TypeScript](https://nodejs.org/api/typescript.html), [Node `26`](https://nodejs.org/en/blog/release/v26.0.0).
 - [Bun `1.4`](https://bun.com/blog/bun-v1.4), [Bun bundler](https://bun.com/docs/bundler), [Bun Docker](https://bun.com/docs/guides/ecosystem/docker).
 - [tsdown](https://tsdown.dev/), [OpenFeature](https://openfeature.dev/docs/reference/technologies/server/javascript/), [Cockatiel](https://github.com/connor4312/cockatiel).
-- [TypeDoc](https://typedoc.org/), [API Extractor](https://api-extractor.com/), [Changesets](https://github.com/changesets/changesets), [registry metadata](https://registry.npmjs.org/).
+- [Changesets](https://github.com/changesets/changesets), [registry metadata](https://registry.npmjs.org/).
