@@ -183,7 +183,8 @@ async function commitIn(
 ): Promise<ToolOutput> {
   const located = await git(["rev-parse", "--show-toplevel", "--show-prefix"])
   if (!located.ok) return refuse(located.reason)
-  const [toplevel = "", base = ""] = located.stdout.split("\n").map((line) => line.trim())
+  // Split on the newline delimiters only: a path may itself end in whitespace.
+  const [toplevel = "", base = ""] = located.stdout.split("\n")
   // The repository git found must be the one holding this workspace (core.worktree and the like can point elsewhere).
   if (resolve(toplevel, base) !== realpathOrSelf(workspace))
     return refuse(`refused: git resolved the workspace to ${resolve(toplevel, base)}, not ${workspace}`)

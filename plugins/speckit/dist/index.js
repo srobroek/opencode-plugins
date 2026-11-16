@@ -1100,7 +1100,7 @@ async function commitIn(request, workspace, git, index) {
   if (!located.ok)
     return refuse(located.reason);
   const [toplevel = "", base = ""] = located.stdout.split(`
-`).map((line) => line.trim());
+`);
   if (resolve2(toplevel, base) !== realpathOrSelf(workspace))
     return refuse(`refused: git resolved the workspace to ${resolve2(toplevel, base)}, not ${workspace}`);
   const parent = await git(["rev-parse", "-q", "--verify", "HEAD^{commit}"]);

@@ -317,6 +317,22 @@ describe("executeCommit", () => {
     })
   })
 
+  test("commits in a repository whose directory name ends in a space", async () => {
+    const parent = realpathSync(mkdtempSync(join(tmpdir(), "speckit-commit-space-")))
+    const spaced = join(parent, "repo ")
+    try {
+      cpSync(repo, spaced, { recursive: true })
+      mkdirSync(join(spaced, "specs", "001-a"), { recursive: true })
+      writeFileSync(join(spaced, "specs", "001-a", "spec.md"), "x\n")
+      const result = await executeCommit({ message: "x" }, spaced)
+      expect(result.metadata.ok).toBe(true)
+      const show = Bun.spawnSync(["git", "show", "--name-only", "--format=", "HEAD"], { cwd: spaced, stdout: "pipe" })
+      expect(show.stdout.toString().trim()).toBe("specs/001-a/spec.md")
+    } finally {
+      rmSync(parent, { recursive: true, force: true })
+    }
+  })
+
   test("reports nothing to commit when the artifacts are unchanged", async () => {
     const result = await executeCommit({ message: "x" }, repo)
     expect(result.metadata.ok).toBe(false)
