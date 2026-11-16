@@ -2642,6 +2642,13 @@ var START_DESCRIPTION = `Start or resume a spec workflow, with an explicit routi
 ` + "Persists and reads back the answer, reuses it on resume, and requires separate consent to migrate an existing gated run. Holds the Beads store's write lock for the whole start. Returns CHOICE_REQUIRED or MIGRATION_REQUIRED with a question to ask the user, READY when the run can advance, or INCOMPLETE (store-lock wait ran out, a bd command passed its bound, or cancellation) with the step reached and whether a pour was issued; inspect the run before retrying. Reviews, tests and safety confirmations remain required.";
 var within = (base, path) => path === undefined ? base : isAbsolute7(path) ? path : resolve6(base, path);
 var record = (input) => input !== null && typeof input === "object" && !Array.isArray(input) ? input : {};
+function toolDirectory(input, session, speckitWorkspace) {
+  return record(input).workspace === undefined ? speckitWorkspace(session) ?? session : session;
+}
+function setupTarget(input, directory) {
+  const workspace = record(input).workspace;
+  return typeof workspace === "string" && workspace !== "" ? resolve6(directory, workspace) : directory;
+}
 function readSetupParams(input) {
   const value = record(input);
   const params = {};
@@ -2763,10 +2770,7 @@ async function setupSpeckit(ctx, overrides = {}) {
   const locations = locationDirectories(ctx);
   const projectRoot = locations[1];
   const hasWorkspace = (dir) => speckitWorkspace(dir, projectRoot) !== undefined;
-  const workspace = async (sessionID) => {
-    const dir = await directory(sessionID);
-    return speckitWorkspace(dir, projectRoot) ?? dir;
-  };
+  const workspace = async (sessionID, input) => toolDirectory(input, await directory(sessionID), (dir) => speckitWorkspace(dir, projectRoot));
   const assert = (context, action, resource, metadata) => ctx.permission.assert({
     sessionID: context.sessionID,
     agent: context.agent,
@@ -2808,15 +2812,16 @@ async function setupSpeckit(ctx, overrides = {}) {
         description: SETUP_DESCRIPTION,
         input: setupInput(options.integration),
         execute: async (input, context) => {
-          const cwd = await workspace(context.sessionID);
+          const cwd = await workspace(context.sessionID, input);
           await assert(context, SETUP_TOOL, cwd, { ...input });
           const result = await executeSetup(input, cwd, options.integration, context.signal);
-          if (locations.includes(cwd)) {
+          const target = setupTarget(input, cwd);
+          if (locations.includes(target)) {
             active = await probe(location);
             await refreshSkills?.();
             await registerSpecAgent();
           }
-          if (workflow !== undefined && usesSpeckit(cwd) && await workflow.latch.lacks(context.sessionID))
+          if (workflow !== undefined && usesSpeckit(target) && await workflow.latch.lacks(context.sessionID))
             return { ...result, content: `${result.content}
 
 ${workflow.text}` };
@@ -2828,7 +2833,7 @@ ${workflow.text}` };
         description: START_DESCRIPTION,
         input: START_INPUT,
         execute: async (input, context) => {
-          const cwd = await workspace(context.sessionID);
+          const cwd = await workspace(context.sessionID, input);
           const spec = input?.spec;
           await assert(context, START_TOOL, typeof spec === "string" ? spec : "*", {
             ...input

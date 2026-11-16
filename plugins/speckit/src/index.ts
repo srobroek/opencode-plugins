@@ -22,6 +22,8 @@ import {
   START_INPUT,
   START_TOOL,
   setupInput,
+  setupTarget,
+  toolDirectory,
 } from "./tools.ts"
 import { speckitWorkspace, usesSpeckit, workflowLatch } from "./workflow.ts"
 
@@ -99,11 +101,9 @@ export async function setupSpeckit(ctx: Context, overrides: Overrides = {}): Pro
   const locations = locationDirectories(ctx)
   const projectRoot = locations[1]
   const hasWorkspace = (dir: string) => speckitWorkspace(dir, projectRoot) !== undefined
-  // The tools' default directory: the session's SpecKit workspace, else the session's directory.
-  const workspace = async (sessionID: string) => {
-    const dir = await directory(sessionID)
-    return speckitWorkspace(dir, projectRoot) ?? dir
-  }
+  // The directory a tool call resolves against; an explicit `workspace` input stays relative to the session.
+  const workspace = async (sessionID: string, input?: unknown) =>
+    toolDirectory(input, await directory(sessionID), (dir) => speckitWorkspace(dir, projectRoot))
 
   const assert = (context: ToolContext, action: string, resource: string, metadata: Record<string, unknown>) =>
     ctx.permission.assert({
@@ -152,16 +152,17 @@ export async function setupSpeckit(ctx: Context, overrides: Overrides = {}): Pro
         description: SETUP_DESCRIPTION,
         input: setupInput(options.integration),
         execute: async (input, context) => {
-          const cwd = await workspace(context.sessionID)
+          const cwd = await workspace(context.sessionID, input)
           await assert(context, SETUP_TOOL, cwd, { ...(input as Record<string, unknown>) })
           const result = await executeSetup(input, cwd, options.integration, context.signal)
-          if (locations.includes(cwd)) {
+          const target = setupTarget(input, cwd)
+          if (locations.includes(target)) {
             active = await probe(location)
             await refreshSkills?.()
             await registerSpecAgent()
           }
           // The system prompt stays as the session's first request had it; the workflow arrives here instead.
-          if (workflow !== undefined && usesSpeckit(cwd) && (await workflow.latch.lacks(context.sessionID)))
+          if (workflow !== undefined && usesSpeckit(target) && (await workflow.latch.lacks(context.sessionID)))
             return { ...result, content: `${result.content}\n\n${workflow.text}` }
           return result
         },
@@ -171,7 +172,7 @@ export async function setupSpeckit(ctx: Context, overrides: Overrides = {}): Pro
         description: START_DESCRIPTION,
         input: START_INPUT,
         execute: async (input, context) => {
-          const cwd = await workspace(context.sessionID)
+          const cwd = await workspace(context.sessionID, input)
           const spec = (input as { spec?: unknown } | null)?.spec
           await assert(context, START_TOOL, typeof spec === "string" ? spec : "*", {
             ...(input as Record<string, unknown>),

@@ -289,6 +289,43 @@ describe("nested location inside a SpecKit project root", () => {
       expect(result.metadata.ok).toBe(true)
       expect(git(root, "show", "--name-only", "--format=", "HEAD")).toBe("specs/001-a/spec.md")
       await cleanup()
+    }), 30_000) // several real git processes, slow on a loaded machine
+})
+
+describe("an explicit workspace input resolves against the session directory", () => {
+  // outer/repo holds SpecKit; the session runs in outer/repo/pkg and names ".." (outer/repo).
+  const layout = async (run: (outer: string, repo: string, pkg: string) => Promise<void>) => {
+    const outer = realpathSync(mkdtempSync(join(tmpdir(), "speckit-explicit-")))
+    const repo = join(outer, "repo")
+    const pkg = join(repo, "pkg")
+    try {
+      for (const path of [pkg, join(repo, ".specify"), join(repo, ".beads")]) mkdirSync(path, { recursive: true })
+      await run(outer, repo, pkg)
+    } finally {
+      rmSync(outer, { recursive: true, force: true })
+    }
+  }
+  const context = { sessionID: "ses_main", agent: "spec", messageID: "msg_1", id: "call_1", signal: new AbortController().signal }
+  type Execute = (input: unknown, ctx: unknown) => Promise<{ content: string }>
+
+  test("speckit_setup", () =>
+    layout(async (outer, repo, pkg) => {
+      const { fake, cleanup } = await start({ directory: pkg, project: repo })
+      const execute = fake.tools.get("speckit_setup")?.execute as Execute
+      await execute({ workspace: "..", skipSpecify: true, skipBeads: true }, context)
+      expect(existsSync(join(repo, ".gitignore"))).toBe(true)
+      expect(existsSync(join(outer, ".gitignore"))).toBe(false)
+      await cleanup()
+    }))
+
+  test("speckit_start", () =>
+    layout(async (_outer, repo, pkg) => {
+      const { fake, cleanup } = await start({ directory: pkg, project: repo })
+      const execute = fake.tools.get("speckit_start")?.execute as Execute
+      // outer/repo/.beads exists, so the start gets past the lookup that outer/.beads would fail.
+      const result = await execute({ spec: "001-a", workspace: ".." }, context)
+      expect(result.content).toContain("Canonical embedded store unavailable")
+      await cleanup()
     }))
 })
 

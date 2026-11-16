@@ -80,6 +80,25 @@ const within = (base: string, path: string | undefined) =>
 const record = (input: unknown): Record<string, unknown> =>
   input !== null && typeof input === "object" && !Array.isArray(input) ? (input as Record<string, unknown>) : {}
 
+/**
+ * The directory a tool call resolves its paths against: the session directory when the
+ * input names a `workspace` (relative to the session, as the caller wrote it), else the
+ * session's SpecKit workspace, else the session directory.
+ */
+export function toolDirectory(
+  input: unknown,
+  session: string,
+  speckitWorkspace: (directory: string) => string | undefined,
+): string {
+  return record(input).workspace === undefined ? (speckitWorkspace(session) ?? session) : session
+}
+
+/** The repository `speckit_setup` bootstraps for this input, as `runSetup` resolves it. */
+export function setupTarget(input: unknown, directory: string): string {
+  const workspace = record(input).workspace
+  return typeof workspace === "string" && workspace !== "" ? resolve(directory, workspace) : directory
+}
+
 /** Validate `speckit_setup` input, or return why it is unusable. */
 export function readSetupParams(input: unknown): SetupParams | string {
   const value = record(input)
