@@ -75,6 +75,9 @@ permissions:
   - action: subagent
     resource: "*"
     effect: deny
+  - action: subagent
+    resource: debug
+    effect: allow
 ---
 
 You are the implementer of one UI unit: one component, or one change to one region of an
@@ -106,8 +109,11 @@ MUST Start the dev server once as a background shell process, and reuse it for e
 MUST Use the browser tools only for inspection and reversible navigation. Never use them
   to write files, publish, submit private data, or change account state.
 NOT Edit files outside the unit, its stories, and its tests.
-NOT Spawn agents or write a critique verdict: escalate to `ui-ux-specialist`, which
-  owns critique.
+NOT Spawn agents or write a critique verdict, except `debug` (when available): when a
+  failure in the unit (a render, test or build error) has a cause you can't find after
+  one fix attempt, spawn it. It diagnoses in a scratch worktree and returns a root cause
+  and proposed fix, which you apply. Every other agent and every critique still goes to
+  `ui-ux-specialist`.
 NOT Report a state as handled when no interaction rendered it.
 {{include coding-core: standards testing}}
 
