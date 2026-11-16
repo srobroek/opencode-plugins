@@ -24,8 +24,8 @@ The journey is **spec-informed but independently owned**: read whatever
 change record exists -- feature spec, merged PRs, diff, design docs, the
 running feature itself -- to learn intended behavior. Record references in
 `trace:` (repo's own vocabulary). Never copy acceptance scenarios verbatim;
-a journey describes what a *user* does and observes end to end, which may
-span many specs and includes glue no spec contains.
+a journey describes what a *user* does and observes end to end, which spans
+many specs and includes glue no spec contains.
 
 ## Elicitation -- the grilling protocol
 
@@ -113,7 +113,7 @@ Classify the change first (FORMAT.md, "three change species"):
 Rewrite, don't transliterate: extract goal, preconditions, user-visible
 steps and assertions from the legacy doc; drop tool-specific mechanics into
 the relevant README.md interface profile notes instead of the journey.
-Carry over known-gaps honestly. Legacy history does not become delta
+Carry over known-gaps. Legacy history does not become delta
 entries -- the new journey starts at `version: 1` as current truth, with the
 legacy doc linked in `trace:`. Propose deleting or pointer-stubbing the
 legacy doc; let the user decide.

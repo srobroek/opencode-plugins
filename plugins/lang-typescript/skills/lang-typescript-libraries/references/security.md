@@ -8,18 +8,18 @@ Checked 2026-11-16.
 | Concern | Default | Use instead when | Avoid (why) |
 | --- | --- | --- | --- |
 | Cryptography | Runtime Web Crypto or Node `node:crypto` | Existing reviewed SDK for the application's encryption/key-management protocol. | Handwritten primitives, insecure random numbers, or encryption without an authenticated mode. |
-| Password hashing | `@node-rs/argon2` `2` with reviewed Argon2id parameters | Bun native password API for Bun-only deployments. | Fast hashes for passwords; native packages without target/runtime tests. |
-| JOSE/JWT | `jose` `6` | `aws-jwt-verify` `5` for Cognito-specific policy. | Decode-only auth; unchecked issuer/audience/token use/algorithm; unbounded JWKS retrieval. |
-| Secrets | Platform secret store; Powertools Parameters `2` cached retrieval on Lambda | Existing secrets injection/agent when deployment owns refresh. | Checked-in env values; logs, prompts or test fixtures containing credentials. |
+| Password hashing | `@node-rs/argon2` `>= 2` with reviewed Argon2id parameters | Bun native password API for Bun-only deployments. | Fast hashes for passwords; native packages without target/runtime tests. |
+| JOSE/JWT | `jose` `>= 6` | `aws-jwt-verify` `>= 5` for Cognito-specific policy. | Decode-only auth; unchecked issuer/audience/token use/algorithm; unbounded JWKS retrieval. |
+| Secrets | Platform secret store; Powertools Parameters `>= 2` cached retrieval on Lambda | Existing secrets injection/agent when deployment owns refresh. | Checked-in env values; logs, prompts or test fixtures containing credentials. |
 | SSRF | URL allowlist, network egress policy, redirect/address validation | Existing vetted transport integration when it enforces those controls for the deployed runtime. | A Node-agent filter assumed to protect Bun native fetch; validating only the initial URL before redirects/DNS changes. |
-| HTML/content | `sanitize-html` `2` server; `dompurify` `3` browser | Framework escaping for plain text; current DOM implementation when server DOMPurify is required. | Regex sanitizers; modifying sanitized HTML; unsafe Markdown output. |
-| Secret scanning | Offline `betterleaks` `1` or `gitleaks` `8` changed-content hook | `trufflehog` `3` history/verification scan; push protection where available. | Verified-only policy: it misses unverifiable secrets; duplicate mandatory scanners. |
-| SBOM | `@cyclonedx/cyclonedx-npm` `7` for npm-supported workflows | Existing artifact/container SBOM generator for Bun or deployed images. | Assuming npm lockfile semantics match Bun lockfiles; SBOM generation without deployment identity. |
-| Artifact SBOM | `syft` `1` for images/artifacts | `cdxgen` `13` tool release for supported source dependencies; verify the npm distribution separately. | Ignoring native binaries or image OS packages in a package-only inventory. |
-| Licences | `license-checker-rseidelsohn` `5` dependency report plus policy review | `licensee` `10` for repository licence detection, not dependency compliance. | Inferring licence compliance from package availability; ignoring transitive/native assets. |
-| Dependency updates | One existing updater, `renovate` `44` or Dependabot | `lockfile-lint` `5` where the lockfile format is supported. | Competing bots; auto-merging unreviewed major updates; missing cooldown/provenance checks. |
-| Container assurance | `grype` `0.121` plus `syft` `1` | `trivy` `0.76` only with explicit artifact/action integrity review; `hadolint` `2` for Dockerfiles. | Ignoring Trivy's documented March `2026` supply-chain compromise or trusting mutable action tags. |
-| Workflow security | `zizmor` `1`, `actionlint` `1`, SHA pinning with `pinact` `5` when workflows exist | Existing organization workflow controls. | Assuming a pinned wrapper secures every transitive action/download. |
+| HTML/content | `sanitize-html` `>= 2` server; `dompurify` `>= 3` browser | Framework escaping for plain text; current DOM implementation when server DOMPurify is required. | Regex sanitizers; modifying sanitized HTML; unsafe Markdown output. |
+| Secret scanning | Offline `betterleaks` `>= 1` or `gitleaks` `>= 8` changed-content hook | `trufflehog` `>= 3` history/verification scan; push protection where available. | Verified-only policy: it misses unverifiable secrets; duplicate mandatory scanners. |
+| SBOM | `@cyclonedx/cyclonedx-npm` `>= 7` for npm-supported workflows | Existing artifact/container SBOM generator for Bun or deployed images. | Assuming npm lockfile semantics match Bun lockfiles; SBOM generation without deployment identity. |
+| Artifact SBOM | `syft` `>= 1` for images/artifacts | `cdxgen` `>= 13` tool release for supported source dependencies; verify the npm distribution separately. | Ignoring native binaries or image OS packages in a package-only inventory. |
+| Licences | `license-checker-rseidelsohn` `>= 5` dependency report plus policy review | `licensee` `>= 10` for repository licence detection, not dependency compliance. | Inferring licence compliance from package availability; ignoring transitive/native assets. |
+| Dependency updates | One existing updater, `renovate` `>= 44` or Dependabot | `lockfile-lint` `>= 5` where the lockfile format is supported. | Competing bots; auto-merging unreviewed major updates; missing cooldown/provenance checks. |
+| Container assurance | `grype` `>= 0.121` plus `syft` `>= 1` | `trivy` `>= 0.76` only with explicit artifact/action integrity review; `hadolint` `>= 2` for Dockerfiles. | Ignoring Trivy's documented March `2026` supply-chain compromise or trusting mutable action tags. |
+| Workflow security | `zizmor` `>= 1`, `actionlint` `>= 1`, SHA pinning with `pinact` `>= 5` when workflows exist | Existing organization workflow controls. | Assuming a pinned wrapper secures every transitive action/download. |
 
 ## Rules
 

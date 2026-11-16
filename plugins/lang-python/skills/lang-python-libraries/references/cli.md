@@ -6,13 +6,13 @@ Checked 2026-11-12.
 
 | Concern | Default | Use instead when | Avoid (why) |
 | --- | --- | --- | --- |
-| Commands | `typer` `0.29` for familiar typed CLIs | `argparse` for dependency-free tools; `click` `8` for explicit mature composition; `cyclopts` `5` for richer type/docstring handling | Migration solely for claimed speed; hidden CLI signature changes |
-| Human output | `rich` `15` | Plain output for pipes/JSON; existing terminal renderer | ANSI decoration or progress bars in machine-readable stdout |
-| Interactive prompts | `prompt_toolkit` `3` | Framework's simple confirmation API for a basic prompt | Full-screen framework for one prompt; interactive prompts in unattended runs |
-| Full TUI | `textual` `8` | Native GUI toolkit when a terminal/browser UI is unsuitable | Calling Textual a native desktop-widget toolkit |
-| Typed service/CLI settings | `pydantic-settings` `2`, validate at startup | Explicit stdlib configuration for small libraries; `dynaconf` `3` for layered files/environments/sources | Implicit working-directory `.env` discovery; application settings imported by reusable libraries |
-| Config files | `tomllib` on Python `3.11` or later; `json` | `tomlkit` `0.15` for comment-preserving editing; `PyYAML` `6` safe loader for existing YAML | Lossy config rewriting; unsafe YAML loaders |
-| Config writing | `tomli-w` `1` | `tomlkit` `0.15` when retaining user formatting | Treating a writer as a lossless parser/editor |
+| Commands | `typer` `>= 0.29` for familiar typed CLIs | `argparse` for dependency-free tools; `click` `>= 8` for explicit mature composition; `cyclopts` `>= 5` for richer type/docstring handling | Migration solely for claimed speed; hidden CLI signature changes |
+| Human output | `rich` `>= 15` | Plain output for pipes/JSON; existing terminal renderer | ANSI decoration or progress bars in machine-readable stdout |
+| Interactive prompts | `prompt_toolkit` `>= 3` | Framework's simple confirmation API for a basic prompt | Full-screen framework for one prompt; interactive prompts in unattended runs |
+| Full TUI | `textual` `>= 8` | Native GUI toolkit when a terminal/browser UI is unsuitable | Calling Textual a native desktop-widget toolkit |
+| Typed service/CLI settings | `pydantic-settings` `>= 2`, validate at startup | Explicit stdlib configuration for small libraries; `dynaconf` `>= 3` for layered files/environments/sources | Implicit working-directory `.env` discovery; application settings imported by reusable libraries |
+| Config files | `tomllib` on Python `3.11` or later; `json` | `tomlkit` `>= 0.15` for comment-preserving editing; `PyYAML` `>= 6` safe loader for existing YAML | Lossy config rewriting; unsafe YAML loaders |
+| Config writing | `tomli-w` `>= 1` | `tomlkit` `>= 0.15` when retaining user formatting | Treating a writer as a lossless parser/editor |
 | Shared command policy | Explicit startup/shutdown and command hooks/decorators | Common wrapper for shared auth/config/telemetry | Hidden business dependencies in command middleware; logger/provider setup per subcommand |
 
 ## Head-to-head

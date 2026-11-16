@@ -67,8 +67,8 @@ Checked 2026-11-16.
 
 | Concern | Default | Use instead when | Avoid (why) |
 | --- | --- | --- | --- |
-| Unsafe inventory | `cargo-geiger` `0.14` for review targeting | Direct unsafe-boundary audit | Unsafe count as risk score or safety proof. |
-| Dependency review | `cargo-vet` `0.10` | Existing equivalent reviewed trust policy | Provenance mistaken for harmless code. |
+| Unsafe inventory | `cargo-geiger` `>= 0.14` for review targeting | Direct unsafe-boundary audit | Unsafe count as risk score or safety proof. |
+| Dependency review | `cargo-vet` `>= 0.10` | Existing equivalent reviewed trust policy | Provenance mistaken for harmless code. |
 | Library docs lint | `missing_docs` for published libraries; docs.rs metadata | Private crates | `#![deny(missing_docs)]` on binaries. |
 | Unsafe policy | `#![forbid(unsafe_code)]` where no unsafe is needed | Audited unsafe modules with Miri coverage | Blanket `allow(unsafe_code)`. |
 

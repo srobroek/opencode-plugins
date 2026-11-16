@@ -62,7 +62,7 @@ the rest run in parallel.
 4. **Reindex once** per wave: `journeys_index` command `index` (or
    `python3 <journeys-dir>/journeys.py index <journeys-dir>` when using the copied helper), then lint.
 5. **Commit** journeys-dir changes as
-   `journey(J<id>): validate v<version> — <result>` -- unless the caller or
+   `journey(J<id>): validate v<version> -- <result>` -- unless the caller or
    repo workflow forbids committing; then leave uncommitted and say so.
 
 ## Journeys and E2E specs

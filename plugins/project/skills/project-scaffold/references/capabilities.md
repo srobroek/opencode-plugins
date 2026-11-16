@@ -63,7 +63,7 @@ Ask first whether Terraform or OpenTofu is the baseline (`toolchain-infrastructu
 only when application code and AWS constructs are tightly coupled. If chosen:
 
 - Destination `infrastructure/` (repo-relative, ask if different). Generate with the
-  CDK's own init, pinned to an exact stable `aws-cdk` version: `bunx aws-cdk@<x.y.z> init app
+  CDK's own init, at least a stable `aws-cdk` version: `bunx aws-cdk@<x.y.z> init app
   --language typescript` in an empty scratch directory, then move the result in and drop what
   an npm-package template adds that this repo does not need (its own git repo, duplicate
   lockfiles). Do not template CDK code by hand.

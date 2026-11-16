@@ -95,5 +95,5 @@ be prompted:
 
 Each validator records its journey's run and findings. The coordinator alone
 updates the shared `INDEX.md` and `TRACKER.md` and commits journeys-directory
-changes per wave. The filesystem safety checks are preflight checks, not locks
-against concurrent writers.
+changes per wave. The filesystem safety checks are preflight checks and give no
+lock against concurrent writers.

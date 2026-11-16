@@ -26,8 +26,8 @@ project is missing.
 - Prefer the project's own tool manager: a dev dependency in the manifest (`package.json`,
   `pyproject.toml` dependency groups, `go.mod` `tool` directives, `Cargo.toml`), then
   `mise.toml`, then the system package manager.
-- Use the latest release the manager offers. The Maintenance cell gives a minimum version,
-  not a pin. Record the version you used in the report. A project lockfile still pins what
+- Use the latest release the manager offers. The Maintenance cell gives a minimum version.
+  Record the version you used in the report. A project lockfile still pins what
   the project already resolved.
 - When the user declines, or the tool cannot run on this platform, use the row's fallback
   where it has one and report the gap.
@@ -177,7 +177,7 @@ and quality rows in `quality.md`. Each concern appears in exactly one file.
 | Column | Allowed values |
 | --- | --- |
 | Concern | The concern id in backticks |
-| Default | A backticked tool name, optionally followed by a short note; `Built-in: <feature>`; `Shared: <shared-tool-id>`; `Inherits: <language-id>`; `N/A: <reason>`, only where the concern allows N/A for this kind; `No maintained tool: <fallback>` |
+| Default | A backticked tool name, optionally followed by a short note, `Built-in: <feature>`, `Shared: <shared-tool-id>`, `Inherits: <language-id>`, `N/A: <reason>`, only where the concern allows N/A for this kind, `No maintained tool: <fallback>` |
 | Maintenance | `>= <minimum version> · <latest release date YYYY-MM-DD> · <status>`, status one of `active`, `maintenance`, `beta`, `pre-1.0`, `preview`. `-` for Shared, Inherits, N/A and No maintained tool; `-` or the full form for Built-in. A deprecated or archived tool is never a Default |
 | Install | `` `<detect command>` · `<install command>` `` for a tool. `Built-in`, `Shared`, `Inherits`, or `-` for N/A and No maintained tool |
 | Alternatives | `None`, or `tool: condition` items separated by `; ` |

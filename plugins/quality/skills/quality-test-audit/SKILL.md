@@ -22,7 +22,7 @@ skill's `references/practice.md`.
    - Before you run a runner, coverage or mutation tool, follow the install policy in the
      `toolchain-languages` skill's `references/concerns.md`: detect the tool, recommend the
      install command and ask permission before installing. A missing tool the user
-     declines is a recorded gap, not a reason to skip the check silently.
+     declines is a recorded gap. Do not skip the check silently.
    - List every runner that executes tests in the scope, including files outside the
      main runner such as `node --test` scripts or a browser suite, so none is skipped
      silently.

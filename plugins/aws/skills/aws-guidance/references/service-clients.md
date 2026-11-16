@@ -33,9 +33,9 @@ Use OpenFeature through one typed flag module and one provider. Choose SSM Param
 
 | Language | SSM provider | AppConfig provider |
 | --- | --- | --- |
-| Python | `openfeature-provider-aws-ssm` `0.1` (contrib); set TTL cache, default LRU has no timed refresh | None found; ask first before writing an Agent HTTP provider |
-| TypeScript (Node) | `@openfeature/aws-ssm-provider` `0.1`; cache off by default, only boolean/string results cached | None found; ask first |
-| Go | Contrib `providers/aws-ssm` `1.0`. Calls `GetParameter` per evaluation without a cache. With the shared 40 TPS default, evaluate once per request. Object flags return the default. | Third-party `github.com/Arthur1/openfeature-provider-go-aws-appconfig` `0.4`; Agent only, boolean flags; dependency review required |
+| Python | `openfeature-provider-aws-ssm` `>= 0.1` (contrib); set TTL cache, default LRU has no timed refresh | None found; ask first before writing an Agent HTTP provider |
+| TypeScript (Node) | `@openfeature/aws-ssm-provider` `>= 0.1`; cache off by default, only boolean/string results cached | None found; ask first |
+| Go | Contrib `providers/aws-ssm` `>= 1.0`. Calls `GetParameter` per evaluation without a cache. With the shared 40 TPS default, evaluate once per request. Object flags return the default. | Third-party `github.com/Arthur1/openfeature-provider-go-aws-appconfig` `>= 0.4`; Agent only, boolean flags; dependency review required |
 | Rust | None found; ask first | None found; ask first |
 | Browser | Evaluate on server and send decisions, or ask first | Same; never expose AWS credentials or Agent |
 
