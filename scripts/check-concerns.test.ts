@@ -1,8 +1,17 @@
-import { afterAll, describe, expect, test } from "bun:test"
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
+import { describe, expect, test } from "bun:test"
+import { readFileSync } from "node:fs"
 import path from "node:path"
-import { checkLanguage, checkRepo, classifyDefault, main, parseShared, parseSpec, parseTable, staleRows } from "./check-concerns.ts"
+import {
+  checkLanguage,
+  checkRepo,
+  classifyDefault,
+  type Files,
+  main,
+  parseShared,
+  parseSpec,
+  parseTable,
+  staleRows,
+} from "./check-concerns.ts"
 
 const FIXTURE = path.join(import.meta.dir, "fixtures", "concerns", "valid")
 const REF = "plugins/toolchain/skills/toolchain-languages/references"
@@ -15,26 +24,51 @@ const TF = "plugins/lang/skills/lang-tf/references/tf.md"
 const SURFACES = `${REF}/surfaces.md`
 const TODAY = "2026-02-01"
 
-const temps: string[] = []
-afterAll(() => {
-  for (const dir of temps) rmSync(dir, { recursive: true, force: true })
-})
+/**
+ * Repo-relative path to file text. Tests work on in-memory copies of the fixture: each file open costs
+ * milliseconds under endpoint security, so copying the fixture to disk per test made this file take minutes.
+ */
+type Tree = Map<string, string>
+/** Root the in-memory trees are mounted at. */
+const ROOT = "/repo"
+const VALID: Tree = new Map(
+  [...new Bun.Glob("**/*").scanSync({ cwd: FIXTURE })].map((f) => [f, readFileSync(path.join(FIXTURE, f), "utf8")]),
+)
 
-/** Copy the valid fixture and apply `file: [from, to]` replacements; each `from` must exist. */
-function repo(edits: Record<string, [string, string]> = {}): string {
-  const root = mkdtempSync(path.join(tmpdir(), "concerns-"))
-  temps.push(root)
-  cpSync(FIXTURE, root, { recursive: true })
-  for (const [file, [from, to]] of Object.entries(edits)) {
-    const abs = path.join(root, file)
-    const text = readFileSync(abs, "utf8")
-    if (!text.includes(from)) throw new Error(`fixture ${file} lacks ${JSON.stringify(from)}`)
-    writeFileSync(abs, text.replace(from, to))
+/** `Files` over a tree mounted at ROOT; a directory exists when some file lies under it. */
+function filesOf(tree: Tree): Files {
+  const rel = (abs: string) => path.relative(ROOT, abs)
+  const under = (abs: string) => [...tree.keys()].filter((k) => k.startsWith(`${rel(abs)}/`)).map((k) => k.slice(rel(abs).length + 1))
+  return {
+    exists: (abs) => tree.has(rel(abs)) || under(abs).length > 0,
+    read: (abs) => {
+      const text = tree.get(rel(abs))
+      if (text === undefined) throw new Error(`ENOENT: ${abs}`)
+      return text
+    },
+    entries: (abs) => [...new Set(under(abs).map((k) => k.split("/")[0] ?? ""))],
   }
-  return root
 }
-const reasons = (root: string, language?: string) =>
-  checkRepo(root, { language, today: TODAY }).map((f) => `${f.file}:${f.line}: ${f.reason}`)
+
+/** A copy of the valid fixture with `file: [from, to]` replacements; each `from` must exist. */
+function repo(edits: Record<string, [string, string]> = {}): Tree {
+  const tree = new Map(VALID)
+  for (const [file, [from, to]] of Object.entries(edits)) {
+    const text = tree.get(file) ?? ""
+    if (!text.includes(from)) throw new Error(`fixture ${file} lacks ${JSON.stringify(from)}`)
+    tree.set(file, text.replace(from, to))
+  }
+  return tree
+}
+const check = (tree: Tree, language?: string) => checkRepo(ROOT, { language, today: TODAY, files: filesOf(tree) })
+const reasons = (tree: Tree, language?: string) => check(tree, language).map((f) => `${f.file}:${f.line}: ${f.reason}`)
+/** Swap the first lines starting with `a` and `b` in `file`. */
+function swapLines(tree: Tree, file: string, a: string, b: string): Tree {
+  const lines = (tree.get(file) ?? "").split("\n")
+  const [i, j] = [lines.findIndex((l) => l.startsWith(a)), lines.findIndex((l) => l.startsWith(b))]
+  ;[lines[i], lines[j]] = [lines[j] as string, lines[i] as string]
+  return tree.set(file, lines.join("\n"))
+}
 
 describe("parseTable", () => {
   const text = "# T\n\n## A\n\n| X | Y |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n\n## B\n\n| Z |\n|---|\n| 9 |\n"
@@ -120,8 +154,8 @@ describe("parseSpec and parseShared", () => {
 })
 
 describe("checkRepo on the valid fixture", () => {
-  test("is clean for every language", () => {
-    expect(reasons(repo())).toEqual([])
+  test("is clean for every language, read from disk", () => {
+    expect(checkRepo(FIXTURE, { today: TODAY })).toEqual([])
   })
   test("--language limits the check", () => {
     const root = repo({ [SH]: ["`bats`", "bats"] })
@@ -137,7 +171,7 @@ describe("checkRepo on the valid fixture", () => {
   })
   test("missing spec file is a finding", () => {
     const root = repo()
-    rmSync(path.join(root, SPEC))
+    root.delete(SPEC)
     expect(reasons(root)).toEqual([`${SPEC}:1: file is missing`])
   })
 })
@@ -187,16 +221,11 @@ describe("language file findings", () => {
   })
 
   test("a finding names file and line", () => {
-    const found = checkRepo(repo({ [PY_QUALITY]: ["| `lint` |", "| `lintt` |"] }), { today: TODAY })
+    const found = check(repo({ [PY_QUALITY]: ["| `lint` |", "| `lintt` |"] }))
     expect(found).toContainEqual({ file: PY_QUALITY, line: 9, reason: 'unknown concern id "lintt"' })
   })
   test("out-of-order rows", () => {
-    const root = repo()
-    const abs = path.join(root, PY_QUALITY)
-    const lines = readFileSync(abs, "utf8").split("\n")
-    const [a, b] = [lines.findIndex((l) => l.startsWith("| `lint`")), lines.findIndex((l) => l.startsWith("| `types`"))]
-    ;[lines[a], lines[b]] = [lines[b] as string, lines[a] as string]
-    writeFileSync(abs, lines.join("\n"))
+    const root = swapLines(repo(), PY_QUALITY, "| `lint`", "| `types`")
     expect(reasons(root).some((r) => r.includes('"lint" is out of spec order'))).toBe(true)
   })
   test("N/A is accepted where the kind allows it, with Run `-`", () => {
@@ -250,21 +279,16 @@ describe("surfaces file", () => {
     expect(reasons(repo()).filter((r) => r.startsWith(SURFACES))).toEqual([])
   })
   test("out-of-order rows", () => {
-    const root = repo()
-    const abs = path.join(root, SURFACES)
-    const lines = readFileSync(abs, "utf8").split("\n")
-    const [a, b] = [lines.findIndex((l) => l.startsWith("| `e2e` | `playwright`")), lines.findIndex((l) => l.startsWith("| `visual` | Built-in"))]
-    ;[lines[a], lines[b]] = [lines[b] as string, lines[a] as string]
-    writeFileSync(abs, lines.join("\n"))
+    const root = swapLines(repo(), SURFACES, "| `e2e` | `playwright`", "| `visual` | Built-in")
     expect(reasons(root).some((r) => r.includes('"e2e" is out of spec order'))).toBe(true)
   })
   test("a finding names the file and the line inside the section", () => {
-    const found = checkRepo(repo({ [SURFACES]: ["1.50.0 · 2026-01-07 · active", "1.50.0 · 2026-01-07 · stable"] }), { today: TODAY })
+    const found = check(repo({ [SURFACES]: ["1.50.0 · 2026-01-07 · active", "1.50.0 · 2026-01-07 · stable"] }))
     expect(found).toContainEqual({ file: SURFACES, line: 9, reason: 'unknown status "stable"' })
   })
   test("a missing surfaces file is a finding", () => {
     const root = repo()
-    rmSync(path.join(root, SURFACES))
+    root.delete(SURFACES)
     expect(reasons(root)).toEqual([`${SPEC}:1: surfaces file ${SURFACES} is missing`])
   })
   test("--language skips the surfaces file", () => {
@@ -276,7 +300,7 @@ describe("surfaces file", () => {
 describe("registration findings", () => {
   test("registered file missing", () => {
     const root = repo()
-    rmSync(path.join(root, SH))
+    root.delete(SH)
     expect(reasons(root, "sh").some((r) => r.includes(`registered file ${SH} is missing`))).toBe(true)
   })
   test("file not linked from the skill", () => {
@@ -287,7 +311,7 @@ describe("registration findings", () => {
     const root = repo({
       "plugins/lang/skills/lang-x/references/more.md": ["[quality](quality.md)", "[deeper](deeper.md)"],
     })
-    writeFileSync(path.join(root, "plugins/lang/skills/lang-x/references/deeper.md"), "[quality](quality.md)\n")
+    root.set("plugins/lang/skills/lang-x/references/deeper.md", "[quality](quality.md)\n")
     expect(reasons(root, "py").some((r) => r.startsWith(`${PY_QUALITY}:1: not linked`))).toBe(true)
   })
   test("skill not found", () => {
@@ -302,29 +326,28 @@ describe("registration findings", () => {
 
 describe("staleRows", () => {
   test("lists rows older than the limit with their age, skipping rows without a date", () => {
-    expect(staleRows(repo(), 26, "2026-02-01")).toEqual([
+    expect(staleRows(ROOT, 26, "2026-02-01", undefined, filesOf(VALID))).toEqual([
       `${PY_TESTING}:9: unit released 2026-01-02 (30 days old)`,
       `${PY_QUALITY}:9: lint released 2026-01-05 (27 days old)`,
       `${PY_QUALITY}:10: types released 2026-01-04 (28 days old)`,
     ])
   })
   test("covers surface rows, with the surface in the label and a file-relative line", () => {
-    expect(staleRows(repo(), 20, "2026-02-01").filter((r) => r.startsWith(SURFACES))).toEqual([
+    expect(staleRows(ROOT, 20, "2026-02-01", undefined, filesOf(VALID)).filter((r) => r.startsWith(SURFACES))).toEqual([
       `${SURFACES}:9: web/e2e released 2026-01-07 (25 days old)`,
       `${SURFACES}:24: api/e2e released 2026-01-08 (24 days old)`,
     ])
   })
   test("is empty when all rows are recent", () => {
-    expect(staleRows(repo(), 365, "2026-02-01")).toEqual([])
+    expect(staleRows(ROOT, 365, "2026-02-01", undefined, filesOf(VALID))).toEqual([])
   })
 })
 
 describe("checkLanguage", () => {
   test("is the unit used by checkRepo", () => {
-    const root = repo()
-    const spec = parseSpec(readFileSync(path.join(root, SPEC), "utf8")).spec
-    const shared = parseShared(readFileSync(path.join(root, SHARED), "utf8")).shared
-    expect(checkLanguage({ root, spec, shared, today: TODAY }, "py")).toEqual([])
+    const spec = parseSpec(VALID.get(SPEC) ?? "").spec
+    const shared = parseShared(VALID.get(SHARED) ?? "").shared
+    expect(checkLanguage({ root: ROOT, spec, shared, today: TODAY, files: filesOf(VALID) }, "py")).toEqual([])
   })
 })
 
@@ -419,10 +442,10 @@ describe("table shape", () => {
 })
 
 describe("main", () => {
-  const run = (argv: string[], root: string) => {
+  const run = (argv: string[], tree: Tree) => {
     const out: string[] = []
     const err: string[] = []
-    const code = main(argv, { root, today: TODAY, stdout: (s) => out.push(s), stderr: (s) => err.push(s) })
+    const code = main(argv, { root: ROOT, files: filesOf(tree), today: TODAY, stdout: (s) => out.push(s), stderr: (s) => err.push(s) })
     return { code, out, err }
   }
   const brokenPy = () => repo({ [PY_TESTING]: ["every-pr + diff-pr", "every-pr + yearly"] })
