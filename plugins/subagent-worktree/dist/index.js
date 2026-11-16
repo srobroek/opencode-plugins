@@ -594,10 +594,12 @@ var RESERVATION_MS = 60000;
 function blockingReservation(reservation, now, token) {
   return reservation !== undefined && reservation.token !== token && reservation.until > now ? reservation : undefined;
 }
-function holdsReservation(reservation, now, token) {
-  return reservation !== undefined && reservation.token === token && reservation.until > now;
+function reservationStatus(reservation, now, token) {
+  if (reservation === undefined || reservation.until <= now)
+    return "free";
+  return reservation.token === token ? "held" : "replaced";
 }
-var FENCED_REASON = "its reservation of this worktree expired or was replaced by another writer spawn while it waited. Check for a live writer session, then spawn again.";
+var FENCED_REASON = "another writer spawn took over this worktree while it waited. Check for a live writer session, then spawn again.";
 
 // plugins/subagent-worktree/src/git.ts
 var GIT_TIMEOUT_MS = 60000;
@@ -899,7 +901,7 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
       const directory = start.lookup.worktree.directory;
       const writer = !sessionIsReadOnly(agent.permissions, parent.permissions);
       if (writer)
-        hold = { directory, token: await reserve(directory, event.id) };
+        hold = { directory, token: await reserve(directory, event.id), writer };
       const guard = decideWriterGuard({
         writer,
         directory,
@@ -911,12 +913,29 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
       if (guard.warn)
         notes.set(event.id, guard.warn);
     }
-    const fence = () => {
-      if (hold && !holdsReservation(reservations.get(hold.directory), now(), hold.token))
+    const fence = async () => {
+      if (!hold)
+        return;
+      const status = reservationStatus(reservations.get(hold.directory), now(), hold.token);
+      if (status === "held")
+        return;
+      if (status === "replaced")
+        throw new Error(`subagent-worktree: ${hold.directory}: ${FENCED_REASON}`);
+      reservations.set(hold.directory, { token: hold.token, callId: event.id, until: now() + reserveMs });
+      const fresh = decideWriterGuard({
+        writer: hold.writer,
+        directory: hold.directory,
+        caller: event.sessionID,
+        sessions: await sessionsIn(parent.projectID, hold.directory)
+      });
+      if (fresh.kind === "refuse")
+        throw new Error(`subagent-worktree: ${fresh.reason}`);
+      const after = reservationStatus(reservations.get(hold.directory), now(), hold.token);
+      if (after === "replaced")
         throw new Error(`subagent-worktree: ${hold.directory}: ${FENCED_REASON}`);
     };
     if (plan.kind === "default") {
-      fence();
+      await fence();
       if (plan.note)
         notes.set(event.id, plan.note);
       return;
@@ -925,7 +944,7 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
       return;
     await assertSubagent(event, agent.id);
     if (plan.kind === "move") {
-      fence();
+      await fence();
       let child;
       try {
         child = await createChild(event, input, agent, parent);
@@ -1289,7 +1308,6 @@ export {
   diffCommand,
   findWorktree,
   formatLaneList,
-  holdsReservation,
   isConflict,
   isRunning,
   isUnbornHead,
@@ -1306,6 +1324,7 @@ export {
   planStart,
   readOptions,
   readSubagentInput,
+  reservationStatus,
   resumeWorktreeNote,
   rewritePrompt,
   rulesAreReadOnly,

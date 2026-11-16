@@ -590,10 +590,15 @@ export function blockingReservation(reservation: Reservation | undefined, now: n
   return reservation !== undefined && reservation.token !== token && reservation.until > now ? reservation : undefined
 }
 
-/** Whether `token` still owns the reservation; an expired or replaced one has fenced its owner. */
-export function holdsReservation(reservation: Reservation | undefined, now: number, token: string): boolean {
-  return reservation !== undefined && reservation.token === token && reservation.until > now
+/**
+ * Where the spawn holding `token` stands after it waited: "held" (its own reservation is live),
+ * "free" (the slot is empty or expired, so it may re-take it) or "replaced" (another token holds
+ * it, which fences the owner).
+ */
+export function reservationStatus(reservation: Reservation | undefined, now: number, token: string): "held" | "free" | "replaced" {
+  if (reservation === undefined || reservation.until <= now) return "free"
+  return reservation.token === token ? "held" : "replaced"
 }
 
 export const FENCED_REASON =
-  "its reservation of this worktree expired or was replaced by another writer spawn while it waited. Check for a live writer session, then spawn again."
+  "another writer spawn took over this worktree while it waited. Check for a live writer session, then spawn again."

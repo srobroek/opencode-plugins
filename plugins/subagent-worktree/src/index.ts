@@ -16,7 +16,6 @@ import {
   FENCED_REASON,
   findWorktree,
   formatLaneList,
-  holdsReservation,
   isConflict,
   isRunning,
   LANE_PREFIX,
@@ -35,6 +34,7 @@ import {
   type Reservation,
   readOptions,
   readSubagentInput,
+  reservationStatus,
   resumeWorktreeNote,
   rewritePrompt,
   SESSION_LOOKUP_MS,
@@ -365,12 +365,12 @@ export function createLanes(
       trackedDirty: input.worktree === undefined && isolation.isolate ? await git.trackedDirty(parentDir) : false,
     })
     if (plan.kind === "refuse") throw new Error(`subagent-worktree: ${plan.reason}`)
-    let hold: { directory: string; token: string } | undefined
+    let hold: { directory: string; token: string; writer: boolean } | undefined
     if (plan.kind !== "isolate" && start?.lookup.ok && agent && agent.mode !== "primary") {
       const directory = start.lookup.worktree.directory
       const writer = !sessionIsReadOnly(agent.permissions, parent.permissions)
       // Reserve before any lookup so a concurrent spawn cannot read a snapshot that predates this one.
-      if (writer) hold = { directory, token: await reserve(directory, event.id) }
+      if (writer) hold = { directory, token: await reserve(directory, event.id), writer }
       const guard = decideWriterGuard({
         writer,
         directory,
@@ -380,12 +380,28 @@ export function createLanes(
       if (guard.kind === "refuse") throw new Error(`subagent-worktree: ${guard.reason}`)
       if (guard.warn) notes.set(event.id, guard.warn)
     }
-    const fence = () => {
-      if (hold && !holdsReservation(reservations.get(hold.directory), now(), hold.token))
-        throw new Error(`subagent-worktree: ${hold.directory}: ${FENCED_REASON}`)
+    /**
+     * After a wait (permission prompt), confirm this call still owns the worktree. Replaced by another
+     * token: refuse. Expired and untaken: re-take the slot and look for a live writer again.
+     */
+    const fence = async () => {
+      if (!hold) return
+      const status = reservationStatus(reservations.get(hold.directory), now(), hold.token)
+      if (status === "held") return
+      if (status === "replaced") throw new Error(`subagent-worktree: ${hold.directory}: ${FENCED_REASON}`)
+      reservations.set(hold.directory, { token: hold.token, callId: event.id, until: now() + reserveMs })
+      const fresh = decideWriterGuard({
+        writer: hold.writer,
+        directory: hold.directory,
+        caller: event.sessionID,
+        sessions: await sessionsIn(parent.projectID, hold.directory),
+      })
+      if (fresh.kind === "refuse") throw new Error(`subagent-worktree: ${fresh.reason}`)
+      const after = reservationStatus(reservations.get(hold.directory), now(), hold.token)
+      if (after === "replaced") throw new Error(`subagent-worktree: ${hold.directory}: ${FENCED_REASON}`)
     }
     if (plan.kind === "default") {
-      fence()
+      await fence()
       if (plan.note) notes.set(event.id, plan.note)
       return
     }
@@ -393,7 +409,7 @@ export function createLanes(
 
     await assertSubagent(event, agent.id)
     if (plan.kind === "move") {
-      fence()
+      await fence()
       let child: string | undefined
       try {
         child = await createChild(event, input, agent, parent)

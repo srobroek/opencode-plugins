@@ -11,7 +11,6 @@ import {
   diffCommand,
   findWorktree,
   formatLaneList,
-  holdsReservation,
   type IsolationFacts,
   isConflict,
   isUnbornHead,
@@ -27,6 +26,7 @@ import {
   RESUME_WORKTREE_NOTE,
   readOptions,
   readSubagentInput,
+  reservationStatus,
   rewritePrompt,
   rulesAreReadOnly,
   SUBAGENT_PREAMBLE,
@@ -547,11 +547,12 @@ describe("blockingReservation and holdsReservation", () => {
     expect(blockingReservation(undefined, 0, "t2")).toBeUndefined()
   })
   test.each([
-    ["the owner before expiry", held, 999, "t1", true],
-    ["the owner after expiry", held, 1000, "t1", false],
-    ["a replaced owner", { ...held, token: "t2" }, 500, "t1", false],
-    ["no reservation", undefined, 0, "t1", false],
-  ])("holds: %s", (_name, reservation, now, token, expected) => {
-    expect(holdsReservation(reservation, now, token)).toBe(expected)
+    ["the owner before expiry", held, 999, "t1", "held"],
+    ["the owner after expiry", held, 1000, "t1", "free"],
+    ["no reservation", undefined, 0, "t1", "free"],
+    ["another token that expired", { ...held, token: "t2" }, 1000, "t1", "free"],
+    ["another live token", { ...held, token: "t2" }, 500, "t1", "replaced"],
+  ] as const)("status: %s", (_name, reservation, now, token, expected) => {
+    expect(reservationStatus(reservation, now, token)).toBe(expected)
   })
 })

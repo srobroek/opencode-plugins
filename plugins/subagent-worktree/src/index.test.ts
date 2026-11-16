@@ -671,19 +671,18 @@ describe("worktree argument", () => {
       expect(sessionID(await second(setup))).toBeDefined()
     })
 
-    test("a spawn that waited past its reservation is fenced out and creates no child", async () => {
-      let clock = 1_000_000
-      const setup = await start({ now: () => clock })
+    /** A first spawn stuck on its permission prompt; `open` lets it continue. */
+    const stuckSpawn = async (setup: Setup) => {
       let open: () => void = () => {}
       const gate = new Promise<void>((resolve) => {
         open = resolve
       })
-      const assertPermission = setup.fake.context.permission.assert.bind(setup.fake.context.permission)
-      let waits = 0
       let reached: () => void = () => {}
       const waiting = new Promise<void>((resolve) => {
         reached = resolve
       })
+      const assertPermission = setup.fake.context.permission.assert.bind(setup.fake.context.permission)
+      let waits = 0
       Object.assign(setup.fake.context.permission, {
         assert: async (input: never) => {
           if (waits++ === 0) {
@@ -693,17 +692,45 @@ describe("worktree argument", () => {
           return assertPermission(input)
         },
       })
-      const a = first(setup)
-      const outcome = a.then(
-        () => "spawned",
+      const outcome = first(setup).then(
+        (event) => sessionID(event),
         (error: Error) => error.message,
       )
       await waiting
+      return { open, outcome }
+    }
+    const creates = (setup: Setup) => setup.fake.calls.filter((entry) => entry.method === "session.create")
+
+    test("a spawn whose reservation was replaced while it waited is fenced out and creates no child", async () => {
+      let clock = 1_000_000
+      const setup = await start({ now: () => clock })
+      const stuck = await stuckSpawn(setup)
       clock += 61_000
       expect(sessionID(await second(setup))).toBe("ses_fake1")
-      open()
-      expect(await outcome).toMatch(/expired or was replaced/)
-      expect(setup.fake.calls.filter((entry) => entry.method === "session.create")).toHaveLength(1)
+      stuck.open()
+      expect(await stuck.outcome).toMatch(/took over this worktree/)
+      expect(creates(setup)).toHaveLength(1)
+    })
+
+    test("a spawn whose reservation merely expired while it waited re-takes it and continues", async () => {
+      let clock = 1_000_000
+      const setup = await start({ now: () => clock })
+      const stuck = await stuckSpawn(setup)
+      clock += 61_000
+      stuck.open()
+      expect(await stuck.outcome).toBe("ses_fake1")
+      await expect(second(setup)).rejects.toThrow(/live writer session ses_fake1/)
+    })
+
+    test("a spawn whose reservation expired is refused when a live writer appeared meanwhile", async () => {
+      let clock = 1_000_000
+      const setup = await start({ now: () => clock })
+      const stuck = await stuckSpawn(setup)
+      clock += 61_000
+      setup.fake.sessions.set("ses_late", { id: "ses_late", parentID: PARENT, projectID: "prj", location: { directory: OTHER }, time: { busy: 2000 } })
+      stuck.open()
+      expect(await stuck.outcome).toMatch(/live writer session ses_late/)
+      expect(creates(setup)).toHaveLength(0)
     })
 
     test("a read-only agent neither reserves nor is blocked", async () => {
