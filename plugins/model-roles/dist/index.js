@@ -4901,6 +4901,8 @@ var HAS_WELLFORMED = !!"".isWellFormed;
  */
 // plugins/lib/src/patterns.ts
 var compiled = new Map;
+// plugins/lib/src/shell-command.ts
+var INTERPRETERS = new Set(["bash", "sh", "zsh", "dash", "ksh"]);
 // plugins/lib/src/tool-targets.ts
 var WRITE_TOOLS = new Set(["edit", "write", "patch"]);
 var READ_TOOLS = new Set(["read"]);

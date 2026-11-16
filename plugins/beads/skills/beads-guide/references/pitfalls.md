@@ -28,11 +28,12 @@
 - **Cause:** Many agents write to one embedded ledger, and the lock lets one writer in at a time. The wait ran out before this command got its turn.
 - **Fix:** Retry the same command as its own simple command. Do not delete the lock file of a live holder. The beads-contention-retry skill has the full policy.
 
-## The gate stops a bd create that has no actor
+## The actor gate is a safety net, not a lock
 
-- **Symptom:** `without BEADS_ACTOR or BD_ACTOR records the invoking human's git identity in created_by`
-- **Cause:** The command has no actor variable. The bead would record the human's git identity, not the agent that wrote it.
-- **Fix:** Set `BEADS_ACTOR=<harness>/<agent>/<session>` on every mutating `bd` command, for example `BEADS_ACTOR=opencode/orchestrator/ses_123 bd create ...`.
+- **Symptom:** An advisory says a create or claim has no `BEADS_ACTOR` or `BD_ACTOR`, or someone asks the gate to catch a wrong actor.
+- **Cause:** The plugin adds `export BEADS_ACTOR='opencode/<agent>/<session>'` to every `bd` shell call that names no actor. The gate only guards against forgetting attribution. It cannot stop deliberate evasion, because an agent can set any actor value.
+- **Fix:** Set `BEADS_ACTOR=<harness>/<agent>/<session>` on the command when you need your own identity. Do not add parser rules to chase shell tricks.
+- **Scope:** the close, update-close and unclaim gates, the embedded-write lock and the wait guard share this scope. They catch commands an agent writes normally, not deliberately obfuscated shell.
 
 ## A claimed bead is back in `bd ready`
 

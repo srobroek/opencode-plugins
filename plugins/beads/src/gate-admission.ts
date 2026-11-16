@@ -15,7 +15,7 @@ import { supervise } from "@srobroek/opencode-lib/subprocess"
 import { type BdInvocation, bdInvocations, flagEnabled, globalValue, invocationFromArgv } from "./bd-actor-gate.ts"
 import { DYNAMIC_CWD, embeddedWriteTargets, withEmbeddedWriteLock, writesStore } from "./bd-embedded-write-lock.ts"
 import { sessionPinFor } from "./beads-store.ts"
-import { leadingCdCwd } from "./shell.ts"
+import { leadingCdCwd, scanShell } from "./shell.ts"
 
 /** The longest a mutating command waits for its store's gate verification. */
 export const GATE_ADMISSION_MS = 20_000
@@ -446,6 +446,31 @@ export function environmentForCommand(command: string, base: NodeJS.ProcessEnv):
 }
 
 /**
+ * Whether a `cd` or `pushd` command in the line takes a directory the shell computes.
+ *
+ * Read from the parsed commands: `cd` has to sit in command position, and only an
+ * expanding word counts, so prose inside a quoted argument moves nowhere.
+ */
+export function changesDirectoryDynamically(command: string): boolean {
+  const assignment = /^[A-Za-z_]\w*=/
+  return scanShell(command).items.some((item) => {
+    if (item.kind !== "command") return false
+    let first = 0
+    while (first < item.words.length && assignment.test(command.slice(item.words[first]?.start, item.words[first]?.end)))
+      first++
+    const words = item.words.slice(first)
+    let head = 0
+    if (words[0]?.value === "builtin" || words[0]?.value === "command") {
+      head = 1
+      while (words[head]?.value.startsWith("-") === true) head++
+    }
+    const name = words[head]?.value
+    if (name !== "cd" && name !== "pushd") return false
+    return words.slice(head + 1).some((word) => word.expands && /[$`]/u.test(word.value))
+  })
+}
+
+/**
  * Whether a mutating bd command may run yet: its target store's automatic gates must be
  * verified first. Commands that write nothing, or write an external store, pass.
  */
@@ -458,10 +483,10 @@ export async function admitBdMutation(
   targetEnabled?: (cwd: string) => boolean,
 ): Promise<Admission> {
   if (!command) return undefined
-  if (/\bcd\s+(?:"[^"]*\$[^"]*"|'[^']*\$[^']*'|\$[A-Za-z_])/u.test(command)) {
-    return { block: true, reason: DYNAMIC_CWD }
-  }
   const writes = bdInvocations(command).filter((invocation) => writesStore(invocation))
+  // A directory computed at run time only matters to a command that writes a ledger.
+  if (writes.length === 0) return undefined
+  if (changesDirectoryDynamically(command)) return { block: true, reason: DYNAMIC_CWD }
   if (
     writes.some((invocation) =>
       invocation.prefix.some((token) => token.startsWith("BEADS_DIR=") && /[$`]/u.test(token)),
@@ -472,7 +497,6 @@ export async function admitBdMutation(
       reason: "Beads directory is selected dynamically and cannot be verified before this mutation",
     }
   }
-  if (writes.length === 0) return undefined
   const literalCd = /^\s*cd\s+([^\s;&|]+)\s*&&\s*([\s\S]+?)\s*$/.exec(command)
   const targetCommand = literalCd === null ? command : (literalCd[2] ?? "")
   const targetCwd = literalCd === null ? cwd : leadingCdCwd(command, cwd)

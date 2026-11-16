@@ -2,7 +2,9 @@ import { describe, expect, test } from "bun:test"
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import {
+  admitBdMutation,
   type BdRun,
+  changesDirectoryDynamically,
   envelopeData,
   formatGateAdvisory,
   GateAdmitter,
@@ -240,5 +242,39 @@ describe("runBdResult", () => {
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
+  })
+})
+
+describe("dynamic directory detection reads parsed commands", () => {
+  test.each([
+    'cd "$TARGET" && bd create y',
+    "cd $TARGET && bd create y",
+    "FOO=1 cd `pwd` && bd create y",
+    'builtin cd "$(mktemp -d)"; bd create y',
+    'command -p cd "$D" && bd create y',
+    'builtin cd "$D"',
+    "echo hi | pushd $X",
+  ])("flags %s", (command) => {
+    expect(changesDirectoryDynamically(command)).toBe(true)
+  })
+
+  test.each([
+    'bd comments add p-1 "then cd $dir and retry"',
+    "echo 'cd $dir'",
+    "cd '$literal' && bd create y",
+    "cd /repo && bd create y",
+    "echo cd $dir",
+  ])("leaves %s alone", (command) => {
+    expect(changesDirectoryDynamically(command)).toBe(false)
+  })
+
+  test("a read-only bd command whose quoted prose mentions a dynamic cd is admitted", async () => {
+    const admitter = {} as GateAdmitter
+    const deadline = Date.now() + 1000
+    expect(await admitBdMutation('bd list --title "run cd $dir first"', "/", {}, admitter, deadline)).toBeUndefined()
+    expect(await admitBdMutation('cd "$(pwd)/x" && make', "/", {}, admitter, deadline)).toBeUndefined()
+    expect(await admitBdMutation('cd "$dir" && bd create y', "/", {}, admitter, deadline)).toMatchObject({
+      block: true,
+    })
   })
 })

@@ -5,6 +5,7 @@ import {
   agentActor,
   bdInvocations,
   decideActorGate,
+  decideActorParsed,
   environmentForInput,
   extractCommand,
   firstBdVerb,
@@ -12,6 +13,7 @@ import {
   isClaimCommand,
   isMutatingBdCommand,
 } from "./bd-actor-gate.ts"
+import { parse } from "./shell.ts"
 
 const emptyEnv = {} as NodeJS.ProcessEnv
 const actorEnv = { BEADS_ACTOR: "omp/GateBuilder/backlog" } as NodeJS.ProcessEnv
@@ -37,6 +39,15 @@ describe("actorValues / environmentForInput", () => {
         BD_ACTOR: "ambient/legacy",
       }),
     ).toEqual(["omp/Main/release"])
+  })
+
+  test.each([
+    ["a backslash", "BEADS_ACTOR='a\\b' bd close x"],
+    ["a NUL character", "BEADS_ACTOR=a\0b bd close x"],
+    ["a dollar sign", 'BEADS_ACTOR="$WHO" bd close x'],
+    ["an empty value", "BEADS_ACTOR= bd close x"],
+  ])("does not count an actor holding %s", (_name, command) => {
+    expect(actorValues(command, emptyEnv)).toEqual([])
   })
 
   test("returns each literal actor used by mutating invocations only", () => {
@@ -91,9 +102,19 @@ describe("agentActor", () => {
     )
   })
 
-  test("leaves the main session without an actor", () => {
-    expect(agentActor({ sessionID: "ses_main", rootID: "ses_main", agent: "build" })).toBeUndefined()
+  test("names a main session by agent and session", () => {
+    expect(agentActor({ sessionID: "ses_main", rootID: "ses_main", agent: "build" })).toBe("opencode/build/ses_main")
     expect(agentActor(undefined)).toBeUndefined()
+  })
+
+  test.each([
+    ["a main session", {}],
+    ["a subagent", { parentID: "ses_r", rootID: "ses_r" }],
+  ])("%s defers to an actor already in its environment", (_name, chain) => {
+    const session = { sessionID: "ses_main", rootID: "ses_main", agent: "build", ...chain }
+    expect(agentActor(session, { BEADS_ACTOR: "me" } as NodeJS.ProcessEnv)).toBeUndefined()
+    expect(agentActor(session, { BD_ACTOR: "me" } as NodeJS.ProcessEnv)).toBeUndefined()
+    expect(agentActor(session, { BEADS_ACTOR: " " } as NodeJS.ProcessEnv)).toBeDefined()
   })
 
   test("keeps the same agent distinct across sessions", () => {
@@ -396,5 +417,65 @@ describe("here-documents", () => {
   test("a commit message that mentions bd close is not a bd command", () => {
     const command = "git commit -q -F - <<'EOF'\nfix: x\n\nafter that, bd close y and bd update z --claim.\nEOF"
     expect(decideActorGate(command, emptyEnv).kind).toBe("allow")
+  })
+})
+
+describe("the actor gate reads the parsed command", () => {
+  const decide = (command: string, env = emptyEnv) => decideActorParsed(parse(command), env).kind
+
+  test.each([
+    ["a brace group", "{ bd create x; }"],
+    ["an unset after the export", "export BEADS_ACTOR=x; unset BEADS_ACTOR; bd create y"],
+    ["a fabricated export from echo arguments", 'echo ";" export "BEADS_ACTOR=x" ; bd create y'],
+    ["a create inside a quoted substitution", 'echo "$(bd create "a (b)")"'],
+    ["a create behind command --", "command -- bd create y"],
+    ["an expanding export", 'export BEADS_ACTOR="$FOO"; bd create y'],
+    ["a quoted heredoc fed to bash", "bash <<'EOF'\nbd create y\nEOF"],
+    ["a heredoc fed to bash -s", "bash -s <<'EOF'\nbd create y\nEOF"],
+    ["a here-string fed to sh", "sh <<< 'bd create y'"],
+    ["a create in a parameter default", `echo "\${X:-'$(bd create y)'}"`],
+  ])("refuses a create after %s", (_name, command) => {
+    expect(decide(command)).toBe("block")
+  })
+
+  test.each([
+    ["an export joined by &&", "export BEADS_ACTOR=x && bd create y"],
+    ["an export before a subshell", "export BEADS_ACTOR=x; (bd create y)"],
+    ["an export before a brace group", "export BEADS_ACTOR=x; { bd create y; }"],
+    ["an export on an earlier line", "export BEADS_ACTOR=x\nbd create y"],
+    ["an export of a quoted literal", "export BEADS_ACTOR='omp/a b/c'; bd create y"],
+    ["an export among other exports", "export FOO=1 BEADS_ACTOR=x; bd create y"],
+    ["a legacy export", "export BD_ACTOR=x; bd create y"],
+    ["an export that a quoted title mentions", 'export BEADS_ACTOR=x; bd create --title "source and unset"'],
+    ["a create in a substitution after an export", "export BEADS_ACTOR=x; id=$(bd create y --json)"],
+    ["a prefix assignment after an unset", "unset BEADS_ACTOR; BEADS_ACTOR=x bd create y"],
+    ["a prefix assignment behind command --", "BEADS_ACTOR=x command -- bd create y"],
+    ["a quoted create in a comment argument", 'BEADS_ACTOR=a/b/c bd comments add p-1 "fix; say retry; bd create x"'],
+    ["a quoted create without any actor", 'bd comments add p-1 "bd create foo"'],
+    ["a heredoc that bash -c ignores", "bash -c 'true' <<'EOF'\nbd create y\nEOF"],
+    ["a heredoc that a script operand ignores", "bash script.sh <<'EOF'\nbd create y\nEOF"],
+  ])("allows %s", (_name, command) => {
+    expect(decide(command)).not.toBe("block")
+  })
+
+  test("an ambient actor attributes the create", () => {
+    expect(decide("bd create y", actorEnv)).toBe("allow")
+    expect(decide("id=$(bd create y --json)", actorEnv)).toBe("allow")
+  })
+})
+
+describe("bdInvocations reads substitutions and stdin scripts", () => {
+  test("a bd write inside an executable substitution is an invocation", () => {
+    expect(bdInvocations("id=$(bd create y --json)").map((invocation) => invocation.verb)).toEqual(["create"])
+  })
+
+  test("stdin is a script only when the interpreter reads it", () => {
+    const verbs = (command: string) => bdInvocations(command).map((invocation) => invocation.verb)
+    expect(verbs("bash <<'EOF'\nbd create y\nEOF")).toEqual(["create"])
+    expect(verbs("bash -s -- a <<'EOF'\nbd create y\nEOF")).toEqual(["create"])
+    expect(verbs("bash -c 'true' <<'EOF'\nbd create y\nEOF")).toEqual([])
+    expect(verbs("bash -lc 'true' <<'EOF'\nbd create y\nEOF")).toEqual([])
+    expect(verbs("bash script.sh <<'EOF'\nbd create y\nEOF")).toEqual([])
+    expect(verbs("bash -o pipefail <<'EOF'\nbd create y\nEOF")).toEqual(["create"])
   })
 })

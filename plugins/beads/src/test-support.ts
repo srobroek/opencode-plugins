@@ -15,3 +15,15 @@ export function gateDeps(overrides: Partial<ShellGateDeps> = {}): ShellGateDeps 
     ...overrides,
   }
 }
+
+/**
+ * A stand-in for what `bd show` reports as each bead's holder, specified by the test rather than
+ * derived from the command: `table` maps bead ids to holders, `fallback` holds every other bead.
+ */
+export function fixtureHolders(table: Record<string, string> = {}, fallback?: string): Map<string, string> {
+  return new (class extends Map<string, string> {
+    override get(key: string): string | undefined {
+      return table[key.slice(key.lastIndexOf("\0") + 1)] ?? fallback
+    }
+  })()
+}

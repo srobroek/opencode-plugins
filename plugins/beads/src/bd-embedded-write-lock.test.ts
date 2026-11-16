@@ -624,6 +624,8 @@ describe("compound commands", () => {
       ['echo "$(bd close bd-1)"', "command substitution"],
       ["ID=$(bd create 'Task' --silent) && echo $ID", "command substitution"],
       ["jq . <<< `bd show bd-1 --json`", "command substitution"],
+      ["echo ${X:- #$(bd close bd-1)}", "command substitution"],
+      ["echo ${X:-'<('$(bd close bd-1)')'}", "command substitution"],
       ["eval 'bd close bd-1'", "shell source to `eval`"],
       ["bash -c 'bd close bd-1'", "shell source to `bash`"],
       ['git status && sh -c "bd update bd-1 --claim"', "shell source to `sh`"],

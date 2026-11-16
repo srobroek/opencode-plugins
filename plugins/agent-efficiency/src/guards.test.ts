@@ -33,6 +33,20 @@ describe("sleep guard", () => {
     for (const command of [`printf '%s' "\${sleep}"`, `printf '%s' "\${sleep:-sleep 5}"`, `printf '%s' "$((sleep + 5))"`]) expect(runsSleep(command)).toBe(false)
     for (const command of ["echo $(sleep 5)", "echo `sleep 5`", "cat <(sleep 5)", "cat >(sleep 5)", `echo "\${value:-$(sleep 5)}"`, `cat <<EOF\n\${value:-$(sleep 5)}\nEOF`]) expect(runsSleep(command)).toBe(true)
   })
+
+  test("a process substitution in an unquoted parameter default runs, in double quotes it is text", () => {
+    for (const command of ["unset X; cat ${X:-<(sleep 30)}", "cat ${X:-$(sleep 30)}", "cat ${X:->(sleep 30)}"]) expect(runsSleep(command)).toBe(true)
+    expect(runsSleep(`cat "\${X:-<(sleep 30)}"`)).toBe(false)
+    expect(runsSleep("cat ${X:-'$(sleep 5)'}")).toBe(false)
+    expect(runsSleep("cat ${X:-$(sleep 5)}")).toBe(true)
+    expect(runsSleep("cat ${X:-<(sleep 5)}")).toBe(true)
+    expect(runsSleep("cat ${X:-'<('$(sleep 5)')'}")).toBe(true)
+    expect(runsSleep("echo ${X:- #$(sleep 5)}")).toBe(true)
+    expect(runsSleep(`echo \${A:-"\${B:-'$(sleep 5)'}"}`)).toBe(true)
+    expect(runsSleep(`echo \${A:-'\${B:-$(sleep 5)}'}`)).toBe(false)
+    expect(runsSleep("echo ${X:-a;b\n#$(sleep 5)}")).toBe(true)
+  })
+
   test("eval scripts and xargs invocations run while ordinary quoted arguments stay data", () => {
     for (const command of ["eval 'sleep 9'", "eval sleep 9", "printf '9' | xargs sleep", "printf '9' | xargs -n 1 -P 2 sleep", "printf '9' | xargs -rn 1 sleep", "printf '9' | xargs --max-args=1 -- sleep", "printf '9' | xargs -I '{}' sh -c 'sleep 9'"]) expect(runsSleep(command)).toBe(true)
     for (const command of ["echo 'eval sleep 9'", "printf '%s' 'xargs sleep'", "printf '9' | xargs echo sleep", "eval 'echo sleep'", "echo 'sh -c sleep'"]) expect(runsSleep(command)).toBe(false)

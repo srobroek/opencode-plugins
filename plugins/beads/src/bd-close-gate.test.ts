@@ -310,6 +310,23 @@ describe("decideBdClose", () => {
     expect(calls).toEqual([])
     expect(decideBdClose("echo bd close bdp-2b && command bd close bdp-2b")?.block).toBe(true)
   })
+  test("a real substitution between quoted literals in a parameter default is still read", async () => {
+    const { run } = fakeBd({ "bdp-2b": "gate" })
+    setBdShowRunForTests(run)
+    const blocked = await decideBdCloseParsed(parse("echo ${X:-'<('$(bd close bdp-2b)')'}"))
+    expect(blocked?.block).toBe(true)
+    expect((await decideBdCloseParsed(parse("echo ${X:- #$(bd close bdp-2b)}")))?.block).toBe(true)
+    expect((await decideBdCloseParsed(parse("bash 3<<<'bd close bdp-2b' 0<&3")))?.block).toBe(true)
+    expect((await decideBdCloseParsed(parse(`echo \${X:-"\${Y:-'$(bd close bdp-2b)'}"}`)))?.block).toBe(true)
+  })
+
+  test("a quoted here-document fed to a shell is read as commands", async () => {
+    const { run } = fakeBd({ "bdp-2b": "gate" })
+    setBdShowRunForTests(run)
+    const blocked = await decideBdCloseParsed(parse("bash <<'EOF'\nbd close bdp-2b\nEOF"))
+    expect(blocked?.block).toBe(true)
+    expect(await decideBdCloseParsed(parse("cat <<'EOF'\nbd close bdp-2b\nEOF"))).toBeUndefined()
+  })
   test("prefilter keeps unrelated commands away from the seam", () => {
     const { run, calls } = fakeBd({ "bdp-2b": "gate" })
     setBdShowRunForTests(run)

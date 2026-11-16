@@ -8,7 +8,13 @@ import { isShellTool, SHELL_TOOL, shellAliasInput } from "@srobroek/opencode-lib
 import { bdInvocations, isMutatingBdCommand } from "./bd-actor-gate.ts"
 import { claimResultOutput } from "./bd-lease-gate.ts"
 import { configuredStore, sessionPinFor } from "./beads-store.ts"
-import { contentionAdvisory, readClaimState, recordClaimTransitions } from "./claims.ts"
+import {
+  claimLookups,
+  contentionAdvisory,
+  readClaimHolders,
+  readClaimState,
+  recordClaimTransitions,
+} from "./claims.ts"
 import {
   type BdRun,
   bdStoreDir,
@@ -33,7 +39,7 @@ import {
 import { BEADS_SOURCE, Lifecycle } from "./lifecycle.ts"
 import { PRIME_WAIT_MS, readPrime, storedPrime } from "./prime.ts"
 import { type StartDeps, sessionStartAdvisories } from "./session-start.ts"
-import { decideShell, type ShellGateDeps, TOOL_CALL_BUDGET_MS } from "./shell-gates.ts"
+import { actorInjection, decideShell, type ShellGateDeps, TOOL_CALL_BUDGET_MS } from "./shell-gates.ts"
 import { registerAgentRouting } from "./subagent-routing.ts"
 
 export { decideShell } from "./shell-gates.ts"
@@ -53,6 +59,8 @@ export const SKILL_NAMES = [
 /** `skills/` at the package root; `src/` and the bundled `dist/` both sit one level below it. */
 export const SKILLS_DIRECTORY = join(import.meta.dir, "..", "skills")
 const PIN_CACHE_MS = 5_000
+/** The longest the plugin waits for bd to say who holds a claimed bead. */
+const CLAIM_LOOKUP_MS = 5_000
 
 /**
  * The store a shell child in `cwd` should open: the checkout's own `.beads`, or the
@@ -71,7 +79,13 @@ export function pinnedEnvironment(cwd: string, base: NodeJS.ProcessEnv, pinFor =
   return pin === undefined ? { ...base } : { ...base, ...EMBEDDED_PIN_ENV, BEADS_DIR: pin }
 }
 
-type PendingCall = { command: string; cwd: string; actor?: string; advisories: string[] }
+type PendingCall = {
+  command: string
+  cwd: string
+  /** The actor the plugin injected into the command, if any. */
+  injected?: string
+  advisories: string[]
+}
 
 /** Serialise read-modify-write on one storage key within this instance. */
 function keyedQueue() {
@@ -230,8 +244,8 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
     const call = shellInput(event.tool === SHELL_TOOL ? event.input : shellAliasInput(event.input), directory)
     if (call === undefined || call.command.trim() === "") return
     const chain = await chainFor(event.sessionID, event.agent)
-    const actor = agentActor(chain)
     const env = pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor)
+    const actor = agentActor(chain, env)
     const decision = await decideShell(call.command, call.cwd, {
       options,
       actor,
@@ -244,7 +258,12 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
     })
     if (decision.kind === "block") throw new GateRefusal(decision.gate, decision.cause, decision.resolution)
     if (decision.command !== call.command) event.input = { ...(event.input as object), command: decision.command }
-    pending.set(event.id, { command: call.command, cwd: call.cwd, actor, advisories: decision.advisories })
+    pending.set(event.id, {
+      command: call.command,
+      cwd: call.cwd,
+      injected: actorInjection(call.command, actor)?.actor,
+      advisories: decision.advisories,
+    })
   })
 
   const routing = await registerAgentRouting(ctx, { run: deps.run, env: baseEnv })
@@ -288,15 +307,21 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
       if (on("beads-claim-tracking") && isMutatingBdCommand(call.command) && shellExit(result) === 0) {
         const key = `claims/${event.sessionID}`
         const env = environmentForCommand(call.command, pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor))
-        if (call.actor !== undefined) env.BEADS_ACTOR = call.actor
         const invocations = bdInvocations(call.command)
+        const lookups = claimLookups(call.command, call.cwd, env, output, invocations, call.injected)
+        const holders = await readClaimHolders(lookups, env, run, Date.now() + CLAIM_LOOKUP_MS)
+        let unreadable: string[] = []
         const [before, state] = await queue(key, async () => {
           const state = readClaimState(await ctx.storage.get(key))
           const before = readClaimState(state)
-          recordClaimTransitions(state, call.command, call.cwd, env, output, invocations)
+          unreadable = recordClaimTransitions(state, call.command, call.cwd, env, output, invocations, holders)
           if (JSON.stringify(state) !== JSON.stringify(before)) await ctx.storage.set(key, state)
           return [before, state] as const
         })
+        if (unreadable.length > 0)
+          advisories.push(
+            `Beads: could not confirm that this session holds ${[...new Set(unreadable)].join(", ")} (\`bd show\` failed, or it reports a different assignee), so the claim is not tracked and its lease is not renewed.`,
+          )
         if (on("bd-lease-heartbeat")) {
           const leaseKey = `leases/${event.sessionID}`
           const leases = await queue(leaseKey, async () => {

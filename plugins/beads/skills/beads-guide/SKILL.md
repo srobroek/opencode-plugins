@@ -20,3 +20,7 @@ skill, not from this table.
 | `lock busy`, `workspace gate busy` or a failed `bd dolt pull`/`push` | `beads-contention-retry` |
 
 When a `bd` command is refused, the ledger is busy, a claim lapses or a bead lands in the wrong ledger, read [references/pitfalls.md](references/pitfalls.md).
+
+## Actor attribution
+
+When neither `BEADS_ACTOR` nor `BD_ACTOR` is set, the beads plugin prefixes every `bd` shell call with `export BEADS_ACTOR='opencode/<agent>/<session>'`, in main sessions as well as subagents (`opencode/<root>/<agent>/<session>` for a subagent). An actor you set always wins. To use your own identity, set `BEADS_ACTOR` or `BD_ACTOR` in the environment, or on the command: `BEADS_ACTOR=<harness>/<agent>/<session> bd create ...`. The actor gate only warns when no actor could be injected.

@@ -18,15 +18,18 @@ On every `shell` call (`tool.hook("execute.before")`), in this order, with one
 5. `bd update --status closed|done` is refused in favour of `bd close --reason`.
 6. `bd close` on a gate bead is refused (looked up with `bd show`).
 7. `bd unclaim` without `--if-assignee` is refused.
-8. Claims and creates without an actor are refused; other unattributed writes get
-   an advisory in the tool result.
+8. Writes without an actor get an advisory in the tool result, since the plugin
+   injects one unless you set `BEADS_ACTOR` or `BD_ACTOR` (see item 11).
 9. `gh pr create` without a `Bead:`, `Closes-Bead:` or `Bead-Id:` trailer is
    refused in a repository with a live ledger that you can write to.
 10. Each `bd` write to an embedded store is rewritten to run under
     `bd-embedded-write-runner`, which holds the store's write lock for exactly the
     life of the `bd` process. The lock files are shared with the omp plugin.
-11. In a subagent session, `export BEADS_ACTOR='opencode/<root>/<agent>/<session>'`
-    is prefixed, unless the command chooses its own actor.
+11. When neither `BEADS_ACTOR` nor `BD_ACTOR` is set, every `bd` shell call gets
+    `export BEADS_ACTOR=...` prefixed: `opencode/<root>/<agent>/<session>` in a subagent
+    session, `opencode/<agent>/<session>` in a main session. An actor set in the
+    environment or on the command always wins. The actor gate only warns when no actor
+    could be injected.
 
 A refusal is thrown, so the model sees it as the tool error.
 
@@ -35,7 +38,9 @@ primary checkout's from a linked worktree) and clears `BEADS_DOLT_SHARED_SERVER`
 in the child environment. An explicitly set `BEADS_DIR` is left alone.
 
 `tool.hook("execute.after")` records successful claims per session in plugin
-storage, and appends the contention-retry and stale-import advisories.
+storage, reading each holder from `bd show <id> --json` rather than from the shell
+text (a claim whose holder bd cannot report is not tracked, with a warning), and
+appends the contention-retry and stale-import advisories.
 
 `session.hook("context")` adds `bd prime` to the system prompt. The text is read
 once and frozen per session, so the prompt stays cacheable. A root session's frozen

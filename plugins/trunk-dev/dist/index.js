@@ -623,6 +623,8 @@ function scanShell(source, options = {}) {
   let word;
   let target;
   let targetHereString = false;
+  let targetOperator = "";
+  let targetFd;
   const pending = [];
   const append = (at, text, quoted = false, expands = false) => {
     word ??= { start: at, value: "", quoted: false, expands: false };
@@ -643,6 +645,9 @@ function scanShell(source, options = {}) {
     if (target !== undefined) {
       if (targetHereString)
         done.hereString = true;
+      done.operator = targetOperator;
+      if (targetFd !== undefined)
+        done.fd = targetFd;
       command.redirects.push(done);
       if (target !== "redirect")
         pending.push({
@@ -667,12 +672,18 @@ function scanShell(source, options = {}) {
     endCommand();
     items.push({ kind: "operator", operator: value });
   };
-  const substitution = (expansion) => {
+  const substitution = (expansion, unquoted = false) => {
     if (expansion.inner !== undefined) {
-      if (!options.executableSubstitutionsOnly || expansion.executable)
+      if (expansion.executable)
         substitutions.push(expansion.inner);
-      else
-        substitutions.push(...scanShell(expansion.inner, options).substitutions);
+      else {
+        if (!options.executableSubstitutionsOnly)
+          substitutions.push(expansion.inner);
+        const own = unquoted && expansion.doubleQuoted !== true;
+        const nested = own ? parameterBodySubstitutions(expansion.inner) : bodySubstitutions(expansion.inner);
+        for (const found of nested)
+          substitution(found, own);
+      }
     }
     if (!expansion.closed)
       complete = false;
@@ -756,7 +767,7 @@ function scanShell(source, options = {}) {
           continue;
         }
         if (c === "$" || c === "`") {
-          const expansion = expansionAt(source, j);
+          const expansion = expansionAt(source, j, true);
           substitution(expansion);
           text += source.slice(j, expansion.end);
           expands ||= expansion.expands;
@@ -774,7 +785,7 @@ function scanShell(source, options = {}) {
     }
     if (ch === "$" || ch === "`") {
       const expansion = expansionAt(source, i);
-      substitution(expansion);
+      substitution(expansion, true);
       append(i, source.slice(i, expansion.end), false, expansion.expands);
       i = expansion.end - 1;
       continue;
@@ -816,6 +827,8 @@ function scanShell(source, options = {}) {
       flush(i);
       target = "redirect";
       targetHereString = false;
+      targetOperator = "&>";
+      targetFd = undefined;
       i += source[i + 2] === ">" ? 2 : 1;
       continue;
     }
@@ -830,11 +843,15 @@ function scanShell(source, options = {}) {
       continue;
     }
     if (ch === "<" || ch === ">") {
-      if (word !== undefined && !word.quoted && !word.expands && /^(?:\d+|\{[A-Za-z_]\w*\})$/.test(word.value))
+      let fd;
+      if (word !== undefined && !word.quoted && !word.expands && /^(?:\d+|\{[A-Za-z_]\w*\})$/.test(word.value)) {
+        fd = word.value;
         word = undefined;
-      else
+      } else
         flush(i);
+      targetFd = fd;
       targetHereString = source.startsWith("<<<", i);
+      targetOperator = source.startsWith("<<<", i) ? "<<<" : source.startsWith("<<-", i) ? "<<-" : source.startsWith("<<", i) ? "<<" : ch + (next === ">" || next === "&" || next === "|" ? next : "");
       if (source.startsWith("<<<", i)) {
         target = "redirect";
         i += 2;
@@ -859,7 +876,7 @@ function scanShell(source, options = {}) {
     complete = false;
   return { items, substitutions, complete };
 }
-function expansionAt(text, at) {
+function expansionAt(text, at, inDouble = false) {
   if (text[at] === "`") {
     let j = at + 1;
     while (j < text.length && text[j] !== "`")
@@ -875,7 +892,7 @@ function expansionAt(text, at) {
   }
   const next = text[at + 1];
   if (next === "(" || next === "{") {
-    const close = closingIndex(text, at + 2, next, next === "(" ? ")" : "}");
+    const close = closingIndex(text, at + 2, next, next === "(" ? ")" : "}", inDouble && next === "{");
     const closed = close >= 0;
     return {
       end: closed ? close + 1 : text.length,
@@ -895,12 +912,21 @@ function expansionAt(text, at) {
     return { end: at + 2, expands: true, closed: true };
   return { end: at + 1, expands: false, closed: true };
 }
-function closingIndex(text, from, open, close) {
+function closingIndex(text, from, open, close, literalSingle = false) {
   let depth = 1;
   for (let j = from;j < text.length; j++) {
     const c = text[j];
     if (c === "\\") {
       j++;
+      continue;
+    }
+    if (c === "'" && literalSingle)
+      continue;
+    if (c === "$" && text[j + 1] === "(") {
+      const end = closingIndex(text, j + 2, "(", ")");
+      if (end < 0)
+        return -1;
+      j = end;
       continue;
     }
     if (c === "'" || c === '"' || c === "`") {
@@ -912,12 +938,47 @@ function closingIndex(text, from, open, close) {
       j = k;
       continue;
     }
-    if (c === open)
+    if (c === open && (open !== "{" || text[j - 1] === "$"))
       depth++;
     else if (c === close && --depth === 0)
       return j;
   }
   return -1;
+}
+function parameterBodySubstitutions(body) {
+  const found = [];
+  for (let j = 0;j < body.length; j++) {
+    const c = body[j];
+    if (c === "\\") {
+      j++;
+    } else if (c === "'") {
+      const end = body.indexOf("'", j + 1);
+      j = end < 0 ? body.length : end;
+    } else if (c === '"') {
+      j++;
+      while (j < body.length && body[j] !== '"') {
+        if (body[j] === "\\")
+          j++;
+        else if (body[j] === "$" || body[j] === "`") {
+          const expansion = expansionAt(body, j, true);
+          found.push({ ...expansion, doubleQuoted: true });
+          j = expansion.end - 1;
+        }
+        j++;
+      }
+    } else if (c === "$" || c === "`") {
+      const expansion = expansionAt(body, j);
+      found.push(expansion);
+      j = expansion.end - 1;
+    } else if ((c === "<" || c === ">") && body[j + 1] === "(") {
+      const close = closingIndex(body, j + 2, "(", ")");
+      const closed = close >= 0;
+      const end = closed ? close + 1 : body.length;
+      found.push({ end, inner: body.slice(j + 2, closed ? close : body.length), executable: true, expands: true, closed });
+      j = end - 1;
+    }
+  }
+  return found;
 }
 function bodySubstitutions(body) {
   const found = [];
@@ -929,12 +990,13 @@ function bodySubstitutions(body) {
     }
     if (c !== "$" && c !== "`")
       continue;
-    const expansion = expansionAt(body, j);
+    const expansion = expansionAt(body, j, true);
     found.push(expansion);
     j = expansion.end - 1;
   }
   return found;
 }
+var INTERPRETERS = new Set(["bash", "sh", "zsh", "dash", "ksh"]);
 // plugins/lib/src/shell-result.ts
 function record(value) {
   return value !== null && typeof value === "object" ? value : undefined;

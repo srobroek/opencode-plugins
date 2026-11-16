@@ -1,6 +1,17 @@
 import { resolve } from "node:path"
 import { shellQuoteBalanced, tokenizeShell } from "./shell-tokenizer.ts"
 
+/*
+ * Design scope of this parser, shared by the beads close, update-close, unclaim and actor
+ * gates, the embedded-write lock and the agent-efficiency wait guard. It models the shell
+ * syntax an agent normally writes: simple commands, pipelines and lists, groups, quoting,
+ * command, process and parameter substitutions, here-documents and here-strings, and
+ * `bash -c` strings. It does not model shell semantics that need execution (aliases,
+ * functions, `eval` of computed text, descriptor tables beyond fd 0), and it does not aim
+ * to resist input written to defeat it. Where it cannot read a command it reports the
+ * parse as unknown instead of guessing.
+ */
+
 /** A token in a command-position argv. Quoted words are data, not executable names. */
 export type Token = { value: string; quoted: boolean }
 
@@ -172,6 +183,10 @@ export type ShellWord = {
   expands: boolean
   /** On a redirection word: the operator is `<<<`, so the word is the here-string text. */
   hereString?: true
+  /** On a redirection word: the operator, such as `<`, `<<`, `<<<`, `>` or `>&`. */
+  operator?: string
+  /** On a redirection word: the file descriptor written before the operator, such as `3`. */
+  fd?: string
 }
 
 export type HereDocument = { body: string; quoted: boolean }
@@ -200,7 +215,15 @@ export type ShellScan = {
   complete: boolean
 }
 
-type Expansion = { end: number; inner?: string; expands: boolean; closed: boolean; executable?: boolean }
+type Expansion = {
+  end: number
+  inner?: string
+  expands: boolean
+  closed: boolean
+  executable?: boolean
+  /** Found inside double quotes, so its own body follows double-quote rules whatever encloses it. */
+  doubleQuoted?: true
+}
 
 /**
  * Split shell source into simple commands with exact word offsets, without evaluating it.
@@ -219,6 +242,8 @@ export function scanShell(source: string, options: { executableSubstitutionsOnly
   let word: { start: number; value: string; quoted: boolean; expands: boolean } | undefined
   let target: "redirect" | "here-document" | "here-document-tabs" | undefined
   let targetHereString = false
+  let targetOperator = ""
+  let targetFd: string | undefined
   const pending: { delimiter: string; stripTabs: boolean; quoted: boolean; owner: SimpleCommand }[] = []
 
   const append = (at: number, text: string, quoted = false, expands = false): void => {
@@ -237,6 +262,8 @@ export function scanShell(source: string, options: { executableSubstitutionsOnly
     word = undefined
     if (target !== undefined) {
       if (targetHereString) done.hereString = true
+      done.operator = targetOperator
+      if (targetFd !== undefined) done.fd = targetFd
       command.redirects.push(done)
       if (target !== "redirect")
         pending.push({
@@ -263,10 +290,20 @@ export function scanShell(source: string, options: { executableSubstitutionsOnly
     endCommand()
     items.push({ kind: "operator", operator: value })
   }
-  const substitution = (expansion: Expansion): void => {
+  const substitution = (expansion: Expansion, unquoted = false): void => {
     if (expansion.inner !== undefined) {
-      if (!options.executableSubstitutionsOnly || expansion.executable) substitutions.push(expansion.inner)
-      else substitutions.push(...scanShell(expansion.inner, options).substitutions)
+      if (expansion.executable) substitutions.push(expansion.inner)
+      else {
+        // The raw body is the source by default; callers that want only code skip it.
+        if (!options.executableSubstitutionsOnly) substitutions.push(expansion.inner)
+        // Unquoted, the body follows expansion rules, not command rules: quotes are honoured
+        // and `#` is data, so `${X:-'$(cmd)'}` is a literal while `${X:-$(cmd)}`, `${X:-<(cmd)}`
+        // and `${X:- #$(cmd)}` run. Inside double quotes the single quotes are literal, so
+        // `"${X:-'$(cmd)'}"` runs `cmd`.
+        const own = unquoted && expansion.doubleQuoted !== true
+        const nested = own ? parameterBodySubstitutions(expansion.inner) : bodySubstitutions(expansion.inner)
+        for (const found of nested) substitution(found, own)
+      }
     }
     if (!expansion.closed) complete = false
   }
@@ -340,7 +377,7 @@ export function scanShell(source: string, options: { executableSubstitutionsOnly
           continue
         }
         if (c === "$" || c === "`") {
-          const expansion = expansionAt(source, j)
+          const expansion = expansionAt(source, j, true)
           substitution(expansion)
           text += source.slice(j, expansion.end)
           expands ||= expansion.expands
@@ -357,7 +394,7 @@ export function scanShell(source: string, options: { executableSubstitutionsOnly
     }
     if (ch === "$" || ch === "`") {
       const expansion = expansionAt(source, i)
-      substitution(expansion)
+      substitution(expansion, true)
       append(i, source.slice(i, expansion.end), false, expansion.expands)
       i = expansion.end - 1
       continue
@@ -395,6 +432,8 @@ export function scanShell(source: string, options: { executableSubstitutionsOnly
       flush(i)
       target = "redirect"
       targetHereString = false
+      targetOperator = "&>"
+      targetFd = undefined
       i += source[i + 2] === ">" ? 2 : 1
       continue
     }
@@ -410,10 +449,21 @@ export function scanShell(source: string, options: { executableSubstitutionsOnly
     }
     if (ch === "<" || ch === ">") {
       // A word of digits, or `{name}`, written against the operator is its file descriptor.
-      if (word !== undefined && !word.quoted && !word.expands && /^(?:\d+|\{[A-Za-z_]\w*\})$/.test(word.value))
+      // Flush the previous word first: in `3<<<'x'>out` the here-string belongs to fd 3.
+      let fd: string | undefined
+      if (word !== undefined && !word.quoted && !word.expands && /^(?:\d+|\{[A-Za-z_]\w*\})$/.test(word.value)) {
+        fd = word.value
         word = undefined
-      else flush(i)
+      } else flush(i)
+      targetFd = fd
       targetHereString = source.startsWith("<<<", i)
+      targetOperator = source.startsWith("<<<", i)
+        ? "<<<"
+        : source.startsWith("<<-", i)
+          ? "<<-"
+          : source.startsWith("<<", i)
+            ? "<<"
+            : ch + (next === ">" || next === "&" || next === "|" ? next : "")
       if (source.startsWith("<<<", i)) {
         target = "redirect"
         i += 2
@@ -438,7 +488,7 @@ export function scanShell(source: string, options: { executableSubstitutionsOnly
 }
 
 /** The expansion a `$` or backtick at `at` starts, and where it ends. */
-function expansionAt(text: string, at: number): Expansion {
+function expansionAt(text: string, at: number, inDouble = false): Expansion {
   if (text[at] === "`") {
     let j = at + 1
     while (j < text.length && text[j] !== "`") j += text[j] === "\\" ? 2 : 1
@@ -453,7 +503,7 @@ function expansionAt(text: string, at: number): Expansion {
   }
   const next = text[at + 1]
   if (next === "(" || next === "{") {
-    const close = closingIndex(text, at + 2, next, next === "(" ? ")" : "}")
+    const close = closingIndex(text, at + 2, next, next === "(" ? ")" : "}", inDouble && next === "{")
     const closed = close >= 0
     return {
       end: closed ? close + 1 : text.length,
@@ -474,12 +524,20 @@ function expansionAt(text: string, at: number): Expansion {
 }
 
 /** Index of the `close` that balances an `open` already consumed before `from`, or -1. */
-function closingIndex(text: string, from: number, open: string, close: string): number {
+function closingIndex(text: string, from: number, open: string, close: string, literalSingle = false): number {
   let depth = 1
   for (let j = from; j < text.length; j++) {
     const c = text[j]
     if (c === "\\") {
       j++
+      continue
+    }
+    if (c === "'" && literalSingle) continue
+    // A command substitution has its own quote rules, whatever surrounds it.
+    if (c === "$" && text[j + 1] === "(") {
+      const end = closingIndex(text, j + 2, "(", ")")
+      if (end < 0) return -1
+      j = end
       continue
     }
     if (c === "'" || c === '"' || c === "`") {
@@ -489,10 +547,52 @@ function closingIndex(text: string, from: number, open: string, close: string): 
       j = k
       continue
     }
-    if (c === open) depth++
+    // Only `${` opens a nested expansion; a bare `{` is a literal brace.
+    if (c === open && (open !== "{" || text[j - 1] === "$")) depth++
     else if (c === close && --depth === 0) return j
   }
   return -1
+}
+
+/**
+ * Substitutions in an unquoted parameter-expansion body such as the default of `${X:-…}`.
+ * Quotes are honoured (single quotes hide everything, double quotes still expand `$( )` and
+ * backticks), and `$( )`, backticks, `<( )`, `>( )` and nested `${ }` are found. A `#`, a `;`
+ * or a newline is plain data here: this is not a command line.
+ */
+function parameterBodySubstitutions(body: string): Expansion[] {
+  const found: Expansion[] = []
+  for (let j = 0; j < body.length; j++) {
+    const c = body[j] as string
+    if (c === "\\") {
+      j++
+    } else if (c === "'") {
+      const end = body.indexOf("'", j + 1)
+      j = end < 0 ? body.length : end
+    } else if (c === '"') {
+      j++
+      while (j < body.length && body[j] !== '"') {
+        if (body[j] === "\\") j++
+        else if (body[j] === "$" || body[j] === "`") {
+          const expansion = expansionAt(body, j, true)
+          found.push({ ...expansion, doubleQuoted: true })
+          j = expansion.end - 1
+        }
+        j++
+      }
+    } else if (c === "$" || c === "`") {
+      const expansion = expansionAt(body, j)
+      found.push(expansion)
+      j = expansion.end - 1
+    } else if ((c === "<" || c === ">") && body[j + 1] === "(") {
+      const close = closingIndex(body, j + 2, "(", ")")
+      const closed = close >= 0
+      const end = closed ? close + 1 : body.length
+      found.push({ end, inner: body.slice(j + 2, closed ? close : body.length), executable: true, expands: true, closed })
+      j = end - 1
+    }
+  }
+  return found
 }
 
 /** Substitutions an unquoted here-document body expands. */
@@ -505,7 +605,7 @@ function bodySubstitutions(body: string): Expansion[] {
       continue
     }
     if (c !== "$" && c !== "`") continue
-    const expansion = expansionAt(body, j)
+    const expansion = expansionAt(body, j, true)
     found.push(expansion)
     j = expansion.end - 1
   }
@@ -579,55 +679,123 @@ function splitCommands(source: string): CommandPosition[] {
   return positions
 }
 
-function nestedSources(source: string): { sources: string[]; unknown: boolean } {
-  const sources: string[] = []
-  let unknown = false
-  let depth = 0
-  let start = -1
-  let quote: "'" | '"' | null = null
-  for (let i = 0; i < source.length; i++) {
-    const ch = source[i]
-    if (quote === "'") {
-      if (ch === "'") quote = null
-      continue
-    }
-    if (quote === '"') {
-      if (ch === "\\") i++
-      else if (ch === '"') quote = null
-      continue
-    }
-    if (ch === "'") {
-      quote = "'"
-      continue
-    }
-    if (ch === '"') {
-      quote = '"'
-      continue
-    }
-    if (ch === "`") {
-      const end = source.indexOf("`", i + 1)
-      if (end < 0) return { sources, unknown: true }
-      sources.push(source.slice(i + 1, end))
-      i = end
-      continue
-    }
-    if (source.startsWith("$(", i)) {
-      if (depth++ === 0) start = i + 2
-      i++
-      continue
-    }
-    if (depth > 0 && ch === ")") {
-      if (--depth === 0) sources.push(source.slice(start, i))
-    }
+/**
+ * The here-document body or here-string text that is the command's standard input, or
+ * undefined when stdin is a file, another descriptor's here-document, or nothing. The last
+ * redirection of descriptor 0 wins, as in the shell.
+ */
+export function stdinSource(item: SimpleCommand): string | undefined {
+  let heredoc = 0
+  let source: string | undefined
+  for (const redirect of item.redirects) {
+    const operator = redirect.operator ?? ""
+    const isHeredoc = operator === "<<" || operator === "<<-"
+    const document = isHeredoc ? item.hereDocuments[heredoc++] : undefined
+    const fd = redirect.fd ?? (operator.startsWith("<") ? "0" : "1")
+    if (fd !== "0") continue
+    if (isHeredoc) source = document?.body
+    else if (operator === "<<<") source = redirect.value
+    else source = undefined
   }
-  if (depth !== 0) unknown = true
-  // Command substitutions and backticks remain executable inside double quotes.
-  for (const match of source.matchAll(/"((?:\\.|[^"\\])*)"/g)) {
-    const body = match[1] ?? ""
-    for (const substitution of body.matchAll(/\$\(([^()]*)\)/g))
-      if (substitution[1] !== undefined) sources.push(substitution[1])
-    for (const substitution of body.matchAll(/`([^`]*)`/g))
-      if (substitution[1] !== undefined) sources.push(substitution[1])
+  return source
+}
+
+/** Whether a redirection duplicates or closes a descriptor onto standard input (`0<&3`, `<&-`, `0>&3`). */
+function duplicatesStdin(item: SimpleCommand): boolean {
+  return item.redirects.some((redirect) => {
+    const operator = redirect.operator ?? ""
+    if (operator !== "<&" && operator !== ">&") return false
+    return (redirect.fd ?? (operator === "<&" ? "0" : "1")) === "0"
+  })
+}
+
+/** Every here-document body and here-string text attached to the command. */
+function documentSources(item: SimpleCommand): string[] {
+  return [
+    ...item.hereDocuments.map((document) => document.body),
+    ...item.redirects.filter((redirect) => redirect.hereString === true).map((redirect) => redirect.value),
+  ]
+}
+
+const INTERPRETERS = new Set(["bash", "sh", "zsh", "dash", "ksh"])
+
+/**
+ * Whether a shell interpreter command (`values[0]` is its word) reads its script from stdin,
+ * so a here-document or here-string fed to it is shell source. `-c '…'` takes its script from
+ * the argument and `script.sh` from a file, so stdin there is data; `-s` forces stdin.
+ */
+export function readsScriptFromStdin(values: string[]): boolean {
+  if (!INTERPRETERS.has(values[0]?.split("/").pop() ?? "")) return false
+  let stdin = false
+  for (let i = 1; i < values.length; i++) {
+    const arg = values[i] as string
+    if (arg === "--") return stdin || i + 1 >= values.length
+    if (arg.startsWith("--")) {
+      if (arg === "--rcfile" || arg === "--init-file") i++
+      continue
+    }
+    if (arg.length > 1 && (arg.startsWith("-") || arg.startsWith("+"))) {
+      const letters = arg.slice(1)
+      if (arg.startsWith("-") && letters.includes("c")) return false
+      if (arg.startsWith("-") && letters.includes("s")) stdin = true
+      if (/[oO]$/.test(letters)) i++
+      continue
+    }
+    return stdin
+  }
+  return true
+}
+
+/**
+ * The script a shell interpreter runs from `-c 'script'`, or undefined when the command has no
+ * literal `-c` argument. Only the plain `bash -c 'script'` and `bash -lc 'script'` spellings.
+ */
+export function interpreterCommandString(values: string[]): string | undefined {
+  if (!INTERPRETERS.has(values[0]?.split("/").pop() ?? "")) return undefined
+  for (let i = 1; i < values.length; i++) {
+    const arg = values[i] as string
+    if (arg === "--" || arg.startsWith("--")) {
+      if (arg === "--rcfile" || arg === "--init-file") i++
+      if (arg === "--") return undefined
+      continue
+    }
+    if (arg.length > 1 && (arg.startsWith("-") || arg.startsWith("+"))) {
+      const letters = arg.slice(1)
+      if (arg.startsWith("-") && letters.includes("c")) {
+        const script = values[i + 1 + (/[oO]$/.test(letters) ? 1 : 0)]
+        return script !== undefined && !script.startsWith("-") ? script : undefined
+      }
+      if (/[oO]$/.test(letters)) i++
+      continue
+    }
+    return undefined
+  }
+  return undefined
+}
+
+function nestedSources(source: string): { sources: string[]; unknown: boolean } {
+  // A balanced, quote-aware scan: `"$(bd create "a (b)")"` is one substitution, which a
+  // regex over the quoted body cannot see. Backticks, `<( )` and substitutions nested
+  // inside parameter or arithmetic expansions come from the same scan.
+  const scan = scanShell(source, { executableSubstitutionsOnly: true })
+  const sources: string[] = [...scan.substitutions]
+  let unknown = !scan.complete
+  // A shell interpreter reading a here-document or here-string runs its body as a script.
+  for (const item of scan.items) {
+    if (item.kind !== "command") continue
+    let first = 0
+    while (
+      first < item.words.length &&
+      /^[A-Za-z_]\w*=/.test(source.slice(item.words[first]?.start, item.words[first]?.end))
+    )
+      first++
+    const values = item.words.slice(first).map((word) => word.value)
+    if (!readsScriptFromStdin(values)) continue
+    const script = stdinSource(item)
+    if (script !== undefined) sources.push(script)
+    // `0<&3` or `0<&0` may point stdin at a here-document on another descriptor. Rather than
+    // model descriptor tables, read every here-document and here-string on the command as a script.
+    else if (duplicatesStdin(item)) sources.push(...documentSources(item))
   }
   for (const match of source.matchAll(/\b(?:bash|sh|zsh|dash|ksh)\s+-c\s+((?:'[^']*')|(?:"[^"]*")|[^\s;&|]+)/g)) {
     const value = match[1]

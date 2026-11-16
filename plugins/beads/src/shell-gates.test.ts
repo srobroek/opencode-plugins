@@ -5,7 +5,7 @@ import { join } from "node:path"
 import { setBdShowRunForTests } from "./bd-close-gate.ts"
 import { GateAdmitter } from "./gate-admission.ts"
 import { parse } from "./shell.ts"
-import { actorForCommand, createLedgerWarning, decideShell, hasBdEdit, withActorPrefix } from "./shell-gates.ts"
+import { actorForCommand, actorInjection, createLedgerWarning, decideShell, hasBdEdit, withActorPrefix } from "./shell-gates.ts"
 import { gateDeps } from "./test-support.ts"
 
 describe("decideShell", () => {
@@ -52,8 +52,21 @@ describe("decideShell", () => {
     expect(await decideShell("bd unclaim proj-1", root, deps())).toMatchObject({ gate: "bd-unclaim-gate" })
   })
 
-  test("refuses a main-session create without an actor", async () => {
-    expect(await decideShell("bd create --title t", root, deps())).toMatchObject({ gate: "bd-actor-gate" })
+  test("an apostrophe in a double-quoted default does not stop an ordinary command", async () => {
+    for (const command of [
+      `echo "\${X:-can't}"`,
+      `echo "\${X:-it's} and \${Y:-isn't}"`,
+      `echo "\${X:-{}"`,
+      `echo "\${X:-$(printf '{"a":1}')}"`,
+    ]) {
+      expect(await decideShell(command, root, deps())).toMatchObject({ kind: "allow" })
+    }
+  })
+
+  test("warns, without refusing, a create that no actor could be injected into", async () => {
+    const decision = await decideShell("bd create --title t", root, deps())
+    expect(decision.kind).toBe("allow")
+    if (decision.kind === "allow") expect(decision.advisories.join("\n")).toContain("BEADS_ACTOR")
   })
 
   test.each([
@@ -65,6 +78,21 @@ describe("decideShell", () => {
     const decision = await decideShell("bd update proj-1 --claim", root, deps({ actor: "a/b/c", options }))
     if (decision.kind !== "allow") throw new Error(JSON.stringify(decision))
     expect(decision.command).toContain(`--beads-wait-ms ${expected} -- bd update`)
+  })
+
+  test.each([
+    ['BEADS_ACTOR=opencode/o/t bd comments add proj-1 "fix in progress; say retry; bd create x"'],
+    ['bd comments add proj-1 "fix in progress; say retry; bd create x"'],
+    ['bd comments add proj-1 "bd create foo"'],
+    ["FOO=1 BEADS_ACTOR=x bd create --title t"],
+  ])("does not refuse %s", async (command) => {
+    expect(await decideShell(command, root, deps())).not.toMatchObject({ gate: "bd-actor-gate" })
+  })
+
+  test("warns about a real create after quoted text mentioning an actor", async () => {
+    const decision = await decideShell('echo "BEADS_ACTOR=x"; bd create --title t', root, deps())
+    expect(decision.kind).toBe("allow")
+    if (decision.kind === "allow") expect(decision.advisories.join("\n")).toContain("BEADS_ACTOR")
   })
 
   test("refuses a PR without a bead trailer when the repository is controlled", async () => {
@@ -215,6 +243,20 @@ describe("helpers", () => {
     expect(hasBdEdit(parse("echo $(bd edit proj-1)") as never)).toBe(true)
     expect(hasBdEdit(parse("bd edit --help") as never)).toBe(false)
     expect(hasBdEdit(parse("echo bd edit") as never)).toBe(false)
+  })
+
+  test.each<[string, "BEADS_ACTOR" | "BD_ACTOR"]>([
+    ["bd update a-1 --claim", "BEADS_ACTOR"],
+    ["BEADS_ACTOR=A bd update a-1 --claim; bd update a-2 --claim", "BEADS_ACTOR"],
+    ["BD_ACTOR=B bd update a-1 --claim; bd update a-2 --claim", "BD_ACTOR"],
+    ["BEADS_ACTOR=A bd update a-1 --claim; BD_ACTOR=B bd update a-2 --claim; bd update a-3 --claim", "BD_ACTOR"],
+    ["bd --actor C update a-1 --claim; BD_ACTOR=B bd update a-2 --claim; bd update a-3 --claim", "BD_ACTOR"],
+  ])("injects through the variable that overrides no explicit actor: %s", (command, variable) => {
+    expect(actorInjection(command, "gen")).toEqual({ actor: "gen", variable })
+  })
+
+  test("injects nothing when every invocation names its own actor", () => {
+    expect(actorInjection("BEADS_ACTOR=A bd update a-1 --claim; BD_ACTOR=B bd update a-2 --claim", "gen")).toBeUndefined()
   })
 
   test("actorForCommand respects an actor the command already chooses", () => {

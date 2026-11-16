@@ -1,13 +1,58 @@
-import { describe, expect, test } from "bun:test"
+import { afterEach, describe, expect, test } from "bun:test"
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { bdInvocations } from "./bd-actor-gate.ts"
-import { CONTENTION_ADVISORY, contentionAdvisory, readClaimState, recordClaimTransitions } from "./claims.ts"
+import { CONTENTION_ADVISORY, claimLookups, contentionAdvisory, readClaimHolders, readClaimState, recordClaimTransitions } from "./claims.ts"
+import type { BdRun } from "./gate-admission.ts"
 import { agentActor, blockReason, gateEnabled, sessionChain, shellInput } from "./host.ts"
 import { closeInvocations, parse, parsedInvocations } from "./shell.ts"
+import { fixtureHolders } from "./test-support.ts"
+
+describe("claim keys after a directory change", () => {
+  const roots: string[] = []
+  afterEach(() => {
+    for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
+  })
+
+  test.each([
+    ["--db .beads", "sub/.beads"],
+    ["--directory nested", "sub/nested"],
+    ["-C nested", "sub/nested"],
+  ])("a relative %s selector is resolved against the directory the write runs in", (selector, relative) => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "beads-claims-")))
+    roots.push(root)
+    mkdirSync(join(root, "sub", ".beads"), { recursive: true })
+    mkdirSync(join(root, "sub", "nested", ".beads"), { recursive: true })
+    const command = `cd sub && bd ${selector} update proj-1 --claim`
+    const invocations = bdInvocations(command)
+    const [lookup] = claimLookups(command, root, {}, "Claimed proj-1", invocations)
+    expect(lookup?.cwd).toBe(join(root, "sub"))
+    expect(lookup?.key).toContain(join(root, relative))
+    const state = readClaimState(undefined)
+    recordClaimTransitions(
+      state,
+      command,
+      root,
+      {},
+      "Claimed proj-1",
+      invocations,
+      fixtureHolders({ "proj-1": "a/s1" }, "a/s1"),
+    )
+    const [claim] = Object.values(state.claims)
+    expect(claim?.id).toBe("proj-1")
+    expect(JSON.stringify(state.claims)).toContain(join(root, relative))
+    expect(JSON.stringify(state.claims)).not.toContain(join(root, selector.includes("nested") ? "nested" : ".beads"))
+  })
+})
 
 describe("claim tracking", () => {
   const env = { BEADS_DIR: "/store/.beads", BEADS_ACTOR: "opencode/r/general/s" } as NodeJS.ProcessEnv
   const record = (state: ReturnType<typeof readClaimState>, command: string, output: string) =>
-    recordClaimTransitions(state, command, "/repo", env, output, bdInvocations(command))
+    {
+      const invocations = bdInvocations(command)
+      return recordClaimTransitions(state, command, "/repo", env, output, invocations, fixtureHolders({}, "opencode/r/general/s"))
+    }
 
   test("a direct claim, then a close, round-trips through stored JSON", () => {
     const state = readClaimState(undefined)
@@ -69,11 +114,11 @@ describe("host", () => {
     expect(chain).toEqual({ sessionID: "c", parentID: "b", rootID: "a", agent: "general" })
     expect(agentActor(chain)).toBe("opencode/a/general/c")
     const main = await sessionChain("a", "build", async (id) => ({ parentID: parents[id] }))
-    expect(agentActor(main)).toBeUndefined()
+    expect(agentActor(main)).toBe("opencode/build/a")
     const broken = await sessionChain("c", "general", async () => {
       throw new Error("gone")
     })
-    expect(agentActor(broken)).toBeUndefined()
+    expect(agentActor(broken)).toBe("opencode/general/c")
   })
 
   test("shellInput resolves workdir against the location", () => {
@@ -101,5 +146,33 @@ describe("bd shell parsing", () => {
     expect(closeInvocations('bd -C /r close proj-1 proj-2 --reason "proj-3"')).toEqual([
       { ids: ["proj-1", "proj-2"], dbArgs: ["-C", "/r"] },
     ])
+  })
+})
+
+describe("claim holder candidates", () => {
+  test("an explicit --actor is the only candidate, so a conditional export cannot become the holder", () => {
+    const command = "if true; then export BEADS_ACTOR=B; fi; bd update proj-1 --claim --actor A; bd update proj-1 --assignee B"
+    const [lookup] = claimLookups(command, "/repo", {}, "Claimed proj-1", bdInvocations(command), "B")
+    expect([...(lookup?.candidates ?? [])]).toEqual(["A"])
+  })
+})
+
+describe("claim holder confirmation", () => {
+  test.each([
+    ["a post-verb --actor", "BEADS_ACTOR=B bd update proj-1 --claim --actor A; bd update proj-1 --assignee B", ["A"]],
+    ["a post-verb --actor= form", "BEADS_ACTOR=B bd update proj-1 --claim --actor=A; bd update proj-1 --assignee B", ["A"]],
+    ["a post-verb --actor over a pre-verb one", "bd --actor B update proj-1 --claim --actor A; bd update proj-1 --assignee B", ["A"]],
+    ["a non-literal flag actor", 'BEADS_ACTOR=B bd update proj-1 --claim --actor "$X"; bd update proj-1 --assignee B', []],
+  ])("%s outranks the prefix actor, so a handoff to B is not tracked", async (_name, command, candidates) => {
+    const asked: string[][] = []
+    const run: BdRun = async (_cwd, args) => {
+      asked.push(args)
+      return { output: JSON.stringify([{ id: "proj-1", assignee: "B" }]) }
+    }
+    const lookups = claimLookups(command, "/repo", {}, "Claimed proj-1", bdInvocations(command), "B")
+    expect(lookups.map((lookup) => [...lookup.candidates])).toEqual([candidates])
+    const holders = await readClaimHolders(lookups, {}, run, Date.now() + 1000)
+    expect(asked.length).toBe(1)
+    expect(holders.size).toBe(0)
   })
 })

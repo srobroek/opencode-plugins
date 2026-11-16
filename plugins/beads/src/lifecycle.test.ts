@@ -105,13 +105,13 @@ const sid = (name: string) => `ses_${name}_${++unique}`
 type Row = { status: string; assignee?: string }
 
 /** A bd stand-in that remembers who holds what, like the ledger would. */
-function ledger(rows: Record<string, Row> = {}) {
+function ledger(rows: Record<string, Row> = {}, fallbackHolder?: string) {
   const calls: string[][] = []
   const run: BdRun = async (_cwd, args, _deadline, env) => {
     calls.push(args)
     const [verb, id = ""] = args
     if (verb === "show") {
-      const row = rows[id]
+      const row = rows[id] ?? (fallbackHolder === undefined ? undefined : { status: "in_progress", assignee: fallbackHolder })
       return { output: JSON.stringify({ data: row === undefined ? [] : [{ id, issue_type: "task", ...row }], schema_version: 1 }) }
     }
     if (verb === "unclaim") {
@@ -205,7 +205,7 @@ describe("stop nudge and release in a root session", () => {
 
   test("a goal or plugin prompt does not re-arm the nudge", async () => {
     const root = sid("root")
-    const t = await start([{ id: root }], { run: ledger().run })
+    const t = await start([{ id: root }], { run: ledger({}, "me/main").run })
     await t.shell(root, "BEADS_ACTOR=me/main bd update proj-1 --claim", "✓ Claimed proj-1")
     await t.emit("session.execution.succeeded", root)
     await t.fake.fire.session("prompt", { sessionID: root, metadata: { source: "goal" }, prompt: { text: "continue" } })
@@ -216,7 +216,7 @@ describe("stop nudge and release in a root session", () => {
   describe("built-in goal", () => {
     const claimed = async (goal: AdapterDeps["goal"]) => {
       const root = sid("root")
-      const t = await start([{ id: root }], { run: ledger().run, goal })
+      const t = await start([{ id: root }], { run: ledger({}, "me/main").run, goal })
       await t.shell(root, "BEADS_ACTOR=me/main bd update proj-1 --claim", "✓ Claimed proj-1")
       return { root, t }
     }
@@ -273,7 +273,7 @@ describe("stop nudge and release in a root session", () => {
 
   test("a user interrupt, a shutdown or a failure is not a stop", async () => {
     const root = sid("root")
-    const t = await start([{ id: root }], { run: ledger().run })
+    const t = await start([{ id: root }], { run: ledger({}, "me/main").run })
     await t.shell(root, "BEADS_ACTOR=me/main bd update proj-1 --claim", "✓ Claimed proj-1")
     await t.emit("session.execution.interrupted", root, { reason: "user" })
     await t.emit("session.execution.interrupted", root, { reason: "shutdown" })
@@ -284,7 +284,7 @@ describe("stop nudge and release in a root session", () => {
 
   test("nothing claimed, nothing said; the nudge gate switches it off", async () => {
     const root = sid("root")
-    const t = await start([{ id: root }], { run: ledger().run }, { gates: { "beads-stop-nudge": false } })
+    const t = await start([{ id: root }], { run: ledger({}, "me/main").run }, { gates: { "beads-stop-nudge": false } })
     await t.emit("session.execution.succeeded", root)
     await t.shell(root, "BEADS_ACTOR=me/main bd update proj-1 --claim", "✓ Claimed proj-1")
     await t.emit("session.execution.succeeded", root)
@@ -294,7 +294,7 @@ describe("stop nudge and release in a root session", () => {
 
   test("one event delivered to two plugin instances is handled once", async () => {
     const root = sid("root")
-    const bd = ledger()
+    const bd = ledger({}, "me/main")
     const directory = mkdtempSync(join(Bun.env.TMPDIR ?? "/tmp", "beads-lifecycle-"))
     roots.push(directory)
     const fake = createFakeContext({ directory, sessions: [{ id: root }], options: { gates: { "binary-git-hooks": false } } })
@@ -348,8 +348,10 @@ describe("subagent claim release", () => {
     const bd = ledger({ "proj-6": { status: "in_progress", assignee: `opencode/${parent}/general/${child}` } })
     const showEntered = Promise.withResolvers<void>()
     const allowShow = Promise.withResolvers<void>()
+    let shows = 0
     const run: BdRun = async (cwd, args, deadline, env) => {
-      if (args[0] === "show") {
+      // The first `show` is the claim's holder lookup; the release's own check is the second.
+      if (args[0] === "show" && ++shows === 2) {
         showEntered.resolve()
         await allowShow.promise
       }
@@ -410,7 +412,7 @@ describe("subagent claim release", () => {
     })
     await t.shell(child, "bd update proj-9 --claim", "✓ Claimed proj-9")
     await t.emit("session.execution.succeeded", child)
-    expect(bd.calls.map((args) => args[0]).filter((verb) => verb !== "gate")).toEqual(["show", "unclaim", "update"])
+    expect(bd.calls.map((args) => args[0]).filter((verb) => verb !== "gate")).toEqual(["show", "show", "unclaim", "update"])
     const [told] = t.synthetics()
     expect(told).toMatchObject({ sessionID: parent, resume: false, metadata: { source: BEADS_SOURCE } })
     expect(told?.text).toContain(`finished background subagent session ${child} were released`)
@@ -424,11 +426,11 @@ describe("subagent claim release", () => {
     const t = await start([{ id: parent }, { id: child, parentID: parent }], { run: bd.run })
     await t.shell(child, "bd update proj-3 --claim", "✓ Claimed proj-3")
     await t.emit("session.execution.interrupted", child, { reason: "superseded" })
-    expect(bd.calls.some((args) => args[0] === "show")).toBe(false)
+    expect(bd.calls.some((args) => args[0] === "unclaim")).toBe(false)
     await t.cleanup()
     const off = await start([{ id: parent }, { id: child, parentID: parent }], { run: bd.run }, { gates: { "beads-claim-release": false } })
     await off.emit("session.execution.succeeded", child)
-    expect(bd.calls.some((args) => args[0] === "show")).toBe(false)
+    expect(bd.calls.some((args) => args[0] === "unclaim")).toBe(false)
     await off.cleanup()
   })
 })
@@ -465,7 +467,12 @@ describe("lease heartbeat", () => {
 
   test("a failed heartbeat drops the lease and tells the session once, without waking it", async () => {
     const root = sid("root")
-    const run: BdRun = async (_cwd, args) => (args[0] === "heartbeat" ? { failure: "bd exited with code 1: not the owner" } : { output: "null" })
+    const run: BdRun = async (_cwd, args) => 
+      args[0] === "heartbeat"
+        ? { failure: "bd exited with code 1: not the owner" }
+        : args[0] === "show"
+          ? { output: JSON.stringify([{ id: args[1], assignee: "me/main" }]) }
+          : { output: "null" }
     const t = await start([{ id: root }], { run })
     await t.shell(root, "BEADS_ACTOR=me/main bd update proj-1 --claim", "✓ Claimed proj-1")
     t.clock.tick()
@@ -480,7 +487,7 @@ describe("lease heartbeat", () => {
 
   test("a parked status ends the lease; cleanup and session deletion stop every timer", async () => {
     const root = sid("root")
-    const t = await start([{ id: root }], { run: ledger().run })
+    const t = await start([{ id: root }], { run: ledger({}, "me/main").run })
     await t.shell(root, "BEADS_ACTOR=me/main bd update proj-1 --claim", "✓ Claimed proj-1")
     await t.shell(root, "BEADS_ACTOR=me/main bd update proj-2 --claim", "✓ Claimed proj-2")
     expect(t.clock.callbacks.size).toBe(2)
@@ -496,7 +503,7 @@ describe("lease heartbeat", () => {
 
   test("the heartbeat gate switches renewal off", async () => {
     const root = sid("root")
-    const t = await start([{ id: root }], { run: ledger().run }, { gates: { "bd-lease-heartbeat": false } })
+    const t = await start([{ id: root }], { run: ledger({}, "me/main").run }, { gates: { "bd-lease-heartbeat": false } })
     await t.shell(root, "BEADS_ACTOR=me/main bd update proj-1 --claim", "✓ Claimed proj-1")
     expect(t.clock.callbacks.size).toBe(0)
     await t.cleanup()
@@ -509,7 +516,7 @@ describe("session start", () => {
     const child = sid("child")
     let checks = 0
     const t = await start([{ id: root }, { id: child, parentID: root }], {
-      run: ledger().run,
+      run: ledger({}, "me/main").run,
       start: {
         hooksAdvisory: () => {
           checks++
@@ -531,7 +538,7 @@ describe("session start", () => {
 
 describe("skills", () => {
   test("registers every shipped skill and removes them on cleanup", async () => {
-    const t = await start([], { run: ledger().run })
+    const t = await start([], { run: ledger({}, "me/main").run })
     expect([...t.fake.skills.keys()].sort()).toEqual([...SKILL_NAMES].sort())
     for (const skill of t.fake.skills.values()) {
       expect(String(skill.content)).not.toMatch(/rule:\/\/|skill:\/\//)

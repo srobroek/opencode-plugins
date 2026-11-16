@@ -6,9 +6,18 @@ import {
   leadingCdCwd,
   parse,
   parsedInvocations,
+  readsScriptFromStdin,
   type ShellScan,
   scanShell,
 } from "./shell-command.ts"
+
+test("a shell interpreter reads its script from stdin only without -c or a script operand", () => {
+  const stdin = (command: string) => readsScriptFromStdin(command.split(" "))
+  for (const command of ["bash", "sh -s", "bash -s -- a", "bash -o pipefail", "bash -e -x", "/bin/bash -l"])
+    expect(stdin(command)).toBe(true)
+  for (const command of ["bash -c true", "bash -lc true", "bash script.sh", "sh -o pipefail script.sh", "bash -- script.sh", "cat", "git"])
+    expect(stdin(command)).toBe(false)
+})
 
 test("executable-only substitutions omit parameter and arithmetic sources without changing the default", () => {
   const source = `echo "\${sleep}" "$((sleep + 1))" "\${value:-$(sleep 5)}" \`sleep 6\` <(sleep 7)`
@@ -124,6 +133,61 @@ test("parses command positions and nested sources, flagging what it cannot read"
   expect(parse("eval $CMD").unknown).toBe(true)
   expect(parse("echo 'open")).toMatchObject({ kind: "parse-failure", reason: "unbalanced shell quote" })
   expect(parse(42)).toMatchObject({ kind: "parse-failure" })
+})
+
+test("finds a substitution whose quoted argument holds parentheses or a nested quote", () => {
+  const sources = (command: string) => parse(command).nested.map((child) => child.command)
+  expect(sources('echo "$(bd create "a (b)")"')).toEqual(['bd create "a (b)"'])
+  expect(sources("echo `bd create 'a ) b'`")).toEqual(["bd create 'a ) b'"])
+  const nested = parse("echo \"$(echo $(bd create 'x)'))\"").nested
+  expect(nested.map((child) => child.command)).toEqual(["echo $(bd create 'x)')"])
+  expect(nested[0]?.nested.map((child) => child.command)).toEqual(["bd create 'x)'"])
+  expect(sources("echo '$(bd create x)'")).toEqual([])
+  expect(sources("cat <<'EOF'\n$(bd create x)\nEOF")).toEqual([])
+  expect(parse('echo "$(bd create "a (b)"').unknown).toBe(true)
+})
+
+test("reads executable substitutions inside parameter expansions and shell-fed here-documents", () => {
+  const sources = (command: string) => parse(command).nested.map((child) => child.command)
+  expect(sources(`echo "\${X:-'$(bd create y)'}"`)).toEqual(["bd create y"])
+  expect(sources("echo \"${X:-`bd create y`}\"")).toEqual(["bd create y"])
+  expect(sources("bash <<'EOF'\nbd create y\nEOF")).toEqual(["bd create y\n"])
+  expect(sources("bash -s <<'EOF'\nbd create y\nEOF")).toEqual(["bd create y\n"])
+  expect(sources("sh <<< 'bd create y'")).toEqual(["bd create y"])
+  expect(sources("cat <<'EOF'\nbd create y\nEOF")).toEqual([])
+  expect(sources("bash -c 'true' <<'EOF'\nbd create y\nEOF").includes("bd create y\n")).toBe(false)
+  expect(sources("cat ${X:-<(sleep 30)}")).toEqual(["sleep 30"])
+  expect(sources("cat ${X:->(sleep 30)}")).toEqual(["sleep 30"])
+  expect(sources('cat "${X:-<(sleep 30)}"')).toEqual([])
+  expect(sources("cat ${X:-'$(sleep 5)'}")).toEqual([])
+  expect(sources("cat ${X:-$(sleep 5)}")).toEqual(["sleep 5"])
+  expect(sources("cat ${X:-'<('$(sleep 5)')'}")).toEqual(["sleep 5"])
+  expect(sources("echo ${X:- #$(sleep 5)}")).toEqual(["sleep 5"])
+  expect(sources('echo ${X:-"$(sleep 5)" ${Y:-`sleep 6`}}')).toEqual(["sleep 5", "sleep 6"])
+  expect(sources("echo ${X:-'#$(sleep 5)'}")).toEqual([])
+  expect(parse(`echo "\${X:-can't}"`).unknown).toBe(false)
+  expect(sources(`echo "\${X:-can't $(sleep 5)}"`)).toEqual(["sleep 5"])
+  expect(sources("bash 0<<<'bd create y'")).toEqual(["bd create y"])
+  expect(sources("bash <<<'bd create y' 3</dev/null")).toEqual(["bd create y"])
+  expect(sources("bash 3<<<'bd create y' </dev/null")).toEqual([])
+  expect(sources("bash <<<'bd create y' </dev/null")).toEqual([])
+  expect(sources("bash <<<'bd create y' >out")).toEqual(["bd create y"])
+  expect(sources("bash 3<<'EOF'\nbd create y\nEOF")).toEqual([])
+  expect(parse('echo "${X:-{}"').unknown).toBe(false)
+  expect(parse(`echo "\${X:-$(printf '{"a":1}')}"`).unknown).toBe(false)
+  expect(sources(`echo "\${X:-$(printf '{"a":1}' && sleep 5)}"`)).toEqual([`printf '{"a":1}' && sleep 5`])
+  expect(parse(`echo \${X:-$(printf '{"a":1}')}`).unknown).toBe(false)
+  expect(parse('echo "${X:-{} ${Y:-${Z}}"').unknown).toBe(false)
+  expect(sources(`echo "\${X:-{ $(sleep 5) }"`)).toEqual(["sleep 5"])
+  expect(sources("bash 3<<<'bd create y'>out")).toEqual([])
+  expect(sources("bash <<<'bd create y'>out")).toEqual(["bd create y"])
+  expect(sources("bash 3<<<'x' 0<<<'bd create y'")).toEqual(["bd create y"])
+  expect(sources("bash 3<<<'bd create y' 0<&3")).toEqual(["bd create y"])
+  expect(sources("bash <<<'bd create y' 0<&0")).toEqual(["bd create y"])
+  expect(sources("bash 3<<'EOF' <&3\nbd create y\nEOF")).toEqual(["bd create y\n"])
+  expect(sources("sleep 3 3<<<'x' <&3")).toEqual([])
+  expect(sources(`echo \${A:-"\${B:-'$(sleep 5)'}"}`)).toEqual(["sleep 5"])
+  expect(sources(`echo \${A:-'\${B:-$(sleep 5)}'}`)).toEqual([])
 })
 
 test("lists invocations of one executable with their globals and verb", () => {

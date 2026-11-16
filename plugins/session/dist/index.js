@@ -1128,6 +1128,387 @@ function tokenize(segment) {
     quoted: startsQuoted
   }));
 }
+function scanShell(source, options = {}) {
+  const items = [];
+  const substitutions = [];
+  let complete = true;
+  let command = { kind: "command", words: [], redirects: [], hereDocuments: [] };
+  let word;
+  let target;
+  let targetHereString = false;
+  let targetOperator = "";
+  let targetFd;
+  const pending = [];
+  const append = (at, text, quoted = false, expands = false) => {
+    word ??= { start: at, value: "", quoted: false, expands: false };
+    word.value += text;
+    word.quoted ||= quoted;
+    word.expands ||= expands;
+  };
+  const endCommand = () => {
+    if (command.words.length > 0 || command.redirects.length > 0)
+      items.push(command);
+    command = { kind: "command", words: [], redirects: [], hereDocuments: [] };
+  };
+  const flush = (end) => {
+    if (word === undefined)
+      return;
+    const done = { start: word.start, end, value: word.value, quoted: word.quoted, expands: word.expands };
+    word = undefined;
+    if (target !== undefined) {
+      if (targetHereString)
+        done.hereString = true;
+      done.operator = targetOperator;
+      if (targetFd !== undefined)
+        done.fd = targetFd;
+      command.redirects.push(done);
+      if (target !== "redirect")
+        pending.push({
+          delimiter: done.value,
+          stripTabs: target === "here-document-tabs",
+          quoted: done.quoted,
+          owner: command
+        });
+      target = undefined;
+      return;
+    }
+    if (command.words.length === 0 && !done.quoted && (done.value === "{" || done.value === "}")) {
+      endCommand();
+      items.push({ kind: "operator", operator: done.value });
+      return;
+    }
+    command.words.push(done);
+  };
+  const operator = (at, value) => {
+    flush(at);
+    target = undefined;
+    endCommand();
+    items.push({ kind: "operator", operator: value });
+  };
+  const substitution = (expansion, unquoted = false) => {
+    if (expansion.inner !== undefined) {
+      if (expansion.executable)
+        substitutions.push(expansion.inner);
+      else {
+        if (!options.executableSubstitutionsOnly)
+          substitutions.push(expansion.inner);
+        const own = unquoted && expansion.doubleQuoted !== true;
+        const nested = own ? parameterBodySubstitutions(expansion.inner) : bodySubstitutions(expansion.inner);
+        for (const found of nested)
+          substitution(found, own);
+      }
+    }
+    if (!expansion.closed)
+      complete = false;
+  };
+  const hereDocuments = (from) => {
+    let at = from;
+    while (pending.length > 0) {
+      const document = pending.shift();
+      if (document === undefined)
+        break;
+      const bodyStart = at;
+      let bodyEnd = -1;
+      while (at <= source.length) {
+        const newline = source.indexOf(`
+`, at);
+        const lineEnd = newline < 0 ? source.length : newline;
+        const line = source.slice(at, lineEnd);
+        if ((document.stripTabs ? line.replace(/^\t+/, "") : line) === document.delimiter) {
+          bodyEnd = at;
+          at = newline < 0 ? source.length : newline + 1;
+          break;
+        }
+        at = lineEnd + 1;
+      }
+      const body = source.slice(bodyStart, bodyEnd < 0 ? source.length : bodyEnd);
+      document.owner.hereDocuments.push({ body, quoted: document.quoted });
+      if (!document.quoted)
+        for (const found of bodySubstitutions(body))
+          substitution(found);
+      if (bodyEnd < 0) {
+        complete = false;
+        return source.length;
+      }
+    }
+    return at;
+  };
+  for (let i = 0;i < source.length; i++) {
+    const ch = source[i];
+    const next = source[i + 1];
+    if (ch === "\\") {
+      if (next === `
+`)
+        i++;
+      else if (next === undefined)
+        append(i, ch);
+      else
+        append(i++, next, true);
+      continue;
+    }
+    if (ch === "'") {
+      const close = source.indexOf("'", i + 1);
+      if (close < 0)
+        complete = false;
+      append(i, source.slice(i + 1, close < 0 ? source.length : close), true);
+      i = close < 0 ? source.length : close;
+      continue;
+    }
+    if (ch === "$" && next === "'") {
+      let j = i + 2;
+      while (j < source.length && source[j] !== "'")
+        j += source[j] === "\\" ? 2 : 1;
+      if (j >= source.length)
+        complete = false;
+      append(i, source.slice(i + 2, Math.min(j, source.length)), true);
+      i = j;
+      continue;
+    }
+    if (ch === '"' || ch === "$" && next === '"') {
+      const open = ch === '"' ? i : i + 1;
+      let j = open + 1;
+      let text = "";
+      let expands = false;
+      while (j < source.length && source[j] !== '"') {
+        const c = source[j];
+        const escaped = source[j + 1];
+        if (c === "\\" && escaped !== undefined) {
+          if (escaped !== `
+`)
+            text += '$`"\\'.includes(escaped) ? escaped : `\\${escaped}`;
+          j += 2;
+          continue;
+        }
+        if (c === "$" || c === "`") {
+          const expansion = expansionAt(source, j, true);
+          substitution(expansion);
+          text += source.slice(j, expansion.end);
+          expands ||= expansion.expands;
+          j = expansion.end;
+          continue;
+        }
+        text += c;
+        j++;
+      }
+      if (j >= source.length)
+        complete = false;
+      append(i, text, true, expands);
+      i = j;
+      continue;
+    }
+    if (ch === "$" || ch === "`") {
+      const expansion = expansionAt(source, i);
+      substitution(expansion, true);
+      append(i, source.slice(i, expansion.end), false, expansion.expands);
+      i = expansion.end - 1;
+      continue;
+    }
+    if ((ch === "<" || ch === ">") && next === "(") {
+      const close = closingIndex(source, i + 2, "(", ")");
+      const end = close < 0 ? source.length : close;
+      substitutions.push(source.slice(i + 2, end));
+      if (close < 0)
+        complete = false;
+      append(i, source.slice(i, close < 0 ? end : end + 1), false, true);
+      i = end;
+      continue;
+    }
+    if (ch === "#" && word === undefined) {
+      const newline = source.indexOf(`
+`, i);
+      i = (newline < 0 ? source.length : newline) - 1;
+      continue;
+    }
+    if (ch === " " || ch === "\t") {
+      flush(i);
+      continue;
+    }
+    if (ch === `
+`) {
+      operator(i, `
+`);
+      i = hereDocuments(i + 1) - 1;
+      continue;
+    }
+    if (ch === ";") {
+      const length = next === ";" ? source[i + 2] === "&" ? 3 : 2 : next === "&" ? 2 : 1;
+      operator(i, length === 1 ? ";" : ";;");
+      i += length - 1;
+      continue;
+    }
+    if (ch === "&" && next === ">") {
+      flush(i);
+      target = "redirect";
+      targetHereString = false;
+      targetOperator = "&>";
+      targetFd = undefined;
+      i += source[i + 2] === ">" ? 2 : 1;
+      continue;
+    }
+    if (ch === "&" || ch === "|") {
+      const value = next === ch ? `${ch}${ch}` : ch === "|" && next === "&" ? "|&" : ch;
+      operator(i, value);
+      i += value.length - 1;
+      continue;
+    }
+    if (ch === "(" || ch === ")") {
+      operator(i, ch);
+      continue;
+    }
+    if (ch === "<" || ch === ">") {
+      let fd;
+      if (word !== undefined && !word.quoted && !word.expands && /^(?:\d+|\{[A-Za-z_]\w*\})$/.test(word.value)) {
+        fd = word.value;
+        word = undefined;
+      } else
+        flush(i);
+      targetFd = fd;
+      targetHereString = source.startsWith("<<<", i);
+      targetOperator = source.startsWith("<<<", i) ? "<<<" : source.startsWith("<<-", i) ? "<<-" : source.startsWith("<<", i) ? "<<" : ch + (next === ">" || next === "&" || next === "|" ? next : "");
+      if (source.startsWith("<<<", i)) {
+        target = "redirect";
+        i += 2;
+      } else if (source.startsWith("<<-", i)) {
+        target = "here-document-tabs";
+        i += 2;
+      } else if (source.startsWith("<<", i)) {
+        target = "here-document";
+        i += 1;
+      } else {
+        target = "redirect";
+        if (next === ">" || next === "&" || next === "|" || ch === "<" && next === ">")
+          i += 1;
+      }
+      continue;
+    }
+    append(i, ch, false, "*?[{}".includes(ch) || ch === "~" && word === undefined);
+  }
+  flush(source.length);
+  endCommand();
+  if (pending.length > 0)
+    complete = false;
+  return { items, substitutions, complete };
+}
+function expansionAt(text, at, inDouble = false) {
+  if (text[at] === "`") {
+    let j = at + 1;
+    while (j < text.length && text[j] !== "`")
+      j += text[j] === "\\" ? 2 : 1;
+    const closed = j < text.length;
+    return {
+      end: closed ? j + 1 : text.length,
+      inner: text.slice(at + 1, Math.min(j, text.length)),
+      executable: true,
+      expands: true,
+      closed
+    };
+  }
+  const next = text[at + 1];
+  if (next === "(" || next === "{") {
+    const close = closingIndex(text, at + 2, next, next === "(" ? ")" : "}", inDouble && next === "{");
+    const closed = close >= 0;
+    return {
+      end: closed ? close + 1 : text.length,
+      inner: text.slice(at + 2, closed ? close : text.length),
+      executable: next === "(" && text[at + 2] !== "(",
+      expands: true,
+      closed
+    };
+  }
+  if (next !== undefined && /[A-Za-z_]/.test(next)) {
+    let j = at + 2;
+    while (j < text.length && /\w/.test(text[j]))
+      j++;
+    return { end: j, expands: true, closed: true };
+  }
+  if (next !== undefined && /[0-9@*#?$!-]/.test(next))
+    return { end: at + 2, expands: true, closed: true };
+  return { end: at + 1, expands: false, closed: true };
+}
+function closingIndex(text, from, open, close, literalSingle = false) {
+  let depth = 1;
+  for (let j = from;j < text.length; j++) {
+    const c = text[j];
+    if (c === "\\") {
+      j++;
+      continue;
+    }
+    if (c === "'" && literalSingle)
+      continue;
+    if (c === "$" && text[j + 1] === "(") {
+      const end = closingIndex(text, j + 2, "(", ")");
+      if (end < 0)
+        return -1;
+      j = end;
+      continue;
+    }
+    if (c === "'" || c === '"' || c === "`") {
+      let k = j + 1;
+      while (k < text.length && text[k] !== c)
+        k += c !== "'" && text[k] === "\\" ? 2 : 1;
+      if (k >= text.length)
+        return -1;
+      j = k;
+      continue;
+    }
+    if (c === open && (open !== "{" || text[j - 1] === "$"))
+      depth++;
+    else if (c === close && --depth === 0)
+      return j;
+  }
+  return -1;
+}
+function parameterBodySubstitutions(body) {
+  const found = [];
+  for (let j = 0;j < body.length; j++) {
+    const c = body[j];
+    if (c === "\\") {
+      j++;
+    } else if (c === "'") {
+      const end = body.indexOf("'", j + 1);
+      j = end < 0 ? body.length : end;
+    } else if (c === '"') {
+      j++;
+      while (j < body.length && body[j] !== '"') {
+        if (body[j] === "\\")
+          j++;
+        else if (body[j] === "$" || body[j] === "`") {
+          const expansion = expansionAt(body, j, true);
+          found.push({ ...expansion, doubleQuoted: true });
+          j = expansion.end - 1;
+        }
+        j++;
+      }
+    } else if (c === "$" || c === "`") {
+      const expansion = expansionAt(body, j);
+      found.push(expansion);
+      j = expansion.end - 1;
+    } else if ((c === "<" || c === ">") && body[j + 1] === "(") {
+      const close = closingIndex(body, j + 2, "(", ")");
+      const closed = close >= 0;
+      const end = closed ? close + 1 : body.length;
+      found.push({ end, inner: body.slice(j + 2, closed ? close : body.length), executable: true, expands: true, closed });
+      j = end - 1;
+    }
+  }
+  return found;
+}
+function bodySubstitutions(body) {
+  const found = [];
+  for (let j = 0;j < body.length; j++) {
+    const c = body[j];
+    if (c === "\\") {
+      j++;
+      continue;
+    }
+    if (c !== "$" && c !== "`")
+      continue;
+    const expansion = expansionAt(body, j, true);
+    found.push(expansion);
+    j = expansion.end - 1;
+  }
+  return found;
+}
 function splitCommands(source) {
   const positions = [];
   let current = [];
@@ -1170,63 +1551,85 @@ function splitCommands(source) {
   flush();
   return positions;
 }
-function nestedSources(source) {
-  const sources = [];
-  let unknown = false;
-  let depth = 0;
-  let start = -1;
-  let quote = null;
-  for (let i = 0;i < source.length; i++) {
-    const ch = source[i];
-    if (quote === "'") {
-      if (ch === "'")
-        quote = null;
+function stdinSource(item) {
+  let heredoc = 0;
+  let source;
+  for (const redirect of item.redirects) {
+    const operator = redirect.operator ?? "";
+    const isHeredoc = operator === "<<" || operator === "<<-";
+    const document = isHeredoc ? item.hereDocuments[heredoc++] : undefined;
+    const fd = redirect.fd ?? (operator.startsWith("<") ? "0" : "1");
+    if (fd !== "0")
       continue;
-    }
-    if (quote === '"') {
-      if (ch === "\\")
-        i++;
-      else if (ch === '"')
-        quote = null;
-      continue;
-    }
-    if (ch === "'") {
-      quote = "'";
-      continue;
-    }
-    if (ch === '"') {
-      quote = '"';
-      continue;
-    }
-    if (ch === "`") {
-      const end = source.indexOf("`", i + 1);
-      if (end < 0)
-        return { sources, unknown: true };
-      sources.push(source.slice(i + 1, end));
-      i = end;
-      continue;
-    }
-    if (source.startsWith("$(", i)) {
-      if (depth++ === 0)
-        start = i + 2;
-      i++;
-      continue;
-    }
-    if (depth > 0 && ch === ")") {
-      if (--depth === 0)
-        sources.push(source.slice(start, i));
-    }
+    if (isHeredoc)
+      source = document?.body;
+    else if (operator === "<<<")
+      source = redirect.value;
+    else
+      source = undefined;
   }
-  if (depth !== 0)
-    unknown = true;
-  for (const match of source.matchAll(/"((?:\\.|[^"\\])*)"/g)) {
-    const body = match[1] ?? "";
-    for (const substitution of body.matchAll(/\$\(([^()]*)\)/g))
-      if (substitution[1] !== undefined)
-        sources.push(substitution[1]);
-    for (const substitution of body.matchAll(/`([^`]*)`/g))
-      if (substitution[1] !== undefined)
-        sources.push(substitution[1]);
+  return source;
+}
+function duplicatesStdin(item) {
+  return item.redirects.some((redirect) => {
+    const operator = redirect.operator ?? "";
+    if (operator !== "<&" && operator !== ">&")
+      return false;
+    return (redirect.fd ?? (operator === "<&" ? "0" : "1")) === "0";
+  });
+}
+function documentSources(item) {
+  return [
+    ...item.hereDocuments.map((document) => document.body),
+    ...item.redirects.filter((redirect) => redirect.hereString === true).map((redirect) => redirect.value)
+  ];
+}
+var INTERPRETERS = new Set(["bash", "sh", "zsh", "dash", "ksh"]);
+function readsScriptFromStdin(values) {
+  if (!INTERPRETERS.has(values[0]?.split("/").pop() ?? ""))
+    return false;
+  let stdin = false;
+  for (let i = 1;i < values.length; i++) {
+    const arg = values[i];
+    if (arg === "--")
+      return stdin || i + 1 >= values.length;
+    if (arg.startsWith("--")) {
+      if (arg === "--rcfile" || arg === "--init-file")
+        i++;
+      continue;
+    }
+    if (arg.length > 1 && (arg.startsWith("-") || arg.startsWith("+"))) {
+      const letters = arg.slice(1);
+      if (arg.startsWith("-") && letters.includes("c"))
+        return false;
+      if (arg.startsWith("-") && letters.includes("s"))
+        stdin = true;
+      if (/[oO]$/.test(letters))
+        i++;
+      continue;
+    }
+    return stdin;
+  }
+  return true;
+}
+function nestedSources(source) {
+  const scan = scanShell(source, { executableSubstitutionsOnly: true });
+  const sources = [...scan.substitutions];
+  let unknown = !scan.complete;
+  for (const item of scan.items) {
+    if (item.kind !== "command")
+      continue;
+    let first = 0;
+    while (first < item.words.length && /^[A-Za-z_]\w*=/.test(source.slice(item.words[first]?.start, item.words[first]?.end)))
+      first++;
+    const values = item.words.slice(first).map((word) => word.value);
+    if (!readsScriptFromStdin(values))
+      continue;
+    const script = stdinSource(item);
+    if (script !== undefined)
+      sources.push(script);
+    else if (duplicatesStdin(item))
+      sources.push(...documentSources(item));
   }
   for (const match of source.matchAll(/\b(?:bash|sh|zsh|dash|ksh)\s+-c\s+((?:'[^']*')|(?:"[^"]*")|[^\s;&|]+)/g)) {
     const value = match[1];
