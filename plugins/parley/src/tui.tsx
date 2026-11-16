@@ -7,6 +7,7 @@ import { createEffect, createSignal, Show } from "solid-js"
 import type { SubmittedAnswer } from "./answers.ts"
 import { createRoundStore, InlineCard, PANEL, RoundPanel } from "./panel.tsx"
 import { canAutoPresent, canCloseRoundPanel } from "./presentation.ts"
+import { instanceChanged, reconcileRounds } from "./reconcile.ts"
 import type { RoundView } from "./rounds.ts"
 import { ParleyRpc, type RoundEvent } from "./rpc.ts"
 import { type Outcome, submitRound } from "./submit.ts"
@@ -102,18 +103,27 @@ export default Plugin.define({
       return [...found.values()]
     }
 
-    const refresh = async (location: LocationRef) => {
+    // The server instance each location last answered from; a new one means the plugin reloaded there.
+    const instances = new Map<string, string>()
+    // Rounds the server no longer lists after a reload. They stay, with their drafts, until the user acts.
+    let lost: ReadonlySet<string> = new Set()
+    const refresh = async (location: LocationRef, reloaded = false) => {
       if (disposed) return
-      const result = (await rpc.pending({}, { location }).catch(() => undefined)) as { rounds?: RoundView[] } | undefined
+      const result = (await rpc.pending({}, { location }).catch(() => undefined)) as
+        | { rounds?: RoundView[]; instance?: string }
+        | undefined
       if (disposed || !result) return
       const key = locationKey(location)
-      const open = new Set((result.rounds ?? []).map((view) => view.roundID))
-      for (const entry of rounds())
-        if (locationKey(entry.location) === key && !open.has(entry.view.roundID)) store.forget(entry.view.roundID)
-      setRounds((all) => [
-        ...all.filter((entry) => locationKey(entry.location) !== key),
-        ...(result.rounds ?? []).map((view) => ({ view, location })),
-      ])
+      const merged = reconcileRounds({
+        current: rounds().filter((entry) => locationKey(entry.location) === key),
+        server: result.rounds ?? [],
+        lost,
+        reloaded: instanceChanged(instances, key, result.instance) || reloaded,
+        toEntry: (view): Entry => ({ view, location }),
+      })
+      lost = merged.lost
+      for (const id of merged.forget) store.forget(id)
+      setRounds((all) => [...all.filter((entry) => locationKey(entry.location) !== key), ...merged.entries])
     }
 
     const forSession = (sessionID: string) => rounds().find((entry) => entry.view.sessionID === sessionID)
@@ -170,8 +180,6 @@ export default Plugin.define({
     }
 
     let reachable = true
-    // The server instance each location last answered from; a new one means the plugin reloaded there.
-    const instances = new Map<string, string>()
     const heartbeat = async () => {
       if (disposed) return
       const results = await Promise.all(
@@ -179,12 +187,8 @@ export default Plugin.define({
           rpc.attach({ clientID }, { location }).then(
             (reply) => {
               const instance = (reply as { instance?: string } | undefined)?.instance
-              const key = locationKey(location)
               // Fetch the restored rounds again. The round ids are unchanged, so drafts are kept.
-              if (instance !== undefined && instances.get(key) !== instance) {
-                if (instances.has(key)) void refresh(location)
-                instances.set(key, instance)
-              }
+              if (instanceChanged(instances, locationKey(location), instance)) void refresh(location, true)
               return true
             },
             () => false,
@@ -262,6 +266,8 @@ export default Plugin.define({
     for (const location of locations()) void refresh(location)
     const timer = setInterval(() => void heartbeat(), HEARTBEAT_MS)
 
+    // One id per round, reused when the user retries, so the server sends the message once.
+    const deliveryIDs = new Map<string, string>()
     const submit = async (view: RoundView, answers: SubmittedAnswer[]) => {
       const entry = rounds().find((item) => item.view.roundID === view.roundID)
       if (!entry) return ["This round is no longer open."]
@@ -269,7 +275,13 @@ export default Plugin.define({
         submit: () => rpc.submit({ roundID: view.roundID, answers, final: true }, { location: entry.location }) as Promise<Outcome>,
         deliver: () =>
           rpc.deliver(
-            { sessionID: view.sessionID, number: view.number, questions: [...view.questions], answers },
+            {
+              sessionID: view.sessionID,
+              number: view.number,
+              questions: [...view.questions],
+              answers,
+              deliveryID: deliveryIDs.get(view.roundID) ?? deliveryIDs.set(view.roundID, crypto.randomUUID()).get(view.roundID),
+            },
             { location: entry.location },
           ) as Promise<Outcome>,
         choose: async () =>
@@ -280,6 +292,7 @@ export default Plugin.define({
           })) === true,
         notify: (message, variant) => context.ui.toast.show({ message, ...(variant ? { variant } : {}), duration: 2000 }),
         settle: async () => {
+          lost = new Set([...lost].filter((id) => id !== view.roundID))
           await refresh(entry.location)
           if (disposed) return
           const stillPending = forSession(view.sessionID) !== undefined
@@ -304,6 +317,7 @@ export default Plugin.define({
       if (disposed || !confirmed) return
       for (const callID of view.callIDs ?? []) dismissing.add(callID)
       await rpc.cancel({ roundID: view.roundID, reason: "user_closed" }, { location: entry.location }).catch(() => {})
+      lost = new Set([...lost].filter((id) => id !== view.roundID))
       await refresh(entry.location)
       if (disposed) return
       const stillPending = forSession(view.sessionID) !== undefined

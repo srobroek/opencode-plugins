@@ -41,9 +41,14 @@ function saveUpload(file: FileValue) {
 }
 
 /** Rounds in the plugin's own storage, one key per round. Nothing is kept when the host offers no storage. */
-async function roundStore(storage: Plugin.Context["storage"] | undefined): Promise<RoundStore | undefined> {
+async function roundStore(ctx: Plugin.Context): Promise<RoundStore | undefined> {
+  const storage = ctx.storage
   if (!storage) return undefined
+  const directory = ctx.location.directory
   return {
+    directory,
+    // A session of another location, one that is gone, or one the host cannot name is not ours.
+    owns: async (sessionID) => (await ctx.session.get({ sessionID })).location.directory === directory,
     list: async () => {
       const entries: unknown[] = []
       let after: string | undefined
@@ -66,7 +71,9 @@ export default Plugin.define({
     let emitEvent: ((event: RoundEvent) => Promise<void>) | undefined
     const service = new Parley({
       settings: settingsFrom(ctx.options, process.env),
-      store: await roundStore(ctx.storage),
+      store: await roundStore(ctx),
+      save: saveUpload,
+      warn: (message) => console.warn(message),
       // A synthetic message, queued behind any running turn and waking an idle session: the user has just
       // answered, and the agent's own call died with the reload, so nothing else would tell it.
       deliver: async ({ sessionID, text, description }) => {
@@ -126,7 +133,13 @@ export default Plugin.define({
       cancel: async (input) => service.cancel(input as { roundID: string; reason?: string }),
       deliver: async (input) =>
         service.deliver(
-          input as { sessionID: string; number?: number; questions: Question[]; answers: SubmittedAnswer[] },
+          input as {
+            sessionID: string
+            number?: number
+            questions: Question[]
+            answers: SubmittedAnswer[]
+            deliveryID?: string
+          },
         ),
     })
     emitEvent = (event) => rpc.events.emit("round", { ...event })
@@ -191,10 +204,12 @@ export default Plugin.define({
       clearInterval(sweep)
       clearInterval(presence)
       disposed = true
-      service.suspend()
+      // Waiting calls end and their last writes finish, within a bound, before the next instance restores.
+      const drained = service.suspend()
       void takeover.then((current) => current?.dispose()).catch(() => {})
       void tools.dispose().catch(() => {})
       void rpc.dispose().catch(() => {})
+      return drained
     }
   },
 })

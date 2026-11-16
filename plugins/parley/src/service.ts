@@ -1,7 +1,7 @@
-import { type Answer, normaliseAnswer, type SubmittedAnswer } from "./answers.ts"
+import { type Answer, type FileValue, normaliseAnswer, type SubmittedAnswer } from "./answers.ts"
 import { visibleQuestions } from "./conditions.ts"
 import { FALLBACK_KINDS, fromQuestionTool, type Prompt, toPrompt, unsupported } from "./fallback.ts"
-import { summarise } from "./format.ts"
+import { baseMime, render } from "./format.ts"
 import { fromStored, type StoredRound, stale, toStored } from "./persist.ts"
 import { Presence } from "./presence.ts"
 import { coerceQuestion, type Question, validateQuestions } from "./questions.ts"
@@ -59,6 +59,10 @@ export interface QuestionTool {
 
 /** Where open rounds are kept so they outlive a plugin reload. */
 export interface RoundStore {
+  /** The location this instance serves. Rounds are stored for every location in one place. */
+  readonly directory: string
+  /** Whether a session belongs to this instance's location. Unknown sessions are not owned. */
+  readonly owns: (sessionID: string) => Promise<boolean>
   readonly list: () => Promise<readonly unknown[]>
   readonly save: (round: StoredRound) => Promise<void>
   readonly remove: (roundID: string) => Promise<void>
@@ -74,6 +78,9 @@ export interface SessionMessage {
 export interface Deps {
   readonly emit: (event: RoundEvent) => Promise<void>
   readonly store?: RoundStore
+  /** Writes an upload to disk and returns its path; without it uploads cannot go in a session message. */
+  readonly save?: (file: FileValue) => string | undefined
+  readonly warn?: (message: string) => void
   readonly deliver?: (message: SessionMessage) => Promise<void>
   readonly now?: () => number
   readonly questionTool?: () => Promise<QuestionTool | undefined>
@@ -110,12 +117,48 @@ const unavailable = (reason: string): Result => ({ status: "unavailable", reason
 
 export class InputError extends Error {}
 
+/** How long `suspend` waits for waiting calls and storage writes to settle. */
+export const SUSPEND_DRAIN_MS = 2000
+
 const DELIVERY_HEAD =
   "The parley plugin reloaded while you waited, so your parley call ended. The user answered that round afterwards; their answers follow. Act on them; do not ask these questions again."
 
-/** The session message for a restored round's answers, in the wording of a parley tool result. */
-export function deliveryText(result: RoundResult, questions: readonly Question[]): string {
-  return `${DELIVERY_HEAD}\n\n${summarise(result, questions)}`
+const filesOf = (answer: Answer): FileValue[] => {
+  const files = (answer.value as { files?: unknown } | undefined)?.files
+  return Array.isArray(files) ? (files as FileValue[]) : []
+}
+const withData = (answer: Answer) => filesOf(answer).filter((file) => file.data !== undefined)
+
+/**
+ * The session message for answers that have no tool call to return through, in the wording of a parley
+ * tool result. A message carries text only, so uploads are written to disk and reported by path (text
+ * files are inlined, as in a normal result). Without `save`, answers with uploads are held back: their
+ * ids come back in `held`, and the text says how to get them.
+ */
+export function deliveryMessage(
+  result: RoundResult,
+  questions: readonly Question[],
+  save: Deps["save"],
+  heldAdvice: string,
+): { text: string; held: string[] } {
+  const held = save ? [] : result.answers.filter((answer) => withData(answer).length > 0).map((answer) => answer.id)
+  const notes: string[] = []
+  const answers = result.answers
+    .filter((answer) => !held.includes(answer.id))
+    .map((answer) => {
+      const files = filesOf(answer).map((file) => {
+        if (file.data === undefined || !baseMime(file.mime).startsWith("image/")) return file
+        const path = save?.(file)
+        notes.push(`${answer.id}: ${file.name} (${baseMime(file.mime)}, ${file.size} B)${path ? ` saved to ${path}` : " not forwarded"}`)
+        const { data: _data, ...rest } = file
+        return rest
+      })
+      return files.length === 0 ? answer : { ...answer, value: { ...(answer.value as object), files } }
+    })
+  const body = render({ ...result, answers }, questions, save).content as string
+  const lines = [DELIVERY_HEAD, "", body, ...notes]
+  if (held.length > 0) lines.push("", `Uploads in ${held.join(", ")} could not be sent in a message. ${heldAdvice}`)
+  return { text: lines.join("\n"), held }
 }
 
 const failure = (error: unknown) =>
@@ -138,8 +181,12 @@ export class Parley {
   /** Open rounds restored from storage that no tool call is waiting on. Their answers go to the session as a message. */
   readonly #orphans = new Set<string>()
   readonly #waits = new Set<AbortController>()
+  readonly #inflight = new Set<Promise<unknown>>()
+  /** Delivery keys already sent, so a retry after a lost acknowledgement does not send twice. */
+  readonly #sent = new Set<string>()
   #suspended = false
   #writes: Promise<unknown> = Promise.resolve()
+  #pending = 0
 
   constructor(readonly deps: Deps) {
     this.presence = new Presence(deps.settings.heartbeatWindowMs)
@@ -155,8 +202,14 @@ export class Parley {
     const now = this.#now()
     const keep: Round[] = []
     for (const entry of entries) {
-      const round = fromStored(entry)
-      if (!round) continue
+      const restored = fromStored(entry)
+      if (!restored) {
+        this.deps.warn?.(`parley: ignoring a stored round that is not valid (${(entry as { id?: unknown } | null)?.id ?? "no id"})`)
+        continue
+      }
+      const { round, directory } = restored
+      // Storage holds every location's rounds; another location's instance owns and writes those.
+      if (directory !== store.directory || !(await store.owns(round.sessionID).catch(() => false))) continue
       if (stale(round, now, CLOSED_TTL_MS)) this.#forget(round.id)
       else keep.push(round)
     }
@@ -167,19 +220,23 @@ export class Parley {
   #persist(round: Round) {
     const store = this.deps.store
     if (!store) return
-    const stored = toStored(round)
-    this.#writes = this.#writes.then(() => store.save(stored)).catch(() => {})
+    const stored = toStored(round, store.directory)
+    this.#queue(() => store.save(stored))
+  }
+
+  /** Writes run one after another, so a round's states reach storage in the order they happened. */
+  #queue(write: () => Promise<void>) {
+    this.#pending++
+    this.#writes = this.#writes
+      .then(write)
+      .catch(() => {})
+      .finally(() => void this.#pending--)
   }
 
   #forget(roundID: string) {
     const store = this.deps.store
     if (!store) return
-    this.#writes = this.#writes.then(() => store.remove(roundID)).catch(() => {})
-  }
-
-  /** Resolves when every queued storage write has finished. */
-  flush() {
-    return this.#writes
+    this.#queue(() => store.remove(roundID))
   }
 
   attached(sessionID?: string) {
@@ -215,6 +272,9 @@ export class Parley {
     const mapped = fromPrompts(prompts)
     if ("errors" in mapped) return BUILTIN
     const { result, questions } = await this.#open({ questions: mapped.questions, timeout_s: 0 }, context, context.callID)
+    // The user did not answer (the plugin reloaded under the call). Failing the call says so; a result
+    // in the question tool's shape would read as an answer.
+    if (result.status === "unavailable") throw new Error(`The question was not answered: ${result.reason ?? "unavailable"}`)
     if (result.status === "cancelled") {
       if (result.reason === "user_closed" || result.reason === "dismissed") return BUILTIN
       throw new Error(`The question was cancelled before the user answered (${result.reason ?? "cancelled"})`)
@@ -304,7 +364,7 @@ export class Parley {
   }
 
   pending(input: { sessionID?: string }) {
-    return { rounds: this.rounds.pending(input.sessionID).map(view) }
+    return { rounds: this.rounds.pending(input.sessionID).map(view), instance: this.instance }
   }
 
   async submit(input: { roundID: string; answers: readonly SubmittedAnswer[]; final?: boolean }) {
@@ -331,8 +391,11 @@ export class Parley {
     number?: number
     questions: readonly Question[]
     answers: readonly SubmittedAnswer[]
+    /** Names one attempt, so a retry after a lost acknowledgement is not sent a second time. */
+    deliveryID?: string
   }) {
     if (!this.deps.deliver) return { ok: false, errors: ["Cannot message the session from here."] }
+    if (input.deliveryID !== undefined && this.#sent.has(input.deliveryID)) return { ok: true, errors: [] }
     const errors: string[] = []
     const answers: Answer[] = []
     for (const item of input.answers) {
@@ -353,16 +416,16 @@ export class Parley {
       answers,
       pending: input.questions.filter((question) => !answered.has(question.id)).map((question) => question.id),
     }
+    const { text, held } = deliveryMessage(result, input.questions, this.deps.save, "They were not forwarded.")
+    // Recorded before sending: if only the acknowledgement is lost, the retry finds it here.
+    if (input.deliveryID !== undefined) this.#sent.add(input.deliveryID)
     try {
-      await this.deps.deliver({
-        sessionID: input.sessionID,
-        text: deliveryText(result, input.questions),
-        description: "Parley answers",
-      })
+      await this.deps.deliver({ sessionID: input.sessionID, text, description: "Parley answers" })
     } catch (error) {
+      if (input.deliveryID !== undefined) this.#sent.delete(input.deliveryID)
       return { ok: false, errors: [failure(error)] }
     }
-    return { ok: true, errors }
+    return { ok: true, errors: held.length > 0 ? [`Uploads in ${held.join(", ")} were not forwarded.`] : errors }
   }
 
   /**
@@ -374,13 +437,14 @@ export class Parley {
     this.#orphans.delete(round.id)
     if (!this.deps.deliver) return []
     const result = collect(round)
+    const { text, held } = deliveryMessage(result, round.questions, this.deps.save, "Call parley_wait to receive them.")
+    // Held answers stay undelivered, so parley_wait still returns them with their contents.
+    for (const id of held) round.delivered.delete(id)
     this.#persist(round)
+    // The delivered marks reach storage before the message is sent, so a reload cannot send it again.
+    await this.#writes
     try {
-      await this.deps.deliver({
-        sessionID: round.sessionID,
-        text: deliveryText(result, round.questions),
-        description: `Parley round ${round.number} answers`,
-      })
+      await this.deps.deliver({ sessionID: round.sessionID, text, description: `Parley round ${round.number} answers` })
     } catch (error) {
       // Keep the answers for a later parley_wait.
       for (const answer of result.answers) round.delivered.delete(answer.id)
@@ -410,9 +474,22 @@ export class Parley {
    * Plugin reload: waiting calls end as `unavailable` and the rounds stay open in storage. The next
    * instance restores them and sends the answers to the session as a message.
    */
-  suspend() {
+  suspend(timeoutMs = SUSPEND_DRAIN_MS): Promise<void> | undefined {
     this.#suspended = true
     for (const wait of [...this.#waits]) wait.abort()
+    if (this.#inflight.size === 0 && this.#pending === 0) return undefined
+    // Waiting calls write their last state as they end, so drain until nothing is left, within the bound.
+    const drain = async () => {
+      do {
+        await Promise.allSettled([...this.#inflight])
+        await this.#writes
+      } while (this.#inflight.size > 0 || this.#pending > 0)
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const bound = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, timeoutMs)
+    })
+    return Promise.race([drain(), bound]).finally(() => clearTimeout(timer))
   }
 
   sweep() {
@@ -420,7 +497,20 @@ export class Parley {
     this.presence.prune(this.#now())
   }
 
-  async #await(
+  #await(
+    round: Round,
+    options: { mode: WaitMode; ids?: readonly string[]; timeout_s?: number; context: CallContext },
+  ): Promise<Result> {
+    const run = this.#awaitRound(round, options)
+    this.#inflight.add(run)
+    void run.then(
+      () => this.#inflight.delete(run),
+      () => this.#inflight.delete(run),
+    )
+    return run
+  }
+
+  async #awaitRound(
     round: Round,
     options: { mode: WaitMode; ids?: readonly string[]; timeout_s?: number; context: CallContext },
   ): Promise<Result> {

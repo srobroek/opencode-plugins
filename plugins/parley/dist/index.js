@@ -1678,9 +1678,10 @@ ${clipped}`);
 var ROUND_KEY_PREFIX = "round:";
 var OPEN_TTL_MS = 24 * 60 * 60000;
 var roundKey = (roundID) => `${ROUND_KEY_PREFIX}${roundID}`;
-function toStored(round) {
+function toStored(round, directory) {
   return {
     id: round.id,
+    directory,
     sessionID: round.sessionID,
     number: round.number,
     ...round.title === undefined ? {} : { title: round.title },
@@ -1699,8 +1700,8 @@ var isRecord4 = (value) => typeof value === "object" && value !== null && !Array
 function fromStored(value) {
   if (!isRecord4(value))
     return;
-  const { id, sessionID, number, questions, answers, status, created, updated } = value;
-  if (typeof id !== "string" || typeof sessionID !== "string" || typeof number !== "number")
+  const { id, directory, sessionID, number, questions, answers, status, created, updated } = value;
+  if (typeof id !== "string" || typeof directory !== "string" || typeof sessionID !== "string" || typeof number !== "number")
     return;
   if (!Array.isArray(questions) || !Array.isArray(answers))
     return;
@@ -1708,21 +1709,30 @@ function fromStored(value) {
     return;
   if (typeof created !== "number" || typeof updated !== "number")
     return;
+  if (validateQuestions(questions).length > 0)
+    return;
+  const known = new Set(questions.map((question) => question.id));
+  const usable = (answer) => isRecord4(answer) && typeof answer.id === "string" && known.has(answer.id) && typeof answer.status === "string";
+  if (!answers.every(usable))
+    return;
   const strings = (input) => Array.isArray(input) ? input.filter((item) => typeof item === "string") : [];
   return {
-    id,
-    sessionID,
-    number,
-    ...typeof value.title === "string" ? { title: value.title } : {},
-    questions,
-    answers: new Map(answers.filter((answer) => isRecord4(answer) && typeof answer.id === "string").map((answer) => [answer.id, answer])),
-    delivered: new Set(strings(value.delivered)),
-    callIDs: strings(value.callIDs),
-    status,
-    ...typeof value.reason === "string" ? { reason: value.reason } : {},
-    ...typeof value.deadline === "number" ? { deadline: value.deadline } : {},
-    created,
-    updated
+    directory,
+    round: {
+      id,
+      sessionID,
+      number,
+      ...typeof value.title === "string" ? { title: value.title } : {},
+      questions,
+      answers: new Map(answers.map((answer) => [answer.id, answer])),
+      delivered: new Set(strings(value.delivered)),
+      callIDs: strings(value.callIDs),
+      status,
+      ...typeof value.reason === "string" ? { reason: value.reason } : {},
+      ...typeof value.deadline === "number" ? { deadline: value.deadline } : {},
+      created,
+      updated
+    }
   };
 }
 function stale(round, now, closedTtlMs) {
@@ -1770,6 +1780,7 @@ var ParleyRpc = Rpc.define({
         properties: {
           sessionID: { type: "string" },
           number: { type: "number" },
+          deliveryID: { type: "string" },
           questions: { type: "array", items: { type: "object" } },
           answers: { type: "array", items: { type: "object" } }
         }
@@ -2112,11 +2123,33 @@ var unavailable = (reason) => ({ status: "unavailable", reason, answers: [], pen
 
 class InputError extends Error {
 }
+var SUSPEND_DRAIN_MS = 2000;
 var DELIVERY_HEAD = "The parley plugin reloaded while you waited, so your parley call ended. The user answered that round afterwards; their answers follow. Act on them; do not ask these questions again.";
-function deliveryText(result, questions) {
-  return `${DELIVERY_HEAD}
-
-${summarise(result, questions)}`;
+var filesOf = (answer) => {
+  const files = answer.value?.files;
+  return Array.isArray(files) ? files : [];
+};
+var withData = (answer) => filesOf(answer).filter((file) => file.data !== undefined);
+function deliveryMessage(result, questions, save, heldAdvice) {
+  const held = save ? [] : result.answers.filter((answer) => withData(answer).length > 0).map((answer) => answer.id);
+  const notes = [];
+  const answers = result.answers.filter((answer) => !held.includes(answer.id)).map((answer) => {
+    const files = filesOf(answer).map((file) => {
+      if (file.data === undefined || !baseMime(file.mime).startsWith("image/"))
+        return file;
+      const path = save?.(file);
+      notes.push(`${answer.id}: ${file.name} (${baseMime(file.mime)}, ${file.size} B)${path ? ` saved to ${path}` : " not forwarded"}`);
+      const { data: _data, ...rest } = file;
+      return rest;
+    });
+    return files.length === 0 ? answer : { ...answer, value: { ...answer.value, files } };
+  });
+  const body = render({ ...result, answers }, questions, save).content;
+  const lines = [DELIVERY_HEAD, "", body, ...notes];
+  if (held.length > 0)
+    lines.push("", `Uploads in ${held.join(", ")} could not be sent in a message. ${heldAdvice}`);
+  return { text: lines.join(`
+`), held };
 }
 var failure = (error) => `Could not send the answers to the session: ${error instanceof Error ? error.message : String(error)}`;
 var isCancel = (error) => {
@@ -2132,8 +2165,11 @@ class Parley {
   instance = crypto.randomUUID();
   #orphans = new Set;
   #waits = new Set;
+  #inflight = new Set;
+  #sent = new Set;
   #suspended = false;
   #writes = Promise.resolve();
+  #pending = 0;
   constructor(deps) {
     this.deps = deps;
     this.presence = new Presence(deps.settings.heartbeatWindowMs);
@@ -2148,8 +2184,13 @@ class Parley {
     const now = this.#now();
     const keep = [];
     for (const entry of entries) {
-      const round = fromStored(entry);
-      if (!round)
+      const restored = fromStored(entry);
+      if (!restored) {
+        this.deps.warn?.(`parley: ignoring a stored round that is not valid (${entry?.id ?? "no id"})`);
+        continue;
+      }
+      const { round, directory } = restored;
+      if (directory !== store.directory || !await store.owns(round.sessionID).catch(() => false))
         continue;
       if (stale(round, now, CLOSED_TTL_MS))
         this.#forget(round.id);
@@ -2165,17 +2206,18 @@ class Parley {
     const store = this.deps.store;
     if (!store)
       return;
-    const stored = toStored(round);
-    this.#writes = this.#writes.then(() => store.save(stored)).catch(() => {});
+    const stored = toStored(round, store.directory);
+    this.#queue(() => store.save(stored));
+  }
+  #queue(write) {
+    this.#pending++;
+    this.#writes = this.#writes.then(write).catch(() => {}).finally(() => void this.#pending--);
   }
   #forget(roundID) {
     const store = this.deps.store;
     if (!store)
       return;
-    this.#writes = this.#writes.then(() => store.remove(roundID)).catch(() => {});
-  }
-  flush() {
-    return this.#writes;
+    this.#queue(() => store.remove(roundID));
   }
   attached(sessionID) {
     return this.presence.attached(this.#now(), sessionID);
@@ -2206,6 +2248,8 @@ class Parley {
     if ("errors" in mapped)
       return BUILTIN;
     const { result, questions } = await this.#open({ questions: mapped.questions, timeout_s: 0 }, context, context.callID);
+    if (result.status === "unavailable")
+      throw new Error(`The question was not answered: ${result.reason ?? "unavailable"}`);
     if (result.status === "cancelled") {
       if (result.reason === "user_closed" || result.reason === "dismissed")
         return BUILTIN;
@@ -2287,7 +2331,7 @@ class Parley {
     return { ok: true, window_s: this.presence.windowMs / 1000, instance: this.instance };
   }
   pending(input) {
-    return { rounds: this.rounds.pending(input.sessionID).map(view) };
+    return { rounds: this.rounds.pending(input.sessionID).map(view), instance: this.instance };
   }
   async submit(input) {
     const final = input.final !== false;
@@ -2307,6 +2351,8 @@ class Parley {
   async deliver(input) {
     if (!this.deps.deliver)
       return { ok: false, errors: ["Cannot message the session from here."] };
+    if (input.deliveryID !== undefined && this.#sent.has(input.deliveryID))
+      return { ok: true, errors: [] };
     const errors = [];
     const answers = [];
     for (const item of input.answers) {
@@ -2330,16 +2376,17 @@ class Parley {
       answers,
       pending: input.questions.filter((question) => !answered.has(question.id)).map((question) => question.id)
     };
+    const { text, held } = deliveryMessage(result, input.questions, this.deps.save, "They were not forwarded.");
+    if (input.deliveryID !== undefined)
+      this.#sent.add(input.deliveryID);
     try {
-      await this.deps.deliver({
-        sessionID: input.sessionID,
-        text: deliveryText(result, input.questions),
-        description: "Parley answers"
-      });
+      await this.deps.deliver({ sessionID: input.sessionID, text, description: "Parley answers" });
     } catch (error) {
+      if (input.deliveryID !== undefined)
+        this.#sent.delete(input.deliveryID);
       return { ok: false, errors: [failure(error)] };
     }
-    return { ok: true, errors };
+    return { ok: true, errors: held.length > 0 ? [`Uploads in ${held.join(", ")} were not forwarded.`] : errors };
   }
   async#deliverOrphan(round) {
     if (!this.#orphans.has(round.id) || round.status === "open")
@@ -2348,13 +2395,13 @@ class Parley {
     if (!this.deps.deliver)
       return [];
     const result = collect(round);
+    const { text, held } = deliveryMessage(result, round.questions, this.deps.save, "Call parley_wait to receive them.");
+    for (const id of held)
+      round.delivered.delete(id);
     this.#persist(round);
+    await this.#writes;
     try {
-      await this.deps.deliver({
-        sessionID: round.sessionID,
-        text: deliveryText(result, round.questions),
-        description: `Parley round ${round.number} answers`
-      });
+      await this.deps.deliver({ sessionID: round.sessionID, text, description: `Parley round ${round.number} answers` });
     } catch (error) {
       for (const answer of result.answers)
         round.delivered.delete(answer.id);
@@ -2377,17 +2424,36 @@ class Parley {
     for (const round of this.rounds.pending())
       this.rounds.cancel(round.id, reason, this.#now());
   }
-  suspend() {
+  suspend(timeoutMs = SUSPEND_DRAIN_MS) {
     this.#suspended = true;
     for (const wait of [...this.#waits])
       wait.abort();
+    if (this.#inflight.size === 0 && this.#pending === 0)
+      return;
+    const drain = async () => {
+      do {
+        await Promise.allSettled([...this.#inflight]);
+        await this.#writes;
+      } while (this.#inflight.size > 0 || this.#pending > 0);
+    };
+    let timer;
+    const bound = new Promise((resolve) => {
+      timer = setTimeout(resolve, timeoutMs);
+    });
+    return Promise.race([drain(), bound]).finally(() => clearTimeout(timer));
   }
   sweep() {
     for (const id of this.rounds.sweep(this.#now(), CLOSED_TTL_MS))
       this.#forget(id);
     this.presence.prune(this.#now());
   }
-  async#await(round, options) {
+  #await(round, options) {
+    const run = this.#awaitRound(round, options);
+    this.#inflight.add(run);
+    run.then(() => this.#inflight.delete(run), () => this.#inflight.delete(run));
+    return run;
+  }
+  async#awaitRound(round, options) {
     const { context } = options;
     this.#orphans.delete(round.id);
     const reload = new AbortController;
@@ -2533,10 +2599,14 @@ function saveUpload(file) {
   writeFileSync(target, Buffer.from(file.data, "base64"));
   return target;
 }
-async function roundStore(storage) {
+async function roundStore(ctx) {
+  const storage = ctx.storage;
   if (!storage)
     return;
+  const directory = ctx.location.directory;
   return {
+    directory,
+    owns: async (sessionID) => (await ctx.session.get({ sessionID })).location.directory === directory,
     list: async () => {
       const entries = [];
       let after;
@@ -2558,7 +2628,9 @@ var src_default = Plugin.define({
     let emitEvent;
     const service = new Parley({
       settings: settingsFrom(ctx.options, process.env),
-      store: await roundStore(ctx.storage),
+      store: await roundStore(ctx),
+      save: saveUpload,
+      warn: (message) => console.warn(message),
       deliver: async ({ sessionID, text, description }) => {
         await ctx.session.synthetic({ sessionID, text, description, delivery: "queue", resume: true });
       },
@@ -2664,10 +2736,11 @@ var src_default = Plugin.define({
       clearInterval(sweep);
       clearInterval(presence);
       disposed = true;
-      service.suspend();
+      const drained = service.suspend();
       takeover.then((current) => current?.dispose()).catch(() => {});
       tools.dispose().catch(() => {});
       rpc.dispose().catch(() => {});
+      return drained;
     };
   }
 });

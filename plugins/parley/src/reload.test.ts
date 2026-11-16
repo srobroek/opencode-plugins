@@ -1,49 +1,81 @@
 import { describe, expect, test } from "bun:test"
+import { summarise } from "./format.ts"
 import { OPEN_TTL_MS, roundKey, type StoredRound, toStored } from "./persist.ts"
 import type { Question } from "./questions.ts"
 import { RELOADED_REASON, type Round } from "./rounds.ts"
-import { CLOSED_TTL_MS, deliveryText, Parley, type RoundStore, type SessionMessage, type Settings } from "./service.ts"
+import { CLOSED_TTL_MS, Parley, type RoundStore, type SessionMessage, type Settings } from "./service.ts"
 
 const settings: Settings = { fallback: "none", questionTool: "takeover", disabled: false, heartbeatWindowMs: 30_000 }
 const questions: Question[] = [
   { id: "ssh.host", title: "SSH hostname", kind: "pick_one", options: [{ id: "a", label: "Alpha" }, { id: "b", label: "Beta" }], recommended: "a" },
   { id: "ssh.port", title: "Port", kind: "slider", min: 0, max: 100, recommended: 22 },
 ]
+const both = [{ id: "ssh.host", status: "accepted" as const }, { id: "ssh.port", status: "accepted" as const }]
 
-function fakeStore(initial: StoredRound[] = []) {
-  const data = new Map<string, unknown>(initial.map((round) => [roundKey(round.id), round]))
-  const store: RoundStore = {
+type Data = Map<string, unknown>
+
+/** The plugin's storage as every location sees it: one map. `delayMs` makes each write slow. */
+function storeOver(data: Data, directory = "/repo", owns: (sessionID: string) => Promise<boolean> = async () => true, delayMs = 0): RoundStore {
+  const slow = () => (delayMs > 0 ? new Promise((resolve) => setTimeout(resolve, delayMs)) : Promise.resolve())
+  return {
+    directory,
+    owns,
     list: async () => [...data.values()],
-    save: async (round) => void data.set(roundKey(round.id), JSON.parse(JSON.stringify(round))),
-    remove: async (id) => void data.delete(roundKey(id)),
+    save: async (round) => {
+      await slow()
+      data.set(roundKey(round.id), JSON.parse(JSON.stringify(round)))
+    },
+    remove: async (id) => {
+      await slow()
+      data.delete(roundKey(id))
+    },
   }
-  return { data, store }
 }
 
-function instance(store: RoundStore, now: () => number = () => 1_000) {
+interface Extras {
+  now?: () => number
+  save?: (file: { name: string }) => string | undefined
+  warn?: (message: string) => void
+  deliver?: (message: SessionMessage) => Promise<void>
+}
+
+function instance(store: RoundStore, extras: Extras = {}) {
   const messages: SessionMessage[] = []
-  const service = new Parley({ settings, emit: async () => {}, store, now, deliver: async (message) => void messages.push(message) })
+  const service = new Parley({
+    settings,
+    emit: async () => {},
+    store,
+    now: extras.now ?? (() => 1_000),
+    deliver: extras.deliver ?? (async (message) => void messages.push(message)),
+    ...(extras.save ? { save: extras.save as never } : {}),
+    ...(extras.warn ? { warn: extras.warn } : {}),
+  })
   service.attach({ clientID: "tui" })
   return { service, messages }
 }
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 5))
 
-/** A plugin reload: the first instance is disposed, a second one starts on the same storage. */
-async function reload(first: ReturnType<typeof instance>, store: RoundStore, now?: () => number) {
-  first.service.suspend()
-  await first.service.flush()
-  const second = instance(store, now)
+/** A plugin reload: the first instance is disposed (which drains its writes), a second starts on the same storage. */
+async function reload(first: ReturnType<typeof instance>, store: RoundStore, extras: Extras = {}) {
+  await first.service.suspend()
+  const second = instance(store, extras)
   await second.service.restore()
   return second
 }
 
+async function openRound(extras: Extras = {}, data: Data = new Map()) {
+  const store = storeOver(data)
+  const first = instance(store, extras)
+  const asking = first.service.ask({ questions, title: "SSH" }, { sessionID: "s" })
+  await tick()
+  const roundID = first.service.pending({}).rounds[0]?.roundID ?? ""
+  return { data, store, first, asking, roundID }
+}
+
 describe("reload", () => {
   test("a live wait ends as unavailable on dispose and the round stays open", async () => {
-    const { store } = fakeStore()
-    const first = instance(store)
-    const asking = first.service.ask({ questions, title: "SSH" }, { sessionID: "s" })
-    await tick()
+    const { first, asking } = await openRound()
     first.service.suspend()
     const { result } = await asking
     expect(result).toMatchObject({ status: "unavailable", reason: RELOADED_REASON, round: 1, pending: ["ssh.host", "ssh.port"] })
@@ -51,7 +83,7 @@ describe("reload", () => {
   })
 
   test("an open round, its answers so far and its delivery state survive a reload", async () => {
-    const { store } = fakeStore()
+    const store = storeOver(new Map())
     const first = instance(store)
     const asking = first.service.ask({ questions, title: "SSH", wait: "any" }, { sessionID: "s" })
     await tick()
@@ -63,23 +95,15 @@ describe("reload", () => {
     expect(round).toMatchObject({ roundID, number: 1, title: "SSH", status: "open", sessionID: "s" })
     expect(round?.questions.map((question) => question.id)).toEqual(["ssh.host", "ssh.port"])
     expect(round?.answers.map((answer) => answer.id)).toEqual(["ssh.host"])
-    // The answer was returned by the first instance's wait, so it is not delivered again.
     expect(second.service.rounds.get(roundID)?.delivered.has("ssh.host")).toBe(true)
   })
 
   test("the final submit to a restored round reaches the session as a message in the tool-result format", async () => {
-    const { store } = fakeStore()
-    const first = instance(store)
-    void first.service.ask({ questions, title: "SSH" }, { sessionID: "s" })
-    await tick()
-    const roundID = first.service.pending({}).rounds[0]?.roundID ?? ""
+    const { store, first, roundID } = await openRound()
     const second = await reload(first, store)
     const outcome = await second.service.submit({
       roundID,
-      answers: [
-        { id: "ssh.host", status: "answered", value: { selected: "b" }, note: "use the bastion" },
-        { id: "ssh.port", status: "accepted" },
-      ],
+      answers: [{ id: "ssh.host", status: "answered", value: { selected: "b" }, note: "use the bastion" }, { id: "ssh.port", status: "accepted" }],
     })
     expect(outcome).toMatchObject({ ok: true, errors: [] })
     expect(second.messages).toHaveLength(1)
@@ -88,107 +112,253 @@ describe("reload", () => {
     const lines = message?.text.split("\n") ?? []
     expect(lines[0]).toContain("The parley plugin reloaded")
     expect(lines).toContain("Parley round 1: submitted — 2 answers, 0 pending")
-    expect(message?.text).toContain("ssh.host")
     expect(message?.text).toContain("Beta")
     expect(message?.text).toContain("use the bastion")
-    expect(message?.text).toContain("ssh.port")
     expect(second.service.rounds.get(roundID)?.status).toBe("submitted")
   })
 
+  test("the delivered marks are in storage before the message is sent, so a reload cannot send it twice", async () => {
+    const { data, store, first, roundID } = await openRound()
+    let storedAtSend: StoredRound | undefined
+    const second = instance(store, {
+      deliver: async () => {
+        storedAtSend = data.get(roundKey(roundID)) as StoredRound
+      },
+    })
+    await first.service.suspend()
+    await second.service.restore()
+    await second.service.submit({ roundID, answers: both })
+    expect(storedAtSend?.status).toBe("submitted")
+    expect(storedAtSend?.delivered.sort()).toEqual(["ssh.host", "ssh.port"])
+  })
+
   test("dismissing a restored round tells the session", async () => {
-    const { store } = fakeStore()
-    const first = instance(store)
-    void first.service.ask({ questions }, { sessionID: "s" })
-    await tick()
-    const roundID = first.service.pending({}).rounds[0]?.roundID ?? ""
+    const { store, first, roundID } = await openRound()
     const second = await reload(first, store)
     await second.service.cancel({ roundID })
     expect(second.messages[0]?.text).toContain("Parley round 1: cancelled (user_closed)")
   })
 
   test("parley_wait on a restored round gets the answers itself, without a message", async () => {
-    const { store } = fakeStore()
-    const first = instance(store)
-    void first.service.ask({ questions }, { sessionID: "s" })
-    await tick()
-    const roundID = first.service.pending({}).rounds[0]?.roundID ?? ""
+    const { store, first, roundID } = await openRound()
     const second = await reload(first, store)
     const waiting = second.service.wait({}, { sessionID: "s" })
     await tick()
-    await second.service.submit({ roundID, answers: [{ id: "ssh.host", status: "accepted" }, { id: "ssh.port", status: "accepted" }] })
-    expect((await waiting).result).toMatchObject({ status: "submitted", round: 1 })
-    expect((await waiting).result.answers.map((answer) => answer.id)).toEqual(["ssh.host", "ssh.port"])
+    await second.service.submit({ roundID, answers: both })
+    const { result } = await waiting
+    expect(result).toMatchObject({ status: "submitted", round: 1 })
+    expect(result.answers.map((answer) => answer.id)).toEqual(["ssh.host", "ssh.port"])
     expect(second.messages).toEqual([])
   })
 
   test("a round opened in the new instance is waited on as before and sends no message", async () => {
-    const { store } = fakeStore()
-    const { service, messages } = instance(store)
+    const { service, messages } = instance(storeOver(new Map()))
     const asking = service.ask({ questions }, { sessionID: "s" })
     await tick()
-    const roundID = service.pending({}).rounds[0]?.roundID ?? ""
-    await service.submit({ roundID, answers: [{ id: "ssh.host", status: "accepted" }, { id: "ssh.port", status: "accepted" }] })
+    await service.submit({ roundID: service.pending({}).rounds[0]?.roundID ?? "", answers: both })
     expect((await asking).result.status).toBe("submitted")
     expect(messages).toEqual([])
   })
 
   test("a failed delivery keeps the answers for parley_wait", async () => {
-    const { store } = fakeStore()
-    const first = instance(store)
-    void first.service.ask({ questions }, { sessionID: "s" })
-    await tick()
-    const roundID = first.service.pending({}).rounds[0]?.roundID ?? ""
-    first.service.suspend()
-    await first.service.flush()
-    const service = new Parley({ settings, emit: async () => {}, store, now: () => 1_000, deliver: async () => { throw new Error("offline") } })
-    service.attach({ clientID: "tui" })
-    await service.restore()
-    const outcome = await service.submit({ roundID, answers: [{ id: "ssh.host", status: "accepted" }, { id: "ssh.port", status: "accepted" }] })
+    const { store, first, roundID } = await openRound()
+    const second = await reload(first, store, { deliver: async () => { throw new Error("offline") } })
+    const outcome = await second.service.submit({ roundID, answers: both })
     expect(outcome.errors[0]).toContain("offline")
-    expect((await service.wait({}, { sessionID: "s" })).result.answers).toHaveLength(2)
+    expect((await second.service.wait({}, { sessionID: "s" })).result.answers).toHaveLength(2)
   })
 
-  test("deliver sends answers for a round the server never stored", async () => {
-    const { store } = fakeStore()
-    const { service, messages } = instance(store)
-    const outcome = await service.deliver({
-      sessionID: "s",
-      number: 3,
-      questions,
-      answers: [{ id: "ssh.host", status: "answered", value: { selected: "a" } }],
+  test("a suspended question takeover fails the call instead of reporting an answer", async () => {
+    const { service } = instance(storeOver(new Map()))
+    const taking = service.takeover(
+      { questions: [{ header: "Host", question: "Which host?", options: [{ label: "Alpha (Recommended)", description: "a" }, { label: "Beta", description: "b" }] }] },
+      { sessionID: "s", callID: "call-1" },
+    )
+    const outcome = taking.then(() => "returned", (error: Error) => error.message)
+    await tick()
+    service.suspend()
+    expect(await outcome).toContain(RELOADED_REASON)
+  })
+})
+
+describe("uploads after a reload", () => {
+  const upload = (id: string, name: string, mime: string, text: string) => ({
+    id,
+    status: "answered" as const,
+    value: { files: [{ name, mime, data: Buffer.from(text).toString("base64") }] },
+  })
+  const fileQuestions: Question[] = [
+    { id: "shot", title: "Shot", kind: "ask_image" },
+    { id: "notes", title: "Notes", kind: "ask_file" },
+  ]
+  async function restoredFiles(extras: Extras) {
+    const store = storeOver(new Map())
+    const first = instance(store)
+    void first.service.ask({ questions: fileQuestions }, { sessionID: "s" })
+    await tick()
+    const roundID = first.service.pending({}).rounds[0]?.roundID ?? ""
+    const second = await reload(first, store, extras)
+    const outcome = await second.service.submit({
+      roundID,
+      answers: [upload("shot", "a.png", "image/png", "PNGBYTES"), upload("notes", "n.txt", "text/plain", "hello notes")],
     })
+    return { second, outcome }
+  }
+
+  test("uploads reach the session as text and file paths, never as bytes", async () => {
+    const { second } = await restoredFiles({ save: (file) => `/tmp/parley/${file.name}` })
+    const text = second.messages[0]?.text ?? ""
+    expect(text).toContain("shot: a.png (image/png, 8 B) saved to /tmp/parley/a.png")
+    expect(text).toContain("--- notes: n.txt ---\nhello notes")
+    expect(text).not.toContain(Buffer.from("PNGBYTES").toString("base64"))
+  })
+
+  test("without a way to save them, answers with uploads are held back, said so and left for parley_wait", async () => {
+    const { second, outcome } = await restoredFiles({})
     expect(outcome.ok).toBe(true)
+    const text = second.messages[0]?.text ?? ""
+    expect(text).toContain("Uploads in shot, notes could not be sent in a message. Call parley_wait to receive them.")
+    expect(text).toContain("0 answers")
+    const waited = (await second.service.wait({}, { sessionID: "s" })).result
+    expect(waited.answers.map((answer) => answer.id)).toEqual(["shot", "notes"])
+    expect(JSON.stringify(waited.answers)).toContain(Buffer.from("hello notes").toString("base64"))
+  })
+})
+
+describe("deliver", () => {
+  const answers = [{ id: "ssh.host", status: "answered" as const, value: { selected: "a" } }]
+
+  test("sends answers for a round the server never stored", async () => {
+    const { service, messages } = instance(storeOver(new Map()))
+    expect((await service.deliver({ sessionID: "s", number: 3, questions, answers })).ok).toBe(true)
     expect(messages[0]?.text).toContain("Parley round 3: submitted — 1 answer, 1 pending")
     expect(messages[0]?.text).toContain("Pending: ssh.port")
     expect((await service.deliver({ sessionID: "s", questions, answers: [{ id: "nope", status: "accepted" }] })).ok).toBe(false)
   })
+
+  test("a retry with the same delivery id after a lost acknowledgement sends once", async () => {
+    const { service, messages } = instance(storeOver(new Map()))
+    await service.deliver({ sessionID: "s", questions, answers, deliveryID: "d1" })
+    expect((await service.deliver({ sessionID: "s", questions, answers, deliveryID: "d1" })).ok).toBe(true)
+    expect(messages).toHaveLength(1)
+  })
+
+  test("a retry after a failed send does send", async () => {
+    let fail = true
+    const sent: string[] = []
+    const { service } = instance(storeOver(new Map()), {
+      deliver: async (message) => {
+        if (fail) throw new Error("offline")
+        sent.push(message.text)
+      },
+    })
+    expect((await service.deliver({ sessionID: "s", questions, answers, deliveryID: "d1" })).ok).toBe(false)
+    fail = false
+    expect((await service.deliver({ sessionID: "s", questions, answers, deliveryID: "d1" })).ok).toBe(true)
+    expect(sent).toHaveLength(1)
+  })
 })
 
-describe("pruning", () => {
+describe("ownership", () => {
+  test("an instance restores only the rounds of its own location's sessions", async () => {
+    const data: Data = new Map()
+    const a = instance(storeOver(data, "/a", async (id) => id === "sA"))
+    const b = instance(storeOver(data, "/b", async (id) => id === "sB"))
+    void a.service.ask({ questions }, { sessionID: "sA" })
+    void b.service.ask({ questions }, { sessionID: "sB" })
+    await tick()
+    await a.service.suspend()
+    await b.service.suspend()
+    const a2 = instance(storeOver(data, "/a", async (id) => id === "sA"))
+    await a2.service.restore()
+    expect(a2.service.pending({}).rounds.map((round) => round.sessionID)).toEqual(["sA"])
+    const b2 = instance(storeOver(data, "/b", async (id) => id === "sB"))
+    await b2.service.restore()
+    expect(b2.service.pending({}).rounds.map((round) => round.sessionID)).toEqual(["sB"])
+    expect(data.size).toBe(2)
+  })
+
+  test("a round whose session cannot be placed is not restored, and is left in storage", async () => {
+    const data: Data = new Map()
+    const first = instance(storeOver(data))
+    void first.service.ask({ questions }, { sessionID: "s" })
+    await tick()
+    await first.service.suspend()
+    const second = instance(storeOver(data, "/repo", async () => { throw new Error("session not found") }))
+    await second.service.restore()
+    expect(second.service.pending({}).rounds).toEqual([])
+    expect(data.size).toBe(1)
+  })
+
+  test("a round stored by another location is not restored even when its session is visible here", async () => {
+    const data: Data = new Map()
+    const other = instance(storeOver(data, "/other"))
+    void other.service.ask({ questions }, { sessionID: "s" })
+    await tick()
+    await other.service.suspend()
+    const here = instance(storeOver(data, "/repo"))
+    await here.service.restore()
+    expect(here.service.pending({}).rounds).toEqual([])
+  })
+})
+
+describe("draining writes", () => {
+  test("suspend returns at once when nothing is waiting or being written", () => {
+    expect(instance(storeOver(new Map())).service.suspend()).toBeUndefined()
+  })
+
+  test("suspend waits for slow writes, including the last state of a waiting call", async () => {
+    const data: Data = new Map()
+    const first = instance(storeOver(data, "/repo", async () => true, 20))
+    const asking = first.service.ask({ questions, wait: "any" }, { sessionID: "s" })
+    await tick()
+    const roundID = first.service.pending({}).rounds[0]?.roundID ?? ""
+    await first.service.submit({ roundID, answers: [{ id: "ssh.host", status: "accepted" }], final: false })
+    const draining = first.service.suspend()
+    expect(draining).toBeInstanceOf(Promise)
+    expect((data.get(roundKey(roundID)) as StoredRound | undefined)?.answers ?? []).toHaveLength(0)
+    await draining
+    await asking
+    const stored = data.get(roundKey(roundID)) as StoredRound
+    expect(stored.answers.map((answer) => answer.id)).toEqual(["ssh.host"])
+    expect(stored.delivered).toEqual(["ssh.host"])
+  })
+
+  test("the wait for slow storage is bounded", async () => {
+    const first = instance(storeOver(new Map(), "/repo", async () => true, 500))
+    void first.service.ask({ questions }, { sessionID: "s" })
+    await tick()
+    const started = Date.now()
+    await first.service.suspend(30)
+    expect(Date.now() - started).toBeLessThan(300)
+  })
+})
+
+describe("pruning and validation", () => {
   const stored = (id: string, status: StoredRound["status"], updated: number): StoredRound => {
     const round: Round = {
       id, sessionID: id, number: 1, questions, answers: new Map(), delivered: new Set(), callIDs: [], status, created: updated, updated,
     }
-    return toStored(round)
+    return toStored(round, "/repo")
   }
+  const seed = (rounds: StoredRound[]): Data => new Map(rounds.map((round) => [roundKey(round.id), round]))
 
   test("old open rounds and closed rounds past the ttl are dropped at restore, the rest kept", async () => {
     const now = 100 * 60 * 60_000
-    const { data, store } = fakeStore([
+    const data = seed([
       stored("old_open", "open", now - OPEN_TTL_MS - 1),
       stored("new_open", "open", now - OPEN_TTL_MS + 1000),
       stored("old_closed", "submitted", now - CLOSED_TTL_MS - 1),
       stored("new_closed", "cancelled", now - 1000),
     ])
-    data.set("round:garbage", { nonsense: true })
-    const { service } = instance(store, () => now)
+    const { service } = instance(storeOver(data), { now: () => now })
     await service.restore()
-    await service.flush()
+    await service.suspend()
     expect(service.pending({}).rounds.map((round) => round.roundID)).toEqual(["new_open"])
     expect(service.rounds.get("new_closed")?.status).toBe("cancelled")
     expect(service.rounds.get("old_open")).toBeUndefined()
     expect(service.rounds.get("old_closed")).toBeUndefined()
-    expect([...data.keys()].sort()).toEqual(["round:garbage", "round:new_closed", "round:new_open"])
+    expect([...data.keys()].sort()).toEqual(["round:new_closed", "round:new_open"])
   })
 
   test("upload bytes are not stored", () => {
@@ -196,11 +366,38 @@ describe("pruning", () => {
       id: "r", sessionID: "s", number: 1, questions, delivered: new Set(), callIDs: [], status: "open", created: 1, updated: 1,
       answers: new Map([["ssh.host", { id: "ssh.host", status: "answered", value: { files: [{ name: "k.pem", mime: "text/plain", size: 3, data: "c2VjcmV0" }] } }]]),
     }
-    expect(JSON.stringify(toStored(round))).not.toContain("c2VjcmV0")
+    expect(JSON.stringify(toStored(round, "/repo"))).not.toContain("c2VjcmV0")
+  })
+
+  test.each([
+    ["a null question", { questions: [null] }],
+    ["a question without a kind", { questions: [{ id: "x", title: "X" }] }],
+    ["a null answer", { answers: [null] }],
+    ["an answer to an unknown question", { answers: [{ id: "ghost", status: "answered" }] }],
+  ])("a round with %s is dropped with a warning and the rest still restore", async (_name, damage) => {
+    const good = stored("good", "open", 1_000)
+    const bad = { ...stored("bad", "open", 1_000), ...damage }
+    const warnings: string[] = []
+    const { service } = instance(storeOver(seed([bad as StoredRound, good])), { warn: (message) => void warnings.push(message) })
+    await service.restore()
+    expect(service.pending({}).rounds.map((round) => round.roundID)).toEqual(["good"])
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toContain("bad")
   })
 })
 
-test("deliveryText leads with the reload notice, then the normal result summary", () => {
-  const text = deliveryText({ status: "submitted", round: 2, answers: [], pending: [] }, questions)
-  expect(text.endsWith("\n\nParley round 2: submitted — 0 answers, 0 pending")).toBe(true)
+describe("guidance after a reload", () => {
+  test("the result of a call that ended in a reload tells the model to wait for the message, not to ask elsewhere", () => {
+    const text = summarise(
+      { status: "unavailable", reason: RELOADED_REASON, round: 1, answers: [], pending: ["ssh.host"] },
+      questions,
+    )
+    expect(text).toContain("Do not ask again and do not use the question tool for this round")
+    expect(text).not.toContain("No parley UI is available")
+  })
+
+  test("a plain unavailable result keeps the no-UI guidance", () => {
+    const text = summarise({ status: "unavailable", reason: "no_tui", answers: [], pending: [] }, questions)
+    expect(text).toContain("No parley UI is available")
+  })
 })

@@ -4317,6 +4317,32 @@ function canCloseRoundPanel(panel, name, sessionID, stillPending) {
   return panel?.name === name && panel.sessionID === sessionID && !stillPending;
 }
 
+// plugins/parley/src/reconcile.ts
+function reconcileRounds(input) {
+  const listed = new Set(input.server.map((view) => view.roundID));
+  const lost = new Set([...input.lost].filter((id) => !listed.has(id)));
+  const forget = [];
+  const kept = [];
+  for (const entry of input.current) {
+    const id = entry.view.roundID;
+    if (listed.has(id))
+      continue;
+    if (input.reloaded || lost.has(id)) {
+      lost.add(id);
+      kept.push(entry);
+    } else
+      forget.push(id);
+  }
+  return { entries: [...input.server.map(input.toEntry), ...kept], lost, forget };
+}
+function instanceChanged(known, key, instance) {
+  if (instance === undefined)
+    return false;
+  const before = known.get(key);
+  known.set(key, instance);
+  return before !== undefined && before !== instance;
+}
+
 // plugins/parley/src/rpc.ts
 import { Rpc } from "@opencode/plugin/rpc";
 var RPC_ID = "parley";
@@ -4358,6 +4384,7 @@ var ParleyRpc = Rpc.define({
         properties: {
           sessionID: { type: "string" },
           number: { type: "number" },
+          deliveryID: { type: "string" },
           questions: { type: "array", items: { type: "object" } },
           answers: { type: "array", items: { type: "object" } }
         }
@@ -4534,7 +4561,9 @@ var tui_default = Plugin.define({
         add(entry.location);
       return [...found.values()];
     };
-    const refresh = async (location) => {
+    const instances = new Map;
+    let lost = new Set;
+    const refresh = async (location, reloaded = false) => {
       if (disposed)
         return;
       const result = await rpc.pending({}, {
@@ -4545,14 +4574,20 @@ var tui_default = Plugin.define({
       if (disposed || !result)
         return;
       const key = locationKey(location);
-      const open = new Set((result.rounds ?? []).map((view) => view.roundID));
-      for (const entry of rounds())
-        if (locationKey(entry.location) === key && !open.has(entry.view.roundID))
-          store.forget(entry.view.roundID);
-      setRounds((all) => [...all.filter((entry) => locationKey(entry.location) !== key), ...(result.rounds ?? []).map((view) => ({
-        view,
-        location
-      }))]);
+      const merged = reconcileRounds({
+        current: rounds().filter((entry) => locationKey(entry.location) === key),
+        server: result.rounds ?? [],
+        lost,
+        reloaded: instanceChanged(instances, key, result.instance) || reloaded,
+        toEntry: (view) => ({
+          view,
+          location
+        })
+      });
+      lost = merged.lost;
+      for (const id of merged.forget)
+        store.forget(id);
+      setRounds((all) => [...all.filter((entry) => locationKey(entry.location) !== key), ...merged.entries]);
     };
     const forSession = (sessionID) => rounds().find((entry) => entry.view.sessionID === sessionID);
     const single = (sessionID) => inlineEligible(forSession(sessionID)?.view.questions ?? []);
@@ -4621,7 +4656,6 @@ var tui_default = Plugin.define({
       }).catch(() => {});
     };
     let reachable = true;
-    const instances = new Map;
     const heartbeat = async () => {
       if (disposed)
         return;
@@ -4631,12 +4665,8 @@ var tui_default = Plugin.define({
         location
       }).then((reply) => {
         const instance = reply?.instance;
-        const key = locationKey(location);
-        if (instance !== undefined && instances.get(key) !== instance) {
-          if (instances.has(key))
-            refresh(location);
-          instances.set(key, instance);
-        }
+        if (instanceChanged(instances, locationKey(location), instance))
+          refresh(location, true);
         return true;
       }, () => false)));
       if (disposed)
@@ -4734,6 +4764,7 @@ var tui_default = Plugin.define({
     for (const location of locations())
       refresh(location);
     const timer = setInterval(() => void heartbeat(), HEARTBEAT_MS);
+    const deliveryIDs = new Map;
     const submit = async (view, answers) => {
       const entry = rounds().find((item) => item.view.roundID === view.roundID);
       if (!entry)
@@ -4750,7 +4781,8 @@ var tui_default = Plugin.define({
           sessionID: view.sessionID,
           number: view.number,
           questions: [...view.questions],
-          answers
+          answers,
+          deliveryID: deliveryIDs.get(view.roundID) ?? deliveryIDs.set(view.roundID, crypto.randomUUID()).get(view.roundID)
         }, {
           location: entry.location
         }),
@@ -4770,6 +4802,7 @@ var tui_default = Plugin.define({
           duration: 2000
         }),
         settle: async () => {
+          lost = new Set([...lost].filter((id) => id !== view.roundID));
           await refresh(entry.location);
           if (disposed)
             return;
@@ -4805,6 +4838,7 @@ var tui_default = Plugin.define({
       }, {
         location: entry.location
       }).catch(() => {});
+      lost = new Set([...lost].filter((id) => id !== view.roundID));
       await refresh(entry.location);
       if (disposed)
         return;

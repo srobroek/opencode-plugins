@@ -41,6 +41,7 @@ export const ParleyRpc = Rpc.define({
         properties: {
           sessionID: { type: "string" },
           number: { type: "number" },
+          deliveryID: { type: "string" },
           questions: { type: "array", items: { type: "object" } },
           answers: { type: "array", items: { type: "object" } },
         },

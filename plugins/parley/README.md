@@ -290,18 +290,28 @@ and open ones after 24 hours.
 - When the user submits (or dismisses) a restored round, the answers reach the
   session as a queued synthetic message in the usual result format. It wakes an
   idle session. If the model calls `parley_wait` first, it gets the answers
-  there instead, and no message is sent.
-- The TUI notices the new server instance on its next check-in and fetches the
-  round again; the draft is kept. If a submit still fails with `unknown round`,
+  there instead, and no message is sent. A message carries text only (the
+  session `synthetic` call takes no files): text uploads are inlined and other
+  uploads are written to a temporary directory and reported by path.
+- Storage is shared by every location, so each round records its location and
+  an instance restores only rounds whose session belongs to its own location.
+  A round whose session cannot be placed is not restored. Invalid stored rounds
+  are skipped with a warning.
+- On dispose, queued saves finish (bounded at 2 s) before the next instance
+  restores, and the delivered marks are saved before a message is sent.
+- The TUI notices the new server instance and fetches the round again; the
+  draft is kept. A round the server no longer lists after a reload stays on the
+  screen with its draft until you act. If a submit fails with `unknown round`,
   the TUI shows the error once and offers to send the answers as a message or
-  dismiss the card.
+  dismiss the card. Retrying the send reuses one delivery id, so the message
+  arrives once.
 
 ## RPC
 
 `parley` methods: `attach { clientID, sessionIDs?, detach? }` (replies with the
 server `instance` id), `pending { sessionID? }`,
 `submit { roundID, answers, final? }`,
-`deliver { sessionID, number?, questions, answers }` (send answers to the
+`deliver { sessionID, number?, questions, answers, deliveryID? }` (send answers to the
 session as a message), `cancel { roundID, reason? }`. Event `round { sessionID, roundID, action }`
 with `action` `opened`, `updated`, `closed` or `ended`.
 
