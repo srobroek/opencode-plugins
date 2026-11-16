@@ -4,7 +4,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { leadingCdCwd } from "@srobroek/opencode-lib"
@@ -80,6 +80,106 @@ describe("history rewrites in a canonical checkout", () => {
     expect(run(`git filter-repo --target ${canonical} --path a`, elsewhere)?.guard).toBe("history-rewrite")
     expect(run(`git filter-repo --target=${linked} --path a`, canonical)).toBeUndefined()
     expect(run(`uvx git-filter-repo --source ${canonical} --target ${elsewhere} --path a`, canonical)).toBeUndefined()
+  })
+})
+
+describe("launcher spellings", () => {
+  test.each([
+    "uvx git-filter-repo@2.47.0 --path a",
+    "uvx git-filter-repo==2.47.0 --path a",
+    "uv tool run git-filter-repo@2.47.0 --path a",
+    "uv run git-filter-repo --path a",
+    "pipx run git-filter-repo==2.47.0 --path a",
+    "uvx --from git-filter-repo==2.47 git-filter-repo --path a",
+    "uvx -p 3.12 git-filter-repo@latest --path a",
+    "python3 /opt/bin/git-filter-repo --path a",
+  ])("refuses %s in a canonical checkout", (command) => {
+    expect(run(command, canonical)?.guard).toBe("history-rewrite")
+  })
+
+  test.each(["uvx git-filter-repo@2.47.0 --force --path a", "uv tool run git-filter-repo@2.47.0 -f"])(
+    "refuses %s with --force anywhere",
+    (command) => {
+      for (const cwd of [canonical, linked, elsewhere]) expect(run(command, cwd)?.reason).toContain("--force")
+    },
+  )
+
+  test.each([
+    "uv pip install git-filter-repo",
+    "uv tool install git-filter-repo",
+    "pip install git-filter-repo",
+    "pipx install git-filter-repo",
+    "uvx ruff check .",
+    "python3 -c 'print(1)'",
+    "python3 script.py git-filter-repo --force",
+  ])("does not treat %s as running filter-repo", (command) => {
+    expect(run(command, canonical)).toBeUndefined()
+  })
+})
+
+describe("a quoted literal cd", () => {
+  test("is followed into a canonical checkout and into a linked worktree", () => {
+    expect(run(`cd "${canonical}" && git filter-branch --env-filter true`, elsewhere)?.guard).toBe("history-rewrite")
+    expect(run(`cd '${canonical}' && git filter-repo --path a`, elsewhere)?.guard).toBe("history-rewrite")
+    expect(run(`cd "${linked}" && git filter-branch --env-filter true`, canonical)).toBeUndefined()
+    expect(run(`cd "main-checkout" && git replace a b`, root)?.guard).toBe("history-rewrite")
+  })
+
+  test("a quoted expansion is not followed", () => {
+    expect(run('cd "$TARGET" && git filter-branch --env-filter true', elsewhere)).toBeUndefined()
+  })
+})
+
+describe("git update-ref --stdin", () => {
+  const zero = "0".repeat(40)
+  test.each([
+    `git update-ref --stdin <<EOF\ndelete refs/heads/main\nEOF`,
+    `git update-ref --stdin <<'EOF'\nstart\ndelete refs/heads/feature abc123\ncommit\nEOF`,
+    `git update-ref --stdin <<< 'delete refs/heads/main'`,
+    `git update-ref --stdin <<EOF\nupdate refs/heads/main ${zero}\nEOF`,
+    `git update-ref --stdin <<EOF\nupdate refs/tags/v1 abc\ndelete refs/heads/old\nEOF`,
+  ])("refuses a literal transaction deleting a branch: %s", (command) => {
+    const refusal = run(command.replaceAll("\\n", "\n"), canonical)
+    expect(refusal?.guard).toBe("history-rewrite")
+    expect(refusal?.reason).toContain("refs/heads/")
+  })
+
+  test.each([
+    "printf 'delete refs/heads/main\\n' | git update-ref --stdin",
+    "git update-ref --stdin < ops.txt",
+    "git update-ref --stdin",
+    "git update-ref -z --stdin <<< 'x'",
+    'git update-ref --stdin <<< "delete refs/heads/$B"',
+    "git update-ref --stdin <<EOF\ndelete refs/heads/$B\nEOF",
+  ])("refuses a transaction it cannot read: %s", (command) => {
+    expect(run(command.replaceAll("\\n", "\n"), canonical)?.guard).toBe("history-rewrite")
+  })
+
+  test.each([
+    "git update-ref --stdin <<EOF\ndelete refs/tags/v1\nEOF",
+    "git update-ref --stdin <<EOF\nupdate refs/remotes/origin/x abc\ndelete refs/remotes/origin/y\nEOF",
+    "git update-ref --stdin <<EOF\ncreate refs/heads/new abc\nEOF",
+    "git update-ref --stdin <<EOF\ndelete refs/heads/main\nEOF",
+  ])("allows what leaves branches alone, or any transaction outside a canonical checkout: %s", (command) => {
+    const text = command.replaceAll("\\n", "\n")
+    if (text.includes("delete refs/heads/main")) expect(run(text, linked)).toBeUndefined()
+    else expect(run(text, canonical)).toBeUndefined()
+  })
+})
+
+describe("symlinked directory changes are resolved physically", () => {
+  test("a symlink followed by .. leaves the link's target, not the link's parent", () => {
+    // elsewhere/link -> canonical/sub, so `link/..` is the canonical checkout, not `elsewhere`.
+    symlinkSync(join(canonical, "sub"), join(elsewhere, "link"))
+    expect(run("git -C link -C .. filter-branch --env-filter true", elsewhere)?.guard).toBe("history-rewrite")
+    expect(run("git -C link/.. filter-branch --env-filter true", elsewhere)?.guard).toBe("history-rewrite")
+    expect(run("git filter-repo --target link/.. --path a", elsewhere)?.guard).toBe("history-rewrite")
+    expect(run(`cd "${join(elsewhere, "link")}/.." && git replace a b`, elsewhere)?.guard).toBe("history-rewrite")
+  })
+
+  test("a directory that does not exist leaves the last resolved one", () => {
+    expect(run("git -C missing/dir filter-branch --env-filter true", canonical)?.guard).toBe("history-rewrite")
+    expect(run("git -C missing/dir filter-branch --env-filter true", elsewhere)).toBeUndefined()
   })
 })
 

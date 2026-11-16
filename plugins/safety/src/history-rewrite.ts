@@ -13,29 +13,80 @@
 
 import { realpathSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { dirname, join, resolve } from "node:path"
+import { dirname, join } from "node:path"
 import { base, type Command, gitInvocation, positionals } from "./shell.ts"
 
 const PREFIX = "Blocked by safety (history-rewrite-guard)"
 const FILTER_REPO_NAME = /^git[-_]filter[-_]repo(?:\.py)?$/
-const LAUNCHERS: ReadonlySet<string> = new Set(["uvx", "uv", "pipx", "python", "python3", "pipenv"])
+/** Launcher options that take the next word as their value, so it is not the program. */
+const LAUNCHER_VALUED: ReadonlySet<string> = new Set([
+  "--from",
+  "--with",
+  "--with-requirements",
+  "--with-editable",
+  "-p",
+  "--python",
+  "--index",
+  "--index-url",
+  "-i",
+  "--extra-index-url",
+  "--default-index",
+  "--constraint",
+  "-c",
+  "--env-file",
+  "--directory",
+  "--project",
+  "--config-file",
+  "--cache-dir",
+  "--spec",
+  "--pip-args",
+  "--suffix",
+])
 const UPDATE_REF_VALUED: ReadonlySet<string> = new Set(["-m"])
 const ZERO_OID = /^0{40,64}$/
 
 /** A word with a `$` or backtick: its value is unknown until the shell expands it. */
-const dynamic = (word: string): boolean => /[$`]/.test(word)
+const dynamic = (word: string): boolean => /[$`]/.test(word) || word.startsWith("~")
 
 type FilterRepo = { args: string[]; chdirs: string[] }
 
-/** `git filter-repo`, `git-filter-repo`, or either behind `uvx`, `uv`, `pipx` or `python -m`. */
+/** The words after the program a launcher runs: `uvx`, `uv tool run`, `uv run`, `pipx run`, `python`. */
+function launched(argv: readonly string[]): { program: string; args: string[] } | undefined {
+  const name = base(argv[0])
+  let start: number
+  if (name === "uvx") start = 1
+  else if (name === "uv") start = argv[1] === "tool" && argv[2] === "run" ? 3 : argv[1] === "run" ? 2 : -1
+  else if (name === "pipx") start = argv[1] === "run" ? 2 : -1
+  else if (/^python3?(?:\.\d+)?$/.test(name)) start = 1
+  else return undefined
+  if (start < 0) return undefined
+  for (let i = start; i < argv.length; i++) {
+    const word = argv[i] as string
+    if (name.startsWith("python") && word === "-m") {
+      const module = argv[i + 1]
+      return module === undefined ? undefined : { program: module, args: argv.slice(i + 2) }
+    }
+    if (name.startsWith("python") && word === "-c") return undefined
+    if (word.startsWith("-")) {
+      if (LAUNCHER_VALUED.has(word)) i++
+      continue
+    }
+    return { program: word, args: argv.slice(i + 1) }
+  }
+  return undefined
+}
+
+/** `git filter-repo`, `git-filter-repo`, or either run through a launcher (a version qualifier is ignored). */
 function filterRepo(command: Command): FilterRepo | undefined {
   const name = base(command.argv[0])
   if (FILTER_REPO_NAME.test(name)) return { args: command.argv.slice(1), chdirs: [] }
   const git = gitInvocation(command.argv)
   if (git?.subcommand === "filter-repo") return { args: git.args, chdirs: git.chdirs }
-  if (!LAUNCHERS.has(name)) return undefined
-  const at = command.argv.findIndex((word, i) => i > 0 && FILTER_REPO_NAME.test(base(word)))
-  return at < 0 ? undefined : { args: command.argv.slice(at + 1), chdirs: [] }
+  const run = launched(command.argv)
+  if (run === undefined) return undefined
+  // `git-filter-repo@2.47.0`, `git-filter-repo==2.47`, `git-filter-repo[extra]`: the executable is the name.
+  const program = base(run.program.replace(/[@=<>~![].*$/, ""))
+  return FILTER_REPO_NAME.test(program) ? { args: run.args, chdirs: [] } : undefined
 }
 
 /** The value of `--name value` or `--name=value`. */
@@ -89,6 +140,53 @@ function canonicalCheckout(dir: string, tempRoots: readonly string[]): string | 
   }
 }
 
+/**
+ * Step into `dir` from the real directory `at`, one component at a time, resolving each symlink
+ * before a later `..` is applied (`link/..` leaves the link's target, not the link's parent).
+ * A component that cannot be resolved leaves the last resolved directory.
+ */
+function enter(at: string, dir: string): string {
+  let here = dir.startsWith("/") ? "/" : at
+  for (const part of dir.split("/")) {
+    if (part === "" || part === ".") continue
+    if (part === "..") {
+      here = dirname(here)
+      continue
+    }
+    try {
+      here = realpathSync(join(here, part))
+    } catch {
+      return here
+    }
+  }
+  return here
+}
+
+/**
+ * What a literal `git update-ref --stdin` transaction deletes: a `refs/heads/` ref, or `"unreadable"`
+ * when the commands do not come from a literal here-document or here-string (a pipe, a file, `-z`).
+ */
+function stdinDeletes(command: Command, args: readonly string[]): string | "unreadable" | undefined {
+  if (args.includes("-z")) return "unreadable"
+  const sources: string[] = []
+  for (const document of command.hereDocuments) {
+    if (!document.quoted && /[$`]/.test(document.body)) return "unreadable"
+    sources.push(document.body)
+  }
+  for (const redirect of command.redirects) {
+    if (redirect.hereString !== true) continue
+    if (redirect.expands) return "unreadable"
+    sources.push(redirect.value)
+  }
+  if (sources.length === 0) return "unreadable"
+  for (const line of sources.join("\n").split("\n")) {
+    const [verb, ref, value] = line.trim().split(/\s+/)
+    if (ref?.startsWith("refs/heads/") !== true) continue
+    if (verb === "delete" || (verb === "update" && value !== undefined && ZERO_OID.test(value))) return ref
+  }
+  return undefined
+}
+
 const refused = (what: string, where: string): string =>
   `${PREFIX}: refused ${what}. ${where} is a canonical checkout (its .git is a directory), and this command rewrites or deletes history in place, which cannot be undone from the work tree. Clone the repository into a temp directory (\`git clone <repo> "$TMPDIR/<name>"\`) and run the command there with the tool's workdir set to the clone.`
 
@@ -101,10 +199,17 @@ export function historyRewrite(
   cwd: string,
   tempRoots: readonly string[] = defaultTempRoots(),
 ): string | undefined {
+  // The plugin applies an unquoted leading `cd` itself; a quoted literal one is read here.
+  let start = realOrSelf(cwd)
+  const first = commands[0]
+  if (first?.context === "top" && first.argv[0] === "cd" && first.argv.length === 2 && first.words?.[1]?.quoted === true) {
+    const operand = first.argv[1] as string
+    if (!dynamic(operand)) start = enter(start, operand)
+  }
   for (const command of commands) {
     const git = gitInvocation(command.argv)
     const chdirs = (git?.chdirs ?? []).filter((dir) => !dynamic(dir))
-    const dir = chdirs.reduce((at, chdir) => resolve(at, chdir), cwd)
+    const dir = chdirs.reduce(enter, start)
     const checkout = (target: string): string | undefined => canonicalCheckout(target, tempRoots)
 
     const rewrite = filterRepo(command)
@@ -113,7 +218,7 @@ export function historyRewrite(
       if (rewrite.args.some((arg) => arg === "--force" || arg === "-f"))
         return `${PREFIX}: refused ${text} with --force. filter-repo --force overwrites the repository's refs and history in the directory it runs in, wherever that is. Run it without --force in a fresh temp clone with the tool's workdir set there; a fresh clone needs no --force.`
       const target = optionValue(rewrite.args, "--target")
-      const targetDir = target === undefined || dynamic(target) ? dir : resolve(dir, target)
+      const targetDir = target === undefined || dynamic(target) ? dir : enter(dir, target)
       const root = checkout(targetDir)
       if (root !== undefined) return refused(text, root)
       continue
@@ -129,6 +234,12 @@ export function historyRewrite(
     }
     if (git.subcommand === "update-ref") {
       const deleting = git.args.includes("-d") || git.args.includes("--delete")
+      if (git.args.includes("--stdin")) {
+        const deleted = stdinDeletes(command, git.args)
+        if (deleted === "unreadable")
+          return refused("`git update-ref --stdin` (its transaction does not come from a literal here-document, so deletions cannot be ruled out)", root)
+        if (deleted !== undefined) return refused(`\`git update-ref --stdin\` deleting ${deleted}`, root)
+      }
       const [ref, value] = positionals(git.args, UPDATE_REF_VALUED)
       const zero = value !== undefined && ZERO_OID.test(value)
       if ((deleting || zero) && ref?.startsWith("refs/heads/")) return refused(`\`git update-ref\` deleting ${ref}`, root)
