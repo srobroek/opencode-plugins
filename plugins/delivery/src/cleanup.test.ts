@@ -21,7 +21,7 @@ import {
   writeFileSync,
 } from "node:fs"
 import { devNull, tmpdir } from "node:os"
-import { basename, dirname, join } from "node:path"
+import { basename, dirname, join, resolve } from "node:path"
 import pkg from "../package.json" with { type: "json" }
 import {
   branchDeleteArgs,
@@ -1144,13 +1144,37 @@ describe("delivery_cleanup irreversible boundary", () => {
     rmSync(f.root, { recursive: true, force: true })
   })
 
-  test("a worktree that switched to a follow-up branch refuses before anything is removed", async () => {
-    const f = fixture("stacked")
-    git(f.linked, ["switch", "-q", "-c", "follow-up"])
-    const { result, calls } = await invoke(f)
-    expect(refusal(result)).toContain("worktree.branch: observed")
-    expect(mutationCalls(calls)).toEqual([])
-    expect(existsSync(f.linked)).toBe(true)
+  describe.each([
+    ["a tracked change", "worktree.status", (f: Fixture) => writeFileSync(join(f.linked, git(f.linked, ["ls-files"]).split("\n")[0] ?? ""), "changed\n")],
+    ["an untracked file", "worktree.status", (f: Fixture) => writeFileSync(join(f.linked, "untracked.txt"), "x\n")],
+    ["a merge in progress", "worktree.operation", (f: Fixture) => writeFileSync(join(git(f.linked, ["rev-parse", "--absolute-git-dir"]), "MERGE_HEAD"), `${f.head}\n`)],
+    ["a cherry-pick in progress", "worktree.operation", (f: Fixture) => writeFileSync(join(git(f.linked, ["rev-parse", "--absolute-git-dir"]), "CHERRY_PICK_HEAD"), `${f.head}\n`)],
+    ["a rebase in progress", "worktree.operation", (f: Fixture) => mkdirSync(join(git(f.linked, ["rev-parse", "--absolute-git-dir"]), "rebase-merge"))],
+    ["a bisect in progress", "worktree.operation", (f: Fixture) => writeFileSync(join(git(f.linked, ["rev-parse", "--absolute-git-dir"]), "BISECT_LOG"), "git bisect start\n")],
+    ["a stash on the branch", "worktree.stash", (f: Fixture) => {
+      writeFileSync(join(f.linked, "stashed.txt"), "x\n")
+      git(f.linked, ["stash", "push", "-u", "-q", "-m", "keep me"])
+    }],
+  ])("the clean check refuses %s", (_name, gate, dirty) => {
+    test("and removes nothing", async () => {
+      const f = fixture("dirty-kind")
+      dirty(f)
+      const { result, calls } = await invoke(f)
+      expect(refusal(result)).toContain(`${gate}: observed`)
+      expect(mutationCalls(calls)).toEqual([])
+      expect(existsSync(f.linked)).toBe(true)
+      rmSync(f.root, { recursive: true, force: true })
+    })
+  })
+
+  test("an ignored file does not make the worktree dirty", async () => {
+    const f = fixture("ignored-ok")
+    const commonExclude = join(resolve(f.linked, git(f.linked, ["rev-parse", "--git-common-dir"])), "info", "exclude")
+    mkdirSync(dirname(commonExclude), { recursive: true })
+    writeFileSync(commonExclude, "ignored.log\n")
+    writeFileSync(join(f.linked, "ignored.log"), "noise\n")
+    const { result } = await invoke(f)
+    expect(result.ok).toBe(true)
     rmSync(f.root, { recursive: true, force: true })
   })
 

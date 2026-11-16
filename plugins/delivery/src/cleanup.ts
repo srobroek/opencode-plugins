@@ -1,6 +1,7 @@
-import { lstatSync, realpathSync, type Stats } from "node:fs"
+import { existsSync, lstatSync, realpathSync, type Stats } from "node:fs"
 import { basename, dirname, isAbsolute, resolve, sep } from "node:path"
 import { isDeepStrictEqual } from "node:util"
+import { OPERATION_MARKERS, operationsInProgress, stashesOnBranch } from "@srobroek/opencode-lib/worktree-state"
 import pkg from "../package.json" with { type: "json" }
 import { type GitPin, inspectCheckoutMarker, physical, verifyCheckout } from "./checkout-marker.ts"
 import {
@@ -669,11 +670,17 @@ function dirtyPaths(output: string): string[] {
     .slice(0, MAX_DIRTY_PATHS)
 }
 
+/**
+ * The target is clean: no tracked change, no untracked file (ignored files are allowed),
+ * no merge/rebase/cherry-pick/revert/bisect in progress, and no stash made on its branch.
+ * `git status --porcelain` alone misses the last two when the tree is otherwise clean.
+ */
 async function verifyCleanTarget(
   path: string,
   run: CliRunner,
   timeoutMs: number,
   pin?: GitPin,
+  branch?: string,
 ): Promise<CleanupFailure | null> {
   const state = worktreePathState(path)
   if (state !== "directory") return refuse("worktree.path", `${path} (${state})`, "a present non-symlink directory")
@@ -687,6 +694,23 @@ async function verifyCleanTarget(
       { paths: dirtyPaths(result.stdout), total: all.length },
       "no dirty paths (empty porcelain output)",
     )
+  }
+  const dirArgv = ["rev-parse", "--absolute-git-dir"]
+  const dir = await runGit(run, path, dirArgv, timeoutMs, pin)
+  if (!completed(dir) || dir.stdout.trim() === "") {
+    return commandFailure("worktree.operation", ["git", ...dirArgv], dir, "exit 0 and the worktree's git directory")
+  }
+  const gitDir = dir.stdout.trim()
+  const operations = operationsInProgress(
+    OPERATION_MARKERS.map((marker) => marker.name).filter((name) => existsSync(resolve(gitDir, name))),
+  )
+  if (operations.length > 0) return refuse("worktree.operation", operations, "no merge, rebase, cherry-pick, revert or bisect in progress")
+  if (branch !== undefined) {
+    const stashArgv = ["stash", "list", "--format=%gs"]
+    const stash = await runGit(run, path, stashArgv, timeoutMs, pin)
+    if (!completed(stash)) return commandFailure("worktree.stash", ["git", ...stashArgv], stash, "exit 0")
+    const entries = stashesOnBranch(stash.stdout, branch)
+    if (entries.length > 0) return refuse("worktree.stash", entries.slice(0, MAX_DIRTY_PATHS), `no stash entries on ${branch}`)
   }
   return null
 }
@@ -1013,7 +1037,7 @@ async function revalidateBoundary(
   if (isFailure(identity)) return identity
   const ref = await verifyLocalRef(receipt, cwd, run, bounds.refReadMs)
   if (ref !== null) return ref
-  const clean = await verifyCleanTarget(identity.cwd, run, bounds.treeScanMs, identity.pin)
+  const clean = await verifyCleanTarget(identity.cwd, run, bounds.treeScanMs, identity.pin, receipt.branch.name)
   if (clean !== null) return clean
   const pushed = await verifyPushed(identity.cwd, run, bounds.refReadMs, identity.pin)
   return isFailure(pushed) ? pushed : identity
@@ -1143,7 +1167,7 @@ export async function cleanupDelivery(
   const observedFailure = verifyObservation(receipt, observed.pr)
   if (observedFailure !== null) return observedFailure
   const path = receipt.worktree.path as string
-  const dirty = await verifyCleanTarget(identity.cwd, run, bounds.treeScanMs, identity.pin)
+  const dirty = await verifyCleanTarget(identity.cwd, run, bounds.treeScanMs, identity.pin, receipt.branch.name)
   if (dirty !== null) return dirty
   const pushed = await verifyPushed(identity.cwd, run, bounds.refReadMs, identity.pin)
   if (isFailure(pushed)) return pushed

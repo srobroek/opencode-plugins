@@ -338,9 +338,10 @@ function inlineCleanupDecision(receipt, enabled, holds = [], canonical = (path) 
   }
   return { run: true };
 }
+var DIRTY_GATE = /^worktree\.(?:status|operation|stash):/;
 function reportFromCleanup(result) {
   if (!result.ok)
-    return { ok: false, reason: result.reason };
+    return { ok: false, reason: DIRTY_GATE.test(result.reason) ? `dirty: ${result.reason}` : result.reason };
   return { ok: true, removed: result.receipt.worktree.path ?? "", localRefDeleted: true };
 }
 async function runInlineCleanup(run) {
@@ -375,9 +376,26 @@ function textAfterCleanup(text, report) {
 }
 
 // plugins/delivery/src/cleanup.ts
-import { lstatSync as lstatSync3, realpathSync as realpathSync3 } from "fs";
+import { existsSync as existsSync2, lstatSync as lstatSync3, realpathSync as realpathSync3 } from "fs";
 import { basename as basename2, dirname as dirname3, isAbsolute as isAbsolute2, resolve as resolve2, sep } from "path";
 import { isDeepStrictEqual } from "util";
+
+// plugins/lib/src/worktree-state.ts
+var OPERATION_MARKERS = [
+  { name: "MERGE_HEAD", operation: "merge" },
+  { name: "rebase-merge", operation: "rebase" },
+  { name: "rebase-apply", operation: "rebase" },
+  { name: "CHERRY_PICK_HEAD", operation: "cherry-pick" },
+  { name: "REVERT_HEAD", operation: "revert" },
+  { name: "BISECT_LOG", operation: "bisect" }
+];
+function operationsInProgress(present) {
+  const names = new Set(present);
+  return [...new Set(OPERATION_MARKERS.filter((marker) => names.has(marker.name)).map((marker) => marker.operation))];
+}
+function stashesOnBranch(subjects, branch) {
+  return subjects.split(/\r?\n/).filter((line) => line.startsWith(`WIP on ${branch}:`) || line.startsWith(`On ${branch}:`));
+}
 // plugins/delivery/package.json
 var package_default = {
   name: "@srobroek/opencode-delivery",
@@ -2298,7 +2316,7 @@ function worktreePathState(path) {
 function dirtyPaths(output) {
   return output.split(/\r?\n/).filter(Boolean).map((line) => line.length > 3 ? line.slice(3) : line).slice(0, MAX_DIRTY_PATHS);
 }
-async function verifyCleanTarget(path, run, timeoutMs, pin) {
+async function verifyCleanTarget(path, run, timeoutMs, pin, branch) {
   const state = worktreePathState(path);
   if (state !== "directory")
     return refuse2("worktree.path", `${path} (${state})`, "a present non-symlink directory");
@@ -2309,6 +2327,24 @@ async function verifyCleanTarget(path, run, timeoutMs, pin) {
   if (result.stdout !== "") {
     const all = result.stdout.split(/\r?\n/).filter(Boolean);
     return refuse2("worktree.status", { paths: dirtyPaths(result.stdout), total: all.length }, "no dirty paths (empty porcelain output)");
+  }
+  const dirArgv = ["rev-parse", "--absolute-git-dir"];
+  const dir = await runGit(run, path, dirArgv, timeoutMs, pin);
+  if (!completed(dir) || dir.stdout.trim() === "") {
+    return commandFailure("worktree.operation", ["git", ...dirArgv], dir, "exit 0 and the worktree's git directory");
+  }
+  const gitDir = dir.stdout.trim();
+  const operations = operationsInProgress(OPERATION_MARKERS.map((marker) => marker.name).filter((name) => existsSync2(resolve2(gitDir, name))));
+  if (operations.length > 0)
+    return refuse2("worktree.operation", operations, "no merge, rebase, cherry-pick, revert or bisect in progress");
+  if (branch !== undefined) {
+    const stashArgv = ["stash", "list", "--format=%gs"];
+    const stash = await runGit(run, path, stashArgv, timeoutMs, pin);
+    if (!completed(stash))
+      return commandFailure("worktree.stash", ["git", ...stashArgv], stash, "exit 0");
+    const entries = stashesOnBranch(stash.stdout, branch);
+    if (entries.length > 0)
+      return refuse2("worktree.stash", entries.slice(0, MAX_DIRTY_PATHS), `no stash entries on ${branch}`);
   }
   return null;
 }
@@ -2536,7 +2572,7 @@ async function revalidateBoundary(receipt, cwd, run, bounds) {
   const ref = await verifyLocalRef(receipt, cwd, run, bounds.refReadMs);
   if (ref !== null)
     return ref;
-  const clean = await verifyCleanTarget(identity.cwd, run, bounds.treeScanMs, identity.pin);
+  const clean = await verifyCleanTarget(identity.cwd, run, bounds.treeScanMs, identity.pin, receipt.branch.name);
   if (clean !== null)
     return clean;
   const pushed = await verifyPushed(identity.cwd, run, bounds.refReadMs, identity.pin);
@@ -2622,7 +2658,7 @@ async function cleanupDelivery(params, cwd, deps = {}) {
   if (observedFailure !== null)
     return observedFailure;
   const path = receipt.worktree.path;
-  const dirty = await verifyCleanTarget(identity.cwd, run, bounds.treeScanMs, identity.pin);
+  const dirty = await verifyCleanTarget(identity.cwd, run, bounds.treeScanMs, identity.pin, receipt.branch.name);
   if (dirty !== null)
     return dirty;
   const pushed = await verifyPushed(identity.cwd, run, bounds.refReadMs, identity.pin);

@@ -65,9 +65,12 @@ export function inlineCleanupDecision(
   return { run: true }
 }
 
+/** The clean-check refusals of `cleanup.ts`: tracked/untracked changes, an operation in progress, a stash. */
+const DIRTY_GATE = /^worktree\.(?:status|operation|stash):/
+
 /** Fold a cleanup result into the report a land result carries. Pure. */
 export function reportFromCleanup(result: CleanupResult): CleanupReport {
-  if (!result.ok) return { ok: false, reason: result.reason }
+  if (!result.ok) return { ok: false, reason: DIRTY_GATE.test(result.reason) ? `dirty: ${result.reason}` : result.reason }
   // cleanupDelivery verifies the registration, path, local ref and remote ref absences before it succeeds.
   return { ok: true, removed: result.receipt.worktree.path ?? "", localRefDeleted: true }
 }

@@ -25,6 +25,13 @@ test("a successful cleanup reports the removed path and the local ref", () => {
   expect(reportFromCleanup(success)).toEqual({ ok: true, removed: "/w/a", localRefDeleted: true })
 })
 
+test.each(["worktree.status", "worktree.operation", "worktree.stash"])("a %s refusal is reported as dirty", (gate) => {
+  expect(reportFromCleanup({ ok: false, reason: `${gate}: observed x, expected y` })).toEqual({
+    ok: false,
+    reason: `dirty: ${gate}: observed x, expected y`,
+  })
+})
+
 test("a refusal and a throw both become a failed report, never an error", async () => {
   expect(await runInlineCleanup(async () => ({ ok: false, reason: "dirty" }))).toEqual({ ok: false, reason: "dirty" })
   expect(
