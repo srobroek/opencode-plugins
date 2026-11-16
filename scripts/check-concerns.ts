@@ -75,14 +75,24 @@ const isDate = (s: string) => {
   return /^\d{4}-\d{2}-\d{2}$/.test(s) && !Number.isNaN(time) && new Date(time).toISOString().startsWith(s)
 }
 
-/** Split one markdown table line into trimmed cells. */
+/** Split one markdown table line into trimmed cells; `\|` stays in the cell as `|` (GFM). */
 function splitRow(line: string): string[] {
-  return line
-    .trim()
-    .replace(/^\|/, "")
-    .replace(/\|$/, "")
-    .split("|")
-    .map((c) => c.trim())
+  const body = line.trim().replace(/^\|/, "")
+  const cells: string[] = []
+  let cell = ""
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i]
+    if (ch === "\\" && body[i + 1] === "|") {
+      cell += "|"
+      i++
+    } else if (ch === "|") {
+      cells.push(cell.trim())
+      cell = ""
+    } else cell += ch
+  }
+  // a trailing pipe closes the last cell; text after the last pipe is a cell of its own
+  if (cell.trim() !== "" || !/\|$/.test(line.trim()) || cells.length === 0) cells.push(cell.trim())
+  return cells
 }
 
 /** The first table under the `## <heading>` section, or undefined when the section or table is absent. */
@@ -99,7 +109,7 @@ export function parseTable(text: string, heading: string): Table | undefined {
     block.push({ line: i + 1, cells: splitRow(lines[i] ?? "") })
   const [head, separator, ...rows] = block
   if (!head || !separator) return undefined
-  if (!separator.cells.every((c) => /^:?-+:?$/.test(c))) return undefined
+  if (separator.cells.length !== head.cells.length || !separator.cells.every((c) => /^:?-+:?$/.test(c))) return undefined
   return { line: head.line, header: head.cells, rows }
 }
 
@@ -366,7 +376,7 @@ function checkFile(ctx: Context, lang: Language, file: string, text: string, own
   }
 
   const order = ctx.spec.concerns.map((c) => c.id)
-  const tradeoffs = tradeoffIds(text)
+  const tradeoffs = tradeoffMap(tradeoffSections(text.split(/\r?\n/), "## Tradeoffs", "###"))
   let lastIndex = -1
   for (const row of table.rows) {
     if (row.cells.length !== LANGUAGE_HEADER.length) {
@@ -404,9 +414,9 @@ function checkFile(ctx: Context, lang: Language, file: string, text: string, own
     )
   }
 
-  for (const [id, line] of tradeoffs) {
-    if (!order.includes(id)) bad(line, `Tradeoffs entry for unknown concern "${id}"`)
-    else if (!tradeoffHasBullet(text, id)) bad(line, `Tradeoffs entry "${id}" has no "- **tool**:" bullet`)
+  for (const [id, section] of tradeoffs) {
+    if (!order.includes(id)) bad(section.line, `Tradeoffs entry for unknown concern "${id}"`)
+    else if (!hasBullet(section)) bad(section.line, `Tradeoffs entry "${id}" has no "- **tool**:" bullet`)
   }
   findings.push(...checkLanguageSpecific(ctx, file, text))
   return findings
@@ -436,19 +446,28 @@ function tradeoffSections(lines: string[], container: string, item: string, offs
 
 const hasBullet = (section: TradeoffSection) => section.body.some((l) => /^- \*\*[^*]+\*\*:\s*\S/.test(l))
 
-/** `### <id>` headings under `## Tradeoffs`, with their line numbers. */
-const tradeoffIds = (text: string) =>
-  new Map(tradeoffSections(text.split(/\r?\n/), "## Tradeoffs", "###").map((s) => [s.id, s.line]))
+const tradeoffMap = (sections: TradeoffSection[]) => new Map(sections.map((s) => [s.id, s]))
 
-const tradeoffHasBullet = (text: string, id: string) => {
-  const section = tradeoffSections(text.split(/\r?\n/), "## Tradeoffs", "###").find((s) => s.id === id)
-  return section ? hasBullet(section) : false
+const toolKey = (name: string) => unticked(name).toLowerCase()
+
+/** Tool names before the first `:` of each Alternatives item. */
+const alternativeNames = (cell: string) => cell.split(";").map((i) => toolKey(i.slice(0, i.indexOf(":"))))
+
+/** Tools a Tradeoffs entry must cover but has no bullet for: the Default tool and every alternative. */
+function missingTradeoffTools(section: TradeoffSection, def: string, alts: string): string[] {
+  const bullets = section.body.flatMap((l) => {
+    const m = /^- \*\*([^*]+)\*\*:/.exec(l)
+    return m?.[1] ? [toolKey(m[1])] : []
+  })
+  const kind = classifyDefault(def)
+  const named = [...(kind.type === "tool" ? [toolKey(kind.tool)] : []), ...alternativeNames(alts)]
+  return named.filter((n) => !bullets.some((b) => b === n || b.startsWith(n)))
 }
 
 type CellsAt = {
   file: string
   checked: string | undefined
-  tradeoffs: Map<string, number>
+  tradeoffs: Map<string, TradeoffSection>
   /** Tail of the missing-Tradeoffs message after `need a "`. */
   tradeoffWhere: string
 }
@@ -465,7 +484,12 @@ function checkCells(ctx: Context, owner: Owner, concern: Concern, row: Row, at: 
   if (alts === "") {
     // reported as an empty cell
   } else if (count === undefined) bad(`Alternatives must be "None" or "tool: condition" items separated by ";"`)
-  else if (count >= 2 && !at.tradeoffs.has(concern.id)) bad(`${count} alternatives need a "${at.tradeoffWhere}`)
+  else if (count >= 2) {
+    const section = at.tradeoffs.get(concern.id)
+    if (!section) bad(`${count} alternatives need a "${at.tradeoffWhere}`)
+    else if (hasBullet(section))
+      for (const tool of missingTradeoffTools(section, def, alts)) bad(`Tradeoffs entry "${concern.id}" lacks a "- **${tool}**:" bullet`)
+  }
   findings.push(...checkRun(ctx, concern, def, { file: at.file, line: row.line, run }))
   return findings
 }
@@ -591,6 +615,15 @@ export function checkSurfaces(ctx: Context): Finding[] {
     if (heading && !spec.surfaces.some((s) => s.id === heading)) bad(i + 1, `section "${heading}" is not a surface in the spec`)
   })
 
+  const sectionSeen = new Set<string>()
+  lines.forEach((l, i) => {
+    const heading = /^## (\S+)\s*$/.exec(l)?.[1]
+    if (heading && spec.surfaces.some((s) => s.id === heading)) {
+      if (sectionSeen.has(heading)) bad(i + 1, `duplicate section "${heading}"`)
+      sectionSeen.add(heading)
+    }
+  })
+
   const order = spec.surfaceConcerns.map((c) => c.id)
   for (const surface of spec.surfaces) {
     const section = sectionOf(lines, surface.id)
@@ -636,7 +669,7 @@ export function checkSurfaces(ctx: Context): Finding[] {
         ...checkCells(ctx, { naProblem }, concern, row, {
           file,
           checked,
-          tradeoffs: new Map(tradeoffs.map((t) => [t.id, t.line])),
+          tradeoffs: tradeoffMap(tradeoffs),
           tradeoffWhere: `#### ${id}" entry under ### Tradeoffs in ## ${surface.id}`,
         }),
       )
@@ -728,30 +761,35 @@ function staleSurfaceRows(ctx: Context, maxAgeDays: number, today: string): stri
   return out
 }
 
-function main(argv: string[]): number {
+type MainIo = { root?: string; today?: string; stdout?: (line: string) => void; stderr?: (line: string) => void }
+
+/** CLI entry: returns the exit code (0 clean, 1 findings, 2 bad usage). */
+export function main(argv: string[], io: MainIo = {}): number {
   const { values } = parseArgs({
     args: argv,
     options: { language: { type: "string" }, "max-age": { type: "string" } },
   })
-  const root = path.resolve(import.meta.dir, "..")
-  const today = new Date().toISOString().slice(0, 10)
+  const out = io.stdout ?? console.log
+  const err = io.stderr ?? console.error
+  const root = io.root ?? path.resolve(import.meta.dir, "..")
+  const today = io.today ?? new Date().toISOString().slice(0, 10)
   const maxAge = values["max-age"] === undefined ? undefined : Number(values["max-age"])
   if (maxAge !== undefined && !(maxAge >= 0)) {
-    console.error("check-concerns: --max-age needs a non-negative number of days")
+    err("check-concerns: --max-age needs a non-negative number of days")
     return 2
   }
   const findings = checkRepo(root, { language: values.language, today })
-  for (const f of findings) console.error(`${f.file}:${f.line}: ${f.reason}`)
+  for (const f of findings) err(`${f.file}:${f.line}: ${f.reason}`)
   if (maxAge !== undefined) {
     const stale = staleRows(root, maxAge, today, values.language)
-    console.log(`check-concerns: ${stale.length} row(s) older than ${maxAge} days`)
-    for (const line of stale) console.log(line)
+    out(`check-concerns: ${stale.length} row(s) older than ${maxAge} days`)
+    for (const line of stale) out(line)
   }
   if (findings.length > 0) {
-    console.error(`check-concerns: ${findings.length} finding(s)`)
+    err(`check-concerns: ${findings.length} finding(s)`)
     return 1
   }
-  console.log("check-concerns: clean")
+  out("check-concerns: clean")
   return 0
 }
 

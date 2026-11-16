@@ -2,7 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test"
 import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
-import { checkLanguage, checkRepo, classifyDefault, parseShared, parseSpec, parseTable, staleRows } from "./check-concerns.ts"
+import { checkLanguage, checkRepo, classifyDefault, main, parseShared, parseSpec, parseTable, staleRows } from "./check-concerns.ts"
 
 const FIXTURE = path.join(import.meta.dir, "fixtures", "concerns", "valid")
 const REF = "plugins/toolchain/skills/toolchain-languages/references"
@@ -175,7 +175,7 @@ describe("language file findings", () => {
     ["Inherits itself", TF, "Inherits: py", "Inherits: tf", "cannot inherit from itself"],
     ["malformed Alternatives", PY_QUALITY, "| None | - | every-pr | - |", "| ruff-ish | - | every-pr | - |", "Alternatives must be"],
     ["two alternatives without Tradeoffs", PY_TESTING, "## Tradeoffs\n\n### unit", "## Tradeoffs\n\n### lint", 'need a "### unit" entry'],
-    ["Tradeoffs entry without bullets", PY_TESTING, "- **pytest**: fixtures and parametrize.\n- **unittest**: standard library only.", "Nothing.", 'has no "- **tool**:" bullet'],
+    ["Tradeoffs entry without bullets", PY_TESTING, "- **pytest**: fixtures and parametrize.\n- **unittest**: standard library only.\n- **nose2**: legacy suites only.", "Nothing.", 'has no "- **tool**:" bullet'],
     ["Tradeoffs for unknown concern", PY_TESTING, "### unit", "### ghost", "unknown concern"],
     ["unknown run token", PY_QUALITY, "every-pr + scheduled", "every-pr + yearly", 'unknown run token "yearly"'],
     ["Run lacks required token", PY_QUALITY, "| every-pr | - |\n| `types`", "| scheduled | - |\n| `types`", "Run must include every-pr"],
@@ -238,7 +238,7 @@ describe("surfaces file", () => {
     ["unknown run token", "every-pr + scheduled | - |\n| `visual`", "every-pr + yearly | - |\n| `visual`", 'unknown run token "yearly"'],
     ["Run lacks required token", "| every-pr + scheduled | - |\n| `visual`", "| every-pr | - |\n| `visual`", "Run must include scheduled"],
     ["two alternatives without Tradeoffs", "#### e2e", "#### visual", 'need a "#### e2e" entry'],
-    ["Tradeoffs entry without bullets", "- **playwright**: multi-browser and fast; costs a browser download.\n- **cypress**: good debugging UI; costs single-tab limits.", "Nothing.", 'has no "- **tool**:" bullet'],
+    ["Tradeoffs entry without bullets", "- **playwright**: multi-browser and fast; costs a browser download.\n- **cypress**: good debugging UI; costs single-tab limits.\n- **selenium**: runs legacy grids; slow and flaky.", "Nothing.", 'has no "- **tool**:" bullet'],
     ["Tradeoffs for unknown concern", "#### e2e", "#### ghost", 'unknown surface concern "ghost"'],
   ]
   test.each(cases)("%s", (_name, from, to, fragment) => {
@@ -311,7 +311,7 @@ describe("staleRows", () => {
   test("covers surface rows, with the surface in the label and a file-relative line", () => {
     expect(staleRows(repo(), 20, "2026-02-01").filter((r) => r.startsWith(SURFACES))).toEqual([
       `${SURFACES}:9: web/e2e released 2026-01-07 (25 days old)`,
-      `${SURFACES}:23: api/e2e released 2026-01-08 (24 days old)`,
+      `${SURFACES}:24: api/e2e released 2026-01-08 (24 days old)`,
     ])
   })
   test("is empty when all rows are recent", () => {
@@ -366,5 +366,90 @@ describe("shared tools Maintenance and Run cells", () => {
   test("checkRepo reports a bad shared Maintenance cell", () => {
     const root = repo({ [SHARED]: [">= 0.50.0", "0.50.0"] })
     expect(reasons(root).some((r) => r.startsWith(`${SHARED}:`) && r.includes("Maintenance must be"))).toBe(true)
+  })
+})
+
+describe("tradeoff coverage", () => {
+  const cases: [string, string, string, string, string][] = [
+    ["language: Default tool", PY_TESTING, "- **pytest**: fixtures and parametrize.\n", "", 'lacks a "- **pytest**:" bullet'],
+    ["language: first alternative", PY_TESTING, "- **unittest**: standard library only.\n", "", 'lacks a "- **unittest**:" bullet'],
+    ["language: last alternative", PY_TESTING, "- **nose2**: legacy suites only.\n", "", 'lacks a "- **nose2**:" bullet'],
+    ["surface: Default tool", SURFACES, "- **playwright**: multi-browser and fast; costs a browser download.\n", "", 'lacks a "- **playwright**:" bullet'],
+    ["surface: alternative", SURFACES, "- **selenium**: runs legacy grids; slow and flaky.\n", "", 'lacks a "- **selenium**:" bullet'],
+  ]
+  test.each(cases)("%s", (_name, file, from, to, fragment) => {
+    expect(reasons(repo({ [file]: [from, to] })).some((r) => r.includes(fragment))).toBe(true)
+  })
+  test("a bullet named after the alternative, with a suffix, covers it", () => {
+    const root = repo({ [PY_TESTING]: ["- **nose2**:", "- **nose2 (legacy)**:"] })
+    expect(reasons(root)).toEqual([])
+  })
+  test("a Built-in Default needs bullets for the alternatives only", () => {
+    const root = repo({
+      [SURFACES]: [
+        "| `visual` | Built-in: playwright screenshots | - | Built-in | None |",
+        "| `visual` | Built-in: playwright screenshots | - | Built-in | `a`: x; `b`: y |",
+      ],
+    })
+    const found = reasons(root)
+    expect(found.some((r) => r.includes('need a "#### visual"'))).toBe(true)
+  })
+})
+
+describe("table shape", () => {
+  const table = (header: string, sep: string, row: string) => `## A\n\n${header}\n${sep}\n${row}\n`
+  test("an escaped pipe stays inside its cell and is unescaped", () => {
+    expect(parseTable(table("| X | Y |", "|---|---|", "| a \\| b | c |"), "A")?.rows[0]?.cells).toEqual(["a | b", "c"])
+  })
+  test("an escaped pipe in a language row does not shift cells", () => {
+    const root = repo({ [PY_TESTING]: ["Plugins that patch internals", "Plugins that a \\| b"] })
+    expect(reasons(root)).toEqual([])
+  })
+  test("a delimiter row with fewer columns than the header is rejected", () => {
+    expect(parseTable(table("| X | Y |", "|---|", "| 1 | 2 |"), "A")).toBeUndefined()
+  })
+  test("a spec table with a short delimiter row is reported", () => {
+    const root = repo({ [SPEC]: ["| Kind | Meaning |\n|---|---|", "| Kind | Meaning |\n|---|"] })
+    expect(reasons(root).some((r) => r.includes("Kinds"))).toBe(true)
+  })
+  test("a second section for the same surface is a finding", () => {
+    const root = repo({ [SURFACES]: ["## api", "## web\n\n## api"] })
+    expect(reasons(root).some((r) => r.includes('duplicate section "web"'))).toBe(true)
+  })
+})
+
+describe("main", () => {
+  const run = (argv: string[], root: string) => {
+    const out: string[] = []
+    const err: string[] = []
+    const code = main(argv, { root, today: TODAY, stdout: (s) => out.push(s), stderr: (s) => err.push(s) })
+    return { code, out, err }
+  }
+  const brokenPy = () => repo({ [PY_TESTING]: ["every-pr + diff-pr", "every-pr + yearly"] })
+  test("exits 0 and prints clean for a clean repo", () => {
+    expect(run([], repo())).toEqual({ code: 0, out: ["check-concerns: clean"], err: [] })
+  })
+  test("exits 1 with findings on stderr", () => {
+    const { code, out, err } = run([], brokenPy())
+    expect(code).toBe(1)
+    expect(out).toEqual([])
+    expect(err[0]).toContain(`${PY_TESTING}:9: unknown run token "yearly"`)
+    expect(err.at(-1)).toBe("check-concerns: 1 finding(s)")
+  })
+  test("--language reaches the checker", () => {
+    const root = brokenPy()
+    expect(run(["--language", "sh"], root).code).toBe(0)
+    expect(run(["--language", "py"], root).code).toBe(1)
+  })
+  test.each(["abc", "-1"])("invalid --max-age %s exits 2 with the message", (value) => {
+    const { code, err } = run([`--max-age=${value}`], repo())
+    expect(code).toBe(2)
+    expect(err).toEqual(["check-concerns: --max-age needs a non-negative number of days"])
+  })
+  test("--max-age reports stale rows without changing the exit status", () => {
+    const clean = run(["--max-age", "0"], repo())
+    expect(clean.code).toBe(0)
+    expect(clean.out[0]).toMatch(/^check-concerns: [1-9]\d* row\(s\) older than 0 days$/)
+    expect(run(["--max-age", "0"], brokenPy()).code).toBe(1)
   })
 })

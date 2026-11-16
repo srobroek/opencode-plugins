@@ -14,6 +14,7 @@ Checked 2026-01-10.
 
 - **pytest**: fixtures and parametrize.
 - **unittest**: standard library only.
+- **nose2**: legacy suites only.
 
 ## Language-specific
 
