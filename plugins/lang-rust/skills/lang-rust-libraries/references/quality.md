@@ -78,6 +78,8 @@ Checked 2026-11-16.
 - Review the full target and feature matrix and the lockfile, not only direct dependencies. Check supported feature and target combinations before deleting an unused-dependency finding.
 - Assign owners and expiry to suppressions, and schedule rescans.
 
+- Lint baseline rules and `clippy.toml` test exemptions are in `lang-rust-quality`; `cargo-shear` is the gate, `cargo-machete` the quick local pass (never both as gates).
+
 - Use `obi1kenobi/cargo-semver-checks-action@v2` for semver checks in CI.
 
 ## Sources

@@ -17,13 +17,14 @@ Checked 2026-11-16.
 - A dependency the request did not name needs approval, even when this guide lists it. Add only what the concern needs, not the whole stack.
 - Versions are observed major/minor lines, not upgrade instructions or compatibility guarantees. Defaults and selection rules are recommendations, not measured performance rankings.
 - Load `toolchain-api` for API style, standards and contract tooling. Load `quality-code-design`'s `middleware.md` and `telemetry.md` for shared design rules. Use `aws-guidance` for Lambda architecture.
+- Crate layout and shared-helper rules are in `lang-rust-packaging`; the lint baseline is in `lang-rust-quality`.
 - Commands belong in `lang-rust-quality` and `lang-rust-testing`. Desktop/Tauri details belong in `lang-rust-tauri`.
 
 ## Default stack
 
 | Concern | Default | Notes |
 | --- | --- | --- |
-| Toolchain | Rust `>= 1.100`, edition `2024` | Declare library MSRV independently. |
+| Toolchain | Stable Rust, edition `2024` | State the pin and MSRV policy in `docs/engineering.md`; declare library MSRV independently. |
 | Async I/O | `tokio` `>= 1.54` | LTS is a separate choice; sync for sequential tools. |
 | CPU work | `rayon` `>= 1.12` | Bound work submitted from async handlers. |
 | HTTP service | `axum` `>= 0.8` | Native Tower composition. |
@@ -68,6 +69,7 @@ Checked 2026-11-16.
 | [ai.md](references/ai.md) | MCP, LLM SDKs, provider abstraction and GenAI telemetry |
 | [cli.md](references/cli.md) | CLI, prompts, terminal output and settings |
 | [testing.md](references/testing.md) | Test runner, property, fuzz, mutation, coverage, integration, load and benchmark tools |
+| [standards.md](references/standards.md) | Checkable rules: errors, rendering, logging, user-facing strings, clap, Rust version line |
 | [quality.md](references/quality.md) | Lint, format, memory safety, dependency audit, API breaks and docs |
 | [security.md](references/security.md) | Crypto, secrets, input controls and supply-chain scanners |
 | [runtime.md](references/runtime.md) | Runtime/error comparisons, builds, resilience, concurrency and utilities |

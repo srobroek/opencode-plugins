@@ -33,6 +33,8 @@ break, usually revealing an isolation bug. Shared files, ports, and databases st
 need isolation. Keep retries off by default. Use plain `cargo test` only when nextest
 cannot be installed.
 
+Unused-dependency tools: keep both `cargo-shear` and `cargo-machete` in view and say which one a project runs. Use `cargo-shear` (AST-based, understands features and workspaces, can fix) as the gate. Use `cargo-machete` (regex, no build) for a quick local pass on a large tree or where shear is not installable, and accept its false positives; sources: [cargo-shear](https://github.com/Boshen/cargo-shear), [cargo-machete](https://github.com/bnjbvr/cargo-machete). Never gate on both.
+
 Keep the scaffold's configured deny gate: deny covers advisories, licences, bans and
 sources. Unused dependencies use one tool (`cargo-shear` by default, `cargo-machete` for
 speed, nightly `cargo-udeps` for accuracy); they do not replace rustc `dead_code`
@@ -71,3 +73,16 @@ invent extra linters.
 In OpenCode, the rust plugin refuses edits to a committed migration: only the
 highest-numbered entry under a `migrations/` directory is editable. Write a new
 migration instead.
+
+## Lint baseline
+
+- **Rule:** in `[workspace.lints.clippy]` set `pedantic = { level = "warn", priority = -1 }` and add restriction lints deliberately: `unwrap_used`, `expect_used`, `panic`, `clippy::todo`, `unimplemented`, `dbg_macro`, `print_stdout` and `print_stderr` (libraries), `allow_attributes_without_reason`, `undocumented_unsafe_blocks`, `clone_on_ref_ptr`, and `indexing_slicing` and `string_slice` in code that parses untrusted text. Enable `nursery` lints one by one, never as a group. CI runs clippy with `-D warnings`.
+- **Rule:** `#[allow]` and `#[expect]` need `reason = "..."`, and only where the lint blocks. Prefer `#[expect]`, which warns when it is no longer needed. Never allow a lint crate-wide to silence new code.
+- **Rule:** exempt tests in `clippy.toml` (`allow-unwrap-in-tests`, `allow-expect-in-tests`, `allow-panic-in-tests`, `allow-indexing-slicing-in-tests`, `allow-dbg-in-tests`, `allow-print-in-tests`), not with attributes.
+- **Rule:** a rollout with a large backlog may use crate-level allows marked `TEMPORARY`, each with a `reason` naming a tracked task; new code never grows them and the count only falls.
+- **Note:** `missing_docs_in_private_items` is usually too noisy; use `missing_docs` for published libraries (see `lang-rust-libraries`' `references/quality.md`).
+- **Why:** the restriction lints turn the error, logging and panic rules into compiler output; a reason makes each exception reviewable, and a tracked task keeps a migration from becoming permanent.
+- **Source:** [Clippy lint groups](https://doc.rust-lang.org/clippy/lints.html), [Clippy configuration](https://doc.rust-lang.org/clippy/configuration.html), [lint attributes and `reason`](https://doc.rust-lang.org/reference/attributes/diagnostics.html#lint-check-attributes), [Cargo `[lints]`](https://doc.rust-lang.org/cargo/reference/manifest.html#the-lints-section).
+- **Review check:** any of these: an `allow` or `expect` without a reason, a crate-level allow not marked `TEMPORARY` with a task or one that grew, an unwrap or index in a parser, a missing `-D warnings`, test exemptions set with attributes.
+
+Error, logging, strings and command-line rules: `lang-rust-libraries`' `references/standards.md`. Crate layout rules: `lang-rust-packaging`.

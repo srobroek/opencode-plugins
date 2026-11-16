@@ -132,3 +132,9 @@ impl Quotes for StubQuotes {
 ```
 
 Consumers take `impl Quotes` (or `&dyn Quotes`); a swap changes the constructor call. See [contracts.md](contracts.md).
+
+## Contract types and untrusted input
+
+**Do:** mark public contract types (errors, config, events, wire structs) `#[non_exhaustive]`, and return a typed error for any value that comes from untrusted input. **Do not:** `unwrap()` or `expect()` such a value, or copy a helper into a second crate.
+
+Why: a new variant or field must not break dependants, and a panic on untrusted input is a remote crash. The checkable rules, sources and review checks are in `lang-rust-libraries`' `references/standards.md`, `lang-rust-packaging` (shared helpers, one theme per crate) and `lang-rust-quality` (lint baseline).

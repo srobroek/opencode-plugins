@@ -33,7 +33,7 @@ No representative error-overhead comparison was verified; measure backtraces, at
 
 | Concern | Default | Use instead when | Avoid (why) |
 | --- | --- | --- | --- |
-| Toolchain/edition | Stable Rust `>= 1.100`, edition `2024` | Edition `2021` for MSRV below `1.85` | Edition mistaken for dependency MSRV; untested declared `rust-version`. |
+| Toolchain/edition | Stable Rust, edition `2024`, a stated MSRV policy | Edition `2021` for MSRV below `1.85` | Edition mistaken for dependency MSRV; untested declared `rust-version`. |
 | Packaging/workspaces | Cargo workspace, explicit feature/target matrix | Separate crates for real public responsibility boundaries | Extra framework/DI containers for basic construction; use `lang-rust-packaging`. |
 | Build caching | `sccache` `>= 0.19`; `cargo-chef` `>= 0.1` for container dependency layers | Existing CI cache recipe | Machine-wide target directories; cache keys ignoring toolchain/features/targets. |
 | Cross builds | `cargo-zigbuild` `>= 0.24` when linker portability fits | `cross` `>= 0.2` container workflow | Musl assumed automatically fully static; unverified native libraries/TLS roots/DNS/runtime files. |
@@ -61,7 +61,7 @@ No representative error-overhead comparison was verified; measure backtraces, at
 
 - Pin toolchains and dependencies, test MSRV and target/features independently, and audit the resolved graph. Recent release activity is not a maintenance SLA.
 - Propagate deadlines/cancellation; bound retries and blocking/CPU tasks. Treat backpressure as part of the API.
-- Keep typed domain errors; install global runtime/subscriber only in binaries. Native plugins need an explicit stable ABI, not assumptions about Rust ABI.
+- Error, logging and string rules with review checks are in [standards.md](standards.md). Keep typed domain errors; install global runtime/subscriber only in binaries. Native plugins need an explicit stable ABI, not assumptions about Rust ABI.
 - Build/deployment commands stay in `lang-rust-quality`, `lang-rust-ci` and `lang-rust-packaging`; desktop details stay in `lang-rust-tauri`.
 
 ## Sources

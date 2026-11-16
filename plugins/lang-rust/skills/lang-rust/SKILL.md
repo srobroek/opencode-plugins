@@ -20,6 +20,8 @@ skill, not from this table.
 | Tauri v2 desktop apps: bundles, release-please, updater, signing, WebDriver E2E | `lang-rust-tauri` |
 | Rust profilers and benchmarks: samply, cargo flamegraph, perf, criterion | `lang-rust-profiling` |
 
+Rules with review checks: errors, logging, user-facing strings and the command line are in `lang-rust-libraries`' `references/standards.md`; shared helpers and one theme per crate in `lang-rust-packaging`; the lint baseline in `lang-rust-quality`.
+
 Rust design is the `quality-code-design` skill: its `rust.md` reference covers error
 enums, newtypes and serde wrappers; `contracts.md` generated bindings, invoke names and
 wire casing; `safe-mutation.md` plan/approve/apply flows.
