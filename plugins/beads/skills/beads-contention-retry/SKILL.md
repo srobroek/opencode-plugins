@@ -13,59 +13,68 @@ metadata:
 - `lock already held by another process`
 - `workspace gate busy`
 
-Any of these is contention, not a failure. The embedded store is single-writer by design
-and takes a cooperative gate that ordinary commands share and maintenance takes
-exclusively, so a concurrent writer is the expected case, not a defect.
+Any of these is contention, not a failure. The embedded store is single-writer by design.
+Ordinary commands share a cooperative gate. Maintenance takes the gate exclusively.
+A concurrent writer is therefore the expected case, not a defect.
 
-MUST wait briefly and retry the same command, up to three attempts, then report
-what still failed. NEVER escalate it, NEVER report the run as blocked on it, and
-NEVER work around it. Agents MUST NOT build their own serialization, wrapper,
-mutex, or retry helper; the beads plugin's embedded-write lock already serializes writes.
+When you see one of these messages, MUST wait briefly and retry the same command, up to three attempts. Then report what still failed.
+
+- NEVER escalate it.
+- NEVER report the run as blocked on it.
+- NEVER work around it.
+
+Agents MUST NOT build their own serialization. Agents MUST NOT build a wrapper, a mutex, or a retry helper. The beads plugin's embedded-write lock already serializes writes.
 Nothing about the store needs changing.
 
 NEVER treat `warning: workspace gate unavailable, continuing ungated` or
 `warning: workspace gate acquisition failed, continuing ungated` as contention.
-Those commands RAN; retrying repeats work that already happened.
+Those commands RAN. Retrying repeats work that already happened.
 
-A message not on this list is a different problem: report it verbatim rather than
+A message not on this list is a different problem. Report it verbatim rather than
 retrying it, so whatever it actually is gets seen.
 
 ## Remote sync
 
 `bd dolt pull` and `bd dolt push` are persistence, never a mutex. Never use a sync
-to serialise writers; contention is handled above.
+to serialize writers. The section above covers contention.
 
 MUST bound each `bd dolt pull` or `bd dolt push` attempt to 180 seconds (or a
-shorter caller deadline), then retry the same command up to three attempts with
-a brief wait. A killed or timed-out attempt is reported verbatim as the failed
-attempt; do not assume the remote state until a subsequent retry completes.
-A sync that fails three times is reported, not worked around: NEVER fall back to
-a manual `dolt` invocation, NEVER start a server, and NEVER continue as though
-the remote were current.
-After the retry sequence, MUST re-run `bd dolt pull` before trusting a read that
-decides work assignment, because a partially applied sync leaves reads stale.
+shorter caller deadline). Then retry the same command, up to three attempts, with
+a brief wait.
+
+When an attempt times out or the caller kills it, report it verbatim as the failed
+attempt. Do not assume the remote state until a later retry completes.
+
+When a sync fails three times, report it. Do not work around it:
+
+- NEVER fall back to a manual `dolt` invocation.
+- NEVER start a server.
+- NEVER continue as though the remote were current.
+
+After the retry sequence, a partially applied sync leaves reads stale. Before you trust a read that
+decides work assignment, MUST re-run `bd dolt pull`.
 
 ## Remote-sync diagnosis and probe
 
 The observed multi-minute stalls are in the Dolt remote/conjoin path, not the
-embedded writer lock: the lock deliberately excludes `bd dolt push` from its
+embedded writer lock. The lock deliberately excludes `bd dolt push` from its
 serialized operation set, so waiting for that lock cannot make a push complete.
-The local-file-remote probe below reproduced the important failure boundary and
-established the recovery invariant without depending on a hosted service:
+The local-file-remote probe below reproduced the important failure boundary.
+It also established the recovery invariant without depending on a hosted service:
 
-- A scratch embedded ledger was configured with `file:///private/tmp/omp-g3dl-remote-w2`.
-- With a pending issue, a `bd dolt push` child was terminated with `SIGTERM`; the
-  exact observed result was `exit=-15`, with empty stdout and stderr.
+- The probe configured a scratch embedded ledger with `file:///private/tmp/omp-g3dl-remote-w2`.
+- With a pending issue, the probe terminated a `bd dolt push` child with `SIGTERM`.
+  The exact observed result was `exit=-15`, with empty stdout and stderr.
 - Retrying the same `bd dolt push` completed with `Push complete.`
-- A fresh Dolt clone of that remote, followed by `dolt pull origin main`, showed
-  both `probe-bgl | consistency probe` and `probe-r74 | retry consistency probe`.
+- The probe made a fresh Dolt clone of that remote and ran `dolt pull origin main`.
+  The result showed both `probe-bgl | consistency probe` and `probe-r74 | retry consistency probe`.
 
-Therefore a killed or timed-out push leaves the remote state unknown until the
-same command succeeds on retry; after success, a fresh clone is the consistency
-check. This is a probe result, not a claim that every hosted-remote stall has
+A killed or timed-out push leaves the remote state unknown until the
+same command succeeds on retry. After success, a fresh clone is the consistency
+check. This is a probe result. It is not a claim that every hosted-remote stall has
 the same transport-level cause.
 
-The messages listed at the top are observed contention text only. No `bd dolt` failure
-text is matched here, because none has been observed in this project; the sync
+This project records only the contention messages listed at the top. It holds no record of `bd dolt` failure
+text, so this skill matches none. The sync
 policy is therefore prose the agent applies after reading the command's own
-output, not a pattern this skill claims to detect.
+output. It is not a pattern this skill claims to detect.
