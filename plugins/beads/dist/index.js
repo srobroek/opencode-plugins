@@ -3949,9 +3949,10 @@ function claimLookups(command, cwd, env, output, invocations, injected) {
     if (target.ambiguous === true)
       continue;
     const candidates = new Set;
-    const override = transitionFlags(invocation.args).actorOverride;
-    const explicit = override !== undefined && override !== "" || globalValue(invocation.globals, ["--actor"]) !== undefined || invocation.prefix.some((token) => /^(BEADS_ACTOR|BD_ACTOR)=/.test(token));
-    for (const actor of explicit ? [override, invocationActor(invocation, env)] : [injected, invocationActor(invocation, env), ...invocation.conditional])
+    const flagActor = transitionFlags(invocation.args).actorOverride ?? globalValue(invocation.globals, ["--actor"]);
+    const ownPrefix = invocation.prefix.some((token) => /^(BEADS_ACTOR|BD_ACTOR)=/.test(token));
+    const possible = flagActor !== undefined ? [/[$`\\\0]/.test(flagActor) ? undefined : flagActor.trim()] : ownPrefix ? [invocationActor(invocation, env)] : [injected, invocationActor(invocation, env), ...invocation.conditional];
+    for (const actor of possible)
       if (actor !== undefined && actor !== null && actor !== "")
         candidates.add(actor);
     const plan = planned.get(invocationSignature(invocation));

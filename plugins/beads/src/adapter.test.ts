@@ -3,7 +3,8 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { bdInvocations } from "./bd-actor-gate.ts"
-import { CONTENTION_ADVISORY, claimLookups, contentionAdvisory, readClaimState, recordClaimTransitions } from "./claims.ts"
+import { CONTENTION_ADVISORY, claimLookups, contentionAdvisory, readClaimHolders, readClaimState, recordClaimTransitions } from "./claims.ts"
+import type { BdRun } from "./gate-admission.ts"
 import { agentActor, blockReason, gateEnabled, sessionChain, shellInput } from "./host.ts"
 import { closeInvocations, parse, parsedInvocations } from "./shell.ts"
 import { fixtureHolders } from "./test-support.ts"
@@ -153,5 +154,23 @@ describe("claim holder candidates", () => {
     const command = "if true; then export BEADS_ACTOR=B; fi; bd update proj-1 --claim --actor A; bd update proj-1 --assignee B"
     const [lookup] = claimLookups(command, "/repo", {}, "Claimed proj-1", bdInvocations(command), "B")
     expect([...(lookup?.candidates ?? [])]).toEqual(["A"])
+  })
+})
+
+describe("claim holder confirmation", () => {
+  test.each([
+    ["a post-verb --actor", "BEADS_ACTOR=B bd update proj-1 --claim --actor A; bd update proj-1 --assignee B"],
+    ["a post-verb --actor= form", "BEADS_ACTOR=B bd update proj-1 --claim --actor=A; bd update proj-1 --assignee B"],
+  ])("%s outranks the prefix actor, so a handoff to the prefix actor is not tracked", async (_name, command) => {
+    const asked: string[][] = []
+    const run: BdRun = async (_cwd, args) => {
+      asked.push(args)
+      return { output: JSON.stringify([{ id: "proj-1", assignee: "B" }]) }
+    }
+    const lookups = claimLookups(command, "/repo", {}, "Claimed proj-1", bdInvocations(command), "B")
+    expect(lookups.map((lookup) => [...lookup.candidates])).toEqual([["A"]])
+    const holders = await readClaimHolders(lookups, {}, run, Date.now() + 1000)
+    expect(asked.length).toBe(1)
+    expect(holders.size).toBe(0)
   })
 })
