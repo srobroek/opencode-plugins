@@ -423,6 +423,14 @@ describe("tradeoff coverage", () => {
     const root = repo({ [PY_TESTING]: ["- **pytest**:", "- **pytest** (plugins):"] })
     expect(reasons(root)).toEqual([])
   })
+  test.each([
+    ["no bullet for it", "- **unittest**:", "- **unittest**:", true],
+    ["its own bullet", "- **unittest**:", "- **node:test**:", false],
+  ])("a backticked alternative name with a colon, %s", (_, from, to, missing) => {
+    const root = repo({ [PY_TESTING]: ["`unittest`: no dependencies allowed", "`node:test`: no dependencies allowed"] })
+    root.set(PY_TESTING, (root.get(PY_TESTING) ?? "").replace(from, to))
+    expect(reasons(root).some((r) => r.includes('lacks a "- **node:test**:" bullet'))).toBe(missing)
+  })
   test("a Built-in Default needs bullets for the alternatives only", () => {
     const root = repo({
       [SURFACES]: [

@@ -467,7 +467,13 @@ const tradeoffMap = (sections: TradeoffSection[]) => new Map(sections.map((s) =>
 const toolKey = (name: string) => unticked(name).toLowerCase()
 
 /** Tool names before the first `:` of each Alternatives item. */
-const alternativeNames = (cell: string) => cell.split(";").map((i) => toolKey(i.slice(0, i.indexOf(":"))))
+/** Each alternative's name: its leading code span, else the text before the first colon (as ALTERNATIVE reads it). */
+const alternativeNames = (cell: string) =>
+  cell.split(";").map((i) => {
+    const item = i.trim()
+    const span = /^`([^`]+)`/.exec(item)
+    return toolKey(span ? (span[1] ?? "") : item.slice(0, item.indexOf(":")))
+  })
 
 /** Tools a Tradeoffs entry must cover but has no bullet for: the Default tool and every alternative. */
 function missingTradeoffTools(section: TradeoffSection, def: string, alts: string): string[] {
