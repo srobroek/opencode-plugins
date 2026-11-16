@@ -521,7 +521,10 @@ export function createLanes(
   const markResumed = async (child: string) => {
     const lane = await load(child)
     if (lane?.state !== "active") return
-    await save({ ...lane, resumedAt: now(), quietSince: undefined })
+    // Waits for a removal already under way, and fences any that collected its facts before this.
+    await lifecycle.noteResume(lane.directory)
+    const fresh = (await load(child)) ?? lane
+    if (fresh.state === "active") await save({ ...fresh, resumedAt: now(), quietSince: undefined })
   }
 
   const retire = async (lane: Lane, state: "removed" | "merged" | "landed") => {

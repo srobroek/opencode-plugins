@@ -6,6 +6,7 @@ import {
   type LaneEvent,
   type LaneFacts,
   type LanePolicy,
+  laneBackgroundWork,
   laneEventAction,
   outcomeNotice,
   stateToken,
@@ -79,8 +80,8 @@ describe("laneEventAction", () => {
   }
 
   test.each([
-    ["failed", child("failed"), facts(), { outcome: { kind: "failed" as const, at: 5, reason: "x" } }, "parent:failed:5"],
-    ["interrupted", child("interrupted"), facts({ dirty: true, dirtyToken: "d1" }), { outcome: { kind: "interrupted" as const, at: 6, reason: "x" } }, "parent:interrupted:6"],
+    ["failed", child("failed"), facts(), { outcome: { kind: "failed" as const, at: 5, reason: "x", id: "e1" } }, "parent:failed:e1"],
+    ["interrupted", child("interrupted"), facts({ dirty: true, dirtyToken: "d1" }), { outcome: { kind: "interrupted" as const, at: 6, reason: "x", id: "e2" } }, "parent:interrupted:e2"],
     ["succeeded dirty", child("succeeded"), facts({ dirty: true, dirtyToken: "d1" }), {}, "child:dirty:d1"],
     ["landed dirty", parent, facts({ landed: true, dirty: true, dirtyToken: "d1" }), {}, "landed-dirty:d1"],
   ])("a repeated %s event produces no second notice", (_name, event, given, extra, key) => {
@@ -182,5 +183,44 @@ describe("idleGateAction", () => {
     const gate = idleGateAction(session(), [own, led()], policy)
     expect(gate.message).toContain("Commit your work")
     expect(gate.message).not.toContain("unresolved")
+  })
+})
+
+describe("laneBackgroundWork", () => {
+  const target = { child: "ses_c", directory: "/wt/a" }
+  const never = () => false
+  const rows: Array<[string, Parameters<typeof laneBackgroundWork>[1], (id: string) => boolean | undefined, string]> = [
+    ["no jobs", [], never, ""],
+    ["a job of another session", [{ kind: "shell", sessionID: "ses_other", command: "sleep 9" }], never, ""],
+    ["a shell the child owns", [{ kind: "shell", sessionID: "ses_c", command: "sleep 9" }], never, "child has a shell"],
+    ["a subagent the child started", [{ kind: "subagent", sessionID: "ses_c", childSessionID: "ses_g" }], never, "child has a subagent"],
+    ["the child itself listed as a subagent", [{ kind: "subagent", sessionID: "ses_p", childSessionID: "ses_c" }], never, "child has a subagent"],
+    ["an image job of the child", [{ kind: "image", sessionID: "ses_c" }], never, "child has a image"],
+    ["a descendant's shell", [{ kind: "shell", sessionID: "ses_g", command: "x" }], (id) => id === "ses_g", "descendant"],
+    ["a session that cannot be placed", [{ kind: "shell", sessionID: "ses_q", command: "x" }], () => undefined, "could not be placed"],
+    ["a shell whose command names the lane", [{ kind: "shell", sessionID: "ses_p", command: "cd /wt/a && make" }], never, "running in the lane"],
+  ]
+  for (const [name, jobs, descendant, reason] of rows) {
+    test(name, () => {
+      const result = laneBackgroundWork(target, jobs, descendant)
+      if (reason === "") expect(result).toBeUndefined()
+      else expect(result).toContain(reason)
+    })
+  }
+})
+
+describe("idleGateAction with the child's real status", () => {
+  const session = { id: "ses_p", runningChildren: new Set<string>(), now: NOW, lastMessageAt: undefined }
+  test("a landed clean lane whose child status is unknown is not removed", () => {
+    const gate = idleGateAction(session, [{ lane: lane(), facts: facts({ landed: true, child: "unknown" }) }], policy)
+    expect(gate.remove).toEqual([])
+  })
+  test("an unresolved lane is not announced as finished while the child's status is unknown", () => {
+    const gate = idleGateAction(session, [{ lane: lane(), facts: facts({ child: "unknown" }) }], policy)
+    expect(gate.message).toBeUndefined()
+  })
+  test("a landed clean lane whose child is running is not removed", () => {
+    const gate = idleGateAction(session, [{ lane: lane(), facts: facts({ landed: true, child: "running" }) }], policy)
+    expect(gate.remove).toEqual([])
   })
 })

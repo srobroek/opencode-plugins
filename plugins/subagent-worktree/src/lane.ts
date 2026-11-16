@@ -82,7 +82,7 @@ export type Lane = {
   /** The head of a PR `delivery_land` merged from this lane, when its cleanup was deferred. */
   landedHead?: string
   /** How the child's last execution ended, when it did not succeed. */
-  outcome?: { kind: "failed" | "interrupted"; at: number; reason: string }
+  outcome?: { kind: "failed" | "interrupted"; at: number; reason: string; id: string }
   /** Since when the child and parent have been idle with the lane still empty. */
   quietSince?: number
   /** Keys of the notices already sent about this lane, so none repeats. */

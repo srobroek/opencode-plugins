@@ -10,6 +10,7 @@ const REPO = "/repo"
 const WT = "/wt/lane-a"
 const BASE = "b".repeat(40)
 const TIP = "t".repeat(40)
+const TIP2 = "u".repeat(40)
 const NOW = 100_000_000
 
 type World = {
@@ -24,6 +25,16 @@ type World = {
   exists: boolean
   now: number
   age: number | undefined
+  /** HEAD of the worktree, and what `refs/heads/lane-a` points at. */
+  head: string
+  branchOid: string
+  /** The worktree is on its branch (not detached). */
+  onBranch: boolean
+  /** Heads `wt list` reports as integrated. */
+  integratedHeads: string[]
+  updateRefFails: boolean
+  /** Called with every git command before it is answered. */
+  onGit?: (cmd: string) => Promise<void> | void
 }
 
 type Fake = ReturnType<typeof createFakeContext>
@@ -49,11 +60,18 @@ function runner(world: World, log: string[][]) {
       if (argv.includes("merged")) return ok(JSON.stringify(world.mergedHeads.map((headRefOid) => ({ headRefOid }))))
       return ok(JSON.stringify(world.openBranches.map((headRefName) => ({ headRefName }))))
     }
-    if (argv[0] === "wt") return { code: 127, stdout: "", stderr: "not installed" }
+    if (argv[0] === "wt") {
+      const items = world.integratedHeads.map((sha) => ({ branch: "lane-a", head: { sha }, display: { state: "integrated" } }))
+      return ok(JSON.stringify({ items }))
+    }
     const cmd = argv.slice(3).join(" ")
+    await world.onGit?.(cmd)
     if (cmd.startsWith("rev-list --count")) return ok(`${world.ahead}\n`)
     if (cmd === "status --porcelain") return ok(world.porcelain)
-    if (cmd.startsWith("rev-parse --verify --quiet HEAD")) return ok(`${TIP}\n`)
+    if (cmd.startsWith("rev-parse --verify --quiet HEAD")) return ok(`${world.head}\n`)
+    if (cmd.startsWith("rev-parse --verify --quiet refs/heads/")) return ok(`${world.branchOid}\n`)
+    if (cmd === "symbolic-ref --quiet --short HEAD") return world.onBranch ? ok("lane-a\n") : { code: 1, stdout: "", stderr: "" }
+    if (cmd.startsWith("update-ref -d")) return { code: world.updateRefFails ? 1 : 0, stdout: "", stderr: "" }
     if (cmd.startsWith("merge-base --is-ancestor")) return { code: world.ancestor, stdout: "", stderr: "" }
     if (cmd === "rev-parse --absolute-git-dir") return ok("/nonexistent/gitdir\n")
     if (cmd.startsWith("stash list")) return ok("")
@@ -75,6 +93,11 @@ async function start(
     exists: true,
     now: NOW,
     age: undefined,
+    head: TIP,
+    branchOid: TIP,
+    onBranch: true,
+    integratedHeads: [],
+    updateRefFails: false,
     ...world,
   }
   const fake = createFakeContext({
@@ -206,7 +229,8 @@ describe("execution events", () => {
       ["refresh", undefined],
     ])
     expect(stored(fake).state).toBe("landed")
-    expect(log.some((argv) => argv.includes("branch") && argv.includes("-D"))).toBe(true)
+    expect(log).toContainEqual(["git", "-C", REPO, "update-ref", "-d", "refs/heads/lane-a", TIP])
+    expect(log.some((argv) => argv.includes("-D"))).toBe(false)
     await cleanup()
   })
 
@@ -330,7 +354,7 @@ describe("the sweep", () => {
       { method: "remove", input: { projectID: "prj", directory: WT, force: false } },
       { method: "refresh", input: { projectID: "prj" } },
     ])
-    expect(log.some((argv) => argv.includes("branch") && argv.includes("-D") && argv.includes("lane-a"))).toBe(true)
+    expect(log).toContainEqual(["git", "-C", REPO, "update-ref", "-d", "refs/heads/lane-a", TIP])
     expect(stored(fake).state).toBe("landed")
     await cleanup()
   })
@@ -378,6 +402,324 @@ describe("the background sweep", () => {
     fake.emit({ type: "session.created", data: { sessionID: "ses_new" } })
     await settle(50)
     expect(fake.storage.has("sweep/at/prj")).toBe(false)
+    await cleanup()
+  })
+})
+
+describe("the branch is deleted only for the commit the proof covered", () => {
+  const idleParent = async (fake: Fake) => {
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle()
+  }
+  const refDeletes = (log: string[][]) => log.filter((argv) => argv.includes("update-ref"))
+
+  test("a detached HEAD at the landed commit removes the worktree but keeps the branch", async () => {
+    const { fake, worktree, log, cleanup } = await start({ ancestor: 0, onBranch: false })
+    await idleParent(fake)
+    expect(worktree[0]?.method).toBe("remove")
+    expect(refDeletes(log)).toEqual([])
+    await cleanup()
+  })
+
+  test("a branch that no longer points at the proven commit blocks the removal", async () => {
+    const { fake, worktree, log, cleanup } = await start({ ancestor: 0, branchOid: TIP2 })
+    await idleParent(fake)
+    expect(worktree).toEqual([])
+    expect(refDeletes(log)).toEqual([])
+    await cleanup()
+  })
+
+  test("a ref that moves between the check and the delete is not force-deleted", async () => {
+    const { fake, worktree, log, cleanup } = await start({ ancestor: 0, updateRefFails: true })
+    await idleParent(fake)
+    expect(worktree[0]?.method).toBe("remove")
+    expect(refDeletes(log)).toEqual([["git", "-C", REPO, "update-ref", "-d", "refs/heads/lane-a", TIP]])
+    expect(log.some((argv) => argv.includes("-D") || argv.includes("--force"))).toBe(false)
+    await cleanup()
+  })
+})
+
+describe("every removal is revalidated when it is applied", () => {
+  test("a cached integrated branch with a new commit is kept", async () => {
+    const { fake, state, worktree, log, cleanup } = await start({
+      integratedHeads: [TIP],
+      time: { [CHILD]: { busy: 5, idle: 2 } },
+    })
+    // The child is running: facts are collected (and the proofs cached) but nothing is removed.
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle()
+    expect(worktree).toEqual([])
+    const session = fake.sessions.get(CHILD)
+    if (session) session.time = { busy: 1, idle: 2 }
+    state.head = TIP2
+    state.branchOid = TIP2
+    state.now += 10_000
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle()
+    expect(worktree).toEqual([])
+    expect(log.filter((argv) => argv[0] === "wt")).toHaveLength(1)
+    await cleanup()
+  })
+
+  test("a commit that lands after the facts were read blocks the removal", async () => {
+    const { fake, state, worktree, cleanup } = await start({ ancestor: 0 })
+    state.onGit = (cmd) => {
+      if (cmd.startsWith("stash list")) state.head = TIP2
+    }
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle()
+    expect(worktree).toEqual([])
+    await cleanup()
+  })
+
+  test("a tree that became dirty after the facts were read blocks the removal", async () => {
+    const { fake, state, worktree, cleanup } = await start({ ancestor: 0 })
+    let reads = 0
+    state.onGit = (cmd) => {
+      if (cmd === "status --porcelain" && ++reads === 2) state.porcelain = " M late.txt\n"
+    }
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle()
+    expect(worktree).toEqual([])
+    await cleanup()
+  })
+})
+
+describe("the idle gate reads every kind of background job", () => {
+  const idle = (fake: Fake, background: unknown[]) => fake.fire.session("experimental.idle", { sessionID: PARENT, background } as never)
+
+  test("a clean landed lane whose child runs a shell is deferred", async () => {
+    const { fake, worktree, cleanup } = await start({ ancestor: 0 })
+    await idle(fake, [{ kind: "shell", sessionID: CHILD, shellID: "sh", command: "sleep 30" }])
+    expect(worktree).toEqual([])
+    await cleanup()
+  })
+
+  test("a shell a descendant of the child runs defers it too", async () => {
+    const { fake, worktree, cleanup } = await start({ ancestor: 0 })
+    fake.sessions.set("ses_grand", { id: "ses_grand", parentID: CHILD, projectID: "prj", location: { directory: WT } })
+    await idle(fake, [{ kind: "shell", sessionID: "ses_grand", shellID: "sh", command: "sleep 30" }])
+    expect(worktree).toEqual([])
+    await cleanup()
+  })
+
+  test("a shell whose command works in the lane directory defers it", async () => {
+    const { fake, worktree, cleanup } = await start({ ancestor: 0 })
+    await idle(fake, [{ kind: "shell", sessionID: PARENT, shellID: "sh", command: `cd ${WT} && make` }])
+    expect(worktree).toEqual([])
+    await cleanup()
+  })
+
+  test("an unknown child status defers it", async () => {
+    const { fake, worktree, cleanup } = await start({ ancestor: 0 })
+    const session = fake.context.session as unknown as { get: (input: { sessionID: string }) => Promise<unknown> }
+    const original = session.get.bind(session)
+    session.get = (input) => (input.sessionID === CHILD ? Promise.reject(new Error("lookup failed")) : original(input))
+    await idle(fake, [])
+    expect(worktree).toEqual([])
+    await cleanup()
+  })
+
+  test("with no job and a finished child it is removed", async () => {
+    const { fake, worktree, cleanup } = await start({ ancestor: 0 })
+    fake.sessions.set("ses_unrelated", { id: "ses_unrelated", projectID: "prj", location: { directory: REPO } })
+    await idle(fake, [{ kind: "shell", sessionID: "ses_unrelated", shellID: "sh", command: "ls" }])
+    expect(worktree[0]?.method).toBe("remove")
+    await cleanup()
+  })
+})
+
+describe("a resume fences a removal", () => {
+  test("a resume while the facts are being collected cancels the removal", async () => {
+    const { fake, state, worktree, cleanup } = await start({ ancestor: 0 })
+    let resumed = false
+    state.onGit = async (cmd) => {
+      if (cmd === "status --porcelain" && !resumed) {
+        resumed = true
+        await fake.fire.tool("execute.before", {
+          tool: "subagent",
+          sessionID: PARENT,
+          agent: "build",
+          messageID: "m",
+          id: "call",
+          input: { agent: "general", prompt: "follow up", sessionID: CHILD },
+        } as never)
+      }
+    }
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle()
+    expect(resumed).toBe(true)
+    expect(worktree).toEqual([])
+    expect(stored(fake).state).toBe("active")
+    await cleanup()
+  })
+
+  test("without a resume the same pass removes it", async () => {
+    const { fake, worktree, cleanup } = await start({ ancestor: 0 })
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle()
+    expect(worktree[0]?.method).toBe("remove")
+    await cleanup()
+  })
+})
+
+describe("holds from other integrations survive", () => {
+  test("a hold already on the input is kept and the lane's is appended once", async () => {
+    const { fake, cleanup } = await start({ time: { [CHILD]: { busy: 5, idle: 2 } } })
+    const event = {
+      tool: "delivery_land",
+      sessionID: PARENT,
+      agent: "a",
+      messageID: "m",
+      id: "c",
+      input: { pr: 7, cleanupHold: [{ directory: "/wt/other", reason: "mine" }, { directory: WT, reason: "already held" }] },
+    }
+    await fake.fire.tool("execute.before", event as never)
+    expect((event.input as { cleanupHold: unknown }).cleanupHold).toEqual([
+      { directory: "/wt/other", reason: "mine" },
+      { directory: WT, reason: "already held" },
+    ])
+    await cleanup()
+  })
+
+  test("a lane that no hold covers is appended to the existing ones", async () => {
+    const { fake, cleanup } = await start({ time: { [CHILD]: { busy: 5, idle: 2 } } })
+    const event = {
+      tool: "delivery_land",
+      sessionID: PARENT,
+      agent: "a",
+      messageID: "m",
+      id: "c",
+      input: { pr: 7, cleanupHold: [{ directory: "/wt/other", reason: "mine" }] },
+    }
+    await fake.fire.tool("execute.before", event as never)
+    expect((event.input as { cleanupHold: unknown }).cleanupHold).toEqual([
+      { directory: "/wt/other", reason: "mine" },
+      { directory: WT, reason: "lane lane-a still active" },
+    ])
+    await cleanup()
+  })
+})
+
+describe("the sweep fails closed on ownership", () => {
+  const sweepWith = async (list: (query: Record<string, unknown>) => Promise<unknown>) => {
+    const { fake, worktree, cleanup } = await start({ ancestor: 0, age: 3 * 24 * 3_600_000 })
+    ;(fake.context.session as unknown as { list: unknown }).list = list
+    const execute = fake.tools.get("subagent_worktree_sweep")?.execute as (i: unknown, c: unknown) => Promise<{ metadata: { plan: Array<{ verdict: string; reason: string }> } }>
+    const result = await execute({ mode: "prune" }, tool)
+    await cleanup()
+    return { plan: result.metadata.plan, worktree }
+  }
+
+  test("a lookup error keeps the worktree", async () => {
+    const { plan, worktree } = await sweepWith(async () => {
+      throw new Error("boom")
+    })
+    expect(plan[0]).toMatchObject({ verdict: "keep", reason: "owner unknown" })
+    expect(worktree).toEqual([])
+  })
+
+  test("an owner on the second page keeps the worktree", async () => {
+    const { plan, worktree } = await sweepWith(async (query) =>
+      query.cursor === undefined
+        ? { data: [{ id: "old", time: { busy: 1, idle: 2 } }], cursor: { next: "p2" } }
+        : { data: [{ id: "live", time: { busy: 9, idle: 2 } }] },
+    )
+    expect(plan[0]).toMatchObject({ verdict: "keep", reason: "a live session owns it" })
+    expect(worktree).toEqual([])
+  })
+
+  test("with every page read and no owner it is pruned", async () => {
+    const { plan } = await sweepWith(async (query) =>
+      query.cursor === undefined
+        ? { data: [{ id: "old", time: { busy: 1, idle: 2 } }], cursor: { next: "p2" } }
+        : { data: [{ id: "older", time: { busy: 1, idle: 2 } }] },
+    )
+    expect(plan[0]?.verdict).toBe("prune")
+  })
+})
+
+describe("without the experimental.idle hook", () => {
+  const withoutHook = async () => {
+    const fake = createFakeContext({
+      directory: REPO,
+      options: { sweep: "off" },
+      sessions: [
+        { id: PARENT, projectID: "prj", location: { directory: REPO }, time: { busy: 1, idle: 2 } },
+        { id: CHILD, parentID: PARENT, projectID: "prj", location: { directory: WT }, time: { busy: 1, idle: 2 } },
+      ],
+    })
+    fake.storage.set(laneKey(CHILD), lane())
+    const session = fake.context.session as unknown as { hook: (name: string, callback: unknown) => Promise<unknown> }
+    const original = session.hook.bind(session)
+    session.hook = (name, callback) => (name === "experimental.idle" ? Promise.reject(new Error("unknown hook")) : original(name, callback))
+    const state: World = {
+      ahead: 2, porcelain: " M a.txt\n", ancestor: 1, mergedHeads: [], openBranches: [], time: {}, exists: true, now: NOW, age: undefined,
+      head: TIP, branchOid: TIP, onBranch: true, integratedHeads: [], updateRefFails: false,
+    }
+    Object.assign(fake.context, {
+      location: { ...(fake.context.location as object), directory: REPO, project: { id: "prj" } },
+      worktree: { list: async () => [], remove: async () => {}, refresh: async () => {} },
+    })
+    const plugin = createPlugin({ run: runner(state, []), lookupMs: 20, directoryExists: async () => true, now: () => state.now, debounceMs: 1 })
+    const cleanup = (await plugin.setup(fake.context)) as () => Promise<void>
+    return { fake, cleanup }
+  }
+
+  test("setup succeeds and the child is still nudged from the succeeded event", async () => {
+    const { fake, cleanup } = await withoutHook()
+    expect(fake.hooks("session")).not.toContain("experimental.idle")
+    fake.emit({ type: "session.execution.succeeded", data: { sessionID: CHILD } })
+    await settle()
+    expect(synthetic(fake)).toEqual([
+      { sessionID: CHILD, text: `<system-reminder>Commit your work in ${WT}, or reply why it stays uncommitted.</system-reminder>` },
+    ])
+    await cleanup()
+  })
+
+  test("with the hook registered the succeeded event leaves the nudge to the gate", async () => {
+    const { fake, cleanup } = await start({ porcelain: " M a.txt\n" })
+    fake.emit({ type: "session.execution.succeeded", data: { sessionID: CHILD } })
+    await settle()
+    expect(synthetic(fake)).toEqual([])
+    await cleanup()
+  })
+})
+
+describe("a notice follows the event's identity, not its time", () => {
+  const failed = (id: string) => ({ id, type: "session.execution.failed", data: { sessionID: CHILD, error: { message: "model gone" } } })
+
+  test("the same failure replayed later sends no second notice", async () => {
+    const { fake, state, cleanup } = await start()
+    fake.emit(failed("ev1"))
+    await settle()
+    state.now += 3_600_000
+    fake.emit(failed("ev1"))
+    await settle()
+    expect(synthetic(fake)).toHaveLength(1)
+    await cleanup()
+  })
+
+  test("a replay without an event id is still the same failure", async () => {
+    const { fake, state, cleanup } = await start()
+    const bare = { type: "session.execution.failed", data: { sessionID: CHILD, error: { message: "model gone" } } }
+    fake.emit(bare)
+    await settle()
+    state.now += 3_600_000
+    fake.emit(bare)
+    await settle()
+    expect(synthetic(fake)).toHaveLength(1)
+    await cleanup()
+  })
+
+  test("a new failure has a new identity and is announced", async () => {
+    const { fake, state, cleanup } = await start()
+    fake.emit(failed("ev1"))
+    await settle()
+    state.now += 3_600_000
+    fake.emit(failed("ev2"))
+    await settle()
+    expect(synthetic(fake)).toHaveLength(2)
     await cleanup()
   })
 })

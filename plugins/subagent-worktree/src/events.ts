@@ -103,7 +103,7 @@ export function laneEventAction(
         : { action: "notifyParent", reason: "landed but has uncommitted changes", key }
     }
     if (failure) {
-      const key = `parent:${event.type}:${lane.outcome?.at ?? ""}`
+      const key = `parent:${event.type}:${lane.outcome?.id ?? ""}`
       return sent(lane, key)
         ? { action: "ignore", reason: `${event.type} notice already sent` }
         : { action: "notifyParent", reason: `child ${event.type} with uncommitted changes`, key }
@@ -125,7 +125,7 @@ export function laneEventAction(
         : { action: "defer", reason: `landed, but ${unmet}` }
     }
     if (failure) {
-      const key = `parent:${event.type}:${lane.outcome?.at ?? ""}`
+      const key = `parent:${event.type}:${lane.outcome?.id ?? ""}`
       return sent(lane, key)
         ? { action: "ignore", reason: `${event.type} notice already sent` }
         : { action: "notifyParent", reason: `child ${event.type} with commits`, key }
@@ -225,7 +225,8 @@ export function idleGateAction(session: IdleSession, lanes: readonly GateLane[],
   const childRunning = led.some(({ lane }) => session.runningChildren.has(lane.child))
   for (const { lane, facts } of led) {
     if (session.runningChildren.has(lane.child)) continue
-    const action = laneEventAction(lane, { ...facts, child: "finished", parent: "idle" }, { type: "idle", subject: "parent" }, policy)
+    // The child's status is what the adapter read, never inferred from its absence in `background`.
+    const action = laneEventAction(lane, { ...facts, parent: "idle" }, { type: "idle", subject: "parent" }, policy)
     if (action.action === "remove") {
       remove.push({ lane, basis: action.basis })
       continue
@@ -237,6 +238,7 @@ export function idleGateAction(session: IdleSession, lanes: readonly GateLane[],
     }
     const ahead = facts.ahead ?? 0
     const unresolved =
+      facts.child === "finished" &&
       action.action === "defer" &&
       action.reason === "not landed" &&
       ahead > 0 &&
@@ -256,4 +258,33 @@ export function idleGateAction(session: IdleSession, lanes: readonly GateLane[],
   if (childRunning) return { remove, marks: [], quiet: "a child is still running" }
   if (lines.length === 0) return { remove, marks: [] }
   return { remove, message: `<system-reminder>${lines.join("\n")}</system-reminder>`, marks }
+}
+
+/** One entry of the idle hook's `background` list. */
+export type BackgroundJob = { kind: string; sessionID?: string; childSessionID?: string; command?: string }
+
+/**
+ * Why a lane's child still has work running, from every kind of background job: a job the
+ * child owns, one a descendant of the child owns (or started), or a shell whose command
+ * names the lane directory. `descendant(id)` says whether session `id` descends from the
+ * child: true, false, or undefined when it could not be established, which counts as busy.
+ */
+export function laneBackgroundWork(
+  lane: Pick<Lane, "child" | "directory">,
+  jobs: readonly BackgroundJob[],
+  descendant: (sessionID: string) => boolean | undefined,
+): string | undefined {
+  for (const job of jobs) {
+    const ids = [job.sessionID, job.childSessionID].filter((id): id is string => typeof id === "string")
+    for (const id of ids) {
+      if (id === lane.child) return `the child has a ${job.kind} job running`
+      const below = descendant(id)
+      if (below === undefined) return `a ${job.kind} job could not be placed relative to the child`
+      if (below) return `a descendant of the child has a ${job.kind} job running`
+    }
+    if (job.kind === "shell" && typeof job.command === "string" && job.command.includes(lane.directory)) {
+      return "a shell is running in the lane"
+    }
+  }
+  return undefined
 }

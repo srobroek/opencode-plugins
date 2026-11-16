@@ -95,9 +95,9 @@ export function createGit(run: Runner) {
     stashSubjects: (directory: string) => git(directory, "stash", "list", "--format=%gs"),
     /** The worktree's own git directory, absolute. */
     gitDir: (directory: string) => git(directory, "rev-parse", "--absolute-git-dir"),
-    /** Force-delete a local branch; callers gate this on a landed proof. */
-    forceDeleteBranch: async (directory: string, name: string) =>
-      (await git(directory, "branch", "--quiet", "-D", name)) !== undefined,
+    /** Delete `refs/heads/<name>` only if it still points at `oid`; a ref that moved fails instead of being deleted. */
+    deleteBranchAt: async (directory: string, name: string, oid: string) =>
+      (await run(["git", "-C", directory, "update-ref", "-d", `refs/heads/${name}`, oid])).code === 0,
     /** Drop registry entries whose directory is gone. */
     pruneWorktrees: async (directory: string) => (await git(directory, "worktree", "prune")) !== undefined,
     /** `git worktree list --porcelain`. */

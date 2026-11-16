@@ -16,6 +16,7 @@ import { join, resolve } from "node:path"
 import type { Context } from "@opencode/plugin/promise/plugin"
 import { OPERATION_MARKERS, operationsInProgress, stashesOnBranch } from "@srobroek/opencode-lib/worktree-state"
 import {
+  type BackgroundJob,
   childNudge,
   failureReason,
   idleGateAction,
@@ -24,6 +25,7 @@ import {
   type LaneFacts,
   type LanePolicy,
   landedDirtyNotice,
+  laneBackgroundWork,
   laneEventAction,
   outcomeNotice,
   stateToken,
@@ -107,7 +109,7 @@ export function createLifecycle(deps: LifecycleDeps) {
   let disposed = false
   let gatesActive = false
   const timers = new Set<ReturnType<typeof setTimeout>>()
-  const pending = new Map<string, { type: string; reason?: string; timer: ReturnType<typeof setTimeout> }>()
+  const pending = new Map<string, { type: string; reason?: string; id?: string; timer: ReturnType<typeof setTimeout> }>()
   const lastGate = new Map<string, number>()
 
   /** One chain for event passes, gates and sweeps' lane writes, so a lane is never handled twice at once. */
@@ -174,8 +176,9 @@ export function createLifecycle(deps: LifecycleDeps) {
     }
     const items = (listed as { items?: unknown } | undefined)?.items
     for (const item of Array.isArray(items) ? items : []) {
-      const entry = item as { branch?: unknown; display?: { state?: unknown } }
-      if (typeof entry.branch === "string" && entry.display?.state === "integrated") proofs.integrated.add(entry.branch)
+      // Keyed by commit, never by branch name: a branch that gained a commit since is not integrated.
+      const entry = item as { head?: { sha?: unknown }; display?: { state?: unknown } }
+      if (typeof entry.head?.sha === "string" && entry.display?.state === "integrated") proofs.integrated.add(entry.head.sha)
     }
     proofCache.set(parentDir, proofs)
     return proofs
@@ -214,7 +217,7 @@ export function createLifecycle(deps: LifecycleDeps) {
       landed = lane.landedHead === tip || (await git.isAncestor(lane.directory, tip, "origin/main"))
       if (!landed) {
         const proofs = await proofsFor(lane.parentDir)
-        landed = proofs.merged.has(tip) || proofs.integrated.has(lane.branch)
+        landed = proofs.merged.has(tip) || proofs.integrated.has(tip)
         openPr = proofs.open.has(lane.branch)
       }
     }
@@ -230,6 +233,73 @@ export function createLifecycle(deps: LifecycleDeps) {
       openPr,
     }
   }
+
+  // --- one fence for every removal ----------------------------------------------------------
+
+  /** Bumped by a resume; a removal that collected its facts under an older number does not run. */
+  const generations = new Map<string, number>()
+  const locks = new Map<string, Promise<unknown>>()
+  const generationOf = (directory: string) => generations.get(canonical(directory)) ?? 0
+
+  /** One at a time per directory: removals, the resume bump and sweep removals all pass here. */
+  const withLock = <T>(directory: string, work: () => Promise<T>): Promise<T> => {
+    const key = canonical(directory)
+    const next = (locks.get(key) ?? Promise.resolve()).then(work, work)
+    locks.set(key, next.catch(() => {}))
+    return next
+  }
+
+  /** A `subagent` call is about to resume the child of this lane: waits for an in-flight removal, then fences later ones. */
+  const noteResume = (directory: string) =>
+    withLock(directory, async () => {
+      generations.set(canonical(directory), generationOf(directory) + 1)
+    })
+
+  type Removal = {
+    directory: string
+    projectID: string
+    branch: string | undefined
+    parentDir: string
+    /** The commit the landed proof covered. */
+    oid: string
+    /** The generation read before the facts were collected. */
+    gen: number
+    /** The lane whose child is moved home first. */
+    lane?: Lane
+  }
+
+  /**
+   * The only removal path. Under the directory lock, and right before removing: the resume
+   * generation is unchanged, HEAD is still the proven commit, and the tree is still clean. The
+   * local branch is deleted only when the worktree was on it (not detached) and it still points
+   * at the proven commit, with a compare-and-delete that fails if the ref moved.
+   */
+  const removeVerified = (removal: Removal): Promise<boolean> =>
+    withLock(removal.directory, async () => {
+      const { directory, branch, oid } = removal
+      if (generationOf(directory) !== removal.gen) return false
+      if ((await git.head(directory)) !== oid) return false
+      if ((await git.porcelain(directory)) !== "") return false
+      if ((await busyTreeOf(directory, branch)) !== undefined) return false
+      let deleteBranch = false
+      if (branch !== undefined && (await git.branch(directory)) === branch) {
+        // On the branch: the ref must still be the commit the proof covered, or something moved it.
+        if ((await git.commit(removal.parentDir, `refs/heads/${branch}`)) !== oid) return false
+        deleteBranch = true
+      }
+      try {
+        if (removal.lane) await deps.moveHome(removal.lane)
+        await deps.removeWorktree(removal.projectID, directory, false)
+      } catch {
+        if (removal.lane && (await deps.exists(directory))) {
+          await ctx.session.move({ sessionID: removal.lane.child, directory } as never).catch(() => {})
+        }
+        return false
+      }
+      await ctx.worktree.refresh({ projectID: removal.projectID } as never).catch(() => {})
+      if (deleteBranch && branch !== undefined) await git.deleteBranchAt(removal.parentDir, branch, oid)
+      return true
+    })
 
   // --- actions ------------------------------------------------------------------------------
 
@@ -248,25 +318,26 @@ export function createLifecycle(deps: LifecycleDeps) {
     }
   }
 
-  /** Non-force host removal, then refresh, then (landed only) the local branch. A refusal keeps the lane. */
-  const removeLane = async (lane: Lane, basis: "landed" | "empty"): Promise<boolean> => {
-    try {
-      await deps.moveHome(lane)
-      await deps.removeWorktree(lane.projectID, lane.directory, false)
-    } catch {
-      if (await deps.exists(lane.directory)) await ctx.session.move({ sessionID: lane.child, directory: lane.directory } as never).catch(() => {})
-      return false
-    }
-    await ctx.worktree.refresh({ projectID: lane.projectID } as never).catch(() => {})
-    if (basis === "landed") await git.forceDeleteBranch(lane.parentDir, lane.branch)
-    else await git.deleteBranch(lane.parentDir, lane.branch)
+  /** A lane's removal, fenced by the generation read before its facts were collected. */
+  const removeLane = async (lane: Lane, basis: "landed" | "empty", facts: LaneFacts, gen: number): Promise<boolean> => {
+    if (facts.tip === undefined) return false
+    const removed = await removeVerified({
+      directory: lane.directory,
+      projectID: lane.projectID,
+      branch: lane.branch,
+      parentDir: lane.parentDir,
+      oid: facts.tip,
+      gen,
+      lane,
+    })
+    if (!removed) return false
     const fresh = (await load(lane.child)) ?? lane
     await save({ ...fresh, state: basis === "landed" ? "landed" : "removed" })
     return true
   }
 
-  const act = async (lane: Lane, action: LaneAction, facts: LaneFacts, event: LaneEvent) => {
-    if (action.action === "remove") return removeLane(lane, action.basis)
+  const act = async (lane: Lane, action: LaneAction, facts: LaneFacts, event: LaneEvent, gen: number) => {
+    if (action.action === "remove") return removeLane(lane, action.basis, facts, gen)
     if (action.action === "defer" && action.quiet) {
       const quietSince = action.quiet === "start" ? facts.now : undefined
       if (lane.quietSince !== quietSince) await save({ ...((await load(lane.child)) ?? lane), ...(quietSince === undefined ? { quietSince: undefined } : { quietSince }) })
@@ -290,7 +361,7 @@ export function createLifecycle(deps: LifecycleDeps) {
 
   const TERMINAL = new Set(["succeeded", "idle", "failed", "interrupted"])
 
-  const pass = async (sessionID: string, type: string, reason: string | undefined) => {
+  const pass = async (sessionID: string, type: string, reason: string | undefined, eventID: string | undefined) => {
     const lanes = await deps.scan()
     const own = lanes.find((lane) => lane.child === sessionID && lane.state === "active")
     const led = lanes.filter((lane) => lane.parent === sessionID && lane.child !== sessionID && lane.state === "active")
@@ -298,25 +369,30 @@ export function createLifecycle(deps: LifecycleDeps) {
     const eventType = type as LaneEvent["type"]
     let ownLane = own
     if (ownLane && (type === "failed" || type === "interrupted")) {
-      ownLane = { ...ownLane, outcome: { kind: type, at: now(), reason: reason ?? "no reason given" }, quietSince: undefined }
+      const why = reason ?? "no reason given"
+      // Identity of the outcome, never its time: a replayed event keeps its key, a new failure gets a new one.
+      const id = eventID ?? `h${Bun.hash(`${sessionID}:${type}:${why}`)}`
+      ownLane = { ...ownLane, outcome: { kind: type, at: now(), reason: why, id }, quietSince: undefined }
       await save(ownLane)
     }
     if (ownLane) {
       const event: LaneEvent = { type: eventType, subject: "child" }
+      const gen = generationOf(ownLane.directory)
       const parent = await statusOf(ownLane.parent)
       const facts = await laneFacts(ownLane, { child: "finished", parent: parent === "finished" ? "idle" : parent === "running" ? "busy" : "unknown" })
-      await act(ownLane, laneEventAction(ownLane, facts, event, policy), facts, event)
+      await act(ownLane, laneEventAction(ownLane, facts, event, policy), facts, event, gen)
     }
     for (const lane of led) {
       const event: LaneEvent = { type: "check", subject: "parent" }
+      const gen = generationOf(lane.directory)
       const child = await statusOf(lane.child)
       const fresh = (await load(lane.child)) ?? lane
       const facts = await laneFacts(fresh, { child, parent: TERMINAL.has(type) ? "idle" : "unknown" })
-      await act(fresh, laneEventAction(fresh, facts, event, policy), facts, event)
+      await act(fresh, laneEventAction(fresh, facts, event, policy), facts, event, gen)
     }
   }
 
-  const schedule = (sessionID: string, type: string, reason?: string) => {
+  const schedule = (sessionID: string, type: string, reason?: string, id?: string) => {
     if (disposed) return
     const held = pending.get(sessionID)
     if (held) {
@@ -324,6 +400,7 @@ export function createLifecycle(deps: LifecycleDeps) {
       if ((PRIORITY[type] ?? 0) > (PRIORITY[held.type] ?? 0)) {
         held.type = type
         if (reason !== undefined) held.reason = reason
+        if (id !== undefined) held.id = id
       }
       return
     }
@@ -332,15 +409,16 @@ export function createLifecycle(deps: LifecycleDeps) {
       const entry = pending.get(sessionID)
       pending.delete(sessionID)
       if (!entry || disposed) return
-      void serial(() => pass(sessionID, entry.type, entry.reason)).catch((error) => console.error("subagent-worktree: lane pass failed", error))
+      void serial(() => pass(sessionID, entry.type, entry.reason, entry.id)).catch((error) => console.error("subagent-worktree: lane pass failed", error))
     }, debounceMs)
     timers.add(timer)
-    pending.set(sessionID, { type, ...(reason === undefined ? {} : { reason }), timer })
+    pending.set(sessionID, { type, ...(reason === undefined ? {} : { reason }), ...(id === undefined ? {} : { id }), timer })
   }
 
   /** Feed one server event. Cheap: it only schedules. */
   const handleEvent = (raw: unknown) => {
-    const event = raw as { type?: string; data?: { sessionID?: unknown; error?: unknown; reason?: unknown } }
+    const event = raw as { id?: unknown; type?: string; data?: { sessionID?: unknown; error?: unknown; reason?: unknown } }
+    const eventID = typeof event.id === "string" ? event.id : undefined
     if (event.type === "session.created") {
       void maybeSweep()
       return
@@ -349,9 +427,9 @@ export function createLifecycle(deps: LifecycleDeps) {
     if (typeof sessionID !== "string") return
     switch (event.type) {
       case "session.execution.failed":
-        return schedule(sessionID, "failed", failureReason(event.data?.error))
+        return schedule(sessionID, "failed", failureReason(event.data?.error), eventID)
       case "session.execution.interrupted":
-        return schedule(sessionID, "interrupted", typeof event.data?.reason === "string" ? event.data.reason : "interrupted")
+        return schedule(sessionID, "interrupted", typeof event.data?.reason === "string" ? event.data.reason : "interrupted", eventID)
       case "session.execution.succeeded":
         return schedule(sessionID, "succeeded")
       case "session.idle":
@@ -361,23 +439,54 @@ export function createLifecycle(deps: LifecycleDeps) {
 
   // --- idle gates ---------------------------------------------------------------------------
 
-  type IdleInput = { sessionID: string; background?: ReadonlyArray<{ kind: string; childSessionID?: string }> }
+  type IdleInput = { sessionID: string; background?: ReadonlyArray<BackgroundJob> }
+
+  /** Whether `sessionID` descends from `ancestor`: true, false, or undefined when a lookup failed. */
+  const descends = async (sessionID: string, ancestor: string): Promise<boolean | undefined> => {
+    let current: string | undefined = sessionID
+    for (let depth = 0; depth < 8 && current !== undefined; depth++) {
+      if (current === ancestor) return depth > 0
+      const session: SessionLike | undefined = await withinLookup(deps.getSession(current))
+      if (!session) return undefined
+      current = session.parentID
+    }
+    return current === undefined ? false : undefined
+  }
 
   const onIdle = async (input: IdleInput) => {
     if (disposed) return
     await serial(async () => {
       const lanes = (await deps.scan()).filter((lane) => lane.state === "active" && (lane.child === input.sessionID || lane.parent === input.sessionID))
       if (lanes.length === 0) return
+      const jobs = input.background ?? []
       const running = new Set<string>()
-      for (const job of input.background ?? []) if (job.kind === "subagent" && typeof job.childSessionID === "string") running.add(job.childSessionID)
       const gateLanes = await Promise.all(
-        lanes.map(async (lane) => ({
-          lane,
-          facts: await laneFacts(lane, { child: running.has(lane.child) ? "running" : "finished", parent: lane.parent === input.sessionID ? "idle" : "unknown" }),
-        })),
+        lanes.map(async (lane) => {
+          const gen = generationOf(lane.directory)
+          // Every kind of job counts, and the child's status is read, not inferred from the list.
+          const known = new Map<string, boolean | undefined>()
+          for (const job of jobs) {
+            for (const id of [job.sessionID, job.childSessionID]) {
+              if (typeof id === "string" && !known.has(id)) known.set(id, id === lane.child ? true : await descends(id, lane.child))
+            }
+          }
+          const busy = laneBackgroundWork(lane, jobs, (id) => known.get(id))
+          if (busy !== undefined && lane.parent === input.sessionID) running.add(lane.child)
+          const child = busy !== undefined ? "running" : await statusOf(lane.child)
+          if (child === "running" && lane.parent === input.sessionID) running.add(lane.child)
+          return { lane, gen, facts: await laneFacts(lane, { child, parent: lane.parent === input.sessionID ? "idle" : "unknown" }) }
+        }),
       )
-      const gate = idleGateAction({ id: input.sessionID, runningChildren: running, now: now(), lastMessageAt: lastGate.get(input.sessionID) }, gateLanes, policy)
-      for (const { lane, basis } of gate.remove) await removeLane(lane, basis)
+      const gens = new Map(gateLanes.map((entry) => [entry.lane.child, entry.gen]))
+      const gate = idleGateAction(
+        { id: input.sessionID, runningChildren: running, now: now(), lastMessageAt: lastGate.get(input.sessionID) },
+        gateLanes.map(({ lane, facts }) => ({ lane, facts })),
+        policy,
+      )
+      for (const { lane, basis } of gate.remove) {
+        const facts = gateLanes.find((entry) => entry.lane.child === lane.child)?.facts
+        if (facts) await removeLane(lane, basis, facts, gens.get(lane.child) ?? generationOf(lane.directory))
+      }
       if (gate.message === undefined) return
       if (await send(input.sessionID, gate.message)) {
         lastGate.set(input.sessionID, now())
@@ -416,7 +525,14 @@ export function createLifecycle(deps: LifecycleDeps) {
       }),
     )
     const holds = cleanupHolds(lanes, (lane) => reasons.get(lane.child))
-    if (holds.length > 0) event.input = { ...(event.input as object), cleanupHold: holds }
+    if (holds.length === 0) return
+    // Append to what other integrations already hold, one entry per directory.
+    const existing = Array.isArray((event.input as { cleanupHold?: unknown })?.cleanupHold)
+      ? ((event.input as { cleanupHold: Array<{ directory?: unknown; reason?: unknown }> }).cleanupHold as Array<{ directory: string; reason: string }>)
+      : []
+    const seen = new Set(existing.map((hold) => canonical(String(hold.directory))))
+    const merged = [...existing, ...holds.filter((hold) => !seen.has(canonical(hold.directory)))]
+    event.input = { ...(event.input as object), cleanupHold: merged }
   }
 
   // --- sweep --------------------------------------------------------------------------------
@@ -425,19 +541,26 @@ export function createLifecycle(deps: LifecycleDeps) {
 
   type Entry = { directory: string }
 
+  /** Who works in `directory`: "unknown" (so the worktree is kept) unless every page of the lookup was read. */
   const ownerOf = async (directory: string, minAgeMs: number): Promise<WorktreeFacts["owner"]> => {
     if (projectID === undefined) return "unknown"
-    const page = (await withinLookup(Promise.resolve(ctx.session.list({ project: projectID, directory, archived: false, limit: 100 } as never)))) as
-      | { data?: unknown }
-      | undefined
-    if (!page || !Array.isArray(page.data)) return "unknown"
-    for (const raw of page.data as Array<{ time?: Record<string, unknown> }>) {
-      const busy = toMillis(raw.time?.busy)
-      const idle = toMillis(raw.time?.idle)
-      const updated = toMillis(raw.time?.updated)
-      if (isRunning({ busy, idle }) || (updated !== undefined && now() - updated < minAgeMs)) return "yes"
+    let query: Record<string, unknown> = { project: projectID, directory, archived: false, limit: 100 }
+    for (let pages = 0; pages < 20; pages++) {
+      const page = (await withinLookup(Promise.resolve(ctx.session.list(query as never)))) as
+        | { data?: unknown; cursor?: { next?: string } }
+        | undefined
+      if (!page || !Array.isArray(page.data)) return "unknown"
+      for (const raw of page.data as Array<{ time?: Record<string, unknown> }>) {
+        const busy = toMillis(raw.time?.busy)
+        const idle = toMillis(raw.time?.idle)
+        const updated = toMillis(raw.time?.updated)
+        if (isRunning({ busy, idle }) || (updated !== undefined && now() - updated < minAgeMs)) return "yes"
+      }
+      const next = page.cursor?.next
+      if (!next) return "no"
+      query = { cursor: next }
     }
-    return "no"
+    return "unknown"
   }
 
   const ageOf = async (directory: string): Promise<number | undefined> => {
@@ -464,7 +587,7 @@ export function createLifecycle(deps: LifecycleDeps) {
       if (!landed) {
         const parentDir = lane?.parentDir ?? ctx.location.directory
         const proofs = await proofsFor(parentDir)
-        landed = proofs.merged.has(tip) || (branch !== undefined && proofs.integrated.has(branch))
+        landed = proofs.merged.has(tip) || proofs.integrated.has(tip)
       }
     }
     const behindRemote = await git.run(["git", "-C", directory, "rev-list", "--count", "@{upstream}..HEAD"])
@@ -493,7 +616,14 @@ export function createLifecycle(deps: LifecycleDeps) {
     for (const entry of listed ?? []) directories.set(canonical(entry.directory), entry.directory)
     for (const lane of lanes) directories.set(canonical(lane.directory), lane.directory)
     const facts: WorktreeFacts[] = []
-    for (const [key, directory] of directories) facts.push(await sweepFacts(directory, byDir.get(key), minAgeMs))
+    const proven = new Map<string, { oid: string | undefined; gen: number }>()
+    for (const [key, directory] of directories) {
+      // The commit and generation are read first: the removal runs only if both are unchanged.
+      const gen = generationOf(directory)
+      const oid = (await deps.exists(directory)) ? await git.head(directory) : undefined
+      facts.push(await sweepFacts(directory, byDir.get(key), minAgeMs))
+      proven.set(key, { oid, gen })
+    }
     const plan = planSweep(facts, { minAgeMs })
     if (mode === "prune") {
       for (const entry of plan) {
@@ -502,15 +632,20 @@ export function createLifecycle(deps: LifecycleDeps) {
           continue
         }
         if (entry.verdict !== "prune") continue
-        try {
-          await deps.removeWorktree(projectID, entry.path, false)
-        } catch {
-          continue
-        }
-        await ctx.worktree.refresh({ projectID } as never).catch(() => {})
-        if (entry.deleteBranch && entry.branch) await git.forceDeleteBranch(ctx.location.directory, entry.branch)
-        const lane = byDir.get(canonical(entry.path))
-        if (lane) await save({ ...((await load(lane.child)) ?? lane), state: "landed" })
+        const key = canonical(entry.path)
+        const lane = byDir.get(key)
+        const covered = proven.get(key)
+        if (covered?.oid === undefined) continue
+        const removed = await removeVerified({
+          directory: entry.path,
+          projectID,
+          branch: entry.deleteBranch ? entry.branch : undefined,
+          parentDir: lane?.parentDir ?? ctx.location.directory,
+          oid: covered.oid,
+          gen: covered.gen,
+          ...(lane ? { lane } : {}),
+        })
+        if (removed && lane) await save({ ...((await load(lane.child)) ?? lane), state: "landed" })
       }
     }
     await ctx.storage.set("sweep/last", { at: now(), mode, plan })
@@ -600,7 +735,7 @@ export function createLifecycle(deps: LifecycleDeps) {
     await Promise.allSettled([chain, sweepChain])
   }
 
-  return { start, dispose, handleEvent, onIdle, onLanding, holdLanes, keep, sweep: runSweep, maybeSweep, settle }
+  return { start, dispose, handleEvent, onIdle, onLanding, holdLanes, keep, noteResume, sweep: runSweep, maybeSweep, settle }
 }
 
 export type Lifecycle = ReturnType<typeof createLifecycle>

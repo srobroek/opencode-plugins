@@ -133,6 +133,15 @@ covering what the others cannot see. A lane is removed only when its work is fin
 landed; every removal is a non-force `worktree.remove` followed by a refresh, and no remote branch
 is ever deleted.
 
+Every removal is applied under a per-directory lock and re-checked at that moment: no `subagent` call
+resumed the child since the facts were read, HEAD is still the commit the landed proof covered, and
+the tree is still clean. The local branch is deleted only when the worktree was on it (not
+detached) and it still points at that commit, with `git update-ref -d refs/heads/<branch> <oid>`,
+so a ref that moved is left alone. Landed proofs are keyed by commit, never by branch name.
+The idle gate counts every `background` job (shell, image, subagent) that belongs to the child, a
+descendant of it, or a shell that names the lane directory, and reads the child's own status; an
+unknown status or an ownership lookup that fails or spans unread pages keeps the worktree.
+
 A lane may be removed when all of these hold:
 
 1. **Landed.** Its tip is an ancestor of `origin/main`, or a merged PR's `headRefOid` equals the tip
