@@ -71,6 +71,8 @@ MUST On an existing gated run, obtain explicit migration authorization before
 NOT Silently resolve or force-close existing human gates during migration.
 MUST At `/speckit.specify`, query parked work (`bd list --status deferred --json`)
   and surface hits before writing the spec.
+DEFAULT Skip the `mkdir -p` that `/speckit.specify` asks for; writing the file with
+  the write tool creates its directory.
 MUST Pour before writing the spec, after obtaining the explicit choice;
   persist the choice on the new root before advancing to specification work.
   Profiles live in this plugin's `formulas/`; `bd cook <name>`.

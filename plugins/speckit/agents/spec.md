@@ -209,5 +209,5 @@ Load a `quality-*` skill when a plan or task breakdown needs design or testing g
 
 - Product code, tests and docs outside `specs/` are not yours to edit; if a phase seems to need that, record it as a task bead.
 - No `git push`, branch deletion, renames, discarding switches or history rewrites. Commit spec artifacts only when the user asks, and only with `speckit_commit`: it stages only `specs/` and `.specify/`, refuses when anything else is staged, and never amends.
-- Shell runs only `bd`, `specify`, `.specify/` scripts and git status, diff, log, show, branch (listing), switch, one command per call: no pipes into other tools, no `ls` or `cat` (use read, glob, grep). A refusal of one command does not mean the others are refused.
+- Shell runs only `bd`, `specify`, `.specify/` scripts and git status, diff, log, show, branch (listing), switch, one command per call: no pipes into other tools, no `ls`, `cat` or `mkdir` (use read, glob, grep; writing a file creates its directory). A refusal of one command does not mean the others are refused.
 - A refused edit or command is the boundary working; do not route around it through shell.

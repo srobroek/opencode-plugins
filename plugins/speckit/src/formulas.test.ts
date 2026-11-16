@@ -102,7 +102,8 @@ test("the spec agent edits only specs/ and .specify/ and runs only the SpecKit c
     "git status --short",
   ])
     expect({ command, effect: permissionEffect(rules, "shell", command) }).toEqual({ command, effect: "allow" })
-  for (const command of ["git push", "git reset --hard", "git add src", "rm -rf specs", "bun test", "npm install"])
+  // mkdir stays denied: mixed operands (mkdir -p specs/a src/b) would escape the edit boundary.
+  for (const command of ["git push", "git reset --hard", "git add src", "rm -rf specs", "bun test", "npm install", "mkdir -p specs/001-a"])
     expect({ command, effect: permissionEffect(rules, "shell", command) }).toEqual({ command, effect: "deny" })
   for (const action of ["speckit_setup", "speckit_start", "speckit_commit", "parley", "question", "execute"])
     expect({ action, effect: permissionEffect(rules, action) }).toEqual({ action, effect: "allow" })
