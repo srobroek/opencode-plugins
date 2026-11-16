@@ -146,10 +146,10 @@ function stats(records: readonly OutcomeRecord[]): Stats {
 
 const byName = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0)
 
-/** Per-arm stats of the runs that recorded an exploration arm; most runs first. */
+/** Per-arm stats of the runs that recorded an arm and stayed on it (a failover or overflow switch moved the rest to another model); most runs first. */
 function armUsage(records: readonly OutcomeRecord[]): ArmUsage[] {
   const byArm = new Map<string, OutcomeRecord[]>()
-  for (const r of records) if (r.arm !== undefined) byArm.set(r.arm, [...(byArm.get(r.arm) ?? []), r])
+  for (const r of records) if (r.arm !== undefined && r.failedOver !== true) byArm.set(r.arm, [...(byArm.get(r.arm) ?? []), r])
   return [...byArm.entries()].map(([arm, rs]) => ({ arm, ...stats(rs) })).sort((a, b) => b.n - a.n || byName(a.arm, b.arm))
 }
 

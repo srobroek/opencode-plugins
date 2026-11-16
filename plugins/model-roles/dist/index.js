@@ -186,8 +186,8 @@ var TRANSIENT = new Set(["rate-limit", "server", "outage", "credentials"]);
 var DECISIVE = new Set(["quota", "unavailable"]);
 var failureScope = (kind) => PROVIDER_SCOPED.has(kind) ? "provider" : "model";
 var isTransient = (kind) => TRANSIENT.has(kind);
+var CONTEXT_LENGTH = /context[_ ](?:length|window)(?:[_ ]exceeded)?|maximum context|prompt is too long|(?:input|prompt|request) (?:is )?too long|exceeds? the context|too many tokens(?!,? ?please wait| per (?:min|hour|day))/i;
 var NOT_MODEL = [
-  /context (?:length|window)|maximum context|prompt is too long|too many tokens/i,
   /\b(?:abort(?:ed)?|cancel(?:l)?ed|interrupted)\b/i
 ];
 var QUOTA = /insufficient_quota|quota (?:exceeded|exhausted|reached)|exceeded (?:your |the )?(?:current )?quota|billing|credit[_ ]balance|out of credits|payment required|usage[_ ]limit|usage_not_included|spend_limit_exceeded|session[_ ]limit|(?:weekly|daily|monthly|5-hour) (?:usage )?limit|plan limit|\b(?:hit|reached) your [^\u00B7\n]*?limit/i;
@@ -202,10 +202,17 @@ var PATTERNS = [
   ["rate-limit", /throttl|rate.?limit|too many requests|\b429\b/i],
   ["server", /overloaded|over capacity|service unavailable|bad gateway|gateway timeout|internal server error|server error|serviceunavailable|\b50[0234]\b|\b529\b/i]
 ];
+var DEFINITE = ["quota", "credentials", "auth", "rate-limit"];
 var bodyText = (error) => {
   const body = error.response?.body;
   return typeof body === "string" ? body : body === undefined ? "" : JSON.stringify(body);
 };
+function isContextLength(error) {
+  const status = error.status;
+  if (status !== undefined && status !== 400 && status !== 413)
+    return false;
+  return CONTEXT_LENGTH.test(error.message ?? "") || CONTEXT_LENGTH.test(bodyText(error));
+}
 function classifyFailure(error) {
   if (error === undefined)
     return;
@@ -224,6 +231,12 @@ function classifyFailure(error) {
     return "rate-limit";
   if (status !== undefined && status >= 500 && status <= 599)
     return "server";
+  const matches = (kind) => PATTERNS.some(([k, pattern]) => k === kind && (pattern.test(message) || pattern.test(type)));
+  for (const kind of DEFINITE)
+    if (matches(kind))
+      return kind;
+  if (isContextLength(error))
+    return "context-length";
   for (const [kind, pattern] of PATTERNS)
     if (pattern.test(message) || pattern.test(type))
       return kind;
@@ -307,6 +320,8 @@ function markUnhealthy(state, ref, now, cooldownMs, reason, scope = "model") {
   return next;
 }
 function recordFailure(state, ref, kind, error, now, policy) {
+  if (kind === "context-length")
+    return { state, cooldownMs: 0, tripped: false };
   const reason = kind;
   const next = pruneHealth(state, now, policy.flapWindowMs);
   const key = failureScope(kind) === "provider" ? providerKey(ref.providerID) : healthKey(ref);
@@ -448,6 +463,29 @@ function subagentNote(facts) {
   } else
     retry = "The spawn may be retried: it now resolves to the next model.";
   return `${who} failed. ${failureNote(facts)} ${retry}`;
+}
+var CONTEXT_FALLBACK_REASON = "context-length";
+function contextFallback(candidates, failed, limits) {
+  const own = limits.get(healthKey(failed));
+  if (own === undefined)
+    return;
+  return candidates.find((candidate) => {
+    const limit = limits.get(healthKey(candidate));
+    return healthKey(candidate) !== healthKey(failed) && limit !== undefined && limit > own;
+  });
+}
+var tokens = (limit) => limit === undefined ? "unknown limit" : `${limit} tokens`;
+function contextSwitchNote(facts) {
+  const head = `context too long for ${label(facts.failed)} (${tokens(facts.limit)})`;
+  const target = `${label(facts.target)} (${tokens(facts.targetLimit)})`;
+  if (facts.resumable !== undefined)
+    return `${head}; the session now runs ${target}. Resume it with sessionID ${facts.resumable} to continue on the larger context.`;
+  const where = facts.tier === undefined ? "its tier" : `tier ${facts.tier}`;
+  return `${head}; ${where} has a larger-context candidate, ${target}. Switch to it or compact the session.`;
+}
+function contextNote(failed, limit, tier) {
+  const where = tier === undefined ? "its tier" : `tier ${tier}`;
+  return `context too long for ${label(failed)} (${tokens(limit)}); no larger-context candidate in ${where}. Compact the session or use a tier with a larger-context model`;
 }
 
 // plugins/model-roles/src/catalog.ts
@@ -1701,6 +1739,31 @@ function describeCandidate(candidate) {
     case "invalid":
       return "invalid: expected provider/model, provider/model#variant or @role";
   }
+}
+var HEALTH_HISTORY_LIMIT = 10;
+function recordCooldown(history, event, limit = HEALTH_HISTORY_LIMIT) {
+  const open = history.findIndex((e) => e.subject === event.subject && e.recoveredAt === undefined && e.at + e.cooldownMs > event.at);
+  if (open >= 0) {
+    const prior = history[open];
+    const merged = { ...prior, kind: event.kind, cooldownMs: event.at + event.cooldownMs - prior.at };
+    return history.map((e, i) => i === open ? merged : e).slice(0, limit);
+  }
+  return [event, ...history].slice(0, limit);
+}
+function recordRecovery(history, providerID, at) {
+  return history.map((e) => e.recoveredAt === undefined && e.at < at && e.at + e.cooldownMs > at && e.subject.startsWith(`${providerID}/`) ? { ...e, recoveredAt: at } : e);
+}
+var clock = (at) => new Date(at).toISOString().slice(11, 19);
+function formatHealthHistory(history, now) {
+  if (history.length === 0)
+    return [];
+  const lines = ["", "Recent health (newest first):"];
+  for (const e of history) {
+    const end = e.recoveredAt ?? (e.at + e.cooldownMs <= now ? e.at + e.cooldownMs : undefined);
+    const who = e.scope === "provider" ? `provider ${e.subject.split("/", 1)[0]}` : `model ${e.subject}`;
+    lines.push(`  - ${clock(e.at)} ${who}: ${e.kind}, cooldown ${duration(e.cooldownMs)}, ${end === undefined ? "still out" : `recovered ${clock(end)}`}`);
+  }
+  return lines;
 }
 function formatCheck(report) {
   const lines = [];
@@ -3822,7 +3885,27 @@ function hostWarn(source) {
 // plugins/model-roles/src/outage.ts
 var NOTICE_DEDUPE_MS = 60000;
 var OUTAGE_STALE_MS = 15 * 60000;
-var newNoticeState = () => ({ outages: new Map, notices: new Map });
+var newNoticeState = () => ({ outages: new Map, notices: new Map, contextNotices: new Map });
+function claimContextNotice(state, sessionID, execution, now) {
+  for (const [id, at] of state.contextNotices)
+    if (now - at >= NOTICE_DEDUPE_MS)
+      state.contextNotices.delete(id);
+  const key = `${sessionID}\x00${execution ?? ""}`;
+  if (state.contextNotices.has(key))
+    return false;
+  state.contextNotices.set(key, now);
+  return true;
+}
+function claimToolContextNotice(state, sessionID, now) {
+  for (const [id, at] of state.contextNotices)
+    if (now - at >= NOTICE_DEDUPE_MS)
+      state.contextNotices.delete(id);
+  for (const key of state.contextNotices.keys())
+    if (key.startsWith(`${sessionID}\x00`))
+      return false;
+  state.contextNotices.set(`${sessionID}\x00tool-error`, now);
+  return true;
+}
 var stoppedKey = (report) => report.subagent?.sessionID ?? `${report.notifyTo}\x00${report.subagent?.agent ?? ""}`;
 var stoppedLine = (stopped, provider, kind, first) => {
   const who = stopped.agent === undefined ? "A subagent" : `Subagent '${stopped.agent}'`;
@@ -3873,6 +3956,9 @@ function decideOutage(state, report) {
   return { sessionID: notifyTo, text: line === undefined ? head : `${head} ${line}` };
 }
 function forgetSession(state, sessionID) {
+  for (const key of state.contextNotices.keys())
+    if (key.startsWith(`${sessionID}\x00`))
+      state.contextNotices.delete(key);
   for (const outage of state.outages.values()) {
     outage.stopped.delete(sessionID);
   }
@@ -3985,7 +4071,8 @@ var RULE_TEXT = {
   "builtin-effort": "built-in effort",
   "auto-effort": "auto effort",
   "model-default": "model default",
-  snapshot: "the child's snapshot"
+  snapshot: "the child's snapshot",
+  "guard-reroute": "the guard's reroute"
 };
 function formatReceipts(list) {
   if (list.length === 0)
@@ -4105,7 +4192,7 @@ var byName = (a, b) => a < b ? -1 : a > b ? 1 : 0;
 function armUsage(records) {
   const byArm = new Map;
   for (const r of records)
-    if (r.arm !== undefined)
+    if (r.arm !== undefined && r.failedOver !== true)
       byArm.set(r.arm, [...byArm.get(r.arm) ?? [], r]);
   return [...byArm.entries()].map(([arm, rs]) => ({ arm, ...stats(rs) })).sort((a, b) => b.n - a.n || byName(a.arm, b.arm));
 }
@@ -4181,6 +4268,45 @@ function usageDetailRows(row) {
     ...row.agents.map((a) => ({ title: a.agent, value: a.agent, description: usageBrief(a), disabled: true })),
     ...(row.arms ?? []).map((a) => ({ title: `arm ${a.arm}`, value: `\x00arm:${a.arm}`, description: usageBrief(a), disabled: true }))
   ];
+}
+
+// plugins/model-roles/src/resume-guard.ts
+function resumeGuard(facts) {
+  if (facts.current === undefined || facts.refused === undefined)
+    return { action: "keep" };
+  const allowed = facts.candidates.find((c) => c.allowed);
+  if (allowed !== undefined)
+    return { action: "switch", model: allowed.model };
+  const spent = facts.overflowed ?? [];
+  if (spent.length > 0) {
+    const list = spent.map((c) => `${modelText(c.model)} (${c.limit === undefined ? "unknown limit" : `${c.limit} tokens`})`).join(", ");
+    const which = spent.length === 1 ? `The only allowed candidate, ${list}, already` : `The allowed candidates, ${list}, already`;
+    return {
+      action: "refuse",
+      reason: `This resume would run on ${modelText(facts.current)}, which the guard refuses. ${which} overflowed its context; compact the session or start a new one.
+${facts.refused}`
+    };
+  }
+  const where = facts.tier === undefined ? "the child has no tier to switch within" : `no candidate of tier '${facts.tier}' passes the guard`;
+  return { action: "refuse", reason: `This resume would run on ${modelText(facts.current)}, which the guard refuses, and ${where}.
+${facts.refused}` };
+}
+function tierModels(roles, tier) {
+  const found = [];
+  const walk = (role, chain) => {
+    for (const entry of roles[role] ?? []) {
+      const candidate = parseCandidate(entry);
+      if (candidate === undefined)
+        continue;
+      if (candidate.kind === "model")
+        found.push(candidate.ref);
+      else if (!chain.includes(candidate.role) && Object.hasOwn(roles, candidate.role))
+        walk(candidate.role, [...chain, candidate.role]);
+    }
+  };
+  if (tier !== undefined && Object.hasOwn(roles, tier))
+    walk(tier, [tier]);
+  return found;
 }
 
 // plugins/model-roles/src/rpc.ts
@@ -4999,7 +5125,20 @@ function readSnapshot(value) {
     snapshot.explore = { policy: value.explore.policy, eligible: value.explore.eligible.filter((a) => typeof a === "string"), arm: value.explore.arm, p: value.explore.p };
   if (value.failedOver === true)
     snapshot.failedOver = true;
+  if (value.rule === "guard-reroute")
+    snapshot.rule = "guard-reroute";
+  if (Array.isArray(value.overflowed)) {
+    const overflowed = value.overflowed.filter((entry) => typeof entry === "string");
+    if (overflowed.length > 0)
+      snapshot.overflowed = overflowed;
+  }
   return snapshot;
+}
+function hasOverflowed(snapshot, model) {
+  return (snapshot?.overflowed ?? []).some((entry) => {
+    const candidate = parseCandidate(entry);
+    return candidate?.kind === "model" && candidate.ref.providerID === model.providerID && candidate.ref.id === model.id;
+  });
 }
 function snapshotModel(snapshot) {
   const candidate = parseCandidate(snapshot.model);
@@ -5236,8 +5375,10 @@ var finishedAt = (event) => {
   return Number.isFinite(at) ? at : Date.now();
 };
 var SUCCEEDED_EVENT = "session.execution.succeeded";
+var STARTED_EVENT = "session.execution.started";
 var CREATED_EVENT = "session.created";
 var CONFIG_EVENT = "config.updated";
+var CHILD_LOOKUP_MS = 3000;
 var PENDING_SPAWN_MS = 10 * 60000;
 function withRoleField(input, description) {
   const schema = input;
@@ -5309,6 +5450,7 @@ var src_default = Plugin.define({
       } catch {}
     });
     let health2 = {};
+    let healthHistory = [];
     try {
       health2 = pruneHealth(readHealth(await ctx.storage.get(HEALTH_KEY)), Date.now(), runtime.flapWindowMs);
     } catch {
@@ -5447,8 +5589,21 @@ ${refs.size}`;
     };
     scheduleExpiry();
     const markFailed = async (ref, kind, error) => {
-      const record = recordFailure(health2, ref, kind, error, Date.now(), runtime);
+      if (kind === "context-length")
+        return 0;
+      const now = Date.now();
+      const record = recordFailure(health2, ref, kind, error, now, runtime);
       health2 = record.state;
+      if (record.tripped) {
+        const scope = failureScope(kind);
+        healthHistory = recordCooldown(healthHistory, {
+          at: now,
+          subject: scope === "provider" ? providerKey(ref.providerID) : healthKey(ref),
+          scope,
+          kind,
+          cooldownMs: record.cooldownMs
+        });
+      }
       try {
         await ctx.storage.set(HEALTH_KEY, health2);
       } catch {}
@@ -5486,6 +5641,73 @@ ${refs.size}`;
       for (const notice of decideRecovery(noticeState, model))
         await notify(notice.sessionID, notice.text, "recovery");
     };
+    const executionOf = new Map;
+    const noteExecution = (sessionID, id) => {
+      executionOf.delete(sessionID);
+      executionOf.set(sessionID, id);
+      if (executionOf.size > 500)
+        executionOf.delete(executionOf.keys().next().value);
+    };
+    const contextLimits = () => {
+      const limits = new Map;
+      for (const model of available) {
+        const context = model.limit?.context;
+        if (typeof context === "number" && context > 0)
+          limits.set(healthKey(model), context);
+      }
+      return limits;
+    };
+    const contextTarget = async (overflow) => {
+      const { sessionID, notifyTo, failed } = overflow;
+      const stored = sessionID === undefined ? undefined : await snapshotOf(sessionID);
+      const role = stored?.tier ?? overflow.spawnRole ?? overflow.role;
+      const tier = contextTier(role, failed);
+      const limits = contextLimits();
+      const allowed = [];
+      for (const ref of contextCandidates(tier, view()))
+        if (await judge({ sessionID: notifyTo, agent: overflow.agent ?? "" }, overflow.agent ?? "", ref) === undefined)
+          allowed.push(ref);
+      return { role, tier, limits, limit: limits.get(healthKey(failed)), target: contextFallback(allowed, failed, limits) };
+    };
+    const onContextOverflow = async (overflow) => {
+      const { sessionID, notifyTo, failed } = overflow;
+      const key = sessionID ?? `${notifyTo}\x00${overflow.agent ?? ""}`;
+      if (!claimContextNotice(noticeState, key, sessionID === undefined ? undefined : executionOf.get(sessionID), Date.now()))
+        return;
+      const { role, tier, limits, limit, target } = await contextTarget(overflow);
+      if (target === undefined)
+        return notify(notifyTo, contextNote(failed, limit, tier), "context-length");
+      let resumable;
+      if (overflow.isChild && sessionID !== undefined) {
+        try {
+          await ctx.session.switchModel({ sessionID, model: target });
+          noteFailover(sessionID, target, role, failed);
+          await outcomes.failover(sessionID);
+          resumable = sessionID;
+          await recordReceipt({
+            at: Date.now(),
+            agent: overflow.agent ?? "",
+            source: "agent",
+            ...tier === undefined ? {} : { tier },
+            model: modelLabel(target),
+            rule: "model-default",
+            fallbacks: [`${modelLabel(failed)}: ${CONTEXT_FALLBACK_REASON}`],
+            warnings: []
+          });
+        } catch {}
+      }
+      await notify(notifyTo, contextSwitchNote({ failed, limit, target, targetLimit: limits.get(healthKey(target)), tier, resumable }), "context-length");
+    };
+    const onContextOverflowToolError = async (overflow) => {
+      const { sessionID, notifyTo, failed } = overflow;
+      if (!claimToolContextNotice(noticeState, sessionID ?? `${notifyTo}\x00${overflow.agent ?? ""}`, Date.now()))
+        return;
+      const { tier, limits, limit, target } = await contextTarget(overflow);
+      const text = target === undefined ? contextNote(failed, limit, tier) : contextSwitchNote({ failed, limit, target, targetLimit: limits.get(healthKey(target)), tier });
+      await notify(notifyTo, text, "context-length");
+    };
+    const contextTier = (role, failed) => role !== undefined && Object.hasOwn(options.roles, role) ? role : rolesListing(options, failed)[0];
+    const contextCandidates = (tier, healthOf) => tier === undefined ? [] : tierModels(options.roles, tier).filter((ref) => healthOf(ref) === undefined && candidateStatus(modelText(ref), available, options.roles, {}, Date.now()).status === "available");
     const childModel = async (message) => {
       const id = childSessionID(message);
       if (id === undefined)
@@ -5656,18 +5878,19 @@ ${refs.size}`;
       }
       return true;
     };
-    const failoverSnapshot = (base, model, role) => ({
+    const failoverSnapshot = (base, model, role, overflowed) => ({
       ...base ?? { configRevision: configRevision(options) },
       ...base?.tier === undefined && role !== undefined ? { tier: role } : {},
+      ...overflowed === undefined ? {} : { overflowed: [...new Set([...base?.overflowed ?? [], modelLabel(overflowed)])] },
       model: modelLabel(model),
       at: Date.now(),
       failedOver: true
     });
-    const noteFailover = (childID, model, role) => {
+    const noteFailover = (childID, model, role, overflowed) => {
       if (snapshotsClosed)
         return;
       const known = childModels.get(childID);
-      const mine = failoverSnapshot(known, model, role);
+      const mine = failoverSnapshot(known, model, role, overflowed);
       childModels.set(childID, mine);
       const background = (async () => {
         if (known === undefined) {
@@ -5677,7 +5900,7 @@ ${refs.size}`;
           if (snapshotsClosed || childModels.get(childID) !== mine)
             return;
           if (stored !== undefined)
-            childModels.set(childID, failoverSnapshot(stored, model, role));
+            childModels.set(childID, failoverSnapshot(stored, model, role, overflowed));
           else if (role === undefined) {
             childModels.delete(childID);
             return;
@@ -5745,6 +5968,10 @@ ${refs.size}`;
       const isChild = typeof session.parentID === "string" && session.parentID !== "";
       const spawnRole = isChild ? await spawnRoleOf(sessionID) : undefined;
       const role = spawnRole ?? (agent === undefined ? undefined : roleOf(agent, options.agents, options.implicit));
+      if (kind === "context-length") {
+        const notifyTo = isChild ? session.parentID : sessionID;
+        return onContextOverflow({ sessionID, notifyTo, failed, role, spawnRole, agent: session.agent, isChild });
+      }
       const target = cooldownMs > 0 ? fallbackTarget(options, available, view(), role, failed) : undefined;
       const facts = { failed, kind, cooldownMs, target };
       if (isChild) {
@@ -5774,9 +6001,11 @@ ${refs.size}`;
         warn(`session ${sessionID}: ${failureNote(facts)}`);
     };
     const switching = new Map;
-    const switchWithin = async (sessionID, model, role) => {
+    const switchWithin = async (sessionID, model, role, onSwitched) => {
       const tracked = Promise.resolve().then(() => ctx.session.switchModel({ sessionID, model })).then(() => true, () => false).then((ok) => {
-        if (ok) {
+        if (ok && onSwitched !== undefined)
+          onSwitched();
+        else if (ok) {
           noteFailover(sessionID, model, role);
           outcomes.failover(sessionID).catch(() => {});
         }
@@ -5808,7 +6037,7 @@ ${refs.size}`;
         triedModels.delete(event.sessionID);
       const error = event.error;
       const kind = classifyFailure(error);
-      if (kind === undefined)
+      if (kind === undefined || kind === "context-length")
         return;
       const { providerID, id, variant } = event.model;
       const failed = variant ? { providerID, id, variant } : { providerID, id };
@@ -5870,7 +6099,7 @@ ${refs.size}`;
           report2.warnings.push(...tierWarnings(settings, { roles: options.roles, tiers: options.tiers ?? {} }, available));
           if (stuck.length > 0)
             report2.warnings.push(`Agents ${stuck.join(", ")} still run another model than their tier resolves to: re-registering gave up after ${MAX_REREGISTER} tries (a later plugin or config keeps setting their model).`);
-          const content = [formatCheck(report2), ...exploring(explorer.options) ? [`exploration: on for ${explorer.options.agents.join(", ")}, \u03B5=${explorer.options.explore}`] : [], ...formatReceipts(receipts), ...formatHistory(autoHistory), ...formatUsage(summarizeUsage(await outcomes.records(), Date.now()))].join(`
+          const content = [formatCheck(report2), ...exploring(explorer.options) ? [`exploration: on for ${explorer.options.agents.join(", ")}, \u03B5=${explorer.options.explore}`] : [], ...formatHealthHistory(healthHistory, Date.now()), ...formatReceipts(receipts), ...formatHistory(autoHistory), ...formatUsage(summarizeUsage(await outcomes.records(), Date.now()))].join(`
 `);
           return { content, metadata: { roles: report2.roles.length, agents: report2.agents.length, auto: autoHistory.length, spawns: receipts.length } };
         }
@@ -6233,6 +6462,9 @@ ${refs.size}`;
       const revision = configRevision(options);
       const stripped = planSpawn(event.input, options, available, view()).input;
       if (explicitModel !== undefined) {
+        const refusal = await judge(event, agent, explicitModel);
+        if (refusal !== undefined)
+          throw new Error(refusal);
         event.input = stripped;
         await writeSnapshot(childID, { model: modelLabel(explicitModel), configRevision: revision, at: Date.now() });
         await forgetChildRole(childID);
@@ -6254,13 +6486,40 @@ ${refs.size}`;
         }
       }
       event.input = stripped;
-      const snapshot = await snapshotOf(childID);
-      if (snapshot === undefined)
-        return true;
+      let snapshot = await snapshotOf(childID);
+      let fromSession = false;
+      if (snapshot === undefined) {
+        if (guard2 === undefined)
+          return true;
+        const lookup = (async () => {
+          const session = await ctx.session.get({ sessionID: childID }).catch(() => {
+            return;
+          });
+          return session === undefined ? undefined : await runningModel(session, await listAgents().catch(() => [])).catch(() => {
+            return;
+          });
+        })();
+        let timer;
+        const expired = new Promise((resolve2) => {
+          timer = setTimeout(() => resolve2("late"), CHILD_LOOKUP_MS);
+          timer.unref?.();
+        });
+        const found = await Promise.race([lookup, expired]);
+        clearTimeout(timer);
+        if (found === "late")
+          warn(`resume of ${childID}: the child's model lookup took longer than ${CHILD_LOOKUP_MS}ms; the guard is not applied`);
+        const running = found === "late" ? undefined : found;
+        if (running === undefined) {
+          await recordReceipt({ at: Date.now(), agent, source: "agent", rule: "model-default", fallbacks: [], warnings: ["model unknown; guard not applied"] });
+          return true;
+        }
+        const role = await spawnRoleOf(childID);
+        snapshot = { model: modelLabel(running), ...role === undefined ? {} : { tier: role }, configRevision: revision, at: Date.now() };
+        fromSession = true;
+      }
       const model = snapshotModel(snapshot);
       const reason = model === undefined ? "the snapshot names no model" : unavailableReason(model, available);
-      const refused = model === undefined || reason !== undefined ? undefined : await judge(event, agent, model);
-      if (model === undefined || reason !== undefined || refused !== undefined) {
+      if (model === undefined || reason !== undefined) {
         await recordReceipt({
           at: Date.now(),
           agent,
@@ -6268,10 +6527,57 @@ ${refs.size}`;
           ...snapshot.tier === undefined ? {} : { tier: snapshot.tier },
           rule: "model-default",
           fallbacks: [],
-          warnings: [`the child's snapshot model ${snapshot.model} is not usable (${reason ?? refused}); the resume resolves normally`]
+          warnings: [`the child's snapshot model ${snapshot.model} is not usable (${reason}); the resume resolves normally`]
         });
         return true;
       }
+      const refused = await judge(event, agent, model);
+      const tier = snapshot.tier ?? await spawnRoleOf(childID);
+      const usable = refused === undefined ? [] : tierModels(options.roles, tier).filter((m) => unavailableReason(m, available) === undefined);
+      const limits = contextLimits();
+      const judged = await Promise.all(usable.sort((x, y) => Number(view()(x) !== undefined) - Number(view()(y) !== undefined)).map(async (m) => ({ model: m, allowed: await judge(event, agent, m) === undefined, spent: hasOverflowed(snapshot, m) })));
+      const decision = resumeGuard({
+        current: model,
+        refused,
+        tier,
+        candidates: judged.filter((c) => !c.spent),
+        overflowed: judged.filter((c) => c.spent && c.allowed).map((c) => ({ model: c.model, limit: limits.get(healthKey(c.model)) }))
+      });
+      if (decision.action === "refuse")
+        throw new Error(decision.reason);
+      if (decision.action === "switch") {
+        const to = decision.model;
+        const outcome = await switchWithin(childID, to, tier, () => {
+          if (snapshotsClosed)
+            return;
+          childModels.set(childID, {
+            model: modelLabel(to),
+            ...tier === undefined ? {} : { tier },
+            configRevision: configRevision(options),
+            at: Date.now(),
+            rule: "guard-reroute",
+            ...snapshot.overflowed === undefined ? {} : { overflowed: snapshot.overflowed }
+          });
+          persistSnapshot(childID);
+        });
+        if (outcome !== "switched")
+          throw new Error(`This resume would run on ${modelLabel(model)}, which the guard refuses, and switching the child to ${modelLabel(to)} did not complete (${outcome}).`);
+        if (isRecord11(event.input))
+          event.input = { ...event.input, model: modelLabel(to) };
+        await recordReceipt({
+          at: Date.now(),
+          agent,
+          source: "agent",
+          ...tier === undefined ? {} : { tier },
+          model: modelLabel(to),
+          rule: "guard-reroute",
+          fallbacks: [],
+          warnings: [`the child's model ${snapshot.model} is refused by the guard; switched to ${modelLabel(to)}${tier === undefined ? "" : ` (tier ${tier})`}`]
+        });
+        return true;
+      }
+      if (fromSession)
+        await writeSnapshot(childID, snapshot);
       if (isRecord11(event.input))
         event.input = { ...event.input, model: snapshot.model };
       await recordReceipt({
@@ -6679,6 +6985,9 @@ ${refs.size}`;
             return;
           const cooldownMs = await markFailed(failed, kind, { message });
           const role = spawn?.role ?? (agent === undefined ? undefined : roleOf(agent, options.agents, options.implicit));
+          if (kind === "context-length") {
+            return onContextOverflowToolError({ sessionID: childSessionID(message), notifyTo: event.sessionID, failed, role, spawnRole: spawn?.role, agent: agentID });
+          }
           const target = cooldownMs > 0 ? fallbackTarget(options, available, view(), role, failed) : undefined;
           const facts = { failed, kind, cooldownMs, target };
           const resumable = cooldownMs > 0 ? undefined : childSessionID(message);
@@ -6718,6 +7027,8 @@ ${refs.size}`;
             continue;
           const model = settleRequest(requestLog, sessionID, endedAt(event));
           await outcomes.signals(sessionID, NO_SIGNALS);
+          if (model !== undefined)
+            healthHistory = recordRecovery(healthHistory, model.providerID, finishedAt(event));
           await outcomes.end(sessionID, "succeeded", finishedAt(event));
           pruneChildModels();
           if (noticeState.outages.size > 0)
@@ -6756,8 +7067,16 @@ ${refs.size}`;
           const sessionID = event.data?.sessionID;
           if (typeof sessionID === "string") {
             requestLog.delete(sessionID);
+            executionOf.delete(sessionID);
             forgetSession(noticeState, sessionID);
           }
+          continue;
+        }
+        if (type === STARTED_EVENT) {
+          const sessionID = event.data?.sessionID;
+          const id = event.id;
+          if (typeof sessionID === "string" && typeof id === "string")
+            noteExecution(sessionID, id);
           continue;
         }
         if (type === CREATED_EVENT) {
@@ -6839,10 +7158,12 @@ export {
   CATALOG_LIMIT,
   CHECK_TOOL,
   CHECK_TOP_AGENTS,
+  CHILD_LOOKUP_MS,
   CLASSIFY_FALLBACK,
   CLASSIFY_KEY_PREFIX,
   CLASSIFY_TIMEOUT_MS,
   CONFIG_NAMES,
+  CONTEXT_FALLBACK_REASON,
   DECIDER_PROMPT_LIMIT,
   DEFAULT_AUTO_ROLES,
   DEFAULT_AUTO_TIMEOUT_MS,
@@ -6869,6 +7190,7 @@ export {
   FAILURE_CLASSES,
   FALLBACK_HEADER,
   GENERAL_TIER,
+  HEALTH_HISTORY_LIMIT,
   HEALTH_KEY,
   INHERIT_NAMES,
   LEDGER_DEBOUNCE_MS,
@@ -6940,6 +7262,9 @@ export {
   classifyFailure,
   compact,
   configuredModels,
+  contextFallback,
+  contextNote,
+  contextSwitchNote,
   cooldownFor,
   costLabel,
   costTier,
@@ -6962,6 +7287,7 @@ export {
   fallbackTarget,
   findPluginEntry,
   formatCheck,
+  formatHealthHistory,
   formatHistory,
   formatReceipts,
   formatUsage,
@@ -6973,6 +7299,7 @@ export {
   inputCost,
   inputModel,
   isAvailable,
+  isContextLength,
   isExpensive,
   isExpensiveClass,
   isTransient,
@@ -7035,7 +7362,9 @@ export {
   readState,
   readTiers,
   readUsage,
+  recordCooldown,
   recordFailure,
+  recordRecovery,
   resolveRole,
   resolveTier,
   retriesOnModel,

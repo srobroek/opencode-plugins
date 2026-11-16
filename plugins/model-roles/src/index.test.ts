@@ -3563,6 +3563,33 @@ describe("exploration inside a tier", () => {
     )
   })
 
+  test("a context-overflow switch of an explored child ends its arm: the ledger and snapshot say it failed over, the facts stay", async () => {
+    setExploreRandom(() => 0)
+    const wideModels = tierModels.map((m, i) => ({ ...m, limit: { context: i === 0 ? 200_000 : 1_000_000 } })) as Model[]
+    const host = createHost({ agents: [{ id: "plain" }], models: wideModels, options: { ...base, evaluate: on } })
+    host.sessions.set("r", { id: "r" })
+    host.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: ref("high") })
+    const cleanup = await setup(host)
+    try {
+      await spawnTier(host)
+      await born(host, ref("high"))
+      expect(host.storage.get("outcome:c")).not.toHaveProperty("failedOver")
+      const message = "prompt is too long: 213462 tokens > 200000 maximum"
+      host.emit({
+        type: "session.execution.failed",
+        data: { sessionID: "c", error: { type: "provider.invalid-request", message, status: 400, response: { body: JSON.stringify({ type: "error", error: { type: "invalid_request_error", message } }) } } },
+      })
+      await settle()
+      const facts = { policy: "explore-v1", arm: label("high"), p: 0.1 / 3 }
+      expect(host.storage.get("outcome:c")).toMatchObject({ ...facts, failedOver: true })
+      expect(host.storage.get("spawn-model:c")).toMatchObject({ model: haikuLabel, failedOver: true, overflowed: [label("high")], explore: facts })
+    } finally {
+      host.close()
+      await cleanup()
+      setExploreRandom(undefined)
+    }
+  })
+
   test("a resume after a reload goes through the stored snapshot and keeps the arm", async () => {
     let kept = new Map<string, unknown>()
     await withHost(on, 0, async (host) => {

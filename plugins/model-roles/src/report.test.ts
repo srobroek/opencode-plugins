@@ -211,3 +211,12 @@ describe("arm rows", () => {
     expect(lines.find((l) => l.startsWith("    arm p/m#high:"))).toContain("2 runs · 50% ok")
   })
 })
+
+describe("arm rows and failover", () => {
+  test("a run a failover moved off its arm is not credited to the arm", () => {
+    const report = summarizeUsage([rec({ arm: "p/m#high" }), rec({ arm: "p/m#high", failedOver: true }), rec({ arm: "p/m#low", failedOver: true })], NOW)
+    const cheap = report.tiers[0]
+    expect(cheap?.arms?.map((a) => [a.arm, a.n])).toEqual([["p/m#high", 1]])
+    expect(cheap?.total.n).toBe(3)
+  })
+})

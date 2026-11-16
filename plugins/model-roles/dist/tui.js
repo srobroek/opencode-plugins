@@ -482,7 +482,7 @@ var byName = (a, b) => a < b ? -1 : a > b ? 1 : 0;
 function armUsage(records) {
   const byArm = new Map;
   for (const r of records)
-    if (r.arm !== undefined)
+    if (r.arm !== undefined && r.failedOver !== true)
       byArm.set(r.arm, [...byArm.get(r.arm) ?? [], r]);
   return [...byArm.entries()].map(([arm, rs]) => ({ arm, ...stats(rs) })).sort((a, b) => b.n - a.n || byName(a.arm, b.arm));
 }
