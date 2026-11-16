@@ -135,7 +135,9 @@ export async function executeCommit(input: unknown, workspace: string, git: Git 
   const empty = head === undefined ? await git(["hash-object", "-t", "tree", "--stdin"], { stdin: "" }) : undefined
   if (empty !== undefined && !empty.ok) return refuse(empty.reason)
   const baseTree = head ?? (empty?.ok ? empty.stdout.trim() : "")
-  const staged = await git(["diff", "--cached", "--name-only", "--no-renames", "-z"])
+  // --no-relative: under diff.relative=true git lists names relative to a nested workspace
+  // and hides everything outside it, so the boundary check would miss foreign files.
+  const staged = await git(["diff", "--cached", "--name-only", "--no-renames", "--no-relative", "-z"])
   if (!staged.ok) return refuse(staged.reason)
   const foreign = outsideArtifacts(names(staged.stdout), base)
   if (foreign.length)
@@ -156,7 +158,7 @@ export async function executeCommit(input: unknown, workspace: string, git: Git 
     const written = await git(["write-tree"], { env })
     if (!written.ok) return refuse(written.reason)
     const tree = written.stdout.trim()
-    const diff = await git(["diff-tree", "-r", "--name-only", "--no-renames", "-z", baseTree, tree])
+    const diff = await git(["diff-tree", "-r", "--name-only", "--no-renames", "--no-relative", "-z", baseTree, tree])
     if (!diff.ok) return refuse(diff.reason)
     const changed = names(diff.stdout)
     if (!changed.length) return refuse("nothing to commit: the artifacts are unchanged")

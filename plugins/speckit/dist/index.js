@@ -1082,7 +1082,7 @@ async function executeCommit(input, workspace, git = gitIn(workspace)) {
   if (empty !== undefined && !empty.ok)
     return refuse(empty.reason);
   const baseTree = head ?? (empty?.ok ? empty.stdout.trim() : "");
-  const staged = await git(["diff", "--cached", "--name-only", "--no-renames", "-z"]);
+  const staged = await git(["diff", "--cached", "--name-only", "--no-renames", "--no-relative", "-z"]);
   if (!staged.ok)
     return refuse(staged.reason);
   const foreign = outsideArtifacts(names(staged.stdout), base);
@@ -1103,7 +1103,7 @@ async function executeCommit(input, workspace, git = gitIn(workspace)) {
     if (!written.ok)
       return refuse(written.reason);
     const tree = written.stdout.trim();
-    const diff = await git(["diff-tree", "-r", "--name-only", "--no-renames", "-z", baseTree, tree]);
+    const diff = await git(["diff-tree", "-r", "--name-only", "--no-renames", "--no-relative", "-z", baseTree, tree]);
     if (!diff.ok)
       return refuse(diff.reason);
     const changed = names(diff.stdout);

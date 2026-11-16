@@ -184,6 +184,31 @@ describe("executeCommit", () => {
     expect(git("ls-tree", "-r", "--name-only", "HEAD")).toBe("README.md")
   })
 
+  describe("with diff.relative=true in a nested workspace", () => {
+    const nested = () => {
+      git("config", "diff.relative", "true")
+      write("pkg/specs/001-a/spec.md")
+      return join(repo, "pkg")
+    }
+
+    test("a staged artifact still counts as the workspace's own", async () => {
+      const workspace = nested()
+      git("add", "pkg/specs/001-a/spec.md")
+      const result = await executeCommit({ message: "x" }, workspace)
+      expect(result.metadata.ok).toBe(true)
+      expect(committedFiles()).toEqual(["pkg/specs/001-a/spec.md"])
+    })
+
+    test("a foreign file staged outside the workspace is still refused", async () => {
+      const workspace = nested()
+      write("src/b.ts")
+      git("add", "src/b.ts")
+      const result = await executeCommit({ message: "x" }, workspace)
+      expect(result.metadata.ok).toBe(false)
+      expect(result.content).toContain("src/b.ts")
+    })
+  })
+
   test("reports nothing to commit when the artifacts are unchanged", async () => {
     const result = await executeCommit({ message: "x" }, repo)
     expect(result.metadata.ok).toBe(false)
