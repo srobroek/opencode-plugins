@@ -63,21 +63,21 @@ describe("checkDebugWrite", () => {
 })
 
 describe("guardDebugWrite", () => {
-  const opts = { home, startDir: join(home, "repo") }
+  const options = () => ({ home, startDir: join(home, "repo") })
   test("edit, write and patch targets are all checked", () => {
     const ok = join(worktrees, "debug-foo/src/a.ts")
     const bad = join(home, "repo/src/a.ts")
-    expect(guardDebugWrite("edit", { path: ok }, "debug", opts)).toBeUndefined()
-    expect(guardDebugWrite("write", { path: bad }, "debug", opts)).toBeString()
+    expect(guardDebugWrite("edit", { path: ok }, "debug", options())).toBeUndefined()
+    expect(guardDebugWrite("write", { path: bad }, "debug", options())).toBeString()
     const patch = `*** Begin Patch\n*** Add File: ${ok}\n+x\n*** Update File: ${bad}\n*** End Patch`
-    expect(guardDebugWrite("patch", { patchText: patch }, "debug", opts)).toBeString()
+    expect(guardDebugWrite("patch", { patchText: patch }, "debug", options())).toBeString()
   })
   test("a write call with no readable target is refused", () => {
-    expect(guardDebugWrite("edit", {}, "debug", opts)).toBeString()
-    expect(guardDebugWrite("patch", { patchText: "nothing" }, "debug", opts)).toBeString()
+    expect(guardDebugWrite("edit", {}, "debug", options())).toBeString()
+    expect(guardDebugWrite("patch", { patchText: "nothing" }, "debug", options())).toBeString()
   })
   test("other agents and other tools are not guarded", () => {
-    expect(guardDebugWrite("edit", { path: join(home, "repo/a.ts") }, "build", opts)).toBeUndefined()
-    expect(guardDebugWrite("read", { path: join(home, "repo/a.ts") }, "debug", opts)).toBeUndefined()
+    expect(guardDebugWrite("edit", { path: join(home, "repo/a.ts") }, "build", options())).toBeUndefined()
+    expect(guardDebugWrite("read", { path: join(home, "repo/a.ts") }, "debug", options())).toBeUndefined()
   })
 })
