@@ -23,3 +23,15 @@ Read when two sides of a boundary must agree on names, shapes, or casing: genera
 **Do not:** let a mock transport stand in for the contract. A mock agrees with whatever the client sends, so name, casing, and schema mismatches pass.
 
 **Exception:** unit tests of client logic can use a fake transport, as long as the fake is itself checked against the real surface (see [verification.md](verification.md)).
+
+## Stubs behind a contract
+
+Read when a consumer is built before the provider exists. When to stub and how to swap are in `quality-code-policy`; the conformance suite is in `quality-testing`'s `doubles.md`.
+
+**Do:** put the dependency behind the contract's interface (trait, interface, protocol). Consumers take the interface, so a swap changes only wiring. Use the contract's shared types (generated from the schema, or the one shared types module).
+**Do not:** copy a contract type into a stub or consumer, or define the interface inside the stub.
+
+**Do:** mark each stub `// STUB(<task-id>): what this fakes` (`#` in Python, TOML and YAML). One marker names one task; a task may cover several markers. Keep stubs minimal and deterministic: implement the contract, nothing more.
+**Do not:** let a stub on a production path silently return plausible fake data. Where it affects behavior, say so with a capability flag or a "not yet supported" error.
+
+Drift checks above still apply: regenerate shared types in the same change as a contract change. Language examples: [rust.md](rust.md), [python.md](python.md), [typescript.md](typescript.md), [go.md](go.md).

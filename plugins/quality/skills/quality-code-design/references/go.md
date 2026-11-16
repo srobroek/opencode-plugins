@@ -91,3 +91,20 @@ Good: parse flags in `main`, call one transformation function, and handle I/O er
 **Do not:** equate one consumer with "no useful boundary," or multiple files with maintainability.
 
 **Exception:** an established CLI framework can reduce present flag/subcommand complexity. Use its ordinary conventions without inventing a second framework around it.
+
+## Stubs behind a contract interface
+
+**Do:** satisfy the contract's interface in the stub, import the shared types from the contract package, and mark it.
+
+```go
+// STUB(task-id): always unsupported; real pricing service not built yet
+type stubQuotes struct{}
+
+var _ contract.Quotes = stubQuotes{} // compile-time conformance; contract.Quote is the shared type
+
+func (stubQuotes) Quote(ctx context.Context, sku string) (contract.Quote, error) {
+	return contract.Quote{}, contract.ErrUnsupported
+}
+```
+
+See [contracts.md](contracts.md).

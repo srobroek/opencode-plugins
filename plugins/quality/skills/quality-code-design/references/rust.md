@@ -116,3 +116,19 @@ Applications can use `anyhow` (or `eyre`) at the binary edge to add context; lib
 **Do not:** derive `Deserialize` on an invariant-bearing newtype without validation; it reopens the invalid states the constructor closed.
 
 Persistence patterns (compare-and-set transitions, append-only migrations) are in [persistence.md](persistence.md). With `sqlx::migrate!` or another embed macro, a new migration file is not applied until the crate recompiles; add `println!("cargo:rerun-if-changed=migrations")` to `build.rs`. For wire casing, set `#[serde(rename_all = "camelCase")]` once per type rather than renaming fields ([contracts.md](contracts.md)).
+
+## Stubs behind a contract trait
+
+**Do:** implement the contract's trait in the stub, import the shared types from the contract crate, and mark it.
+
+```rust
+use contract::{Quote, QuoteError, Quotes}; // shared types, never redefined here
+
+// STUB(task-id): fixed quote; real pricing service not built yet
+pub struct StubQuotes;
+impl Quotes for StubQuotes {
+    fn quote(&self, _sku: &str) -> Result<Quote, QuoteError> { Err(QuoteError::Unsupported) }
+}
+```
+
+Consumers take `impl Quotes` (or `&dyn Quotes`); a swap changes the constructor call. See [contracts.md](contracts.md).
