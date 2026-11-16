@@ -5,7 +5,7 @@ Checked 2026-11-16.
 Tools that work the same in every language. A language's `## Concerns` table points here
 with `Shared: <id>`. [concerns.md](concerns.md) defines the concerns and the install policy:
 detect the tool, recommend the install, and ask the user before you run it. The Maintenance
-cell is a minimum version, not a pin; use the latest release the manager offers and record the
+cell is a minimum version. Use the latest release the manager offers and record the
 version you used. `Family` marks a tool with one binding per language, listed in its section;
 `Service` marks a hosted service without releases.
 

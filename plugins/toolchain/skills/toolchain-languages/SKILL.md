@@ -74,7 +74,7 @@ Starting points, not rules:
 | Service clients | The SDK for control-plane calls and simple exact requests; a maintained higher-level library when it removes a concrete burden (mapping, pagination, multipart, leasing, caching, replay) or is markedly simpler, even when an official helper exists |
 | IDs and time | UUIDv7 for sortable ids (UUIDv4 when creation time must stay private); timezone-aware UTC instants |
 | Feature flags | Applications/services/CLIs: OpenFeature with one provider over flags.yaml, SSM or AppConfig, chosen by need; ask before writing a missing provider. Libraries take caller decisions; OpenCode plugins keep options. See `quality-code-design`'s `feature-flags.md` |
-| MCP | The official SDK for the language, pinned; stdio locally, Streamable HTTP remotely |
+| MCP | The official SDK for the language, at least its current release; stdio locally, Streamable HTTP remotely |
 | Tests and quality checks | Every language fills the concerns in [references/concerns.md](references/concerns.md) in its own table; report a concern you could not run as not run |
 
 ## Java and .NET
