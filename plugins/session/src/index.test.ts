@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
 import { assistant, compaction, idle, SUMMARY, session, tool, user } from "./fixtures.ts"
 import plugin, { apiSource, ctxSource, parseSkill, pickSource, TOOL_NAME } from "./index.ts"
@@ -229,4 +232,88 @@ describe("setup", () => {
     const parsed = parseSkill("---\nname: x\ndescription: \"Does y\"\n---\n\n# Body\n")
     expect(parsed).toEqual({ name: "x", description: "Does y", content: "# Body" })
   })
+})
+
+describe("a stop through the tool call's signal", () => {
+  type Execute = (input: unknown, context: unknown) => Promise<{ content: string; metadata: Record<string, unknown> }>
+  const alive = (pid: number): boolean => {
+    try {
+      process.kill(pid, 0)
+      return true
+    } catch {
+      return false
+    }
+  }
+  const scratch = async (run: (dir: string) => Promise<void>) => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "session-stop-")))
+    try {
+      await run(dir)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+  const pidOf = async (file: string): Promise<number> => {
+    while (!existsSync(file) || readFileSync(file, "utf8").trim() === "") await Bun.sleep(10)
+    return Number(readFileSync(file, "utf8").trim())
+  }
+  const gone = async (pid: number): Promise<boolean> => {
+    for (let i = 0; i < 100 && alive(pid); i++) await Bun.sleep(20)
+    return !alive(pid)
+  }
+
+  test("aborting session_resume between api pages stops the child and requests no later page", () =>
+    scratch(async (dir) => {
+      const log = join(dir, "requests.log")
+      const pidFile = join(dir, "page2.pid")
+      const script = join(dir, "opencode")
+      const page = '{"data":[{"id":"ses_a","projectID":"p","time":{"created":1,"updated":1},"location":{"directory":"/r"}}],"cursor":{"next":"c1"}}'
+      writeFileSync(
+        script,
+        `#!/bin/sh\necho "$3" >> '${log}'\ncase "$3" in\n*cursor=c1*) echo $$ > '${pidFile}'; exec sleep 30;;\n*) echo '${page}';;\nesac\n`,
+      )
+      chmodSync(script, 0o755)
+      const fake = createFakeContext({ ...fixture(), directory: "/repo/main", options: { api: { command: [script] } } })
+      const cleanup = await plugin.setup(fake.context)
+      const execute = fake.tools.get(TOOL_NAME)?.execute as Execute
+      const controller = new AbortController()
+      const running = execute({ mode: "list", source: "api" }, { sessionID: "ses_self0000000001", signal: controller.signal })
+      const pid = await pidOf(pidFile)
+      controller.abort()
+      await running
+      expect(await gone(pid)).toBe(true)
+      expect(readFileSync(log, "utf8").trim().split("\n")).toHaveLength(2)
+      await (cleanup as () => Promise<void>)()
+    }), 15_000)
+
+  test("aborting session_resume stops the git read it started", () =>
+    scratch(async (dir) => {
+      const bin = join(dir, "bin")
+      mkdirSync(bin)
+      const pidFile = join(dir, "git.pid")
+      writeFileSync(join(bin, "git"), `#!/bin/sh\necho $$ > '${pidFile}'\nexec sleep 30\n`)
+      chmodSync(join(bin, "git"), 0o755)
+      const path = process.env.PATH
+      process.env.PATH = `${bin}:${path}`
+      try {
+        const base = fixture()
+        const sessions = base.sessions.map((entry) =>
+          entry.id === "ses_self0000000001" ? { ...entry, location: { directory: dir } } : entry,
+        )
+        const fake = createFakeContext({ ...base, sessions, directory: dir })
+        const cleanup = await plugin.setup(fake.context)
+        const execute = fake.tools.get(TOOL_NAME)?.execute as Execute
+        const controller = new AbortController()
+        const running = execute({ mode: "list" }, { sessionID: "ses_self0000000001", signal: controller.signal })
+        const pid = await pidOf(pidFile)
+        const stopped = Date.now()
+        controller.abort()
+        await running
+        // git's own 10 s timeout would also end the child, so the stop must beat it.
+        expect(Date.now() - stopped).toBeLessThan(5_000)
+        expect(await gone(pid)).toBe(true)
+        await (cleanup as () => Promise<void>)()
+      } finally {
+        process.env.PATH = path
+      }
+    }), 15_000)
 })

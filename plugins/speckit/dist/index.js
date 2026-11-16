@@ -993,7 +993,7 @@ async function run(argv, cwd, deadline, signal) {
   if (testSpawn)
     return testSpawn(argv, { cwd, timeout: remaining });
   try {
-    const proc = Bun.spawn(argv, { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", timeout: remaining, ...signal ? { signal } : {} });
+    const proc = Bun.spawn(argv, { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", timeout: remaining, env: process.env, ...signal ? { signal } : {} });
     const [stdout, stderr, exitCode] = await Promise.all([
       new Response(proc.stdout).text(),
       new Response(proc.stderr).text(),

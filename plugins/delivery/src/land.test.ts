@@ -2496,7 +2496,7 @@ describe("delivery_land brings the landed commits local before proving their sha
     expect(fetches(calls)).toHaveLength(2)
   })
 
-  test("an abort during the merge still records the receipt and later commands run unsignalled", async () => {
+  test.each([false, true])("an abort during the merge still records the receipt and later commands run unsignalled (setupAutoDelete %p)", async (setupAutoDelete) => {
     const { canonical, receipts } = repository()
     mkdirSync(join(canonical, ".beads"))
     const { run, calls } = runner({ prView: [completed(githubPr()), completed(mergedGithubPr())] }, canonical)
@@ -2512,7 +2512,7 @@ describe("delivery_land brings the landed commits local before proving their sha
       return run(argv, options)
     }
     const outcome = await landPullRequest(
-      { pr: 470, ...REVIEWED },
+      { pr: 470, ...REVIEWED, ...(setupAutoDelete ? { setupAutoDelete } : {}) },
       { run: aborting, cwd: canonical, now: () => NOW, receiptsDirectory: receipts, env: {}, signal: controller.signal },
     )
 
