@@ -209,6 +209,8 @@ One tool per gate.
 
 Security rules in a linter check what the document declares, not how the server behaves.
 
+Versions, install commands, licences and tradeoffs for Schemathesis, Pact, Hurl, oasdiff and k6 are in `toolchain-languages`' [shared-tools.md](../toolchain-languages/references/shared-tools.md); this table gives only the choice per gate.
+
 ## Rules
 
 1. State the protocol, the contract owner, the version and the support window.
