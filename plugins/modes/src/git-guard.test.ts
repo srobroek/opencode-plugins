@@ -245,6 +245,19 @@ describe("output options", () => {
     `git worktree remove ${CHECKOUT}`,
     `git worktree remove ${WORKTREES}/subagent-x`,
     "git worktree prune",
+    'git diff --output "$OUT"',
+    "git diff --output=$HOME/x.patch",
+    "git diff --output=`echo x`",
+    `git diff --output=${WT}/*.patch`,
+    "git diff --output={a,b}.patch",
+    "git diff --output=~root/x.patch",
+    'git format-patch -o "$OUT" HEAD~1',
+    'git worktree add "$TARGET"',
+    `git worktree add ${WORKTREES}/debug-*`,
+    'git worktree remove "$TARGET"',
+    'git bisect run "$SCRIPT"',
+    "git bisect run sh $SCRIPT",
+    "git bisect run sh ~root/x.sh",
   ]
   const allowed = [
     `git format-patch -o ${WT}/patches HEAD~1`,
@@ -260,6 +273,9 @@ describe("output options", () => {
     `git worktree add -f --detach ${WORKTREES}/debug-bar HEAD`,
     `git worktree remove --force ${WT}`,
     "git worktree list",
+    "git diff --output=~/.opencode/debug/d.patch",
+    "git worktree add ~/.local/share/opencode/worktree/h1/debug-bar",
+    `git -C "$ELSEWHERE" log`,
   ]
   test.each(refused)("refuses %j", (command) => {
     expect(forbiddenGit(command, "debug", context)).toBeString()

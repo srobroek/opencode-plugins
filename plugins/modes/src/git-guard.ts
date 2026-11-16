@@ -73,6 +73,8 @@ const WORTH_PARSING = /git|[{*?[$`]/i
 const KEYWORDS = new Set(["if", "then", "else", "elif", "while", "until", "do", "!", "{", "(", "coproc"])
 const INTERPRETERS = /^(python[0-9.]*|node|nodejs|perl|ruby|php|lua|awk|gawk|mawk|osascript|tclsh|Rscript)$/
 const INLINE_CODE_RUNNERS = /^(bun|deno)$/
+/** An operand that the shell or git would expand into something the guard cannot see. A leading `~/` is expanded by the guard. */
+const unsafeOperand = (path: string) => /[$`*?[{]/.test(path) || /^~[^/]/.test(path)
 const unbackslash = (word: string) => word.replace(/\\(.)/gs, "$1")
 const escapeRegex = (text: string) => text.replace(/[.+^${}()|[\]\\*?]/g, "\\$&")
 
@@ -136,9 +138,9 @@ function checkGit(args: readonly string[], ctx: Ctx, cwd: string | undefined): s
       const value = args[++i]
       if (word === "-c" && (value === undefined || !SAFE_CONFIG.test(value.split("=")[0] ?? ""))) return refuse(`git -c ${value ?? ""}`)
       if (value === undefined) return refuse("git -C without a path")
-      if (word === "-C") tree = joinPath(tree, value, ctx.env.home)
+      if (word === "-C") tree = unsafeOperand(value) ? undefined : joinPath(tree, value, ctx.env.home)
     } else if (word.startsWith("-C")) {
-      tree = joinPath(tree, word.slice(2), ctx.env.home)
+      tree = unsafeOperand(word.slice(2)) ? undefined : joinPath(tree, word.slice(2), ctx.env.home)
     } else if (word.startsWith("-c")) {
       if (!SAFE_CONFIG.test(word.slice(2).split("=")[0] ?? "")) return refuse(`git ${word}`)
     } else if (word.startsWith("--exec-path")) {
@@ -153,7 +155,7 @@ function checkGit(args: readonly string[], ctx: Ctx, cwd: string | undefined): s
       const name = word.split("=")[0] as string
       const value = word.includes("=") ? word.slice(word.indexOf("=") + 1) : args[++i]
       if (value === undefined) return refuse(`git ${word} without a value`)
-      if (name === "--work-tree") tree = joinPath(tree, value, ctx.env.home)
+      if (name === "--work-tree") tree = unsafeOperand(value) ? undefined : joinPath(tree, value, ctx.env.home)
       if (name === "--git-dir") gitDir = true
     } else return refuse(`git option ${word}`)
   }
@@ -168,7 +170,7 @@ function checkGit(args: readonly string[], ctx: Ctx, cwd: string | undefined): s
     if (tree === undefined || !scratch(tree, ctx)) return refuse(`git ${sub} outside a debug-* scratch worktree (it would change the user's checkout or shared refs)`)
   }
   const outputs = outputDestinations(sub, rest)
-  if (outputs === undefined) return refuse(`git ${sub} with an output option that has no path`)
+  if (outputs === undefined) return refuse(`git ${sub} with an output path that is missing or cannot be checked`)
   for (const destination of outputs) {
     const reason = checkDestination(destination, tree, ctx)
     if (reason !== undefined) return refuse(`git ${sub} writing to ${destination} (${reason})`)
@@ -223,7 +225,7 @@ function checkGit(args: readonly string[], ctx: Ctx, cwd: string | undefined): s
       if (!["add", "list", "remove", "lock", "unlock", "move", "repair"].includes(action)) return refuse(`git worktree ${action}`)
       if (action === "add" || action === "remove") {
         const target = worktreeTarget(action, rest.slice(1))
-        const resolved = target === undefined ? undefined : joinPath(tree, target, ctx.env.home)
+        const resolved = target === undefined || unsafeOperand(target) ? undefined : joinPath(tree, target, ctx.env.home)
         if (resolved === undefined || !scratch(resolved, ctx)) return refuse(`git worktree ${action} outside a debug-* scratch worktree`)
       }
       break
@@ -241,7 +243,7 @@ function checkRunner(runner: readonly string[], ctx: Ctx, tree: string | undefin
   const { argv } = realCommand(runner)
   const first = argv[0]
   if (first === undefined) return refuse("without a command")
-  if (/[$`*?[{~]/.test(first)) return refuse(`${first}: a variable or glob in the command cannot be checked`)
+  if (unsafeOperand(first)) return refuse(`${first}: a variable or glob in the command cannot be checked`)
   const exe = basename(first)
   const shell = SHELLS.has(exe)
   const inline = shell && argv.slice(1).some((arg) => /^-[a-zA-Z]*c[a-zA-Z]*$/.test(arg))
@@ -254,7 +256,7 @@ function checkRunner(runner: readonly string[], ctx: Ctx, tree: string | undefin
   if (first.includes("/")) script = first
   else if ((shell || INTERPRETERS.test(exe)) && !inline) script = argv.slice(1).find((arg) => !arg.startsWith("-"))
   if (script === undefined) return undefined
-  const resolved = joinPath(tree, script, ctx.env.home)
+  const resolved = unsafeOperand(script) ? undefined : joinPath(tree, script, ctx.env.home)
   return resolved !== undefined && scratch(resolved, ctx) ? undefined : refuse(`${script}: a script outside a debug-* scratch worktree cannot be checked`)
 }
 
@@ -319,7 +321,7 @@ function outputDestinations(sub: string, rest: readonly string[]): string[] | un
     const short = sub === "format-patch" && arg.startsWith("-o")
     if (!long && !short) continue
     const value = long ? (arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : rest[++i]) : arg.length > 2 ? arg.slice(2) : rest[++i]
-    if (value === undefined || value === "") return undefined
+    if (value === undefined || value === "" || unsafeOperand(value)) return undefined
     found.push(value)
   }
   return found

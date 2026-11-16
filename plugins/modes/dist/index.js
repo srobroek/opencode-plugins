@@ -1121,6 +1121,7 @@ var WORTH_PARSING = /git|[{*?[$`]/i;
 var KEYWORDS = new Set(["if", "then", "else", "elif", "while", "until", "do", "!", "{", "(", "coproc"]);
 var INTERPRETERS = /^(python[0-9.]*|node|nodejs|perl|ruby|php|lua|awk|gawk|mawk|osascript|tclsh|Rscript)$/;
 var INLINE_CODE_RUNNERS = /^(bun|deno)$/;
+var unsafeOperand = (path) => /[$`*?[{]/.test(path) || /^~[^/]/.test(path);
 var unbackslash = (word) => word.replace(/\\(.)/gs, "$1");
 var escapeRegex = (text) => text.replace(/[.+^${}()|[\]\\*?]/g, "\\$&");
 function wordPattern(word) {
@@ -1178,9 +1179,9 @@ function checkGit(args, ctx, cwd) {
       if (value === undefined)
         return refuse("git -C without a path");
       if (word === "-C")
-        tree = joinPath(tree, value, ctx.env.home);
+        tree = unsafeOperand(value) ? undefined : joinPath(tree, value, ctx.env.home);
     } else if (word.startsWith("-C")) {
-      tree = joinPath(tree, word.slice(2), ctx.env.home);
+      tree = unsafeOperand(word.slice(2)) ? undefined : joinPath(tree, word.slice(2), ctx.env.home);
     } else if (word.startsWith("-c")) {
       if (!SAFE_CONFIG.test(word.slice(2).split("=")[0] ?? ""))
         return refuse(`git ${word}`);
@@ -1196,7 +1197,7 @@ function checkGit(args, ctx, cwd) {
       if (value === undefined)
         return refuse(`git ${word} without a value`);
       if (name === "--work-tree")
-        tree = joinPath(tree, value, ctx.env.home);
+        tree = unsafeOperand(value) ? undefined : joinPath(tree, value, ctx.env.home);
       if (name === "--git-dir")
         gitDir = true;
     } else
@@ -1219,7 +1220,7 @@ function checkGit(args, ctx, cwd) {
   }
   const outputs = outputDestinations(sub, rest);
   if (outputs === undefined)
-    return refuse(`git ${sub} with an output option that has no path`);
+    return refuse(`git ${sub} with an output path that is missing or cannot be checked`);
   for (const destination of outputs) {
     const reason = checkDestination(destination, tree, ctx);
     if (reason !== undefined)
@@ -1270,7 +1271,7 @@ function checkGit(args, ctx, cwd) {
         return refuse(`git worktree ${action}`);
       if (action === "add" || action === "remove") {
         const target = worktreeTarget(action, rest.slice(1));
-        const resolved = target === undefined ? undefined : joinPath(tree, target, ctx.env.home);
+        const resolved = target === undefined || unsafeOperand(target) ? undefined : joinPath(tree, target, ctx.env.home);
         if (resolved === undefined || !scratch(resolved, ctx))
           return refuse(`git worktree ${action} outside a debug-* scratch worktree`);
       }
@@ -1285,7 +1286,7 @@ function checkRunner(runner, ctx, tree) {
   const first = argv[0];
   if (first === undefined)
     return refuse("without a command");
-  if (/[$`*?[{~]/.test(first))
+  if (unsafeOperand(first))
     return refuse(`${first}: a variable or glob in the command cannot be checked`);
   const exe = basename2(first);
   const shell = SHELLS.has(exe);
@@ -1302,7 +1303,7 @@ function checkRunner(runner, ctx, tree) {
     script = argv.slice(1).find((arg) => !arg.startsWith("-"));
   if (script === undefined)
     return;
-  const resolved = joinPath(tree, script, ctx.env.home);
+  const resolved = unsafeOperand(script) ? undefined : joinPath(tree, script, ctx.env.home);
   return resolved !== undefined && scratch(resolved, ctx) ? undefined : refuse(`${script}: a script outside a debug-* scratch worktree cannot be checked`);
 }
 function changesTree(sub, rest) {
@@ -1357,7 +1358,7 @@ function outputDestinations(sub, rest) {
     if (!long && !short)
       continue;
     const value = long ? arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : rest[++i] : arg.length > 2 ? arg.slice(2) : rest[++i];
-    if (value === undefined || value === "")
+    if (value === undefined || value === "" || unsafeOperand(value))
       return;
     found.push(value);
   }
