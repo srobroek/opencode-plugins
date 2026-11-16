@@ -44,7 +44,8 @@ modified, the verdict a detached `bd dolt push` left in `.beads/last-push.log`
 (consumed when read), and an inherited `BEADS_DIR` that points at another
 repository's store.
 
-The `subagent` tool also waits for gate admission.
+Only mutating `bd` commands wait for gate admission. A `subagent` spawn, a shell command
+that writes no bd store, and every read or edit pass without waiting on the ledger.
 
 ## Session lifecycle
 
