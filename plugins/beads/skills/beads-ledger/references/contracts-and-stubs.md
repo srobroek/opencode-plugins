@@ -152,12 +152,14 @@ S's id exists only after the create, so write the stub markers when T's work sta
 
 **When the plan wired T to B with a hard edge (retrofit only):**
 
-1. Run `bd dep remove T B`.
-2. File S:
+1. Check that `bd dep list T` and `bd dep list B` both show C `via blocks`. Add a
+   missing edge with `bd dep add T C` or `bd dep add B C`.
+2. Run `bd dep remove T B`.
+3. File S:
    `bd create "Replace <stub> with <real B>" --type task --labels stub --parent <consumer-epic> --metadata '{"execution_agent_type":"implementer"}' --description "<where the stub lives, what it fakes, which runner covers it>" --acceptance "Real B wired in place of the stub; B passes C's runner; T's tests pass against B; no STUB(<S-id>) markers remain."`
-3. Add edges 3, 4 and 5: `bd dep add S B`, `bd dep add S T`,
+4. Add edges 3, 4 and 5: `bd dep add S B`, `bd dep add S T`,
    `bd dep add T B --type related`.
-4. Run `bd label add T soft-blocked` and
+5. Run `bd label add T soft-blocked` and
    `bd comments add T "Soft-blocked on B; built against STUB(<S-id>), conforming to C"`.
 
 When you retrofit more than one pair, put the edge changes in one `bd batch`.
@@ -180,8 +182,10 @@ needs more, C had a gap. Fix C with a fixture that captures the gap.
 
 **Release gate:**
 
-- `bd list --label stub --status open` is empty, and
-  `git grep -E 'STUB\([A-Za-z0-9._-]+\)'` finds no marker.
+- `bd list --label stub --status open,in_progress,blocked,deferred` is empty.
+  The list covers every status except `closed`, and it includes split stub
+  beads that leave no marker in code.
+- `git grep -E 'STUB\([A-Za-z0-9._-]+\)'` finds no marker.
   Check both: a closed swap bead can leave a marker behind.
 - The staleness check of every contract passes.
 - A release-gate bead queries the `stub` label. Do not give it hard edges to each
@@ -220,8 +224,9 @@ needs more, C had a gap. Fix C with a fixture that captures the gap.
 - **File a breaking change as a new contract bead C2.** Do not edit C in place.
   File one swap bead S2 for each affected stub, with `bd dep add S2 C2` and edges
   3 and 4 as before. Run every implementation, stubs included, against C2's runner.
-- **When only one implementation passes a fixture, the contract is wrong or
-  incomplete.** Fix C. Do not special-case the implementation.
+- **When only one implementation passes a fixture, compare the fixture with C's
+  specification.** If the fixture matches the specification, fix the failing
+  implementation. If it does not, fix C. Never special-case one implementation.
 
 ## Keep swaps moving
 
@@ -235,6 +240,6 @@ needs more, C had a gap. Fix C with a fixture that captures the gap.
   on the blocking PR or bead. The watch wakes the agent when the blocker lands.
 - **Track the trend of open stubs, not only the count.** The count can rise while
   swaps land, because new work files new stubs. Record the count from
-  `bd count --label stub --status open` for each workstream in its readiness note.
+  `bd list --label stub --status open,in_progress,blocked,deferred --json | jq length` for each workstream in its readiness note.
 
 When a stub, swap or contract misbehaves, read [pitfalls.md](pitfalls.md).

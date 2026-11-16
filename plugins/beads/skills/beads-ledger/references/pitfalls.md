@@ -28,7 +28,7 @@
 
 - **Symptom:** `bd dep list <T>` shows the producer B `via blocks`. T stays out of `bd ready` after C closes.
 - **Cause:** The plan gave T a hard edge on B, not on C. A `blocks` edge hides its dependent until the blocker closes.
-- **Fix:** Run `bd dep remove T B` and `bd dep add T B --type related`. Then file the swap bead with edges 3 and 4 from [contracts-and-stubs.md](contracts-and-stubs.md).
+- **Fix:** Check that T and B both depend on C with `bd dep add T C` and `bd dep add B C`. Then run `bd dep remove T B` and `bd dep add T B --type related`. Then file the swap bead with edges 3 and 4 from [contracts-and-stubs.md](contracts-and-stubs.md).
 
 ## A swap bead was ready before its stub landed
 
@@ -41,3 +41,9 @@
 - **Symptom:** `bd ready --label stub` lists S, but B still rejects the value S needs. C's runner fails on S's branch.
 - **Cause:** Edge 3 points at a broad epic or an earlier bead. It does not point at the bead that delivers the change.
 - **Fix:** Run `bd dep remove S <old>` and `bd dep add S <bead-that-delivers-the-change>`.
+
+## A stub count reads zero for a list of statuses
+
+- **Symptom:** `bd count --label stub --status open,in_progress` prints `0`, but `bd list` with the same filters lists stub beads.
+- **Cause:** In bd 1.3.1, `bd count` returns 0 for a comma-separated status list. `bd count --status open` alone counts correctly.
+- **Fix:** Count with `bd list --label stub --status open,in_progress,blocked,deferred --json | jq length`.
