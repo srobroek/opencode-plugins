@@ -213,7 +213,13 @@ describe("held-claims advisory (the stop nudge)", () => {
   })
 
   test("compound JSON from a no-id claim is not attributed as claim evidence", () => {
-    const state = track([["BD_ACTOR=actor/a bd ready --claim --json; bd show bd-other-1 --json", '{"id":"bd-claimed-1"}\n{"id":"bd-other-1"}']])
+    const holders = { "bd-claimed-1": "actor/a", "bd-other-1": "actor/a" }
+    const state = track(
+      [["BD_ACTOR=actor/a bd ready --claim --json; bd show bd-other-1 --json", '{"id":"bd-claimed-1"}\n{"id":"bd-other-1"}']],
+      {},
+      "/repo",
+      holders,
+    )
     expect(heldClaimsAdvisory(state)).toBeUndefined()
   })
 
@@ -233,11 +239,11 @@ describe("held-claims advisory (the stop nudge)", () => {
   })
 
   test("equivalent external database selector spellings clear tracked claims", () => {
-    const state = track([
-      "BD_ACTOR=a/s1 bd --database=/external -C /irrelevant-a update bd-probe-2m7 --claim",
-      "BD_ACTOR=a/s1 bd --database /external -C /irrelevant-b close bd-probe-2m7",
-    ])
-    expect(heldClaimsAdvisory(state)).toBeUndefined()
+    const claim = "BD_ACTOR=a/s1 bd --database=/external -C /irrelevant-a update bd-probe-2m7 --claim"
+    const close = "BD_ACTOR=a/s1 bd --database /external -C /irrelevant-b close bd-probe-2m7"
+    const held = { "bd-probe-2m7": "a/s1" }
+    expect(heldClaimsAdvisory(track([claim], {}, "/repo", held))).toBeDefined()
+    expect(heldClaimsAdvisory(track([claim, close], {}, "/repo", held))).toBeUndefined()
   })
 
   test("relative db selectors keep their effective directory identity", () => {
