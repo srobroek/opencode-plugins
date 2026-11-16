@@ -5791,7 +5791,7 @@ var SECRET_STORE_INPUT = {
     },
     command: {
       type: "object",
-      description: "Run argv with no shell after asking the user; its stdout is the value",
+      description: "Run argv with no shell after asking the user; runs with your permission; approve only commands you trust. Its stdout is the value",
       properties: { argv: { type: "array", items: { type: "string" }, minItems: 1 }, cwd: { type: "string" } },
       required: ["argv"]
     },

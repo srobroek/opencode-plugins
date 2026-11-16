@@ -96,6 +96,14 @@ The guard catches honest mistakes in the common forms of a command and refuses t
 follow. It is not a sandbox against a command built to evade it. For that reason it refuses every
 value-carrying `op item create|edit` and `fnox set` from the shell. The
 [`safety_secret_store`](#secret-store-tool) tool does that work without a shell. It checks the fnox
-config again after the value is obtained, but fnox reads the file itself. A process outside the
-command's process group that rewrites the config between that check and fnox's read can still change
-the provider fnox uses.
+config again after the value is obtained, but fnox reads the file itself.
+
+The tool does not close one gap in the `command` source:
+
+- What can happen: the command can start a detached process (for example with `setsid`) that leaves
+  its process group. That process can change the fnox config after the recheck and before fnox reads
+  it, so fnox can use another provider.
+- Why it is accepted: the command prints the value, so it already has the value. The gap gives it
+  nothing new. Only the `command` source has this gap, since `generate` runs no command.
+- What to do: approve only commands you trust. When the secret does not come from a service, use
+  `generate`.
