@@ -4,11 +4,12 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Error as ToolError } from "@opencode/plugin/promise/tool"
 import { createFakeContext, type FakeAssert } from "@srobroek/opencode-lib/testing"
-import plugin, { applyDecision, createPlugin, type Evaluation, readOptions, shellCwd } from "./index.ts"
-import { FNOX_CONFIG_MESSAGE, FNOX_INDIRECT_MESSAGE, FNOX_STORE_MESSAGE } from "./op-guard.ts"
+import plugin, { applyDecision, confirmSecretCommand, createPlugin, type Evaluation, readOptions, shellCwd } from "./index.ts"
+import { FNOX_CONFIG_MESSAGE, FNOX_INDIRECT_MESSAGE, FNOX_STORE_MESSAGE, VALUE_MESSAGE } from "./op-guard.ts"
 import { INVESTIGATE_NOTICE } from "./package-investigate.ts"
 import { FORCE_PUSH_MESSAGE } from "./permission.ts"
 import { scratchRoots } from "./scratch-dirs.ts"
+import { COMMAND_ACTION, STORE_ACTION } from "./secret-store.ts"
 
 // Every decision spawns real git processes; a loaded machine can take seconds.
 setDefaultTimeout(60_000)
@@ -55,13 +56,15 @@ async function load(options: Record<string, unknown> = {}, more: Load = {}) {
 }
 
 describe("setup", () => {
-  test("registers its hooks and disposes them", async () => {
+  test("registers its hooks and the secret-store tool, and disposes them", async () => {
     const { fake, cleanup } = await load()
     expect(fake.hooks("tool")).toEqual(["execute.before", "execute.before", "execute.after", "execute.after"])
     expect(fake.hooks("shell")).toEqual(["create.before"])
-    expect(fake.hooks("permission")).toEqual(["evaluate", "evaluate"])
+    expect(fake.hooks("permission")).toEqual(["evaluate", "evaluate", "evaluate"])
+    expect([...fake.tools.keys()]).toEqual([STORE_ACTION])
     await cleanup?.()
     expect(fake.active()).toBe(0)
+    expect(fake.tools.size).toBe(0)
   })
 
   test("the default export is the plugin", () => {
@@ -354,10 +357,10 @@ describe("fnox provider types from config", () => {
     })
   })
 
-  test("a piped fnox set passes when the project's host provider is age", async () => {
+  test("a piped fnox set into the project's age host provider is sent to the secret-store tool", async () => {
     await withConfig("age", async (dir) => {
       const { before } = await load()
-      await before("c2", "cmd | fnox set NAME --provider host", dir)
+      await expect(before("c2", "cmd | fnox set NAME --provider host", dir)).rejects.toThrow(VALUE_MESSAGE)
     })
   })
 })
@@ -381,27 +384,29 @@ describe("nested commands through the hook", () => {
     ).rejects.toThrow(FNOX_CONFIG_MESSAGE)
   })
 
-  test("the keychain recipe with an explicit local config passes", async () => {
+  test("the keychain generate recipe with an explicit local config resolves the store and goes to the tool", async () => {
     const base = join(realpathSync(tmpdir()), "opencode")
     mkdirSync(base, { recursive: true })
     const dir = mkdtempSync(join(base, "safety-recipe-"))
     try {
       writeFileSync(join(dir, "fnox.local.toml"), '[providers.keychain]\ntype = "keychain"\nservice = "fnox-x"\n')
       const { before } = await load()
-      await before("n3", "fnox -c fnox.local.toml set NAME --generate --provider keychain", dir)
+      await expect(before("n3", "fnox -c fnox.local.toml set NAME --generate --provider keychain", dir)).rejects.toThrow(
+        VALUE_MESSAGE,
+      )
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
   })
 
-  test("an explicit config file that defines the provider as age lets a piped value through", async () => {
+  test("an explicit config file that defines the provider as age resolves it as a store", async () => {
     const base = join(realpathSync(tmpdir()), "opencode")
     mkdirSync(base, { recursive: true })
     const dir = mkdtempSync(join(base, "safety-recipe-"))
     try {
       writeFileSync(join(dir, "other.toml"), '[providers.host]\ntype = "age"\n')
       const { before } = await load()
-      await before("n4", "cmd | fnox -c other.toml set NAME --provider host", dir)
+      await expect(before("n4", "cmd | fnox -c other.toml set NAME --provider host", dir)).rejects.toThrow(VALUE_MESSAGE)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
@@ -479,7 +484,7 @@ describe("scratch folders", () => {
 
   test("scratchDirs: false registers no hook", async () => {
     const { fake } = await load({ scratchDirs: false })
-    expect(fake.hooks("permission")).toEqual(["evaluate"])
+    expect(fake.hooks("permission")).toEqual(["evaluate", "evaluate"])
   })
 
   test("readOptions defaults scratchDirs to true", () => {
@@ -498,5 +503,69 @@ describe("helpers", () => {
     expect(shellCwd(undefined, "/p")).toBe("/p")
     expect(shellCwd("sub", "/p")).toBe("/p/sub")
     expect(shellCwd("/abs", "/p")).toBe("/abs")
+  })
+})
+
+describe("safety_secret_store through the plugin", () => {
+  const SENTINEL = "SENTINEL-dummy-6ks-plugin"
+  const toolCall = { ...call, id: "t1", signal: new AbortController().signal }
+
+  async function storeThrough(input: unknown, assert?: (input: FakeAssert) => void) {
+    const runs: { argv: string[]; stdin?: string }[] = []
+    const fake = createFakeContext({
+      directory: "/project",
+      sessions: [{ id: "ses_1", location: { directory: "/project" } }],
+      ...(assert ? { assert } : {}),
+    })
+    await createPlugin({
+      env: {},
+      secretStore: {
+        env: { PATH: "/bin" },
+        which: (bin) => `/bin/${bin}`,
+        providersOfType: () => ["op"],
+        providerVault: () => "Dev",
+        run: async (argv, options) => {
+          runs.push({ argv, ...(options.stdin ? { stdin: new TextDecoder().decode(options.stdin) } : {}) })
+          return argv[0] === "/bin/gh" ? { kind: "exited", exitCode: 0, stdout: new TextEncoder().encode(`${SENTINEL}\n`) } : { kind: "exited", exitCode: 0 }
+        },
+      },
+    }).setup(fake.context)
+    const execute = fake.tools.get(STORE_ACTION)?.execute as (input: unknown, context: unknown) => Promise<{ content: string; metadata: unknown }>
+    const result = await execute(input, toolCall).catch((error: Error) => error)
+    return { fake, runs, result }
+  }
+
+  const input = { name: "GH_TOKEN", target: { kind: "1password", vault: "Dev", item: "gh" }, command: { argv: ["gh", "auth", "token"] } }
+
+  test("asks to store, then asks to run the command with argv and cwd, and returns no value", async () => {
+    const { fake, runs, result } = await storeThrough(input)
+    expect(fake.asserts.map((a) => [a.action, a.resources])).toEqual([
+      [STORE_ACTION, ["GH_TOKEN"]],
+      [COMMAND_ACTION, ["gh auth token  (in /project)"]],
+    ])
+    expect(runs.map((run) => run.argv[0])).toEqual(["/bin/gh", "/bin/op", "/bin/fnox"])
+    expect(JSON.stringify(result)).not.toContain(SENTINEL)
+    expect(JSON.stringify(fake.asserts)).not.toContain(SENTINEL)
+    expect(result).toMatchObject({ metadata: { name: "GH_TOKEN", reference: "gh/credential", stored: true } })
+  })
+
+  test("a refused command prompt runs nothing", async () => {
+    const { runs, result } = await storeThrough(input, (a) => {
+      if (a.action === COMMAND_ACTION) throw new Error("rejected")
+    })
+    expect(String(result)).toContain("rejected")
+    expect(runs).toEqual([])
+  })
+
+  test("every command run asks, even when the policy allows it; a deny and other actions stay as they are", () => {
+    const evaluation = (action: string, effect: Evaluation["effect"]) => ({ sessionID: "s", action, resources: [], effect }) as Evaluation
+    const allowed = evaluation(COMMAND_ACTION, "allow")
+    confirmSecretCommand(allowed)
+    expect(allowed.effect).toBe("ask")
+    for (const other of [evaluation(COMMAND_ACTION, "deny"), evaluation(STORE_ACTION, "allow")]) {
+      const before = other.effect
+      confirmSecretCommand(other)
+      expect(other.effect).toBe(before)
+    }
   })
 })

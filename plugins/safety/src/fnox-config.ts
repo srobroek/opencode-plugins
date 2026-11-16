@@ -110,3 +110,40 @@ export function readProviderTypes(cwd: string, home: string = homedir()): Provid
     return types === undefined ? undefined : resolve(types, name)
   }
 }
+
+/**
+ * The names of the providers that every definition gives the type `type`, in the configs that apply to
+ * `cwd` or in an explicit `config` file (read with the global config). `undefined` when a config cannot be
+ * read, so the caller cannot tell which providers exist.
+ */
+export function providersOfType(type: string, cwd: string, config?: string, home: string = homedir()): string[] | undefined {
+  let types: Map<string, unknown[]>
+  try {
+    types = collect(config === undefined ? configs(cwd, home) : explicitConfigs(isAbsolute(config) ? config : join(cwd, config), home))
+  } catch {
+    return undefined
+  }
+  return [...types].filter(([, all]) => all.length > 0 && all.every((each) => each === type)).map(([name]) => name)
+}
+
+/**
+ * The string setting `key` (such as `vault`) of provider `name`, when every definition gives the same
+ * one, in the configs for `cwd` or an explicit `config` with the global config. `undefined` when a
+ * definition lacks it, two disagree, or a config cannot be read.
+ */
+export function providerSetting(name: string, key: string, cwd: string, config?: string, home: string = homedir()): string | undefined {
+  let found: Record<string, unknown>[]
+  try {
+    found = config === undefined ? configs(cwd, home) : explicitConfigs(isAbsolute(config) ? config : join(cwd, config), home)
+  } catch {
+    return undefined
+  }
+  const values: unknown[] = []
+  for (const each of found) {
+    const tables: unknown[] = [each.providers]
+    if (isTable(each.profiles)) for (const profile of Object.values(each.profiles)) if (isTable(profile)) tables.push(profile.providers)
+    for (const table of tables) if (isTable(table) && name in table) values.push(isTable(table[name]) ? (table[name] as Record<string, unknown>)[key] : undefined)
+  }
+  const [first] = values
+  return typeof first === "string" && values.every((value) => value === first) ? first : undefined
+}

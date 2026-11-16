@@ -34,7 +34,8 @@ a tool hands it. It asks the user for values only the user has (`references/stor
 
 The laptop uses 1Password through fnox's `op` provider, plus the daemon's in-memory cache
 (8h idle timeout). `pace` and `work-linux` have no 1Password. They have a global `host`
-age store. The agent pipes values into `fnox set NAME --provider host`. Check with
+age store. The agent stores values there with `safety_secret_store` (target `fnox-store`,
+provider `host`), or without that tool pipes them into `fnox set NAME --provider host`. Check with
 `fnox provider list` and `fnox config-files`.
 
 ## Fewer approvals

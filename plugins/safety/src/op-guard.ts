@@ -1,12 +1,13 @@
 /**
- * The `op-guard` gate: the 1Password CLI `op` called directly, and fnox commands that print
- * secret values. fnox reads 1Password through its daemon cache; a direct `op` call opens a new
- * 1Password session and prompts the user.
+ * The `op-guard` gate: the 1Password CLI `op` called directly, fnox commands that print secret
+ * values, and shell commands that carry a secret value into `op item create|edit` or `fnox set`.
+ * fnox reads 1Password through its daemon cache; a direct `op` call opens a new 1Password session
+ * and prompts the user. A value goes through the `safety_secret_store` tool, which needs no shell.
  */
 
 import { homedir } from "node:os"
 import { join } from "node:path"
-import type { HereDocument } from "@srobroek/opencode-lib"
+import type { HereDocument, ShellWord } from "@srobroek/opencode-lib"
 import { base, type Command, hasFlag, positionals, SHELLS, walkShell, wordText } from "./shell.ts"
 
 export const OP_MESSAGE =
@@ -15,20 +16,22 @@ export const OP_MESSAGE =
 export const FNOX_DUMP_MESSAGE =
   "safety op-guard: this fnox command prints secret values into the transcript. Use `fnox check` or `fnox list` to inspect, and `fnox exec -- <cmd>` to use a value."
 
-export const LITERAL_MESSAGE =
-  "safety op-guard: a literal secret in the command lands in the transcript; pass it from a command or variable (`credential=$(cmd)`), or pipe a JSON template to `op item create -`."
+/** The tool that stores a secret without a shell; every value-carrying refusal points to it. */
+export const SECRET_STORE_TOOL = "safety_secret_store"
 
-export const FNOX_SET_MESSAGE =
-  "safety op-guard: pipe the value into `fnox set NAME --provider host` from a command; a literal value lands in the transcript."
+const USE_TOOL = `Store the secret with the \`${SECRET_STORE_TOOL}\` tool: it generates the value, or runs your command without a shell, and writes it to 1Password or a fnox store with no value in a command line, the environment or the transcript.`
 
-export const FNOX_STORE_MESSAGE =
-  "safety op-guard: this fnox provider cannot store a value; `fnox set` would write a piped, generated or expanded value into fnox.toml as the item reference. Create the item first, `<json from a command> | op item create --vault V -`, then point fnox at it: `fnox set NAME '<item>/<field>' --provider <op-provider>`."
+export const LITERAL_MESSAGE = `safety op-guard: a literal secret in the command lands in the transcript. ${USE_TOOL}`
 
-export const FNOX_INDIRECT_MESSAGE =
-  "safety op-guard: this command reaches `fnox set` or `op item create|edit` through an executor the guard cannot follow (a piped shell, xargs, find -exec, parallel, env -S, eval, source, an alias or function, an expanded command name, or a launcher such as nix, mise, uv or npx), so it cannot check where the value goes. Run it directly: `<json from a command> | op item create --vault V -`, then `fnox set NAME '<item>/<field>' --provider <op-provider>`."
+export const FNOX_SET_MESSAGE = `safety op-guard: a literal value in \`fnox set\` lands in the transcript. ${USE_TOOL}`
 
-export const FNOX_CONFIG_MESSAGE =
-  "safety op-guard: this command passes a value to `fnox set` and also changes fnox configuration (a write to fnox*.toml or ~/.config/fnox, `fnox config`/`fnox provider` changes, or a write whose target the guard cannot read), so the provider it checked may not be the one used. Change the configuration in one command and run `fnox set` in the next."
+export const FNOX_STORE_MESSAGE = `safety op-guard: this fnox provider cannot store a value; \`fnox set\` would write a piped, generated or expanded value into fnox.toml as the item reference. ${USE_TOOL} A literal reference, \`fnox set NAME '<item>/<field>' --provider <op-provider>\`, still works.`
+
+export const VALUE_MESSAGE = `safety op-guard: a shell command may not carry a secret value into \`op item create|edit\` or \`fnox set\` (stdin, a pipe or redirect, a \`--template\`, an expansion, \`--generate\` or \`--from-file\`); a static check cannot follow every way a command routes it. ${USE_TOOL} A literal reference, \`fnox set NAME '<item>/<field>' --provider <op-provider>\`, still works.`
+
+export const FNOX_INDIRECT_MESSAGE = `safety op-guard: this command reaches \`fnox set\` or \`op item create|edit\` through an executor the guard cannot follow (a piped shell, xargs, find -exec, parallel, env -S, eval, source, an alias or function, an expanded command name, or a launcher such as nix, mise, uv or npx), so it cannot check where the value goes. ${USE_TOOL}`
+
+export const FNOX_CONFIG_MESSAGE = `safety op-guard: this command passes a value to \`fnox set\` and also changes fnox configuration (a write to fnox*.toml or ~/.config/fnox, \`fnox config\`/\`fnox provider\` changes, or a write whose target the guard cannot read), so the provider it checked may not be the one used. Change the configuration in a separate command first. ${USE_TOOL}`
 
 export const NESTING_MESSAGE =
   "safety op-guard: command nesting is too deep to check; run it without nested shells"
@@ -176,6 +179,42 @@ function literalSecret(command: Command, args: readonly string[], inheritedLiter
   return false
 }
 
+/** The redirect operator before a redirect word, with its file descriptor; `undefined` when unreadable. */
+const REDIRECT_OPERATOR = /(\d*)(<<<|<<-|<<|<>|<&|<|>>|>\||>&|&>>|&>|>)$/
+
+/** Whether a redirect word opens the command's stdin: `<`, `<>`, `<&`, a here-string or here-document, or an operator the guard cannot read. */
+function stdinRedirect(command: Command, word: ShellWord): boolean {
+  if (word.hereString === true) return true
+  const before = command.source.slice(0, word.start).replace(/\\\n/g, "").trimEnd()
+  const found = REDIRECT_OPERATOR.exec(before)
+  if (found === null) return true
+  const [match, digits, operator] = found as unknown as [string, string, string]
+  // Digits glued to the previous word (`op2<file`, `x\ 2<file`) belong to that word, not to the redirect.
+  const prefix = before.slice(0, before.length - match.length)
+  const escapes = /\\*$/.exec(prefix.slice(0, -1))?.[0].length ?? 0
+  const glued = digits !== "" && (!/[\s;&|()]$/.test(prefix) || escapes % 2 === 1)
+  const fd = glued ? "" : digits
+  return operator.startsWith("<") && (fd === "" || fd === "0")
+}
+
+/** Whether the command's own stdin is fed: a later pipeline stage, an input redirect, a here-string or a here-document. */
+export function readsStdin(command: Command): boolean {
+  return command.stage > 0 || command.hereDocuments.length > 0 || command.redirects.some((word) => stdinRedirect(command, word))
+}
+
+/**
+ * Whether a command found inside a script, here-document or substitution may inherit a fed stdin:
+ * the walk does not say which command ran it, so any other fed command in the list counts.
+ */
+function inheritsStdin(command: Command, commands: readonly Command[]): boolean {
+  return command.context !== "top" && commands.some((other) => other !== command && readsStdin(other))
+}
+
+/** Whether `op item create|edit` takes a value the guard cannot see: an expanded word or a `--template` file. */
+function carriesItemValue(command: Command): boolean {
+  return command.argv.some((word, at) => at > 0 && (expands(command, at) || word === "--template" || word.startsWith("--template=")))
+}
+
 /** The words of `allow` (such as "vault list") match the start of the subcommand words. */
 function allowed(words: readonly string[], allow: readonly string[]): boolean {
   return allow.some((entry) => {
@@ -186,10 +225,17 @@ function allowed(words: readonly string[], allow: readonly string[]): boolean {
 
 /**
  * Why an `op` call is refused: `op` for any call but the exceptions, `literal` for an item write that puts
- * a possible secret in the command text. `item create|edit`, `whoami`, `vault create <name>`, help, `--version`
- * and the `allow` prefixes pass. `inheritedLiteral`: a `fnox exec` parent feeds the call literal stdin.
+ * a possible secret in the command text, `value` for an item write that carries a value from stdin, a
+ * template or an expansion. An item write passes only with literal non-secret fields, `--generate-password`
+ * or no field at all. `whoami`, `vault create <name>`, `vault list`, help, `--version` and the `allow`
+ * prefixes pass. `inheritedLiteral`: a parent feeds the call literal stdin; `inheritedStdin`: any stdin.
  */
-export function opRefusal(command: Command, allow: readonly string[] = [], inheritedLiteral = false): "op" | "literal" | undefined {
+export function opRefusal(
+  command: Command,
+  allow: readonly string[] = [],
+  inheritedLiteral = false,
+  inheritedStdin = false,
+): "op" | "literal" | "value" | undefined {
   if (!isOp(base(command.argv[0]))) return undefined
   const args = command.argv.slice(1)
   if (args.includes("--help") || args.includes("-h")) return undefined
@@ -198,7 +244,8 @@ export function opRefusal(command: Command, allow: readonly string[] = [], inher
   if (words[0] === "whoami") return undefined
   if (words[0] === "item" && (words[1] === "create" || words[1] === "edit")) {
     if (args.some((arg) => arg === "--reveal" || arg.startsWith("--reveal="))) return "op"
-    return literalSecret(command, args, inheritedLiteral) ? "literal" : undefined
+    if (literalSecret(command, args, inheritedLiteral)) return "literal"
+    return inheritedStdin || readsStdin(command) || carriesItemValue(command) ? "value" : undefined
   }
   if (words[0] === "vault" && words[1] === "create" && words[2] !== undefined) return undefined
   // Names and ids only, no item content.
@@ -244,7 +291,7 @@ function execInner(args: readonly string[]): number {
   return -1
 }
 
-export type Verdict = "op" | "dump" | "literal" | "set" | "store" | "indirect" | "config"
+export type Verdict = "op" | "dump" | "literal" | "set" | "store" | "value" | "indirect" | "config"
 
 const SET_VALUED: ReadonlySet<string> = new Set([
   "-d",
@@ -331,7 +378,8 @@ function valueSource(command: Command, stdin: boolean, value: number | undefined
   return piped || substituted || defaults.some((d) => expands(command, d.at)) || (value !== undefined && expands(command, value))
 }
 
-const SEARCHED_CONFIGS: ReadonlySet<string> = new Set(["fnox.toml", ".fnox.toml", "fnox.local.toml", ".fnox.local.toml"])
+/** The bare config names fnox searches for up the tree, as the resolver already reads them. */
+export const SEARCHED_CONFIGS: ReadonlySet<string> = new Set(["fnox.toml", ".fnox.toml", "fnox.local.toml", ".fnox.local.toml"])
 
 /**
  * The explicit config file a `fnox` command names with `-c`/`--config`: `undefined` for none (or one of
@@ -380,12 +428,13 @@ function parseSet(command: Command, at: number) {
 }
 
 /**
- * `fnox set` that would put a value where it must not go. With a provider that stores a value (by its
- * resolved type), a literal positional or `--default` is `set` and a stdin value fed from a literal is
- * `literal`. With any other provider, or none, only the reference form passes: a literal positional
- * (or none, which prompts) with no expansion and no value source (`--generate`, `--from-file`, an expanded `--default`, a pipe,
- * redirect, here-document, here-string, process substitution or stdin inherited from `fnox exec`);
- * everything else is `store`, since fnox would record the value as the item reference in fnox.toml.
+ * `fnox set` that would put a value where it must not go. Only the reference form passes from a shell:
+ * a literal positional (or none, which prompts) with no expansion and no value source (`--generate`,
+ * `--from-file`, a `-` value, an expanded `--default`, a pipe, redirect, here-document, here-string,
+ * process substitution or inherited stdin). With a provider that stores a value (by its resolved type), a
+ * literal positional or `--default` is `set`, a stdin value fed from a literal is `literal` and any other
+ * value source is `value`. With any other provider, or none, a value source is `store`, since fnox would
+ * record the value as the item reference in fnox.toml.
  */
 function fnoxSetRefusal(
   command: Command,
@@ -394,19 +443,18 @@ function fnoxSetRefusal(
   stdin: boolean,
   types: ProviderTypes,
   config: string | null | undefined,
-): "set" | "literal" | "store" | undefined {
+): "set" | "literal" | "store" | "value" | undefined {
   const { provider, reads, sourced, positional, defaults } = parseSet(command, at)
   const type = provider === undefined || config === null ? undefined : types(provider, config)
   const value = positional[1]
-  if (type === undefined || !VALUE_STORE_TYPES.has(type)) {
-    // No value and no source is an interactive prompt or a settings update, which stores nothing from the agent.
-    return sourced || valueSource(command, stdin, value, defaults) ? "store" : undefined
-  }
-  const defaultLiteral = defaults.some((d) => !expansionOnly(command, d.at, d.skip))
+  const carries = sourced || (value !== undefined && command.argv[value] === "-") || valueSource(command, stdin, value, defaults)
+  // No value and no source is an interactive prompt or a settings update, which stores nothing from the agent.
+  if (type === undefined || !VALUE_STORE_TYPES.has(type)) return carries ? "store" : undefined
   // KEY, then VALUE: a second positional that is not an expansion is a literal.
-  if (value !== undefined) return expansionOnly(command, value) && !defaultLiteral ? undefined : "set"
-  if (defaultLiteral) return "set"
-  return reads && fed ? "literal" : undefined
+  if (defaults.some((d) => !expansionOnly(command, d.at, d.skip))) return "set"
+  if (value !== undefined && !expansionOnly(command, value)) return "set"
+  if (value === undefined && reads && fed) return "literal"
+  return carries ? "value" : undefined
 }
 
 const FNOX_VALUED_GLOBAL: ReadonlySet<string> = new Set(["-P", "--profile", "-c", "--config", "--age-key-file"])
@@ -595,7 +643,7 @@ export function fnoxRefusal(
   const documents = [...inherited.documents, ...command.hereDocuments]
   const literal = inherited.literal || literalStdin(command)
   const stdin =
-    inherited.stdin === true || command.stage > 0 || command.redirects.length > 0 || command.hereDocuments.length > 0
+    inherited.stdin === true || readsStdin(command)
   // A pipe or redirect feeds text the walk cannot read; a here-document it does read.
   const piped = inherited.piped === true || command.stage > 0 || opaqueRedirects(command)
   const children = walkComplete(inner.map((word, i) => wordText(command, first + i) ?? quote(word)).join(" "))
@@ -610,18 +658,19 @@ export function fnoxRefusal(
   const policy = listPolicy(children, writesOf, piped, command.source) ??
     (bodies.length > 0 ? listPolicy(bodies, writesOf, piped, command.source) : undefined)
   if (policy !== undefined) return policy
-  const check = (nested: Command, fed: boolean): Verdict | undefined => {
+  const check = (nested: Command, fed: boolean, list: readonly Command[]): Verdict | undefined => {
     if (dumpsEnvironment(nested)) return "dump"
-    const op = opRefusal(nested, allow, fed)
+    const fedStdin = stdin || inheritsStdin(nested, list)
+    const op = opRefusal(nested, allow, fed, fedStdin)
     if (op !== undefined) return op
-    return fnoxRefusal(nested, allow, { literal: fed, stdin, piped, documents: rest, depth: inherited.depth + 1, writesOf }, types)
+    return fnoxRefusal(nested, allow, { literal: fed, stdin: fedStdin, piped, documents: rest, depth: inherited.depth + 1, writesOf }, types)
   }
   for (const nested of children) {
-    const found = check(nested, literal || literalFed(nested, children))
+    const found = check(nested, literal || literalFed(nested, children), children)
     if (found !== undefined) return found
   }
   for (const nested of bodies) {
-    const found = check(nested, literalFed(nested, bodies))
+    const found = check(nested, literalFed(nested, bodies), bodies)
     if (found !== undefined) return found
   }
   return undefined
@@ -654,6 +703,7 @@ const MESSAGES: Record<Verdict, string> = {
   literal: LITERAL_MESSAGE,
   set: FNOX_SET_MESSAGE,
   store: FNOX_STORE_MESSAGE,
+  value: VALUE_MESSAGE,
   indirect: FNOX_INDIRECT_MESSAGE,
   config: FNOX_CONFIG_MESSAGE,
 }
@@ -672,7 +722,10 @@ export function opGuard(
     const known = changesDirectory(commands) ? () => undefined : types
     for (const command of commands) {
       const fed = literalFed(command, commands)
-      const found = opRefusal(command, allow, fed) ?? fnoxRefusal(command, allow, { literal: fed, documents: [], depth: 0, writesOf }, known)
+      const stdin = inheritsStdin(command, commands)
+      const found =
+        opRefusal(command, allow, fed, stdin) ??
+        fnoxRefusal(command, allow, { literal: fed, stdin, documents: [], depth: 0, writesOf }, known)
       if (found !== undefined) return MESSAGES[found]
     }
     return undefined

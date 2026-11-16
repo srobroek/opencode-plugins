@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { readProviderTypes } from "./fnox-config.ts"
+import { providerSetting, providersOfType, readProviderTypes } from "./fnox-config.ts"
 import { VALUE_STORE_TYPES } from "./op-guard.ts"
 
 const base = join(realpathSync(tmpdir()), "opencode")
@@ -151,5 +151,46 @@ describe("readProviderTypes", () => {
       const { home, cwd } = tree({ "elsewhere/c.toml": provider("host", "age") })
       expect(readProviderTypes(cwd, home)("host", join(cwd, "../../elsewhere/c.toml"))).toBe("age")
     })
+  })
+})
+
+describe("providersOfType", () => {
+  test("lists the providers every definition of which has the type, across the path and the global config", () => {
+    const { home, cwd } = tree({
+      "proj/fnox.toml": provider("proj", "1password") + provider("keys", "age"),
+      "home/.config/fnox/config.toml": provider("shared", "1password"),
+    })
+    expect(providersOfType("1password", cwd, undefined, home)?.sort()).toEqual(["proj", "shared"])
+  })
+
+  test("leaves out a provider whose definitions disagree", () => {
+    const { home, cwd } = tree({
+      "proj/fnox.toml": provider("op", "1password"),
+      "proj/sub/fnox.local.toml": provider("op", "age"),
+    })
+    expect(providersOfType("1password", cwd, undefined, home)).toEqual([])
+  })
+
+  test("reads an explicit config with the global config only", () => {
+    const { home, cwd } = tree({ "proj/sub/other.toml": provider("a", "1password"), "proj/fnox.toml": provider("b", "1password") })
+    expect(providersOfType("1password", cwd, "other.toml", home)).toEqual(["a"])
+  })
+
+  test("is unknown when a config does not parse or has an import", () => {
+    const { home, cwd } = tree({ "proj/sub/fnox.toml": "[providers\n", "proj/sub/imp.toml": `import = ["x"]\n` })
+    expect([providersOfType("1password", cwd, undefined, home), providersOfType("1password", cwd, "imp.toml", home)]).toEqual([
+      undefined,
+      undefined,
+    ])
+  })
+})
+
+describe("providerSetting", () => {
+  test("gives a setting every definition agrees on, and nothing when one differs or lacks it", () => {
+    const { home, cwd } = tree({
+      "proj/fnox.toml": '[providers.a]\ntype = "1password"\nvault = "dev"\n[providers.b]\ntype = "1password"\nvault = "x"\n[providers.c]\ntype = "1password"\n',
+      "proj/sub/fnox.local.toml": '[providers.a]\ntype = "1password"\nvault = "dev"\n[providers.b]\ntype = "1password"\nvault = "y"\n',
+    })
+    expect(["a", "b", "c"].map((name) => providerSetting(name, "vault", cwd, undefined, home))).toEqual(["dev", undefined, undefined])
   })
 })
