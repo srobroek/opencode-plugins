@@ -613,6 +613,99 @@ describe("worktree argument", () => {
       expect(sessionID(await second(setup))).toBeDefined()
     })
 
+    const backgroundDone = () => ({
+      ...completed("ses_fake1"),
+      result: { content: "started", metadata: { sessionID: "ses_fake1", status: "running" } } as Record<string, unknown>,
+    })
+
+    test("reserves before the liveness lookup, so a concurrent spawn is refused while it is pending", async () => {
+      const setup = await start()
+      let open: () => void = () => {}
+      const gate = new Promise<void>((resolve) => {
+        open = resolve
+      })
+      const list = setup.fake.context.session.list.bind(setup.fake.context.session)
+      let listing: () => void = () => {}
+      const listed = new Promise<void>((resolve) => {
+        listing = resolve
+      })
+      Object.assign(setup.fake.context.session, {
+        list: async (input: never) => {
+          listing()
+          await gate
+          return list(input)
+        },
+      })
+      const a = first(setup)
+      await listed
+      await expect(second(setup)).rejects.toThrow(/writer spawn in progress/)
+      open()
+      expect(sessionID(await a)).toBe("ses_fake1")
+    })
+
+    test("a background child keeps the worktree reserved until it is observed busy", async () => {
+      const setup = await start()
+      await first(setup)
+      await setup.fake.fire.tool("execute.after", backgroundDone())
+      await expect(second(setup)).rejects.toThrow(/live writer session ses_fake1/)
+    })
+
+    test("a background child that has started is caught by the live lookup, not the reservation", async () => {
+      const setup = await start()
+      await first(setup)
+      await setup.fake.fire.tool("execute.after", backgroundDone())
+      Object.assign(setup.fake.sessions.get("ses_fake1") ?? {}, { projectID: "prj", time: { busy: 2000 } })
+      await expect(second(setup)).rejects.toThrow(/live writer session ses_fake1/)
+      Object.assign(setup.fake.sessions.get("ses_fake1") ?? {}, { time: { busy: 2000, idle: 3000 } })
+      expect(sessionID(await second(setup))).toBeDefined()
+    })
+
+    test("a background child that never starts frees the worktree when the hold expires", async () => {
+      let clock = 1_000_000
+      const setup = await start({ now: () => clock })
+      await first(setup)
+      await setup.fake.fire.tool("execute.after", backgroundDone())
+      clock += 59_000
+      await expect(second(setup)).rejects.toThrow(/live writer session ses_fake1/)
+      clock += 2_000
+      expect(sessionID(await second(setup))).toBeDefined()
+    })
+
+    test("a spawn that waited past its reservation is fenced out and creates no child", async () => {
+      let clock = 1_000_000
+      const setup = await start({ now: () => clock })
+      let open: () => void = () => {}
+      const gate = new Promise<void>((resolve) => {
+        open = resolve
+      })
+      const assertPermission = setup.fake.context.permission.assert.bind(setup.fake.context.permission)
+      let waits = 0
+      let reached: () => void = () => {}
+      const waiting = new Promise<void>((resolve) => {
+        reached = resolve
+      })
+      Object.assign(setup.fake.context.permission, {
+        assert: async (input: never) => {
+          if (waits++ === 0) {
+            reached()
+            await gate
+          }
+          return assertPermission(input)
+        },
+      })
+      const a = first(setup)
+      const outcome = a.then(
+        () => "spawned",
+        (error: Error) => error.message,
+      )
+      await waiting
+      clock += 61_000
+      expect(sessionID(await second(setup))).toBe("ses_fake1")
+      open()
+      expect(await outcome).toMatch(/expired or was replaced/)
+      expect(setup.fake.calls.filter((entry) => entry.method === "session.create")).toHaveLength(1)
+    })
+
     test("a read-only agent neither reserves nor is blocked", async () => {
       const setup = await start()
       await spawn(setup, { agent: "reviewer", worktree: "feat" })

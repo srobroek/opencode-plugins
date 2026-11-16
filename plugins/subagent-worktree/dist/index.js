@@ -591,9 +591,13 @@ function writerRefusal(directory, child) {
   return child === undefined ? `${directory} already has a writer spawn in progress that has not started yet. Wait for it, then send that session a follow-up (pass its sessionID) instead of spawning a second writer, or stop it first.` : `${directory} already has a live writer session ${child}. Send that session a follow-up (pass sessionID: "${child}") instead of spawning a second writer, or stop it first.`;
 }
 var RESERVATION_MS = 60000;
-function blockingReservation(reservation, now, callId) {
-  return reservation !== undefined && reservation.callId !== callId && reservation.until > now ? reservation : undefined;
+function blockingReservation(reservation, now, token) {
+  return reservation !== undefined && reservation.token !== token && reservation.until > now ? reservation : undefined;
 }
+function holdsReservation(reservation, now, token) {
+  return reservation !== undefined && reservation.token === token && reservation.until > now;
+}
+var FENCED_REASON = "its reservation of this worktree expired or was replaced by another writer spawn while it waited. Check for a live writer session, then spawn again.";
 
 // plugins/subagent-worktree/src/git.ts
 var GIT_TIMEOUT_MS = 60000;
@@ -822,6 +826,26 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
   };
   const notes = new Map;
   const reservations = new Map;
+  let sequence = 0;
+  const hasStarted = async (child) => {
+    const session = await getSession(child);
+    return session?.time?.busy !== undefined;
+  };
+  const reserve = async (directory, callId) => {
+    const token = `${callId}#${++sequence}`;
+    for (;; ) {
+      const held = blockingReservation(reservations.get(directory), now(), token);
+      if (!held) {
+        reservations.set(directory, { token, callId, until: now() + reserveMs });
+        return token;
+      }
+      if (held.child === undefined || !await hasStarted(held.child)) {
+        throw new Error(`subagent-worktree: ${writerRefusal(directory, held.child)}`);
+      }
+      if (reservations.get(directory) === held)
+        reservations.delete(directory);
+    }
+  };
   const release = (callId) => {
     for (const [directory, reservation] of reservations)
       if (reservation.callId === callId)
@@ -870,9 +894,12 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
     });
     if (plan.kind === "refuse")
       throw new Error(`subagent-worktree: ${plan.reason}`);
+    let hold;
     if (plan.kind !== "isolate" && start?.lookup.ok && agent && agent.mode !== "primary") {
       const directory = start.lookup.worktree.directory;
       const writer = !sessionIsReadOnly(agent.permissions, parent.permissions);
+      if (writer)
+        hold = { directory, token: await reserve(directory, event.id) };
       const guard = decideWriterGuard({
         writer,
         directory,
@@ -883,14 +910,13 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
         throw new Error(`subagent-worktree: ${guard.reason}`);
       if (guard.warn)
         notes.set(event.id, guard.warn);
-      if (writer) {
-        const held = blockingReservation(reservations.get(directory), now(), event.id);
-        if (held)
-          throw new Error(`subagent-worktree: ${writerRefusal(directory, held.child)}`);
-        reservations.set(directory, { callId: event.id, until: now() + reserveMs });
-      }
     }
+    const fence = () => {
+      if (hold && !holdsReservation(reservations.get(hold.directory), now(), hold.token))
+        throw new Error(`subagent-worktree: ${hold.directory}: ${FENCED_REASON}`);
+    };
     if (plan.kind === "default") {
+      fence();
       if (plan.note)
         notes.set(event.id, plan.note);
       return;
@@ -899,11 +925,12 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
       return;
     await assertSubagent(event, agent.id);
     if (plan.kind === "move") {
+      fence();
       let child;
       try {
         child = await createChild(event, input, agent, parent);
-        const reserved = reservations.get(plan.worktree.directory);
-        if (reserved?.callId === event.id)
+        const reserved = hold && reservations.get(hold.directory);
+        if (reserved && hold && reserved.token === hold.token)
           reserved.child = child;
         await ctx.session.move({ sessionID: child, directory: plan.worktree.directory });
         event.input = { ...event.input, sessionID: child, prompt: startPrompt(input.prompt, plan.worktree) };
@@ -995,7 +1022,8 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
   const after = async (event) => {
     if (event.tool !== SUBAGENT_TOOL)
       return;
-    if (event.id !== undefined)
+    const reported = event.status === "completed" ? event.result.metadata : event.error.metadata;
+    if (event.id !== undefined && reported?.status !== "running")
       release(event.id);
     const skipped = event.id === undefined ? undefined : notes.get(event.id);
     if (event.id !== undefined)
@@ -1232,6 +1260,7 @@ var src_default = createPlugin();
 export {
   DEFAULT_AGENTS,
   DIRTY_CHECKOUT_NOTE,
+  FENCED_REASON,
   GIT_TIMEOUT_MS,
   LANE_PREFIX,
   MERGE_DESCRIPTION,
@@ -1260,6 +1289,7 @@ export {
   diffCommand,
   findWorktree,
   formatLaneList,
+  holdsReservation,
   isConflict,
   isRunning,
   isUnbornHead,

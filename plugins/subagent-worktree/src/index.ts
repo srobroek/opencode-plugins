@@ -13,8 +13,10 @@ import {
   decideIsolation,
   decideMerge,
   decideWriterGuard,
+  FENCED_REASON,
   findWorktree,
   formatLaneList,
+  holdsReservation,
   isConflict,
   isRunning,
   LANE_PREFIX,
@@ -284,6 +286,34 @@ export function createLanes(
 
   /** Worktrees reserved by an in-flight writer spawn, by canonical path; see `Reservation`. */
   const reservations = new Map<string, Reservation>()
+  let sequence = 0
+
+  /** Whether a session's latest execution has started, as `session.get` reports `time.busy`. */
+  const hasStarted = async (child: string) => {
+    const session = (await getSession(child)) as { time?: { busy?: unknown } } | undefined
+    return session?.time?.busy !== undefined
+  }
+
+  /**
+   * Take the reservation on `directory` for call `callId`, or refuse. A reservation whose child was
+   * observed busy is dropped: the live-writer lookup covers it from then on. No await separates the
+   * blocking check from the set, so concurrent spawns cannot both reserve.
+   */
+  const reserve = async (directory: string, callId: string): Promise<string> => {
+    const token = `${callId}#${++sequence}`
+    for (;;) {
+      const held = blockingReservation(reservations.get(directory), now(), token)
+      if (!held) {
+        reservations.set(directory, { token, callId, until: now() + reserveMs })
+        return token
+      }
+      if (held.child === undefined || !(await hasStarted(held.child))) {
+        throw new Error(`subagent-worktree: ${writerRefusal(directory, held.child)}`)
+      }
+      if (reservations.get(directory) === held) reservations.delete(directory)
+    }
+  }
+
   const release = (callId: string) => {
     for (const [directory, reservation] of reservations) if (reservation.callId === callId) reservations.delete(directory)
   }
@@ -335,9 +365,12 @@ export function createLanes(
       trackedDirty: input.worktree === undefined && isolation.isolate ? await git.trackedDirty(parentDir) : false,
     })
     if (plan.kind === "refuse") throw new Error(`subagent-worktree: ${plan.reason}`)
+    let hold: { directory: string; token: string } | undefined
     if (plan.kind !== "isolate" && start?.lookup.ok && agent && agent.mode !== "primary") {
       const directory = start.lookup.worktree.directory
       const writer = !sessionIsReadOnly(agent.permissions, parent.permissions)
+      // Reserve before any lookup so a concurrent spawn cannot read a snapshot that predates this one.
+      if (writer) hold = { directory, token: await reserve(directory, event.id) }
       const guard = decideWriterGuard({
         writer,
         directory,
@@ -346,14 +379,13 @@ export function createLanes(
       })
       if (guard.kind === "refuse") throw new Error(`subagent-worktree: ${guard.reason}`)
       if (guard.warn) notes.set(event.id, guard.warn)
-      if (writer) {
-        // No await between this check and the reservation, so concurrent spawns cannot both pass.
-        const held = blockingReservation(reservations.get(directory), now(), event.id)
-        if (held) throw new Error(`subagent-worktree: ${writerRefusal(directory, held.child)}`)
-        reservations.set(directory, { callId: event.id, until: now() + reserveMs })
-      }
+    }
+    const fence = () => {
+      if (hold && !holdsReservation(reservations.get(hold.directory), now(), hold.token))
+        throw new Error(`subagent-worktree: ${hold.directory}: ${FENCED_REASON}`)
     }
     if (plan.kind === "default") {
+      fence()
       if (plan.note) notes.set(event.id, plan.note)
       return
     }
@@ -361,11 +393,12 @@ export function createLanes(
 
     await assertSubagent(event, agent.id)
     if (plan.kind === "move") {
+      fence()
       let child: string | undefined
       try {
         child = await createChild(event, input, agent, parent)
-        const reserved = reservations.get(plan.worktree.directory)
-        if (reserved?.callId === event.id) reserved.child = child
+        const reserved = hold && reservations.get(hold.directory)
+        if (reserved && hold && reserved.token === hold.token) reserved.child = child
         await ctx.session.move({ sessionID: child, directory: plan.worktree.directory } as never)
         event.input = { ...(event.input as object), sessionID: child, prompt: startPrompt(input.prompt, plan.worktree) }
       } catch (error) {
@@ -465,7 +498,9 @@ export function createLanes(
     ),
   ) => {
     if (event.tool !== SUBAGENT_TOOL) return
-    if (event.id !== undefined) release(event.id)
+    const reported = (event.status === "completed" ? event.result.metadata : event.error.metadata) as { status?: unknown } | undefined
+    // A background child keeps the worktree reserved until a later check sees it busy, or the hold expires.
+    if (event.id !== undefined && reported?.status !== "running") release(event.id)
     const skipped = event.id === undefined ? undefined : notes.get(event.id)
     if (event.id !== undefined) notes.delete(event.id)
     if (skipped) {

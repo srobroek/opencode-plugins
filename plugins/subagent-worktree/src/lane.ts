@@ -583,9 +583,17 @@ export const RESERVATION_MS = 60_000
  * A writer spawn's hold on a worktree, kept in this plugin instance only. Spawns from separate
  * OpenCode server instances are not coordinated: there is no cross-process lock.
  */
-export type Reservation = { callId: string; child?: string; until: number }
+export type Reservation = { token: string; callId: string; child?: string; until: number }
 
-/** The reservation that blocks the spawn `callId`: unexpired and held by another call. */
-export function blockingReservation(reservation: Reservation | undefined, now: number, callId: string): Reservation | undefined {
-  return reservation !== undefined && reservation.callId !== callId && reservation.until > now ? reservation : undefined
+/** The unexpired reservation that blocks the spawn holding `token`: one held under another token. */
+export function blockingReservation(reservation: Reservation | undefined, now: number, token: string): Reservation | undefined {
+  return reservation !== undefined && reservation.token !== token && reservation.until > now ? reservation : undefined
 }
+
+/** Whether `token` still owns the reservation; an expired or replaced one has fenced its owner. */
+export function holdsReservation(reservation: Reservation | undefined, now: number, token: string): boolean {
+  return reservation !== undefined && reservation.token === token && reservation.until > now
+}
+
+export const FENCED_REASON =
+  "its reservation of this worktree expired or was replaced by another writer spawn while it waited. Check for a live writer session, then spawn again."

@@ -11,6 +11,7 @@ import {
   diffCommand,
   findWorktree,
   formatLaneList,
+  holdsReservation,
   type IsolationFacts,
   isConflict,
   isUnbornHead,
@@ -531,18 +532,26 @@ describe("decideWriterGuard", () => {
   })
 })
 
-describe("blockingReservation", () => {
-  const held = { callId: "call_1", child: "ses_a", until: 1000 }
-  test("blocks another call before it expires", () => {
-    expect(blockingReservation(held, 999, "call_2")).toBe(held)
+describe("blockingReservation and holdsReservation", () => {
+  const held = { token: "t1", callId: "call_1", child: "ses_a", until: 1000 }
+  test("blocks another token before expiry", () => {
+    expect(blockingReservation(held, 999, "t2")).toBe(held)
   })
   test.each([
-    ["the holder itself", 500, "call_1"],
-    ["after expiry", 1000, "call_2"],
-  ])("does not block %s", (_name, now, callId) => {
-    expect(blockingReservation(held, now, callId)).toBeUndefined()
+    ["the holder itself", 500, "t1"],
+    ["after expiry", 1000, "t2"],
+  ])("does not block %s", (_name, now, token) => {
+    expect(blockingReservation(held, now, token)).toBeUndefined()
   })
   test("does not block without a reservation", () => {
-    expect(blockingReservation(undefined, 0, "call_2")).toBeUndefined()
+    expect(blockingReservation(undefined, 0, "t2")).toBeUndefined()
+  })
+  test.each([
+    ["the owner before expiry", held, 999, "t1", true],
+    ["the owner after expiry", held, 1000, "t1", false],
+    ["a replaced owner", { ...held, token: "t2" }, 500, "t1", false],
+    ["no reservation", undefined, 0, "t1", false],
+  ])("holds: %s", (_name, reservation, now, token, expected) => {
+    expect(holdsReservation(reservation, now, token)).toBe(expected)
   })
 })
