@@ -107,14 +107,41 @@ permissions:
     resource: "git switch *"
     effect: allow
   - action: shell
-    resource: "git add specs/*"
-    effect: allow
+    resource: "git branch* -d*"
+    effect: deny
   - action: shell
-    resource: "git add .specify/*"
-    effect: allow
+    resource: "git branch* -D*"
+    effect: deny
   - action: shell
-    resource: "git commit *"
-    effect: allow
+    resource: "git branch* --delete*"
+    effect: deny
+  - action: shell
+    resource: "git branch* -m*"
+    effect: deny
+  - action: shell
+    resource: "git branch* -M*"
+    effect: deny
+  - action: shell
+    resource: "git branch* --move*"
+    effect: deny
+  - action: shell
+    resource: "git branch* -f*"
+    effect: deny
+  - action: shell
+    resource: "git branch* --force*"
+    effect: deny
+  - action: shell
+    resource: "git switch* --discard-changes*"
+    effect: deny
+  - action: shell
+    resource: "git switch* -f*"
+    effect: deny
+  - action: shell
+    resource: "git switch* --force*"
+    effect: deny
+  - action: shell
+    resource: "git switch* -C*"
+    effect: deny
   - action: subagent
     resource: "*"
     effect: deny
@@ -167,6 +194,6 @@ Load a `quality-*` skill when a plan or task breakdown needs design or testing g
 ## Limits
 
 - Product code, tests and docs outside `specs/` are not yours to edit; if a phase seems to need that, record it as a task bead.
-- No `git push`, branch deletion or history rewrites. Commit spec artifacts only when the user asks.
-- Shell runs only `bd`, `specify`, `.specify/` scripts and git status, diff, log, show, branch, switch, `add specs/` / `add .specify/` and commit, one command per call: no pipes into other tools, no `ls` or `cat` (use read, glob, grep). A refusal of one command does not mean the others are refused.
+- No `git push`, branch deletion, renames, discarding switches or history rewrites. Commit spec artifacts only when the user asks, and only with `speckit_commit`: it stages only `specs/` and `.specify/`, refuses when anything else is staged, and never amends.
+- Shell runs only `bd`, `specify`, `.specify/` scripts and git status, diff, log, show, branch (listing), switch, one command per call: no pipes into other tools, no `ls` or `cat` (use read, glob, grep). A refusal of one command does not mean the others are refused.
 - A refused edit or command is the boundary working; do not route around it through shell.

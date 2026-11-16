@@ -977,6 +977,10 @@ async function beadsActive(directory, spawn = spawnExit) {
   }
 }
 
+// plugins/speckit/src/commit.ts
+import { existsSync as existsSync4 } from "fs";
+import { join as join5, posix } from "path";
+
 // plugins/speckit/src/setup.ts
 import { appendFileSync, copyFileSync, existsSync as existsSync3, lstatSync, mkdirSync, readFileSync as readFileSync3, writeFileSync } from "fs";
 import { dirname, isAbsolute as isAbsolute2, join as join4, parse, resolve as resolve2, sep } from "path";
@@ -1282,6 +1286,99 @@ ${ver.stderr}`))
   }
 }
 
+// plugins/speckit/src/commit.ts
+var COMMIT_TOOL = "speckit_commit";
+var COMMIT_DESCRIPTION = `Commit SpecKit artifacts: stages only specs/ and .specify/, refuses other staged files, never amends.
+` + "Paths are relative to the SpecKit workspace and default to specs/ and .specify/. Refuses before staging when a requested path lies outside them or the index already holds other files; commits exactly the staged artifact paths.";
+var COMMIT_INPUT = {
+  type: "object",
+  properties: {
+    message: { type: "string", minLength: 1, description: "Commit message" },
+    paths: {
+      type: "array",
+      items: { type: "string" },
+      description: "Paths under specs/ or .specify/; default both"
+    }
+  },
+  required: ["message"],
+  additionalProperties: false
+};
+var GIT_TIMEOUT_MS = 60000;
+var ROOTS = ["specs", ".specify"];
+function artifactPath(path) {
+  if (path === "" || posix.isAbsolute(path))
+    return;
+  const normal = posix.normalize(path).replace(/\/+$/, "");
+  if (normal.split("/").includes(".."))
+    return;
+  return ROOTS.some((root) => normal === root || normal.startsWith(`${root}/`)) ? normal : undefined;
+}
+function outsideArtifacts(staged, prefix) {
+  return staged.filter((path) => !path.startsWith(prefix) || artifactPath(path.slice(prefix.length)) === undefined);
+}
+var gitIn = (workspace) => async (args) => {
+  const result = await run(["git", "--literal-pathspecs", ...args], workspace, Date.now() + GIT_TIMEOUT_MS);
+  return result.exitCode === 0 ? { ok: true, stdout: result.stdout } : { ok: false, reason: `git ${args[0]} failed: ${result.stderr.trim() || `exit ${result.exitCode}`}` };
+};
+var refuse = (reason) => ({ content: `${COMMIT_TOOL}: ${reason}`, metadata: { ok: false } });
+function readCommitParams(input, workspace) {
+  const value = input !== null && typeof input === "object" ? input : {};
+  if (typeof value.message !== "string" || value.message.trim() === "")
+    return "message is required";
+  if (value.paths === undefined)
+    return { message: value.message, paths: ROOTS.filter((root) => existsSync4(join5(workspace, root))) };
+  if (!Array.isArray(value.paths) || value.paths.some((path) => typeof path !== "string"))
+    return "paths must be an array of strings";
+  const outside = value.paths.filter((path) => artifactPath(path) === undefined);
+  if (outside.length)
+    return `refused: only paths under specs/ or .specify/ may be committed; got ${outside.join(", ")}`;
+  return { message: value.message, paths: value.paths.map((path) => artifactPath(path)) };
+}
+async function executeCommit(input, workspace, git = gitIn(workspace)) {
+  const params = readCommitParams(input, workspace);
+  if (typeof params === "string")
+    return refuse(params);
+  if (!params.paths.length)
+    return refuse("nothing to commit: no specs/ or .specify/ in the workspace");
+  const prefix = await git(["rev-parse", "--show-prefix"]);
+  if (!prefix.ok)
+    return refuse(prefix.reason);
+  const base = prefix.stdout.trim();
+  const staged = async () => {
+    const listed = await git(["diff", "--cached", "--name-only", "--no-renames", "-z"]);
+    return listed.ok ? { ok: true, paths: listed.stdout.split("\x00").filter(Boolean) } : listed;
+  };
+  const before = await staged();
+  if (!before.ok)
+    return refuse(before.reason);
+  const foreign = outsideArtifacts(before.paths, base);
+  if (foreign.length)
+    return refuse(`refused: the index already holds files outside specs/ and .specify/: ${foreign.join(", ")}. Unstage them first.`);
+  const added = await git(["add", "-A", "--", ...params.paths]);
+  if (!added.ok)
+    return refuse(added.reason);
+  const after = await staged();
+  if (!after.ok)
+    return refuse(after.reason);
+  const late = outsideArtifacts(after.paths, base);
+  if (late.length)
+    return refuse(`refused: files outside specs/ and .specify/ were staged meanwhile: ${late.join(", ")}`);
+  if (!after.paths.length)
+    return refuse("nothing to commit: the artifacts are unchanged");
+  const paths = after.paths.map((path) => path.slice(base.length));
+  const committed = await git(["commit", "-m", params.message, "--", ...paths]);
+  if (!committed.ok)
+    return refuse(committed.reason);
+  const head = await git(["rev-parse", "--short", "HEAD"]);
+  const sha = head.ok ? head.stdout.trim() : "HEAD";
+  return {
+    content: `Committed ${sha}: ${paths.length} file(s)
+${paths.join(`
+`)}`,
+    metadata: { ok: true, sha, paths }
+  };
+}
+
 // plugins/speckit/src/skills.ts
 var MARKER = "<!-- srobroek.speckit -->";
 var IMPLEMENT_SKILLS = ["speckit-implement", "speckit.implement"];
@@ -1338,11 +1435,11 @@ function skillRefusal(tool, input) {
 import { basename as basename3 } from "path";
 
 // plugins/speckit/src/workflow.ts
-import { existsSync as existsSync4 } from "fs";
-import { join as join5 } from "path";
+import { existsSync as existsSync5 } from "fs";
+import { join as join6 } from "path";
 var OWN_PROMPT_AGENTS = ["speckit-sync", "speckit-verify"];
 function usesSpeckit(directory) {
-  return existsSync4(join5(directory, ".specify"));
+  return existsSync5(join6(directory, ".specify"));
 }
 function workflowLatch(detect = usesSpeckit, store) {
   const decided = new Map;
@@ -1676,13 +1773,13 @@ async function startSpec(options, command) {
 import { spawn } from "child_process";
 import { randomUUID } from "crypto";
 import { realpathSync as realpathSync3 } from "fs";
-import { join as join7 } from "path";
+import { join as join8 } from "path";
 
 // plugins/beads/src/bd-embedded-write-lock.ts
 import { spawnSync as spawnSync2 } from "child_process";
 import {
   closeSync as closeSync2,
-  existsSync as existsSync5,
+  existsSync as existsSync6,
   openSync as openSync2,
   readFileSync as readFileSync4,
   realpathSync as realpathSync2,
@@ -1691,7 +1788,7 @@ import {
   writeSync
 } from "fs";
 import { hostname } from "os";
-import { basename as basename4, dirname as dirname4, isAbsolute as isAbsolute5, join as join6, resolve as resolve5 } from "path";
+import { basename as basename4, dirname as dirname4, isAbsolute as isAbsolute5, join as join7, resolve as resolve5 } from "path";
 
 // plugins/lib/src/shell-command.ts
 var INTERPRETERS = new Set(["bash", "sh", "zsh", "dash", "ksh"]);
@@ -1931,9 +2028,9 @@ function storeFor(globals, cwd, env) {
   const base = directory === undefined ? cwd : absolute(directory, cwd);
   if (db !== undefined) {
     const target = absolute(db, base);
-    if (!existsSync5(target))
+    if (!existsSync6(target))
       return;
-    return canonical(isDirectory2(target) ? target : join6(target, ".."));
+    return canonical(isDirectory2(target) ? target : join7(target, ".."));
   }
   if (directory !== undefined)
     return canonicalStore(sessionPinFor(base));
@@ -1964,11 +2061,11 @@ function canonicalStore(store) {
 }
 function embedded(store) {
   for (const file of ["metadata.json", "config.yaml"]) {
-    const read = readBounded(join6(store, file));
+    const read = readBounded(join7(store, file));
     if (read.kind === "unreadable" || read.kind === "text" && read.text !== "")
       return true;
   }
-  return isDirectory2(join6(store, "embeddeddolt"));
+  return isDirectory2(join7(store, "embeddeddolt"));
 }
 function embeddedStoreFor(cwd, env = process.env) {
   const store = storeFor([], cwd, env);
@@ -2096,7 +2193,7 @@ function wakeHead(lock) {
   registry().queues.get(lock)?.[0]?.wake?.();
 }
 async function hold(store, owner, waitMs = WAIT_MS, signal) {
-  const lock = join6(store, LOCK_NAME);
+  const lock = join7(store, LOCK_NAME);
   const { owned, queues } = registry();
   const deadline = Date.now() + waitMs;
   let attempt = 0;
@@ -2142,7 +2239,7 @@ async function hold(store, owner, waitMs = WAIT_MS, signal) {
               reason: `Beads embedded write lock could not be taken at ${lock} (${code ?? "unknown error"}). The write was refused rather than risk a second writer on the embedded Dolt journal.`
             };
           }
-          const steal = join6(store, STEAL_NAME);
+          const steal = join7(store, STEAL_NAME);
           const unsafe = unsafeRecord(lock) ? lock : unsafeRecord(steal) ? steal : undefined;
           if (unsafe !== undefined) {
             return {
@@ -2187,7 +2284,7 @@ async function hold(store, owner, waitMs = WAIT_MS, signal) {
   }
 }
 function withOwnership(storeLock, token, change) {
-  const steal = join6(dirname4(storeLock), STEAL_NAME);
+  const steal = join7(dirname4(storeLock), STEAL_NAME);
   let fd;
   try {
     fd = openSync2(steal, "wx");
@@ -2209,7 +2306,7 @@ function withOwnership(storeLock, token, change) {
   }
 }
 function release(store, owner) {
-  const lock = join6(store, LOCK_NAME);
+  const lock = join7(store, LOCK_NAME);
   const owned = registry().owned;
   const held = owned.get(lock);
   if (held === undefined)
@@ -2289,7 +2386,7 @@ async function runSpecStart(options, signal, commandMs = COMMAND_MS, module = BE
   const cwd = realpathSync3(options.workspace);
   const env = {
     ...process.env,
-    BEADS_DIR: realpathSync3(join7(cwd, ".beads")),
+    BEADS_DIR: realpathSync3(join8(cwd, ".beads")),
     GIT_TERMINAL_PROMPT: "0",
     SSH_ASKPASS: "/usr/bin/false",
     SSH_ASKPASS_REQUIRE: "force",
@@ -2623,6 +2720,16 @@ ${workflow.text}` };
           return executeStart(input, cwd, context.signal);
         }
       });
+      editor.add({
+        name: COMMIT_TOOL,
+        description: COMMIT_DESCRIPTION,
+        input: COMMIT_INPUT,
+        execute: async (input, context) => {
+          const cwd = await directory(context.sessionID);
+          await assert(context, COMMIT_TOOL, cwd, { ...input });
+          return executeCommit(input, cwd);
+        }
+      });
     });
     disposers.push(() => tools.dispose());
     if (options.tasksGuard || options.blockTasksToIssues) {
@@ -2754,14 +2861,17 @@ export {
   SPEC_AGENT,
   TASKSTOISSUES_REFUSAL,
   WORKFLOW_PATH,
+  artifactPath,
   beadsActive,
   createPlugin,
   decideToolCall,
   src_default as default,
+  executeCommit,
   executeSetup,
   executeStart,
   installFormulas,
   isTasksMd,
+  outsideArtifacts,
   parseOptions,
   rewriteSkill,
   runSetup,

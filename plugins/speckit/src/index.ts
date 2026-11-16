@@ -8,6 +8,7 @@ import { locationDirectories } from "@srobroek/opencode-lib/mcp"
 import { registerSkills, skillPaths } from "@srobroek/opencode-lib/skill-files"
 import { isShellTool, WRITE_TOOLS } from "@srobroek/opencode-lib/tool-targets"
 import { beadsActive } from "./beads.ts"
+import { COMMIT_DESCRIPTION, COMMIT_INPUT, COMMIT_TOOL, executeCommit } from "./commit.ts"
 import { DEFAULT_INTEGRATION } from "./setup.ts"
 import { rewriteSkill, type SkillLike, type SkillRouting, skillRefusal, staleSkills } from "./skills.ts"
 import { isSpecAgent, type SpecAgentSetting, specAgentSetting, wantsSpecAgent } from "./spec-agent.ts"
@@ -25,6 +26,7 @@ import {
 import { usesSpeckit, workflowLatch } from "./workflow.ts"
 
 export { beadsActive } from "./beads.ts"
+export { artifactPath, executeCommit, outsideArtifacts } from "./commit.ts"
 export { installFormulas, runSetup } from "./setup.ts"
 export { IMPLEMENT_REDIRECT, rewriteSkill, skillRefusal, TASKSTOISSUES_REFUSAL } from "./skills.ts"
 export { SPEC_AGENT, wantsSpecAgent } from "./spec-agent.ts"
@@ -166,6 +168,16 @@ export async function setupSpeckit(ctx: Context, overrides: Overrides = {}): Pro
             ...(input as Record<string, unknown>),
           })
           return executeStart(input, cwd, context.signal)
+        },
+      })
+      editor.add({
+        name: COMMIT_TOOL,
+        description: COMMIT_DESCRIPTION,
+        input: COMMIT_INPUT,
+        execute: async (input, context) => {
+          const cwd = await directory(context.sessionID)
+          await assert(context, COMMIT_TOOL, cwd, { ...(input as Record<string, unknown>) })
+          return executeCommit(input, cwd)
         },
       })
     })

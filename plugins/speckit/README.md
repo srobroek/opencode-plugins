@@ -80,6 +80,12 @@ bundled into this package; both copies take turns on the same lock file. Pass `r
 when the spec has several runs. Clarification, analysis, reviews, verification, tests
 and consequential safety confirmations stay required whatever the choice.
 
+`speckit_commit` commits SpecKit artifacts. It stages only paths under `specs/` and
+`.specify/` (by default both), refuses before staging when a requested path lies outside
+them or the index already holds other files, commits exactly the staged artifact paths
+and never amends. The `spec` agent commits through it, since a shell `git add` or
+`git commit` pattern cannot keep its operands or options in bounds.
+
 ## Guards and routes
 
 All of them apply only where `bd where` finds a beads workspace, and fail open when
@@ -127,8 +133,8 @@ and through `tools.parley_ask` for rounds of several questions.
 | --- | --- |
 | Steps | 100 |
 | Edits | `specs/*` and `.specify/*` only |
-| Shell | `bd` (including the beads write-lock runner), `specify`, `.specify/` scripts, and `git` status, diff, log, show, branch, rev-parse, ls-files, merge-base, switch, `add specs/` / `add .specify/`, commit |
-| Tools | read, grep, glob, LSP, `question`, `execute` (for `parley_ask`, `speckit_setup`, `speckit_start`), `speckit_*` |
+| Shell | `bd` (including the beads write-lock runner), `specify`, `.specify/` scripts, and `git` status, diff, log, show, branch, rev-parse, ls-files, merge-base, switch. Branch deletion, renames and forced moves, and discarding or forced switches are denied. |
+| Tools | read, grep, glob, LSP, `question`, `execute` (for `parley_ask`, `speckit_setup`, `speckit_start`), `speckit_*` (commits go through `speckit_commit`) |
 | Skills | `speckit-*` (this plugin's and spec-kit's), `quality-*` |
 | Subagents | `explore`, `researcher`, `architect`, `speckit-verify`, `speckit-sync` |
 

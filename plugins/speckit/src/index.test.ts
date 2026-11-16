@@ -53,7 +53,7 @@ const before = (fake: Fake, tool: string, input: unknown) =>
 describe("setup", () => {
   test("registers the tools, hooks, skills and agents, and disposes all of them", async () => {
     const { fake, cleanup } = await start()
-    expect([...fake.tools.keys()].sort()).toEqual(["speckit_setup", "speckit_start"])
+    expect([...fake.tools.keys()].sort()).toEqual(["speckit_commit", "speckit_setup", "speckit_start"])
     expect(fake.hooks("tool")).toEqual(["execute.before"])
     expect(fake.hooks("session")).toEqual(["context", "compaction", "generate"])
     expect([...fake.skills.keys()].sort()).toEqual(["speckit-bugfix", "speckit-setup"])
