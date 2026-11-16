@@ -606,7 +606,7 @@ function readReportFile(sessionDirectory, path, roots = reportRoots(sessionDirec
   return readFileSync3(real, "utf8");
 }
 
-// node_modules/.bun/fast-xml-parser@5.12.0/node_modules/fast-xml-parser/src/util.js
+// node_modules/.bun/fast-xml-parser@5.12.1/node_modules/fast-xml-parser/src/util.js
 var nameStartChar = ":A-Za-z_\\u00C0-\\u00D6\\u00D8-\\u00F6\\u00F8-\\u02FF\\u0370-\\u037D\\u037F-\\u1FFF\\u200C-\\u200D\\u2070-\\u218F\\u2C00-\\u2FEF\\u3001-\\uD7FF\\uF900-\\uFDCF\\uFDF0-\\uFFFD";
 var nameChar = nameStartChar + "\\-.\\d\\u00B7\\u0300-\\u036F\\u203F-\\u2040";
 var nameRegexp = "[" + nameStartChar + "][" + nameChar + "]*";
@@ -644,7 +644,7 @@ var DANGEROUS_PROPERTY_NAMES = [
 ];
 var criticalProperties = ["__proto__", "constructor", "prototype"];
 
-// node_modules/.bun/fast-xml-parser@5.12.0/node_modules/fast-xml-parser/src/validator.js
+// node_modules/.bun/fast-xml-parser@5.12.1/node_modules/fast-xml-parser/src/validator.js
 var defaultOptions = {
   allowBooleanAttributes: false,
   unpairedTags: []
@@ -874,7 +874,7 @@ function scanAttributeTokens(attrStr) {
     if (i >= len)
       break;
     if (attrStr[i] === "=") {
-      i = tokenStart + 1;
+      i++;
       continue;
     }
     const leadingWs = attrStr.slice(tokenStart, i);
@@ -1335,7 +1335,7 @@ class EntityDecoder {
     return this._applyNCRAction(effective, token, cp);
   }
 }
-// node_modules/.bun/fast-xml-parser@5.12.0/node_modules/fast-xml-parser/src/xmlparser/OptionsBuilder.js
+// node_modules/.bun/fast-xml-parser@5.12.1/node_modules/fast-xml-parser/src/xmlparser/OptionsBuilder.js
 var defaultOnDangerousProperty = (name) => {
   if (DANGEROUS_PROPERTY_NAMES.includes(name)) {
     return "__" + name;
@@ -1458,7 +1458,7 @@ var buildOptions = function(options) {
   return built;
 };
 
-// node_modules/.bun/fast-xml-parser@5.12.0/node_modules/fast-xml-parser/src/xmlparser/xmlNode.js
+// node_modules/.bun/fast-xml-parser@5.12.1/node_modules/fast-xml-parser/src/xmlparser/xmlNode.js
 var METADATA_SYMBOL;
 if (typeof Symbol !== "function") {
   METADATA_SYMBOL = "@@xmlMetadata";
@@ -1532,7 +1532,7 @@ var getRegexes = (xmlVersion = "1.0", asciiOnly = false) => {
 };
 var qName = (str, { xmlVersion = "1.0", asciiOnly = false } = {}) => getRegexes(xmlVersion, asciiOnly).qName.test(str);
 
-// node_modules/.bun/fast-xml-parser@5.12.0/node_modules/fast-xml-parser/src/xmlparser/DocTypeReader.js
+// node_modules/.bun/fast-xml-parser@5.12.1/node_modules/fast-xml-parser/src/xmlparser/DocTypeReader.js
 class DocTypeReader {
   constructor(options, xmlVersion) {
     this.suppressValidationErr = !options;
@@ -2145,7 +2145,7 @@ function handleInfinity(str, num, options) {
   }
 }
 
-// node_modules/.bun/fast-xml-parser@5.12.0/node_modules/fast-xml-parser/src/ignoreAttributes.js
+// node_modules/.bun/fast-xml-parser@5.12.1/node_modules/fast-xml-parser/src/ignoreAttributes.js
 function getIgnoreAttributesFn(ignoreAttributes) {
   if (typeof ignoreAttributes === "function") {
     return ignoreAttributes;
@@ -3430,7 +3430,7 @@ function isUnsafe(value, context) {
   return false;
 }
 
-// node_modules/.bun/fast-xml-parser@5.12.0/node_modules/fast-xml-parser/src/xmlparser/OrderedObjParser.js
+// node_modules/.bun/fast-xml-parser@5.12.1/node_modules/fast-xml-parser/src/xmlparser/OrderedObjParser.js
 function extractRawAttributes(prefixedAttrs, options) {
   if (!prefixedAttrs)
     return {};
@@ -3557,7 +3557,10 @@ function resolveNameSpace(tagname) {
   }
   return tagname;
 }
-var attrsRegx = new RegExp(`([^\\s=]+)\\s*(=\\s*(['"])([\\s\\S]*?)\\3)?`, "gm");
+var attrsRegx = /([^\s=]+)\s*(=\s*(?:"([^"]*)"|'([^']*)'))?/gm;
+function attrValue(match) {
+  return match[3] !== undefined ? match[3] : match[4];
+}
 function buildAttributesMap(attrStr, jPath, tagName, force = false) {
   const options = this.options;
   if (force === true || options.ignoreAttributes !== true && typeof attrStr === "string") {
@@ -3569,7 +3572,7 @@ function buildAttributesMap(attrStr, jPath, tagName, force = false) {
     const rawAttrsForMatcher = {};
     for (let i = 0;i < len; i++) {
       const attrName = this.resolveNameSpace(matches[i][1]);
-      const oldVal = matches[i][4];
+      const oldVal = attrValue(matches[i]);
       if (attrName.length && oldVal !== undefined) {
         let val = oldVal;
         if (options.trimValues)
@@ -3595,7 +3598,7 @@ function buildAttributesMap(attrStr, jPath, tagName, force = false) {
           aName = options.transformAttributeName(aName);
         }
         aName = sanitizeName(aName, options);
-        if (matches[i][4] !== undefined) {
+        if (attrValue(matches[i]) !== undefined) {
           const oldVal = processedVals[i];
           const newVal = options.attributeValueProcessor(attrName, oldVal, jPathStr);
           if (newVal === null || newVal === undefined) {
@@ -3914,7 +3917,6 @@ function isItStopNode() {
   return this.matcher.matchesAny(this.stopNodeExpressionsSet);
 }
 function tagExpWithClosingIndex(xmlData, i, closingChar = ">") {
-  let attrBoundary = 0;
   const len = xmlData.length;
   const closeCode0 = closingChar.charCodeAt(0);
   const closeCode1 = closingChar.length > 1 ? closingChar.charCodeAt(1) : -1;
@@ -3922,11 +3924,10 @@ function tagExpWithClosingIndex(xmlData, i, closingChar = ">") {
   let segmentStart = i;
   for (let index = i;index < len; index++) {
     const code = xmlData.charCodeAt(index);
-    if (attrBoundary) {
-      if (code === attrBoundary)
-        attrBoundary = 0;
-    } else if (code === 34 || code === 39) {
-      attrBoundary = code;
+    if (code === 34 || code === 39) {
+      index = xmlData.indexOf(xmlData[index], index + 1);
+      if (index === -1)
+        return;
     } else if (code === closeCode0) {
       if (closeCode1 !== -1) {
         if (xmlData.charCodeAt(index + 1) === closeCode1) {
@@ -3937,7 +3938,7 @@ function tagExpWithClosingIndex(xmlData, i, closingChar = ">") {
         result += xmlData.substring(segmentStart, index);
         return { data: result, index };
       }
-    } else if (code === 9 && !attrBoundary) {
+    } else if (code === 9) {
       result += xmlData.substring(segmentStart, index) + " ";
       segmentStart = index + 1;
     }
@@ -4083,7 +4084,7 @@ function sanitizeName(name, options) {
   return name;
 }
 
-// node_modules/.bun/fast-xml-parser@5.12.0/node_modules/fast-xml-parser/src/xmlparser/node2json.js
+// node_modules/.bun/fast-xml-parser@5.12.1/node_modules/fast-xml-parser/src/xmlparser/node2json.js
 var METADATA_SYMBOL2 = XmlNode.getMetaDataSymbol();
 function stripAttributePrefix(attrs, prefix) {
   if (!attrs || typeof attrs !== "object")
@@ -4201,7 +4202,7 @@ function isLeafTag(obj, options) {
   return false;
 }
 
-// node_modules/.bun/fast-xml-parser@5.12.0/node_modules/fast-xml-parser/src/xmlparser/XMLParser.js
+// node_modules/.bun/fast-xml-parser@5.12.1/node_modules/fast-xml-parser/src/xmlparser/XMLParser.js
 class XMLParser {
   constructor(options) {
     this.externalEntities = {};
@@ -4248,7 +4249,7 @@ class XMLParser {
   }
 }
 
-// node_modules/.bun/fast-xml-parser@5.12.0/node_modules/fast-xml-parser/src/fxp.js
+// node_modules/.bun/fast-xml-parser@5.12.1/node_modules/fast-xml-parser/src/fxp.js
 var XMLValidator = {
   validate
 };
