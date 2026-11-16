@@ -21,8 +21,8 @@ export type ModelSnapshot = {
   at: number
   /** Set when failover moved the child off the model it resolved to. */
   failedOver?: true
-  /** Set when the guard moved a resumed child off a model it now refuses. */
-  rule?: "guard-reroute"
+  /** Why the child runs where it does, when a tier did not choose: the guard moved it, the spawn named its model, or the agent pins one. */
+  rule?: "guard-reroute" | "explicit-model" | "agent-pin"
   /** Models the child's prompt overflowed, `provider/model#variant`. A resume never goes back to one. */
   overflowed?: string[]
   /** Set for a spawn that was eligible for exploration: the arm it runs on, kept across a resume. */
@@ -57,7 +57,7 @@ export function readSnapshot(value: unknown): ModelSnapshot | undefined {
   if (isRecord(value.explore) && typeof value.explore.arm === "string" && typeof value.explore.p === "number" && typeof value.explore.policy === "string" && Array.isArray(value.explore.eligible))
     snapshot.explore = { policy: value.explore.policy, eligible: value.explore.eligible.filter((a): a is string => typeof a === "string"), arm: value.explore.arm, p: value.explore.p }
   if (value.failedOver === true) snapshot.failedOver = true
-  if (value.rule === "guard-reroute") snapshot.rule = "guard-reroute"
+  if (value.rule === "guard-reroute" || value.rule === "explicit-model" || value.rule === "agent-pin") snapshot.rule = value.rule
   if (Array.isArray(value.overflowed)) {
     const overflowed = value.overflowed.filter((entry): entry is string => typeof entry === "string")
     if (overflowed.length > 0) snapshot.overflowed = overflowed

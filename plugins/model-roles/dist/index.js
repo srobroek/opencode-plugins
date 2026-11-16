@@ -483,6 +483,9 @@ function contextSwitchNote(facts) {
   const where = facts.tier === undefined ? "its tier" : `tier ${facts.tier}`;
   return `${head}; ${where} has a larger-context candidate, ${target}. Switch to it or compact the session.`;
 }
+function pinnedContextNote(failed, limit) {
+  return `context too long for ${label(failed)} (${tokens(limit)}); ${label(failed)} was chosen explicitly, so model-roles does not switch it. Compact the session, or spawn with a larger-context model.`;
+}
 function contextNote(failed, limit, tier) {
   const where = tier === undefined ? "its tier" : `tier ${tier}`;
   return `context too long for ${label(failed)} (${tokens(limit)}); no larger-context candidate in ${where}. Compact the session or use a tier with a larger-context model`;
@@ -5127,8 +5130,8 @@ function readSnapshot(value) {
     snapshot.explore = { policy: value.explore.policy, eligible: value.explore.eligible.filter((a) => typeof a === "string"), arm: value.explore.arm, p: value.explore.p };
   if (value.failedOver === true)
     snapshot.failedOver = true;
-  if (value.rule === "guard-reroute")
-    snapshot.rule = "guard-reroute";
+  if (value.rule === "guard-reroute" || value.rule === "explicit-model" || value.rule === "agent-pin")
+    snapshot.rule = value.rule;
   if (Array.isArray(value.overflowed)) {
     const overflowed = value.overflowed.filter((entry) => typeof entry === "string");
     if (overflowed.length > 0)
@@ -5659,24 +5662,40 @@ ${refs.size}`;
       }
       return limits;
     };
+    const isChosen = async (stored, overflow) => {
+      if (stored?.rule === "explicit-model" || stored?.rule === "agent-pin")
+        return true;
+      if (stored?.tier !== undefined || overflow.spawnRole !== undefined || overflow.agent === undefined)
+        return false;
+      try {
+        const agent = (await listAgents()).find((a) => a.id === overflow.agent);
+        return agent !== undefined && userPin(agent) !== undefined;
+      } catch {
+        return false;
+      }
+    };
     const contextTarget = async (overflow) => {
-      const { sessionID, notifyTo, failed } = overflow;
+      const { sessionID, failed } = overflow;
       const stored = sessionID === undefined ? undefined : await snapshotOf(sessionID);
       const role = stored?.tier ?? overflow.spawnRole ?? overflow.role;
-      const tier = contextTier(role, failed);
       const limits = contextLimits();
+      if (await isChosen(stored, overflow))
+        return { role, tier: undefined, limits, limit: limits.get(healthKey(failed)), target: undefined, chosen: true };
+      const tier = contextTier(role, failed);
       const allowed = [];
       for (const ref of contextCandidates(tier, view()))
-        if (await judge({ sessionID: notifyTo, agent: overflow.agent ?? "" }, overflow.agent ?? "", ref) === undefined)
+        if (guard2 === undefined || allowsChosenModel(guard2, options, ref))
           allowed.push(ref);
-      return { role, tier, limits, limit: limits.get(healthKey(failed)), target: contextFallback(allowed, failed, limits) };
+      return { role, tier, limits, limit: limits.get(healthKey(failed)), target: contextFallback(allowed, failed, limits), chosen: false };
     };
     const onContextOverflow = async (overflow) => {
       const { sessionID, notifyTo, failed } = overflow;
       const key = sessionID ?? `${notifyTo}\x00${overflow.agent ?? ""}`;
       if (!claimContextNotice(noticeState, key, sessionID === undefined ? undefined : executionOf.get(sessionID), Date.now()))
         return;
-      const { role, tier, limits, limit, target } = await contextTarget(overflow);
+      const { role, tier, limits, limit, target, chosen } = await contextTarget(overflow);
+      if (chosen)
+        return notify(notifyTo, pinnedContextNote(failed, limit), "context-length");
       if (target === undefined)
         return notify(notifyTo, contextNote(failed, limit, tier), "context-length");
       let resumable;
@@ -5704,8 +5723,8 @@ ${refs.size}`;
       const { sessionID, notifyTo, failed } = overflow;
       if (!claimToolContextNotice(noticeState, sessionID ?? `${notifyTo}\x00${overflow.agent ?? ""}`, Date.now()))
         return;
-      const { tier, limits, limit, target } = await contextTarget(overflow);
-      const text = target === undefined ? contextNote(failed, limit, tier) : contextSwitchNote({ failed, limit, target, targetLimit: limits.get(healthKey(target)), tier });
+      const { tier, limits, limit, target, chosen } = await contextTarget(overflow);
+      const text = chosen ? pinnedContextNote(failed, limit) : target === undefined ? contextNote(failed, limit, tier) : contextSwitchNote({ failed, limit, target, targetLimit: limits.get(healthKey(target)), tier });
       await notify(notifyTo, text, "context-length");
     };
     const contextTier = (role, failed) => role !== undefined && Object.hasOwn(options.roles, role) ? role : rolesListing(options, failed)[0];
@@ -5832,7 +5851,7 @@ ${refs.size}`;
       await persistSnapshot(childID);
     };
     const expectedChildren = new Map;
-    const expectChild = (callID, event, agent, planned, tier, explore) => {
+    const expectChild = (callID, event, agent, planned, tier, explore, rule) => {
       expectedChildren.set(callID, {
         parentID: event.sessionID,
         agent,
@@ -5840,7 +5859,8 @@ ${refs.size}`;
         ...tier === undefined ? {} : { tier },
         configRevision: configRevision(options),
         at: Date.now(),
-        ...explore === undefined ? {} : { explore }
+        ...explore === undefined ? {} : { explore },
+        ...rule === undefined ? {} : { rule }
       });
     };
     const recordChildModel = async (childID, spawn, actual) => {
@@ -5852,7 +5872,8 @@ ${refs.size}`;
         ...spawn.tier === undefined ? {} : { tier: spawn.tier },
         configRevision: spawn.configRevision,
         at: Date.now(),
-        ...spawn.explore === undefined ? {} : { explore: spawn.explore }
+        ...spawn.explore === undefined ? {} : { explore: spawn.explore },
+        ...spawn.rule === undefined ? {} : { rule: spawn.rule }
       });
     };
     const matchExpected = async (data) => {
@@ -6468,7 +6489,7 @@ ${refs.size}`;
         if (refusal !== undefined)
           throw new Error(refusal);
         event.input = stripped;
-        await writeSnapshot(childID, { model: modelLabel(explicitModel), configRevision: revision, at: Date.now() });
+        await writeSnapshot(childID, { model: modelLabel(explicitModel), rule: "explicit-model", configRevision: revision, at: Date.now() });
         await outcomes.leftArm(childID);
         await forgetChildRole(childID);
         await recordReceipt({ at: Date.now(), agent, source: "agent", model: modelLabel(explicitModel), rule: "explicit-model", fallbacks: [], warnings: [] });
@@ -6643,7 +6664,7 @@ ${refs.size}`;
         const receipt2 = bypass("explicit-model", explicitModel, "the spawn's own model wins over tier");
         if (receipt2 !== undefined)
           await recordReceipt(receipt2);
-        expectChild(event.id, event, target, explicitModel, undefined);
+        expectChild(event.id, event, target, explicitModel, undefined, undefined, "explicit-model");
         return;
       }
       let source = asked?.source;
@@ -6728,7 +6749,7 @@ ${refs.size}`;
               explore: exploration.facts
             });
         }
-        expectChild(event.id, event, target, exploration?.tuned?.model ?? ownModel, pin === undefined ? own : undefined, exploration?.facts);
+        expectChild(event.id, event, target, exploration?.tuned?.model ?? ownModel, pin === undefined ? own : undefined, exploration?.facts, pin === undefined ? undefined : "agent-pin");
         if (pin !== undefined) {
           const receipt2 = bypass("agent-pin", pin, "the agent's own model (config or frontmatter) wins over tier");
           if (receipt2 !== undefined)
@@ -7344,6 +7365,7 @@ export {
   parseVerdict,
   pickConfigFile,
   pickRole,
+  pinnedContextNote,
   pinnedModel,
   planImplicit,
   planSpawn,

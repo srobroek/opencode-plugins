@@ -46,6 +46,7 @@ import {
   failureNote,
   fallbackTarget,
   type NoteFacts,
+  pinnedContextNote,
   retriesOnModel,
   retryDelay,
   retryTarget,
@@ -564,19 +565,33 @@ export default Plugin.define({
       agent: string | undefined
     }
 
+    /** Whether the child runs on a model the user chose: the snapshot's rule, else an agent pin of a child no tier routed. */
+    const isChosen = async (stored: ModelSnapshot | undefined, overflow: OverflowFacts): Promise<boolean> => {
+      if (stored?.rule === "explicit-model" || stored?.rule === "agent-pin") return true
+      if (stored?.tier !== undefined || overflow.spawnRole !== undefined || overflow.agent === undefined) return false
+      try {
+        const agent = (await listAgents()).find((a) => a.id === overflow.agent)
+        return agent !== undefined && userPin(agent) !== undefined
+      } catch {
+        return false
+      }
+    }
+
     /** The tier an overflowing child is judged in and the first larger-context candidate the guard allows. */
     const contextTarget = async (overflow: OverflowFacts) => {
-      const { sessionID, notifyTo, failed } = overflow
+      const { sessionID, failed } = overflow
       // A child keeps the tier it was spawned in: its snapshot first, then its recorded spawn tier, then its agent's.
       const stored = sessionID === undefined ? undefined : await snapshotOf(sessionID)
       const role = stored?.tier ?? overflow.spawnRole ?? overflow.role
-      const tier = contextTier(role, failed)
       const limits = contextLimits()
-      // The guard judges a larger-context candidate as it judges any model a spawn names.
+      // A model the user chose (a spawn `model`, an agent pin) wins over tiers: it is never switched.
+      if (await isChosen(stored, overflow)) return { role, tier: undefined, limits, limit: limits.get(healthKey(failed)), target: undefined, chosen: true }
+      const tier = contextTier(role, failed)
+      // The plugin picks these, so no pin exempts them: the guard judges each as a plugin choice.
       const allowed: ModelRef[] = []
       for (const ref of contextCandidates(tier, view()))
-        if ((await judge({ sessionID: notifyTo, agent: overflow.agent ?? "" }, overflow.agent ?? "", ref)) === undefined) allowed.push(ref)
-      return { role, tier, limits, limit: limits.get(healthKey(failed)), target: contextFallback(allowed, failed, limits) }
+        if (guard === undefined || allowsChosenModel(guard, options, ref)) allowed.push(ref)
+      return { role, tier, limits, limit: limits.get(healthKey(failed)), target: contextFallback(allowed, failed, limits), chosen: false }
     }
 
     /**
@@ -593,7 +608,8 @@ export default Plugin.define({
       const { sessionID, notifyTo, failed } = overflow
       const key = sessionID ?? `${notifyTo}\0${overflow.agent ?? ""}`
       if (!claimContextNotice(noticeState, key, sessionID === undefined ? undefined : executionOf.get(sessionID), Date.now())) return
-      const { role, tier, limits, limit, target } = await contextTarget(overflow)
+      const { role, tier, limits, limit, target, chosen } = await contextTarget(overflow)
+      if (chosen) return notify(notifyTo, pinnedContextNote(failed, limit), "context-length")
       if (target === undefined) return notify(notifyTo, contextNote(failed, limit, tier), "context-length")
       let resumable: string | undefined
       if (overflow.isChild && sessionID !== undefined) {
@@ -627,9 +643,10 @@ export default Plugin.define({
     const onContextOverflowToolError = async (overflow: OverflowFacts) => {
       const { sessionID, notifyTo, failed } = overflow
       if (!claimToolContextNotice(noticeState, sessionID ?? `${notifyTo}\0${overflow.agent ?? ""}`, Date.now())) return
-      const { tier, limits, limit, target } = await contextTarget(overflow)
-      const text =
-        target === undefined
+      const { tier, limits, limit, target, chosen } = await contextTarget(overflow)
+      const text = chosen
+        ? pinnedContextNote(failed, limit)
+        : target === undefined
           ? contextNote(failed, limit, tier)
           : contextSwitchNote({ failed, limit, target, targetLimit: limits.get(healthKey(target)), tier })
       await notify(notifyTo, text, "context-length")
@@ -810,9 +827,9 @@ export default Plugin.define({
      * Every fresh spawn that will create a child, by tool call id, until the child is matched or the call ends.
      * `planned` is what the plugin resolved (none when the host decides); the child's own model is what counts.
      */
-    type ExpectedChild = { parentID: string; agent: string; planned?: ModelRef; tier?: string; configRevision: string; at: number; childID?: string; explore?: ExploreFacts }
+    type ExpectedChild = { parentID: string; agent: string; planned?: ModelRef; tier?: string; configRevision: string; at: number; childID?: string; explore?: ExploreFacts; rule?: "explicit-model" | "agent-pin" }
     const expectedChildren = new Map<string, ExpectedChild>()
-    const expectChild = (callID: string, event: { sessionID: string }, agent: string, planned: ModelRef | undefined, tier: string | undefined, explore?: ExploreFacts) => {
+    const expectChild = (callID: string, event: { sessionID: string }, agent: string, planned: ModelRef | undefined, tier: string | undefined, explore?: ExploreFacts, rule?: "explicit-model" | "agent-pin") => {
       expectedChildren.set(callID, {
         parentID: event.sessionID,
         agent,
@@ -821,6 +838,7 @@ export default Plugin.define({
         configRevision: configRevision(options),
         at: Date.now(),
         ...(explore === undefined ? {} : { explore }),
+        ...(rule === undefined ? {} : { rule }),
       })
     }
 
@@ -834,6 +852,7 @@ export default Plugin.define({
         configRevision: spawn.configRevision,
         at: Date.now(),
         ...(spawn.explore === undefined ? {} : { explore: spawn.explore }),
+        ...(spawn.rule === undefined ? {} : { rule: spawn.rule }),
       })
     }
 
@@ -1559,7 +1578,7 @@ export default Plugin.define({
         const refusal = await judge(event, agent, explicitModel)
         if (refusal !== undefined) throw new Error(refusal)
         event.input = stripped
-        await writeSnapshot(childID, { model: modelLabel(explicitModel), configRevision: revision, at: Date.now() })
+        await writeSnapshot(childID, { model: modelLabel(explicitModel), rule: "explicit-model", configRevision: revision, at: Date.now() })
         await outcomes.leftArm(childID)
         await forgetChildRole(childID)
         await recordReceipt({ at: Date.now(), agent, source: "agent", model: modelLabel(explicitModel), rule: "explicit-model", fallbacks: [], warnings: [] })
@@ -1733,7 +1752,7 @@ export default Plugin.define({
         if (reason !== undefined) throw new Error(reason)
         const receipt = bypass("explicit-model", explicitModel, "the spawn's own model wins over tier")
         if (receipt !== undefined) await recordReceipt(receipt)
-        expectChild(event.id, event, target, explicitModel, undefined)
+        expectChild(event.id, event, target, explicitModel, undefined, undefined, "explicit-model")
         return
       }
       let source: SpawnSource | undefined = asked?.source
@@ -1817,7 +1836,7 @@ export default Plugin.define({
               explore: exploration.facts,
             })
         }
-        expectChild(event.id, event, target, exploration?.tuned?.model ?? ownModel, pin === undefined ? own : undefined, exploration?.facts)
+        expectChild(event.id, event, target, exploration?.tuned?.model ?? ownModel, pin === undefined ? own : undefined, exploration?.facts, pin === undefined ? undefined : "agent-pin")
         if (pin !== undefined) {
           const receipt = bypass("agent-pin", pin, "the agent's own model (config or frontmatter) wins over tier")
           if (receipt !== undefined) await recordReceipt(receipt)

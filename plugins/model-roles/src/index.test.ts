@@ -2949,6 +2949,43 @@ describe("a child keeps its resolved model", () => {
       await third.cleanupHost()
     })
 
+    describe("a model the user chose is never switched", () => {
+      const tiered = { roles: { task: [sonnetHigh, "anthropic/claude-haiku"] }, agents: { plain: "task" } }
+      const pinnedNote = `context too long for ${sonnetHigh} (200000 tokens); ${sonnetHigh} was chosen explicitly, so model-roles does not switch it. Compact the session, or spawn with a larger-context model.`
+      const overflowOf = async (agents: Array<{ id: string; model?: ModelRef }>, input: Record<string, unknown>) => {
+        const host = createHost({ agents, models: limited, options: tiered as never })
+        host.sessions.set("r", { id: "r" })
+        host.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: sonnet })
+        const cleanup = await setup(host)
+        const spawned = await host.spawn("subagent", { agent: "plain", prompt: "x", ...input }, "build", "r", "call-1")
+        host.emit({ type: "session.created", data: { sessionID: "c", parentID: "r", agent: "plain", model: sonnet } })
+        await settle()
+        await host.spawnDone(spawned, { sessionID: "c" }, "r", "call-1")
+        host.emit({ type: "session.execution.failed", data: { sessionID: "c", error: long } })
+        await settle()
+        return { host, cleanup }
+      }
+      const noted = (host: ReturnType<typeof createHost>) => methods(host, "synthetic").map((c) => (c.input as { text: string }).text)
+
+      test.each([
+        ["an explicit spawn model", [{ id: "plain" }], { model: sonnetHigh }],
+        ["an agent pin", [{ id: "plain", model: sonnet }], {}],
+      ])("a child on %s gets the note and no switch", async (_name, agents, input) => {
+        const { host, cleanup } = await overflowOf(agents, input)
+        expect(methods(host, "switchModel")).toHaveLength(0)
+        expect(noted(host)).toEqual([pinnedNote])
+        host.close()
+        await cleanup()
+      })
+
+      test("a tier-routed child of the same agent is still switched", async () => {
+        const { host, cleanup } = await overflowOf([{ id: "plain" }], { tier: "task" })
+        expect(methods(host, "switchModel").map((c) => c.input)).toEqual([{ sessionID: "c", model: haiku }])
+        host.close()
+        await cleanup()
+      })
+    })
+
     describe("with the guard on", () => {
       const priced = [
         { providerID: "amazon-bedrock", id: "claude-opus", variants: [], cost: [{ input: 12 }], limit: { context: 2_000_000 } },
@@ -2970,6 +3007,47 @@ describe("a child keeps its resolved model", () => {
         expect(methods(host, "switchModel").map((c) => c.input)).toEqual([{ sessionID: "c", model: haiku }])
         host.close()
         await cleanup()
+      })
+
+      describe("when another variant of the tier's own model is the larger candidate", () => {
+        // Every gem variant is guarded, but tier task resolves to gem#low: the old pin exemption let any gem variant through.
+        const variants = [
+          { providerID: "amazon-bedrock", id: "gem", variants: [{ id: "low" }, { id: "high" }], cost: [{ input: 2 }], limit: { context: 1_000_000 } },
+          { providerID: "amazon-bedrock", id: "small", variants: [], cost: [{ input: 0.1 }], limit: { context: 200_000 } },
+          { providerID: "anthropic", id: "big", variants: [], cost: [{ input: 0.2 }], limit: { context: 2_000_000 } },
+        ] as Model[]
+        const small = { providerID: "amazon-bedrock", id: "small" }
+        const big = { providerID: "anthropic", id: "big" }
+        const run = async (task: string[]) => {
+          const options = { roles: { task }, agents: { plain: "task" }, guard: { expensive: ["amazon-bedrock/gem"] } }
+          const host = createHost({ agents: [{ id: "plain" }], models: variants, options: options as never })
+          host.sessions.set("r", { id: "r" })
+          host.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: small })
+          const cleanup = await setup(host)
+          const input = await host.spawn("subagent", { agent: "plain", prompt: "x", tier: "task" }, "build", "r", "call-1")
+          created(host, "c", "plain", small)
+          await settle()
+          await host.spawnDone(input, { sessionID: "c" }, "r", "call-1")
+          await event(host)
+          return { host, cleanup }
+        }
+
+        test("the guard-refused variant is skipped for the next allowed larger candidate", async () => {
+          const { host, cleanup } = await run(["amazon-bedrock/gem#low", "amazon-bedrock/gem#high", "amazon-bedrock/small", "anthropic/big"])
+          expect(methods(host, "switchModel").map((c) => c.input)).toEqual([{ sessionID: "c", model: big }])
+          host.close()
+          await cleanup()
+        })
+
+        test("with no other allowed larger candidate the child is not switched and the note names none", async () => {
+          const { host, cleanup } = await run(["amazon-bedrock/gem#low", "amazon-bedrock/gem#high", "amazon-bedrock/small"])
+          expect(methods(host, "switchModel")).toHaveLength(0)
+          const notes = methods(host, "synthetic").map((c) => c.input as { text: string })
+          expect(notes).toHaveLength(1)
+          expect(notes[0]?.text).not.toContain("gem#high")
+          host.close()
+          await cleanup()
+        })
       })
 
       test("a resume never goes back to the model that overflowed, even when the larger one is refused later", async () => {

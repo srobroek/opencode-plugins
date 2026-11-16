@@ -619,6 +619,8 @@ alike:
    - With no larger candidate, the note says: "context too long for
      `<model>` (`<limit>` tokens); no larger-context candidate in tier
      `<tier>`. Compact the session or use a tier with a larger-context model".
+   - A child on a model the user chose, through a spawn's `model` or an agent
+     pin, is never switched. Its note says the model was chosen explicitly.
 
    The parent gets one note for each overflowing execution of a child. The
    parent's failed `subagent` call never switches a model. It posts the note

@@ -211,6 +211,11 @@ export function contextSwitchNote(facts: ContextSwitchFacts): string {
 }
 
 /** The note when no candidate of the tier can take a prompt that was too long. */
+/** The note for an overflow of a child whose model the user chose (a spawn `model` or an agent pin): it is never switched. */
+export function pinnedContextNote(failed: ModelRef, limit: number | undefined): string {
+  return `context too long for ${label(failed)} (${tokens(limit)}); ${label(failed)} was chosen explicitly, so model-roles does not switch it. Compact the session, or spawn with a larger-context model.`
+}
+
 export function contextNote(failed: ModelRef, limit: number | undefined, tier: string | undefined): string {
   const where = tier === undefined ? "its tier" : `tier ${tier}`
   return `context too long for ${label(failed)} (${tokens(limit)}); no larger-context candidate in ${where}. Compact the session or use a tier with a larger-context model`
