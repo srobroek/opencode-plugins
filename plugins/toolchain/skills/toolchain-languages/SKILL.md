@@ -19,6 +19,7 @@ Checked 2026-11-12. This skill holds the cross-language rules and routes to the 
 | Middleware and telemetry rules that hold in every language | `quality-code-design`: `middleware.md`, `telemetry.md` |
 | Quality and security scanners, dead-code tools, CI gates | `lang-<language>-quality`, `toolchain-quality-observability`, `ci-github-actions` |
 | Every language's testing and quality concerns (test runner, fuzzing, mutation, contracts, SAST, dependency audit and more); read before you choose or report a check | [references/concerns.md](references/concerns.md) |
+| Checks that depend on the product surface (web, mobile, desktop, HTTP API, CLI), not the language: end-to-end, visual, accessibility, journeys | [references/surfaces.md](references/surfaces.md) |
 | Tools shared by every language: Testcontainers, Pact, Schemathesis, Hurl, oasdiff, k6, OSV-Scanner, fuzzing services, Semgrep, Opengrep, CodeQL, Lizard, jscpd, Gitleaks; versions, install, tradeoffs | [references/shared-tools.md](references/shared-tools.md) |
 | Java, Kotlin, .NET, Ruby, PHP, Swift, C and C++ (documented choices, no language plugin) | [java](references/java.md), [kotlin](references/kotlin.md), [dotnet](references/dotnet.md), [ruby](references/ruby.md), [php](references/php.md), [swift](references/swift.md), [cpp](references/cpp.md) |
 | Shell, Terraform/OpenTofu and AWS CDK concerns | `shell-language`, `terraform-language`, `aws-guidance` (its `references/cdk.md`) |

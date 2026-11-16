@@ -11,6 +11,22 @@ Checked 2026-01-10.
 | types | Type checking | quality | Static type analysis. | shell, iac | every-pr |
 | drift | Drift detection | iac | Deployed state matches code. | none | scheduled |
 
+## Surface concerns
+
+| Id | Name | Group | Definition | N/A allowed for | Run must include |
+|---|---|---|---|---|---|
+| e2e | End-to-end | surface | Whole-flow tests. | none | every-pr + scheduled |
+| visual | Visual regression | surface | Screenshot comparison. | none | diff-pr |
+
+## Surfaces
+
+Surfaces file: `plugins/toolchain/skills/toolchain-languages/references/surfaces.md`
+
+| Surface | Id | N/A allowed for |
+|---|---|---|
+| Web UI | web | none |
+| HTTP API | api | visual |
+
 ## Kinds
 
 | Kind | Meaning |
