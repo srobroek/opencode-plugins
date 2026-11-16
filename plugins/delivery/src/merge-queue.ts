@@ -18,6 +18,8 @@
  * Nothing here merges by any other means: a dequeued pull request is a refusal.
  */
 
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { join } from "node:path"
 import { type CliRunner, FORGE_TIMEOUT_MS, type MergeMethod } from "./forge-adapter.ts"
 
 /** The default wait for the queue to merge an entry, in seconds. */
@@ -65,6 +67,13 @@ export function queueRuleFrom(payload: unknown): QueueRule | { reason: string } 
   if (payload.length >= RULES_PAGE) {
     return { reason: `rules: observed ${payload.length} rules, a full page; the merge queue rule cannot be ruled out` }
   }
+  // A rule this code cannot read is not "no queue": a response with a malformed element
+  // is refused whole, so it can never fall through to a direct merge.
+  for (const [index, rule] of payload.entries()) {
+    if (text(rule, "type") === null) {
+      return { reason: `rules: observed element ${index} without a string type, expected an object with a type` }
+    }
+  }
   const queue = payload.find((rule) => text(rule, "type") === "merge_queue")
   if (queue === undefined) return { required: false }
   const raw = text(own(queue, "parameters"), "merge_method")
@@ -77,7 +86,13 @@ export function queueRuleFrom(payload: unknown): QueueRule | { reason: string } 
   return { required: true, method }
 }
 
-/** Read the branch's active rules and say whether it requires a merge queue. */
+/**
+ * Read the branch's active rules and say whether it requires a merge queue.
+ *
+ * GitHub answers `200 []` for a branch with no rules. A 404 is ambiguous (no access, or no
+ * such repository), so it counts as "no queue rule" only when the repository itself reads
+ * back; every other failure refuses.
+ */
 export async function readQueueRule(
   run: CliRunner,
   repoPath: string,
@@ -87,9 +102,17 @@ export async function readQueueRule(
   const argv = rulesArgv(repoPath, branch)
   const result = await run(argv, { timeoutMs: FORGE_TIMEOUT_MS, env })
   if (!result.ok || result.exitCode !== 0 || result.error !== undefined) {
-    return {
-      reason: `${argv.join(" ")}: observed ${result.error ?? `exit ${result.exitCode}`}, expected exit 0 to learn whether the branch requires a merge queue; ${result.stderr.trim().slice(0, 300)}`,
+    const detail = `${argv.join(" ")}: observed ${result.error ?? `exit ${result.exitCode}`}, expected exit 0 to learn whether the branch requires a merge queue; ${result.stderr.trim().slice(0, 300)}`
+    if (result.error === undefined && /\b404\b|not found/i.test(result.stderr)) {
+      const probe = ["gh", "api", `repos/${repoPath}`, "--jq", ".full_name"]
+      const repo = await run(probe, { timeoutMs: FORGE_TIMEOUT_MS, env })
+      const confirmed =
+        repo.ok && repo.exitCode === 0 && repo.error === undefined && repo.stdout.trim().toLowerCase() === repoPath.toLowerCase()
+      return confirmed
+        ? { required: false }
+        : { reason: `${detail}; ${probe.join(" ")} did not confirm repository access either` }
     }
+    return { reason: detail }
   }
   let parsed: unknown
   try {
@@ -100,9 +123,11 @@ export async function readQueueRule(
   return queueRuleFrom(parsed)
 }
 
-const ENTRY_FIELDS = "state position headCommit { oid }"
+// `headCommit` is deliberately not read: it is the queue's own integration commit, never the
+// pull request's head, so nothing about review identity can be derived from it.
+const ENTRY_FIELDS = "state position"
 
-const STATE_QUERY = `query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { id state headRefOid mergeQueueEntry { ${ENTRY_FIELDS} } } } }`
+const STATE_QUERY = `query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { nameWithOwner pullRequest(number: $number) { id number baseRefName state headRefOid mergeQueueEntry { ${ENTRY_FIELDS} } } } }`
 
 const ENQUEUE_MUTATION = `mutation($id: ID!, $head: GitObjectID!) { enqueuePullRequest(input: { pullRequestId: $id, expectedHeadOid: $head }) { mergeQueueEntry { ${ENTRY_FIELDS} } } }`
 
@@ -128,20 +153,24 @@ export function enqueueArgv(pullRequestId: string, head: string): string[] {
   return ["gh", "api", "graphql", "-f", `query=${ENQUEUE_MUTATION}`, "-f", `id=${pullRequestId}`, "-f", `head=${head}`]
 }
 
-export type QueueEntry = { state: string; position: number | null; headOid: string | null }
+export type QueueEntry = { state: string; position: number | null }
 
 /** One observation of the pull request: its state, its head, and its queue entry if any. */
-export type QueueSnapshot = { id: string; state: string; headRefOid: string; entry: QueueEntry | null }
+export type QueueSnapshot = {
+  id: string
+  repository: string
+  number: number
+  baseRefName: string
+  state: string
+  headRefOid: string
+  entry: QueueEntry | null
+}
 
 function entryFrom(value: unknown): QueueEntry | null {
   const state = text(value, "state")
   if (state === null) return null
   const position = own(value, "position")
-  return {
-    state,
-    position: typeof position === "number" ? position : null,
-    headOid: text(own(value, "headCommit"), "oid")?.toLowerCase() ?? null,
-  }
+  return { state, position: typeof position === "number" ? position : null }
 }
 
 /** The GraphQL `errors` of a response as a refusal reason, or null when there are none. */
@@ -161,19 +190,52 @@ export function enqueuedEntry(payload: unknown): QueueEntry | null {
 export function parseSnapshot(payload: unknown): QueueSnapshot | { reason: string } {
   const errors = graphqlErrors(payload)
   if (errors !== null) return { reason: errors }
-  const pr = own(own(own(payload, "data"), "repository"), "pullRequest")
+  const repository = own(own(payload, "data"), "repository")
+  const pr = own(repository, "pullRequest")
+  const name = text(repository, "nameWithOwner")
+  const number = own(pr, "number")
+  const base = text(pr, "baseRefName")
   const id = text(pr, "id")
   const state = text(pr, "state")
   const head = text(pr, "headRefOid")
-  if (id === null || state === null || head === null) {
-    return { reason: "graphql: observed no pull request with id, state and headRefOid, expected one" }
+  if (id === null || state === null || head === null || name === null || base === null || typeof number !== "number") {
+    return {
+      reason:
+        "graphql: observed no pull request with repository, id, number, baseRefName, state and headRefOid, expected one",
+    }
   }
   return {
     id,
+    repository: name,
+    number,
+    baseRefName: base,
     state: state.toUpperCase(),
     headRefOid: head.toLowerCase(),
     entry: entryFrom(own(pr, "mergeQueueEntry")),
   }
+}
+
+/**
+ * Whether the snapshot describes the pull request that was authorized.
+ *
+ * The node id the enqueue mutation takes is opaque, so it is trusted only through what is
+ * read beside it: the repository, number and base must equal the independent read the
+ * landing was authorized from. The head is judged by {@link decideQueue}.
+ */
+export function bindingFailure(
+  snapshot: QueueSnapshot,
+  expected: { repository: string; number: number; baseRefName: string },
+): string | null {
+  if (snapshot.repository.toLowerCase() !== expected.repository.toLowerCase()) {
+    return `graphql: observed repository ${JSON.stringify(snapshot.repository)}, expected ${JSON.stringify(expected.repository)}`
+  }
+  if (snapshot.number !== expected.number) {
+    return `graphql: observed pull request number ${snapshot.number}, expected ${expected.number}`
+  }
+  if (snapshot.baseRefName !== expected.baseRefName) {
+    return `graphql: observed baseRefName ${JSON.stringify(snapshot.baseRefName)}, expected ${JSON.stringify(expected.baseRefName)}; the pull request was re-targeted or the read is for another pull request`
+  }
+  return null
 }
 
 export type QueueDecision =
@@ -204,12 +266,6 @@ export function decideQueue(snapshot: QueueSnapshot, expected: string, absent: n
     }
   }
   if (snapshot.entry !== null) {
-    if (snapshot.entry.headOid !== null && snapshot.entry.headOid !== expected) {
-      return {
-        kind: "refused",
-        reason: `mergeQueueEntry.headCommit: observed ${snapshot.entry.headOid}, expected ${expected}; the queued entry is not the reviewed head`,
-      }
-    }
     const place = snapshot.entry.position === null ? "" : ` at position ${snapshot.entry.position}`
     return { kind: "wait", detail: `queued${place}, entry state ${snapshot.entry.state}`, absent: 0 }
   }
@@ -299,4 +355,54 @@ export function queueBudgetMs(value: unknown): { ms: number } | { reason: string
     }
   }
   return { ms: seconds * 1000 }
+}
+
+/** The argv that asks whether `oid` is in the history of `branch`: compare `oid...branch`. */
+export function containmentArgv(repoPath: string, oid: string, branch: string): string[] {
+  const ref = branch.split("/").map(encodeURIComponent).join("/")
+  return ["gh", "api", `repos/${repoPath}/compare/${oid}...${ref}?per_page=1`, "--jq", ".status"]
+}
+
+/** Whether a compare status says the branch contains the commit (it is identical to or ahead of it). */
+export function branchContains(status: string): boolean {
+  return status.trim() === "ahead" || status.trim() === "identical"
+}
+
+/**
+ * A record that an earlier call enqueued this pull request at this head.
+ *
+ * Without it a resumed call that finds no entry cannot tell "not enqueued yet" from "enqueued
+ * and since removed", and would enqueue again over a removal someone made on purpose. It lives
+ * beside the receipts under a name the receipt scan ignores.
+ */
+export type PendingRecord = { schema: 1; repository: string; number: number; head: string; enqueuedAt: string }
+
+export function pendingPath(directory: string, number: number, head: string): string {
+  return join(directory, `pending-queue-${number}-${head.slice(0, 12)}.json`)
+}
+
+export function hasPending(directory: string, repository: string, number: number, head: string): boolean {
+  const path = pendingPath(directory, number, head)
+  if (!existsSync(path)) return false
+  try {
+    const record: unknown = JSON.parse(readFileSync(path, "utf8"))
+    return (
+      text(record, "repository")?.toLowerCase() === repository.toLowerCase() &&
+      own(record, "number") === number &&
+      text(record, "head") === head
+    )
+  } catch {
+    return false
+  }
+}
+
+export function writePending(directory: string, record: Omit<PendingRecord, "schema">): void {
+  mkdirSync(directory, { recursive: true, mode: 0o700 })
+  const path = pendingPath(directory, record.number, record.head)
+  writeFileSync(path, `${JSON.stringify({ schema: 1, ...record })}\n`, { mode: 0o600 })
+  chmodSync(path, 0o600)
+}
+
+export function clearPending(directory: string, number: number, head: string): void {
+  rmSync(pendingPath(directory, number, head), { force: true })
 }

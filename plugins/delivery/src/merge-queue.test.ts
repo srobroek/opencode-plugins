@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import {
+  bindingFailure,
+  branchContains,
   decideQueue,
   parseSnapshot,
   pollDelayMs,
@@ -15,12 +17,15 @@ const OTHER = "1111111111111111111111111111111111111111"
 
 const snapshot = (overrides: Partial<QueueSnapshot> = {}): QueueSnapshot => ({
   id: "PR_1",
+  repository: "o/r",
+  number: 7,
+  baseRefName: "main",
   state: "OPEN",
   headRefOid: HEAD,
   entry: null,
   ...overrides,
 })
-const entry = (headOid: string | null = HEAD) => ({ state: "QUEUED", position: 2, headOid })
+const entry = () => ({ state: "QUEUED", position: 2 })
 
 describe("queueRuleFrom", () => {
   test.each<[string, unknown, QueueRule]>([
@@ -36,6 +41,9 @@ describe("queueRuleFrom", () => {
   test.each([
     ["an object payload", { message: "Not Found" }],
     ["a queue rule with no method", [{ type: "merge_queue", parameters: {} }]],
+    ["a string element", ["merge_queue"]],
+    ["a null element", [null]],
+    ["a malformed element beside a queue rule", [{ type: "merge_queue", parameters: { merge_method: "SQUASH" } }, 5]],
     ["a full page of rules", Array.from({ length: 100 }, () => ({ type: "creation" }))],
   ])("refuses %s rather than assume a direct merge", (_name, payload) => {
     expect(queueRuleFrom(payload)).toHaveProperty("reason")
@@ -59,6 +67,11 @@ describe("decideQueue", () => {
     })
   })
 
+  test("an entry's headCommit is the queue's integration commit and never judged as the PR head", () => {
+    const withIntegration = snapshot({ entry: { ...entry(), headCommit: { oid: OTHER } } as never })
+    expect(decideQueue(withIntegration, HEAD, 0)).toMatchObject({ kind: "wait" })
+  })
+
   test("an entry missing once waits, and missing twice in a row is a removal", () => {
     expect(decideQueue(snapshot(), HEAD, 0)).toMatchObject({ kind: "wait", absent: 1 })
     expect(decideQueue(snapshot(), HEAD, 1)).toMatchObject({ kind: "refused" })
@@ -66,11 +79,36 @@ describe("decideQueue", () => {
 
   test.each([
     ["a changed pull request head", snapshot({ headRefOid: OTHER })],
-    ["a queued entry for another head", snapshot({ entry: entry(OTHER) })],
     ["a closed pull request", snapshot({ state: "CLOSED" })],
   ])("%s refuses", (_name, observed) => {
     expect(decideQueue(observed, HEAD, 0)).toMatchObject({ kind: "refused" })
   })
+})
+
+describe("bindingFailure", () => {
+  const expected = { repository: "O/R", number: 7, baseRefName: "main" }
+
+  test("accepts the authorized repository (case-insensitive), number and base", () => {
+    expect(bindingFailure(snapshot(), expected)).toBeNull()
+  })
+
+  test.each([
+    ["repository", { repository: "evil/r" }],
+    ["number", { number: 8 }],
+    ["base", { baseRefName: "release" }],
+  ])("refuses a different %s", (_name, overrides) => {
+    expect(bindingFailure(snapshot(overrides), expected)).toContain("graphql: observed")
+  })
+})
+
+test.each([
+  ["ahead", true],
+  ["identical", true],
+  ["behind", false],
+  ["diverged", false],
+  ["", false],
+])("compare status %p means the base contains the commit: %p", (status, contained) => {
+  expect(branchContains(status)).toBe(contained)
 })
 
 test("poll delays double from 5 s and stop at 60 s", () => {
@@ -93,15 +131,26 @@ test("parseSnapshot reads the entry and refuses a payload with errors", () => {
   const payload = {
     data: {
       repository: {
+        nameWithOwner: "o/r",
         pullRequest: {
           id: "PR_1",
+          number: 7,
+          baseRefName: "main",
           state: "OPEN",
           headRefOid: HEAD.toUpperCase(),
-          mergeQueueEntry: { state: "QUEUED", position: 3, headCommit: { oid: HEAD } },
+          mergeQueueEntry: { state: "QUEUED", position: 3, headCommit: { oid: OTHER } },
         },
       },
     },
   }
-  expect(parseSnapshot(payload)).toEqual({ id: "PR_1", state: "OPEN", headRefOid: HEAD, entry: { state: "QUEUED", position: 3, headOid: HEAD } })
+  expect(parseSnapshot(payload)).toEqual({
+    id: "PR_1",
+    repository: "o/r",
+    number: 7,
+    baseRefName: "main",
+    state: "OPEN",
+    headRefOid: HEAD,
+    entry: { state: "QUEUED", position: 3 },
+  })
   expect(parseSnapshot({ errors: [{ message: "x" }] })).toHaveProperty("reason")
 })

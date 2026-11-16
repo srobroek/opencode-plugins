@@ -231,7 +231,7 @@ const CLEANUP_DESCRIPTION =
   "checks every receipt bead is closed with metadata.merge_sha equal to the merge (read-only bd show), refuses to remove the worktree it runs from, a dirty tree or unpushed commits, a receipt or worktree of another repository, " +
   "then removes the worktree (no force; through OpenCode when it tracks it, else git worktree remove) and runs git branch -d and verifies four absences."
 
-function landOutput(outcome: LandOutcome, cleanup?: CleanupReport) {
+export function landOutput(outcome: LandOutcome, cleanup?: CleanupReport) {
   if (!outcome.ok) {
     return {
       ok: false as const,

@@ -70,17 +70,29 @@ Inputs: `pr`, and when needed `merge_method` (`squash` by default, `merge`,
   not `expectHeadSha`. It never runs a direct merge or auto-merge there. It polls the
   pull request's `mergeQueueEntry` (5 s, doubling to 60 s) for up to `queueWaitSeconds`
   (default 600, at most 3600).
-  - Merged: the tool re-reads the PR, requires the same head, proves the commit with the
-    queue's own method (`merge_method` must be omitted or match it), and writes the
-    receipt.
+  - Merged: the tool re-reads the PR, requires the same head and base, and proves the
+    merge commit GitHub names (`mergeCommit`) by shape and by base containment (the
+    compare API must report it in the base branch's history). The queue builds on its own
+    integration branch, so the shape is judged per the queue's method (`merge_method`
+    must be omitted or match it): squash is one parent, any parent (a grouped entry
+    follows its predecessor); merge is two parents with the reviewed head an ancestor
+    (not necessarily the second parent); rebase is ordered `git patch-id --stable`
+    equivalence. Then it writes the receipt. The queue entry's `headCommit` is the
+    integration commit and is never compared with the reviewed head.
+  - Every queue read must be for the authorized repository, PR number and base, and the
+    enqueue only follows a read whose `headRefOid` is `expectHeadSha`.
   - Still queued when the wait ends: the result is `ok: false, queued: true`, which is
     not final. Call again with the same inputs; an entry for that head is waited on and
-    not enqueued twice, and a PR that has merged is proved as usual.
+    not enqueued twice, and a PR that has merged is proved as usual. A small
+    `pending-queue-<pr>-<head>.json` record next to the receipts remembers the enqueue:
+    a resumed call that finds the entry gone refuses as removed instead of enqueuing
+    again, and clears the record, so a later call is a fresh decision.
   - Removed from the queue (failed checks, conflict, closed) or a changed head: refused,
     with no other merge attempted.
-  - A failed rules read refuses, because a direct merge into a queue branch would
-    enqueue the PR on its own. A branch without a queue rule is merged directly, as
-    before.
+  - A failed rules read, or a rules response with a malformed element, refuses, because a
+    direct merge into a queue branch would enqueue the PR on its own. A 404 counts as no
+    rule only when the repository itself reads back. A branch without a queue rule is
+    merged directly, as before.
 - After the merge the tool reads the PR again and fetches the landed commits by id
   (falling back to the base branch, with three attempts over about 7 seconds). It
   then checks the commit shape for the method:
