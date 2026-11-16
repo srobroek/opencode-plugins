@@ -6,23 +6,23 @@ Tools that work the same in every language. A language's `## Concerns` table poi
 with `Shared: <id>`. [concerns.md](concerns.md) defines the concerns and the install policy:
 detect the tool, recommend the install, and ask the user before you run it. The Maintenance
 cell is a minimum version, not a pin; use the latest release the manager offers and record the
-version you used. Where a release date or version was not recorded, the date is the check date
-and the version is `latest`; look the real release up before you rely on it.
+version you used. `Family` marks a tool with one binding per language, listed in its section;
+`Service` marks a hosted service without releases.
 
 ## Tools
 
 | Id | Tool | Concerns | Maintenance | Run | Use with |
 |---|---|---|---|---|---|
-| testcontainers | Testcontainers | integration | >= latest · 2026-11-16 · active | every-pr | pact |
-| pact | Pact | contract | >= latest · 2026-11-16 · active | every-pr | testcontainers, oasdiff |
+| testcontainers | Testcontainers | integration | Family: [Testcontainers](#testcontainers) | every-pr | pact |
+| pact | Pact | contract | Family: [Pact with containers](#pact-with-containers) | every-pr | testcontainers, oasdiff |
 | schemathesis | Schemathesis | api-schema | >= 4.33.4 · 2026-11-12 · active | bounded-pr + scheduled | oasdiff, hurl |
 | hurl | Hurl | integration | >= 8.1.0 · 2026-10-28 · active | every-pr | schemathesis |
-| oasdiff | oasdiff | api-break | >= latest · 2026-11-16 · active | every-pr | schemathesis |
+| oasdiff | oasdiff | api-break | >= 1.38.0 · 2026-11-14 · active | every-pr | schemathesis |
 | k6 | k6 | load | >= 2.4.0 · 2026-11-12 · active | scheduled | - |
 | osv-scanner | OSV-Scanner | dep-audit | >= 2.7.1 · 2026-11-09 · active | every-pr + scheduled | - |
-| oss-fuzz | OSS-Fuzz | fuzz-continuous | >= latest · 2026-11-16 · active | scheduled | clusterfuzzlite |
-| clusterfuzzlite | ClusterFuzzLite | fuzz, fuzz-continuous | >= v1 · 2026-11-16 · active | bounded-pr + scheduled | oss-fuzz |
-| semgrep | Semgrep CE | sast | >= 1.185.0 · 2026-11-16 · active | every-pr | codeql |
+| oss-fuzz | OSS-Fuzz | fuzz-continuous | Service: open-source projects only | scheduled | clusterfuzzlite |
+| clusterfuzzlite | ClusterFuzzLite | fuzz, fuzz-continuous | >= v1 · 2026-02-12 · maintenance | bounded-pr + scheduled | oss-fuzz |
+| semgrep | Semgrep CE | sast | >= 1.185.0 · 2026-11-10 · active | every-pr | codeql |
 | opengrep | Opengrep | sast | >= 2.0.0 · 2026-11-13 · active | every-pr | codeql |
 | codeql | CodeQL CLI | sast | >= 2.27.4 · 2026-11-02 · active | every-pr + scheduled | semgrep, opengrep |
 | lizard | Lizard | complexity | >= 1.26.0 · 2026-11-10 · active | every-pr | - |
