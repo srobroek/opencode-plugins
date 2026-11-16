@@ -23,6 +23,8 @@ export type ModelSnapshot = {
   failedOver?: true
   /** Set when the guard moved a resumed child off a model it now refuses. */
   rule?: "guard-reroute"
+  /** Models the child's prompt overflowed, `provider/model#variant`. A resume never goes back to one. */
+  overflowed?: string[]
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -52,7 +54,19 @@ export function readSnapshot(value: unknown): ModelSnapshot | undefined {
   if (typeof value.tier === "string") snapshot.tier = value.tier
   if (value.failedOver === true) snapshot.failedOver = true
   if (value.rule === "guard-reroute") snapshot.rule = "guard-reroute"
+  if (Array.isArray(value.overflowed)) {
+    const overflowed = value.overflowed.filter((entry): entry is string => typeof entry === "string")
+    if (overflowed.length > 0) snapshot.overflowed = overflowed
+  }
   return snapshot
+}
+
+/** Whether the child's prompt already overflowed `model`, whatever the variant. */
+export function hasOverflowed(snapshot: ModelSnapshot | undefined, model: Pick<ModelRef, "providerID" | "id">): boolean {
+  return (snapshot?.overflowed ?? []).some((entry) => {
+    const candidate = parseCandidate(entry)
+    return candidate?.kind === "model" && candidate.ref.providerID === model.providerID && candidate.ref.id === model.id
+  })
 }
 
 /** The model a snapshot names, if it still parses. */

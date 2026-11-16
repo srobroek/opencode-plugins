@@ -2799,6 +2799,103 @@ describe("a child keeps its resolved model", () => {
   })
 
 
+  describe("a context overflow of a snapshotted child", () => {
+    const long = { type: "provider.invalid-request", message: "prompt is too long: 213462 tokens > 200000 maximum", status: 400 }
+    const limited = [
+      { ...models[0], limit: { context: 200_000 } },
+      { ...models[1], limit: { context: 1_000_000 } },
+      { ...models[2], limit: { context: 2_000_000 } },
+    ] as Model[]
+    // `aaa` lists the failed model first by name, so routing by "the first tier that lists it" would pick flint.
+    const overlapping = {
+      roles: { aaa: ["amazon-bedrock/claude-sonnet#high", "opencode/flint"], task: ["amazon-bedrock/claude-sonnet#high", "anthropic/claude-haiku"] },
+      agents: { general: "task" },
+    }
+    const event = async (host: ReturnType<typeof createHost>) => {
+      host.emit({ type: "session.execution.failed", data: { sessionID: "c", error: long } })
+      await settle()
+    }
+    const tool = async (host: ReturnType<typeof createHost>) => {
+      await host.spawnFailed({ agent: "plain", prompt: "x" }, `Subagent failed (sessionID: c): ${long.message}`, "r")
+      await settle()
+    }
+    const reopen = async (from: ReturnType<typeof createHost>, nextModels: Model[], next: object) => {
+      const host = createHost({ agents: [{ id: "plain" }], models: nextModels, options: next as never })
+      for (const [key, value] of from.storage) host.storage.set(key, value)
+      host.sessions.set("r", { id: "r" })
+      return { host, cleanupHost: await setup(host) }
+    }
+
+    test.each([
+      ["failure event", [event, tool]],
+      ["tool error", [tool, event]],
+    ] as const)("a resumed child with no pending spawn routes by its stored tier when the %s comes first", async (_name, order) => {
+      const { again, cleanupAgain } = await spawnThenReload(overlapping, limited)
+      again.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: sonnet })
+      for (const step of order) await step(again)
+      expect(methods(again, "switchModel").map((c) => c.input)).toEqual([{ sessionID: "c", model: haiku }])
+      const notes = methods(again, "synthetic").map((c) => c.input as { sessionID: string; text: string })
+      expect(notes.map((n) => n.sessionID)).toEqual(["r"])
+      expect(notes[0]?.text).toContain("the session now runs anthropic/claude-haiku (1000000 tokens)")
+      again.close()
+      await cleanupAgain()
+    })
+
+    test("the switch is stored with the snapshot and the ledger, and a resume after a reload continues on the larger model", async () => {
+      const { again, cleanupAgain } = await spawnThenReload(first, limited)
+      again.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: sonnet })
+      await event(again)
+      expect(again.storage.get("spawn-model:c")).toMatchObject({ model: "anthropic/claude-haiku", tier: "task", failedOver: true, overflowed: [sonnetHigh] })
+      expect(again.storage.get("outcome:c")).toMatchObject({ failedOver: true })
+      again.close()
+      await cleanupAgain()
+      const { host, cleanupHost } = await reopen(again, limited, first)
+      expect(await host.spawn("subagent", resume, "build", "r", "call-2")).toEqual({ ...resume, model: "anthropic/claude-haiku" })
+      expect(methods(host, "switchModel")).toHaveLength(0)
+      expect(receipts(host)[0]).toMatchObject({ rule: "snapshot", model: "anthropic/claude-haiku" })
+      host.close()
+      await cleanupHost()
+    })
+
+    describe("with the guard on", () => {
+      const priced = [
+        { providerID: "amazon-bedrock", id: "claude-opus", variants: [], cost: [{ input: 12 }], limit: { context: 2_000_000 } },
+        { providerID: "amazon-bedrock", id: "claude-sonnet", variants: [{ id: "high" }], cost: [{ input: 2 }], limit: { context: 200_000 } },
+        { providerID: "anthropic", id: "claude-haiku", variants: [], cost: [{ input: 0.1 }], limit: { context: 1_000_000 } },
+      ] as Model[]
+      const guarded = (expensive: string[]) => ({ ...first, roles: { task: ["amazon-bedrock/claude-sonnet#high", "amazon-bedrock/claude-opus", "anthropic/claude-haiku"] }, guard: { expensive } })
+
+      test("a guarded larger-context candidate is skipped for the next allowed one", async () => {
+        const host = createHost({ agents: [{ id: "plain" }], models: priced, options: guarded(["amazon-bedrock/claude-opus"]) as never })
+        host.sessions.set("r", { id: "r" })
+        host.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: sonnet })
+        const cleanup = await setup(host)
+        const input = await host.spawn("subagent", { agent: "plain", prompt: "x", tier: "task" }, "build", "r", "call-1")
+        created(host, "c", "plain", sonnet)
+        await settle()
+        await host.spawnDone(input, { sessionID: "c" }, "r", "call-1")
+        await event(host)
+        expect(methods(host, "switchModel").map((c) => c.input)).toEqual([{ sessionID: "c", model: haiku }])
+        host.close()
+        await cleanup()
+      })
+
+      test("a resume never goes back to the model that overflowed, even when the larger one is refused later", async () => {
+        const { again, cleanupAgain } = await spawnThenReload(first, limited)
+        again.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: sonnet })
+        await event(again)
+        again.close()
+        await cleanupAgain()
+        // The guard now refuses haiku, where the child runs; sonnet is allowed but overflowed.
+        const { host, cleanupHost } = await reopen(again, limited, { ...first, guard: { expensive: ["anthropic/claude-haiku"] } })
+        await expect(host.spawn("subagent", resume, "build", "r", "call-2")).rejects.toThrow(/resume would run on anthropic\/claude-haiku.*no candidate of tier 'task'/s)
+        expect(methods(host, "switchModel")).toHaveLength(0)
+        host.close()
+        await cleanupHost()
+      })
+    })
+  })
+
   test("a failover is visible to a resume at once, even when the stored snapshot is slow to read and write", async () => {
     const { again, cleanupAgain } = await spawnThenReload(first)
     again.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: sonnet })

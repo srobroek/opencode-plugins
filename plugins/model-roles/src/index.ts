@@ -107,7 +107,7 @@ import {
 import { resumeGuard, tierModels } from "./resume-guard.ts"
 import { TiersRpc } from "./rpc.ts"
 import { exitStatusOf, parseEvaluate, parseVerdict, testRun, touchesTests } from "./signals.ts"
-import { configRevision, type ModelSnapshot, readSnapshot, SPAWN_MODEL_KEY_PREFIX, snapshotModel, staleSnapshots, unavailableReason } from "./snapshot.ts"
+import { configRevision, hasOverflowed, type ModelSnapshot, readSnapshot, SPAWN_MODEL_KEY_PREFIX, snapshotModel, staleSnapshots, unavailableReason } from "./snapshot.ts"
 import {
   applyFrozenTierParam,
   captureTierParam,
@@ -550,16 +550,23 @@ export default Plugin.define({
     }) => {
       const { sessionID, notifyTo, failed } = overflow
       if (!claimContextNotice(noticeState, sessionID ?? `${notifyTo}\0${overflow.agent ?? ""}`, Date.now())) return
-      const tier = contextTier(overflow.role, failed)
+      // A child keeps the tier it was spawned in: its snapshot first, then its recorded spawn tier, then its agent's.
+      const stored = overflow.isChild && sessionID !== undefined ? await snapshotOf(sessionID) : undefined
+      const role = stored?.tier ?? overflow.spawnRole ?? overflow.role
+      const tier = contextTier(role, failed)
       const limits = contextLimits()
       const limit = limits.get(healthKey(failed))
-      const target = contextFallback(contextCandidates(tier, view()), failed, limits)
+      // The guard judges a larger-context candidate as it judges any model a spawn names.
+      const allowed: ModelRef[] = []
+      for (const ref of contextCandidates(tier, view()))
+        if ((await judge({ sessionID: notifyTo, agent: overflow.agent ?? "" }, overflow.agent ?? "", ref)) === undefined) allowed.push(ref)
+      const target = contextFallback(allowed, failed, limits)
       if (target === undefined) return notify(notifyTo, contextNote(failed, limit, tier), "context-length")
       let resumable: string | undefined
       if (overflow.isChild && sessionID !== undefined) {
         try {
           await ctx.session.switchModel({ sessionID, model: target })
-          noteFailover(sessionID, target, overflow.spawnRole)
+          noteFailover(sessionID, target, role, failed)
           await outcomes.failover(sessionID)
           resumable = sessionID
           await recordReceipt({
@@ -793,9 +800,10 @@ export default Plugin.define({
       return true
     }
 
-    const failoverSnapshot = (base: ModelSnapshot | undefined, model: ModelRef, role: string | undefined): ModelSnapshot => ({
+    const failoverSnapshot = (base: ModelSnapshot | undefined, model: ModelRef, role: string | undefined, overflowed?: ModelRef): ModelSnapshot => ({
       ...(base ?? { configRevision: configRevision(options) }),
       ...(base?.tier === undefined && role !== undefined ? { tier: role } : {}),
+      ...(overflowed === undefined ? {} : { overflowed: [...new Set([...(base?.overflowed ?? []), modelLabel(overflowed)])] }),
       model: modelLabel(model),
       at: Date.now(),
       failedOver: true,
@@ -806,18 +814,18 @@ export default Plugin.define({
      * The in-memory snapshot changes before this returns, so a resume right after the switch sees it;
      * storage follows in the background.
      */
-    const noteFailover = (childID: string, model: ModelRef, role: string | undefined): void => {
+    const noteFailover = (childID: string, model: ModelRef, role: string | undefined, overflowed?: ModelRef): void => {
       if (snapshotsClosed) return
       const known = childModels.get(childID)
       // Published now, from what is known; a child with nothing in memory gets a minimal snapshot.
-      const mine = failoverSnapshot(known, model, role)
+      const mine = failoverSnapshot(known, model, role, overflowed)
       childModels.set(childID, mine)
       const background = (async () => {
         if (known === undefined) {
           // A cold child's stored snapshot may carry a tier and revision. Memory keeps its model.
           const stored = readSnapshot(await ctx.storage.get(`${SPAWN_MODEL_KEY_PREFIX}${childID}`).catch(() => undefined))
           if (snapshotsClosed || childModels.get(childID) !== mine) return
-          if (stored !== undefined) childModels.set(childID, failoverSnapshot(stored, model, role))
+          if (stored !== undefined) childModels.set(childID, failoverSnapshot(stored, model, role, overflowed))
           else if (role === undefined) {
             // Not a child this plugin knows (a root session switched): nothing to keep or store.
             childModels.delete(childID)
@@ -1528,7 +1536,7 @@ export default Plugin.define({
             ? []
             : await Promise.all(
                 tierModels(options.roles, tier)
-                  .filter((m) => unavailableReason(m, available) === undefined)
+                  .filter((m) => unavailableReason(m, available) === undefined && !hasOverflowed(snapshot, m))
                   .sort((x, y) => Number(view()(x) !== undefined) - Number(view()(y) !== undefined))
                   .map(async (m) => ({ model: m, allowed: (await judge(event, agent, m)) === undefined })),
               ),

@@ -4970,7 +4970,18 @@ function readSnapshot(value) {
     snapshot.failedOver = true;
   if (value.rule === "guard-reroute")
     snapshot.rule = "guard-reroute";
+  if (Array.isArray(value.overflowed)) {
+    const overflowed = value.overflowed.filter((entry) => typeof entry === "string");
+    if (overflowed.length > 0)
+      snapshot.overflowed = overflowed;
+  }
   return snapshot;
+}
+function hasOverflowed(snapshot, model) {
+  return (snapshot?.overflowed ?? []).some((entry) => {
+    const candidate = parseCandidate(entry);
+    return candidate?.kind === "model" && candidate.ref.providerID === model.providerID && candidate.ref.id === model.id;
+  });
 }
 function snapshotModel(snapshot) {
   const candidate = parseCandidate(snapshot.model);
@@ -5477,17 +5488,23 @@ ${refs.size}`;
       const { sessionID, notifyTo, failed } = overflow;
       if (!claimContextNotice(noticeState, sessionID ?? `${notifyTo}\x00${overflow.agent ?? ""}`, Date.now()))
         return;
-      const tier = contextTier(overflow.role, failed);
+      const stored = overflow.isChild && sessionID !== undefined ? await snapshotOf(sessionID) : undefined;
+      const role = stored?.tier ?? overflow.spawnRole ?? overflow.role;
+      const tier = contextTier(role, failed);
       const limits = contextLimits();
       const limit = limits.get(healthKey(failed));
-      const target = contextFallback(contextCandidates(tier, view()), failed, limits);
+      const allowed = [];
+      for (const ref of contextCandidates(tier, view()))
+        if (await judge({ sessionID: notifyTo, agent: overflow.agent ?? "" }, overflow.agent ?? "", ref) === undefined)
+          allowed.push(ref);
+      const target = contextFallback(allowed, failed, limits);
       if (target === undefined)
         return notify(notifyTo, contextNote(failed, limit, tier), "context-length");
       let resumable;
       if (overflow.isChild && sessionID !== undefined) {
         try {
           await ctx.session.switchModel({ sessionID, model: target });
-          noteFailover(sessionID, target, overflow.spawnRole);
+          noteFailover(sessionID, target, role, failed);
           await outcomes.failover(sessionID);
           resumable = sessionID;
           await recordReceipt({
@@ -5662,18 +5679,19 @@ ${refs.size}`;
       }
       return true;
     };
-    const failoverSnapshot = (base, model, role) => ({
+    const failoverSnapshot = (base, model, role, overflowed) => ({
       ...base ?? { configRevision: configRevision(options) },
       ...base?.tier === undefined && role !== undefined ? { tier: role } : {},
+      ...overflowed === undefined ? {} : { overflowed: [...new Set([...base?.overflowed ?? [], modelLabel(overflowed)])] },
       model: modelLabel(model),
       at: Date.now(),
       failedOver: true
     });
-    const noteFailover = (childID, model, role) => {
+    const noteFailover = (childID, model, role, overflowed) => {
       if (snapshotsClosed)
         return;
       const known = childModels.get(childID);
-      const mine = failoverSnapshot(known, model, role);
+      const mine = failoverSnapshot(known, model, role, overflowed);
       childModels.set(childID, mine);
       const background = (async () => {
         if (known === undefined) {
@@ -5683,7 +5701,7 @@ ${refs.size}`;
           if (snapshotsClosed || childModels.get(childID) !== mine)
             return;
           if (stored !== undefined)
-            childModels.set(childID, failoverSnapshot(stored, model, role));
+            childModels.set(childID, failoverSnapshot(stored, model, role, overflowed));
           else if (role === undefined) {
             childModels.delete(childID);
             return;
@@ -6297,7 +6315,7 @@ ${refs.size}`;
         current: model,
         refused,
         tier,
-        candidates: refused === undefined ? [] : await Promise.all(tierModels(options.roles, tier).filter((m) => unavailableReason(m, available) === undefined).sort((x, y) => Number(view()(x) !== undefined) - Number(view()(y) !== undefined)).map(async (m) => ({ model: m, allowed: await judge(event, agent, m) === undefined })))
+        candidates: refused === undefined ? [] : await Promise.all(tierModels(options.roles, tier).filter((m) => unavailableReason(m, available) === undefined && !hasOverflowed(snapshot, m)).sort((x, y) => Number(view()(x) !== undefined) - Number(view()(y) !== undefined)).map(async (m) => ({ model: m, allowed: await judge(event, agent, m) === undefined })))
       });
       if (decision.action === "refuse")
         throw new Error(decision.reason);
