@@ -1,6 +1,6 @@
 ---
 name: aws-guidance
-description: Use for any AWS task (CLI, CDK, SAM, SDK, IaC, pricing, secrets); routes it through the AWS MCP servers and docs.
+description: Use for any AWS task (CLI, CDK apps and tests, SAM, SDK, IaC, pricing, secrets); routes it through the AWS MCP servers and docs.
 ---
 
 AWS work goes through two MCP servers: `aws-mcp` (the read-only AWS MCP Server) and `aws-pricing`. When either is not connected, say so and state which checks below stayed undone.
@@ -12,4 +12,5 @@ AWS work goes through two MCP servers: `aws-mcp` (the read-only AWS MCP Server) 
 - Load the `aws-secrets-manager` skill before any secret, credential, API key, token, or password task. Never call `secretsmanager get-secret-value` or `batch-get-secret-value`.
 - Use hyphens, not em dashes, in AWS resource names and descriptions.
 - Before you write or change a Lambda function, read [references/lambda.md](references/lambda.md): thin handlers, one middleware model per surface, Powertools for AWS Lambda over hand-rolled code, OpenTelemetry through the ADOT layer instead of the X-Ray SDK, and runtime defaults.
+- Before you write, test or review AWS CDK apps or construct libraries, read [references/cdk.md](references/cdk.md): assertions tests, cdk-nag, `cdk diff` gates, drift and cost checks.
 - Before you write code that calls an AWS service's data plane (DynamoDB, Valkey, S3, SQS, Secrets Manager, Cognito tokens, RDS, OpenSearch, Kinesis, MSK, Bedrock), read [references/service-clients.md](references/service-clients.md) and use the listed library where it beats the raw SDK.
