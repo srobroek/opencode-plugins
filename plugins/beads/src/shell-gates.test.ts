@@ -52,6 +52,12 @@ describe("decideShell", () => {
     expect(await decideShell("bd unclaim proj-1", root, deps())).toMatchObject({ gate: "bd-unclaim-gate" })
   })
 
+  test("an apostrophe in a double-quoted default does not stop an ordinary command", async () => {
+    for (const command of [`echo "\${X:-can't}"`, `echo "\${X:-it's} and \${Y:-isn't}"`]) {
+      expect(await decideShell(command, root, deps())).toMatchObject({ kind: "allow" })
+    }
+  })
+
   test("warns, without refusing, a create that no actor could be injected into", async () => {
     const decision = await decideShell("bd create --title t", root, deps())
     expect(decision.kind).toBe("allow")

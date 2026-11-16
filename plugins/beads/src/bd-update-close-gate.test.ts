@@ -33,6 +33,7 @@ describe("bd update close-status gate", () => {
   })
 
   test("refuses a closing update between quoted literals in a parameter default", () => {
+    expect(decideBdUpdateClose("echo ${X:- #$(bd update bead-1 --status closed)}")?.block).toBe(true)
     expect(decideBdUpdateClose("echo ${X:-'<('$(bd update bead-1 --status closed)')'}")).toEqual({
       block: true,
       reason: UPDATE_CLOSE_REASON,

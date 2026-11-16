@@ -1,4 +1,4 @@
-import { readsScriptFromStdin, scanShell } from "./shell.ts"
+import { readsScriptFromStdin, scanShell, stdinSource } from "./shell.ts"
 
 const ACTOR_VARS = ["BEADS_ACTOR", "BD_ACTOR"] as const
 type ActorVar = (typeof ACTOR_VARS)[number]
@@ -118,9 +118,16 @@ function readCommand(command: string, inherited: ActorState): { invocations: BdI
     if (item.kind === "operator") continue
 
     // A substitution runs where its command does, with the exports in force at that point.
+    // An unquoted here-document body expands in the shell that owns the command.
     const spans = [...item.words, ...item.redirects]
+    const texts: string[] = []
     if (spans.length > 0) {
-      const text = command.slice(Math.min(...spans.map((w) => w.start)), Math.max(...spans.map((w) => w.end)))
+      texts.push(command.slice(Math.min(...spans.map((w) => w.start)), Math.max(...spans.map((w) => w.end))))
+    }
+    for (const document of item.hereDocuments) {
+      if (!document.quoted) texts.push(`:<<__HEREDOC_END__\n${document.body}__HEREDOC_END__\n`)
+    }
+    for (const text of texts) {
       for (const source of scanShell(text, { executableSubstitutionsOnly: true }).substitutions) {
         const at = unclaimed.indexOf(source)
         if (at >= 0) unclaimed.splice(at, 1)
@@ -163,7 +170,8 @@ function readCommand(command: string, inherited: ActorState): { invocations: BdI
       }
     }
     if (readsScriptFromStdin(values)) {
-      for (const document of item.hereDocuments) out.push(...bdInvocations(document.body, state))
+      const script = stdinSource(item)
+      if (script !== undefined) out.push(...bdInvocations(script, state))
     }
   }
   for (const source of unclaimed) out.push(...bdInvocations(source, state))

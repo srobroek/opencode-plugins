@@ -29,6 +29,7 @@ export {
   type ShellWord,
   type SimpleCommand,
   scanShell,
+  stdinSource,
   type Token,
   tokenize,
 } from "@srobroek/opencode-lib/shell-command"

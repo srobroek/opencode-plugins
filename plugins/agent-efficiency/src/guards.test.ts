@@ -41,6 +41,8 @@ describe("sleep guard", () => {
     expect(runsSleep("cat ${X:-$(sleep 5)}")).toBe(true)
     expect(runsSleep("cat ${X:-<(sleep 5)}")).toBe(true)
     expect(runsSleep("cat ${X:-'<('$(sleep 5)')'}")).toBe(true)
+    expect(runsSleep("echo ${X:- #$(sleep 5)}")).toBe(true)
+    expect(runsSleep("echo ${X:-a;b\n#$(sleep 5)}")).toBe(true)
   })
 
   test("eval scripts and xargs invocations run while ordinary quoted arguments stay data", () => {

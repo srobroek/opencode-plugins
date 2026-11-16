@@ -632,6 +632,8 @@ function scanShell(source, options = {}) {
   let word;
   let target;
   let targetHereString = false;
+  let targetOperator = "";
+  let targetFd;
   const pending = [];
   const append = (at, text, quoted = false, expands = false) => {
     word ??= { start: at, value: "", quoted: false, expands: false };
@@ -652,6 +654,9 @@ function scanShell(source, options = {}) {
     if (target !== undefined) {
       if (targetHereString)
         done.hereString = true;
+      done.operator = targetOperator;
+      if (targetFd !== undefined)
+        done.fd = targetFd;
       command.redirects.push(done);
       if (target !== "redirect")
         pending.push({
@@ -678,13 +683,14 @@ function scanShell(source, options = {}) {
   };
   const substitution = (expansion, unquoted = false) => {
     if (expansion.inner !== undefined) {
-      if (!options.executableSubstitutionsOnly || expansion.executable)
+      if (expansion.executable)
         substitutions.push(expansion.inner);
-      else if (unquoted) {
-        substitutions.push(...scanShell(expansion.inner, options).substitutions);
-      } else {
-        for (const found of bodySubstitutions(expansion.inner))
-          substitution(found);
+      else {
+        if (!options.executableSubstitutionsOnly)
+          substitutions.push(expansion.inner);
+        const nested = unquoted ? parameterBodySubstitutions(expansion.inner) : bodySubstitutions(expansion.inner);
+        for (const found of nested)
+          substitution(found, unquoted);
       }
     }
     if (!expansion.closed)
@@ -769,7 +775,7 @@ function scanShell(source, options = {}) {
           continue;
         }
         if (c === "$" || c === "`") {
-          const expansion = expansionAt(source, j);
+          const expansion = expansionAt(source, j, true);
           substitution(expansion);
           text += source.slice(j, expansion.end);
           expands ||= expansion.expands;
@@ -829,6 +835,8 @@ function scanShell(source, options = {}) {
       flush(i);
       target = "redirect";
       targetHereString = false;
+      targetOperator = "&>";
+      targetFd = undefined;
       i += source[i + 2] === ">" ? 2 : 1;
       continue;
     }
@@ -843,11 +851,14 @@ function scanShell(source, options = {}) {
       continue;
     }
     if (ch === "<" || ch === ">") {
-      if (word !== undefined && !word.quoted && !word.expands && /^(?:\d+|\{[A-Za-z_]\w*\})$/.test(word.value))
+      targetFd = undefined;
+      if (word !== undefined && !word.quoted && !word.expands && /^(?:\d+|\{[A-Za-z_]\w*\})$/.test(word.value)) {
+        targetFd = word.value;
         word = undefined;
-      else
+      } else
         flush(i);
       targetHereString = source.startsWith("<<<", i);
+      targetOperator = source.startsWith("<<<", i) ? "<<<" : source.startsWith("<<-", i) ? "<<-" : source.startsWith("<<", i) ? "<<" : ch + (next === ">" || next === "&" || next === "|" ? next : "");
       if (source.startsWith("<<<", i)) {
         target = "redirect";
         i += 2;
@@ -872,7 +883,7 @@ function scanShell(source, options = {}) {
     complete = false;
   return { items, substitutions, complete };
 }
-function expansionAt(text, at) {
+function expansionAt(text, at, inDouble = false) {
   if (text[at] === "`") {
     let j = at + 1;
     while (j < text.length && text[j] !== "`")
@@ -888,7 +899,7 @@ function expansionAt(text, at) {
   }
   const next = text[at + 1];
   if (next === "(" || next === "{") {
-    const close = closingIndex(text, at + 2, next, next === "(" ? ")" : "}");
+    const close = closingIndex(text, at + 2, next, next === "(" ? ")" : "}", inDouble && next === "{");
     const closed = close >= 0;
     return {
       end: closed ? close + 1 : text.length,
@@ -908,7 +919,7 @@ function expansionAt(text, at) {
     return { end: at + 2, expands: true, closed: true };
   return { end: at + 1, expands: false, closed: true };
 }
-function closingIndex(text, from, open, close) {
+function closingIndex(text, from, open, close, literalSingle = false) {
   let depth = 1;
   for (let j = from;j < text.length; j++) {
     const c = text[j];
@@ -916,6 +927,8 @@ function closingIndex(text, from, open, close) {
       j++;
       continue;
     }
+    if (c === "'" && literalSingle)
+      continue;
     if (c === "'" || c === '"' || c === "`") {
       let k = j + 1;
       while (k < text.length && text[k] !== c)
@@ -932,6 +945,41 @@ function closingIndex(text, from, open, close) {
   }
   return -1;
 }
+function parameterBodySubstitutions(body) {
+  const found = [];
+  for (let j = 0;j < body.length; j++) {
+    const c = body[j];
+    if (c === "\\") {
+      j++;
+    } else if (c === "'") {
+      const end = body.indexOf("'", j + 1);
+      j = end < 0 ? body.length : end;
+    } else if (c === '"') {
+      j++;
+      while (j < body.length && body[j] !== '"') {
+        if (body[j] === "\\")
+          j++;
+        else if (body[j] === "$" || body[j] === "`") {
+          const expansion = expansionAt(body, j, true);
+          found.push(expansion);
+          j = expansion.end - 1;
+        }
+        j++;
+      }
+    } else if (c === "$" || c === "`") {
+      const expansion = expansionAt(body, j);
+      found.push(expansion);
+      j = expansion.end - 1;
+    } else if ((c === "<" || c === ">") && body[j + 1] === "(") {
+      const close = closingIndex(body, j + 2, "(", ")");
+      const closed = close >= 0;
+      const end = closed ? close + 1 : body.length;
+      found.push({ end, inner: body.slice(j + 2, closed ? close : body.length), executable: true, expands: true, closed });
+      j = end - 1;
+    }
+  }
+  return found;
+}
 function bodySubstitutions(body) {
   const found = [];
   for (let j = 0;j < body.length; j++) {
@@ -942,7 +990,7 @@ function bodySubstitutions(body) {
     }
     if (c !== "$" && c !== "`")
       continue;
-    const expansion = expansionAt(body, j);
+    const expansion = expansionAt(body, j, true);
     found.push(expansion);
     j = expansion.end - 1;
   }
@@ -990,6 +1038,25 @@ function splitCommands(source) {
   flush();
   return positions;
 }
+function stdinSource(item) {
+  let heredoc = 0;
+  let source;
+  for (const redirect of item.redirects) {
+    const operator = redirect.operator ?? "";
+    const isHeredoc = operator === "<<" || operator === "<<-";
+    const document = isHeredoc ? item.hereDocuments[heredoc++] : undefined;
+    const fd = redirect.fd ?? (operator.startsWith("<") ? "0" : "1");
+    if (fd !== "0")
+      continue;
+    if (isHeredoc)
+      source = document?.body;
+    else if (operator === "<<<")
+      source = redirect.value;
+    else
+      source = undefined;
+  }
+  return source;
+}
 var INTERPRETERS = new Set(["bash", "sh", "zsh", "dash", "ksh"]);
 function readsScriptFromStdin(values) {
   if (!INTERPRETERS.has(values[0]?.split("/").pop() ?? ""))
@@ -1031,11 +1098,9 @@ function nestedSources(source) {
     const values = item.words.slice(first).map((word) => word.value);
     if (!readsScriptFromStdin(values))
       continue;
-    for (const document of item.hereDocuments)
-      sources.push(document.body);
-    for (const redirect of item.redirects)
-      if (redirect.hereString === true)
-        sources.push(redirect.value);
+    const script = stdinSource(item);
+    if (script !== undefined)
+      sources.push(script);
   }
   for (const match of source.matchAll(/\b(?:bash|sh|zsh|dash|ksh)\s+-c\s+((?:'[^']*')|(?:"[^"]*")|[^\s;&|]+)/g)) {
     const value = match[1];
@@ -1374,8 +1439,17 @@ function readCommand(command, inherited) {
     if (item.kind === "operator")
       continue;
     const spans = [...item.words, ...item.redirects];
+    const texts = [];
     if (spans.length > 0) {
-      const text = command.slice(Math.min(...spans.map((w) => w.start)), Math.max(...spans.map((w) => w.end)));
+      texts.push(command.slice(Math.min(...spans.map((w) => w.start)), Math.max(...spans.map((w) => w.end))));
+    }
+    for (const document of item.hereDocuments) {
+      if (!document.quoted)
+        texts.push(`:<<__HEREDOC_END__
+${document.body}__HEREDOC_END__
+`);
+    }
+    for (const text of texts) {
       for (const source of scanShell(text, { executableSubstitutionsOnly: true }).substitutions) {
         const at = unclaimed.indexOf(source);
         if (at >= 0)
@@ -1424,8 +1498,9 @@ function readCommand(command, inherited) {
       }
     }
     if (readsScriptFromStdin(values)) {
-      for (const document of item.hereDocuments)
-        out.push(...bdInvocations(document.body, state));
+      const script = stdinSource(item);
+      if (script !== undefined)
+        out.push(...bdInvocations(script, state));
     }
   }
   for (const source of unclaimed)

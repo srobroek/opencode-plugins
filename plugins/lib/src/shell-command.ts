@@ -172,6 +172,10 @@ export type ShellWord = {
   expands: boolean
   /** On a redirection word: the operator is `<<<`, so the word is the here-string text. */
   hereString?: true
+  /** On a redirection word: the operator, such as `<`, `<<`, `<<<`, `>` or `>&`. */
+  operator?: string
+  /** On a redirection word: the file descriptor written before the operator, such as `3`. */
+  fd?: string
 }
 
 export type HereDocument = { body: string; quoted: boolean }
@@ -219,6 +223,8 @@ export function scanShell(source: string, options: { executableSubstitutionsOnly
   let word: { start: number; value: string; quoted: boolean; expands: boolean } | undefined
   let target: "redirect" | "here-document" | "here-document-tabs" | undefined
   let targetHereString = false
+  let targetOperator = ""
+  let targetFd: string | undefined
   const pending: { delimiter: string; stripTabs: boolean; quoted: boolean; owner: SimpleCommand }[] = []
 
   const append = (at: number, text: string, quoted = false, expands = false): void => {
@@ -237,6 +243,8 @@ export function scanShell(source: string, options: { executableSubstitutionsOnly
     word = undefined
     if (target !== undefined) {
       if (targetHereString) done.hereString = true
+      done.operator = targetOperator
+      if (targetFd !== undefined) done.fd = targetFd
       command.redirects.push(done)
       if (target !== "redirect")
         pending.push({
@@ -265,15 +273,16 @@ export function scanShell(source: string, options: { executableSubstitutionsOnly
   }
   const substitution = (expansion: Expansion, unquoted = false): void => {
     if (expansion.inner !== undefined) {
-      if (!options.executableSubstitutionsOnly || expansion.executable) substitutions.push(expansion.inner)
-      else if (unquoted) {
-        // Unquoted, the body is shell text: `${X:-'$(cmd)'}` is a quoted literal, while
-        // `${X:-$(cmd)}` and `${X:-<(cmd)}` run.
-        substitutions.push(...scanShell(expansion.inner, options).substitutions)
-      } else {
-        // Inside `"${X:-'$(cmd)'}"` the single quotes are literal, so the expansion body is
-        // read for substitutions without quote handling: any `$(` or backtick may run.
-        for (const found of bodySubstitutions(expansion.inner)) substitution(found)
+      if (expansion.executable) substitutions.push(expansion.inner)
+      else {
+        // The raw body is the source by default; callers that want only code skip it.
+        if (!options.executableSubstitutionsOnly) substitutions.push(expansion.inner)
+        // Unquoted, the body follows expansion rules, not command rules: quotes are honoured
+        // and `#` is data, so `${X:-'$(cmd)'}` is a literal while `${X:-$(cmd)}`, `${X:-<(cmd)}`
+        // and `${X:- #$(cmd)}` run. Inside double quotes the single quotes are literal, so
+        // `"${X:-'$(cmd)'}"` runs `cmd`.
+        const nested = unquoted ? parameterBodySubstitutions(expansion.inner) : bodySubstitutions(expansion.inner)
+        for (const found of nested) substitution(found, unquoted)
       }
     }
     if (!expansion.closed) complete = false
@@ -348,7 +357,7 @@ export function scanShell(source: string, options: { executableSubstitutionsOnly
           continue
         }
         if (c === "$" || c === "`") {
-          const expansion = expansionAt(source, j)
+          const expansion = expansionAt(source, j, true)
           substitution(expansion)
           text += source.slice(j, expansion.end)
           expands ||= expansion.expands
@@ -403,6 +412,8 @@ export function scanShell(source: string, options: { executableSubstitutionsOnly
       flush(i)
       target = "redirect"
       targetHereString = false
+      targetOperator = "&>"
+      targetFd = undefined
       i += source[i + 2] === ">" ? 2 : 1
       continue
     }
@@ -418,10 +429,19 @@ export function scanShell(source: string, options: { executableSubstitutionsOnly
     }
     if (ch === "<" || ch === ">") {
       // A word of digits, or `{name}`, written against the operator is its file descriptor.
-      if (word !== undefined && !word.quoted && !word.expands && /^(?:\d+|\{[A-Za-z_]\w*\})$/.test(word.value))
+      targetFd = undefined
+      if (word !== undefined && !word.quoted && !word.expands && /^(?:\d+|\{[A-Za-z_]\w*\})$/.test(word.value)) {
+        targetFd = word.value
         word = undefined
-      else flush(i)
+      } else flush(i)
       targetHereString = source.startsWith("<<<", i)
+      targetOperator = source.startsWith("<<<", i)
+        ? "<<<"
+        : source.startsWith("<<-", i)
+          ? "<<-"
+          : source.startsWith("<<", i)
+            ? "<<"
+            : ch + (next === ">" || next === "&" || next === "|" ? next : "")
       if (source.startsWith("<<<", i)) {
         target = "redirect"
         i += 2
@@ -446,7 +466,7 @@ export function scanShell(source: string, options: { executableSubstitutionsOnly
 }
 
 /** The expansion a `$` or backtick at `at` starts, and where it ends. */
-function expansionAt(text: string, at: number): Expansion {
+function expansionAt(text: string, at: number, inDouble = false): Expansion {
   if (text[at] === "`") {
     let j = at + 1
     while (j < text.length && text[j] !== "`") j += text[j] === "\\" ? 2 : 1
@@ -461,7 +481,7 @@ function expansionAt(text: string, at: number): Expansion {
   }
   const next = text[at + 1]
   if (next === "(" || next === "{") {
-    const close = closingIndex(text, at + 2, next, next === "(" ? ")" : "}")
+    const close = closingIndex(text, at + 2, next, next === "(" ? ")" : "}", inDouble && next === "{")
     const closed = close >= 0
     return {
       end: closed ? close + 1 : text.length,
@@ -482,7 +502,7 @@ function expansionAt(text: string, at: number): Expansion {
 }
 
 /** Index of the `close` that balances an `open` already consumed before `from`, or -1. */
-function closingIndex(text: string, from: number, open: string, close: string): number {
+function closingIndex(text: string, from: number, open: string, close: string, literalSingle = false): number {
   let depth = 1
   for (let j = from; j < text.length; j++) {
     const c = text[j]
@@ -490,6 +510,7 @@ function closingIndex(text: string, from: number, open: string, close: string): 
       j++
       continue
     }
+    if (c === "'" && literalSingle) continue
     if (c === "'" || c === '"' || c === "`") {
       let k = j + 1
       while (k < text.length && text[k] !== c) k += c !== "'" && text[k] === "\\" ? 2 : 1
@@ -503,6 +524,47 @@ function closingIndex(text: string, from: number, open: string, close: string): 
   return -1
 }
 
+/**
+ * Substitutions in an unquoted parameter-expansion body such as the default of `${X:-…}`.
+ * Quotes are honoured (single quotes hide everything, double quotes still expand `$( )` and
+ * backticks), and `$( )`, backticks, `<( )`, `>( )` and nested `${ }` are found. A `#`, a `;`
+ * or a newline is plain data here: this is not a command line.
+ */
+function parameterBodySubstitutions(body: string): Expansion[] {
+  const found: Expansion[] = []
+  for (let j = 0; j < body.length; j++) {
+    const c = body[j] as string
+    if (c === "\\") {
+      j++
+    } else if (c === "'") {
+      const end = body.indexOf("'", j + 1)
+      j = end < 0 ? body.length : end
+    } else if (c === '"') {
+      j++
+      while (j < body.length && body[j] !== '"') {
+        if (body[j] === "\\") j++
+        else if (body[j] === "$" || body[j] === "`") {
+          const expansion = expansionAt(body, j, true)
+          found.push(expansion)
+          j = expansion.end - 1
+        }
+        j++
+      }
+    } else if (c === "$" || c === "`") {
+      const expansion = expansionAt(body, j)
+      found.push(expansion)
+      j = expansion.end - 1
+    } else if ((c === "<" || c === ">") && body[j + 1] === "(") {
+      const close = closingIndex(body, j + 2, "(", ")")
+      const closed = close >= 0
+      const end = closed ? close + 1 : body.length
+      found.push({ end, inner: body.slice(j + 2, closed ? close : body.length), executable: true, expands: true, closed })
+      j = end - 1
+    }
+  }
+  return found
+}
+
 /** Substitutions an unquoted here-document body expands. */
 function bodySubstitutions(body: string): Expansion[] {
   const found: Expansion[] = []
@@ -513,7 +575,7 @@ function bodySubstitutions(body: string): Expansion[] {
       continue
     }
     if (c !== "$" && c !== "`") continue
-    const expansion = expansionAt(body, j)
+    const expansion = expansionAt(body, j, true)
     found.push(expansion)
     j = expansion.end - 1
   }
@@ -587,6 +649,27 @@ function splitCommands(source: string): CommandPosition[] {
   return positions
 }
 
+/**
+ * The here-document body or here-string text that is the command's standard input, or
+ * undefined when stdin is a file, another descriptor's here-document, or nothing. The last
+ * redirection of descriptor 0 wins, as in the shell.
+ */
+export function stdinSource(item: SimpleCommand): string | undefined {
+  let heredoc = 0
+  let source: string | undefined
+  for (const redirect of item.redirects) {
+    const operator = redirect.operator ?? ""
+    const isHeredoc = operator === "<<" || operator === "<<-"
+    const document = isHeredoc ? item.hereDocuments[heredoc++] : undefined
+    const fd = redirect.fd ?? (operator.startsWith("<") ? "0" : "1")
+    if (fd !== "0") continue
+    if (isHeredoc) source = document?.body
+    else if (operator === "<<<") source = redirect.value
+    else source = undefined
+  }
+  return source
+}
+
 const INTERPRETERS = new Set(["bash", "sh", "zsh", "dash", "ksh"])
 
 /**
@@ -634,8 +717,8 @@ function nestedSources(source: string): { sources: string[]; unknown: boolean } 
       first++
     const values = item.words.slice(first).map((word) => word.value)
     if (!readsScriptFromStdin(values)) continue
-    for (const document of item.hereDocuments) sources.push(document.body)
-    for (const redirect of item.redirects) if (redirect.hereString === true) sources.push(redirect.value)
+    const script = stdinSource(item)
+    if (script !== undefined) sources.push(script)
   }
   for (const match of source.matchAll(/\b(?:bash|sh|zsh|dash|ksh)\s+-c\s+((?:'[^']*')|(?:"[^"]*")|[^\s;&|]+)/g)) {
     const value = match[1]
