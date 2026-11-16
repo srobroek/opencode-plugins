@@ -1456,10 +1456,19 @@ import { basename as basename3 } from "path";
 
 // plugins/speckit/src/workflow.ts
 import { existsSync as existsSync5 } from "fs";
-import { join as join6 } from "path";
+import { isAbsolute as isAbsolute3, join as join6, relative as relative2 } from "path";
 var OWN_PROMPT_AGENTS = ["speckit-sync", "speckit-verify"];
 function usesSpeckit(directory) {
   return existsSync5(join6(directory, ".specify"));
+}
+function speckitWorkspace(directory, projectRoot, detect = usesSpeckit) {
+  if (detect(directory))
+    return directory;
+  if (projectRoot === undefined || projectRoot === directory)
+    return;
+  const path = relative2(projectRoot, directory);
+  const inside = path !== "" && !path.startsWith("..") && !isAbsolute3(path);
+  return inside && detect(projectRoot) ? projectRoot : undefined;
 }
 function workflowLatch(detect = usesSpeckit, store) {
   const decided = new Map;
@@ -1507,11 +1516,12 @@ function isSpecAgent(path) {
 function wantsSpecAgent(setting, directories, detect = usesSpeckit) {
   if (setting !== "auto")
     return setting;
-  return directories.some(detect);
+  const [location, projectRoot] = directories;
+  return location !== undefined && speckitWorkspace(location, projectRoot, detect) !== undefined;
 }
 
 // plugins/speckit/src/tasks-guard.ts
-import { dirname as dirname2, isAbsolute as isAbsolute3, resolve as resolve3 } from "path";
+import { dirname as dirname2, isAbsolute as isAbsolute4, resolve as resolve3 } from "path";
 var DENY_REASON = "blocked by speckit (task state lives in beads, tasks.md is never authored): this repo has an active beads workspace, so specs/*/tasks.md is read-only legacy and must not be written or created. Create implementation tasks as beads under the feature molecule's implement step instead, by the TASK STATE route of the SpecKit workflow instructions: load the beads-ledger skill and create one task graph (bd create --graph specs/<NNN-slug>/tasks.graph.json, dry-run first) whose nodes carry parent_id <implement-step-id>, spec_id <NNN-slug>, acceptance criteria and routing metadata, with blocks edges for true dependencies; read them back with bd list --parent <implement-step-id> --json. Then work the tasks via bd ready -> bd update <id> --claim -> bd close <id> --reason. Find the implement step with bd mol current <molecule-root-id>. IF A SKILL DEMANDED tasks.md: skip check-prerequisites.sh --require-tasks and read bd list --spec <NNN-slug>. Do not create tasks.md to get past the check. Disable: set the srobroek.speckit plugin option tasksGuard=false";
 var TASKS_PATH = /(?:^|\/)specs\/[^/\s'"]+\/tasks\.md(?:$|[/\s'"])/;
 var WRITE_REDIRECT = /[0-9]*&?>>?\s*['"]?[^|;&]*specs\/[^|;&]*\/tasks\.md/;
@@ -1546,7 +1556,7 @@ function repoOf(path) {
 }
 function tasksTargets(tool, input, directory) {
   if (WRITE_TOOLS.has(tool)) {
-    const hits = writeTargets(tool, input).filter(isTasksMd).map((path) => isAbsolute3(path) ? path : resolve3(directory, path));
+    const hits = writeTargets(tool, input).filter(isTasksMd).map((path) => isAbsolute4(path) ? path : resolve3(directory, path));
     return hits.length > 0 ? [...new Set(hits.map(repoOf))] : undefined;
   }
   if (!isShellTool(tool))
@@ -1571,7 +1581,7 @@ async function decideToolCall(tool, input, directory, probe) {
 }
 
 // plugins/speckit/src/tools.ts
-import { isAbsolute as isAbsolute6, resolve as resolve6 } from "path";
+import { isAbsolute as isAbsolute7, resolve as resolve6 } from "path";
 
 // plugins/speckit/src/spec-start.ts
 var APPROVAL_QUESTION = "Require routine human approval checkpoints for this spec/run? Yes or no.";
@@ -1819,7 +1829,7 @@ import {
   writeSync
 } from "fs";
 import { hostname } from "os";
-import { basename as basename4, dirname as dirname4, isAbsolute as isAbsolute5, join as join7, resolve as resolve5 } from "path";
+import { basename as basename4, dirname as dirname4, isAbsolute as isAbsolute6, join as join7, resolve as resolve5 } from "path";
 
 // plugins/lib/src/shell-command.ts
 var INTERPRETERS = new Set(["bash", "sh", "zsh", "dash", "ksh"]);
@@ -1867,7 +1877,7 @@ var TRUTHY = { "": true, "1": true, t: true, T: true, TRUE: true, true: true, Tr
 // plugins/beads/src/beads-store.ts
 import { spawnSync } from "child_process";
 import { lstatSync as lstatSync2, realpathSync, statSync as statSync2 } from "fs";
-import { dirname as dirname3, isAbsolute as isAbsolute4, resolve as resolve4 } from "path";
+import { dirname as dirname3, isAbsolute as isAbsolute5, resolve as resolve4 } from "path";
 function repoIdentity(cwd) {
   if (cwd.includes("\x00"))
     return;
@@ -1886,7 +1896,7 @@ function repoIdentity(cwd) {
   }
   const out = String(result.stdout ?? "").trim();
   try {
-    return realpathSync(isAbsolute4(out) ? out : resolve4(cwd, out));
+    return realpathSync(isAbsolute5(out) ? out : resolve4(cwd, out));
   } catch {
     return;
   }
@@ -2071,7 +2081,7 @@ function storeFor(globals, cwd, env) {
   return canonicalStore(sessionPinFor(cwd));
 }
 function absolute(path, cwd) {
-  return isAbsolute5(path) ? path : resolve5(cwd, path);
+  return isAbsolute6(path) ? path : resolve5(cwd, path);
 }
 function isDirectory2(path) {
   try {
@@ -2560,7 +2570,7 @@ var START_INPUT = {
       pattern: "^[0-9]{3}-[a-z0-9-]+$",
       description: "NNN-slug spec identity; optional on resume when root is given"
     },
-    workspace: { type: "string", description: "Repository root with .beads; defaults to the session directory" },
+    workspace: { type: "string", description: "Repository root with .beads; defaults to the SpecKit workspace" },
     profile: { type: "string", enum: [...PROFILES], description: "default speckit-feature" },
     root: { type: "string", description: "Existing run root; required when several runs exist" },
     approvals: {
@@ -2578,7 +2588,7 @@ var START_INPUT = {
 };
 var START_DESCRIPTION = `Start or resume a spec workflow, with an explicit routine approval choice from the user before pouring.
 ` + "Persists and reads back the answer, reuses it on resume, and requires separate consent to migrate an existing gated run. Holds the Beads store's write lock for the whole start. Returns CHOICE_REQUIRED or MIGRATION_REQUIRED with a question to ask the user, READY when the run can advance, or INCOMPLETE (store-lock wait ran out, a bd command passed its bound, or cancellation) with the step reached and whether a pour was issued; inspect the run before retrying. Reviews, tests and safety confirmations remain required.";
-var within = (base, path) => path === undefined ? base : isAbsolute6(path) ? path : resolve6(base, path);
+var within = (base, path) => path === undefined ? base : isAbsolute7(path) ? path : resolve6(base, path);
 var record = (input) => input !== null && typeof input === "object" && !Array.isArray(input) ? input : {};
 function readSetupParams(input) {
   const value = record(input);
@@ -2698,6 +2708,13 @@ async function setupSpeckit(ctx, overrides = {}) {
       await dispose();
   };
   const directory = (sessionID) => ctx.session.get({ sessionID }).then((session) => session.location.directory ?? location).catch(() => location);
+  const locations = locationDirectories(ctx);
+  const projectRoot = locations[1];
+  const hasWorkspace = (dir) => speckitWorkspace(dir, projectRoot) !== undefined;
+  const workspace = async (sessionID) => {
+    const dir = await directory(sessionID);
+    return speckitWorkspace(dir, projectRoot) ?? dir;
+  };
   const assert = (context, action, resource, metadata) => ctx.permission.assert({
     sessionID: context.sessionID,
     agent: context.agent,
@@ -2717,14 +2734,14 @@ async function setupSpeckit(ctx, overrides = {}) {
   const agentFiles = agentPaths(AGENTS_DIR);
   let specRegistration;
   const registerSpecAgent = async () => {
-    if (specRegistration !== undefined || !wantsSpecAgent(options.specAgent, locationDirectories(ctx)))
+    if (specRegistration !== undefined || !wantsSpecAgent(options.specAgent, locations))
       return;
     specRegistration = registerAgents(ctx.agent, agentFiles.filter(isSpecAgent));
     await specRegistration;
   };
   const workflow = options.workflow ? {
     text: readFileSync5(WORKFLOW_PATH, "utf8").trim(),
-    latch: workflowLatch(usesSpeckit, {
+    latch: workflowLatch(hasWorkspace, {
       get: async (sessionID) => {
         const value = await ctx.storage.get(`${WORKFLOW_KEY_PREFIX}${sessionID}`);
         return typeof value === "boolean" ? value : undefined;
@@ -2739,10 +2756,10 @@ async function setupSpeckit(ctx, overrides = {}) {
         description: SETUP_DESCRIPTION,
         input: setupInput(options.integration),
         execute: async (input, context) => {
-          const cwd = await directory(context.sessionID);
+          const cwd = await workspace(context.sessionID);
           await assert(context, SETUP_TOOL, cwd, { ...input });
           const result = await executeSetup(input, cwd, options.integration, context.signal);
-          if (cwd === location) {
+          if (locations.includes(cwd)) {
             active = await probe(location);
             await refreshSkills?.();
             await registerSpecAgent();
@@ -2759,7 +2776,7 @@ ${workflow.text}` };
         description: START_DESCRIPTION,
         input: START_INPUT,
         execute: async (input, context) => {
-          const cwd = await directory(context.sessionID);
+          const cwd = await workspace(context.sessionID);
           const spec = input?.spec;
           await assert(context, START_TOOL, typeof spec === "string" ? spec : "*", {
             ...input
@@ -2772,7 +2789,7 @@ ${workflow.text}` };
         description: COMMIT_DESCRIPTION,
         input: COMMIT_INPUT,
         execute: async (input, context) => {
-          const cwd = await directory(context.sessionID);
+          const cwd = await workspace(context.sessionID);
           await assert(context, COMMIT_TOOL, cwd, { ...input });
           return executeCommit(input, cwd);
         }

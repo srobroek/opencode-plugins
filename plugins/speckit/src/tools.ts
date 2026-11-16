@@ -53,7 +53,7 @@ export const START_INPUT = {
       pattern: "^[0-9]{3}-[a-z0-9-]+$",
       description: "NNN-slug spec identity; optional on resume when root is given",
     },
-    workspace: { type: "string", description: "Repository root with .beads; defaults to the session directory" },
+    workspace: { type: "string", description: "Repository root with .beads; defaults to the SpecKit workspace" },
     profile: { type: "string", enum: [...PROFILES], description: "default speckit-feature" },
     root: { type: "string", description: "Existing run root; required when several runs exist" },
     approvals: {

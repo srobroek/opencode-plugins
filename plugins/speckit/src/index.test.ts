@@ -19,6 +19,7 @@ async function start(
   options: {
     beads?: boolean
     directory?: string
+    project?: string
     plugin?: Record<string, unknown>
     skills?: { id: string; content: string }[]
   } = {},
@@ -31,6 +32,8 @@ async function start(
     sessions: [{ id: "ses_main", location: { directory } }],
     skills: options.skills ?? [],
   })
+  if (options.project !== undefined)
+    (fake.context.location as { project?: { directory: string } }).project = { directory: options.project }
   const plugin = createPlugin({
     probe: async (dir) => {
       probes.push(dir)
@@ -244,11 +247,58 @@ describe("spec agent registration", () => {
     }))
 })
 
+describe("nested location inside a SpecKit project root", () => {
+  const git = (cwd: string, ...args: string[]) => {
+    const proc = Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" })
+    if (proc.exitCode !== 0) throw new Error(proc.stderr.toString())
+    return proc.stdout.toString().trim()
+  }
+  const nested = async (run: (root: string, sub: string) => Promise<void>) => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "speckit-nested-")))
+    const sub = join(root, "packages", "app")
+    try {
+      for (const path of [sub, join(root, ".specify"), join(root, ".beads"), join(root, "specs", "001-a")])
+        mkdirSync(path, { recursive: true })
+      await run(root, sub)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  }
+  const context = { sessionID: "ses_main", agent: "spec", messageID: "msg_1", id: "call_1", signal: new AbortController().signal }
+
+  test("registers the spec agent and gives the session the workflow text", () =>
+    nested(async (root, sub) => {
+      const { fake, cleanup } = await start({ directory: sub, project: root })
+      expect(fake.agents.has("spec")).toBe(true)
+      const request = { sessionID: "ses_main", agent: "build", system: [] as { text: string }[] }
+      expect((await fake.fire.session("context", request)).system[0]?.text).toContain("SpecKit workflow")
+      await cleanup()
+    }))
+
+  test("tools default to the project root's SpecKit workspace", () =>
+    nested(async (root, sub) => {
+      git(root, "init", "-q", "-b", "main")
+      git(root, "config", "user.name", "Test")
+      git(root, "config", "user.email", "test@example.com")
+      git(root, "config", "commit.gpgsign", "false")
+      git(root, "config", "core.hooksPath", "/dev/null")
+      writeFileSync(join(root, "specs", "001-a", "spec.md"), "x\n")
+      const { fake, cleanup } = await start({ directory: sub, project: root })
+      const execute = fake.tools.get("speckit_commit")?.execute as (input: unknown, ctx: unknown) => Promise<{ metadata: { ok: boolean } }>
+      const result = await execute({ message: "docs(spec): 001-a", paths: ["specs/001-a"] }, context)
+      expect(result.metadata.ok).toBe(true)
+      expect(git(root, "show", "--name-only", "--format=", "HEAD")).toBe("specs/001-a/spec.md")
+      await cleanup()
+    }))
+})
+
 describe("wantsSpecAgent", () => {
   test("auto checks the location, then the project root", () => {
     const has = (dir: string) => dir === "/root"
     expect(wantsSpecAgent("auto", ["/root/sub", "/root"], has)).toBe(true)
     expect(wantsSpecAgent("auto", ["/elsewhere"], has)).toBe(false)
+    // A location outside its project root (a separate worktree) does not borrow the root's workspace.
+    expect(wantsSpecAgent("auto", ["/elsewhere", "/root"], has)).toBe(false)
     expect(wantsSpecAgent(true, ["/elsewhere"], has)).toBe(true)
     expect(wantsSpecAgent(false, ["/root"], has)).toBe(false)
   })

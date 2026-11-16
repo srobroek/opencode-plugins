@@ -23,7 +23,7 @@ import {
   START_TOOL,
   setupInput,
 } from "./tools.ts"
-import { usesSpeckit, workflowLatch } from "./workflow.ts"
+import { speckitWorkspace, usesSpeckit, workflowLatch } from "./workflow.ts"
 
 export { beadsActive } from "./beads.ts"
 export { artifactPath, executeCommit, outsideArtifacts } from "./commit.ts"
@@ -96,6 +96,14 @@ export async function setupSpeckit(ctx: Context, overrides: Overrides = {}): Pro
       .get({ sessionID })
       .then((session) => (session.location.directory as string) ?? location)
       .catch(() => location)
+  const locations = locationDirectories(ctx)
+  const projectRoot = locations[1]
+  const hasWorkspace = (dir: string) => speckitWorkspace(dir, projectRoot) !== undefined
+  // The tools' default directory: the session's SpecKit workspace, else the session's directory.
+  const workspace = async (sessionID: string) => {
+    const dir = await directory(sessionID)
+    return speckitWorkspace(dir, projectRoot) ?? dir
+  }
 
   const assert = (context: ToolContext, action: string, resource: string, metadata: Record<string, unknown>) =>
     ctx.permission.assert({
@@ -120,14 +128,14 @@ export async function setupSpeckit(ctx: Context, overrides: Overrides = {}): Pro
   let specRegistration: Promise<{ dispose: () => Promise<void> }> | undefined
   // The location's plugin instance registers the agent, so a project without SpecKit never lists it.
   const registerSpecAgent = async () => {
-    if (specRegistration !== undefined || !wantsSpecAgent(options.specAgent, locationDirectories(ctx))) return
+    if (specRegistration !== undefined || !wantsSpecAgent(options.specAgent, locations)) return
     specRegistration = registerAgents(ctx.agent, agentFiles.filter(isSpecAgent))
     await specRegistration
   }
   const workflow = options.workflow
     ? {
         text: readFileSync(WORKFLOW_PATH, "utf8").trim(),
-        latch: workflowLatch(usesSpeckit, {
+        latch: workflowLatch(hasWorkspace, {
           get: async (sessionID) => {
             const value = await ctx.storage.get(`${WORKFLOW_KEY_PREFIX}${sessionID}`)
             return typeof value === "boolean" ? value : undefined
@@ -144,10 +152,10 @@ export async function setupSpeckit(ctx: Context, overrides: Overrides = {}): Pro
         description: SETUP_DESCRIPTION,
         input: setupInput(options.integration),
         execute: async (input, context) => {
-          const cwd = await directory(context.sessionID)
+          const cwd = await workspace(context.sessionID)
           await assert(context, SETUP_TOOL, cwd, { ...(input as Record<string, unknown>) })
           const result = await executeSetup(input, cwd, options.integration, context.signal)
-          if (cwd === location) {
+          if (locations.includes(cwd)) {
             active = await probe(location)
             await refreshSkills?.()
             await registerSpecAgent()
@@ -163,7 +171,7 @@ export async function setupSpeckit(ctx: Context, overrides: Overrides = {}): Pro
         description: START_DESCRIPTION,
         input: START_INPUT,
         execute: async (input, context) => {
-          const cwd = await directory(context.sessionID)
+          const cwd = await workspace(context.sessionID)
           const spec = (input as { spec?: unknown } | null)?.spec
           await assert(context, START_TOOL, typeof spec === "string" ? spec : "*", {
             ...(input as Record<string, unknown>),
@@ -176,7 +184,7 @@ export async function setupSpeckit(ctx: Context, overrides: Overrides = {}): Pro
         description: COMMIT_DESCRIPTION,
         input: COMMIT_INPUT,
         execute: async (input, context) => {
-          const cwd = await directory(context.sessionID)
+          const cwd = await workspace(context.sessionID)
           await assert(context, COMMIT_TOOL, cwd, { ...(input as Record<string, unknown>) })
           return executeCommit(input, cwd)
         },

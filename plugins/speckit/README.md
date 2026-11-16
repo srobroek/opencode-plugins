@@ -25,9 +25,13 @@ formulas and subagents.
 | `blockTasksToIssues` | `true` | Refuse the taskstoissues skills where beads is active. |
 | `workflow` | `true` | Add the workflow instructions to sessions in a SpecKit repository. |
 | `agents` | `true` | Register the `speckit-sync` and `speckit-verify` subagents. |
-| `specAgent` | `"auto"` | Register the primary `spec` agent. `"auto"`: only where the location or its project root holds `.specify/`; `true`: everywhere; `false`: never. |
+| `specAgent` | `"auto"` | Register the primary `spec` agent. `"auto"`: only where the location, or the project root it lies inside, holds `.specify/`; `true`: everywhere; `false`: never. |
 
 ## Tools
+
+The tools run in the session's SpecKit workspace: the session's directory when it holds
+`.specify/`, else the project root when the directory lies inside it and the root holds
+`.specify/`. Agent registration and the workflow instructions use the same workspace.
 
 `speckit_setup` bootstraps the session's repository. Every phase reports `done`,
 `skipped` (already present or an extension could not install) or `failed`.
@@ -110,8 +114,8 @@ Project skills load after plugins, so the skill transform registers again whenev
 ## Workflow instructions
 
 `instructions/speckit-workflow.md` holds the beads workflow contract and command
-routing. A session gets it in its system prompt when its directory holds `.specify/` at
-the session's first request, and that decision holds for the whole session (also across
+routing. A session gets it in its system prompt when it has a SpecKit workspace (see
+Tools) at the session's first request, and that decision holds for the whole session (also across
 a server restart), so the system prompt never changes mid-session and the provider's
 prompt cache holds. A session that started without it and runs `speckit_setup` gets the
 text in the tool result instead. The two speckit subagents do not get it.
