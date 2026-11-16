@@ -31,18 +31,21 @@ which ships the browsers.
 
 #### e2e
 
+- **@playwright/test**: wins on auto-waiting, traces, multi-origin and parallel runs across Chromium, Firefox and WebKit in one runner; costs a browser download and a Node runtime.
 - **Cypress**: wins when the team already has a suite and wants its time-travel debugger; costs a paid cloud for parallelism and weaker multi-tab and multi-origin support than Playwright.
 - **WebdriverIO**: wins when one stack must cover browsers and real mobile devices; costs a heavier setup and slower runs.
 - **Selenium**: wins when an existing grid or a language binding Playwright lacks is fixed; costs more flake handling by hand.
 
 #### visual
 
+- **@playwright/test**: wins on `toHaveScreenshot` beside the e2e specs with no extra service; costs baselines that differ per OS and browser, so record them in CI.
 - **Chromatic**: wins for Storybook-based component review with a hosted baseline store; costs a paid service and a Storybook dependency.
 - **Argos**: wins when you keep Playwright specs and want hosted review and baseline history; costs a hosted service.
 - **Percy**: wins for cross-browser rendering in hosted review; costs a paid service.
 
 #### a11y
 
+- **@axe-core/playwright**: wins on axe rules run inside existing Playwright specs, with `toMatchAriaSnapshot` for structure; costs automated coverage that finds only part of the WCAG issues.
 - **Lighthouse CI**: wins when you also enforce performance budgets; costs a shallow accessibility rule set compared with axe.
 - **pa11y**: wins for crawling a static site without writing specs; costs no interaction coverage.
 
@@ -64,6 +67,7 @@ which ships the browsers.
 
 #### e2e
 
+- **maestro**: wins on short YAML flows for iOS and Android with built-in waiting and no code build step; costs less control than a native framework and a flow language to learn.
 - **Detox**: wins for React Native apps that need fast, synchronized gray-box tests; costs a React Native-only scope.
 - **Patrol**: wins for Flutter apps that need native dialogs and permissions; costs a Flutter-only scope.
 - **XCUITest**: wins when the iOS team owns the suite and needs the audit APIs; costs one platform and Xcode only.
@@ -92,6 +96,7 @@ which ships the browsers.
 
 #### e2e
 
+- **hurl**: wins on plain-text HTTP requests with captures and asserts in one binary, easy to run in CI; costs no GUI and no scripting beyond its filters.
 - **Bruno**: wins when non-developers edit collections in a GUI that stays in Git; costs a second format beside the code.
 - **Newman**: wins when the team already keeps Postman collections; costs the Postman format and a Node runtime.
 
@@ -108,6 +113,7 @@ which ships the browsers.
 
 #### e2e
 
+- **bats-core**: wins for any CLI, driving the real binary with exit-code and output asserts and JUnit output; costs Bash-only tests and subprocess handling by hand.
 - **testscript**: wins for Go CLIs, with txtar scripts and coverage of the binary; costs a Go-only workflow.
 - **trycmd**: wins for Rust CLIs, keeping command output in checked-in files; costs a Rust-only workflow.
 - **pytest**: wins for Python CLIs that already use pytest fixtures; costs hand-written subprocess handling.

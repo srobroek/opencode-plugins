@@ -32,6 +32,7 @@ Checked 2026-11-16.
 
 ### test-runner
 
+- **vitest**: wins on projects, fixtures, shuffled and seeded runs, JUnit output and browser mode in one runner; costs a Node-side dependency tree and a watch-mode default that hangs in CI unless run as `vitest run`.
 - **bun test**: wins when the product runs on Bun and one runtime for build, run and test matters; costs fewer fixture, project and selection APIs than Vitest. Module mocks leak across files unless isolated, and coverage has no branches.
 - **node:test**: wins when a Node library wants no test dependency and `node:assert/strict`; costs no built-in coverage thresholds, projects or watch-mode ergonomics comparable to Vitest.
 
@@ -43,22 +44,26 @@ Checked 2026-11-16.
 
 ### component
 
+- **@vitest/browser-playwright**: wins on real browser layout, events and CSS in the same Vitest run as unit tests; costs a Playwright browser install and slower runs than jsdom.
 - **jsdom**: wins on speed and no browser install when layout and CSS do not matter; costs no layout, and some browser APIs are missing.
 - **happy-dom**: wins on the fastest startup for the same cases; costs more behavior gaps against real browsers than jsdom.
 - **@storybook/addon-vitest**: wins when stories already exist and double as tests; costs Storybook in the toolchain.
 
 ### mutation
 
+- **@stryker-mutator/core**: wins on the most mature JS mutation engine with incremental mode, a Vitest runner and JSON reports; costs slow runs on large suites and `maxWorkers` 1 under the Vitest runner.
 - **@hughescr/stryker-bun-runner**: wins when Bun is the runner and per-test coverage keeps mutant runs fast; costs a single maintainer, serial test runs, and a `mock.module()` blind spot.
 - **stryker command runner**: wins when nothing beyond Stryker itself should be trusted; costs `coverageAnalysis: "off"`, so every mutant runs the whole suite.
 
 ### coverage
 
+- **@vitest/coverage-v8**: wins on fast native V8 coverage with Istanbul-identical reports since Vitest 3.2 and no instrumentation step; costs Bun support that depends on the Bun version.
 - **bun test --coverage**: wins when the suite already runs on `bun test` and lines and functions are enough; costs no branch data. `bun --bun vitest run --coverage` with `v8` also works on Bun 1.4 or later by Bun's account, while the Vitest docs still say `v8` does not work on Bun.
 - **@vitest/coverage-istanbul**: wins when branch data must come from a non-V8 engine or an older Bun runs the suite; costs per-file instrumentation and slower runs than `v8`, which since Vitest 3.2 gives Istanbul-identical reports.
 
 ### benchmark
 
+- **tinybench**: wins on a small runtime-agnostic API with warm-up and statistics that runs under Node and Bun; costs no baseline storage or CI trend tracking.
 - **vitest bench**: wins when the suite already uses Vitest and benchmarks sit beside the tests; costs the same noise on shared runners.
 - **mitata**: wins when you want its report format and fine-grained timing; costs a release line stale since 2025-02-04.
 - **CodSpeed**: wins when CI needs managed regression trends; costs a hosted service.

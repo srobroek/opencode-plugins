@@ -26,6 +26,7 @@ Checked 2026-11-16.
 
 ### lint
 
+- **@biomejs/biome**: wins on one fast binary that lints, formats and sorts imports with a single config; costs fewer rules than ESLint, mostly nursery type-aware ones, and no plugin ecosystem.
 - **eslint with typescript-eslint**: wins when a rule has no Biome equivalent, such as the wide type-aware set (Biome's `types` domain rules are mostly nursery), Angular templates, full Vue or a plugin without a Biome port; costs a slower run, a second config and a TypeScript 6 API requirement under TypeScript 7.
 - **oxlint**: wins as a fast optional second linter with type-aware rules through `oxlint-tsgolint`; costs overlapping findings with Biome, so enable it only for rules Biome lacks.
 
