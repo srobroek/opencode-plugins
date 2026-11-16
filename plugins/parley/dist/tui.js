@@ -1682,6 +1682,19 @@ function initialDraft(question) {
     cursor: pointed === undefined ? 0 : ids.indexOf(pointed)
   };
 }
+function draftFromAnswer(question, answer) {
+  const base = initialDraft(question);
+  const value = answer.value === undefined ? base.value : structuredClone(answer.value);
+  const ids = rows(question);
+  const selected = value ?? {};
+  const pointed = [selected.selected, selected.choice, selected.decision, selected.emoji, selected.hex].find((item) => typeof item === "string" && ids.includes(item));
+  return {
+    status: answer.status,
+    ...value === undefined ? {} : { value },
+    note: answer.note ?? "",
+    cursor: pointed === undefined ? base.cursor : ids.indexOf(pointed)
+  };
+}
 function toSubmission(question, draft) {
   const note = draft.note.trim();
   const withNote = (answer) => note === "" ? answer : { ...answer, note };
@@ -4384,6 +4397,7 @@ var ParleyRpc = Rpc.define({
         properties: {
           sessionID: { type: "string" },
           number: { type: "number" },
+          roundID: { type: "string" },
           deliveryID: { type: "string" },
           questions: { type: "array", items: { type: "object" } },
           answers: { type: "array", items: { type: "object" } }
@@ -4421,6 +4435,7 @@ var ParleyRpc = Rpc.define({
 
 // plugins/parley/src/submit.ts
 var isUnknownRound = (errors) => errors.some((error) => /unknown round/i.test(error));
+var isUndeliveredRound = (errors) => errors.some((error) => /undelivered round/i.test(error));
 var messageOf = (error) => error instanceof Error ? error.message : String(error);
 async function submitRound(flow) {
   const outcome = await flow.submit().catch((error) => ({ ok: false, errors: [messageOf(error)] }));
@@ -4433,10 +4448,14 @@ async function submitRound(flow) {
     return [];
   }
   const errors = [...outcome.errors ?? ["Submit failed"]];
-  if (!isUnknownRound(errors))
+  if (isUnknownRound(errors))
+    flow.notify("This round is gone from the server (the plugin probably reloaded).", "warning");
+  else if (isUndeliveredRound(errors))
+    flow.notify(errors.join(" "), "warning");
+  else
     return errors;
-  flow.notify("This round is gone from the server (the plugin probably reloaded).", "warning");
   if (!await flow.choose()) {
+    await flow.dismiss();
     await flow.settle();
     return [];
   }
@@ -4587,6 +4606,16 @@ var tui_default = Plugin.define({
       lost = merged.lost;
       for (const id of merged.forget)
         store.forget(id);
+      for (const entry of merged.entries) {
+        if (entry.view.undelivered === undefined)
+          continue;
+        for (const answer of entry.view.answers) {
+          const question = entry.view.questions.find((candidate) => candidate.id === answer.id);
+          const key = `${entry.view.roundID}\x00${answer.id}`;
+          if (question && store.drafts[key] === undefined)
+            store.setDraft(key, draftFromAnswer(question, answer));
+        }
+      }
       setRounds((all) => [...all.filter((entry) => locationKey(entry.location) !== key), ...merged.entries]);
     };
     const forSession = (sessionID) => rounds().find((entry) => entry.view.sessionID === sessionID);
@@ -4688,7 +4717,15 @@ var tui_default = Plugin.define({
       await refresh(location);
       if (disposed)
         return;
-      if (data.action === "opened")
+      if (data.action === "opened" && data.status === "undelivered") {
+        context.ui.toast.show({
+          title: "Parley",
+          message: data.reason || "Your answers did not reach the agent",
+          variant: "warning",
+          sessionID: data.sessionID
+        });
+        present(data.sessionID, true);
+      } else if (data.action === "opened")
         present(data.sessionID, true);
       else if (data.action === "updated") {
         if (inline().has(data.sessionID) && !single(data.sessionID)) {
@@ -4779,6 +4816,7 @@ var tui_default = Plugin.define({
         }),
         deliver: () => rpc.deliver({
           sessionID: view.sessionID,
+          roundID: view.roundID,
           number: view.number,
           questions: [...view.questions],
           answers,
@@ -4787,13 +4825,21 @@ var tui_default = Plugin.define({
           location: entry.location
         }),
         choose: async () => await context.ui.dialog.confirm({
-          title: "This round is gone",
-          message: "The server lost this round. You can still send your answers to the agent as a message.",
+          title: view.undelivered === undefined ? "This round is gone" : "Your answers did not reach the agent",
+          message: view.undelivered === undefined ? "The server lost this round. You can still send your answers to the agent as a message." : "Sending them as a message failed. You can try again, or dismiss them (the agent can still collect them with parley_wait).",
           label: {
             confirm: "Send these answers as a message",
             cancel: "Dismiss"
           }
         }) === true,
+        dismiss: async () => {
+          await rpc.cancel({
+            roundID: view.roundID,
+            reason: "dismissed"
+          }, {
+            location: entry.location
+          }).catch(() => {});
+        },
         notify: (message, variant) => context.ui.toast.show({
           message,
           ...variant ? {

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { isUnknownRound, type Outcome, type SubmitFlow, submitRound } from "./submit.ts"
+import { isUndeliveredRound, isUnknownRound, type Outcome, type SubmitFlow, submitRound } from "./submit.ts"
 
 function flow(overrides: Partial<SubmitFlow> = {}) {
   const log: string[] = []
@@ -7,6 +7,7 @@ function flow(overrides: Partial<SubmitFlow> = {}) {
     submit: async () => ({ ok: true }),
     deliver: async () => ({ ok: true }),
     choose: async () => true,
+    dismiss: async () => void log.push("dismiss"),
     notify: (message) => void log.push(`notify:${message}`),
     settle: async () => void log.push("settle"),
   }
@@ -59,11 +60,18 @@ describe("submitRound", () => {
     ])
   })
 
-  test("unknown round: dismiss closes the card without sending", async () => {
+  test("unknown round: dismiss tells the server and closes the card without sending", async () => {
     const { flow: f, log } = flow({ submit: async () => unknown, choose: async () => false })
     expect(await submitRound(f)).toEqual([])
     expect(log).not.toContain("deliver")
-    expect(log.at(-1)).toBe("settle")
+    expect(log.slice(-2)).toEqual(["dismiss", "settle"])
+  })
+
+  test("undelivered round: shows the server's error once, then offers the same choice", async () => {
+    const error = "undelivered round rnd_1: Could not send the answers to the session: host down"
+    const { flow: f, log } = flow({ submit: async () => ({ ok: false, errors: [error] }) })
+    expect(await submitRound(f)).toEqual([])
+    expect(log).toEqual(["submit", `notify:${error}`, "choose", "deliver", "notify:Answers sent as a message", "settle"])
   })
 
   test("unknown round thrown by the transport is treated the same", async () => {
@@ -85,7 +93,9 @@ describe("submitRound", () => {
   })
 })
 
-test("isUnknownRound matches only the unknown round error", () => {
+test("isUnknownRound and isUndeliveredRound match only their own errors", () => {
   expect(isUnknownRound(["unknown round rnd_1"])).toBe(true)
   expect(isUnknownRound(["round rnd_1 is submitted"])).toBe(false)
+  expect(isUndeliveredRound(["undelivered round rnd_1: down"])).toBe(true)
+  expect(isUndeliveredRound(["unknown round rnd_1"])).toBe(false)
 })

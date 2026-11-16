@@ -9,7 +9,7 @@ import { ParleyRpc, type RoundEvent } from "./rpc.ts"
 import { askInput, endInput, endOutput, resultOutput, waitInput } from "./schema.ts"
 import { type AskInput, type CallContext, InputError, Parley, type RoundStore, settingsFrom, type WaitInput } from "./service.ts"
 import { wrapQuestion } from "./takeover.ts"
-import { removeUploads, saveUpload } from "./uploads.ts"
+import { markClosed, saveUpload, sweepUploads } from "./uploads.ts"
 
 export { ParleyRpc } from "./rpc.ts"
 
@@ -67,11 +67,13 @@ export default Plugin.define({
       settings: settingsFrom(ctx.options, process.env),
       store: await roundStore(ctx),
       save: (file, roundID) => saveUpload(file, roundID),
-      dropUploads: (roundID) => removeUploads(roundID),
+      closeUploads: (roundID, at) => markClosed(roundID, at),
+      sweepUploads: (now) => sweepUploads(now),
       warn: (message) => console.warn(message),
       // A synthetic message, queued behind any running turn and waking an idle session: the user has just
       // answered, and the agent's own call died with the reload, so nothing else would tell it. The id
-      // (host format `msg_...`) is fixed per message, so a retry carries the same one.
+      // (host format `msg_...`) is fixed per message. The host admits an inbox id once and ignores a
+      // retried payload (specs/v2/session.md, "Prompt Admission Precedes Execution"), so retries are safe.
       deliver: async ({ id, sessionID, text, description }) => {
         await ctx.session.synthetic({ id, sessionID, text, description, delivery: "queue", resume: true })
       },
@@ -135,6 +137,7 @@ export default Plugin.define({
             questions: Question[]
             answers: SubmittedAnswer[]
             deliveryID?: string
+            roundID?: string
           },
         ),
     })
@@ -158,7 +161,7 @@ export default Plugin.define({
         execute: async (input, context) => {
           try {
             const { result, questions } = await service.ask(input as AskInput, call(context))
-            return render(result, questions, (file) => saveUpload(file, result.round_id), (input as AskInput).format === "native" ? "native" : "parley")
+            return render(result, questions, (file) => service.saveUpload(file, result.round_id), (input as AskInput).format === "native" ? "native" : "parley")
           } catch (error) {
             if (error instanceof InputError) throw new Error(error.message)
             throw error
@@ -174,7 +177,7 @@ export default Plugin.define({
         options,
         execute: async (input, context) => {
           const { result, questions } = await service.wait(input as WaitInput, call(context))
-          return render(result, questions, (file) => saveUpload(file, result.round_id))
+          return render(result, questions, (file) => service.saveUpload(file, result.round_id))
         },
       })
       editor.add({

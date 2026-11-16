@@ -81,6 +81,23 @@ export function initialDraft(question: Question): Draft {
   }
 }
 
+/** A card edit state that shows an answer the user already gave, so a card that comes back shows their answers. */
+export function draftFromAnswer(question: Question, answer: { status: AnswerStatus; value?: unknown; note?: string }): Draft {
+  const base = initialDraft(question)
+  const value = answer.value === undefined ? base.value : structuredClone(answer.value)
+  const ids = rows(question)
+  const selected = (value as { selected?: unknown; choice?: unknown; decision?: unknown; emoji?: unknown; hex?: unknown } | undefined) ?? {}
+  const pointed = [selected.selected, selected.choice, selected.decision, selected.emoji, selected.hex].find(
+    (item) => typeof item === "string" && ids.includes(item),
+  ) as string | undefined
+  return {
+    status: answer.status,
+    ...(value === undefined ? {} : { value }),
+    note: answer.note ?? "",
+    cursor: pointed === undefined ? base.cursor : ids.indexOf(pointed),
+  }
+}
+
 /** The submission for one card, or undefined to leave the question pending. */
 export function toSubmission(question: Question, draft: Draft): SubmittedAnswer | undefined {
   const note = draft.note.trim()

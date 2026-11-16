@@ -11,7 +11,7 @@ import { instanceChanged, reconcileRounds } from "./reconcile.ts"
 import type { RoundView } from "./rounds.ts"
 import { ParleyRpc, type RoundEvent } from "./rpc.ts"
 import { type Outcome, submitRound } from "./submit.ts"
-import { inlineEligible } from "./tui-state.ts"
+import { draftFromAnswer, inlineEligible } from "./tui-state.ts"
 
 const HEARTBEAT_MS = 10_000
 /** When to look for the built-in form of a call handed to the built-in tool (ms since the last look). */
@@ -123,6 +123,15 @@ export default Plugin.define({
       })
       lost = merged.lost
       for (const id of merged.forget) store.forget(id)
+      // A round whose message to the agent failed comes back closed: its card shows the answers the user gave.
+      for (const entry of merged.entries) {
+        if (entry.view.undelivered === undefined) continue
+        for (const answer of entry.view.answers) {
+          const question = entry.view.questions.find((candidate) => candidate.id === answer.id)
+          const key = `${entry.view.roundID}\u0000${answer.id}`
+          if (question && store.drafts[key] === undefined) store.setDraft(key, draftFromAnswer(question, answer))
+        }
+      }
       setRounds((all) => [...all.filter((entry) => locationKey(entry.location) !== key), ...merged.entries])
     }
 
@@ -211,7 +220,10 @@ export default Plugin.define({
       }
       await refresh(location)
       if (disposed) return
-      if (data.action === "opened") present(data.sessionID, true)
+      if (data.action === "opened" && data.status === "undelivered") {
+        context.ui.toast.show({ title: "Parley", message: data.reason || "Your answers did not reach the agent", variant: "warning", sessionID: data.sessionID })
+        present(data.sessionID, true)
+      } else if (data.action === "opened") present(data.sessionID, true)
       else if (data.action === "updated") {
         if (inline().has(data.sessionID) && !single(data.sessionID)) {
           openPanel(data.sessionID)
@@ -277,6 +289,7 @@ export default Plugin.define({
           rpc.deliver(
             {
               sessionID: view.sessionID,
+              roundID: view.roundID,
               number: view.number,
               questions: [...view.questions],
               answers,
@@ -286,10 +299,16 @@ export default Plugin.define({
           ) as Promise<Outcome>,
         choose: async () =>
           (await context.ui.dialog.confirm({
-            title: "This round is gone",
-            message: "The server lost this round. You can still send your answers to the agent as a message.",
+            title: view.undelivered === undefined ? "This round is gone" : "Your answers did not reach the agent",
+            message:
+              view.undelivered === undefined
+                ? "The server lost this round. You can still send your answers to the agent as a message."
+                : "Sending them as a message failed. You can try again, or dismiss them (the agent can still collect them with parley_wait).",
             label: { confirm: "Send these answers as a message", cancel: "Dismiss" },
           })) === true,
+        dismiss: async () => {
+          await rpc.cancel({ roundID: view.roundID, reason: "dismissed" }, { location: entry.location }).catch(() => {})
+        },
         notify: (message, variant) => context.ui.toast.show({ message, ...(variant ? { variant } : {}), duration: 2000 }),
         settle: async () => {
           lost = new Set([...lost].filter((id) => id !== view.roundID))

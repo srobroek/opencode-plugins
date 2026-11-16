@@ -1,28 +1,47 @@
-/** Messages parley has to get into a session (answers of a restored round, or a TUI's fallback), kept until the host admits them. */
+/** Messages parley sends to a session for the TUI's fallback (a round the server never held), kept until the host admits them. */
 export const OUTBOX_KEY_PREFIX = "outbox:"
-/** A pending delivery is retried on this many restores; after that its answers wait for parley_wait. */
+/** A delivery that failed this many times stops retrying on its own and goes back to the user. */
 export const MAX_ATTEMPTS = 3
-/** Admitted deliveries are remembered this long, so a retried request is recognised. */
+/** Admitted or pending fallback deliveries are remembered this long, so a retried request is recognised. */
 export const SENT_TTL_MS = 60 * 60_000
 
 export const outboxKey = (key: string) => `${OUTBOX_KEY_PREFIX}${key}`
 
-export interface OutboxEntry {
-  /** What identifies the delivery: a round (`round-<id>`) or the TUI's delivery id. */
-  readonly key: string
-  /** The host message id, fixed when the entry is written so every retry carries the same one. */
+export type DeliveryStatus = "pending" | "sent" | "failed" | "dismissed"
+
+/** Fields every delivery has. `generation` changes whenever its content does, so a stale send result is ignored. */
+interface DeliveryBase {
+  /** The host message id, fixed when the delivery is planned. The host admits an id once, so every retry reuses it. */
   readonly messageID: string
+  generation: number
+  readonly description: string
+  status: DeliveryStatus
+  attempts: number
+  error?: string
+  readonly created: number
+  updated: number
+}
+
+/**
+ * The message carrying a restored round's answers. It is stored in the round record, so it is saved in
+ * the same write as the closure that plans it. The text is built from the round when it is sent.
+ */
+export interface RoundDelivery extends DeliveryBase {
+  /** The answers the message carries. An answer the agent took through parley_wait leaves the list. */
+  answerIDs: string[]
+  /** Per answer: what the message says about its uploads (saved paths, inlined text). */
+  readonly notes: Record<string, string[]>
+  /** Answers with uploads that could not be saved: left for parley_wait. */
+  held: string[]
+}
+
+/** A fallback message the TUI asked for: its text is fixed. */
+export interface OutboxEntry extends DeliveryBase {
+  /** The TUI's delivery id. */
+  readonly key: string
   readonly directory: string
   readonly sessionID: string
   readonly text: string
-  readonly description: string
-  /** The round whose answers the message carries, and which of them. They are marked delivered once the host admits it. */
-  readonly roundID?: string
-  readonly answerIDs: readonly string[]
-  status: "pending" | "sent"
-  attempts: number
-  readonly created: number
-  updated: number
 }
 
 const CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
@@ -39,28 +58,42 @@ export function messageID(now: number): string {
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value)
+const strings = (input: unknown) =>
+  Array.isArray(input) ? input.filter((item): item is string => typeof item === "string") : []
+const STATUSES = new Set<unknown>(["pending", "sent", "failed", "dismissed"])
 
-/** Reads a stored outbox entry; anything that is not a usable entry is undefined. Never throws. */
-export function fromOutbox(value: unknown): OutboxEntry | undefined {
-  if (!isRecord(value)) return undefined
-  const { key, messageID: id, directory, sessionID, text, description, status, attempts, created, updated } = value
-  if (typeof key !== "string" || typeof id !== "string" || !id.startsWith("msg_")) return undefined
-  if (typeof directory !== "string" || typeof sessionID !== "string" || typeof text !== "string") return undefined
-  if (typeof description !== "string" || (status !== "pending" && status !== "sent")) return undefined
+function base(value: Record<string, unknown>): DeliveryBase | undefined {
+  const { messageID: id, generation, description, status, attempts, created, updated } = value
+  if (typeof id !== "string" || !id.startsWith("msg_") || typeof description !== "string" || !STATUSES.has(status)) return undefined
   if (typeof attempts !== "number" || typeof created !== "number" || typeof updated !== "number") return undefined
-  const answerIDs = Array.isArray(value.answerIDs) ? value.answerIDs.filter((item): item is string => typeof item === "string") : []
   return {
-    key,
     messageID: id,
-    directory,
-    sessionID,
-    text,
+    generation: typeof generation === "number" ? generation : 0,
     description,
-    ...(typeof value.roundID === "string" ? { roundID: value.roundID } : {}),
-    answerIDs,
-    status,
+    status: status as DeliveryStatus,
     attempts,
+    ...(typeof value.error === "string" ? { error: value.error } : {}),
     created,
     updated,
   }
+}
+
+/** Reads a stored round delivery; anything unusable is undefined. Never throws. */
+export function fromRoundDelivery(value: unknown): RoundDelivery | undefined {
+  if (!isRecord(value)) return undefined
+  const head = base(value)
+  if (!head) return undefined
+  const notes: Record<string, string[]> = {}
+  if (isRecord(value.notes)) for (const [id, lines] of Object.entries(value.notes)) notes[id] = strings(lines)
+  return { ...head, answerIDs: strings(value.answerIDs), notes, held: strings(value.held) }
+}
+
+/** Reads a stored fallback delivery; anything unusable is undefined. Never throws. */
+export function fromOutbox(value: unknown): OutboxEntry | undefined {
+  if (!isRecord(value)) return undefined
+  const head = base(value)
+  const { key, directory, sessionID, text } = value
+  if (!head || typeof key !== "string" || typeof directory !== "string") return undefined
+  if (typeof sessionID !== "string" || typeof text !== "string") return undefined
+  return { ...head, key, directory, sessionID, text }
 }

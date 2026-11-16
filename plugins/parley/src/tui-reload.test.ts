@@ -42,6 +42,7 @@ async function attachTui(current: () => Parley) {
   }) as never
   let event: (input: { data: RoundEvent; location: typeof location }) => Promise<void> = async () => {}
   const pendingReplies: Array<{ instance: string; rounds: number }> = []
+  const toasts: Array<{ message: string; variant?: string }> = []
   const slots: Array<{ append: string; render: (props?: never) => unknown }> = []
   const layers: Array<() => { commands: Array<{ id: string; enabled?: () => boolean }> }> = []
   const colour = RGBA.fromHex("#ffffff")
@@ -75,7 +76,7 @@ async function attachTui(current: () => Parley) {
       tabs: { enabled: () => false },
       router: { current: () => ({ type: "session", sessionID: "s" }), navigate: () => {} },
       panel: { current: () => undefined, open: () => true, close: () => {} },
-      toast: { show: () => {} },
+      toast: { show: (input: { message: string; variant?: string }) => void toasts.push(input) },
       dialog: { confirm: async () => false },
       slot: (config: (typeof slots)[number]) => (slots.push(config), () => {}),
     },
@@ -94,6 +95,7 @@ async function attachTui(current: () => Parley) {
     heartbeat,
     shown,
     pendingReplies,
+    toasts,
     event: (data: RoundEvent) => event({ data, location }),
     stop: async () => {
       cleanup?.()
@@ -166,6 +168,42 @@ test("a round closed elsewhere without a reload still leaves the screen", async 
     await view.event({ sessionID: "s", roundID, action: "closed", status: "cancelled" })
     await tick(20)
     expect(view.shown()).toBe(false)
+  } finally {
+    await view.stop()
+  }
+})
+
+test("a round whose message to the agent kept failing comes back on screen with the error", async () => {
+  const data = new Map<string, unknown>()
+  const before = server(memoryStore(data))
+  before.attach({ clientID: "x" })
+  void before.ask({ questions: question, timeout_s: 0 }, { sessionID: "s" })
+  await tick()
+  await before.suspend()
+  let view: Awaited<ReturnType<typeof attachTui>> | undefined
+  const after = new Parley({
+    settings: settingsFrom({}, {}),
+    store: memoryStore(data),
+    retryDelaysMs: [60, 60],
+    emit: async (event) => {
+      await view?.event(event)
+    },
+    deliver: async () => {
+      throw new Error("host down")
+    },
+  })
+  await after.restore()
+  view = await attachTui(() => after)
+  try {
+    const roundID = after.pending({}).rounds[0]?.roundID ?? ""
+    const yes = [{ id: "a", status: "accepted" as const }, { id: "b", status: "accepted" as const }]
+    await after.submit({ roundID, answers: yes })
+    await view.event({ sessionID: "s", roundID, action: "closed", status: "submitted" })
+    await tick(20)
+    expect(view.shown()).toBe(false)
+    for (let i = 0; i < 50 && !view.shown(); i++) await tick(10)
+    expect(view.shown()).toBe(true)
+    expect(view.toasts.some((toast) => toast.variant === "warning" && toast.message.includes("host down"))).toBe(true)
   } finally {
     await view.stop()
   }

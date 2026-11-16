@@ -84,10 +84,14 @@ markdown round in chat.
 
 Uploaded images reach the model as image content. Text files are inlined in the
 result. Other files are written to a private temporary directory on the server
-(0700 directory, 0600 files, under `parley/<round id>/`) and the path is
-reported. A round's files are removed when parley prunes the closed round, at
-least 30 minutes after it closed, and never earlier: the agent reads them on a
-later turn.
+(0700 directories, 0600 files) and the path is reported. Each upload gets its
+own directory under `parley/<round id>/`, so two files with the same name never
+overwrite each other, and the file keeps its original name. When the round
+closes, parley writes a `.closed` marker with the time into the round's
+directory. The files stay for 24 hours after that, even after the round record
+is pruned (30 minutes after it closes), because the agent may read them on a
+later turn. A round directory without a marker is removed after 48 hours with
+no change.
 
 ## Phase three kinds
 
@@ -304,29 +308,37 @@ and open ones after 24 hours.
   are skipped with a warning.
 - On dispose, queued saves finish (bounded at 2 s) before the next instance
   restores.
-- Delivery goes through an outbox kept in storage. The message gets a host
-  message id (`msg_...`, fixed per message) and is written to the outbox before
-  it is sent. The round's answers are marked delivered only after the host
-  admits it. A restore sends again, with the same id, any message the host never
-  admitted (up to 3 attempts; then the answers wait for `parley_wait`). The
-  host's behaviour for a repeated id is not documented, so delivery is
-  at-least-once: every message ends with a `Delivery key: msg_...` line, and a
-  repeat of a key is the same message. `parley_wait` taking the answers
-  cancels the pending message.
+- Each message gets a host message id (`msg_...`) when it is planned, and every
+  retry reuses that id. The host admits a synthetic inbox id once and ignores a
+  retried payload (`specs/v2/session.md` in anomalyco/opencode), so a message
+  reaches the agent once.
+- A restored round's message is planned as the round closes and saved in the
+  same write as the closure. A reload at any point after that sends it on
+  restore. The answers are marked delivered only after the host admits the
+  message.
+- Collecting answers and sending the message take turns per round. If the model
+  calls `parley_wait` while the message is being sent, the wait gets the answers
+  the message did not carry. Answers the wait returns (all of them, or the ids
+  it asked for) leave the message, which then carries the rest.
+- A failed send is retried after 2 s and 8 s. After 3 failed attempts the card
+  comes back with the user's answers and the error, and the TUI offers to send
+  the answers as a message or dismiss them. A dismissed message is not sent,
+  and its answers stay for `parley_wait`.
 - The TUI notices the new server instance and fetches the round again; the
   draft is kept. A round the server no longer lists after a reload stays on the
   screen with its draft until you act. If a submit fails with `unknown round`,
   the TUI shows the error once and offers to send the answers as a message or
-  dismiss the card. Retrying the send reuses one delivery id, so the message
-  arrives once.
+  dismiss the card. Retrying the send reuses one delivery id and one message id,
+  so the message arrives once.
 
 ## RPC
 
 `parley` methods: `attach { clientID, sessionIDs?, detach? }` (replies with the
 server `instance` id), `pending { sessionID? }`,
 `submit { roundID, answers, final? }`,
-`deliver { sessionID, number?, questions, answers, deliveryID? }` (send answers to the
-session as a message), `cancel { roundID, reason? }`. Event `round { sessionID, roundID, action }`
+`deliver { sessionID, roundID?, number?, questions, answers, deliveryID? }` (send
+answers to the session as a message; for a round whose message failed, send that
+message again), `cancel { roundID, reason? }`. Event `round { sessionID, roundID, action }`
 with `action` `opened`, `updated`, `closed` or `ended`.
 
 ## Manual test

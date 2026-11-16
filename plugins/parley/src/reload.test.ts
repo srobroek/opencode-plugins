@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test"
 import { summarise } from "./format.ts"
-import { MAX_ATTEMPTS, type OutboxEntry, outboxKey } from "./outbox.ts"
+import { MAX_ATTEMPTS, outboxKey } from "./outbox.ts"
 import { OPEN_TTL_MS, roundKey, type StoredRound, toStored } from "./persist.ts"
 import type { Question } from "./questions.ts"
 import { RELOADED_REASON, type Round } from "./rounds.ts"
+import type { RoundEvent } from "./rpc.ts"
 import { CLOSED_TTL_MS, Parley, type RoundStore, type SessionMessage, type Settings } from "./service.ts"
 import { submitRound } from "./submit.ts"
 
@@ -46,26 +47,61 @@ function storeOver(data: Data, directory = "/repo", owns: (sessionID: string) =>
 interface Extras {
   now?: () => number
   save?: (file: { name: string }, roundID?: string) => string | undefined
-  dropUploads?: (roundID: string) => void
+  closeUploads?: (roundID: string, at: number) => void
+  sweepUploads?: (now: number) => void
   warn?: (message: string) => void
   deliver?: (message: SessionMessage) => Promise<void>
+  emit?: (event: RoundEvent) => Promise<void>
+  retryDelaysMs?: readonly number[]
 }
 
+/**
+ * A parley instance over `store`. Its fake host admits a message id once, as the real host does
+ * (specs/v2/session.md: the first admission wins): `messages` holds what the agent sees, `posts` every call.
+ */
 function instance(store: RoundStore, extras: Extras = {}) {
   const messages: SessionMessage[] = []
+  const posts: SessionMessage[] = []
+  const events: RoundEvent[] = []
   const service = new Parley({
     settings,
-    emit: async () => {},
+    emit: async (event) => {
+      events.push(event)
+      await extras.emit?.(event)
+    },
     store,
     now: extras.now ?? (() => 1_000),
-    deliver: extras.deliver ?? (async (message) => void messages.push(message)),
+    retryDelaysMs: extras.retryDelaysMs ?? [],
+    deliver: async (message) => {
+      posts.push(message)
+      if (extras.deliver) await extras.deliver(message)
+      if (!messages.some((admitted) => admitted.id === message.id)) messages.push(message)
+    },
     ...(extras.save ? { save: extras.save as never } : {}),
     ...(extras.warn ? { warn: extras.warn } : {}),
-    ...(extras.dropUploads ? { dropUploads: extras.dropUploads } : {}),
+    ...(extras.closeUploads ? { closeUploads: extras.closeUploads } : {}),
+    ...(extras.sweepUploads ? { sweepUploads: extras.sweepUploads } : {}),
   })
   service.attach({ clientID: "tui" })
-  return { service, messages }
+  return { service, messages, posts, events }
 }
+
+const down = async (_message?: SessionMessage): Promise<void> => {
+  throw new Error("host down")
+}
+
+/** A promise with its resolve and reject in hand. */
+function deferred() {
+  let resolve = () => {}
+  let reject = (_error: Error) => {}
+  const promise = new Promise<void>((done, fail) => {
+    resolve = done
+    reject = fail
+  })
+  return { promise, resolve, reject }
+}
+
+const stored = (data: Data, roundID: string) => data.get(roundKey(roundID)) as StoredRound
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 5))
 
@@ -130,43 +166,61 @@ describe("reload", () => {
     expect(second.service.rounds.get(roundID)?.status).toBe("submitted")
   })
 
-  test("the message is in the outbox, under its id, before it is sent; the answers are marked delivered only after the host admits it", async () => {
+  test("the message is planned in the round record, under a host id, before it is sent; answers are marked delivered only once admitted", async () => {
     const { data, store, first, roundID } = await openRound()
-    let atSend: { round: StoredRound; entry: OutboxEntry } | undefined
+    let atSend: StoredRound | undefined
     const second = instance(store, {
       deliver: async () => {
-        atSend = { round: data.get(roundKey(roundID)) as StoredRound, entry: data.get(outboxKey(`round-${roundID}`)) as OutboxEntry }
+        atSend = stored(data, roundID)
       },
     })
     await first.service.suspend()
     await second.service.restore()
     await second.service.submit({ roundID, answers: both })
-    expect(atSend?.entry).toMatchObject({ status: "pending", roundID, sessionID: "s" })
-    expect(atSend?.entry.messageID).toMatch(/^msg_[0-9a-f]{12}[0-9A-Za-z]{14}$/)
-    expect(atSend?.round.delivered).toEqual([])
-    const after = data.get(roundKey(roundID)) as StoredRound
-    expect(after.delivered.sort()).toEqual(["ssh.host", "ssh.port"])
-    expect(data.get(outboxKey(`round-${roundID}`))).toMatchObject({ status: "sent" })
+    expect(atSend?.status).toBe("submitted")
+    expect(atSend?.delivery).toMatchObject({ status: "pending", answerIDs: ["ssh.host", "ssh.port"] })
+    expect(atSend?.delivery?.messageID).toMatch(/^msg_[0-9a-f]{12}[0-9A-Za-z]{14}$/)
+    expect(atSend?.delivered).toEqual([])
+    expect(stored(data, roundID).delivered.sort()).toEqual(["ssh.host", "ssh.port"])
+    expect(stored(data, roundID).delivery?.status).toBe("sent")
+    expect(second.messages[0]?.id).toBe(atSend?.delivery?.messageID)
+  })
+
+  test("a reload while the submit waits on its event still delivers: the closure and its message are saved in one write", async () => {
+    const { data, store, first, roundID } = await openRound()
+    const hang = deferred()
+    const stuck = instance(store, { emit: (event) => (event.action === "closed" ? hang.promise : Promise.resolve()) })
+    await first.service.suspend()
+    await stuck.service.restore()
+    const submitting = stuck.service.submit({ roundID, answers: both })
+    await tick()
+    expect(stuck.posts).toEqual([])
+    expect(stored(data, roundID)).toMatchObject({ status: "submitted", delivery: { status: "pending" } })
+    await stuck.service.suspend()
+    const next = instance(store)
+    await next.service.restore()
+    expect(next.messages).toHaveLength(1)
+    expect(next.messages[0]?.text).toContain("Parley round 1: submitted — 2 answers, 0 pending")
+    // The old instance's submit wakes after the reload and sends nothing.
+    hang.resolve()
+    await submitting
+    expect(stuck.posts).toEqual([])
   })
 
   test("a reload between the user's submit and the host admitting the message sends it again under the same id, and hides nothing", async () => {
     const { data, store, first, roundID } = await openRound()
-    const down = instance(store, { deliver: async () => { throw new Error("host down") } })
+    const failing = instance(store, { deliver: down })
     await first.service.suspend()
-    await down.service.restore()
-    const failed = await down.service.submit({ roundID, answers: both })
+    await failing.service.restore()
+    const failed = await failing.service.submit({ roundID, answers: both })
     expect(failed.errors[0]).toContain("host down")
-    const pending = data.get(outboxKey(`round-${roundID}`)) as OutboxEntry
-    expect(pending.status).toBe("pending")
-    expect((data.get(roundKey(roundID)) as StoredRound).delivered).toEqual([])
-    await down.service.suspend()
-    const sent: SessionMessage[] = []
-    const third = instance(store, { deliver: async (message) => void sent.push(message) })
-    await third.service.restore()
-    expect(sent.map((message) => message.id)).toEqual([pending.messageID])
-    expect(sent[0]?.text).toContain(`Delivery key: ${pending.messageID}`)
+    const planned = stored(data, roundID).delivery
+    expect(planned).toMatchObject({ status: "pending", attempts: 1 })
+    expect(stored(data, roundID).delivered).toEqual([])
+    const third = await reload(failing, store)
+    expect(third.posts.map((message) => message.id)).toEqual([planned?.messageID ?? ""])
     expect(third.service.rounds.get(roundID)?.delivered.size).toBe(2)
-    expect(data.get(outboxKey(`round-${roundID}`))).toMatchObject({ status: "sent" })
+    expect(stored(data, roundID).delivery?.status).toBe("sent")
   })
 
   test("a reload after the host admitted the message does not send it again", async () => {
@@ -175,42 +229,160 @@ describe("reload", () => {
     await second.service.submit({ roundID, answers: both })
     expect(second.messages).toHaveLength(1)
     const third = await reload(second, store)
-    expect(third.messages).toEqual([])
+    expect(third.posts).toEqual([])
     await third.service.cancel({ roundID })
-    expect(third.messages).toEqual([])
+    expect(third.posts).toEqual([])
   })
 
-  test("a delivery that keeps failing is given up after the attempt limit and its answers wait for parley_wait", async () => {
-    const { data, store, first, roundID } = await openRound()
-    const down = instance(store, { deliver: async () => { throw new Error("host down") } })
+  test("a lost acknowledgement retried under the same id reaches the agent once", async () => {
+    const { store, first, roundID } = await openRound()
+    let calls = 0
+    const flaky = instance(store, {
+      deliver: async () => {
+        calls++
+        // The host admits the first call, but its answer never arrives.
+        if (calls === 1) throw new Error("connection reset")
+      },
+    })
     await first.service.suspend()
-    await down.service.restore()
-    await down.service.submit({ roundID, answers: both })
-    const key = outboxKey(`round-${roundID}`)
-    data.set(key, { ...(data.get(key) as OutboxEntry), attempts: MAX_ATTEMPTS })
-    const warnings: string[] = []
-    const sent: SessionMessage[] = []
-    const next = instance(store, { deliver: async (message) => void sent.push(message), warn: (message) => void warnings.push(message) })
-    await down.service.suspend()
-    await next.service.restore()
-    await next.service.suspend()
-    expect(sent).toEqual([])
-    expect(warnings[0]).toContain("giving up")
-    expect(data.has(key)).toBe(false)
+    await flaky.service.restore()
+    await flaky.service.submit({ roundID, answers: both })
+    const next = await reload(flaky, store, {
+      deliver: async (message) => {
+        // The same host: it already holds this id.
+        expect(message.id).toBe(flaky.posts[0]?.id ?? "")
+      },
+    })
+    expect(next.posts).toHaveLength(1)
+    expect(next.posts[0]?.id).toBe(flaky.posts[0]?.id ?? "")
+  })
+
+  test("parley_wait taking the answers cancels the pending message, so they arrive once", async () => {
+    const { data, store, first, roundID } = await openRound()
+    const failing = instance(store, { deliver: down })
+    await first.service.suspend()
+    await failing.service.restore()
+    await failing.service.submit({ roundID, answers: both })
+    expect((await failing.service.wait({}, { sessionID: "s" })).result.answers).toHaveLength(2)
+    await failing.service.suspend()
+    expect(stored(data, roundID).delivery).toBeUndefined()
+    const next = await reload(failing, store)
+    expect(next.posts).toEqual([])
+  })
+
+  test("a send that fails after parley_wait asked for the answers does not bring the message back", async () => {
+    const { data, store, first, roundID } = await openRound()
+    const gate = deferred()
+    const slow = instance(store, { deliver: () => gate.promise })
+    await first.service.suspend()
+    await slow.service.restore()
+    const submitting = slow.service.submit({ roundID, answers: both })
+    await tick()
+    expect(slow.posts).toHaveLength(1)
+    let waited = false
+    const waiting = slow.service.wait({}, { sessionID: "s" }).then((outcome) => {
+      waited = true
+      return outcome
+    })
+    await tick()
+    // The wait collects only after the send in flight has settled.
+    expect(waited).toBe(false)
+    gate.reject(new Error("host down"))
+    await submitting
+    expect((await waiting).result.answers.map((answer) => answer.id)).toEqual(["ssh.host", "ssh.port"])
+    await slow.service.suspend()
+    expect(stored(data, roundID).delivery).toBeUndefined()
+    const next = await reload(slow, store)
+    expect(next.posts).toEqual([])
+  })
+
+  test("a send that succeeds while parley_wait waits leaves the wait nothing new", async () => {
+    const { store, first, roundID } = await openRound()
+    const gate = deferred()
+    const slow = instance(store, { deliver: () => gate.promise })
+    await first.service.suspend()
+    await slow.service.restore()
+    const submitting = slow.service.submit({ roundID, answers: both })
+    await tick()
+    const waiting = slow.service.wait({}, { sessionID: "s" })
+    await tick()
+    gate.resolve()
+    await submitting
+    expect((await waiting).result.answers).toEqual([])
+    expect(slow.messages).toHaveLength(1)
+  })
+
+  test("a scoped parley_wait takes only its answers out of the message; the others are still sent", async () => {
+    const { store, first, roundID } = await openRound()
+    const failing = instance(store, { deliver: down })
+    await first.service.suspend()
+    await failing.service.restore()
+    await failing.service.submit({ roundID, answers: both })
+    const scoped = (await failing.service.wait({ ids: ["ssh.host"] }, { sessionID: "s" })).result
+    expect(scoped.answers.map((answer) => answer.id)).toEqual(["ssh.host"])
+    const next = await reload(failing, store)
+    expect(next.messages).toHaveLength(1)
+    const text = next.messages[0]?.text ?? ""
+    expect(text).toContain("Parley round 1: submitted — 1 answer, 0 pending")
+    expect(text).toContain("ssh.port")
+    expect(text).not.toContain("ssh.host")
+    expect((await next.service.wait({}, { sessionID: "s" })).result.answers).toEqual([])
+  })
+
+  test("after the attempt limit the card comes back with the error, and sending it again uses the same message", async () => {
+    const { store, first, roundID } = await openRound()
+    let host: (message: SessionMessage) => Promise<void> = down
+    const failing = instance(store, { deliver: (message) => host(message), retryDelaysMs: [0, 0] })
+    await first.service.suspend()
+    await failing.service.restore()
+    await failing.service.submit({ roundID, answers: both })
+    for (let i = 0; i < 20 && failing.posts.length < MAX_ATTEMPTS; i++) await tick()
+    await tick()
+    expect(failing.posts).toHaveLength(MAX_ATTEMPTS)
+    expect(failing.events.at(-1)).toMatchObject({ roundID, action: "opened", status: "undelivered" })
+    const [card] = failing.service.pending({ sessionID: "s" }).rounds
+    expect(card).toMatchObject({ roundID, status: "submitted" })
+    expect(card?.undelivered).toContain("host down")
+    expect(card?.answers.map((answer) => answer.id)).toEqual(["ssh.host", "ssh.port"])
+    host = async () => {}
+    const notices: string[] = []
+    const problems = await submitRound({
+      submit: () => failing.service.submit({ roundID, answers: both }),
+      deliver: () => failing.service.deliver({ sessionID: "s", roundID, questions, answers: both }),
+      choose: async () => true,
+      dismiss: async () => {},
+      notify: (message) => void notices.push(message),
+      settle: async () => {},
+    })
+    expect(problems).toEqual([])
+    expect(notices[0]).toContain("host down")
+    expect(failing.service.pending({ sessionID: "s" }).rounds).toEqual([])
+    expect(new Set(failing.posts.map((message) => message.id)).size).toBe(1)
+    expect(failing.messages).toHaveLength(1)
+  })
+
+  test("dismissing a card that came back keeps its answers for parley_wait and sends nothing", async () => {
+    const { store, first, roundID } = await openRound()
+    const failing = instance(store, { deliver: down, retryDelaysMs: [0, 0] })
+    await first.service.suspend()
+    await failing.service.restore()
+    await failing.service.submit({ roundID, answers: both })
+    for (let i = 0; i < 20 && failing.posts.length < MAX_ATTEMPTS; i++) await tick()
+    await tick()
+    const problems = await submitRound({
+      submit: () => failing.service.submit({ roundID, answers: both }),
+      deliver: async () => ({ ok: false }),
+      choose: async () => false,
+      dismiss: async () => void (await failing.service.cancel({ roundID, reason: "dismissed" })),
+      notify: () => {},
+      settle: async () => {},
+    })
+    expect(problems).toEqual([])
+    expect(failing.service.pending({ sessionID: "s" }).rounds).toEqual([])
+    const next = await reload(failing, store)
+    expect(next.posts).toEqual([])
+    expect(next.service.pending({}).rounds).toEqual([])
     expect((await next.service.wait({}, { sessionID: "s" })).result.answers).toHaveLength(2)
-  })
-
-  test("parley_wait taking the answers cancels the pending delivery, so they arrive once", async () => {
-    const { data, store, first, roundID } = await openRound()
-    const down = instance(store, { deliver: async () => { throw new Error("host down") } })
-    await first.service.suspend()
-    await down.service.restore()
-    await down.service.submit({ roundID, answers: both })
-    expect((await down.service.wait({}, { sessionID: "s" })).result.answers).toHaveLength(2)
-    await down.service.suspend()
-    expect(data.has(outboxKey(`round-${roundID}`))).toBe(false)
-    const next = await reload(down, store)
-    expect(next.messages).toEqual([])
   })
 
   test("dismissing a restored round tells the session", async () => {
@@ -243,9 +415,9 @@ describe("reload", () => {
 
   test("a failed delivery keeps the answers for parley_wait", async () => {
     const { store, first, roundID } = await openRound()
-    const second = await reload(first, store, { deliver: async () => { throw new Error("offline") } })
+    const second = await reload(first, store, { deliver: down })
     const outcome = await second.service.submit({ roundID, answers: both })
-    expect(outcome.errors[0]).toContain("offline")
+    expect(outcome.errors[0]).toContain("host down")
     expect((await second.service.wait({}, { sessionID: "s" })).result.answers).toHaveLength(2)
   })
 
@@ -287,7 +459,14 @@ describe("uploads after a reload", () => {
   }
 
   test("uploads reach the session as text and file paths, never as bytes", async () => {
-    const { second } = await restoredFiles({ save: (file) => `/tmp/parley/${file.name}` })
+    const saved: Array<string | undefined> = []
+    const { second } = await restoredFiles({
+      save: (file, roundID) => {
+        saved.push(roundID)
+        return `/tmp/parley/${file.name}`
+      },
+    })
+    expect(saved).toEqual([second.service.rounds.list()[0]?.id])
     const text = second.messages[0]?.text ?? ""
     expect(text).toContain("shot: a.png (image/png, 8 B) saved to /tmp/parley/a.png")
     expect(text).toContain("--- notes: n.txt ---\nhello notes")
@@ -318,10 +497,10 @@ describe("deliver", () => {
   })
 
   test("a retry with the same delivery id after a lost acknowledgement sends once", async () => {
-    const { service, messages } = instance(storeOver(new Map()))
+    const { service, posts } = instance(storeOver(new Map()))
     await service.deliver({ sessionID: "s", questions, answers, deliveryID: "d1" })
     expect((await service.deliver({ sessionID: "s", questions, answers, deliveryID: "d1" })).ok).toBe(true)
-    expect(messages).toHaveLength(1)
+    expect(posts).toHaveLength(1)
   })
 
   test("a retry after a failed send does send", async () => {
@@ -348,7 +527,7 @@ describe("deliver", () => {
     const second = instance(storeOver(data))
     await second.service.restore()
     expect((await second.service.deliver({ sessionID: "s", questions, answers, deliveryID: "d1" })).ok).toBe(true)
-    expect(second.messages).toEqual([])
+    expect(second.posts).toEqual([])
   })
 
   test("answers with uploads fail when there is nowhere to save them, so the card keeps its draft", async () => {
@@ -364,6 +543,7 @@ describe("deliver", () => {
       submit: async () => ({ ok: false, errors: ["unknown round rnd_1"] }),
       deliver: () => service.deliver({ sessionID: "s", questions: [{ id: "shot", title: "Shot", kind: "ask_image" }], answers: [file] }),
       choose: async () => true,
+      dismiss: async () => {},
       notify: () => {},
       settle: async () => {
         settled = true
@@ -519,33 +699,59 @@ describe("guidance after a reload", () => {
   })
 })
 
-describe("upload files follow the round's pruning", () => {
-  test("they are removed when the closed round is swept, and not when its delivery is confirmed", async () => {
+describe("upload files outlive the round record", () => {
+  test("closing a round marks its uploads closed at that time, and a sweep hands the files to the upload sweeper", async () => {
     let now = 1_000
-    const dropped: string[] = []
-    const { store, first, roundID } = await openRound({ now: () => now, dropUploads: (id) => void dropped.push(id) })
-    const second = instance(store, { now: () => now, dropUploads: (id) => void dropped.push(id), save: () => "/tmp/x" })
+    const closed: Array<[string, number]> = []
+    const swept: number[] = []
+    const extras: Extras = {
+      now: () => now,
+      closeUploads: (id, at) => void closed.push([id, at]),
+      sweepUploads: (at) => void swept.push(at),
+      save: () => "/tmp/x",
+    }
+    const { store, first, roundID } = await openRound(extras)
     await first.service.suspend()
+    now = 5_000
+    const second = instance(store, extras)
     await second.service.restore()
     await second.service.submit({ roundID, answers: both })
-    expect(second.messages).toHaveLength(1)
-    second.service.sweep()
-    expect(dropped).toEqual([])
+    expect(closed).toEqual([[roundID, 5_000]])
     now += CLOSED_TTL_MS + 1
     second.service.sweep()
-    expect(dropped).toEqual([roundID])
+    // The round record goes after 30 minutes; its files are the upload sweeper's, 24 h from the close.
+    expect(second.service.rounds.get(roundID)).toBeUndefined()
+    expect(swept.at(-1)).toBe(now)
+    expect(closed).toEqual([[roundID, 5_000]])
   })
 
-  test("they are removed when a stale round is pruned at restore", async () => {
-    const dropped: string[] = []
+  test("an upload saved for a result after the round closed is marked with the round's close time", async () => {
+    const closed: Array<[string, number]> = []
+    const { service } = instance(storeOver(new Map()), { save: () => "/tmp/x", closeUploads: (id, at) => void closed.push([id, at]) })
+    const asking = service.ask({ questions: [{ id: "shot", title: "Shot", kind: "ask_image" }] }, { sessionID: "s" })
+    await tick()
+    const roundID = service.pending({}).rounds[0]?.roundID ?? ""
+    await service.submit({
+      roundID,
+      answers: [{ id: "shot", status: "answered", value: { files: [{ name: "a.png", mime: "image/png", data: "UE5H" }] } }],
+    })
+    await asking
+    closed.length = 0
+    expect(service.saveUpload({ name: "a.png", mime: "image/png", size: 3, data: "UE5H" }, roundID)).toBe("/tmp/x")
+    expect(closed).toEqual([[roundID, 1_000]])
+  })
+
+  test("a stale round pruned at restore marks its uploads closed now, so the files stay 24 h longer", async () => {
+    const closed: Array<[string, number]> = []
     const data: Data = new Map()
     const first = instance(storeOver(data), { now: () => 1_000 })
     void first.service.ask({ questions }, { sessionID: "s" })
     await tick()
     const roundID = first.service.pending({}).rounds[0]?.roundID ?? ""
     await first.service.suspend()
-    const later = instance(storeOver(data), { now: () => 1_000 + OPEN_TTL_MS + 1, dropUploads: (id) => void dropped.push(id) })
-    await later.service.restore()
-    expect(dropped).toEqual([roundID])
+    const later = 1_000 + OPEN_TTL_MS + 1
+    const next = instance(storeOver(data), { now: () => later, closeUploads: (id, at) => void closed.push([id, at]) })
+    await next.service.restore()
+    expect(closed).toEqual([[roundID, later]])
   })
 })

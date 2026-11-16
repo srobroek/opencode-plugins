@@ -56,6 +56,23 @@ const TEXT_MIME = /^(text\/|application\/(json|xml|yaml|x-yaml|toml|javascript|t
 export const baseMime = (mime: string) => mime.split(";")[0]?.trim().toLowerCase() || "application/octet-stream"
 
 /**
+ * The text that stands for an upload the model cannot get as file content: a text file inlined, any
+ * other file handed to `save` and reported by path. Images are left to the caller (undefined).
+ */
+export function fileNote(answerID: string, file: FileValue, save?: (file: FileValue) => string | undefined): string | undefined {
+  if (file.data === undefined) return undefined
+  const mime = baseMime(file.mime)
+  if (mime.startsWith("image/")) return undefined
+  if (TEXT_MIME.test(mime)) {
+    const text = Buffer.from(file.data, "base64").toString("utf8")
+    const clipped = text.length > MAX_INLINE_TEXT ? `${text.slice(0, MAX_INLINE_TEXT)}\n… (truncated)` : text
+    return `--- ${answerID}: ${file.name} ---\n${clipped}`
+  }
+  const path = save?.(file)
+  return `${answerID}: ${file.name} (${mime}, ${file.size} B)${path ? ` saved to ${path}` : " not forwarded"}`
+}
+
+/**
  * Tool `output` (file data stripped) and `content`: the summary, then each upload.
  * Images go to the model as file content, text files are inlined, other files are handed to `save`
  * (which returns a server-side path) because most providers reject arbitrary media types.
@@ -78,14 +95,8 @@ export function render(
         parts.push({ type: "file", uri: `data:${mime};base64,${file.data}`, mime, name: file.name })
         continue
       }
-      if (TEXT_MIME.test(mime)) {
-        const text = Buffer.from(file.data, "base64").toString("utf8")
-        const clipped = text.length > MAX_INLINE_TEXT ? `${text.slice(0, MAX_INLINE_TEXT)}\n… (truncated)` : text
-        notes.push(`--- ${answer.id}: ${file.name} ---\n${clipped}`)
-        continue
-      }
-      const path = save?.(file)
-      notes.push(`${answer.id}: ${file.name} (${mime}, ${file.size} B)${path ? ` saved to ${path}` : " not forwarded"}`)
+      const note = fileNote(answer.id, file, save)
+      if (note !== undefined) notes.push(note)
     }
   }
   const head = format === "native" && result.status === "submitted" ? nativeSummary(result, questions) : summarise(result, questions)

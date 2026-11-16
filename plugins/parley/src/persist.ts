@@ -1,6 +1,7 @@
 import { type Answer, publicAnswer } from "./answers.ts"
+import { fromRoundDelivery, type RoundDelivery } from "./outbox.ts"
 import { type Question, validateQuestions } from "./questions.ts"
-import type { Round } from "./rounds.ts"
+import { awaitsDelivery, type Round } from "./rounds.ts"
 
 /** Storage key prefix; one entry per round. */
 export const ROUND_KEY_PREFIX = "round:"
@@ -26,6 +27,7 @@ export interface StoredRound {
   readonly deadline?: number
   readonly created: number
   readonly updated: number
+  readonly delivery?: RoundDelivery
 }
 
 export function toStored(round: Round, directory: string): StoredRound {
@@ -44,6 +46,7 @@ export function toStored(round: Round, directory: string): StoredRound {
     ...(round.deadline === undefined ? {} : { deadline: round.deadline }),
     created: round.created,
     updated: round.updated,
+    ...(round.delivery === undefined ? {} : { delivery: structuredClone(round.delivery) }),
   }
 }
 
@@ -78,6 +81,8 @@ function decode(value: unknown): Restored | undefined {
   const usable = (answer: unknown): answer is Answer =>
     isRecord(answer) && typeof answer.id === "string" && known.has(answer.id) && typeof answer.status === "string"
   if (!answers.every(usable)) return undefined
+  const delivery = value.delivery === undefined ? undefined : fromRoundDelivery(value.delivery)
+  if (value.delivery !== undefined && delivery === undefined) return undefined
   const strings = (input: unknown) => (Array.isArray(input) ? input.filter((item): item is string => typeof item === "string") : [])
   return {
     directory,
@@ -95,11 +100,12 @@ function decode(value: unknown): Restored | undefined {
       ...(typeof value.deadline === "number" ? { deadline: value.deadline } : {}),
       created,
       updated,
+      ...(delivery === undefined ? {} : { delivery }),
     },
   }
 }
 
-/** Whether a stored round is too old to restore: closed past `closedTtlMs`, or open past a day. */
+/** Whether a stored round is too old to restore: closed past `closedTtlMs`, or open (or still to be delivered) past a day. */
 export function stale(round: Round, now: number, closedTtlMs: number): boolean {
-  return now - round.updated > (round.status === "open" ? OPEN_TTL_MS : closedTtlMs)
+  return now - round.updated > (round.status === "open" || awaitsDelivery(round) ? OPEN_TTL_MS : closedTtlMs)
 }

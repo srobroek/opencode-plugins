@@ -1,5 +1,6 @@
 import { type Answer, normaliseAnswer, publicAnswer, type SubmittedAnswer } from "./answers.ts"
 import { visibleQuestions } from "./conditions.ts"
+import type { RoundDelivery } from "./outbox.ts"
 import { type Question, validateQuestions } from "./questions.ts"
 
 export type RoundStatus = "open" | "submitted" | "cancelled"
@@ -22,6 +23,8 @@ export interface Round {
   deadline?: number
   readonly created: number
   updated: number
+  /** The message that carries a restored round's answers to the session, planned when the round closes. */
+  delivery?: RoundDelivery
 }
 
 /** What a client sees of a round (`pending` RPC). */
@@ -40,6 +43,8 @@ export interface RoundView {
    * whose form the dismissing client cancels so the turn ends exactly as a dismissed form does.
    */
   readonly callIDs?: readonly string[]
+  /** Set on a closed round whose answers could not be sent to the session: the error, for the user to act on. */
+  readonly undelivered?: string
 }
 
 export interface RoundResult {
@@ -122,6 +127,11 @@ export class Rounds {
     return found
   }
 
+  /** Every round, open or closed, in the order they were opened. */
+  list(): Round[] {
+    return [...this.#rounds.values()]
+  }
+
   pending(sessionID?: string): Round[] {
     return [...this.#rounds.values()].filter(
       (round) => round.status === "open" && (sessionID === undefined || round.sessionID === sessionID),
@@ -185,7 +195,7 @@ export class Rounds {
   sweep(now: number, ttlMs: number) {
     const dropped: string[] = []
     for (const [id, round] of this.#rounds)
-      if (round.status !== "open" && now - round.updated > ttlMs) {
+      if (round.status !== "open" && !awaitsDelivery(round) && now - round.updated > ttlMs) {
         this.#rounds.delete(id)
         dropped.push(id)
       }
@@ -210,6 +220,9 @@ export class Rounds {
     for (const listener of [...this.#listeners]) listener(round)
   }
 }
+
+/** A closed round whose answers still have to reach the session (being sent, or back with the user after failing). */
+export const awaitsDelivery = (round: Round) => round.delivery?.status === "pending" || round.delivery?.status === "failed"
 
 const scoped = (round: Round, ids?: readonly string[]) =>
   visibleQuestions(round.questions, (id) => round.answers.get(id)?.value).map((question) => question.id).filter((id) => ids === undefined || ids.includes(id))
@@ -267,6 +280,7 @@ export function view(round: Round): RoundView {
     answers: [...round.answers.values()].map(publicAnswer),
     ...(round.deadline === undefined ? {} : { deadline: round.deadline }),
     ...(round.callIDs.length === 0 ? {} : { callIDs: [...round.callIDs] }),
+    ...(round.delivery?.status === "failed" ? { undelivered: round.delivery.error ?? "the message was not admitted" } : {}),
   }
 }
 

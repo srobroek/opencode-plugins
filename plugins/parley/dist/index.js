@@ -1331,6 +1331,9 @@ class Rounds {
         found = round;
     return found;
   }
+  list() {
+    return [...this.#rounds.values()];
+  }
   pending(sessionID) {
     return [...this.#rounds.values()].filter((round) => round.status === "open" && (sessionID === undefined || round.sessionID === sessionID));
   }
@@ -1398,7 +1401,7 @@ class Rounds {
   sweep(now, ttlMs) {
     const dropped = [];
     for (const [id, round] of this.#rounds)
-      if (round.status !== "open" && now - round.updated > ttlMs) {
+      if (round.status !== "open" && !awaitsDelivery(round) && now - round.updated > ttlMs) {
         this.#rounds.delete(id);
         dropped.push(id);
       }
@@ -1421,6 +1424,7 @@ class Rounds {
       listener(round);
   }
 }
+var awaitsDelivery = (round) => round.delivery?.status === "pending" || round.delivery?.status === "failed";
 var scoped = (round, ids) => visibleQuestions(round.questions, (id) => round.answers.get(id)?.value).map((question) => question.id).filter((id) => ids === undefined || ids.includes(id));
 function settled(round, mode, ids) {
   if (round.status !== "open" || mode === "none")
@@ -1460,7 +1464,8 @@ function view(round) {
     questions: round.questions,
     answers: [...round.answers.values()].map(publicAnswer),
     ...round.deadline === undefined ? {} : { deadline: round.deadline },
-    ...round.callIDs.length === 0 ? {} : { callIDs: [...round.callIDs] }
+    ...round.callIDs.length === 0 ? {} : { callIDs: [...round.callIDs] },
+    ...round.delivery?.status === "failed" ? { undelivered: round.delivery.error ?? "the message was not admitted" } : {}
   };
 }
 function waitFor(rounds, round, options) {
@@ -1638,6 +1643,22 @@ function describe(question, answer, position, fallback) {
 var MAX_INLINE_TEXT = 20000;
 var TEXT_MIME = /^(text\/|application\/(json|xml|yaml|x-yaml|toml|javascript|typescript))/;
 var baseMime = (mime) => mime.split(";")[0]?.trim().toLowerCase() || "application/octet-stream";
+function fileNote(answerID, file, save) {
+  if (file.data === undefined)
+    return;
+  const mime = baseMime(file.mime);
+  if (mime.startsWith("image/"))
+    return;
+  if (TEXT_MIME.test(mime)) {
+    const text = Buffer.from(file.data, "base64").toString("utf8");
+    const clipped = text.length > MAX_INLINE_TEXT ? `${text.slice(0, MAX_INLINE_TEXT)}
+\u2026 (truncated)` : text;
+    return `--- ${answerID}: ${file.name} ---
+${clipped}`;
+  }
+  const path = save?.(file);
+  return `${answerID}: ${file.name} (${mime}, ${file.size} B)${path ? ` saved to ${path}` : " not forwarded"}`;
+}
 function render(result, questions, save, format = "parley") {
   const output = { ...result, answers: result.answers.map(publicAnswer) };
   const parts = [];
@@ -1652,16 +1673,9 @@ function render(result, questions, save, format = "parley") {
         parts.push({ type: "file", uri: `data:${mime};base64,${file.data}`, mime, name: file.name });
         continue;
       }
-      if (TEXT_MIME.test(mime)) {
-        const text = Buffer.from(file.data, "base64").toString("utf8");
-        const clipped = text.length > MAX_INLINE_TEXT ? `${text.slice(0, MAX_INLINE_TEXT)}
-\u2026 (truncated)` : text;
-        notes.push(`--- ${answer.id}: ${file.name} ---
-${clipped}`);
-        continue;
-      }
-      const path = save?.(file);
-      notes.push(`${answer.id}: ${file.name} (${mime}, ${file.size} B)${path ? ` saved to ${path}` : " not forwarded"}`);
+      const note = fileNote(answer.id, file, save);
+      if (note !== undefined)
+        notes.push(note);
     }
   }
   const head = format === "native" && result.status === "submitted" ? nativeSummary(result, questions) : summarise(result, questions);
@@ -1684,33 +1698,47 @@ function messageID(now) {
   return `msg_${time}${Array.from(bytes, (byte) => CHARS[byte % 62]).join("")}`;
 }
 var isRecord4 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
-function fromOutbox(value) {
-  if (!isRecord4(value))
-    return;
-  const { key, messageID: id, directory, sessionID, text, description, status, attempts, created, updated } = value;
-  if (typeof key !== "string" || typeof id !== "string" || !id.startsWith("msg_"))
-    return;
-  if (typeof directory !== "string" || typeof sessionID !== "string" || typeof text !== "string")
-    return;
-  if (typeof description !== "string" || status !== "pending" && status !== "sent")
+var strings = (input) => Array.isArray(input) ? input.filter((item) => typeof item === "string") : [];
+var STATUSES = new Set(["pending", "sent", "failed", "dismissed"]);
+function base(value) {
+  const { messageID: id, generation, description, status, attempts, created, updated } = value;
+  if (typeof id !== "string" || !id.startsWith("msg_") || typeof description !== "string" || !STATUSES.has(status))
     return;
   if (typeof attempts !== "number" || typeof created !== "number" || typeof updated !== "number")
     return;
-  const answerIDs = Array.isArray(value.answerIDs) ? value.answerIDs.filter((item) => typeof item === "string") : [];
   return {
-    key,
     messageID: id,
-    directory,
-    sessionID,
-    text,
+    generation: typeof generation === "number" ? generation : 0,
     description,
-    ...typeof value.roundID === "string" ? { roundID: value.roundID } : {},
-    answerIDs,
     status,
     attempts,
+    ...typeof value.error === "string" ? { error: value.error } : {},
     created,
     updated
   };
+}
+function fromRoundDelivery(value) {
+  if (!isRecord4(value))
+    return;
+  const head = base(value);
+  if (!head)
+    return;
+  const notes = {};
+  if (isRecord4(value.notes))
+    for (const [id, lines] of Object.entries(value.notes))
+      notes[id] = strings(lines);
+  return { ...head, answerIDs: strings(value.answerIDs), notes, held: strings(value.held) };
+}
+function fromOutbox(value) {
+  if (!isRecord4(value))
+    return;
+  const head = base(value);
+  const { key, directory, sessionID, text } = value;
+  if (!head || typeof key !== "string" || typeof directory !== "string")
+    return;
+  if (typeof sessionID !== "string" || typeof text !== "string")
+    return;
+  return { ...head, key, directory, sessionID, text };
 }
 
 // plugins/parley/src/persist.ts
@@ -1732,7 +1760,8 @@ function toStored(round, directory) {
     ...round.reason === undefined ? {} : { reason: round.reason },
     ...round.deadline === undefined ? {} : { deadline: round.deadline },
     created: round.created,
-    updated: round.updated
+    updated: round.updated,
+    ...round.delivery === undefined ? {} : { delivery: structuredClone(round.delivery) }
   };
 }
 var isRecord5 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
@@ -1761,6 +1790,9 @@ function decode(value) {
   const usable = (answer) => isRecord5(answer) && typeof answer.id === "string" && known.has(answer.id) && typeof answer.status === "string";
   if (!answers.every(usable))
     return;
+  const delivery = value.delivery === undefined ? undefined : fromRoundDelivery(value.delivery);
+  if (value.delivery !== undefined && delivery === undefined)
+    return;
   const strings = (input) => Array.isArray(input) ? input.filter((item) => typeof item === "string") : [];
   return {
     directory,
@@ -1777,12 +1809,13 @@ function decode(value) {
       ...typeof value.reason === "string" ? { reason: value.reason } : {},
       ...typeof value.deadline === "number" ? { deadline: value.deadline } : {},
       created,
-      updated
+      updated,
+      ...delivery === undefined ? {} : { delivery }
     }
   };
 }
 function stale(round, now, closedTtlMs) {
-  return now - round.updated > (round.status === "open" ? OPEN_TTL_MS : closedTtlMs);
+  return now - round.updated > (round.status === "open" || awaitsDelivery(round) ? OPEN_TTL_MS : closedTtlMs);
 }
 
 // plugins/parley/src/rpc.ts
@@ -1826,6 +1859,7 @@ var ParleyRpc = Rpc.define({
         properties: {
           sessionID: { type: "string" },
           number: { type: "number" },
+          roundID: { type: "string" },
           deliveryID: { type: "string" },
           questions: { type: "array", items: { type: "object" } },
           answers: { type: "array", items: { type: "object" } }
@@ -2171,36 +2205,41 @@ class InputError extends Error {
 }
 var SUSPEND_DRAIN_MS = 2000;
 var DELIVERY_HEAD = "The parley plugin reloaded while you waited, so your parley call ended. The user answered that round afterwards; their answers follow. Act on them; do not ask these questions again.";
+var HELD_FOR_WAIT = "Call parley_wait to receive them.";
+var RETRY_DELAYS_MS = [2000, 8000];
 var filesOf = (answer) => {
   const files = answer.value?.files;
   return Array.isArray(files) ? files : [];
 };
 var withData = (answer) => filesOf(answer).filter((file) => file.data !== undefined);
-function deliveryMessage(result, questions, save, heldAdvice) {
-  const held = save ? [] : result.answers.filter((answer) => withData(answer).length > 0).map((answer) => answer.id);
-  const notes = [];
-  const answers = result.answers.filter((answer) => !held.includes(answer.id)).map((answer) => {
-    const files = filesOf(answer).map((file) => {
-      if (file.data === undefined || !baseMime(file.mime).startsWith("image/"))
-        return file;
-      const path = save?.(file);
-      notes.push(`${answer.id}: ${file.name} (${baseMime(file.mime)}, ${file.size} B)${path ? ` saved to ${path}` : " not forwarded"}`);
-      const { data: _data, ...rest } = file;
-      return rest;
-    });
-    return files.length === 0 ? answer : { ...answer, value: { ...answer.value, files } };
+function uploadNotes(answer, save) {
+  return withData(answer).map((file) => {
+    const inline = fileNote(answer.id, file, save);
+    if (inline !== undefined)
+      return inline;
+    const path = save?.(file);
+    return `${answer.id}: ${file.name} (${baseMime(file.mime)}, ${file.size} B)${path ? ` saved to ${path}` : " not forwarded"}`;
   });
-  const body = render({ ...result, answers }, questions, save).content;
-  const lines = [DELIVERY_HEAD, "", body, ...notes];
-  if (held.length > 0)
-    lines.push("", `Uploads in ${held.join(", ")} could not be sent in a message. ${heldAdvice}`);
-  return { text: lines.join(`
-`), held };
 }
-var withKey = (text, id) => `${text}
-
-Delivery key: ${id} (a repeat of this key is the same message)`;
-var failure = (error) => `Could not send the answers to the session: ${error instanceof Error ? error.message : String(error)}`;
+function planAnswers(answers, save) {
+  const held = save ? [] : answers.filter((answer) => withData(answer).length > 0).map((answer) => answer.id);
+  const carried = answers.filter((answer) => !held.includes(answer.id));
+  return {
+    answerIDs: carried.map((answer) => answer.id),
+    notes: Object.fromEntries(carried.map((answer) => [answer.id, uploadNotes(answer, save)])),
+    held
+  };
+}
+function deliveryText(result, questions, plan, heldAdvice) {
+  const answers = result.answers.filter((answer) => plan.answerIDs.includes(answer.id)).map(publicAnswer);
+  const lines = [DELIVERY_HEAD, "", summarise({ ...result, answers }, questions), ...plan.answerIDs.flatMap((id) => plan.notes[id] ?? [])];
+  if (plan.held.length > 0)
+    lines.push("", `Uploads in ${plan.held.join(", ")} could not be sent in a message. ${heldAdvice}`);
+  return lines.join(`
+`);
+}
+var messageOf = (error) => error instanceof Error ? error.message : String(error);
+var failure = (error) => `Could not send the answers to the session: ${error}`;
 var isCancel = (error) => {
   const text = `${error?.name ?? ""} ${error?._tag ?? ""} ${error instanceof Error ? error.message : String(error)}`;
   return /cancel|dismiss/i.test(text);
@@ -2216,6 +2255,8 @@ class Parley {
   #waits = new Set;
   #inflight = new Set;
   #outbox = new Map;
+  #locks = new Map;
+  #timers = new Set;
   #suspended = false;
   #writes = Promise.resolve();
   #pending = 0;
@@ -2223,7 +2264,12 @@ class Parley {
     this.deps = deps;
     this.presence = new Presence(deps.settings.heartbeatWindowMs);
     this.#now = deps.now ?? Date.now;
-    this.rounds.subscribe((round) => this.#persist(round));
+    this.rounds.subscribe((round) => {
+      this.#plan(round);
+      if (round.status !== "open")
+        this.deps.closeUploads?.(round.id, round.updated);
+      this.#persist(round);
+    });
   }
   async restore() {
     const store = this.deps.store;
@@ -2243,7 +2289,7 @@ class Parley {
         continue;
       if (stale(round, now, CLOSED_TTL_MS)) {
         this.#forget(round.id);
-        this.deps.dropUploads?.(round.id);
+        this.deps.closeUploads?.(round.id, now);
       } else
         keep.push(round);
     }
@@ -2251,7 +2297,17 @@ class Parley {
     for (const round of keep)
       if (round.status === "open")
         this.#orphans.add(round.id);
+    this.deps.sweepUploads?.(now);
     await this.#restoreOutbox(store);
+    const resends = [
+      ...keep.filter((round) => round.delivery?.status === "pending").map((round) => this.#deliverRound(round)),
+      ...[...this.#outbox.values()].filter((entry) => entry.status === "pending").map((entry) => this.#sendEntry(entry))
+    ];
+    let timer;
+    const bound = new Promise((resolve) => {
+      timer = setTimeout(resolve, SUSPEND_DRAIN_MS * 2);
+    });
+    await Promise.race([Promise.allSettled(resends), bound]).finally(() => clearTimeout(timer));
   }
   async#restoreOutbox(store) {
     for (const raw of await store.listOutbox().catch(() => [])) {
@@ -2262,20 +2318,141 @@ class Parley {
       }
       if (entry.directory !== store.directory || !await store.owns(entry.sessionID).catch(() => false))
         continue;
-      if (entry.status === "sent" && this.#now() - entry.updated > SENT_TTL_MS)
+      if (this.#now() - entry.updated > SENT_TTL_MS)
         this.#dropOutbox(entry.key);
-      else if (entry.status === "pending" && entry.attempts >= MAX_ATTEMPTS) {
-        this.deps.warn?.(`parley: giving up on delivering message ${entry.messageID} after ${entry.attempts} attempts`);
-        this.#dropOutbox(entry.key);
-      } else
+      else
         this.#outbox.set(entry.key, entry);
     }
-    let timer;
-    const bound = new Promise((resolve) => {
-      timer = setTimeout(resolve, SUSPEND_DRAIN_MS * 2);
+  }
+  #exclusive(key, task) {
+    const before = this.#locks.get(key) ?? Promise.resolve();
+    const run = before.then(task, task);
+    const settled = run.then(() => {}, () => {});
+    this.#locks.set(key, settled);
+    settled.then(() => {
+      if (this.#locks.get(key) === settled)
+        this.#locks.delete(key);
     });
-    const retries = [...this.#outbox.values()].filter((entry) => entry.status === "pending").map((entry) => this.#send(entry));
-    await Promise.race([Promise.allSettled(retries), bound]).finally(() => clearTimeout(timer));
+    return run;
+  }
+  async#post(message) {
+    const deliver = this.deps.deliver;
+    if (!deliver)
+      return "Cannot message the session from here.";
+    const sending = deliver(message).then(() => {
+      return;
+    }, (error) => messageOf(error));
+    this.#inflight.add(sending);
+    sending.finally(() => this.#inflight.delete(sending));
+    return sending;
+  }
+  #plan(round) {
+    if (round.status === "open" || !this.#orphans.has(round.id))
+      return;
+    this.#orphans.delete(round.id);
+    if (!this.deps.deliver || round.delivery)
+      return;
+    const save = this.deps.save;
+    const plan = planAnswers(collect(round, { keep: true }).answers, save && ((file) => save(file, round.id)));
+    const now = this.#now();
+    round.delivery = {
+      messageID: messageID(now),
+      generation: 0,
+      description: `Parley round ${round.number} answers`,
+      status: "pending",
+      attempts: 0,
+      created: now,
+      updated: now,
+      answerIDs: [...plan.answerIDs],
+      notes: plan.notes,
+      held: [...plan.held]
+    };
+  }
+  #roundText(round, delivery) {
+    const head = collect(round, { keep: true });
+    const answers = delivery.answerIDs.map((id) => round.answers.get(id)).filter((answer) => answer !== undefined);
+    return deliveryText({ ...head, answers }, round.questions, delivery, HELD_FOR_WAIT);
+  }
+  async#deliverRound(round) {
+    const error = await this.#attemptRound(round);
+    if (error !== undefined && round.delivery?.status === "pending")
+      this.#retryLater(round, 0);
+    return error === undefined ? [] : [error];
+  }
+  #retryLater(round, step) {
+    const delay = (this.deps.retryDelaysMs ?? RETRY_DELAYS_MS)[step];
+    if (delay === undefined || this.#suspended)
+      return;
+    const timer = setTimeout(() => {
+      this.#timers.delete(timer);
+      this.#attemptRound(round).then((error) => {
+        if (error !== undefined && round.delivery?.status === "pending")
+          this.#retryLater(round, step + 1);
+      });
+    }, delay);
+    timer.unref?.();
+    this.#timers.add(timer);
+  }
+  #attemptRound(round) {
+    return this.#exclusive(round.id, async () => {
+      const delivery = round.delivery;
+      if (delivery?.status !== "pending" || this.#suspended)
+        return;
+      const generation = delivery.generation;
+      const error = await this.#post({
+        id: delivery.messageID,
+        sessionID: round.sessionID,
+        text: this.#roundText(round, delivery),
+        description: delivery.description
+      });
+      if (round.delivery !== delivery || delivery.generation !== generation)
+        return;
+      delivery.updated = this.#now();
+      if (error === undefined) {
+        for (const id of delivery.answerIDs)
+          if (round.answers.has(id))
+            round.delivered.add(id);
+        delivery.status = "sent";
+        delete delivery.error;
+      } else {
+        delivery.attempts++;
+        delivery.error = failure(error);
+        if (delivery.attempts >= MAX_ATTEMPTS)
+          delivery.status = "failed";
+      }
+      this.#persist(round);
+      await this.#writes;
+      if (delivery.status === "failed")
+        await this.deps.emit({
+          sessionID: round.sessionID,
+          roundID: round.id,
+          action: "opened",
+          status: "undelivered",
+          reason: delivery.error ?? ""
+        });
+      return error === undefined ? undefined : failure(error);
+    });
+  }
+  #consume(round, ids) {
+    const delivery = round.delivery;
+    if (!delivery || ids.length === 0 || delivery.status === "sent" || delivery.status === "dismissed")
+      return;
+    const taken = new Set(ids);
+    const carried = delivery.answerIDs.filter((id) => !taken.has(id));
+    const held = delivery.held.filter((id) => !taken.has(id));
+    if (carried.length === delivery.answerIDs.length && held.length === delivery.held.length)
+      return;
+    delivery.answerIDs = carried;
+    delivery.held = held;
+    delivery.generation++;
+    delivery.updated = this.#now();
+    if (carried.length === 0 && held.length === 0) {
+      const wasFailed = delivery.status === "failed";
+      round.delivery = undefined;
+      if (wasFailed)
+        this.deps.emit({ sessionID: round.sessionID, roundID: round.id, action: "closed", status: round.status });
+    }
+    this.#persist(round);
   }
   #saveOutbox(entry) {
     this.#outbox.set(entry.key, entry);
@@ -2291,30 +2468,26 @@ class Parley {
     if (store)
       this.#queue(() => store.removeOutbox(key));
   }
-  async#send(entry) {
-    if (!this.deps.deliver)
-      return "Cannot message the session from here.";
-    try {
-      await this.deps.deliver({
-        id: entry.messageID,
-        sessionID: entry.sessionID,
-        text: entry.text,
-        description: entry.description
-      });
-    } catch (error) {
-      this.#saveOutbox({ ...entry, attempts: entry.attempts + 1, updated: this.#now() });
-      return failure(error);
-    }
-    const round = entry.roundID === undefined ? undefined : this.rounds.get(entry.roundID);
-    if (round) {
-      for (const id of entry.answerIDs)
-        if (round.answers.has(id))
-          round.delivered.add(id);
-      this.#persist(round);
-    }
-    this.#saveOutbox({ ...entry, status: "sent", updated: this.#now() });
-    await this.#writes;
-    return;
+  #sendEntry(entry) {
+    return this.#exclusive(`outbox-${entry.key}`, async () => {
+      if (this.#outbox.get(entry.key) !== entry || entry.status === "sent" || this.#suspended)
+        return;
+      const generation = entry.generation;
+      const error = await this.#post({ id: entry.messageID, sessionID: entry.sessionID, text: entry.text, description: entry.description });
+      if (this.#outbox.get(entry.key) !== entry || entry.generation !== generation)
+        return error === undefined ? undefined : failure(error);
+      entry.updated = this.#now();
+      if (error === undefined) {
+        entry.status = "sent";
+        delete entry.error;
+      } else {
+        entry.attempts++;
+        entry.error = failure(error);
+      }
+      this.#saveOutbox(entry);
+      await this.#writes;
+      return error === undefined ? undefined : failure(error);
+    });
   }
   #persist(round) {
     const store = this.deps.store;
@@ -2332,6 +2505,13 @@ class Parley {
     if (!store)
       return;
     this.#queue(() => store.remove(roundID));
+  }
+  saveUpload(file, roundID) {
+    const path = this.deps.save?.(file, roundID);
+    const round = roundID === undefined ? undefined : this.rounds.get(roundID);
+    if (path !== undefined && round && round.status !== "open")
+      this.deps.closeUploads?.(round.id, round.updated);
+    return path;
   }
   attached(sessionID) {
     return this.presence.attached(this.#now(), sessionID);
@@ -2422,9 +2602,6 @@ class Parley {
       timeout_s: input.timeout_s,
       context
     });
-    const waiting = this.#outbox.get(`round-${round.id}`);
-    if (waiting?.status === "pending" && result.answers.length > 0)
-      this.#dropOutbox(waiting.key);
     return { result, questions: round.questions };
   }
   async end(sessionID, message) {
@@ -2448,10 +2625,14 @@ class Parley {
     return { ok: true, window_s: this.presence.windowMs / 1000, instance: this.instance };
   }
   pending(input) {
-    return { rounds: this.rounds.pending(input.sessionID).map(view), instance: this.instance };
+    const rounds = this.rounds.list().filter((round) => round.status === "open" || round.delivery?.status === "failed").filter((round) => input.sessionID === undefined || round.sessionID === input.sessionID);
+    return { rounds: rounds.map(view), instance: this.instance };
   }
   async submit(input) {
     const final = input.final !== false;
+    const known = this.rounds.get(input.roundID);
+    if (known?.delivery?.status === "failed")
+      return { ok: false, errors: [`undelivered round ${known.id}: ${known.delivery.error ?? "the message was not admitted"}`] };
     const outcome = this.rounds.submit(input.roundID, input.answers, final, this.#now());
     const round = this.rounds.get(input.roundID);
     if (outcome.ok && round)
@@ -2461,17 +2642,24 @@ class Parley {
         action: final ? "closed" : "updated",
         status: round.status
       });
-    if (outcome.ok && round && final)
-      return { ...outcome, errors: await this.#deliverOrphan(round) };
+    if (outcome.ok && round && final && round.delivery?.status === "pending")
+      return { ...outcome, errors: await this.#deliverRound(round) };
     return outcome;
   }
   async deliver(input) {
     if (!this.deps.deliver)
       return { ok: false, errors: ["Cannot message the session from here."] };
+    const round = input.roundID === undefined ? undefined : this.rounds.get(input.roundID);
+    if (round?.delivery)
+      return this.#resendRound(round);
     const key = input.deliveryID ?? `anon-${crypto.randomUUID()}`;
     const existing = this.#outbox.get(key);
     if (existing?.status === "sent")
       return { ok: true, errors: [] };
+    if (existing) {
+      const error = await this.#sendEntry(existing);
+      return error === undefined ? { ok: true, errors: [] } : { ok: false, errors: [error] };
+    }
     const errors = [];
     const answers = [];
     for (const item of input.answers) {
@@ -2488,6 +2676,13 @@ class Parley {
     }
     if (errors.length > 0)
       return { ok: false, errors };
+    const save = this.deps.save;
+    const plan = planAnswers(answers, save && ((file) => save(file)));
+    if (plan.held.length > 0)
+      return {
+        ok: false,
+        errors: [`Uploads in ${plan.held.join(", ")} cannot be sent in a message and there is nowhere to save them. Nothing was sent.`]
+      };
     const answered = new Set(answers.map((answer) => answer.id));
     const result = {
       status: "submitted",
@@ -2495,74 +2690,66 @@ class Parley {
       answers,
       pending: input.questions.filter((question) => !answered.has(question.id)).map((question) => question.id)
     };
-    const save = this.deps.save;
-    const { text, held } = deliveryMessage(result, input.questions, save && ((file) => save(file)), "");
-    if (held.length > 0)
-      return {
-        ok: false,
-        errors: [`Uploads in ${held.join(", ")} cannot be sent in a message and there is nowhere to save them. Nothing was sent.`]
-      };
     const now = this.#now();
-    const id = existing?.messageID ?? messageID(now);
     const entry = {
       key,
-      messageID: id,
+      messageID: messageID(now),
+      generation: 0,
       directory: this.deps.store?.directory ?? "",
       sessionID: input.sessionID,
-      text: withKey(text, id),
+      text: deliveryText(result, input.questions, plan, ""),
       description: "Parley answers",
-      answerIDs: [],
       status: "pending",
-      attempts: existing?.attempts ?? 0,
-      created: existing?.created ?? now,
+      attempts: 0,
+      created: now,
       updated: now
     };
     this.#saveOutbox(entry);
     await this.#writes;
-    const error = await this.#send(entry);
-    return error ? { ok: false, errors: [error] } : { ok: true, errors };
+    const error = await this.#sendEntry(entry);
+    return error === undefined ? { ok: true, errors: [] } : { ok: false, errors: [error] };
   }
-  async#deliverOrphan(round) {
-    if (!this.#orphans.has(round.id) || round.status === "open")
-      return [];
-    this.#orphans.delete(round.id);
-    if (!this.deps.deliver)
-      return [];
-    const key = `round-${round.id}`;
-    const existing = this.#outbox.get(key);
-    if (existing?.status === "sent")
-      return [];
-    const result = collect(round, { keep: true });
-    const save = this.deps.save;
-    const { text, held } = deliveryMessage(result, round.questions, save && ((file) => save(file, round.id)), "Call parley_wait to receive them.");
-    const now = this.#now();
-    const id = existing?.messageID ?? messageID(now);
-    const entry = {
-      key,
-      messageID: id,
-      directory: this.deps.store?.directory ?? "",
-      sessionID: round.sessionID,
-      text: withKey(text, id),
-      description: `Parley round ${round.number} answers`,
-      roundID: round.id,
-      answerIDs: result.answers.map((answer) => answer.id).filter((answerID) => !held.includes(answerID)),
-      status: "pending",
-      attempts: existing?.attempts ?? 0,
-      created: existing?.created ?? now,
-      updated: now
-    };
-    this.#saveOutbox(entry);
-    await this.#writes;
-    const error = await this.#send(entry);
-    return error ? [error] : [];
+  async#resendRound(round) {
+    const delivery = round.delivery;
+    if (!delivery || delivery.status === "sent")
+      return { ok: true, errors: [] };
+    if (delivery.status === "failed" || delivery.status === "dismissed") {
+      delivery.status = "pending";
+      delivery.attempts = 0;
+      delivery.generation++;
+      this.#persist(round);
+    }
+    const error = await this.#attemptRound(round);
+    if (error !== undefined && round.delivery === delivery && delivery.status === "pending") {
+      delivery.status = "failed";
+      this.#persist(round);
+    }
+    return error === undefined ? { ok: true, errors: [] } : { ok: false, errors: [error] };
+  }
+  #dismissDelivery(round) {
+    return this.#exclusive(round.id, async () => {
+      const delivery = round.delivery;
+      if (delivery?.status !== "failed")
+        return false;
+      delivery.status = "dismissed";
+      delivery.generation++;
+      delivery.updated = this.#now();
+      this.#persist(round);
+      await this.deps.emit({ sessionID: round.sessionID, roundID: round.id, action: "closed", status: round.status, reason: "dismissed" });
+      return true;
+    });
   }
   async cancel(input) {
     const reason = input.reason ?? "user_closed";
+    const known = this.rounds.get(input.roundID);
+    if (known?.delivery?.status === "failed")
+      return { ok: await this.#dismissDelivery(known) };
     const ok = this.rounds.cancel(input.roundID, reason, this.#now());
     const round = this.rounds.get(input.roundID);
     if (ok && round) {
       await this.deps.emit({ sessionID: round.sessionID, roundID: round.id, action: "closed", status: "cancelled", reason });
-      await this.#deliverOrphan(round);
+      if (round.delivery?.status === "pending")
+        await this.#deliverRound(round);
     }
     return { ok };
   }
@@ -2574,6 +2761,9 @@ class Parley {
     this.#suspended = true;
     for (const wait of [...this.#waits])
       wait.abort();
+    for (const timer of this.#timers)
+      clearTimeout(timer);
+    this.#timers.clear();
     if (this.#inflight.size === 0 && this.#pending === 0)
       return;
     const drain = async () => {
@@ -2589,10 +2779,9 @@ class Parley {
     return Promise.race([drain(), bound]).finally(() => clearTimeout(timer));
   }
   sweep() {
-    for (const id of this.rounds.sweep(this.#now(), CLOSED_TTL_MS)) {
+    for (const id of this.rounds.sweep(this.#now(), CLOSED_TTL_MS))
       this.#forget(id);
-      this.deps.dropUploads?.(id);
-    }
+    this.deps.sweepUploads?.(this.#now());
     this.presence.prune(this.#now());
   }
   #await(round, options) {
@@ -2642,10 +2831,11 @@ class Parley {
           status: closing === TIMEOUT ? "timeout" : "cancelled",
           reason: closing
         });
-      return {
-        ...collect(round, { ...options.ids === undefined ? {} : { ids: options.ids }, timedOut: outcome === "timeout" }),
-        channel: "tui"
-      };
+      return await this.#exclusive(round.id, async () => {
+        const result = collect(round, { ...options.ids === undefined ? {} : { ids: options.ids }, timedOut: outcome === "timeout" });
+        this.#consume(round, result.answers.map((answer) => answer.id));
+        return { ...result, channel: "tui" };
+      });
     } finally {
       stop();
       this.#waits.delete(reload);
@@ -2723,26 +2913,64 @@ class Parley {
 }
 
 // plugins/parley/src/uploads.ts
-import { chmodSync, mkdirSync, rmSync, writeFileSync } from "fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
+var UPLOAD_TTL_MS = 24 * 60 * 60000;
+var UNMARKED_TTL_MS = 2 * UPLOAD_TTL_MS;
+var CLOSED_MARKER = ".closed";
 var uploadRoot = (base = tmpdir()) => path.join(base, "parley");
 var safe = (name) => name.replace(/[^A-Za-z0-9_.-]/g, "_") || "round";
+var roundDir = (roundID, base) => path.join(uploadRoot(base), safe(roundID));
+var privateDir = (dir) => {
+  mkdirSync(dir, { recursive: true, mode: 448 });
+  chmodSync(dir, 448);
+};
 function saveUpload(file, roundID, base = tmpdir()) {
   if (file.data === undefined)
     return;
-  const root = uploadRoot(base);
-  mkdirSync(root, { recursive: true, mode: 448 });
-  chmodSync(root, 448);
-  const dir = path.join(root, safe(roundID ?? crypto.randomUUID()));
-  mkdirSync(dir, { recursive: true, mode: 448 });
-  const target = path.join(dir, path.basename(file.name));
+  privateDir(uploadRoot(base));
+  const round = roundDir(roundID ?? crypto.randomUUID(), base);
+  privateDir(round);
+  const dir = path.join(round, crypto.randomUUID());
+  privateDir(dir);
+  const target = path.join(dir, path.basename(file.name) || "upload");
   writeFileSync(target, Buffer.from(file.data, "base64"), { mode: 384 });
   chmodSync(target, 384);
   return target;
 }
-function removeUploads(roundID, base = tmpdir()) {
-  rmSync(path.join(uploadRoot(base), safe(roundID)), { recursive: true, force: true });
+function markClosed(roundID, at, base = tmpdir()) {
+  const dir = roundDir(roundID, base);
+  const marker = path.join(dir, CLOSED_MARKER);
+  if (!existsSync(dir) || existsSync(marker))
+    return;
+  writeFileSync(marker, String(at), { mode: 384 });
+}
+var closedAt = (dir) => {
+  try {
+    const value = Number(readFileSync(path.join(dir, CLOSED_MARKER), "utf8"));
+    return Number.isFinite(value) ? value : undefined;
+  } catch {
+    return;
+  }
+};
+function sweepUploads(now, base = tmpdir()) {
+  const root = uploadRoot(base);
+  let names;
+  try {
+    names = readdirSync(root);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    const dir = path.join(root, name);
+    try {
+      const closed = closedAt(dir);
+      const expired = closed === undefined ? now - statSync(dir).mtimeMs > UNMARKED_TTL_MS : now - closed > UPLOAD_TTL_MS;
+      if (expired)
+        rmSync(dir, { recursive: true, force: true });
+    } catch {}
+  }
 }
 
 // plugins/parley/src/index.ts
@@ -2796,7 +3024,8 @@ var src_default = Plugin.define({
       settings: settingsFrom(ctx.options, process.env),
       store: await roundStore(ctx),
       save: (file, roundID) => saveUpload(file, roundID),
-      dropUploads: (roundID) => removeUploads(roundID),
+      closeUploads: (roundID, at) => markClosed(roundID, at),
+      sweepUploads: (now) => sweepUploads(now),
       warn: (message) => console.warn(message),
       deliver: async ({ id, sessionID, text, description }) => {
         await ctx.session.synthetic({ id, sessionID, text, description, delivery: "queue", resume: true });
@@ -2864,7 +3093,7 @@ var src_default = Plugin.define({
         execute: async (input, context) => {
           try {
             const { result, questions } = await service.ask(input, call(context));
-            return render(result, questions, (file) => saveUpload(file, result.round_id), input.format === "native" ? "native" : "parley");
+            return render(result, questions, (file) => service.saveUpload(file, result.round_id), input.format === "native" ? "native" : "parley");
           } catch (error) {
             if (error instanceof InputError)
               throw new Error(error.message);
@@ -2880,7 +3109,7 @@ var src_default = Plugin.define({
         options,
         execute: async (input, context) => {
           const { result, questions } = await service.wait(input, call(context));
-          return render(result, questions, (file) => saveUpload(file, result.round_id));
+          return render(result, questions, (file) => service.saveUpload(file, result.round_id));
         }
       });
       editor.add({
