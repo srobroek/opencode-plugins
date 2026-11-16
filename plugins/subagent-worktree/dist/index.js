@@ -830,8 +830,16 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
   const reservations = new Map;
   let sequence = 0;
   const hasStarted = async (child) => {
-    const session = await getSession(child);
-    return session?.time?.busy !== undefined;
+    let timer;
+    const timeout = new Promise((done) => {
+      timer = setTimeout(() => done(TIMED_OUT), lookupMs);
+    });
+    try {
+      const session = await Promise.race([getSession(child), timeout]);
+      return session !== TIMED_OUT && session?.time?.busy !== undefined;
+    } finally {
+      clearTimeout(timer);
+    }
   };
   const reserve = async (directory, callId) => {
     const token = `${callId}#${++sequence}`;
@@ -930,6 +938,8 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
       });
       if (fresh.kind === "refuse")
         throw new Error(`subagent-worktree: ${fresh.reason}`);
+      if (fresh.warn)
+        notes.set(event.id, fresh.warn);
       const after = reservationStatus(reservations.get(hold.directory), now(), hold.token);
       if (after === "replaced")
         throw new Error(`subagent-worktree: ${hold.directory}: ${FENCED_REASON}`);
@@ -1042,8 +1052,17 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
     if (event.tool !== SUBAGENT_TOOL)
       return;
     const reported = event.status === "completed" ? event.result.metadata : event.error.metadata;
-    if (event.id !== undefined && reported?.status !== "running")
-      release(event.id);
+    if (event.id !== undefined) {
+      if (event.status === "completed" && reported?.status === "running") {
+        const started = event.result.metadata?.sessionID;
+        if (typeof started === "string") {
+          for (const reservation of reservations.values())
+            if (reservation.callId === event.id)
+              reservation.child = started;
+        }
+      } else
+        release(event.id);
+    }
     const skipped = event.id === undefined ? undefined : notes.get(event.id);
     if (event.id !== undefined)
       notes.delete(event.id);

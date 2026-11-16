@@ -290,8 +290,17 @@ export function createLanes(
 
   /** Whether a session's latest execution has started, as `session.get` reports `time.busy`. */
   const hasStarted = async (child: string) => {
-    const session = (await getSession(child)) as { time?: { busy?: unknown } } | undefined
-    return session?.time?.busy !== undefined
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<typeof TIMED_OUT>((done) => {
+      timer = setTimeout(() => done(TIMED_OUT), lookupMs)
+    })
+    try {
+      const session = await Promise.race([getSession(child), timeout])
+      // No answer in time is unknown: keep the reservation until it expires, but do not hang.
+      return session !== TIMED_OUT && (session as { time?: { busy?: unknown } } | undefined)?.time?.busy !== undefined
+    } finally {
+      clearTimeout(timer)
+    }
   }
 
   /**
@@ -397,6 +406,7 @@ export function createLanes(
         sessions: await sessionsIn(parent.projectID, hold.directory),
       })
       if (fresh.kind === "refuse") throw new Error(`subagent-worktree: ${fresh.reason}`)
+      if (fresh.warn) notes.set(event.id, fresh.warn)
       const after = reservationStatus(reservations.get(hold.directory), now(), hold.token)
       if (after === "replaced") throw new Error(`subagent-worktree: ${hold.directory}: ${FENCED_REASON}`)
     }
@@ -515,8 +525,15 @@ export function createLanes(
   ) => {
     if (event.tool !== SUBAGENT_TOOL) return
     const reported = (event.status === "completed" ? event.result.metadata : event.error.metadata) as { status?: unknown } | undefined
-    // A background child keeps the worktree reserved until a later check sees it busy, or the hold expires.
-    if (event.id !== undefined && reported?.status !== "running") release(event.id)
+    if (event.id !== undefined) {
+      if (event.status === "completed" && reported?.status === "running") {
+        // A background child keeps the worktree reserved until a later check sees it busy, or the hold expires.
+        const started = (event.result.metadata as { sessionID?: unknown } | undefined)?.sessionID
+        if (typeof started === "string") {
+          for (const reservation of reservations.values()) if (reservation.callId === event.id) reservation.child = started
+        }
+      } else release(event.id)
+    }
     const skipped = event.id === undefined ? undefined : notes.get(event.id)
     if (event.id !== undefined) notes.delete(event.id)
     if (skipped) {

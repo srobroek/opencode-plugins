@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import { Error as ToolError } from "@opencode/plugin/promise/tool"
 import { createFakeContext, type FakeContext } from "@srobroek/opencode-lib/testing"
 import type { RunResult } from "./git.ts"
 import { createPlugin } from "./index.ts"
@@ -731,6 +732,60 @@ describe("worktree argument", () => {
       stuck.open()
       expect(await stuck.outcome).toMatch(/live writer session ses_late/)
       expect(creates(setup)).toHaveLength(0)
+    })
+
+    test("a tool error on the first spawn releases the worktree for the next writer", async () => {
+      const setup = await start()
+      await first(setup)
+      await setup.fake.fire.tool("execute.after", {
+        ...completed("ses_fake1"),
+        status: "error" as const,
+        error: new ToolError({ message: "boom" }),
+      } as never)
+      expect(sessionID(await second(setup))).toBe("ses_fake2")
+    })
+
+    test("a background spawn into the caller's own worktree ties its child to the reservation", async () => {
+      const setup = await start()
+      const own = (id: string) => setup.fake.fire.tool("execute.before", { ...call({ agent: "pinned", worktree: "main" }), id })
+      await own("call_1")
+      setup.fake.sessions.set("ses_bg", { id: "ses_bg", parentID: PARENT, projectID: "prj", location: { directory: REPO }, time: { busy: 1000, idle: 2000 } })
+      await setup.fake.fire.tool("execute.after", {
+        ...completed("ses_bg"),
+        input: { agent: "pinned", prompt: "x" },
+        result: { content: "started", metadata: { sessionID: "ses_bg", status: "running" } },
+      })
+      // The child has finished: only the reservation could still block, and it follows the child.
+      await expect(own("call_2")).resolves.toBeDefined()
+    })
+
+    test("a child lookup that never settles keeps the reservation without hanging the next spawn", async () => {
+      const setup = await start()
+      await first(setup)
+      await setup.fake.fire.tool("execute.after", backgroundDone())
+      const get = setup.fake.context.session.get.bind(setup.fake.context.session)
+      Object.assign(setup.fake.context.session, {
+        get: (input: { sessionID: string }) => (input.sessionID === "ses_fake1" ? new Promise(() => {}) : get(input)),
+      })
+      const started = Date.now()
+      await expect(second(setup)).rejects.toThrow(/live writer session ses_fake1/)
+      expect(Date.now() - started).toBeLessThan(1000)
+    })
+
+    test("a re-taken reservation keeps the warning when the fresh liveness lookup fails", async () => {
+      let clock = 1_000_000
+      const setup = await start({ now: () => clock })
+      const stuck = await stuckSpawn(setup)
+      clock += 61_000
+      Object.assign(setup.fake.context.session, {
+        list: async () => {
+          throw new Error("unavailable")
+        },
+      })
+      stuck.open()
+      expect(await stuck.outcome).toBe("ses_fake1")
+      const result = await setup.fake.fire.tool("execute.after", completed("ses_fake1"))
+      expect((result.result as { content: string }).content).toContain("could not check whether the worktree already has a live writer")
     })
 
     test("a read-only agent neither reserves nor is blocked", async () => {
