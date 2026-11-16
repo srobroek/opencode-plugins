@@ -25,7 +25,7 @@ contracts. Do not use `ignore` to conceal a broken example.
 Do show setup, action, and an independent expected outcome. Several assertions may
 describe one outcome; separate unrelated success and error scenarios.
 Use `assert_eq!`, `assert!`, and `matches!` with useful failure messages.
-Add `pretty_assertions` only when its diffs improve compound or textual failures.
+Add `pretty_assertions` (the `assertions` row) only when its diffs improve compound or textual failures.
 
 ```rust
 #[test]

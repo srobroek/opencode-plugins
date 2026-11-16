@@ -9,17 +9,20 @@ Checked 2026-11-16.
 | Concern | Default | Maintenance | Install | Alternatives | Use both when | Run | Avoid |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `test-runner` | `cargo-nextest` plus `cargo test --doc` | >= 0.9 · 2026-11-13 · active | `cargo nextest --version` · `cargo binstall cargo-nextest` | `cargo test`: nextest cannot be installed | Always: nextest skips doctests | every-pr | Assuming process isolation covers shared files, ports or databases, or replaces doctests |
+| `assertions` | Built-in: `assert!`, `assert_eq!`, `matches!` plus `pretty_assertions` as the diff helper | >= 1.4.1 · 2024-09-15 · maintenance | `cargo tree -i pretty_assertions` · `cargo add --dev pretty_assertions` | similar-asserts 2.0.0: large strings; googletest 0.14.4 (pre-1.0): composable matchers and non-fatal `expect_that!` | - | every-pr | `assert_matches` crate (use std `matches!`); `k9` (stale) |
+| `watch` | `bacon` with its nextest job | >= 3.26.0 · 2026-09-26 · active | `bacon --version` · `cargo binstall bacon` | watchexec 2.8.0: language-agnostic watching | nextest filtersets for selection: `-E 'package(x)'` | on-demand | `cargo-watch` (archived); bacon is AGPL-3.0, which is fine for running the CLI |
 | `property` | `proptest` | >= 1.12 · 2026-10-10 · active | `cargo tree -i proptest` · `cargo add --dev proptest` | `quickcheck`: simple `Arbitrary` generators; `bolero`: one target shared by property and fuzz engines; `hegeltest`: early, watch only | `proptest` and `bolero` when a property target also feeds a fuzz engine | on-demand | Losing shrunk failures or seeds; generating only valid inputs for parsers; adding all engines |
 | `fuzz` | `cargo-fuzz` | >= 0.13 · 2026-06-09 · active | `cargo fuzz --version` · `cargo install --locked cargo-fuzz` | `bolero`: unified property and fuzz targets; `afl.rs`: AFL-family engine needed; `LibAFL`: custom fuzzer | `cargo-fuzz` and `bolero` when targets are shared | bounded-pr | Discarding corpora or crash inputs; unbounded PR campaigns; a no-panic target as the only oracle |
 | `fuzz-continuous` | Shared: clusterfuzzlite | - | Shared | `Shared: oss-fuzz`: a public open-source project | - | scheduled | Running long campaigns on the PR path; dropping the corpus between runs |
 | `mutation` | `cargo-mutants` under its default `cargo test` | >= 27.1 · 2026-06-02 · active | `cargo mutants --version` · `cargo binstall cargo-mutants` | None | - | diff-pr + scheduled | Whole-project mutation as an unconditional PR gate; test-only diffs assumed to select mutants; nextest runs that hide doctest-only coverage |
 | `snapshot` | `insta` | >= 1.49 · 2026-10-03 · active | `cargo insta --version` · `cargo binstall cargo-insta` | Direct semantic assertions: small outputs | - | every-pr | Automatic acceptance in CI; unstable IDs or times in snapshots |
+| `component` | N/A: no UI component model | - | - | None | - | every-pr | - |
 | `concurrency` | `loom` | >= 0.7 · 2026-11-08 · active | `cargo tree -i loom` · `cargo add --dev loom` | `shuttle`: randomized exploration of larger models; ThreadSanitizer: real code on nightly with `-Zbuild-std` | `loom` for small primitives and TSan for the real binary | on-demand | Treating bounded exploration or stress tests as proof of race freedom |
 | `coverage` | `cargo-llvm-cov` with `cargo llvm-cov nextest` | >= 0.9 · 2026-09-06 · active | `cargo llvm-cov --version` · `cargo binstall cargo-llvm-cov` | `cargo-tarpaulin`: Linux-only projects that already use it | - | every-pr | A percentage as correctness proof; assuming branch or doctest coverage is included |
 | `benchmark` | `criterion` | >= 0.8 · 2026-02-04 · active | `cargo tree -i criterion` · `cargo add --dev criterion` | `divan`: ergonomic allocation-aware benchmarks; `gungraun`: Valgrind instruction counts for noisy CI (unverified, early) | `criterion` for wall time and `gungraun` for stable CI counts | on-demand | Microbenchmarks without a representative workload; unpinned machines |
 | `flaky-order` | `cargo-nextest` retries and `--stress-count` | >= 0.9 · 2026-11-13 · active | `cargo nextest --version` · `cargo binstall cargo-nextest` | nightly shuffle: `cargo +nightly test -- -Z unstable-options --shuffle` for order-dependence hunting, because nextest has no shuffle | Both: nextest for repeats, nightly shuffle for order | scheduled | Retries on by default; reporting an eventual pass as clean; quarantine with no owner or expiry |
 | `integration` | Shared: testcontainers | - | Shared | Existing isolated provisioned test infrastructure: it already exists | - | on-demand | Mocking away transaction and constraint semantics; assuming Docker exists in CI |
-| `contract` | Shared: pact | - | Shared | None | - | on-demand | Mocks mistaken for provider compatibility evidence |
+| `contract` | Shared: contracts | - | Shared | pact_consumer and pact_verifier 1.6.0: two or more services you own call each other and deploy independently (Pact Broker required) | - | on-demand | Pact as the only gate for public APIs; mocks mistaken for provider compatibility evidence |
 | `api-schema` | Shared: schemathesis | - | Shared | None | - | on-demand | Archived Dredd for new OpenAPI adoption |
 | `load` | Shared: k6 | - | Shared | `oha`: simple HTTP load from one command; `goose`: Rust-coded scenarios | `k6` for scenarios and `oha` for quick checks | scheduled | Production load without authorization; framework benchmark rankings as app evidence |
 
@@ -31,6 +34,12 @@ Checked 2026-11-16.
 - **quickcheck**: wins for simple `Arbitrary` generators; costs weaker shrinking and no persistence.
 - **bolero**: wins when one target must serve property tests and fuzz engines; costs a younger ecosystem.
 - **hegeltest**: wins on promise only, because it is early; costs stability, so watch it and do not adopt it.
+
+### assertions
+
+- **pretty_assertions**: wins for readable diffs of compound values; costs a dependency that shadows `assert_eq!`.
+- **similar-asserts**: wins for very large strings; costs a second diff crate.
+- **googletest**: wins for composable matchers and non-fatal checks; costs a pre-1.0 API.
 
 ### fuzz
 
@@ -78,7 +87,7 @@ Checked 2026-11-16.
 | HTTP recording | Reviewed redacted fixtures with `wiremock` | Approved recording tool when a named gap requires it | Unverified recorder recommendation; recording tokens or personal data. |
 | Factories | Small Rust builders and functions | `fake` for seeded broad fixture generation | Random default data making failures irreproducible. |
 | Integration crate | `testcontainers` crate for the shared testcontainers row | Existing isolated provisioned infrastructure | Pinless images; no readiness checks. |
-| Test diagnostics | `test-log`, `pretty_assertions` | `serial_test` only for unavoidable shared state; `claims` for focused assertions | Serializing tests instead of isolating resources. |
+| Test diagnostics | `test-log` | `serial_test` only for unavoidable shared state | Serializing tests instead of isolating resources. |
 
 ## Rules
 

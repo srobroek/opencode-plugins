@@ -160,7 +160,7 @@ diff-cover coverage.xml --compare-branch=origin/main
 ```
 
 Use the project's actual comparison base. `pytest-testmon` can accelerate local
-affected-test runs but must not be the sole correctness gate. Do not infer assertion
+affected-test runs (pair it with `pytest-watcher`, the `watch` row) but must not be the sole correctness gate. Do not infer assertion
 strength from execution coverage or add vacuous tests to reach a percentage.
 
 ## Flaky tests
