@@ -1,9 +1,21 @@
-import type { Answer, SubmittedAnswer } from "./answers.ts"
+import { type Answer, normaliseAnswer, type SubmittedAnswer } from "./answers.ts"
 import { visibleQuestions } from "./conditions.ts"
 import { FALLBACK_KINDS, fromQuestionTool, type Prompt, toPrompt, unsupported } from "./fallback.ts"
+import { summarise } from "./format.ts"
+import { fromStored, type StoredRound, stale, toStored } from "./persist.ts"
 import { Presence } from "./presence.ts"
 import { coerceQuestion, type Question, validateQuestions } from "./questions.ts"
-import { collect, type Round, type RoundResult, Rounds, TIMEOUT, view, type WaitMode, waitFor } from "./rounds.ts"
+import {
+  collect,
+  RELOADED_REASON,
+  type Round,
+  type RoundResult,
+  Rounds,
+  TIMEOUT,
+  view,
+  type WaitMode,
+  waitFor,
+} from "./rounds.ts"
 import type { RoundEvent } from "./rpc.ts"
 import { BUILTIN, fromPrompts, nativeResult, shouldTakeOver } from "./takeover.ts"
 
@@ -45,8 +57,24 @@ export interface QuestionTool {
   execute(input: unknown, context: unknown): Promise<unknown>
 }
 
+/** Where open rounds are kept so they outlive a plugin reload. */
+export interface RoundStore {
+  readonly list: () => Promise<readonly unknown[]>
+  readonly save: (round: StoredRound) => Promise<void>
+  readonly remove: (roundID: string) => Promise<void>
+}
+
+/** A message for the session's agent, for answers that have no waiting tool call to return through. */
+export interface SessionMessage {
+  readonly sessionID: string
+  readonly text: string
+  readonly description: string
+}
+
 export interface Deps {
   readonly emit: (event: RoundEvent) => Promise<void>
+  readonly store?: RoundStore
+  readonly deliver?: (message: SessionMessage) => Promise<void>
   readonly now?: () => number
   readonly questionTool?: () => Promise<QuestionTool | undefined>
   readonly settings: Settings
@@ -82,6 +110,17 @@ const unavailable = (reason: string): Result => ({ status: "unavailable", reason
 
 export class InputError extends Error {}
 
+const DELIVERY_HEAD =
+  "The parley plugin reloaded while you waited, so your parley call ended. The user answered that round afterwards; their answers follow. Act on them; do not ask these questions again."
+
+/** The session message for a restored round's answers, in the wording of a parley tool result. */
+export function deliveryText(result: RoundResult, questions: readonly Question[]): string {
+  return `${DELIVERY_HEAD}\n\n${summarise(result, questions)}`
+}
+
+const failure = (error: unknown) =>
+  `Could not send the answers to the session: ${error instanceof Error ? error.message : String(error)}`
+
 const isCancel = (error: unknown) => {
   const text = `${(error as { name?: string })?.name ?? ""} ${(error as { _tag?: string })?._tag ?? ""} ${
     error instanceof Error ? error.message : String(error)
@@ -94,10 +133,53 @@ export class Parley {
   readonly rounds = new Rounds()
   readonly presence: Presence
   readonly #now: () => number
+  /** Identifies this instance, so a client can tell that the plugin reloaded under it. */
+  readonly instance = crypto.randomUUID()
+  /** Open rounds restored from storage that no tool call is waiting on. Their answers go to the session as a message. */
+  readonly #orphans = new Set<string>()
+  readonly #waits = new Set<AbortController>()
+  #suspended = false
+  #writes: Promise<unknown> = Promise.resolve()
 
   constructor(readonly deps: Deps) {
     this.presence = new Presence(deps.settings.heartbeatWindowMs)
     this.#now = deps.now ?? Date.now
+    this.rounds.subscribe((round) => this.#persist(round))
+  }
+
+  /** Loads the rounds a previous instance left in storage; call once, before the tools are registered. */
+  async restore() {
+    const store = this.deps.store
+    if (!store) return
+    const entries = await store.list().catch(() => [])
+    const now = this.#now()
+    const keep: Round[] = []
+    for (const entry of entries) {
+      const round = fromStored(entry)
+      if (!round) continue
+      if (stale(round, now, CLOSED_TTL_MS)) this.#forget(round.id)
+      else keep.push(round)
+    }
+    this.rounds.restore(keep)
+    for (const round of keep) if (round.status === "open") this.#orphans.add(round.id)
+  }
+
+  #persist(round: Round) {
+    const store = this.deps.store
+    if (!store) return
+    const stored = toStored(round)
+    this.#writes = this.#writes.then(() => store.save(stored)).catch(() => {})
+  }
+
+  #forget(roundID: string) {
+    const store = this.deps.store
+    if (!store) return
+    this.#writes = this.#writes.then(() => store.remove(roundID)).catch(() => {})
+  }
+
+  /** Resolves when every queued storage write has finished. */
+  flush() {
+    return this.#writes
   }
 
   attached(sessionID?: string) {
@@ -181,6 +263,7 @@ export class Parley {
     const seconds = timeoutSeconds(timeout_s)
     if (seconds === 0 || round.status !== "open") return
     round.deadline = Math.max(round.deadline ?? 0, this.#now() + seconds * 1000)
+    this.#persist(round)
   }
 
   async wait(input: WaitInput, context: CallContext): Promise<{ result: Result; questions: readonly Question[] }> {
@@ -217,7 +300,7 @@ export class Parley {
   attach(input: { clientID: string; sessionIDs?: string[]; detach?: boolean }) {
     if (input.detach) this.presence.detach(input.clientID)
     else this.presence.attach(input.clientID, this.#now(), input.sessionIDs)
-    return { ok: true, window_s: this.presence.windowMs / 1000 }
+    return { ok: true, window_s: this.presence.windowMs / 1000, instance: this.instance }
   }
 
   pending(input: { sessionID?: string }) {
@@ -235,15 +318,86 @@ export class Parley {
         action: final ? "closed" : "updated",
         status: round.status,
       })
+    if (outcome.ok && round && final) return { ...outcome, errors: await this.#deliverOrphan(round) }
     return outcome
+  }
+
+  /**
+   * Sends answers the TUI holds for a round this instance does not know (it was never persisted) to the
+   * session as a message, so the user's input is not lost.
+   */
+  async deliver(input: {
+    sessionID: string
+    number?: number
+    questions: readonly Question[]
+    answers: readonly SubmittedAnswer[]
+  }) {
+    if (!this.deps.deliver) return { ok: false, errors: ["Cannot message the session from here."] }
+    const errors: string[] = []
+    const answers: Answer[] = []
+    for (const item of input.answers) {
+      const question = input.questions.find((candidate) => candidate.id === item.id)
+      if (!question) {
+        errors.push(`unknown question ${item.id}`)
+        continue
+      }
+      const result = normaliseAnswer(question, item)
+      if ("error" in result) errors.push(result.error)
+      else answers.push(result.answer)
+    }
+    if (errors.length > 0) return { ok: false, errors }
+    const answered = new Set(answers.map((answer) => answer.id))
+    const result: RoundResult = {
+      status: "submitted",
+      ...(input.number === undefined ? {} : { round: input.number }),
+      answers,
+      pending: input.questions.filter((question) => !answered.has(question.id)).map((question) => question.id),
+    }
+    try {
+      await this.deps.deliver({
+        sessionID: input.sessionID,
+        text: deliveryText(result, input.questions),
+        description: "Parley answers",
+      })
+    } catch (error) {
+      return { ok: false, errors: [failure(error)] }
+    }
+    return { ok: true, errors }
+  }
+
+  /**
+   * A restored round has no waiting call, so the answers that close it go to the session as a message.
+   * Returns the errors to report to the client (none on success).
+   */
+  async #deliverOrphan(round: Round): Promise<string[]> {
+    if (!this.#orphans.has(round.id) || round.status === "open") return []
+    this.#orphans.delete(round.id)
+    if (!this.deps.deliver) return []
+    const result = collect(round)
+    this.#persist(round)
+    try {
+      await this.deps.deliver({
+        sessionID: round.sessionID,
+        text: deliveryText(result, round.questions),
+        description: `Parley round ${round.number} answers`,
+      })
+    } catch (error) {
+      // Keep the answers for a later parley_wait.
+      for (const answer of result.answers) round.delivered.delete(answer.id)
+      this.#persist(round)
+      return [failure(error)]
+    }
+    return []
   }
 
   async cancel(input: { roundID: string; reason?: string }) {
     const reason = input.reason ?? "user_closed"
     const ok = this.rounds.cancel(input.roundID, reason, this.#now())
     const round = this.rounds.get(input.roundID)
-    if (ok && round)
+    if (ok && round) {
       await this.deps.emit({ sessionID: round.sessionID, roundID: round.id, action: "closed", status: "cancelled", reason })
+      await this.#deliverOrphan(round)
+    }
     return { ok }
   }
 
@@ -252,8 +406,17 @@ export class Parley {
     for (const round of this.rounds.pending()) this.rounds.cancel(round.id, reason, this.#now())
   }
 
+  /**
+   * Plugin reload: waiting calls end as `unavailable` and the rounds stay open in storage. The next
+   * instance restores them and sends the answers to the session as a message.
+   */
+  suspend() {
+    this.#suspended = true
+    for (const wait of [...this.#waits]) wait.abort()
+  }
+
   sweep() {
-    this.rounds.sweep(this.#now(), CLOSED_TTL_MS)
+    for (const id of this.rounds.sweep(this.#now(), CLOSED_TTL_MS)) this.#forget(id)
     this.presence.prune(this.#now())
   }
 
@@ -262,6 +425,10 @@ export class Parley {
     options: { mode: WaitMode; ids?: readonly string[]; timeout_s?: number; context: CallContext },
   ): Promise<Result> {
     const { context } = options
+    this.#orphans.delete(round.id)
+    const reload = new AbortController()
+    this.#waits.add(reload)
+    if (this.#suspended) reload.abort()
     const total = () =>
       options.ids === undefined ? round.questions.length : round.questions.filter((q) => options.ids?.includes(q.id)).length
     const report = () =>
@@ -275,8 +442,18 @@ export class Parley {
         mode: options.mode,
         ...(options.ids === undefined ? {} : { ids: options.ids }),
         timeoutMs: timeoutSeconds(options.timeout_s) * 1000,
-        ...(context.signal === undefined ? {} : { signal: context.signal }),
+        signal: context.signal === undefined ? reload.signal : AbortSignal.any([context.signal, reload.signal]),
       })
+      if (outcome === "aborted" && this.#suspended && !context.signal?.aborted)
+        return {
+          status: "unavailable",
+          reason: RELOADED_REASON,
+          round: round.number,
+          round_id: round.id,
+          answers: [],
+          pending: round.questions.map((question) => question.id).filter((id) => !round.answers.has(id)),
+          channel: "tui",
+        }
       // A timeout closes the round like a dismissal, so the TUI takes it down and the model moves on.
       // Only the call with the latest deadline closes it; one that gave up earlier leaves it to that call.
       const last = round.deadline === undefined || this.#now() >= round.deadline - DEADLINE_SLACK_MS
@@ -295,6 +472,8 @@ export class Parley {
       }
     } finally {
       stop()
+      this.#waits.delete(reload)
+      this.#persist(round)
     }
   }
 

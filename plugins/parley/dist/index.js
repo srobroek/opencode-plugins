@@ -1258,6 +1258,238 @@ function describeAnswer(question, answer, index) {
 // plugins/parley/src/notes.ts
 var NOTES_HINT = "Notes are the user's input: act on each one. If a note asks a question or raises a concern, answer it, or ask a follow-up parley round, before you proceed.";
 
+// plugins/parley/src/conditions.ts
+function visibleQuestions(questions, value) {
+  const visible = [];
+  const ids = new Set;
+  for (const question of questions) {
+    const condition = question.show_if;
+    if (condition && (!ids.has(condition.id) || value(condition.id) === undefined || canonical(value(condition.id)) !== canonical(condition.equals)))
+      continue;
+    visible.push(question);
+    ids.add(question.id);
+  }
+  return visible;
+}
+
+// plugins/parley/src/rounds.ts
+var TIMEOUT = "timeout";
+var RELOADED_REASON = "parley reloaded; the round stays open and its answers will arrive as a message";
+
+class Rounds {
+  newID;
+  #rounds = new Map;
+  #counters = new Map;
+  #listeners = new Set;
+  constructor(newID = () => `rnd_${crypto.randomUUID().replaceAll("-", "")}`) {
+    this.newID = newID;
+  }
+  open(sessionID, input, now) {
+    const existing = this.current(sessionID);
+    const errors = validateQuestions(input.questions, existing?.questions);
+    if (errors.length > 0)
+      return { errors };
+    if (existing) {
+      existing.questions.push(...input.questions);
+      if (input.callID !== undefined)
+        existing.callIDs.push(input.callID);
+      if (input.title !== undefined)
+        existing.title = input.title;
+      existing.updated = now;
+      this.#emit(existing);
+      return { round: existing, joined: true };
+    }
+    const number = input.round ?? (this.#counters.get(sessionID) ?? 0) + 1;
+    this.#counters.set(sessionID, Math.max(number, this.#counters.get(sessionID) ?? 0));
+    const round = {
+      id: this.newID(),
+      sessionID,
+      number,
+      ...input.title === undefined ? {} : { title: input.title },
+      questions: [...input.questions],
+      answers: new Map,
+      delivered: new Set,
+      callIDs: input.callID === undefined ? [] : [input.callID],
+      status: "open",
+      created: now,
+      updated: now
+    };
+    this.#rounds.set(round.id, round);
+    this.#emit(round);
+    return { round, joined: false };
+  }
+  get(roundID) {
+    return this.#rounds.get(roundID);
+  }
+  current(sessionID) {
+    for (const round of this.#rounds.values())
+      if (round.sessionID === sessionID && round.status === "open")
+        return round;
+    return;
+  }
+  latest(sessionID) {
+    let found;
+    for (const round of this.#rounds.values())
+      if (round.sessionID === sessionID)
+        found = round;
+    return found;
+  }
+  pending(sessionID) {
+    return [...this.#rounds.values()].filter((round) => round.status === "open" && (sessionID === undefined || round.sessionID === sessionID));
+  }
+  submit(roundID, submitted, final, now) {
+    const round = this.#rounds.get(roundID);
+    if (!round)
+      return { ok: false, errors: [`unknown round ${roundID}`] };
+    if (round.status !== "open")
+      return { ok: false, errors: [`round ${roundID} is ${round.status}`] };
+    const errors = [];
+    const accepted = [];
+    for (const item of submitted) {
+      const question = round.questions.find((candidate) => candidate.id === item.id);
+      if (!question) {
+        errors.push(`unknown question ${item.id}`);
+        continue;
+      }
+      const result = normaliseAnswer(question, item);
+      if ("error" in result)
+        errors.push(result.error);
+      else
+        accepted.push(result.answer);
+    }
+    if (errors.length > 0)
+      return { ok: false, errors };
+    const combined = new Map(round.answers);
+    for (const answer of accepted)
+      combined.set(answer.id, answer);
+    const active = new Set(visibleQuestions(round.questions, (id) => combined.get(id)?.value).map((question) => question.id));
+    for (const id of round.answers.keys())
+      if (!active.has(id)) {
+        round.answers.delete(id);
+        round.delivered.delete(id);
+      }
+    for (const answer of accepted) {
+      if (!active.has(answer.id))
+        continue;
+      round.answers.set(answer.id, answer);
+      round.delivered.delete(answer.id);
+    }
+    if (final)
+      round.status = "submitted";
+    round.updated = now;
+    this.#emit(round);
+    return { ok: true, errors };
+  }
+  cancel(roundID, reason, now) {
+    const round = this.#rounds.get(roundID);
+    if (round?.status !== "open")
+      return false;
+    round.status = "cancelled";
+    round.reason = reason;
+    round.updated = now;
+    this.#emit(round);
+    return true;
+  }
+  remove(sessionID, now) {
+    for (const round of [...this.#rounds.values()]) {
+      if (round.sessionID !== sessionID)
+        continue;
+      this.cancel(round.id, "ended", now);
+      this.#rounds.delete(round.id);
+    }
+  }
+  sweep(now, ttlMs) {
+    const dropped = [];
+    for (const [id, round] of this.#rounds)
+      if (round.status !== "open" && now - round.updated > ttlMs) {
+        this.#rounds.delete(id);
+        dropped.push(id);
+      }
+    return dropped;
+  }
+  restore(restored) {
+    for (const round of [...restored].sort((a, b) => a.created - b.created)) {
+      if (this.#rounds.has(round.id))
+        continue;
+      this.#rounds.set(round.id, round);
+      this.#counters.set(round.sessionID, Math.max(round.number, this.#counters.get(round.sessionID) ?? 0));
+    }
+  }
+  subscribe(listener) {
+    this.#listeners.add(listener);
+    return () => this.#listeners.delete(listener);
+  }
+  #emit(round) {
+    for (const listener of [...this.#listeners])
+      listener(round);
+  }
+}
+var scoped = (round, ids) => visibleQuestions(round.questions, (id) => round.answers.get(id)?.value).map((question) => question.id).filter((id) => ids === undefined || ids.includes(id));
+function settled(round, mode, ids) {
+  if (round.status !== "open" || mode === "none")
+    return true;
+  const wanted = scoped(round, ids);
+  if (wanted.length === 0)
+    return true;
+  if (mode === "any")
+    return wanted.some((id) => round.answers.has(id) && !round.delivered.has(id));
+  return wanted.every((id) => round.answers.has(id));
+}
+function collect(round, options = {}) {
+  const wanted = scoped(round, options.ids);
+  const fresh = wanted.filter((id) => round.answers.has(id) && !round.delivered.has(id));
+  for (const id of fresh)
+    round.delivered.add(id);
+  const answers = fresh.map((id) => round.answers.get(id));
+  const pending = wanted.filter((id) => !round.answers.has(id));
+  const status = round.status === "submitted" ? "submitted" : round.status === "cancelled" ? round.reason === TIMEOUT ? "timeout" : "cancelled" : options.timedOut ? "timeout" : round.answers.size > 0 ? "partial" : "open";
+  return {
+    status,
+    ...round.reason === undefined ? {} : { reason: round.reason },
+    round: round.number,
+    round_id: round.id,
+    answers,
+    pending
+  };
+}
+function view(round) {
+  return {
+    roundID: round.id,
+    sessionID: round.sessionID,
+    number: round.number,
+    ...round.title === undefined ? {} : { title: round.title },
+    status: round.status,
+    questions: round.questions,
+    answers: [...round.answers.values()].map(publicAnswer),
+    ...round.deadline === undefined ? {} : { deadline: round.deadline },
+    ...round.callIDs.length === 0 ? {} : { callIDs: [...round.callIDs] }
+  };
+}
+function waitFor(rounds, round, options) {
+  if (settled(round, options.mode, options.ids))
+    return Promise.resolve("settled");
+  if (options.signal?.aborted)
+    return Promise.resolve("aborted");
+  return new Promise((resolve) => {
+    let timer;
+    const finish = (outcome) => {
+      unsubscribe();
+      if (timer !== undefined)
+        clearTimeout(timer);
+      options.signal?.removeEventListener("abort", onAbort);
+      resolve(outcome);
+    };
+    const onAbort = () => finish("aborted");
+    const unsubscribe = rounds.subscribe((changed) => {
+      if (changed.id === round.id && settled(round, options.mode, options.ids))
+        finish("settled");
+    });
+    if (options.timeoutMs > 0)
+      timer = setTimeout(() => finish("timeout"), options.timeoutMs);
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 // plugins/parley/src/takeover.ts
 var RECOMMENDED = /\s*\(recommended\)\s*$/i;
 var BUILTIN = Symbol("parley.builtin");
@@ -1377,6 +1609,7 @@ var HINTS = {
   unavailable: "No parley UI is available. Ask through the built-in question tool if present, otherwise as a plain markdown round in chat.",
   none: "There is no parley round for this session."
 };
+var RELOADED_HINT = "Do not ask again and do not use the question tool for this round. Carry on with other work or end your turn; the answers reach you as a message.";
 function summarise(result, questions) {
   const counts = `${result.answers.length} answer${result.answers.length === 1 ? "" : "s"}, ${result.pending.length} pending`;
   const head = [
@@ -1393,7 +1626,7 @@ function summarise(result, questions) {
   });
   if (result.pending.length > 0)
     lines.push(`Pending: ${result.pending.join(", ")}`);
-  const hint = HINTS[result.status];
+  const hint = result.reason === RELOADED_REASON ? RELOADED_HINT : HINTS[result.status];
   if (hint)
     lines.push(hint);
   if (result.answers.some((answer) => answer.note !== undefined))
@@ -1441,6 +1674,61 @@ ${clipped}`);
   return { output, content };
 }
 
+// plugins/parley/src/persist.ts
+var ROUND_KEY_PREFIX = "round:";
+var OPEN_TTL_MS = 24 * 60 * 60000;
+var roundKey = (roundID) => `${ROUND_KEY_PREFIX}${roundID}`;
+function toStored(round) {
+  return {
+    id: round.id,
+    sessionID: round.sessionID,
+    number: round.number,
+    ...round.title === undefined ? {} : { title: round.title },
+    questions: round.questions,
+    answers: [...round.answers.values()].map(publicAnswer),
+    delivered: [...round.delivered],
+    callIDs: round.callIDs,
+    status: round.status,
+    ...round.reason === undefined ? {} : { reason: round.reason },
+    ...round.deadline === undefined ? {} : { deadline: round.deadline },
+    created: round.created,
+    updated: round.updated
+  };
+}
+var isRecord4 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+function fromStored(value) {
+  if (!isRecord4(value))
+    return;
+  const { id, sessionID, number, questions, answers, status, created, updated } = value;
+  if (typeof id !== "string" || typeof sessionID !== "string" || typeof number !== "number")
+    return;
+  if (!Array.isArray(questions) || !Array.isArray(answers))
+    return;
+  if (status !== "open" && status !== "submitted" && status !== "cancelled")
+    return;
+  if (typeof created !== "number" || typeof updated !== "number")
+    return;
+  const strings = (input) => Array.isArray(input) ? input.filter((item) => typeof item === "string") : [];
+  return {
+    id,
+    sessionID,
+    number,
+    ...typeof value.title === "string" ? { title: value.title } : {},
+    questions,
+    answers: new Map(answers.filter((answer) => isRecord4(answer) && typeof answer.id === "string").map((answer) => [answer.id, answer])),
+    delivered: new Set(strings(value.delivered)),
+    callIDs: strings(value.callIDs),
+    status,
+    ...typeof value.reason === "string" ? { reason: value.reason } : {},
+    ...typeof value.deadline === "number" ? { deadline: value.deadline } : {},
+    created,
+    updated
+  };
+}
+function stale(round, now, closedTtlMs) {
+  return now - round.updated > (round.status === "open" ? OPEN_TTL_MS : closedTtlMs);
+}
+
 // plugins/parley/src/rpc.ts
 import { Rpc } from "@opencode/plugin/rpc";
 var RPC_ID = "parley";
@@ -1471,6 +1759,19 @@ var ParleyRpc = Rpc.define({
           roundID: { type: "string" },
           answers: { type: "array", items: { type: "object" } },
           final: { type: "boolean" }
+        }
+      },
+      output: { type: "object" }
+    },
+    deliver: {
+      input: {
+        type: "object",
+        required: ["sessionID", "questions", "answers"],
+        properties: {
+          sessionID: { type: "string" },
+          number: { type: "number" },
+          questions: { type: "array", items: { type: "object" } },
+          answers: { type: "array", items: { type: "object" } }
         }
       },
       output: { type: "object" }
@@ -1627,20 +1928,6 @@ var endOutput = {
   required: ["ok"],
   properties: { ok: { type: "boolean" }, closed: { type: "integer" } }
 };
-
-// plugins/parley/src/conditions.ts
-function visibleQuestions(questions, value) {
-  const visible = [];
-  const ids = new Set;
-  for (const question of questions) {
-    const condition = question.show_if;
-    if (condition && (!ids.has(condition.id) || value(condition.id) === undefined || canonical(value(condition.id)) !== canonical(condition.equals)))
-      continue;
-    visible.push(question);
-    ids.add(question.id);
-  }
-  return visible;
-}
 
 // plugins/parley/src/fallback.ts
 var FALLBACK_KINDS = new Set(["pick_one", "show_options", "pick_many", "confirm", "ask_text"]);
@@ -1804,211 +2091,6 @@ class Presence {
   }
 }
 
-// plugins/parley/src/rounds.ts
-var TIMEOUT = "timeout";
-
-class Rounds {
-  newID;
-  #rounds = new Map;
-  #counters = new Map;
-  #listeners = new Set;
-  constructor(newID = () => `rnd_${crypto.randomUUID().replaceAll("-", "")}`) {
-    this.newID = newID;
-  }
-  open(sessionID, input, now) {
-    const existing = this.current(sessionID);
-    const errors = validateQuestions(input.questions, existing?.questions);
-    if (errors.length > 0)
-      return { errors };
-    if (existing) {
-      existing.questions.push(...input.questions);
-      if (input.callID !== undefined)
-        existing.callIDs.push(input.callID);
-      if (input.title !== undefined)
-        existing.title = input.title;
-      existing.updated = now;
-      this.#emit(existing);
-      return { round: existing, joined: true };
-    }
-    const number = input.round ?? (this.#counters.get(sessionID) ?? 0) + 1;
-    this.#counters.set(sessionID, Math.max(number, this.#counters.get(sessionID) ?? 0));
-    const round = {
-      id: this.newID(),
-      sessionID,
-      number,
-      ...input.title === undefined ? {} : { title: input.title },
-      questions: [...input.questions],
-      answers: new Map,
-      delivered: new Set,
-      callIDs: input.callID === undefined ? [] : [input.callID],
-      status: "open",
-      created: now,
-      updated: now
-    };
-    this.#rounds.set(round.id, round);
-    this.#emit(round);
-    return { round, joined: false };
-  }
-  get(roundID) {
-    return this.#rounds.get(roundID);
-  }
-  current(sessionID) {
-    for (const round of this.#rounds.values())
-      if (round.sessionID === sessionID && round.status === "open")
-        return round;
-    return;
-  }
-  latest(sessionID) {
-    let found;
-    for (const round of this.#rounds.values())
-      if (round.sessionID === sessionID)
-        found = round;
-    return found;
-  }
-  pending(sessionID) {
-    return [...this.#rounds.values()].filter((round) => round.status === "open" && (sessionID === undefined || round.sessionID === sessionID));
-  }
-  submit(roundID, submitted, final, now) {
-    const round = this.#rounds.get(roundID);
-    if (!round)
-      return { ok: false, errors: [`unknown round ${roundID}`] };
-    if (round.status !== "open")
-      return { ok: false, errors: [`round ${roundID} is ${round.status}`] };
-    const errors = [];
-    const accepted = [];
-    for (const item of submitted) {
-      const question = round.questions.find((candidate) => candidate.id === item.id);
-      if (!question) {
-        errors.push(`unknown question ${item.id}`);
-        continue;
-      }
-      const result = normaliseAnswer(question, item);
-      if ("error" in result)
-        errors.push(result.error);
-      else
-        accepted.push(result.answer);
-    }
-    if (errors.length > 0)
-      return { ok: false, errors };
-    const combined = new Map(round.answers);
-    for (const answer of accepted)
-      combined.set(answer.id, answer);
-    const active = new Set(visibleQuestions(round.questions, (id) => combined.get(id)?.value).map((question) => question.id));
-    for (const id of round.answers.keys())
-      if (!active.has(id)) {
-        round.answers.delete(id);
-        round.delivered.delete(id);
-      }
-    for (const answer of accepted) {
-      if (!active.has(answer.id))
-        continue;
-      round.answers.set(answer.id, answer);
-      round.delivered.delete(answer.id);
-    }
-    if (final)
-      round.status = "submitted";
-    round.updated = now;
-    this.#emit(round);
-    return { ok: true, errors };
-  }
-  cancel(roundID, reason, now) {
-    const round = this.#rounds.get(roundID);
-    if (round?.status !== "open")
-      return false;
-    round.status = "cancelled";
-    round.reason = reason;
-    round.updated = now;
-    this.#emit(round);
-    return true;
-  }
-  remove(sessionID, now) {
-    for (const round of [...this.#rounds.values()]) {
-      if (round.sessionID !== sessionID)
-        continue;
-      this.cancel(round.id, "ended", now);
-      this.#rounds.delete(round.id);
-    }
-  }
-  sweep(now, ttlMs) {
-    for (const [id, round] of this.#rounds)
-      if (round.status !== "open" && now - round.updated > ttlMs)
-        this.#rounds.delete(id);
-  }
-  subscribe(listener) {
-    this.#listeners.add(listener);
-    return () => this.#listeners.delete(listener);
-  }
-  #emit(round) {
-    for (const listener of [...this.#listeners])
-      listener(round);
-  }
-}
-var scoped = (round, ids) => visibleQuestions(round.questions, (id) => round.answers.get(id)?.value).map((question) => question.id).filter((id) => ids === undefined || ids.includes(id));
-function settled(round, mode, ids) {
-  if (round.status !== "open" || mode === "none")
-    return true;
-  const wanted = scoped(round, ids);
-  if (wanted.length === 0)
-    return true;
-  if (mode === "any")
-    return wanted.some((id) => round.answers.has(id) && !round.delivered.has(id));
-  return wanted.every((id) => round.answers.has(id));
-}
-function collect(round, options = {}) {
-  const wanted = scoped(round, options.ids);
-  const fresh = wanted.filter((id) => round.answers.has(id) && !round.delivered.has(id));
-  for (const id of fresh)
-    round.delivered.add(id);
-  const answers = fresh.map((id) => round.answers.get(id));
-  const pending = wanted.filter((id) => !round.answers.has(id));
-  const status = round.status === "submitted" ? "submitted" : round.status === "cancelled" ? round.reason === TIMEOUT ? "timeout" : "cancelled" : options.timedOut ? "timeout" : round.answers.size > 0 ? "partial" : "open";
-  return {
-    status,
-    ...round.reason === undefined ? {} : { reason: round.reason },
-    round: round.number,
-    round_id: round.id,
-    answers,
-    pending
-  };
-}
-function view(round) {
-  return {
-    roundID: round.id,
-    sessionID: round.sessionID,
-    number: round.number,
-    ...round.title === undefined ? {} : { title: round.title },
-    status: round.status,
-    questions: round.questions,
-    answers: [...round.answers.values()].map(publicAnswer),
-    ...round.deadline === undefined ? {} : { deadline: round.deadline },
-    ...round.callIDs.length === 0 ? {} : { callIDs: [...round.callIDs] }
-  };
-}
-function waitFor(rounds, round, options) {
-  if (settled(round, options.mode, options.ids))
-    return Promise.resolve("settled");
-  if (options.signal?.aborted)
-    return Promise.resolve("aborted");
-  return new Promise((resolve) => {
-    let timer;
-    const finish = (outcome) => {
-      unsubscribe();
-      if (timer !== undefined)
-        clearTimeout(timer);
-      options.signal?.removeEventListener("abort", onAbort);
-      resolve(outcome);
-    };
-    const onAbort = () => finish("aborted");
-    const unsubscribe = rounds.subscribe((changed) => {
-      if (changed.id === round.id && settled(round, options.mode, options.ids))
-        finish("settled");
-    });
-    if (options.timeoutMs > 0)
-      timer = setTimeout(() => finish("timeout"), options.timeoutMs);
-    options.signal?.addEventListener("abort", onAbort, { once: true });
-  });
-}
-
 // plugins/parley/src/service.ts
 var DEFAULT_TIMEOUT_S = 1800;
 var CLOSED_TTL_MS = 30 * 60000;
@@ -2030,6 +2112,13 @@ var unavailable = (reason) => ({ status: "unavailable", reason, answers: [], pen
 
 class InputError extends Error {
 }
+var DELIVERY_HEAD = "The parley plugin reloaded while you waited, so your parley call ended. The user answered that round afterwards; their answers follow. Act on them; do not ask these questions again.";
+function deliveryText(result, questions) {
+  return `${DELIVERY_HEAD}
+
+${summarise(result, questions)}`;
+}
+var failure = (error) => `Could not send the answers to the session: ${error instanceof Error ? error.message : String(error)}`;
 var isCancel = (error) => {
   const text = `${error?.name ?? ""} ${error?._tag ?? ""} ${error instanceof Error ? error.message : String(error)}`;
   return /cancel|dismiss/i.test(text);
@@ -2040,10 +2129,53 @@ class Parley {
   rounds = new Rounds;
   presence;
   #now;
+  instance = crypto.randomUUID();
+  #orphans = new Set;
+  #waits = new Set;
+  #suspended = false;
+  #writes = Promise.resolve();
   constructor(deps) {
     this.deps = deps;
     this.presence = new Presence(deps.settings.heartbeatWindowMs);
     this.#now = deps.now ?? Date.now;
+    this.rounds.subscribe((round) => this.#persist(round));
+  }
+  async restore() {
+    const store = this.deps.store;
+    if (!store)
+      return;
+    const entries = await store.list().catch(() => []);
+    const now = this.#now();
+    const keep = [];
+    for (const entry of entries) {
+      const round = fromStored(entry);
+      if (!round)
+        continue;
+      if (stale(round, now, CLOSED_TTL_MS))
+        this.#forget(round.id);
+      else
+        keep.push(round);
+    }
+    this.rounds.restore(keep);
+    for (const round of keep)
+      if (round.status === "open")
+        this.#orphans.add(round.id);
+  }
+  #persist(round) {
+    const store = this.deps.store;
+    if (!store)
+      return;
+    const stored = toStored(round);
+    this.#writes = this.#writes.then(() => store.save(stored)).catch(() => {});
+  }
+  #forget(roundID) {
+    const store = this.deps.store;
+    if (!store)
+      return;
+    this.#writes = this.#writes.then(() => store.remove(roundID)).catch(() => {});
+  }
+  flush() {
+    return this.#writes;
   }
   attached(sessionID) {
     return this.presence.attached(this.#now(), sessionID);
@@ -2116,6 +2248,7 @@ class Parley {
     if (seconds === 0 || round.status !== "open")
       return;
     round.deadline = Math.max(round.deadline ?? 0, this.#now() + seconds * 1000);
+    this.#persist(round);
   }
   async wait(input, context) {
     const round = this.rounds.current(context.sessionID) ?? this.rounds.latest(context.sessionID);
@@ -2151,7 +2284,7 @@ class Parley {
       this.presence.detach(input.clientID);
     else
       this.presence.attach(input.clientID, this.#now(), input.sessionIDs);
-    return { ok: true, window_s: this.presence.windowMs / 1000 };
+    return { ok: true, window_s: this.presence.windowMs / 1000, instance: this.instance };
   }
   pending(input) {
     return { rounds: this.rounds.pending(input.sessionID).map(view) };
@@ -2167,26 +2300,100 @@ class Parley {
         action: final ? "closed" : "updated",
         status: round.status
       });
+    if (outcome.ok && round && final)
+      return { ...outcome, errors: await this.#deliverOrphan(round) };
     return outcome;
+  }
+  async deliver(input) {
+    if (!this.deps.deliver)
+      return { ok: false, errors: ["Cannot message the session from here."] };
+    const errors = [];
+    const answers = [];
+    for (const item of input.answers) {
+      const question = input.questions.find((candidate) => candidate.id === item.id);
+      if (!question) {
+        errors.push(`unknown question ${item.id}`);
+        continue;
+      }
+      const result = normaliseAnswer(question, item);
+      if ("error" in result)
+        errors.push(result.error);
+      else
+        answers.push(result.answer);
+    }
+    if (errors.length > 0)
+      return { ok: false, errors };
+    const answered = new Set(answers.map((answer) => answer.id));
+    const result = {
+      status: "submitted",
+      ...input.number === undefined ? {} : { round: input.number },
+      answers,
+      pending: input.questions.filter((question) => !answered.has(question.id)).map((question) => question.id)
+    };
+    try {
+      await this.deps.deliver({
+        sessionID: input.sessionID,
+        text: deliveryText(result, input.questions),
+        description: "Parley answers"
+      });
+    } catch (error) {
+      return { ok: false, errors: [failure(error)] };
+    }
+    return { ok: true, errors };
+  }
+  async#deliverOrphan(round) {
+    if (!this.#orphans.has(round.id) || round.status === "open")
+      return [];
+    this.#orphans.delete(round.id);
+    if (!this.deps.deliver)
+      return [];
+    const result = collect(round);
+    this.#persist(round);
+    try {
+      await this.deps.deliver({
+        sessionID: round.sessionID,
+        text: deliveryText(result, round.questions),
+        description: `Parley round ${round.number} answers`
+      });
+    } catch (error) {
+      for (const answer of result.answers)
+        round.delivered.delete(answer.id);
+      this.#persist(round);
+      return [failure(error)];
+    }
+    return [];
   }
   async cancel(input) {
     const reason = input.reason ?? "user_closed";
     const ok = this.rounds.cancel(input.roundID, reason, this.#now());
     const round = this.rounds.get(input.roundID);
-    if (ok && round)
+    if (ok && round) {
       await this.deps.emit({ sessionID: round.sessionID, roundID: round.id, action: "closed", status: "cancelled", reason });
+      await this.#deliverOrphan(round);
+    }
     return { ok };
   }
   close(reason = "plugin_unloaded") {
     for (const round of this.rounds.pending())
       this.rounds.cancel(round.id, reason, this.#now());
   }
+  suspend() {
+    this.#suspended = true;
+    for (const wait of [...this.#waits])
+      wait.abort();
+  }
   sweep() {
-    this.rounds.sweep(this.#now(), CLOSED_TTL_MS);
+    for (const id of this.rounds.sweep(this.#now(), CLOSED_TTL_MS))
+      this.#forget(id);
     this.presence.prune(this.#now());
   }
   async#await(round, options) {
     const { context } = options;
+    this.#orphans.delete(round.id);
+    const reload = new AbortController;
+    this.#waits.add(reload);
+    if (this.#suspended)
+      reload.abort();
     const total = () => options.ids === undefined ? round.questions.length : round.questions.filter((q) => options.ids?.includes(q.id)).length;
     const report = () => context.progress?.({ round: round.number, answered: round.answers.size, total: total() }).catch(() => {});
     const stop = this.rounds.subscribe((changed) => {
@@ -2199,8 +2406,18 @@ class Parley {
         mode: options.mode,
         ...options.ids === undefined ? {} : { ids: options.ids },
         timeoutMs: timeoutSeconds(options.timeout_s) * 1000,
-        ...context.signal === undefined ? {} : { signal: context.signal }
+        signal: context.signal === undefined ? reload.signal : AbortSignal.any([context.signal, reload.signal])
       });
+      if (outcome === "aborted" && this.#suspended && !context.signal?.aborted)
+        return {
+          status: "unavailable",
+          reason: RELOADED_REASON,
+          round: round.number,
+          round_id: round.id,
+          answers: [],
+          pending: round.questions.map((question) => question.id).filter((id) => !round.answers.has(id)),
+          channel: "tui"
+        };
       const last = round.deadline === undefined || this.#now() >= round.deadline - DEADLINE_SLACK_MS;
       const closing = outcome === "aborted" ? "aborted" : outcome === "timeout" && last ? TIMEOUT : undefined;
       if (closing && this.rounds.cancel(round.id, closing, this.#now()))
@@ -2217,6 +2434,8 @@ class Parley {
       };
     } finally {
       stop();
+      this.#waits.delete(reload);
+      this.#persist(round);
     }
   }
   async#fallback(input, context) {
@@ -2314,6 +2533,24 @@ function saveUpload(file) {
   writeFileSync(target, Buffer.from(file.data, "base64"));
   return target;
 }
+async function roundStore(storage) {
+  if (!storage)
+    return;
+  return {
+    list: async () => {
+      const entries = [];
+      let after;
+      do {
+        const page = await storage.scan({ prefix: ROUND_KEY_PREFIX, ...after === undefined ? {} : { after } });
+        entries.push(...page.entries.map((entry) => entry.value));
+        after = page.next;
+      } while (after !== undefined);
+      return entries;
+    },
+    save: (round) => storage.set(roundKey(round.id), round),
+    remove: (roundID) => storage.remove(roundKey(roundID))
+  };
+}
 var src_default = Plugin.define({
   id: "srobroek.parley",
   async setup(ctx) {
@@ -2321,11 +2558,16 @@ var src_default = Plugin.define({
     let emitEvent;
     const service = new Parley({
       settings: settingsFrom(ctx.options, process.env),
+      store: await roundStore(ctx.storage),
+      deliver: async ({ sessionID, text, description }) => {
+        await ctx.session.synthetic({ sessionID, text, description, delivery: "queue", resume: true });
+      },
       emit: async (event) => {
         await emitEvent?.(event).catch(() => {});
       },
       questionTool: async () => (await ctx.tool.list()).find((tool) => tool.id === "question")
     });
+    await service.restore();
     let takeover = Promise.resolve(undefined);
     const syncTakeover = () => {
       if (disposed)
@@ -2362,7 +2604,8 @@ var src_default = Plugin.define({
       },
       pending: async (input) => service.pending(input ?? {}),
       submit: async (input) => service.submit(input),
-      cancel: async (input) => service.cancel(input)
+      cancel: async (input) => service.cancel(input),
+      deliver: async (input) => service.deliver(input)
     });
     emitEvent = (event) => rpc.events.emit("round", { ...event });
     const call = (context) => ({
@@ -2421,7 +2664,7 @@ var src_default = Plugin.define({
       clearInterval(sweep);
       clearInterval(presence);
       disposed = true;
-      service.close();
+      service.suspend();
       takeover.then((current) => current?.dispose()).catch(() => {});
       tools.dispose().catch(() => {});
       rpc.dispose().catch(() => {});

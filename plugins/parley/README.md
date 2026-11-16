@@ -276,11 +276,33 @@ open rounds with `parley.pending` on start and after a reconnect. Desktop, web
 and `opencode run` have no panel, so calls from there get `unavailable` or the
 `question` fallback.
 
+## Reloads
+
+A plugin reload (for example `opencode plugin update`) restarts the server side
+of parley, and a waiting tool call cannot survive it. Open rounds are kept in
+the plugin's storage (questions, answers so far, delivery state; upload bytes
+are not kept) and restored at start. Closed rounds are dropped after 30 minutes
+and open ones after 24 hours.
+
+- A call that is waiting when the plugin reloads returns `unavailable` with the
+  reason `parley reloaded; the round stays open and its answers will arrive as
+  a message`. The round stays open.
+- When the user submits (or dismisses) a restored round, the answers reach the
+  session as a queued synthetic message in the usual result format. It wakes an
+  idle session. If the model calls `parley_wait` first, it gets the answers
+  there instead, and no message is sent.
+- The TUI notices the new server instance on its next check-in and fetches the
+  round again; the draft is kept. If a submit still fails with `unknown round`,
+  the TUI shows the error once and offers to send the answers as a message or
+  dismiss the card.
+
 ## RPC
 
-`parley` methods: `attach { clientID, sessionIDs?, detach? }`,
-`pending { sessionID? }`, `submit { roundID, answers, final? }`,
-`cancel { roundID, reason? }`. Event `round { sessionID, roundID, action }`
+`parley` methods: `attach { clientID, sessionIDs?, detach? }` (replies with the
+server `instance` id), `pending { sessionID? }`,
+`submit { roundID, answers, final? }`,
+`deliver { sessionID, number?, questions, answers }` (send answers to the
+session as a message), `cancel { roundID, reason? }`. Event `round { sessionID, roundID, action }`
 with `action` `opened`, `updated`, `closed` or `ended`.
 
 ## Manual test

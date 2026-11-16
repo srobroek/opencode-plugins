@@ -9,6 +9,7 @@ import { createRoundStore, InlineCard, PANEL, RoundPanel } from "./panel.tsx"
 import { canAutoPresent, canCloseRoundPanel } from "./presentation.ts"
 import type { RoundView } from "./rounds.ts"
 import { ParleyRpc, type RoundEvent } from "./rpc.ts"
+import { type Outcome, submitRound } from "./submit.ts"
 import { inlineEligible } from "./tui-state.ts"
 
 const HEARTBEAT_MS = 10_000
@@ -169,12 +170,23 @@ export default Plugin.define({
     }
 
     let reachable = true
+    // The server instance each location last answered from; a new one means the plugin reloaded there.
+    const instances = new Map<string, string>()
     const heartbeat = async () => {
       if (disposed) return
       const results = await Promise.all(
         locations().map((location) =>
           rpc.attach({ clientID }, { location }).then(
-            () => true,
+            (reply) => {
+              const instance = (reply as { instance?: string } | undefined)?.instance
+              const key = locationKey(location)
+              // Fetch the restored rounds again. The round ids are unchanged, so drafts are kept.
+              if (instance !== undefined && instances.get(key) !== instance) {
+                if (instances.has(key)) void refresh(location)
+                instances.set(key, instance)
+              }
+              return true
+            },
             () => false,
           ),
         ),
@@ -253,23 +265,29 @@ export default Plugin.define({
     const submit = async (view: RoundView, answers: SubmittedAnswer[]) => {
       const entry = rounds().find((item) => item.view.roundID === view.roundID)
       if (!entry) return ["This round is no longer open."]
-      try {
-        const result = (await rpc.submit({ roundID: view.roundID, answers, final: true }, { location: entry.location })) as {
-          ok: boolean
-          errors?: string[]
-        }
-        if (disposed) return []
-        if (!result.ok) return result.errors ?? ["Submit failed"]
-        context.ui.toast.show({ message: "Answers sent", variant: "success", duration: 2000 })
-        await refresh(entry.location)
-        if (disposed) return []
-        const stillPending = forSession(view.sessionID) !== undefined
-        if (canCloseRoundPanel(context.ui.panel.current(), PANEL, view.sessionID, stillPending)) context.ui.panel.close()
-        if (!stillPending) showInline(view.sessionID, false)
-        return []
-      } catch (error) {
-        return [error instanceof Error ? error.message : String(error)]
-      }
+      const problems = await submitRound({
+        submit: () => rpc.submit({ roundID: view.roundID, answers, final: true }, { location: entry.location }) as Promise<Outcome>,
+        deliver: () =>
+          rpc.deliver(
+            { sessionID: view.sessionID, number: view.number, questions: [...view.questions], answers },
+            { location: entry.location },
+          ) as Promise<Outcome>,
+        choose: async () =>
+          (await context.ui.dialog.confirm({
+            title: "This round is gone",
+            message: "The server lost this round. You can still send your answers to the agent as a message.",
+            label: { confirm: "Send these answers as a message", cancel: "Dismiss" },
+          })) === true,
+        notify: (message, variant) => context.ui.toast.show({ message, ...(variant ? { variant } : {}), duration: 2000 }),
+        settle: async () => {
+          await refresh(entry.location)
+          if (disposed) return
+          const stillPending = forSession(view.sessionID) !== undefined
+          if (canCloseRoundPanel(context.ui.panel.current(), PANEL, view.sessionID, stillPending)) context.ui.panel.close()
+          if (!stillPending) showInline(view.sessionID, false)
+        },
+      })
+      return disposed ? [] : problems
     }
 
     const dismiss = async (view: RoundView) => {

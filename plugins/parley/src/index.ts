@@ -5,9 +5,11 @@ import { Plugin } from "@opencode/plugin"
 import type { FileValue, SubmittedAnswer } from "./answers.ts"
 import type { Prompt } from "./fallback.ts"
 import { render } from "./format.ts"
+import { ROUND_KEY_PREFIX, roundKey, type StoredRound } from "./persist.ts"
+import type { Question } from "./questions.ts"
 import { ParleyRpc, type RoundEvent } from "./rpc.ts"
 import { askInput, endInput, endOutput, resultOutput, waitInput } from "./schema.ts"
-import { type AskInput, type CallContext, InputError, Parley, settingsFrom, type WaitInput } from "./service.ts"
+import { type AskInput, type CallContext, InputError, Parley, type RoundStore, settingsFrom, type WaitInput } from "./service.ts"
 import { wrapQuestion } from "./takeover.ts"
 
 export { ParleyRpc } from "./rpc.ts"
@@ -38,6 +40,25 @@ function saveUpload(file: FileValue) {
   return target
 }
 
+/** Rounds in the plugin's own storage, one key per round. Nothing is kept when the host offers no storage. */
+async function roundStore(storage: Plugin.Context["storage"] | undefined): Promise<RoundStore | undefined> {
+  if (!storage) return undefined
+  return {
+    list: async () => {
+      const entries: unknown[] = []
+      let after: string | undefined
+      do {
+        const page = await storage.scan({ prefix: ROUND_KEY_PREFIX, ...(after === undefined ? {} : { after }) })
+        entries.push(...page.entries.map((entry) => entry.value))
+        after = page.next
+      } while (after !== undefined)
+      return entries
+    },
+    save: (round: StoredRound) => storage.set(roundKey(round.id), round as never),
+    remove: (roundID) => storage.remove(roundKey(roundID)),
+  }
+}
+
 export default Plugin.define({
   id: "srobroek.parley",
   async setup(ctx) {
@@ -45,11 +66,19 @@ export default Plugin.define({
     let emitEvent: ((event: RoundEvent) => Promise<void>) | undefined
     const service = new Parley({
       settings: settingsFrom(ctx.options, process.env),
+      store: await roundStore(ctx.storage),
+      // A synthetic message, queued behind any running turn and waking an idle session: the user has just
+      // answered, and the agent's own call died with the reload, so nothing else would tell it.
+      deliver: async ({ sessionID, text, description }) => {
+        await ctx.session.synthetic({ sessionID, text, description, delivery: "queue", resume: true })
+      },
       emit: async (event) => {
         await emitEvent?.(event).catch(() => {})
       },
       questionTool: async () => (await ctx.tool.list()).find((tool) => tool.id === "question"),
     })
+
+    await service.restore()
 
     // execute.before cannot route `question` to parley: renaming a call only reaches direct (non Code
     // Mode) tools, and parley's are Code Mode tools. So the built-in tool itself is wrapped, and only
@@ -95,6 +124,10 @@ export default Plugin.define({
       submit: async (input) =>
         service.submit(input as { roundID: string; answers: SubmittedAnswer[]; final?: boolean }),
       cancel: async (input) => service.cancel(input as { roundID: string; reason?: string }),
+      deliver: async (input) =>
+        service.deliver(
+          input as { sessionID: string; number?: number; questions: Question[]; answers: SubmittedAnswer[] },
+        ),
     })
     emitEvent = (event) => rpc.events.emit("round", { ...event })
 
@@ -158,7 +191,7 @@ export default Plugin.define({
       clearInterval(sweep)
       clearInterval(presence)
       disposed = true
-      service.close()
+      service.suspend()
       void takeover.then((current) => current?.dispose()).catch(() => {})
       void tools.dispose().catch(() => {})
       void rpc.dispose().catch(() => {})

@@ -1,7 +1,7 @@
 import { type Answer, describeAnswer, type FileValue, publicAnswer } from "./answers.ts"
 import { NOTES_HINT } from "./notes.ts"
 import type { Question } from "./questions.ts"
-import type { RoundResult } from "./rounds.ts"
+import { RELOADED_REASON, type RoundResult } from "./rounds.ts"
 import { nativeSummary } from "./takeover.ts"
 
 export interface ToolResult extends RoundResult {
@@ -22,6 +22,9 @@ const HINTS: Partial<Record<ToolResult["status"], string>> = {
   none: "There is no parley round for this session.",
 }
 
+const RELOADED_HINT =
+  "Do not ask again and do not use the question tool for this round. Carry on with other work or end your turn; the answers reach you as a message."
+
 export function summarise(result: ToolResult, questions: readonly Question[]): string {
   const counts = `${result.answers.length} answer${result.answers.length === 1 ? "" : "s"}, ${result.pending.length} pending`
   const head = [
@@ -37,7 +40,7 @@ export function summarise(result: ToolResult, questions: readonly Question[]): s
     lines.push(describe(question, answer, questions.indexOf(question as Question), index))
   })
   if (result.pending.length > 0) lines.push(`Pending: ${result.pending.join(", ")}`)
-  const hint = HINTS[result.status]
+  const hint = result.reason === RELOADED_REASON ? RELOADED_HINT : HINTS[result.status]
   if (hint) lines.push(hint)
   if (result.answers.some((answer) => answer.note !== undefined)) lines.push(NOTES_HINT)
   return lines.join("\n")

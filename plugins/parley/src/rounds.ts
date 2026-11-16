@@ -63,6 +63,9 @@ type Listener = (round: Round) => void
 /** Cancel reason of a round closed because a waiting call's `timeout_s` passed. */
 export const TIMEOUT = "timeout"
 
+/** Reason of the `unavailable` result a waiting call gets when the plugin reloads under it. */
+export const RELOADED_REASON = "parley reloaded; the round stays open and its answers will arrive as a message"
+
 /** In-memory rounds for one plugin instance, keyed by session. One open round per session. */
 export class Rounds {
   readonly #rounds = new Map<string, Round>()
@@ -178,9 +181,24 @@ export class Rounds {
     }
   }
 
-  /** Forgets closed rounds older than `ttlMs`. */
+  /** Forgets closed rounds older than `ttlMs`, and returns their ids. */
   sweep(now: number, ttlMs: number) {
-    for (const [id, round] of this.#rounds) if (round.status !== "open" && now - round.updated > ttlMs) this.#rounds.delete(id)
+    const dropped: string[] = []
+    for (const [id, round] of this.#rounds)
+      if (round.status !== "open" && now - round.updated > ttlMs) {
+        this.#rounds.delete(id)
+        dropped.push(id)
+      }
+    return dropped
+  }
+
+  /** Puts back rounds read from storage after a reload. Ones already known are left alone. */
+  restore(restored: readonly Round[]) {
+    for (const round of [...restored].sort((a, b) => a.created - b.created)) {
+      if (this.#rounds.has(round.id)) continue
+      this.#rounds.set(round.id, round)
+      this.#counters.set(round.sessionID, Math.max(round.number, this.#counters.get(round.sessionID) ?? 0))
+    }
   }
 
   subscribe(listener: Listener) {
