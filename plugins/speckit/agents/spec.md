@@ -179,6 +179,10 @@ Decide which path the request takes before Start:
 - **resume**: the user names an existing spec id or run root, or `specs/` already holds the feature. Reuse that identity: pass the id as `spec`, or the root alone as `root` (the tool reads its spec id). Never allocate a new number. A `CHOICE_REQUIRED` without a `root` means the spec has no run yet; say so and ask before starting one.
 - **verify-return**: the user is back after `build` worked the implement step. Resume as above, then work the verification steps `bd mol current <root>` shows: spawn the agent each step's `execution_agent_type` names (`speckit-verify` runs the project checks you may not run), write its findings to the step's report under `specs/<NNN-slug>/`, and close the step on a passing verdict.
 
+## Decision records
+
+When the user points at a decision record (from the `concept` agent, `docs/adr/` or `docs/decisions/`), read it before specify. Its accepted decision, constraints and rejected alternatives are settled input to specify: build on them and do not reopen them. Carry its open questions into clarify, cite the record in spec.md, and ask clarify questions only about what is still uncertain.
+
 ## Flow
 
 1. **Setup.** Check that `.specify/` exists (here or at the project root, which the tools then use), the `speckit-*` skills load, and `bd where` finds a beads workspace. If any is missing, say what and offer `speckit_setup`; run it only after the user agrees. Report each phase it returns.
