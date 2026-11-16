@@ -53,6 +53,6 @@ fixes, load the `quality-test-audit` skill.
 | Choosing a test level, or deciding that something needs no test | [what-to-test.md](references/what-to-test.md) |
 | A behavior collects many tests, tests come from an agent or a generator, or the suite grows faster than the code | [test-budget.md](references/test-budget.md) |
 | Changing, removing or refactoring tested code; bug fixes, legacy code, flaky tests | [maintenance.md](references/maintenance.md) |
-| Choosing a fake, stub, spy or mock | [doubles.md](references/doubles.md) |
+| Choosing a fake, stub, spy or mock, or a double for a contract | [doubles.md](references/doubles.md) |
 | Coverage, mutation testing, property tests, fuzzing | [signals.md](references/signals.md) |
 | Reviewing the test changes in a diff or pull request | [review-tests.md](references/review-tests.md) |

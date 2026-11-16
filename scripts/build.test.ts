@@ -83,7 +83,7 @@ describe("composeAgents", () => {
 
   test("the composed coder prompt carries the quality line", () => {
     const prompt = readFileSync(path.resolve(import.meta.dir, "../plugins/agent-coder/agents/coder.md"), "utf8")
-    expect(prompt).toContain("skip `quality-code-policy`")
+    expect(prompt).toContain("skip `quality-code-policy` except for stubs")
     expect(prompt).toContain("only for new behavior")
   })
 
