@@ -1,52 +1,136 @@
 import { describe, expect, test } from "bun:test"
 import { forbiddenGit } from "./git-guard.ts"
 
-const REFUSED_BOTH = [
+/** Refused for both guarded agents. */
+const REFUSED = [
   "git push origin main",
   "git -C /wt push",
+  "git -Cx push",
+  "git -C x -c a=b push",
   "git -c core.pager=cat clean -fdx",
   "git --git-dir=/x/.git push",
+  "git --git-dir /x/.git push",
   "git --work-tree /x --no-pager clean -n",
+  "git --exec-path=/x push",
+  "\\git push",
+  "/usr/bin/git push",
+  "command git push",
+  "exec git push",
+  "env -i git push",
+  "env FOO=1 git push",
+  "nice -n 5 git push",
+  "time git push",
+  "xargs git push",
+  "echo x | xargs -n1 git push",
+  "find . -exec git push ';'",
   "cd /wt && git push",
   "echo hi | git push",
   "(git push)",
   "sh -c 'git push'",
-  "env GIT_TRACE=1 git push",
+  "bash -lc 'git push'",
+  "zsh -c 'git -C x push'",
+  "bash -c \"bash -c 'git push'\"",
+  "eval 'git push'",
   "x=$(git push)",
+  "echo `git push`",
   "git $(echo push)",
+  "bash <<'EOF'\ngit push\nEOF",
+  "echo 'git push' | sh",
+  "bash -s <<< 'git push'",
+  "bash ./run.sh # git",
+  "$G push # git",
+  "git pushy",
+  "git gc",
+  "git prune",
+  "git filter-branch --all",
+  "git update-ref -d HEAD",
+  "git reflog expire --all",
+  "git reset --hard HEAD~1",
+  "git reset --har",
+  "git -C wt reset --hard",
+  "git rebase main",
+  "git config user.name x",
+  "git config --global alias.p push",
+  "git config --unset user.name",
+  "git branch -D old",
+  "git branch -dr old",
+  "git branch --delete old",
+  "git branch --del old",
+  "git branch -m new",
+  "git remote add o url",
+  "git remote set-url o url",
+  "git tag v1",
+  "git tag -d v1",
+  "git fetch --upload-pack='touch x'",
+  "git diff --output=src/a.ts",
+  "git -c alias.x=!rm status",
+  "git -c core.fsmonitor=evil status",
+  "GIT_SSH_COMMAND='evil' git fetch",
+  "git --unknown-option status",
 ]
-const ALLOWED_BOTH = [
-  "git log --grep push",
-  "git -C /wt commit -m x",
+
+const ALLOWED = [
   "git status",
-  "git -C /wt checkout -b probe",
+  "git log --grep push",
+  "git -C ../x status",
+  "git -Cx status",
+  "git -c color.ui=never diff",
+  "git --no-pager log -1",
+  "git --git-dir=/x/.git show HEAD",
   "git diff main -- clean.ts",
-  "bun test",
+  "git -C /wt commit -m x",
+  "git -C /wt checkout -b probe",
+  "git switch -c probe",
+  "git add -A && git commit -m x",
+  "git stash",
+  "git reset --soft HEAD~1",
+  "git reset HEAD file",
+  "git cherry-pick abc",
+  "git restore file",
+  "git branch",
+  "git branch -a",
+  "git branch probe",
+  "git branch --show-current",
+  "git tag",
+  "git tag -l 'v*'",
+  "git config --get user.name",
+  "git config --list",
+  "git remote -v",
+  "git remote get-url origin",
+  "git fetch origin",
+  "git worktree add ../w -b b",
+  "git worktree list",
+  "git worktree remove ../w",
+  "git blame file",
+  "git grep push",
+  "git --version",
   "echo 'git push is blocked'",
+  "bun test",
+  "ls",
+  "bash -c 'echo hi'",
+  "bash ./run.sh",
+  "cat file | sh",
 ]
 
 describe("forbiddenGit", () => {
-  test.each(REFUSED_BOTH)("refuses %s for debug and refactor", (command) => {
+  test.each(REFUSED)("refuses %j for debug and refactor", (command) => {
     expect(forbiddenGit(command, "debug")).toBeString()
     expect(forbiddenGit(command, "refactor")).toBeString()
   })
-  test.each(ALLOWED_BOTH)("allows %s for debug and refactor", (command) => {
+  test.each(ALLOWED)("allows %j for debug and refactor", (command) => {
     expect(forbiddenGit(command, "debug")).toBeUndefined()
     expect(forbiddenGit(command, "refactor")).toBeUndefined()
   })
-  test("rebase and hard reset are refused for refactor only", () => {
-    for (const command of ["git rebase main", "git -C wt reset --hard HEAD~1", "git -c a=b rebase -i HEAD~3"]) {
-      expect(forbiddenGit(command, "refactor")).toBeString()
-      expect(forbiddenGit(command, "debug")).toBeUndefined()
-    }
-  })
-  test("a soft reset is allowed for refactor", () => {
-    expect(forbiddenGit("git reset --soft HEAD~1", "refactor")).toBeUndefined()
+  test("bisect is allowed for debug and refused for refactor", () => {
+    expect(forbiddenGit("git bisect start", "debug")).toBeUndefined()
+    expect(forbiddenGit("git -C wt bisect good", "debug")).toBeUndefined()
+    expect(forbiddenGit("git bisect start", "refactor")).toBeString()
   })
   test("other agents are not guarded", () => {
     expect(forbiddenGit("git push", "build")).toBeUndefined()
   })
-  test("an unparseable command that mentions git is refused", () => {
-    expect(forbiddenGit("git push 'unterminated", "debug")).toBeString()
+  test("an unparseable command that mentions git is refused, and one that does not is left alone", () => {
+    expect(forbiddenGit("git status 'unterminated", "debug")).toBeString()
+    expect(forbiddenGit("echo 'unterminated", "debug")).toBeUndefined()
   })
 })

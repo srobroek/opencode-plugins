@@ -529,6 +529,80 @@ var WRAPPERS = new Map([
   ["time", { valued: new Set(["-f", "-o", "--format", "--output"]) }],
   ["nohup", { valued: NONE }]
 ]);
+var ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+function readOption(words, at, wrapper) {
+  const word = words[at];
+  if (word.startsWith("--")) {
+    const eq = word.indexOf("=");
+    const name = eq === -1 ? word : word.slice(0, eq);
+    if (!wrapper.valued.has(name))
+      return null;
+    return eq === -1 ? { name, value: words[at + 1], span: 2 } : { name, value: word.slice(eq + 1), span: 1 };
+  }
+  for (let j = 1;j < word.length; j++) {
+    const name = `-${word[j]}`;
+    if (wrapper.lookup?.has(name))
+      return "lookup";
+    if (!wrapper.valued.has(name))
+      continue;
+    const attached = word.slice(j + 1);
+    return attached ? { name, value: attached, span: 1 } : { name, value: words[at + 1], span: 2 };
+  }
+  return null;
+}
+function commandWords(input) {
+  const { argv, directories } = stripWrappers(input);
+  return { argv, directories };
+}
+function stripWrappers(input) {
+  const words = [...input];
+  const directories = [];
+  const wrappers = [];
+  let i = 0;
+  while (i < words.length) {
+    const word = words[i];
+    if (ASSIGNMENT.test(word) || word === "--") {
+      i++;
+      continue;
+    }
+    const wrapper = WRAPPERS.get(word.slice(word.lastIndexOf("/") + 1));
+    if (wrapper === undefined)
+      break;
+    wrappers.push(word.slice(word.lastIndexOf("/") + 1));
+    i++;
+    while (i < words.length) {
+      const option = words[i];
+      if (option === "--") {
+        i++;
+        break;
+      }
+      if (wrapper.assignments && ASSIGNMENT.test(option)) {
+        i++;
+        continue;
+      }
+      if (!option.startsWith("-"))
+        break;
+      const read = readOption(words, i, wrapper);
+      if (read === "lookup")
+        return { argv: [], directories, wrappers };
+      if (read === null) {
+        i++;
+        continue;
+      }
+      if (read.value === undefined)
+        return { argv: [], directories, wrappers };
+      if (wrapper.split?.has(read.name)) {
+        words.splice(i, read.span, ...tokenizeShell(read.value).map((token) => token.value));
+        continue;
+      }
+      if (wrapper.chdir?.has(read.name))
+        directories.push(read.value);
+      i += read.span;
+    }
+    i += Math.min(wrapper.operands ?? 0, words.length - i);
+  }
+  return { argv: words.slice(i), directories, wrappers };
+}
 
 // plugins/lib/src/tool-targets.ts
 var WRITE_TOOLS = new Set(["edit", "write", "patch"]);
@@ -757,47 +831,55 @@ function commandFromInput(input) {
     return value.cmd;
   return "";
 }
-function parsedInvocations(parsed, executable, booleanFlags = []) {
-  if (parsed.unknown)
-    return [];
-  const found = [];
-  for (const position of parsed.commands) {
-    const executableName = position.executable?.split("/").pop();
-    const index = executableName === executable ? position.argv.findIndex((word, i) => !position.words[i]?.quoted && (word.split("/").pop() ?? word) === executable) : -1;
-    if (index < 0)
-      continue;
-    const args = position.argv.slice(index + 1);
-    const globals = [];
-    let verb;
-    for (let i = 0;i < args.length; i++) {
-      const word = args[i];
-      if (word === undefined)
-        continue;
-      if (word.startsWith("-") && verb === undefined) {
-        globals.push(word);
-        const next = args[i + 1];
-        if (!booleanFlags.includes(word) && !word.includes("=") && next !== undefined && !next.startsWith("-")) {
-          globals.push(next);
-          i++;
-        }
-        continue;
-      }
-      if (verb === undefined && !word.startsWith("\x00"))
-        verb = word;
-    }
-    found.push({ position, command: position.raw, args, verb, globals });
-  }
-  for (const child of parsed.nested)
-    found.push(...parsedInvocations(child, executable, booleanFlags));
-  return found;
-}
 
 // plugins/modes/src/git-guard.ts
-var BOOLEAN_FLAGS = [
+var COMMON = [
+  "status",
+  "diff",
+  "log",
+  "show",
+  "rev-parse",
+  "rev-list",
+  "ls-files",
+  "ls-tree",
+  "cat-file",
+  "blame",
+  "grep",
+  "worktree",
+  "branch",
+  "switch",
+  "checkout",
+  "commit",
+  "add",
+  "restore",
+  "stash",
+  "reset",
+  "cherry-pick",
+  "revert",
+  "apply",
+  "am",
+  "format-patch",
+  "describe",
+  "merge-base",
+  "for-each-ref",
+  "config",
+  "fetch",
+  "remote",
+  "tag"
+];
+var POLICIES = {
+  debug: { subcommands: new Set([...COMMON, "bisect"]) },
+  refactor: { subcommands: new Set(COMMON) }
+};
+var GUARDED_AGENTS = Object.keys(POLICIES);
+var SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh"]);
+var RUNNERS = new Set(["xargs", "watch", "setsid", "parallel"]);
+var XARGS_VALUED = new Set(["-n", "-I", "-L", "-P", "-s", "-d", "-E", "-a", "-J"]);
+var BOOLEAN_GLOBALS = new Set([
   "--no-pager",
-  "-P",
   "--paginate",
   "-p",
+  "-P",
   "--bare",
   "--no-replace-objects",
   "--literal-pathspecs",
@@ -805,39 +887,174 @@ var BOOLEAN_FLAGS = [
   "--noglob-pathspecs",
   "--icase-pathspecs",
   "--no-optional-locks",
-  "--no-lazy-fetch"
-];
-var FORBIDDEN = {
-  debug: { verbs: ["push", "clean"], hardReset: false },
-  refactor: { verbs: ["push", "clean", "rebase"], hardReset: true }
+  "--no-lazy-fetch",
+  "--no-advice",
+  "--version",
+  "--help",
+  "--html-path",
+  "--man-path",
+  "--info-path"
+]);
+var VALUED_GLOBALS = new Set(["--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env", "--attr-source"]);
+var SAFE_CONFIG = /^(core\.(quotepath|autocrlf|whitespace|abbrev|precomposeunicode)|color\.[a-z.]+|diff\.(algorithm|renames|context|noprefix|mnemonicprefix)|log\.[a-z]+|user\.(name|email)|commit\.gpgsign|gc\.auto|advice\.[a-z]+|safe\.directory|protocol\.version|init\.defaultbranch)$/i;
+var DANGEROUS_ENV = /^GIT_(SSH|SSH_COMMAND|EXTERNAL_DIFF|PAGER|EDITOR|ASKPASS|CONFIG[A-Z_]*|EXEC_PATH|PROXY_COMMAND|SEQUENCE_EDITOR)=/;
+var ASSIGNMENT2 = /^[A-Za-z_][A-Za-z0-9_]*=/;
+var RISKY_OPTION = /^--(output|upload-pack|receive-pack|exec|open-files-in-pager|ext-diff|textconv)(=|$)/;
+var MENTIONS_GIT = /git/i;
+var basename2 = (word) => word.replace(/^\\+/, "").split("/").pop() ?? word;
+var longOption = (arg, full) => {
+  const name = arg.split("=")[0] ?? arg;
+  return name.startsWith("--") && name.length >= 3 && full.startsWith(name);
 };
-var GUARDED_AGENTS = Object.keys(FORBIDDEN);
-function forbiddenGit(command, agent) {
-  const rules = FORBIDDEN[agent];
-  if (rules === undefined)
+var cluster = (arg, letters) => /^-[^-]/.test(arg) && [...arg.slice(1)].some((c) => letters.includes(c));
+function checkGit(args, agent, policy) {
+  const refuse = (what) => `${what} is not allowed for the ${agent} agent`;
+  let i = 0;
+  for (;i < args.length; i++) {
+    const word = args[i];
+    if (!word.startsWith("-"))
+      break;
+    if (word === "-C" || word === "-c") {
+      const value = args[++i];
+      if (word === "-c" && (value === undefined || !SAFE_CONFIG.test(value.split("=")[0] ?? "")))
+        return refuse(`git -c ${value ?? ""}`);
+      if (value === undefined)
+        return refuse("git -C without a path");
+    } else if (word.startsWith("-C")) {} else if (word.startsWith("-c")) {
+      if (!SAFE_CONFIG.test(word.slice(2).split("=")[0] ?? ""))
+        return refuse(`git ${word}`);
+    } else if (word.startsWith("--exec-path")) {
+      return refuse("git --exec-path");
+    } else if (BOOLEAN_GLOBALS.has(word)) {} else if (VALUED_GLOBALS.has(word)) {
+      if (args[++i] === undefined)
+        return refuse(`git ${word} without a value`);
+    } else if (VALUED_GLOBALS.has(word.split("=")[0] ?? "") && word.includes("=")) {} else
+      return refuse(`git option ${word}`);
+  }
+  const sub = args[i];
+  if (sub === undefined)
+    return;
+  const rest = args.slice(i + 1);
+  if (!policy.subcommands.has(sub))
+    return refuse(`git ${sub}`);
+  const risky = rest.find((arg) => RISKY_OPTION.test(arg) || sub === "grep" && /^-O/.test(arg));
+  if (risky !== undefined)
+    return refuse(`git ${sub} ${risky}`);
+  switch (sub) {
+    case "reset":
+      if (rest.some((arg) => longOption(arg, "--hard")))
+        return refuse("git reset --hard");
+      break;
+    case "branch":
+      if (rest.some((arg) => cluster(arg, "dDmMcCfu") || ["--delete", "--move", "--copy", "--force", "--set-upstream-to", "--unset-upstream", "--edit-description"].some((full) => longOption(arg, full))))
+        return refuse("git branch with a delete, move, copy or force option");
+      break;
+    case "config": {
+      const read = rest.some((arg) => ["--get", "--get-all", "--get-regexp", "--list", "-l"].includes(arg));
+      const write = rest.some((arg) => ["--add", "--unset", "--unset-all", "--replace-all", "--edit", "-e", "--rename-section", "--remove-section", "--global", "--system", "--file", "-f"].includes(arg));
+      if (!read || write)
+        return refuse("git config writes");
+      break;
+    }
+    case "remote": {
+      const [first, ...others] = rest;
+      const ok = first === undefined || first === "-v" || first === "--verbose" || first === "get-url" && others.every((arg) => !arg.startsWith("-") || arg === "--all");
+      if (!ok)
+        return refuse("git remote changes");
+      break;
+    }
+    case "tag": {
+      const list = rest.some((arg) => arg === "-l" || arg === "--list");
+      if (rest.some((arg) => cluster(arg, "dasfmuF") || ["--delete", "--force", "--annotate", "--sign", "--message", "--local-user"].some((f) => longOption(arg, f))))
+        return refuse("git tag with a create or delete option");
+      if (rest.some((arg) => !arg.startsWith("-")) && !list)
+        return refuse("git tag creating a tag");
+      break;
+    }
+    case "worktree":
+      if (!["add", "list", "remove", "lock", "unlock", "move", "repair"].includes(rest[0] ?? ""))
+        return refuse(`git worktree ${rest[0] ?? ""}`);
+      break;
+  }
+  return;
+}
+function runnerCommand(exe, args) {
+  let i = 0;
+  while (i < args.length && args[i].startsWith("-"))
+    i += exe === "xargs" && XARGS_VALUED.has(args[i]) ? 2 : 1;
+  return args.slice(i);
+}
+function checkWords(input, agent, policy, depth) {
+  if (depth > 6)
+    return "the command nests too deeply to check its git use";
+  const assignments = input.filter((word) => ASSIGNMENT2.test(word));
+  const { argv } = commandWords(input);
+  const first = argv[0];
+  if (first === undefined)
+    return;
+  const exe = basename2(first);
+  const args = argv.slice(1);
+  if (/^[$`]/.test(first) || first.includes("$("))
+    return "a variable or substitution in command position cannot be checked";
+  if (exe === "git") {
+    if (assignments.some((word) => DANGEROUS_ENV.test(word)))
+      return `git with ${assignments.find((word) => DANGEROUS_ENV.test(word))} is not allowed for the ${agent} agent`;
+    return checkGit(args, agent, policy);
+  }
+  if (SHELLS.has(exe)) {
+    const flag = args.findIndex((arg) => /^-[a-zA-Z]*c[a-zA-Z]*$/.test(arg));
+    const payload = flag >= 0 ? args[flag + 1] : undefined;
+    if (payload === undefined)
+      return `a shell reading its script from stdin or a file cannot be checked`;
+    return checkCommand(payload, agent, policy, depth + 1);
+  }
+  if (exe === "eval")
+    return checkCommand(args.join(" "), agent, policy, depth + 1);
+  if (RUNNERS.has(exe))
+    return checkWords(runnerCommand(exe, args), agent, policy, depth + 1);
+  if (exe === "find") {
+    for (let i = 0;i < args.length; i++) {
+      if (!["-exec", "-execdir", "-ok", "-okdir"].includes(args[i]))
+        continue;
+      const end = args.findIndex((arg, j) => j > i && (arg === ";" || arg === "+" || arg === "\\;"));
+      const reason = checkWords(args.slice(i + 1, end < 0 ? undefined : end), agent, policy, depth + 1);
+      if (reason !== undefined)
+        return reason;
+    }
+  }
+  return;
+}
+function checkParsed(parsed, agent, policy, depth) {
+  for (const position of parsed.commands) {
+    const reason = checkWords(position.argv, agent, policy, depth);
+    if (reason !== undefined)
+      return reason;
+  }
+  for (const child of parsed.nested) {
+    const reason = checkParsed(child, agent, policy, depth + 1);
+    if (reason !== undefined)
+      return reason;
+  }
+  return;
+}
+function checkCommand(command, agent, policy, depth) {
+  if (!MENTIONS_GIT.test(command.replace(/['"\\]/g, "")))
     return;
   const parsed = parse(command);
   if (parsed.unknown)
-    return /\bgit\b/.test(command) ? "the command could not be parsed, so its git use cannot be checked" : undefined;
-  for (const call of parsedInvocations(parsed, "git", BOOLEAN_FLAGS)) {
-    const verb = call.verb;
-    if (verb === undefined)
-      continue;
-    if (/[$`'"(]/.test(verb))
-      return `git subcommand "${verb}" is not a plain word, so it cannot be checked`;
-    if (rules.verbs.includes(verb))
-      return `git ${verb} is not allowed for the ${agent} agent`;
-    if (rules.hardReset && verb === "reset" && call.args.includes("--hard"))
-      return `git reset --hard is not allowed for the ${agent} agent`;
-  }
-  return;
+    return "the command could not be parsed, so its git use cannot be checked";
+  return checkParsed(parsed, agent, policy, depth);
+}
+function forbiddenGit(command, agent) {
+  const policy = POLICIES[agent];
+  return policy === undefined ? undefined : checkCommand(command, agent, policy, 0);
 }
 function forbiddenGitInput(input, agent) {
   return forbiddenGit(commandFromInput(input), agent);
 }
 
 // plugins/modes/src/modes.ts
-import { basename as basename2 } from "path";
+import { basename as basename3 } from "path";
 var AGENT_IDS = ["debug", "refactor", "concept"];
 var MODES2 = {
   debug: defineMode({
@@ -870,7 +1087,7 @@ function parseOptions(raw) {
   };
 }
 function selectAgents(paths, options) {
-  return paths.filter((path) => options.agents[basename2(path, ".md")] === true);
+  return paths.filter((path) => options.agents[basename3(path, ".md")] === true);
 }
 function enabledModes(options) {
   return AGENT_IDS.filter((id) => options.agents[id]).map((id) => MODES2[id]);
