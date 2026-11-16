@@ -2328,12 +2328,9 @@ async function verifyCleanTarget(path, run, timeoutMs, pin, branch) {
     const all = result.stdout.split(/\r?\n/).filter(Boolean);
     return refuse2("worktree.status", { paths: dirtyPaths(result.stdout), total: all.length }, "no dirty paths (empty porcelain output)");
   }
-  const dirArgv = ["rev-parse", "--absolute-git-dir"];
-  const dir = await runGit(run, path, dirArgv, timeoutMs, pin);
-  if (!completed(dir) || dir.stdout.trim() === "") {
-    return commandFailure("worktree.operation", ["git", ...dirArgv], dir, "exit 0 and the worktree's git directory");
-  }
-  const gitDir = dir.stdout.trim();
+  const gitDir = pin?.GIT_DIR;
+  if (gitDir === undefined)
+    return refuse2("worktree.operation", path, "a verified git directory to read operation markers from");
   const operations = operationsInProgress(OPERATION_MARKERS.map((marker) => marker.name).filter((name) => existsSync2(resolve2(gitDir, name))));
   if (operations.length > 0)
     return refuse2("worktree.operation", operations, "no merge, rebase, cherry-pick, revert or bisect in progress");

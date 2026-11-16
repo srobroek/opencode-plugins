@@ -695,12 +695,9 @@ async function verifyCleanTarget(
       "no dirty paths (empty porcelain output)",
     )
   }
-  const dirArgv = ["rev-parse", "--absolute-git-dir"]
-  const dir = await runGit(run, path, dirArgv, timeoutMs, pin)
-  if (!completed(dir) || dir.stdout.trim() === "") {
-    return commandFailure("worktree.operation", ["git", ...dirArgv], dir, "exit 0 and the worktree's git directory")
-  }
-  const gitDir = dir.stdout.trim()
+  // The verified pin names this worktree's own git directory; no extra git read is needed.
+  const gitDir = pin?.GIT_DIR
+  if (gitDir === undefined) return refuse("worktree.operation", path, "a verified git directory to read operation markers from")
   const operations = operationsInProgress(
     OPERATION_MARKERS.map((marker) => marker.name).filter((name) => existsSync(resolve(gitDir, name))),
   )
