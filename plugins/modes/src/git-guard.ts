@@ -12,7 +12,7 @@
  */
 
 import { commandWords } from "@srobroek/opencode-lib/command-words"
-import { type CommandPosition, commandFromInput, type ParsedCommand, parse } from "@srobroek/opencode-lib/shell-command"
+import { type CommandPosition, type ParsedCommand, parse } from "@srobroek/opencode-lib/shell-command"
 import { isShellTool, shellCommand } from "@srobroek/opencode-lib/tool-targets"
 
 type Policy = { subcommands: ReadonlySet<string> }
