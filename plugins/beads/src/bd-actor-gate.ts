@@ -110,12 +110,20 @@ export function actorStateAfter(command: string, inherited: ActorState = {}): Ac
 function readCommand(command: string, inherited: ActorState): { invocations: BdInvocation[]; state: ActorState } {
   const out: BdInvocation[] = []
   const scan = scanShell(command, { executableSubstitutionsOnly: true })
-  const state: ActorState = { ...inherited }
+  let state: ActorState = { ...inherited }
+  // A subshell `( … )` gets a copy of the actor state; its exports end with it.
+  const scopes: ActorState[] = []
   // Substitutions not claimed by a command's own words (here-document bodies) run with the final state.
   const unclaimed = [...scan.substitutions]
 
   for (const item of scan.items) {
-    if (item.kind === "operator") continue
+    if (item.kind === "operator") {
+      if (item.operator === "(") {
+        scopes.push(state)
+        state = { ...state }
+      } else if (item.operator === ")" && scopes.length > 0) state = scopes.pop() as ActorState
+      continue
+    }
 
     // A substitution runs where its command does, with the exports in force at that point.
     // An unquoted here-document body expands in the shell that owns the command.

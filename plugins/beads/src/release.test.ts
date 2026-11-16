@@ -10,19 +10,24 @@ import {
   releaseReport,
   restoreStatusArgs,
 } from "./release.ts"
-import { simulatedHolders } from "./test-support.ts"
+import { fixtureHolders } from "./test-support.ts"
 
 const AT = "2026-09-14T12:34:56.789Z"
 
 /** Feed successful shell results through claim tracking, as `execute.after` does. */
-function track(commands: Array<string | [string, string]>, env: NodeJS.ProcessEnv = {}, cwd = "/repo"): ClaimState {
+function track(
+  commands: Array<string | [string, string]>,
+  env: NodeJS.ProcessEnv = {},
+  cwd = "/repo",
+  holders: Record<string, string> = {},
+): ClaimState {
   const state = readClaimState(undefined)
   for (const entry of commands) {
     const [command, output] = typeof entry === "string" ? [entry, "command succeeded"] : entry
     {
-      const run = { BEADS_DIR: "/repo/.beads", ...env }
+      const run: NodeJS.ProcessEnv = { BEADS_DIR: "/repo/.beads", ...env }
       const invocations = bdInvocations(command)
-      recordClaimTransitions(state, command, cwd, run, output, invocations, simulatedHolders(cwd, run, output, invocations))
+      recordClaimTransitions(state, command, cwd, run, output, invocations, fixtureHolders(holders, run.BEADS_ACTOR ?? run.BD_ACTOR))
     }
   }
   return state
@@ -80,7 +85,7 @@ describe("held-claims advisory (the stop nudge)", () => {
     const state = track([
       ["bd ready --claim", "Claimed bd-a-1"],
       ["BD_ACTOR=actor/b bd ready --claim", "Claimed bd-b-2"],
-    ], { BD_ACTOR: "actor/a" })
+    ], { BD_ACTOR: "actor/a" }, "/repo", { "bd-a-1": "actor/a", "bd-b-2": "actor/b" })
     const text = advisory(state)
     expect(text).toContain("BEADS_ACTOR='actor/a' BD_ACTOR='actor/a' bd")
     expect(text).toContain("BEADS_ACTOR='actor/b' BD_ACTOR='actor/b' bd")
@@ -96,7 +101,7 @@ describe("held-claims advisory (the stop nudge)", () => {
         ["BD_ACTOR=actor/a 'bd' update bd-quoted-1 --claim", "Updated issue: bd-quoted-1"],
         ["BD_ACTOR=actor/a b\\d update bd-escaped-2 --claim", "Updated issue: bd-escaped-2"],
         ["BD_ACTOR=actor/a command 'bd' update bd-command-3 --claim", "Updated issue: bd-command-3"],
-      ]),
+      ], {}, "/repo", { "bd-quoted-1": "actor/a", "bd-escaped-2": "actor/a", "bd-command-3": "actor/a" }),
     )
     for (const id of ["bd-quoted-1", "bd-escaped-2", "bd-command-3"]) expect(text).toContain(id)
   })
@@ -124,6 +129,8 @@ describe("held-claims advisory (the stop nudge)", () => {
           ["cat <<EOF\nbd close bd-probe-2m7\nEOF", "bd close bd-probe-2m7\n"],
         ],
         env,
+        "/repo",
+        { "bd-post-actor-0a0": "someone/else" },
       ),
     )
     expect(text).toContain("bd-probe-2m7")
@@ -150,14 +157,19 @@ describe("held-claims advisory (the stop nudge)", () => {
       track([
         ["BD_ACTOR=a/s1 bd update bd-claimed-0 --claim", "Claimed bd-claimed-0"],
         ["BD_ACTOR=a/s1 bd assign bd-assigned-1 a/s1", "Assigned bd-assigned-1 to a/s1"],
-      ]),
+      ], {}, "/repo", { "bd-claimed-0": "a/s1" }),
     )
     expect(text).toContain("bd-assigned-1 [a/s1]")
   })
 
   test("compound claims retain each invocation's actor", () => {
     const text = advisory(
-      track([["BD_ACTOR=actor/a bd update bd-a-1 --claim; BD_ACTOR=actor/b bd update bd-b-2 --claim", "Claimed bd-a-1\nClaimed bd-b-2"]]),
+      track(
+        [["BD_ACTOR=actor/a bd update bd-a-1 --claim; BD_ACTOR=actor/b bd update bd-b-2 --claim", "Claimed bd-a-1\nClaimed bd-b-2"]],
+        {},
+        "/repo",
+        { "bd-a-1": "actor/a", "bd-b-2": "actor/b" },
+      ),
     )
     expect(text).toContain("bd-a-1 [actor/a]")
     expect(text).toContain("bd-b-2 [actor/b]")
@@ -165,7 +177,7 @@ describe("held-claims advisory (the stop nudge)", () => {
 
   test("a bead claimed twice in one command is held by whoever bd reports", () => {
     const text = advisory(
-      track([["BD_ACTOR=actor/a bd update bd-x-1 --claim; BD_ACTOR=actor/b bd update bd-x-1 --claim || true", "Claimed bd-x-1"]]),
+      track([["BD_ACTOR=actor/a bd update bd-x-1 --claim; BD_ACTOR=actor/b bd update bd-x-1 --claim || true", "Claimed bd-x-1"]], {}, "/repo", { "bd-x-1": "actor/b" }),
     )
     expect(text).toContain("bd-x-1 [actor/b]")
   })
@@ -230,8 +242,9 @@ describe("held-claims advisory (the stop nudge)", () => {
 
   test("relative db selectors keep their effective directory identity", () => {
     const claimed = ["BEADS_DIR=$X BD_ACTOR=a/s1 bd -C /A --db .beads update bd-probe-2m7 --claim"]
-    expect(heldClaimsAdvisory(track([...claimed, "BEADS_DIR=$X BD_ACTOR=a/s1 bd -C /B --db .beads close bd-probe-2m7"]))).toBeDefined()
-    expect(heldClaimsAdvisory(track([...claimed, "BEADS_DIR=$X BD_ACTOR=a/s1 bd -C /A --db .beads close bd-probe-2m7"]))).toBeUndefined()
+    const held = { "bd-probe-2m7": "a/s1" }
+    expect(heldClaimsAdvisory(track([...claimed, "BEADS_DIR=$X BD_ACTOR=a/s1 bd -C /B --db .beads close bd-probe-2m7"], {}, "/repo", held))).toBeDefined()
+    expect(heldClaimsAdvisory(track([...claimed, "BEADS_DIR=$X BD_ACTOR=a/s1 bd -C /A --db .beads close bd-probe-2m7"], {}, "/repo", held))).toBeUndefined()
   })
 
   test("a long list is capped and counted", () => {

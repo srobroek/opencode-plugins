@@ -6,8 +6,10 @@
  * location, so module memory would split one session's claims across instances.
  */
 
+import { existsSync } from "node:fs"
 import { resolve } from "node:path"
-import { type BdInvocation, flagEnabled, globalValue } from "./bd-actor-gate.ts"
+import { type BdInvocation, flagEnabled, globalValue, invocationActor } from "./bd-actor-gate.ts"
+import { planEmbeddedWrites } from "./bd-embedded-write-lock.ts"
 import { claimedIds, claimedTextIds } from "./bd-lease-gate.ts"
 import { type BdRun, bdStoreForInvocation, envelopeData } from "./gate-admission.ts"
 import { closeInvocations, tokenizeShell } from "./shell.ts"
@@ -46,7 +48,31 @@ export function readClaimState(value: unknown): ClaimState {
   return state
 }
 
-type ClaimTarget = { key: string; store: string | null }
+type ClaimTarget = { key: string; store: string | null; ambiguous?: true }
+
+/** Where the embedded-write planner resolved each write: the store (undefined when it cannot say) and directory. */
+type PlannedTargets = Map<string, { store: string | undefined; cwd: string }>
+
+const invocationSignature = (invocation: BdInvocation): string =>
+  [invocation.verb, ...invocation.args, "\0", ...invocation.globals].join("\0")
+
+/**
+ * Resolve each `bd` write's store the way the write lock does, so a preceding `export BEADS_DIR=…`,
+ * `cd` or command-local `BEADS_DIR` selects the ledger the write really lands in.
+ */
+function plannedTargets(command: string, cwd: string, env: NodeJS.ProcessEnv): PlannedTargets {
+  const planned: PlannedTargets = new Map()
+  planEmbeddedWrites(command, cwd, env, {
+    classify: false,
+    observe: ({ invocation, store, cwd: writeCwd }) => {
+      const key = invocationSignature(invocation)
+      const earlier = planned.get(key)
+      // The same write at two different stores is ambiguous.
+      planned.set(key, earlier !== undefined && earlier.store !== store ? { store: undefined, cwd: writeCwd } : { store, cwd: writeCwd })
+    },
+  })
+  return planned
+}
 
 /** Bead-id-shaped arguments. Deliberately loose; callers intersect with real ids. */
 export function beadIdCandidates(command: string): string[] {
@@ -101,7 +127,12 @@ function unclaimIds(args: readonly string[]): string[] {
   return ids
 }
 
-function claimTarget(invocation: BdInvocation, cwd: string, env: NodeJS.ProcessEnv): ClaimTarget {
+function claimTarget(
+  invocation: BdInvocation,
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  planned?: PlannedTargets,
+): ClaimTarget {
   const localStore = invocation.prefix.findLast((token) => token.startsWith("BEADS_DIR="))?.slice("BEADS_DIR=".length)
   const global = flagEnabled(invocation.globals, ["--global"])
   const database = globalValue(invocation.globals, ["--database"])
@@ -117,8 +148,17 @@ function claimTarget(invocation: BdInvocation, cwd: string, env: NodeJS.ProcessE
         : directory !== undefined
           ? ["directory", base]
           : undefined
-  const store = bdStoreForInvocation(invocation, cwd, env) ?? null
-  if (selector !== undefined) return { key: `external:${JSON.stringify(selector)}`, store }
+  if (selector !== undefined) return { key: `external:${JSON.stringify(selector)}`, store: bdStoreForInvocation(invocation, cwd, env) ?? null }
+  const plan = planned?.get(invocationSignature(invocation))
+  const ambient = bdStoreForInvocation(invocation, cwd, env) ?? null
+  if (plan !== undefined) {
+    // The planner could not name the store (a computed `cd` or `BEADS_DIR`) while the ambient
+    // environment points at a ledger: the write may land elsewhere, so the target is ambiguous.
+    if (plan.store === undefined && ambient !== null && existsSync(ambient))
+      return { key: `ambiguous:${invocationSignature(invocation)}`, store: null, ambiguous: true }
+    if (plan.store !== undefined) return { key: plan.store, store: plan.store }
+  }
+  const store = ambient
   if (store !== null) return { key: store, store }
   return {
     key: `external:${JSON.stringify(["beadsDir", localStore === undefined ? undefined : resolve(cwd, localStore)])}`,
@@ -216,9 +256,18 @@ function transitionFlags(args: string[]): { actorOverride: string | undefined; c
 }
 
 /** One bead a claim-enabled invocation may have claimed, and the key its holder is stored under. */
-export type ClaimLookup = { invocation: BdInvocation; id: string; key: string }
+export type ClaimLookup = {
+  invocation: BdInvocation
+  id: string
+  key: string
+  /** The directory and store the claiming write ran against, as the write planner resolved them. */
+  cwd: string
+  store: string | undefined
+  /** The actors this session's invocation could have run as; bd's answer must be one of them. */
+  candidates: ReadonlySet<string>
+}
 
-/** The holder of each claimed bead, as bd itself reports it. A bead missing from the map was unreadable. */
+/** The holder of each claimed bead, as bd itself reports it. A bead missing from the map was not confirmed. */
 export type ClaimHolders = ReadonlyMap<string, string>
 
 function claimEnabled(invocation: BdInvocation): boolean {
@@ -228,52 +277,67 @@ function claimEnabled(invocation: BdInvocation): boolean {
 }
 
 /**
- * Every bead a successful command may have claimed. The caller asks bd who holds each one:
- * the holder is read from the ledger, never guessed from the shell text, because the actor a
- * command really ran under depends on the shell (a skipped export, an unset, a wrapper).
+ * Every bead a successful command may have claimed, with the ledger it targets. The caller asks
+ * bd who holds each one. A holder counts only when it is an actor this session's invocation
+ * could have used (`injected`, an explicit `--actor`, or the actor its environment names), so a
+ * bead the same command then reassigns to someone else is not adopted as this session's claim.
  */
 export function claimLookups(
+  command: string,
   cwd: string,
   env: NodeJS.ProcessEnv,
   output: string,
   invocations: BdInvocation[],
+  injected?: string,
 ): ClaimLookup[] {
   const outputIds = claimedIds(output)
+  const planned = plannedTargets(command, cwd, env)
   const found: ClaimLookup[] = []
   for (const invocation of invocations) {
     if (!claimEnabled(invocation)) continue
-    const target = claimTarget(invocation, cwd, env)
+    const target = claimTarget(invocation, cwd, env, planned)
+    if (target.ambiguous === true) continue
+    const candidates = new Set<string>()
+    for (const actor of [injected, transitionFlags(invocation.args).actorOverride, invocationActor(invocation, env)])
+      if (actor !== undefined && actor !== null && actor !== "") candidates.add(actor)
+    const plan = planned.get(invocationSignature(invocation))
     const direct = mutationTargetIds(invocation.args)
-    for (const id of new Set(direct.length > 0 ? direct : outputIds)) found.push({ invocation, id, key: claimKey(target, id) })
+    for (const id of new Set(direct.length > 0 ? direct : outputIds))
+      found.push({ invocation, id, key: claimKey(target, id), cwd: plan?.cwd ?? cwd, store: plan?.store, candidates })
   }
   return found
 }
 
 /**
- * Ask bd who holds each looked-up bead (`bd show <id> --json`, same store selectors as the
- * claiming command). Beads bd cannot answer for are left out of the map.
+ * Ask bd who holds each looked-up bead (`bd show <id> --json`, against the store and directory
+ * the claiming write targeted). Beads bd cannot answer for, or reports under an actor outside
+ * the lookup's candidates, are left out of the map.
  */
 export async function readClaimHolders(
   lookups: ClaimLookup[],
-  cwd: string,
   env: NodeJS.ProcessEnv,
   run: BdRun,
   deadline: number,
 ): Promise<Map<string, string>> {
   const holders = new Map<string, string>()
   const seen = new Set<string>()
-  for (const { invocation, id, key } of lookups) {
+  for (const { invocation, id, key, cwd, store, candidates } of lookups) {
     if (seen.has(key)) continue
     seen.add(key)
     const local = invocation.prefix.findLast((token) => token.startsWith("BEADS_DIR="))
-    const queryEnv = local === undefined ? env : { ...env, BEADS_DIR: resolve(cwd, local.slice("BEADS_DIR=".length)) }
+    const queryEnv =
+      store !== undefined
+        ? { ...env, BEADS_DIR: store }
+        : local === undefined
+          ? env
+          : { ...env, BEADS_DIR: resolve(cwd, local.slice("BEADS_DIR=".length)) }
     const result = await run(cwd, [...invocation.globals, "show", id, "--json"], deadline, queryEnv)
     if ("failure" in result) continue
     try {
       const data = envelopeData(JSON.parse(result.output))
       const issue = (Array.isArray(data) ? data[0] : data) as { assignee?: unknown } | undefined
-      const assignee = issue?.assignee
-      if (typeof assignee === "string" && assignee.trim() !== "") holders.set(key, assignee.trim())
+      const assignee = typeof issue?.assignee === "string" ? issue.assignee.trim() : ""
+      if (assignee !== "" && candidates.has(assignee)) holders.set(key, assignee)
     } catch {
       // Unreadable output: leave the bead untracked.
     }
@@ -284,8 +348,8 @@ export async function readClaimHolders(
 /**
  * Update `state` from one successful shell result. `command` is the command as the
  * agent wrote it, before any rewrite; `env` the environment it ran under; `holders` who bd
- * says holds each claimed bead. Returns the beads whose holder could not be read: those are
- * not tracked, since recording a guess would hand the lease to the wrong actor.
+ * says holds each claimed bead. Returns the beads whose holder could not be confirmed: those
+ * are not tracked, since recording a guess would hand the lease to the wrong actor.
  */
 export function recordClaimTransitions(
   state: ClaimState,
@@ -297,6 +361,7 @@ export function recordClaimTransitions(
   holders: ClaimHolders = new Map(),
 ): string[] {
   const unreadable: string[] = []
+  const planned = plannedTargets(command, cwd, env)
   const transitions = invocations.flatMap((invocation) => {
     const flags = transitionFlags(invocation.args)
     return flagEnabled(invocation.globals, ["--help", "-h"]) || flags.help ? [] : [{ flags, invocation }]
@@ -323,7 +388,7 @@ export function recordClaimTransitions(
   for (const { invocation } of transitions) {
     if (!claimEnabled(invocation)) continue
     const directIds = mutationTargetIds(invocation.args)
-    const target = claimTarget(invocation, cwd, env)
+    const target = claimTarget(invocation, cwd, env, planned)
     if (direct) {
       for (const id of directIds.length > 0 ? directIds : allOutputIds) track(target, id)
       continue
@@ -334,7 +399,7 @@ export function recordClaimTransitions(
   const entry = transitions[0]
   if (entry === undefined) return unreadable
   const { invocation } = entry
-  const target = claimTarget(invocation, cwd, env)
+  const target = claimTarget(invocation, cwd, env, planned)
   for (const close of closeInvocations(command)) {
     for (const id of close.ids) deleteClaim(state, target, id)
   }
@@ -374,7 +439,7 @@ const CONTENTION = [
 ]
 
 export const CONTENTION_ADVISORY =
-  "Beads: this is embedded-store contention, not a failure. Wait briefly and retry the same command, up to three attempts, then report what still failed. Do not escalate it, report the run as blocked, or build your own lock, wrapper or retry helper: the plugin's embedded-write lock already serialises writes. `workspace gate unavailable, continuing ungated` is NOT contention: that command ran. The beads-contention-retry skill has the full policy."
+  "Beads reported embedded-store contention: another bd process holds this workspace, so the command did not complete. Retrying the same command after a short wait usually succeeds, and the plugin's embedded-write lock serialises writes. `workspace gate unavailable, continuing ungated` is not contention: that command ran."
 
 /** The contention advisory when `output` shows contention, else `undefined`. */
 export function contentionAdvisory(output: string): string | undefined {

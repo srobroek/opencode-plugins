@@ -1483,11 +1483,18 @@ function actorStateAfter(command, inherited = {}) {
 function readCommand(command, inherited) {
   const out = [];
   const scan = scanShell(command, { executableSubstitutionsOnly: true });
-  const state = { ...inherited };
+  let state = { ...inherited };
+  const scopes = [];
   const unclaimed = [...scan.substitutions];
   for (const item of scan.items) {
-    if (item.kind === "operator")
+    if (item.kind === "operator") {
+      if (item.operator === "(") {
+        scopes.push(state);
+        state = { ...state };
+      } else if (item.operator === ")" && scopes.length > 0)
+        state = scopes.pop();
       continue;
+    }
     const spans = [...item.words, ...item.redirects];
     const texts = [];
     if (spans.length > 0) {
@@ -1970,143 +1977,8 @@ function isDir(path) {
 }
 
 // plugins/beads/src/claims.ts
+import { existsSync as existsSync4 } from "fs";
 import { resolve as resolve6 } from "path";
-
-// plugins/beads/src/gate-admission.ts
-import { existsSync as existsSync3, realpathSync as realpathSync3, statSync as statSync3 } from "fs";
-import { dirname as dirname3, isAbsolute as isAbsolute4, join as join2, resolve as resolve5 } from "path";
-
-// plugins/lib/src/subprocess.ts
-import { constants } from "os";
-var EXIT_GRACE_MS = 2000;
-var EXIT_POLL_MS = 100;
-function processAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error.code === "EPERM";
-  }
-}
-function killChild(child, group) {
-  if (group) {
-    try {
-      process.kill(-child.pid, "SIGKILL");
-      return;
-    } catch {}
-  }
-  try {
-    child.kill("SIGKILL");
-  } catch {}
-}
-function unref(timer) {
-  timer.unref?.();
-}
-function capture(stream) {
-  if (!(stream instanceof ReadableStream))
-    return { text: Promise.resolve(""), snapshot: () => "", cancel: () => {} };
-  const reader = stream.getReader();
-  const decoder = new TextDecoder;
-  let collected = "";
-  const text = (async () => {
-    try {
-      for (;; ) {
-        const chunk = await reader.read();
-        if (chunk.done)
-          break;
-        collected += decoder.decode(chunk.value, { stream: true });
-      }
-    } catch {}
-    collected += decoder.decode();
-    return collected;
-  })();
-  const cancel = () => {
-    try {
-      reader.cancel().catch(() => {
-        return;
-      });
-    } catch {}
-  };
-  return { text, snapshot: () => collected, cancel };
-}
-function supervise(child, options = {}) {
-  const grace = Math.max(0, options.graceMs ?? EXIT_GRACE_MS);
-  const pollMs = Math.max(1, options.pollMs ?? EXIT_POLL_MS);
-  const alive = options.alive ?? processAlive;
-  const group = options.group ?? false;
-  const { signal, timeoutMs } = options;
-  const out = capture(child.stdout);
-  const err = capture(child.stderr);
-  return new Promise((resolve) => {
-    let ended = null;
-    let exitSeen = false;
-    let settled = false;
-    let goneSince = null;
-    let deadline;
-    let graceTimer;
-    const settle = (run) => {
-      if (settled)
-        return;
-      settled = true;
-      clearTimeout(deadline);
-      clearTimeout(graceTimer);
-      clearInterval(poller);
-      signal?.removeEventListener("abort", onAbort);
-      resolve(run);
-    };
-    const end = (cause) => {
-      if (ended !== null || settled)
-        return;
-      ended = cause;
-      if (cause !== "lost" || group)
-        killChild(child, group);
-      out.cancel();
-      err.cancel();
-      graceTimer = setTimeout(() => settle({ kind: cause, stdout: out.snapshot(), stderr: err.snapshot() }), grace);
-      if (options.unref)
-        unref(graceTimer);
-    };
-    const onAbort = () => end("aborted");
-    const poller = setInterval(() => {
-      if (exitSeen || ended !== null || settled)
-        return;
-      if (alive(child.pid)) {
-        goneSince = null;
-        return;
-      }
-      goneSince ??= Date.now();
-      if (Date.now() - goneSince >= grace)
-        end("lost");
-    }, pollMs);
-    unref(poller);
-    if (timeoutMs !== undefined && timeoutMs > 0 && Number.isFinite(timeoutMs)) {
-      deadline = setTimeout(() => end("timeout"), timeoutMs);
-      if (options.unref)
-        unref(deadline);
-    }
-    signal?.addEventListener("abort", onAbort, { once: true });
-    if (signal?.aborted)
-      onAbort();
-    child.exited.then(() => {
-      exitSeen = true;
-    }, () => {
-      return;
-    });
-    Promise.all([child.exited, out.text, err.text]).then(([exitCode, stdout, stderr]) => {
-      if (ended !== null)
-        settle({ kind: ended, stdout, stderr });
-      else
-        settle({ kind: "exited", exitCode, signalCode: signalName(child.signalCode), stdout, stderr });
-    }, () => end("lost"));
-  });
-}
-function signalName(code) {
-  if (code === null || code === undefined)
-    return null;
-  if (typeof code === "string")
-    return code;
-  return Object.entries(constants.signals).find(([, n]) => n === code)?.[0] ?? String(code);
-}
 
 // plugins/beads/src/bd-embedded-write-lock.ts
 import { spawnSync as spawnSync2 } from "child_process";
@@ -2124,14 +1996,14 @@ import { hostname } from "os";
 import { basename as basename2, dirname as dirname2, isAbsolute as isAbsolute3, join, resolve as resolve4 } from "path";
 
 // plugins/beads/src/bounded-read.ts
-import { closeSync, constants as constants2, fstatSync, lstatSync as lstatSync2, openSync, readSync } from "fs";
+import { closeSync, constants, fstatSync, lstatSync as lstatSync2, openSync, readSync } from "fs";
 var MAX_LEDGER_FILE_BYTES = 64 * 1024;
 function readBounded(path) {
   let fd;
   try {
     if (!lstatSync2(path).isFile())
       return { kind: "unreadable" };
-    fd = openSync(path, constants2.O_RDONLY | constants2.O_NOFOLLOW | constants2.O_NONBLOCK);
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     const info = fstatSync(fd);
     if (!info.isFile() || info.size > MAX_LEDGER_FILE_BYTES)
       return { kind: "unreadable" };
@@ -3297,6 +3169,142 @@ async function decideEmbeddedWrite(parsed, cwd, env, callID, deadline = Date.now
 }
 
 // plugins/beads/src/gate-admission.ts
+import { existsSync as existsSync3, realpathSync as realpathSync3, statSync as statSync3 } from "fs";
+import { dirname as dirname3, isAbsolute as isAbsolute4, join as join2, resolve as resolve5 } from "path";
+
+// plugins/lib/src/subprocess.ts
+import { constants as constants2 } from "os";
+var EXIT_GRACE_MS = 2000;
+var EXIT_POLL_MS = 100;
+function processAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+}
+function killChild(child, group) {
+  if (group) {
+    try {
+      process.kill(-child.pid, "SIGKILL");
+      return;
+    } catch {}
+  }
+  try {
+    child.kill("SIGKILL");
+  } catch {}
+}
+function unref(timer) {
+  timer.unref?.();
+}
+function capture(stream) {
+  if (!(stream instanceof ReadableStream))
+    return { text: Promise.resolve(""), snapshot: () => "", cancel: () => {} };
+  const reader = stream.getReader();
+  const decoder = new TextDecoder;
+  let collected = "";
+  const text = (async () => {
+    try {
+      for (;; ) {
+        const chunk = await reader.read();
+        if (chunk.done)
+          break;
+        collected += decoder.decode(chunk.value, { stream: true });
+      }
+    } catch {}
+    collected += decoder.decode();
+    return collected;
+  })();
+  const cancel = () => {
+    try {
+      reader.cancel().catch(() => {
+        return;
+      });
+    } catch {}
+  };
+  return { text, snapshot: () => collected, cancel };
+}
+function supervise(child, options = {}) {
+  const grace = Math.max(0, options.graceMs ?? EXIT_GRACE_MS);
+  const pollMs = Math.max(1, options.pollMs ?? EXIT_POLL_MS);
+  const alive = options.alive ?? processAlive;
+  const group = options.group ?? false;
+  const { signal, timeoutMs } = options;
+  const out = capture(child.stdout);
+  const err = capture(child.stderr);
+  return new Promise((resolve) => {
+    let ended = null;
+    let exitSeen = false;
+    let settled = false;
+    let goneSince = null;
+    let deadline;
+    let graceTimer;
+    const settle = (run) => {
+      if (settled)
+        return;
+      settled = true;
+      clearTimeout(deadline);
+      clearTimeout(graceTimer);
+      clearInterval(poller);
+      signal?.removeEventListener("abort", onAbort);
+      resolve(run);
+    };
+    const end = (cause) => {
+      if (ended !== null || settled)
+        return;
+      ended = cause;
+      if (cause !== "lost" || group)
+        killChild(child, group);
+      out.cancel();
+      err.cancel();
+      graceTimer = setTimeout(() => settle({ kind: cause, stdout: out.snapshot(), stderr: err.snapshot() }), grace);
+      if (options.unref)
+        unref(graceTimer);
+    };
+    const onAbort = () => end("aborted");
+    const poller = setInterval(() => {
+      if (exitSeen || ended !== null || settled)
+        return;
+      if (alive(child.pid)) {
+        goneSince = null;
+        return;
+      }
+      goneSince ??= Date.now();
+      if (Date.now() - goneSince >= grace)
+        end("lost");
+    }, pollMs);
+    unref(poller);
+    if (timeoutMs !== undefined && timeoutMs > 0 && Number.isFinite(timeoutMs)) {
+      deadline = setTimeout(() => end("timeout"), timeoutMs);
+      if (options.unref)
+        unref(deadline);
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted)
+      onAbort();
+    child.exited.then(() => {
+      exitSeen = true;
+    }, () => {
+      return;
+    });
+    Promise.all([child.exited, out.text, err.text]).then(([exitCode, stdout, stderr]) => {
+      if (ended !== null)
+        settle({ kind: ended, stdout, stderr });
+      else
+        settle({ kind: "exited", exitCode, signalCode: signalName(child.signalCode), stdout, stderr });
+    }, () => end("lost"));
+  });
+}
+function signalName(code) {
+  if (code === null || code === undefined)
+    return null;
+  if (typeof code === "string")
+    return code;
+  return Object.entries(constants2.signals).find(([, n]) => n === code)?.[0] ?? String(code);
+}
+
+// plugins/beads/src/gate-admission.ts
 var GATE_ADMISSION_MS = 20000;
 var BD_COMMAND_CEILING_MS = 120000;
 var MAX_LISTED = 8;
@@ -3705,6 +3713,19 @@ function readClaimState(value) {
   }
   return state;
 }
+var invocationSignature = (invocation) => [invocation.verb, ...invocation.args, "\x00", ...invocation.globals].join("\x00");
+function plannedTargets(command, cwd, env) {
+  const planned = new Map;
+  planEmbeddedWrites(command, cwd, env, {
+    classify: false,
+    observe: ({ invocation, store, cwd: writeCwd }) => {
+      const key = invocationSignature(invocation);
+      const earlier = planned.get(key);
+      planned.set(key, earlier !== undefined && earlier.store !== store ? { store: undefined, cwd: writeCwd } : { store, cwd: writeCwd });
+    }
+  });
+  return planned;
+}
 function beadIdCandidates(command) {
   const ids = [];
   for (const token of command.split(/[\s;&|(`'"]+/)) {
@@ -3759,7 +3780,7 @@ function unclaimIds(args) {
   }
   return ids;
 }
-function claimTarget(invocation, cwd, env) {
+function claimTarget(invocation, cwd, env, planned) {
   const localStore = invocation.prefix.findLast((token) => token.startsWith("BEADS_DIR="))?.slice("BEADS_DIR=".length);
   const global = flagEnabled(invocation.globals, ["--global"]);
   const database = globalValue(invocation.globals, ["--database"]);
@@ -3767,9 +3788,17 @@ function claimTarget(invocation, cwd, env) {
   const directory = globalValue(invocation.globals, ["-C", "--directory"]);
   const base = directory === undefined ? cwd : resolve6(cwd, directory);
   const selector = global ? ["global"] : database !== undefined ? ["database", database] : db !== undefined ? ["db", resolve6(base, db)] : directory !== undefined ? ["directory", base] : undefined;
-  const store = bdStoreForInvocation(invocation, cwd, env) ?? null;
   if (selector !== undefined)
-    return { key: `external:${JSON.stringify(selector)}`, store };
+    return { key: `external:${JSON.stringify(selector)}`, store: bdStoreForInvocation(invocation, cwd, env) ?? null };
+  const plan = planned?.get(invocationSignature(invocation));
+  const ambient = bdStoreForInvocation(invocation, cwd, env) ?? null;
+  if (plan !== undefined) {
+    if (plan.store === undefined && ambient !== null && existsSync4(ambient))
+      return { key: `ambiguous:${invocationSignature(invocation)}`, store: null, ambiguous: true };
+    if (plan.store !== undefined)
+      return { key: plan.store, store: plan.store };
+  }
+  const store = ambient;
   if (store !== null)
     return { key: store, store };
   return {
@@ -3874,43 +3903,52 @@ function claimEnabled(invocation) {
     return false;
   return invocation.verb === "claim" || (invocation.verb === "update" || invocation.verb === "ready") && flags.claim;
 }
-function claimLookups(cwd, env, output, invocations) {
+function claimLookups(command, cwd, env, output, invocations, injected) {
   const outputIds = claimedIds(output);
+  const planned = plannedTargets(command, cwd, env);
   const found = [];
   for (const invocation of invocations) {
     if (!claimEnabled(invocation))
       continue;
-    const target = claimTarget(invocation, cwd, env);
+    const target = claimTarget(invocation, cwd, env, planned);
+    if (target.ambiguous === true)
+      continue;
+    const candidates = new Set;
+    for (const actor of [injected, transitionFlags(invocation.args).actorOverride, invocationActor(invocation, env)])
+      if (actor !== undefined && actor !== null && actor !== "")
+        candidates.add(actor);
+    const plan = planned.get(invocationSignature(invocation));
     const direct = mutationTargetIds(invocation.args);
     for (const id of new Set(direct.length > 0 ? direct : outputIds))
-      found.push({ invocation, id, key: claimKey(target, id) });
+      found.push({ invocation, id, key: claimKey(target, id), cwd: plan?.cwd ?? cwd, store: plan?.store, candidates });
   }
   return found;
 }
-async function readClaimHolders(lookups, cwd, env, run, deadline) {
+async function readClaimHolders(lookups, env, run, deadline) {
   const holders = new Map;
   const seen = new Set;
-  for (const { invocation, id, key } of lookups) {
+  for (const { invocation, id, key, cwd, store, candidates } of lookups) {
     if (seen.has(key))
       continue;
     seen.add(key);
     const local = invocation.prefix.findLast((token) => token.startsWith("BEADS_DIR="));
-    const queryEnv = local === undefined ? env : { ...env, BEADS_DIR: resolve6(cwd, local.slice("BEADS_DIR=".length)) };
+    const queryEnv = store !== undefined ? { ...env, BEADS_DIR: store } : local === undefined ? env : { ...env, BEADS_DIR: resolve6(cwd, local.slice("BEADS_DIR=".length)) };
     const result = await run(cwd, [...invocation.globals, "show", id, "--json"], deadline, queryEnv);
     if ("failure" in result)
       continue;
     try {
       const data = envelopeData(JSON.parse(result.output));
       const issue = Array.isArray(data) ? data[0] : data;
-      const assignee = issue?.assignee;
-      if (typeof assignee === "string" && assignee.trim() !== "")
-        holders.set(key, assignee.trim());
+      const assignee = typeof issue?.assignee === "string" ? issue.assignee.trim() : "";
+      if (assignee !== "" && candidates.has(assignee))
+        holders.set(key, assignee);
     } catch {}
   }
   return holders;
 }
 function recordClaimTransitions(state, command, cwd, env, output, invocations, holders = new Map) {
   const unreadable = [];
+  const planned = plannedTargets(command, cwd, env);
   const transitions = invocations.flatMap((invocation) => {
     const flags = transitionFlags(invocation.args);
     return flagEnabled(invocation.globals, ["--help", "-h"]) || flags.help ? [] : [{ flags, invocation }];
@@ -3934,7 +3972,7 @@ function recordClaimTransitions(state, command, cwd, env, output, invocations, h
     if (!claimEnabled(invocation))
       continue;
     const directIds = mutationTargetIds(invocation.args);
-    const target = claimTarget(invocation, cwd, env);
+    const target = claimTarget(invocation, cwd, env, planned);
     if (direct) {
       for (const id of directIds.length > 0 ? directIds : allOutputIds)
         track(target, id);
@@ -3950,7 +3988,7 @@ function recordClaimTransitions(state, command, cwd, env, output, invocations, h
   if (entry === undefined)
     return unreadable;
   const { invocation } = entry;
-  const target = claimTarget(invocation, cwd, env);
+  const target = claimTarget(invocation, cwd, env, planned);
   for (const close of closeInvocations(command)) {
     for (const id of close.ids)
       deleteClaim(state, target, id);
@@ -3994,7 +4032,7 @@ var CONTENTION = [
   /lock already held by another process/i,
   /workspace gate busy/i
 ];
-var CONTENTION_ADVISORY = "Beads: this is embedded-store contention, not a failure. Wait briefly and retry the same command, up to three attempts, then report what still failed. Do not escalate it, report the run as blocked, or build your own lock, wrapper or retry helper: the plugin's embedded-write lock already serialises writes. `workspace gate unavailable, continuing ungated` is NOT contention: that command ran. The beads-contention-retry skill has the full policy.";
+var CONTENTION_ADVISORY = "Beads reported embedded-store contention: another bd process holds this workspace, so the command did not complete. Retrying the same command after a short wait usually succeeds, and the plugin's embedded-write lock serialises writes. `workspace gate unavailable, continuing ungated` is not contention: that command ran.";
 function contentionAdvisory(output) {
   return CONTENTION.some((pattern) => pattern.test(output)) ? CONTENTION_ADVISORY : undefined;
 }
@@ -4610,12 +4648,12 @@ function storedPrime(value) {
 }
 
 // plugins/beads/src/session-start.ts
-import { existsSync as existsSync5, readFileSync as readFileSync4, realpathSync as realpathSync5, rmSync } from "fs";
+import { existsSync as existsSync6, readFileSync as readFileSync4, realpathSync as realpathSync5, rmSync } from "fs";
 import { dirname as dirname6, join as join4, resolve as resolve8 } from "path";
 
 // plugins/beads/src/binary-hooks.ts
 import { spawnSync as spawnSync3 } from "child_process";
-import { closeSync as closeSync3, existsSync as existsSync4, openSync as openSync3, readdirSync as readdirSync2, readFileSync as readFileSync3, readSync as readSync2, realpathSync as realpathSync4, statSync as statSync4 } from "fs";
+import { closeSync as closeSync3, existsSync as existsSync5, openSync as openSync3, readdirSync as readdirSync2, readFileSync as readFileSync3, readSync as readSync2, realpathSync as realpathSync4, statSync as statSync4 } from "fs";
 import { isAbsolute as isAbsolute5, join as join3, resolve as resolve7, sep } from "path";
 var BINARY_MAGICS = [
   [254, 237, 250, 206],
@@ -4656,7 +4694,7 @@ function hooksDirectory(cwd, git) {
     return isAbsolute5(configured.stdout) ? configured.stdout : resolve7(cwd, configured.stdout);
   }
   const conventional = join3(cwd, ".git", "hooks");
-  return existsSync4(conventional) ? conventional : undefined;
+  return existsSync5(conventional) ? conventional : undefined;
 }
 function fileHasMarker(path, magicsOnly = false) {
   const fd = openSync3(path, "r");
@@ -4900,7 +4938,7 @@ function lastPushNotice(contents) {
 }
 function consumeLastPush(store) {
   const log = join4(store, "last-push.log");
-  if (!existsSync5(log))
+  if (!existsSync6(log))
     return;
   let notice;
   try {
@@ -5185,7 +5223,7 @@ function decideBdUpdateCloseParsed(parsed) {
 }
 
 // plugins/beads/src/ledger-context.ts
-import { existsSync as existsSync6, lstatSync as lstatSync3, realpathSync as realpathSync6 } from "fs";
+import { existsSync as existsSync7, lstatSync as lstatSync3, realpathSync as realpathSync6 } from "fs";
 import { dirname as dirname7, join as join5, resolve as resolve9 } from "path";
 var SAFE_PREFIX = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 function findLedger(from) {
@@ -5193,7 +5231,7 @@ function findLedger(from) {
   let current = start;
   for (;; ) {
     const store = join5(current, ".beads");
-    if (existsSync6(store)) {
+    if (existsSync7(store)) {
       const prefix = ledgerPrefix(store);
       return { from: start, store, retired: isRetired(store), ...prefix === undefined ? {} : { prefix } };
     }
@@ -5272,7 +5310,7 @@ function ledgerRepoMismatch(input) {
 
 // plugins/beads/src/pr-bead-link-gate.ts
 import { execFileSync } from "child_process";
-import { existsSync as existsSync7, lstatSync as lstatSync4 } from "fs";
+import { existsSync as existsSync8, lstatSync as lstatSync4 } from "fs";
 import { dirname as dirname8, join as join6, resolve as resolve10 } from "path";
 var MAX_COMMAND_LENGTH = 64000;
 var BEAD_REF = /(?:^|\s)(?:Bead|Closes-Bead|Bead-Id):\s*[A-Za-z][A-Za-z0-9_-]*-[A-Za-z0-9]+/i;
@@ -5310,7 +5348,7 @@ function beadsActive(dir) {
   let current = resolve10(dir);
   for (;; ) {
     const beads = join6(current, ".beads");
-    if (existsSync7(beads)) {
+    if (existsSync8(beads)) {
       try {
         return !lstatSync4(join6(beads, "RETIRED")).isFile();
       } catch {
@@ -5921,7 +5959,12 @@ async function setupBeads(ctx, deps = {}) {
       throw new GateRefusal(decision.gate, decision.cause, decision.resolution);
     if (decision.command !== call.command)
       event.input = { ...event.input, command: decision.command };
-    pending.set(event.id, { command: call.command, cwd: call.cwd, advisories: decision.advisories });
+    pending.set(event.id, {
+      command: call.command,
+      cwd: call.cwd,
+      injected: actorInjection(call.command, actor)?.actor,
+      advisories: decision.advisories
+    });
   });
   const routing = await registerAgentRouting(ctx, { run: deps.run, env: baseEnv });
   const pin = await ctx.shell.hook("create.before", (event) => {
@@ -5965,8 +6008,8 @@ async function setupBeads(ctx, deps = {}) {
         const key = `claims/${event.sessionID}`;
         const env = environmentForCommand(call.command, pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor));
         const invocations = bdInvocations(call.command);
-        const lookups = claimLookups(call.cwd, env, output, invocations);
-        const holders = await readClaimHolders(lookups, call.cwd, env, run, Date.now() + CLAIM_LOOKUP_MS);
+        const lookups = claimLookups(call.command, call.cwd, env, output, invocations, call.injected);
+        const holders = await readClaimHolders(lookups, env, run, Date.now() + CLAIM_LOOKUP_MS);
         let unreadable = [];
         const [before, state] = await queue(key, async () => {
           const state = readClaimState(await ctx.storage.get(key));
@@ -5977,7 +6020,7 @@ async function setupBeads(ctx, deps = {}) {
           return [before, state];
         });
         if (unreadable.length > 0)
-          advisories.push(`Beads: could not read who holds ${[...new Set(unreadable)].join(", ")} (\`bd show\` failed), so the claim is not tracked and its lease is not renewed. Re-run \`bd show <id> --json\` to check the assignee.`);
+          advisories.push(`Beads: could not confirm that this session holds ${[...new Set(unreadable)].join(", ")} (\`bd show\` failed, or it reports a different assignee), so the claim is not tracked and its lease is not renewed.`);
         if (on("bd-lease-heartbeat")) {
           const leaseKey = `leases/${event.sessionID}`;
           const leases = await queue(leaseKey, async () => {

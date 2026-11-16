@@ -1,5 +1,3 @@
-import { type BdInvocation, invocationActor } from "./bd-actor-gate.ts"
-import { claimLookups } from "./claims.ts"
 import { GateAdmitter } from "./gate-admission.ts"
 import type { ShellGateDeps } from "./shell-gates.ts"
 
@@ -19,23 +17,13 @@ export function gateDeps(overrides: Partial<ShellGateDeps> = {}): ShellGateDeps 
 }
 
 /**
- * Who bd would report as the holder of each bead a command claims, worked out the way the shell
- * hands the actor to bd: `--actor`, else the invocation's environment. Stands in for `bd show`.
+ * A stand-in for what `bd show` reports as each bead's holder, specified by the test rather than
+ * derived from the command: `table` maps bead ids to holders, `fallback` holds every other bead.
  */
-export function simulatedHolders(
-  cwd: string,
-  env: NodeJS.ProcessEnv,
-  output: string,
-  invocations: BdInvocation[],
-): Map<string, string> {
-  const holders = new Map<string, string>()
-  for (const lookup of claimLookups(cwd, env, output, invocations)) {
-    const args = lookup.invocation.args
-    const flag = args.findIndex((arg) => arg === "--actor" || arg.startsWith("--actor="))
-    const named =
-      flag < 0 ? undefined : args[flag]?.includes("=") ? args[flag]?.split("=").slice(1).join("=") : args[flag + 1]
-    const holder = named ?? invocationActor(lookup.invocation, env)
-    if (holder !== null && holder !== undefined) holders.set(lookup.key, holder)
-  }
-  return holders
+export function fixtureHolders(table: Record<string, string> = {}, fallback?: string): Map<string, string> {
+  return new (class extends Map<string, string> {
+    override get(key: string): string | undefined {
+      return table[key.slice(key.lastIndexOf("\0") + 1)] ?? fallback
+    }
+  })()
 }

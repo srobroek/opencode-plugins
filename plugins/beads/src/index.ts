@@ -39,7 +39,7 @@ import {
 import { BEADS_SOURCE, Lifecycle } from "./lifecycle.ts"
 import { PRIME_WAIT_MS, readPrime, storedPrime } from "./prime.ts"
 import { type StartDeps, sessionStartAdvisories } from "./session-start.ts"
-import { decideShell, type ShellGateDeps, TOOL_CALL_BUDGET_MS } from "./shell-gates.ts"
+import { actorInjection, decideShell, type ShellGateDeps, TOOL_CALL_BUDGET_MS } from "./shell-gates.ts"
 import { registerAgentRouting } from "./subagent-routing.ts"
 
 export { decideShell } from "./shell-gates.ts"
@@ -82,6 +82,8 @@ export function pinnedEnvironment(cwd: string, base: NodeJS.ProcessEnv, pinFor =
 type PendingCall = {
   command: string
   cwd: string
+  /** The actor the plugin injected into the command, if any. */
+  injected?: string
   advisories: string[]
 }
 
@@ -256,7 +258,12 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
     })
     if (decision.kind === "block") throw new GateRefusal(decision.gate, decision.cause, decision.resolution)
     if (decision.command !== call.command) event.input = { ...(event.input as object), command: decision.command }
-    pending.set(event.id, { command: call.command, cwd: call.cwd, advisories: decision.advisories })
+    pending.set(event.id, {
+      command: call.command,
+      cwd: call.cwd,
+      injected: actorInjection(call.command, actor)?.actor,
+      advisories: decision.advisories,
+    })
   })
 
   const routing = await registerAgentRouting(ctx, { run: deps.run, env: baseEnv })
@@ -301,8 +308,8 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
         const key = `claims/${event.sessionID}`
         const env = environmentForCommand(call.command, pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor))
         const invocations = bdInvocations(call.command)
-        const lookups = claimLookups(call.cwd, env, output, invocations)
-        const holders = await readClaimHolders(lookups, call.cwd, env, run, Date.now() + CLAIM_LOOKUP_MS)
+        const lookups = claimLookups(call.command, call.cwd, env, output, invocations, call.injected)
+        const holders = await readClaimHolders(lookups, env, run, Date.now() + CLAIM_LOOKUP_MS)
         let unreadable: string[] = []
         const [before, state] = await queue(key, async () => {
           const state = readClaimState(await ctx.storage.get(key))
@@ -313,7 +320,7 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
         })
         if (unreadable.length > 0)
           advisories.push(
-            `Beads: could not read who holds ${[...new Set(unreadable)].join(", ")} (\`bd show\` failed), so the claim is not tracked and its lease is not renewed. Re-run \`bd show <id> --json\` to check the assignee.`,
+            `Beads: could not confirm that this session holds ${[...new Set(unreadable)].join(", ")} (\`bd show\` failed, or it reports a different assignee), so the claim is not tracked and its lease is not renewed.`,
           )
         if (on("bd-lease-heartbeat")) {
           const leaseKey = `leases/${event.sessionID}`

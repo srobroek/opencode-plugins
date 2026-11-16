@@ -13,7 +13,7 @@ import {
   nextLeases,
   readLeases,
 } from "./heartbeat.ts"
-import { simulatedHolders } from "./test-support.ts"
+import { fixtureHolders } from "./test-support.ts"
 
 class FakeClock implements HeartbeatClock {
   #next = 0
@@ -40,7 +40,7 @@ function claims(commands: string[]) {
   const env = { BEADS_DIR: "/repo/.beads", BD_ACTOR: "opencode/r/general/s" }
   for (const command of commands) {
     const invocations = bdInvocations(command)
-    recordClaimTransitions(state, command, "/repo", env, "ok", invocations, simulatedHolders("/repo", env, "ok", invocations))
+    recordClaimTransitions(state, command, "/repo", env, "ok", invocations, fixtureHolders({}, "opencode/r/general/s"))
   }
   return state
 }

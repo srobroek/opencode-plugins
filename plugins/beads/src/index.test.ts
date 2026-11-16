@@ -324,9 +324,6 @@ describe("execute.after on shell", () => {
     ['export BEADS_ACTOR=me/chosen; bd update proj-1 --claim --notes "source and unset"', { "proj-1": "me/chosen" }],
     ["export BD_ACTOR=me/chosen; bd update proj-1 --claim", { "proj-1": "me/chosen" }],
     ["BD_ACTOR=me/chosen bd update proj-1 --claim", { "proj-1": "me/chosen" }],
-    // The shell decides what bd sees: an unset variable and a skipped export are not guessable from text.
-    ["unset BEADS_ACTOR; bd update proj-1 --claim", { "proj-1": "human@example.com" }],
-    ["false && export BEADS_ACTOR=B; bd update proj-1 --claim", { "proj-1": GENERATED }],
     ['c=$(bd update proj-1 --claim); export BEADS_ACTOR=B; echo "$c"', { "proj-1": GENERATED }],
     ["cat <<EOF\n$(bd update proj-1 --claim)\nEOF\nexport BEADS_ACTOR=B", { "proj-1": GENERATED }],
     ["BD_ACTOR=A bd update a-1 --claim; bd update a-2 --claim", { "a-1": "A", "a-2": GENERATED }],
@@ -340,10 +337,53 @@ describe("execute.after on shell", () => {
     await cleanup()
   })
 
+  test.each([
+    // The shell decides what bd sees, and bd's answer must be an actor this invocation could have used.
+    ["unset BEADS_ACTOR; bd update proj-1 --claim", "human@example.com"],
+    ["false && export BEADS_ACTOR=B; bd update proj-1 --claim", GENERATED],
+    ["bd update proj-1 --claim; bd update proj-1 --assignee other", "other"],
+    ["bd update proj-1 --claim && bd assign proj-1 other", "other"],
+  ])("does not track a claim whose reported holder is not the claiming actor: %s", async (command, holder) => {
+    const { recorded, result, cleanup } = await claimThrough(command, { "proj-1": holder })
+    expect(recorded).toEqual({})
+    expect(result).toContain("could not confirm that this session holds proj-1")
+    await cleanup()
+  })
+
+  test("looks up and records a claim against the store an earlier export selected", async () => {
+    const other = scratch(true)
+    const seen: Array<{ cwd: string; beadsDir: string | undefined }> = []
+    const run: BdRun = async (cwd, args, _deadline, env) => {
+      seen.push({ cwd, beadsDir: env.BEADS_DIR })
+      return { output: JSON.stringify([{ id: args[1], assignee: GENERATED }]) }
+    }
+    const { fake, cleanup } = await start(scratch(), { run })
+    const before = shellCall(`export BEADS_DIR=${other}/.beads; bd update proj-1 --claim`, "ses_child")
+    await fake.fire.tool("execute.before", before)
+    await fake.fire.tool("execute.after", completed(before, "✓ Claimed proj-1"))
+    const state = fake.storage.get("claims/ses_child") as { claims: Record<string, { store: string | null }> }
+    expect(seen.at(-1)?.beadsDir).toBe(join(other, ".beads"))
+    expect(Object.values(state.claims)[0]?.store).toBe(join(other, ".beads"))
+    await cleanup()
+  })
+
+  test.each([
+    "( export BEADS_ACTOR=x; true ); bd create --title t",
+    "id=$(export BEADS_ACTOR=x; true); bd create --title t",
+    "{ true; }; ( export BD_ACTOR=x ); bd create --title t",
+  ])("an actor exported inside a subshell does not suppress injection for the outer command: %s", async (command) => {
+    const { fake, cleanup } = await start(scratch())
+    const event = await fake.fire.tool("execute.before", shellCall(command, "ses_child"))
+    expect((event.input as { command: string }).command).toStartWith(
+      "export BEADS_ACTOR='opencode/ses_root/general/ses_child'; ",
+    )
+    await cleanup()
+  })
+
   test("skips tracking, with a warning, when bd cannot say who holds the bead", async () => {
     const { recorded, result, cleanup } = await claimThrough("bd update proj-1 --claim", {})
     expect(recorded).toEqual({})
-    expect(result).toContain("could not read who holds")
+    expect(result).toContain("could not confirm that this session holds")
     await cleanup()
   })
 
@@ -387,7 +427,7 @@ describe("execute.after on shell", () => {
       "execute.after",
       completed(before, "Error: other bd commands are using this workspace: wait for them to finish and retry", 1),
     )
-    expect(String(event.result.content)).toContain("embedded-store contention, not a failure")
+    expect(String(event.result.content)).toContain("embedded-store contention")
     await cleanup()
   })
 

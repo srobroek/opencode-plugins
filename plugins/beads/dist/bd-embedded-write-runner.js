@@ -1412,11 +1412,18 @@ function actorStateAfter(command, inherited = {}) {
 function readCommand(command, inherited) {
   const out = [];
   const scan = scanShell(command, { executableSubstitutionsOnly: true });
-  const state = { ...inherited };
+  let state = { ...inherited };
+  const scopes = [];
   const unclaimed = [...scan.substitutions];
   for (const item of scan.items) {
-    if (item.kind === "operator")
+    if (item.kind === "operator") {
+      if (item.operator === "(") {
+        scopes.push(state);
+        state = { ...state };
+      } else if (item.operator === ")" && scopes.length > 0)
+        state = scopes.pop();
       continue;
+    }
     const spans = [...item.words, ...item.redirects];
     const texts = [];
     if (spans.length > 0) {
