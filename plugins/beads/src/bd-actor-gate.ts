@@ -1,4 +1,4 @@
-import { readsScriptFromStdin, scanShell, stdinSource } from "./shell.ts"
+import { interpreterCommandString, readsScriptFromStdin, scanShell, stdinSource } from "./shell.ts"
 
 const ACTOR_VARS = ["BEADS_ACTOR", "BD_ACTOR"] as const
 type ActorVar = (typeof ACTOR_VARS)[number]
@@ -169,9 +169,17 @@ function readCommand(command: string, inherited: ActorState): { invocations: BdI
         })
       }
     }
+    // The interpreter's own `BD_ACTOR=A bash -c '…'` prefix is exported to the script it runs.
+    const scriptState: ActorState = { ...state }
+    for (const assignment of assigned) {
+      const variable = ACTOR_VARS.find((candidate) => assignment.startsWith(`${candidate}=`))
+      if (variable !== undefined) scriptState[variable] = assignment.slice(variable.length + 1)
+    }
+    const inline = interpreterCommandString(values)
+    if (inline !== undefined) out.push(...bdInvocations(inline, scriptState))
     if (readsScriptFromStdin(values)) {
       const script = stdinSource(item)
-      if (script !== undefined) out.push(...bdInvocations(script, state))
+      if (script !== undefined) out.push(...bdInvocations(script, scriptState))
     }
   }
   for (const source of unclaimed) out.push(...bdInvocations(source, state))

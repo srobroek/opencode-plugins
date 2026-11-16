@@ -317,6 +317,7 @@ describe("decideBdClose", () => {
     expect(blocked?.block).toBe(true)
     expect((await decideBdCloseParsed(parse("echo ${X:- #$(bd close bdp-2b)}")))?.block).toBe(true)
     expect((await decideBdCloseParsed(parse("bash 3<<<'bd close bdp-2b' 0<&3")))?.block).toBe(true)
+    expect((await decideBdCloseParsed(parse(`echo \${X:-"\${Y:-'$(bd close bdp-2b)'}"}`)))?.block).toBe(true)
   })
 
   test("a quoted here-document fed to a shell is read as commands", async () => {

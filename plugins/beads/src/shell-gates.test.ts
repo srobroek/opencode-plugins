@@ -53,7 +53,7 @@ describe("decideShell", () => {
   })
 
   test("an apostrophe in a double-quoted default does not stop an ordinary command", async () => {
-    for (const command of [`echo "\${X:-can't}"`, `echo "\${X:-it's} and \${Y:-isn't}"`]) {
+    for (const command of [`echo "\${X:-can't}"`, `echo "\${X:-it's} and \${Y:-isn't}"`, `echo "\${X:-{}"`]) {
       expect(await decideShell(command, root, deps())).toMatchObject({ kind: "allow" })
     }
   })

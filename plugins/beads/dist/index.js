@@ -852,12 +852,13 @@ function scanShell(source, options = {}) {
       continue;
     }
     if (ch === "<" || ch === ">") {
-      targetFd = undefined;
+      let fd;
       if (word !== undefined && !word.quoted && !word.expands && /^(?:\d+|\{[A-Za-z_]\w*\})$/.test(word.value)) {
-        targetFd = word.value;
+        fd = word.value;
         word = undefined;
       } else
         flush(i);
+      targetFd = fd;
       targetHereString = source.startsWith("<<<", i);
       targetOperator = source.startsWith("<<<", i) ? "<<<" : source.startsWith("<<-", i) ? "<<-" : source.startsWith("<<", i) ? "<<" : ch + (next === ">" || next === "&" || next === "|" ? next : "");
       if (source.startsWith("<<<", i)) {
@@ -939,7 +940,7 @@ function closingIndex(text, from, open, close, literalSingle = false) {
       j = k;
       continue;
     }
-    if (c === open)
+    if (c === open && (open !== "{" || text[j - 1] === "$"))
       depth++;
     else if (c === close && --depth === 0)
       return j;
@@ -1099,6 +1100,32 @@ function readsScriptFromStdin(values) {
     return stdin;
   }
   return true;
+}
+function interpreterCommandString(values) {
+  if (!INTERPRETERS.has(values[0]?.split("/").pop() ?? ""))
+    return;
+  for (let i = 1;i < values.length; i++) {
+    const arg = values[i];
+    if (arg === "--" || arg.startsWith("--")) {
+      if (arg === "--rcfile" || arg === "--init-file")
+        i++;
+      if (arg === "--")
+        return;
+      continue;
+    }
+    if (arg.length > 1 && (arg.startsWith("-") || arg.startsWith("+"))) {
+      const letters = arg.slice(1);
+      if (arg.startsWith("-") && letters.includes("c")) {
+        const script = values[i + 1 + (/[oO]$/.test(letters) ? 1 : 0)];
+        return script !== undefined && !script.startsWith("-") ? script : undefined;
+      }
+      if (/[oO]$/.test(letters))
+        i++;
+      continue;
+    }
+    return;
+  }
+  return;
 }
 function nestedSources(source) {
   const scan = scanShell(source, { executableSubstitutionsOnly: true });
@@ -1514,10 +1541,19 @@ ${document.body}__HEREDOC_END__
         });
       }
     }
+    const scriptState = { ...state };
+    for (const assignment of assigned) {
+      const variable = ACTOR_VARS.find((candidate) => assignment.startsWith(`${candidate}=`));
+      if (variable !== undefined)
+        scriptState[variable] = assignment.slice(variable.length + 1);
+    }
+    const inline = interpreterCommandString(values);
+    if (inline !== undefined)
+      out.push(...bdInvocations(inline, scriptState));
     if (readsScriptFromStdin(values)) {
       const script = stdinSource(item);
       if (script !== undefined)
-        out.push(...bdInvocations(script, state));
+        out.push(...bdInvocations(script, scriptState));
     }
   }
   for (const source of unclaimed)
@@ -5398,18 +5434,31 @@ function block(gate, cause, resolution = "inspect the command and retry") {
 function hasBdEdit(parsed) {
   return bdInvocations(parsed.command).some((invocation) => invocation.verb === "edit" && !flagEnabled(invocation.args, ["--help", "-h"])) || parsed.nested.some(hasBdEdit);
 }
-function actorForCommand(command, actor) {
+function namedVariables(invocation) {
+  const names = new Set;
+  if (invocation.globals.some((token) => token === "--actor" || token.startsWith("--actor=")))
+    names.add("--actor");
+  for (const variable of ["BEADS_ACTOR", "BD_ACTOR"]) {
+    if (invocation.prefix.some((token) => token.startsWith(`${variable}=`)) || invocation.exported[variable] !== undefined)
+      names.add(variable);
+  }
+  return names;
+}
+function actorInjection(command, actor) {
   if (actor === undefined)
     return;
   const invocations = bdInvocations(command);
   if (invocations.length === 0)
     return;
-  if (invocations.some((invocation) => invocation.globals.some((token) => token === "--actor" || token.startsWith("--actor=")) || invocation.prefix.some((token) => token.startsWith("BEADS_ACTOR=") || token.startsWith("BD_ACTOR=")) || invocation.exported.BEADS_ACTOR !== undefined || invocation.exported.BD_ACTOR !== undefined))
+  const named = invocations.map(namedVariables);
+  if (named.every((names) => names.size > 0))
     return;
-  return actor;
+  const anyNamed = named.some((names) => names.size > 0);
+  const onlyLegacy = named.every((names) => names.size === 0 || names.size === 1 && names.has("BD_ACTOR"));
+  return { actor, variable: anyNamed && onlyLegacy ? "BD_ACTOR" : "BEADS_ACTOR" };
 }
-function withActorPrefix(command, actor) {
-  return `export BEADS_ACTOR='${actor.replaceAll("'", "'\\''")}'; ${command}`;
+function withActorPrefix(command, actor, variable = "BEADS_ACTOR") {
+  return `export ${variable}='${actor.replaceAll("'", "'\\''")}'; ${command}`;
 }
 var TARGET_SELECTORS = ["-C", "--directory", "--db", "--database"];
 function createLedgerWarning(command, cwd, env, identity = repoIdentity) {
@@ -5483,9 +5532,9 @@ async function decide(original, cwd, deps) {
     if (unclaim !== undefined)
       return block("bd-unclaim-gate", unclaim.reason, "retry with `bd unclaim <id> --if-assignee <your actor>`");
   }
-  const actor = actorForCommand(command, deps.actor);
+  const injection = actorInjection(command, deps.actor);
   if (on("bd-actor-gate")) {
-    const env = actor === undefined ? deps.env : { ...deps.env, BEADS_ACTOR: actor };
+    const env = injection === undefined ? deps.env : { ...deps.env, [injection.variable]: injection.actor };
     const decision = decideActorParsed(parsed, env);
     if (decision.kind === "block")
       advisories.push(decision.reason);
@@ -5511,8 +5560,8 @@ async function decide(original, cwd, deps) {
     if (embedded?.kind === "rewrite")
       command = embedded.command;
   }
-  if (actor !== undefined)
-    command = withActorPrefix(command, actor);
+  if (injection !== undefined)
+    command = withActorPrefix(command, injection.actor, injection.variable);
   if (hooksSkipped && command !== original) {
     command = `${BINARY_HOOKS_NOTE}
 ${command}`;
@@ -5832,7 +5881,7 @@ async function setupBeads(ctx, deps = {}) {
     pending.set(event.id, {
       command: call.command,
       cwd: call.cwd,
-      actor: actorForCommand(call.command, actor),
+      actor: actorInjection(call.command, actor),
       advisories: decision.advisories
     });
   });
@@ -5878,7 +5927,7 @@ async function setupBeads(ctx, deps = {}) {
         const key = `claims/${event.sessionID}`;
         const env = environmentForCommand(call.command, pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor));
         if (call.actor !== undefined)
-          env.BEADS_ACTOR = call.actor;
+          env[call.actor.variable] = call.actor.actor;
         const invocations = bdInvocations(call.command);
         const [before, state] = await queue(key, async () => {
           const state = readClaimState(await ctx.storage.get(key));

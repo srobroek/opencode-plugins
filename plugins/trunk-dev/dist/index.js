@@ -843,12 +843,13 @@ function scanShell(source, options = {}) {
       continue;
     }
     if (ch === "<" || ch === ">") {
-      targetFd = undefined;
+      let fd;
       if (word !== undefined && !word.quoted && !word.expands && /^(?:\d+|\{[A-Za-z_]\w*\})$/.test(word.value)) {
-        targetFd = word.value;
+        fd = word.value;
         word = undefined;
       } else
         flush(i);
+      targetFd = fd;
       targetHereString = source.startsWith("<<<", i);
       targetOperator = source.startsWith("<<<", i) ? "<<<" : source.startsWith("<<-", i) ? "<<-" : source.startsWith("<<", i) ? "<<" : ch + (next === ">" || next === "&" || next === "|" ? next : "");
       if (source.startsWith("<<<", i)) {
@@ -930,7 +931,7 @@ function closingIndex(text, from, open, close, literalSingle = false) {
       j = k;
       continue;
     }
-    if (c === open)
+    if (c === open && (open !== "{" || text[j - 1] === "$"))
       depth++;
     else if (c === close && --depth === 0)
       return j;

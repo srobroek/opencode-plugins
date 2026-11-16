@@ -33,7 +33,7 @@ import {
 import { BEADS_SOURCE, Lifecycle } from "./lifecycle.ts"
 import { PRIME_WAIT_MS, readPrime, storedPrime } from "./prime.ts"
 import { type StartDeps, sessionStartAdvisories } from "./session-start.ts"
-import { actorForCommand, decideShell, type ShellGateDeps, TOOL_CALL_BUDGET_MS } from "./shell-gates.ts"
+import { actorInjection, decideShell, type ShellGateDeps, TOOL_CALL_BUDGET_MS } from "./shell-gates.ts"
 import { registerAgentRouting } from "./subagent-routing.ts"
 
 export { decideShell } from "./shell-gates.ts"
@@ -71,7 +71,11 @@ export function pinnedEnvironment(cwd: string, base: NodeJS.ProcessEnv, pinFor =
   return pin === undefined ? { ...base } : { ...base, ...EMBEDDED_PIN_ENV, BEADS_DIR: pin }
 }
 
-type PendingCall = { command: string; cwd: string; actor?: string; advisories: string[] }
+type PendingCall = {
+  command: string
+  cwd: string
+  actor?: { actor: string; variable: "BEADS_ACTOR" | "BD_ACTOR" }
+  advisories: string[] }
 
 /** Serialise read-modify-write on one storage key within this instance. */
 function keyedQueue() {
@@ -248,7 +252,7 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
     pending.set(event.id, {
       command: call.command,
       cwd: call.cwd,
-      actor: actorForCommand(call.command, actor),
+      actor: actorInjection(call.command, actor),
       advisories: decision.advisories,
     })
   })
@@ -294,7 +298,7 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
       if (on("beads-claim-tracking") && isMutatingBdCommand(call.command) && shellExit(result) === 0) {
         const key = `claims/${event.sessionID}`
         const env = environmentForCommand(call.command, pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor))
-        if (call.actor !== undefined) env.BEADS_ACTOR = call.actor
+        if (call.actor !== undefined) env[call.actor.variable] = call.actor.actor
         const invocations = bdInvocations(call.command)
         const [before, state] = await queue(key, async () => {
           const state = readClaimState(await ctx.storage.get(key))

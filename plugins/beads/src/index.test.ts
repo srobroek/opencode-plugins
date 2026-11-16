@@ -346,6 +346,37 @@ describe("execute.after on shell", () => {
     await cleanup()
   })
 
+  test.each([
+    ["BD_ACTOR=A bd update a-1 --claim; bd update a-2 --claim", { "a-1": "A", "a-2": "opencode/ses_root/general/ses_child" }],
+    ["BEADS_ACTOR=A bd update a-1 --claim; bd update a-2 --claim", { "a-1": "A", "a-2": "opencode/ses_root/general/ses_child" }],
+    ["bd update a-1 --claim; BD_ACTOR=A bd update a-2 --claim", { "a-1": "opencode/ses_root/general/ses_child", "a-2": "A" }],
+    ["bash -c 'bd update a-1 --claim'", { "a-1": "opencode/ses_root/general/ses_child" }],
+    ["BD_ACTOR=A bash -c 'bd update a-1 --claim'", { "a-1": "A" }],
+  ])("tracks each claim under its own actor when only some name one: %s", async (command, expected) => {
+    const { fake, cleanup } = await start(scratch())
+    const before = shellCall(command, "ses_child")
+    const event = await fake.fire.tool("execute.before", before)
+    if (!command.startsWith("BD_ACTOR=A bash")) expect((event.input as { command: string }).command).toStartWith("export ")
+    await fake.fire.tool(
+      "execute.after",
+      completed(before, `${Object.keys(expected).map((id) => `✓ Claimed ${id}`).join("\n")}\n`),
+    )
+    const state = fake.storage.get("claims/ses_child") as { claims: Record<string, { id: string; actor: string }> }
+    const actors = Object.fromEntries(Object.values(state.claims).map((claim) => [claim.id, claim.actor]))
+    expect(actors).toEqual(expected)
+    await cleanup()
+  })
+
+  test("injects BD_ACTOR when the only named actors use BD_ACTOR, so their choice still wins", async () => {
+    const { fake, cleanup } = await start(scratch())
+    const event = await fake.fire.tool(
+      "execute.before",
+      shellCall("BD_ACTOR=A bd update a-1 --claim; bd update a-2 --claim", "ses_child"),
+    )
+    expect((event.input as { command: string }).command).toStartWith("export BD_ACTOR='opencode/ses_root/general/ses_child'; ")
+    await cleanup()
+  })
+
   test("records nothing for a failed claim", async () => {
     const { fake, cleanup } = await start(scratch())
     const before = shellCall("bd update proj-1 --claim", "ses_child")

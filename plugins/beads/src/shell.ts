@@ -18,6 +18,7 @@ export {
   type CommandPosition,
   commandFromInput,
   commandSegments,
+  interpreterCommandString,
   invocation,
   leadingCdCwd,
   type ParsedCommand,

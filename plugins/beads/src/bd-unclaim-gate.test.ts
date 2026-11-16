@@ -17,6 +17,7 @@ describe("bd unclaim gate", () => {
     expect(decideBdUnclaim("echo ${X:-'<('$(bd unclaim bead-1)')'}")?.block).toBe(true)
     expect(decideBdUnclaim("echo ${X:- #$(bd unclaim bead-1)}")?.block).toBe(true)
     expect(decideBdUnclaim("bash 3<<<'bd unclaim bead-1' 0<&3")?.block).toBe(true)
+    expect(decideBdUnclaim(`echo \${X:-"\${Y:-'$(bd unclaim bead-1)'}"}`)?.block).toBe(true)
     expect(decideBdUnclaim("bash 3<<<'bd unclaim bead-1' </dev/null")).toBeUndefined()
   })
 

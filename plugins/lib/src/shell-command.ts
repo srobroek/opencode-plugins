@@ -438,11 +438,13 @@ export function scanShell(source: string, options: { executableSubstitutionsOnly
     }
     if (ch === "<" || ch === ">") {
       // A word of digits, or `{name}`, written against the operator is its file descriptor.
-      targetFd = undefined
+      // Flush the previous word first: in `3<<<'x'>out` the here-string belongs to fd 3.
+      let fd: string | undefined
       if (word !== undefined && !word.quoted && !word.expands && /^(?:\d+|\{[A-Za-z_]\w*\})$/.test(word.value)) {
-        targetFd = word.value
+        fd = word.value
         word = undefined
       } else flush(i)
+      targetFd = fd
       targetHereString = source.startsWith("<<<", i)
       targetOperator = source.startsWith("<<<", i)
         ? "<<<"
@@ -527,7 +529,8 @@ function closingIndex(text: string, from: number, open: string, close: string, l
       j = k
       continue
     }
-    if (c === open) depth++
+    // Only `${` opens a nested expansion; a bare `{` is a literal brace.
+    if (c === open && (open !== "{" || text[j - 1] === "$")) depth++
     else if (c === close && --depth === 0) return j
   }
   return -1
@@ -723,6 +726,33 @@ export function readsScriptFromStdin(values: string[]): boolean {
     return stdin
   }
   return true
+}
+
+/**
+ * The script a shell interpreter runs from `-c 'script'`, or undefined when the command has no
+ * literal `-c` argument. Only the plain `bash -c 'script'` and `bash -lc 'script'` spellings.
+ */
+export function interpreterCommandString(values: string[]): string | undefined {
+  if (!INTERPRETERS.has(values[0]?.split("/").pop() ?? "")) return undefined
+  for (let i = 1; i < values.length; i++) {
+    const arg = values[i] as string
+    if (arg === "--" || arg.startsWith("--")) {
+      if (arg === "--rcfile" || arg === "--init-file") i++
+      if (arg === "--") return undefined
+      continue
+    }
+    if (arg.length > 1 && (arg.startsWith("-") || arg.startsWith("+"))) {
+      const letters = arg.slice(1)
+      if (arg.startsWith("-") && letters.includes("c")) {
+        const script = values[i + 1 + (/[oO]$/.test(letters) ? 1 : 0)]
+        return script !== undefined && !script.startsWith("-") ? script : undefined
+      }
+      if (/[oO]$/.test(letters)) i++
+      continue
+    }
+    return undefined
+  }
+  return undefined
 }
 
 function nestedSources(source: string): { sources: string[]; unknown: boolean } {

@@ -41,6 +41,15 @@ describe("actorValues / environmentForInput", () => {
     ).toEqual(["omp/Main/release"])
   })
 
+  test.each([
+    ["a backslash", "BEADS_ACTOR='a\\b' bd close x"],
+    ["a NUL character", "BEADS_ACTOR=a\0b bd close x"],
+    ["a dollar sign", 'BEADS_ACTOR="$WHO" bd close x'],
+    ["an empty value", "BEADS_ACTOR= bd close x"],
+  ])("does not count an actor holding %s", (_name, command) => {
+    expect(actorValues(command, emptyEnv)).toEqual([])
+  })
+
   test("returns each literal actor used by mutating invocations only", () => {
     expect(
       actorValues(

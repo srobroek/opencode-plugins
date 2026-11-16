@@ -781,12 +781,13 @@ function scanShell(source, options = {}) {
       continue;
     }
     if (ch === "<" || ch === ">") {
-      targetFd = undefined;
+      let fd;
       if (word !== undefined && !word.quoted && !word.expands && /^(?:\d+|\{[A-Za-z_]\w*\})$/.test(word.value)) {
-        targetFd = word.value;
+        fd = word.value;
         word = undefined;
       } else
         flush(i);
+      targetFd = fd;
       targetHereString = source.startsWith("<<<", i);
       targetOperator = source.startsWith("<<<", i) ? "<<<" : source.startsWith("<<-", i) ? "<<-" : source.startsWith("<<", i) ? "<<" : ch + (next === ">" || next === "&" || next === "|" ? next : "");
       if (source.startsWith("<<<", i)) {
@@ -868,7 +869,7 @@ function closingIndex(text, from, open, close, literalSingle = false) {
       j = k;
       continue;
     }
-    if (c === open)
+    if (c === open && (open !== "{" || text[j - 1] === "$"))
       depth++;
     else if (c === close && --depth === 0)
       return j;
@@ -1028,6 +1029,32 @@ function readsScriptFromStdin(values) {
     return stdin;
   }
   return true;
+}
+function interpreterCommandString(values) {
+  if (!INTERPRETERS.has(values[0]?.split("/").pop() ?? ""))
+    return;
+  for (let i = 1;i < values.length; i++) {
+    const arg = values[i];
+    if (arg === "--" || arg.startsWith("--")) {
+      if (arg === "--rcfile" || arg === "--init-file")
+        i++;
+      if (arg === "--")
+        return;
+      continue;
+    }
+    if (arg.length > 1 && (arg.startsWith("-") || arg.startsWith("+"))) {
+      const letters = arg.slice(1);
+      if (arg.startsWith("-") && letters.includes("c")) {
+        const script = values[i + 1 + (/[oO]$/.test(letters) ? 1 : 0)];
+        return script !== undefined && !script.startsWith("-") ? script : undefined;
+      }
+      if (/[oO]$/.test(letters))
+        i++;
+      continue;
+    }
+    return;
+  }
+  return;
 }
 function nestedSources(source) {
   const scan = scanShell(source, { executableSubstitutionsOnly: true });
@@ -1443,10 +1470,19 @@ ${document.body}__HEREDOC_END__
         });
       }
     }
+    const scriptState = { ...state };
+    for (const assignment of assigned) {
+      const variable = ACTOR_VARS.find((candidate) => assignment.startsWith(`${candidate}=`));
+      if (variable !== undefined)
+        scriptState[variable] = assignment.slice(variable.length + 1);
+    }
+    const inline = interpreterCommandString(values);
+    if (inline !== undefined)
+      out.push(...bdInvocations(inline, scriptState));
     if (readsScriptFromStdin(values)) {
       const script = stdinSource(item);
       if (script !== undefined)
-        out.push(...bdInvocations(script, state));
+        out.push(...bdInvocations(script, scriptState));
     }
   }
   for (const source of unclaimed)

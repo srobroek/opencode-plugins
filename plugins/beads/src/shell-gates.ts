@@ -8,7 +8,7 @@
  * sets `BEADS_DIR` in the child's environment.
  */
 
-import { bdInvocations, decideActorParsed, flagEnabled, globalValue } from "./bd-actor-gate.ts"
+import { type BdInvocation, bdInvocations, decideActorParsed, flagEnabled, globalValue } from "./bd-actor-gate.ts"
 import { decideBdCloseParsed } from "./bd-close-gate.ts"
 import {
   decideEmbeddedWrite,
@@ -63,26 +63,47 @@ export function hasBdEdit(parsed: ParsedCommand): boolean {
   ) || parsed.nested.some(hasBdEdit)
 }
 
-/** The actor to export, unless the command already chooses its own. */
-export function actorForCommand(command: string, actor: string | undefined): string | undefined {
+type ActorVariable = "BEADS_ACTOR" | "BD_ACTOR"
+
+/** The ways one invocation names its own actor: `--actor`, or either variable. */
+function namedVariables(invocation: BdInvocation): Set<string> {
+  const names = new Set<string>()
+  if (invocation.globals.some((token) => token === "--actor" || token.startsWith("--actor="))) names.add("--actor")
+  for (const variable of ["BEADS_ACTOR", "BD_ACTOR"] as const) {
+    if (invocation.prefix.some((token) => token.startsWith(`${variable}=`)) || invocation.exported[variable] !== undefined)
+      names.add(variable)
+  }
+  return names
+}
+
+/**
+ * The actor to export and the variable to export it through, unless every `bd` invocation in
+ * the command already chooses its own. An invocation's own prefix beats the export by shell
+ * rules, so one actorless invocation is enough to inject. `bd` reads BEADS_ACTOR before
+ * BD_ACTOR, so when the invocations that named an actor did so only through BD_ACTOR, the
+ * injection uses BD_ACTOR and leaves their choice standing.
+ */
+export function actorInjection(
+  command: string,
+  actor: string | undefined,
+): { actor: string; variable: ActorVariable } | undefined {
   if (actor === undefined) return undefined
   const invocations = bdInvocations(command)
   if (invocations.length === 0) return undefined
-  if (
-    invocations.some(
-      (invocation) =>
-        invocation.globals.some((token) => token === "--actor" || token.startsWith("--actor=")) ||
-        invocation.prefix.some((token) => token.startsWith("BEADS_ACTOR=") || token.startsWith("BD_ACTOR=")) ||
-        invocation.exported.BEADS_ACTOR !== undefined ||
-        invocation.exported.BD_ACTOR !== undefined,
-    )
-  )
-    return undefined
-  return actor
+  const named = invocations.map(namedVariables)
+  if (named.every((names) => names.size > 0)) return undefined
+  const anyNamed = named.some((names) => names.size > 0)
+  const onlyLegacy = named.every((names) => names.size === 0 || (names.size === 1 && names.has("BD_ACTOR")))
+  return { actor, variable: anyNamed && onlyLegacy ? "BD_ACTOR" : "BEADS_ACTOR" }
 }
 
-export function withActorPrefix(command: string, actor: string): string {
-  return `export BEADS_ACTOR='${actor.replaceAll("'", "'\\''")}'; ${command}`
+/** The actor to export, unless the command already chooses its own. */
+export function actorForCommand(command: string, actor: string | undefined): string | undefined {
+  return actorInjection(command, actor)?.actor
+}
+
+export function withActorPrefix(command: string, actor: string, variable: ActorVariable = "BEADS_ACTOR"): string {
+  return `export ${variable}='${actor.replaceAll("'", "'\\''")}'; ${command}`
 }
 
 /** Global flags that name the store themselves; the advisory does not follow them. */
@@ -199,9 +220,9 @@ async function decide(original: string, cwd: string, deps: ShellGateDeps): Promi
       return block("bd-unclaim-gate", unclaim.reason, "retry with `bd unclaim <id> --if-assignee <your actor>`")
   }
 
-  const actor = actorForCommand(command, deps.actor)
+  const injection = actorInjection(command, deps.actor)
   if (on("bd-actor-gate")) {
-    const env = actor === undefined ? deps.env : { ...deps.env, BEADS_ACTOR: actor }
+    const env = injection === undefined ? deps.env : { ...deps.env, [injection.variable]: injection.actor }
     const decision = decideActorParsed(parsed, env)
     // The plugin injects an actor into every session's `bd` calls, so reaching a refusal here
     // means injection was not possible. This gate guards against forgetting attribution, not
@@ -241,7 +262,7 @@ async function decide(original: string, cwd: string, deps: ShellGateDeps): Promi
   }
 
   // The actor prefix goes on after the runner rewrite so the executed command keeps it.
-  if (actor !== undefined) command = withActorPrefix(command, actor)
+  if (injection !== undefined) command = withActorPrefix(command, injection.actor, injection.variable)
   if (hooksSkipped && command !== original) {
     command = `${BINARY_HOOKS_NOTE}\n${command}`
     advisories.push("Hooks were skipped to keep the existing (binary) Git hooks intact.")
