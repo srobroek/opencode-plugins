@@ -190,3 +190,11 @@ describe("registerAgentFiles", () => {
     ])
   })
 })
+
+test("reads color and an agent's own color wins over the file's", () => {
+  const file = parseAgentFile('---\nmode: primary\ncolor: "#ff0000"\npermissions: []\n---\nhi', "x")
+  expect(file.color).toBe("#ff0000")
+  const agent: { color?: string } = { color: "blue" }
+  shapeAgent(agent, file, false)
+  expect(agent.color).toBe("blue")
+})

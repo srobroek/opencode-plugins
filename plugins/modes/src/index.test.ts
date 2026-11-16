@@ -1,0 +1,98 @@
+import { describe, expect, test } from "bun:test"
+import { agentPaths, permissionEffect, readAgentFile } from "@srobroek/opencode-lib/agent-files"
+import { MODEL_TIERS } from "@srobroek/opencode-lib/model-roles"
+import { createFakeContext } from "@srobroek/opencode-lib/testing"
+import plugin, { AGENTS_DIR, enabledModes, parseOptions, selectAgents } from "./index.ts"
+
+const agent = (id: string) => readAgentFile(`${AGENTS_DIR}/${id}.md`)
+const effect = (id: string, action: string, resource = "*") => permissionEffect(agent(id).permissions, action, resource)
+const WORKTREE = "~/.local/share/opencode/worktree/abc123/debug-1"
+
+describe("options", () => {
+  test("every agent and reminders default to on", () => {
+    expect(parseOptions(undefined)).toEqual({ agents: { debug: true, refactor: true, concept: true }, reminders: true })
+  })
+  test("an agent set to false is left out of the registered files and modes", () => {
+    const options = parseOptions({ agents: { refactor: false } })
+    const files = selectAgents(agentPaths(AGENTS_DIR), options).map((path) => path.split("/").pop())
+    expect(files).toEqual(["concept.md", "debug.md"])
+    expect(enabledModes(options).map((mode) => mode.id)).toEqual(["debug", "concept"])
+  })
+})
+
+describe("shipped agents", () => {
+  const expected = { debug: ["all", "strong", 150], refactor: ["primary", "standard", 200], concept: ["primary", "strong", 120] } as const
+  test.each(Object.entries(expected))("%s has its mode, tier, steps, colour and a short description", (id, [mode, tier, steps]) => {
+    const file = agent(id)
+    expect(file.mode).toBe(mode)
+    expect(file.hidden).toBe(false)
+    expect(MODEL_TIERS).toContain(file.request?.headers["x-opencode-model-role"] as never)
+    expect(file.request?.headers["x-opencode-model-role"]).toBe(tier)
+    expect(file.steps).toBe(steps)
+    expect(file.color).toBeTruthy()
+    expect((file.description ?? "").length).toBeLessThanOrEqual(150)
+  })
+
+  test("colours are distinct", () => {
+    expect(new Set(Object.keys(expected).map((id) => agent(id).color)).size).toBe(3)
+  })
+
+  test("debug denies edits in the checkout and allows the scratch worktree and ledger", () => {
+    expect(effect("debug", "edit", "src/foo.ts")).toBe("deny")
+    expect(effect("debug", "edit", `${WORKTREE}/src/foo.ts`)).toBe("allow")
+    expect(effect("debug", "edit", "~/.opencode/debug/x.md")).toBe("allow")
+    expect(effect("debug", "external_directory", `${WORKTREE}/src/foo.ts`)).toBe("allow")
+  })
+  test("debug shell is open but refuses push, clean and rm -rf", () => {
+    expect(effect("debug", "shell", "git -C wt commit -m x")).toBe("allow")
+    for (const command of ["git push origin main", "git clean -fd", "rm -rf build"]) expect(effect("debug", "shell", command)).toBe("deny")
+  })
+  test("debug spawns only its listed helpers", () => {
+    expect(effect("debug", "subagent", "adversarial-challenger")).toBe("allow")
+    expect(effect("debug", "subagent", "coder")).toBe("deny")
+  })
+
+  test("refactor denies tests and fixtures but allows source", () => {
+    expect(effect("refactor", "edit", "src/foo.ts")).toBe("allow")
+    for (const path of ["src/foo.test.ts", "tests/a.ts", "pkg/__snapshots__/a.snap", "src/fixtures/x.json", "test_a.py"])
+      expect(effect("refactor", "edit", path)).toBe("deny")
+  })
+  test("refactor may spawn debug but not coder", () => {
+    expect(effect("refactor", "subagent", "debug")).toBe("allow")
+    expect(effect("refactor", "subagent", "coder")).toBe("deny")
+  })
+
+  test("concept edits only design docs and scratch", () => {
+    expect(effect("concept", "edit", "src/foo.ts")).toBe("deny")
+    expect(effect("concept", "edit", "docs/adr/0001-x.md")).toBe("allow")
+    expect(effect("concept", "edit", "~/.opencode/concept/s/brief.md")).toBe("allow")
+  })
+  test("concept shell asks except for read-only git and the prototype server", () => {
+    expect(effect("concept", "shell", "rm a")).toBe("ask")
+    expect(effect("concept", "shell", "git status --short")).toBe("allow")
+    expect(effect("concept", "shell", "python3 -m http.server 8000")).toBe("allow")
+  })
+  test("concept spawns design helpers but not coder", () => {
+    expect(effect("concept", "subagent", "ui-ux-specialist")).toBe("allow")
+    expect(effect("concept", "subagent", "design-critic")).toBe("allow")
+    expect(effect("concept", "subagent", "coder")).toBe("deny")
+    expect(effect("concept", "wire-dsl_render")).toBe("allow")
+  })
+})
+
+describe("setup", () => {
+  test("registers the agents and reminders, and the cleanup disposes everything", async () => {
+    const fake = createFakeContext()
+    const cleanup = await plugin.setup(fake.context)
+    expect([...fake.agents.keys()].sort()).toEqual(["concept", "debug", "refactor"])
+    expect(fake.hooks("session")).toEqual(["context"])
+    await cleanup?.()
+    expect(fake.active()).toBe(0)
+    expect(fake.hooks("session")).toEqual([])
+  })
+  test("reminders: false registers no hook", async () => {
+    const fake = createFakeContext({ options: { reminders: false } })
+    await plugin.setup(fake.context)
+    expect(fake.hooks("session")).toEqual([])
+  })
+})

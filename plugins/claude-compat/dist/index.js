@@ -15,6 +15,8 @@ function shapeAgent(agent, file, created) {
     agent.hidden = file.hidden;
   if (file.steps !== undefined)
     agent.steps ??= file.steps;
+  if (file.color !== undefined)
+    agent.color ??= file.color;
   if (file.request)
     agent.request = { ...agent.request, headers: { ...file.request.headers, ...agent.request?.headers } };
   agent.permissions = [...agent.permissions ?? [], ...file.permissions];

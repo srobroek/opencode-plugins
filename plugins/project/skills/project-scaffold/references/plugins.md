@@ -70,6 +70,7 @@ Loaded in every project by the global configuration. Do not add them per project
 | lang-rust | Rust skills: fmt, clippy and test checks, testing with nextest, proptest and insta, crates and workspaces, CI, sqlx persistence, Tauri and profiling |
 | lang-typescript | TypeScript and JavaScript skills: install, lint, tsc and test checks, testing, monorepo packaging, type safety and zod, and Bun and Node profiling |
 | model-roles | Give agents a model tier (cheap, standard, strong, reviewer) derived from the model catalog, and resolve each tier to the first available candidate |
+| modes | Debug, refactor and concept agents with plan-style mode reminders: root-cause diagnosis in a scratch worktree, behaviour-preserving refactoring, and design iteration |
 | parley | Ask the user rounds of typed questions in a TUI panel, with recommended answers, notes and deferrals |
 | project | Project lifecycle: scaffold a project with /new-project, set up fnox and 1Password secrets, and pick an OSI-approved license |
 | quality | Code design and review guidance, a code-quality policy, testing standards with a test audit and its two tools, performance profiling, logic prototyping, and a read-only adversarial-challenger subagent |
