@@ -918,9 +918,10 @@ function scanShell(source, options = {}) {
       else {
         if (!options.executableSubstitutionsOnly)
           substitutions.push(expansion.inner);
-        const nested = unquoted ? parameterBodySubstitutions(expansion.inner) : bodySubstitutions(expansion.inner);
+        const own = unquoted && expansion.doubleQuoted !== true;
+        const nested = own ? parameterBodySubstitutions(expansion.inner) : bodySubstitutions(expansion.inner);
         for (const found of nested)
-          substitution(found, unquoted);
+          substitution(found, own);
       }
     }
     if (!expansion.closed)
@@ -1191,7 +1192,7 @@ function parameterBodySubstitutions(body) {
           j++;
         else if (body[j] === "$" || body[j] === "`") {
           const expansion = expansionAt(body, j, true);
-          found.push(expansion);
+          found.push({ ...expansion, doubleQuoted: true });
           j = expansion.end - 1;
         }
         j++;

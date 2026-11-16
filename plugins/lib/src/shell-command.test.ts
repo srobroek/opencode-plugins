@@ -173,6 +173,12 @@ test("reads executable substitutions inside parameter expansions and shell-fed h
   expect(sources("bash <<<'bd create y' </dev/null")).toEqual([])
   expect(sources("bash <<<'bd create y' >out")).toEqual(["bd create y"])
   expect(sources("bash 3<<'EOF'\nbd create y\nEOF")).toEqual([])
+  expect(sources("bash 3<<<'bd create y' 0<&3")).toEqual(["bd create y"])
+  expect(sources("bash <<<'bd create y' 0<&0")).toEqual(["bd create y"])
+  expect(sources("bash 3<<'EOF' <&3\nbd create y\nEOF")).toEqual(["bd create y\n"])
+  expect(sources("sleep 3 3<<<'x' <&3")).toEqual([])
+  expect(sources(`echo \${A:-"\${B:-'$(sleep 5)'}"}`)).toEqual(["sleep 5"])
+  expect(sources(`echo \${A:-'\${B:-$(sleep 5)}'}`)).toEqual([])
 })
 
 test("lists invocations of one executable with their globals and verb", () => {

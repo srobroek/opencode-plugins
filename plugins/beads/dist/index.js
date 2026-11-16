@@ -688,9 +688,10 @@ function scanShell(source, options = {}) {
       else {
         if (!options.executableSubstitutionsOnly)
           substitutions.push(expansion.inner);
-        const nested = unquoted ? parameterBodySubstitutions(expansion.inner) : bodySubstitutions(expansion.inner);
+        const own = unquoted && expansion.doubleQuoted !== true;
+        const nested = own ? parameterBodySubstitutions(expansion.inner) : bodySubstitutions(expansion.inner);
         for (const found of nested)
-          substitution(found, unquoted);
+          substitution(found, own);
       }
     }
     if (!expansion.closed)
@@ -961,7 +962,7 @@ function parameterBodySubstitutions(body) {
           j++;
         else if (body[j] === "$" || body[j] === "`") {
           const expansion = expansionAt(body, j, true);
-          found.push(expansion);
+          found.push({ ...expansion, doubleQuoted: true });
           j = expansion.end - 1;
         }
         j++;
@@ -1057,6 +1058,20 @@ function stdinSource(item) {
   }
   return source;
 }
+function duplicatesStdin(item) {
+  return item.redirects.some((redirect) => {
+    const operator = redirect.operator ?? "";
+    if (operator !== "<&" && operator !== ">&")
+      return false;
+    return (redirect.fd ?? (operator === "<&" ? "0" : "1")) === "0";
+  });
+}
+function documentSources(item) {
+  return [
+    ...item.hereDocuments.map((document) => document.body),
+    ...item.redirects.filter((redirect) => redirect.hereString === true).map((redirect) => redirect.value)
+  ];
+}
 var INTERPRETERS = new Set(["bash", "sh", "zsh", "dash", "ksh"]);
 function readsScriptFromStdin(values) {
   if (!INTERPRETERS.has(values[0]?.split("/").pop() ?? ""))
@@ -1101,6 +1116,8 @@ function nestedSources(source) {
     const script = stdinSource(item);
     if (script !== undefined)
       sources.push(script);
+    else if (duplicatesStdin(item))
+      sources.push(...documentSources(item));
   }
   for (const match of source.matchAll(/\b(?:bash|sh|zsh|dash|ksh)\s+-c\s+((?:'[^']*')|(?:"[^"]*")|[^\s;&|]+)/g)) {
     const value = match[1];

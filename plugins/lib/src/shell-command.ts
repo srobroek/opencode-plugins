@@ -204,7 +204,15 @@ export type ShellScan = {
   complete: boolean
 }
 
-type Expansion = { end: number; inner?: string; expands: boolean; closed: boolean; executable?: boolean }
+type Expansion = {
+  end: number
+  inner?: string
+  expands: boolean
+  closed: boolean
+  executable?: boolean
+  /** Found inside double quotes, so its own body follows double-quote rules whatever encloses it. */
+  doubleQuoted?: true
+}
 
 /**
  * Split shell source into simple commands with exact word offsets, without evaluating it.
@@ -281,8 +289,9 @@ export function scanShell(source: string, options: { executableSubstitutionsOnly
         // and `#` is data, so `${X:-'$(cmd)'}` is a literal while `${X:-$(cmd)}`, `${X:-<(cmd)}`
         // and `${X:- #$(cmd)}` run. Inside double quotes the single quotes are literal, so
         // `"${X:-'$(cmd)'}"` runs `cmd`.
-        const nested = unquoted ? parameterBodySubstitutions(expansion.inner) : bodySubstitutions(expansion.inner)
-        for (const found of nested) substitution(found, unquoted)
+        const own = unquoted && expansion.doubleQuoted !== true
+        const nested = own ? parameterBodySubstitutions(expansion.inner) : bodySubstitutions(expansion.inner)
+        for (const found of nested) substitution(found, own)
       }
     }
     if (!expansion.closed) complete = false
@@ -545,7 +554,7 @@ function parameterBodySubstitutions(body: string): Expansion[] {
         if (body[j] === "\\") j++
         else if (body[j] === "$" || body[j] === "`") {
           const expansion = expansionAt(body, j, true)
-          found.push(expansion)
+          found.push({ ...expansion, doubleQuoted: true })
           j = expansion.end - 1
         }
         j++
@@ -670,6 +679,23 @@ export function stdinSource(item: SimpleCommand): string | undefined {
   return source
 }
 
+/** Whether a redirection duplicates or closes a descriptor onto standard input (`0<&3`, `<&-`, `0>&3`). */
+function duplicatesStdin(item: SimpleCommand): boolean {
+  return item.redirects.some((redirect) => {
+    const operator = redirect.operator ?? ""
+    if (operator !== "<&" && operator !== ">&") return false
+    return (redirect.fd ?? (operator === "<&" ? "0" : "1")) === "0"
+  })
+}
+
+/** Every here-document body and here-string text attached to the command. */
+function documentSources(item: SimpleCommand): string[] {
+  return [
+    ...item.hereDocuments.map((document) => document.body),
+    ...item.redirects.filter((redirect) => redirect.hereString === true).map((redirect) => redirect.value),
+  ]
+}
+
 const INTERPRETERS = new Set(["bash", "sh", "zsh", "dash", "ksh"])
 
 /**
@@ -719,6 +745,9 @@ function nestedSources(source: string): { sources: string[]; unknown: boolean } 
     if (!readsScriptFromStdin(values)) continue
     const script = stdinSource(item)
     if (script !== undefined) sources.push(script)
+    // `0<&3` or `0<&0` may point stdin at a here-document on another descriptor. Rather than
+    // model descriptor tables, read every here-document and here-string on the command as a script.
+    else if (duplicatesStdin(item)) sources.push(...documentSources(item))
   }
   for (const match of source.matchAll(/\b(?:bash|sh|zsh|dash|ksh)\s+-c\s+((?:'[^']*')|(?:"[^"]*")|[^\s;&|]+)/g)) {
     const value = match[1]
