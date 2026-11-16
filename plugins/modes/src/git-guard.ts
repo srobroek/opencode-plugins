@@ -129,6 +129,11 @@ function checkGit(args: readonly string[], agent: string, policy: Policy): strin
       if (rest.some((arg) => !arg.startsWith("-")) && !list) return refuse("git tag creating a tag")
       break
     }
+    case "stash":
+      // Stash refs are shared by every worktree, so drop, clear, pop and apply could delete or apply someone else's work.
+      if (rest[0] !== undefined && !rest[0].startsWith("-") && !["list", "show", "push", "save"].includes(rest[0]))
+        return refuse(`git stash ${rest[0]}`)
+      break
     case "worktree":
       if (!["add", "list", "remove", "lock", "unlock", "move", "repair"].includes(rest[0] ?? "")) return refuse(`git worktree ${rest[0] ?? ""}`)
       break

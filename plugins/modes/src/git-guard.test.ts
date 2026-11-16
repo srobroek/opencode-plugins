@@ -67,6 +67,14 @@ const REFUSED = [
   "git -c core.fsmonitor=evil status",
   "GIT_SSH_COMMAND='evil' git fetch",
   "git --unknown-option status",
+  "git stash drop",
+  "git stash drop stash@{1}",
+  "git stash clear",
+  "git stash pop",
+  "git stash apply",
+  "git stash branch rescue",
+  "git stash store abc",
+  "git -C wt stash pop",
 ]
 
 const ALLOWED = [
@@ -83,6 +91,11 @@ const ALLOWED = [
   "git switch -c probe",
   "git add -A && git commit -m x",
   "git stash",
+  "git stash -u",
+  "git stash list",
+  "git stash show -p",
+  "git stash push -m x",
+  "git stash save x",
   "git reset --soft HEAD~1",
   "git reset HEAD file",
   "git cherry-pick abc",

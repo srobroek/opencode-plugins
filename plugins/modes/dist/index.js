@@ -1068,6 +1068,10 @@ function checkGit(args, agent, policy) {
         return refuse("git tag creating a tag");
       break;
     }
+    case "stash":
+      if (rest[0] !== undefined && !rest[0].startsWith("-") && !["list", "show", "push", "save"].includes(rest[0]))
+        return refuse(`git stash ${rest[0]}`);
+      break;
     case "worktree":
       if (!["add", "list", "remove", "lock", "unlock", "move", "repair"].includes(rest[0] ?? ""))
         return refuse(`git worktree ${rest[0] ?? ""}`);
