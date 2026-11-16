@@ -21,7 +21,7 @@ Standard-library entries use Go `1.27`; commands belong in `lang-go-testing` and
 | `mutation` | `gremlins` | >= 0.6.0 · 2025-12-06 · pre-1.0 | `grep -F go-gremlins/gremlins go.mod` · `go get -tool github.com/go-gremlins/gremlins/cmd/gremlins@latest` | go-mutesting (avito-tech v2): gremlins cannot parse the code | - | diff-pr + scheduled | Whole-module mutation as a blocking PR gate; assuming Go 1.27 generic-method syntax is supported (unverified) |
 | `snapshot` | Built-in: golden files in `testdata` | - | Built-in | gotest.tools/v3/golden: update flag and diff helper; goldie: template and fixture-dir helpers | - | every-pr | Automatic update in CI; unreviewed bulk regeneration |
 | `component` | N/A: no UI component model | - | - | None | - | every-pr | - |
-| `concurrency` | Built-in: `-race` and `testing/synctest` | - | Built-in | goleak: assert no goroutine outlives a test; goroutineleak profile (Go 1.27 runtime/pprof): inspect leaks in a running process | `-race`, `synctest` and goleak together on concurrent code | every-pr | Sleep-based synchronization; synctest as a substitute for network integration |
+| `concurrency` | Built-in: `-race` and `testing/synctest` | - | Built-in | goleak: assert no goroutine outlives a test; goroutineleak profile: with Go 1.27 runtime/pprof, inspect leaks in a running process | `-race`, `synctest` and goleak together on concurrent code | every-pr | Sleep-based synchronization; synctest as a substitute for network integration |
 | `coverage` | Built-in: `go test -coverprofile` | - | Built-in | None | - | every-pr | A percentage target; statement coverage read as branch coverage |
 | `benchmark` | Built-in: `testing.B` with `b.Loop` | - | Built-in | benchstat: compare repeated runs | `go test -bench -count=10` output goes through benchstat before any claim | on-demand | One noisy run as proof; mixing `b.Loop` with `b.N` |
 | `flaky-order` | Built-in: `-shuffle=on -count=N` | - | Built-in | gotestsum: `--rerun-fails` for diagnosis only | - | scheduled | Retries on by default; quarantine without an owner and expiry |
@@ -34,6 +34,7 @@ Standard-library entries use Go `1.27`; commands belong in `lang-go-testing` and
 
 ### property
 
+- **pgregory.net/rapid**: wins on automatic shrinking, stateful testing and `go test` integration with saved failing seeds; costs a dependency and generators to learn.
 - **gopter**: wins when a suite already uses it; costs no release since 2020.
 - **testing/quick**: wins for a one-line check with no dependency; costs a frozen package with no shrinking.
 

@@ -32,12 +32,14 @@ Commands belong in `lang-go-quality`. Install policy: detect the tool, recommend
 
 ### sast
 
+- **golangci-lint**: wins when gosec runs inside the lint binary you already use, with one config and fast local feedback; costs gosec's pattern-level heuristics with no data-flow analysis.
 - **semgrep**: wins when custom rules are shared with other languages; costs a restrictive licence on Semgrep-maintained rules.
 - **opengrep**: wins for the same rule format with no vendor rule licence; costs a younger project.
 - **codeql**: wins for data-flow analysis in CI; costs a build step and a slower run.
 
 ### complexity
 
+- **golangci-lint**: wins when gocognit, gocyclo and the rest run in the one lint pass with a shared baseline; costs the golangci-lint config upkeep and a cognitive metric only as good as its threshold.
 - **gocyclo**: wins as a second, cyclomatic limit of 10-12 beside gocognit; costs overlapping findings.
 - **lizard**: wins for one metric across languages; costs a Python tool outside the Go toolchain.
 

@@ -49,6 +49,7 @@ Rows follow the spec in
 
 ### lint
 
+- **sh -n**: wins as a zero-install syntax check for the declared interpreter (`bash -n`, `zsh -n`); costs no lint rules, so it catches only parse errors
 - **shellcheck**: wins on Bash and POSIX scripts with the broadest rule set; costs no zsh support
 - **checkbashisms**: wins when a `#!/bin/sh` script must stay POSIX; costs a second tool for one shebang
 - **syntax check**: wins because it runs the real interpreter's parser, including zsh; costs it finds syntax errors only
