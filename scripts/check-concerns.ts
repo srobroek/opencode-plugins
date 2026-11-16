@@ -42,7 +42,19 @@ export type Spec = {
 }
 /** Shared tool id to the concern ids it covers. */
 export type Shared = Map<string, string[]>
-export type Context = { root: string; spec: Spec; shared: Shared; today: string }
+/** Read access to the repository tree, by absolute path. Tests pass an in-memory tree. */
+export type Files = {
+  exists(file: string): boolean
+  read(file: string): string
+  /** Names of the entries (files and directories) directly inside `dir`. */
+  entries(dir: string): string[]
+}
+export const diskFiles: Files = {
+  exists: (file) => existsSync(file),
+  read: (file) => readFileSync(file, "utf8"),
+  entries: (dir) => [...new Bun.Glob("*").scanSync({ cwd: dir, onlyFiles: false })],
+}
+export type Context = { root: string; spec: Spec; shared: Shared; today: string; files: Files }
 
 export type DefaultKind =
   | { type: "tool"; tool: string }
@@ -293,10 +305,10 @@ const languageFiles = (lang: Language) => lang.files.map((f) => f.replace(/^\.\/
 type FileRow = { file: string; row: Row }
 
 /** Concern rows of one language file, with problems from table shape only. */
-function readConcernRows(root: string, file: string): Row[] {
+function readConcernRows(files: Files, root: string, file: string): Row[] {
   const abs = path.join(root, file)
-  if (!existsSync(abs)) return []
-  const table = parseTable(readFileSync(abs, "utf8"), "Concerns")
+  if (!files.exists(abs)) return []
+  const table = parseTable(files.read(abs), "Concerns")
   return table && sameHeader(table.header, LANGUAGE_HEADER)
     ? table.rows.filter((r) => r.cells.length === LANGUAGE_HEADER.length)
     : []
@@ -305,32 +317,32 @@ function readConcernRows(root: string, file: string): Row[] {
 /** The Default cell a language declares for a concern, searching all its files. */
 function defaultOf(ctx: Context, lang: Language, concern: string): string | undefined {
   for (const file of languageFiles(lang))
-    for (const row of readConcernRows(ctx.root, file)) if (unticked(row.cells[0] ?? "") === concern) return row.cells[1]
+    for (const row of readConcernRows(ctx.files, ctx.root, file)) if (unticked(row.cells[0] ?? "") === concern) return row.cells[1]
   return undefined
 }
 
-function skillPath(root: string, skill: string): string | undefined {
+function skillPath(files: Files, root: string, skill: string): string | undefined {
   const plugins = path.join(root, "plugins")
-  if (!existsSync(plugins)) return undefined
-  for (const plugin of new Bun.Glob("*").scanSync({ cwd: plugins, onlyFiles: false })) {
+  if (!files.exists(plugins)) return undefined
+  for (const plugin of files.entries(plugins)) {
     const candidate = path.join(plugins, plugin, "skills", skill, "SKILL.md")
-    if (existsSync(candidate)) return candidate
+    if (files.exists(candidate)) return candidate
   }
   return undefined
 }
 
-function linksOf(file: string): string[] {
-  if (!existsSync(file)) return []
-  const targets = [...readFileSync(file, "utf8").matchAll(/\]\(([^)\s]+)\)/g)].map((m) => m[1] ?? "")
+function linksOf(files: Files, file: string): string[] {
+  if (!files.exists(file)) return []
+  const targets = [...files.read(file).matchAll(/\]\(([^)\s]+)\)/g)].map((m) => m[1] ?? "")
   return targets
     .filter((t) => !/^[a-z][a-z0-9+.-]*:|^#/i.test(t))
     .map((t) => path.resolve(path.dirname(file), t.split("#")[0] ?? ""))
 }
 
 /** Absolute paths linked from SKILL.md or from a file it links (one hop). */
-function reachableFrom(skill: string): Set<string> {
-  const direct = linksOf(skill)
-  return new Set([...direct, ...direct.filter((f) => f.endsWith(".md")).flatMap(linksOf)])
+function reachableFrom(files: Files, skill: string): Set<string> {
+  const direct = linksOf(files, skill)
+  return new Set([...direct, ...direct.filter((f) => f.endsWith(".md")).flatMap((f) => linksOf(files, f))])
 }
 
 /** Findings for one language across all its registered files. */
@@ -339,19 +351,19 @@ export function checkLanguage(ctx: Context, languageId: string): Finding[] {
   if (!lang) return [{ file: SPEC_FILE, line: 1, reason: `unknown language "${languageId}"` }]
   const findings: Finding[] = []
   const owner = new Map<string, FileRow>()
-  const skill = skillPath(ctx.root, lang.skill)
+  const skill = skillPath(ctx.files, ctx.root, lang.skill)
   if (!skill) findings.push({ file: SPEC_FILE, line: lang.line, reason: `skill "${lang.skill}" not found in plugins/*/skills` })
-  const linked = skill ? reachableFrom(skill) : new Set<string>()
+  const linked = skill ? reachableFrom(ctx.files, skill) : new Set<string>()
 
   for (const file of languageFiles(lang)) {
     const abs = path.join(ctx.root, file)
-    if (!existsSync(abs)) {
+    if (!ctx.files.exists(abs)) {
       findings.push({ file: SPEC_FILE, line: lang.line, reason: `registered file ${file} is missing` })
       continue
     }
     if (skill && !linked.has(abs))
       findings.push({ file, line: 1, reason: `not linked from ${lang.skill} SKILL.md (directly or one hop)` })
-    findings.push(...checkFile(ctx, lang, file, readFileSync(abs, "utf8"), owner))
+    findings.push(...checkFile(ctx, lang, file, ctx.files.read(abs), owner))
   }
 
   const applicable = ctx.spec.concerns.filter((c) => applicableGroups(lang.kind).includes(c.group))
@@ -601,8 +613,8 @@ export function checkSurfaces(ctx: Context): Finding[] {
   const { spec } = ctx
   const file = spec.surfacesFile
   const abs = path.join(ctx.root, file)
-  if (!file || !existsSync(abs)) return [{ file: SPEC_FILE, line: 1, reason: `surfaces file ${file || "(unset)"} is missing` }]
-  const text = readFileSync(abs, "utf8")
+  if (!file || !ctx.files.exists(abs)) return [{ file: SPEC_FILE, line: 1, reason: `surfaces file ${file || "(unset)"} is missing` }]
+  const text = ctx.files.read(abs)
   const lines = text.split(/\r?\n/)
   const findings: Finding[] = []
   const bad = (line: number, reason: string) => findings.push({ file, line, reason })
@@ -697,9 +709,9 @@ function checkLanguageSpecific(ctx: Context, file: string, text: string): Findin
 }
 
 /** Load the spec and shared tools, then check the chosen language or every language. */
-export function checkRepo(root: string, options: { language?: string; today?: string } = {}): Finding[] {
+export function checkRepo(root: string, options: { language?: string; today?: string; files?: Files } = {}): Finding[] {
   const today = options.today ?? new Date().toISOString().slice(0, 10)
-  const loaded = loadContext(root, today)
+  const loaded = loadContext(root, today, options.files ?? diskFiles)
   if (!("ctx" in loaded)) return loaded.findings
   const { ctx, findings } = loaded
   const ids = options.language ? [options.language] : ctx.spec.languages.map((l) => l.id)
@@ -708,29 +720,30 @@ export function checkRepo(root: string, options: { language?: string; today?: st
   return findings
 }
 
-function loadContext(root: string, today: string): { ctx: Context; findings: Finding[] } | { findings: Finding[] } {
+function loadContext(root: string, today: string, files: Files): { ctx: Context; findings: Finding[] } | { findings: Finding[] } {
   const specPath = path.join(root, SPEC_FILE)
   const sharedPath = path.join(root, SHARED_FILE)
-  const missing = [SPEC_FILE, SHARED_FILE].filter((f) => !existsSync(path.join(root, f)))
+  const missing = [SPEC_FILE, SHARED_FILE].filter((f) => !files.exists(path.join(root, f)))
   if (missing.length > 0) return { findings: missing.map((file) => ({ file, line: 1, reason: "file is missing" })) }
-  const spec = parseSpec(readFileSync(specPath, "utf8"))
-  const shared = parseShared(readFileSync(sharedPath, "utf8"), SHARED_FILE, spec.spec.tokens)
+  const specText = files.read(specPath)
+  const spec = parseSpec(specText)
+  const shared = parseShared(files.read(sharedPath), SHARED_FILE, spec.spec.tokens)
   const findings = [...spec.findings, ...shared.findings]
-  const dated = /^Checked (\S+)\.$/m.exec(readFileSync(specPath, "utf8"))?.[1]
+  const dated = /^Checked (\S+)\.$/m.exec(specText)?.[1]
   if (dated && !isDate(dated)) findings.push({ file: SPEC_FILE, line: 1, reason: `Checked "${dated}" is not YYYY-MM-DD` })
   if (findings.length > 0) return { findings }
-  return { ctx: { root, spec: spec.spec, shared: shared.shared, today }, findings }
+  return { ctx: { root, spec: spec.spec, shared: shared.shared, today, files }, findings }
 }
 
 /** Report lines for rows whose release date is older than `maxAgeDays`. Informational only. */
-export function staleRows(root: string, maxAgeDays: number, today: string, language?: string): string[] {
-  const loaded = loadContext(root, today)
+export function staleRows(root: string, maxAgeDays: number, today: string, language?: string, files: Files = diskFiles): string[] {
+  const loaded = loadContext(root, today, files)
   if (!("ctx" in loaded)) return []
   const { ctx } = loaded
   const out: string[] = []
   for (const lang of ctx.spec.languages.filter((l) => !language || l.id === language))
     for (const file of languageFiles(lang))
-      for (const row of readConcernRows(root, file)) {
+      for (const row of readConcernRows(files, root, file)) {
         const date = /(\d{4}-\d{2}-\d{2})/.exec(row.cells[2] ?? "")?.[1]
         if (!date || !isDate(date)) continue
         const age = Math.floor((Date.parse(today) - Date.parse(date)) / DAY_MS)
@@ -743,8 +756,8 @@ export function staleRows(root: string, maxAgeDays: number, today: string, langu
 function staleSurfaceRows(ctx: Context, maxAgeDays: number, today: string): string[] {
   const file = ctx.spec.surfacesFile
   const abs = path.join(ctx.root, file)
-  if (!file || !existsSync(abs)) return []
-  const lines = readFileSync(abs, "utf8").split(/\r?\n/)
+  if (!file || !ctx.files.exists(abs)) return []
+  const lines = ctx.files.read(abs).split(/\r?\n/)
   const out: string[] = []
   for (const surface of ctx.spec.surfaces) {
     const section = sectionOf(lines, surface.id)
@@ -761,7 +774,7 @@ function staleSurfaceRows(ctx: Context, maxAgeDays: number, today: string): stri
   return out
 }
 
-type MainIo = { root?: string; today?: string; stdout?: (line: string) => void; stderr?: (line: string) => void }
+type MainIo = { root?: string; files?: Files; today?: string; stdout?: (line: string) => void; stderr?: (line: string) => void }
 
 /** CLI entry: returns the exit code (0 clean, 1 findings, 2 bad usage). */
 export function main(argv: string[], io: MainIo = {}): number {
@@ -778,10 +791,10 @@ export function main(argv: string[], io: MainIo = {}): number {
     err("check-concerns: --max-age needs a non-negative number of days")
     return 2
   }
-  const findings = checkRepo(root, { language: values.language, today })
+  const findings = checkRepo(root, { language: values.language, today, files: io.files })
   for (const f of findings) err(`${f.file}:${f.line}: ${f.reason}`)
   if (maxAge !== undefined) {
-    const stale = staleRows(root, maxAge, today, values.language)
+    const stale = staleRows(root, maxAge, today, values.language, io.files)
     out(`check-concerns: ${stale.length} row(s) older than ${maxAge} days`)
     for (const line of stale) out(line)
   }
