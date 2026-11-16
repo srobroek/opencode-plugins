@@ -17,6 +17,7 @@ beforeAll(() => {
     ...originalCleanup,
     cleanupDelivery: async (params: unknown, _cwd: string, deps: CleanupDeps) => {
       cleanupCalls.push({ params, deps })
+      await deps.authorize?.({ worktree: "/w/a", branch: "b", pr: 7 })
       return cleanupResult
     },
   }))
@@ -25,7 +26,7 @@ beforeAll(() => {
     landPullRequest: async () => ({
       ok: true,
       receiptPath: "/r/receipt.json",
-      receipt: { pr: { number: 7, mergeCommitOid: "abc" }, worktree: { path: "/w/a" }, repo: { nameWithOwner: "o/r" }, beads: { ledgerActive } },
+      receipt: { receiptId: "r7", pr: { number: 7, mergeCommitOid: "abc" }, worktree: { path: "/w/a" }, repo: { nameWithOwner: "o/r" }, beads: { ledgerActive } },
       text: "landed\nnext: run delivery_cleanup to remove the worktree and the local branch.",
       next: ["delivery_cleanup"],
     }),
@@ -46,9 +47,10 @@ type Result = { output: { ok: boolean; next: string[]; cleanup?: Record<string, 
 async function land(
   options: Record<string, unknown> = {},
   input: Record<string, unknown> = {},
-): Promise<{ result: Result; removed: unknown[] }> {
+  fakeOptions: Parameters<typeof createFakeContext>[0] = {},
+): Promise<{ result: Result; removed: unknown[]; fake: ReturnType<typeof createFakeContext> }> {
   const removed: unknown[] = []
-  const fake = createFakeContext()
+  const fake = createFakeContext(fakeOptions)
   const context = fake.context as unknown as { location: unknown; worktree: unknown; options: unknown }
   context.location = { ...(context.location as object), project: { id: "prj" } }
   context.options = options
@@ -65,7 +67,7 @@ async function land(
     { pr: 7, ...input },
     { sessionID: "s", agent: "a", messageID: "m", id: "c", signal: new AbortController().signal },
   )
-  return { result, removed }
+  return { result, removed, fake }
 }
 
 test("a successful land cleans up with the receipt it wrote and reports cleanup.ok", async () => {
@@ -117,4 +119,22 @@ test("a worktree held by an integration is not cleaned inline and reports the de
 test("a hold on another worktree does not stop cleanup", async () => {
   const { result } = await land({}, { cleanupHold: [{ directory: "/w/other", reason: "busy" }] })
   expect(result.output.cleanup).toMatchObject({ ok: true })
+})
+
+test("a denied inline cleanup is recorded as denied, still lands, and is never retried in the background", async () => {
+  const deny = (assert: { action: string }) => {
+    if (assert.action === "delivery_cleanup") throw new Error("denied by the user")
+  }
+  const { result, fake } = await land({}, {}, { assert: deny as never })
+  expect(result.output.ok).toBe(true)
+  expect(result.output.cleanup).toMatchObject({ ok: false, denied: true })
+  expect(result.output.next).toEqual(["delivery_cleanup"])
+  expect(fake.storage.get("delivery/pending/r7")).toMatchObject({ sessionID: "s", denied: { sessionID: "s" } })
+})
+
+test("a cleanup that is refused for another reason is not recorded as denied", async () => {
+  cleanupResult = { ok: false, reason: "worktree.status: dirty" }
+  const { result, fake } = await land()
+  expect(result.output.cleanup).not.toHaveProperty("denied")
+  expect((fake.storage.get("delivery/pending/r7") as { denied?: unknown }).denied).toBeUndefined()
 })

@@ -180,6 +180,7 @@ const LAND_OUTPUT = {
         localRefDeleted: { type: "boolean" },
         skipped: { type: "boolean" },
         deferred: { type: "string" },
+        denied: { type: "boolean" },
       },
       required: ["ok"],
     },
@@ -366,6 +367,8 @@ export async function setupDelivery(
           readCleanupHolds(input),
           canonicalPath,
         )
+        // A refused prompt is a denial: recorded, and never retried without a new explicit call.
+        let denied = false
         // A skipped run is reported only when the option is on; off keeps the old result.
         const cleanup: CleanupReport | undefined = decision.run
           ? await runInlineCleanup(() => {
@@ -373,7 +376,14 @@ export async function setupDelivery(
               return cleanupDelivery({ receipt: outcome.receiptPath }, directory, {
                 env: environment(options),
                 signal: context.signal,
-                authorize: (request) => askCleanup(request.worktree, { ...request }),
+                authorize: async (request) => {
+                  try {
+                    await askCleanup(request.worktree, { ...request })
+                  } catch (error) {
+                    denied = true
+                    throw error
+                  }
+                },
                 host: hostWorktrees(ctx),
               })
             })
@@ -382,9 +392,10 @@ export async function setupDelivery(
                 ? { ok: false, skipped: true, reason: decision.reason }
                 : { ok: false, deferred: decision.deferred }
               : undefined
+        if (denied && cleanup !== undefined) cleanup.denied = true
         // Cleanup that did not finish stays pending: delivery retries it when a turn ends.
         if (pending !== undefined && cleanup?.ok !== true) {
-          await pending.record(outcome.receipt, context.sessionID, readCleanupHolds(input)).catch(() => {})
+          await pending.record(outcome.receipt, context.sessionID, readCleanupHolds(input), { denied }).catch(() => {})
         }
         const output = landOutput(outcome, cleanup)
         const content = cleanup === undefined ? outcome.text : textAfterCleanup(outcome.text, cleanup)
@@ -398,6 +409,7 @@ export async function setupDelivery(
       output: CLEANUP_OUTPUT,
       execute: async (input, context) => {
         const ask = asserter(ctx, context, CLEANUP_ACTION)
+        await pending?.rearm(input as DeliveryCleanupParams).catch(() => {})
         const result = await cleanupDelivery(input as DeliveryCleanupParams, directory, {
           env: environment(options),
           signal: context.signal,

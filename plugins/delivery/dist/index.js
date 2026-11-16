@@ -3734,7 +3734,7 @@ ${next.slice(0, -1).map((step) => `  ${step}`).join(`
 
 // plugins/delivery/src/pending-cleanup.ts
 import { existsSync as existsSync3 } from "fs";
-import { resolve as resolve4 } from "path";
+import { basename as basename3, resolve as resolve4 } from "path";
 var CLAIM_TTL_MS = 24 * 3600000;
 var RETRY_WINDOW_MS = 5000;
 var DEBOUNCE_MS = 2000;
@@ -3742,6 +3742,8 @@ var MAX_PER_PASS = 20;
 function pendingCleanupAction(receipt, facts) {
   if (facts.done)
     return { action: "skip", reason: "already cleaned" };
+  if (facts.denied)
+    return { action: "skip", reason: "cleanup was denied; call delivery_cleanup to re-arm it" };
   if (receipt.worktree.path === null || receipt.worktree.removed)
     return { action: "skip", reason: "nothing to remove" };
   if (facts.worktreeGone)
@@ -3794,12 +3796,13 @@ function createPendingCleanup(deps) {
     return value !== null && typeof value === "object" && !Array.isArray(value) ? value : {};
   };
   const writeMeta = (receiptId, meta) => ctx.storage.set(metaKey(receiptId), meta);
-  const record = async (receipt, sessionID, claims) => {
+  const record = async (receipt, sessionID, claims, outcome = {}) => {
     const path = receipt.worktree.path;
     const mine = path === null ? [] : claims.filter((hold) => deps.canonical(hold.directory) === deps.canonical(path));
     await writeMeta(receipt.receiptId, {
       sessionID,
-      ...mine.length > 0 ? { claims: mine, claimedAt: now() } : {}
+      ...mine.length > 0 ? { claims: mine, claimedAt: now() } : {},
+      ...outcome.denied ? { denied: { at: now(), sessionID } } : {}
     });
   };
   const holdFor = async (receipt, meta) => {
@@ -3851,7 +3854,8 @@ function createPendingCleanup(deps) {
         recentlyTried,
         landingSession: meta.sessionID === sessionID,
         idle,
-        nudged: meta.nudged === true
+        nudged: meta.nudged === true,
+        denied: meta.denied !== undefined
       });
       if (decision.action === "done") {
         doneIds.add(receipt.receiptId);
@@ -3873,6 +3877,22 @@ function createPendingCleanup(deps) {
           await ctx.storage.remove(metaKey(receipt.receiptId)).catch(() => {});
         }
       }
+    }
+  };
+  const rearm = async (params) => {
+    const key = repoKey(cwd);
+    if (key === null)
+      return;
+    const directory = resolve4(receiptDirectory(env, key));
+    const wanted = params.receipt === undefined ? undefined : basename3(params.receipt, ".json");
+    const matches = pendingReceipts(listReceipts(directory)).filter((receipt) => (wanted === undefined || receipt.receiptId === wanted) && (params.pr === undefined || receipt.pr.number === params.pr) && (params.branch === undefined || receipt.branch.name === params.branch));
+    const selected = params.receipt === undefined && params.pr === undefined && params.branch === undefined ? matches.slice(0, 1) : matches;
+    for (const receipt of selected) {
+      const meta = await readMeta(receipt.receiptId);
+      if (meta.denied === undefined)
+        continue;
+      const { denied: _denied, ...rest } = meta;
+      await writeMeta(receipt.receiptId, rest);
     }
   };
   const retryNow = (sessionID, idle) => disposed ? Promise.resolve() : serial(() => run(sessionID, idle)).catch((error) => console.error("delivery: pending cleanup failed", error));
@@ -3942,7 +3962,7 @@ function createPendingCleanup(deps) {
       await new Promise((done) => setTimeout(done, debounceMs + 1));
     await chain;
   };
-  return { start, dispose, record, retryNow, handleEvent, settle };
+  return { start, dispose, record, rearm, retryNow, handleEvent, settle };
 }
 
 // plugins/delivery/src/verdict.ts
@@ -4125,7 +4145,8 @@ var LAND_OUTPUT = {
         removed: { type: "string" },
         localRefDeleted: { type: "boolean" },
         skipped: { type: "boolean" },
-        deferred: { type: "string" }
+        deferred: { type: "string" },
+        denied: { type: "boolean" }
       },
       required: ["ok"]
     }
@@ -4274,17 +4295,27 @@ async function setupDelivery(ctx, overrides = {}) {
           return { output, content: outcome.text, metadata: metadataOf(output) };
         }
         const decision = inlineCleanupDecision(outcome.receipt, options.autoCleanup, readCleanupHolds(input), canonicalPath);
+        let denied = false;
         const cleanup = decision.run ? await runInlineCleanup(() => {
           const askCleanup = asserter(ctx, context, CLEANUP_ACTION);
           return cleanupDelivery({ receipt: outcome.receiptPath }, directory, {
             env: environment(options),
             signal: context.signal,
-            authorize: (request) => askCleanup(request.worktree, { ...request }),
+            authorize: async (request) => {
+              try {
+                await askCleanup(request.worktree, { ...request });
+              } catch (error) {
+                denied = true;
+                throw error;
+              }
+            },
             host: hostWorktrees(ctx)
           });
         }) : options.autoCleanup ? decision.deferred === undefined ? { ok: false, skipped: true, reason: decision.reason } : { ok: false, deferred: decision.deferred } : undefined;
+        if (denied && cleanup !== undefined)
+          cleanup.denied = true;
         if (pending !== undefined && cleanup?.ok !== true) {
-          await pending.record(outcome.receipt, context.sessionID, readCleanupHolds(input)).catch(() => {});
+          await pending.record(outcome.receipt, context.sessionID, readCleanupHolds(input), { denied }).catch(() => {});
         }
         const output = landOutput(outcome, cleanup);
         const content = cleanup === undefined ? outcome.text : textAfterCleanup(outcome.text, cleanup);
@@ -4298,6 +4329,7 @@ async function setupDelivery(ctx, overrides = {}) {
       output: CLEANUP_OUTPUT,
       execute: async (input, context) => {
         const ask = asserter(ctx, context, CLEANUP_ACTION);
+        await pending?.rearm(input).catch(() => {});
         const result = await cleanupDelivery(input, directory, {
           env: environment(options),
           signal: context.signal,

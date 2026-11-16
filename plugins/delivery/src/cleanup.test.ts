@@ -2539,3 +2539,36 @@ describe("pending cleanup retries when a turn ends", () => {
     rmSync(f.root, { recursive: true, force: true })
   })
 })
+
+describe("a denied cleanup stays denied until an explicit delivery_cleanup re-arms it", () => {
+  test("deny, then idle: nothing is removed; re-armed, the next idle removes it", async () => {
+    const f = fixture("pending-denied")
+    const scripted = runner(f, { beadStatus: "closed" })
+    const fake = createFakeContext({ directory: f.main })
+    let clock = NOW + 10
+    const pending = createPendingCleanup({
+      ctx: fake.context,
+      cwd: f.main,
+      env: f.env,
+      host: () => undefined,
+      canonical: (path) => path,
+      debounceMs: 1,
+      cleanup: { run: stripped(scripted.run), now: () => NOW + 10, bounds: HEAVY_FIXTURE_BOUNDS },
+      now: () => clock,
+    })
+    await pending.record(f.receipt, "ses_lead", [], { denied: true })
+    await pending.start()
+    fake.emit({ type: "session.idle", data: { sessionID: "ses_lead" } })
+    await pending.settle()
+    expect(existsSync(f.linked)).toBe(true)
+    expect(mutationCalls(scripted.calls)).toEqual([])
+
+    await pending.rearm({ receipt: f.receiptPath })
+    clock += 60_000
+    fake.emit({ type: "session.idle", data: { sessionID: "ses_lead" } })
+    await pending.settle()
+    expect(existsSync(f.linked)).toBe(false)
+    await pending.dispose()
+    rmSync(f.root, { recursive: true, force: true })
+  })
+})

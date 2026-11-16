@@ -17,7 +17,7 @@
  */
 
 import { existsSync } from "node:fs"
-import { resolve } from "node:path"
+import { basename, resolve } from "node:path"
 import type { Context } from "@opencode/plugin/promise/plugin"
 import type { CleanupHold } from "./auto-cleanup.ts"
 import { type CleanupDeps, type CleanupResult, cleanupDelivery, type HostWorktrees, ledgerState } from "./cleanup.ts"
@@ -55,6 +55,8 @@ export type PendingFacts = {
   idle: boolean
   /** The nudge for this receipt was already sent. */
   nudged: boolean
+  /** The inline cleanup was denied; only an explicit `delivery_cleanup` call re-arms it. */
+  denied: boolean
 }
 
 export function pendingCleanupAction(
@@ -62,6 +64,7 @@ export function pendingCleanupAction(
   facts: PendingFacts,
 ): { action: PendingAction; reason: string } {
   if (facts.done) return { action: "skip", reason: "already cleaned" }
+  if (facts.denied) return { action: "skip", reason: "cleanup was denied; call delivery_cleanup to re-arm it" }
   if (receipt.worktree.path === null || receipt.worktree.removed) return { action: "skip", reason: "nothing to remove" }
   if (facts.worktreeGone) return { action: "done", reason: "the worktree is already gone" }
   if (facts.hold !== undefined) return { action: "hold", reason: facts.hold }
@@ -104,6 +107,8 @@ export type PendingMeta = {
   claims?: CleanupHold[]
   claimedAt?: number
   nudged?: boolean
+  /** The inline cleanup was denied (when, and in which session). */
+  denied?: { at: number; sessionID: string }
 }
 
 const metaKey = (receiptId: string) => `delivery/pending/${receiptId}`
@@ -143,12 +148,18 @@ export function createPendingCleanup(deps: PendingDeps) {
   const writeMeta = (receiptId: string, meta: PendingMeta) => ctx.storage.set(metaKey(receiptId), meta as never)
 
   /** `delivery_land` finished without removing the worktree: remember who landed it and who claimed it. */
-  const record = async (receipt: LandingReceipt, sessionID: string, claims: readonly CleanupHold[]) => {
+  const record = async (
+    receipt: LandingReceipt,
+    sessionID: string,
+    claims: readonly CleanupHold[],
+    outcome: { denied?: boolean } = {},
+  ) => {
     const path = receipt.worktree.path
     const mine = path === null ? [] : claims.filter((hold) => deps.canonical(hold.directory) === deps.canonical(path))
     await writeMeta(receipt.receiptId, {
       sessionID,
       ...(mine.length > 0 ? { claims: mine, claimedAt: now() } : {}),
+      ...(outcome.denied ? { denied: { at: now(), sessionID } } : {}),
     })
   }
 
@@ -201,6 +212,7 @@ export function createPendingCleanup(deps: PendingDeps) {
         landingSession: meta.sessionID === sessionID,
         idle,
         nudged: meta.nudged === true,
+        denied: meta.denied !== undefined,
       })
       if (decision.action === "done") {
         doneIds.add(receipt.receiptId)
@@ -225,6 +237,27 @@ export function createPendingCleanup(deps: PendingDeps) {
           await ctx.storage.remove(metaKey(receipt.receiptId)).catch(() => {})
         }
       }
+    }
+  }
+
+  /** An explicit `delivery_cleanup` call re-arms the receipts it names (the newest one without a selector). */
+  const rearm = async (params: { receipt?: string; pr?: number; branch?: string }) => {
+    const key = repoKey(cwd)
+    if (key === null) return
+    const directory = resolve(receiptDirectory(env, key))
+    const wanted = params.receipt === undefined ? undefined : basename(params.receipt, ".json")
+    const matches = pendingReceipts(listReceipts(directory)).filter(
+      (receipt) =>
+        (wanted === undefined || receipt.receiptId === wanted) &&
+        (params.pr === undefined || receipt.pr.number === params.pr) &&
+        (params.branch === undefined || receipt.branch.name === params.branch),
+    )
+    const selected = params.receipt === undefined && params.pr === undefined && params.branch === undefined ? matches.slice(0, 1) : matches
+    for (const receipt of selected) {
+      const meta = await readMeta(receipt.receiptId)
+      if (meta.denied === undefined) continue
+      const { denied: _denied, ...rest } = meta
+      await writeMeta(receipt.receiptId, rest)
     }
   }
 
@@ -303,5 +336,5 @@ export function createPendingCleanup(deps: PendingDeps) {
     await chain
   }
 
-  return { start, dispose, record, retryNow, handleEvent, settle }
+  return { start, dispose, record, rearm, retryNow, handleEvent, settle }
 }

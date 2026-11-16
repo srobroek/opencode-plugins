@@ -26,6 +26,8 @@ export type CleanupReport = {
   skipped?: boolean
   /** Why a holder kept the worktree for now; set instead of running cleanup. */
   deferred?: string
+  /** The user (or policy) refused the inline cleanup. It is not retried in the background. */
+  denied?: boolean
 }
 
 /** A worktree another plugin is still using, and why. */

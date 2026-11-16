@@ -22,6 +22,7 @@ const facts = (over: Partial<PendingFacts> = {}): PendingFacts => ({
   landingSession: true,
   idle: true,
   nudged: false,
+  denied: false,
   ...over,
 })
 
@@ -36,6 +37,9 @@ describe("pendingCleanupAction", () => {
     ["a hold is active", { hold: "lane x still active" }, "hold"],
     ["a hold wins over open beads", { hold: "busy", beads: "open" }, "hold"],
     ["already done", { done: true }, "skip"],
+    ["the inline cleanup was denied", { denied: true }, "skip"],
+    ["denied, even with the beads closed", { denied: true, beads: "closed" }, "skip"],
+    ["denied, even with open beads", { denied: true, beads: "open" }, "skip"],
     ["tried a moment ago", { recentlyTried: true }, "skip"],
     ["the worktree is already gone", { worktreeGone: true }, "done"],
   ]
