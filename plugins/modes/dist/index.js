@@ -238,6 +238,9 @@ async function registerModeReminders(ctx, modes, options = {}) {
   };
 }
 
+// plugins/modes/src/git-guard.ts
+import { isAbsolute as isAbsolute2, resolve as resolve2 } from "path";
+
 // plugins/lib/src/shell-tokenizer.ts
 var SEPARATORS = new Set([";", "&", "|", "(", ")", `
 `]);
@@ -925,8 +928,101 @@ function shellCall(tool, input) {
     call.background = value.background;
   return call;
 }
-function shellCommand(tool, input) {
-  return shellCall(tool, input)?.command;
+
+// plugins/modes/src/path-guard.ts
+import { lstatSync, readlinkSync } from "fs";
+import { homedir } from "os";
+import { dirname, isAbsolute, join as join2, relative, resolve, sep } from "path";
+var MAX_LINKS = 40;
+function canonical(path) {
+  const pending = resolve(path).split(sep).filter((segment) => segment !== "");
+  let current = sep;
+  let links = 0;
+  while (pending.length > 0) {
+    const segment = pending.shift();
+    if (segment === ".")
+      continue;
+    if (segment === "..") {
+      current = dirname(current);
+      continue;
+    }
+    const next = join2(current, segment);
+    let stats;
+    try {
+      stats = lstatSync(next);
+    } catch (error) {
+      if (error.code !== "ENOENT")
+        throw error;
+      return resolve(join2(next, ...pending));
+    }
+    if (!stats.isSymbolicLink()) {
+      current = next;
+      continue;
+    }
+    if (++links > MAX_LINKS)
+      throw new Error(`too many symbolic links resolving ${path}`);
+    const target = readlinkSync(next);
+    if (isAbsolute(target))
+      current = sep;
+    pending.unshift(...target.split(sep).filter((part) => part !== ""));
+  }
+  return current;
+}
+var inside = (path, root) => {
+  const rel = relative(root, path);
+  return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+};
+function checkDebugWrite(target, options) {
+  try {
+    return checkResolved(target, options);
+  } catch (error) {
+    return `${target} could not be resolved (${error.message}), so the write is refused`;
+  }
+}
+function checkResolved(target, options) {
+  const home = canonical(options.home ?? homedir());
+  const start = canonical(options.startDir);
+  const path = canonical(isAbsolute(target) ? target : resolve(start, target));
+  if (path === start || inside(path, start))
+    return `${target} is inside the directory this session started in`;
+  if (inside(path, join2(home, ".opencode", "debug")))
+    return;
+  const worktrees = join2(home, ".local", "share", "opencode", "worktree");
+  if (inside(path, worktrees)) {
+    const [hash, lane, ...rest] = relative(worktrees, path).split(sep);
+    if (hash !== undefined && lane !== undefined && /^debug-.+/.test(lane) && rest.length > 0)
+      return;
+  }
+  return `${target} is outside a debug-* scratch worktree and the debug ledger directory`;
+}
+function isScratchPath(path, options) {
+  try {
+    const home = canonical(options.home ?? homedir());
+    const start = canonical(options.startDir);
+    const resolved = canonical(isAbsolute(path) ? path : resolve(start, path));
+    if (resolved === start || inside(resolved, start))
+      return false;
+    const worktrees = join2(home, ".local", "share", "opencode", "worktree");
+    if (!inside(resolved, worktrees))
+      return false;
+    const [hash, lane] = relative(worktrees, resolved).split(sep);
+    return hash !== undefined && lane !== undefined && /^debug-.+/.test(lane);
+  } catch {
+    return false;
+  }
+}
+function guardDebugWrite(tool, input, agent, options) {
+  if (agent !== "debug" || !WRITE_TOOLS.has(tool))
+    return;
+  const targets = writeTargets(tool, input);
+  if (targets.length === 0)
+    return "the write has no readable target path, so it cannot be checked";
+  for (const target of targets) {
+    const reason = checkDebugWrite(target, options);
+    if (reason !== undefined)
+      return reason;
+  }
+  return;
 }
 
 // plugins/modes/src/git-guard.ts
@@ -995,7 +1091,7 @@ var BOOLEAN_GLOBALS = new Set([
 var VALUED_GLOBALS = new Set(["--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env", "--attr-source"]);
 var SAFE_CONFIG = /^(core\.(quotepath|autocrlf|whitespace|abbrev|precomposeunicode)|color\.[a-z.]+|diff\.(algorithm|renames|context|noprefix|mnemonicprefix)|log\.[a-z]+|user\.(name|email)|commit\.gpgsign|gc\.auto|advice\.[a-z]+|safe\.directory|protocol\.version|init\.defaultbranch)$/i;
 var DANGEROUS_ENV = /^(GIT_(CONFIG[A-Z_0-9]*|SSH|SSH_COMMAND|ASKPASS|EXTERNAL_DIFF|PAGER|EDITOR|SEQUENCE_EDITOR|EXEC_PATH|PROXY_COMMAND|DIR|WORK_TREE|INDEX_FILE|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES|COMMON_DIR|TEMPLATE_DIR)|SSH_ASKPASS|EDITOR|VISUAL|PAGER)=/;
-var RISKY_OPTION = /^--(output|upload-pack|receive-pack|exec|open-files-in-pager|ext-diff|textconv)(=|$)/;
+var RISKY_OPTION = /^--(upload-pack|receive-pack|exec|open-files-in-pager|ext-diff|textconv)(=|$)/;
 var MENTIONS_GIT = /git/i;
 var WORTH_PARSING = /git|[{*?[$`]/i;
 var KEYWORDS = new Set(["if", "then", "else", "elif", "while", "until", "do", "!", "{", "(", "coproc"]);
@@ -1034,8 +1130,16 @@ var longOption = (arg, full) => {
   return name.startsWith("--") && name.length >= 3 && full.startsWith(name);
 };
 var cluster = (arg, letters) => /^-[^-]/.test(arg) && [...arg.slice(1)].some((c) => letters.includes(c));
-function checkGit(args, agent, policy) {
+function joinPath(base, path) {
+  if (isAbsolute2(path))
+    return resolve2(path);
+  return base === undefined ? undefined : resolve2(base, path);
+}
+function checkGit(args, ctx, cwd) {
+  const { agent, policy } = ctx;
   const refuse = (what) => `${what} is not allowed for the ${agent} agent`;
+  let tree = cwd;
+  let gitDir = false;
   let i = 0;
   for (;i < args.length; i++) {
     const word = args[i];
@@ -1047,7 +1151,11 @@ function checkGit(args, agent, policy) {
         return refuse(`git -c ${value ?? ""}`);
       if (value === undefined)
         return refuse("git -C without a path");
-    } else if (word.startsWith("-C")) {} else if (word.startsWith("-c")) {
+      if (word === "-C")
+        tree = joinPath(tree, value);
+    } else if (word.startsWith("-C")) {
+      tree = joinPath(tree, word.slice(2));
+    } else if (word.startsWith("-c")) {
       if (!SAFE_CONFIG.test(word.slice(2).split("=")[0] ?? ""))
         return refuse(`git ${word}`);
     } else if (word.startsWith("--exec-path")) {
@@ -1056,10 +1164,16 @@ function checkGit(args, agent, policy) {
       const value = word === "--config-env" ? args[++i] : word.slice("--config-env=".length);
       if (value === undefined || !SAFE_CONFIG.test(value.split("=")[0] ?? ""))
         return refuse(`git --config-env ${value ?? ""}`);
-    } else if (VALUED_GLOBALS.has(word)) {
-      if (args[++i] === undefined)
+    } else if (VALUED_GLOBALS.has(word) || VALUED_GLOBALS.has(word.split("=")[0] ?? "") && word.includes("=")) {
+      const name = word.split("=")[0];
+      const value = word.includes("=") ? word.slice(word.indexOf("=") + 1) : args[++i];
+      if (value === undefined)
         return refuse(`git ${word} without a value`);
-    } else if (VALUED_GLOBALS.has(word.split("=")[0] ?? "") && word.includes("=")) {} else
+      if (name === "--work-tree")
+        tree = joinPath(tree, value);
+      if (name === "--git-dir")
+        gitDir = true;
+    } else
       return refuse(`git option ${word}`);
   }
   const sub = args[i];
@@ -1071,6 +1185,14 @@ function checkGit(args, agent, policy) {
   const risky = rest.find((arg) => RISKY_OPTION.test(arg) || sub === "grep" && /^-O/.test(arg));
   if (risky !== undefined)
     return refuse(`git ${sub} ${risky}`);
+  const outputs = outputDestinations(sub, rest);
+  if (outputs === undefined)
+    return refuse(`git ${sub} with an output option that has no path`);
+  for (const destination of outputs) {
+    const reason = checkDestination(destination, tree, ctx);
+    if (reason !== undefined)
+      return refuse(`git ${sub} writing to ${destination} (${reason})`);
+  }
   switch (sub) {
     case "reset":
       if (rest.some((arg) => longOption(arg, "--hard")))
@@ -1106,12 +1228,62 @@ function checkGit(args, agent, policy) {
       if (rest[0] !== undefined && !rest[0].startsWith("-") && !["list", "show", "push", "save"].includes(rest[0]))
         return refuse(`git stash ${rest[0]}`);
       break;
-    case "worktree":
-      if (!["add", "list", "remove", "lock", "unlock", "move", "repair"].includes(rest[0] ?? ""))
-        return refuse(`git worktree ${rest[0] ?? ""}`);
+    case "worktree": {
+      const action = rest[0] ?? "";
+      if (!["add", "list", "remove", "lock", "unlock", "move", "repair"].includes(action))
+        return refuse(`git worktree ${action}`);
+      if (action === "add" || action === "remove") {
+        const target = worktreeTarget(action, rest.slice(1));
+        const resolved = target === undefined ? undefined : joinPath(tree, target);
+        if (resolved === undefined || !scratch(resolved, ctx))
+          return refuse(`git worktree ${action} outside a debug-* scratch worktree`);
+      }
       break;
+    }
   }
   return;
+}
+function worktreeTarget(action, args) {
+  for (let i = 0;i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--")
+      return args[i + 1];
+    if (!arg.startsWith("-"))
+      return arg;
+    if (action === "add" && ["-b", "-B", "--reason"].includes(arg))
+      i++;
+  }
+  return;
+}
+function scratch(path, ctx) {
+  return ctx.env.startDir !== undefined && isScratchPath(path, { home: ctx.env.home, startDir: ctx.env.startDir });
+}
+function outputDestinations(sub, rest) {
+  const found = [];
+  for (let i = 0;i < rest.length; i++) {
+    const arg = rest[i];
+    if (arg === "--")
+      break;
+    const name = arg.split("=")[0];
+    const long = name.startsWith("--") && name.length >= 3 && ("--output".startsWith(name) || "--output-directory".startsWith(name));
+    const short = sub === "format-patch" && arg.startsWith("-o");
+    if (!long && !short)
+      continue;
+    const value = long ? arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : rest[++i] : arg.length > 2 ? arg.slice(2) : rest[++i];
+    if (value === undefined || value === "")
+      return;
+    found.push(value);
+  }
+  return found;
+}
+function checkDestination(destination, tree, ctx) {
+  const { startDir, home } = ctx.env;
+  const resolved = joinPath(tree, destination);
+  if (startDir === undefined || resolved === undefined)
+    return "the destination or the start directory is unknown";
+  if (scratch(resolved, ctx) || checkDebugWrite(resolved, { home, startDir }) === undefined)
+    return;
+  return "outside a debug-* scratch worktree and ~/.opencode/debug";
 }
 function runnerCommand(exe, args) {
   let i = 0;
@@ -1121,16 +1293,18 @@ function runnerCommand(exe, args) {
 }
 function realCommand(input) {
   let current = input.map(unescape);
+  const directories = [];
   for (let round = 0;round < 6; round++) {
     let start = 0;
     while (start < current.length && KEYWORDS.has(current[start]))
       start++;
-    const next = commandWords(current.slice(start)).argv;
-    if (start === 0 && next.length === current.length)
-      return next;
-    current = next;
+    const words = commandWords(current.slice(start));
+    directories.push(...words.directories);
+    if (start === 0 && words.argv.length === current.length)
+      return { argv: words.argv, directories };
+    current = words.argv;
   }
-  return current;
+  return { argv: current, directories };
 }
 var deeper = (ctx) => ({ ...ctx, depth: ctx.depth + 1 });
 function checkWords(input, ctx) {
@@ -1140,7 +1314,7 @@ function checkWords(input, ctx) {
   const dangerous = input.find((word) => DANGEROUS_ENV.test(word));
   if (dangerous !== undefined)
     return `${dangerous.split("=")[0]} can make git run a command or read other config, which is not allowed for the ${agent} agent`;
-  const argv = realCommand(input);
+  const { argv, directories } = realCommand(input);
   const first = argv[0];
   if (first === undefined)
     return;
@@ -1150,8 +1324,12 @@ function checkWords(input, ctx) {
     return "a variable or substitution in command position cannot be checked";
   if (/[*?[{]/.test(first) && (mentions || couldBeGit(first)))
     return "a glob or brace in command position could name git, so it cannot be checked";
-  if (exe === "git")
-    return checkGit(args, agent, policy);
+  if (exe === "git") {
+    let cwd = ctx.state.cwd;
+    for (const directory of directories)
+      cwd = joinPath(cwd, directory);
+    return checkGit(args, ctx, cwd);
+  }
   if ((INTERPRETERS.test(exe) || INLINE_CODE_RUNNERS.test(exe) && args.some((arg) => ["-e", "--eval", "-p", "--print"].includes(arg))) && args.some((arg) => MENTIONS_GIT.test(arg)))
     return "an interpreter running code that mentions git cannot be checked";
   if (SHELLS.has(exe)) {
@@ -1177,19 +1355,35 @@ function checkWords(input, ctx) {
   }
   return;
 }
+var CD_UNSAFE = /[$`*?[{~]/;
+function followDirectory(position, ctx) {
+  const { argv } = realCommand(position.argv);
+  const exe = basename2(argv[0] ?? "");
+  if (exe === "pushd" || exe === "popd")
+    ctx.state.cwd = undefined;
+  else if (exe === "cd") {
+    const target = argv[1];
+    ctx.state.cwd = ctx.trusted && target !== undefined && !target.startsWith("-") && !CD_UNSAFE.test(target) && argv.length === 2 ? joinPath(ctx.state.cwd, target) : undefined;
+  } else
+    return false;
+  return true;
+}
 function checkParsed(parsed, ctx) {
   for (const position of parsed.commands) {
+    if (followDirectory(position, ctx))
+      continue;
     const reason = checkWords(position.argv, ctx);
     if (reason !== undefined)
       return reason;
   }
   for (const child of parsed.nested) {
-    const reason = checkParsed(child, deeper(ctx));
+    const reason = checkParsed(child, { ...deeper(ctx), state: { cwd: ctx.state.cwd }, trusted: false });
     if (reason !== undefined)
       return reason;
   }
   return;
 }
+var onlyAndChains = (command) => !/[;|&(){}`\n]|\$\(/.test(command.replaceAll("&&", " "));
 function checkCommand(command, ctx) {
   const text = unescape(command.replace(/['"]/g, ""));
   if (!WORTH_PARSING.test(text))
@@ -1197,19 +1391,36 @@ function checkCommand(command, ctx) {
   const parsed = parse(command);
   if (parsed.unknown)
     return MENTIONS_GIT.test(text) || ctx.mentions ? "the command could not be parsed, so its git use cannot be checked" : undefined;
-  return checkParsed(parsed, { ...ctx, mentions: ctx.mentions || MENTIONS_GIT.test(text) });
+  return checkParsed(parsed, { ...ctx, mentions: ctx.mentions || MENTIONS_GIT.test(text), state: { cwd: ctx.state.cwd }, trusted: onlyAndChains(command) });
 }
-function forbiddenGit(command, agent) {
+function startingDirectory(env) {
+  if (env.workdir !== undefined && isAbsolute2(env.workdir))
+    return resolve2(env.workdir);
+  if (env.startDir === undefined)
+    return;
+  return env.workdir === undefined ? resolve2(env.startDir) : resolve2(env.startDir, env.workdir);
+}
+function forbiddenGit(command, agent, env = {}) {
   const policy = POLICIES[agent];
-  return policy === undefined ? undefined : checkCommand(command, { agent, policy, mentions: false, depth: 0 });
+  if (policy === undefined)
+    return;
+  return checkCommand(command, {
+    agent,
+    policy,
+    mentions: false,
+    depth: 0,
+    env,
+    state: { cwd: startingDirectory(env) },
+    trusted: onlyAndChains(command)
+  });
 }
-function guardShellCall(tool, input, agent) {
+function guardShellCall(tool, input, agent, env = {}) {
   if (POLICIES[agent] === undefined || !isShellTool(tool))
     return;
-  const command = shellCommand(tool, input);
-  if (command === undefined || command.trim() === "")
+  const call = shellCall(tool, input);
+  if (call === undefined || call.command.trim() === "")
     return "the shell input has no recognisable command, so its git use cannot be checked";
-  return forbiddenGit(command, agent);
+  return forbiddenGit(call.command, agent, { ...env, workdir: call.workdir ?? env.workdir });
 }
 
 // plugins/modes/src/modes.ts
@@ -1252,86 +1463,6 @@ function enabledModes(options) {
   return AGENT_IDS.filter((id) => options.agents[id]).map((id) => MODES2[id]);
 }
 
-// plugins/modes/src/path-guard.ts
-import { lstatSync, readlinkSync } from "fs";
-import { homedir } from "os";
-import { dirname, isAbsolute, join as join2, relative, resolve, sep } from "path";
-var MAX_LINKS = 40;
-function canonical(path) {
-  const pending = resolve(path).split(sep).filter((segment) => segment !== "");
-  let current = sep;
-  let links = 0;
-  while (pending.length > 0) {
-    const segment = pending.shift();
-    if (segment === ".")
-      continue;
-    if (segment === "..") {
-      current = dirname(current);
-      continue;
-    }
-    const next = join2(current, segment);
-    let stats;
-    try {
-      stats = lstatSync(next);
-    } catch (error) {
-      if (error.code !== "ENOENT")
-        throw error;
-      return resolve(join2(next, ...pending));
-    }
-    if (!stats.isSymbolicLink()) {
-      current = next;
-      continue;
-    }
-    if (++links > MAX_LINKS)
-      throw new Error(`too many symbolic links resolving ${path}`);
-    const target = readlinkSync(next);
-    if (isAbsolute(target))
-      current = sep;
-    pending.unshift(...target.split(sep).filter((part) => part !== ""));
-  }
-  return current;
-}
-var inside = (path, root) => {
-  const rel = relative(root, path);
-  return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
-};
-function checkDebugWrite(target, options) {
-  try {
-    return checkResolved(target, options);
-  } catch (error) {
-    return `${target} could not be resolved (${error.message}), so the write is refused`;
-  }
-}
-function checkResolved(target, options) {
-  const home = canonical(options.home ?? homedir());
-  const start = canonical(options.startDir);
-  const path = canonical(isAbsolute(target) ? target : resolve(start, target));
-  if (path === start || inside(path, start))
-    return `${target} is inside the directory this session started in`;
-  if (inside(path, join2(home, ".opencode", "debug")))
-    return;
-  const worktrees = join2(home, ".local", "share", "opencode", "worktree");
-  if (inside(path, worktrees)) {
-    const [hash, lane, ...rest] = relative(worktrees, path).split(sep);
-    if (hash !== undefined && lane !== undefined && /^debug-.+/.test(lane) && rest.length > 0)
-      return;
-  }
-  return `${target} is outside a debug-* scratch worktree and the debug ledger directory`;
-}
-function guardDebugWrite(tool, input, agent, options) {
-  if (agent !== "debug" || !WRITE_TOOLS.has(tool))
-    return;
-  const targets = writeTargets(tool, input);
-  if (targets.length === 0)
-    return "the write has no readable target path, so it cannot be checked";
-  for (const target of targets) {
-    const reason = checkDebugWrite(target, options);
-    if (reason !== undefined)
-      return reason;
-  }
-  return;
-}
-
 // plugins/modes/src/index.ts
 var AGENTS_DIR = fileURLToPath(new URL("../agents", import.meta.url));
 async function setupModes(ctx) {
@@ -1344,21 +1475,25 @@ async function setupModes(ctx) {
   try {
     const agents = await registerAgents(ctx.agent, selectAgents(agentPaths(AGENTS_DIR), options));
     disposers.push(() => agents.dispose());
+    const location = ctx.location.directory;
+    const startDirectory = (sessionID) => ctx.session.get({ sessionID }).then((session) => session.location.directory ?? location).catch(() => location);
     if (options.agents.debug || options.agents.refactor) {
-      const guard = await ctx.tool.hook("execute.before", (event) => {
-        const reason = guardShellCall(event.tool, event.input, event.agent);
+      const guard = await ctx.tool.hook("execute.before", async (event) => {
+        if (!GUARDED_AGENTS.includes(event.agent))
+          return;
+        const reason = guardShellCall(event.tool, event.input, event.agent, { startDir: await startDirectory(event.sessionID) });
         if (reason !== undefined)
           throw new Error(reason);
       });
       disposers.push(() => guard.dispose());
     }
     if (options.agents.debug) {
-      const location = ctx.location.directory;
       const writes = await ctx.tool.hook("execute.before", async (event) => {
         if (event.agent !== "debug")
           return;
-        const startDir = await ctx.session.get({ sessionID: event.sessionID }).then((session) => session.location.directory ?? location).catch(() => location);
-        const reason = guardDebugWrite(event.tool, event.input, event.agent, { startDir });
+        const reason = guardDebugWrite(event.tool, event.input, event.agent, {
+          startDir: await startDirectory(event.sessionID)
+        });
         if (reason !== undefined)
           throw new Error(reason);
       });

@@ -11,9 +11,21 @@
  * failure) is refused.
  */
 
+import { isAbsolute, resolve } from "node:path"
 import { commandWords } from "@srobroek/opencode-lib/command-words"
 import { type CommandPosition, type ParsedCommand, parse } from "@srobroek/opencode-lib/shell-command"
-import { isShellTool, shellCommand } from "@srobroek/opencode-lib/tool-targets"
+import { isShellTool, shellCall } from "@srobroek/opencode-lib/tool-targets"
+import { checkDebugWrite, isScratchPath } from "./path-guard.ts"
+
+/** What the guard needs to know about where a command runs. */
+export type GitContext = {
+  /** The directory the session started in, the user's checkout. */
+  startDir?: string
+  /** The shell call's `workdir`, relative to `startDir`. */
+  workdir?: string
+  /** The user's home directory. Defaults to `os.homedir()`. */
+  home?: string
+}
 
 type Policy = { subcommands: ReadonlySet<string> }
 
@@ -48,8 +60,8 @@ const SAFE_CONFIG =
 const DANGEROUS_ENV =
   /^(GIT_(CONFIG[A-Z_0-9]*|SSH|SSH_COMMAND|ASKPASS|EXTERNAL_DIFF|PAGER|EDITOR|SEQUENCE_EDITOR|EXEC_PATH|PROXY_COMMAND|DIR|WORK_TREE|INDEX_FILE|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES|COMMON_DIR|TEMPLATE_DIR)|SSH_ASKPASS|EDITOR|VISUAL|PAGER)=/
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/
-/** Options that run a command or write to a path chosen by the caller. */
-const RISKY_OPTION = /^--(output|upload-pack|receive-pack|exec|open-files-in-pager|ext-diff|textconv)(=|$)/
+/** Options that run a command chosen by the caller. Output paths are checked separately. */
+const RISKY_OPTION = /^--(upload-pack|receive-pack|exec|open-files-in-pager|ext-diff|textconv)(=|$)/
 const MENTIONS_GIT = /git/i
 /** A command that is worth parsing: it mentions git or has a word that could expand into it. */
 const WORTH_PARSING = /git|[{*?[$`]/i
@@ -94,9 +106,18 @@ const longOption = (arg: string, full: string) => {
 /** Whether a short-option cluster such as `-dr` contains one of `letters`. */
 const cluster = (arg: string, letters: string) => /^-[^-]/.test(arg) && [...arg.slice(1)].some((c) => letters.includes(c))
 
+/** `path` resolved against `base`; undefined when a relative path has no known base. */
+function joinPath(base: string | undefined, path: string): string | undefined {
+  if (isAbsolute(path)) return resolve(path)
+  return base === undefined ? undefined : resolve(base, path)
+}
+
 /** Why `args` (the words after `git`) is refused for `policy`, or undefined. */
-function checkGit(args: readonly string[], agent: string, policy: Policy): string | undefined {
+function checkGit(args: readonly string[], ctx: Ctx, cwd: string | undefined): string | undefined {
+  const { agent, policy } = ctx
   const refuse = (what: string) => `${what} is not allowed for the ${agent} agent`
+  let tree = cwd
+  let gitDir = false
   let i = 0
   for (; i < args.length; i++) {
     const word = args[i] as string
@@ -105,8 +126,9 @@ function checkGit(args: readonly string[], agent: string, policy: Policy): strin
       const value = args[++i]
       if (word === "-c" && (value === undefined || !SAFE_CONFIG.test(value.split("=")[0] ?? ""))) return refuse(`git -c ${value ?? ""}`)
       if (value === undefined) return refuse("git -C without a path")
+      if (word === "-C") tree = joinPath(tree, value)
     } else if (word.startsWith("-C")) {
-      // attached path: -Cx
+      tree = joinPath(tree, word.slice(2))
     } else if (word.startsWith("-c")) {
       if (!SAFE_CONFIG.test(word.slice(2).split("=")[0] ?? "")) return refuse(`git ${word}`)
     } else if (word.startsWith("--exec-path")) {
@@ -117,10 +139,12 @@ function checkGit(args: readonly string[], agent: string, policy: Policy): strin
     } else if (word === "--config-env" || word.startsWith("--config-env=")) {
       const value = word === "--config-env" ? args[++i] : word.slice("--config-env=".length)
       if (value === undefined || !SAFE_CONFIG.test(value.split("=")[0] ?? "")) return refuse(`git --config-env ${value ?? ""}`)
-    } else if (VALUED_GLOBALS.has(word)) {
-      if (args[++i] === undefined) return refuse(`git ${word} without a value`)
-    } else if (VALUED_GLOBALS.has(word.split("=")[0] ?? "") && word.includes("=")) {
-      // --git-dir=x
+    } else if (VALUED_GLOBALS.has(word) || (VALUED_GLOBALS.has(word.split("=")[0] ?? "") && word.includes("="))) {
+      const name = word.split("=")[0] as string
+      const value = word.includes("=") ? word.slice(word.indexOf("=") + 1) : args[++i]
+      if (value === undefined) return refuse(`git ${word} without a value`)
+      if (name === "--work-tree") tree = joinPath(tree, value)
+      if (name === "--git-dir") gitDir = true
     } else return refuse(`git option ${word}`)
   }
   const sub = args[i]
@@ -129,6 +153,12 @@ function checkGit(args: readonly string[], agent: string, policy: Policy): strin
   if (!policy.subcommands.has(sub)) return refuse(`git ${sub}`)
   const risky = rest.find((arg) => RISKY_OPTION.test(arg) || (sub === "grep" && /^-O/.test(arg)))
   if (risky !== undefined) return refuse(`git ${sub} ${risky}`)
+  const outputs = outputDestinations(sub, rest)
+  if (outputs === undefined) return refuse(`git ${sub} with an output option that has no path`)
+  for (const destination of outputs) {
+    const reason = checkDestination(destination, tree, ctx)
+    if (reason !== undefined) return refuse(`git ${sub} writing to ${destination} (${reason})`)
+  }
   switch (sub) {
     case "reset":
       if (rest.some((arg) => longOption(arg, "--hard"))) return refuse("git reset --hard")
@@ -171,11 +201,64 @@ function checkGit(args: readonly string[], agent: string, policy: Policy): strin
       if (rest[0] !== undefined && !rest[0].startsWith("-") && !["list", "show", "push", "save"].includes(rest[0]))
         return refuse(`git stash ${rest[0]}`)
       break
-    case "worktree":
-      if (!["add", "list", "remove", "lock", "unlock", "move", "repair"].includes(rest[0] ?? "")) return refuse(`git worktree ${rest[0] ?? ""}`)
+    case "worktree": {
+      const action = rest[0] ?? ""
+      if (!["add", "list", "remove", "lock", "unlock", "move", "repair"].includes(action)) return refuse(`git worktree ${action}`)
+      if (action === "add" || action === "remove") {
+        const target = worktreeTarget(action, rest.slice(1))
+        const resolved = target === undefined ? undefined : joinPath(tree, target)
+        if (resolved === undefined || !scratch(resolved, ctx)) return refuse(`git worktree ${action} outside a debug-* scratch worktree`)
+      }
       break
+    }
   }
   return undefined
+}
+
+/** The path argument of `git worktree add|remove`. */
+function worktreeTarget(action: string, args: readonly string[]): string | undefined {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i] as string
+    if (arg === "--") return args[i + 1]
+    if (!arg.startsWith("-")) return arg
+    if (action === "add" && ["-b", "-B", "--reason"].includes(arg)) i++
+  }
+  return undefined
+}
+
+/** Whether `path` is a debug scratch worktree (or inside one) for this session. */
+function scratch(path: string, ctx: Ctx): boolean {
+  return ctx.env.startDir !== undefined && isScratchPath(path, { home: ctx.env.home, startDir: ctx.env.startDir })
+}
+
+/**
+ * The paths a git subcommand's output options write to, or undefined when an option has no value.
+ * Covers `--output[=]` and `--output-directory[=]` (and the abbreviations git accepts), and
+ * `-o <dir>` for `format-patch`.
+ */
+function outputDestinations(sub: string, rest: readonly string[]): string[] | undefined {
+  const found: string[] = []
+  for (let i = 0; i < rest.length; i++) {
+    const arg = rest[i] as string
+    if (arg === "--") break
+    const name = arg.split("=")[0] as string
+    const long = name.startsWith("--") && name.length >= 3 && ("--output".startsWith(name) || "--output-directory".startsWith(name))
+    const short = sub === "format-patch" && arg.startsWith("-o")
+    if (!long && !short) continue
+    const value = long ? (arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : rest[++i]) : arg.length > 2 ? arg.slice(2) : rest[++i]
+    if (value === undefined || value === "") return undefined
+    found.push(value)
+  }
+  return found
+}
+
+/** Why a git output path is refused, or undefined when it lands in a scratch worktree or the debug ledger directory. */
+function checkDestination(destination: string, tree: string | undefined, ctx: Ctx): string | undefined {
+  const { startDir, home } = ctx.env
+  const resolved = joinPath(tree, destination)
+  if (startDir === undefined || resolved === undefined) return "the destination or the start directory is unknown"
+  if (scratch(resolved, ctx) || checkDebugWrite(resolved, { home, startDir }) === undefined) return undefined
+  return "outside a debug-* scratch worktree and ~/.opencode/debug"
 }
 
 /** Words after the xargs/watch/parallel options, as the command they run. */
@@ -185,20 +268,32 @@ function runnerCommand(exe: string, args: readonly string[]): string[] {
   return args.slice(i)
 }
 
-/** The command a simple command runs: reserved words, wrappers, assignments and backslash escapes dropped. */
-function realCommand(input: readonly string[]): string[] {
+/** The command a simple command runs, with the directories its wrappers change into. */
+function realCommand(input: readonly string[]): { argv: string[]; directories: string[] } {
   let current = input.map(unescape)
+  const directories: string[] = []
   for (let round = 0; round < 6; round++) {
     let start = 0
     while (start < current.length && KEYWORDS.has(current[start] as string)) start++
-    const next = commandWords(current.slice(start)).argv
-    if (start === 0 && next.length === current.length) return next
-    current = next
+    const words = commandWords(current.slice(start))
+    directories.push(...words.directories)
+    if (start === 0 && words.argv.length === current.length) return { argv: words.argv, directories }
+    current = words.argv
   }
-  return current
+  return { argv: current, directories }
 }
 
-type Ctx = { agent: string; policy: Policy; mentions: boolean; depth: number }
+type Ctx = {
+  agent: string
+  policy: Policy
+  mentions: boolean
+  depth: number
+  env: GitContext
+  /** The current directory as `cd` changes it; undefined once it cannot be known. Shared by the commands of one line. */
+  state: { cwd: string | undefined }
+  /** Whether `cd` can be followed: the line is only `&&`-joined commands. */
+  trusted: boolean
+}
 const deeper = (ctx: Ctx): Ctx => ({ ...ctx, depth: ctx.depth + 1 })
 
 function checkWords(input: readonly string[], ctx: Ctx): string | undefined {
@@ -206,14 +301,18 @@ function checkWords(input: readonly string[], ctx: Ctx): string | undefined {
   if (ctx.depth > 6) return "the command nests too deeply to check its git use"
   const dangerous = input.find((word) => DANGEROUS_ENV.test(word))
   if (dangerous !== undefined) return `${dangerous.split("=")[0]} can make git run a command or read other config, which is not allowed for the ${agent} agent`
-  const argv = realCommand(input)
+  const { argv, directories } = realCommand(input)
   const first = argv[0]
   if (first === undefined) return undefined
   const exe = basename(first)
   const args = argv.slice(1)
   if (/[$`]/.test(first) && mentions) return "a variable or substitution in command position cannot be checked"
   if (/[*?[{]/.test(first) && (mentions || couldBeGit(first))) return "a glob or brace in command position could name git, so it cannot be checked"
-  if (exe === "git") return checkGit(args, agent, policy)
+  if (exe === "git") {
+    let cwd = ctx.state.cwd
+    for (const directory of directories) cwd = joinPath(cwd, directory)
+    return checkGit(args, ctx, cwd)
+  }
   if (
     (INTERPRETERS.test(exe) || (INLINE_CODE_RUNNERS.test(exe) && args.some((arg) => ["-e", "--eval", "-p", "--print"].includes(arg)))) &&
     args.some((arg) => MENTIONS_GIT.test(arg))
@@ -238,30 +337,67 @@ function checkWords(input: readonly string[], ctx: Ctx): string | undefined {
   return undefined
 }
 
+const CD_UNSAFE = /[$`*?[{~]/
+
+/** Follow `cd` (and drop track on `pushd`/`popd`) so later git commands know their directory. */
+function followDirectory(position: CommandPosition, ctx: Ctx): boolean {
+  const { argv } = realCommand(position.argv)
+  const exe = basename(argv[0] ?? "")
+  if (exe === "pushd" || exe === "popd") ctx.state.cwd = undefined
+  else if (exe === "cd") {
+    const target = argv[1]
+    ctx.state.cwd =
+      ctx.trusted && target !== undefined && !target.startsWith("-") && !CD_UNSAFE.test(target) && argv.length === 2
+        ? joinPath(ctx.state.cwd, target)
+        : undefined
+  } else return false
+  return true
+}
+
 function checkParsed(parsed: ParsedCommand, ctx: Ctx): string | undefined {
   for (const position of parsed.commands as CommandPosition[]) {
+    if (followDirectory(position, ctx)) continue
     const reason = checkWords(position.argv, ctx)
     if (reason !== undefined) return reason
   }
   for (const child of parsed.nested) {
-    const reason = checkParsed(child, deeper(ctx))
+    const reason = checkParsed(child, { ...deeper(ctx), state: { cwd: ctx.state.cwd }, trusted: false })
     if (reason !== undefined) return reason
   }
   return undefined
 }
+
+/** Only `&&` joins the commands: no subshell, group, pipe, `;`, `||`, background or substitution. */
+const onlyAndChains = (command: string) => !/[;|&(){}`\n]|\$\(/.test(command.replaceAll("&&", " "))
 
 function checkCommand(command: string, ctx: Ctx): string | undefined {
   const text = unescape(command.replace(/['"]/g, ""))
   if (!WORTH_PARSING.test(text)) return undefined
   const parsed = parse(command)
   if (parsed.unknown) return MENTIONS_GIT.test(text) || ctx.mentions ? "the command could not be parsed, so its git use cannot be checked" : undefined
-  return checkParsed(parsed, { ...ctx, mentions: ctx.mentions || MENTIONS_GIT.test(text) })
+  return checkParsed(parsed, { ...ctx, mentions: ctx.mentions || MENTIONS_GIT.test(text), state: { cwd: ctx.state.cwd }, trusted: onlyAndChains(command) })
+}
+
+/** The directory a shell call starts in: its `workdir` against the session's start directory. */
+function startingDirectory(env: GitContext): string | undefined {
+  if (env.workdir !== undefined && isAbsolute(env.workdir)) return resolve(env.workdir)
+  if (env.startDir === undefined) return undefined
+  return env.workdir === undefined ? resolve(env.startDir) : resolve(env.startDir, env.workdir)
 }
 
 /** Why `command` is refused for `agent`, or undefined when it may run. */
-export function forbiddenGit(command: string, agent: string): string | undefined {
+export function forbiddenGit(command: string, agent: string, env: GitContext = {}): string | undefined {
   const policy = POLICIES[agent]
-  return policy === undefined ? undefined : checkCommand(command, { agent, policy, mentions: false, depth: 0 })
+  if (policy === undefined) return undefined
+  return checkCommand(command, {
+    agent,
+    policy,
+    mentions: false,
+    depth: 0,
+    env,
+    state: { cwd: startingDirectory(env) },
+    trusted: onlyAndChains(command),
+  })
 }
 
 /**
@@ -270,9 +406,9 @@ export function forbiddenGit(command: string, agent: string): string | undefined
  * A shell call whose input has no recognisable command is refused for guarded agents, because
  * another hook may rewrite it into one.
  */
-export function guardShellCall(tool: string, input: unknown, agent: string): string | undefined {
+export function guardShellCall(tool: string, input: unknown, agent: string, env: GitContext = {}): string | undefined {
   if (POLICIES[agent] === undefined || !isShellTool(tool)) return undefined
-  const command = shellCommand(tool, input)
-  if (command === undefined || command.trim() === "") return "the shell input has no recognisable command, so its git use cannot be checked"
-  return forbiddenGit(command, agent)
+  const call = shellCall(tool, input)
+  if (call === undefined || call.command.trim() === "") return "the shell input has no recognisable command, so its git use cannot be checked"
+  return forbiddenGit(call.command, agent, { ...env, workdir: call.workdir ?? env.workdir })
 }

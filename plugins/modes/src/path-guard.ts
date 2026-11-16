@@ -86,6 +86,25 @@ function checkResolved(target: string, options: PathGuardOptions): string | unde
   return `${target} is outside a debug-* scratch worktree and the debug ledger directory`
 }
 
+/**
+ * Whether `path` is a `debug-*` scratch worktree or inside one: `<worktree root>/<hash>/debug-<slug>[/…]`,
+ * after symlinks are resolved and never inside the directory the session started in.
+ */
+export function isScratchPath(path: string, options: PathGuardOptions): boolean {
+  try {
+    const home = canonical(options.home ?? homedir())
+    const start = canonical(options.startDir)
+    const resolved = canonical(isAbsolute(path) ? path : resolve(start, path))
+    if (resolved === start || inside(resolved, start)) return false
+    const worktrees = join(home, ".local", "share", "opencode", "worktree")
+    if (!inside(resolved, worktrees)) return false
+    const [hash, lane] = relative(worktrees, resolved).split(sep)
+    return hash !== undefined && lane !== undefined && /^debug-.+/.test(lane)
+  } catch {
+    return false
+  }
+}
+
 /** `checkDebugWrite` for an edit, write or patch call by the `debug` agent. */
 export function guardDebugWrite(tool: string, input: unknown, agent: string, options: PathGuardOptions): string | undefined {
   if (agent !== "debug" || !WRITE_TOOLS.has(tool)) return undefined

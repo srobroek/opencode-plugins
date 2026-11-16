@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { checkDebugWrite, guardDebugWrite } from "./path-guard.ts"
+import { checkDebugWrite, guardDebugWrite, isScratchPath } from "./path-guard.ts"
 
 let home: string
 let checkout: string
@@ -77,6 +77,21 @@ describe("checkDebugWrite", () => {
   })
   test("a relative path resolves against the starting directory", () => {
     expect(check("src/a.ts")).toBeString()
+  })
+})
+
+describe("isScratchPath", () => {
+  const scratch = (path: string, startDir = checkout) => isScratchPath(path, { home, startDir })
+  test("a debug-* worktree and the files in it are scratch", () => {
+    expect(scratch(join(worktrees, "debug-foo"))).toBe(true)
+    expect(scratch(join(worktrees, "debug-foo/src/a.ts"))).toBe(true)
+  })
+  test("another lane, a nested debug-* directory, the checkout and a symlink out of the worktree are not", () => {
+    expect(scratch(join(worktrees, "subagent-x"))).toBe(false)
+    expect(scratch(join(checkout, "src/debug-y"))).toBe(false)
+    expect(scratch(join(home, "repo"))).toBe(false)
+    expect(scratch(join(worktrees, "debug-foo/link"))).toBe(false)
+    expect(scratch(join(worktrees, "debug-foo"), join(worktrees, "debug-foo"))).toBe(false)
   })
 })
 

@@ -1,6 +1,14 @@
 import { describe, expect, test } from "bun:test"
 import { forbiddenGit, guardShellCall } from "./git-guard.ts"
 
+// Nothing here touches the disk: paths that do not exist resolve lexically.
+const HOME = "/fake/home"
+const WORKTREES = `${HOME}/.local/share/opencode/worktree/h1`
+const WT = `${WORKTREES}/debug-foo`
+const CHECKOUT = `${HOME}/repo`
+/** A debug session started in the user's checkout, running its shell calls in the scratch worktree. */
+const context = { home: HOME, startDir: CHECKOUT, workdir: WT }
+
 /** Refused for both guarded agents. */
 const REFUSED = [
   "git push origin main",
@@ -62,7 +70,7 @@ const REFUSED = [
   "git tag v1",
   "git tag -d v1",
   "git fetch --upload-pack='touch x'",
-  "git diff --output=src/a.ts",
+  `git diff --output=${CHECKOUT}/src/a.ts`,
   "git -c alias.x=!rm status",
   "git -c core.fsmonitor=evil status",
   "GIT_SSH_COMMAND='evil' git fetch",
@@ -151,8 +159,8 @@ const ALLOWED = [
   "env FOO=1 git status",
   "git commit -m 'EDITOR note'",
   "git diff main -- clean.ts",
-  "git -C /wt commit -m x",
-  "git -C /wt checkout -b probe",
+  `git -C ${WT} commit -m x`,
+  `git -C ${WT} checkout -b probe`,
   "git switch -c probe",
   "git add -A && git commit -m x",
   "git stash",
@@ -176,9 +184,9 @@ const ALLOWED = [
   "git remote -v",
   "git remote get-url origin",
   "git fetch origin",
-  "git worktree add ../w -b b",
+  `git worktree add ${WORKTREES}/debug-bar -b bar`,
   "git worktree list",
-  "git worktree remove ../w",
+  `git worktree remove ${WT}`,
   "git blame file",
   "git grep push",
   "git --version",
@@ -192,24 +200,72 @@ const ALLOWED = [
 
 describe("forbiddenGit", () => {
   test.each(REFUSED)("refuses %j for debug and refactor", (command) => {
-    expect(forbiddenGit(command, "debug")).toBeString()
-    expect(forbiddenGit(command, "refactor")).toBeString()
+    expect(forbiddenGit(command, "debug", context)).toBeString()
+    expect(forbiddenGit(command, "refactor", context)).toBeString()
   })
   test.each(ALLOWED)("allows %j for debug and refactor", (command) => {
-    expect(forbiddenGit(command, "debug")).toBeUndefined()
-    expect(forbiddenGit(command, "refactor")).toBeUndefined()
+    expect(forbiddenGit(command, "debug", context)).toBeUndefined()
+    expect(forbiddenGit(command, "refactor", context)).toBeUndefined()
   })
   test("bisect is allowed for debug and refused for refactor", () => {
-    expect(forbiddenGit("git bisect start", "debug")).toBeUndefined()
-    expect(forbiddenGit("git -C wt bisect good", "debug")).toBeUndefined()
-    expect(forbiddenGit("git bisect start", "refactor")).toBeString()
+    expect(forbiddenGit("git bisect start", "debug", context)).toBeUndefined()
+    expect(forbiddenGit("git -C wt bisect good", "debug", context)).toBeUndefined()
+    expect(forbiddenGit("git bisect start", "refactor", context)).toBeString()
   })
   test("other agents are not guarded", () => {
-    expect(forbiddenGit("git push", "build")).toBeUndefined()
+    expect(forbiddenGit("git push", "build", context)).toBeUndefined()
   })
   test("an unparseable command that mentions git is refused, and one that does not is left alone", () => {
-    expect(forbiddenGit("git status 'unterminated", "debug")).toBeString()
-    expect(forbiddenGit("echo 'unterminated", "debug")).toBeUndefined()
+    expect(forbiddenGit("git status 'unterminated", "debug", context)).toBeString()
+    expect(forbiddenGit("echo 'unterminated", "debug", context)).toBeUndefined()
+  })
+})
+
+describe("output options", () => {
+  const refused = [
+    `git format-patch -o ${CHECKOUT}/out HEAD~1`,
+    `git format-patch -o${CHECKOUT}/out HEAD~1`,
+    "git format-patch -o /tmp/patches HEAD~1",
+    "git format-patch -o ../elsewhere HEAD~1",
+    `git format-patch --output-directory=${CHECKOUT}/out HEAD~1`,
+    `git format-patch --output-directory ${CHECKOUT}/out HEAD~1`,
+    `git format-patch --output-dir=${CHECKOUT}/out HEAD~1`,
+    "git format-patch -o",
+    `git diff --output=${CHECKOUT}/src/a.ts`,
+    `git diff --output ${CHECKOUT}/src/a.ts`,
+    `git -C ${CHECKOUT} log --output=src/a.ts`,
+    `git show --out=${CHECKOUT}/x HEAD`,
+    `git worktree add ${CHECKOUT}/sibling`,
+    "git worktree add ../elsewhere",
+    `git worktree add -b b ${HOME}/other`,
+    `git worktree remove ${CHECKOUT}`,
+    `git worktree remove ${WORKTREES}/subagent-x`,
+    "git worktree prune",
+  ]
+  const allowed = [
+    `git format-patch -o ${WT}/patches HEAD~1`,
+    `git format-patch --output-directory=${HOME}/.opencode/debug/p HEAD~1`,
+    "git format-patch -o patches HEAD~1",
+    `git -C ${WT} format-patch -o patches HEAD~1`,
+    `git diff --output=${HOME}/.opencode/debug/d.patch`,
+    "git diff --output=out.patch",
+    "git log -p",
+    "git diff --output-indicator-new=+",
+    "git blame --contents notes.txt file.ts",
+    `git worktree add ${WORKTREES}/debug-bar -b bar`,
+    `git worktree add -f --detach ${WORKTREES}/debug-bar HEAD`,
+    `git worktree remove --force ${WT}`,
+    "git worktree list",
+  ]
+  test.each(refused)("refuses %j", (command) => {
+    expect(forbiddenGit(command, "debug", context)).toBeString()
+    expect(forbiddenGit(command, "refactor", context)).toBeString()
+  })
+  test.each(allowed)("allows %j", (command) => {
+    expect(forbiddenGit(command, "debug", context)).toBeUndefined()
+  })
+  test("without a known start directory every output path is refused", () => {
+    expect(forbiddenGit("git diff --output=out.patch", "debug", { home: HOME })).toBeString()
   })
 })
 
