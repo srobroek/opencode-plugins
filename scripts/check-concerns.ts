@@ -460,13 +460,15 @@ function tradeoffSections(lines: string[], container: string, item: string, offs
   return sections
 }
 
-const hasBullet = (section: TradeoffSection) => section.body.some((l) => /^- \*\*[^*]+\*\*:\s*\S/.test(l))
+/** A Tradeoffs bullet: `- **tool**:` or `- **tool** (note):`, followed by text. Group 1 is the tool name. */
+const BULLET = /^- \*\*([^*]+)\*\*(?: \([^)]*\))?:\s*\S/
+
+const hasBullet = (section: TradeoffSection) => section.body.some((l) => BULLET.test(l))
 
 const tradeoffMap = (sections: TradeoffSection[]) => new Map(sections.map((s) => [s.id, s]))
 
 const toolKey = (name: string) => unticked(name).toLowerCase()
 
-/** Tool names before the first `:` of each Alternatives item. */
 /** Each alternative's name: its leading code span, else the text before the first colon (as ALTERNATIVE reads it). */
 const alternativeNames = (cell: string) =>
   cell.split(";").map((i) => {
@@ -478,7 +480,7 @@ const alternativeNames = (cell: string) =>
 /** Tools a Tradeoffs entry must cover but has no bullet for: the Default tool and every alternative. */
 function missingTradeoffTools(section: TradeoffSection, def: string, alts: string): string[] {
   const bullets = section.body.flatMap((l) => {
-    const m = /^- \*\*([^*]+)\*\*(?: \([^)]*\))?:/.exec(l)
+    const m = BULLET.exec(l)
     return m?.[1] ? [toolKey(m[1])] : []
   })
   const kind = classifyDefault(def)

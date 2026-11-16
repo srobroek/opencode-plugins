@@ -423,6 +423,12 @@ describe("tradeoff coverage", () => {
     const root = repo({ [PY_TESTING]: ["- **pytest**:", "- **pytest** (plugins):"] })
     expect(reasons(root)).toEqual([])
   })
+  test("an entry whose every bullet carries a parenthesised note still has bullets", () => {
+    const tree = repo()
+    const text = tree.get(PY_TESTING) ?? ""
+    tree.set(PY_TESTING, text.replace(/^- \*\*([^*]+)\*\*:/gm, "- **$1** (note):"))
+    expect(reasons(tree)).toEqual([])
+  })
   test.each([
     ["no bullet for it", "- **unittest**:", "- **unittest**:", true],
     ["its own bullet", "- **unittest**:", "- **node:test**:", false],
