@@ -86,7 +86,7 @@ export function parseTable(text: string, heading: string): Table | undefined {
   for (let i = first; i < end && lines[i]?.trimStart().startsWith("|"); i++)
     block.push({ line: i + 1, cells: splitRow(lines[i] ?? "") })
   const [head, separator, ...rows] = block
-  if (!head || !separator || !separator.cells.every((c) => /^:?-+:?$/.test(c))) return undefined
+  if (!head || !separator?.cells.every((c) => /^:?-+:?$/.test(c))) return undefined
   return { line: head.line, header: head.cells, rows }
 }
 
