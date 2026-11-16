@@ -17,3 +17,9 @@
 - **Symptom:** `cannot resolve the dynamic working directory before this mutation`
 - **Cause:** The gate must know which ledger a `bd` mutation targets. It resolves a literal `cd <path> &&` prefix, but not a directory that comes from a variable, a command substitution or another runtime value.
 - **Fix:** Pass the directory as the shell tool's `workdir` and run the bare `bd` command, rather than computing it inside the command.
+
+## The actor gate is a safety net, not a lock
+
+- **Symptom:** An advisory says a create or claim has no `BEADS_ACTOR` or `BD_ACTOR`, or someone asks the gate to catch a wrong actor.
+- **Cause:** The plugin adds `export BEADS_ACTOR='opencode/<agent>/<session>'` to every `bd` shell call that names no actor. The gate only guards against forgetting attribution. It cannot stop deliberate evasion, because an agent can set any actor value.
+- **Fix:** Set `BEADS_ACTOR=<harness>/<agent>/<session>` on the command when you need your own identity. Do not add parser rules to chase shell tricks.

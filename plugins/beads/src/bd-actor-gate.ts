@@ -619,6 +619,12 @@ export function decideActorParsed(parsed: unknown, env: NodeJS.ProcessEnv = proc
   return advisory ? { kind: "advisory", text: ADVISORY_TEXT } : { kind: "allow" }
 }
 
+/**
+ * The actor gate guards against an agent that forgot to attribute a write, not against
+ * deliberate evasion: an agent could always set a wrong BEADS_ACTOR. The plugin injects
+ * an actor into every session's `bd` calls, so this verdict is advisory (see shell-gates).
+ * Do not harden the parser against adversarial shell; read quoted text as data and stop.
+ */
 export function decideActorGate(command: string, env: NodeJS.ProcessEnv = process.env): ActorGateDecision {
   let advisory = false
   for (const invocation of bdInvocations(command)) {

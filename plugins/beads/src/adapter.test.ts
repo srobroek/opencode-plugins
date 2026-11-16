@@ -69,11 +69,11 @@ describe("host", () => {
     expect(chain).toEqual({ sessionID: "c", parentID: "b", rootID: "a", agent: "general" })
     expect(agentActor(chain)).toBe("opencode/a/general/c")
     const main = await sessionChain("a", "build", async (id) => ({ parentID: parents[id] }))
-    expect(agentActor(main)).toBeUndefined()
+    expect(agentActor(main)).toBe("opencode/build/a")
     const broken = await sessionChain("c", "general", async () => {
       throw new Error("gone")
     })
-    expect(agentActor(broken)).toBeUndefined()
+    expect(agentActor(broken)).toBe("opencode/general/c")
   })
 
   test("shellInput resolves workdir against the location", () => {

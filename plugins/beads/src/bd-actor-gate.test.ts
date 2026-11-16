@@ -93,9 +93,19 @@ describe("agentActor", () => {
     )
   })
 
-  test("leaves the main session without an actor", () => {
-    expect(agentActor({ sessionID: "ses_main", rootID: "ses_main", agent: "build" })).toBeUndefined()
+  test("names a main session by agent and session", () => {
+    expect(agentActor({ sessionID: "ses_main", rootID: "ses_main", agent: "build" })).toBe("opencode/build/ses_main")
     expect(agentActor(undefined)).toBeUndefined()
+  })
+
+  test("a main session defers to an actor already in its environment, a subagent does not", () => {
+    const main = { sessionID: "ses_main", rootID: "ses_main", agent: "build" }
+    expect(agentActor(main, { BEADS_ACTOR: "me" } as NodeJS.ProcessEnv)).toBeUndefined()
+    expect(agentActor(main, { BD_ACTOR: "me" } as NodeJS.ProcessEnv)).toBeUndefined()
+    expect(agentActor(main, { BEADS_ACTOR: "" } as NodeJS.ProcessEnv)).toBe("opencode/build/ses_main")
+    expect(agentActor({ ...main, parentID: "ses_r", rootID: "ses_r" }, { BEADS_ACTOR: "me" } as NodeJS.ProcessEnv)).toBe(
+      "opencode/ses_r/build/ses_main",
+    )
   })
 
   test("keeps the same agent distinct across sessions", () => {

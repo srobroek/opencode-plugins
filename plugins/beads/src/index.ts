@@ -230,8 +230,8 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
     const call = shellInput(event.tool === SHELL_TOOL ? event.input : shellAliasInput(event.input), directory)
     if (call === undefined || call.command.trim() === "") return
     const chain = await chainFor(event.sessionID, event.agent)
-    const actor = agentActor(chain)
     const env = pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor)
+    const actor = agentActor(chain, env)
     const decision = await decideShell(call.command, call.cwd, {
       options,
       actor,

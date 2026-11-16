@@ -76,7 +76,7 @@ describe("execute.before on shell", () => {
   test("a switched-off gate lets the command through", async () => {
     const { fake, cleanup } = await start(scratch(), {}, { gates: { "bd-update-close-gate": { enabled: false } } })
     const event = await fake.fire.tool("execute.before", shellCall("bd update proj-1 --status closed"))
-    expect((event.input as { command: string }).command).toBe("bd update proj-1 --status closed")
+    expect((event.input as { command: string }).command).toEndWith("; bd update proj-1 --status closed")
     await cleanup()
   })
 
@@ -89,18 +89,29 @@ describe("execute.before on shell", () => {
     await cleanup()
   })
 
-  test("leaves a main session's command and a non-bd command alone", async () => {
+  test("prefixes a main session's bd call, and leaves a non-bd command and a chosen actor alone", async () => {
     const { fake, cleanup } = await start(scratch())
     const main = await fake.fire.tool("execute.before", shellCall("bd list"))
-    expect((main.input as { command: string }).command).toBe("bd list")
+    expect((main.input as { command: string }).command).toBe("export BEADS_ACTOR='opencode/general/ses_root'; bd list")
+    const chosen = await fake.fire.tool("execute.before", shellCall("BEADS_ACTOR=me bd create --title t"))
+    expect((chosen.input as { command: string }).command).toBe("BEADS_ACTOR=me bd create --title t")
     const other = await fake.fire.tool("execute.before", shellCall("git status", "ses_child"))
     expect((other.input as { command: string }).command).toBe("git status")
     await cleanup()
   })
 
-  test("lets a subagent claim under its own actor instead of refusing it", async () => {
+  test("a main session defers to an ambient actor", async () => {
+    const env = { ...quietEnv, BEADS_ACTOR: "ambient/me" } as NodeJS.ProcessEnv
+    const { fake, cleanup } = await start(scratch(), { env })
+    const event = await fake.fire.tool("execute.before", shellCall("bd list"))
+    expect((event.input as { command: string }).command).toBe("bd list")
+    await cleanup()
+  })
+
+  test("lets a main session and a subagent claim under their own actors instead of refusing", async () => {
     const { fake, cleanup } = await start(scratch())
-    await expect(fake.fire.tool("execute.before", shellCall("bd update proj-1 --claim"))).rejects.toThrow(/BEADS_ACTOR/)
+    const main = await fake.fire.tool("execute.before", shellCall("bd update proj-1 --claim"))
+    expect((main.input as { command: string }).command).toStartWith("export BEADS_ACTOR='opencode/general/ses_root'")
     const event = await fake.fire.tool("execute.before", shellCall("bd update proj-1 --claim", "ses_child"))
     expect((event.input as { command: string }).command).toStartWith("export BEADS_ACTOR=")
     await cleanup()
@@ -303,9 +314,9 @@ describe("execute.after on shell", () => {
     await cleanup()
   })
 
-  test("appends the actor advisory for an unattributed write", async () => {
+  test("appends the actor advisory for a write that names a dynamic actor", async () => {
     const { fake, cleanup } = await start(scratch())
-    const before = shellCall("bd close proj-1 --reason done")
+    const before = shellCall('BEADS_ACTOR="$WHO" bd close proj-1 --reason done')
     await fake.fire.tool("execute.before", before)
     const event = await fake.fire.tool("execute.after", completed(before, "✓ Closed proj-1"))
     expect(String(event.result.content)).toContain("BEADS_ACTOR and BD_ACTOR are unset")

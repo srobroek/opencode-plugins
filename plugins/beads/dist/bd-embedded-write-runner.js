@@ -1161,11 +1161,16 @@ class GateRefusal extends Error {
     this.gate = gate;
   }
 }
-function agentActor(chain) {
-  if (chain === undefined || chain.parentID === undefined || chain.parentID === "")
+function agentActor(chain, env = {}) {
+  if (chain === undefined)
     return;
-  const agent = chain.agent !== undefined && chain.agent !== "" ? chain.agent : "subagent";
-  return `opencode/${chain.rootID}/${agent}/${chain.sessionID}`;
+  const agent = chain.agent !== undefined && chain.agent !== "" ? chain.agent : undefined;
+  if (chain.parentID === undefined || chain.parentID === "") {
+    if ((env.BEADS_ACTOR ?? "").trim() !== "" || (env.BD_ACTOR ?? "").trim() !== "")
+      return;
+    return `opencode/${agent ?? "main"}/${chain.sessionID}`;
+  }
+  return `opencode/${chain.rootID}/${agent ?? "subagent"}/${chain.sessionID}`;
 }
 async function sessionChain(sessionID, agent, lookup, maxDepth = 16) {
   let parentID;

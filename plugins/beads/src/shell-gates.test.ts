@@ -52,8 +52,10 @@ describe("decideShell", () => {
     expect(await decideShell("bd unclaim proj-1", root, deps())).toMatchObject({ gate: "bd-unclaim-gate" })
   })
 
-  test("refuses a main-session create without an actor", async () => {
-    expect(await decideShell("bd create --title t", root, deps())).toMatchObject({ gate: "bd-actor-gate" })
+  test("warns, without refusing, a create that no actor could be injected into", async () => {
+    const decision = await decideShell("bd create --title t", root, deps())
+    expect(decision.kind).toBe("allow")
+    if (decision.kind === "allow") expect(decision.advisories.join("\n")).toContain("BEADS_ACTOR")
   })
 
   test.each([
@@ -76,10 +78,10 @@ describe("decideShell", () => {
     expect(await decideShell(command, root, deps())).not.toMatchObject({ gate: "bd-actor-gate" })
   })
 
-  test("refuses a real create after quoted text mentioning an actor", async () => {
-    expect(await decideShell('echo "BEADS_ACTOR=x"; bd create --title t', root, deps())).toMatchObject({
-      gate: "bd-actor-gate",
-    })
+  test("warns about a real create after quoted text mentioning an actor", async () => {
+    const decision = await decideShell('echo "BEADS_ACTOR=x"; bd create --title t', root, deps())
+    expect(decision.kind).toBe("allow")
+    if (decision.kind === "allow") expect(decision.advisories.join("\n")).toContain("BEADS_ACTOR")
   })
 
   test("refuses a PR without a bead trailer when the repository is controlled", async () => {

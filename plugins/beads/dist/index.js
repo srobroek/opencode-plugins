@@ -1232,11 +1232,16 @@ class GateRefusal extends Error {
     this.gate = gate;
   }
 }
-function agentActor(chain) {
-  if (chain === undefined || chain.parentID === undefined || chain.parentID === "")
+function agentActor(chain, env = {}) {
+  if (chain === undefined)
     return;
-  const agent = chain.agent !== undefined && chain.agent !== "" ? chain.agent : "subagent";
-  return `opencode/${chain.rootID}/${agent}/${chain.sessionID}`;
+  const agent = chain.agent !== undefined && chain.agent !== "" ? chain.agent : undefined;
+  if (chain.parentID === undefined || chain.parentID === "") {
+    if ((env.BEADS_ACTOR ?? "").trim() !== "" || (env.BD_ACTOR ?? "").trim() !== "")
+      return;
+    return `opencode/${agent ?? "main"}/${chain.sessionID}`;
+  }
+  return `opencode/${chain.rootID}/${agent ?? "subagent"}/${chain.sessionID}`;
 }
 async function sessionChain(sessionID, agent, lookup, maxDepth = 16) {
   let parentID;
@@ -5450,8 +5455,8 @@ async function decide(original, cwd, deps) {
     const env = actor === undefined ? deps.env : { ...deps.env, BEADS_ACTOR: actor };
     const decision = decideActorParsed(parsed, env);
     if (decision.kind === "block")
-      return block("bd-actor-gate", decision.reason);
-    if (decision.kind === "advisory")
+      advisories.push(decision.reason);
+    else if (decision.kind === "advisory")
       advisories.push(decision.text);
   }
   const crossRepo = on("bd-embedded-write-lock") ? createLedgerWarning(command, cwd, deps.env) : undefined;
@@ -5775,8 +5780,8 @@ async function setupBeads(ctx, deps = {}) {
     if (call === undefined || call.command.trim() === "")
       return;
     const chain = await chainFor(event.sessionID, event.agent);
-    const actor = agentActor(chain);
     const env = pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor);
+    const actor = agentActor(chain, env);
     const decision = await decideShell(call.command, call.cwd, {
       options,
       actor,

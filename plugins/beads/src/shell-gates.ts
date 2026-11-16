@@ -202,8 +202,11 @@ async function decide(original: string, cwd: string, deps: ShellGateDeps): Promi
   if (on("bd-actor-gate")) {
     const env = actor === undefined ? deps.env : { ...deps.env, BEADS_ACTOR: actor }
     const decision = decideActorParsed(parsed, env)
-    if (decision.kind === "block") return block("bd-actor-gate", decision.reason)
-    if (decision.kind === "advisory") advisories.push(decision.text)
+    // The plugin injects an actor into every session's `bd` calls, so reaching a refusal here
+    // means injection was not possible. This gate guards against forgetting attribution, not
+    // against deliberate evasion (an agent can always set a wrong actor), so it only warns.
+    if (decision.kind === "block") advisories.push(decision.reason)
+    else if (decision.kind === "advisory") advisories.push(decision.text)
   }
 
   const crossRepo = on("bd-embedded-write-lock") ? createLedgerWarning(command, cwd, deps.env) : undefined

@@ -25,8 +25,10 @@ On every `shell` call (`tool.hook("execute.before")`), in this order, with one
 10. Each `bd` write to an embedded store is rewritten to run under
     `bd-embedded-write-runner`, which holds the store's write lock for exactly the
     life of the `bd` process. The lock files are shared with the omp plugin.
-11. In a subagent session, `export BEADS_ACTOR='opencode/<root>/<agent>/<session>'`
-    is prefixed, unless the command chooses its own actor.
+11. Every `bd` shell call gets `export BEADS_ACTOR=...` prefixed unless the command
+    or the environment already chooses an actor: `opencode/<root>/<agent>/<session>`
+    in a subagent session, `opencode/<agent>/<session>` in a main session. The actor
+    gate only warns when no actor could be injected.
 
 A refusal is thrown, so the model sees it as the tool error.
 
