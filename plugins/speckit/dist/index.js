@@ -206,6 +206,14 @@ function missingReminders(agent, messages, modes) {
     return [];
   return [...active ? [leaveReminder(active)] : [], ...current ? [enterReminder(current)] : []];
 }
+function insertionIndex(messages, modes) {
+  const last = messages.at(-1);
+  if (last?.role !== "user")
+    return messages.length;
+  const text = soleText(last);
+  const reminder = text !== undefined && modes.some((mode) => mode.enter === text || mode.leave === text);
+  return reminder ? messages.length : messages.length - 1;
+}
 async function registerModeReminders(ctx, modes, options = {}) {
   const controller = new AbortController;
   const report = options.onError ?? (() => {});
@@ -214,7 +222,7 @@ async function registerModeReminders(ctx, modes, options = {}) {
     const missing = missingReminders(event.agent, event.messages, modes);
     if (missing.length === 0)
       return;
-    const at = event.messages.at(-1)?.role === "user" ? event.messages.length - 1 : event.messages.length;
+    const at = insertionIndex(event.messages, modes);
     event.messages.splice(at, 0, ...missing.map((text) => ({ role: "user", content: [{ type: "text", text }] })));
     for (const text of missing)
       await synthetic(event.sessionID, text);

@@ -88,6 +88,17 @@ describe("registerModeReminders", () => {
     await dispose()
   })
 
+  test("a correction goes after a trailing obsolete reminder, and a second pass adds nothing", async () => {
+    const { fake, dispose } = await started()
+    const messages = [user("hi"), user(enterReminder(alpha))]
+    await fake.fire.session("context", { sessionID: "ses_1", agent: "build", messages })
+    expect(messages).toEqual([user("hi"), user(enterReminder(alpha)), user(leaveReminder(alpha))])
+    await fake.fire.session("context", { sessionID: "ses_1", agent: "build", messages })
+    expect(messages).toHaveLength(3)
+    expect(synthetic(fake)).toEqual([leaveReminder(alpha)])
+    await dispose()
+  })
+
   test("the cleanup removes the context hook", async () => {
     const { fake, dispose } = await started()
     await dispose()

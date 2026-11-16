@@ -92,6 +92,18 @@ export function missingReminders(agent: string, messages: readonly unknown[], mo
   return [...(active ? [leaveReminder(active)] : []), ...(current ? [enterReminder(current)] : [])]
 }
 
+/**
+ * Where to add corrections: before a trailing real user prompt, else after the history (so
+ * after any trailing reminders, which keeps the newest reminder last and reconciliation idempotent).
+ */
+export function insertionIndex(messages: readonly unknown[], modes: readonly Mode[]): number {
+  const last = messages.at(-1)
+  if ((last as { role?: unknown } | undefined)?.role !== "user") return messages.length
+  const text = soleText(last)
+  const reminder = text !== undefined && modes.some((mode) => mode.enter === text || mode.leave === text)
+  return reminder ? messages.length : messages.length - 1
+}
+
 type SwitchEvent = { type?: unknown; data?: { sessionID?: unknown; agent?: unknown; previous?: unknown } }
 
 /** Options for {@link registerModeReminders}. */
@@ -118,7 +130,7 @@ export async function registerModeReminders(
   const hook = await ctx.session.hook("context", async (event) => {
     const missing = missingReminders(event.agent as string, event.messages, modes)
     if (missing.length === 0) return
-    const at = (event.messages.at(-1) as { role?: unknown } | undefined)?.role === "user" ? event.messages.length - 1 : event.messages.length
+    const at = insertionIndex(event.messages, modes)
     event.messages.splice(at, 0, ...missing.map((text) => ({ role: "user", content: [{ type: "text", text }] }) as never))
     for (const text of missing) await synthetic(event.sessionID as string, text)
   })
