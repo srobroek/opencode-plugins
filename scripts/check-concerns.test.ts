@@ -343,6 +343,14 @@ describe("staleRows", () => {
   })
 })
 
+describe("staleRows with a language filter", () => {
+  test("reports only that language's rows, not other languages or surfaces", () => {
+    const out = staleRows(ROOT, 0, TODAY, "sh", filesOf(VALID))
+    expect(out.length).toBeGreaterThan(0)
+    expect(out.every((r) => r.startsWith(`${SH}:`))).toBe(true)
+  })
+})
+
 describe("checkLanguage", () => {
   test("is the unit used by checkRepo", () => {
     const spec = parseSpec(VALID.get(SPEC) ?? "").spec
@@ -407,6 +415,14 @@ describe("tradeoff coverage", () => {
     const root = repo({ [PY_TESTING]: ["- **nose2**:", "- **nose2 (legacy)**:"] })
     expect(reasons(root)).toEqual([])
   })
+  test("a bullet whose name only starts with the alternative does not cover it", () => {
+    const root = repo({ [PY_TESTING]: ["- **nose2**:", "- **nose2-watcher**:"] })
+    expect(reasons(root).some((r) => r.includes('lacks a "- **nose2**:" bullet'))).toBe(true)
+  })
+  test("a bullet with a parenthesised note after the name covers the Default", () => {
+    const root = repo({ [PY_TESTING]: ["- **pytest**:", "- **pytest** (plugins):"] })
+    expect(reasons(root)).toEqual([])
+  })
   test("a Built-in Default needs bullets for the alternatives only", () => {
     const root = repo({
       [SURFACES]: [
@@ -416,6 +432,34 @@ describe("tradeoff coverage", () => {
     })
     const found = reasons(root)
     expect(found.some((r) => r.includes('need a "#### visual"'))).toBe(true)
+  })
+})
+
+describe("No maintained tool Default", () => {
+  const ROW = "`pytest` | >= 8.3.0 · 2026-01-02 · active | `pytest --version` · `uv tool install pytest`"
+  const unitReasons = (cells: string) => reasons(repo({ [PY_TESTING]: [ROW, `No maintained tool: review by hand | ${cells}`] }), "py")
+  test("accepts Maintenance and Install of `-`", () => {
+    expect(unitReasons("- | -")).toEqual([])
+  })
+  test("rejects a Maintenance other than `-`", () => {
+    expect(unitReasons(">= 1.0.0 · 2026-01-02 · active | -")).toEqual([`${PY_TESTING}:9: Maintenance must be "-" for No maintained tool`])
+  })
+  test("rejects an Install other than `-`", () => {
+    expect(unitReasons("- | `a` · `b`")).toEqual([`${PY_TESTING}:9: Install must be "-" for this Default, found "\`a\` · \`b\`"`])
+  })
+})
+
+describe("duplicate sections in a language file", () => {
+  test("a second ## Concerns section is a finding", () => {
+    const root = repo({ [PY_QUALITY]: ["## Concerns", "## Concerns\n\n## Concerns"] })
+    expect(reasons(root).some((r) => r.includes('duplicate section "Concerns"'))).toBe(true)
+  })
+})
+
+describe("the spec's contract concern", () => {
+  test("requires every-pr in Run", () => {
+    const real = readFileSync(path.join(import.meta.dir, "..", SPEC), "utf8")
+    expect(parseSpec(real).spec.concerns.find((c) => c.id === "contract")?.runMust).toContain("every-pr")
   })
 })
 
@@ -468,6 +512,16 @@ describe("main", () => {
     const { code, err } = run([`--max-age=${value}`], repo())
     expect(code).toBe(2)
     expect(err).toEqual(["check-concerns: --max-age needs a non-negative number of days"])
+  })
+  test.each([
+    ["an unknown option", ["--bogus"]],
+    ["a missing option value", ["--language"]],
+  ])("%s exits 2 with a usage message", (_name, argv) => {
+    const { code, out, err } = run(argv, repo())
+    expect(code).toBe(2)
+    expect(out).toEqual([])
+    expect(err[0]).toStartWith("check-concerns: ")
+    expect(err.join("\n")).toContain("usage: bun scripts/check-concerns.ts [--language <id>] [--max-age <days>]")
   })
   test("--max-age reports stale rows without changing the exit status", () => {
     const clean = run(["--max-age", "0"], repo())

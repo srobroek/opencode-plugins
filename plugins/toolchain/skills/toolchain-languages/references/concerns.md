@@ -54,7 +54,7 @@ project is missing.
 | `benchmark` | Benchmarks | testing | Repeatable performance comparisons | iac | - |
 | `flaky-order` | Flaky tests and test order | testing | Shuffled order, repeated runs and quarantine with an owner | iac | scheduled |
 | `integration` | Integration | testing | Tests against real dependencies: databases, brokers, real cloud resources | none | - |
-| `contract` | Contracts | testing | Consumer and provider agreements between independently deployed services | shell, iac | - |
+| `contract` | Contracts | testing | Consumer and provider agreements between independently deployed services | shell, iac | every-pr |
 | `api-schema` | API schema checks | testing | Tests generated from an API schema, run against a running server | shell, iac | - |
 | `load` | Load | testing | Throughput and latency under load | shell, iac | scheduled |
 | `lint` | Lint | quality | The language's linter, with the project's rule set | none | every-pr |
