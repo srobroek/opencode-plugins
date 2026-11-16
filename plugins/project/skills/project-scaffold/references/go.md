@@ -27,7 +27,7 @@ of git (`lang-go-packaging`). Pin dev tools with `go get -tool <pkg>` and run th
 | Fuzz | built-in `go test -fuzz` |
 | Mutation | `gremlins` (`go tool gremlins`) |
 | Flaky / order | `-shuffle=on -count=N` |
-| API break (libraries only) | `go-apidiff` on PRs, `gorelease` at release |
+| API break (libraries only) | `go-apidiff` on PRs and at release |
 | Docs | doc comments and `Example` functions with `// Output:` |
 | Vulnerabilities | Project-pinned `go tool govulncheck ./...` (`go get -tool golang.org/x/vuln/cmd/govulncheck@<version>` during setup) |
 | Dead code | Optional pinned `golang.org/x/tools/cmd/deadcode`: `go tool deadcode -test ./...` for executable/test roots; whole-program reachability complements `unused`/`staticcheck`, not a library API deletion list |
