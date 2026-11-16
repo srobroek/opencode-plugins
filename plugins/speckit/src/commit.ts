@@ -1,21 +1,23 @@
 /**
  * The `speckit_commit` tool: commit SpecKit artifacts without a shell `git add` or
  * `git commit`, whose whole-command permission patterns cannot keep operands or options
- * in bounds. It stages only paths under the workspace's `specs/` and `.specify/`, refuses
- * when anything else is already staged or requested, commits exactly the verified paths,
- * and never amends.
+ * in bounds. It builds the commit in a private index (HEAD plus the requested artifact
+ * paths), checks the resulting tree holds changes only under the workspace's `specs/` and
+ * `.specify/`, and commits exactly that tree with plumbing: no hook runs, so nothing can
+ * join the commit after the check, and HEAD moves only from the commit it was built on.
+ * It never amends.
  */
 
-import { existsSync } from "node:fs"
+import { existsSync, mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
 import { join, posix } from "node:path"
-import { run } from "./setup.ts"
 import type { ToolOutput } from "./tools.ts"
 
 export const COMMIT_TOOL = "speckit_commit"
 
 export const COMMIT_DESCRIPTION =
   "Commit SpecKit artifacts: stages only specs/ and .specify/, refuses other staged files, never amends.\n" +
-  "Paths are relative to the SpecKit workspace and default to specs/ and .specify/. Refuses before staging when a requested path lies outside them or the index already holds other files; commits exactly the staged artifact paths."
+  "Paths are relative to the SpecKit workspace and default to specs/ and .specify/. Refuses when a requested path lies outside them or the index already holds other files. Commits the checked working-tree snapshot of those paths on top of HEAD and runs no git hooks (pre-commit, commit-msg), so run the project's checks separately."
 
 export const COMMIT_INPUT = {
   type: "object",
@@ -31,7 +33,7 @@ export const COMMIT_INPUT = {
   additionalProperties: false,
 } as const
 
-/** Each git command's bound; a commit hook or signing prompt cannot hold the tool open. */
+/** Each git command's bound; a signing prompt cannot hold the tool open. */
 export const GIT_TIMEOUT_MS = 60_000
 
 const ROOTS = ["specs", ".specify"] as const
@@ -44,23 +46,54 @@ export function artifactPath(path: string): string | undefined {
   return ROOTS.some((root) => normal === root || normal.startsWith(`${root}/`)) ? normal : undefined
 }
 
-/** The staged repository-relative paths that are not artifacts of the workspace at `prefix` (`git rev-parse --show-prefix`). */
-export function outsideArtifacts(staged: readonly string[], prefix: string): string[] {
-  return staged.filter((path) => !path.startsWith(prefix) || artifactPath(path.slice(prefix.length)) === undefined)
+/**
+ * The repository-relative paths that are not artifacts of the workspace at `prefix`
+ * (`git rev-parse --show-prefix`), or, given `requested`, not under one of those paths.
+ */
+export function outsideArtifacts(paths: readonly string[], prefix: string, requested?: readonly string[]): string[] {
+  return paths.filter((path) => {
+    if (!path.startsWith(prefix)) return true
+    const local = path.slice(prefix.length)
+    if (artifactPath(local) === undefined) return true
+    return requested !== undefined && !requested.some((root) => local === root || local.startsWith(`${root}/`))
+  })
 }
 
-type Git = (args: string[]) => Promise<{ ok: true; stdout: string } | { ok: false; reason: string }>
+export type GitOptions = { env?: Record<string, string>; stdin?: string }
+export type Git = (
+  args: string[],
+  options?: GitOptions,
+) => Promise<{ ok: true; stdout: string } | { ok: false; reason: string }>
 
-const gitIn =
+/** git in `workspace`, with literal pathspecs, no prompts and a bound per command. */
+export const gitIn =
   (workspace: string): Git =>
-  async (args) => {
-    const result = await run(["git", "--literal-pathspecs", ...args], workspace, Date.now() + GIT_TIMEOUT_MS)
-    return result.exitCode === 0
-      ? { ok: true, stdout: result.stdout }
-      : { ok: false, reason: `git ${args[0]} failed: ${result.stderr.trim() || `exit ${result.exitCode}`}` }
+  async (args, options = {}) => {
+    try {
+      const proc = Bun.spawn(["git", "--literal-pathspecs", ...args], {
+        cwd: workspace,
+        env: { ...process.env, GIT_TERMINAL_PROMPT: "0", ...options.env },
+        stdin: options.stdin === undefined ? "ignore" : new TextEncoder().encode(options.stdin),
+        stdout: "pipe",
+        stderr: "pipe",
+        timeout: GIT_TIMEOUT_MS,
+      })
+      const [stdout, stderr, exitCode] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ])
+      return exitCode === 0
+        ? { ok: true, stdout }
+        : { ok: false, reason: `git ${args[0]} failed: ${stderr.trim() || `exit ${exitCode}`}` }
+    } catch (error) {
+      return { ok: false, reason: `git ${args[0]} failed: ${error instanceof Error ? error.message : String(error)}` }
+    }
   }
 
 const refuse = (reason: string): ToolOutput => ({ content: `${COMMIT_TOOL}: ${reason}`, metadata: { ok: false } })
+
+const names = (stdout: string) => stdout.split("\0").filter(Boolean)
 
 /** Validate `speckit_commit` input into a message and artifact paths, or return why it is unusable. */
 export function readCommitParams(input: unknown, workspace: string): { message: string; paths: string[] } | string {
@@ -82,30 +115,51 @@ export async function executeCommit(input: unknown, workspace: string, git: Git 
   const prefix = await git(["rev-parse", "--show-prefix"])
   if (!prefix.ok) return refuse(prefix.reason)
   const base = prefix.stdout.trim()
-  const staged = async () => {
-    const listed = await git(["diff", "--cached", "--name-only", "--no-renames", "-z"])
-    return listed.ok ? { ok: true as const, paths: listed.stdout.split("\0").filter(Boolean) } : listed
-  }
-  const before = await staged()
-  if (!before.ok) return refuse(before.reason)
-  const foreign = outsideArtifacts(before.paths, base)
+  const parent = await git(["rev-parse", "--verify", "HEAD^{commit}"])
+  if (!parent.ok) return refuse("the repository has no commit to build on yet")
+  const head = parent.stdout.trim()
+  const staged = await git(["diff", "--cached", "--name-only", "--no-renames", "-z"])
+  if (!staged.ok) return refuse(staged.reason)
+  const foreign = outsideArtifacts(names(staged.stdout), base)
   if (foreign.length)
     return refuse(`refused: the index already holds files outside specs/ and .specify/: ${foreign.join(", ")}. Unstage them first.`)
-  const added = await git(["add", "-A", "--", ...params.paths])
-  if (!added.ok) return refuse(added.reason)
-  const after = await staged()
-  if (!after.ok) return refuse(after.reason)
-  const late = outsideArtifacts(after.paths, base)
-  if (late.length) return refuse(`refused: files outside specs/ and .specify/ were staged meanwhile: ${late.join(", ")}`)
-  if (!after.paths.length) return refuse("nothing to commit: the artifacts are unchanged")
-  // Naming the verified paths commits only them, whatever else reaches the index meanwhile.
-  const paths = after.paths.map((path) => path.slice(base.length))
-  const committed = await git(["commit", "-m", params.message, "--", ...paths])
-  if (!committed.ok) return refuse(committed.reason)
-  const head = await git(["rev-parse", "--short", "HEAD"])
-  const sha = head.ok ? head.stdout.trim() : "HEAD"
-  return {
-    content: `Committed ${sha}: ${paths.length} file(s)\n${paths.join("\n")}`,
-    metadata: { ok: true, sha, paths },
+
+  // The commit is built in a private index from HEAD, so the real index, later edits and
+  // hooks cannot change what was checked.
+  const scratch = mkdtempSync(join(tmpdir(), "speckit-commit-"))
+  try {
+    const env = { GIT_INDEX_FILE: join(scratch, "index") }
+    for (const args of [
+      ["read-tree", head],
+      ["add", "-A", "--", ...params.paths],
+    ]) {
+      const step = await git(args, { env })
+      if (!step.ok) return refuse(step.reason)
+    }
+    const written = await git(["write-tree"], { env })
+    if (!written.ok) return refuse(written.reason)
+    const tree = written.stdout.trim()
+    const diff = await git(["diff-tree", "-r", "--name-only", "--no-renames", "-z", head, tree])
+    if (!diff.ok) return refuse(diff.reason)
+    const changed = names(diff.stdout)
+    if (!changed.length) return refuse("nothing to commit: the artifacts are unchanged")
+    const stray = outsideArtifacts(changed, base, params.paths)
+    if (stray.length) return refuse(`refused: the commit would change paths outside the request: ${stray.join(", ")}`)
+    const message = params.message.endsWith("\n") ? params.message : `${params.message}\n`
+    const created = await git(["commit-tree", tree, "-p", head, "-F", "-"], { stdin: message })
+    if (!created.ok) return refuse(created.reason)
+    const commit = created.stdout.trim()
+    // The old value makes a concurrent HEAD move fail instead of being overwritten.
+    const moved = await git(["update-ref", "-m", `speckit_commit: ${message.split("\n", 1)[0]}`, "HEAD", commit, head])
+    if (!moved.ok) return refuse(`HEAD moved while committing; nothing was committed. ${moved.reason}`)
+    const paths = changed.map((path) => path.slice(base.length))
+    const synced = await git(["reset", "-q", "--", ...paths])
+    const sha = commit.slice(0, 12)
+    return {
+      content: `Committed ${sha}: ${paths.length} file(s)\n${paths.join("\n")}${synced.ok ? "" : `\nThe index was not synced for these paths: ${synced.reason}`}`,
+      metadata: { ok: true, sha, paths },
+    }
+  } finally {
+    rmSync(scratch, { recursive: true, force: true })
   }
 }

@@ -978,12 +978,153 @@ async function beadsActive(directory, spawn = spawnExit) {
 }
 
 // plugins/speckit/src/commit.ts
-import { existsSync as existsSync4 } from "fs";
-import { join as join5, posix } from "path";
+import { existsSync as existsSync3, mkdtempSync, rmSync } from "fs";
+import { tmpdir } from "os";
+import { join as join4, posix } from "path";
+var COMMIT_TOOL = "speckit_commit";
+var COMMIT_DESCRIPTION = `Commit SpecKit artifacts: stages only specs/ and .specify/, refuses other staged files, never amends.
+` + "Paths are relative to the SpecKit workspace and default to specs/ and .specify/. Refuses when a requested path lies outside them or the index already holds other files. Commits the checked working-tree snapshot of those paths on top of HEAD and runs no git hooks (pre-commit, commit-msg), so run the project's checks separately.";
+var COMMIT_INPUT = {
+  type: "object",
+  properties: {
+    message: { type: "string", minLength: 1, description: "Commit message" },
+    paths: {
+      type: "array",
+      items: { type: "string" },
+      description: "Paths under specs/ or .specify/; default both"
+    }
+  },
+  required: ["message"],
+  additionalProperties: false
+};
+var GIT_TIMEOUT_MS = 60000;
+var ROOTS = ["specs", ".specify"];
+function artifactPath(path) {
+  if (path === "" || posix.isAbsolute(path))
+    return;
+  const normal = posix.normalize(path).replace(/\/+$/, "");
+  if (normal.split("/").includes(".."))
+    return;
+  return ROOTS.some((root) => normal === root || normal.startsWith(`${root}/`)) ? normal : undefined;
+}
+function outsideArtifacts(paths, prefix, requested) {
+  return paths.filter((path) => {
+    if (!path.startsWith(prefix))
+      return true;
+    const local = path.slice(prefix.length);
+    if (artifactPath(local) === undefined)
+      return true;
+    return requested !== undefined && !requested.some((root) => local === root || local.startsWith(`${root}/`));
+  });
+}
+var gitIn = (workspace) => async (args, options = {}) => {
+  try {
+    const proc = Bun.spawn(["git", "--literal-pathspecs", ...args], {
+      cwd: workspace,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0", ...options.env },
+      stdin: options.stdin === undefined ? "ignore" : new TextEncoder().encode(options.stdin),
+      stdout: "pipe",
+      stderr: "pipe",
+      timeout: GIT_TIMEOUT_MS
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited
+    ]);
+    return exitCode === 0 ? { ok: true, stdout } : { ok: false, reason: `git ${args[0]} failed: ${stderr.trim() || `exit ${exitCode}`}` };
+  } catch (error) {
+    return { ok: false, reason: `git ${args[0]} failed: ${error instanceof Error ? error.message : String(error)}` };
+  }
+};
+var refuse = (reason) => ({ content: `${COMMIT_TOOL}: ${reason}`, metadata: { ok: false } });
+var names = (stdout) => stdout.split("\x00").filter(Boolean);
+function readCommitParams(input, workspace) {
+  const value = input !== null && typeof input === "object" ? input : {};
+  if (typeof value.message !== "string" || value.message.trim() === "")
+    return "message is required";
+  if (value.paths === undefined)
+    return { message: value.message, paths: ROOTS.filter((root) => existsSync3(join4(workspace, root))) };
+  if (!Array.isArray(value.paths) || value.paths.some((path) => typeof path !== "string"))
+    return "paths must be an array of strings";
+  const outside = value.paths.filter((path) => artifactPath(path) === undefined);
+  if (outside.length)
+    return `refused: only paths under specs/ or .specify/ may be committed; got ${outside.join(", ")}`;
+  return { message: value.message, paths: value.paths.map((path) => artifactPath(path)) };
+}
+async function executeCommit(input, workspace, git = gitIn(workspace)) {
+  const params = readCommitParams(input, workspace);
+  if (typeof params === "string")
+    return refuse(params);
+  if (!params.paths.length)
+    return refuse("nothing to commit: no specs/ or .specify/ in the workspace");
+  const prefix = await git(["rev-parse", "--show-prefix"]);
+  if (!prefix.ok)
+    return refuse(prefix.reason);
+  const base = prefix.stdout.trim();
+  const parent = await git(["rev-parse", "--verify", "HEAD^{commit}"]);
+  if (!parent.ok)
+    return refuse("the repository has no commit to build on yet");
+  const head = parent.stdout.trim();
+  const staged = await git(["diff", "--cached", "--name-only", "--no-renames", "-z"]);
+  if (!staged.ok)
+    return refuse(staged.reason);
+  const foreign = outsideArtifacts(names(staged.stdout), base);
+  if (foreign.length)
+    return refuse(`refused: the index already holds files outside specs/ and .specify/: ${foreign.join(", ")}. Unstage them first.`);
+  const scratch = mkdtempSync(join4(tmpdir(), "speckit-commit-"));
+  try {
+    const env = { GIT_INDEX_FILE: join4(scratch, "index") };
+    for (const args of [
+      ["read-tree", head],
+      ["add", "-A", "--", ...params.paths]
+    ]) {
+      const step = await git(args, { env });
+      if (!step.ok)
+        return refuse(step.reason);
+    }
+    const written = await git(["write-tree"], { env });
+    if (!written.ok)
+      return refuse(written.reason);
+    const tree = written.stdout.trim();
+    const diff = await git(["diff-tree", "-r", "--name-only", "--no-renames", "-z", head, tree]);
+    if (!diff.ok)
+      return refuse(diff.reason);
+    const changed = names(diff.stdout);
+    if (!changed.length)
+      return refuse("nothing to commit: the artifacts are unchanged");
+    const stray = outsideArtifacts(changed, base, params.paths);
+    if (stray.length)
+      return refuse(`refused: the commit would change paths outside the request: ${stray.join(", ")}`);
+    const message = params.message.endsWith(`
+`) ? params.message : `${params.message}
+`;
+    const created = await git(["commit-tree", tree, "-p", head, "-F", "-"], { stdin: message });
+    if (!created.ok)
+      return refuse(created.reason);
+    const commit = created.stdout.trim();
+    const moved = await git(["update-ref", "-m", `speckit_commit: ${message.split(`
+`, 1)[0]}`, "HEAD", commit, head]);
+    if (!moved.ok)
+      return refuse(`HEAD moved while committing; nothing was committed. ${moved.reason}`);
+    const paths = changed.map((path) => path.slice(base.length));
+    const synced = await git(["reset", "-q", "--", ...paths]);
+    const sha = commit.slice(0, 12);
+    return {
+      content: `Committed ${sha}: ${paths.length} file(s)
+${paths.join(`
+`)}${synced.ok ? "" : `
+The index was not synced for these paths: ${synced.reason}`}`,
+      metadata: { ok: true, sha, paths }
+    };
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
 
 // plugins/speckit/src/setup.ts
-import { appendFileSync, copyFileSync, existsSync as existsSync3, lstatSync, mkdirSync, readFileSync as readFileSync3, writeFileSync } from "fs";
-import { dirname, isAbsolute as isAbsolute2, join as join4, parse, resolve as resolve2, sep } from "path";
+import { appendFileSync, copyFileSync, existsSync as existsSync4, lstatSync, mkdirSync, readFileSync as readFileSync3, writeFileSync } from "fs";
+import { dirname, isAbsolute as isAbsolute2, join as join5, parse, resolve as resolve2, sep } from "path";
 import { fileURLToPath } from "url";
 var PHASE_TIMEOUT_MS = 60000;
 var STOPPED = "stopped by the tool call; rerun to resume, finished phases are skipped";
@@ -1058,7 +1199,7 @@ var testPluginRoot = null;
 function pluginRoot() {
   if (testPluginRoot)
     return testPluginRoot;
-  return join4(dirname(fileURLToPath(import.meta.url)), "..");
+  return join5(dirname(fileURLToPath(import.meta.url)), "..");
 }
 function parseSpecifyMajorMinor(versionOut) {
   const m = versionOut.match(/(\d+)\.(\d+)/);
@@ -1073,9 +1214,9 @@ function specifyVersionOk(versionOut) {
   return v.major > 0 || v.major === 0 && v.minor >= 12;
 }
 function ensureGitignore(repo) {
-  safePath(join4(repo, ".gitignore"));
-  const gi = join4(repo, ".gitignore");
-  const existing = existsSync3(gi) ? readFileSync3(gi, "utf8") : "";
+  safePath(join5(repo, ".gitignore"));
+  const gi = join5(repo, ".gitignore");
+  const existing = existsSync4(gi) ? readFileSync3(gi, "utf8") : "";
   if (existing.split(`
 `).some((l) => l.trim() === GITIGNORE_ENTRY)) {
     return "gitignore already has spec-status.md";
@@ -1083,7 +1224,7 @@ function ensureGitignore(repo) {
   const prefix = existing.length === 0 || existing.endsWith(`
 `) ? "" : `
 `;
-  if (existsSync3(gi))
+  if (existsSync4(gi))
     appendFileSync(gi, `${prefix}${GITIGNORE_ENTRY}
 `);
   else
@@ -1095,19 +1236,19 @@ function safePath(path) {
   const absolute = isAbsolute2(path) ? path : `${process.cwd()}/${path}`;
   let current = parse(absolute).root;
   for (const part of absolute.slice(current.length).split(sep === "\\" ? /[\\/]/ : "/").filter(Boolean)) {
-    current = join4(current, part);
+    current = join5(current, part);
     const st = lstatSync(current, { throwIfNoEntry: false });
     if (st?.isSymbolicLink())
       throw new Error(`unsafe symlink: ${current}`);
   }
 }
 function installFormulas(repo, srcDir) {
-  const destDir = join4(repo, ".beads", "formulas");
+  const destDir = join5(repo, ".beads", "formulas");
   safePath(destDir);
   const copies = [];
   for (const name of FORMULAS) {
-    const src = join4(srcDir, `${name}.formula.toml`);
-    const dest = join4(destDir, `${name}.formula.toml`);
+    const src = join5(srcDir, `${name}.formula.toml`);
+    const dest = join5(destDir, `${name}.formula.toml`);
     safePath(src);
     safePath(dest);
     if (!lstatSync(src, { throwIfNoEntry: false })?.isFile()) {
@@ -1126,9 +1267,9 @@ function installFormulas(repo, srcDir) {
   return copies.map(({ name }) => `copied ${name}`);
 }
 function installedExtensions(repo) {
-  const registry = join4(repo, ".specify", "extensions", ".registry");
+  const registry = join5(repo, ".specify", "extensions", ".registry");
   safePath(registry);
-  if (!existsSync3(registry))
+  if (!existsSync4(registry))
     return new Set;
   try {
     const data = JSON.parse(readFileSync3(registry, "utf8"));
@@ -1141,9 +1282,9 @@ function installedExtensions(repo) {
   }
 }
 function communityCatalogState(repo) {
-  const config = join4(repo, ".specify", "extension-catalogs.yml");
+  const config = join5(repo, ".specify", "extension-catalogs.yml");
   safePath(config);
-  if (!existsSync3(config))
+  if (!existsSync4(config))
     return "absent";
   const parsed = Bun.YAML.parse(readFileSync3(config, "utf8"));
   const catalogs = parsed !== null && typeof parsed === "object" && "catalogs" in parsed && Array.isArray(parsed.catalogs) ? parsed.catalogs : [];
@@ -1184,9 +1325,9 @@ async function runSetup(params, cwd, signal) {
   };
   try {
     safePath(repo);
-    safePath(join4(repo, ".specify"));
-    safePath(join4(repo, ".beads"));
-    safePath(join4(repo, ".gitignore"));
+    safePath(join5(repo, ".specify"));
+    safePath(join5(repo, ".beads"));
+    safePath(join5(repo, ".gitignore"));
     if (params.skipSpecify)
       record("specify", "skipped", "skipSpecify: specify CLI steps omitted");
     else {
@@ -1201,7 +1342,7 @@ ${ver.stderr}`))
         return fail(`specify-cli >= 0.12.0 required. Got: ${ver.stdout || ver.stderr}`);
       record(current, "done", ver.stdout.trim());
       current = "specify init";
-      if (existsSync3(join4(repo, ".specify")) && !params.force)
+      if (existsSync4(join5(repo, ".specify")) && !params.force)
         record(current, "skipped", ".specify already present (pass force=true to re-scaffold)");
       else {
         const init = await run([
@@ -1274,7 +1415,7 @@ ${ver.stderr}`))
         record(current, "done", "bd init --skip-hooks");
       }
       current = "formulas";
-      const copied = installFormulas(repo, join4(pluginRoot(), "formulas"));
+      const copied = installFormulas(repo, join5(pluginRoot(), "formulas"));
       record(current, copied.length ? "done" : "skipped", copied.length ? copied.join(", ") : "every formula already present");
     }
     current = "gitignore";
@@ -1284,99 +1425,6 @@ ${ver.stderr}`))
   } catch (err) {
     return fail(err instanceof Error ? err.message : String(err));
   }
-}
-
-// plugins/speckit/src/commit.ts
-var COMMIT_TOOL = "speckit_commit";
-var COMMIT_DESCRIPTION = `Commit SpecKit artifacts: stages only specs/ and .specify/, refuses other staged files, never amends.
-` + "Paths are relative to the SpecKit workspace and default to specs/ and .specify/. Refuses before staging when a requested path lies outside them or the index already holds other files; commits exactly the staged artifact paths.";
-var COMMIT_INPUT = {
-  type: "object",
-  properties: {
-    message: { type: "string", minLength: 1, description: "Commit message" },
-    paths: {
-      type: "array",
-      items: { type: "string" },
-      description: "Paths under specs/ or .specify/; default both"
-    }
-  },
-  required: ["message"],
-  additionalProperties: false
-};
-var GIT_TIMEOUT_MS = 60000;
-var ROOTS = ["specs", ".specify"];
-function artifactPath(path) {
-  if (path === "" || posix.isAbsolute(path))
-    return;
-  const normal = posix.normalize(path).replace(/\/+$/, "");
-  if (normal.split("/").includes(".."))
-    return;
-  return ROOTS.some((root) => normal === root || normal.startsWith(`${root}/`)) ? normal : undefined;
-}
-function outsideArtifacts(staged, prefix) {
-  return staged.filter((path) => !path.startsWith(prefix) || artifactPath(path.slice(prefix.length)) === undefined);
-}
-var gitIn = (workspace) => async (args) => {
-  const result = await run(["git", "--literal-pathspecs", ...args], workspace, Date.now() + GIT_TIMEOUT_MS);
-  return result.exitCode === 0 ? { ok: true, stdout: result.stdout } : { ok: false, reason: `git ${args[0]} failed: ${result.stderr.trim() || `exit ${result.exitCode}`}` };
-};
-var refuse = (reason) => ({ content: `${COMMIT_TOOL}: ${reason}`, metadata: { ok: false } });
-function readCommitParams(input, workspace) {
-  const value = input !== null && typeof input === "object" ? input : {};
-  if (typeof value.message !== "string" || value.message.trim() === "")
-    return "message is required";
-  if (value.paths === undefined)
-    return { message: value.message, paths: ROOTS.filter((root) => existsSync4(join5(workspace, root))) };
-  if (!Array.isArray(value.paths) || value.paths.some((path) => typeof path !== "string"))
-    return "paths must be an array of strings";
-  const outside = value.paths.filter((path) => artifactPath(path) === undefined);
-  if (outside.length)
-    return `refused: only paths under specs/ or .specify/ may be committed; got ${outside.join(", ")}`;
-  return { message: value.message, paths: value.paths.map((path) => artifactPath(path)) };
-}
-async function executeCommit(input, workspace, git = gitIn(workspace)) {
-  const params = readCommitParams(input, workspace);
-  if (typeof params === "string")
-    return refuse(params);
-  if (!params.paths.length)
-    return refuse("nothing to commit: no specs/ or .specify/ in the workspace");
-  const prefix = await git(["rev-parse", "--show-prefix"]);
-  if (!prefix.ok)
-    return refuse(prefix.reason);
-  const base = prefix.stdout.trim();
-  const staged = async () => {
-    const listed = await git(["diff", "--cached", "--name-only", "--no-renames", "-z"]);
-    return listed.ok ? { ok: true, paths: listed.stdout.split("\x00").filter(Boolean) } : listed;
-  };
-  const before = await staged();
-  if (!before.ok)
-    return refuse(before.reason);
-  const foreign = outsideArtifacts(before.paths, base);
-  if (foreign.length)
-    return refuse(`refused: the index already holds files outside specs/ and .specify/: ${foreign.join(", ")}. Unstage them first.`);
-  const added = await git(["add", "-A", "--", ...params.paths]);
-  if (!added.ok)
-    return refuse(added.reason);
-  const after = await staged();
-  if (!after.ok)
-    return refuse(after.reason);
-  const late = outsideArtifacts(after.paths, base);
-  if (late.length)
-    return refuse(`refused: files outside specs/ and .specify/ were staged meanwhile: ${late.join(", ")}`);
-  if (!after.paths.length)
-    return refuse("nothing to commit: the artifacts are unchanged");
-  const paths = after.paths.map((path) => path.slice(base.length));
-  const committed = await git(["commit", "-m", params.message, "--", ...paths]);
-  if (!committed.ok)
-    return refuse(committed.reason);
-  const head = await git(["rev-parse", "--short", "HEAD"]);
-  const sha = head.ok ? head.stdout.trim() : "HEAD";
-  return {
-    content: `Committed ${sha}: ${paths.length} file(s)
-${paths.join(`
-`)}`,
-    metadata: { ok: true, sha, paths }
-  };
 }
 
 // plugins/speckit/src/skills.ts

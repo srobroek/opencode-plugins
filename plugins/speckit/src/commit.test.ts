@@ -1,8 +1,8 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test"
-import { cpSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test"
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { artifactPath, executeCommit, outsideArtifacts } from "./commit.ts"
+import { artifactPath, executeCommit, type Git, gitIn, outsideArtifacts } from "./commit.ts"
 
 describe("artifactPath", () => {
   test.each([
@@ -28,7 +28,14 @@ test("outsideArtifacts lists staged repository paths outside the workspace's spe
     "specs/d.md",
   ])
   expect(outsideArtifacts(["specs/a.md"], "")).toEqual([])
+  expect(outsideArtifacts(["specs/a/x.md", "specs/b/y.md", ".specify/z"], "", ["specs/a"])).toEqual([
+    "specs/b/y.md",
+    ".specify/z",
+  ])
 })
+
+// Each case below runs several real git processes, which a loaded machine slows past the 5 s default.
+setDefaultTimeout(30_000)
 
 describe("executeCommit", () => {
   let template: string
@@ -95,6 +102,64 @@ describe("executeCommit", () => {
     const result = await executeCommit({ message: "--amend" }, repo)
     expect(result.metadata.ok).toBe(true)
     expect(git("log", "--format=%s")).toBe("--amend\ninit")
+  })
+
+  /** The real runner, with `before` run ahead of the git step that writes the commit or moves HEAD. */
+  const late = (steps: readonly string[], before: () => void): Git => {
+    const real = gitIn(repo)
+    return (args, options) => {
+      if (steps.includes(args[0] ?? "")) before()
+      return real(args, options)
+    }
+  }
+  const committedFiles = () => git("show", "--name-only", "--format=", "HEAD").split("\n")
+
+  test("commits the working-tree snapshot of a partially staged artifact and syncs its index entry", async () => {
+    write("specs/001-a/spec.md", "staged\n")
+    git("add", "specs/001-a/spec.md")
+    write("specs/001-a/spec.md", "worktree\n")
+    const result = await executeCommit({ message: "x" }, repo)
+    expect(result.metadata.ok).toBe(true)
+    expect(git("show", "HEAD:specs/001-a/spec.md")).toBe("worktree")
+    expect(git("status", "--porcelain", "--", "specs")).toBe("")
+  })
+
+  test("an edit or a foreign stage after validation does not reach the commit", async () => {
+    write("specs/001-a/spec.md", "checked\n")
+    const seam = late(["commit", "commit-tree"], () => {
+      write("specs/001-a/spec.md", "late\n")
+      write("src/b.ts")
+      git("add", "src/b.ts")
+    })
+    const result = await executeCommit({ message: "x" }, repo, seam)
+    expect(result.metadata.ok).toBe(true)
+    expect(git("show", "HEAD:specs/001-a/spec.md")).toBe("checked")
+    expect(committedFiles()).toEqual(["specs/001-a/spec.md"])
+    expect(result.content).not.toContain("not synced")
+    expect(git("diff", "--cached", "--name-only")).toBe("src/b.ts")
+  })
+
+  test("a pre-commit hook that stages a foreign file cannot add it to the commit", async () => {
+    const hooks = join(repo, ".git", "test-hooks")
+    mkdirSync(hooks)
+    writeFileSync(join(hooks, "pre-commit"), "#!/bin/sh\necho x > src.ts && git add src.ts\n")
+    chmodSync(join(hooks, "pre-commit"), 0o755)
+    git("config", "core.hooksPath", hooks)
+    write("specs/001-a/spec.md")
+    const result = await executeCommit({ message: "x" }, repo)
+    expect(result.metadata.ok).toBe(true)
+    expect(committedFiles()).toEqual(["specs/001-a/spec.md"])
+  })
+
+  test("refuses when HEAD moves during the commit, keeping the other commit", async () => {
+    write("specs/001-a/spec.md")
+    // Plumbing moves HEAD without touching the index, as another writer's commit would.
+    const seam = late(["commit", "update-ref"], () => {
+      git("update-ref", "HEAD", git("commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", "concurrent"))
+    })
+    const result = await executeCommit({ message: "x" }, repo, seam)
+    expect(result.metadata.ok).toBe(false)
+    expect(git("log", "--format=%s")).toBe("concurrent\ninit")
   })
 
   test("reports nothing to commit when the artifacts are unchanged", async () => {

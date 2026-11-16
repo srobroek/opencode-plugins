@@ -85,10 +85,14 @@ when the spec has several runs, or alone to resume a run: the tool reads the spe
 from the root. Clarification, analysis, reviews, verification, tests
 and consequential safety confirmations stay required whatever the choice.
 
-`speckit_commit` commits SpecKit artifacts. It stages only paths under `specs/` and
-`.specify/` (by default both), refuses before staging when a requested path lies outside
-them or the index already holds other files, commits exactly the staged artifact paths
-and never amends. The `spec` agent commits through it, since a shell `git add` or
+`speckit_commit` commits SpecKit artifacts. It takes only paths under `specs/` and
+`.specify/` (by default both) and refuses when a requested path lies outside them or the
+index already holds other files. It builds the commit in a private index (HEAD plus the
+working-tree state of those paths), checks the tree changes nothing else, commits that
+tree on top of HEAD and syncs the real index for those paths. It never amends, and a
+concurrent move of HEAD makes it fail rather than overwrite the other commit. It commits
+with plumbing, so no git hook runs (pre-commit, commit-msg): that is the price of
+committing exactly the checked snapshot, so run the project's checks separately. The `spec` agent commits through it, since a shell `git add` or
 `git commit` pattern cannot keep its operands or options in bounds.
 
 ## Guards and routes
