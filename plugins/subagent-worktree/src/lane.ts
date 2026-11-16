@@ -1,5 +1,7 @@
 /** Pure decision logic for subagent worktree lanes. */
 
+import { wildcardMatch as wildcard } from "@srobroek/opencode-lib/patterns"
+
 export const SUBAGENT_TOOL = "subagent"
 export const MERGE_TOOL = "subagent_worktree_merge"
 export const LANE_PREFIX = "lane/"
@@ -257,7 +259,7 @@ export function decideIsolation(facts: IsolationFacts): Isolation {
   if (!facts.options.agents.some((agent) => names.has(agent))) return { isolate: false, reason: "agent not opted in" }
   if (!facts.agent) return { isolate: false, reason: "unknown agent" }
   if (facts.agent.mode === "primary") return { isolate: false, reason: "primary agent" }
-  if (rulesAreReadOnly(facts.agent.permissions)) return { isolate: false, reason: "read-only agent (edit denied)" }
+  if (sessionIsReadOnly(facts.agent.permissions, undefined)) return { isolate: false, reason: "read-only agent (edit denied)" }
   if (facts.callerIsChild) return { isolate: false, reason: "caller is a child session" }
   if (!facts.isGit) return { isolate: false, reason: "not a git checkout" }
   return { isolate: true }
@@ -271,12 +273,6 @@ export function targetsExternalDirectory(prompt: string, projectDir: string, hom
     .map((path) => path.startsWith("~/") && homeDir ? `${homeDir}/${path.slice(2)}` : path)
   // Ambiguous/multi-repository briefs keep isolation; explicit worktree arguments take precedence.
   return paths.length === 1 && !within(paths[0] ?? "", projectDir)
-}
-
-/** OpenCode wildcard match: `*` matches any run of characters. */
-function wildcard(value: string, pattern: string): boolean {
-  const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")
-  return new RegExp(`^${escaped}$`).test(value)
 }
 
 /**

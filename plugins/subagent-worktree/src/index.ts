@@ -32,7 +32,6 @@ import {
   readSubagentInput,
   resumeWorktreeNote,
   rewritePrompt,
-  rulesAreReadOnly,
   SESSION_LOOKUP_MS,
   SUBAGENT_TOOL,
   type SubagentInput,
@@ -316,7 +315,7 @@ export function createLanes(
     if (plan.kind === "refuse") throw new Error(`subagent-worktree: ${plan.reason}`)
     if (plan.kind !== "isolate" && start?.lookup.ok && agent && agent.mode !== "primary") {
       const guard = decideWriterGuard({
-        writer: !rulesAreReadOnly(agent.permissions),
+        writer: !sessionIsReadOnly(agent.permissions, undefined),
         directory: start.lookup.worktree.directory,
         caller: event.sessionID,
         sessions: await sessionsIn(parent.projectID, start.lookup.worktree.directory),

@@ -195,6 +195,23 @@ function signalName(code) {
   return Object.entries(constants.signals).find(([, n]) => n === code)?.[0] ?? String(code);
 }
 
+// plugins/lib/src/patterns.ts
+var compiled = new Map;
+function compile(pattern) {
+  let regex = compiled.get(pattern);
+  if (regex === undefined) {
+    let source = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".");
+    if (source.endsWith(" .*"))
+      source = `${source.slice(0, -3)}( .*)?`;
+    regex = new RegExp(`^${source}$`, "s");
+    compiled.set(pattern, regex);
+  }
+  return regex;
+}
+function wildcardMatch(value, pattern) {
+  return compile(pattern).test(value);
+}
+
 // plugins/subagent-worktree/src/lane.ts
 var SUBAGENT_TOOL = "subagent";
 var MERGE_TOOL = "subagent_worktree_merge";
@@ -355,7 +372,7 @@ function decideIsolation(facts) {
     return { isolate: false, reason: "unknown agent" };
   if (facts.agent.mode === "primary")
     return { isolate: false, reason: "primary agent" };
-  if (rulesAreReadOnly(facts.agent.permissions))
+  if (sessionIsReadOnly(facts.agent.permissions, undefined))
     return { isolate: false, reason: "read-only agent (edit denied)" };
   if (facts.callerIsChild)
     return { isolate: false, reason: "caller is a child session" };
@@ -367,17 +384,13 @@ function targetsExternalDirectory(prompt, projectDir, homeDir) {
   const paths = [...prompt.matchAll(/(?:working directory|workdir|repository|repo|checkout|work in|work at)\s*(?:is|:|=)?\s*[`"']?(\/[^\s`"',;]+|~\/[^\s`"',;]+)/gi)].map((match) => match[1]?.replace(/[.)]+$/, "")).filter((path) => path !== undefined).map((path) => path.startsWith("~/") && homeDir ? `${homeDir}/${path.slice(2)}` : path);
   return paths.length === 1 && !within(paths[0] ?? "", projectDir);
 }
-function wildcard(value, pattern) {
-  const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
-  return new RegExp(`^${escaped}$`).test(value);
-}
 function rulesAreReadOnly(rules) {
   if (!Array.isArray(rules))
     return false;
   const match = [...rules].reverse().find((rule) => {
     if (typeof rule?.action !== "string" || typeof rule.resource !== "string")
       return false;
-    return wildcard("edit", rule.action) && (rule.resource === "*" || rule.resource === "**");
+    return wildcardMatch("edit", rule.action) && (rule.resource === "*" || rule.resource === "**");
   });
   return match?.effect === "deny";
 }
@@ -385,8 +398,8 @@ function sessionIsReadOnly(agentRules, sessionRules) {
   const rules = [...Array.isArray(agentRules) ? agentRules : [], ...Array.isArray(sessionRules) ? sessionRules : []];
   if (!rulesAreReadOnly(rules))
     return false;
-  const denied = rules.findLastIndex((rule) => rule?.effect === "deny" && typeof rule.action === "string" && wildcard("edit", rule.action) && (rule.resource === "*" || rule.resource === "**"));
-  return !rules.slice(denied + 1).some((rule) => rule?.effect === "allow" && typeof rule.action === "string" && (wildcard("edit", rule.action) || wildcard("write", rule.action)));
+  const denied = rules.findLastIndex((rule) => rule?.effect === "deny" && typeof rule.action === "string" && wildcardMatch("edit", rule.action) && (rule.resource === "*" || rule.resource === "**"));
+  return !rules.slice(denied + 1).some((rule) => rule?.effect === "allow" && typeof rule.action === "string" && (wildcardMatch("edit", rule.action) || wildcardMatch("write", rule.action)));
 }
 function slug(text, max = 32) {
   const value = text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, max).replace(/-+$/g, "");
@@ -848,7 +861,7 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
       throw new Error(`subagent-worktree: ${plan.reason}`);
     if (plan.kind !== "isolate" && start?.lookup.ok && agent && agent.mode !== "primary") {
       const guard = decideWriterGuard({
-        writer: !rulesAreReadOnly(agent.permissions),
+        writer: !sessionIsReadOnly(agent.permissions, undefined),
         directory: start.lookup.worktree.directory,
         caller: event.sessionID,
         sessions: await sessionsIn(parent.projectID, start.lookup.worktree.directory)

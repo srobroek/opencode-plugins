@@ -93,6 +93,15 @@ async function start(
       { id: "pinned", name: "pinned", mode: "subagent", model: { id: "y", providerID: "prov" } },
       { id: "build", name: "build", mode: "primary" },
       {
+        id: "scoped",
+        name: "scoped",
+        mode: "subagent",
+        permissions: [
+          { action: "edit", resource: "*", effect: "deny" },
+          { action: "edit", resource: "src/*", effect: "allow" },
+        ],
+      },
+      {
         id: "reviewer",
         name: "reviewer",
         mode: "subagent",
@@ -461,6 +470,12 @@ describe("worktree argument", () => {
       const setup = await start()
       writerIn(setup, "ses_limited", running, { agent: "pinned", permissions: [{ action: "edit", resource: "*", effect: "deny" }] })
       expect(sessionID(await spawn(setup, { agent: "pinned", worktree: "feat" }))).toBe("ses_fake1")
+    })
+
+    test("a spawning agent with a scoped edit grant is guarded as a writer", async () => {
+      const setup = await start()
+      writerIn(setup, "ses_live", running)
+      await expect(spawn(setup, { agent: "scoped", worktree: "feat" })).rejects.toThrow(/live writer session ses_live/)
     })
 
     test("a live reviewer is not a writer", async () => {

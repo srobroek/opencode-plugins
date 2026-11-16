@@ -239,12 +239,25 @@ describe("decideIsolation", () => {
     )
     expect(decision).toEqual({ isolate: true })
   })
+  test("an agent with a scoped edit grant after a blanket deny is still isolated as a writer", () => {
+    const permissions = [
+      { action: "edit", resource: "*", effect: "deny" },
+      { action: "edit", resource: "src/*", effect: "allow" },
+    ]
+    expect(decideIsolation(facts({ agent: { id: "general", permissions } }))).toEqual({ isolate: true })
+  })
 })
 
 describe("sessionIsReadOnly", () => {
   const rule = (action: string, resource: string, effect: string) => ({ action, resource, effect })
   const deny = [rule("edit", "*", "deny")]
   const allow = [rule("*", "*", "allow")]
+
+  test("`?` in an action matches exactly one character", () => {
+    expect(sessionIsReadOnly([rule("ed?t", "*", "deny")], undefined)).toBe(true)
+    expect(sessionIsReadOnly([rule("e?t", "*", "deny")], undefined)).toBe(false)
+    expect(sessionIsReadOnly(deny, [rule("ed?t", "src/*", "allow")])).toBe(false)
+  })
 
   test.each([
     ["agent denies, no session rules", deny, undefined, true],
