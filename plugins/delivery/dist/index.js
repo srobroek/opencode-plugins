@@ -3739,6 +3739,7 @@ var CLAIM_TTL_MS = 24 * 3600000;
 var RETRY_WINDOW_MS = 5000;
 var DEBOUNCE_MS = 2000;
 var MAX_PER_PASS = 20;
+var MAX_SESSION_PAGES = 20;
 function pendingCleanupAction(receipt, facts) {
   if (facts.done)
     return { action: "skip", reason: "already cleaned" };
@@ -3810,21 +3811,35 @@ function createPendingCleanup(deps) {
       return meta.claims[0]?.reason;
     }
     const path = receipt.worktree.path;
+    if (path === null)
+      return;
     const projectID = ctx.location.project?.id;
-    if (path === null || projectID === undefined)
-      return;
     try {
-      const page = await ctx.session.list({ project: projectID, directory: path, archived: false, limit: 100 });
-      for (const raw of Array.isArray(page.data) ? page.data : []) {
-        const busy = typeof raw.time?.busy === "number" ? raw.time.busy : undefined;
-        const idle = typeof raw.time?.idle === "number" ? raw.time.idle : undefined;
-        if (busy !== undefined && (idle === undefined || busy > idle))
-          return `a session is running in ${path}`;
+      let query = {
+        ...projectID === undefined ? {} : { project: projectID },
+        directory: path,
+        archived: false,
+        limit: 100
+      };
+      for (let pages = 0;pages < MAX_SESSION_PAGES; pages++) {
+        const page = await ctx.session.list(query);
+        if (!Array.isArray(page?.data))
+          return `the sessions in ${path} could not be listed`;
+        for (const raw of page.data) {
+          const busy = typeof raw.time?.busy === "number" ? raw.time.busy : undefined;
+          const idle = typeof raw.time?.idle === "number" ? raw.time.idle : undefined;
+          if (busy !== undefined && (idle === undefined || busy > idle))
+            return `a session is running in ${path}`;
+        }
+        const next = page.cursor?.next;
+        if (!next)
+          return;
+        query = { cursor: next };
       }
+      return `the sessions in ${path} span more pages than are read`;
     } catch {
-      return;
+      return `the sessions in ${path} could not be listed`;
     }
-    return;
   };
   const run = async (sessionID, idle) => {
     const key = repoKey(cwd);

@@ -35,6 +35,7 @@ export const CLAIM_TTL_MS = 24 * 3_600_000
 export const RETRY_WINDOW_MS = 5_000
 export const DEBOUNCE_MS = 2_000
 const MAX_PER_PASS = 20
+const MAX_SESSION_PAGES = 20
 
 export type PendingAction = "retry" | "nudge" | "done" | "hold" | "skip"
 
@@ -169,19 +170,32 @@ export function createPendingCleanup(deps: PendingDeps) {
       return meta.claims[0]?.reason
     }
     const path = receipt.worktree.path
+    if (path === null) return undefined
     const projectID = (ctx.location as { project?: { id?: string } }).project?.id
-    if (path === null || projectID === undefined) return undefined
+    // Fail closed: a lookup that errors, or whose pages cannot all be read, holds the worktree.
     try {
-      const page = (await ctx.session.list({ project: projectID, directory: path, archived: false, limit: 100 } as never)) as { data?: unknown }
-      for (const raw of Array.isArray(page.data) ? (page.data as Array<{ time?: { busy?: unknown; idle?: unknown } }>) : []) {
-        const busy = typeof raw.time?.busy === "number" ? raw.time.busy : undefined
-        const idle = typeof raw.time?.idle === "number" ? raw.time.idle : undefined
-        if (busy !== undefined && (idle === undefined || busy > idle)) return `a session is running in ${path}`
+      let query: Record<string, unknown> = {
+        ...(projectID === undefined ? {} : { project: projectID }),
+        directory: path,
+        archived: false,
+        limit: 100,
       }
+      for (let pages = 0; pages < MAX_SESSION_PAGES; pages++) {
+        const page = (await ctx.session.list(query as never)) as { data?: unknown; cursor?: { next?: string } }
+        if (!Array.isArray(page?.data)) return `the sessions in ${path} could not be listed`
+        for (const raw of page.data as Array<{ time?: { busy?: unknown; idle?: unknown } }>) {
+          const busy = typeof raw.time?.busy === "number" ? raw.time.busy : undefined
+          const idle = typeof raw.time?.idle === "number" ? raw.time.idle : undefined
+          if (busy !== undefined && (idle === undefined || busy > idle)) return `a session is running in ${path}`
+        }
+        const next = page.cursor?.next
+        if (!next) return undefined
+        query = { cursor: next }
+      }
+      return `the sessions in ${path} span more pages than are read`
     } catch {
-      return undefined
+      return `the sessions in ${path} could not be listed`
     }
-    return undefined
   }
 
   /** One pass over this repository's pending receipts for a finished turn of `sessionID`. */

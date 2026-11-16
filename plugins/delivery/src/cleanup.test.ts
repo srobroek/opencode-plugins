@@ -2572,3 +2572,110 @@ describe("a denied cleanup stays denied until an explicit delivery_cleanup re-ar
     rmSync(f.root, { recursive: true, force: true })
   })
 })
+
+describe("pending cleanup fails closed on who is in the worktree", () => {
+  async function idleWith(name: string, list: (query: Record<string, unknown>) => Promise<unknown>) {
+    const f = fixture(name)
+    const scripted = runner(f, { beadStatus: "closed" })
+    const fake = createFakeContext({ directory: f.main })
+    ;(fake.context.session as unknown as { list: unknown }).list = list
+    const pending = createPendingCleanup({
+      ctx: fake.context,
+      cwd: f.main,
+      env: f.env,
+      host: () => undefined,
+      canonical: (path) => path,
+      debounceMs: 1,
+      cleanup: { run: stripped(scripted.run), now: () => NOW + 10, bounds: HEAVY_FIXTURE_BOUNDS },
+    })
+    await pending.record(f.receipt, "ses_lead", [])
+    await pending.start()
+    fake.emit({ type: "session.idle", data: { sessionID: "ses_lead" } })
+    await pending.settle()
+    const result = { removed: !existsSync(f.linked), mutations: mutationCalls(scripted.calls) }
+    await pending.dispose()
+    rmSync(f.root, { recursive: true, force: true })
+    return result
+  }
+
+  test("a lookup error holds the worktree", async () => {
+    const result = await idleWith("pending-list-error", async () => {
+      throw new Error("boom")
+    })
+    expect(result).toEqual({ removed: false, mutations: [] })
+  })
+
+  test("an owner on the second page holds the worktree", async () => {
+    const result = await idleWith("pending-page-two", async (query) =>
+      query.cursor === undefined
+        ? { data: [{ id: "old", time: { busy: 1, idle: 2 } }], cursor: { next: "p2" } }
+        : { data: [{ id: "live", time: { busy: 9, idle: 2 } }] },
+    )
+    expect(result).toEqual({ removed: false, mutations: [] })
+  })
+
+  test("with no one in it (every page read) the worktree is removed", async () => {
+    const result = await idleWith("pending-page-clear", async (query) =>
+      query.cursor === undefined
+        ? { data: [{ id: "old", time: { busy: 1, idle: 2 } }], cursor: { next: "p2" } }
+        : { data: [{ id: "older", time: { busy: 1, idle: 2 } }] },
+    )
+    expect(result.removed).toBe(true)
+  })
+
+  test("a claim holds until 24 hours pass, then the retry removes the worktree", async () => {
+    const f = fixture("pending-claim-expiry")
+    const scripted = runner(f, { beadStatus: "closed" })
+    const fake = createFakeContext({ directory: f.main })
+    let clock = NOW + 10
+    const pending = createPendingCleanup({
+      ctx: fake.context,
+      cwd: f.main,
+      env: f.env,
+      host: () => undefined,
+      canonical: (path) => path,
+      debounceMs: 1,
+      cleanup: { run: stripped(scripted.run), now: () => NOW + 10, bounds: HEAVY_FIXTURE_BOUNDS },
+      now: () => clock,
+    })
+    await pending.record(f.receipt, "ses_lead", [{ directory: f.linked, reason: "lane x still active" }])
+    await pending.start()
+    clock += 23 * 3_600_000
+    fake.emit({ type: "session.idle", data: { sessionID: "ses_lead" } })
+    await pending.settle()
+    expect(existsSync(f.linked)).toBe(true)
+    clock += 2 * 3_600_000
+    fake.emit({ type: "session.idle", data: { sessionID: "ses_lead" } })
+    await pending.settle()
+    expect(existsSync(f.linked)).toBe(false)
+    await pending.dispose()
+    rmSync(f.root, { recursive: true, force: true })
+  })
+
+  test("without the experimental.idle hook the events still retry", async () => {
+    const f = fixture("pending-no-hook")
+    const scripted = runner(f, { beadStatus: "closed" })
+    const fake = createFakeContext({ directory: f.main })
+    const session = fake.context.session as unknown as { hook: (name: string, callback: unknown) => Promise<unknown> }
+    const original = session.hook.bind(session)
+    session.hook = (name, callback) =>
+      name === "experimental.idle" ? Promise.reject(new Error("unknown hook")) : original(name, callback)
+    const pending = createPendingCleanup({
+      ctx: fake.context,
+      cwd: f.main,
+      env: f.env,
+      host: () => undefined,
+      canonical: (path) => path,
+      debounceMs: 1,
+      cleanup: { run: stripped(scripted.run), now: () => NOW + 10, bounds: HEAVY_FIXTURE_BOUNDS },
+    })
+    await pending.record(f.receipt, "ses_lead", [])
+    await pending.start()
+    expect(fake.hooks("session")).not.toContain("experimental.idle")
+    fake.emit({ type: "session.execution.succeeded", data: { sessionID: "ses_lead" } })
+    await pending.settle()
+    expect(existsSync(f.linked)).toBe(false)
+    await pending.dispose()
+    rmSync(f.root, { recursive: true, force: true })
+  })
+})
