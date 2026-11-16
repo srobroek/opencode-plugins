@@ -151,7 +151,8 @@ export function parseSpec(text: string, file = SPEC_FILE): { spec: Spec; finding
   const languages: Language[] = []
   const languageSeen = new Set<string>()
   for (const r of dataRows(requireTable(text, "Languages", LANGUAGE_REGISTRY_HEADER, file, findings), file, findings)) {
-    const [, id = "", kind = "", skill = "", files = ""] = r.cells.map((c) => c.trim())
+    const [, rawId = "", kind = "", skill = "", files = ""] = r.cells.map((c) => c.trim())
+    const id = unticked(rawId)
     unique(languageSeen, id, r.line, "language id")
     if (!kinds.includes(unticked(kind))) bad(r.line, `unknown kind "${kind}"`)
     const fileList = list(files, /\s*,\s*/)

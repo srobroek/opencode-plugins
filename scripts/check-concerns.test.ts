@@ -115,6 +115,10 @@ describe("checkRepo on the valid fixture", () => {
   test("unknown language is a finding", () => {
     expect(reasons(repo(), "zz")).toEqual([`${SPEC}:1: unknown language "zz"`])
   })
+  test("a backticked language id in the spec matches --language", () => {
+    const root = repo({ [SPEC]: ["| Python | py |", "| Python | `py` |"] })
+    expect(reasons(root, "py")).toEqual([])
+  })
   test("missing spec file is a finding", () => {
     const root = repo()
     rmSync(path.join(root, SPEC))
