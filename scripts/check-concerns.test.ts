@@ -12,6 +12,7 @@ const PY_TESTING = "plugins/lang/skills/lang-x/references/testing.md"
 const PY_QUALITY = "plugins/lang/skills/lang-x/references/quality.md"
 const SH = "plugins/lang/skills/lang-sh/references/shell.md"
 const TF = "plugins/lang/skills/lang-tf/references/tf.md"
+const SURFACES = `${REF}/surfaces.md`
 const TODAY = "2026-02-01"
 
 const temps: string[] = []
@@ -82,6 +83,15 @@ describe("parseSpec and parseShared", () => {
       ["types", "quality", ["shell", "iac"], ["every-pr"]],
       ["drift", "iac", [], ["scheduled"]],
     ])
+    expect(parsed.spec.surfaceConcerns.map((c) => [c.id, c.group, c.runMust])).toEqual([
+      ["e2e", "surface", ["every-pr", "scheduled"]],
+      ["visual", "surface", ["diff-pr"]],
+    ])
+    expect(parsed.spec.surfaces.map((x) => [x.id, x.naAllowed])).toEqual([
+      ["web", []],
+      ["api", ["visual"]],
+    ])
+    expect(parsed.spec.surfacesFile).toBe(SURFACES)
     expect(parsed.spec.languages[0]).toMatchObject({ id: "py", kind: "managed", skill: "lang-x" })
     expect(parsed.spec.languages[0]?.files).toHaveLength(2)
   })
@@ -89,7 +99,13 @@ describe("parseSpec and parseShared", () => {
     ["duplicate concern id", "| lint | Linting |", "| unit | Linting |", 'duplicate concern id "unit"'],
     ["unknown group", "| testing |", "| nope |", 'unknown group "nope"'],
     ["unknown kind in N/A", "| shell, iac |", "| shell, ghost |", 'unknown kind "ghost" in N/A allowed for'],
-    ["unknown run token", "| scheduled |\n\n## Kinds", "| yearly |\n\n## Kinds", 'unknown run token "yearly"'],
+    ["unknown run token", "| scheduled |\n\n## Surface concerns", "| yearly |\n\n## Surface concerns", 'unknown run token "yearly"'],
+    ["surface concern in the wrong group", "| surface | Whole", "| testing | Whole", 'unknown group "testing"'],
+    ["surface concern with a kind in N/A", "| surface | Whole-flow tests. | none |", "| surface | Whole-flow tests. | shell |", 'surface concern "e2e" must have N/A allowed for "none"; list N/A in ## Surfaces'],
+    ["surface concern id clashing with a concern", "| e2e | End-to-end", "| unit | End-to-end", 'duplicate concern id "unit"'],
+    ["duplicate surface id", "| HTTP API | api |", "| HTTP API | web |", 'duplicate surface id "web"'],
+    ["unknown surface concern in N/A", "| HTTP API | api | visual |", "| HTTP API | api | ghost |", 'unknown surface concern "ghost" in N/A allowed for'],
+    ["no Surfaces file line", "Surfaces file: `plugins/toolchain/skills/toolchain-languages/references/surfaces.md`", "", "no `Surfaces file: `<path>`` line"],
     ["unknown language kind", "| shell | lang-sh |", "| ghost | lang-sh |", 'unknown kind "ghost"'],
   ])("spec: %s", (_name, from, to, reason) => {
     const edited = spec.replace(from, to)
@@ -202,6 +218,61 @@ describe("language file findings", () => {
   })
 })
 
+describe("surfaces file", () => {
+  const WEB_E2E = "| `e2e` | `playwright` | >= 1.50.0 · 2026-01-07 · active | `playwright --version` · `npm i -D @playwright/test` |"
+  // [name, from, to, expected reason fragment]
+  const cases: [string, string, string, string][] = [
+    ["no Checked line", "Checked 2026-01-10.", "", "no valid `Checked"],
+    ["Checked in the future", "Checked 2026-01-10.", "Checked 2026-03-01.", "is in the future"],
+    ["missing surface section", "## api", "## other", 'no "## api" section'],
+    ["section that is not a surface", "## api", "## api\n\n## ghost", 'section "ghost" is not a surface'],
+    ["missing concern row", "| `visual` | Built-in: playwright screenshots | - | Built-in | None | - | diff-pr | - |\n", "", 'surface web: no row for concern "visual"'],
+    ["wrong header", "| Concern | Default |", "| Concern | Tool |", "header must be"],
+    ["language concern in a surface", WEB_E2E, WEB_E2E.replace("`e2e`", "`unit`"), 'unknown surface concern id "unit"'],
+    ["duplicate row", "| `visual` | Built-in", "| `e2e` | Built-in", 'duplicate concern "e2e" in surface web'],
+    ["Inherits", "`hurl` | >= 6.0.0 · 2026-01-08 · active | `hurl --version` · `brew install hurl`", "Inherits: py | - | Inherits", "Inherits is not allowed in surfaces"],
+    ["N/A where the surface forbids it", "`hurl` | >= 6.0.0 · 2026-01-08 · active | `hurl --version` · `brew install hurl`", "N/A: skipped | - | -", 'N/A is not allowed for surface api on concern "e2e"'],
+    ["deprecated tool", "1.50.0 · 2026-01-07 · active", "1.50.0 · 2026-01-07 · deprecated", "default tool is deprecated"],
+    ["exact version pin", ">= 1.50.0", "1.50.0", "Maintenance must be"],
+    ["Install as plain text", "`playwright --version` · `npm i -D @playwright/test`", "npm i -D @playwright/test", "Install must be"],
+    ["unknown run token", "every-pr + scheduled | - |\n| `visual`", "every-pr + yearly | - |\n| `visual`", 'unknown run token "yearly"'],
+    ["Run lacks required token", "| every-pr + scheduled | - |\n| `visual`", "| every-pr | - |\n| `visual`", "Run must include scheduled"],
+    ["two alternatives without Tradeoffs", "#### e2e", "#### visual", 'need a "#### e2e" entry'],
+    ["Tradeoffs entry without bullets", "- **playwright**: multi-browser and fast; costs a browser download.\n- **cypress**: good debugging UI; costs single-tab limits.", "Nothing.", 'has no "- **tool**:" bullet'],
+    ["Tradeoffs for unknown concern", "#### e2e", "#### ghost", 'unknown surface concern "ghost"'],
+  ]
+  test.each(cases)("%s", (_name, from, to, fragment) => {
+    const found = reasons(repo({ [SURFACES]: [from, to] }))
+    expect(found.some((r) => r.includes(fragment))).toBe(true)
+  })
+
+  test("N/A is accepted where the surface allows it", () => {
+    expect(reasons(repo()).filter((r) => r.startsWith(SURFACES))).toEqual([])
+  })
+  test("out-of-order rows", () => {
+    const root = repo()
+    const abs = path.join(root, SURFACES)
+    const lines = readFileSync(abs, "utf8").split("\n")
+    const [a, b] = [lines.findIndex((l) => l.startsWith("| `e2e` | `playwright`")), lines.findIndex((l) => l.startsWith("| `visual` | Built-in"))]
+    ;[lines[a], lines[b]] = [lines[b] as string, lines[a] as string]
+    writeFileSync(abs, lines.join("\n"))
+    expect(reasons(root).some((r) => r.includes('"e2e" is out of spec order'))).toBe(true)
+  })
+  test("a finding names the file and the line inside the section", () => {
+    const found = checkRepo(repo({ [SURFACES]: ["1.50.0 · 2026-01-07 · active", "1.50.0 · 2026-01-07 · stable"] }), { today: TODAY })
+    expect(found).toContainEqual({ file: SURFACES, line: 9, reason: 'unknown status "stable"' })
+  })
+  test("a missing surfaces file is a finding", () => {
+    const root = repo()
+    rmSync(path.join(root, SURFACES))
+    expect(reasons(root)).toEqual([`${SPEC}:1: surfaces file ${SURFACES} is missing`])
+  })
+  test("--language skips the surfaces file", () => {
+    const root = repo({ [SURFACES]: ["Checked 2026-01-10.", ""] })
+    expect(reasons(root, "py")).toEqual([])
+  })
+})
+
 describe("registration findings", () => {
   test("registered file missing", () => {
     const root = repo()
@@ -235,6 +306,12 @@ describe("staleRows", () => {
       `${PY_TESTING}:9: unit released 2026-01-02 (30 days old)`,
       `${PY_QUALITY}:9: lint released 2026-01-05 (27 days old)`,
       `${PY_QUALITY}:10: types released 2026-01-04 (28 days old)`,
+    ])
+  })
+  test("covers surface rows, with the surface in the label and a file-relative line", () => {
+    expect(staleRows(repo(), 20, "2026-02-01").filter((r) => r.startsWith(SURFACES))).toEqual([
+      `${SURFACES}:9: web/e2e released 2026-01-07 (25 days old)`,
+      `${SURFACES}:23: api/e2e released 2026-01-08 (24 days old)`,
     ])
   })
   test("is empty when all rows are recent", () => {

@@ -37,11 +37,14 @@ project is missing.
 | Id | Name | Group | Definition | N/A allowed for | Run must include |
 | --- | --- | --- | --- | --- | --- |
 | `test-runner` | Test runner | testing | Runs, isolates, filters and reports tests, with JUnit output for CI | none | every-pr |
+| `assertions` | Assertions | testing | The runner's built-in assertions plus at most one diff or matcher helper | none | every-pr |
+| `watch` | Watch and test selection | testing | The red-green loop tool and affected-test selection, for local TDD | iac | on-demand |
 | `property` | Property tests | testing | Checks invariants over generated inputs, with shrinking and saved failing seeds | shell, iac | - |
 | `fuzz` | Fuzzing | testing | Coverage-guided fuzzing of parsers and untrusted input, with a kept corpus | shell, iac | bounded-pr |
 | `fuzz-continuous` | Continuous fuzzing | testing | Long fuzz campaigns that run outside the PR | shell, iac | scheduled |
 | `mutation` | Mutation | testing | Changes the code on purpose and checks that a test fails | shell, iac | diff-pr + scheduled |
 | `snapshot` | Snapshots and golden files | testing | Reviewed output fixtures compared on every run | shell | - |
+| `component` | Component tests | testing | A UI unit rendered in isolation in a real browser or DOM | managed, native, shell, iac | every-pr |
 | `concurrency` | Concurrency and races | testing | Race detectors and schedule exploration | shell, iac | - |
 | `coverage` | Coverage | testing | Line, branch and changed-line coverage, read for gaps, not as a target | iac | every-pr |
 | `benchmark` | Benchmarks | testing | Repeatable performance comparisons | iac | - |
@@ -67,7 +70,39 @@ project is missing.
 | `iac-cost` | Cost | iac | Cost estimate of the planned change | none | - |
 
 Every language fills the testing and quality groups. Only a language of kind `iac` fills
-the iac group.
+the iac group. A language without a UI component model says `N/A` for `component`.
+
+## BDD
+
+BDD tools are not a concern. The journeys plugin covers acceptance-level specs. A language
+documents its BDD option as a `bdd` row in its `## Language-specific` table, and an agent
+uses it only when non-programmers read or write the scenarios or `.feature` files already
+exist.
+
+## Surface concerns
+
+Checks that depend on the product surface, not the language. A project fills them for each
+surface it ships, in [surfaces.md](surfaces.md), whatever its language. The N/A column is
+`none` here: a surface's N/A choices are in [Surfaces](#surfaces).
+
+| Id | Name | Group | Definition | N/A allowed for | Run must include |
+| --- | --- | --- | --- | --- | --- |
+| `e2e` | End-to-end | surface | Deterministic whole-flow tests through the real UI, API or CLI; smoke on PRs, full matrix scheduled | none | every-pr + scheduled |
+| `visual` | Visual regression | surface | Screenshot comparison against reviewed baselines | none | diff-pr |
+| `a11y` | Accessibility | surface | Automated rules plus accessibility-tree snapshots | none | every-pr |
+| `journey` | Journey validation | surface | Agent-driven validation of human-readable user journeys from the journeys plugin | none | release + on-demand |
+
+## Surfaces
+
+Surfaces file: `plugins/toolchain/skills/toolchain-languages/references/surfaces.md`
+
+| Surface | Id | N/A allowed for |
+| --- | --- | --- |
+| Web UI | `web` | none |
+| Mobile app | `mobile` | none |
+| Desktop app | `desktop` | none |
+| HTTP API | `http-api` | visual, a11y |
+| Command-line tool | `cli` | visual, a11y |
 
 ## Kinds
 
@@ -114,6 +149,16 @@ them. Tools shared by every language are in [shared-tools.md](shared-tools.md).
 
 Join tokens with ` + `, for example `diff-pr + scheduled`. A diff-scoped job blocks the merge
 only on code paths the project names as critical; elsewhere it reports.
+
+## Surface file format
+
+`surfaces.md` has a `Checked YYYY-MM-DD.` line, then one `## <surface-id>` section per row of
+[Surfaces](#surfaces), in that order. Each section holds a table with the language header
+below and one row per surface concern, in the order of [Surface concerns](#surface-concerns).
+Cells follow the [cell rules](#cells), with these differences: `Inherits:` is not allowed, and
+`N/A:` is allowed only for the concerns in the surface's N/A column. An optional
+`### Tradeoffs` in the section has one `#### <concern-id>` per concern with two or more
+alternatives, each with `- **tool**: wins when ...; costs ...` bullets.
 
 ## Table format
 

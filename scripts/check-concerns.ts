@@ -28,7 +28,18 @@ export type Concern = {
   line: number
 }
 export type Language = { id: string; kind: string; skill: string; files: string[]; line: number }
-export type Spec = { concerns: Concern[]; kinds: string[]; tokens: string[]; languages: Language[] }
+/** A product surface; `naAllowed` lists the surface concern ids that may be N/A for it. */
+export type Surface = { id: string; name: string; naAllowed: string[]; line: number }
+export type Spec = {
+  concerns: Concern[]
+  kinds: string[]
+  tokens: string[]
+  languages: Language[]
+  surfaceConcerns: Concern[]
+  surfaces: Surface[]
+  /** Repo-relative path of the surfaces file, from the `Surfaces file:` line; empty when absent. */
+  surfacesFile: string
+}
 /** Shared tool id to the concern ids it covers. */
 export type Shared = Map<string, string[]>
 export type Context = { root: string; spec: Spec; shared: Shared; today: string }
@@ -46,6 +57,7 @@ export const STATUSES = ["active", "maintenance", "beta", "pre-1.0", "preview"]
 export const LANGUAGE_HEADER = ["Concern", "Default", "Maintenance", "Install", "Alternatives", "Use both when", "Run", "Avoid"]
 
 const CONCERN_HEADER = ["Id", "Name", "Group", "Definition", "N/A allowed for", "Run must include"]
+const SURFACE_HEADER = ["Surface", "Id", "N/A allowed for"]
 const KIND_HEADER = ["Kind", "Meaning"]
 const LANGUAGE_REGISTRY_HEADER = ["Language", "Id", "Kind", "Skill", "Files"]
 const TOKEN_HEADER = ["Token", "Meaning"]
@@ -135,18 +147,39 @@ export function parseSpec(text: string, file = SPEC_FILE): { spec: Spec; finding
     tokens.push(id)
   }
 
-  const concerns: Concern[] = []
   const concernSeen = new Set<string>()
-  for (const r of dataRows(requireTable(text, "Concerns", CONCERN_HEADER, file, findings), file, findings)) {
-    const [id = "", name = "", group = "", , na = "", must = ""] = r.cells.map(unticked)
-    unique(concernSeen, id, r.line, "concern id")
-    if (!GROUPS.includes(group)) bad(r.line, `unknown group "${group}"`)
-    const naAllowed = na === "none" ? [] : list(na, /\s*,\s*/)
-    for (const k of naAllowed) if (!kinds.includes(k)) bad(r.line, `unknown kind "${k}" in N/A allowed for`)
-    const runMust = must === "-" ? [] : list(must, /\s*\+\s*/)
-    for (const t of runMust) if (!tokens.includes(t)) bad(r.line, `unknown run token "${t}"`)
-    concerns.push({ id, name, group, naAllowed, runMust, line: r.line })
+  /** Concern rows under `## <heading>`. Surface concerns never use N/A kinds: a surface's N/A lives in `## Surfaces`. */
+  const readConcerns = (heading: string, groups: string[], surface: boolean): Concern[] => {
+    const out: Concern[] = []
+    for (const r of dataRows(requireTable(text, heading, CONCERN_HEADER, file, findings), file, findings)) {
+      const [id = "", name = "", group = "", , na = "", must = ""] = r.cells.map(unticked)
+      unique(concernSeen, id, r.line, "concern id")
+      if (!groups.includes(group)) bad(r.line, `unknown group "${group}"`)
+      const naAllowed = na === "none" ? [] : list(na, /\s*,\s*/)
+      if (surface) {
+        if (na !== "none") bad(r.line, `surface concern "${id}" must have N/A allowed for "none"; list N/A in ## Surfaces`)
+      } else for (const k of naAllowed) if (!kinds.includes(k)) bad(r.line, `unknown kind "${k}" in N/A allowed for`)
+      const runMust = must === "-" ? [] : list(must, /\s*\+\s*/)
+      for (const t of runMust) if (!tokens.includes(t)) bad(r.line, `unknown run token "${t}"`)
+      out.push({ id, name, group, naAllowed: surface ? [] : naAllowed, runMust, line: r.line })
+    }
+    return out
   }
+  const concerns = readConcerns("Concerns", GROUPS, false)
+  const surfaceConcerns = readConcerns("Surface concerns", ["surface"], true)
+
+  const surfaces: Surface[] = []
+  const surfaceSeen = new Set<string>()
+  for (const r of dataRows(requireTable(text, "Surfaces", SURFACE_HEADER, file, findings), file, findings)) {
+    const [name = "", id = "", na = ""] = r.cells.map(unticked)
+    unique(surfaceSeen, id, r.line, "surface id")
+    const naAllowed = na === "none" ? [] : list(na, /\s*,\s*/)
+    for (const c of naAllowed)
+      if (!surfaceConcerns.some((sc) => sc.id === c)) bad(r.line, `unknown surface concern "${c}" in N/A allowed for`)
+    surfaces.push({ id, name, naAllowed, line: r.line })
+  }
+  const surfacesFile = /^Surfaces file: `([^`]+)`$/m.exec(text)?.[1] ?? ""
+  if (!surfacesFile) bad(1, "no `Surfaces file: `<path>`` line")
 
   const languages: Language[] = []
   const languageSeen = new Set<string>()
@@ -159,7 +192,7 @@ export function parseSpec(text: string, file = SPEC_FILE): { spec: Spec; finding
     if (fileList.length === 0) bad(r.line, "no files listed")
     languages.push({ id, kind: unticked(kind), skill: unticked(skill), files: fileList, line: r.line })
   }
-  return { spec: { concerns, kinds, tokens, languages }, findings }
+  return { spec: { concerns, kinds, tokens, languages, surfaceConcerns, surfaces, surfacesFile }, findings }
 }
 
 const slug = (heading: string) =>
@@ -340,9 +373,7 @@ function checkFile(ctx: Context, lang: Language, file: string, text: string, own
       bad(row.line, `expected ${LANGUAGE_HEADER.length} cells, found ${row.cells.length}`)
       continue
     }
-    const [concernCell = "", def = "", maint = "", install = "", alts = "", , run = ""] = row.cells
-    const empty = LANGUAGE_HEADER.filter((_, i) => row.cells[i] === "")
-    if (empty.length > 0) bad(row.line, `empty cell: ${empty.join(", ")}`)
+    const concernCell = row.cells[0] ?? ""
     const id = /^`([^`]+)`$/.exec(concernCell)?.[1]
     const concern = ctx.spec.concerns.find((c) => c.id === id)
     if (!id) {
@@ -365,13 +396,12 @@ function checkFile(ctx: Context, lang: Language, file: string, text: string, own
     if (index < lastIndex) bad(row.line, `concern "${id}" is out of spec order`)
     lastIndex = Math.max(lastIndex, index)
 
-    findings.push(...checkDefault(ctx, lang, concern, { file, line: row.line, def, maint, install, checked }))
-    const count = countAlternatives(alts)
-    if (alts === "") {
-      // reported as an empty cell
-    } else if (count === undefined) bad(row.line, `Alternatives must be "None" or "tool: condition" items separated by ";"`)
-    else if (count >= 2 && !tradeoffs.has(id)) bad(row.line, `${count} alternatives need a "### ${id}" entry under ## Tradeoffs`)
-    findings.push(...checkRun(ctx, concern, def, { file, line: row.line, run }))
+    const naProblem = concern.naAllowed.includes(lang.kind)
+      ? undefined
+      : `N/A is not allowed for kind ${lang.kind} on concern "${id}"`
+    findings.push(
+      ...checkCells(ctx, { naProblem, lang }, concern, row, { file, checked, tradeoffs, tradeoffWhere: `### ${id}" entry under ## Tradeoffs` }),
+    )
   }
 
   for (const [id, line] of tradeoffs) {
@@ -382,38 +412,72 @@ function checkFile(ctx: Context, lang: Language, file: string, text: string, own
   return findings
 }
 
-/** `### <id>` headings under `## Tradeoffs`, with their line numbers. */
-function tradeoffIds(text: string): Map<string, number> {
-  const ids = new Map<string, number>()
-  for (const s of tradeoffSections(text)) ids.set(s.id, s.line)
-  return ids
-}
+type TradeoffSection = { id: string; line: number; body: string[] }
 
-function tradeoffSections(text: string): { id: string; line: number; body: string[] }[] {
-  const lines = text.split(/\r?\n/)
-  const start = lines.findIndex((l) => l.trim() === "## Tradeoffs")
+/**
+ * Item headings (`item`, for example `###`) under the first `container` heading (for example `## Tradeoffs`) in
+ * `lines`, up to the next heading of the container's level or higher. `offset` maps slice lines to file lines.
+ */
+function tradeoffSections(lines: string[], container: string, item: string, offset = 0): TradeoffSection[] {
+  const start = lines.findIndex((l) => l.trim() === container)
   if (start < 0) return []
-  let end = lines.findIndex((l, i) => i > start && /^## /.test(l))
+  const level = container.indexOf(" ")
+  const stop = new RegExp(`^#{1,${level}} `)
+  let end = lines.findIndex((l, i) => i > start && stop.test(l))
   if (end < 0) end = lines.length
-  const sections: { id: string; line: number; body: string[] }[] = []
+  const sections: TradeoffSection[] = []
   for (let i = start + 1; i < end; i++) {
-    const m = /^### (\S+)\s*$/.exec(lines[i] ?? "")
-    if (m?.[1]) sections.push({ id: unticked(m[1]), line: i + 1, body: [] })
+    const m = new RegExp(`^${item} (\\S+)\\s*$`).exec(lines[i] ?? "")
+    if (m?.[1]) sections.push({ id: unticked(m[1]), line: i + 1 + offset, body: [] })
     else sections.at(-1)?.body.push(lines[i] ?? "")
   }
   return sections
 }
 
-const tradeoffHasBullet = (text: string, id: string) =>
-  tradeoffSections(text)
-    .find((s) => s.id === id)
-    ?.body.some((l) => /^- \*\*[^*]+\*\*:\s*\S/.test(l)) ?? false
+const hasBullet = (section: TradeoffSection) => section.body.some((l) => /^- \*\*[^*]+\*\*:\s*\S/.test(l))
+
+/** `### <id>` headings under `## Tradeoffs`, with their line numbers. */
+const tradeoffIds = (text: string) =>
+  new Map(tradeoffSections(text.split(/\r?\n/), "## Tradeoffs", "###").map((s) => [s.id, s.line]))
+
+const tradeoffHasBullet = (text: string, id: string) => {
+  const section = tradeoffSections(text.split(/\r?\n/), "## Tradeoffs", "###").find((s) => s.id === id)
+  return section ? hasBullet(section) : false
+}
+
+type CellsAt = {
+  file: string
+  checked: string | undefined
+  tradeoffs: Map<string, number>
+  /** Tail of the missing-Tradeoffs message after `need a "`. */
+  tradeoffWhere: string
+}
+
+/** Cell rules shared by language and surface rows: no empty cell, Default, Alternatives and Run. */
+function checkCells(ctx: Context, owner: Owner, concern: Concern, row: Row, at: CellsAt): Finding[] {
+  const findings: Finding[] = []
+  const bad = (reason: string) => findings.push({ file: at.file, line: row.line, reason })
+  const [, def = "", maint = "", install = "", alts = "", , run = ""] = row.cells
+  const empty = LANGUAGE_HEADER.filter((_, i) => row.cells[i] === "")
+  if (empty.length > 0) bad(`empty cell: ${empty.join(", ")}`)
+  findings.push(...checkDefault(ctx, owner, concern, { file: at.file, line: row.line, def, maint, install, checked: at.checked }))
+  const count = countAlternatives(alts)
+  if (alts === "") {
+    // reported as an empty cell
+  } else if (count === undefined) bad(`Alternatives must be "None" or "tool: condition" items separated by ";"`)
+  else if (count >= 2 && !at.tradeoffs.has(concern.id)) bad(`${count} alternatives need a "${at.tradeoffWhere}`)
+  findings.push(...checkRun(ctx, concern, def, { file: at.file, line: row.line, run }))
+  return findings
+}
 
 type Where = { file: string; line: number }
 
+/** Where a row lives and what it may do: a language row may inherit and may be N/A per kind; a surface row neither inherits nor is N/A unless `naProblem` is undefined. */
+type Owner = { lang?: Language; naProblem: string | undefined }
+
 function checkDefault(
   ctx: Context,
-  lang: Language,
+  owner: Owner,
   concern: Concern,
   at: Where & { def: string; maint: string; install: string; checked: string | undefined },
 ): Finding[] {
@@ -453,13 +517,14 @@ function checkDefault(
     case "inherits": {
       needsDash("Inherits")
       needsInstall("Inherits")
-      findings.push(...checkInherits(ctx, lang, id, kind.id, at))
+      if (owner.lang) findings.push(...checkInherits(ctx, owner.lang, id, kind.id, at))
+      else bad("Inherits is not allowed in surfaces")
       break
     }
     case "na":
       needsDash("N/A")
       needsInstall("-")
-      if (!concern.naAllowed.includes(lang.kind)) bad(`N/A is not allowed for kind ${lang.kind} on concern "${id}"`)
+      if (owner.naProblem) bad(owner.naProblem)
       break
     case "none":
       needsDash("No maintained tool")
@@ -494,6 +559,97 @@ function checkRun(ctx: Context, concern: Concern, def: string, at: Where & { run
   return []
 }
 
+/** Lines of the `## <id>` section: the slice and its 0-based offset in the file. */
+function sectionOf(lines: string[], id: string): { lines: string[]; offset: number } | undefined {
+  const start = lines.findIndex((l) => l.trim() === `## ${id}`)
+  if (start < 0) return undefined
+  let end = lines.findIndex((l, i) => i > start && /^## /.test(l))
+  if (end < 0) end = lines.length
+  return { lines: lines.slice(start, end), offset: start }
+}
+
+/**
+ * Findings for the surfaces file: one `## <surface-id>` section per surface, each with a language-style table of
+ * the surface concerns in spec order, and optional `### Tradeoffs` with one `#### <concern-id>` per concern that
+ * has two or more alternatives.
+ */
+export function checkSurfaces(ctx: Context): Finding[] {
+  const { spec } = ctx
+  const file = spec.surfacesFile
+  const abs = path.join(ctx.root, file)
+  if (!file || !existsSync(abs)) return [{ file: SPEC_FILE, line: 1, reason: `surfaces file ${file || "(unset)"} is missing` }]
+  const text = readFileSync(abs, "utf8")
+  const lines = text.split(/\r?\n/)
+  const findings: Finding[] = []
+  const bad = (line: number, reason: string) => findings.push({ file, line, reason })
+  const checked = /^Checked (\S+)\.$/m.exec(text)?.[1]
+  if (!checked || !isDate(checked)) bad(1, "no valid `Checked YYYY-MM-DD.` line")
+  else if (checked > ctx.today) bad(1, `Checked ${checked} is in the future`)
+
+  lines.forEach((l, i) => {
+    const heading = /^## (\S+)\s*$/.exec(l)?.[1]
+    if (heading && !spec.surfaces.some((s) => s.id === heading)) bad(i + 1, `section "${heading}" is not a surface in the spec`)
+  })
+
+  const order = spec.surfaceConcerns.map((c) => c.id)
+  for (const surface of spec.surfaces) {
+    const section = sectionOf(lines, surface.id)
+    if (!section) {
+      bad(1, `no "## ${surface.id}" section`)
+      continue
+    }
+    const seen = new Set<string>()
+    const tradeoffs = tradeoffSections(section.lines, "### Tradeoffs", "####", section.offset)
+    const table = parseTable(section.lines.join("\n"), surface.id)
+    const rows = table && sameHeader(table.header, LANGUAGE_HEADER) ? table.rows : []
+    if (table && !sameHeader(table.header, LANGUAGE_HEADER))
+      bad(table.line + section.offset, `"## ${surface.id}" header must be | ${LANGUAGE_HEADER.join(" | ")} |`)
+    let lastIndex = -1
+    for (const r of rows) {
+      const row = { line: r.line + section.offset, cells: r.cells }
+      if (row.cells.length !== LANGUAGE_HEADER.length) {
+        bad(row.line, `expected ${LANGUAGE_HEADER.length} cells, found ${row.cells.length}`)
+        continue
+      }
+      const id = /^`([^`]+)`$/.exec(row.cells[0] ?? "")?.[1]
+      if (!id) {
+        bad(row.line, "Concern cell must be the concern id in backticks")
+        continue
+      }
+      const concern = spec.surfaceConcerns.find((c) => c.id === id)
+      if (!concern) {
+        bad(row.line, `unknown surface concern id "${id}"`)
+        continue
+      }
+      if (seen.has(id)) {
+        bad(row.line, `duplicate concern "${id}" in surface ${surface.id}`)
+        continue
+      }
+      seen.add(id)
+      const index = order.indexOf(id)
+      if (index < lastIndex) bad(row.line, `concern "${id}" is out of spec order`)
+      lastIndex = Math.max(lastIndex, index)
+      const naProblem = surface.naAllowed.includes(id)
+        ? undefined
+        : `N/A is not allowed for surface ${surface.id} on concern "${id}"`
+      findings.push(
+        ...checkCells(ctx, { naProblem }, concern, row, {
+          file,
+          checked,
+          tradeoffs: new Map(tradeoffs.map((t) => [t.id, t.line])),
+          tradeoffWhere: `#### ${id}" entry under ### Tradeoffs in ## ${surface.id}`,
+        }),
+      )
+    }
+    for (const t of tradeoffs) {
+      if (!order.includes(t.id)) bad(t.line, `Tradeoffs entry for unknown surface concern "${t.id}"`)
+      else if (!hasBullet(t)) bad(t.line, `Tradeoffs entry "${t.id}" has no "- **tool**:" bullet`)
+    }
+    for (const id of order) if (!seen.has(id)) bad(section.offset + 1, `surface ${surface.id}: no row for concern "${id}"`)
+  }
+  return findings
+}
+
 function checkLanguageSpecific(ctx: Context, file: string, text: string): Finding[] {
   const table = parseTable(text, "Language-specific")
   if (!table) return []
@@ -515,6 +671,7 @@ export function checkRepo(root: string, options: { language?: string; today?: st
   const { ctx, findings } = loaded
   const ids = options.language ? [options.language] : ctx.spec.languages.map((l) => l.id)
   for (const id of ids) findings.push(...checkLanguage(ctx, id))
+  if (!options.language) findings.push(...checkSurfaces(ctx))
   return findings
 }
 
@@ -546,6 +703,28 @@ export function staleRows(root: string, maxAgeDays: number, today: string, langu
         const age = Math.floor((Date.parse(today) - Date.parse(date)) / DAY_MS)
         if (age > maxAgeDays) out.push(`${file}:${row.line}: ${unticked(row.cells[0] ?? "")} released ${date} (${age} days old)`)
       }
+  if (!language) out.push(...staleSurfaceRows(ctx, maxAgeDays, today))
+  return out
+}
+
+function staleSurfaceRows(ctx: Context, maxAgeDays: number, today: string): string[] {
+  const file = ctx.spec.surfacesFile
+  const abs = path.join(ctx.root, file)
+  if (!file || !existsSync(abs)) return []
+  const lines = readFileSync(abs, "utf8").split(/\r?\n/)
+  const out: string[] = []
+  for (const surface of ctx.spec.surfaces) {
+    const section = sectionOf(lines, surface.id)
+    const table = section && parseTable(section.lines.join("\n"), surface.id)
+    if (!section || !table || !sameHeader(table.header, LANGUAGE_HEADER)) continue
+    for (const row of table.rows) {
+      const date = /(\d{4}-\d{2}-\d{2})/.exec(row.cells[2] ?? "")?.[1]
+      if (!date || !isDate(date)) continue
+      const age = Math.floor((Date.parse(today) - Date.parse(date)) / DAY_MS)
+      if (age > maxAgeDays)
+        out.push(`${file}:${row.line + section.offset}: ${surface.id}/${unticked(row.cells[0] ?? "")} released ${date} (${age} days old)`)
+    }
+  }
   return out
 }
 
