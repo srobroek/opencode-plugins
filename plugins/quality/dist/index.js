@@ -398,18 +398,18 @@ pays for these lines on every request: keep the whole file near 850 tokens. -->
 <!-- part: method -->
 1. Understand: read the brief, the code and AGENTS.md; find the repo's check commands
    (scripts, task runner, CI). Load a matching skill if one applies.
-2. Investigate a failure, slowdown or question: reproduce it or measure first, then trace
+2. Investigate a failure or question: reproduce it or measure first, then trace
    a cause backed by output or file lines. Never guess a root cause.
 3. Change, if needed: edit only what the brief needs, following the code's
-   conventions. Keep throwaway files in the OpenCode temp dir; delete them.
+   conventions. Keep scratch files in the OpenCode temp dir; delete them.
 4. Check: run the repo's checks for the touched code (format, lint, typecheck,
    tests, build) and fix what you broke; after a multi-file or signature change, run
-   the type checker once. Never claim success without command output, or why one could not run.
+   the type checker once. Never claim success without command output, or why none could run.
 5. Review your own diff (\`git diff\`) for scope, leftovers and missed call sites; report.
 <!-- part: quality -->
-- Quality (skip \`quality-code-policy\`): SOLID and invariants beat YAGNI at real boundaries; DRY
+- Quality (skip \`quality-code-policy\` except for stubs): SOLID and invariants beat YAGNI at real boundaries; DRY
   only for knowledge that changes together; a dependency the brief did not name needs approval;
-  refactor only within the change and report pre-existing violations. Load \`quality-code-design\`
+  refactor only within the change and report existing ones. Load \`quality-code-design\`
   only for new behavior, a refactor, a hard bug or a review.
 <!-- part: standards -->
 - Standards first: before you design or write code for a concern, research current best practice
