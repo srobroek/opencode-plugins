@@ -42,6 +42,8 @@ describe("readPlugin", () => {
       skills: ["one"],
       mcp: false,
       targets: ["claude", "codex"],
+      claudeHooks: false,
+      requires: [],
     })
   })
 
@@ -87,7 +89,7 @@ describe("readPlugin", () => {
 
 describe("render and write", () => {
   test("accepts plugin-table keys and renders the same output without them", () => {
-    plugin("alpha", { "opencode-plugins": { scope: "project", signals: ["x/"], requires: ["beta"] } }, { one: skill("one") })
+    plugin("alpha", { "opencode-plugins": { scope: "project", signals: ["x/"] } }, { one: skill("one") })
     plugin("beta", { "opencode-plugins": { scope: "global" } }, { two: skill("two") })
     const withKeys = render(root, readPlugins(root))
     plugin("alpha", {}, { one: skill("one") })
@@ -161,5 +163,90 @@ describe("render and write", () => {
     write(root, outputs)
     expect(drift(root, render(root, readPlugins(root)))).toEqual({ changed: [], extra: [] })
     expect(existsSync(path.join(dir, ".codex-plugin"))).toBe(false)
+  })
+})
+
+const openCodeAgent = (mode: string, tools: string[]) =>
+  `---\ndescription: "An agent."\nmode: ${mode}\nsteps: 40\npermissions:\n  - action: "*"\n    resource: "*"\n    effect: deny\n${tools
+    .map((tool) => `  - action: ${tool}\n    resource: "*"\n    effect: allow\n`)
+    .join("")}---\n\nPrompt.\n`
+
+function agents(dir: string, files: Record<string, string>) {
+  mkdirSync(path.join(dir, "agents"), { recursive: true })
+  for (const [id, text] of Object.entries(files)) writeFileSync(path.join(dir, "agents", `${id}.md`), text)
+}
+
+describe("Claude Code components", () => {
+  test("translates every non-primary agent and lists exactly those files in the manifest", () => {
+    const dir = plugin("alpha", {}, { one: skill("one") })
+    agents(dir, { lead: openCodeAgent("primary", ["read"]), reader: openCodeAgent("subagent", ["read", "grep"]) })
+    write(root, render(root, readPlugins(root)))
+    expect(read("plugins/alpha/.claude-plugin/plugin.json")).toMatchObject({ agents: ["./claude-agents/reader.md"] })
+    expect(readFileSync(path.join(dir, "claude-agents/reader.md"), "utf8")).toContain("\ntools: Read, Grep\nmaxTurns: 40\n")
+    expect(existsSync(path.join(dir, "claude-agents/lead.md"))).toBe(false)
+    expect(read("plugins/alpha/.codex-plugin/plugin.json")).not.toHaveProperty("agents")
+  })
+
+  test("an empty claudeAgents list still sets agents, so Claude Code skips the OpenCode files", () => {
+    const dir = plugin("alpha", { "opencode-plugins": { claudeAgents: [] } }, { one: skill("one") })
+    agents(dir, { reader: openCodeAgent("subagent", ["read"]) })
+    write(root, render(root, readPlugins(root)))
+    expect(read("plugins/alpha/.claude-plugin/plugin.json")).toMatchObject({ agents: [] })
+  })
+
+  test("a plugin without agents/ gets no agents key", () => {
+    plugin("alpha", {}, { one: skill("one") })
+    write(root, render(root, readPlugins(root)))
+    expect(read("plugins/alpha/.claude-plugin/plugin.json")).not.toHaveProperty("agents")
+  })
+
+  test.each([
+    ["an agent that is not in agents/", { claudeAgents: ["missing"] }, 'names "missing", which is not in agents/'],
+    ["a primary agent", { claudeAgents: ["lead"] }, 'names the primary agent "lead"'],
+  ])("rejects claudeAgents naming %s", (_, config, message) => {
+    const dir = plugin("alpha", { "opencode-plugins": config }, { one: skill("one") })
+    agents(dir, { lead: openCodeAgent("primary", ["read"]) })
+    expect(() => readPlugin(dir)).toThrow(message)
+  })
+
+  test("refuses the same agent id in two Claude-exported plugins", () => {
+    agents(plugin("alpha", {}, { one: skill("one") }), { reader: openCodeAgent("subagent", ["read"]) })
+    agents(plugin("beta", {}, { two: skill("two") }), { reader: openCodeAgent("subagent", ["read"]) })
+    expect(() => render(root, readPlugins(root))).toThrow('agent "reader" is also exported to Claude Code by alpha')
+  })
+
+  test("references hooks/claude-hooks.json and maps requires to dependencies", () => {
+    const dir = plugin("alpha", { "opencode-plugins": { requires: ["beta"] } }, { one: skill("one") })
+    plugin("beta", {}, { two: skill("two") })
+    mkdirSync(path.join(dir, "hooks"))
+    writeFileSync(path.join(dir, "hooks/claude-hooks.json"), "{}")
+    write(root, render(root, readPlugins(root)))
+    expect(read("plugins/alpha/.claude-plugin/plugin.json")).toMatchObject({
+      hooks: "./hooks/claude-hooks.json",
+      dependencies: ["beta"],
+    })
+    expect(read("plugins/alpha/.codex-plugin/plugin.json")).not.toHaveProperty("dependencies")
+  })
+
+  test("refuses a dependency that is not exported to Claude Code", () => {
+    plugin("alpha", { "opencode-plugins": { requires: ["beta"] } }, { one: skill("one") })
+    plugin("beta", { "opencode-plugins": { claude: false } }, { two: skill("two") })
+    expect(() => render(root, readPlugins(root))).toThrow('requires "beta", which is not exported to Claude Code')
+  })
+
+  test("reports a stale translation and removes agents no longer exported", () => {
+    const dir = plugin("alpha", {}, { one: skill("one") })
+    agents(dir, { reader: openCodeAgent("subagent", ["read"]) })
+    write(root, render(root, readPlugins(root)))
+    writeFileSync(path.join(dir, "agents/reader.md"), openCodeAgent("subagent", ["read", "glob"]))
+    expect(drift(root, render(root, readPlugins(root))).changed.map((file) => path.relative(root, file))).toContain(
+      "plugins/alpha/claude-agents/reader.md",
+    )
+
+    writeFileSync(path.join(dir, "package.json"), JSON.stringify({ version: "1.2.3", description: "a", "opencode-plugins": { claudeAgents: [] } }))
+    const outputs = render(root, readPlugins(root))
+    expect(drift(root, outputs).extra.map((file) => path.relative(root, file))).toEqual(["plugins/alpha/claude-agents/reader.md"])
+    write(root, outputs)
+    expect(existsSync(path.join(dir, "claude-agents"))).toBe(false)
   })
 })

@@ -65,13 +65,17 @@ package whose entry point default-exports `Plugin.define({ id, setup })` from
   Reviewer agents include `review-core`; `code-reviewer` and the `pr-reviewer`
   copies also include `review-tests`. Edit the source, never the composed file.
 - `scripts/build-marketplaces.ts` generates `.claude-plugin/marketplace.json`,
-  `.agents/plugins/marketplace.json` and every `plugins/<name>/.claude-plugin/`
-  and `plugins/<name>/.codex-plugin/` manifest. Never hand-edit them; change the
-  plugin's `package.json` (version, description, `"opencode-plugins"` overrides)
-  or its `skills/`, run `bun run marketplaces` and commit the output. Only
-  `skills/` and `.mcp.json` reach Claude Code and Codex. A plugin with `skills/`
-  is exported by default; set `"opencode-plugins": { "claude": false, "codex": false }`
-  when its skills depend on OpenCode tools.
+  `.agents/plugins/marketplace.json`, every `plugins/<name>/.claude-plugin/` and
+  `plugins/<name>/.codex-plugin/` manifest, and every `plugins/<name>/claude-agents/<id>.md`.
+  Never hand-edit them; change the plugin's `package.json` (version, description,
+  `"opencode-plugins"` overrides), its `skills/` or its `agents/`, run `bun run marketplaces`
+  and commit the output. Both harnesses get `skills/` and `.mcp.json`. Claude Code also gets
+  each plugin's `agents/` translated by `scripts/claude-agents.ts` (choose them with
+  `"claudeAgents"`; an agent id may ship in one plugin only; the manifest always lists them,
+  so Claude Code never loads the OpenCode files), `hooks/claude-hooks.json`, and
+  `"requires"` as `dependencies`. A plugin with `skills/` is exported by default; set
+  `"opencode-plugins": { "claude": false, "codex": false }` when its skills depend on
+  OpenCode tools.
 - `scripts/build-plugin-table.ts` generates the plugin table between the markers in
   `plugins/project/skills/project-scaffold/references/plugins.md` from each plugin's
   `"opencode-plugins"` object. A new plugin needs `scope` (`global`, `project` or

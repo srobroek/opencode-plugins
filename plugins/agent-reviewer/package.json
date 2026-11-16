@@ -15,6 +15,7 @@
   ],
   "opencode-plugins": {
     "description": "A security review skill: trace untrusted input to sinks, tag CWE ids and check cross-boundary dispatch.",
+    "claudeAgents": ["adversarial-challenger", "code-reviewer", "security-reviewer"],
     "scope": "global"
   },
   "peerDependencies": {

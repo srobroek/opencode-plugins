@@ -1,18 +1,30 @@
 // Generates the Claude Code and Codex plugin marketplaces from plugins/*.
 //
-// Only harness-neutral content is exported: Agent Skills under skills/ and an
-// optional .mcp.json. OpenCode code (src/, dist/, TUI) does not run in either
-// harness. A plugin is exported when it has skills/ or .mcp.json, unless its
-// package.json overrides that:
+// Both harnesses get the harness-neutral content: Agent Skills under skills/ and an
+// optional .mcp.json. OpenCode code (src/, TUI) does not run in either harness. A
+// plugin is exported when it has skills/ or .mcp.json, unless its package.json
+// overrides that:
 //
-//   "opencode-plugins": { "claude": false, "codex": false, "category": "...", "description": "..." }
+//   "opencode-plugins": { "claude": false, "codex": false, "category": "...", "description": "...",
+//                         "claudeAgents": ["<agent id>", ...] }
 //
-// "scope", "signals" and "requires" feed scripts/build-plugin-table.ts and are ignored here.
+// Claude Code also gets, per exported plugin:
+//   - subagents: each agent in agents/ is translated by scripts/claude-agents.ts into
+//     claude-agents/<id>.md, and the manifest lists exactly those files, because Claude
+//     Code would otherwise load the OpenCode files in agents/ and ignore their
+//     permissions. "claudeAgents" picks the agents (default: every non-primary one); a
+//     plugin with agents/ always gets an explicit list, possibly empty. An agent id may
+//     appear in only one Claude-exported plugin.
+//   - hooks: hooks/claude-hooks.json, when present.
+//   - dependencies: the plugin's "requires" list; each one must be exported to Claude Code.
+//
+// "scope" and "signals" feed scripts/build-plugin-table.ts and are ignored here.
 //
 // Outputs (all generated, never hand-edited):
 //   .claude-plugin/marketplace.json            Claude Code marketplace
 //   .agents/plugins/marketplace.json           Codex marketplace
 //   plugins/<name>/.claude-plugin/plugin.json  Claude Code plugin manifest
+//   plugins/<name>/claude-agents/<id>.md       Claude Code subagents
 //   plugins/<name>/.codex-plugin/plugin.json   Codex plugin manifest
 //
 //   bun scripts/build-marketplaces.ts          write all files
@@ -20,6 +32,8 @@
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import path from "node:path"
+import { translateAgent } from "./claude-agents.ts"
+import { parseFrontmatter } from "./convert-agent.ts"
 
 export const TARGETS = ["claude", "codex"] as const
 export type Target = (typeof TARGETS)[number]
@@ -34,6 +48,12 @@ export type Plugin = {
   skills: string[]
   mcp: boolean
   targets: Target[]
+  /** Agent ids translated for Claude Code; `undefined` when the plugin has no agents/. */
+  claudeAgents?: string[]
+  /** Whether hooks/claude-hooks.json exists. */
+  claudeHooks: boolean
+  /** Plugins this one needs, from "requires". */
+  requires: string[]
 }
 
 const OWNER = { name: "Sjors Robroek", url: "https://github.com/srobroek" }
@@ -46,8 +66,19 @@ const CONFIG_KEY = "opencode-plugins"
 const NAME_PATTERN = /^[a-z0-9][a-z0-9-]*$/
 
 const MANIFEST_DIRS: Record<Target, string> = { claude: ".claude-plugin", codex: ".codex-plugin" }
+const CLAUDE_AGENTS_DIR = "claude-agents"
+const CLAUDE_HOOKS = "hooks/claude-hooks.json"
 
-type Config = { claude?: boolean; codex?: boolean; category?: string; description?: string }
+type Config = {
+  claude?: boolean
+  codex?: boolean
+  category?: string
+  description?: string
+  claudeAgents?: string[]
+  requires?: string[]
+}
+
+const CONFIG_KEYS = ["claude", "codex", "category", "description", "claudeAgents", "scope", "signals", "requires"]
 
 function fail(where: string, message: string): never {
   throw new Error(`${where}: ${message}`)
@@ -58,7 +89,12 @@ function parseConfig(where: string, value: unknown): Config {
   if (typeof value !== "object" || value === null || Array.isArray(value)) fail(where, `"${CONFIG_KEY}" must be an object`)
   const config = value as Record<string, unknown>
   for (const key of Object.keys(config)) {
-    if (!["claude", "codex", "category", "description", "scope", "signals", "requires"].includes(key)) fail(where, `unknown "${CONFIG_KEY}" key "${key}"`)
+    if (!CONFIG_KEYS.includes(key)) fail(where, `unknown "${CONFIG_KEY}" key "${key}"`)
+  }
+  for (const key of ["claudeAgents", "requires"]) {
+    const field = config[key]
+    if (field !== undefined && (!Array.isArray(field) || !field.every((item) => typeof item === "string" && item !== "")))
+      fail(where, `"${CONFIG_KEY}.${key}" must be a list of names`)
   }
   for (const key of TARGETS) {
     if (config[key] !== undefined && typeof config[key] !== "boolean") fail(where, `"${CONFIG_KEY}.${key}" must be a boolean`)
@@ -93,6 +129,34 @@ export function readSkills(dir: string): string[] {
   return names
 }
 
+/** The OpenCode agent ids in agents/ and which of them are primary, or undefined without agents/. */
+export function readAgents(dir: string): { id: string; primary: boolean }[] | undefined {
+  const agentsDir = path.join(dir, "agents")
+  if (!existsSync(agentsDir)) return undefined
+  return readdirSync(agentsDir)
+    .filter((name) => name.endsWith(".md"))
+    .sort()
+    .map((name) => ({
+      id: name.slice(0, -3),
+      primary: parseFrontmatter(readFileSync(path.join(agentsDir, name), "utf8")).data.mode === "primary",
+    }))
+}
+
+function claudeAgentIds(where: string, dir: string, selected: string[] | undefined): string[] | undefined {
+  const agents = readAgents(dir)
+  if (agents === undefined) {
+    if (selected !== undefined) fail(where, `"${CONFIG_KEY}.claudeAgents" is set but there is no agents/`)
+    return undefined
+  }
+  if (selected === undefined) return agents.filter((agent) => !agent.primary).map((agent) => agent.id)
+  for (const id of selected) {
+    const agent = agents.find((candidate) => candidate.id === id)
+    if (agent === undefined) fail(where, `"${CONFIG_KEY}.claudeAgents" names "${id}", which is not in agents/`)
+    if (agent.primary) fail(where, `"${CONFIG_KEY}.claudeAgents" names the primary agent "${id}"`)
+  }
+  return [...new Set(selected)].sort()
+}
+
 /** The marketplace view of one plugin directory, or undefined when it has no package.json. */
 export function readPlugin(dir: string): Plugin | undefined {
   const manifestPath = path.join(dir, "package.json")
@@ -111,7 +175,19 @@ export function readPlugin(dir: string): Plugin | undefined {
   if (typeof version !== "string" || !version) fail(where, "version must be a non-empty string")
   const description = config.description ?? manifest.description
   if (typeof description !== "string" || !description.trim()) fail(where, "description must be a non-empty string")
-  return { name, version, description, category: config.category ?? DEFAULT_CATEGORY, skills, mcp, targets }
+  const claudeAgents = claudeAgentIds(where, dir, config.claudeAgents)
+  return {
+    name,
+    version,
+    description,
+    category: config.category ?? DEFAULT_CATEGORY,
+    skills,
+    mcp,
+    targets,
+    ...(claudeAgents === undefined ? {} : { claudeAgents }),
+    claudeHooks: existsSync(path.join(dir, CLAUDE_HOOKS)),
+    requires: config.requires ?? [],
+  }
 }
 
 export function readPlugins(root: string): Plugin[] {
@@ -189,8 +265,38 @@ function codexManifest(plugin: Plugin) {
   }
 }
 
-/** Every generated file, keyed by absolute path, for the given plugins. */
-export function render(root: string, plugins: Plugin[]): Output[] {
+function claudeManifest(plugin: Plugin) {
+  return {
+    ...metadata(plugin),
+    ...(plugin.claudeAgents === undefined
+      ? {}
+      : { agents: plugin.claudeAgents.map((id) => `./${CLAUDE_AGENTS_DIR}/${id}.md`) }),
+    ...(plugin.claudeHooks ? { hooks: `./${CLAUDE_HOOKS}` } : {}),
+    ...(plugin.requires.length > 0 ? { dependencies: plugin.requires } : {}),
+  }
+}
+
+/** Refuse Claude Code output that would not load as intended: a missing dependency or a duplicate agent id. */
+function checkClaude(plugins: readonly Plugin[]): void {
+  const exported = plugins.filter((plugin) => plugin.targets.includes("claude"))
+  const names = new Set(exported.map((plugin) => plugin.name))
+  const owners = new Map<string, string>()
+  for (const plugin of exported) {
+    const where = `plugins/${plugin.name}/package.json`
+    for (const dependency of plugin.requires)
+      if (!names.has(dependency)) fail(where, `requires "${dependency}", which is not exported to Claude Code`)
+    for (const id of plugin.claudeAgents ?? []) {
+      const owner = owners.get(id)
+      if (owner !== undefined)
+        fail(where, `agent "${id}" is also exported to Claude Code by ${owner}; set "${CONFIG_KEY}.claudeAgents" in one of them`)
+      owners.set(id, plugin.name)
+    }
+  }
+}
+
+/** Every generated file, keyed by absolute path, for the given plugins. Translation warnings go to `warn`. */
+export function render(root: string, plugins: Plugin[], warn: (message: string) => void = () => {}): Output[] {
+  checkClaude(plugins)
   const forTarget = (target: Target) => plugins.filter((plugin) => plugin.targets.includes(target))
   const outputs: Output[] = [
     { file: path.join(root, ".claude-plugin", "marketplace.json"), contents: json(claudeMarketplace(forTarget("claude"))) },
@@ -199,7 +305,15 @@ export function render(root: string, plugins: Plugin[]): Output[] {
   for (const plugin of plugins) {
     const dir = path.join(root, "plugins", plugin.name)
     if (plugin.targets.includes("claude")) {
-      outputs.push({ file: path.join(dir, MANIFEST_DIRS.claude, "plugin.json"), contents: json(metadata(plugin)) })
+      outputs.push({ file: path.join(dir, MANIFEST_DIRS.claude, "plugin.json"), contents: json(claudeManifest(plugin)) })
+      for (const id of plugin.claudeAgents ?? []) {
+        const source = path.join(dir, "agents", `${id}.md`)
+        const agent = translateAgent(id, readFileSync(source, "utf8"), `plugins/${plugin.name}/agents/${id}.md`)
+        const reasons = Map.groupBy(agent.dropped, (drop) => drop.reason)
+        for (const [reason, drops] of reasons)
+          warn(`${plugin.name}/${id}: ${reason}: ${drops.map((drop) => drop.rule).join(", ")}`)
+        outputs.push({ file: path.join(dir, CLAUDE_AGENTS_DIR, `${id}.md`), contents: agent.contents })
+      }
     }
     if (plugin.targets.includes("codex")) {
       outputs.push({ file: path.join(dir, MANIFEST_DIRS.codex, "plugin.json"), contents: json(codexManifest(plugin)) })
@@ -208,12 +322,17 @@ export function render(root: string, plugins: Plugin[]): Output[] {
   return outputs
 }
 
-/** Plugin manifests on disk. Every one of them is generated, so any not in a fresh render is stale. */
+/** Plugin manifests and Claude Code agents on disk. Every one of them is generated, so any not in a fresh render is stale. */
 export function existingManifests(root: string): string[] {
   const pluginsDir = path.join(root, "plugins")
   return readdirSync(pluginsDir, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
-    .flatMap((entry) => TARGETS.map((target) => path.join(pluginsDir, entry.name, MANIFEST_DIRS[target], "plugin.json")))
+    .flatMap((entry) => {
+      const dir = path.join(pluginsDir, entry.name)
+      const agentsDir = path.join(dir, CLAUDE_AGENTS_DIR)
+      const agents = existsSync(agentsDir) ? readdirSync(agentsDir).map((name) => path.join(agentsDir, name)) : []
+      return [...TARGETS.map((target) => path.join(dir, MANIFEST_DIRS[target], "plugin.json")), ...agents]
+    })
     .filter(existsSync)
 }
 
@@ -245,7 +364,8 @@ export function write(root: string, outputs: readonly Output[]): void {
 function main(check: boolean) {
   const root = path.resolve(import.meta.dir, "..")
   const plugins = readPlugins(root)
-  const outputs = render(root, plugins)
+  const warnings: string[] = []
+  const outputs = render(root, plugins, (message) => warnings.push(message))
   if (check) {
     const { changed, extra } = drift(root, outputs)
     const stale = [...changed, ...extra]
@@ -260,6 +380,7 @@ function main(check: boolean) {
   for (const plugin of plugins) {
     console.log(`${plugin.name}: ${plugin.targets.length > 0 ? plugin.targets.join(", ") : "skipped"}`)
   }
+  for (const warning of warnings) console.warn(`warning: ${warning}`)
 }
 
 if (import.meta.main) main(process.argv.includes("--check"))
