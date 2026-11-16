@@ -48,7 +48,11 @@ export const SETUP_DESCRIPTION =
 export const START_INPUT = {
   type: "object",
   properties: {
-    spec: { type: "string", pattern: "^[0-9]{3}-[a-z0-9-]+$", description: "NNN-slug spec identity" },
+    spec: {
+      type: "string",
+      pattern: "^[0-9]{3}-[a-z0-9-]+$",
+      description: "NNN-slug spec identity; optional on resume when root is given",
+    },
     workspace: { type: "string", description: "Repository root with .beads; defaults to the session directory" },
     profile: { type: "string", enum: [...PROFILES], description: "default speckit-feature" },
     root: { type: "string", description: "Existing run root; required when several runs exist" },
@@ -56,7 +60,6 @@ export const START_INPUT = {
     decision: { type: "string", description: "The user's decision, kept in history" },
     migrate: { type: "boolean", description: "The user's separate consent to migrate a gated run" },
   },
-  required: ["spec"],
   additionalProperties: false,
 } as const
 
@@ -111,8 +114,12 @@ export async function executeSetup(
 /** Validate `speckit_start` input, or return why it is unusable. */
 export function readStartParams(input: unknown, directory: string): RuntimeOptions | string {
   const value = record(input)
-  if (typeof value.spec !== "string" || value.spec === "") return "spec is required"
-  const options: RuntimeOptions = { spec: value.spec, workspace: directory }
+  if (value.spec === undefined && value.root === undefined) return "spec or root is required"
+  const options: RuntimeOptions = { workspace: directory }
+  if (value.spec !== undefined) {
+    if (typeof value.spec !== "string" || value.spec === "") return "spec must be a non-empty string"
+    options.spec = value.spec
+  }
   if (value.workspace !== undefined) {
     if (typeof value.workspace !== "string" || value.workspace === "") return "workspace must be a non-empty string"
     options.workspace = within(directory, value.workspace)

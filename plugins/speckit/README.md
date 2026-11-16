@@ -77,7 +77,8 @@ it back, and reuses it on resume.
 The whole start holds the beads store's embedded-write lock, so concurrent starts for
 a spec cannot pour duplicate runs. The lock is the beads plugin's implementation,
 bundled into this package; both copies take turns on the same lock file. Pass `root`
-when the spec has several runs. Clarification, analysis, reviews, verification, tests
+when the spec has several runs, or alone to resume a run: the tool reads the spec id
+from the root. Clarification, analysis, reviews, verification, tests
 and consequential safety confirmations stay required whatever the choice.
 
 `speckit_commit` commits SpecKit artifacts. It stages only paths under `specs/` and
@@ -123,8 +124,11 @@ text in the tool result instead. The two speckit subagents do not get it.
 calls `speckit_start` and asks the routine-approval question; then follows the poured
 molecule with the upstream skills (`speckit-specify`, `speckit-clarify`, `speckit-plan`,
 `speckit-tasks` as child beads of the implement step, `speckit-analyze`, plus checklist,
-critique and security review where the profile has them). At the implement step it
-stops and hands the task beads to `build` (or delivery's implementers).
+critique and security review where the profile has them). It stops at the first step
+outside its boundary (the implement step, later docs, checks and the final commit) and
+hands those steps to `build` by id (or the task beads to delivery's implementers). It
+has three entry paths: a new spec, a resume of an existing spec id or run root (no new
+number), and a verify-return that routes verification to `speckit-verify`.
 
 It asks through the `question` tool, which parley takes over when its TUI is attached,
 and through `tools.parley_ask` for rounds of several questions.

@@ -1659,6 +1659,14 @@ function routineCheckpoints(root, spec, graph, required, refusal) {
   }
   return checkpoints;
 }
+async function specOfRoot(id, command) {
+  if (!id)
+    throw new Error("Name the spec or an existing run root");
+  const root = issueList(await command(["show", id]))[0];
+  if (!root || !isRunRoot(root) || !root.spec_id)
+    throw new Error(`${id} is not a SpecKit run root with a spec_id`);
+  return root.spec_id;
+}
 async function migrateRoutine(root, options, command) {
   const graph = await moleculeGraph(root, command);
   const { children, edges } = graph;
@@ -1703,7 +1711,8 @@ async function migrateRoutine(root, options, command) {
   if (resolutions.some((row) => after.find((issue) => issue.id === row.gate)?.status !== "closed" || after.find((issue) => issue.id === row.step)?.status !== "closed"))
     throw new Error("Routine migration readback failed; do not record approvals as declined");
 }
-async function startSpec(options, command) {
+async function startSpec(input, command) {
+  const options = { ...input, spec: input.spec ?? await specOfRoot(input.root, command) };
   if (!/^[0-9]{3}-[a-z0-9-]+$/.test(options.spec))
     throw new Error("Spec must be NNN-slug");
   const profile = options.profile ?? "speckit-feature";
@@ -2483,7 +2492,7 @@ async function runSpecStart(options, signal, commandMs = COMMAND_MS, module = BE
     });
     return promise;
   };
-  const owner = `speckit-start/${options.spec}/${randomUUID()}`;
+  const owner = `speckit-start/${options.spec ?? options.root}/${randomUUID()}`;
   const held = await module.withEmbeddedWriteLock(cwd, owner, () => startSpec(options, command), env, undefined, signal);
   if (held.kind === "failed")
     throw new IncompleteStart(`${held.reason} No workflow-start command ran.`, {
@@ -2524,7 +2533,11 @@ var SETUP_DESCRIPTION = `Resumable SpecKit bootstrap in the session's workspace;
 var START_INPUT = {
   type: "object",
   properties: {
-    spec: { type: "string", pattern: "^[0-9]{3}-[a-z0-9-]+$", description: "NNN-slug spec identity" },
+    spec: {
+      type: "string",
+      pattern: "^[0-9]{3}-[a-z0-9-]+$",
+      description: "NNN-slug spec identity; optional on resume when root is given"
+    },
     workspace: { type: "string", description: "Repository root with .beads; defaults to the session directory" },
     profile: { type: "string", enum: [...PROFILES], description: "default speckit-feature" },
     root: { type: "string", description: "Existing run root; required when several runs exist" },
@@ -2532,7 +2545,6 @@ var START_INPUT = {
     decision: { type: "string", description: "The user's decision, kept in history" },
     migrate: { type: "boolean", description: "The user's separate consent to migrate a gated run" }
   },
-  required: ["spec"],
   additionalProperties: false
 };
 var START_DESCRIPTION = `Start or resume a spec workflow, with an explicit routine approval choice from the user before pouring.
@@ -2576,9 +2588,14 @@ async function executeSetup(input, directory, integration = DEFAULT_INTEGRATION,
 }
 function readStartParams(input, directory) {
   const value = record(input);
-  if (typeof value.spec !== "string" || value.spec === "")
-    return "spec is required";
-  const options = { spec: value.spec, workspace: directory };
+  if (value.spec === undefined && value.root === undefined)
+    return "spec or root is required";
+  const options = { workspace: directory };
+  if (value.spec !== undefined) {
+    if (typeof value.spec !== "string" || value.spec === "")
+      return "spec must be a non-empty string";
+    options.spec = value.spec;
+  }
   if (value.workspace !== undefined) {
     if (typeof value.workspace !== "string" || value.workspace === "")
       return "workspace must be a non-empty string";

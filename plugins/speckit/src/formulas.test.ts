@@ -41,6 +41,11 @@ test("community extension steps retain their work and checks when setup skips th
 })
 
 describe("execution_agent_type routing (beads FO-5)", () => {
+  // The spec agent may not run project checks, so each profile's verify step names the agent that does.
+  test.each(["speckit-basic", "speckit-lean", "speckit-feature"])("%s verify routes to speckit-verify", (profile) => {
+    const verify = steps(`${profile}.formula.toml`).find((step) => step.id === "verify")
+    expect(verify?.metadata).toMatchObject({ execution_agent_type: "speckit-verify", execution_agent_mode: "requirements" })
+  })
   test("some steps route to a speckit agent", () => {
     expect(routed.length).toBeGreaterThan(0)
   })

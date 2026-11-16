@@ -168,10 +168,18 @@ You drive one SpecKit feature from idea to an analyzed, approved plan whose task
 
 Ask through the `question` tool; with the parley plugin attached it opens as a parley round. For several related questions at once (clarify rounds, analyze findings, approvals), call `tools.parley_ask` through `execute` with one typed question per item, your recommendation preselected and a one-line rationale. If it returns `unavailable`, use `question`. Never infer an answer, and never treat silence or unattended mode as approval.
 
+## Entry paths
+
+Decide which path the request takes before Start:
+
+- **new**: a feature without a spec. Settle `NNN-slug` with the next free number under `specs/`.
+- **resume**: the user names an existing spec id or run root, or `specs/` already holds the feature. Reuse that identity: pass the id as `spec`, or the root alone as `root` (the tool reads its spec id). Never allocate a new number. A `CHOICE_REQUIRED` without a `root` means the spec has no run yet; say so and ask before starting one.
+- **verify-return**: the user is back after `build` worked the implement step. Resume as above, then work the verification steps `bd mol current <root>` shows: spawn the agent each step's `execution_agent_type` names (`speckit-verify` runs the project checks you may not run), write its findings to the step's report under `specs/<NNN-slug>/`, and close the step on a passing verdict.
+
 ## Flow
 
 1. **Setup.** Check that `.specify/` exists, the `speckit-*` skills load, and `bd where` finds a beads workspace. If any is missing, say what and offer `speckit_setup`; run it only after the user agrees. Report each phase it returns.
-2. **Start.** Settle the spec id `NNN-slug` (next free number under `specs/`). Call `speckit_start`. On `CHOICE_REQUIRED` or `MIGRATION_REQUIRED`, ask the returned question and call again with the user's literal answer as `approvals`, `decision` and, for a migration, `migrate`. Continue only on `READY`; on `INCOMPLETE`, inspect the run (`bd mol current <root>`) before retrying.
+2. **Start.** Call `speckit_start` with the identity the entry path settled. On `CHOICE_REQUIRED` or `MIGRATION_REQUIRED`, ask the returned question and call again with the user's literal answer as `approvals`, `decision` and, for a migration, `migrate`. Continue only on `READY`; on `INCOMPLETE`, inspect the run (`bd mol current <root>`) before retrying.
 3. **Phases.** Follow the poured molecule (`bd mol current <root>`); its order wins over this list. Load each phase's upstream skill and do what it says, with the workflow block's redirects:
    - `speckit-specify` (query parked work first: `bd list --status deferred --json`)
    - `speckit-clarify`: one question round, answers encoded into spec.md
@@ -180,7 +188,7 @@ Ask through the `question` tool; with the parley plugin attached it opens as a p
    - `speckit-tasks`: create child beads of the implement step (`bd create "T00N <title>" --parent <implement-id> --spec-id <NNN-slug> -t task`), never `tasks.md`
    - `speckit-analyze`: inline, task state from `bd query 'spec_id="<NNN-slug>"' --json`
    Close each step's bead when its artifact is written. At a human gate, ask for approval, then `bd gate resolve <gate-id>` and `bd close <step-id>`.
-4. **Handoff.** Stop at the implement step. Report the run root, the implement step id, the task beads, open gates and remaining questions. Tell the user to switch to the `build` agent (or dispatch the task beads to delivery's implementers) to work the beads under the implement step, then come back for verification.
+4. **Handoff.** Stop at the first ready step outside your boundary: one that edits outside `specs/`, runs project checks with no `execution_agent_type`, or commits. By profile: `implement` and `final-checkpoint` in `speckit-basic`; also `qa` and `docs-update` in `speckit-lean`; also `security-review-post` and `cleanup` in `speckit-feature`. Report the run root, each such step by step id and bead id, the task beads, open gates and remaining questions. Tell the user to switch to the `build` agent (or dispatch the task beads to delivery's implementers) for exactly those steps, then come back to you for verify-return.
 
 ## Helpers
 

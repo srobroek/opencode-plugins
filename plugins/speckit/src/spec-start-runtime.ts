@@ -176,7 +176,7 @@ export async function runSpecStart(
   // One hold of the store's write lock spans lookup, pour, and metadata writes, so a
   // concurrent start for this workspace waits and then finds the root this one created.
   // The wait uses the Beads default bound; the signal abandons it.
-  const owner = `speckit-start/${options.spec}/${randomUUID()}`
+  const owner = `speckit-start/${options.spec ?? options.root}/${randomUUID()}`
   const held = await module.withEmbeddedWriteLock(cwd, owner, () => startSpec(options, command), env, undefined, signal)
   if (held.kind === "failed")
     throw new IncompleteStart(`${held.reason} No workflow-start command ran.`, {

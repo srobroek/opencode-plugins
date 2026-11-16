@@ -167,6 +167,29 @@ test("invalid spec input is rejected before ledger access", async () => {
   expect(startSpec({ ...options, spec: '001-example" or true' }, command)).rejects.toThrow("NNN-slug")
 })
 
+describe("resume by run root alone", () => {
+  test("reads the spec identity from the root and reuses the run without pouring", async () => {
+    const root = runRoot({ spec_dir: `specs/${spec}`, human_approvals: "no", autonomous: "yes" })
+    const command: Command = async (args) => {
+      if (args[0] === "query" || args[0] === "show") return [root]
+      throw new Error(`unexpected mutation: ${args.join(" ")}`)
+    }
+    expect(await startSpec({ workspace: "/unused", root: "run" }, command)).toMatchObject({
+      status: "READY",
+      root: "run",
+      humanApprovals: "no",
+    })
+  })
+
+  test("refuses a root that is not a run root of a spec", async () => {
+    const command: Command = async (args) => {
+      if (args[0] === "show") return [{ id: "task", title: "T001 x", issue_type: "task" }]
+      throw new Error(`unexpected command: ${args.join(" ")}`)
+    }
+    expect(startSpec({ workspace: "/unused", root: "task" }, command)).rejects.toThrow("not a SpecKit run root")
+  })
+})
+
 describe("legacy root discovery", () => {
   test("finds a root by spec identity when spec_dir was never recorded, and adopts it instead of pouring", async () => {
     const run = gatedRun()

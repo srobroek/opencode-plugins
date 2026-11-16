@@ -47,7 +47,7 @@ permissions:
 
 Verify a SpecKit implementation in the "mode: ..." the spawn prompt names, default requirements. Read task state with `bd query 'spec_id="<NNN-slug>"' --json`; checkboxes and closed issues are not implementation evidence.
 
-- **requirements**: per FR and SC, extract the intent, find its surfaces, verify file/symbol/test/UI evidence; check every implementation of an extended interface, and serialization, counters and UI states as named.
+- **requirements**: per FR and SC, extract the intent, find its surfaces, verify file/symbol/test/UI evidence; check every implementation of an extended interface, and serialization, counters and UI states as named. Run the project's applicable checks (tests, lint, typecheck) and cite their output.
 - **tasks**: phantom completions in every completed task in scope: file exists → change evidence → content → usage → semantics. Flag weak evidence.
 - **review**: diff from the merge base (`git diff $(git merge-base HEAD <default-branch>)...HEAD`) for correctness, regressions, error handling, tests for changed behavior, and fit with spec.md, plan.md and the task beads; flag scope outside them. Rate each finding blocking / should-fix / nit for `mol-speckit-fix-findings`.
 
