@@ -176,6 +176,12 @@ type Answers = {
   fetch?: CliResult[]
   /** What the approval read (`gh pr view --json author,reviews,comments` or the GitLab approvals API) answers. */
   approval?: CliResult
+  /** What the branch rules read (`gh api repos/<o>/<r>/rules/branches/<base>`) answers; no rules by default. */
+  rules?: CliResult
+  /** What each merge queue state read (`gh api graphql` query) answers, in call order; the last repeats. */
+  queueStates?: CliResult[]
+  /** What the `enqueuePullRequest` mutation answers. */
+  enqueue?: CliResult
   /** What the checks read (`gh pr checks` or the GitLab merge request API) answers. */
   checks?: CliResult
 }
@@ -191,6 +197,7 @@ function runner(answers: Answers, canonical: string): { run: CliRunner; calls: C
   const views = [...(answers.prView ?? [])]
   const present = [...(answers.present ?? [])]
   const fetches = [...(answers.fetch ?? [])]
+  const states = [...(answers.queueStates ?? [])]
   const calls: Call[] = []
   const run: CliRunner = (argv, options) => {
     calls.push({ argv: [...argv], cwd: options.cwd, timeoutMs: options.timeoutMs, env: options.env })
@@ -210,6 +217,13 @@ function runner(answers: Answers, canonical: string): { run: CliRunner; calls: C
     if (argv[1] === "pr" && argv[2] === "view" && argv.includes("author,reviews,comments"))
       return answers.approval ?? completed("{}")
     if (argv[1] === "pr" && argv[2] === "checks") return answers.checks ?? completed("[]")
+    if (argv[1] === "api" && argv.some((part) => part.includes("/rules/branches/")))
+      return answers.rules ?? completed("[]")
+    if (argv[1] === "api" && argv[2] === "graphql") {
+      if (argv.some((part) => part.startsWith("query=mutation"))) return answers.enqueue ?? completed("{}")
+      const state = states.length > 1 ? states.shift() : states[0]
+      return state ?? completed("{}")
+    }
     if (argv[1] === "api" && argv.some((part) => part.endsWith("/approvals")))
       return answers.approval ?? completed("{}")
     if (argv[1] === "api" && argv.some((part) => /\/merge_requests\/\d+$/.test(part)))
@@ -226,7 +240,12 @@ function runner(answers: Answers, canonical: string): { run: CliRunner; calls: C
   }
   return { run, calls }
 }
-async function land(answers: Answers, params: Partial<LandParams> = {}, env: NodeJS.ProcessEnv = {}) {
+async function land(
+  answers: Answers,
+  params: Partial<LandParams> = {},
+  env: NodeJS.ProcessEnv = {},
+  extra: Partial<LandDeps> = {},
+) {
   const { canonical, receipts } = repository()
   mkdirSync(join(canonical, ".beads"))
   const { run, calls } = runner(answers, canonical)
@@ -236,7 +255,7 @@ async function land(answers: Answers, params: Partial<LandParams> = {}, env: Nod
   const worktreePath = wanted === undefined ? undefined : linkedWorktree(canonical, wanted.split("/").pop() ?? "wt")
   const outcome = await landPullRequest(
     { pr: 470, ...params, ...(worktreePath === undefined ? {} : { worktree: worktreePath }) },
-    { run, cwd: canonical, now: () => NOW, receiptsDirectory: receipts, env },
+    { run, cwd: canonical, now: () => NOW, receiptsDirectory: receipts, env, ...extra },
   )
   return { outcome, calls, receipts, canonical, worktreePath, files: () => readdirSync(receipts) }
 }
@@ -2726,6 +2745,186 @@ describe("delivery_land approval and checks preconditions", () => {
     ])
     expect(calls.some((call) => merged(call.argv))).toBe(false)
     expect(readdirSync(receipts)).toEqual([])
+  })
+})
+
+describe("delivery_land through a GitHub merge queue", () => {
+  const queueRules = (method = "SQUASH"): CliResult =>
+    completed(JSON.stringify([{ type: "pull_request", parameters: {} }, { type: "merge_queue", parameters: { merge_method: method } }]))
+  const snapshot = (
+    state: "OPEN" | "MERGED" | "CLOSED",
+    entry: { state: string; position: number; oid?: string } | null,
+    head = HEAD_OID,
+  ): CliResult =>
+    completed(
+      JSON.stringify({
+        data: {
+          repository: {
+            pullRequest: {
+              id: "PR_node_470",
+              state,
+              headRefOid: head,
+              mergeQueueEntry: entry === null ? null : { state: entry.state, position: entry.position, headCommit: { oid: entry.oid ?? head } },
+            },
+          },
+        },
+      }),
+    )
+  const queued = { state: "QUEUED", position: 1 }
+  const enqueued = completed(JSON.stringify({ data: { enqueuePullRequest: { mergeQueueEntry: { state: "QUEUED", position: 1, headCommit: { oid: HEAD_OID } } } } }))
+  const isGraphql = (argv: string[]): boolean => argv[1] === "api" && argv[2] === "graphql"
+  const isEnqueue = (argv: string[]): boolean => isGraphql(argv) && argv.some((part) => part.startsWith("query=mutation"))
+  const merges = (calls: Call[]): Call[] => calls.filter((call) => call.argv[1] === "pr" && call.argv[2] === "merge")
+  const slept: number[] = []
+  const sleep = async (ms: number): Promise<void> => {
+    slept.push(ms)
+  }
+  const inQueue = (answers: Answers, params: Partial<LandParams> = {}) => {
+    slept.length = 0
+    return land({ rules: queueRules(), enqueue: enqueued, ...answers }, { ...REVIEWED, ...params }, {}, { sleep })
+  }
+
+  test("a base branch without a queue rule merges directly and never touches the queue", async () => {
+    const { outcome, calls } = await land(
+      { prView: [completed(githubPr()), completed(mergedGithubPr())] },
+      REVIEWED,
+    )
+    expect(outcome.ok).toBe(true)
+    expect(merges(calls)).toHaveLength(1)
+    expect(calls.some((call) => isGraphql(call.argv))).toBe(false)
+  })
+
+  test("a queue rule enqueues the reviewed head, waits, and writes the receipt without a direct merge", async () => {
+    const { outcome, calls, files } = await inQueue({
+      prView: [completed(githubPr()), completed(mergedGithubPr())],
+      queueStates: [snapshot("OPEN", null), snapshot("OPEN", queued), snapshot("MERGED", null)],
+    })
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) throw new Error(outcome.reason)
+    const enqueues = calls.filter((call) => isEnqueue(call.argv))
+    expect(enqueues).toHaveLength(1)
+    expect(enqueues[0]?.argv).toContain(`head=${HEAD_OID}`)
+    expect(enqueues[0]?.argv).toContain("id=PR_node_470")
+    expect(enqueues[0]?.argv.join(" ")).toContain("expectedHeadOid: $head")
+    expect(merges(calls)).toEqual([])
+    expect(calls.some((call) => call.argv.includes("--auto"))).toBe(false)
+    expect(slept).toEqual([5_000])
+    expect(files()).toHaveLength(1)
+    expect(outcome.receipt.pr.headRefOid).toBe(HEAD_OID)
+    expect(outcome.receipt.pr.mergeCommitOid).toBe(MERGE_OID)
+    expect(outcome.receipt.proof.evidence).toMatchObject({
+      mergeMethod: "squash",
+      queue: { rule: "merge_queue", method: "squash" },
+    })
+  })
+
+  test("the queue's merge method decides the proof: a squash queue refuses a two-parent commit", async () => {
+    const { outcome, files } = await inQueue({
+      prView: [completed(githubPr()), completed(mergedGithubPr())],
+      queueStates: [snapshot("OPEN", null), snapshot("MERGED", null)],
+      parents: `${BASE_OID} ${HEAD_OID}`,
+    })
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) throw new Error("expected a refusal")
+    expect(outcome.reason).toContain('merge_method "squash": observed 2 parents')
+    expect(outcome.mergeIssued).toBe(true)
+    expect(files()).toEqual([])
+  })
+
+  test("a merged pull request whose head is not the enqueued head writes no receipt", async () => {
+    const { outcome, files } = await inQueue({
+      prView: [completed(githubPr()), completed(mergedGithubPr({ headRefOid: BASE_OID }))],
+      queueStates: [snapshot("OPEN", null), snapshot("MERGED", null)],
+    })
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) throw new Error("expected a refusal")
+    expect(outcome.reason).toContain("the head moved after the merge was bound to it")
+    expect(files()).toEqual([])
+  })
+
+  test("an entry the queue removed is a refusal, and nothing else merges the pull request", async () => {
+    const { outcome, calls, files } = await inQueue({
+      prView: [completed(githubPr())],
+      queueStates: [snapshot("OPEN", null), snapshot("OPEN", queued), snapshot("OPEN", null)],
+    })
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) throw new Error("expected a refusal")
+    expect(outcome.reason).toContain("the merge queue removed it")
+    expect(outcome.queued).toBeUndefined()
+    expect(merges(calls)).toEqual([])
+    expect(files()).toEqual([])
+  })
+
+  test("a head that changed while queued is a refusal", async () => {
+    const { outcome, files } = await inQueue({
+      prView: [completed(githubPr())],
+      queueStates: [snapshot("OPEN", null), snapshot("OPEN", queued), snapshot("OPEN", null, BASE_OID)],
+    })
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) throw new Error("expected a refusal")
+    expect(outcome.reason).toContain(`observed ${BASE_OID}, expected ${HEAD_OID}`)
+    expect(files()).toEqual([])
+  })
+
+  test("an exhausted budget is a pending result, and the next call waits on the entry without enqueuing again", async () => {
+    const first = await inQueue(
+      { prView: [completed(githubPr())], queueStates: [snapshot("OPEN", null), snapshot("OPEN", queued)] },
+      { queueWaitSeconds: 0 },
+    )
+    expect(first.outcome.ok).toBe(false)
+    if (first.outcome.ok) throw new Error("expected a pending result")
+    expect(first.outcome.queued).toBe(true)
+    expect(first.outcome.mergeIssued).toBeUndefined()
+    expect(first.outcome.reason).toContain("Call delivery_land again")
+    expect(first.calls.filter((call) => isEnqueue(call.argv))).toHaveLength(1)
+    expect(first.files()).toEqual([])
+
+    const second = await inQueue({
+      prView: [completed(githubPr()), completed(mergedGithubPr())],
+      queueStates: [snapshot("OPEN", queued), snapshot("MERGED", null)],
+    })
+    expect(second.outcome.ok).toBe(true)
+    expect(second.calls.filter((call) => isEnqueue(call.argv))).toEqual([])
+    expect(merges(second.calls)).toEqual([])
+    expect(second.files()).toHaveLength(1)
+  })
+
+  test("an already MERGED pull request is proved without reading rules or the queue", async () => {
+    const { outcome, calls } = await inQueue({ prView: [completed(mergedGithubPr())] })
+    expect(outcome.ok).toBe(true)
+    expect(calls.some((call) => isGraphql(call.argv) || call.argv.some((part) => part.includes("/rules/")))).toBe(false)
+    expect(merges(calls)).toEqual([])
+  })
+
+  test("a rules read that fails refuses instead of assuming a direct merge", async () => {
+    const { outcome, calls } = await inQueue({
+      prView: [completed(githubPr())],
+      rules: completed("", 1, "HTTP 403"),
+    })
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) throw new Error("expected a refusal")
+    expect(outcome.reason).toContain("whether the branch requires a merge queue")
+    expect(merges(calls)).toEqual([])
+  })
+
+  test("a merge_method that differs from the queue's refuses before enqueuing", async () => {
+    const { outcome, calls } = await inQueue({ prView: [completed(githubPr())] }, { merge_method: "rebase" })
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) throw new Error("expected a refusal")
+    expect(outcome.reason).toContain("lands with squash")
+    expect(calls.some((call) => isGraphql(call.argv))).toBe(false)
+  })
+
+  test("an enqueue GitHub rejects, such as a moved head, refuses", async () => {
+    const { outcome, files } = await inQueue({
+      prView: [completed(githubPr())],
+      queueStates: [snapshot("OPEN", null)],
+      enqueue: completed(JSON.stringify({ errors: [{ message: "Head sha didn't match the expected head" }] })),
+    })
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) throw new Error("expected a refusal")
+    expect(outcome.reason).toContain("Head sha didn't match")
+    expect(files()).toEqual([])
   })
 })
 

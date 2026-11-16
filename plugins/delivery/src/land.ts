@@ -118,6 +118,16 @@ import {
   validateReceipt,
   writeReceipt,
 } from "./landing-receipt.ts"
+import {
+  awaitQueue,
+  decideQueue,
+  enqueueArgv,
+  enqueuedEntry,
+  graphqlErrors,
+  queueBudgetMs,
+  readQueueRule,
+  readSnapshot,
+} from "./merge-queue.ts"
 
 /** Wall-clock ceiling for the local Git reads this file issues itself. */
 const GIT_TIMEOUT_MS = 5_000
@@ -183,6 +193,11 @@ export type LandParams = {
   requireApproval?: boolean
   /** Before merging, require every check on the PR head to have passed. */
   requireGreenChecks?: boolean
+  /**
+   * How long to wait for a GitHub merge queue to merge the enqueued head, in seconds
+   * (0 to 3600, default 600). Ignored when the base branch takes direct merges.
+   */
+  queueWaitSeconds?: number
 }
 
 /** What a landing is about to do, handed to {@link LandDeps.authorize} before any write. */
@@ -229,7 +244,12 @@ export type LandOutcome =
    * later step refused: the forge holds the landing, no receipt exists, and re-running
    * with the same inputs proves the MERGED request without merging it again.
    */
-  | { ok: false; reason: string; text: string; mergeIssued?: true }
+  | { ok: false; reason: string; text: string; mergeIssued?: true; queued?: true }
+  /**
+   * The merge queue still holds the pull request when the wait budget ran out: nothing
+   * is merged yet and nothing is wrong. Calling again with the same inputs waits on the
+   * existing entry (it is not enqueued twice) and writes the receipt once it merges.
+   */
 
 /** One observed pull request, in receipt spelling, from either forge's dialect. */
 type PrObservation = {
@@ -1105,6 +1125,8 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
   const selected = landingMethod(params.merge_method)
   if ("reason" in selected) return refuse(selected.reason)
   const mergeMethod = selected.method
+  const budget = queueBudgetMs(params.queueWaitSeconds)
+  if ("reason" in budget) return refuse(budget.reason)
 
   const number =
     typeof params.pr === "number" ? String(params.pr) : typeof params.pr === "string" ? params.pr.trim() : ""
@@ -1233,6 +1255,25 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
     }
   }
 
+  // A base branch with a merge queue takes no direct merge: `gh pr merge` would enqueue it
+  // by itself, so the rules are read first and an unreadable answer refuses.
+  let queue: { method: MergeMethod } | null = null
+  if (!alreadyMerged && forge === "github") {
+    const path = normalizeRepoPath("github", nameWithOwner)
+    if (path === null) return refuse(`repo: observed ${show(nameWithOwner)}, expected "<owner>/<name>"`)
+    const rules = await readQueueRule(run, path, first.pr.baseRefName, forgeCommandEnv)
+    if ("reason" in rules) return refuse(`${rules.reason}; no merge was issued and no receipt was written`)
+    if (rules.required) {
+      if (params.merge_method !== undefined && params.merge_method !== rules.method) {
+        return refuse(
+          `merge_method: observed ${show(params.merge_method)}, expected ${show(rules.method)} or no value; the merge queue of ${show(first.pr.baseRefName)} lands with ${rules.method}; no merge was issued and no receipt was written`,
+        )
+      }
+      queue = { method: rules.method }
+    }
+  }
+  const landMethod = queue?.method ?? mergeMethod
+
   // Every read above passed; nothing has been written yet.
   const unasked = interrupted("before authorization; nothing was merged or written")
   if (unasked !== null) return unasked
@@ -1240,14 +1281,14 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
     resource: `${nameWithOwner}#${number}`,
     forge,
     head,
-    merge: alreadyMerged ? null : mergeMethod,
+    merge: alreadyMerged ? null : landMethod,
     setupAutoDelete: params.setupAutoDelete === true,
   })
 
   const notes: string[] = []
   let mergeArgv: string[] | null = null
-  let proved = first.pr
-  let rereadArgv: string[] | null = null
+  let proved: PrObservation = first.pr
+  let rereadArgv = null as string[] | null
   let mergePolicy: boolean | "unknown" | null = null
   // A refusal once a landing exists on the forge. No receipt is written for a landing
   // this call could not prove, so cleanup never acts on one; instead the refusal says
@@ -1262,10 +1303,83 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
     const text = `${reason}; no receipt was written. The forge accepted ${mergeArgv.join(" ")}, so the request is merged and must not be merged again: re-run delivery_land with the same pr and expectHeadSha ${head}; it reads the request as MERGED, issues no merge, and writes the receipt once the proof completes`
     return { ok: false, reason: text, text: `delivery_land refused: ${text}`, mergeIssued: true }
   }
+  // The re-read after the forge reports the landing. It must describe the same pull
+  // request, at the same head, on the same base. A merge proves a landing only of what
+  // was read: a re-target or a push between the two reads would otherwise let this
+  // receipt name a head and a base that never merged.
+  const rereadLanded = async (): Promise<LandOutcome | null> => {
+    const second = await readPr(run, forge, cliRepo, number, FORGE_TIMEOUT_MS, forgeCommandEnv)
+    rereadArgv = second.argv
+    if ("reason" in second) return refuseMerged(second.reason)
+    const drift = subjectDrift(second.pr, requested, first.pr, second.argv.join(" "))
+    if (drift !== null) return refuse(`${drift}; no receipt was written`)
+    proved = second.pr
+    return null
+  }
   if (alreadyMerged) {
     notes.push(
       `The pull request was already MERGED when it was read, so no merge argv was issued: ${first.argv.join(" ")} is the proof.`,
     )
+  } else if (queue !== null) {
+    const [owner = "", repoName = ""] = nameWithOwner.split("/")
+    if (!FULL_OID.test(head)) {
+      return refuse(
+        `pr.headRefOid: observed ${show(first.pr.headRefOid)}, expected a 40- or 64-character hex object id to bind the enqueue to; nothing was enqueued`,
+      )
+    }
+    const read = () => readSnapshot(run, owner, repoName, number, forgeCommandEnv)
+    const sleep = (ms: number): Promise<void> => (deps.sleep ?? abortableSleep)(ms, signal)
+    const queueLabel = ["gh", "api", "graphql", "enqueuePullRequest", `expectedHeadOid=${head}`]
+    const current = await read()
+    if ("reason" in current) return refuse(`${current.reason}; nothing was enqueued and no receipt was written`)
+    // An entry for this head already exists, or the request merged since the first read:
+    // wait on it instead of enqueuing again. Anything else about the head refuses here.
+    const standing = decideQueue(current.snapshot, head, 0)
+    if (standing.kind === "refused") return refuse(`${standing.reason}; nothing was enqueued and no receipt was written`)
+    if (standing.kind === "wait" && current.snapshot.entry === null) {
+      const unenqueued = interrupted("before the enqueue; nothing was enqueued and no receipt was written")
+      if (unenqueued !== null) return unenqueued
+      const enqueue = await run(enqueueArgv(current.snapshot.id, head), {
+        cwd,
+        timeoutMs: FORGE_TIMEOUT_MS,
+        env: forgeCommandEnv,
+      })
+      const enqueueFailure = cliFailure(queueLabel, enqueue)
+      if (enqueueFailure !== null) return refuse(`${enqueueFailure}; no receipt was written`)
+      let response: unknown
+      try {
+        response = JSON.parse(enqueue.stdout)
+      } catch {
+        return refuse(`${queueLabel.join(" ")}: observed unparseable output, expected one JSON object`)
+      }
+      const rejected = graphqlErrors(response)
+      if (rejected !== null) return refuse(`${queueLabel.join(" ")}: ${rejected}; no receipt was written`)
+      if (enqueuedEntry(response) === null) {
+        return refuse(
+          `${queueLabel.join(" ")}: observed no mergeQueueEntry in the response, expected the queued entry; no receipt was written`,
+        )
+      }
+    }
+    const waited = await awaitQueue({
+      read,
+      sleep,
+      stopped: () => signal?.aborted === true,
+      expected: head,
+      budgetMs: budget.ms,
+    })
+    if (waited.kind === "refused") {
+      return refuse(`${waited.reason}; no direct merge was attempted and no receipt was written`)
+    }
+    if (waited.kind === "pending") {
+      const reason = `the merge queue holds ${nameWithOwner}#${number} (${waited.detail}) and has not merged it within ${budget.ms / 1000} seconds; nothing else was merged and no receipt was written. Call delivery_land again with the same pr and expectHeadSha ${head}: it waits on the existing queue entry and does not enqueue twice`
+      return { ok: false, reason, text: `delivery_land pending: ${reason}`, queued: true }
+    }
+    mergeArgv = queueLabel
+    notes.push(
+      `The base branch ${first.pr.baseRefName} requires a merge queue, so the reviewed head ${head} was enqueued with enqueuePullRequest(expectedHeadOid) and merged by the queue with ${queue.method}.`,
+    )
+    const reread = await rereadLanded()
+    if (reread !== null) return reread
   } else {
     if (mergeMethod === "merge") {
       mergePolicy = await allowMergeCommit(forge, nameWithOwner, boundForgeRun)
@@ -1310,19 +1424,11 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
       await run(mergeArgv, { cwd, timeoutMs: FORGE_TIMEOUT_MS, env: forgeCommandEnv }),
     )
     if (mergeFailure !== null) return refuse(`${mergeFailure}; no receipt was written`)
-    const second = await readPr(run, forge, cliRepo, number, FORGE_TIMEOUT_MS, forgeCommandEnv)
-    rereadArgv = second.argv
-    if ("reason" in second) return refuseMerged(second.reason)
-    // The re-read must describe the same pull request, at the same head, on the same
-    // base. A merge proves a landing only of what was read: a re-target or a push
-    // between the two reads would otherwise let this receipt name a head and a base
-    // that never merged.
-    const drift = subjectDrift(second.pr, requested, first.pr, second.argv.join(" "))
-    if (drift !== null) return refuse(`${drift}; no receipt was written`)
-    proved = second.pr
+    const reread = await rereadLanded()
+    if (reread !== null) return reread
   }
 
-  const proofMethod = alreadyMerged ? null : mergeMethod
+  const proofMethod = alreadyMerged ? null : landMethod
   const provedOid = proved.mergeCommitOid?.trim().toLowerCase() ?? ""
   let localCommits: LocalCommits | null = null
   if (proved.state.trim().toUpperCase() === "MERGED" && FULL_OID.test(provedOid)) {
@@ -1379,7 +1485,8 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
   const observingArgv = rereadArgv ?? first.argv
   const evidence: Record<string, unknown> = {
     remote,
-    mergeMethod,
+    mergeMethod: landMethod,
+    queue: queue === null ? null : { rule: "merge_queue", method: queue.method },
     mergePolicy,
     // The URL lives here and not in `repo.remote`, which records the configured
     // remote NAME: the name is what a later `git ls-remote` is given, and the URL is
@@ -1399,7 +1506,7 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
     expectHeadSha: expected === "" ? null : expected,
     worktree,
     autoDelete: { observed: observedAutoDelete, requested: params.setupAutoDelete === true },
-    merge: mergeArgv === null ? null : { argv: mergeArgv.join(" "), method: mergeMethod, boundHead: head },
+    merge: mergeArgv === null ? null : { argv: mergeArgv.join(" "), method: landMethod, boundHead: head },
     mergeShape: { parents: proof.parents, rebase: proof.rebase },
     // The commits the shape proof read and the fetches that brought them local; an
     // empty list means they were already present.

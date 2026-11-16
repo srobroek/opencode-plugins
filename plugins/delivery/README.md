@@ -34,7 +34,7 @@ once `git worktree remove` starts, so a removal is never left half done.
 
 Inputs: `pr`, and when needed `merge_method` (`squash` by default, `merge`,
 `rebase`), `repo`, `remote`, `expectHeadSha`, `worktree`, `beadId`,
-`setupAutoDelete`, `requireApproval`, `requireGreenChecks`.
+`setupAutoDelete`, `requireApproval`, `requireGreenChecks`, `queueWaitSeconds`.
 
 - `expectHeadSha` is required whenever the call would merge. The merge is bound to
   that head (`gh pr merge --match-head-commit`, `glab mr merge --sha`), so a push
@@ -63,6 +63,24 @@ Inputs: `pr`, and when needed `merge_method` (`squash` by default, `merge`,
   skipped), with at least one check present. On GitLab the head pipeline must have
   succeeded on the head.
 - A squash uses the PR title as the commit subject.
+- A GitHub base branch with a merge queue (an active `merge_queue` rule, read from
+  `GET /repos/{owner}/{repo}/rules/branches/{branch}`) takes no direct merge. The tool
+  checks approval and checks as above, then enqueues the reviewed head with the
+  `enqueuePullRequest` mutation and `expectedHeadOid`, so GitHub refuses a head that is
+  not `expectHeadSha`. It never runs a direct merge or auto-merge there. It polls the
+  pull request's `mergeQueueEntry` (5 s, doubling to 60 s) for up to `queueWaitSeconds`
+  (default 600, at most 3600).
+  - Merged: the tool re-reads the PR, requires the same head, proves the commit with the
+    queue's own method (`merge_method` must be omitted or match it), and writes the
+    receipt.
+  - Still queued when the wait ends: the result is `ok: false, queued: true`, which is
+    not final. Call again with the same inputs; an entry for that head is waited on and
+    not enqueued twice, and a PR that has merged is proved as usual.
+  - Removed from the queue (failed checks, conflict, closed) or a changed head: refused,
+    with no other merge attempted.
+  - A failed rules read refuses, because a direct merge into a queue branch would
+    enqueue the PR on its own. A branch without a queue rule is merged directly, as
+    before.
 - After the merge the tool reads the PR again and fetches the landed commits by id
   (falling back to the base branch, with three attempts over about 7 seconds). It
   then checks the commit shape for the method:

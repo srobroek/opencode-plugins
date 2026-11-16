@@ -12,6 +12,18 @@
 - **Cause:** `delivery_land` works only in the session repository. It checks `repo` against that repository's remotes and refuses a `worktree` that is not one of its own, because Git must not run in a checkout of another repository.
 - **Fix:** Run `delivery_land` from a session in the PR's repository, and pass that repository's `worktree`. `repo` may name any remote of the session repository.
 
+## Landing a pull request of another repository
+
+- **Symptom:** `worktree: observed "/path" as a checkout of another repository`, because you are landing a PR of a repository other than the session's.
+- **Cause:** `delivery_land` reads and fetches with Git in the session repository only and refuses a `repo` or `worktree` that is not its own. This is deliberate. The tool does not defend against an attacker who can already write to your own checkouts as your user, and it does not run Git in checkouts it has not verified.
+- **Fix:** Run the landing from a session in that repository: move the session there with `tools.opencode.session_move`, or hand the landing to a subagent whose `workdir` is that repository.
+
+## `delivery_land` returns `queued: true` or reports a removed queue entry
+
+- **Symptom:** `ok: false, queued: true` with "the merge queue holds ... has not merged it", or a refusal saying the merge queue removed the entry.
+- **Cause:** The base branch requires a GitHub merge queue, so `delivery_land` enqueues the head and waits up to `queueWaitSeconds` (default 600). Queue entries can take longer. GitHub removes an entry when its checks fail, it conflicts, or the PR head changes; the tool then merges nothing.
+- **Fix:** For `queued: true`, call `delivery_land` again with the same `pr` and `expectHeadSha`: it waits on the existing entry and does not enqueue twice. For a removal, fix the cause on the PR (a new head needs a new review and a new `expectHeadSha`), then land again. Never enable auto-merge on the PR.
+
 ## `delivery_cleanup` refuses another repository or a changed worktree
 
 - **Symptom:** `worktree.owner: observed "a receipt or worktree of a repository other than this session's"` or `worktree.marker: observed`
