@@ -9,17 +9,20 @@ Checked 2026-11-16.
 | Concern | Default | Maintenance | Install | Alternatives | Use both when | Run | Avoid |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `test-runner` | `Kotest` | >= 6.2.7 · 2026-11-11 · active | `grep -rl kotest build.gradle.kts` · `testImplementation io.kotest:kotest-runner-junit5` | `JUnit Jupiter`: Java and Kotlin tests share one stock runner | Kotest and JUnit Jupiter in one module, since Kotest runs on the JUnit Platform | every-pr | Kotest 5 plugins and extensions on Kotest 6 without checking they were ported |
+| `assertions` | `Kotest assertions` | >= 6.2.7 · 2026-11-11 · active | `grep -rl kotest-assertions build.gradle.kts` · `testImplementation io.kotest:kotest-assertions-core` | `AssertJ`: a mixed Java and Kotlin module that already uses it (3.27.7) | - | every-pr | Mixing Kotest matchers and AssertJ in one file |
+| `watch` | Built-in: Gradle continuous build (`gradle test --continuous`) | - | Built-in | None | - | on-demand | Continuous builds on a task graph that includes slow integration tests |
 | `property` | `Kotest property` | >= 6.2.7 · 2026-11-11 · active | `grep -rl kotest-property build.gradle.kts` · `testImplementation io.kotest:kotest-property` | `jqwik`: a JUnit Platform engine written for Java (1.10.2) | - | every-pr | Unseeded runs with no saved failing seed |
 | `fuzz` | Inherits: java | - | Inherits | None | - | bounded-pr | Fuzz targets that keep state between calls |
 | `fuzz-continuous` | Shared: clusterfuzzlite | - | Shared | `oss-fuzz`: an open-source project that wants Google-run campaigns | `clusterfuzzlite` on pull requests with `oss-fuzz` for long campaigns | scheduled | Discarding the corpus between runs |
 | `mutation` | `PIT` | >= 1.30.2 · 2026-11-05 · active | `grep -rl pitest build.gradle.kts` · `Gradle plugin info.solidsoft.pitest` | `Arcmutate`: paid Kotlin mutators and filters that cut the noise | `PIT` with the Arcmutate Kotlin plugin when the budget allows | diff-pr + scheduled | Plain PIT on Kotlin without a review of the noisy survivors from compiler-generated code |
 | `snapshot` | Inherits: java | - | Inherits | None | - | every-pr | Approving a golden file without reading it |
+| `component` | N/A: Kotlin has no default UI component model | - | - | None | - | - | - |
 | `concurrency` | Inherits: java | - | Inherits | None | - | scheduled | Sleeping to provoke a race; treating one passing run as proof |
 | `coverage` | `Kover` | >= 0.9.11 · 2026-09-29 · active | `grep -rl kover build.gradle.kts` · `Gradle org.jetbrains.kotlinx.kover plugin` | `JaCoCo`: Maven builds and existing JaCoCo reports | - | every-pr | Coverage thresholds as the goal; inline functions and generated code left in the report |
 | `benchmark` | Inherits: java | - | Inherits | None | - | on-demand | Benchmarks without warm-up forks |
 | `flaky-order` | Built-in: Kotest `specExecutionOrder = Random` and JUnit random orderers | - | Built-in | None | - | scheduled | Retries that hide a flake without an owner |
 | `integration` | Shared: testcontainers | - | Shared | None | - | every-pr | Mocked databases standing in for the real engine |
-| `contract` | Shared: pact | - | Shared | None | - | every-pr | Verifying a provider only against a mock |
+| `contract` | Shared: contracts | - | Shared | `Pact JVM`: two or more services you own call each other and deploy independently (Pact Broker required) | - | every-pr | Verifying a provider only against a mock |
 | `api-schema` | Shared: schemathesis | - | Shared | None | - | bounded-pr | Running against production |
 | `load` | Shared: k6 | - | Shared | `Gatling`: a JVM team that writes scenarios in code | - | scheduled | Load tests against an environment not sized for them |
 | `lint` | `detekt` | >= 1.23.8 · 2025-02-21 · maintenance | `grep -rl detekt build.gradle.kts` · `Gradle io.gitlab.arturbosch.detekt plugin` | `detekt 2.0.0 alpha`: newer Kotlin support, a pre-release line | - | every-pr | The stable release is 21 months old and may not read a newer Kotlin compiler, so check compatibility before you upgrade Kotlin; adopt the 2.0.0 alphas only after a trial |

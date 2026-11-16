@@ -11,11 +11,14 @@ Rows follow the spec in
 | Concern | Default | Maintenance | Install | Alternatives | Use both when | Run | Avoid |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `test-runner` | `bats` (bats-core with bats-support, bats-assert, bats-file) | >= 1.14.0 · 2026-07-21 · active | `bats --version` · `mise use bats` | `shellspec`: the scripts must run under dash, zsh or busybox, or you want built-in mocks | A script ships for several interpreters: bats for the Bash suite, ShellSpec for the matrix | every-pr | shUnit2 and bash_unit: smaller ecosystems, no JUnit report; `bats --jobs` needs GNU parallel |
+| `assertions` | Built-in: `bats-assert` 2.2.4 with `bats-support` (`assert_output`, `assert_success`, `assert_line`) | - | `bats --version` · `mise use bats` | None | - | every-pr | Raw `[ ]` tests with no failure message; `bats-assert` needs `bats-support` loaded first |
+| `watch` | `watchexec` | >= 2.8.0 · 2026-10-06 · active | `watchexec --version` · `mise use watchexec` | None | - | on-demand | Watching `.git` or generated output, which retriggers the run; use `watchexec -e sh,bats -- bats test` |
 | `property` | No maintained tool: seeded `$RANDOM` table tests that print the seed on failure | - | - | None | - | - | Unseeded random input: a failure cannot be replayed |
 | `fuzz` | N/A: no coverage-guided fuzzer for shell; hostile-input tables cover the risk | - | - | None | - | - | - |
 | `fuzz-continuous` | N/A: no coverage-guided fuzzer for shell | - | - | None | - | - | - |
 | `mutation` | No maintained tool: a forced-fault loop that flips `-eq`/`-ne`, and-or operators, exit codes or deletes a statement, runs the bats suite under `timeout`, then restores the file with git | - | - | None | - | diff-pr + scheduled | `bashrs mutate`: a stub that reports a made-up kill rate |
 | `snapshot` | `bats` with `diff` against `fixtures/*.expected` | >= 1.14.0 · 2026-07-21 · active | `bats --version` · `mise use bats` | None | - | every-pr | Updating an expected file to make a test pass without reading the diff |
+| `component` | N/A: shell scripts have no UI component model | - | - | None | - | - | - |
 | `concurrency` | N/A: shell scripts have no race detector; test lock files and traps with parallel bats runs | - | - | None | - | - | - |
 | `coverage` | `kcov` | >= 43 · 2024-07-23 · maintenance | `kcov --version` · `brew install kcov` | `bashcov`: Ruby is available and Bash is 4 or newer | - | every-pr | Gating on a percentage; kcov on macOS is unverified, run it in Linux CI |
 | `benchmark` | `hyperfine` | >= 2.0.0 · 2026-10-07 · active | `hyperfine --version` · `mise use hyperfine` | None | - | on-demand | Timing with `time` once: one sample is noise |
