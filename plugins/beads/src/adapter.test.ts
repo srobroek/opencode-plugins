@@ -3,11 +3,15 @@ import { bdInvocations } from "./bd-actor-gate.ts"
 import { CONTENTION_ADVISORY, contentionAdvisory, readClaimState, recordClaimTransitions } from "./claims.ts"
 import { agentActor, blockReason, gateEnabled, sessionChain, shellInput } from "./host.ts"
 import { closeInvocations, parse, parsedInvocations } from "./shell.ts"
+import { simulatedHolders } from "./test-support.ts"
 
 describe("claim tracking", () => {
   const env = { BEADS_DIR: "/store/.beads", BEADS_ACTOR: "opencode/r/general/s" } as NodeJS.ProcessEnv
   const record = (state: ReturnType<typeof readClaimState>, command: string, output: string) =>
-    recordClaimTransitions(state, command, "/repo", env, output, bdInvocations(command))
+    {
+      const invocations = bdInvocations(command)
+      return recordClaimTransitions(state, command, "/repo", env, output, invocations, simulatedHolders("/repo", env, output, invocations))
+    }
 
   test("a direct claim, then a close, round-trips through stored JSON", () => {
     const state = readClaimState(undefined)

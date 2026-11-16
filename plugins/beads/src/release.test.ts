@@ -10,6 +10,7 @@ import {
   releaseReport,
   restoreStatusArgs,
 } from "./release.ts"
+import { simulatedHolders } from "./test-support.ts"
 
 const AT = "2026-09-14T12:34:56.789Z"
 
@@ -18,7 +19,11 @@ function track(commands: Array<string | [string, string]>, env: NodeJS.ProcessEn
   const state = readClaimState(undefined)
   for (const entry of commands) {
     const [command, output] = typeof entry === "string" ? [entry, "command succeeded"] : entry
-    recordClaimTransitions(state, command, cwd, { BEADS_DIR: "/repo/.beads", ...env }, output, bdInvocations(command))
+    {
+      const run = { BEADS_DIR: "/repo/.beads", ...env }
+      const invocations = bdInvocations(command)
+      recordClaimTransitions(state, command, cwd, run, output, invocations, simulatedHolders(cwd, run, output, invocations))
+    }
   }
   return state
 }
@@ -158,13 +163,11 @@ describe("held-claims advisory (the stop nudge)", () => {
     expect(text).toContain("bd-b-2 [actor/b]")
   })
 
-  test("ambiguous compound claims retain the id without guessing an actor", () => {
+  test("a bead claimed twice in one command is held by whoever bd reports", () => {
     const text = advisory(
       track([["BD_ACTOR=actor/a bd update bd-x-1 --claim; BD_ACTOR=actor/b bd update bd-x-1 --claim || true", "Claimed bd-x-1"]]),
     )
-    expect(text).toContain("- bd-x-1 claim recorded by this session")
-    expect(text).toContain("Release unavailable: the effective actor or store is missing or ambiguous")
-    expect(text).not.toContain("bd-x-1 [actor/")
+    expect(text).toContain("bd-x-1 [actor/b]")
   })
 
   test("multi-id updates honour short status and assignee flags", () => {

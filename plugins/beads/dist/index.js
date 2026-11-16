@@ -931,6 +931,13 @@ function closingIndex(text, from, open, close, literalSingle = false) {
     }
     if (c === "'" && literalSingle)
       continue;
+    if (c === "$" && text[j + 1] === "(") {
+      const end = closingIndex(text, j + 2, "(", ")");
+      if (end < 0)
+        return -1;
+      j = end;
+      continue;
+    }
     if (c === "'" || c === '"' || c === "`") {
       let k = j + 1;
       while (k < text.length && text[k] !== c)
@@ -1371,12 +1378,11 @@ class GateRefusal extends Error {
 function agentActor(chain, env = {}) {
   if (chain === undefined)
     return;
+  if ((env.BEADS_ACTOR ?? "").trim() !== "" || (env.BD_ACTOR ?? "").trim() !== "")
+    return;
   const agent = chain.agent !== undefined && chain.agent !== "" ? chain.agent : undefined;
-  if (chain.parentID === undefined || chain.parentID === "") {
-    if ((env.BEADS_ACTOR ?? "").trim() !== "" || (env.BD_ACTOR ?? "").trim() !== "")
-      return;
+  if (chain.parentID === undefined || chain.parentID === "")
     return `opencode/${agent ?? "main"}/${chain.sessionID}`;
-  }
   return `opencode/${chain.rootID}/${agent ?? "subagent"}/${chain.sessionID}`;
 }
 async function sessionChain(sessionID, agent, lookup, maxDepth = 16) {
@@ -3862,7 +3868,49 @@ function transitionFlags(args) {
   }
   return { actorOverride, claim, help: false };
 }
-function recordClaimTransitions(state, command, cwd, env, output, invocations) {
+function claimEnabled(invocation) {
+  const flags = transitionFlags(invocation.args);
+  if (flagEnabled(invocation.globals, ["--help", "-h"]) || flags.help)
+    return false;
+  return invocation.verb === "claim" || (invocation.verb === "update" || invocation.verb === "ready") && flags.claim;
+}
+function claimLookups(cwd, env, output, invocations) {
+  const outputIds = claimedIds(output);
+  const found = [];
+  for (const invocation of invocations) {
+    if (!claimEnabled(invocation))
+      continue;
+    const target = claimTarget(invocation, cwd, env);
+    const direct = mutationTargetIds(invocation.args);
+    for (const id of new Set(direct.length > 0 ? direct : outputIds))
+      found.push({ invocation, id, key: claimKey(target, id) });
+  }
+  return found;
+}
+async function readClaimHolders(lookups, cwd, env, run, deadline) {
+  const holders = new Map;
+  const seen = new Set;
+  for (const { invocation, id, key } of lookups) {
+    if (seen.has(key))
+      continue;
+    seen.add(key);
+    const local = invocation.prefix.findLast((token) => token.startsWith("BEADS_DIR="));
+    const queryEnv = local === undefined ? env : { ...env, BEADS_DIR: resolve6(cwd, local.slice("BEADS_DIR=".length)) };
+    const result = await run(cwd, [...invocation.globals, "show", id, "--json"], deadline, queryEnv);
+    if ("failure" in result)
+      continue;
+    try {
+      const data = envelopeData(JSON.parse(result.output));
+      const issue = Array.isArray(data) ? data[0] : data;
+      const assignee = issue?.assignee;
+      if (typeof assignee === "string" && assignee.trim() !== "")
+        holders.set(key, assignee.trim());
+    } catch {}
+  }
+  return holders;
+}
+function recordClaimTransitions(state, command, cwd, env, output, invocations, holders = new Map) {
+  const unreadable = [];
   const transitions = invocations.flatMap((invocation) => {
     const flags = transitionFlags(invocation.args);
     return flagEnabled(invocation.globals, ["--help", "-h"]) || flags.help ? [] : [{ flags, invocation }];
@@ -3873,40 +3921,34 @@ function recordClaimTransitions(state, command, cwd, env, output, invocations) {
   const direct = transitions.length === 1 && terminalToken !== "&" && !/\$\(|[;|<>]/u.test(command) && (!command.includes("&&") || safeCdAndBd);
   const allOutputIds = new Set(claimedIds(output));
   const labeledOutputIds = new Set(claimedTextIds(output));
-  const claims = transitions.flatMap(({ flags, invocation }) => {
-    const enabled = invocation.verb === "claim" || (invocation.verb === "update" || invocation.verb === "ready") && flags.claim;
-    const actor = enabled ? flags.actorOverride ?? invocationActor(invocation, env) : null;
-    return actor === null ? [] : [{ actor, directIds: mutationTargetIds(invocation.args), target: claimTarget(invocation, cwd, env) }];
-  });
-  const actorsByClaim = new Map;
-  for (const { actor, directIds, target } of claims) {
-    for (const id of directIds) {
-      const key = claimKey(target, id);
-      const actors = actorsByClaim.get(key) ?? new Set;
-      actors.add(actor);
-      actorsByClaim.set(key, actors);
+  const track = (target, id) => {
+    const holder = holders.get(claimKey(target, id));
+    if (holder === undefined) {
+      unreadable.push(id);
+      return;
     }
-  }
-  for (const { actor, directIds, target } of claims) {
+    addActor(state, holder);
+    setClaim(state, target, id, holder);
+  };
+  for (const { invocation } of transitions) {
+    if (!claimEnabled(invocation))
+      continue;
+    const directIds = mutationTargetIds(invocation.args);
+    const target = claimTarget(invocation, cwd, env);
     if (direct) {
-      addActor(state, actor);
       for (const id of directIds.length > 0 ? directIds : allOutputIds)
-        setClaim(state, target, id, actor);
+        track(target, id);
       continue;
     }
-    for (const id of directIds) {
-      if (!labeledOutputIds.has(id))
-        continue;
-      const actors = actorsByClaim.get(claimKey(target, id));
-      addActor(state, actor);
-      setClaim(state, target, id, actors?.size === 1 ? actor : null);
-    }
+    for (const id of directIds)
+      if (labeledOutputIds.has(id))
+        track(target, id);
   }
   if (!direct)
-    return;
+    return unreadable;
   const entry = transitions[0];
   if (entry === undefined)
-    return;
+    return unreadable;
   const { invocation } = entry;
   const target = claimTarget(invocation, cwd, env);
   for (const close of closeInvocations(command)) {
@@ -3916,7 +3958,7 @@ function recordClaimTransitions(state, command, cwd, env, output, invocations) {
   if (invocation.verb === "unclaim") {
     for (const id of unclaimIds(invocation.args))
       deleteClaim(state, target, id);
-    return;
+    return unreadable;
   }
   if (invocation.verb === "assign") {
     const [idToken, assignee] = invocation.args;
@@ -3927,10 +3969,10 @@ function recordClaimTransitions(state, command, cwd, env, output, invocations) {
       else
         deleteClaim(state, target, id);
     }
-    return;
+    return unreadable;
   }
   if (invocation.verb !== "update")
-    return;
+    return unreadable;
   const status = optionValue(invocation.args, ["--status", "-s"]);
   const assignee = optionValue(invocation.args, ["--assignee", "-a"]);
   for (const id of mutationTargetIds(invocation.args)) {
@@ -3943,6 +3985,7 @@ function recordClaimTransitions(state, command, cwd, env, output, invocations) {
         deleteClaim(state, target, id);
     }
   }
+  return unreadable;
 }
 var CONTENTION = [
   /a maintenance operation is running on this workspace: retry when it completes/i,
@@ -5453,9 +5496,8 @@ function actorInjection(command, actor) {
   const named = invocations.map(namedVariables);
   if (named.every((names) => names.size > 0))
     return;
-  const anyNamed = named.some((names) => names.size > 0);
-  const onlyLegacy = named.every((names) => names.size === 0 || names.size === 1 && names.has("BD_ACTOR"));
-  return { actor, variable: anyNamed && onlyLegacy ? "BD_ACTOR" : "BEADS_ACTOR" };
+  const choosesBdActor = named.some((names) => names.has("BD_ACTOR"));
+  return { actor, variable: choosesBdActor ? "BD_ACTOR" : "BEADS_ACTOR" };
 }
 function withActorPrefix(command, actor, variable = "BEADS_ACTOR") {
   return `export ${variable}='${actor.replaceAll("'", "'\\''")}'; ${command}`;
@@ -5711,6 +5753,7 @@ var SKILL_NAMES = [
 ];
 var SKILLS_DIRECTORY = join7(import.meta.dir, "..", "skills");
 var PIN_CACHE_MS = 5000;
+var CLAIM_LOOKUP_MS = 5000;
 function shellPin(cwd, env, pinFor = sessionPinFor) {
   const explicit = env.BEADS_DIR;
   if (explicit !== undefined && explicit !== "")
@@ -5878,12 +5921,7 @@ async function setupBeads(ctx, deps = {}) {
       throw new GateRefusal(decision.gate, decision.cause, decision.resolution);
     if (decision.command !== call.command)
       event.input = { ...event.input, command: decision.command };
-    pending.set(event.id, {
-      command: call.command,
-      cwd: call.cwd,
-      actor: actorInjection(call.command, actor),
-      advisories: decision.advisories
-    });
+    pending.set(event.id, { command: call.command, cwd: call.cwd, advisories: decision.advisories });
   });
   const routing = await registerAgentRouting(ctx, { run: deps.run, env: baseEnv });
   const pin = await ctx.shell.hook("create.before", (event) => {
@@ -5926,17 +5964,20 @@ async function setupBeads(ctx, deps = {}) {
       if (on("beads-claim-tracking") && isMutatingBdCommand(call.command) && shellExit(result) === 0) {
         const key = `claims/${event.sessionID}`;
         const env = environmentForCommand(call.command, pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor));
-        if (call.actor !== undefined)
-          env[call.actor.variable] = call.actor.actor;
         const invocations = bdInvocations(call.command);
+        const lookups = claimLookups(call.cwd, env, output, invocations);
+        const holders = await readClaimHolders(lookups, call.cwd, env, run, Date.now() + CLAIM_LOOKUP_MS);
+        let unreadable = [];
         const [before, state] = await queue(key, async () => {
           const state = readClaimState(await ctx.storage.get(key));
           const before = readClaimState(state);
-          recordClaimTransitions(state, call.command, call.cwd, env, output, invocations);
+          unreadable = recordClaimTransitions(state, call.command, call.cwd, env, output, invocations, holders);
           if (JSON.stringify(state) !== JSON.stringify(before))
             await ctx.storage.set(key, state);
           return [before, state];
         });
+        if (unreadable.length > 0)
+          advisories.push(`Beads: could not read who holds ${[...new Set(unreadable)].join(", ")} (\`bd show\` failed), so the claim is not tracked and its lease is not renewed. Re-run \`bd show <id> --json\` to check the assignee.`);
         if (on("bd-lease-heartbeat")) {
           const leaseKey = `leases/${event.sessionID}`;
           const leases = await queue(leaseKey, async () => {

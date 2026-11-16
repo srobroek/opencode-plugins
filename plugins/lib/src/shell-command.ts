@@ -2,11 +2,14 @@ import { resolve } from "node:path"
 import { shellQuoteBalanced, tokenizeShell } from "./shell-tokenizer.ts"
 
 /*
- * Scope for every consumer of this parser (the beads close, update-close, unclaim and
- * actor gates, the embedded-write lock, the agent-efficiency wait guard): commands an
- * agent writes normally are in scope. Deliberately obfuscated shell is not. These gates
- * catch an agent that forgot or misjudged a rule, not one that is working around it.
- * Fix a parser bug that mishandles an ordinary command; do not chase evasion.
+ * Design scope of this parser, shared by the beads close, update-close, unclaim and actor
+ * gates, the embedded-write lock and the agent-efficiency wait guard. It models the shell
+ * syntax an agent normally writes: simple commands, pipelines and lists, groups, quoting,
+ * command, process and parameter substitutions, here-documents and here-strings, and
+ * `bash -c` strings. It does not model shell semantics that need execution (aliases,
+ * functions, `eval` of computed text, descriptor tables beyond fd 0), and it does not aim
+ * to resist input written to defeat it. Where it cannot read a command it reports the
+ * parse as unknown instead of guessing.
  */
 
 /** A token in a command-position argv. Quoted words are data, not executable names. */
@@ -530,6 +533,13 @@ function closingIndex(text: string, from: number, open: string, close: string, l
       continue
     }
     if (c === "'" && literalSingle) continue
+    // A command substitution has its own quote rules, whatever surrounds it.
+    if (c === "$" && text[j + 1] === "(") {
+      const end = closingIndex(text, j + 2, "(", ")")
+      if (end < 0) return -1
+      j = end
+      continue
+    }
     if (c === "'" || c === '"' || c === "`") {
       let k = j + 1
       while (k < text.length && text[k] !== c) k += c !== "'" && text[k] === "\\" ? 2 : 1

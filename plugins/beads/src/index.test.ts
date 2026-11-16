@@ -4,6 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
 import { setBdShowRunForTests } from "./bd-close-gate.ts"
+import type { BdRun } from "./gate-admission.ts"
 import plugin, { type AdapterDeps, pinnedEnvironment, setupBeads, shellPin } from "./index.ts"
 
 const roots: string[] = []
@@ -291,79 +292,58 @@ describe("execute.after on shell", () => {
     }
   }
 
-  test("records a successful claim in storage under the session", async () => {
-    const { fake, cleanup } = await start(scratch())
-    const before = shellCall("bd update proj-1 --claim", "ses_child")
-    await fake.fire.tool("execute.before", before)
-    await fake.fire.tool("execute.after", completed(before, "✓ Claimed proj-1"))
-    const state = fake.storage.get("claims/ses_child") as { claims: Record<string, { id: string; actor: string }> }
-    const claims = Object.values(state.claims)
-    expect(claims).toHaveLength(1)
-    expect(claims[0]).toMatchObject({ id: "proj-1", actor: "opencode/ses_root/general/ses_child" })
-    await cleanup()
-  })
+  const GENERATED = "opencode/ses_root/general/ses_child"
 
-  test.each([
-    'export BEADS_ACTOR=me/chosen; bd update proj-1 --claim --notes "source and unset"',
-    'export BD_ACTOR=me/chosen; bd update proj-1 --claim --notes "source and unset"',
-    "BD_ACTOR=me/chosen bd update proj-1 --claim",
-  ])("records a claim under the actor the command chose, not the generated one: %s", async (command) => {
-    const { fake, cleanup } = await start(scratch())
+  /** A bd stand-in whose `show` reports who holds each bead, as the ledger would after the claim. */
+  const holdersRun =
+    (holders: Record<string, string>): BdRun =>
+    async (_cwd, args) => {
+      const id = args[args.indexOf("show") + 1] ?? ""
+      return args.includes("show") && holders[id] !== undefined
+        ? { output: JSON.stringify([{ id, assignee: holders[id] }]) }
+        : { failure: "bd exited with code 1: no issues found" }
+    }
+
+  async function claimThrough(command: string, holders: Record<string, string>) {
+    const { fake, cleanup } = await start(scratch(), { run: holdersRun(holders) })
     const before = shellCall(command, "ses_child")
     await fake.fire.tool("execute.before", before)
-    await fake.fire.tool("execute.after", completed(before, "✓ Claimed proj-1"))
-    const state = fake.storage.get("claims/ses_child") as { claims: Record<string, { actor: string }> }
-    expect(Object.values(state.claims)[0]?.actor).toBe("me/chosen")
-    await cleanup()
-  })
+    const output = `${Object.keys(holders)
+      .map((id) => `✓ Claimed ${id}`)
+      .join("\n")}\n`
+    const event = await fake.fire.tool("execute.after", completed(before, output))
+    const state = fake.storage.get("claims/ses_child") as
+      | { claims: Record<string, { id: string; actor: string }> }
+      | undefined
+    const recorded = Object.fromEntries(Object.values(state?.claims ?? {}).map((claim) => [claim.id, claim.actor]))
+    return { recorded, result: String(event.result.content), cleanup }
+  }
 
-  test.each([
-    ['export BEADS_ACTOR=A; c=$(bd update proj-1 --claim); export BEADS_ACTOR=B; echo "$c"', "A"],
-    ['c=$(bd update proj-1 --claim); export BEADS_ACTOR=B; echo "$c"', "opencode/ses_root/general/ses_child"],
-  ])("records a claim made in a substitution under the actor in force there: %s", async (command, expected) => {
-    const { fake, cleanup } = await start(scratch())
-    const before = shellCall(command, "ses_child")
-    await fake.fire.tool("execute.before", before)
-    await fake.fire.tool("execute.after", completed(before, "✓ Claimed proj-1"))
-    const state = fake.storage.get("claims/ses_child") as { claims: Record<string, { actor: string }> }
-    expect(Object.values(state.claims)[0]?.actor).toBe(expected)
-    await cleanup()
-  })
-
-  test.each([
-    [
-      'export BEADS_ACTOR=A; cat <<EOF\n$(bd update proj-1 --claim)\nEOF\nexport BEADS_ACTOR=B\necho done',
-      "A",
-    ],
-    ["cat <<EOF\n$(bd update proj-1 --claim)\nEOF\nexport BEADS_ACTOR=B", "opencode/ses_root/general/ses_child"],
-  ])("records a claim made in a heredoc body under the actor in force there: %s", async (command, expected) => {
-    const { fake, cleanup } = await start(scratch())
-    const before = shellCall(command, "ses_child")
-    await fake.fire.tool("execute.before", before)
-    await fake.fire.tool("execute.after", completed(before, "✓ Claimed proj-1"))
-    const state = fake.storage.get("claims/ses_child") as { claims: Record<string, { actor: string }> }
-    expect(Object.values(state.claims)[0]?.actor).toBe(expected)
-    await cleanup()
-  })
-
-  test.each([
-    ["BD_ACTOR=A bd update a-1 --claim; bd update a-2 --claim", { "a-1": "A", "a-2": "opencode/ses_root/general/ses_child" }],
-    ["BEADS_ACTOR=A bd update a-1 --claim; bd update a-2 --claim", { "a-1": "A", "a-2": "opencode/ses_root/general/ses_child" }],
-    ["bd update a-1 --claim; BD_ACTOR=A bd update a-2 --claim", { "a-1": "opencode/ses_root/general/ses_child", "a-2": "A" }],
-    ["bash -c 'bd update a-1 --claim'", { "a-1": "opencode/ses_root/general/ses_child" }],
+  test.each<[string, Record<string, string>]>([
+    ["bd update proj-1 --claim", { "proj-1": GENERATED }],
+    ['export BEADS_ACTOR=me/chosen; bd update proj-1 --claim --notes "source and unset"', { "proj-1": "me/chosen" }],
+    ["export BD_ACTOR=me/chosen; bd update proj-1 --claim", { "proj-1": "me/chosen" }],
+    ["BD_ACTOR=me/chosen bd update proj-1 --claim", { "proj-1": "me/chosen" }],
+    // The shell decides what bd sees: an unset variable and a skipped export are not guessable from text.
+    ["unset BEADS_ACTOR; bd update proj-1 --claim", { "proj-1": "human@example.com" }],
+    ["false && export BEADS_ACTOR=B; bd update proj-1 --claim", { "proj-1": GENERATED }],
+    ['c=$(bd update proj-1 --claim); export BEADS_ACTOR=B; echo "$c"', { "proj-1": GENERATED }],
+    ["cat <<EOF\n$(bd update proj-1 --claim)\nEOF\nexport BEADS_ACTOR=B", { "proj-1": GENERATED }],
+    ["BD_ACTOR=A bd update a-1 --claim; bd update a-2 --claim", { "a-1": "A", "a-2": GENERATED }],
+    ["BEADS_ACTOR=A bd update a-1 --claim; bd update a-2 --claim", { "a-1": "A", "a-2": GENERATED }],
+    ["bd update a-1 --claim; BD_ACTOR=A bd update a-2 --claim", { "a-1": GENERATED, "a-2": "A" }],
+    ["bash -c 'bd update a-1 --claim'", { "a-1": GENERATED }],
     ["BD_ACTOR=A bash -c 'bd update a-1 --claim'", { "a-1": "A" }],
-  ])("tracks each claim under its own actor when only some name one: %s", async (command, expected) => {
-    const { fake, cleanup } = await start(scratch())
-    const before = shellCall(command, "ses_child")
-    const event = await fake.fire.tool("execute.before", before)
-    if (!command.startsWith("BD_ACTOR=A bash")) expect((event.input as { command: string }).command).toStartWith("export ")
-    await fake.fire.tool(
-      "execute.after",
-      completed(before, `${Object.keys(expected).map((id) => `✓ Claimed ${id}`).join("\n")}\n`),
-    )
-    const state = fake.storage.get("claims/ses_child") as { claims: Record<string, { id: string; actor: string }> }
-    const actors = Object.fromEntries(Object.values(state.claims).map((claim) => [claim.id, claim.actor]))
-    expect(actors).toEqual(expected)
+  ])("records the holder bd reports for the claim: %s", async (command, holders) => {
+    const { recorded, cleanup } = await claimThrough(command, holders)
+    expect(recorded).toEqual(holders)
+    await cleanup()
+  })
+
+  test("skips tracking, with a warning, when bd cannot say who holds the bead", async () => {
+    const { recorded, result, cleanup } = await claimThrough("bd update proj-1 --claim", {})
+    expect(recorded).toEqual({})
+    expect(result).toContain("could not read who holds")
     await cleanup()
   })
 
@@ -387,7 +367,7 @@ describe("execute.after on shell", () => {
   })
 
   test("drops a claim the same session later closes", async () => {
-    const { fake, cleanup } = await start(scratch())
+    const { fake, cleanup } = await start(scratch(), { run: holdersRun({ "proj-1": GENERATED }) })
     const claim = shellCall("bd update proj-1 --claim", "ses_child", "call_a")
     await fake.fire.tool("execute.before", claim)
     await fake.fire.tool("execute.after", completed(claim, "✓ Claimed proj-1"))

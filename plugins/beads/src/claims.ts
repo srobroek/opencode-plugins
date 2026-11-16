@@ -7,9 +7,9 @@
  */
 
 import { resolve } from "node:path"
-import { type BdInvocation, flagEnabled, globalValue, invocationActor } from "./bd-actor-gate.ts"
+import { type BdInvocation, flagEnabled, globalValue } from "./bd-actor-gate.ts"
 import { claimedIds, claimedTextIds } from "./bd-lease-gate.ts"
-import { bdStoreForInvocation } from "./gate-admission.ts"
+import { type BdRun, bdStoreForInvocation, envelopeData } from "./gate-admission.ts"
 import { closeInvocations, tokenizeShell } from "./shell.ts"
 
 export type TrackedClaim = { id: string; actor: string | null; store: string | null }
@@ -215,9 +215,77 @@ function transitionFlags(args: string[]): { actorOverride: string | undefined; c
   return { actorOverride, claim, help: false }
 }
 
+/** One bead a claim-enabled invocation may have claimed, and the key its holder is stored under. */
+export type ClaimLookup = { invocation: BdInvocation; id: string; key: string }
+
+/** The holder of each claimed bead, as bd itself reports it. A bead missing from the map was unreadable. */
+export type ClaimHolders = ReadonlyMap<string, string>
+
+function claimEnabled(invocation: BdInvocation): boolean {
+  const flags = transitionFlags(invocation.args)
+  if (flagEnabled(invocation.globals, ["--help", "-h"]) || flags.help) return false
+  return invocation.verb === "claim" || ((invocation.verb === "update" || invocation.verb === "ready") && flags.claim)
+}
+
+/**
+ * Every bead a successful command may have claimed. The caller asks bd who holds each one:
+ * the holder is read from the ledger, never guessed from the shell text, because the actor a
+ * command really ran under depends on the shell (a skipped export, an unset, a wrapper).
+ */
+export function claimLookups(
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  output: string,
+  invocations: BdInvocation[],
+): ClaimLookup[] {
+  const outputIds = claimedIds(output)
+  const found: ClaimLookup[] = []
+  for (const invocation of invocations) {
+    if (!claimEnabled(invocation)) continue
+    const target = claimTarget(invocation, cwd, env)
+    const direct = mutationTargetIds(invocation.args)
+    for (const id of new Set(direct.length > 0 ? direct : outputIds)) found.push({ invocation, id, key: claimKey(target, id) })
+  }
+  return found
+}
+
+/**
+ * Ask bd who holds each looked-up bead (`bd show <id> --json`, same store selectors as the
+ * claiming command). Beads bd cannot answer for are left out of the map.
+ */
+export async function readClaimHolders(
+  lookups: ClaimLookup[],
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  run: BdRun,
+  deadline: number,
+): Promise<Map<string, string>> {
+  const holders = new Map<string, string>()
+  const seen = new Set<string>()
+  for (const { invocation, id, key } of lookups) {
+    if (seen.has(key)) continue
+    seen.add(key)
+    const local = invocation.prefix.findLast((token) => token.startsWith("BEADS_DIR="))
+    const queryEnv = local === undefined ? env : { ...env, BEADS_DIR: resolve(cwd, local.slice("BEADS_DIR=".length)) }
+    const result = await run(cwd, [...invocation.globals, "show", id, "--json"], deadline, queryEnv)
+    if ("failure" in result) continue
+    try {
+      const data = envelopeData(JSON.parse(result.output))
+      const issue = (Array.isArray(data) ? data[0] : data) as { assignee?: unknown } | undefined
+      const assignee = issue?.assignee
+      if (typeof assignee === "string" && assignee.trim() !== "") holders.set(key, assignee.trim())
+    } catch {
+      // Unreadable output: leave the bead untracked.
+    }
+  }
+  return holders
+}
+
 /**
  * Update `state` from one successful shell result. `command` is the command as the
- * agent wrote it, before any rewrite; `env` the environment it ran under.
+ * agent wrote it, before any rewrite; `env` the environment it ran under; `holders` who bd
+ * says holds each claimed bead. Returns the beads whose holder could not be read: those are
+ * not tracked, since recording a guess would hand the lease to the wrong actor.
  */
 export function recordClaimTransitions(
   state: ClaimState,
@@ -226,7 +294,9 @@ export function recordClaimTransitions(
   env: NodeJS.ProcessEnv,
   output: string,
   invocations: BdInvocation[],
-): void {
+  holders: ClaimHolders = new Map(),
+): string[] {
+  const unreadable: string[] = []
   const transitions = invocations.flatMap((invocation) => {
     const flags = transitionFlags(invocation.args)
     return flagEnabled(invocation.globals, ["--help", "-h"]) || flags.help ? [] : [{ flags, invocation }]
@@ -241,39 +311,28 @@ export function recordClaimTransitions(
     (!command.includes("&&") || safeCdAndBd)
   const allOutputIds = new Set(claimedIds(output))
   const labeledOutputIds = new Set(claimedTextIds(output))
-  const claims = transitions.flatMap(({ flags, invocation }) => {
-    const enabled =
-      invocation.verb === "claim" || ((invocation.verb === "update" || invocation.verb === "ready") && flags.claim)
-    const actor = enabled ? (flags.actorOverride ?? invocationActor(invocation, env)) : null
-    return actor === null
-      ? []
-      : [{ actor, directIds: mutationTargetIds(invocation.args), target: claimTarget(invocation, cwd, env) }]
-  })
-  const actorsByClaim = new Map<string, Set<string>>()
-  for (const { actor, directIds, target } of claims) {
-    for (const id of directIds) {
-      const key = claimKey(target, id)
-      const actors = actorsByClaim.get(key) ?? new Set<string>()
-      actors.add(actor)
-      actorsByClaim.set(key, actors)
+  const track = (target: ClaimTarget, id: string): void => {
+    const holder = holders.get(claimKey(target, id))
+    if (holder === undefined) {
+      unreadable.push(id)
+      return
     }
+    addActor(state, holder)
+    setClaim(state, target, id, holder)
   }
-  for (const { actor, directIds, target } of claims) {
+  for (const { invocation } of transitions) {
+    if (!claimEnabled(invocation)) continue
+    const directIds = mutationTargetIds(invocation.args)
+    const target = claimTarget(invocation, cwd, env)
     if (direct) {
-      addActor(state, actor)
-      for (const id of directIds.length > 0 ? directIds : allOutputIds) setClaim(state, target, id, actor)
+      for (const id of directIds.length > 0 ? directIds : allOutputIds) track(target, id)
       continue
     }
-    for (const id of directIds) {
-      if (!labeledOutputIds.has(id)) continue
-      const actors = actorsByClaim.get(claimKey(target, id))
-      addActor(state, actor)
-      setClaim(state, target, id, actors?.size === 1 ? actor : null)
-    }
+    for (const id of directIds) if (labeledOutputIds.has(id)) track(target, id)
   }
-  if (!direct) return
+  if (!direct) return unreadable
   const entry = transitions[0]
-  if (entry === undefined) return
+  if (entry === undefined) return unreadable
   const { invocation } = entry
   const target = claimTarget(invocation, cwd, env)
   for (const close of closeInvocations(command)) {
@@ -281,7 +340,7 @@ export function recordClaimTransitions(
   }
   if (invocation.verb === "unclaim") {
     for (const id of unclaimIds(invocation.args)) deleteClaim(state, target, id)
-    return
+    return unreadable
   }
   if (invocation.verb === "assign") {
     const [idToken, assignee] = invocation.args
@@ -290,9 +349,9 @@ export function recordClaimTransitions(
       if (state.actors.includes(assignee)) setClaim(state, target, id, assignee)
       else deleteClaim(state, target, id)
     }
-    return
+    return unreadable
   }
-  if (invocation.verb !== "update") return
+  if (invocation.verb !== "update") return unreadable
   const status = optionValue(invocation.args, ["--status", "-s"])
   const assignee = optionValue(invocation.args, ["--assignee", "-a"])
   for (const id of mutationTargetIds(invocation.args)) {
@@ -302,6 +361,7 @@ export function recordClaimTransitions(
       else deleteClaim(state, target, id)
     }
   }
+  return unreadable
 }
 
 /** Contention text the embedded store prints; the same command should simply be retried. */

@@ -931,6 +931,13 @@ function closingIndex(text, from, open, close, literalSingle = false) {
     }
     if (c === "'" && literalSingle)
       continue;
+    if (c === "$" && text[j + 1] === "(") {
+      const end = closingIndex(text, j + 2, "(", ")");
+      if (end < 0)
+        return -1;
+      j = end;
+      continue;
+    }
     if (c === "'" || c === '"' || c === "`") {
       let k = j + 1;
       while (k < text.length && text[k] !== c)

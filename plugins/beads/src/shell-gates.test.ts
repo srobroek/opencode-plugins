@@ -5,7 +5,7 @@ import { join } from "node:path"
 import { setBdShowRunForTests } from "./bd-close-gate.ts"
 import { GateAdmitter } from "./gate-admission.ts"
 import { parse } from "./shell.ts"
-import { actorForCommand, createLedgerWarning, decideShell, hasBdEdit, withActorPrefix } from "./shell-gates.ts"
+import { actorForCommand, actorInjection, createLedgerWarning, decideShell, hasBdEdit, withActorPrefix } from "./shell-gates.ts"
 import { gateDeps } from "./test-support.ts"
 
 describe("decideShell", () => {
@@ -53,7 +53,12 @@ describe("decideShell", () => {
   })
 
   test("an apostrophe in a double-quoted default does not stop an ordinary command", async () => {
-    for (const command of [`echo "\${X:-can't}"`, `echo "\${X:-it's} and \${Y:-isn't}"`, `echo "\${X:-{}"`]) {
+    for (const command of [
+      `echo "\${X:-can't}"`,
+      `echo "\${X:-it's} and \${Y:-isn't}"`,
+      `echo "\${X:-{}"`,
+      `echo "\${X:-$(printf '{"a":1}')}"`,
+    ]) {
       expect(await decideShell(command, root, deps())).toMatchObject({ kind: "allow" })
     }
   })
@@ -238,6 +243,20 @@ describe("helpers", () => {
     expect(hasBdEdit(parse("echo $(bd edit proj-1)") as never)).toBe(true)
     expect(hasBdEdit(parse("bd edit --help") as never)).toBe(false)
     expect(hasBdEdit(parse("echo bd edit") as never)).toBe(false)
+  })
+
+  test.each<[string, "BEADS_ACTOR" | "BD_ACTOR"]>([
+    ["bd update a-1 --claim", "BEADS_ACTOR"],
+    ["BEADS_ACTOR=A bd update a-1 --claim; bd update a-2 --claim", "BEADS_ACTOR"],
+    ["BD_ACTOR=B bd update a-1 --claim; bd update a-2 --claim", "BD_ACTOR"],
+    ["BEADS_ACTOR=A bd update a-1 --claim; BD_ACTOR=B bd update a-2 --claim; bd update a-3 --claim", "BD_ACTOR"],
+    ["bd --actor C update a-1 --claim; BD_ACTOR=B bd update a-2 --claim; bd update a-3 --claim", "BD_ACTOR"],
+  ])("injects through the variable that overrides no explicit actor: %s", (command, variable) => {
+    expect(actorInjection(command, "gen")).toEqual({ actor: "gen", variable })
+  })
+
+  test("injects nothing when every invocation names its own actor", () => {
+    expect(actorInjection("BEADS_ACTOR=A bd update a-1 --claim; BD_ACTOR=B bd update a-2 --claim", "gen")).toBeUndefined()
   })
 
   test("actorForCommand respects an actor the command already chooses", () => {

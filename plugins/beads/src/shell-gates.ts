@@ -79,9 +79,8 @@ function namedVariables(invocation: BdInvocation): Set<string> {
 /**
  * The actor to export and the variable to export it through, unless every `bd` invocation in
  * the command already chooses its own. An invocation's own prefix beats the export by shell
- * rules, so one actorless invocation is enough to inject. `bd` reads BEADS_ACTOR before
- * BD_ACTOR, so when the invocations that named an actor did so only through BD_ACTOR, the
- * injection uses BD_ACTOR and leaves their choice standing.
+ * rules, so one actorless invocation is enough to inject. The injection never overrides an
+ * explicit actor: it uses the lower-precedence BD_ACTOR whenever any invocation chose one.
  */
 export function actorInjection(
   command: string,
@@ -92,9 +91,11 @@ export function actorInjection(
   if (invocations.length === 0) return undefined
   const named = invocations.map(namedVariables)
   if (named.every((names) => names.size > 0)) return undefined
-  const anyNamed = named.some((names) => names.size > 0)
-  const onlyLegacy = named.every((names) => names.size === 0 || (names.size === 1 && names.has("BD_ACTOR")))
-  return { actor, variable: anyNamed && onlyLegacy ? "BD_ACTOR" : "BEADS_ACTOR" }
+  // `bd` reads BEADS_ACTOR before BD_ACTOR, so an injected BEADS_ACTOR would override an
+  // invocation that chose its actor through BD_ACTOR. The injected BD_ACTOR loses to every
+  // explicit choice instead: a BEADS_ACTOR, a --actor, or the invocation's own BD_ACTOR.
+  const choosesBdActor = named.some((names) => names.has("BD_ACTOR"))
+  return { actor, variable: choosesBdActor ? "BD_ACTOR" : "BEADS_ACTOR" }
 }
 
 /** The actor to export, unless the command already chooses its own. */

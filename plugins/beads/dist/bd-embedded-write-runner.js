@@ -860,6 +860,13 @@ function closingIndex(text, from, open, close, literalSingle = false) {
     }
     if (c === "'" && literalSingle)
       continue;
+    if (c === "$" && text[j + 1] === "(") {
+      const end = closingIndex(text, j + 2, "(", ")");
+      if (end < 0)
+        return -1;
+      j = end;
+      continue;
+    }
     if (c === "'" || c === '"' || c === "`") {
       let k = j + 1;
       while (k < text.length && text[k] !== c)
@@ -1300,12 +1307,11 @@ class GateRefusal extends Error {
 function agentActor(chain, env = {}) {
   if (chain === undefined)
     return;
+  if ((env.BEADS_ACTOR ?? "").trim() !== "" || (env.BD_ACTOR ?? "").trim() !== "")
+    return;
   const agent = chain.agent !== undefined && chain.agent !== "" ? chain.agent : undefined;
-  if (chain.parentID === undefined || chain.parentID === "") {
-    if ((env.BEADS_ACTOR ?? "").trim() !== "" || (env.BD_ACTOR ?? "").trim() !== "")
-      return;
+  if (chain.parentID === undefined || chain.parentID === "")
     return `opencode/${agent ?? "main"}/${chain.sessionID}`;
-  }
   return `opencode/${chain.rootID}/${agent ?? "subagent"}/${chain.sessionID}`;
 }
 async function sessionChain(sessionID, agent, lookup, maxDepth = 16) {
