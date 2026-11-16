@@ -5,7 +5,7 @@ import { realpathSync as realpathSync6 } from "fs";
 import { homedir as homedir8 } from "os";
 import { isAbsolute as isAbsolute10, resolve as resolve10 } from "path";
 import { Plugin } from "@opencode/plugin";
-import { Error as ToolError } from "@opencode/plugin/promise/tool";
+import { Tool } from "@opencode/plugin/effect";
 // plugins/lib/src/shell-tokenizer.ts
 var SEPARATORS = new Set([";", "&", "|", "(", ")", `
 `]);
@@ -5586,6 +5586,9 @@ function outcome(result, stage) {
     return `${stage} could not start`;
   return `${stage} ended without an exit status`;
 }
+function unsure(failure) {
+  return failure.endsWith("was cancelled") ? "; the write may have completed, so check the store before retrying" : "";
+}
 function quoted(word) {
   return `'${word.replaceAll("'", "'\\''")}'`;
 }
@@ -5680,6 +5683,8 @@ async function storeSecret(input, deps) {
       return fail(changed);
     if (after.digest !== before.digest || deps.realpath(requested) !== file || validProvider(target, after) !== provider)
       fail(changed);
+    if (deps.signal?.aborted === true)
+      fail(`stopped before writing ${name}; nothing was stored`);
     if (target.kind === "fnox-store") {
       if (edgeWhitespace(value)) {
         fail(`the value for ${name} starts or ends with whitespace, which fnox would trim; nothing was stored`);
@@ -5687,16 +5692,16 @@ async function storeSecret(input, deps) {
       stdin = value;
       const failure = outcome(await deps.run(fnoxSet([name]), { ...common, stdin, timeoutMs: FNOX_TIMEOUT_MS }), "fnox set");
       if (failure !== undefined)
-        fail(`${failure} storing ${name}; not retried`);
+        fail(`${failure} storing ${name}; not retried${unsure(failure)}`);
       return { name, provider, stored: true };
     }
     stdin = itemTemplate(target, value);
     const created = outcome(await deps.run([op, "item", "create", `--vault=${target.vault}`, "-"], { ...common, stdin, timeoutMs: OP_TIMEOUT_MS }), "op item create");
     if (created !== undefined)
-      fail(`${created} storing ${name} (a 1Password approval may have been refused or timed out); not retried`);
+      fail(`${created} storing ${name} (a 1Password approval may have been refused or timed out); not retried${unsure(created)}`);
     const short = `${target.item}/${target.field}`;
     const reference = after.setting(provider, "vault") === target.vault ? short : `op://${target.vault}/${short}`;
-    const recorded = outcome(await deps.run(fnoxSet([name, reference]), { ...common, timeoutMs: FNOX_TIMEOUT_MS }), "fnox set");
+    const recorded = outcome(await deps.run(fnoxSet([name, reference]), { cwd: common.cwd, env: common.env, timeoutMs: FNOX_TIMEOUT_MS }), "fnox set");
     if (recorded !== undefined) {
       fail(`${recorded} after the 1Password item was created; record it with \`fnox set ${name} ${quoted(reference)} --provider ${provider}\``);
     }
@@ -5939,7 +5944,8 @@ function createPlugin(overrides = {}) {
 ` + "The value never reaches a command line, an environment, a log, an error or this result. `generate` draws from a " + "CSPRNG. `command` runs argv with no shell after the user allows that run; its stdout, one trailing newline trimmed " + "and at most 64 KiB, is the value. Target `1password` pipes the item JSON to `op item create --vault <vault> -`, then " + "records `fnox set NAME '<item>/<field>'` with the config's 1Password provider. Target `fnox-store` pipes the value " + "to `fnox set NAME --provider <p>` for a value-store provider and replaces an existing value. A failure gives the " + "stage and exit code only and is not retried.",
           input: SECRET_STORE_INPUT,
           execute: async (input, context) => {
-            context.signal.throwIfAborted();
+            if (context.signal?.aborted === true)
+              return { content: "safety_secret_store stopped before it started; nothing was stored." };
             const directory = await sessionDirectory(context.sessionID);
             const source = { type: "tool", messageID: context.messageID, id: context.id };
             const env = overrides.secretStore?.env ?? stringEnv(process.env);
@@ -5954,7 +5960,7 @@ function createPlugin(overrides = {}) {
               snapshot: (path) => readConfigSnapshot(directory, path, home),
               run: runChild,
               ...overrides.secretStore,
-              signal: context.signal,
+              ...context.signal ? { signal: context.signal } : {},
               askExternal: (external) => ctx.permission.assert({
                 sessionID: context.sessionID,
                 agent: context.agent,
@@ -6012,7 +6018,7 @@ function createPlugin(overrides = {}) {
           const clean = { message: redactor.text(message), error: redactor.value(error), metadata: redactor.value(metadata) };
           if (clean.message === message && clean.error === error && clean.metadata === metadata)
             return;
-          event.error = new ToolError({
+          event.error = new Tool.Error({
             message: clean.message,
             ...clean.error === undefined ? {} : { error: clean.error },
             ...clean.metadata === undefined ? {} : { metadata: clean.metadata }

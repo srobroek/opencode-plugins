@@ -104,3 +104,38 @@ test("the npx fallback is flagged for the prompt, and a rejection stops the run"
   expect(evaluation.effect).toBe("ask")
   expect(evaluation.message).toContain(`npx --yes repomix@${REPOMIX_VERSION}`)
 })
+
+test("an aborted signal reaches the run and the tool reports it stopped", async () => {
+  const root = mkdtempSync(join(tmpdir(), "repomix-tool-"))
+  try {
+    const signals: Array<AbortSignal | undefined> = []
+    const controller = new AbortController()
+    const fake = createFakeContext({ directory: "/project" })
+    const exec = async (_argv: string[], options: { signal?: AbortSignal }): Promise<SupervisedRun> => {
+      signals.push(options.signal)
+      controller.abort()
+      return { kind: "aborted", stdout: "", stderr: "" }
+    }
+    await createPlugin({ root, exec, which: () => "/bin/repomix", isDirectory: () => true }).setup(fake.context)
+    const pack = fake.tools.get(PACK_TOOL)?.execute as Execute
+    const result = await pack({ directory: "." }, { ...context, signal: controller.signal })
+    expect(signals).toEqual([controller.signal])
+    expect(result.metadata).toMatchObject({ ok: false, status: "aborted" })
+    expect(result.content).toContain("repomix was cancelled")
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("a host without ToolContext.signal still packs", async () => {
+  const root = mkdtempSync(join(tmpdir(), "repomix-tool-"))
+  try {
+    const fake = createFakeContext({ directory: "/project" })
+    await createPlugin({ root, exec: fakeRepomix([]), which: () => "/bin/repomix", isDirectory: () => true }).setup(fake.context)
+    const pack = fake.tools.get(PACK_TOOL)?.execute as Execute
+    const { signal: _unused, ...legacy } = context
+    expect((await pack({ directory: "." }, legacy)).metadata).toMatchObject({ ok: true, status: "packed" })
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})

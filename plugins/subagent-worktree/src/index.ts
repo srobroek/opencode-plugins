@@ -653,8 +653,13 @@ export function createLanes(
 
   const merge = async (
     input: MergeInput,
-    tool: { sessionID: string; agent: string; messageID: string; id: string },
+    tool: { sessionID: string; agent: string; messageID: string; id: string; signal?: AbortSignal },
   ): Promise<Result> => {
+    // `signal` is undefined on hosts older than OpenCode 2.3.
+    const stopped = (): boolean => tool.signal?.aborted === true
+    if (stopped()) {
+      return { content: `${MERGE_TOOL}: stopped before it started; nothing was merged.`, metadata: { ok: false, stopped: true } }
+    }
     if (input.method === "list") {
       await ctx.permission.assert({
         sessionID: tool.sessionID,
@@ -700,6 +705,12 @@ export function createLanes(
       return { content: `${MERGE_TOOL}: not merged: ${reason}`, metadata: { ok: false, reason } }
     }
     const argv = mergeArgs(lane.directory, decision.target)
+    // Last stop point. From the session move through `wt merge` and the lane retirement the
+    // call runs to its end: `wt merge` runs the repository's merge hooks and removes the
+    // checkout, and killing it midway could leave a half-landed merge. The stop waits.
+    if (stopped()) {
+      return { content: `${MERGE_TOOL}: stopped before the merge; nothing was merged.`, metadata: { ok: false, stopped: true } }
+    }
     // wt merge removes the checkout itself. A failed move must prevent that removal.
     await moveHome(lane)
     const result = await git.run(argv)

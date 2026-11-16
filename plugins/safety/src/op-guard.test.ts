@@ -1,5 +1,5 @@
 import { describe, expect, setDefaultTimeout, test } from "bun:test"
-import { Error as ToolError } from "@opencode/plugin/promise/tool"
+import { Tool } from "@opencode/plugin/effect"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
 import { type GuardOptions, hardGate } from "./guards.ts"
 import { createPlugin, readOptions } from "./index.ts"
@@ -695,7 +695,7 @@ async function throughHook(command: string, guard: GuardOptions = {}): Promise<u
     })
     return "allowed"
   } catch (error) {
-    return error instanceof ToolError || error instanceof Error ? error.message : String(error)
+    return error instanceof Tool.Error || error instanceof Error ? error.message : String(error)
   }
 }
 

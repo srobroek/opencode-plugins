@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { BranchTracker } from "./branch.ts"
 import { parseWorktrees } from "./git.ts"
 import { looksLikeId, recommended, resolvePrefix, score, searchTerms, tokens } from "./rank.ts"
+import { spawnApiRunner } from "./source.ts"
 import {
   absoluteTime,
   clip,
@@ -181,5 +182,23 @@ describe("rank", () => {
     expect(resolvePrefix("ses_abc", ids)).toEqual({ error: "ambiguous", matches: ["ses_abc1", "ses_abc2"] })
     expect(resolvePrefix("ses_q", ids)).toEqual({ error: "none", matches: [] })
     expect(resolvePrefix("ses_abc1", [...ids, "ses_abc10"])).toEqual({ id: "ses_abc1" })
+  })
+})
+
+describe("spawnApiRunner", () => {
+  test("an abort kills the opencode api child and rejects", async () => {
+    // `sh -c 'sleep 30' api get /x` ignores the extra words, so this child only ends when killed.
+    const run = spawnApiRunner(["/bin/sh", "-c", "sleep 30"])
+    const controller = new AbortController()
+    setTimeout(() => controller.abort(new Error("stopped")), 50)
+    const started = Date.now()
+    await expect(run("/x", controller.signal)).rejects.toThrow("stopped")
+    expect(Date.now() - started).toBeLessThan(10_000)
+  })
+
+  test("an already-aborted signal starts nothing", async () => {
+    const controller = new AbortController()
+    controller.abort(new Error("stopped"))
+    await expect(spawnApiRunner(["/nonexistent-opencode"])("/x", controller.signal)).rejects.toThrow("stopped")
   })
 })

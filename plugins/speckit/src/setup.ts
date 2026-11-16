@@ -10,18 +10,30 @@ export const PHASE_TIMEOUT_MS = 60_000
 
 export type RunResult = { exitCode: number; stdout: string; stderr: string }
 
-export async function run(argv: string[], cwd: string | undefined, deadline: number): Promise<RunResult> {
+export const STOPPED = "stopped by the tool call; rerun to resume, finished phases are skipped"
+
+/** Read through a call so a signal aborted mid-run is not narrowed away by an earlier check. */
+const isStopped = (signal?: AbortSignal): boolean => signal?.aborted === true
+
+export async function run(
+  argv: string[],
+  cwd: string | undefined,
+  deadline: number,
+  signal?: AbortSignal,
+): Promise<RunResult> {
+  if (signal?.aborted === true) return { exitCode: 130, stdout: "", stderr: STOPPED }
   const remaining = deadline - Date.now()
   if (remaining <= 0)
     return { exitCode: 124, stdout: "", stderr: "phase budget exhausted; earlier phases may have landed" }
   if (testSpawn) return testSpawn(argv, { cwd, timeout: remaining })
   try {
-    const proc = Bun.spawn(argv, { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", timeout: remaining })
+    const proc = Bun.spawn(argv, { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", timeout: remaining, env: process.env, ...(signal ? { signal } : {}) })
     const [stdout, stderr, exitCode] = await Promise.all([
       new Response(proc.stdout).text(),
       new Response(proc.stderr).text(),
       proc.exited,
     ])
+    if (isStopped(signal)) return { exitCode: 130, stdout, stderr: `${stderr}\n${STOPPED}` }
     if (proc.signalCode !== null && Date.now() >= deadline)
       return { exitCode: 124, stdout, stderr: `${stderr}\nphase budget exhausted; earlier phases may have landed` }
     return { exitCode, stdout, stderr }
@@ -39,10 +51,11 @@ const PROBE_ARGS: readonly (readonly string[])[] = [["--version"], ["version"], 
  * every probe. Returns null when `bin` runs, else the failure detail; a probe cut
  * off by the phase deadline says so, because the binary may well be on PATH.
  */
-export async function unavailable(bin: string, deadline: number): Promise<string | null> {
+export async function unavailable(bin: string, deadline: number, signal?: AbortSignal): Promise<string | null> {
   for (const args of PROBE_ARGS) {
-    const r = await run([bin, ...args], undefined, deadline)
+    const r = await run([bin, ...args], undefined, deadline, signal)
     if (r.exitCode === 0) return null
+    if (signal?.aborted === true) return STOPPED
     if (r.exitCode === 124 && Date.now() >= deadline) return `${bin} probe timed out`
   }
   return `${bin} not on PATH or does not run`
@@ -222,7 +235,7 @@ export function output(result: RunResult): string {
  * Bootstrap `params.workspace`, resolved against the caller's `cwd`. Every phase
  * detects work already done and skips it, so a rerun resumes after a failure.
  */
-export async function runSetup(params: SetupParams, cwd: string): Promise<SetupResult> {
+export async function runSetup(params: SetupParams, cwd: string, signal?: AbortSignal): Promise<SetupResult> {
   const repo = resolve(cwd, params.workspace ?? ".")
   const phases: PhaseResult[] = []
   const record = (phase: string, status: PhaseResult["status"], detail: string) =>
@@ -249,9 +262,9 @@ export async function runSetup(params: SetupParams, cwd: string): Promise<SetupR
     else {
       current = "specify"
       const deadline = budget()
-      const specifyMissing = await unavailable("specify", deadline)
+      const specifyMissing = await unavailable("specify", deadline, signal)
       if (specifyMissing) return fail(specifyMissing)
-      const ver = await run(["specify", "--version"], repo, deadline)
+      const ver = await run(["specify", "--version"], repo, deadline, signal)
       if (ver.exitCode !== 0 || !specifyVersionOk(`${ver.stdout}\n${ver.stderr}`))
         return fail(`specify-cli >= 0.12.0 required. Got: ${ver.stdout || ver.stderr}`)
       record(current, "done", ver.stdout.trim())
@@ -273,6 +286,7 @@ export async function runSetup(params: SetupParams, cwd: string): Promise<SetupR
           ],
           repo,
           budget(),
+          signal,
         )
         if (init.exitCode !== 0) return fail(output(init))
         record(current, "done", "scaffolded .specify/")
@@ -304,6 +318,7 @@ export async function runSetup(params: SetupParams, cwd: string): Promise<SetupR
             ["specify", "extension", "catalog", "add", "--name", "community", "--install-allowed", CATALOG_URL],
             repo,
             budget(),
+            signal,
           )
           if (catalog.exitCode !== 0) return fail(output(catalog))
           record(current, "done", "registered as an install source (installAllowed=true)")
@@ -320,7 +335,8 @@ export async function runSetup(params: SetupParams, cwd: string): Promise<SetupR
           record(current, "skipped", "already installed")
           continue
         }
-        const add = await run(["specify", "extension", "add", ext], repo, budget())
+        const add = await run(["specify", "extension", "add", ext], repo, budget(), signal)
+        if (signal?.aborted === true) return fail(STOPPED)
         if (add.exitCode !== 0) {
           // Optional upstream capabilities must not block beads or formula setup.
           // No success is written to the registry; a rerun retries this extension.
@@ -334,12 +350,12 @@ export async function runSetup(params: SetupParams, cwd: string): Promise<SetupR
     if (params.skipBeads) record(current, "skipped", "beads explicitly omitted; molecule workflows are unavailable")
     else {
       const deadline = budget()
-      const bdMissing = await unavailable("bd", deadline)
+      const bdMissing = await unavailable("bd", deadline, signal)
       if (bdMissing) return fail(`${bdMissing}; install beads or explicitly set skipBeads=true for SpecKit-only setup`)
-      const where = await run(["bd", "where"], repo, deadline)
+      const where = await run(["bd", "where"], repo, deadline, signal)
       if (where.exitCode === 0) record(current, "skipped", "beads workspace already present")
       else {
-        const init = await run(["bd", "init", "--skip-hooks"], repo, deadline)
+        const init = await run(["bd", "init", "--skip-hooks"], repo, deadline, signal)
         if (init.exitCode !== 0) return fail(`bd init: ${output(init)}`)
         record(current, "done", "bd init --skip-hooks")
       }

@@ -982,19 +982,26 @@ import { appendFileSync, copyFileSync, existsSync as existsSync3, lstatSync, mkd
 import { dirname, isAbsolute as isAbsolute2, join as join4, parse, resolve as resolve2, sep } from "path";
 import { fileURLToPath } from "url";
 var PHASE_TIMEOUT_MS = 60000;
-async function run(argv, cwd, deadline) {
+var STOPPED = "stopped by the tool call; rerun to resume, finished phases are skipped";
+var isStopped = (signal) => signal?.aborted === true;
+async function run(argv, cwd, deadline, signal) {
+  if (signal?.aborted === true)
+    return { exitCode: 130, stdout: "", stderr: STOPPED };
   const remaining = deadline - Date.now();
   if (remaining <= 0)
     return { exitCode: 124, stdout: "", stderr: "phase budget exhausted; earlier phases may have landed" };
   if (testSpawn)
     return testSpawn(argv, { cwd, timeout: remaining });
   try {
-    const proc = Bun.spawn(argv, { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", timeout: remaining });
+    const proc = Bun.spawn(argv, { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", timeout: remaining, env: process.env, ...signal ? { signal } : {} });
     const [stdout, stderr, exitCode] = await Promise.all([
       new Response(proc.stdout).text(),
       new Response(proc.stderr).text(),
       proc.exited
     ]);
+    if (isStopped(signal))
+      return { exitCode: 130, stdout, stderr: `${stderr}
+${STOPPED}` };
     if (proc.signalCode !== null && Date.now() >= deadline)
       return { exitCode: 124, stdout, stderr: `${stderr}
 phase budget exhausted; earlier phases may have landed` };
@@ -1005,11 +1012,13 @@ phase budget exhausted; earlier phases may have landed` };
   }
 }
 var PROBE_ARGS = [["--version"], ["version"], ["-h"]];
-async function unavailable(bin, deadline) {
+async function unavailable(bin, deadline, signal) {
   for (const args of PROBE_ARGS) {
-    const r = await run([bin, ...args], undefined, deadline);
+    const r = await run([bin, ...args], undefined, deadline, signal);
     if (r.exitCode === 0)
       return null;
+    if (signal?.aborted === true)
+      return STOPPED;
     if (r.exitCode === 124 && Date.now() >= deadline)
       return `${bin} probe timed out`;
   }
@@ -1151,7 +1160,7 @@ function output(result) {
   return [result.stderr.trim(), result.stdout.trim()].filter(Boolean).join(`
 `) || `exit ${result.exitCode}`;
 }
-async function runSetup(params, cwd) {
+async function runSetup(params, cwd, signal) {
   const repo = resolve2(cwd, params.workspace ?? ".");
   const phases = [];
   const record = (phase, status, detail) => phases.push({ phase, status, detail });
@@ -1179,10 +1188,10 @@ async function runSetup(params, cwd) {
     else {
       current = "specify";
       const deadline = budget();
-      const specifyMissing = await unavailable("specify", deadline);
+      const specifyMissing = await unavailable("specify", deadline, signal);
       if (specifyMissing)
         return fail(specifyMissing);
-      const ver = await run(["specify", "--version"], repo, deadline);
+      const ver = await run(["specify", "--version"], repo, deadline, signal);
       if (ver.exitCode !== 0 || !specifyVersionOk(`${ver.stdout}
 ${ver.stderr}`))
         return fail(`specify-cli >= 0.12.0 required. Got: ${ver.stdout || ver.stderr}`);
@@ -1201,7 +1210,7 @@ ${ver.stderr}`))
           "--script",
           script,
           "--ignore-agent-tools"
-        ], repo, budget());
+        ], repo, budget(), signal);
         if (init.exitCode !== 0)
           return fail(output(init));
         record(current, "done", "scaffolded .specify/");
@@ -1219,7 +1228,7 @@ ${ver.stderr}`))
         else if (state === "conflict")
           return fail("a community catalog entry with other settings exists in .specify/extension-catalogs.yml; resolve it explicitly, then retry");
         else {
-          const catalog = await run(["specify", "extension", "catalog", "add", "--name", "community", "--install-allowed", CATALOG_URL], repo, budget());
+          const catalog = await run(["specify", "extension", "catalog", "add", "--name", "community", "--install-allowed", CATALOG_URL], repo, budget(), signal);
           if (catalog.exitCode !== 0)
             return fail(output(catalog));
           record(current, "done", "registered as an install source (installAllowed=true)");
@@ -1233,7 +1242,9 @@ ${ver.stderr}`))
           record(current, "skipped", "already installed");
           continue;
         }
-        const add = await run(["specify", "extension", "add", ext], repo, budget());
+        const add = await run(["specify", "extension", "add", ext], repo, budget(), signal);
+        if (signal?.aborted === true)
+          return fail(STOPPED);
         if (add.exitCode !== 0) {
           record(current, "skipped", `not installed: ${output(add)}${hint}`);
           continue;
@@ -1246,14 +1257,14 @@ ${ver.stderr}`))
       record(current, "skipped", "beads explicitly omitted; molecule workflows are unavailable");
     else {
       const deadline = budget();
-      const bdMissing = await unavailable("bd", deadline);
+      const bdMissing = await unavailable("bd", deadline, signal);
       if (bdMissing)
         return fail(`${bdMissing}; install beads or explicitly set skipBeads=true for SpecKit-only setup`);
-      const where = await run(["bd", "where"], repo, deadline);
+      const where = await run(["bd", "where"], repo, deadline, signal);
       if (where.exitCode === 0)
         record(current, "skipped", "beads workspace already present");
       else {
-        const init = await run(["bd", "init", "--skip-hooks"], repo, deadline);
+        const init = await run(["bd", "init", "--skip-hooks"], repo, deadline, signal);
         if (init.exitCode !== 0)
           return fail(`bd init: ${output(init)}`);
         record(current, "done", "bd init --skip-hooks");
@@ -2445,12 +2456,12 @@ function readSetupParams(input) {
   }
   return params;
 }
-async function executeSetup(input, directory, integration = DEFAULT_INTEGRATION) {
+async function executeSetup(input, directory, integration = DEFAULT_INTEGRATION, signal) {
   const params = readSetupParams(input);
   if (typeof params === "string")
     return { content: `${SETUP_TOOL}: ${params}`, metadata: { ok: false } };
   try {
-    const result = await runSetup({ integration, ...params }, directory);
+    const result = await runSetup({ integration, ...params }, directory, signal);
     return { content: result.text, metadata: { ok: result.ok, phases: result.phases } };
   } catch (error) {
     return {
@@ -2579,7 +2590,7 @@ async function setupSpeckit(ctx, overrides = {}) {
         execute: async (input, context) => {
           const cwd = await directory(context.sessionID);
           await assert(context, SETUP_TOOL, cwd, { ...input });
-          const result = await executeSetup(input, cwd, options.integration);
+          const result = await executeSetup(input, cwd, options.integration, context.signal);
           if (cwd === location) {
             active = await probe(location);
             await refreshSkills?.();

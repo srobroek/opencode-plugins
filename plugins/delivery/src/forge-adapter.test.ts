@@ -7,11 +7,10 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
-  watch,
   writeFileSync,
 } from "node:fs"
 import { devNull, tmpdir } from "node:os"
-import { dirname, join } from "node:path"
+import { join } from "node:path"
 
 import * as adapter from "./forge-adapter.ts"
 import {
@@ -1509,17 +1508,17 @@ describe("the absence probe against real processes", () => {
   }, 60_000)
 })
 
-/** Resolve once `file` exists, on the directory's change events rather than a polling clock. */
-function appeared(file: string): Promise<void> {
-  const { promise, resolve } = Promise.withResolvers<void>()
-  const settle = (): void => {
-    if (!existsSync(file)) return
-    watcher.close()
-    resolve()
+/**
+ * Resolve once `file` exists. A short poll rather than `fs.watch`: under heavy load a
+ * watcher can miss or delay the event for the whole test budget, while a poll sees the
+ * file within a few milliseconds of its rename and fails with a clear error if it never comes.
+ */
+async function appeared(file: string, ms = 20_000): Promise<void> {
+  const deadline = Date.now() + ms
+  while (!existsSync(file)) {
+    if (Date.now() > deadline) throw new Error(`${file} did not appear within ${ms}ms`)
+    await Bun.sleep(5)
   }
-  const watcher = watch(dirname(file), settle)
-  settle()
-  return promise
 }
 
 /**
@@ -1619,7 +1618,7 @@ describe("runCli against real processes", () => {
     expect(result.stdout).toBe("started\n")
     expect(await exitsWithin(pid(self))).toBe(true)
     expect(await exitsWithin(pid(child))).toBe(true)
-  }, 60_000)
+  }, 20_000)
 
   test("the deadline ends a command whose child still holds stdout open", async () => {
     const script = join(dir, "holds-stdout")

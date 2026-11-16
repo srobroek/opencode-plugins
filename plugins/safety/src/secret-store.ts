@@ -472,6 +472,11 @@ function outcome(result: RunResult, stage: string): string | undefined {
   return `${stage} ended without an exit status`
 }
 
+/** A stop can land mid-write, so a cancelled write may or may not have stored the value. */
+function unsure(failure: string): string {
+  return failure.endsWith("was cancelled") ? "; the write may have completed, so check the store before retrying" : ""
+}
+
 function quoted(word: string): string {
   return `'${word.replaceAll("'", "'\\''")}'`
 }
@@ -576,13 +581,15 @@ export async function storeSecret(input: unknown, deps: StoreDeps): Promise<Stor
     const after = deps.snapshot(file)
     if (after === undefined) return fail(changed)
     if (after.digest !== before.digest || deps.realpath(requested) !== file || validProvider(target, after) !== provider) fail(changed)
+    // Last point where a stop writes nothing: past it the write below runs to its end.
+    if (deps.signal?.aborted === true) fail(`stopped before writing ${name}; nothing was stored`)
     if (target.kind === "fnox-store") {
       if (edgeWhitespace(value)) {
         fail(`the value for ${name} starts or ends with whitespace, which fnox would trim; nothing was stored`)
       }
       stdin = value
       const failure = outcome(await deps.run(fnoxSet([name]), { ...common, stdin, timeoutMs: FNOX_TIMEOUT_MS }), "fnox set")
-      if (failure !== undefined) fail(`${failure} storing ${name}; not retried`)
+      if (failure !== undefined) fail(`${failure} storing ${name}; not retried${unsure(failure)}`)
       return { name, provider, stored: true }
     }
     stdin = itemTemplate(target, value)
@@ -590,11 +597,16 @@ export async function storeSecret(input: unknown, deps: StoreDeps): Promise<Stor
       await deps.run([op as string, "item", "create", `--vault=${target.vault}`, "-"], { ...common, stdin, timeoutMs: OP_TIMEOUT_MS }),
       "op item create",
     )
-    if (created !== undefined) fail(`${created} storing ${name} (a 1Password approval may have been refused or timed out); not retried`)
+    if (created !== undefined) fail(`${created} storing ${name} (a 1Password approval may have been refused or timed out); not retried${unsure(created)}`)
     // `item/field` resolves in the provider's vault; a full op:// reference names the vault the item went to.
     const short = `${target.item}/${target.field}`
     const reference = after.setting(provider, "vault") === target.vault ? short : `op://${target.vault}/${short}`
-    const recorded = outcome(await deps.run(fnoxSet([name, reference]), { ...common, timeoutMs: FNOX_TIMEOUT_MS }), "fnox set")
+    // Critical section: the item exists, so recording its reference ignores the signal; a stop
+    // here would leave an item nothing points to. The stop is honored once this returns.
+    const recorded = outcome(
+      await deps.run(fnoxSet([name, reference]), { cwd: common.cwd, env: common.env, timeoutMs: FNOX_TIMEOUT_MS }),
+      "fnox set",
+    )
     if (recorded !== undefined) {
       fail(`${recorded} after the 1Password item was created; record it with \`fnox set ${name} ${quoted(reference)} --provider ${provider}\``)
     }

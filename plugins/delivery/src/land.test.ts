@@ -2467,11 +2467,11 @@ describe("delivery_land brings the landed commits local before proving their sha
     expect(fetches(fixture.calls).map(operands)).toEqual([["origin", MERGE_OID, HEAD_OID]])
   })
 
-  test("an abort while waiting to retry stops before the next fetch", async () => {
+  test("an abort while waiting to retry stops before the next fetch when no merge was issued here", async () => {
     const { canonical, receipts } = repository()
     const { run, calls } = runner(
       {
-        prView: [completed(githubPr()), completed(mergedGithubPr())],
+        prView: [completed(mergedGithubPr())],
         present: [false, false, false],
         fetch: [
           { ok: true, exitCode: 128, stdout: "", stderr: "" },
@@ -2492,8 +2492,40 @@ describe("delivery_land brings the landed commits local before proving their sha
     expect(outcome.ok).toBe(false)
     if (outcome.ok) throw new Error("expected a refusal")
     expect(outcome.reason).toContain("signal: observed an abort while fetching")
-    expect(outcome.mergeIssued).toBe(true)
+    expect(outcome.mergeIssued).toBeUndefined()
     expect(fetches(calls)).toHaveLength(2)
+  })
+
+  test.each([false, true])("an abort during the merge still records the receipt and later commands run unsignalled (setupAutoDelete %p)", async (setupAutoDelete) => {
+    const { canonical, receipts } = repository()
+    mkdirSync(join(canonical, ".beads"))
+    const { run, calls } = runner({ prView: [completed(githubPr()), completed(mergedGithubPr())] }, canonical)
+    const controller = new AbortController()
+    let afterMerge = false
+    const seen: Array<AbortSignal | undefined> = []
+    const aborting: CliRunner = (argv, options) => {
+      if (afterMerge) seen.push(options.signal)
+      if (merged(argv)) {
+        afterMerge = true
+        controller.abort()
+      }
+      return run(argv, options)
+    }
+    const outcome = await landPullRequest(
+      { pr: 470, ...REVIEWED, ...(setupAutoDelete ? { setupAutoDelete } : {}) },
+      { run: aborting, cwd: canonical, now: () => NOW, receiptsDirectory: receipts, env: {}, signal: controller.signal },
+    )
+
+    if (!outcome.ok) throw new Error(outcome.reason)
+    expect(readdirSync(receipts)).toHaveLength(1)
+    expect(calls.filter((call) => merged(call.argv))).toHaveLength(1)
+    expect(seen.length).toBeGreaterThan(0)
+    expect(seen.every((signal) => signal === undefined)).toBe(true)
+  })
+
+  test("without a signal a clean land behaves as before", async () => {
+    const { outcome } = await land({ prView: [completed(githubPr()), completed(mergedGithubPr())] }, REVIEWED)
+    expect(outcome.ok).toBe(true)
   })
 
   test("against real Git, a squash the forge landed on the remote is fetched and proved", async () => {
