@@ -1,8 +1,10 @@
 # Python testing practice
 
-Checked 2026-11-12.
+Checked 2026-11-16.
 
-Python idioms and tool choices for small, behavior-focused suites using `pytest` `9`.
+Python idioms and tool choices for small, behavior-focused suites using `pytest`. Tool defaults, minimum versions and install commands are in
+[testing.md](../../lang-python-libraries/references/testing.md); detect a missing tool, recommend
+its install command and ask before adding the dependency.
 Use `quality-testing` for what to test, the behavior budget, same-change maintenance,
 and review rules; the parent skill keeps runner commands and configuration.
 
@@ -136,12 +138,18 @@ or automatically update in CI. Review every update as a changed expectation.
 
 ## Fuzzing, mutation testing and coverage
 
-Do target `mutmut` `3` at critical changed pure logic; use its incremental results and
+Do target `mutmut` at critical changed pure logic; use its incremental results and
 test selection for feedback, then periodically rerun without stale results. It needs
-`fork`; check platform support. Investigate meaningful surviving mutants, not a universal score.
-Use `Atheris` for hostile byte parsers/native-extension crash risks: bound CI campaigns,
-run longer scheduled campaigns, and preserve minimized failures as regression inputs.
-Do not start with whole-project mutation or fuzzing when ordinary properties suffice.
+`fork` (POSIX or WSL) and exports no schema, so `quality_test_compare` cannot read it;
+use `cosmic-ray` on Windows or when a Stryker-schema report must be compared. Run
+mutation on the diff in each pull request (blocking only on critical paths) and on a schedule.
+Investigate meaningful surviving mutants, not a universal score.
+Use `Atheris` for hostile byte parsers and native-extension crash risks: bound the CI
+campaign, run longer campaigns on a schedule with ClusterFuzzLite (or OSS-Fuzz for accepted
+open-source projects), and keep the corpus and minimized failures as regression inputs.
+Its PyPI wheels cover Linux x86_64 only; elsewhere it needs a source build, so fall back to
+`hypothesis` for pure-Python parsers. Do not start with whole-project mutation or fuzzing
+when ordinary properties suffice.
 
 Do measure branch coverage with `pytest-cov`/`coverage.py`, and use `diff-cover` on
 coverage XML for changed-line gaps. Affected-test selection is not changed-line coverage.
@@ -152,18 +160,26 @@ diff-cover coverage.xml --compare-branch=origin/main
 ```
 
 Use the project's actual comparison base. `pytest-testmon` can accelerate local
-affected-test runs but must not be the sole correctness gate. Do not infer assertion
+affected-test runs (pair it with `pytest-watcher`, the `watch` row) but must not be the sole correctness gate. Do not infer assertion
 strength from execution coverage or add vacuous tests to reach a percentage.
 
 ## Flaky tests
 
 Do diagnose repeated runs and shuffled order with `pytest-randomly`; save its failing
-seed. Check leaked globals, clocks, random data, port collisions, and task cleanup.
-Use repetition tooling only after checking compatibility with the pinned runner;
-`pytest-flakefinder` compatibility with `pytest` `9` is not established here.
-Do not install blanket retries. Keep retries off by default and record first failures.
+seed, and reproduce one suspect test with `pytest-repeat`. Check leaked globals, clocks,
+random data, port collisions, and task cleanup.
+Do not install blanket retries: `pytest-rerunfailures` masks failures. Keep retries off by
+default and record first failures. Run shuffled order on a schedule.
 Quarantine needs an issue, owner, expiry, and a separate reporting/failing lane;
 do not silently delete the scenario or permanently skip it.
+
+## Concurrency
+
+Do test thread safety with `pytest-run-parallel`, which runs each test in several
+threads (most useful on free-threaded builds); native extension code also needs a
+thread-sanitizer CPython build. `pytest-xdist` runs tests in separate processes and is
+not race evidence. Test asyncio interleavings with explicit events, barriers and
+cancellation. `pytest-freethreaded` is abandoned.
 
 ## Bad tests and fixes
 

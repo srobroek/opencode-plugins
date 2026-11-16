@@ -6,13 +6,13 @@ Checked 2026-11-12.
 
 | Concern | Default | Use instead when | Avoid (why) |
 | --- | --- | --- | --- |
-| MCP client/server | Official `rmcp` `3.9` | Unsupported requirement is named and a reviewed alternative passes protocol fixtures | Stale unofficial SDK tutorials or a bespoke JSON-RPC imitation. |
-| MCP transports | `rmcp` `3.9` stdio or Streamable HTTP | Existing compatible peer requires a negotiated older protocol | Stdout logs on stdio; treating legacy HTTP+SSE as current Streamable HTTP. |
-| OpenAI | Community `async-openai` `0.43` | `reqwest` `0.13` for precise unsupported provider endpoints | Assuming community ownership means official provider support. |
-| Multi-provider agents | `rig-core` `0.46` | Thin `async-openai` `0.43`/SDK adapters for a fixed workflow | Framework adoption for one call; ignoring current MSRV `1.97.1` and modular API changes. |
-| Anthropic | Reviewed `reqwest` `0.13` adapter | Community `anthropic-async` `0.5` after API/maintenance evaluation | Claiming an official Rust SDK; `anthropic-sdk` `0.1` is an old community release. |
-| Bedrock | Service-specific `aws-sdk-*` `1` | `rig-core` `0.46` when its provider covers required operations | Generic abstractions hiding required Converse/streaming/tool capabilities. |
-| GenAI telemetry | `opentelemetry_sdk` `0.33`, `tracing-opentelemetry` `0.34` | Existing reviewed instrumentation supplies compatible spans | Prompt/completion capture by default; calling development conventions stable. |
+| MCP client/server | Official `rmcp` `>= 3.9` | Unsupported requirement is named and a reviewed alternative passes protocol fixtures | Stale unofficial SDK tutorials or a bespoke JSON-RPC imitation. |
+| MCP transports | `rmcp` `>= 3.9` stdio or Streamable HTTP | Existing compatible peer requires a negotiated older protocol | Stdout logs on stdio; treating legacy HTTP+SSE as current Streamable HTTP. |
+| OpenAI | Community `async-openai` `>= 0.43` | `reqwest` `>= 0.13` for precise unsupported provider endpoints | Assuming community ownership means official provider support. |
+| Multi-provider agents | `rig-core` `>= 0.46` | Thin `async-openai` `>= 0.43`/SDK adapters for a fixed workflow | Framework adoption for one call; ignoring current MSRV `1.97.1` and modular API changes. |
+| Anthropic | Reviewed `reqwest` `>= 0.13` adapter | Community `anthropic-async` `>= 0.5` after API/maintenance evaluation | Claiming an official Rust SDK; `anthropic-sdk` `>= 0.1` is an old community release. |
+| Bedrock | Service-specific `aws-sdk-*` `>= 1` | `rig-core` `>= 0.46` when its provider covers required operations | Generic abstractions hiding required Converse/streaming/tool capabilities. |
+| GenAI telemetry | `opentelemetry_sdk` `>= 0.33`, `tracing-opentelemetry` `>= 0.34` | Existing reviewed instrumentation supplies compatible spans | Prompt/completion capture by default; calling development conventions stable. |
 
 ## Rules
 

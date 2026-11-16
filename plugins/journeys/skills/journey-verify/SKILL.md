@@ -62,8 +62,19 @@ the rest run in parallel.
 4. **Reindex once** per wave: `journeys_index` command `index` (or
    `python3 <journeys-dir>/journeys.py index <journeys-dir>` when using the copied helper), then lint.
 5. **Commit** journeys-dir changes as
-   `journey(J<id>): validate v<version> — <result>` -- unless the caller or
+   `journey(J<id>): validate v<version> -- <result>` -- unless the caller or
    repo workflow forbids committing; then leave uncommitted and say so.
+
+## Journeys and E2E specs
+
+When a journey has a deterministic spec (its id is in the spec title or annotation; see
+`journey-write`), the journey remains the source of truth.
+
+- List journeys without a spec in the report, so the owner can decide which to automate.
+- When a spec fails, re-validate its journey first. A journey that still passes means the spec
+  has a stale selector or timing fault, so fix the spec. A journey that fails is a product
+  regression.
+- Never commit a healer rewrite of a spec without review.
 
 ## Close the loop
 

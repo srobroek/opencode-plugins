@@ -17,3 +17,5 @@ skill, not from this table.
 | Validating only the journeys a diff, PR or branch touches | `journey-verify-changed` |
 | Fleet-scale journey or issue validation: fan out validators, fix, re-validate until green | `journey-campaign` |
 | Advancing a journey checkpoint with approval: flush delta logs, prune runs, regenerate the index | `journey-consolidate` |
+
+Turning a passed journey into a deterministic E2E spec, and telling a spec failure from a regression, is covered in `journey-write` and `journey-verify`.

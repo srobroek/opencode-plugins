@@ -21,12 +21,20 @@ of git (`lang-go-packaging`). Pin dev tools with `go get -tool <pkg>` and run th
 | Base | standard library first |
 | CLI | `urfave/cli` when plain `flag` is not enough |
 | Config | `koanf` for layered configuration |
-| Lint + format | `golangci-lint` v2: `.golangci.yml` with `version: "2"`, `linters.default: standard`, enable `errcheck govet ineffassign staticcheck unused` plus `gosec` (off in the standard set, so no security lint without it) and `revive` (its `exported` rule as a warning), `run.timeout: 5m`; formatters enabled; import layering with `depguard` rules |
-| Tests | `go test -race ./...`; table tests, `httptest`, fuzzing (`lang-go-testing`) |
+| Lint + format | `golangci-lint` (v2 config format or newer): `.golangci.yml` with `version: "2"`, `linters.default: standard`, enable `errcheck govet ineffassign staticcheck unused` plus `gosec` (off in the standard set, so no security lint without it) and `revive` (its `exported` rule as a warning), `run.timeout: 5m`; formatters enabled; import layering with `depguard` rules |
+| Tests | `go test -race ./...`; table tests, `httptest` (`lang-go-testing`) |
+| Property | `pgregory.net/rapid` |
+| Fuzz | built-in `go test -fuzz` |
+| Mutation | `gremlins` (`go tool gremlins`) |
+| Flaky / order | `-shuffle=on -count=N` |
+| API break (libraries only) | `go-apidiff` on PRs and at release |
+| Docs | doc comments and `Example` functions with `// Output:` |
 | Vulnerabilities | Project-pinned `go tool govulncheck ./...` (`go get -tool golang.org/x/vuln/cmd/govulncheck@<version>` during setup) |
 | Dead code | Optional pinned `golang.org/x/tools/cmd/deadcode`: `go tool deadcode -test ./...` for executable/test roots; whole-program reachability complements `unused`/`staticcheck`, not a library API deletion list |
 | Complexity | Optional golangci-lint v2 `gocyclo`/`gocognit`; start at 10-12/15 and ratchet reviewed exceptions |
 | Vendoring | no `vendor/` unless the user wants it |
+
+Tool versions and install commands: the concerns tables in `lang-go-libraries` (`references/testing.md`, `references/quality.md`); minimums only. Detect, recommend, ask before installing (`toolchain-languages`, `references/concerns.md`).
 
 HTTP router, database access and logging: ask the user (sources are silent; `log/slog`
 is the standard-library option to propose). Observability per `toolchain-quality-observability`.

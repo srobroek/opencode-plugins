@@ -6,14 +6,14 @@ Checked 2026-11-12.
 
 | Concern | Default | Use instead when | Avoid (why) |
 | --- | --- | --- | --- |
-| Arguments | Standard argument parser for tiny CLIs; `commander` `15` for subcommands/help | `citty` `0.2` for UnJS; `yargs` `18` for parser features; `cac` `7` for small CLIs; existing framework when migration is not requested. | Reimplementing option parsing/help; accidental Clipanion `4` release-candidate adoption. |
-| Prompts | `@clack/prompts` `1` | Existing prompt library or non-interactive flags in automation. | Waiting for input in CI; printing secrets or ignoring cancellation. |
-| TUI | `ink` `8` when a React terminal UI is needed | Plain text for ordinary command output. | A full UI framework for one prompt; assuming TTY support or Bun compatibility without tests. |
-| Color | `picocolors` `1` | Existing renderer's color support. | Forced ANSI codes in redirected output; color as the only status indication. |
-| CLI logging | `consola` `3` | `pino` `10` when machine-readable structured logs are required. | Mixing diagnostics into machine-readable stdout. |
-| Env files | Node native env-file support; Bun built-in env loading | `dotenv` `18` for existing loader/tool compatibility. | Adding env loaders without checking runtime support; committing real secrets. |
-| Settings validation | `zod` `4` once at startup | `@t3-oss/env-core` `0.13` for server/client env boundaries; `envalid` `9` for env-specific validators. | Unchecked env in business code; coercing string `"false"` to true; client bundles with server secrets. |
-| Layered config | Native file/env handling for simple settings | `c12` `3` when layered config/loading semantics are needed. | Adopting `c12` `latest` prereleases automatically; executing untrusted config files. |
+| Arguments | Standard argument parser for tiny CLIs; `commander` `>= 15` for subcommands/help | `citty` `>= 0.2` for UnJS; `yargs` `>= 18` for parser features; `cac` `>= 7` for small CLIs; existing framework when migration is not requested. | Reimplementing option parsing/help; accidental Clipanion `4` release-candidate adoption. |
+| Prompts | `@clack/prompts` `>= 1` | Existing prompt library or non-interactive flags in automation. | Waiting for input in CI; printing secrets or ignoring cancellation. |
+| TUI | `ink` `>= 8` when a React terminal UI is needed | Plain text for ordinary command output. | A full UI framework for one prompt; assuming TTY support or Bun compatibility without tests. |
+| Color | `picocolors` `>= 1` | Existing renderer's color support. | Forced ANSI codes in redirected output; color as the only status indication. |
+| CLI logging | `consola` `>= 3` | `pino` `>= 10` when machine-readable structured logs are required. | Mixing diagnostics into machine-readable stdout. |
+| Env files | Node native env-file support; Bun built-in env loading | `dotenv` `>= 18` for existing loader/tool compatibility. | Adding env loaders without checking runtime support; committing real secrets. |
+| Settings validation | `zod` `>= 4` once at startup | `@t3-oss/env-core` `>= 0.13` for server/client env boundaries; `envalid` `>= 9` for env-specific validators. | Unchecked env in business code; coercing string `"false"` to true; client bundles with server secrets. |
+| Layered config | Native file/env handling for simple settings | `c12` `>= 3` when layered config/loading semantics are needed. | Adopting `c12` `latest` prereleases automatically; executing untrusted config files. |
 
 ## Rules
 

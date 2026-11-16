@@ -34,6 +34,13 @@ already exists:
 - `journey-consolidate`: flush delta logs, prune runs and regenerate the index,
   with human approval.
 
+## Journeys and E2E specs
+
+Journeys stay the agent-validated source of truth. After a journey passes, its stable steps may
+become a deterministic E2E spec tagged with the journey id; `journey-write` and `journey-verify`
+describe the workflow. The tool for each surface is in the `e2e` row of `surfaces.md` in the
+`toolchain-languages` skill.
+
 ## Agents
 
 The plugin adds two subagents from `agents/`, converted from the omp agents with
@@ -88,5 +95,5 @@ be prompted:
 
 Each validator records its journey's run and findings. The coordinator alone
 updates the shared `INDEX.md` and `TRACKER.md` and commits journeys-directory
-changes per wave. The filesystem safety checks are preflight checks, not locks
-against concurrent writers.
+changes per wave. The filesystem safety checks are preflight checks and give no
+lock against concurrent writers.

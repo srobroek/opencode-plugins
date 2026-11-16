@@ -15,7 +15,11 @@ directory with `Cargo.toml`):
 | Format check | `cargo fmt --check` |
 | Lint | `cargo clippy --all-targets --all-features -- -D warnings` |
 | Test | `cargo nextest run` and `cargo test --doc` |
-| Dependencies | Configured `cargo deny check` and `cargo machete`, preferably through the project's `just` tasks |
+| Docs | `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features` |
+| Dependencies | Configured `cargo deny check` and an unused-dependency check (`cargo shear` or `cargo machete`), preferably through the project's `just` tasks |
+| API break (published libraries) | `cargo semver-checks` (the gate; `cargo-public-api` only for a committed API snapshot) |
+| Mutation (changed code) | `cargo mutants --in-place --no-shuffle --in-diff git.diff` |
+| Undefined behaviour (unsafe code) | `cargo +nightly miri nextest run` or `cargo +nightly careful test` |
 | Format fix | `cargo fmt` |
 
 Run them in that order and stop at the first failure you need to fix. In a
@@ -29,11 +33,21 @@ break, usually revealing an isolation bug. Shared files, ports, and databases st
 need isolation. Keep retries off by default. Use plain `cargo test` only when nextest
 cannot be installed.
 
-Keep the scaffold's configured deny/machete gate: deny covers advisories, licences,
-bans and sources; machete covers unused dependencies, not rustc `dead_code` warnings.
-Check supported feature/target combinations before deleting findings. Optional
-`cargo-shear` pilot and nightly `cargo-udeps` fallback are in `project-scaffold`'s
-`references/rust.md`; do not stack them as mandatory gates. For cognitive complexity,
+Keep the scaffold's configured deny gate: deny covers advisories, licences, bans and
+sources. Unused dependencies use one tool (`cargo-shear` by default, `cargo-machete` for
+speed, nightly `cargo-udeps` for accuracy); they do not replace rustc `dead_code`
+warnings. Check supported feature/target combinations before deleting findings, and do
+not stack the scanners as mandatory gates.
+
+Run mutation under the default `cargo test` so doctests count; `--test-tool=nextest`
+skips them. A test-only diff selects no mutants. Run Miri or `cargo careful` on a
+schedule for crates with unsafe code, and skip them under `#![forbid(unsafe_code)]` only when no unsafe dependency is in scope.
+Run `cargo semver-checks` for published libraries only.
+
+Tool choices per concern are in `lang-rust-libraries`' `references/testing.md` and
+`references/quality.md`. Install policy: detect the tool, recommend the install command
+(`cargo binstall`, `cargo install --locked`, `rustup component add`), and ask the user
+before installing; report a declined or missing tool as not run. For cognitive complexity,
 run Lizard (`lizard -Ecognitive --CogC 15 src`) after checking its scores on a few
 representative files, or SonarQube Cloud or Server; do not gate on Clippy
 `cognitive_complexity`, which is not Sonar-equivalent and skips tests and macros.

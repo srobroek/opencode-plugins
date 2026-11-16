@@ -209,6 +209,21 @@ One tool per gate.
 
 Security rules in a linter check what the document declares, not how the server behaves.
 
+Versions, install commands, licences and tradeoffs for Schemathesis, Pact, Hurl, oasdiff and k6 are in `toolchain-languages`' [shared-tools.md](../toolchain-languages/references/shared-tools.md); this table gives only the choice per gate.
+
+## Contract gates by style
+
+Every style has a schema gate on every PR. Where significant internal services you own call each other and deploy independently, add Pact (consumer-driven contracts, a Pact Broker, `can-i-deploy`). Public and third-party consumers get the schema gate only. Versions, install commands and the Pact conditions are in [shared-tools.md](../toolchain-languages/references/shared-tools.md#contracts-by-api-style).
+
+| Style | Default gate | Required add-on for internal services |
+| --- | --- | --- |
+| HTTP/OpenAPI | `oasdiff` plus Schemathesis | Pact with Broker |
+| gRPC, protobuf, Connect | `buf breaking` and `buf lint` | Pact with `pact-protobuf-plugin` |
+| GraphQL | `graphql-inspector diff` | - |
+| Events | Registry compatibility mode plus `asyncapi validate` | Pact V4 message pacts |
+| Webhooks | The payload schema diff plus Standard Webhooks tests | - |
+| MCP servers | Committed `tools/list` snapshot diff | - |
+
 ## Rules
 
 1. State the protocol, the contract owner, the version and the support window.

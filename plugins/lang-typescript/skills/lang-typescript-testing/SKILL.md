@@ -29,7 +29,7 @@ vitest run --coverage
 ```
 
 `vitest` without `run` starts watch mode and never exits; in checks always use
-`vitest run`.
+`vitest run`. For the local red-green loop use `vitest --changed` or `bun test --watch`.
 
 ## Module mocks
 

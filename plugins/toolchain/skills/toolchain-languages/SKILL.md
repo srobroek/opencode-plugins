@@ -18,6 +18,11 @@ Checked 2026-11-12. This skill holds the cross-language rules and routes to the 
 | AWS Lambda structure, Powertools, Lambda telemetry, AWS service clients versus the raw SDK | `aws-guidance` |
 | Middleware and telemetry rules that hold in every language | `quality-code-design`: `middleware.md`, `telemetry.md` |
 | Quality and security scanners, dead-code tools, CI gates | `lang-<language>-quality`, `toolchain-quality-observability`, `ci-github-actions` |
+| Every language's testing and quality concerns (test runner, fuzzing, mutation, contracts, SAST, dependency audit and more); read before you choose or report a check | [references/concerns.md](references/concerns.md) |
+| Checks that depend on the product surface (web, mobile, desktop, HTTP API, CLI), not the language: end-to-end, visual, accessibility, journeys | [references/surfaces.md](references/surfaces.md) |
+| Tools shared by every language: Testcontainers, Pact, Schemathesis, Hurl, oasdiff, k6, OSV-Scanner, fuzzing services, Semgrep, Opengrep, CodeQL, Lizard, jscpd, Gitleaks; versions, install, tradeoffs | [references/shared-tools.md](references/shared-tools.md) |
+| Java, Kotlin, .NET, Ruby, PHP, Swift, C and C++ (documented choices, no language plugin) | [java](references/java.md), [kotlin](references/kotlin.md), [dotnet](references/dotnet.md), [ruby](references/ruby.md), [php](references/php.md), [swift](references/swift.md), [cpp](references/cpp.md) |
+| Shell, Terraform/OpenTofu and AWS CDK concerns | `shell-language`, `terraform-language`, `aws-guidance` (its `references/cdk.md`) |
 | A language without a `lang-<language>-libraries` skill | The rules below, then research as in step 2 |
 
 ## Choosing a language
@@ -69,9 +74,9 @@ Starting points, not rules:
 | Service clients | The SDK for control-plane calls and simple exact requests; a maintained higher-level library when it removes a concrete burden (mapping, pagination, multipart, leasing, caching, replay) or is markedly simpler, even when an official helper exists |
 | IDs and time | UUIDv7 for sortable ids (UUIDv4 when creation time must stay private); timezone-aware UTC instants |
 | Feature flags | Applications/services/CLIs: OpenFeature with one provider over flags.yaml, SSM or AppConfig, chosen by need; ask before writing a missing provider. Libraries take caller decisions; OpenCode plugins keep options. See `quality-code-design`'s `feature-flags.md` |
-| MCP | The official SDK for the language, pinned; stdio locally, Streamable HTTP remotely |
-| Tests | The language's standard runner, property tests for invariants, real dependencies in containers for integration tests |
+| MCP | The official SDK for the language, at least its current release; stdio locally, Streamable HTTP remotely |
+| Tests and quality checks | Every language fills the concerns in [references/concerns.md](references/concerns.md) in its own table; report a concern you could not run as not run |
 
 ## Java and .NET
 
-There are no language plugins for these. On Lambda, use Powertools for AWS Lambda (Java 2, .NET 3) and the AWS SDK; SnapStart for latency-sensitive Java functions after restore testing. Research other picks with the steps above.
+There are no language plugins for these. Read [references/java.md](references/java.md), [kotlin.md](references/kotlin.md) or [dotnet.md](references/dotnet.md) for the testing and quality tools, and [references/shared-tools.md](references/shared-tools.md) for the shared ones. On Lambda, use Powertools for AWS Lambda (Java 2, .NET 3) and the AWS SDK; SnapStart for latency-sensitive Java functions after restore testing. Research other picks with the steps above.

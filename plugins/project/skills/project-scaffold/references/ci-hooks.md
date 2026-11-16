@@ -47,7 +47,7 @@ fails on any change. Formatters and safe lint fixes stay in `just fmt`, never in
   `lychee --no-progress --accept 200,204,206,429 '**/*.md'` online link check, a
   Conventional Commits check across the PR's commit range (not just the commit-msg hook,
   which `--no-verify` skips). Cognitive complexity 15 per function on new code: `complexipy` (Python), Biome
-  `noExcessiveCognitiveComplexity` or `eslint-plugin-sonarjs` (TypeScript), `gocognit` (Go),
+  `noExcessiveCognitiveComplexity` (TypeScript), `gocognit` (Go),
   Lizard `-Ecognitive` (Rust, and as the cross-language option). Cyclomatic limits start at
   10-12 (`Ruff` `C901`, `gocyclo`). Ratchet existing exceptions. Function length 80 and five arguments
   are review signals rather than mandatory gates. Report duplication with `jscpd` or `PMD CPD`
@@ -55,6 +55,25 @@ fails on any change. Formatters and safe lint fixes stay in `just fmt`, never in
 - Path-based skipping inside the workflow with a path filter job feeding the gate's
   allowed skips, never `paths:` on the trigger (see `ci-github-actions`).
 - Monorepo: one job per member path and language (`monorepo.md`).
+
+## Lanes for the Run tokens
+
+Each concern in a language's table (`toolchain-languages`, `references/concerns.md`) has a
+Run token. CI installs tools with pinned actions and managers (`taiki-e/install-action`,
+`setup-*`, `mise-action`); locally agents detect tools and ask before installing. The
+lane runs the matching `just` recipe (`justfile.md`).
+
+| Token | Lane |
+| --- | --- |
+| every-pr | the required `ci-gate` jobs |
+| diff-pr | a PR job on the changed code: mutation (`mutate-diff`) blocks the merge only on the configured critical paths, elsewhere it reports |
+| bounded-pr | ClusterFuzzLite in code-change mode for Go, Python and Rust (it supports C, C++, JVM, Go, Python, Rust and Swift, not JavaScript); the `fuzz-smoke` recipe (about 60s per target) otherwise, including Jazzer.js |
+| scheduled | `scheduled.yml` with `cron` and `workflow_dispatch` (pattern in `ci-github-actions`): full mutation (cargo-mutants `--shard k/n` matrix), long fuzz campaigns, shuffle and repeat flaky runs, k6 and Schemathesis against non-production, Terraform drift (`terraform plan -detailed-exitcode -lock=false`) and CDK drift (`cdk drift --fail`), dependency rescans |
+| release | the release job: `api-break` for libraries, docs publish |
+| on-demand | no lane; run by hand when a task needs it |
+
+Keep scheduled jobs out of `ci-gate`; they report failures by issue or notification, and
+upload corpora, crashers, seeds and mutation reports as artifacts.
 
 ## Release and dependency updates
 
