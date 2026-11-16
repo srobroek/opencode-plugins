@@ -1,8 +1,9 @@
 /**
  * `cad_run`: start a CAD skill script through cad-flow's `run.py` launcher, which resolves the
  * script under `skills/` and runs it in uv's environment shared by its PEP 723 dependency set.
- * OMP addressed these scripts as `skill://<skill>/scripts/<script>.py`; OpenCode has no such
- * resolver, so the plugin, which knows where its skills live, resolves them instead.
+ * The vendored cad-agent skills spell this `uv run --script "$CAD_SKILLS/cad-flow/scripts/run.py"
+ * <script> <args>` for a shell; the plugin, which knows where its skills live, runs the same
+ * command so its agents need no shell.
  */
 
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs"
@@ -23,6 +24,7 @@ export const STDERR_TAIL = 4_000
 
 export const RUN_DESCRIPTION =
   "Run a CAD skill script in uv's environment for its PEP 723 dependencies, from the session directory.\n" +
+  'It runs the skills\' `uv run --script "$CAD_SKILLS/cad-flow/scripts/run.py" <script> <args>` command. ' +
   "script is relative to the CAD skills directory (cad-model/scripts/cad_model.py); args pass through as-is. " +
   "background=true starts a server and returns its pid and first stdout line; cad_stop ends it."
 
@@ -93,16 +95,15 @@ export function runArgv(skillsDir: string, script: string, args: readonly string
   return ["uv", "run", "--script", join(skillsDir, "cad-flow", "scripts", "run.py"), script, ...args]
 }
 
-/** The environment a CAD script sees: the server's, plus the session id and the plugin marker. */
-export function runEnv(
-  base: Record<string, string | undefined>,
-  sessionID: string,
-  plugin: string,
-): Record<string, string> {
+/**
+ * The environment a CAD script sees: the server's, plus the root session id as the cad-viewer
+ * session name, so each OpenCode session gets its own viewer host and `viewer.py serve` prints a
+ * stop command that names it. A `--session` argument still wins over the variable.
+ */
+export function runEnv(base: Record<string, string | undefined>, sessionID: string): Record<string, string> {
   const env: Record<string, string> = {}
   for (const [key, value] of Object.entries(base)) if (value !== undefined) env[key] = value
-  env.CAD_SESSION_ID = sessionID
-  env.CAD_OPENCODE_PLUGIN = plugin
+  env.CAD_VIEWER_SESSION_NAME = sessionID
   return env
 }
 

@@ -60,10 +60,22 @@ description = "Use the cad-record skill to write traceable REQ-### entries with 
 skill_hints = "cad-record, cad-flow"
 
 [[steps]]
+id = "specify-gate"
+title = "SPECIFY gate for {{product}}"
+type = "task"
+needs = ["specify"]
+labels = ["cad", "phase:gate"]
+description = "Present the SPECIFY output before any concept is drawn: each REQ-### with its rationale, source, priority, verification method and measurable criteria, the interface contracts and limits, and the open questions, each file as an absolute path on its own line. Ask the user to approve the requirements and verification plan or name changes; apply a named change to the record and present it again before resolving this gate. On explicit approval record a `Status: APPROVED` DR and set product.yaml `flow.stage` to `concept`, as the cad-flow skill's gate rules describe. No recommendation is consent; only bd gate resolve after user approval closes this gate."
+
+[steps.gate]
+type = "human"
+timeout = "72h"
+
+[[steps]]
 id = "concept-fanout"
 title = "L0 CONCEPT: fan out one variant molecule per concept"
 type = "task"
-needs = ["specify"]
+needs = ["specify-gate"]
 labels = ["cad", "phase:concept", "fanout"]
 description = "Choose 2-4 distinct answers to the main trade-off and one shared node-id vocabulary. Bond one mol-cad-variant per variant onto this step, all before dispatch: `bd mol bond mol-cad-variant <this-step> --type parallel --ref variant-<id> --var product={{product}} --var scope={{scope}} --var variant=<id> --var tradeoff='<answer>'`. Dispatch every ready subagent step below this step in ONE parallel batch, one cad-concept-designer per variant, as the cad-flow skill's Delegation section describes. Close each molecule's step and root from its worker's report; dispatch a failed variant again in the next batch. Close this step when every child is closed."
 

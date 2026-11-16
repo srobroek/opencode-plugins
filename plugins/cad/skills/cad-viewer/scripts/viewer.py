@@ -10,21 +10,20 @@
 """Drive OCP CAD Viewer and the cad-viewer side panel for a cad-model hardware record.
 
 Usage (run viewer through cad-flow's shared environment):
-    cad_run cad-viewer/scripts/viewer.py serve [--session NAME] [--idle-timeout MIN]
-    cad_run cad-viewer/scripts/viewer.py stop [--session NAME]
-    cad_run cad-viewer/scripts/viewer.py show HW [--version VERSION] [--check FILE] [--session NAME]
-    cad_run cad-viewer/scripts/viewer.py compare A B --hw HW [--session NAME]
-    cad_run cad-viewer/scripts/viewer.py gallery HW [--session NAME]
-    cad_run cad-viewer/scripts/viewer.py mode single|split [--session NAME]
-    cad_run cad-viewer/scripts/viewer.py parts ACTION [PN|GROUP] [--session NAME]
-    cad_run cad-viewer/scripts/viewer.py animate (--joint ID --from VALUE --to VALUE | --case CASE) [--session NAME]
-    cad_run cad-viewer/scripts/viewer.py studio [OPTIONS] [--session NAME]
-    cad_run cad-viewer/scripts/viewer.py capture --view VIEW --out PNG [--session NAME]
+    uv run --script "$CAD_SKILLS/cad-flow/scripts/run.py" cad-viewer/scripts/viewer.py serve [--session NAME] [--idle-timeout MIN]
+    uv run --script "$CAD_SKILLS/cad-flow/scripts/run.py" cad-viewer/scripts/viewer.py stop [--session NAME]
+    uv run --script "$CAD_SKILLS/cad-flow/scripts/run.py" cad-viewer/scripts/viewer.py show HW [--version VERSION] [--check FILE] [--session NAME]
+    uv run --script "$CAD_SKILLS/cad-flow/scripts/run.py" cad-viewer/scripts/viewer.py compare A B --hw HW [--session NAME]
+    uv run --script "$CAD_SKILLS/cad-flow/scripts/run.py" cad-viewer/scripts/viewer.py gallery HW [--session NAME]
+    uv run --script "$CAD_SKILLS/cad-flow/scripts/run.py" cad-viewer/scripts/viewer.py mode single|split [--session NAME]
+    uv run --script "$CAD_SKILLS/cad-flow/scripts/run.py" cad-viewer/scripts/viewer.py parts ACTION [PN|GROUP] [--session NAME]
+    uv run --script "$CAD_SKILLS/cad-flow/scripts/run.py" cad-viewer/scripts/viewer.py animate (--joint ID --from VALUE --to VALUE | --case CASE) [--session NAME]
+    uv run --script "$CAD_SKILLS/cad-flow/scripts/run.py" cad-viewer/scripts/viewer.py studio [OPTIONS] [--session NAME]
+    uv run --script "$CAD_SKILLS/cad-flow/scripts/run.py" cad-viewer/scripts/viewer.py capture --view VIEW --out PNG [--session NAME]
 
-`serve` reuses one detached host per project and session. Session files are keyed by the root
-OpenCode session id that the cad plugin's cad_run tool sets in `CAD_SESSION_ID`, a `--session` /
-`CAD_VIEWER_SESSION_NAME` value, and the project root. The project root is the directory containing `hw/`. `CAD_VIEWER_SESSION` keeps
-its legacy behavior and overrides the session-file path.
+`serve` reuses one detached host per project and explicit session name. Session files are keyed by
+the project root and the `--session` / `CAD_VIEWER_SESSION_NAME` value, if supplied. The project
+root is the directory containing `hw/`. `CAD_VIEWER_SESSION` overrides the session-file path.
 
 stdout: one JSON object per command. Exit 0 = done; 1 = a joint value outside its limits
 (`animate`, nothing pushed) or a blank capture; 2 = usage, record, viewer, or browser error.

@@ -92,7 +92,7 @@ pinion on its crank is 720 degrees).
 the same samples. Merge runs that together cover every owner (one run, when a single owner owns
 every pair):
 
-`cad_run cad-motion/scripts/merge_sweeps.py --hw hw --version vN --case NAME --inputs hw/motion/vN/A hw/motion/vN/B ...`
+`uv run --script "$CAD_SKILLS/cad-flow/scripts/run.py" cad-motion/scripts/merge_sweeps.py --hw hw --version vN --case NAME --inputs hw/motion/vN/A hw/motion/vN/B ...`
 
 The merge refuses inputs swept with other options, partition, rule or code, a missing or doubly
 measured pair, or an unfinished run. It publishes the result the whole sweep gives, with the worst

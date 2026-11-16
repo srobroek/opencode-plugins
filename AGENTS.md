@@ -31,6 +31,10 @@ package whose entry point default-exports `Plugin.define({ id, setup })` from
   160 characters, an agent description 150, or an `instructions/` block 1k.
 - `bun run check` runs typecheck, lint, test, build:check, marketplaces:check,
   plugin-table:check, steering, pitfalls, agent-roles and descriptions before you hand work off.
+- `bun run cad:sync` vendors `plugins/cad/{skills,examples,agents}` from the cad-agent tag
+  pinned in `plugins/cad/cad-agent.json` (`bun scripts/sync-cad.ts --tag <tag>` moves the pin);
+  `bun run cad:check` fails when they differ from it. It clones from GitHub, so it is not part
+  of `check`; CI runs it when `plugins/cad` changes. Never edit those vendored files.
 
 ## Conventions
 

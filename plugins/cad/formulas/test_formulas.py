@@ -10,7 +10,7 @@ import tomllib
 import unittest
 from pathlib import Path
 
-FORMULAS = Path(__file__).resolve().parents[3] / "formulas"
+FORMULAS = Path(__file__).resolve().parent
 SEALS = "cad-record/scripts/release.py"
 # The VOID instruction in each `<stage>-full-check` description: the `bd reopen` command, and the `bd dep tree`
 # query that resolves its `<later closed steps>` placeholder.
@@ -218,6 +218,25 @@ class ReleaseApproval(unittest.TestCase):
                 with self.subTest(formula=path.name, gate=gate):
                     self.assertFalse(ancestors(steps, gate) & sealing, f"{gate} asks for approval after the release is sealed")
         self.assertEqual(sealing_formulas, 4, "cad-product, cad-part, cad-touch and mol-cad-release each run release.py")
+class SpecifyGate(unittest.TestCase):
+    def test_no_concept_starts_before_the_user_approves_the_specification(self) -> None:
+        for name in ("cad-product", "cad-part"):
+            steps = formula_steps(name)
+            with self.subTest(formula=name):
+                self.assertEqual(
+                    steps["specify-gate"].get("gate", {}).get("type"), "human"
+                )
+                self.assertEqual(steps["specify-gate"]["needs"], ["specify"])
+                self.assertIn("intent-gate", ancestors(steps, "specify"))
+                specified = ancestors(steps, "specify-gate") | {"specify"}
+                self.assertNotIn(
+                    "concept-fanout",
+                    ready(steps, specified),
+                    "a concept started on unapproved requirements",
+                )
+                self.assertIn(
+                    "concept-fanout", ready(steps, specified | {"specify-gate"})
+                )
 
 
 if __name__ == "__main__":

@@ -239,7 +239,10 @@ walk_void() {
 walk_pass GROUND 'smoke: grounded'
 walk_approve "$(walk_step 'INTENT gate')"
 walk_pass 'INTENT gate' 'smoke: user approved'
-walk_pass SPECIFY 'smoke: specified'
+walk_pass 'SPECIFY requirements' 'smoke: specified'
+walk_ready 'specified, not approved' '-SPECIFY gate' '-L0 CONCEPT: fan out'
+walk_approve "$(walk_step 'SPECIFY gate')"
+walk_pass 'SPECIFY gate' 'smoke: user approved'
 walk_pass 'L0 CONCEPT: fan out' 'smoke: no variants'
 walk_pass 'L0 CONCEPT: merge' 'smoke: merged'
 walk_approve "$(walk_step 'VARIANT gate')"

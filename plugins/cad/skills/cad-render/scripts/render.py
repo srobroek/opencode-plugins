@@ -10,8 +10,8 @@
 
 
 Usage:
-    cad_run cad-render/scripts/render.py HW [--version latest|vN] [--views iso front side exploded dir-X-Y-Z[-closeup-REF|-part-REF]] [--subject S]
-    cad_run cad-render/scripts/render.py HW --version vN --motion SPEC.json
+    uv run --script "$CAD_SKILLS/cad-flow/scripts/run.py" cad-render/scripts/render.py HW [--version latest|vN] [--views iso front side exploded dir-X-Y-Z[-closeup-REF|-part-REF]] [--subject S]
+    uv run --script "$CAD_SKILLS/cad-flow/scripts/run.py" cad-render/scripts/render.py HW --version vN --motion SPEC.json
         --out-dir .cad-work/PATH [--size 1280x720] [--cache-dir DIR]
 
 Resolves a verified built version through cad-record's layout API, maps each part's part.yaml
