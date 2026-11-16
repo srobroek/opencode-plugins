@@ -1,6 +1,6 @@
 import type { Context } from "@opencode/plugin/promise/plugin"
 
-export function onSessionDeleted(ctx: Context, evict: (sessionID: string) => void): () => Promise<void> {
+export function onSessionDeleted(ctx: Context, evict: (sessionID: string) => void, onAgentsChanged?: () => void): () => Promise<void> {
   const controller = new AbortController()
   const iterator = ctx.event.subscribe({ signal: controller.signal })[Symbol.asyncIterator]()
   const listening = (async () => {
@@ -10,6 +10,7 @@ export function onSessionDeleted(ctx: Context, evict: (sessionID: string) => voi
         if (next.done) break
         const event = next.value
         if (event.type === "session.deleted") evict(event.data.sessionID)
+        else if (event.type === "agent.updated") onAgentsChanged?.()
       }
     } catch (error) {
       if (!controller.signal.aborted) throw error

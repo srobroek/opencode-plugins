@@ -289,3 +289,48 @@ describe("large-read guard", () => {
     rmSync(dir, { recursive: true, force: true })
   })
 })
+
+describe("lead routing and agent changes", () => {
+  const request = (fake: ReturnType<typeof createFakeContext>) =>
+    fake.fire.session("context", { sessionID: "root", agent: "build", tools: { subagent: {} }, system: [] as Array<{ type: "text"; text: string }> })
+  const updated = async (fake: ReturnType<typeof createFakeContext>) => {
+    fake.emit({ type: "agent.updated", data: {} })
+    await new Promise<void>((resolve) => setImmediate(resolve))
+  }
+  test("a list that was partial at the first prompt is replaced by the full one after agent.updated", async () => {
+    const fake = createFakeContext({ agents: [{ id: "coder" }], sessions: [{ id: "root" }] })
+    const cleanup = await plugin.setup(fake.context)
+    try {
+      const partial = (await request(fake)).system[0]?.text
+      expect(partial).not.toContain("- `operator`:")
+      fake.agents.set("operator", { id: "operator" })
+      await updated(fake)
+      const full = (await request(fake)).system[0]?.text
+      expect(full).toContain("- `coder`:")
+      expect(full).toContain("- `operator`:")
+    } finally { await cleanup?.() }
+  })
+  test("a stable list is fetched once until the next agent.updated", async () => {
+    const fake = createFakeContext({ agents: [{ id: "coder" }], sessions: [{ id: "root" }] })
+    const cleanup = await plugin.setup(fake.context)
+    const listed = () => fake.calls.filter((entry) => entry.method === "agent.list").length
+    try {
+      await request(fake)
+      await request(fake)
+      expect(listed()).toBe(1)
+      await updated(fake)
+      await request(fake)
+      expect(listed()).toBe(2)
+    } finally { await cleanup?.() }
+  })
+  test("an agent removed before agent.updated disappears from the routing text", async () => {
+    const fake = createFakeContext({ agents: [{ id: "coder" }, { id: "operator" }], sessions: [{ id: "root" }] })
+    const cleanup = await plugin.setup(fake.context)
+    try {
+      expect((await request(fake)).system[0]?.text).toContain("- `operator`:")
+      fake.agents.delete("operator")
+      await updated(fake)
+      expect((await request(fake)).system[0]?.text).not.toContain("- `operator`:")
+    } finally { await cleanup?.() }
+  })
+})

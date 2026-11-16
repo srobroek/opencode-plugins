@@ -79,7 +79,7 @@ export type FakeContext = {
   mcp: Map<string, Loose>
   /** Every `permission.assert` input, in call order. */
   asserts: FakeAssert[]
-  /** Calls to faked client methods (`session.*`, `event.subscribe`), in order. */
+  /** Calls to faked client methods (`session.*`, `agent.list`, `event.subscribe`), in order. */
   calls: FakeCall[]
   /** Run every registered hook of one domain and name in order, as the host does; resolves to the payload. */
   fire: {
@@ -405,7 +405,10 @@ export function createFakeContext(options: FakeContextOptions = {}): FakeContext
     agent: {
       transform: agentTransform,
       reload: async () => {},
-      list: async () => [...agents.values()],
+      list: async () => {
+        calls.push({ method: "agent.list", input: undefined })
+        return [...agents.values()]
+      },
       get: async (input: { agentID?: string; id?: string }) => agents.get(input.agentID ?? input.id ?? ""),
     },
     event: { subscribe },

@@ -1176,7 +1176,7 @@ function bodySubstitutions(body) {
 }
 
 // plugins/agent-efficiency/src/session-cache.ts
-function onSessionDeleted(ctx, evict) {
+function onSessionDeleted(ctx, evict, onAgentsChanged) {
   const controller = new AbortController;
   const iterator = ctx.event.subscribe({ signal: controller.signal })[Symbol.asyncIterator]();
   const listening = (async () => {
@@ -1188,6 +1188,8 @@ function onSessionDeleted(ctx, evict) {
         const event = next.value;
         if (event.type === "session.deleted")
           evict(event.data.sessionID);
+        else if (event.type === "agent.updated")
+          onAgentsChanged?.();
       }
     } catch (error) {
       if (!controller.signal.aborted)
@@ -1556,7 +1558,7 @@ function filterLeadRouting(text, registered) {
 async function setupLead(ctx) {
   const text = readFileSync(LEAD_PATH, "utf8").trim();
   const cached = new Map;
-  const stop = onSessionDeleted(ctx, (sessionID) => cached.delete(sessionID));
+  const stop = onSessionDeleted(ctx, (sessionID) => cached.delete(sessionID), () => cached.clear());
   const forSession = async (sessionID) => {
     try {
       const session = await ctx.session.get({ sessionID });
