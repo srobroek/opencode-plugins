@@ -72,13 +72,6 @@ project is missing.
 Every language fills the testing and quality groups. Only a language of kind `iac` fills
 the iac group. A language without a UI component model says `N/A` for `component`.
 
-## BDD
-
-BDD tools are not a concern. The journeys plugin covers acceptance-level specs. A language
-documents its BDD option as a `bdd` row in its `## Language-specific` table, and an agent
-uses it only when non-programmers read or write the scenarios or `.feature` files already
-exist.
-
 ## Surface concerns
 
 Checks that depend on the product surface, not the language. A project fills them for each

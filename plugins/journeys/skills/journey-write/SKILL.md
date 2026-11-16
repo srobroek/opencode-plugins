@@ -118,6 +118,19 @@ entries -- the new journey starts at `version: 1` as current truth, with the
 legacy doc linked in `trace:`. Propose deleting or pointer-stubbing the
 legacy doc; let the user decide.
 
+## Journeys and deterministic E2E specs
+
+A journey stays the agent-validated source of truth. Once it passes, its stable steps may become
+a deterministic spec. Pick the tool for the surface from the `e2e` row in the `toolchain-languages`
+skill's `references/surfaces.md`.
+
+- Bootstrap the spec from the passed run with Playwright Test Agents (planner, generator) or
+  `playwright codegen`, then edit it by hand.
+- Tag each spec with its journey id in the title or an annotation, for example
+  `test('J-012 checkout with saved card', ...)`.
+- Keep the journey's `Expect (negative):` assertions as assertions in the spec.
+- Never commit a healer rewrite without review.
+
 ## Always
 
 - Never validate as part of authoring: do not invoke journey-verify (or

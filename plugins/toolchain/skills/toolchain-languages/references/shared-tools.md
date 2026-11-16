@@ -14,10 +14,14 @@ version you used. `Family` marks a tool with one binding per language, listed in
 | Id | Tool | Concerns | Maintenance | Run | Use with |
 |---|---|---|---|---|---|
 | testcontainers | Testcontainers | integration | Family: [Testcontainers](#testcontainers) | every-pr | pact |
-| pact | Pact | contract | Family: [Pact with containers](#pact-with-containers) | every-pr | testcontainers, oasdiff |
+| contracts | Contract gate per API style | contract | Family: [Contracts by API style](#contracts-by-api-style) | every-pr + scheduled | pact, oasdiff, schemathesis |
+| pact | Pact (required for significant internal service-to-service traffic) | contract | Family: [Pact with containers](#pact-with-containers) | every-pr | testcontainers, oasdiff |
+| buf | Buf CLI | contract | >= 1.75.0 · 2026-10-22 · active | every-pr | pact |
+| graphql-inspector | GraphQL Inspector | contract | >= 7.0.4 · 2026-11-13 · active | every-pr | - |
+| asyncapi-cli | AsyncAPI CLI | contract | >= 6.3.1 · 2026-11-16 · active | every-pr | pact |
 | schemathesis | Schemathesis | api-schema | >= 4.33.4 · 2026-11-12 · active | bounded-pr + scheduled | oasdiff, hurl |
 | hurl | Hurl | integration | >= 8.1.0 · 2026-10-28 · active | every-pr | schemathesis |
-| oasdiff | oasdiff | api-break | >= 1.38.0 · 2026-11-14 · active | every-pr | schemathesis |
+| oasdiff | oasdiff | api-break, contract | >= 1.38.0 · 2026-11-14 · active | every-pr | schemathesis |
 | k6 | k6 | load | >= 2.4.0 · 2026-11-12 · active | scheduled | - |
 | osv-scanner | OSV-Scanner | dep-audit | >= 2.7.1 · 2026-11-09 · active | every-pr + scheduled | - |
 | oss-fuzz | OSS-Fuzz | fuzz-continuous | Service: open-source projects only | scheduled | clusterfuzzlite |
@@ -42,7 +46,11 @@ install page.
 | Id | Detect | Install |
 | --- | --- | --- |
 | `testcontainers` | A Docker-API daemon: `docker info` | The language library, see [Testcontainers](#testcontainers) |
+| `contracts` | The style's gate from [Contracts by API style](#contracts-by-api-style) | Install that gate's tool |
 | `pact` | The language library in the manifest | The language library, see [Pact with containers](#pact-with-containers) |
+| `buf` | `buf --version` | `brew install bufbuild/buf/buf` |
+| `graphql-inspector` | `graphql-inspector --version` | A dev dependency: `npm install --save-dev @graphql-inspector/cli` |
+| `asyncapi-cli` | `asyncapi --version` | A dev dependency: `npm install --save-dev @asyncapi/cli` |
 | `schemathesis` | `schemathesis --version` | `uv tool install schemathesis` |
 | `hurl` | `hurl --version` | `brew install hurl` |
 | `oasdiff` | `oasdiff --version` | `brew install oasdiff` |
@@ -91,12 +99,16 @@ repository is eligible.
 
 ### contract
 
-- **Pact**: wins for consumer-driven contracts between independently deployed services across
-  many languages, with a broker and `can-i-deploy`; costs consumer tests and broker upkeep.
+- **Schema gates per API style** (default): win when you own the schema and want a breaking
+  change to fail the PR: oasdiff and Schemathesis for HTTP, `buf breaking` for protobuf,
+  GraphQL Inspector for GraphQL, a registry compatibility mode for events; cost no record of
+  what each consumer actually uses.
+- **Pact**: wins, and is required, when two or more services you own call each other and deploy
+  independently (see [Contracts by API style](#contracts-by-api-style)); costs consumer tests
+  and a self-hosted Pact Broker. Not for public or third-party consumers, which you cannot ask
+  to write pacts.
 - **Specmatic**: wins when OpenAPI is the single source of truth and you want contract tests
   from the spec (MIT; where the commercial boundary starts is unverified); costs a spec-first workflow.
-- **Schemathesis plus oasdiff**: wins when you own both sides and the schema is authoritative;
-  costs no record of what each consumer actually uses.
 - **PactFlow bi-directional**: wins when you already have provider specs and consumer mocks
   and want hosted comparison; costs a paid SaaS (unverified) and a weaker guarantee than a
   verified pact.
@@ -117,6 +129,39 @@ repository is eligible.
 - **Trivy**: wins on breadth (images, IaC, licences) in one binary; costs the March 2026
   compromise: use it only from verified artifacts pinned by digest (see
   `toolchain-quality-observability`).
+
+## Contracts by API style
+
+Default (option A): a schema gate per API style, run on every PR. Add Pact (option B) where the
+condition below holds. Database migrations are persistence, not contracts: gate them with
+squawk, Atlas or pgroll.
+
+| Style | Default gate | Required add-on | Optional | Run |
+|---|---|---|---|---|
+| HTTP/OpenAPI | `oasdiff` for spec breaks against the base branch; Schemathesis for conformance, never against production | Pact consumer-driven contracts, Pact Broker and `can-i-deploy` when significant internal services call each other | Specmatic; PactFlow bi-directional (paid) | oasdiff every-pr; Schemathesis bounded-pr + scheduled |
+| gRPC, protobuf, Connect | `buf breaking --against '.git#branch=main'` and `buf lint` | Pact with `pact-protobuf-plugin` 0.8.1 (pre-1.0) for internal gRPC between your own services | `connectrpc/conformance` 1.0.7, only when you implement a Connect or gRPC server or library | every-pr |
+| GraphQL | `graphql-inspector diff` | - | GraphQL Hive 15.3.0 (MIT, self-hostable registry with usage data); Apollo Rover only for an existing GraphOS | every-pr |
+| Events (Kafka, SNS/SQS, EventBridge) | Schema-registry compatibility mode `BACKWARD` or `FULL` (transitive when consumers lag), plus AsyncAPI 3.1 checked with `asyncapi validate` | Pact V4 message pacts for internal producer and consumer pairs you own | CloudEvents 1.0 envelope | every-pr |
+| Webhooks | Payload described in OpenAPI `webhooks` or AsyncAPI, gated by the same diff; Standard Webhooks 1.0.2 tests for signature, replay (stale timestamp), key rotation and deduplication | - | - | every-pr |
+| MCP servers | Committed snapshot of `tools/list` (names, input and output JSON Schemas), diffed in CI; a removed or tightened tool is breaking | - | MCP Inspector 2.15.0 for smoke tests only (licence moving from MIT to Apache-2.0) | every-pr |
+
+Registries for events: Apicurio Registry 3.3.4 (Apache-2.0) is the open default; Confluent
+Schema Registry is under the Confluent Community License; AWS Glue Schema Registry suits an
+AWS-only stack. SNS, SQS and EventBridge have no registry gate, so diff the JSON Schema in CI.
+
+### When Pact is required
+
+Pact is required when two or more services you own call each other over HTTP, gRPC or messages
+and deploy independently. Then:
+
+1. Run a self-hosted Pact Broker (compose in [Pact with containers](#pact-with-containers)).
+2. Publish pacts with the branch and the git SHA as the version.
+3. Verify with the `mainBranch`, `matchingBranch` and `deployedOrReleased` selectors; enable
+   pending and work-in-progress (WIP) pacts so a new consumer test never breaks the provider build.
+4. Let broker webhooks trigger provider verification when a pact changes.
+5. Run `can-i-deploy` before each deploy and `record-deployment` after it.
+
+Public or third-party consumers get schema gates only: you cannot make them publish pacts.
 
 ## Testcontainers
 

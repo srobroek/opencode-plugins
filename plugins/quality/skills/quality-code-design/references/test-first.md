@@ -13,6 +13,13 @@ answers to what the previous cycle taught you.
 imagined behavior: they test the shape of things, commit to a test structure before the
 implementation is understood, and stay green through real changes.
 
+## Tools for the loop
+
+Take the tools from the language's table in the `toolchain-languages` skill's
+[concerns.md](../../../../toolchain/skills/toolchain-languages/references/concerns.md) registry:
+the `watch` row for the red-green loop and affected-test selection, and the `assertions` row for
+the matcher and diff helpers. Keep the project's existing tool unless the task is a migration.
+
 ## Pick the seams
 
 Before the first test, name the seams the tests will use: the public interfaces that the

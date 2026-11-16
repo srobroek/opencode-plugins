@@ -34,6 +34,13 @@ already exists:
 - `journey-consolidate`: flush delta logs, prune runs and regenerate the index,
   with human approval.
 
+## Journeys and E2E specs
+
+Journeys stay the agent-validated source of truth. After a journey passes, its stable steps may
+become a deterministic E2E spec tagged with the journey id; `journey-write` and `journey-verify`
+describe the workflow. The tool for each surface is in the `e2e` row of `surfaces.md` in the
+`toolchain-languages` skill.
+
 ## Agents
 
 The plugin adds two subagents from `agents/`, converted from the omp agents with
