@@ -193,6 +193,7 @@ One tool per gate.
 | --- | --- | --- | --- |
 | OpenAPI lint | Redocly CLI 2 | Spectral 6 (supports OpenAPI 3.2; custom governance rulesets and the OWASP API security ruleset); `vacuum` (fast, Go); IBM `openapi-validator` (OpenAPI 3.0 and 3.1 only) | Pre-commit and CI |
 | OpenAPI breaking changes | `oasdiff` against the released baseline | `openapi-diff` (JVM). Optic is archived: do not adopt | CI |
+| JSON Schema breaking changes | `json-schema-diff` against the base branch, failing on any removed difference (additive-only) | A registry compatibility mode where a schema registry already holds the schemas. The Sentry `json-schema-diff` crate is best effort | CI |
 | Bundling and overlays | `redocly bundle` and `redocly split`; a pinned overlay tool (`vacuum apply-overlay`) | `openapi-format` for sorting and filtering | CI |
 | Protobuf lint, format, breaking | `buf lint`, `buf format`, `buf breaking` | `api-linter` for Google AIP style; `protolint` | Lint in pre-commit; breaking in CI |
 | Protobuf runtime validation | Protovalidate (replaces `protoc-gen-validate`) | - | Code and tests |
@@ -222,7 +223,45 @@ Every style has a schema gate on every PR. Where significant internal services y
 | GraphQL | `graphql-inspector diff` | - |
 | Events | Registry compatibility mode plus `asyncapi validate` | Pact V4 message pacts |
 | Webhooks | The payload schema diff plus Standard Webhooks tests | - |
+| Plain JSON Schema | `json-schema-diff` additive-only gate | The shared-contract gate below when two languages consume the schema |
+| JSON-RPC over stdio | A scripted peer plus a frame corpus | The MCP conformance runner for MCP servers |
 | MCP servers | Committed `tools/list` snapshot diff | - |
+
+## JSON Schema additive-only gate
+
+For a contract that is plain JSON Schema (no OpenAPI or protobuf around it), compare the schema on the PR with the one on the base branch and allow only additive change.
+
+- **Tool:** `json-schema-diff` (Atlassian, Apache-2.0). It compares two schemas by set theory and reports "added" (the new schema is more permissive) and "removed" (it is more restrictive). The CLI exits non-zero when anything is removed, which is the additive-only rule: everything the old schema accepted still validates. Pin the version in the lockfile.
+- **Limits:** the tool targets draft-07 and lists unsupported keywords in its `KEYWORDS.md`. Check the keywords your schemas use with committed fixtures (one passing and one failing pair per keyword) before gating on 2020-12 files. Treat "unsupported keyword" output as a failed gate, never as a pass.
+- **Rules:** a new property is optional, never added to `required`; do not tighten a type, `enum`, bound or `pattern`; do not set `additionalProperties` to `false` where it was open. A deliberate break ships as a new versioned schema.
+- **Alternatives:** Sentry's Rust `json-schema-diff` is best effort by its own README. A schema registry's compatibility mode (Confluent documents `BACKWARD` and `FULL`) fits where the registry already holds the schemas. The JSON Schema organisation lists no official compatibility tool.
+- **Review check:** a schema file changed with no gate in CI; a field added to `required`; a tightened constraint with no new schema version.
+
+## Shared contract across languages
+
+When two languages share a contract (a Rust host and a TypeScript SDK, a Go server and a Python client), both consume the same generated schema files, never hand-copied ones.
+
+1. **One source:** generate the schemas from one place (the code or the IDL that owns the contract) with a pinned generator, and commit them.
+2. **Regenerate and diff:** CI regenerates the schemas with the pinned generator and fails on any diff against the committed files.
+3. **Byte-checked copies:** where a package must vendor the files, CI compares each vendored copy to the source byte for byte and fails on a difference.
+4. **Shared conformance corpus:** one corpus of valid and invalid messages lives with the schemas, and each language runs it against its own validator or codec. Expected outcomes live in the corpus, never in a language's tests.
+5. **Cross-language tests:** for each message type, a test drives the real SDK of one language through the real host of the other, over the real transport. A mock host proves nothing about the other side.
+6. **Gate the schema:** the additive-only gate above runs on the generated files.
+
+- **Why:** two copies drift, and each side's own tests pass against its own copy. The corpus and the cross-language tests are the only checks that fail when the two sides disagree.
+- **Review check:** a schema file copied by hand; a vendored copy with no byte check; a message type with no cross-language test; corpus expectations written in one language's test code.
+- The testing side is `quality-testing`'s `shared-contracts.md`.
+
+## JSON-RPC over stdio
+
+Schemathesis targets HTTP APIs described by OpenAPI or GraphQL, and Pact targets HTTP and message payloads. Neither drives a framed stream on a child process's stdin and stdout, so a JSON-RPC-over-stdio contract (LSP, MCP, a custom host protocol) needs its own test.
+
+- **Scripted peer:** a test client that starts the real process, writes frames to its stdin, reads frames from its stdout, and asserts on each reply. It follows a script: initialise, then requests, notifications, malformed input, cancellation, EOF and a crash.
+- **Frame corpus:** committed files of raw frames, golden and negative, with the expected reply for each. Cover framing edges (partial writes, several messages in one write, a message split across writes, an oversized frame, invalid UTF-8) and JSON-RPC edges (an unknown method gives `-32601`, bad params `-32602`, invalid JSON `-32700`, a notification gets no reply, a batch).
+- **Channel discipline:** stdout carries only frames and diagnostics go to stderr. A fixture that prints a banner to stdout must fail the test, not be skipped.
+- **Framing varies:** MCP's stdio transport uses one JSON message per line with no embedded newlines; LSP uses `Content-Length` headers. Test the framing the protocol defines.
+- **Schema check:** validate every frame in both directions against the protocol's schema. The MCP conformance runner does this per scenario (`wire-schema-valid`), and an MCP server should also run it.
+- **Review check:** a stdio protocol tested only through its SDK client; no negative frames in the corpus; stdout contamination untested.
 
 ## Rules
 
@@ -252,8 +291,15 @@ Every style has a schema gate on every PR. Where significant internal services y
 - Protobuf editions: https://protobuf.dev/editions/overview/
 - gRPC guides: https://grpc.io/docs/guides/
 - GraphQL specification: https://spec.graphql.org/
+- JSON Schema specification: https://json-schema.org/specification
+- json-schema-diff (Atlassian): https://bitbucket.org/atlassian/json-schema-diff, https://www.npmjs.com/package/json-schema-diff
+- json-schema-diff (Sentry, Rust): https://github.com/getsentry/json-schema-diff
+- Schema Registry compatibility types: https://docs.confluent.io/platform/current/schema-registry/fundamentals/schema-evolution.html
+- JSON-RPC 2.0: https://www.jsonrpc.org/specification
+- LSP base protocol: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#baseProtocol
+- MCP conformance runner: https://github.com/modelcontextprotocol/conformance
 - Standard Webhooks: https://github.com/standard-webhooks/standard-webhooks
-- MCP transports: https://modelcontextprotocol.io/specification/latest/basic/transports
+- MCP transports (stdio framing): https://modelcontextprotocol.io/specification/latest/basic/transports
 - RFC 9110, 9457, 9745, 8594, 9700: https://www.rfc-editor.org/
 - Google AIPs: https://google.aip.dev/
 - Buf breaking rules: https://buf.build/docs/breaking/rules/

@@ -57,5 +57,6 @@ fixes, load the `quality-test-audit` skill.
 | A behavior collects many tests, tests come from an agent or a generator, or the suite grows faster than the code | [test-budget.md](references/test-budget.md) |
 | Changing, removing or refactoring tested code; bug fixes, legacy code, flaky tests | [maintenance.md](references/maintenance.md) |
 | Choosing a fake, stub, spy or mock, or a double for a contract | [doubles.md](references/doubles.md) |
+| Two languages or processes share a message contract: one schema, a shared corpus, cross-language tests | [shared-contracts.md](references/shared-contracts.md) |
 | Coverage, mutation testing, property tests, fuzzing | [signals.md](references/signals.md) |
 | Reviewing the test changes in a diff or pull request | [review-tests.md](references/review-tests.md) |

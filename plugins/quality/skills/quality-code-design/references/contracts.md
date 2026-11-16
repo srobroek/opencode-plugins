@@ -34,4 +34,4 @@ Read when a consumer is built before the provider exists. When to stub and how t
 **Do:** mark each stub `// STUB(<task-id>): what this fakes` (`#` in Python, TOML and YAML). One marker names one task; a task may cover several markers. Keep stubs minimal and deterministic: implement the contract, nothing more.
 **Do not:** let a stub on a production path silently return plausible fake data. Where it affects behavior, say so with a capability flag or a "not yet supported" error.
 
-Drift checks above still apply: regenerate shared types in the same change as a contract change. Language examples: [rust.md](rust.md), [python.md](python.md), [typescript.md](typescript.md), [go.md](go.md).
+Drift checks above still apply: regenerate shared types in the same change as a contract change. When two languages share a contract, both consume the same generated schema files: `toolchain-api` has the gates and `quality-testing`'s `shared-contracts.md` the tests. Language examples: [rust.md](rust.md), [python.md](python.md), [typescript.md](typescript.md), [go.md](go.md).
