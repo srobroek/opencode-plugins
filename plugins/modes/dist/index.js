@@ -604,16 +604,6 @@ function stripWrappers(input) {
   return { argv: words.slice(i), directories, wrappers };
 }
 
-// plugins/lib/src/tool-targets.ts
-var WRITE_TOOLS = new Set(["edit", "write", "patch"]);
-var READ_TOOLS = new Set(["read"]);
-var SHELL_TOOL = "shell";
-var SHELL_ALIASES = new Set(["bash", "Bash"]);
-function isShellTool(tool) {
-  return tool === SHELL_TOOL || SHELL_ALIASES.has(tool);
-}
-var SHELL_EXECUTABLES = new Set(["bash", "sh", "zsh", "dash", "ksh"]);
-
 // plugins/lib/src/shell-command.ts
 var OPERATORS = {
   ";": true,
@@ -821,15 +811,89 @@ function parse(command) {
   }
   return staticParse(command);
 }
-function commandFromInput(input) {
-  if (!input || typeof input !== "object")
-    return "";
-  const value = input;
-  if (typeof value.command === "string")
-    return value.command;
-  if (typeof value.cmd === "string")
-    return value.cmd;
-  return "";
+
+// plugins/lib/src/tool-targets.ts
+var WRITE_TOOLS = new Set(["edit", "write", "patch"]);
+var READ_TOOLS = new Set(["read"]);
+var SHELL_TOOL = "shell";
+var SHELL_ALIASES = new Set(["bash", "Bash"]);
+function isShellTool(tool) {
+  return tool === SHELL_TOOL || SHELL_ALIASES.has(tool);
+}
+var SHELL_EXECUTABLES = new Set(["bash", "sh", "zsh", "dash", "ksh"]);
+var SAFE_WORD = /^[A-Za-z0-9_@%+=:,./-]+$/;
+function quoteWord(word) {
+  return SAFE_WORD.test(word) ? word : `'${word.replaceAll("'", `'\\''`)}'`;
+}
+function commandText(value) {
+  if (typeof value === "string")
+    return value;
+  if (!Array.isArray(value) || value.length === 0 || !value.every((word) => typeof word === "string"))
+    return;
+  const argv = value;
+  const executable = argv[0]?.split("/").pop() ?? "";
+  if (argv.length === 3 && SHELL_EXECUTABLES.has(executable) && /^-l?c$/.test(argv[1] ?? ""))
+    return argv[2];
+  return argv.map(quoteWord).join(" ");
+}
+function flag(value) {
+  if (typeof value === "boolean")
+    return value;
+  if (value === "true")
+    return true;
+  if (value === "false")
+    return false;
+  return;
+}
+function milliseconds(value) {
+  const parsed = typeof value === "string" && value.trim() !== "" ? Number(value) : value;
+  return typeof parsed === "number" && Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined;
+}
+function shellAliasInput(input) {
+  let raw = input;
+  if (typeof raw === "string") {
+    try {
+      raw = JSON.parse(raw);
+    } catch {
+      return input;
+    }
+  }
+  const value = fields(raw);
+  const command = commandText(value.command ?? value.cmd);
+  if (command === undefined)
+    return input;
+  const out = { command };
+  const workdir = [value.workdir, value.cwd, value.working_directory].find((dir) => typeof dir === "string" && dir !== "");
+  if (workdir !== undefined)
+    out.workdir = workdir;
+  const timeout = milliseconds(value.timeout ?? value.timeout_ms);
+  if (timeout !== undefined)
+    out.timeout = timeout;
+  const background = flag(value.background ?? value.run_in_background);
+  if (background !== undefined)
+    out.background = background;
+  return out;
+}
+function fields(input) {
+  return input !== null && typeof input === "object" ? input : {};
+}
+function shellCall(tool, input) {
+  if (!isShellTool(tool))
+    return;
+  const value = fields(tool === SHELL_TOOL ? input : shellAliasInput(input));
+  if (typeof value.command !== "string")
+    return;
+  const call = { command: value.command };
+  if (typeof value.workdir === "string" && value.workdir)
+    call.workdir = value.workdir;
+  if (typeof value.timeout === "number")
+    call.timeout = value.timeout;
+  if (typeof value.background === "boolean")
+    call.background = value.background;
+  return call;
+}
+function shellCommand(tool, input) {
+  return shellCall(tool, input)?.command;
 }
 
 // plugins/modes/src/git-guard.ts
@@ -1049,8 +1113,13 @@ function forbiddenGit(command, agent) {
   const policy = POLICIES[agent];
   return policy === undefined ? undefined : checkCommand(command, agent, policy, 0);
 }
-function forbiddenGitInput(input, agent) {
-  return forbiddenGit(commandFromInput(input), agent);
+function guardShellCall(tool, input, agent) {
+  if (POLICIES[agent] === undefined || !isShellTool(tool))
+    return;
+  const command = shellCommand(tool, input);
+  if (command === undefined || command.trim() === "")
+    return "the shell input has no recognisable command, so its git use cannot be checked";
+  return forbiddenGit(command, agent);
 }
 
 // plugins/modes/src/modes.ts
@@ -1107,9 +1176,7 @@ async function setupModes(ctx) {
     disposers.push(() => agents.dispose());
     if (options.agents.debug || options.agents.refactor) {
       const guard = await ctx.tool.hook("execute.before", (event) => {
-        if (!isShellTool(event.tool))
-          return;
-        const reason = forbiddenGitInput(event.input, event.agent);
+        const reason = guardShellCall(event.tool, event.input, event.agent);
         if (reason !== undefined)
           throw new Error(reason);
       });

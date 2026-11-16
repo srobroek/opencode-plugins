@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { forbiddenGit } from "./git-guard.ts"
+import { forbiddenGit, guardShellCall } from "./git-guard.ts"
 
 /** Refused for both guarded agents. */
 const REFUSED = [
@@ -132,5 +132,25 @@ describe("forbiddenGit", () => {
   test("an unparseable command that mentions git is refused, and one that does not is left alone", () => {
     expect(forbiddenGit("git status 'unterminated", "debug")).toBeString()
     expect(forbiddenGit("echo 'unterminated", "debug")).toBeUndefined()
+  })
+})
+
+describe("guardShellCall", () => {
+  test("an alias tool with an argv-array command is read as the command it becomes", () => {
+    expect(guardShellCall("bash", { command: ["git", "-C", "x", "push"] }, "debug")).toBeString()
+    expect(guardShellCall("bash", { command: ["bash", "-lc", "git push"] }, "debug")).toBeString()
+    expect(guardShellCall("bash", { cmd: "git push" }, "debug")).toBeString()
+    expect(guardShellCall("bash", { command: ["git", "status"] }, "debug")).toBeUndefined()
+  })
+  test("a shell call without a recognisable command is refused", () => {
+    expect(guardShellCall("shell", { cmd: "git push" }, "debug")).toBeString()
+    expect(guardShellCall("shell", {}, "debug")).toBeString()
+    expect(guardShellCall("shell", { command: "  " }, "refactor")).toBeString()
+  })
+  test("a plain shell command and non-shell tools follow the git rules", () => {
+    expect(guardShellCall("shell", { command: "git push" }, "debug")).toBeString()
+    expect(guardShellCall("shell", { command: "git status" }, "debug")).toBeUndefined()
+    expect(guardShellCall("read", { path: "a" }, "debug")).toBeUndefined()
+    expect(guardShellCall("shell", {}, "build")).toBeUndefined()
   })
 })

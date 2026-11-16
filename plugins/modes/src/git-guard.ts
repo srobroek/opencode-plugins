@@ -13,6 +13,7 @@
 
 import { commandWords } from "@srobroek/opencode-lib/command-words"
 import { type CommandPosition, commandFromInput, type ParsedCommand, parse } from "@srobroek/opencode-lib/shell-command"
+import { isShellTool, shellCommand } from "@srobroek/opencode-lib/tool-targets"
 
 type Policy = { subcommands: ReadonlySet<string> }
 
@@ -199,7 +200,15 @@ export function forbiddenGit(command: string, agent: string): string | undefined
   return policy === undefined ? undefined : checkCommand(command, agent, policy, 0)
 }
 
-/** `forbiddenGit` for a shell tool's input. */
-export function forbiddenGitInput(input: unknown, agent: string): string | undefined {
-  return forbiddenGit(commandFromInput(input), agent)
+/**
+ * `forbiddenGit` for a shell tool call, read the way the host reads it: an alias such as `bash`
+ * with an argv-array command is normalised first, so the guard sees the same string that runs.
+ * A shell call whose input has no recognisable command is refused for guarded agents, because
+ * another hook may rewrite it into one.
+ */
+export function guardShellCall(tool: string, input: unknown, agent: string): string | undefined {
+  if (POLICIES[agent] === undefined || !isShellTool(tool)) return undefined
+  const command = shellCommand(tool, input)
+  if (command === undefined || command.trim() === "") return "the shell input has no recognisable command, so its git use cannot be checked"
+  return forbiddenGit(command, agent)
 }

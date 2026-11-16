@@ -121,6 +121,9 @@ describe("setup", () => {
     await expect(run("debug", "git -C /wt push")).rejects.toThrow("git push")
     await expect(run("build", "git -C /wt push")).resolves.toBeDefined()
     await expect(run("debug", "git -C /wt commit -m x")).resolves.toBeDefined()
+    await expect(
+      fake.fire.tool("execute.before", { tool: "bash", agent: "debug", input: { command: ["git", "push"] } }),
+    ).rejects.toThrow()
     await cleanup?.()
     expect(fake.hooks("tool")).toEqual([])
   })
