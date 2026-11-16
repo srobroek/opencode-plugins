@@ -20,7 +20,7 @@ then continue; later steps on code that does not build only add noise.
 | Lint | `golangci-lint run` when the project configures it, otherwise `go vet ./...` |
 | Test | `go test -race ./...` |
 | Module tidy | `go mod tidy -diff` (prints the diff and exits non-zero when `go.mod` or `go.sum` is stale) |
-| Vulnerabilities | `govulncheck ./...` (or `go tool govulncheck ./...` when it is a `tool` in `go.mod`) |
+| Vulnerabilities | `go tool govulncheck ./...` (a `tool` directive in `go.mod`) |
 | Format fix | `golangci-lint fmt`, or `gofmt -w .` |
 | API break (libraries) | `go tool go-apidiff <base-ref>` on PRs and at release |
 | Docs | `go doc ./...` renders; lint doc comments through golangci-lint (`revive` `exported`, `godoclint`) |
@@ -51,8 +51,10 @@ Do not treat that report as proof a library's public API is safe to remove.
   module with `go -C ./svc test ./...`. `go mod tidy` is per module:
   `go -C ./svc mod tidy -diff`.
 - Never `go install …@latest` a tool inside a check. Use the binary the project
-  has (a `tool` directive, Go 1.24+, run with `go tool <name>`) or what is on
-  `PATH`. When it is missing, recommend `go get -tool <pkg>@latest`, ask the user
+  has: a `tool` directive in `go.mod` (Go 1.24+, detect with `grep -F <module> go.mod`,
+  run with `go tool <name>`), or for `golangci-lint` a binary on `PATH`, because its
+  docs advise against `go get -tool` and `go install`. When a tool is missing, recommend
+  `go get -tool <pkg>@latest` (`golangci-lint`: `brew install golangci-lint`), ask the user
   before running it, and report the step as not run if they decline.
 - Tool choices per concern, with minimum versions, are in `lang-go-libraries`'s
   `references/quality.md` and `references/testing.md`. For `cgo` code, `go test -asan`
