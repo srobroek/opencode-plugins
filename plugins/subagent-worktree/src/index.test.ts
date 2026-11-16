@@ -451,7 +451,19 @@ describe("worktree argument", () => {
       expect(sessionID(await spawn(setup, { agent: "reviewer", worktree: "feat" }))).toBe("ses_fake1")
     })
 
-    test("a live read-only reviewer does not block a writer", async () => {
+    test("a live reviewer whose session rules grant edit still blocks a writer", async () => {
+      const setup = await start()
+      writerIn(setup, "ses_review", running, { agent: "reviewer", permissions: [{ action: "edit", resource: "*", effect: "allow" }] })
+      await expect(spawn(setup, { agent: "pinned", worktree: "feat" })).rejects.toThrow(/live writer session ses_review/)
+    })
+
+    test("a live writer agent whose session rules deny edit does not block a writer", async () => {
+      const setup = await start()
+      writerIn(setup, "ses_limited", running, { agent: "pinned", permissions: [{ action: "edit", resource: "*", effect: "deny" }] })
+      expect(sessionID(await spawn(setup, { agent: "pinned", worktree: "feat" }))).toBe("ses_fake1")
+    })
+
+    test("a live reviewer is not a writer", async () => {
       const setup = await start()
       writerIn(setup, "ses_review", running, { agent: "reviewer" })
       expect(sessionID(await spawn(setup, { agent: "pinned", worktree: "feat" }))).toBe("ses_fake1")

@@ -381,6 +381,13 @@ function rulesAreReadOnly(rules) {
   });
   return match?.effect === "deny";
 }
+function sessionIsReadOnly(agentRules, sessionRules) {
+  const rules = [...Array.isArray(agentRules) ? agentRules : [], ...Array.isArray(sessionRules) ? sessionRules : []];
+  if (!rulesAreReadOnly(rules))
+    return false;
+  const denied = rules.findLastIndex((rule) => rule?.effect === "deny" && typeof rule.action === "string" && wildcard("edit", rule.action) && (rule.resource === "*" || rule.resource === "**"));
+  return !rules.slice(denied + 1).some((rule) => rule?.effect === "allow" && typeof rule.action === "string" && (wildcard("edit", rule.action) || wildcard("write", rule.action)));
+}
 function slug(text, max = 32) {
   const value = text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, max).replace(/-+$/g, "");
   return value || "task";
@@ -787,7 +794,7 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
           const agent = typeof raw.agent === "string" ? await within(getAgent(raw.agent, directory)) : undefined;
           if (typeof agent === "symbol")
             return;
-          session.readOnly = rulesAreReadOnly(raw.permissions) || rulesAreReadOnly(agent?.permissions);
+          session.readOnly = sessionIsReadOnly(agent?.permissions, raw.permissions);
         }
         sessions.push(session);
       }
@@ -1225,6 +1232,7 @@ export {
   resumeWorktreeNote,
   rewritePrompt,
   rulesAreReadOnly,
+  sessionIsReadOnly,
   shortSha,
   shouldRemove,
   slug,

@@ -292,6 +292,29 @@ export function rulesAreReadOnly(rules: unknown): boolean {
   return match?.effect === "deny"
 }
 
+/**
+ * Whether a session cannot edit: its agent's rules, then its own rules (evaluated after, the last
+ * matching rule wins), deny `edit` everywhere and no later rule grants `edit` or `write`, even
+ * on a scoped path. Conservative: any such grant makes the session a writer.
+ */
+export function sessionIsReadOnly(agentRules: unknown, sessionRules: unknown): boolean {
+  const rules = [...(Array.isArray(agentRules) ? agentRules : []), ...(Array.isArray(sessionRules) ? sessionRules : [])]
+  if (!rulesAreReadOnly(rules)) return false
+  const denied = rules.findLastIndex(
+    (rule: { action?: unknown; resource?: unknown; effect?: unknown } | null) =>
+      rule?.effect === "deny" &&
+      typeof rule.action === "string" &&
+      wildcard("edit", rule.action) &&
+      (rule.resource === "*" || rule.resource === "**"),
+  )
+  return !rules.slice(denied + 1).some(
+    (rule: { action?: unknown; effect?: unknown } | null) =>
+      rule?.effect === "allow" &&
+      typeof rule.action === "string" &&
+      (wildcard("edit", rule.action) || wildcard("write", rule.action)),
+  )
+}
+
 /** A branch-safe slug of a task description. */
 export function slug(text: string, max = 32): string {
   const value = text

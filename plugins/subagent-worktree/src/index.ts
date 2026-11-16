@@ -36,6 +36,7 @@ import {
   SESSION_LOOKUP_MS,
   SUBAGENT_TOOL,
   type SubagentInput,
+  sessionIsReadOnly,
   shouldRemove,
   startPrompt,
   tail,
@@ -254,7 +255,7 @@ export function createLanes(
         if (session.parentID !== undefined && isRunning(session)) {
           const agent = typeof raw.agent === "string" ? await within(getAgent(raw.agent, directory)) : undefined
           if (typeof agent === "symbol") return undefined
-          session.readOnly = rulesAreReadOnly(raw.permissions) || rulesAreReadOnly(agent?.permissions)
+          session.readOnly = sessionIsReadOnly(agent?.permissions, raw.permissions)
         }
         sessions.push(session)
       }

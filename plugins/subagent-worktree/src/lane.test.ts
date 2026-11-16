@@ -28,6 +28,7 @@ import {
   rewritePrompt,
   rulesAreReadOnly,
   SUBAGENT_PREAMBLE,
+  sessionIsReadOnly,
   shouldRemove,
   slug,
   startPrompt,
@@ -237,6 +238,25 @@ describe("decideIsolation", () => {
       facts({ input: { agent: "Implementer", description: "", prompt: "p" }, agent: { id: "implementer" } }),
     )
     expect(decision).toEqual({ isolate: true })
+  })
+})
+
+describe("sessionIsReadOnly", () => {
+  const rule = (action: string, resource: string, effect: string) => ({ action, resource, effect })
+  const deny = [rule("edit", "*", "deny")]
+  const allow = [rule("*", "*", "allow")]
+
+  test.each([
+    ["agent denies, no session rules", deny, undefined, true],
+    ["agent allows, session denies edit", allow, deny, true],
+    ["agent denies, session allows edit", deny, [rule("edit", "*", "allow")], false],
+    ["agent denies, session grants edit on a path", deny, [rule("edit", "src/*", "allow")], false],
+    ["agent denies, session grants write on a path", deny, [rule("write", "src/*", "allow")], false],
+    ["agent allows, session denies then re-grants a path", allow, [...deny, rule("edit", "docs/*", "allow")], false],
+    ["session denies, an earlier scoped grant is overridden", [], [rule("edit", "src/*", "allow"), ...deny], true],
+    ["no rules", undefined, undefined, false],
+  ])("%s", (_name, agentRules, sessionRules, expected) => {
+    expect(sessionIsReadOnly(agentRules, sessionRules)).toBe(expected)
   })
 })
 
