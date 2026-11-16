@@ -1,4 +1,4 @@
-import { scanShell } from "./shell.ts"
+import { readsScriptFromStdin, scanShell } from "./shell.ts"
 
 const ACTOR_VARS = ["BEADS_ACTOR", "BD_ACTOR"] as const
 type ActorVar = (typeof ACTOR_VARS)[number]
@@ -61,126 +61,32 @@ export interface BdInvocation {
   globals: string[]
   /** `NAME=value` assignments prefixed to this very `bd` word. */
   prefix: string[]
-  /**
-   * Actor values an earlier plain top-level `export` sets, alone in its `;`/newline list
-   * or chained with `&&`, only when nothing in the line could clear or shadow it.
-   * Empty when unsure.
-   */
+  /** Actor values an earlier `export NAME=value` set, read in order (an `unset` drops it). */
   exported: Partial<Record<ActorVar, string>>
-  /** The same, counting only exports alone in their `;`/newline list. Creates attribute by this. */
-  exportedAlone: Partial<Record<ActorVar, string>>
   /** Actor variables removed by an `env -u`/`env -i` wrapper. */
   unset: Partial<Record<ActorVar, true>>
 }
 
 type ActorState = Partial<Record<ActorVar, string>>
 
-/** Interpreters that execute a here-document body as commands. */
-const SHELL_INTERPRETERS = new Set(["bash", "sh", "zsh", "dash", "ksh"])
 const OPENERS = new Set(["if", "while", "until", "for", "select", "case"])
 const HEADER_ONLY = new Set(["for", "select", "case"])
 const CLOSERS = new Set(["fi", "done", "esac"])
 const BRANCHES = new Set(["else", "elif"])
 const ASSIGNMENT = /^[A-Za-z_]\w*=/
-const ACTOR_NAME = /^(BEADS_ACTOR|BD_ACTOR)(\+?=|$)/
-/** Words that could clear, shadow or redefine an exported actor, wherever they appear. */
-const HAZARD_WORDS = new Set([
-  "unset",
-  "declare",
-  "typeset",
-  "readonly",
-  "local",
-  "alias",
-  "eval",
-  "source",
-  ".",
-  "builtin",
-  "function",
-  "case",
-  "enable",
-])
 
 const basename = (word: string): string => word.split("/").pop() ?? word
 
-/** A value that is plain text: no expansion, escape or NUL, and not empty. */
-function plainLiteral(raw: string, value: string): boolean {
-  return value.trim() !== "" && !/[$`\\\0]/.test(raw) && !/[$`\\\0]/.test(value)
-}
-
-type Item = ReturnType<typeof scanShell>["items"][number]
-
-/** Whether anything in the line could clear or shadow an exported actor. Unsure counts as yes. */
-function mayShadowActor(command: string, items: Item[], counted: Set<unknown>): boolean {
-  for (const [index, item] of items.entries()) {
-    if (item.kind === "operator") {
-      // `name (` opens a function body.
-      if (item.operator === "(" && items[index - 1]?.kind === "command") return true
-      continue
-    }
-    const values = item.words.map((word) => word.value)
-    // Assignments prefixed to a command last for that command only; bare ones persist.
-    let prefixed = 0
-    while (
-      prefixed < item.words.length &&
-      ASSIGNMENT.test(command.slice(item.words[prefixed]?.start, item.words[prefixed]?.end))
-    )
-      prefixed++
-    if (prefixed === item.words.length) prefixed = 0
-    for (const [at, word] of item.words.entries()) {
-      const value = word.value
-      if (HAZARD_WORDS.has(value) || value.endsWith("()")) return true
-      if (ACTOR_NAME.test(value) && !counted.has(word) && at >= prefixed) return true
-      if (value === "command" && /^-[A-Za-z]*p/.test(values[at + 1] ?? "")) return true
-      if (value === "export" && values.slice(at + 1).some((arg) => /^-[A-Za-z]*n/.test(arg))) return true
-      if (basename(value) === "env") {
-        for (const arg of values.slice(at + 1)) {
-          if (!arg.startsWith("-") && !ASSIGNMENT.test(arg)) break
-          if (/^-[A-Za-z]*[ui]/.test(arg) || arg.startsWith("--unset") || arg === "--ignore-environment") return true
-        }
-      }
-    }
+/** Apply a command-position `export NAME=value` or `unset NAME` to the running actor state. */
+function applyActorBuiltin(state: ActorState, values: string[]): void {
+  const name = values[0]
+  if (name !== "export" && name !== "unset") return
+  for (const arg of values.slice(1)) {
+    const variable = ACTOR_VARS.find((candidate) => arg === candidate || arg.startsWith(`${candidate}=`))
+    if (variable === undefined) continue
+    if (name === "unset") delete state[variable]
+    else if (arg.includes("=")) state[variable] = arg.slice(variable.length + 1)
   }
-  return false
-}
-
-type ExportedActor = { variable: ActorVar; value: string; word: unknown; alone: boolean }
-
-/**
- * A top-level `export NAME=literal` that stands alone in its `;`/newline list, by item index.
- * Inside a group, pipeline, `&&`/`||` list, background job, branch, loop or function
- * body the export may not reach the later command, so it does not count.
- */
-function topLevelExports(command: string, items: Item[]): Map<number, ExportedActor[]> {
-  const found = new Map<number, ExportedActor[]>()
-  let depth = 0
-  for (const [index, item] of items.entries()) {
-    if (item.kind === "operator") {
-      if (item.operator === "(" || item.operator === "{") depth++
-      else if (item.operator === ")" || item.operator === "}") depth--
-      continue
-    }
-    const first = item.words[0]
-    if (first === undefined || first.quoted) continue
-    if (OPENERS.has(first.value)) depth++
-    else if (CLOSERS.has(first.value)) depth--
-    const before = items[index - 1]
-    const after = items[index + 1]
-    if (depth !== 0 || first.value !== "export") continue
-    const is = (side: Item | undefined, operators: string[]): boolean =>
-      side?.kind === "operator" && operators.includes(side.operator)
-    const alone = (before === undefined || is(before, [";", "\n"])) && is(after, [";", "\n"])
-    const chained = (before === undefined || is(before, [";", "\n", "&&"])) && is(after, [";", "\n", "&&"])
-    if (!chained) continue
-    const list: ExportedActor[] = []
-    for (const word of item.words.slice(1)) {
-      const variable = ACTOR_VARS.find((candidate) => word.value.startsWith(`${candidate}=`))
-      if (variable === undefined) continue
-      const value = word.value.slice(variable.length + 1)
-      if (plainLiteral(command.slice(word.start, word.end), value)) list.push({ variable, value, word, alone })
-    }
-    found.set(index, list)
-  }
-  return found
 }
 
 /**
@@ -188,31 +94,26 @@ function topLevelExports(command: string, items: Item[]): Map<number, ExportedAc
  *
  * Read from the shared structural scanner, never from the command text: a quoted
  * word is data, so `echo ";" export BEADS_ACTOR=x` exports nothing and `bd comments
- * add x "bd create y"` creates nothing. The attribution rule is deliberately small
- * and fails closed: an `export BEADS_ACTOR=<literal>` counts only as a top-level
- * statement of its own list, and only when no word anywhere in the line could clear,
- * shadow or redefine it (`unset`, `eval`, a function, another assignment, ...).
- * A bare `BEADS_ACTOR=x; bd close y` never counts: without `export` it does not reach `bd`.
+ * add x "bd create y"` creates nothing. Executable substitutions and shell-fed
+ * here-documents are read too. An `export BEADS_ACTOR=x` counts for the commands after it;
+ * a bare `BEADS_ACTOR=x; bd close y` never does, since without `export` it does not reach `bd`.
  */
-export function bdInvocations(command: string): BdInvocation[] {
-  const out: BdInvocation[] = []
-  const { items } = scanShell(command)
-  const exports = topLevelExports(command, items)
-  const counted = new Set<unknown>()
-  for (const list of exports.values()) for (const entry of list) counted.add(entry.word)
-  const trusted = counted.size > 0 && !mayShadowActor(command, items, counted)
-  const state: ActorState = {}
-  const alone: ActorState = {}
+export function bdInvocations(command: string, inherited: ActorState = {}): BdInvocation[] {
+  return readCommand(command, inherited).invocations
+}
 
-  for (const [index, item] of items.entries()) {
+/** The actor exports in force once `command` has run, for the commands nested inside it. */
+export function actorStateAfter(command: string, inherited: ActorState = {}): ActorState {
+  return readCommand(command, inherited).state
+}
+
+function readCommand(command: string, inherited: ActorState): { invocations: BdInvocation[]; state: ActorState } {
+  const out: BdInvocation[] = []
+  const scan = scanShell(command, { executableSubstitutionsOnly: true })
+  const state: ActorState = { ...inherited }
+
+  for (const item of scan.items) {
     if (item.kind === "operator") continue
-    if (trusted) {
-      for (const entry of exports.get(index) ?? []) {
-        state[entry.variable] = entry.value
-        if (entry.alone) alone[entry.variable] = entry.value
-        else delete alone[entry.variable]
-      }
-    }
 
     const words = item.words
     let k = 0
@@ -229,16 +130,10 @@ export function bdInvocations(command: string): BdInvocation[] {
 
     let a = k
     while (a < words.length && ASSIGNMENT.test(command.slice(words[a]?.start, words[a]?.end))) a++
-    const assigned = words.slice(k, a).map((word) => {
-      const name = word.value.slice(0, word.value.indexOf("="))
-      const raw = command.slice(word.start, word.end)
-      // An actor that expands or escapes is not a literal; mark it so it never attributes.
-      return ACTOR_VARS.some((variable) => variable === name) && !plainLiteral(raw, word.value.slice(name.length + 1))
-        ? `${name}=$`
-        : word.value
-    })
+    const assigned = words.slice(k, a).map((word) => word.value)
     const values = words.slice(a).map((word) => word.value)
     if (values.length === 0) continue
+    applyActorBuiltin(state, values)
     const found = resolveBd(values, assigned)
     if (found !== undefined) {
       const scanned = scanGlobals(values, found.next)
@@ -250,18 +145,17 @@ export function bdInvocations(command: string): BdInvocation[] {
           globals: scanned.globals,
           prefix: found.prefix,
           exported: { ...state },
-          exportedAlone: { ...alone },
           unset: found.unset,
         })
       }
     }
-    if (SHELL_INTERPRETERS.has(basename(values[0] ?? ""))) {
-      for (const document of item.hereDocuments) out.push(...bdInvocations(document.body))
+    if (readsScriptFromStdin(values)) {
+      for (const document of item.hereDocuments) out.push(...bdInvocations(document.body, state))
     }
   }
-  return out
+  for (const source of scan.substitutions) out.push(...bdInvocations(source, state))
+  return { invocations: out, state }
 }
-
 
 /** The `bd` word after shell assignments and transparent wrappers, with what those wrappers set. */
 function resolveBd(
@@ -491,8 +385,7 @@ export function invocationActor(invocation: BdInvocation, env: NodeJS.ProcessEnv
     const value =
       assignment !== undefined
         ? assignment.slice(variable.length + 1)
-        : ((CREATING_VERBS[invocation.verb] === true ? invocation.exportedAlone : invocation.exported)[variable] ??
-          env[variable])
+        : (invocation.exported[variable] ?? env[variable])
     return literal(value)
   }
   return resolve("BEADS_ACTOR") ?? resolve("BD_ACTOR")
@@ -533,7 +426,6 @@ export function invocationFromArgv(args: string[]): BdInvocation | undefined {
     globals: scanned.globals,
     prefix: [],
     exported: {},
-    exportedAlone: {},
     unset: {},
   }
 }
@@ -599,7 +491,11 @@ const ADVISORY_TEXT =
   "BEADS_ACTOR and BD_ACTOR are unset on this mutating `bd` command. Without an actor, created_by records the invoking human's git identity; Owner is always the git identity and never identifies the agent. Set either variable to <harness>/<agent-name>/<session-id> so writes and claims are attributable, then retry."
 
 /** Decide across command-position segments and recursively executable children. */
-export function decideActorParsed(parsed: unknown, env: NodeJS.ProcessEnv = process.env): ActorGateDecision {
+export function decideActorParsed(
+  parsed: unknown,
+  env: NodeJS.ProcessEnv = process.env,
+  inherited: ActorState = {},
+): ActorGateDecision {
   if (parsed === null || typeof parsed !== "object") return { kind: "block", reason: "command could not be parsed" }
   const candidate = parsed as { command?: unknown; nested?: unknown }
   if (typeof candidate.command !== "string" || !Array.isArray(candidate.nested)) {
@@ -608,11 +504,12 @@ export function decideActorParsed(parsed: unknown, env: NodeJS.ProcessEnv = proc
   // Decide on the original command text. Re-joining argv with spaces drops quoting, so a
   // quoted "; bd create" would become a command and prefix assignments would vanish.
   let advisory = false
-  const own = decideActorGate(candidate.command, env)
+  const own = decideActorGate(candidate.command, env, inherited)
   if (own.kind === "block") return own
   if (own.kind === "advisory") advisory = true
+  const after = actorStateAfter(candidate.command, inherited)
   for (const child of candidate.nested) {
-    const decision = decideActorParsed(child, env)
+    const decision = decideActorParsed(child, env, after)
     if (decision.kind === "block") return decision
     if (decision.kind === "advisory") advisory = true
   }
@@ -625,9 +522,13 @@ export function decideActorParsed(parsed: unknown, env: NodeJS.ProcessEnv = proc
  * an actor into every session's `bd` calls, so this verdict is advisory (see shell-gates).
  * Do not harden the parser against adversarial shell; read quoted text as data and stop.
  */
-export function decideActorGate(command: string, env: NodeJS.ProcessEnv = process.env): ActorGateDecision {
+export function decideActorGate(
+  command: string,
+  env: NodeJS.ProcessEnv = process.env,
+  inherited: ActorState = {},
+): ActorGateDecision {
   let advisory = false
-  for (const invocation of bdInvocations(command)) {
+  for (const invocation of bdInvocations(command, inherited)) {
     if (!isMutatingInvocation(invocation) || invocationActor(invocation, env) !== null) {
       continue
     }

@@ -263,13 +263,14 @@ export function scanShell(source: string, options: { executableSubstitutionsOnly
     endCommand()
     items.push({ kind: "operator", operator: value })
   }
-  const substitution = (expansion: Expansion): void => {
+  const substitution = (expansion: Expansion, unquoted = false): void => {
     if (expansion.inner !== undefined) {
       if (!options.executableSubstitutionsOnly || expansion.executable) substitutions.push(expansion.inner)
       else {
         // Inside `"${X:-'$(cmd)'}"` the single quotes are literal, so the expansion body is
-        // read for substitutions without quote handling: any `$(` or backtick may run.
-        for (const found of bodySubstitutions(expansion.inner)) substitution(found)
+        // read for substitutions without quote handling: any `$(` or backtick may run. Outside
+        // double quotes a default can also be a process substitution, `${X:-<(cmd)}`.
+        for (const found of bodySubstitutions(expansion.inner, unquoted)) substitution(found, unquoted)
       }
     }
     if (!expansion.closed) complete = false
@@ -361,7 +362,7 @@ export function scanShell(source: string, options: { executableSubstitutionsOnly
     }
     if (ch === "$" || ch === "`") {
       const expansion = expansionAt(source, i)
-      substitution(expansion)
+      substitution(expansion, true)
       append(i, source.slice(i, expansion.end), false, expansion.expands)
       i = expansion.end - 1
       continue
@@ -500,12 +501,20 @@ function closingIndex(text: string, from: number, open: string, close: string): 
 }
 
 /** Substitutions an unquoted here-document body expands. */
-function bodySubstitutions(body: string): Expansion[] {
+function bodySubstitutions(body: string, processSubstitutions = false): Expansion[] {
   const found: Expansion[] = []
   for (let j = 0; j < body.length; j++) {
     const c = body[j]
     if (c === "\\") {
       j++
+      continue
+    }
+    if (processSubstitutions && (c === "<" || c === ">") && body[j + 1] === "(") {
+      const close = closingIndex(body, j + 2, "(", ")")
+      const closed = close >= 0
+      const end = closed ? close + 1 : body.length
+      found.push({ end, inner: body.slice(j + 2, closed ? close : body.length), executable: true, expands: true, closed })
+      j = end - 1
       continue
     }
     if (c !== "$" && c !== "`") continue
@@ -585,6 +594,33 @@ function splitCommands(source: string): CommandPosition[] {
 
 const INTERPRETERS = new Set(["bash", "sh", "zsh", "dash", "ksh"])
 
+/**
+ * Whether a shell interpreter command (`values[0]` is its word) reads its script from stdin,
+ * so a here-document or here-string fed to it is shell source. `-c '…'` takes its script from
+ * the argument and `script.sh` from a file, so stdin there is data; `-s` forces stdin.
+ */
+export function readsScriptFromStdin(values: string[]): boolean {
+  if (!INTERPRETERS.has(values[0]?.split("/").pop() ?? "")) return false
+  let stdin = false
+  for (let i = 1; i < values.length; i++) {
+    const arg = values[i] as string
+    if (arg === "--") return stdin || i + 1 >= values.length
+    if (arg.startsWith("--")) {
+      if (arg === "--rcfile" || arg === "--init-file") i++
+      continue
+    }
+    if (arg.length > 1 && (arg.startsWith("-") || arg.startsWith("+"))) {
+      const letters = arg.slice(1)
+      if (arg.startsWith("-") && letters.includes("c")) return false
+      if (arg.startsWith("-") && letters.includes("s")) stdin = true
+      if (/[oO]$/.test(letters)) i++
+      continue
+    }
+    return stdin
+  }
+  return true
+}
+
 function nestedSources(source: string): { sources: string[]; unknown: boolean } {
   // A balanced, quote-aware scan: `"$(bd create "a (b)")"` is one substitution, which a
   // regex over the quoted body cannot see. Backticks, `<( )` and substitutions nested
@@ -601,9 +637,8 @@ function nestedSources(source: string): { sources: string[]; unknown: boolean } 
       /^[A-Za-z_]\w*=/.test(source.slice(item.words[first]?.start, item.words[first]?.end))
     )
       first++
-    const head = item.words[first]
-    if (head === undefined || !INTERPRETERS.has(head.value.split("/").pop() ?? head.value)) continue
-    if (item.words.some((word, index) => index > first && /^-[A-Za-z]*c/.test(word.value))) continue
+    const values = item.words.slice(first).map((word) => word.value)
+    if (!readsScriptFromStdin(values)) continue
     for (const document of item.hereDocuments) sources.push(document.body)
     for (const redirect of item.redirects) if (redirect.hereString === true) sources.push(redirect.value)
   }

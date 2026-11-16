@@ -1694,26 +1694,10 @@ var VALUE_FLAGS = new Set([
   "--dolt-auto-commit",
   "--mem-profile"
 ]);
-var SHELL_INTERPRETERS = new Set(["bash", "sh", "zsh", "dash", "ksh"]);
 var OPENERS = new Set(["if", "while", "until", "for", "select", "case"]);
 var HEADER_ONLY = new Set(["for", "select", "case"]);
 var CLOSERS = new Set(["fi", "done", "esac"]);
 var BRANCHES = new Set(["else", "elif"]);
-var HAZARD_WORDS = new Set([
-  "unset",
-  "declare",
-  "typeset",
-  "readonly",
-  "local",
-  "alias",
-  "eval",
-  "source",
-  ".",
-  "builtin",
-  "function",
-  "case",
-  "enable"
-]);
 function globalValue(globals, names) {
   for (const [index, token] of globals.entries()) {
     for (const name of names) {

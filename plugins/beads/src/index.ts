@@ -33,7 +33,7 @@ import {
 import { BEADS_SOURCE, Lifecycle } from "./lifecycle.ts"
 import { PRIME_WAIT_MS, readPrime, storedPrime } from "./prime.ts"
 import { type StartDeps, sessionStartAdvisories } from "./session-start.ts"
-import { decideShell, type ShellGateDeps, TOOL_CALL_BUDGET_MS } from "./shell-gates.ts"
+import { actorForCommand, decideShell, type ShellGateDeps, TOOL_CALL_BUDGET_MS } from "./shell-gates.ts"
 import { registerAgentRouting } from "./subagent-routing.ts"
 
 export { decideShell } from "./shell-gates.ts"
@@ -244,7 +244,13 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
     })
     if (decision.kind === "block") throw new GateRefusal(decision.gate, decision.cause, decision.resolution)
     if (decision.command !== call.command) event.input = { ...(event.input as object), command: decision.command }
-    pending.set(event.id, { command: call.command, cwd: call.cwd, actor, advisories: decision.advisories })
+    // Only an actor the plugin really injected: a command that chose its own keeps its identity.
+    pending.set(event.id, {
+      command: call.command,
+      cwd: call.cwd,
+      actor: actorForCommand(call.command, actor),
+      advisories: decision.advisories,
+    })
   })
 
   const routing = await registerAgentRouting(ctx, { run: deps.run, env: baseEnv })

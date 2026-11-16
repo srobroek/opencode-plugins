@@ -667,13 +667,13 @@ function scanShell(source, options = {}) {
     endCommand();
     items.push({ kind: "operator", operator: value });
   };
-  const substitution = (expansion) => {
+  const substitution = (expansion, unquoted = false) => {
     if (expansion.inner !== undefined) {
       if (!options.executableSubstitutionsOnly || expansion.executable)
         substitutions.push(expansion.inner);
       else {
-        for (const found of bodySubstitutions(expansion.inner))
-          substitution(found);
+        for (const found of bodySubstitutions(expansion.inner, unquoted))
+          substitution(found, unquoted);
       }
     }
     if (!expansion.closed)
@@ -776,7 +776,7 @@ function scanShell(source, options = {}) {
     }
     if (ch === "$" || ch === "`") {
       const expansion = expansionAt(source, i);
-      substitution(expansion);
+      substitution(expansion, true);
       append(i, source.slice(i, expansion.end), false, expansion.expands);
       i = expansion.end - 1;
       continue;
@@ -921,12 +921,20 @@ function closingIndex(text, from, open, close) {
   }
   return -1;
 }
-function bodySubstitutions(body) {
+function bodySubstitutions(body, processSubstitutions = false) {
   const found = [];
   for (let j = 0;j < body.length; j++) {
     const c = body[j];
     if (c === "\\") {
       j++;
+      continue;
+    }
+    if (processSubstitutions && (c === "<" || c === ">") && body[j + 1] === "(") {
+      const close = closingIndex(body, j + 2, "(", ")");
+      const closed = close >= 0;
+      const end = closed ? close + 1 : body.length;
+      found.push({ end, inner: body.slice(j + 2, closed ? close : body.length), executable: true, expands: true, closed });
+      j = end - 1;
       continue;
     }
     if (c !== "$" && c !== "`")

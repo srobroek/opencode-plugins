@@ -6,9 +6,18 @@ import {
   leadingCdCwd,
   parse,
   parsedInvocations,
+  readsScriptFromStdin,
   type ShellScan,
   scanShell,
 } from "./shell-command.ts"
+
+test("a shell interpreter reads its script from stdin only without -c or a script operand", () => {
+  const stdin = (command: string) => readsScriptFromStdin(command.split(" "))
+  for (const command of ["bash", "sh -s", "bash -s -- a", "bash -o pipefail", "bash -e -x", "/bin/bash -l"])
+    expect(stdin(command)).toBe(true)
+  for (const command of ["bash -c true", "bash -lc true", "bash script.sh", "sh -o pipefail script.sh", "bash -- script.sh", "cat", "git"])
+    expect(stdin(command)).toBe(false)
+})
 
 test("executable-only substitutions omit parameter and arithmetic sources without changing the default", () => {
   const source = `echo "\${sleep}" "$((sleep + 1))" "\${value:-$(sleep 5)}" \`sleep 6\` <(sleep 7)`
@@ -141,12 +150,15 @@ test("finds a substitution whose quoted argument holds parentheses or a nested q
 test("reads executable substitutions inside parameter expansions and shell-fed here-documents", () => {
   const sources = (command: string) => parse(command).nested.map((child) => child.command)
   expect(sources(`echo "\${X:-'$(bd create y)'}"`)).toEqual(["bd create y"])
-  expect(sources("echo \"\${X:-`bd create y`}\"")).toEqual(["bd create y"])
+  expect(sources("echo \"${X:-`bd create y`}\"")).toEqual(["bd create y"])
   expect(sources("bash <<'EOF'\nbd create y\nEOF")).toEqual(["bd create y\n"])
   expect(sources("bash -s <<'EOF'\nbd create y\nEOF")).toEqual(["bd create y\n"])
   expect(sources("sh <<< 'bd create y'")).toEqual(["bd create y"])
   expect(sources("cat <<'EOF'\nbd create y\nEOF")).toEqual([])
   expect(sources("bash -c 'true' <<'EOF'\nbd create y\nEOF").includes("bd create y\n")).toBe(false)
+  expect(sources("cat ${X:-<(sleep 30)}")).toEqual(["sleep 30"])
+  expect(sources("cat ${X:->(sleep 30)}")).toEqual(["sleep 30"])
+  expect(sources('cat "${X:-<(sleep 30)}"')).toEqual([])
 })
 
 test("lists invocations of one executable with their globals and verb", () => {

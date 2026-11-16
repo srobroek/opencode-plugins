@@ -332,13 +332,13 @@ function scanShell(source, options = {}) {
     endCommand();
     items.push({ kind: "operator", operator: value });
   };
-  const substitution = (expansion) => {
+  const substitution = (expansion, unquoted = false) => {
     if (expansion.inner !== undefined) {
       if (!options.executableSubstitutionsOnly || expansion.executable)
         substitutions.push(expansion.inner);
       else {
-        for (const found of bodySubstitutions(expansion.inner))
-          substitution(found);
+        for (const found of bodySubstitutions(expansion.inner, unquoted))
+          substitution(found, unquoted);
       }
     }
     if (!expansion.closed)
@@ -441,7 +441,7 @@ function scanShell(source, options = {}) {
     }
     if (ch === "$" || ch === "`") {
       const expansion = expansionAt(source, i);
-      substitution(expansion);
+      substitution(expansion, true);
       append(i, source.slice(i, expansion.end), false, expansion.expands);
       i = expansion.end - 1;
       continue;
@@ -586,12 +586,20 @@ function closingIndex(text, from, open, close) {
   }
   return -1;
 }
-function bodySubstitutions(body) {
+function bodySubstitutions(body, processSubstitutions = false) {
   const found = [];
   for (let j = 0;j < body.length; j++) {
     const c = body[j];
     if (c === "\\") {
       j++;
+      continue;
+    }
+    if (processSubstitutions && (c === "<" || c === ">") && body[j + 1] === "(") {
+      const close = closingIndex(body, j + 2, "(", ")");
+      const closed = close >= 0;
+      const end = closed ? close + 1 : body.length;
+      found.push({ end, inner: body.slice(j + 2, closed ? close : body.length), executable: true, expands: true, closed });
+      j = end - 1;
       continue;
     }
     if (c !== "$" && c !== "`")
@@ -645,6 +653,33 @@ function splitCommands(source) {
   return positions;
 }
 var INTERPRETERS = new Set(["bash", "sh", "zsh", "dash", "ksh"]);
+function readsScriptFromStdin(values) {
+  if (!INTERPRETERS.has(values[0]?.split("/").pop() ?? ""))
+    return false;
+  let stdin = false;
+  for (let i = 1;i < values.length; i++) {
+    const arg = values[i];
+    if (arg === "--")
+      return stdin || i + 1 >= values.length;
+    if (arg.startsWith("--")) {
+      if (arg === "--rcfile" || arg === "--init-file")
+        i++;
+      continue;
+    }
+    if (arg.length > 1 && (arg.startsWith("-") || arg.startsWith("+"))) {
+      const letters = arg.slice(1);
+      if (arg.startsWith("-") && letters.includes("c"))
+        return false;
+      if (arg.startsWith("-") && letters.includes("s"))
+        stdin = true;
+      if (/[oO]$/.test(letters))
+        i++;
+      continue;
+    }
+    return stdin;
+  }
+  return true;
+}
 function nestedSources(source) {
   const scan = scanShell(source, { executableSubstitutionsOnly: true });
   const sources = [...scan.substitutions];
@@ -655,10 +690,8 @@ function nestedSources(source) {
     let first = 0;
     while (first < item.words.length && /^[A-Za-z_]\w*=/.test(source.slice(item.words[first]?.start, item.words[first]?.end)))
       first++;
-    const head = item.words[first];
-    if (head === undefined || !INTERPRETERS.has(head.value.split("/").pop() ?? head.value))
-      continue;
-    if (item.words.some((word, index) => index > first && /^-[A-Za-z]*c/.test(word.value)))
+    const values = item.words.slice(first).map((word) => word.value);
+    if (!readsScriptFromStdin(values))
       continue;
     for (const document of item.hereDocuments)
       sources.push(document.body);

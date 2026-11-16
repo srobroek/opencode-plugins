@@ -100,6 +100,29 @@ describe("execute.before on shell", () => {
     await cleanup()
   })
 
+  test("a subagent keeps an actor the command chose, through either variable", async () => {
+    const { fake, cleanup } = await start(scratch())
+    for (const command of [
+      "BD_ACTOR=me bd create --title t",
+      "export BD_ACTOR=me; bd create --title t",
+      "BEADS_ACTOR=me bd create --title t",
+      "export BEADS_ACTOR=me; bd create --title t",
+    ]) {
+      const event = await fake.fire.tool("execute.before", shellCall(command, "ses_child"))
+      expect((event.input as { command: string }).command).toBe(command)
+    }
+    await cleanup()
+  })
+
+  test("prefixes a bd write that sits inside a command substitution", async () => {
+    const { fake, cleanup } = await start(scratch())
+    const event = await fake.fire.tool("execute.before", shellCall("id=$(bd create --title t --json)", "ses_child"))
+    expect((event.input as { command: string }).command).toBe(
+      "export BEADS_ACTOR='opencode/ses_root/general/ses_child'; id=$(bd create --title t --json)",
+    )
+    await cleanup()
+  })
+
   test("a main session defers to an ambient actor", async () => {
     const env = { ...quietEnv, BEADS_ACTOR: "ambient/me" } as NodeJS.ProcessEnv
     const { fake, cleanup } = await start(scratch(), { env })
@@ -277,6 +300,20 @@ describe("execute.after on shell", () => {
     const claims = Object.values(state.claims)
     expect(claims).toHaveLength(1)
     expect(claims[0]).toMatchObject({ id: "proj-1", actor: "opencode/ses_root/general/ses_child" })
+    await cleanup()
+  })
+
+  test.each([
+    'export BEADS_ACTOR=me/chosen; bd update proj-1 --claim --notes "source and unset"',
+    'export BD_ACTOR=me/chosen; bd update proj-1 --claim --notes "source and unset"',
+    "BD_ACTOR=me/chosen bd update proj-1 --claim",
+  ])("records a claim under the actor the command chose, not the generated one: %s", async (command) => {
+    const { fake, cleanup } = await start(scratch())
+    const before = shellCall(command, "ses_child")
+    await fake.fire.tool("execute.before", before)
+    await fake.fire.tool("execute.after", completed(before, "✓ Claimed proj-1"))
+    const state = fake.storage.get("claims/ses_child") as { claims: Record<string, { actor: string }> }
+    expect(Object.values(state.claims)[0]?.actor).toBe("me/chosen")
     await cleanup()
   })
 

@@ -676,13 +676,13 @@ function scanShell(source, options = {}) {
     endCommand();
     items.push({ kind: "operator", operator: value });
   };
-  const substitution = (expansion) => {
+  const substitution = (expansion, unquoted = false) => {
     if (expansion.inner !== undefined) {
       if (!options.executableSubstitutionsOnly || expansion.executable)
         substitutions.push(expansion.inner);
       else {
-        for (const found of bodySubstitutions(expansion.inner))
-          substitution(found);
+        for (const found of bodySubstitutions(expansion.inner, unquoted))
+          substitution(found, unquoted);
       }
     }
     if (!expansion.closed)
@@ -785,7 +785,7 @@ function scanShell(source, options = {}) {
     }
     if (ch === "$" || ch === "`") {
       const expansion = expansionAt(source, i);
-      substitution(expansion);
+      substitution(expansion, true);
       append(i, source.slice(i, expansion.end), false, expansion.expands);
       i = expansion.end - 1;
       continue;
@@ -930,12 +930,20 @@ function closingIndex(text, from, open, close) {
   }
   return -1;
 }
-function bodySubstitutions(body) {
+function bodySubstitutions(body, processSubstitutions = false) {
   const found = [];
   for (let j = 0;j < body.length; j++) {
     const c = body[j];
     if (c === "\\") {
       j++;
+      continue;
+    }
+    if (processSubstitutions && (c === "<" || c === ">") && body[j + 1] === "(") {
+      const close = closingIndex(body, j + 2, "(", ")");
+      const closed = close >= 0;
+      const end = closed ? close + 1 : body.length;
+      found.push({ end, inner: body.slice(j + 2, closed ? close : body.length), executable: true, expands: true, closed });
+      j = end - 1;
       continue;
     }
     if (c !== "$" && c !== "`")
@@ -989,6 +997,33 @@ function splitCommands(source) {
   return positions;
 }
 var INTERPRETERS = new Set(["bash", "sh", "zsh", "dash", "ksh"]);
+function readsScriptFromStdin(values) {
+  if (!INTERPRETERS.has(values[0]?.split("/").pop() ?? ""))
+    return false;
+  let stdin = false;
+  for (let i = 1;i < values.length; i++) {
+    const arg = values[i];
+    if (arg === "--")
+      return stdin || i + 1 >= values.length;
+    if (arg.startsWith("--")) {
+      if (arg === "--rcfile" || arg === "--init-file")
+        i++;
+      continue;
+    }
+    if (arg.length > 1 && (arg.startsWith("-") || arg.startsWith("+"))) {
+      const letters = arg.slice(1);
+      if (arg.startsWith("-") && letters.includes("c"))
+        return false;
+      if (arg.startsWith("-") && letters.includes("s"))
+        stdin = true;
+      if (/[oO]$/.test(letters))
+        i++;
+      continue;
+    }
+    return stdin;
+  }
+  return true;
+}
 function nestedSources(source) {
   const scan = scanShell(source, { executableSubstitutionsOnly: true });
   const sources = [...scan.substitutions];
@@ -999,10 +1034,8 @@ function nestedSources(source) {
     let first = 0;
     while (first < item.words.length && /^[A-Za-z_]\w*=/.test(source.slice(item.words[first]?.start, item.words[first]?.end)))
       first++;
-    const head = item.words[first];
-    if (head === undefined || !INTERPRETERS.has(head.value.split("/").pop() ?? head.value))
-      continue;
-    if (item.words.some((word, index) => index > first && /^-[A-Za-z]*c/.test(word.value)))
+    const values = item.words.slice(first).map((word) => word.value);
+    if (!readsScriptFromStdin(values))
       continue;
     for (const document of item.hereDocuments)
       sources.push(document.body);
@@ -1312,134 +1345,39 @@ var WRAPPER_VALUE_FLAGS = {
   "--unset": true,
   "--user": true
 };
-var SHELL_INTERPRETERS = new Set(["bash", "sh", "zsh", "dash", "ksh"]);
 var OPENERS = new Set(["if", "while", "until", "for", "select", "case"]);
 var HEADER_ONLY = new Set(["for", "select", "case"]);
 var CLOSERS = new Set(["fi", "done", "esac"]);
 var BRANCHES = new Set(["else", "elif"]);
 var ASSIGNMENT = /^[A-Za-z_]\w*=/;
-var ACTOR_NAME = /^(BEADS_ACTOR|BD_ACTOR)(\+?=|$)/;
-var HAZARD_WORDS = new Set([
-  "unset",
-  "declare",
-  "typeset",
-  "readonly",
-  "local",
-  "alias",
-  "eval",
-  "source",
-  ".",
-  "builtin",
-  "function",
-  "case",
-  "enable"
-]);
 var basename = (word) => word.split("/").pop() ?? word;
-function plainLiteral(raw, value) {
-  return value.trim() !== "" && !/[$`\\\0]/.test(raw) && !/[$`\\\0]/.test(value);
-}
-function mayShadowActor(command, items, counted) {
-  for (const [index, item] of items.entries()) {
-    if (item.kind === "operator") {
-      if (item.operator === "(" && items[index - 1]?.kind === "command")
-        return true;
+function applyActorBuiltin(state, values) {
+  const name = values[0];
+  if (name !== "export" && name !== "unset")
+    return;
+  for (const arg of values.slice(1)) {
+    const variable = ACTOR_VARS.find((candidate) => arg === candidate || arg.startsWith(`${candidate}=`));
+    if (variable === undefined)
       continue;
-    }
-    const values = item.words.map((word) => word.value);
-    let prefixed = 0;
-    while (prefixed < item.words.length && ASSIGNMENT.test(command.slice(item.words[prefixed]?.start, item.words[prefixed]?.end)))
-      prefixed++;
-    if (prefixed === item.words.length)
-      prefixed = 0;
-    for (const [at, word] of item.words.entries()) {
-      const value = word.value;
-      if (HAZARD_WORDS.has(value) || value.endsWith("()"))
-        return true;
-      if (ACTOR_NAME.test(value) && !counted.has(word) && at >= prefixed)
-        return true;
-      if (value === "command" && /^-[A-Za-z]*p/.test(values[at + 1] ?? ""))
-        return true;
-      if (value === "export" && values.slice(at + 1).some((arg) => /^-[A-Za-z]*n/.test(arg)))
-        return true;
-      if (basename(value) === "env") {
-        for (const arg of values.slice(at + 1)) {
-          if (!arg.startsWith("-") && !ASSIGNMENT.test(arg))
-            break;
-          if (/^-[A-Za-z]*[ui]/.test(arg) || arg.startsWith("--unset") || arg === "--ignore-environment")
-            return true;
-        }
-      }
-    }
+    if (name === "unset")
+      delete state[variable];
+    else if (arg.includes("="))
+      state[variable] = arg.slice(variable.length + 1);
   }
-  return false;
 }
-function topLevelExports(command, items) {
-  const found = new Map;
-  let depth = 0;
-  for (const [index, item] of items.entries()) {
-    if (item.kind === "operator") {
-      if (item.operator === "(" || item.operator === "{")
-        depth++;
-      else if (item.operator === ")" || item.operator === "}")
-        depth--;
-      continue;
-    }
-    const first = item.words[0];
-    if (first === undefined || first.quoted)
-      continue;
-    if (OPENERS.has(first.value))
-      depth++;
-    else if (CLOSERS.has(first.value))
-      depth--;
-    const before = items[index - 1];
-    const after = items[index + 1];
-    if (depth !== 0 || first.value !== "export")
-      continue;
-    const is = (side, operators) => side?.kind === "operator" && operators.includes(side.operator);
-    const alone = (before === undefined || is(before, [";", `
-`])) && is(after, [";", `
-`]);
-    const chained = (before === undefined || is(before, [";", `
-`, "&&"])) && is(after, [";", `
-`, "&&"]);
-    if (!chained)
-      continue;
-    const list = [];
-    for (const word of item.words.slice(1)) {
-      const variable = ACTOR_VARS.find((candidate) => word.value.startsWith(`${candidate}=`));
-      if (variable === undefined)
-        continue;
-      const value = word.value.slice(variable.length + 1);
-      if (plainLiteral(command.slice(word.start, word.end), value))
-        list.push({ variable, value, word, alone });
-    }
-    found.set(index, list);
-  }
-  return found;
+function bdInvocations(command, inherited = {}) {
+  return readCommand(command, inherited).invocations;
 }
-function bdInvocations(command) {
+function actorStateAfter(command, inherited = {}) {
+  return readCommand(command, inherited).state;
+}
+function readCommand(command, inherited) {
   const out = [];
-  const { items } = scanShell(command);
-  const exports = topLevelExports(command, items);
-  const counted = new Set;
-  for (const list of exports.values())
-    for (const entry of list)
-      counted.add(entry.word);
-  const trusted = counted.size > 0 && !mayShadowActor(command, items, counted);
-  const state = {};
-  const alone = {};
-  for (const [index, item] of items.entries()) {
+  const scan = scanShell(command, { executableSubstitutionsOnly: true });
+  const state = { ...inherited };
+  for (const item of scan.items) {
     if (item.kind === "operator")
       continue;
-    if (trusted) {
-      for (const entry of exports.get(index) ?? []) {
-        state[entry.variable] = entry.value;
-        if (entry.alone)
-          alone[entry.variable] = entry.value;
-        else
-          delete alone[entry.variable];
-      }
-    }
     const words = item.words;
     let k = 0;
     let skip = false;
@@ -1460,14 +1398,11 @@ function bdInvocations(command) {
     let a = k;
     while (a < words.length && ASSIGNMENT.test(command.slice(words[a]?.start, words[a]?.end)))
       a++;
-    const assigned = words.slice(k, a).map((word) => {
-      const name = word.value.slice(0, word.value.indexOf("="));
-      const raw = command.slice(word.start, word.end);
-      return ACTOR_VARS.some((variable) => variable === name) && !plainLiteral(raw, word.value.slice(name.length + 1)) ? `${name}=$` : word.value;
-    });
+    const assigned = words.slice(k, a).map((word) => word.value);
     const values = words.slice(a).map((word) => word.value);
     if (values.length === 0)
       continue;
+    applyActorBuiltin(state, values);
     const found = resolveBd(values, assigned);
     if (found !== undefined) {
       const scanned = scanGlobals(values, found.next);
@@ -1479,17 +1414,18 @@ function bdInvocations(command) {
           globals: scanned.globals,
           prefix: found.prefix,
           exported: { ...state },
-          exportedAlone: { ...alone },
           unset: found.unset
         });
       }
     }
-    if (SHELL_INTERPRETERS.has(basename(values[0] ?? ""))) {
+    if (readsScriptFromStdin(values)) {
       for (const document of item.hereDocuments)
-        out.push(...bdInvocations(document.body));
+        out.push(...bdInvocations(document.body, state));
     }
   }
-  return out;
+  for (const source of scan.substitutions)
+    out.push(...bdInvocations(source, state));
+  return { invocations: out, state };
 }
 function resolveBd(values, assigned) {
   let i = 0;
@@ -1671,7 +1607,7 @@ function invocationActor(invocation, env) {
     if (invocation.unset[variable] === true)
       return null;
     const assignment = invocation.prefix.findLast((token) => token.startsWith(`${variable}=`));
-    const value = assignment !== undefined ? assignment.slice(variable.length + 1) : (CREATING_VERBS[invocation.verb] === true ? invocation.exportedAlone : invocation.exported)[variable] ?? env[variable];
+    const value = assignment !== undefined ? assignment.slice(variable.length + 1) : invocation.exported[variable] ?? env[variable];
     return literal(value);
   };
   return resolve("BEADS_ACTOR") ?? resolve("BD_ACTOR");
@@ -1687,7 +1623,6 @@ function invocationFromArgv(args) {
     globals: scanned.globals,
     prefix: [],
     exported: {},
-    exportedAlone: {},
     unset: {}
   };
 }
@@ -1727,7 +1662,7 @@ var CREATING_VERBS = {
 };
 var CREATE_REASON = "bd create / `bd new` / `bd create-form` without BEADS_ACTOR or BD_ACTOR records the invoking human's git identity in created_by. Owner is always the git identity and never identifies the agent. Set either variable to <harness>/<agent-name>/<session-id> so created_by is attributable, then retry.";
 var ADVISORY_TEXT = "BEADS_ACTOR and BD_ACTOR are unset on this mutating `bd` command. Without an actor, created_by records the invoking human's git identity; Owner is always the git identity and never identifies the agent. Set either variable to <harness>/<agent-name>/<session-id> so writes and claims are attributable, then retry.";
-function decideActorParsed(parsed, env = process.env) {
+function decideActorParsed(parsed, env = process.env, inherited = {}) {
   if (parsed === null || typeof parsed !== "object")
     return { kind: "block", reason: "command could not be parsed" };
   const candidate = parsed;
@@ -1735,13 +1670,14 @@ function decideActorParsed(parsed, env = process.env) {
     return { kind: "block", reason: "command could not be parsed" };
   }
   let advisory = false;
-  const own = decideActorGate(candidate.command, env);
+  const own = decideActorGate(candidate.command, env, inherited);
   if (own.kind === "block")
     return own;
   if (own.kind === "advisory")
     advisory = true;
+  const after = actorStateAfter(candidate.command, inherited);
   for (const child of candidate.nested) {
-    const decision = decideActorParsed(child, env);
+    const decision = decideActorParsed(child, env, after);
     if (decision.kind === "block")
       return decision;
     if (decision.kind === "advisory")
@@ -1749,9 +1685,9 @@ function decideActorParsed(parsed, env = process.env) {
   }
   return advisory ? { kind: "advisory", text: ADVISORY_TEXT } : { kind: "allow" };
 }
-function decideActorGate(command, env = process.env) {
+function decideActorGate(command, env = process.env, inherited = {}) {
   let advisory = false;
-  for (const invocation of bdInvocations(command)) {
+  for (const invocation of bdInvocations(command, inherited)) {
     if (!isMutatingInvocation(invocation) || invocationActor(invocation, env) !== null) {
       continue;
     }
@@ -2341,7 +2277,7 @@ var NAME_ONLY = {
   whereis: true,
   which: true
 };
-var SHELL_INTERPRETERS2 = {
+var SHELL_INTERPRETERS = {
   bash: true,
   dash: true,
   fish: true,
@@ -2564,7 +2500,7 @@ function sourceRunner(shape) {
     return;
   if (!head.quoted && !head.expands && SOURCE_RUNNERS[commandName(head)] === true)
     return head;
-  return [head, ...args].find((word) => !word.quoted && !word.expands && SHELL_INTERPRETERS2[commandName(word)] === true);
+  return [head, ...args].find((word) => !word.quoted && !word.expands && SHELL_INTERPRETERS[commandName(word)] === true);
 }
 function pipelineSourceRunner(items, index, source) {
   const pipe = (at) => {
@@ -5371,7 +5307,7 @@ function actorForCommand(command, actor) {
   const invocations = bdInvocations(command);
   if (invocations.length === 0)
     return;
-  if (invocations.some((invocation) => invocation.globals.some((token) => token === "--actor" || token.startsWith("--actor=")) || invocation.prefix.some((token) => token.startsWith("BEADS_ACTOR=")) || invocation.exported.BEADS_ACTOR !== undefined))
+  if (invocations.some((invocation) => invocation.globals.some((token) => token === "--actor" || token.startsWith("--actor=")) || invocation.prefix.some((token) => token.startsWith("BEADS_ACTOR=") || token.startsWith("BD_ACTOR=")) || invocation.exported.BEADS_ACTOR !== undefined || invocation.exported.BD_ACTOR !== undefined))
     return;
   return actor;
 }
@@ -5796,7 +5732,12 @@ async function setupBeads(ctx, deps = {}) {
       throw new GateRefusal(decision.gate, decision.cause, decision.resolution);
     if (decision.command !== call.command)
       event.input = { ...event.input, command: decision.command };
-    pending.set(event.id, { command: call.command, cwd: call.cwd, actor, advisories: decision.advisories });
+    pending.set(event.id, {
+      command: call.command,
+      cwd: call.cwd,
+      actor: actorForCommand(call.command, actor),
+      advisories: decision.advisories
+    });
   });
   const routing = await registerAgentRouting(ctx, { run: deps.run, env: baseEnv });
   const pin = await ctx.shell.hook("create.before", (event) => {

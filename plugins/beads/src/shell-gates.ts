@@ -72,8 +72,9 @@ export function actorForCommand(command: string, actor: string | undefined): str
     invocations.some(
       (invocation) =>
         invocation.globals.some((token) => token === "--actor" || token.startsWith("--actor=")) ||
-        invocation.prefix.some((token) => token.startsWith("BEADS_ACTOR=")) ||
-        invocation.exported.BEADS_ACTOR !== undefined,
+        invocation.prefix.some((token) => token.startsWith("BEADS_ACTOR=") || token.startsWith("BD_ACTOR=")) ||
+        invocation.exported.BEADS_ACTOR !== undefined ||
+        invocation.exported.BD_ACTOR !== undefined,
     )
   )
     return undefined

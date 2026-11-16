@@ -24,6 +24,7 @@ export {
   type ParsedInvocation,
   type ParseFailure,
   parse,
+  readsScriptFromStdin,
   type ShellScan,
   type ShellWord,
   type SimpleCommand,
