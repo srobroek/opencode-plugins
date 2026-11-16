@@ -29,6 +29,8 @@ export const EXPLORE_PERMISSIONS: ReadonlyArray<Rule> = [
   { action: "glob", resource: "*", effect: "allow" },
   { action: "websearch", resource: "*", effect: "allow" },
   { action: "webfetch", resource: "*", effect: "allow" },
+  { action: "skill", resource: "quality-*", effect: "allow" },
+  { action: "skill", resource: "lang-*", effect: "allow" },
   { action: "external_directory", resource: "*", effect: "ask" },
 ]
 

@@ -68,7 +68,7 @@ describe("agent-reviewer", () => {
     expect(permissionEffect(pr, "shell", "gh pr diff 7 --repo o/r")).toBe("allow")
     for (const command of ["gh api repos/o/r", "git diff", "cat x"]) expect(permissionEffect(pr, "shell", command)).toBe("deny")
     for (const action of ["read", "grep", "webfetch"]) expect(permissionEffect(pr, action)).toBe("deny")
-    for (const skill of ["quality-code-design", "review-security"]) expect(permissionEffect(pr, "skill", skill)).toBe("allow")
+    for (const skill of ["quality-code-design", "lang-rust", "review-security"]) expect(permissionEffect(pr, "skill", skill)).toBe("allow")
   })
 
   test("code-reviewer runs only git diff, log and show, and never writes their output", async () => {
@@ -89,6 +89,7 @@ describe("agent-reviewer", () => {
     for (const action of ["read", "grep", "glob", "lsp_diagnostics"]) expect(permissionEffect(code, action)).toBe("allow")
     for (const action of ["webfetch", "websearch"]) expect(permissionEffect(code, action)).toBe("deny")
     expect(permissionEffect(code, "skill", "ast-grep-search")).toBe("allow")
+    expect(permissionEffect(code, "skill", "lang-rust")).toBe("allow")
   })
 
   test("security-reviewer reads code only: no shell, no web", async () => {
@@ -98,6 +99,7 @@ describe("agent-reviewer", () => {
     for (const action of ["read", "grep", "glob", "lsp_hover"]) expect(permissionEffect(security, action)).toBe("allow")
     for (const action of ["shell", "webfetch", "websearch"]) expect(permissionEffect(security, action)).toBe("deny")
     expect(permissionEffect(security, "skill", "review-security")).toBe("allow")
+    for (const skill of ["quality-code-design", "lang-rust"]) expect(permissionEffect(security, "skill", skill)).toBe("allow")
     expect(permissionEffect(security, "skill", "ast-grep-search")).toBe("allow")
     expect(permissionEffect(security, "read", ".env")).toBe("ask")
     expect(file("security-reviewer").system).toContain("CWE id")
