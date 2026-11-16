@@ -3,26 +3,28 @@ name: cad-render
 description: Renders cad-model versions into PBR product PNGs and checks requirement window visibility, for stage gates. Triggers on "render v3", "show me the renders".
 ---
 
+Resolve `$CAD_SKILLS` as the parent directory of this skill's directory; it contains the installed `cad-*` skill folders.
+
 # CAD Product Render
 
 Stages L1 LAYOUT to L4 ANALYSIS: every commit batch renders its version after `cad-model run`,
 and every stage gate shows the renders. Use `cad-concept` for L0 CONCEPT variants.
-Paths below are relative to this skill's base directory.
+Paths below are relative to this skill's directory.
 Interactive look-dev (environment, exposure, shadow and AO tuning by eye) runs in OCP CAD
 Viewer Studio mode through `cad-viewer`; this skill is the unattended renderer.
 
 TRIGGER
 + "render v3", "show me the renders", "what does it look like now", "product shot"
-+ an L1 to L4 commit batch after `cad-model run`, or any stage gate in the `cad-flow` skill
++ an L1 to L4 commit batch after `cad-model run`, or any stage gate in `cad-flow`
 + "can the pistons be seen through the cover": a requirement `visibility` binding, checked by every render
-- L0 concept variants -> the `cad-concept` skill
+- L0 concept variants -> `cad-concept`
 - interactive look-dev, orbiting, section or explode by hand -> `cad-viewer` (OCP CAD Viewer Studio mode)
-- a check result (validity, interference) -> the `cad-model` skill's `check`; a render is never one
+- a check result (validity, interference) -> `cad-model` `check`; a render is never one
 
 ## Workflow
 
-1. Build first: the `cad-model` skill's `run` writes `hw/versions/vN/` and `latest.json`.
-2. Render: `cad_run cad-render/scripts/render.py hw [--version latest|vN] [--views ...] [--size WxH] [--subject S] [--replace] [--out-dir .cad-work/...]`
+1. Build first: `cad-model` `run` writes `hw/versions/vN/` and `latest.json`.
+2. Render: `uv run --script "$CAD_SKILLS/cad-flow/scripts/run.py" cad-render/scripts/render.py hw [--version latest|vN] [--views ...] [--size WxH] [--subject S] [--replace] [--out-dir .cad-work/...]`
    -> immutable `hw/renders/<vN>/<subject>/` bundles with requested PNGs, `render.json`, and `manifest.json`.
    `--views` accepts `iso front side exploded`, `closeup-<PN>` / `part-<PN>`, and custom `dir-<X>-<Y>-<Z>` directions in assembly coordinates (+Z up, front -Y). Encode each signed decimal using `p` or `m` and `d` for the decimal point; for example `dir-p1-m1d5-p0-closeup-LMP-0004`. Directions are normalized. `-closeup-<PN>` or `-part-<PN>` optionally frames a PN from that direction; `@occurrence` uses the same explicit, filename-safe reference accepted by `closeup-@occurrence`. Names are deterministic and safe as `{VIEW}.png` bundle file names. Camera up switches to +Z near vertical directions.
    The bundle manifest seals its files and binds the bundle to the version manifest. `render.json` holds
@@ -35,7 +37,7 @@ TRIGGER
    for five 800x600 views. Use higher values when tests on the target hardware show a benefit.
    The render metadata records page-load, view-capture, renderer, and PNG-encoding times.
    Per-view PNG SHA-256 values verify cache integrity. From this skill directory, run
-   `cad_run cad-render/scripts/compare_renders.py DIR_A DIR_B` to compare render decisions and PNG pixels.
+   `uv run --script scripts/compare_renders.py DIR_A DIR_B` to compare render decisions and PNG pixels.
    At default 1600x1200, Mac serial runs and pace serial-vs-serial / serial-vs-jobs2 runs (30 views) matched
    byte-for-byte. The comparator uses exact parity.
    Each capture seeds GTAO noise from the view and retry index. The floor-shadow bake key includes visible part transforms and sampling settings.
@@ -113,7 +115,7 @@ quality and adds `reused` (`version`, `bundle`, `rendered_in`, `sha256`); the su
 MUST Treat exit 1 as a failed render for the batch; report unusable findings and metrics verbatim.
 MUST Report a failed visibility check as a failed requirement: requirement, target, `visible_fraction` and `min_visible_fraction`.
 MUST Keep warning-only renders; report warning, retry strategy, and each requested view's absolute PNG path.
-MUST Install the headless browser once per machine: `cad_run cad-flow/scripts/preflight.py --warm` installs the pinned Playwright Chromium (1.64.1). The manifest's `renderer.playwright` is the installed version.
+MUST Install the headless browser once per machine: `uv run --with playwright==1.64.1 playwright install chromium`. The manifest's `renderer.playwright` is the installed version.
 DEFAULT Default views are iso, front, side, and exploded at 1600x1200; `--size WxH` overrides.
 NOT Render L0 concept variants here; `cad-concept` owns them.
 NOT Hand-edit `hw/renders/`; it is derived and replaced whole on every miss.

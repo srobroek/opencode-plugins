@@ -49,15 +49,18 @@ export type OutcomeRecord = {
   outcome?: Outcome
   /** A failover moved the child to another model. */
   failedOver?: boolean
+  /** A resume rerouted the child off its exploration arm (an explicit model or tier, or a guard switch); the arm facts stay. */
+  leftArm?: boolean
   // Outcome signals from the child's own session; enums and a boolean, never text.
   verdict?: Verdict
   /** The last test run of the child; `none` when it ran none. */
   tests?: TestResult
   /** Any step edited a test file. */
   touchedTests?: boolean
-  // Reserved for evaluation-based routing; unset until it exists.
+  // Exploration inside a tier, set only for an eligible spawn (see explore.ts).
   policy?: string
-  eligible?: boolean
+  /** Labels of the arms the spawn could have run on, the control first. */
+  eligible?: string[]
   arm?: string
   p?: number
 }
@@ -169,6 +172,14 @@ export function onSignals(ledger: Ledger, childID: string, signals: Signals): Le
 }
 
 export const onFailover = (ledger: Ledger, childID: string): Ledger => update(ledger, childID, (r) => (r.failedOver ? r : { ...r, failedOver: true }))
+
+/** A deliberate or guard reroute on resume ended the child's exploration arm. Only a child with an arm is marked. */
+export const onLeftArm = (ledger: Ledger, childID: string): Ledger =>
+  update(ledger, childID, (r) => (r.arm === undefined || r.leftArm ? r : { ...r, leftArm: true }))
+
+/** The exploration facts of an eligible spawn. The first set stays: a resume does not redraw. */
+export const onExploration = (ledger: Ledger, childID: string, facts: { policy: string; eligible: string[]; arm: string; p: number }): Ledger =>
+  update(ledger, childID, (r) => (r.arm !== undefined ? r : { ...r, policy: facts.policy, eligible: [...facts.eligible], arm: facts.arm, p: facts.p }))
 
 export type PruneLimits = { maxEntries: number; maxAgeMs: number }
 
@@ -493,6 +504,8 @@ export function createLedgerStore(storage: LedgerStorage, options: LedgerStoreOp
     end: (id: string, outcome: Outcome, at: number) => change(id, (l, i) => onEnd(l, i, outcome, at), "end"),
     signals: (id: string, signals: Signals) => change(id, (l, i) => onSignals(l, i, signals), "debounce"),
     failover: (id: string) => change(id, onFailover, "now"),
+    leftArm: (id: string) => change(id, onLeftArm, "now"),
+    exploration: (id: string, facts: Parameters<typeof onExploration>[2]) => change(id, (l, i) => onExploration(l, i, facts), "now"),
     flush,
     /**
      * Admits nothing new, writes what is waiting, drains every child's queue, then retries the

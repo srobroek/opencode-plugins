@@ -1,13 +1,15 @@
 ---
 name: cad-viewer
-description: Shows cad-model versions in OCP CAD Viewer with parts, findings and measurements. Triggers on "show v3", "compare".
+description: Shows cad-model versions in OCP CAD Viewer with a parts, findings, and measurements panel. Triggers on "show v3", "compare v2 and v3", "animate J-002".
 ---
+
+Resolve `$CAD_SKILLS` as the parent directory of this skill's directory; it contains the installed `cad-*` skill folders.
 
 # CAD Viewer
 
-Stages L1 LAYOUT to L5 RELEASE of the `cad-flow` skill: the live CAD view after every build, the
+Stages L1 LAYOUT to L5 RELEASE of `cad-flow`: the live CAD view after every build, the
 review surface at each gate, and the screenshots a gate or the user reads. L0 CONCEPT stays in
-the `cad-concept` skill. Paths below are relative to this skill's base directory.
+`cad-concept`. Paths below are relative to this skill's directory.
 
 TRIGGER
 + "show the model", "show v3", "open the viewer", "keep the viewer on the latest build"
@@ -15,24 +17,23 @@ TRIGGER
 + "compare v2 and v3", "side by side", "isolate the lower link", "ghost the rest"
 + "explode it", "section through the elbow pin", "animate J-002", "screenshot the iso view"
 + "look-dev", "studio lighting" for interactive renders
-- L0 concept variants -> the `cad-concept` skill
-- building, checking, or diffing a version -> the `cad-model` skill
-- joint sweeps, collisions, worst-case pose -> the `cad-motion` skill
+- L0 concept variants -> `cad-concept`
+- building, checking, or diffing a version -> `cad-model`
+- joint sweeps, collisions, worst-case pose -> `cad-motion`
 
 ## Workflow
 
-Run viewer commands with the `cad_run` tool, in cad-flow's shared environment:
-`cad_run cad-viewer/scripts/viewer.py <command> [args...]`.
-Once per machine, install the headless browser captures use with
-`cad_run cad-flow/scripts/preflight.py --warm`.
+Run viewer commands through cad-flow's shared environment:
+`uv run --script "$CAD_SKILLS/cad-flow/scripts/run.py" cad-viewer/scripts/viewer.py <command> [args...]`.
+Once per machine, install the headless browser captures use:
+`uv run --with playwright==1.64.1 playwright install chromium`.
 
 Session identity:
-- `cad_run` keys the host to this OpenCode session (its subagents share it), so a new session gets
-  its own host. Within one session, pass `--session NAME` to run several hosts, one per name.
-- Reuse the name for each command. Different names in one project get separate hosts.
+- A session is scoped to the project. For separate hosts in one project, pass `--session NAME` or
+  set `CAD_VIEWER_SESSION_NAME`; repeat that same value for every command in the session.
 - The project root contains `hw/`. Commands with `hw/` derive it from that path; other commands use cwd.
-- Run `serve` from the project root unless you name the session. Deleting the OpenCode session stops
-  its hosts. `CAD_VIEWER_SESSION` still overrides the session-file path.
+- Run `serve` from the project root unless you name the session. `CAD_VIEWER_SESSION` still overrides
+  the session-file path.
 1. `serve [--session NAME] [--idle-timeout MIN]` starts or reuses this session's host.
    The host runs the user and presenter OCP viewer pairs and the panel.
    The timeout defaults to 30 minutes. Pass `0` to disable it.
@@ -89,8 +90,7 @@ Session identity:
 
 ## Studio look-dev
 
-Realistic renders per commit batch come from the three.js PBR renderer (the `cad-render` skill);
-Studio mode is the interactive route. `studio --environment studio --tone-mapping ACES
+Realistic renders per commit batch come from the three.js PBR renderer (`cad-render`);
 --exposure 1.0 [--env-intensity] [--env-rotation] [--background] [--shadow-intensity]
 [--shadow-softness] [--ao-intensity] [--texture-mapping]` switches both viewer pairs to the
 Studio tab, and `capture --view current` records it. Settings the user changes by hand in their
@@ -106,11 +106,9 @@ to the live 3D viewer.
 
 | section | source | caption |
 |---|---|---|
-| Renders | `hw/renders/<vN>/<subject>/{render.json,*.png,manifest.json}` (the `cad-render` skill) | view quality, retry strategy, and material/input decisions from render.json |
-| Viewer captures | `hw/captures/<vN>/<subject>/{capture.json,<view>.png,manifest.json}` | captured view and state bound to one version |
+| Renders | `hw/renders/<vN>/<subject>/{render.json,*.png,manifest.json}` (`cad-render`) | view quality, retry strategy, and material/input decisions from render.json |
 | Drawings | `hw/drawings/<vN>/<subject>/{package.json,sheet-1.png,sheet-1.pdf,manifest.json}` | status, scale, projection and Open PDF with its absolute path |
-| Concept screenshots | `hw/concept/screenshots/` (the `cad-concept` skill) | scene and variant |
-
+| Concept screenshots | `hw/concept/screenshots/` (`cad-concept`) | scene and variant |
 The version picker uses built labels from cad-record layout. Each option includes the build date and part
 count, plus counts of valid render sets, capture bundles and drawing preview bundles; choose Gallery to
 see the actual images. The file route serves only PNG, JPEG, and PDF files inside the open `hw/`.
@@ -120,25 +118,24 @@ see the actual images. The file route serves only PNG, JPEG, and PDF files insid
 MUST Read the PNG before any claim about a view; a pass status only says the canvas is not blank.
 MUST Run the exact `stop` command printed by `serve` when the user is done with the viewer (end of
   review/stage, before handoff), and tell the user the URL that is going away.
-DEFAULT One host per project and session: session files under the state directory are keyed by the
-  OpenCode session ID and `CAD_VIEWER_SESSION_NAME` / `--session NAME`, plus the project root.
+DEFAULT One host per project and explicit session name: session files are keyed by
+  `CAD_VIEWER_SESSION_NAME` / `--session NAME` plus the project root.
 NOT Use ocp_viewer `save_screenshot`: headless it returns a black frame. Captures are browser screenshots.
 NOT Expose the host beyond loopback: it answers only `Host` 127.0.0.1 or localhost on its port,
   refuses another site's `Origin` (403) and a non-JSON POST (415), and writes a capture only as
   a `.png` into a folder that already exists.
-NOT Treat the viewer, a render, or a capture as a check result; the `cad-model` skill's `check` is the gate.
-
+NOT Treat the viewer, a render, or a capture as a check result; `cad-model` `check` is the gate.
 ## Limits
 
 - Headless WebGL is SwiftShader in Playwright Chromium: correct pixels, slow frames (seconds per capture).
 - Colours are cad-render's `assets/materials.json` rule for part.yaml `material` and `finish`
-  (the `cad-render` skill); an unmapped material shows the table's neutral default.
-- OCP CAD Viewer does not replay a model to a newly opened page, and serves only the last page that
-  connected: the user's tab and the presenter each have their own viewers, and the panel asks the
-  host to push again on each viewer load, which restores the camera and a held animation pose.
-- Cylindrical bores come from metrics.json `parts.<PN>.holes` (diameter, through or blind, depth). The
-  list includes every concave full-circle cylinder, so recesses and cavities appear beside drilled
-  holes; a missing or empty field shows "no cylindrical bores".
+  (`cad-render`); an unmapped material shows the table's neutral default.
+- OCP CAD Viewer does not replay a model to a newly opened page, and serves only the last page that connected:
+  the user's tab and the presenter each have their own viewers, and the panel asks the host to push again on
+  each viewer load, which restores the camera and a held animation pose.
+- Cylindrical bores come from metrics.json `parts.<PN>.holes` (diameter, through or blind, depth). The list
+  includes every concave full-circle cylinder, so recesses and cavities appear beside drilled holes; a missing
+  or empty field shows "no cylindrical bores".
 
 ```text
 L1 VIEWER {SERVE|SHOW|COMPARE|ANIMATE|CAPTURE|GALLERY|STOP}: {PASS|FAIL}, {version(s)}, {url or PNG}

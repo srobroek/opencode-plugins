@@ -8,10 +8,10 @@ import { withOptionalString } from "../../lib/src/tool-schema.ts"
 import { WORKTREE_PARAM, WORKTREE_PARAM_DESCRIPTION } from "../../subagent-worktree/src/lane.ts"
 import reference from "./fixtures/reference.json"
 import work from "./fixtures/work-models.json"
-import plugin, { CHILD_LOOKUP_MS, MAX_REREGISTER, type ModelRef, readAgents, readTiers, spawnTarget } from "./index.ts"
+import plugin, { CHILD_LOOKUP_MS, MAX_REREGISTER, type ModelRef, readAgents, readTiers, setExploreRandom, spawnTarget } from "./index.ts"
 
 type Agent = { id: string; model?: ModelRef; request?: { headers?: Record<string, string> } }
-type Model = { providerID: string; id: string; variants: { id: string }[]; cost?: { input: number }[] }
+type Model = { providerID: string; id: string; variants: { id: string }[]; cost?: { input: number }[]; limit?: { context: number } }
 type SubagentTool = { id: string; name: string; description: string; input: unknown }
 type ToolEditor = {
   add: (tool: { name: string; execute: (input: unknown) => Promise<{ content: string }> }) => void
@@ -733,6 +733,153 @@ describe("runtime fallback", () => {
     await cleanup()
   })
 
+  // The host's shape for an overflow its compaction could not fix: `session.execution.failed` carries
+  // `toSessionError` of an InvalidRequest (opencode core `session/to-session-error.ts`, `providerError`).
+  const overflow = (message: string) => ({
+    type: "provider.invalid-request",
+    message,
+    status: 400,
+    response: { body: JSON.stringify({ type: "error", error: { type: "invalid_request_error", message } }) },
+  })
+  const tooLong = overflow("prompt is too long: 213462 tokens > 200000 maximum")
+  const windows = (...limits: number[]) => models.map((m, i) => ({ ...m, limit: { context: limits[i] ?? 200_000 } })) as Model[]
+  const wide = { ...fallbackOptions, roles: { task: ["amazon-bedrock/claude-sonnet#high", "anthropic/claude-haiku", "opencode/flint"] } }
+  const notes = (host: ReturnType<typeof createHost>) => methods(host, "synthetic").map((c) => c.input as { sessionID: string; text: string })
+  const childHost = (models: Model[], options: typeof fallbackOptions, children = ["c"]) => {
+    const host = createHost({ agents: [{ id: "general" }], models, options })
+    host.sessions.set("r", { id: "r" })
+    for (const id of children) host.sessions.set(id, { id, parentID: "r", agent: "general", model: sonnet })
+    return host
+  }
+
+  test("a child that overflows is switched to the tier's larger-context candidate for its next request, with one note and a receipt", async () => {
+    const host = childHost(windows(200_000, 1_000_000, 2_000_000), wide)
+    const cleanup = await setup(host)
+    host.emit(failed("c", tooLong))
+    await settle()
+    expect(methods(host, "switchModel").map((c) => c.input)).toEqual([{ sessionID: "c", model: haiku }])
+    expect(notes(host)).toEqual([
+      {
+        ...notes(host)[0],
+        sessionID: "r",
+        text: "context too long for amazon-bedrock/claude-sonnet#high (200000 tokens); the session now runs anthropic/claude-haiku (1000000 tokens). Resume it with sessionID c to continue on the larger context.",
+      },
+    ])
+    expect(host.storage.has("health")).toBe(false)
+    const check = (await host.tools.get("model_roles_check")?.execute({}))?.content ?? ""
+    expect(check).toContain("anthropic/claude-haiku by model default; fell back past amazon-bedrock/claude-sonnet#high: context-length")
+    expect(check).not.toContain("Recent health")
+    host.close()
+    await cleanup()
+  })
+
+  test("a candidate whose variant is unknown is not a larger-context target", async () => {
+    const roles = { ...fallbackOptions, roles: { task: ["amazon-bedrock/claude-sonnet#high", "anthropic/claude-haiku#nope", "opencode/flint"] } }
+    const host = childHost(windows(200_000, 1_000_000, 2_000_000), roles)
+    const cleanup = await setup(host)
+    host.emit(failed("c", tooLong))
+    await settle()
+    expect(methods(host, "switchModel").map((c) => c.input)).toEqual([{ sessionID: "c", model: flint }])
+    host.close()
+    await cleanup()
+  })
+
+  test("with no larger-context candidate nothing is switched and the note says so", async () => {
+    const host = childHost(windows(200_000, 200_000, 200_000), wide)
+    const cleanup = await setup(host)
+    host.emit(failed("c", overflow("Input is too long for requested model.")))
+    await settle()
+    expect(methods(host, "switchModel")).toHaveLength(0)
+    expect(notes(host).map((n) => n.text)).toEqual([
+      "context too long for amazon-bedrock/claude-sonnet#high (200000 tokens); no larger-context candidate in tier task. Compact the session or use a tier with a larger-context model",
+    ])
+    expect(host.storage.has("health")).toBe(false)
+    host.close()
+    await cleanup()
+  })
+
+  test("a root session that overflows is not switched; the note names the larger candidate", async () => {
+    const host = createHost({ agents: [{ id: "general" }], models: windows(200_000, 1_000_000), options: fallbackOptions })
+    host.sessions.set("r", { id: "r", agent: "general", model: sonnet })
+    const cleanup = await setup(host)
+    host.emit(failed("r", tooLong))
+    await settle()
+    expect(methods(host, "switchModel")).toHaveLength(0)
+    expect(notes(host)).toEqual([
+      {
+        ...notes(host)[0],
+        sessionID: "r",
+        text: "context too long for amazon-bedrock/claude-sonnet#high (200000 tokens); tier task has a larger-context candidate, anthropic/claude-haiku (1000000 tokens). Switch to it or compact the session.",
+      },
+    ])
+    host.close()
+    await cleanup()
+  })
+
+  test.each([
+    ["the failure event first", ["event", "tool"], 1],
+    ["the tool error first", ["tool", "event"], 2],
+  ])("a child's overflow is switched by its failure event only, with %s", async (_name, order, noteCount) => {
+    const host = childHost(windows(200_000, 1_000_000), fallbackOptions)
+    const cleanup = await setup(host)
+    const steps = {
+      event: async () => {
+        host.emit(failed("c", tooLong))
+        await settle()
+      },
+      tool: async () => {
+        await host.spawnFailed({ agent: "general", prompt: "x" }, `Subagent failed (sessionID: c): ${tooLong.message}`, "r")
+        await settle()
+      },
+    }
+    for (const step of order as Array<"event" | "tool">) await steps[step]()
+    expect(methods(host, "switchModel").map((c) => c.input)).toEqual([{ sessionID: "c", model: haiku }])
+    expect(notes(host).map((n) => n.sessionID)).toEqual(Array(noteCount).fill("r"))
+    expect(notes(host).at(-1)?.text).toContain("Resume it with sessionID c")
+    host.close()
+    await cleanup()
+  })
+
+  test("two children that overflow on one model each get a note in the parent", async () => {
+    const host = childHost(windows(200_000, 1_000_000), fallbackOptions, ["c1", "c2"])
+    const cleanup = await setup(host)
+    host.emit(failed("c1", tooLong))
+    host.emit(failed("c2", tooLong))
+    await settle()
+    expect(notes(host).map((n) => n.text.match(/sessionID (\w+)/)?.[1])).toEqual(["c1", "c2"])
+    host.close()
+    await cleanup()
+  })
+
+  test("the retry hook leaves an overflow to the host", async () => {
+    const host = createHost({ agents: [{ id: "build" }], models: windows(200_000, 1_000_000), options: fallbackOptions })
+    const cleanup = await setup(host)
+    expect(await host.fireRetry({ sessionID: "r", agent: "build", model: sonnet, error: tooLong, attempt: 2 }, declined)).toEqual(declined)
+    expect(methods(host, "switchModel")).toHaveLength(0)
+    expect(host.storage.has("health")).toBe(false)
+    host.close()
+    await cleanup()
+  })
+
+  test("model_roles_check lists recent cooldowns, then their recovery", async () => {
+    const host = createHost({ agents: [{ id: "build" }], models, options: fallbackOptions })
+    const cleanup = await setup(host)
+    const run = async () => (await host.tools.get("model_roles_check")?.execute({}))?.content ?? ""
+    expect(await run()).not.toContain("Recent health")
+    const quota = { type: "provider.quota", message: "You exceeded your current quota", status: 429 }
+    await host.fireRetry({ sessionID: "r", agent: "build", model: sonnet, error: quota, attempt: 2 })
+    expect(await run()).toMatch(/Recent health[\s\S]*provider amazon-bedrock: quota, cooldown 6 h, still out/)
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    host.fireModelRequest({}, { sessionID: "r", model: sonnet, kind: "primary" })
+    host.emit({ type: "session.execution.succeeded", data: { sessionID: "r" } })
+    await settle()
+    const after = await run()
+    expect(after).toMatch(/provider amazon-bedrock: quota, cooldown 6 h, recovered \d\d:\d\d:\d\d/)
+    expect(after).not.toContain("still out")
+    host.close()
+    await cleanup()
+  })
+
   test("a non-retryable model error is retried on the next model; other errors are left alone", async () => {
     const host = createHost({ agents: [{ id: "build" }], models, options: fallbackOptions })
     const cleanup = await setup(host)
@@ -1174,7 +1321,7 @@ describe("runtime fallback", () => {
     host.sessions.set("r", { id: "r", agent: "general", model: sonnet })
     const cleanup = await setup(host)
     host.emit(failed("r", { type: "tool", message: "Model unavailable: x/y" }))
-    host.emit(failed("r", { type: "unknown", message: "prompt is too long" }))
+    host.emit(failed("r", { type: "unknown", message: "file not found: src/x.ts" }))
     await host.spawnFailed({ agent: "general", prompt: "x" }, "file not found")
     await settle()
     expect(host.storage.has("health")).toBe(false)
@@ -2654,6 +2801,273 @@ describe("a child keeps its resolved model", () => {
   })
 
 
+  describe("a context overflow of a snapshotted child", () => {
+    const long = { type: "provider.invalid-request", message: "prompt is too long: 213462 tokens > 200000 maximum", status: 400 }
+    const limited = [
+      { ...models[0], limit: { context: 200_000 } },
+      { ...models[1], limit: { context: 1_000_000 } },
+      { ...models[2], limit: { context: 2_000_000 } },
+    ] as Model[]
+    // `aaa` lists the failed model first by name, so routing by "the first tier that lists it" would pick flint.
+    const overlapping = {
+      roles: { aaa: ["amazon-bedrock/claude-sonnet#high", "opencode/flint"], task: ["amazon-bedrock/claude-sonnet#high", "anthropic/claude-haiku"] },
+      agents: { general: "task" },
+    }
+    const event = async (host: ReturnType<typeof createHost>) => {
+      host.emit({ type: "session.execution.failed", data: { sessionID: "c", error: long } })
+      await settle()
+    }
+    const tool = async (host: ReturnType<typeof createHost>) => {
+      await host.spawnFailed({ agent: "plain", prompt: "x" }, `Subagent failed (sessionID: c): ${long.message}`, "r")
+      await settle()
+    }
+    const reopen = async (from: ReturnType<typeof createHost>, nextModels: Model[], next: object) => {
+      const host = createHost({ agents: [{ id: "plain" }], models: nextModels, options: next as never })
+      for (const [key, value] of from.storage) host.storage.set(key, value)
+      host.sessions.set("r", { id: "r" })
+      return { host, cleanupHost: await setup(host) }
+    }
+
+    test.each([
+      ["failure event", [event, tool], 1],
+      ["tool error", [tool, event], 2],
+    ] as const)("a resumed child with no pending spawn routes by its stored tier when the %s comes first", async (_name, order, noteCount) => {
+      const { again, cleanupAgain } = await spawnThenReload(overlapping, limited)
+      again.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: sonnet })
+      for (const step of order) await step(again)
+      // Only the failure event switches; the tool error before it just names the candidate of the child's tier.
+      expect(methods(again, "switchModel").map((c) => c.input)).toEqual([{ sessionID: "c", model: haiku }])
+      const notes = methods(again, "synthetic").map((c) => c.input as { sessionID: string; text: string })
+      expect(notes.map((n) => n.sessionID)).toEqual(Array(noteCount).fill("r"))
+      expect(notes.at(-1)?.text).toContain("the session now runs anthropic/claude-haiku (1000000 tokens)")
+      if (noteCount === 2) expect(notes[0]?.text).toContain("tier task has a larger-context candidate, anthropic/claude-haiku (1000000 tokens)")
+      again.close()
+      await cleanupAgain()
+    })
+
+    test("a delayed tool error of an earlier execution changes nothing; the next execution's overflow is still handled", async () => {
+      const { again, cleanupAgain } = await spawnThenReload(three, limited)
+      again.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: sonnet })
+      await started(again, "e1")
+      await event(again)
+      // e2 runs on haiku; e1's tool error reaches the parent late and names the session's current model.
+      again.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: haiku })
+      await started(again, "e2")
+      await tool(again)
+      expect(methods(again, "switchModel")).toHaveLength(1)
+      expect(methods(again, "synthetic")).toHaveLength(1)
+      expect(again.storage.get("spawn-model:c")).toMatchObject({ model: "anthropic/claude-haiku", overflowed: [sonnetHigh] })
+      await event(again)
+      expect(methods(again, "switchModel").map((c) => c.input)).toEqual([
+        { sessionID: "c", model: haiku },
+        { sessionID: "c", model: flint },
+      ])
+      expect(methods(again, "synthetic")).toHaveLength(2)
+      expect(again.storage.get("spawn-model:c")).toMatchObject({ model: "opencode/flint", overflowed: [sonnetHigh, "anthropic/claude-haiku"] })
+      again.close()
+      await cleanupAgain()
+    })
+
+    test("a tool error with no failure event notes once, switches nothing and records no overflow", async () => {
+      const { again, cleanupAgain } = await spawnThenReload(first, limited)
+      again.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: sonnet })
+      await tool(again)
+      await tool(again)
+      expect(methods(again, "switchModel")).toHaveLength(0)
+      expect(methods(again, "synthetic")).toHaveLength(1)
+      expect(again.storage.get("spawn-model:c")).not.toHaveProperty("overflowed")
+      expect(again.storage.get("spawn-model:c")).not.toHaveProperty("failedOver")
+      again.close()
+      await cleanupAgain()
+    })
+
+    test("the switch is stored with the snapshot and the ledger, and a resume after a reload continues on the larger model", async () => {
+      const { again, cleanupAgain } = await spawnThenReload(first, limited)
+      again.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: sonnet })
+      await event(again)
+      expect(again.storage.get("spawn-model:c")).toMatchObject({ model: "anthropic/claude-haiku", tier: "task", failedOver: true, overflowed: [sonnetHigh] })
+      expect(again.storage.get("outcome:c")).toMatchObject({ failedOver: true })
+      again.close()
+      await cleanupAgain()
+      const { host, cleanupHost } = await reopen(again, limited, first)
+      expect(await host.spawn("subagent", resume, "build", "r", "call-2")).toEqual({ ...resume, model: "anthropic/claude-haiku" })
+      expect(methods(host, "switchModel")).toHaveLength(0)
+      expect(receipts(host)[0]).toMatchObject({ rule: "snapshot", model: "anthropic/claude-haiku" })
+      host.close()
+      await cleanupHost()
+    })
+
+    const started = async (host: ReturnType<typeof createHost>, id: string) => {
+      host.emit({ type: "session.execution.started", id, data: { sessionID: "c" } })
+      await settle()
+    }
+    const three = { roles: { task: ["amazon-bedrock/claude-sonnet#high", "anthropic/claude-haiku", "opencode/flint"] }, agents: { general: "task" } }
+
+    test("a resume that overflows the larger model too is switched and noted again, once per execution", async () => {
+      const { again, cleanupAgain } = await spawnThenReload(three, limited)
+      again.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: sonnet })
+      await started(again, "e1")
+      await event(again)
+      await again.spawn("subagent", resume, "build", "r", "call-2")
+      again.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: haiku })
+      await started(again, "e2")
+      await event(again)
+      // The tool error of the same execution adds nothing.
+      await tool(again)
+      expect(methods(again, "switchModel").map((c) => c.input)).toEqual([
+        { sessionID: "c", model: haiku },
+        { sessionID: "c", model: flint },
+      ])
+      const texts = methods(again, "synthetic").map((c) => (c.input as { text: string }).text)
+      expect(texts).toHaveLength(2)
+      expect(texts[0]).toContain("the session now runs anthropic/claude-haiku (1000000 tokens)")
+      expect(texts[1]).toContain("the session now runs opencode/flint (2000000 tokens)")
+      expect(again.storage.get("spawn-model:c")).toMatchObject({ model: "opencode/flint", overflowed: [sonnetHigh, "anthropic/claude-haiku"] })
+      again.close()
+      await cleanupAgain()
+    })
+
+    test("a guard reroute keeps the overflow history, so a later guard change never selects the overflowed model", async () => {
+      const { again, cleanupAgain } = await spawnThenReload(three, limited)
+      again.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: sonnet })
+      await event(again)
+      again.close()
+      await cleanupAgain()
+      // The guard refuses haiku, where the child runs: it is rerouted past the overflowed sonnet, to flint.
+      const second = await reopen(again, limited, { ...three, guard: { expensive: ["anthropic/claude-haiku"] } })
+      await second.host.spawn("subagent", resume, "build", "r", "call-2")
+      await settle()
+      expect(methods(second.host, "switchModel").map((c) => c.input)).toEqual([{ sessionID: "c", model: flint }])
+      expect(second.host.storage.get("spawn-model:c")).toMatchObject({ model: "opencode/flint", rule: "guard-reroute", overflowed: [sonnetHigh] })
+      second.host.close()
+      await second.cleanupHost()
+      // Now flint is refused and haiku allowed: the reroute goes to haiku, not back to sonnet.
+      const third = await reopen(second.host, limited, { ...three, guard: { expensive: ["opencode/flint"] } })
+      await third.host.spawn("subagent", resume, "build", "r", "call-3")
+      expect(methods(third.host, "switchModel").map((c) => c.input)).toEqual([{ sessionID: "c", model: haiku }])
+      third.host.close()
+      await third.cleanupHost()
+    })
+
+    describe("a model the user chose is never switched", () => {
+      const tiered = { roles: { task: [sonnetHigh, "anthropic/claude-haiku"] }, agents: { plain: "task" } }
+      const pinnedNote = `context too long for ${sonnetHigh} (200000 tokens); ${sonnetHigh} was chosen explicitly, so model-roles does not switch it. Compact the session, or spawn with a larger-context model.`
+      const overflowOf = async (agents: Array<{ id: string; model?: ModelRef }>, input: Record<string, unknown>) => {
+        const host = createHost({ agents, models: limited, options: tiered as never })
+        host.sessions.set("r", { id: "r" })
+        host.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: sonnet })
+        const cleanup = await setup(host)
+        const spawned = await host.spawn("subagent", { agent: "plain", prompt: "x", ...input }, "build", "r", "call-1")
+        host.emit({ type: "session.created", data: { sessionID: "c", parentID: "r", agent: "plain", model: sonnet } })
+        await settle()
+        await host.spawnDone(spawned, { sessionID: "c" }, "r", "call-1")
+        host.emit({ type: "session.execution.failed", data: { sessionID: "c", error: long } })
+        await settle()
+        return { host, cleanup }
+      }
+      const noted = (host: ReturnType<typeof createHost>) => methods(host, "synthetic").map((c) => (c.input as { text: string }).text)
+
+      test.each([
+        ["an explicit spawn model", [{ id: "plain" }], { model: sonnetHigh }],
+        ["an agent pin", [{ id: "plain", model: sonnet }], {}],
+      ])("a child on %s gets the note and no switch", async (_name, agents, input) => {
+        const { host, cleanup } = await overflowOf(agents, input)
+        expect(methods(host, "switchModel")).toHaveLength(0)
+        expect(noted(host)).toEqual([pinnedNote])
+        host.close()
+        await cleanup()
+      })
+
+      test("a tier-routed child of the same agent is still switched", async () => {
+        const { host, cleanup } = await overflowOf([{ id: "plain" }], { tier: "task" })
+        expect(methods(host, "switchModel").map((c) => c.input)).toEqual([{ sessionID: "c", model: haiku }])
+        host.close()
+        await cleanup()
+      })
+    })
+
+    describe("with the guard on", () => {
+      const priced = [
+        { providerID: "amazon-bedrock", id: "claude-opus", variants: [], cost: [{ input: 12 }], limit: { context: 2_000_000 } },
+        { providerID: "amazon-bedrock", id: "claude-sonnet", variants: [{ id: "high" }], cost: [{ input: 2 }], limit: { context: 200_000 } },
+        { providerID: "anthropic", id: "claude-haiku", variants: [], cost: [{ input: 0.1 }], limit: { context: 1_000_000 } },
+      ] as Model[]
+      const guarded = (expensive: string[]) => ({ ...first, roles: { task: ["amazon-bedrock/claude-sonnet#high", "amazon-bedrock/claude-opus", "anthropic/claude-haiku"] }, guard: { expensive } })
+
+      test("a guarded larger-context candidate is skipped for the next allowed one", async () => {
+        const host = createHost({ agents: [{ id: "plain" }], models: priced, options: guarded(["amazon-bedrock/claude-opus"]) as never })
+        host.sessions.set("r", { id: "r" })
+        host.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: sonnet })
+        const cleanup = await setup(host)
+        const input = await host.spawn("subagent", { agent: "plain", prompt: "x", tier: "task" }, "build", "r", "call-1")
+        created(host, "c", "plain", sonnet)
+        await settle()
+        await host.spawnDone(input, { sessionID: "c" }, "r", "call-1")
+        await event(host)
+        expect(methods(host, "switchModel").map((c) => c.input)).toEqual([{ sessionID: "c", model: haiku }])
+        host.close()
+        await cleanup()
+      })
+
+      describe("when another variant of the tier's own model is the larger candidate", () => {
+        // Every gem variant is guarded, but tier task resolves to gem#low: the old pin exemption let any gem variant through.
+        const variants = [
+          { providerID: "amazon-bedrock", id: "gem", variants: [{ id: "low" }, { id: "high" }], cost: [{ input: 2 }], limit: { context: 1_000_000 } },
+          { providerID: "amazon-bedrock", id: "small", variants: [], cost: [{ input: 0.1 }], limit: { context: 200_000 } },
+          { providerID: "anthropic", id: "big", variants: [], cost: [{ input: 0.2 }], limit: { context: 2_000_000 } },
+        ] as Model[]
+        const small = { providerID: "amazon-bedrock", id: "small" }
+        const big = { providerID: "anthropic", id: "big" }
+        const run = async (task: string[]) => {
+          const options = { roles: { task }, agents: { plain: "task" }, guard: { expensive: ["amazon-bedrock/gem"] } }
+          const host = createHost({ agents: [{ id: "plain" }], models: variants, options: options as never })
+          host.sessions.set("r", { id: "r" })
+          host.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: small })
+          const cleanup = await setup(host)
+          const input = await host.spawn("subagent", { agent: "plain", prompt: "x", tier: "task" }, "build", "r", "call-1")
+          created(host, "c", "plain", small)
+          await settle()
+          await host.spawnDone(input, { sessionID: "c" }, "r", "call-1")
+          await event(host)
+          return { host, cleanup }
+        }
+
+        test("the guard-refused variant is skipped for the next allowed larger candidate", async () => {
+          const { host, cleanup } = await run(["amazon-bedrock/gem#low", "amazon-bedrock/gem#high", "amazon-bedrock/small", "anthropic/big"])
+          expect(methods(host, "switchModel").map((c) => c.input)).toEqual([{ sessionID: "c", model: big }])
+          host.close()
+          await cleanup()
+        })
+
+        test("with no other allowed larger candidate the child is not switched and the note names none", async () => {
+          const { host, cleanup } = await run(["amazon-bedrock/gem#low", "amazon-bedrock/gem#high", "amazon-bedrock/small"])
+          expect(methods(host, "switchModel")).toHaveLength(0)
+          const notes = methods(host, "synthetic").map((c) => c.input as { text: string })
+          expect(notes).toHaveLength(1)
+          expect(notes[0]?.text).not.toContain("gem#high")
+          host.close()
+          await cleanup()
+        })
+      })
+
+      test("a resume never goes back to the model that overflowed, even when the larger one is refused later", async () => {
+        const { again, cleanupAgain } = await spawnThenReload(first, limited)
+        again.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: sonnet })
+        await event(again)
+        again.close()
+        await cleanupAgain()
+        // The guard now refuses haiku, where the child runs; sonnet is allowed but overflowed.
+        const { host, cleanupHost } = await reopen(again, limited, { ...first, guard: { expensive: ["anthropic/claude-haiku"] } })
+        await expect(host.spawn("subagent", resume, "build", "r", "call-2")).rejects.toThrow(
+          /resume would run on anthropic\/claude-haiku, which the guard refuses\. The only allowed candidate, amazon-bedrock\/claude-sonnet#high \(200000 tokens\), already overflowed its context; compact the session or start a new one\./,
+        )
+        expect(methods(host, "switchModel")).toHaveLength(0)
+        host.close()
+        await cleanupHost()
+      })
+    })
+  })
+
   test("a failover is visible to a resume at once, even when the stored snapshot is slow to read and write", async () => {
     const { again, cleanupAgain } = await spawnThenReload(first)
     again.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: sonnet })
@@ -3109,5 +3523,363 @@ describe("a child keeps its resolved model", () => {
     expect(kept).not.toContain("spawn-model:n999")
     host.close()
     await cleanup()
+  })
+})
+
+describe("exploration inside a tier", () => {
+  const sonnetModel = { providerID: "amazon-bedrock", id: "claude-sonnet" }
+  const ref = (variant: string): ModelRef => ({ ...sonnetModel, variant })
+  const tierModels: Model[] = [{ ...sonnetModel, variants: [{ id: "low" }, { id: "medium" }, { id: "high" }] }, models[1] as Model]
+  const base = { roles: { task: ["amazon-bedrock/claude-sonnet#medium", "anthropic/claude-haiku"] }, agents: { coder: "task", plain: "task" } }
+  const on = { agents: ["plain", "coder"], explore: 0.1 }
+  const label = (variant: string) => `amazon-bedrock/claude-sonnet#${variant}`
+  const haikuLabel = "anthropic/claude-haiku"
+  const receipts = (host: ReturnType<typeof createHost>) => host.storage.get("receipts") as Array<Record<string, unknown>>
+  const spawnTier = (host: ReturnType<typeof createHost>, id = "call-1", agent = "plain") => host.spawn("subagent", { agent, prompt: "x", tier: "task" }, "build", "r", id)
+  const born = async (host: ReturnType<typeof createHost>, model: ModelRef, agent = "plain") => {
+    host.emit({ type: "session.created", data: { sessionID: "c", parentID: "r", agent, model } })
+    await settle()
+  }
+
+  /** Run `body` on a host with exploration `evaluate` and an injected draw. */
+  const withHost = async (
+    evaluate: unknown,
+    draw: number,
+    body: (host: ReturnType<typeof createHost>) => Promise<void>,
+    extra: Record<string, unknown> = {},
+    storage: Map<string, unknown> = new Map(),
+  ) => {
+    setExploreRandom(() => draw)
+    const host = createHost({ agents: [{ id: "plain" }, { id: "coder" }], models: tierModels, options: { ...base, ...extra, ...(evaluate === undefined ? {} : { evaluate }) } })
+    for (const [key, value] of storage) host.storage.set(key, value)
+    host.sessions.set("r", { id: "r" })
+    const cleanup = await setup(host)
+    try {
+      await body(host)
+    } finally {
+      host.close()
+      await cleanup()
+      setExploreRandom(undefined)
+    }
+  }
+
+  /** Everything observable from a fixed set of spawns, with the clock pinned. */
+  const trace = async (evaluate: unknown) => {
+    setSystemTime(new Date(1_800_000_000_000))
+    try {
+      let result: { inputs: unknown[]; storage: [string, unknown][]; calls: unknown[] } | undefined
+      await withHost(evaluate, 0, async (host) => {
+        const inputs: unknown[] = []
+        inputs.push(await spawnTier(host, "call-1", "plain"))
+        await born(host, ref("medium"))
+        inputs.push(await host.spawn("subagent", { agent: "coder", prompt: "own tier" }, "build", "r", "call-2"))
+        inputs.push(await host.spawn("subagent", { agent: "plain", prompt: "x", model: haikuLabel }, "build", "r", "call-3"))
+        inputs.push(await host.spawn("subagent", { agent: "plain", prompt: "again", sessionID: "c" }, "build", "r", "call-4"))
+        await settle()
+        result = { inputs, storage: [...host.storage].sort(([a], [b]) => (a < b ? -1 : 1)), calls: structuredClone(host.calls) }
+      })
+      return result
+    } finally {
+      setSystemTime()
+    }
+  }
+
+  test.each([
+    ["an empty agent list", { agents: [], explore: 0.1 }],
+    ["explore 0", { agents: ["plain", "coder"], explore: 0 }],
+    ["agents that never match", { agents: ["other"], explore: 0.1 }],
+  ])("with %s, receipts, model arguments, storage and host calls equal a run without evaluate", async (_name, evaluate) => {
+    const plain = await trace(undefined)
+    expect(plain?.inputs).toHaveLength(4)
+    expect(await trace(evaluate)).toEqual(plain)
+  })
+
+  test("an exploring tier spawn runs on the arm, with the receipt rule kept and the facts in the ledger and snapshot", async () => {
+    await withHost(on, 0, async (host) => {
+      const input = await spawnTier(host)
+      // The first alternative is the control model one step up.
+      expect(input.model).toBe(label("high"))
+      await born(host, ref("high"))
+      const facts = { policy: "explore-v1", eligible: [label("medium"), label("high"), label("low"), haikuLabel], arm: label("high"), p: 0.1 / 3 }
+      expect(host.storage.get("outcome:c")).toMatchObject(facts)
+      expect(host.storage.get("spawn-model:c")).toMatchObject({ model: label("high"), tier: "task", explore: facts })
+      expect(receipts(host)[0]).toMatchObject({ model: label("high"), explore: label("high"), source: "tier-param", tier: "standard", rule: "candidate-variant" })
+      expect((await host.tools.get("model_roles_check")?.execute({}))?.content).toContain("exploration: on for plain, coder, ε=0.1")
+    })
+  })
+
+  test("a draw above ε keeps the control and logs p of the control", async () => {
+    await withHost(on, 0.5, async (host) => {
+      expect((await spawnTier(host)).model).toBe(label("medium"))
+      await born(host, ref("medium"))
+      expect(host.storage.get("outcome:c")).toMatchObject({ policy: "explore-v1", arm: label("medium"), p: 0.9 })
+      expect(receipts(host)[0]).not.toHaveProperty("explore")
+    })
+  })
+
+  test("after a reload, a failover rewrites the stored snapshot and every exploration fact survives", async () => {
+    let kept = new Map<string, unknown>()
+    await withHost(on, 0, async (host) => {
+      await spawnTier(host)
+      await born(host, ref("high"))
+      kept = new Map(host.storage)
+    })
+    const facts = { policy: "explore-v1", eligible: [label("medium"), label("high"), label("low"), haikuLabel], arm: label("high"), p: 0.1 / 3 }
+    expect(kept.get("spawn-model:c")).toMatchObject({ explore: facts })
+    await withHost(
+      on,
+      0.5,
+      async (host) => {
+        host.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: ref("high") })
+        host.emit({ type: "session.execution.failed", data: { sessionID: "c", error: { type: "api", message: "ThrottlingException", status: 429 } } })
+        await settle()
+        // The failover moved the child off the arm and rewrote the snapshot; the facts stayed.
+        expect(host.storage.get("spawn-model:c")).toMatchObject({ model: haikuLabel, failedOver: true, tier: "task", explore: facts })
+      },
+      { flapCount: 1 },
+      kept,
+    )
+  })
+
+  test("a context-overflow switch of an explored child ends its arm: the ledger and snapshot say it failed over, the facts stay", async () => {
+    setExploreRandom(() => 0)
+    const wideModels = tierModels.map((m, i) => ({ ...m, limit: { context: i === 0 ? 200_000 : 1_000_000 } })) as Model[]
+    const host = createHost({ agents: [{ id: "plain" }], models: wideModels, options: { ...base, evaluate: on } })
+    host.sessions.set("r", { id: "r" })
+    host.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: ref("high") })
+    const cleanup = await setup(host)
+    try {
+      await spawnTier(host)
+      await born(host, ref("high"))
+      expect(host.storage.get("outcome:c")).not.toHaveProperty("failedOver")
+      const message = "prompt is too long: 213462 tokens > 200000 maximum"
+      host.emit({
+        type: "session.execution.failed",
+        data: { sessionID: "c", error: { type: "provider.invalid-request", message, status: 400, response: { body: JSON.stringify({ type: "error", error: { type: "invalid_request_error", message } }) } } },
+      })
+      await settle()
+      const facts = { policy: "explore-v1", arm: label("high"), p: 0.1 / 3 }
+      expect(host.storage.get("outcome:c")).toMatchObject({ ...facts, failedOver: true })
+      expect(host.storage.get("spawn-model:c")).toMatchObject({ model: haikuLabel, failedOver: true, overflowed: [label("high")], explore: facts })
+    } finally {
+      host.close()
+      await cleanup()
+      setExploreRandom(undefined)
+    }
+  })
+
+  test("a resume reroute ends the arm: the ledger keeps the facts and marks leftArm, for a model, a tier and a guard switch", async () => {
+    const reroutes: Array<[string, Record<string, unknown>, Record<string, unknown>]> = [
+      ["an explicit model", { model: label("low") }, {}],
+      ["an explicit tier", { tier: "task" }, {}],
+      ["a guard switch", {}, { guard: { expensive: [haikuLabel] } }],
+    ]
+    for (const [name, change, extra] of reroutes) {
+      let kept = new Map<string, unknown>()
+      // The last alternative is the next candidate, haiku.
+      await withHost(on, 0.0999, async (host) => {
+        await spawnTier(host)
+        await born(host, { providerID: "anthropic", id: "claude-haiku" })
+        expect(host.storage.get("outcome:c"), name).toMatchObject({ arm: haikuLabel })
+        expect(host.storage.get("outcome:c"), name).not.toHaveProperty("leftArm")
+        kept = new Map(host.storage)
+      })
+      await withHost(
+        on,
+        0.5,
+        async (host) => {
+          await host.spawn("subagent", { agent: "plain", prompt: "again", sessionID: "c", ...change }, "build", "r", "call-2")
+          await settle()
+          expect(host.storage.get("outcome:c"), name).toMatchObject({ policy: "explore-v1", arm: haikuLabel, p: 0.1 / 3, leftArm: true, resumes: 1 })
+        },
+        extra,
+        kept,
+      )
+    }
+  })
+
+  test("a resume that keeps the child's model leaves it on its arm", async () => {
+    let kept = new Map<string, unknown>()
+    await withHost(on, 0, async (host) => {
+      await spawnTier(host)
+      await born(host, ref("high"))
+      kept = new Map(host.storage)
+    })
+    await withHost(
+      on,
+      0.5,
+      async (host) => {
+        await host.spawn("subagent", { agent: "plain", prompt: "again", sessionID: "c" }, "build", "r", "call-2")
+        await settle()
+        expect(host.storage.get("outcome:c")).not.toHaveProperty("leftArm")
+      },
+      {},
+      kept,
+    )
+  })
+
+  test("a resume after a reload goes through the stored snapshot and keeps the arm", async () => {
+    let kept = new Map<string, unknown>()
+    await withHost(on, 0, async (host) => {
+      await spawnTier(host)
+      await born(host, ref("high"))
+      kept = new Map(host.storage)
+    })
+    expect(kept.get("spawn-model:c")).toMatchObject({ explore: { arm: label("high") } })
+    await withHost(
+      on,
+      0.5,
+      async (host) => {
+        const input = await host.spawn("subagent", { agent: "plain", prompt: "again", sessionID: "c" }, "build", "r", "call-2")
+        expect(input.model).toBe(label("high"))
+        expect(receipts(host)[0]).toMatchObject({ rule: "snapshot", model: label("high") })
+        await settle()
+        expect(host.storage.get("outcome:c")).toMatchObject({ arm: label("high"), p: 0.1 / 3, resumes: 1 })
+        expect(host.storage.get("spawn-model:c")).toMatchObject({ model: label("high"), explore: { arm: label("high"), p: 0.1 / 3 } })
+      },
+      {},
+      kept,
+    )
+  })
+
+  test("a guard that refuses the effort-up variant keeps it out of the offer, even for a tier-assigned agent", async () => {
+    const guard = { expensive: [label("high")] }
+    for (const draw of [0, 0.0499, 0.0999]) {
+      await withHost(
+        on,
+        draw,
+        async (host) => {
+          const input = await spawnTier(host)
+          expect(input.model).not.toBe(label("high"))
+          await born(host, input.model === label("low") ? ref("low") : { providerID: "anthropic", id: "claude-haiku" })
+          expect((host.storage.get("outcome:c") as { eligible: string[] }).eligible).toEqual([label("medium"), label("low"), haikuLabel])
+        },
+        { guard },
+      )
+    }
+  })
+
+  test("a guard-allowlisted variant stays an arm", async () => {
+    await withHost(
+      on,
+      0,
+      async (host) => {
+        expect((await spawnTier(host)).model).toBe(label("high"))
+      },
+      { guard: { expensive: [label("high")], allowModels: [label("high")] } },
+    )
+  })
+
+  test("p is the probability under the arms actually offered: filtered alternatives leave the set", async () => {
+    const one = { guard: { expensive: [label("high")] } }
+    await withHost(on, 0, async (host) => {
+      expect((await spawnTier(host)).model).toBe(label("low"))
+      await born(host, ref("low"))
+      const record = host.storage.get("outcome:c") as { eligible: string[]; p: number }
+      expect(record.eligible).toEqual([label("medium"), label("low"), haikuLabel])
+      expect(record.p).toBeCloseTo(0.05, 10)
+    }, one)
+    const two = { guard: { expensive: [label("high"), label("low")] } }
+    await withHost(on, 0, async (host) => {
+      expect((await spawnTier(host)).model).toBe(haikuLabel)
+      await born(host, { providerID: "anthropic", id: "claude-haiku" })
+      const record = host.storage.get("outcome:c") as { eligible: string[]; arm: string; p: number }
+      expect(record.eligible).toEqual([label("medium"), haikuLabel])
+      expect(record).toMatchObject({ arm: haikuLabel })
+      expect(record.p).toBeCloseTo(0.1, 10)
+    }, two)
+    await withHost(on, 0.5, async (host) => {
+      expect((await spawnTier(host)).model).toBe(label("medium"))
+      await born(host, ref("medium"))
+      expect((host.storage.get("outcome:c") as { p: number }).p).toBeCloseTo(0.9, 10)
+    }, two)
+  })
+
+  test("when the guard refuses every alternative the spawn stays on the control and logs no arm", async () => {
+    const guard = { expensive: [label("high"), label("low"), haikuLabel] }
+    await withHost(
+      on,
+      0,
+      async (host) => {
+        expect((await spawnTier(host)).model).toBe(label("medium"))
+        await born(host, ref("medium"))
+        expect(host.storage.get("outcome:c")).not.toHaveProperty("arm")
+        expect(receipts(host)[0]).not.toHaveProperty("explore")
+      },
+      { guard },
+    )
+  })
+
+  test("a cooled-down model is not an arm", async () => {
+    const now = Date.now()
+    const cooled = new Map<string, unknown>([["health", { [haikuLabel]: { failedAt: now, until: now + 600_000, reason: "x" } }]])
+    await withHost(on, 0.0999, async (host) => {
+      expect((await spawnTier(host)).model).toBe(label("low"))
+      await born(host, ref("low"))
+      expect((host.storage.get("outcome:c") as { eligible: string[] }).eligible).toEqual([label("medium"), label("high"), label("low")])
+    }, {}, cooled)
+  })
+
+  test("a cooled-down provider leaves a single arm, so the spawn is not explored", async () => {
+    const now = Date.now()
+    const cooled = new Map<string, unknown>([["health", { "amazon-bedrock/*": { failedAt: now, until: now + 600_000, reason: "x" } }]])
+    await withHost(on, 0, async (host) => {
+      const input = await spawnTier(host)
+      expect(input.model).toBe(haikuLabel)
+      await born(host, { providerID: "anthropic", id: "claude-haiku" })
+      expect(host.storage.get("outcome:c")).not.toHaveProperty("arm")
+    }, {}, cooled)
+  })
+
+  test("a reviewer agent never explores", async () => {
+    setExploreRandom(() => 0)
+    const host = createHost({ agents: [{ id: "code-reviewer" }], models: tierModels, options: { ...base, evaluate: { agents: ["code-reviewer"], explore: 0.1 } } })
+    host.sessions.set("r", { id: "r" })
+    const cleanup = await setup(host)
+    const input = await host.spawn("subagent", { agent: "code-reviewer", prompt: "x", tier: "task" }, "build", "r", "call-1")
+    expect(input.model).toBe(label("medium"))
+    host.close()
+    await cleanup()
+    setExploreRandom(undefined)
+  })
+
+  test("a spawn with its own model is not touched", async () => {
+    await withHost(on, 0, async (host) => {
+      const input = await host.spawn("subagent", { agent: "plain", prompt: "x", model: haikuLabel }, "build", "r", "call-1")
+      expect(input.model).toBe(haikuLabel)
+    })
+  })
+
+  describe("a spawn without a tier parameter whose agent has its own tier", () => {
+    const spawnOwn = (host: ReturnType<typeof createHost>, agent = "coder") => host.spawn("subagent", { agent, prompt: "x" }, "build", "r", "call-1")
+
+    test("explores like an explicit tier: the arm runs, and the ledger and snapshot carry the facts", async () => {
+      await withHost(on, 0, async (host) => {
+        const input = await spawnOwn(host)
+        expect(input.model).toBe(label("high"))
+        await born(host, ref("high"), "coder")
+        const facts = { policy: "explore-v1", eligible: [label("medium"), label("high"), label("low"), haikuLabel], arm: label("high"), p: 0.1 / 3 }
+        expect(host.storage.get("outcome:c")).toMatchObject({ agent: "coder", tier: "standard", source: "agent", ...facts })
+        expect(host.storage.get("spawn-model:c")).toMatchObject({ model: label("high"), explore: facts })
+        expect(receipts(host)[0]).toMatchObject({ agent: "coder", source: "agent", model: label("high"), explore: label("high") })
+      })
+    })
+
+    test("a control draw leaves the spawn alone, and logs the control with its p", async () => {
+      await withHost(on, 0.5, async (host) => {
+        const input = await spawnOwn(host)
+        expect(input).toEqual({ agent: "coder", prompt: "x" })
+        await born(host, ref("medium"), "coder")
+        expect(host.storage.get("outcome:c")).toMatchObject({ arm: label("medium"), p: 0.9 })
+      })
+    })
+
+    test("an agent not in evaluate.agents is not explored and leaves no ledger record", async () => {
+      await withHost({ agents: ["plain"], explore: 0.1 }, 0, async (host) => {
+        expect(await spawnOwn(host)).toEqual({ agent: "coder", prompt: "x" })
+        await born(host, ref("medium"), "coder")
+        expect(host.storage.has("outcome:c")).toBe(false)
+      })
+    })
   })
 })

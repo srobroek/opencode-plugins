@@ -1,5 +1,7 @@
 /** Pure decision logic for subagent worktree lanes. */
 
+import { wildcardMatch as wildcard } from "@srobroek/opencode-lib/patterns"
+
 export const SUBAGENT_TOOL = "subagent"
 export const MERGE_TOOL = "subagent_worktree_merge"
 export const LANE_PREFIX = "lane/"
@@ -236,6 +238,8 @@ export type IsolationFacts = {
   options: Options
   /** The resolved agent, or undefined when the host does not know it. */
   agent: { id: string; name?: string; mode?: string; permissions?: unknown } | undefined
+  /** The calling session's rules; a child starts with them, evaluated after the agent's. */
+  callerPermissions?: unknown
   /** Whether the calling session is itself a child session. */
   callerIsChild: boolean
   /** Whether the caller's directory is inside a git work tree. */
@@ -257,7 +261,7 @@ export function decideIsolation(facts: IsolationFacts): Isolation {
   if (!facts.options.agents.some((agent) => names.has(agent))) return { isolate: false, reason: "agent not opted in" }
   if (!facts.agent) return { isolate: false, reason: "unknown agent" }
   if (facts.agent.mode === "primary") return { isolate: false, reason: "primary agent" }
-  if (rulesAreReadOnly(facts.agent.permissions)) return { isolate: false, reason: "read-only agent (edit denied)" }
+  if (sessionIsReadOnly(facts.agent.permissions, facts.callerPermissions)) return { isolate: false, reason: "read-only agent (edit denied)" }
   if (facts.callerIsChild) return { isolate: false, reason: "caller is a child session" }
   if (!facts.isGit) return { isolate: false, reason: "not a git checkout" }
   return { isolate: true }
@@ -273,12 +277,6 @@ export function targetsExternalDirectory(prompt: string, projectDir: string, hom
   return paths.length === 1 && !within(paths[0] ?? "", projectDir)
 }
 
-/** OpenCode wildcard match: `*` matches any run of characters. */
-function wildcard(value: string, pattern: string): boolean {
-  const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")
-  return new RegExp(`^${escaped}$`).test(value)
-}
-
 /**
  * Whether an agent's permission rules deny `edit` everywhere. OpenCode uses the last matching
  * rule, so this mirrors evaluating `edit` on `*`. Adapted from hueyexe/opencode-ensemble (MIT).
@@ -290,6 +288,29 @@ export function rulesAreReadOnly(rules: unknown): boolean {
     return wildcard("edit", rule.action) && (rule.resource === "*" || rule.resource === "**")
   }) as { effect?: unknown } | undefined
   return match?.effect === "deny"
+}
+
+/**
+ * Whether a session cannot edit: its agent's rules, then its own rules (evaluated after, the last
+ * matching rule wins), deny `edit` everywhere and no later rule grants `edit` or `write` (allow or
+ * ask), even on a scoped path. Conservative: any such grant makes the session a writer.
+ */
+export function sessionIsReadOnly(agentRules: unknown, sessionRules: unknown): boolean {
+  const rules = [...(Array.isArray(agentRules) ? agentRules : []), ...(Array.isArray(sessionRules) ? sessionRules : [])]
+  if (!rulesAreReadOnly(rules)) return false
+  const denied = rules.findLastIndex(
+    (rule: { action?: unknown; resource?: unknown; effect?: unknown } | null) =>
+      rule?.effect === "deny" &&
+      typeof rule.action === "string" &&
+      wildcard("edit", rule.action) &&
+      (rule.resource === "*" || rule.resource === "**"),
+  )
+  return !rules.slice(denied + 1).some(
+    (rule: { action?: unknown; effect?: unknown } | null) =>
+      (rule?.effect === "allow" || rule?.effect === "ask") &&
+      typeof rule.action === "string" &&
+      (wildcard("edit", rule.action) || wildcard("write", rule.action)),
+  )
 }
 
 /** A branch-safe slug of a task description. */
@@ -507,3 +528,77 @@ export function tail(text: string, lines = 40): string {
   const clean = text.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "").trim()
   return clean.split("\n").slice(-lines).join("\n")
 }
+
+/**
+ * A session in the target worktree, as `session.list` reports it. `busy` is the start of its
+ * latest execution and `idle` the end of its latest completed one, both in epoch milliseconds.
+ * `readOnly` is true when the session's agent cannot edit.
+ */
+export type WriterSession = { id: string; parentID?: string; busy?: number; idle?: number; readOnly?: boolean }
+
+/** Whether the latest execution started and has not ended: it began after the last completed one ended. */
+export function isRunning(session: Pick<WriterSession, "busy" | "idle">): boolean {
+  return session.busy !== undefined && (session.idle === undefined || session.busy > session.idle)
+}
+
+export type WriterGuard = { kind: "allow"; warn?: string } | { kind: "refuse"; reason: string }
+
+export const WRITER_LIVENESS_NOTE =
+  "subagent-worktree: could not check whether the worktree already has a live writer session; the spawn went ahead. List your background work first."
+
+/**
+ * Whether a new writer subagent may start in an explicitly named worktree. A live writer is a
+ * child session in that directory whose latest execution is still running (an earlier `outcome`
+ * does not matter: a resumed session keeps it while it runs again). `sessions` is undefined when the
+ * lookup failed or timed out; uncertainty allows the spawn and warns.
+ */
+export function decideWriterGuard(facts: {
+  /** The agent can edit files. */
+  writer: boolean
+  directory: string
+  caller: string
+  sessions: readonly WriterSession[] | undefined
+}): WriterGuard {
+  if (!facts.writer) return { kind: "allow" }
+  if (facts.sessions === undefined) return { kind: "allow", warn: WRITER_LIVENESS_NOTE }
+  const live = facts.sessions.find(
+    (session) =>
+      session.parentID !== undefined && session.id !== facts.caller && !session.readOnly && isRunning(session),
+  )
+  if (!live) return { kind: "allow" }
+  return { kind: "refuse", reason: writerRefusal(facts.directory, live.id) }
+}
+
+/** The refusal for a second writer; `child` is the session already writing, or undefined while its spawn is still starting. */
+export function writerRefusal(directory: string, child?: string): string {
+  return child === undefined
+    ? `${directory} already has a writer spawn in progress that has not started yet. Wait for it, then send that session a follow-up (pass its sessionID) instead of spawning a second writer, or stop it first.`
+    : `${directory} already has a live writer session ${child}. Send that session a follow-up (pass sessionID: "${child}") instead of spawning a second writer, or stop it first.`
+}
+
+/** How long a writer spawn holds its worktree before its child's first execution shows up in `session.list`. */
+export const RESERVATION_MS = 60_000
+
+/**
+ * A writer spawn's hold on a worktree, kept in this plugin instance only. Spawns from separate
+ * OpenCode server instances are not coordinated: there is no cross-process lock.
+ */
+export type Reservation = { token: string; callId: string; child?: string; until: number }
+
+/** The unexpired reservation that blocks the spawn holding `token`: one held under another token. */
+export function blockingReservation(reservation: Reservation | undefined, now: number, token: string): Reservation | undefined {
+  return reservation !== undefined && reservation.token !== token && reservation.until > now ? reservation : undefined
+}
+
+/**
+ * Where the spawn holding `token` stands after it waited: "held" (its own reservation is live),
+ * "free" (the slot is empty or expired, so it may re-take it) or "replaced" (another token holds
+ * it, which fences the owner).
+ */
+export function reservationStatus(reservation: Reservation | undefined, now: number, token: string): "held" | "free" | "replaced" {
+  if (reservation === undefined || reservation.until <= now) return "free"
+  return reservation.token === token ? "held" : "replaced"
+}
+
+export const FENCED_REASON =
+  "another writer spawn took over this worktree while it waited. Check for a live writer session, then spawn again."

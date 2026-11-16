@@ -93,11 +93,12 @@ export async function executeSetup(
   input: unknown,
   directory: string,
   integration = DEFAULT_INTEGRATION,
+  signal?: AbortSignal,
 ): Promise<ToolOutput> {
   const params = readSetupParams(input)
   if (typeof params === "string") return { content: `${SETUP_TOOL}: ${params}`, metadata: { ok: false } }
   try {
-    const result = await runSetup({ integration, ...params }, directory)
+    const result = await runSetup({ integration, ...params }, directory, signal)
     return { content: result.text, metadata: { ok: result.ok, phases: result.phases } }
   } catch (error) {
     return {

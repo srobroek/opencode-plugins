@@ -102,14 +102,14 @@ describe("engineering standards", () => {
 
   test("the block is the coding-core standards part, short enough for every request", () => {
     expect(STANDARDS_TEXT.length).toBeLessThanOrEqual(1000)
-    for (const phrase of ["lang-<language>-libraries", "toolchain-languages", "aws-guidance", "middleware", "Powertools", "OpenTelemetry", "departure"])
+    for (const phrase of ["lang-<language>-libraries", "toolchain-languages", "aws-guidance", "middleware", "Powertools", "OpenTelemetry", "departure", "STUB(<task-id>)"])
       expect(STANDARDS_TEXT).toContain(phrase)
     expect(readFileSync(join(import.meta.dir, "../../lib/src/coding-core.md"), "utf8")).toContain(STANDARDS_TEXT.split("\n\n")[1]?.split("\n")[0] ?? "missing")
   })
 
   test("the testing block is the coding-core testing part, short enough for every request", () => {
     expect(TESTING_TEXT.length).toBeLessThanOrEqual(1000)
-    for (const phrase of ["quality-testing", "lang-<language>-testing", "public interface", "distinct risk", "removed behavior", "only checks code is gone"])
+    for (const phrase of ["quality-testing", "lang-<language>-testing", "public interface", "distinct risk", "removed behavior", "only checks code is gone", "conformance suite"])
       expect(TESTING_TEXT).toContain(phrase)
     expect(readFileSync(join(import.meta.dir, "../../lib/src/coding-core.md"), "utf8")).toContain(TESTING_TEXT.split("\n\n")[1]?.split("\n")[0] ?? "missing")
   })

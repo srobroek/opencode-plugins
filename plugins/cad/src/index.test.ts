@@ -5,7 +5,7 @@ import { join } from "node:path"
 import { permissionEffect } from "@srobroek/opencode-lib/agent-files"
 import type { SupervisedRun } from "@srobroek/opencode-lib/subprocess"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
-import plugin, { createPlugin, FORMULAS, PLUGIN_ID, RUN_TOOL, SETUP_TOOL, STOP_TOOL } from "./index.ts"
+import plugin, { createPlugin, FORMULAS, RUN_TOOL, SETUP_TOOL, STOP_TOOL } from "./index.ts"
 
 const SKILLS_DIR = join(import.meta.dir, "..", "skills")
 const SKILLS = [
@@ -164,8 +164,7 @@ describe(RUN_TOOL, () => {
       "--json",
     ])
     expect(run?.cwd).toBe(directory)
-    expect(run?.env.CAD_SESSION_ID).toBe("ses_root")
-    expect(run?.env.CAD_OPENCODE_PLUGIN).toStartWith(`${PLUGIN_ID} `)
+    expect(run?.env.CAD_VIEWER_SESSION_NAME).toBe("ses_root")
     expect(fake.asserts.map(({ action, resources }) => ({ action, resources }))).toEqual([
       { action: RUN_TOOL, resources: ["cad-flow/scripts/preflight.py"] },
     ])
@@ -231,7 +230,7 @@ describe("session cleanup", () => {
     ])
     for (const run of runs) {
       expect(run.cwd).toBe(directory)
-      expect(run.env.CAD_SESSION_ID).toBe("ses_root")
+      expect(run.env.CAD_VIEWER_SESSION_NAME).toBe("ses_root")
     }
     await cleanup?.()
     expect(runs).toHaveLength(2)

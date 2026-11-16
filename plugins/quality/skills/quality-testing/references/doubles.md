@@ -19,6 +19,21 @@ Read when a test needs a stand-in for a collaborator.
   mock server, and double the adapter everywhere else.
 - Run one contract test suite against the fake and against the real implementation, so
   the fake cannot drift. Do not build a fake that you will not keep honest.
+- Verified fakes / contract suite: a stub, fake or double that stands in for a contract must
+  pass the same conformance suite as the real implementation. Wire it into the contract's
+  conformance runner in the consumer's tests; a double that never passed the runner does not
+  count as conforming. This is the mechanism behind the previous rule when a contract exists.
+  - The contract owns the suite: valid and invalid fixtures, expected outputs, and for
+    protocols recorded interaction transcripts, each replayed against the provider (recorded
+    responses) and the consumer (recorded requests). Implementations run it; they do not fork it.
+  - When only one implementation passes a fixture, check the fixture against the specification.
+    If the fixture is right, fix the implementation; change the contract and its fixtures only
+    when they are wrong. Never special-case an implementation.
+  - On a contract change, regenerate generated outputs in the same change. CI fails when
+    generated types, docs or fixtures are stale (drift check in the `quality-code-design`
+    skill's `contracts.md`).
+  - Keep consumer behavior tests separate from the contract suite: the suite proves the stub
+    faithful, the consumer tests prove the consumer correct.
 - Give each external operation its own function, so that a stub returns one shape with
   no branching (the `quality-code-design` skill's `test-first.md`).
 - Do not add an interface, trait or protocol only so that a test can mock it. Inject the

@@ -5,8 +5,9 @@
  */
 
 import type { Derived } from "./catalog.ts"
+import { duration } from "./fallback.ts"
 import { type GuardModel, tierNames } from "./guard.ts"
-import { type FailureReason, type HealthState, healthEntry, healthView } from "./health.ts"
+import { type FailureClass, type FailureReason, type FailureScope, type HealthState, healthEntry, healthView } from "./health.ts"
 import {
   type AgentLike,
   type AvailableModel,
@@ -182,6 +183,61 @@ export function describeCandidate(candidate: CandidateStatus): string {
     case "invalid":
       return "invalid: expected provider/model, provider/model#variant or @role"
   }
+}
+
+/** Cooldown starts kept for the "Recent health" section. */
+export const HEALTH_HISTORY_LIMIT = 10
+
+/** One cooldown of a model or provider. Holds the failure class only, never error text. */
+export type HealthEvent = {
+  /** When the cooldown started. */
+  at: number
+  /** `provider/model`, or `provider/*` for a provider-wide cooldown. */
+  subject: string
+  scope: FailureScope
+  kind: FailureClass
+  cooldownMs: number
+  /** When the cooldown was seen to end early, by a successful call. */
+  recoveredAt?: number
+}
+
+/**
+ * `history` (newest first, at most `limit`) with a cooldown of `subject` recorded. A cooldown
+ * that extends one still open for the same subject updates it instead of adding a second.
+ */
+export function recordCooldown(
+  history: ReadonlyArray<HealthEvent>,
+  event: Omit<HealthEvent, "recoveredAt">,
+  limit = HEALTH_HISTORY_LIMIT,
+): HealthEvent[] {
+  const open = history.findIndex((e) => e.subject === event.subject && e.recoveredAt === undefined && e.at + e.cooldownMs > event.at)
+  if (open >= 0) {
+    const prior = history[open] as HealthEvent
+    const merged: HealthEvent = { ...prior, kind: event.kind, cooldownMs: event.at + event.cooldownMs - prior.at }
+    return history.map((e, i) => (i === open ? merged : e)).slice(0, limit)
+  }
+  return [event, ...history].slice(0, limit)
+}
+
+/** `history` with every open cooldown of `providerID` (its models and the provider itself) ended at `at`, if `at` is after it started. */
+export function recordRecovery(history: ReadonlyArray<HealthEvent>, providerID: string, at: number): HealthEvent[] {
+  return history.map((e) =>
+    e.recoveredAt === undefined && e.at < at && e.at + e.cooldownMs > at && e.subject.startsWith(`${providerID}/`) ? { ...e, recoveredAt: at } : e,
+  )
+}
+
+const clock = (at: number): string => new Date(at).toISOString().slice(11, 19)
+
+/** The "Recent health" section, newest first; nothing when there is no history. */
+export function formatHealthHistory(history: ReadonlyArray<HealthEvent>, now: number): string[] {
+  if (history.length === 0) return []
+  const lines = ["", "Recent health (newest first):"]
+  for (const e of history) {
+    const end = e.recoveredAt ?? (e.at + e.cooldownMs <= now ? e.at + e.cooldownMs : undefined)
+    const who = e.scope === "provider" ? `provider ${e.subject.split("/", 1)[0]}` : `model ${e.subject}`
+    lines.push(`  - ${clock(e.at)} ${who}: ${e.kind}, cooldown ${duration(e.cooldownMs)}, ${end === undefined ? "still out" : `recovered ${clock(end)}`}`)
+  }
+  return lines
 }
 
 /** The check as text for the model. */

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { configRevision, readSnapshot, SNAPSHOT_MAX_AGE_MS, snapshotModel, staleSnapshots, unavailableReason } from "./snapshot.ts"
+import { configRevision, hasOverflowed, readSnapshot, SNAPSHOT_MAX_AGE_MS, snapshotModel, staleSnapshots, unavailableReason } from "./snapshot.ts"
 
 const snap = (at: number, extra: object = {}) => ({ model: "anthropic/claude-haiku", configRevision: "abc", at, ...extra })
 
@@ -24,6 +24,21 @@ describe("readSnapshot", () => {
 
   test("names the model with its variant", () => {
     expect(snapshotModel(snap(1, { model: "amazon-bedrock/claude-sonnet#high" }))).toEqual({ providerID: "amazon-bedrock", id: "claude-sonnet", variant: "high" })
+  })
+
+  test("keeps the models that overflowed, dropping junk entries", () => {
+    expect(readSnapshot(snap(5, { overflowed: ["a/b#high", 3, "c/d"] }))?.overflowed).toEqual(["a/b#high", "c/d"])
+    expect(readSnapshot(snap(5, { overflowed: [] }))).toEqual(snap(5))
+    expect(readSnapshot(snap(5, { overflowed: "a/b" }))).toEqual(snap(5))
+  })
+})
+
+describe("hasOverflowed", () => {
+  const stored = readSnapshot(snap(5, { overflowed: ["amazon-bedrock/claude-sonnet#high"] }))
+  test("matches the model whatever its variant", () => {
+    expect(hasOverflowed(stored, { providerID: "amazon-bedrock", id: "claude-sonnet" })).toBe(true)
+    expect(hasOverflowed(stored, { providerID: "amazon-bedrock", id: "claude-opus" })).toBe(false)
+    expect(hasOverflowed(undefined, { providerID: "amazon-bedrock", id: "claude-sonnet" })).toBe(false)
   })
 })
 

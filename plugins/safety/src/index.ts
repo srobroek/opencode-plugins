@@ -2,7 +2,7 @@ import { realpathSync } from "node:fs"
 import { homedir } from "node:os"
 import { isAbsolute, resolve } from "node:path"
 import { Plugin } from "@opencode/plugin"
-import { Error as ToolError } from "@opencode/plugin/promise/tool"
+import { Tool } from "@opencode/plugin/effect"
 import { appendResultText, isShellTool, leadingCdCwd, shellCall, WRITE_TOOLS } from "@srobroek/opencode-lib"
 import { rewriteCloseKeywords } from "./close-keywords.ts"
 import { externalDirectories, sessionRoots, shellFlagDirectories } from "./flag-directories.ts"
@@ -362,7 +362,8 @@ export function createPlugin(overrides: Overrides = {}) {
             "stage and exit code only and is not retried.",
           input: SECRET_STORE_INPUT,
           execute: async (input, context) => {
-            context.signal.throwIfAborted()
+            // `signal` is undefined on hosts older than OpenCode 2.3.
+            if (context.signal?.aborted === true) return { content: "safety_secret_store stopped before it started; nothing was stored." }
             const directory = await sessionDirectory(context.sessionID)
             const source = { type: "tool" as const, messageID: context.messageID, id: context.id }
             const env = overrides.secretStore?.env ?? stringEnv(process.env)
@@ -378,7 +379,7 @@ export function createPlugin(overrides: Overrides = {}) {
               snapshot: (path) => readConfigSnapshot(directory, path, home),
               run: runChild,
               ...overrides.secretStore,
-              signal: context.signal,
+              ...(context.signal ? { signal: context.signal } : {}),
               askExternal: (external) =>
                 ctx.permission.assert({
                   sessionID: context.sessionID,
@@ -439,7 +440,7 @@ export function createPlugin(overrides: Overrides = {}) {
               const { message, error, metadata } = event.error
               const clean = { message: redactor.text(message), error: redactor.value(error), metadata: redactor.value(metadata) }
               if (clean.message === message && clean.error === error && clean.metadata === metadata) return
-              event.error = new ToolError({
+              event.error = new Tool.Error({
                 message: clean.message,
                 ...(clean.error === undefined ? {} : { error: clean.error }),
                 ...(clean.metadata === undefined ? {} : { metadata: clean.metadata }),

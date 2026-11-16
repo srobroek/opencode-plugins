@@ -52,6 +52,47 @@ lives in the language plugin's skills when installed.
   On release, publish, or deploy workflows, omit `cancel-in-progress` (or set it
   `false`); cancelling mid-upload leaves a half-published release.
 
+## Scheduled workflows
+
+Long checks (full mutation, fuzz campaigns, shuffled or repeated test runs, drift,
+dependency rescans) live in their own `scheduled.yml`, never in `ci-gate`:
+
+```yaml
+on:
+  schedule:
+    - cron: "17 3 * * *"   # off the hour; UTC
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  mutation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@<sha> # v4
+      - run: just mutate --shard ${{ matrix.shard }}/4
+      - uses: actions/upload-artifact@<sha> # v4
+        if: always()
+        with:
+          name: mutation-${{ matrix.shard }}
+          path: reports/
+```
+
+- Always offer `workflow_dispatch`; schedules run only on the default branch.
+- Shard with a matrix and `fail-fast: false`; upload reports, corpora and crashers with
+  `if: always()` so a failing run keeps its evidence.
+- Do not cancel an in-progress scheduled run; queue or skip the next one.
+- Set `permissions: contents: read` at the top; add `issues: write` only on the job that
+  files the failure. Pin every action by SHA. Drift jobs use a read-only OIDC role.
+- Give each job a `timeout-minutes`.
+
 ## Supply chain
 
 - Pin every third-party action to a full commit SHA with the version in a comment

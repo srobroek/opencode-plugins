@@ -1,8 +1,12 @@
 # Quality signals
 
 Read when you use coverage, mutation testing, property tests or fuzzing to judge or
-extend a suite. Each language's tools are in the `lang-<language>-testing` skill's
-`references/practice.md`.
+extend a suite. Pick the tool for each signal from the language's concerns table
+(`coverage`, `mutation`, `property`, `fuzz`, `fuzz-continuous` and `flaky-order` rows), found
+through the `toolchain-languages` skill's `references/concerns.md`; shared tools and report
+formats are in its `references/shared-tools.md`. Detect a tool before use, and recommend
+the install command and ask permission before you install it. Idioms are in the
+`lang-<language>-testing` skill's `references/practice.md`.
 
 | Signal | Shows | Does not show | Use |
 | --- | --- | --- | --- |
@@ -17,6 +21,14 @@ extend a suite. Each language's tools are in the `lang-<language>-testing` skill
 - Mutation testing is the stronger signal that tests detect wrong behavior. Coverage
   only finds gaps.
 
+## Run cadence
+
+- Mutation: diff-scoped on every pull request, blocking the merge only on the paths the
+  project names as critical and reporting elsewhere, plus a scheduled full run.
+- Fuzzing: bounded in time or inputs on every pull request, plus scheduled long campaigns
+  that keep and grow the corpus.
+- Flaky order: shuffled and repeated runs on a schedule, not on every pull request.
+
 ## Property-based tests
 
 Use them for invariants that hold over many inputs: round-trips
@@ -30,7 +42,7 @@ total), and "never crashes on any input" for parsers of untrusted data.
 
 ## Fuzzing
 
-Fuzz parsers and decoders that read untrusted formats. Bound the fuzz time in CI. Keep
+Fuzz parsers and decoders that read untrusted formats. Bound the fuzz time on pull requests and run long campaigns on a schedule. Keep
 each minimized crashing input as a regression input.
 
 Sources: [Software Engineering at Google, ch. 11](https://abseil.io/resources/swe-book/html/ch11.html),

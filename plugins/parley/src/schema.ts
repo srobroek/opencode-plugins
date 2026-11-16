@@ -124,6 +124,14 @@ export const resultOutput = {
     round_id: { type: "string" },
     answers: { type: "array", items: answer },
     pending: { type: "array", items: { type: "string" } },
+    as_message: {
+      type: "object",
+      properties: {
+        status: { type: "string", enum: ["delivered", "sending", "dismissed"] },
+        ids: { type: "array", items: { type: "string" } },
+        error: { type: "string" },
+      },
+    },
   },
 } as const
 

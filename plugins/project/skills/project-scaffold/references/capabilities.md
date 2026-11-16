@@ -63,12 +63,15 @@ Ask first whether Terraform or OpenTofu is the baseline (`toolchain-infrastructu
 only when application code and AWS constructs are tightly coupled. If chosen:
 
 - Destination `infrastructure/` (repo-relative, ask if different). Generate with the
-  CDK's own init, pinned to an exact stable `aws-cdk` version: `bunx aws-cdk@<x.y.z> init app
+  CDK's own init, at least a stable `aws-cdk` version: `bunx aws-cdk@<x.y.z> init app
   --language typescript` in an empty scratch directory, then move the result in and drop what
   an npm-package template adds that this repo does not need (its own git repo, duplicate
   lockfiles). Do not template CDK code by hand.
 - Tasks: install (`cd infrastructure && bun install --frozen-lockfile`), `synth`
-  (`bun run cdk synth`); the gate is synth only.
+  (`bun run cdk synth`), `diff` (`bun run cdk diff --fail-on=broadening`, needs a read-only AWS
+  role, so CI only). The local gate is synth with `cdk-nag` packs applied to the app, plus
+  the template assertions; `cdk diff` and `cfn-lint` on `cdk.out` run beside synth in CI.
+  Concern tools: `aws-guidance` (`references/cdk.md`).
 - Never bootstrap or deploy unless the user asks in this conversation. Credentials for it
   come from `project-secrets` (AWS section), not from files.
 - Keep CDK's tests out of the root TypeScript config (exclude `infrastructure/` in the root

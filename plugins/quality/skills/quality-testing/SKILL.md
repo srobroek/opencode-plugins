@@ -8,7 +8,10 @@ description: "Load before answering how to test code, or planning, writing, revi
 Language-neutral rules for what to test, how many tests to keep, and how tests change
 with the code. For a language's runner, idioms and tool choices, also load the
 `lang-<language>-testing` skill and its `references/practice.md` when one is listed;
-if none is, follow the project's existing tests and test configuration. The test-first
+if none is, follow the project's existing tests and test configuration. Tool choices for
+coverage, mutation, property tests, fuzzing and flaky-order checks come from the language's
+concerns table, found through the `toolchain-languages` skill's `references/concerns.md`.
+The test-first
 loop and evidence rules are in the `quality-code-design` skill's `test-first.md` and
 `verification.md` references. To audit an existing suite on demand, with recommendations and
 fixes, load the `quality-test-audit` skill.
@@ -53,6 +56,6 @@ fixes, load the `quality-test-audit` skill.
 | Choosing a test level, or deciding that something needs no test | [what-to-test.md](references/what-to-test.md) |
 | A behavior collects many tests, tests come from an agent or a generator, or the suite grows faster than the code | [test-budget.md](references/test-budget.md) |
 | Changing, removing or refactoring tested code; bug fixes, legacy code, flaky tests | [maintenance.md](references/maintenance.md) |
-| Choosing a fake, stub, spy or mock | [doubles.md](references/doubles.md) |
+| Choosing a fake, stub, spy or mock, or a double for a contract | [doubles.md](references/doubles.md) |
 | Coverage, mutation testing, property tests, fuzzing | [signals.md](references/signals.md) |
 | Reviewing the test changes in a diff or pull request | [review-tests.md](references/review-tests.md) |

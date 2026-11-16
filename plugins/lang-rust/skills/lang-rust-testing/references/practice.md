@@ -1,6 +1,6 @@
 # Rust testing practice
 
-Checked 2026-11-12.
+Checked 2026-11-16.
 
 Rust layout, assertion idioms, and tool choices for small, behavior-focused suites.
 Use `quality-testing` for what to test, the behavior budget, same-change maintenance,
@@ -25,7 +25,7 @@ contracts. Do not use `ignore` to conceal a broken example.
 Do show setup, action, and an independent expected outcome. Several assertions may
 describe one outcome; separate unrelated success and error scenarios.
 Use `assert_eq!`, `assert!`, and `matches!` with useful failure messages.
-Add `pretty_assertions` only when its diffs improve compound or textual failures.
+Add `pretty_assertions` (the `assertions` row) only when its diffs improve compound or textual failures.
 
 ```rust
 #[test]
@@ -144,15 +144,36 @@ Do not auto-accept snapshots in CI or snapshot opaque, enormous object graphs.
 
 Do use `cargo-fuzz` for coverage-guided parser/security targets; choose `afl` when
 the infrastructure needs an AFL-family engine, or `bolero` for shared property/fuzz
-targets. Bound campaigns and retain minimized crash inputs and corpus regressions.
+targets. Bound PR campaigns and retain minimized crash inputs and corpus regressions;
+run long campaigns continuously through ClusterFuzzLite or OSS-Fuzz.
 Do not treat a no-panic target as a complete semantic oracle.
 
-Use `cargo-mutants --in-diff change.diff` for important changed logic and periodic
-broader runs. A test-only diff may select no mutants; inspect surviving mutants
-before adding tests, since equivalent mutations do not justify brittle assertions.
+Run `cargo-mutants` under its default `cargo test`, which includes doctests.
+`--test-tool=nextest` (or `test_tool = "nextest"` in `.cargo/mutants.toml`) skips
+doctests, so doctest-only coverage shows as missed; use it only where a suite needs
+process isolation or measures faster, and accept those misses. On a pull request:
+
+```sh
+git diff origin/$BASE.. > git.diff
+cargo mutants --in-place --no-shuffle -vV --in-diff git.diff
+```
+
+Use `fetch-depth: 0`. A test-only diff selects no mutants. Run the full suite on a
+schedule, sharded with `--shard k/n` in a matrix with identical arguments, and upload
+`mutants.out` (`outcomes.json`, `missed.txt`) with `if: always()`. Exit codes: 0 all
+caught, 2 missed, 3 timeouts, 4 baseline failing. Inspect surviving mutants before
+adding tests, since equivalent mutations do not justify brittle assertions.
 Use `cargo llvm-cov nextest` for suite coverage. Read changed-line and branch gaps
 as missing-behavior prompts, not correctness scores; check the toolchain requirements
 for optional branch and doc-test coverage rather than assuming they are included.
+
+For unsafe code run Miri (`cargo +nightly miri nextest run`, with
+`MIRIFLAGS=-Zmiri-many-seeds` for schedules; no FFI) on a schedule, and optionally
+`cargo +nightly careful test`. Use AddressSanitizer or ThreadSanitizer
+(`-Zsanitizer=address|thread` with `-Zbuild-std`) or Valgrind for FFI. Skip all of
+these under `#![forbid(unsafe_code)]` only when no unsafe dependency is in scope. Tool choices are in `lang-rust-libraries`'
+`references/testing.md` and `references/quality.md`; detect a tool, recommend the
+install and ask before installing.
 
 ## Runner and flaky tests
 
@@ -163,11 +184,14 @@ and broken assumptions about state shared across tests in one process, usually
 revealing an isolation bug. Use plain `cargo test` only if nextest cannot be installed.
 Process isolation does not isolate files, ports, databases, or external services.
 
-Do diagnose intermittent failures with repeated runs and shuffled order where the
-runner supports it; vary concurrency and preserve seeds, output, and initial failures.
-Keep retries off by default. If explicitly enabled for diagnosis, nextest marks an
-eventual success flaky; do not report it as a clean initial pass.
-Quarantine only with an owner, issue, expiry, and continued diagnostic execution.
+Do diagnose intermittent failures with repeated runs (`--stress-count N` or
+`--stress-duration`) and `--no-fail-fast`; vary concurrency and preserve output and
+initial failures. Nextest has no shuffle. For order dependence run plain
+`cargo +nightly test -- -Z unstable-options --shuffle --shuffle-seed N` and keep the seed.
+Keep retries off by default. If explicitly enabled for diagnosis, `--retries` marks an
+eventual success flaky (`--flaky-result fail` makes it fail); do not report it as a
+clean initial pass. Quarantine only with an owner, issue, expiry, and continued
+diagnostic execution.
 Use `test-log` for logging/tracing setup, not assertions on incidental log lines.
 Use `serial_test` only as a last resort for unavoidable shared resources; its
 process-local locks do not coordinate nextest processes. File locks or runner-level
@@ -288,4 +312,4 @@ fn receipt_total_is_preserved() -> Result<(), Box<dyn std::error::Error>> {
 - [Rstest](https://docs.rs/rstest/latest/rstest/), [Insta](https://insta.rs/docs/), [redactions](https://insta.rs/docs/redactions/), [Proptest persistence](https://proptest-rs.github.io/proptest/proptest/failure-persistence.html).
 - [Mockall](https://docs.rs/mockall/latest/mockall/), [Wiremock](https://docs.rs/wiremock/latest/wiremock/), [Testcontainers](https://docs.rs/testcontainers/latest/testcontainers/), [Tokio test](https://docs.rs/tokio/latest/tokio/attr.test.html).
 - [Loom](https://docs.rs/loom/latest/loom/), [Shuttle](https://docs.rs/shuttle/latest/shuttle/), [fuzzing](https://rust-fuzz.github.io/book/cargo-fuzz.html), [Bolero](https://docs.rs/bolero/latest/bolero/).
-- [Mutation in diffs](https://mutants.rs/in-diff.html), [LLVM coverage](https://github.com/taiki-e/cargo-llvm-cov), [Serial test](https://docs.rs/serial_test/latest/serial_test/).
+- [Mutation in diffs](https://mutants.rs/in-diff.html), [mutants test tool](https://mutants.rs/nextest.html), [Miri](https://github.com/rust-lang/miri), [LLVM coverage](https://github.com/taiki-e/cargo-llvm-cov), [Serial test](https://docs.rs/serial_test/latest/serial_test/).

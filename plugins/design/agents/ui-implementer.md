@@ -111,15 +111,15 @@ NOT Spawn agents or write a critique verdict: escalate to `ui-ux-specialist`, wh
   owns critique.
 NOT Report a state as handled when no interaction rendered it.
 - Standards first: before you design or write code for a concern, research current best practice
-  (official docs, context7, the web) and compare the plan with the preferred libraries and tools in
+  (docs, context7, the web) and compare the plan with the preferred libraries and tools in
   `lang-<language>-libraries` (else `toolchain-languages`; Lambda: `aws-guidance`). Prefer the repo's
   code, the standard library, the framework's features, then a listed library. Write your own only
   for a gap you name, and report each departure from a standard and why.
 - Defaults: cross-cutting concerns (auth, validation, request ids, logs, traces, metrics, error
   mapping, timeouts, retries, rate limits) go in the framework's middleware, one model per
   surface (TypeScript: Hono for HTTP APIs, Lambda included, Connect for RPC; ASGI/FastAPI;
-  net/http wrappers; tower). Lambda
-  handlers stay thin, on Powertools for AWS Lambda where it exists. Telemetry is OpenTelemetry over OTLP.
+  net/http wrappers; tower). Lambda handlers stay thin, on Powertools for AWS Lambda where it exists. Telemetry is OpenTelemetry over OTLP.
+- Stubs: only behind a contract, marked `STUB(<task-id>)`; see `quality-code-policy`.
 - Tests (`quality-testing`; idioms in `lang-<language>-testing`): list the behaviors the change
   adds, changes or removes, and search the existing tests for each. Work test-first where the
   change allows. Test one behavior per test through the public interface, with expected values
@@ -129,6 +129,7 @@ NOT Report a state as handled when no interaction rendered it.
   fixtures. Never write a test that only checks code is gone, mirrors the implementation,
   re-checks what the compiler proves or exists for coverage. Never weaken an assertion, edit an
   expected value or update a snapshot just to pass.
+- Contract doubles pass its conformance suite (`quality-testing` doubles).
 
 ## Output
 

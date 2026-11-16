@@ -1,4 +1,4 @@
-"""The viewer session: one host process per OpenCode session, found through a session file.
+"""The viewer session: one host process per harness session, found through a session file.
 
 `serve` starts `viewer.py host` detached and records its ports and PID; every other command
 reads the session file and talks to the host over loopback HTTP. Stdlib only.
@@ -38,18 +38,14 @@ KILL_GRACE_S = 10.0  # between SIGTERM and SIGKILL to a process group
 
 
 def session_path(project_root: Path | None = None, session_name: str | None = None) -> Path:
-    """Path for one project, OpenCode session, or explicit name; CAD_VIEWER_SESSION always wins.
-
-    The cad plugin's cad_run tool sets CAD_SESSION_ID to the root OpenCode session id.
-    """
+    """Path for one project and explicit session name; CAD_VIEWER_SESSION overrides the file path."""
     explicit = os.environ.get("CAD_VIEWER_SESSION")
     if explicit:
         return Path(explicit)
 
     project = (project_root or Path.cwd()).expanduser().resolve()
-    harness_session = os.environ.get("CAD_SESSION_ID")
     name = session_name or os.environ.get("CAD_VIEWER_SESSION_NAME")
-    identity = f"{harness_session or ''}\0{name or 'default'}\0{project}"
+    identity = f"{name or 'default'}\0{project}"
     digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
     base = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
     return Path(base) / "cad-viewer" / digest / "session.json"
@@ -133,7 +129,7 @@ def call(session: dict[str, Any], method: str, route: str, body: dict[str, Any] 
 
 
 def describe(session: dict[str, Any], reused: bool, session_name: str | None = None) -> dict[str, Any]:
-    command = "cad_run cad-viewer/scripts/viewer.py stop"
+    command = 'uv run --script "$CAD_SKILLS/cad-flow/scripts/run.py" cad-viewer/scripts/viewer.py stop'
     if session_name:
         command += f" --session {shlex.quote(session_name)}"
     return {"status": "running", "reused": reused, "url": session["url"], "pid": session["pid"],

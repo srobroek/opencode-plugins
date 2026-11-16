@@ -24,8 +24,8 @@ The journey is **spec-informed but independently owned**: read whatever
 change record exists -- feature spec, merged PRs, diff, design docs, the
 running feature itself -- to learn intended behavior. Record references in
 `trace:` (repo's own vocabulary). Never copy acceptance scenarios verbatim;
-a journey describes what a *user* does and observes end to end, which may
-span many specs and includes glue no spec contains.
+a journey describes what a *user* does and observes end to end, which spans
+many specs and includes glue no spec contains.
 
 ## Elicitation -- the grilling protocol
 
@@ -113,10 +113,23 @@ Classify the change first (FORMAT.md, "three change species"):
 Rewrite, don't transliterate: extract goal, preconditions, user-visible
 steps and assertions from the legacy doc; drop tool-specific mechanics into
 the relevant README.md interface profile notes instead of the journey.
-Carry over known-gaps honestly. Legacy history does not become delta
+Carry over known-gaps. Legacy history does not become delta
 entries -- the new journey starts at `version: 1` as current truth, with the
 legacy doc linked in `trace:`. Propose deleting or pointer-stubbing the
 legacy doc; let the user decide.
+
+## Journeys and deterministic E2E specs
+
+A journey stays the agent-validated source of truth. Once it passes, its stable steps may become
+a deterministic spec. Pick the tool for the surface from the `e2e` row in the `toolchain-languages`
+skill's `references/surfaces.md`.
+
+- Bootstrap the spec from the passed run with Playwright Test Agents (planner, generator) or
+  `playwright codegen`, then edit it by hand.
+- Tag each spec with its journey id in the title or an annotation, for example
+  `test('J-012 checkout with saved card', ...)`.
+- Keep the journey's `Expect (negative):` assertions as assertions in the spec.
+- Never commit a healer rewrite without review.
 
 ## Always
 

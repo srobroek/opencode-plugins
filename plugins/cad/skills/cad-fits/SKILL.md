@@ -3,6 +3,8 @@ name: cad-fits
 description: ISO 286 hole/shaft limits, fit types and worst-case/RSS stack-ups. Triggers on "what fit for", "H7/g6", "stack-up".
 ---
 
+Resolve `$CAD_SKILLS` as the parent directory of this skill's directory; it contains the installed `cad-*` skill folders.
+
 # CAD Fits and Stack-ups
 
 Stage L3 DETAIL, and the L4 ANALYSIS stack-up check. Numbers come from the scripts, never from memory.
@@ -16,14 +18,14 @@ TRIGGER
 
 ## Workflow
 
-1. Fit limits: `cad_run cad-fits/scripts/fits.py SIZE FIT [--expect TYPE]`.
+1. Fit limits: `uv run --script scripts/fits.py SIZE FIT [--expect TYPE]`.
    SIZE is nominal mm; FIT is `H7/g6` or one class (`g6`); TYPE is `clearance|transition|interference`.
    → JSON with deviations in µm, limits in mm, `max_clearance_um`, `min_clearance_um`, and `fit.type`.
 2. Record the chosen class in the part's `model.py` and on its drawing. A fit chosen to meet a
    requirement cites its REQ-### and gets a DR-### entry.
 3. Stack-up: write the chain as YAML (format in the `scripts/stackup.py` docstring: contributors with
    `nominal`, `tol` or `tol_plus`/`tol_minus`, `direction` 1|-1; optional `requirement` min/max/method),
-   then run `cad_run cad-fits/scripts/stackup.py STACK.yaml` for a standalone result.
+   then run `uv run --script scripts/stackup.py STACK.yaml` for a standalone result.
    With `--hw hw --version vN`, the script publishes `results.json` to `hw/analysis/vN/<stack-id>/` and reuses a
    matching bundle; changed recipes require `--replace`. Standalone `--out` destinations must be under `.cad-work`.
 

@@ -1682,6 +1682,19 @@ function initialDraft(question) {
     cursor: pointed === undefined ? 0 : ids.indexOf(pointed)
   };
 }
+function draftFromAnswer(question, answer) {
+  const base = initialDraft(question);
+  const value = answer.value === undefined ? base.value : structuredClone(answer.value);
+  const ids = rows(question);
+  const selected = value ?? {};
+  const pointed = [selected.selected, selected.choice, selected.decision, selected.emoji, selected.hex].find((item) => typeof item === "string" && ids.includes(item));
+  return {
+    status: answer.status,
+    ...value === undefined ? {} : { value },
+    note: answer.note ?? "",
+    cursor: pointed === undefined ? base.cursor : ids.indexOf(pointed)
+  };
+}
 function toSubmission(question, draft) {
   const note = draft.note.trim();
   const withNote = (answer) => note === "" ? answer : { ...answer, note };
@@ -4317,6 +4330,32 @@ function canCloseRoundPanel(panel, name, sessionID, stillPending) {
   return panel?.name === name && panel.sessionID === sessionID && !stillPending;
 }
 
+// plugins/parley/src/reconcile.ts
+function reconcileRounds(input) {
+  const listed = new Set(input.server.map((view) => view.roundID));
+  const lost = new Set([...input.lost].filter((id) => !listed.has(id)));
+  const forget = [];
+  const kept = [];
+  for (const entry of input.current) {
+    const id = entry.view.roundID;
+    if (listed.has(id))
+      continue;
+    if (input.reloaded || lost.has(id)) {
+      lost.add(id);
+      kept.push(entry);
+    } else
+      forget.push(id);
+  }
+  return { entries: [...input.server.map(input.toEntry), ...kept], lost, forget };
+}
+function instanceChanged(known, key, instance) {
+  if (instance === undefined)
+    return false;
+  const before = known.get(key);
+  known.set(key, instance);
+  return before !== undefined && before !== instance;
+}
+
 // plugins/parley/src/rpc.ts
 import { Rpc } from "@opencode/plugin/rpc";
 var RPC_ID = "parley";
@@ -4351,6 +4390,21 @@ var ParleyRpc = Rpc.define({
       },
       output: { type: "object" }
     },
+    deliver: {
+      input: {
+        type: "object",
+        required: ["sessionID", "questions", "answers"],
+        properties: {
+          sessionID: { type: "string" },
+          number: { type: "number" },
+          roundID: { type: "string" },
+          deliveryID: { type: "string" },
+          questions: { type: "array", items: { type: "object" } },
+          answers: { type: "array", items: { type: "object" } }
+        }
+      },
+      output: { type: "object" }
+    },
     cancel: {
       input: {
         type: "object",
@@ -4378,6 +4432,40 @@ var ParleyRpc = Rpc.define({
     }
   }
 });
+
+// plugins/parley/src/submit.ts
+var isUnknownRound = (errors) => errors.some((error) => /unknown round/i.test(error));
+var isUndeliveredRound = (errors) => errors.some((error) => /undelivered round/i.test(error));
+var messageOf = (error) => error instanceof Error ? error.message : String(error);
+async function submitRound(flow) {
+  const outcome = await flow.submit().catch((error) => ({ ok: false, errors: [messageOf(error)] }));
+  if (outcome.ok) {
+    if (outcome.errors?.length)
+      flow.notify(outcome.errors.join(" "), "warning");
+    else
+      flow.notify("Answers sent", "success");
+    await flow.settle();
+    return [];
+  }
+  const errors = [...outcome.errors ?? ["Submit failed"]];
+  if (isUnknownRound(errors))
+    flow.notify("This round is gone from the server (the plugin probably reloaded).", "warning");
+  else if (isUndeliveredRound(errors))
+    flow.notify(errors.join(" "), "warning");
+  else
+    return errors;
+  if (!await flow.choose()) {
+    await flow.dismiss();
+    await flow.settle();
+    return [];
+  }
+  const sent = await flow.deliver().catch((error) => ({ ok: false, errors: [messageOf(error)] }));
+  if (!sent.ok)
+    return [...sent.errors ?? ["Could not send the answers as a message"]];
+  flow.notify("Answers sent as a message", "success");
+  await flow.settle();
+  return [];
+}
 
 // plugins/parley/src/tui.tsx
 var HEARTBEAT_MS = 1e4;
@@ -4492,7 +4580,9 @@ var tui_default = Plugin.define({
         add(entry.location);
       return [...found.values()];
     };
-    const refresh = async (location) => {
+    const instances = new Map;
+    let lost = new Set;
+    const refresh = async (location, reloaded = false) => {
       if (disposed)
         return;
       const result = await rpc.pending({}, {
@@ -4503,14 +4593,30 @@ var tui_default = Plugin.define({
       if (disposed || !result)
         return;
       const key = locationKey(location);
-      const open = new Set((result.rounds ?? []).map((view) => view.roundID));
-      for (const entry of rounds())
-        if (locationKey(entry.location) === key && !open.has(entry.view.roundID))
-          store.forget(entry.view.roundID);
-      setRounds((all) => [...all.filter((entry) => locationKey(entry.location) !== key), ...(result.rounds ?? []).map((view) => ({
-        view,
-        location
-      }))]);
+      const merged = reconcileRounds({
+        current: rounds().filter((entry) => locationKey(entry.location) === key),
+        server: result.rounds ?? [],
+        lost,
+        reloaded: instanceChanged(instances, key, result.instance) || reloaded,
+        toEntry: (view) => ({
+          view,
+          location
+        })
+      });
+      lost = merged.lost;
+      for (const id of merged.forget)
+        store.forget(id);
+      for (const entry of merged.entries) {
+        if (entry.view.undelivered === undefined)
+          continue;
+        for (const answer of entry.view.answers) {
+          const question = entry.view.questions.find((candidate) => candidate.id === answer.id);
+          const key = `${entry.view.roundID}\x00${answer.id}`;
+          if (question && store.drafts[key] === undefined)
+            store.setDraft(key, draftFromAnswer(question, answer));
+        }
+      }
+      setRounds((all) => [...all.filter((entry) => locationKey(entry.location) !== key), ...merged.entries]);
     };
     const forSession = (sessionID) => rounds().find((entry) => entry.view.sessionID === sessionID);
     const single = (sessionID) => inlineEligible(forSession(sessionID)?.view.questions ?? []);
@@ -4586,7 +4692,12 @@ var tui_default = Plugin.define({
         clientID
       }, {
         location
-      }).then(() => true, () => false)));
+      }).then((reply) => {
+        const instance = reply?.instance;
+        if (instanceChanged(instances, locationKey(location), instance))
+          refresh(location, true);
+        return true;
+      }, () => false)));
       if (disposed)
         return;
       const ok = results.some(Boolean);
@@ -4606,7 +4717,15 @@ var tui_default = Plugin.define({
       await refresh(location);
       if (disposed)
         return;
-      if (data.action === "opened")
+      if (data.action === "opened" && data.status === "undelivered") {
+        context.ui.toast.show({
+          title: "Parley",
+          message: data.reason || "Your answers did not reach the agent",
+          variant: "warning",
+          sessionID: data.sessionID
+        });
+        present(data.sessionID, true);
+      } else if (data.action === "opened")
         present(data.sessionID, true);
       else if (data.action === "updated") {
         if (inline().has(data.sessionID) && !single(data.sessionID)) {
@@ -4682,39 +4801,65 @@ var tui_default = Plugin.define({
     for (const location of locations())
       refresh(location);
     const timer = setInterval(() => void heartbeat(), HEARTBEAT_MS);
+    const deliveryIDs = new Map;
     const submit = async (view, answers) => {
       const entry = rounds().find((item) => item.view.roundID === view.roundID);
       if (!entry)
         return ["This round is no longer open."];
-      try {
-        const result = await rpc.submit({
+      const problems = await submitRound({
+        submit: () => rpc.submit({
           roundID: view.roundID,
           answers,
           final: true
         }, {
           location: entry.location
-        });
-        if (disposed)
-          return [];
-        if (!result.ok)
-          return result.errors ?? ["Submit failed"];
-        context.ui.toast.show({
-          message: "Answers sent",
-          variant: "success",
+        }),
+        deliver: () => rpc.deliver({
+          sessionID: view.sessionID,
+          roundID: view.roundID,
+          number: view.number,
+          questions: [...view.questions],
+          answers,
+          deliveryID: deliveryIDs.get(view.roundID) ?? deliveryIDs.set(view.roundID, crypto.randomUUID()).get(view.roundID)
+        }, {
+          location: entry.location
+        }),
+        choose: async () => await context.ui.dialog.confirm({
+          title: view.undelivered === undefined ? "This round is gone" : "Your answers did not reach the agent",
+          message: view.undelivered === undefined ? "The server lost this round. You can still send your answers to the agent as a message." : "Sending them as a message failed. You can try again, or dismiss them.",
+          label: {
+            confirm: "Send these answers as a message",
+            cancel: "Dismiss"
+          }
+        }) === true,
+        dismiss: async () => {
+          await rpc.cancel({
+            roundID: view.roundID,
+            reason: "dismissed"
+          }, {
+            location: entry.location
+          }).catch(() => {});
+        },
+        notify: (message, variant) => context.ui.toast.show({
+          message,
+          ...variant ? {
+            variant
+          } : {},
           duration: 2000
-        });
-        await refresh(entry.location);
-        if (disposed)
-          return [];
-        const stillPending = forSession(view.sessionID) !== undefined;
-        if (canCloseRoundPanel(context.ui.panel.current(), PANEL, view.sessionID, stillPending))
-          context.ui.panel.close();
-        if (!stillPending)
-          showInline(view.sessionID, false);
-        return [];
-      } catch (error) {
-        return [error instanceof Error ? error.message : String(error)];
-      }
+        }),
+        settle: async () => {
+          lost = new Set([...lost].filter((id) => id !== view.roundID));
+          await refresh(entry.location);
+          if (disposed)
+            return;
+          const stillPending = forSession(view.sessionID) !== undefined;
+          if (canCloseRoundPanel(context.ui.panel.current(), PANEL, view.sessionID, stillPending))
+            context.ui.panel.close();
+          if (!stillPending)
+            showInline(view.sessionID, false);
+        }
+      });
+      return disposed ? [] : problems;
     };
     const dismiss = async (view) => {
       const entry = rounds().find((item) => item.view.roundID === view.roundID);
@@ -4739,6 +4884,7 @@ var tui_default = Plugin.define({
       }, {
         location: entry.location
       }).catch(() => {});
+      lost = new Set([...lost].filter((id) => id !== view.roundID));
       await refresh(entry.location);
       if (disposed)
         return;

@@ -5,7 +5,7 @@
 """Audit a sweep's mesh-cleared requests by measuring them exactly.
 
 Usage:
-    cad_run cad-motion/scripts/spot_check.py --hw HW --version vN
+    uv run --script "$CAD_SKILLS/cad-flow/scripts/run.py" cad-motion/scripts/spot_check.py --hw HW --version vN
         --result BUNDLE [--all-mesh-poses] [--jobs 1|N|auto] [--cache DIR | --no-cache] [--time-limit 600]
 
 A fast sweep leaves a request unmeasured when the mesh bound of mesh_bound.py proves it more than the

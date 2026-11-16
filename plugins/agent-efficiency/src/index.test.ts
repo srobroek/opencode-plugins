@@ -268,7 +268,9 @@ describe("plugin", () => {
     expect(explore).not.toHaveProperty("request")
     const rules = explore.permissions
     for (const tool of ["read", "grep", "glob", "websearch", "webfetch"]) expect(evaluate(rules, tool, "x")).toBe("allow")
-    for (const tool of ["shell", "execute", "skill", "edit", "subagent"]) expect(evaluate(rules, tool, "x")).toBe("deny")
+    for (const tool of ["shell", "execute", "edit", "subagent"]) expect(evaluate(rules, tool, "x")).toBe("deny")
+    for (const skill of ["quality-code-design", "lang-rust"]) expect(evaluate(rules, "skill", skill)).toBe("allow")
+    expect(evaluate(rules, "skill", "beads-guide")).toBe("deny")
     expect(evaluate(rules, "read", "/repo/.env")).toBe("ask")
     expect(evaluate(rules, "read", "/repo/.env.local")).toBe("ask")
     expect(evaluate(rules, "read", "/repo/.env.example")).toBe("allow")

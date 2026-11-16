@@ -7,7 +7,6 @@
 
 The default is a dry run. ``--yes`` executes user-level actions. FreeCAD must already be
 installed; runtime environments, Chromium, and the three.js cache use preflight warm-up.
-The OpenCode plugin's cad_setup tool installs the Beads formulas.
 
 From a project root (the folder holding ``hw/``) setup also plans the git storage rules of the
 generated results from ``hw/product.yaml`` ``storage.results_in_git`` (cad-record layout
@@ -102,6 +101,13 @@ def _install_uv(home: Path, environ: Mapping[str, str]) -> dict[str, str]:
     return updated
 
 
+
+
+
+
+def _harness_needed(harness: str, cwd: Path, home: Path, environ: Mapping[str, str]) -> bool:
+    return preflight._harness_check(harness, cwd, home, environ).status != "pass"
+
 def _release_info(path: Path) -> dict[str, str]:
     values = {}
     if path.is_file():
@@ -117,7 +123,7 @@ def _is_debian_family(release: Mapping[str, str]) -> bool:
     return bool(identifiers & {"debian", "ubuntu"})
 
 
-def plan(report, cwd: Path, home: Path, environ: Mapping[str, str]) -> list[PlanItem]:
+def plan(report, cwd: Path, home: Path, environ: Mapping[str, str], harness: str | None = None) -> list[PlanItem]:
     """Plan actions for missing non-CAD prerequisites."""
     items: list[PlanItem] = []
     if any(check.id == "uv" and check.status != "pass" for check in report.checks):
@@ -142,6 +148,15 @@ def plan(report, cwd: Path, home: Path, environ: Mapping[str, str]) -> list[Plan
         items.append(PlanItem("manual-libraries", "Install OCP system libraries manually",
                               "Install `libglvnd-glx`, `libX11`, and `expat` (for example: "
                               "`dnf install libglvnd-glx libX11 expat`) for headless OCP."))
+    if harness and _harness_needed(harness, cwd, home, environ):
+        installer = CAD_ROOT / "harness" / "install.py"
+        if installer.is_file():
+            command = f"python3 {installer} --harness {harness} --project ."
+            items.append(PlanItem(f"harness-{harness}", f"Install CAD files for {harness.title()}", command))
+        else:
+            command = (f"From the cad-agent checkout, run `python3 harness/install.py --harness {harness} "
+                       f"--project {cwd}`. Installed skills do not include the installer.")
+            items.append(PlanItem("harness-unavailable", f"Install CAD files for {harness.title()}", command))
     return items + storage_plan(cwd)
 
 
@@ -261,8 +276,15 @@ def render_plan(items: Sequence[PlanItem], *, execute: bool) -> str:
     return "\n".join(lines)
 
 
-def _execute(items: Sequence[PlanItem], cwd: Path, home: Path,
-             environ: dict[str, str]) -> tuple[list[str], dict[str, str]]:
+def _install_harness(harness: str, cwd: Path) -> None:
+    installer = CAD_ROOT / "harness" / "install.py"
+    if not installer.is_file():
+        raise RuntimeError("harness/install.py is not bundled with installed skills; run the printed command from your cad-agent checkout")
+    _run(["python3", str(installer), "--harness", harness, "--project", "."], cwd=cwd)
+
+
+def _execute(items: Sequence[PlanItem], cwd: Path, home: Path, environ: dict[str, str],
+             harness: str | None) -> tuple[list[str], dict[str, str]]:
     """Run each planned action; returns the failures and the environment the actions left."""
     failures = []
     warm_started = False
@@ -280,8 +302,10 @@ def _execute(items: Sequence[PlanItem], cwd: Path, home: Path,
             elif item.id.startswith("warm-"):
                 if not warm_started:
                     print("Warming runtime environments, Chromium, and the pinned three.js cache...")
-                    print(preflight.render_text(preflight.warm(environ, cwd, home)))
+                    print(preflight.render_text(preflight.warm(environ, cwd, home, harness)))
                     warm_started = True
+            elif item.id.startswith("harness-"):
+                _install_harness(item.id.removeprefix("harness-"), cwd)
             elif item.id == "git-storage":
                 write_storage(storage_changes(cwd / "hw")[1])
         except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
@@ -293,6 +317,8 @@ def _execute(items: Sequence[PlanItem], cwd: Path, home: Path,
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--yes", action="store_true", help="execute user-level setup actions")
+    parser.add_argument("--harness", choices=("claude", "codex", "opencode", "kiro"),
+                        help="install harness files into the current project")
     parser.add_argument("--storage", action="store_true",
                         help="plan only the git storage rules of hw/ in this folder (with --yes, write them)")
     args = parser.parse_args(argv)
@@ -309,7 +335,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not args.yes:
             print("Dry run: no setup actions were executed.")
             return 0
-        return int(bool(_execute(items, cwd, home, environ)[0]))
+        return int(bool(_execute(items, cwd, home, environ, args.harness)[0]))
 
     cad_checks = preflight._timed_freecad_checks(environ, home)
     cad_report = preflight.Report(tuple(cad_checks))
@@ -317,16 +343,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(preflight.render_text(cad_report))
         return cad_report.exit_code
 
-    report = preflight.run_checks(environ, cwd, home, cad_checks=cad_checks)
-    items = plan(report, cwd, home, environ)
+    report = preflight.run_checks(environ, cwd, home, args.harness, cad_checks=cad_checks)
+    items = plan(report, cwd, home, environ, args.harness)
     print(render_plan(items, execute=args.yes))
     if not args.yes:
         print("Dry run: no setup actions were executed.")
         return 0
 
-    failures, environ = _execute(items, cwd, home, environ)
+    failures, environ = _execute(items, cwd, home, environ, args.harness)
     print("Re-running CAD preflight after setup actions...")
-    final_report = preflight.run_checks(environ, cwd, home)
+    final_report = preflight.run_checks(environ, cwd, home, args.harness)
     print(preflight.render_text(final_report))
     return int(bool(failures) or final_report.exit_code != 0)
 

@@ -5,14 +5,14 @@
 """Build, check, and diff versions of a hardware design from its part model scripts.
 
 Usage:
-    cad_run cad-model/scripts/cad_model.py run <hw-dir> --label vN [--kernel auto|cadquery|build123d]
+    uv run --script "$CAD_SKILLS/cad-flow/scripts/run.py" cad-model/scripts/cad_model.py run <hw-dir> --label vN [--kernel auto|cadquery|build123d]
                                      [--attach REF=PARENT_REF ...]
-    cad_run cad-model/scripts/cad_model.py check vN --hw hw [--out FILE]
+    uv run --script "$CAD_SKILLS/cad-flow/scripts/run.py" cad-model/scripts/cad_model.py check vN --hw hw [--out FILE]
        [--pair REF:REF ... | --changed-only [--since-version vM]] [--exact] [--allow-interference REF:REF ...]
        [--expect-solids PN=N ...] [--jobs 1|N|auto] [--cache DIR | --no-cache]
-    cad_run cad-model/scripts/cad_model.py diff vA vB [--hw HW] [--out FILE]
-    cad_run cad-model/scripts/cad_model.py latest <hw-dir> --label vN
-    cad_run cad-model/scripts/cad_model.py store gc <hw-dir> [--dry-run]
+    uv run --script "$CAD_SKILLS/cad-flow/scripts/run.py" cad-model/scripts/cad_model.py diff vA vB [--hw HW] [--out FILE]
+    uv run --script "$CAD_SKILLS/cad-flow/scripts/run.py" cad-model/scripts/cad_model.py latest <hw-dir> --label vN
+    uv run --script "$CAD_SKILLS/cad-flow/scripts/run.py" cad-model/scripts/cad_model.py store gc <hw-dir> [--dry-run]
 
 A REF is a PN placed once, or `@id` for one occurrence of hw/assembly.yaml.
 

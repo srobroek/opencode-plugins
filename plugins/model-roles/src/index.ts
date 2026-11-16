@@ -21,7 +21,7 @@ import {
   withAutoTag,
 } from "./auto.ts"
 import { buildReferenceIndex, type CatalogModel, type Derived, nearestVariant, type ReferenceIndex, vendorOf } from "./catalog.ts"
-import { candidateStatus, checkRoles, formatCheck } from "./check.ts"
+import { candidateStatus, checkRoles, formatCheck, formatHealthHistory, type HealthEvent, recordCooldown, recordRecovery } from "./check.ts"
 import {
   AUTO_AGENT,
   agentHash,
@@ -35,20 +35,29 @@ import {
   readClassification,
 } from "./classify.ts"
 import { type ConfigFile, type EffectiveConfig, effectiveConfig, globalConfigDir, pickConfigFile, readConfigFiles, readProjectFiles, readTiers, writeAgentTier, writeTier } from "./config-edit.ts"
+import { arms, chooseArm, type ExploreFacts, eligible, exploreFacts, exploring, parseExplore } from "./explore.ts"
 import {
+  CONTEXT_FALLBACK_REASON,
+  type ContextLimits,
+  contextFallback,
+  contextNote,
+  contextSwitchNote,
   duration,
   failureNote,
   fallbackTarget,
   type NoteFacts,
+  pinnedContextNote,
   retriesOnModel,
   retryDelay,
   retryTarget,
+  rolesListing,
   SOURCE,
   staysOnModel,
   subagentNote,
   switchNote,
 } from "./fallback.ts"
 import {
+  allowsChosenModel,
   type GuardAgent,
   type GuardModel,
   isExpensive,
@@ -69,6 +78,7 @@ import {
   healthView,
   modelFromError,
   nextExpiry,
+  providerKey,
   pruneHealth,
   RECENT_MS,
   readHealth,
@@ -76,14 +86,16 @@ import {
 } from "./health.ts"
 import { createLedgerStore, LEDGER_DISPOSE_TIMEOUT_MS, type Usage } from "./ledger.ts"
 import { hostWarn } from "./log.ts"
-import { decideFailureNotice, decideRecovery, type FailureReport, forgetSession, NOTICE_DEDUPE_MS, newNoticeState, type RequestLog, recordRequest, settleRequest } from "./outage.ts"
+import { claimContextNotice, claimToolContextNotice, decideFailureNotice, decideRecovery, type FailureReport, forgetSession, NOTICE_DEDUPE_MS, newNoticeState, type RequestLog, recordRequest, settleRequest } from "./outage.ts"
 import { explainSpawn, formatReceipts, pushReceipt, RECEIPTS_KEY, type Receipt, readReceipts, type SpawnRule, type SpawnSource } from "./receipt.ts"
 import { formatUsage, summarizeUsage } from "./report.ts"
 import {
   type AvailableModel,
   desiredModels,
   FALLBACK_HEADER,
+  type HealthView,
   type ModelRef,
+  modelText,
   type Options,
   parseCandidate,
   parseOptions,
@@ -98,7 +110,7 @@ import {
 import { resumeGuard, tierModels } from "./resume-guard.ts"
 import { TiersRpc } from "./rpc.ts"
 import { exitStatusOf, parseEvaluate, parseVerdict, testRun, touchesTests } from "./signals.ts"
-import { configRevision, type ModelSnapshot, readSnapshot, SPAWN_MODEL_KEY_PREFIX, snapshotModel, staleSnapshots, unavailableReason } from "./snapshot.ts"
+import { configRevision, hasOverflowed, type ModelSnapshot, readSnapshot, SPAWN_MODEL_KEY_PREFIX, snapshotModel, staleSnapshots, unavailableReason } from "./snapshot.ts"
 import {
   applyFrozenTierParam,
   captureTierParam,
@@ -186,6 +198,7 @@ const finishedAt = (event: unknown): number => {
   return Number.isFinite(at) ? at : Date.now()
 }
 const SUCCEEDED_EVENT = "session.execution.succeeded"
+const STARTED_EVENT = "session.execution.started"
 const CREATED_EVENT = "session.created"
 /** The host reloaded its config; a `/tiers` save or a hand edit of the global file lands here too. */
 const CONFIG_EVENT = "config.updated"
@@ -234,6 +247,12 @@ const availabilityKey = (models: ReadonlyArray<AvailableModel>): string =>
     .sort()
     .join("\n")
 
+/** Source of the exploration draw in [0, 1); a test seam, replaced with `setExploreRandom`. */
+let exploreRandom: () => number = Math.random
+export const setExploreRandom = (rand: (() => number) | undefined): void => {
+  exploreRandom = rand ?? Math.random
+}
+
 /** Run tasks one at a time, in call order. */
 function serial() {
   let tail: Promise<unknown> = Promise.resolve()
@@ -253,7 +272,10 @@ export default Plugin.define({
     const options: Options = { ...parseOptions(ctx.options), tiers: {}, classes: {}, implicit: {} }
     const runtime = parseRuntime(ctx.options, options)
     const guard = parseGuard(isRecord(ctx.options) ? ctx.options.guard : undefined)
-    const evaluate = parseEvaluate(isRecord(ctx.options) ? ctx.options.evaluate : undefined)
+    const evaluateRaw = isRecord(ctx.options) ? ctx.options.evaluate : undefined
+    const evaluate = parseEvaluate(evaluateRaw)
+    const explorer = parseExplore(evaluateRaw)
+    for (const message of explorer.warnings) warn(message)
     let autoHistory: AutoRecord[] = []
     let available: GuardModel[] = []
     let availableKey = ""
@@ -286,6 +308,8 @@ export default Plugin.define({
       }
     })
     let health: HealthState = {}
+    /** Recent cooldown starts and recoveries, for the check. Class and time only; lost on restart. */
+    let healthHistory: HealthEvent[] = []
     try {
       health = pruneHealth(readHealth(await ctx.storage.get(HEALTH_KEY)), Date.now(), runtime.flapWindowMs)
     } catch {
@@ -446,8 +470,21 @@ export default Plugin.define({
      */
     const markFailed = async (ref: ModelRef, kind: FailureClass, error: FailureInput): Promise<number> => {
       // Health keeps the failure class only: the provider's message can hold prompt text or credentials.
-      const record = recordFailure(health, ref, kind, error, Date.now(), runtime)
+      // A request that is too long says nothing about the model's health.
+      if (kind === "context-length") return 0
+      const now = Date.now()
+      const record = recordFailure(health, ref, kind, error, now, runtime)
       health = record.state
+      if (record.tripped) {
+        const scope = failureScope(kind)
+        healthHistory = recordCooldown(healthHistory, {
+          at: now,
+          subject: scope === "provider" ? providerKey(ref.providerID) : healthKey(ref),
+          scope,
+          kind,
+          cooldownMs: record.cooldownMs,
+        })
+      }
       try {
         await ctx.storage.set(HEALTH_KEY, health)
       } catch {
@@ -496,6 +533,136 @@ export default Plugin.define({
       if (model === undefined) return
       for (const notice of decideRecovery(noticeState, model)) await notify(notice.sessionID, notice.text, "recovery")
     }
+
+    /**
+     * The event that started each session's current execution, by session. The host's failed event names no
+     * execution, so this is what tells one overflow from the next. Bounded: the oldest sessions go first.
+     */
+    const executionOf = new Map<string, string>()
+    const noteExecution = (sessionID: string, id: string) => {
+      executionOf.delete(sessionID)
+      executionOf.set(sessionID, id)
+      if (executionOf.size > 500) executionOf.delete(executionOf.keys().next().value as string)
+    }
+
+    /** The context window of each listed model, from the catalog's `Model.Info.limit.context`. */
+    const contextLimits = (): ContextLimits => {
+      const limits = new Map<string, number>()
+      for (const model of available) {
+        const context = (model as { limit?: { context?: unknown } }).limit?.context
+        if (typeof context === "number" && context > 0) limits.set(healthKey(model), context)
+      }
+      return limits
+    }
+
+    type OverflowFacts = {
+      /** The session that overflowed, when known. */
+      sessionID: string | undefined
+      notifyTo: string
+      failed: ModelRef
+      role: string | undefined
+      spawnRole: string | undefined
+      agent: string | undefined
+    }
+
+    /** Whether the child runs on a model the user chose: the snapshot's rule, else an agent pin of a child no tier routed. */
+    const isChosen = async (stored: ModelSnapshot | undefined, overflow: OverflowFacts): Promise<boolean> => {
+      if (stored?.rule === "explicit-model" || stored?.rule === "agent-pin") return true
+      if (stored?.tier !== undefined || overflow.spawnRole !== undefined || overflow.agent === undefined) return false
+      try {
+        const agent = (await listAgents()).find((a) => a.id === overflow.agent)
+        return agent !== undefined && userPin(agent) !== undefined
+      } catch {
+        return false
+      }
+    }
+
+    /** The tier an overflowing child is judged in and the first larger-context candidate the guard allows. */
+    const contextTarget = async (overflow: OverflowFacts) => {
+      const { sessionID, failed } = overflow
+      // A child keeps the tier it was spawned in: its snapshot first, then its recorded spawn tier, then its agent's.
+      const stored = sessionID === undefined ? undefined : await snapshotOf(sessionID)
+      const role = stored?.tier ?? overflow.spawnRole ?? overflow.role
+      const limits = contextLimits()
+      // A model the user chose (a spawn `model`, an agent pin) wins over tiers: it is never switched.
+      if (await isChosen(stored, overflow)) return { role, tier: undefined, limits, limit: limits.get(healthKey(failed)), target: undefined, chosen: true }
+      const tier = contextTier(role, failed)
+      // The plugin picks these, so no pin exempts them: the guard judges each as a plugin choice.
+      const allowed: ModelRef[] = []
+      for (const ref of contextCandidates(tier, view()))
+        if (guard === undefined || allowsChosenModel(guard, options, ref)) allowed.push(ref)
+      return { role, tier, limits, limit: limits.get(healthKey(failed)), target: contextFallback(allowed, failed, limits), chosen: false }
+    }
+
+    /**
+     * A request over the context window, as the host reports it: it compacts once on an overflow, and
+     * fails the step when that is off or not enough. It never offers an overflow to the retry hook
+     * (opencode core `session/runner/step.ts`), so nothing re-runs here.
+     *
+     * Only the failed session's own `session.execution.failed` event reaches this: the event belongs to
+     * the execution that failed, so the model it ran on is known. A child moves to its tier's first
+     * larger-context candidate for its next request and records the model that overflowed; its parent
+     * hears once per execution. A root session is only told.
+     */
+    const onContextOverflow = async (overflow: OverflowFacts & { isChild: boolean }) => {
+      const { sessionID, notifyTo, failed } = overflow
+      const key = sessionID ?? `${notifyTo}\0${overflow.agent ?? ""}`
+      if (!claimContextNotice(noticeState, key, sessionID === undefined ? undefined : executionOf.get(sessionID), Date.now())) return
+      const { role, tier, limits, limit, target, chosen } = await contextTarget(overflow)
+      if (chosen) return notify(notifyTo, pinnedContextNote(failed, limit), "context-length")
+      if (target === undefined) return notify(notifyTo, contextNote(failed, limit, tier), "context-length")
+      let resumable: string | undefined
+      if (overflow.isChild && sessionID !== undefined) {
+        try {
+          await ctx.session.switchModel({ sessionID, model: target })
+          noteFailover(sessionID, target, role, failed)
+          await outcomes.failover(sessionID)
+          resumable = sessionID
+          await recordReceipt({
+            at: Date.now(),
+            agent: overflow.agent ?? "",
+            source: "agent",
+            ...(tier === undefined ? {} : { tier }),
+            model: modelLabel(target),
+            rule: "model-default",
+            fallbacks: [`${modelLabel(failed)}: ${CONTEXT_FALLBACK_REASON}`],
+            warnings: [],
+          })
+        } catch {
+          // The note names the larger candidate instead.
+        }
+      }
+      await notify(notifyTo, contextSwitchNote({ failed, limit, target, targetLimit: limits.get(healthKey(target)), tier, resumable }), "context-length")
+    }
+
+    /**
+     * The parent's `subagent` tool error for an overflow. It names no execution, and its model is whatever the
+     * child runs on now, so it never switches or records anything: it posts the note when the child's failure
+     * event has not, and stays quiet while a notice of that child is live.
+     */
+    const onContextOverflowToolError = async (overflow: OverflowFacts) => {
+      const { sessionID, notifyTo, failed } = overflow
+      if (!claimToolContextNotice(noticeState, sessionID ?? `${notifyTo}\0${overflow.agent ?? ""}`, Date.now())) return
+      const { tier, limits, limit, target, chosen } = await contextTarget(overflow)
+      const text = chosen
+        ? pinnedContextNote(failed, limit)
+        : target === undefined
+          ? contextNote(failed, limit, tier)
+          : contextSwitchNote({ failed, limit, target, targetLimit: limits.get(healthKey(target)), tier })
+      await notify(notifyTo, text, "context-length")
+    }
+
+    /** The tier a context failure of `failed` is judged within: the agent's role, else the first role listing it. */
+    const contextTier = (role: string | undefined, failed: ModelRef): string | undefined =>
+      role !== undefined && Object.hasOwn(options.roles, role) ? role : rolesListing(options, failed)[0]
+
+    /** Healthy, listed candidates of the tier, in order. */
+    const contextCandidates = (tier: string | undefined, healthOf: HealthView): ModelRef[] =>
+      tier === undefined
+        ? []
+        : tierModels(options.roles, tier).filter(
+            (ref) => healthOf(ref) === undefined && candidateStatus(modelText(ref), available, options.roles, {}, Date.now()).status === "available",
+          )
 
     /** The model of the child session a `Subagent failed (sessionID: <id>)` message names. */
     const childModel = async (message: string): Promise<ModelRef | undefined> => {
@@ -563,6 +730,8 @@ export default Plugin.define({
       childID?: string
       /** What this spawn's own receipt said, for its outcome record. */
       routed?: Pick<Receipt, "tier" | "source" | "rule">
+      /** Set when the spawn was eligible for exploration. */
+      explore?: ExploreFacts
     }
     const pending = new Map<string, PendingSpawn>()
     /** The role each child session was spawned with. */
@@ -658,17 +827,33 @@ export default Plugin.define({
      * Every fresh spawn that will create a child, by tool call id, until the child is matched or the call ends.
      * `planned` is what the plugin resolved (none when the host decides); the child's own model is what counts.
      */
-    type ExpectedChild = { parentID: string; agent: string; planned?: ModelRef; tier?: string; configRevision: string; at: number; childID?: string }
+    type ExpectedChild = { parentID: string; agent: string; planned?: ModelRef; tier?: string; configRevision: string; at: number; childID?: string; explore?: ExploreFacts; rule?: "explicit-model" | "agent-pin" }
     const expectedChildren = new Map<string, ExpectedChild>()
-    const expectChild = (callID: string, event: { sessionID: string }, agent: string, planned: ModelRef | undefined, tier: string | undefined) => {
-      expectedChildren.set(callID, { parentID: event.sessionID, agent, ...(planned === undefined ? {} : { planned }), ...(tier === undefined ? {} : { tier }), configRevision: configRevision(options), at: Date.now() })
+    const expectChild = (callID: string, event: { sessionID: string }, agent: string, planned: ModelRef | undefined, tier: string | undefined, explore?: ExploreFacts, rule?: "explicit-model" | "agent-pin") => {
+      expectedChildren.set(callID, {
+        parentID: event.sessionID,
+        agent,
+        ...(planned === undefined ? {} : { planned }),
+        ...(tier === undefined ? {} : { tier }),
+        configRevision: configRevision(options),
+        at: Date.now(),
+        ...(explore === undefined ? {} : { explore }),
+        ...(rule === undefined ? {} : { rule }),
+      })
     }
 
     /** Keep the model a child really got for its lifetime. The first record wins: failover may have updated it since. */
     const recordChildModel = async (childID: string, spawn: ExpectedChild, actual: ModelRef | undefined) => {
       const model = actual ?? spawn.planned
       if (model === undefined || (await snapshotOf(childID)) !== undefined) return
-      await writeSnapshot(childID, { model: modelLabel(model), ...(spawn.tier === undefined ? {} : { tier: spawn.tier }), configRevision: spawn.configRevision, at: Date.now() })
+      await writeSnapshot(childID, {
+        model: modelLabel(model),
+        ...(spawn.tier === undefined ? {} : { tier: spawn.tier }),
+        configRevision: spawn.configRevision,
+        at: Date.now(),
+        ...(spawn.explore === undefined ? {} : { explore: spawn.explore }),
+        ...(spawn.rule === undefined ? {} : { rule: spawn.rule }),
+      })
     }
 
     /** Pair a new child with its own spawn call: the exact model and variant first, then the model, then a spawn the host decides, then the only one left. */
@@ -699,9 +884,10 @@ export default Plugin.define({
       return true
     }
 
-    const failoverSnapshot = (base: ModelSnapshot | undefined, model: ModelRef, role: string | undefined): ModelSnapshot => ({
+    const failoverSnapshot = (base: ModelSnapshot | undefined, model: ModelRef, role: string | undefined, overflowed?: ModelRef): ModelSnapshot => ({
       ...(base ?? { configRevision: configRevision(options) }),
       ...(base?.tier === undefined && role !== undefined ? { tier: role } : {}),
+      ...(overflowed === undefined ? {} : { overflowed: [...new Set([...(base?.overflowed ?? []), modelLabel(overflowed)])] }),
       model: modelLabel(model),
       at: Date.now(),
       failedOver: true,
@@ -712,18 +898,18 @@ export default Plugin.define({
      * The in-memory snapshot changes before this returns, so a resume right after the switch sees it;
      * storage follows in the background.
      */
-    const noteFailover = (childID: string, model: ModelRef, role: string | undefined): void => {
+    const noteFailover = (childID: string, model: ModelRef, role: string | undefined, overflowed?: ModelRef): void => {
       if (snapshotsClosed) return
       const known = childModels.get(childID)
       // Published now, from what is known; a child with nothing in memory gets a minimal snapshot.
-      const mine = failoverSnapshot(known, model, role)
+      const mine = failoverSnapshot(known, model, role, overflowed)
       childModels.set(childID, mine)
       const background = (async () => {
         if (known === undefined) {
           // A cold child's stored snapshot may carry a tier and revision. Memory keeps its model.
           const stored = readSnapshot(await ctx.storage.get(`${SPAWN_MODEL_KEY_PREFIX}${childID}`).catch(() => undefined))
           if (snapshotsClosed || childModels.get(childID) !== mine) return
-          if (stored !== undefined) childModels.set(childID, failoverSnapshot(stored, model, role))
+          if (stored !== undefined) childModels.set(childID, failoverSnapshot(stored, model, role, overflowed))
           else if (role === undefined) {
             // Not a child this plugin knows (a root session switched): nothing to keep or store.
             childModels.delete(childID)
@@ -754,6 +940,7 @@ export default Plugin.define({
         tier: spawn.routed?.tier ?? spawn.role,
         ...(spawn.routed === undefined ? {} : { source: spawn.routed.source, rule: spawn.routed.rule }),
       })
+      if (spawn.explore !== undefined) await outcomes.exploration(childID, spawn.explore)
     }
 
     /** Match a new child session to the role spawn that created it: same parent, agent and model. */
@@ -790,6 +977,10 @@ export default Plugin.define({
       const isChild = typeof session.parentID === "string" && session.parentID !== ""
       const spawnRole = isChild ? await spawnRoleOf(sessionID) : undefined
       const role = spawnRole ?? (agent === undefined ? undefined : roleOf(agent, options.agents, options.implicit))
+      if (kind === "context-length") {
+        const notifyTo = isChild ? (session.parentID as string) : sessionID
+        return onContextOverflow({ sessionID, notifyTo, failed, role, spawnRole, agent: session.agent, isChild })
+      }
       // A model that stays in use keeps its tier where it was: nothing moves.
       const target = cooldownMs > 0 ? fallbackTarget(options, available, view(), role, failed) : undefined
       const facts: NoteFacts = { failed, kind, cooldownMs, target }
@@ -886,7 +1077,8 @@ export default Plugin.define({
       if (event.attempt <= 2) triedModels.delete(event.sessionID)
       const error = event.error as FailureInput
       const kind = classifyFailure(error)
-      if (kind === undefined) return
+      // The host sends no overflow here; if one comes anyway, it is the request's, not the model's.
+      if (kind === undefined || kind === "context-length") return
       const { providerID, id, variant } = event.model as { providerID: string; id: string; variant?: string }
       const failed: ModelRef = variant ? { providerID, id, variant } : { providerID, id }
       if (staysOnModel(kind, event.attempt, runtime.hostRetries)) return keepOnModel(event, kind, failed)
@@ -954,7 +1146,7 @@ export default Plugin.define({
             report.warnings.push(
               `Agents ${stuck.join(", ")} still run another model than their tier resolves to: re-registering gave up after ${MAX_REREGISTER} tries (a later plugin or config keeps setting their model).`,
             )
-          const content = [formatCheck(report), ...formatReceipts(receipts), ...formatHistory(autoHistory), ...formatUsage(summarizeUsage(await outcomes.records(), Date.now()))].join("\n")
+          const content = [formatCheck(report), ...(exploring(explorer.options) ? [`exploration: on for ${explorer.options.agents.join(", ")}, ε=${explorer.options.explore}`] : []), ...formatHealthHistory(healthHistory, Date.now()), ...formatReceipts(receipts), ...formatHistory(autoHistory), ...formatUsage(summarizeUsage(await outcomes.records(), Date.now()))].join("\n")
           return { content, metadata: { roles: report.roles.length, agents: report.agents.length, auto: autoHistory.length, spawns: receipts.length } }
         },
       })
@@ -1220,6 +1412,38 @@ export default Plugin.define({
     type Routed = { input: Record<string, unknown>; role: string; model: ModelRef }
 
     /**
+     * Opt-in exploration (explore.ts), called only when `evaluate` turned it on. For an eligible fresh
+     * spawn it draws an arm among the tier's own alternatives and returns the facts to log; `tuned` is
+     * set when the arm differs from the control. The offered set is final before the draw: an arm must be
+     * available, out of cooldown (the control's own health view) and allowed by the guard as a model the
+     * plugin picks, with no pin exemption. So `p` is always the probability under the arms offered.
+     */
+    const exploreSpawn = (
+      target: string,
+      role: string,
+      control: Tuned,
+      pinned: boolean,
+    ): { facts: ExploreFacts; tuned?: Tuned } | undefined => {
+      const meta = tierMeta(options, role)
+      const spawn = { agent: target, explicitModel: false, pinned, resume: false, effortAuto: meta?.effort === "auto", distinctVendorTier: meta?.distinctVendor === true, armCount: 2 }
+      if (!eligible(spawn, explorer.options)) return undefined
+      const candidates = candidateOrder(options, role).flatMap((entry) => {
+        const candidate = parseCandidate(entry)
+        return candidate?.kind === "model" ? [candidate.ref] : []
+      })
+      const health = view()
+      const variantsOf = (model: ModelRef) => (available.find((m) => m.providerID === model.providerID && m.id === model.id)?.variants ?? []).map((v) => v.id)
+      const allowed = (model: ModelRef) =>
+        unavailableReason(model, available) === undefined && health(model) === undefined && (guard === undefined || allowsChosenModel(guard, options, model))
+      const all = arms(candidates, control.model, { variantsOf, allowed }, explorer.options.maxArms)
+      if (!eligible({ ...spawn, armCount: all.length }, explorer.options)) return undefined
+      const chosen = chooseArm(all, explorer.options.explore, exploreRandom)
+      const facts = exploreFacts(all, chosen)
+      if (chosen.arm === all[0]) return { facts }
+      return { facts, tuned: { input: { ...control.input, model: chosen.arm.label }, model: chosen.arm.model } }
+    }
+
+    /**
      * Pick a role for a spawn that names none. `cheapOnly` (the guard's auto mode)
      * offers only roles whose model is not expensive. Returns `undefined` when the
      * spawn is not eligible or no allowed role resolves; the spawn then goes on as is.
@@ -1354,7 +1578,8 @@ export default Plugin.define({
         const refusal = await judge(event, agent, explicitModel)
         if (refusal !== undefined) throw new Error(refusal)
         event.input = stripped
-        await writeSnapshot(childID, { model: modelLabel(explicitModel), configRevision: revision, at: Date.now() })
+        await writeSnapshot(childID, { model: modelLabel(explicitModel), rule: "explicit-model", configRevision: revision, at: Date.now() })
+        await outcomes.leftArm(childID)
         await forgetChildRole(childID)
         await recordReceipt({ at: Date.now(), agent, source: "agent", model: modelLabel(explicitModel), rule: "explicit-model", fallbacks: [], warnings: [] })
         return true
@@ -1368,6 +1593,7 @@ export default Plugin.define({
           const tuned = await withAutoEffort(plan.input, plan.role, plan.model).catch(() => ({ input: plan.input as Record<string, unknown>, model: plan.model as ModelRef }) as Tuned)
           event.input = { ...tuned.input, sessionID: childID }
           await writeSnapshot(childID, { model: modelLabel(tuned.model), tier: plan.role, configRevision: revision, at: Date.now() })
+          await outcomes.leftArm(childID)
           await recordChildRole(childID, plan.role)
           await recordReceipt(tierReceipt(agent, asked, tuned))
           return true
@@ -1420,30 +1646,40 @@ export default Plugin.define({
       // child spawned may be guarded now, and the host would keep the child on it: switch it to the tier's.
       const refused = await judge(event, agent, model)
       const tier = snapshot.tier ?? (await spawnRoleOf(childID))
+      const usable = refused === undefined ? [] : tierModels(options.roles, tier).filter((m) => unavailableReason(m, available) === undefined)
+      const limits = contextLimits()
+      // A model the child's prompt already overflowed is never a way back; it is named if it was the only one left.
+      const judged = await Promise.all(
+        usable
+          .sort((x, y) => Number(view()(x) !== undefined) - Number(view()(y) !== undefined))
+          .map(async (m) => ({ model: m, allowed: (await judge(event, agent, m)) === undefined, spent: hasOverflowed(snapshot, m) })),
+      )
       const decision = resumeGuard({
         current: model,
         refused,
         tier,
-        candidates:
-          refused === undefined
-            ? []
-            : await Promise.all(
-                tierModels(options.roles, tier)
-                  .filter((m) => unavailableReason(m, available) === undefined)
-                  .sort((x, y) => Number(view()(x) !== undefined) - Number(view()(y) !== undefined))
-                  .map(async (m) => ({ model: m, allowed: (await judge(event, agent, m)) === undefined })),
-              ),
+        candidates: judged.filter((c) => !c.spent),
+        overflowed: judged.filter((c) => c.spent && c.allowed).map((c) => ({ model: c.model, limit: limits.get(healthKey(c.model)) })),
       })
       if (decision.action === "refuse") throw new Error(decision.reason)
       if (decision.action === "switch") {
         const to = decision.model
         const outcome = await switchWithin(childID, to, tier, () => {
           if (snapshotsClosed) return
-          childModels.set(childID, { model: modelLabel(to), ...(tier === undefined ? {} : { tier }), configRevision: configRevision(options), at: Date.now(), rule: "guard-reroute" })
+          // An automatic reroute keeps the overflow history: only a deliberate reroute (a model or a tier) resets it.
+          childModels.set(childID, {
+            model: modelLabel(to),
+            ...(tier === undefined ? {} : { tier }),
+            configRevision: configRevision(options),
+            at: Date.now(),
+            rule: "guard-reroute",
+            ...(snapshot.overflowed === undefined ? {} : { overflowed: snapshot.overflowed }),
+          })
           void persistSnapshot(childID)
         })
         if (outcome !== "switched") throw new Error(`This resume would run on ${modelLabel(model)}, which the guard refuses, and switching the child to ${modelLabel(to)} did not complete (${outcome}).`)
         if (isRecord(event.input)) event.input = { ...event.input, model: modelLabel(to) }
+        await outcomes.leftArm(childID)
         await recordReceipt({
           at: Date.now(),
           agent,
@@ -1516,7 +1752,7 @@ export default Plugin.define({
         if (reason !== undefined) throw new Error(reason)
         const receipt = bypass("explicit-model", explicitModel, "the spawn's own model wins over tier")
         if (receipt !== undefined) await recordReceipt(receipt)
-        expectChild(event.id, event, target, explicitModel, undefined)
+        expectChild(event.id, event, target, explicitModel, undefined, undefined, "explicit-model")
         return
       }
       let source: SpawnSource | undefined = asked?.source
@@ -1541,10 +1777,30 @@ export default Plugin.define({
           tuned = await withAutoEffort(plan.input, plan.role, plan.model).catch(() => ({ input: tuned.input, model: plan.model as ModelRef }))
           event.input = tuned.input
         }
-        pending.set(event.id, { parentID: event.sessionID, agent: target, role: plan.role, model: tuned.model, revision: configRevision(options), at: Date.now() })
-        expectChild(event.id, event, target, tuned.model, plan.role)
+        const control = tuned
+        // Plug point of opt-in exploration: the tier is resolved and `model#variant` is final; off, this is skipped.
+        let exploration: { facts: ExploreFacts; tuned?: Tuned } | undefined
+        if (exploring(explorer.options) && isRecord(plan.input)) {
+          exploration = exploreSpawn(target, plan.role, control, pinned)
+          if (exploration?.tuned !== undefined) {
+            tuned = exploration.tuned
+            event.input = tuned.input
+          }
+        }
+        pending.set(event.id, {
+          parentID: event.sessionID,
+          agent: target,
+          role: plan.role,
+          model: tuned.model,
+          revision: configRevision(options),
+          at: Date.now(),
+          ...(exploration === undefined ? {} : { explore: exploration.facts }),
+        })
+        expectChild(event.id, event, target, tuned.model, plan.role, exploration?.facts)
         const vendorOfCaller = tierMeta(options, plan.role)?.distinctVendor ? await callerVendor(event) : undefined
-        await recordSpawnReceipt(event.id, tierReceipt(target, { source: source ?? "agent", name: tierName ?? plan.role }, tuned, vendorOfCaller))
+        const receipt = tierReceipt(target, { source: source ?? "agent", name: tierName ?? plan.role }, control, vendorOfCaller)
+        if (exploration?.tuned !== undefined) Object.assign(receipt, { model: modelLabel(tuned.model), explore: exploration.facts.arm })
+        await recordSpawnReceipt(event.id, receipt)
         return
       }
       const unroled = plan.role === undefined
@@ -1564,7 +1820,23 @@ export default Plugin.define({
       if (reason === undefined) {
         // The spawn goes ahead on the agent's own model: its pin, or the model this plugin set for its tier, else the host decides.
         const ownModel = pin ?? (own === undefined ? undefined : resolveTier(options, available, own, view()).model)
-        expectChild(event.id, event, target, ownModel, pin === undefined ? own : undefined)
+        // Opt-in exploration reaches an agent on its own tier through the same pending entry as an explicit tier.
+        let exploration: { facts: ExploreFacts; tuned?: Tuned } | undefined
+        if (pin === undefined && own !== undefined && ownModel !== undefined && exploring(explorer.options) && isRecord(plan.input)) {
+          exploration = exploreSpawn(target, own, { input: plan.input, model: ownModel }, false)
+          if (exploration?.tuned !== undefined) event.input = exploration.tuned.input
+          if (exploration !== undefined)
+            pending.set(event.id, {
+              parentID: event.sessionID,
+              agent: target,
+              role: own,
+              model: exploration.tuned?.model ?? ownModel,
+              revision: configRevision(options),
+              at: Date.now(),
+              explore: exploration.facts,
+            })
+        }
+        expectChild(event.id, event, target, exploration?.tuned?.model ?? ownModel, pin === undefined ? own : undefined, exploration?.facts, pin === undefined ? undefined : "agent-pin")
         if (pin !== undefined) {
           const receipt = bypass("agent-pin", pin, "the agent's own model (config or frontmatter) wins over tier")
           if (receipt !== undefined) await recordReceipt(receipt)
@@ -1574,7 +1846,8 @@ export default Plugin.define({
             const receipt = tierReceipt(target, { source: "agent", name: own }, { input: {}, model })
             if (agent.model !== undefined && !sameModel(agent.model, model))
               receipt.warnings = [...receipt.warnings, `the agent still runs ${modelLabel(agent.model)}: its model has not caught up with the tier`]
-            await recordReceipt(receipt)
+            if (exploration?.tuned !== undefined) Object.assign(receipt, { model: modelLabel(exploration.tuned.model), explore: exploration.facts.arm })
+            await recordSpawnReceipt(event.id, receipt)
           }
         }
         return
@@ -1842,6 +2115,9 @@ export default Plugin.define({
           if (failed === undefined) return
           const cooldownMs = await markFailed(failed, kind, { message })
           const role = spawn?.role ?? (agent === undefined ? undefined : roleOf(agent, options.agents, options.implicit))
+          if (kind === "context-length") {
+            return onContextOverflowToolError({ sessionID: childSessionID(message), notifyTo: event.sessionID, failed, role, spawnRole: spawn?.role, agent: agentID })
+          }
           const target = cooldownMs > 0 ? fallbackTarget(options, available, view(), role, failed) : undefined
           const facts: NoteFacts = { failed, kind, cooldownMs, target }
           const resumable = cooldownMs > 0 ? undefined : childSessionID(message)
@@ -1881,6 +2157,7 @@ export default Plugin.define({
           if (typeof sessionID !== "string") continue
           const model = settleRequest(requestLog, sessionID, endedAt(event))
           await outcomes.signals(sessionID, NO_SIGNALS)
+          if (model !== undefined) healthHistory = recordRecovery(healthHistory, model.providerID, finishedAt(event))
           await outcomes.end(sessionID, "succeeded", finishedAt(event))
           pruneChildModels()
           if (noticeState.outages.size > 0) await queue(() => onSessionSucceeded(sessionID, model)).catch(() => {})
@@ -1916,8 +2193,15 @@ export default Plugin.define({
           const sessionID = (event as { data?: { sessionID?: unknown } }).data?.sessionID
           if (typeof sessionID === "string") {
             requestLog.delete(sessionID)
+            executionOf.delete(sessionID)
             forgetSession(noticeState, sessionID)
           }
+          continue
+        }
+        if (type === STARTED_EVENT) {
+          const sessionID = (event as { data?: { sessionID?: unknown } }).data?.sessionID
+          const id = (event as { id?: unknown }).id
+          if (typeof sessionID === "string" && typeof id === "string") noteExecution(sessionID, id)
           continue
         }
         if (type === CREATED_EVENT) {

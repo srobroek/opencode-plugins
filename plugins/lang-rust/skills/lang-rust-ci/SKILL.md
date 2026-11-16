@@ -28,7 +28,7 @@ This skill is what is specific to Rust.
 - Never `cargo install` in a workflow `run:` step: it compiles the tool from source on
   every run, before your build starts, outside rust-cache. Install prebuilt binaries:
   `taiki-e/install-action` covers the common tools (`cargo-nextest`, `cargo-llvm-cov`,
-  `cargo-deny`, `cargo-machete`, `cargo-audit`); `cargo binstall` covers the rest.
+  `cargo-deny`, `cargo-shear`, `cargo-machete`, `cargo-audit`, `cargo-mutants`); `cargo binstall` covers the rest.
   Locally, try `cargo binstall <tool>` first and fall back to `cargo install --locked <tool>`
   only when the crate publishes no prebuilt artifact.
 - Pin installer actions to full SHAs and tool versions explicitly. Review their
@@ -46,3 +46,13 @@ This skill is what is specific to Rust.
 - With nextest, run `cargo test --doc` as its own step; nextest skips doc tests.
 - sqlx offline builds: `cargo sqlx prepare --check` (see `lang-rust-persistence`).
 - `fail-fast: false` on the OS matrix: a Windows-only failure stays visible.
+- Mutation on pull requests: check out with `fetch-depth: 0`, then
+  `git diff origin/$BASE.. > git.diff` and
+  `cargo mutants --in-place --no-shuffle -vV --in-diff git.diff` under the default
+  `cargo test` (doctests included). Scheduled full runs shard with `--shard k/n` in a
+  matrix using identical arguments. Upload `mutants.out` with `if: always()`.
+- Miri or `cargo +nightly careful test` run on a schedule for crates with unsafe code.
+- `cargo semver-checks` (`obi1kenobi/cargo-semver-checks-action@v2`) for published libraries.
+- Docs: `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features`.
+- Install policy: a tool the project lacks is detected, recommended and installed only
+  after the user agrees; tool choices are in `lang-rust-libraries`.

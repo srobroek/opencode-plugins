@@ -127,7 +127,10 @@ export default Plugin.define({
               metadata: { exit: 2 },
             }
           }
-          context.signal.throwIfAborted()
+          // `signal` is undefined on hosts older than OpenCode 2.3.
+          if (context.signal?.aborted === true) {
+            return { content: "dep_apply stopped before it started; no changes made.", metadata: { exit: 1 } }
+          }
           const resource = bumpResource(name, version)
           await ctx.permission.assert({
             sessionID: context.sessionID,

@@ -1,6 +1,6 @@
 import type { LocationRef } from "@opencode/client"
 import { Plugin } from "@opencode/plugin/tui"
-import { readUsage, type UsageReport, usageBrief } from "./report.ts"
+import { readUsage, type UsageReport, usageBrief, usageDetailRows } from "./report.ts"
 import { TiersRpc } from "./rpc.ts"
 import {
   AGENT_DEFAULT,
@@ -318,7 +318,7 @@ export default Plugin.define({
         await dialog.select<string>({
           title: `Usage: ${row.tier}`,
           placeholder: "Per agent. Esc goes back",
-          options: row.agents.map((a) => ({ title: a.agent, value: a.agent, description: usageBrief(a), disabled: true })),
+          options: usageDetailRows(row),
         })
       }
     }

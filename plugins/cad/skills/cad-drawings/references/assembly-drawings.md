@@ -9,9 +9,10 @@ numbers are the same on every sheet. Every sheet has:
 - a parts list generated from `bom.csv`;
 - numbered assembly notes.
 
-```text
-cad_run cad-drawings/scripts/assembly_drawing.py HW --version vN --output-dir OUT [--timeout SECONDS]
-cad_run cad-drawings/scripts/assembly_check.py OUT
+```sh
+uv run --script "$CAD_SKILLS/cad-flow/scripts/run.py" cad-drawings/scripts/assembly_drawing.py HW \
+  --version vN --output-dir OUT [--timeout SECONDS]
+uv run --script "$CAD_SKILLS/cad-flow/scripts/run.py" cad-drawings/scripts/assembly_check.py OUT
 ```
 
 Exit 0 means that the run published the package. Exit 1 means content findings; the run publishes

@@ -13,7 +13,9 @@ import {
   output,
   PHASE_TIMEOUT_MS,
   parseSpecifyMajorMinor,
+  run,
   runSetup,
+  STOPPED,
   setPluginRootForTests,
   setSpawnForTests,
   specifyVersionOk,
@@ -350,5 +352,36 @@ describe("runSetup specify phases", () => {
     expect(calls.filter(({ argv }) => argv[0] === "specify" && argv[1] !== "--version").length).toBeGreaterThan(10)
     for (const { argv, timeout } of calls)
       if (argv[1] !== "--version") expect(timeout).toBeGreaterThan(PHASE_TIMEOUT_MS - 1_000)
+  })
+})
+
+describe("a stop through the tool call's signal", () => {
+  test("kills the running command and reports it stopped", async () => {
+    setSpawnForTests(null)
+    const controller = new AbortController()
+    setTimeout(() => controller.abort(), 50)
+    const started = Date.now()
+    const result = await run(["sleep", "30"], undefined, Date.now() + 60_000, controller.signal)
+    expect(result.exitCode).toBe(130)
+    expect(result.stderr).toContain(STOPPED)
+    expect(Date.now() - started).toBeLessThan(10_000)
+  })
+
+  test("an aborted signal starts nothing and the setup fails as stopped", async () => {
+    const spawned: string[][] = []
+    setSpawnForTests((argv) => {
+      spawned.push(argv)
+      return { exitCode: 0, stdout: "", stderr: "" }
+    })
+    const controller = new AbortController()
+    controller.abort()
+    try {
+      const out = await runSetup({ workspace: SAFE_TMPDIR, skipBeads: true }, "/unused", controller.signal)
+      expect(out.ok).toBe(false)
+      expect(out.text).toContain(STOPPED)
+      expect(spawned).toEqual([])
+    } finally {
+      setSpawnForTests(null)
+    }
   })
 })

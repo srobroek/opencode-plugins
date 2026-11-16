@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
@@ -250,3 +250,52 @@ describe("wantsSpecAgent", () => {
     expect(wantsSpecAgent(false, ["/root"], has)).toBe(false)
   })
 })
+
+describe("a stop through the tool call's signal", () => {
+  /** A `specify` that records its pid and then waits; only a kill ends it. */
+  const blockingSpecify = async (run: (dir: string, pidFile: string) => Promise<void>) => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "speckit-stop-")))
+    const bin = join(dir, "bin")
+    mkdirSync(bin)
+    const pidFile = join(dir, "specify.pid")
+    writeFileSync(join(bin, "specify"), `#!/bin/sh\necho $$ > '${pidFile}'\nexec sleep 30\n`)
+    chmodSync(join(bin, "specify"), 0o755)
+    const path = process.env.PATH
+    process.env.PATH = `${bin}:${path}`
+    try {
+      await run(dir, pidFile)
+    } finally {
+      process.env.PATH = path
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  test("aborting speckit_setup kills the command it started and reports it stopped", () =>
+    blockingSpecify(async (dir, pidFile) => {
+      const { fake, cleanup } = await start({ directory: dir })
+      const execute = fake.tools.get("speckit_setup")?.execute as (
+        input: unknown,
+        ctx: unknown,
+      ) => Promise<{ content: string }>
+      const controller = new AbortController()
+      const context = { sessionID: "ses_main", agent: "build", messageID: "msg_1", id: "call_1", signal: controller.signal }
+      const running = execute({ skipBeads: true }, context)
+      while (!existsSync(pidFile) || readFileSync(pidFile, "utf8").trim() === "") await Bun.sleep(10)
+      const pid = Number(readFileSync(pidFile, "utf8").trim())
+      controller.abort()
+      const result = await running
+      expect(result.content).toContain("stopped by the tool call")
+      for (let i = 0; i < 100 && alive(pid); i++) await Bun.sleep(20)
+      expect(alive(pid)).toBe(false)
+      await cleanup()
+    }), 15_000)
+})
+
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}

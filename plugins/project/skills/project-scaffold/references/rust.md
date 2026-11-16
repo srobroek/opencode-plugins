@@ -23,10 +23,18 @@ Pin the channel in `rust-toolchain.toml` (`components = ["rustfmt", "clippy"]`).
 | Format / lint | `rustfmt`; `clippy` with `-D warnings` |
 | Tests | `cargo nextest run` plus `cargo test --doc` for library crates |
 | Coverage | `cargo llvm-cov nextest --lcov` |
+| Property | `proptest` |
+| Mutation | `cargo-mutants` under its default `cargo test` |
+| Fuzz | `cargo-fuzz` |
+| Flaky / order | nextest retries and `--stress-count`; nightly `--shuffle` |
+| API break (libraries only) | `cargo-semver-checks` |
+| Docs | rustdoc with `RUSTDOCFLAGS="-D warnings"` |
 | Dependency gate | `cargo deny check` (advisories, bans, licenses, sources); `deny.toml` allowlist of MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, Unicode-3.0, Zlib (SPDX ids) |
 | Unused deps | `cargo machete` (part of the gate); pilot `cargo-shear` for misplaced dependencies instead of stacking gates. `cargo-udeps` is a nightly diagnostic fallback |
 | Add deps | `cargo add`, never hand-edit tables |
 | Database | `sqlx` (`lang-rust-persistence`); desktop `Tauri` v2 (`lang-rust-tauri`) |
+
+Tool versions and install commands: the concerns tables in `lang-rust-libraries` (`references/testing.md`, `references/quality.md`); minimums only. Detect, recommend, ask before installing (`toolchain-languages`, `references/concerns.md`).
 
 Async runtime, HTTP, logging and serialization crates: use `serde` for serialization;
 ask the user for the rest (the sources are silent on them). Structured logging and
@@ -47,7 +55,7 @@ Check the supported feature/target matrix before deleting dependencies or treati
 does not measure true cognitive complexity; do not enable it as a universal gate.
 Use Lizard `-Ecognitive` (threshold 15) or SonarQube for cognitive complexity instead.
 
-Pin `cargo-nextest`, `cargo-deny`, `cargo-machete` and `cargo-llvm-cov` in mise (or install
+Manage `cargo-nextest`, `cargo-deny`, `cargo-machete` and `cargo-llvm-cov` in mise (or install
 them in CI with `taiki-e/install-action`). Add `clippy.toml` with `allow-unwrap-in-tests = true`
 and `allow-expect-in-tests = true` if the user wants unwrap allowed in tests only.
 If the project is unlicensed, set `[licenses.private] ignore = true` in `deny.toml`.

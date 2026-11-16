@@ -7,7 +7,7 @@ metadata:
 
 # Python Quality
 
-Sources: [uv CLI reference](https://docs.astral.sh/uv/reference/cli/) (uv 0.13), [uv workspaces](https://docs.astral.sh/uv/concepts/projects/workspaces/), [ruff](https://docs.astral.sh/ruff/), [mypy configuration](https://mypy.readthedocs.io/en/stable/config_file.html), [pyright configuration](https://microsoft.github.io/pyright/#/configuration), [pytest exit codes](https://docs.pytest.org/en/stable/reference/exit-codes.html).
+Sources: [uv CLI reference](https://docs.astral.sh/uv/reference/cli/), [uv workspaces](https://docs.astral.sh/uv/concepts/projects/workspaces/), [ruff](https://docs.astral.sh/ruff/), [mypy configuration](https://mypy.readthedocs.io/en/stable/config_file.html), [pyright configuration](https://microsoft.github.io/pyright/#/configuration), [pytest exit codes](https://docs.pytest.org/en/stable/reference/exit-codes.html).
 
 Run the checks through the shell tool from the project root (the directory with
 `pyproject.toml`), in this order. Stop at the first failing step, fix it, rerun that
@@ -22,6 +22,9 @@ project has `uv.lock`, `poetry run` with `poetry.lock`.
 | Type check | `uv run --locked mypy` or `uv run --locked pyright`, whichever the project configures |
 | Test | `uv run --locked pytest -x` |
 | Dependencies | `uv run --locked deptry .` when configured; `uv run --locked lint-imports` when contracts exist |
+| Audit | `uv run --locked pip-audit` when installed |
+| API breaks | `uv run --locked griffe check PACKAGE -a REF` for a published library |
+| Docs | `uv run --locked sphinx-build -W docs docs/_build` when docs exist |
 | Fix | `uv run ruff check --fix PATHS`, then `uv run ruff format PATHS` |
 
 - After an edit that spans modules or changes a signature, run the type check once
@@ -41,6 +44,15 @@ project has `uv.lock`, `poetry run` with `poetry.lock`.
   it, do not call it a pass.
 - Fix mode on `.` rewrites files outside the task. Pass the touched paths, review the
   diff, and revert incidental rewrites.
+
+## Missing tools
+
+The tool tables are in `lang-python-libraries` ([testing.md](../lang-python-libraries/references/testing.md)
+and [quality.md](../lang-python-libraries/references/quality.md)). Detect a tool with the
+row's detect command (`uv pip show <package>`, which reads the project environment only and makes no changes). Without uv, use `python -m pip show <package>` inside the project venv. When it is missing, recommend
+the row's install command (`uv add --dev <package>`) and ask permission before you run it:
+it changes `pyproject.toml` and `uv.lock`. Use the latest release uv offers; the tables
+give a minimum, not a pin. When the user declines, report the step as not run.
 
 ## Workspaces
 
@@ -73,8 +85,9 @@ Keep configured deptry and import contracts in the gate, matching the scaffold.
 Optional dead-code/security policy is in `project-scaffold`'s `references/python.md`
 and `references/ci-hooks.md`: `Vulture` at 100% confidence with reviewed exceptions,
 `Ruff` `C901`/`S`, `complexipy` for cognitive complexity (threshold 15, with its
-snapshot baseline so only new violations fail), and a configured vulnerability audit. `Ruff` `F401`/`F841` do not
-establish whole-project reachability. Keep `mypy`/`Pyright`; `ty` is an opt-in beta pilot.
+snapshot baseline so only new violations fail), and `pip-audit` for the vulnerability
+audit (`uv audit` is report-only while it is a preview). `Ruff` `F401`/`F841` do not
+establish whole-project reachability. Keep `mypy`/`Pyright`; `pyrefly` and `ty` are optional advisory second checkers.
 
 Same steps, same order, one step per row. Install uv with `astral-sh/setup-uv`
 (`enable-cache: true`), then `uv sync --locked --all-packages` (add `--all-groups`

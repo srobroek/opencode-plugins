@@ -1,6 +1,6 @@
 ---
 name: beads-ledger
-description: Ledger rules bd prime omits (acceptance, metadata, routing, deps); load before creating, planning or bulk-editing beads.
+description: Ledger rules bd prime omits (acceptance, metadata, routing, deps, stubs); load before creating, planning or bulk-editing beads.
 metadata:
   opencode/autoinvoke: false
 ---
@@ -54,6 +54,15 @@ dependents, over serial chains. To classify research, use `blocks` only when its
 finding is an input the consumer needs before proceeding; use `discovered-from`
 for a mid-work follow-up and `related` or `tracks` for a non-blocking association.
 
+A dependency on another workstream's implementation is not a blocker when a
+contract covers it. At planning time, block the consumer on the contract bead
+only, link it `related` to the implementation, and file a `stub` swap bead.
+NEVER file a hard edge on the implementation to convert later.
+When a task depends on unfinished work in another workstream, read
+[references/contracts-and-stubs.md](references/contracts-and-stubs.md).
+When a stub, swap bead or contract misbehaves, or a bead is missing from
+`bd ready`, read [references/pitfalls.md](references/pitfalls.md).
+
 # GRAPH PLAN SCHEMA
 `bd create --graph` is the only batched path that carries the fields this
 steering requires. Its verified plan shape:
@@ -99,7 +108,8 @@ required:
 - Every task names bounded files or symbols and independently verifiable
   acceptance criteria.
 - Dependencies encode true ordering only, under DEPENDENCY SEMANTICS, with no
-  missing, over-constraining, or cyclic `blocks` edges.
+  missing, over-constraining, or cyclic `blocks` edges. No consumer blocks on
+  an implementation that a contract bead covers.
 - Every work bead carries an `execution_agent_type` chosen under AGENT ROUTING.
 - Design decisions are separate decision or research beads that block the work they decide.
 - Review beads depend on every task they review.

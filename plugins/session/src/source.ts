@@ -111,13 +111,15 @@ export function ctxSource(session: SessionClient, pageSize = 50): Source {
 }
 
 /** Runs `opencode api get <path>` and returns stdout. */
-export type ApiRunner = (path: string) => Promise<string>
+export type ApiRunner = (path: string, signal?: AbortSignal) => Promise<string>
 
 /** `args` go after `api`, for example `["--server", "http://127.0.0.1:4096"]`. */
 export function spawnApiRunner(command: readonly string[] = ["opencode"], args: readonly string[] = []): ApiRunner {
-  return async (path) => {
+  return async (path, signal) => {
+    signal?.throwIfAborted()
     const child = Bun.spawn([...command, "api", ...args, "get", path], { stdout: "pipe", stderr: "pipe", stdin: "ignore" })
-    const run = await supervise(child)
+    const run = await supervise(child, signal ? { signal } : {})
+    signal?.throwIfAborted()
     if (run.kind !== "exited") throw new Error(`opencode api get ${path} ended without reporting an exit status`)
     const { exitCode: code, stdout, stderr } = run
     if (code !== 0) throw new Error(`opencode api get ${path} exited ${code}: ${stderr.trim().slice(0, 300)}`)
@@ -145,12 +147,12 @@ function unwrap(raw: unknown): unknown {
 export function apiSource(run: ApiRunner, options: { pageSize?: number; maxMessages?: number } = {}): Source {
   const pageSize = options.pageSize ?? 50
   const maxMessages = options.maxMessages ?? 5000
-  const get = async (path: string): Promise<unknown> => JSON.parse(await run(path))
+  const get = async (path: string, signal?: AbortSignal): Promise<unknown> => JSON.parse(await run(path, signal))
   return {
     kind: "api",
     complete: true,
     async *roots(query, signal) {
-      let page = unwrap(await get(`/api/session?${queryString(listQuery(query, pageSize))}`))
+      let page = unwrap(await get(`/api/session?${queryString(listQuery(query, pageSize))}`, signal))
       for (;;) {
         signal?.throwIfAborted()
         const data = isRecord(page) && Array.isArray(page.data) ? page.data : []
@@ -160,7 +162,7 @@ export function apiSource(run: ApiRunner, options: { pageSize?: number; maxMessa
         }
         const cursor = isRecord(page) && isRecord(page.cursor) ? page.cursor.next : undefined
         if (typeof cursor !== "string" || !cursor) return
-        page = unwrap(await get(`/api/session?${queryString({ cursor })}`))
+        page = unwrap(await get(`/api/session?${queryString({ cursor })}`, signal))
       }
     },
     async info(id) {
