@@ -7,7 +7,7 @@ metadata:
 
 # Python libraries
 
-Checked 2026-11-12.
+Checked 2026-11-16.
 
 ## How to use
 
@@ -69,6 +69,7 @@ Checked 2026-11-12.
 | [aws.md](references/aws.md) | Lambda, Powertools, middleware, ADOT and service clients |
 | [ai.md](references/ai.md) | MCP, vendor SDKs, agent frameworks and GenAI telemetry |
 | [cli.md](references/cli.md) | Commands, prompts, TUI, output and configuration |
-| [testing.md](references/testing.md) | Unit, property, integration, contract, load and fuzz tests |
-| [security.md](references/security.md) | Crypto, sanitization, SAST, SCA, secrets, SBOM and code audits |
+| [testing.md](references/testing.md) | Test runner, property, fuzz, mutation, snapshot, coverage, integration, contract and load tests |
+| [quality.md](references/quality.md) | Lint, format, types, SAST, dependency audit, dead code, complexity, API breaks and docs |
+| [security.md](references/security.md) | Crypto, sanitization, secrets, SBOM, licences, images and workflows |
 | [runtime.md](references/runtime.md) | Runtime, packaging, containers, lifecycle, resilience and helpers |
