@@ -58,6 +58,7 @@ export const RESERVED_TOOL_PREFIXES: readonly string[] = [
   "parley_",
   "quality_",
   "repomix_",
+  "safety_",
   "seance_",
   "session_",
   "sniff_",

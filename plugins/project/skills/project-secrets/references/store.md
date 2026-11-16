@@ -19,7 +19,40 @@ The agent asks the user for values only the user has:
 The agent also asks before it overwrites an existing value.
 
 A value never appears literally in a command, in a file written with an editor tool, or in
-tool output. Produce it inside the command with `$(...)` or a pipe.
+tool output.
+
+## With the `safety_secret_store` tool
+
+With the safety plugin, store every agent-written value with `safety_secret_store`. The tool
+generates the value or runs a command without a shell. It writes the value only through a child's
+stdin, so no command line, environment, log, error or tool result holds it. The safety op-guard
+refuses the shell steps under "Without the tool": any `op item create|edit` or `fnox set` that takes
+its value from the shell.
+
+- Value: `generate: { charset: "hex" | "base64url" | "alnum" | "ascii-printable", bytes | length }`
+  (at least 128 bits), or `command: { argv: ["gh", "auth", "token"], cwd? }`. The user approves
+  each command run. Its stdout, one trailing newline trimmed and at most 64 KiB, is the value.
+- 1Password: `target: { kind: "1password", vault, item: "<project> <purpose>", tags: ["project/<project>"] }`.
+  The tool creates the item with a concealed `credential` field. Next it records
+  `fnox set NAME '<item>/credential'` with the config's only 1Password provider. If the config
+  has two or more, name one with `provider`. When `vault` is not that provider's vault, the
+  reference is the full `op://<vault>/<item>/credential`.
+- Value store: `target: { kind: "fnox-store", provider: "host" }` for a provider whose type
+  stores values (age, keychain, the cloud secret managers). It replaces an existing value, so
+  ask first.
+- `config: "fnox.local.toml"` writes the entry there instead of `fnox.toml`. Create the file first.
+  fnox loads only that file and the global config, so declare the provider in one of them. A file
+  outside the project asks for `external_directory`.
+- A command that changes the fnox config while it runs stops the call, and nothing is stored.
+- The result is `{ name, reference | provider, stored: true }`. Then run `fnox check`.
+
+A failure gives the stage and exit code only and is not retried. After a failed or timed-out
+1Password approval, stop and report the secret name.
+
+## Without the tool
+
+Use these steps only when the safety plugin is not installed, for example in Claude Code or
+Codex. Produce the value inside the command with `$(...)` or a pipe.
 
 | Provider | Steps |
 | --- | --- |
@@ -44,6 +77,7 @@ Declare the secret with `env = "exec"`. For a required secret, also add
    For a generated password, add `--generate-password` and leave `credential=` out.
 2. To update an existing item (after the user agrees to the overwrite):
    `op item edit <item> "credential=$(<command>)" >/dev/null`, then `fnox daemon clear NAME`.
+   With the tool, create a new item instead and point the reference at it (`references/rotate.md`).
 3. Never print the result. Send output to `/dev/null`, or to `--format json | jq '{id}'`.
    Never use `--reveal`.
 4. For a value only the user has, create the item without the field and ask the user to fill

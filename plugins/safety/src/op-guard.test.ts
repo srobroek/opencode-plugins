@@ -11,7 +11,7 @@ import {
   FNOX_SET_MESSAGE,
   FNOX_STORE_MESSAGE,
   LITERAL_MESSAGE,
-  MAX_NESTING, NESTING_MESSAGE, OP_MESSAGE } from "./op-guard.ts"
+  MAX_NESTING, NESTING_MESSAGE, OP_MESSAGE, SECRET_STORE_TOOL, VALUE_MESSAGE } from "./op-guard.ts"
 
 /** Provider types as a fnox config would declare them. */
 const TYPES: Record<string, string> = {
@@ -308,8 +308,8 @@ const REFUSED_DUMP = [
   "fnox exec -- fnox exec -- bash <<'EOF'\nprintenv\nEOF",
 ]
 
-const PASSED = [
-  // item writes: values from stdin, a template, a generator, an expansion or a plain typed field
+/** Item writes and `fnox set` that carry a value from a shell: refused for every provider. */
+const REFUSED_VALUE = [
   "op item create --title t - < t.json",
   "op item create --vault v - < t.json",
   "cat t.json | op item create -",
@@ -318,26 +318,14 @@ const PASSED = [
   "op item create --template t.json --vault v",
   "op item create --template=t.json",
   "op item edit x --template t.json",
-  "op item create --title t --generate-password",
-  "op item create --title t --generate-password=letters,digits,32",
-  "op item edit x --generate-password",
   "op item create --title t \"credential=$TOKEN\"",
   "op item create --title t \"password=$(cmd)\"",
   "op item edit x \"f[password]=$(cmd)\"",
-  "op item create --title t 'host[text]=db.example.com'",
-  "op item create --title t 'site[url]=https://x.example'",
-  "op item create --title t 'mail[email]=a@b.c'",
-  "op item create --title t 'd[date]=2026-01-01' 'm[monthYear]=202601' 'p[phone]=555'",
-  "op item create --title t username=alice url=https://x notesPlain=hello",
-  "op item edit x username=alice",
-  "op item create --title 'a=b' --url 'https://x?a=b' --vault v",
-  "op item create --title t > out.json",
   "op item create --title t - < t.json > out.json 2>/dev/null",
   "fnox exec -- op item create --title t - < t.json",
   "cat t.json | fnox exec -- op item create -",
   "fnox exec -- fnox exec -- op item create --title t \"password=$X\"",
   "fnox exec -- bash <<'EOF'\nop item create --title t --generate-password\nEOF",
-  // piped values from expansions only
   "echo \"$TOKEN\" | op item create -",
   "echo \"$(cmd)\" | op item create -",
   "echo -n \"$TOKEN\" | op item create -",
@@ -356,35 +344,72 @@ const PASSED = [
   "jq -n --arg v \"$TOKEN\" --argjson n \"$N\" '{}' | op item create -",
   "jq -n '{title:\"x\"}' | op item create -",
   "cat <<EOF | op item create -\n{\"password\":\"$TOKEN\"}\nEOF",
-  "cat t.json | op item create -",
-  "echo hunter2 | cat > out.txt; op item create --title t",
-  "echo hunter2; op item create -",
-  "echo hunter2 && op item create --title t",
-  "echo hunter2 | tr a b",
   "echo hunter2 | fnox set NAME --provider host --generate",
   "echo hunter2 | fnox set NAME --provider host --from-file k.txt",
   "printf '%s' \"$TOKEN\" | fnox set NAME --provider host",
   "echo \"$TOKEN\" | fnox exec -- op item create -",
-  // fnox set --default
   "fnox set NAME --default \"$X\" --provider host",
-  "fnox set NAME --default hunter2 --provider other",
-  "fnox set NAME --default hunter2",
   "fnox set NAME --provider host --generate --default \"$X\"",
-  // fnox set
-  "fnox set NAME --provider host",
-  "printf '%s' \"$TOKEN\" | fnox set NAME --provider host",
   "cmd | fnox set NAME -p host",
   "fnox set NAME --provider host --generate",
   "fnox set NAME --generate --length 48 --provider age",
   "fnox set NAME \"$TOKEN\" --provider host",
   "fnox set NAME \"$(cmd)\" --provider host",
   "fnox set NAME --from-file key.txt --provider host",
-  "fnox set NAME 'item/field' --provider proj",
-  "fnox set NAME 'item/field' --provider op",
-  "echo x > fnox.toml; fnox set NAME item/field --provider op",
   "cmd | fnox set NAME --provider host; echo ok > out.txt",
   "fnox provider list; cmd | fnox set NAME --provider host",
   "jq -n --arg v \"$(cmd)\" '{}' | op item create --vault V - >/dev/null",
+  "fnox exec -- sh -c 'cmd | fnox set NAME --provider host'",
+  "openssl rand -hex 8 | fnox set NAME -c custom.toml --provider age",
+  "cp template.toml other.toml && openssl rand -hex 8 | fnox set NAME -c custom.toml --provider age",
+  "fnox -c fnox.local.toml set NAME --generate --provider keychain",
+  "cmd | fnox -c fnox.local.toml set NAME --provider host",
+  "fnox set NAME --generate --provider host",
+  // stdin inherited by a script, and expansions anywhere in an item write
+  "cmd | sh -c 'op item create --vault V -'",
+  "bash <<'EOF'\nop item create --title t --generate-password\nEOF",
+  "op item create --vault \"$V\" --title t",
+  "op item create --title t \"host[text]=$HOST\"",
+  "op item create --template <(cmd) --vault V",
+  "op item edit x \"username=$U\"",
+  "cmd | sh -c 'fnox set NAME --provider host'",
+  "op item create --title x\\ 2<template.json -",
+  "op item create --title x\\;2<template.json -",
+]
+
+/** Value sources into a provider that is not a value store, which the guard used to miss. */
+const REFUSED_STORE_INHERITED = [
+  "cmd | sh -c 'fnox set NAME --provider op'",
+  "fnox set NAME - --provider op",
+  "fnox exec -- fnox set NAME --provider op2<secret.txt",
+]
+
+const PASSED = [
+  // item writes: values from stdin, a template, a generator, an expansion or a plain typed field
+  "op item create --title t --generate-password",
+  "op item create --title t --generate-password=letters,digits,32",
+  "op item edit x --generate-password",
+  "op item create --title t 'host[text]=db.example.com'",
+  "op item create --title t 'site[url]=https://x.example'",
+  "op item create --title t 'mail[email]=a@b.c'",
+  "op item create --title t 'd[date]=2026-01-01' 'm[monthYear]=202601' 'p[phone]=555'",
+  "op item create --title t username=alice url=https://x notesPlain=hello",
+  "op item edit x username=alice",
+  "op item create --title 'a=b' --url 'https://x?a=b' --vault v",
+  "op item create --title t > out.json",
+  // piped values from expansions only
+  "echo hunter2 | cat > out.txt; op item create --title t",
+  "echo hunter2; op item create -",
+  "echo hunter2 && op item create --title t",
+  "echo hunter2 | tr a b",
+  // fnox set --default
+  "fnox set NAME --default hunter2 --provider other",
+  "fnox set NAME --default hunter2",
+  // fnox set
+  "fnox set NAME --provider host",
+  "fnox set NAME 'item/field' --provider proj",
+  "fnox set NAME 'item/field' --provider op",
+  "echo x > fnox.toml; fnox set NAME item/field --provider op",
   "nix develop -c cargo test",
   "uv run pytest",
   "npx tsc --noEmit",
@@ -395,14 +420,8 @@ const PASSED = [
   "bash -c 'echo hi' > out.txt",
   "fnox exec -- sh -c 'cargo test | tee out.txt'",
   "fnox exec -- sh -c 'find . -name x -exec echo {} \\;'",
-  "fnox exec -- sh -c 'cmd | fnox set NAME --provider host'",
   "fnox exec -- sh -c 'echo ok > out.txt; fnox set NAME item/f --provider op'",
   "fnox -c fnox.local.toml set NAME --provider host",
-  "openssl rand -hex 8 | fnox set NAME -c custom.toml --provider age",
-  "cp template.toml other.toml && openssl rand -hex 8 | fnox set NAME -c custom.toml --provider age",
-  "fnox -c fnox.local.toml set NAME --generate --provider keychain",
-  "cmd | fnox -c fnox.local.toml set NAME --provider host",
-  "fnox set NAME --generate --provider host",
   "fnox set NAME 'op://vault/item/field' --provider op",
   "fnox set NAME --provider op",
   "op vault list",
@@ -449,6 +468,11 @@ const PASSED = [
   "fnox daemon status",
   "fnox daemon start",
   "fnox provider discover op --tags project/x",
+  "op item create --title t --generate-password >/dev/null 2>&1",
+  "op item create --vault V --title t 2>&1",
+  "op item create --vault V --title t 3<fd.txt",
+  "op item create --vault V --title 'x\\' 3<fd.txt",
+  "fnox set NAME 'item/credential' --provider op --description d",
 ]
 
 /** `fnox set` refusals carry the fnox-set text; the rest the literal-secret text. */
@@ -515,6 +539,14 @@ describe("op-guard", () => {
     test(`refuses fnox set ${command}`, () => {
       expect(gate(command)).toEqual({ guard: "op-guard", reason: FNOX_SET_MESSAGE })
     })
+  for (const command of REFUSED_VALUE)
+    test(`refuses a value-carrying write ${command}`, () => {
+      expect(gate(command)).toEqual({ guard: "op-guard", reason: VALUE_MESSAGE })
+    })
+  for (const command of REFUSED_STORE_INHERITED)
+    test(`refuses a value into a provider without storage ${command}`, () => {
+      expect(gate(command)).toEqual({ guard: "op-guard", reason: FNOX_STORE_MESSAGE })
+    })
   for (const command of REFUSED_DUMP)
     test(`refuses dump ${command}`, () => {
       expect(gate(command)).toEqual({ guard: "op-guard", reason: FNOX_DUMP_MESSAGE })
@@ -544,7 +576,7 @@ describe("op-guard", () => {
   })
 
   test("a value set with no directory change in the command uses the resolved type", () => {
-    expect(gate("cmd | fnox set NAME --provider host")).toBeUndefined()
+    expect(gate("cmd | fnox set NAME --provider host")?.reason).toBe(VALUE_MESSAGE)
   })
 
   describe("an explicit fnox config file", () => {
@@ -553,8 +585,8 @@ describe("op-guard", () => {
     })
 
     test("resolves providers from a literal path", () => {
-      expect(gate("cmd | fnox -c other.toml set NAME --provider host", explicit("other.toml"))).toBeUndefined()
-      expect(gate("cmd | fnox set NAME --config=other.toml --provider host", explicit("other.toml"))).toBeUndefined()
+      expect(gate("cmd | fnox -c other.toml set NAME --provider host", explicit("other.toml"))?.reason).toBe(VALUE_MESSAGE)
+      expect(gate("cmd | fnox set NAME --config=other.toml --provider host", explicit("other.toml"))?.reason).toBe(VALUE_MESSAGE)
     })
 
     test("a file the resolver cannot read is not a store", () => {
@@ -576,7 +608,7 @@ describe("op-guard", () => {
     })
 
     test("a bare fnox file name resolves like the searched configs", () => {
-      expect(gate("cmd | fnox -c fnox.local.toml set NAME --provider host")).toBeUndefined()
+      expect(gate("cmd | fnox -c fnox.local.toml set NAME --provider host")?.reason).toBe(VALUE_MESSAGE)
     })
   })
 
@@ -595,8 +627,8 @@ describe("op-guard", () => {
   })
 
   for (const type of ["aws-sm", "aws-ps", "azure-sm", "gcp-sm", "bitwarden-sm", "foks", "vault"])
-    test(`a provider of the cloud store type ${type} takes a piped value`, () => {
-      expect(gate("cmd | fnox set NAME --provider p", { providerTypes: () => type })).toBeUndefined()
+    test(`a provider of the cloud store type ${type} is a value store, and a piped value goes to the tool`, () => {
+      expect(gate("cmd | fnox set NAME --provider p", { providerTypes: () => type })?.reason).toBe(VALUE_MESSAGE)
     })
 
   for (const type of ["doppler", "infisical", "azure-ac", "kubernetes", "keeper-sm", "plain", "lua"])
@@ -604,8 +636,13 @@ describe("op-guard", () => {
       expect(gate("cmd | fnox set NAME --provider p", { providerTypes: () => type })?.reason).toBe(FNOX_STORE_MESSAGE)
     })
 
-  test("a provider of type age takes a piped value whatever its name", () => {
-    expect(gate("cmd | fnox set NAME --provider vault-keys", { providerTypes: () => "age" })).toBeUndefined()
+  test("a provider of type age is a value store whatever its name", () => {
+    expect(gate("cmd | fnox set NAME --provider vault-keys", { providerTypes: () => "age" })?.reason).toBe(VALUE_MESSAGE)
+  })
+
+  test("every value refusal points to the secret-store tool", () => {
+    for (const message of [VALUE_MESSAGE, LITERAL_MESSAGE, FNOX_SET_MESSAGE, FNOX_STORE_MESSAGE, FNOX_INDIRECT_MESSAGE, FNOX_CONFIG_MESSAGE])
+      expect(message).toContain(`\`${SECRET_STORE_TOOL}\``)
   })
 
   test("the refusal points to fnox exec and provider discover", () => {

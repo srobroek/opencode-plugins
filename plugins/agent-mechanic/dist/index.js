@@ -168,6 +168,7 @@ var RESERVED_TOOL_PREFIXES = [
   "parley_",
   "quality_",
   "repomix_",
+  "safety_",
   "seance_",
   "session_",
   "sniff_",
