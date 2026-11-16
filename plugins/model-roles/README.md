@@ -552,8 +552,9 @@ alike:
    cooldown or adds a strike. The host handles an overflow itself, outside the
    `retry` hook. With automatic compaction on, it compacts the session once.
    It fails the step when compaction is off or doesn't shrink the request
-   enough. The plugin acts only on that failure (`session.execution.failed`,
-   or the failed `subagent` call), and re-runs nothing:
+   enough. The plugin switches a model only on that failure's
+   `session.execution.failed` event, which belongs to the execution that
+   failed, and re-runs nothing:
    - A child moves, with `session.switchModel`, to the first healthy
      candidate of its tier with a larger context window. Resuming it
      continues there. Windows come from the catalog's `limit.context`.
@@ -564,8 +565,9 @@ alike:
      `<model>` (`<limit>` tokens); no larger-context candidate in tier
      `<tier>`. Compact the session or use a tier with a larger-context model".
 
-   The parent gets one note for each child that overflows, whether the
-   child's failure event or the tool error arrives first.
+   The parent gets one note for each overflowing execution of a child. The
+   parent's failed `subagent` call never switches a model. It posts the note
+   only when the child's failure event has not.
 2. A transient failure stays on the same model for the first `hostRetries`
    retries. A permanent one switches on the first retry. When the host would
    not retry a transient failure itself (it doesn't retry credentials that

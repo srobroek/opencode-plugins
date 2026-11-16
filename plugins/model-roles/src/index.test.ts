@@ -817,23 +817,25 @@ describe("runtime fallback", () => {
   })
 
   test.each([
-    ["the failure event", "event"],
-    ["the tool error", "tool"],
-  ])("a child's overflow switches it once and notes it once when %s comes first", async (_name, first) => {
+    ["the failure event first", ["event", "tool"], 1],
+    ["the tool error first", ["tool", "event"], 2],
+  ])("a child's overflow is switched by its failure event only, with %s", async (_name, order, noteCount) => {
     const host = childHost(windows(200_000, 1_000_000), fallbackOptions)
     const cleanup = await setup(host)
-    const event = async () => {
-      host.emit(failed("c", tooLong))
-      await settle()
+    const steps = {
+      event: async () => {
+        host.emit(failed("c", tooLong))
+        await settle()
+      },
+      tool: async () => {
+        await host.spawnFailed({ agent: "general", prompt: "x" }, `Subagent failed (sessionID: c): ${tooLong.message}`, "r")
+        await settle()
+      },
     }
-    const tool = async () => {
-      await host.spawnFailed({ agent: "general", prompt: "x" }, `Subagent failed (sessionID: c): ${tooLong.message}`, "r")
-      await settle()
-    }
-    for (const step of first === "event" ? [event, tool] : [tool, event]) await step()
+    for (const step of order as Array<"event" | "tool">) await steps[step]()
     expect(methods(host, "switchModel").map((c) => c.input)).toEqual([{ sessionID: "c", model: haiku }])
-    expect(notes(host).map((n) => n.sessionID)).toEqual(["r"])
-    expect(notes(host)[0]?.text).toContain("Resume it with sessionID c")
+    expect(notes(host).map((n) => n.sessionID)).toEqual(Array(noteCount).fill("r"))
+    expect(notes(host).at(-1)?.text).toContain("Resume it with sessionID c")
     host.close()
     await cleanup()
   })
@@ -2827,16 +2829,54 @@ describe("a child keeps its resolved model", () => {
     }
 
     test.each([
-      ["failure event", [event, tool]],
-      ["tool error", [tool, event]],
-    ] as const)("a resumed child with no pending spawn routes by its stored tier when the %s comes first", async (_name, order) => {
+      ["failure event", [event, tool], 1],
+      ["tool error", [tool, event], 2],
+    ] as const)("a resumed child with no pending spawn routes by its stored tier when the %s comes first", async (_name, order, noteCount) => {
       const { again, cleanupAgain } = await spawnThenReload(overlapping, limited)
       again.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: sonnet })
       for (const step of order) await step(again)
+      // Only the failure event switches; the tool error before it just names the candidate of the child's tier.
       expect(methods(again, "switchModel").map((c) => c.input)).toEqual([{ sessionID: "c", model: haiku }])
       const notes = methods(again, "synthetic").map((c) => c.input as { sessionID: string; text: string })
-      expect(notes.map((n) => n.sessionID)).toEqual(["r"])
-      expect(notes[0]?.text).toContain("the session now runs anthropic/claude-haiku (1000000 tokens)")
+      expect(notes.map((n) => n.sessionID)).toEqual(Array(noteCount).fill("r"))
+      expect(notes.at(-1)?.text).toContain("the session now runs anthropic/claude-haiku (1000000 tokens)")
+      if (noteCount === 2) expect(notes[0]?.text).toContain("tier task has a larger-context candidate, anthropic/claude-haiku (1000000 tokens)")
+      again.close()
+      await cleanupAgain()
+    })
+
+    test("a delayed tool error of an earlier execution changes nothing; the next execution's overflow is still handled", async () => {
+      const { again, cleanupAgain } = await spawnThenReload(three, limited)
+      again.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: sonnet })
+      await started(again, "e1")
+      await event(again)
+      // e2 runs on haiku; e1's tool error reaches the parent late and names the session's current model.
+      again.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: haiku })
+      await started(again, "e2")
+      await tool(again)
+      expect(methods(again, "switchModel")).toHaveLength(1)
+      expect(methods(again, "synthetic")).toHaveLength(1)
+      expect(again.storage.get("spawn-model:c")).toMatchObject({ model: "anthropic/claude-haiku", overflowed: [sonnetHigh] })
+      await event(again)
+      expect(methods(again, "switchModel").map((c) => c.input)).toEqual([
+        { sessionID: "c", model: haiku },
+        { sessionID: "c", model: flint },
+      ])
+      expect(methods(again, "synthetic")).toHaveLength(2)
+      expect(again.storage.get("spawn-model:c")).toMatchObject({ model: "opencode/flint", overflowed: [sonnetHigh, "anthropic/claude-haiku"] })
+      again.close()
+      await cleanupAgain()
+    })
+
+    test("a tool error with no failure event notes once, switches nothing and records no overflow", async () => {
+      const { again, cleanupAgain } = await spawnThenReload(first, limited)
+      again.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: sonnet })
+      await tool(again)
+      await tool(again)
+      expect(methods(again, "switchModel")).toHaveLength(0)
+      expect(methods(again, "synthetic")).toHaveLength(1)
+      expect(again.storage.get("spawn-model:c")).not.toHaveProperty("overflowed")
+      expect(again.storage.get("spawn-model:c")).not.toHaveProperty("failedOver")
       again.close()
       await cleanupAgain()
     })

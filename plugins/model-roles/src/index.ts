@@ -83,7 +83,7 @@ import {
 } from "./health.ts"
 import { createLedgerStore, LEDGER_DISPOSE_TIMEOUT_MS, type Usage } from "./ledger.ts"
 import { hostWarn } from "./log.ts"
-import { claimContextNotice, decideFailureNotice, decideRecovery, type FailureReport, forgetSession, NOTICE_DEDUPE_MS, newNoticeState, type RequestLog, recordRequest, settleRequest } from "./outage.ts"
+import { claimContextNotice, claimToolContextNotice, decideFailureNotice, decideRecovery, type FailureReport, forgetSession, NOTICE_DEDUPE_MS, newNoticeState, type RequestLog, recordRequest, settleRequest } from "./outage.ts"
 import { explainSpawn, formatReceipts, pushReceipt, RECEIPTS_KEY, type Receipt, readReceipts, type SpawnRule, type SpawnSource } from "./receipt.ts"
 import { formatUsage, summarizeUsage } from "./report.ts"
 import {
@@ -543,14 +543,7 @@ export default Plugin.define({
       return limits
     }
 
-    /**
-     * A request over the context window, as the host reports it: it compacts once on an overflow, and
-     * fails the step when that is off or not enough. It never offers an overflow to the retry hook
-     * (opencode core `session/runner/step.ts`), so nothing re-runs here. A child moves to its tier's
-     * first larger-context candidate for its next request, and its parent hears once, whether the
-     * child's failure event or the `subagent` tool error arrives first.
-     */
-    const onContextOverflow = async (overflow: {
+    type OverflowFacts = {
       /** The session that overflowed, when known. */
       sessionID: string | undefined
       notifyTo: string
@@ -558,21 +551,38 @@ export default Plugin.define({
       role: string | undefined
       spawnRole: string | undefined
       agent: string | undefined
-      isChild: boolean
-    }) => {
+    }
+
+    /** The tier an overflowing child is judged in and the first larger-context candidate the guard allows. */
+    const contextTarget = async (overflow: OverflowFacts) => {
       const { sessionID, notifyTo, failed } = overflow
-      if (!claimContextNotice(noticeState, sessionID ?? `${notifyTo}\0${overflow.agent ?? ""}`, sessionID === undefined ? undefined : executionOf.get(sessionID), Date.now())) return
       // A child keeps the tier it was spawned in: its snapshot first, then its recorded spawn tier, then its agent's.
-      const stored = overflow.isChild && sessionID !== undefined ? await snapshotOf(sessionID) : undefined
+      const stored = sessionID === undefined ? undefined : await snapshotOf(sessionID)
       const role = stored?.tier ?? overflow.spawnRole ?? overflow.role
       const tier = contextTier(role, failed)
       const limits = contextLimits()
-      const limit = limits.get(healthKey(failed))
       // The guard judges a larger-context candidate as it judges any model a spawn names.
       const allowed: ModelRef[] = []
       for (const ref of contextCandidates(tier, view()))
         if ((await judge({ sessionID: notifyTo, agent: overflow.agent ?? "" }, overflow.agent ?? "", ref)) === undefined) allowed.push(ref)
-      const target = contextFallback(allowed, failed, limits)
+      return { role, tier, limits, limit: limits.get(healthKey(failed)), target: contextFallback(allowed, failed, limits) }
+    }
+
+    /**
+     * A request over the context window, as the host reports it: it compacts once on an overflow, and
+     * fails the step when that is off or not enough. It never offers an overflow to the retry hook
+     * (opencode core `session/runner/step.ts`), so nothing re-runs here.
+     *
+     * Only the failed session's own `session.execution.failed` event reaches this: the event belongs to
+     * the execution that failed, so the model it ran on is known. A child moves to its tier's first
+     * larger-context candidate for its next request and records the model that overflowed; its parent
+     * hears once per execution. A root session is only told.
+     */
+    const onContextOverflow = async (overflow: OverflowFacts & { isChild: boolean }) => {
+      const { sessionID, notifyTo, failed } = overflow
+      const key = sessionID ?? `${notifyTo}\0${overflow.agent ?? ""}`
+      if (!claimContextNotice(noticeState, key, sessionID === undefined ? undefined : executionOf.get(sessionID), Date.now())) return
+      const { role, tier, limits, limit, target } = await contextTarget(overflow)
       if (target === undefined) return notify(notifyTo, contextNote(failed, limit, tier), "context-length")
       let resumable: string | undefined
       if (overflow.isChild && sessionID !== undefined) {
@@ -596,6 +606,22 @@ export default Plugin.define({
         }
       }
       await notify(notifyTo, contextSwitchNote({ failed, limit, target, targetLimit: limits.get(healthKey(target)), tier, resumable }), "context-length")
+    }
+
+    /**
+     * The parent's `subagent` tool error for an overflow. It names no execution, and its model is whatever the
+     * child runs on now, so it never switches or records anything: it posts the note when the child's failure
+     * event has not, and stays quiet while a notice of that child is live.
+     */
+    const onContextOverflowToolError = async (overflow: OverflowFacts) => {
+      const { sessionID, notifyTo, failed } = overflow
+      if (!claimToolContextNotice(noticeState, sessionID ?? `${notifyTo}\0${overflow.agent ?? ""}`, Date.now())) return
+      const { tier, limits, limit, target } = await contextTarget(overflow)
+      const text =
+        target === undefined
+          ? contextNote(failed, limit, tier)
+          : contextSwitchNote({ failed, limit, target, targetLimit: limits.get(healthKey(target)), tier })
+      await notify(notifyTo, text, "context-length")
     }
 
     /** The tier a context failure of `failed` is judged within: the agent's role, else the first role listing it. */
@@ -1971,8 +1997,7 @@ export default Plugin.define({
           const cooldownMs = await markFailed(failed, kind, { message })
           const role = spawn?.role ?? (agent === undefined ? undefined : roleOf(agent, options.agents, options.implicit))
           if (kind === "context-length") {
-            const childID = childSessionID(message)
-            return onContextOverflow({ sessionID: childID, notifyTo: event.sessionID, failed, role, spawnRole: spawn?.role, agent: agentID, isChild: true })
+            return onContextOverflowToolError({ sessionID: childSessionID(message), notifyTo: event.sessionID, failed, role, spawnRole: spawn?.role, agent: agentID })
           }
           const target = cooldownMs > 0 ? fallbackTarget(options, available, view(), role, failed) : undefined
           const facts: NoteFacts = { failed, kind, cooldownMs, target }

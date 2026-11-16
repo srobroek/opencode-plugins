@@ -55,6 +55,18 @@ export function claimContextNotice(state: NoticeState, sessionID: string, execut
   return true
 }
 
+/**
+ * Whether the parent's `subagent` tool error may post the context note for `sessionID`, and claim it.
+ * It may only when no notice of that session is live: the child's failure event owns the switch and
+ * its note, and a late tool error of an earlier execution must not repeat or contradict it.
+ */
+export function claimToolContextNotice(state: NoticeState, sessionID: string, now: number): boolean {
+  for (const [id, at] of state.contextNotices) if (now - at >= NOTICE_DEDUPE_MS) state.contextNotices.delete(id)
+  for (const key of state.contextNotices.keys()) if (key.startsWith(`${sessionID}\0`)) return false
+  state.contextNotices.set(`${sessionID}\0tool-error`, now)
+  return true
+}
+
 export type FailureReport = NoteFacts & {
   now: number
   /** The session the note goes to: the failed session, or a subagent's parent. */

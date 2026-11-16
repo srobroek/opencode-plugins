@@ -3786,6 +3786,16 @@ function claimContextNotice(state, sessionID, execution, now) {
   state.contextNotices.set(key, now);
   return true;
 }
+function claimToolContextNotice(state, sessionID, now) {
+  for (const [id, at] of state.contextNotices)
+    if (now - at >= NOTICE_DEDUPE_MS)
+      state.contextNotices.delete(id);
+  for (const key of state.contextNotices.keys())
+    if (key.startsWith(`${sessionID}\x00`))
+      return false;
+  state.contextNotices.set(`${sessionID}\x00tool-error`, now);
+  return true;
+}
 var stoppedKey = (report) => report.subagent?.sessionID ?? `${report.notifyTo}\x00${report.subagent?.agent ?? ""}`;
 var stoppedLine = (stopped, provider, kind, first) => {
   const who = stopped.agent === undefined ? "A subagent" : `Subagent '${stopped.agent}'`;
@@ -5505,20 +5515,24 @@ ${refs.size}`;
       }
       return limits;
     };
-    const onContextOverflow = async (overflow) => {
+    const contextTarget = async (overflow) => {
       const { sessionID, notifyTo, failed } = overflow;
-      if (!claimContextNotice(noticeState, sessionID ?? `${notifyTo}\x00${overflow.agent ?? ""}`, sessionID === undefined ? undefined : executionOf.get(sessionID), Date.now()))
-        return;
-      const stored = overflow.isChild && sessionID !== undefined ? await snapshotOf(sessionID) : undefined;
+      const stored = sessionID === undefined ? undefined : await snapshotOf(sessionID);
       const role = stored?.tier ?? overflow.spawnRole ?? overflow.role;
       const tier = contextTier(role, failed);
       const limits = contextLimits();
-      const limit = limits.get(healthKey(failed));
       const allowed = [];
       for (const ref of contextCandidates(tier, view()))
         if (await judge({ sessionID: notifyTo, agent: overflow.agent ?? "" }, overflow.agent ?? "", ref) === undefined)
           allowed.push(ref);
-      const target = contextFallback(allowed, failed, limits);
+      return { role, tier, limits, limit: limits.get(healthKey(failed)), target: contextFallback(allowed, failed, limits) };
+    };
+    const onContextOverflow = async (overflow) => {
+      const { sessionID, notifyTo, failed } = overflow;
+      const key = sessionID ?? `${notifyTo}\x00${overflow.agent ?? ""}`;
+      if (!claimContextNotice(noticeState, key, sessionID === undefined ? undefined : executionOf.get(sessionID), Date.now()))
+        return;
+      const { role, tier, limits, limit, target } = await contextTarget(overflow);
       if (target === undefined)
         return notify(notifyTo, contextNote(failed, limit, tier), "context-length");
       let resumable;
@@ -5541,6 +5555,14 @@ ${refs.size}`;
         } catch {}
       }
       await notify(notifyTo, contextSwitchNote({ failed, limit, target, targetLimit: limits.get(healthKey(target)), tier, resumable }), "context-length");
+    };
+    const onContextOverflowToolError = async (overflow) => {
+      const { sessionID, notifyTo, failed } = overflow;
+      if (!claimToolContextNotice(noticeState, sessionID ?? `${notifyTo}\x00${overflow.agent ?? ""}`, Date.now()))
+        return;
+      const { tier, limits, limit, target } = await contextTarget(overflow);
+      const text = target === undefined ? contextNote(failed, limit, tier) : contextSwitchNote({ failed, limit, target, targetLimit: limits.get(healthKey(target)), tier });
+      await notify(notifyTo, text, "context-length");
     };
     const contextTier = (role, failed) => role !== undefined && Object.hasOwn(options.roles, role) ? role : rolesListing(options, failed)[0];
     const contextCandidates = (tier, healthOf) => tier === undefined ? [] : tierModels(options.roles, tier).filter((ref) => healthOf(ref) === undefined && candidateStatus(modelText(ref), available, options.roles, {}, Date.now()).status === "available");
@@ -6747,8 +6769,7 @@ ${refs.size}`;
           const cooldownMs = await markFailed(failed, kind, { message });
           const role = spawn?.role ?? (agent === undefined ? undefined : roleOf(agent, options.agents, options.implicit));
           if (kind === "context-length") {
-            const childID = childSessionID(message);
-            return onContextOverflow({ sessionID: childID, notifyTo: event.sessionID, failed, role, spawnRole: spawn?.role, agent: agentID, isChild: true });
+            return onContextOverflowToolError({ sessionID: childSessionID(message), notifyTo: event.sessionID, failed, role, spawnRole: spawn?.role, agent: agentID });
           }
           const target = cooldownMs > 0 ? fallbackTarget(options, available, view(), role, failed) : undefined;
           const facts = { failed, kind, cooldownMs, target };
