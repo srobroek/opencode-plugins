@@ -46,4 +46,4 @@
 
 - **Symptom:** `bd count --label stub --status open,in_progress` prints `0`, but `bd list` with the same filters lists stub beads.
 - **Cause:** In bd 1.3.1, `bd count` returns 0 for a comma-separated status list. `bd count --status open` alone counts correctly.
-- **Fix:** Count with `bd list --label stub --status open,in_progress,blocked,deferred --json | jq length`.
+- **Fix:** Count with `bd list --label stub --status open,in_progress,blocked,deferred --limit 0 --json | jq length`. The `--limit 0` lifts the default cap of 50 results.

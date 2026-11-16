@@ -240,6 +240,7 @@ needs more, C had a gap. Fix C with a fixture that captures the gap.
   on the blocking PR or bead. The watch wakes the agent when the blocker lands.
 - **Track the trend of open stubs, not only the count.** The count can rise while
   swaps land, because new work files new stubs. Record the count from
-  `bd list --label stub --status open,in_progress,blocked,deferred --json | jq length` for each workstream in its readiness note.
+  `bd list --label stub --status open,in_progress,blocked,deferred --limit 0 --json | jq length` for each workstream in its readiness note.
+  Without `--limit 0`, `bd list` returns at most 50 beads.
 
 When a stub, swap or contract misbehaves, read [pitfalls.md](pitfalls.md).
