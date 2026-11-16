@@ -1,4 +1,6 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test"
+import { createFakeContext } from "@srobroek/opencode-lib/testing"
+import { createPendingCleanup } from "./pending-cleanup.ts"
 
 // Fixture setup creates several real Git repositories and measured about 20s under full-suite load;
 // keep three times that headroom instead of letting Bun's 5s default kill a child process mid-fixture.
@@ -2468,4 +2470,72 @@ describe("delivery_cleanup refuses a registered worktree whose directory is not 
     expect(mutationCalls(scripted.calls)).toEqual([])
     expect(existsSync(f.linked)).toBe(true)
   }, 30_000)
+})
+
+describe("pending cleanup retries when a turn ends", () => {
+  const sessionIdle = (sessionID: string) => ({ type: "session.idle", data: { sessionID } })
+
+  test("a receipt landed with beads open is nudged once; after the beads close, the next idle removes the worktree", async () => {
+    const f = fixture("pending-retry")
+    const options: RunnerOptions = { beadStatus: "open" }
+    const scripted = runner(f, options)
+    const fake = createFakeContext({ directory: f.main })
+    let clock = NOW + 10
+    const pending = createPendingCleanup({
+      ctx: fake.context,
+      cwd: f.main,
+      env: f.env,
+      host: () => undefined,
+      canonical: (path) => path,
+      debounceMs: 1,
+      cleanup: { run: stripped(scripted.run), now: () => NOW + 10, bounds: HEAVY_FIXTURE_BOUNDS },
+      now: () => clock,
+    })
+    await pending.record(f.receipt, "ses_lead", [])
+    await pending.start()
+    const synthetic = () => fake.calls.filter((entry) => entry.method === "session.synthetic")
+
+    fake.emit(sessionIdle("ses_lead"))
+    await pending.settle()
+    expect(synthetic()).toHaveLength(1)
+    expect(JSON.stringify(synthetic()[0]?.input)).toContain("Landed PR #17: close beads delivery-17")
+    expect(existsSync(f.linked)).toBe(true)
+
+    fake.emit(sessionIdle("ses_lead"))
+    await pending.settle()
+    expect(synthetic()).toHaveLength(1)
+    expect(existsSync(f.linked)).toBe(true)
+
+    options.beadStatus = "closed"
+    clock += 60_000
+    fake.emit(sessionIdle("ses_lead"))
+    await pending.settle()
+    expect(existsSync(f.linked)).toBe(false)
+    expect(synthetic()).toHaveLength(1)
+    await pending.dispose()
+    rmSync(f.root, { recursive: true, force: true })
+  })
+
+  test("a worktree claimed at land time is left to its claimant", async () => {
+    const f = fixture("pending-claimed")
+    const scripted = runner(f, { beadStatus: "closed" })
+    const fake = createFakeContext({ directory: f.main })
+    const pending = createPendingCleanup({
+      ctx: fake.context,
+      cwd: f.main,
+      env: f.env,
+      host: () => undefined,
+      canonical: (path) => path,
+      debounceMs: 1,
+      cleanup: { run: stripped(scripted.run), now: () => NOW + 10, bounds: HEAVY_FIXTURE_BOUNDS },
+    })
+    await pending.record(f.receipt, "ses_lead", [{ directory: f.linked, reason: "lane x still active" }])
+    await pending.start()
+    fake.emit(sessionIdle("ses_lead"))
+    await pending.settle()
+    expect(existsSync(f.linked)).toBe(true)
+    expect(mutationCalls(scripted.calls)).toEqual([])
+    await pending.dispose()
+    rmSync(f.root, { recursive: true, force: true })
+  })
 })

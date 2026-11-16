@@ -28,6 +28,7 @@ import {
 import { type CleanupResult, cleanupDelivery, type DeliveryCleanupParams, type HostWorktrees } from "./cleanup.ts"
 import { MERGE_METHODS } from "./forge-adapter.ts"
 import { type LandOutcome, type LandParams, landPullRequest } from "./land.ts"
+import { createPendingCleanup, type PendingDeps } from "./pending-cleanup.ts"
 import { malformedNote, parseVerdict } from "./verdict.ts"
 
 export {
@@ -323,10 +324,23 @@ async function isPrimary(ctx: Context, sessionID: string): Promise<boolean> {
   }
 }
 
-export async function setupDelivery(ctx: Context): Promise<() => Promise<void>> {
+export async function setupDelivery(
+  ctx: Context,
+  overrides: Pick<PendingDeps, "debounceMs" | "now" | "cleanup"> = {},
+): Promise<() => Promise<void>> {
   const options = parseOptions(ctx.options as Record<string, unknown>)
   const directory = ctx.location.directory
   const disposers: Array<() => Promise<void>> = []
+  const pending = options.autoCleanup
+    ? createPendingCleanup({
+        ctx,
+        cwd: directory,
+        env: environment(options),
+        host: () => hostWorktrees(ctx),
+        canonical: canonicalPath,
+        ...overrides,
+      })
+    : undefined
 
   const tools = await ctx.tool.transform((editor) => {
     editor.add({
@@ -368,6 +382,10 @@ export async function setupDelivery(ctx: Context): Promise<() => Promise<void>> 
                 ? { ok: false, skipped: true, reason: decision.reason }
                 : { ok: false, deferred: decision.deferred }
               : undefined
+        // Cleanup that did not finish stays pending: delivery retries it when a turn ends.
+        if (pending !== undefined && cleanup?.ok !== true) {
+          await pending.record(outcome.receipt, context.sessionID, readCleanupHolds(input)).catch(() => {})
+        }
         const output = landOutput(outcome, cleanup)
         const content = cleanup === undefined ? outcome.text : textAfterCleanup(outcome.text, cleanup)
         return { output, content, metadata: metadataOf(output) }
@@ -395,6 +413,11 @@ export async function setupDelivery(ctx: Context): Promise<() => Promise<void>> 
     })
   })
   disposers.push(() => tools.dispose())
+
+  if (pending !== undefined) {
+    await pending.start()
+    disposers.push(() => pending.dispose())
+  }
 
   if (options.confirm) {
     const gate = await ctx.permission.hook("evaluate", confirmDelivery)

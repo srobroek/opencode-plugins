@@ -757,6 +757,23 @@ function unwrapEnvelope(value: unknown): unknown {
 }
 
 /**
+ * Whether the receipt's beads are closed with the landed merge sha, by the same read
+ * `delivery_cleanup` makes. `open`: a bead is not closed (or lacks the sha) yet, which is
+ * the one refusal that closing it fixes; `unknown`: the read or the classification failed.
+ */
+export async function ledgerState(
+  receipt: LandingReceipt,
+  cwd: string,
+  receiptPath: string,
+  run: CliRunner = runCli,
+  timeoutMs: number = CLEANUP_BOUNDS.bdShowMs,
+): Promise<"closed" | "open" | "unknown"> {
+  const failure = await verifyLedger(receipt, cwd, receiptPath, run, timeoutMs)
+  if (failure === null) return "closed"
+  return /^beads\.(?!ledgerActive)[^:]+:/.test(failure.reason) ? "open" : "unknown"
+}
+
+/**
  * The native close-out gate: classify the ledger at the canonical root, require the
  * receipt to agree, and then require every bead it names to be closed against this
  * merge.

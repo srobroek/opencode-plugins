@@ -86,6 +86,17 @@ Inputs: `pr`, and when needed `merge_method` (`squash` by default, `merge`,
   `execute.before` hook; the result then reports `cleanup: { ok: false, deferred }`
   and `next` keeps `delivery_cleanup`. `subagent-worktree` does this for a lane whose
   child is still active.
+- With an active ledger inline cleanup cannot run, so delivery retries it itself: after
+  each `session.execution.succeeded`, `session.execution.failed` and `session.idle`
+  (debounced 2 s per session, plus the `experimental.idle` hook when the host has it) it
+  re-runs `delivery_cleanup`'s proofs for this repository's receipts whose worktree is
+  still there, at most once per receipt every 5 s. Open beads make the proof refuse and
+  the retry is silent; once they close, the next turn end removes the worktree. The
+  session that ran `delivery_land` gets one reminder, when it goes idle with beads still
+  open, naming the beads and their close commands. A worktree an integration claimed with
+  `cleanupHold` at land time (or one a running session sits in) is left alone; a claim
+  lapses after 24 hours. The retry runs only while `autoCleanup` is on; the land prompt
+  is the user's approval for it.
 - If the forge accepted the merge but a later step refused, the result has
   `mergeIssued: true` and no receipt. Run the tool again with the same inputs: it
   sees the PR as MERGED, merges nothing, and writes the receipt.
