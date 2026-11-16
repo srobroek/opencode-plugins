@@ -194,6 +194,18 @@ describe("executeCommit", () => {
     expect(existsSync(marker)).toBe(false)
   })
 
+  test("no configured fsmonitor program runs", async () => {
+    const monitor = join(repo, ".git", "test-fsmonitor")
+    const marker = join(repo, ".git", "ran-fsmonitor")
+    writeFileSync(monitor, `#!/bin/sh\ntouch '${marker}'\nexit 1\n`)
+    chmodSync(monitor, 0o755)
+    git("config", "core.fsmonitor", monitor)
+    write("specs/001-a/spec.md")
+    const result = await executeCommit({ message: "x" }, repo)
+    expect(result.metadata.ok).toBe(true)
+    expect(existsSync(marker)).toBe(false)
+  })
+
   test("refuses when HEAD moves during the commit, keeping the other commit", async () => {
     write("specs/001-a/spec.md")
     // Plumbing moves HEAD without touching the index, as another writer's commit would.
