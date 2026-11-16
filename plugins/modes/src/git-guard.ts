@@ -9,6 +9,11 @@
  * Commands that never mention git are left alone. Anything that mentions git and cannot be read
  * statically (a shell reading a script from stdin, a variable in command position, a parse
  * failure) is refused.
+ *
+ * Limits of static parsing: a program that runs git on its own (a script file, `make`, an npm
+ * script, a git hook, an interpreter reading code from a file) is not seen. Inline interpreter
+ * code that mentions git is refused, and `git bisect run` scripts must sit in the scratch
+ * worktree, but nothing else can be proven here.
  */
 
 import { isAbsolute, resolve } from "node:path"

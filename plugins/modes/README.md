@@ -50,6 +50,16 @@ debug -> build
 
 OpenCode limits subagent nesting with `experimental.subagent_depth`. The default is 1, so a subagent cannot start another one. `debug` is `mode: all`, so a caller may spawn it as a subagent. With the default depth it cannot spawn `explore` or `adversarial-challenger`. Set a higher depth (for example 3) if you want it to delegate. Each prompt tells the agent to do a refused helper's work itself and to say so in the report.
 
+## Guards
+
+Permission rules cannot see through git's global options, shell wrappers or `*` spanning `/`, so the plugin adds hooks for `debug` and `refactor`:
+
+- A git allowlist. Only listed subcommands run. `push`, `clean`, `rebase`, `gc`, `stash drop|clear|pop|apply` and unknown spellings are refused. A command that mentions git and cannot be read statically is refused.
+- For `debug`, mutating git runs only inside a `debug-*` scratch worktree. Read-only git can target any directory.
+- For `debug`, `edit`, `write` and `patch` are allowed only inside a `debug-*` worktree and `~/.opencode/debug/`, after symlinks resolve.
+
+A program that runs git itself (a script file, `make`, an npm script, a hook) is outside what static parsing can see.
+
 ## Permission notes
 
 Subagents use their own permissions, so a primary agent's edit limits do not bind the writers it delegates to. Each prompt states the limit in the helper's brief. Each prompt then checks the result.
