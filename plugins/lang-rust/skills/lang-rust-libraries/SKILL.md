@@ -7,7 +7,7 @@ metadata:
 
 # Rust libraries
 
-Checked 2026-11-12.
+Checked 2026-11-16.
 
 ## How to use
 
@@ -52,9 +52,9 @@ Checked 2026-11-12.
 | Errors | `thiserror` `2`, `anyhow` `1` | Typed library/domain errors; reports in binaries. |
 | TLS/passwords/JWT | `rustls` `0.23`, `argon2` `0.6`, `jsonwebtoken` `11` | Validate algorithms, issuer and audience. |
 | IDs/time | `uuid` `1`, `jiff` `0.2` | UUID `v7` discloses time; `v4` avoids that. |
-| Tests | `cargo-nextest` `0.9`, `proptest` `1`, `insta` `1` | Keep standard doctests. |
-| Integration tests | `wiremock` `0.6`, `testcontainers` `0.28` | Real persistence semantics, owned-boundary doubles. |
-| Security/dependencies | `cargo-deny` `0.20`, `cargo-machete` `0.9` | Feature/target-aware review, not a safety certificate. |
+| Tests | `cargo-nextest`, `proptest`, `insta` | Keep standard doctests. |
+| Integration tests | `wiremock`, `testcontainers` | Real persistence semantics, owned-boundary doubles. |
+| Security/dependencies | `cargo-deny`, `cargo-shear` | Feature/target-aware review, not a safety certificate. |
 
 ## References
 
@@ -67,6 +67,7 @@ Checked 2026-11-12.
 | [aws.md](references/aws.md) | SDK, Lambda adapters, Powertools substitutes and service clients |
 | [ai.md](references/ai.md) | MCP, LLM SDKs, provider abstraction and GenAI telemetry |
 | [cli.md](references/cli.md) | CLI, prompts, terminal output and settings |
-| [testing.md](references/testing.md) | Unit, async, property, integration, fuzz, load and benchmark tools |
-| [security.md](references/security.md) | Crypto, secrets, input controls and quality/security scanners |
+| [testing.md](references/testing.md) | Test runner, property, fuzz, mutation, coverage, integration, load and benchmark tools |
+| [quality.md](references/quality.md) | Lint, format, memory safety, dependency audit, API breaks and docs |
+| [security.md](references/security.md) | Crypto, secrets, input controls and supply-chain scanners |
 | [runtime.md](references/runtime.md) | Runtime/error comparisons, builds, resilience, concurrency and utilities |

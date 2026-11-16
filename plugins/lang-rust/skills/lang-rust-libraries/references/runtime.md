@@ -2,7 +2,7 @@
 
 Use Rust's standard facilities first, and select runtime, error and resilience crates for explicit boundaries.
 
-Checked 2026-11-12.
+Checked 2026-11-16.
 
 ## Runtime comparison
 
@@ -54,7 +54,7 @@ No representative error-overhead comparison was verified; measure backtraces, at
 | Hashing | Standard map hasher | `hashbrown` `0.17`, `ahash` `0.8`, `foldhash` `0.2` after attacker-input review | Noncryptographic hashers on hostile keys without analysis. |
 | Allocators | System/default allocator | `mimalloc` `0.1`, `tikv-jemallocator` `0.7` after workload profiling | Benchmark-free allocator replacement. |
 | Releases | `release-plz` `0.4` release PRs | `cargo-release` `1.1` operator workflow; `cargo-dist` `0.34` binary distribution | Release automation mistaken for API compatibility evidence. |
-| API/docs | Standard rustdoc, docs.rs feature/target metadata | `mdbook` `0.5` narrative docs; `cargo-semver-checks` `0.51` public API gate | Indiscriminate all-features builds with conflicting features. |
+| API/docs | Standard rustdoc, docs.rs feature/target metadata | `mdbook` narrative docs; public API gate and docs lint rows are in [quality.md](quality.md) | Indiscriminate all-features builds with conflicting features. |
 | Desktop | `tauri` `2.12`; load `lang-rust-tauri` | `egui` `0.37` immediate-mode tools, `iced` `0.14` Elm-style, `dioxus` `0.7` Rust fullstack | Nested async runtimes, broad IPC permission or identical-webview assumptions. |
 
 ## Rules
