@@ -221,6 +221,25 @@ without it the skill reports the missing guidance.
 - Depth: `speckit-basic`, `speckit-lean`, `speckit-feature`
 - Bonds: `mol-speckit-iterate`, `mol-speckit-fix-findings`, `mol-speckit-bugfix`, `mol-speckit-refine`
 
+## Claude Code
+
+The plugin is also in this repository's Claude Code marketplace as
+`speckit@srobroek-opencode`. It depends on `beads`, which Claude Code enables with it.
+Claude Code gets these parts:
+
+- the `speckit-setup` and `speckit-bugfix` skills, with the manual steps for setup and
+  spec start
+- the `speckit-sync` and `speckit-verify` subagents
+- the tasks.md guard, as a `PreToolUse` hook on `Edit`, `Write` and `Bash`, run by
+  `bun dist/claude-hook.js`
+
+These parts stay OpenCode-only:
+
+- the `spec` primary agent
+- the `speckit_setup` and `speckit_start` tools
+- the skill routes
+- the workflow instructions, which name those tools
+
 ## Not ported
 
 - The omp `tools/spec-start.ts` CLI. Use `speckit_start`.

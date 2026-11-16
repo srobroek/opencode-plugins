@@ -120,6 +120,13 @@
       "category": "development"
     },
     {
+      "name": "speckit",
+      "source": "./plugins/speckit",
+      "description": "SpecKit on beads: a tasks.md guard, setup and bugfix skills, formulas, and the speckit-sync and speckit-verify subagents.",
+      "version": "0.7.1",
+      "category": "development"
+    },
+    {
       "name": "toolchain",
       "source": "./plugins/toolchain",
       "description": "Toolchain defaults as skills: stack, frontend, infrastructure, languages, observability, shell, Terraform, caches, background jobs and worktree coexistence.",

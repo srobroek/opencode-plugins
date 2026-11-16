@@ -1,0 +1,17 @@
+{
+  "description": "SpecKit for Claude Code: the tasks.md guard on Edit, Write and Bash while beads holds the task state.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if command -v bun >/dev/null 2>&1; then bun \"${CLAUDE_PLUGIN_ROOT}/dist/claude-hook.js\" pre-tool-use; fi; exit 0",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}
