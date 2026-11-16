@@ -16,12 +16,13 @@ export function filterLeadRouting(text: string, registered: ReadonlySet<string>)
 export async function setupLead(ctx: Context): Promise<() => Promise<void>> {
   const text = readFileSync(LEAD_PATH, "utf8").trim()
   const cached = new Map<string, Promise<string | undefined>>()
-  const stop = onSessionDeleted(ctx, (sessionID) => cached.delete(sessionID))
+  const stop = onSessionDeleted(ctx, (sessionID) => cached.delete(sessionID), () => cached.clear())
   const forSession = async (sessionID: string): Promise<string | undefined> => {
     try {
       const session = await ctx.session.get({ sessionID })
       if (session.parentID != null) return undefined
       const agents = await ctx.agent.list()
+      // OpenCode 2.2.7+ returns a partial list while plugins load; "agent.updated" clears the cache.
       // The shared fake uses the editor's array shape; the client wraps it in data.
       const listed: readonly { id: string }[] = Array.isArray(agents) ? agents : agents.data
       return filterLeadRouting(text, new Set(listed.map((agent) => agent.id)))
