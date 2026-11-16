@@ -3539,6 +3539,30 @@ describe("exploration inside a tier", () => {
     })
   })
 
+  test("after a reload, a failover rewrites the stored snapshot and every exploration fact survives", async () => {
+    let kept = new Map<string, unknown>()
+    await withHost(on, 0, async (host) => {
+      await spawnTier(host)
+      await born(host, ref("high"))
+      kept = new Map(host.storage)
+    })
+    const facts = { policy: "explore-v1", eligible: [label("medium"), label("high"), label("low"), haikuLabel], arm: label("high"), p: 0.1 / 3 }
+    expect(kept.get("spawn-model:c")).toMatchObject({ explore: facts })
+    await withHost(
+      on,
+      0.5,
+      async (host) => {
+        host.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: ref("high") })
+        host.emit({ type: "session.execution.failed", data: { sessionID: "c", error: { type: "api", message: "ThrottlingException", status: 429 } } })
+        await settle()
+        // The failover moved the child off the arm and rewrote the snapshot; the facts stayed.
+        expect(host.storage.get("spawn-model:c")).toMatchObject({ model: haikuLabel, failedOver: true, tier: "task", explore: facts })
+      },
+      { flapCount: 1 },
+      kept,
+    )
+  })
+
   test("a resume after a reload goes through the stored snapshot and keeps the arm", async () => {
     let kept = new Map<string, unknown>()
     await withHost(on, 0, async (host) => {
