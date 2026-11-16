@@ -162,10 +162,11 @@ function normalTemplate(): NormalTemplate {
   const bare = join(root, "remote.git")
   const main = join(root, "main")
   const linked = join(root, "linked worktree")
+  // No template: its sample hooks would be copied into every fixture and never run.
   mkdirSync(bare)
-  git(bare, ["init", "--bare", "-q"])
+  git(bare, ["init", "--bare", "-q", "--template="])
   mkdirSync(main)
-  git(main, ["init", "-q", "-b", "main"])
+  git(main, ["init", "-q", "-b", "main", "--template="])
   git(main, ["config", "user.email", "delivery@example.test"])
   git(main, ["config", "user.name", "Delivery Test"])
   writeFileSync(join(main, "base.txt"), "base\n")
@@ -233,6 +234,7 @@ function hostileConfig(f: Fixture): { markers: Record<string, string> } {
   git(f.main, ["config", "include.path", included])
   const tracked = git(f.linked, ["ls-files"]).split("\n").filter(Boolean)
   // `included` is a clean driver from `include.path`, `hostile` a long-running process driver.
+  mkdirSync(join(f.main, ".git", "info"), { recursive: true })
   writeFileSync(join(f.main, ".git", "info", "attributes"), `* filter=included\n${tracked[0]} filter=hostile\n`)
   const hooks = join(dir, "hooks")
   mkdirSync(hooks)
