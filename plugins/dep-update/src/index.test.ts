@@ -161,10 +161,24 @@ describe("dep_apply", () => {
     expect(invalid.metadata.exit).toBe(2)
     const controller = new AbortController()
     controller.abort(new Error("stopped"))
-    await expect(
-      tool("dep_apply")({ ecosystem: "npm", name: "x", version: "1.0.0" }, { ...call, signal: controller.signal }),
-    ).rejects.toThrow("stopped")
+    const stopped = await tool("dep_apply")(
+      { ecosystem: "npm", name: "x", version: "1.0.0" },
+      { ...call, signal: controller.signal },
+    )
+    expect(stopped.content).toContain("stopped")
+    expect(stopped.metadata.exit).toBe(1)
     expect(fake.asserts).toEqual([])
+  })
+
+  test("a host without ToolContext.signal gets past the stop check", async () => {
+    const { tool } = await load({
+      assert: () => {
+        throw new Error("reached the prompt")
+      },
+    })
+    await expect(tool("dep_apply")({ ecosystem: "npm", name: "x", version: "1.0.0" }, call)).rejects.toThrow(
+      "reached the prompt",
+    )
   })
 })
 

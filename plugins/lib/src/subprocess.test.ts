@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test"
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 
 import { processAlive, type SupervisedChild, signalName, supervise } from "./subprocess.ts"
 
@@ -55,13 +58,29 @@ describe("supervise", () => {
     expect(child.kills).toEqual(["SIGKILL"])
   })
 
-  test("an abort kills the process group and reports the abort", async () => {
-    const child = Bun.spawn(["/bin/sh", "-c", "sleep 30 & wait"], { stdout: "pipe", stderr: "pipe", detached: true })
-    const controller = new AbortController()
-    setTimeout(() => controller.abort(), 20)
-    const started = Date.now()
-    expect((await supervise(child, { signal: controller.signal, group: true })).kind).toBe("aborted")
-    expect(Date.now() - started).toBeLessThan(5_000)
+  test("an abort kills the whole process group, descendants included", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "supervise-"))
+    const pidFile = join(dir, "pid")
+    try {
+      const child = Bun.spawn(["/bin/sh", "-c", `sleep 30 & echo $! > "${pidFile}"; wait`], {
+        stdout: "pipe",
+        stderr: "pipe",
+        detached: true,
+      })
+      const controller = new AbortController()
+      const running = supervise(child, { signal: controller.signal, group: true })
+      // Abort only once the descendant exists, however slow the machine is.
+      while (!existsSync(pidFile) || readFileSync(pidFile, "utf8").trim() === "") await Bun.sleep(10)
+      const descendant = Number(readFileSync(pidFile, "utf8").trim())
+      expect(processAlive(descendant)).toBe(true)
+      controller.abort()
+      expect((await running).kind).toBe("aborted")
+      // The killed descendant may linger as a zombie for a moment before init reaps it.
+      for (let i = 0; i < 100 && processAlive(descendant); i++) await Bun.sleep(20)
+      expect(processAlive(descendant)).toBe(false)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   test("a descendant holding the pipes past the deadline cannot hold the call open", async () => {

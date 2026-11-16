@@ -1074,7 +1074,11 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
   const baseRun = deps.run ?? runCli
   // Every child process carries the tool call's signal, so an interrupt ends whichever
   // command is running and keeps the next one from starting.
-  const run: CliRunner = (argv, options) => baseRun(argv, { ...options, signal })
+  // Critical section: from the moment the merge is issued until the receipt is recorded the
+  // signal no longer reaches commands. Killing the re-read or the proof there would leave a
+  // merged request with no receipt, so the call finishes first and the stop is honored after.
+  let merging = false
+  const run: CliRunner = (argv, options) => baseRun(argv, { ...options, signal: merging ? undefined : signal })
   const cwd = deps.cwd ?? process.cwd()
   const env = deps.env ?? process.env
   const forgeEnv = forgeEnvironment(env)
@@ -1300,6 +1304,7 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
     }
     const unmerged = interrupted("before the merge; no merge was issued and no receipt was written")
     if (unmerged !== null) return unmerged
+    merging = true
     const mergeFailure = cliFailure(
       mergeArgv,
       await run(mergeArgv, { cwd, timeoutMs: FORGE_TIMEOUT_MS, env: forgeCommandEnv }),
@@ -1332,7 +1337,7 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
       git,
       fetchRun,
       deps.sleep ?? abortableSleep,
-      signal,
+      merging ? undefined : signal,
     )
     if ("reason" in local) {
       const source = alreadyMerged ? "the pull request read" : `the re-read after ${(mergeArgv ?? []).join(" ")}`
@@ -1474,7 +1479,8 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
     )
     if ("reason" in composed) return refuseMerged(composed.reason)
   }
-  const unrecorded = interrupted(
+  // After a merge issued here the receipt is part of the critical section: the stop waits for it.
+  const unrecorded = merging ? null : interrupted(
     `before the receipt was written; no receipt was written, and ${landedState}, so delivery_land proves it again without merging`,
   )
   if (unrecorded !== null) return unrecorded

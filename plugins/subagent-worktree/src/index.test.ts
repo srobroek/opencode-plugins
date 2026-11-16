@@ -947,6 +947,25 @@ describe(MERGE_TOOL, () => {
     expect(setup.worktree.calls.map((call) => call.method)).toEqual(["create"])
   })
 
+  test("an aborted signal stops before the merge and leaves the lane active", async () => {
+    const setup = await start()
+    await spawn(setup)
+    setup.repo.ahead = 2
+    const controller = new AbortController()
+    controller.abort()
+    const tool = setup.fake.tools.get(MERGE_TOOL) as unknown as {
+      execute: (input: unknown, context: unknown) => Promise<{ content: string; metadata: Record<string, unknown> }>
+    }
+    const result = await tool.execute(
+      { sessionID: "ses_fake1", method: "wt-merge" },
+      { sessionID: PARENT, agent: "build", messageID: "msg_2", id: "call_2", signal: controller.signal },
+    )
+    expect(result.metadata).toMatchObject({ ok: false, stopped: true })
+    expect(result.content).toContain("stopped")
+    expect(setup.log.some((argv) => argv[0] === "wt")).toBe(false)
+    expect(lane(setup.fake)?.state).toBe("active")
+  })
+
   test("a failed move prevents wt merge", async () => {
     const setup = await start()
     await spawn(setup)

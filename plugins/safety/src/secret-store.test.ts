@@ -479,6 +479,48 @@ describe("the value stays out of argv, env, the result, errors and logs", () => 
   })
 })
 
+describe("a stop through the tool call's signal", () => {
+  test("before any write, nothing is stored", async () => {
+    const controller = new AbortController()
+    controller.abort()
+    const { deps, calls } = fake({ signal: controller.signal })
+    await expect(storeSecret({ name: "A", target: onePassword, generate: hex }, deps)).rejects.toThrow("stopped before writing A; nothing was stored")
+    expect(calls).toEqual([])
+  })
+
+  test("after the item is created, the reference is still recorded without the signal", async () => {
+    const controller = new AbortController()
+    const { deps, calls } = fake(
+      { signal: controller.signal },
+      {
+        "/bin/op": () => {
+          controller.abort()
+          return { kind: "exited", exitCode: 0 }
+        },
+      },
+    )
+    const result = await storeSecret({ name: "A", target: onePassword, generate: hex }, deps)
+    expect(result).toMatchObject({ stored: true })
+    expect(calls).toHaveLength(2)
+    expect(calls[0]?.options.signal).toBe(controller.signal)
+    expect(calls[1]?.options.signal).toBeUndefined()
+  })
+
+  test("a create cancelled midway says the item may exist", async () => {
+    const { deps } = fake({}, { "/bin/op": () => ({ kind: "aborted" }) })
+    await expect(storeSecret({ name: "A", target: onePassword, generate: hex }, deps)).rejects.toThrow(
+      "op item create was cancelled storing A (a 1Password approval may have been refused or timed out); not retried; the write may have completed",
+    )
+  })
+
+  test("a missing signal changes nothing", async () => {
+    const { deps, calls } = fake()
+    expect(deps.signal).toBeUndefined()
+    await storeSecret({ name: "A", target: onePassword, generate: hex }, deps)
+    expect(calls.map((call) => call.options.signal)).toEqual([undefined, undefined])
+  })
+})
+
 describe("runChild", () => {
   const bun = process.execPath
   const options = (more: Partial<RunOptions> = {}): RunOptions => ({ cwd: process.cwd(), env: { ...process.env } as Record<string, string>, timeoutMs: 10_000, ...more })

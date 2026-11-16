@@ -362,7 +362,8 @@ export function createPlugin(overrides: Overrides = {}) {
             "stage and exit code only and is not retried.",
           input: SECRET_STORE_INPUT,
           execute: async (input, context) => {
-            context.signal.throwIfAborted()
+            // `signal` is undefined on hosts older than OpenCode 2.3.
+            if (context.signal?.aborted === true) return { content: "safety_secret_store stopped before it started; nothing was stored." }
             const directory = await sessionDirectory(context.sessionID)
             const source = { type: "tool" as const, messageID: context.messageID, id: context.id }
             const env = overrides.secretStore?.env ?? stringEnv(process.env)
@@ -378,7 +379,7 @@ export function createPlugin(overrides: Overrides = {}) {
               snapshot: (path) => readConfigSnapshot(directory, path, home),
               run: runChild,
               ...overrides.secretStore,
-              signal: context.signal,
+              ...(context.signal ? { signal: context.signal } : {}),
               askExternal: (external) =>
                 ctx.permission.assert({
                   sessionID: context.sessionID,

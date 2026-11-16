@@ -1178,6 +1178,10 @@ Missing worktrees: moved child sessions back to their parent directory: ${repair
     return directory === undefined ? [] : git2.localFiles(directory);
   };
   const merge = async (input, tool) => {
+    const stopped = () => tool.signal?.aborted === true;
+    if (stopped()) {
+      return { content: `${MERGE_TOOL}: stopped before it started; nothing was merged.`, metadata: { ok: false, stopped: true } };
+    }
     if (input.method === "list") {
       await ctx.permission.assert({
         sessionID: tool.sessionID,
@@ -1222,6 +1226,9 @@ Missing worktrees: moved child sessions back to their parent directory: ${repair
       return { content: `${MERGE_TOOL}: not merged: ${reason}`, metadata: { ok: false, reason } };
     }
     const argv = mergeArgs(lane2.directory, decision.target);
+    if (stopped()) {
+      return { content: `${MERGE_TOOL}: stopped before the merge; nothing was merged.`, metadata: { ok: false, stopped: true } };
+    }
     await moveHome(lane2);
     const result = await git2.run(argv);
     const output = tail(`${result.stdout}

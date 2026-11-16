@@ -3316,7 +3316,8 @@ async function resolveLandingTarget(params, git, cwd, forgeEnv) {
 async function landPullRequest(params, deps = {}) {
   const { signal } = deps;
   const baseRun = deps.run ?? runCli;
-  const run = (argv, options) => baseRun(argv, { ...options, signal });
+  let merging = false;
+  const run = (argv, options) => baseRun(argv, { ...options, signal: merging ? undefined : signal });
   const cwd = deps.cwd ?? process.cwd();
   const env = deps.env ?? process.env;
   const forgeEnv = forgeEnvironment(env);
@@ -3477,6 +3478,7 @@ async function landPullRequest(params, deps = {}) {
     const unmerged = interrupted("before the merge; no merge was issued and no receipt was written");
     if (unmerged !== null)
       return unmerged;
+    merging = true;
     const mergeFailure = cliFailure(mergeArgv, await run(mergeArgv, { cwd, timeoutMs: FORGE_TIMEOUT_MS, env: forgeCommandEnv }));
     if (mergeFailure !== null)
       return refuse(`${mergeFailure}; no receipt was written`);
@@ -3495,7 +3497,7 @@ async function landPullRequest(params, deps = {}) {
   if (proved.state.trim().toUpperCase() === "MERGED" && FULL_OID.test(provedOid)) {
     const required = proofMethod === "rebase" && FULL_OID.test(head) && head !== provedOid ? [provedOid, head] : [provedOid];
     const fetchRun = (argv) => Promise.resolve(run(argv, { cwd, timeoutMs: FETCH_TIMEOUT_MS, env: gitEnv }));
-    const local = await ensureLocalCommits(required, proved.baseRefName, remote, git, fetchRun, deps.sleep ?? abortableSleep, signal);
+    const local = await ensureLocalCommits(required, proved.baseRefName, remote, git, fetchRun, deps.sleep ?? abortableSleep, merging ? undefined : signal);
     if ("reason" in local) {
       const source = alreadyMerged ? "the pull request read" : `the re-read after ${(mergeArgv ?? []).join(" ")}`;
       return refuseMerged(`${source}: ${local.reason}`);
@@ -3598,7 +3600,7 @@ async function landPullRequest(params, deps = {}) {
     if ("reason" in composed)
       return refuseMerged(composed.reason);
   }
-  const unrecorded = interrupted(`before the receipt was written; no receipt was written, and ${landedState}, so delivery_land proves it again without merging`);
+  const unrecorded = merging ? null : interrupted(`before the receipt was written; no receipt was written, and ${landedState}, so delivery_land proves it again without merging`);
   if (unrecorded !== null)
     return unrecorded;
   const receipt = composed.receipt;
