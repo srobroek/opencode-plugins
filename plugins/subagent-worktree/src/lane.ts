@@ -507,3 +507,37 @@ export function tail(text: string, lines = 40): string {
   const clean = text.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "").trim()
   return clean.split("\n").slice(-lines).join("\n")
 }
+
+/** A session in the target worktree, as `session.list` reports it. `outcome` is set once a run has ended. */
+export type WriterSession = { id: string; parentID?: string; outcome?: string }
+
+export type WriterGuard = { kind: "allow"; warn?: string } | { kind: "refuse"; reason: string }
+
+export const WRITER_LIVENESS_NOTE =
+  "subagent-worktree: could not check whether the worktree already has a live writer session; the spawn went ahead. List your background work first."
+
+/**
+ * Whether a new writer subagent may start in an explicitly named worktree. A live writer is a
+ * child session in that directory that has no `outcome` yet. `sessions` is undefined when the
+ * lookup failed or timed out; uncertainty allows the spawn and warns.
+ */
+export function decideWriterGuard(facts: {
+  /** The agent can edit files. */
+  writer: boolean
+  directory: string
+  caller: string
+  sessions: readonly WriterSession[] | undefined
+}): WriterGuard {
+  if (!facts.writer) return { kind: "allow" }
+  if (facts.sessions === undefined) return { kind: "allow", warn: WRITER_LIVENESS_NOTE }
+  const live = facts.sessions.find(
+    (session) => session.parentID !== undefined && session.id !== facts.caller && session.outcome === undefined,
+  )
+  if (!live) return { kind: "allow" }
+  return {
+    kind: "refuse",
+    reason:
+      `${facts.directory} already has a live writer session ${live.id}. ` +
+      `Send that session a follow-up (pass sessionID: "${live.id}") instead of spawning a second writer, or stop it first.`,
+  }
+}

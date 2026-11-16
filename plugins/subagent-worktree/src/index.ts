@@ -11,6 +11,7 @@ import {
   containingWorktree,
   decideIsolation,
   decideMerge,
+  decideWriterGuard,
   findWorktree,
   formatLaneList,
   isConflict,
@@ -30,6 +31,7 @@ import {
   readSubagentInput,
   resumeWorktreeNote,
   rewritePrompt,
+  rulesAreReadOnly,
   SESSION_LOOKUP_MS,
   SUBAGENT_TOOL,
   type SubagentInput,
@@ -39,6 +41,7 @@ import {
   UNBORN_NOTE,
   WORKTREE_PARAM,
   WORKTREE_PARAM_DESCRIPTION,
+  type WriterSession,
   withoutWorktree,
   worktreeForBranch,
   worktreeName,
@@ -199,6 +202,37 @@ export function createLanes(
     return { lookup: findWorktree(requested, path, entries), current }
   }
 
+  /** The open sessions whose directory is `directory`; undefined when the host cannot answer within the lookup time. */
+  const sessionsIn = async (projectID: string, directory: string): Promise<WriterSession[] | undefined> => {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<undefined>((done) => {
+      timer = setTimeout(() => done(undefined), lookupMs)
+    })
+    try {
+      const page = await Promise.race([
+        ctx.session.list({ project: projectID, directory, archived: false, limit: 100 } as never).then(
+          (value) => value as unknown as { data?: Array<Record<string, unknown>> },
+          () => undefined,
+        ),
+        timeout,
+      ])
+      if (!page || !Array.isArray(page.data)) return undefined
+      return page.data.flatMap((raw) =>
+        typeof raw.id === "string"
+          ? [
+              {
+                id: raw.id,
+                ...(typeof raw.parentID === "string" ? { parentID: raw.parentID } : {}),
+                ...(typeof raw.outcome === "string" ? { outcome: raw.outcome } : {}),
+              },
+            ]
+          : [],
+      )
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
   /** Skip notes by tool call id, appended to that call's result by `after`. */
   const notes = new Map<string, string>()
 
@@ -248,6 +282,16 @@ export function createLanes(
       trackedDirty: input.worktree === undefined && isolation.isolate ? await git.trackedDirty(parentDir) : false,
     })
     if (plan.kind === "refuse") throw new Error(`subagent-worktree: ${plan.reason}`)
+    if (plan.kind === "move" && start?.lookup.ok && agent && agent.mode !== "primary") {
+      const guard = decideWriterGuard({
+        writer: !rulesAreReadOnly(agent.permissions),
+        directory: start.lookup.worktree.directory,
+        caller: event.sessionID,
+        sessions: await sessionsIn(parent.projectID, start.lookup.worktree.directory),
+      })
+      if (guard.kind === "refuse") throw new Error(`subagent-worktree: ${guard.reason}`)
+      if (guard.warn) notes.set(event.id, guard.warn)
+    }
     if (plan.kind === "default") {
       if (plan.note) notes.set(event.id, plan.note)
       return

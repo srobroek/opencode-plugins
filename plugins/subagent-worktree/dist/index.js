@@ -553,6 +553,20 @@ function tail(text, lines = 40) {
 `).slice(-lines).join(`
 `);
 }
+var WRITER_LIVENESS_NOTE = "subagent-worktree: could not check whether the worktree already has a live writer session; the spawn went ahead. List your background work first.";
+function decideWriterGuard(facts) {
+  if (!facts.writer)
+    return { kind: "allow" };
+  if (facts.sessions === undefined)
+    return { kind: "allow", warn: WRITER_LIVENESS_NOTE };
+  const live = facts.sessions.find((session) => session.parentID !== undefined && session.id !== facts.caller && session.outcome === undefined);
+  if (!live)
+    return { kind: "allow" };
+  return {
+    kind: "refuse",
+    reason: `${facts.directory} already has a live writer session ${live.id}. ` + `Send that session a follow-up (pass sessionID: "${live.id}") instead of spawning a second writer, or stop it first.`
+  };
+}
 
 // plugins/subagent-worktree/src/git.ts
 var GIT_TIMEOUT_MS = 60000;
@@ -722,6 +736,31 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
     const current = entries && containingWorktree(await normalize(parentDir), entries)?.directory;
     return { lookup: findWorktree(requested, path, entries), current };
   };
+  const sessionsIn = async (projectID, directory) => {
+    let timer;
+    const timeout = new Promise((done) => {
+      timer = setTimeout(() => done(undefined), lookupMs);
+    });
+    try {
+      const page = await Promise.race([
+        ctx.session.list({ project: projectID, directory, archived: false, limit: 100 }).then((value) => value, () => {
+          return;
+        }),
+        timeout
+      ]);
+      if (!page || !Array.isArray(page.data))
+        return;
+      return page.data.flatMap((raw) => typeof raw.id === "string" ? [
+        {
+          id: raw.id,
+          ...typeof raw.parentID === "string" ? { parentID: raw.parentID } : {},
+          ...typeof raw.outcome === "string" ? { outcome: raw.outcome } : {}
+        }
+      ] : []);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
   const notes = new Map;
   const before = async (event) => {
     if (event.tool !== SUBAGENT_TOOL)
@@ -765,6 +804,18 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
     });
     if (plan.kind === "refuse")
       throw new Error(`subagent-worktree: ${plan.reason}`);
+    if (plan.kind === "move" && start?.lookup.ok && agent && agent.mode !== "primary") {
+      const guard = decideWriterGuard({
+        writer: !rulesAreReadOnly(agent.permissions),
+        directory: start.lookup.worktree.directory,
+        caller: event.sessionID,
+        sessions: await sessionsIn(parent.projectID, start.lookup.worktree.directory)
+      });
+      if (guard.kind === "refuse")
+        throw new Error(`subagent-worktree: ${guard.reason}`);
+      if (guard.warn)
+        notes.set(event.id, guard.warn);
+    }
     if (plan.kind === "default") {
       if (plan.note)
         notes.set(event.id, plan.note);
@@ -1107,6 +1158,7 @@ export {
   UNBORN_NOTE,
   WORKTREE_PARAM,
   WORKTREE_PARAM_DESCRIPTION,
+  WRITER_LIVENESS_NOTE,
   annotation,
   containingWorktree,
   createGit,
@@ -1114,6 +1166,7 @@ export {
   createPlugin,
   decideIsolation,
   decideMerge,
+  decideWriterGuard,
   src_default as default,
   diffCommand,
   findWorktree,

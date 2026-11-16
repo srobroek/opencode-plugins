@@ -6,6 +6,7 @@ import {
   DIRTY_CHECKOUT_NOTE,
   decideIsolation,
   decideMerge,
+  decideWriterGuard,
   diffCommand,
   findWorktree,
   formatLaneList,
@@ -32,6 +33,7 @@ import {
   startPrompt,
   tail,
   targetsExternalDirectory,
+  WRITER_LIVENESS_NOTE,
   withoutWorktree,
   worktreeForBranch,
   worktreeName,
@@ -444,5 +446,33 @@ describe("isUnbornHead", () => {
     ["a failed refs listing", { head: undefined, symbolic: "refs/heads/main", refs: undefined }, false],
   ])("%s", (_name, facts, expected) => {
     expect(isUnbornHead(facts)).toBe(expected)
+  })
+})
+
+describe("decideWriterGuard", () => {
+  const live = { id: "ses_live", parentID: "ses_parent" }
+  const facts = { writer: true, directory: "/wt/a", caller: "ses_parent" }
+
+  test("refuses when a child session without an outcome is in the worktree", () => {
+    const guard = decideWriterGuard({ ...facts, sessions: [live] })
+    expect(guard).toEqual({ kind: "refuse", reason: expect.stringContaining("live writer session ses_live") })
+  })
+
+  test.each([
+    ["a finished writer", [{ ...live, outcome: "succeeded" }]],
+    ["an interrupted writer", [{ ...live, outcome: "interrupted" }]],
+    ["a root session", [{ id: "ses_root" }]],
+    ["the caller itself", [{ id: "ses_parent", parentID: "ses_gp" }]],
+    ["no sessions", []],
+  ])("allows with %s", (_name, sessions) => {
+    expect(decideWriterGuard({ ...facts, sessions })).toEqual({ kind: "allow" })
+  })
+
+  test("allows a read-only agent", () => {
+    expect(decideWriterGuard({ ...facts, writer: false, sessions: [live] })).toEqual({ kind: "allow" })
+  })
+
+  test("allows with a warning when liveness is unknown", () => {
+    expect(decideWriterGuard({ ...facts, sessions: undefined })).toEqual({ kind: "allow", warn: WRITER_LIVENESS_NOTE })
   })
 })

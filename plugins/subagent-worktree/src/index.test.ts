@@ -404,6 +404,49 @@ describe("worktree argument", () => {
     expect(setup.log).toContainEqual(["wt", "-C", "/wt/subagent-write-hello-abc123", "merge", "feat", "--no-squash", "--no-ff", "--yes"])
   })
 
+  describe("single writer per worktree", () => {
+    const writerIn = (setup: Setup, id: string, extra: Record<string, unknown> = {}) =>
+      setup.fake.sessions.set(id, { id, parentID: PARENT, projectID: "prj", location: { directory: OTHER }, ...extra })
+
+    test("refuses a second writer and names the live session", async () => {
+      const setup = await start()
+      writerIn(setup, "ses_live")
+      await expect(spawn(setup, { agent: "pinned", worktree: "feat" })).rejects.toThrow(
+        /ses_live.*Send that session a follow-up \(pass sessionID: "ses_live"\).*or stop it first/s,
+      )
+      expect(setup.fake.calls.some((entry) => entry.method === "session.create")).toBe(false)
+    })
+
+    test("allows a writer when the earlier one finished", async () => {
+      const setup = await start()
+      writerIn(setup, "ses_done", { outcome: "succeeded" })
+      const event = await spawn(setup, { agent: "pinned", worktree: "feat" })
+      expect((event.input as { sessionID?: string }).sessionID).toBe("ses_fake1")
+    })
+
+    test("a read-only agent is unaffected by a live writer", async () => {
+      const setup = await start()
+      writerIn(setup, "ses_live")
+      const event = await spawn(setup, { agent: "reviewer", worktree: "feat" })
+      expect((event.input as { sessionID?: string }).sessionID).toBe("ses_fake1")
+    })
+
+    test("resuming the live session itself still works", async () => {
+      const setup = await start()
+      writerIn(setup, "ses_live")
+      const event = await spawn(setup, { agent: "pinned", sessionID: "ses_live", worktree: "feat" })
+      expect((event.input as { sessionID?: string }).sessionID).toBe("ses_live")
+    })
+
+    test("allows the spawn and warns when the host cannot list sessions", async () => {
+      const setup = await start()
+      Object.assign(setup.fake.context.session, { list: async () => { throw new Error("unavailable") } })
+      await spawn(setup, { agent: "pinned", worktree: "feat" })
+      const result = await setup.fake.fire.tool("execute.after", completed("ses_fake1"))
+      expect((result.result as { content: string }).content).toContain("could not check whether the worktree already has a live writer")
+    })
+  })
+
   test("a parent already in a worktree: children start there and writers branch from it", async () => {
     const setup = await start()
     const original = call({ agent: "explore" }, "ses_in_other")
