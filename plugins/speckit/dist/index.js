@@ -1062,10 +1062,12 @@ async function executeCommit(input, workspace, git = gitIn(workspace)) {
   if (!prefix.ok)
     return refuse(prefix.reason);
   const base = prefix.stdout.trim();
-  const parent = await git(["rev-parse", "--verify", "HEAD^{commit}"]);
-  if (!parent.ok)
-    return refuse("the repository has no commit to build on yet");
-  const head = parent.stdout.trim();
+  const parent = await git(["rev-parse", "-q", "--verify", "HEAD^{commit}"]);
+  const head = parent.ok ? parent.stdout.trim() : undefined;
+  const empty = head === undefined ? await git(["hash-object", "-t", "tree", "--stdin"], { stdin: "" }) : undefined;
+  if (empty !== undefined && !empty.ok)
+    return refuse(empty.reason);
+  const baseTree = head ?? (empty?.ok ? empty.stdout.trim() : "");
   const staged = await git(["diff", "--cached", "--name-only", "--no-renames", "-z"]);
   if (!staged.ok)
     return refuse(staged.reason);
@@ -1076,7 +1078,7 @@ async function executeCommit(input, workspace, git = gitIn(workspace)) {
   try {
     const env = { GIT_INDEX_FILE: join4(scratch, "index") };
     for (const args of [
-      ["read-tree", head],
+      head === undefined ? ["read-tree", "--empty"] : ["read-tree", head],
       ["add", "-A", "--", ...params.paths]
     ]) {
       const step = await git(args, { env });
@@ -1087,7 +1089,7 @@ async function executeCommit(input, workspace, git = gitIn(workspace)) {
     if (!written.ok)
       return refuse(written.reason);
     const tree = written.stdout.trim();
-    const diff = await git(["diff-tree", "-r", "--name-only", "--no-renames", "-z", head, tree]);
+    const diff = await git(["diff-tree", "-r", "--name-only", "--no-renames", "-z", baseTree, tree]);
     if (!diff.ok)
       return refuse(diff.reason);
     const changed = names(diff.stdout);
@@ -1099,12 +1101,14 @@ async function executeCommit(input, workspace, git = gitIn(workspace)) {
     const message = params.message.endsWith(`
 `) ? params.message : `${params.message}
 `;
-    const created = await git(["commit-tree", tree, "-p", head, "-F", "-"], { stdin: message });
+    const created = await git(["commit-tree", tree, ...head === undefined ? [] : ["-p", head], "-F", "-"], {
+      stdin: message
+    });
     if (!created.ok)
       return refuse(created.reason);
     const commit = created.stdout.trim();
     const moved = await git(["update-ref", "-m", `speckit_commit: ${message.split(`
-`, 1)[0]}`, "HEAD", commit, head]);
+`, 1)[0]}`, "HEAD", commit, head ?? ""]);
     if (!moved.ok)
       return refuse(`HEAD moved while committing; nothing was committed. ${moved.reason}`);
     const paths = changed.map((path) => path.slice(base.length));

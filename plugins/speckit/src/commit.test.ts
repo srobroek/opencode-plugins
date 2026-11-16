@@ -162,6 +162,19 @@ describe("executeCommit", () => {
     expect(git("log", "--format=%s")).toBe("concurrent\ninit")
   })
 
+  test("makes the first commit of a repository without commits", async () => {
+    rmSync(join(repo, ".git"), { recursive: true, force: true })
+    git("init", "-q", "-b", "main")
+    git("config", "user.name", "Test")
+    git("config", "user.email", "test@example.com")
+    git("config", "commit.gpgsign", "false")
+    write("specs/001-a/spec.md")
+    const result = await executeCommit({ message: "first" }, repo)
+    expect(result.metadata.ok).toBe(true)
+    expect(git("log", "--format=%s")).toBe("first")
+    expect(committedFiles()).toEqual(["specs/001-a/spec.md"])
+  })
+
   test("reports nothing to commit when the artifacts are unchanged", async () => {
     const result = await executeCommit({ message: "x" }, repo)
     expect(result.metadata.ok).toBe(false)

@@ -115,9 +115,12 @@ export async function executeCommit(input: unknown, workspace: string, git: Git 
   const prefix = await git(["rev-parse", "--show-prefix"])
   if (!prefix.ok) return refuse(prefix.reason)
   const base = prefix.stdout.trim()
-  const parent = await git(["rev-parse", "--verify", "HEAD^{commit}"])
-  if (!parent.ok) return refuse("the repository has no commit to build on yet")
-  const head = parent.stdout.trim()
+  // An unborn HEAD (a repository without commits) builds the first commit on the empty tree.
+  const parent = await git(["rev-parse", "-q", "--verify", "HEAD^{commit}"])
+  const head = parent.ok ? parent.stdout.trim() : undefined
+  const empty = head === undefined ? await git(["hash-object", "-t", "tree", "--stdin"], { stdin: "" }) : undefined
+  if (empty !== undefined && !empty.ok) return refuse(empty.reason)
+  const baseTree = head ?? (empty?.ok ? empty.stdout.trim() : "")
   const staged = await git(["diff", "--cached", "--name-only", "--no-renames", "-z"])
   if (!staged.ok) return refuse(staged.reason)
   const foreign = outsideArtifacts(names(staged.stdout), base)
@@ -130,7 +133,7 @@ export async function executeCommit(input: unknown, workspace: string, git: Git 
   try {
     const env = { GIT_INDEX_FILE: join(scratch, "index") }
     for (const args of [
-      ["read-tree", head],
+      head === undefined ? ["read-tree", "--empty"] : ["read-tree", head],
       ["add", "-A", "--", ...params.paths],
     ]) {
       const step = await git(args, { env })
@@ -139,18 +142,20 @@ export async function executeCommit(input: unknown, workspace: string, git: Git 
     const written = await git(["write-tree"], { env })
     if (!written.ok) return refuse(written.reason)
     const tree = written.stdout.trim()
-    const diff = await git(["diff-tree", "-r", "--name-only", "--no-renames", "-z", head, tree])
+    const diff = await git(["diff-tree", "-r", "--name-only", "--no-renames", "-z", baseTree, tree])
     if (!diff.ok) return refuse(diff.reason)
     const changed = names(diff.stdout)
     if (!changed.length) return refuse("nothing to commit: the artifacts are unchanged")
     const stray = outsideArtifacts(changed, base, params.paths)
     if (stray.length) return refuse(`refused: the commit would change paths outside the request: ${stray.join(", ")}`)
     const message = params.message.endsWith("\n") ? params.message : `${params.message}\n`
-    const created = await git(["commit-tree", tree, "-p", head, "-F", "-"], { stdin: message })
+    const created = await git(["commit-tree", tree, ...(head === undefined ? [] : ["-p", head]), "-F", "-"], {
+      stdin: message,
+    })
     if (!created.ok) return refuse(created.reason)
     const commit = created.stdout.trim()
-    // The old value makes a concurrent HEAD move fail instead of being overwritten.
-    const moved = await git(["update-ref", "-m", `speckit_commit: ${message.split("\n", 1)[0]}`, "HEAD", commit, head])
+    // The old value (empty: HEAD must still be unborn) makes a concurrent HEAD move fail instead of being overwritten.
+    const moved = await git(["update-ref", "-m", `speckit_commit: ${message.split("\n", 1)[0]}`, "HEAD", commit, head ?? ""])
     if (!moved.ok) return refuse(`HEAD moved while committing; nothing was committed. ${moved.reason}`)
     const paths = changed.map((path) => path.slice(base.length))
     const synced = await git(["reset", "-q", "--", ...paths])
