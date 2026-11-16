@@ -8,7 +8,10 @@ description: "Load before answering how to test code, or planning, writing, revi
 Language-neutral rules for what to test, how many tests to keep, and how tests change
 with the code. For a language's runner, idioms and tool choices, also load the
 `lang-<language>-testing` skill and its `references/practice.md` when one is listed;
-if none is, follow the project's existing tests and test configuration. The test-first
+if none is, follow the project's existing tests and test configuration. Tool choices for
+coverage, mutation, property tests, fuzzing and flaky-order checks come from the language's
+concerns table, found through the `toolchain-languages` skill's `references/concerns.md`.
+The test-first
 loop and evidence rules are in the `quality-code-design` skill's `test-first.md` and
 `verification.md` references. To audit an existing suite on demand, with recommendations and
 fixes, load the `quality-test-audit` skill.
