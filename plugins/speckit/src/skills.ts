@@ -1,14 +1,18 @@
 /**
  * Route the spec-kit skills that conflict with beads. `speckit-implement` reads and ticks
- * tasks.md, so its content becomes a redirect to the implement step's beads; the
- * taskstoissues skills open a second tracker, so their content becomes a refusal and the
- * `skill` tool refuses to load them. Both apply only where a beads workspace is active.
+ * tasks.md, so its content becomes a redirect to the implement step's beads;
+ * `speckit-analyze` aborts without tasks.md, so a beads preamble goes ahead of its
+ * unchanged analysis; the taskstoissues skills open a second tracker, so their content
+ * becomes a refusal and the `skill` tool refuses to load them. All apply only where a
+ * beads workspace is active.
  */
 
 /** Marks content this plugin wrote, so a rewritten skill is not rewritten again. */
 export const MARKER = "<!-- srobroek.speckit -->"
 
 export const IMPLEMENT_SKILLS: readonly string[] = ["speckit-implement", "speckit.implement"]
+
+export const ANALYZE_SKILLS: readonly string[] = ["speckit-analyze", "speckit.analyze"]
 
 export const TASKSTOISSUES_SKILLS: readonly string[] = [
   "speckit-taskstoissues",
@@ -35,6 +39,23 @@ Do not create or edit \`specs/*/tasks.md\`; the speckit plugin refuses those wri
 If a check script demands tasks.md (\`check-prerequisites.sh --require-tasks\`), skip it
 and read \`bd list --spec <NNN-slug>\`.`
 
+export const ANALYZE_REDIRECT = `${MARKER}
+# speckit-analyze here: tasks live in beads
+
+This repository keeps tasks in beads, not \`specs/<spec>/tasks.md\`. Run the command
+below with these changes; its spec, plan and constitution analysis stays as written.
+
+- Run the prerequisite script with \`--json --require-spec\` only, without
+  \`--require-tasks --include-tasks\` (PowerShell: \`-RequireTasks -IncludeTasks\`). It
+  still checks the feature directory, spec.md and plan.md. Do not abort for tasks.md.
+- Wherever the command reads tasks.md, read the task beads: find the run with
+  \`bd query 'spec_id="<NNN-slug>"' --json\`, then \`bd list --parent <implement-step-id> --json\`.
+  Use each bead's id, title, description, acceptance criteria and dependencies.
+- Cite tasks by bead id. A coverage fix is a bead change, never a tasks.md edit.
+
+---
+`
+
 export const TASKSTOISSUES_REFUSAL =
   "blocked by speckit: taskstoissues turns tasks.md into GitHub issues, a second task tracker in a repository whose task state already lives in beads. Do not invoke it; link an existing GitHub issue instead with bd update <id> --external-ref gh-<number>. Disable: set the srobroek.speckit plugin option blockTasksToIssues=false"
 
@@ -42,7 +63,7 @@ const TASKSTOISSUES_CONTENT = `${MARKER}\n${TASKSTOISSUES_REFUSAL}\n`
 
 export type SkillLike = { id: string; content?: string; description?: string }
 
-export type SkillRouting = { implement: boolean; taskstoissues: boolean }
+export type SkillRouting = { implement: boolean; analyze: boolean; taskstoissues: boolean }
 
 /** The content one skill should have, or `undefined` to leave it as it is. */
 export function rewriteSkill(
@@ -56,6 +77,7 @@ export function rewriteSkill(
       description:
         "Work a SpecKit feature's implementation task beads under its molecule's implement step (replaces the tasks.md implement command)",
     }
+  if (routing.analyze && ANALYZE_SKILLS.includes(skill.id)) return { content: `${ANALYZE_REDIRECT}\n${skill.content ?? ""}` }
   if (routing.taskstoissues && TASKSTOISSUES_SKILLS.includes(skill.id))
     return { content: TASKSTOISSUES_CONTENT, description: "Disabled here: task state lives in beads; do not load" }
   return undefined

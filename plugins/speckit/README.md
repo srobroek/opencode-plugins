@@ -21,7 +21,7 @@ formulas and subagents.
 | --- | --- | --- |
 | `integration` | `codex` | spec-kit integration `speckit_setup` passes to `specify init`. `codex` writes the commands as skills under `.agents/skills/`, which OpenCode loads. |
 | `tasksGuard` | `true` | Refuse writes of `specs/*/tasks.md` where beads is active. |
-| `implementRedirect` | `true` | Replace the `speckit-implement` skill with the beads route where beads is active. |
+| `implementRedirect` | `true` | Where beads is active, replace the `speckit-implement` skill with the beads route and point `speckit-analyze` at the task beads. |
 | `blockTasksToIssues` | `true` | Refuse the taskstoissues skills where beads is active. |
 | `workflow` | `true` | Add the workflow instructions to sessions in a SpecKit repository. |
 | `agents` | `true` | Register the `speckit-sync` and `speckit-verify` subagents. |
@@ -97,6 +97,7 @@ it cannot run.
 | `edit`, `write`, `patch` of `specs/*/tasks.md` | Refused, including patch move destinations. The target's own repository is probed. |
 | `shell` writes of `specs/*/tasks.md` | Refused: redirects, `tee`, `cp`/`mv` destinations, `sed -i`, `touch` and similar, resolved against the call's `workdir`. Reads run. |
 | `speckit-implement` skill | Its content becomes the beads route: work the task beads under the molecule's `implement` step. |
+| `speckit-analyze` skill | A beads preamble goes ahead of the upstream command: run the prerequisite script without `--require-tasks --include-tasks`, and read the implement step's task beads where it reads tasks.md. The spec and plan analysis stays as upstream wrote it. |
 | taskstoissues skills | `speckit-taskstoissues` and the spec-kit 1.2 `speckit-github-taskstoissues`: the `skill` tool refuses to load them, and their content becomes the refusal. |
 
 Upstream writers the guard denies: `speckit-tasks`, `speckit-converge` (it appends a

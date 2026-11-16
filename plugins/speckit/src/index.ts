@@ -28,7 +28,7 @@ import { usesSpeckit, workflowLatch } from "./workflow.ts"
 export { beadsActive } from "./beads.ts"
 export { artifactPath, executeCommit, outsideArtifacts } from "./commit.ts"
 export { installFormulas, runSetup } from "./setup.ts"
-export { IMPLEMENT_REDIRECT, rewriteSkill, skillRefusal, TASKSTOISSUES_REFUSAL } from "./skills.ts"
+export { ANALYZE_REDIRECT, IMPLEMENT_REDIRECT, rewriteSkill, skillRefusal, TASKSTOISSUES_REFUSAL } from "./skills.ts"
 export { SPEC_AGENT, wantsSpecAgent } from "./spec-agent.ts"
 export { startSpec } from "./spec-start.ts"
 export { runSpecStart } from "./spec-start-runtime.ts"
@@ -50,7 +50,7 @@ export type SpeckitOptions = {
   integration: string
   /** Refuse writes of `specs/*\/tasks.md` where beads is active. Default true. */
   tasksGuard: boolean
-  /** Replace the `speckit-implement` skill with the beads route where beads is active. Default true. */
+  /** Where beads is active, replace the `speckit-implement` skill with the beads route and point `speckit-analyze` at the task beads. Default true. */
   implementRedirect: boolean
   /** Refuse the taskstoissues skills where beads is active. Default true. */
   blockTasksToIssues: boolean
@@ -112,6 +112,7 @@ export async function setupSpeckit(ctx: Context, overrides: Overrides = {}): Pro
   let active = await probe(location)
   const routing = (): SkillRouting => ({
     implement: active && options.implementRedirect,
+    analyze: active && options.implementRedirect,
     taskstoissues: active && options.blockTasksToIssues,
   })
   let refreshSkills: (() => Promise<void>) | undefined

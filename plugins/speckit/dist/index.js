@@ -1382,6 +1382,7 @@ ${paths.join(`
 // plugins/speckit/src/skills.ts
 var MARKER = "<!-- srobroek.speckit -->";
 var IMPLEMENT_SKILLS = ["speckit-implement", "speckit.implement"];
+var ANALYZE_SKILLS = ["speckit-analyze", "speckit.analyze"];
 var TASKSTOISSUES_SKILLS = [
   "speckit-taskstoissues",
   "speckit.taskstoissues",
@@ -1405,6 +1406,22 @@ molecule's unconditional \`implement\` step instead:
 Do not create or edit \`specs/*/tasks.md\`; the speckit plugin refuses those writes.
 If a check script demands tasks.md (\`check-prerequisites.sh --require-tasks\`), skip it
 and read \`bd list --spec <NNN-slug>\`.`;
+var ANALYZE_REDIRECT = `${MARKER}
+# speckit-analyze here: tasks live in beads
+
+This repository keeps tasks in beads, not \`specs/<spec>/tasks.md\`. Run the command
+below with these changes; its spec, plan and constitution analysis stays as written.
+
+- Run the prerequisite script with \`--json --require-spec\` only, without
+  \`--require-tasks --include-tasks\` (PowerShell: \`-RequireTasks -IncludeTasks\`). It
+  still checks the feature directory, spec.md and plan.md. Do not abort for tasks.md.
+- Wherever the command reads tasks.md, read the task beads: find the run with
+  \`bd query 'spec_id="<NNN-slug>"' --json\`, then \`bd list --parent <implement-step-id> --json\`.
+  Use each bead's id, title, description, acceptance criteria and dependencies.
+- Cite tasks by bead id. A coverage fix is a bead change, never a tasks.md edit.
+
+---
+`;
 var TASKSTOISSUES_REFUSAL = "blocked by speckit: taskstoissues turns tasks.md into GitHub issues, a second task tracker in a repository whose task state already lives in beads. Do not invoke it; link an existing GitHub issue instead with bd update <id> --external-ref gh-<number>. Disable: set the srobroek.speckit plugin option blockTasksToIssues=false";
 var TASKSTOISSUES_CONTENT = `${MARKER}
 ${TASKSTOISSUES_REFUSAL}
@@ -1417,6 +1434,9 @@ function rewriteSkill(skill, routing) {
       content: IMPLEMENT_REDIRECT,
       description: "Work a SpecKit feature's implementation task beads under its molecule's implement step (replaces the tasks.md implement command)"
     };
+  if (routing.analyze && ANALYZE_SKILLS.includes(skill.id))
+    return { content: `${ANALYZE_REDIRECT}
+${skill.content ?? ""}` };
   if (routing.taskstoissues && TASKSTOISSUES_SKILLS.includes(skill.id))
     return { content: TASKSTOISSUES_CONTENT, description: "Disabled here: task state lives in beads; do not load" };
   return;
@@ -2681,6 +2701,7 @@ async function setupSpeckit(ctx, overrides = {}) {
   let active = await probe(location);
   const routing = () => ({
     implement: active && options.implementRedirect,
+    analyze: active && options.implementRedirect,
     taskstoissues: active && options.blockTasksToIssues
   });
   let refreshSkills;
@@ -2872,6 +2893,7 @@ function createPlugin(overrides = {}) {
 var src_default = createPlugin();
 export {
   AGENTS_DIR,
+  ANALYZE_REDIRECT,
   DENY_REASON,
   IMPLEMENT_REDIRECT,
   SKILLS_DIR,

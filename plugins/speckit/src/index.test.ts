@@ -4,6 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
 import {
+  ANALYZE_REDIRECT,
   createPlugin,
   DENY_REASON,
   IMPLEMENT_REDIRECT,
@@ -128,6 +129,7 @@ describe("skill routing", () => {
     { id: "speckit-implement", content: "Execute tasks.md" },
     { id: "speckit-taskstoissues", content: "Create GitHub issues" },
     { id: "speckit-plan", content: "Plan" },
+    { id: "speckit-analyze", content: "Analyze" },
   ]
 
   test("redirects implement and refuses taskstoissues where beads is active", async () => {
@@ -135,6 +137,7 @@ describe("skill routing", () => {
     expect(fake.skills.get("speckit-implement")?.content).toBe(IMPLEMENT_REDIRECT)
     expect(fake.skills.get("speckit-taskstoissues")?.content).toContain(TASKSTOISSUES_REFUSAL)
     expect(fake.skills.get("speckit-plan")?.content).toBe("Plan")
+    expect(fake.skills.get("speckit-analyze")?.content).toBe(`${ANALYZE_REDIRECT}\nAnalyze`)
     await expect(before(fake, "skill", { id: "speckit-taskstoissues" })).rejects.toThrow(TASKSTOISSUES_REFUSAL)
     await before(fake, "skill", { id: "speckit-plan" })
     await cleanup()
