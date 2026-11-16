@@ -1183,8 +1183,10 @@ function scanShell(source, options = {}) {
     if (expansion.inner !== undefined) {
       if (!options.executableSubstitutionsOnly || expansion.executable)
         substitutions.push(expansion.inner);
-      else
-        substitutions.push(...scanShell(expansion.inner, options).substitutions);
+      else {
+        for (const found of bodySubstitutions(expansion.inner))
+          substitution(found);
+      }
     }
     if (!expansion.closed)
       complete = false;
@@ -1489,10 +1491,28 @@ function splitCommands(source) {
   flush();
   return positions;
 }
+var INTERPRETERS = new Set(["bash", "sh", "zsh", "dash", "ksh"]);
 function nestedSources(source) {
   const scan = scanShell(source, { executableSubstitutionsOnly: true });
   const sources = [...scan.substitutions];
   let unknown = !scan.complete;
+  for (const item of scan.items) {
+    if (item.kind !== "command")
+      continue;
+    let first = 0;
+    while (first < item.words.length && /^[A-Za-z_]\w*=/.test(source.slice(item.words[first]?.start, item.words[first]?.end)))
+      first++;
+    const head = item.words[first];
+    if (head === undefined || !INTERPRETERS.has(head.value.split("/").pop() ?? head.value))
+      continue;
+    if (item.words.some((word, index) => index > first && /^-[A-Za-z]*c/.test(word.value)))
+      continue;
+    for (const document of item.hereDocuments)
+      sources.push(document.body);
+    for (const redirect of item.redirects)
+      if (redirect.hereString === true)
+        sources.push(redirect.value);
+  }
   for (const match of source.matchAll(/\b(?:bash|sh|zsh|dash|ksh)\s+-c\s+((?:'[^']*')|(?:"[^"]*")|[^\s;&|]+)/g)) {
     const value = match[1];
     if (!value || value.startsWith('"$') || value.startsWith("'$"))

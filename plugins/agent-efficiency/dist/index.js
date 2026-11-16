@@ -910,8 +910,10 @@ function scanShell(source, options = {}) {
     if (expansion.inner !== undefined) {
       if (!options.executableSubstitutionsOnly || expansion.executable)
         substitutions.push(expansion.inner);
-      else
-        substitutions.push(...scanShell(expansion.inner, options).substitutions);
+      else {
+        for (const found of bodySubstitutions(expansion.inner))
+          substitution(found);
+      }
     }
     if (!expansion.closed)
       complete = false;
@@ -1174,6 +1176,7 @@ function bodySubstitutions(body) {
   }
   return found;
 }
+var INTERPRETERS = new Set(["bash", "sh", "zsh", "dash", "ksh"]);
 
 // plugins/agent-efficiency/src/session-cache.ts
 function onSessionDeleted(ctx, evict, onAgentsChanged) {

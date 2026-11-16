@@ -266,7 +266,11 @@ export function scanShell(source: string, options: { executableSubstitutionsOnly
   const substitution = (expansion: Expansion): void => {
     if (expansion.inner !== undefined) {
       if (!options.executableSubstitutionsOnly || expansion.executable) substitutions.push(expansion.inner)
-      else substitutions.push(...scanShell(expansion.inner, options).substitutions)
+      else {
+        // Inside `"${X:-'$(cmd)'}"` the single quotes are literal, so the expansion body is
+        // read for substitutions without quote handling: any `$(` or backtick may run.
+        for (const found of bodySubstitutions(expansion.inner)) substitution(found)
+      }
     }
     if (!expansion.closed) complete = false
   }
@@ -579,6 +583,8 @@ function splitCommands(source: string): CommandPosition[] {
   return positions
 }
 
+const INTERPRETERS = new Set(["bash", "sh", "zsh", "dash", "ksh"])
+
 function nestedSources(source: string): { sources: string[]; unknown: boolean } {
   // A balanced, quote-aware scan: `"$(bd create "a (b)")"` is one substitution, which a
   // regex over the quoted body cannot see. Backticks, `<( )` and substitutions nested
@@ -586,6 +592,21 @@ function nestedSources(source: string): { sources: string[]; unknown: boolean } 
   const scan = scanShell(source, { executableSubstitutionsOnly: true })
   const sources: string[] = [...scan.substitutions]
   let unknown = !scan.complete
+  // A shell interpreter reading a here-document or here-string runs its body as a script.
+  for (const item of scan.items) {
+    if (item.kind !== "command") continue
+    let first = 0
+    while (
+      first < item.words.length &&
+      /^[A-Za-z_]\w*=/.test(source.slice(item.words[first]?.start, item.words[first]?.end))
+    )
+      first++
+    const head = item.words[first]
+    if (head === undefined || !INTERPRETERS.has(head.value.split("/").pop() ?? head.value)) continue
+    if (item.words.some((word, index) => index > first && /^-[A-Za-z]*c/.test(word.value))) continue
+    for (const document of item.hereDocuments) sources.push(document.body)
+    for (const redirect of item.redirects) if (redirect.hereString === true) sources.push(redirect.value)
+  }
   for (const match of source.matchAll(/\b(?:bash|sh|zsh|dash|ksh)\s+-c\s+((?:'[^']*')|(?:"[^"]*")|[^\s;&|]+)/g)) {
     const value = match[1]
     if (!value || value.startsWith('"$') || value.startsWith("'$")) unknown = true

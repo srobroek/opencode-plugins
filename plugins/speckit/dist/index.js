@@ -1681,6 +1681,9 @@ import {
 } from "fs";
 import { hostname } from "os";
 import { basename as basename4, dirname as dirname4, isAbsolute as isAbsolute5, join as join6, resolve as resolve5 } from "path";
+
+// plugins/lib/src/shell-command.ts
+var INTERPRETERS = new Set(["bash", "sh", "zsh", "dash", "ksh"]);
 // plugins/beads/src/bd-actor-gate.ts
 var VALUE_FLAGS = new Set([
   "--actor",
@@ -1691,23 +1694,26 @@ var VALUE_FLAGS = new Set([
   "--dolt-auto-commit",
   "--mem-profile"
 ]);
-var STATE_BUILTINS = new Set([
-  "export",
-  "unset",
-  "eval",
-  "source",
-  ".",
-  "declare",
-  "typeset",
-  "local",
-  "read",
-  "readonly"
-]);
-var SHELL_INTERPRETERS = new Set(["bash", "sh", "zsh", "dash", "ksh", "source", "."]);
+var SHELL_INTERPRETERS = new Set(["bash", "sh", "zsh", "dash", "ksh"]);
 var OPENERS = new Set(["if", "while", "until", "for", "select", "case"]);
 var HEADER_ONLY = new Set(["for", "select", "case"]);
 var CLOSERS = new Set(["fi", "done", "esac"]);
 var BRANCHES = new Set(["else", "elif"]);
+var HAZARD_WORDS = new Set([
+  "unset",
+  "declare",
+  "typeset",
+  "readonly",
+  "local",
+  "alias",
+  "eval",
+  "source",
+  ".",
+  "builtin",
+  "function",
+  "case",
+  "enable"
+]);
 function globalValue(globals, names) {
   for (const [index, token] of globals.entries()) {
     for (const name of names) {

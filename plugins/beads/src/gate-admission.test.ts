@@ -251,6 +251,8 @@ describe("dynamic directory detection reads parsed commands", () => {
     "cd $TARGET && bd create y",
     "FOO=1 cd `pwd` && bd create y",
     'builtin cd "$(mktemp -d)"; bd create y',
+    'command -p cd "$D" && bd create y',
+    'builtin cd "$D"',
     "echo hi | pushd $X",
   ])("flags %s", (command) => {
     expect(changesDirectoryDynamically(command)).toBe(true)

@@ -460,7 +460,10 @@ export function changesDirectoryDynamically(command: string): boolean {
       first++
     const words = item.words.slice(first)
     let head = 0
-    if (words[0]?.value === "builtin" || words[0]?.value === "command") head = words[1]?.value === "--" ? 2 : 1
+    if (words[0]?.value === "builtin" || words[0]?.value === "command") {
+      head = 1
+      while (words[head]?.value.startsWith("-") === true) head++
+    }
     const name = words[head]?.value
     if (name !== "cd" && name !== "pushd") return false
     return words.slice(head + 1).some((word) => word.expands && /[$`]/u.test(word.value))

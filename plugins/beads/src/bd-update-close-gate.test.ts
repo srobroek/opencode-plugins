@@ -32,6 +32,13 @@ describe("bd update close-status gate", () => {
       expect(decideBdUpdateClose(command)).toBeUndefined()
   })
 
+  test("refuses a closing update fed to a shell as a quoted here-document", () => {
+    expect(decideBdUpdateClose("bash <<'EOF'\nbd update bead-1 --status closed\nEOF")).toEqual({
+      block: true,
+      reason: UPDATE_CLOSE_REASON,
+    })
+  })
+
   test("allows the reason-bearing close command", () => {
     expect(decideBdUpdateClose('bd close bead-1 --reason "implemented and reviewed"')).toBeUndefined()
   })

@@ -138,6 +138,17 @@ test("finds a substitution whose quoted argument holds parentheses or a nested q
   expect(parse('echo "$(bd create "a (b)"').unknown).toBe(true)
 })
 
+test("reads executable substitutions inside parameter expansions and shell-fed here-documents", () => {
+  const sources = (command: string) => parse(command).nested.map((child) => child.command)
+  expect(sources(`echo "\${X:-'$(bd create y)'}"`)).toEqual(["bd create y"])
+  expect(sources("echo \"\${X:-`bd create y`}\"")).toEqual(["bd create y"])
+  expect(sources("bash <<'EOF'\nbd create y\nEOF")).toEqual(["bd create y\n"])
+  expect(sources("bash -s <<'EOF'\nbd create y\nEOF")).toEqual(["bd create y\n"])
+  expect(sources("sh <<< 'bd create y'")).toEqual(["bd create y"])
+  expect(sources("cat <<'EOF'\nbd create y\nEOF")).toEqual([])
+  expect(sources("bash -c 'true' <<'EOF'\nbd create y\nEOF").includes("bd create y\n")).toBe(false)
+})
+
 test("lists invocations of one executable with their globals and verb", () => {
   const found = parsedInvocations(parse("gh -R o/r pr list && echo $(gh --json api x)"), "gh", ["--json"])
   expect(found.map(({ verb, globals }) => ({ verb, globals }))).toEqual([
