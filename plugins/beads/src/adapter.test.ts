@@ -159,16 +159,18 @@ describe("claim holder candidates", () => {
 
 describe("claim holder confirmation", () => {
   test.each([
-    ["a post-verb --actor", "BEADS_ACTOR=B bd update proj-1 --claim --actor A; bd update proj-1 --assignee B"],
-    ["a post-verb --actor= form", "BEADS_ACTOR=B bd update proj-1 --claim --actor=A; bd update proj-1 --assignee B"],
-  ])("%s outranks the prefix actor, so a handoff to the prefix actor is not tracked", async (_name, command) => {
+    ["a post-verb --actor", "BEADS_ACTOR=B bd update proj-1 --claim --actor A; bd update proj-1 --assignee B", ["A"]],
+    ["a post-verb --actor= form", "BEADS_ACTOR=B bd update proj-1 --claim --actor=A; bd update proj-1 --assignee B", ["A"]],
+    ["a post-verb --actor over a pre-verb one", "bd --actor B update proj-1 --claim --actor A; bd update proj-1 --assignee B", ["A"]],
+    ["a non-literal flag actor", 'BEADS_ACTOR=B bd update proj-1 --claim --actor "$X"; bd update proj-1 --assignee B', []],
+  ])("%s outranks the prefix actor, so a handoff to B is not tracked", async (_name, command, candidates) => {
     const asked: string[][] = []
     const run: BdRun = async (_cwd, args) => {
       asked.push(args)
       return { output: JSON.stringify([{ id: "proj-1", assignee: "B" }]) }
     }
     const lookups = claimLookups(command, "/repo", {}, "Claimed proj-1", bdInvocations(command), "B")
-    expect(lookups.map((lookup) => [...lookup.candidates])).toEqual([["A"]])
+    expect(lookups.map((lookup) => [...lookup.candidates])).toEqual([candidates])
     const holders = await readClaimHolders(lookups, {}, run, Date.now() + 1000)
     expect(asked.length).toBe(1)
     expect(holders.size).toBe(0)
