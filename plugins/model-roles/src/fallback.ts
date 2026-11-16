@@ -188,6 +188,12 @@ export function contextFallback(candidates: ReadonlyArray<ModelRef>, failed: Mod
   })
 }
 
+/** The note when the one larger-context retry was already spent on this request. */
+export function contextRetriedNote(failed: ModelRef, limit: number | undefined): string {
+  const size = limit === undefined ? "unknown limit" : `${limit} tokens`
+  return `context too long for ${label(failed)} (${size}) after one larger-context retry; compact the session or start a new one.`
+}
+
 /** The note when no candidate of the tier can take a prompt that was too long. */
 export function contextNote(failed: ModelRef, limit: number | undefined, tier: string | undefined): string {
   const size = limit === undefined ? "unknown limit" : `${limit} tokens`

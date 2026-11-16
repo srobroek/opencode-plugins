@@ -40,6 +40,7 @@ import {
   type ContextLimits,
   contextFallback,
   contextNote,
+  contextRetriedNote,
   duration,
   failureNote,
   fallbackTarget,
@@ -531,8 +532,17 @@ export default Plugin.define({
     }
 
     /** A prompt too long for `failed`: one note to `notifyTo`, deduped like any model failure notice. */
-    const announceContext = async (notifyTo: string, failed: ModelRef, role: string | undefined, subagent?: FailureReport["subagent"]) => {
-      const plain = contextNote(failed, contextLimits().get(healthKey(failed)), contextTier(role, failed))
+    const announceContext = async (
+      notifyTo: string,
+      failed: ModelRef,
+      role: string | undefined,
+      subagent?: FailureReport["subagent"],
+      requestSession?: string,
+    ) => {
+      const limit = contextLimits().get(healthKey(failed))
+      // The one larger-context retry was already spent on this request: say that, not that nothing larger exists.
+      const spent = requestSession !== undefined && contextRetried.has(requestSession)
+      const plain = spent ? contextRetriedNote(failed, limit) : contextNote(failed, limit, contextTier(role, failed))
       await announce({ failed, kind: "context-length", cooldownMs: 0, target: undefined, now: Date.now(), notifyTo, subagent, plain })
     }
 
@@ -842,7 +852,10 @@ export default Plugin.define({
       const spawnRole = isChild ? await spawnRoleOf(sessionID) : undefined
       const role = spawnRole ?? (agent === undefined ? undefined : roleOf(agent, options.agents, options.implicit))
       if (kind === "context-length") {
-        await announceContext(isChild ? (session.parentID as string) : sessionID, failed, role, isChild ? { agent: session.agent, sessionID } : undefined)
+        await announceContext(isChild ? (session.parentID as string) : sessionID, failed, role, isChild ? { agent: session.agent, sessionID } : undefined, sessionID)
+        // The request is over: its retry budget does not carry to the next one.
+        contextRetried.delete(sessionID)
+        triedModels.delete(sessionID)
         return
       }
       // A model that stays in use keeps its tier where it was: nothing moves.
@@ -944,7 +957,14 @@ export default Plugin.define({
      * larger context window. The model is not marked: the failure is the request's, not its health.
      */
     const retryOnLargerContext = async (event: SessionRetry, failed: ModelRef): Promise<void> => {
-      if (contextRetried.has(event.sessionID) || switching.has(event.sessionID)) return
+      // The model that overflowed is out for the rest of this request, so a later switch never returns to it.
+      const tried = triedModels.get(event.sessionID) ?? new Set<string>()
+      triedModels.set(event.sessionID, tried.add(healthKey(failed)))
+      if (contextRetried.has(event.sessionID)) {
+        warn(`session ${event.sessionID}: ${contextRetriedNote(failed, contextLimits().get(healthKey(failed)))}`)
+        return
+      }
+      if (switching.has(event.sessionID)) return
       try {
         await queue(async () => {
           const agent = (await listAgents()).find((a) => a.id === event.agent)
@@ -952,7 +972,8 @@ export default Plugin.define({
           const role = spawnRole ?? (agent === undefined ? undefined : roleOf(agent, options.agents, options.implicit))
           const tier = contextTier(role, failed)
           const limits = contextLimits()
-          const target = contextFallback(contextCandidates(tier, healthView(health, Date.now(), RECENT_MS)), failed, limits)
+          const recent = healthView(health, Date.now(), RECENT_MS)
+          const target = contextFallback(contextCandidates(tier, (ref) => (tried.has(healthKey(ref)) ? 0 : recent(ref))), failed, limits)
           if (target === undefined) {
             warn(`session ${event.sessionID}: ${contextNote(failed, limits.get(healthKey(failed)), tier)}`)
             return
@@ -1946,7 +1967,7 @@ export default Plugin.define({
           const cooldownMs = await markFailed(failed, kind, { message })
           const role = spawn?.role ?? (agent === undefined ? undefined : roleOf(agent, options.agents, options.implicit))
           if (kind === "context-length") {
-            await announceContext(event.sessionID, failed, role, { agent: agentID, sessionID: childSessionID(message) })
+            await announceContext(event.sessionID, failed, role, { agent: agentID, sessionID: childSessionID(message) }, childSessionID(message))
             return
           }
           const target = cooldownMs > 0 ? fallbackTarget(options, available, view(), role, failed) : undefined

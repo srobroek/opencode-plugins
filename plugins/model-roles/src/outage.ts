@@ -61,7 +61,7 @@ const stoppedLine = (stopped: Stopped, provider: string, kind: FailureClass, fir
 export function decideFailureNotice(state: NoticeState, report: FailureReport): Notice | undefined {
   const { failed, kind, now, notifyTo } = report
   if (failureScope(kind) === "provider") return decideOutage(state, report)
-  const key = `${notifyTo}\0${healthKey(failed)}\0${kind}`
+  const key = kind === "context-length" ? `${notifyTo}\0${healthKey(failed)}\0${kind}\0${report.subagent?.sessionID ?? ""}` : `${notifyTo}\0${healthKey(failed)}\0${kind}`
   const last = state.notices.get(key)
   if (last !== undefined && now - last < NOTICE_DEDUPE_MS) return undefined
   state.notices.set(key, now)

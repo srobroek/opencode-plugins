@@ -1246,6 +1246,81 @@ describe("runtime fallback", () => {
     await cleanup()
   })
 
+  test("two children over the context window on one model each get a note in the parent", async () => {
+    const limited = models.map((m) => ({ ...m, limit: { context: 200_000 } }))
+    const host = createHost({ agents: [{ id: "general" }], models: limited as Model[], options: fallbackOptions })
+    host.sessions.set("r", { id: "r" })
+    host.sessions.set("c1", { id: "c1", parentID: "r", agent: "general", model: sonnet })
+    host.sessions.set("c2", { id: "c2", parentID: "r", agent: "general", model: sonnet })
+    const cleanup = await setup(host)
+    const message = "prompt is too long: 250000 tokens > 200000 maximum"
+    host.emit(failed("c1", { type: "unknown", message, status: 400 }))
+    host.emit(failed("c2", { type: "unknown", message, status: 400 }))
+    await settle()
+    expect(methods(host, "synthetic")).toHaveLength(2)
+    host.close()
+    await cleanup()
+  })
+
+  test("a child's tool error first, then its failure event, still gives one note", async () => {
+    const limited = models.map((m) => ({ ...m, limit: { context: 200_000 } }))
+    const host = createHost({ agents: [{ id: "general" }], models: limited as Model[], options: fallbackOptions })
+    host.sessions.set("r", { id: "r" })
+    host.sessions.set("c", { id: "c", parentID: "r", agent: "general", model: sonnet })
+    const cleanup = await setup(host)
+    const message = "prompt is too long: 250000 tokens > 200000 maximum"
+    await host.spawnFailed({ agent: "general", prompt: "x" }, `Subagent failed (sessionID: c): ${message}`, "r")
+    await settle()
+    host.emit(failed("c", { type: "unknown", message, status: 400 }))
+    await settle()
+    expect(methods(host, "synthetic").map((c) => (c.input as { sessionID: string }).sessionID)).toEqual(["r"])
+    host.close()
+    await cleanup()
+  })
+
+  test("after a context fallback, a later switch in the same request skips the small model", async () => {
+    const windows = [
+      { ...models[0], limit: { context: 200_000 } },
+      { ...models[1], limit: { context: 1_000_000 } },
+      { ...models[2], limit: { context: 2_000_000 } },
+    ] as Model[]
+    const roles = { ...fallbackOptions, roles: { task: ["amazon-bedrock/claude-sonnet#high", "anthropic/claude-haiku", "opencode/flint"] } }
+    const host = createHost({ agents: [{ id: "build" }], models: windows, options: roles })
+    const cleanup = await setup(host)
+    const long = { type: "api", message: "prompt is too long: 213462 tokens > 200000 maximum", status: 400 }
+    const busy = { type: "api", message: "Service Unavailable", status: 503 }
+    const base = { sessionID: "r", agent: "build" }
+    expect(await host.fireRetry({ ...base, model: sonnet, error: long, attempt: 2 })).toEqual({ retry: true, delay: 0 })
+    expect(await host.fireRetry({ ...base, model: haiku, error: busy, attempt: 4 })).toEqual({ retry: true, delay: 0 })
+    expect(methods(host, "switchModel").map((c) => (c.input as { model: ModelRef }).model)).toEqual([haiku, flint])
+    host.close()
+    await cleanup()
+  })
+
+  test("the final note says whether the larger-context retry was spent", async () => {
+    const windows = [
+      { ...models[0], limit: { context: 200_000 } },
+      { ...models[1], limit: { context: 1_000_000 } },
+      { ...models[2], limit: { context: 2_000_000 } },
+    ] as Model[]
+    const roles = { ...fallbackOptions, roles: { task: ["amazon-bedrock/claude-sonnet#high", "anthropic/claude-haiku", "opencode/flint"] } }
+    const host = createHost({ agents: [{ id: "build" }], models: windows, options: roles })
+    host.sessions.set("r", { id: "r", agent: "build", model: haiku })
+    const cleanup = await setup(host)
+    const long = { type: "api", message: "prompt is too long: 1100000 tokens > 1000000 maximum", status: 400 }
+    const base = { sessionID: "r", agent: "build", error: long }
+    await host.fireRetry({ ...base, model: sonnet, attempt: 2 })
+    // The retry on haiku overflows too: the budget is spent although flint is larger.
+    expect(await host.fireRetry({ ...base, model: haiku, attempt: 3 }, { retry: false })).toEqual({ retry: false })
+    expect(methods(host, "switchModel")).toHaveLength(1)
+    host.emit(failed("r", long))
+    await settle()
+    const texts = methods(host, "synthetic").map((c) => (c.input as { text: string }).text)
+    expect(texts).toEqual(["context too long for anthropic/claude-haiku (1000000 tokens) after one larger-context retry; compact the session or start a new one."])
+    host.close()
+    await cleanup()
+  })
+
   test("a child over the context window gets one note in its parent, whether its failure event or the tool error comes first", async () => {
     const limited = models.map((m) => ({ ...m, limit: { context: 200_000 } }))
     const host = createHost({ agents: [{ id: "general" }], models: limited as Model[], options: fallbackOptions })

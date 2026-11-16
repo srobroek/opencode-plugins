@@ -150,6 +150,19 @@ describe("model failure", () => {
     expect(fail("p1")).toBeUndefined()
   })
 
+  test("a context-length notice is per child; other classes stay per model", () => {
+    const state = newNoticeState()
+    const long = (child: string, now: number) =>
+      decideFailureNotice(state, report(bedrock("a"), "context-length", now, { subagent: { agent: "coder", sessionID: child }, plain: `${child} long` }))
+    expect(long("c1", 0)?.text).toBe("c1 long")
+    expect(long("c2", 1_000)?.text).toBe("c2 long")
+    expect(long("c1", 2_000)).toBeUndefined()
+    const busy = (child: string, now: number) =>
+      decideFailureNotice(state, report(bedrock("a"), "rate-limit", now, { subagent: { agent: "coder", sessionID: child }, plain: "busy" }))
+    expect(busy("c1", 0)).toBeDefined()
+    expect(busy("c2", 1_000)).toBeUndefined()
+  })
+
   test("a model failure does not recover or open a provider outage", () => {
     const state = newNoticeState()
     decideFailureNotice(state, report(bedrock("a"), "rate-limit", 0, { plain: "x" }))
