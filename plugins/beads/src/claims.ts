@@ -302,12 +302,16 @@ export function claimLookups(
     const target = claimTarget(invocation, cwd, env, planned)
     if (target.ambiguous === true) continue
     const candidates = new Set<string>()
-    for (const actor of [
-      injected,
-      transitionFlags(invocation.args).actorOverride,
-      invocationActor(invocation, env),
-      ...invocation.conditional,
-    ])
+    // An explicit `--actor` or the invocation's own prefix assignment is the only actor it can run
+    // as; injected, inherited and conditionally exported actors do not apply to it.
+    const override = transitionFlags(invocation.args).actorOverride
+    const explicit =
+      (override !== undefined && override !== "") ||
+      globalValue(invocation.globals, ["--actor"]) !== undefined ||
+      invocation.prefix.some((token) => /^(BEADS_ACTOR|BD_ACTOR)=/.test(token))
+    for (const actor of explicit
+      ? [override, invocationActor(invocation, env)]
+      : [injected, invocationActor(invocation, env), ...invocation.conditional])
       if (actor !== undefined && actor !== null && actor !== "") candidates.add(actor)
     const plan = planned.get(invocationSignature(invocation))
     const direct = mutationTargetIds(invocation.args)

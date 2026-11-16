@@ -147,3 +147,11 @@ describe("bd shell parsing", () => {
     ])
   })
 })
+
+describe("claim holder candidates", () => {
+  test("an explicit --actor is the only candidate, so a conditional export cannot become the holder", () => {
+    const command = "if true; then export BEADS_ACTOR=B; fi; bd update proj-1 --claim --actor A; bd update proj-1 --assignee B"
+    const [lookup] = claimLookups(command, "/repo", {}, "Claimed proj-1", bdInvocations(command), "B")
+    expect([...(lookup?.candidates ?? [])]).toEqual(["A"])
+  })
+})
