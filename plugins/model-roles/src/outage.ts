@@ -33,8 +33,8 @@ export type NoticeState = {
   /** When a model failure last notified, by `session\0model\0class`. */
   notices: Map<string, number>
   /**
-   * When a context overflow was last handled, by the session that overflowed. A child's failure
-   * event and its tool error claim the same entry, so the parent hears once. Bounded by the window.
+   * When a context overflow was last handled, by the overflowing session and its execution. A child's
+   * failure event and its tool error claim the same entry, so the parent hears once. Bounded by the window.
    */
   contextNotices: Map<string, number>
 }
@@ -42,13 +42,16 @@ export type NoticeState = {
 export const newNoticeState = (): NoticeState => ({ outages: new Map(), notices: new Map(), contextNotices: new Map() })
 
 /**
- * Whether the context overflow of `sessionID` is still to be handled, and claim it. A claim lasts
- * `NOTICE_DEDUPE_MS`; expired claims are dropped on each call.
+ * Whether the context overflow of one execution of `sessionID` is still to be handled, and claim it.
+ * The failure event and the `subagent` tool error of one execution claim once, so the parent hears
+ * once. A later execution (a resume) has its own claim. `execution` is the id of the event that
+ * started the execution, when known. A claim lasts `NOTICE_DEDUPE_MS`; expired claims are dropped.
  */
-export function claimContextNotice(state: NoticeState, sessionID: string, now: number): boolean {
+export function claimContextNotice(state: NoticeState, sessionID: string, execution: string | undefined, now: number): boolean {
   for (const [id, at] of state.contextNotices) if (now - at >= NOTICE_DEDUPE_MS) state.contextNotices.delete(id)
-  if (state.contextNotices.has(sessionID)) return false
-  state.contextNotices.set(sessionID, now)
+  const key = `${sessionID}\0${execution ?? ""}`
+  if (state.contextNotices.has(key)) return false
+  state.contextNotices.set(key, now)
   return true
 }
 
@@ -125,7 +128,7 @@ function decideOutage(state: NoticeState, report: FailureReport): Notice | undef
 
 /** A session was deleted or has run successfully since: it no longer needs resuming. */
 export function forgetSession(state: NoticeState, sessionID: string): void {
-  state.contextNotices.delete(sessionID)
+  for (const key of state.contextNotices.keys()) if (key.startsWith(`${sessionID}\0`)) state.contextNotices.delete(key)
   for (const outage of state.outages.values()) {
     outage.stopped.delete(sessionID)
   }

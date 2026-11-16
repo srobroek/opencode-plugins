@@ -30,6 +30,22 @@ describe("resumeGuard", () => {
     expect(decision).toMatchObject({ action: "refuse" })
     expect((decision as { reason: string }).reason).toContain("no tier")
   })
+
+  test("names the overflow when the only allowed candidates already overflowed", () => {
+    const one = resumeGuard({ current: opus, refused: "too dear", tier: "task", candidates: [{ model: opus, allowed: false }], overflowed: [{ model: haiku, limit: 200_000 }] })
+    expect(one).toEqual({
+      action: "refuse",
+      reason:
+        "This resume would run on a/opus, which the guard refuses. The only allowed candidate, b/haiku (200000 tokens), already overflowed its context; compact the session or start a new one.\ntoo dear",
+    })
+    const two = resumeGuard({ current: opus, refused: "x", tier: "task", candidates: [], overflowed: [{ model: haiku, limit: 1_000 }, { model: sonnet }] })
+    expect((two as { reason: string }).reason).toContain("The allowed candidates, b/haiku (1000 tokens), a/sonnet#high (unknown limit), already overflowed")
+  })
+
+  test("an allowed candidate that did not overflow still wins over the overflow note", () => {
+    const decision = resumeGuard({ current: opus, refused: "x", tier: "task", candidates: [{ model: sonnet, allowed: true }], overflowed: [{ model: haiku }] })
+    expect(decision).toEqual({ action: "switch", model: sonnet })
+  })
 })
 
 describe("tierModels", () => {

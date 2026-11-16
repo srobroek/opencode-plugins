@@ -195,6 +195,7 @@ const finishedAt = (event: unknown): number => {
   return Number.isFinite(at) ? at : Date.now()
 }
 const SUCCEEDED_EVENT = "session.execution.succeeded"
+const STARTED_EVENT = "session.execution.started"
 const CREATED_EVENT = "session.created"
 /** The host reloaded its config; a `/tiers` save or a hand edit of the global file lands here too. */
 const CONFIG_EVENT = "config.updated"
@@ -521,6 +522,17 @@ export default Plugin.define({
       for (const notice of decideRecovery(noticeState, model)) await notify(notice.sessionID, notice.text, "recovery")
     }
 
+    /**
+     * The event that started each session's current execution, by session. The host's failed event names no
+     * execution, so this is what tells one overflow from the next. Bounded: the oldest sessions go first.
+     */
+    const executionOf = new Map<string, string>()
+    const noteExecution = (sessionID: string, id: string) => {
+      executionOf.delete(sessionID)
+      executionOf.set(sessionID, id)
+      if (executionOf.size > 500) executionOf.delete(executionOf.keys().next().value as string)
+    }
+
     /** The context window of each listed model, from the catalog's `Model.Info.limit.context`. */
     const contextLimits = (): ContextLimits => {
       const limits = new Map<string, number>()
@@ -549,7 +561,7 @@ export default Plugin.define({
       isChild: boolean
     }) => {
       const { sessionID, notifyTo, failed } = overflow
-      if (!claimContextNotice(noticeState, sessionID ?? `${notifyTo}\0${overflow.agent ?? ""}`, Date.now())) return
+      if (!claimContextNotice(noticeState, sessionID ?? `${notifyTo}\0${overflow.agent ?? ""}`, sessionID === undefined ? undefined : executionOf.get(sessionID), Date.now())) return
       // A child keeps the tier it was spawned in: its snapshot first, then its recorded spawn tier, then its agent's.
       const stored = overflow.isChild && sessionID !== undefined ? await snapshotOf(sessionID) : undefined
       const role = stored?.tier ?? overflow.spawnRole ?? overflow.role
@@ -1527,26 +1539,35 @@ export default Plugin.define({
       // child spawned may be guarded now, and the host would keep the child on it: switch it to the tier's.
       const refused = await judge(event, agent, model)
       const tier = snapshot.tier ?? (await spawnRoleOf(childID))
+      const usable = refused === undefined ? [] : tierModels(options.roles, tier).filter((m) => unavailableReason(m, available) === undefined)
+      const limits = contextLimits()
+      // A model the child's prompt already overflowed is never a way back; it is named if it was the only one left.
+      const judged = await Promise.all(
+        usable
+          .sort((x, y) => Number(view()(x) !== undefined) - Number(view()(y) !== undefined))
+          .map(async (m) => ({ model: m, allowed: (await judge(event, agent, m)) === undefined, spent: hasOverflowed(snapshot, m) })),
+      )
       const decision = resumeGuard({
         current: model,
         refused,
         tier,
-        candidates:
-          refused === undefined
-            ? []
-            : await Promise.all(
-                tierModels(options.roles, tier)
-                  .filter((m) => unavailableReason(m, available) === undefined && !hasOverflowed(snapshot, m))
-                  .sort((x, y) => Number(view()(x) !== undefined) - Number(view()(y) !== undefined))
-                  .map(async (m) => ({ model: m, allowed: (await judge(event, agent, m)) === undefined })),
-              ),
+        candidates: judged.filter((c) => !c.spent),
+        overflowed: judged.filter((c) => c.spent && c.allowed).map((c) => ({ model: c.model, limit: limits.get(healthKey(c.model)) })),
       })
       if (decision.action === "refuse") throw new Error(decision.reason)
       if (decision.action === "switch") {
         const to = decision.model
         const outcome = await switchWithin(childID, to, tier, () => {
           if (snapshotsClosed) return
-          childModels.set(childID, { model: modelLabel(to), ...(tier === undefined ? {} : { tier }), configRevision: configRevision(options), at: Date.now(), rule: "guard-reroute" })
+          // An automatic reroute keeps the overflow history: only a deliberate reroute (a model or a tier) resets it.
+          childModels.set(childID, {
+            model: modelLabel(to),
+            ...(tier === undefined ? {} : { tier }),
+            configRevision: configRevision(options),
+            at: Date.now(),
+            rule: "guard-reroute",
+            ...(snapshot.overflowed === undefined ? {} : { overflowed: snapshot.overflowed }),
+          })
           void persistSnapshot(childID)
         })
         if (outcome !== "switched") throw new Error(`This resume would run on ${modelLabel(model)}, which the guard refuses, and switching the child to ${modelLabel(to)} did not complete (${outcome}).`)
@@ -2028,8 +2049,15 @@ export default Plugin.define({
           const sessionID = (event as { data?: { sessionID?: unknown } }).data?.sessionID
           if (typeof sessionID === "string") {
             requestLog.delete(sessionID)
+            executionOf.delete(sessionID)
             forgetSession(noticeState, sessionID)
           }
+          continue
+        }
+        if (type === STARTED_EVENT) {
+          const sessionID = (event as { data?: { sessionID?: unknown } }).data?.sessionID
+          const id = (event as { id?: unknown }).id
+          if (typeof sessionID === "string" && typeof id === "string") noteExecution(sessionID, id)
           continue
         }
         if (type === CREATED_EVENT) {

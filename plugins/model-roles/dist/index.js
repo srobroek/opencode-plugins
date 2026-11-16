@@ -3776,13 +3776,14 @@ function hostWarn(source) {
 var NOTICE_DEDUPE_MS = 60000;
 var OUTAGE_STALE_MS = 15 * 60000;
 var newNoticeState = () => ({ outages: new Map, notices: new Map, contextNotices: new Map });
-function claimContextNotice(state, sessionID, now) {
+function claimContextNotice(state, sessionID, execution, now) {
   for (const [id, at] of state.contextNotices)
     if (now - at >= NOTICE_DEDUPE_MS)
       state.contextNotices.delete(id);
-  if (state.contextNotices.has(sessionID))
+  const key = `${sessionID}\x00${execution ?? ""}`;
+  if (state.contextNotices.has(key))
     return false;
-  state.contextNotices.set(sessionID, now);
+  state.contextNotices.set(key, now);
   return true;
 }
 var stoppedKey = (report) => report.subagent?.sessionID ?? `${report.notifyTo}\x00${report.subagent?.agent ?? ""}`;
@@ -3835,7 +3836,9 @@ function decideOutage(state, report) {
   return { sessionID: notifyTo, text: line === undefined ? head : `${head} ${line}` };
 }
 function forgetSession(state, sessionID) {
-  state.contextNotices.delete(sessionID);
+  for (const key of state.contextNotices.keys())
+    if (key.startsWith(`${sessionID}\x00`))
+      state.contextNotices.delete(key);
   for (const outage of state.outages.values()) {
     outage.stopped.delete(sessionID);
   }
@@ -4132,6 +4135,16 @@ function resumeGuard(facts) {
   const allowed = facts.candidates.find((c) => c.allowed);
   if (allowed !== undefined)
     return { action: "switch", model: allowed.model };
+  const spent = facts.overflowed ?? [];
+  if (spent.length > 0) {
+    const list = spent.map((c) => `${modelText(c.model)} (${c.limit === undefined ? "unknown limit" : `${c.limit} tokens`})`).join(", ");
+    const which = spent.length === 1 ? `The only allowed candidate, ${list}, already` : `The allowed candidates, ${list}, already`;
+    return {
+      action: "refuse",
+      reason: `This resume would run on ${modelText(facts.current)}, which the guard refuses. ${which} overflowed its context; compact the session or start a new one.
+${facts.refused}`
+    };
+  }
   const where = facts.tier === undefined ? "the child has no tier to switch within" : `no candidate of tier '${facts.tier}' passes the guard`;
   return { action: "refuse", reason: `This resume would run on ${modelText(facts.current)}, which the guard refuses, and ${where}.
 ${facts.refused}` };
@@ -5218,6 +5231,7 @@ var finishedAt = (event) => {
   return Number.isFinite(at) ? at : Date.now();
 };
 var SUCCEEDED_EVENT = "session.execution.succeeded";
+var STARTED_EVENT = "session.execution.started";
 var CREATED_EVENT = "session.created";
 var CONFIG_EVENT = "config.updated";
 var CHILD_LOOKUP_MS = 3000;
@@ -5475,6 +5489,13 @@ ${refs.size}`;
       for (const notice of decideRecovery(noticeState, model))
         await notify(notice.sessionID, notice.text, "recovery");
     };
+    const executionOf = new Map;
+    const noteExecution = (sessionID, id) => {
+      executionOf.delete(sessionID);
+      executionOf.set(sessionID, id);
+      if (executionOf.size > 500)
+        executionOf.delete(executionOf.keys().next().value);
+    };
     const contextLimits = () => {
       const limits = new Map;
       for (const model of available) {
@@ -5486,7 +5507,7 @@ ${refs.size}`;
     };
     const onContextOverflow = async (overflow) => {
       const { sessionID, notifyTo, failed } = overflow;
-      if (!claimContextNotice(noticeState, sessionID ?? `${notifyTo}\x00${overflow.agent ?? ""}`, Date.now()))
+      if (!claimContextNotice(noticeState, sessionID ?? `${notifyTo}\x00${overflow.agent ?? ""}`, sessionID === undefined ? undefined : executionOf.get(sessionID), Date.now()))
         return;
       const stored = overflow.isChild && sessionID !== undefined ? await snapshotOf(sessionID) : undefined;
       const role = stored?.tier ?? overflow.spawnRole ?? overflow.role;
@@ -6311,11 +6332,15 @@ ${refs.size}`;
       }
       const refused = await judge(event, agent, model);
       const tier = snapshot.tier ?? await spawnRoleOf(childID);
+      const usable = refused === undefined ? [] : tierModels(options.roles, tier).filter((m) => unavailableReason(m, available) === undefined);
+      const limits = contextLimits();
+      const judged = await Promise.all(usable.sort((x, y) => Number(view()(x) !== undefined) - Number(view()(y) !== undefined)).map(async (m) => ({ model: m, allowed: await judge(event, agent, m) === undefined, spent: hasOverflowed(snapshot, m) })));
       const decision = resumeGuard({
         current: model,
         refused,
         tier,
-        candidates: refused === undefined ? [] : await Promise.all(tierModels(options.roles, tier).filter((m) => unavailableReason(m, available) === undefined && !hasOverflowed(snapshot, m)).sort((x, y) => Number(view()(x) !== undefined) - Number(view()(y) !== undefined)).map(async (m) => ({ model: m, allowed: await judge(event, agent, m) === undefined })))
+        candidates: judged.filter((c) => !c.spent),
+        overflowed: judged.filter((c) => c.spent && c.allowed).map((c) => ({ model: c.model, limit: limits.get(healthKey(c.model)) }))
       });
       if (decision.action === "refuse")
         throw new Error(decision.reason);
@@ -6324,7 +6349,14 @@ ${refs.size}`;
         const outcome = await switchWithin(childID, to, tier, () => {
           if (snapshotsClosed)
             return;
-          childModels.set(childID, { model: modelLabel(to), ...tier === undefined ? {} : { tier }, configRevision: configRevision(options), at: Date.now(), rule: "guard-reroute" });
+          childModels.set(childID, {
+            model: modelLabel(to),
+            ...tier === undefined ? {} : { tier },
+            configRevision: configRevision(options),
+            at: Date.now(),
+            rule: "guard-reroute",
+            ...snapshot.overflowed === undefined ? {} : { overflowed: snapshot.overflowed }
+          });
           persistSnapshot(childID);
         });
         if (outcome !== "switched")
@@ -6797,8 +6829,16 @@ ${refs.size}`;
           const sessionID = event.data?.sessionID;
           if (typeof sessionID === "string") {
             requestLog.delete(sessionID);
+            executionOf.delete(sessionID);
             forgetSession(noticeState, sessionID);
           }
+          continue;
+        }
+        if (type === STARTED_EVENT) {
+          const sessionID = event.data?.sessionID;
+          const id = event.id;
+          if (typeof sessionID === "string" && typeof id === "string")
+            noteExecution(sessionID, id);
           continue;
         }
         if (type === CREATED_EVENT) {

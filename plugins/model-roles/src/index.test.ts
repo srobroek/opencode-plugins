@@ -2857,6 +2857,58 @@ describe("a child keeps its resolved model", () => {
       await cleanupHost()
     })
 
+    const started = async (host: ReturnType<typeof createHost>, id: string) => {
+      host.emit({ type: "session.execution.started", id, data: { sessionID: "c" } })
+      await settle()
+    }
+    const three = { roles: { task: ["amazon-bedrock/claude-sonnet#high", "anthropic/claude-haiku", "opencode/flint"] }, agents: { general: "task" } }
+
+    test("a resume that overflows the larger model too is switched and noted again, once per execution", async () => {
+      const { again, cleanupAgain } = await spawnThenReload(three, limited)
+      again.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: sonnet })
+      await started(again, "e1")
+      await event(again)
+      await again.spawn("subagent", resume, "build", "r", "call-2")
+      again.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: haiku })
+      await started(again, "e2")
+      await event(again)
+      // The tool error of the same execution adds nothing.
+      await tool(again)
+      expect(methods(again, "switchModel").map((c) => c.input)).toEqual([
+        { sessionID: "c", model: haiku },
+        { sessionID: "c", model: flint },
+      ])
+      const texts = methods(again, "synthetic").map((c) => (c.input as { text: string }).text)
+      expect(texts).toHaveLength(2)
+      expect(texts[0]).toContain("the session now runs anthropic/claude-haiku (1000000 tokens)")
+      expect(texts[1]).toContain("the session now runs opencode/flint (2000000 tokens)")
+      expect(again.storage.get("spawn-model:c")).toMatchObject({ model: "opencode/flint", overflowed: [sonnetHigh, "anthropic/claude-haiku"] })
+      again.close()
+      await cleanupAgain()
+    })
+
+    test("a guard reroute keeps the overflow history, so a later guard change never selects the overflowed model", async () => {
+      const { again, cleanupAgain } = await spawnThenReload(three, limited)
+      again.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: sonnet })
+      await event(again)
+      again.close()
+      await cleanupAgain()
+      // The guard refuses haiku, where the child runs: it is rerouted past the overflowed sonnet, to flint.
+      const second = await reopen(again, limited, { ...three, guard: { expensive: ["anthropic/claude-haiku"] } })
+      await second.host.spawn("subagent", resume, "build", "r", "call-2")
+      await settle()
+      expect(methods(second.host, "switchModel").map((c) => c.input)).toEqual([{ sessionID: "c", model: flint }])
+      expect(second.host.storage.get("spawn-model:c")).toMatchObject({ model: "opencode/flint", rule: "guard-reroute", overflowed: [sonnetHigh] })
+      second.host.close()
+      await second.cleanupHost()
+      // Now flint is refused and haiku allowed: the reroute goes to haiku, not back to sonnet.
+      const third = await reopen(second.host, limited, { ...three, guard: { expensive: ["opencode/flint"] } })
+      await third.host.spawn("subagent", resume, "build", "r", "call-3")
+      expect(methods(third.host, "switchModel").map((c) => c.input)).toEqual([{ sessionID: "c", model: haiku }])
+      third.host.close()
+      await third.cleanupHost()
+    })
+
     describe("with the guard on", () => {
       const priced = [
         { providerID: "amazon-bedrock", id: "claude-opus", variants: [], cost: [{ input: 12 }], limit: { context: 2_000_000 } },
@@ -2888,7 +2940,9 @@ describe("a child keeps its resolved model", () => {
         await cleanupAgain()
         // The guard now refuses haiku, where the child runs; sonnet is allowed but overflowed.
         const { host, cleanupHost } = await reopen(again, limited, { ...first, guard: { expensive: ["anthropic/claude-haiku"] } })
-        await expect(host.spawn("subagent", resume, "build", "r", "call-2")).rejects.toThrow(/resume would run on anthropic\/claude-haiku.*no candidate of tier 'task'/s)
+        await expect(host.spawn("subagent", resume, "build", "r", "call-2")).rejects.toThrow(
+          /resume would run on anthropic\/claude-haiku, which the guard refuses\. The only allowed candidate, amazon-bedrock\/claude-sonnet#high \(200000 tokens\), already overflowed its context; compact the session or start a new one\./,
+        )
         expect(methods(host, "switchModel")).toHaveLength(0)
         host.close()
         await cleanupHost()

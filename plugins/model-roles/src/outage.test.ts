@@ -150,17 +150,24 @@ describe("model failure", () => {
     expect(fail("p1")).toBeUndefined()
   })
 
-  test("a context-length notice is claimed once per overflowing session, expires and is forgotten", () => {
+  test("a context-length notice is claimed once per overflowing execution, expires and is forgotten", () => {
     const state = newNoticeState()
-    expect(claimContextNotice(state, "c1", 0)).toBe(true)
-    expect(claimContextNotice(state, "c2", 1_000)).toBe(true)
-    expect(claimContextNotice(state, "c1", 2_000)).toBe(false)
-    // The window passes: a later overflow of the same child is noted again, and stale entries go.
-    expect(claimContextNotice(state, "c1", 61_000)).toBe(true)
-    expect(state.contextNotices.has("c2")).toBe(false)
+    expect(claimContextNotice(state, "c1", "e1", 0)).toBe(true)
+    expect(claimContextNotice(state, "c2", "e1", 1_000)).toBe(true)
+    // The event and the tool error of one execution claim once.
+    expect(claimContextNotice(state, "c1", "e1", 2_000)).toBe(false)
+    // A new execution of the same child (a resume) is its own overflow.
+    expect(claimContextNotice(state, "c1", "e2", 3_000)).toBe(true)
+    // With no known execution, the session alone is the key.
+    expect(claimContextNotice(state, "c3", undefined, 3_000)).toBe(true)
+    expect(claimContextNotice(state, "c3", undefined, 4_000)).toBe(false)
+    // The window passes: stale entries go, the live ones stay.
+    expect(claimContextNotice(state, "c1", "e1", 62_000)).toBe(true)
+    expect(state.contextNotices.size).toBe(3)
+    expect(claimContextNotice(state, "c1", "e2", 62_500)).toBe(false)
     forgetSession(state, "c1")
-    expect(state.contextNotices.size).toBe(0)
-    expect(claimContextNotice(state, "c1", 62_000)).toBe(true)
+    expect(state.contextNotices.size).toBe(1)
+    expect(claimContextNotice(state, "c1", "e1", 63_000)).toBe(true)
   })
 
   test("a model failure does not recover or open a provider outage", () => {
