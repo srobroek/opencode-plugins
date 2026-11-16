@@ -1964,10 +1964,16 @@ function ageOf(path) {
     return 0;
   }
 }
+function unsafeRecord(path) {
+  return readBounded(path).kind === "unreadable";
+}
 function lockHolder(lock) {
   let ageMs = ageOf(lock);
   try {
-    const parsed = JSON.parse(readFileSync4(lock, "utf8"));
+    const record = readBounded(lock);
+    if (record.kind !== "text")
+      throw new Error("unreadable");
+    const parsed = JSON.parse(record.text);
     if (typeof parsed.taken === "number")
       ageMs = Math.max(0, Date.now() - parsed.taken);
     const owner = typeof parsed.owner === "string" && parsed.owner.length > 0 ? parsed.owner : "unknown owner";
@@ -1980,12 +1986,10 @@ function lockHolder(lock) {
   }
 }
 function abandoned(lock) {
-  let raw;
-  try {
-    raw = readFileSync4(lock, "utf8");
-  } catch {
+  const record = readBounded(lock);
+  if (record.kind !== "text")
     return false;
-  }
+  const raw = record.text;
   let holder;
   try {
     holder = JSON.parse(raw);
@@ -2046,7 +2050,10 @@ function holderNow(owner, token, writer, writerStart = writer === undefined ? un
 }
 function stillOurs(lock, token) {
   try {
-    const holder = JSON.parse(readFileSync4(lock, "utf8"));
+    const record = readBounded(lock);
+    if (record.kind !== "text")
+      return false;
+    const holder = JSON.parse(record.text);
     return holder.token === token && holder.pid === process.pid && holder.host === HOST;
   } catch {
     return false;
@@ -2116,7 +2123,15 @@ async function hold(store, owner, waitMs = WAIT_MS, signal) {
               reason: `Beads embedded write lock could not be taken at ${lock} (${code ?? "unknown error"}). The write was refused rather than risk a second writer on the embedded Dolt journal.`
             };
           }
-          takeOverIfAbandoned(lock, join6(store, STEAL_NAME));
+          const steal = join6(store, STEAL_NAME);
+          const unsafe = unsafeRecord(lock) ? lock : unsafeRecord(steal) ? steal : undefined;
+          if (unsafe !== undefined) {
+            return {
+              kind: "failed",
+              reason: `Beads embedded write lock path ${unsafe} is not a small regular file (a FIFO, symlink or oversized file), so its holder cannot be read safely. The write was refused rather than run unlocked. Inspect and remove that path by hand, then retry.`
+            };
+          }
+          takeOverIfAbandoned(lock, steal);
         }
       }
       if (signal?.aborted === true) {

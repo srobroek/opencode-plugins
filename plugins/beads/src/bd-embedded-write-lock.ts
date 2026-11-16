@@ -1159,10 +1159,21 @@ function ageOf(path: string): number {
   }
 }
 
+/**
+ * Whether something that is not a small regular file sits at a lock path (a FIFO, a
+ * symlink to `/dev/zero`, an oversized file). Such a record cannot be read safely, so
+ * the lock is never judged from it and never taken over: the write is refused.
+ */
+function unsafeRecord(path: string): boolean {
+  return readBounded(path).kind === "unreadable"
+}
+
 function lockHolder(lock: string): string {
   let ageMs = ageOf(lock)
   try {
-    const parsed = JSON.parse(readFileSync(lock, "utf8")) as Partial<Holder>
+    const record = readBounded(lock)
+    if (record.kind !== "text") throw new Error("unreadable")
+    const parsed = JSON.parse(record.text) as Partial<Holder>
     if (typeof parsed.taken === "number") ageMs = Math.max(0, Date.now() - parsed.taken)
     const owner = typeof parsed.owner === "string" && parsed.owner.length > 0 ? parsed.owner : "unknown owner"
     const pid = typeof parsed.pid === "number" ? `pid ${parsed.pid}` : "pid unknown"
@@ -1186,13 +1197,11 @@ function lockHolder(lock: string): string {
  * judged by the lease length alone.
  */
 function abandoned(lock: string): boolean {
-  let raw: string
-  try {
-    raw = readFileSync(lock, "utf8")
-  } catch {
-    // Released while we were reading it; the next create attempt settles it.
-    return false
-  }
+  const record = readBounded(lock)
+  // Absent: released while we were reading it; the next create attempt settles it.
+  // Unreadable: not a small regular file, so never taken over (see unsafeRecord).
+  if (record.kind !== "text") return false
+  const raw = record.text
   let holder: Partial<Holder>
   try {
     holder = JSON.parse(raw) as Partial<Holder>
@@ -1275,7 +1284,9 @@ function holderNow(
 /** Whether the file at `lock` still records the hold this process took. */
 function stillOurs(lock: string, token: string): boolean {
   try {
-    const holder = JSON.parse(readFileSync(lock, "utf8")) as Partial<Holder>
+    const record = readBounded(lock)
+    if (record.kind !== "text") return false
+    const holder = JSON.parse(record.text) as Partial<Holder>
     return holder.token === token && holder.pid === process.pid && holder.host === HOST
   } catch {
     return false
@@ -1389,7 +1400,15 @@ export async function hold(
               reason: `Beads embedded write lock could not be taken at ${lock} (${code ?? "unknown error"}). The write was refused rather than risk a second writer on the embedded Dolt journal.`,
             }
           }
-          takeOverIfAbandoned(lock, join(store, STEAL_NAME))
+          const steal = join(store, STEAL_NAME)
+          const unsafe = unsafeRecord(lock) ? lock : unsafeRecord(steal) ? steal : undefined
+          if (unsafe !== undefined) {
+            return {
+              kind: "failed",
+              reason: `Beads embedded write lock path ${unsafe} is not a small regular file (a FIFO, symlink or oversized file), so its holder cannot be read safely. The write was refused rather than run unlocked. Inspect and remove that path by hand, then retry.`,
+            }
+          }
+          takeOverIfAbandoned(lock, steal)
         }
       }
       // Checked after the attempt, so a caller aborted while its turn was already

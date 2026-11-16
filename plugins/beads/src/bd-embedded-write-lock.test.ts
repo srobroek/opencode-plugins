@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { hostname } from "node:os"
 import { join } from "node:path"
 import {
@@ -807,5 +807,69 @@ describe("waiting for a busy ledger", () => {
       setPreflightWaitForTests()
       rmSync(root, { recursive: true, force: true })
     }
+  })
+
+  describe.each([
+    ["a FIFO", (path: string) => Bun.spawnSync(["mkfifo", path])],
+    ["a symlink to /dev/zero", (path: string) => symlinkSync("/dev/zero", path)],
+  ])("a lock path that is %s", (_name, plant) => {
+    const withHostileLock = async (run: (store: string, root: string) => Promise<void>): Promise<void> => {
+      const root = mkdtempSync(join(Bun.env.TMPDIR ?? "/tmp", "beads-lock-hostile-"))
+      const store = join(root, ".beads")
+      mkdirSync(store, { recursive: true })
+      writeFileSync(join(store, "metadata.json"), "{}")
+      plant(join(store, "omp-embedded-write.lock"))
+      try {
+        await run(store, root)
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    }
+
+    test("hold refuses at once instead of hanging or waiting out the budget", async () => {
+      await withHostileLock(async (store) => {
+        const started = Date.now()
+        const result = await hold(store, "waiter", 20_000)
+        if (result.kind !== "failed") throw new Error("expected a refusal")
+        expect(Date.now() - started).toBeLessThan(2000)
+        expect(result.reason).toContain("not a small regular file")
+        expect(result.busy).toBeUndefined()
+      })
+    })
+
+    test("the preflight blocks the call and writes nothing unlocked", async () => {
+      await withHostileLock(async (store, root) => {
+        const decision = await decideEmbeddedWrite(
+          parse("bd update bead-1 --claim") as unknown as Parameters<typeof decideEmbeddedWrite>[0],
+          root,
+          { ...process.env, BEADS_DIR: store },
+          "hostile-preflight",
+          Date.now() + 5000,
+          () => ({ interpreter: "/opt/bun", script: "/opt/runner.js" }),
+        )
+        if (decision?.kind !== "block") throw new Error(`expected a block, got ${JSON.stringify(decision)}`)
+        expect(decision.reason).toContain("not a small regular file")
+      })
+    })
+
+    test("the runner refuses without starting the write", async () => {
+      await withHostileLock(async (store, root) => {
+        const marker = join(root, "ran")
+        const started = Date.now()
+        const code = await runEmbeddedWriter([
+          "--beads-store",
+          store,
+          "--beads-wait-ms",
+          "20000",
+          "--",
+          "/bin/sh",
+          "-c",
+          `touch ${marker}`,
+        ])
+        expect(code).not.toBe(0)
+        expect(existsSync(marker)).toBe(false)
+        expect(Date.now() - started).toBeLessThan(3000)
+      })
+    })
   })
 })

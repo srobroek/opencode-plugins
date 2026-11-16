@@ -56,6 +56,17 @@ describe("decideShell", () => {
     expect(await decideShell("bd create --title t", root, deps())).toMatchObject({ gate: "bd-actor-gate" })
   })
 
+  test.each([
+    [undefined, 30000],
+    [45000, 45000],
+    [0, 0],
+  ])("forwards embeddedWriteWaitMs %p to the runner as %p ms", async (configured, expected) => {
+    const options = configured === undefined ? {} : { embeddedWriteWaitMs: configured }
+    const decision = await decideShell("bd update proj-1 --claim", root, deps({ actor: "a/b/c", options }))
+    if (decision.kind !== "allow") throw new Error(JSON.stringify(decision))
+    expect(decision.command).toContain(`--beads-wait-ms ${expected} -- bd update`)
+  })
+
   test("refuses a PR without a bead trailer when the repository is controlled", async () => {
     const decision = await decideShell(
       'gh pr create --title t --body "no trailer here"',
