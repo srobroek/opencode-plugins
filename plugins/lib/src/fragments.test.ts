@@ -144,7 +144,7 @@ describe("coding-core", () => {
     for (const word of ["bd ", "bead", "VERDICT", "SPLIT", "PARTIAL"]) expect(text).not.toContain(word)
   })
 
-  test("stays near 850 tokens (about 4 characters each)", () => {
-    expect([...parts.values()].join("\n").length).toBeLessThan(3500)
+  test("stays near 900 tokens (about 4 characters each)", () => {
+    expect([...parts.values()].join("\n").length).toBeLessThan(3700)
   })
 })

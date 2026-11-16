@@ -83,6 +83,7 @@ describe("hard gates", () => {
     await expect(before("c4", "git worktree add /tmp/x")).rejects.toThrow(/worktree-tmp-guard/)
     await expect(before("c5", "git defender status")).rejects.toThrow(/git-defender-user-only/)
     await expect(before("c6", "aws route53 delete-hosted-zone --id Z1")).rejects.toThrow(/dns-delegation-guard/)
+    await expect(before("c7", "uvx git-filter-repo --force --subdirectory-filter X")).rejects.toThrow(/history-rewrite-guard/)
   })
 
   test("other tools and harmless commands pass", async () => {
