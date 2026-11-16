@@ -19,7 +19,7 @@ import {
 } from "node:fs"
 import { homedir } from "node:os"
 import { basename, dirname, isAbsolute, join, resolve } from "node:path"
-import { SAFE_GIT_ARGS } from "./safe-git.ts"
+import { SAFE_GIT_ARGS } from "@srobroek/opencode-lib/safe-git"
 
 /**
  * The landing receipt: the proof a branch landed, written by delivery and read by

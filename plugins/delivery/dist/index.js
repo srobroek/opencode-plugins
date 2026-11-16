@@ -351,7 +351,7 @@ var package_default = {
   }
 };
 
-// plugins/delivery/src/checkout-marker.ts
+// plugins/lib/src/checkout-marker.ts
 import { closeSync, constants, fstatSync, lstatSync, openSync, readlinkSync, readSync } from "fs";
 import { dirname, join } from "path";
 var MAX_MARKER_BYTES = 64 * 1024;
@@ -615,7 +615,7 @@ function signalName(code) {
   return Object.entries(constants2.signals).find(([, n]) => n === code)?.[0] ?? String(code);
 }
 
-// plugins/delivery/src/safe-git.ts
+// plugins/lib/src/safe-git.ts
 import { devNull } from "os";
 var SAFE_GIT_ARGS = [
   "-c",

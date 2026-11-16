@@ -2,7 +2,7 @@ import { lstatSync, realpathSync, type Stats } from "node:fs"
 import { basename, dirname, isAbsolute, resolve, sep } from "node:path"
 import { isDeepStrictEqual } from "node:util"
 import pkg from "../package.json" with { type: "json" }
-import { type GitPin, inspectCheckoutMarker, physical, verifyCheckout } from "./checkout-marker.ts"
+import { type GitPin, inspectCheckoutMarker, physical, verifyCheckout } from "@srobroek/opencode-lib/checkout-marker"
 import {
   type CliResult,
   type CliRunner,

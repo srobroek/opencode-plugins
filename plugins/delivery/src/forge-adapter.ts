@@ -40,7 +40,7 @@ import { devNull, tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { supervise } from "@srobroek/opencode-lib/subprocess"
-import { SAFE_GIT_ARGS } from "./safe-git.ts"
+import { SAFE_GIT_ARGS } from "@srobroek/opencode-lib/safe-git"
 
 export { SAFE_GIT_ARGS }
 
