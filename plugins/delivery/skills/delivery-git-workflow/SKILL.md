@@ -7,7 +7,7 @@ description: Use when creating or reviewing PRs, choosing a merge method, landin
 
 ## Shipping
 
-- A PR is the default for reviewed or outward-facing work. Agent-authored PRs start as drafts (`gh pr create --draft`); promote with `gh pr ready` only after implementation, local validation, required review and CI are complete with no known blocker.
+- A PR is the default for reviewed or outward-facing work. Open every PR as a draft (`gh pr create --draft`). In repositories whose workflows skip drafts and run on `ready_for_review` (for example srobroek/slopvac), a draft runs no CI; elsewhere a draft still runs CI and marking it ready may not start a new run. Mark it ready (`gh pr ready <n>`) only when the work is complete and local checks pass. For a fix round, convert back with `gh pr ready <n> --undo`, push, then mark ready again. Approval is for the exact head after CI is green.
 - The body states what changed, why, and the test plan. Use one close keyword per issue line.
 - GW-7: under squash merge the PR title becomes the commit subject, because `delivery_land` passes the title as the squash subject. Give the title a conventional type and, in a monorepo, the package scope (`fix(beads): catalog refresh fails when offline`). Release automation reads subjects, not body bullets. Write the title for end users, never spec ids, task references or phase names.
 - GW-8: when the target repository is external, upstream, or not controlled by the user, leave internal linkage out of every externally visible title, body, comment, review and template field. Never mention Beads, bead ids, internal ids, agents, gates, orchestration or workflow rationale there. Controlled repositories keep the Beads linkage below.
@@ -16,7 +16,7 @@ description: Use when creating or reviewing PRs, choosing a merge method, landin
 
 GW-4: the agent that creates a PR owns its automated-review loop until landing or explicit human escalation. It may hand landing to a `shepherd`, but never to a watcher that polls while holding a session open. Workers a lead dispatched never request or act on review rounds for the lead's PR.
 
-1. Keep the draft until local review, CI and configured automated reviewers (CodeRabbit, Codex, Copilot review, Greptile, repository-configured ones) have run against the exact head.
+1. Keep the draft until local review passes, then mark it ready so CI and the configured automated reviewers (CodeRabbit, Codex, Copilot review, Greptile, repository-configured ones) run on the exact head.
 2. Park pending waits and continue unrelated work; read the review state later.
 3. Collect the complete actionable set for the head, assign one fix owner, push the new head and rerun every configured reviewer.
 4. Identify findings by review-thread node id, or by review URL plus a stable bot/path/location/finding fingerprint. Count attempts per material issue; a new issue starts at one.
@@ -54,4 +54,4 @@ An ambiguous or contradictory policy is a hold, not permission to guess. Pass th
 
 ## Pitfalls
 
-When `delivery_land`, `delivery_cleanup`, `gh pr create` or `gh pr checks` fails unexpectedly, read [references/pitfalls.md](references/pitfalls.md).
+When `delivery_land`, `delivery_cleanup`, `gh pr create` or `gh pr checks` fails unexpectedly, or a draft PR shows no checks, read [references/pitfalls.md](references/pitfalls.md).
