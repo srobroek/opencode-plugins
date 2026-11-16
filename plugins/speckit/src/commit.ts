@@ -3,12 +3,12 @@
  * `git commit`, whose whole-command permission patterns cannot keep operands or options
  * in bounds. It builds the commit in a private index (HEAD plus the requested artifact
  * paths), checks the resulting tree holds changes only under the workspace's `specs/` and
- * `.specify/`, and commits exactly that tree with plumbing: no hook runs, so nothing can
+ * `.specify/`, and commits exactly that tree with plumbing and hooks off: no hook runs, so nothing can
  * join the commit after the check, and HEAD moves only from the commit it was built on.
  * It never amends.
  */
 
-import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, posix, resolve } from "node:path"
 import type { ToolOutput } from "./tools.ts"
@@ -17,7 +17,7 @@ export const COMMIT_TOOL = "speckit_commit"
 
 export const COMMIT_DESCRIPTION =
   "Commit SpecKit artifacts: stages only specs/ and .specify/, refuses other staged files, never amends.\n" +
-  "Paths are relative to the SpecKit workspace and default to specs/ and .specify/. Refuses when a requested path lies outside them or the index already holds other files. Commits the checked working-tree snapshot of those paths on top of HEAD and runs no git hooks (pre-commit, commit-msg), so run the project's checks separately."
+  "Paths are relative to the SpecKit workspace and default to specs/ and .specify/. Refuses when a requested path lies outside them or the index already holds other files. Commits the checked working-tree snapshot of those paths on top of HEAD. No git hook of any kind runs (pre-commit, commit-msg, reference-transaction, post-index-change), so run the project's checks separately."
 
 export const COMMIT_INPUT = {
   type: "object",
@@ -94,12 +94,19 @@ export function gitEnvironment(source: NodeJS.ProcessEnv, index?: string): Recor
   return env
 }
 
-/** git pinned to `workspace` (`-C`), with a clean environment, literal pathspecs and a bound per command. */
+/**
+ * git pinned to `workspace` (`-C`), with a clean environment, literal pathspecs and a bound
+ * per command. `hooks` is an empty directory used as `core.hooksPath`, so no hook runs
+ * (reference-transaction, post-index-change and the commit hooks included); command-line
+ * `-c` outranks repository config. `core.fsmonitor=false` keeps a configured fsmonitor
+ * program from running either.
+ */
 export const gitIn =
-  (workspace: string): Git =>
+  (workspace: string, hooks: string): Git =>
   async (args, options = {}) => {
     try {
-      const proc = Bun.spawn(["git", "-C", workspace, "--literal-pathspecs", ...args], {
+      const pins = ["-c", `core.hooksPath=${hooks}`, "-c", "core.fsmonitor=false", "--literal-pathspecs"]
+      const proc = Bun.spawn(["git", "-C", workspace, ...pins, ...args], {
         cwd: workspace,
         env: gitEnvironment(process.env, options.index),
         stdin: options.stdin === undefined ? "ignore" : new TextEncoder().encode(options.stdin),
@@ -147,9 +154,33 @@ const realpathOrSelf = (path: string) => {
   }
 }
 
-export async function executeCommit(input: unknown, workspace: string, git: Git = gitIn(workspace)): Promise<ToolOutput> {
+/** Build the git runner from the empty hooks directory every call must use. */
+export type GitFactory = (hooks: string) => Git
+
+export async function executeCommit(
+  input: unknown,
+  workspace: string,
+  makeGit: GitFactory = (hooks) => gitIn(workspace, hooks),
+): Promise<ToolOutput> {
   const request = readCommitParams(input)
   if (typeof request === "string") return refuse(request)
+  // The private scratch holds the empty hooks directory and, later, the private index.
+  const scratch = mkdtempSync(join(tmpdir(), "speckit-commit-"))
+  try {
+    const hooks = join(scratch, "hooks")
+    mkdirSync(hooks)
+    return await commitIn(request, workspace, makeGit(hooks), join(scratch, "index"))
+  } finally {
+    rmSync(scratch, { recursive: true, force: true })
+  }
+}
+
+async function commitIn(
+  request: { message: string; paths?: string[] },
+  workspace: string,
+  git: Git,
+  index: string,
+): Promise<ToolOutput> {
   const located = await git(["rev-parse", "--show-toplevel", "--show-prefix"])
   if (!located.ok) return refuse(located.reason)
   const [toplevel = "", base = ""] = located.stdout.split("\n").map((line) => line.trim())
@@ -183,44 +214,38 @@ export async function executeCommit(input: unknown, workspace: string, git: Git 
   if (foreign.length)
     return refuse(`refused: the index already holds files outside specs/ and .specify/: ${foreign.join(", ")}. Unstage them first.`)
 
-  // The commit is built in a private index from HEAD, so the real index, later edits and
-  // hooks cannot change what was checked.
-  const scratch = mkdtempSync(join(tmpdir(), "speckit-commit-"))
-  try {
-    const index = join(scratch, "index")
-    for (const args of [
-      head === undefined ? ["read-tree", "--empty"] : ["read-tree", head],
-      ["add", "-A", "--", ...params.paths],
-    ]) {
-      const step = await git(args, { index })
-      if (!step.ok) return refuse(step.reason)
-    }
-    const written = await git(["write-tree"], { index })
-    if (!written.ok) return refuse(written.reason)
-    const tree = written.stdout.trim()
-    const diff = await git(["diff-tree", "-r", "--name-only", "--no-renames", "--no-relative", "-z", baseTree, tree])
-    if (!diff.ok) return refuse(diff.reason)
-    const changed = names(diff.stdout)
-    if (!changed.length) return refuse("nothing to commit: the artifacts are unchanged")
-    const stray = outsideArtifacts(changed, base, params.paths)
-    if (stray.length) return refuse(`refused: the commit would change paths outside the request: ${stray.join(", ")}`)
-    const message = params.message.endsWith("\n") ? params.message : `${params.message}\n`
-    const created = await git(["commit-tree", tree, ...(head === undefined ? [] : ["-p", head]), "-F", "-"], {
-      stdin: message,
-    })
-    if (!created.ok) return refuse(created.reason)
-    const commit = created.stdout.trim()
-    // The old value (empty: HEAD must still be unborn) makes a concurrent HEAD move fail instead of being overwritten.
-    const moved = await git(["update-ref", "-m", `speckit_commit: ${message.split("\n", 1)[0]}`, "HEAD", commit, head ?? ""])
-    if (!moved.ok) return refuse(`HEAD moved while committing; nothing was committed. ${moved.reason}`)
-    const files = changed.map((path) => path.slice(base.length))
-    const synced = await git(["reset", "-q", "--", ...files])
-    const sha = commit.slice(0, 12)
-    return {
-      content: `Committed ${sha}: ${files.length} file(s)\n${files.join("\n")}${synced.ok ? "" : `\nThe index was not synced for these paths: ${synced.reason}`}`,
-      metadata: { ok: true, sha, paths: files },
-    }
-  } finally {
-    rmSync(scratch, { recursive: true, force: true })
+  // The commit is built in a private index from HEAD, so the real index and later edits
+  // cannot change what was checked.
+  for (const args of [
+    head === undefined ? ["read-tree", "--empty"] : ["read-tree", head],
+    ["add", "-A", "--", ...params.paths],
+  ]) {
+    const step = await git(args, { index })
+    if (!step.ok) return refuse(step.reason)
+  }
+  const written = await git(["write-tree"], { index })
+  if (!written.ok) return refuse(written.reason)
+  const tree = written.stdout.trim()
+  const diff = await git(["diff-tree", "-r", "--name-only", "--no-renames", "--no-relative", "-z", baseTree, tree])
+  if (!diff.ok) return refuse(diff.reason)
+  const changed = names(diff.stdout)
+  if (!changed.length) return refuse("nothing to commit: the artifacts are unchanged")
+  const stray = outsideArtifacts(changed, base, params.paths)
+  if (stray.length) return refuse(`refused: the commit would change paths outside the request: ${stray.join(", ")}`)
+  const message = params.message.endsWith("\n") ? params.message : `${params.message}\n`
+  const created = await git(["commit-tree", tree, ...(head === undefined ? [] : ["-p", head]), "-F", "-"], {
+    stdin: message,
+  })
+  if (!created.ok) return refuse(created.reason)
+  const commit = created.stdout.trim()
+  // The old value (empty: HEAD must still be unborn) makes a concurrent HEAD move fail instead of being overwritten.
+  const moved = await git(["update-ref", "-m", `speckit_commit: ${message.split("\n", 1)[0]}`, "HEAD", commit, head ?? ""])
+  if (!moved.ok) return refuse(`HEAD moved while committing; nothing was committed. ${moved.reason}`)
+  const files = changed.map((path) => path.slice(base.length))
+  const synced = await git(["reset", "-q", "--", ...files])
+  const sha = commit.slice(0, 12)
+  return {
+    content: `Committed ${sha}: ${files.length} file(s)\n${files.join("\n")}${synced.ok ? "" : `\nThe index was not synced for these paths: ${synced.reason}`}`,
+    metadata: { ok: true, sha, paths: files },
   }
 }

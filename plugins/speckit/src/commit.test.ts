@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, setDefaul
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { artifactPath, executeCommit, type Git, gitEnvironment, gitIn, outsideArtifacts } from "./commit.ts"
+import { artifactPath, executeCommit, type GitFactory, gitEnvironment, gitIn, outsideArtifacts } from "./commit.ts"
 
 describe("artifactPath", () => {
   test.each([
@@ -133,13 +133,15 @@ describe("executeCommit", () => {
   })
 
   /** The real runner, with `before` run ahead of the git step that writes the commit or moves HEAD. */
-  const late = (steps: readonly string[], before: () => void): Git => {
-    const real = gitIn(repo)
-    return (args, options) => {
-      if (steps.includes(args[0] ?? "")) before()
-      return real(args, options)
+  const late =
+    (steps: readonly string[], before: () => void): GitFactory =>
+    (hooks) => {
+      const real = gitIn(repo, hooks)
+      return (args, options) => {
+        if (steps.includes(args[0] ?? "")) before()
+        return real(args, options)
+      }
     }
-  }
   const committedFiles = () => git("show", "--name-only", "--format=", "HEAD").split("\n")
 
   test("commits the working-tree snapshot of a partially staged artifact and syncs its index entry", async () => {
@@ -177,6 +179,19 @@ describe("executeCommit", () => {
     const result = await executeCommit({ message: "x" }, repo)
     expect(result.metadata.ok).toBe(true)
     expect(committedFiles()).toEqual(["specs/001-a/spec.md"])
+  })
+
+  test.each(["reference-transaction", "post-index-change"])("no %s hook runs", async (hook) => {
+    const hooks = join(repo, ".git", "test-hooks")
+    const marker = join(repo, ".git", `ran-${hook}`)
+    mkdirSync(hooks)
+    writeFileSync(join(hooks, hook), `#!/bin/sh\ntouch '${marker}'\n`)
+    chmodSync(join(hooks, hook), 0o755)
+    git("config", "core.hooksPath", hooks)
+    write("specs/001-a/spec.md")
+    const result = await executeCommit({ message: "x" }, repo)
+    expect(result.metadata.ok).toBe(true)
+    expect(existsSync(marker)).toBe(false)
   })
 
   test("refuses when HEAD moves during the commit, keeping the other commit", async () => {

@@ -93,10 +93,14 @@ tree on top of HEAD and syncs the real index for those paths. It never amends, a
 concurrent move of HEAD makes it fail rather than overwrite the other commit. Every git
 call runs pinned to the workspace (`git -C`) without inherited repository selectors
 (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, object-store and `GIT_CONFIG*` variables),
-and it refuses before writing unless git resolves the workspace to itself. It commits
-with plumbing, so no git hook runs (pre-commit, commit-msg): that is the price of
-committing exactly the checked snapshot, so run the project's checks separately. The `spec` agent commits through it, since a shell `git add` or
-`git commit` pattern cannot keep its operands or options in bounds.
+and it refuses before writing unless git resolves the workspace to itself.
+
+No git hook of any kind runs (pre-commit, commit-msg, reference-transaction,
+post-index-change): the tool commits with plumbing, and every git call points
+`core.hooksPath` at an empty directory. That is the price of committing exactly the
+checked snapshot, so run the project's checks separately. The `spec` agent commits
+through it, since a shell `git add` or `git commit` pattern cannot keep its operands or
+options in bounds.
 
 ## Guards and routes
 
