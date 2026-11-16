@@ -2949,6 +2949,43 @@ describe("a child keeps its resolved model", () => {
       await third.cleanupHost()
     })
 
+    describe("a model the user chose is never switched", () => {
+      const tiered = { roles: { task: [sonnetHigh, "anthropic/claude-haiku"] }, agents: { plain: "task" } }
+      const pinnedNote = `context too long for ${sonnetHigh} (200000 tokens); ${sonnetHigh} was chosen explicitly, so model-roles does not switch it. Compact the session, or spawn with a larger-context model.`
+      const overflowOf = async (agents: Array<{ id: string; model?: ModelRef }>, input: Record<string, unknown>) => {
+        const host = createHost({ agents, models: limited, options: tiered as never })
+        host.sessions.set("r", { id: "r" })
+        host.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: sonnet })
+        const cleanup = await setup(host)
+        const spawned = await host.spawn("subagent", { agent: "plain", prompt: "x", ...input }, "build", "r", "call-1")
+        host.emit({ type: "session.created", data: { sessionID: "c", parentID: "r", agent: "plain", model: sonnet } })
+        await settle()
+        await host.spawnDone(spawned, { sessionID: "c" }, "r", "call-1")
+        host.emit({ type: "session.execution.failed", data: { sessionID: "c", error: long } })
+        await settle()
+        return { host, cleanup }
+      }
+      const noted = (host: ReturnType<typeof createHost>) => methods(host, "synthetic").map((c) => (c.input as { text: string }).text)
+
+      test.each([
+        ["an explicit spawn model", [{ id: "plain" }], { model: sonnetHigh }],
+        ["an agent pin", [{ id: "plain", model: sonnet }], {}],
+      ])("a child on %s gets the note and no switch", async (_name, agents, input) => {
+        const { host, cleanup } = await overflowOf(agents, input)
+        expect(methods(host, "switchModel")).toHaveLength(0)
+        expect(noted(host)).toEqual([pinnedNote])
+        host.close()
+        await cleanup()
+      })
+
+      test("a tier-routed child of the same agent is still switched", async () => {
+        const { host, cleanup } = await overflowOf([{ id: "plain" }], { tier: "task" })
+        expect(methods(host, "switchModel").map((c) => c.input)).toEqual([{ sessionID: "c", model: haiku }])
+        host.close()
+        await cleanup()
+      })
+    })
+
     describe("with the guard on", () => {
       const priced = [
         { providerID: "amazon-bedrock", id: "claude-opus", variants: [], cost: [{ input: 12 }], limit: { context: 2_000_000 } },
