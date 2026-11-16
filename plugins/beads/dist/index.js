@@ -1829,17 +1829,15 @@ function decideActorParsed(parsed, env = process.env) {
   if (parsed === null || typeof parsed !== "object")
     return { kind: "block", reason: "command could not be parsed" };
   const candidate = parsed;
-  if (!Array.isArray(candidate.segments) || !candidate.segments.every((segment) => Array.isArray(segment) && segment.every((token) => typeof token === "string")) || !Array.isArray(candidate.nested)) {
+  if (typeof candidate.command !== "string" || !Array.isArray(candidate.nested)) {
     return { kind: "block", reason: "command could not be parsed" };
   }
   let advisory = false;
-  for (const segment of candidate.segments) {
-    const decision = decideActorGate(segment.join(" "), env);
-    if (decision.kind === "block")
-      return decision;
-    if (decision.kind === "advisory")
-      advisory = true;
-  }
+  const own = decideActorGate(candidate.command, env);
+  if (own.kind === "block")
+    return own;
+  if (own.kind === "advisory")
+    advisory = true;
   for (const child of candidate.nested) {
     const decision = decideActorParsed(child, env);
     if (decision.kind === "block")

@@ -67,6 +67,21 @@ describe("decideShell", () => {
     expect(decision.command).toContain(`--beads-wait-ms ${expected} -- bd update`)
   })
 
+  test.each([
+    ['BEADS_ACTOR=opencode/o/t bd comments add proj-1 "fix in progress; say retry; bd create x"'],
+    ['bd comments add proj-1 "fix in progress; say retry; bd create x"'],
+    ['bd comments add proj-1 "bd create foo"'],
+    ["FOO=1 BEADS_ACTOR=x bd create --title t"],
+  ])("does not refuse %s", async (command) => {
+    expect(await decideShell(command, root, deps())).not.toMatchObject({ gate: "bd-actor-gate" })
+  })
+
+  test("refuses a real create after quoted text mentioning an actor", async () => {
+    expect(await decideShell('echo "BEADS_ACTOR=x"; bd create --title t', root, deps())).toMatchObject({
+      gate: "bd-actor-gate",
+    })
+  })
+
   test("refuses a PR without a bead trailer when the repository is controlled", async () => {
     const decision = await decideShell(
       'gh pr create --title t --body "no trailer here"',
