@@ -978,9 +978,9 @@ async function beadsActive(directory, spawn = spawnExit) {
 }
 
 // plugins/speckit/src/commit.ts
-import { existsSync as existsSync3, mkdtempSync, rmSync } from "fs";
+import { existsSync as existsSync3, mkdtempSync, realpathSync, rmSync } from "fs";
 import { tmpdir } from "os";
-import { join as join4, posix } from "path";
+import { join as join4, posix, resolve as resolve2 } from "path";
 var COMMIT_TOOL = "speckit_commit";
 var COMMIT_DESCRIPTION = `Commit SpecKit artifacts: stages only specs/ and .specify/, refuses other staged files, never amends.
 ` + "Paths are relative to the SpecKit workspace and default to specs/ and .specify/. Refuses when a requested path lies outside them or the index already holds other files. Commits the checked working-tree snapshot of those paths on top of HEAD and runs no git hooks (pre-commit, commit-msg), so run the project's checks separately.";
@@ -1017,11 +1017,33 @@ function outsideArtifacts(paths, prefix, requested) {
     return requested !== undefined && !requested.some((root) => local === root || local.startsWith(`${root}/`));
   });
 }
+var GIT_SELECTORS = new Set([
+  "GIT_DIR",
+  "GIT_WORK_TREE",
+  "GIT_INDEX_FILE",
+  "GIT_COMMON_DIR",
+  "GIT_OBJECT_DIRECTORY",
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  "GIT_NAMESPACE",
+  "GIT_CEILING_DIRECTORIES",
+  "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+  "GIT_EXEC_PATH"
+]);
+function gitEnvironment(source, index) {
+  const env = {};
+  for (const [key, value] of Object.entries(source))
+    if (value !== undefined && !GIT_SELECTORS.has(key) && !key.startsWith("GIT_CONFIG"))
+      env[key] = value;
+  env.GIT_TERMINAL_PROMPT = "0";
+  if (index !== undefined)
+    env.GIT_INDEX_FILE = index;
+  return env;
+}
 var gitIn = (workspace) => async (args, options = {}) => {
   try {
-    const proc = Bun.spawn(["git", "--literal-pathspecs", ...args], {
+    const proc = Bun.spawn(["git", "-C", workspace, "--literal-pathspecs", ...args], {
       cwd: workspace,
-      env: { ...process.env, GIT_TERMINAL_PROMPT: "0", ...options.env },
+      env: gitEnvironment(process.env, options.index),
       stdin: options.stdin === undefined ? "ignore" : new TextEncoder().encode(options.stdin),
       stdout: "pipe",
       stderr: "pipe",
@@ -1052,14 +1074,24 @@ function readCommitParams(input) {
     return `refused: only paths under specs/ or .specify/ may be committed; got ${outside.join(", ")}`;
   return { message: value.message, paths: value.paths.map((path) => artifactPath(path)) };
 }
+var realpathOrSelf = (path) => {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve2(path);
+  }
+};
 async function executeCommit(input, workspace, git = gitIn(workspace)) {
   const request = readCommitParams(input);
   if (typeof request === "string")
     return refuse(request);
-  const prefix = await git(["rev-parse", "--show-prefix"]);
-  if (!prefix.ok)
-    return refuse(prefix.reason);
-  const base = prefix.stdout.trim();
+  const located = await git(["rev-parse", "--show-toplevel", "--show-prefix"]);
+  if (!located.ok)
+    return refuse(located.reason);
+  const [toplevel = "", base = ""] = located.stdout.split(`
+`).map((line) => line.trim());
+  if (resolve2(toplevel, base) !== realpathOrSelf(workspace))
+    return refuse(`refused: git resolved the workspace to ${resolve2(toplevel, base)}, not ${workspace}`);
   const parent = await git(["rev-parse", "-q", "--verify", "HEAD^{commit}"]);
   const head = parent.ok ? parent.stdout.trim() : undefined;
   const paths = request.paths ?? [];
@@ -1090,16 +1122,16 @@ async function executeCommit(input, workspace, git = gitIn(workspace)) {
     return refuse(`refused: the index already holds files outside specs/ and .specify/: ${foreign.join(", ")}. Unstage them first.`);
   const scratch = mkdtempSync(join4(tmpdir(), "speckit-commit-"));
   try {
-    const env = { GIT_INDEX_FILE: join4(scratch, "index") };
+    const index = join4(scratch, "index");
     for (const args of [
       head === undefined ? ["read-tree", "--empty"] : ["read-tree", head],
       ["add", "-A", "--", ...params.paths]
     ]) {
-      const step = await git(args, { env });
+      const step = await git(args, { index });
       if (!step.ok)
         return refuse(step.reason);
     }
-    const written = await git(["write-tree"], { env });
+    const written = await git(["write-tree"], { index });
     if (!written.ok)
       return refuse(written.reason);
     const tree = written.stdout.trim();
@@ -1142,7 +1174,7 @@ The index was not synced for these paths: ${synced.reason}`}`,
 
 // plugins/speckit/src/setup.ts
 import { appendFileSync, copyFileSync, existsSync as existsSync4, lstatSync, mkdirSync, readFileSync as readFileSync3, writeFileSync } from "fs";
-import { dirname, isAbsolute as isAbsolute2, join as join5, parse, resolve as resolve2, sep } from "path";
+import { dirname, isAbsolute as isAbsolute2, join as join5, parse, resolve as resolve3, sep } from "path";
 import { fileURLToPath } from "url";
 var PHASE_TIMEOUT_MS = 60000;
 var STOPPED = "stopped by the tool call; rerun to resume, finished phases are skipped";
@@ -1324,7 +1356,7 @@ function output(result) {
 `) || `exit ${result.exitCode}`;
 }
 async function runSetup(params, cwd, signal) {
-  const repo = resolve2(cwd, params.workspace ?? ".");
+  const repo = resolve3(cwd, params.workspace ?? ".");
   const phases = [];
   const record = (phase, status, detail) => phases.push({ phase, status, detail });
   const finish = () => ({
@@ -1587,7 +1619,7 @@ function wantsSpecAgent(setting, directories, detect = usesSpeckit) {
 }
 
 // plugins/speckit/src/tasks-guard.ts
-import { dirname as dirname2, isAbsolute as isAbsolute4, resolve as resolve3 } from "path";
+import { dirname as dirname2, isAbsolute as isAbsolute4, resolve as resolve4 } from "path";
 var DENY_REASON = "blocked by speckit (task state lives in beads, tasks.md is never authored): this repo has an active beads workspace, so specs/*/tasks.md is read-only legacy and must not be written or created. Create implementation tasks as beads under the feature molecule's implement step instead, by the TASK STATE route of the SpecKit workflow instructions: load the beads-ledger skill and create one task graph (bd create --graph specs/<NNN-slug>/tasks.graph.json, dry-run first) whose nodes carry parent_id <implement-step-id>, spec_id <NNN-slug>, acceptance criteria and routing metadata, with blocks edges for true dependencies; read them back with bd list --parent <implement-step-id> --json. Then work the tasks via bd ready -> bd update <id> --claim -> bd close <id> --reason. Find the implement step with bd mol current <molecule-root-id>. IF A SKILL DEMANDED tasks.md: skip check-prerequisites.sh --require-tasks and read bd list --spec <NNN-slug>. Do not create tasks.md to get past the check. Disable: set the srobroek.speckit plugin option tasksGuard=false";
 var TASKS_PATH = /(?:^|\/)specs\/[^/\s'"]+\/tasks\.md(?:$|[/\s'"])/;
 var WRITE_REDIRECT = /[0-9]*&?>>?\s*['"]?[^|;&]*specs\/[^|;&]*\/tasks\.md/;
@@ -1622,7 +1654,7 @@ function repoOf(path) {
 }
 function tasksTargets(tool, input, directory) {
   if (WRITE_TOOLS.has(tool)) {
-    const hits = writeTargets(tool, input).filter(isTasksMd).map((path) => isAbsolute4(path) ? path : resolve3(directory, path));
+    const hits = writeTargets(tool, input).filter(isTasksMd).map((path) => isAbsolute4(path) ? path : resolve4(directory, path));
     return hits.length > 0 ? [...new Set(hits.map(repoOf))] : undefined;
   }
   if (!isShellTool(tool))
@@ -1647,7 +1679,7 @@ async function decideToolCall(tool, input, directory, probe) {
 }
 
 // plugins/speckit/src/tools.ts
-import { isAbsolute as isAbsolute7, resolve as resolve6 } from "path";
+import { isAbsolute as isAbsolute7, resolve as resolve7 } from "path";
 
 // plugins/speckit/src/spec-start.ts
 var APPROVAL_QUESTION = "Require routine human approval checkpoints for this spec/run? Yes or no.";
@@ -1879,7 +1911,7 @@ async function startSpec(input, command) {
 // plugins/speckit/src/spec-start-runtime.ts
 import { spawn } from "child_process";
 import { randomUUID } from "crypto";
-import { realpathSync as realpathSync3 } from "fs";
+import { realpathSync as realpathSync4 } from "fs";
 import { join as join8 } from "path";
 
 // plugins/beads/src/bd-embedded-write-lock.ts
@@ -1889,13 +1921,13 @@ import {
   existsSync as existsSync6,
   openSync as openSync2,
   readFileSync as readFileSync4,
-  realpathSync as realpathSync2,
+  realpathSync as realpathSync3,
   statSync as statSync3,
   unlinkSync,
   writeSync
 } from "fs";
 import { hostname } from "os";
-import { basename as basename4, dirname as dirname4, isAbsolute as isAbsolute6, join as join7, resolve as resolve5 } from "path";
+import { basename as basename4, dirname as dirname4, isAbsolute as isAbsolute6, join as join7, resolve as resolve6 } from "path";
 
 // plugins/lib/src/shell-command.ts
 var INTERPRETERS = new Set(["bash", "sh", "zsh", "dash", "ksh"]);
@@ -1942,8 +1974,8 @@ var TRUTHY = { "": true, "1": true, t: true, T: true, TRUE: true, true: true, Tr
 
 // plugins/beads/src/beads-store.ts
 import { spawnSync } from "child_process";
-import { lstatSync as lstatSync2, realpathSync, statSync as statSync2 } from "fs";
-import { dirname as dirname3, isAbsolute as isAbsolute5, resolve as resolve4 } from "path";
+import { lstatSync as lstatSync2, realpathSync as realpathSync2, statSync as statSync2 } from "fs";
+import { dirname as dirname3, isAbsolute as isAbsolute5, resolve as resolve5 } from "path";
 function repoIdentity(cwd) {
   if (cwd.includes("\x00"))
     return;
@@ -1962,7 +1994,7 @@ function repoIdentity(cwd) {
   }
   const out = String(result.stdout ?? "").trim();
   try {
-    return realpathSync(isAbsolute5(out) ? out : resolve4(cwd, out));
+    return realpathSync2(isAbsolute5(out) ? out : resolve5(cwd, out));
   } catch {
     return;
   }
@@ -1970,13 +2002,13 @@ function repoIdentity(cwd) {
 function repositoryState(cwd) {
   let current;
   try {
-    current = realpathSync(cwd);
+    current = realpathSync2(cwd);
   } catch {
     return "unknown";
   }
   for (;; ) {
     try {
-      lstatSync2(resolve4(current, ".git"));
+      lstatSync2(resolve5(current, ".git"));
       return "present";
     } catch (error) {
       if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT")
@@ -1989,19 +2021,19 @@ function repositoryState(cwd) {
   }
 }
 function sessionPinFor(cwd) {
-  const local = resolve4(cwd, ".beads");
+  const local = resolve5(cwd, ".beads");
   const common = repoIdentity(cwd);
   if (common === undefined)
     return;
   if (common !== cwd && common.endsWith("/.git")) {
-    const primaryRoot = resolve4(common, "..");
+    const primaryRoot = resolve5(common, "..");
     try {
-      if (realpathSync(cwd) === primaryRoot && isDir(local))
+      if (realpathSync2(cwd) === primaryRoot && isDir(local))
         return local;
     } catch {
       return;
     }
-    const primary = resolve4(primaryRoot, ".beads");
+    const primary = resolve5(primaryRoot, ".beads");
     if (isDir(primary))
       return primary;
   }
@@ -2147,7 +2179,7 @@ function storeFor(globals, cwd, env) {
   return canonicalStore(sessionPinFor(cwd));
 }
 function absolute(path, cwd) {
-  return isAbsolute6(path) ? path : resolve5(cwd, path);
+  return isAbsolute6(path) ? path : resolve6(cwd, path);
 }
 function isDirectory2(path) {
   try {
@@ -2158,9 +2190,9 @@ function isDirectory2(path) {
 }
 function canonical(path) {
   try {
-    return realpathSync2(path);
+    return realpathSync3(path);
   } catch {
-    return resolve5(path);
+    return resolve6(path);
   }
 }
 function canonicalStore(store) {
@@ -2490,10 +2522,10 @@ class IncompleteStart extends Error {
 }
 async function runSpecStart(options, signal, commandMs = COMMAND_MS, module = BEADS_LOCK, timers = globalThis) {
   const started = Date.now();
-  const cwd = realpathSync3(options.workspace);
+  const cwd = realpathSync4(options.workspace);
   const env = {
     ...process.env,
-    BEADS_DIR: realpathSync3(join8(cwd, ".beads")),
+    BEADS_DIR: realpathSync4(join8(cwd, ".beads")),
     GIT_TERMINAL_PROMPT: "0",
     SSH_ASKPASS: "/usr/bin/false",
     SSH_ASKPASS_REQUIRE: "force",
@@ -2654,14 +2686,14 @@ var START_INPUT = {
 };
 var START_DESCRIPTION = `Start or resume a spec workflow, with an explicit routine approval choice from the user before pouring.
 ` + "Persists and reads back the answer, reuses it on resume, and requires separate consent to migrate an existing gated run. Holds the Beads store's write lock for the whole start. Returns CHOICE_REQUIRED or MIGRATION_REQUIRED with a question to ask the user, READY when the run can advance, or INCOMPLETE (store-lock wait ran out, a bd command passed its bound, or cancellation) with the step reached and whether a pour was issued; inspect the run before retrying. Reviews, tests and safety confirmations remain required.";
-var within = (base, path) => path === undefined ? base : isAbsolute7(path) ? path : resolve6(base, path);
+var within = (base, path) => path === undefined ? base : isAbsolute7(path) ? path : resolve7(base, path);
 var record = (input) => input !== null && typeof input === "object" && !Array.isArray(input) ? input : {};
 function toolDirectory(input, session, speckitWorkspace) {
   return record(input).workspace === undefined ? speckitWorkspace(session) ?? session : session;
 }
 function setupTarget(input, directory) {
   const workspace = record(input).workspace;
-  return typeof workspace === "string" && workspace !== "" ? resolve6(directory, workspace) : directory;
+  return typeof workspace === "string" && workspace !== "" ? resolve7(directory, workspace) : directory;
 }
 function readSetupParams(input) {
   const value = record(input);

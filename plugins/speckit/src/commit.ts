@@ -8,9 +8,9 @@
  * It never amends.
  */
 
-import { existsSync, mkdtempSync, rmSync } from "node:fs"
+import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join, posix } from "node:path"
+import { join, posix, resolve } from "node:path"
 import type { ToolOutput } from "./tools.ts"
 
 export const COMMIT_TOOL = "speckit_commit"
@@ -59,20 +59,49 @@ export function outsideArtifacts(paths: readonly string[], prefix: string, reque
   })
 }
 
-export type GitOptions = { env?: Record<string, string>; stdin?: string }
+/** `index`: the tool's private index, the only git selector a call may set. */
+export type GitOptions = { index?: string; stdin?: string }
 export type Git = (
   args: string[],
   options?: GitOptions,
 ) => Promise<{ ok: true; stdout: string } | { ok: false; reason: string }>
 
-/** git in `workspace`, with literal pathspecs, no prompts and a bound per command. */
+/** Inherited variables that would select another repository, work tree, index, object store or git binary. */
+const GIT_SELECTORS: ReadonlySet<string> = new Set([
+  "GIT_DIR",
+  "GIT_WORK_TREE",
+  "GIT_INDEX_FILE",
+  "GIT_COMMON_DIR",
+  "GIT_OBJECT_DIRECTORY",
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  "GIT_NAMESPACE",
+  "GIT_CEILING_DIRECTORIES",
+  "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+  "GIT_EXEC_PATH",
+])
+
+/**
+ * The environment of every git call: `source` without the repository selectors and the
+ * environment-backed config (`GIT_CONFIG*`), plus no prompts and the tool's own private
+ * index when given. Author and committer identity variables pass through.
+ */
+export function gitEnvironment(source: NodeJS.ProcessEnv, index?: string): Record<string, string> {
+  const env: Record<string, string> = {}
+  for (const [key, value] of Object.entries(source))
+    if (value !== undefined && !GIT_SELECTORS.has(key) && !key.startsWith("GIT_CONFIG")) env[key] = value
+  env.GIT_TERMINAL_PROMPT = "0"
+  if (index !== undefined) env.GIT_INDEX_FILE = index
+  return env
+}
+
+/** git pinned to `workspace` (`-C`), with a clean environment, literal pathspecs and a bound per command. */
 export const gitIn =
   (workspace: string): Git =>
   async (args, options = {}) => {
     try {
-      const proc = Bun.spawn(["git", "--literal-pathspecs", ...args], {
+      const proc = Bun.spawn(["git", "-C", workspace, "--literal-pathspecs", ...args], {
         cwd: workspace,
-        env: { ...process.env, GIT_TERMINAL_PROMPT: "0", ...options.env },
+        env: gitEnvironment(process.env, options.index),
         stdin: options.stdin === undefined ? "ignore" : new TextEncoder().encode(options.stdin),
         stdout: "pipe",
         stderr: "pipe",
@@ -110,12 +139,23 @@ export function readCommitParams(input: unknown): { message: string; paths?: str
   return { message: value.message, paths: value.paths.map((path) => artifactPath(path) as string) }
 }
 
+const realpathOrSelf = (path: string) => {
+  try {
+    return realpathSync(path)
+  } catch {
+    return resolve(path)
+  }
+}
+
 export async function executeCommit(input: unknown, workspace: string, git: Git = gitIn(workspace)): Promise<ToolOutput> {
   const request = readCommitParams(input)
   if (typeof request === "string") return refuse(request)
-  const prefix = await git(["rev-parse", "--show-prefix"])
-  if (!prefix.ok) return refuse(prefix.reason)
-  const base = prefix.stdout.trim()
+  const located = await git(["rev-parse", "--show-toplevel", "--show-prefix"])
+  if (!located.ok) return refuse(located.reason)
+  const [toplevel = "", base = ""] = located.stdout.split("\n").map((line) => line.trim())
+  // The repository git found must be the one holding this workspace (core.worktree and the like can point elsewhere).
+  if (resolve(toplevel, base) !== realpathOrSelf(workspace))
+    return refuse(`refused: git resolved the workspace to ${resolve(toplevel, base)}, not ${workspace}`)
   // An unborn HEAD (a repository without commits) builds the first commit on the empty tree.
   const parent = await git(["rev-parse", "-q", "--verify", "HEAD^{commit}"])
   const head = parent.ok ? parent.stdout.trim() : undefined
@@ -147,15 +187,15 @@ export async function executeCommit(input: unknown, workspace: string, git: Git 
   // hooks cannot change what was checked.
   const scratch = mkdtempSync(join(tmpdir(), "speckit-commit-"))
   try {
-    const env = { GIT_INDEX_FILE: join(scratch, "index") }
+    const index = join(scratch, "index")
     for (const args of [
       head === undefined ? ["read-tree", "--empty"] : ["read-tree", head],
       ["add", "-A", "--", ...params.paths],
     ]) {
-      const step = await git(args, { env })
+      const step = await git(args, { index })
       if (!step.ok) return refuse(step.reason)
     }
-    const written = await git(["write-tree"], { env })
+    const written = await git(["write-tree"], { index })
     if (!written.ok) return refuse(written.reason)
     const tree = written.stdout.trim()
     const diff = await git(["diff-tree", "-r", "--name-only", "--no-renames", "--no-relative", "-z", baseTree, tree])

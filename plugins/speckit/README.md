@@ -90,7 +90,10 @@ and consequential safety confirmations stay required whatever the choice.
 index already holds other files. It builds the commit in a private index (HEAD plus the
 working-tree state of those paths), checks the tree changes nothing else, commits that
 tree on top of HEAD and syncs the real index for those paths. It never amends, and a
-concurrent move of HEAD makes it fail rather than overwrite the other commit. It commits
+concurrent move of HEAD makes it fail rather than overwrite the other commit. Every git
+call runs pinned to the workspace (`git -C`) without inherited repository selectors
+(`GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, object-store and `GIT_CONFIG*` variables),
+and it refuses before writing unless git resolves the workspace to itself. It commits
 with plumbing, so no git hook runs (pre-commit, commit-msg): that is the price of
 committing exactly the checked snapshot, so run the project's checks separately. The `spec` agent commits through it, since a shell `git add` or
 `git commit` pattern cannot keep its operands or options in bounds.

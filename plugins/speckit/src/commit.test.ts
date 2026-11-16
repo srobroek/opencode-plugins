@@ -1,8 +1,8 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test"
-import { chmodSync, cpSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { artifactPath, executeCommit, type Git, gitIn, outsideArtifacts } from "./commit.ts"
+import { artifactPath, executeCommit, type Git, gitEnvironment, gitIn, outsideArtifacts } from "./commit.ts"
 
 describe("artifactPath", () => {
   test.each([
@@ -36,6 +36,34 @@ test("outsideArtifacts lists staged repository paths outside the workspace's spe
 
 // Each case below runs several real git processes, which a loaded machine slows past the 5 s default.
 setDefaultTimeout(30_000)
+
+test.each([
+  "GIT_DIR",
+  "GIT_WORK_TREE",
+  "GIT_INDEX_FILE",
+  "GIT_COMMON_DIR",
+  "GIT_OBJECT_DIRECTORY",
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  "GIT_NAMESPACE",
+  "GIT_CEILING_DIRECTORIES",
+  "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+  "GIT_EXEC_PATH",
+  "GIT_CONFIG",
+  "GIT_CONFIG_GLOBAL",
+  "GIT_CONFIG_COUNT",
+  "GIT_CONFIG_KEY_0",
+  "GIT_CONFIG_PARAMETERS",
+])("gitEnvironment drops the inherited %s", (key) => {
+  expect(gitEnvironment({ [key]: "/elsewhere", PATH: "/bin" })).toEqual({ PATH: "/bin", GIT_TERMINAL_PROMPT: "0" })
+})
+
+test("gitEnvironment keeps identity variables and sets only the tool's own index", () => {
+  expect(gitEnvironment({ GIT_AUTHOR_NAME: "A", GIT_INDEX_FILE: "/x" }, "/private/index")).toEqual({
+    GIT_AUTHOR_NAME: "A",
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_INDEX_FILE: "/private/index",
+  })
+})
 
 describe("executeCommit", () => {
   let template: string
@@ -206,6 +234,59 @@ describe("executeCommit", () => {
       const result = await executeCommit({ message: "x" }, workspace)
       expect(result.metadata.ok).toBe(false)
       expect(result.content).toContain("src/b.ts")
+    })
+  })
+
+  describe("inherited git selectors", () => {
+    /** Run `run` with `vars` in the process environment, as a session's shell could leave them. */
+    const withEnv = async <T>(vars: Record<string, string>, run: () => Promise<T>): Promise<T> => {
+      const saved = Object.fromEntries(Object.keys(vars).map((key) => [key, process.env[key]]))
+      Object.assign(process.env, vars)
+      try {
+        return await run()
+      } finally {
+        for (const [key, value] of Object.entries(saved))
+          if (value === undefined) delete process.env[key]
+          else process.env[key] = value
+      }
+    }
+    let other: string
+    beforeEach(() => {
+      other = realpathSync(mkdtempSync(join(tmpdir(), "speckit-commit-other-")))
+      cpSync(template, other, { recursive: true })
+    })
+    afterEach(() => rmSync(other, { recursive: true, force: true }))
+    const otherGit = (...args: string[]) => Bun.spawnSync(["git", ...args], { cwd: other, stdout: "pipe" }).stdout.toString().trim()
+
+    test("GIT_DIR and GIT_WORK_TREE cannot point the commit at another repository", async () => {
+      write("specs/001-a/spec.md")
+      const result = await withEnv({ GIT_DIR: join(other, ".git"), GIT_WORK_TREE: other }, () =>
+        executeCommit({ message: "x" }, repo),
+      )
+      expect(result.metadata.ok).toBe(true)
+      expect(committedFiles()).toEqual(["specs/001-a/spec.md"])
+      expect(otherGit("log", "--format=%s")).toBe("init")
+      expect(otherGit("status", "--porcelain")).toBe("")
+    })
+
+    test("refuses when repository config points the work tree elsewhere", async () => {
+      write("specs/001-a/spec.md")
+      git("config", "core.worktree", other)
+      const result = await executeCommit({ message: "x" }, repo)
+      expect(result.metadata.ok).toBe(false)
+      git("config", "--unset", "core.worktree")
+      expect(git("log", "--format=%s")).toBe("init")
+      expect(otherGit("log", "--format=%s")).toBe("init")
+    })
+
+    test("GIT_INDEX_FILE cannot swap in another index", async () => {
+      write("specs/001-a/spec.md")
+      const foreignIndex = join(other, "foreign-index")
+      const result = await withEnv({ GIT_INDEX_FILE: foreignIndex }, () => executeCommit({ message: "x" }, repo))
+      expect(result.metadata.ok).toBe(true)
+      expect(committedFiles()).toEqual(["specs/001-a/spec.md"])
+      expect(existsSync(foreignIndex)).toBe(false)
+      expect(git("status", "--porcelain")).toBe("")
     })
   })
 
