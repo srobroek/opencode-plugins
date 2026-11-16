@@ -5660,14 +5660,14 @@ ${refs.size}`;
       return limits;
     };
     const contextTarget = async (overflow) => {
-      const { sessionID, notifyTo, failed } = overflow;
+      const { sessionID, failed } = overflow;
       const stored = sessionID === undefined ? undefined : await snapshotOf(sessionID);
       const role = stored?.tier ?? overflow.spawnRole ?? overflow.role;
       const tier = contextTier(role, failed);
       const limits = contextLimits();
       const allowed = [];
       for (const ref of contextCandidates(tier, view()))
-        if (await judge({ sessionID: notifyTo, agent: overflow.agent ?? "" }, overflow.agent ?? "", ref) === undefined)
+        if (guard2 === undefined || allowsChosenModel(guard2, options, ref))
           allowed.push(ref);
       return { role, tier, limits, limit: limits.get(healthKey(failed)), target: contextFallback(allowed, failed, limits) };
     };

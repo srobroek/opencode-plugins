@@ -566,16 +566,16 @@ export default Plugin.define({
 
     /** The tier an overflowing child is judged in and the first larger-context candidate the guard allows. */
     const contextTarget = async (overflow: OverflowFacts) => {
-      const { sessionID, notifyTo, failed } = overflow
+      const { sessionID, failed } = overflow
       // A child keeps the tier it was spawned in: its snapshot first, then its recorded spawn tier, then its agent's.
       const stored = sessionID === undefined ? undefined : await snapshotOf(sessionID)
       const role = stored?.tier ?? overflow.spawnRole ?? overflow.role
       const tier = contextTier(role, failed)
       const limits = contextLimits()
-      // The guard judges a larger-context candidate as it judges any model a spawn names.
+      // The plugin picks these, so no pin exempts them: the guard judges each as a plugin choice.
       const allowed: ModelRef[] = []
       for (const ref of contextCandidates(tier, view()))
-        if ((await judge({ sessionID: notifyTo, agent: overflow.agent ?? "" }, overflow.agent ?? "", ref)) === undefined) allowed.push(ref)
+        if (guard === undefined || allowsChosenModel(guard, options, ref)) allowed.push(ref)
       return { role, tier, limits, limit: limits.get(healthKey(failed)), target: contextFallback(allowed, failed, limits) }
     }
 
