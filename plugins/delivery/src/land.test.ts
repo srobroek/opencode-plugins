@@ -14,6 +14,7 @@ import {
 } from "node:fs"
 import { devNull, tmpdir } from "node:os"
 import { dirname, join } from "node:path"
+import { writeExecutable } from "@srobroek/opencode-lib/executable-fixture"
 import pkg from "../package.json" with { type: "json" }
 import { parseWorktreeList } from "./cleanup.ts"
 import { type CliResult, type CliRunner, runCli, SAFE_GIT_ARGS } from "./forge-adapter.ts"
@@ -38,7 +39,7 @@ function gitSpawnLog(): { log: () => string[]; restore: () => void } {
   const dir = temporaryDirectory("delivery-land-git-shim-")
   const logFile = join(dir, "spawns.log")
   const real = Bun.spawnSync(["which", "git"]).stdout.toString().trim()
-  writeFileSync(join(dir, "git"), `#!/bin/sh\npwd -P >> "${logFile}"\nexec "${real}" "$@"\n`, { mode: 0o755 })
+  writeExecutable(join(dir, "git"), `#!/bin/sh\npwd -P >> "${logFile}"\nexec "${real}" "$@"\n`)
   const before = process.env.PATH
   process.env.PATH = `${dir}:${before ?? ""}`
   return {

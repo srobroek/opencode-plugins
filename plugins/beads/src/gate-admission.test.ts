@@ -1,6 +1,7 @@
 import { describe, expect, setDefaultTimeout, test } from "bun:test"
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import { join } from "node:path"
+import { writeExecutable } from "@srobroek/opencode-lib/executable-fixture"
 import {
   admitBdMutation,
   type BdRun,
@@ -229,8 +230,7 @@ describe("runBdResult", () => {
   test("keeps nonzero stderr bounded in the failure result", async () => {
     const root = mkdtempSync(join(Bun.env.TMPDIR ?? "/tmp", "beads-run-fail-"))
     const script = join(root, "bd")
-    writeFileSync(script, "#!/bin/sh\nprintf '%s' 'permission denied by the embedded ledger' >&2\nexit 7\n")
-    chmodSync(script, 0o755)
+    writeExecutable(script, "#!/bin/sh\nprintf '%s' 'permission denied by the embedded ledger' >&2\nexit 7\n")
     try {
       const result = await runBdResult(root, ["list"], Date.now() + 5_000, { ...process.env, PATH: root })
       expect(result).toEqual({ failure: "bd exited with code 7: permission denied by the embedded ledger" })
@@ -241,8 +241,7 @@ describe("runBdResult", () => {
   test("distinguishes a timed-out bd process", async () => {
     const root = mkdtempSync(join(Bun.env.TMPDIR ?? "/tmp", "beads-run-timeout-"))
     const script = join(root, "bd")
-    writeFileSync(script, "#!/bin/sh\nexec /bin/sleep 1\n")
-    chmodSync(script, 0o755)
+    writeExecutable(script, "#!/bin/sh\nexec /bin/sleep 1\n")
     try {
       expect(await runBdResult(root, ["list"], Date.now() + 30, { ...process.env, PATH: root })).toEqual({ failure: "bd command timed out" })
     } finally {

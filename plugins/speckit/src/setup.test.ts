@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, setDefaultTimeout, setSystemTi
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { writeExecutable } from "@srobroek/opencode-lib/executable-fixture"
 
 import {
   CATALOG_URL,
@@ -142,9 +143,7 @@ describe("runSetup skipSpecify", () => {
     // A child bun, because Bun resolves PATH at startup.
     const bin = mkdtempSync(join(SAFE_TMPDIR, "skb-"))
     try {
-      writeFileSync(join(bin, "specify"), "#!/bin/sh\necho 'mise ERROR specify is not installed' >&2\nexit 127\n", {
-        mode: 0o755,
-      })
+      writeExecutable(join(bin, "specify"), "#!/bin/sh\necho 'mise ERROR specify is not installed' >&2\nexit 127\n")
       const script = `import { runSetup } from ${JSON.stringify(join(import.meta.dir, "setup.ts"))};\nconst out = await runSetup({ workspace: ${JSON.stringify(dir)}, skipSpecify: false, skipBeads: true }, "/unused");\nconsole.log(JSON.stringify(out));`
       const proc = Bun.spawn([process.execPath, "-e", script], {
         env: { ...process.env, PATH: `${bin}:/usr/bin:/bin` },

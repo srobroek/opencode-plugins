@@ -35,6 +35,7 @@ import {
 } from "node:fs"
 import { devNull, hostname, tmpdir } from "node:os"
 import { basename, dirname, join, resolve } from "node:path"
+import { writeExecutable } from "@srobroek/opencode-lib/executable-fixture"
 import pkg from "../package.json" with { type: "json" }
 import {
   branchDeleteArgs,
@@ -222,7 +223,7 @@ function hostileConfig(f: Fixture): { markers: Record<string, string> } {
     const marker = join(dir, `${name}.ran`)
     markers[name] = marker
     const path = join(dir, `${name}.sh`)
-    writeFileSync(path, `#!/bin/sh\ntouch "${marker}"\n${body}\n`, { mode: 0o755 })
+    writeExecutable(path, `#!/bin/sh\ntouch "${marker}"\n${body}\n`)
     return path
   }
   git(f.main, ["config", "core.fsmonitor", script("fsmonitor", "printf '\\0'")])
@@ -238,7 +239,7 @@ function hostileConfig(f: Fixture): { markers: Record<string, string> } {
   for (const hook of ["post-checkout", "reference-transaction", "post-index-change", "pre-auto-gc"]) {
     const marker = join(dir, `hook-${hook}.ran`)
     markers[`hook-${hook}`] = marker
-    writeFileSync(join(hooks, hook), `#!/bin/sh\ntouch "${marker}"\nexit 0\n`, { mode: 0o755 })
+    writeExecutable(join(hooks, hook), `#!/bin/sh\ntouch "${marker}"\nexit 0\n`)
   }
   git(f.main, ["config", "core.hooksPath", hooks])
   // Make a tracked file stat-dirty so a status has to re-hash it through the clean filter.
@@ -257,7 +258,7 @@ function gitSpawnLog(): { log: () => string[]; restore: () => void } {
   const dir = scratch("git-shim")
   const logFile = join(dir, "spawns.log")
   const real = execFileSync("which", ["git"], { encoding: "utf8" }).trim()
-  writeFileSync(join(dir, "git"), `#!/bin/sh\npwd -P >> "${logFile}"\nexec "${real}" "$@"\n`, { mode: 0o755 })
+  writeExecutable(join(dir, "git"), `#!/bin/sh\npwd -P >> "${logFile}"\nexec "${real}" "$@"\n`)
   const before = process.env.PATH
   process.env.PATH = `${dir}:${before ?? ""}`
   return {
