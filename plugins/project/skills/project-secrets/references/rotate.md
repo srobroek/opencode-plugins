@@ -6,9 +6,12 @@ Source: https://fnox.jdx.dev/cli/daemon/clear, /cli/remove, /cli/set, /guide/syn
 
 1. Change the value at its source.
    - Agent-written (generated or tool-issued): write the new value as in `references/store.md`.
-     1Password: `op item edit <item> "credential=$(<command>)" >/dev/null`. `host` or another
-     age provider: `<command> | fnox set NAME --provider host`, or
-     `fnox set NAME --generate --force --provider host`.
+     With `safety_secret_store`: for 1Password, store it as a new item (for example
+     `<project> <purpose> <date>`). The tool repoints the reference, and the user deletes the old
+     item. For `host` or another age provider, a `fnox-store` target replaces the value.
+     Without the tool: `op item edit <item> "credential=$(<command>)" >/dev/null` for 1Password, and
+     `<command> | fnox set NAME --provider host` or `fnox set NAME --generate --force --provider host`
+     for `host`.
    - User-only value: the user edits the 1Password field, or runs `fnox set NAME --provider host` again.
    - Before you overwrite a value the user supplied, ask the user.
 2. Drop the cached copy: `fnox daemon clear NAME`. The next `fnox exec` reads the new value.

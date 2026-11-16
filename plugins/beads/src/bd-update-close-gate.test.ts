@@ -11,7 +11,7 @@ describe("bd update close-status gate", () => {
             `bd -C /repo update bead-1 ${value}`,
             `BEADS_DIR=/repo/.beads bd update bead-1 ${value}`,
             `cd /repo && bd update bead-1 ${value}`,
-            `'/opt/bun' '/opt/beads/extensions/bd-embedded-write-runner.js' --beads-store '/repo/.beads' --beads-wait-ms 120000 -- bd update bead-1 ${value}`,
+            `'/opt/bun' '/opt/beads/extensions/bd-embedded-write-runner.js' --beads-store '/repo/.beads' --beads-wait-ms 30000 -- bd update bead-1 ${value}`,
           ]) {
             expect(decideBdUpdateClose(command)).toEqual({ block: true, reason: UPDATE_CLOSE_REASON })
           }

@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/srobroek/opencode-plugins/compare/safety--v0.6.1...safety--v0.7.0) (2026-11-16)
+
+
+### Features
+
+* **safety:** refuse route53 delete-hosted-zone without a parent-cleanup marker ([#176](https://github.com/srobroek/opencode-plugins/issues/176)) ([ffc4054](https://github.com/srobroek/opencode-plugins/commit/ffc4054b4ae218b8f3e71089f742b6b8cb9095cc))
+
 ## [0.6.1](https://github.com/srobroek/opencode-plugins/compare/safety--v0.6.0...safety--v0.6.1) (2026-11-13)
 
 

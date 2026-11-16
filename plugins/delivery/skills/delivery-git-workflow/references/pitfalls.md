@@ -29,3 +29,21 @@
 - **Symptom:** `This PR names no bead. A live ledger requires a Bead: <id>, Closes-Bead: <id>, or Bead-Id: <id> trailer.`
 - **Cause:** The PR gate reads the ledger of the shell call's working directory. In a repo with a regular-file `.beads/RETIRED` it skips the check, so the message means the working directory is a different, live repo. `No-Bead:` is not accepted.
 - **Fix:** Run `gh pr create` with the PR's repo as `workdir`. Add no trailer for a retired repo, create no bead, and do not use `No-Bead:`. If the gate still asks for a trailer, your `workdir` is the wrong repo.
+
+## A draft PR reports no checks
+
+- **Symptom:** `no checks reported` on a draft PR
+- **Cause:** Expected in repositories whose workflows skip drafts and run on `ready_for_review`. Elsewhere a draft still runs CI, and marking it ready may not start a new run.
+- **Fix:** Finish the work and pass local checks, then run `gh pr ready <n>`. For a fix round, run `gh pr ready <n> --undo`, push, and mark it ready again.
+
+## Landing into a branch that requires a merge queue (interim until `delivery_land` supports merge queues)
+
+- **Symptom:** `delivery_land` refuses, or a direct merge fails with an error like "Repository rule violations found" or "Changes must be made through the merge queue" (approximate text, not an exact diagnostic)
+- **Cause:** The base branch requires a GitHub merge queue, and `delivery_land` merges directly. Interim guidance until `delivery_land` supports merge queues (PR #188). `gh pr merge` on a queue branch is not safe here: with checks still pending it silently enables auto-merge without `--auto`, and that stays armed across pushes; the docs also do not say whether `--match-head-commit` binds the enqueue.
+- **Fix:** Wait until the required checks are green on the reviewed head. Then enqueue with GraphQL, which refuses a different head: `gh api graphql -f query='mutation($id:ID!,$oid:GitObjectID!){enqueuePullRequest(input:{pullRequestId:$id,expectedHeadOid:$oid}){mergeQueueEntry{state}}}' -f id="$(gh pr view <n> --json id -q .id)" -f oid=<reviewed-sha>`. Watch the entry with `gh pr view <n> --json state,mergeCommit,headRefOid` until it is MERGED, and confirm `headRefOid` equals the reviewed SHA. The repository setting deletes the branch. Close the bead by hand with the PR number and merge SHA. Never pass `--auto`.
+
+## A restart did not pick up a merged plugin fix
+
+- **Symptom:** `opencode plugin check` lists a plugin as `(update available)` after OpenCode restarted
+- **Cause:** Server startup only checks unpinned npm and git plugins for updates; it does not change the installed package.
+- **Fix:** Run `opencode plugin update`, and run it again with the project directory as `workdir` for plugins a project's `.opencode/opencode.json` loads. If the update times out, update one plugin at a time with `opencode plugin update <id>`. Then confirm `opencode plugin check` shows `(current)`. A running server keeps the plugin code it loaded until a reload.

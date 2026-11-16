@@ -106,15 +106,38 @@ const WAIT_MS = 120_000
 const PREFLIGHT_WAIT_MS = 500
 
 /**
- * How long the runner may wait if contention begins after the preflight.
- *
- * This remains finite, but gives ordinary parallel orchestration enough room for
- * ten short Beads writes to pass through one embedded store without surfacing the
- * lock refusal to the model. A genuinely long hold still gets a diagnostic.
+ * The `embeddedWriteWaitMs` plugin option's default: how long the runner waits for a busy
+ * ledger before refusing. Finite, and inside a typical 120 s shell-tool timeout, but wide
+ * enough for ~15 orchestrators' short writes to take turns; a genuinely long hold still
+ * gets a diagnostic.
  */
-const RUNNER_WAIT_MS = 120_000
+export const DEFAULT_WRITE_WAIT_MS = 30_000
 
+/** First poll delay while another process holds the lock; doubles per attempt up to {@link POLL_MAX_MS}. */
 const POLL_MS = 20
+
+/**
+ * Ceiling on the poll delay. Each poll reads the lock file and, on macOS, may spawn `ps`
+ * synchronously, so ~15 contenders polling every 20 ms starved the holder. A release in this
+ * process still wakes the head waiter at once; only cross-process waits pay the delay.
+ */
+const POLL_MAX_MS = 400
+
+/**
+ * Delay before poll `attempt` (0-based): exponential from {@link POLL_MS}, capped, with
+ * jitter in [delay/2, delay] so contenders that started together drift apart.
+ * `random` is injectable for tests and returns a value in [0, 1).
+ */
+export function backoffDelayMs(attempt: number, random: () => number = Math.random): number {
+  const ceiling = Math.min(POLL_MAX_MS, POLL_MS * 2 ** Math.min(attempt, 16))
+  return Math.max(1, Math.round(ceiling / 2 + (ceiling / 2) * random()))
+}
+
+/** Read the `embeddedWriteWaitMs` option; anything but a non-negative finite number is the default. */
+export function writeWaitFromOptions(options: Readonly<Record<string, unknown>> | undefined): number {
+  const value = options?.embeddedWriteWaitMs
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : DEFAULT_WRITE_WAIT_MS
+}
 
 /** Shared test seam so source and the loaded generated bundle use one preflight condition. */
 const PREFLIGHT_WAIT_KEY = Symbol.for("com.srobroek.beads.embedded-write-lock.preflight-wait-ms.v1")
@@ -1136,10 +1159,21 @@ function ageOf(path: string): number {
   }
 }
 
+/**
+ * Whether something that is not a small regular file sits at a lock path (a FIFO, a
+ * symlink to `/dev/zero`, an oversized file). Such a record cannot be read safely, so
+ * the lock is never judged from it and never taken over: the write is refused.
+ */
+function unsafeRecord(path: string): boolean {
+  return readBounded(path).kind === "unreadable"
+}
+
 function lockHolder(lock: string): string {
   let ageMs = ageOf(lock)
   try {
-    const parsed = JSON.parse(readFileSync(lock, "utf8")) as Partial<Holder>
+    const record = readBounded(lock)
+    if (record.kind !== "text") throw new Error("unreadable")
+    const parsed = JSON.parse(record.text) as Partial<Holder>
     if (typeof parsed.taken === "number") ageMs = Math.max(0, Date.now() - parsed.taken)
     const owner = typeof parsed.owner === "string" && parsed.owner.length > 0 ? parsed.owner : "unknown owner"
     const pid = typeof parsed.pid === "number" ? `pid ${parsed.pid}` : "pid unknown"
@@ -1163,13 +1197,11 @@ function lockHolder(lock: string): string {
  * judged by the lease length alone.
  */
 function abandoned(lock: string): boolean {
-  let raw: string
-  try {
-    raw = readFileSync(lock, "utf8")
-  } catch {
-    // Released while we were reading it; the next create attempt settles it.
-    return false
-  }
+  const record = readBounded(lock)
+  // Absent: released while we were reading it; the next create attempt settles it.
+  // Unreadable: not a small regular file, so never taken over (see unsafeRecord).
+  if (record.kind !== "text") return false
+  const raw = record.text
   let holder: Partial<Holder>
   try {
     holder = JSON.parse(raw) as Partial<Holder>
@@ -1231,6 +1263,14 @@ function takeOverIfAbandoned(lock: string, steal: string): void {
   }
 }
 
+/**
+ * Longest owner name written to a lock record. Owners are caller-supplied (a spec start
+ * names its spec), and the record must stay far below the bounded reader's 64 KiB cap or
+ * `stillOurs` could not recognise the lock to release it. Ownership itself is the token
+ * and the in-process registry, so the stored name is only a diagnostic.
+ */
+const MAX_RECORD_OWNER_CHARS = 256
+
 function holderNow(
   owner: string,
   token: string,
@@ -1241,7 +1281,7 @@ function holderNow(
   return {
     host: HOST,
     pid: process.pid,
-    owner,
+    owner: owner.slice(0, MAX_RECORD_OWNER_CHARS),
     token,
     taken,
     expires: taken + leaseMs,
@@ -1252,14 +1292,17 @@ function holderNow(
 /** Whether the file at `lock` still records the hold this process took. */
 function stillOurs(lock: string, token: string): boolean {
   try {
-    const holder = JSON.parse(readFileSync(lock, "utf8")) as Partial<Holder>
+    const record = readBounded(lock)
+    if (record.kind !== "text") return false
+    const holder = JSON.parse(record.text) as Partial<Holder>
     return holder.token === token && holder.pid === process.pid && holder.host === HOST
   } catch {
     return false
   }
 }
 
-export type Hold = { kind: "held" } | { kind: "failed"; reason: string }
+/** `busy` marks a refusal because a live holder kept the lock past the wait; retrying later can succeed. */
+export type Hold = { kind: "held" } | { kind: "failed"; reason: string; busy?: true }
 
 /**
  * Sleep up to `ms`, ending early when this ticket is woken or `signal` aborts.
@@ -1311,6 +1354,7 @@ export async function hold(
   const lock = join(store, LOCK_NAME)
   const { owned, queues } = registry()
   const deadline = Date.now() + waitMs
+  let attempt = 0
   const queue = queues.get(lock) ?? []
   if (queue.length === 0) queues.set(lock, queue)
   const ticket: Ticket = { wake: undefined }
@@ -1364,7 +1408,15 @@ export async function hold(
               reason: `Beads embedded write lock could not be taken at ${lock} (${code ?? "unknown error"}). The write was refused rather than risk a second writer on the embedded Dolt journal.`,
             }
           }
-          takeOverIfAbandoned(lock, join(store, STEAL_NAME))
+          const steal = join(store, STEAL_NAME)
+          const unsafe = unsafeRecord(lock) ? lock : unsafeRecord(steal) ? steal : undefined
+          if (unsafe !== undefined) {
+            return {
+              kind: "failed",
+              reason: `Beads embedded write lock path ${unsafe} is not a small regular file (a FIFO, symlink or oversized file), so its holder cannot be read safely. The write was refused rather than run unlocked. Inspect and remove that path by hand, then retry.`,
+            }
+          }
+          takeOverIfAbandoned(lock, steal)
         }
       }
       // Checked after the attempt, so a caller aborted while its turn was already
@@ -1378,12 +1430,20 @@ export async function hold(
       }
       if (Date.now() >= deadline) {
         const holder = lockHolder(lock)
+        const waited = `${Math.round((waitMs / 1000) * 10) / 10}s`
+        if (abandoned(lock)) {
+          return {
+            kind: "failed",
+            reason: `Beads embedded write lock at ${lock} stayed held for ${waited}; ${holder}, and that holder looks gone. The write was refused rather than run concurrently. Read the lock file, then remove it once its holder is really gone.`,
+          }
+        }
         return {
           kind: "failed",
-          reason: `Beads embedded write lock at ${lock} stayed held for ${Math.round(waitMs / 1000)}s; ${holder}. The write was refused rather than run concurrently. Read the lock file, then remove it once its holder is really gone.`,
+          busy: true,
+          reason: `The Beads ledger is busy: other writers held the embedded write lock at ${lock} for ${waited} (${holder}). Nothing was written. Retry the same command, as its own simple command; do not remove the lock.`,
         }
       }
-      await pause(ticket, Math.min(POLL_MS, deadline - Date.now()), signal)
+      await pause(ticket, Math.min(backoffDelayMs(attempt++), deadline - Date.now()), signal)
     }
   } finally {
     const index = queue.indexOf(ticket)
@@ -1546,7 +1606,7 @@ export async function attachWriter(
   store: string,
   owner: string,
   pid: number,
-  waitMs = RUNNER_WAIT_MS,
+  waitMs = DEFAULT_WRITE_WAIT_MS,
 ): Promise<boolean> {
   const lock = join(store, LOCK_NAME)
   const held = registry().owned.get(lock)
@@ -1729,12 +1789,12 @@ function quote(word: string): string {
  * command-local `BEADS_DIR` comes after the caller's, so the write lands in the very
  * store the runner holds.
  */
-function withRunner(command: string, writes: EmbeddedWrite[], runner: EmbeddedWriteRunner): string {
+function withRunner(command: string, writes: EmbeddedWrite[], runner: EmbeddedWriteRunner, waitMs: number): string {
   let out = ""
   let cursor = 0
   for (const write of [...writes].sort((left, right) => left.offset - right.offset)) {
     const store = quote(write.store)
-    out += `${command.slice(cursor, write.offset)}BEADS_DOLT_SHARED_SERVER= BEADS_DIR=${store} ${quote(runner.interpreter)} ${quote(runner.script)} ${RUNNER_STORE_FLAG} ${store} ${RUNNER_WAIT_FLAG} ${RUNNER_WAIT_MS} -- `
+    out += `${command.slice(cursor, write.offset)}BEADS_DOLT_SHARED_SERVER= BEADS_DIR=${store} ${quote(runner.interpreter)} ${quote(runner.script)} ${RUNNER_STORE_FLAG} ${store} ${RUNNER_WAIT_FLAG} ${Math.round(waitMs)} -- `
     cursor = write.offset
   }
   return out + command.slice(cursor)
@@ -1765,6 +1825,7 @@ export async function decideEmbeddedWrite(
   callID: string,
   deadline = Date.now() + 25_000,
   runnerLookup: () => EmbeddedWriteRunnerLookup = embeddedWriteRunner,
+  writeWaitMs: number = DEFAULT_WRITE_WAIT_MS,
 ): Promise<EmbeddedWriteDecision | undefined> {
   try {
     const plan = planEmbeddedWrites(parsed.command, cwd, env)
@@ -1784,11 +1845,14 @@ export async function decideEmbeddedWrite(
     const preflightDeadline = Math.min(deadline, Date.now() + preflightWaitMs())
     for (const store of stores) {
       const preflight = await hold(store, preflightOwner, Math.max(0, preflightDeadline - Date.now()))
-      if (preflight.kind === "failed") return { kind: "block", reason: preflight.reason }
+      // A live holder that outlasts the short preflight is ordinary contention: the runner
+      // waits for its turn (up to the write wait) instead of refusing the call here.
+      if (preflight.kind === "failed" && preflight.busy !== true) return { kind: "block", reason: preflight.reason }
+      if (preflight.kind === "failed") continue
       const released = await releasePreflight(store, preflightOwner, preflightDeadline)
       if (released.kind === "failed") return { kind: "block", reason: released.reason }
     }
-    return { kind: "rewrite", command: withRunner(parsed.command, plan.writes, runner) }
+    return { kind: "rewrite", command: withRunner(parsed.command, plan.writes, runner, writeWaitMs) }
   } catch {
     return { kind: "block", reason: "embedded write target could not be resolved" }
   }

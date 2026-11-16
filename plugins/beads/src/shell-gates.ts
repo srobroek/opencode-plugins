@@ -15,6 +15,7 @@ import {
   type EmbeddedWriteRunnerLookup,
   embeddedWriteRunner,
   planEmbeddedWrites,
+  writeWaitFromOptions,
 } from "./bd-embedded-write-lock.ts"
 import { decideBdUnclaimParsed } from "./bd-unclaim-gate.ts"
 import { decideBdUpdateCloseParsed } from "./bd-update-close-gate.ts"
@@ -229,6 +230,7 @@ async function decide(original: string, cwd: string, deps: ShellGateDeps): Promi
       deps.callID,
       deadline,
       deps.runnerLookup ?? embeddedWriteRunner,
+      writeWaitFromOptions(options),
     )
     if (embedded?.kind === "block") return block("bd-embedded-write-lock", embedded.reason)
     if (embedded?.kind === "rewrite") command = embedded.command

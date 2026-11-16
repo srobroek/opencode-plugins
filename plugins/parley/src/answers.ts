@@ -14,6 +14,8 @@ export interface FileValue {
   readonly mime: string
   readonly size: number
   readonly path?: string
+  /** The server's private copy (see `uploads.ts`), written when the answer arrives. Storage keeps this, not the bytes. */
+  readonly stored?: string
   /** Base64 contents. Kept server-side and sent to the model as file content, never echoed in `output`. */
   readonly data?: string
 }

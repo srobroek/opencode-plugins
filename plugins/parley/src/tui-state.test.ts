@@ -5,6 +5,7 @@ import {
   arrowAction,
   badge,
   choose,
+  draftFromAnswer,
   enterIsNewline,
   initialDraft,
   moveCursor,
@@ -26,6 +27,19 @@ const options = [
 ]
 
 describe("drafts", () => {
+  test.each([
+    ["an answered choice with a note", { id: "p", status: "answered" as const, value: { selected: "c" }, note: "why c" }],
+    ["an accepted recommendation", { id: "p", status: "accepted" as const, value: { selected: "b" } }],
+    ["a deferral", { id: "p", status: "deferred" as const }],
+  ])("a card that comes back with %s submits that same answer again", (_name, answer) => {
+    const question: Question = { id: "p", title: "P", kind: "pick_one", options, recommended: "b" }
+    const draft = draftFromAnswer(question, answer)
+    const again = toSubmission(question, draft)
+    expect(again).toMatchObject({ id: "p", status: answer.status, ...("note" in answer ? { note: answer.note } : {}) })
+    if (answer.status === "answered") expect(again).toMatchObject({ value: answer.value })
+    if (answer.status === "answered") expect(draft.cursor).toBe(2)
+  })
+
   test("recommended is preselected and submitted as an answer", () => {
     const question: Question = { id: "p", title: "P", kind: "pick_one", options, recommended: "b" }
     const draft = initialDraft(question)

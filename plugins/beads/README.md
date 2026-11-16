@@ -44,7 +44,8 @@ modified, the verdict a detached `bd dolt push` left in `.beads/last-push.log`
 (consumed when read), and an inherited `BEADS_DIR` that points at another
 repository's store.
 
-The `subagent` tool also waits for gate admission.
+Only mutating `bd` commands wait for gate admission. A `subagent` spawn, a shell command
+that writes no bd store, and every read or edit pass without waiting on the ledger.
 
 ## Session lifecycle
 
@@ -105,6 +106,17 @@ Gates: `beads-gate-admission`, `binary-git-hooks`, `bd-update-close-gate`,
 follows it), `beads-claim-release`, `bd-lease-heartbeat`, `beads-session-advisories`,
 `beads-skills`. The lifecycle and the heartbeat read the claims that
 `beads-claim-tracking` records.
+
+### Busy-ledger wait
+
+An embedded-store write that finds the write lock held waits for its turn, polling
+with exponential backoff and jitter, for `embeddedWriteWaitMs` (default `30000`)
+before it is refused. The refusal says the ledger is busy and to retry the command
+as its own simple command; it only advises removing the lock when the holder is gone.
+
+```json
+{ "embeddedWriteWaitMs": 60000 }
+```
 
 ## Permissions
 

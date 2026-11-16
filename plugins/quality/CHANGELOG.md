@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0](https://github.com/srobroek/opencode-plugins/compare/quality--v0.9.0...quality--v0.10.0) (2026-11-16)
+
+
+### Features
+
+* **quality:** add audit learnings on order, load, leaks and noisy runs ([#170](https://github.com/srobroek/opencode-plugins/issues/170)) ([07964f1](https://github.com/srobroek/opencode-plugins/commit/07964f1e58836ae59ac261dcc692a8d9521e0f83))
+
 ## [0.9.0](https://github.com/srobroek/opencode-plugins/compare/quality--v0.8.0...quality--v0.9.0) (2026-11-13)
 
 

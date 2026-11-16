@@ -1,16 +1,27 @@
+import { realpathSync } from "node:fs"
+import { homedir } from "node:os"
 import { isAbsolute, resolve } from "node:path"
 import { Plugin } from "@opencode/plugin"
 import { Error as ToolError } from "@opencode/plugin/promise/tool"
 import { appendResultText, isShellTool, leadingCdCwd, shellCall, WRITE_TOOLS } from "@srobroek/opencode-lib"
 import { rewriteCloseKeywords } from "./close-keywords.ts"
 import { externalDirectories, sessionRoots, shellFlagDirectories } from "./flag-directories.ts"
-import { readProviderTypes } from "./fnox-config.ts"
+import { readConfigSnapshot, readProviderTypes } from "./fnox-config.ts"
 import { GUARD_IDS, type GuardID, type GuardOptions, hardGate } from "./guards.ts"
 import { decideToolCall, type MigrationOptions, migrationOverride } from "./migrations.ts"
 import { createPackageAdvisor } from "./package-investigate.ts"
 import { type Decision, type DecisionID, type ReviewOptions, reviewPermission } from "./permission.ts"
 import { createRedactor, type RedactOptions, readRedactOptions } from "./redact.ts"
 import { allowScratch, scratchRoots } from "./scratch-dirs.ts"
+import {
+  COMMAND_ACTION,
+  type Destination,
+  runChild,
+  STORE_ACTION,
+  type StoreDeps,
+  type StoreRequest,
+  storeSecret,
+} from "./secret-store.ts"
 
 export { normalize as normalizeCloseKeywords, rewriteCloseKeywords } from "./close-keywords.ts"
 export { externalDirectories, flagDirectories, shellFlagDirectories } from "./flag-directories.ts"
@@ -131,6 +142,85 @@ export type Overrides = {
   env?: NodeJS.ProcessEnv
   guard?: Pick<GuardOptions, "read" | "analyzeOp" | "providerTypes">
   scratch?: { roots?: readonly string[] }
+  secretStore?: Partial<Pick<StoreDeps, "run" | "which" | "env" | "home">>
+}
+
+/** The model-facing schema of `safety_secret_store`; `parseRequest` checks every field again. */
+export const SECRET_STORE_INPUT = {
+  type: "object",
+  properties: {
+    name: { type: "string", pattern: "^[A-Z][A-Z0-9_]*$", description: "fnox secret name" },
+    target: {
+      type: "object",
+      description:
+        '{kind:"1password", vault, item, field?="credential", tags?, provider?} or {kind:"fnox-store", provider} (a value-store provider such as host)',
+      properties: {
+        kind: { type: "string", enum: ["1password", "fnox-store"] },
+        vault: { type: "string" },
+        item: { type: "string", description: "1Password item title; no '/'" },
+        field: { type: "string" },
+        tags: { type: "array", items: { type: "string" } },
+        provider: { type: "string", description: "fnox provider; for 1password, default the only 1Password provider" },
+      },
+      required: ["kind"],
+    },
+    generate: {
+      type: "object",
+      description: "A CSPRNG value of at least 128 bits: one of bytes (entropy) or length (characters)",
+      properties: {
+        charset: { type: "string", enum: ["hex", "base64url", "alnum", "ascii-printable"] },
+        bytes: { type: "integer" },
+        length: { type: "integer" },
+      },
+      required: ["charset"],
+    },
+    command: {
+      type: "object",
+      description: "Run argv with no shell after asking the user; runs with your permission; approve only commands you trust. Its stdout is the value",
+      properties: { argv: { type: "array", items: { type: "string" }, minItems: 1 }, cwd: { type: "string" } },
+      required: ["argv"],
+    },
+    config: { type: "string", description: "Existing fnox config file fnox gets as --config (default fnox.toml); outside the project asks first" },
+    description: { type: "string", description: "fnox secret description" },
+  },
+  required: ["name", "target"],
+  additionalProperties: false,
+} as const
+
+/** Turn an allowed secret command run into a prompt, so every run asks; a configured deny stays a deny. */
+export function confirmSecretCommand(evaluation: Evaluation): void {
+  if (evaluation.action !== COMMAND_ACTION || evaluation.effect !== "allow") return
+  evaluation.effect = "ask"
+  evaluation.message = `Run this command for ${STORE_ACTION}? Its stdout becomes the secret and is never shown.`
+}
+
+/** The canonical path of an existing file or directory, symlinks resolved; `undefined` when missing. */
+function canonical(path: string): string | undefined {
+  try {
+    return realpathSync(path)
+  } catch {
+    return undefined
+  }
+}
+
+/** The store permission's resource: the secret name, where its value goes and the config fnox writes. */
+export function storeResource(request: StoreRequest, destination: Destination): string {
+  const target = request.target
+  const where =
+    target.kind === "1password"
+      ? `1password ${target.vault}/${target.item}/${target.field} (fnox provider ${destination.provider})`
+      : `fnox provider ${destination.provider}`
+  return `${request.name} -> ${where} in ${destination.file}`
+}
+
+/** argv as one shell-quoted line, for the permission prompt. */
+export function displayArgv(argv: readonly string[]): string {
+  return argv.map((word) => (/^[A-Za-z0-9_@%+=:,./-]+$/.test(word) ? word : `'${word.replaceAll("'", "'\\''")}'`)).join(" ")
+}
+
+/** The process environment with unset entries dropped, as a child's environment. */
+function stringEnv(env: NodeJS.ProcessEnv): Record<string, string> {
+  return Object.fromEntries(Object.entries(env).filter((entry): entry is [string, string] => typeof entry[1] === "string"))
 }
 
 export function createPlugin(overrides: Overrides = {}) {
@@ -259,6 +349,81 @@ export function createPlugin(overrides: Overrides = {}) {
         if (notice !== undefined) event.result = appendResultText(event.result, notice)
       })
 
+      const secretTool = await ctx.tool.transform((editor) => {
+        editor.add({
+          name: STORE_ACTION,
+          description:
+            "Store a new secret in 1Password or a fnox store without a shell: generated, or the stdout of a command you name.\n" +
+            "The value never reaches a command line, an environment, a log, an error or this result. `generate` draws from a " +
+            "CSPRNG. `command` runs argv with no shell after the user allows that run; its stdout, one trailing newline trimmed " +
+            "and at most 64 KiB, is the value. Target `1password` pipes the item JSON to `op item create --vault <vault> -`, then " +
+            "records `fnox set NAME '<item>/<field>'` with the config's 1Password provider. Target `fnox-store` pipes the value " +
+            "to `fnox set NAME --provider <p>` for a value-store provider and replaces an existing value. A failure gives the " +
+            "stage and exit code only and is not retried.",
+          input: SECRET_STORE_INPUT,
+          execute: async (input, context) => {
+            context.signal.throwIfAborted()
+            const directory = await sessionDirectory(context.sessionID)
+            const source = { type: "tool" as const, messageID: context.messageID, id: context.id }
+            const env = overrides.secretStore?.env ?? stringEnv(process.env)
+            const home = overrides.secretStore?.home ?? homedir()
+            const deps: StoreDeps = {
+              directory,
+              roots: sessionRoots(directory).map((root) => canonical(root) ?? root),
+              env,
+              home,
+              which: (bin, cwd) => Bun.which(bin, { PATH: env.PATH ?? "", cwd }),
+              realpath: canonical,
+              // A fresh read every time: the tool compares the config before and after the value is obtained.
+              snapshot: (path) => readConfigSnapshot(directory, path, home),
+              run: runChild,
+              ...overrides.secretStore,
+              signal: context.signal,
+              askExternal: (external) =>
+                ctx.permission.assert({
+                  sessionID: context.sessionID,
+                  agent: context.agent,
+                  source,
+                  action: "external_directory",
+                  resources: external.map((item) => item.resource),
+                  save: external.map((item) => item.save),
+                } as never),
+              askStore: (request, destination) => {
+                const resource = storeResource(request, destination)
+                return ctx.permission.assert({
+                  sessionID: context.sessionID,
+                  agent: context.agent,
+                  source,
+                  action: STORE_ACTION,
+                  resources: [resource],
+                  save: [resource],
+                  metadata: {
+                    name: request.name,
+                    target: request.target,
+                    provider: destination.provider,
+                    config: destination.file,
+                    source: request.source.kind,
+                  },
+                } as never)
+              },
+              askCommand: (argv, cwd) =>
+                ctx.permission.assert({
+                  sessionID: context.sessionID,
+                  agent: context.agent,
+                  source,
+                  action: COMMAND_ACTION,
+                  resources: [`${displayArgv(argv)}  (in ${cwd})`],
+                  metadata: { argv, cwd },
+                } as never),
+            }
+            const result = await storeSecret(input, deps)
+            const where = "reference" in result ? `reference ${result.reference}` : `provider ${result.provider}`
+            return { content: `Stored ${result.name} (${where}).`, metadata: result }
+          },
+        })
+      })
+      const confirmCommand = await ctx.permission.hook("evaluate", (evaluation) => confirmSecretCommand(evaluation as Evaluation))
+
       // Registered last so it also sees the notices the hooks above append.
       const redactor = redact.enabled ? createRedactor(() => overrides.env ?? process.env, redact) : undefined
       const redacting = redactor
@@ -285,6 +450,8 @@ export function createPlugin(overrides: Overrides = {}) {
 
       return async () => {
         for (const registration of redacting.reverse()) await registration.dispose()
+        await confirmCommand.dispose()
+        await secretTool.dispose()
         await after.dispose()
         await scratch?.dispose()
         await gate.dispose()

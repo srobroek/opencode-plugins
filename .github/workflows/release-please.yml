@@ -74,7 +74,7 @@ jobs:
         if: ${{ steps.release-pr.outputs.branch != '' }}
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: "1.4.3"
+          bun-version: "1.4.4"
 
       - name: Sync bun.lock, plugin bundles and marketplaces on the release branch
         if: ${{ steps.release-pr.outputs.branch != '' }}

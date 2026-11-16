@@ -108,9 +108,44 @@ describe("classifyFailure", () => {
     expect(classifyFailure({ type: "tool", message: "Model unavailable: a/b" })).toBeUndefined()
     expect(classifyFailure({ type: "aborted", message: "aborted by user" })).toBeUndefined()
     expect(classifyFailure({ message: "The operation was cancelled" })).toBeUndefined()
-    expect(classifyFailure({ message: "prompt is too long: 250000 tokens", status: 400 })).toBeUndefined()
     expect(classifyFailure({ message: "file not found: src/x.ts" })).toBeUndefined()
     expect(classifyFailure({ message: "bad request", status: 400 })).toBeUndefined()
+  })
+
+  // Messages as the providers send them.
+  const contextCases: Array<[string, FailureInput]> = [
+    ["Anthropic", { message: "prompt is too long: 213462 tokens > 200000 maximum", status: 400 }],
+    ["Anthropic body", { message: "Bad Request", status: 400, response: { body: '{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 213462 tokens > 200000 maximum"}}' } }],
+    ["OpenAI maximum", { message: "This model's maximum context length is 128000 tokens. However, your messages resulted in 130500 tokens.", status: 400 }],
+    ["OpenAI code", { message: "Bad Request", status: 400, response: { body: { error: { code: "context_length_exceeded" } } } }],
+    ["OpenAI responses", { message: "Your input exceeds the context window of this model. Please adjust your input and try again." }],
+    ["Bedrock", { type: "ValidationException", message: "Input is too long for requested model." }],
+    ["Bedrock 400", { message: "The input is too long for the requested model", status: 400 }],
+    ["too many tokens", { message: "Too many tokens in the request: 300000", status: 400 }],
+    ["413 body", { message: "Payload Too Large", status: 413, response: { body: "Request failed: context length exceeded" } }],
+  ]
+  test.each(contextCases)("context length: %s", (_name, error) => {
+    expect(classifyFailure(error)).toBe("context-length")
+  })
+
+  test("definite failures win over ambiguous context wording", () => {
+    expect(classifyFailure({ message: "Rate limit reached: too many tokens per minute", status: 429 })).toBe("rate-limit")
+    expect(classifyFailure({ message: "Too many tokens per minute", status: 429 })).toBe("rate-limit")
+    expect(classifyFailure({ message: "Too many tokens per minute" })).toBeUndefined()
+    expect(classifyFailure({ message: "You exceeded your current quota: too many tokens", status: 429 })).toBe("quota")
+    expect(classifyFailure({ message: "Your credit balance is too low to process this prompt is too long request", status: 400 })).toBe("quota")
+    expect(classifyFailure({ message: "Forbidden: prompt is too long", status: 403 })).toBe("auth")
+    expect(classifyFailure({ message: "Throttling: input is too long", status: 400 })).toBe("rate-limit")
+    expect(classifyFailure({ message: "prompt is too long", status: 400 })).toBe("context-length")
+    expect(classifyFailure({ message: "prompt is too long", status: 503 })).toBe("server")
+  })
+
+  test("other failures that mention tokens or size are not context length", () => {
+    expect(classifyFailure({ message: "ThrottlingException: Too many tokens, please wait before trying again.", status: 429 })).toBe("rate-limit")
+    expect(classifyFailure({ message: "Rate limit reached for gpt-5 on tokens per min (TPM): Limit 30000", status: 429 })).toBe("rate-limit")
+    expect(classifyFailure({ message: "Service Unavailable", status: 503, response: { body: "context window" } })).toBe("server")
+    expect(failureScope("context-length")).toBe("model")
+    expect(isTransient("context-length")).toBe(false)
   })
 })
 
@@ -232,6 +267,16 @@ describe("recordFailure", () => {
   const policy = { cooldownMs: 60_000, maxCooldownMs: 600_000, quotaCooldownMs: 3_600_000, flapCount: 3, flapWindowMs: 600_000 }
   const fail = (state: HealthState, now: number, kind: FailureClass = "credentials", ref = a, error: FailureInput = {}) =>
     recordFailure(state, ref, kind, error, now, policy)
+
+  test("a context-length failure is no episode, strike or cooldown", () => {
+    let state: HealthState = {}
+    for (let i = 0; i < 5; i++) {
+      const record = fail(state, i * 20_000, "context-length")
+      expect(record).toMatchObject({ cooldownMs: 0, tripped: false })
+      state = record.state
+    }
+    expect(state).toEqual({})
+  })
 
   test("a blip, even across parallel requests, keeps the model and its provider in use", () => {
     let record = fail({}, 0)

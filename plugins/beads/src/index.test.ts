@@ -114,20 +114,31 @@ describe("execute.before on shell", () => {
   })
 })
 
-describe("gate admission on subagent", () => {
-  test("refuses a dispatch while the store's gates cannot be verified", async () => {
-    const root = scratch(true)
-    const { fake, cleanup } = await start(root, { run: async () => ({ failure: "bd exploded" }) })
-    await expect(
-      fake.fire.tool("execute.before", { ...shellCall(""), tool: "subagent", input: { prompt: "go" } }),
-    ).rejects.toThrow(/could not be verified.*bd exploded/s)
+describe("gate admission scope", () => {
+  // A bd read that never settles stands in for a 20 s ledger verification.
+  const slow = () => new Promise<never>(() => {})
+
+  test("a subagent spawn passes at once while verification is pending", async () => {
+    const { fake, cleanup } = await start(scratch(true), { run: slow })
+    const started = Date.now()
+    await fake.fire.tool("execute.before", { ...shellCall(""), tool: "subagent", input: { prompt: "go" } })
+    expect(Date.now() - started).toBeLessThan(1000)
     await cleanup()
   })
 
-  test("admits a dispatch once the store has no open gates", async () => {
-    const root = scratch(true)
-    const { fake, cleanup } = await start(root, { run: async () => ({ output: "null" }) })
-    await fake.fire.tool("execute.before", { ...shellCall(""), tool: "subagent", input: { prompt: "go" } })
+  test("a plain shell command passes at once while verification is pending", async () => {
+    const { fake, cleanup } = await start(scratch(true), { run: slow })
+    const started = Date.now()
+    await fake.fire.tool("execute.before", shellCall("ls -la"))
+    expect(Date.now() - started).toBeLessThan(1000)
+    await cleanup()
+  })
+
+  test("a bd write still refuses while the store's gates cannot be verified", async () => {
+    const { fake, cleanup } = await start(scratch(true), { run: async () => ({ failure: "bd exploded" }) })
+    await expect(fake.fire.tool("execute.before", shellCall("bd create --title test"))).rejects.toThrow(
+      /could not be verified.*bd exploded/s,
+    )
     await cleanup()
   })
 })

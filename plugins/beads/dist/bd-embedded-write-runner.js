@@ -1802,8 +1802,17 @@ var LEASE_MS = 120000;
 var RENEW_MS = 20000;
 var WAIT_MS = 120000;
 var PREFLIGHT_WAIT_MS = 500;
-var RUNNER_WAIT_MS = 120000;
+var DEFAULT_WRITE_WAIT_MS = 30000;
 var POLL_MS = 20;
+var POLL_MAX_MS = 400;
+function backoffDelayMs(attempt, random = Math.random) {
+  const ceiling = Math.min(POLL_MAX_MS, POLL_MS * 2 ** Math.min(attempt, 16));
+  return Math.max(1, Math.round(ceiling / 2 + ceiling / 2 * random()));
+}
+function writeWaitFromOptions(options) {
+  const value = options?.embeddedWriteWaitMs;
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : DEFAULT_WRITE_WAIT_MS;
+}
 var PREFLIGHT_WAIT_KEY = Symbol.for("com.srobroek.beads.embedded-write-lock.preflight-wait-ms.v1");
 function preflightWaitMs() {
   const configured = Reflect.get(globalThis, PREFLIGHT_WAIT_KEY);
@@ -2463,10 +2472,16 @@ function ageOf(path) {
     return 0;
   }
 }
+function unsafeRecord(path) {
+  return readBounded(path).kind === "unreadable";
+}
 function lockHolder(lock) {
   let ageMs = ageOf(lock);
   try {
-    const parsed = JSON.parse(readFileSync(lock, "utf8"));
+    const record = readBounded(lock);
+    if (record.kind !== "text")
+      throw new Error("unreadable");
+    const parsed = JSON.parse(record.text);
     if (typeof parsed.taken === "number")
       ageMs = Math.max(0, Date.now() - parsed.taken);
     const owner = typeof parsed.owner === "string" && parsed.owner.length > 0 ? parsed.owner : "unknown owner";
@@ -2479,12 +2494,10 @@ function lockHolder(lock) {
   }
 }
 function abandoned(lock) {
-  let raw;
-  try {
-    raw = readFileSync(lock, "utf8");
-  } catch {
+  const record = readBounded(lock);
+  if (record.kind !== "text")
     return false;
-  }
+  const raw = record.text;
   let holder;
   try {
     holder = JSON.parse(raw);
@@ -2531,12 +2544,13 @@ function takeOverIfAbandoned(lock, steal) {
     } catch {}
   }
 }
+var MAX_RECORD_OWNER_CHARS = 256;
 function holderNow(owner, token, writer, writerStart = writer === undefined ? undefined : processStartIdentity(writer)) {
   const taken = Date.now();
   return {
     host: HOST,
     pid: process.pid,
-    owner,
+    owner: owner.slice(0, MAX_RECORD_OWNER_CHARS),
     token,
     taken,
     expires: taken + leaseMs,
@@ -2545,7 +2559,10 @@ function holderNow(owner, token, writer, writerStart = writer === undefined ? un
 }
 function stillOurs(lock, token) {
   try {
-    const holder = JSON.parse(readFileSync(lock, "utf8"));
+    const record = readBounded(lock);
+    if (record.kind !== "text")
+      return false;
+    const holder = JSON.parse(record.text);
     return holder.token === token && holder.pid === process.pid && holder.host === HOST;
   } catch {
     return false;
@@ -2572,6 +2589,7 @@ async function hold(store, owner, waitMs = WAIT_MS, signal) {
   const lock = join(store, LOCK_NAME);
   const { owned, queues } = registry();
   const deadline = Date.now() + waitMs;
+  let attempt = 0;
   const queue = queues.get(lock) ?? [];
   if (queue.length === 0)
     queues.set(lock, queue);
@@ -2614,7 +2632,15 @@ async function hold(store, owner, waitMs = WAIT_MS, signal) {
               reason: `Beads embedded write lock could not be taken at ${lock} (${code ?? "unknown error"}). The write was refused rather than risk a second writer on the embedded Dolt journal.`
             };
           }
-          takeOverIfAbandoned(lock, join(store, STEAL_NAME));
+          const steal = join(store, STEAL_NAME);
+          const unsafe = unsafeRecord(lock) ? lock : unsafeRecord(steal) ? steal : undefined;
+          if (unsafe !== undefined) {
+            return {
+              kind: "failed",
+              reason: `Beads embedded write lock path ${unsafe} is not a small regular file (a FIFO, symlink or oversized file), so its holder cannot be read safely. The write was refused rather than run unlocked. Inspect and remove that path by hand, then retry.`
+            };
+          }
+          takeOverIfAbandoned(lock, steal);
         }
       }
       if (signal?.aborted === true) {
@@ -2625,12 +2651,20 @@ async function hold(store, owner, waitMs = WAIT_MS, signal) {
       }
       if (Date.now() >= deadline) {
         const holder = lockHolder(lock);
+        const waited = `${Math.round(waitMs / 1000 * 10) / 10}s`;
+        if (abandoned(lock)) {
+          return {
+            kind: "failed",
+            reason: `Beads embedded write lock at ${lock} stayed held for ${waited}; ${holder}, and that holder looks gone. The write was refused rather than run concurrently. Read the lock file, then remove it once its holder is really gone.`
+          };
+        }
         return {
           kind: "failed",
-          reason: `Beads embedded write lock at ${lock} stayed held for ${Math.round(waitMs / 1000)}s; ${holder}. The write was refused rather than run concurrently. Read the lock file, then remove it once its holder is really gone.`
+          busy: true,
+          reason: `The Beads ledger is busy: other writers held the embedded write lock at ${lock} for ${waited} (${holder}). Nothing was written. Retry the same command, as its own simple command; do not remove the lock.`
         };
       }
-      await pause(ticket, Math.min(POLL_MS, deadline - Date.now()), signal);
+      await pause(ticket, Math.min(backoffDelayMs(attempt++), deadline - Date.now()), signal);
     }
   } finally {
     const index = queue.indexOf(ticket);
@@ -2750,7 +2784,7 @@ function renewLease(lock, owner, token) {
     closeSync2(held.fd);
   } catch {}
 }
-async function attachWriter(store, owner, pid, waitMs = RUNNER_WAIT_MS) {
+async function attachWriter(store, owner, pid, waitMs = DEFAULT_WRITE_WAIT_MS) {
   const lock = join(store, LOCK_NAME);
   const held = registry().owned.get(lock);
   if (held === undefined || !held.holders.has(owner))
@@ -2858,17 +2892,17 @@ function resolveBunBinary(options = {}) {
 function quote(word) {
   return `'${word.replaceAll("'", "'\\''")}'`;
 }
-function withRunner(command, writes, runner) {
+function withRunner(command, writes, runner, waitMs) {
   let out = "";
   let cursor = 0;
   for (const write of [...writes].sort((left, right) => left.offset - right.offset)) {
     const store = quote(write.store);
-    out += `${command.slice(cursor, write.offset)}BEADS_DOLT_SHARED_SERVER= BEADS_DIR=${store} ${quote(runner.interpreter)} ${quote(runner.script)} ${RUNNER_STORE_FLAG} ${store} ${RUNNER_WAIT_FLAG} ${RUNNER_WAIT_MS} -- `;
+    out += `${command.slice(cursor, write.offset)}BEADS_DOLT_SHARED_SERVER= BEADS_DIR=${store} ${quote(runner.interpreter)} ${quote(runner.script)} ${RUNNER_STORE_FLAG} ${store} ${RUNNER_WAIT_FLAG} ${Math.round(waitMs)} -- `;
     cursor = write.offset;
   }
   return out + command.slice(cursor);
 }
-async function decideEmbeddedWrite(parsed, cwd, env, callID, deadline = Date.now() + 25000, runnerLookup = embeddedWriteRunner) {
+async function decideEmbeddedWrite(parsed, cwd, env, callID, deadline = Date.now() + 25000, runnerLookup = embeddedWriteRunner, writeWaitMs = DEFAULT_WRITE_WAIT_MS) {
   try {
     const plan = planEmbeddedWrites(parsed.command, cwd, env);
     if (plan.kind === "refused")
@@ -2887,13 +2921,15 @@ async function decideEmbeddedWrite(parsed, cwd, env, callID, deadline = Date.now
     const preflightDeadline = Math.min(deadline, Date.now() + preflightWaitMs());
     for (const store of stores) {
       const preflight = await hold(store, preflightOwner, Math.max(0, preflightDeadline - Date.now()));
-      if (preflight.kind === "failed")
+      if (preflight.kind === "failed" && preflight.busy !== true)
         return { kind: "block", reason: preflight.reason };
+      if (preflight.kind === "failed")
+        continue;
       const released = await releasePreflight(store, preflightOwner, preflightDeadline);
       if (released.kind === "failed")
         return { kind: "block", reason: released.reason };
     }
-    return { kind: "rewrite", command: withRunner(parsed.command, plan.writes, runner) };
+    return { kind: "rewrite", command: withRunner(parsed.command, plan.writes, runner, writeWaitMs) };
   } catch {
     return { kind: "block", reason: "embedded write target could not be resolved" };
   }

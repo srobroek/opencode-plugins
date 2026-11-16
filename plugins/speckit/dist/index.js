@@ -1831,6 +1831,11 @@ var LEASE_MS = 120000;
 var RENEW_MS = 20000;
 var WAIT_MS = 120000;
 var POLL_MS = 20;
+var POLL_MAX_MS = 400;
+function backoffDelayMs(attempt, random = Math.random) {
+  const ceiling = Math.min(POLL_MAX_MS, POLL_MS * 2 ** Math.min(attempt, 16));
+  return Math.max(1, Math.round(ceiling / 2 + ceiling / 2 * random()));
+}
 var PREFLIGHT_WAIT_KEY = Symbol.for("com.srobroek.beads.embedded-write-lock.preflight-wait-ms.v1");
 var leaseMs = LEASE_MS;
 var renewMs = RENEW_MS;
@@ -1959,10 +1964,16 @@ function ageOf(path) {
     return 0;
   }
 }
+function unsafeRecord(path) {
+  return readBounded(path).kind === "unreadable";
+}
 function lockHolder(lock) {
   let ageMs = ageOf(lock);
   try {
-    const parsed = JSON.parse(readFileSync4(lock, "utf8"));
+    const record = readBounded(lock);
+    if (record.kind !== "text")
+      throw new Error("unreadable");
+    const parsed = JSON.parse(record.text);
     if (typeof parsed.taken === "number")
       ageMs = Math.max(0, Date.now() - parsed.taken);
     const owner = typeof parsed.owner === "string" && parsed.owner.length > 0 ? parsed.owner : "unknown owner";
@@ -1975,12 +1986,10 @@ function lockHolder(lock) {
   }
 }
 function abandoned(lock) {
-  let raw;
-  try {
-    raw = readFileSync4(lock, "utf8");
-  } catch {
+  const record = readBounded(lock);
+  if (record.kind !== "text")
     return false;
-  }
+  const raw = record.text;
   let holder;
   try {
     holder = JSON.parse(raw);
@@ -2027,12 +2036,13 @@ function takeOverIfAbandoned(lock, steal) {
     } catch {}
   }
 }
+var MAX_RECORD_OWNER_CHARS = 256;
 function holderNow(owner, token, writer, writerStart = writer === undefined ? undefined : processStartIdentity(writer)) {
   const taken = Date.now();
   return {
     host: HOST,
     pid: process.pid,
-    owner,
+    owner: owner.slice(0, MAX_RECORD_OWNER_CHARS),
     token,
     taken,
     expires: taken + leaseMs,
@@ -2041,7 +2051,10 @@ function holderNow(owner, token, writer, writerStart = writer === undefined ? un
 }
 function stillOurs(lock, token) {
   try {
-    const holder = JSON.parse(readFileSync4(lock, "utf8"));
+    const record = readBounded(lock);
+    if (record.kind !== "text")
+      return false;
+    const holder = JSON.parse(record.text);
     return holder.token === token && holder.pid === process.pid && holder.host === HOST;
   } catch {
     return false;
@@ -2068,6 +2081,7 @@ async function hold(store, owner, waitMs = WAIT_MS, signal) {
   const lock = join6(store, LOCK_NAME);
   const { owned, queues } = registry();
   const deadline = Date.now() + waitMs;
+  let attempt = 0;
   const queue = queues.get(lock) ?? [];
   if (queue.length === 0)
     queues.set(lock, queue);
@@ -2110,7 +2124,15 @@ async function hold(store, owner, waitMs = WAIT_MS, signal) {
               reason: `Beads embedded write lock could not be taken at ${lock} (${code ?? "unknown error"}). The write was refused rather than risk a second writer on the embedded Dolt journal.`
             };
           }
-          takeOverIfAbandoned(lock, join6(store, STEAL_NAME));
+          const steal = join6(store, STEAL_NAME);
+          const unsafe = unsafeRecord(lock) ? lock : unsafeRecord(steal) ? steal : undefined;
+          if (unsafe !== undefined) {
+            return {
+              kind: "failed",
+              reason: `Beads embedded write lock path ${unsafe} is not a small regular file (a FIFO, symlink or oversized file), so its holder cannot be read safely. The write was refused rather than run unlocked. Inspect and remove that path by hand, then retry.`
+            };
+          }
+          takeOverIfAbandoned(lock, steal);
         }
       }
       if (signal?.aborted === true) {
@@ -2121,12 +2143,20 @@ async function hold(store, owner, waitMs = WAIT_MS, signal) {
       }
       if (Date.now() >= deadline) {
         const holder = lockHolder(lock);
+        const waited = `${Math.round(waitMs / 1000 * 10) / 10}s`;
+        if (abandoned(lock)) {
+          return {
+            kind: "failed",
+            reason: `Beads embedded write lock at ${lock} stayed held for ${waited}; ${holder}, and that holder looks gone. The write was refused rather than run concurrently. Read the lock file, then remove it once its holder is really gone.`
+          };
+        }
         return {
           kind: "failed",
-          reason: `Beads embedded write lock at ${lock} stayed held for ${Math.round(waitMs / 1000)}s; ${holder}. The write was refused rather than run concurrently. Read the lock file, then remove it once its holder is really gone.`
+          busy: true,
+          reason: `The Beads ledger is busy: other writers held the embedded write lock at ${lock} for ${waited} (${holder}). Nothing was written. Retry the same command, as its own simple command; do not remove the lock.`
         };
       }
-      await pause(ticket, Math.min(POLL_MS, deadline - Date.now()), signal);
+      await pause(ticket, Math.min(backoffDelayMs(attempt++), deadline - Date.now()), signal);
     }
   } finally {
     const index = queue.indexOf(ticket);

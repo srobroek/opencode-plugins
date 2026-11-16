@@ -1,14 +1,15 @@
-import { mkdirSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
-import path from "node:path"
 import { Plugin } from "@opencode/plugin"
-import type { FileValue, SubmittedAnswer } from "./answers.ts"
+import type { SubmittedAnswer } from "./answers.ts"
 import type { Prompt } from "./fallback.ts"
 import { render } from "./format.ts"
+import { OUTBOX_KEY_PREFIX, type OutboxEntry, outboxKey } from "./outbox.ts"
+import { ROUND_KEY_PREFIX, roundKey, type StoredRound } from "./persist.ts"
+import type { Question } from "./questions.ts"
 import { ParleyRpc, type RoundEvent } from "./rpc.ts"
 import { askInput, endInput, endOutput, resultOutput, waitInput } from "./schema.ts"
-import { type AskInput, type CallContext, InputError, Parley, settingsFrom, type WaitInput } from "./service.ts"
+import { type AskInput, type CallContext, InputError, Parley, type RoundStore, settingsFrom, type WaitInput } from "./service.ts"
 import { wrapQuestion } from "./takeover.ts"
+import { markClosed, readUpload, removeUpload, saveUpload, sweepUploads } from "./uploads.ts"
 
 export { ParleyRpc } from "./rpc.ts"
 
@@ -29,13 +30,32 @@ Status unavailable: no parley UI, so use the question tool or chat for the rest 
 
 const options = { permission: "parley" } as const
 
-function saveUpload(file: FileValue) {
-  if (file.data === undefined) return undefined
-  const dir = path.join(tmpdir(), "parley", crypto.randomUUID())
-  mkdirSync(dir, { recursive: true })
-  const target = path.join(dir, path.basename(file.name))
-  writeFileSync(target, Buffer.from(file.data, "base64"))
-  return target
+/** Rounds in the plugin's own storage, one key per round. Nothing is kept when the host offers no storage. */
+async function roundStore(ctx: Plugin.Context): Promise<RoundStore | undefined> {
+  const storage = ctx.storage
+  if (!storage) return undefined
+  const directory = ctx.location.directory
+  const scanValues = async (prefix: string) => {
+    const entries: unknown[] = []
+    let after: string | undefined
+    do {
+      const page = await storage.scan({ prefix, ...(after === undefined ? {} : { after }) })
+      entries.push(...page.entries.map((entry) => entry.value))
+      after = page.next
+    } while (after !== undefined)
+    return entries
+  }
+  return {
+    directory,
+    // A session of another location, one that is gone, or one the host cannot name is not ours.
+    owns: async (sessionID) => (await ctx.session.get({ sessionID })).location.directory === directory,
+    list: () => scanValues(ROUND_KEY_PREFIX),
+    listOutbox: () => scanValues(OUTBOX_KEY_PREFIX),
+    saveOutbox: (entry: OutboxEntry) => storage.set(outboxKey(entry.key), entry as never),
+    removeOutbox: (key) => storage.remove(outboxKey(key)),
+    save: (round: StoredRound) => storage.set(roundKey(round.id), round as never),
+    remove: (roundID) => storage.remove(roundKey(roundID)),
+  }
 }
 
 export default Plugin.define({
@@ -45,11 +65,27 @@ export default Plugin.define({
     let emitEvent: ((event: RoundEvent) => Promise<void>) | undefined
     const service = new Parley({
       settings: settingsFrom(ctx.options, process.env),
+      store: await roundStore(ctx),
+      save: (file, roundID) => saveUpload(file, roundID),
+      closeUploads: (roundID, at) => markClosed(roundID, at),
+      sweepUploads: (now) => sweepUploads(now),
+      readUpload: (stored) => readUpload(stored),
+      removeUpload: (stored) => removeUpload(stored),
+      warn: (message) => console.warn(message),
+      // A synthetic message, queued behind any running turn and waking an idle session: the user has just
+      // answered, and the agent's own call died with the reload, so nothing else would tell it. The id
+      // (host format `msg_...`) is fixed per message. The host admits an inbox id once and ignores a
+      // retried payload (specs/v2/session.md, "Prompt Admission Precedes Execution"), so retries are safe.
+      deliver: async ({ id, sessionID, text, description }) => {
+        await ctx.session.synthetic({ id, sessionID, text, description, delivery: "queue", resume: true })
+      },
       emit: async (event) => {
         await emitEvent?.(event).catch(() => {})
       },
       questionTool: async () => (await ctx.tool.list()).find((tool) => tool.id === "question"),
     })
+
+    await service.restore()
 
     // execute.before cannot route `question` to parley: renaming a call only reaches direct (non Code
     // Mode) tools, and parley's are Code Mode tools. So the built-in tool itself is wrapped, and only
@@ -95,6 +131,17 @@ export default Plugin.define({
       submit: async (input) =>
         service.submit(input as { roundID: string; answers: SubmittedAnswer[]; final?: boolean }),
       cancel: async (input) => service.cancel(input as { roundID: string; reason?: string }),
+      deliver: async (input) =>
+        service.deliver(
+          input as {
+            sessionID: string
+            number?: number
+            questions: Question[]
+            answers: SubmittedAnswer[]
+            deliveryID?: string
+            roundID?: string
+          },
+        ),
     })
     emitEvent = (event) => rpc.events.emit("round", { ...event })
 
@@ -116,7 +163,7 @@ export default Plugin.define({
         execute: async (input, context) => {
           try {
             const { result, questions } = await service.ask(input as AskInput, call(context))
-            return render(result, questions, saveUpload, (input as AskInput).format === "native" ? "native" : "parley")
+            return render(result, questions, (file) => service.saveUpload(file, result.round_id), (input as AskInput).format === "native" ? "native" : "parley")
           } catch (error) {
             if (error instanceof InputError) throw new Error(error.message)
             throw error
@@ -132,7 +179,7 @@ export default Plugin.define({
         options,
         execute: async (input, context) => {
           const { result, questions } = await service.wait(input as WaitInput, call(context))
-          return render(result, questions, saveUpload)
+          return render(result, questions, (file) => service.saveUpload(file, result.round_id))
         },
       })
       editor.add({
@@ -158,10 +205,12 @@ export default Plugin.define({
       clearInterval(sweep)
       clearInterval(presence)
       disposed = true
-      service.close()
+      // Waiting calls end and their last writes finish, within a bound, before the next instance restores.
+      const drained = service.suspend()
       void takeover.then((current) => current?.dispose()).catch(() => {})
       void tools.dispose().catch(() => {})
       void rpc.dispose().catch(() => {})
+      return drained
     }
   },
 })

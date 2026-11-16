@@ -7,7 +7,8 @@
  * every definition of it says so. A provider's name says nothing about what it stores; its `type` does.
  */
 
-import { existsSync, readdirSync, readFileSync } from "node:fs"
+import { createHash, type Hash } from "node:crypto"
+import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs"
 import { homedir } from "node:os"
 import { dirname, isAbsolute, join } from "node:path"
 import { parse } from "smol-toml"
@@ -108,5 +109,78 @@ export function readProviderTypes(cwd: string, home: string = homedir()): Provid
     }
     const types = explicit.get(path)
     return types === undefined ? undefined : resolve(types, name)
+  }
+}
+
+/**
+ * The fnox config the secret-store tool checks, read once: the provider answers and the digest come from
+ * the same bytes. The digest covers each file's path, its resolved target and its content, and which
+ * config files exist, so any change between two reads (an edit, a new file, a swapped symlink) shows.
+ */
+export type ConfigSnapshot = {
+  digest: string
+  /** A provider's type, resolved as `readProviderTypes` does; `undefined` when uncertain. */
+  typeOf: (name: string) => string | undefined
+  /** The providers every definition of which has `type`. */
+  ofType: (type: string) => string[]
+  /** The string setting `key` every definition of `name` agrees on, else `undefined`. */
+  setting: (name: string, key: string) => string | undefined
+}
+
+/** The files fnox reads for `cwd` (or for an explicit `config` path), nearest first, global last. */
+function configFiles(cwd: string, home: string, config: string | undefined, hash: Hash): string[] {
+  const files: string[] = []
+  if (config !== undefined) files.push(config)
+  else {
+    for (let dir = cwd; ; dir = dirname(dir)) {
+      try {
+        files.push(...readdirSync(dir).filter((name) => CONFIG_NAME.test(name)).sort().map((name) => join(dir, name)))
+      } catch {
+        hash.update(`unreadable\0${dir}\0`)
+      }
+      if (dirname(dir) === dir) break
+    }
+  }
+  const global = join(home, ".config", "fnox", "config.toml")
+  if (existsSync(global)) files.push(global)
+  return files
+}
+
+/**
+ * The fnox config for `cwd`, or for the explicit file `config` (an absolute path, read with the global
+ * config as fnox does). `undefined` when a file cannot be read, does not parse or uses `import`.
+ */
+export function readConfigSnapshot(cwd: string, config?: string, home: string = homedir()): ConfigSnapshot | undefined {
+  const hash = createHash("sha256")
+  const found: Record<string, unknown>[] = []
+  try {
+    for (const file of configFiles(cwd, home, config, hash)) {
+      const bytes = readFileSync(file)
+      hash.update(`${file}\0${realpathSync(file)}\0${bytes.length}\0`)
+      hash.update(bytes)
+      const parsed = parse(bytes.toString("utf8"))
+      bytes.fill(0)
+      // An import pulls in files this reader does not follow.
+      if ("import" in parsed) return undefined
+      found.push(parsed)
+    }
+  } catch {
+    return undefined
+  }
+  const types = collect(found)
+  return {
+    digest: hash.digest("hex"),
+    typeOf: (name) => resolve(types, name),
+    ofType: (type) => [...types].filter(([, all]) => all.length > 0 && all.every((each) => each === type)).map(([name]) => name),
+    setting: (name, key) => {
+      const values: unknown[] = []
+      for (const each of found) {
+        const tables: unknown[] = [each.providers]
+        if (isTable(each.profiles)) for (const profile of Object.values(each.profiles)) if (isTable(profile)) tables.push(profile.providers)
+        for (const table of tables) if (isTable(table) && name in table) values.push(isTable(table[name]) ? table[name][key] : undefined)
+      }
+      const [first] = values
+      return typeof first === "string" && values.every((value) => value === first) ? first : undefined
+    },
   }
 }

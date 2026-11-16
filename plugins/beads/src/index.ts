@@ -224,14 +224,6 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
     const deadline = Date.now() + TOOL_CALL_BUDGET_MS
     if (event.tool === SUBAGENT_TOOL) {
       lifecycle.subagentStarted(event.sessionID, event.id, event.input)
-      if (!on("beads-gate-admission")) return
-      const admission = await admitter.admit(directory, lifecycleBdEnvironment(directory, baseEnv()), true, deadline)
-      if (admission?.block === true)
-        throw new GateRefusal(
-          "beads-gate-admission",
-          admission.reason,
-          "retry the operation; verification continues and the next attempt waits on the same read",
-        )
       return
     }
     if (!isShellTool(event.tool)) return

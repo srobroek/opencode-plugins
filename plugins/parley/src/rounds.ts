@@ -1,5 +1,6 @@
 import { type Answer, normaliseAnswer, publicAnswer, type SubmittedAnswer } from "./answers.ts"
 import { visibleQuestions } from "./conditions.ts"
+import type { RoundDelivery } from "./outbox.ts"
 import { type Question, validateQuestions } from "./questions.ts"
 
 export type RoundStatus = "open" | "submitted" | "cancelled"
@@ -22,6 +23,8 @@ export interface Round {
   deadline?: number
   readonly created: number
   updated: number
+  /** The message that carries a restored round's answers to the session, planned when the round closes. */
+  delivery?: RoundDelivery
 }
 
 /** What a client sees of a round (`pending` RPC). */
@@ -40,6 +43,15 @@ export interface RoundView {
    * whose form the dismissing client cancels so the turn ends exactly as a dismissed form does.
    */
   readonly callIDs?: readonly string[]
+  /** Set on a closed round whose answers could not be sent to the session: the error, for the user to act on. */
+  readonly undelivered?: string
+}
+
+/** Answers that reach the agent as a session message rather than in this result: ids and state, no content. */
+export interface AsMessage {
+  readonly status: "delivered" | "sending" | "dismissed"
+  readonly ids: readonly string[]
+  readonly error?: string
 }
 
 export interface RoundResult {
@@ -49,6 +61,7 @@ export interface RoundResult {
   readonly round_id?: string
   readonly answers: Answer[]
   readonly pending: string[]
+  readonly as_message?: AsMessage
 }
 
 export interface OpenInput {
@@ -62,6 +75,9 @@ type Listener = (round: Round) => void
 
 /** Cancel reason of a round closed because a waiting call's `timeout_s` passed. */
 export const TIMEOUT = "timeout"
+
+/** Reason of the `unavailable` result a waiting call gets when the plugin reloads under it. */
+export const RELOADED_REASON = "parley reloaded; the round stays open and its answers will arrive as a message"
 
 /** In-memory rounds for one plugin instance, keyed by session. One open round per session. */
 export class Rounds {
@@ -117,6 +133,11 @@ export class Rounds {
     let found: Round | undefined
     for (const round of this.#rounds.values()) if (round.sessionID === sessionID) found = round
     return found
+  }
+
+  /** Every round, open or closed, in the order they were opened. */
+  list(): Round[] {
+    return [...this.#rounds.values()]
   }
 
   pending(sessionID?: string): Round[] {
@@ -178,9 +199,24 @@ export class Rounds {
     }
   }
 
-  /** Forgets closed rounds older than `ttlMs`. */
+  /** Forgets closed rounds older than `ttlMs`, and returns their ids. */
   sweep(now: number, ttlMs: number) {
-    for (const [id, round] of this.#rounds) if (round.status !== "open" && now - round.updated > ttlMs) this.#rounds.delete(id)
+    const dropped: string[] = []
+    for (const [id, round] of this.#rounds)
+      if (round.status !== "open" && !awaitsDelivery(round) && now - round.updated > ttlMs) {
+        this.#rounds.delete(id)
+        dropped.push(id)
+      }
+    return dropped
+  }
+
+  /** Puts back rounds read from storage after a reload. Ones already known are left alone. */
+  restore(restored: readonly Round[]) {
+    for (const round of [...restored].sort((a, b) => a.created - b.created)) {
+      if (this.#rounds.has(round.id)) continue
+      this.#rounds.set(round.id, round)
+      this.#counters.set(round.sessionID, Math.max(round.number, this.#counters.get(round.sessionID) ?? 0))
+    }
   }
 
   subscribe(listener: Listener) {
@@ -192,6 +228,9 @@ export class Rounds {
     for (const listener of [...this.#listeners]) listener(round)
   }
 }
+
+/** A closed round whose answers still have to reach the session (being sent, or back with the user after failing). */
+export const awaitsDelivery = (round: Round) => round.delivery?.status === "pending" || round.delivery?.status === "failed"
 
 const scoped = (round: Round, ids?: readonly string[]) =>
   visibleQuestions(round.questions, (id) => round.answers.get(id)?.value).map((question) => question.id).filter((id) => ids === undefined || ids.includes(id))
@@ -206,10 +245,14 @@ export function settled(round: Round, mode: WaitMode, ids?: readonly string[]): 
 }
 
 /** Builds a tool result and marks the returned answers as delivered. */
-export function collect(round: Round, options: { ids?: readonly string[]; timedOut?: boolean } = {}): RoundResult {
+export function collect(
+  round: Round,
+  options: { ids?: readonly string[]; timedOut?: boolean; keep?: boolean } = {},
+): RoundResult {
   const wanted = scoped(round, options.ids)
   const fresh = wanted.filter((id) => round.answers.has(id) && !round.delivered.has(id))
-  for (const id of fresh) round.delivered.add(id)
+  // `keep`: the caller marks them delivered itself, once the answers have really reached the agent.
+  if (options.keep !== true) for (const id of fresh) round.delivered.add(id)
   const answers = fresh.map((id) => round.answers.get(id) as Answer)
   const pending = wanted.filter((id) => !round.answers.has(id))
   const status: ResultStatus =
@@ -245,6 +288,7 @@ export function view(round: Round): RoundView {
     answers: [...round.answers.values()].map(publicAnswer),
     ...(round.deadline === undefined ? {} : { deadline: round.deadline }),
     ...(round.callIDs.length === 0 ? {} : { callIDs: [...round.callIDs] }),
+    ...(round.delivery?.status === "failed" ? { undelivered: round.delivery.error ?? "the message was not admitted" } : {}),
   }
 }
 
