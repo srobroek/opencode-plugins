@@ -431,6 +431,7 @@ Options, under `evaluate`; an array replaces its default:
   `cargo nextest`.
 - `testGlobs`: default `**/*.test.*`, `**/*.spec.*`, `**/test/**`, `**/tests/**`,
   `**/__tests__/**`, `**/*_test.go`, `**/test_*.py`.
+- `agents`, `explore`, `maxArms`, `minN`, `margin`, `costTolerance`: see [Exploration](#exploration-opt-in).
 
 This first phase records only tier-routed spawns: those that reach a session
 through a tier, role or `auto` decision, which the plugin links to the child
@@ -472,6 +473,60 @@ record land in order, and the plugin assumes plugin storage calls settle. At shu
 it waits up to 10 seconds for pending writes and logs what stays unwritten. A write
 still in flight after that can finish after a reload and overwrite the new instance's
 write for the same record. That is accepted.
+
+## Exploration (opt-in)
+
+Exploration collects ledger evidence for alternatives inside a tier. It only collects:
+it never writes config, and it recommends nothing (the assessment comes later).
+It is off by default, and off it changes no routing, receipt or record.
+
+Options, under `evaluate`:
+
+- `agents`: agent ids that may explore (default `[]`). Exploration is on only when
+  this is non-empty and `explore` is above 0.
+- `explore`: ε, the share of eligible spawns that leave the control (default `0.05`,
+  clamped to 0 through 0.1).
+- `maxArms`: most alternatives to the control (default `3`, clamped to 1 through 6).
+  A small set keeps each arm's share of ε high enough to gather evidence.
+- `minN` (30), `margin` (0.05), `costTolerance` (0): stored for the assessment; exploration does not read them.
+
+A bad value logs a warning and falls back to its default (or the clamp).
+
+An eligible spawn draws once: the control (the model and effort the tier resolved) with
+probability 1 − ε, otherwise one alternative uniformly. The alternatives, in order, capped at `maxArms`:
+
+1. the control model one effort step up, when the model has that variant;
+2. the control model one effort step down, when it has one;
+3. the tier's next candidate at its configured (or default) variant;
+4. further candidates, when `maxArms` is above 3.
+
+Steps follow the effort scale `none < minimal < low < medium < high < xhigh < max`, among
+the variants the model has. A control without a variant on that scale has no up or down.
+Filters apply after the cap: a filtered alternative leaves its slot empty, a later one does not replace it.
+An alternative must be available, out of cooldown (the health view the tier resolution uses, so a quota-exhausted
+or cooled-down model or provider is never an arm) and allowed by the guard.
+
+Not eligible: a spawn with an explicit `model`, an agent with its own model, a resume,
+a tier or agent with effort `auto`, an agent outside `evaluate.agents`, a spawn with only
+one arm, and reviewers, whose verdicts are the rewards. A reviewer is a tier with
+`distinctVendor`, or an agent named `*-reviewer` or `adversarial-challenger`.
+Exploration covers every spawn that runs on a tier: one with a `tier` parameter, and one
+with none whose agent has its own tier (an `x-opencode-model-role` header or an `agents`
+mapping). The second kind gets a ledger record only while exploration is on and the spawn is
+eligible; with exploration off nothing changes.
+
+The guard comes first. An arm is a model the plugin picks, so the agent's own tier model
+does not exempt it: an expensive model, an effort variant included, is never an arm unless
+`guard.allowModels` lists it. The offered set is final before the draw, so `p` is always
+the probability under the arms actually offered.
+
+The ledger record of an eligible spawn gets `policy` (`explore-v1`), `eligible` (the arm
+labels, control first), `arm` and `p`, the probability of the arm drawn from the offered set. A control
+draw is logged too; without it the propensities cannot be corrected for. The model
+snapshot keeps the same facts, so a resume stays on the arm and does not redraw. The
+receipt keeps its rule and adds `exploring arm <model#variant>` when the arm is not the
+control. `model_roles_check` shows `exploration: on for <agents>, ε=<x>`, and the usage
+report adds a row per arm under a tier that has any. A child that a failover, a context-overflow switch or a resume reroute (an explicit `model` or `tier`, or a guard switch) moved to another model left its arm: it keeps its `arm` facts and `failedOver`, but the arm rows do not count it (the ledger marks a reroute `leftArm`).
 
 ## Subagent model guard
 

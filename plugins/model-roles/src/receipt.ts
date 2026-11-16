@@ -41,6 +41,8 @@ export type Receipt = {
   /** Candidates skipped before the one that runs, each with its reason. */
   fallbacks: string[]
   warnings: string[]
+  /** The exploration arm the spawn runs on, when exploration moved it off the tier's own choice. */
+  explore?: string
 }
 
 export const RECEIPTS_KEY = "receipts"
@@ -161,6 +163,7 @@ export function formatReceipts(list: ReadonlyArray<Receipt>): string[] {
     const asked = r.tier === undefined ? source : `tier ${r.tier} (${r.alias === undefined ? "" : `${r.alias}, `}${source})`
     const parts = [`${time} ${r.agent}: ${asked} → ${r.model ?? "the agent's model"} by ${RULE_TEXT[r.rule as SpawnRule] ?? r.rule}${r.configRevision === undefined ? "" : ` (config ${r.configRevision})`}`]
     if (r.fallbacks.length > 0) parts.push(`fell back past ${r.fallbacks.join(", ")}`)
+    if (r.explore !== undefined) parts.push(`exploring arm ${r.explore}`)
     for (const warning of r.warnings) parts.push(`warning: ${warning}`)
     lines.push(`  - ${parts.join("; ")}`)
   }
