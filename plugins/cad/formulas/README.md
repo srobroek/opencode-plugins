@@ -12,11 +12,11 @@ The roots orchestrate; the lead runs their steps. A stage with independent units
 4. A full check, labelled `full-check`: the full check on the same version, during which the lead prepares the gate packet, including the sweep's unproved between-sample intervals. A failure, a MAJOR L2 light-review finding, or a change named at the human gate voids the provisional approval, also after the full check closed: the lead runs `bd reopen` on the integration, provisional and full-check steps, the L2 reviews, and every closed later step built on that version except fan-out steps and bonded molecules. Beads then blocks the full check, the human gate, and every later integration until a fixed version passes the fast checks.
 5. One human gate for the stage. It needs the full check and the previous stage's human gate; molecules carry no gates.
 
-INTENT, VARIANT, DESIGN freeze, and RELEASE are single human gates. The `cad-flow` skill describes the fail-fast check order and the gate rules.
+INTENT, SPECIFY, VARIANT, DESIGN freeze, and RELEASE are single human gates; in `cad-touch`, INTENT and RELEASE are. The SPECIFY gate keeps L0 CONCEPT closed until the user approves the requirements and verification plan. The `cad-flow` skill describes the fail-fast check order and the gate rules.
 
 | Root | Stages that fan out | Human gates | Provisional gates |
 |---|---|---|---|
-| `cad-product`, `cad-part` | concept (variants), parts (subassemblies plus purchased families), the L2 light review, detail (made parts), analysis (cases, then the joint sweep and its worst-pose FEA at the full check), and the two critique steps | INTENT, VARIANT, LAYOUT freeze, PARTS, DETAIL, ANALYSIS, DESIGN freeze, RELEASE | LAYOUT, PARTS, DETAIL, ANALYSIS |
+| `cad-product`, `cad-part` | concept (variants), parts (subassemblies plus purchased families), the L2 light review, detail (made parts), analysis (cases, then the joint sweep and its worst-pose FEA at the full check), and the two critique steps | INTENT, SPECIFY, VARIANT, LAYOUT freeze, PARTS, DETAIL, ANALYSIS, DESIGN freeze, RELEASE | LAYOUT, PARTS, DETAIL, ANALYSIS |
 | `cad-touch` | revise (the ECO impact set), analysis (affected cases, then the joint sweep at the full check), and the two critique steps | INTENT, REVISION, ANALYSIS, RELEASE | REVISION, ANALYSIS |
 
 GROUND, INTENT, SPECIFY, LAYOUT, BOM, and RELEASE stay with the lead.

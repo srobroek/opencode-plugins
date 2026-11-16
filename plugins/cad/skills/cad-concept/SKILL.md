@@ -1,20 +1,20 @@
 ---
 name: cad-concept
-description: Iterates 2-4 rough three.js concept variants in a live viewer, then exports one. Triggers on "sketch some concepts".
+description: Iterates 2-4 rough three.js concept variants in a live viewer, then exports the chosen one for CAD. Triggers on "sketch some concepts", "pick a variant".
 ---
+
+Resolve `$CAD_SKILLS` as the parent directory of this skill's directory; it contains the installed `cad-*` skill folders.
 
 # CAD Concept (L0)
 
-Stage L0 CONCEPT of the `cad-flow` skill: rough primitive variants the user compares, refines,
+Stage L0 CONCEPT of `cad-flow`: rough primitive variants the user compares, refines,
 merges, or drops until the VARIANT gate, then a handoff manifest for L1 LAYOUT. Joints describe
 the mechanism at its nominal configuration and are passed to L1 LAYOUT in the handoff.
-Paths below are relative to this skill's base directory.
-
-TRIGGER
+Paths below are relative to this skill's directory.
 + "sketch some concepts", "show me a few options", "compare variants", "pick a variant"
 + `hw/product.yaml` has `flow.stage: concept`
-- envelopes, interfaces, or a BOM skeleton -> L1 LAYOUT in the `cad-flow` skill
-- real geometry in CadQuery or build123d -> L2 PARTS in the `cad-flow` skill
+- envelopes, interfaces, or a BOM skeleton -> L1 LAYOUT in `cad-flow`
+- real geometry in CadQuery or build123d -> L2 PARTS in `cad-flow`
 
 GATES
 ASK which live variant passes the VARIANT gate; record nothing as chosen until the user names it.
@@ -27,26 +27,25 @@ ASK which live variant passes the VARIANT gate; record nothing as chosen until t
    and material each variant assumes in `params` (e.g. `window_material: "cast acrylic"`), from
    `hw/product.yaml` `manufacturing.processes`. A variant that needs what its process cannot
    make, such as a see-through part printed in FDM, names that conflict in its `summary`.
-3. Run `cad_run cad-concept/scripts/concept.py check <scene>` after every edit. -> exit 0, `"ok": true`.
-4. Start the preview once in the background:
-   `cad_run cad-concept/scripts/serve.py --scene-dir hw/concept` with `background: true`. Read the first stdout JSON line
+3. Run `uv run --script scripts/concept.py check <scene>` after every edit. -> exit 0, `"ok": true`.
+4. Start the preview once as the harness's background job or service:
+   `uv run --script scripts/serve.py --scene-dir hw/concept`. Read the first stdout JSON line
    and send its `url` to the user; it reports the chosen free port. Use `--port N` only when a
    fixed port is needed. Each saved edit reloads the open viewer.
-5. Collect feedback. Drive the viewer yourself when you have browser tools; otherwise ask
+5. Collect feedback. Drive the viewer yourself when the harness has a browser; otherwise ask
    the user which nominal variant best addresses the trade-off. Save a screenshot for each
    live variant when useful; screenshots land in `hw/concept/screenshots/`.
 6. Apply each request as one operation from the table, then re-run step 3.
 7. On "commit batch": run step 3 and save one screenshot per live variant. No other checks
-   run before LAYOUT freeze. Hand the batch to the `cad-flow` skill for COMMIT.
+   run before LAYOUT freeze. Hand the batch to `cad-flow` for COMMIT.
 8. "More detail?" -> back to step 5. Otherwise ASK the VARIANT gate, naming each variant's
-   process or material conflict, set `chosen`, and run
-   `cad_run cad-concept/scripts/concept.py handoff <scene> --out <new path under .cad-work/>`
-   -> exit 0 means the manifest passed the bundled handoff JSON schema.
-9. MUST stop the concept server when the user is done: after the VARIANT gate passes or the
-   session ends. Stop it with `cad_stop` and the pid `cad_run` reported; deleting the session
-   also stops it. Tell the user which viewer URL is going away.
+   process or material conflict. Set `chosen` only after approval is recorded in a `DR-###`
+   decision in `hw/decisions/`, then run `concept.py handoff <scene>`.
+9. MUST stop the concept server when the user is done: after the VARIANT gate passes or the session
+   ends. Stop it through the harness job or service handle. If none exists, start it with `&`, keep `$!`,
+   and run `kill <pid>`. Tell the user which viewer URL is going away.
    The 30-minute idle timeout stops abandoned servers after inactivity. Report the handoff path
-   to the `cad-flow` skill, which opens L1 LAYOUT.
+   to `cad-flow`, which opens L1 LAYOUT.
 
 | user says | operation |
 |---|---|
