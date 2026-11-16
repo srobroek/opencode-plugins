@@ -733,23 +733,39 @@ describe("runtime fallback", () => {
     await cleanup()
   })
 
-  test("a prompt too long is retried once on a tier candidate with a larger window, with no cooldown", async () => {
-    const windows: Model[] = [
-      { ...models[0], limit: { context: 200_000 } },
-      { ...models[1], limit: { context: 1_000_000 } },
-      { ...models[2], limit: { context: 2_000_000 } },
-    ] as Model[]
-    const roles = { ...fallbackOptions, roles: { task: ["amazon-bedrock/claude-sonnet#high", "anthropic/claude-haiku", "opencode/flint"] } }
-    const host = createHost({ agents: [{ id: "build" }], models: windows, options: roles })
+  // The host's shape for an overflow its compaction could not fix: `session.execution.failed` carries
+  // `toSessionError` of an InvalidRequest (opencode core `session/to-session-error.ts`, `providerError`).
+  const overflow = (message: string) => ({
+    type: "provider.invalid-request",
+    message,
+    status: 400,
+    response: { body: JSON.stringify({ type: "error", error: { type: "invalid_request_error", message } }) },
+  })
+  const tooLong = overflow("prompt is too long: 213462 tokens > 200000 maximum")
+  const windows = (...limits: number[]) => models.map((m, i) => ({ ...m, limit: { context: limits[i] ?? 200_000 } })) as Model[]
+  const wide = { ...fallbackOptions, roles: { task: ["amazon-bedrock/claude-sonnet#high", "anthropic/claude-haiku", "opencode/flint"] } }
+  const notes = (host: ReturnType<typeof createHost>) => methods(host, "synthetic").map((c) => c.input as { sessionID: string; text: string })
+  const childHost = (models: Model[], options: typeof fallbackOptions, children = ["c"]) => {
+    const host = createHost({ agents: [{ id: "general" }], models, options })
+    host.sessions.set("r", { id: "r" })
+    for (const id of children) host.sessions.set(id, { id, parentID: "r", agent: "general", model: sonnet })
+    return host
+  }
+
+  test("a child that overflows is switched to the tier's larger-context candidate for its next request, with one note and a receipt", async () => {
+    const host = childHost(windows(200_000, 1_000_000, 2_000_000), wide)
     const cleanup = await setup(host)
-    const error = { type: "api", message: "prompt is too long: 213462 tokens > 200000 maximum", status: 400 }
-    const base = { sessionID: "r", agent: "build", error }
-    expect(await host.fireRetry({ ...base, model: sonnet, attempt: 2 })).toEqual({ retry: true, delay: 0 })
-    expect(methods(host, "switchModel").map((c) => c.input)).toEqual([{ sessionID: "r", model: haiku }])
+    host.emit(failed("c", tooLong))
+    await settle()
+    expect(methods(host, "switchModel").map((c) => c.input)).toEqual([{ sessionID: "c", model: haiku }])
+    expect(notes(host)).toEqual([
+      {
+        ...notes(host)[0],
+        sessionID: "r",
+        text: "context too long for amazon-bedrock/claude-sonnet#high (200000 tokens); the session now runs anthropic/claude-haiku (1000000 tokens). Resume it with sessionID c to continue on the larger context.",
+      },
+    ])
     expect(host.storage.has("health")).toBe(false)
-    // Once per request: a second failure of the same request is left to the host.
-    await host.fireRetry({ ...base, model: haiku, attempt: 3 }, declined)
-    expect(methods(host, "switchModel")).toHaveLength(1)
     const check = (await host.tools.get("model_roles_check")?.execute({}))?.content ?? ""
     expect(check).toContain("anthropic/claude-haiku by model default; fell back past amazon-bedrock/claude-sonnet#high: context-length")
     expect(check).not.toContain("Recent health")
@@ -758,46 +774,85 @@ describe("runtime fallback", () => {
   })
 
   test("a candidate whose variant is unknown is not a larger-context target", async () => {
-    const windows = [
-      { ...models[0], limit: { context: 200_000 } },
-      { ...models[1], limit: { context: 1_000_000 } },
-      { ...models[2], limit: { context: 2_000_000 } },
-    ] as Model[]
     const roles = { ...fallbackOptions, roles: { task: ["amazon-bedrock/claude-sonnet#high", "anthropic/claude-haiku#nope", "opencode/flint"] } }
-    const host = createHost({ agents: [{ id: "build" }], models: windows, options: roles })
+    const host = childHost(windows(200_000, 1_000_000, 2_000_000), roles)
     const cleanup = await setup(host)
-    const error = { type: "api", message: "prompt is too long: 213462 tokens > 200000 maximum", status: 400 }
-    expect(await host.fireRetry({ sessionID: "r", agent: "build", model: sonnet, error, attempt: 2 })).toEqual({ retry: true, delay: 0 })
-    expect(methods(host, "switchModel").map((c) => c.input)).toEqual([{ sessionID: "r", model: flint }])
+    host.emit(failed("c", tooLong))
+    await settle()
+    expect(methods(host, "switchModel").map((c) => c.input)).toEqual([{ sessionID: "c", model: flint }])
     host.close()
     await cleanup()
   })
 
-  test("a later request that starts with a transient failure can still move to a larger context", async () => {
-    const windows = [
-      { ...models[0], limit: { context: 200_000 } },
-      { ...models[1], limit: { context: 1_000_000 } },
-    ] as Model[]
-    const host = createHost({ agents: [{ id: "build" }], models: windows, options: fallbackOptions })
+  test("with no larger-context candidate nothing is switched and the note says so", async () => {
+    const host = childHost(windows(200_000, 200_000, 200_000), wide)
     const cleanup = await setup(host)
-    const long = { type: "api", message: "prompt is too long: 213462 tokens > 200000 maximum", status: 400 }
-    const busy = { type: "api", message: "Service Unavailable", status: 503 }
-    const base = { sessionID: "r", agent: "build" }
-    expect(await host.fireRetry({ ...base, model: sonnet, error: long, attempt: 2 })).toEqual({ retry: true, delay: 0 })
-    // A new request: it starts with a transient failure, then hits the window.
-    await host.fireRetry({ ...base, model: sonnet, error: busy, attempt: 2 })
-    expect(await host.fireRetry({ ...base, model: sonnet, error: long, attempt: 3 })).toEqual({ retry: true, delay: 0 })
-    expect(methods(host, "switchModel")).toHaveLength(2)
+    host.emit(failed("c", overflow("Input is too long for requested model.")))
+    await settle()
+    expect(methods(host, "switchModel")).toHaveLength(0)
+    expect(notes(host).map((n) => n.text)).toEqual([
+      "context too long for amazon-bedrock/claude-sonnet#high (200000 tokens); no larger-context candidate in tier task. Compact the session or use a tier with a larger-context model",
+    ])
+    expect(host.storage.has("health")).toBe(false)
     host.close()
     await cleanup()
   })
 
-  test("a prompt too long with no larger-context candidate is not retried and sits nothing out", async () => {
-    const same: Model[] = models.map((m) => ({ ...m, limit: { context: 200_000 } })) as Model[]
-    const host = createHost({ agents: [{ id: "build" }], models: same, options: fallbackOptions })
+  test("a root session that overflows is not switched; the note names the larger candidate", async () => {
+    const host = createHost({ agents: [{ id: "general" }], models: windows(200_000, 1_000_000), options: fallbackOptions })
+    host.sessions.set("r", { id: "r", agent: "general", model: sonnet })
     const cleanup = await setup(host)
-    const error = { type: "api", message: "Input is too long for requested model.", status: 400 }
-    expect(await host.fireRetry({ sessionID: "r", agent: "build", model: sonnet, error, attempt: 2 }, declined)).toEqual(declined)
+    host.emit(failed("r", tooLong))
+    await settle()
+    expect(methods(host, "switchModel")).toHaveLength(0)
+    expect(notes(host)).toEqual([
+      {
+        ...notes(host)[0],
+        sessionID: "r",
+        text: "context too long for amazon-bedrock/claude-sonnet#high (200000 tokens); tier task has a larger-context candidate, anthropic/claude-haiku (1000000 tokens). Switch to it or compact the session.",
+      },
+    ])
+    host.close()
+    await cleanup()
+  })
+
+  test.each([
+    ["the failure event", "event"],
+    ["the tool error", "tool"],
+  ])("a child's overflow switches it once and notes it once when %s comes first", async (_name, first) => {
+    const host = childHost(windows(200_000, 1_000_000), fallbackOptions)
+    const cleanup = await setup(host)
+    const event = async () => {
+      host.emit(failed("c", tooLong))
+      await settle()
+    }
+    const tool = async () => {
+      await host.spawnFailed({ agent: "general", prompt: "x" }, `Subagent failed (sessionID: c): ${tooLong.message}`, "r")
+      await settle()
+    }
+    for (const step of first === "event" ? [event, tool] : [tool, event]) await step()
+    expect(methods(host, "switchModel").map((c) => c.input)).toEqual([{ sessionID: "c", model: haiku }])
+    expect(notes(host).map((n) => n.sessionID)).toEqual(["r"])
+    expect(notes(host)[0]?.text).toContain("Resume it with sessionID c")
+    host.close()
+    await cleanup()
+  })
+
+  test("two children that overflow on one model each get a note in the parent", async () => {
+    const host = childHost(windows(200_000, 1_000_000), fallbackOptions, ["c1", "c2"])
+    const cleanup = await setup(host)
+    host.emit(failed("c1", tooLong))
+    host.emit(failed("c2", tooLong))
+    await settle()
+    expect(notes(host).map((n) => n.text.match(/sessionID (\w+)/)?.[1])).toEqual(["c1", "c2"])
+    host.close()
+    await cleanup()
+  })
+
+  test("the retry hook leaves an overflow to the host", async () => {
+    const host = createHost({ agents: [{ id: "build" }], models: windows(200_000, 1_000_000), options: fallbackOptions })
+    const cleanup = await setup(host)
+    expect(await host.fireRetry({ sessionID: "r", agent: "build", model: sonnet, error: tooLong, attempt: 2 }, declined)).toEqual(declined)
     expect(methods(host, "switchModel")).toHaveLength(0)
     expect(host.storage.has("health")).toBe(false)
     host.close()
@@ -1246,100 +1301,6 @@ describe("runtime fallback", () => {
     await cleanup()
   })
 
-  test("two children over the context window on one model each get a note in the parent", async () => {
-    const limited = models.map((m) => ({ ...m, limit: { context: 200_000 } }))
-    const host = createHost({ agents: [{ id: "general" }], models: limited as Model[], options: fallbackOptions })
-    host.sessions.set("r", { id: "r" })
-    host.sessions.set("c1", { id: "c1", parentID: "r", agent: "general", model: sonnet })
-    host.sessions.set("c2", { id: "c2", parentID: "r", agent: "general", model: sonnet })
-    const cleanup = await setup(host)
-    const message = "prompt is too long: 250000 tokens > 200000 maximum"
-    host.emit(failed("c1", { type: "unknown", message, status: 400 }))
-    host.emit(failed("c2", { type: "unknown", message, status: 400 }))
-    await settle()
-    expect(methods(host, "synthetic")).toHaveLength(2)
-    host.close()
-    await cleanup()
-  })
-
-  test("a child's tool error first, then its failure event, still gives one note", async () => {
-    const limited = models.map((m) => ({ ...m, limit: { context: 200_000 } }))
-    const host = createHost({ agents: [{ id: "general" }], models: limited as Model[], options: fallbackOptions })
-    host.sessions.set("r", { id: "r" })
-    host.sessions.set("c", { id: "c", parentID: "r", agent: "general", model: sonnet })
-    const cleanup = await setup(host)
-    const message = "prompt is too long: 250000 tokens > 200000 maximum"
-    await host.spawnFailed({ agent: "general", prompt: "x" }, `Subagent failed (sessionID: c): ${message}`, "r")
-    await settle()
-    host.emit(failed("c", { type: "unknown", message, status: 400 }))
-    await settle()
-    expect(methods(host, "synthetic").map((c) => (c.input as { sessionID: string }).sessionID)).toEqual(["r"])
-    host.close()
-    await cleanup()
-  })
-
-  test("after a context fallback, a later switch in the same request skips the small model", async () => {
-    const windows = [
-      { ...models[0], limit: { context: 200_000 } },
-      { ...models[1], limit: { context: 1_000_000 } },
-      { ...models[2], limit: { context: 2_000_000 } },
-    ] as Model[]
-    const roles = { ...fallbackOptions, roles: { task: ["amazon-bedrock/claude-sonnet#high", "anthropic/claude-haiku", "opencode/flint"] } }
-    const host = createHost({ agents: [{ id: "build" }], models: windows, options: roles })
-    const cleanup = await setup(host)
-    const long = { type: "api", message: "prompt is too long: 213462 tokens > 200000 maximum", status: 400 }
-    const busy = { type: "api", message: "Service Unavailable", status: 503 }
-    const base = { sessionID: "r", agent: "build" }
-    expect(await host.fireRetry({ ...base, model: sonnet, error: long, attempt: 2 })).toEqual({ retry: true, delay: 0 })
-    expect(await host.fireRetry({ ...base, model: haiku, error: busy, attempt: 4 })).toEqual({ retry: true, delay: 0 })
-    expect(methods(host, "switchModel").map((c) => (c.input as { model: ModelRef }).model)).toEqual([haiku, flint])
-    host.close()
-    await cleanup()
-  })
-
-  test("the final note says whether the larger-context retry was spent", async () => {
-    const windows = [
-      { ...models[0], limit: { context: 200_000 } },
-      { ...models[1], limit: { context: 1_000_000 } },
-      { ...models[2], limit: { context: 2_000_000 } },
-    ] as Model[]
-    const roles = { ...fallbackOptions, roles: { task: ["amazon-bedrock/claude-sonnet#high", "anthropic/claude-haiku", "opencode/flint"] } }
-    const host = createHost({ agents: [{ id: "build" }], models: windows, options: roles })
-    host.sessions.set("r", { id: "r", agent: "build", model: haiku })
-    const cleanup = await setup(host)
-    const long = { type: "api", message: "prompt is too long: 1100000 tokens > 1000000 maximum", status: 400 }
-    const base = { sessionID: "r", agent: "build", error: long }
-    await host.fireRetry({ ...base, model: sonnet, attempt: 2 })
-    // The retry on haiku overflows too: the budget is spent although flint is larger.
-    expect(await host.fireRetry({ ...base, model: haiku, attempt: 3 }, { retry: false })).toEqual({ retry: false })
-    expect(methods(host, "switchModel")).toHaveLength(1)
-    host.emit(failed("r", long))
-    await settle()
-    const texts = methods(host, "synthetic").map((c) => (c.input as { text: string }).text)
-    expect(texts).toEqual(["context too long for anthropic/claude-haiku (1000000 tokens) after one larger-context retry; compact the session or start a new one."])
-    host.close()
-    await cleanup()
-  })
-
-  test("a child over the context window gets one note in its parent, whether its failure event or the tool error comes first", async () => {
-    const limited = models.map((m) => ({ ...m, limit: { context: 200_000 } }))
-    const host = createHost({ agents: [{ id: "general" }], models: limited as Model[], options: fallbackOptions })
-    host.sessions.set("r", { id: "r" })
-    host.sessions.set("c", { id: "c", parentID: "r", agent: "general", model: sonnet })
-    const cleanup = await setup(host)
-    const message = "prompt is too long: 250000 tokens > 200000 maximum"
-    host.emit(failed("c", { type: "unknown", message, status: 400 }))
-    await settle()
-    await host.spawnFailed({ agent: "general", prompt: "x" }, `Subagent failed (sessionID: c): ${message}`, "r")
-    await settle()
-    const notes = methods(host, "synthetic").map((c) => c.input as { sessionID: string; text: string })
-    expect(notes.map((n) => n.sessionID)).toEqual(["r"])
-    expect(notes[0]?.text).toContain("context too long for amazon-bedrock/claude-sonnet#high (200000 tokens)")
-    expect(host.storage.has("health")).toBe(false)
-    host.close()
-    await cleanup()
-  })
-
   test("a spawn error names its child as sessionID: <id>", async () => {
     const host = createHost({ agents: [{ id: "general" }], models, options: fallbackOptions })
     // The child ran on haiku, not on what general resolves to now: the child's model is the one blamed.
@@ -1364,22 +1325,6 @@ describe("runtime fallback", () => {
     expect(host.storage.has("health")).toBe(false)
     expect(host.calls).toHaveLength(0)
     expect(host.agents().get("general")?.model).toEqual(sonnet)
-    host.close()
-    await cleanup()
-  })
-
-  test("a failed execution over the context window notes the limit and sits nothing out", async () => {
-    const limited = models.map((m) => ({ ...m, limit: { context: 200_000 } }))
-    const host = createHost({ agents: [{ id: "general" }], models: limited as Model[], options: fallbackOptions })
-    host.sessions.set("r", { id: "r", agent: "general", model: sonnet })
-    const cleanup = await setup(host)
-    host.emit(failed("r", { type: "unknown", message: "prompt is too long: 250000 tokens > 200000 maximum", status: 400 }))
-    await settle()
-    expect(host.storage.has("health")).toBe(false)
-    const texts = methods(host, "synthetic").map((c) => (c.input as { text: string }).text)
-    expect(texts).toEqual([
-      "context too long for amazon-bedrock/claude-sonnet#high (200000 tokens); no larger-context candidate in tier task. Compact the session or use a tier with a larger-context model",
-    ])
     host.close()
     await cleanup()
   })

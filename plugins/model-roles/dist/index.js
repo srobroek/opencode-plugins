@@ -474,14 +474,18 @@ function contextFallback(candidates, failed, limits) {
     return healthKey(candidate) !== healthKey(failed) && limit !== undefined && limit > own;
   });
 }
-function contextRetriedNote(failed, limit) {
-  const size = limit === undefined ? "unknown limit" : `${limit} tokens`;
-  return `context too long for ${label(failed)} (${size}) after one larger-context retry; compact the session or start a new one.`;
+var tokens = (limit) => limit === undefined ? "unknown limit" : `${limit} tokens`;
+function contextSwitchNote(facts) {
+  const head = `context too long for ${label(facts.failed)} (${tokens(facts.limit)})`;
+  const target = `${label(facts.target)} (${tokens(facts.targetLimit)})`;
+  if (facts.resumable !== undefined)
+    return `${head}; the session now runs ${target}. Resume it with sessionID ${facts.resumable} to continue on the larger context.`;
+  const where = facts.tier === undefined ? "its tier" : `tier ${facts.tier}`;
+  return `${head}; ${where} has a larger-context candidate, ${target}. Switch to it or compact the session.`;
 }
 function contextNote(failed, limit, tier) {
-  const size = limit === undefined ? "unknown limit" : `${limit} tokens`;
   const where = tier === undefined ? "its tier" : `tier ${tier}`;
-  return `context too long for ${label(failed)} (${size}); no larger-context candidate in ${where}. Compact the session or use a tier with a larger-context model`;
+  return `context too long for ${label(failed)} (${tokens(limit)}); no larger-context candidate in ${where}. Compact the session or use a tier with a larger-context model`;
 }
 
 // plugins/model-roles/src/catalog.ts
@@ -3771,7 +3775,16 @@ function hostWarn(source) {
 // plugins/model-roles/src/outage.ts
 var NOTICE_DEDUPE_MS = 60000;
 var OUTAGE_STALE_MS = 15 * 60000;
-var newNoticeState = () => ({ outages: new Map, notices: new Map });
+var newNoticeState = () => ({ outages: new Map, notices: new Map, contextNotices: new Map });
+function claimContextNotice(state, sessionID, now) {
+  for (const [id, at] of state.contextNotices)
+    if (now - at >= NOTICE_DEDUPE_MS)
+      state.contextNotices.delete(id);
+  if (state.contextNotices.has(sessionID))
+    return false;
+  state.contextNotices.set(sessionID, now);
+  return true;
+}
 var stoppedKey = (report) => report.subagent?.sessionID ?? `${report.notifyTo}\x00${report.subagent?.agent ?? ""}`;
 var stoppedLine = (stopped, provider, kind, first) => {
   const who = stopped.agent === undefined ? "A subagent" : `Subagent '${stopped.agent}'`;
@@ -3782,7 +3795,7 @@ function decideFailureNotice(state, report) {
   const { failed, kind, now, notifyTo } = report;
   if (failureScope(kind) === "provider")
     return decideOutage(state, report);
-  const key = kind === "context-length" ? `${notifyTo}\x00${healthKey(failed)}\x00${kind}\x00${report.subagent?.sessionID ?? ""}` : `${notifyTo}\x00${healthKey(failed)}\x00${kind}`;
+  const key = `${notifyTo}\x00${healthKey(failed)}\x00${kind}`;
   const last = state.notices.get(key);
   if (last !== undefined && now - last < NOTICE_DEDUPE_MS)
     return;
@@ -3822,6 +3835,7 @@ function decideOutage(state, report) {
   return { sessionID: notifyTo, text: line === undefined ? head : `${head} ${line}` };
 }
 function forgetSession(state, sessionID) {
+  state.contextNotices.delete(sessionID);
   for (const outage of state.outages.values()) {
     outage.stopped.delete(sessionID);
   }
@@ -5459,11 +5473,36 @@ ${refs.size}`;
       }
       return limits;
     };
-    const announceContext = async (notifyTo, failed, role, subagent, requestSession) => {
-      const limit = contextLimits().get(healthKey(failed));
-      const spent = requestSession !== undefined && contextRetried.has(requestSession);
-      const plain = spent ? contextRetriedNote(failed, limit) : contextNote(failed, limit, contextTier(role, failed));
-      await announce({ failed, kind: "context-length", cooldownMs: 0, target: undefined, now: Date.now(), notifyTo, subagent, plain });
+    const onContextOverflow = async (overflow) => {
+      const { sessionID, notifyTo, failed } = overflow;
+      if (!claimContextNotice(noticeState, sessionID ?? `${notifyTo}\x00${overflow.agent ?? ""}`, Date.now()))
+        return;
+      const tier = contextTier(overflow.role, failed);
+      const limits = contextLimits();
+      const limit = limits.get(healthKey(failed));
+      const target = contextFallback(contextCandidates(tier, view()), failed, limits);
+      if (target === undefined)
+        return notify(notifyTo, contextNote(failed, limit, tier), "context-length");
+      let resumable;
+      if (overflow.isChild && sessionID !== undefined) {
+        try {
+          await ctx.session.switchModel({ sessionID, model: target });
+          noteFailover(sessionID, target, overflow.spawnRole);
+          await outcomes.failover(sessionID);
+          resumable = sessionID;
+          await recordReceipt({
+            at: Date.now(),
+            agent: overflow.agent ?? "",
+            source: "agent",
+            ...tier === undefined ? {} : { tier },
+            model: modelLabel(target),
+            rule: "model-default",
+            fallbacks: [`${modelLabel(failed)}: ${CONTEXT_FALLBACK_REASON}`],
+            warnings: []
+          });
+        } catch {}
+      }
+      await notify(notifyTo, contextSwitchNote({ failed, limit, target, targetLimit: limits.get(healthKey(target)), tier, resumable }), "context-length");
     };
     const contextTier = (role, failed) => role !== undefined && Object.hasOwn(options.roles, role) ? role : rolesListing(options, failed)[0];
     const contextCandidates = (tier, healthOf) => tier === undefined ? [] : tierModels(options.roles, tier).filter((ref) => healthOf(ref) === undefined && candidateStatus(modelText(ref), available, options.roles, {}, Date.now()).status === "available");
@@ -5711,10 +5750,8 @@ ${refs.size}`;
       const spawnRole = isChild ? await spawnRoleOf(sessionID) : undefined;
       const role = spawnRole ?? (agent === undefined ? undefined : roleOf(agent, options.agents, options.implicit));
       if (kind === "context-length") {
-        await announceContext(isChild ? session.parentID : sessionID, failed, role, isChild ? { agent: session.agent, sessionID } : undefined, sessionID);
-        contextRetried.delete(sessionID);
-        triedModels.delete(sessionID);
-        return;
+        const notifyTo = isChild ? session.parentID : sessionID;
+        return onContextOverflow({ sessionID, notifyTo, failed, role, spawnRole, agent: session.agent, isChild });
       }
       const target = cooldownMs > 0 ? fallbackTarget(options, available, view(), role, failed) : undefined;
       const facts = { failed, kind, cooldownMs, target };
@@ -5776,65 +5813,15 @@ ${refs.size}`;
       warn(`session ${event.sessionID}: ${modelLabel(failed)} failed (${kind}); retrying it in ${duration(delay)}.`);
     };
     const triedModels = new Map;
-    const contextRetried = new Set;
-    const retryOnLargerContext = async (event, failed) => {
-      const tried = triedModels.get(event.sessionID) ?? new Set;
-      triedModels.set(event.sessionID, tried.add(healthKey(failed)));
-      if (contextRetried.has(event.sessionID)) {
-        warn(`session ${event.sessionID}: ${contextRetriedNote(failed, contextLimits().get(healthKey(failed)))}`);
-        return;
-      }
-      if (switching.has(event.sessionID))
-        return;
-      try {
-        await queue(async () => {
-          const agent = (await listAgents()).find((a) => a.id === event.agent);
-          const spawnRole = await spawnRoleOf(event.sessionID);
-          const role = spawnRole ?? (agent === undefined ? undefined : roleOf(agent, options.agents, options.implicit));
-          const tier = contextTier(role, failed);
-          const limits = contextLimits();
-          const recent = healthView(health2, Date.now(), RECENT_MS);
-          const target = contextFallback(contextCandidates(tier, (ref) => tried.has(healthKey(ref)) ? 0 : recent(ref)), failed, limits);
-          if (target === undefined) {
-            warn(`session ${event.sessionID}: ${contextNote(failed, limits.get(healthKey(failed)), tier)}`);
-            return;
-          }
-          contextRetried.add(event.sessionID);
-          const outcome = await switchWithin(event.sessionID, target, spawnRole);
-          if (outcome !== "switched") {
-            warn(`session ${event.sessionID}: switching to ${modelLabel(target)} for a larger context ${outcome === "late" ? "is still pending" : "failed"}.`);
-            return;
-          }
-          event.decision = { retry: true, delay: 0 };
-          warn(`session ${event.sessionID}: context too long for ${modelLabel(failed)}; the request was retried on ${modelLabel(target)} (${limits.get(healthKey(target))} tokens).`);
-          await recordReceipt({
-            at: Date.now(),
-            agent: event.agent ?? "",
-            source: "agent",
-            ...tier === undefined ? {} : { tier },
-            model: modelLabel(target),
-            rule: "model-default",
-            fallbacks: [`${modelLabel(failed)}: ${CONTEXT_FALLBACK_REASON}`],
-            warnings: []
-          });
-        });
-      } catch (error) {
-        warn(`could not switch the failing request to a larger-context model`, { error: String(error) });
-      }
-    };
     const retries = await ctx.session.hook("retry", async (event) => {
-      if (event.attempt <= 2) {
+      if (event.attempt <= 2)
         triedModels.delete(event.sessionID);
-        contextRetried.delete(event.sessionID);
-      }
       const error = event.error;
       const kind = classifyFailure(error);
-      if (kind === undefined)
+      if (kind === undefined || kind === "context-length")
         return;
       const { providerID, id, variant } = event.model;
       const failed = variant ? { providerID, id, variant } : { providerID, id };
-      if (kind === "context-length")
-        return retryOnLargerContext(event, failed);
       if (staysOnModel(kind, event.attempt, runtime.hostRetries))
         return keepOnModel(event, kind, failed);
       if (switching.has(event.sessionID))
@@ -6710,8 +6697,8 @@ ${refs.size}`;
           const cooldownMs = await markFailed(failed, kind, { message });
           const role = spawn?.role ?? (agent === undefined ? undefined : roleOf(agent, options.agents, options.implicit));
           if (kind === "context-length") {
-            await announceContext(event.sessionID, failed, role, { agent: agentID, sessionID: childSessionID(message) }, childSessionID(message));
-            return;
+            const childID = childSessionID(message);
+            return onContextOverflow({ sessionID: childID, notifyTo: event.sessionID, failed, role, spawnRole: spawn?.role, agent: agentID, isChild: true });
           }
           const target = cooldownMs > 0 ? fallbackTarget(options, available, view(), role, failed) : undefined;
           const facts = { failed, kind, cooldownMs, target };
@@ -6980,7 +6967,7 @@ export {
   configuredModels,
   contextFallback,
   contextNote,
-  contextRetriedNote,
+  contextSwitchNote,
   cooldownFor,
   costLabel,
   costTier,

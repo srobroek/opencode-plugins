@@ -549,14 +549,23 @@ alike:
    stands.
 
    A `context-length` failure is about one request, so it never starts a
-   cooldown or adds a strike. The plugin retries it once on the first healthy
-   candidate of the session's tier whose context window is larger than the
-   failed model's, using the catalog's `limit.context` for each model. Unknown
-   or equal windows don't count as larger. The receipt records the fallback
-   reason `context-length`. With no larger candidate, nothing is retried and the
-   session gets: "context too long for `<model>` (`<limit>` tokens); no
-   larger-context candidate in tier `<tier>`. Compact the session or use a tier
-   with a larger-context model".
+   cooldown or adds a strike. The host handles an overflow itself, outside the
+   `retry` hook. With automatic compaction on, it compacts the session once.
+   It fails the step when compaction is off or doesn't shrink the request
+   enough. The plugin acts only on that failure (`session.execution.failed`,
+   or the failed `subagent` call), and re-runs nothing:
+   - A child moves, with `session.switchModel`, to the first healthy
+     candidate of its tier with a larger context window. Resuming it
+     continues there. Windows come from the catalog's `limit.context`.
+     Unknown or equal windows don't count as larger. The receipt records the
+     fallback reason `context-length`.
+   - A root session keeps its model. Its note names the larger candidate.
+   - With no larger candidate, the note says: "context too long for
+     `<model>` (`<limit>` tokens); no larger-context candidate in tier
+     `<tier>`. Compact the session or use a tier with a larger-context model".
+
+   The parent gets one note for each child that overflows, whether the
+   child's failure event or the tool error arrives first.
 2. A transient failure stays on the same model for the first `hostRetries`
    retries. A permanent one switches on the first retry. When the host would
    not retry a transient failure itself (it doesn't retry credentials that

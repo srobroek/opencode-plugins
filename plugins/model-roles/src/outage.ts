@@ -32,9 +32,25 @@ export type NoticeState = {
   outages: Map<string, Outage>
   /** When a model failure last notified, by `session\0model\0class`. */
   notices: Map<string, number>
+  /**
+   * When a context overflow was last handled, by the session that overflowed. A child's failure
+   * event and its tool error claim the same entry, so the parent hears once. Bounded by the window.
+   */
+  contextNotices: Map<string, number>
 }
 
-export const newNoticeState = (): NoticeState => ({ outages: new Map(), notices: new Map() })
+export const newNoticeState = (): NoticeState => ({ outages: new Map(), notices: new Map(), contextNotices: new Map() })
+
+/**
+ * Whether the context overflow of `sessionID` is still to be handled, and claim it. A claim lasts
+ * `NOTICE_DEDUPE_MS`; expired claims are dropped on each call.
+ */
+export function claimContextNotice(state: NoticeState, sessionID: string, now: number): boolean {
+  for (const [id, at] of state.contextNotices) if (now - at >= NOTICE_DEDUPE_MS) state.contextNotices.delete(id)
+  if (state.contextNotices.has(sessionID)) return false
+  state.contextNotices.set(sessionID, now)
+  return true
+}
 
 export type FailureReport = NoteFacts & {
   now: number
@@ -61,7 +77,7 @@ const stoppedLine = (stopped: Stopped, provider: string, kind: FailureClass, fir
 export function decideFailureNotice(state: NoticeState, report: FailureReport): Notice | undefined {
   const { failed, kind, now, notifyTo } = report
   if (failureScope(kind) === "provider") return decideOutage(state, report)
-  const key = kind === "context-length" ? `${notifyTo}\0${healthKey(failed)}\0${kind}\0${report.subagent?.sessionID ?? ""}` : `${notifyTo}\0${healthKey(failed)}\0${kind}`
+  const key = `${notifyTo}\0${healthKey(failed)}\0${kind}`
   const last = state.notices.get(key)
   if (last !== undefined && now - last < NOTICE_DEDUPE_MS) return undefined
   state.notices.set(key, now)
@@ -109,6 +125,7 @@ function decideOutage(state: NoticeState, report: FailureReport): Notice | undef
 
 /** A session was deleted or has run successfully since: it no longer needs resuming. */
 export function forgetSession(state: NoticeState, sessionID: string): void {
+  state.contextNotices.delete(sessionID)
   for (const outage of state.outages.values()) {
     outage.stopped.delete(sessionID)
   }

@@ -171,7 +171,7 @@ export function subagentNote(facts: SubagentNoteFacts): string {
 /** Context window in tokens by `provider/model`; the catalog's `Model.Info.limit.context`. */
 export type ContextLimits = ReadonlyMap<string, number>
 
-/** The receipt fallback reason for a request moved to a larger-context candidate. */
+/** The receipt fallback reason for a session moved to a larger-context candidate. */
 export const CONTEXT_FALLBACK_REASON = "context-length"
 
 /**
@@ -188,15 +188,30 @@ export function contextFallback(candidates: ReadonlyArray<ModelRef>, failed: Mod
   })
 }
 
-/** The note when the one larger-context retry was already spent on this request. */
-export function contextRetriedNote(failed: ModelRef, limit: number | undefined): string {
-  const size = limit === undefined ? "unknown limit" : `${limit} tokens`
-  return `context too long for ${label(failed)} (${size}) after one larger-context retry; compact the session or start a new one.`
+const tokens = (limit: number | undefined): string => (limit === undefined ? "unknown limit" : `${limit} tokens`)
+
+export type ContextSwitchFacts = {
+  failed: ModelRef
+  limit: number | undefined
+  target: ModelRef
+  targetLimit: number | undefined
+  tier: string | undefined
+  /** Set when the session was switched to `target`: resuming it continues there. */
+  resumable?: string
+}
+
+/** The note when a larger-context candidate exists: where the session now runs, or which model to switch to. */
+export function contextSwitchNote(facts: ContextSwitchFacts): string {
+  const head = `context too long for ${label(facts.failed)} (${tokens(facts.limit)})`
+  const target = `${label(facts.target)} (${tokens(facts.targetLimit)})`
+  if (facts.resumable !== undefined)
+    return `${head}; the session now runs ${target}. Resume it with sessionID ${facts.resumable} to continue on the larger context.`
+  const where = facts.tier === undefined ? "its tier" : `tier ${facts.tier}`
+  return `${head}; ${where} has a larger-context candidate, ${target}. Switch to it or compact the session.`
 }
 
 /** The note when no candidate of the tier can take a prompt that was too long. */
 export function contextNote(failed: ModelRef, limit: number | undefined, tier: string | undefined): string {
-  const size = limit === undefined ? "unknown limit" : `${limit} tokens`
   const where = tier === undefined ? "its tier" : `tier ${tier}`
-  return `context too long for ${label(failed)} (${size}); no larger-context candidate in ${where}. Compact the session or use a tier with a larger-context model`
+  return `context too long for ${label(failed)} (${tokens(limit)}); no larger-context candidate in ${where}. Compact the session or use a tier with a larger-context model`
 }

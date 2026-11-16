@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import type { FailureClass } from "./health.ts"
-import { decideFailureNotice, decideRecovery, type FailureReport, forgetSession, MAX_STOPPED, MAX_TRACKED, newNoticeState, type RequestLog, recordRequest, settleRequest } from "./outage.ts"
+import { claimContextNotice, decideFailureNotice, decideRecovery, type FailureReport, forgetSession, MAX_STOPPED, MAX_TRACKED, newNoticeState, type RequestLog, recordRequest, settleRequest } from "./outage.ts"
 import type { ModelRef } from "./resolve.ts"
 
 const bedrock = (id: string): ModelRef => ({ providerID: "amazon-bedrock", id })
@@ -150,17 +150,17 @@ describe("model failure", () => {
     expect(fail("p1")).toBeUndefined()
   })
 
-  test("a context-length notice is per child; other classes stay per model", () => {
+  test("a context-length notice is claimed once per overflowing session, expires and is forgotten", () => {
     const state = newNoticeState()
-    const long = (child: string, now: number) =>
-      decideFailureNotice(state, report(bedrock("a"), "context-length", now, { subagent: { agent: "coder", sessionID: child }, plain: `${child} long` }))
-    expect(long("c1", 0)?.text).toBe("c1 long")
-    expect(long("c2", 1_000)?.text).toBe("c2 long")
-    expect(long("c1", 2_000)).toBeUndefined()
-    const busy = (child: string, now: number) =>
-      decideFailureNotice(state, report(bedrock("a"), "rate-limit", now, { subagent: { agent: "coder", sessionID: child }, plain: "busy" }))
-    expect(busy("c1", 0)).toBeDefined()
-    expect(busy("c2", 1_000)).toBeUndefined()
+    expect(claimContextNotice(state, "c1", 0)).toBe(true)
+    expect(claimContextNotice(state, "c2", 1_000)).toBe(true)
+    expect(claimContextNotice(state, "c1", 2_000)).toBe(false)
+    // The window passes: a later overflow of the same child is noted again, and stale entries go.
+    expect(claimContextNotice(state, "c1", 61_000)).toBe(true)
+    expect(state.contextNotices.has("c2")).toBe(false)
+    forgetSession(state, "c1")
+    expect(state.contextNotices.size).toBe(0)
+    expect(claimContextNotice(state, "c1", 62_000)).toBe(true)
   })
 
   test("a model failure does not recover or open a provider outage", () => {
