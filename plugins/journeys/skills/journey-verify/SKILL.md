@@ -65,6 +65,17 @@ the rest run in parallel.
    `journey(J<id>): validate v<version> — <result>` -- unless the caller or
    repo workflow forbids committing; then leave uncommitted and say so.
 
+## Journeys and E2E specs
+
+When a journey has a deterministic spec (its id is in the spec title or annotation; see
+`journey-write`), the journey remains the source of truth.
+
+- List journeys without a spec in the report, so the owner can decide which to automate.
+- When a spec fails, re-validate its journey first. A journey that still passes means the spec
+  has a stale selector or timing fault, so fix the spec. A journey that fails is a product
+  regression.
+- Never commit a healer rewrite of a spec without review.
+
 ## Close the loop
 
 Report per-journey results, amendments (with evidence), findings filed.
