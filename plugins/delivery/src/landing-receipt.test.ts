@@ -865,6 +865,8 @@ describe("canonicalLedger", () => {
 
     expect(canonicalLedger("/anywhere", run)).toEqual({ root: realpathSync(repository), active: true })
     expect(seen).toEqual([{ argv: REPOSITORY_OBSERVATION_ARGS, cwd: "/anywhere", timeoutMs: GIT_TIMEOUT_MS }])
+    canonicalLedger("/anywhere", run, 60_000)
+    expect(seen[1]?.timeoutMs).toBe(60_000)
   })
   test("classifies at the canonical root, so a nested marker below the cwd does not vote", () => {
     const repository = scratch("ledger-canonical")

@@ -1955,6 +1955,33 @@ describe("delivery_cleanup command bounds and interrupts", () => {
     expect(refReads.every((bound) => bound === 61_000)).toBe(true)
   })
 
+  test("bounds.refReadMs also bounds the repository identity reads", async () => {
+    const f = fixture("configured-repository-read")
+    const reads: { argv: readonly string[]; timeoutMs: number }[] = []
+    const git: GitRunner = (argv, cwd, timeoutMs) => {
+      reads.push({ argv, timeoutMs })
+      const proc = Bun.spawnSync(["git", ...SAFE_GIT_ARGS, ...argv], { cwd, stdout: "pipe", stderr: "pipe", timeout: timeoutMs })
+      return proc.exitCode === 0 ? proc.stdout.toString() : null
+    }
+    const result = await cleanupDelivery({ receipt: f.receiptPath }, f.main, {
+      run: runner(f).run,
+      now: () => NOW + 10,
+      env: f.env,
+      bounds: { refReadMs: 61_000 },
+      git,
+    })
+    expect(result.ok).toBe(true)
+    // The repository key, the target's common directory (twice: before the reads and at
+    // the boundary) and the canonical ledger root.
+    expect(reads.map((read) => read.argv[0] === "rev-parse" && read.argv.at(-1))).toEqual([
+      "--git-common-dir",
+      "--show-toplevel",
+      "--show-toplevel",
+      "--show-toplevel",
+    ])
+    expect(reads.every((read) => read.timeoutMs === 61_000)).toBe(true)
+  })
+
   test("a bd show that hangs past its bound reports the ledger step not done, and nothing is removed", async () => {
     const f = fixture("hung-bd")
     const scripted = runner(f)

@@ -422,8 +422,12 @@ export type CanonicalLedger = { root: string; active: boolean }
  * whenever the combined common-dir/top-level observation cannot be resolved
  * unambiguously, which keeps the destructive cleanup path closed.
  */
-export function canonicalLedger(cwd: string, run: GitRunner = spawnGit): CanonicalLedger | null {
-  return repositoryContext(cwd, run)?.ledger ?? null
+export function canonicalLedger(
+  cwd: string,
+  run: GitRunner = spawnGit,
+  timeoutMs: number = GIT_TIMEOUT_MS,
+): CanonicalLedger | null {
+  return repositoryContext(cwd, run, timeoutMs)?.ledger ?? null
 }
 
 /**
