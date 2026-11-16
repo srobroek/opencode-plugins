@@ -418,6 +418,26 @@ describe("executeCommit", () => {
     })
   })
 
+  test("a tracked artifact whose name holds a tab commits its change and its deletion", async () => {
+    const tabbed = "specs/001-a/a\tb.md"
+    write(tabbed, "one\n")
+    write("specs/001-a/spec.md", "one\n")
+    expect((await executeCommit({ message: "add" }, repo)).metadata.ok).toBe(true)
+    write(tabbed, "two\n")
+    write("specs/001-a/spec.md", "two\n")
+    expect((await executeCommit({ message: "modify" }, repo)).metadata.ok).toBe(true)
+    expect(git("show", "HEAD:specs/001-a/a\tb.md")).toBe("two")
+    expect(git("show", "HEAD:specs/001-a/spec.md")).toBe("two")
+    rmSync(join(repo, tabbed))
+    write("specs/001-a/spec.md", "three\n")
+    expect((await executeCommit({ message: "delete" }, repo)).metadata.ok).toBe(true)
+    expect(git("ls-tree", "-r", "-z", "--name-only", "HEAD").split("\0").filter(Boolean)).toEqual([
+      "README.md",
+      "specs/001-a/spec.md",
+    ])
+    expect(git("show", "HEAD:specs/001-a/spec.md")).toBe("three")
+  })
+
   test("reports nothing to commit when the artifacts are unchanged", async () => {
     const result = await executeCommit({ message: "x" }, repo)
     expect(result.metadata.ok).toBe(false)

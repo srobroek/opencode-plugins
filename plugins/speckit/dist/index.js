@@ -1208,8 +1208,9 @@ async function commitIn(request, workspace, git, index) {
     return refuse(listed.reason);
   const tracked = new Map;
   for (const record of names(listed.stdout)) {
-    const [meta = "", path = ""] = record.split("\t");
-    const [mode = "", oid = ""] = meta.split(" ");
+    const tab = record.indexOf("\t");
+    const path = record.slice(tab + 1);
+    const [mode = "", oid = ""] = record.slice(0, tab).split(" ");
     if (mode === "160000")
       return refuse(`refused: ${path} is a submodule`);
     tracked.set(path, { mode, oid });
