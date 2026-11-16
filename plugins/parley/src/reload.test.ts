@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { mkdtempSync, rmSync, statSync } from "node:fs"
+import { mkdtempSync, readdirSync, rmSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { summarise } from "./format.ts"
@@ -10,7 +10,7 @@ import { RELOADED_REASON, type Round } from "./rounds.ts"
 import type { RoundEvent } from "./rpc.ts"
 import { CLOSED_TTL_MS, Parley, type RoundStore, type SessionMessage, type Settings } from "./service.ts"
 import { submitRound } from "./submit.ts"
-import { readUpload, saveUpload, uploadRoot } from "./uploads.ts"
+import { readUpload, removeUpload, saveUpload, uploadRoot } from "./uploads.ts"
 
 const settings: Settings = { fallback: "none", questionTool: "takeover", disabled: false, heartbeatWindowMs: 30_000 }
 const questions: Question[] = [
@@ -50,6 +50,7 @@ function storeOver(data: Data, directory = "/repo", owns: (sessionID: string) =>
 
 interface Extras {
   readUpload?: (stored: string) => string | undefined
+  removeUpload?: (stored: string) => void
   now?: () => number
   save?: (file: { name: string }, roundID?: string) => string | undefined
   closeUploads?: (roundID: string, at: number) => void
@@ -87,6 +88,7 @@ function instance(store: RoundStore, extras: Extras = {}) {
     ...(extras.closeUploads ? { closeUploads: extras.closeUploads } : {}),
     ...(extras.sweepUploads ? { sweepUploads: extras.sweepUploads } : {}),
     ...(extras.readUpload ? { readUpload: extras.readUpload } : {}),
+    ...(extras.removeUpload ? { removeUpload: extras.removeUpload } : {}),
   })
   service.attach({ clientID: "tui" })
   return { service, messages, posts, events }
@@ -585,6 +587,79 @@ describe("uploads submitted before the final submit", () => {
       const { result } = await waiting
       const key = result.answers.find((answer) => answer.id === "key")
       expect(files(key)[0]?.data).toBe(bytes)
+    } finally {
+      rmSync(base, { recursive: true, force: true })
+    }
+  })
+})
+
+describe("a failed upload copy", () => {
+  const fileQuestions: Question[] = [
+    { id: "one", title: "One", kind: "ask_file" },
+    { id: "two", title: "Two", kind: "ask_file" },
+  ]
+  const upload = (id: string, name: string, text: string) => ({
+    id,
+    status: "answered" as const,
+    value: { files: [{ name, mime: "text/plain", data: Buffer.from(text).toString("base64") }] },
+  })
+  const copies = (base: string) => {
+    try {
+      return readdirSync(path.join(uploadRoot(base), readdirSync(uploadRoot(base))[0] ?? ""))
+    } catch {
+      return []
+    }
+  }
+
+  test("nothing is committed: the round stays open and unsubmitted, the error names the upload and errno, and partial copies are removed; a retry succeeds", async () => {
+    const base = mkdtempSync(path.join(tmpdir(), "parley-fail-"))
+    try {
+      let failing = true
+      const extras: Extras = {
+        save: (file, roundID) => {
+          if (failing && file.name === "b.txt") throw Object.assign(new Error(`ENOSPC: no space left on device, write '${base}/secret/path'`), { code: "ENOSPC" })
+          return saveUpload(file as never, roundID, base)
+        },
+        removeUpload: (copy) => removeUpload(copy, base),
+        readUpload: (copy) => readUpload(copy, base),
+      }
+      const data: Data = new Map()
+      const { service } = instance(storeOver(data), extras)
+      const asking = service.ask({ questions: fileQuestions }, { sessionID: "s" })
+      await tick()
+      const roundID = service.pending({}).rounds[0]?.roundID ?? ""
+      const answers = [upload("one", "a.txt", "first"), upload("two", "b.txt", "second")]
+      const failed = await service.submit({ roundID, answers })
+      expect(failed.ok).toBe(false)
+      expect(failed.errors).toEqual(['Could not save the upload "b.txt" (ENOSPC). Nothing was submitted; send it again.'])
+      expect(failed.errors.join(" ")).not.toContain(base)
+      expect(service.rounds.get(roundID)?.status).toBe("open")
+      expect(service.rounds.get(roundID)?.answers.size).toBe(0)
+      expect(copies(base)).toEqual([])
+      failing = false
+      const retried = await service.submit({ roundID, answers })
+      expect(retried).toMatchObject({ ok: true })
+      expect((await asking).result.status).toBe("submitted")
+      expect(copies(base)).toHaveLength(2)
+      expect(JSON.stringify(stored(data, roundID))).not.toContain(Buffer.from("first").toString("base64"))
+    } finally {
+      rmSync(base, { recursive: true, force: true })
+    }
+  })
+
+  test("an invalid submission removes the copies it made", async () => {
+    const base = mkdtempSync(path.join(tmpdir(), "parley-fail-"))
+    try {
+      const { service } = instance(storeOver(new Map()), {
+        save: (file, roundID) => saveUpload(file as never, roundID, base),
+        removeUpload: (copy) => removeUpload(copy, base),
+      })
+      void service.ask({ questions: fileQuestions }, { sessionID: "s" })
+      await tick()
+      const roundID = service.pending({}).rounds[0]?.roundID ?? ""
+      const outcome = await service.submit({ roundID, answers: [upload("one", "a.txt", "first"), { id: "ghost", status: "accepted" }] })
+      expect(outcome.ok).toBe(false)
+      expect(copies(base)).toEqual([])
     } finally {
       rmSync(base, { recursive: true, force: true })
     }

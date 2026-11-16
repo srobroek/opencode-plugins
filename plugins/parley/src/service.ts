@@ -91,6 +91,8 @@ export interface Deps {
   readonly closeUploads?: (roundID: string, at: number) => void
   /** Removes uploads whose round closed more than 24 h ago. */
   readonly sweepUploads?: (now: number) => void
+  /** Removes one private copy made by `save`, when the submission it was made for is not committed. */
+  readonly removeUpload?: (stored: string) => void
   /** Reads back a private upload copy (`FileValue.stored`) as base64, or undefined when it is gone. */
   readonly readUpload?: (stored: string) => string | undefined
   /** Waits between automatic retries of a round's message; defaults to `RETRY_DELAYS_MS`. */
@@ -141,6 +143,9 @@ const HELD_FOR_WAIT = "Call parley_wait to receive them."
 
 /** Waits between the automatic retries of a round's message, after the first attempt fails. */
 export const RETRY_DELAYS_MS: readonly number[] = [2000, 8000]
+
+const copyKey = (file: FileValue) => `${file.name}\u0000${file.data}`
+const basename = (name: string) => name.split(/[\\/]/).pop() || "upload"
 
 const filesOf = (answer: Answer): FileValue[] => {
   const files = (answer.value as { files?: unknown } | undefined)?.files
@@ -212,6 +217,8 @@ export class Parley {
   /** One chain per round or delivery: collecting answers and sending them never interleave. */
   readonly #locks = new Map<string, Promise<unknown>>()
   readonly #timers = new Set<ReturnType<typeof setTimeout>>()
+  /** Copies made for the submission in progress, so committing it does not copy them again. Keyed by name and contents. */
+  #copies = new Map<string, string>()
   #suspended = false
   #writes: Promise<unknown> = Promise.resolve()
   #pending = 0
@@ -343,11 +350,38 @@ export class Parley {
       if (!Array.isArray(files) || !files.some((file: FileValue) => file.data !== undefined && file.stored === undefined)) continue
       const kept = (files as FileValue[]).map((file) => {
         if (file.data === undefined || file.stored !== undefined) return file
-        const stored = save(file, round.id)
+        const stored = this.#copies.get(copyKey(file)) ?? save(file, round.id)
         return stored === undefined ? file : { ...file, stored }
       })
       round.answers.set(id, { ...answer, value: { ...(answer.value as object), files: kept } })
     }
+  }
+
+  /** Copies the submitted answers' uploads into the private store; on a failure removes what this attempt copied. */
+  #copyUploads(roundID: string, answers: readonly SubmittedAnswer[]): { copies: Map<string, string> } | { error: string } {
+    const copies = new Map<string, string>()
+    const save = this.deps.save
+    const round = this.rounds.get(roundID)
+    if (!save || round?.status !== "open") return { copies }
+    for (const answer of answers) {
+      const files = (answer.value as { files?: unknown } | undefined)?.files
+      if (!Array.isArray(files)) continue
+      for (const raw of files) {
+        if (typeof raw !== "object" || raw === null || typeof raw.data !== "string" || typeof raw.name !== "string") continue
+        const file = raw as FileValue
+        if (copies.has(copyKey(file))) continue
+        try {
+          const stored = save(file, roundID)
+          if (stored !== undefined) copies.set(copyKey(file), stored)
+        } catch (error) {
+          for (const done of copies.values()) this.deps.removeUpload?.(done)
+          const code = (error as { code?: unknown } | null)?.code
+          const kind = typeof code === "string" && /^[A-Z0-9_]+$/.test(code) ? code : "error"
+          return { error: `Could not save the upload ${JSON.stringify(basename(file.name))} (${kind}). Nothing was submitted; send it again.` }
+        }
+      }
+    }
+    return { copies }
   }
 
   /** A restored round's answers reference their uploads' private copies; their bytes are read back from there. */
@@ -684,7 +718,18 @@ export class Parley {
     // A closed round whose message failed: the client offers to send it again or dismiss it.
     if (known?.delivery?.status === "failed")
       return { ok: false, errors: [`undelivered round ${known.id}: ${known.delivery.error ?? "the message was not admitted"}`] }
-    const outcome = this.rounds.submit(input.roundID, input.answers, final, this.#now())
+    // Uploads are copied to the private store before anything is committed: a failed copy leaves the round
+    // open and the card as it was, so the user can send again.
+    const copied = this.#copyUploads(input.roundID, input.answers)
+    if ("error" in copied) return { ok: false, errors: [copied.error] }
+    this.#copies = copied.copies
+    let outcome: ReturnType<Rounds["submit"]>
+    try {
+      outcome = this.rounds.submit(input.roundID, input.answers, final, this.#now())
+    } finally {
+      this.#copies = new Map()
+    }
+    if (!outcome.ok) for (const stored of copied.copies.values()) this.deps.removeUpload?.(stored)
     const round = this.rounds.get(input.roundID)
     if (outcome.ok && round)
       await this.deps.emit({

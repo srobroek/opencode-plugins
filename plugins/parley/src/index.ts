@@ -9,7 +9,7 @@ import { ParleyRpc, type RoundEvent } from "./rpc.ts"
 import { askInput, endInput, endOutput, resultOutput, waitInput } from "./schema.ts"
 import { type AskInput, type CallContext, InputError, Parley, type RoundStore, settingsFrom, type WaitInput } from "./service.ts"
 import { wrapQuestion } from "./takeover.ts"
-import { markClosed, readUpload, saveUpload, sweepUploads } from "./uploads.ts"
+import { markClosed, readUpload, removeUpload, saveUpload, sweepUploads } from "./uploads.ts"
 
 export { ParleyRpc } from "./rpc.ts"
 
@@ -70,6 +70,7 @@ export default Plugin.define({
       closeUploads: (roundID, at) => markClosed(roundID, at),
       sweepUploads: (now) => sweepUploads(now),
       readUpload: (stored) => readUpload(stored),
+      removeUpload: (stored) => removeUpload(stored),
       warn: (message) => console.warn(message),
       // A synthetic message, queued behind any running turn and waking an idle session: the user has just
       // answered, and the agent's own call died with the reload, so nothing else would tell it. The id

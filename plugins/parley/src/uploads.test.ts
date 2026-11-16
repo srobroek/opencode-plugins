@@ -1,8 +1,8 @@
 import { afterEach, expect, test } from "bun:test"
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
-import { CLOSED_MARKER, markClosed, readUpload, saveUpload, sweepUploads, UNMARKED_TTL_MS, UPLOAD_TTL_MS, uploadRoot } from "./uploads.ts"
+import { CLOSED_MARKER, markClosed, readUpload, removeUpload, saveUpload, sweepUploads, UNMARKED_TTL_MS, UPLOAD_TTL_MS, uploadRoot } from "./uploads.ts"
 
 const bases: string[] = []
 const base = () => {
@@ -96,4 +96,19 @@ test("a private copy reads back as base64; paths outside the upload root and mis
   expect(readUpload(path.join(uploadRoot(dir), "..", "escape.txt"), dir)).toBeUndefined()
   rmSync(path.dirname(copy), { recursive: true })
   expect(readUpload(copy, dir)).toBeUndefined()
+})
+
+test("removing one copy removes its own directory only, and nothing outside the upload root", () => {
+  const dir = base()
+  const one = saveUpload(file("a.txt"), "rnd_1", dir) ?? ""
+  const two = saveUpload(file("a.txt"), "rnd_1", dir) ?? ""
+  removeUpload(one, dir)
+  expect(existsSync(one)).toBe(false)
+  expect(existsSync(two)).toBe(true)
+  const outside = path.join(dir, "keep.txt")
+  writeFileSync(outside, "x")
+  removeUpload(outside, dir)
+  removeUpload(path.join(uploadRoot(dir), "rnd_1", "loose.txt"), dir)
+  expect(existsSync(outside)).toBe(true)
+  expect(existsSync(two)).toBe(true)
 })

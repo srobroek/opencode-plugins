@@ -40,6 +40,18 @@ export function saveUpload(file: FileValue, roundID: string | undefined, base = 
   return target
 }
 
+/** Removes the directory holding one private copy (its unique upload directory). Only paths inside the upload root; never throws. */
+export function removeUpload(stored: string, base = tmpdir()) {
+  const root = uploadRoot(base)
+  const dir = path.dirname(path.resolve(stored))
+  if (!dir.startsWith(root + path.sep) || path.dirname(dir) === root) return
+  try {
+    rmSync(dir, { recursive: true, force: true })
+  } catch {
+    // The sweeper removes it later.
+  }
+}
+
 /**
  * Reads a private copy back as base64. Only paths inside the upload root are read, and a copy that is
  * gone (swept, or a missing file) is undefined. Never throws.

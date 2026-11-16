@@ -2231,6 +2231,8 @@ var SUSPEND_DRAIN_MS = 2000;
 var DELIVERY_HEAD = "The parley plugin reloaded while you waited, so your parley call ended. The user answered that round afterwards; their answers follow. Act on them; do not ask these questions again.";
 var HELD_FOR_WAIT = "Call parley_wait to receive them.";
 var RETRY_DELAYS_MS = [2000, 8000];
+var copyKey = (file) => `${file.name}\x00${file.data}`;
+var basename = (name) => name.split(/[\\/]/).pop() || "upload";
 var filesOf = (answer) => {
   const files = answer.value?.files;
   return Array.isArray(files) ? files : [];
@@ -2281,6 +2283,7 @@ class Parley {
   #outbox = new Map;
   #locks = new Map;
   #timers = new Set;
+  #copies = new Map;
   #suspended = false;
   #writes = Promise.resolve();
   #pending = 0;
@@ -2406,11 +2409,42 @@ class Parley {
       const kept = files.map((file) => {
         if (file.data === undefined || file.stored !== undefined)
           return file;
-        const stored = save(file, round.id);
+        const stored = this.#copies.get(copyKey(file)) ?? save(file, round.id);
         return stored === undefined ? file : { ...file, stored };
       });
       round.answers.set(id, { ...answer, value: { ...answer.value, files: kept } });
     }
+  }
+  #copyUploads(roundID, answers) {
+    const copies = new Map;
+    const save = this.deps.save;
+    const round = this.rounds.get(roundID);
+    if (!save || round?.status !== "open")
+      return { copies };
+    for (const answer of answers) {
+      const files = answer.value?.files;
+      if (!Array.isArray(files))
+        continue;
+      for (const raw of files) {
+        if (typeof raw !== "object" || raw === null || typeof raw.data !== "string" || typeof raw.name !== "string")
+          continue;
+        const file = raw;
+        if (copies.has(copyKey(file)))
+          continue;
+        try {
+          const stored = save(file, roundID);
+          if (stored !== undefined)
+            copies.set(copyKey(file), stored);
+        } catch (error) {
+          for (const done of copies.values())
+            this.deps.removeUpload?.(done);
+          const code = error?.code;
+          const kind = typeof code === "string" && /^[A-Z0-9_]+$/.test(code) ? code : "error";
+          return { error: `Could not save the upload ${JSON.stringify(basename(file.name))} (${kind}). Nothing was submitted; send it again.` };
+        }
+      }
+    }
+    return { copies };
   }
   #loadUploads(round) {
     const read = this.deps.readUpload;
@@ -2714,7 +2748,19 @@ class Parley {
     const known = this.rounds.get(input.roundID);
     if (known?.delivery?.status === "failed")
       return { ok: false, errors: [`undelivered round ${known.id}: ${known.delivery.error ?? "the message was not admitted"}`] };
-    const outcome = this.rounds.submit(input.roundID, input.answers, final, this.#now());
+    const copied = this.#copyUploads(input.roundID, input.answers);
+    if ("error" in copied)
+      return { ok: false, errors: [copied.error] };
+    this.#copies = copied.copies;
+    let outcome;
+    try {
+      outcome = this.rounds.submit(input.roundID, input.answers, final, this.#now());
+    } finally {
+      this.#copies = new Map;
+    }
+    if (!outcome.ok)
+      for (const stored of copied.copies.values())
+        this.deps.removeUpload?.(stored);
     const round = this.rounds.get(input.roundID);
     if (outcome.ok && round)
       await this.deps.emit({
@@ -3032,6 +3078,15 @@ function saveUpload(file, roundID, base = tmpdir()) {
   chmodSync(target, 384);
   return target;
 }
+function removeUpload(stored, base = tmpdir()) {
+  const root = uploadRoot(base);
+  const dir = path.dirname(path.resolve(stored));
+  if (!dir.startsWith(root + path.sep) || path.dirname(dir) === root)
+    return;
+  try {
+    rmSync(dir, { recursive: true, force: true });
+  } catch {}
+}
 function readUpload(stored, base = tmpdir()) {
   const root = uploadRoot(base);
   const target = path.resolve(stored);
@@ -3131,6 +3186,7 @@ var src_default = Plugin.define({
       closeUploads: (roundID, at) => markClosed(roundID, at),
       sweepUploads: (now) => sweepUploads(now),
       readUpload: (stored) => readUpload(stored),
+      removeUpload: (stored) => removeUpload(stored),
       warn: (message) => console.warn(message),
       deliver: async ({ id, sessionID, text, description }) => {
         await ctx.session.synthetic({ id, sessionID, text, description, delivery: "queue", resume: true });
