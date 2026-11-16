@@ -1831,6 +1831,11 @@ var LEASE_MS = 120000;
 var RENEW_MS = 20000;
 var WAIT_MS = 120000;
 var POLL_MS = 20;
+var POLL_MAX_MS = 400;
+function backoffDelayMs(attempt, random = Math.random) {
+  const ceiling = Math.min(POLL_MAX_MS, POLL_MS * 2 ** Math.min(attempt, 16));
+  return Math.max(1, Math.round(ceiling / 2 + ceiling / 2 * random()));
+}
 var PREFLIGHT_WAIT_KEY = Symbol.for("com.srobroek.beads.embedded-write-lock.preflight-wait-ms.v1");
 var leaseMs = LEASE_MS;
 var renewMs = RENEW_MS;
@@ -2068,6 +2073,7 @@ async function hold(store, owner, waitMs = WAIT_MS, signal) {
   const lock = join6(store, LOCK_NAME);
   const { owned, queues } = registry();
   const deadline = Date.now() + waitMs;
+  let attempt = 0;
   const queue = queues.get(lock) ?? [];
   if (queue.length === 0)
     queues.set(lock, queue);
@@ -2121,12 +2127,20 @@ async function hold(store, owner, waitMs = WAIT_MS, signal) {
       }
       if (Date.now() >= deadline) {
         const holder = lockHolder(lock);
+        const waited = `${Math.round(waitMs / 1000 * 10) / 10}s`;
+        if (abandoned(lock)) {
+          return {
+            kind: "failed",
+            reason: `Beads embedded write lock at ${lock} stayed held for ${waited}; ${holder}, and that holder looks gone. The write was refused rather than run concurrently. Read the lock file, then remove it once its holder is really gone.`
+          };
+        }
         return {
           kind: "failed",
-          reason: `Beads embedded write lock at ${lock} stayed held for ${Math.round(waitMs / 1000)}s; ${holder}. The write was refused rather than run concurrently. Read the lock file, then remove it once its holder is really gone.`
+          busy: true,
+          reason: `The Beads ledger is busy: other writers held the embedded write lock at ${lock} for ${waited} (${holder}). Nothing was written. Retry the same command, as its own simple command; do not remove the lock.`
         };
       }
-      await pause(ticket, Math.min(POLL_MS, deadline - Date.now()), signal);
+      await pause(ticket, Math.min(backoffDelayMs(attempt++), deadline - Date.now()), signal);
     }
   } finally {
     const index = queue.indexOf(ticket);

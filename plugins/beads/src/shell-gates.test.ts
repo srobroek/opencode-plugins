@@ -172,7 +172,7 @@ describe("decideShell", () => {
     if (decision.kind !== "allow") throw new Error(JSON.stringify(decision))
     const held = realpathSync(store)
     expect(decision.command).toBe(
-      `export BEADS_ACTOR='opencode/r/general/s'; BEADS_DOLT_SHARED_SERVER= BEADS_DIR='${held}' '/opt/bun' '/opt/beads/src/bd-embedded-write-runner.ts' --beads-store '${held}' --beads-wait-ms 120000 -- bd update proj-1 --claim`,
+      `export BEADS_ACTOR='opencode/r/general/s'; BEADS_DOLT_SHARED_SERVER= BEADS_DIR='${held}' '/opt/bun' '/opt/beads/src/bd-embedded-write-runner.ts' --beads-store '${held}' --beads-wait-ms 30000 -- bd update proj-1 --claim`,
     )
   })
 
