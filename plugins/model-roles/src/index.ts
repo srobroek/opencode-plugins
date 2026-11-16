@@ -52,7 +52,6 @@ import {
   staysOnModel,
   subagentNote,
   switchNote,
-  tierModels,
 } from "./fallback.ts"
 import {
   type GuardAgent,
@@ -92,6 +91,7 @@ import {
   FALLBACK_HEADER,
   type HealthView,
   type ModelRef,
+  modelText,
   type Options,
   parseCandidate,
   parseOptions,
@@ -530,6 +530,12 @@ export default Plugin.define({
       return limits
     }
 
+    /** A prompt too long for `failed`: one note to `notifyTo`, deduped like any model failure notice. */
+    const announceContext = async (notifyTo: string, failed: ModelRef, role: string | undefined, subagent?: FailureReport["subagent"]) => {
+      const plain = contextNote(failed, contextLimits().get(healthKey(failed)), contextTier(role, failed))
+      await announce({ failed, kind: "context-length", cooldownMs: 0, target: undefined, now: Date.now(), notifyTo, subagent, plain })
+    }
+
     /** The tier a context failure of `failed` is judged within: the agent's role, else the first role listing it. */
     const contextTier = (role: string | undefined, failed: ModelRef): string | undefined =>
       role !== undefined && Object.hasOwn(options.roles, role) ? role : rolesListing(options, failed)[0]
@@ -538,8 +544,8 @@ export default Plugin.define({
     const contextCandidates = (tier: string | undefined, healthOf: HealthView): ModelRef[] =>
       tier === undefined
         ? []
-        : tierModels(options, tier).filter(
-            (ref) => healthOf(ref) === undefined && available.some((m) => healthKey(m) === healthKey(ref) && m.enabled !== false),
+        : tierModels(options.roles, tier).filter(
+            (ref) => healthOf(ref) === undefined && candidateStatus(modelText(ref), available, options.roles, {}, Date.now()).status === "available",
           )
 
     /** The model of the child session a `Subagent failed (sessionID: <id>)` message names. */
@@ -836,8 +842,7 @@ export default Plugin.define({
       const spawnRole = isChild ? await spawnRoleOf(sessionID) : undefined
       const role = spawnRole ?? (agent === undefined ? undefined : roleOf(agent, options.agents, options.implicit))
       if (kind === "context-length") {
-        const tier = contextTier(role, failed)
-        await notify(isChild ? (session.parentID as string) : sessionID, contextNote(failed, contextLimits().get(healthKey(failed)), tier), "context-length")
+        await announceContext(isChild ? (session.parentID as string) : sessionID, failed, role, isChild ? { agent: session.agent, sessionID } : undefined)
         return
       }
       // A model that stays in use keeps its tier where it was: nothing moves.
@@ -939,7 +944,6 @@ export default Plugin.define({
      * larger context window. The model is not marked: the failure is the request's, not its health.
      */
     const retryOnLargerContext = async (event: SessionRetry, failed: ModelRef): Promise<void> => {
-      if (event.attempt <= 2) contextRetried.delete(event.sessionID)
       if (contextRetried.has(event.sessionID) || switching.has(event.sessionID)) return
       try {
         await queue(async () => {
@@ -978,7 +982,10 @@ export default Plugin.define({
     }
     const retries = await ctx.session.hook("retry", async (event) => {
       // The first retry of a request starts a fresh run.
-      if (event.attempt <= 2) triedModels.delete(event.sessionID)
+      if (event.attempt <= 2) {
+        triedModels.delete(event.sessionID)
+        contextRetried.delete(event.sessionID)
+      }
       const error = event.error as FailureInput
       const kind = classifyFailure(error)
       if (kind === undefined) return
@@ -1939,7 +1946,7 @@ export default Plugin.define({
           const cooldownMs = await markFailed(failed, kind, { message })
           const role = spawn?.role ?? (agent === undefined ? undefined : roleOf(agent, options.agents, options.implicit))
           if (kind === "context-length") {
-            await notify(event.sessionID, contextNote(failed, contextLimits().get(healthKey(failed)), contextTier(role, failed)), "context-length")
+            await announceContext(event.sessionID, failed, role, { agent: agentID, sessionID: childSessionID(message) })
             return
           }
           const target = cooldownMs > 0 ? fallbackTarget(options, available, view(), role, failed) : undefined

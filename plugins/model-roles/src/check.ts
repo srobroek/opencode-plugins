@@ -219,10 +219,10 @@ export function recordCooldown(
   return [event, ...history].slice(0, limit)
 }
 
-/** `history` with every open cooldown of `providerID` (its models and the provider itself) ended at `at`. */
+/** `history` with every open cooldown of `providerID` (its models and the provider itself) ended at `at`, if `at` is after it started. */
 export function recordRecovery(history: ReadonlyArray<HealthEvent>, providerID: string, at: number): HealthEvent[] {
   return history.map((e) =>
-    e.recoveredAt === undefined && e.at + e.cooldownMs > at && e.subject.startsWith(`${providerID}/`) ? { ...e, recoveredAt: at } : e,
+    e.recoveredAt === undefined && e.at < at && e.at + e.cooldownMs > at && e.subject.startsWith(`${providerID}/`) ? { ...e, recoveredAt: at } : e,
   )
 }
 

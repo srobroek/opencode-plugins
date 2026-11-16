@@ -186,7 +186,7 @@ var TRANSIENT = new Set(["rate-limit", "server", "outage", "credentials"]);
 var DECISIVE = new Set(["quota", "unavailable"]);
 var failureScope = (kind) => PROVIDER_SCOPED.has(kind) ? "provider" : "model";
 var isTransient = (kind) => TRANSIENT.has(kind);
-var CONTEXT_LENGTH = /context[_ ](?:length|window)(?:[_ ]exceeded)?|maximum context|prompt is too long|(?:input|prompt|request) (?:is )?too long|exceeds? the context|too many tokens(?!,? ?please wait)/i;
+var CONTEXT_LENGTH = /context[_ ](?:length|window)(?:[_ ]exceeded)?|maximum context|prompt is too long|(?:input|prompt|request) (?:is )?too long|exceeds? the context|too many tokens(?!,? ?please wait| per (?:min|hour|day))/i;
 var NOT_MODEL = [
   /\b(?:abort(?:ed)?|cancel(?:l)?ed|interrupted)\b/i
 ];
@@ -202,15 +202,16 @@ var PATTERNS = [
   ["rate-limit", /throttl|rate.?limit|too many requests|\b429\b/i],
   ["server", /overloaded|over capacity|service unavailable|bad gateway|gateway timeout|internal server error|server error|serviceunavailable|\b50[0234]\b|\b529\b/i]
 ];
+var DEFINITE = ["quota", "credentials", "auth", "rate-limit"];
 var bodyText = (error) => {
   const body = error.response?.body;
   return typeof body === "string" ? body : body === undefined ? "" : JSON.stringify(body);
 };
 function isContextLength(error) {
-  if (CONTEXT_LENGTH.test(error.message ?? ""))
-    return true;
   const status = error.status;
-  return (status === undefined || status === 400 || status === 413) && CONTEXT_LENGTH.test(bodyText(error));
+  if (status !== undefined && status !== 400 && status !== 413)
+    return false;
+  return CONTEXT_LENGTH.test(error.message ?? "") || CONTEXT_LENGTH.test(bodyText(error));
 }
 function classifyFailure(error) {
   if (error === undefined)
@@ -219,8 +220,6 @@ function classifyFailure(error) {
   if (type === "tool" || type === "user" || type === "aborted" || type === "interrupted")
     return;
   const message = error.message ?? "";
-  if (isContextLength(error))
-    return "context-length";
   if (NOT_MODEL.some((pattern) => pattern.test(message)))
     return;
   const status = error.status;
@@ -232,6 +231,12 @@ function classifyFailure(error) {
     return "rate-limit";
   if (status !== undefined && status >= 500 && status <= 599)
     return "server";
+  const matches = (kind) => PATTERNS.some(([k, pattern]) => k === kind && (pattern.test(message) || pattern.test(type)));
+  for (const kind of DEFINITE)
+    if (matches(kind))
+      return kind;
+  if (isContextLength(error))
+    return "context-length";
   for (const [kind, pattern] of PATTERNS)
     if (pattern.test(message) || pattern.test(type))
       return kind;
@@ -460,20 +465,6 @@ function subagentNote(facts) {
   return `${who} failed. ${failureNote(facts)} ${retry}`;
 }
 var CONTEXT_FALLBACK_REASON = "context-length";
-function tierModels(options, role, seen = new Set) {
-  if (seen.has(role))
-    return [];
-  seen.add(role);
-  const out = [];
-  for (const entry of options.roles[role] ?? []) {
-    const candidate = parseCandidate(entry);
-    if (candidate?.kind === "model")
-      out.push(candidate.ref);
-    else if (candidate?.kind === "role")
-      out.push(...tierModels(options, candidate.role, seen));
-  }
-  return out;
-}
 function contextFallback(candidates, failed, limits) {
   const own = limits.get(healthKey(failed));
   if (own === undefined)
@@ -1751,7 +1742,7 @@ function recordCooldown(history, event, limit = HEALTH_HISTORY_LIMIT) {
   return [event, ...history].slice(0, limit);
 }
 function recordRecovery(history, providerID, at) {
-  return history.map((e) => e.recoveredAt === undefined && e.at + e.cooldownMs > at && e.subject.startsWith(`${providerID}/`) ? { ...e, recoveredAt: at } : e);
+  return history.map((e) => e.recoveredAt === undefined && e.at < at && e.at + e.cooldownMs > at && e.subject.startsWith(`${providerID}/`) ? { ...e, recoveredAt: at } : e);
 }
 var clock = (at) => new Date(at).toISOString().slice(11, 19);
 function formatHealthHistory(history, now) {
@@ -3437,6 +3428,20 @@ var onStep = (ledger, childID, usage) => update(ledger, childID, (r) => ({ ...ad
 var onSteps = (ledger, childID, usage, steps) => update(ledger, childID, (r) => ({ ...addUsage(r, usage), steps: r.steps + steps }));
 var onCompaction = (ledger, childID, usage) => update(ledger, childID, (r) => addUsage(r, usage));
 var onEnd = (ledger, childID, outcome, at) => update(ledger, childID, (r) => ({ ...r, outcome, ms: Math.max(0, at - r.at) }));
+function onSignals(ledger, childID, signals) {
+  return update(ledger, childID, (r) => {
+    const next = { ...r };
+    if (signals.verdict !== undefined)
+      next.verdict = signals.verdict;
+    if (signals.tests === "pass" || signals.tests === "fail" || signals.tests === "none" && r.tests === undefined)
+      next.tests = signals.tests;
+    if (signals.touchedTests === true)
+      next.touchedTests = true;
+    else if (signals.touchedTests === false && r.touchedTests === undefined)
+      next.touchedTests = false;
+    return next.verdict === r.verdict && next.tests === r.tests && next.touchedTests === r.touchedTests ? r : next;
+  });
+}
 var onFailover = (ledger, childID) => update(ledger, childID, (r) => r.failedOver ? r : { ...r, failedOver: true });
 function prune(ledger, now, limits = { maxEntries: LEDGER_MAX_ENTRIES, maxAgeMs: LEDGER_MAX_AGE_MS }) {
   const kept = Object.entries(ledger).filter(([, r]) => now - r.at <= limits.maxAgeMs).sort((a, b) => b[1].at - a[1].at).slice(0, limits.maxEntries);
@@ -3705,6 +3710,7 @@ function createLedgerStore(storage, options = {}) {
       await change(id, (l, i) => onCompaction(l, i, usage), "debounce");
     },
     end: (id, outcome, at) => change(id, (l, i) => onEnd(l, i, outcome, at), "end"),
+    signals: (id, signals) => change(id, (l, i) => onSignals(l, i, signals), "debounce"),
     failover: (id) => change(id, onFailover, "now"),
     flush,
     async dispose(timeoutMs = disposeTimeoutMs) {
@@ -4163,6 +4169,762 @@ var TiersRpc = Rpc.define({
   },
   events: {}
 });
+// plugins/lib/src/shell-tokenizer.ts
+var SEPARATORS = new Set([";", "&", "|", "(", ")", `
+`]);
+function token(value, startsQuoted = false, sawQuote = false) {
+  return { value, startsQuoted, sawQuote };
+}
+function tokenizeShell(command, options = {}) {
+  if (typeof command !== "string")
+    return [];
+  const out = [];
+  let current = "";
+  let started = false;
+  let startsQuoted = false;
+  let sawQuote = false;
+  let quote = null;
+  const pending = [];
+  const flush = () => {
+    if (!started)
+      return;
+    out.push(token(current, startsQuoted, sawQuote));
+    current = "";
+    started = false;
+    startsQuoted = false;
+    sawQuote = false;
+  };
+  for (let i = 0;i < command.length; i++) {
+    const ch = command[i];
+    if (quote !== null) {
+      if (ch === quote) {
+        quote = null;
+        continue;
+      }
+      current += ch;
+      started = true;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      if (!started)
+        startsQuoted = true;
+      started = true;
+      sawQuote = true;
+      quote = ch;
+      continue;
+    }
+    if (ch === "\\" && i + 1 < command.length) {
+      if (options.preserveBackslashes)
+        current += ch;
+      current += command[++i];
+      started = true;
+      continue;
+    }
+    if (ch === "$" && command[i + 1] === "(") {
+      flush();
+      out.push(token("$("));
+      i++;
+      continue;
+    }
+    if (ch === "<" && command[i + 1] === "<" && command[i + 2] === "<") {
+      flush();
+      out.push(token("<<<"));
+      i += 2;
+      continue;
+    }
+    if (ch === "<" && command[i + 1] === "<") {
+      const operator = hereDocumentOperator(command, i);
+      if (operator !== null) {
+        flush();
+        pending.push(operator);
+        i = operator.end - 1;
+        continue;
+      }
+    }
+    if (ch === `
+`) {
+      flush();
+      out.push(token(ch));
+      let bodyStart = i + 1;
+      while (pending.length > 0) {
+        const document = pending.shift();
+        if (document === undefined)
+          break;
+        const body = hereDocumentBody(command, bodyStart, document);
+        if (!document.quoted) {
+          const source = command.slice(bodyStart, body.bodyEnd);
+          if (options.hereDocumentSubstitutionsOnly)
+            out.push(...substitutions(source, options));
+          else
+            out.push(...tokenizeShell(source, options));
+        }
+        i = body.terminatorEnd;
+        bodyStart = i + 1;
+      }
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      flush();
+      continue;
+    }
+    if (SEPARATORS.has(ch)) {
+      flush();
+      out.push(token(ch));
+      continue;
+    }
+    current += ch;
+    started = true;
+  }
+  flush();
+  return out;
+}
+function shellQuoteBalanced(command) {
+  if (typeof command !== "string")
+    return true;
+  let quote = null;
+  for (let i = 0;i < command.length; i++) {
+    const ch = command[i];
+    if (quote !== null) {
+      if (ch === quote)
+        quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'")
+      quote = ch;
+    else if (ch === "\\")
+      i++;
+  }
+  return quote === null;
+}
+function hereDocumentOperator(command, start) {
+  let i = start + 2;
+  const stripTabs = command[i] === "-";
+  if (stripTabs)
+    i++;
+  while (command[i] === " " || command[i] === "\t")
+    i++;
+  let delimiter = "";
+  let quoted = false;
+  let quote = null;
+  while (i < command.length) {
+    const ch = command[i];
+    if (quote !== null) {
+      if (ch === quote) {
+        quote = null;
+        i++;
+        continue;
+      }
+      delimiter += ch;
+      i++;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quoted = true;
+      quote = ch;
+      i++;
+      continue;
+    }
+    if (ch === "\\" && i + 1 < command.length) {
+      quoted = true;
+      delimiter += command[i + 1];
+      i += 2;
+      continue;
+    }
+    if (/\s|[;&|<>()]/.test(ch))
+      break;
+    delimiter += ch;
+    i++;
+  }
+  if (quote !== null || delimiter.length === 0)
+    return null;
+  return { delimiter, stripTabs, quoted, end: i };
+}
+function hereDocumentBody(command, from, document) {
+  let cursor = from;
+  while (cursor < command.length) {
+    let next = command.indexOf(`
+`, cursor);
+    if (next === -1)
+      next = command.length;
+    let line = command.slice(cursor, next);
+    if (document.stripTabs)
+      line = line.replace(/^\t+/, "");
+    if (line === document.delimiter)
+      return { bodyEnd: cursor, terminatorEnd: next };
+    if (next === command.length)
+      break;
+    cursor = next + 1;
+  }
+  return { bodyEnd: command.length, terminatorEnd: command.length };
+}
+function substitutions(body, options) {
+  const out = [];
+  for (let i = 0;i < body.length; i++) {
+    const ch = body[i];
+    if (ch === "\\") {
+      i++;
+      continue;
+    }
+    let inner;
+    if (ch === "$" && body[i + 1] === "(") {
+      const end = substitutionEnd(body, i + 2);
+      inner = body.slice(i + 2, end);
+      i = end;
+      if (inner.startsWith("("))
+        continue;
+    } else if (ch === "`") {
+      let end = i + 1;
+      while (end < body.length && body[end] !== "`")
+        end += body[end] === "\\" ? 2 : 1;
+      inner = body.slice(i + 1, end);
+      i = end;
+    } else {
+      continue;
+    }
+    out.push(token("$("), ...tokenizeShell(inner, options), token(")"));
+  }
+  return out;
+}
+function substitutionEnd(body, from) {
+  let depth = 1;
+  let quote = null;
+  for (let i = from;i < body.length; i++) {
+    const ch = body[i];
+    if (quote !== null) {
+      if (ch === quote)
+        quote = null;
+      else if (ch === "\\" && quote === '"')
+        i++;
+      continue;
+    }
+    if (ch === "\\")
+      i++;
+    else if (ch === '"' || ch === "'")
+      quote = ch;
+    else if (ch === "(")
+      depth++;
+    else if (ch === ")" && --depth === 0)
+      return i;
+  }
+  return body.length;
+}
+
+// plugins/lib/src/command-words.ts
+var NONE = new Set;
+var WRAPPERS = new Map([
+  [
+    "sudo",
+    {
+      valued: new Set([
+        "-C",
+        "-D",
+        "-g",
+        "-h",
+        "-p",
+        "-R",
+        "-r",
+        "-T",
+        "-t",
+        "-U",
+        "-u",
+        "--chdir",
+        "--chroot",
+        "--close-from",
+        "--command-timeout",
+        "--group",
+        "--host",
+        "--other-user",
+        "--prompt",
+        "--role",
+        "--type",
+        "--user"
+      ]),
+      chdir: new Set(["-D", "--chdir"])
+    }
+  ],
+  ["doas", { valued: new Set(["-C", "-u"]) }],
+  [
+    "env",
+    {
+      valued: new Set(["-C", "-L", "-P", "-S", "-U", "-u", "--chdir", "--split-string", "--unset"]),
+      chdir: new Set(["-C", "--chdir"]),
+      split: new Set(["-S", "--split-string"]),
+      assignments: true
+    }
+  ],
+  ["nice", { valued: new Set(["-n", "--adjustment"]) }],
+  ["timeout", { valued: new Set(["-k", "-s", "--kill-after", "--signal"]), operands: 1 }],
+  ["stdbuf", { valued: new Set(["-e", "-i", "-o", "--error", "--input", "--output"]) }],
+  ["exec", { valued: new Set(["-a"]) }],
+  ["command", { valued: NONE, lookup: new Set(["-V", "-v"]) }],
+  ["time", { valued: new Set(["-f", "-o", "--format", "--output"]) }],
+  ["nohup", { valued: NONE }]
+]);
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/error.js
+/*!
+ * Copyright (c) Squirrel Chat et al., All rights reserved.
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice, this
+ *    list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software without
+ *    specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/primitive.js
+/*!
+ * Copyright (c) Squirrel Chat et al., All rights reserved.
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice, this
+ *    list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software without
+ *    specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/date.js
+/*!
+ * Copyright (c) Squirrel Chat et al., All rights reserved.
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice, this
+ *    list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software without
+ *    specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/extract.js
+/*!
+ * Copyright (c) Squirrel Chat et al., All rights reserved.
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice, this
+ *    list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software without
+ *    specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/util.js
+/*!
+ * Copyright (c) Squirrel Chat et al., All rights reserved.
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice, this
+ *    list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software without
+ *    specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/struct.js
+/*!
+ * Copyright (c) Squirrel Chat et al., All rights reserved.
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice, this
+ *    list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software without
+ *    specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/parse.js
+/*!
+ * Copyright (c) Squirrel Chat et al., All rights reserved.
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice, this
+ *    list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software without
+ *    specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/stringify.js
+/*!
+ * Copyright (c) Squirrel Chat et al., All rights reserved.
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice, this
+ *    list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software without
+ *    specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+var HAS_WELLFORMED = !!"".isWellFormed;
+
+// node_modules/.bun/smol-toml@1.9.1/node_modules/smol-toml/dist/index.js
+/*!
+ * Copyright (c) Squirrel Chat et al., All rights reserved.
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice, this
+ *    list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software without
+ *    specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+// plugins/lib/src/patterns.ts
+var compiled = new Map;
+// plugins/lib/src/tool-targets.ts
+var WRITE_TOOLS = new Set(["edit", "write", "patch"]);
+var READ_TOOLS = new Set(["read"]);
+var SHELL_ALIASES = new Set(["bash", "Bash"]);
+var SHELL_EXECUTABLES = new Set(["bash", "sh", "zsh", "dash", "ksh"]);
+// plugins/model-roles/src/signals.ts
+var DEFAULT_TEST_COMMANDS = [
+  "bun test",
+  "bun run test",
+  "bun run check",
+  "npm test",
+  "pnpm test",
+  "yarn test",
+  "pytest",
+  "python -m pytest",
+  "go test",
+  "cargo test",
+  "cargo nextest"
+];
+var DEFAULT_TEST_GLOBS = [
+  "**/*.test.*",
+  "**/*.spec.*",
+  "**/test/**",
+  "**/tests/**",
+  "**/__tests__/**",
+  "**/*_test.go",
+  "**/test_*.py"
+];
+var strings3 = (value) => Array.isArray(value) ? value.filter((v) => typeof v === "string" && v.trim() !== "").map((v) => v.trim()) : undefined;
+function parseEvaluate(raw) {
+  const input = typeof raw === "object" && raw !== null ? raw : {};
+  return {
+    testCommands: strings3(input.testCommands) ?? DEFAULT_TEST_COMMANDS,
+    testGlobs: strings3(input.testGlobs) ?? DEFAULT_TEST_GLOBS
+  };
+}
+var VERDICT_LINE = /^VERDICT:\s*(APPROVE|REQUEST-CHANGES|COMMENT)\b/i;
+var OPEN_FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+var CLOSE_FENCE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
+function parseVerdict(text) {
+  let found;
+  let fence;
+  for (const line of text.split(/\r?\n/)) {
+    if (fence !== undefined) {
+      const closes = CLOSE_FENCE.exec(line)?.[1];
+      if (closes?.startsWith(fence.char) && closes.length >= fence.length)
+        fence = undefined;
+      continue;
+    }
+    const opens = OPEN_FENCE.exec(line);
+    if (opens?.[1] !== undefined && !(opens[1].startsWith("`") && opens[2]?.includes("`"))) {
+      fence = { char: opens[1].charAt(0), length: opens[1].length };
+      continue;
+    }
+    if (/^(?: {4}|\t)/.test(line) || /^ {0,3}>/.test(line))
+      continue;
+    const match = VERDICT_LINE.exec(line.trim());
+    if (match?.[1] !== undefined)
+      found = match[1].toLowerCase();
+  }
+  return found;
+}
+var ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+var SEPARATORS2 = new Set([";", "&", "|", "(", ")", `
+`, "$(", "<<<"]);
+var JOINERS = new Set(["&&", ";", `
+`]);
+function items(command) {
+  if (!shellQuoteBalanced(command) || command.includes("`") || command.includes("<<"))
+    return;
+  const tokens = tokenizeShell(command);
+  const out = [];
+  const isSeparator = (i) => {
+    const t = tokens[i];
+    return t !== undefined && !t.sawQuote && SEPARATORS2.has(t.value);
+  };
+  const wordAt = (i) => tokens[i] !== undefined && !isSeparator(i) ? tokens[i] : undefined;
+  for (let i = 0;i < tokens.length; i++) {
+    const t = tokens[i];
+    if (t === undefined)
+      continue;
+    if (isSeparator(i)) {
+      out.push({ separator: t.value });
+      continue;
+    }
+    if (!t.sawQuote && /^\d*>>?$/.test(t.value)) {
+      if (isSeparator(i + 1) && tokens[i + 1]?.value === "&" && /^(\d+|-)$/.test(wordAt(i + 2)?.value ?? "x"))
+        i += 2;
+      else if (wordAt(i + 1) !== undefined)
+        i += 1;
+      else
+        return;
+      continue;
+    }
+    if (!t.sawQuote && /^\d*>>?[^>&]/.test(t.value))
+      continue;
+    out.push({ word: t.value });
+  }
+  return out;
+}
+function isSetup(words) {
+  let rest = words;
+  while (rest[0] !== undefined && ASSIGNMENT.test(rest[0]))
+    rest = rest.slice(1);
+  if (rest.length === 0)
+    return true;
+  if (rest[0] === "cd")
+    return rest.length === 2;
+  return rest[0] === "export" && rest.length > 1 && rest.slice(1).every((w) => ASSIGNMENT.test(w));
+}
+function forms(words) {
+  const [tool, run, ...rest] = words;
+  const wrapped = tool !== undefined && ["bun", "npm", "pnpm", "yarn"].includes(tool) && run === "run" && rest.length > 0;
+  return wrapped ? [[...words], [tool, ...rest]] : [[...words]];
+}
+var startsWithCommand = (words, command) => {
+  const tokens = command.trim().split(/\s+/);
+  if (tokens.length > words.length)
+    return false;
+  return tokens.every((token, i) => words[i] === token || i === tokens.length - 1 && words[i]?.startsWith(`${token}:`) === true);
+};
+function parseTestCommand(command, testCommands) {
+  const parts = items(command.trim());
+  if (parts === undefined || parts.length === 0)
+    return;
+  const segments = [[]];
+  const joins = [];
+  let run = "";
+  for (const part of parts) {
+    if ("separator" in part)
+      run += part.separator;
+    else {
+      if (run !== "") {
+        if (!JOINERS.has(run))
+          return;
+        joins.push(run);
+        segments.push([]);
+        run = "";
+      }
+      segments[segments.length - 1]?.push(part.word);
+    }
+  }
+  if (run !== "" || segments.some((s) => s.length === 0))
+    return;
+  const last = segments.pop() ?? [];
+  if (!segments.every(isSetup))
+    return;
+  let rest = last;
+  while (rest[0] !== undefined && ASSIGNMENT.test(rest[0]))
+    rest = rest.slice(1);
+  if (!forms(rest).some((form) => testCommands.some((tc) => startsWithCommand(form, tc))))
+    return;
+  return { setupFirst: joins[joins.length - 1] === "&&" };
+}
+function testRun(command, exitStatus, testCommands) {
+  if (exitStatus === undefined || !Number.isInteger(exitStatus))
+    return;
+  const parsed = parseTestCommand(command, testCommands);
+  if (parsed === undefined)
+    return;
+  if (exitStatus === 0)
+    return "pass";
+  return parsed.setupFirst ? undefined : "fail";
+}
+var REGEX_SPECIAL = /[.+^${}()|[\]\\]/g;
+function globToRegExp2(glob) {
+  let source = "";
+  for (let i = 0;i < glob.length; i++) {
+    const c = glob.charAt(i);
+    if (c === "*" && glob[i + 1] === "*") {
+      if (glob[i + 2] === "/") {
+        source += "(?:.*/)?";
+        i += 2;
+      } else {
+        source += ".*";
+        i += 1;
+      }
+    } else if (c === "*")
+      source += "[^/]*";
+    else if (c === "?")
+      source += "[^/]";
+    else
+      source += c.replace(REGEX_SPECIAL, "\\$&");
+  }
+  return new RegExp(`^${source}$`);
+}
+function touchesTests(files, testGlobs) {
+  const patterns = testGlobs.map(globToRegExp2);
+  return files.some((file) => {
+    const path = file.replace(/\\/g, "/").replace(/^\.\//, "");
+    return patterns.some((p) => p.test(path));
+  });
+}
+function exitStatusOf(metadata) {
+  if (typeof metadata !== "object" || metadata === null)
+    return;
+  const m = metadata;
+  for (const key of ["exit", "exitCode"])
+    if (typeof m[key] === "number")
+      return m[key];
+  return;
+}
 
 // plugins/model-roles/src/snapshot.ts
 var SPAWN_MODEL_KEY_PREFIX = "spawn-model:";
@@ -4419,6 +5181,8 @@ var endedAt = (event) => {
   return typeof created === "number" && Number.isFinite(created) ? created : Number.POSITIVE_INFINITY;
 };
 var STEP_ENDED_EVENT = "session.step.ended";
+var TEXT_ENDED_EVENT = "session.text.ended";
+var NO_SIGNALS = { tests: "none", touchedTests: false };
 var COMPACTION_ENDED_EVENT = "session.compaction.ended";
 var finishedAt = (event) => {
   const at = endedAt(event);
@@ -4467,6 +5231,7 @@ var src_default = Plugin.define({
     const options = { ...parseOptions(ctx.options), tiers: {}, classes: {}, implicit: {} };
     const runtime = parseRuntime(ctx.options, options);
     const guard2 = parseGuard(isRecord10(ctx.options) ? ctx.options.guard : undefined);
+    const evaluate = parseEvaluate(isRecord10(ctx.options) ? ctx.options.evaluate : undefined);
     let autoHistory = [];
     let available = [];
     let availableKey = "";
@@ -4690,8 +5455,12 @@ ${refs.size}`;
       }
       return limits;
     };
+    const announceContext = async (notifyTo, failed, role, subagent) => {
+      const plain = contextNote(failed, contextLimits().get(healthKey(failed)), contextTier(role, failed));
+      await announce({ failed, kind: "context-length", cooldownMs: 0, target: undefined, now: Date.now(), notifyTo, subagent, plain });
+    };
     const contextTier = (role, failed) => role !== undefined && Object.hasOwn(options.roles, role) ? role : rolesListing(options, failed)[0];
-    const contextCandidates = (tier, healthOf) => tier === undefined ? [] : tierModels(options, tier).filter((ref) => healthOf(ref) === undefined && available.some((m) => healthKey(m) === healthKey(ref) && m.enabled !== false));
+    const contextCandidates = (tier, healthOf) => tier === undefined ? [] : tierModels(options.roles, tier).filter((ref) => healthOf(ref) === undefined && candidateStatus(modelText(ref), available, options.roles, {}, Date.now()).status === "available");
     const childModel = async (message) => {
       const id = childSessionID(message);
       if (id === undefined)
@@ -4936,8 +5705,7 @@ ${refs.size}`;
       const spawnRole = isChild ? await spawnRoleOf(sessionID) : undefined;
       const role = spawnRole ?? (agent === undefined ? undefined : roleOf(agent, options.agents, options.implicit));
       if (kind === "context-length") {
-        const tier = contextTier(role, failed);
-        await notify(isChild ? session.parentID : sessionID, contextNote(failed, contextLimits().get(healthKey(failed)), tier), "context-length");
+        await announceContext(isChild ? session.parentID : sessionID, failed, role, isChild ? { agent: session.agent, sessionID } : undefined);
         return;
       }
       const target = cooldownMs > 0 ? fallbackTarget(options, available, view(), role, failed) : undefined;
@@ -5002,8 +5770,6 @@ ${refs.size}`;
     const triedModels = new Map;
     const contextRetried = new Set;
     const retryOnLargerContext = async (event, failed) => {
-      if (event.attempt <= 2)
-        contextRetried.delete(event.sessionID);
       if (contextRetried.has(event.sessionID) || switching.has(event.sessionID))
         return;
       try {
@@ -5042,8 +5808,10 @@ ${refs.size}`;
       }
     };
     const retries = await ctx.session.hook("retry", async (event) => {
-      if (event.attempt <= 2)
+      if (event.attempt <= 2) {
         triedModels.delete(event.sessionID);
+        contextRetried.delete(event.sessionID);
+      }
       const error = event.error;
       const kind = classifyFailure(error);
       if (kind === undefined)
@@ -5884,7 +6652,16 @@ ${refs.size}`;
         return effective.origin === "project" ? { ...result, shadowedBy: effective.path } : result;
       }
     });
+    const recordTestRun = async (event) => {
+      if (event.status !== "completed" || !isRecord10(event.input) || typeof event.input.command !== "string")
+        return;
+      const metadata = isRecord10(event.result) ? event.result.metadata : undefined;
+      const tests = testRun(event.input.command, exitStatusOf(metadata), evaluate.testCommands);
+      if (tests !== undefined)
+        await outcomes.signals(event.sessionID, { tests });
+    };
     const spawnResults = await ctx.tool.hook("execute.after", async (event) => {
+      await recordTestRun(event);
       if (event.tool !== SUBAGENT_TOOL)
         return;
       const spawn = pending.get(event.id);
@@ -5918,7 +6695,7 @@ ${refs.size}`;
           const cooldownMs = await markFailed(failed, kind, { message });
           const role = spawn?.role ?? (agent === undefined ? undefined : roleOf(agent, options.agents, options.implicit));
           if (kind === "context-length") {
-            await notify(event.sessionID, contextNote(failed, contextLimits().get(healthKey(failed)), contextTier(role, failed)), "context-length");
+            await announceContext(event.sessionID, failed, role, { agent: agentID, sessionID: childSessionID(message) });
             return;
           }
           const target = cooldownMs > 0 ? fallbackTarget(options, available, view(), role, failed) : undefined;
@@ -5948,6 +6725,7 @@ ${refs.size}`;
           const sessionID = data.sessionID;
           settleRequest(requestLog, sessionID, endedAt(event));
           const error = data.error;
+          await outcomes.signals(sessionID, NO_SIGNALS);
           await outcomes.end(sessionID, `failed:${classifyFailure(error) ?? "other"}`, finishedAt(event));
           pruneChildModels();
           await queue(() => onSessionFailed(sessionID, error)).catch((error) => warn(`fallback after a failed execution did not complete`, { error: String(error) }));
@@ -5958,6 +6736,7 @@ ${refs.size}`;
           if (typeof sessionID !== "string")
             continue;
           const model = settleRequest(requestLog, sessionID, endedAt(event));
+          await outcomes.signals(sessionID, NO_SIGNALS);
           if (model !== undefined)
             healthHistory = recordRecovery(healthHistory, model.providerID, finishedAt(event));
           await outcomes.end(sessionID, "succeeded", finishedAt(event));
@@ -5970,15 +6749,27 @@ ${refs.size}`;
           const sessionID = event.data?.sessionID;
           if (typeof sessionID === "string") {
             settleRequest(requestLog, sessionID, endedAt(event));
+            await outcomes.signals(sessionID, NO_SIGNALS);
             await outcomes.end(sessionID, "interrupted", finishedAt(event));
             pruneChildModels();
           }
+          continue;
+        }
+        if (type === TEXT_ENDED_EVENT) {
+          const data = event.data;
+          if (typeof data?.sessionID !== "string" || typeof data.text !== "string")
+            continue;
+          const verdict = parseVerdict(data.text);
+          if (verdict !== undefined)
+            await outcomes.signals(data.sessionID, { verdict });
           continue;
         }
         if (type === STEP_ENDED_EVENT || type === COMPACTION_ENDED_EVENT) {
           const data = event.data;
           if (typeof data?.sessionID !== "string")
             continue;
+          if (type === STEP_ENDED_EVENT && Array.isArray(data.files) && touchesTests(data.files.filter((f) => typeof f === "string"), evaluate.testGlobs))
+            await outcomes.signals(data.sessionID, { touchedTests: true });
           await (type === STEP_ENDED_EVENT ? outcomes.step : outcomes.compaction)(data.sessionID, data);
           continue;
         }
@@ -6088,6 +6879,8 @@ export {
   DEFAULT_PREMIUM,
   DEFAULT_QUOTA_COOLDOWN_MS,
   DEFAULT_SWITCH_TIMEOUT_MS,
+  DEFAULT_TEST_COMMANDS,
+  DEFAULT_TEST_GLOBS,
   DEFAULT_TIER_EFFORT,
   DEFAULT_VARIANT,
   DERIVED_TIERS,
@@ -6184,6 +6977,7 @@ export {
   desiredModels,
   duration,
   effectiveConfig,
+  exitStatusOf,
   expandRole,
   explainSpawn,
   explicitCandidates,
@@ -6197,6 +6991,7 @@ export {
   formatHistory,
   formatReceipts,
   formatUsage,
+  globToRegExp2 as globToRegExp,
   globalConfigDir,
   healthEntry,
   healthKey,
@@ -6223,6 +7018,7 @@ export {
   onEnd,
   onFailover,
   onResume,
+  onSignals,
   onSpawn,
   onStep,
   onSteps,
@@ -6231,11 +7027,14 @@ export {
   parseClassification,
   parseDecision,
   parseEffort,
+  parseEvaluate,
   parseGuard,
   parseOptions,
   parseRuntime,
+  parseTestCommand,
   parseTierConfig,
   parseTierSettings,
+  parseVerdict,
   pickConfigFile,
   pickRole,
   pinnedModel,
@@ -6287,10 +7086,10 @@ export {
   summarize,
   summarizeUsage,
   switchNote,
+  testRun,
   textHash,
   tierEffort,
   tierMeta,
-  tierModels,
   tierNameError,
   tierNames,
   tierOf,
@@ -6299,6 +7098,7 @@ export {
   tierSummary,
   tierWarnings,
   toJsonSchema,
+  touchesTests,
   usageBrief,
   usageLine,
   userPin,

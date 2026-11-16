@@ -118,7 +118,7 @@ export type HealthState = Record<string, HealthEntry>
  * Bedrock throttling also says "Too many tokens, please wait before trying again": that is a rate limit.
  */
 const CONTEXT_LENGTH =
-  /context[_ ](?:length|window)(?:[_ ]exceeded)?|maximum context|prompt is too long|(?:input|prompt|request) (?:is )?too long|exceeds? the context|too many tokens(?!,? ?please wait)/i
+  /context[_ ](?:length|window)(?:[_ ]exceeded)?|maximum context|prompt is too long|(?:input|prompt|request) (?:is )?too long|exceeds? the context|too many tokens(?!,? ?please wait| per (?:min|hour|day))/i
 
 const NOT_MODEL = [
   /\b(?:abort(?:ed)?|cancel(?:l)?ed|interrupted)\b/i,
@@ -151,16 +151,19 @@ const PATTERNS: ReadonlyArray<[FailureClass, RegExp]> = [
   ["server", /overloaded|over capacity|service unavailable|bad gateway|gateway timeout|internal server error|server error|serviceunavailable|\b50[0234]\b|\b529\b/i],
 ]
 
+/** Classes checked before the ambiguous context wording. */
+const DEFINITE: ReadonlyArray<FailureClass> = ["quota", "credentials", "auth", "rate-limit"]
+
 const bodyText = (error: FailureInput): string => {
   const body = error.response?.body
   return typeof body === "string" ? body : body === undefined ? "" : JSON.stringify(body)
 }
 
-/** Whether the message, or the body of a 400 or 413 response, says the request exceeds the context window. */
+/** Whether the message, or the body of a 400 or 413 response, says the request exceeds the context window. Only for those statuses, or none. */
 export function isContextLength(error: FailureInput): boolean {
-  if (CONTEXT_LENGTH.test(error.message ?? "")) return true
   const status = error.status
-  return (status === undefined || status === 400 || status === 413) && CONTEXT_LENGTH.test(bodyText(error))
+  if (status !== undefined && status !== 400 && status !== 413) return false
+  return CONTEXT_LENGTH.test(error.message ?? "") || CONTEXT_LENGTH.test(bodyText(error))
 }
 
 /**
@@ -173,13 +176,16 @@ export function classifyFailure(error: FailureInput | undefined): FailureClass |
   const type = (error.type ?? "").toLowerCase()
   if (type === "tool" || type === "user" || type === "aborted" || type === "interrupted") return undefined
   const message = error.message ?? ""
-  if (isContextLength(error)) return "context-length"
   if (NOT_MODEL.some((pattern) => pattern.test(message))) return undefined
   const status = error.status
   if (status === 402 || QUOTA_TYPE.test(type) || QUOTA.test(message) || QUOTA.test(bodyText(error))) return "quota"
   if (status === 401 || status === 403) return "auth"
   if (status === 429) return "rate-limit"
   if (status !== undefined && status >= 500 && status <= 599) return "server"
+  const matches = (kind: FailureClass) => PATTERNS.some(([k, pattern]) => k === kind && (pattern.test(message) || pattern.test(type)))
+  // Definite classes first: their wording can share words with a context overflow ("too many tokens per minute").
+  for (const kind of DEFINITE) if (matches(kind)) return kind
+  if (isContextLength(error)) return "context-length"
   for (const [kind, pattern] of PATTERNS) if (pattern.test(message) || pattern.test(type)) return kind
   return undefined
 }

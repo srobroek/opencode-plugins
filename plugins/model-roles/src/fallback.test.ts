@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { contextFallback, contextNote, tierModels } from "./fallback.ts"
-import { parseOptions } from "./resolve.ts"
+import { contextFallback, contextNote } from "./fallback.ts"
 
 const a = { providerID: "p", id: "a" }
 const b = { providerID: "p", id: "b" }
@@ -41,12 +40,5 @@ describe("contextNote", () => {
 
   test("an unknown limit and tier are said so", () => {
     expect(contextNote(a, undefined, undefined)).toContain("p/a (unknown limit); no larger-context candidate in its tier.")
-  })
-})
-
-describe("tierModels", () => {
-  test("lists models in order, following role links once", () => {
-    const options = parseOptions({ roles: { top: ["p/a", "@mid"], mid: ["q/c", "@top"] } })
-    expect(tierModels(options, "top")).toEqual([a, c])
   })
 })

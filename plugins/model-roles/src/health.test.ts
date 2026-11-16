@@ -128,6 +128,18 @@ describe("classifyFailure", () => {
     expect(classifyFailure(error)).toBe("context-length")
   })
 
+  test("definite failures win over ambiguous context wording", () => {
+    expect(classifyFailure({ message: "Rate limit reached: too many tokens per minute", status: 429 })).toBe("rate-limit")
+    expect(classifyFailure({ message: "Too many tokens per minute", status: 429 })).toBe("rate-limit")
+    expect(classifyFailure({ message: "Too many tokens per minute" })).toBeUndefined()
+    expect(classifyFailure({ message: "You exceeded your current quota: too many tokens", status: 429 })).toBe("quota")
+    expect(classifyFailure({ message: "Your credit balance is too low to process this prompt is too long request", status: 400 })).toBe("quota")
+    expect(classifyFailure({ message: "Forbidden: prompt is too long", status: 403 })).toBe("auth")
+    expect(classifyFailure({ message: "Throttling: input is too long", status: 400 })).toBe("rate-limit")
+    expect(classifyFailure({ message: "prompt is too long", status: 400 })).toBe("context-length")
+    expect(classifyFailure({ message: "prompt is too long", status: 503 })).toBe("server")
+  })
+
   test("other failures that mention tokens or size are not context length", () => {
     expect(classifyFailure({ message: "ThrottlingException: Too many tokens, please wait before trying again.", status: 429 })).toBe("rate-limit")
     expect(classifyFailure({ message: "Rate limit reached for gpt-5 on tokens per min (TPM): Limit 30000", status: 429 })).toBe("rate-limit")

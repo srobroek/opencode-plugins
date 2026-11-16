@@ -46,6 +46,13 @@ describe("recordRecovery", () => {
     ])
   })
 
+  test("a success from before the cooldown started does not recover it", () => {
+    const history = recordCooldown([], model("10:00:00", 600_000))
+    expect(recordRecovery(history, "p", at("09:59:59"))[0]?.recoveredAt).toBeUndefined()
+    expect(recordRecovery(history, "p", at("10:00:00"))[0]?.recoveredAt).toBeUndefined()
+    expect(recordRecovery(history, "p", at("10:00:01"))[0]?.recoveredAt).toBe(at("10:00:01"))
+  })
+
   test("does not move a recovery already recorded or a cooldown that ended earlier", () => {
     let history = recordCooldown([], model("10:00:00", 60_000))
     history = recordRecovery(history, "p", at("10:05:00"))

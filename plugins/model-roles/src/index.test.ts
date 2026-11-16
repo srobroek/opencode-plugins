@@ -757,6 +757,41 @@ describe("runtime fallback", () => {
     await cleanup()
   })
 
+  test("a candidate whose variant is unknown is not a larger-context target", async () => {
+    const windows = [
+      { ...models[0], limit: { context: 200_000 } },
+      { ...models[1], limit: { context: 1_000_000 } },
+      { ...models[2], limit: { context: 2_000_000 } },
+    ] as Model[]
+    const roles = { ...fallbackOptions, roles: { task: ["amazon-bedrock/claude-sonnet#high", "anthropic/claude-haiku#nope", "opencode/flint"] } }
+    const host = createHost({ agents: [{ id: "build" }], models: windows, options: roles })
+    const cleanup = await setup(host)
+    const error = { type: "api", message: "prompt is too long: 213462 tokens > 200000 maximum", status: 400 }
+    expect(await host.fireRetry({ sessionID: "r", agent: "build", model: sonnet, error, attempt: 2 })).toEqual({ retry: true, delay: 0 })
+    expect(methods(host, "switchModel").map((c) => c.input)).toEqual([{ sessionID: "r", model: flint }])
+    host.close()
+    await cleanup()
+  })
+
+  test("a later request that starts with a transient failure can still move to a larger context", async () => {
+    const windows = [
+      { ...models[0], limit: { context: 200_000 } },
+      { ...models[1], limit: { context: 1_000_000 } },
+    ] as Model[]
+    const host = createHost({ agents: [{ id: "build" }], models: windows, options: fallbackOptions })
+    const cleanup = await setup(host)
+    const long = { type: "api", message: "prompt is too long: 213462 tokens > 200000 maximum", status: 400 }
+    const busy = { type: "api", message: "Service Unavailable", status: 503 }
+    const base = { sessionID: "r", agent: "build" }
+    expect(await host.fireRetry({ ...base, model: sonnet, error: long, attempt: 2 })).toEqual({ retry: true, delay: 0 })
+    // A new request: it starts with a transient failure, then hits the window.
+    await host.fireRetry({ ...base, model: sonnet, error: busy, attempt: 2 })
+    expect(await host.fireRetry({ ...base, model: sonnet, error: long, attempt: 3 })).toEqual({ retry: true, delay: 0 })
+    expect(methods(host, "switchModel")).toHaveLength(2)
+    host.close()
+    await cleanup()
+  })
+
   test("a prompt too long with no larger-context candidate is not retried and sits nothing out", async () => {
     const same: Model[] = models.map((m) => ({ ...m, limit: { context: 200_000 } })) as Model[]
     const host = createHost({ agents: [{ id: "build" }], models: same, options: fallbackOptions })
@@ -777,6 +812,7 @@ describe("runtime fallback", () => {
     const quota = { type: "provider.quota", message: "You exceeded your current quota", status: 429 }
     await host.fireRetry({ sessionID: "r", agent: "build", model: sonnet, error: quota, attempt: 2 })
     expect(await run()).toMatch(/Recent health[\s\S]*provider amazon-bedrock: quota, cooldown 6 h, still out/)
+    await new Promise((resolve) => setTimeout(resolve, 5))
     host.fireModelRequest({}, { sessionID: "r", model: sonnet, kind: "primary" })
     host.emit({ type: "session.execution.succeeded", data: { sessionID: "r" } })
     await settle()
@@ -1206,6 +1242,25 @@ describe("runtime fallback", () => {
     expect(methods(host, "switchModel")).toHaveLength(0)
     // One failure moves nothing, so the root session gets no note.
     expect(methods(host, "synthetic")).toHaveLength(0)
+    host.close()
+    await cleanup()
+  })
+
+  test("a child over the context window gets one note in its parent, whether its failure event or the tool error comes first", async () => {
+    const limited = models.map((m) => ({ ...m, limit: { context: 200_000 } }))
+    const host = createHost({ agents: [{ id: "general" }], models: limited as Model[], options: fallbackOptions })
+    host.sessions.set("r", { id: "r" })
+    host.sessions.set("c", { id: "c", parentID: "r", agent: "general", model: sonnet })
+    const cleanup = await setup(host)
+    const message = "prompt is too long: 250000 tokens > 200000 maximum"
+    host.emit(failed("c", { type: "unknown", message, status: 400 }))
+    await settle()
+    await host.spawnFailed({ agent: "general", prompt: "x" }, `Subagent failed (sessionID: c): ${message}`, "r")
+    await settle()
+    const notes = methods(host, "synthetic").map((c) => c.input as { sessionID: string; text: string })
+    expect(notes.map((n) => n.sessionID)).toEqual(["r"])
+    expect(notes[0]?.text).toContain("context too long for amazon-bedrock/claude-sonnet#high (200000 tokens)")
+    expect(host.storage.has("health")).toBe(false)
     host.close()
     await cleanup()
   })

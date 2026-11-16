@@ -174,19 +174,6 @@ export type ContextLimits = ReadonlyMap<string, number>
 /** The receipt fallback reason for a request moved to a larger-context candidate. */
 export const CONTEXT_FALLBACK_REASON = "context-length"
 
-/** The ordered model candidates of a tier, following `@role` links, each role once. */
-export function tierModels(options: Options, role: string, seen: Set<string> = new Set()): ModelRef[] {
-  if (seen.has(role)) return []
-  seen.add(role)
-  const out: ModelRef[] = []
-  for (const entry of options.roles[role] ?? []) {
-    const candidate = parseCandidate(entry)
-    if (candidate?.kind === "model") out.push(candidate.ref)
-    else if (candidate?.kind === "role") out.push(...tierModels(options, candidate.role, seen))
-  }
-  return out
-}
-
 /**
  * The first candidate with a strictly larger context window than `failed`. A limit that is
  * unknown, on either side, never counts as larger, and neither does an equal one: the same
