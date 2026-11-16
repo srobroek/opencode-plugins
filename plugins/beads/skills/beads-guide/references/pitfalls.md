@@ -17,3 +17,21 @@
 - **Symptom:** `cannot resolve the dynamic working directory before this mutation`
 - **Cause:** The gate must know which ledger a `bd` mutation targets. It resolves a literal `cd <path> &&` prefix, but not a directory that comes from a variable, a command substitution or another runtime value.
 - **Fix:** Pass the directory as the shell tool's `workdir` and run the bare `bd` command, rather than computing it inside the command.
+
+## The ledger is busy with other writers
+
+- **Symptom:** `The Beads ledger is busy: other writers held the embedded write lock`
+- **Cause:** Many agents write to one embedded ledger, and the lock lets one writer in at a time. The wait ran out before this command got its turn.
+- **Fix:** Retry the same command as its own simple command. Do not delete the lock file of a live holder. The beads-contention-retry skill has the full policy.
+
+## The gate stops a bd create that has no actor
+
+- **Symptom:** `without BEADS_ACTOR or BD_ACTOR records the invoking human's git identity in created_by`
+- **Cause:** The command has no actor variable. The bead would record the human's git identity, not the agent that wrote it.
+- **Fix:** Set `BEADS_ACTOR=<harness>/<agent>/<session>` on every mutating `bd` command, for example `BEADS_ACTOR=opencode/orchestrator/ses_123 bd create ...`.
+
+## A claimed bead is back in `bd ready`
+
+- **Symptom:** `bd show <id>` reports `open` with no assignee for a bead you claimed, or `bd heartbeat <id>` fails.
+- **Cause:** A claim holds a five-minute lease. The plugin renews it while the session runs. In an idle session the lease lapses, and `bd reclaim` returns the bead to ready. This behavior is correct.
+- **Fix:** Run `bd show <id>`. If no other actor holds the bead, claim it again with `bd update <id> --claim`.
