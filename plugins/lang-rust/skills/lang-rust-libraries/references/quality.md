@@ -13,12 +13,12 @@ Checked 2026-11-16.
 | `types` | Built-in: `cargo check --all-targets` | - | Built-in | `Kani`: bounded model checking of critical unsafe or arithmetic code | `cargo check` always; Kani for chosen proofs | every-pr | Skipping `--all-targets`, so tests and benches go unchecked |
 | `sast` | Shared: semgrep | - | Shared | `Opengrep`: the Semgrep CE rule licence does not fit; `Shared: codeql`: GitHub code scanning with a supported Rust query pack | `semgrep` with `codeql` when both are licensed | scheduled | Universal Rust coverage assumed; untested rule packs; clippy treated as a SAST program |
 | `memory-safety` | Built-in: Miri (nightly component) | - | `cargo +nightly miri --version` · `rustup +nightly component add miri` | `cargo-careful`: cheap extra runtime checks on nightly; AddressSanitizer or ThreadSanitizer: FFI or native code Miri cannot run; Valgrind: native dependencies without nightly | Miri for pure-Rust unsafe, sanitizers for FFI | scheduled | Running it on `#![forbid(unsafe_code)]` crates with no unsafe dependencies; Miri on FFI-heavy tests |
-| `dep-audit` | `cargo-deny` | >= 0.20 · 2026-07-09 · active | `cargo deny --version` · `cargo binstall cargo-deny` (CI: `taiki-e/install-action`) | `cargo-audit`: a standalone advisory scan without licence or ban policy; `osv-scanner`: one scanner across languages | `cargo-deny` with `cargo-audit` only for an extra advisory view | every-pr + scheduled | Redundant mandatory tools; latest dependency mistaken for a safe graph |
+| `dep-audit` | `cargo-deny` | >= 0.20 · 2026-07-09 · active | `cargo deny --version` · `cargo binstall cargo-deny` | `cargo-audit`: a standalone advisory scan without licence or ban policy; `osv-scanner`: one scanner across languages | `cargo-deny` with `cargo-audit` only for an extra advisory view | every-pr + scheduled | Redundant mandatory tools; latest dependency mistaken for a safe graph |
 | `dead-code` | Built-in: rustc `dead_code` lint | - | Built-in | None | - | every-pr | Silencing with `allow(dead_code)` instead of deleting |
 | `unused-deps` | `cargo-shear` | >= 1.14 · 2026-11-13 · active | `cargo shear --version` · `cargo binstall cargo-shear` | `cargo-machete`: fast regex check, accepts false positives; `cargo-udeps`: accurate, nightly and a full build | `cargo-shear` with `cargo-udeps` for one investigation | every-pr | Stacking scanners as mandatory gates; text matches as reachability proof |
 | `complexity` | Shared: lizard | - | Shared | None | - | on-demand | Blanket thresholds as correctness rules; gating on Clippy `cognitive_complexity`; `rust-code-analysis` (stale) |
 | `duplication` | Shared: jscpd | - | Shared | None | - | on-demand | Generated-code noise in the report |
-| `api-break` | `cargo-semver-checks` | >= 0.51 · 2026-10-03 · active | `cargo semver-checks --version` · `cargo binstall cargo-semver-checks` (CI: `obi1kenobi/cargo-semver-checks-action@v2`) | `cargo-public-api`: review a snapshot of the API on nightly | `cargo-semver-checks` as the gate and `cargo-public-api` for the reviewed diff | every-pr | Release automation mistaken for API compatibility evidence; running it for unpublished binaries |
+| `api-break` | `cargo-semver-checks` | >= 0.51 · 2026-10-03 · active | `cargo semver-checks --version` · `cargo binstall cargo-semver-checks` | `cargo-public-api`: review a snapshot of the API on nightly | `cargo-semver-checks` as the gate and `cargo-public-api` for the reviewed diff | every-pr | Release automation mistaken for API compatibility evidence; running it for unpublished binaries |
 | `docs` | Built-in: rustdoc (`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features`) | - | Built-in | `mdBook`: narrative guides beside the API reference; `cargo-rdme`: README generated from crate docs | rustdoc with `mdBook` for a guide | every-pr | Indiscriminate `--all-features` with conflicting features; docs.rs metadata missing for feature-gated items |
 
 ## Tradeoffs
@@ -77,6 +77,8 @@ Checked 2026-11-16.
 - Skip memory-safety tooling for a crate with `#![forbid(unsafe_code)]` and no unsafe dependency in scope; report it as not applicable.
 - Review the full target and feature matrix and the lockfile, not only direct dependencies. Check supported feature and target combinations before deleting an unused-dependency finding.
 - Assign owners and expiry to suppressions, and schedule rescans.
+
+- Use `obi1kenobi/cargo-semver-checks-action@v2` for semver checks in CI.
 
 ## Sources
 
