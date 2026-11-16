@@ -73,6 +73,10 @@ type Call = {
 const MERGE_OID = "feedfacecafebabe0123456789abcdef01234567"
 const HEAD_OID = "0123456789abcdef0123456789abcdef01234567"
 const BASE_OID = "1111111111111111111111111111111111111111"
+const TIP_OID = "2222222222222222222222222222222222222222"
+const PARENT_TREE = "3333333333333333333333333333333333333333"
+const LANDED_TREE = "4444444444444444444444444444444444444444"
+const BASE_BRANCH = "omp/integration/omp-plugins-9ej3"
 const REMOTE_URL = "https://github.com/srobroek/omp-plugins.git"
 const BRANCH = "omp/agent/omp-plugins-9ej3.5"
 const NOW = 1_764_000_000_000
@@ -86,11 +90,12 @@ const completed = (stdout: string, exitCode = 0, stderr = ""): CliResult => ({ o
 /** A GitHub pull-request payload in `gh pr view --json` spelling. */
 const githubPr = (overrides: Record<string, unknown> = {}): string =>
   JSON.stringify({
+    id: "PR_node_470",
     number: 470,
     url: "https://github.com/srobroek/omp-plugins/pull/470",
     title: TITLE,
     state: "OPEN",
-    baseRefName: "omp/integration/omp-plugins-9ej3",
+    baseRefName: BASE_BRANCH,
     headRefName: BRANCH,
     headRefOid: HEAD_OID,
     mergeCommit: null,
@@ -184,8 +189,16 @@ type Answers = {
   enqueue?: CliResult
   /** What the forge's compare read (`compare/<oid>...<base>`) answers; "ahead" by default. */
   compare?: CliResult
-  /** What the repository probe after a 404 answers. */
-  repoProbe?: CliResult
+  /** What the `mergeQueue(branch:)` read after a rules 404 answers. */
+  mergeQueueProbe?: CliResult
+  /** What the rulesets list read after a rules 404 answers. */
+  rulesets?: CliResult
+  /** What `ls-remote` answers for the base branch; its tip is `TIP_OID` by default. */
+  baseTip?: CliResult
+  /** What `git rev-parse <landed>^{tree}` answers; the parent's tree is always `PARENT_TREE`. */
+  landedTree?: CliResult
+  /** What `git merge-tree --write-tree <parent> <head>` answers. */
+  mergeTree?: CliResult
   /** What `git merge-base --is-ancestor` answers. */
   ancestor?: CliResult
   /** What the checks read (`gh pr checks` or the GitLab merge request API) answers. */
@@ -213,6 +226,14 @@ function runner(answers: Answers, canonical: string): { run: CliRunner; calls: C
     }
     if (argv[0] === "git" && argv.includes("show") && argv.includes("-s"))
       return completed(`${answers.parents ?? BASE_OID}\n`)
+    const treeOf = argv.find((part) => part.endsWith("^{tree}"))
+    if (argv[0] === "git" && argv.includes("rev-parse") && treeOf !== undefined) {
+      const parent = (answers.parents ?? BASE_OID).split(" ")[0]
+      return treeOf.startsWith(`${parent}^`) ? completed(`${PARENT_TREE}\n`) : (answers.landedTree ?? completed(`${LANDED_TREE}\n`))
+    }
+    if (argv[0] === "git" && argv.includes("merge-tree")) return answers.mergeTree ?? completed(`${LANDED_TREE}\n`)
+    if (argv[0] === "git" && argv.includes("ls-remote") && argv.some((part) => part === `refs/heads/${BASE_BRANCH}` || part === "refs/heads/main"))
+      return answers.baseTip ?? completed(`${TIP_OID}\trefs/heads/${argv.find((part) => part.startsWith("refs/heads/"))?.slice(11)}\n`)
     if (argv[0] === "git" && argv[1] === "cat-file" && argv[2] === "-e")
       return (present.shift() ?? true) ? completed("") : completed("", 1, "fatal: not a commit")
     if (argv[0] === "git" && argv.includes("fetch")) return fetches.shift() ?? completed("")
@@ -227,8 +248,13 @@ function runner(answers: Answers, canonical: string): { run: CliRunner; calls: C
       return answers.ancestor ?? completed("")
     if (argv[1] === "api" && argv.some((part) => part.includes("/compare/")))
       return answers.compare ?? completed("ahead\n")
-    if (argv[1] === "api" && argv.includes(".full_name"))
-      return answers.repoProbe ?? completed("srobroek/omp-plugins\n")
+    if (argv[1] === "api" && argv.some((part) => part.includes("/rulesets")))
+      return answers.rulesets ?? completed("[]")
+    if (argv[1] === "api" && argv[2] === "graphql" && argv.some((part) => part.includes("mergeQueue(branch")))
+      return (
+        answers.mergeQueueProbe ??
+        completed(JSON.stringify({ data: { repository: { nameWithOwner: "srobroek/omp-plugins", mergeQueue: null } } }))
+      )
     if (argv[1] === "api" && argv.some((part) => part.includes("/rules/branches/")))
       return answers.rules ?? completed("[]")
     if (argv[1] === "api" && argv[2] === "graphql") {
@@ -269,7 +295,7 @@ async function land(
     { pr: 470, ...params, ...(worktreePath === undefined ? {} : { worktree: worktreePath }) },
     { run, cwd: canonical, now: () => NOW, receiptsDirectory: receipts, env, ...extra },
   )
-  return { outcome, calls, receipts, canonical, worktreePath, files: () => readdirSync(receipts) }
+  return { outcome, calls, receipts, canonical, worktreePath, files: () => readdirSync(receipts).filter((name) => !name.startsWith("pending-")) }
 }
 function nativeNext(beadId: string, pr: number, mergeSha: string, receiptPath: string): string[] {
   return [
@@ -462,7 +488,7 @@ async function landRebase(
     repo.canonical,
   )
   const run: CliRunner = (argv, options) => {
-    if (argv[0] !== "git" || argv[1] === "remote" || argv.includes("ls-remote")) return fixture.run(argv, options)
+    if (argv[0] !== "git" || argv[1] === "remote" || (argv.includes("ls-remote") && !argv.includes("refs/heads/main"))) return fixture.run(argv, options)
     fixture.calls.push({ argv: [...argv], cwd: options.cwd, timeoutMs: options.timeoutMs, env: options.env })
     return runCli(argv, options)
   }
@@ -890,7 +916,7 @@ describe("delivery_land", () => {
       "--repo",
       "github.com/srobroek/omp-plugins",
       "--json",
-      "number,url,state,baseRefName,headRefName,headRefOid,mergeCommit,mergedAt,title",
+      "id,number,url,state,baseRefName,headRefName,headRefOid,mergeCommit,mergedAt,title",
     ].join(" ")
     const merge = `gh pr merge 470 --squash --subject ${TITLE} --delete-branch --repo github.com/srobroek/omp-plugins --match-head-commit ${HEAD_OID}`
     const cases: Array<[Answers, string]> = [
@@ -1130,7 +1156,7 @@ describe("delivery_land", () => {
         "--repo",
         "github.com/srobroek/omp-plugins",
         "--json",
-        "number,url,state,baseRefName,headRefName,headRefOid,mergeCommit,mergedAt,title",
+        "id,number,url,state,baseRefName,headRefName,headRefOid,mergeCommit,mergedAt,title",
       ],
       [
         "gh",
@@ -1140,7 +1166,7 @@ describe("delivery_land", () => {
         "--repo",
         "github.com/srobroek/omp-plugins",
         "--json",
-        "number,url,state,baseRefName,headRefName,headRefOid,mergeCommit,mergedAt,title",
+        "id,number,url,state,baseRefName,headRefName,headRefOid,mergeCommit,mergedAt,title",
       ],
     ])
     if (!outcome.ok) throw new Error(outcome.reason)
@@ -1713,7 +1739,7 @@ describe("delivery_land", () => {
     )
 
     expect(outcome.ok).toBe(true)
-    expect(calls.filter((call) => call.argv.includes("ls-remote")).map((call) => call.cwd)).toEqual([nested])
+    expect(calls.filter((call) => call.argv.includes("ls-remote")).map((call) => call.cwd)).toEqual([nested, nested])
   })
 
   /**
@@ -2278,7 +2304,7 @@ describe("choosing the remote and worktree of a landing", () => {
     expect(shows.length).toBeGreaterThan(0)
     for (const argv of shows) expect(argv).toContain("log.showSignature=false")
     // No command that could run a clean or smudge filter (status, diff, checkout, add, ...) is issued.
-    const allowed = ["rev-parse", "remote", "worktree", "cat-file", "show", "fetch", "rev-list", "merge-base", "diff-tree", "patch-id"]
+    const allowed = ["rev-parse", "remote", "worktree", "cat-file", "show", "fetch", "rev-list", "merge-base", "diff-tree", "patch-id", "merge-tree"]
     for (const argv of reads) expect(allowed.some((verb) => argv.includes(verb))).toBe(true)
   })
 
@@ -2375,7 +2401,7 @@ describe("delivery_land brings the landed commits local before proving their sha
       { pr: 470, ...params },
       { run, cwd: canonical, now: () => NOW, receiptsDirectory: receipts, env: {}, sleep },
     )
-    return { outcome, calls, slept, canonical, receipts, run, files: () => readdirSync(receipts) }
+    return { outcome, calls, slept, canonical, receipts, run, files: () => readdirSync(receipts).filter((name) => !name.startsWith("pending-")) }
   }
   const fetches = (calls: Call[]): string[][] =>
     calls.filter((call) => call.argv[0] === "git" && call.argv.includes("fetch")).map((call) => call.argv)
@@ -2403,7 +2429,7 @@ describe("delivery_land brings the landed commits local before proving their sha
     expect(calls[fetch]?.cwd).toBe(canonical)
     expect(calls[fetch]?.env?.GIT_TERMINAL_PROMPT).toBe("0")
     expect(outcome.receipt.proof.evidence).toMatchObject({
-      localCommits: { required: [MERGE_OID], fetches: [expect.stringContaining(` fetch `)] },
+      localCommits: { required: [MERGE_OID, HEAD_OID], fetches: [expect.stringContaining(` fetch `)] },
     })
     expect(files()).toHaveLength(1)
   })
@@ -2414,7 +2440,7 @@ describe("delivery_land brings the landed commits local before proving their sha
     expect(outcome.ok).toBe(true)
     if (!outcome.ok) throw new Error(outcome.reason)
     expect(fetches(calls)).toEqual([])
-    expect(outcome.receipt.proof.evidence).toMatchObject({ localCommits: { required: [MERGE_OID], fetches: [] } })
+    expect(outcome.receipt.proof.evidence).toMatchObject({ localCommits: { required: [MERGE_OID, HEAD_OID], fetches: [] } })
   })
 
   test("replication lag is retried on a bounded schedule, falling back to the base branch", async () => {
@@ -2427,16 +2453,16 @@ describe("delivery_land brings the landed commits local before proving their sha
     const { outcome, calls, slept, files } = await landWithFetch({
       prView: [completed(githubPr()), completed(mergedGithubPr())],
       // Before any fetch, after the first id fetch, after the first branch fetch, after the second id fetch.
-      present: [false, false, false, true],
+      present: [false, false, false, false, false, false, true, true],
       fetch: [lagging, completed("")],
     })
 
     expect(outcome.ok).toBe(true)
     if (!outcome.ok) throw new Error(outcome.reason)
     expect(fetches(calls).map(operands)).toEqual([
-      ["origin", MERGE_OID],
+      ["origin", MERGE_OID, HEAD_OID],
       ["origin", "refs/heads/omp/integration/omp-plugins-9ej3"],
-      ["origin", MERGE_OID],
+      ["origin", MERGE_OID, HEAD_OID],
     ])
     expect(slept).toEqual([0, 2_000])
     expect(calls.filter((call) => merged(call.argv))).toHaveLength(1)
@@ -2447,14 +2473,14 @@ describe("delivery_land brings the landed commits local before proving their sha
     const missing = { ok: true, exitCode: 128, stdout: "", stderr: "fatal: couldn't find remote ref" } as const
     const first = await landWithFetch({
       prView: [completed(githubPr()), completed(mergedGithubPr())],
-      present: [false, false, false, false, false, false, false],
+      present: Array.from({ length: 20 }, () => false),
       fetch: [missing, missing, missing, missing, missing, missing],
     })
 
     expect(first.outcome.ok).toBe(false)
     if (first.outcome.ok) throw new Error("expected a refusal")
     expect(first.outcome.mergeIssued).toBe(true)
-    expect(first.outcome.reason).toContain(`${MERGE_OID} absent locally after 6 fetches from origin over 3 attempts`)
+    expect(first.outcome.reason).toContain(`${MERGE_OID}, ${HEAD_OID} absent locally after 6 fetches from origin over 3 attempts`)
     expect(first.outcome.reason).toContain("no receipt was written")
     expect(first.outcome.reason).toContain("so the request is merged and must not be merged again")
     expect(first.outcome.reason).toContain(`re-run delivery_land with the same pr and expectHeadSha ${HEAD_OID}`)
@@ -2475,7 +2501,7 @@ describe("delivery_land brings the landed commits local before proving their sha
   test("an already MERGED request whose commit is missing names the safe re-run, not a merge", async () => {
     const { outcome, calls } = await landWithFetch({
       prView: [completed(mergedGithubPr())],
-      present: [false, false, false, false, false, false, false],
+      present: Array.from({ length: 20 }, () => false),
       fetch: Array.from({ length: 6 }, () => ({ ok: true, exitCode: 128, stdout: "", stderr: "" })),
     })
 
@@ -2507,8 +2533,8 @@ describe("delivery_land brings the landed commits local before proving their sha
     const { canonical, receipts } = repository()
     const { run, calls } = runner(
       {
-        prView: [completed(mergedGithubPr())],
-        present: [false, false, false],
+        prView: [completed(githubPr()), completed(mergedGithubPr())],
+        present: Array.from({ length: 20 }, () => false),
         fetch: [
           { ok: true, exitCode: 128, stdout: "", stderr: "" },
           { ok: true, exitCode: 128, stdout: "", stderr: "" },
@@ -2593,7 +2619,7 @@ describe("delivery_land brings the landed commits local before proving their sha
       checkout,
     )
     const run: CliRunner = (argv, options) => {
-      if (argv[0] !== "git" || argv[1] === "remote" || argv.includes("ls-remote")) return fixture.run(argv, options)
+      if (argv[0] !== "git" || argv[1] === "remote" || (argv.includes("ls-remote") && !argv.includes("refs/heads/main"))) return fixture.run(argv, options)
       fixture.calls.push({ argv: [...argv], cwd: options.cwd, timeoutMs: options.timeoutMs, env: options.env })
       return runCli(argv, options)
     }
@@ -2849,19 +2875,61 @@ describe("delivery_land through a GitHub merge queue", () => {
     )
     expect(outcome.ok).toBe(true)
     expect(merges(calls)).toHaveLength(1)
-    expect(calls.some((call) => call.argv.includes(".full_name"))).toBe(true)
+    expect(calls.some((call) => call.argv.some((part) => part.includes("mergeQueue(branch")))).toBe(true)
+    expect(calls.some((call) => call.argv.some((part) => part.includes("/rulesets")))).toBe(true)
   })
 
-  test("a 404 from the rules API that the repository read does not explain refuses", async () => {
+  test("a 404 whose mergeQueue read finds a queue refuses instead of merging directly", async () => {
     const { outcome, calls } = await land(
       {
         prView: [completed(githubPr())],
         rules: completed("", 1, "gh: Not Found (HTTP 404)"),
-        repoProbe: completed("", 1, "gh: Not Found (HTTP 404)"),
+        mergeQueueProbe: completed(
+          JSON.stringify({ data: { repository: { nameWithOwner: "srobroek/omp-plugins", mergeQueue: { id: "MQ_1" } } } }),
+        ),
       },
       REVIEWED,
     )
-    expect(reasonOf(outcome)).toContain("did not confirm repository access")
+    expect(reasonOf(outcome)).toContain("expected an explicit null")
+    expect(merges(calls)).toEqual([])
+  })
+
+  test("a 404 whose mergeQueue read omits the field refuses", async () => {
+    const { outcome, calls } = await land(
+      {
+        prView: [completed(githubPr())],
+        rules: completed("", 1, "gh: Not Found (HTTP 404)"),
+        mergeQueueProbe: completed(JSON.stringify({ data: { repository: { nameWithOwner: "srobroek/omp-plugins" } } })),
+      },
+      REVIEWED,
+    )
+    expect(reasonOf(outcome)).toContain("expected an explicit null")
+    expect(merges(calls)).toEqual([])
+  })
+
+  test("a 404 whose rulesets list is unreadable refuses even though the repository reads", async () => {
+    const { outcome, calls } = await land(
+      {
+        prView: [completed(githubPr())],
+        rules: completed("", 1, "gh: Not Found (HTTP 404)"),
+        rulesets: completed("", 1, "HTTP 403"),
+      },
+      REVIEWED,
+    )
+    expect(reasonOf(outcome)).toContain("readable rulesets list")
+    expect(merges(calls)).toEqual([])
+  })
+
+  test("a 404 from the rules API that the rule-specific reads do not explain refuses", async () => {
+    const { outcome, calls } = await land(
+      {
+        prView: [completed(githubPr())],
+        rules: completed("", 1, "gh: Not Found (HTTP 404)"),
+        rulesets: completed("", 1, "gh: Not Found (HTTP 404)"),
+      },
+      REVIEWED,
+    )
+    expect(reasonOf(outcome)).toContain("not taken as \"no merge queue\"")
     expect(merges(calls)).toEqual([])
   })
 
@@ -3020,6 +3088,7 @@ describe("delivery_land through a GitHub merge queue", () => {
     ["another pull request number", { number: 471 }, "pull request number 471"],
     ["another repository", { repository: "evil/omp-plugins" }, 'repository "evil/omp-plugins"'],
     ["another base branch", { base: "main" }, 'baseRefName "main"'],
+    ["only the node id, with every label correct", {}, 'node id "PR_node_forged"'],
   ])("a snapshot for %s is refused before anything is enqueued", async (_name, forged, expected) => {
     const { outcome, calls, files } = await inQueue({
       prView: [completed(githubPr())],
@@ -3028,6 +3097,144 @@ describe("delivery_land through a GitHub merge queue", () => {
     expect(reasonOf(outcome)).toContain(expected)
     expect(enqueues(calls)).toEqual([])
     expect(files()).toEqual([])
+  })
+
+  describe("single-parent content", () => {
+    const queuedSquash = (answers: Answers) =>
+      inQueue({
+        prView: [completed(githubPr()), completed(mergedGithubPr())],
+        queueStates: [snapshot("OPEN", null), snapshot("MERGED", null)],
+        ...answers,
+      })
+
+    test("a squash whose tree is not the reviewed head merged onto its parent is refused and reported as merged", async () => {
+      const { outcome, files } = await queuedSquash({ mergeTree: completed(`${PARENT_TREE}\n`) })
+      expect(reasonOf(outcome)).toContain(`observed tree ${LANDED_TREE}, expected ${PARENT_TREE}`)
+      expect(outcome.ok === false && outcome.mergeIssued).toBe(true)
+      expect(files()).toEqual([])
+    })
+
+    test("a squash with its parent's tree changed nothing and is refused", async () => {
+      const { outcome } = await queuedSquash({ landedTree: completed(`${PARENT_TREE}\n`) })
+      expect(reasonOf(outcome)).toContain("the same tree as its parent")
+    })
+
+    test("a reviewed head that does not merge cleanly onto the parent is refused", async () => {
+      const { outcome } = await queuedSquash({ mergeTree: completed("", 1, "CONFLICT") })
+      expect(reasonOf(outcome)).toContain("a conflict or no completed read")
+    })
+
+    test("a landed commit outside the locally fetched base is refused though the compare API says ahead", async () => {
+      const { outcome, calls } = await queuedSquash({ ancestor: completed("", 1) })
+      expect(reasonOf(outcome)).toContain("outside the fetched base branch")
+      expect(calls.some((call) => call.argv.includes(TIP_OID))).toBe(true)
+    })
+
+    test("an unreadable base tip refuses", async () => {
+      const { outcome } = await queuedSquash({ baseTip: completed("", 2) })
+      expect(reasonOf(outcome)).toContain("ls-remote")
+    })
+
+    test("a direct squash is held to the same content proof", async () => {
+      const { outcome, files } = await land(
+        { prView: [completed(githubPr()), completed(mergedGithubPr())], mergeTree: completed(`${PARENT_TREE}\n`) },
+        REVIEWED,
+      )
+      expect(reasonOf(outcome)).toContain("the landed content is not the reviewed change")
+      expect(outcome.ok === false && outcome.mergeIssued).toBe(true)
+      expect(files()).toEqual([])
+    })
+
+    test("a pre-merged linear request is held to the same content proof", async () => {
+      const { outcome } = await land({ prView: [completed(mergedGithubPr())], mergeTree: completed(`${PARENT_TREE}\n`) })
+      expect(reasonOf(outcome)).toContain("the landed content is not the reviewed change")
+    })
+  })
+
+  test("a retry after the queue merged the head reads the record and proves the queue's merge shape", async () => {
+    const shared = temporaryDirectory("delivery-land-pending-")
+    await inQueue(
+      {
+        rules: queueRules("MERGE"),
+        prView: [completed(githubPr())],
+        queueStates: [snapshot("OPEN", null), snapshot("OPEN", queued)],
+      },
+      { queueWaitSeconds: 0 },
+      { receiptsDirectory: shared },
+    )
+    const resumed = await inQueue(
+      { prView: [completed(mergedGithubPr())], parents: `${BASE_OID} ${INTEGRATION_OID}` },
+      {},
+      { receiptsDirectory: shared },
+    )
+    expect(resumed.outcome.ok).toBe(true)
+    if (!resumed.outcome.ok) throw new Error(resumed.outcome.reason)
+    expect(resumed.outcome.receipt.proof.evidence).toMatchObject({ mergeMethod: "merge", queue: { method: "merge" } })
+    expect(enqueues(resumed.calls)).toEqual([])
+    expect(readdirSync(shared).filter((name) => name.startsWith("pending-"))).toEqual([])
+  })
+
+  test("a proof that fails after the queue merged keeps the record, so the retry still proves the queue shape", async () => {
+    const shared = temporaryDirectory("delivery-land-pending-")
+    const failed = await inQueue(
+      {
+        rules: queueRules("MERGE"),
+        prView: [completed(githubPr()), completed(mergedGithubPr())],
+        queueStates: [snapshot("OPEN", null), snapshot("MERGED", null)],
+        parents: `${BASE_OID} ${INTEGRATION_OID}`,
+        ancestor: completed("", 1),
+      },
+      {},
+      { receiptsDirectory: shared },
+    )
+    expect(failed.outcome.ok).toBe(false)
+    const retried = await inQueue(
+      { prView: [completed(mergedGithubPr())], parents: `${BASE_OID} ${INTEGRATION_OID}` },
+      {},
+      { receiptsDirectory: shared },
+    )
+    expect(retried.outcome.ok).toBe(true)
+  })
+
+  test("a failed queue read keeps the record, so the next call refuses as removed instead of enqueuing again", async () => {
+    const shared = temporaryDirectory("delivery-land-pending-")
+    const failed = await inQueue(
+      { prView: [completed(githubPr())], queueStates: [snapshot("OPEN", null), completed("", 1, "HTTP 502")] },
+      {},
+      { receiptsDirectory: shared },
+    )
+    expect(reasonOf(failed.outcome)).toContain("HTTP 502")
+    expect(enqueues(failed.calls)).toHaveLength(1)
+    expect(readdirSync(shared)).toEqual([`pending-queue-470-${HEAD_OID.slice(0, 12)}.json`])
+
+    const next = await inQueue(
+      { prView: [completed(githubPr())], queueStates: [snapshot("OPEN", null)] },
+      {},
+      { receiptsDirectory: shared },
+    )
+    expect(reasonOf(next.outcome)).toContain("was removed from the merge queue and was not enqueued again")
+    expect(enqueues(next.calls)).toEqual([])
+    expect(readdirSync(shared)).toEqual([])
+  })
+
+  test("waiting on an entry someone else enqueued writes the record, so its later removal is not re-enqueued", async () => {
+    const shared = temporaryDirectory("delivery-land-pending-")
+    const joined = await inQueue(
+      { prView: [completed(githubPr())], queueStates: [snapshot("OPEN", queued)] },
+      { queueWaitSeconds: 0 },
+      { receiptsDirectory: shared },
+    )
+    expect(joined.outcome.ok === false && joined.outcome.queued).toBe(true)
+    expect(enqueues(joined.calls)).toEqual([])
+    expect(readdirSync(shared)).toEqual([`pending-queue-470-${HEAD_OID.slice(0, 12)}.json`])
+
+    const removed = await inQueue(
+      { prView: [completed(githubPr())], queueStates: [snapshot("OPEN", null)] },
+      {},
+      { receiptsDirectory: shared },
+    )
+    expect(reasonOf(removed.outcome)).toContain("was removed from the merge queue and was not enqueued again")
+    expect(enqueues(removed.calls)).toEqual([])
   })
 
   test("an exhausted budget is pending; the next call waits on the entry without enqueuing again", async () => {

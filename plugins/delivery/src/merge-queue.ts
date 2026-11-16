@@ -20,7 +20,7 @@
 
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { type CliRunner, FORGE_TIMEOUT_MS, type MergeMethod } from "./forge-adapter.ts"
+import { type CliRunner, FORGE_TIMEOUT_MS, MERGE_METHODS, type MergeMethod } from "./forge-adapter.ts"
 
 /** The default wait for the queue to merge an entry, in seconds. */
 export const DEFAULT_QUEUE_WAIT_SECONDS = 600
@@ -34,7 +34,12 @@ const ABSENCES_BEFORE_REMOVED = 2
 /** The page size of the rules read; a full page may hide a rule, so it is not trusted. */
 const RULES_PAGE = 100
 
-const QUEUE_METHODS: Readonly<Record<string, MergeMethod>> = { MERGE: "merge", SQUASH: "squash", REBASE: "rebase" }
+/** A Map, not an object: a payload's `"constructor"` must never resolve through a prototype. */
+const QUEUE_METHODS: ReadonlyMap<string, MergeMethod> = new Map<string, MergeMethod>([
+  ["MERGE", "merge"],
+  ["SQUASH", "squash"],
+  ["REBASE", "rebase"],
+])
 
 /** An own, enumerable data property; a forge payload is untrusted, so no prototype read. */
 function own(holder: unknown, key: string): unknown {
@@ -77,7 +82,7 @@ export function queueRuleFrom(payload: unknown): QueueRule | { reason: string } 
   const queue = payload.find((rule) => text(rule, "type") === "merge_queue")
   if (queue === undefined) return { required: false }
   const raw = text(own(queue, "parameters"), "merge_method")
-  const method = QUEUE_METHODS[raw ?? ""]
+  const method = raw === null ? undefined : QUEUE_METHODS.get(raw)
   if (method === undefined) {
     return {
       reason: `rules: observed merge_queue merge_method ${JSON.stringify(raw)}, expected MERGE, SQUASH or REBASE`,
@@ -86,12 +91,74 @@ export function queueRuleFrom(payload: unknown): QueueRule | { reason: string } 
   return { required: true, method }
 }
 
+const NO_QUEUE_QUERY = `query($owner: String!, $name: String!, $branch: String!) { repository(owner: $owner, name: $name) { nameWithOwner mergeQueue(branch: $branch) { id } } }`
+
+/** The argv that asks GraphQL for the merge queue of `branch`; the answer is null when it has none. */
+export function mergeQueueArgv(repoPath: string, branch: string): string[] {
+  const [owner = "", name = ""] = repoPath.split("/")
+  return ["gh", "api", "graphql", "-f", `query=${NO_QUEUE_QUERY}`, "-f", `owner=${owner}`, "-f", `name=${name}`, "-f", `branch=${branch}`]
+}
+
+/** The argv that lists the repository's rulesets, which proves the caller may read them. */
+export function rulesetsArgv(repoPath: string): string[] {
+  return ["gh", "api", `repos/${repoPath}/rulesets?per_page=${RULES_PAGE}`]
+}
+
+function succeeded(result: Awaited<ReturnType<CliRunner>>): boolean {
+  return result.ok && result.exitCode === 0 && result.error === undefined
+}
+
+/**
+ * Whether two rule-specific signals both say the branch has no merge queue, or why not.
+ *
+ * A 404 from the branch rules read does not say that: it is also what a caller without
+ * access sees, and a readable repository does not prove the absence of branch rules. So
+ * the repository's `mergeQueue(branch:)` must read back as an explicit null, and its
+ * rulesets list must be readable (the same permission the rules read needed); either
+ * failing refuses.
+ */
+async function noQueueConfirmed(
+  run: CliRunner,
+  repoPath: string,
+  branch: string,
+  env: Readonly<Record<string, string>>,
+): Promise<string | null> {
+  const graphql = mergeQueueArgv(repoPath, branch)
+  const queue = await run(graphql, { timeoutMs: FORGE_TIMEOUT_MS, env })
+  if (!succeeded(queue)) return `gh api graphql (mergeQueue of ${branch}) observed ${queue.error ?? `exit ${queue.exitCode}`}, expected exit 0`
+  let payload: unknown
+  try {
+    payload = JSON.parse(queue.stdout)
+  } catch {
+    return "gh api graphql (mergeQueue): observed unparseable output, expected one JSON object"
+  }
+  const errors = graphqlErrors(payload)
+  if (errors !== null) return errors
+  const repository = own(own(payload, "data"), "repository")
+  if (text(repository, "nameWithOwner")?.toLowerCase() !== repoPath.toLowerCase()) {
+    return `gh api graphql (mergeQueue): observed repository ${JSON.stringify(text(repository, "nameWithOwner"))}, expected ${JSON.stringify(repoPath)}`
+  }
+  const field = typeof repository === "object" && repository !== null ? Object.getOwnPropertyDescriptor(repository, "mergeQueue") : undefined
+  if (field === undefined || !("value" in field) || field.value !== null) {
+    return "gh api graphql (mergeQueue): observed a merge queue or no mergeQueue field, expected an explicit null"
+  }
+  const rulesets = rulesetsArgv(repoPath)
+  const listed = await run(rulesets, { timeoutMs: FORGE_TIMEOUT_MS, env })
+  if (!succeeded(listed)) return `${rulesets.join(" ")}: observed ${listed.error ?? `exit ${listed.exitCode}`}, expected a readable rulesets list`
+  try {
+    if (!Array.isArray(JSON.parse(listed.stdout))) return `${rulesets.join(" ")}: observed a payload that is not an array`
+  } catch {
+    return `${rulesets.join(" ")}: observed unparseable output, expected a JSON array`
+  }
+  return null
+}
+
 /**
  * Read the branch's active rules and say whether it requires a merge queue.
  *
  * GitHub answers `200 []` for a branch with no rules. A 404 is ambiguous (no access, or no
- * such repository), so it counts as "no queue rule" only when the repository itself reads
- * back; every other failure refuses.
+ * such repository), so it counts as "no queue rule" only when {@link noQueueConfirmed} finds
+ * a second, rule-specific signal; every other failure refuses.
  */
 export async function readQueueRule(
   run: CliRunner,
@@ -104,13 +171,12 @@ export async function readQueueRule(
   if (!result.ok || result.exitCode !== 0 || result.error !== undefined) {
     const detail = `${argv.join(" ")}: observed ${result.error ?? `exit ${result.exitCode}`}, expected exit 0 to learn whether the branch requires a merge queue; ${result.stderr.trim().slice(0, 300)}`
     if (result.error === undefined && /\b404\b|not found/i.test(result.stderr)) {
-      const probe = ["gh", "api", `repos/${repoPath}`, "--jq", ".full_name"]
-      const repo = await run(probe, { timeoutMs: FORGE_TIMEOUT_MS, env })
-      const confirmed =
-        repo.ok && repo.exitCode === 0 && repo.error === undefined && repo.stdout.trim().toLowerCase() === repoPath.toLowerCase()
-      return confirmed
+      const unconfirmed = await noQueueConfirmed(run, repoPath, branch, env)
+      return unconfirmed === null
         ? { required: false }
-        : { reason: `${detail}; ${probe.join(" ")} did not confirm repository access either` }
+        : {
+            reason: `${detail}; the 404 is not taken as "no merge queue" because ${unconfirmed}. Check that the gh token may read branch rules (repository administration read access), or land through the GitHub UI`,
+          }
     }
     return { reason: detail }
   }
@@ -218,13 +284,14 @@ export function parseSnapshot(payload: unknown): QueueSnapshot | { reason: strin
 /**
  * Whether the snapshot describes the pull request that was authorized.
  *
- * The node id the enqueue mutation takes is opaque, so it is trusted only through what is
- * read beside it: the repository, number and base must equal the independent read the
- * landing was authorized from. The head is judged by {@link decideQueue}.
+ * The node id the enqueue mutation takes is opaque, and a forged response could pair a
+ * foreign id with the right labels. So the id must equal the one the independent
+ * `pr view` read (the read the landing was authorized from) named, and the repository,
+ * number and base must equal that read too. The head is judged by {@link decideQueue}.
  */
 export function bindingFailure(
   snapshot: QueueSnapshot,
-  expected: { repository: string; number: number; baseRefName: string },
+  expected: { repository: string; number: number; baseRefName: string; id: string },
 ): string | null {
   if (snapshot.repository.toLowerCase() !== expected.repository.toLowerCase()) {
     return `graphql: observed repository ${JSON.stringify(snapshot.repository)}, expected ${JSON.stringify(expected.repository)}`
@@ -234,6 +301,9 @@ export function bindingFailure(
   }
   if (snapshot.baseRefName !== expected.baseRefName) {
     return `graphql: observed baseRefName ${JSON.stringify(snapshot.baseRefName)}, expected ${JSON.stringify(expected.baseRefName)}; the pull request was re-targeted or the read is for another pull request`
+  }
+  if (snapshot.id !== expected.id) {
+    return `graphql: observed pull request node id ${JSON.stringify(snapshot.id)}, expected ${JSON.stringify(expected.id)} from the independent pr view read; the enqueue would act on another pull request`
   }
   return null
 }
@@ -314,14 +384,16 @@ export async function readSnapshot(
 export type QueueWait =
   | { kind: "merged" }
   | { kind: "pending"; detail: string }
-  | { kind: "refused"; reason: string }
+  | { kind: "refused"; reason: string; terminal: boolean }
 
 /**
  * Poll until the queue merges the pull request, removes it, or the budget is spent.
  *
  * The budget is the sum of the delays slept, so it is deterministic and a test needs no
  * clock. Out of budget is `pending`, not a failure: the entry is still queued and a later
- * call resumes the wait. `absent` carries over a poll already made by the caller.
+ * call resumes the wait. `absent` carries over a poll already made by the caller. A refusal
+ * is `terminal` only when a read confirmed the end (closed, head changed, entry removed); a
+ * failed read is not, so the caller keeps its record of the enqueue.
  */
 export async function awaitQueue(options: {
   read: () => Promise<QueueRead>
@@ -335,9 +407,11 @@ export async function awaitQueue(options: {
   let spent = 0
   for (let attempt = 0; ; attempt++) {
     const observed = await options.read()
-    if ("reason" in observed) return { kind: "refused", reason: observed.reason }
+    // A failed read observed nothing: the entry may still be queued, so it is not terminal.
+    if ("reason" in observed) return { kind: "refused", reason: observed.reason, terminal: false }
     const decision = decideQueue(observed.snapshot, options.expected, absent)
-    if (decision.kind !== "wait") return decision
+    if (decision.kind === "merged") return decision
+    if (decision.kind === "refused") return { ...decision, terminal: true }
     absent = decision.absent
     const delay = pollDelayMs(attempt)
     if (options.stopped() || spent + delay > options.budgetMs) return { kind: "pending", detail: decision.detail }
@@ -375,25 +449,45 @@ export function branchContains(status: string): boolean {
  * and since removed", and would enqueue again over a removal someone made on purpose. It lives
  * beside the receipts under a name the receipt scan ignores.
  */
-export type PendingRecord = { schema: 1; repository: string; number: number; head: string; enqueuedAt: string }
+export type PendingRecord = {
+  schema: 1
+  repository: string
+  number: number
+  head: string
+  /** The merge method the queue lands with, so a resume after the merge can pick the queue-aware proof. */
+  method: MergeMethod
+  enqueuedAt: string
+}
 
 export function pendingPath(directory: string, number: number, head: string): string {
   return join(directory, `pending-queue-${number}-${head.slice(0, 12)}.json`)
 }
 
-export function hasPending(directory: string, repository: string, number: number, head: string): boolean {
+/** The record of an earlier enqueue of this pull request at this head, or null when none matches. */
+export function readPending(directory: string, repository: string, number: number, head: string): PendingRecord | null {
   const path = pendingPath(directory, number, head)
-  if (!existsSync(path)) return false
+  if (!existsSync(path)) return null
   try {
     const record: unknown = JSON.parse(readFileSync(path, "utf8"))
-    return (
-      text(record, "repository")?.toLowerCase() === repository.toLowerCase() &&
-      own(record, "number") === number &&
-      text(record, "head") === head
-    )
+    const raw = text(record, "method")
+    const method = raw === null ? undefined : MERGE_METHODS.find((known) => known === raw)
+    const holder = text(record, "repository")
+    if (
+      holder?.toLowerCase() !== repository.toLowerCase() ||
+      own(record, "number") !== number ||
+      text(record, "head") !== head ||
+      method === undefined
+    ) {
+      return null
+    }
+    return { schema: 1, repository: holder, number, head, method, enqueuedAt: text(record, "enqueuedAt") ?? "" }
   } catch {
-    return false
+    return null
   }
+}
+
+export function hasPending(directory: string, repository: string, number: number, head: string): boolean {
+  return readPending(directory, repository, number, head) !== null
 }
 
 export function writePending(directory: string, record: Omit<PendingRecord, "schema">): void {

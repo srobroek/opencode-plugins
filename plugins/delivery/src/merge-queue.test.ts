@@ -1,7 +1,12 @@
 import { describe, expect, test } from "bun:test"
+import { mkdtempSync, readdirSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import {
+  awaitQueue,
   bindingFailure,
   branchContains,
+  clearPending,
   decideQueue,
   parseSnapshot,
   pollDelayMs,
@@ -9,7 +14,9 @@ import {
   type QueueSnapshot,
   queueBudgetMs,
   queueRuleFrom,
+  readPending,
   rulesArgv,
+  writePending,
 } from "./merge-queue.ts"
 
 const HEAD = "0123456789abcdef0123456789abcdef01234567"
@@ -43,6 +50,10 @@ describe("queueRuleFrom", () => {
     ["a queue rule with no method", [{ type: "merge_queue", parameters: {} }]],
     ["a string element", ["merge_queue"]],
     ["a null element", [null]],
+    ["an inherited property name as the method", [{ type: "merge_queue", parameters: { merge_method: "constructor" } }]],
+    ["a prototype key as the method", [{ type: "merge_queue", parameters: { merge_method: "__proto__" } }]],
+    ["a lower-case method", [{ type: "merge_queue", parameters: { merge_method: "squash" } }]],
+    ["a non-string method", [{ type: "merge_queue", parameters: { merge_method: 7 } }]],
     ["a malformed element beside a queue rule", [{ type: "merge_queue", parameters: { merge_method: "SQUASH" } }, 5]],
     ["a full page of rules", Array.from({ length: 100 }, () => ({ type: "creation" }))],
   ])("refuses %s rather than assume a direct merge", (_name, payload) => {
@@ -86,7 +97,7 @@ describe("decideQueue", () => {
 })
 
 describe("bindingFailure", () => {
-  const expected = { repository: "O/R", number: 7, baseRefName: "main" }
+  const expected = { repository: "O/R", number: 7, baseRefName: "main", id: "PR_1" }
 
   test("accepts the authorized repository (case-insensitive), number and base", () => {
     expect(bindingFailure(snapshot(), expected)).toBeNull()
@@ -96,6 +107,7 @@ describe("bindingFailure", () => {
     ["repository", { repository: "evil/r" }],
     ["number", { number: 8 }],
     ["base", { baseRefName: "release" }],
+    ["node id, with every label correct", { id: "PR_forged" }],
   ])("refuses a different %s", (_name, overrides) => {
     expect(bindingFailure(snapshot(overrides), expected)).toContain("graphql: observed")
   })
@@ -153,4 +165,60 @@ test("parseSnapshot reads the entry and refuses a payload with errors", () => {
     entry: { state: "QUEUED", position: 3 },
   })
   expect(parseSnapshot({ errors: [{ message: "x" }] })).toHaveProperty("reason")
+})
+
+describe("awaitQueue", () => {
+  const run = (reads: Array<{ snapshot: QueueSnapshot } | { reason: string }>) => {
+    const queue = [...reads]
+    return awaitQueue({
+      read: async () => queue.shift() ?? { reason: "no more reads" },
+      sleep: async () => {},
+      stopped: () => false,
+      expected: HEAD,
+      budgetMs: 600_000,
+    })
+  }
+
+  test("a failed read refuses without being terminal, so the enqueue record survives", async () => {
+    expect(await run([{ reason: "gh: exit 1" }])).toEqual({ kind: "refused", reason: "gh: exit 1", terminal: false })
+  })
+
+  test("a removed entry, a closed pull request and a moved head are terminal refusals", async () => {
+    for (const observed of [snapshot({ state: "CLOSED" }), snapshot({ headRefOid: OTHER })]) {
+      expect(await run([{ snapshot: observed }])).toMatchObject({ kind: "refused", terminal: true })
+    }
+    expect(await run([{ snapshot: snapshot() }, { snapshot: snapshot() }])).toMatchObject({
+      kind: "refused",
+      terminal: true,
+    })
+  })
+})
+
+describe("pending record", () => {
+  const record = { repository: "O/R", number: 7, head: HEAD, method: "merge", enqueuedAt: "2026-01-01T00:00:00Z" } as const
+  const withDirectory = (check: (directory: string) => void): void => {
+    const directory = mkdtempSync(join(tmpdir(), "pending-queue-"))
+    try {
+      check(directory)
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
+  }
+
+  test("round-trips the repository, number, head and merge method", () => {
+    withDirectory((directory) => {
+      writePending(directory, record)
+      expect(readPending(directory, "o/r", 7, HEAD)).toMatchObject({ number: 7, head: HEAD, method: "merge" })
+      expect(readPending(directory, "other/r", 7, HEAD)).toBeNull()
+      clearPending(directory, 7, HEAD)
+      expect(readdirSync(directory)).toEqual([])
+    })
+  })
+
+  test("a record whose method is not a merge method reads as absent", () => {
+    withDirectory((directory) => {
+      writePending(directory, { ...record, method: "constructor" as never })
+      expect(readPending(directory, "o/r", 7, HEAD)).toBeNull()
+    })
+  })
 })

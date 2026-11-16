@@ -950,6 +950,17 @@ function lsRemoteArgv(remote: string, ref: string): string[] {
   ]
 }
 
+/**
+ * The `ls-remote` that names the commit a remote's base branch points at, or null when an
+ * operand is not one this module will put on a command line. It reads one ref and writes
+ * nothing; the caller fetches the printed id by id and compares exact ids, so no ref or
+ * `FETCH_HEAD` is ever trusted.
+ */
+export function remoteBranchTipArgv(remote: string, branch: string): string[] | null {
+  if (!REMOTE_NAME.test(remote) || !isSafeArgument(remote) || !isValidBranchName(branch)) return null
+  return lsRemoteArgv(remote, `refs/heads/${branch}`)
+}
+
 /** Wall-clock ceiling for one fetch of landed commits: it moves objects, not one ref line. */
 export const FETCH_TIMEOUT_MS = 30_000
 
