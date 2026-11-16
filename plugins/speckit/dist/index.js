@@ -166,6 +166,81 @@ function locationDirectories(ctx) {
   return directories;
 }
 
+// plugins/lib/src/mode-reminders.ts
+var wrap = (text) => `<system-reminder>
+${text}
+</system-reminder>`;
+function defineMode(spec) {
+  const enter = wrap([
+    `You are in ${spec.name} mode: ${spec.purpose}`,
+    `You may edit files only in: ${spec.allowed}. Do not modify any other files or ask a subagent to.`,
+    `You remain in ${spec.name} mode until the user switches agents. If the user asks for work outside it, do not do it; tell them to ${spec.redirect}.`
+  ].join(`
+
+`));
+  const leave = wrap(`You are NO LONGER in ${spec.name} mode. The previous ${spec.name} restrictions no longer apply. Any ${spec.name} mode instructions from earlier in this conversation are no longer active.`);
+  return { id: spec.id, name: spec.name, enter, leave, allowed: spec.allowed };
+}
+var enterReminder = (mode) => mode.enter;
+var leaveReminder = (mode) => mode.leave;
+function reminderFor(previous, next, modes) {
+  if (previous === next)
+    return [];
+  const left = modes.find((mode) => mode.id === previous);
+  const entered = modes.find((mode) => mode.id === next);
+  return [...left ? [leaveReminder(left)] : [], ...entered ? [enterReminder(entered)] : []];
+}
+function soleText(message) {
+  const { role, content } = message;
+  if (role !== "user" || !Array.isArray(content) || content.length !== 1)
+    return;
+  const part = content[0];
+  return part.type === "text" && typeof part.text === "string" ? part.text : undefined;
+}
+function missingReminders(agent, messages, modes) {
+  const known = new Set(modes.flatMap((mode) => [mode.enter, mode.leave]));
+  const last = messages.map(soleText).findLast((text) => text !== undefined && known.has(text));
+  const current = modes.find((mode) => mode.id === agent);
+  const active = modes.find((mode) => mode.enter === last);
+  if (active === current)
+    return [];
+  return [...active ? [leaveReminder(active)] : [], ...current ? [enterReminder(current)] : []];
+}
+async function registerModeReminders(ctx, modes, options = {}) {
+  const controller = new AbortController;
+  const report = options.onError ?? (() => {});
+  const synthetic = (sessionID, text) => ctx.session.synthetic({ sessionID, text, resume: false }).catch(report);
+  const hook = await ctx.session.hook("context", async (event) => {
+    const missing = missingReminders(event.agent, event.messages, modes);
+    if (missing.length === 0)
+      return;
+    const at = event.messages.at(-1)?.role === "user" ? event.messages.length - 1 : event.messages.length;
+    event.messages.splice(at, 0, ...missing.map((text) => ({ role: "user", content: [{ type: "text", text }] })));
+    for (const text of missing)
+      await synthetic(event.sessionID, text);
+  });
+  (async () => {
+    for await (const raw of ctx.event.subscribe({
+      types: ["session.created", "session.agent.selected"],
+      signal: controller.signal
+    })) {
+      if (controller.signal.aborted)
+        break;
+      const event = raw;
+      const data = event.data;
+      if (typeof data?.sessionID !== "string" || typeof data.agent !== "string")
+        continue;
+      const previous = event.type === "session.created" ? undefined : data.previous;
+      for (const text of reminderFor(previous, data.agent, modes))
+        await synthetic(data.sessionID, text);
+    }
+  })().catch(report);
+  return async () => {
+    controller.abort();
+    await hook.dispose();
+  };
+}
+
 // plugins/lib/src/skill-files.ts
 import { existsSync as existsSync2, readdirSync as readdirSync2, readFileSync as readFileSync2 } from "fs";
 import { join as join2 } from "path";
@@ -1768,6 +1843,13 @@ function workflowLatch(detect = usesSpeckit, store) {
 
 // plugins/speckit/src/spec-agent.ts
 var SPEC_AGENT = "spec";
+var SPEC_MODE = defineMode({
+  id: SPEC_AGENT,
+  name: "Spec",
+  purpose: "you drive SpecKit artifacts under `specs/` and `.specify/` and never implement.",
+  allowed: "`specs/` and `.specify/`",
+  redirect: "switch to `build` or dispatch the task beads"
+});
 function specAgentSetting(raw) {
   return typeof raw === "boolean" ? raw : "auto";
 }
@@ -2998,11 +3080,14 @@ async function setupSpeckit(ctx, overrides = {}) {
   let refreshSkills;
   const agentFiles = agentPaths(AGENTS_DIR);
   let specRegistration;
+  let reminders;
   const registerSpecAgent = async () => {
     if (specRegistration !== undefined || !wantsSpecAgent(options.specAgent, locations))
       return;
     specRegistration = registerAgents(ctx.agent, agentFiles.filter(isSpecAgent));
     await specRegistration;
+    reminders = registerModeReminders(ctx, [SPEC_MODE]);
+    await reminders;
   };
   const workflow = options.workflow ? {
     text: readFileSync6(WORKFLOW_PATH, "utf8").trim(),
@@ -3168,6 +3253,9 @@ ${workflow.text}` };
         return;
       });
       await registration?.dispose();
+      await (await reminders?.catch(() => {
+        return;
+      }))?.();
     });
     await registerSpecAgent();
   } catch (error) {
@@ -3190,6 +3278,7 @@ export {
   IMPLEMENT_REDIRECT,
   SKILLS_DIR,
   SPEC_AGENT,
+  SPEC_MODE,
   TASKSTOISSUES_REFUSAL,
   WORKFLOW_PATH,
   artifactPath,

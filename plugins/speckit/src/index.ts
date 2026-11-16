@@ -5,13 +5,14 @@ import type { Context } from "@opencode/plugin/promise/plugin"
 import type { ToolContext } from "@opencode/plugin/promise/tool"
 import { agentPaths, registerAgents } from "@srobroek/opencode-lib/agent-files"
 import { locationDirectories } from "@srobroek/opencode-lib/mcp"
+import { registerModeReminders } from "@srobroek/opencode-lib/mode-reminders"
 import { registerSkills, skillPaths } from "@srobroek/opencode-lib/skill-files"
 import { isShellTool, WRITE_TOOLS } from "@srobroek/opencode-lib/tool-targets"
 import { beadsActive } from "./beads.ts"
 import { COMMIT_DESCRIPTION, COMMIT_INPUT, COMMIT_TOOL, executeCommit } from "./commit.ts"
 import { DEFAULT_INTEGRATION } from "./setup.ts"
 import { rewriteSkill, type SkillLike, type SkillRouting, skillRefusal, staleSkills } from "./skills.ts"
-import { isSpecAgent, type SpecAgentSetting, specAgentSetting, wantsSpecAgent } from "./spec-agent.ts"
+import { isSpecAgent, SPEC_MODE, type SpecAgentSetting, specAgentSetting, wantsSpecAgent } from "./spec-agent.ts"
 import { type BeadsProbe, decideToolCall } from "./tasks-guard.ts"
 import {
   executeSetup,
@@ -31,7 +32,7 @@ export { beadsActive } from "./beads.ts"
 export { artifactPath, executeCommit, outsideArtifacts } from "./commit.ts"
 export { installFormulas, runSetup } from "./setup.ts"
 export { ANALYZE_REDIRECT, IMPLEMENT_REDIRECT, rewriteSkill, skillRefusal, TASKSTOISSUES_REFUSAL } from "./skills.ts"
-export { SPEC_AGENT, wantsSpecAgent } from "./spec-agent.ts"
+export { SPEC_AGENT, SPEC_MODE, wantsSpecAgent } from "./spec-agent.ts"
 export { startSpec } from "./spec-start.ts"
 export { runSpecStart } from "./spec-start-runtime.ts"
 export { DENY_REASON, decideToolCall, isTasksMd, writesTasksMd } from "./tasks-guard.ts"
@@ -126,11 +127,14 @@ export async function setupSpeckit(ctx: Context, overrides: Overrides = {}): Pro
   let refreshSkills: (() => Promise<void>) | undefined
   const agentFiles = agentPaths(AGENTS_DIR)
   let specRegistration: Promise<{ dispose: () => Promise<void> }> | undefined
+  let reminders: Promise<() => Promise<void>> | undefined
   // The location's plugin instance registers the agent, so a project without SpecKit never lists it.
   const registerSpecAgent = async () => {
     if (specRegistration !== undefined || !wantsSpecAgent(options.specAgent, locations)) return
     specRegistration = registerAgents(ctx.agent, agentFiles.filter(isSpecAgent))
     await specRegistration
+    reminders = registerModeReminders(ctx, [SPEC_MODE])
+    await reminders
   }
   const workflow = options.workflow
     ? {
@@ -298,6 +302,7 @@ export async function setupSpeckit(ctx: Context, overrides: Overrides = {}): Pro
     disposers.push(async () => {
       const registration = await specRegistration?.catch(() => undefined)
       await registration?.dispose()
+      await (await reminders?.catch(() => undefined))?.()
     })
     await registerSpecAgent()
   } catch (error) {
