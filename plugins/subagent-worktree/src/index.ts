@@ -53,6 +53,7 @@ import {
   worktreeName,
   writerRefusal,
 } from "./lane.ts"
+import { createLifecycle, toMillis } from "./lifecycle.ts"
 
 export * from "./git.ts"
 export * from "./lane.ts"
@@ -63,8 +64,22 @@ export const MERGE_DESCRIPTION =
   'method "wt-merge" runs `wt merge <target> --no-squash --no-ff --yes` from the subagent worktree, keeping its commits, ' +
   "and removes the worktree on success; a conflict keeps the worktree and reports the output. " +
   "The worktree must be committed and clean, and the target checkout must have no uncommitted or untracked changes to files the lane changes. " +
-  'method "none" only reports the lane status. method "list" (no sessionID) reports every active lane in the project ' +
+  'method "keep" (with reason) records that an unmerged lane is kept on purpose, so the idle gate stops nudging about it. method "none" only reports the lane status. method "list" (no sessionID) reports every active lane in the project ' +
   "with commits ahead, uncommitted changes, and orphaned lanes; missing worktrees move their child sessions back."
+
+export const SWEEP_TOOL = "subagent_worktree_sweep"
+
+export const SWEEP_DESCRIPTION =
+  "Plan or prune landed, clean, abandoned agent worktrees; dirty or unlanded ones are only reported.\n" +
+  'Each worktree under OpenCode\'s worktree directory (and lane records) gets keep, prune, prune-registry or quarantine with a reason. ' +
+  'A worktree is pruned only when it landed (ancestor of origin/main, a merged PR at its tip, or wt integrated), is clean, has no live session, ' +
+  'and is older than minAgeHours. Removal is never forced and no remote branch is touched. Mode "report" (default) changes nothing.'
+
+export const SWEEP_INPUT = {
+  type: "object",
+  additionalProperties: false,
+  properties: { mode: { type: "string", enum: ["report", "prune"] } },
+} as const
 
 export const MERGE_INPUT = {
   type: "object",
@@ -75,12 +90,13 @@ export const MERGE_INPUT = {
       type: "string",
       description: 'From the subagent tool result; required unless method is "list"',
     },
-    method: { type: "string", enum: ["wt-merge", "none", "list"] },
+    method: { type: "string", enum: ["wt-merge", "none", "list", "keep"] },
     target: { type: "string", description: "Defaults to the lane's base branch" },
+    reason: { type: "string", description: 'Why the lane is kept; used by method "keep"' },
   },
 } as const
 
-type MergeInput = { sessionID?: string; method: "wt-merge" | "none" | "list"; target?: string }
+type MergeInput = { sessionID?: string; method: "wt-merge" | "none" | "list" | "keep"; target?: string; reason?: string }
 
 type Session = {
   id: string
@@ -102,6 +118,9 @@ export type Overrides = {
   directoryExists?: (path: string) => Promise<boolean>
   now?: () => number
   reserveMs?: number
+  debounceMs?: number
+  sweepDelayMs?: number
+  age?: (directory: string) => Promise<number | undefined>
 }
 
 const directoryExists = async (path: string) => {
@@ -112,17 +131,6 @@ const directoryExists = async (path: string) => {
 }
 
 const TIMED_OUT = Symbol("timed out")
-
-/** Epoch milliseconds from a number, Date or date string; undefined otherwise. */
-function toMillis(value: unknown): number | undefined {
-  if (typeof value === "number") return value
-  if (value instanceof Date) return value.getTime()
-  if (typeof value === "string") {
-    const parsed = Date.parse(value)
-    return Number.isNaN(parsed) ? undefined : parsed
-  }
-  return undefined
-}
 
 const randomSuffix = () => crypto.randomUUID().slice(0, 6)
 
@@ -148,6 +156,9 @@ export function createLanes(
   exists = directoryExists,
   now: () => number = Date.now,
   reserveMs = RESERVATION_MS,
+  debounceMs?: number,
+  sweepDelayMs?: number,
+  age?: (directory: string) => Promise<number | undefined>,
 ) {
   const load = async (child: string) => parseLane(await ctx.storage.get(laneKey(child)))
   const save = (lane: Lane) => ctx.storage.set(laneKey(lane.child), lane)
@@ -340,6 +351,7 @@ export function createLanes(
     if (!input) return
     event.input = withoutWorktree(event.input)
     if (input.sessionID !== undefined) {
+      await markResumed(input.sessionID)
       const note = resumeWorktreeNote(input)
       if (note) {
         notes.set(event.id, note)
@@ -505,7 +517,14 @@ export function createLanes(
     await ctx.session.move({ sessionID: lane.child, directory } as never)
   }
 
-  const retire = async (lane: Lane, state: "removed" | "merged") => {
+  /** A `subagent` call targeted this child: record it, so its lane is not removed from under a follow-up. */
+  const markResumed = async (child: string) => {
+    const lane = await load(child)
+    if (lane?.state !== "active") return
+    await save({ ...lane, resumedAt: now(), quietSince: undefined })
+  }
+
+  const retire = async (lane: Lane, state: "removed" | "merged" | "landed") => {
     const next: Lane = { ...lane, state }
     await save(next)
     return next
@@ -674,6 +693,23 @@ export function createLanes(
       return { content: `${MERGE_TOOL}: sessionID is required for method "${input.method}"`, metadata: { ok: false } }
     }
     let lane = await load(input.sessionID)
+    if (input.method === "keep") {
+      await ctx.permission.assert({
+        sessionID: tool.sessionID,
+        agent: tool.agent,
+        action: MERGE_TOOL,
+        resources: [lane?.branch ?? input.sessionID],
+        source: { type: "tool", messageID: tool.messageID, id: tool.id },
+      } as never)
+      if (!lane || lane.state !== "active" || lane.parent !== tool.sessionID) {
+        return { content: `${MERGE_TOOL}: no active lane of yours for session ${input.sessionID}`, metadata: { ok: false } }
+      }
+      const kept = await lifecycle.keep(lane.child, input.reason?.trim() || "kept on purpose")
+      return {
+        content: `${MERGE_TOOL}: keeping ${lane.branch} (${kept?.kept?.reason ?? "kept on purpose"}); no more nudges until it changes.`,
+        metadata: { ok: kept !== undefined, lane: kept },
+      }
+    }
     await ctx.permission.assert({
       sessionID: tool.sessionID,
       agent: tool.agent,
@@ -739,7 +775,25 @@ export function createLanes(
     }
   }
 
-  return { before, after, merge, load }
+  const lifecycle = createLifecycle({
+    ctx,
+    options,
+    git,
+    now,
+    exists,
+    lookupMs,
+    load,
+    save,
+    scan,
+    getSession,
+    moveHome,
+    removeWorktree,
+    ...(debounceMs === undefined ? {} : { debounceMs }),
+    ...(sweepDelayMs === undefined ? {} : { sweepDelayMs }),
+    ...(age === undefined ? {} : { age }),
+  })
+
+  return { before, after, merge, load, lifecycle }
 }
 
 export function createPlugin(overrides: Overrides = {}) {
@@ -748,7 +802,7 @@ export function createPlugin(overrides: Overrides = {}) {
     async setup(ctx) {
       const options = readOptions(ctx.options)
       const git = createGit(overrides.run ?? spawnRunner)
-      const lanes = createLanes(ctx, options, git, overrides.suffix ?? randomSuffix, overrides.lookupMs, overrides.directoryExists, overrides.now, overrides.reserveMs)
+      const lanes = createLanes(ctx, options, git, overrides.suffix ?? randomSuffix, overrides.lookupMs, overrides.directoryExists, overrides.now, overrides.reserveMs, overrides.debounceMs, overrides.sweepDelayMs, overrides.age)
       const registrations: { dispose: () => Promise<void> }[] = []
       const cleanup = async () => {
         for (const registration of registrations.reverse()) await registration.dispose()
@@ -756,6 +810,10 @@ export function createPlugin(overrides: Overrides = {}) {
       try {
         registrations.push(await ctx.tool.hook("execute.before", lanes.before))
         registrations.push(await ctx.tool.hook("execute.after", lanes.after as never))
+        registrations.push(await ctx.tool.hook("execute.before", lanes.lifecycle.holdLanes as never))
+        registrations.push(await ctx.tool.hook("execute.after", lanes.lifecycle.onLanding as never))
+        registrations.push({ dispose: lanes.lifecycle.dispose })
+        await lanes.lifecycle.start()
         registrations.push(
           await ctx.tool.transform((editor) => {
             editor.add({
@@ -763,6 +821,23 @@ export function createPlugin(overrides: Overrides = {}) {
               description: MERGE_DESCRIPTION,
               input: MERGE_INPUT,
               execute: async (raw, tool) => lanes.merge(raw as MergeInput, tool),
+            })
+            editor.add({
+              name: SWEEP_TOOL,
+              description: SWEEP_DESCRIPTION,
+              input: SWEEP_INPUT,
+              execute: async (raw, tool) => {
+                const mode = (raw as { mode?: string }).mode === "prune" ? "prune" : "report"
+                await ctx.permission.assert({
+                  sessionID: tool.sessionID,
+                  agent: tool.agent,
+                  action: SWEEP_TOOL,
+                  resources: [mode],
+                  source: { type: "tool", messageID: tool.messageID, id: tool.id },
+                } as never)
+                const { plan, text } = await lanes.lifecycle.sweep(mode)
+                return { content: text, metadata: { ok: true, mode, plan } }
+              },
             })
           }),
         )

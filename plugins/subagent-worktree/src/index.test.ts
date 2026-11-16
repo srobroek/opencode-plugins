@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { Error as ToolError } from "@opencode/plugin/promise/tool"
 import { createFakeContext, type FakeContext } from "@srobroek/opencode-lib/testing"
 import type { RunResult } from "./git.ts"
-import { createPlugin } from "./index.ts"
+import { createPlugin, SWEEP_TOOL } from "./index.ts"
 import { type Lane, laneKey, MERGE_TOOL, SUBAGENT_PREAMBLE, UNBORN_NOTE } from "./lane.ts"
 
 const BASE = "0123456789abcdef0123456789abcdef01234567"
@@ -199,8 +199,8 @@ const completed = (child: string, content = "<subagent>done</subagent>") => ({
 describe("setup", () => {
   test("registers the hooks and the merge tool, and cleans up", async () => {
     const { fake, cleanup } = await start()
-    expect(fake.hooks("tool")).toEqual(["execute.before", "execute.after"])
-    expect([...fake.tools.keys()]).toEqual([MERGE_TOOL])
+    expect(fake.hooks("tool")).toEqual(["execute.before", "execute.after", "execute.before", "execute.after"])
+    expect([...fake.tools.keys()]).toEqual([MERGE_TOOL, SWEEP_TOOL])
     await cleanup()
     expect(fake.active()).toBe(0)
     expect(fake.tools.size).toBe(0)
