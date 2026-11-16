@@ -6,7 +6,7 @@ agents and instructions for fanning work out to subagents.
 Ported from the omp-plugins `delivery` plugin (1.4.3 plus the land-fetch fix).
 `delivery_hygiene_report` and the `worktree-reaper` agent were not ported: use
 `wt list` for an inventory. A receipt for a branch whose worktree still exists
-means `delivery_cleanup` has not run yet.
+means `delivery_cleanup` has not run yet (or `delivery_land` could not finish it).
 
 ## Install
 
@@ -72,6 +72,14 @@ Inputs: `pr`, and when needed `merge_method` (`squash` by default, `merge`,
 - The tool never writes the Beads ledger. When the receipt's `beads.ledgerActive`
   is true, `next` lists the `bd update` / `bd close` commands to run, children
   first, before `delivery_cleanup`.
+- With the `autoCleanup` option (default true) and no active ledger, `delivery_land`
+  then runs the same cleanup in-process with the receipt it just wrote: the same
+  proofs, and a non-force removal through OpenCode's registry when it tracks the
+  worktree. The result gains `cleanup: { ok, reason?, removed?, localRefDeleted? }`.
+  A cleanup refusal never turns the landing into an error; `next` keeps
+  `delivery_cleanup` until cleanup finishes. With an active ledger cleanup is not
+  attempted (`cleanup.skipped`), because it proves the beads are closed and those
+  closes come first. `autoCleanup: false` keeps the two-call flow.
 - If the forge accepted the merge but a later step refused, the result has
   `mergeIssued: true` and no receipt. Run the tool again with the same inputs: it
   sees the PR as MERGED, merges nothing, and writes the receipt.
@@ -271,6 +279,7 @@ This agent denies `execute`, so OpenCode lists its allowed MCP tools directly, e
     "package": "github:srobroek/opencode-plugins::path:plugins/delivery",
     "options": {
       "confirm": true,              // prompt for every land and cleanup
+      "autoCleanup": true,          // delivery_land runs cleanup itself
       "receiptsDirectory": null,    // default $DELIVERY_RECEIPTS_DIR, then ~/.omp/receipts
       "agents": true,               // register the delivery agents
       "models": { "operator": false },

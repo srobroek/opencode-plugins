@@ -67,6 +67,7 @@ describe("setup", () => {
       models: {},
       fanOut: true,
       verdicts: true,
+      autoCleanup: true,
     })
     expect(parseOptions({ models: { implementer: "a/b#high", operator: false, bad: 1 } }).models).toEqual({
       implementer: "a/b#high",

@@ -16,6 +16,13 @@ import {
   loadAgents,
   shapeAgent,
 } from "./agents.ts"
+import {
+  type CleanupReport,
+  inlineCleanupDecision,
+  nextAfterCleanup,
+  runInlineCleanup,
+  textAfterCleanup,
+} from "./auto-cleanup.ts"
 import { type CleanupResult, cleanupDelivery, type DeliveryCleanupParams, type HostWorktrees } from "./cleanup.ts"
 import { MERGE_METHODS } from "./forge-adapter.ts"
 import { type LandOutcome, type LandParams, landPullRequest } from "./land.ts"
@@ -57,6 +64,8 @@ export type DeliveryOptions = {
   fanOut: boolean
   /** Parse delivery-agent verdicts into subagent result metadata. Default true. */
   verdicts: boolean
+  /** Run the cleanup in-process after a successful land. Default true. */
+  autoCleanup: boolean
 }
 
 /** `plugin.list` during setup must not hold up startup; a slow answer counts as "not installed". */
@@ -88,6 +97,7 @@ export function parseOptions(raw: Record<string, unknown> | undefined): Delivery
     models,
     fanOut: options.fanOut !== false,
     verdicts: options.verdicts !== false,
+    autoCleanup: options.autoCleanup !== false,
   }
 }
 
@@ -149,6 +159,17 @@ const LAND_OUTPUT = {
     reason: { type: "string" },
     mergeIssued: { type: "boolean" },
     receipt: { type: "object" },
+    cleanup: {
+      type: "object",
+      properties: {
+        ok: { type: "boolean" },
+        reason: { type: "string" },
+        removed: { type: "string" },
+        localRefDeleted: { type: "boolean" },
+        skipped: { type: "boolean" },
+      },
+      required: ["ok"],
+    },
   },
   required: ["ok"],
 } as const
@@ -198,7 +219,7 @@ const CLEANUP_DESCRIPTION =
   "checks every receipt bead is closed with metadata.merge_sha equal to the merge (read-only bd show), refuses to remove the worktree it runs from, a dirty tree or unpushed commits, a receipt or worktree of another repository, " +
   "then removes the worktree (no force; through OpenCode when it tracks it, else git worktree remove) and runs git branch -d and verifies four absences."
 
-function landOutput(outcome: LandOutcome) {
+function landOutput(outcome: LandOutcome, cleanup?: CleanupReport) {
   if (!outcome.ok) {
     return {
       ok: false as const,
@@ -212,7 +233,8 @@ function landOutput(outcome: LandOutcome) {
     mergeSha: outcome.receipt.pr.mergeCommitOid ?? "",
     pr: outcome.receipt.pr.number,
     repo: outcome.receipt.repo.nameWithOwner,
-    next: [...outcome.next],
+    next: nextAfterCleanup(outcome.next, cleanup),
+    ...(cleanup === undefined ? {} : { cleanup }),
     receipt: outcome.receipt as Record<string, unknown>,
   }
 }
@@ -299,8 +321,28 @@ export async function setupDelivery(ctx: Context): Promise<() => Promise<void>> 
           signal: context.signal,
           authorize: (request) => ask(request.resource, { ...request }),
         })
-        const output = landOutput(outcome)
-        return { output, content: outcome.text, metadata: metadataOf(output) }
+        if (!outcome.ok) {
+          const output = landOutput(outcome)
+          return { output, content: outcome.text, metadata: metadataOf(output) }
+        }
+        const decision = inlineCleanupDecision(outcome.receipt, options.autoCleanup)
+        // A skipped run is reported only when the option is on; off keeps the old result.
+        const cleanup: CleanupReport | undefined = decision.run
+          ? await runInlineCleanup(() => {
+              const askCleanup = asserter(ctx, context, CLEANUP_ACTION)
+              return cleanupDelivery({ receipt: outcome.receiptPath }, directory, {
+                env: environment(options),
+                signal: context.signal,
+                authorize: (request) => askCleanup(request.worktree, { ...request }),
+                host: hostWorktrees(ctx),
+              })
+            })
+            : options.autoCleanup
+              ? { ok: false, skipped: true, reason: decision.reason }
+              : undefined
+        const output = landOutput(outcome, cleanup)
+        const content = cleanup === undefined ? outcome.text : textAfterCleanup(outcome.text, cleanup)
+        return { output, content, metadata: metadataOf(output) }
       },
     })
     editor.add({

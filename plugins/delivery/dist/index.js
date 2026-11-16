@@ -312,6 +312,49 @@ function loadAgents(ids = AGENT_IDS) {
   return ids.map((id) => parseAgentFile(id, readFileSync2(agentPath(id), "utf8")));
 }
 
+// plugins/delivery/src/auto-cleanup.ts
+function inlineCleanupDecision(receipt, enabled) {
+  if (!enabled)
+    return { run: false, reason: "autoCleanup is off" };
+  if (receipt.beads.ledgerActive) {
+    return {
+      run: false,
+      reason: "the Beads ledger is active: close the beads in next first, then delivery_cleanup can prove the closeout"
+    };
+  }
+  return { run: true };
+}
+function reportFromCleanup(result) {
+  if (!result.ok)
+    return { ok: false, reason: result.reason };
+  return { ok: true, removed: result.receipt.worktree.path ?? "", localRefDeleted: true };
+}
+async function runInlineCleanup(run) {
+  try {
+    return reportFromCleanup(await run());
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+  }
+}
+function nextAfterCleanup(next, report) {
+  return report?.ok === true ? next.filter((step) => step !== "delivery_cleanup") : [...next];
+}
+var NEXT_CLEANUP_LINE = "next: run delivery_cleanup to remove the worktree and the local branch.";
+function textAfterCleanup(text, report) {
+  if (report.skipped)
+    return text;
+  const lines = text.split(`
+`);
+  if (report.ok) {
+    const at = lines.indexOf(NEXT_CLEANUP_LINE);
+    const kept = at >= 0 ? lines.slice(0, at) : lines;
+    return [...kept, `cleanup: removed ${report.removed} and its local branch; nothing left to run.`].join(`
+`);
+  }
+  return [...lines, `cleanup: not finished (${report.reason}); the landing stands. Fix that and call delivery_cleanup.`].join(`
+`);
+}
+
 // plugins/delivery/src/cleanup.ts
 import { lstatSync as lstatSync3, realpathSync as realpathSync3 } from "fs";
 import { basename as basename2, dirname as dirname3, isAbsolute as isAbsolute2, resolve as resolve2, sep } from "path";
@@ -3741,7 +3784,8 @@ function parseOptions(raw) {
     agents: options.agents !== false,
     models,
     fanOut: options.fanOut !== false,
-    verdicts: options.verdicts !== false
+    verdicts: options.verdicts !== false,
+    autoCleanup: options.autoCleanup !== false
   };
 }
 function confirmDelivery(evaluation) {
@@ -3792,7 +3836,18 @@ var LAND_OUTPUT = {
     next: { type: "array", items: { type: "string" } },
     reason: { type: "string" },
     mergeIssued: { type: "boolean" },
-    receipt: { type: "object" }
+    receipt: { type: "object" },
+    cleanup: {
+      type: "object",
+      properties: {
+        ok: { type: "boolean" },
+        reason: { type: "string" },
+        removed: { type: "string" },
+        localRefDeleted: { type: "boolean" },
+        skipped: { type: "boolean" }
+      },
+      required: ["ok"]
+    }
   },
   required: ["ok"]
 };
@@ -3828,7 +3883,7 @@ var LAND_DESCRIPTION = `Merge a reviewed pull request at most once, prove it lan
 ` + "Refuses unless expectHeadSha names the PR head (required whenever the call would merge) " + "and, when worktree is given, it is a worktree of the session repository (never another repository's) whose HEAD is that head. With requireApproval/requireGreenChecks it also requires an approval artifact on the PR for that exact head " + "and green checks before merging. Merges at most once (an already MERGED request is proved, not re-merged) with merge_method (squash by default, PR title as subject), " + "binds the merge to the head, re-reads it, fetches the landed commits and checks the method's commit shape, observes the remote branch, then writes the receipt. " + "Writes no Beads ledger: when beads.ledgerActive, run the returned next steps child-before-parent, then delivery_cleanup. " + "A refusal with mergeIssued true means the PR is merged: re-run with the same pr and expectHeadSha to write the receipt.";
 var CLEANUP_DESCRIPTION = `Remove a landed PR's worktree and local branch after proving the landing receipt, and write a continuation receipt.
 ` + "Recomputes the ledger classification at the canonical root, proves the PR merged at the recorded head from the receipt's own remote, " + "checks every receipt bead is closed with metadata.merge_sha equal to the merge (read-only bd show), refuses to remove the worktree it runs from, a dirty tree or unpushed commits, a receipt or worktree of another repository, " + "then removes the worktree (no force; through OpenCode when it tracks it, else git worktree remove) and runs git branch -d and verifies four absences.";
-function landOutput(outcome) {
+function landOutput(outcome, cleanup) {
   if (!outcome.ok) {
     return {
       ok: false,
@@ -3842,7 +3897,8 @@ function landOutput(outcome) {
     mergeSha: outcome.receipt.pr.mergeCommitOid ?? "",
     pr: outcome.receipt.pr.number,
     repo: outcome.receipt.repo.nameWithOwner,
-    next: [...outcome.next],
+    next: nextAfterCleanup(outcome.next, cleanup),
+    ...cleanup === undefined ? {} : { cleanup },
     receipt: outcome.receipt
   };
 }
@@ -3917,8 +3973,23 @@ async function setupDelivery(ctx) {
           signal: context.signal,
           authorize: (request) => ask(request.resource, { ...request })
         });
-        const output = landOutput(outcome);
-        return { output, content: outcome.text, metadata: metadataOf(output) };
+        if (!outcome.ok) {
+          const output = landOutput(outcome);
+          return { output, content: outcome.text, metadata: metadataOf(output) };
+        }
+        const decision = inlineCleanupDecision(outcome.receipt, options.autoCleanup);
+        const cleanup = decision.run ? await runInlineCleanup(() => {
+          const askCleanup = asserter(ctx, context, CLEANUP_ACTION);
+          return cleanupDelivery({ receipt: outcome.receiptPath }, directory, {
+            env: environment(options),
+            signal: context.signal,
+            authorize: (request) => askCleanup(request.worktree, { ...request }),
+            host: hostWorktrees(ctx)
+          });
+        }) : options.autoCleanup ? { ok: false, skipped: true, reason: decision.reason } : undefined;
+        const output = landOutput(outcome, cleanup);
+        const content = cleanup === undefined ? outcome.text : textAfterCleanup(outcome.text, cleanup);
+        return { output, content, metadata: metadataOf(output) };
       }
     });
     editor.add({
