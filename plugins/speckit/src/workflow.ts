@@ -7,7 +7,7 @@
  */
 
 import { existsSync } from "node:fs"
-import { isAbsolute, join, relative } from "node:path"
+import { isAbsolute, join, relative, sep } from "node:path"
 
 /** Agents with their own SpecKit prompt; the workflow text would only repeat it. */
 export const OWN_PROMPT_AGENTS: readonly string[] = ["speckit-sync", "speckit-verify"]
@@ -30,7 +30,8 @@ export function speckitWorkspace(
   if (detect(directory)) return directory
   if (projectRoot === undefined || projectRoot === directory) return undefined
   const path = relative(projectRoot, directory)
-  const inside = path !== "" && !path.startsWith("..") && !isAbsolute(path)
+  // Only a real `..` segment leaves the root; a child named `..cache` stays inside it.
+  const inside = path !== "" && path !== ".." && !path.startsWith(`..${sep}`) && !isAbsolute(path)
   return inside && detect(projectRoot) ? projectRoot : undefined
 }
 

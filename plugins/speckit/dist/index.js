@@ -1508,7 +1508,7 @@ import { basename as basename3 } from "path";
 
 // plugins/speckit/src/workflow.ts
 import { existsSync as existsSync5 } from "fs";
-import { isAbsolute as isAbsolute3, join as join6, relative as relative2 } from "path";
+import { isAbsolute as isAbsolute3, join as join6, relative as relative2, sep as sep2 } from "path";
 var OWN_PROMPT_AGENTS = ["speckit-sync", "speckit-verify"];
 function usesSpeckit(directory) {
   return existsSync5(join6(directory, ".specify"));
@@ -1519,7 +1519,7 @@ function speckitWorkspace(directory, projectRoot, detect = usesSpeckit) {
   if (projectRoot === undefined || projectRoot === directory)
     return;
   const path = relative2(projectRoot, directory);
-  const inside = path !== "" && !path.startsWith("..") && !isAbsolute3(path);
+  const inside = path !== "" && path !== ".." && !path.startsWith(`..${sep2}`) && !isAbsolute3(path);
   return inside && detect(projectRoot) ? projectRoot : undefined;
 }
 function workflowLatch(detect = usesSpeckit, store) {

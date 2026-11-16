@@ -336,6 +336,9 @@ describe("wantsSpecAgent", () => {
     expect(wantsSpecAgent("auto", ["/elsewhere"], has)).toBe(false)
     // A location outside its project root (a separate worktree) does not borrow the root's workspace.
     expect(wantsSpecAgent("auto", ["/elsewhere", "/root"], has)).toBe(false)
+    // A child whose name starts with ".." is inside the root, not a traversal out of it.
+    expect(wantsSpecAgent("auto", ["/root/..cache", "/root"], has)).toBe(true)
+    expect(wantsSpecAgent("auto", ["/root/../other", "/root"], has)).toBe(false)
     expect(wantsSpecAgent(true, ["/elsewhere"], has)).toBe(true)
     expect(wantsSpecAgent(false, ["/root"], has)).toBe(false)
   })
