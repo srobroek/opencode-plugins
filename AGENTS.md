@@ -29,8 +29,11 @@ package whose entry point default-exports `Plugin.define({ id, setup })` from
   characters, a direct tool's schema passes 1.5k (Code Mode 3k), `codemode: false`
   lacks a `check-descriptions: direct <reason>` comment, a skill description passes
   160 characters, an agent description 150, or an `instructions/` block 1k.
+- `bun run concerns` fails when a language's testing and quality concerns table, registered in
+  `plugins/toolchain/skills/toolchain-languages/references/concerns.md`, misses a concern, uses
+  an unknown marker, pins an exact version or skips a required run.
 - `bun run check` runs typecheck, lint, test, build:check, marketplaces:check,
-  plugin-table:check, steering, pitfalls, agent-roles and descriptions before you hand work off.
+  plugin-table:check, steering, pitfalls, agent-roles, descriptions and concerns before you hand work off.
 
 ## Conventions
 
@@ -94,6 +97,8 @@ package whose entry point default-exports `Plugin.define({ id, setup })` from
   `bun run pitfalls` checks the link and the entry format.
 - Do not inject changing state into the system prompt on every request; it breaks
   provider prompt caching. Put live state in tool results.
+- A language skill fills every concern in that spec. Tool versions are minimums (`>=`), not
+  pins. Each tool row carries detect and install commands, and agents ask before installing.
 - Conventional Commits. Scope is the plugin name, for example `feat(beads): ...`.
 - A new plugin needs entries in `release-please-config.json` and
   `.release-please-manifest.json`.

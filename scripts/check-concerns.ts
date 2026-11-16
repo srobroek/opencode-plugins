@@ -162,14 +162,38 @@ export function parseSpec(text: string, file = SPEC_FILE): { spec: Spec; finding
   return { spec: { concerns, kinds, tokens, languages }, findings }
 }
 
-/** Parse the shared tools file into tool id to concern ids. */
-export function parseShared(text: string, file = SHARED_FILE): { shared: Shared; findings: Finding[] } {
+const slug = (heading: string) =>
+  heading
+    .trim()
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s-]/gu, "")
+    .replace(/\s/g, "-")
+
+/** Maintenance cell of a shared tool: a version row, `Family: [text](#anchor)` or `Service: <note>`. */
+function sharedMaintenanceProblem(cell: string, anchors: Set<string>, checked: string | undefined): string | undefined {
+  if (cell.startsWith("Service:")) return cell.slice("Service:".length).trim() ? undefined : "Service needs a note"
+  if (cell.startsWith("Family:")) {
+    const m = /^Family: \[[^\]]+\]\(#([^)\s]+)\)$/.exec(cell)
+    if (!m) return `Family must be "Family: [text](#section)", found "${cell}"`
+    return anchors.has(m[1] ?? "") ? undefined : `Family anchor "#${m[1]}" matches no "## " heading`
+  }
+  return maintenanceProblem(cell, checked)
+}
+
+/** Parse the shared tools file into tool id to concern ids; `tokens` enables Run cell validation. */
+export function parseShared(text: string, file = SHARED_FILE, tokens?: string[]): { shared: Shared; findings: Finding[] } {
   const findings: Finding[] = []
   const shared: Shared = new Map()
+  const anchors = new Set([...text.matchAll(/^## (.+)$/gm)].map((m) => slug(m[1] ?? "")))
+  const checked = /^Checked (\S+)\.$/m.exec(text)?.[1]
   for (const r of dataRows(requireTable(text, "Tools", SHARED_HEADER, file, findings), file, findings)) {
     const id = unticked(r.cells[0] ?? "")
     if (shared.has(id)) findings.push({ file, line: r.line, reason: `duplicate shared tool "${id}"` })
     shared.set(id, list(r.cells[2] ?? "", /\s*,\s*/))
+    const problem = sharedMaintenanceProblem(r.cells[3] ?? "", anchors, checked)
+    if (problem) findings.push({ file, line: r.line, reason: problem })
+    const unknown = tokens ? list(r.cells[4] ?? "", /\s*\+\s*/).filter((t) => !tokens.includes(unticked(t))) : []
+    if (unknown.length > 0) findings.push({ file, line: r.line, reason: `unknown run token "${unknown.join(", ")}"` })
   }
   return { shared, findings }
 }
@@ -500,7 +524,7 @@ function loadContext(root: string, today: string): { ctx: Context; findings: Fin
   const missing = [SPEC_FILE, SHARED_FILE].filter((f) => !existsSync(path.join(root, f)))
   if (missing.length > 0) return { findings: missing.map((file) => ({ file, line: 1, reason: "file is missing" })) }
   const spec = parseSpec(readFileSync(specPath, "utf8"))
-  const shared = parseShared(readFileSync(sharedPath, "utf8"))
+  const shared = parseShared(readFileSync(sharedPath, "utf8"), SHARED_FILE, spec.spec.tokens)
   const findings = [...spec.findings, ...shared.findings]
   const dated = /^Checked (\S+)\.$/m.exec(readFileSync(specPath, "utf8"))?.[1]
   if (dated && !isDate(dated)) findings.push({ file: SPEC_FILE, line: 1, reason: `Checked "${dated}" is not YYYY-MM-DD` })
