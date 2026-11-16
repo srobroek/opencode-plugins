@@ -80,6 +80,12 @@ Inputs: `pr`, and when needed `merge_method` (`squash` by default, `merge`,
   `delivery_cleanup` until cleanup finishes. With an active ledger cleanup is not
   attempted (`cleanup.skipped`), because it proves the beads are closed and those
   closes come first. `autoCleanup: false` keeps the two-call flow.
+  Cleanup still refuses a worktree that moved past the landed head (`worktree.HEAD`,
+  `worktree.branch`). An integration can hold a worktree back by adding
+  `cleanupHold: [{ directory, reason }]` to the `delivery_land` input from an
+  `execute.before` hook; the result then reports `cleanup: { ok: false, deferred }`
+  and `next` keeps `delivery_cleanup`. `subagent-worktree` does this for a lane whose
+  child is still active.
 - If the forge accepted the merge but a later step refused, the result has
   `mergeIssued: true` and no receipt. Run the tool again with the same inputs: it
   sees the PR as MERGED, merges nothing, and writes the receipt.

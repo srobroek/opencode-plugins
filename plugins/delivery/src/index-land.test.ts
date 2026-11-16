@@ -25,7 +25,7 @@ beforeAll(() => {
     landPullRequest: async () => ({
       ok: true,
       receiptPath: "/r/receipt.json",
-      receipt: { pr: { number: 7, mergeCommitOid: "abc" }, repo: { nameWithOwner: "o/r" }, beads: { ledgerActive } },
+      receipt: { pr: { number: 7, mergeCommitOid: "abc" }, worktree: { path: "/w/a" }, repo: { nameWithOwner: "o/r" }, beads: { ledgerActive } },
       text: "landed\nnext: run delivery_cleanup to remove the worktree and the local branch.",
       next: ["delivery_cleanup"],
     }),
@@ -43,7 +43,10 @@ beforeEach(() => {
 
 type Result = { output: { ok: boolean; next: string[]; cleanup?: Record<string, unknown> }; content: string }
 
-async function land(options: Record<string, unknown> = {}): Promise<{ result: Result; removed: unknown[] }> {
+async function land(
+  options: Record<string, unknown> = {},
+  input: Record<string, unknown> = {},
+): Promise<{ result: Result; removed: unknown[] }> {
   const removed: unknown[] = []
   const fake = createFakeContext()
   const context = fake.context as unknown as { location: unknown; worktree: unknown; options: unknown }
@@ -59,7 +62,7 @@ async function land(options: Record<string, unknown> = {}): Promise<{ result: Re
   await plugin.setup(fake.context)
   const execute = fake.tools.get(LAND_ACTION)?.execute as (i: unknown, c: unknown) => Promise<Result>
   const result = await execute(
-    { pr: 7 },
+    { pr: 7, ...input },
     { sessionID: "s", agent: "a", messageID: "m", id: "c", signal: new AbortController().signal },
   )
   return { result, removed }
@@ -101,4 +104,17 @@ test("an active ledger skips inline cleanup so the closeout commands run first",
   expect(cleanupCalls).toEqual([])
   expect(result.output.cleanup).toMatchObject({ ok: false, skipped: true })
   expect(result.output.next).toEqual(["delivery_cleanup"])
+})
+
+test("a worktree held by an integration is not cleaned inline and reports the deferral", async () => {
+  const { result } = await land({}, { cleanupHold: [{ directory: "/w/a", reason: "lane lane/x still active" }] })
+  expect(cleanupCalls).toEqual([])
+  expect(result.output.ok).toBe(true)
+  expect(result.output.cleanup).toEqual({ ok: false, deferred: "lane lane/x still active" })
+  expect(result.output.next).toEqual(["delivery_cleanup"])
+})
+
+test("a hold on another worktree does not stop cleanup", async () => {
+  const { result } = await land({}, { cleanupHold: [{ directory: "/w/other", reason: "busy" }] })
+  expect(result.output.cleanup).toMatchObject({ ok: true })
 })

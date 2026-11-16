@@ -1,4 +1,5 @@
-import { readFileSync } from "node:fs"
+import { readFileSync, realpathSync } from "node:fs"
+import { resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { Plugin } from "@opencode/plugin"
 import type { Context } from "@opencode/plugin/promise/plugin"
@@ -19,6 +20,7 @@ import {
 import {
   type CleanupReport,
   inlineCleanupDecision,
+  readCleanupHolds,
   nextAfterCleanup,
   runInlineCleanup,
   textAfterCleanup,
@@ -138,6 +140,15 @@ const LAND_INPUT = {
     requireGreenChecks: { type: "boolean", description: "Require every check on the head to pass" },
     setupAutoDelete: { type: "boolean", description: "Enable deletion-on-merge after the landing is proved" },
     worktree: { type: "string", description: "Landed worktree for cleanup (HEAD = PR head); inferred if omitted" },
+    cleanupHold: {
+      type: "array",
+      description: "Set by integrations: worktrees still in use. Holds inline cleanup only.",
+      items: {
+        type: "object",
+        properties: { directory: { type: "string" }, reason: { type: "string" } },
+        required: ["directory", "reason"],
+      },
+    },
     beadId: {
       type: "string",
       description: "Bead this closes when the branch is not <omp|opencode>/agent/<bead-id>; required then on a ledger",
@@ -167,6 +178,7 @@ const LAND_OUTPUT = {
         removed: { type: "string" },
         localRefDeleted: { type: "boolean" },
         skipped: { type: "boolean" },
+        deferred: { type: "string" },
       },
       required: ["ok"],
     },
@@ -273,6 +285,15 @@ export function hostWorktrees(ctx: Context): HostWorktrees | undefined {
   }
 }
 
+/** The real path when it exists, else the resolved one: holds and receipts compare by this. */
+function canonicalPath(path: string): string {
+  try {
+    return realpathSync(path)
+  } catch {
+    return resolve(path)
+  }
+}
+
 function environment(options: DeliveryOptions): NodeJS.ProcessEnv {
   return options.receiptsDirectory === undefined
     ? process.env
@@ -325,7 +346,12 @@ export async function setupDelivery(ctx: Context): Promise<() => Promise<void>> 
           const output = landOutput(outcome)
           return { output, content: outcome.text, metadata: metadataOf(output) }
         }
-        const decision = inlineCleanupDecision(outcome.receipt, options.autoCleanup)
+        const decision = inlineCleanupDecision(
+          outcome.receipt,
+          options.autoCleanup,
+          readCleanupHolds(input),
+          canonicalPath,
+        )
         // A skipped run is reported only when the option is on; off keeps the old result.
         const cleanup: CleanupReport | undefined = decision.run
           ? await runInlineCleanup(() => {
@@ -338,7 +364,9 @@ export async function setupDelivery(ctx: Context): Promise<() => Promise<void>> 
               })
             })
             : options.autoCleanup
-              ? { ok: false, skipped: true, reason: decision.reason }
+              ? decision.deferred === undefined
+                ? { ok: false, skipped: true, reason: decision.reason }
+                : { ok: false, deferred: decision.deferred }
               : undefined
         const output = landOutput(outcome, cleanup)
         const content = cleanup === undefined ? outcome.text : textAfterCleanup(outcome.text, cleanup)

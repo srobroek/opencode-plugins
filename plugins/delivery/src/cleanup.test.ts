@@ -1132,6 +1132,28 @@ describe("delivery_cleanup irreversible boundary", () => {
     rmSync(f.root, { recursive: true, force: true })
   })
 
+  test("commits after the PR head refuse before anything is removed", async () => {
+    const f = fixture("moved-on")
+    writeFileSync(join(f.linked, "followup.txt"), "more work\n")
+    git(f.linked, ["add", "followup.txt"])
+    git(f.linked, ["commit", "-q", "-m", "follow-up work"])
+    const { result, calls } = await invoke(f)
+    expect(refusal(result)).toContain("worktree.HEAD: observed")
+    expect(mutationCalls(calls)).toEqual([])
+    expect(existsSync(f.linked)).toBe(true)
+    rmSync(f.root, { recursive: true, force: true })
+  })
+
+  test("a worktree that switched to a follow-up branch refuses before anything is removed", async () => {
+    const f = fixture("stacked")
+    git(f.linked, ["switch", "-q", "-c", "follow-up"])
+    const { result, calls } = await invoke(f)
+    expect(refusal(result)).toContain("worktree.branch: observed")
+    expect(mutationCalls(calls)).toEqual([])
+    expect(existsSync(f.linked)).toBe(true)
+    rmSync(f.root, { recursive: true, force: true })
+  })
+
   test("a moved head, a dirty tree, an unpushed commit, and an open bead each refuse at their own gate", async () => {
     const f = fixture("refusal-order")
     writeFileSync(join(f.linked, "dirty.txt"), "dirty\n")

@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test"
 import {
   inlineCleanupDecision,
+  readCleanupHolds,
   nextAfterCleanup,
   reportFromCleanup,
   runInlineCleanup,
@@ -8,7 +9,8 @@ import {
 } from "./auto-cleanup.ts"
 import type { CleanupResult } from "./cleanup.ts"
 
-const receipt = (ledgerActive: boolean) => ({ beads: { ledgerActive } }) as never
+const receipt = (ledgerActive: boolean, path: string | null = "/w/a") =>
+  ({ beads: { ledgerActive }, worktree: { path } }) as never
 const success = { ok: true, receipt: { worktree: { path: "/w/a" } }, path: "/r", remoteBranchAbsence: "absent" } as unknown as CleanupResult
 
 test.each([
@@ -46,4 +48,36 @@ test("the text swaps the cleanup instruction for the outcome", () => {
   )
   expect(textAfterCleanup(text, { ok: false, reason: "dirty" })).toContain("cleanup: not finished (dirty)")
   expect(textAfterCleanup(text, { ok: false, skipped: true, reason: "x" })).toBe(text)
+})
+
+test("a hold on the receipt's worktree defers cleanup with the holder's reason", () => {
+  const holds = [{ directory: "/w/a", reason: "lane lane/x still active" }]
+  expect(inlineCleanupDecision(receipt(false), true, holds)).toEqual({
+    run: false,
+    reason: "lane lane/x still active",
+    deferred: "lane lane/x still active",
+  })
+})
+
+test("holds compare by canonical path and leave other worktrees alone", () => {
+  const canonical = (path: string) => path.replace("/link", "/real")
+  const holds = [{ directory: "/link/a", reason: "busy" }]
+  expect(inlineCleanupDecision(receipt(false, "/real/a"), true, holds, canonical).run).toBe(false)
+  expect(inlineCleanupDecision(receipt(false, "/real/b"), true, holds, canonical).run).toBe(true)
+  expect(inlineCleanupDecision(receipt(false, null), true, holds, canonical).run).toBe(true)
+})
+
+test("malformed hold entries are ignored", () => {
+  expect(readCleanupHolds({ cleanupHold: [{ directory: "/a", reason: "r" }, { directory: 1 }, null, "x"] })).toEqual([
+    { directory: "/a", reason: "r" },
+  ])
+  expect(readCleanupHolds({ cleanupHold: "nope" })).toEqual([])
+  expect(readCleanupHolds(undefined)).toEqual([])
+})
+
+test("a deferred report keeps the instruction and says why", () => {
+  const text = "landed\nnext: run delivery_cleanup to remove the worktree and the local branch."
+  expect(textAfterCleanup(text, { ok: false, deferred: "lane lane/x still active" })).toContain(
+    "cleanup: deferred (lane lane/x still active)",
+  )
 })
