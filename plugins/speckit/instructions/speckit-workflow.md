@@ -77,9 +77,12 @@ MUST Pour before writing the spec, after obtaining the explicit choice;
 MUST Validate `autonomous` as exactly `yes` or `no` before pouring.
 
 TASK STATE (task-producing commands)
-MUST When /speckit.tasks instructs writing specs/*/tasks.md, create beads
-  instead: `bd create "T00N <title>" --parent <implement-step-id> --spec-id
-  <NNN-slug> -t task`. Bulk `bd create -f <tmp>.md` OUTSIDE specs/.
+MUST When /speckit.tasks instructs writing specs/*/tasks.md, load the
+  `beads-ledger` skill and create the implement step's task graph per its contract:
+  one `bd create --graph specs/<NNN-slug>/tasks.graph.json`, dry-run first, each node
+  with `parent_id` <implement-step-id>, `spec_id` <NNN-slug>, acceptance criteria and
+  routing metadata, and `blocks` edges for true dependencies only. Then read the
+  identities back: `bd list --parent <implement-step-id> --json`.
 MUST When a later phase instructs reading tasks.md, query beads:
   `bd query 'spec_id="<NNN-slug>"' --json`.
 MUST Keep the implement parent open until every implementation child is closed.

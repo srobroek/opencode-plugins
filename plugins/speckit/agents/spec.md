@@ -46,6 +46,9 @@ permissions:
   - action: skill
     resource: "quality-*"
     effect: allow
+  - action: skill
+    resource: beads-ledger
+    effect: allow
   - action: question
     resource: "*"
     effect: allow
@@ -188,7 +191,7 @@ Decide which path the request takes before Start:
    - `speckit-clarify`: one question round, answers encoded into spec.md
    - `speckit-plan`
    - `speckit-checklist`, `speckit-critique-run`, `speckit-security-review-plan` when the molecule has those steps
-   - `speckit-tasks`: create child beads of the implement step (`bd create "T00N <title>" --parent <implement-id> --spec-id <NNN-slug> -t task`), never `tasks.md`
+   - `speckit-tasks`: create the task beads by the workflow block's TASK STATE route (it loads `beads-ledger`), never `tasks.md`
    - `speckit-analyze`: inline, task state from `bd query 'spec_id="<NNN-slug>"' --json`
    Close each step's bead when its artifact is written. At a human gate, ask for approval, then `bd gate resolve <gate-id>` and `bd close <step-id>`.
 4. **Handoff.** Stop at the first ready step outside your boundary: one that edits outside `specs/`, runs project checks with no `execution_agent_type`, or commits. By profile: `implement` and `final-checkpoint` in `speckit-basic`; also `qa` and `docs-update` in `speckit-lean`; also `security-review-post` and `cleanup` in `speckit-feature`. Report the run root, each such step by step id and bead id, the task beads, open gates and remaining questions. Tell the user to switch to the `build` agent (or dispatch the task beads to delivery's implementers) for exactly those steps, then come back to you for verify-return.
