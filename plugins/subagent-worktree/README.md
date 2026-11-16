@@ -19,6 +19,14 @@ the `wt` strategy when the [worktrunk](../worktrunk) plugin is loaded, OpenCode'
 | `agents` | `["coder", "implementer", "implementer-high", "general"]` | Agents (id or name) whose subagent calls get a worktree. |
 | `base` | `"HEAD"` | Ref the worktree starts from, resolved in the caller's checkout. |
 
+| `gates` | `true` | Register the `experimental.idle` gates (see Cleanup layers). The hook is experimental; if the host lacks it the plugin runs without gates. |
+| `resumeGraceMinutes` | `10` | A landed lane is kept this long after a `subagent` call last targeted its child. |
+| `emptyGraceMinutes` | `30` | An empty lane is removed only after its child and parent stayed idle this long. |
+| `sweep` | `"report"` | `"off"`, `"report"` (plan only) or `"prune"` (carry the plan out). |
+| `minAgeHours` | `24` | The sweep never prunes a worktree younger than this. |
+| `intervalHours` | `6` | The background sweep runs at most once per project in this time. |
+| `include` | `[]` | Extra roots, beyond OpenCode's worktree directory, the sweep may look in. |
+
 ```jsonc
 { "plugins": [{ "package": "...", "options": { "agents": ["implementer"], "base": "HEAD" } }] }
 ```
@@ -117,6 +125,63 @@ session lookup has a 2 second limit and reports `unknown` when it runs out. Lane
 parent session is gone, or whose worktree git cannot read, are flagged as orphans. `list` only
 repairs missing worktrees by moving their child sessions back to the parent's directory and
 marking the lanes removed, and reports these repairs. It does not delete any worktree.
+
+## Cleanup layers
+
+Agent worktrees pile up when work lands or an agent dies. Five layers keep them in step, each
+covering what the others cannot see. A lane is removed only when its work is finished **and**
+landed; every removal is a non-force `worktree.remove` followed by a refresh, and no remote branch
+is ever deleted.
+
+A lane may be removed when all of these hold:
+
+1. **Landed.** Its tip is an ancestor of `origin/main`, or a merged PR's `headRefOid` equals the tip
+   (one batched `gh pr list` per repository, cached for five minutes), or `wt list` reports the
+   branch integrated, or `delivery_land` recorded that PR head for it. The local branch is deleted
+   (`git branch -D`) only on this proof.
+2. **Clean.** No uncommitted or untracked change (ignored files are fine), no merge, rebase,
+   cherry-pick, revert or bisect in progress, no stash on its branch. `delivery_cleanup` applies
+   the same check.
+3. **Child finished.** Not running; when its status cannot be read it counts as not finished.
+4. **Parent done with it.** The parent is idle, and no `subagent` call targeted the child within
+   `resumeGraceMinutes`.
+
+An empty lane (no commits, clean) is removed only after its child and parent stay idle for
+`emptyGraceMinutes`; child events never remove it sooner.
+
+| Layer | Covers | Does not cover |
+| --- | --- | --- |
+| 1. `delivery` `autoCleanup` | `delivery_land` runs `delivery_cleanup` itself. For a lane whose child is still active this plugin adds a `cleanupHold` to the `delivery_land` input; the result then reports `cleanup.deferred` and layers 3-4 remove it later. | A lane landed by hand, or any other tool. |
+| 2. Lane sync on a landing | An `execute.after` hook on `delivery_land` and `delivery_cleanup`: when the result shows the worktree removed (or its path gone), the lane is retired as `landed` and the worktree list is refreshed. `list` stops showing it. Results are read defensively (object, JSON or prose), and nothing happens when `delivery` is not installed. | Lanes whose worktree is still there. |
+| 3. Execution events | `session.execution.failed`, `.interrupted`, `.succeeded` and `session.idle` for a lane child or the parent of lanes. One debounced pass (about 2 s) per session; `succeeded` and `idle` for one execution are one pass. It records how a child ended, tells the parent once when a failed or interrupted child left work, and removes a landed, clean, finished lane. | A hard crash or a restart: the server emits nothing. |
+| 4. Idle gates | `experimental.idle`. A child idle with uncommitted changes gets one nudge per dirty state. A lead with finished lanes gets one message: landed and clean lanes are removed, an unresolved lane (commits, not landed, no open PR) is named once, a landed-but-dirty lane is reported once. Nothing is sent while one of its children runs, and at most one message per session every 15 s, because a message admitted in the hook fires the hook again. `subagent_worktree_merge` method `keep` (with `reason`) silences a lane until its state changes. | An interrupt or a failure: the hook does not fire for them. |
+| 5. Sweep | Worktrees that no event or gate reaches: a crash, a restart, a PR merged on the forge after the lead went idle, worktrees from before lanes existed. Runs after 30 s at startup and on `session.created`, throttled by `intervalHours`. Only paths under OpenCode's worktree directory (plus `include` roots and lane records). Prunes only landed, clean worktrees that no live session owns and that are older than `minAgeHours`; dirty or unpushed ones are **quarantined**, reported and kept. An unknown owner keeps the worktree. `git worktree prune` runs only for entries whose directory is already gone. | Anything it cannot prove: it keeps it. |
+
+`sweep` defaults to `report`: the plan is stored under `sweep/last` and nothing is removed until
+you set `"sweep": "prune"` or call the tool with `mode: "prune"`.
+
+### `subagent_worktree_sweep`
+
+`{ mode?: "report" | "prune" }` runs the same sweep on demand and returns the plan, one line per
+worktree: `keep`, `prune`, `prune-registry` or `quarantine`, with the reason. `report` (the default)
+changes nothing.
+
+### Messages to sessions
+
+Notices are `session.synthetic` messages sent without `resume: false`. The plugin API documents that
+`resume: false` notices wait for the next wake, so these are expected to wake an idle session (not
+exercised against a live host here). The parent notice reads
+`Subagent <child> (<description>) failed|was interrupted: <reason>. Its lane <branch> at <dir> has
+<n> commits ahead, uncommitted changes: yes|no. Resume it with subagent sessionID <child>, merge it
+with subagent_worktree_merge, or discard it.` Each notice has a key stored on the lane, so a
+repeated event or idle sends nothing twice.
+
+### Optional daily schedule
+
+To have the sweep reported without anyone asking, create a schedule with
+`POST /api/experimental/schedule`. Give it a Code Mode `if` check that calls
+`subagent_worktree_sweep({ mode: "report" })` and wakes the session only when the plan contains
+quarantined worktrees. No plugin code is involved.
 
 ## Credits
 
