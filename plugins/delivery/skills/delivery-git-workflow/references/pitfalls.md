@@ -52,4 +52,4 @@
 
 - **Symptom:** `already has a live writer session ses_` from subagent-worktree, or two writers committing to the same branch and worktree after OpenCode restarted
 - **Cause:** After a restart OpenCode resumes interrupted subagents on its own, and they show as running. Re-spawning a writer for the same branch then adds a second live session to that worktree.
-- **Fix:** After a restart, list your background work first. Re-spawn only sessions that are gone, never two writers per worktree. Send a follow-up (pass its `sessionID`) to the surviving session, or stop it before you spawn a new one.
+- **Fix:** After a restart, list your background work first. Re-spawn only sessions that are gone, never two writers per worktree. Send a follow-up (pass its `sessionID`) to the surviving session, or stop it before you spawn a new one. The plugin only coordinates spawns within one OpenCode server instance; concurrent spawns from separate server instances are not coordinated, so keep one orchestrator per worktree.

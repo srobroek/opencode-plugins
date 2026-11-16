@@ -81,6 +81,7 @@ async function start(
     strategy?: "wt" | "git"
     tools?: Array<Record<string, unknown> & { name: string }>
     exists?: (path: string) => Promise<boolean>
+    now?: () => number
   } = {},
 ): Promise<Setup> {
   const fake = createFakeContext({
@@ -163,7 +164,7 @@ async function start(
   const plugin = createPlugin({ run: async (argv) => {
     if (argv[0] === "wt") expect(fake.sessions.get("ses_fake1")?.location).toEqual({ directory: REPO })
     return fakeRun(repo, log)(argv)
-  }, suffix: () => "abc123", lookupMs: 20, directoryExists: options.exists ?? (async () => true) })
+  }, suffix: () => "abc123", lookupMs: 20, directoryExists: options.exists ?? (async () => true), ...(options.now ? { now: options.now } : {}), reserveMs: 60_000 })
   const cleanup = (await plugin.setup(fake.context)) as () => Promise<void>
   return { fake, repo, log, worktree, cleanup }
 }
@@ -552,6 +553,70 @@ describe("worktree argument", () => {
       expect(sessionID(event)).toBe("ses_fake1")
       const result = await setup.fake.fire.tool("execute.after", completed("ses_fake1"))
       expect((result.result as { content: string }).content).toContain("could not check whether the worktree already has a live writer")
+    })
+  })
+
+  describe("reservation of a worktree by an in-flight writer spawn", () => {
+    const sessionID = (event: { input: unknown }) => (event.input as { sessionID?: string }).sessionID
+    const second = (setup: Setup) => setup.fake.fire.tool("execute.before", { ...call({ agent: "pinned", worktree: "feat" }), id: "call_2" })
+    const first = (setup: Setup) => spawn(setup, { agent: "pinned", worktree: "feat" })
+    const failCreateOnce = (setup: Setup) => {
+      const original = setup.fake.context.session.create.bind(setup.fake.context.session)
+      let failed = false
+      Object.assign(setup.fake.context.session, {
+        create: async (input: never) => {
+          if (!failed) {
+            failed = true
+            throw new Error("create failed")
+          }
+          return original(input)
+        },
+      })
+    }
+
+    test("two concurrent spawns: the second is refused", async () => {
+      const setup = await start()
+      const results = await Promise.allSettled([first(setup), second(setup)])
+      const outcomes = results.map((result) => result.status).sort()
+      expect(outcomes).toEqual(["fulfilled", "rejected"])
+      const refused = results.find((result): result is PromiseRejectedResult => result.status === "rejected")
+      expect(String(refused?.reason)).toMatch(/already has a (live writer session|writer spawn in progress)/)
+    })
+
+    test("a later spawn is refused and names the reserving session", async () => {
+      const setup = await start()
+      await first(setup)
+      await expect(second(setup)).rejects.toThrow(/live writer session ses_fake1/)
+    })
+
+    test("a spawn that finished releases the worktree", async () => {
+      const setup = await start()
+      await first(setup)
+      await setup.fake.fire.tool("execute.after", completed("ses_fake1"))
+      expect(sessionID(await second(setup))).toBe("ses_fake2")
+    })
+
+    test("a failed spawn releases the worktree", async () => {
+      const setup = await start()
+      failCreateOnce(setup)
+      await expect(first(setup)).rejects.toThrow(/create failed/)
+      expect(sessionID(await second(setup))).toBeDefined()
+    })
+
+    test("the reservation expires", async () => {
+      let clock = 1_000_000
+      const setup = await start({ now: () => clock })
+      await first(setup)
+      clock += 59_000
+      await expect(second(setup)).rejects.toThrow(/writer/)
+      clock += 2_000
+      expect(sessionID(await second(setup))).toBeDefined()
+    })
+
+    test("a read-only agent neither reserves nor is blocked", async () => {
+      const setup = await start()
+      await spawn(setup, { agent: "reviewer", worktree: "feat" })
+      expect(sessionID(await second(setup))).toBeDefined()
     })
   })
 

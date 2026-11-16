@@ -585,10 +585,14 @@ function decideWriterGuard(facts) {
   const live = facts.sessions.find((session) => session.parentID !== undefined && session.id !== facts.caller && !session.readOnly && isRunning(session));
   if (!live)
     return { kind: "allow" };
-  return {
-    kind: "refuse",
-    reason: `${facts.directory} already has a live writer session ${live.id}. ` + `Send that session a follow-up (pass sessionID: "${live.id}") instead of spawning a second writer, or stop it first.`
-  };
+  return { kind: "refuse", reason: writerRefusal(facts.directory, live.id) };
+}
+function writerRefusal(directory, child) {
+  return child === undefined ? `${directory} already has a writer spawn in progress that has not started yet. Wait for it, then send that session a follow-up (pass its sessionID) instead of spawning a second writer, or stop it first.` : `${directory} already has a live writer session ${child}. Send that session a follow-up (pass sessionID: "${child}") instead of spawning a second writer, or stop it first.`;
+}
+var RESERVATION_MS = 60000;
+function blockingReservation(reservation, now, callId) {
+  return reservation !== undefined && reservation.callId !== callId && reservation.until > now ? reservation : undefined;
 }
 
 // plugins/subagent-worktree/src/git.ts
@@ -706,7 +710,7 @@ ${note}`;
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
 }
-function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, exists = directoryExists) {
+function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, exists = directoryExists, now = Date.now, reserveMs = RESERVATION_MS) {
   const load = async (child) => parseLane(await ctx.storage.get(laneKey(child)));
   const save = (lane2) => ctx.storage.set(laneKey(lane2.child), lane2);
   const getSession = (sessionID) => ctx.session.get({ sessionID }).then((session) => session, () => {
@@ -817,7 +821,13 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
     }
   };
   const notes = new Map;
-  const before = async (event) => {
+  const reservations = new Map;
+  const release = (callId) => {
+    for (const [directory, reservation] of reservations)
+      if (reservation.callId === callId)
+        reservations.delete(directory);
+  };
+  const begin = async (event) => {
     if (event.tool !== SUBAGENT_TOOL)
       return;
     const input = readSubagentInput(event.input);
@@ -861,16 +871,24 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
     if (plan.kind === "refuse")
       throw new Error(`subagent-worktree: ${plan.reason}`);
     if (plan.kind !== "isolate" && start?.lookup.ok && agent && agent.mode !== "primary") {
+      const directory = start.lookup.worktree.directory;
+      const writer = !sessionIsReadOnly(agent.permissions, parent.permissions);
       const guard = decideWriterGuard({
-        writer: !sessionIsReadOnly(agent.permissions, parent.permissions),
-        directory: start.lookup.worktree.directory,
+        writer,
+        directory,
         caller: event.sessionID,
-        sessions: await sessionsIn(parent.projectID, start.lookup.worktree.directory)
+        sessions: await sessionsIn(parent.projectID, directory)
       });
       if (guard.kind === "refuse")
         throw new Error(`subagent-worktree: ${guard.reason}`);
       if (guard.warn)
         notes.set(event.id, guard.warn);
+      if (writer) {
+        const held = blockingReservation(reservations.get(directory), now(), event.id);
+        if (held)
+          throw new Error(`subagent-worktree: ${writerRefusal(directory, held.child)}`);
+        reservations.set(directory, { callId: event.id, until: now() + reserveMs });
+      }
     }
     if (plan.kind === "default") {
       if (plan.note)
@@ -884,6 +902,9 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
       let child;
       try {
         child = await createChild(event, input, agent, parent);
+        const reserved = reservations.get(plan.worktree.directory);
+        if (reserved?.callId === event.id)
+          reserved.child = child;
         await ctx.session.move({ sessionID: child, directory: plan.worktree.directory });
         event.input = { ...event.input, sessionID: child, prompt: startPrompt(input.prompt, plan.worktree) };
       } catch (error) {
@@ -917,6 +938,14 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
         await ctx.session.remove({ sessionID: child }).catch(() => {});
       await removeWorktree(parent.projectID, worktree.directory, true).catch(() => {});
       throw new Error(`subagent-worktree: ${errorMessage(error)}`);
+    }
+  };
+  const before = async (event) => {
+    try {
+      await begin(event);
+    } catch (error) {
+      release(event.id);
+      throw error;
     }
   };
   const revive = async (event, child, prompt) => {
@@ -966,6 +995,8 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
   const after = async (event) => {
     if (event.tool !== SUBAGENT_TOOL)
       return;
+    if (event.id !== undefined)
+      release(event.id);
     const skipped = event.id === undefined ? undefined : notes.get(event.id);
     if (event.id !== undefined)
       notes.delete(event.id);
@@ -1162,7 +1193,7 @@ function createPlugin(overrides = {}) {
     async setup(ctx) {
       const options = readOptions(ctx.options);
       const git2 = createGit(overrides.run ?? spawnRunner);
-      const lanes = createLanes(ctx, options, git2, overrides.suffix ?? randomSuffix, overrides.lookupMs, overrides.directoryExists);
+      const lanes = createLanes(ctx, options, git2, overrides.suffix ?? randomSuffix, overrides.lookupMs, overrides.directoryExists, overrides.now, overrides.reserveMs);
       const registrations = [];
       const cleanup = async () => {
         for (const registration of registrations.reverse())
@@ -1206,6 +1237,7 @@ export {
   MERGE_DESCRIPTION,
   MERGE_INPUT,
   MERGE_TOOL,
+  RESERVATION_MS,
   RESUME_WORKTREE_NOTE,
   SESSION_LOOKUP_MS,
   SUBAGENT_PREAMBLE,
@@ -1216,6 +1248,7 @@ export {
   WORKTREE_PARAM_DESCRIPTION,
   WRITER_LIVENESS_NOTE,
   annotation,
+  blockingReservation,
   containingWorktree,
   createGit,
   createLanes,
@@ -1257,5 +1290,6 @@ export {
   uncommittedOnly,
   withoutWorktree,
   worktreeForBranch,
-  worktreeName
+  worktreeName,
+  writerRefusal
 };

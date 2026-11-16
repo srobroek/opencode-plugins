@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import {
   annotation,
+  blockingReservation,
   containingWorktree,
   DEFAULT_AGENTS,
   DIRTY_CHECKOUT_NOTE,
@@ -527,5 +528,21 @@ describe("decideWriterGuard", () => {
 
   test("allows with a warning when liveness is unknown", () => {
     expect(decideWriterGuard({ ...facts, sessions: undefined })).toEqual({ kind: "allow", warn: WRITER_LIVENESS_NOTE })
+  })
+})
+
+describe("blockingReservation", () => {
+  const held = { callId: "call_1", child: "ses_a", until: 1000 }
+  test("blocks another call before it expires", () => {
+    expect(blockingReservation(held, 999, "call_2")).toBe(held)
+  })
+  test.each([
+    ["the holder itself", 500, "call_1"],
+    ["after expiry", 1000, "call_2"],
+  ])("does not block %s", (_name, now, callId) => {
+    expect(blockingReservation(held, now, callId)).toBeUndefined()
+  })
+  test("does not block without a reservation", () => {
+    expect(blockingReservation(undefined, 0, "call_2")).toBeUndefined()
   })
 })

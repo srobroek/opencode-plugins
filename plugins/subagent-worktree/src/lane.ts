@@ -566,10 +566,26 @@ export function decideWriterGuard(facts: {
       session.parentID !== undefined && session.id !== facts.caller && !session.readOnly && isRunning(session),
   )
   if (!live) return { kind: "allow" }
-  return {
-    kind: "refuse",
-    reason:
-      `${facts.directory} already has a live writer session ${live.id}. ` +
-      `Send that session a follow-up (pass sessionID: "${live.id}") instead of spawning a second writer, or stop it first.`,
-  }
+  return { kind: "refuse", reason: writerRefusal(facts.directory, live.id) }
+}
+
+/** The refusal for a second writer; `child` is the session already writing, or undefined while its spawn is still starting. */
+export function writerRefusal(directory: string, child?: string): string {
+  return child === undefined
+    ? `${directory} already has a writer spawn in progress that has not started yet. Wait for it, then send that session a follow-up (pass its sessionID) instead of spawning a second writer, or stop it first.`
+    : `${directory} already has a live writer session ${child}. Send that session a follow-up (pass sessionID: "${child}") instead of spawning a second writer, or stop it first.`
+}
+
+/** How long a writer spawn holds its worktree before its child's first execution shows up in `session.list`. */
+export const RESERVATION_MS = 60_000
+
+/**
+ * A writer spawn's hold on a worktree, kept in this plugin instance only. Spawns from separate
+ * OpenCode server instances are not coordinated: there is no cross-process lock.
+ */
+export type Reservation = { callId: string; child?: string; until: number }
+
+/** The reservation that blocks the spawn `callId`: unexpired and held by another call. */
+export function blockingReservation(reservation: Reservation | undefined, now: number, callId: string): Reservation | undefined {
+  return reservation !== undefined && reservation.callId !== callId && reservation.until > now ? reservation : undefined
 }
