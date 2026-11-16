@@ -994,7 +994,7 @@ import {
   rmSync
 } from "fs";
 import { tmpdir } from "os";
-import { join as join4, posix, resolve as resolve2 } from "path";
+import { basename as basename3, dirname, join as join4, posix, resolve as resolve2 } from "path";
 var COMMIT_TOOL = "speckit_commit";
 var COMMIT_DESCRIPTION = `Commit SpecKit artifacts: stages only specs/ and .specify/, refuses other staged files, never amends.
 ` + "Paths are relative to the SpecKit workspace and default to specs/ and .specify/. Refuses when a requested path lies outside them or the index already holds other files. Commits the checked working-tree snapshot of those paths on top of HEAD, storing each file's bytes exactly as they are on disk: no clean or process filter, no autocrlf conversion. Ignored files stay out; a symlink out of specs/ and .specify/, a submodule or a nested repository is refused. No git hook of any kind runs (pre-commit, commit-msg, reference-transaction, post-index-change), so run the project's checks separately.";
@@ -1095,22 +1095,30 @@ function linkInside(path, target) {
   return artifactPath(posix.join(posix.dirname(path), target)) !== undefined;
 }
 var missing = (error) => ["ENOENT", "ENOTDIR"].includes(error.code ?? "");
-function readArtifact(workspace, path) {
+var movedWhileReading = (why) => ({ kind: "refuse", reason: `changed while reading (${why})` });
+function readArtifact(workspace, path, race = {}) {
   const parts = path.split("/");
-  for (let depth = 1;depth < parts.length; depth++) {
-    const dir = join4(workspace, ...parts.slice(0, depth));
-    try {
-      const stat = lstatSync(dir);
-      if (stat.isSymbolicLink())
-        return { kind: "refuse", reason: `${parts.slice(0, depth).join("/")} is a symlink` };
-      if (!stat.isDirectory())
-        return { kind: "gone" };
-    } catch (error) {
-      if (missing(error))
-        return { kind: "gone" };
-      throw error;
+  const ancestors = () => {
+    for (let depth = 1;depth < parts.length; depth++) {
+      const dir = join4(workspace, ...parts.slice(0, depth));
+      try {
+        const stat = lstatSync(dir);
+        if (stat.isSymbolicLink())
+          return { kind: "refuse", reason: `${parts.slice(0, depth).join("/")} is a symlink` };
+        if (!stat.isDirectory())
+          return { kind: "gone" };
+      } catch (error) {
+        if (missing(error))
+          return { kind: "gone" };
+        throw error;
+      }
     }
-  }
+    return;
+  };
+  const before = ancestors();
+  if (before !== undefined)
+    return before;
+  race.afterCheck?.();
   const full = join4(workspace, path);
   let stat;
   try {
@@ -1120,26 +1128,51 @@ function readArtifact(workspace, path) {
       return { kind: "gone" };
     throw error;
   }
+  let snapshot;
+  let identity;
   if (stat.isSymbolicLink()) {
     const target = readlinkSync(full, { encoding: "buffer" });
     if (!linkInside(path, target.toString()))
       return { kind: "refuse", reason: `symlink to ${target.toString()} leaves specs/ and .specify/` };
-    return { kind: "blob", mode: "120000", bytes: target };
-  }
-  if (stat.isDirectory())
+    snapshot = { kind: "blob", mode: "120000", bytes: target };
+    identity = stat;
+  } else if (stat.isDirectory())
     return { kind: "gone" };
-  if (!stat.isFile())
+  else if (!stat.isFile())
     return { kind: "refuse", reason: "not a regular file or symlink" };
-  const fd = openSync(full, constants.O_RDONLY | constants.O_NOFOLLOW);
-  try {
-    const opened = fstatSync(fd);
-    if (!opened.isFile() || opened.ino !== stat.ino)
-      return { kind: "refuse", reason: "changed while reading" };
-    const bytes = readFileSync3(fd);
-    return { kind: "blob", mode: opened.mode & 64 ? "100755" : "100644", bytes };
-  } finally {
-    closeSync(fd);
+  else {
+    let fd;
+    try {
+      fd = openSync(full, constants.O_RDONLY | constants.O_NOFOLLOW);
+    } catch {
+      return movedWhileReading("open failed");
+    }
+    try {
+      const opened = fstatSync(fd);
+      if (!opened.isFile())
+        return movedWhileReading("not a regular file");
+      snapshot = { kind: "blob", mode: opened.mode & 64 ? "100755" : "100644", bytes: readFileSync3(fd) };
+      identity = opened;
+    } finally {
+      closeSync(fd);
+    }
   }
+  race.afterRead?.();
+  const after = ancestors();
+  if (after !== undefined)
+    return after.kind === "refuse" ? after : movedWhileReading("a directory moved");
+  try {
+    const now = lstatSync(full);
+    if (now.dev !== identity.dev || now.ino !== identity.ino)
+      return movedWhileReading("a different file is there now");
+    const expected = join4(realpathSync(workspace), path);
+    const real = snapshot.mode === "120000" ? join4(realpathSync(dirname(full)), basename3(full)) : realpathSync(full);
+    if (real !== expected)
+      return movedWhileReading(`it resolves to ${real}`);
+  } catch {
+    return movedWhileReading("it moved");
+  }
+  return snapshot;
 }
 function blobId(format, bytes) {
   return createHash(format === "sha256" ? "sha256" : "sha1").update(`blob ${bytes.length}\x00`).update(bytes).digest("hex");
@@ -1300,7 +1333,7 @@ The index was not synced for these paths: ${synced.reason}`}`,
 
 // plugins/speckit/src/setup.ts
 import { appendFileSync, copyFileSync, existsSync as existsSync4, lstatSync as lstatSync2, mkdirSync as mkdirSync2, readFileSync as readFileSync4, writeFileSync } from "fs";
-import { dirname, isAbsolute as isAbsolute2, join as join5, parse, resolve as resolve3, sep } from "path";
+import { dirname as dirname2, isAbsolute as isAbsolute2, join as join5, parse, resolve as resolve3, sep } from "path";
 import { fileURLToPath } from "url";
 var PHASE_TIMEOUT_MS = 60000;
 var STOPPED = "stopped by the tool call; rerun to resume, finished phases are skipped";
@@ -1375,7 +1408,7 @@ var testPluginRoot = null;
 function pluginRoot() {
   if (testPluginRoot)
     return testPluginRoot;
-  return join5(dirname(fileURLToPath(import.meta.url)), "..");
+  return join5(dirname2(fileURLToPath(import.meta.url)), "..");
 }
 function parseSpecifyMajorMinor(versionOut) {
   const m = versionOut.match(/(\d+)\.(\d+)/);
@@ -1676,7 +1709,7 @@ function skillRefusal(tool, input) {
 }
 
 // plugins/speckit/src/spec-agent.ts
-import { basename as basename3 } from "path";
+import { basename as basename4 } from "path";
 
 // plugins/speckit/src/workflow.ts
 import { existsSync as existsSync5 } from "fs";
@@ -1735,7 +1768,7 @@ function specAgentSetting(raw) {
   return typeof raw === "boolean" ? raw : "auto";
 }
 function isSpecAgent(path) {
-  return basename3(path, ".md") === SPEC_AGENT;
+  return basename4(path, ".md") === SPEC_AGENT;
 }
 function wantsSpecAgent(setting, directories, detect = usesSpeckit) {
   if (setting !== "auto")
@@ -1745,7 +1778,7 @@ function wantsSpecAgent(setting, directories, detect = usesSpeckit) {
 }
 
 // plugins/speckit/src/tasks-guard.ts
-import { dirname as dirname2, isAbsolute as isAbsolute4, resolve as resolve4 } from "path";
+import { dirname as dirname3, isAbsolute as isAbsolute4, resolve as resolve4 } from "path";
 var DENY_REASON = "blocked by speckit (task state lives in beads, tasks.md is never authored): this repo has an active beads workspace, so specs/*/tasks.md is read-only legacy and must not be written or created. Create implementation tasks as beads under the feature molecule's implement step instead, by the TASK STATE route of the SpecKit workflow instructions: load the beads-ledger skill and create one task graph (bd create --graph specs/<NNN-slug>/tasks.graph.json, dry-run first) whose nodes carry parent_id <implement-step-id>, spec_id <NNN-slug>, acceptance criteria and routing metadata, with blocks edges for true dependencies; read them back with bd list --parent <implement-step-id> --json. Then work the tasks via bd ready -> bd update <id> --claim -> bd close <id> --reason. Find the implement step with bd mol current <molecule-root-id>. IF A SKILL DEMANDED tasks.md: skip check-prerequisites.sh --require-tasks and read bd list --spec <NNN-slug>. Do not create tasks.md to get past the check. Disable: set the srobroek.speckit plugin option tasksGuard=false";
 var TASKS_PATH = /(?:^|\/)specs\/[^/\s'"]+\/tasks\.md(?:$|[/\s'"])/;
 var WRITE_REDIRECT = /[0-9]*&?>>?\s*['"]?[^|;&]*specs\/[^|;&]*\/tasks\.md/;
@@ -1776,7 +1809,7 @@ function commandMentionsTasksMd(command) {
   return /specs\/.*\/tasks\.md/s.test(command);
 }
 function repoOf(path) {
-  return dirname2(dirname2(dirname2(path)));
+  return dirname3(dirname3(dirname3(path)));
 }
 function tasksTargets(tool, input, directory) {
   if (WRITE_TOOLS.has(tool)) {
@@ -2053,7 +2086,7 @@ import {
   writeSync
 } from "fs";
 import { hostname } from "os";
-import { basename as basename4, dirname as dirname4, isAbsolute as isAbsolute6, join as join7, resolve as resolve6 } from "path";
+import { basename as basename5, dirname as dirname5, isAbsolute as isAbsolute6, join as join7, resolve as resolve6 } from "path";
 
 // plugins/lib/src/shell-command.ts
 var INTERPRETERS = new Set(["bash", "sh", "zsh", "dash", "ksh"]);
@@ -2101,7 +2134,7 @@ var TRUTHY = { "": true, "1": true, t: true, T: true, TRUE: true, true: true, Tr
 // plugins/beads/src/beads-store.ts
 import { spawnSync } from "child_process";
 import { lstatSync as lstatSync3, realpathSync as realpathSync2, statSync as statSync2 } from "fs";
-import { dirname as dirname3, isAbsolute as isAbsolute5, resolve as resolve5 } from "path";
+import { dirname as dirname4, isAbsolute as isAbsolute5, resolve as resolve5 } from "path";
 function repoIdentity(cwd) {
   if (cwd.includes("\x00"))
     return;
@@ -2140,7 +2173,7 @@ function repositoryState(cwd) {
       if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT")
         return "unknown";
     }
-    const parent = dirname3(current);
+    const parent = dirname4(current);
     if (parent === current)
       return "absent";
     current = parent;
@@ -2549,7 +2582,7 @@ async function hold(store, owner, waitMs = WAIT_MS, signal) {
   }
 }
 function withOwnership(storeLock, token, change) {
-  const steal = join7(dirname4(storeLock), STEAL_NAME);
+  const steal = join7(dirname5(storeLock), STEAL_NAME);
   let fd;
   try {
     fd = openSync3(steal, "wx");

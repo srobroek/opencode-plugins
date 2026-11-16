@@ -94,7 +94,11 @@ exactly as they are on disk, never through `git add`: no clean or process filter
 `.gitattributes` runs and `core.autocrlf` converts nothing. Ignored files stay out, the
 exec bit sets the file mode, and a symlink is stored as its link text. A symlink that is
 absolute or climbs out of `specs/` and `.specify/`, a path through a symlinked directory,
-a submodule and a nested repository are refused. It never amends, and a
+a submodule and a nested repository are refused. After reading each file it checks the
+ancestors, the file's real path and its inode again, and refuses the commit if anything
+moved. That closes the practical race window, not a perfectly timed double swap: the
+tool guards against an agent's mistakes and casual misuse, not a hostile local process
+racing it. It never amends, and a
 concurrent move of HEAD makes it fail rather than overwrite the other commit. Every git
 call runs pinned to the workspace (`git -C`) without inherited repository selectors
 (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, object-store and `GIT_CONFIG*` variables),

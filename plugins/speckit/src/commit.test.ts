@@ -2,7 +2,45 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, setDefaul
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { artifactPath, executeCommit, type GitFactory, gitEnvironment, gitIn, outsideArtifacts } from "./commit.ts"
+import {
+  artifactPath,
+  executeCommit,
+  type GitFactory,
+  gitEnvironment,
+  gitIn,
+  outsideArtifacts,
+  readArtifact,
+} from "./commit.ts"
+
+describe("readArtifact against a directory swapped for an outbound symlink", () => {
+  let root: string
+  let workspace: string
+  let outside: string
+  beforeEach(() => {
+    root = realpathSync(mkdtempSync(join(tmpdir(), "speckit-race-")))
+    workspace = join(root, "ws")
+    outside = join(root, "outside")
+    mkdirSync(join(workspace, "specs", "001-a"), { recursive: true })
+    mkdirSync(outside)
+    writeFileSync(join(workspace, "specs", "001-a", "spec.md"), "mine\n")
+    writeFileSync(join(outside, "spec.md"), "secret\n")
+  })
+  afterEach(() => rmSync(root, { recursive: true, force: true }))
+  const swap = () => {
+    rmSync(join(workspace, "specs", "001-a"), { recursive: true })
+    symlinkSync(outside, join(workspace, "specs", "001-a"))
+  }
+
+  test("reads the file when nothing moves", () => {
+    const snapshot = readArtifact(workspace, "specs/001-a/spec.md")
+    expect(snapshot.kind === "blob" && new TextDecoder().decode(snapshot.bytes)).toBe("mine\n")
+  })
+
+  test.each(["afterCheck", "afterRead"] as const)("refuses a swap at %s", (moment) => {
+    const snapshot = readArtifact(workspace, "specs/001-a/spec.md", { [moment]: swap })
+    expect(snapshot.kind).toBe("refuse")
+  })
+})
 
 describe("artifactPath", () => {
   test.each([

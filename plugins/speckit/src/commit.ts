@@ -24,7 +24,7 @@ import {
   rmSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
-import { join, posix, resolve } from "node:path"
+import { basename, dirname, join, posix, resolve } from "node:path"
 import type { ToolOutput } from "./tools.ts"
 
 export const COMMIT_TOOL = "speckit_commit"
@@ -184,25 +184,43 @@ export type Snapshot =
 
 const missing = (error: unknown) => ["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")
 
+/** Test seams around the read: `afterCheck` runs between the ancestor check and the open, `afterRead` between the read and the re-check. */
+export type ReadRace = { afterCheck?: () => void; afterRead?: () => void }
+
+const movedWhileReading = (why: string): Snapshot => ({ kind: "refuse", reason: `changed while reading (${why})` })
+
 /**
  * Read the workspace-relative `path` as raw bytes, with no git filter or conversion: a
  * regular file with its exec bit, a symlink as its link text. A path that runs through a
- * symlinked directory is refused, and the file is opened without following a link, so a
- * swapped-in link cannot pull outside content into the commit.
+ * symlinked directory is refused, and the file is opened without following a link.
+ *
+ * Node has no openat, so a directory swapped for an outbound symlink between the ancestor
+ * check and the open would make the open follow it. After the read every ancestor is
+ * checked again, the file's real path must still be the expected one inside the workspace,
+ * and an lstat of it must still name the descriptor's device and inode; any difference
+ * refuses. That closes the practical window, not a perfectly timed double swap (out and
+ * back between the checks): the tool guards against an agent's mistakes and casual misuse,
+ * not a hostile local process racing it.
  */
-export function readArtifact(workspace: string, path: string): Snapshot {
+export function readArtifact(workspace: string, path: string, race: ReadRace = {}): Snapshot {
   const parts = path.split("/")
-  for (let depth = 1; depth < parts.length; depth++) {
-    const dir = join(workspace, ...parts.slice(0, depth))
-    try {
-      const stat = lstatSync(dir)
-      if (stat.isSymbolicLink()) return { kind: "refuse", reason: `${parts.slice(0, depth).join("/")} is a symlink` }
-      if (!stat.isDirectory()) return { kind: "gone" }
-    } catch (error) {
-      if (missing(error)) return { kind: "gone" }
-      throw error
+  const ancestors = (): Snapshot | undefined => {
+    for (let depth = 1; depth < parts.length; depth++) {
+      const dir = join(workspace, ...parts.slice(0, depth))
+      try {
+        const stat = lstatSync(dir)
+        if (stat.isSymbolicLink()) return { kind: "refuse", reason: `${parts.slice(0, depth).join("/")} is a symlink` }
+        if (!stat.isDirectory()) return { kind: "gone" }
+      } catch (error) {
+        if (missing(error)) return { kind: "gone" }
+        throw error
+      }
     }
+    return undefined
   }
+  const before = ancestors()
+  if (before !== undefined) return before
+  race.afterCheck?.()
   const full = join(workspace, path)
   let stat: ReturnType<typeof lstatSync>
   try {
@@ -211,23 +229,45 @@ export function readArtifact(workspace: string, path: string): Snapshot {
     if (missing(error)) return { kind: "gone" }
     throw error
   }
+  let snapshot: Extract<Snapshot, { kind: "blob" }>
+  let identity: { dev: number; ino: number }
   if (stat.isSymbolicLink()) {
     const target = readlinkSync(full, { encoding: "buffer" })
     if (!linkInside(path, target.toString()))
       return { kind: "refuse", reason: `symlink to ${target.toString()} leaves specs/ and .specify/` }
-    return { kind: "blob", mode: "120000", bytes: target }
+    snapshot = { kind: "blob", mode: "120000", bytes: target }
+    identity = stat
+  } else if (stat.isDirectory()) return { kind: "gone" }
+  else if (!stat.isFile()) return { kind: "refuse", reason: "not a regular file or symlink" }
+  else {
+    let fd: number
+    try {
+      fd = openSync(full, constants.O_RDONLY | constants.O_NOFOLLOW)
+    } catch {
+      return movedWhileReading("open failed")
+    }
+    try {
+      const opened = fstatSync(fd)
+      if (!opened.isFile()) return movedWhileReading("not a regular file")
+      snapshot = { kind: "blob", mode: opened.mode & 0o100 ? "100755" : "100644", bytes: readFileSync(fd) }
+      identity = opened
+    } finally {
+      closeSync(fd)
+    }
   }
-  if (stat.isDirectory()) return { kind: "gone" }
-  if (!stat.isFile()) return { kind: "refuse", reason: "not a regular file or symlink" }
-  const fd = openSync(full, constants.O_RDONLY | constants.O_NOFOLLOW)
+  race.afterRead?.()
+  const after = ancestors()
+  if (after !== undefined) return after.kind === "refuse" ? after : movedWhileReading("a directory moved")
   try {
-    const opened = fstatSync(fd)
-    if (!opened.isFile() || opened.ino !== stat.ino) return { kind: "refuse", reason: "changed while reading" }
-    const bytes = readFileSync(fd)
-    return { kind: "blob", mode: opened.mode & 0o100 ? "100755" : "100644", bytes }
-  } finally {
-    closeSync(fd)
+    const now = lstatSync(full)
+    if (now.dev !== identity.dev || now.ino !== identity.ino) return movedWhileReading("a different file is there now")
+    const expected = join(realpathSync(workspace), path)
+    const real = snapshot.mode === "120000" ? join(realpathSync(dirname(full)), basename(full)) : realpathSync(full)
+    if (real !== expected) return movedWhileReading(`it resolves to ${real}`)
+  } catch {
+    return movedWhileReading("it moved")
   }
+  return snapshot
 }
 
 /** The git object id of a blob holding `bytes`, as `git hash-object` computes it. */
