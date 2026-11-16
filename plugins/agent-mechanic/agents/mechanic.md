@@ -33,6 +33,12 @@ permissions:
   - action: shell
     resource: "*"
     effect: allow
+  - action: skill
+    resource: "quality-*"
+    effect: allow
+  - action: skill
+    resource: "lang-*"
+    effect: allow
   - action: external_directory
     resource: "*"
     effect: ask

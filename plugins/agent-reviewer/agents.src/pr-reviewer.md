@@ -14,6 +14,9 @@ permissions:
     resource: "quality-*"
     effect: allow
   - action: skill
+    resource: "lang-*"
+    effect: allow
+  - action: skill
     resource: "review-*"
     effect: allow
   - action: shell

@@ -12,8 +12,10 @@ test("registers the cheap mechanic subagent with an edit-and-shell allowlist", a
   expect(agent?.system).toContain("exactly the described change")
   const rules = agent?.permissions as AgentPermission[]
   for (const action of ["read", "grep", "glob", "edit", "shell"]) expect(permissionEffect(rules, action)).toBe("allow")
-  for (const action of ["skill", "execute", "subagent", "question", "webfetch", "websearch", "some_plugin_tool"])
+  for (const action of ["execute", "subagent", "question", "webfetch", "websearch", "some_plugin_tool"])
     expect(permissionEffect(rules, action)).toBe("deny")
+  for (const skill of ["quality-code-design", "lang-rust"]) expect(permissionEffect(rules, "skill", skill)).toBe("allow")
+  expect(permissionEffect(rules, "skill", "beads-guide")).toBe("deny")
   expect(permissionEffect(rules, "read", "src/.env")).toBe("ask")
   expect(permissionEffect(rules, "read", "src/.env.local")).toBe("ask")
   expect(permissionEffect(rules, "read", "src/.env.example")).toBe("allow")

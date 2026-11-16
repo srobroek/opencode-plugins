@@ -30,6 +30,12 @@ permissions:
   - action: skill
     resource: repomix
     effect: allow
+  - action: skill
+    resource: "quality-*"
+    effect: allow
+  - action: skill
+    resource: "lang-*"
+    effect: allow
   - action: execute
     resource: "*"
     effect: allow
