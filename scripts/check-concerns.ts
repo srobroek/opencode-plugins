@@ -43,7 +43,7 @@ export const SPEC_FILE = "plugins/toolchain/skills/toolchain-languages/reference
 export const SHARED_FILE = "plugins/toolchain/skills/toolchain-languages/references/shared-tools.md"
 export const GROUPS = ["testing", "quality", "iac"]
 export const STATUSES = ["active", "maintenance", "beta", "pre-1.0", "preview"]
-export const LANGUAGE_HEADER = ["Concern", "Default", "Maintenance", "Alternatives", "Use both when", "Run", "Avoid"]
+export const LANGUAGE_HEADER = ["Concern", "Default", "Maintenance", "Install", "Alternatives", "Use both when", "Run", "Avoid"]
 
 const CONCERN_HEADER = ["Id", "Name", "Group", "Definition", "N/A allowed for", "Run must include"]
 const KIND_HEADER = ["Kind", "Meaning"]
@@ -86,7 +86,8 @@ export function parseTable(text: string, heading: string): Table | undefined {
   for (let i = first; i < end && lines[i]?.trimStart().startsWith("|"); i++)
     block.push({ line: i + 1, cells: splitRow(lines[i] ?? "") })
   const [head, separator, ...rows] = block
-  if (!head || !separator?.cells.every((c) => /^:?-+:?$/.test(c))) return undefined
+  if (!head || !separator) return undefined
+  if (!separator.cells.every((c) => /^:?-+:?$/.test(c))) return undefined
   return { line: head.line, header: head.cells, rows }
 }
 
@@ -199,14 +200,23 @@ function countAlternatives(cell: string): number | undefined {
 
 /** Maintenance cell problem, or undefined when valid. */
 function maintenanceProblem(cell: string, checked: string | undefined): string | undefined {
-  const m = /^(\S+) · (\S+) · (\S+)$/.exec(cell)
-  if (!m) return `Maintenance must be "<version> · YYYY-MM-DD · <status>", found "${cell}"`
+  const m = /^>= (\S+) · (\S+) · (\S+)$/.exec(cell)
+  if (!m) return `Maintenance must be ">= <min version> · YYYY-MM-DD · <status>", found "${cell}"`
   const [, , date = "", status = ""] = m
   if (!isDate(date)) return `Maintenance date "${date}" is not YYYY-MM-DD`
   if (status === "deprecated" || status === "archived") return `default tool is ${status}`
   if (!STATUSES.includes(status)) return `unknown status "${status}"`
   if (checked && date > checked) return `Maintenance date ${date} is after Checked ${checked}`
   return undefined
+}
+
+const INSTALL = /^`([^`]*)` · `([^`]*)`$/
+
+/** Install cell problem for a tool default: two non-empty backticked commands, detect then install. */
+function installProblem(cell: string): string | undefined {
+  const m = INSTALL.exec(cell)
+  if (m?.[1]?.trim() && m[2]?.trim()) return undefined
+  return `Install must be "\`<detect command>\` · \`<install command>\`", found "${cell}"`
 }
 
 const applicableGroups = (kind: string) => (kind === "iac" ? GROUPS : GROUPS.filter((g) => g !== "iac"))
@@ -305,7 +315,7 @@ function checkFile(ctx: Context, lang: Language, file: string, text: string, own
       bad(row.line, `expected ${LANGUAGE_HEADER.length} cells, found ${row.cells.length}`)
       continue
     }
-    const [concernCell = "", def = "", maint = "", alts = "", , run = ""] = row.cells
+    const [concernCell = "", def = "", maint = "", install = "", alts = "", , run = ""] = row.cells
     const empty = LANGUAGE_HEADER.filter((_, i) => row.cells[i] === "")
     if (empty.length > 0) bad(row.line, `empty cell: ${empty.join(", ")}`)
     const id = /^`([^`]+)`$/.exec(concernCell)?.[1]
@@ -330,7 +340,7 @@ function checkFile(ctx: Context, lang: Language, file: string, text: string, own
     if (index < lastIndex) bad(row.line, `concern "${id}" is out of spec order`)
     lastIndex = Math.max(lastIndex, index)
 
-    findings.push(...checkDefault(ctx, lang, concern, { file, line: row.line, def, maint, checked }))
+    findings.push(...checkDefault(ctx, lang, concern, { file, line: row.line, def, maint, install, checked }))
     const count = countAlternatives(alts)
     if (alts === "") {
       // reported as an empty cell
@@ -380,29 +390,36 @@ function checkDefault(
   ctx: Context,
   lang: Language,
   concern: Concern,
-  at: Where & { def: string; maint: string; checked: string | undefined },
+  at: Where & { def: string; maint: string; install: string; checked: string | undefined },
 ): Finding[] {
   const findings: Finding[] = []
   const bad = (reason: string) => findings.push({ file: at.file, line: at.line, reason })
   const kind = classifyDefault(at.def)
   const id = concern.id
   const needsDash = (what: string) => at.maint !== "-" && bad(`Maintenance must be "-" for ${what}`)
+  const needsInstall = (expected: string) =>
+    at.install !== expected && bad(`Install must be "${expected}" for this Default, found "${at.install}"`)
   switch (kind.type) {
     case "unknown":
       bad(`unknown Default "${at.def}"; use \`tool\`, Built-in:, Shared:, Inherits:, N/A: or No maintained tool:`)
       break
     case "tool": {
-      const problem = maintenanceProblem(at.maint, at.checked)
+      const problem = maintenanceProblem(at.maint, at.checked) ?? installProblem(at.install)
       if (problem) bad(problem)
       break
     }
     case "builtin": {
       const problem = at.maint === "-" ? undefined : maintenanceProblem(at.maint, at.checked)
       if (problem) bad(problem)
+      if (at.install !== "Built-in") {
+        const install = installProblem(at.install)
+        if (install) bad(`${install} (or "Built-in")`)
+      }
       break
     }
     case "shared": {
       needsDash("Shared")
+      needsInstall("Shared")
       const covers = ctx.shared.get(kind.id)
       if (!covers) bad(`shared tool "${kind.id}" is not in shared-tools.md`)
       else if (!covers.includes(id)) bad(`shared tool "${kind.id}" does not list concern "${id}"`)
@@ -410,15 +427,18 @@ function checkDefault(
     }
     case "inherits": {
       needsDash("Inherits")
+      needsInstall("Inherits")
       findings.push(...checkInherits(ctx, lang, id, kind.id, at))
       break
     }
     case "na":
       needsDash("N/A")
+      needsInstall("-")
       if (!concern.naAllowed.includes(lang.kind)) bad(`N/A is not allowed for kind ${lang.kind} on concern "${id}"`)
       break
     case "none":
       needsDash("No maintained tool")
+      needsInstall("-")
       break
   }
   return findings

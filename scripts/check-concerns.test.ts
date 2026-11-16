@@ -131,17 +131,24 @@ describe("language file findings", () => {
     ["unknown concern id", PY_QUALITY, "| `lint` |", "| `lintt` |", 'unknown concern id "lintt"'],
     ["duplicate row", PY_QUALITY, "| `types` |", "| `lint` |", 'duplicate concern "lint"'],
     ["concern cell without backticks", PY_QUALITY, "| `lint` |", "| lint |", "Concern cell must be"],
-    ["empty cell", PY_QUALITY, "| `ruff` | 0.9.0 · 2026-01-05 · active | None | - |", "| `ruff` | 0.9.0 · 2026-01-05 · active | None |  |", "empty cell: Use both when"],
-    ["wrong cell count", PY_QUALITY, "| every-pr | - |\n| `types`", "| every-pr |\n| `types`", "expected 7 cells"],
+    ["empty cell", PY_QUALITY, "| None | - | every-pr | - |", "| None |  | every-pr | - |", "empty cell: Use both when"],
+    ["wrong cell count", PY_QUALITY, "| every-pr | - |\n| `types`", "| every-pr |\n| `types`", "expected 8 cells"],
     ["iac concern in a non-iac language", PY_QUALITY, "| `types` |", "| `drift` |", "does not apply to kind managed"],
     ["unknown Default", PY_QUALITY, "`ruff` |", "ruff |", 'unknown Default "ruff"'],
     ["deprecated tool", PY_QUALITY, "0.9.0 · 2026-01-05 · active", "0.9.0 · 2026-01-05 · deprecated", "default tool is deprecated"],
     ["unknown status", PY_QUALITY, "0.9.0 · 2026-01-05 · active", "0.9.0 · 2026-01-05 · stable", 'unknown status "stable"'],
     ["malformed Maintenance", PY_QUALITY, "0.9.0 · 2026-01-05 · active", "0.9.0", "Maintenance must be"],
+    ["exact version pin", PY_QUALITY, ">= 0.9.0", "0.9.0", "Maintenance must be"],
+    ["Install without an install command", PY_QUALITY, "`ruff --version` · `uv tool install ruff`", "`ruff --version`", "Install must be"],
+    ["Install with an empty command", PY_QUALITY, "`ruff --version` · `uv tool install ruff`", "`ruff --version` · ``", "Install must be"],
+    ["Install as plain text", PY_QUALITY, "`ruff --version` · `uv tool install ruff`", "uv tool install ruff", "Install must be"],
+    ["Shared with a tool Install", TF, "Shared: tflint-shared | - | Shared", "Shared: tflint-shared | - | `a` · `b`", 'Install must be "Shared"'],
+    ["Inherits with a tool Install", TF, "Inherits: py | - | Inherits", "Inherits: py | - | `a` · `b`", 'Install must be "Inherits"'],
+    ["N/A with an Install", SH, "types` | N/A: shell has no static types | - | -", "types` | N/A: shell has no static types | - | `a` · `b`", 'Install must be "-"'],
     ["Maintenance after Checked", PY_QUALITY, "2026-01-05", "2026-01-11", "is after Checked"],
     ["Maintenance not a date", PY_QUALITY, "2026-01-05", "2026-13-45", "is not YYYY-MM-DD"],
     ["Shared with a version", TF, "Shared: tflint-shared | - |", "Shared: tflint-shared | 1.0 · 2026-01-01 · active |", 'must be "-" for Shared'],
-    ["N/A not allowed for kind", PY_QUALITY, "| `mypy` | 1.14.0 · 2026-01-04 · active |", "| N/A: skipped | - |", "N/A is not allowed for kind managed"],
+    ["N/A not allowed for kind", PY_QUALITY, "`mypy` | >= 1.14.0 · 2026-01-04 · active | `mypy --version` · `uv tool install mypy` |", "N/A: skipped | - | - |", "N/A is not allowed for kind managed"],
     ["unknown shared id", TF, "Shared: tflint-shared", "Shared: ghost", 'shared tool "ghost" is not in shared-tools.md'],
     ["shared tool lacks the concern", TF, "| `types` | N/A: HCL is validated by the provider", "| `types` | Shared: tflint-shared", 'does not list concern "types"'],
     ["Inherits unknown language", TF, "Inherits: py", "Inherits: zz", "is not a language in the spec"],
@@ -175,12 +182,18 @@ describe("language file findings", () => {
   test("N/A is accepted where the kind allows it, with Run `-`", () => {
     expect(reasons(repo(), "sh")).toEqual([])
   })
+  test("Built-in accepts Maintenance and Install of `-` or `Built-in`", () => {
+    const root = repo({
+      [SH]: ["`bats` | >= 1.11.0 · 2026-01-06 · active | `bats --version` · `brew install bats-core`", "Built-in: bats | - | Built-in"],
+    })
+    expect(reasons(root, "sh")).toEqual([])
+  })
   test("Inherits chain is rejected", () => {
-    const root = repo({ [SH]: ["`bats` | 1.11.0 · 2026-01-06 · active", "Inherits: py | -"], [TF]: ["Inherits: py", "Inherits: sh"] })
+    const root = repo({ [SH]: ["`bats` | >= 1.11.0 · 2026-01-06 · active", "Inherits: py | -"], [TF]: ["Inherits: py", "Inherits: sh"] })
     expect(reasons(root, "tf").some((r) => r.includes("no chains"))).toBe(true)
   })
   test("Inherits from a language whose Default is N/A is rejected", () => {
-    const root = repo({ [SH]: ["`bats` | 1.11.0 · 2026-01-06 · active", "N/A: none | -"], [TF]: ["Inherits: py", "Inherits: sh"] })
+    const root = repo({ [SH]: ["`bats` | >= 1.11.0 · 2026-01-06 · active", "N/A: none | -"], [TF]: ["Inherits: py", "Inherits: sh"] })
     expect(reasons(root, "tf").some((r) => r.includes('has N/A for "unit"'))).toBe(true)
   })
 })
