@@ -19,11 +19,14 @@ freely. Pin `aws-cdk-lib` and every `-alpha` package to one version in the proje
 | Concern | Default | Maintenance | Install | Alternatives | Use both when | Run | Avoid |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `test-runner` | `vitest` with `aws-cdk-lib/assertions` (`Template.fromStack`, `hasResourceProperties`, `Match`, `Capture`, `resourceCountIs`, `Annotations.fromStack`) | >= 5.0.0 · 2026-11-02 · active | `vitest --version` · `npm install --save-dev vitest` | `jest`: the project already runs it, since it is AWS's documented path and ships `aws-cdk-lib/testhelpers/jest-autoclean` | - | every-pr | Synthesizing to the default temp `outdir` under Vitest without cleanup: set an explicit `outdir` or call `CloudAssembly.cleanupTemporaryDirectories()` in `afterAll` |
+| `assertions` | Built-in: `aws-cdk-lib/assertions` (`Template`, `Match`, `Capture`) with the runner's `expect` | - | Built-in | None | - | every-pr | Asserting on the whole template instead of resources by name and property |
+| `watch` | N/A: the synth-and-assert loop uses the TypeScript watch (`Inherits: typescript`) | - | - | None | - | - | - |
 | `property` | Inherits: typescript | - | Inherits | None | - | - | Property tests over whole stacks: synth is slow, so test pure prop-mapping helpers only |
 | `fuzz` | N/A: no untrusted input parser in an IaC app | - | - | None | - | - | - |
 | `fuzz-continuous` | N/A: no untrusted input parser in an IaC app | - | - | None | - | - | - |
 | `mutation` | Inherits: typescript | - | Inherits | None | - | diff-pr + scheduled | Mutating whole stacks: declarative mutants are hard to judge; scope it to pure helpers |
 | `snapshot` | Built-in: the test runner's snapshot of `Template.fromStack(stack).toJSON()` for stable L3 constructs, with asset hashes normalised | - | Built-in | None | - | every-pr | Snapshots as the only test: CDK upgrades change templates; assert IAM, encryption and public access by name first |
+| `component` | N/A: no UI | - | - | None | - | - | - |
 | `concurrency` | N/A: synth is single-process and holds no shared state | - | - | None | - | - | - |
 | `coverage` | N/A: coverage of declarative construct code says little; assertions on the template are the measure | - | - | None | - | - | - |
 | `benchmark` | N/A: infrastructure is not benchmarked | - | - | None | - | - | - |
