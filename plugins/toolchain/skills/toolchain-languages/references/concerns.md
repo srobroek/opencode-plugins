@@ -21,6 +21,9 @@ project is missing.
 
 - Detect the tool with the first command in the row's Install cell before you rely on it.
   Detect commands never install or sync: run them before you ask.
+- Detect offline: read the project's installed tree (`node_modules/.bin`, `uv pip show`,
+  `go.mod` tool directives, `cargo <sub> --version`); never use a probe that falls back to
+  PATH or the network.
 - When it is missing, recommend the install command from the Install cell and ask the user
   for permission before you run it. Never install a tool, add a dependency or change a
   lockfile without that permission.

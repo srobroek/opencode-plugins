@@ -49,7 +49,7 @@ project has `uv.lock`, `poetry run` with `poetry.lock`.
 
 The tool tables are in `lang-python-libraries` ([testing.md](../lang-python-libraries/references/testing.md)
 and [quality.md](../lang-python-libraries/references/quality.md)). Detect a tool with the
-row's detect command (`uv run --locked <tool> --version`). When it is missing, recommend
+row's detect command (`uv pip show <package>`, which reads the project environment only and makes no changes). Without uv, use `python -m pip show <package>` inside the project venv. When it is missing, recommend
 the row's install command (`uv add --dev <package>`) and ask permission before you run it:
 it changes `pyproject.toml` and `uv.lock`. Use the latest release uv offers; the tables
 give a minimum, not a pin. When the user declines, report the step as not run.

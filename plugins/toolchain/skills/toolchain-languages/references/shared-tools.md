@@ -49,8 +49,8 @@ install page.
 | `contracts` | The style's gate from [Contracts by API style](#contracts-by-api-style) | Install that gate's tool |
 | `pact` | The language library in the manifest | The language library, see [Pact with containers](#pact-with-containers) |
 | `buf` | `buf --version` | `brew install bufbuild/buf/buf` |
-| `graphql-inspector` | `graphql-inspector --version` | A dev dependency: `npm install --save-dev @graphql-inspector/cli` |
-| `asyncapi-cli` | `asyncapi --version` | A dev dependency: `npm install --save-dev @asyncapi/cli` |
+| `graphql-inspector` | `node_modules/.bin/graphql-inspector --version` | A dev dependency: `npm install --save-dev @graphql-inspector/cli` |
+| `asyncapi-cli` | `node_modules/.bin/asyncapi --version` | A dev dependency: `npm install --save-dev @asyncapi/cli` |
 | `schemathesis` | `schemathesis --version` | `uv tool install schemathesis` |
 | `hurl` | `hurl --version` | `brew install hurl` |
 | `oasdiff` | `oasdiff --version` | `brew install oasdiff` |
