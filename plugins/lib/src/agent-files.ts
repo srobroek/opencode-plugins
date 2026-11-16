@@ -22,6 +22,8 @@ export type AgentFile = {
   /** Kept out of listings and the subagent catalog; callers spawn it by id. */
   hidden?: boolean
   steps?: number
+  /** Display colour in the agent list, such as a hex value or a theme name. */
+  color?: string
   request?: { headers: Record<string, string> }
   permissions: AgentPermission[]
   /** The body after the frontmatter, used as the agent's system prompt. */
@@ -101,7 +103,8 @@ export function parseAgentFile(text: string, id: string): AgentFile {
       const steps = Number(scalar(value))
       if (!Number.isInteger(steps) || steps <= 0) throw new Error(`agent ${id}: steps must be a positive integer`)
       agent.steps = steps
-    } else if (key === "request") {
+    } else if (key === "color") agent.color = scalar(value)
+    else if (key === "request") {
       if (value.trim() !== "") throw new Error(`agent ${id}: request must be a map`)
       section = "request"
     } else if (key === "permissions") {
@@ -152,6 +155,7 @@ type MutableAgent = {
   hidden?: boolean
   system?: string
   steps?: number
+  color?: string
   request?: { headers?: Record<string, string> }
   permissions?: AgentPermission[]
 }
@@ -170,6 +174,7 @@ export function shapeAgent(agent: MutableAgent, file: AgentFile, created: boolea
   // The host fills a new agent's `hidden` with false before the callback runs.
   if (file.hidden !== undefined && (created || agent.hidden === undefined)) agent.hidden = file.hidden
   if (file.steps !== undefined) agent.steps ??= file.steps
+  if (file.color !== undefined) agent.color ??= file.color
   if (file.request) agent.request = { ...agent.request, headers: { ...file.request.headers, ...agent.request?.headers } }
   agent.permissions = [...(agent.permissions ?? []), ...file.permissions]
 }
