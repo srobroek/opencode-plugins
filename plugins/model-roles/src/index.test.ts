@@ -1,4 +1,4 @@
-import { describe, expect, setSystemTime, test } from "bun:test"
+import { describe, expect, jest, setSystemTime, test } from "bun:test"
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
@@ -8,7 +8,7 @@ import { withOptionalString } from "../../lib/src/tool-schema.ts"
 import { WORKTREE_PARAM, WORKTREE_PARAM_DESCRIPTION } from "../../subagent-worktree/src/lane.ts"
 import reference from "./fixtures/reference.json"
 import work from "./fixtures/work-models.json"
-import plugin, { MAX_REREGISTER, type ModelRef, readAgents, readTiers, spawnTarget } from "./index.ts"
+import plugin, { CHILD_LOOKUP_MS, MAX_REREGISTER, type ModelRef, readAgents, readTiers, spawnTarget } from "./index.ts"
 
 type Agent = { id: string; model?: ModelRef; request?: { headers?: Record<string, string> } }
 type Model = { providerID: string; id: string; variants: { id: string }[]; cost?: { input: number }[] }
@@ -490,7 +490,8 @@ describe("subagent model guard", () => {
     await expect(host.spawn("subagent", { agent: "plain", prompt: "x" })).rejects.toThrow(/explore \(anthropic\/claude-haiku\)/)
     await host.spawn("subagent", { agent: "general", prompt: "x" })
     await host.spawn("subagent", { agent: "explore", prompt: "x" })
-    await host.spawn("subagent", { agent: "plain", prompt: "x", sessionID: "ses_2" })
+    // A resume of a child with no snapshot is judged on the child's own model too.
+    await expect(host.spawn("subagent", { agent: "plain", prompt: "x", sessionID: "ses_2" })).rejects.toThrow(/resume would run on .*claude-opus/)
     await host.spawn("shell", { agent: "plain", prompt: "x" })
     host.close()
     await cleanup()
@@ -2835,31 +2836,216 @@ describe("a child keeps its resolved model", () => {
     })
   })
 
-  test("a snapshot model the guard now refuses is not reused: the resume resolves normally with a warning", async () => {
+  describe("the guard on a resumed child", () => {
     const priced: Model[] = [
       { providerID: "amazon-bedrock", id: "claude-opus", variants: [], cost: [{ input: 12 }] },
       { providerID: "amazon-bedrock", id: "claude-sonnet", variants: [{ id: "high" }], cost: [{ input: 2 }] },
       { providerID: "anthropic", id: "claude-haiku", variants: [], cost: [{ input: 0.1 }] },
     ]
-    const host = createHost({ agents: [{ id: "plain" }], models: priced, options })
-    host.sessions.set("r", { id: "r" })
-    const cleanup = await setup(host)
-    const input = await host.spawn("subagent", { agent: "plain", prompt: "x", model: "amazon-bedrock/claude-opus" }, "build", "r", "call-1")
-    created(host, "c", "plain", { providerID: "amazon-bedrock", id: "claude-opus" })
-    await settle()
-    await host.spawnDone(input, { sessionID: "c" }, "r", "call-1")
-    host.close()
-    await cleanup()
-    const again = createHost({ agents: [{ id: "plain" }], models: priced, options: { ...options, guard: true } })
-    for (const [key, value] of host.storage) again.storage.set(key, value)
-    again.sessions.set("r", { id: "r" })
-    const cleanupAgain = await setup(again)
-    expect(await again.spawn("subagent", resume, "build", "r", "call-2")).toEqual(resume)
-    const [receipt] = receipts(again)
-    expect(receipt?.rule).not.toBe("snapshot")
-    expect(receipt?.warnings[0]).toContain("snapshot model amazon-bedrock/claude-opus is not usable")
-    again.close()
-    await cleanupAgain()
+    const opus = { providerID: "amazon-bedrock", id: "claude-opus" }
+    const opusOptions = (task: string[]) => ({ roles: { task }, agents: { general: "task" } })
+
+    /** A child spawned on the tier's first model while the guard was off, then resumed with the guard on. */
+    const guardedReload = async (task: string[], guard: unknown = true, extra: object = {}) => {
+      const host = createHost({ agents: [{ id: "plain" }], models: priced, options: opusOptions(task) })
+      host.sessions.set("r", { id: "r" })
+      const cleanup = await setup(host)
+      const input = await host.spawn("subagent", { agent: "plain", prompt: "x", tier: "task" }, "build", "r", "call-1")
+      created(host, "c", "plain", opus)
+      await settle()
+      await host.spawnDone(input, { sessionID: "c" }, "r", "call-1")
+      host.close()
+      await cleanup()
+      const again = createHost({ agents: [{ id: "plain" }], models: priced, options: { ...opusOptions(task), guard, ...extra } as never })
+      for (const [key, value] of host.storage) again.storage.set(key, value)
+      again.sessions.set("r", { id: "r" })
+      return { again, cleanupAgain: await setup(again) }
+    }
+
+    test("a resumed child on a now-guarded model is switched to the tier's first allowed candidate, and the receipt warns", async () => {
+      const { again, cleanupAgain } = await guardedReload(["amazon-bedrock/claude-opus", "amazon-bedrock/claude-sonnet#high", "anthropic/claude-haiku"])
+      const input = await again.spawn("subagent", resume, "build", "r", "call-2")
+      expect(methods(again, "switchModel").map((c) => c.input)).toEqual([{ sessionID: "c", model: { providerID: "amazon-bedrock", id: "claude-sonnet", variant: "high" } }])
+      expect(input).toEqual({ ...resume, model: sonnetHigh })
+      const [receipt] = receipts(again)
+      expect(receipt).toMatchObject({ rule: "guard-reroute", model: sonnetHigh })
+      expect(receipt?.warnings[0]).toContain("amazon-bedrock/claude-opus is refused by the guard; switched to amazon-bedrock/claude-sonnet#high (tier task)")
+      again.close()
+      await cleanupAgain()
+    })
+
+    test("the switch updates the snapshot with the guard-reroute rule and stores it", async () => {
+      const { again, cleanupAgain } = await guardedReload(["amazon-bedrock/claude-opus", "anthropic/claude-haiku"])
+      await again.spawn("subagent", resume, "build", "r", "call-2")
+      await settle()
+      expect(again.storage.get("spawn-model:c")).toMatchObject({ model: "anthropic/claude-haiku", tier: "task", rule: "guard-reroute" })
+      // The next resume reuses the new model without another switch.
+      expect((await again.spawn("subagent", resume, "build", "r", "call-3")).model).toBe("anthropic/claude-haiku")
+      expect(methods(again, "switchModel")).toHaveLength(1)
+      again.close()
+      await cleanupAgain()
+    })
+
+    test("a tier with no candidate the guard accepts refuses the resume, naming the model and the tier", async () => {
+      const { again, cleanupAgain } = await guardedReload(["amazon-bedrock/claude-opus"])
+      await expect(again.spawn("subagent", resume, "build", "r", "call-2")).rejects.toThrow(/resume would run on amazon-bedrock\/claude-opus.*no candidate of tier 'task'/s)
+      expect(methods(again, "switchModel")).toHaveLength(0)
+      again.close()
+      await cleanupAgain()
+    })
+
+    test("a guard-refused resume is not marked running: the child's outcome record is unchanged", async () => {
+      const { again, cleanupAgain } = await guardedReload(["amazon-bedrock/claude-opus"])
+      const before = structuredClone(again.storage.get("outcome:c"))
+      expect(before).toMatchObject({ agent: "plain" })
+      await expect(again.spawn("subagent", resume, "build", "r", "call-2")).rejects.toThrow(/resume would run on/)
+      await settle()
+      expect(again.storage.get("outcome:c")).toEqual(before)
+      again.close()
+      await cleanupAgain()
+    })
+
+    test("a model the guard still allows resumes unchanged", async () => {
+      const { again, cleanupAgain } = await guardedReload(["amazon-bedrock/claude-opus", "anthropic/claude-haiku"], { allowModels: ["amazon-bedrock/claude-opus"] })
+      expect(await again.spawn("subagent", resume, "build", "r", "call-2")).toEqual({ ...resume, model: "amazon-bedrock/claude-opus" })
+      expect(methods(again, "switchModel")).toHaveLength(0)
+      expect(receipts(again)[0]?.rule).toBe("snapshot")
+      again.close()
+      await cleanupAgain()
+    })
+
+    test("an explicit model on the resume that the guard refuses is refused", async () => {
+      const { again, cleanupAgain } = await guardedReload(["amazon-bedrock/claude-sonnet#high"])
+      await expect(again.spawn("subagent", { ...resume, model: "amazon-bedrock/claude-opus" }, "build", "r", "call-2")).rejects.toThrow(/sets model amazon-bedrock\/claude-opus itself/)
+      expect(methods(again, "switchModel")).toHaveLength(0)
+      again.close()
+      await cleanupAgain()
+    })
+
+    const failing = (again: ReturnType<typeof createHost>, how: "reject" | "hang") => {
+      let land: (() => void) | undefined
+      again.context.session.switchModel = (payload: unknown) => {
+        again.calls.push({ method: "switchModel", input: payload })
+        if (how === "reject") return Promise.reject(new Error("host refused"))
+        return new Promise<undefined>((resolve) => {
+          land = () => resolve(undefined)
+        })
+      }
+      return () => land?.()
+    }
+    const tiers = ["amazon-bedrock/claude-opus", "anthropic/claude-haiku"]
+
+    test("a guard switch the host rejects refuses the resume and keeps the old snapshot", async () => {
+      const { again, cleanupAgain } = await guardedReload(tiers)
+      failing(again, "reject")
+      await expect(again.spawn("subagent", resume, "build", "r", "call-2")).rejects.toThrow(/did not complete \(failed\)/)
+      await settle()
+      expect(again.storage.get("spawn-model:c")).toMatchObject({ model: "amazon-bedrock/claude-opus" })
+      expect(again.storage.get("spawn-model:c")).not.toHaveProperty("rule")
+      again.close()
+      await cleanupAgain()
+    })
+
+    test("a guard switch that times out refuses the resume", async () => {
+      const { again, cleanupAgain } = await guardedReload(tiers, true, { switchTimeoutMs: 20 })
+      failing(again, "hang")
+      await expect(again.spawn("subagent", resume, "build", "r", "call-2")).rejects.toThrow(/did not complete \(late\)/)
+      again.close()
+      await cleanupAgain()
+    })
+
+    test("a guard switch that lands after the timeout still persists the snapshot as guard-reroute", async () => {
+      const { again, cleanupAgain } = await guardedReload(tiers, true, { switchTimeoutMs: 20 })
+      const land = failing(again, "hang")
+      await expect(again.spawn("subagent", resume, "build", "r", "call-2")).rejects.toThrow(/\(late\)/)
+      expect(again.storage.get("spawn-model:c")).not.toHaveProperty("rule")
+      land()
+      await settle()
+      expect(again.storage.get("spawn-model:c")).toMatchObject({ model: "anthropic/claude-haiku", tier: "task", rule: "guard-reroute" })
+      again.close()
+      await cleanupAgain()
+    })
+
+    describe("a child with no snapshot", () => {
+      /** Child `c` was never snapshotted; its session says which model it runs on. */
+      const unsnapshotted = async (task: string[], session: Record<string, unknown> | undefined, spawnRole = "task") => {
+        const host = createHost({ agents: [{ id: "plain" }], models: priced, options: { ...opusOptions(task), guard: true } as never })
+        host.sessions.set("r", { id: "r" })
+        if (session !== undefined) host.sessions.set("c", { id: "c", parentID: "r", agent: "plain", ...session })
+        host.storage.set("spawn-role:c", spawnRole)
+        return { host, cleanup: await setup(host) }
+      }
+
+      test("a known allowed model resumes unchanged and gets a fresh snapshot", async () => {
+        const { host, cleanup } = await unsnapshotted(tiers, { model: { providerID: "anthropic", id: "claude-haiku" } })
+        expect(await host.spawn("subagent", resume, "build", "r", "call-2")).toEqual({ ...resume, model: "anthropic/claude-haiku" })
+        await settle()
+        expect(methods(host, "switchModel")).toHaveLength(0)
+        expect(host.storage.get("spawn-model:c")).toMatchObject({ model: "anthropic/claude-haiku", tier: "task" })
+        host.close()
+        await cleanup()
+      })
+
+      test("a known guarded model is switched to the tier's allowed candidate and snapshotted as guard-reroute", async () => {
+        const { host, cleanup } = await unsnapshotted(tiers, { model: opus })
+        const input = await host.spawn("subagent", resume, "build", "r", "call-2")
+        expect(methods(host, "switchModel").map((c) => c.input)).toEqual([{ sessionID: "c", model: { providerID: "anthropic", id: "claude-haiku" } }])
+        expect(input).toEqual({ ...resume, model: "anthropic/claude-haiku" })
+        await settle()
+        expect(host.storage.get("spawn-model:c")).toMatchObject({ model: "anthropic/claude-haiku", rule: "guard-reroute" })
+        expect(receipts(host)[0]).toMatchObject({ rule: "guard-reroute" })
+        host.close()
+        await cleanup()
+      })
+
+      test("a known guarded model with no allowed candidate refuses the resume", async () => {
+        const { host, cleanup } = await unsnapshotted(["amazon-bedrock/claude-opus"], { model: opus })
+        await expect(host.spawn("subagent", resume, "build", "r", "call-2")).rejects.toThrow(/no candidate of tier 'task'/)
+        expect(methods(host, "switchModel")).toHaveLength(0)
+        host.close()
+        await cleanup()
+      })
+
+      test("a child lookup that never settles is bounded: the resume proceeds, a reload completes, and a late answer writes nothing", async () => {
+        const { host, cleanup } = await unsnapshotted(tiers, { model: opus })
+        let answer: (session: unknown) => void = () => {}
+        host.setSessionGet((id) => (id === "c" ? new Promise((resolve) => (answer = resolve)) : Promise.resolve({ id })))
+        jest.useFakeTimers()
+        try {
+          const resumed = host.spawn("subagent", resume, "build", "r", "call-2")
+          const flush = async () => {
+            for (let i = 0; i < 20; i++) await Promise.resolve()
+          }
+          await flush()
+          host.emit({ type: "config.updated", data: {} })
+          await flush()
+          jest.advanceTimersByTime(CHILD_LOOKUP_MS)
+          expect(await resumed).toEqual(resume)
+          await flush()
+          // The reload that waited on the resume is done: a spawn no longer waits on it.
+          await host.spawn("subagent", { agent: "plain", prompt: "x", tier: "task" }, "build", "r", "call-3")
+          expect(receipts(host).some((r) => r.warnings.includes("model unknown; guard not applied"))).toBe(true)
+          answer({ id: "c", parentID: "r", agent: "plain", model: opus })
+          await flush()
+        } finally {
+          jest.useRealTimers()
+        }
+        await settle()
+        expect(host.storage.get("spawn-model:c")).toBeUndefined()
+        expect(methods(host, "switchModel")).toHaveLength(0)
+        host.close()
+        await cleanup()
+      })
+
+      test("an unknown model resumes with an explicit warning that the guard was not applied", async () => {
+        const { host, cleanup } = await unsnapshotted(tiers, undefined)
+        expect(await host.spawn("subagent", resume, "build", "r", "call-2")).toEqual(resume)
+        expect(receipts(host)[0]?.warnings).toEqual(["model unknown; guard not applied"])
+        expect(methods(host, "switchModel")).toHaveLength(0)
+        host.close()
+        await cleanup()
+      })
+    })
   })
 
   test("a switch that lands after the timeout still updates the snapshot", async () => {
