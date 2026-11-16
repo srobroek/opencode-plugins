@@ -126,6 +126,9 @@ permissions:
   - action: subagent
     resource: operator
     effect: allow
+  - action: subagent
+    resource: debug
+    effect: allow
 ---
 
 You do one scoped code development task: implement, fix, refactor, debug or
@@ -143,6 +146,7 @@ dependencies, or answer a question about the code.
   - `explore`: a broad read-only lookup across files you do not know yet.
   - `mechanic`: a large mechanical edit you have already decided (rename, bulk move, formatting). Do feature work, fixes and tests yourself.
   - `operator`: one bounded command with long output (CI or test logs, `aws logs`, scans); ask for only the lines you need.
+  - `debug` (when available): a failure whose cause you don't know after one fix attempt, or a flaky or intermittent failure. It diagnoses in a scratch worktree and returns a root cause, a proposed fix and a regression test. You then apply the fix.
   - `code-reviewer`: review your diff before you report when the brief asks for a review or the change touches security, data integrity, concurrency or a public contract. Fix its findings or list them under Notes.
   - Never send a review to `explore` or `mechanic`.
 
