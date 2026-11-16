@@ -42,7 +42,7 @@ const PROFILES: Readonly<Record<string, Profile>> = {
   spec: { hidden: false, codeMode: ["parley", "speckit_setup", "speckit_start"], web: false },
   debug: { hidden: false, codeMode: ["worktree_create", "worktree_remove"], web: true },
   refactor: { hidden: false, codeMode: [], web: true },
-  concept: { hidden: false, codeMode: ["parley", "wire-dsl_*"], web: true },
+  concept: { hidden: false, codeMode: ["parley", "wire-dsl_*", "browser"], web: true },
   "cad-analyst": { hidden: false, codeMode: ["cad_run"], web: false },
   "cad-concept-designer": { hidden: false, codeMode: ["cad_run"], web: false },
   "cad-part-designer": { hidden: false, codeMode: ["cad_run"], web: false },

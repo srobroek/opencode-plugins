@@ -76,6 +76,26 @@ describe("shipped agents", () => {
     expect(effect("concept", "shell", "git status --short")).toBe("allow")
     expect(effect("concept", "shell", "python3 -m http.server 8000")).toBe("allow")
   })
+  test.each([
+    "design-guide",
+    "design-prototype",
+    "design-upstream-preflight",
+    "ui-review",
+    "wireloom",
+    "html-wireframe",
+    "html-prototype",
+    "prototype-logic",
+    "grilling",
+    "debate",
+  ])("concept may load the %s skill, and not an unrelated one", (skill) => {
+    expect(effect("concept", "skill", skill)).toBe("allow")
+    expect(effect("concept", "skill", "dep-update")).toBe("deny")
+  })
+  test("concept may drive a browser and self-check a served prototype", () => {
+    expect(effect("concept", "browser")).toBe("allow")
+    expect(effect("concept", "shell", "curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8123/a.html")).toBe("allow")
+    expect(effect("concept", "shell", "curl -sS https://example.com")).toBe("ask")
+  })
   test("concept spawns design helpers but not coder", () => {
     expect(effect("concept", "subagent", "ui-ux-specialist")).toBe("allow")
     expect(effect("concept", "subagent", "design-critic")).toBe("allow")

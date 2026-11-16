@@ -71,6 +71,9 @@ permissions:
   - action: shell
     resource: "python3 -m http.server*"
     effect: allow
+  - action: shell
+    resource: "curl -sS -o /dev/null -w * http://127.0.0.1:*"
+    effect: allow
   - action: webfetch
     resource: "*"
     effect: allow
@@ -105,7 +108,28 @@ permissions:
     resource: "wireloom"
     effect: allow
   - action: skill
+    resource: "design-upstream-preflight"
+    effect: allow
+  - action: skill
+    resource: "ui-review"
+    effect: allow
+  - action: skill
+    resource: "html-wireframe"
+    effect: allow
+  - action: skill
+    resource: "html-prototype"
+    effect: allow
+  - action: skill
+    resource: "frontend-slides"
+    effect: allow
+  - action: skill
+    resource: "web-asset-generator"
+    effect: allow
+  - action: skill
     resource: "architecture-*"
+    effect: allow
+  - action: browser
+    resource: "*"
     effect: allow
   - action: execute
     resource: "*"
@@ -174,7 +198,10 @@ Each round ends with a `question`. With the parley plugin attached, use `tools.p
 - `wireloom` for inline SVG wireframes in Markdown; always available.
 - The `wire-dsl_*` tools, when that server is configured.
 - `prototype-logic` for state models.
-- To show an HTML prototype to the user, write it under `~/.opencode/concept/<slug>/` and serve it with `python3 -m http.server` (ask before running; shell asks by default).
+- The interactive-HTML route is `design-prototype`, then `design-upstream-preflight` for the upstream producer (`html-wireframe`, `html-prototype`, `frontend-slides`, `web-asset-generator`), then `ui-review` to check the result. Write the artifact under `~/.opencode/concept/<slug>/`.
+- Serve an interactive artifact with `python3 -m http.server "<port>" --bind 127.0.0.1` from its directory as a background shell process, and self-check it with `curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:<port>/<file>`. Stop the server before you report.
+- The browser tools are for inspection and reversible navigation only. Never use them to write files, publish, submit private data or change account state.
+- If an upstream skill is not installed, preflight asks you to edit the global OpenCode config, which you cannot. Stop, name the missing skill and the install command, and ask the user to run it. Do not substitute another route. The hosted `superdesign` route is not available to you.
 
 ## Helpers
 
