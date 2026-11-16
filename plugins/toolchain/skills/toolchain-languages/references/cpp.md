@@ -8,7 +8,7 @@ Checked 2026-11-16.
 
 | Concern | Default | Maintenance | Install | Alternatives | Use both when | Run | Avoid |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `test-runner` | `GoogleTest` | >= 1.18.0 · 2026-08-10 · active | `grep -rli gtest CMakeLists.txt conanfile.txt vcpkg.json` · `CMake FetchContent, conan gtest/1.18.0 or vcpkg install gtest` | `Catch2`: BDD-style sections and one header set (3.16.1, BSL-1.0); `doctest`: the fastest compile times of the three (2.5.3, MIT) | - | every-pr | No XML output in CI (use `--gtest_output=xml`); tests registered outside CTest |
+| `test-runner` | `GoogleTest` | >= 1.18.0 · 2026-08-10 · active | `grep -rli gtest CMakeLists.txt conanfile.txt vcpkg.json` · `CMake FetchContent, conan gtest/1.18.0 or vcpkg install gtest` | `Catch2`: nested sections and one header set (3.16.1, BSL-1.0); `doctest`: the fastest compile times of the three (2.5.3, MIT) | - | every-pr | No XML output in CI (use `--gtest_output=xml`); tests registered outside CTest |
 | `assertions` | Built-in: GoogleTest `EXPECT_*` and `ASSERT_*` (Catch2: `REQUIRE`, `CHECK`) | - | Built-in | None | - | every-pr | `ASSERT_*` in helper functions that return a value, which skips the failure |
 | `watch` | `watchexec` | >= 2.8.0 · 2026-10-06 · active | `watchexec --version` · `mise use watchexec` | None | - | on-demand | Watching the build directory, which retriggers the run; use `watchexec -e cpp,h -- ctest --test-dir build` |
 | `property` | `RapidCheck` | >= main · 2026-10-05 · active | `grep -rl rapidcheck CMakeLists.txt conanfile.txt vcpkg.json` · `CMake FetchContent pinned to a commit, or vcpkg install rapidcheck` | None | - | every-pr | Floating on `main`: it has no tagged releases, so pin a commit (the date here is the last commit); unseeded runs with no saved failing seed |
@@ -43,7 +43,7 @@ Checked 2026-11-16.
 ### test-runner
 
 - **GoogleTest**: wins on mocking with GoogleMock, CTest discovery and broad CI support; costs slower compile times and more boilerplate.
-- **Catch2**: wins on BDD sections and readable output; costs heavier compile times than doctest.
+- **Catch2**: wins on nested sections and readable output; costs heavier compile times than doctest.
 - **doctest**: wins on compile speed and tests next to the code; costs a smaller feature set.
 
 ### fuzz
