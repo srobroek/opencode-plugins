@@ -17,10 +17,11 @@ it, rerun that step, then continue. Prefer the project's own scripts (`bun run c
 | Step | Command |
 | --- | --- |
 | Install | The lockfile-respecting install: `bun install --frozen-lockfile`, `pnpm install --frozen-lockfile`, `npm ci`, `yarn install --immutable` |
-| Lint and format check | Selected project-local stack: `Biome` 2 (`biome check .`), or `ESLint` 10 flat config (`eslint .`) plus configured `Prettier` (`prettier --check .`); optional `Oxlint` 1 with `oxlint-tsgolint` for type-aware rules, not mandatory overlapping lint |
+| Lint and format check | Biome first: `biome check .` covers lint, format and import sorting. `ESLint` 10 flat config (`eslint .`) or `Prettier` (`prettier --check .`) only for a named gap, such as type-aware rules Biome lacks, Vue or Angular templates |
 | Type check | `tsc -b` when `tsconfig.json` has `references`, otherwise `tsc --noEmit` |
 | Test | The project's test script (`bun test`, `vitest run`, `npm test`, …) |
-| Fix | `biome check --write PATHS`, or `eslint --fix PATHS` and `prettier --write PATHS` |
+| Coverage | `vitest run --coverage` (`v8`), or `bun test --coverage --coverage-reporter=lcov` (lines and functions only) |
+| Fix | `biome check --write PATHS`, or `eslint --fix PATHS` and `prettier --write PATHS` for the gap |
 
 - After an edit that spans files or changes an exported signature, run the type
   check once before handing back, even when no other check is due: the project's
@@ -38,9 +39,25 @@ it, rerun that step, then continue. Prefer the project's own scripts (`bun run c
 - TypeScript 7's native compiler has no stable programmatic API. Validate framework
   checkers and embedded-language tooling before migration; keep their TypeScript 6
   compatibility path when needed. Run the framework-aware checker, not only `tsc`.
-- Run configured `Knip` 6 for unused files, exports and dependencies. Prefer its broader
-  coverage to archived `unimported`; do not describe `ts-prune` as abandoned without
-  checking its current status.
+- Run configured `Knip` for unused files, exports and dependencies. `unimported` is
+  deprecated; `ts-prune`, `ts-unused-exports` and `depcheck` are stale.
+- Complexity: Biome's `noExcessiveCognitiveComplexity` set to error with
+  `maxAllowedComplexity` 15 (its default severity is information, so it never fails
+  until you raise it). Do not add a second complexity gate.
+- Dependency audit: `bun audit` or `npm audit` on every PR and on a schedule; review
+  before `bun audit fix`. Use `osv-scanner` for several ecosystems.
+- Mutation: `stryker run --mutate <changed files>` with incremental mode on pull
+  requests, the full run on a schedule (`lang-typescript-testing` has the Bun runner and
+  its limits).
+- Public API breaks (published libraries): `api-extractor run` against the committed
+  `.api.md` report, plus `attw --pack .` and `publint` on every PR. API Extractor,
+  TypeDoc, typescript-eslint and the Bun Stryker runner need the TypeScript 6 API: keep
+  a `@typescript/typescript6` alias (or `typescript@^6`) beside TypeScript 7.
+- Docs: `typedoc` with warnings as errors; API Documenter when the API report is the contract.
+- Install policy: detect a tool with the first command in its row of the libraries
+  `testing.md` or `quality.md`, recommend the install command, and ask the user before
+  you add a dependency or change a lockfile. Use the latest release; the rows give a
+  minimum, not a pin. When a tool is missing and not approved, report that step as not run.
 - A test runner that finds no tests did not test anything; report it, do not call it
   a pass.
 - Fix mode on `.` rewrites files outside the task. Pass the touched paths, review the

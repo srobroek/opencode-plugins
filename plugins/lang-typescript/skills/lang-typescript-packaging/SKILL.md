@@ -72,8 +72,10 @@ for anyone installing the package alone.
 - Conditions match in order: `types` first, `default` last. With
   `moduleResolution` set to `nodenext` or `bundler`, TypeScript resolves through the
   same map.
-- Before publishing, run `npx publint` and `npx @arethetypeswrong/cli --pack .` to catch
-  wrong paths, missing types and ESM/CJS mismatches.
+- Before publishing, and on every PR for a library, run `publint` and
+  `attw --pack .` (`@arethetypeswrong/cli`) to catch wrong paths, missing types and
+  ESM/CJS mismatches. Use the project's dev dependency; ask before adding either. The
+  public surface itself is gated by API Extractor, see `lang-typescript-quality`.
 - `sideEffects: false` lets bundlers drop unused modules; leave it out (or list the
   files) when importing a module registers something.
 

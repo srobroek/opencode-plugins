@@ -1,5 +1,5 @@
 # TypeScript testing practice
-Checked 2026-11-12.
+Checked 2026-11-16.
 Runner idioms and tool choices for small TypeScript/JavaScript suites.
 Follow `quality-testing` for behavior selection, test budget, maintenance, and review.
 
@@ -141,17 +141,33 @@ test("round-trips every supported label", () => {
 
 ## Fuzzing, mutation testing, and coverage
 
-- Do start with properties for domain invariants. Use `@jazzer.js/core 4` selectively
-  on Node for hostile parser inputs and crash/security boundaries; retain minimized
-  failures. Do not assume Jazzer.js supports Bun.
-- Do use `@stryker-mutator/core 10` with `@stryker-mutator/vitest-runner 10` on selected
+Tool rows and install commands are in the libraries `testing.md`; ask before adding a dependency.
+
+- Do start with properties for domain invariants. Set
+  `fc.configureGlobal({ numRuns: Number(process.env.FC_RUNS ?? 100) })` so CI can raise
+  the count. `fc.assert` works in `bun:test` without an adapter; `@fast-check/vitest`
+  adds `test.prop` for Vitest. Replay a failure with `{ seed, path }` and promote it to a
+  named example.
+- Do run `@jazzer.js/core` fuzz targets on Node LTS, also in a Bun project: it is a native
+  libFuzzer addon and supports no other runtime. Keep a corpus directory, bound the PR run
+  (`npx jazzer fuzz/parse.fuzz.js corpus/ --sync -- -max_total_time=60`) and run longer
+  campaigns on a schedule or in OSS-Fuzz. Without Node, `fc.uint8Array()` with a high
+  `numRuns` on a schedule is a fallback; it is not coverage-guided.
+- Do use `@stryker-mutator/core` with `@stryker-mutator/vitest-runner` on selected
   critical logic. Inspect meaningful survivors rather than enforce a universal score.
-  The peer range accepts `Vitest 5`, but that is not an executed compatibility test.
-- Do use Stryker incremental results for feedback and periodically run without the
-  cache. Restrict mutation to changed source when appropriate, not the entire repo.
+  The runner forces `maxWorkers` 1. Run `--mutate` on changed files with incremental
+  mode on pull requests, and the full run, without the cache, on a schedule.
+  `--reporters json` writes the mutation-testing-report-schema that `quality_test_compare` reads.
+- Do on Bun use `@hughescr/stryker-bun-runner` (single maintainer; needs Bun 1.4, Node 22,
+  TypeScript below 7; tests run serially; `mock.module()` of a mutated file has no effect).
+  Fall back to `testRunner: "command"` with `bun test --bail` and `coverageAnalysis: "off"`:
+  every mutant then runs the whole suite.
 - Do measure uncovered branches and changed lines as gap finders, not correctness.
-  Vitest's default `v8` provider needs V8 and does not work on Bun; choose `istanbul`
-  for non-V8 Vitest coverage where supported, or Bun's native coverage for Bun tests.
+  Vitest's `v8` provider is the default and, since 3.2, matches Istanbul reports.
+  Bun 1.4 implements the `node:inspector` profiler, so `bun --bun vitest run --coverage`
+  with `v8` should work (Bun's claim; the Vitest docs still say `v8` does not work on Bun).
+  On an older Bun use `istanbul`. `bun test --coverage --coverage-reporter=lcov` reports
+  lines and functions only, with no branches, and `coverageThreshold` enforces just those.
 - Do use `vitest run --changed` or `vitest related --run <source>` for fast feedback.
   Related selection follows static imports, not computed dynamic imports.
   `Vitest 5.1` has experimental `--since-last-run` selection from previously loaded
@@ -163,6 +179,9 @@ test("round-trips every supported label", () => {
 - Do keep `retry: 0` by default. Diagnose Vitest failures with `repeats`,
   `sequence.shuffle`, and a recorded `sequence.seed`; use Bun randomization/reruns
   when Bun is the runner. Repeat with isolated resources before enabling concurrency.
+- Do in Bun use `--randomize` with `--seed <n>` to shuffle and replay order, `--rerun-each <n>`
+  to repeat, and `--parallel` or `--isolate` to expose state shared between files
+  (module mocks leak without isolation).
 - Do investigate leaked mocks, timers, randomness, and resource collisions.
   Quarantine only with an issue, owner, expiry, and a separate reporting lane.
 - Do not make failures green with blanket retries or permanent skips.
@@ -275,7 +294,7 @@ test("expires after the deadline", async () => {
 | HTTP handlers | Hono `app.request()` or framework equivalent | MSW for outbound HTTP; server smoke test for transport |
 | Async/concurrency | Awaited work, isolated resources, injected clock | Fake timers; cancellation and race scenarios |
 | CLI | Direct command function with injected streams | Small subprocess exit/output smoke test |
-| Parsers | Named valid/malformed cases, round-trip property | Node Jazzer.js for hostile byte inputs |
+| Parsers | Named valid/malformed cases, round-trip property | Jazzer.js on Node for hostile byte inputs |
 | CI lane | Full suite, typecheck, branch/changed-line gap review | Periodic shuffle/repeats; targeted Stryker |
 
 ## Sources
