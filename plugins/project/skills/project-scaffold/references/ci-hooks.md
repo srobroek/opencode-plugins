@@ -56,6 +56,25 @@ fails on any change. Formatters and safe lint fixes stay in `just fmt`, never in
   allowed skips, never `paths:` on the trigger (see `ci-github-actions`).
 - Monorepo: one job per member path and language (`monorepo.md`).
 
+## Lanes for the Run tokens
+
+Each concern in a language's table (`toolchain-languages`, `references/concerns.md`) has a
+Run token. CI installs tools with pinned actions and managers (`taiki-e/install-action`,
+`setup-*`, `mise-action`); locally agents detect tools and ask before installing. The
+lane runs the matching `just` recipe (`justfile.md`).
+
+| Token | Lane |
+| --- | --- |
+| every-pr | the required `ci-gate` jobs |
+| diff-pr | a PR job on the changed code: mutation (`mutate-diff`) blocks the merge only on the configured critical paths, elsewhere it reports |
+| bounded-pr | ClusterFuzzLite in code-change mode for Go, Python and Rust (it supports C, C++, JVM, Go, Python, Rust and Swift, not JavaScript); the `fuzz-smoke` recipe (about 60s per target) otherwise, including Jazzer.js |
+| scheduled | `scheduled.yml` with `cron` and `workflow_dispatch` (pattern in `ci-github-actions`): full mutation (cargo-mutants `--shard k/n` matrix), long fuzz campaigns, shuffle and repeat flaky runs, k6 and Schemathesis against non-production, Terraform drift (`terraform plan -detailed-exitcode -lock=false`) and CDK drift (`cdk drift --fail`), dependency rescans |
+| release | the release job: `api-break` for libraries, docs publish |
+| on-demand | no lane; run by hand when a task needs it |
+
+Keep scheduled jobs out of `ci-gate`; they report failures by issue or notification, and
+upload corpora, crashers, seeds and mutation reports as artifacts.
+
 ## Release and dependency updates
 
 - release-please defaults: `release-type: simple`, `include-component-in-tag: false`,

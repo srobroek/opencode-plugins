@@ -23,14 +23,21 @@ workspace (`[tool.uv.workspace] members = ["packages/*"]`, `lang-python-packagin
 | Lint + format | `ruff` (`ruff check`, `ruff format`); selected rules at least `E F I N W UP B SIM TC ANN RUF PERF C4 PT S`; per-file ignore `assert` and `ANN` in `tests/**` |
 | Types | `pyright` strict is the preference; keep configured mypy (`lang-python-types`). `ty` is beta with no stable API: opt-in pilot, not the default gate |
 | Tests | `pytest` (`--strict-markers --strict-config`, `filterwarnings = error`); `hypothesis` for properties |
+| Mutation | `mutmut` on selected critical modules (POSIX or WSL) |
+| Fuzz | `atheris` for parsers and native extensions (manylinux x86_64 wheels) |
+| Flaky / order | `pytest-randomly`, `pytest-repeat` |
+| API break (libraries only) | `griffe check` against the last release |
+| Docs | `sphinx-autoapi` with `sphinx-build -W` |
 | APIs | FastAPI with Pydantic; Litestar when the app needs stronger structure |
 | Database | SQLAlchemy + Alembic (`lang-python-persistence`) |
 | Import rules | `import-linter` (`lint-imports`) |
 | Unused or missing deps | `deptry` (`uv run --locked deptry .`) in the gate |
 | Dead code | Optional `Vulture` (`uv run --locked vulture . --min-confidence 100`); baseline reviewed dynamic-use exceptions. `Ruff` `F401`/`F841` cover imports/local variables, not whole-project reachability |
-| Vulnerabilities | `pip-audit` or `OSV-Scanner` v2; `uv audit` only after validating the pinned version's preview policy |
+| Vulnerabilities | `pip-audit` or `OSV-Scanner`; `uv audit` only after validating the pinned version's preview policy |
 | Coverage | `pytest-cov` (`--cov --cov-report=term-missing --cov-report=lcov`); ask whether to enforce a threshold (`--cov-fail-under=N`); the old scaffold set none |
 | Matrix | `nox` for several Python versions only if the library supports more than one; ask |
+
+Tool versions and install commands: the concerns tables in `lang-python-libraries` (`references/testing.md`, `references/quality.md`); minimums only, no pins. Detect a tool, recommend the install and ask before running it (`toolchain-languages`, `references/concerns.md`).
 
 CLI framework, HTTP client, logging and settings libraries: ask the user (sources are
 silent). Logging for services follows `toolchain-quality-observability`.
