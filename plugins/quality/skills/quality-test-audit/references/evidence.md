@@ -1,7 +1,7 @@
 # Evidence commands
 
 Read in step 2 of the audit. Commands checked against official documentation on
-2026-11-12; "not verified" marks a capability that was not confirmed, so do not rely on
+2026-11-12 (Rust and Python and Go mutation rows and the Rust shuffle rows: 2026-11-16); "not verified" marks a capability that was not confirmed, so do not rely on
 it. Choose your own output paths in the OpenCode temp directory: most tools have no
 default report file.
 
@@ -13,7 +13,7 @@ default report file.
 | Vitest | `vitest run --reporter=junit --outputFile=<path>` | `--sequence.shuffle`; replay with `--sequence.seed=<seed>` |
 | bun test | `bun test --reporter=junit --reporter-outfile=<path>` | `--randomize`; replay with `--seed <seed>` |
 | Go | `gotestsum --junitfile <path> -- ./pkg/...` (`go test` has no JUnit flag) | `go test -shuffle=on`; replay with `-shuffle=<seed>`; add `-count=1` to skip cached results |
-| Rust | `cargo nextest run --profile <name>` with `[profile.<name>.junit] path = "junit.xml"` in `.config/nextest.toml`; the report lands in `target/nextest/<name>/junit.xml` | nextest shuffle not verified. `cargo +nightly test -- -Z unstable-options --shuffle` and `--shuffle-seed <seed>` exist on nightly only |
+| Rust | `cargo nextest run --profile <name>` with `[profile.<name>.junit] path = "junit.xml"` in `.config/nextest.toml`; the report lands in `target/nextest/<name>/junit.xml` | nextest has no shuffle option (checked cargo-nextest 0.9.152, 2026-11-13). Use `cargo +nightly test -- -Z unstable-options --shuffle --shuffle-seed <seed>` (nightly only). For repeats use `cargo nextest run --stress-count N`, and `--flaky-result fail` so retries do not hide flakes |
 
 File order and test order within a file are two different shuffles, and they catch
 different order dependences: a dependence between two tests in one file passed every
@@ -26,7 +26,7 @@ per run to `quality_test_summarize` (`default`, `shuffle-files`, `shuffle-tests`
 | pytest | Not verified: `pytest-randomly` shuffles modules, classes and functions together; check its documentation for a separate switch | Same as the left cell |
 | bun test | Not verified | `--randomize` (documented as shuffling test order; whether it also shuffles files was not verified) |
 | Go | Not verified for package order | `go test -shuffle=on` shuffles tests and benchmarks of a package |
-| Rust | Not verified | Nightly `--shuffle` only |
+| Rust | Not verified | Nightly `cargo test -- -Z unstable-options --shuffle` only; nextest has none |
 
 Run the command through the shell for the baseline: 3 default-order runs, 3 with file
 order shuffled and 3 with test order shuffled (20 runs of the suspected mode for a flaky
@@ -83,10 +83,10 @@ Vitest, bun test, Go or Rust; Stryker maps tests to mutants instead.
 
 | Language | Command scoped to the audit | Report for `quality_test_compare` |
 | --- | --- | --- |
-| Python | `mutmut run "<module>.<function>*"`; scope with `[tool.mutmut]` `source_paths` and `only_mutate` | No per-mutant JSON export: `mutmut export-cicd-stats` writes summary counts only. Compare `mutmut results` by hand |
+| Python | `mutmut run "<module>.<function>*"`; scope with `[tool.mutmut]` `source_paths` and `only_mutate`. For a comparable report use cosmic-ray | mutmut has no per-mutant export: `mutmut export-cicd-stats` writes summary counts only. With cosmic-ray, the third-party cosmic-ray-to-mutation-elements-adapter (`cr-to-stryker-report -f json`) emits mutation-testing-report-schema JSON that `quality_test_compare` reads |
 | TypeScript | `npx stryker run --testRunner vitest --mutate "<file>" --reporters json` | `reports/mutation/mutation.json` (mutation-testing-report-schema) |
-| Go | `gremlins unleash --diff "<base-ref>" --output=<path>` | The JSON file named by `--output` |
-| Rust | `cargo mutants --file '<file>'` or `cargo mutants --in-diff <diff-file>` | `mutants.out/outcomes.json`, or the directory named by `--output` |
+| Go | `gremlins unleash --diff "<base-ref>" --output=<path>`; fallback avito-tech go-mutesting | The JSON file named by `--output`. go-mutesting writes its own `report.json`, which `quality_test_compare` cannot read |
+| Rust | `cargo mutants --file '<file>'` or `cargo mutants --in-diff <diff-file>`; add `--shard k/n` for a large scope. Keep the default `cargo test` so doctests count: with `--test-tool=nextest` doctests are skipped and doctest-only coverage shows as missed | `mutants.out/outcomes.json`, or the directory named by `--output` |
 
 When mutation testing cannot run on a scope (a runner pool requirement, a bundler step
 that breaks the mutation tool, a scope too slow), use hand-made forced faults as the
