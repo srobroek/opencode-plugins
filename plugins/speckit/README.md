@@ -89,7 +89,12 @@ and consequential safety confirmations stay required whatever the choice.
 `.specify/` (by default both) and refuses when a requested path lies outside them or the
 index already holds other files. It builds the commit in a private index (HEAD plus the
 working-tree state of those paths), checks the tree changes nothing else, commits that
-tree on top of HEAD and syncs the real index for those paths. It never amends, and a
+tree on top of HEAD and syncs the real index for those paths. It stores each file's bytes
+exactly as they are on disk, never through `git add`: no clean or process filter from
+`.gitattributes` runs and `core.autocrlf` converts nothing. Ignored files stay out, the
+exec bit sets the file mode, and a symlink is stored as its link text. A symlink that is
+absolute or climbs out of `specs/` and `.specify/`, a path through a symlinked directory,
+a submodule and a nested repository are refused. It never amends, and a
 concurrent move of HEAD makes it fail rather than overwrite the other commit. Every git
 call runs pinned to the workspace (`git -C`) without inherited repository selectors
 (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, object-store and `GIT_CONFIG*` variables),

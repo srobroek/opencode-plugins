@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test"
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { artifactPath, executeCommit, type GitFactory, gitEnvironment, gitIn, outsideArtifacts } from "./commit.ts"
@@ -331,6 +331,91 @@ describe("executeCommit", () => {
     } finally {
       rmSync(parent, { recursive: true, force: true })
     }
+  })
+
+  describe("stores the bytes on disk, with no filter or conversion", () => {
+    let outside: string
+    beforeEach(() => {
+      outside = realpathSync(mkdtempSync(join(tmpdir(), "speckit-commit-outside-")))
+    })
+    afterEach(() => rmSync(outside, { recursive: true, force: true }))
+    const blob = (path: string) =>
+      Bun.spawnSync(["git", "cat-file", "blob", `HEAD:${path}`], { cwd: repo, stdout: "pipe" }).stdout.toString()
+    const mode = (path: string) => git("ls-tree", "HEAD", "--", path).split(" ")[0]
+
+    test("a clean filter selected by .gitattributes never runs", async () => {
+      const marker = join(outside, "marker")
+      git("config", "filter.evil.clean", `sh -c 'touch "${marker}"; tr a-z A-Z'`)
+      write("specs/.gitattributes", "* filter=evil\n")
+      write("specs/001-a/spec.md", "raw bytes\n")
+      const result = await executeCommit({ message: "x" }, repo)
+      expect(result.metadata.ok).toBe(true)
+      expect(existsSync(marker)).toBe(false)
+      expect(blob("specs/001-a/spec.md")).toBe("raw bytes\n")
+    })
+
+    test("core.autocrlf does not convert line endings", async () => {
+      git("config", "core.autocrlf", "true")
+      write("specs/001-a/spec.md", "a\r\nb\r\n")
+      expect((await executeCommit({ message: "x" }, repo)).metadata.ok).toBe(true)
+      expect(blob("specs/001-a/spec.md")).toBe("a\r\nb\r\n")
+    })
+
+    test("ignored files stay out and the exec bit sets the mode", async () => {
+      write(".gitignore", "specs/**/spec-status.md\n")
+      git("add", ".gitignore")
+      git("commit", "-q", "-m", "ignore")
+      write("specs/001-a/spec-status.md")
+      write("specs/001-a/run.sh", "#!/bin/sh\n")
+      chmodSync(join(repo, "specs/001-a/run.sh"), 0o755)
+      write("specs/001-a/spec.md")
+      expect((await executeCommit({ message: "x" }, repo)).metadata.ok).toBe(true)
+      expect(committedFiles().sort()).toEqual(["specs/001-a/run.sh", "specs/001-a/spec.md"])
+      expect(mode("specs/001-a/run.sh")).toBe("100755")
+      expect(mode("specs/001-a/spec.md")).toBe("100644")
+    })
+
+    test("a symlink inside the boundary is stored as a link to its text", async () => {
+      write("specs/001-a/spec.md")
+      symlinkSync("spec.md", join(repo, "specs/001-a/current.md"))
+      expect((await executeCommit({ message: "x" }, repo)).metadata.ok).toBe(true)
+      expect(mode("specs/001-a/current.md")).toBe("120000")
+      expect(blob("specs/001-a/current.md")).toBe("spec.md")
+    })
+
+    test.each([
+      ["a relative path out of the artifact roots", "../../src/b.ts"],
+      ["an absolute path", "/etc/hosts"],
+    ])("refuses a symlink to %s", async (_, target) => {
+      write("specs/001-a/spec.md")
+      symlinkSync(target, join(repo, "specs/001-a/link"))
+      const result = await executeCommit({ message: "x" }, repo)
+      expect(result.metadata.ok).toBe(false)
+      expect(result.content).toContain("specs/001-a/link")
+      expect(git("log", "--format=%s")).toBe("init")
+    })
+
+    test("refuses a nested repository under the paths", async () => {
+      write("specs/001-a/spec.md")
+      mkdirSync(join(repo, "specs/vendor"))
+      Bun.spawnSync(["git", "init", "-q"], { cwd: join(repo, "specs/vendor") })
+      writeFileSync(join(repo, "specs/vendor/x"), "x\n")
+      const result = await executeCommit({ message: "x" }, repo)
+      expect(result.metadata.ok).toBe(false)
+      expect(result.content).toContain("specs/vendor")
+      expect(git("log", "--format=%s")).toBe("init")
+    })
+
+    test("a tracked directory swapped for a symlink out of the boundary cannot leak its target", async () => {
+      write("specs/001-a/spec.md", "mine\n")
+      expect((await executeCommit({ message: "add" }, repo)).metadata.ok).toBe(true)
+      writeFileSync(join(outside, "spec.md"), "secret\n")
+      rmSync(join(repo, "specs/001-a"), { recursive: true })
+      symlinkSync(outside, join(repo, "specs/001-a"))
+      const result = await executeCommit({ message: "swap" }, repo)
+      expect(result.metadata.ok).toBe(false)
+      expect(git("log", "--format=%s")).toBe("add\ninit")
+    })
   })
 
   test("reports nothing to commit when the artifacts are unchanged", async () => {

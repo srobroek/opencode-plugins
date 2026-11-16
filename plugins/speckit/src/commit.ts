@@ -8,7 +8,21 @@
  * It never amends.
  */
 
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs"
+import { createHash } from "node:crypto"
+import {
+  closeSync,
+  constants,
+  existsSync,
+  fstatSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  readlinkSync,
+  realpathSync,
+  rmSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join, posix, resolve } from "node:path"
 import type { ToolOutput } from "./tools.ts"
@@ -17,7 +31,7 @@ export const COMMIT_TOOL = "speckit_commit"
 
 export const COMMIT_DESCRIPTION =
   "Commit SpecKit artifacts: stages only specs/ and .specify/, refuses other staged files, never amends.\n" +
-  "Paths are relative to the SpecKit workspace and default to specs/ and .specify/. Refuses when a requested path lies outside them or the index already holds other files. Commits the checked working-tree snapshot of those paths on top of HEAD. No git hook of any kind runs (pre-commit, commit-msg, reference-transaction, post-index-change), so run the project's checks separately."
+  "Paths are relative to the SpecKit workspace and default to specs/ and .specify/. Refuses when a requested path lies outside them or the index already holds other files. Commits the checked working-tree snapshot of those paths on top of HEAD, storing each file's bytes exactly as they are on disk: no clean or process filter, no autocrlf conversion. Ignored files stay out; a symlink out of specs/ and .specify/, a submodule or a nested repository is refused. No git hook of any kind runs (pre-commit, commit-msg, reference-transaction, post-index-change), so run the project's checks separately."
 
 export const COMMIT_INPUT = {
   type: "object",
@@ -60,7 +74,7 @@ export function outsideArtifacts(paths: readonly string[], prefix: string, reque
 }
 
 /** `index`: the tool's private index, the only git selector a call may set. */
-export type GitOptions = { index?: string; stdin?: string }
+export type GitOptions = { index?: string; stdin?: string | Uint8Array }
 export type Git = (
   args: string[],
   options?: GitOptions,
@@ -109,7 +123,12 @@ export const gitIn =
       const proc = Bun.spawn(["git", "-C", workspace, ...pins, ...args], {
         cwd: workspace,
         env: gitEnvironment(process.env, options.index),
-        stdin: options.stdin === undefined ? "ignore" : new TextEncoder().encode(options.stdin),
+        stdin:
+          options.stdin === undefined
+            ? "ignore"
+            : typeof options.stdin === "string"
+              ? new TextEncoder().encode(options.stdin)
+              : options.stdin,
         stdout: "pipe",
         stderr: "pipe",
         timeout: GIT_TIMEOUT_MS,
@@ -144,6 +163,79 @@ export function readCommitParams(input: unknown): { message: string; paths?: str
   const outside = value.paths.filter((path) => artifactPath(path) === undefined)
   if (outside.length) return `refused: only paths under specs/ or .specify/ may be committed; got ${outside.join(", ")}`
   return { message: value.message, paths: value.paths.map((path) => artifactPath(path) as string) }
+}
+
+/**
+ * Whether a symlink at the workspace-relative `path` with link text `target` points inside
+ * the artifact roots. An absolute target, or one that climbs out of `specs/` and
+ * `.specify/`, is refused: the committed tree would then depend on files the tool may not
+ * touch, and an absolute target names one machine's layout.
+ */
+export function linkInside(path: string, target: string): boolean {
+  if (target === "" || posix.isAbsolute(target)) return false
+  return artifactPath(posix.join(posix.dirname(path), target)) !== undefined
+}
+
+/** What one candidate path holds on disk: a blob with its mode, nothing, or a reason to refuse. */
+export type Snapshot =
+  | { kind: "blob"; mode: "100644" | "100755" | "120000"; bytes: Uint8Array }
+  | { kind: "gone" }
+  | { kind: "refuse"; reason: string }
+
+const missing = (error: unknown) => ["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")
+
+/**
+ * Read the workspace-relative `path` as raw bytes, with no git filter or conversion: a
+ * regular file with its exec bit, a symlink as its link text. A path that runs through a
+ * symlinked directory is refused, and the file is opened without following a link, so a
+ * swapped-in link cannot pull outside content into the commit.
+ */
+export function readArtifact(workspace: string, path: string): Snapshot {
+  const parts = path.split("/")
+  for (let depth = 1; depth < parts.length; depth++) {
+    const dir = join(workspace, ...parts.slice(0, depth))
+    try {
+      const stat = lstatSync(dir)
+      if (stat.isSymbolicLink()) return { kind: "refuse", reason: `${parts.slice(0, depth).join("/")} is a symlink` }
+      if (!stat.isDirectory()) return { kind: "gone" }
+    } catch (error) {
+      if (missing(error)) return { kind: "gone" }
+      throw error
+    }
+  }
+  const full = join(workspace, path)
+  let stat: ReturnType<typeof lstatSync>
+  try {
+    stat = lstatSync(full)
+  } catch (error) {
+    if (missing(error)) return { kind: "gone" }
+    throw error
+  }
+  if (stat.isSymbolicLink()) {
+    const target = readlinkSync(full, { encoding: "buffer" })
+    if (!linkInside(path, target.toString()))
+      return { kind: "refuse", reason: `symlink to ${target.toString()} leaves specs/ and .specify/` }
+    return { kind: "blob", mode: "120000", bytes: target }
+  }
+  if (stat.isDirectory()) return { kind: "gone" }
+  if (!stat.isFile()) return { kind: "refuse", reason: "not a regular file or symlink" }
+  const fd = openSync(full, constants.O_RDONLY | constants.O_NOFOLLOW)
+  try {
+    const opened = fstatSync(fd)
+    if (!opened.isFile() || opened.ino !== stat.ino) return { kind: "refuse", reason: "changed while reading" }
+    const bytes = readFileSync(fd)
+    return { kind: "blob", mode: opened.mode & 0o100 ? "100755" : "100644", bytes }
+  } finally {
+    closeSync(fd)
+  }
+}
+
+/** The git object id of a blob holding `bytes`, as `git hash-object` computes it. */
+export function blobId(format: string, bytes: Uint8Array): string {
+  return createHash(format === "sha256" ? "sha256" : "sha1")
+    .update(`blob ${bytes.length}\0`)
+    .update(bytes)
+    .digest("hex")
 }
 
 const realpathOrSelf = (path: string) => {
@@ -216,14 +308,54 @@ async function commitIn(
     return refuse(`refused: the index already holds files outside specs/ and .specify/: ${foreign.join(", ")}. Unstage them first.`)
 
   // The commit is built in a private index from HEAD, so the real index and later edits
-  // cannot change what was checked.
-  for (const args of [
-    head === undefined ? ["read-tree", "--empty"] : ["read-tree", head],
-    ["add", "-A", "--", ...params.paths],
-  ]) {
-    const step = await git(args, { index })
-    if (!step.ok) return refuse(step.reason)
+  // cannot change what was checked. Content is staged as the raw bytes this process reads,
+  // never through git add, so no clean filter, process filter or autocrlf conversion runs.
+  const loaded = await git(head === undefined ? ["read-tree", "--empty"] : ["read-tree", head], { index })
+  if (!loaded.ok) return refuse(loaded.reason)
+  const listed = await git(["ls-files", "-z", "-s", "--", ...params.paths], { index })
+  if (!listed.ok) return refuse(listed.reason)
+  const tracked = new Map<string, { mode: string; oid: string }>()
+  for (const record of names(listed.stdout)) {
+    const [meta = "", path = ""] = record.split("\t")
+    const [mode = "", oid = ""] = meta.split(" ")
+    if (mode === "160000") return refuse(`refused: ${path} is a submodule`)
+    tracked.set(path, { mode, oid })
   }
+  const untracked = await git(["ls-files", "-z", "--others", "--exclude-standard", "--", ...params.paths], { index })
+  if (!untracked.ok) return refuse(untracked.reason)
+  const others = names(untracked.stdout)
+  const nested = others.filter((path) => path.endsWith("/"))
+  if (nested.length) return refuse(`refused: ${nested.join(", ")} is a nested repository`)
+  const format = await git(["rev-parse", "--show-object-format"])
+  if (!format.ok) return refuse(format.reason)
+  const entries: string[] = []
+  const removals: string[] = []
+  for (const path of new Set([...tracked.keys(), ...others])) {
+    const snapshot = readArtifact(workspace, path)
+    if (snapshot.kind === "refuse") return refuse(`refused: ${path}: ${snapshot.reason}`)
+    const known = tracked.get(path)
+    if (snapshot.kind === "gone") {
+      if (known !== undefined) removals.push(path)
+      continue
+    }
+    const oid = blobId(format.stdout.trim(), snapshot.bytes)
+    if (known?.oid === oid && known.mode === snapshot.mode) continue
+    const stored = await git(["hash-object", "-w", "--no-filters", "--stdin"], { stdin: snapshot.bytes })
+    if (!stored.ok) return refuse(stored.reason)
+    if (stored.stdout.trim() !== oid) return refuse(`blob id mismatch for ${path}`)
+    // --index-info takes repository-relative paths; ls-files listed them relative to the workspace.
+    entries.push(`${snapshot.mode} ${oid}\t${base}${path}\0`)
+  }
+  const stage = async (target: { index?: string }) => {
+    if (entries.length) {
+      const added = await git(["update-index", "-z", "--index-info"], { ...target, stdin: entries.join("") })
+      if (!added.ok) return added
+    }
+    if (removals.length) return git(["update-index", "--force-remove", "--", ...removals], target)
+    return { ok: true as const, stdout: "" }
+  }
+  const inPrivate = await stage({ index })
+  if (!inPrivate.ok) return refuse(inPrivate.reason)
   const written = await git(["write-tree"], { index })
   if (!written.ok) return refuse(written.reason)
   const tree = written.stdout.trim()
@@ -243,7 +375,8 @@ async function commitIn(
   const moved = await git(["update-ref", "-m", `speckit_commit: ${message.split("\n", 1)[0]}`, "HEAD", commit, head ?? ""])
   if (!moved.ok) return refuse(`HEAD moved while committing; nothing was committed. ${moved.reason}`)
   const files = changed.map((path) => path.slice(base.length))
-  const synced = await git(["reset", "-q", "--", ...files])
+  // The real index takes the same entries, again without reading the work tree.
+  const synced = await stage({})
   const sha = commit.slice(0, 12)
   return {
     content: `Committed ${sha}: ${files.length} file(s)\n${files.join("\n")}${synced.ok ? "" : `\nThe index was not synced for these paths: ${synced.reason}`}`,
