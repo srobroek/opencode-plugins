@@ -1196,29 +1196,56 @@ function enabledModes(options) {
 }
 
 // plugins/modes/src/path-guard.ts
-import { realpathSync } from "fs";
+import { lstatSync, readlinkSync } from "fs";
 import { homedir } from "os";
-import { basename as basename4, dirname, isAbsolute, join as join2, relative, resolve, sep } from "path";
+import { dirname, isAbsolute, join as join2, relative, resolve, sep } from "path";
+var MAX_LINKS = 40;
 function canonical(path) {
-  const pending = [];
-  let current = resolve(path);
-  for (;; ) {
-    try {
-      return join2(realpathSync(current), ...pending.reverse());
-    } catch {
-      const parent = dirname(current);
-      if (parent === current)
-        return resolve(path);
-      pending.push(basename4(current));
-      current = parent;
+  const pending = resolve(path).split(sep).filter((segment) => segment !== "");
+  let current = sep;
+  let links = 0;
+  while (pending.length > 0) {
+    const segment = pending.shift();
+    if (segment === ".")
+      continue;
+    if (segment === "..") {
+      current = dirname(current);
+      continue;
     }
+    const next = join2(current, segment);
+    let stats;
+    try {
+      stats = lstatSync(next);
+    } catch (error) {
+      if (error.code !== "ENOENT")
+        throw error;
+      return resolve(join2(next, ...pending));
+    }
+    if (!stats.isSymbolicLink()) {
+      current = next;
+      continue;
+    }
+    if (++links > MAX_LINKS)
+      throw new Error(`too many symbolic links resolving ${path}`);
+    const target = readlinkSync(next);
+    if (isAbsolute(target))
+      current = sep;
+    pending.unshift(...target.split(sep).filter((part) => part !== ""));
   }
+  return current;
 }
 var inside = (path, root) => {
   const rel = relative(root, path);
   return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
 };
 function checkDebugWrite(target, options) {
+  try {
+    return checkResolved(target, options);
+  } catch (error) {
+    return `${target} could not be resolved (${error.message}), so the write is refused`;
+  }
+}
+function checkResolved(target, options) {
   const home = canonical(options.home ?? homedir());
   const start = canonical(options.startDir);
   const path = canonical(isAbsolute(target) ? target : resolve(start, target));

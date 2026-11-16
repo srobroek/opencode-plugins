@@ -18,6 +18,12 @@ beforeAll(() => {
   mkdirSync(join(home, "repo/src"), { recursive: true })
   symlinkSync(join(home, "repo"), join(worktrees, "debug-foo/link"))
   symlinkSync(join(home, "repo/src"), join(home, ".opencode/debug/escape"))
+  // dangling: the target does not exist yet
+  symlinkSync(join(home, "repo/src/not-yet.ts"), join(worktrees, "debug-foo/dangling.ts"))
+  symlinkSync("../../../../../../../repo/src/rel-not-yet.ts", join(worktrees, "debug-foo/src/rel.ts"))
+  symlinkSync(join(worktrees, "debug-foo/chain-b"), join(worktrees, "debug-foo/chain-a"))
+  symlinkSync(join(home, "repo/src/chained.ts"), join(worktrees, "debug-foo/chain-b"))
+  symlinkSync("loop", join(worktrees, "debug-foo/loop"))
 })
 afterAll(() => rmSync(home, { recursive: true, force: true }))
 
@@ -45,6 +51,18 @@ describe("checkDebugWrite", () => {
   })
   test("a symlink inside a debug-* worktree that points at the user checkout is refused", () => {
     expect(check(join(worktrees, "debug-foo/link/src/a.ts"))).toBeString()
+  })
+  test("a dangling symlink that points at a checkout file which does not exist yet is refused", () => {
+    expect(check(join(worktrees, "debug-foo/dangling.ts"))).toBeString()
+  })
+  test("a dangling relative symlink is resolved from its own directory", () => {
+    expect(check(join(worktrees, "debug-foo/src/rel.ts"))).toBeString()
+  })
+  test("a chain of symlinks ending in a dangling target is followed", () => {
+    expect(check(join(worktrees, "debug-foo/chain-a"))).toBeString()
+  })
+  test("a symlink loop fails closed", () => {
+    expect(check(join(worktrees, "debug-foo/loop"))).toBeString()
   })
   test("a symlink in the ledger directory that points elsewhere is refused", () => {
     expect(check(join(home, ".opencode/debug/escape/a.ts"))).toBeString()
