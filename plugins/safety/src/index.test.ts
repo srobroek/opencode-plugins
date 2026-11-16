@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { Error as ToolError } from "@opencode/plugin/promise/tool"
+import { Tool } from "@opencode/plugin/effect"
 import { createFakeContext, type FakeAssert } from "@srobroek/opencode-lib/testing"
 import plugin, { applyDecision, confirmSecretCommand, createPlugin, type Evaluation, readOptions, shellCwd } from "./index.ts"
 import { FNOX_CONFIG_MESSAGE, FNOX_INDIRECT_MESSAGE, FNOX_STORE_MESSAGE, VALUE_MESSAGE } from "./op-guard.ts"
@@ -303,7 +303,7 @@ describe("secret redaction", () => {
       tool: "shell",
       input: { command: "x" },
       status: "error",
-      error: new ToolError({ message: `failed with ${KEY}` }),
+      error: new Tool.Error({ message: `failed with ${KEY}` }),
     })
     expect(event.error.message).toBe("failed with [REDACTED:TAVILY_API_KEY]")
   })

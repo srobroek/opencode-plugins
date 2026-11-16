@@ -5,7 +5,7 @@ import { realpathSync as realpathSync6 } from "fs";
 import { homedir as homedir8 } from "os";
 import { isAbsolute as isAbsolute10, resolve as resolve10 } from "path";
 import { Plugin } from "@opencode/plugin";
-import { Error as ToolError } from "@opencode/plugin/promise/tool";
+import { Tool } from "@opencode/plugin/effect";
 // plugins/lib/src/shell-tokenizer.ts
 var SEPARATORS = new Set([";", "&", "|", "(", ")", `
 `]);
@@ -6012,7 +6012,7 @@ function createPlugin(overrides = {}) {
           const clean = { message: redactor.text(message), error: redactor.value(error), metadata: redactor.value(metadata) };
           if (clean.message === message && clean.error === error && clean.metadata === metadata)
             return;
-          event.error = new ToolError({
+          event.error = new Tool.Error({
             message: clean.message,
             ...clean.error === undefined ? {} : { error: clean.error },
             ...clean.metadata === undefined ? {} : { metadata: clean.metadata }
