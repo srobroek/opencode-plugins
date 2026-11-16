@@ -13,11 +13,14 @@ it with `tofu` unless a row says otherwise.
 | Concern | Default | Maintenance | Install | Alternatives | Use both when | Run | Avoid |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `test-runner` | Built-in: `terraform test` (1.6 or newer) or `tofu test`; plan runs with `mock_provider`, `override_resource`, `override_data` and `override_module` for unit tests | - | Built-in | `terratest`: you need HTTP or SSH probes of deployed resources, or Go orchestration | A module ships endpoints: native tests for logic, Terratest for the probe | every-pr | kitchen-terraform: archived |
+| `assertions` | Built-in: `assert` blocks in `run` blocks and `expect_failures` | - | Built-in | None | - | every-pr | `assert` blocks with no `error_message`; `expect_failures` that name no specific variable or check |
+| `watch` | N/A: infrastructure code has no inner test loop; run `terraform test` on demand | - | - | None | - | - | - |
 | `property` | N/A: HCL has no generator; use `validation` blocks with negative tests | - | - | None | - | - | - |
 | `fuzz` | N/A: no fuzzer for HCL | - | - | None | - | - | - |
 | `fuzz-continuous` | N/A: no fuzzer for HCL | - | - | None | - | - | - |
 | `mutation` | N/A: no maintained tool; negative tests with `expect_failures` check that validations, preconditions and postconditions reject bad input | - | - | None | - | - | - |
 | `snapshot` | Built-in: `terraform show -json` of a saved plan, compared with a committed golden file | - | Built-in | None | - | on-demand | Golden files of whole plans: they change on every provider bump and add noise |
+| `component` | N/A: infrastructure code has no UI component model | - | - | None | - | - | - |
 | `concurrency` | N/A: Terraform runs in parallel only through `parallel = true` with `state_key`; OpenTofu documents no such option | - | - | None | - | - | - |
 | `coverage` | N/A: no coverage tool for HCL | - | - | None | - | - | - |
 | `benchmark` | N/A: infrastructure is not benchmarked | - | - | None | - | - | - |
