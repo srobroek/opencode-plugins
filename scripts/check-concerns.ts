@@ -380,6 +380,10 @@ function checkFile(ctx: Context, lang: Language, file: string, text: string, own
   if (!checkedMatch || !checked || !isDate(checked)) bad(1, "no valid `Checked YYYY-MM-DD.` line")
   else if (checked > ctx.today) bad(1, `Checked ${checked} is in the future`)
 
+  text.split(/\r?\n/).forEach((l, i, all) => {
+    if (l.trim() === "## Concerns" && all.findIndex((x) => x.trim() === "## Concerns") !== i) bad(i + 1, 'duplicate section "Concerns"')
+  })
+
   const table = parseTable(text, "Concerns")
   if (!table) return [...findings, { file, line: 1, reason: 'no table under "## Concerns"' }]
   if (!sameHeader(table.header, LANGUAGE_HEADER)) {
@@ -468,12 +472,12 @@ const alternativeNames = (cell: string) => cell.split(";").map((i) => toolKey(i.
 /** Tools a Tradeoffs entry must cover but has no bullet for: the Default tool and every alternative. */
 function missingTradeoffTools(section: TradeoffSection, def: string, alts: string): string[] {
   const bullets = section.body.flatMap((l) => {
-    const m = /^- \*\*([^*]+)\*\*:/.exec(l)
+    const m = /^- \*\*([^*]+)\*\*(?: \([^)]*\))?:/.exec(l)
     return m?.[1] ? [toolKey(m[1])] : []
   })
   const kind = classifyDefault(def)
   const named = [...(kind.type === "tool" ? [toolKey(kind.tool)] : []), ...alternativeNames(alts)]
-  return named.filter((n) => !bullets.some((b) => b === n || b.startsWith(n)))
+  return named.filter((n) => !bullets.some((b) => b === n || (b.startsWith(n) && /^(?:\s+\S|\()/.test(b.slice(n.length)))))
 }
 
 type CellsAt = {
@@ -778,12 +782,16 @@ type MainIo = { root?: string; files?: Files; today?: string; stdout?: (line: st
 
 /** CLI entry: returns the exit code (0 clean, 1 findings, 2 bad usage). */
 export function main(argv: string[], io: MainIo = {}): number {
-  const { values } = parseArgs({
-    args: argv,
-    options: { language: { type: "string" }, "max-age": { type: "string" } },
-  })
   const out = io.stdout ?? console.log
   const err = io.stderr ?? console.error
+  let values: { language?: string; "max-age"?: string }
+  try {
+    values = parseArgs({ args: argv, options: { language: { type: "string" }, "max-age": { type: "string" } } }).values
+  } catch (e) {
+    err(`check-concerns: ${e instanceof Error ? e.message : String(e)}`)
+    err("usage: bun scripts/check-concerns.ts [--language <id>] [--max-age <days>]")
+    return 2
+  }
   const root = io.root ?? path.resolve(import.meta.dir, "..")
   const today = io.today ?? new Date().toISOString().slice(0, 10)
   const maxAge = values["max-age"] === undefined ? undefined : Number(values["max-age"])
