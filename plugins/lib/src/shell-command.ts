@@ -580,55 +580,12 @@ function splitCommands(source: string): CommandPosition[] {
 }
 
 function nestedSources(source: string): { sources: string[]; unknown: boolean } {
-  const sources: string[] = []
-  let unknown = false
-  let depth = 0
-  let start = -1
-  let quote: "'" | '"' | null = null
-  for (let i = 0; i < source.length; i++) {
-    const ch = source[i]
-    if (quote === "'") {
-      if (ch === "'") quote = null
-      continue
-    }
-    if (quote === '"') {
-      if (ch === "\\") i++
-      else if (ch === '"') quote = null
-      continue
-    }
-    if (ch === "'") {
-      quote = "'"
-      continue
-    }
-    if (ch === '"') {
-      quote = '"'
-      continue
-    }
-    if (ch === "`") {
-      const end = source.indexOf("`", i + 1)
-      if (end < 0) return { sources, unknown: true }
-      sources.push(source.slice(i + 1, end))
-      i = end
-      continue
-    }
-    if (source.startsWith("$(", i)) {
-      if (depth++ === 0) start = i + 2
-      i++
-      continue
-    }
-    if (depth > 0 && ch === ")") {
-      if (--depth === 0) sources.push(source.slice(start, i))
-    }
-  }
-  if (depth !== 0) unknown = true
-  // Command substitutions and backticks remain executable inside double quotes.
-  for (const match of source.matchAll(/"((?:\\.|[^"\\])*)"/g)) {
-    const body = match[1] ?? ""
-    for (const substitution of body.matchAll(/\$\(([^()]*)\)/g))
-      if (substitution[1] !== undefined) sources.push(substitution[1])
-    for (const substitution of body.matchAll(/`([^`]*)`/g))
-      if (substitution[1] !== undefined) sources.push(substitution[1])
-  }
+  // A balanced, quote-aware scan: `"$(bd create "a (b)")"` is one substitution, which a
+  // regex over the quoted body cannot see. Backticks, `<( )` and substitutions nested
+  // inside parameter or arithmetic expansions come from the same scan.
+  const scan = scanShell(source, { executableSubstitutionsOnly: true })
+  const sources: string[] = [...scan.substitutions]
+  let unknown = !scan.complete
   for (const match of source.matchAll(/\b(?:bash|sh|zsh|dash|ksh)\s+-c\s+((?:'[^']*')|(?:"[^"]*")|[^\s;&|]+)/g)) {
     const value = match[1]
     if (!value || value.startsWith('"$') || value.startsWith("'$")) unknown = true

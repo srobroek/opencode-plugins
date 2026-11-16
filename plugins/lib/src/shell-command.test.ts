@@ -126,6 +126,18 @@ test("parses command positions and nested sources, flagging what it cannot read"
   expect(parse(42)).toMatchObject({ kind: "parse-failure" })
 })
 
+test("finds a substitution whose quoted argument holds parentheses or a nested quote", () => {
+  const sources = (command: string) => parse(command).nested.map((child) => child.command)
+  expect(sources('echo "$(bd create "a (b)")"')).toEqual(['bd create "a (b)"'])
+  expect(sources("echo `bd create 'a ) b'`")).toEqual(["bd create 'a ) b'"])
+  const nested = parse("echo \"$(echo $(bd create 'x)'))\"").nested
+  expect(nested.map((child) => child.command)).toEqual(["echo $(bd create 'x)')"])
+  expect(nested[0]?.nested.map((child) => child.command)).toEqual(["bd create 'x)'"])
+  expect(sources("echo '$(bd create x)'")).toEqual([])
+  expect(sources("cat <<'EOF'\n$(bd create x)\nEOF")).toEqual([])
+  expect(parse('echo "$(bd create "a (b)"').unknown).toBe(true)
+})
+
 test("lists invocations of one executable with their globals and verb", () => {
   const found = parsedInvocations(parse("gh -R o/r pr list && echo $(gh --json api x)"), "gh", ["--json"])
   expect(found.map(({ verb, globals }) => ({ verb, globals }))).toEqual([

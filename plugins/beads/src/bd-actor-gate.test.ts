@@ -5,6 +5,7 @@ import {
   agentActor,
   bdInvocations,
   decideActorGate,
+  decideActorParsed,
   environmentForInput,
   extractCommand,
   firstBdVerb,
@@ -12,6 +13,7 @@ import {
   isClaimCommand,
   isMutatingBdCommand,
 } from "./bd-actor-gate.ts"
+import { parse } from "./shell.ts"
 
 const emptyEnv = {} as NodeJS.ProcessEnv
 const actorEnv = { BEADS_ACTOR: "omp/GateBuilder/backlog" } as NodeJS.ProcessEnv
@@ -396,5 +398,48 @@ describe("here-documents", () => {
   test("a commit message that mentions bd close is not a bd command", () => {
     const command = "git commit -q -F - <<'EOF'\nfix: x\n\nafter that, bd close y and bd update z --claim.\nEOF"
     expect(decideActorGate(command, emptyEnv).kind).toBe("allow")
+  })
+})
+
+describe("the actor gate reads the parsed command", () => {
+  const decide = (command: string, env = emptyEnv) => decideActorParsed(parse(command), env).kind
+
+  test.each([
+    ["a brace group", "{ bd create x; }"],
+    ["an unset after the export", "export BEADS_ACTOR=x; unset BEADS_ACTOR; bd create y"],
+    ["an emptying assignment after the export", "export BEADS_ACTOR=x; BEADS_ACTOR=; bd create y"],
+    ["an unexport", "export BEADS_ACTOR=x; export -n BEADS_ACTOR; bd create y"],
+    ["an eval that may unset", "export BEADS_ACTOR=x; eval 'unset BEADS_ACTOR'; bd create y"],
+    ["an export inside a subshell", "(export BEADS_ACTOR=x); bd create y"],
+    ["an export inside a brace group", "{ export BEADS_ACTOR=x; }; bd create y"],
+    ["an export in a pipeline stage", "export BEADS_ACTOR=x | true; bd create y"],
+    ["an export in a background job", "export BEADS_ACTOR=x & bd create y"],
+    ["a conditional export", "false && export BEADS_ACTOR=x; bd create y"],
+    ["an export in an if branch", "if false; then export BEADS_ACTOR=x; fi; bd create y"],
+    ["an export in the other branch", "if c; then export BEADS_ACTOR=x; else bd create y; fi"],
+    ["an export in a loop body", "for i in 1; do export BEADS_ACTOR=x; done; bd create y"],
+    ["a fabricated export from echo arguments", 'echo ";" export "BEADS_ACTOR=x" ; bd create y'],
+    ["a create inside a quoted substitution", 'echo "$(bd create "a (b)")"'],
+    ["a create behind command --", "command -- bd create y"],
+  ])("refuses a create after %s", (_name, command) => {
+    expect(decide(command)).toBe("block")
+  })
+
+  test.each([
+    ["an export joined by &&", "export BEADS_ACTOR=x && bd create y"],
+    ["an export before a subshell", "export BEADS_ACTOR=x; (bd create y)"],
+    ["an export before a brace group", "export BEADS_ACTOR=x; { bd create y; }"],
+    ["an export inside the group that creates", "{ export BEADS_ACTOR=x; bd create y; }"],
+    ["an export inside the branch that creates", "if c; then export BEADS_ACTOR=x; bd create y; fi"],
+    ["a prefix assignment after an unset", "unset BEADS_ACTOR; BEADS_ACTOR=x bd create y"],
+    ["a prefix assignment behind command --", "BEADS_ACTOR=x command -- bd create y"],
+    ["a quoted create in a comment argument", 'BEADS_ACTOR=a/b/c bd comments add p-1 "fix; say retry; bd create x"'],
+    ["a quoted create without any actor", 'bd comments add p-1 "bd create foo"'],
+  ])("allows %s", (_name, command) => {
+    expect(decide(command)).not.toBe("block")
+  })
+
+  test("an ambient actor is not cancelled by an export that is out of scope", () => {
+    expect(decide("(unset BEADS_ACTOR); bd create y", actorEnv)).toBe("allow")
   })
 })

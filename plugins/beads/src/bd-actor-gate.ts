@@ -1,4 +1,4 @@
-import { tokenize } from "./bd-close-gate.ts"
+import { scanShell } from "./shell.ts"
 
 const ACTOR_VARS = ["BEADS_ACTOR", "BD_ACTOR"] as const
 type ActorVar = (typeof ACTOR_VARS)[number]
@@ -54,20 +54,6 @@ const WRAPPER_VALUE_FLAGS: Record<string, true> = {
   "--user": true,
 }
 
-/** Literal simple commands only; this is not a shell interpreter. */
-export function commandSegments(command: string): string[][] {
-  const segments: string[][] = []
-  let segment: string[] = []
-  for (const token of tokenize(command)) {
-    if ([";", "&", "|", "(", ")", "$(", "\n"].includes(token)) {
-      if (segment.length) segments.push(segment)
-      segment = []
-    } else segment.push(token)
-  }
-  if (segment.length) segments.push(segment)
-  return segments
-}
-
 export interface BdInvocation {
   verb: string
   args: string[]
@@ -75,103 +61,306 @@ export interface BdInvocation {
   globals: string[]
   /** `NAME=value` assignments prefixed to this very `bd` word. */
   prefix: string[]
-  /** Actor values an earlier `export` in the same command line set. */
+  /**
+   * Actor values the shell has exported to this `bd`. An empty string means the
+   * variable was unset, unexported or emptied, or that it might have been: a
+   * state the scanner cannot prove counts as no actor.
+   */
   exported: Partial<Record<ActorVar, string>>
   /** Actor variables removed by an `env -u`/`env -i` wrapper. */
   unset: Partial<Record<ActorVar, true>>
 }
 
+type ActorState = Partial<Record<ActorVar, string>>
+
+/** Builtins that read or write the exported environment of the current shell. */
+const STATE_BUILTINS = new Set([
+  "export",
+  "unset",
+  "eval",
+  "source",
+  ".",
+  "declare",
+  "typeset",
+  "local",
+  "read",
+  "readonly",
+])
+/** Interpreters that execute a here-document body as commands. */
+const SHELL_INTERPRETERS = new Set(["bash", "sh", "zsh", "dash", "ksh", "source", "."])
+const OPENERS = new Set(["if", "while", "until", "for", "select", "case"])
+const HEADER_ONLY = new Set(["for", "select", "case"])
+const CLOSERS = new Set(["fi", "done", "esac"])
+const BRANCHES = new Set(["else", "elif"])
+const ASSIGNMENT = /^[A-Za-z_]\w*=/
+
+/** What survives when either of two states may be the real one. Unprovable means no actor. */
+function mergeStates(a: ActorState, b: ActorState): ActorState {
+  const out: ActorState = {}
+  for (const variable of ACTOR_VARS) {
+    const x = a[variable]
+    const y = b[variable]
+    if (x === "" || y === "") out[variable] = ""
+    else if (x === undefined || y === undefined) continue
+    else out[variable] = x
+  }
+  return out
+}
+
+const isPipe = (item: { kind: string; operator?: string } | undefined): boolean =>
+  item?.kind === "operator" && (item.operator === "|" || item.operator === "|&")
+
+const basename = (word: string): string => word.split("/").pop() ?? word
+
+type Frame = {
+  kind: "root" | "group" | "compound"
+  /** The state when the group opened; a subshell or a branch that did not run leaves this behind. */
+  base: ActorState
+  /** The state at the start of the current and-or list, restored when the list is backgrounded. */
+  listStart: ActorState
+  /** The state before the first `&&` / `||` of the current list: what holds if the rest never runs. */
+  cond?: ActorState
+  /** The merged end state of the branches of a compound command closed so far. */
+  branches?: ActorState
+}
+
 /**
  * Every `bd` invocation in the command line, with the environment it runs under.
  *
- * `export BEADS_ACTOR=x && bd close y` is one shell line and two segments; the
- * export is what `bd` inherits, so it counts. A bare `BEADS_ACTOR=x; bd close y`
- * does not: without `export` the variable never reaches the child process.
+ * Read from the shared structural scanner, never from the command text: a quoted
+ * word is data, so `echo ";" export BEADS_ACTOR=x` exports nothing and `bd comments
+ * add x "bd create y"` creates nothing. Exports follow the shell's own scoping:
+ * `export BEADS_ACTOR=x && bd close y` counts, while an export inside `( )`, `{ }`,
+ * a pipeline, a background job or a branch that may not run does not, and an
+ * `unset`, an emptying assignment or an `eval` removes the actor. A bare
+ * `BEADS_ACTOR=x; bd close y` never counts: without `export` it does not reach `bd`.
  */
 export function bdInvocations(command: string): BdInvocation[] {
   const out: BdInvocation[] = []
-  let exported: Partial<Record<ActorVar, string>> = {}
-  for (const tokens of commandSegments(command)) {
-    if (tokens[0] === "export") {
-      for (const variable of ACTOR_VARS) {
-        const assignment = tokens.findLast((token) => token.startsWith(`${variable}=`))
-        if (assignment !== undefined) {
-          exported = { ...exported, [variable]: assignment.slice(variable.length + 1) }
-        }
+  const { items } = scanShell(command)
+  let state: ActorState = {}
+  let pipeBase: ActorState = {}
+  const stack: Frame[] = [{ kind: "root", base: state, listStart: state }]
+  const top = (): Frame => stack[stack.length - 1] as Frame
+  const endList = (): void => {
+    const frame = top()
+    if (frame.cond !== undefined) state = mergeStates(frame.cond, state)
+    frame.cond = undefined
+    frame.listStart = state
+  }
+  const open = (kind: "group" | "compound"): void => {
+    stack.push({ kind, base: state, listStart: state })
+  }
+  const branch = (): void => {
+    const frame = top()
+    if (frame.kind !== "compound") return
+    endList()
+    frame.branches = frame.branches === undefined ? state : mergeStates(frame.branches, state)
+    state = frame.base
+    frame.listStart = state
+  }
+  const close = (kind: "group" | "compound"): void => {
+    if (top().kind !== kind) return
+    endList()
+    const frame = stack.pop() as Frame
+    state = kind === "group" ? frame.base : mergeStates(frame.base, mergeStates(frame.branches ?? state, state))
+  }
+
+  for (const [index, item] of items.entries()) {
+    if (item.kind === "operator") {
+      switch (item.operator) {
+        case "|":
+        case "|&":
+          state = pipeBase
+          break
+        case "&&":
+        case "||":
+          top().cond ??= state
+          break
+        case "&":
+          state = top().listStart
+          top().cond = undefined
+          break
+        case ";":
+        case "\n":
+          endList()
+          break
+        case ";;":
+          branch()
+          break
+        case "(":
+        case "{":
+          open("group")
+          break
+        case ")":
+        case "}":
+          close("group")
+          break
       }
+      if (item.operator !== "|" && item.operator !== "|&") pipeBase = state
       continue
     }
-    let i = 0
-    const prefix: string[] = []
-    const unset: Partial<Record<ActorVar, true>> = {}
-    while (true) {
-      while (/^[A-Za-z_]\w*=/.test(tokens[i] ?? "")) {
-        prefix.push(tokens[i] as string)
-        i++
-      }
-      const word = (tokens[i] ?? "").split("/").pop() ?? ""
-      if (CONTROL_PREFIXES[word] === true) {
-        i++
-        continue
-      }
-      if (TRANSPARENT_WRAPPERS[word] !== true) break
-      i++
-      if (word === "command") continue
-      while (true) {
-        while (/^[A-Za-z_]\w*=/.test(tokens[i] ?? "")) {
-          const assignment = tokens[i] as string
-          prefix.push(assignment)
-          const variable = assignment.slice(0, assignment.indexOf("="))
-          if (variable === "BEADS_ACTOR" || variable === "BD_ACTOR") delete unset[variable]
-          i++
+
+    const words = item.words
+    let k = 0
+    let skip = false
+    while (k < words.length && words[k]?.quoted === false) {
+      const value = words[k]?.value as string
+      if (OPENERS.has(value)) {
+        open("compound")
+        skip = HEADER_ONLY.has(value)
+      } else if (BRANCHES.has(value)) branch()
+      else if (CLOSERS.has(value)) {
+        close("compound")
+        skip = true
+      } else if (value !== "!" && value !== "then" && value !== "do") break
+      k++
+      if (skip) break
+    }
+    if (skip) continue
+
+    let a = k
+    while (a < words.length && ASSIGNMENT.test(command.slice(words[a]?.start, words[a]?.end))) a++
+    const assigned = words.slice(k, a).map((word) => word.value)
+    const values = words.slice(a).map((word) => word.value)
+    if (values.length === 0) {
+      for (const assignment of assigned) state = assignBare(state, assignment)
+    } else if (stateBuiltin(values) !== undefined) {
+      state = applyBuiltin(state, values)
+    } else {
+      const found = resolveBd(values, assigned)
+      if (found !== undefined) {
+        const scanned = scanGlobals(values, found.next)
+        const verb = values[scanned.next]
+        if (verb !== undefined) {
+          out.push({
+            verb: verb.toLowerCase(),
+            args: values.slice(scanned.next + 1),
+            globals: scanned.globals,
+            prefix: found.prefix,
+            exported: { ...state },
+            unset: found.unset,
+          })
         }
-        const flag = tokens[i]
-        if (flag === undefined || !flag.startsWith("-")) break
-        if (word === "env") {
-          if (flag === "--") {
-            i++
-            break
-          }
-          if (flag === "-i" || flag === "--ignore-environment") {
-            unset.BEADS_ACTOR = true
-            unset.BD_ACTOR = true
-            i++
-            continue
-          }
-          const unsetName =
-            flag === "-u" || flag === "--unset"
-              ? tokens[i + 1]
-              : flag.startsWith("--unset=")
-                ? flag.slice("--unset=".length)
-                : flag.startsWith("-u") && flag.length > 2
-                  ? flag.slice(2)
-                  : undefined
-          if (unsetName === "BEADS_ACTOR" || unsetName === "BD_ACTOR") unset[unsetName] = true
-          if (flag === "-u" || flag === "--unset") i += 2
-          else i++
-          continue
-        }
-        i++
-        if (WRAPPER_VALUE_FLAGS[flag] === true) i++
+      }
+      if (SHELL_INTERPRETERS.has(basename(values[0] ?? ""))) {
+        for (const document of item.hereDocuments) out.push(...bdInvocations(document.body))
       }
     }
-    const word = tokens[i]
-    if (word === undefined || (word.split("/").pop() ?? word) !== "bd") continue
-    i++
-    const scanned = scanGlobals(tokens, i)
-    const verb = tokens[scanned.next]
-    if (verb !== undefined) {
-      out.push({
-        verb: verb.toLowerCase(),
-        args: tokens.slice(scanned.next + 1),
-        globals: scanned.globals,
-        prefix,
-        exported: { ...exported },
-        unset,
-      })
-    }
+    if (isPipe(items[index - 1]) && !isPipe(items[index + 1])) state = pipeBase
   }
   return out
+}
+
+/** `export`, `unset` and the like at command position, looking through `builtin` and `command`. */
+function stateBuiltin(values: string[]): { name: string; args: string[] } | undefined {
+  let at = 0
+  if (values[0] === "builtin" || values[0] === "command") at = values[1] === "--" ? 2 : 1
+  const name = values[at]
+  return name !== undefined && STATE_BUILTINS.has(name) ? { name, args: values.slice(at + 1) } : undefined
+}
+
+function applyBuiltin(state: ActorState, values: string[]): ActorState {
+  const found = stateBuiltin(values)
+  if (found === undefined) return state
+  const next: ActorState = { ...state }
+  if (found.name === "eval" || found.name === "source" || found.name === ".") {
+    for (const variable of ACTOR_VARS) next[variable] = ""
+    return next
+  }
+  const unexport = found.name === "export" && found.args.some((arg) => /^-[A-Za-z]*n[A-Za-z]*$/.test(arg))
+  for (const arg of found.args) {
+    const name = arg.split("=", 1)[0] as string
+    const variable = ACTOR_VARS.find((candidate) => candidate === name)
+    if (variable === undefined) continue
+    if (found.name === "export" && !unexport) {
+      if (arg.includes("=")) next[variable] = arg.slice(name.length + 1)
+    } else next[variable] = ""
+  }
+  return next
+}
+
+/** A bare `NAME=value`: it re-values an exported actor, and an empty one clears even an ambient actor. */
+function assignBare(state: ActorState, assignment: string): ActorState {
+  const name = assignment.slice(0, assignment.indexOf("="))
+  const variable = ACTOR_VARS.find((candidate) => candidate === name)
+  if (variable === undefined) return state
+  const value = assignment.slice(name.length + 1)
+  const current = state[variable]
+  if (current === "") return state
+  if (current === undefined && value !== "") return state
+  return { ...state, [variable]: value }
+}
+
+/** The `bd` word after shell assignments and transparent wrappers, with what those wrappers set. */
+function resolveBd(
+  values: string[],
+  assigned: string[],
+): { next: number; prefix: string[]; unset: Partial<Record<ActorVar, true>> } | undefined {
+  let i = 0
+  const prefix = [...assigned]
+  const unset: Partial<Record<ActorVar, true>> = {}
+  while (true) {
+    const word = basename(values[i] ?? "")
+    if (CONTROL_PREFIXES[word] === true) {
+      i++
+      continue
+    }
+    if (TRANSPARENT_WRAPPERS[word] !== true) break
+    i++
+    if (word === "command") {
+      // `command -v bd` only describes `bd`; `command -- bd` and `command -p bd` run it.
+      let describes = false
+      while (values[i]?.startsWith("-") === true) {
+        const flag = values[i] as string
+        i++
+        if (flag === "--") break
+        if (/^-[A-Za-z]*[vV]/.test(flag)) describes = true
+      }
+      if (describes) return undefined
+      continue
+    }
+    while (true) {
+      while (ASSIGNMENT.test(values[i] ?? "")) {
+        const assignment = values[i] as string
+        prefix.push(assignment)
+        const variable = assignment.slice(0, assignment.indexOf("="))
+        if (variable === "BEADS_ACTOR" || variable === "BD_ACTOR") delete unset[variable]
+        i++
+      }
+      const flag = values[i]
+      if (flag === undefined || !flag.startsWith("-")) break
+      if (word === "env") {
+        if (flag === "--") {
+          i++
+          break
+        }
+        if (flag === "-i" || flag === "--ignore-environment") {
+          unset.BEADS_ACTOR = true
+          unset.BD_ACTOR = true
+          i++
+          continue
+        }
+        const unsetName =
+          flag === "-u" || flag === "--unset"
+            ? values[i + 1]
+            : flag.startsWith("--unset=")
+              ? flag.slice("--unset=".length)
+              : flag.startsWith("-u") && flag.length > 2
+                ? flag.slice(2)
+                : undefined
+        if (unsetName === "BEADS_ACTOR" || unsetName === "BD_ACTOR") unset[unsetName] = true
+        if (flag === "-u" || flag === "--unset") i += 2
+        else i++
+        continue
+      }
+      i++
+      if (WRAPPER_VALUE_FLAGS[flag] === true) i++
+    }
+  }
+  const word = values[i]
+  if (word === undefined || basename(word) !== "bd") return undefined
+  return { next: i + 1, prefix, unset }
 }
 
 /**
