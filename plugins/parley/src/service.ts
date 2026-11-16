@@ -2,6 +2,7 @@ import { type Answer, type FileValue, normaliseAnswer, type SubmittedAnswer } fr
 import { visibleQuestions } from "./conditions.ts"
 import { FALLBACK_KINDS, fromQuestionTool, type Prompt, toPrompt, unsupported } from "./fallback.ts"
 import { baseMime, render } from "./format.ts"
+import { fromOutbox, MAX_ATTEMPTS, messageID, type OutboxEntry, SENT_TTL_MS } from "./outbox.ts"
 import { fromStored, type StoredRound, stale, toStored } from "./persist.ts"
 import { Presence } from "./presence.ts"
 import { coerceQuestion, type Question, validateQuestions } from "./questions.ts"
@@ -66,10 +67,16 @@ export interface RoundStore {
   readonly list: () => Promise<readonly unknown[]>
   readonly save: (round: StoredRound) => Promise<void>
   readonly remove: (roundID: string) => Promise<void>
+  /** Messages still to be sent to a session, and recently sent ones. */
+  readonly listOutbox: () => Promise<readonly unknown[]>
+  readonly saveOutbox: (entry: OutboxEntry) => Promise<void>
+  readonly removeOutbox: (key: string) => Promise<void>
 }
 
 /** A message for the session's agent, for answers that have no waiting tool call to return through. */
 export interface SessionMessage {
+  /** The host message id, the same on every retry of this message. */
+  readonly id: string
   readonly sessionID: string
   readonly text: string
   readonly description: string
@@ -79,7 +86,9 @@ export interface Deps {
   readonly emit: (event: RoundEvent) => Promise<void>
   readonly store?: RoundStore
   /** Writes an upload to disk and returns its path; without it uploads cannot go in a session message. */
-  readonly save?: (file: FileValue) => string | undefined
+  readonly save?: (file: FileValue, roundID?: string) => string | undefined
+  /** Removes what `save` wrote for a round. Called when the closed round is pruned, never before. */
+  readonly dropUploads?: (roundID: string) => void
   readonly warn?: (message: string) => void
   readonly deliver?: (message: SessionMessage) => Promise<void>
   readonly now?: () => number
@@ -161,6 +170,9 @@ export function deliveryMessage(
   return { text: lines.join("\n"), held }
 }
 
+/** The message id as a line of the text: the host may collapse a repeat by id, and if it does not, the agent can see it is one. */
+const withKey = (text: string, id: string) => `${text}\n\nDelivery key: ${id} (a repeat of this key is the same message)`
+
 const failure = (error: unknown) =>
   `Could not send the answers to the session: ${error instanceof Error ? error.message : String(error)}`
 
@@ -182,8 +194,8 @@ export class Parley {
   readonly #orphans = new Set<string>()
   readonly #waits = new Set<AbortController>()
   readonly #inflight = new Set<Promise<unknown>>()
-  /** Delivery keys already sent, so a retry after a lost acknowledgement does not send twice. */
-  readonly #sent = new Set<string>()
+  /** Deliveries that are pending or recently sent, by key. Kept in storage too, so a reload does not forget them. */
+  readonly #outbox = new Map<string, OutboxEntry>()
   #suspended = false
   #writes: Promise<unknown> = Promise.resolve()
   #pending = 0
@@ -210,11 +222,82 @@ export class Parley {
       const { round, directory } = restored
       // Storage holds every location's rounds; another location's instance owns and writes those.
       if (directory !== store.directory || !(await store.owns(round.sessionID).catch(() => false))) continue
-      if (stale(round, now, CLOSED_TTL_MS)) this.#forget(round.id)
-      else keep.push(round)
+      if (stale(round, now, CLOSED_TTL_MS)) {
+        this.#forget(round.id)
+        this.deps.dropUploads?.(round.id)
+      } else keep.push(round)
     }
     this.rounds.restore(keep)
     for (const round of keep) if (round.status === "open") this.#orphans.add(round.id)
+    await this.#restoreOutbox(store)
+  }
+
+  /** Reads this location's outbox and sends again, with the same message ids, what the host never admitted. */
+  async #restoreOutbox(store: RoundStore) {
+    for (const raw of await store.listOutbox().catch(() => [])) {
+      const entry = fromOutbox(raw)
+      if (!entry) {
+        this.deps.warn?.("parley: ignoring a stored delivery that is not valid")
+        continue
+      }
+      if (entry.directory !== store.directory || !(await store.owns(entry.sessionID).catch(() => false))) continue
+      if (entry.status === "sent" && this.#now() - entry.updated > SENT_TTL_MS) this.#dropOutbox(entry.key)
+      else if (entry.status === "pending" && entry.attempts >= MAX_ATTEMPTS) {
+        // Its answers stay undelivered, so parley_wait still returns them.
+        this.deps.warn?.(`parley: giving up on delivering message ${entry.messageID} after ${entry.attempts} attempts`)
+        this.#dropOutbox(entry.key)
+      } else this.#outbox.set(entry.key, entry)
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const bound = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, SUSPEND_DRAIN_MS * 2)
+    })
+    const retries = [...this.#outbox.values()].filter((entry) => entry.status === "pending").map((entry) => this.#send(entry))
+    await Promise.race([Promise.allSettled(retries), bound]).finally(() => clearTimeout(timer))
+  }
+
+  #saveOutbox(entry: OutboxEntry) {
+    this.#outbox.set(entry.key, entry)
+    const store = this.deps.store
+    if (!store) return
+    const stored = { ...entry }
+    this.#queue(() => store.saveOutbox(stored))
+  }
+
+  #dropOutbox(key: string) {
+    this.#outbox.delete(key)
+    const store = this.deps.store
+    if (store) this.#queue(() => store.removeOutbox(key))
+  }
+
+  /**
+   * Sends an outbox entry to the session under its fixed message id. Only once the host admits it are the
+   * round's answers marked delivered, so a reload before that leaves them to be sent again, never hidden.
+   * The text carries the message id, so a repeat the host does not collapse is recognisable to the agent.
+   * Returns an error message, or undefined on success.
+   */
+  async #send(entry: OutboxEntry): Promise<string | undefined> {
+    if (!this.deps.deliver) return "Cannot message the session from here."
+    try {
+      await this.deps.deliver({
+        id: entry.messageID,
+        sessionID: entry.sessionID,
+        text: entry.text,
+        description: entry.description,
+      })
+    } catch (error) {
+      this.#saveOutbox({ ...entry, attempts: entry.attempts + 1, updated: this.#now() })
+      return failure(error)
+    }
+    const round = entry.roundID === undefined ? undefined : this.rounds.get(entry.roundID)
+    if (round) {
+      for (const id of entry.answerIDs) if (round.answers.has(id)) round.delivered.add(id)
+      this.#persist(round)
+    }
+    this.#saveOutbox({ ...entry, status: "sent", updated: this.#now() })
+    // The marks and the sent state are in storage before the caller is told it worked.
+    await this.#writes
+    return undefined
   }
 
   #persist(round: Round) {
@@ -339,6 +422,9 @@ export class Parley {
       timeout_s: input.timeout_s,
       context,
     })
+    // The agent has these answers now; a delivery still waiting to be sent would repeat them.
+    const waiting = this.#outbox.get(`round-${round.id}`)
+    if (waiting?.status === "pending" && result.answers.length > 0) this.#dropOutbox(waiting.key)
     return { result, questions: round.questions }
   }
 
@@ -384,18 +470,21 @@ export class Parley {
 
   /**
    * Sends answers the TUI holds for a round this instance does not know (it was never persisted) to the
-   * session as a message, so the user's input is not lost.
+   * session as a message, so the user's input is not lost. Answers with uploads fail unless there is a
+   * place to save the files: no round keeps them, so the TUI must keep the card and its draft.
    */
   async deliver(input: {
     sessionID: string
     number?: number
     questions: readonly Question[]
     answers: readonly SubmittedAnswer[]
-    /** Names one attempt, so a retry after a lost acknowledgement is not sent a second time. */
+    /** Names one send, so a retry after a lost acknowledgement does not send it again. */
     deliveryID?: string
   }) {
     if (!this.deps.deliver) return { ok: false, errors: ["Cannot message the session from here."] }
-    if (input.deliveryID !== undefined && this.#sent.has(input.deliveryID)) return { ok: true, errors: [] }
+    const key = input.deliveryID ?? `anon-${crypto.randomUUID()}`
+    const existing = this.#outbox.get(key)
+    if (existing?.status === "sent") return { ok: true, errors: [] }
     const errors: string[] = []
     const answers: Answer[] = []
     for (const item of input.answers) {
@@ -416,16 +505,33 @@ export class Parley {
       answers,
       pending: input.questions.filter((question) => !answered.has(question.id)).map((question) => question.id),
     }
-    const { text, held } = deliveryMessage(result, input.questions, this.deps.save, "They were not forwarded.")
-    // Recorded before sending: if only the acknowledgement is lost, the retry finds it here.
-    if (input.deliveryID !== undefined) this.#sent.add(input.deliveryID)
-    try {
-      await this.deps.deliver({ sessionID: input.sessionID, text, description: "Parley answers" })
-    } catch (error) {
-      if (input.deliveryID !== undefined) this.#sent.delete(input.deliveryID)
-      return { ok: false, errors: [failure(error)] }
+    const save = this.deps.save
+    const { text, held } = deliveryMessage(result, input.questions, save && ((file) => save(file)), "")
+    if (held.length > 0)
+      return {
+        ok: false,
+        errors: [`Uploads in ${held.join(", ")} cannot be sent in a message and there is nowhere to save them. Nothing was sent.`],
+      }
+    const now = this.#now()
+    const id = existing?.messageID ?? messageID(now)
+    const entry: OutboxEntry = {
+      key,
+      messageID: id,
+      directory: this.deps.store?.directory ?? "",
+      sessionID: input.sessionID,
+      text: withKey(text, id),
+      description: "Parley answers",
+      answerIDs: [],
+      status: "pending",
+      attempts: existing?.attempts ?? 0,
+      created: existing?.created ?? now,
+      updated: now,
     }
-    return { ok: true, errors: held.length > 0 ? [`Uploads in ${held.join(", ")} were not forwarded.`] : errors }
+    // In storage before it is sent: a reload now retries it under the same id instead of losing it.
+    this.#saveOutbox(entry)
+    await this.#writes
+    const error = await this.#send(entry)
+    return error ? { ok: false, errors: [error] } : { ok: true, errors }
   }
 
   /**
@@ -436,22 +542,37 @@ export class Parley {
     if (!this.#orphans.has(round.id) || round.status === "open") return []
     this.#orphans.delete(round.id)
     if (!this.deps.deliver) return []
-    const result = collect(round)
-    const { text, held } = deliveryMessage(result, round.questions, this.deps.save, "Call parley_wait to receive them.")
-    // Held answers stay undelivered, so parley_wait still returns them with their contents.
-    for (const id of held) round.delivered.delete(id)
-    this.#persist(round)
-    // The delivered marks reach storage before the message is sent, so a reload cannot send it again.
-    await this.#writes
-    try {
-      await this.deps.deliver({ sessionID: round.sessionID, text, description: `Parley round ${round.number} answers` })
-    } catch (error) {
-      // Keep the answers for a later parley_wait.
-      for (const answer of result.answers) round.delivered.delete(answer.id)
-      this.#persist(round)
-      return [failure(error)]
+    const key = `round-${round.id}`
+    const existing = this.#outbox.get(key)
+    if (existing?.status === "sent") return []
+    const result = collect(round, { keep: true })
+    const save = this.deps.save
+    const { text, held } = deliveryMessage(
+      result,
+      round.questions,
+      save && ((file) => save(file, round.id)),
+      "Call parley_wait to receive them.",
+    )
+    const now = this.#now()
+    const id = existing?.messageID ?? messageID(now)
+    const entry: OutboxEntry = {
+      key,
+      messageID: id,
+      directory: this.deps.store?.directory ?? "",
+      sessionID: round.sessionID,
+      text: withKey(text, id),
+      description: `Parley round ${round.number} answers`,
+      roundID: round.id,
+      answerIDs: result.answers.map((answer) => answer.id).filter((answerID) => !held.includes(answerID)),
+      status: "pending",
+      attempts: existing?.attempts ?? 0,
+      created: existing?.created ?? now,
+      updated: now,
     }
-    return []
+    this.#saveOutbox(entry)
+    await this.#writes
+    const error = await this.#send(entry)
+    return error ? [error] : []
   }
 
   async cancel(input: { roundID: string; reason?: string }) {
@@ -493,7 +614,10 @@ export class Parley {
   }
 
   sweep() {
-    for (const id of this.rounds.sweep(this.#now(), CLOSED_TTL_MS)) this.#forget(id)
+    for (const id of this.rounds.sweep(this.#now(), CLOSED_TTL_MS)) {
+      this.#forget(id)
+      this.deps.dropUploads?.(id)
+    }
     this.presence.prune(this.#now())
   }
 

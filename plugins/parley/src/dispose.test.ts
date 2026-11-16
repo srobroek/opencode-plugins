@@ -18,7 +18,7 @@ function host(directory: string, data: Map<string, unknown>, writeMs: number) {
         data.set(key, JSON.parse(JSON.stringify(value)))
       },
       remove: async (key: string) => void data.delete(key),
-      scan: async () => ({ entries: [...data].map(([key, value]) => ({ key, value })) }),
+      scan: async (options: { prefix: string }) => ({ entries: [...data].filter(([key]) => key.startsWith(options.prefix)).map(([key, value]) => ({ key, value })) }),
     },
     session: { get: async () => ({ location: { directory } }), synthetic: async () => ({}) },
     rpc: {

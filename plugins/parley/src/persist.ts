@@ -58,6 +58,15 @@ export interface Restored {
 
 /** Reads a stored entry back into a round, or undefined when it is not a usable round. Nested data is checked too. */
 export function fromStored(value: unknown): Restored | undefined {
+  try {
+    return decode(value)
+  } catch {
+    // Malformed nested data (validation reads options, answers, ...) is one bad round, not a failed restore.
+    return undefined
+  }
+}
+
+function decode(value: unknown): Restored | undefined {
   if (!isRecord(value)) return undefined
   const { id, directory, sessionID, number, questions, answers, status, created, updated } = value
   if (typeof id !== "string" || typeof directory !== "string" || typeof sessionID !== "string" || typeof number !== "number") return undefined

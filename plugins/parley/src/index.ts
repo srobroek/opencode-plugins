@@ -1,16 +1,15 @@
-import { mkdirSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
-import path from "node:path"
 import { Plugin } from "@opencode/plugin"
-import type { FileValue, SubmittedAnswer } from "./answers.ts"
+import type { SubmittedAnswer } from "./answers.ts"
 import type { Prompt } from "./fallback.ts"
 import { render } from "./format.ts"
+import { OUTBOX_KEY_PREFIX, type OutboxEntry, outboxKey } from "./outbox.ts"
 import { ROUND_KEY_PREFIX, roundKey, type StoredRound } from "./persist.ts"
 import type { Question } from "./questions.ts"
 import { ParleyRpc, type RoundEvent } from "./rpc.ts"
 import { askInput, endInput, endOutput, resultOutput, waitInput } from "./schema.ts"
 import { type AskInput, type CallContext, InputError, Parley, type RoundStore, settingsFrom, type WaitInput } from "./service.ts"
 import { wrapQuestion } from "./takeover.ts"
+import { removeUploads, saveUpload } from "./uploads.ts"
 
 export { ParleyRpc } from "./rpc.ts"
 
@@ -31,34 +30,29 @@ Status unavailable: no parley UI, so use the question tool or chat for the rest 
 
 const options = { permission: "parley" } as const
 
-function saveUpload(file: FileValue) {
-  if (file.data === undefined) return undefined
-  const dir = path.join(tmpdir(), "parley", crypto.randomUUID())
-  mkdirSync(dir, { recursive: true })
-  const target = path.join(dir, path.basename(file.name))
-  writeFileSync(target, Buffer.from(file.data, "base64"))
-  return target
-}
-
 /** Rounds in the plugin's own storage, one key per round. Nothing is kept when the host offers no storage. */
 async function roundStore(ctx: Plugin.Context): Promise<RoundStore | undefined> {
   const storage = ctx.storage
   if (!storage) return undefined
   const directory = ctx.location.directory
+  const scanValues = async (prefix: string) => {
+    const entries: unknown[] = []
+    let after: string | undefined
+    do {
+      const page = await storage.scan({ prefix, ...(after === undefined ? {} : { after }) })
+      entries.push(...page.entries.map((entry) => entry.value))
+      after = page.next
+    } while (after !== undefined)
+    return entries
+  }
   return {
     directory,
     // A session of another location, one that is gone, or one the host cannot name is not ours.
     owns: async (sessionID) => (await ctx.session.get({ sessionID })).location.directory === directory,
-    list: async () => {
-      const entries: unknown[] = []
-      let after: string | undefined
-      do {
-        const page = await storage.scan({ prefix: ROUND_KEY_PREFIX, ...(after === undefined ? {} : { after }) })
-        entries.push(...page.entries.map((entry) => entry.value))
-        after = page.next
-      } while (after !== undefined)
-      return entries
-    },
+    list: () => scanValues(ROUND_KEY_PREFIX),
+    listOutbox: () => scanValues(OUTBOX_KEY_PREFIX),
+    saveOutbox: (entry: OutboxEntry) => storage.set(outboxKey(entry.key), entry as never),
+    removeOutbox: (key) => storage.remove(outboxKey(key)),
     save: (round: StoredRound) => storage.set(roundKey(round.id), round as never),
     remove: (roundID) => storage.remove(roundKey(roundID)),
   }
@@ -72,12 +66,14 @@ export default Plugin.define({
     const service = new Parley({
       settings: settingsFrom(ctx.options, process.env),
       store: await roundStore(ctx),
-      save: saveUpload,
+      save: (file, roundID) => saveUpload(file, roundID),
+      dropUploads: (roundID) => removeUploads(roundID),
       warn: (message) => console.warn(message),
       // A synthetic message, queued behind any running turn and waking an idle session: the user has just
-      // answered, and the agent's own call died with the reload, so nothing else would tell it.
-      deliver: async ({ sessionID, text, description }) => {
-        await ctx.session.synthetic({ sessionID, text, description, delivery: "queue", resume: true })
+      // answered, and the agent's own call died with the reload, so nothing else would tell it. The id
+      // (host format `msg_...`) is fixed per message, so a retry carries the same one.
+      deliver: async ({ id, sessionID, text, description }) => {
+        await ctx.session.synthetic({ id, sessionID, text, description, delivery: "queue", resume: true })
       },
       emit: async (event) => {
         await emitEvent?.(event).catch(() => {})
@@ -162,7 +158,7 @@ export default Plugin.define({
         execute: async (input, context) => {
           try {
             const { result, questions } = await service.ask(input as AskInput, call(context))
-            return render(result, questions, saveUpload, (input as AskInput).format === "native" ? "native" : "parley")
+            return render(result, questions, (file) => saveUpload(file, result.round_id), (input as AskInput).format === "native" ? "native" : "parley")
           } catch (error) {
             if (error instanceof InputError) throw new Error(error.message)
             throw error
@@ -178,7 +174,7 @@ export default Plugin.define({
         options,
         execute: async (input, context) => {
           const { result, questions } = await service.wait(input as WaitInput, call(context))
-          return render(result, questions, saveUpload)
+          return render(result, questions, (file) => saveUpload(file, result.round_id))
         },
       })
       editor.add({

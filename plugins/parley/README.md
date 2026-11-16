@@ -83,8 +83,11 @@ returns at once, so a skill can fall back to the `question` tool or a plain
 markdown round in chat.
 
 Uploaded images reach the model as image content. Text files are inlined in the
-result. Other files are written to a temporary directory on the server and the
-path is reported.
+result. Other files are written to a private temporary directory on the server
+(0700 directory, 0600 files, under `parley/<round id>/`) and the path is
+reported. A round's files are removed when parley prunes the closed round, at
+least 30 minutes after it closed, and never earlier: the agent reads them on a
+later turn.
 
 ## Phase three kinds
 
@@ -292,13 +295,24 @@ and open ones after 24 hours.
   idle session. If the model calls `parley_wait` first, it gets the answers
   there instead, and no message is sent. A message carries text only (the
   session `synthetic` call takes no files): text uploads are inlined and other
-  uploads are written to a temporary directory and reported by path.
+  uploads are written to the private upload directory and reported by path.
+  Where the files cannot be saved, a TUI fallback send fails and keeps the card
+  and its draft; for a restored round the answers stay for `parley_wait`.
 - Storage is shared by every location, so each round records its location and
   an instance restores only rounds whose session belongs to its own location.
   A round whose session cannot be placed is not restored. Invalid stored rounds
   are skipped with a warning.
 - On dispose, queued saves finish (bounded at 2 s) before the next instance
-  restores, and the delivered marks are saved before a message is sent.
+  restores.
+- Delivery goes through an outbox kept in storage. The message gets a host
+  message id (`msg_...`, fixed per message) and is written to the outbox before
+  it is sent. The round's answers are marked delivered only after the host
+  admits it. A restore sends again, with the same id, any message the host never
+  admitted (up to 3 attempts; then the answers wait for `parley_wait`). The
+  host's behaviour for a repeated id is not documented, so delivery is
+  at-least-once: every message ends with a `Delivery key: msg_...` line, and a
+  repeat of a key is the same message. `parley_wait` taking the answers
+  cancels the pending message.
 - The TUI notices the new server instance and fetches the round again; the
   draft is kept. A round the server no longer lists after a reload stays on the
   screen with its draft until you act. If a submit fails with `unknown round`,

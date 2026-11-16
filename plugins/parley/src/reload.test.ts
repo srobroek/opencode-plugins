@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test"
 import { summarise } from "./format.ts"
+import { MAX_ATTEMPTS, type OutboxEntry, outboxKey } from "./outbox.ts"
 import { OPEN_TTL_MS, roundKey, type StoredRound, toStored } from "./persist.ts"
 import type { Question } from "./questions.ts"
 import { RELOADED_REASON, type Round } from "./rounds.ts"
 import { CLOSED_TTL_MS, Parley, type RoundStore, type SessionMessage, type Settings } from "./service.ts"
+import { submitRound } from "./submit.ts"
 
 const settings: Settings = { fallback: "none", questionTool: "takeover", disabled: false, heartbeatWindowMs: 30_000 }
 const questions: Question[] = [
@@ -20,7 +22,7 @@ function storeOver(data: Data, directory = "/repo", owns: (sessionID: string) =>
   return {
     directory,
     owns,
-    list: async () => [...data.values()],
+    list: async () => [...data].filter(([key]) => key.startsWith("round:")).map(([, value]) => value),
     save: async (round) => {
       await slow()
       data.set(roundKey(round.id), JSON.parse(JSON.stringify(round)))
@@ -29,12 +31,22 @@ function storeOver(data: Data, directory = "/repo", owns: (sessionID: string) =>
       await slow()
       data.delete(roundKey(id))
     },
+    listOutbox: async () => [...data].filter(([key]) => key.startsWith("outbox:")).map(([, value]) => value),
+    saveOutbox: async (entry) => {
+      await slow()
+      data.set(outboxKey(entry.key), JSON.parse(JSON.stringify(entry)))
+    },
+    removeOutbox: async (key) => {
+      await slow()
+      data.delete(outboxKey(key))
+    },
   }
 }
 
 interface Extras {
   now?: () => number
-  save?: (file: { name: string }) => string | undefined
+  save?: (file: { name: string }, roundID?: string) => string | undefined
+  dropUploads?: (roundID: string) => void
   warn?: (message: string) => void
   deliver?: (message: SessionMessage) => Promise<void>
 }
@@ -49,6 +61,7 @@ function instance(store: RoundStore, extras: Extras = {}) {
     deliver: extras.deliver ?? (async (message) => void messages.push(message)),
     ...(extras.save ? { save: extras.save as never } : {}),
     ...(extras.warn ? { warn: extras.warn } : {}),
+    ...(extras.dropUploads ? { dropUploads: extras.dropUploads } : {}),
   })
   service.attach({ clientID: "tui" })
   return { service, messages }
@@ -117,19 +130,87 @@ describe("reload", () => {
     expect(second.service.rounds.get(roundID)?.status).toBe("submitted")
   })
 
-  test("the delivered marks are in storage before the message is sent, so a reload cannot send it twice", async () => {
+  test("the message is in the outbox, under its id, before it is sent; the answers are marked delivered only after the host admits it", async () => {
     const { data, store, first, roundID } = await openRound()
-    let storedAtSend: StoredRound | undefined
+    let atSend: { round: StoredRound; entry: OutboxEntry } | undefined
     const second = instance(store, {
       deliver: async () => {
-        storedAtSend = data.get(roundKey(roundID)) as StoredRound
+        atSend = { round: data.get(roundKey(roundID)) as StoredRound, entry: data.get(outboxKey(`round-${roundID}`)) as OutboxEntry }
       },
     })
     await first.service.suspend()
     await second.service.restore()
     await second.service.submit({ roundID, answers: both })
-    expect(storedAtSend?.status).toBe("submitted")
-    expect(storedAtSend?.delivered.sort()).toEqual(["ssh.host", "ssh.port"])
+    expect(atSend?.entry).toMatchObject({ status: "pending", roundID, sessionID: "s" })
+    expect(atSend?.entry.messageID).toMatch(/^msg_[0-9a-f]{12}[0-9A-Za-z]{14}$/)
+    expect(atSend?.round.delivered).toEqual([])
+    const after = data.get(roundKey(roundID)) as StoredRound
+    expect(after.delivered.sort()).toEqual(["ssh.host", "ssh.port"])
+    expect(data.get(outboxKey(`round-${roundID}`))).toMatchObject({ status: "sent" })
+  })
+
+  test("a reload between the user's submit and the host admitting the message sends it again under the same id, and hides nothing", async () => {
+    const { data, store, first, roundID } = await openRound()
+    const down = instance(store, { deliver: async () => { throw new Error("host down") } })
+    await first.service.suspend()
+    await down.service.restore()
+    const failed = await down.service.submit({ roundID, answers: both })
+    expect(failed.errors[0]).toContain("host down")
+    const pending = data.get(outboxKey(`round-${roundID}`)) as OutboxEntry
+    expect(pending.status).toBe("pending")
+    expect((data.get(roundKey(roundID)) as StoredRound).delivered).toEqual([])
+    await down.service.suspend()
+    const sent: SessionMessage[] = []
+    const third = instance(store, { deliver: async (message) => void sent.push(message) })
+    await third.service.restore()
+    expect(sent.map((message) => message.id)).toEqual([pending.messageID])
+    expect(sent[0]?.text).toContain(`Delivery key: ${pending.messageID}`)
+    expect(third.service.rounds.get(roundID)?.delivered.size).toBe(2)
+    expect(data.get(outboxKey(`round-${roundID}`))).toMatchObject({ status: "sent" })
+  })
+
+  test("a reload after the host admitted the message does not send it again", async () => {
+    const { store, first, roundID } = await openRound()
+    const second = await reload(first, store)
+    await second.service.submit({ roundID, answers: both })
+    expect(second.messages).toHaveLength(1)
+    const third = await reload(second, store)
+    expect(third.messages).toEqual([])
+    await third.service.cancel({ roundID })
+    expect(third.messages).toEqual([])
+  })
+
+  test("a delivery that keeps failing is given up after the attempt limit and its answers wait for parley_wait", async () => {
+    const { data, store, first, roundID } = await openRound()
+    const down = instance(store, { deliver: async () => { throw new Error("host down") } })
+    await first.service.suspend()
+    await down.service.restore()
+    await down.service.submit({ roundID, answers: both })
+    const key = outboxKey(`round-${roundID}`)
+    data.set(key, { ...(data.get(key) as OutboxEntry), attempts: MAX_ATTEMPTS })
+    const warnings: string[] = []
+    const sent: SessionMessage[] = []
+    const next = instance(store, { deliver: async (message) => void sent.push(message), warn: (message) => void warnings.push(message) })
+    await down.service.suspend()
+    await next.service.restore()
+    await next.service.suspend()
+    expect(sent).toEqual([])
+    expect(warnings[0]).toContain("giving up")
+    expect(data.has(key)).toBe(false)
+    expect((await next.service.wait({}, { sessionID: "s" })).result.answers).toHaveLength(2)
+  })
+
+  test("parley_wait taking the answers cancels the pending delivery, so they arrive once", async () => {
+    const { data, store, first, roundID } = await openRound()
+    const down = instance(store, { deliver: async () => { throw new Error("host down") } })
+    await first.service.suspend()
+    await down.service.restore()
+    await down.service.submit({ roundID, answers: both })
+    expect((await down.service.wait({}, { sessionID: "s" })).result.answers).toHaveLength(2)
+    await down.service.suspend()
+    expect(data.has(outboxKey(`round-${roundID}`))).toBe(false)
+    const next = await reload(down, store)
+    expect(next.messages).toEqual([])
   })
 
   test("dismissing a restored round tells the session", async () => {
@@ -245,17 +326,51 @@ describe("deliver", () => {
 
   test("a retry after a failed send does send", async () => {
     let fail = true
-    const sent: string[] = []
+    const tried: string[] = []
     const { service } = instance(storeOver(new Map()), {
       deliver: async (message) => {
+        tried.push(message.id)
         if (fail) throw new Error("offline")
-        sent.push(message.text)
       },
     })
     expect((await service.deliver({ sessionID: "s", questions, answers, deliveryID: "d1" })).ok).toBe(false)
     fail = false
     expect((await service.deliver({ sessionID: "s", questions, answers, deliveryID: "d1" })).ok).toBe(true)
-    expect(sent).toHaveLength(1)
+    expect(tried).toHaveLength(2)
+    expect(tried[1]).toBe(tried[0])
+  })
+
+  test("a retry after a reload that followed a successful send is recognised and not sent again", async () => {
+    const data: Data = new Map()
+    const first = instance(storeOver(data))
+    await first.service.deliver({ sessionID: "s", questions, answers, deliveryID: "d1" })
+    await first.service.suspend()
+    const second = instance(storeOver(data))
+    await second.service.restore()
+    expect((await second.service.deliver({ sessionID: "s", questions, answers, deliveryID: "d1" })).ok).toBe(true)
+    expect(second.messages).toEqual([])
+  })
+
+  test("answers with uploads fail when there is nowhere to save them, so the card keeps its draft", async () => {
+    const { service, messages } = instance(storeOver(new Map()))
+    const file = { id: "shot", status: "answered" as const, value: { files: [{ name: "a.png", mime: "image/png", data: "UE5H" }] } }
+    const outcome = await service.deliver({ sessionID: "s", questions: [{ id: "shot", title: "Shot", kind: "ask_image" }], answers: [file] })
+    expect(outcome.ok).toBe(false)
+    expect(outcome.errors[0]).toContain("nowhere to save")
+    expect(messages).toEqual([])
+    // End to end through the TUI flow: the error comes back on the card and the card is not settled.
+    let settled = false
+    const problems = await submitRound({
+      submit: async () => ({ ok: false, errors: ["unknown round rnd_1"] }),
+      deliver: () => service.deliver({ sessionID: "s", questions: [{ id: "shot", title: "Shot", kind: "ask_image" }], answers: [file] }),
+      choose: async () => true,
+      notify: () => {},
+      settle: async () => {
+        settled = true
+      },
+    })
+    expect(problems[0]).toContain("nowhere to save")
+    expect(settled).toBe(false)
   })
 })
 
@@ -372,6 +487,8 @@ describe("pruning and validation", () => {
   test.each([
     ["a null question", { questions: [null] }],
     ["a question without a kind", { questions: [{ id: "x", title: "X" }] }],
+    ["options that are not a list", { questions: [{ id: "x", title: "X", kind: "pick_one", options: "nope" }] }],
+    ["a null option", { questions: [{ id: "x", title: "X", kind: "pick_one", options: [null] }] }],
     ["a null answer", { answers: [null] }],
     ["an answer to an unknown question", { answers: [{ id: "ghost", status: "answered" }] }],
   ])("a round with %s is dropped with a warning and the rest still restore", async (_name, damage) => {
@@ -399,5 +516,36 @@ describe("guidance after a reload", () => {
   test("a plain unavailable result keeps the no-UI guidance", () => {
     const text = summarise({ status: "unavailable", reason: "no_tui", answers: [], pending: [] }, questions)
     expect(text).toContain("No parley UI is available")
+  })
+})
+
+describe("upload files follow the round's pruning", () => {
+  test("they are removed when the closed round is swept, and not when its delivery is confirmed", async () => {
+    let now = 1_000
+    const dropped: string[] = []
+    const { store, first, roundID } = await openRound({ now: () => now, dropUploads: (id) => void dropped.push(id) })
+    const second = instance(store, { now: () => now, dropUploads: (id) => void dropped.push(id), save: () => "/tmp/x" })
+    await first.service.suspend()
+    await second.service.restore()
+    await second.service.submit({ roundID, answers: both })
+    expect(second.messages).toHaveLength(1)
+    second.service.sweep()
+    expect(dropped).toEqual([])
+    now += CLOSED_TTL_MS + 1
+    second.service.sweep()
+    expect(dropped).toEqual([roundID])
+  })
+
+  test("they are removed when a stale round is pruned at restore", async () => {
+    const dropped: string[] = []
+    const data: Data = new Map()
+    const first = instance(storeOver(data), { now: () => 1_000 })
+    void first.service.ask({ questions }, { sessionID: "s" })
+    await tick()
+    const roundID = first.service.pending({}).rounds[0]?.roundID ?? ""
+    await first.service.suspend()
+    const later = instance(storeOver(data), { now: () => 1_000 + OPEN_TTL_MS + 1, dropUploads: (id) => void dropped.push(id) })
+    await later.service.restore()
+    expect(dropped).toEqual([roundID])
   })
 })

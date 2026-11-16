@@ -224,10 +224,14 @@ export function settled(round: Round, mode: WaitMode, ids?: readonly string[]): 
 }
 
 /** Builds a tool result and marks the returned answers as delivered. */
-export function collect(round: Round, options: { ids?: readonly string[]; timedOut?: boolean } = {}): RoundResult {
+export function collect(
+  round: Round,
+  options: { ids?: readonly string[]; timedOut?: boolean; keep?: boolean } = {},
+): RoundResult {
   const wanted = scoped(round, options.ids)
   const fresh = wanted.filter((id) => round.answers.has(id) && !round.delivered.has(id))
-  for (const id of fresh) round.delivered.add(id)
+  // `keep`: the caller marks them delivered itself, once the answers have really reached the agent.
+  if (options.keep !== true) for (const id of fresh) round.delivered.add(id)
   const answers = fresh.map((id) => round.answers.get(id) as Answer)
   const pending = wanted.filter((id) => !round.answers.has(id))
   const status: ResultStatus =
