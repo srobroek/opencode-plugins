@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test"
 import {
   inlineCleanupDecision,
-  readCleanupHolds,
   nextAfterCleanup,
+  readCleanupHolds,
   reportFromCleanup,
   runInlineCleanup,
   textAfterCleanup,

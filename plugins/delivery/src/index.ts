@@ -20,8 +20,8 @@ import {
 import {
   type CleanupReport,
   inlineCleanupDecision,
-  readCleanupHolds,
   nextAfterCleanup,
+  readCleanupHolds,
   runInlineCleanup,
   textAfterCleanup,
 } from "./auto-cleanup.ts"
