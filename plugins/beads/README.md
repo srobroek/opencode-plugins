@@ -106,6 +106,17 @@ follows it), `beads-claim-release`, `bd-lease-heartbeat`, `beads-session-advisor
 `beads-skills`. The lifecycle and the heartbeat read the claims that
 `beads-claim-tracking` records.
 
+### Busy-ledger wait
+
+An embedded-store write that finds the write lock held waits for its turn, polling
+with exponential backoff and jitter, for `embeddedWriteWaitMs` (default `30000`)
+before it is refused. The refusal says the ledger is busy and to retry the command
+as its own simple command; it only advises removing the lock when the holder is gone.
+
+```json
+{ "embeddedWriteWaitMs": 60000 }
+```
+
 ## Permissions
 
 OpenCode evaluates shell permissions on the rewritten command. A write that runs

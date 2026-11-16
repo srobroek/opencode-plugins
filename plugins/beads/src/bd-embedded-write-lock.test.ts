@@ -1,8 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { hostname } from "node:os"
 import { join } from "node:path"
 import {
+  backoffDelayMs,
   decideEmbeddedWrite,
   embeddedWriteRunner,
   embeddedWriteTargets,
@@ -10,7 +11,9 @@ import {
   parseLinuxStatStartIdentity,
   release,
   resolveBunBinary,
+  setPreflightWaitForTests,
   setProcessStartIdentityForTests,
+  writeWaitFromOptions,
 } from "./bd-embedded-write-lock.ts"
 import { main as runEmbeddedWriter, setCommandTimeoutForTests } from "./bd-embedded-write-runner.ts"
 import { parse } from "./shell.ts"
@@ -191,7 +194,7 @@ describe("embedded write lock", () => {
       )
       const result = await hold(store, "blocked", 35)
       expect(result.kind).toBe("failed")
-      if (result.kind === "failed") expect(result.reason).toContain("stayed held")
+      if (result.kind === "failed") expect(result.reason).toContain("ledger is busy")
     } finally {
       setProcessStartIdentityForTests()
       rmSync(store, { recursive: true, force: true })
@@ -491,7 +494,7 @@ describe("compound commands", () => {
   let held = ""
   let heldOther = ""
   const runnerForm = (target: string, using = runner) =>
-    `BEADS_DOLT_SHARED_SERVER= BEADS_DIR='${target}' '${using.interpreter}' '${using.script}' --beads-store '${target}' --beads-wait-ms 120000 -- `
+    `BEADS_DOLT_SHARED_SERVER= BEADS_DIR='${target}' '${using.interpreter}' '${using.script}' --beads-store '${target}' --beads-wait-ms 30000 -- `
 
   beforeAll(() => {
     root = mkdtempSync(join(Bun.env.TMPDIR ?? "/tmp", "beads-lock-compound-"))
@@ -696,4 +699,247 @@ describe("compound commands", () => {
     },
     { timeout: 15_000 },
   )
+})
+
+describe("waiting for a busy ledger", () => {
+  const liveHolder = (store: string, name = "omp-embedded-write.lock"): void =>
+    writeFileSync(
+      join(store, name),
+      JSON.stringify({
+        host,
+        pid: process.pid,
+        owner: "runner-other",
+        token: "other-token",
+        taken: Date.now(),
+        expires: Date.now() + 60_000,
+      }),
+    )
+
+  test("acquires a lock that is released inside the wait", async () => {
+    const store = mkdtempSync(join(Bun.env.TMPDIR ?? "/tmp", "beads-lock-wait-"))
+    try {
+      liveHolder(store)
+      setTimeout(() => rmSync(join(store, "omp-embedded-write.lock")), 150)
+      const started = Date.now()
+      const result = await hold(store, "waiter", 5000)
+      expect(result.kind).toBe("held")
+      expect(Date.now() - started).toBeLessThan(1500)
+      release(store, "waiter")
+    } finally {
+      rmSync(store, { recursive: true, force: true })
+    }
+  })
+
+  test("a live holder past the wait gives retry guidance, not lock removal", async () => {
+    const store = mkdtempSync(join(Bun.env.TMPDIR ?? "/tmp", "beads-lock-busy-"))
+    try {
+      liveHolder(store)
+      const result = await hold(store, "waiter", 60)
+      if (result.kind !== "failed") throw new Error("expected a refusal")
+      expect(result.busy).toBe(true)
+      expect(result.reason).toContain("ledger is busy")
+      expect(result.reason).toContain("Retry the same command")
+      expect(result.reason).not.toContain("remove it")
+    } finally {
+      rmSync(store, { recursive: true, force: true })
+    }
+  })
+
+  test("a dead holder that cannot be taken over keeps the stale-lock guidance", async () => {
+    const store = mkdtempSync(join(Bun.env.TMPDIR ?? "/tmp", "beads-lock-stale-"))
+    try {
+      const dead = Bun.spawnSync(["/bin/sh", "-c", "exit 0"]).pid
+      writeFileSync(
+        join(store, "omp-embedded-write.lock"),
+        JSON.stringify({ host, pid: dead, owner: "runner-dead", token: "t", taken: Date.now(), expires: Date.now() + 60_000 }),
+      )
+      // A live steal lock stops takeover, so the dead hold is still there at the deadline.
+      liveHolder(store, "omp-embedded-write-steal.lock")
+      const result = await hold(store, "waiter", 60)
+      if (result.kind !== "failed") throw new Error("expected a refusal")
+      expect(result.busy).toBeUndefined()
+      expect(result.reason).toContain("remove it once its holder is really gone")
+    } finally {
+      rmSync(store, { recursive: true, force: true })
+    }
+  })
+
+  test("backoff jitter stays inside [ceiling/2, ceiling] and the cap", () => {
+    const ceilings = [20, 40, 80, 160, 320, 400, 400]
+    for (const [attempt, ceiling] of ceilings.entries()) {
+      expect(backoffDelayMs(attempt, () => 0)).toBe(ceiling / 2)
+      expect(backoffDelayMs(attempt, () => 0.999999)).toBe(ceiling)
+    }
+    expect(backoffDelayMs(10_000, () => 0.999999)).toBe(400)
+  })
+
+  test.each([
+    [undefined, 30_000],
+    [{}, 30_000],
+    [{ embeddedWriteWaitMs: 5000 }, 5000],
+    [{ embeddedWriteWaitMs: 0 }, 0],
+    [{ embeddedWriteWaitMs: -1 }, 30_000],
+    [{ embeddedWriteWaitMs: "10" }, 30_000],
+  ])("reads the embeddedWriteWaitMs option %j as %d ms", (options, expected) => {
+    expect(writeWaitFromOptions(options)).toBe(expected)
+  })
+
+  test("a live holder past the preflight lets the runner wait instead of refusing the call", async () => {
+    const root = mkdtempSync(join(Bun.env.TMPDIR ?? "/tmp", "beads-lock-preflight-busy-"))
+    const store = join(root, ".beads")
+    mkdirSync(store, { recursive: true })
+    writeFileSync(join(store, "metadata.json"), "{}")
+    try {
+      liveHolder(store)
+      setPreflightWaitForTests(40)
+      const decision = await decideEmbeddedWrite(
+        parse("bd update bead-1 --claim") as unknown as Parameters<typeof decideEmbeddedWrite>[0],
+        root,
+        { ...process.env, BEADS_DIR: store },
+        "busy-preflight",
+        Date.now() + 5000,
+        () => ({ interpreter: "/opt/bun", script: "/opt/runner.js" }),
+        7000,
+      )
+      if (decision?.kind !== "rewrite") throw new Error(`expected a rewrite, got ${JSON.stringify(decision)}`)
+      expect(decision.command).toContain("--beads-wait-ms 7000 -- bd update")
+    } finally {
+      setPreflightWaitForTests()
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test("an oversized owner still releases and a later acquisition succeeds", async () => {
+    const store = mkdtempSync(join(Bun.env.TMPDIR ?? "/tmp", "beads-lock-big-owner-"))
+    try {
+      const owner = `spec-start:${"x".repeat(200_000)}`
+      expect((await hold(store, owner, 1000)).kind).toBe("held")
+      expect(readFileSync(join(store, "omp-embedded-write.lock"), "utf8").length).toBeLessThan(2048)
+      release(store, owner)
+      expect(existsSync(join(store, "omp-embedded-write.lock"))).toBe(false)
+      expect((await hold(store, "next", 1000)).kind).toBe("held")
+      release(store, "next")
+    } finally {
+      rmSync(store, { recursive: true, force: true })
+    }
+  })
+
+  describe.each([
+    ["a FIFO", (path: string) => Bun.spawnSync(["mkfifo", path])],
+    ["a symlink to /dev/zero", (path: string) => symlinkSync("/dev/zero", path)],
+    ["an oversized file", (path: string) => writeFileSync(path, "x".repeat(70_000))],
+  ])("a steal-lock path that is %s", (_name, plant) => {
+    const withHostileSteal = async (run: (store: string, root: string) => Promise<void>): Promise<void> => {
+      const root = mkdtempSync(join(Bun.env.TMPDIR ?? "/tmp", "beads-steal-hostile-"))
+      const store = join(root, ".beads")
+      mkdirSync(store, { recursive: true })
+      writeFileSync(join(store, "metadata.json"), "{}")
+      // A live main hold forces the EEXIST path; the hostile steal path is what gets judged.
+      writeFileSync(
+        join(store, "omp-embedded-write.lock"),
+        JSON.stringify({ host, pid: process.pid, owner: "other", token: "t", taken: Date.now(), expires: Date.now() + 60_000 }),
+      )
+      plant(join(store, "omp-embedded-write-steal.lock"))
+      try {
+        await run(store, root)
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    }
+
+    test("hold refuses at once", async () => {
+      await withHostileSteal(async (store) => {
+        const started = Date.now()
+        const result = await hold(store, "waiter", 20_000)
+        if (result.kind !== "failed") throw new Error("expected a refusal")
+        expect(Date.now() - started).toBeLessThan(2000)
+        expect(result.reason).toContain("not a small regular file")
+        expect(result.reason).toContain("omp-embedded-write-steal.lock")
+      })
+    })
+
+    test("the runner refuses without starting the write", async () => {
+      await withHostileSteal(async (store, root) => {
+        const marker = join(root, "ran")
+        const started = Date.now()
+        const code = await runEmbeddedWriter([
+          "--beads-store",
+          store,
+          "--beads-wait-ms",
+          "20000",
+          "--",
+          "/bin/sh",
+          "-c",
+          `touch ${marker}`,
+        ])
+        expect(code).not.toBe(0)
+        expect(existsSync(marker)).toBe(false)
+        expect(Date.now() - started).toBeLessThan(3000)
+      })
+    })
+  })
+
+  describe.each([
+    ["a FIFO", (path: string) => Bun.spawnSync(["mkfifo", path])],
+    ["a symlink to /dev/zero", (path: string) => symlinkSync("/dev/zero", path)],
+  ])("a lock path that is %s", (_name, plant) => {
+    const withHostileLock = async (run: (store: string, root: string) => Promise<void>): Promise<void> => {
+      const root = mkdtempSync(join(Bun.env.TMPDIR ?? "/tmp", "beads-lock-hostile-"))
+      const store = join(root, ".beads")
+      mkdirSync(store, { recursive: true })
+      writeFileSync(join(store, "metadata.json"), "{}")
+      plant(join(store, "omp-embedded-write.lock"))
+      try {
+        await run(store, root)
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    }
+
+    test("hold refuses at once instead of hanging or waiting out the budget", async () => {
+      await withHostileLock(async (store) => {
+        const started = Date.now()
+        const result = await hold(store, "waiter", 20_000)
+        if (result.kind !== "failed") throw new Error("expected a refusal")
+        expect(Date.now() - started).toBeLessThan(2000)
+        expect(result.reason).toContain("not a small regular file")
+        expect(result.busy).toBeUndefined()
+      })
+    })
+
+    test("the preflight blocks the call and writes nothing unlocked", async () => {
+      await withHostileLock(async (store, root) => {
+        const decision = await decideEmbeddedWrite(
+          parse("bd update bead-1 --claim") as unknown as Parameters<typeof decideEmbeddedWrite>[0],
+          root,
+          { ...process.env, BEADS_DIR: store },
+          "hostile-preflight",
+          Date.now() + 5000,
+          () => ({ interpreter: "/opt/bun", script: "/opt/runner.js" }),
+        )
+        if (decision?.kind !== "block") throw new Error(`expected a block, got ${JSON.stringify(decision)}`)
+        expect(decision.reason).toContain("not a small regular file")
+      })
+    })
+
+    test("the runner refuses without starting the write", async () => {
+      await withHostileLock(async (store, root) => {
+        const marker = join(root, "ran")
+        const started = Date.now()
+        const code = await runEmbeddedWriter([
+          "--beads-store",
+          store,
+          "--beads-wait-ms",
+          "20000",
+          "--",
+          "/bin/sh",
+          "-c",
+          `touch ${marker}`,
+        ])
+        expect(code).not.toBe(0)
+        expect(existsSync(marker)).toBe(false)
+        expect(Date.now() - started).toBeLessThan(3000)
+      })
+    })
+  })
 })
