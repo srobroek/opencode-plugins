@@ -30,9 +30,21 @@ export const RECENT_MS = 60_000
 /** Storage key for the health map. */
 export const HEALTH_KEY = "health"
 
-export type FailureClass = "unavailable" | "content-filter" | "auth" | "credentials" | "quota" | "outage" | "rate-limit" | "server"
+export type FailureClass =
+  | "unavailable"
+  | "content-filter"
+  | "auth"
+  | "credentials"
+  | "quota"
+  | "outage"
+  | "rate-limit"
+  | "server"
+  | "context-length"
 
-/** Every failure class, the allowlist a stored or shown health reason is held to. */
+/**
+ * Every failure class that can sit a model out, the allowlist a stored or shown health reason is held to.
+ * `context-length` is absent on purpose: it is a fact about one request, never about a model's health.
+ */
 export const FAILURE_CLASSES: ReadonlyArray<FailureClass> = [
   "unavailable",
   "content-filter",
@@ -97,8 +109,18 @@ export type HealthEntry = {
 /** Health by `provider/model`. A model's variants share its health. */
 export type HealthState = Record<string, HealthEntry>
 
+/**
+ * A request that does not fit the model's context window. Real messages:
+ * - Anthropic: `prompt is too long: 213462 tokens > 200000 maximum`
+ * - OpenAI: `This model's maximum context length is 128000 tokens ...`, code `context_length_exceeded`,
+ *   and `Your input exceeds the context window of this model`
+ * - Bedrock: `Input is too long for requested model.`
+ * Bedrock throttling also says "Too many tokens, please wait before trying again": that is a rate limit.
+ */
+const CONTEXT_LENGTH =
+  /context[_ ](?:length|window)(?:[_ ]exceeded)?|maximum context|prompt is too long|(?:input|prompt|request) (?:is )?too long|exceeds? the context|too many tokens(?!,? ?please wait)/i
+
 const NOT_MODEL = [
-  /context (?:length|window)|maximum context|prompt is too long|too many tokens/i,
   /\b(?:abort(?:ed)?|cancel(?:l)?ed|interrupted)\b/i,
 ]
 
@@ -134,15 +156,24 @@ const bodyText = (error: FailureInput): string => {
   return typeof body === "string" ? body : body === undefined ? "" : JSON.stringify(body)
 }
 
+/** Whether the message, or the body of a 400 or 413 response, says the request exceeds the context window. */
+export function isContextLength(error: FailureInput): boolean {
+  if (CONTEXT_LENGTH.test(error.message ?? "")) return true
+  const status = error.status
+  return (status === undefined || status === 400 || status === 413) && CONTEXT_LENGTH.test(bodyText(error))
+}
+
 /**
- * Whether a failure is the model's or provider's, and which kind. User interrupts,
- * tool errors and context overflow are not: another model would fail the same way.
+ * Whether a failure is the model's or provider's, and which kind. User interrupts and
+ * tool errors are not. A request over the context window is `context-length`: per request,
+ * so it never cools a model down.
  */
 export function classifyFailure(error: FailureInput | undefined): FailureClass | undefined {
   if (error === undefined) return undefined
   const type = (error.type ?? "").toLowerCase()
   if (type === "tool" || type === "user" || type === "aborted" || type === "interrupted") return undefined
   const message = error.message ?? ""
+  if (isContextLength(error)) return "context-length"
   if (NOT_MODEL.some((pattern) => pattern.test(message))) return undefined
   const status = error.status
   if (status === 402 || QUOTA_TYPE.test(type) || QUOTA.test(message) || QUOTA.test(bodyText(error))) return "quota"
@@ -291,6 +322,8 @@ export function recordFailure(
   now: number,
   policy: HealthPolicy,
 ): FailureRecord {
+  // A request that is too long says nothing about the model: no strike, episode or cooldown.
+  if (kind === "context-length") return { state, cooldownMs: 0, tripped: false }
   const reason: FailureReason = kind
   const next = pruneHealth(state, now, policy.flapWindowMs)
   const key = failureScope(kind) === "provider" ? providerKey(ref.providerID) : healthKey(ref)

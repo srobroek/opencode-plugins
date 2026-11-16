@@ -21,7 +21,7 @@ import {
   withAutoTag,
 } from "./auto.ts"
 import { buildReferenceIndex, type CatalogModel, type Derived, nearestVariant, type ReferenceIndex, vendorOf } from "./catalog.ts"
-import { candidateStatus, checkRoles, formatCheck } from "./check.ts"
+import { candidateStatus, checkRoles, formatCheck, formatHealthHistory, type HealthEvent, recordCooldown, recordRecovery } from "./check.ts"
 import {
   AUTO_AGENT,
   agentHash,
@@ -36,6 +36,10 @@ import {
 } from "./classify.ts"
 import { type ConfigFile, type EffectiveConfig, effectiveConfig, globalConfigDir, pickConfigFile, readConfigFiles, readProjectFiles, readTiers, writeAgentTier, writeTier } from "./config-edit.ts"
 import {
+  CONTEXT_FALLBACK_REASON,
+  type ContextLimits,
+  contextFallback,
+  contextNote,
   duration,
   failureNote,
   fallbackTarget,
@@ -43,10 +47,12 @@ import {
   retriesOnModel,
   retryDelay,
   retryTarget,
+  rolesListing,
   SOURCE,
   staysOnModel,
   subagentNote,
   switchNote,
+  tierModels,
 } from "./fallback.ts"
 import {
   type GuardAgent,
@@ -69,6 +75,7 @@ import {
   healthView,
   modelFromError,
   nextExpiry,
+  providerKey,
   pruneHealth,
   RECENT_MS,
   readHealth,
@@ -83,6 +90,7 @@ import {
   type AvailableModel,
   desiredModels,
   FALLBACK_HEADER,
+  type HealthView,
   type ModelRef,
   type Options,
   parseCandidate,
@@ -286,6 +294,8 @@ export default Plugin.define({
       }
     })
     let health: HealthState = {}
+    /** Recent cooldown starts and recoveries, for the check. Class and time only; lost on restart. */
+    let healthHistory: HealthEvent[] = []
     try {
       health = pruneHealth(readHealth(await ctx.storage.get(HEALTH_KEY)), Date.now(), runtime.flapWindowMs)
     } catch {
@@ -446,8 +456,21 @@ export default Plugin.define({
      */
     const markFailed = async (ref: ModelRef, kind: FailureClass, error: FailureInput): Promise<number> => {
       // Health keeps the failure class only: the provider's message can hold prompt text or credentials.
-      const record = recordFailure(health, ref, kind, error, Date.now(), runtime)
+      // A request that is too long says nothing about the model's health.
+      if (kind === "context-length") return 0
+      const now = Date.now()
+      const record = recordFailure(health, ref, kind, error, now, runtime)
       health = record.state
+      if (record.tripped) {
+        const scope = failureScope(kind)
+        healthHistory = recordCooldown(healthHistory, {
+          at: now,
+          subject: scope === "provider" ? providerKey(ref.providerID) : healthKey(ref),
+          scope,
+          kind,
+          cooldownMs: record.cooldownMs,
+        })
+      }
       try {
         await ctx.storage.set(HEALTH_KEY, health)
       } catch {
@@ -496,6 +519,28 @@ export default Plugin.define({
       if (model === undefined) return
       for (const notice of decideRecovery(noticeState, model)) await notify(notice.sessionID, notice.text, "recovery")
     }
+
+    /** The context window of each listed model, from the catalog's `Model.Info.limit.context`. */
+    const contextLimits = (): ContextLimits => {
+      const limits = new Map<string, number>()
+      for (const model of available) {
+        const context = (model as { limit?: { context?: unknown } }).limit?.context
+        if (typeof context === "number" && context > 0) limits.set(healthKey(model), context)
+      }
+      return limits
+    }
+
+    /** The tier a context failure of `failed` is judged within: the agent's role, else the first role listing it. */
+    const contextTier = (role: string | undefined, failed: ModelRef): string | undefined =>
+      role !== undefined && Object.hasOwn(options.roles, role) ? role : rolesListing(options, failed)[0]
+
+    /** Healthy, listed candidates of the tier, in order. */
+    const contextCandidates = (tier: string | undefined, healthOf: HealthView): ModelRef[] =>
+      tier === undefined
+        ? []
+        : tierModels(options, tier).filter(
+            (ref) => healthOf(ref) === undefined && available.some((m) => healthKey(m) === healthKey(ref) && m.enabled !== false),
+          )
 
     /** The model of the child session a `Subagent failed (sessionID: <id>)` message names. */
     const childModel = async (message: string): Promise<ModelRef | undefined> => {
@@ -790,6 +835,11 @@ export default Plugin.define({
       const isChild = typeof session.parentID === "string" && session.parentID !== ""
       const spawnRole = isChild ? await spawnRoleOf(sessionID) : undefined
       const role = spawnRole ?? (agent === undefined ? undefined : roleOf(agent, options.agents, options.implicit))
+      if (kind === "context-length") {
+        const tier = contextTier(role, failed)
+        await notify(isChild ? (session.parentID as string) : sessionID, contextNote(failed, contextLimits().get(healthKey(failed)), tier), "context-length")
+        return
+      }
       // A model that stays in use keeps its tier where it was: nothing moves.
       const target = cooldownMs > 0 ? fallbackTarget(options, available, view(), role, failed) : undefined
       const facts: NoteFacts = { failed, kind, cooldownMs, target }
@@ -881,6 +931,51 @@ export default Plugin.define({
      */
     const triedModels = new Map<string, Set<string>>()
 
+    /** Sessions whose current request already moved to a larger-context model: a prompt too long is retried once. */
+    const contextRetried = new Set<string>()
+
+    /**
+     * A prompt too long for `failed` is retried once on the next healthy tier candidate with a
+     * larger context window. The model is not marked: the failure is the request's, not its health.
+     */
+    const retryOnLargerContext = async (event: SessionRetry, failed: ModelRef): Promise<void> => {
+      if (event.attempt <= 2) contextRetried.delete(event.sessionID)
+      if (contextRetried.has(event.sessionID) || switching.has(event.sessionID)) return
+      try {
+        await queue(async () => {
+          const agent = (await listAgents()).find((a) => a.id === event.agent)
+          const spawnRole = await spawnRoleOf(event.sessionID)
+          const role = spawnRole ?? (agent === undefined ? undefined : roleOf(agent, options.agents, options.implicit))
+          const tier = contextTier(role, failed)
+          const limits = contextLimits()
+          const target = contextFallback(contextCandidates(tier, healthView(health, Date.now(), RECENT_MS)), failed, limits)
+          if (target === undefined) {
+            warn(`session ${event.sessionID}: ${contextNote(failed, limits.get(healthKey(failed)), tier)}`)
+            return
+          }
+          contextRetried.add(event.sessionID)
+          const outcome = await switchWithin(event.sessionID, target, spawnRole)
+          if (outcome !== "switched") {
+            warn(`session ${event.sessionID}: switching to ${modelLabel(target)} for a larger context ${outcome === "late" ? "is still pending" : "failed"}.`)
+            return
+          }
+          event.decision = { retry: true, delay: 0 }
+          warn(`session ${event.sessionID}: context too long for ${modelLabel(failed)}; the request was retried on ${modelLabel(target)} (${limits.get(healthKey(target))} tokens).`)
+          await recordReceipt({
+            at: Date.now(),
+            agent: event.agent ?? "",
+            source: "agent",
+            ...(tier === undefined ? {} : { tier }),
+            model: modelLabel(target),
+            rule: "model-default",
+            fallbacks: [`${modelLabel(failed)}: ${CONTEXT_FALLBACK_REASON}`],
+            warnings: [],
+          })
+        })
+      } catch (error) {
+        warn(`could not switch the failing request to a larger-context model`, { error: String(error) })
+      }
+    }
     const retries = await ctx.session.hook("retry", async (event) => {
       // The first retry of a request starts a fresh run.
       if (event.attempt <= 2) triedModels.delete(event.sessionID)
@@ -889,6 +984,7 @@ export default Plugin.define({
       if (kind === undefined) return
       const { providerID, id, variant } = event.model as { providerID: string; id: string; variant?: string }
       const failed: ModelRef = variant ? { providerID, id, variant } : { providerID, id }
+      if (kind === "context-length") return retryOnLargerContext(event, failed)
       if (staysOnModel(kind, event.attempt, runtime.hostRetries)) return keepOnModel(event, kind, failed)
       // A switch from an earlier retry is still landing: the host's next attempt reloads it.
       if (switching.has(event.sessionID)) return keepOnModel(event, kind, failed)
@@ -954,7 +1050,7 @@ export default Plugin.define({
             report.warnings.push(
               `Agents ${stuck.join(", ")} still run another model than their tier resolves to: re-registering gave up after ${MAX_REREGISTER} tries (a later plugin or config keeps setting their model).`,
             )
-          const content = [formatCheck(report), ...formatReceipts(receipts), ...formatHistory(autoHistory), ...formatUsage(summarizeUsage(await outcomes.records(), Date.now()))].join("\n")
+          const content = [formatCheck(report), ...formatHealthHistory(healthHistory, Date.now()), ...formatReceipts(receipts), ...formatHistory(autoHistory), ...formatUsage(summarizeUsage(await outcomes.records(), Date.now()))].join("\n")
           return { content, metadata: { roles: report.roles.length, agents: report.agents.length, auto: autoHistory.length, spawns: receipts.length } }
         },
       })
@@ -1842,6 +1938,10 @@ export default Plugin.define({
           if (failed === undefined) return
           const cooldownMs = await markFailed(failed, kind, { message })
           const role = spawn?.role ?? (agent === undefined ? undefined : roleOf(agent, options.agents, options.implicit))
+          if (kind === "context-length") {
+            await notify(event.sessionID, contextNote(failed, contextLimits().get(healthKey(failed)), contextTier(role, failed)), "context-length")
+            return
+          }
           const target = cooldownMs > 0 ? fallbackTarget(options, available, view(), role, failed) : undefined
           const facts: NoteFacts = { failed, kind, cooldownMs, target }
           const resumable = cooldownMs > 0 ? undefined : childSessionID(message)
@@ -1881,6 +1981,7 @@ export default Plugin.define({
           if (typeof sessionID !== "string") continue
           const model = settleRequest(requestLog, sessionID, endedAt(event))
           await outcomes.signals(sessionID, NO_SIGNALS)
+          if (model !== undefined) healthHistory = recordRecovery(healthHistory, model.providerID, finishedAt(event))
           await outcomes.end(sessionID, "succeeded", finishedAt(event))
           pruneChildModels()
           if (noticeState.outages.size > 0) await queue(() => onSessionSucceeded(sessionID, model)).catch(() => {})

@@ -11,7 +11,7 @@ import work from "./fixtures/work-models.json"
 import plugin, { CHILD_LOOKUP_MS, MAX_REREGISTER, type ModelRef, readAgents, readTiers, spawnTarget } from "./index.ts"
 
 type Agent = { id: string; model?: ModelRef; request?: { headers?: Record<string, string> } }
-type Model = { providerID: string; id: string; variants: { id: string }[]; cost?: { input: number }[] }
+type Model = { providerID: string; id: string; variants: { id: string }[]; cost?: { input: number }[]; limit?: { context: number } }
 type SubagentTool = { id: string; name: string; description: string; input: unknown }
 type ToolEditor = {
   add: (tool: { name: string; execute: (input: unknown) => Promise<{ content: string }> }) => void
@@ -733,6 +733,60 @@ describe("runtime fallback", () => {
     await cleanup()
   })
 
+  test("a prompt too long is retried once on a tier candidate with a larger window, with no cooldown", async () => {
+    const windows: Model[] = [
+      { ...models[0], limit: { context: 200_000 } },
+      { ...models[1], limit: { context: 1_000_000 } },
+      { ...models[2], limit: { context: 2_000_000 } },
+    ] as Model[]
+    const roles = { ...fallbackOptions, roles: { task: ["amazon-bedrock/claude-sonnet#high", "anthropic/claude-haiku", "opencode/flint"] } }
+    const host = createHost({ agents: [{ id: "build" }], models: windows, options: roles })
+    const cleanup = await setup(host)
+    const error = { type: "api", message: "prompt is too long: 213462 tokens > 200000 maximum", status: 400 }
+    const base = { sessionID: "r", agent: "build", error }
+    expect(await host.fireRetry({ ...base, model: sonnet, attempt: 2 })).toEqual({ retry: true, delay: 0 })
+    expect(methods(host, "switchModel").map((c) => c.input)).toEqual([{ sessionID: "r", model: haiku }])
+    expect(host.storage.has("health")).toBe(false)
+    // Once per request: a second failure of the same request is left to the host.
+    await host.fireRetry({ ...base, model: haiku, attempt: 3 }, declined)
+    expect(methods(host, "switchModel")).toHaveLength(1)
+    const check = (await host.tools.get("model_roles_check")?.execute({}))?.content ?? ""
+    expect(check).toContain("anthropic/claude-haiku by model default; fell back past amazon-bedrock/claude-sonnet#high: context-length")
+    expect(check).not.toContain("Recent health")
+    host.close()
+    await cleanup()
+  })
+
+  test("a prompt too long with no larger-context candidate is not retried and sits nothing out", async () => {
+    const same: Model[] = models.map((m) => ({ ...m, limit: { context: 200_000 } })) as Model[]
+    const host = createHost({ agents: [{ id: "build" }], models: same, options: fallbackOptions })
+    const cleanup = await setup(host)
+    const error = { type: "api", message: "Input is too long for requested model.", status: 400 }
+    expect(await host.fireRetry({ sessionID: "r", agent: "build", model: sonnet, error, attempt: 2 }, declined)).toEqual(declined)
+    expect(methods(host, "switchModel")).toHaveLength(0)
+    expect(host.storage.has("health")).toBe(false)
+    host.close()
+    await cleanup()
+  })
+
+  test("model_roles_check lists recent cooldowns, then their recovery", async () => {
+    const host = createHost({ agents: [{ id: "build" }], models, options: fallbackOptions })
+    const cleanup = await setup(host)
+    const run = async () => (await host.tools.get("model_roles_check")?.execute({}))?.content ?? ""
+    expect(await run()).not.toContain("Recent health")
+    const quota = { type: "provider.quota", message: "You exceeded your current quota", status: 429 }
+    await host.fireRetry({ sessionID: "r", agent: "build", model: sonnet, error: quota, attempt: 2 })
+    expect(await run()).toMatch(/Recent health[\s\S]*provider amazon-bedrock: quota, cooldown 6 h, still out/)
+    host.fireModelRequest({}, { sessionID: "r", model: sonnet, kind: "primary" })
+    host.emit({ type: "session.execution.succeeded", data: { sessionID: "r" } })
+    await settle()
+    const after = await run()
+    expect(after).toMatch(/provider amazon-bedrock: quota, cooldown 6 h, recovered \d\d:\d\d:\d\d/)
+    expect(after).not.toContain("still out")
+    host.close()
+    await cleanup()
+  })
+
   test("a non-retryable model error is retried on the next model; other errors are left alone", async () => {
     const host = createHost({ agents: [{ id: "build" }], models, options: fallbackOptions })
     const cleanup = await setup(host)
@@ -1174,12 +1228,28 @@ describe("runtime fallback", () => {
     host.sessions.set("r", { id: "r", agent: "general", model: sonnet })
     const cleanup = await setup(host)
     host.emit(failed("r", { type: "tool", message: "Model unavailable: x/y" }))
-    host.emit(failed("r", { type: "unknown", message: "prompt is too long" }))
+    host.emit(failed("r", { type: "unknown", message: "file not found: src/x.ts" }))
     await host.spawnFailed({ agent: "general", prompt: "x" }, "file not found")
     await settle()
     expect(host.storage.has("health")).toBe(false)
     expect(host.calls).toHaveLength(0)
     expect(host.agents().get("general")?.model).toEqual(sonnet)
+    host.close()
+    await cleanup()
+  })
+
+  test("a failed execution over the context window notes the limit and sits nothing out", async () => {
+    const limited = models.map((m) => ({ ...m, limit: { context: 200_000 } }))
+    const host = createHost({ agents: [{ id: "general" }], models: limited as Model[], options: fallbackOptions })
+    host.sessions.set("r", { id: "r", agent: "general", model: sonnet })
+    const cleanup = await setup(host)
+    host.emit(failed("r", { type: "unknown", message: "prompt is too long: 250000 tokens > 200000 maximum", status: 400 }))
+    await settle()
+    expect(host.storage.has("health")).toBe(false)
+    const texts = methods(host, "synthetic").map((c) => (c.input as { text: string }).text)
+    expect(texts).toEqual([
+      "context too long for amazon-bedrock/claude-sonnet#high (200000 tokens); no larger-context candidate in tier task. Compact the session or use a tier with a larger-context model",
+    ])
     host.close()
     await cleanup()
   })

@@ -167,3 +167,43 @@ export function subagentNote(facts: SubagentNoteFacts): string {
   } else retry = "The spawn may be retried: it now resolves to the next model."
   return `${who} failed. ${failureNote(facts)} ${retry}`
 }
+
+/** Context window in tokens by `provider/model`; the catalog's `Model.Info.limit.context`. */
+export type ContextLimits = ReadonlyMap<string, number>
+
+/** The receipt fallback reason for a request moved to a larger-context candidate. */
+export const CONTEXT_FALLBACK_REASON = "context-length"
+
+/** The ordered model candidates of a tier, following `@role` links, each role once. */
+export function tierModels(options: Options, role: string, seen: Set<string> = new Set()): ModelRef[] {
+  if (seen.has(role)) return []
+  seen.add(role)
+  const out: ModelRef[] = []
+  for (const entry of options.roles[role] ?? []) {
+    const candidate = parseCandidate(entry)
+    if (candidate?.kind === "model") out.push(candidate.ref)
+    else if (candidate?.kind === "role") out.push(...tierModels(options, candidate.role, seen))
+  }
+  return out
+}
+
+/**
+ * The first candidate with a strictly larger context window than `failed`. A limit that is
+ * unknown, on either side, never counts as larger, and neither does an equal one: the same
+ * prompt would fail there too.
+ */
+export function contextFallback(candidates: ReadonlyArray<ModelRef>, failed: ModelRef, limits: ContextLimits): ModelRef | undefined {
+  const own = limits.get(healthKey(failed))
+  if (own === undefined) return undefined
+  return candidates.find((candidate) => {
+    const limit = limits.get(healthKey(candidate))
+    return healthKey(candidate) !== healthKey(failed) && limit !== undefined && limit > own
+  })
+}
+
+/** The note when no candidate of the tier can take a prompt that was too long. */
+export function contextNote(failed: ModelRef, limit: number | undefined, tier: string | undefined): string {
+  const size = limit === undefined ? "unknown limit" : `${limit} tokens`
+  const where = tier === undefined ? "its tier" : `tier ${tier}`
+  return `context too long for ${label(failed)} (${size}); no larger-context candidate in ${where}. Compact the session or use a tier with a larger-context model`
+}
