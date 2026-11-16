@@ -7,6 +7,7 @@ import plugin, { AGENTS_DIR, enabledModes, parseOptions, selectAgents } from "./
 const agent = (id: string) => readAgentFile(`${AGENTS_DIR}/${id}.md`)
 const effect = (id: string, action: string, resource = "*") => permissionEffect(agent(id).permissions, action, resource)
 const WORKTREE = "~/.local/share/opencode/worktree/abc123/debug-1"
+const WORKTREE_ROOT = "~/.local/share/opencode/worktree/41bad1"
 
 describe("options", () => {
   test("every agent and reminders default to on", () => {
@@ -41,6 +42,9 @@ describe("shipped agents", () => {
     expect(effect("debug", "edit", "src/foo.ts")).toBe("deny")
     expect(effect("debug", "edit", `${WORKTREE}/src/foo.ts`)).toBe("allow")
     expect(effect("debug", "edit", "~/.opencode/debug/x.md")).toBe("allow")
+    expect(effect("debug", "edit", `${WORKTREE_ROOT}/debug-foo/src/a.ts`)).toBe("allow")
+    expect(effect("debug", "edit", `${WORKTREE_ROOT}/subagent-x/src/a.ts`)).toBe("deny")
+    expect(effect("debug", "external_directory", `${WORKTREE_ROOT}/subagent-x/src/a.ts`)).toBe("ask")
     expect(effect("debug", "external_directory", `${WORKTREE}/src/foo.ts`)).toBe("allow")
   })
   test("debug shell is open but refuses push, clean and rm -rf", () => {
