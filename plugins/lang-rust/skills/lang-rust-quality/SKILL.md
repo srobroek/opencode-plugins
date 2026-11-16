@@ -17,7 +17,7 @@ directory with `Cargo.toml`):
 | Test | `cargo nextest run` and `cargo test --doc` |
 | Docs | `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features` |
 | Dependencies | Configured `cargo deny check` and an unused-dependency check (`cargo shear` or `cargo machete`), preferably through the project's `just` tasks |
-| API break (published libraries) | `cargo semver-checks` |
+| API break (published libraries) | `cargo semver-checks` (the gate; `cargo-public-api` only for a committed API snapshot) |
 | Mutation (changed code) | `cargo mutants --in-place --no-shuffle --in-diff git.diff` |
 | Undefined behaviour (unsafe code) | `cargo +nightly miri nextest run` or `cargo +nightly careful test` |
 | Format fix | `cargo fmt` |

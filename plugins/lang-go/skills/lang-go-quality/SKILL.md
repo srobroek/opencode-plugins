@@ -22,7 +22,7 @@ then continue; later steps on code that does not build only add noise.
 | Module tidy | `go mod tidy -diff` (prints the diff and exits non-zero when `go.mod` or `go.sum` is stale) |
 | Vulnerabilities | `govulncheck ./...` (or `go tool govulncheck ./...` when it is a `tool` in `go.mod`) |
 | Format fix | `golangci-lint fmt`, or `gofmt -w .` |
-| API break (libraries) | `go tool go-apidiff <base-ref>` on PRs; `gorelease` before a release (needs tags) |
+| API break (libraries) | `go tool go-apidiff <base-ref>` on PRs and at release |
 | Docs | `go doc ./...` renders; lint doc comments through golangci-lint (`revive` `exported`, `godoclint`) |
 | Dead code (executables) | `go tool deadcode -test ./...` |
 

@@ -18,7 +18,7 @@ Checked 2026-11-16.
 | `unused-deps` | `cargo-shear` | >= 1.14 · 2026-11-13 · active | `cargo shear --version` · `cargo binstall cargo-shear` | `cargo-machete`: fast regex check, accepts false positives; `cargo-udeps`: accurate, nightly and a full build | `cargo-shear` with `cargo-udeps` for one investigation | every-pr | Stacking scanners as mandatory gates; text matches as reachability proof |
 | `complexity` | Shared: lizard | - | Shared | None | - | on-demand | Blanket thresholds as correctness rules; gating on Clippy `cognitive_complexity`; `rust-code-analysis` (stale) |
 | `duplication` | Shared: jscpd | - | Shared | None | - | on-demand | Generated-code noise in the report |
-| `api-break` | `cargo-semver-checks` | >= 0.51 · 2026-10-03 · active | `cargo semver-checks --version` · `cargo binstall cargo-semver-checks` | `cargo-public-api`: review a snapshot of the API on nightly | `cargo-semver-checks` as the gate and `cargo-public-api` for the reviewed diff | every-pr | Release automation mistaken for API compatibility evidence; running it for unpublished binaries |
+| `api-break` | `cargo-semver-checks` | >= 0.51 · 2026-10-03 · active | `cargo semver-checks --version` · `cargo binstall cargo-semver-checks` | `cargo-public-api`: only where a committed API snapshot is wanted for review (nightly) | `cargo-semver-checks` is the gate; add `cargo-public-api` only for a committed API snapshot | every-pr | Release automation mistaken for API compatibility evidence; running it for unpublished binaries |
 | `docs` | Built-in: rustdoc (`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features`) | - | Built-in | `mdBook`: narrative guides beside the API reference; `cargo-rdme`: README generated from crate docs | rustdoc with `mdBook` for a guide | every-pr | Indiscriminate `--all-features` with conflicting features; docs.rs metadata missing for feature-gated items |
 
 ## Tradeoffs
@@ -56,7 +56,7 @@ Checked 2026-11-16.
 ### api-break
 
 - **cargo-semver-checks**: wins as a rustdoc-based lint gate for published libraries; costs coupling to rustdoc JSON and no checks for behaviour changes.
-- **cargo-public-api**: wins at showing the exact API diff for review; costs nightly and no pass-or-fail rules.
+- **cargo-public-api**: use only where a committed API snapshot is wanted; wins at showing the exact API diff for review; costs nightly and no pass-or-fail rules.
 
 ### docs
 

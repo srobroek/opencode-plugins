@@ -20,7 +20,7 @@ Commands belong in `lang-go-quality`. Install policy: detect the tool, recommend
 | `unused-deps` | Built-in: `go mod tidy -diff` | - | Built-in | None | - | every-pr | Running `go mod tidy` without `-diff` in CI, which rewrites files |
 | `complexity` | `golangci-lint` with `gocognit` at 15 | >= 2.15.0 · 2026-10-16 · active | `golangci-lint --version` · `go get -tool github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest` | gocyclo: cyclomatic limit of 10-12 beside it; lizard: one metric across languages | gocognit and gocyclo together, ratcheted against a baseline | every-pr | Arbitrary limits as defects; exceptions without an owner |
 | `duplication` | `golangci-lint` with `dupl` | >= 2.15.0 · 2026-10-16 · active | `golangci-lint --version` · `go get -tool github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest` | jscpd: one report across languages | - | every-pr | Gating generated-code duplication; overlapping duplication gates |
-| `api-break` | `go-apidiff` | >= 0.8.3 · 2025-05-22 · active | `go tool go-apidiff --help` · `go get -tool github.com/joelanford/go-apidiff@latest` | gorelease: compares against the latest tag at release; oasdiff: HTTP API contracts | go-apidiff on PRs and gorelease before a release; both build on `golang.org/x/exp/apidiff` | every-pr + release | gorelease on a repository with no tags; reporting an internal package as public |
+| `api-break` | `go-apidiff` | >= 0.8.3 · 2025-05-22 · active | `go tool go-apidiff --help` · `go get -tool github.com/joelanford/go-apidiff@latest` | oasdiff: HTTP API contracts | go-apidiff on PRs and at release; it builds on `golang.org/x/exp/apidiff` | every-pr + release | `gorelease` (needs tags, slower); reporting an internal package as public |
 | `docs` | Built-in: `go doc`, doc comments and `Example` functions | - | Built-in | pkgsite: browse rendered docs locally; godoclint: lint doc comments beside revive exported | Built-in docs with revive and godoclint through golangci-lint | every-pr | gomarkdoc and godocdown, which are stale; Example functions without `// Output:` |
 
 ## Tradeoffs
@@ -43,7 +43,6 @@ Commands belong in `lang-go-quality`. Install policy: detect the tool, recommend
 
 ### api-break
 
-- **gorelease**: wins at release time with suggested version bumps; costs a tag to compare with and a slower run.
 - **oasdiff**: wins for HTTP API contracts in OpenAPI files; costs no Go symbol analysis.
 
 ### docs
@@ -62,4 +61,4 @@ Commands belong in `lang-go-quality`. Install policy: detect the tool, recommend
 
 - [golangci-lint](https://golangci-lint.run/docs/), [linters](https://golangci-lint.run/docs/linters/), [staticcheck](https://staticcheck.dev/), [gosec](https://pkg.go.dev/github.com/securego/gosec/v2).
 - [govulncheck](https://pkg.go.dev/golang.org/x/vuln/cmd/govulncheck), [deadcode](https://pkg.go.dev/golang.org/x/tools/cmd/deadcode), [go mod tidy](https://go.dev/ref/mod#go-mod-tidy), [race detector and sanitizers](https://go.dev/doc/articles/race_detector).
-- [go-apidiff](https://github.com/joelanford/go-apidiff), [gorelease](https://pkg.go.dev/golang.org/x/exp/cmd/gorelease), [apidiff](https://pkg.go.dev/golang.org/x/exp/apidiff), [pkgsite](https://pkg.go.dev/golang.org/x/pkgsite/cmd/pkgsite), [godoclint](https://github.com/godoc-lint/godoc-lint), [revive](https://github.com/mgechev/revive), [doc comments](https://go.dev/doc/comment).
+- [go-apidiff](https://github.com/joelanford/go-apidiff), [apidiff](https://pkg.go.dev/golang.org/x/exp/apidiff), [pkgsite](https://pkg.go.dev/golang.org/x/pkgsite/cmd/pkgsite), [godoclint](https://github.com/godoc-lint/godoc-lint), [revive](https://github.com/mgechev/revive), [doc comments](https://go.dev/doc/comment).
