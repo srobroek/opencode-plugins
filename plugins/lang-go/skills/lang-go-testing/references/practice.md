@@ -1,6 +1,6 @@
 # Go testing practice
 
-Checked 2026-11-12.
+Checked 2026-11-16.
 
 Go idioms and tool choices for small, behavior-focused test suites.
 Use `quality-testing` for what to test, behavior budgets, same-change maintenance,
@@ -34,9 +34,9 @@ if got != 5*time.Minute {
 ```
 
 **Do not:** Copy the implementation into the expected-value calculation. Default
-to standard checks; use `go-cmp` `0.7` and `cmp.Diff(want, got)` for compound values.
+to standard checks; use `go-cmp` and `cmp.Diff(want, got)` for compound values.
 Handle unexported fields deliberately; broad ignore options can conceal defects.
-Keep existing `testify` `1` or `is` `1` conventions rather than adding a second
+Keep existing `testify` or `is` conventions rather than adding a second
 assertion library. Never call fatal assertions, including `require`, in workers.
 
 ## Parametrize instead of copying
@@ -78,11 +78,11 @@ process state and cannot be used in parallel tests or under parallel ancestors.
 **Do:** Use real deterministic collaborators, then small consumer-owned fakes.
 Check a reusable fake against the real implementation's contract. Use `httptest`
 recorders for handler results and `httptest.NewServer` for client/transport behavior.
-Put `testcontainers-go` `0.45` database/broker checks in an explicit integration
+Put `testcontainers-go` database/broker checks in an explicit integration
 lane with pinned images, readiness checks, isolated data and registered cleanup.
 
 **Do not:** Invent interfaces solely to mock every collaborator. Choose existing
-`gomock` (`go.uber.org/mock` `0.6`) or `mockery` `3` only when boundary arguments,
+`gomock` (`go.uber.org/mock`) or `mockery` only when boundary arguments,
 counts or order are contractual. Do not mix generators or script incidental calls.
 Driver mocks do not establish real SQL, transaction or broker semantics.
 
@@ -109,11 +109,13 @@ synctest.Test(t, func(t *testing.T) {
 
 **Do not:** Assume fake time models external sockets or every blocking operation.
 Network I/O and mutex waits are not durably blocking; `synctest` is not exhaustive
-schedule exploration. Keep an exercised `-race` lane.
+schedule exploration. Keep an exercised `-race` lane and add `go.uber.org/goleak` for goroutine leaks.
+Tool versions and install commands live in `lang-go-libraries` `references/testing.md`;
+detect a tool, recommend the install and ask before running it.
 
 ## Property tests
 
-**Do:** Use `rapid` `1` when domain generation and shrinking let one invariant
+**Do:** Use `rapid` when domain generation and shrinking let one invariant
 replace many examples: conservation, idempotence or ordering. Generate valid domain
 inputs explicitly. Preserve failing seeds and a readable minimized regression case.
 
@@ -147,8 +149,10 @@ Do not snapshot timestamps, random identifiers or incidental object internals.
 **Do:** Use native `FuzzXxx` targets for parsers/codecs with seed inputs and meaningful
 no-panic/round-trip invariants. Bound campaigns with `-fuzztime`; ordinary `go test`
 replays seeds and committed failures in `testdata/fuzz/<FuzzName>`.
-Pilot `gremlins` `0.6` on important pure-logic packages. Scope PR mutation work to
-changed packages; verify tool support before promising incremental or in-diff modes.
+Run `gremlins` (`gremlins unleash --diff <ref> --output=<json>`) on important pure-logic
+packages and on changed code in PRs; `go-mutesting` v2 is the fallback. Neither emits
+the Stryker schema; `quality_test_compare` reads the Gremlins JSON.
+Continuous fuzzing uses OSS-Fuzz or ClusterFuzzLite (`compile_native_go_fuzzer`).
 
 Read `-coverprofile` and changed-code gaps as prompts for missing behaviors.
 Native Go coverage is statement coverage, not branch coverage. Review branch risks
@@ -168,7 +172,7 @@ and replay with `-shuffle=<seed>`. Use `-count=1` to bypass cached results. Insp
 shared state, resource collisions, goroutine lifetime and races before retrying.
 Quarantine only with an owner, issue, expiry and continued diagnostic execution.
 
-**Do not:** Enable retries by default. `gotestsum` `1` reports useful JSON/JUnit
+**Do not:** Enable retries by default. `gotestsum` reports useful JSON/JUnit
 artifacts, but `--rerun-fails` can turn intermittent defects green. Preserve the
 initial failure and use reruns for diagnosis, not as a passing gate.
 
