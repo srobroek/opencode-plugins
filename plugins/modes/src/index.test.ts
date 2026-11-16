@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import { homedir } from "node:os"
 import { agentPaths, permissionEffect, readAgentFile } from "@srobroek/opencode-lib/agent-files"
 import { MODEL_TIERS } from "@srobroek/opencode-lib/model-roles"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
@@ -124,6 +125,18 @@ describe("setup", () => {
     await expect(
       fake.fire.tool("execute.before", { tool: "bash", agent: "debug", input: { command: ["git", "push"] } }),
     ).rejects.toThrow()
+    await cleanup?.()
+    expect(fake.hooks("tool")).toEqual([])
+  })
+  test("the write guard refuses a debug edit in the starting directory and allows a debug-* worktree", async () => {
+    const fake = createFakeContext({ sessions: [{ id: "ses_1", location: { directory: "/repo" } }] })
+    const cleanup = await plugin.setup(fake.context)
+    const edit = (agent: string, path: string) =>
+      fake.fire.tool("execute.before", { tool: "edit", agent, sessionID: "ses_1", input: { path } })
+    const scratch = `${homedir()}/.local/share/opencode/worktree/h1/debug-foo/src/a.ts`
+    await expect(edit("debug", "/repo/src/a.ts")).rejects.toThrow("started in")
+    await expect(edit("debug", scratch)).resolves.toBeDefined()
+    await expect(edit("build", "/repo/src/a.ts")).resolves.toBeDefined()
     await cleanup?.()
     expect(fake.hooks("tool")).toEqual([])
   })

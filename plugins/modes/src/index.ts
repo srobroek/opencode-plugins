@@ -5,6 +5,7 @@ import { agentPaths, registerAgents } from "@srobroek/opencode-lib/agent-files"
 import { registerModeReminders } from "@srobroek/opencode-lib/mode-reminders"
 import { guardShellCall } from "./git-guard.ts"
 import { enabledModes, parseOptions, selectAgents } from "./modes.ts"
+import { guardDebugWrite } from "./path-guard.ts"
 
 export { AGENT_IDS, enabledModes, MODES, parseOptions, selectAgents } from "./modes.ts"
 
@@ -26,6 +27,20 @@ export async function setupModes(ctx: Context): Promise<() => Promise<void>> {
         if (reason !== undefined) throw new Error(reason)
       })
       disposers.push(() => guard.dispose())
+    }
+    if (options.agents.debug) {
+      // Permission globs cannot express "exactly one debug-* segment", so check the resolved path.
+      const location = ctx.location.directory as string
+      const writes = await ctx.tool.hook("execute.before", async (event) => {
+        if (event.agent !== "debug") return
+        const startDir = await ctx.session
+          .get({ sessionID: event.sessionID })
+          .then((session) => (session.location.directory as string) ?? location)
+          .catch(() => location)
+        const reason = guardDebugWrite(event.tool, event.input, event.agent as string, { startDir })
+        if (reason !== undefined) throw new Error(reason)
+      })
+      disposers.push(() => writes.dispose())
     }
     const modes = enabledModes(options)
     if (options.reminders && modes.length > 0) disposers.push(await registerModeReminders(ctx, modes))

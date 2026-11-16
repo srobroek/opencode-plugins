@@ -874,8 +874,41 @@ function shellAliasInput(input) {
     out.background = background;
   return out;
 }
+var PATCH_HEADER = /^\*\*\* (?:(?<verb>Add|Update|Delete) File|(?<move>Move to)):\s*(?<path>.+?)\s*$/;
+function unquote(path) {
+  const first = path[0];
+  if (path.length > 1 && (first === '"' || first === "'") && path.endsWith(first))
+    return path.slice(1, -1);
+  return path;
+}
 function fields(input) {
   return input !== null && typeof input === "object" ? input : {};
+}
+function patchTargets(patchText) {
+  const out = [];
+  for (const raw of patchText.split(`
+`)) {
+    const match = PATCH_HEADER.exec(raw.replace(/\r$/, ""));
+    const path = match?.groups?.path;
+    if (match === null || path === undefined)
+      continue;
+    const operation = match.groups?.move ? "move" : match.groups?.verb?.toLowerCase();
+    const target = unquote(path);
+    if (target.length > 0)
+      out.push({ operation, path: target });
+  }
+  return out;
+}
+function patchPaths(patchText) {
+  return [...new Set(patchTargets(patchText).map((target) => target.path))];
+}
+function writeTargets(tool, input) {
+  const value = fields(input);
+  if (tool === "edit" || tool === "write")
+    return typeof value.path === "string" && value.path ? [value.path] : [];
+  if (tool === "patch")
+    return typeof value.patchText === "string" ? patchPaths(value.patchText) : [];
+  return [];
 }
 function shellCall(tool, input) {
   if (!isShellTool(tool))
@@ -1162,6 +1195,59 @@ function enabledModes(options) {
   return AGENT_IDS.filter((id) => options.agents[id]).map((id) => MODES2[id]);
 }
 
+// plugins/modes/src/path-guard.ts
+import { realpathSync } from "fs";
+import { homedir } from "os";
+import { basename as basename4, dirname, isAbsolute, join as join2, relative, resolve, sep } from "path";
+function canonical(path) {
+  const pending = [];
+  let current = resolve(path);
+  for (;; ) {
+    try {
+      return join2(realpathSync(current), ...pending.reverse());
+    } catch {
+      const parent = dirname(current);
+      if (parent === current)
+        return resolve(path);
+      pending.push(basename4(current));
+      current = parent;
+    }
+  }
+}
+var inside = (path, root) => {
+  const rel = relative(root, path);
+  return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+};
+function checkDebugWrite(target, options) {
+  const home = canonical(options.home ?? homedir());
+  const start = canonical(options.startDir);
+  const path = canonical(isAbsolute(target) ? target : resolve(start, target));
+  if (path === start || inside(path, start))
+    return `${target} is inside the directory this session started in`;
+  if (inside(path, join2(home, ".opencode", "debug")))
+    return;
+  const worktrees = join2(home, ".local", "share", "opencode", "worktree");
+  if (inside(path, worktrees)) {
+    const [hash, lane, ...rest] = relative(worktrees, path).split(sep);
+    if (hash !== undefined && lane !== undefined && /^debug-.+/.test(lane) && rest.length > 0)
+      return;
+  }
+  return `${target} is outside a debug-* scratch worktree and the debug ledger directory`;
+}
+function guardDebugWrite(tool, input, agent, options) {
+  if (agent !== "debug" || !WRITE_TOOLS.has(tool))
+    return;
+  const targets = writeTargets(tool, input);
+  if (targets.length === 0)
+    return "the write has no readable target path, so it cannot be checked";
+  for (const target of targets) {
+    const reason = checkDebugWrite(target, options);
+    if (reason !== undefined)
+      return reason;
+  }
+  return;
+}
+
 // plugins/modes/src/index.ts
 var AGENTS_DIR = fileURLToPath(new URL("../agents", import.meta.url));
 async function setupModes(ctx) {
@@ -1181,6 +1267,18 @@ async function setupModes(ctx) {
           throw new Error(reason);
       });
       disposers.push(() => guard.dispose());
+    }
+    if (options.agents.debug) {
+      const location = ctx.location.directory;
+      const writes = await ctx.tool.hook("execute.before", async (event) => {
+        if (event.agent !== "debug")
+          return;
+        const startDir = await ctx.session.get({ sessionID: event.sessionID }).then((session) => session.location.directory ?? location).catch(() => location);
+        const reason = guardDebugWrite(event.tool, event.input, event.agent, { startDir });
+        if (reason !== undefined)
+          throw new Error(reason);
+      });
+      disposers.push(() => writes.dispose());
     }
     const modes = enabledModes(options);
     if (options.reminders && modes.length > 0)
