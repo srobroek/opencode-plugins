@@ -543,9 +543,31 @@ alike:
    | `quota` | 402, spent quota, billing, weekly or daily usage limit, subscription session or usage limits (`claude_session_limit`, `usage_limit_reached`, `subscription_sharing_usage_limit_exceeded`) | the provider | permanent |
    | `unavailable` | unknown or retired model, Bedrock's `The provided model identifier is invalid` | the model | permanent |
    | `content-filter` | blocked by a content or safety filter | the model | permanent |
+   | `context-length` | `prompt is too long` (Anthropic), `maximum context length` / `context_length_exceeded` (OpenAI), `Input is too long for requested model` (Bedrock), 400 or 413 bodies saying so | the request, not the model | see below |
 
-   User interrupts, tool errors and context overflow don't count, and the
-   host's own decision stands.
+   User interrupts and tool errors don't count, and the host's own decision
+   stands.
+
+   A `context-length` failure is about one request, so it never starts a
+   cooldown or adds a strike. The host handles an overflow itself, outside the
+   `retry` hook. With automatic compaction on, it compacts the session once.
+   It fails the step when compaction is off or doesn't shrink the request
+   enough. The plugin switches a model only on that failure's
+   `session.execution.failed` event, which belongs to the execution that
+   failed, and re-runs nothing:
+   - A child moves, with `session.switchModel`, to the first healthy
+     candidate of its tier with a larger context window. Resuming it
+     continues there. Windows come from the catalog's `limit.context`.
+     Unknown or equal windows don't count as larger. The receipt records the
+     fallback reason `context-length`.
+   - A root session keeps its model. Its note names the larger candidate.
+   - With no larger candidate, the note says: "context too long for
+     `<model>` (`<limit>` tokens); no larger-context candidate in tier
+     `<tier>`. Compact the session or use a tier with a larger-context model".
+
+   The parent gets one note for each overflowing execution of a child. The
+   parent's failed `subagent` call never switches a model. It posts the note
+   only when the child's failure event has not.
 2. A transient failure stays on the same model for the first `hostRetries`
    retries. A permanent one switches on the first retry. When the host would
    not retry a transient failure itself (it doesn't retry credentials that
@@ -748,6 +770,11 @@ It also shows:
   its model lacks, a model with no variant near the effort, and agents that
   re-registering gave up on;
 - the derived lineups, and every model the derivation dropped, grouped by reason;
+- a "Recent health" section with the last 10 cooldown starts, newest first: time,
+  model or provider, failure class, cooldown length, and when it recovered (a
+  successful call on the provider, or the cooldown running out) or "still out".
+  It lives in memory, so it empties on restart, holds classes and times only, and
+  is left out while empty;
 - the recent [spawn receipts](#spawn-receipts) and [auto routing](#auto-routing)
   decisions.
 

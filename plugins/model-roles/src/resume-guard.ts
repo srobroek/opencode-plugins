@@ -15,6 +15,8 @@ export type ResumeFacts = {
   tier: string | undefined
   /** The tier's usable candidates in order, each with the guard's verdict. */
   candidates: ReadonlyArray<{ model: ModelRef; allowed: boolean }>
+  /** Allowed candidates left out because the child's prompt already overflowed them, with their context window. */
+  overflowed?: ReadonlyArray<{ model: ModelRef; limit?: number }>
 }
 
 export type ResumeDecision = { action: "keep" } | { action: "switch"; model: ModelRef } | { action: "refuse"; reason: string }
@@ -24,6 +26,15 @@ export function resumeGuard(facts: ResumeFacts): ResumeDecision {
   if (facts.current === undefined || facts.refused === undefined) return { action: "keep" }
   const allowed = facts.candidates.find((c) => c.allowed)
   if (allowed !== undefined) return { action: "switch", model: allowed.model }
+  const spent = facts.overflowed ?? []
+  if (spent.length > 0) {
+    const list = spent.map((c) => `${modelText(c.model)} (${c.limit === undefined ? "unknown limit" : `${c.limit} tokens`})`).join(", ")
+    const which = spent.length === 1 ? `The only allowed candidate, ${list}, already` : `The allowed candidates, ${list}, already`
+    return {
+      action: "refuse",
+      reason: `This resume would run on ${modelText(facts.current)}, which the guard refuses. ${which} overflowed its context; compact the session or start a new one.\n${facts.refused}`,
+    }
+  }
   const where = facts.tier === undefined ? "the child has no tier to switch within" : `no candidate of tier '${facts.tier}' passes the guard`
   return { action: "refuse", reason: `This resume would run on ${modelText(facts.current)}, which the guard refuses, and ${where}.\n${facts.refused}` }
 }

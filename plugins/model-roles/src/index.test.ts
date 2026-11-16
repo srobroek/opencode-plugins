@@ -11,7 +11,7 @@ import work from "./fixtures/work-models.json"
 import plugin, { CHILD_LOOKUP_MS, MAX_REREGISTER, type ModelRef, readAgents, readTiers, spawnTarget } from "./index.ts"
 
 type Agent = { id: string; model?: ModelRef; request?: { headers?: Record<string, string> } }
-type Model = { providerID: string; id: string; variants: { id: string }[]; cost?: { input: number }[] }
+type Model = { providerID: string; id: string; variants: { id: string }[]; cost?: { input: number }[]; limit?: { context: number } }
 type SubagentTool = { id: string; name: string; description: string; input: unknown }
 type ToolEditor = {
   add: (tool: { name: string; execute: (input: unknown) => Promise<{ content: string }> }) => void
@@ -733,6 +733,153 @@ describe("runtime fallback", () => {
     await cleanup()
   })
 
+  // The host's shape for an overflow its compaction could not fix: `session.execution.failed` carries
+  // `toSessionError` of an InvalidRequest (opencode core `session/to-session-error.ts`, `providerError`).
+  const overflow = (message: string) => ({
+    type: "provider.invalid-request",
+    message,
+    status: 400,
+    response: { body: JSON.stringify({ type: "error", error: { type: "invalid_request_error", message } }) },
+  })
+  const tooLong = overflow("prompt is too long: 213462 tokens > 200000 maximum")
+  const windows = (...limits: number[]) => models.map((m, i) => ({ ...m, limit: { context: limits[i] ?? 200_000 } })) as Model[]
+  const wide = { ...fallbackOptions, roles: { task: ["amazon-bedrock/claude-sonnet#high", "anthropic/claude-haiku", "opencode/flint"] } }
+  const notes = (host: ReturnType<typeof createHost>) => methods(host, "synthetic").map((c) => c.input as { sessionID: string; text: string })
+  const childHost = (models: Model[], options: typeof fallbackOptions, children = ["c"]) => {
+    const host = createHost({ agents: [{ id: "general" }], models, options })
+    host.sessions.set("r", { id: "r" })
+    for (const id of children) host.sessions.set(id, { id, parentID: "r", agent: "general", model: sonnet })
+    return host
+  }
+
+  test("a child that overflows is switched to the tier's larger-context candidate for its next request, with one note and a receipt", async () => {
+    const host = childHost(windows(200_000, 1_000_000, 2_000_000), wide)
+    const cleanup = await setup(host)
+    host.emit(failed("c", tooLong))
+    await settle()
+    expect(methods(host, "switchModel").map((c) => c.input)).toEqual([{ sessionID: "c", model: haiku }])
+    expect(notes(host)).toEqual([
+      {
+        ...notes(host)[0],
+        sessionID: "r",
+        text: "context too long for amazon-bedrock/claude-sonnet#high (200000 tokens); the session now runs anthropic/claude-haiku (1000000 tokens). Resume it with sessionID c to continue on the larger context.",
+      },
+    ])
+    expect(host.storage.has("health")).toBe(false)
+    const check = (await host.tools.get("model_roles_check")?.execute({}))?.content ?? ""
+    expect(check).toContain("anthropic/claude-haiku by model default; fell back past amazon-bedrock/claude-sonnet#high: context-length")
+    expect(check).not.toContain("Recent health")
+    host.close()
+    await cleanup()
+  })
+
+  test("a candidate whose variant is unknown is not a larger-context target", async () => {
+    const roles = { ...fallbackOptions, roles: { task: ["amazon-bedrock/claude-sonnet#high", "anthropic/claude-haiku#nope", "opencode/flint"] } }
+    const host = childHost(windows(200_000, 1_000_000, 2_000_000), roles)
+    const cleanup = await setup(host)
+    host.emit(failed("c", tooLong))
+    await settle()
+    expect(methods(host, "switchModel").map((c) => c.input)).toEqual([{ sessionID: "c", model: flint }])
+    host.close()
+    await cleanup()
+  })
+
+  test("with no larger-context candidate nothing is switched and the note says so", async () => {
+    const host = childHost(windows(200_000, 200_000, 200_000), wide)
+    const cleanup = await setup(host)
+    host.emit(failed("c", overflow("Input is too long for requested model.")))
+    await settle()
+    expect(methods(host, "switchModel")).toHaveLength(0)
+    expect(notes(host).map((n) => n.text)).toEqual([
+      "context too long for amazon-bedrock/claude-sonnet#high (200000 tokens); no larger-context candidate in tier task. Compact the session or use a tier with a larger-context model",
+    ])
+    expect(host.storage.has("health")).toBe(false)
+    host.close()
+    await cleanup()
+  })
+
+  test("a root session that overflows is not switched; the note names the larger candidate", async () => {
+    const host = createHost({ agents: [{ id: "general" }], models: windows(200_000, 1_000_000), options: fallbackOptions })
+    host.sessions.set("r", { id: "r", agent: "general", model: sonnet })
+    const cleanup = await setup(host)
+    host.emit(failed("r", tooLong))
+    await settle()
+    expect(methods(host, "switchModel")).toHaveLength(0)
+    expect(notes(host)).toEqual([
+      {
+        ...notes(host)[0],
+        sessionID: "r",
+        text: "context too long for amazon-bedrock/claude-sonnet#high (200000 tokens); tier task has a larger-context candidate, anthropic/claude-haiku (1000000 tokens). Switch to it or compact the session.",
+      },
+    ])
+    host.close()
+    await cleanup()
+  })
+
+  test.each([
+    ["the failure event first", ["event", "tool"], 1],
+    ["the tool error first", ["tool", "event"], 2],
+  ])("a child's overflow is switched by its failure event only, with %s", async (_name, order, noteCount) => {
+    const host = childHost(windows(200_000, 1_000_000), fallbackOptions)
+    const cleanup = await setup(host)
+    const steps = {
+      event: async () => {
+        host.emit(failed("c", tooLong))
+        await settle()
+      },
+      tool: async () => {
+        await host.spawnFailed({ agent: "general", prompt: "x" }, `Subagent failed (sessionID: c): ${tooLong.message}`, "r")
+        await settle()
+      },
+    }
+    for (const step of order as Array<"event" | "tool">) await steps[step]()
+    expect(methods(host, "switchModel").map((c) => c.input)).toEqual([{ sessionID: "c", model: haiku }])
+    expect(notes(host).map((n) => n.sessionID)).toEqual(Array(noteCount).fill("r"))
+    expect(notes(host).at(-1)?.text).toContain("Resume it with sessionID c")
+    host.close()
+    await cleanup()
+  })
+
+  test("two children that overflow on one model each get a note in the parent", async () => {
+    const host = childHost(windows(200_000, 1_000_000), fallbackOptions, ["c1", "c2"])
+    const cleanup = await setup(host)
+    host.emit(failed("c1", tooLong))
+    host.emit(failed("c2", tooLong))
+    await settle()
+    expect(notes(host).map((n) => n.text.match(/sessionID (\w+)/)?.[1])).toEqual(["c1", "c2"])
+    host.close()
+    await cleanup()
+  })
+
+  test("the retry hook leaves an overflow to the host", async () => {
+    const host = createHost({ agents: [{ id: "build" }], models: windows(200_000, 1_000_000), options: fallbackOptions })
+    const cleanup = await setup(host)
+    expect(await host.fireRetry({ sessionID: "r", agent: "build", model: sonnet, error: tooLong, attempt: 2 }, declined)).toEqual(declined)
+    expect(methods(host, "switchModel")).toHaveLength(0)
+    expect(host.storage.has("health")).toBe(false)
+    host.close()
+    await cleanup()
+  })
+
+  test("model_roles_check lists recent cooldowns, then their recovery", async () => {
+    const host = createHost({ agents: [{ id: "build" }], models, options: fallbackOptions })
+    const cleanup = await setup(host)
+    const run = async () => (await host.tools.get("model_roles_check")?.execute({}))?.content ?? ""
+    expect(await run()).not.toContain("Recent health")
+    const quota = { type: "provider.quota", message: "You exceeded your current quota", status: 429 }
+    await host.fireRetry({ sessionID: "r", agent: "build", model: sonnet, error: quota, attempt: 2 })
+    expect(await run()).toMatch(/Recent health[\s\S]*provider amazon-bedrock: quota, cooldown 6 h, still out/)
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    host.fireModelRequest({}, { sessionID: "r", model: sonnet, kind: "primary" })
+    host.emit({ type: "session.execution.succeeded", data: { sessionID: "r" } })
+    await settle()
+    const after = await run()
+    expect(after).toMatch(/provider amazon-bedrock: quota, cooldown 6 h, recovered \d\d:\d\d:\d\d/)
+    expect(after).not.toContain("still out")
+    host.close()
+    await cleanup()
+  })
+
   test("a non-retryable model error is retried on the next model; other errors are left alone", async () => {
     const host = createHost({ agents: [{ id: "build" }], models, options: fallbackOptions })
     const cleanup = await setup(host)
@@ -1174,7 +1321,7 @@ describe("runtime fallback", () => {
     host.sessions.set("r", { id: "r", agent: "general", model: sonnet })
     const cleanup = await setup(host)
     host.emit(failed("r", { type: "tool", message: "Model unavailable: x/y" }))
-    host.emit(failed("r", { type: "unknown", message: "prompt is too long" }))
+    host.emit(failed("r", { type: "unknown", message: "file not found: src/x.ts" }))
     await host.spawnFailed({ agent: "general", prompt: "x" }, "file not found")
     await settle()
     expect(host.storage.has("health")).toBe(false)
@@ -2653,6 +2800,195 @@ describe("a child keeps its resolved model", () => {
     await cleanup()
   })
 
+
+  describe("a context overflow of a snapshotted child", () => {
+    const long = { type: "provider.invalid-request", message: "prompt is too long: 213462 tokens > 200000 maximum", status: 400 }
+    const limited = [
+      { ...models[0], limit: { context: 200_000 } },
+      { ...models[1], limit: { context: 1_000_000 } },
+      { ...models[2], limit: { context: 2_000_000 } },
+    ] as Model[]
+    // `aaa` lists the failed model first by name, so routing by "the first tier that lists it" would pick flint.
+    const overlapping = {
+      roles: { aaa: ["amazon-bedrock/claude-sonnet#high", "opencode/flint"], task: ["amazon-bedrock/claude-sonnet#high", "anthropic/claude-haiku"] },
+      agents: { general: "task" },
+    }
+    const event = async (host: ReturnType<typeof createHost>) => {
+      host.emit({ type: "session.execution.failed", data: { sessionID: "c", error: long } })
+      await settle()
+    }
+    const tool = async (host: ReturnType<typeof createHost>) => {
+      await host.spawnFailed({ agent: "plain", prompt: "x" }, `Subagent failed (sessionID: c): ${long.message}`, "r")
+      await settle()
+    }
+    const reopen = async (from: ReturnType<typeof createHost>, nextModels: Model[], next: object) => {
+      const host = createHost({ agents: [{ id: "plain" }], models: nextModels, options: next as never })
+      for (const [key, value] of from.storage) host.storage.set(key, value)
+      host.sessions.set("r", { id: "r" })
+      return { host, cleanupHost: await setup(host) }
+    }
+
+    test.each([
+      ["failure event", [event, tool], 1],
+      ["tool error", [tool, event], 2],
+    ] as const)("a resumed child with no pending spawn routes by its stored tier when the %s comes first", async (_name, order, noteCount) => {
+      const { again, cleanupAgain } = await spawnThenReload(overlapping, limited)
+      again.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: sonnet })
+      for (const step of order) await step(again)
+      // Only the failure event switches; the tool error before it just names the candidate of the child's tier.
+      expect(methods(again, "switchModel").map((c) => c.input)).toEqual([{ sessionID: "c", model: haiku }])
+      const notes = methods(again, "synthetic").map((c) => c.input as { sessionID: string; text: string })
+      expect(notes.map((n) => n.sessionID)).toEqual(Array(noteCount).fill("r"))
+      expect(notes.at(-1)?.text).toContain("the session now runs anthropic/claude-haiku (1000000 tokens)")
+      if (noteCount === 2) expect(notes[0]?.text).toContain("tier task has a larger-context candidate, anthropic/claude-haiku (1000000 tokens)")
+      again.close()
+      await cleanupAgain()
+    })
+
+    test("a delayed tool error of an earlier execution changes nothing; the next execution's overflow is still handled", async () => {
+      const { again, cleanupAgain } = await spawnThenReload(three, limited)
+      again.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: sonnet })
+      await started(again, "e1")
+      await event(again)
+      // e2 runs on haiku; e1's tool error reaches the parent late and names the session's current model.
+      again.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: haiku })
+      await started(again, "e2")
+      await tool(again)
+      expect(methods(again, "switchModel")).toHaveLength(1)
+      expect(methods(again, "synthetic")).toHaveLength(1)
+      expect(again.storage.get("spawn-model:c")).toMatchObject({ model: "anthropic/claude-haiku", overflowed: [sonnetHigh] })
+      await event(again)
+      expect(methods(again, "switchModel").map((c) => c.input)).toEqual([
+        { sessionID: "c", model: haiku },
+        { sessionID: "c", model: flint },
+      ])
+      expect(methods(again, "synthetic")).toHaveLength(2)
+      expect(again.storage.get("spawn-model:c")).toMatchObject({ model: "opencode/flint", overflowed: [sonnetHigh, "anthropic/claude-haiku"] })
+      again.close()
+      await cleanupAgain()
+    })
+
+    test("a tool error with no failure event notes once, switches nothing and records no overflow", async () => {
+      const { again, cleanupAgain } = await spawnThenReload(first, limited)
+      again.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: sonnet })
+      await tool(again)
+      await tool(again)
+      expect(methods(again, "switchModel")).toHaveLength(0)
+      expect(methods(again, "synthetic")).toHaveLength(1)
+      expect(again.storage.get("spawn-model:c")).not.toHaveProperty("overflowed")
+      expect(again.storage.get("spawn-model:c")).not.toHaveProperty("failedOver")
+      again.close()
+      await cleanupAgain()
+    })
+
+    test("the switch is stored with the snapshot and the ledger, and a resume after a reload continues on the larger model", async () => {
+      const { again, cleanupAgain } = await spawnThenReload(first, limited)
+      again.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: sonnet })
+      await event(again)
+      expect(again.storage.get("spawn-model:c")).toMatchObject({ model: "anthropic/claude-haiku", tier: "task", failedOver: true, overflowed: [sonnetHigh] })
+      expect(again.storage.get("outcome:c")).toMatchObject({ failedOver: true })
+      again.close()
+      await cleanupAgain()
+      const { host, cleanupHost } = await reopen(again, limited, first)
+      expect(await host.spawn("subagent", resume, "build", "r", "call-2")).toEqual({ ...resume, model: "anthropic/claude-haiku" })
+      expect(methods(host, "switchModel")).toHaveLength(0)
+      expect(receipts(host)[0]).toMatchObject({ rule: "snapshot", model: "anthropic/claude-haiku" })
+      host.close()
+      await cleanupHost()
+    })
+
+    const started = async (host: ReturnType<typeof createHost>, id: string) => {
+      host.emit({ type: "session.execution.started", id, data: { sessionID: "c" } })
+      await settle()
+    }
+    const three = { roles: { task: ["amazon-bedrock/claude-sonnet#high", "anthropic/claude-haiku", "opencode/flint"] }, agents: { general: "task" } }
+
+    test("a resume that overflows the larger model too is switched and noted again, once per execution", async () => {
+      const { again, cleanupAgain } = await spawnThenReload(three, limited)
+      again.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: sonnet })
+      await started(again, "e1")
+      await event(again)
+      await again.spawn("subagent", resume, "build", "r", "call-2")
+      again.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: haiku })
+      await started(again, "e2")
+      await event(again)
+      // The tool error of the same execution adds nothing.
+      await tool(again)
+      expect(methods(again, "switchModel").map((c) => c.input)).toEqual([
+        { sessionID: "c", model: haiku },
+        { sessionID: "c", model: flint },
+      ])
+      const texts = methods(again, "synthetic").map((c) => (c.input as { text: string }).text)
+      expect(texts).toHaveLength(2)
+      expect(texts[0]).toContain("the session now runs anthropic/claude-haiku (1000000 tokens)")
+      expect(texts[1]).toContain("the session now runs opencode/flint (2000000 tokens)")
+      expect(again.storage.get("spawn-model:c")).toMatchObject({ model: "opencode/flint", overflowed: [sonnetHigh, "anthropic/claude-haiku"] })
+      again.close()
+      await cleanupAgain()
+    })
+
+    test("a guard reroute keeps the overflow history, so a later guard change never selects the overflowed model", async () => {
+      const { again, cleanupAgain } = await spawnThenReload(three, limited)
+      again.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: sonnet })
+      await event(again)
+      again.close()
+      await cleanupAgain()
+      // The guard refuses haiku, where the child runs: it is rerouted past the overflowed sonnet, to flint.
+      const second = await reopen(again, limited, { ...three, guard: { expensive: ["anthropic/claude-haiku"] } })
+      await second.host.spawn("subagent", resume, "build", "r", "call-2")
+      await settle()
+      expect(methods(second.host, "switchModel").map((c) => c.input)).toEqual([{ sessionID: "c", model: flint }])
+      expect(second.host.storage.get("spawn-model:c")).toMatchObject({ model: "opencode/flint", rule: "guard-reroute", overflowed: [sonnetHigh] })
+      second.host.close()
+      await second.cleanupHost()
+      // Now flint is refused and haiku allowed: the reroute goes to haiku, not back to sonnet.
+      const third = await reopen(second.host, limited, { ...three, guard: { expensive: ["opencode/flint"] } })
+      await third.host.spawn("subagent", resume, "build", "r", "call-3")
+      expect(methods(third.host, "switchModel").map((c) => c.input)).toEqual([{ sessionID: "c", model: haiku }])
+      third.host.close()
+      await third.cleanupHost()
+    })
+
+    describe("with the guard on", () => {
+      const priced = [
+        { providerID: "amazon-bedrock", id: "claude-opus", variants: [], cost: [{ input: 12 }], limit: { context: 2_000_000 } },
+        { providerID: "amazon-bedrock", id: "claude-sonnet", variants: [{ id: "high" }], cost: [{ input: 2 }], limit: { context: 200_000 } },
+        { providerID: "anthropic", id: "claude-haiku", variants: [], cost: [{ input: 0.1 }], limit: { context: 1_000_000 } },
+      ] as Model[]
+      const guarded = (expensive: string[]) => ({ ...first, roles: { task: ["amazon-bedrock/claude-sonnet#high", "amazon-bedrock/claude-opus", "anthropic/claude-haiku"] }, guard: { expensive } })
+
+      test("a guarded larger-context candidate is skipped for the next allowed one", async () => {
+        const host = createHost({ agents: [{ id: "plain" }], models: priced, options: guarded(["amazon-bedrock/claude-opus"]) as never })
+        host.sessions.set("r", { id: "r" })
+        host.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: sonnet })
+        const cleanup = await setup(host)
+        const input = await host.spawn("subagent", { agent: "plain", prompt: "x", tier: "task" }, "build", "r", "call-1")
+        created(host, "c", "plain", sonnet)
+        await settle()
+        await host.spawnDone(input, { sessionID: "c" }, "r", "call-1")
+        await event(host)
+        expect(methods(host, "switchModel").map((c) => c.input)).toEqual([{ sessionID: "c", model: haiku }])
+        host.close()
+        await cleanup()
+      })
+
+      test("a resume never goes back to the model that overflowed, even when the larger one is refused later", async () => {
+        const { again, cleanupAgain } = await spawnThenReload(first, limited)
+        again.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: sonnet })
+        await event(again)
+        again.close()
+        await cleanupAgain()
+        // The guard now refuses haiku, where the child runs; sonnet is allowed but overflowed.
+        const { host, cleanupHost } = await reopen(again, limited, { ...first, guard: { expensive: ["anthropic/claude-haiku"] } })
+        await expect(host.spawn("subagent", resume, "build", "r", "call-2")).rejects.toThrow(
+          /resume would run on anthropic\/claude-haiku, which the guard refuses\. The only allowed candidate, amazon-bedrock\/claude-sonnet#high \(200000 tokens\), already overflowed its context; compact the session or start a new one\./,
+        )
+        expect(methods(host, "switchModel")).toHaveLength(0)
+        host.close()
+        await cleanupHost()
+      })
+    })
+  })
 
   test("a failover is visible to a resume at once, even when the stored snapshot is slow to read and write", async () => {
     const { again, cleanupAgain } = await spawnThenReload(first)

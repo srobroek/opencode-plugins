@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import type { FailureClass } from "./health.ts"
-import { decideFailureNotice, decideRecovery, type FailureReport, forgetSession, MAX_STOPPED, MAX_TRACKED, newNoticeState, type RequestLog, recordRequest, settleRequest } from "./outage.ts"
+import { claimContextNotice, claimToolContextNotice, decideFailureNotice, decideRecovery, type FailureReport, forgetSession, MAX_STOPPED, MAX_TRACKED, newNoticeState, type RequestLog, recordRequest, settleRequest } from "./outage.ts"
 import type { ModelRef } from "./resolve.ts"
 
 const bedrock = (id: string): ModelRef => ({ providerID: "amazon-bedrock", id })
@@ -148,6 +148,41 @@ describe("model failure", () => {
     expect(fail("p1")).toBeDefined()
     expect(fail("p2")).toBeDefined()
     expect(fail("p1")).toBeUndefined()
+  })
+
+  test("a context-length notice is claimed once per overflowing execution, expires and is forgotten", () => {
+    const state = newNoticeState()
+    expect(claimContextNotice(state, "c1", "e1", 0)).toBe(true)
+    expect(claimContextNotice(state, "c2", "e1", 1_000)).toBe(true)
+    // The event and the tool error of one execution claim once.
+    expect(claimContextNotice(state, "c1", "e1", 2_000)).toBe(false)
+    // A new execution of the same child (a resume) is its own overflow.
+    expect(claimContextNotice(state, "c1", "e2", 3_000)).toBe(true)
+    // With no known execution, the session alone is the key.
+    expect(claimContextNotice(state, "c3", undefined, 3_000)).toBe(true)
+    expect(claimContextNotice(state, "c3", undefined, 4_000)).toBe(false)
+    // The window passes: stale entries go, the live ones stay.
+    expect(claimContextNotice(state, "c1", "e1", 62_000)).toBe(true)
+    expect(state.contextNotices.size).toBe(3)
+    expect(claimContextNotice(state, "c1", "e2", 62_500)).toBe(false)
+    forgetSession(state, "c1")
+    expect(state.contextNotices.size).toBe(1)
+    expect(claimContextNotice(state, "c1", "e1", 63_000)).toBe(true)
+  })
+
+  test("a tool-error context notice is claimed only when no live notice of the session exists", () => {
+    const state = newNoticeState()
+    expect(claimToolContextNotice(state, "c1", 0)).toBe(true)
+    expect(claimToolContextNotice(state, "c1", 1_000)).toBe(false)
+    // The failure event of the execution is still its own claim.
+    expect(claimContextNotice(state, "c1", "e1", 2_000)).toBe(true)
+    // A live event notice silences the tool error of another child session's late report.
+    expect(claimContextNotice(state, "c2", "e1", 3_000)).toBe(true)
+    expect(claimToolContextNotice(state, "c2", 4_000)).toBe(false)
+    // After the window, a tool error is noted again.
+    expect(claimToolContextNotice(state, "c2", 64_000)).toBe(true)
+    forgetSession(state, "c2")
+    expect(claimToolContextNotice(state, "c2", 65_000)).toBe(true)
   })
 
   test("a model failure does not recover or open a provider outage", () => {
