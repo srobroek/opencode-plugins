@@ -37,6 +37,10 @@ describe("sleep guard", () => {
   test("a process substitution in an unquoted parameter default runs, in double quotes it is text", () => {
     for (const command of ["unset X; cat ${X:-<(sleep 30)}", "cat ${X:-$(sleep 30)}", "cat ${X:->(sleep 30)}"]) expect(runsSleep(command)).toBe(true)
     expect(runsSleep(`cat "\${X:-<(sleep 30)}"`)).toBe(false)
+    expect(runsSleep("cat ${X:-'$(sleep 5)'}")).toBe(false)
+    expect(runsSleep("cat ${X:-$(sleep 5)}")).toBe(true)
+    expect(runsSleep("cat ${X:-<(sleep 5)}")).toBe(true)
+    expect(runsSleep("cat ${X:-'<('$(sleep 5)')'}")).toBe(true)
   })
 
   test("eval scripts and xargs invocations run while ordinary quoted arguments stay data", () => {

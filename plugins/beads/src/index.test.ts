@@ -317,6 +317,19 @@ describe("execute.after on shell", () => {
     await cleanup()
   })
 
+  test.each([
+    ['export BEADS_ACTOR=A; c=$(bd update proj-1 --claim); export BEADS_ACTOR=B; echo "$c"', "A"],
+    ['c=$(bd update proj-1 --claim); export BEADS_ACTOR=B; echo "$c"', "opencode/ses_root/general/ses_child"],
+  ])("records a claim made in a substitution under the actor in force there: %s", async (command, expected) => {
+    const { fake, cleanup } = await start(scratch())
+    const before = shellCall(command, "ses_child")
+    await fake.fire.tool("execute.before", before)
+    await fake.fire.tool("execute.after", completed(before, "✓ Claimed proj-1"))
+    const state = fake.storage.get("claims/ses_child") as { claims: Record<string, { actor: string }> }
+    expect(Object.values(state.claims)[0]?.actor).toBe(expected)
+    await cleanup()
+  })
+
   test("records nothing for a failed claim", async () => {
     const { fake, cleanup } = await start(scratch())
     const before = shellCall("bd update proj-1 --claim", "ses_child")

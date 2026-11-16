@@ -483,8 +483,10 @@ export async function admitBdMutation(
   targetEnabled?: (cwd: string) => boolean,
 ): Promise<Admission> {
   if (!command) return undefined
-  if (changesDirectoryDynamically(command)) return { block: true, reason: DYNAMIC_CWD }
   const writes = bdInvocations(command).filter((invocation) => writesStore(invocation))
+  // A directory computed at run time only matters to a command that writes a ledger.
+  if (writes.length === 0) return undefined
+  if (changesDirectoryDynamically(command)) return { block: true, reason: DYNAMIC_CWD }
   if (
     writes.some((invocation) =>
       invocation.prefix.some((token) => token.startsWith("BEADS_DIR=") && /[$`]/u.test(token)),
@@ -495,7 +497,6 @@ export async function admitBdMutation(
       reason: "Beads directory is selected dynamically and cannot be verified before this mutation",
     }
   }
-  if (writes.length === 0) return undefined
   const literalCd = /^\s*cd\s+([^\s;&|]+)\s*&&\s*([\s\S]+?)\s*$/.exec(command)
   const targetCommand = literalCd === null ? command : (literalCd[2] ?? "")
   const targetCwd = literalCd === null ? cwd : leadingCdCwd(command, cwd)

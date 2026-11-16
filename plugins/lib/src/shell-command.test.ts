@@ -159,6 +159,9 @@ test("reads executable substitutions inside parameter expansions and shell-fed h
   expect(sources("cat ${X:-<(sleep 30)}")).toEqual(["sleep 30"])
   expect(sources("cat ${X:->(sleep 30)}")).toEqual(["sleep 30"])
   expect(sources('cat "${X:-<(sleep 30)}"')).toEqual([])
+  expect(sources("cat ${X:-'$(sleep 5)'}")).toEqual([])
+  expect(sources("cat ${X:-$(sleep 5)}")).toEqual(["sleep 5"])
+  expect(sources("cat ${X:-'<('$(sleep 5)')'}")).toEqual(["sleep 5"])
 })
 
 test("lists invocations of one executable with their globals and verb", () => {

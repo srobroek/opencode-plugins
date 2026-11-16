@@ -111,9 +111,22 @@ function readCommand(command: string, inherited: ActorState): { invocations: BdI
   const out: BdInvocation[] = []
   const scan = scanShell(command, { executableSubstitutionsOnly: true })
   const state: ActorState = { ...inherited }
+  // Substitutions not claimed by a command's own words (here-document bodies) run with the final state.
+  const unclaimed = [...scan.substitutions]
 
   for (const item of scan.items) {
     if (item.kind === "operator") continue
+
+    // A substitution runs where its command does, with the exports in force at that point.
+    const spans = [...item.words, ...item.redirects]
+    if (spans.length > 0) {
+      const text = command.slice(Math.min(...spans.map((w) => w.start)), Math.max(...spans.map((w) => w.end)))
+      for (const source of scanShell(text, { executableSubstitutionsOnly: true }).substitutions) {
+        const at = unclaimed.indexOf(source)
+        if (at >= 0) unclaimed.splice(at, 1)
+        out.push(...bdInvocations(source, state))
+      }
+    }
 
     const words = item.words
     let k = 0
@@ -153,7 +166,7 @@ function readCommand(command: string, inherited: ActorState): { invocations: BdI
       for (const document of item.hereDocuments) out.push(...bdInvocations(document.body, state))
     }
   }
-  for (const source of scan.substitutions) out.push(...bdInvocations(source, state))
+  for (const source of unclaimed) out.push(...bdInvocations(source, state))
   return { invocations: out, state }
 }
 
@@ -517,10 +530,11 @@ export function decideActorParsed(
 }
 
 /**
- * The actor gate guards against an agent that forgot to attribute a write, not against
- * deliberate evasion: an agent could always set a wrong BEADS_ACTOR. The plugin injects
- * an actor into every session's `bd` calls, so this verdict is advisory (see shell-gates).
- * Do not harden the parser against adversarial shell; read quoted text as data and stop.
+ * Scope: this gate is an attribution aid. The plugin injects an actor into every session's
+ * `bd` calls, so its verdict is advisory (see shell-gates), and it cannot stop an agent that
+ * sets a wrong actor on purpose. The other gates that read commands through the shared parser
+ * (close, update-close, unclaim, the embedded-write lock, the wait guard) are real controls;
+ * parser bugs that let a command slip past them are bugs to fix.
  */
 export function decideActorGate(
   command: string,

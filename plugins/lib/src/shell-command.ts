@@ -266,11 +266,14 @@ export function scanShell(source: string, options: { executableSubstitutionsOnly
   const substitution = (expansion: Expansion, unquoted = false): void => {
     if (expansion.inner !== undefined) {
       if (!options.executableSubstitutionsOnly || expansion.executable) substitutions.push(expansion.inner)
-      else {
+      else if (unquoted) {
+        // Unquoted, the body is shell text: `${X:-'$(cmd)'}` is a quoted literal, while
+        // `${X:-$(cmd)}` and `${X:-<(cmd)}` run.
+        substitutions.push(...scanShell(expansion.inner, options).substitutions)
+      } else {
         // Inside `"${X:-'$(cmd)'}"` the single quotes are literal, so the expansion body is
-        // read for substitutions without quote handling: any `$(` or backtick may run. Outside
-        // double quotes a default can also be a process substitution, `${X:-<(cmd)}`.
-        for (const found of bodySubstitutions(expansion.inner, unquoted)) substitution(found, unquoted)
+        // read for substitutions without quote handling: any `$(` or backtick may run.
+        for (const found of bodySubstitutions(expansion.inner)) substitution(found)
       }
     }
     if (!expansion.closed) complete = false
@@ -501,20 +504,12 @@ function closingIndex(text: string, from: number, open: string, close: string): 
 }
 
 /** Substitutions an unquoted here-document body expands. */
-function bodySubstitutions(body: string, processSubstitutions = false): Expansion[] {
+function bodySubstitutions(body: string): Expansion[] {
   const found: Expansion[] = []
   for (let j = 0; j < body.length; j++) {
     const c = body[j]
     if (c === "\\") {
       j++
-      continue
-    }
-    if (processSubstitutions && (c === "<" || c === ">") && body[j + 1] === "(") {
-      const close = closingIndex(body, j + 2, "(", ")")
-      const closed = close >= 0
-      const end = closed ? close + 1 : body.length
-      found.push({ end, inner: body.slice(j + 2, closed ? close : body.length), executable: true, expands: true, closed })
-      j = end - 1
       continue
     }
     if (c !== "$" && c !== "`") continue

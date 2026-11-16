@@ -609,9 +609,11 @@ function scanShell(source, options = {}) {
     if (expansion.inner !== undefined) {
       if (!options.executableSubstitutionsOnly || expansion.executable)
         substitutions.push(expansion.inner);
-      else {
-        for (const found of bodySubstitutions(expansion.inner, unquoted))
-          substitution(found, unquoted);
+      else if (unquoted) {
+        substitutions.push(...scanShell(expansion.inner, options).substitutions);
+      } else {
+        for (const found of bodySubstitutions(expansion.inner))
+          substitution(found);
       }
     }
     if (!expansion.closed)
@@ -859,20 +861,12 @@ function closingIndex(text, from, open, close) {
   }
   return -1;
 }
-function bodySubstitutions(body, processSubstitutions = false) {
+function bodySubstitutions(body) {
   const found = [];
   for (let j = 0;j < body.length; j++) {
     const c = body[j];
     if (c === "\\") {
       j++;
-      continue;
-    }
-    if (processSubstitutions && (c === "<" || c === ">") && body[j + 1] === "(") {
-      const close = closingIndex(body, j + 2, "(", ")");
-      const closed = close >= 0;
-      const end = closed ? close + 1 : body.length;
-      found.push({ end, inner: body.slice(j + 2, closed ? close : body.length), executable: true, expands: true, closed });
-      j = end - 1;
       continue;
     }
     if (c !== "$" && c !== "`")
@@ -1304,9 +1298,20 @@ function readCommand(command, inherited) {
   const out = [];
   const scan = scanShell(command, { executableSubstitutionsOnly: true });
   const state = { ...inherited };
+  const unclaimed = [...scan.substitutions];
   for (const item of scan.items) {
     if (item.kind === "operator")
       continue;
+    const spans = [...item.words, ...item.redirects];
+    if (spans.length > 0) {
+      const text = command.slice(Math.min(...spans.map((w) => w.start)), Math.max(...spans.map((w) => w.end)));
+      for (const source of scanShell(text, { executableSubstitutionsOnly: true }).substitutions) {
+        const at = unclaimed.indexOf(source);
+        if (at >= 0)
+          unclaimed.splice(at, 1);
+        out.push(...bdInvocations(source, state));
+      }
+    }
     const words = item.words;
     let k = 0;
     let skip = false;
@@ -1352,7 +1357,7 @@ function readCommand(command, inherited) {
         out.push(...bdInvocations(document.body, state));
     }
   }
-  for (const source of scan.substitutions)
+  for (const source of unclaimed)
     out.push(...bdInvocations(source, state));
   return { invocations: out, state };
 }

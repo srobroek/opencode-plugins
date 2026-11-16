@@ -13,6 +13,10 @@ function decision(command: string) {
 }
 
 describe("bd unclaim gate", () => {
+  test("refuses an unguarded unclaim between quoted literals in a parameter default", () => {
+    expect(decideBdUnclaim("echo ${X:-'<('$(bd unclaim bead-1)')'}")?.block).toBe(true)
+  })
+
   test("refuses an unguarded unclaim fed to a shell as a quoted here-document", () => {
     expect(decideBdUnclaim("bash <<'EOF'\nbd unclaim bead-1\nEOF")?.block).toBe(true)
   })

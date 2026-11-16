@@ -272,6 +272,7 @@ describe("dynamic directory detection reads parsed commands", () => {
     const admitter = {} as GateAdmitter
     const deadline = Date.now() + 1000
     expect(await admitBdMutation('bd list --title "run cd $dir first"', "/", {}, admitter, deadline)).toBeUndefined()
+    expect(await admitBdMutation('cd "$(pwd)/x" && make', "/", {}, admitter, deadline)).toBeUndefined()
     expect(await admitBdMutation('cd "$dir" && bd create y', "/", {}, admitter, deadline)).toMatchObject({
       block: true,
     })
