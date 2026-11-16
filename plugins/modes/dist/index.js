@@ -1224,6 +1224,10 @@ function checkGit(args, ctx, cwd) {
         return refuse("git tag creating a tag");
       break;
     }
+    case "bisect":
+      if (rest[0] === "run")
+        return checkRunner(rest.slice(1), ctx, tree);
+      break;
     case "stash":
       if (rest[0] !== undefined && !rest[0].startsWith("-") && !["list", "show", "push", "save"].includes(rest[0]))
         return refuse(`git stash ${rest[0]}`);
@@ -1242,6 +1246,32 @@ function checkGit(args, ctx, cwd) {
     }
   }
   return;
+}
+function checkRunner(runner, ctx, tree) {
+  const refuse = (what) => `git bisect run ${what} is not allowed for the ${ctx.agent} agent`;
+  const { argv } = realCommand(runner);
+  const first = argv[0];
+  if (first === undefined)
+    return refuse("without a command");
+  if (/[$`*?[{~]/.test(first))
+    return refuse(`${first}: a variable or glob in the command cannot be checked`);
+  const exe = basename2(first);
+  const shell = SHELLS.has(exe);
+  const inline = shell && argv.slice(1).some((arg) => /^-[a-zA-Z]*c[a-zA-Z]*$/.test(arg));
+  if (!shell || inline) {
+    const nested = checkWords(runner, deeper(ctx));
+    if (nested !== undefined)
+      return nested;
+  }
+  let script;
+  if (first.includes("/"))
+    script = first;
+  else if ((shell || INTERPRETERS.test(exe)) && !inline)
+    script = argv.slice(1).find((arg) => !arg.startsWith("-"));
+  if (script === undefined)
+    return;
+  const resolved = joinPath(tree, script);
+  return resolved !== undefined && scratch(resolved, ctx) ? undefined : refuse(`${script}: a script outside a debug-* scratch worktree cannot be checked`);
 }
 function worktreeTarget(action, args) {
   for (let i = 0;i < args.length; i++) {

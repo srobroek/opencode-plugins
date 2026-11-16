@@ -269,6 +269,47 @@ describe("output options", () => {
   })
 })
 
+describe("git bisect run", () => {
+  const refused = [
+    "git bisect run git push",
+    "git bisect run sh -c 'git push'",
+    "git bisect run bash -c \"git -C x push\"",
+    "git bisect run env GIT_PAGER=evil git log",
+    "git bisect run ../outside.sh",
+    "git bisect run /tmp/x.sh",
+    `git bisect run ${CHECKOUT}/repro.sh`,
+    "git bisect run bash /tmp/x.sh",
+    "git bisect run python3 /tmp/x.py",
+    `git bisect run sh ${CHECKOUT}/repro.sh`,
+    "git bisect run python3 -c \"import os; os.system('git push')\"",
+    "git bisect run $CMD",
+    "git bisect run ./*.sh",
+    "git bisect run",
+  ]
+  const allowed = [
+    "git bisect run bun test x",
+    "git bisect run npm test",
+    "git bisect run ./repro.sh",
+    "git bisect run sh ./repro.sh",
+    "git bisect run bash repro.sh --flag",
+    "git bisect run python3 -m pytest tests/x",
+    `git bisect run ${WT}/repro.sh`,
+    "git bisect run sh -c 'bun test x'",
+    "git bisect start",
+    "git bisect good",
+    "git bisect reset",
+  ]
+  test.each(refused)("refuses %j for debug", (command) => {
+    expect(forbiddenGit(command, "debug", context)).toBeString()
+  })
+  test.each(allowed)("allows %j for debug", (command) => {
+    expect(forbiddenGit(command, "debug", context)).toBeUndefined()
+  })
+  test("a runner script in the user's checkout is refused even with a relative path", () => {
+    expect(forbiddenGit("git bisect run ./repro.sh", "debug", { ...context, workdir: CHECKOUT })).toBeString()
+  })
+})
+
 describe("guardShellCall", () => {
   test("an alias tool with an argv-array command is read as the command it becomes", () => {
     expect(guardShellCall("bash", { command: ["git", "-C", "x", "push"] }, "debug")).toBeString()

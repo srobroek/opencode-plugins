@@ -196,6 +196,9 @@ function checkGit(args: readonly string[], ctx: Ctx, cwd: string | undefined): s
       if (rest.some((arg) => !arg.startsWith("-")) && !list) return refuse("git tag creating a tag")
       break
     }
+    case "bisect":
+      if (rest[0] === "run") return checkRunner(rest.slice(1), ctx, tree)
+      break
     case "stash":
       // Stash refs are shared by every worktree, so drop, clear, pop and apply could delete or apply someone else's work.
       if (rest[0] !== undefined && !rest[0].startsWith("-") && !["list", "show", "push", "save"].includes(rest[0]))
@@ -213,6 +216,32 @@ function checkGit(args: readonly string[], ctx: Ctx, cwd: string | undefined): s
     }
   }
   return undefined
+}
+
+/**
+ * Check the command `git bisect run` repeats. A bare command (`bun test`) goes through the same
+ * guard as any other. A script cannot be read, so it is allowed only inside a debug scratch worktree.
+ */
+function checkRunner(runner: readonly string[], ctx: Ctx, tree: string | undefined): string | undefined {
+  const refuse = (what: string) => `git bisect run ${what} is not allowed for the ${ctx.agent} agent`
+  const { argv } = realCommand(runner)
+  const first = argv[0]
+  if (first === undefined) return refuse("without a command")
+  if (/[$`*?[{~]/.test(first)) return refuse(`${first}: a variable or glob in the command cannot be checked`)
+  const exe = basename(first)
+  const shell = SHELLS.has(exe)
+  const inline = shell && argv.slice(1).some((arg) => /^-[a-zA-Z]*c[a-zA-Z]*$/.test(arg))
+  // A shell given a script file has nothing to read here, so that script is checked as a path below.
+  if (!shell || inline) {
+    const nested = checkWords(runner, deeper(ctx))
+    if (nested !== undefined) return nested
+  }
+  let script: string | undefined
+  if (first.includes("/")) script = first
+  else if ((shell || INTERPRETERS.test(exe)) && !inline) script = argv.slice(1).find((arg) => !arg.startsWith("-"))
+  if (script === undefined) return undefined
+  const resolved = joinPath(tree, script)
+  return resolved !== undefined && scratch(resolved, ctx) ? undefined : refuse(`${script}: a script outside a debug-* scratch worktree cannot be checked`)
 }
 
 /** The path argument of `git worktree add|remove`. */
