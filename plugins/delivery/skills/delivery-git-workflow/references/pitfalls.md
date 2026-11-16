@@ -29,3 +29,15 @@
 - **Symptom:** `This PR names no bead. A live ledger requires a Bead: <id>, Closes-Bead: <id>, or Bead-Id: <id> trailer.`
 - **Cause:** The PR gate reads the ledger of the shell call's working directory. In a repo with a regular-file `.beads/RETIRED` it skips the check, so the message means the working directory is a different, live repo. `No-Bead:` is not accepted.
 - **Fix:** Run `gh pr create` with the PR's repo as `workdir`. Add no trailer for a retired repo, create no bead, and do not use `No-Bead:`. If the gate still asks for a trailer, your `workdir` is the wrong repo.
+
+## A draft PR reports no checks
+
+- **Symptom:** `no checks reported` on a draft PR
+- **Cause:** Expected. Repositories skip workflows for draft PRs and run them on `ready_for_review`.
+- **Fix:** Finish the work and pass local checks, then run `gh pr ready <n>`. For a fix round, run `gh pr ready <n> --undo`, push, and mark it ready again.
+
+## Landing into a branch that requires a merge queue (interim until `delivery_land` supports merge queues)
+
+- **Symptom:** `delivery_land` refuses, or a direct merge fails with `Repository rule violations found` and `Changes must be made through the merge queue` (wording may vary by GitHub version)
+- **Cause:** The base branch (for example in `srobroek/slopvac`) requires a GitHub merge queue, and `delivery_land` merges directly. Interim guidance until `delivery_land` supports merge queues (PR #188).
+- **Fix:** Run `gh pr merge <n> --squash --match-head-commit <reviewed-sha>`, which enqueues the PR. The repository setting deletes the branch automatically. Close the bead by hand with the PR number and merge SHA. Never arm `--auto`.
