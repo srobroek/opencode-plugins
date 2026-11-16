@@ -11,13 +11,14 @@ import { existsSync, realpathSync } from "fs";
 import { basename } from "path";
 import { promisify } from "util";
 var execFileAsync = promisify(execFile);
-async function git(args) {
+async function git(args, signal) {
   try {
     const { stdout } = await execFileAsync("git", args, {
       encoding: "utf8",
       timeout: 1e4,
       maxBuffer: 16 * 1024 * 1024,
-      env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" }
+      env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
+      ...signal ? { signal } : {}
     });
     return stdout;
   } catch {
@@ -62,16 +63,16 @@ function parseWorktrees(out, exists = existsSync) {
   });
   return live;
 }
-async function listWorktrees(directory) {
+async function listWorktrees(directory, signal) {
   if (!existsSync(directory))
     return [];
-  const out = await git(["-C", directory, "worktree", "list", "--porcelain"]);
+  const out = await git(["-C", directory, "worktree", "list", "--porcelain"], signal);
   return out === null ? [] : parseWorktrees(out);
 }
-async function currentBranch(directory) {
+async function currentBranch(directory, signal) {
   if (!existsSync(directory))
     return;
-  const out = await git(["-C", directory, "rev-parse", "--abbrev-ref", "HEAD"]);
+  const out = await git(["-C", directory, "rev-parse", "--abbrev-ref", "HEAD"], signal);
   const branch = out?.trim();
   return branch ? branch : undefined;
 }
@@ -2293,9 +2294,11 @@ function ctxSource(session, pageSize = 50) {
   };
 }
 function spawnApiRunner(command = ["opencode"], args = []) {
-  return async (path) => {
+  return async (path, signal) => {
+    signal?.throwIfAborted();
     const child = Bun.spawn([...command, "api", ...args, "get", path], { stdout: "pipe", stderr: "pipe", stdin: "ignore" });
-    const run = await supervise(child);
+    const run = await supervise(child, signal ? { signal } : {});
+    signal?.throwIfAborted();
     if (run.kind !== "exited")
       throw new Error(`opencode api get ${path} ended without reporting an exit status`);
     const { exitCode: code, stdout, stderr } = run;
@@ -2319,12 +2322,12 @@ function unwrap(raw) {
 function apiSource(run, options = {}) {
   const pageSize = options.pageSize ?? 50;
   const maxMessages = options.maxMessages ?? 5000;
-  const get = async (path) => JSON.parse(await run(path));
+  const get = async (path, signal) => JSON.parse(await run(path, signal));
   return {
     kind: "api",
     complete: true,
     async* roots(query, signal) {
-      let page = unwrap(await get(`/api/session?${queryString(listQuery(query, pageSize))}`));
+      let page = unwrap(await get(`/api/session?${queryString(listQuery(query, pageSize))}`, signal));
       for (;; ) {
         signal?.throwIfAborted();
         const data = isRecord(page) && Array.isArray(page.data) ? page.data : [];
@@ -2336,7 +2339,7 @@ function apiSource(run, options = {}) {
         const cursor = isRecord(page) && isRecord(page.cursor) ? page.cursor.next : undefined;
         if (typeof cursor !== "string" || !cursor)
           return;
-        page = unwrap(await get(`/api/session?${queryString({ cursor })}`));
+        page = unwrap(await get(`/api/session?${queryString({ cursor })}`, signal));
       }
     },
     async info(id) {
@@ -2446,7 +2449,7 @@ var src_default = Plugin.define({
           try {
             const { self, exclude } = await callerChain(ctx.session, tool.sessionID);
             const directory = self?.directory || ctx.location.directory;
-            const worktrees = await listWorktrees(directory);
+            const worktrees = await listWorktrees(directory, tool.signal);
             const family = acceptedPaths(worktrees, directory);
             const source2 = pickSource(input.source ?? "opencode", { session: ctx.session, options, family });
             if ("error" in source2)
@@ -2458,7 +2461,7 @@ var src_default = Plugin.define({
               worktrees,
               family,
               now: Date.now(),
-              branchOf: currentBranch,
+              branchOf: (path) => currentBranch(path, tool.signal),
               signal: tool.signal
             };
             if (self)

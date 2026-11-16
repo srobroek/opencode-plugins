@@ -143,7 +143,7 @@ export async function setupSpeckit(ctx: Context, overrides: Overrides = {}): Pro
         execute: async (input, context) => {
           const cwd = await directory(context.sessionID)
           await assert(context, SETUP_TOOL, cwd, { ...(input as Record<string, unknown>) })
-          const result = await executeSetup(input, cwd, options.integration)
+          const result = await executeSetup(input, cwd, options.integration, context.signal)
           if (cwd === location) {
             active = await probe(location)
             await refreshSkills?.()

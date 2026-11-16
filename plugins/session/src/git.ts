@@ -8,13 +8,14 @@ import { promisify } from "node:util"
 const execFileAsync = promisify(execFile)
 
 /** A git read, off the event loop, with `GIT_OPTIONAL_LOCKS=0` so it never takes index.lock. */
-export async function git(args: string[]): Promise<string | null> {
+export async function git(args: string[], signal?: AbortSignal): Promise<string | null> {
   try {
     const { stdout } = await execFileAsync("git", args, {
       encoding: "utf8",
       timeout: 10_000,
       maxBuffer: 16 * 1024 * 1024,
       env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
+      ...(signal ? { signal } : {}),
     })
     return stdout
   } catch {
@@ -63,17 +64,17 @@ export function parseWorktrees(out: string, exists: (path: string) => boolean = 
 }
 
 /** Live worktrees of the repository containing `directory`; empty outside a repository. */
-export async function listWorktrees(directory: string): Promise<Worktree[]> {
+export async function listWorktrees(directory: string, signal?: AbortSignal): Promise<Worktree[]> {
   // A removed worktree is common among recorded sessions; there is nothing for git to read there.
   if (!existsSync(directory)) return []
-  const out = await git(["-C", directory, "worktree", "list", "--porcelain"])
+  const out = await git(["-C", directory, "worktree", "list", "--porcelain"], signal)
   return out === null ? [] : parseWorktrees(out)
 }
 
 /** The branch checked out in `directory` now, or undefined. */
-export async function currentBranch(directory: string): Promise<string | undefined> {
+export async function currentBranch(directory: string, signal?: AbortSignal): Promise<string | undefined> {
   if (!existsSync(directory)) return undefined
-  const out = await git(["-C", directory, "rev-parse", "--abbrev-ref", "HEAD"])
+  const out = await git(["-C", directory, "rev-parse", "--abbrev-ref", "HEAD"], signal)
   const branch = out?.trim()
   return branch ? branch : undefined
 }

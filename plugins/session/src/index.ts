@@ -125,7 +125,7 @@ export default Plugin.define({
           try {
             const { self, exclude } = await callerChain(ctx.session, tool.sessionID)
             const directory = self?.directory || ctx.location.directory
-            const worktrees = await listWorktrees(directory)
+            const worktrees = await listWorktrees(directory, tool.signal)
             const family = acceptedPaths(worktrees, directory)
             const source = pickSource(input.source ?? "opencode", { session: ctx.session, options, family })
             if ("error" in source) return { content: neutralize(source.error), metadata: { mode: input.mode, error: source.error } }
@@ -136,7 +136,7 @@ export default Plugin.define({
               worktrees,
               family,
               now: Date.now(),
-              branchOf: currentBranch,
+              branchOf: (path) => currentBranch(path, tool.signal),
               signal: tool.signal,
             }
             if (self) env.self = self
