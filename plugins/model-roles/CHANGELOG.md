@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.5.0](https://github.com/srobroek/opencode-plugins/compare/model-roles--v0.4.0...model-roles--v0.5.0) (2026-11-16)
+
+
+### Features
+
+* **model-roles:** per-tier usage report in model_roles_check and /tiers ([97d0f65](https://github.com/srobroek/opencode-plugins/commit/97d0f6568aab3e559b92132416dd1d8be2804e57))
+* **model-roles:** record review verdicts, test results and test-file edits per spawn ([d4a624b](https://github.com/srobroek/opencode-plugins/commit/d4a624b5887f428015e30a894a8fcf20ddd0304a))
+
+
+### Bug Fixes
+
+* **model-roles:** the guard applies to resumed subagents; a refused model is switched to the tier's allowed one ([4ebeedc](https://github.com/srobroek/opencode-plugins/commit/4ebeedcb28f2659de56c49731ee653826f6e05e9))
+
 ## [0.4.0](https://github.com/srobroek/opencode-plugins/compare/model-roles--v0.3.1...model-roles--v0.4.0) (2026-11-14)
 
 

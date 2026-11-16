@@ -6,6 +6,18 @@
 
 * Add `options.store` for project-specific ledger paths, canonical shared write locks, and consistent `BEADS_DIR` on plugin commands.
 
+## [0.5.2](https://github.com/srobroek/opencode-plugins/compare/beads--v0.5.1...beads--v0.5.2) (2026-11-16)
+
+
+### Bug Fixes
+
+* **beads:** name the ledger in PR-link refusals, point cd refusals at workdir, warn on cross-repo bd create ([#180](https://github.com/srobroek/opencode-plugins/issues/180)) ([fae4ced](https://github.com/srobroek/opencode-plugins/commit/fae4cede5ac9af61d6261db4256f787fb1c7334e))
+
+
+### Documentation
+
+* **skills:** add a per-skill references/pitfalls.md standard and a check ([#178](https://github.com/srobroek/opencode-plugins/issues/178)) ([ff2489a](https://github.com/srobroek/opencode-plugins/commit/ff2489af6aab145e3a5e6be8462d390b43395ae7))
+
 ## [0.5.1](https://github.com/srobroek/opencode-plugins/compare/beads--v0.5.0...beads--v0.5.1) (2026-11-13)
 
 

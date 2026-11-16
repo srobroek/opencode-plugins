@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/srobroek/opencode-plugins/compare/worktrunk--v0.4.0...worktrunk--v0.4.1) (2026-11-16)
+
+
+### Documentation
+
+* **skills:** add a per-skill references/pitfalls.md standard and a check ([#178](https://github.com/srobroek/opencode-plugins/issues/178)) ([ff2489a](https://github.com/srobroek/opencode-plugins/commit/ff2489af6aab145e3a5e6be8462d390b43395ae7))
+
 ## [0.4.0](https://github.com/srobroek/opencode-plugins/compare/worktrunk--v0.3.0...worktrunk--v0.4.0) (2026-11-12)
 
 
