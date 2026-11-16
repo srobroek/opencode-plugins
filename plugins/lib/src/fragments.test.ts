@@ -108,7 +108,7 @@ describe("coding-core", () => {
 
   test("the standards part names the preferred-library skills and the defaults, and fits a system prompt", () => {
     const standards = parts.get("standards") ?? ""
-    for (const phrase of ["research current best practice", "lang-<language>-libraries", "toolchain-languages", "aws-guidance", "middleware", "Powertools", "OpenTelemetry", "departure"])
+    for (const phrase of ["research current best practice", "lang-<language>-libraries", "toolchain-languages", "aws-guidance", "middleware", "Powertools", "OpenTelemetry", "departure", "STUB(<task-id>)"])
       expect(standards).toContain(phrase)
     expect(standards.length).toBeLessThan(1000)
     expect(STANDARDS).toBe(standards)
@@ -116,7 +116,7 @@ describe("coding-core", () => {
 
   test("the testing part names the testing skills and the maintenance rules, and fits a system prompt", () => {
     const testing = parts.get("testing") ?? ""
-    for (const phrase of ["quality-testing", "lang-<language>-testing", "public interface", "distinct risk", "removed behavior", "only checks code is gone", "weaken an assertion"])
+    for (const phrase of ["quality-testing", "lang-<language>-testing", "public interface", "distinct risk", "removed behavior", "only checks code is gone", "weaken an assertion", "conformance suite"])
       expect(testing).toContain(phrase)
     expect(testing.length).toBeLessThan(1000)
     expect(TESTING).toBe(testing)

@@ -1,7 +1,9 @@
 ---
 name: cad-review-mech
-description: Reviews a CAD design's requirements, load paths, fits and FEA with measured evidence, as an independent review.
+description: Reviews a CAD design for requirements, load paths, mechanics, fits, and FEA with measured evidence. Use when a mechanical design needs independent review.
 ---
+
+Resolve `$CAD_SKILLS` as the parent directory of this skill's directory; it contains the installed `cad-*` skill folders.
 
 # Mechanical Design Review
 

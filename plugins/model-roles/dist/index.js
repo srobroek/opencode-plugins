@@ -1215,6 +1215,7 @@ function judgeModelOverride(facts) {
   return { allow: false, reason: lines.join(`
 `) };
 }
+var allowsChosenModel = (guard, options, model) => !isExpensive(model, guard, options.classes) || listed(model, guard.allowModels);
 
 // plugins/model-roles/src/spawn-role.ts
 var TIER_PARAM = "tier";
@@ -3373,6 +3374,113 @@ function effectiveConfig(project, global, spec) {
   return { origin: "global", path: global.path, tiers: readTiers(global.text, identity), agents: readAgents(global.text, identity), ...extra };
 }
 
+// plugins/model-roles/src/explore.ts
+var EXPLORE_POLICY = "explore-v1";
+var DEFAULT_EXPLORE = 0.05;
+var MAX_EXPLORE = 0.1;
+var DEFAULT_MAX_ARMS = 3;
+var MAX_ARMS_LIMIT = 6;
+var DEFAULT_EXPLORE_OPTIONS = { agents: [], explore: DEFAULT_EXPLORE, maxArms: DEFAULT_MAX_ARMS, minN: 30, margin: 0.05, costTolerance: 0 };
+var isRecord6 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+function parseExplore(raw) {
+  const input = isRecord6(raw) ? raw : {};
+  const options = { ...DEFAULT_EXPLORE_OPTIONS };
+  const warnings = [];
+  if (input.agents !== undefined) {
+    if (Array.isArray(input.agents) && input.agents.every((a) => typeof a === "string"))
+      options.agents = [...new Set(input.agents.map((a) => a.trim()).filter((a) => a !== ""))];
+    else
+      warnings.push("evaluate.agents must be an array of agent ids; exploration stays off");
+  }
+  const number = (key, ok, need) => {
+    const value = input[key];
+    if (value === undefined)
+      return;
+    if (typeof value === "number" && Number.isFinite(value) && ok(value))
+      return value;
+    warnings.push(`evaluate.${key} must be ${need}; using ${options[key]}`);
+    return;
+  };
+  const explore = number("explore", (n) => n >= 0, "a number of at least 0");
+  if (explore !== undefined) {
+    options.explore = Math.min(MAX_EXPLORE, explore);
+    if (explore > MAX_EXPLORE)
+      warnings.push(`evaluate.explore ${explore} is above ${MAX_EXPLORE}; using ${MAX_EXPLORE}`);
+  }
+  const maxArms = number("maxArms", (n) => Number.isInteger(n) && n >= 1, "a whole number of at least 1");
+  if (maxArms !== undefined) {
+    options.maxArms = Math.min(MAX_ARMS_LIMIT, maxArms);
+    if (maxArms > MAX_ARMS_LIMIT)
+      warnings.push(`evaluate.maxArms ${maxArms} is above ${MAX_ARMS_LIMIT}; using ${MAX_ARMS_LIMIT}`);
+  }
+  options.minN = number("minN", (n) => Number.isInteger(n) && n >= 1, "a whole number of at least 1") ?? options.minN;
+  options.margin = number("margin", (n) => n >= 0 && n < 1, "a number from 0 up to 1") ?? options.margin;
+  options.costTolerance = number("costTolerance", (n) => n >= 0, "a number of at least 0") ?? options.costTolerance;
+  return { options, warnings };
+}
+var exploring = (options) => options.agents.length > 0 && options.explore > 0;
+var isReviewerAgent = (agent) => /-reviewer$/.test(agent) || agent === "adversarial-challenger";
+function eligible(spawn, options) {
+  if (spawn.explicitModel || spawn.pinned || spawn.resume || spawn.effortAuto)
+    return false;
+  if (!options.agents.includes(spawn.agent))
+    return false;
+  if (spawn.distinctVendorTier || isReviewerAgent(spawn.agent))
+    return false;
+  return spawn.armCount > 1;
+}
+var armOf = (model) => ({ label: modelLabel(model), model });
+var sameBase = (a, b) => a.providerID === b.providerID && a.id === b.id;
+function neighbour(control, variants, step) {
+  const scale = EFFORT_SCALE;
+  const at = control.variant === undefined ? -1 : scale.indexOf(control.variant);
+  if (at < 0)
+    return;
+  const ranked = variants.map((v) => ({ v, rank: scale.indexOf(v) })).filter((e) => e.rank >= 0);
+  const next = step === 1 ? ranked.filter((e) => e.rank > at).sort((a, b) => a.rank - b.rank) : ranked.filter((e) => e.rank < at).sort((a, b) => b.rank - a.rank);
+  return next[0]?.v;
+}
+function arms(tierCandidates, control, filters, maxArms = DEFAULT_MAX_ARMS) {
+  const variants = filters.variantsOf(control);
+  const picks = [];
+  for (const step of [1, -1]) {
+    const variant = neighbour(control, variants, step);
+    if (variant !== undefined)
+      picks.push({ providerID: control.providerID, id: control.id, variant });
+  }
+  for (const candidate of tierCandidates)
+    if (!sameBase(candidate, control))
+      picks.push(candidate);
+  const out = [armOf(control)];
+  const seen = new Set(out.map((a) => a.label));
+  for (const model of picks.slice(0, Math.max(0, maxArms))) {
+    const arm = armOf(model);
+    if (seen.has(arm.label) || !filters.allowed(model))
+      continue;
+    seen.add(arm.label);
+    out.push(arm);
+  }
+  return out;
+}
+function chooseArm(all, explore, rand) {
+  const [control, ...others] = all;
+  if (control === undefined)
+    throw new Error("chooseArm needs the control arm");
+  if (others.length === 0 || explore <= 0)
+    return { arm: control, p: 1 };
+  const draw = rand();
+  if (draw >= explore)
+    return { arm: control, p: 1 - explore };
+  const index = Math.min(others.length - 1, Math.floor(draw / explore * others.length));
+  return { arm: others[index], p: explore / others.length };
+}
+var exploreFacts = (all, chosen) => ({
+  policy: EXPLORE_POLICY,
+  eligible: all.map((a) => a.label),
+  arm: chosen.arm.label,
+  p: chosen.p
+});
+
 // plugins/model-roles/src/ledger.ts
 var OUTCOME_KEY_PREFIX = "outcome:";
 var LEDGER_MAX_ENTRIES = 1000;
@@ -3451,13 +3559,15 @@ function onSignals(ledger, childID, signals) {
   });
 }
 var onFailover = (ledger, childID) => update(ledger, childID, (r) => r.failedOver ? r : { ...r, failedOver: true });
+var onLeftArm = (ledger, childID) => update(ledger, childID, (r) => r.arm === undefined || r.leftArm ? r : { ...r, leftArm: true });
+var onExploration = (ledger, childID, facts) => update(ledger, childID, (r) => r.arm !== undefined ? r : { ...r, policy: facts.policy, eligible: [...facts.eligible], arm: facts.arm, p: facts.p });
 function prune(ledger, now, limits = { maxEntries: LEDGER_MAX_ENTRIES, maxAgeMs: LEDGER_MAX_AGE_MS }) {
   const kept = Object.entries(ledger).filter(([, r]) => now - r.at <= limits.maxAgeMs).sort((a, b) => b[1].at - a[1].at).slice(0, limits.maxEntries);
   return kept.length === Object.keys(ledger).length ? ledger : Object.fromEntries(kept);
 }
-var isRecord6 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+var isRecord7 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 function readOutcome(value) {
-  if (!isRecord6(value))
+  if (!isRecord7(value))
     return;
   const { at, agent, model, parentID } = value;
   if (typeof at !== "number" || typeof agent !== "string" || typeof model !== "string" || typeof parentID !== "string")
@@ -3720,6 +3830,8 @@ function createLedgerStore(storage, options = {}) {
     end: (id, outcome, at) => change(id, (l, i) => onEnd(l, i, outcome, at), "end"),
     signals: (id, signals) => change(id, (l, i) => onSignals(l, i, signals), "debounce"),
     failover: (id) => change(id, onFailover, "now"),
+    leftArm: (id) => change(id, onLeftArm, "now"),
+    exploration: (id, facts) => change(id, (l, i) => onExploration(l, i, facts), "now"),
     flush,
     async dispose(timeoutMs = disposeTimeoutMs) {
       const flushing = flush(false);
@@ -3898,12 +4010,12 @@ var RECEIPT_LIMIT = 50;
 function pushReceipt(list, receipt, limit = RECEIPT_LIMIT) {
   return [receipt, ...list].slice(0, limit);
 }
-var isRecord7 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+var isRecord8 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 var isStrings = (value) => Array.isArray(value) && value.every((v) => typeof v === "string");
 function readReceipts(value) {
   if (!Array.isArray(value))
     return [];
-  return value.filter((r) => isRecord7(r) && typeof r.at === "number" && typeof r.agent === "string" && typeof r.source === "string" && typeof r.rule === "string" && isStrings(r.fallbacks) && isStrings(r.warnings));
+  return value.filter((r) => isRecord8(r) && typeof r.at === "number" && typeof r.agent === "string" && typeof r.source === "string" && typeof r.rule === "string" && isStrings(r.fallbacks) && isStrings(r.warnings));
 }
 var bare = (ref) => `${ref.providerID}/${ref.id}`;
 function explainSpawn(input) {
@@ -3975,6 +4087,8 @@ function formatReceipts(list) {
     const parts = [`${time} ${r.agent}: ${asked} \u2192 ${r.model ?? "the agent's model"} by ${RULE_TEXT[r.rule] ?? r.rule}${r.configRevision === undefined ? "" : ` (config ${r.configRevision})`}`];
     if (r.fallbacks.length > 0)
       parts.push(`fell back past ${r.fallbacks.join(", ")}`);
+    if (r.explore !== undefined)
+      parts.push(`exploring arm ${r.explore}`);
     for (const warning of r.warnings)
       parts.push(`warning: ${warning}`);
     lines.push(`  - ${parts.join("; ")}`);
@@ -4077,6 +4191,13 @@ function stats(records) {
   return out;
 }
 var byName = (a, b) => a < b ? -1 : a > b ? 1 : 0;
+function armUsage(records) {
+  const byArm = new Map;
+  for (const r of records)
+    if (r.arm !== undefined && r.failedOver !== true && r.leftArm !== true)
+      byArm.set(r.arm, [...byArm.get(r.arm) ?? [], r]);
+  return [...byArm.entries()].map(([arm, rs]) => ({ arm, ...stats(rs) })).sort((a, b) => b.n - a.n || byName(a.arm, b.arm));
+}
 function summarizeUsage(records, now, days) {
   const window = days !== undefined && Number.isFinite(days) && days > 0 ? days : REPORT_DEFAULT_DAYS;
   const since = now - window * DAY_MS;
@@ -4089,11 +4210,16 @@ function summarizeUsage(records, now, days) {
     agents.set(r.agent, [...agents.get(r.agent) ?? [], r]);
     byTier.set(tier, agents);
   }
-  const tiers = [...byTier.entries()].sort(([a], [b]) => byName(a, b)).map(([tier, agents]) => ({
-    tier,
-    total: stats([...agents.values()].flat()),
-    agents: [...agents.entries()].map(([agent, rs]) => ({ agent, ...stats(rs) })).sort((a, b) => b.n - a.n || byName(a.agent, b.agent))
-  }));
+  const tiers = [...byTier.entries()].sort(([a], [b]) => byName(a, b)).map(([tier, agents]) => {
+    const all = [...agents.values()].flat();
+    const armed = armUsage(all);
+    return {
+      tier,
+      total: stats(all),
+      agents: [...agents.entries()].map(([agent, rs]) => ({ agent, ...stats(rs) })).sort((a, b) => b.n - a.n || byName(a.agent, b.agent)),
+      ...armed.length === 0 ? {} : { arms: armed }
+    };
+  });
   return { days: window, tiers };
 }
 function readUsage(value) {
@@ -4128,14 +4254,22 @@ function formatUsage(report) {
   const lines = [`Usage per tier (last ${plural(report.days, "day")}):`];
   if (report.tiers.length === 0)
     return [...lines, "  no finished spawns recorded"];
-  for (const { tier, total, agents } of report.tiers) {
+  for (const { tier, total, agents, arms } of report.tiers) {
     lines.push(`  ${tier}: ${usageLine(total)}`);
+    for (const a of arms ?? [])
+      lines.push(`    arm ${a.arm}: ${usageBrief(a)}`);
     for (const a of agents.slice(0, CHECK_TOP_AGENTS))
       lines.push(`    - ${a.agent}: ${usageBrief(a)}`);
     if (agents.length > CHECK_TOP_AGENTS)
       lines.push(`    - ${agents.length - CHECK_TOP_AGENTS} more agents`);
   }
   return lines;
+}
+function usageDetailRows(row) {
+  return [
+    ...row.agents.map((a) => ({ title: a.agent, value: a.agent, description: usageBrief(a), disabled: true })),
+    ...(row.arms ?? []).map((a) => ({ title: `arm ${a.arm}`, value: `\x00arm:${a.arm}`, description: usageBrief(a), disabled: true }))
+  ];
 }
 
 // plugins/model-roles/src/resume-guard.ts
@@ -4971,24 +5105,26 @@ function exitStatusOf(metadata) {
 var SPAWN_MODEL_KEY_PREFIX = "spawn-model:";
 var SNAPSHOT_LIMIT = 1000;
 var SNAPSHOT_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
-var isRecord8 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+var isRecord9 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 var stable = (value) => {
   if (Array.isArray(value))
     return `[${value.map(stable).join(",")}]`;
-  if (isRecord8(value)) {
+  if (isRecord9(value)) {
     return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stable(value[key])}`).join(",")}}`;
   }
   return JSON.stringify(value) ?? "null";
 };
 var configRevision = (options) => textHash(stable({ roles: options.roles, tiers: options.tiers ?? {} }));
 function readSnapshot(value) {
-  if (!isRecord8(value) || typeof value.model !== "string" || typeof value.configRevision !== "string" || typeof value.at !== "number")
+  if (!isRecord9(value) || typeof value.model !== "string" || typeof value.configRevision !== "string" || typeof value.at !== "number")
     return;
   if (parseCandidate(value.model)?.kind !== "model")
     return;
   const snapshot = { model: value.model, configRevision: value.configRevision, at: value.at };
   if (typeof value.tier === "string")
     snapshot.tier = value.tier;
+  if (isRecord9(value.explore) && typeof value.explore.arm === "string" && typeof value.explore.p === "number" && typeof value.explore.policy === "string" && Array.isArray(value.explore.eligible))
+    snapshot.explore = { policy: value.explore.policy, eligible: value.explore.eligible.filter((a) => typeof a === "string"), arm: value.explore.arm, p: value.explore.p };
   if (value.failedOver === true)
     snapshot.failedOver = true;
   if (value.rule === "guard-reroute")
@@ -5038,7 +5174,7 @@ function staleSnapshots(entries, now, limit = SNAPSHOT_LIMIT, maxAgeMs = SNAPSHO
 
 // plugins/model-roles/src/tiers-ui.ts
 var EFFORT_CHOICES = ["auto", "none", "minimal", "low", "medium", "high", "xhigh", "max"];
-var isRecord9 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+var isRecord10 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 function tierState(input) {
   const resolve = (name) => {
     const model = resolveRole(input.options.roles, input.available, name, input.health).model;
@@ -5098,7 +5234,7 @@ function tierState(input) {
   return state;
 }
 function readState(value) {
-  if (!isRecord9(value) || !Array.isArray(value.tiers) || !Array.isArray(value.models))
+  if (!isRecord10(value) || !Array.isArray(value.tiers) || !Array.isArray(value.models))
     return;
   return { ...value, agents: Array.isArray(value.agents) ? value.agents : [] };
 }
@@ -5109,7 +5245,7 @@ function agentTierError(tier, tiers) {
 }
 var TIER_NAME = /^[a-z][a-z0-9-]*$/;
 function readDraft(input) {
-  const draft = isRecord9(input) && isRecord9(input.draft) ? input.draft : {};
+  const draft = isRecord10(input) && isRecord10(input.draft) ? input.draft : {};
   const out = {};
   for (const [name, value] of Object.entries(draft)) {
     if (!TIER_NAME.test(name))
@@ -5256,9 +5392,9 @@ function withRoleField(input, description) {
   return schema.mapFields((fields) => ({ ...fields, [TIER_PARAM]: tier, [ROLE_PARAM]: role }));
 }
 var SUBAGENT_TOOL = "subagent";
-var isRecord10 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+var isRecord11 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 function spawnTarget(input) {
-  if (!isRecord10(input) || typeof input.agent !== "string" || input.agent === "")
+  if (!isRecord11(input) || typeof input.agent !== "string" || input.agent === "")
     return;
   if (typeof input.sessionID === "string" && input.sessionID !== "")
     return;
@@ -5266,6 +5402,10 @@ function spawnTarget(input) {
 }
 var availabilityKey = (models) => models.filter((m) => m.enabled !== false).map((m) => `${m.providerID}/${m.id}#${(m.variants ?? []).map((v) => v.id).join(",")}`).sort().join(`
 `);
+var exploreRandom = Math.random;
+var setExploreRandom = (rand) => {
+  exploreRandom = rand ?? Math.random;
+};
 function serial() {
   let tail = Promise.resolve();
   return (task) => {
@@ -5283,8 +5423,12 @@ var src_default = Plugin.define({
     let settings = parseTierSettings(ctx.options);
     const options = { ...parseOptions(ctx.options), tiers: {}, classes: {}, implicit: {} };
     const runtime = parseRuntime(ctx.options, options);
-    const guard2 = parseGuard(isRecord10(ctx.options) ? ctx.options.guard : undefined);
-    const evaluate = parseEvaluate(isRecord10(ctx.options) ? ctx.options.evaluate : undefined);
+    const guard2 = parseGuard(isRecord11(ctx.options) ? ctx.options.guard : undefined);
+    const evaluateRaw = isRecord11(ctx.options) ? ctx.options.evaluate : undefined;
+    const evaluate = parseEvaluate(evaluateRaw);
+    const explorer = parseExplore(evaluateRaw);
+    for (const message of explorer.warnings)
+      warn(message);
     let autoHistory = [];
     let available = [];
     let availableKey = "";
@@ -5362,7 +5506,7 @@ ${refs.size}`;
       }
     };
     await refresh();
-    const auto2 = parseAuto(isRecord10(ctx.options) ? ctx.options.auto : undefined, options);
+    const auto2 = parseAuto(isRecord11(ctx.options) ? ctx.options.auto : undefined, options);
     const deciderSettings = auto2 ?? parseAuto(true, options);
     const guardAuto = guard2?.mode === "auto" ? deciderSettings : undefined;
     try {
@@ -5688,17 +5832,31 @@ ${refs.size}`;
       await persistSnapshot(childID);
     };
     const expectedChildren = new Map;
-    const expectChild = (callID, event, agent, planned, tier) => {
-      expectedChildren.set(callID, { parentID: event.sessionID, agent, ...planned === undefined ? {} : { planned }, ...tier === undefined ? {} : { tier }, configRevision: configRevision(options), at: Date.now() });
+    const expectChild = (callID, event, agent, planned, tier, explore) => {
+      expectedChildren.set(callID, {
+        parentID: event.sessionID,
+        agent,
+        ...planned === undefined ? {} : { planned },
+        ...tier === undefined ? {} : { tier },
+        configRevision: configRevision(options),
+        at: Date.now(),
+        ...explore === undefined ? {} : { explore }
+      });
     };
     const recordChildModel = async (childID, spawn, actual) => {
       const model = actual ?? spawn.planned;
       if (model === undefined || await snapshotOf(childID) !== undefined)
         return;
-      await writeSnapshot(childID, { model: modelLabel(model), ...spawn.tier === undefined ? {} : { tier: spawn.tier }, configRevision: spawn.configRevision, at: Date.now() });
+      await writeSnapshot(childID, {
+        model: modelLabel(model),
+        ...spawn.tier === undefined ? {} : { tier: spawn.tier },
+        configRevision: spawn.configRevision,
+        at: Date.now(),
+        ...spawn.explore === undefined ? {} : { explore: spawn.explore }
+      });
     };
     const matchExpected = async (data) => {
-      if (typeof data.sessionID !== "string" || typeof data.parentID !== "string" || !isRecord10(data.model))
+      if (typeof data.sessionID !== "string" || typeof data.parentID !== "string" || !isRecord11(data.model))
         return false;
       const actual = data.model;
       const now = Date.now();
@@ -5771,11 +5929,13 @@ ${refs.size}`;
         tier: spawn.routed?.tier ?? spawn.role,
         ...spawn.routed === undefined ? {} : { source: spawn.routed.source, rule: spawn.routed.rule }
       });
+      if (spawn.explore !== undefined)
+        await outcomes.exploration(childID, spawn.explore);
     };
     const onSessionCreated = async (data) => {
       if (await matchExpected(data))
         return;
-      if (typeof data.sessionID !== "string" || typeof data.parentID !== "string" || !isRecord10(data.model))
+      if (typeof data.sessionID !== "string" || typeof data.parentID !== "string" || !isRecord11(data.model))
         return;
       const model = data.model;
       const now = Date.now();
@@ -5941,7 +6101,7 @@ ${refs.size}`;
           report2.warnings.push(...tierWarnings(settings, { roles: options.roles, tiers: options.tiers ?? {} }, available));
           if (stuck.length > 0)
             report2.warnings.push(`Agents ${stuck.join(", ")} still run another model than their tier resolves to: re-registering gave up after ${MAX_REREGISTER} tries (a later plugin or config keeps setting their model).`);
-          const content = [formatCheck(report2), ...formatHealthHistory(healthHistory, Date.now()), ...formatReceipts(receipts), ...formatHistory(autoHistory), ...formatUsage(summarizeUsage(await outcomes.records(), Date.now()))].join(`
+          const content = [formatCheck(report2), ...exploring(explorer.options) ? [`exploration: on for ${explorer.options.agents.join(", ")}, \u03B5=${explorer.options.explore}`] : [], ...formatHealthHistory(healthHistory, Date.now()), ...formatReceipts(receipts), ...formatHistory(autoHistory), ...formatUsage(summarizeUsage(await outcomes.records(), Date.now()))].join(`
 `);
           return { content, metadata: { roles: report2.roles.length, agents: report2.agents.length, auto: autoHistory.length, spawns: receipts.length } };
         }
@@ -6164,12 +6324,33 @@ ${refs.size}`;
       }
       return receipt2;
     };
+    const exploreSpawn = (target, role, control, pinned) => {
+      const meta = tierMeta(options, role);
+      const spawn = { agent: target, explicitModel: false, pinned, resume: false, effortAuto: meta?.effort === "auto", distinctVendorTier: meta?.distinctVendor === true, armCount: 2 };
+      if (!eligible(spawn, explorer.options))
+        return;
+      const candidates = candidateOrder(options, role).flatMap((entry) => {
+        const candidate = parseCandidate(entry);
+        return candidate?.kind === "model" ? [candidate.ref] : [];
+      });
+      const health2 = view();
+      const variantsOf = (model) => (available.find((m) => m.providerID === model.providerID && m.id === model.id)?.variants ?? []).map((v) => v.id);
+      const allowed = (model) => unavailableReason(model, available) === undefined && health2(model) === undefined && (guard2 === undefined || allowsChosenModel(guard2, options, model));
+      const all = arms(candidates, control.model, { variantsOf, allowed }, explorer.options.maxArms);
+      if (!eligible({ ...spawn, armCount: all.length }, explorer.options))
+        return;
+      const chosen = chooseArm(all, explorer.options.explore, exploreRandom);
+      const facts = exploreFacts(all, chosen);
+      if (chosen.arm === all[0])
+        return { facts };
+      return { facts, tuned: { input: { ...control.input, model: chosen.arm.label }, model: chosen.arm.model } };
+    };
     const route = async (event, target, input, settings, cheapOnly) => {
       const agents = await listAgents();
       const agent = agents.find((a) => a.id === target);
       if (!cheapOnly && target !== AUTO_AGENT)
         return;
-      if (!autoEligible(input, agent, options) || !isRecord10(input))
+      if (!autoEligible(input, agent, options) || !isRecord11(input))
         return;
       const health2 = view();
       const choices = choicesFor(settings.roles, options, available, runtime.purposes).filter((choice) => {
@@ -6217,7 +6398,7 @@ ${refs.size}`;
       }
       const vendor = tierMeta(options, role)?.distinctVendor ? await callerVendor(event) : undefined;
       const plan = planSpawn({ ...input, tier: role }, options, available, health2, vendor);
-      if (plan.model === undefined || !isRecord10(plan.input))
+      if (plan.model === undefined || !isRecord11(plan.input))
         return;
       const record = { at: started, agent: target, role, reason: picked.reason, model: plan.model, ms: Date.now() - started };
       if (capped !== undefined)
@@ -6227,7 +6408,7 @@ ${refs.size}`;
       return { input: { ...plan.input, description: withAutoTag(input.description, record) }, role, model: plan.model };
     };
     const passedTier = (input) => {
-      if (!isRecord10(input))
+      if (!isRecord11(input))
         return;
       for (const [key, source] of [
         [TIER_PARAM, "tier-param"],
@@ -6274,7 +6455,7 @@ ${refs.size}`;
       }
     };
     const handleResume = async (event) => {
-      if (!isRecord10(event.input) || typeof event.input.sessionID !== "string" || event.input.sessionID === "")
+      if (!isRecord11(event.input) || typeof event.input.sessionID !== "string" || event.input.sessionID === "")
         return false;
       const childID = event.input.sessionID;
       const agent = typeof event.input.agent === "string" ? event.input.agent : "(resumed)";
@@ -6288,6 +6469,7 @@ ${refs.size}`;
           throw new Error(refusal);
         event.input = stripped;
         await writeSnapshot(childID, { model: modelLabel(explicitModel), configRevision: revision, at: Date.now() });
+        await outcomes.leftArm(childID);
         await forgetChildRole(childID);
         await recordReceipt({ at: Date.now(), agent, source: "agent", model: modelLabel(explicitModel), rule: "explicit-model", fallbacks: [], warnings: [] });
         return true;
@@ -6297,10 +6479,11 @@ ${refs.size}`;
         const plan = planSpawn(fresh, options, available, view(), tierMeta(options, asked.name)?.distinctVendor ? await callerVendor(event) : undefined);
         if (plan.error !== undefined)
           throw new Error(plan.error);
-        if (plan.role !== undefined && plan.model !== undefined && isRecord10(plan.input)) {
+        if (plan.role !== undefined && plan.model !== undefined && isRecord11(plan.input)) {
           const tuned = await withAutoEffort(plan.input, plan.role, plan.model).catch(() => ({ input: plan.input, model: plan.model }));
           event.input = { ...tuned.input, sessionID: childID };
           await writeSnapshot(childID, { model: modelLabel(tuned.model), tier: plan.role, configRevision: revision, at: Date.now() });
+          await outcomes.leftArm(childID);
           await recordChildRole(childID, plan.role);
           await recordReceipt(tierReceipt(agent, asked, tuned));
           return true;
@@ -6383,8 +6566,9 @@ ${refs.size}`;
         });
         if (outcome !== "switched")
           throw new Error(`This resume would run on ${modelLabel(model)}, which the guard refuses, and switching the child to ${modelLabel(to)} did not complete (${outcome}).`);
-        if (isRecord10(event.input))
+        if (isRecord11(event.input))
           event.input = { ...event.input, model: modelLabel(to) };
+        await outcomes.leftArm(childID);
         await recordReceipt({
           at: Date.now(),
           agent,
@@ -6399,7 +6583,7 @@ ${refs.size}`;
       }
       if (fromSession)
         await writeSnapshot(childID, snapshot);
-      if (isRecord10(event.input))
+      if (isRecord11(event.input))
         event.input = { ...event.input, model: snapshot.model };
       await recordReceipt({
         at: Date.now(),
@@ -6464,7 +6648,7 @@ ${refs.size}`;
       }
       let source = asked?.source;
       let tierName = passed;
-      if (plan.role === undefined && !pinned && isRecord10(plan.input) && own !== undefined) {
+      if (plan.role === undefined && !pinned && isRecord11(plan.input) && own !== undefined) {
         const meta = tierMeta(options, own);
         if (meta?.distinctVendor || meta?.effort === "auto") {
           const callerVendorOf = meta.distinctVendor ? await callerVendor(event) : undefined;
@@ -6478,15 +6662,35 @@ ${refs.size}`;
         }
       }
       if (plan.role !== undefined && plan.model !== undefined) {
-        let tuned = { input: isRecord10(plan.input) ? plan.input : {}, model: plan.model };
-        if (isRecord10(plan.input)) {
+        let tuned = { input: isRecord11(plan.input) ? plan.input : {}, model: plan.model };
+        if (isRecord11(plan.input)) {
           tuned = await withAutoEffort(plan.input, plan.role, plan.model).catch(() => ({ input: tuned.input, model: plan.model }));
           event.input = tuned.input;
         }
-        pending.set(event.id, { parentID: event.sessionID, agent: target, role: plan.role, model: tuned.model, revision: configRevision(options), at: Date.now() });
-        expectChild(event.id, event, target, tuned.model, plan.role);
+        const control = tuned;
+        let exploration;
+        if (exploring(explorer.options) && isRecord11(plan.input)) {
+          exploration = exploreSpawn(target, plan.role, control, pinned);
+          if (exploration?.tuned !== undefined) {
+            tuned = exploration.tuned;
+            event.input = tuned.input;
+          }
+        }
+        pending.set(event.id, {
+          parentID: event.sessionID,
+          agent: target,
+          role: plan.role,
+          model: tuned.model,
+          revision: configRevision(options),
+          at: Date.now(),
+          ...exploration === undefined ? {} : { explore: exploration.facts }
+        });
+        expectChild(event.id, event, target, tuned.model, plan.role, exploration?.facts);
         const vendorOfCaller = tierMeta(options, plan.role)?.distinctVendor ? await callerVendor(event) : undefined;
-        await recordSpawnReceipt(event.id, tierReceipt(target, { source: source ?? "agent", name: tierName ?? plan.role }, tuned, vendorOfCaller));
+        const receipt2 = tierReceipt(target, { source: source ?? "agent", name: tierName ?? plan.role }, control, vendorOfCaller);
+        if (exploration?.tuned !== undefined)
+          Object.assign(receipt2, { model: modelLabel(tuned.model), explore: exploration.facts.arm });
+        await recordSpawnReceipt(event.id, receipt2);
         return;
       }
       const unroled = plan.role === undefined;
@@ -6508,7 +6712,23 @@ ${refs.size}`;
       const reason = await judge(event, target, undefined);
       if (reason === undefined) {
         const ownModel = pin ?? (own === undefined ? undefined : resolveTier(options, available, own, view()).model);
-        expectChild(event.id, event, target, ownModel, pin === undefined ? own : undefined);
+        let exploration;
+        if (pin === undefined && own !== undefined && ownModel !== undefined && exploring(explorer.options) && isRecord11(plan.input)) {
+          exploration = exploreSpawn(target, own, { input: plan.input, model: ownModel }, false);
+          if (exploration?.tuned !== undefined)
+            event.input = exploration.tuned.input;
+          if (exploration !== undefined)
+            pending.set(event.id, {
+              parentID: event.sessionID,
+              agent: target,
+              role: own,
+              model: exploration.tuned?.model ?? ownModel,
+              revision: configRevision(options),
+              at: Date.now(),
+              explore: exploration.facts
+            });
+        }
+        expectChild(event.id, event, target, exploration?.tuned?.model ?? ownModel, pin === undefined ? own : undefined, exploration?.facts);
         if (pin !== undefined) {
           const receipt2 = bypass("agent-pin", pin, "the agent's own model (config or frontmatter) wins over tier");
           if (receipt2 !== undefined)
@@ -6519,7 +6739,9 @@ ${refs.size}`;
             const receipt2 = tierReceipt(target, { source: "agent", name: own }, { input: {}, model });
             if (agent.model !== undefined && !sameModel(agent.model, model))
               receipt2.warnings = [...receipt2.warnings, `the agent still runs ${modelLabel(agent.model)}: its model has not caught up with the tier`];
-            await recordReceipt(receipt2);
+            if (exploration?.tuned !== undefined)
+              Object.assign(receipt2, { model: modelLabel(exploration.tuned.model), explore: exploration.facts.arm });
+            await recordSpawnReceipt(event.id, receipt2);
           }
         }
         return;
@@ -6537,7 +6759,7 @@ ${refs.size}`;
       if (event.tool !== SUBAGENT_TOOL)
         return;
       await whileSpawning(() => handleSpawn(event));
-      const resumed = isRecord10(event.input) ? event.input.sessionID : undefined;
+      const resumed = isRecord11(event.input) ? event.input.sessionID : undefined;
       if (typeof resumed === "string" && resumed !== "")
         await outcomes.resume(resumed);
     });
@@ -6545,7 +6767,7 @@ ${refs.size}`;
     const lookupIdentity = async () => {
       try {
         const listed = await ctx.plugin.list();
-        const rows = Array.isArray(listed) ? listed : isRecord10(listed) && Array.isArray(listed.data) ? listed.data : [];
+        const rows = Array.isArray(listed) ? listed : isRecord11(listed) && Array.isArray(listed.data) ? listed.data : [];
         const mine = rows.filter((row) => row.id === "srobroek.model-roles");
         if (mine.length > 1)
           return { kind: "ambiguous", targets: mine.map((row) => String(row.source?.target ?? row.source?.type ?? "unknown")) };
@@ -6580,7 +6802,7 @@ ${refs.size}`;
         return;
       }
     };
-    const pluginOptions = isRecord10(ctx.options) ? ctx.options : {};
+    const pluginOptions = isRecord11(ctx.options) ? ctx.options : {};
     const agentConfig = () => {
       let project = [];
       try {
@@ -6727,9 +6949,9 @@ ${refs.size}`;
       }
     });
     const recordTestRun = async (event) => {
-      if (event.status !== "completed" || !isRecord10(event.input) || typeof event.input.command !== "string")
+      if (event.status !== "completed" || !isRecord11(event.input) || typeof event.input.command !== "string")
         return;
-      const metadata = isRecord10(event.result) ? event.result.metadata : undefined;
+      const metadata = isRecord11(event.result) ? event.result.metadata : undefined;
       const tests = testRun(event.input.command, exitStatusOf(metadata), evaluate.testCommands);
       if (tests !== undefined)
         await outcomes.signals(event.sessionID, { tests });
@@ -6758,7 +6980,7 @@ ${refs.size}`;
       const kind = classifyFailure({ message });
       if (kind === undefined)
         return;
-      const agentID = isRecord10(event.input) && typeof event.input.agent === "string" ? event.input.agent : undefined;
+      const agentID = isRecord11(event.input) && typeof event.input.agent === "string" ? event.input.agent : undefined;
       try {
         await queue(async () => {
           const agents = await listAgents();
@@ -6790,10 +7012,10 @@ ${refs.size}`;
       for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
         if (controller.signal.aborted)
           break;
-        const type = isRecord10(event) ? event.type : undefined;
+        const type = isRecord11(event) ? event.type : undefined;
         if (type === FAILED_EVENT) {
           const data = event.data;
-          if (typeof data?.sessionID !== "string" || !isRecord10(data.error))
+          if (typeof data?.sessionID !== "string" || !isRecord11(data.error))
             continue;
           const sessionID = data.sessionID;
           settleRequest(requestLog, sessionID, endedAt(event));
@@ -6864,7 +7086,7 @@ ${refs.size}`;
         }
         if (type === CREATED_EVENT) {
           const data = event.data;
-          if (isRecord10(data))
+          if (isRecord11(data))
             await onSessionCreated(data).catch(() => {});
           continue;
         }
@@ -7015,6 +7237,7 @@ export {
   agentHash,
   agentTier,
   agentTierError,
+  allowsChosenModel,
   applyDraft,
   applyEdit2 as applyEdit,
   applyFrozenTierParam,
@@ -7098,7 +7321,9 @@ export {
   nextExpiry,
   onCompaction,
   onEnd,
+  onExploration,
   onFailover,
+  onLeftArm,
   onResume,
   onSignals,
   onSpawn,
@@ -7159,6 +7384,7 @@ export {
   sameModel,
   setAgentTier,
   setEntry,
+  setExploreRandom,
   setTier,
   spawnTarget,
   staleAgents,
@@ -7182,6 +7408,7 @@ export {
   toJsonSchema,
   touchesTests,
   usageBrief,
+  usageDetailRows,
   usageLine,
   userPin,
   validateTierConfig,

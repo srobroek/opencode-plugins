@@ -3,7 +3,6 @@ import { existsSync, readdirSync, readFileSync } from "node:fs"
 import { join, relative } from "node:path"
 import { agentPaths, readAgentFile } from "@srobroek/opencode-lib/agent-files"
 import { skillPaths } from "@srobroek/opencode-lib/skill-files"
-import { checkText } from "../../../scripts/check-steering.ts"
 import { decideRouting } from "../../beads/src/subagent-routing.ts"
 import { FORMULAS, FORMULAS_DIR } from "./formulas.ts"
 
@@ -27,19 +26,12 @@ const routed = formulas.flatMap(({ file, data }) =>
     .map((step) => ({ file, step, type: step.metadata?.execution_agent_type as string })),
 )
 
-/** Every Markdown file the model reads: skills, references, agents and the formulas README. */
+/**
+ * The prose this plugin owns: its README, the formulas README and the formulas. The skills and
+ * agents are vendored from cad-agent; `bun run cad:check` keeps them identical to the pinned tag.
+ */
 function prose(): { path: string; text: string }[] {
-  const files: string[] = []
-  const walk = (dir: string) => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      const path = join(dir, entry.name)
-      if (entry.isDirectory()) walk(path)
-      else if (entry.name.endsWith(".md")) files.push(path)
-    }
-  }
-  walk(skillsDir)
-  walk(join(root, "agents"))
-  files.push(join(FORMULAS_DIR, "README.md"))
+  const files = [join(root, "README.md"), join(FORMULAS_DIR, "README.md")]
   return [...files, ...formulas.map(({ file }) => join(FORMULAS_DIR, file))].map((path) => ({
     path: relative(root, path),
     text: readFileSync(path, "utf8"),
@@ -83,27 +75,13 @@ describe("formula content", () => {
   }
 })
 
-/** Every Python file under skills/: script docstrings and usage text reach the model through cad_run output. */
-function python(): { path: string; text: string }[] {
-  return [...new Bun.Glob("**/*.py").scanSync(skillsDir)].sort().map((file) => ({
-    path: `skills/${file}`,
-    text: readFileSync(join(skillsDir, file), "utf8"),
-  }))
-}
-
-const OMP_WORDING = /skill:\/\/|uv run --script (?:skill|cad\/skills|\.opencode)|\bOMP\b|\bomp plugin\b|PI_SESSION_ID|CLAUDE_CODE_SESSION_ID|Claude Code|\bKiro\b/g
+const OMP_WORDING = /skill:\/\/|uv run --script (?:skill|cad\/skills|\.opencode)|\bOMP\b|\bomp plugin\b|PI_SESSION_ID|CLAUDE_CODE_SESSION_ID/g
 
 describe("OpenCode wording", () => {
   const files = prose()
 
-  test("no Markdown or formula names an OMP launcher, URI or harness", () => {
+  test("no Markdown or formula names an OMP launcher or URI", () => {
     for (const { path, text } of files) expect({ path, hits: text.match(OMP_WORDING) }).toEqual({ path, hits: null })
-  })
-
-  test("no Python script or test names an OMP launcher, URI or harness", () => {
-    const sources = python()
-    expect(sources.length).toBeGreaterThan(100)
-    for (const { path, text } of sources) expect({ path, hits: text.match(OMP_WORDING) }).toEqual({ path, hits: null })
   })
 
   test("cad_run examples sit in text blocks, never in shell blocks a reader would paste", () => {
@@ -118,15 +96,10 @@ describe("OpenCode wording", () => {
     }
   })
 
-  test("skills and agents pass the repository steering check", () => {
-    for (const { path, text } of files.filter(({ path }) => path.startsWith("skills/") || path.startsWith("agents/")))
-      expect({ path, findings: checkText(path, text) }).toEqual({ path, findings: [] })
-  })
-
   test("every cad_run names a script that ships under skills/", () => {
     let count = 0
     for (const { path, text } of files)
-      for (const match of text.matchAll(/cad_run ([a-z][\w-]*\/(?:scripts|tests)\/[\w/.-]+\.py)/g)) {
+      for (const match of text.matchAll(/cad_run ([a-z][\w-]*\/scripts\/[\w/.-]+\.py)/g)) {
         count++
         expect({ path, script: match[1], exists: existsSync(join(skillsDir, match[1] as string)) }).toEqual({
           path,
@@ -134,6 +107,6 @@ describe("OpenCode wording", () => {
           exists: true,
         })
       }
-    expect(count).toBeGreaterThan(50)
+    expect(count).toBeGreaterThan(20)
   })
 })

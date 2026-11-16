@@ -81,3 +81,20 @@ order = Order.model_validate_json(body)
 ```
 
 **Exception:** a short script reading its own trusted file can use plain dicts; adopt pydantic when input crosses a trust boundary or the shape is shared.
+
+## Stubs behind a contract Protocol
+
+**Do:** satisfy the contract's `Protocol` (or ABC) in the stub, import the shared types from the contract module, and mark it.
+
+```python
+from contract import Quote, Quotes  # shared types, never redefined here
+
+# STUB(task-id): always unsupported; real pricing service not built yet
+class StubQuotes:
+    def quote(self, sku: str) -> Quote:
+        raise NotImplementedError("pricing is not yet supported")
+
+def checkout(quotes: Quotes) -> None: ...
+```
+
+See [contracts.md](contracts.md).

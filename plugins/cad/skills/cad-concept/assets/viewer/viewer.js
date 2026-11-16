@@ -597,6 +597,7 @@ async function saveScreenshot() {
     ui.shot.disabled = false;
   }
 }
+
 // --- wiring -----------------------------------------------------------------
 
 ui.fit.addEventListener("click", fitView);

@@ -25,6 +25,8 @@ export type ModelSnapshot = {
   rule?: "guard-reroute"
   /** Models the child's prompt overflowed, `provider/model#variant`. A resume never goes back to one. */
   overflowed?: string[]
+  /** Set for a spawn that was eligible for exploration: the arm it runs on, kept across a resume. */
+  explore?: { policy: string; eligible: string[]; arm: string; p: number }
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -52,6 +54,8 @@ export function readSnapshot(value: unknown): ModelSnapshot | undefined {
   if (parseCandidate(value.model)?.kind !== "model") return undefined
   const snapshot: ModelSnapshot = { model: value.model, configRevision: value.configRevision, at: value.at }
   if (typeof value.tier === "string") snapshot.tier = value.tier
+  if (isRecord(value.explore) && typeof value.explore.arm === "string" && typeof value.explore.p === "number" && typeof value.explore.policy === "string" && Array.isArray(value.explore.eligible))
+    snapshot.explore = { policy: value.explore.policy, eligible: value.explore.eligible.filter((a): a is string => typeof a === "string"), arm: value.explore.arm, p: value.explore.p }
   if (value.failedOver === true) snapshot.failedOver = true
   if (value.rule === "guard-reroute") snapshot.rule = "guard-reroute"
   if (Array.isArray(value.overflowed)) {

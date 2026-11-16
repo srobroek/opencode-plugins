@@ -1086,7 +1086,7 @@ def markdown() -> str:
     lines += ["## Git storage", "",
               "Generated results stay out of git unless the user approved storing them: `product.yaml`",
               f"`{storage['setting']}: true`. Absent means not asked yet and counts as not approved.",
-              "`cad_run cad-flow/scripts/setup.py --storage --yes`, run from the project root, writes the",
+              "`uv run --script \"$CAD_SKILLS/cad-flow/scripts/run.py\" cad-flow/scripts/setup.py --storage --yes`, run from the project root, writes the",
               "rules below into one managed block of `hw/.gitignore` or `hw/.gitattributes` and removes the other",
               "block, so changing the answer and running it again changes the rules. Other lines of both files are",
               "kept. The project template's `hw/.gitignore` holds the not-approved block.", "",

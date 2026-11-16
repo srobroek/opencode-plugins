@@ -1,5 +1,5 @@
 import { realpathSync } from "node:fs"
-import { dirname, join, resolve } from "node:path"
+import { join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { Plugin } from "@opencode/plugin"
 import type { Context } from "@opencode/plugin/promise/plugin"
@@ -70,7 +70,6 @@ type Session = { location?: { directory?: unknown }; parentID?: string }
 
 export async function setupCad(ctx: Context, moduleUrl: string, overrides: Overrides = {}) {
   const skillsDir = fileURLToPath(new URL("../skills", moduleUrl))
-  const marker = `${PLUGIN_ID} ${dirname(skillsDir)}`
   const exec = overrides.exec ?? spawnRun
   const start = overrides.start ?? startBackground
   const alive = overrides.alive ?? processAlive
@@ -113,7 +112,7 @@ export async function setupCad(ctx: Context, moduleUrl: string, overrides: Overr
       ...viewers.map((host) =>
         exec(runArgv(skillsDir, VIEWER_SCRIPT, viewerStopArgs(host.session)), {
           cwd: host.cwd,
-          env: runEnv(process.env, root, marker),
+          env: runEnv(process.env, root),
           timeoutMs: VIEWER_STOP_MS,
         }),
       ),
@@ -177,7 +176,7 @@ export async function setupCad(ctx: Context, moduleUrl: string, overrides: Overr
             const { directory, root } = await scope(context.sessionID)
             await assert(context, RUN_TOOL, [script], { script, args: params.args, background: params.background })
             const argv = runArgv(skillsDir, script, params.args)
-            const env = runEnv(process.env, root, marker)
+            const env = runEnv(process.env, root)
             if (params.background) {
               const started = await runBackground(
                 argv,

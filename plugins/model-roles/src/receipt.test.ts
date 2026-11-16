@@ -83,4 +83,9 @@ describe("receipts", () => {
     ])
     expect(formatReceipts([])).toEqual([])
   })
+
+  test("an explored spawn's line names the arm it runs on, before the warnings", () => {
+    const [, , line] = formatReceipts([{ ...receipt(Date.UTC(2026, 10, 13, 9, 30)), explore: "a/big#high", warnings: ["w"] }])
+    expect(line).toBe("  - 09:30:00 plain: tier cheap (tier param) → a/big#low by built-in effort; exploring arm a/big#high; warning: w")
+  })
 })

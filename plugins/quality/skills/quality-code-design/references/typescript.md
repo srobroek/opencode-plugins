@@ -76,3 +76,18 @@ catch (error) { throw new ConfigError(`cannot load ${path}`, { cause: error }); 
 Why: `cause` keeps the original stack for diagnosis while the outer error carries the domain meaning.
 
 **Exception:** at a process or request edge, catching all errors to log and map them to an exit code or response is the correct boundary handling.
+
+## Stubs behind a contract interface
+
+**Do:** implement the contract's interface in the stub, import the shared (generated) types, and mark it.
+
+```ts
+import type { Quote, Quotes } from "@acme/contract"; // shared types, never redefined here
+
+// STUB(task-id): always unsupported; real pricing service not built yet
+export const stubQuotes: Quotes = {
+  async quote(): Promise<Quote> { throw new Error("pricing is not yet supported"); },
+};
+```
+
+Consumers accept `Quotes`; a swap changes the wiring. See [contracts.md](contracts.md).

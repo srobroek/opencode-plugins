@@ -1,6 +1,6 @@
 ---
 name: beads-guide
-description: "Use for Beads: init, remotes, BEADS_DIR, separate beads repo, ledger outside the checkout, preflight or closing."
+description: "Use for Beads: planning beads or dependencies, stubs, init, remotes, BEADS_DIR, separate ledger, preflight, closing."
 ---
 
 # Beads guide
@@ -15,7 +15,8 @@ skill, not from this table.
 | `BEADS_DIR` or a ledger outside the checkout ([Project ledger store](../../README.md#project-ledger-store)) | `beads-setup` |
 | Starting ledger work, or asked for a beads preflight (read-only readiness checks) | `beads-preflight` |
 | Creating, planning or bulk-editing beads: acceptance, metadata, routing, deps | `beads-ledger` |
+| A task that depends on another workstream's unfinished work: contracts, stubs, swap beads, soft blocks | `beads-ledger` |
 | Closing or reviewing a bead: the evidence a close needs | `beads-evidence` |
 | `lock busy`, `workspace gate busy` or a failed `bd dolt pull`/`push` | `beads-contention-retry` |
 
-When a `bd` command is refused or its bead lands in the wrong ledger, read [references/pitfalls.md](references/pitfalls.md).
+When a `bd` command is refused, the ledger is busy, a claim lapses or a bead lands in the wrong ledger, read [references/pitfalls.md](references/pitfalls.md).

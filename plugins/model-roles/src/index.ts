@@ -35,6 +35,7 @@ import {
   readClassification,
 } from "./classify.ts"
 import { type ConfigFile, type EffectiveConfig, effectiveConfig, globalConfigDir, pickConfigFile, readConfigFiles, readProjectFiles, readTiers, writeAgentTier, writeTier } from "./config-edit.ts"
+import { arms, chooseArm, type ExploreFacts, eligible, exploreFacts, exploring, parseExplore } from "./explore.ts"
 import {
   CONTEXT_FALLBACK_REASON,
   type ContextLimits,
@@ -55,6 +56,7 @@ import {
   switchNote,
 } from "./fallback.ts"
 import {
+  allowsChosenModel,
   type GuardAgent,
   type GuardModel,
   isExpensive,
@@ -244,6 +246,12 @@ const availabilityKey = (models: ReadonlyArray<AvailableModel>): string =>
     .sort()
     .join("\n")
 
+/** Source of the exploration draw in [0, 1); a test seam, replaced with `setExploreRandom`. */
+let exploreRandom: () => number = Math.random
+export const setExploreRandom = (rand: (() => number) | undefined): void => {
+  exploreRandom = rand ?? Math.random
+}
+
 /** Run tasks one at a time, in call order. */
 function serial() {
   let tail: Promise<unknown> = Promise.resolve()
@@ -263,7 +271,10 @@ export default Plugin.define({
     const options: Options = { ...parseOptions(ctx.options), tiers: {}, classes: {}, implicit: {} }
     const runtime = parseRuntime(ctx.options, options)
     const guard = parseGuard(isRecord(ctx.options) ? ctx.options.guard : undefined)
-    const evaluate = parseEvaluate(isRecord(ctx.options) ? ctx.options.evaluate : undefined)
+    const evaluateRaw = isRecord(ctx.options) ? ctx.options.evaluate : undefined
+    const evaluate = parseEvaluate(evaluateRaw)
+    const explorer = parseExplore(evaluateRaw)
+    for (const message of explorer.warnings) warn(message)
     let autoHistory: AutoRecord[] = []
     let available: GuardModel[] = []
     let availableKey = ""
@@ -702,6 +713,8 @@ export default Plugin.define({
       childID?: string
       /** What this spawn's own receipt said, for its outcome record. */
       routed?: Pick<Receipt, "tier" | "source" | "rule">
+      /** Set when the spawn was eligible for exploration. */
+      explore?: ExploreFacts
     }
     const pending = new Map<string, PendingSpawn>()
     /** The role each child session was spawned with. */
@@ -797,17 +810,31 @@ export default Plugin.define({
      * Every fresh spawn that will create a child, by tool call id, until the child is matched or the call ends.
      * `planned` is what the plugin resolved (none when the host decides); the child's own model is what counts.
      */
-    type ExpectedChild = { parentID: string; agent: string; planned?: ModelRef; tier?: string; configRevision: string; at: number; childID?: string }
+    type ExpectedChild = { parentID: string; agent: string; planned?: ModelRef; tier?: string; configRevision: string; at: number; childID?: string; explore?: ExploreFacts }
     const expectedChildren = new Map<string, ExpectedChild>()
-    const expectChild = (callID: string, event: { sessionID: string }, agent: string, planned: ModelRef | undefined, tier: string | undefined) => {
-      expectedChildren.set(callID, { parentID: event.sessionID, agent, ...(planned === undefined ? {} : { planned }), ...(tier === undefined ? {} : { tier }), configRevision: configRevision(options), at: Date.now() })
+    const expectChild = (callID: string, event: { sessionID: string }, agent: string, planned: ModelRef | undefined, tier: string | undefined, explore?: ExploreFacts) => {
+      expectedChildren.set(callID, {
+        parentID: event.sessionID,
+        agent,
+        ...(planned === undefined ? {} : { planned }),
+        ...(tier === undefined ? {} : { tier }),
+        configRevision: configRevision(options),
+        at: Date.now(),
+        ...(explore === undefined ? {} : { explore }),
+      })
     }
 
     /** Keep the model a child really got for its lifetime. The first record wins: failover may have updated it since. */
     const recordChildModel = async (childID: string, spawn: ExpectedChild, actual: ModelRef | undefined) => {
       const model = actual ?? spawn.planned
       if (model === undefined || (await snapshotOf(childID)) !== undefined) return
-      await writeSnapshot(childID, { model: modelLabel(model), ...(spawn.tier === undefined ? {} : { tier: spawn.tier }), configRevision: spawn.configRevision, at: Date.now() })
+      await writeSnapshot(childID, {
+        model: modelLabel(model),
+        ...(spawn.tier === undefined ? {} : { tier: spawn.tier }),
+        configRevision: spawn.configRevision,
+        at: Date.now(),
+        ...(spawn.explore === undefined ? {} : { explore: spawn.explore }),
+      })
     }
 
     /** Pair a new child with its own spawn call: the exact model and variant first, then the model, then a spawn the host decides, then the only one left. */
@@ -894,6 +921,7 @@ export default Plugin.define({
         tier: spawn.routed?.tier ?? spawn.role,
         ...(spawn.routed === undefined ? {} : { source: spawn.routed.source, rule: spawn.routed.rule }),
       })
+      if (spawn.explore !== undefined) await outcomes.exploration(childID, spawn.explore)
     }
 
     /** Match a new child session to the role spawn that created it: same parent, agent and model. */
@@ -1099,7 +1127,7 @@ export default Plugin.define({
             report.warnings.push(
               `Agents ${stuck.join(", ")} still run another model than their tier resolves to: re-registering gave up after ${MAX_REREGISTER} tries (a later plugin or config keeps setting their model).`,
             )
-          const content = [formatCheck(report), ...formatHealthHistory(healthHistory, Date.now()), ...formatReceipts(receipts), ...formatHistory(autoHistory), ...formatUsage(summarizeUsage(await outcomes.records(), Date.now()))].join("\n")
+          const content = [formatCheck(report), ...(exploring(explorer.options) ? [`exploration: on for ${explorer.options.agents.join(", ")}, ε=${explorer.options.explore}`] : []), ...formatHealthHistory(healthHistory, Date.now()), ...formatReceipts(receipts), ...formatHistory(autoHistory), ...formatUsage(summarizeUsage(await outcomes.records(), Date.now()))].join("\n")
           return { content, metadata: { roles: report.roles.length, agents: report.agents.length, auto: autoHistory.length, spawns: receipts.length } }
         },
       })
@@ -1365,6 +1393,38 @@ export default Plugin.define({
     type Routed = { input: Record<string, unknown>; role: string; model: ModelRef }
 
     /**
+     * Opt-in exploration (explore.ts), called only when `evaluate` turned it on. For an eligible fresh
+     * spawn it draws an arm among the tier's own alternatives and returns the facts to log; `tuned` is
+     * set when the arm differs from the control. The offered set is final before the draw: an arm must be
+     * available, out of cooldown (the control's own health view) and allowed by the guard as a model the
+     * plugin picks, with no pin exemption. So `p` is always the probability under the arms offered.
+     */
+    const exploreSpawn = (
+      target: string,
+      role: string,
+      control: Tuned,
+      pinned: boolean,
+    ): { facts: ExploreFacts; tuned?: Tuned } | undefined => {
+      const meta = tierMeta(options, role)
+      const spawn = { agent: target, explicitModel: false, pinned, resume: false, effortAuto: meta?.effort === "auto", distinctVendorTier: meta?.distinctVendor === true, armCount: 2 }
+      if (!eligible(spawn, explorer.options)) return undefined
+      const candidates = candidateOrder(options, role).flatMap((entry) => {
+        const candidate = parseCandidate(entry)
+        return candidate?.kind === "model" ? [candidate.ref] : []
+      })
+      const health = view()
+      const variantsOf = (model: ModelRef) => (available.find((m) => m.providerID === model.providerID && m.id === model.id)?.variants ?? []).map((v) => v.id)
+      const allowed = (model: ModelRef) =>
+        unavailableReason(model, available) === undefined && health(model) === undefined && (guard === undefined || allowsChosenModel(guard, options, model))
+      const all = arms(candidates, control.model, { variantsOf, allowed }, explorer.options.maxArms)
+      if (!eligible({ ...spawn, armCount: all.length }, explorer.options)) return undefined
+      const chosen = chooseArm(all, explorer.options.explore, exploreRandom)
+      const facts = exploreFacts(all, chosen)
+      if (chosen.arm === all[0]) return { facts }
+      return { facts, tuned: { input: { ...control.input, model: chosen.arm.label }, model: chosen.arm.model } }
+    }
+
+    /**
      * Pick a role for a spawn that names none. `cheapOnly` (the guard's auto mode)
      * offers only roles whose model is not expensive. Returns `undefined` when the
      * spawn is not eligible or no allowed role resolves; the spawn then goes on as is.
@@ -1500,6 +1560,7 @@ export default Plugin.define({
         if (refusal !== undefined) throw new Error(refusal)
         event.input = stripped
         await writeSnapshot(childID, { model: modelLabel(explicitModel), configRevision: revision, at: Date.now() })
+        await outcomes.leftArm(childID)
         await forgetChildRole(childID)
         await recordReceipt({ at: Date.now(), agent, source: "agent", model: modelLabel(explicitModel), rule: "explicit-model", fallbacks: [], warnings: [] })
         return true
@@ -1513,6 +1574,7 @@ export default Plugin.define({
           const tuned = await withAutoEffort(plan.input, plan.role, plan.model).catch(() => ({ input: plan.input as Record<string, unknown>, model: plan.model as ModelRef }) as Tuned)
           event.input = { ...tuned.input, sessionID: childID }
           await writeSnapshot(childID, { model: modelLabel(tuned.model), tier: plan.role, configRevision: revision, at: Date.now() })
+          await outcomes.leftArm(childID)
           await recordChildRole(childID, plan.role)
           await recordReceipt(tierReceipt(agent, asked, tuned))
           return true
@@ -1598,6 +1660,7 @@ export default Plugin.define({
         })
         if (outcome !== "switched") throw new Error(`This resume would run on ${modelLabel(model)}, which the guard refuses, and switching the child to ${modelLabel(to)} did not complete (${outcome}).`)
         if (isRecord(event.input)) event.input = { ...event.input, model: modelLabel(to) }
+        await outcomes.leftArm(childID)
         await recordReceipt({
           at: Date.now(),
           agent,
@@ -1695,10 +1758,30 @@ export default Plugin.define({
           tuned = await withAutoEffort(plan.input, plan.role, plan.model).catch(() => ({ input: tuned.input, model: plan.model as ModelRef }))
           event.input = tuned.input
         }
-        pending.set(event.id, { parentID: event.sessionID, agent: target, role: plan.role, model: tuned.model, revision: configRevision(options), at: Date.now() })
-        expectChild(event.id, event, target, tuned.model, plan.role)
+        const control = tuned
+        // Plug point of opt-in exploration: the tier is resolved and `model#variant` is final; off, this is skipped.
+        let exploration: { facts: ExploreFacts; tuned?: Tuned } | undefined
+        if (exploring(explorer.options) && isRecord(plan.input)) {
+          exploration = exploreSpawn(target, plan.role, control, pinned)
+          if (exploration?.tuned !== undefined) {
+            tuned = exploration.tuned
+            event.input = tuned.input
+          }
+        }
+        pending.set(event.id, {
+          parentID: event.sessionID,
+          agent: target,
+          role: plan.role,
+          model: tuned.model,
+          revision: configRevision(options),
+          at: Date.now(),
+          ...(exploration === undefined ? {} : { explore: exploration.facts }),
+        })
+        expectChild(event.id, event, target, tuned.model, plan.role, exploration?.facts)
         const vendorOfCaller = tierMeta(options, plan.role)?.distinctVendor ? await callerVendor(event) : undefined
-        await recordSpawnReceipt(event.id, tierReceipt(target, { source: source ?? "agent", name: tierName ?? plan.role }, tuned, vendorOfCaller))
+        const receipt = tierReceipt(target, { source: source ?? "agent", name: tierName ?? plan.role }, control, vendorOfCaller)
+        if (exploration?.tuned !== undefined) Object.assign(receipt, { model: modelLabel(tuned.model), explore: exploration.facts.arm })
+        await recordSpawnReceipt(event.id, receipt)
         return
       }
       const unroled = plan.role === undefined
@@ -1718,7 +1801,23 @@ export default Plugin.define({
       if (reason === undefined) {
         // The spawn goes ahead on the agent's own model: its pin, or the model this plugin set for its tier, else the host decides.
         const ownModel = pin ?? (own === undefined ? undefined : resolveTier(options, available, own, view()).model)
-        expectChild(event.id, event, target, ownModel, pin === undefined ? own : undefined)
+        // Opt-in exploration reaches an agent on its own tier through the same pending entry as an explicit tier.
+        let exploration: { facts: ExploreFacts; tuned?: Tuned } | undefined
+        if (pin === undefined && own !== undefined && ownModel !== undefined && exploring(explorer.options) && isRecord(plan.input)) {
+          exploration = exploreSpawn(target, own, { input: plan.input, model: ownModel }, false)
+          if (exploration?.tuned !== undefined) event.input = exploration.tuned.input
+          if (exploration !== undefined)
+            pending.set(event.id, {
+              parentID: event.sessionID,
+              agent: target,
+              role: own,
+              model: exploration.tuned?.model ?? ownModel,
+              revision: configRevision(options),
+              at: Date.now(),
+              explore: exploration.facts,
+            })
+        }
+        expectChild(event.id, event, target, exploration?.tuned?.model ?? ownModel, pin === undefined ? own : undefined, exploration?.facts)
         if (pin !== undefined) {
           const receipt = bypass("agent-pin", pin, "the agent's own model (config or frontmatter) wins over tier")
           if (receipt !== undefined) await recordReceipt(receipt)
@@ -1728,7 +1827,8 @@ export default Plugin.define({
             const receipt = tierReceipt(target, { source: "agent", name: own }, { input: {}, model })
             if (agent.model !== undefined && !sameModel(agent.model, model))
               receipt.warnings = [...receipt.warnings, `the agent still runs ${modelLabel(agent.model)}: its model has not caught up with the tier`]
-            await recordReceipt(receipt)
+            if (exploration?.tuned !== undefined) Object.assign(receipt, { model: modelLabel(exploration.tuned.model), explore: exploration.facts.arm })
+            await recordSpawnReceipt(event.id, receipt)
           }
         }
         return

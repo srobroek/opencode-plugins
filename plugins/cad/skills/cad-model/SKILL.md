@@ -1,7 +1,9 @@
 ---
 name: cad-model
-description: Builds part models into versioned STEP AP242, GLB and metrics, then checks or diffs them. Triggers on "build v3".
+description: Builds part model scripts into versioned STEP AP242, GLB, and metrics, then checks or diffs versions. Triggers on "build v3", "check the model", "diff".
 ---
+
+Resolve `$CAD_SKILLS` as the parent directory of this skill's directory; it contains the installed `cad-*` skill folders.
 
 # CAD Model Build and Check
 
@@ -25,7 +27,7 @@ TRIGGER
    another state than it is installed in, such as a strap printed flat. LOAD references/contract.md
    when writing or reviewing a model.py. For a cosmetic round that may fail (`StdFail_NotDone`),
    use the [Fillet fallback](references/fillets.md) helper.
-2. Build: `cad_run cad-model/scripts/cad_model.py run hw --label vN [--kernel auto]`
+2. Build: `uv run --script "$CAD_SKILLS/cad-flow/scripts/run.py" cad-model/scripts/cad_model.py run hw --label vN [--kernel auto]`
    → `hw/versions/vN/` and `hw/versions/latest.json`; JSON summary on stdout. `auto` runs each
    part in its declared kernel's own uv environment; `cadquery` or `build123d` additionally
    requires every part to declare that kernel. The version snapshots its records in `record/` and
@@ -34,7 +36,7 @@ TRIGGER
    fails its checks fails the run: no version, latest unchanged. Only parts whose build inputs
    changed are built; the others reuse their stored output byte for byte (`cache` in the summary,
    `references/outputs.md`).
-3. Check: `cad_run cad-model/scripts/cad_model.py check vN --hw hw [--out .cad-work/<unit>/check.json] [--changed-only [--since-version vM]] [--exact] [--jobs 1|N|auto] [--cache DIR | --no-cache]` (explicit results must be new `.cad-work/` paths).
+3. Check: `uv run --script "$CAD_SKILLS/cad-flow/scripts/run.py" cad-model/scripts/cad_model.py check vN --hw hw [--out .cad-work/<unit>/check.json] [--changed-only [--since-version vM]] [--exact] [--jobs 1|N|auto] [--cache DIR | --no-cache]` (explicit results must be new `.cad-work/` paths).
    → check result JSON; press fits and heat-set inserts declared in the version's `interfaces.yaml`
    are allowed to interfere automatically. `build_volume` checks each FDM part, in the state it is
    printed in, against the printer envelope of the version's `product.yaml`.
@@ -51,7 +53,7 @@ TRIGGER
    `--since-version` (default: the previous built version) can affect. It is the fast early check
    of a commit batch, `scope.complete: false`, and never replaces the full check.
    `blocking_failures` names every failed blocking check.
-4. Diff: `cad_run cad-model/scripts/cad_model.py diff vA vB --hw hw` → per-part
+4. Diff: `uv run --script "$CAD_SKILLS/cad-flow/scripts/run.py" cad-model/scripts/cad_model.py diff vA vB --hw hw` → per-part
    volume and bbox deltas, added/removed parts, exact shared / A-only / B-only volumes, and the
    manufacturing state, tolerance, output policy and placement changes per custom-made part.
 5. Recheck: write the full check JSON with `--out`, then pass it to `cad-recheck` `stamp.py --checks`,
@@ -67,7 +69,7 @@ hw --label vN` command it names; never rebuild the sealed label.
 
 MUST Pick the next label above the newest version; versions are immutable and `run` refuses an existing or lower label.
 MUST Treat `check` exit 1 as a failed stage gate; report `blocking_failures` and the numbers verbatim.
-MUST Stop the runs a `check` exit 2 names as still running or left behind with the `kill` commands it prints (`cad_run cad-flow/scripts/process_lifecycle.py strays --hw hw` lists them); never delete a run record whose processes still run.
+MUST Stop the runs a `check` exit 2 names as still running or left behind with the `kill` commands it prints (`uv run --script "$CAD_SKILLS/cad-flow/scripts/run.py" cad-flow/scripts/process_lifecycle.py strays --hw hw` lists them); never delete a run record whose processes still run.
 NOT Stamp, gate or release from a `--changed-only` check; run the full check first.
 MUST Use the cad-record layout API for version and manufacturing paths; its generated `references/layout.md` is the one canonical path table.
 MUST Add a missing material density to `assets/materials.yaml` with its source; `mass_g: null` means unknown.

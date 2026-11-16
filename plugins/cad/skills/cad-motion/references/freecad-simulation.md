@@ -2,8 +2,9 @@
 
 For a long `freecad_assembly.py` run, start with `--smoke` to validate FreeCAD discovery, geometry import, constraint solving, and a few motion frames quickly:
 
-```text
-cad_run cad-motion/scripts/freecad_assembly.py --hw hw --version vN --smoke
+```sh
+uv run --script "$CAD_SKILLS/cad-flow/scripts/run.py" cad-motion/scripts/freecad_assembly.py \
+  --hw hw --version vN --smoke
 ```
 
 Smoke mode uses no more than three evenly spaced frames (including the start and end), and writes a JSON summary with `mode: "smoke"` and `evidence: false`. It never reuses or publishes a verification bundle; it is not accepted as evidence of limits or coupled-motion agreement across the full simulation. A smoke failure is useful diagnostic evidence, but a smoke pass only shows that the sampled setup ran. Remove `--smoke` and run the full simulation before recording or relying on the check result.

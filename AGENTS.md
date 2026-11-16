@@ -34,6 +34,10 @@ package whose entry point default-exports `Plugin.define({ id, setup })` from
   an unknown marker, pins an exact version or skips a required run.
 - `bun run check` runs typecheck, lint, test, build:check, marketplaces:check,
   plugin-table:check, steering, pitfalls, agent-roles, descriptions and concerns before you hand work off.
+- `bun run cad:sync` vendors `plugins/cad/{skills,examples,agents}` from the cad-agent tag
+  pinned in `plugins/cad/cad-agent.json` (`bun scripts/sync-cad.ts --tag <tag>` moves the pin);
+  `bun run cad:check` fails when they differ from it. It clones from GitHub, so it is not part
+  of `check`; CI runs it when `plugins/cad` changes. Never edit those vendored files.
 
 ## Conventions
 

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import {
+  allowsChosenModel,
   cheaperAlternatives,
   type GuardFacts,
   type GuardModel,
@@ -196,5 +197,20 @@ describe("judgeSpawn", () => {
     const decision = judgeSpawn(facts({ sessionModel: { ...opus, variant: "default" } }))
     if (decision.allow) throw new Error("allowed")
     expect(decision.reason).toContain("expensive model amazon-bedrock/global.anthropic.claude-opus-5-5.")
+  })
+})
+
+describe("allowsChosenModel", () => {
+  const guard = { expensive: "auto" as const, allowInherit: [], allowModels: ["anthropic/claude-haiku"], mode: "refuse" as const }
+  const options = withClasses(parseOptions({}))
+
+  test("an expensive model is refused even when it is the agent's own tier model", () => {
+    expect(allowsChosenModel(guard, options, opus)).toBe(false)
+    expect(allowsChosenModel({ ...guard, expensive: ["amazon-bedrock/global.anthropic.claude-sonnet-5-5#high"] }, options, { ...sonnet, variant: "high" })).toBe(false)
+  })
+
+  test("a cheap model, or an expensive one on allowModels, passes", () => {
+    expect(allowsChosenModel(guard, options, sonnet)).toBe(true)
+    expect(allowsChosenModel({ ...guard, allowModels: [`${opus.providerID}/${opus.id}`] }, options, opus)).toBe(true)
   })
 })

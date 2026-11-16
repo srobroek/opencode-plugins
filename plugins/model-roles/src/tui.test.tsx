@@ -597,6 +597,31 @@ describe("/tiers usage", () => {
     expect(h.setCalls).toEqual([])
   })
 
+  test("a tier with exploration arms lists them after its agents", async () => {
+    const withArms = {
+      days: 90,
+      tiers: [{ tier: "cheap", total: stats(3, 2), agents: [{ agent: "explore", ...stats(3, 2) }], arms: [{ arm: "p/m#high", ...stats(2, 2) }, { arm: "p/m#low", ...stats(1, 0) }] }],
+    }
+    const h = harness(
+      [
+        pick("\u0000usage"),
+        () => "cheap",
+        (o) => {
+          expect(o.options).toEqual([
+            { title: "explore", value: "explore", description: "3 runs · 67% ok · p50 2s · n/a", disabled: true },
+            { title: "arm p/m#high", value: "\u0000arm:p/m#high", description: "2 runs · 100% ok · p50 2s · n/a", disabled: true },
+            { title: "arm p/m#low", value: "\u0000arm:p/m#low", description: "1 run · 0% ok · p50 2s · n/a", disabled: true },
+          ])
+          return ESC
+        },
+        esc,
+        () => ESC,
+      ],
+      { usage: withArms },
+    )
+    await h.run()
+  })
+
   test("an empty ledger shows one disabled row", async () => {
     const h = harness([
       pick("\u0000usage"),

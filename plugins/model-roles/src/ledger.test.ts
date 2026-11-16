@@ -7,6 +7,7 @@ import {
   type OutcomeRecord,
   onCompaction,
   onEnd,
+  onExploration,
   onFailover,
   onResume,
   onSignals,
@@ -21,6 +22,14 @@ const facts = { at: 1000, agent: "explore", model: "anthropic/haiku#low", parent
 const spawned = () => onSpawn(newLedger(), "ses_c", facts)
 
 describe("reducers", () => {
+  test("exploration facts are set once: a later call does not redraw the arm", () => {
+    const first = { policy: "explore-v1", eligible: ["p/m#high", "p/m#low"], arm: "p/m#low", p: 0.05 }
+    const set = onExploration(spawned(), "ses_c", first)
+    expect(set.ses_c).toMatchObject(first)
+    expect(onExploration(set, "ses_c", { ...first, arm: "p/m#high", p: 0.95 }).ses_c).toMatchObject({ arm: "p/m#low", p: 0.05 })
+    expect(onExploration(newLedger(), "ses_none", first)).toEqual({})
+  })
+
   test("a spawn starts a versioned record with the routing facts, no usage and unset experiment fields", () => {
     const record = spawned().ses_c
     expect(record).toEqual({

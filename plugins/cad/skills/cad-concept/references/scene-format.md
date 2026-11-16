@@ -75,8 +75,7 @@ good render and shows the error in the panel.
 
 ## Handoff manifest
 
-`scripts/concept.py handoff <scene> [--variant ID] [--out FILE]` writes
-`assets/schemas/handoff.schema.json`: the scene digest, the chosen
-variant's `params`, every node in parents-first order with `path` (slash-joined ids), authored
-transforms, and an envelope (bounds in the node frame with joints at nominal), every joint with a
-unit axis and `unit: deg|mm`, and each alternative's fate (`not-chosen`, `dropped`, `merged`).
+`scripts/concept.py handoff <scene> [--variant ID] [--out FILE]` writes `assets/schemas/handoff.schema.json`:
+the scene digest, the chosen variant's `params`, every node in parents-first order with `path`
+(slash-joined ids), authored transforms, and an envelope (bounds in the node frame with joints at nominal),
+every joint with a unit axis and `unit: deg|mm`, and each alternative's fate (`not-chosen`, `dropped`, `merged`).

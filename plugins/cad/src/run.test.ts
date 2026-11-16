@@ -84,8 +84,8 @@ test("runArgv, runEnv and the viewer helpers", () => {
     "cad-bom/scripts/bom.py",
     "a.step",
   ])
-  const env = runEnv({ PATH: "/bin", GONE: undefined }, "ses_1", "srobroek.cad /p")
-  expect(env).toEqual({ PATH: "/bin", CAD_SESSION_ID: "ses_1", CAD_OPENCODE_PLUGIN: "srobroek.cad /p" })
+  const env = runEnv({ PATH: "/bin", GONE: undefined, CAD_VIEWER_SESSION_NAME: "mine" }, "ses_1")
+  expect(env).toEqual({ PATH: "/bin", CAD_VIEWER_SESSION_NAME: "ses_1" })
   expect(viewerSessionName(["serve"])).toBe("")
   expect(viewerSessionName(["serve", "--session", "a"])).toBe("a")
   expect(viewerSessionName(["serve", "--session=b"])).toBe("b")

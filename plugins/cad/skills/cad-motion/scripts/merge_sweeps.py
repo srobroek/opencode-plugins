@@ -5,7 +5,7 @@
 """Merge subsystem sweeps of one version into the whole sweep's result.
 
 Usage:
-    cad_run cad-motion/scripts/merge_sweeps.py --hw HW --version vN
+    uv run --script "$CAD_SKILLS/cad-flow/scripts/run.py" cad-motion/scripts/merge_sweeps.py --hw HW --version vN
         --case NAME --inputs BUNDLE [BUNDLE ...] [--replace]
 
 Each input is a published sweep bundle of `--version` run with `--subsystem` (sweep.py), together
