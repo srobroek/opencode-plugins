@@ -175,6 +175,15 @@ describe("executeCommit", () => {
     expect(committedFiles()).toEqual(["specs/001-a/spec.md"])
   })
 
+  test("commits the deletion of a tracked root that is gone from the working tree", async () => {
+    write("specs/001-a/spec.md")
+    expect((await executeCommit({ message: "add" }, repo)).metadata.ok).toBe(true)
+    rmSync(join(repo, "specs"), { recursive: true })
+    const result = await executeCommit({ message: "drop" }, repo)
+    expect(result.metadata.ok).toBe(true)
+    expect(git("ls-tree", "-r", "--name-only", "HEAD")).toBe("README.md")
+  })
+
   test("reports nothing to commit when the artifacts are unchanged", async () => {
     const result = await executeCommit({ message: "x" }, repo)
     expect(result.metadata.ok).toBe(false)

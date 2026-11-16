@@ -95,12 +95,14 @@ const refuse = (reason: string): ToolOutput => ({ content: `${COMMIT_TOOL}: ${re
 
 const names = (stdout: string) => stdout.split("\0").filter(Boolean)
 
-/** Validate `speckit_commit` input into a message and artifact paths, or return why it is unusable. */
-export function readCommitParams(input: unknown, workspace: string): { message: string; paths: string[] } | string {
+/**
+ * Validate `speckit_commit` input into a message and artifact paths, or return why it is
+ * unusable. Omitted paths come back undefined: the default roots depend on the repository.
+ */
+export function readCommitParams(input: unknown): { message: string; paths?: string[] } | string {
   const value = input !== null && typeof input === "object" ? (input as Record<string, unknown>) : {}
   if (typeof value.message !== "string" || value.message.trim() === "") return "message is required"
-  if (value.paths === undefined)
-    return { message: value.message, paths: ROOTS.filter((root) => existsSync(join(workspace, root))) }
+  if (value.paths === undefined) return { message: value.message }
   if (!Array.isArray(value.paths) || value.paths.some((path) => typeof path !== "string"))
     return "paths must be an array of strings"
   const outside = value.paths.filter((path) => artifactPath(path) === undefined)
@@ -109,15 +111,27 @@ export function readCommitParams(input: unknown, workspace: string): { message: 
 }
 
 export async function executeCommit(input: unknown, workspace: string, git: Git = gitIn(workspace)): Promise<ToolOutput> {
-  const params = readCommitParams(input, workspace)
-  if (typeof params === "string") return refuse(params)
-  if (!params.paths.length) return refuse("nothing to commit: no specs/ or .specify/ in the workspace")
+  const request = readCommitParams(input)
+  if (typeof request === "string") return refuse(request)
   const prefix = await git(["rev-parse", "--show-prefix"])
   if (!prefix.ok) return refuse(prefix.reason)
   const base = prefix.stdout.trim()
   // An unborn HEAD (a repository without commits) builds the first commit on the empty tree.
   const parent = await git(["rev-parse", "-q", "--verify", "HEAD^{commit}"])
   const head = parent.ok ? parent.stdout.trim() : undefined
+  // By default each root present in the working tree, or tracked in HEAD so its deletion commits.
+  const paths = request.paths ?? []
+  if (request.paths === undefined)
+    for (const root of ROOTS) {
+      if (existsSync(join(workspace, root))) paths.push(root)
+      else if (head !== undefined) {
+        const tracked = await git(["ls-tree", "--name-only", head, "--", root])
+        if (!tracked.ok) return refuse(tracked.reason)
+        if (tracked.stdout.trim() !== "") paths.push(root)
+      }
+    }
+  if (!paths.length) return refuse("nothing to commit: no specs/ or .specify/ in the workspace")
+  const params = { message: request.message, paths }
   const empty = head === undefined ? await git(["hash-object", "-t", "tree", "--stdin"], { stdin: "" }) : undefined
   if (empty !== undefined && !empty.ok) return refuse(empty.reason)
   const baseTree = head ?? (empty?.ok ? empty.stdout.trim() : "")
@@ -157,12 +171,12 @@ export async function executeCommit(input: unknown, workspace: string, git: Git 
     // The old value (empty: HEAD must still be unborn) makes a concurrent HEAD move fail instead of being overwritten.
     const moved = await git(["update-ref", "-m", `speckit_commit: ${message.split("\n", 1)[0]}`, "HEAD", commit, head ?? ""])
     if (!moved.ok) return refuse(`HEAD moved while committing; nothing was committed. ${moved.reason}`)
-    const paths = changed.map((path) => path.slice(base.length))
-    const synced = await git(["reset", "-q", "--", ...paths])
+    const files = changed.map((path) => path.slice(base.length))
+    const synced = await git(["reset", "-q", "--", ...files])
     const sha = commit.slice(0, 12)
     return {
-      content: `Committed ${sha}: ${paths.length} file(s)\n${paths.join("\n")}${synced.ok ? "" : `\nThe index was not synced for these paths: ${synced.reason}`}`,
-      metadata: { ok: true, sha, paths },
+      content: `Committed ${sha}: ${files.length} file(s)\n${files.join("\n")}${synced.ok ? "" : `\nThe index was not synced for these paths: ${synced.reason}`}`,
+      metadata: { ok: true, sha, paths: files },
     }
   } finally {
     rmSync(scratch, { recursive: true, force: true })

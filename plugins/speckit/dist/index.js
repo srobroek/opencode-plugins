@@ -1039,12 +1039,12 @@ var gitIn = (workspace) => async (args, options = {}) => {
 };
 var refuse = (reason) => ({ content: `${COMMIT_TOOL}: ${reason}`, metadata: { ok: false } });
 var names = (stdout) => stdout.split("\x00").filter(Boolean);
-function readCommitParams(input, workspace) {
+function readCommitParams(input) {
   const value = input !== null && typeof input === "object" ? input : {};
   if (typeof value.message !== "string" || value.message.trim() === "")
     return "message is required";
   if (value.paths === undefined)
-    return { message: value.message, paths: ROOTS.filter((root) => existsSync3(join4(workspace, root))) };
+    return { message: value.message };
   if (!Array.isArray(value.paths) || value.paths.some((path) => typeof path !== "string"))
     return "paths must be an array of strings";
   const outside = value.paths.filter((path) => artifactPath(path) === undefined);
@@ -1053,17 +1053,31 @@ function readCommitParams(input, workspace) {
   return { message: value.message, paths: value.paths.map((path) => artifactPath(path)) };
 }
 async function executeCommit(input, workspace, git = gitIn(workspace)) {
-  const params = readCommitParams(input, workspace);
-  if (typeof params === "string")
-    return refuse(params);
-  if (!params.paths.length)
-    return refuse("nothing to commit: no specs/ or .specify/ in the workspace");
+  const request = readCommitParams(input);
+  if (typeof request === "string")
+    return refuse(request);
   const prefix = await git(["rev-parse", "--show-prefix"]);
   if (!prefix.ok)
     return refuse(prefix.reason);
   const base = prefix.stdout.trim();
   const parent = await git(["rev-parse", "-q", "--verify", "HEAD^{commit}"]);
   const head = parent.ok ? parent.stdout.trim() : undefined;
+  const paths = request.paths ?? [];
+  if (request.paths === undefined)
+    for (const root of ROOTS) {
+      if (existsSync3(join4(workspace, root)))
+        paths.push(root);
+      else if (head !== undefined) {
+        const tracked = await git(["ls-tree", "--name-only", head, "--", root]);
+        if (!tracked.ok)
+          return refuse(tracked.reason);
+        if (tracked.stdout.trim() !== "")
+          paths.push(root);
+      }
+    }
+  if (!paths.length)
+    return refuse("nothing to commit: no specs/ or .specify/ in the workspace");
+  const params = { message: request.message, paths };
   const empty = head === undefined ? await git(["hash-object", "-t", "tree", "--stdin"], { stdin: "" }) : undefined;
   if (empty !== undefined && !empty.ok)
     return refuse(empty.reason);
@@ -1111,15 +1125,15 @@ async function executeCommit(input, workspace, git = gitIn(workspace)) {
 `, 1)[0]}`, "HEAD", commit, head ?? ""]);
     if (!moved.ok)
       return refuse(`HEAD moved while committing; nothing was committed. ${moved.reason}`);
-    const paths = changed.map((path) => path.slice(base.length));
-    const synced = await git(["reset", "-q", "--", ...paths]);
+    const files = changed.map((path) => path.slice(base.length));
+    const synced = await git(["reset", "-q", "--", ...files]);
     const sha = commit.slice(0, 12);
     return {
-      content: `Committed ${sha}: ${paths.length} file(s)
-${paths.join(`
+      content: `Committed ${sha}: ${files.length} file(s)
+${files.join(`
 `)}${synced.ok ? "" : `
 The index was not synced for these paths: ${synced.reason}`}`,
-      metadata: { ok: true, sha, paths }
+      metadata: { ok: true, sha, paths: files }
     };
   } finally {
     rmSync(scratch, { recursive: true, force: true });
