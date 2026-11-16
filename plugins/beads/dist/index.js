@@ -3786,12 +3786,13 @@ function claimTarget(invocation, cwd, env, planned) {
   const database = globalValue(invocation.globals, ["--database"]);
   const db = globalValue(invocation.globals, ["--db"]);
   const directory = globalValue(invocation.globals, ["-C", "--directory"]);
-  const base = directory === undefined ? cwd : resolve6(cwd, directory);
+  const plan = planned?.get(invocationSignature(invocation));
+  const workdir = plan?.cwd ?? cwd;
+  const base = directory === undefined ? workdir : resolve6(workdir, directory);
   const selector = global ? ["global"] : database !== undefined ? ["database", database] : db !== undefined ? ["db", resolve6(base, db)] : directory !== undefined ? ["directory", base] : undefined;
   if (selector !== undefined)
-    return { key: `external:${JSON.stringify(selector)}`, store: bdStoreForInvocation(invocation, cwd, env) ?? null };
-  const plan = planned?.get(invocationSignature(invocation));
-  const ambient = bdStoreForInvocation(invocation, cwd, env) ?? null;
+    return { key: `external:${JSON.stringify(selector)}`, store: bdStoreForInvocation(invocation, workdir, env) ?? null };
+  const ambient = bdStoreForInvocation(invocation, workdir, env) ?? null;
   if (plan !== undefined) {
     if (plan.store === undefined && ambient !== null && existsSync4(ambient))
       return { key: `ambiguous:${invocationSignature(invocation)}`, store: null, ambiguous: true };

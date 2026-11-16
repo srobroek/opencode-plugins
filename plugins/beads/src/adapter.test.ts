@@ -1,9 +1,49 @@
-import { describe, expect, test } from "bun:test"
+import { afterEach, describe, expect, test } from "bun:test"
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { bdInvocations } from "./bd-actor-gate.ts"
-import { CONTENTION_ADVISORY, contentionAdvisory, readClaimState, recordClaimTransitions } from "./claims.ts"
+import { CONTENTION_ADVISORY, claimLookups, contentionAdvisory, readClaimState, recordClaimTransitions } from "./claims.ts"
 import { agentActor, blockReason, gateEnabled, sessionChain, shellInput } from "./host.ts"
 import { closeInvocations, parse, parsedInvocations } from "./shell.ts"
 import { fixtureHolders } from "./test-support.ts"
+
+describe("claim keys after a directory change", () => {
+  const roots: string[] = []
+  afterEach(() => {
+    for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
+  })
+
+  test.each([
+    ["--db .beads", "sub/.beads"],
+    ["--directory nested", "sub/nested"],
+    ["-C nested", "sub/nested"],
+  ])("a relative %s selector is resolved against the directory the write runs in", (selector, relative) => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "beads-claims-")))
+    roots.push(root)
+    mkdirSync(join(root, "sub", ".beads"), { recursive: true })
+    mkdirSync(join(root, "sub", "nested", ".beads"), { recursive: true })
+    const command = `cd sub && bd ${selector} update proj-1 --claim`
+    const invocations = bdInvocations(command)
+    const [lookup] = claimLookups(command, root, {}, "Claimed proj-1", invocations)
+    expect(lookup?.cwd).toBe(join(root, "sub"))
+    expect(lookup?.key).toContain(join(root, relative))
+    const state = readClaimState(undefined)
+    recordClaimTransitions(
+      state,
+      command,
+      root,
+      {},
+      "Claimed proj-1",
+      invocations,
+      fixtureHolders({ "proj-1": "a/s1" }, "a/s1"),
+    )
+    const [claim] = Object.values(state.claims)
+    expect(claim?.id).toBe("proj-1")
+    expect(JSON.stringify(state.claims)).toContain(join(root, relative))
+    expect(JSON.stringify(state.claims)).not.toContain(join(root, selector.includes("nested") ? "nested" : ".beads"))
+  })
+})
 
 describe("claim tracking", () => {
   const env = { BEADS_DIR: "/store/.beads", BEADS_ACTOR: "opencode/r/general/s" } as NodeJS.ProcessEnv

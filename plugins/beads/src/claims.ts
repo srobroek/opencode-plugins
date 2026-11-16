@@ -138,7 +138,11 @@ function claimTarget(
   const database = globalValue(invocation.globals, ["--database"])
   const db = globalValue(invocation.globals, ["--db"])
   const directory = globalValue(invocation.globals, ["-C", "--directory"])
-  const base = directory === undefined ? cwd : resolve(cwd, directory)
+  // The directory the write runs in after any literal `cd`, as the write planner resolved it:
+  // relative `--db`, `-C` and `--directory` values are relative to that, not to the tool's start.
+  const plan = planned?.get(invocationSignature(invocation))
+  const workdir = plan?.cwd ?? cwd
+  const base = directory === undefined ? workdir : resolve(workdir, directory)
   const selector = global
     ? ["global"]
     : database !== undefined
@@ -148,9 +152,9 @@ function claimTarget(
         : directory !== undefined
           ? ["directory", base]
           : undefined
-  if (selector !== undefined) return { key: `external:${JSON.stringify(selector)}`, store: bdStoreForInvocation(invocation, cwd, env) ?? null }
-  const plan = planned?.get(invocationSignature(invocation))
-  const ambient = bdStoreForInvocation(invocation, cwd, env) ?? null
+  if (selector !== undefined)
+    return { key: `external:${JSON.stringify(selector)}`, store: bdStoreForInvocation(invocation, workdir, env) ?? null }
+  const ambient = bdStoreForInvocation(invocation, workdir, env) ?? null
   if (plan !== undefined) {
     // The planner could not name the store (a computed `cd` or `BEADS_DIR`) while the ambient
     // environment points at a ledger: the write may land elsewhere, so the target is ambiguous.
