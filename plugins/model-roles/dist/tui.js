@@ -553,6 +553,12 @@ function formatUsage(report) {
   }
   return lines;
 }
+function usageDetailRows(row) {
+  return [
+    ...row.agents.map((a) => ({ title: a.agent, value: a.agent, description: usageBrief(a), disabled: true })),
+    ...(row.arms ?? []).map((a) => ({ title: `arm ${a.arm}`, value: `\x00arm:${a.arm}`, description: usageBrief(a), disabled: true }))
+  ];
+}
 
 // plugins/model-roles/src/rpc.ts
 import { Rpc } from "@opencode/plugin/rpc";
@@ -2075,12 +2081,7 @@ var tui_default = Plugin.define({
         await dialog.select({
           title: `Usage: ${row.tier}`,
           placeholder: "Per agent. Esc goes back",
-          options: row.agents.map((a) => ({
-            title: a.agent,
-            value: a.agent,
-            description: usageBrief(a),
-            disabled: true
-          }))
+          options: usageDetailRows(row)
         });
       }
     };

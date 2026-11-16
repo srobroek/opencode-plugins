@@ -503,20 +503,25 @@ probability 1 − ε, otherwise one alternative uniformly. The alternatives, in 
 Steps follow the effort scale `none < minimal < low < medium < high < xhigh < max`, among
 the variants the model has. A control without a variant on that scale has no up or down.
 Filters apply after the cap: a filtered alternative leaves its slot empty, a later one does not replace it.
+An alternative must be available, out of cooldown (the health view the tier resolution uses, so a quota-exhausted
+or cooled-down model or provider is never an arm) and allowed by the guard.
 
 Not eligible: a spawn with an explicit `model`, an agent with its own model, a resume,
 a tier or agent with effort `auto`, an agent outside `evaluate.agents`, a spawn with only
 one arm, and reviewers, whose verdicts are the rewards. A reviewer is a tier with
 `distinctVendor`, or an agent named `*-reviewer` or `adversarial-challenger`.
-Exploration covers spawns the plugin routes by tier (a `tier` parameter, or an agent whose
-tier moves it per spawn); an agent that only runs its own tier's model is not touched.
+Exploration covers every spawn that runs on a tier: one with a `tier` parameter, and one
+with none whose agent has its own tier (an `x-opencode-model-role` header or an `agents`
+mapping). The second kind gets a ledger record only while exploration is on and the spawn is
+eligible; with exploration off nothing changes.
 
-The guard comes first. Each alternative is judged as a spawn naming that model, so an
-expensive model is never an arm unless `guard.allowModels` lists it, and the chosen arm is
-judged again before it runs; a refusal falls back to the control.
+The guard comes first. An arm is a model the plugin picks, so the agent's own tier model
+does not exempt it: an expensive model, an effort variant included, is never an arm unless
+`guard.allowModels` lists it. The offered set is final before the draw, so `p` is always
+the probability under the arms actually offered.
 
 The ledger record of an eligible spawn gets `policy` (`explore-v1`), `eligible` (the arm
-labels, control first), `arm` and `p`, the probability of the arm drawn. A control
+labels, control first), `arm` and `p`, the probability of the arm drawn from the offered set. A control
 draw is logged too; without it the propensities cannot be corrected for. The model
 snapshot keeps the same facts, so a resume stays on the arm and does not redraw. The
 receipt keeps its rule and adds `exploring arm <model#variant>` when the arm is not the

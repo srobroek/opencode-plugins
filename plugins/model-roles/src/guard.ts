@@ -235,3 +235,11 @@ export function judgeModelOverride(facts: GuardFacts & { model: ModelRef }): Gua
   lines.push(`If the user asked for ${label(facts.model)}, add it to the srobroek.model-roles option guard.allowModels.`)
   return { allow: false, reason: lines.join("\n") }
 }
+
+/**
+ * Whether the guard lets the plugin itself pick `model` for a spawn (an exploration arm). Unlike
+ * `judgeModelOverride`, no pin exempts it: the model the plugin set on a tier's agent is not a
+ * user's pin, so an expensive model passes only when `guard.allowModels` lists it.
+ */
+export const allowsChosenModel = (guard: GuardOptions, options: Pick<Options, "classes">, model: ModelRef): boolean =>
+  !isExpensive(model, guard, options.classes) || listed(model, guard.allowModels)

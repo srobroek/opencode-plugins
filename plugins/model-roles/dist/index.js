@@ -1177,6 +1177,7 @@ function judgeModelOverride(facts) {
   return { allow: false, reason: lines.join(`
 `) };
 }
+var allowsChosenModel = (guard, options, model) => !isExpensive(model, guard, options.classes) || listed(model, guard.allowModels);
 
 // plugins/model-roles/src/spawn-role.ts
 var TIER_PARAM = "tier";
@@ -4175,6 +4176,12 @@ function formatUsage(report) {
   }
   return lines;
 }
+function usageDetailRows(row) {
+  return [
+    ...row.agents.map((a) => ({ title: a.agent, value: a.agent, description: usageBrief(a), disabled: true })),
+    ...(row.arms ?? []).map((a) => ({ title: `arm ${a.arm}`, value: `\x00arm:${a.arm}`, description: usageBrief(a), disabled: true }))
+  ];
+}
 
 // plugins/model-roles/src/rpc.ts
 import { Rpc } from "@opencode/plugin/rpc";
@@ -6086,7 +6093,7 @@ ${refs.size}`;
       }
       return receipt2;
     };
-    const exploreSpawn = async (event, target, role, control, pinned) => {
+    const exploreSpawn = (target, role, control, pinned) => {
       const meta = tierMeta(options, role);
       const spawn = { agent: target, explicitModel: false, pinned, resume: false, effortAuto: meta?.effort === "auto", distinctVendorTier: meta?.distinctVendor === true, armCount: 2 };
       if (!eligible(spawn, explorer.options))
@@ -6095,22 +6102,15 @@ ${refs.size}`;
         const candidate = parseCandidate(entry);
         return candidate?.kind === "model" ? [candidate.ref] : [];
       });
+      const health2 = view();
       const variantsOf = (model) => (available.find((m) => m.providerID === model.providerID && m.id === model.id)?.variants ?? []).map((v) => v.id);
-      const usable = (model) => unavailableReason(model, available) === undefined;
-      const first = arms(candidates, control.model, { variantsOf, allowed: usable }, explorer.options.maxArms);
-      const refused = new Set;
-      for (const arm of first.slice(1))
-        if (await judge(event, target, arm.model) !== undefined)
-          refused.add(arm.label);
-      const all = refused.size === 0 ? first : arms(candidates, control.model, { variantsOf, allowed: (m) => usable(m) && !refused.has(modelLabel(m)) }, explorer.options.maxArms);
+      const allowed = (model) => unavailableReason(model, available) === undefined && health2(model) === undefined && (guard2 === undefined || allowsChosenModel(guard2, options, model));
+      const all = arms(candidates, control.model, { variantsOf, allowed }, explorer.options.maxArms);
       if (!eligible({ ...spawn, armCount: all.length }, explorer.options))
         return;
-      let chosen = chooseArm(all, explorer.options.explore, exploreRandom);
-      const [controlArm] = all;
-      if (controlArm !== undefined && chosen.arm !== controlArm && await judge(event, target, chosen.arm.model) !== undefined)
-        chosen = { arm: controlArm, p: 1 - explorer.options.explore + chosen.p };
+      const chosen = chooseArm(all, explorer.options.explore, exploreRandom);
       const facts = exploreFacts(all, chosen);
-      if (chosen.arm === controlArm)
+      if (chosen.arm === all[0])
         return { facts };
       return { facts, tuned: { input: { ...control.input, model: chosen.arm.label }, model: chosen.arm.model } };
     };
@@ -6359,9 +6359,7 @@ ${refs.size}`;
         const control = tuned;
         let exploration;
         if (exploring(explorer.options) && isRecord11(plan.input)) {
-          exploration = await exploreSpawn(event, target, plan.role, control, pinned).catch(() => {
-            return;
-          });
+          exploration = exploreSpawn(target, plan.role, control, pinned);
           if (exploration?.tuned !== undefined) {
             tuned = exploration.tuned;
             event.input = tuned.input;
@@ -6403,7 +6401,23 @@ ${refs.size}`;
       const reason = await judge(event, target, undefined);
       if (reason === undefined) {
         const ownModel = pin ?? (own === undefined ? undefined : resolveTier(options, available, own, view()).model);
-        expectChild(event.id, event, target, ownModel, pin === undefined ? own : undefined);
+        let exploration;
+        if (pin === undefined && own !== undefined && ownModel !== undefined && exploring(explorer.options) && isRecord11(plan.input)) {
+          exploration = exploreSpawn(target, own, { input: plan.input, model: ownModel }, false);
+          if (exploration?.tuned !== undefined)
+            event.input = exploration.tuned.input;
+          if (exploration !== undefined)
+            pending.set(event.id, {
+              parentID: event.sessionID,
+              agent: target,
+              role: own,
+              model: exploration.tuned?.model ?? ownModel,
+              revision: configRevision(options),
+              at: Date.now(),
+              explore: exploration.facts
+            });
+        }
+        expectChild(event.id, event, target, exploration?.tuned?.model ?? ownModel, pin === undefined ? own : undefined, exploration?.facts);
         if (pin !== undefined) {
           const receipt2 = bypass("agent-pin", pin, "the agent's own model (config or frontmatter) wins over tier");
           if (receipt2 !== undefined)
@@ -6414,7 +6428,9 @@ ${refs.size}`;
             const receipt2 = tierReceipt(target, { source: "agent", name: own }, { input: {}, model });
             if (agent.model !== undefined && !sameModel(agent.model, model))
               receipt2.warnings = [...receipt2.warnings, `the agent still runs ${modelLabel(agent.model)}: its model has not caught up with the tier`];
-            await recordReceipt(receipt2);
+            if (exploration?.tuned !== undefined)
+              Object.assign(receipt2, { model: modelLabel(exploration.tuned.model), explore: exploration.facts.arm });
+            await recordSpawnReceipt(event.id, receipt2);
           }
         }
         return;
@@ -6894,6 +6910,7 @@ export {
   agentHash,
   agentTier,
   agentTierError,
+  allowsChosenModel,
   applyDraft,
   applyEdit2 as applyEdit,
   applyFrozenTierParam,
@@ -7056,6 +7073,7 @@ export {
   toJsonSchema,
   touchesTests,
   usageBrief,
+  usageDetailRows,
   usageLine,
   userPin,
   validateTierConfig,

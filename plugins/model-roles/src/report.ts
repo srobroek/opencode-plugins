@@ -234,3 +234,13 @@ export function formatUsage(report: UsageReport): string[] {
   }
   return lines
 }
+
+export type UsageRow = { title: string; value: string; description: string; disabled: true }
+
+/** The `/tiers` detail rows of one tier: its agents, then its exploration arms when it has any. */
+export function usageDetailRows(row: TierUsage): UsageRow[] {
+  return [
+    ...row.agents.map((a) => ({ title: a.agent, value: a.agent, description: usageBrief(a), disabled: true as const })),
+    ...(row.arms ?? []).map((a) => ({ title: `arm ${a.arm}`, value: `\u0000arm:${a.arm}`, description: usageBrief(a), disabled: true as const })),
+  ]
+}

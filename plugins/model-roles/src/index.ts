@@ -35,7 +35,7 @@ import {
   readClassification,
 } from "./classify.ts"
 import { type ConfigFile, type EffectiveConfig, effectiveConfig, globalConfigDir, pickConfigFile, readConfigFiles, readProjectFiles, readTiers, writeAgentTier, writeTier } from "./config-edit.ts"
-import { type Arm, arms, chooseArm, type ExploreFacts, eligible, exploreFacts, exploring, parseExplore } from "./explore.ts"
+import { arms, chooseArm, type ExploreFacts, eligible, exploreFacts, exploring, parseExplore } from "./explore.ts"
 import {
   CONTEXT_FALLBACK_REASON,
   type ContextLimits,
@@ -56,6 +56,7 @@ import {
   switchNote,
 } from "./fallback.ts"
 import {
+  allowsChosenModel,
   type GuardAgent,
   type GuardModel,
   isExpensive,
@@ -1394,16 +1395,16 @@ export default Plugin.define({
     /**
      * Opt-in exploration (explore.ts), called only when `evaluate` turned it on. For an eligible fresh
      * spawn it draws an arm among the tier's own alternatives and returns the facts to log; `tuned` is
-     * set when the arm differs from the control. The guard's judgement of every arm is read first, and
-     * the chosen arm is judged again, so exploration never goes past the guard.
+     * set when the arm differs from the control. The offered set is final before the draw: an arm must be
+     * available, out of cooldown (the control's own health view) and allowed by the guard as a model the
+     * plugin picks, with no pin exemption. So `p` is always the probability under the arms offered.
      */
-    const exploreSpawn = async (
-      event: { sessionID: string; agent: string },
+    const exploreSpawn = (
       target: string,
       role: string,
       control: Tuned,
       pinned: boolean,
-    ): Promise<{ facts: ExploreFacts; tuned?: Tuned } | undefined> => {
+    ): { facts: ExploreFacts; tuned?: Tuned } | undefined => {
       const meta = tierMeta(options, role)
       const spawn = { agent: target, explicitModel: false, pinned, resume: false, effortAuto: meta?.effort === "auto", distinctVendorTier: meta?.distinctVendor === true, armCount: 2 }
       if (!eligible(spawn, explorer.options)) return undefined
@@ -1411,19 +1412,15 @@ export default Plugin.define({
         const candidate = parseCandidate(entry)
         return candidate?.kind === "model" ? [candidate.ref] : []
       })
+      const health = view()
       const variantsOf = (model: ModelRef) => (available.find((m) => m.providerID === model.providerID && m.id === model.id)?.variants ?? []).map((v) => v.id)
-      const usable = (model: ModelRef) => unavailableReason(model, available) === undefined
-      const first = arms(candidates, control.model, { variantsOf, allowed: usable }, explorer.options.maxArms)
-      const refused = new Set<string>()
-      for (const arm of first.slice(1)) if ((await judge(event, target, arm.model)) !== undefined) refused.add(arm.label)
-      const all: Arm[] = refused.size === 0 ? first : arms(candidates, control.model, { variantsOf, allowed: (m) => usable(m) && !refused.has(modelLabel(m)) }, explorer.options.maxArms)
+      const allowed = (model: ModelRef) =>
+        unavailableReason(model, available) === undefined && health(model) === undefined && (guard === undefined || allowsChosenModel(guard, options, model))
+      const all = arms(candidates, control.model, { variantsOf, allowed }, explorer.options.maxArms)
       if (!eligible({ ...spawn, armCount: all.length }, explorer.options)) return undefined
-      let chosen = chooseArm(all, explorer.options.explore, exploreRandom)
-      const [controlArm] = all
-      if (controlArm !== undefined && chosen.arm !== controlArm && (await judge(event, target, chosen.arm.model)) !== undefined)
-        chosen = { arm: controlArm, p: 1 - explorer.options.explore + chosen.p }
+      const chosen = chooseArm(all, explorer.options.explore, exploreRandom)
       const facts = exploreFacts(all, chosen)
-      if (chosen.arm === controlArm) return { facts }
+      if (chosen.arm === all[0]) return { facts }
       return { facts, tuned: { input: { ...control.input, model: chosen.arm.label }, model: chosen.arm.model } }
     }
 
@@ -1762,7 +1759,7 @@ export default Plugin.define({
         // Plug point of opt-in exploration: the tier is resolved and `model#variant` is final; off, this is skipped.
         let exploration: { facts: ExploreFacts; tuned?: Tuned } | undefined
         if (exploring(explorer.options) && isRecord(plan.input)) {
-          exploration = await exploreSpawn(event, target, plan.role, control, pinned).catch(() => undefined)
+          exploration = exploreSpawn(target, plan.role, control, pinned)
           if (exploration?.tuned !== undefined) {
             tuned = exploration.tuned
             event.input = tuned.input
@@ -1801,7 +1798,23 @@ export default Plugin.define({
       if (reason === undefined) {
         // The spawn goes ahead on the agent's own model: its pin, or the model this plugin set for its tier, else the host decides.
         const ownModel = pin ?? (own === undefined ? undefined : resolveTier(options, available, own, view()).model)
-        expectChild(event.id, event, target, ownModel, pin === undefined ? own : undefined)
+        // Opt-in exploration reaches an agent on its own tier through the same pending entry as an explicit tier.
+        let exploration: { facts: ExploreFacts; tuned?: Tuned } | undefined
+        if (pin === undefined && own !== undefined && ownModel !== undefined && exploring(explorer.options) && isRecord(plan.input)) {
+          exploration = exploreSpawn(target, own, { input: plan.input, model: ownModel }, false)
+          if (exploration?.tuned !== undefined) event.input = exploration.tuned.input
+          if (exploration !== undefined)
+            pending.set(event.id, {
+              parentID: event.sessionID,
+              agent: target,
+              role: own,
+              model: exploration.tuned?.model ?? ownModel,
+              revision: configRevision(options),
+              at: Date.now(),
+              explore: exploration.facts,
+            })
+        }
+        expectChild(event.id, event, target, exploration?.tuned?.model ?? ownModel, pin === undefined ? own : undefined, exploration?.facts)
         if (pin !== undefined) {
           const receipt = bypass("agent-pin", pin, "the agent's own model (config or frontmatter) wins over tier")
           if (receipt !== undefined) await recordReceipt(receipt)
@@ -1811,7 +1824,8 @@ export default Plugin.define({
             const receipt = tierReceipt(target, { source: "agent", name: own }, { input: {}, model })
             if (agent.model !== undefined && !sameModel(agent.model, model))
               receipt.warnings = [...receipt.warnings, `the agent still runs ${modelLabel(agent.model)}: its model has not caught up with the tier`]
-            await recordReceipt(receipt)
+            if (exploration?.tuned !== undefined) Object.assign(receipt, { model: modelLabel(exploration.tuned.model), explore: exploration.facts.arm })
+            await recordSpawnReceipt(event.id, receipt)
           }
         }
         return
