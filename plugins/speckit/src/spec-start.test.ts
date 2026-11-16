@@ -137,6 +137,16 @@ test("fresh decline requires separate consent for an existing gated run", async 
   })
 })
 
+test("a yes to the migration question cannot stand in for the pending approvals choice", async () => {
+  // The user declined approvals (approvals=no), got MIGRATION_REQUIRED, and said yes to migrating.
+  const run = gatedRun({ spec_dir: `specs/${spec}`, human_approvals: "yes", autonomous: "no" })
+  const { command, writes } = ledger(run)
+  await expect(startSpec({ ...options, approvals: "yes", migrate: true, decision: "yes" }, command)).rejects.toThrow(
+    "approvals=no",
+  )
+  expect(writes()).toEqual([])
+})
+
 test("migration refuses a gate without scoped ownership before any write", async () => {
   const root = runRoot({ spec_dir: `specs/${spec}`, human_approvals: "yes", autonomous: "no" })
   const command: Command = async (args) => {

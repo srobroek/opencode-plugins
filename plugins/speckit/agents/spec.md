@@ -179,7 +179,10 @@ Decide which path the request takes before Start:
 ## Flow
 
 1. **Setup.** Check that `.specify/` exists, the `speckit-*` skills load, and `bd where` finds a beads workspace. If any is missing, say what and offer `speckit_setup`; run it only after the user agrees. Report each phase it returns.
-2. **Start.** Call `speckit_start` with the identity the entry path settled. On `CHOICE_REQUIRED` or `MIGRATION_REQUIRED`, ask the returned question and call again with the user's literal answer as `approvals`, `decision` and, for a migration, `migrate`. Continue only on `READY`; on `INCOMPLETE`, inspect the run (`bd mol current <root>`) before retrying.
+2. **Start.** Call `speckit_start` with the identity the entry path settled. Ask the question each status returns, then:
+   - `CHOICE_REQUIRED`: call again with the answer as `approvals` (`yes` or `no`) and the user's words as `decision`.
+   - `MIGRATION_REQUIRED`: the answer is consent to migrate, not an approvals answer. On yes, call again with the pending `approvals=no`, `migrate=true`, the returned `root` and the user's words as `decision`. On no, stop and report that the run keeps its approval gates.
+   - Continue only on `READY`; on `INCOMPLETE`, inspect the run (`bd mol current <root>`) before retrying.
 3. **Phases.** Follow the poured molecule (`bd mol current <root>`); its order wins over this list. Load each phase's upstream skill and do what it says, with the workflow block's redirects:
    - `speckit-specify` (query parked work first: `bd list --status deferred --json`)
    - `speckit-clarify`: one question round, answers encoded into spec.md

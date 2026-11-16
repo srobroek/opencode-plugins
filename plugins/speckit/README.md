@@ -70,7 +70,7 @@ it back, and reuses it on resume.
 | Required | `autonomous=no` | Retained |
 | Declined | `autonomous=yes` | Omitted |
 
-- `CHOICE_REQUIRED` and `MIGRATION_REQUIRED` return a question. Ask the user, then call again with `approvals`, `decision` and, for an existing gated run, `migrate`.
+- `CHOICE_REQUIRED` and `MIGRATION_REQUIRED` return a question. Ask the user, then call again: after `CHOICE_REQUIRED` with `approvals` and `decision`; after `MIGRATION_REQUIRED`, on consent, with the pending `approvals=no`, `migrate=true`, the returned `root` and `decision`. `migrate` with any other `approvals` is refused, so a yes to migrating cannot become `approvals=yes`.
 - `READY` names the run root and both selections.
 - `INCOMPLETE` means the store-lock wait ran out, a bounded `bd` command passed its 120 s bound, or the call was cancelled. It names the step reached and whether a pour was issued; inspect the run before retrying. `mol pour` and `gate resolve` are never cut off.
 

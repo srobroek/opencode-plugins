@@ -249,6 +249,11 @@ export async function startSpec(input: StartOptions, command: Command): Promise<
   const profile = options.profile ?? "speckit-feature"
   if (!PROFILES.includes(profile)) throw new Error("Unknown SpecKit profile")
   const requested = approval(options.approvals)
+  // Migration only ever drops routine approvals, so its consent travels with the pending no.
+  if (options.migrate !== undefined && requested !== "no")
+    throw new Error(
+      "migrate answers MIGRATION_REQUIRED only: send it with approvals=no (the pending choice) and the returned root, never the migration answer as approvals",
+    )
   // Candidates by spec identity alone, so a legacy root without spec_dir is still found;
   // its metadata is validated only after one root is selected.
   const roots = issueList(await command(["query", `spec_id="${options.spec}"`, "--limit", "0"])).filter(isRunRoot)

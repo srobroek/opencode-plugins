@@ -56,9 +56,16 @@ export const START_INPUT = {
     workspace: { type: "string", description: "Repository root with .beads; defaults to the session directory" },
     profile: { type: "string", enum: [...PROFILES], description: "default speckit-feature" },
     root: { type: "string", description: "Existing run root; required when several runs exist" },
-    approvals: { type: "string", enum: ["yes", "no"], description: "The user's explicit answer, never inferred" },
+    approvals: {
+      type: "string",
+      enum: ["yes", "no"],
+      description: "The user's answer to the approval question; on a migration keep the pending no",
+    },
     decision: { type: "string", description: "The user's decision, kept in history" },
-    migrate: { type: "boolean", description: "The user's separate consent to migrate a gated run" },
+    migrate: {
+      type: "boolean",
+      description: "Only after MIGRATION_REQUIRED: true for the user's yes to migrating, with approvals=no and root",
+    },
   },
   additionalProperties: false,
 } as const

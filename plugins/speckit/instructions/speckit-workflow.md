@@ -50,6 +50,7 @@ DEFAULT Track position with `bd mol current <root-id>`.
 MUST Use the `speckit_start` tool for workflow start and resume.
 MUST On `CHOICE_REQUIRED` or `MIGRATION_REQUIRED`, ask the returned question
   and supply only the explicit user answer and decision when invoking it again.
+  A migration answer is `migrate`, sent with the pending `approvals=no` and root.
 SPEC START (new or resumed spec lifecycle)
 MUST Before pouring, bonding, or advancing, find the spec's existing molecule root;
   read its metadata if one exists.
