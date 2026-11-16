@@ -2,6 +2,7 @@ import { expect, test } from "bun:test"
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
+import { permissionEffect, readAgentFile } from "@srobroek/opencode-lib/agent-files"
 import type { SupervisedRun } from "@srobroek/opencode-lib/subprocess"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
 import plugin, { createPlugin, SCAN_TOOL, SETUP_TOOL } from "./index.ts"
@@ -138,4 +139,10 @@ test("adds no servers outside a frontend project", async () => {
   const fake = createFakeContext()
   await plugin.setup(fake.context)
   expect(fake.mcp.size).toBe(0)
+})
+
+test("ui-implementer may spawn debug and still denies every other subagent", () => {
+  const { permissions } = readAgentFile(join(import.meta.dir, "../agents/ui-implementer.md"))
+  expect(permissionEffect(permissions, "subagent", "debug")).toBe("allow")
+  for (const other of ["coder", "ui-ux-specialist", "explore"]) expect(permissionEffect(permissions, "subagent", other)).toBe("deny")
 })
