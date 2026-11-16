@@ -33,7 +33,7 @@ break, usually revealing an isolation bug. Shared files, ports, and databases st
 need isolation. Keep retries off by default. Use plain `cargo test` only when nextest
 cannot be installed.
 
-Unused-dependency tools: keep both `cargo-shear` and `cargo-machete` in view and say which one a project runs. Use `cargo-shear` (AST-based, understands features and workspaces, can fix) as the gate. Use `cargo-machete` (regex, no build) for a quick local pass on a large tree or where shear is not installable, and accept its false positives; sources: [cargo-shear](https://github.com/Boshen/cargo-shear), [cargo-machete](https://github.com/bnjbvr/cargo-machete). Never gate on both.
+Unused-dependency tools: keep both `cargo-shear` and `cargo-machete` available and say which one a project runs. Their READMEs describe different trade-offs. `cargo-machete` calls itself "fast (yet imprecise)" and documents a false-positives section. `cargo-shear` parses sources with rust-analyzer's parser, checks all workspace members and offers `--fix`; it does not evaluate `cfg`, so references in disabled branches count as usage, and it can miss macro-generated references unless you pass `--expand` (nightly). Use `cargo-shear` as the gate. Use `cargo-machete` for a quick local pass and expect to triage false positives; sources: [cargo-shear README](https://github.com/Boshen/cargo-shear#readme), [cargo-machete README](https://github.com/bnjbvr/cargo-machete#readme). Never gate on both.
 
 Keep the scaffold's configured deny gate: deny covers advisories, licences, bans and
 sources. Unused dependencies use one tool (`cargo-shear` by default, `cargo-machete` for
@@ -86,3 +86,13 @@ migration instead.
 - **Review check:** any of these: an `allow` or `expect` without a reason, a crate-level allow not marked `TEMPORARY` with a task or one that grew, an unwrap or index in a parser, a missing `-D warnings`, test exemptions set with attributes.
 
 Error, logging, strings and command-line rules: `lang-rust-libraries`' `references/standards.md`. Crate layout rules: `lang-rust-packaging`.
+
+## Results, errors and numeric conversions
+
+- **Rule:** never discard a `#[must_use]` value or a `Result` with `.ok()`, `let _ =` or an unused binding just to satisfy a lint; handle it or propagate it. Where ignoring is right, write `let _ = ...` with a comment, or `#[expect(..., reason = "...")]`, that names why the failure is harmless. Writes, flushes and filesystem or cache operations are never silently ignored.
+- **Rule:** `map_err` keeps the source error: wrap it (`#[source]`, `#[from]`, or a field holding the cause). A variant that carries no cause (`.map_err(|_| Error::Io)`) is a defect.
+- **Rule:** lossless widening uses `From`/`into` (or a documented widening helper); narrowing uses `try_from` and returns an error; a saturating or truncating `as` cast is acceptable only where saturation or truncation is the specified behaviour, never as a lint workaround.
+- **Lints:** `let_underscore_must_use` and `let_underscore_untyped` (restriction) flag a discarded must-use value; `map_err_ignore` (restriction) flags `map_err(|_| ...)`; `unused_io_amount` (correctness) flags an ignored read or write count; `cast_lossless`, `cast_possible_truncation`, `cast_possible_wrap`, `cast_sign_loss` and `cast_precision_loss` (pedantic) flag lossy `as` casts. Enable the restriction lints deliberately, as in the baseline above.
+- **Why:** an ignored `Result` turns a failed write or cache operation into silent data loss; a dropped source error removes the cause from the report; a lossy cast changes a value without a signal.
+- **Source:** [`#[must_use]`](https://doc.rust-lang.org/reference/attributes/diagnostics.html#the-must_use-attribute), [`TryFrom`](https://doc.rust-lang.org/std/convert/trait.TryFrom.html), [`From`](https://doc.rust-lang.org/std/convert/trait.From.html), [API Guidelines C-GOOD-ERR](https://rust-lang.github.io/api-guidelines/interoperability.html#error-types-are-meaningful-and-well-behaved-c-good-err), [Clippy lint list](https://rust-lang.github.io/rust-clippy/master/index.html).
+- **Review check:** `.ok()`, `let _ =` or an unused binding on a `Result` or write, flush, filesystem or cache call with no comment or reasoned `expect`; `map_err` that drops the source; an `as` cast between numeric types with no stated reason.

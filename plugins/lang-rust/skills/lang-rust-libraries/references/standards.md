@@ -11,7 +11,8 @@ Checked 2026-11-16.
 - **Hand-written error type:** acceptable for a tiny closed set (up to about three variants), for `no_std`, when stable error codes must be the type's identity (see User-facing strings), or when the derive's dependency is not worth it. The type still implements `std::error::Error` and `Display` and keeps `source()`.
 - **Why:** typed errors let callers match on causes; erased errors are for the edge that only reports. `non_exhaustive` is the Rust API Guidelines' future-proofing rule. A panic on untrusted input is a remotely triggerable crash.
 - **Source:** [thiserror](https://docs.rs/thiserror), [anyhow](https://docs.rs/anyhow), [API Guidelines: future proofing](https://rust-lang.github.io/api-guidelines/future-proofing.html), [`non_exhaustive`](https://doc.rust-lang.org/reference/attributes/type_system.html#the-non_exhaustive-attribute).
-- **Review check:** a library returns `anyhow` or a string error; a public contract type lacks `#[non_exhaustive]`; `unwrap`/`expect` on untrusted input; a hand-written error with no stated reason.
+- **Rule:** `map_err` keeps the source error (`#[source]`, `#[from]` or a wrapping field); the full rule, with ignored-`Result` and numeric-conversion rules, is in `lang-rust-quality`.
+- **Review check:** any of these: a library returns `anyhow` or a string error, a `map_err` drops its source, a public contract type lacks `#[non_exhaustive]`, `unwrap`/`expect` on untrusted input, a hand-written error with no stated reason.
 
 ## Rendering diagnostics
 
