@@ -2798,12 +2798,13 @@ function takeOverIfAbandoned(lock, steal) {
     } catch {}
   }
 }
+var MAX_RECORD_OWNER_CHARS = 256;
 function holderNow(owner, token, writer, writerStart = writer === undefined ? undefined : processStartIdentity(writer)) {
   const taken = Date.now();
   return {
     host: HOST,
     pid: process.pid,
-    owner,
+    owner: owner.slice(0, MAX_RECORD_OWNER_CHARS),
     token,
     taken,
     expires: taken + leaseMs,

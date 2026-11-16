@@ -809,6 +809,76 @@ describe("waiting for a busy ledger", () => {
     }
   })
 
+  test("an oversized owner still releases and a later acquisition succeeds", async () => {
+    const store = mkdtempSync(join(Bun.env.TMPDIR ?? "/tmp", "beads-lock-big-owner-"))
+    try {
+      const owner = `spec-start:${"x".repeat(200_000)}`
+      expect((await hold(store, owner, 1000)).kind).toBe("held")
+      expect(readFileSync(join(store, "omp-embedded-write.lock"), "utf8").length).toBeLessThan(2048)
+      release(store, owner)
+      expect(existsSync(join(store, "omp-embedded-write.lock"))).toBe(false)
+      expect((await hold(store, "next", 1000)).kind).toBe("held")
+      release(store, "next")
+    } finally {
+      rmSync(store, { recursive: true, force: true })
+    }
+  })
+
+  describe.each([
+    ["a FIFO", (path: string) => Bun.spawnSync(["mkfifo", path])],
+    ["a symlink to /dev/zero", (path: string) => symlinkSync("/dev/zero", path)],
+    ["an oversized file", (path: string) => writeFileSync(path, "x".repeat(70_000))],
+  ])("a steal-lock path that is %s", (_name, plant) => {
+    const withHostileSteal = async (run: (store: string, root: string) => Promise<void>): Promise<void> => {
+      const root = mkdtempSync(join(Bun.env.TMPDIR ?? "/tmp", "beads-steal-hostile-"))
+      const store = join(root, ".beads")
+      mkdirSync(store, { recursive: true })
+      writeFileSync(join(store, "metadata.json"), "{}")
+      // A live main hold forces the EEXIST path; the hostile steal path is what gets judged.
+      writeFileSync(
+        join(store, "omp-embedded-write.lock"),
+        JSON.stringify({ host, pid: process.pid, owner: "other", token: "t", taken: Date.now(), expires: Date.now() + 60_000 }),
+      )
+      plant(join(store, "omp-embedded-write-steal.lock"))
+      try {
+        await run(store, root)
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    }
+
+    test("hold refuses at once", async () => {
+      await withHostileSteal(async (store) => {
+        const started = Date.now()
+        const result = await hold(store, "waiter", 20_000)
+        if (result.kind !== "failed") throw new Error("expected a refusal")
+        expect(Date.now() - started).toBeLessThan(2000)
+        expect(result.reason).toContain("not a small regular file")
+        expect(result.reason).toContain("omp-embedded-write-steal.lock")
+      })
+    })
+
+    test("the runner refuses without starting the write", async () => {
+      await withHostileSteal(async (store, root) => {
+        const marker = join(root, "ran")
+        const started = Date.now()
+        const code = await runEmbeddedWriter([
+          "--beads-store",
+          store,
+          "--beads-wait-ms",
+          "20000",
+          "--",
+          "/bin/sh",
+          "-c",
+          `touch ${marker}`,
+        ])
+        expect(code).not.toBe(0)
+        expect(existsSync(marker)).toBe(false)
+        expect(Date.now() - started).toBeLessThan(3000)
+      })
+    })
+  })
+
   describe.each([
     ["a FIFO", (path: string) => Bun.spawnSync(["mkfifo", path])],
     ["a symlink to /dev/zero", (path: string) => symlinkSync("/dev/zero", path)],

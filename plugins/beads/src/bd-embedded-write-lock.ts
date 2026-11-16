@@ -1263,6 +1263,14 @@ function takeOverIfAbandoned(lock: string, steal: string): void {
   }
 }
 
+/**
+ * Longest owner name written to a lock record. Owners are caller-supplied (a spec start
+ * names its spec), and the record must stay far below the bounded reader's 64 KiB cap or
+ * `stillOurs` could not recognise the lock to release it. Ownership itself is the token
+ * and the in-process registry, so the stored name is only a diagnostic.
+ */
+const MAX_RECORD_OWNER_CHARS = 256
+
 function holderNow(
   owner: string,
   token: string,
@@ -1273,7 +1281,7 @@ function holderNow(
   return {
     host: HOST,
     pid: process.pid,
-    owner,
+    owner: owner.slice(0, MAX_RECORD_OWNER_CHARS),
     token,
     taken,
     expires: taken + leaseMs,
