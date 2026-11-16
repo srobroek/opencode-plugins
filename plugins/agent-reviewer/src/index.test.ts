@@ -90,6 +90,7 @@ describe("agent-reviewer", () => {
     for (const action of ["webfetch", "websearch"]) expect(permissionEffect(code, action)).toBe("deny")
     expect(permissionEffect(code, "skill", "ast-grep-search")).toBe("allow")
     expect(permissionEffect(code, "skill", "lang-rust")).toBe("allow")
+    expect(permissionEffect(code, "skill", "delivery-git-workflow")).toBe("allow")
   })
 
   test("security-reviewer reads code only: no shell, no web", async () => {

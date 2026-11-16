@@ -116,6 +116,8 @@ Never put secrets in the file; use `{env:NAME}` or the `project-secrets` skill.
 - Release: `trunk-dev-release-setup`; release-please is the GitHub alternative.
 - CI on GitHub: `ci-github-actions` (one `ci-gate` job, pinned actions, least
   permissions) plus the language's CI notes in its plugin skills.
+- Branch protection, the merge queue and the CI lanes on GitHub: load `delivery-git-workflow`
+  and read its `repo-setup-parallel-agents.md` reference.
 - Worktrees: `references/worktrees.md` (the `worktrunk` plugin). For Rust, never set a global `CARGO_TARGET_DIR`
   (`ops-no-global-cargo-target`); caches follow `ops-toolchain-cache-policy`.
 - Hooks, CI jobs, release-please and Renovate defaults to offer: `references/ci-hooks.md`.

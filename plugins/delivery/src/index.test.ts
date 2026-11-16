@@ -207,6 +207,12 @@ describe("agents", () => {
     expect(implementer.model).toBeUndefined()
     expect(implementer.request).toEqual({ headers: { "x-opencode-model-role": "standard" } })
     expect(implementer.permissions).toContainEqual({ action: "subagent", resource: "researcher", effect: "allow" })
+    for (const id of ["implementer", "implementer-high"])
+      expect(fake.agents.get(id)?.permissions).toContainEqual({
+        action: "skill",
+        resource: "delivery-git-workflow",
+        effect: "allow",
+      })
   })
 
   const withHost = (fake: ReturnType<typeof createFakeContext>, plugins: unknown[]) => {
