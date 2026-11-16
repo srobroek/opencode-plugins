@@ -238,6 +238,604 @@ async function registerModeReminders(ctx, modes, options = {}) {
   };
 }
 
+// plugins/lib/src/shell-tokenizer.ts
+var SEPARATORS = new Set([";", "&", "|", "(", ")", `
+`]);
+function token(value, startsQuoted = false, sawQuote = false) {
+  return { value, startsQuoted, sawQuote };
+}
+function tokenizeShell(command, options = {}) {
+  if (typeof command !== "string")
+    return [];
+  const out = [];
+  let current = "";
+  let started = false;
+  let startsQuoted = false;
+  let sawQuote = false;
+  let quote = null;
+  const pending = [];
+  const flush = () => {
+    if (!started)
+      return;
+    out.push(token(current, startsQuoted, sawQuote));
+    current = "";
+    started = false;
+    startsQuoted = false;
+    sawQuote = false;
+  };
+  for (let i = 0;i < command.length; i++) {
+    const ch = command[i];
+    if (quote !== null) {
+      if (ch === quote) {
+        quote = null;
+        continue;
+      }
+      current += ch;
+      started = true;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      if (!started)
+        startsQuoted = true;
+      started = true;
+      sawQuote = true;
+      quote = ch;
+      continue;
+    }
+    if (ch === "\\" && i + 1 < command.length) {
+      if (options.preserveBackslashes)
+        current += ch;
+      current += command[++i];
+      started = true;
+      continue;
+    }
+    if (ch === "$" && command[i + 1] === "(") {
+      flush();
+      out.push(token("$("));
+      i++;
+      continue;
+    }
+    if (ch === "<" && command[i + 1] === "<" && command[i + 2] === "<") {
+      flush();
+      out.push(token("<<<"));
+      i += 2;
+      continue;
+    }
+    if (ch === "<" && command[i + 1] === "<") {
+      const operator = hereDocumentOperator(command, i);
+      if (operator !== null) {
+        flush();
+        pending.push(operator);
+        i = operator.end - 1;
+        continue;
+      }
+    }
+    if (ch === `
+`) {
+      flush();
+      out.push(token(ch));
+      let bodyStart = i + 1;
+      while (pending.length > 0) {
+        const document = pending.shift();
+        if (document === undefined)
+          break;
+        const body = hereDocumentBody(command, bodyStart, document);
+        if (!document.quoted) {
+          const source = command.slice(bodyStart, body.bodyEnd);
+          if (options.hereDocumentSubstitutionsOnly)
+            out.push(...substitutions(source, options));
+          else
+            out.push(...tokenizeShell(source, options));
+        }
+        i = body.terminatorEnd;
+        bodyStart = i + 1;
+      }
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      flush();
+      continue;
+    }
+    if (SEPARATORS.has(ch)) {
+      flush();
+      out.push(token(ch));
+      continue;
+    }
+    current += ch;
+    started = true;
+  }
+  flush();
+  return out;
+}
+function shellQuoteBalanced(command) {
+  if (typeof command !== "string")
+    return true;
+  let quote = null;
+  for (let i = 0;i < command.length; i++) {
+    const ch = command[i];
+    if (quote !== null) {
+      if (ch === quote)
+        quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'")
+      quote = ch;
+    else if (ch === "\\")
+      i++;
+  }
+  return quote === null;
+}
+function hereDocumentOperator(command, start) {
+  let i = start + 2;
+  const stripTabs = command[i] === "-";
+  if (stripTabs)
+    i++;
+  while (command[i] === " " || command[i] === "\t")
+    i++;
+  let delimiter = "";
+  let quoted = false;
+  let quote = null;
+  while (i < command.length) {
+    const ch = command[i];
+    if (quote !== null) {
+      if (ch === quote) {
+        quote = null;
+        i++;
+        continue;
+      }
+      delimiter += ch;
+      i++;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quoted = true;
+      quote = ch;
+      i++;
+      continue;
+    }
+    if (ch === "\\" && i + 1 < command.length) {
+      quoted = true;
+      delimiter += command[i + 1];
+      i += 2;
+      continue;
+    }
+    if (/\s|[;&|<>()]/.test(ch))
+      break;
+    delimiter += ch;
+    i++;
+  }
+  if (quote !== null || delimiter.length === 0)
+    return null;
+  return { delimiter, stripTabs, quoted, end: i };
+}
+function hereDocumentBody(command, from, document) {
+  let cursor = from;
+  while (cursor < command.length) {
+    let next = command.indexOf(`
+`, cursor);
+    if (next === -1)
+      next = command.length;
+    let line = command.slice(cursor, next);
+    if (document.stripTabs)
+      line = line.replace(/^\t+/, "");
+    if (line === document.delimiter)
+      return { bodyEnd: cursor, terminatorEnd: next };
+    if (next === command.length)
+      break;
+    cursor = next + 1;
+  }
+  return { bodyEnd: command.length, terminatorEnd: command.length };
+}
+function substitutions(body, options) {
+  const out = [];
+  for (let i = 0;i < body.length; i++) {
+    const ch = body[i];
+    if (ch === "\\") {
+      i++;
+      continue;
+    }
+    let inner;
+    if (ch === "$" && body[i + 1] === "(") {
+      const end = substitutionEnd(body, i + 2);
+      inner = body.slice(i + 2, end);
+      i = end;
+      if (inner.startsWith("("))
+        continue;
+    } else if (ch === "`") {
+      let end = i + 1;
+      while (end < body.length && body[end] !== "`")
+        end += body[end] === "\\" ? 2 : 1;
+      inner = body.slice(i + 1, end);
+      i = end;
+    } else {
+      continue;
+    }
+    out.push(token("$("), ...tokenizeShell(inner, options), token(")"));
+  }
+  return out;
+}
+function substitutionEnd(body, from) {
+  let depth = 1;
+  let quote = null;
+  for (let i = from;i < body.length; i++) {
+    const ch = body[i];
+    if (quote !== null) {
+      if (ch === quote)
+        quote = null;
+      else if (ch === "\\" && quote === '"')
+        i++;
+      continue;
+    }
+    if (ch === "\\")
+      i++;
+    else if (ch === '"' || ch === "'")
+      quote = ch;
+    else if (ch === "(")
+      depth++;
+    else if (ch === ")" && --depth === 0)
+      return i;
+  }
+  return body.length;
+}
+
+// plugins/lib/src/command-words.ts
+var NONE = new Set;
+var WRAPPERS = new Map([
+  [
+    "sudo",
+    {
+      valued: new Set([
+        "-C",
+        "-D",
+        "-g",
+        "-h",
+        "-p",
+        "-R",
+        "-r",
+        "-T",
+        "-t",
+        "-U",
+        "-u",
+        "--chdir",
+        "--chroot",
+        "--close-from",
+        "--command-timeout",
+        "--group",
+        "--host",
+        "--other-user",
+        "--prompt",
+        "--role",
+        "--type",
+        "--user"
+      ]),
+      chdir: new Set(["-D", "--chdir"])
+    }
+  ],
+  ["doas", { valued: new Set(["-C", "-u"]) }],
+  [
+    "env",
+    {
+      valued: new Set(["-C", "-L", "-P", "-S", "-U", "-u", "--chdir", "--split-string", "--unset"]),
+      chdir: new Set(["-C", "--chdir"]),
+      split: new Set(["-S", "--split-string"]),
+      assignments: true
+    }
+  ],
+  ["nice", { valued: new Set(["-n", "--adjustment"]) }],
+  ["timeout", { valued: new Set(["-k", "-s", "--kill-after", "--signal"]), operands: 1 }],
+  ["stdbuf", { valued: new Set(["-e", "-i", "-o", "--error", "--input", "--output"]) }],
+  ["exec", { valued: new Set(["-a"]) }],
+  ["command", { valued: NONE, lookup: new Set(["-V", "-v"]) }],
+  ["time", { valued: new Set(["-f", "-o", "--format", "--output"]) }],
+  ["nohup", { valued: NONE }]
+]);
+
+// plugins/lib/src/tool-targets.ts
+var WRITE_TOOLS = new Set(["edit", "write", "patch"]);
+var READ_TOOLS = new Set(["read"]);
+var SHELL_TOOL = "shell";
+var SHELL_ALIASES = new Set(["bash", "Bash"]);
+function isShellTool(tool) {
+  return tool === SHELL_TOOL || SHELL_ALIASES.has(tool);
+}
+var SHELL_EXECUTABLES = new Set(["bash", "sh", "zsh", "dash", "ksh"]);
+
+// plugins/lib/src/shell-command.ts
+var OPERATORS = {
+  ";": true,
+  "&&": true,
+  "||": true,
+  "&": true,
+  "|": true,
+  "\n": true,
+  "(": true,
+  ")": true,
+  "{": true,
+  "}": true
+};
+var WRAPPERS2 = {
+  mise: true,
+  env: true,
+  command: true,
+  exec: true,
+  nohup: true,
+  nice: true,
+  sudo: true,
+  xargs: true,
+  time: true,
+  "!": true,
+  if: true,
+  elif: true,
+  else: true,
+  while: true,
+  until: true,
+  do: true
+};
+function tokenize(segment) {
+  return tokenizeShell(segment, { preserveBackslashes: true }).map(({ value, startsQuoted }) => ({
+    value,
+    quoted: startsQuoted
+  }));
+}
+function splitCommands(source) {
+  const positions = [];
+  let current = [];
+  const flush = () => {
+    if (current.length === 0)
+      return;
+    const words = [...current];
+    const argv = words.map((word) => word.value);
+    let index = 0;
+    while (index < words.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[index]?.value ?? "") || words[index]?.value === "!"))
+      index++;
+    while (index < words.length && WRAPPERS2[words[index]?.value.split("/").pop() ?? words[index]?.value ?? ""] === true) {
+      const wrapper = words[index]?.value.split("/").pop() ?? words[index]?.value ?? "";
+      index++;
+      if (wrapper === "env")
+        while (index < words.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[index]?.value ?? "") || words[index]?.value?.startsWith("-") === true))
+          index++;
+      if (wrapper === "xargs")
+        while (index < words.length && words[index]?.value?.startsWith("-") === true)
+          index++;
+      if (wrapper === "sudo")
+        while (index < words.length && words[index]?.value?.startsWith("-") === true) {
+          index++;
+          if (index < words.length && words[index]?.value?.startsWith("-") === false)
+            index++;
+        }
+    }
+    const executable = words[index] && !words[index]?.quoted ? words[index]?.value : undefined;
+    const raw = words.map((word) => word.quoted ? `'${word.value.replaceAll("'", "'\\''")}'` : word.value).join(" ");
+    positions.push({ raw, words, argv, executable });
+    current = [];
+  };
+  for (const token of tokenize(source)) {
+    if (OPERATORS[token.value] === true) {
+      flush();
+      continue;
+    }
+    current.push(token);
+  }
+  flush();
+  return positions;
+}
+function nestedSources(source) {
+  const sources = [];
+  let unknown = false;
+  let depth = 0;
+  let start = -1;
+  let quote = null;
+  for (let i = 0;i < source.length; i++) {
+    const ch = source[i];
+    if (quote === "'") {
+      if (ch === "'")
+        quote = null;
+      continue;
+    }
+    if (quote === '"') {
+      if (ch === "\\")
+        i++;
+      else if (ch === '"')
+        quote = null;
+      continue;
+    }
+    if (ch === "'") {
+      quote = "'";
+      continue;
+    }
+    if (ch === '"') {
+      quote = '"';
+      continue;
+    }
+    if (ch === "`") {
+      const end = source.indexOf("`", i + 1);
+      if (end < 0)
+        return { sources, unknown: true };
+      sources.push(source.slice(i + 1, end));
+      i = end;
+      continue;
+    }
+    if (source.startsWith("$(", i)) {
+      if (depth++ === 0)
+        start = i + 2;
+      i++;
+      continue;
+    }
+    if (depth > 0 && ch === ")") {
+      if (--depth === 0)
+        sources.push(source.slice(start, i));
+    }
+  }
+  if (depth !== 0)
+    unknown = true;
+  for (const match of source.matchAll(/"((?:\\.|[^"\\])*)"/g)) {
+    const body = match[1] ?? "";
+    for (const substitution of body.matchAll(/\$\(([^()]*)\)/g))
+      if (substitution[1] !== undefined)
+        sources.push(substitution[1]);
+    for (const substitution of body.matchAll(/`([^`]*)`/g))
+      if (substitution[1] !== undefined)
+        sources.push(substitution[1]);
+  }
+  for (const match of source.matchAll(/\b(?:bash|sh|zsh|dash|ksh)\s+-c\s+((?:'[^']*')|(?:"[^"]*")|[^\s;&|]+)/g)) {
+    const value = match[1];
+    if (!value || value.startsWith('"$') || value.startsWith("'$"))
+      unknown = true;
+    else
+      sources.push(value.replace(/^['"]|['"]$/g, ""));
+  }
+  for (const match of source.matchAll(/\beval\s+((?:'[^']*')|(?:"[^"]*")|[^\s;&|]+)/g)) {
+    const value = match[1];
+    if (value?.startsWith("$"))
+      unknown = true;
+    else if (value)
+      sources.push(value.replace(/^['"]|['"]$/g, ""));
+  }
+  for (const match of source.matchAll(/\bxargs(?:\s+-[^\s;&|]+)*\s+([^;&|]+?)(?=\s*(?:[;&|]|$))/g)) {
+    const value = match[1]?.trim();
+    if (value?.startsWith("$"))
+      unknown = true;
+    else if (value)
+      sources.push(value.replace(/^['"]|['"]$/g, ""));
+  }
+  return { sources, unknown };
+}
+function staticParse(command) {
+  if (command.length > 64000)
+    return {
+      kind: "parse-failure",
+      reason: "input exceeds 64000 characters",
+      command,
+      segments: [],
+      commands: [],
+      unknown: true,
+      nested: []
+    };
+  if (!shellQuoteBalanced(command))
+    return {
+      kind: "parse-failure",
+      reason: "unbalanced shell quote",
+      command,
+      segments: [],
+      commands: [],
+      unknown: true,
+      nested: []
+    };
+  const commands = splitCommands(command);
+  const nested = nestedSources(command);
+  const children = nested.sources.map(staticParse);
+  const unknown = nested.unknown || children.some((child) => child.unknown);
+  return {
+    command,
+    segments: commands.map((position) => position.argv),
+    commands,
+    unknown,
+    nested: children
+  };
+}
+function parse(command) {
+  if (typeof command !== "string") {
+    return {
+      kind: "parse-failure",
+      reason: "command is not a string",
+      command: "",
+      segments: [],
+      commands: [],
+      unknown: true,
+      nested: []
+    };
+  }
+  return staticParse(command);
+}
+function commandFromInput(input) {
+  if (!input || typeof input !== "object")
+    return "";
+  const value = input;
+  if (typeof value.command === "string")
+    return value.command;
+  if (typeof value.cmd === "string")
+    return value.cmd;
+  return "";
+}
+function parsedInvocations(parsed, executable, booleanFlags = []) {
+  if (parsed.unknown)
+    return [];
+  const found = [];
+  for (const position of parsed.commands) {
+    const executableName = position.executable?.split("/").pop();
+    const index = executableName === executable ? position.argv.findIndex((word, i) => !position.words[i]?.quoted && (word.split("/").pop() ?? word) === executable) : -1;
+    if (index < 0)
+      continue;
+    const args = position.argv.slice(index + 1);
+    const globals = [];
+    let verb;
+    for (let i = 0;i < args.length; i++) {
+      const word = args[i];
+      if (word === undefined)
+        continue;
+      if (word.startsWith("-") && verb === undefined) {
+        globals.push(word);
+        const next = args[i + 1];
+        if (!booleanFlags.includes(word) && !word.includes("=") && next !== undefined && !next.startsWith("-")) {
+          globals.push(next);
+          i++;
+        }
+        continue;
+      }
+      if (verb === undefined && !word.startsWith("\x00"))
+        verb = word;
+    }
+    found.push({ position, command: position.raw, args, verb, globals });
+  }
+  for (const child of parsed.nested)
+    found.push(...parsedInvocations(child, executable, booleanFlags));
+  return found;
+}
+
+// plugins/modes/src/git-guard.ts
+var BOOLEAN_FLAGS = [
+  "--no-pager",
+  "-P",
+  "--paginate",
+  "-p",
+  "--bare",
+  "--no-replace-objects",
+  "--literal-pathspecs",
+  "--glob-pathspecs",
+  "--noglob-pathspecs",
+  "--icase-pathspecs",
+  "--no-optional-locks",
+  "--no-lazy-fetch"
+];
+var FORBIDDEN = {
+  debug: { verbs: ["push", "clean"], hardReset: false },
+  refactor: { verbs: ["push", "clean", "rebase"], hardReset: true }
+};
+var GUARDED_AGENTS = Object.keys(FORBIDDEN);
+function forbiddenGit(command, agent) {
+  const rules = FORBIDDEN[agent];
+  if (rules === undefined)
+    return;
+  const parsed = parse(command);
+  if (parsed.unknown)
+    return /\bgit\b/.test(command) ? "the command could not be parsed, so its git use cannot be checked" : undefined;
+  for (const call of parsedInvocations(parsed, "git", BOOLEAN_FLAGS)) {
+    const verb = call.verb;
+    if (verb === undefined)
+      continue;
+    if (/[$`'"(]/.test(verb))
+      return `git subcommand "${verb}" is not a plain word, so it cannot be checked`;
+    if (rules.verbs.includes(verb))
+      return `git ${verb} is not allowed for the ${agent} agent`;
+    if (rules.hardReset && verb === "reset" && call.args.includes("--hard"))
+      return `git reset --hard is not allowed for the ${agent} agent`;
+  }
+  return;
+}
+function forbiddenGitInput(input, agent) {
+  return forbiddenGit(commandFromInput(input), agent);
+}
+
 // plugins/modes/src/modes.ts
 import { basename as basename2 } from "path";
 var AGENT_IDS = ["debug", "refactor", "concept"];
@@ -290,6 +888,16 @@ async function setupModes(ctx) {
   try {
     const agents = await registerAgents(ctx.agent, selectAgents(agentPaths(AGENTS_DIR), options));
     disposers.push(() => agents.dispose());
+    if (options.agents.debug || options.agents.refactor) {
+      const guard = await ctx.tool.hook("execute.before", (event) => {
+        if (!isShellTool(event.tool))
+          return;
+        const reason = forbiddenGitInput(event.input, event.agent);
+        if (reason !== undefined)
+          throw new Error(reason);
+      });
+      disposers.push(() => guard.dispose());
+    }
     const modes = enabledModes(options);
     if (options.reminders && modes.length > 0)
       disposers.push(await registerModeReminders(ctx, modes));

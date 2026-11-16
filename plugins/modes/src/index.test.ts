@@ -45,7 +45,7 @@ describe("shipped agents", () => {
   })
   test("debug shell is open but refuses push, clean and rm -rf", () => {
     expect(effect("debug", "shell", "git -C wt commit -m x")).toBe("allow")
-    for (const command of ["git push origin main", "git clean -fd", "rm -rf build"]) expect(effect("debug", "shell", command)).toBe("deny")
+    for (const command of ["git push origin main", "git clean -fd", "rm -rf build", "git -C wt push", "git -c a=b clean -fdx"]) expect(effect("debug", "shell", command)).toBe("deny")
   })
   test("debug spawns only its listed helpers", () => {
     expect(effect("debug", "subagent", "adversarial-challenger")).toBe("allow")
@@ -89,6 +89,21 @@ describe("setup", () => {
     await cleanup?.()
     expect(fake.active()).toBe(0)
     expect(fake.hooks("session")).toEqual([])
+  })
+  test("the shell guard refuses git -C push for debug, allows it for build, and is disposed", async () => {
+    const fake = createFakeContext()
+    const cleanup = await plugin.setup(fake.context)
+    const run = (agent: string, command: string) => fake.fire.tool("execute.before", { tool: "shell", agent, input: { command } })
+    await expect(run("debug", "git -C /wt push")).rejects.toThrow("git push")
+    await expect(run("build", "git -C /wt push")).resolves.toBeDefined()
+    await expect(run("debug", "git -C /wt commit -m x")).resolves.toBeDefined()
+    await cleanup?.()
+    expect(fake.hooks("tool")).toEqual([])
+  })
+  test("the shell guard is not registered when debug and refactor are off", async () => {
+    const fake = createFakeContext({ options: { agents: { debug: false, refactor: false } } })
+    await plugin.setup(fake.context)
+    expect(fake.hooks("tool")).toEqual([])
   })
   test("reminders: false registers no hook", async () => {
     const fake = createFakeContext({ options: { reminders: false } })

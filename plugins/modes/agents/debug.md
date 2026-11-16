@@ -68,6 +68,18 @@ permissions:
   - action: shell
     resource: "rm -rf*"
     effect: deny
+  - action: shell
+    resource: "git -C * push*"
+    effect: deny
+  - action: shell
+    resource: "git -c * push*"
+    effect: deny
+  - action: shell
+    resource: "git -C * clean*"
+    effect: deny
+  - action: shell
+    resource: "git -c * clean*"
+    effect: deny
   - action: webfetch
     resource: "*"
     effect: allow
