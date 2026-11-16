@@ -2,7 +2,7 @@
 
 ## A stub drifted from its contract
 
-- **Symptom:** T's tests pass against the stub but fail against the real B in S's PR. `git grep 'STUB('` finds a stub that no conformance test uses.
+- **Symptom:** T's tests pass against the stub but fail against the real B in S's PR. `git grep -E 'STUB\([A-Za-z0-9._-]+\)'` finds a stub that no conformance test uses.
 - **Cause:** Only the real implementation ran C's conformance runner. The stub followed the consumer's assumptions, not the contract.
 - **Fix:** Wire every stub into C's runner in T's own tests, and put that in T's acceptance. If the stub and B disagree on a case outside the fixtures, add a fixture to C.
 

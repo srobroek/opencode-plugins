@@ -147,12 +147,14 @@ S's id exists only after the create, so write the stub markers when T's work sta
    that has not passed the runner is not conforming.
 3. Mark every stub with a greppable marker that names S:
    `// STUB(<S-id>): what this fakes`. Use `#` in Python, TOML and YAML.
+   A real marker holds a bead id, so `git grep -E 'STUB\([A-Za-z0-9._-]+\)'`
+   finds real markers and skips placeholders such as `STUB(<S-id>)` in docs.
 
 **When the plan wired T to B with a hard edge (retrofit only):**
 
 1. Run `bd dep remove T B`.
 2. File S:
-   `bd create "Replace <stub> with <real B>" --type task --labels stub --parent <consumer-epic> --description "<where the stub lives, what it fakes, which runner covers it>" --acceptance "Real B wired in place of the stub; B passes C's runner; T's tests pass against B; no STUB(<S-id>) markers remain."`
+   `bd create "Replace <stub> with <real B>" --type task --labels stub --parent <consumer-epic> --metadata '{"execution_agent_type":"implementer"}' --description "<where the stub lives, what it fakes, which runner covers it>" --acceptance "Real B wired in place of the stub; B passes C's runner; T's tests pass against B; no STUB(<S-id>) markers remain."`
 3. Add edges 3, 4 and 5: `bd dep add S B`, `bd dep add S T`,
    `bd dep add T B --type related`.
 4. Run `bd label add T soft-blocked` and
@@ -178,7 +180,8 @@ needs more, C had a gap. Fix C with a fixture that captures the gap.
 
 **Release gate:**
 
-- `bd list --label stub --status open` is empty and `git grep 'STUB('` is empty.
+- `bd list --label stub --status open` is empty, and
+  `git grep -E 'STUB\([A-Za-z0-9._-]+\)'` finds no marker.
   Check both: a closed swap bead can leave a marker behind.
 - The staleness check of every contract passes.
 - A release-gate bead queries the `stub` label. Do not give it hard edges to each
@@ -198,8 +201,9 @@ needs more, C had a gap. Fix C with a fixture that captures the gap.
   ready before it can work. Re-point it with `bd dep remove S <old>` and `bd dep add S <new>`.
 - **Split acceptance across workstreams.** When part of a bead's acceptance needs
   feature F from another workstream:
-  1. Move that part to a new `stub` bead S′, with `bd dep add S′ F`.
-  2. Link S′ to the original bead with `--type related`.
+  1. Move that part to a new `stub` bead S′.
+  2. Add `bd dep add S′ F` and `bd dep add S′ <original>`. The second edge
+     keeps S′ out of `bd ready` until the original bead closes.
   3. Close the original bead on the rest of its acceptance.
 - **Respect ownership.** One workstream owns the shared core types. One
   workstream owns the CLI or entry point. Other workstreams expose library
