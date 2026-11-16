@@ -66,6 +66,7 @@ go test -race ./...                         # default; see lang-go-quality
 go test -run 'TestParseDuration/empty$' ./internal/timeparse
 go test -count=1 ./...                      # bypass the test result cache
 go test -shuffle=on -count=5 ./pkg          # flush out order dependence; prints the seed
+gotestsum --junitfile junit.xml -- -race ./... # JUnit for CI; rerun flags only for diagnosis
 go test -failfast ./...                     # stop after the first failing test
 go test -coverprofile=cover.out ./... && go tool cover -func=cover.out
 ```
@@ -108,14 +109,26 @@ func FuzzParse(f *testing.F) {
 ```
 
 ```sh
-go test -run='^$' -fuzz='^FuzzParse$' -fuzztime=60s ./internal/timeparse   # one package at a time
+go test -run='^$' -fuzz='^FuzzParse$' -fuzztime=60s ./internal/timeparse   # one package at a time; always bound it
 ```
 
 A failing input is written to `testdata/fuzz/FuzzParse/`; commit it. Plain `go test`
 replays the seeds and that corpus as regular tests, so the bug stays fixed.
 
+## Mutation
+
+```sh
+go tool gremlins unleash --diff origin/main --output=gremlins.json   # changed code only
+```
+
+`gremlins` (or avito-tech `go-mutesting` v2 when it cannot parse the code) is not
+installed by default: detect it, recommend `go get -tool github.com/go-gremlins/gremlins/cmd/gremlins@latest`,
+and ask before running it. Scope it to changed or critical packages; never gate on the whole module.
+
 ## Time, concurrency and I/O
 
+- Use `-race`, `synctest` and `go.uber.org/goleak` (`goleak.VerifyNone(t)`) together on
+  concurrent code. Go 1.27 adds a `goroutineleak` `runtime/pprof` profile for live processes.
 - Supported in-process timer/concurrency tests can use
   `synctest.Test(t, func(t *testing.T) { /* scenario */ })` (Go `1.25`+). Fake time
   advances when every goroutine in the bubble is durably blocked;

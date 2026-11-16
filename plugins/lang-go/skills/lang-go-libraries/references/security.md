@@ -2,7 +2,7 @@
 
 Use standard cryptographic primitives, explicit boundary policies and complementary scanners with reviewed findings.
 
-Checked 2026-11-12. Standard-library entries use Go `1.27`; commands belong in `lang-go-quality`.
+Checked 2026-11-16. SAST, dependency audit, dead code, complexity and duplication moved to [quality.md](quality.md). Standard-library entries use Go `1.27`; commands belong in `lang-go-quality`.
 
 | Concern | Default | Use instead when | Avoid (why) |
 | --- | --- | --- | --- |
@@ -16,13 +16,9 @@ Checked 2026-11-12. Standard-library entries use Go `1.27`; commands belong in `
 | HTML/input | `html/template` escaping for ordinary output | `github.com/microcosm-cc/bluemonday` `1` for allowlisted rich HTML | Regex sanitizers or decoding treated as validation. |
 | CSRF | `net/http.CrossOriginProtection`; standard library suffices for origin-based protection | `github.com/gorilla/csrf` `1` for synchronizer-token requirements | Assuming origin checks and token mechanisms are identical. |
 | Security headers | Explicit `net/http` headers; standard library is sufficient | `github.com/unrolled/secure` `1` for configurable shared middleware | Blind CSP/HSTS defaults; CORS as authorization. |
-| Security lint/SAST | `github.com/securego/gosec/v2` `2` plus configured `golangci-lint` `2` | `Opengrep` `1` or `Semgrep CE` `1` for targeted rules; organization CodeQL where licensed | Scanner output as complete audit; ignoring separate engine/rule licenses. |
 | Secret scanning | Offline `Betterleaks` `1` or `Gitleaks` `8` on changed content | `TruffleHog` `3` for separate history/verification scans | Verified-only policy that drops unverifiable secrets. |
-| Dependency SCA | `golang.org/x/vuln/cmd/govulncheck` `1` for reachable Go vulnerabilities | `OSV-Scanner` `2` for broader source dependencies; `Grype` `0.121` for built artifacts | Redundant mandatory scans with no ownership; no scan of shipped binaries/images. |
 | SBOM | `github.com/CycloneDX/cyclonedx-gomod` `1` for Go source modules | `Syft` `1` for images/artifacts; `cdxgen` `13` for multilingual source | SBOM generation presented as vulnerability detection. |
 | Dependency licences | `go-licenses` `2` inventory and project policy | Organization-approved compliance tooling | Repository-licence detection as equivalent to dependency compliance. |
-| Dead declarations | Configured `unused`/`staticcheck` in golangci `2` | `golang.org/x/tools/cmd/deadcode` `0.52` for whole-program executable/test-root reachability | Deleting exported library APIs solely because one executable does not reach them. |
-| Duplication/complexity | `gocognit` `1` through golangci `2` at 15 (cognitive) and `gocyclo` at 10-12, with review | `jscpd` `5` or PMD CPD `7` optional duplication report | Multiple overlapping universal gates; generated-code duplication or arbitrary limits as defects. |
 | Container security | Verified `Grype` `0.121` plus `Syft` `1` when images ship | `Trivy` `0.76` only with explicit artifact/transitive-action review | Ignoring Trivy's documented March 2026 compromise or trusting mutable installer tags. |
 | Workflow security | `actionlint` `1`, `zizmor` `1`, `pinact` `5` when workflows exist | Scheduled Scorecard `5` assessment for repository posture | Treating an action SHA alone as proof of downloaded-tool integrity. |
 
@@ -30,9 +26,9 @@ Checked 2026-11-12. Standard-library entries use Go `1.27`; commands belong in `
 
 - Authorize tenant/object/action/field access in the domain boundary, not only at the gateway. Bound bodies, decompression, queries, concurrency and outbound waits.
 - Distinguish escaping, sanitization, CSRF, SSRF, SAST, SCA and SBOM purposes. No one scanner supplies all of them.
-- Pin scanners and artifacts. Review suppressions with an owner, rationale and expiry; configure one tool per gate.
+- Pin scanner artifacts in CI. Review suppressions with an owner, rationale and expiry; configure one tool per gate.
 - Keep a single dependency updater, such as `Renovate` `44`, with project cooldown and vulnerability policy. Review supply-chain and license changes alongside advisories.
-- Report dead code/duplication before gating a mature codebase; library entry points and generated code need explicit exclusions.
+- Dead code, duplication, SAST and dependency audit rules are in [quality.md](quality.md); report dead code and duplication before gating a mature codebase.
 
 ## Sources
 

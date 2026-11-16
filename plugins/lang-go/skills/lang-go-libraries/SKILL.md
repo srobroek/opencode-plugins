@@ -7,14 +7,14 @@ metadata:
 
 # Go libraries
 
-Checked 2026-11-12.
+Checked 2026-11-16.
 
 ## How to use
 
 - Keep the project's existing choice unless the task is a migration. Apply the reuse order: existing code, standard library, framework features, listed dependency.
 - Otherwise use the default below. An alternative needs its listed condition. A departure from both needs a named gap; report the choice and reason.
 - Read the relevant reference before designing or writing code. The defaults are recommendations with conditions for alternatives.
-- Re-check fast-moving rows, especially MCP, LLM SDKs and OpenTelemetry, on the registry before adding them. Pin the exact version added; these tables name major or minor lines.
+- Re-check fast-moving rows, especially MCP, LLM SDKs and OpenTelemetry, on the registry before adding them. Use the latest release; these tables name major or minor lines, and the lockfile pins what resolves.
 - A dependency the request did not name needs approval, even when this guide lists it. Do not add unused parts of this stack.
 - Use `toolchain-api` for API style, contracts and API test tools. Use `quality-code-design` and its `middleware.md` and `telemetry.md` references for shared design rules.
 - Use `lang-go-quality` and `lang-go-testing` for commands. Use `aws-guidance` for Lambda and AWS deployment decisions.
@@ -70,5 +70,6 @@ Standard-library entries below use Go `1.27`; retain a supported lower minimum w
 | [ai.md](references/ai.md) | MCP and model integrations. |
 | [cli.md](references/cli.md) | Commands and terminal interaction. |
 | [testing.md](references/testing.md) | Behavioral and performance testing. |
-| [security.md](references/security.md) | Security controls and audit tools. |
+| [quality.md](references/quality.md) | Lint, analysis, audit, API-break and docs tools. |
+| [security.md](references/security.md) | Security controls and scanners. |
 | [runtime.md](references/runtime.md) | Build and application lifecycle. |
