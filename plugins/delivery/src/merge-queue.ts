@@ -18,7 +18,8 @@
  * Nothing here merges by any other means: a dequeued pull request is a refusal.
  */
 
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { randomBytes } from "node:crypto"
+import { linkSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { type CliRunner, FORGE_TIMEOUT_MS, MERGE_METHODS, type MergeMethod } from "./forge-adapter.ts"
 
@@ -442,12 +443,45 @@ export function branchContains(status: string): boolean {
   return status.trim() === "ahead" || status.trim() === "identical"
 }
 
+/** What an enqueue mutation's result says happened. */
+export type EnqueueAnswer = { kind: "queued" } | { kind: "rejected"; reason: string } | { kind: "uncertain"; reason: string }
+
 /**
- * A record that an earlier call enqueued this pull request at this head.
+ * Read an `enqueuePullRequest` result. Only GitHub's own GraphQL errors, with no entry, are a
+ * rejection; `gh` prints them on stdout and exits 1. A run that did not complete, an exit with
+ * no readable answer, or an answer that names no entry is `uncertain`: GitHub may have
+ * accepted the mutation before the answer was lost, so the caller keeps its record of it.
+ */
+export function enqueueAnswer(result: Awaited<ReturnType<CliRunner>>): EnqueueAnswer {
+  if (!result.ok || result.error !== undefined) {
+    return { kind: "uncertain", reason: `observed ${result.error ?? "a run that did not complete"}, expected exit 0` }
+  }
+  let payload: unknown
+  try {
+    payload = JSON.parse(result.stdout)
+  } catch {
+    return {
+      kind: "uncertain",
+      reason: `observed exit ${result.exitCode} with output that is not one JSON object; ${result.stderr.trim().slice(0, 300)}`,
+    }
+  }
+  const errors = graphqlErrors(payload)
+  const entry = enqueuedEntry(payload)
+  if (errors !== null) return entry === null ? { kind: "rejected", reason: errors } : { kind: "uncertain", reason: errors }
+  if (result.exitCode !== 0) return { kind: "uncertain", reason: `observed exit ${result.exitCode}, expected exit 0` }
+  if (entry === null) {
+    return { kind: "uncertain", reason: "observed no mergeQueueEntry in the response, expected the queued entry" }
+  }
+  return { kind: "queued" }
+}
+
+/**
+ * A record that an earlier call enqueued, or was about to enqueue, this pull request at this head.
  *
  * Without it a resumed call that finds no entry cannot tell "not enqueued yet" from "enqueued
- * and since removed", and would enqueue again over a removal someone made on purpose. It lives
- * beside the receipts under a name the receipt scan ignores.
+ * and since removed", and would enqueue again over a removal someone made on purpose. It is
+ * written before the enqueue mutation is sent, because a mutation GitHub accepted can still
+ * time out on the way back. It lives beside the receipts under a name the receipt scan ignores.
  */
 export type PendingRecord = {
   schema: 1
@@ -459,42 +493,158 @@ export type PendingRecord = {
   enqueuedAt: string
 }
 
+/**
+ * What the pending-queue record for one head says. `unreadable` is not `absent`: a record that
+ * exists but cannot be read (truncated, not JSON, or naming another landing) may be the only
+ * trace of an enqueue, so a caller refuses instead of treating it as "never enqueued".
+ */
+export type PendingRead =
+  | { kind: "absent" }
+  | { kind: "record"; record: PendingRecord }
+  | { kind: "unreadable"; path: string; reason: string }
+
 export function pendingPath(directory: string, number: number, head: string): string {
   return join(directory, `pending-queue-${number}-${head.slice(0, 12)}.json`)
 }
 
-/** The record of an earlier enqueue of this pull request at this head, or null when none matches. */
-export function readPending(directory: string, repository: string, number: number, head: string): PendingRecord | null {
+/** The record of an earlier enqueue of this pull request at this head, that there is none, or why it cannot be read. */
+export function readPending(directory: string, repository: string, number: number, head: string): PendingRead {
   const path = pendingPath(directory, number, head)
-  if (!existsSync(path)) return null
+  let raw: string
   try {
-    const record: unknown = JSON.parse(readFileSync(path, "utf8"))
-    const raw = text(record, "method")
-    const method = raw === null ? undefined : MERGE_METHODS.find((known) => known === raw)
-    const holder = text(record, "repository")
-    if (
-      holder?.toLowerCase() !== repository.toLowerCase() ||
-      own(record, "number") !== number ||
-      text(record, "head") !== head ||
-      method === undefined
-    ) {
-      return null
-    }
-    return { schema: 1, repository: holder, number, head, method, enqueuedAt: text(record, "enqueuedAt") ?? "" }
+    raw = readFileSync(path, "utf8")
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { kind: "absent" }
+    return { kind: "unreadable", path, reason: error instanceof Error ? error.message : String(error) }
+  }
+  let record: unknown
+  try {
+    record = JSON.parse(raw)
+  } catch {
+    return { kind: "unreadable", path, reason: "observed content that is not one JSON object, as a truncated write leaves" }
+  }
+  const named = text(record, "method")
+  const method = named === null ? undefined : MERGE_METHODS.find((known) => known === named)
+  const holder = text(record, "repository")
+  const mismatch =
+    own(record, "schema") !== 1
+      ? `schema ${JSON.stringify(own(record, "schema"))}, expected 1`
+      : holder === null || holder.toLowerCase() !== repository.toLowerCase()
+        ? `repository ${JSON.stringify(holder)}, expected ${JSON.stringify(repository)}`
+        : own(record, "number") !== number
+          ? `number ${JSON.stringify(own(record, "number"))}, expected ${number}`
+          : text(record, "head") !== head
+            ? `head ${JSON.stringify(text(record, "head"))}, expected ${JSON.stringify(head)}`
+            : method === undefined
+              ? `method ${JSON.stringify(named)}, expected one of ${MERGE_METHODS.join(", ")}`
+              : null
+  if (mismatch !== null || holder === null || method === undefined) {
+    return { kind: "unreadable", path, reason: `observed ${mismatch ?? "an incomplete record"}` }
+  }
+  return {
+    kind: "record",
+    record: { schema: 1, repository: holder, number, head, method, enqueuedAt: text(record, "enqueuedAt") ?? "" },
+  }
+}
+
+/**
+ * Publish `content` at `path` only if nothing is there: write a temporary file in the same
+ * directory, then hard-link it to the final name. A reader sees the whole file or none, and the
+ * link never replaces what another call made first, which returns `exists`.
+ */
+function publishExclusive(path: string, content: string): "created" | "exists" {
+  const temporary = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`
+  // "wx" refuses an existing name, so a planted file or symlink cannot capture the write.
+  try {
+    writeFileSync(temporary, content, { mode: 0o600, flag: "wx" })
+  } catch (error) {
+    // Only a name this call created is removed; EEXIST means the name was never ours.
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") rmSync(temporary, { force: true })
+    throw error
+  }
+  try {
+    linkSync(temporary, path)
+    return "created"
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") return "exists"
+    throw error
+  } finally {
+    rmSync(temporary, { force: true })
+  }
+}
+
+/** Claim the record without replacing one: `exists` means another call recorded this head first. */
+export function writePending(directory: string, record: Omit<PendingRecord, "schema">): "created" | "exists" {
+  mkdirSync(directory, { recursive: true, mode: 0o700 })
+  return publishExclusive(pendingPath(directory, record.number, record.head), `${JSON.stringify({ schema: 1, ...record })}\n`)
+}
+
+export function enqueueLockPath(directory: string, number: number, head: string): string {
+  return join(directory, `pending-queue-${number}-${head.slice(0, 12)}.lock`)
+}
+
+/** Whether a process with this id still runs on this host; EPERM means it does, as another user's. */
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM"
+  }
+}
+
+function readOrNull(path: string): string | null {
+  try {
+    return readFileSync(path, "utf8")
   } catch {
     return null
   }
 }
 
-export function hasPending(directory: string, repository: string, number: number, head: string): boolean {
-  return readPending(directory, repository, number, head) !== null
-}
+export type EnqueueLock = { kind: "acquired"; release: () => void } | { kind: "held"; path: string; detail: string }
 
-export function writePending(directory: string, record: Omit<PendingRecord, "schema">): void {
+/**
+ * Serialize the no-entry decision for one head: whether to refuse as removed, and claiming the
+ * record, sending the enqueue and reading its answer. Without it a second call that saw no entry
+ * yet could take a first call's in-flight record for a removal and clear it, so a lost answer
+ * would leave no trace.
+ *
+ * The lock is an exclusively created file, and no call ever removes another call's lock: there
+ * is no atomic compare-and-delete on a path, so an automatic takeover could let two calls in at
+ * once. A lock left by a call that ended without releasing it (the process was killed) is
+ * reported with its holder's id, and a person removes it after checking the queue.
+ */
+export function acquireEnqueueLock(
+  directory: string,
+  number: number,
+  head: string,
+  nowMs: number,
+  alive: (pid: number) => boolean = processAlive,
+): EnqueueLock {
   mkdirSync(directory, { recursive: true, mode: 0o700 })
-  const path = pendingPath(directory, record.number, record.head)
-  writeFileSync(path, `${JSON.stringify({ schema: 1, ...record })}\n`, { mode: 0o600 })
-  chmodSync(path, 0o600)
+  const path = enqueueLockPath(directory, number, head)
+  const token = randomBytes(12).toString("hex")
+  const content = `${JSON.stringify({ pid: process.pid, at: nowMs, token })}\n`
+  if (publishExclusive(path, content) === "created") {
+    // Only this call writes this content, and no other call removes a lock it does not hold.
+    return { kind: "acquired", release: () => (readOrNull(path) === content ? rmSync(path, { force: true }) : undefined) }
+  }
+  let holder: unknown = null
+  try {
+    holder = JSON.parse(readOrNull(path) ?? "null")
+  } catch {
+    // Published whole by link, so an unparseable lock was not written by this code.
+  }
+  const pid = own(holder, "pid")
+  const at = own(holder, "at")
+  const since = typeof at === "number" ? ` since ${new Date(at).toISOString()}` : ""
+  const detail =
+    typeof pid !== "number"
+      ? "by an unreadable holder"
+      : alive(pid)
+        ? `by process ${pid}${since}`
+        : `by process ${pid}${since}, which has ended without releasing it`
+  return { kind: "held", path, detail }
 }
 
 export function clearPending(directory: string, number: number, head: string): void {

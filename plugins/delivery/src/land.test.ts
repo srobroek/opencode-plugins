@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -25,7 +26,8 @@ import {
   resolveLandingTarget,
   selectRemoteForRepo,
 } from "./land.ts"
-import { RECEIPT_SCHEMA, readReceipt, repoKey, writeReceipt } from "./landing-receipt.ts"
+import { type LandingReceipt, RECEIPT_SCHEMA, readReceipt, repoKey, writeReceipt } from "./landing-receipt.ts"
+import { writePending } from "./merge-queue.ts"
 
 /** Every raw git argv the tool issued, before the safe-option prefix is stripped for the mocks. */
 const rawGitArgv: string[][] = []
@@ -187,6 +189,8 @@ type Answers = {
   queueStates?: CliResult[]
   /** What the `enqueuePullRequest` mutation answers. */
   enqueue?: CliResult
+  /** Runs while the `enqueuePullRequest` mutation is in flight, and supplies its answer. */
+  duringEnqueue?: () => Promise<CliResult>
   /** What the forge's compare read (`compare/<oid>...<base>`) answers; "ahead" by default. */
   compare?: CliResult
   /** What the `mergeQueue(branch:)` read after a rules 404 answers. */
@@ -201,6 +205,8 @@ type Answers = {
   mergeTree?: CliResult
   /** What `git merge-base --is-ancestor` answers. */
   ancestor?: CliResult
+  /** What `git merge-base --is-ancestor <landed> <base tip>` answers; `ancestor` when unset. */
+  onBase?: CliResult
   /** What the checks read (`gh pr checks` or the GitLab merge request API) answers. */
   checks?: CliResult
 }
@@ -245,7 +251,9 @@ function runner(answers: Answers, canonical: string): { run: CliRunner; calls: C
       return answers.approval ?? completed("{}")
     if (argv[1] === "pr" && argv[2] === "checks") return answers.checks ?? completed("[]")
     if (argv[0] === "git" && argv.includes("merge-base") && argv.includes("--is-ancestor"))
-      return answers.ancestor ?? completed("")
+      return (argv.at(-1) === TIP_OID ? answers.onBase : undefined) ?? answers.ancestor ?? completed("")
+    // No fork point: the rebase proof that reads one is shown against real commits elsewhere.
+    if (argv[0] === "git" && argv.includes("merge-base")) return completed("", 1)
     if (argv[1] === "api" && argv.some((part) => part.includes("/compare/")))
       return answers.compare ?? completed("ahead\n")
     if (argv[1] === "api" && argv.some((part) => part.includes("/rulesets")))
@@ -258,7 +266,8 @@ function runner(answers: Answers, canonical: string): { run: CliRunner; calls: C
     if (argv[1] === "api" && argv.some((part) => part.includes("/rules/branches/")))
       return answers.rules ?? completed("[]")
     if (argv[1] === "api" && argv[2] === "graphql") {
-      if (argv.some((part) => part.startsWith("query=mutation"))) return answers.enqueue ?? completed("{}")
+      if (argv.some((part) => part.startsWith("query=mutation")))
+        return answers.duringEnqueue?.() ?? answers.enqueue ?? completed("{}")
       const state = states.length > 1 ? states.shift() : states[0]
       return state ?? completed("{}")
     }
@@ -372,19 +381,25 @@ const numbered = (line: number, text: string): string =>
  * them. `altered` changes the last landed patch, which no equivalence may accept.
  * `context-moved` has the base edit line 4 of a file whose line 6 the reviewed branch
  * edits: the rebase replays cleanly, but the landed hunk's context lines differ.
+ * `transient` has the first reviewed commit add a scratch file and the second remove it,
+ * so the last landed commit does not equal the reviewed head merged onto its parent.
+ * `whitespace` lands the last line with trailing blanks, which `patch-id` ignores.
  *
  * The history is written by one `git fast-import`, the landed commits as the trees a
  * replay onto the moved base produces, instead of some fifteen porcelain commands
  * and a real rebase: under heavy load each child process costs a sizeable part of
  * Bun's per-test budget, and the proof reads only commits, trees and diffs.
  */
-function rebasedRepository(variant: "clean" | "altered" | "context-moved" = "clean"): {
+function rebasedRepository(variant: "clean" | "altered" | "context-moved" | "transient" | "whitespace" = "clean"): {
   canonical: string
   receipts: string
   head: string
   landed: string
+  /** The moved base the landing was replayed onto, which does not contain it. */
+  main: string
 } {
   const moved = variant === "context-moved"
+  const transient = variant === "transient"
   const canonical = realpathSync(temporaryDirectory("delivery-land-rebase-"))
   const base = moved ? numbered(0, "") : "base\n"
   const reviewedTwo = moved ? numbered(6, "6, reviewed") : "base\ntwo\n"
@@ -392,6 +407,8 @@ function rebasedRepository(variant: "clean" | "altered" | "context-moved" = "cle
   const landedTwo =
     variant === "altered"
       ? "base\ntwo, altered\n"
+      : variant === "whitespace"
+        ? "base\ntwo \t\n"
       : moved
         ? movedBase.replace("6\n", "6, reviewed\n")
         : "base\ntwo\n"
@@ -400,7 +417,8 @@ function rebasedRepository(variant: "clean" | "altered" | "context-moved" = "cle
     ref: string,
     mark: number,
     message: string,
-    files: Record<string, string>,
+    /** A null content deletes the path. */
+    files: Record<string, string | null>,
     from?: number,
     committer = "Delivery Test",
   ): string => {
@@ -416,19 +434,20 @@ function rebasedRepository(variant: "clean" | "altered" | "context-moved" = "cle
     ]
     if (from !== undefined) lines.push(`from :${from}`)
     for (const [path, content] of Object.entries(files)) {
-      lines.push(`M 100644 inline ${path}`, `data ${Buffer.byteLength(content)}`, content)
+      if (content === null) lines.push(`D ${path}`)
+      else lines.push(`M 100644 inline ${path}`, `data ${Buffer.byteLength(content)}`, content)
     }
     return `${lines.join("\n")}\n`
   }
   const stream = [
     commit("refs/heads/main", 1, "base", { "base.txt": base }),
-    commit(`refs/heads/${BRANCH}`, 2, "one", { "one.txt": "one\n" }, 1),
-    commit(`refs/heads/${BRANCH}`, 3, "two", { "base.txt": reviewedTwo }, 2),
+    commit(`refs/heads/${BRANCH}`, 2, "one", { "one.txt": "one\n", ...(transient ? { "scratch.txt": "scratch\n" } : {}) }, 1),
+    commit(`refs/heads/${BRANCH}`, 3, "two", transient ? { "scratch.txt": null } : { "base.txt": reviewedTwo }, 2),
     moved
       ? commit("refs/heads/main", 4, "base moved", { "base.txt": movedBase }, 1)
       : commit("refs/heads/main", 4, "other", { "other.txt": "other\n" }, 1),
-    commit("refs/heads/landed", 5, "one", { "one.txt": "one\n" }, 4, "Forge Rebase"),
-    commit("refs/heads/landed", 6, "two", { "base.txt": landedTwo }, 5, "Forge Rebase"),
+    commit("refs/heads/landed", 5, "one", { "one.txt": "one\n", ...(transient ? { "scratch.txt": "scratch\n" } : {}) }, 4, "Forge Rebase"),
+    commit("refs/heads/landed", 6, "two", transient ? { "scratch.txt": null } : { "base.txt": landedTwo }, 5, "Forge Rebase"),
   ].join("")
   const marks = join(canonical, ".git", "fixture-marks")
   git(canonical, ["init", "-q", "-b", "main"])
@@ -448,8 +467,9 @@ function rebasedRepository(variant: "clean" | "altered" | "context-moved" = "cle
   )
   const head = oids.get(":3")
   const landed = oids.get(":6")
-  if (head === undefined || landed === undefined) throw new Error("git fast-import exported no marks")
-  return { canonical, receipts: temporaryDirectory("delivery-land-receipts-"), head, landed }
+  const main = oids.get(":4")
+  if (head === undefined || landed === undefined || main === undefined) throw new Error("git fast-import exported no marks")
+  return { canonical, receipts: temporaryDirectory("delivery-land-receipts-"), head, landed, main }
 }
 
 /** A commit's `git patch-id --stable` over Git's default three-line-context diff. */
@@ -476,6 +496,7 @@ function contextPatchId(repo: string, commit: string): string {
 async function landRebase(
   repo: { canonical: string; receipts: string; head: string; landed: string },
   extra: Partial<Answers> = {},
+  params: Partial<LandParams> = { merge_method: "rebase" },
 ) {
   const fixture = runner(
     {
@@ -483,6 +504,8 @@ async function landRebase(
         completed(githubPr({ headRefOid: repo.head })),
         completed(mergedGithubPr({ headRefOid: repo.head, mergeCommit: { oid: repo.landed } })),
       ],
+      // The base branch's tip is the landed commit, which the real repository holds.
+      baseTip: completed(`${repo.landed}\trefs/heads/${BASE_BRANCH}\n`),
       ...extra,
     },
     repo.canonical,
@@ -493,7 +516,7 @@ async function landRebase(
     return runCli(argv, options)
   }
   const outcome = await landPullRequest(
-    { pr: 470, merge_method: "rebase", expectHeadSha: repo.head },
+    { pr: 470, expectHeadSha: repo.head, ...params },
     {
       run,
       cwd: repo.canonical,
@@ -507,6 +530,11 @@ async function landRebase(
 }
 
 const merged = (argv: string[]): boolean => argv[2] === "merge"
+
+const reasonOf = (outcome: Awaited<ReturnType<typeof land>>["outcome"]): string => {
+  if (outcome.ok) throw new Error("expected a refusal")
+  return outcome.reason
+}
 
 describe("delivery_land", () => {
   test("a clean land emits one receipt whose fields are the forge reads", async () => {
@@ -668,6 +696,52 @@ describe("delivery_land", () => {
     expect(outcome.reason).toContain(repo.landed)
     expect(outcome.reason).toContain("no receipt was written")
     expect(files()).toHaveLength(0)
+  }, 60_000)
+
+  test("a rebase whose patch ids match but whose landed bytes differ refuses on content", async () => {
+    const repo = rebasedRepository("whitespace")
+    // patch-id ignores whitespace, so the ordered patch ids agree; only the tree tells.
+    expect(contextPatchId(repo.canonical, repo.landed)).toBe(contextPatchId(repo.canonical, repo.head))
+    const { outcome, files } = await landRebase(repo)
+
+    expect(reasonOf(outcome)).toContain("the landed content is not the reviewed change")
+    expect(files()).toHaveLength(0)
+  }, 60_000)
+
+  test("a two-parent merge whose tree is not the reviewed head merged onto its first parent refuses", async () => {
+    const { outcome, files } = await land(
+      {
+        prView: [completed(githubPr()), completed(mergedGithubPr())],
+        parents: `${BASE_OID} ${HEAD_OID}`,
+        mergeTree: completed(`${PARENT_TREE}\n`),
+      },
+      { ...REVIEWED, merge_method: "merge" },
+    )
+    expect(reasonOf(outcome)).toContain("the landed content is not the reviewed change")
+    expect(outcome.ok === false && outcome.mergeIssued).toBe(true)
+    expect(files()).toEqual([])
+  })
+
+  test("an already-MERGED rebase whose commits add then remove a file is proved as a rebase chain", async () => {
+    const repo = rebasedRepository("transient")
+    // The last landed commit is not the reviewed head merged onto its own parent, so a
+    // squash-style proof alone would reject this valid rebase.
+    expect(git(repo.canonical, ["merge-tree", "--write-tree", `${repo.landed}^`, repo.head])).not.toBe(
+      git(repo.canonical, ["rev-parse", `${repo.landed}^{tree}`]),
+    )
+    const { outcome, calls, files } = await landRebase(
+      repo,
+      { prView: [completed(mergedGithubPr({ headRefOid: repo.head, mergeCommit: { oid: repo.landed } }))] },
+      {},
+    )
+
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) throw new Error(outcome.reason)
+    expect(calls.some((call) => merged(call.argv))).toBe(false)
+    expect(outcome.receipt.proof.evidence).toMatchObject({
+      mergeShape: { rebase: { method: "patch-id", commits: 2 } },
+    })
+    expect(files()).toHaveLength(1)
   }, 60_000)
 
   test("refuses merge method when repository policy disallows merge commits", async () => {
@@ -2853,10 +2927,6 @@ describe("delivery_land through a GitHub merge queue", () => {
       { sleep, ...extra },
     )
   }
-  const reasonOf = (outcome: Awaited<ReturnType<typeof land>>["outcome"]): string => {
-    if (outcome.ok) throw new Error("expected a refusal")
-    return outcome.reason
-  }
 
   test("a base branch without a queue rule merges directly and never touches the queue", async () => {
     const { outcome, calls } = await land({ prView: [completed(githubPr()), completed(mergedGithubPr())] }, REVIEWED)
@@ -3042,7 +3112,7 @@ describe("delivery_land through a GitHub merge queue", () => {
     expect(enqueues(calls)).toHaveLength(1)
     expect(merges(calls)).toEqual([])
     expect(files()).toHaveLength(1)
-  })
+  }, 60_000)
 
   test("a merge commit the base branch does not contain is not proof", async () => {
     const { outcome, files } = await inQueue({
@@ -3307,13 +3377,277 @@ describe("delivery_land through a GitHub merge queue", () => {
   })
 
   test("an enqueue GitHub rejects, such as a moved head, refuses and leaves no pending record", async () => {
-    const { outcome, files } = await inQueue({
+    const { outcome, receipts } = await inQueue({
       prView: [completed(githubPr())],
       queueStates: [snapshot("OPEN", null)],
       enqueue: completed(JSON.stringify({ errors: [{ message: "Head sha didn't match the expected head" }] })),
     })
     expect(reasonOf(outcome)).toContain("Head sha didn't match")
-    expect(files()).toEqual([])
+    expect(readdirSync(receipts)).toEqual([])
+  })
+
+  test("an enqueue gh exits non-zero on, with GitHub's errors on stdout, is a rejection and leaves no pending record", async () => {
+    const { outcome, receipts } = await inQueue({
+      prView: [completed(githubPr())],
+      queueStates: [snapshot("OPEN", null)],
+      enqueue: completed(JSON.stringify({ errors: [{ message: "Pull request is not mergeable" }] }), 1, "gh: GraphQL error"),
+    })
+    expect(reasonOf(outcome)).toContain("Pull request is not mergeable")
+    expect(readdirSync(receipts)).toEqual([])
+  })
+
+  describe("uncertain enqueue history", () => {
+    const pendingName = `pending-queue-470-${HEAD_OID.slice(0, 12)}.json`
+
+    test.each([
+      ["a timeout", { ok: false, exitCode: null, stdout: "", stderr: "", error: "timed out after 30000 ms" }],
+      ["an exit with no readable answer", completed("", 1, "HTTP 502 Bad Gateway")],
+      ["an unparseable answer", completed("<html>")],
+    ])("an enqueue that ends in %s keeps its record, so a vanished entry refuses as removed", async (_name, lost) => {
+      const shared = temporaryDirectory("delivery-land-pending-")
+      const first = await inQueue(
+        { prView: [completed(githubPr())], queueStates: [snapshot("OPEN", null)], enqueue: lost as CliResult },
+        {},
+        { receiptsDirectory: shared },
+      )
+      expect(reasonOf(first.outcome)).toContain("may have been accepted")
+      expect(enqueues(first.calls)).toHaveLength(1)
+      expect(readdirSync(shared)).toEqual([pendingName])
+
+      const retry = await inQueue(
+        { prView: [completed(githubPr())], queueStates: [snapshot("OPEN", null)] },
+        {},
+        { receiptsDirectory: shared },
+      )
+      expect(reasonOf(retry.outcome)).toContain("was not enqueued again")
+      expect(enqueues(retry.calls)).toEqual([])
+    })
+
+    test("a record another call writes after this call first looked still stops a second enqueue", async () => {
+      const shared = temporaryDirectory("delivery-land-pending-")
+      // Another call enqueues this head, and records it, while this call is being authorized;
+      // GitHub has since removed that entry.
+      const authorize = async (): Promise<void> => {
+        writePending(shared, {
+          repository: "srobroek/omp-plugins",
+          number: 470,
+          head: HEAD_OID,
+          method: "squash",
+          enqueuedAt: "2026-09-21T19:00:00Z",
+        })
+      }
+      const { outcome, calls } = await inQueue(
+        { prView: [completed(githubPr())], queueStates: [snapshot("OPEN", null)] },
+        {},
+        { receiptsDirectory: shared, authorize },
+      )
+      expect(reasonOf(outcome)).toContain("was not enqueued again")
+      expect(enqueues(calls)).toEqual([])
+    })
+
+    test("a call that runs while another call's enqueue is in flight leaves that call's record alone", async () => {
+      const shared = temporaryDirectory("delivery-land-pending-")
+      let overlapping: Awaited<ReturnType<typeof inQueue>> | null = null
+      const first = await inQueue(
+        {
+          prView: [completed(githubPr())],
+          queueStates: [snapshot("OPEN", null)],
+          // While the first call waits on GitHub, a second call sees no entry yet.
+          duringEnqueue: async () => {
+            overlapping = await inQueue(
+              { prView: [completed(githubPr())], queueStates: [snapshot("OPEN", null)] },
+              {},
+              { receiptsDirectory: shared },
+            )
+            return { ok: false, exitCode: null, stdout: "", stderr: "", error: "timed out after 30000 ms" }
+          },
+        },
+        {},
+        { receiptsDirectory: shared },
+      )
+      const second = overlapping as Awaited<ReturnType<typeof inQueue>> | null
+      if (second === null) throw new Error("the overlapping call did not run")
+      expect(reasonOf(second.outcome)).toContain("another call is enqueuing")
+      expect(enqueues(second.calls)).toEqual([])
+      expect(reasonOf(first.outcome)).toContain("may have been accepted")
+      expect(readdirSync(shared)).toEqual([pendingName])
+
+      const retry = await inQueue(
+        { prView: [completed(githubPr())], queueStates: [snapshot("OPEN", null)] },
+        {},
+        { receiptsDirectory: shared },
+      )
+      expect(reasonOf(retry.outcome)).toContain("was not enqueued again")
+      expect(enqueues(retry.calls)).toEqual([])
+    })
+
+    test("an enqueue intent that cannot be persisted sends no enqueue", async () => {
+      const shared = temporaryDirectory("delivery-land-pending-")
+      chmodSync(shared, 0o500)
+      try {
+        const { outcome, calls } = await inQueue(
+          { prView: [completed(githubPr())], queueStates: [snapshot("OPEN", null)] },
+          {},
+          { receiptsDirectory: shared },
+        )
+        expect(reasonOf(outcome)).toMatch(/pending-queue (lock|record) could not be written/)
+        expect(enqueues(calls)).toEqual([])
+      } finally {
+        chmodSync(shared, 0o700)
+      }
+    })
+
+    test.each([
+      ["a truncated record", '{"schema":1,"repository":"srobroek/omp-plugins","num'],
+      [
+        "a record for another head",
+        JSON.stringify({ schema: 1, repository: "srobroek/omp-plugins", number: 470, head: BASE_OID, method: "squash" }),
+      ],
+    ])("%s refuses instead of reading as never enqueued, and is left in place", async (_name, content) => {
+      const shared = temporaryDirectory("delivery-land-pending-")
+      writeFileSync(join(shared, pendingName), content)
+      const open = await inQueue(
+        { prView: [completed(githubPr())], queueStates: [snapshot("OPEN", null)] },
+        {},
+        { receiptsDirectory: shared },
+      )
+      expect(reasonOf(open.outcome)).toContain(`the pending-queue record ${join(shared, pendingName)} is unreadable`)
+      expect(enqueues(open.calls)).toEqual([])
+      expect(merges(open.calls)).toEqual([])
+      const merged = await inQueue({ prView: [completed(mergedGithubPr())] }, {}, { receiptsDirectory: shared })
+      expect(reasonOf(merged.outcome)).toContain("is unreadable")
+      expect(readdirSync(shared)).toEqual([pendingName])
+    })
+  })
+
+  describe("a resumed queue landing is held to base containment", () => {
+    const enqueueThenStop = (shared: string, method: string) =>
+      inQueue(
+        {
+          rules: queueRules(method),
+          prView: [completed(githubPr())],
+          queueStates: [snapshot("OPEN", null), snapshot("OPEN", queued)],
+        },
+        { queueWaitSeconds: 0 },
+        { receiptsDirectory: shared },
+      )
+
+    test("a merge commit outside the fetched base is refused on resume", async () => {
+      const shared = temporaryDirectory("delivery-land-pending-")
+      await enqueueThenStop(shared, "MERGE")
+      const resumed = await inQueue(
+        { prView: [completed(mergedGithubPr())], parents: `${BASE_OID} ${INTEGRATION_OID}`, onBase: completed("", 1) },
+        {},
+        { receiptsDirectory: shared },
+      )
+      expect(reasonOf(resumed.outcome)).toContain("outside the fetched base branch")
+      expect(readdirSync(shared)).toEqual([`pending-queue-470-${HEAD_OID.slice(0, 12)}.json`])
+    })
+
+    test("a merge commit the compare API puts off the base is refused on resume", async () => {
+      const shared = temporaryDirectory("delivery-land-pending-")
+      await enqueueThenStop(shared, "MERGE")
+      const resumed = await inQueue(
+        { prView: [completed(mergedGithubPr())], parents: `${BASE_OID} ${INTEGRATION_OID}`, compare: completed("diverged\n") },
+        {},
+        { receiptsDirectory: shared },
+      )
+      expect(reasonOf(resumed.outcome)).toContain("is not in the history of")
+    })
+
+    test("against real Git, a rebase chain the base branch does not contain is refused on resume", async () => {
+      const repo = rebasedRepository("clean")
+      const stopped = await landRebase(
+        repo,
+        {
+          rules: queueRules("REBASE"),
+          prView: [completed(githubPr({ headRefOid: repo.head }))],
+          queueStates: [snapshot("OPEN", null, { head: repo.head }), snapshot("OPEN", queued, { head: repo.head })],
+          enqueue: enqueued,
+        },
+        { queueWaitSeconds: 0 },
+      )
+      expect(stopped.outcome.ok === false && stopped.outcome.queued).toBe(true)
+      const resumed = await landRebase(
+        repo,
+        {
+          prView: [completed(mergedGithubPr({ headRefOid: repo.head, mergeCommit: { oid: repo.landed } }))],
+          baseTip: completed(`${repo.main}\trefs/heads/${BASE_BRANCH}\n`),
+        },
+        {},
+      )
+      expect(reasonOf(resumed.outcome)).toContain("outside the fetched base branch")
+      expect(resumed.files().filter((name) => !name.startsWith("pending-"))).toEqual([])
+    }, 60_000)
+  })
+
+  test("re-proving a merge-queue landing after its receipt was written keeps the queue's proof", async () => {
+    const shared = temporaryDirectory("delivery-land-pending-")
+    const landed = await inQueue(
+      {
+        rules: queueRules("MERGE"),
+        prView: [completed(githubPr()), completed(mergedGithubPr())],
+        queueStates: [snapshot("OPEN", null), snapshot("MERGED", null)],
+        parents: `${BASE_OID} ${INTEGRATION_OID}`,
+      },
+      {},
+      { receiptsDirectory: shared },
+    )
+    expect(landed.outcome.ok).toBe(true)
+    expect(readdirSync(shared).filter((name) => name.startsWith("pending-"))).toEqual([])
+
+    const reproved = await inQueue(
+      { prView: [completed(mergedGithubPr())], parents: `${BASE_OID} ${INTEGRATION_OID}` },
+      { worktree: "/tmp/worktrees/reproved" },
+      // A later re-proof: its receipt is a new one, not a rewrite of the first.
+      { receiptsDirectory: shared, now: () => NOW + 60_000 },
+    )
+    expect(reproved.outcome.ok).toBe(true)
+    if (!reproved.outcome.ok) throw new Error(reproved.outcome.reason)
+    expect(reproved.outcome.receipt.proof.evidence).toMatchObject({ mergeMethod: "merge", queue: { method: "merge" } })
+    expect(reproved.outcome.receipt.worktree.path).toBe(reproved.worktreePath ?? "")
+  })
+
+  test.each([
+    ["another tool's receipt", (r: LandingReceipt): LandingReceipt => ({ ...r, emitter: { ...r.emitter, tool: "delivery_cleanup" } })],
+    ["a receipt for another base", (r: LandingReceipt): LandingReceipt => ({ ...r, pr: { ...r.pr, baseRefName: "main" } })],
+    [
+      "queue evidence that disagrees with the landed method",
+      (r: LandingReceipt): LandingReceipt => ({ ...r, proof: { ...r.proof, evidence: { ...r.proof.evidence, mergeMethod: "squash" } } }),
+    ],
+  ])("%s lends no queue provenance to a re-proof", async (_name, tamper) => {
+    const shared = temporaryDirectory("delivery-land-pending-")
+    const landed = await inQueue(
+      {
+        rules: queueRules("MERGE"),
+        prView: [completed(githubPr()), completed(mergedGithubPr())],
+        queueStates: [snapshot("OPEN", null), snapshot("MERGED", null)],
+        parents: `${BASE_OID} ${INTEGRATION_OID}`,
+      },
+      {},
+      { receiptsDirectory: shared },
+    )
+    if (!landed.outcome.ok) throw new Error(landed.outcome.reason)
+    const forged = temporaryDirectory("delivery-land-forged-")
+    writeReceipt(tamper(structuredClone(landed.outcome.receipt)), forged)
+    const reproved = await inQueue(
+      { prView: [completed(mergedGithubPr())], parents: `${BASE_OID} ${INTEGRATION_OID}` },
+      {},
+      { receiptsDirectory: forged, now: () => NOW + 60_000 },
+    )
+    expect(reasonOf(reproved.outcome)).toContain(`observed second parent "${INTEGRATION_OID}"`)
+  })
+
+  test("a direct landing's receipt lends no queue provenance to a re-proof", async () => {
+    const shared = temporaryDirectory("delivery-land-pending-")
+    const direct = await land({ prView: [completed(mergedGithubPr())] }, {}, {}, { receiptsDirectory: shared })
+    expect(direct.outcome.ok).toBe(true)
+    const reproved = await inQueue(
+      { prView: [completed(mergedGithubPr())], parents: `${BASE_OID} ${INTEGRATION_OID}` },
+      {},
+      { receiptsDirectory: shared },
+    )
+    expect(reasonOf(reproved.outcome)).toContain(`observed second parent "${INTEGRATION_OID}"`)
   })
 })
 

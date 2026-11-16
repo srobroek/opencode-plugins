@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test"
-import { mkdtempSync, readdirSync, rmSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
+  acquireEnqueueLock,
   awaitQueue,
   bindingFailure,
   branchContains,
@@ -205,20 +206,81 @@ describe("pending record", () => {
     }
   }
 
-  test("round-trips the repository, number, head and merge method", () => {
+  test("round-trips the repository, number, head and merge method, leaving only the record behind", () => {
     withDirectory((directory) => {
       writePending(directory, record)
-      expect(readPending(directory, "o/r", 7, HEAD)).toMatchObject({ number: 7, head: HEAD, method: "merge" })
-      expect(readPending(directory, "other/r", 7, HEAD)).toBeNull()
+      expect(readdirSync(directory)).toEqual([`pending-queue-7-${HEAD.slice(0, 12)}.json`])
+      expect(readPending(directory, "o/r", 7, HEAD)).toMatchObject({
+        kind: "record",
+        record: { number: 7, head: HEAD, method: "merge" },
+      })
       clearPending(directory, 7, HEAD)
       expect(readdirSync(directory)).toEqual([])
     })
   })
 
-  test("a record whose method is not a merge method reads as absent", () => {
+  test("a second write never replaces the first record", () => {
     withDirectory((directory) => {
-      writePending(directory, { ...record, method: "constructor" as never })
-      expect(readPending(directory, "o/r", 7, HEAD)).toBeNull()
+      expect(writePending(directory, record)).toBe("created")
+      expect(writePending(directory, { ...record, method: "squash", enqueuedAt: "2026-02-02T00:00:00Z" })).toBe("exists")
+      expect(readPending(directory, "o/r", 7, HEAD)).toMatchObject({ kind: "record", record: { method: "merge" } })
+      expect(readdirSync(directory)).toEqual([`pending-queue-7-${HEAD.slice(0, 12)}.json`])
+    })
+  })
+
+  test("no record file reads as absent", () => {
+    withDirectory((directory) => {
+      expect(readPending(directory, "o/r", 7, HEAD)).toEqual({ kind: "absent" })
+    })
+  })
+
+  test.each([
+    ["a truncated write", (path: string) => writeFileSync(path, '{"schema":1,"repository":"O/R","num')],
+    ["an empty file", (path: string) => writeFileSync(path, "")],
+    ["a method that is not a merge method", (path: string) => writeFileSync(path, JSON.stringify({ schema: 1, repository: "O/R", number: 7, head: HEAD, method: "constructor" }))],
+    ["another repository", (path: string) => writeFileSync(path, JSON.stringify({ schema: 1, repository: "other/r", number: 7, head: HEAD, method: "merge" }))],
+    ["another head with the same prefix", (path: string) => writeFileSync(path, JSON.stringify({ schema: 1, repository: "O/R", number: 7, head: `${HEAD.slice(0, 12)}${"f".repeat(28)}`, method: "merge" }))],
+    ["a directory in the record's place", (path: string) => mkdirSync(path)],
+  ])("%s reads as unreadable, never as absent", (_name, plant) => {
+    withDirectory((directory) => {
+      const path = join(directory, `pending-queue-7-${HEAD.slice(0, 12)}.json`)
+      plant(path)
+      expect(readPending(directory, "o/r", 7, HEAD)).toMatchObject({ kind: "unreadable", path })
+    })
+  })
+})
+
+describe("enqueue lock", () => {
+  const NOW = 1_800_000_000_000
+  const withDirectory = (check: (directory: string) => void): void => {
+    const directory = mkdtempSync(join(tmpdir(), "enqueue-lock-"))
+    try {
+      check(directory)
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
+  }
+
+  test("a live holder keeps it until it releases, and release leaves nothing behind", () => {
+    withDirectory((directory) => {
+      const first = acquireEnqueueLock(directory, 7, HEAD, NOW)
+      if (first.kind !== "acquired") throw new Error("expected the lock")
+      expect(acquireEnqueueLock(directory, 7, HEAD, NOW + 1_000).kind).toBe("held")
+      first.release()
+      expect(readdirSync(directory)).toEqual([])
+      expect(acquireEnqueueLock(directory, 7, HEAD, NOW + 2_000).kind).toBe("acquired")
+    })
+  })
+
+  test.each([
+    ["whose process has ended", () => false, "which has ended without releasing it"],
+    ["held far longer than an enqueue takes", () => true, "by process"],
+  ])("a lock %s is reported, never taken over", (_name, alive, detail) => {
+    withDirectory((directory) => {
+      expect(acquireEnqueueLock(directory, 7, HEAD, NOW).kind).toBe("acquired")
+      const later = acquireEnqueueLock(directory, 7, HEAD, NOW + 86_400_000, alive)
+      expect(later).toMatchObject({ kind: "held", path: join(directory, `pending-queue-7-${HEAD.slice(0, 12)}.lock`) })
+      expect(later.kind === "held" && later.detail).toContain(detail)
     })
   })
 })

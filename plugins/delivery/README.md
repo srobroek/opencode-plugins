@@ -84,9 +84,23 @@ Inputs: `pr`, and when needed `merge_method` (`squash` by default, `merge`,
   - Still queued when the wait ends: the result is `ok: false, queued: true`, which is
     not final. Call again with the same inputs; an entry for that head is waited on and
     not enqueued twice, and a PR that has merged is proved as usual. A small
-    `pending-queue-<pr>-<head>.json` record next to the receipts remembers the enqueue:
-    a resumed call that finds the entry gone refuses as removed instead of enqueuing
-    again, and clears the record, so a later call is a fresh decision.
+    `pending-queue-<pr>-<head>.json` record next to the receipts remembers the enqueue.
+    The tool writes it before it sends the mutation, to a temporary file that it then
+    links into place, so it never replaces a record another call made. GitHub may queue
+    the PR even when the answer is lost (a timeout, an exit without GraphQL errors, an
+    unreadable reply), so the record stays then. A resumed
+    call that finds no entry refuses as removed and does not enqueue again. It clears
+    the record, so the next call decides afresh. A GraphQL rejection clears the record
+    at once. That decision and the enqueue run under a per-head `.lock` file, so a call
+    that overlaps another call's enqueue refuses and leaves its record alone. No call
+    removes another call's lock; a lock an interrupted call left is named in the refusal,
+    to delete after checking the queue.
+  - A record that exists but does not parse, or that names another landing, refuses.
+    The tool never reads it as "never enqueued". Check the queue on GitHub, delete the
+    file the refusal names, and call again.
+  - A call that finds the PR already MERGED takes the queue's method from the record.
+    After the receipt is written, it takes the method from that validated receipt. A
+    re-proof (to record a worktree, say) then uses the queue's proof again.
   - Removed from the queue (failed checks, conflict, closed) or a changed head: refused,
     with no other merge attempted.
   - A failed rules read, or a rules response with a malformed element, refuses, because a
@@ -99,6 +113,12 @@ Inputs: `pr`, and when needed `merge_method` (`squash` by default, `merge`,
   - squash: one parent;
   - merge: two parents, with the reviewed head second;
   - rebase: ordered `git patch-id --stable` equivalence with the reviewed commits.
+  The landed commit must also be in the history of the base branch tip, which the tool
+  reads with `git ls-remote` and fetches by id. Its tree must equal the reviewed head
+  merged onto its first parent, or for a rebase onto the commit the chain starts from.
+  These checks run for direct merges, queue landings, resumed
+  calls and already-MERGED PRs alike. An already-MERGED PR names no method, so one
+  parent passes as a squash or, if that fails, as a rebase chain proved by patch id.
 - The tool never writes the Beads ledger. When the receipt's `beads.ledgerActive`
   is true, `next` lists the `bd update` / `bd close` commands to run, children
   first, before `delivery_cleanup`.

@@ -9,6 +9,9 @@
  * is left here is order, refusal, and the mapping from two forge dialects onto the
  * receipt's `pr` fields.
  *
+ * Trust model: the GitHub API is trusted; these checks guard against races and mistakes,
+ * not a malicious forge.
+ *
  * Five properties this file exists to hold.
  *
  * A merge is issued at most once, and only against the exact subject that was
@@ -111,6 +114,7 @@ import {
   type CanonicalLedger,
   closeoutCommands,
   type LandingReceipt,
+  listReceipts,
   RECEIPT_METHOD_UNKNOWN,
   REPOSITORY_OBSERVATION_ARGS,
   type ReceiptAutoDelete,
@@ -120,15 +124,15 @@ import {
   writeReceipt,
 } from "./landing-receipt.ts"
 import {
+  acquireEnqueueLock,
   awaitQueue,
   bindingFailure,
   branchContains,
   clearPending,
   containmentArgv,
   decideQueue,
+  enqueueAnswer,
   enqueueArgv,
-  enqueuedEntry,
-  graphqlErrors,
   queueBudgetMs,
   readPending,
   readQueueRule,
@@ -562,13 +566,13 @@ async function rebaseEquivalence(
       reason: `git merge-base ${head} ${oid}: observed ${fork === null ? "no completed read" : show(fork)}, expected the commit the reviewed branch forked from`,
     }
   }
-  const reviewed = oidLines(await git(["rev-list", "--reverse", "--topo-order", "--no-merges", `${fork}..${head}`]))
+  const reviewed = oidLines(await git(["rev-list", "--reverse", "--topo-order", "--no-merges", "--end-of-options", `${fork}..${head}`]))
   if (reviewed === null || reviewed.length === 0) {
     return {
       reason: `git rev-list ${fork}..${head}: observed ${reviewed === null ? "no completed read" : "no commits"}, expected the reviewed commits`,
     }
   }
-  const chain = await git(["rev-list", "--first-parent", "--parents", `--max-count=${reviewed.length}`, oid])
+  const chain = await git(["rev-list", "--first-parent", "--parents", `--max-count=${reviewed.length}`, "--end-of-options", oid])
   const records =
     chain === null
       ? null
@@ -606,43 +610,41 @@ async function rebaseEquivalence(
       }
     }
   }
+  // Stable patch ids ignore whitespace, so they cannot say the bytes are the reviewed ones:
+  // the final tree must also equal the reviewed head replayed onto the chain's base.
+  const unproven = await contentFailure(head, oid, landedBase, git, false)
+  if (unproven !== null) return unproven
   return { method: "patch-id", reviewed: `${fork}..${head}`, landed: `${landedBase}..${oid}`, commits: reviewed.length }
 }
 
+/** The tree id of `commit`, or null when Git does not name exactly one. */
+async function treeOf(commit: string, git: GitRead): Promise<string | null> {
+  const printed = (await git(["rev-parse", "--verify", "--end-of-options", `${commit}^{tree}`]))?.trim().toLowerCase() ?? null
+  return printed !== null && FULL_OID.test(printed) ? printed : null
+}
+
 /**
- * Prove locally that a single-parent landing is the reviewed change on top of its parent.
+ * Why `oid` is not the reviewed `head` applied to `parent`, or null when it is.
  *
- * Shape and the forge's compare API certify nothing about content: a forged reread could
- * name an unrelated single-parent commit. So the landed tree must equal the tree of merging
- * the reviewed head into the landed commit's parent (`git merge-tree --write-tree`, which
- * finds the merge base itself and so also covers a grouped queue entry, whose parent is the
- * previous group commit), must differ from the parent's tree, and the commit must be in the
- * history of the base tip this call fetched, not just in the compare API's answer.
+ * Shape and the forge's compare API say nothing about content, so the landed tree must equal
+ * the tree `git merge-tree --write-tree` writes for merging the reviewed head into the
+ * landed commit's parent. Git finds the merge base itself, so a grouped queue entry (whose
+ * parent is the previous group commit) works too. `requireChange` additionally refuses a
+ * landing whose tree is its parent's: a squash that changed nothing is not the review.
  */
-async function singleParentContent(
+async function contentFailure(
   head: string,
   oid: string,
   parent: string,
-  baseTip: () => Promise<string | { reason: string }>,
   git: GitRead,
+  requireChange: boolean,
 ): Promise<{ reason: string } | null> {
-  const tip = await baseTip()
-  if (typeof tip !== "string") return tip
-  if ((await git(["merge-base", "--is-ancestor", oid, tip])) === null) {
-    return {
-      reason: `git merge-base --is-ancestor ${oid} ${tip}: observed the landed commit outside the fetched base branch, expected it in the history of ${tip}`,
-    }
-  }
-  const tree = async (commit: string): Promise<string | null> => {
-    const printed = (await git(["rev-parse", "--verify", `${commit}^{tree}`]))?.trim().toLowerCase() ?? null
-    return printed !== null && FULL_OID.test(printed) ? printed : null
-  }
-  const landedTree = await tree(oid)
-  const parentTree = await tree(parent)
+  const landedTree = await treeOf(oid, git)
+  const parentTree = await treeOf(parent, git)
   if (landedTree === null || parentTree === null) {
     return { reason: `git rev-parse ${landedTree === null ? oid : parent}^{tree}: observed no tree id, expected one` }
   }
-  if (landedTree === parentTree) {
+  if (requireChange && landedTree === parentTree) {
     return { reason: `landed commit ${oid}: observed the same tree as its parent ${parent}, expected the reviewed change` }
   }
   const merged = (await git(["merge-tree", "--write-tree", parent, head]))?.split("\n")[0]?.trim().toLowerCase() ?? null
@@ -659,13 +661,36 @@ async function singleParentContent(
   return null
 }
 
+/** Why `oid` is not in the history of the base tip this call fetched, or null when it is. */
+async function baseContainmentFailure(
+  oid: string,
+  baseTip: () => Promise<string | { reason: string }>,
+  git: GitRead,
+): Promise<{ reason: string } | null> {
+  const tip = await baseTip()
+  if (typeof tip !== "string") return tip
+  if ((await git(["merge-base", "--is-ancestor", oid, tip])) === null) {
+    return {
+      reason: `git merge-base --is-ancestor ${oid} ${tip}: observed the landed commit outside the fetched base branch, expected it in the history of ${tip}`,
+    }
+  }
+  return null
+}
+
 /**
- * Prove that the observed commit has the shape requested by the landing method.
- * Merge and squash are distinguished by parent count; a merge commit must retain
- * the exact reviewed head as its second parent. A single-parent landing (squash, or a
- * pre-merged linear one) must also carry the reviewed content, see
- * {@link singleParentContent}. Rebase is linear and additionally
- * requires {@link rebaseEquivalence} between the reviewed and the landed commits.
+ * Prove that the observed commit is the reviewed change, landed the way `method` says.
+ *
+ * Every proof path, whichever method and whoever merged (this call, the queue, or an earlier
+ * call that is being resumed), checks the same three things:
+ * - the forge-supplied ids are whole lowercase hex object ids before any Git command sees
+ *   them, so none can be read as an option;
+ * - the landed commit is in the history of the base tip this call fetched;
+ * - its tree is the reviewed head merged onto its (first) parent, see {@link contentFailure}.
+ *
+ * Shape is checked first: a merge commit has two parents and, outside a queue, the reviewed
+ * head as the second; squash and rebase are linear. A rebase additionally needs the ordered
+ * patch equivalence of {@link rebaseEquivalence}. A request that was already MERGED names no
+ * method, so a single-parent commit is accepted as a squash or, failing that, as a rebase chain.
  */
 async function mergeProof(
   pr: PrObservation,
@@ -681,7 +706,15 @@ async function mergeProof(
   }
   const oid = pr.mergeCommitOid.trim().toLowerCase()
   const head = pr.headRefOid.trim().toLowerCase()
-  const output = await git(["-c", "log.showSignature=false", "show", "-s", "--format=%P", oid])
+  for (const [field, value] of [
+    ["pr.mergeCommitOid", oid],
+    ["pr.headRefOid", head],
+  ] as const) {
+    if (!FULL_OID.test(value)) {
+      return { reason: `${field}: observed ${show(value)}, expected a 40- or 64-character lowercase hex object id; no Git command was run` }
+    }
+  }
+  const output = await git(["-c", "log.showSignature=false", "show", "-s", "--format=%P", "--end-of-options", oid])
   if (output === null)
     return { reason: `git show -s --format=%P ${oid}: observed no completed read, expected the merge commit's parents` }
   const text = output.trim()
@@ -691,50 +724,67 @@ async function mergeProof(
       reason: `git show -s --format=%P ${oid}: observed malformed parent ids ${show(text)}, expected full hexadecimal object ids`,
     }
   }
+  const first = parents[0] ?? ""
+  const label = method === null ? "pre-merged request" : `merge_method "${method}"`
+
+  // Shape.
   if (method === null) {
-    if (parents.length === 1) {
-      const unproven = await singleParentContent(head, oid, parents[0] ?? "", baseTip, git)
-      return unproven === null ? { oid, parents, rebase: null } : { reason: `pre-merged request: ${unproven.reason}` }
+    if (parents.length === 2 && parents[1] !== head) {
+      return {
+        reason: `pre-merged request: observed second parent ${show(parents[1])}, expected the reviewed head ${show(head)}`,
+      }
     }
-    if (parents.length === 2 && parents[1]?.toLowerCase() === head) return { oid, parents, rebase: null }
-    return {
-      reason: `pre-merged request: observed ${parents.length} parents, expected one parent or two with the reviewed head as the second parent`,
+    if (parents.length !== 1 && parents.length !== 2) {
+      return {
+        reason: `pre-merged request: observed ${parents.length} parents, expected one parent or two with the reviewed head as the second parent`,
+      }
     }
-  }
-  if (method === "merge") {
-    if (parents.length !== 2)
+  } else if (method === "merge") {
+    if (parents.length !== 2) {
       return {
         reason: `merge_method "merge": observed ${parents.length} parents, expected exactly 2 with the reviewed head as the second parent`,
       }
+    }
     if (queued) {
-      // The queue builds the merge on its own integration branch, so the reviewed head need
-      // not be the second parent (a grouped entry merges onto its predecessors). It must
-      // still be part of what landed.
+      // The queue builds the merge on its own branch, so the reviewed head need not be the
+      // second parent (a grouped entry merges onto its predecessors). It must still be part
+      // of what landed.
       if ((await git(["merge-base", "--is-ancestor", head, oid])) === null) {
         return {
           reason: `merge_method "merge": observed reviewed head ${show(pr.headRefOid)} not an ancestor of the queue's merge commit ${oid}, expected the head in what landed`,
         }
       }
-      return { oid, parents, rebase: null }
-    }
-    if (parents[1]?.toLowerCase() !== head) {
+    } else if (parents[1] !== head) {
       return {
         reason: `merge_method "merge": observed second parent ${show(parents[1])}, expected reviewed head ${show(pr.headRefOid)}`,
       }
     }
-    return { oid, parents, rebase: null }
-  }
-  if (parents.length !== 1)
+  } else if (parents.length !== 1) {
     return {
       reason: `merge_method "${method}": observed ${parents.length} parents, expected exactly 1 for a linear landing`,
     }
-  if (method === "squash") {
-    const unproven = await singleParentContent(head, oid, parents[0] ?? "", baseTip, git)
-    return unproven === null ? { oid, parents, rebase: null } : { reason: `merge_method "squash": ${unproven.reason}` }
   }
+
+  const outside = await baseContainmentFailure(oid, baseTip, git)
+  if (outside !== null) return { reason: `${label}: ${outside.reason}` }
+
+  // Content.
+  if (parents.length === 2) {
+    const unproven = await contentFailure(head, oid, first, git, false)
+    return unproven === null ? { oid, parents, rebase: null } : { reason: `${label}: ${unproven.reason}` }
+  }
+  if (method === "rebase") {
+    const rebase = await rebaseEquivalence(head, oid, git)
+    return "reason" in rebase ? { reason: `merge_method "rebase": ${rebase.reason}` } : { oid, parents, rebase }
+  }
+  const single = await contentFailure(head, oid, first, git, true)
+  if (single === null) return { oid, parents, rebase: null }
+  if (method === "squash") return { reason: `merge_method "squash": ${single.reason}` }
+  // Already MERGED, so the method is not known: a rebase chain lands several commits whose
+  // last one does not merge cleanly onto its own parent, so it gets the rebase proof.
   const rebase = await rebaseEquivalence(head, oid, git)
-  if ("reason" in rebase) return { reason: `merge_method "rebase": ${rebase.reason}` }
-  return { oid, parents, rebase }
+  if (!("reason" in rebase)) return { oid, parents, rebase }
+  return { reason: `pre-merged request: ${single.reason}; as a rebase landing: ${rebase.reason}` }
 }
 
 /**
@@ -958,6 +1008,52 @@ function nativeCloseoutSteps(receipt: LandingReceipt, receiptPath: string, merge
 function missingBeadIdentity(ids: readonly string[], branch: string, ledger: CanonicalLedger): string | null {
   if (!ledger.active || ids.length > 0) return null
   return `beads.ids: observed no bead identity for branch ${show(branch)}, expected an "omp/agent/<bead-id>" or "opencode/agent/<bead-id>" branch or an explicit beadId; the ledger at canonical root ${show(ledger.root)} is active, so this landing has no bead for the native close-out commands`
+}
+
+/**
+ * The merge method of the queue that landed this pull request at this head and merge commit,
+ * as a receipt this tool wrote and its validator accepts records it; null when none does.
+ *
+ * The pending-queue record that chose the queue-aware proof is cleared once the receipt is
+ * written, so a later re-proof (to record a worktree, say) learns the provenance here instead,
+ * and does not hold a queue's merge commit to the direct-merge shape.
+ */
+function receiptQueueMethod(
+  directory: string,
+  expected: { repository: string; number: number; head: string; baseRefName: string; mergeCommitOid: string | null },
+): MergeMethod | null {
+  const landed = expected.mergeCommitOid?.trim().toLowerCase() ?? ""
+  if (!FULL_OID.test(landed)) return null
+  let receipts: LandingReceipt[]
+  try {
+    receipts = listReceipts(directory, { pr: expected.number })
+  } catch {
+    // An unreadable directory lends no provenance; the stricter direct-merge proof applies.
+    return null
+  }
+  for (const receipt of receipts) {
+    // Only this tool's own landing receipt for the same GitHub pull request, head, base and
+    // merge commit counts, and its queue evidence must agree with the method it landed with.
+    if (
+      receipt.emitter.tool !== "delivery_land" ||
+      receipt.outcome !== "landed" ||
+      receipt.repo.forge !== "github" ||
+      receipt.repo.nameWithOwner.toLowerCase() !== expected.repository.toLowerCase() ||
+      receipt.pr.baseRefName !== expected.baseRefName ||
+      receipt.pr.headRefOid.trim().toLowerCase() !== expected.head ||
+      receipt.pr.mergeCommitOid?.trim().toLowerCase() !== landed
+    ) {
+      continue
+    }
+    const evidence = receipt.proof.evidence
+    const recorded = ownValue(evidence, "queue")
+    const method = stringField(recorded, "method")
+    const known = MERGE_METHODS.find((candidate) => candidate === method)
+    if (stringField(recorded, "rule") === "merge_queue" && known !== undefined && stringField(evidence, "mergeMethod") === known) {
+      return known
+    }
+  }
+  return null
 }
 
 /**
@@ -1344,13 +1440,30 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
   // by itself, so the rules are read first and an unreadable answer refuses.
   let queue: { method: MergeMethod } | null = null
   const pendingDirectory = deps.receiptsDirectory ?? receiptDirectory(env, repository.key)
+  // A record that exists but cannot be read may be the only trace of an enqueue GitHub
+  // accepted, so it is never taken for "never enqueued": the call refuses and names it.
+  const pending = forge === "github" ? readPending(pendingDirectory, nameWithOwner, requested, head) : ({ kind: "absent" } as const)
+  if (pending.kind === "unreadable") {
+    return refuse(
+      `the pending-queue record ${pending.path} is unreadable (${pending.reason}), so whether an earlier call enqueued ${nameWithOwner}#${number} at ${head} cannot be told; check the pull request's merge queue on GitHub, then delete that file and call delivery_land again; nothing was enqueued or merged and no receipt was written`,
+    )
+  }
   if (alreadyMerged && forge === "github") {
     // A merge this tool enqueued earlier and the queue has since landed reads as MERGED, and the
     // direct-merge proof cannot recognise the queue's integration commit. The record of that
-    // enqueue (kept until the receipt is written) carries the method, so the queue-aware proof
-    // is used on every retry.
-    const recorded = readPending(pendingDirectory, nameWithOwner, requested, head)
-    if (recorded !== null) queue = { method: recorded.method }
+    // enqueue (kept until the receipt is written) carries the method; once the receipt is
+    // written, a re-proof finds the method in that validated receipt instead.
+    const method =
+      pending.kind === "record"
+        ? pending.record.method
+        : receiptQueueMethod(pendingDirectory, {
+            repository: nameWithOwner,
+            number: requested,
+            head,
+            baseRefName: first.pr.baseRefName,
+            mergeCommitOid: first.pr.mergeCommitOid,
+          })
+    if (method !== null) queue = { method }
   }
   if (!alreadyMerged && forge === "github") {
     const path = normalizeRepoPath("github", nameWithOwner)
@@ -1443,24 +1556,32 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
     }
     const sleep = (ms: number): Promise<void> => (deps.sleep ?? abortableSleep)(ms, signal)
     const queueLabel = ["gh", "api", "graphql", "enqueuePullRequest", `expectedHeadOid=${head}`]
-    const hasPendingRecord = (): boolean => readPending(pendingDirectory, nameWithOwner, requested, head) !== null
-    // Records that this head is, or was, in the queue, so a later call that finds no entry can
-    // tell "removed" from "never enqueued". Written whether this call enqueued or joined an entry.
-    const recordEnqueue = (): LandOutcome | null => {
-      if (hasPendingRecord()) return null
+    // Whether a record says this head is, or may be, in the queue, so a call that finds no
+    // entry can tell "removed" from "never enqueued". Read again right before each decision:
+    // another call may have enqueued and recorded this head since the read above.
+    const recordedNow = (): { recorded: boolean } | { reason: string } => {
+      const now = readPending(pendingDirectory, nameWithOwner, requested, head)
+      if (now.kind === "unreadable") {
+        return {
+          reason: `the pending-queue record ${now.path} is unreadable (${now.reason}), so whether an earlier call enqueued ${nameWithOwner}#${number} at ${head} cannot be told; check the pull request's merge queue on GitHub, then delete that file and call delivery_land again; nothing was enqueued and no receipt was written`,
+        }
+      }
+      return { recorded: now.kind === "record" }
+    }
+    // Claims the record without replacing one: `exists` means another call recorded this head.
+    const recordEnqueue = (): "created" | "exists" | { reason: string } => {
       try {
-        writePending(pendingDirectory, {
+        return writePending(pendingDirectory, {
           repository: nameWithOwner,
           number: requested,
           head,
           method: queue?.method ?? mergeMethod,
           enqueuedAt: observedAt,
         })
-        return null
       } catch (error) {
-        return refuse(
-          `the pending-queue record could not be written (${error instanceof Error ? error.message : String(error)}) while the head is in the merge queue; call delivery_land again with the same pr and expectHeadSha ${head} to wait on the entry`,
-        )
+        return {
+          reason: `the pending-queue record could not be written (${error instanceof Error ? error.message : String(error)})`,
+        }
       }
     }
     const current = await read()
@@ -1473,43 +1594,71 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
       return refuse(`${standing.reason}; nothing was enqueued and no receipt was written`)
     }
     if (standing.kind === "wait" && current.snapshot.entry !== null) {
+      // Written whether this call enqueued or joined an entry someone else made; a record
+      // another call already made is kept as it is.
       const unrecorded = recordEnqueue()
-      if (unrecorded !== null) return unrecorded
+      if (typeof unrecorded !== "string") {
+        return refuse(
+          `${unrecorded.reason} while the head is in the merge queue; call delivery_land again with the same pr and expectHeadSha ${head} to wait on the entry; no receipt was written`,
+        )
+      }
     }
     if (standing.kind === "wait" && current.snapshot.entry === null) {
-      // No entry. If an earlier call enqueued this head, the entry was removed since (by the
-      // queue or by hand): re-enqueuing would override that, so it refuses once and the next
-      // call, which finds no record, is a fresh decision.
-      if (hasPendingRecord()) {
-        clearPending(pendingDirectory, requested, head)
-        return refuse(
-          "mergeQueueEntry: observed no entry for a pull request an earlier call enqueued, expected a queued or merged one; the entry was removed from the merge queue and was not enqueued again. Call delivery_land again only if the pull request should be re-enqueued; nothing was merged and no receipt was written",
-        )
-      }
-      const unenqueued = interrupted("before the enqueue; nothing was enqueued and no receipt was written")
-      if (unenqueued !== null) return unenqueued
-      const enqueue = await run(enqueueArgv(nodeId, head), {
-        cwd,
-        timeoutMs: FORGE_TIMEOUT_MS,
-        env: forgeCommandEnv,
-      })
-      const enqueueFailure = cliFailure(queueLabel, enqueue)
-      if (enqueueFailure !== null) return refuse(`${enqueueFailure}; no receipt was written`)
-      let response: unknown
+      // The whole no-entry decision runs under a per-head lock, so a call that sees no entry
+      // while another call's enqueue is in flight cannot take that call's record for a removal.
+      let lock: ReturnType<typeof acquireEnqueueLock>
       try {
-        response = JSON.parse(enqueue.stdout)
-      } catch {
-        return refuse(`${queueLabel.join(" ")}: observed unparseable output, expected one JSON object`)
-      }
-      const rejected = graphqlErrors(response)
-      if (rejected !== null) return refuse(`${queueLabel.join(" ")}: ${rejected}; no receipt was written`)
-      if (enqueuedEntry(response) === null) {
+        lock = acquireEnqueueLock(pendingDirectory, requested, head, deps.now?.() ?? Date.now())
+      } catch (error) {
         return refuse(
-          `${queueLabel.join(" ")}: observed no mergeQueueEntry in the response, expected the queued entry; no receipt was written`,
+          `the pending-queue lock could not be written (${error instanceof Error ? error.message : String(error)}); nothing was enqueued and no receipt was written`,
         )
       }
-      const unrecorded = recordEnqueue()
-      if (unrecorded !== null) return unrecorded
+      if (lock.kind === "held") {
+        return refuse(
+          `the enqueue lock ${lock.path} for ${nameWithOwner}#${number} at ${head} is held ${lock.detail}, so another call is enqueuing it; this call did not enqueue. Call delivery_land again with the same pr and expectHeadSha ${head} to wait on that entry. If no delivery_land call is running, an interrupted call left the lock: check the pull request's merge queue on GitHub, then delete the lock; no receipt was written`,
+        )
+      }
+      const decided = await (async (): Promise<LandOutcome | null> => {
+        // No entry. If an earlier call enqueued (or tried to enqueue) this head, the entry was
+        // removed since, by the queue or by hand, or never made: re-enqueuing would override a
+        // removal, so it refuses once and the next call, which finds no record, decides afresh.
+        const history = recordedNow()
+        if ("reason" in history) return refuse(history.reason)
+        if (history.recorded) {
+          clearPending(pendingDirectory, requested, head)
+          return refuse(
+            "mergeQueueEntry: observed no entry for a pull request an earlier call enqueued, expected a queued or merged one; the entry was removed from the merge queue and was not enqueued again (an earlier enqueue whose answer was lost may also never have made one). Call delivery_land again only if the pull request should be re-enqueued; nothing was merged and no receipt was written",
+          )
+        }
+        const unenqueued = interrupted("before the enqueue; nothing was enqueued and no receipt was written")
+        if (unenqueued !== null) return unenqueued
+        // The intent is recorded before the mutation is sent: GitHub can accept it and the answer
+        // still be lost, and without the record a retry would read that as "never enqueued".
+        const claimed = recordEnqueue()
+        if (typeof claimed !== "string") return refuse(`${claimed.reason}; nothing was enqueued and no receipt was written`)
+        if (claimed === "exists") {
+          // Another call recorded this head between the read and the claim: it is enqueuing or
+          // enqueued it, so this call does not, and leaves that call's record alone.
+          return refuse(
+            `the pending-queue record for ${nameWithOwner}#${number} at ${head} appeared while this call was deciding, so another call is enqueuing it; this call did not enqueue. Call delivery_land again with the same pr and expectHeadSha ${head} to wait on that entry; no receipt was written`,
+          )
+        }
+        const answer = enqueueAnswer(
+          await run(enqueueArgv(nodeId, head), { cwd, timeoutMs: FORGE_TIMEOUT_MS, env: forgeCommandEnv }),
+        )
+        if (answer.kind === "rejected") {
+          clearPending(pendingDirectory, requested, head)
+          return refuse(`${queueLabel.join(" ")}: ${answer.reason}; nothing was enqueued and no receipt was written`)
+        }
+        if (answer.kind === "uncertain") {
+          return refuse(
+            `${queueLabel.join(" ")}: ${answer.reason}; the enqueue may have been accepted, so its pending-queue record is kept. Call delivery_land again with the same pr and expectHeadSha ${head}: it waits on the entry if GitHub queued it, and otherwise refuses as removed without enqueuing, after which the next call enqueues afresh; no receipt was written`,
+          )
+        }
+        return null
+      })().finally(lock.release)
+      if (decided !== null) return decided
     }
     const waited = await awaitQueue({
       read,
@@ -1537,22 +1686,6 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
     )
     const reread = await rereadLanded()
     if (reread !== null) return reread
-    // The queue's own claim is not the only evidence: the merge commit the forge names must
-    // also be in the history of the base branch, as the forge's compare API reports it.
-    const landedOid = proved.mergeCommitOid?.trim().toLowerCase() ?? ""
-    const base = normalizeRepoPath("github", nameWithOwner)
-    if (FULL_OID.test(landedOid) && base !== null) {
-      const contains = containmentArgv(base, landedOid, proved.baseRefName)
-      const result = await run(contains, { timeoutMs: FORGE_TIMEOUT_MS, env: forgeCommandEnv })
-      const failure = cliFailure(contains, result)
-      if (failure !== null) return refuseMerged(failure)
-      if (!branchContains(result.stdout)) {
-        return refuseMerged(
-          `${contains.join(" ")}: observed ${show(result.stdout.trim())}, expected "ahead" or "identical": the merge commit ${landedOid} is not in the history of ${proved.baseRefName}`,
-        )
-      }
-      notes.push(`The merge commit ${landedOid} is in the history of ${proved.baseRefName} (compare status ${result.stdout.trim()}).`)
-    }
   } else {
     if (mergeMethod === "merge") {
       mergePolicy = await allowMergeCommit(forge, nameWithOwner, boundForgeRun)
@@ -1601,17 +1734,38 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
     if (reread !== null) return reread
   }
 
+  // A queue landing, whether this call waited on it or resumes one, is also checked against
+  // the forge's compare API: the merge commit must be in the base branch's history there, as
+  // it must be in the fetched base tip's history below.
+  if (queue !== null) {
+    const landedOid = proved.mergeCommitOid?.trim().toLowerCase() ?? ""
+    const base = normalizeRepoPath("github", nameWithOwner)
+    if (!FULL_OID.test(landedOid) || base === null) {
+      return refuseMerged(
+        `pr.mergeCommitOid: observed ${show(proved.mergeCommitOid)} in ${show(nameWithOwner)}, expected a whole object id to compare with ${proved.baseRefName}`,
+      )
+    }
+    const contains = containmentArgv(base, landedOid, proved.baseRefName)
+    const result = await run(contains, { timeoutMs: FORGE_TIMEOUT_MS, env: forgeCommandEnv })
+    const failure = cliFailure(contains, result)
+    if (failure !== null) return refuseMerged(failure)
+    if (!branchContains(result.stdout)) {
+      return refuseMerged(
+        `${contains.join(" ")}: observed ${show(result.stdout.trim())}, expected "ahead" or "identical": the merge commit ${landedOid} is not in the history of ${proved.baseRefName}`,
+      )
+    }
+    notes.push(`The merge commit ${landedOid} is in the history of ${proved.baseRefName} (compare status ${result.stdout.trim()}).`)
+  }
+
   const proofMethod = queue !== null ? queue.method : alreadyMerged ? null : landMethod
   const provedOid = proved.mergeCommitOid?.trim().toLowerCase() ?? ""
   let localCommits: LocalCommits | null = null
   const fetchRun = (argv: string[]): Promise<CliResult> =>
     Promise.resolve(run(argv, { cwd, timeoutMs: FETCH_TIMEOUT_MS, env: gitEnv }))
   if (proved.state.trim().toUpperCase() === "MERGED" && FULL_OID.test(provedOid)) {
-    // The reviewed head is read locally by the rebase patch ids, the queue's merge ancestry
-    // check and the single-parent content proof; only a two-parent merge that is not queued
-    // needs just the merge commit.
-    const needsHead = proofMethod !== "merge" || queue !== null
-    const required = needsHead && FULL_OID.test(head) && head !== provedOid ? [provedOid, head] : [provedOid]
+    // Every proof reads the reviewed head locally: the content proof merges it onto the
+    // landed commit's parent, and the rebase patch ids and queue ancestry check read it too.
+    const required = FULL_OID.test(head) && head !== provedOid ? [provedOid, head] : [provedOid]
     const local = await ensureLocalCommits(
       required,
       proved.baseRefName,
