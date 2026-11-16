@@ -62,7 +62,7 @@ install page.
 | `opengrep` | `opengrep --version` | Download the release binary from the Opengrep GitHub releases and verify its checksum |
 | `codeql` | `codeql version` | In CI, the `github/codeql-action` pinned by SHA; locally, the CodeQL CLI bundle from GitHub releases |
 | `lizard` | `lizard --version` | `uv tool install lizard` |
-| `jscpd` | `jscpd --version` | A dev dependency: `npm install --save-dev jscpd` (or the project's package manager) |
+| `jscpd` | `node_modules/.bin/jscpd --version` | A dev dependency: `npm install --save-dev jscpd` (or the project's package manager) |
 | `gitleaks` | `gitleaks version` | `brew install gitleaks` |
 
 Run Schemathesis only against a disposable environment, never production. Run k6 only against
