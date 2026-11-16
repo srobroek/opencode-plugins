@@ -310,6 +310,105 @@ describe("git bisect run", () => {
   })
 })
 
+describe("checkout boundary (debug only)", () => {
+  const inCheckout = { ...context, workdir: CHECKOUT }
+  const mutating = [
+    "git commit -am x",
+    "git add -A",
+    "git checkout main",
+    "git switch main",
+    "git reset HEAD~1",
+    "git restore f",
+    "git stash",
+    "git stash push -m x",
+    "git cherry-pick abc",
+    "git revert abc",
+    "git apply p.diff",
+    "git am p.mbox",
+    "git branch newone",
+    "git bisect start",
+    "git bisect good",
+    "git bisect run bun test x",
+    "git bisect reset",
+    "git worktree lock somewhere",
+  ]
+  test.each(mutating)("refuses %j in the user's checkout", (command) => {
+    expect(forbiddenGit(command, "debug", inCheckout)).toBeString()
+  })
+  test.each(mutating.filter((command) => !command.includes("bisect") && !command.includes("worktree")))(
+    "allows %j in the scratch worktree and for refactor in the checkout",
+    (command) => {
+      expect(forbiddenGit(command, "debug", context)).toBeUndefined()
+      expect(forbiddenGit(command, "refactor", inCheckout)).toBeUndefined()
+    },
+  )
+  test.each(["git bisect start", "git bisect good", "git bisect reset"])("allows %j in the scratch worktree", (command) => {
+    expect(forbiddenGit(command, "debug", context)).toBeUndefined()
+  })
+  test("bisect run is allowed in the scratch worktree", () => {
+    expect(forbiddenGit("git bisect run bun test x", "debug", context)).toBeUndefined()
+  })
+  const redirected = [
+    `git -C ${CHECKOUT} commit -m x`,
+    `git -C ${CHECKOUT}/src add f`,
+    "git -C .. commit -m x",
+    `git --work-tree=${CHECKOUT} checkout .`,
+    `git --work-tree ${CHECKOUT} checkout .`,
+    `git --git-dir=${CHECKOUT}/.git commit -m x`,
+    `git --git-dir=${WT}/.git commit -m x`,
+    `cd ${CHECKOUT} && git commit -m x`,
+    `cd ${CHECKOUT}; git commit -m x`,
+    `(cd ${WT} && true); git commit -m x`,
+    `(cd ${CHECKOUT} && git commit -m x)`,
+    "cd $SOMEWHERE && git commit -m x",
+    "cd ~ && git commit -m x",
+    "cd .. && git commit -m x",
+    `pushd ${CHECKOUT} && git commit -m x`,
+    `env -C ${CHECKOUT} git commit -m x`,
+    `sh -c 'cd ${CHECKOUT} && git commit -m x'`,
+  ]
+  test.each(redirected)("refuses %j from the scratch worktree", (command) => {
+    expect(forbiddenGit(command, "debug", context)).toBeString()
+  })
+  const scratchTargets = [
+    `git -C ${WT} commit -am x`,
+    `git -C ${WT}/src add f`,
+    `git --work-tree=${WT} reset`,
+    `cd ${WT} && git commit -am x`,
+    `cd ${WT}/src && git add f && git commit -m x`,
+    `git -C ${WT} bisect run bun test x`,
+    `env -C ${WT} git commit -m x`,
+    `sh -c 'cd ${WT} && git commit -m x'`,
+  ]
+  test.each(scratchTargets)("allows %j from the user's checkout", (command) => {
+    expect(forbiddenGit(command, "debug", inCheckout)).toBeUndefined()
+  })
+  const readOnly = [
+    "git status",
+    "git log -p",
+    "git diff",
+    "git show HEAD",
+    "git stash list",
+    "git stash show -p",
+    "git branch -a",
+    "git branch --contains abc",
+    "git bisect log",
+    "git worktree list",
+    "git fetch",
+    "git config --get user.name",
+    `git -C ${CHECKOUT} log`,
+    `git --git-dir=${CHECKOUT}/.git show HEAD`,
+    `cd ${CHECKOUT} && git status`,
+  ]
+  test.each(readOnly)("allows the read-only %j anywhere", (command) => {
+    expect(forbiddenGit(command, "debug", inCheckout)).toBeUndefined()
+  })
+  test("the session's workdir is followed, and a call with no start directory is refused", () => {
+    expect(forbiddenGit("git commit -m x", "debug", { home: HOME, startDir: CHECKOUT, workdir: "../.local/share/opencode/worktree/h1/debug-foo" })).toBeUndefined()
+    expect(forbiddenGit("git commit -m x", "debug", { home: HOME })).toBeString()
+  })
+})
+
 describe("guardShellCall", () => {
   test("an alias tool with an argv-array command is read as the command it becomes", () => {
     expect(guardShellCall("bash", { command: ["git", "-C", "x", "push"] }, "debug")).toBeString()

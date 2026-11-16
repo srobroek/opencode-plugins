@@ -133,7 +133,7 @@ describe("setup", () => {
     const run = (agent: string, command: string) => fake.fire.tool("execute.before", { tool: "shell", agent, input: { command } })
     await expect(run("debug", "git -C /wt push")).rejects.toThrow("git push")
     await expect(run("build", "git -C /wt push")).resolves.toBeDefined()
-    await expect(run("debug", "git -C /wt commit -m x")).resolves.toBeDefined()
+    await expect(run("debug", "git -C /wt status")).resolves.toBeDefined()
     await expect(
       fake.fire.tool("execute.before", { tool: "bash", agent: "debug", input: { command: ["git", "push"] } }),
     ).rejects.toThrow()
@@ -151,6 +151,17 @@ describe("setup", () => {
     await expect(edit("build", "/repo/src/a.ts")).resolves.toBeDefined()
     await cleanup?.()
     expect(fake.hooks("tool")).toEqual([])
+  })
+  test("the shell guard keeps debug's mutating git out of the session's starting checkout", async () => {
+    const fake = createFakeContext({ sessions: [{ id: "ses_1", location: { directory: "/repo" } }] })
+    await plugin.setup(fake.context)
+    const run = (agent: string, command: string, workdir?: string) =>
+      fake.fire.tool("execute.before", { tool: "shell", agent, sessionID: "ses_1", input: { command, workdir } })
+    const scratch = `${homedir()}/.local/share/opencode/worktree/h1/debug-foo`
+    await expect(run("debug", "git commit -m x")).rejects.toThrow("scratch worktree")
+    await expect(run("debug", `git -C ${scratch} commit -m x`)).resolves.toBeDefined()
+    await expect(run("debug", "git commit -m x", scratch)).resolves.toBeDefined()
+    await expect(run("refactor", "git commit -m x")).resolves.toBeDefined()
   })
   test("the shell guard is not registered when debug and refactor are off", async () => {
     const fake = createFakeContext({ options: { agents: { debug: false, refactor: false } } })

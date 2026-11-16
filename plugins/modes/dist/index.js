@@ -1185,6 +1185,12 @@ function checkGit(args, ctx, cwd) {
   const risky = rest.find((arg) => RISKY_OPTION.test(arg) || sub === "grep" && /^-O/.test(arg));
   if (risky !== undefined)
     return refuse(`git ${sub} ${risky}`);
+  if (agent === "debug" && changesTree(sub, rest)) {
+    if (gitDir)
+      return refuse(`git ${sub} with --git-dir`);
+    if (tree === undefined || !scratch(tree, ctx))
+      return refuse(`git ${sub} outside a debug-* scratch worktree (it would change the user's checkout or shared refs)`);
+  }
   const outputs = outputDestinations(sub, rest);
   if (outputs === undefined)
     return refuse(`git ${sub} with an output option that has no path`);
@@ -1272,6 +1278,31 @@ function checkRunner(runner, ctx, tree) {
     return;
   const resolved = joinPath(tree, script);
   return resolved !== undefined && scratch(resolved, ctx) ? undefined : refuse(`${script}: a script outside a debug-* scratch worktree cannot be checked`);
+}
+function changesTree(sub, rest) {
+  switch (sub) {
+    case "commit":
+    case "add":
+    case "restore":
+    case "checkout":
+    case "switch":
+    case "reset":
+    case "cherry-pick":
+    case "revert":
+    case "apply":
+    case "am":
+      return true;
+    case "stash":
+      return !["list", "show"].includes(rest[0] ?? "");
+    case "branch":
+      return rest.some((arg) => !arg.startsWith("-")) && !rest.some((arg) => ["-l", "--list", "--contains", "--no-contains", "--merged", "--no-merged", "--points-at"].includes(arg));
+    case "bisect":
+      return !["log", "visualize", "view", "terms"].includes(rest[0] ?? "");
+    case "worktree":
+      return ["lock", "unlock", "move", "repair"].includes(rest[0] ?? "");
+    default:
+      return false;
+  }
 }
 function worktreeTarget(action, args) {
   for (let i = 0;i < args.length; i++) {
@@ -1407,7 +1438,7 @@ function checkParsed(parsed, ctx) {
       return reason;
   }
   for (const child of parsed.nested) {
-    const reason = checkParsed(child, { ...deeper(ctx), state: { cwd: ctx.state.cwd }, trusted: false });
+    const reason = checkParsed(child, { ...deeper(ctx), state: { cwd: ctx.state.cwd }, trusted: onlyAndChains(child.command) });
     if (reason !== undefined)
       return reason;
   }
