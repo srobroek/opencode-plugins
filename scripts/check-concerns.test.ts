@@ -250,3 +250,44 @@ describe("checkLanguage", () => {
     expect(checkLanguage({ root, spec, shared, today: TODAY }, "py")).toEqual([])
   })
 })
+
+describe("shared tools Maintenance and Run cells", () => {
+  const TOOL = "| tflint-shared | tflint | lint | >= 0.50.0 · 2026-01-03 · active | every-pr | - |"
+  const sharedReasons = (from: string, to: string) =>
+    parseShared(readFileSync(path.join(FIXTURE, SHARED), "utf8").replace(from, to), SHARED, [
+      "every-pr",
+      "diff-pr",
+      "bounded-pr",
+      "scheduled",
+      "release",
+      "on-demand",
+    ]).findings.map((f) => f.reason)
+
+  test("the valid fixture, with Family and Service rows, is clean", () => {
+    expect(sharedReasons(TOOL, TOOL)).toEqual([])
+  })
+
+  test.each([
+    ["an exact pin", ">= 0.50.0", "0.50.0", "Maintenance must be"],
+    ["a missing status", " · active", "", "Maintenance must be"],
+    ["an unknown status", "· active", "· stable", 'unknown status "stable"'],
+    ["a bad date", "2026-01-03", "2026-13-45", "is not YYYY-MM-DD"],
+    ["a date after Checked", "2026-01-03", "2026-12-01", "is after Checked 2026-11-16"],
+    ["a Family link without an anchor", "[Family tool](#family-tool)", "Family tool", 'Family must be "Family: [text](#section)"'],
+    ["a Family anchor with no heading", "(#family-tool)", "(#ghost)", 'Family anchor "#ghost" matches no'],
+    ["an empty Service note", "Service: hosted only", "Service:", "Service needs a note"],
+  ])("rejects %s", (_name, from, to, reason) => {
+    const base = readFileSync(path.join(FIXTURE, SHARED), "utf8").replace("# Shared tools\n", "# Shared tools\n\nChecked 2026-11-16.\n")
+    const out = parseShared(base.replace(from, to), SHARED, ["every-pr", "scheduled"]).findings.map((f) => f.reason)
+    expect(out.some((r) => r.includes(reason))).toBe(true)
+  })
+
+  test("rejects an unknown Run token", () => {
+    expect(sharedReasons("| every-pr | - |", "| every-prr | - |")).toContain('unknown run token "every-prr"')
+  })
+
+  test("checkRepo reports a bad shared Maintenance cell", () => {
+    const root = repo({ [SHARED]: [">= 0.50.0", "0.50.0"] })
+    expect(reasons(root).some((r) => r.startsWith(`${SHARED}:`) && r.includes("Maintenance must be"))).toBe(true)
+  })
+})
