@@ -8,12 +8,16 @@ import { toJsonSchema, withOptionalString } from "@srobroek/opencode-lib/tool-sc
 import { createGit, type Git, type Runner, spawnRunner } from "./git.ts"
 import {
   annotation,
+  blockingReservation,
   containingWorktree,
   decideIsolation,
   decideMerge,
+  decideWriterGuard,
+  FENCED_REASON,
   findWorktree,
   formatLaneList,
   isConflict,
+  isRunning,
   LANE_PREFIX,
   type Lane,
   type LaneReport,
@@ -26,22 +30,28 @@ import {
   parseModel,
   parseWorktrees,
   planStart,
+  RESERVATION_MS,
+  type Reservation,
   readOptions,
   readSubagentInput,
+  reservationStatus,
   resumeWorktreeNote,
   rewritePrompt,
   SESSION_LOOKUP_MS,
   SUBAGENT_TOOL,
   type SubagentInput,
+  sessionIsReadOnly,
   shouldRemove,
   startPrompt,
   tail,
   UNBORN_NOTE,
   WORKTREE_PARAM,
   WORKTREE_PARAM_DESCRIPTION,
+  type WriterSession,
   withoutWorktree,
   worktreeForBranch,
   worktreeName,
+  writerRefusal,
 } from "./lane.ts"
 
 export * from "./git.ts"
@@ -78,18 +88,40 @@ type Session = {
   projectID: string
   model?: { id: string; providerID: string; variant?: string }
   location: { directory: string }
+  /** Rules evaluated after the agent's; children are created with their parent's. */
+  permissions?: unknown
 }
 
 type AgentInfo = { id: string; name?: string; mode?: string; model?: Session["model"]; permissions?: unknown }
 
 /** Test seams; the host never passes these. */
-export type Overrides = { run?: Runner; suffix?: () => string; lookupMs?: number; directoryExists?: (path: string) => Promise<boolean> }
+export type Overrides = {
+  run?: Runner
+  suffix?: () => string
+  lookupMs?: number
+  directoryExists?: (path: string) => Promise<boolean>
+  now?: () => number
+  reserveMs?: number
+}
 
 const directoryExists = async (path: string) => {
   try { return (await stat(path)).isDirectory() } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return false
     throw error
   }
+}
+
+const TIMED_OUT = Symbol("timed out")
+
+/** Epoch milliseconds from a number, Date or date string; undefined otherwise. */
+function toMillis(value: unknown): number | undefined {
+  if (typeof value === "number") return value
+  if (value instanceof Date) return value.getTime()
+  if (typeof value === "string") {
+    const parsed = Date.parse(value)
+    return Number.isNaN(parsed) ? undefined : parsed
+  }
+  return undefined
 }
 
 const randomSuffix = () => crypto.randomUUID().slice(0, 6)
@@ -114,6 +146,8 @@ export function createLanes(
   suffix: () => string,
   lookupMs = SESSION_LOOKUP_MS,
   exists = directoryExists,
+  now: () => number = Date.now,
+  reserveMs = RESERVATION_MS,
 ) {
   const load = async (child: string) => parseLane(await ctx.storage.get(laneKey(child)))
   const save = (lane: Lane) => ctx.storage.set(laneKey(lane.child), lane)
@@ -199,10 +233,101 @@ export function createLanes(
     return { lookup: findWorktree(requested, path, entries), current }
   }
 
+  /**
+   * The open sessions whose directory is `directory`, following pagination; undefined when the
+   * lookup fails or does not finish within the lookup time (an incomplete answer is unknown).
+   */
+  const sessionsIn = async (projectID: string, directory: string): Promise<WriterSession[] | undefined> => {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<typeof TIMED_OUT>((done) => {
+      timer = setTimeout(() => done(TIMED_OUT), lookupMs)
+    })
+    const within = <T>(work: Promise<T>) => Promise.race([work.catch(() => TIMED_OUT), timeout])
+    try {
+      const raws: Array<Record<string, unknown>> = []
+      let query: Record<string, unknown> = { project: projectID, directory, archived: false, limit: 100 }
+      for (;;) {
+        const page = (await within(Promise.resolve(ctx.session.list(query as never)) as Promise<unknown>)) as
+          | { data?: unknown; cursor?: { next?: string } }
+          | typeof TIMED_OUT
+        if (page === TIMED_OUT || !Array.isArray(page.data)) return undefined
+        raws.push(...(page.data as Array<Record<string, unknown>>))
+        const next = page.cursor?.next
+        if (!next) break
+        query = { cursor: next }
+      }
+      const sessions: WriterSession[] = []
+      for (const raw of raws) {
+        if (typeof raw.id !== "string") continue
+        const time = (raw.time ?? {}) as Record<string, unknown>
+        const busy = toMillis(time.busy)
+        const idle = toMillis(time.idle)
+        const session: WriterSession = {
+          id: raw.id,
+          ...(typeof raw.parentID === "string" ? { parentID: raw.parentID } : {}),
+          ...(busy === undefined ? {} : { busy }),
+          ...(idle === undefined ? {} : { idle }),
+        }
+        if (session.parentID !== undefined && isRunning(session)) {
+          const agent = typeof raw.agent === "string" ? await within(getAgent(raw.agent, directory)) : undefined
+          if (typeof agent === "symbol") return undefined
+          session.readOnly = sessionIsReadOnly(agent?.permissions, raw.permissions)
+        }
+        sessions.push(session)
+      }
+      return sessions
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
   /** Skip notes by tool call id, appended to that call's result by `after`. */
   const notes = new Map<string, string>()
 
-  const before = async (event: {
+  /** Worktrees reserved by an in-flight writer spawn, by canonical path; see `Reservation`. */
+  const reservations = new Map<string, Reservation>()
+  let sequence = 0
+
+  /** Whether a session's latest execution has started, as `session.get` reports `time.busy`. */
+  const hasStarted = async (child: string) => {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<typeof TIMED_OUT>((done) => {
+      timer = setTimeout(() => done(TIMED_OUT), lookupMs)
+    })
+    try {
+      const session = await Promise.race([getSession(child), timeout])
+      // No answer in time is unknown: keep the reservation until it expires, but do not hang.
+      return session !== TIMED_OUT && (session as { time?: { busy?: unknown } } | undefined)?.time?.busy !== undefined
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  /**
+   * Take the reservation on `directory` for call `callId`, or refuse. A reservation whose child was
+   * observed busy is dropped: the live-writer lookup covers it from then on. No await separates the
+   * blocking check from the set, so concurrent spawns cannot both reserve.
+   */
+  const reserve = async (directory: string, callId: string): Promise<string> => {
+    const token = `${callId}#${++sequence}`
+    for (;;) {
+      const held = blockingReservation(reservations.get(directory), now(), token)
+      if (!held) {
+        reservations.set(directory, { token, callId, until: now() + reserveMs })
+        return token
+      }
+      if (held.child === undefined || !(await hasStarted(held.child))) {
+        throw new Error(`subagent-worktree: ${writerRefusal(directory, held.child)}`)
+      }
+      if (reservations.get(directory) === held) reservations.delete(directory)
+    }
+  }
+
+  const release = (callId: string) => {
+    for (const [directory, reservation] of reservations) if (reservation.callId === callId) reservations.delete(directory)
+  }
+
+  const begin = async (event: {
     tool: string
     sessionID: string
     agent: string
@@ -233,6 +358,7 @@ export function createLanes(
       input,
       options,
       agent,
+      callerPermissions: parent.permissions,
       callerIsChild: Boolean(parent.parentID),
       isGit: start ? start.lookup.ok : await git.isWorkTree(parentDir),
       projectDir: parentDir,
@@ -248,7 +374,44 @@ export function createLanes(
       trackedDirty: input.worktree === undefined && isolation.isolate ? await git.trackedDirty(parentDir) : false,
     })
     if (plan.kind === "refuse") throw new Error(`subagent-worktree: ${plan.reason}`)
+    let hold: { directory: string; token: string; writer: boolean } | undefined
+    if (plan.kind !== "isolate" && start?.lookup.ok && agent && agent.mode !== "primary") {
+      const directory = start.lookup.worktree.directory
+      const writer = !sessionIsReadOnly(agent.permissions, parent.permissions)
+      // Reserve before any lookup so a concurrent spawn cannot read a snapshot that predates this one.
+      if (writer) hold = { directory, token: await reserve(directory, event.id), writer }
+      const guard = decideWriterGuard({
+        writer,
+        directory,
+        caller: event.sessionID,
+        sessions: await sessionsIn(parent.projectID, directory),
+      })
+      if (guard.kind === "refuse") throw new Error(`subagent-worktree: ${guard.reason}`)
+      if (guard.warn) notes.set(event.id, guard.warn)
+    }
+    /**
+     * After a wait (permission prompt), confirm this call still owns the worktree. Replaced by another
+     * token: refuse. Expired and untaken: re-take the slot and look for a live writer again.
+     */
+    const fence = async () => {
+      if (!hold) return
+      const status = reservationStatus(reservations.get(hold.directory), now(), hold.token)
+      if (status === "held") return
+      if (status === "replaced") throw new Error(`subagent-worktree: ${hold.directory}: ${FENCED_REASON}`)
+      reservations.set(hold.directory, { token: hold.token, callId: event.id, until: now() + reserveMs })
+      const fresh = decideWriterGuard({
+        writer: hold.writer,
+        directory: hold.directory,
+        caller: event.sessionID,
+        sessions: await sessionsIn(parent.projectID, hold.directory),
+      })
+      if (fresh.kind === "refuse") throw new Error(`subagent-worktree: ${fresh.reason}`)
+      if (fresh.warn) notes.set(event.id, fresh.warn)
+      const after = reservationStatus(reservations.get(hold.directory), now(), hold.token)
+      if (after === "replaced") throw new Error(`subagent-worktree: ${hold.directory}: ${FENCED_REASON}`)
+    }
     if (plan.kind === "default") {
+      await fence()
       if (plan.note) notes.set(event.id, plan.note)
       return
     }
@@ -256,9 +419,12 @@ export function createLanes(
 
     await assertSubagent(event, agent.id)
     if (plan.kind === "move") {
+      await fence()
       let child: string | undefined
       try {
         child = await createChild(event, input, agent, parent)
+        const reserved = hold && reservations.get(hold.directory)
+        if (reserved && hold && reserved.token === hold.token) reserved.child = child
         await ctx.session.move({ sessionID: child, directory: plan.worktree.directory } as never)
         event.input = { ...(event.input as object), sessionID: child, prompt: startPrompt(input.prompt, plan.worktree) }
       } catch (error) {
@@ -291,6 +457,16 @@ export function createLanes(
       if (child) await ctx.session.remove({ sessionID: child } as never).catch(() => {})
       await removeWorktree(parent.projectID, worktree.directory, true).catch(() => {})
       throw new Error(`subagent-worktree: ${errorMessage(error)}`)
+    }
+  }
+
+  /** A failed spawn releases its reservation; a finished one releases it in `after`. */
+  const before: typeof begin = async (event) => {
+    try {
+      await begin(event)
+    } catch (error) {
+      release(event.id)
+      throw error
     }
   }
 
@@ -348,6 +524,16 @@ export function createLanes(
     ),
   ) => {
     if (event.tool !== SUBAGENT_TOOL) return
+    const reported = (event.status === "completed" ? event.result.metadata : event.error.metadata) as { status?: unknown } | undefined
+    if (event.id !== undefined) {
+      if (event.status === "completed" && reported?.status === "running") {
+        // A background child keeps the worktree reserved until a later check sees it busy, or the hold expires.
+        const started = (event.result.metadata as { sessionID?: unknown } | undefined)?.sessionID
+        if (typeof started === "string") {
+          for (const reservation of reservations.values()) if (reservation.callId === event.id) reservation.child = started
+        }
+      } else release(event.id)
+    }
     const skipped = event.id === undefined ? undefined : notes.get(event.id)
     if (event.id !== undefined) notes.delete(event.id)
     if (skipped) {
@@ -551,7 +737,7 @@ export function createPlugin(overrides: Overrides = {}) {
     async setup(ctx) {
       const options = readOptions(ctx.options)
       const git = createGit(overrides.run ?? spawnRunner)
-      const lanes = createLanes(ctx, options, git, overrides.suffix ?? randomSuffix, overrides.lookupMs, overrides.directoryExists)
+      const lanes = createLanes(ctx, options, git, overrides.suffix ?? randomSuffix, overrides.lookupMs, overrides.directoryExists, overrides.now, overrides.reserveMs)
       const registrations: { dispose: () => Promise<void> }[] = []
       const cleanup = async () => {
         for (const registration of registrations.reverse()) await registration.dispose()

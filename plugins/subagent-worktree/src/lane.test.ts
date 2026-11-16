@@ -1,11 +1,13 @@
 import { describe, expect, test } from "bun:test"
 import {
   annotation,
+  blockingReservation,
   containingWorktree,
   DEFAULT_AGENTS,
   DIRTY_CHECKOUT_NOTE,
   decideIsolation,
   decideMerge,
+  decideWriterGuard,
   diffCommand,
   findWorktree,
   formatLaneList,
@@ -24,14 +26,17 @@ import {
   RESUME_WORKTREE_NOTE,
   readOptions,
   readSubagentInput,
+  reservationStatus,
   rewritePrompt,
   rulesAreReadOnly,
   SUBAGENT_PREAMBLE,
+  sessionIsReadOnly,
   shouldRemove,
   slug,
   startPrompt,
   tail,
   targetsExternalDirectory,
+  WRITER_LIVENESS_NOTE,
   withoutWorktree,
   worktreeForBranch,
   worktreeName,
@@ -235,6 +240,52 @@ describe("decideIsolation", () => {
       facts({ input: { agent: "Implementer", description: "", prompt: "p" }, agent: { id: "implementer" } }),
     )
     expect(decision).toEqual({ isolate: true })
+  })
+  test("a caller's scoped edit grant makes a denying agent a writer for isolation", () => {
+    const agent = { id: "general", permissions: [{ action: "edit", resource: "*", effect: "deny" }] }
+    const callerPermissions = [{ action: "edit", resource: "src/*", effect: "allow" }]
+    expect(decideIsolation(facts({ agent, callerPermissions }))).toEqual({ isolate: true })
+  })
+  test("an agent with a scoped edit ask after a blanket deny is still isolated as a writer", () => {
+    const permissions = [
+      { action: "edit", resource: "*", effect: "deny" },
+      { action: "edit", resource: "src/*", effect: "ask" },
+    ]
+    expect(decideIsolation(facts({ agent: { id: "general", permissions } }))).toEqual({ isolate: true })
+  })
+  test("an agent with a scoped edit grant after a blanket deny is still isolated as a writer", () => {
+    const permissions = [
+      { action: "edit", resource: "*", effect: "deny" },
+      { action: "edit", resource: "src/*", effect: "allow" },
+    ]
+    expect(decideIsolation(facts({ agent: { id: "general", permissions } }))).toEqual({ isolate: true })
+  })
+})
+
+describe("sessionIsReadOnly", () => {
+  const rule = (action: string, resource: string, effect: string) => ({ action, resource, effect })
+  const deny = [rule("edit", "*", "deny")]
+  const allow = [rule("*", "*", "allow")]
+
+  test("`?` in an action matches exactly one character", () => {
+    expect(sessionIsReadOnly([rule("ed?t", "*", "deny")], undefined)).toBe(true)
+    expect(sessionIsReadOnly([rule("e?t", "*", "deny")], undefined)).toBe(false)
+    expect(sessionIsReadOnly(deny, [rule("ed?t", "src/*", "allow")])).toBe(false)
+  })
+
+  test.each([
+    ["agent denies, no session rules", deny, undefined, true],
+    ["agent allows, session denies edit", allow, deny, true],
+    ["agent denies, session allows edit", deny, [rule("edit", "*", "allow")], false],
+    ["agent denies, session grants edit on a path", deny, [rule("edit", "src/*", "allow")], false],
+    ["agent denies, session grants write on a path", deny, [rule("write", "src/*", "allow")], false],
+    ["agent denies, session asks for edit on a path", deny, [rule("edit", "src/*", "ask")], false],
+    ["agent denies, later ask for write on a path", deny, [rule("write", "docs/*", "ask")], false],
+    ["agent allows, session denies then re-grants a path", allow, [...deny, rule("edit", "docs/*", "allow")], false],
+    ["session denies, an earlier scoped grant is overridden", [], [rule("edit", "src/*", "allow"), ...deny], true],
+    ["no rules", undefined, undefined, false],
+  ])("%s", (_name, agentRules, sessionRules, expected) => {
+    expect(sessionIsReadOnly(agentRules, sessionRules)).toBe(expected)
   })
 })
 
@@ -444,5 +495,64 @@ describe("isUnbornHead", () => {
     ["a failed refs listing", { head: undefined, symbolic: "refs/heads/main", refs: undefined }, false],
   ])("%s", (_name, facts, expected) => {
     expect(isUnbornHead(facts)).toBe(expected)
+  })
+})
+
+describe("decideWriterGuard", () => {
+  const live = { id: "ses_live", parentID: "ses_parent", busy: 2000 }
+  const facts = { writer: true, directory: "/wt/a", caller: "ses_parent" }
+
+  test("refuses when a child session is running", () => {
+    const guard = decideWriterGuard({ ...facts, sessions: [live] })
+    expect(guard).toEqual({ kind: "refuse", reason: expect.stringContaining("live writer session ses_live") })
+  })
+
+  test("refuses a resumed child whose latest run started after its previous one ended", () => {
+    const guard = decideWriterGuard({ ...facts, sessions: [{ ...live, idle: 1000 }] })
+    expect(guard.kind).toBe("refuse")
+  })
+
+  test.each([
+    ["a child idle after its last run", [{ ...live, busy: 1000, idle: 2000 }]],
+    ["a child that never ran", [{ id: "ses_new", parentID: "ses_parent" }]],
+    ["a read-only child", [{ ...live, readOnly: true }]],
+    ["a root session", [{ id: "ses_root", busy: 2000 }]],
+    ["the caller itself", [{ id: "ses_parent", parentID: "ses_gp", busy: 2000 }]],
+    ["no sessions", []],
+  ])("allows with %s", (_name, sessions) => {
+    expect(decideWriterGuard({ ...facts, sessions })).toEqual({ kind: "allow" })
+  })
+
+  test("allows a read-only agent", () => {
+    expect(decideWriterGuard({ ...facts, writer: false, sessions: [live] })).toEqual({ kind: "allow" })
+  })
+
+  test("allows with a warning when liveness is unknown", () => {
+    expect(decideWriterGuard({ ...facts, sessions: undefined })).toEqual({ kind: "allow", warn: WRITER_LIVENESS_NOTE })
+  })
+})
+
+describe("blockingReservation and holdsReservation", () => {
+  const held = { token: "t1", callId: "call_1", child: "ses_a", until: 1000 }
+  test("blocks another token before expiry", () => {
+    expect(blockingReservation(held, 999, "t2")).toBe(held)
+  })
+  test.each([
+    ["the holder itself", 500, "t1"],
+    ["after expiry", 1000, "t2"],
+  ])("does not block %s", (_name, now, token) => {
+    expect(blockingReservation(held, now, token)).toBeUndefined()
+  })
+  test("does not block without a reservation", () => {
+    expect(blockingReservation(undefined, 0, "t2")).toBeUndefined()
+  })
+  test.each([
+    ["the owner before expiry", held, 999, "t1", "held"],
+    ["the owner after expiry", held, 1000, "t1", "free"],
+    ["no reservation", undefined, 0, "t1", "free"],
+    ["another token that expired", { ...held, token: "t2" }, 1000, "t1", "free"],
+    ["another live token", { ...held, token: "t2" }, 500, "t1", "replaced"],
+  ] as const)("status: %s", (_name, reservation, now, token, expected) => {
+    expect(reservationStatus(reservation, now, token)).toBe(expected)
   })
 })

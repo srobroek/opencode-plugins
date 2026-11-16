@@ -47,3 +47,9 @@
 - **Symptom:** `opencode plugin check` lists a plugin as `(update available)` after OpenCode restarted
 - **Cause:** Server startup only checks unpinned npm and git plugins for updates; it does not change the installed package.
 - **Fix:** Run `opencode plugin update`, and run it again with the project directory as `workdir` for plugins a project's `.opencode/opencode.json` loads. If the update times out, update one plugin at a time with `opencode plugin update <id>`. Then confirm `opencode plugin check` shows `(current)`. A running server keeps the plugin code it loaded until a reload.
+
+## Two sessions editing one worktree after a restart
+
+- **Symptom:** `already has a live writer session ses_` from subagent-worktree, or two writers committing to the same branch and worktree after OpenCode restarted
+- **Cause:** After a restart OpenCode resumes interrupted subagents on its own, and they show as running. Re-spawning a writer for the same branch then adds a second live session to that worktree.
+- **Fix:** After a restart, list your background work first. Re-spawn only sessions that are gone, never two writers per worktree. Send a follow-up (pass its `sessionID`) to the surviving session, or stop it before you spawn a new one. The plugin only coordinates spawns within one OpenCode server instance; concurrent spawns from separate server instances are not coordinated, so keep one orchestrator per worktree.

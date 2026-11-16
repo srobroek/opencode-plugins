@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import { Error as ToolError } from "@opencode/plugin/promise/tool"
 import { createFakeContext, type FakeContext } from "@srobroek/opencode-lib/testing"
 import type { RunResult } from "./git.ts"
 import { createPlugin } from "./index.ts"
@@ -81,6 +82,7 @@ async function start(
     strategy?: "wt" | "git"
     tools?: Array<Record<string, unknown> & { name: string }>
     exists?: (path: string) => Promise<boolean>
+    now?: () => number
   } = {},
 ): Promise<Setup> {
   const fake = createFakeContext({
@@ -92,6 +94,24 @@ async function start(
       { id: "explore", name: "explore", mode: "subagent" },
       { id: "pinned", name: "pinned", mode: "subagent", model: { id: "y", providerID: "prov" } },
       { id: "build", name: "build", mode: "primary" },
+      {
+        id: "asking",
+        name: "asking",
+        mode: "subagent",
+        permissions: [
+          { action: "edit", resource: "*", effect: "deny" },
+          { action: "edit", resource: "src/*", effect: "ask" },
+        ],
+      },
+      {
+        id: "scoped",
+        name: "scoped",
+        mode: "subagent",
+        permissions: [
+          { action: "edit", resource: "*", effect: "deny" },
+          { action: "edit", resource: "src/*", effect: "allow" },
+        ],
+      },
       {
         id: "reviewer",
         name: "reviewer",
@@ -145,7 +165,7 @@ async function start(
   const plugin = createPlugin({ run: async (argv) => {
     if (argv[0] === "wt") expect(fake.sessions.get("ses_fake1")?.location).toEqual({ directory: REPO })
     return fakeRun(repo, log)(argv)
-  }, suffix: () => "abc123", lookupMs: 20, directoryExists: options.exists ?? (async () => true) })
+  }, suffix: () => "abc123", lookupMs: 20, directoryExists: options.exists ?? (async () => true), ...(options.now ? { now: options.now } : {}), reserveMs: 60_000 })
   const cleanup = (await plugin.setup(fake.context)) as () => Promise<void>
   return { fake, repo, log, worktree, cleanup }
 }
@@ -402,6 +422,377 @@ describe("worktree argument", () => {
     const tool = setup.fake.tools.get(MERGE_TOOL) as unknown as { execute: (i: unknown, c: unknown) => Promise<unknown> }
     await tool.execute({ sessionID: "ses_fake1", method: "wt-merge" }, { sessionID: PARENT, agent: "build", messageID: "m", id: "c" })
     expect(setup.log).toContainEqual(["wt", "-C", "/wt/subagent-write-hello-abc123", "merge", "feat", "--no-squash", "--no-ff", "--yes"])
+  })
+
+  describe("single writer per worktree", () => {
+    const running = { busy: 2000 }
+    const writerIn = (setup: Setup, id: string, time: Record<string, number>, extra: Record<string, unknown> = {}, directory = OTHER) =>
+      setup.fake.sessions.set(id, { id, parentID: PARENT, projectID: "prj", location: { directory }, time, ...extra })
+    const sessionID = (event: { input: unknown }) => (event.input as { sessionID?: string }).sessionID
+
+    test("refuses a second writer and names the live session", async () => {
+      const setup = await start()
+      writerIn(setup, "ses_live", running)
+      await expect(spawn(setup, { agent: "pinned", worktree: "feat" })).rejects.toThrow(
+        /ses_live.*Send that session a follow-up \(pass sessionID: "ses_live"\).*or stop it first/s,
+      )
+      expect(setup.fake.calls.some((entry) => entry.method === "session.create")).toBe(false)
+    })
+
+    test("refuses a resumed writer that still shows its earlier outcome", async () => {
+      const setup = await start()
+      writerIn(setup, "ses_resumed", { idle: 1000, busy: 2000 }, { outcome: "interrupted" })
+      await expect(spawn(setup, { agent: "pinned", worktree: "feat" })).rejects.toThrow(/live writer session ses_resumed/)
+    })
+
+    test("allows a writer when the earlier one is idle after its last run", async () => {
+      const setup = await start()
+      writerIn(setup, "ses_done", { busy: 1000, idle: 2000 }, { outcome: "succeeded" })
+      expect(sessionID(await spawn(setup, { agent: "pinned", worktree: "feat" }))).toBe("ses_fake1")
+    })
+
+    test("checks the caller's own worktree when it is named", async () => {
+      const setup = await start()
+      writerIn(setup, "ses_live", running, {}, REPO)
+      await expect(spawn(setup, { agent: "pinned", worktree: "main" })).rejects.toThrow(/live writer session ses_live/)
+    })
+
+    test("does not check for an agent that gets a fresh lane", async () => {
+      const setup = await start()
+      writerIn(setup, "ses_live", running)
+      await spawn(setup, { agent: "general", worktree: "feat" })
+      expect(setup.worktree.calls[0]?.method).toBe("create")
+      expect(setup.fake.calls.some((entry) => entry.method === "session.list")).toBe(false)
+    })
+
+    test("a read-only agent is unaffected by a live writer", async () => {
+      const setup = await start()
+      writerIn(setup, "ses_live", running)
+      expect(sessionID(await spawn(setup, { agent: "reviewer", worktree: "feat" }))).toBe("ses_fake1")
+    })
+
+    test("a live reviewer whose session rules grant edit still blocks a writer", async () => {
+      const setup = await start()
+      writerIn(setup, "ses_review", running, { agent: "reviewer", permissions: [{ action: "edit", resource: "*", effect: "allow" }] })
+      await expect(spawn(setup, { agent: "pinned", worktree: "feat" })).rejects.toThrow(/live writer session ses_review/)
+    })
+
+    test("a live writer agent whose session rules deny edit does not block a writer", async () => {
+      const setup = await start()
+      writerIn(setup, "ses_limited", running, { agent: "pinned", permissions: [{ action: "edit", resource: "*", effect: "deny" }] })
+      expect(sessionID(await spawn(setup, { agent: "pinned", worktree: "feat" }))).toBe("ses_fake1")
+    })
+
+    test("a read-only agent whose parent session grants scoped edit is guarded as a writer", async () => {
+      const setup = await start()
+      Object.assign(setup.fake.sessions.get(PARENT) ?? {}, { permissions: [{ action: "edit", resource: "src/*", effect: "allow" }] })
+      writerIn(setup, "ses_live", running)
+      await expect(spawn(setup, { agent: "reviewer", worktree: "feat" })).rejects.toThrow(/live writer session ses_live/)
+    })
+
+    test("a spawning agent with a scoped edit ask is guarded as a writer", async () => {
+      const setup = await start()
+      writerIn(setup, "ses_live", running)
+      await expect(spawn(setup, { agent: "asking", worktree: "feat" })).rejects.toThrow(/live writer session ses_live/)
+    })
+
+    test("a live agent with a scoped edit ask counts as a writer", async () => {
+      const setup = await start()
+      writerIn(setup, "ses_asking", running, { agent: "asking" })
+      await expect(spawn(setup, { agent: "pinned", worktree: "feat" })).rejects.toThrow(/live writer session ses_asking/)
+    })
+
+    test("a live reviewer whose session rules ask for scoped edit counts as a writer", async () => {
+      const setup = await start()
+      writerIn(setup, "ses_review", running, { agent: "reviewer", permissions: [{ action: "edit", resource: "src/*", effect: "ask" }] })
+      await expect(spawn(setup, { agent: "pinned", worktree: "feat" })).rejects.toThrow(/live writer session ses_review/)
+    })
+
+    test("a spawning agent with a scoped edit grant is guarded as a writer", async () => {
+      const setup = await start()
+      writerIn(setup, "ses_live", running)
+      await expect(spawn(setup, { agent: "scoped", worktree: "feat" })).rejects.toThrow(/live writer session ses_live/)
+    })
+
+    test("a live reviewer is not a writer", async () => {
+      const setup = await start()
+      writerIn(setup, "ses_review", running, { agent: "reviewer" })
+      expect(sessionID(await spawn(setup, { agent: "pinned", worktree: "feat" }))).toBe("ses_fake1")
+    })
+
+    test("resuming the live session itself still works", async () => {
+      const setup = await start()
+      writerIn(setup, "ses_live", running)
+      expect(sessionID(await spawn(setup, { agent: "pinned", sessionID: "ses_live", worktree: "feat" }))).toBe("ses_live")
+    })
+
+    test("finds a live writer on a later page", async () => {
+      const setup = await start()
+      for (let n = 0; n < 101; n++) writerIn(setup, `ses_old${n}`, { busy: 1000, idle: 2000, updated: 5000 })
+      writerIn(setup, "ses_late", { ...running, updated: 1 })
+      await expect(spawn(setup, { agent: "pinned", worktree: "feat" })).rejects.toThrow(/live writer session ses_late/)
+    })
+
+    test("allows the spawn and warns when the host cannot list sessions", async () => {
+      const setup = await start()
+      Object.assign(setup.fake.context.session, {
+        list: async () => {
+          throw new Error("unavailable")
+        },
+      })
+      await spawn(setup, { agent: "pinned", worktree: "feat" })
+      const result = await setup.fake.fire.tool("execute.after", completed("ses_fake1"))
+      expect((result.result as { content: string }).content).toContain("could not check whether the worktree already has a live writer")
+    })
+
+    test("allows the spawn within the deadline and warns when the list never settles", async () => {
+      const setup = await start()
+      Object.assign(setup.fake.context.session, { list: () => new Promise(() => {}) })
+      const started = Date.now()
+      const event = await spawn(setup, { agent: "pinned", worktree: "feat" })
+      expect(Date.now() - started).toBeLessThan(1000)
+      expect(sessionID(event)).toBe("ses_fake1")
+      const result = await setup.fake.fire.tool("execute.after", completed("ses_fake1"))
+      expect((result.result as { content: string }).content).toContain("could not check whether the worktree already has a live writer")
+    })
+  })
+
+  describe("reservation of a worktree by an in-flight writer spawn", () => {
+    const sessionID = (event: { input: unknown }) => (event.input as { sessionID?: string }).sessionID
+    const second = (setup: Setup) => setup.fake.fire.tool("execute.before", { ...call({ agent: "pinned", worktree: "feat" }), id: "call_2" })
+    const first = (setup: Setup) => spawn(setup, { agent: "pinned", worktree: "feat" })
+    const failCreateOnce = (setup: Setup) => {
+      const original = setup.fake.context.session.create.bind(setup.fake.context.session)
+      let failed = false
+      Object.assign(setup.fake.context.session, {
+        create: async (input: never) => {
+          if (!failed) {
+            failed = true
+            throw new Error("create failed")
+          }
+          return original(input)
+        },
+      })
+    }
+
+    test("two concurrent spawns: the second is refused", async () => {
+      const setup = await start()
+      const results = await Promise.allSettled([first(setup), second(setup)])
+      const outcomes = results.map((result) => result.status).sort()
+      expect(outcomes).toEqual(["fulfilled", "rejected"])
+      const refused = results.find((result): result is PromiseRejectedResult => result.status === "rejected")
+      expect(String(refused?.reason)).toMatch(/already has a (live writer session|writer spawn in progress)/)
+    })
+
+    test("a later spawn is refused and names the reserving session", async () => {
+      const setup = await start()
+      await first(setup)
+      await expect(second(setup)).rejects.toThrow(/live writer session ses_fake1/)
+    })
+
+    test("a spawn that finished releases the worktree", async () => {
+      const setup = await start()
+      await first(setup)
+      await setup.fake.fire.tool("execute.after", completed("ses_fake1"))
+      expect(sessionID(await second(setup))).toBe("ses_fake2")
+    })
+
+    test("a failed spawn releases the worktree", async () => {
+      const setup = await start()
+      failCreateOnce(setup)
+      await expect(first(setup)).rejects.toThrow(/create failed/)
+      expect(sessionID(await second(setup))).toBeDefined()
+    })
+
+    test("the reservation expires", async () => {
+      let clock = 1_000_000
+      const setup = await start({ now: () => clock })
+      await first(setup)
+      clock += 59_000
+      await expect(second(setup)).rejects.toThrow(/writer/)
+      clock += 2_000
+      expect(sessionID(await second(setup))).toBeDefined()
+    })
+
+    const backgroundDone = () => ({
+      ...completed("ses_fake1"),
+      result: { content: "started", metadata: { sessionID: "ses_fake1", status: "running" } } as Record<string, unknown>,
+    })
+
+    test("reserves before the liveness lookup, so a concurrent spawn is refused while it is pending", async () => {
+      const setup = await start()
+      let open: () => void = () => {}
+      const gate = new Promise<void>((resolve) => {
+        open = resolve
+      })
+      const list = setup.fake.context.session.list.bind(setup.fake.context.session)
+      let listing: () => void = () => {}
+      const listed = new Promise<void>((resolve) => {
+        listing = resolve
+      })
+      Object.assign(setup.fake.context.session, {
+        list: async (input: never) => {
+          listing()
+          await gate
+          return list(input)
+        },
+      })
+      const a = first(setup)
+      await listed
+      await expect(second(setup)).rejects.toThrow(/writer spawn in progress/)
+      open()
+      expect(sessionID(await a)).toBe("ses_fake1")
+    })
+
+    test("a background child keeps the worktree reserved until it is observed busy", async () => {
+      const setup = await start()
+      await first(setup)
+      await setup.fake.fire.tool("execute.after", backgroundDone())
+      await expect(second(setup)).rejects.toThrow(/live writer session ses_fake1/)
+    })
+
+    test("a background child that has started is caught by the live lookup, not the reservation", async () => {
+      const setup = await start()
+      await first(setup)
+      await setup.fake.fire.tool("execute.after", backgroundDone())
+      Object.assign(setup.fake.sessions.get("ses_fake1") ?? {}, { projectID: "prj", time: { busy: 2000 } })
+      await expect(second(setup)).rejects.toThrow(/live writer session ses_fake1/)
+      Object.assign(setup.fake.sessions.get("ses_fake1") ?? {}, { time: { busy: 2000, idle: 3000 } })
+      expect(sessionID(await second(setup))).toBeDefined()
+    })
+
+    test("a background child that never starts frees the worktree when the hold expires", async () => {
+      let clock = 1_000_000
+      const setup = await start({ now: () => clock })
+      await first(setup)
+      await setup.fake.fire.tool("execute.after", backgroundDone())
+      clock += 59_000
+      await expect(second(setup)).rejects.toThrow(/live writer session ses_fake1/)
+      clock += 2_000
+      expect(sessionID(await second(setup))).toBeDefined()
+    })
+
+    /** A first spawn stuck on its permission prompt; `open` lets it continue. */
+    const stuckSpawn = async (setup: Setup) => {
+      let open: () => void = () => {}
+      const gate = new Promise<void>((resolve) => {
+        open = resolve
+      })
+      let reached: () => void = () => {}
+      const waiting = new Promise<void>((resolve) => {
+        reached = resolve
+      })
+      const assertPermission = setup.fake.context.permission.assert.bind(setup.fake.context.permission)
+      let waits = 0
+      Object.assign(setup.fake.context.permission, {
+        assert: async (input: never) => {
+          if (waits++ === 0) {
+            reached()
+            await gate
+          }
+          return assertPermission(input)
+        },
+      })
+      const outcome = first(setup).then(
+        (event) => sessionID(event),
+        (error: Error) => error.message,
+      )
+      await waiting
+      return { open, outcome }
+    }
+    const creates = (setup: Setup) => setup.fake.calls.filter((entry) => entry.method === "session.create")
+
+    test("a spawn whose reservation was replaced while it waited is fenced out and creates no child", async () => {
+      let clock = 1_000_000
+      const setup = await start({ now: () => clock })
+      const stuck = await stuckSpawn(setup)
+      clock += 61_000
+      expect(sessionID(await second(setup))).toBe("ses_fake1")
+      stuck.open()
+      expect(await stuck.outcome).toMatch(/took over this worktree/)
+      expect(creates(setup)).toHaveLength(1)
+    })
+
+    test("a spawn whose reservation merely expired while it waited re-takes it and continues", async () => {
+      let clock = 1_000_000
+      const setup = await start({ now: () => clock })
+      const stuck = await stuckSpawn(setup)
+      clock += 61_000
+      stuck.open()
+      expect(await stuck.outcome).toBe("ses_fake1")
+      await expect(second(setup)).rejects.toThrow(/live writer session ses_fake1/)
+    })
+
+    test("a spawn whose reservation expired is refused when a live writer appeared meanwhile", async () => {
+      let clock = 1_000_000
+      const setup = await start({ now: () => clock })
+      const stuck = await stuckSpawn(setup)
+      clock += 61_000
+      setup.fake.sessions.set("ses_late", { id: "ses_late", parentID: PARENT, projectID: "prj", location: { directory: OTHER }, time: { busy: 2000 } })
+      stuck.open()
+      expect(await stuck.outcome).toMatch(/live writer session ses_late/)
+      expect(creates(setup)).toHaveLength(0)
+    })
+
+    test("a tool error on the first spawn releases the worktree for the next writer", async () => {
+      const setup = await start()
+      await first(setup)
+      await setup.fake.fire.tool("execute.after", {
+        ...completed("ses_fake1"),
+        status: "error" as const,
+        error: new ToolError({ message: "boom" }),
+      } as never)
+      expect(sessionID(await second(setup))).toBe("ses_fake2")
+    })
+
+    test("a background spawn into the caller's own worktree ties its child to the reservation", async () => {
+      const setup = await start()
+      const own = (id: string) => setup.fake.fire.tool("execute.before", { ...call({ agent: "pinned", worktree: "main" }), id })
+      await own("call_1")
+      setup.fake.sessions.set("ses_bg", { id: "ses_bg", parentID: PARENT, projectID: "prj", location: { directory: REPO }, time: { busy: 1000, idle: 2000 } })
+      await setup.fake.fire.tool("execute.after", {
+        ...completed("ses_bg"),
+        input: { agent: "pinned", prompt: "x" },
+        result: { content: "started", metadata: { sessionID: "ses_bg", status: "running" } },
+      })
+      // The child has finished: only the reservation could still block, and it follows the child.
+      await expect(own("call_2")).resolves.toBeDefined()
+    })
+
+    test("a child lookup that never settles keeps the reservation without hanging the next spawn", async () => {
+      const setup = await start()
+      await first(setup)
+      await setup.fake.fire.tool("execute.after", backgroundDone())
+      const get = setup.fake.context.session.get.bind(setup.fake.context.session)
+      Object.assign(setup.fake.context.session, {
+        get: (input: { sessionID: string }) => (input.sessionID === "ses_fake1" ? new Promise(() => {}) : get(input)),
+      })
+      const started = Date.now()
+      await expect(second(setup)).rejects.toThrow(/live writer session ses_fake1/)
+      expect(Date.now() - started).toBeLessThan(1000)
+    })
+
+    test("a re-taken reservation keeps the warning when the fresh liveness lookup fails", async () => {
+      let clock = 1_000_000
+      const setup = await start({ now: () => clock })
+      const stuck = await stuckSpawn(setup)
+      clock += 61_000
+      Object.assign(setup.fake.context.session, {
+        list: async () => {
+          throw new Error("unavailable")
+        },
+      })
+      stuck.open()
+      expect(await stuck.outcome).toBe("ses_fake1")
+      const result = await setup.fake.fire.tool("execute.after", completed("ses_fake1"))
+      expect((result.result as { content: string }).content).toContain("could not check whether the worktree already has a live writer")
+    })
+
+    test("a read-only agent neither reserves nor is blocked", async () => {
+      const setup = await start()
+      await spawn(setup, { agent: "reviewer", worktree: "feat" })
+      expect(sessionID(await second(setup))).toBeDefined()
+    })
   })
 
   test("a parent already in a worktree: children start there and writers branch from it", async () => {

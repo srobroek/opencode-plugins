@@ -195,6 +195,23 @@ function signalName(code) {
   return Object.entries(constants.signals).find(([, n]) => n === code)?.[0] ?? String(code);
 }
 
+// plugins/lib/src/patterns.ts
+var compiled = new Map;
+function compile(pattern) {
+  let regex = compiled.get(pattern);
+  if (regex === undefined) {
+    let source = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".");
+    if (source.endsWith(" .*"))
+      source = `${source.slice(0, -3)}( .*)?`;
+    regex = new RegExp(`^${source}$`, "s");
+    compiled.set(pattern, regex);
+  }
+  return regex;
+}
+function wildcardMatch(value, pattern) {
+  return compile(pattern).test(value);
+}
+
 // plugins/subagent-worktree/src/lane.ts
 var SUBAGENT_TOOL = "subagent";
 var MERGE_TOOL = "subagent_worktree_merge";
@@ -355,7 +372,7 @@ function decideIsolation(facts) {
     return { isolate: false, reason: "unknown agent" };
   if (facts.agent.mode === "primary")
     return { isolate: false, reason: "primary agent" };
-  if (rulesAreReadOnly(facts.agent.permissions))
+  if (sessionIsReadOnly(facts.agent.permissions, facts.callerPermissions))
     return { isolate: false, reason: "read-only agent (edit denied)" };
   if (facts.callerIsChild)
     return { isolate: false, reason: "caller is a child session" };
@@ -367,19 +384,22 @@ function targetsExternalDirectory(prompt, projectDir, homeDir) {
   const paths = [...prompt.matchAll(/(?:working directory|workdir|repository|repo|checkout|work in|work at)\s*(?:is|:|=)?\s*[`"']?(\/[^\s`"',;]+|~\/[^\s`"',;]+)/gi)].map((match) => match[1]?.replace(/[.)]+$/, "")).filter((path) => path !== undefined).map((path) => path.startsWith("~/") && homeDir ? `${homeDir}/${path.slice(2)}` : path);
   return paths.length === 1 && !within(paths[0] ?? "", projectDir);
 }
-function wildcard(value, pattern) {
-  const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
-  return new RegExp(`^${escaped}$`).test(value);
-}
 function rulesAreReadOnly(rules) {
   if (!Array.isArray(rules))
     return false;
   const match = [...rules].reverse().find((rule) => {
     if (typeof rule?.action !== "string" || typeof rule.resource !== "string")
       return false;
-    return wildcard("edit", rule.action) && (rule.resource === "*" || rule.resource === "**");
+    return wildcardMatch("edit", rule.action) && (rule.resource === "*" || rule.resource === "**");
   });
   return match?.effect === "deny";
+}
+function sessionIsReadOnly(agentRules, sessionRules) {
+  const rules = [...Array.isArray(agentRules) ? agentRules : [], ...Array.isArray(sessionRules) ? sessionRules : []];
+  if (!rulesAreReadOnly(rules))
+    return false;
+  const denied = rules.findLastIndex((rule) => rule?.effect === "deny" && typeof rule.action === "string" && wildcardMatch("edit", rule.action) && (rule.resource === "*" || rule.resource === "**"));
+  return !rules.slice(denied + 1).some((rule) => (rule?.effect === "allow" || rule?.effect === "ask") && typeof rule.action === "string" && (wildcardMatch("edit", rule.action) || wildcardMatch("write", rule.action)));
 }
 function slug(text, max = 32) {
   const value = text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, max).replace(/-+$/g, "");
@@ -553,6 +573,33 @@ function tail(text, lines = 40) {
 `).slice(-lines).join(`
 `);
 }
+function isRunning(session) {
+  return session.busy !== undefined && (session.idle === undefined || session.busy > session.idle);
+}
+var WRITER_LIVENESS_NOTE = "subagent-worktree: could not check whether the worktree already has a live writer session; the spawn went ahead. List your background work first.";
+function decideWriterGuard(facts) {
+  if (!facts.writer)
+    return { kind: "allow" };
+  if (facts.sessions === undefined)
+    return { kind: "allow", warn: WRITER_LIVENESS_NOTE };
+  const live = facts.sessions.find((session) => session.parentID !== undefined && session.id !== facts.caller && !session.readOnly && isRunning(session));
+  if (!live)
+    return { kind: "allow" };
+  return { kind: "refuse", reason: writerRefusal(facts.directory, live.id) };
+}
+function writerRefusal(directory, child) {
+  return child === undefined ? `${directory} already has a writer spawn in progress that has not started yet. Wait for it, then send that session a follow-up (pass its sessionID) instead of spawning a second writer, or stop it first.` : `${directory} already has a live writer session ${child}. Send that session a follow-up (pass sessionID: "${child}") instead of spawning a second writer, or stop it first.`;
+}
+var RESERVATION_MS = 60000;
+function blockingReservation(reservation, now, token) {
+  return reservation !== undefined && reservation.token !== token && reservation.until > now ? reservation : undefined;
+}
+function reservationStatus(reservation, now, token) {
+  if (reservation === undefined || reservation.until <= now)
+    return "free";
+  return reservation.token === token ? "held" : "replaced";
+}
+var FENCED_REASON = "another writer spawn took over this worktree while it waited. Check for a live writer session, then spawn again.";
 
 // plugins/subagent-worktree/src/git.ts
 var GIT_TIMEOUT_MS = 60000;
@@ -643,6 +690,18 @@ var directoryExists = async (path) => {
     throw error;
   }
 };
+var TIMED_OUT = Symbol("timed out");
+function toMillis(value) {
+  if (typeof value === "number")
+    return value;
+  if (value instanceof Date)
+    return value.getTime();
+  if (typeof value === "string") {
+    const parsed = Date.parse(value);
+    return Number.isNaN(parsed) ? undefined : parsed;
+  }
+  return;
+}
 var randomSuffix = () => crypto.randomUUID().slice(0, 6);
 var normalize = (path) => realpath(path).catch(() => resolve(path));
 function appendContent(content, note) {
@@ -657,7 +716,7 @@ ${note}`;
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
 }
-function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, exists = directoryExists) {
+function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, exists = directoryExists, now = Date.now, reserveMs = RESERVATION_MS) {
   const load = async (child) => parseLane(await ctx.storage.get(laneKey(child)));
   const save = (lane2) => ctx.storage.set(laneKey(lane2.child), lane2);
   const getSession = (sessionID) => ctx.session.get({ sessionID }).then((session) => session, () => {
@@ -722,8 +781,87 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
     const current = entries && containingWorktree(await normalize(parentDir), entries)?.directory;
     return { lookup: findWorktree(requested, path, entries), current };
   };
+  const sessionsIn = async (projectID, directory) => {
+    let timer;
+    const timeout = new Promise((done) => {
+      timer = setTimeout(() => done(TIMED_OUT), lookupMs);
+    });
+    const within = (work) => Promise.race([work.catch(() => TIMED_OUT), timeout]);
+    try {
+      const raws = [];
+      let query = { project: projectID, directory, archived: false, limit: 100 };
+      for (;; ) {
+        const page = await within(Promise.resolve(ctx.session.list(query)));
+        if (page === TIMED_OUT || !Array.isArray(page.data))
+          return;
+        raws.push(...page.data);
+        const next = page.cursor?.next;
+        if (!next)
+          break;
+        query = { cursor: next };
+      }
+      const sessions = [];
+      for (const raw of raws) {
+        if (typeof raw.id !== "string")
+          continue;
+        const time = raw.time ?? {};
+        const busy = toMillis(time.busy);
+        const idle = toMillis(time.idle);
+        const session = {
+          id: raw.id,
+          ...typeof raw.parentID === "string" ? { parentID: raw.parentID } : {},
+          ...busy === undefined ? {} : { busy },
+          ...idle === undefined ? {} : { idle }
+        };
+        if (session.parentID !== undefined && isRunning(session)) {
+          const agent = typeof raw.agent === "string" ? await within(getAgent(raw.agent, directory)) : undefined;
+          if (typeof agent === "symbol")
+            return;
+          session.readOnly = sessionIsReadOnly(agent?.permissions, raw.permissions);
+        }
+        sessions.push(session);
+      }
+      return sessions;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
   const notes = new Map;
-  const before = async (event) => {
+  const reservations = new Map;
+  let sequence = 0;
+  const hasStarted = async (child) => {
+    let timer;
+    const timeout = new Promise((done) => {
+      timer = setTimeout(() => done(TIMED_OUT), lookupMs);
+    });
+    try {
+      const session = await Promise.race([getSession(child), timeout]);
+      return session !== TIMED_OUT && session?.time?.busy !== undefined;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  const reserve = async (directory, callId) => {
+    const token = `${callId}#${++sequence}`;
+    for (;; ) {
+      const held = blockingReservation(reservations.get(directory), now(), token);
+      if (!held) {
+        reservations.set(directory, { token, callId, until: now() + reserveMs });
+        return token;
+      }
+      if (held.child === undefined || !await hasStarted(held.child)) {
+        throw new Error(`subagent-worktree: ${writerRefusal(directory, held.child)}`);
+      }
+      if (reservations.get(directory) === held)
+        reservations.delete(directory);
+    }
+  };
+  const release = (callId) => {
+    for (const [directory, reservation] of reservations)
+      if (reservation.callId === callId)
+        reservations.delete(directory);
+  };
+  const begin = async (event) => {
     if (event.tool !== SUBAGENT_TOOL)
       return;
     const input = readSubagentInput(event.input);
@@ -749,6 +887,7 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
       input,
       options,
       agent,
+      callerPermissions: parent.permissions,
       callerIsChild: Boolean(parent.parentID),
       isGit: start ? start.lookup.ok : await git2.isWorkTree(parentDir),
       projectDir: parentDir,
@@ -765,7 +904,48 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
     });
     if (plan.kind === "refuse")
       throw new Error(`subagent-worktree: ${plan.reason}`);
+    let hold;
+    if (plan.kind !== "isolate" && start?.lookup.ok && agent && agent.mode !== "primary") {
+      const directory = start.lookup.worktree.directory;
+      const writer = !sessionIsReadOnly(agent.permissions, parent.permissions);
+      if (writer)
+        hold = { directory, token: await reserve(directory, event.id), writer };
+      const guard = decideWriterGuard({
+        writer,
+        directory,
+        caller: event.sessionID,
+        sessions: await sessionsIn(parent.projectID, directory)
+      });
+      if (guard.kind === "refuse")
+        throw new Error(`subagent-worktree: ${guard.reason}`);
+      if (guard.warn)
+        notes.set(event.id, guard.warn);
+    }
+    const fence = async () => {
+      if (!hold)
+        return;
+      const status = reservationStatus(reservations.get(hold.directory), now(), hold.token);
+      if (status === "held")
+        return;
+      if (status === "replaced")
+        throw new Error(`subagent-worktree: ${hold.directory}: ${FENCED_REASON}`);
+      reservations.set(hold.directory, { token: hold.token, callId: event.id, until: now() + reserveMs });
+      const fresh = decideWriterGuard({
+        writer: hold.writer,
+        directory: hold.directory,
+        caller: event.sessionID,
+        sessions: await sessionsIn(parent.projectID, hold.directory)
+      });
+      if (fresh.kind === "refuse")
+        throw new Error(`subagent-worktree: ${fresh.reason}`);
+      if (fresh.warn)
+        notes.set(event.id, fresh.warn);
+      const after = reservationStatus(reservations.get(hold.directory), now(), hold.token);
+      if (after === "replaced")
+        throw new Error(`subagent-worktree: ${hold.directory}: ${FENCED_REASON}`);
+    };
     if (plan.kind === "default") {
+      await fence();
       if (plan.note)
         notes.set(event.id, plan.note);
       return;
@@ -774,9 +954,13 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
       return;
     await assertSubagent(event, agent.id);
     if (plan.kind === "move") {
+      await fence();
       let child;
       try {
         child = await createChild(event, input, agent, parent);
+        const reserved = hold && reservations.get(hold.directory);
+        if (reserved && hold && reserved.token === hold.token)
+          reserved.child = child;
         await ctx.session.move({ sessionID: child, directory: plan.worktree.directory });
         event.input = { ...event.input, sessionID: child, prompt: startPrompt(input.prompt, plan.worktree) };
       } catch (error) {
@@ -810,6 +994,14 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
         await ctx.session.remove({ sessionID: child }).catch(() => {});
       await removeWorktree(parent.projectID, worktree.directory, true).catch(() => {});
       throw new Error(`subagent-worktree: ${errorMessage(error)}`);
+    }
+  };
+  const before = async (event) => {
+    try {
+      await begin(event);
+    } catch (error) {
+      release(event.id);
+      throw error;
     }
   };
   const revive = async (event, child, prompt) => {
@@ -859,6 +1051,18 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
   const after = async (event) => {
     if (event.tool !== SUBAGENT_TOOL)
       return;
+    const reported = event.status === "completed" ? event.result.metadata : event.error.metadata;
+    if (event.id !== undefined) {
+      if (event.status === "completed" && reported?.status === "running") {
+        const started = event.result.metadata?.sessionID;
+        if (typeof started === "string") {
+          for (const reservation of reservations.values())
+            if (reservation.callId === event.id)
+              reservation.child = started;
+        }
+      } else
+        release(event.id);
+    }
     const skipped = event.id === undefined ? undefined : notes.get(event.id);
     if (event.id !== undefined)
       notes.delete(event.id);
@@ -1055,7 +1259,7 @@ function createPlugin(overrides = {}) {
     async setup(ctx) {
       const options = readOptions(ctx.options);
       const git2 = createGit(overrides.run ?? spawnRunner);
-      const lanes = createLanes(ctx, options, git2, overrides.suffix ?? randomSuffix, overrides.lookupMs, overrides.directoryExists);
+      const lanes = createLanes(ctx, options, git2, overrides.suffix ?? randomSuffix, overrides.lookupMs, overrides.directoryExists, overrides.now, overrides.reserveMs);
       const registrations = [];
       const cleanup = async () => {
         for (const registration of registrations.reverse())
@@ -1094,11 +1298,13 @@ var src_default = createPlugin();
 export {
   DEFAULT_AGENTS,
   DIRTY_CHECKOUT_NOTE,
+  FENCED_REASON,
   GIT_TIMEOUT_MS,
   LANE_PREFIX,
   MERGE_DESCRIPTION,
   MERGE_INPUT,
   MERGE_TOOL,
+  RESERVATION_MS,
   RESUME_WORKTREE_NOTE,
   SESSION_LOOKUP_MS,
   SUBAGENT_PREAMBLE,
@@ -1107,18 +1313,22 @@ export {
   UNBORN_NOTE,
   WORKTREE_PARAM,
   WORKTREE_PARAM_DESCRIPTION,
+  WRITER_LIVENESS_NOTE,
   annotation,
+  blockingReservation,
   containingWorktree,
   createGit,
   createLanes,
   createPlugin,
   decideIsolation,
   decideMerge,
+  decideWriterGuard,
   src_default as default,
   diffCommand,
   findWorktree,
   formatLaneList,
   isConflict,
+  isRunning,
   isUnbornHead,
   isUncommittedOnly,
   laneKey,
@@ -1133,9 +1343,11 @@ export {
   planStart,
   readOptions,
   readSubagentInput,
+  reservationStatus,
   resumeWorktreeNote,
   rewritePrompt,
   rulesAreReadOnly,
+  sessionIsReadOnly,
   shortSha,
   shouldRemove,
   slug,
@@ -1146,5 +1358,6 @@ export {
   uncommittedOnly,
   withoutWorktree,
   worktreeForBranch,
-  worktreeName
+  worktreeName,
+  writerRefusal
 };
