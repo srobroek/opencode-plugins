@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.5](https://github.com/srobroek/opencode-plugins/compare/subagent-worktree--v0.2.4...subagent-worktree--v0.2.5) (2026-11-16)
+
+
+### Bug Fixes
+
+* **subagent-worktree:** ignore the Beads ledger when checking for tracked changes ([#174](https://github.com/srobroek/opencode-plugins/issues/174)) ([7167f51](https://github.com/srobroek/opencode-plugins/commit/7167f51ca2055385e87b901ecfd322c95cd55da2))
+
 ## [0.2.4](https://github.com/srobroek/opencode-plugins/compare/subagent-worktree--v0.2.3...subagent-worktree--v0.2.4) (2026-11-13)
 
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.1](https://github.com/srobroek/opencode-plugins/compare/agent-coder--v0.8.0...agent-coder--v0.8.1) (2026-11-16)
+
+
+### Bug Fixes
+
+* **agent-coder:** allow the chezmoi-editor skill ([#177](https://github.com/srobroek/opencode-plugins/issues/177)) ([f7d09b5](https://github.com/srobroek/opencode-plugins/commit/f7d09b5fba7a06d8e840200913c84b1ee205c8c6))
+
 ## [0.8.0](https://github.com/srobroek/opencode-plugins/compare/agent-coder--v0.7.0...agent-coder--v0.8.0) (2026-11-13)
 
 

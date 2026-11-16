@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.1](https://github.com/srobroek/opencode-plugins/compare/speckit--v0.7.0...speckit--v0.7.1) (2026-11-16)
+
+
+### Bug Fixes
+
+* **beads:** name the ledger in PR-link refusals, point cd refusals at workdir, warn on cross-repo bd create ([#180](https://github.com/srobroek/opencode-plugins/issues/180)) ([fae4ced](https://github.com/srobroek/opencode-plugins/commit/fae4cede5ac9af61d6261db4256f787fb1c7334e))
+
 ## [0.7.0](https://github.com/srobroek/opencode-plugins/compare/speckit--v0.6.0...speckit--v0.7.0) (2026-11-13)
 
 
