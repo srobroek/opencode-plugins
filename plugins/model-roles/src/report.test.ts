@@ -192,3 +192,22 @@ describe("formatUsage", () => {
     expect(usageBrief(summarizeUsage([rec(unreported)], NOW).tiers[0]?.total as never)).toBe("1 run · 100% ok · p50 1s · n/a")
   })
 })
+
+describe("arm rows", () => {
+  test("a tier with exploration arms lists a row per arm, most runs first; other tiers and records stay as before", () => {
+    const report = summarizeUsage(
+      [rec({ arm: "p/m#low" }), rec({ arm: "p/m#high" }), rec({ arm: "p/m#high", outcome: "failed:server" }), rec(), rec({ tier: "strong" })],
+      NOW,
+    )
+    const cheap = report.tiers.find((t) => t.tier === "cheap")
+    expect(cheap?.arms?.map((a) => [a.arm, a.n, a.succeeded])).toEqual([
+      ["p/m#high", 2, 1],
+      ["p/m#low", 1, 1],
+    ])
+    expect(cheap?.total.n).toBe(4)
+    expect(report.tiers.find((t) => t.tier === "strong")).not.toHaveProperty("arms")
+    const lines = formatUsage(report)
+    expect(lines.filter((l) => l.startsWith("    arm "))).toHaveLength(2)
+    expect(lines.find((l) => l.startsWith("    arm p/m#high:"))).toContain("2 runs · 50% ok")
+  })
+})

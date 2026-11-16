@@ -44,7 +44,9 @@ export type Stats = {
 }
 
 export type AgentUsage = { agent: string } & Stats
-export type TierUsage = { tier: string; total: Stats; agents: AgentUsage[] }
+export type ArmUsage = { arm: string } & Stats
+/** `arms` is set only when some run of the tier recorded an exploration arm. */
+export type TierUsage = { tier: string; total: Stats; agents: AgentUsage[]; arms?: ArmUsage[] }
 export type UsageReport = { days: number; tiers: TierUsage[] }
 
 const finite = (value: unknown): number | undefined => (typeof value === "number" && Number.isFinite(value) ? value : undefined)
@@ -144,6 +146,13 @@ function stats(records: readonly OutcomeRecord[]): Stats {
 
 const byName = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0)
 
+/** Per-arm stats of the runs that recorded an exploration arm; most runs first. */
+function armUsage(records: readonly OutcomeRecord[]): ArmUsage[] {
+  const byArm = new Map<string, OutcomeRecord[]>()
+  for (const r of records) if (r.arm !== undefined) byArm.set(r.arm, [...(byArm.get(r.arm) ?? []), r])
+  return [...byArm.entries()].map(([arm, rs]) => ({ arm, ...stats(rs) })).sort((a, b) => b.n - a.n || byName(a.arm, b.arm))
+}
+
 /**
  * Group the records that ended inside the window by tier and by agent. Tiers sort by name,
  * agents under a tier by runs (most first), then name. `days` defaults to the ledger's retention.
@@ -161,11 +170,16 @@ export function summarizeUsage(records: Iterable<OutcomeRecord>, now: number, da
   }
   const tiers = [...byTier.entries()]
     .sort(([a], [b]) => byName(a, b))
-    .map(([tier, agents]) => ({
-      tier,
-      total: stats([...agents.values()].flat()),
-      agents: [...agents.entries()].map(([agent, rs]) => ({ agent, ...stats(rs) })).sort((a, b) => b.n - a.n || byName(a.agent, b.agent)),
-    }))
+    .map(([tier, agents]) => {
+      const all = [...agents.values()].flat()
+      const armed = armUsage(all)
+      return {
+        tier,
+        total: stats(all),
+        agents: [...agents.entries()].map(([agent, rs]) => ({ agent, ...stats(rs) })).sort((a, b) => b.n - a.n || byName(a.agent, b.agent)),
+        ...(armed.length === 0 ? {} : { arms: armed }),
+      }
+    })
   return { days: window, tiers }
 }
 
@@ -212,8 +226,9 @@ export function usageLine(s: Stats): string {
 export function formatUsage(report: UsageReport): string[] {
   const lines = [`Usage per tier (last ${plural(report.days, "day")}):`]
   if (report.tiers.length === 0) return [...lines, "  no finished spawns recorded"]
-  for (const { tier, total, agents } of report.tiers) {
+  for (const { tier, total, agents, arms } of report.tiers) {
     lines.push(`  ${tier}: ${usageLine(total)}`)
+    for (const a of arms ?? []) lines.push(`    arm ${a.arm}: ${usageBrief(a)}`)
     for (const a of agents.slice(0, CHECK_TOP_AGENTS)) lines.push(`    - ${a.agent}: ${usageBrief(a)}`)
     if (agents.length > CHECK_TOP_AGENTS) lines.push(`    - ${agents.length - CHECK_TOP_AGENTS} more agents`)
   }

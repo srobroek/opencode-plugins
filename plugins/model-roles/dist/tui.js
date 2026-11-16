@@ -81,6 +81,7 @@ function onSignals(ledger, childID, signals) {
   });
 }
 var onFailover = (ledger, childID) => update(ledger, childID, (r) => r.failedOver ? r : { ...r, failedOver: true });
+var onExploration = (ledger, childID, facts) => update(ledger, childID, (r) => r.arm !== undefined ? r : { ...r, policy: facts.policy, eligible: [...facts.eligible], arm: facts.arm, p: facts.p });
 function prune(ledger, now, limits = { maxEntries: LEDGER_MAX_ENTRIES, maxAgeMs: LEDGER_MAX_AGE_MS }) {
   const kept = Object.entries(ledger).filter(([, r]) => now - r.at <= limits.maxAgeMs).sort((a, b) => b[1].at - a[1].at).slice(0, limits.maxEntries);
   return kept.length === Object.keys(ledger).length ? ledger : Object.fromEntries(kept);
@@ -350,6 +351,7 @@ function createLedgerStore(storage, options = {}) {
     end: (id, outcome, at) => change(id, (l, i) => onEnd(l, i, outcome, at), "end"),
     signals: (id, signals) => change(id, (l, i) => onSignals(l, i, signals), "debounce"),
     failover: (id) => change(id, onFailover, "now"),
+    exploration: (id, facts) => change(id, (l, i) => onExploration(l, i, facts), "now"),
     flush,
     async dispose(timeoutMs = disposeTimeoutMs) {
       const flushing = flush(false);
@@ -477,6 +479,13 @@ function stats(records) {
   return out;
 }
 var byName = (a, b) => a < b ? -1 : a > b ? 1 : 0;
+function armUsage(records) {
+  const byArm = new Map;
+  for (const r of records)
+    if (r.arm !== undefined)
+      byArm.set(r.arm, [...byArm.get(r.arm) ?? [], r]);
+  return [...byArm.entries()].map(([arm, rs]) => ({ arm, ...stats(rs) })).sort((a, b) => b.n - a.n || byName(a.arm, b.arm));
+}
 function summarizeUsage(records, now, days) {
   const window = days !== undefined && Number.isFinite(days) && days > 0 ? days : REPORT_DEFAULT_DAYS;
   const since = now - window * DAY_MS;
@@ -489,11 +498,16 @@ function summarizeUsage(records, now, days) {
     agents.set(r.agent, [...agents.get(r.agent) ?? [], r]);
     byTier.set(tier, agents);
   }
-  const tiers = [...byTier.entries()].sort(([a], [b]) => byName(a, b)).map(([tier, agents]) => ({
-    tier,
-    total: stats([...agents.values()].flat()),
-    agents: [...agents.entries()].map(([agent, rs]) => ({ agent, ...stats(rs) })).sort((a, b) => b.n - a.n || byName(a.agent, b.agent))
-  }));
+  const tiers = [...byTier.entries()].sort(([a], [b]) => byName(a, b)).map(([tier, agents]) => {
+    const all = [...agents.values()].flat();
+    const armed = armUsage(all);
+    return {
+      tier,
+      total: stats(all),
+      agents: [...agents.entries()].map(([agent, rs]) => ({ agent, ...stats(rs) })).sort((a, b) => b.n - a.n || byName(a.agent, b.agent)),
+      ...armed.length === 0 ? {} : { arms: armed }
+    };
+  });
   return { days: window, tiers };
 }
 function readUsage(value) {
@@ -528,8 +542,10 @@ function formatUsage(report) {
   const lines = [`Usage per tier (last ${plural(report.days, "day")}):`];
   if (report.tiers.length === 0)
     return [...lines, "  no finished spawns recorded"];
-  for (const { tier, total, agents } of report.tiers) {
+  for (const { tier, total, agents, arms } of report.tiers) {
     lines.push(`  ${tier}: ${usageLine(total)}`);
+    for (const a of arms ?? [])
+      lines.push(`    arm ${a.arm}: ${usageBrief(a)}`);
     for (const a of agents.slice(0, CHECK_TOP_AGENTS))
       lines.push(`    - ${a.agent}: ${usageBrief(a)}`);
     if (agents.length > CHECK_TOP_AGENTS)

@@ -8,7 +8,7 @@ import { withOptionalString } from "../../lib/src/tool-schema.ts"
 import { WORKTREE_PARAM, WORKTREE_PARAM_DESCRIPTION } from "../../subagent-worktree/src/lane.ts"
 import reference from "./fixtures/reference.json"
 import work from "./fixtures/work-models.json"
-import plugin, { CHILD_LOOKUP_MS, MAX_REREGISTER, type ModelRef, readAgents, readTiers, spawnTarget } from "./index.ts"
+import plugin, { CHILD_LOOKUP_MS, MAX_REREGISTER, type ModelRef, readAgents, readTiers, setExploreRandom, spawnTarget } from "./index.ts"
 
 type Agent = { id: string; model?: ModelRef; request?: { headers?: Record<string, string> } }
 type Model = { providerID: string; id: string; variants: { id: string }[]; cost?: { input: number }[]; limit?: { context: number } }
@@ -3445,5 +3445,140 @@ describe("a child keeps its resolved model", () => {
     expect(kept).not.toContain("spawn-model:n999")
     host.close()
     await cleanup()
+  })
+})
+
+describe("exploration inside a tier", () => {
+  const sonnetModel = { providerID: "amazon-bedrock", id: "claude-sonnet" }
+  const ref = (variant: string): ModelRef => ({ ...sonnetModel, variant })
+  const tierModels: Model[] = [{ ...sonnetModel, variants: [{ id: "low" }, { id: "medium" }, { id: "high" }] }, models[1] as Model]
+  const base = { roles: { task: ["amazon-bedrock/claude-sonnet#medium", "anthropic/claude-haiku"] }, agents: {} }
+  const on = { agents: ["plain"], explore: 0.1 }
+  const label = (variant: string) => `amazon-bedrock/claude-sonnet#${variant}`
+  const receipts = (host: ReturnType<typeof createHost>) => host.storage.get("receipts") as Array<Record<string, unknown>>
+  const spawnTier = (host: ReturnType<typeof createHost>, id = "call-1") => host.spawn("subagent", { agent: "plain", prompt: "x", tier: "task" }, "build", "r", id)
+
+  /** Run `body` on a host with exploration `evaluate` and an injected draw. */
+  const withHost = async (
+    evaluate: unknown,
+    draw: number,
+    body: (host: ReturnType<typeof createHost>) => Promise<void>,
+    extra: Record<string, unknown> = {},
+  ) => {
+    setExploreRandom(() => draw)
+    const host = createHost({ agents: [{ id: "plain" }], models: tierModels, options: { ...base, ...extra, ...(evaluate === undefined ? {} : { evaluate }) } })
+    host.sessions.set("r", { id: "r" })
+    const cleanup = await setup(host)
+    try {
+      await body(host)
+    } finally {
+      host.close()
+      await cleanup()
+      setExploreRandom(undefined)
+    }
+  }
+
+  test.each([
+    ["no evaluate option", undefined],
+    ["no agents", { explore: 0.1 }],
+    ["explore 0", { agents: ["plain"], explore: 0 }],
+    ["an agent not listed", { agents: ["other"], explore: 0.1 }],
+  ])("with %s, model arguments, receipts and records are those of a plain tier spawn", async (_name, evaluate) => {
+    await withHost(evaluate, 0, async (host) => {
+      const input = await spawnTier(host)
+      expect(input.model).toBe(label("medium"))
+      host.emit({ type: "session.created", data: { sessionID: "c", parentID: "r", agent: "plain", model: ref("medium") } })
+      await settle()
+      const [receipt] = receipts(host)
+      expect(receipt).toMatchObject({ agent: "plain", source: "tier-param", tier: "standard", model: label("medium"), fallbacks: [], warnings: [] })
+      expect(receipt).not.toHaveProperty("explore")
+      expect(Object.keys(host.storage.get("spawn-model:c") as object).sort()).toEqual(["at", "configRevision", "model", "tier"])
+      const record = host.storage.get("outcome:c") as Record<string, unknown>
+      for (const key of ["policy", "eligible", "arm", "p"]) expect(record).not.toHaveProperty(key)
+    })
+  })
+
+  test("an exploring spawn runs on the arm, with the receipt rule kept and the arm logged in the ledger and snapshot", async () => {
+    await withHost(on, 0, async (host) => {
+      const input = await spawnTier(host)
+      // The first alternative is the control model one step up.
+      expect(input.model).toBe(label("high"))
+      host.emit({ type: "session.created", data: { sessionID: "c", parentID: "r", agent: "plain", model: ref("high") } })
+      await settle()
+      const facts = { policy: "explore-v1", eligible: [label("medium"), label("high"), label("low"), "anthropic/claude-haiku"], arm: label("high"), p: 0.1 / 3 }
+      expect(host.storage.get("outcome:c")).toMatchObject(facts)
+      expect(host.storage.get("spawn-model:c")).toMatchObject({ model: label("high"), tier: "task", explore: facts })
+      const [receipt] = receipts(host)
+      expect(receipt).toMatchObject({ model: label("high"), explore: label("high"), source: "tier-param", tier: "standard", rule: "candidate-variant" })
+      const check = (await host.tools.get("model_roles_check")?.execute({}))?.content ?? ""
+      expect(check).toContain("exploration: on for plain, ε=0.1")
+    })
+  })
+
+  test("a draw above ε keeps the control and still logs the propensity of the control", async () => {
+    await withHost(on, 0.5, async (host) => {
+      const input = await spawnTier(host)
+      expect(input.model).toBe(label("medium"))
+      host.emit({ type: "session.created", data: { sessionID: "c", parentID: "r", agent: "plain", model: ref("medium") } })
+      await settle()
+      expect(host.storage.get("outcome:c")).toMatchObject({ policy: "explore-v1", arm: label("medium"), p: 0.9 })
+      expect(receipts(host)[0]).not.toHaveProperty("explore")
+    })
+  })
+
+  test("a resume keeps the arm of the child", async () => {
+    await withHost(on, 0, async (host) => {
+      await spawnTier(host)
+      host.emit({ type: "session.created", data: { sessionID: "c", parentID: "r", agent: "plain", model: ref("high") } })
+      await settle()
+      setExploreRandom(() => 0.5)
+      const input = await host.spawn("subagent", { agent: "plain", prompt: "again", sessionID: "c" }, "build", "r", "call-2")
+      expect(input.model).toBe(label("high"))
+      await settle()
+      expect(host.storage.get("outcome:c")).toMatchObject({ arm: label("high"), p: 0.1 / 3, resumes: 1 })
+      expect(host.storage.get("spawn-model:c")).toMatchObject({ model: label("high"), explore: { arm: label("high") } })
+    })
+  })
+
+  test("an arm the guard refuses is dropped, and the draw lands on the rest", async () => {
+    const guard = { expensive: ["anthropic/claude-haiku"] }
+    await withHost(on, 0.0999, async (host) => {
+      const input = await spawnTier(host)
+      expect(input.model).toBe(label("low"))
+      host.emit({ type: "session.created", data: { sessionID: "c", parentID: "r", agent: "plain", model: ref("low") } })
+      await settle()
+      expect(host.storage.get("outcome:c")).toMatchObject({ eligible: [label("medium"), label("high"), label("low")], arm: label("low") })
+    }, { guard })
+  })
+
+  test("when the guard refuses every alternative the spawn stays on the control and logs no arm", async () => {
+    const guard = { expensive: [label("high"), label("low"), "anthropic/claude-haiku"] }
+    await withHost(on, 0, async (host) => {
+      const input = await spawnTier(host)
+      expect(input.model).toBe(label("medium"))
+      host.emit({ type: "session.created", data: { sessionID: "c", parentID: "r", agent: "plain", model: ref("medium") } })
+      await settle()
+      expect(host.storage.get("outcome:c")).not.toHaveProperty("arm")
+      expect(receipts(host)[0]).not.toHaveProperty("explore")
+    }, { guard })
+  })
+
+  test("a reviewer agent never explores", async () => {
+    setExploreRandom(() => 0)
+    const host = createHost({ agents: [{ id: "code-reviewer" }], models: tierModels, options: { ...base, evaluate: { agents: ["code-reviewer"], explore: 0.1 } } })
+    host.sessions.set("r", { id: "r" })
+    const cleanup = await setup(host)
+    const input = await host.spawn("subagent", { agent: "code-reviewer", prompt: "x", tier: "task" }, "build", "r", "call-1")
+    expect(input.model).toBe(label("medium"))
+    host.close()
+    await cleanup()
+    setExploreRandom(undefined)
+  })
+
+  test("a spawn with its own model is not touched", async () => {
+    await withHost(on, 0, async (host) => {
+      const input = await host.spawn("subagent", { agent: "plain", prompt: "x", model: "anthropic/claude-haiku" }, "build", "r", "call-1")
+      expect(input.model).toBe("anthropic/claude-haiku")
+    })
   })
 })
