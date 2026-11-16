@@ -170,6 +170,9 @@ function checkGit(args: readonly string[], ctx: Ctx, cwd: string | undefined): s
     if (tree === undefined || !scratch(tree, ctx)) return refuse(`git ${sub} outside a debug-* scratch worktree (it would change the user's checkout or shared refs)`)
   }
   const outputs = outputDestinations(sub, rest)
+  // format-patch writes its files to the current directory unless told otherwise.
+  if (sub === "format-patch" && !rest.includes("--stdout") && outputs?.length === 0)
+    return refuse("git format-patch without --stdout or -o (it writes patch files to the current directory)")
   if (outputs === undefined) return refuse(`git ${sub} with an output path that is missing or cannot be checked`)
   for (const destination of outputs) {
     const reason = checkDestination(destination, tree, ctx)
@@ -274,6 +277,8 @@ function changesTree(sub: string, rest: readonly string[]): boolean {
     case "apply":
     case "am":
       return true
+    case "format-patch":
+      return !rest.includes("--stdout")
     case "stash":
       return !["list", "show"].includes(rest[0] ?? "")
     case "branch":
