@@ -144,7 +144,7 @@ and through `tools.parley_ask` for rounds of several questions.
 | Edits | `specs/*` and `.specify/*` only |
 | Shell | `bd` (including the beads write-lock runner), `specify`, `.specify/` scripts, and `git` status, diff, log, show, branch, rev-parse, ls-files, merge-base, switch. Branch deletion, renames and forced moves, and discarding or forced switches are denied. |
 | Tools | read, grep, glob, LSP, `question`, `execute` (for `parley_ask`, `speckit_setup`, `speckit_start`), `speckit_*` (commits go through `speckit_commit`) |
-| Skills | `speckit-*` (this plugin's and spec-kit's), `quality-*`, `beads-ledger` |
+| Skills | `speckit-*` (this plugin's and spec-kit's), `quality-*`, `beads-ledger` (and its router `beads-guide`) |
 | Subagents | `explore`, `researcher`, `architect`, `speckit-verify`, `speckit-sync` |
 
 Everything else is denied, including `git push`, web access and edits of product code.

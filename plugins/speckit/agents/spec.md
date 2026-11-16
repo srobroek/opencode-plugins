@@ -49,6 +49,9 @@ permissions:
   - action: skill
     resource: beads-ledger
     effect: allow
+  - action: skill
+    resource: beads-guide
+    effect: allow
   - action: question
     resource: "*"
     effect: allow
