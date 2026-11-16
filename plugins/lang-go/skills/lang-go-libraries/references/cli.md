@@ -6,13 +6,13 @@ Checked 2026-11-12. Standard-library entries use Go `1.27`.
 
 | Concern | Default | Use instead when | Avoid (why) |
 | --- | --- | --- | --- |
-| Small CLI | `flag`, `fmt`, `os`; standard library is sufficient | `github.com/spf13/cobra` `1` for command trees/completions | Command framework for a few flags. |
-| Structured commands | Cobra `1` for established command-tree conventions | `github.com/alecthomas/kong` `1` for struct parsing; `github.com/urfave/cli/v3` `3` for its API | Treating `github.com/peterbourgon/ff/v4` `4` beta as stable. |
-| Prompts/forms | Noninteractive flags first | `charm.land/huh/v2` `2` for forms | Blocking prompts in automation; old Charm paths mistaken for v2 modules. |
-| Full TUI | `charm.land/bubbletea/v2` `2` when a stateful TUI is needed | `charm.land/bubbles/v2` `2` for components | A TUI for ordinary command output; blocking work in the event/update path. |
-| Plain/machine output | `fmt`, `encoding/json`, `text/tabwriter`; standard library is sufficient | `github.com/fatih/color` `1` for modest color; `charm.land/lipgloss/v2` `2` for styling | ANSI on machine output, diagnostics mixed with JSON stdout. |
-| Tiny configuration | `os.LookupEnv`, typed immutable structs; standard library is sufficient | `github.com/caarlos0/env/v11` `11` for typed environment parsing | Hidden defaults, no startup validation or mutable global settings. |
-| Layered configuration | `github.com/knadh/koanf/v2` `2` when files/env/flags must combine | `github.com/spf13/viper` `1` for existing Cobra integrations; `github.com/kelseyhightower/envconfig` `1` for existing code | Viper concurrent reads/writes, case-sensitive-key assumptions or unnoticed environment rereads. |
+| Small CLI | `flag`, `fmt`, `os`; standard library is sufficient | `github.com/spf13/cobra` `>= 1` for command trees/completions | Command framework for a few flags. |
+| Structured commands | Cobra `1` for established command-tree conventions | `github.com/alecthomas/kong` `>= 1` for struct parsing; `github.com/urfave/cli/v3` `>= 3` for its API | Treating `github.com/peterbourgon/ff/v4` `>= 4` beta as stable. |
+| Prompts/forms | Noninteractive flags first | `charm.land/huh/v2` `>= 2` for forms | Blocking prompts in automation; old Charm paths mistaken for v2 modules. |
+| Full TUI | `charm.land/bubbletea/v2` `>= 2` when a stateful TUI is needed | `charm.land/bubbles/v2` `>= 2` for components | A TUI for ordinary command output; blocking work in the event/update path. |
+| Plain/machine output | `fmt`, `encoding/json`, `text/tabwriter`; standard library is sufficient | `github.com/fatih/color` `>= 1` for modest color; `charm.land/lipgloss/v2` `>= 2` for styling | ANSI on machine output, diagnostics mixed with JSON stdout. |
+| Tiny configuration | `os.LookupEnv`, typed immutable structs; standard library is sufficient | `github.com/caarlos0/env/v11` `>= 11` for typed environment parsing | Hidden defaults, no startup validation or mutable global settings. |
+| Layered configuration | `github.com/knadh/koanf/v2` `>= 2` when files/env/flags must combine | `github.com/spf13/viper` `>= 1` for existing Cobra integrations; `github.com/kelseyhightower/envconfig` `>= 1` for existing code | Viper concurrent reads/writes, case-sensitive-key assumptions or unnoticed environment rereads. |
 | Config formats | JSON via standard library when sufficient | Maintained YAML `3` or TOML `2` modules from `data.md` | Inventing parsers or installing formats the project does not need. |
 
 ## Rules

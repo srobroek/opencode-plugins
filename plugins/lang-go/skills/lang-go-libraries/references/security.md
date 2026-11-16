@@ -6,28 +6,28 @@ Checked 2026-11-16. SAST, dependency audit, dead code, complexity and duplicatio
 
 | Concern | Default | Use instead when | Avoid (why) |
 | --- | --- | --- | --- |
-| Cryptography/randomness | `crypto`, `crypto/rand`, `crypto/tls`; standard library is sufficient for supplied primitives | `golang.org/x/crypto` `0.59` for missing approved algorithms | Homemade crypto, `math/rand` for secrets or bypassed TLS verification. |
-| Password storage | `golang.org/x/crypto/argon2` `0.59` Argon2id with reviewed parameters | `golang.org/x/crypto/bcrypt` `0.59` for compatibility | Plain/fast hashes; bcrypt passwords beyond its `72`-byte limit. |
-| JWT/JOSE | `github.com/golang-jwt/jwt/v5` `5` for verification | `github.com/lestrrat-go/jwx/v3` `3` for JWK/JWE/JWS and cached keys | Decode-only authentication; unbounded key fetching or absent algorithm/issuer/audience/time checks. |
-| OAuth/OIDC | `golang.org/x/oauth2` `0.38`, `github.com/coreos/go-oidc/v3` `3` | Provider integration for a named flow | Handwritten OAuth protocols or identity tokens used as API access tokens. |
+| Cryptography/randomness | `crypto`, `crypto/rand`, `crypto/tls`; standard library is sufficient for supplied primitives | `golang.org/x/crypto` `>= 0.59` for missing approved algorithms | Homemade crypto, `math/rand` for secrets or bypassed TLS verification. |
+| Password storage | `golang.org/x/crypto/argon2` `>= 0.59` Argon2id with reviewed parameters | `golang.org/x/crypto/bcrypt` `>= 0.59` for compatibility | Plain/fast hashes; bcrypt passwords beyond its `72`-byte limit. |
+| JWT/JOSE | `github.com/golang-jwt/jwt/v5` `>= 5` for verification | `github.com/lestrrat-go/jwx/v3` `>= 3` for JWK/JWE/JWS and cached keys | Decode-only authentication; unbounded key fetching or absent algorithm/issuer/audience/time checks. |
+| OAuth/OIDC | `golang.org/x/oauth2` `>= 0.38`, `github.com/coreos/go-oidc/v3` `>= 3` | Provider integration for a named flow | Handwritten OAuth protocols or identity tokens used as API access tokens. |
 | Secrets | Workload identity and managed-secret retrieval, detailed in `aws.md` | Existing approved secret manager | Values in source, fixtures, errors, logs or telemetry; env vars mistaken for secure storage. |
 | Filesystem containment | `os.Root`; standard library is sufficient for its rooted operations | Reviewed sandbox/process isolation for stronger threat models | String-prefix path checks as a race-safe filesystem boundary. |
 | SSRF | Restricted `net/http.Transport`/dialer plus destination policy; standard library supplies the mechanism and the application enforces the policy | Network egress proxy/controls | Hostname-only checks, DNS-check-then-redial, unrestricted redirects/proxies; validate actual IPv4/IPv6/mapped dial addresses. |
-| HTML/input | `html/template` escaping for ordinary output | `github.com/microcosm-cc/bluemonday` `1` for allowlisted rich HTML | Regex sanitizers or decoding treated as validation. |
-| CSRF | `net/http.CrossOriginProtection`; standard library suffices for origin-based protection | `github.com/gorilla/csrf` `1` for synchronizer-token requirements | Assuming origin checks and token mechanisms are identical. |
-| Security headers | Explicit `net/http` headers; standard library is sufficient | `github.com/unrolled/secure` `1` for configurable shared middleware | Blind CSP/HSTS defaults; CORS as authorization. |
-| Secret scanning | Offline `Betterleaks` `1` or `Gitleaks` `8` on changed content | `TruffleHog` `3` for separate history/verification scans | Verified-only policy that drops unverifiable secrets. |
-| SBOM | `github.com/CycloneDX/cyclonedx-gomod` `1` for Go source modules | `Syft` `1` for images/artifacts; `cdxgen` `13` for multilingual source | SBOM generation presented as vulnerability detection. |
-| Dependency licences | `go-licenses` `2` inventory and project policy | Organization-approved compliance tooling | Repository-licence detection as equivalent to dependency compliance. |
-| Container security | Verified `Grype` `0.121` plus `Syft` `1` when images ship | `Trivy` `0.76` only with explicit artifact/transitive-action review | Ignoring Trivy's documented March 2026 compromise or trusting mutable installer tags. |
-| Workflow security | `actionlint` `1`, `zizmor` `1`, `pinact` `5` when workflows exist | Scheduled Scorecard `5` assessment for repository posture | Treating an action SHA alone as proof of downloaded-tool integrity. |
+| HTML/input | `html/template` escaping for ordinary output | `github.com/microcosm-cc/bluemonday` `>= 1` for allowlisted rich HTML | Regex sanitizers or decoding treated as validation. |
+| CSRF | `net/http.CrossOriginProtection`; standard library suffices for origin-based protection | `github.com/gorilla/csrf` `>= 1` for synchronizer-token requirements | Assuming origin checks and token mechanisms are identical. |
+| Security headers | Explicit `net/http` headers; standard library is sufficient | `github.com/unrolled/secure` `>= 1` for configurable shared middleware | Blind CSP/HSTS defaults; CORS as authorization. |
+| Secret scanning | Offline `Betterleaks` `>= 1` or `Gitleaks` `>= 8` on changed content | `TruffleHog` `>= 3` for separate history/verification scans | Verified-only policy that drops unverifiable secrets. |
+| SBOM | `github.com/CycloneDX/cyclonedx-gomod` `>= 1` for Go source modules | `Syft` `>= 1` for images/artifacts; `cdxgen` `>= 13` for multilingual source | SBOM generation presented as vulnerability detection. |
+| Dependency licences | `go-licenses` `>= 2` inventory and project policy | Organization-approved compliance tooling | Repository-licence detection as equivalent to dependency compliance. |
+| Container security | Verified `Grype` `>= 0.121` plus `Syft` `>= 1` when images ship | `Trivy` `>= 0.76` only with explicit artifact/transitive-action review | Ignoring Trivy's documented March 2026 compromise or trusting mutable installer tags. |
+| Workflow security | `actionlint` `>= 1`, `zizmor` `>= 1`, `pinact` `>= 5` when workflows exist | Scheduled Scorecard `5` assessment for repository posture | Treating an action SHA alone as proof of downloaded-tool integrity. |
 
 ## Rules
 
 - Authorize tenant/object/action/field access in the domain boundary, not only at the gateway. Bound bodies, decompression, queries, concurrency and outbound waits.
 - Distinguish escaping, sanitization, CSRF, SSRF, SAST, SCA and SBOM purposes. No one scanner supplies all of them.
 - Pin scanner artifacts in CI. Review suppressions with an owner, rationale and expiry; configure one tool per gate.
-- Keep a single dependency updater, such as `Renovate` `44`, with project cooldown and vulnerability policy. Review supply-chain and license changes alongside advisories.
+- Keep a single dependency updater, such as `Renovate` `>= 44`, with project cooldown and vulnerability policy. Review supply-chain and license changes alongside advisories.
 - Dead code, duplication, SAST and dependency audit rules are in [quality.md](quality.md); report dead code and duplication before gating a mature codebase.
 
 ## Sources
