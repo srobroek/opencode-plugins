@@ -15,6 +15,7 @@ Checked 2026-01-10.
 
 - **playwright**: multi-browser and fast; costs a browser download.
 - **cypress**: good debugging UI; costs single-tab limits.
+- **selenium**: runs legacy grids; slow and flaky.
 
 ## api
 
