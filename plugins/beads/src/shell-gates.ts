@@ -94,7 +94,9 @@ export function actorInjection(
   // `bd` reads BEADS_ACTOR before BD_ACTOR, so an injected BEADS_ACTOR would override an
   // invocation that chose its actor through BD_ACTOR. The injected BD_ACTOR loses to every
   // explicit choice instead: a BEADS_ACTOR, a --actor, or the invocation's own BD_ACTOR.
-  const choosesBdActor = named.some((names) => names.has("BD_ACTOR"))
+  // An export that may or may not run is injected around, not trusted: BD_ACTOR loses to every
+  // explicit choice, and to the conditional export itself when that export runs.
+  const choosesBdActor = named.some((names) => names.has("BD_ACTOR")) || invocations.some((i) => i.conditional.length > 0)
   return { actor, variable: choosesBdActor ? "BD_ACTOR" : "BEADS_ACTOR" }
 }
 

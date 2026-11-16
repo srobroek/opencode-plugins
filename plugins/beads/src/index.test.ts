@@ -329,6 +329,12 @@ describe("execute.after on shell", () => {
     ["BD_ACTOR=A bd update a-1 --claim; bd update a-2 --claim", { "a-1": "A", "a-2": GENERATED }],
     ["BEADS_ACTOR=A bd update a-1 --claim; bd update a-2 --claim", { "a-1": "A", "a-2": GENERATED }],
     ["bd update a-1 --claim; BD_ACTOR=A bd update a-2 --claim", { "a-1": GENERATED, "a-2": "A" }],
+    // A conditional export either ran (bd reports it) or did not (bd reports the injected actor).
+    ['if [ -n "$X" ]; then export BD_ACTOR=alice; fi; bd update proj-1 --claim', { "proj-1": "alice" }],
+    ['if [ -n "$X" ]; then export BD_ACTOR=alice; fi; bd update proj-1 --claim', { "proj-1": GENERATED }],
+    ['[ -n "$X" ] && export BEADS_ACTOR=alice; bd update proj-1 --claim', { "proj-1": "alice" }],
+    ['[ -n "$X" ] && export BEADS_ACTOR=alice; bd update proj-1 --claim', { "proj-1": GENERATED }],
+    ['[ -n "$X" ] || export BD_ACTOR=alice; bd update proj-1 --claim', { "proj-1": "alice" }],
     ["bash -c 'bd update a-1 --claim'", { "a-1": GENERATED }],
     ["BD_ACTOR=A bash -c 'bd update a-1 --claim'", { "a-1": "A" }],
   ])("records the holder bd reports for the claim: %s", async (command, holders) => {
@@ -340,7 +346,7 @@ describe("execute.after on shell", () => {
   test.each([
     // The shell decides what bd sees, and bd's answer must be an actor this invocation could have used.
     ["unset BEADS_ACTOR; bd update proj-1 --claim", "human@example.com"],
-    ["false && export BEADS_ACTOR=B; bd update proj-1 --claim", GENERATED],
+    ["false && export BEADS_ACTOR=B; bd update proj-1 --claim", "human@example.com"],
     ["bd update proj-1 --claim; bd update proj-1 --assignee other", "other"],
     ["bd update proj-1 --claim && bd assign proj-1 other", "other"],
   ])("does not track a claim whose reported holder is not the claiming actor: %s", async (command, holder) => {
@@ -364,6 +370,29 @@ describe("execute.after on shell", () => {
     const state = fake.storage.get("claims/ses_child") as { claims: Record<string, { store: string | null }> }
     expect(seen.at(-1)?.beadsDir).toBe(join(other, ".beads"))
     expect(Object.values(state.claims)[0]?.store).toBe(join(other, ".beads"))
+    await cleanup()
+  })
+
+  test.each([
+    'if [ -n "$CUSTOM_ACTOR" ]; then export BD_ACTOR=alice; fi; bd create --title t',
+    'if [ -n "$CUSTOM_ACTOR" ]; then export BEADS_ACTOR=alice; fi; bd create --title t',
+    '[ -n "$CUSTOM_ACTOR" ] && export BD_ACTOR=alice; bd create --title t',
+    '[ -n "$CUSTOM_ACTOR" ] || export BEADS_ACTOR=alice; bd create --title t',
+    'for i in 1; do export BD_ACTOR=alice; done; bd create --title t',
+  ])("a conditional actor export is injected around with BD_ACTOR, which it still overrides: %s", async (command) => {
+    const { fake, cleanup } = await start(scratch())
+    const event = await fake.fire.tool("execute.before", shellCall(command, "ses_child"))
+    expect((event.input as { command: string }).command).toStartWith(
+      "export BD_ACTOR='opencode/ses_root/general/ses_child'; ",
+    )
+    await cleanup()
+  })
+
+  test("an unconditional export still counts as naming the actor", async () => {
+    const { fake, cleanup } = await start(scratch())
+    const command = "export BD_ACTOR=alice && bd create --title t"
+    const event = await fake.fire.tool("execute.before", shellCall(command, "ses_child"))
+    expect((event.input as { command: string }).command).toBe(command)
     await cleanup()
   })
 

@@ -1460,7 +1460,7 @@ var CLOSERS = new Set(["fi", "done", "esac"]);
 var BRANCHES = new Set(["else", "elif"]);
 var ASSIGNMENT = /^[A-Za-z_]\w*=/;
 var basename = (word) => word.split("/").pop() ?? word;
-function applyActorBuiltin(state, values) {
+function applyActorBuiltin(state, values, conditional) {
   const name = values[0];
   if (name !== "export" && name !== "unset")
     return;
@@ -1468,7 +1468,10 @@ function applyActorBuiltin(state, values) {
     const variable = ACTOR_VARS.find((candidate) => arg === candidate || arg.startsWith(`${candidate}=`));
     if (variable === undefined)
       continue;
-    if (name === "unset")
+    if (conditional !== undefined) {
+      if (name === "export" && arg.includes("="))
+        conditional.push(arg.slice(variable.length + 1));
+    } else if (name === "unset")
       delete state[variable];
     else if (arg.includes("="))
       state[variable] = arg.slice(variable.length + 1);
@@ -1485,6 +1488,11 @@ function readCommand(command, inherited) {
   const scan = scanShell(command, { executableSubstitutionsOnly: true });
   let state = { ...inherited };
   const scopes = [];
+  let compounds = 0;
+  let andChained = false;
+  let orChained = false;
+  let chainExports = [];
+  const maybe = [];
   const unclaimed = [...scan.substitutions];
   for (const item of scan.items) {
     if (item.kind === "operator") {
@@ -1493,6 +1501,21 @@ function readCommand(command, inherited) {
         state = { ...state };
       } else if (item.operator === ")" && scopes.length > 0)
         state = scopes.pop();
+      else if (item.operator === "&&")
+        andChained = true;
+      else if (item.operator === "||")
+        orChained = true;
+      else if (item.operator === ";" || item.operator === `
+` || item.operator === "&") {
+        for (const { variable, value } of chainExports) {
+          if (state[variable] === value)
+            delete state[variable];
+          maybe.push(value);
+        }
+        chainExports = [];
+        andChained = false;
+        orChained = false;
+      }
       continue;
     }
     const spans = [...item.words, ...item.redirects];
@@ -1519,11 +1542,13 @@ ${document.body}__HEREDOC_END__
     let skip = false;
     while (k < words.length && words[k]?.quoted === false) {
       const value = words[k]?.value;
-      if (OPENERS.has(value))
+      if (OPENERS.has(value)) {
+        compounds++;
         skip = HEADER_ONLY.has(value);
-      else if (CLOSERS.has(value))
+      } else if (CLOSERS.has(value)) {
+        compounds = Math.max(0, compounds - 1);
         skip = true;
-      else if (!BRANCHES.has(value) && value !== "!" && value !== "then" && value !== "do")
+      } else if (!BRANCHES.has(value) && value !== "!" && value !== "then" && value !== "do")
         break;
       k++;
       if (skip)
@@ -1538,7 +1563,14 @@ ${document.body}__HEREDOC_END__
     const values = words.slice(a).map((word) => word.value);
     if (values.length === 0)
       continue;
-    applyActorBuiltin(state, values);
+    const before = { ...state };
+    applyActorBuiltin(state, values, compounds > 0 || orChained ? maybe : undefined);
+    if (andChained)
+      for (const variable of ACTOR_VARS) {
+        const value = state[variable];
+        if (value !== undefined && value !== before[variable])
+          chainExports.push({ variable, value });
+      }
     const found = resolveBd(values, assigned);
     if (found !== undefined) {
       const scanned = scanGlobals(values, found.next);
@@ -1550,6 +1582,7 @@ ${document.body}__HEREDOC_END__
           globals: scanned.globals,
           prefix: found.prefix,
           exported: { ...state },
+          conditional: [...maybe],
           unset: found.unset
         });
       }
@@ -1769,6 +1802,7 @@ function invocationFromArgv(args) {
     globals: scanned.globals,
     prefix: [],
     exported: {},
+    conditional: [],
     unset: {}
   };
 }
@@ -3915,7 +3949,12 @@ function claimLookups(command, cwd, env, output, invocations, injected) {
     if (target.ambiguous === true)
       continue;
     const candidates = new Set;
-    for (const actor of [injected, transitionFlags(invocation.args).actorOverride, invocationActor(invocation, env)])
+    for (const actor of [
+      injected,
+      transitionFlags(invocation.args).actorOverride,
+      invocationActor(invocation, env),
+      ...invocation.conditional
+    ])
       if (actor !== undefined && actor !== null && actor !== "")
         candidates.add(actor);
     const plan = planned.get(invocationSignature(invocation));
@@ -5535,7 +5574,7 @@ function actorInjection(command, actor) {
   const named = invocations.map(namedVariables);
   if (named.every((names) => names.size > 0))
     return;
-  const choosesBdActor = named.some((names) => names.has("BD_ACTOR"));
+  const choosesBdActor = named.some((names) => names.has("BD_ACTOR")) || invocations.some((i) => i.conditional.length > 0);
   return { actor, variable: choosesBdActor ? "BD_ACTOR" : "BEADS_ACTOR" };
 }
 function withActorPrefix(command, actor, variable = "BEADS_ACTOR") {

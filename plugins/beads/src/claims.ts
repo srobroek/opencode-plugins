@@ -302,7 +302,12 @@ export function claimLookups(
     const target = claimTarget(invocation, cwd, env, planned)
     if (target.ambiguous === true) continue
     const candidates = new Set<string>()
-    for (const actor of [injected, transitionFlags(invocation.args).actorOverride, invocationActor(invocation, env)])
+    for (const actor of [
+      injected,
+      transitionFlags(invocation.args).actorOverride,
+      invocationActor(invocation, env),
+      ...invocation.conditional,
+    ])
       if (actor !== undefined && actor !== null && actor !== "") candidates.add(actor)
     const plan = planned.get(invocationSignature(invocation))
     const direct = mutationTargetIds(invocation.args)

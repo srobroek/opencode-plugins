@@ -63,6 +63,8 @@ export interface BdInvocation {
   prefix: string[]
   /** Actor values an earlier `export NAME=value` set, read in order (an `unset` drops it). */
   exported: Partial<Record<ActorVar, string>>
+  /** Actor values exported where they may not run (an `if` body, after `&&`/`||`); never counted as naming an actor. */
+  conditional: string[]
   /** Actor variables removed by an `env -u`/`env -i` wrapper. */
   unset: Partial<Record<ActorVar, true>>
 }
@@ -78,13 +80,16 @@ const ASSIGNMENT = /^[A-Za-z_]\w*=/
 const basename = (word: string): string => word.split("/").pop() ?? word
 
 /** Apply a command-position `export NAME=value` or `unset NAME` to the running actor state. */
-function applyActorBuiltin(state: ActorState, values: string[]): void {
+function applyActorBuiltin(state: ActorState, values: string[], conditional: string[] | undefined): void {
   const name = values[0]
   if (name !== "export" && name !== "unset") return
   for (const arg of values.slice(1)) {
     const variable = ACTOR_VARS.find((candidate) => arg === candidate || arg.startsWith(`${candidate}=`))
     if (variable === undefined) continue
-    if (name === "unset") delete state[variable]
+    // Where the command may not run, an export is only a possibility; an unset changes nothing we rely on.
+    if (conditional !== undefined) {
+      if (name === "export" && arg.includes("=")) conditional.push(arg.slice(variable.length + 1))
+    } else if (name === "unset") delete state[variable]
     else if (arg.includes("=")) state[variable] = arg.slice(variable.length + 1)
   }
 }
@@ -113,6 +118,13 @@ function readCommand(command: string, inherited: ActorState): { invocations: BdI
   let state: ActorState = { ...inherited }
   // A subshell `( … )` gets a copy of the actor state; its exports end with it.
   const scopes: ActorState[] = []
+  // Compound-command depth and whether this list continued after `&&` / `||`: exports there are conditional.
+  let compounds = 0
+  let andChained = false
+  let orChained = false
+  // Exports made inside an `&&` chain hold for the rest of that chain only.
+  let chainExports: Array<{ variable: ActorVar; value: string }> = []
+  const maybe: string[] = []
   // Substitutions not claimed by a command's own words (here-document bodies) run with the final state.
   const unclaimed = [...scan.substitutions]
 
@@ -122,6 +134,17 @@ function readCommand(command: string, inherited: ActorState): { invocations: BdI
         scopes.push(state)
         state = { ...state }
       } else if (item.operator === ")" && scopes.length > 0) state = scopes.pop() as ActorState
+      else if (item.operator === "&&") andChained = true
+      else if (item.operator === "||") orChained = true
+      else if (item.operator === ";" || item.operator === "\n" || item.operator === "&") {
+        for (const { variable, value } of chainExports) {
+          if (state[variable] === value) delete state[variable]
+          maybe.push(value)
+        }
+        chainExports = []
+        andChained = false
+        orChained = false
+      }
       continue
     }
 
@@ -148,8 +171,13 @@ function readCommand(command: string, inherited: ActorState): { invocations: BdI
     let skip = false
     while (k < words.length && words[k]?.quoted === false) {
       const value = words[k]?.value as string
-      if (OPENERS.has(value)) skip = HEADER_ONLY.has(value)
-      else if (CLOSERS.has(value)) skip = true
+      if (OPENERS.has(value)) {
+        compounds++
+        skip = HEADER_ONLY.has(value)
+      } else if (CLOSERS.has(value)) {
+        compounds = Math.max(0, compounds - 1)
+        skip = true
+      }
       else if (!BRANCHES.has(value) && value !== "!" && value !== "then" && value !== "do") break
       k++
       if (skip) break
@@ -161,7 +189,13 @@ function readCommand(command: string, inherited: ActorState): { invocations: BdI
     const assigned = words.slice(k, a).map((word) => word.value)
     const values = words.slice(a).map((word) => word.value)
     if (values.length === 0) continue
-    applyActorBuiltin(state, values)
+    const before = { ...state }
+    applyActorBuiltin(state, values, compounds > 0 || orChained ? maybe : undefined)
+    if (andChained)
+      for (const variable of ACTOR_VARS) {
+        const value = state[variable]
+        if (value !== undefined && value !== before[variable]) chainExports.push({ variable, value })
+      }
     const found = resolveBd(values, assigned)
     if (found !== undefined) {
       const scanned = scanGlobals(values, found.next)
@@ -173,6 +207,7 @@ function readCommand(command: string, inherited: ActorState): { invocations: BdI
           globals: scanned.globals,
           prefix: found.prefix,
           exported: { ...state },
+          conditional: [...maybe],
           unset: found.unset,
         })
       }
@@ -463,6 +498,7 @@ export function invocationFromArgv(args: string[]): BdInvocation | undefined {
     globals: scanned.globals,
     prefix: [],
     exported: {},
+    conditional: [],
     unset: {},
   }
 }
