@@ -1613,6 +1613,14 @@ var HINTS = {
   none: "There is no parley round for this session."
 };
 var RELOADED_HINT = "Do not ask again and do not use the question tool for this round. Carry on with other work or end your turn; the answers reach you as a message.";
+var AS_MESSAGE = {
+  delivered: "Delivered to you as a session message (read them there; they are not repeated here)",
+  sending: "Being delivered to you as a session message (it will arrive; do not ask again)",
+  dismissed: "Sent as a session message the user then dismissed (if it reached you, use it; otherwise go on without them)"
+};
+function asMessageLine(message) {
+  return `${AS_MESSAGE[message.status]}: ${message.ids.join(", ")}${message.error ? ` (${message.error})` : ""}`;
+}
 function summarise(result, questions) {
   const counts = `${result.answers.length} answer${result.answers.length === 1 ? "" : "s"}, ${result.pending.length} pending`;
   const head = [
@@ -1629,6 +1637,8 @@ function summarise(result, questions) {
   });
   if (result.pending.length > 0)
     lines.push(`Pending: ${result.pending.join(", ")}`);
+  if (result.as_message && result.as_message.ids.length > 0)
+    lines.push(asMessageLine(result.as_message));
   const hint = result.reason === RELOADED_REASON ? RELOADED_HINT : HINTS[result.status];
   if (hint)
     lines.push(hint);
@@ -1656,7 +1666,7 @@ function fileNote(answerID, file, save) {
     return `--- ${answerID}: ${file.name} ---
 ${clipped}`;
   }
-  const path = save?.(file);
+  const path = file.stored ?? save?.(file);
   return `${answerID}: ${file.name} (${mime}, ${file.size} B)${path ? ` saved to ${path}` : " not forwarded"}`;
 }
 function render(result, questions, save, format = "parley") {
@@ -1727,7 +1737,13 @@ function fromRoundDelivery(value) {
   if (isRecord4(value.notes))
     for (const [id, lines] of Object.entries(value.notes))
       notes[id] = strings(lines);
-  return { ...head, answerIDs: strings(value.answerIDs), notes, held: strings(value.held) };
+  return {
+    ...head,
+    answerIDs: strings(value.answerIDs),
+    notes,
+    held: strings(value.held),
+    ...value.started === true ? { started: true } : {}
+  };
 }
 function fromOutbox(value) {
   if (!isRecord4(value))
@@ -2011,7 +2027,15 @@ var resultOutput = {
     round: { type: "integer" },
     round_id: { type: "string" },
     answers: { type: "array", items: answer },
-    pending: { type: "array", items: { type: "string" } }
+    pending: { type: "array", items: { type: "string" } },
+    as_message: {
+      type: "object",
+      properties: {
+        status: { type: "string", enum: ["delivered", "sending", "dismissed"] },
+        ids: { type: "array", items: { type: "string" } },
+        error: { type: "string" }
+      }
+    }
   }
 };
 var endOutput = {
@@ -2217,7 +2241,7 @@ function uploadNotes(answer, save) {
     const inline = fileNote(answer.id, file, save);
     if (inline !== undefined)
       return inline;
-    const path = save?.(file);
+    const path = file.stored ?? save?.(file);
     return `${answer.id}: ${file.name} (${baseMime(file.mime)}, ${file.size} B)${path ? ` saved to ${path}` : " not forwarded"}`;
   });
 }
@@ -2265,6 +2289,7 @@ class Parley {
     this.presence = new Presence(deps.settings.heartbeatWindowMs);
     this.#now = deps.now ?? Date.now;
     this.rounds.subscribe((round) => {
+      this.#keepUploads(round);
       this.#plan(round);
       if (round.status !== "open")
         this.deps.closeUploads?.(round.id, round.updated);
@@ -2293,6 +2318,8 @@ class Parley {
       } else
         keep.push(round);
     }
+    for (const round of keep)
+      this.#loadUploads(round);
     this.rounds.restore(keep);
     for (const round of keep)
       if (round.status === "open")
@@ -2368,6 +2395,40 @@ class Parley {
       held: [...plan.held]
     };
   }
+  #keepUploads(round) {
+    const save = this.deps.save;
+    if (!save)
+      return;
+    for (const [id, answer] of round.answers) {
+      const files = answer.value?.files;
+      if (!Array.isArray(files) || !files.some((file) => file.data !== undefined && file.stored === undefined))
+        continue;
+      const kept = files.map((file) => {
+        if (file.data === undefined || file.stored !== undefined)
+          return file;
+        const stored = save(file, round.id);
+        return stored === undefined ? file : { ...file, stored };
+      });
+      round.answers.set(id, { ...answer, value: { ...answer.value, files: kept } });
+    }
+  }
+  #loadUploads(round) {
+    const read = this.deps.readUpload;
+    if (!read)
+      return;
+    for (const [id, answer] of round.answers) {
+      const files = answer.value?.files;
+      if (!Array.isArray(files))
+        continue;
+      const loaded = files.map((file) => {
+        if (file.data !== undefined || file.stored === undefined)
+          return file;
+        const data = read(file.stored);
+        return data === undefined ? file : { ...file, data };
+      });
+      round.answers.set(id, { ...answer, value: { ...answer.value, files: loaded } });
+    }
+  }
   #roundText(round, delivery) {
     const head = collect(round, { keep: true });
     const answers = delivery.answerIDs.map((id) => round.answers.get(id)).filter((answer) => answer !== undefined);
@@ -2394,50 +2455,70 @@ class Parley {
     this.#timers.add(timer);
   }
   #attemptRound(round) {
-    return this.#exclusive(round.id, async () => {
-      const delivery = round.delivery;
-      if (delivery?.status !== "pending" || this.#suspended)
-        return;
-      const generation = delivery.generation;
-      const error = await this.#post({
-        id: delivery.messageID,
-        sessionID: round.sessionID,
-        text: this.#roundText(round, delivery),
-        description: delivery.description
-      });
-      if (round.delivery !== delivery || delivery.generation !== generation)
-        return;
-      delivery.updated = this.#now();
-      if (error === undefined) {
-        for (const id of delivery.answerIDs)
-          if (round.answers.has(id))
-            round.delivered.add(id);
-        delivery.status = "sent";
-        delete delivery.error;
-      } else {
-        delivery.attempts++;
-        delivery.error = failure(error);
-        if (delivery.attempts >= MAX_ATTEMPTS)
-          delivery.status = "failed";
-      }
+    return this.#exclusive(round.id, () => this.#attemptRoundNow(round));
+  }
+  async#attemptRoundNow(round, again = false) {
+    const delivery = round.delivery;
+    if (!delivery || this.#suspended)
+      return;
+    if (delivery.status !== "pending" && !(again && delivery.status === "failed"))
+      return;
+    const before = delivery.status;
+    if (!delivery.started) {
+      delivery.started = true;
       this.#persist(round);
       await this.#writes;
-      if (delivery.status === "failed")
-        await this.deps.emit({
-          sessionID: round.sessionID,
-          roundID: round.id,
-          action: "opened",
-          status: "undelivered",
-          reason: delivery.error ?? ""
-        });
-      return error === undefined ? undefined : failure(error);
+    }
+    const generation = delivery.generation;
+    const error = await this.#post({
+      id: delivery.messageID,
+      sessionID: round.sessionID,
+      text: this.#roundText(round, delivery),
+      description: delivery.description
     });
+    if (round.delivery !== delivery || delivery.generation !== generation)
+      return;
+    delivery.updated = this.#now();
+    if (error === undefined) {
+      for (const id of delivery.answerIDs)
+        if (round.answers.has(id))
+          round.delivered.add(id);
+      delivery.status = "sent";
+      delete delivery.error;
+    } else {
+      delivery.attempts++;
+      delivery.error = failure(error);
+      if (delivery.attempts >= MAX_ATTEMPTS)
+        delivery.status = "failed";
+    }
+    this.#persist(round);
+    await this.#writes;
+    if (delivery.status === "failed" && before !== "failed")
+      await this.deps.emit({
+        sessionID: round.sessionID,
+        roundID: round.id,
+        action: "opened",
+        status: "undelivered",
+        reason: delivery.error ?? ""
+      });
+    if (delivery.status === "sent" && before === "failed")
+      await this.deps.emit({ sessionID: round.sessionID, roundID: round.id, action: "closed", status: round.status });
+    return error === undefined ? undefined : failure(error);
   }
   #consume(round, ids) {
     const delivery = round.delivery;
     if (!delivery || ids.length === 0 || delivery.status === "sent" || delivery.status === "dismissed")
       return;
     const taken = new Set(ids);
+    if (delivery.started) {
+      const held = delivery.held.filter((id) => !taken.has(id));
+      if (held.length === delivery.held.length)
+        return;
+      delivery.held = held;
+      delivery.updated = this.#now();
+      this.#persist(round);
+      return;
+    }
     const carried = delivery.answerIDs.filter((id) => !taken.has(id));
     const held = delivery.held.filter((id) => !taken.has(id));
     if (carried.length === delivery.answerIDs.length && held.length === delivery.held.length)
@@ -2832,9 +2913,21 @@ class Parley {
           reason: closing
         });
       return await this.#exclusive(round.id, async () => {
-        const result = collect(round, { ...options.ids === undefined ? {} : { ids: options.ids }, timedOut: outcome === "timeout" });
+        const delivery = round.delivery;
+        const owned = delivery?.started ? new Set(delivery.answerIDs) : new Set;
+        if (delivery?.started)
+          await this.#attemptRoundNow(round, true);
+        const scope = (options.ids ?? round.questions.map((question) => question.id)).filter((id) => !owned.has(id));
+        const result = collect(round, { ids: scope, timedOut: outcome === "timeout" });
         this.#consume(round, result.answers.map((answer) => answer.id));
-        return { ...result, channel: "tui" };
+        const messaged = [...owned].filter((id) => round.answers.has(id) && (options.ids === undefined || options.ids.includes(id)));
+        const now = round.delivery;
+        const as_message = messaged.length === 0 || !now ? undefined : {
+          status: now.status === "sent" ? "delivered" : now.status === "dismissed" ? "dismissed" : "sending",
+          ids: messaged,
+          ...now.status === "sent" || now.error === undefined ? {} : { error: now.error }
+        };
+        return { ...result, ...as_message ? { as_message } : {}, channel: "tui" };
       });
     } finally {
       stop();
@@ -2939,6 +3032,17 @@ function saveUpload(file, roundID, base = tmpdir()) {
   chmodSync(target, 384);
   return target;
 }
+function readUpload(stored, base = tmpdir()) {
+  const root = uploadRoot(base);
+  const target = path.resolve(stored);
+  if (!target.startsWith(root + path.sep))
+    return;
+  try {
+    return readFileSync(target).toString("base64");
+  } catch {
+    return;
+  }
+}
 function markClosed(roundID, at, base = tmpdir()) {
   const dir = roundDir(roundID, base);
   const marker = path.join(dir, CLOSED_MARKER);
@@ -3026,6 +3130,7 @@ var src_default = Plugin.define({
       save: (file, roundID) => saveUpload(file, roundID),
       closeUploads: (roundID, at) => markClosed(roundID, at),
       sweepUploads: (now) => sweepUploads(now),
+      readUpload: (stored) => readUpload(stored),
       warn: (message) => console.warn(message),
       deliver: async ({ id, sessionID, text, description }) => {
         await ctx.session.synthetic({ id, sessionID, text, description, delivery: "queue", resume: true });

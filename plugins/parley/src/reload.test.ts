@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test"
+import { mkdtempSync, rmSync, statSync } from "node:fs"
+import { tmpdir } from "node:os"
+import path from "node:path"
 import { summarise } from "./format.ts"
 import { MAX_ATTEMPTS, outboxKey } from "./outbox.ts"
 import { OPEN_TTL_MS, roundKey, type StoredRound, toStored } from "./persist.ts"
@@ -7,6 +10,7 @@ import { RELOADED_REASON, type Round } from "./rounds.ts"
 import type { RoundEvent } from "./rpc.ts"
 import { CLOSED_TTL_MS, Parley, type RoundStore, type SessionMessage, type Settings } from "./service.ts"
 import { submitRound } from "./submit.ts"
+import { readUpload, saveUpload, uploadRoot } from "./uploads.ts"
 
 const settings: Settings = { fallback: "none", questionTool: "takeover", disabled: false, heartbeatWindowMs: 30_000 }
 const questions: Question[] = [
@@ -45,6 +49,7 @@ function storeOver(data: Data, directory = "/repo", owns: (sessionID: string) =>
 }
 
 interface Extras {
+  readUpload?: (stored: string) => string | undefined
   now?: () => number
   save?: (file: { name: string }, roundID?: string) => string | undefined
   closeUploads?: (roundID: string, at: number) => void
@@ -81,6 +86,7 @@ function instance(store: RoundStore, extras: Extras = {}) {
     ...(extras.warn ? { warn: extras.warn } : {}),
     ...(extras.closeUploads ? { closeUploads: extras.closeUploads } : {}),
     ...(extras.sweepUploads ? { sweepUploads: extras.sweepUploads } : {}),
+    ...(extras.readUpload ? { readUpload: extras.readUpload } : {}),
   })
   service.attach({ clientID: "tui" })
   return { service, messages, posts, events }
@@ -257,23 +263,60 @@ describe("reload", () => {
     expect(next.posts[0]?.id).toBe(flaky.posts[0]?.id ?? "")
   })
 
-  test("parley_wait taking the answers cancels the pending message, so they arrive once", async () => {
+  test("before the message's first send, parley_wait may take the answers and the message is dropped", async () => {
     const { data, store, first, roundID } = await openRound()
-    const failing = instance(store, { deliver: down })
+    const hang = deferred()
+    const held = instance(store, { emit: (event) => (event.action === "closed" ? hang.promise : Promise.resolve()) })
     await first.service.suspend()
-    await failing.service.restore()
-    await failing.service.submit({ roundID, answers: both })
-    expect((await failing.service.wait({}, { sessionID: "s" })).result.answers).toHaveLength(2)
-    await failing.service.suspend()
+    await held.service.restore()
+    const submitting = held.service.submit({ roundID, answers: both })
+    await tick()
+    const { result } = await held.service.wait({}, { sessionID: "s" })
+    expect(result.answers.map((answer) => answer.id)).toEqual(["ssh.host", "ssh.port"])
+    expect(result.as_message).toBeUndefined()
+    hang.resolve()
+    await submitting
+    expect(held.posts).toEqual([])
     expect(stored(data, roundID).delivery).toBeUndefined()
-    const next = await reload(failing, store)
+    const next = await reload(held, store)
     expect(next.posts).toEqual([])
   })
 
-  test("a send that fails after parley_wait asked for the answers does not bring the message back", async () => {
-    const { data, store, first, roundID } = await openRound()
+  test("a host that admits the message and then fails the call: parley_wait finishes the send and reports the answers by id only", async () => {
+    const { store, first, roundID } = await openRound()
+    const admitted = new Set<string>()
+    const host = instance(store, {
+      deliver: async (message) => {
+        // The host records the message, then the call fails as if the acknowledgement were lost.
+        const known = admitted.has(message.id)
+        admitted.add(message.id)
+        if (!known) throw new Error("connection reset")
+      },
+    })
+    await first.service.suspend()
+    await host.service.restore()
+    const outcome = await host.service.submit({ roundID, answers: both })
+    expect(outcome.errors[0]).toContain("connection reset")
+    const { result } = await host.service.wait({}, { sessionID: "s" })
+    expect(result.answers).toEqual([])
+    expect(result.as_message).toEqual({ status: "delivered", ids: ["ssh.host", "ssh.port"] })
+    expect(new Set(host.posts.map((message) => message.id)).size).toBe(1)
+    expect(admitted.size).toBe(1)
+    expect((await host.service.wait({}, { sessionID: "s" })).result.answers).toEqual([])
+    const next = await reload(host, store)
+    expect(next.posts).toEqual([])
+  })
+
+  test("a wait while a started send is in flight takes its turn, then sends again under the same id and returns no answers", async () => {
+    const { store, first, roundID } = await openRound()
     const gate = deferred()
-    const slow = instance(store, { deliver: () => gate.promise })
+    let calls = 0
+    const slow = instance(store, {
+      deliver: () => {
+        calls++
+        return calls === 1 ? gate.promise : Promise.resolve()
+      },
+    })
     await first.service.suspend()
     await slow.service.restore()
     const submitting = slow.service.submit({ roundID, answers: both })
@@ -285,15 +328,14 @@ describe("reload", () => {
       return outcome
     })
     await tick()
-    // The wait collects only after the send in flight has settled.
     expect(waited).toBe(false)
     gate.reject(new Error("host down"))
     await submitting
-    expect((await waiting).result.answers.map((answer) => answer.id)).toEqual(["ssh.host", "ssh.port"])
-    await slow.service.suspend()
-    expect(stored(data, roundID).delivery).toBeUndefined()
-    const next = await reload(slow, store)
-    expect(next.posts).toEqual([])
+    const { result } = await waiting
+    expect(result.answers).toEqual([])
+    expect(result.as_message).toEqual({ status: "delivered", ids: ["ssh.host", "ssh.port"] })
+    expect(slow.posts.map((message) => message.id)).toEqual([slow.posts[0]?.id ?? "", slow.posts[0]?.id ?? ""])
+    expect(slow.messages).toHaveLength(1)
   })
 
   test("a send that succeeds while parley_wait waits leaves the wait nothing new", async () => {
@@ -308,25 +350,32 @@ describe("reload", () => {
     await tick()
     gate.resolve()
     await submitting
-    expect((await waiting).result.answers).toEqual([])
+    const { result } = await waiting
+    expect(result.answers).toEqual([])
+    expect(result.as_message).toEqual({ status: "delivered", ids: ["ssh.host", "ssh.port"] })
     expect(slow.messages).toHaveLength(1)
   })
 
-  test("a scoped parley_wait takes only its answers out of the message; the others are still sent", async () => {
+  test("a scoped parley_wait before the first send takes only its answers out of the message; the others are still sent", async () => {
     const { store, first, roundID } = await openRound()
-    const failing = instance(store, { deliver: down })
+    const hang = deferred()
+    const held = instance(store, { emit: (event) => (event.action === "closed" ? hang.promise : Promise.resolve()) })
     await first.service.suspend()
-    await failing.service.restore()
-    await failing.service.submit({ roundID, answers: both })
-    const scoped = (await failing.service.wait({ ids: ["ssh.host"] }, { sessionID: "s" })).result
+    await held.service.restore()
+    const submitting = held.service.submit({ roundID, answers: both })
+    await tick()
+    const scoped = (await held.service.wait({ ids: ["ssh.host"] }, { sessionID: "s" })).result
     expect(scoped.answers.map((answer) => answer.id)).toEqual(["ssh.host"])
-    const next = await reload(failing, store)
-    expect(next.messages).toHaveLength(1)
-    const text = next.messages[0]?.text ?? ""
+    hang.resolve()
+    await submitting
+    expect(held.messages).toHaveLength(1)
+    const text = held.messages[0]?.text ?? ""
     expect(text).toContain("Parley round 1: submitted — 1 answer, 0 pending")
     expect(text).toContain("ssh.port")
     expect(text).not.toContain("ssh.host")
-    expect((await next.service.wait({}, { sessionID: "s" })).result.answers).toEqual([])
+    const rest = (await held.service.wait({}, { sessionID: "s" })).result
+    expect(rest.answers).toEqual([])
+    expect(rest.as_message).toEqual({ status: "delivered", ids: ["ssh.port"] })
   })
 
   test("after the attempt limit the card comes back with the error, and sending it again uses the same message", async () => {
@@ -361,7 +410,7 @@ describe("reload", () => {
     expect(failing.messages).toHaveLength(1)
   })
 
-  test("dismissing a card that came back keeps its answers for parley_wait and sends nothing", async () => {
+  test("dismissing a card that came back sends nothing more, and parley_wait reports its answers by id only", async () => {
     const { store, first, roundID } = await openRound()
     const failing = instance(store, { deliver: down, retryDelaysMs: [0, 0] })
     await first.service.suspend()
@@ -382,7 +431,9 @@ describe("reload", () => {
     const next = await reload(failing, store)
     expect(next.posts).toEqual([])
     expect(next.service.pending({}).rounds).toEqual([])
-    expect((await next.service.wait({}, { sessionID: "s" })).result.answers).toHaveLength(2)
+    const { result } = await next.service.wait({}, { sessionID: "s" })
+    expect(result.answers).toEqual([])
+    expect(result.as_message).toMatchObject({ status: "dismissed", ids: ["ssh.host", "ssh.port"] })
   })
 
   test("dismissing a restored round tells the session", async () => {
@@ -413,12 +464,19 @@ describe("reload", () => {
     expect(messages).toEqual([])
   })
 
-  test("a failed delivery keeps the answers for parley_wait", async () => {
+  test("after a failed send, parley_wait retries it and reports the answers as on their way, never as answers", async () => {
     const { store, first, roundID } = await openRound()
     const second = await reload(first, store, { deliver: down })
     const outcome = await second.service.submit({ roundID, answers: both })
     expect(outcome.errors[0]).toContain("host down")
-    expect((await second.service.wait({}, { sessionID: "s" })).result.answers).toHaveLength(2)
+    const { result } = await second.service.wait({}, { sessionID: "s" })
+    expect(result.answers).toEqual([])
+    expect(result.as_message).toMatchObject({ status: "sending", ids: ["ssh.host", "ssh.port"] })
+    expect(result.as_message?.error).toContain("host down")
+    expect(second.posts).toHaveLength(2)
+    const next = await reload(second, store)
+    expect(next.messages).toHaveLength(1)
+    expect(next.messages[0]?.id).toBe(second.posts[0]?.id ?? "")
   })
 
   test("a suspended question takeover fails the call instead of reporting an answer", async () => {
@@ -466,7 +524,9 @@ describe("uploads after a reload", () => {
         return `/tmp/parley/${file.name}`
       },
     })
-    expect(saved).toEqual([second.service.rounds.list()[0]?.id])
+    // Each upload is copied once, under its round, when it arrives; the message names the copy.
+    const id = second.service.rounds.list()[0]?.id
+    expect(saved).toEqual([id, id])
     const text = second.messages[0]?.text ?? ""
     expect(text).toContain("shot: a.png (image/png, 8 B) saved to /tmp/parley/a.png")
     expect(text).toContain("--- notes: n.txt ---\nhello notes")
@@ -482,6 +542,52 @@ describe("uploads after a reload", () => {
     const waited = (await second.service.wait({}, { sessionID: "s" })).result
     expect(waited.answers.map((answer) => answer.id)).toEqual(["shot", "notes"])
     expect(JSON.stringify(waited.answers)).toContain(Buffer.from("hello notes").toString("base64"))
+  })
+})
+
+describe("uploads submitted before the final submit", () => {
+  test("a non-final upload survives a reload: storage keeps a private copy's path, and a later wait returns the contents", async () => {
+    const base = mkdtempSync(path.join(tmpdir(), "parley-reload-"))
+    try {
+      const data: Data = new Map()
+      const extras: Extras = {
+        save: (file, roundID) => saveUpload(file as never, roundID, base),
+        readUpload: (copy) => readUpload(copy, base),
+      }
+      const fileQuestions: Question[] = [
+        { id: "key", title: "Key", kind: "ask_file" },
+        { id: "ok", title: "OK", kind: "confirm", recommended: "yes" },
+      ]
+      const first = instance(storeOver(data), extras)
+      const asking = first.service.ask({ questions: fileQuestions }, { sessionID: "s" })
+      await tick()
+      const roundID = first.service.pending({}).rounds[0]?.roundID ?? ""
+      const bytes = Buffer.from("ssh-ed25519 AAAA").toString("base64")
+      await first.service.submit({
+        roundID,
+        answers: [{ id: "key", status: "answered", value: { files: [{ name: "id.pub", mime: "application/octet-stream", data: bytes }] } }],
+        final: false,
+      })
+      await first.service.suspend()
+      await asking
+      const record = JSON.stringify(stored(data, roundID))
+      expect(record).not.toContain(bytes)
+      const files = (answer: { value?: unknown } | undefined) => (answer?.value as { files?: Array<{ stored?: string; data?: string }> } | undefined)?.files ?? []
+      const copy = files(stored(data, roundID).answers[0])[0]?.stored ?? ""
+      expect(copy.startsWith(uploadRoot(base))).toBe(true)
+      expect(statSync(copy).mode & 0o777).toBe(0o600)
+
+      const next = instance(storeOver(data), extras)
+      await next.service.restore()
+      const waiting = next.service.wait({}, { sessionID: "s" })
+      await tick()
+      await next.service.submit({ roundID, answers: [{ id: "ok", status: "accepted" }] })
+      const { result } = await waiting
+      const key = result.answers.find((answer) => answer.id === "key")
+      expect(files(key)[0]?.data).toBe(bytes)
+    } finally {
+      rmSync(base, { recursive: true, force: true })
+    }
   })
 })
 
@@ -696,6 +802,14 @@ describe("guidance after a reload", () => {
   test("a plain unavailable result keeps the no-UI guidance", () => {
     const text = summarise({ status: "unavailable", reason: "no_tui", answers: [], pending: [] }, questions)
     expect(text).toContain("No parley UI is available")
+  })
+
+  test("answers that reach the agent as a message are named by id, without content", () => {
+    const text = summarise(
+      { status: "submitted", round: 1, answers: [], pending: [], as_message: { status: "delivered", ids: ["ssh.host", "ssh.port"] } },
+      questions,
+    )
+    expect(text).toContain("Delivered to you as a session message (read them there; they are not repeated here): ssh.host, ssh.port")
   })
 })
 

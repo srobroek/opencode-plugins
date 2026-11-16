@@ -303,7 +303,7 @@ export default Plugin.define({
             message:
               view.undelivered === undefined
                 ? "The server lost this round. You can still send your answers to the agent as a message."
-                : "Sending them as a message failed. You can try again, or dismiss them (the agent can still collect them with parley_wait).",
+                : "Sending them as a message failed. You can try again, or dismiss them.",
             label: { confirm: "Send these answers as a message", cancel: "Dismiss" },
           })) === true,
         dismiss: async () => {

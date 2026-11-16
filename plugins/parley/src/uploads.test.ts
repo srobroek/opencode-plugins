@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test"
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
-import { CLOSED_MARKER, markClosed, saveUpload, sweepUploads, UNMARKED_TTL_MS, UPLOAD_TTL_MS, uploadRoot } from "./uploads.ts"
+import { CLOSED_MARKER, markClosed, readUpload, saveUpload, sweepUploads, UNMARKED_TTL_MS, UPLOAD_TTL_MS, uploadRoot } from "./uploads.ts"
 
 const bases: string[] = []
 const base = () => {
@@ -86,4 +86,14 @@ test("marking a round without uploads creates nothing, and sweeping a missing ro
   markClosed("rnd_none", 1, dir)
   expect(existsSync(path.join(uploadRoot(dir), "rnd_none"))).toBe(false)
   sweepUploads(Date.now(), dir)
+})
+
+test("a private copy reads back as base64; paths outside the upload root and missing copies read as nothing", () => {
+  const dir = base()
+  const copy = saveUpload(file("a.txt", "hello"), "rnd_1", dir) ?? ""
+  expect(readUpload(copy, dir)).toBe(Buffer.from("hello").toString("base64"))
+  expect(readUpload(path.join(dir, "elsewhere.txt"), dir)).toBeUndefined()
+  expect(readUpload(path.join(uploadRoot(dir), "..", "escape.txt"), dir)).toBeUndefined()
+  rmSync(path.dirname(copy), { recursive: true })
+  expect(readUpload(copy, dir)).toBeUndefined()
 })

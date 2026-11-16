@@ -78,7 +78,10 @@ async function attachTui(current: () => Parley) {
       panel: { current: () => undefined, open: () => true, close: () => {} },
       toast: { show: (input: { message: string; variant?: string }) => void toasts.push(input) },
       dialog: { confirm: async () => false },
-      slot: (config: (typeof slots)[number]) => (slots.push(config), () => {}),
+      slot: (config: (typeof slots)[number]) => {
+        slots.push(config)
+        return () => {}
+      },
     },
     attention: { notify: async () => ({ ok: true }) },
   } as unknown as Plugin.Context

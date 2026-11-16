@@ -4826,7 +4826,7 @@ var tui_default = Plugin.define({
         }),
         choose: async () => await context.ui.dialog.confirm({
           title: view.undelivered === undefined ? "This round is gone" : "Your answers did not reach the agent",
-          message: view.undelivered === undefined ? "The server lost this round. You can still send your answers to the agent as a message." : "Sending them as a message failed. You can try again, or dismiss them (the agent can still collect them with parley_wait).",
+          message: view.undelivered === undefined ? "The server lost this round. You can still send your answers to the agent as a message." : "Sending them as a message failed. You can try again, or dismiss them.",
           label: {
             confirm: "Send these answers as a message",
             cancel: "Dismiss"

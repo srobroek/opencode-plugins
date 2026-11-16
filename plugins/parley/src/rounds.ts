@@ -47,6 +47,13 @@ export interface RoundView {
   readonly undelivered?: string
 }
 
+/** Answers that reach the agent as a session message rather than in this result: ids and state, no content. */
+export interface AsMessage {
+  readonly status: "delivered" | "sending" | "dismissed"
+  readonly ids: readonly string[]
+  readonly error?: string
+}
+
 export interface RoundResult {
   readonly status: ResultStatus
   readonly reason?: string
@@ -54,6 +61,7 @@ export interface RoundResult {
   readonly round_id?: string
   readonly answers: Answer[]
   readonly pending: string[]
+  readonly as_message?: AsMessage
 }
 
 export interface OpenInput {

@@ -33,6 +33,11 @@ export interface RoundDelivery extends DeliveryBase {
   readonly notes: Record<string, string[]>
   /** Answers with uploads that could not be saved: left for parley_wait. */
   held: string[]
+  /**
+   * Set, and saved, before the first send. The host may have admitted any attempt, so from then on the
+   * message owns `answerIDs`: parley_wait finishes the send instead of returning them.
+   */
+  started?: boolean
 }
 
 /** A fallback message the TUI asked for: its text is fixed. */
@@ -85,7 +90,13 @@ export function fromRoundDelivery(value: unknown): RoundDelivery | undefined {
   if (!head) return undefined
   const notes: Record<string, string[]> = {}
   if (isRecord(value.notes)) for (const [id, lines] of Object.entries(value.notes)) notes[id] = strings(lines)
-  return { ...head, answerIDs: strings(value.answerIDs), notes, held: strings(value.held) }
+  return {
+    ...head,
+    answerIDs: strings(value.answerIDs),
+    notes,
+    held: strings(value.held),
+    ...(value.started === true ? { started: true } : {}),
+  }
 }
 
 /** Reads a stored fallback delivery; anything unusable is undefined. Never throws. */

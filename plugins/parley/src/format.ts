@@ -1,7 +1,7 @@
 import { type Answer, describeAnswer, type FileValue, publicAnswer } from "./answers.ts"
 import { NOTES_HINT } from "./notes.ts"
 import type { Question } from "./questions.ts"
-import { RELOADED_REASON, type RoundResult } from "./rounds.ts"
+import { type AsMessage, RELOADED_REASON, type RoundResult } from "./rounds.ts"
 import { nativeSummary } from "./takeover.ts"
 
 export interface ToolResult extends RoundResult {
@@ -25,6 +25,16 @@ const HINTS: Partial<Record<ToolResult["status"], string>> = {
 const RELOADED_HINT =
   "Do not ask again and do not use the question tool for this round. Carry on with other work or end your turn; the answers reach you as a message."
 
+const AS_MESSAGE: Record<AsMessage["status"], string> = {
+  delivered: "Delivered to you as a session message (read them there; they are not repeated here)",
+  sending: "Being delivered to you as a session message (it will arrive; do not ask again)",
+  dismissed: "Sent as a session message the user then dismissed (if it reached you, use it; otherwise go on without them)",
+}
+
+function asMessageLine(message: AsMessage) {
+  return `${AS_MESSAGE[message.status]}: ${message.ids.join(", ")}${message.error ? ` (${message.error})` : ""}`
+}
+
 export function summarise(result: ToolResult, questions: readonly Question[]): string {
   const counts = `${result.answers.length} answer${result.answers.length === 1 ? "" : "s"}, ${result.pending.length} pending`
   const head = [
@@ -40,6 +50,7 @@ export function summarise(result: ToolResult, questions: readonly Question[]): s
     lines.push(describe(question, answer, questions.indexOf(question as Question), index))
   })
   if (result.pending.length > 0) lines.push(`Pending: ${result.pending.join(", ")}`)
+  if (result.as_message && result.as_message.ids.length > 0) lines.push(asMessageLine(result.as_message))
   const hint = result.reason === RELOADED_REASON ? RELOADED_HINT : HINTS[result.status]
   if (hint) lines.push(hint)
   if (result.answers.some((answer) => answer.note !== undefined)) lines.push(NOTES_HINT)
@@ -68,7 +79,7 @@ export function fileNote(answerID: string, file: FileValue, save?: (file: FileVa
     const clipped = text.length > MAX_INLINE_TEXT ? `${text.slice(0, MAX_INLINE_TEXT)}\n… (truncated)` : text
     return `--- ${answerID}: ${file.name} ---\n${clipped}`
   }
-  const path = save?.(file)
+  const path = file.stored ?? save?.(file)
   return `${answerID}: ${file.name} (${mime}, ${file.size} B)${path ? ` saved to ${path}` : " not forwarded"}`
 }
 

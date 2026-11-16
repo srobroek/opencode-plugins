@@ -83,15 +83,20 @@ returns at once, so a skill can fall back to the `question` tool or a plain
 markdown round in chat.
 
 Uploaded images reach the model as image content. Text files are inlined in the
-result. Other files are written to a private temporary directory on the server
-(0700 directories, 0600 files) and the path is reported. Each upload gets its
-own directory under `parley/<round id>/`, so two files with the same name never
-overwrite each other, and the file keeps its original name. When the round
+result. Other files are reported by the path of their private copy. Every
+upload, final or not, is copied to a private temporary directory on the server
+(0700 directories, 0600 files) as soon as it is submitted, and parley's storage
+keeps only that path, not the bytes. After a reload, waits and messages read the
+upload back from the copy. Each upload gets its own directory under
+`parley/<round id>/`, so two files with the same name never overwrite each
+other, and the file keeps its original name. When the round
 closes, parley writes a `.closed` marker with the time into the round's
 directory. The files stay for 24 hours after that, even after the round record
 is pruned (30 minutes after it closes), because the agent may read them on a
 later turn. A round directory without a marker is removed after 48 hours with
-no change.
+no change. Cleanup is lazy: parley sweeps expired files when it starts and every
+5 minutes while it runs, so expired files stay on disk while the plugin is not
+loaded.
 
 ## Phase three kinds
 
@@ -316,14 +321,20 @@ and open ones after 24 hours.
   same write as the closure. A reload at any point after that sends it on
   restore. The answers are marked delivered only after the host admits the
   message.
-- Collecting answers and sending the message take turns per round. If the model
-  calls `parley_wait` while the message is being sent, the wait gets the answers
-  the message did not carry. Answers the wait returns (all of them, or the ids
-  it asked for) leave the message, which then carries the rest.
+- Collecting answers and sending the message take turns per round. Until the
+  first send starts, `parley_wait` may take the answers: all of them, or the ids
+  it asked for. Those answers leave the message. The message then carries the
+  rest, and it is dropped when nothing is left.
+- Once a send has started, the message owns its answers, because the host may
+  have admitted it even when the call failed. `parley_wait` then never returns
+  them as answers. It first sends the message again under the same id (a copy
+  the host already admitted is not repeated) and reports the answers in
+  `as_message`: `status` (`delivered`, `sending` with the error, or
+  `dismissed`) and their `ids`, with no content.
 - A failed send is retried after 2 s and 8 s. After 3 failed attempts the card
   comes back with the user's answers and the error, and the TUI offers to send
-  the answers as a message or dismiss them. A dismissed message is not sent,
-  and its answers stay for `parley_wait`.
+  the answers as a message or dismiss them. A dismissed message is not sent
+  again, and `parley_wait` reports its answers as `dismissed`.
 - The TUI notices the new server instance and fetches the round again; the
   draft is kept. A round the server no longer lists after a reload stays on the
   screen with its draft until you act. If a submit fails with `unknown round`,

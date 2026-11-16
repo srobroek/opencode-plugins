@@ -40,6 +40,21 @@ export function saveUpload(file: FileValue, roundID: string | undefined, base = 
   return target
 }
 
+/**
+ * Reads a private copy back as base64. Only paths inside the upload root are read, and a copy that is
+ * gone (swept, or a missing file) is undefined. Never throws.
+ */
+export function readUpload(stored: string, base = tmpdir()): string | undefined {
+  const root = uploadRoot(base)
+  const target = path.resolve(stored)
+  if (!target.startsWith(root + path.sep)) return undefined
+  try {
+    return readFileSync(target).toString("base64")
+  } catch {
+    return undefined
+  }
+}
+
 /** Records when a round closed, once, if it has uploads. Its files are kept `UPLOAD_TTL_MS` from then. */
 export function markClosed(roundID: string, at: number, base = tmpdir()) {
   const dir = roundDir(roundID, base)

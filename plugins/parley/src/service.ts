@@ -91,6 +91,8 @@ export interface Deps {
   readonly closeUploads?: (roundID: string, at: number) => void
   /** Removes uploads whose round closed more than 24 h ago. */
   readonly sweepUploads?: (now: number) => void
+  /** Reads back a private upload copy (`FileValue.stored`) as base64, or undefined when it is gone. */
+  readonly readUpload?: (stored: string) => string | undefined
   /** Waits between automatic retries of a round's message; defaults to `RETRY_DELAYS_MS`. */
   readonly retryDelaysMs?: readonly number[]
   readonly warn?: (message: string) => void
@@ -153,7 +155,7 @@ function uploadNotes(answer: Answer, save?: Save): string[] {
   return withData(answer).map((file) => {
     const inline = fileNote(answer.id, file, save)
     if (inline !== undefined) return inline
-    const path = save?.(file)
+    const path = file.stored ?? save?.(file)
     return `${answer.id}: ${file.name} (${baseMime(file.mime)}, ${file.size} B)${path ? ` saved to ${path}` : " not forwarded"}`
   })
 }
@@ -218,6 +220,9 @@ export class Parley {
     this.presence = new Presence(deps.settings.heartbeatWindowMs)
     this.#now = deps.now ?? Date.now
     this.rounds.subscribe((round) => {
+      // Uploads are copied to the private store as they arrive, final or not, so the saved round can
+      // reference them instead of holding (and losing) their bytes.
+      this.#keepUploads(round)
       // The message is planned in the same call that saves the closure, so one write holds both.
       this.#plan(round)
       if (round.status !== "open") this.deps.closeUploads?.(round.id, round.updated)
@@ -246,6 +251,7 @@ export class Parley {
         this.deps.closeUploads?.(round.id, now)
       } else keep.push(round)
     }
+    for (const round of keep) this.#loadUploads(round)
     this.rounds.restore(keep)
     for (const round of keep) if (round.status === "open") this.#orphans.add(round.id)
     this.deps.sweepUploads?.(now)
@@ -328,6 +334,38 @@ export class Parley {
     }
   }
 
+  /** Writes each upload that has bytes but no private copy yet, and records the copy on the answer. */
+  #keepUploads(round: Round) {
+    const save = this.deps.save
+    if (!save) return
+    for (const [id, answer] of round.answers) {
+      const files = (answer.value as { files?: unknown } | undefined)?.files
+      if (!Array.isArray(files) || !files.some((file: FileValue) => file.data !== undefined && file.stored === undefined)) continue
+      const kept = (files as FileValue[]).map((file) => {
+        if (file.data === undefined || file.stored !== undefined) return file
+        const stored = save(file, round.id)
+        return stored === undefined ? file : { ...file, stored }
+      })
+      round.answers.set(id, { ...answer, value: { ...(answer.value as object), files: kept } })
+    }
+  }
+
+  /** A restored round's answers reference their uploads' private copies; their bytes are read back from there. */
+  #loadUploads(round: Round) {
+    const read = this.deps.readUpload
+    if (!read) return
+    for (const [id, answer] of round.answers) {
+      const files = (answer.value as { files?: unknown } | undefined)?.files
+      if (!Array.isArray(files)) continue
+      const loaded = (files as FileValue[]).map((file) => {
+        if (file.data !== undefined || file.stored === undefined) return file
+        const data = read(file.stored)
+        return data === undefined ? file : { ...file, data }
+      })
+      round.answers.set(id, { ...answer, value: { ...(answer.value as object), files: loaded } })
+    }
+  }
+
   #roundText(round: Round, delivery: RoundDelivery) {
     const head = collect(round, { keep: true })
     const answers = delivery.answerIDs.map((id) => round.answers.get(id)).filter((answer): answer is Answer => answer !== undefined)
@@ -354,52 +392,79 @@ export class Parley {
     this.#timers.add(timer)
   }
 
-  /**
-   * One attempt at a round's message. The answers are marked delivered only once the host admits it. A
-   * result for a delivery that changed or went while it was being sent is ignored. After `MAX_ATTEMPTS`
-   * failures the round goes back to the user, who can send it again or dismiss it.
-   */
+  /** One attempt at a round's message, in turn with the round's other sends and collections. */
   #attemptRound(round: Round): Promise<string | undefined> {
-    return this.#exclusive(round.id, async () => {
-      const delivery = round.delivery
-      if (delivery?.status !== "pending" || this.#suspended) return undefined
-      const generation = delivery.generation
-      const error = await this.#post({
-        id: delivery.messageID,
-        sessionID: round.sessionID,
-        text: this.#roundText(round, delivery),
-        description: delivery.description,
-      })
-      if (round.delivery !== delivery || delivery.generation !== generation) return undefined
-      delivery.updated = this.#now()
-      if (error === undefined) {
-        for (const id of delivery.answerIDs) if (round.answers.has(id)) round.delivered.add(id)
-        delivery.status = "sent"
-        delete delivery.error
-      } else {
-        delivery.attempts++
-        delivery.error = failure(error)
-        if (delivery.attempts >= MAX_ATTEMPTS) delivery.status = "failed"
-      }
-      this.#persist(round)
-      await this.#writes
-      if (delivery.status === "failed")
-        await this.deps.emit({
-          sessionID: round.sessionID,
-          roundID: round.id,
-          action: "opened",
-          status: "undelivered",
-          reason: delivery.error ?? "",
-        })
-      return error === undefined ? undefined : failure(error)
-    })
+    return this.#exclusive(round.id, () => this.#attemptRoundNow(round))
   }
 
-  /** The agent took these answers through a tool call: the round's message stops carrying them. */
+  /**
+   * One attempt at a round's message; the caller holds the round's turn. The delivery is marked started,
+   * and saved, before the first send: the host may admit any attempt, so from then on the message owns
+   * its answers. They are marked delivered only once the host admits it. A result for a delivery that
+   * changed or went while it was being sent is ignored. After `MAX_ATTEMPTS` failures the round goes back
+   * to the user. `again` also sends a message that already failed (parley_wait finishing it).
+   */
+  async #attemptRoundNow(round: Round, again = false): Promise<string | undefined> {
+    const delivery = round.delivery
+    if (!delivery || this.#suspended) return undefined
+    if (delivery.status !== "pending" && !(again && delivery.status === "failed")) return undefined
+    const before = delivery.status
+    if (!delivery.started) {
+      delivery.started = true
+      this.#persist(round)
+      await this.#writes
+    }
+    const generation = delivery.generation
+    const error = await this.#post({
+      id: delivery.messageID,
+      sessionID: round.sessionID,
+      text: this.#roundText(round, delivery),
+      description: delivery.description,
+    })
+    if (round.delivery !== delivery || delivery.generation !== generation) return undefined
+    delivery.updated = this.#now()
+    if (error === undefined) {
+      for (const id of delivery.answerIDs) if (round.answers.has(id)) round.delivered.add(id)
+      delivery.status = "sent"
+      delete delivery.error
+    } else {
+      delivery.attempts++
+      delivery.error = failure(error)
+      if (delivery.attempts >= MAX_ATTEMPTS) delivery.status = "failed"
+    }
+    this.#persist(round)
+    await this.#writes
+    if (delivery.status === "failed" && before !== "failed")
+      await this.deps.emit({
+        sessionID: round.sessionID,
+        roundID: round.id,
+        action: "opened",
+        status: "undelivered",
+        reason: delivery.error ?? "",
+      })
+    // A card that was back with the user goes away once its message is in.
+    if (delivery.status === "sent" && before === "failed")
+      await this.deps.emit({ sessionID: round.sessionID, roundID: round.id, action: "closed", status: round.status })
+    return error === undefined ? undefined : failure(error)
+  }
+
+  /**
+   * The agent took these answers through a tool call. Before the first send the round's message stops
+   * carrying them; once a send started the message owns its answers (they never reach this point), and
+   * only held answers, which no message carries, leave the list.
+   */
   #consume(round: Round, ids: readonly string[]) {
     const delivery = round.delivery
     if (!delivery || ids.length === 0 || delivery.status === "sent" || delivery.status === "dismissed") return
     const taken = new Set(ids)
+    if (delivery.started) {
+      const held = delivery.held.filter((id) => !taken.has(id))
+      if (held.length === delivery.held.length) return
+      delivery.held = held
+      delivery.updated = this.#now()
+      this.#persist(round)
+      return
+    }
     const carried = delivery.answerIDs.filter((id) => !taken.has(id))
     const held = delivery.held.filter((id) => !taken.has(id))
     if (carried.length === delivery.answerIDs.length && held.length === delivery.held.length) return
@@ -847,12 +912,28 @@ export class Parley {
           status: closing === TIMEOUT ? "timeout" : "cancelled",
           reason: closing,
         })
-      // Collected under the round's lock: a message being sent finishes first, and whatever the agent takes
-      // here leaves the round's message, so no answer reaches it twice.
+      // Collected in turn with the round's message, so no answer reaches the agent twice. Before the
+      // message's first send, whatever the agent takes here leaves the message. Once a send started, the
+      // message owns its answers: the wait finishes the send (same id, so a copy the host already admitted
+      // is not repeated) and reports those answers by id only.
       return await this.#exclusive(round.id, async () => {
-        const result = collect(round, { ...(options.ids === undefined ? {} : { ids: options.ids }), timedOut: outcome === "timeout" })
+        const delivery = round.delivery
+        const owned = delivery?.started ? new Set(delivery.answerIDs) : new Set<string>()
+        if (delivery?.started) await this.#attemptRoundNow(round, true)
+        const scope = (options.ids ?? round.questions.map((question) => question.id)).filter((id) => !owned.has(id))
+        const result = collect(round, { ids: scope, timedOut: outcome === "timeout" })
         this.#consume(round, result.answers.map((answer) => answer.id))
-        return { ...result, channel: "tui" as const }
+        const messaged = [...owned].filter((id) => round.answers.has(id) && (options.ids === undefined || options.ids.includes(id)))
+        const now = round.delivery
+        const as_message =
+          messaged.length === 0 || !now
+            ? undefined
+            : {
+                status: now.status === "sent" ? ("delivered" as const) : now.status === "dismissed" ? ("dismissed" as const) : ("sending" as const),
+                ids: messaged,
+                ...(now.status === "sent" || now.error === undefined ? {} : { error: now.error }),
+              }
+        return { ...result, ...(as_message ? { as_message } : {}), channel: "tui" as const }
       })
     } finally {
       stop()
