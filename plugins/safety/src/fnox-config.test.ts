@@ -1,8 +1,8 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { providerSetting, providersOfType, readProviderTypes } from "./fnox-config.ts"
+import { readConfigSnapshot, readProviderTypes } from "./fnox-config.ts"
 import { VALUE_STORE_TYPES } from "./op-guard.ts"
 
 const base = join(realpathSync(tmpdir()), "opencode")
@@ -154,43 +154,80 @@ describe("readProviderTypes", () => {
   })
 })
 
-describe("providersOfType", () => {
-  test("lists the providers every definition of which has the type, across the path and the global config", () => {
+describe("readConfigSnapshot", () => {
+  test("lists the providers every definition of which has a type, across the path and the global config", () => {
     const { home, cwd } = tree({
       "proj/fnox.toml": provider("proj", "1password") + provider("keys", "age"),
+      "proj/sub/fnox.local.toml": provider("mixed", "1password"),
+      "proj/fnox.local.toml": provider("mixed", "age"),
       "home/.config/fnox/config.toml": provider("shared", "1password"),
     })
-    expect(providersOfType("1password", cwd, undefined, home)?.sort()).toEqual(["proj", "shared"])
-  })
-
-  test("leaves out a provider whose definitions disagree", () => {
-    const { home, cwd } = tree({
-      "proj/fnox.toml": provider("op", "1password"),
-      "proj/sub/fnox.local.toml": provider("op", "age"),
-    })
-    expect(providersOfType("1password", cwd, undefined, home)).toEqual([])
+    const snapshot = readConfigSnapshot(cwd, undefined, home)
+    expect(snapshot?.ofType("1password").sort()).toEqual(["proj", "shared"])
+    expect([snapshot?.typeOf("keys"), snapshot?.typeOf("mixed")]).toEqual(["age", "1password"])
   })
 
   test("reads an explicit config with the global config only", () => {
     const { home, cwd } = tree({ "proj/sub/other.toml": provider("a", "1password"), "proj/fnox.toml": provider("b", "1password") })
-    expect(providersOfType("1password", cwd, "other.toml", home)).toEqual(["a"])
+    expect(readConfigSnapshot(cwd, join(cwd, "other.toml"), home)?.ofType("1password")).toEqual(["a"])
   })
 
-  test("is unknown when a config does not parse or has an import", () => {
+  test("is unknown when a config does not parse, has an import or the explicit file is missing", () => {
     const { home, cwd } = tree({ "proj/sub/fnox.toml": "[providers\n", "proj/sub/imp.toml": `import = ["x"]\n` })
-    expect([providersOfType("1password", cwd, undefined, home), providersOfType("1password", cwd, "imp.toml", home)]).toEqual([
-      undefined,
-      undefined,
-    ])
+    expect([
+      readConfigSnapshot(cwd, undefined, home),
+      readConfigSnapshot(cwd, join(cwd, "imp.toml"), home),
+      readConfigSnapshot(cwd, join(cwd, "missing.toml"), home),
+    ]).toEqual([undefined, undefined, undefined])
   })
-})
 
-describe("providerSetting", () => {
   test("gives a setting every definition agrees on, and nothing when one differs or lacks it", () => {
     const { home, cwd } = tree({
       "proj/fnox.toml": '[providers.a]\ntype = "1password"\nvault = "dev"\n[providers.b]\ntype = "1password"\nvault = "x"\n[providers.c]\ntype = "1password"\n',
       "proj/sub/fnox.local.toml": '[providers.a]\ntype = "1password"\nvault = "dev"\n[providers.b]\ntype = "1password"\nvault = "y"\n',
     })
-    expect(["a", "b", "c"].map((name) => providerSetting(name, "vault", cwd, undefined, home))).toEqual(["dev", undefined, undefined])
+    const snapshot = readConfigSnapshot(cwd, undefined, home)
+    expect(["a", "b", "c"].map((name) => snapshot?.setting(name, "vault"))).toEqual(["dev", undefined, undefined])
+  })
+
+  describe("its digest", () => {
+    const digest = (cwd: string, home: string, config?: string) => readConfigSnapshot(cwd, config, home)?.digest
+
+    test("is the same for unchanged files", () => {
+      const { home, cwd } = tree({ "proj/fnox.toml": provider("host", "age") })
+      expect(digest(cwd, home)).toBe(digest(cwd, home) as string)
+    })
+
+    test("changes when a file's content changes", () => {
+      const { home, cwd } = tree({ "proj/fnox.toml": provider("host", "age") })
+      const before = digest(cwd, home)
+      writeFileSync(join(cwd, "../fnox.toml"), provider("host", "plain"))
+      expect(digest(cwd, home)).not.toBe(before as string)
+    })
+
+    test("changes when a config file appears", () => {
+      const { home, cwd } = tree({ "proj/fnox.toml": provider("host", "age") })
+      const before = digest(cwd, home)
+      writeFileSync(join(cwd, "fnox.local.toml"), "")
+      expect(digest(cwd, home)).not.toBe(before as string)
+    })
+
+    test("changes when a symlinked config is pointed at another file with the same content", () => {
+      const { home, cwd } = tree({ "a.toml": provider("host", "age"), "b.toml": provider("host", "age") })
+      const link = join(cwd, "fnox.toml")
+      symlinkSync(join(cwd, "../../a.toml"), link)
+      const before = digest(cwd, home)
+      rmSync(link)
+      symlinkSync(join(cwd, "../../b.toml"), link)
+      expect(digest(cwd, home)).not.toBe(before as string)
+    })
+
+    test("covers the global config next to an explicit file", () => {
+      const { home, cwd } = tree({ "proj/sub/x.toml": provider("host", "age") })
+      const before = digest(cwd, home, join(cwd, "x.toml"))
+      mkdirSync(join(home, ".config/fnox"), { recursive: true })
+      writeFileSync(join(home, ".config/fnox/config.toml"), provider("host", "plain"))
+      expect(digest(cwd, home, join(cwd, "x.toml"))).not.toBe(before as string)
+    })
   })
 })

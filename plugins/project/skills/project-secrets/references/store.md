@@ -40,7 +40,10 @@ its value from the shell.
 - Value store: `target: { kind: "fnox-store", provider: "host" }` for a provider whose type
   stores values (age, keychain, the cloud secret managers). It replaces an existing value, so
   ask first.
-- `config: "fnox.local.toml"` writes the entry there instead of `fnox.toml`.
+- `config: "fnox.local.toml"` writes the entry there instead of `fnox.toml`. Create the file first.
+  fnox loads only that file and the global config, so declare the provider in one of them. A file
+  outside the project asks for `external_directory`.
+- A command that changes the fnox config while it runs stops the call, and nothing is stored.
 - The result is `{ name, reference | provider, stored: true }`. Then run `fnox check`.
 
 A failure gives the stage and exit code only and is not retried. After a failed or timed-out

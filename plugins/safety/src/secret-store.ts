@@ -10,9 +10,11 @@
  */
 
 import { homedir } from "node:os"
-import { isAbsolute, resolve } from "node:path"
+import { dirname, isAbsolute, resolve } from "node:path"
 import { EXIT_GRACE_MS, killChild, supervise } from "@srobroek/opencode-lib/subprocess"
-import { SEARCHED_CONFIGS, VALUE_STORE_TYPES } from "./op-guard.ts"
+import { type ExternalDirectory, externalDirectories } from "./flag-directories.ts"
+import type { ConfigSnapshot } from "./fnox-config.ts"
+import { VALUE_STORE_TYPES } from "./op-guard.ts"
 
 export const STORE_ACTION = "safety_secret_store"
 /** The permission each command run asks for; the plugin turns an `allow` into an `ask`. */
@@ -305,6 +307,8 @@ export type RunOptions = {
   stdin?: Uint8Array
   /** Capture stdout up to this many bytes; more stops the child. Without it stdout is discarded. */
   capture?: number
+  /** Kill what is left of the child's process group once the child exits. */
+  reap?: boolean
   timeoutMs: number
   signal?: AbortSignal
 }
@@ -409,6 +413,7 @@ export const runChild: Runner = async (argv, options) => {
   }
   const outcome = await run
   let captured = capture === undefined ? undefined : await within(capture.done, EXIT_GRACE_MS)
+  if (options.reap) killChild(child, true)
   if (captured === "late") {
     killChild(child, true)
     capture?.cancel()
@@ -424,21 +429,26 @@ export const runChild: Runner = async (argv, options) => {
   return { kind: "exited", exitCode: outcome.exitCode, ...(captured ? { stdout: captured.bytes } : {}) }
 }
 
+/** Where the value goes: the canonical config file fnox writes and the provider it uses. */
+export type Destination = { file: string; provider: string }
+
 export type StoreDeps = {
-  /** The session's directory: fnox runs here and a relative command cwd resolves against it. */
+  /** The session's directory: fnox runs here and a relative path resolves against it. */
   directory: string
+  /** Canonical directories inside which a config file needs no `external_directory` approval. */
+  roots: readonly string[]
   env: Record<string, string>
   which: (bin: string, cwd: string) => string | null
-  /** The resolved type of a fnox provider, as the op-guard reads it; `undefined` when uncertain. */
-  providerType: (name: string, config?: string) => string | undefined
-  /** Providers every definition of which has `type`; `undefined` when a config cannot be read. */
-  providersOfType: (type: string, config?: string) => string[] | undefined
-  /** The `vault` every definition of a provider agrees on; `undefined` when uncertain. */
-  providerVault: (name: string, config?: string) => string | undefined
-  /** The home directory whose `~/.config/fnox` the provider checks read. */
+  /** The canonical path of an existing file, symlinks resolved; `undefined` when it does not exist. */
+  realpath: (path: string) => string | undefined
+  /** A fresh read of the fnox config fnox loads with `--config=<path>`; `undefined` when it cannot be read. */
+  snapshot: (path: string) => ConfigSnapshot | undefined
+  /** The home directory whose `~/.config/fnox` the snapshot reads. */
   home?: string
-  /** Asks to store `request` (no value exists yet); throws when refused. */
-  askStore: (request: StoreRequest) => Promise<void>
+  /** Asks `external_directory` for a config outside `roots`; throws when refused. */
+  askExternal: (external: ExternalDirectory[]) => Promise<void>
+  /** Asks to store `request` into `destination` (no value exists yet); throws when refused. */
+  askStore: (request: StoreRequest, destination: Destination) => Promise<void>
   /** Asks to run one command, showing argv and cwd; throws when refused. */
   askCommand: (argv: string[], cwd: string) => Promise<void>
   run: Runner
@@ -467,9 +477,8 @@ function quoted(word: string): string {
 }
 
 /** The provider to record the reference with: the named one, or the only 1Password provider; fails closed otherwise. */
-function onePasswordProvider(target: OnePasswordTarget, deps: StoreDeps, config: string | undefined): string {
-  const providers = deps.providersOfType("1password", config)
-  if (providers === undefined) return fail("could not read the fnox config, so the 1Password provider is uncertain")
+function onePasswordProvider(target: OnePasswordTarget, snapshot: ConfigSnapshot): string {
+  const providers = snapshot.ofType("1password")
   if (target.provider !== undefined) {
     if (!providers.includes(target.provider)) fail(`provider ${target.provider} is not a 1Password provider in every fnox config`)
     return target.provider
@@ -478,6 +487,16 @@ function onePasswordProvider(target: OnePasswordTarget, deps: StoreDeps, config:
     fail(`found ${providers.length} 1Password providers in the fnox config; name one with target.provider`)
   }
   return providers[0] as string
+}
+
+/** The provider the target writes with, checked against one config snapshot; fails closed when uncertain. */
+function validProvider(target: Target, snapshot: ConfigSnapshot): string {
+  if (target.kind === "1password") return onePasswordProvider(target, snapshot)
+  const type = snapshot.typeOf(target.provider)
+  if (type === undefined || !VALUE_STORE_TYPES.has(type)) {
+    fail(`provider ${target.provider} is not a value store in every fnox config (type ${type ?? "unknown"}); use a 1Password target`)
+  }
+  return target.provider
 }
 
 /** The value: generated here, or the stdout of the command after the user allows it. */
@@ -492,6 +511,8 @@ async function obtain(request: StoreRequest, deps: StoreDeps): Promise<Uint8Arra
     cwd,
     env: deps.env,
     capture: STDOUT_CAP,
+    // Nothing the command started may outlive it and edit the config after the recheck.
+    reap: true,
     timeoutMs: COMMAND_TIMEOUT_MS,
     ...(deps.signal ? { signal: deps.signal } : {}),
   })
@@ -517,8 +538,10 @@ export function configEnvironmentRefusal(env: Readonly<Record<string, string>>, 
 }
 
 /**
- * Store a secret: validate, resolve the provider (failing closed), ask, obtain the value, then write it
- * through a child's stdin only. Throws a SecretStoreError that names the stage, never the value.
+ * Store a secret. The config is pinned: fnox gets `--config=<canonical path>`, a path outside the session
+ * asks `external_directory`, and the provider is checked against one snapshot of the files fnox loads.
+ * After the value is obtained (a command may have run), a fresh snapshot must have the same digest and
+ * pass the same check before anything is written. Throws a SecretStoreError naming the stage, never the value.
  */
 export async function storeSecret(input: unknown, deps: StoreDeps): Promise<StoreResult> {
   const request = parseRequest(input)
@@ -527,20 +550,15 @@ export async function storeSecret(input: unknown, deps: StoreDeps): Promise<Stor
   const op = target.kind === "1password" ? onPath(deps, "op", deps.directory) : undefined
   const overridden = configEnvironmentRefusal(deps.env, deps.home ?? homedir())
   if (overridden !== undefined) fail(`${overridden}, so fnox may read a config this check did not; unset it and retry`)
-  // A bare searched name reads like no -c at all; fnox still gets it so it writes to that file.
-  const config = request.config === undefined || SEARCHED_CONFIGS.has(request.config) ? undefined : request.config
-  let provider: string
-  if (target.kind === "1password") provider = onePasswordProvider(target, deps, config)
-  else {
-    const type = deps.providerType(target.provider, config)
-    if (type === undefined || !VALUE_STORE_TYPES.has(type)) {
-      fail(`provider ${target.provider} is not a value store in every fnox config (type ${type ?? "unknown"}); use a 1Password target`)
-    }
-    provider = target.provider
-  }
+  const requested = resolve(deps.directory, request.config ?? "fnox.toml")
+  const file = deps.realpath(requested) ?? fail(`fnox config ${requested} does not exist; create it first`)
+  const external = externalDirectories([dirname(file)], deps.roots)
+  if (external.length > 0) await deps.askExternal(external)
+  const before = deps.snapshot(file) ?? fail(`could not read the fnox config ${file}, so the provider is uncertain`)
+  const provider = validProvider(target, before)
   const fnoxSet = (positionals: string[]) => [
     fnox,
-    ...(request.config === undefined ? [] : [`--config=${request.config}`]),
+    `--config=${file}`,
     "set",
     `--provider=${provider}`,
     ...(request.description === undefined ? [] : [`--description=${request.description}`]),
@@ -549,10 +567,15 @@ export async function storeSecret(input: unknown, deps: StoreDeps): Promise<Stor
   ]
   const common = { cwd: deps.directory, env: deps.env, ...(deps.signal ? { signal: deps.signal } : {}) }
 
-  await deps.askStore(request)
+  await deps.askStore(request, { file, provider })
   const value = await obtain(request, deps)
   let stdin: Uint8Array | undefined
   try {
+    // A command may have rewritten the config: re-read it, with no cached data, before any write.
+    const changed = `the fnox config changed while the value for ${name} was obtained; nothing was stored`
+    const after = deps.snapshot(file)
+    if (after === undefined) return fail(changed)
+    if (after.digest !== before.digest || deps.realpath(requested) !== file || validProvider(target, after) !== provider) fail(changed)
     if (target.kind === "fnox-store") {
       if (edgeWhitespace(value)) {
         fail(`the value for ${name} starts or ends with whitespace, which fnox would trim; nothing was stored`)
@@ -570,7 +593,7 @@ export async function storeSecret(input: unknown, deps: StoreDeps): Promise<Stor
     if (created !== undefined) fail(`${created} storing ${name} (a 1Password approval may have been refused or timed out); not retried`)
     // `item/field` resolves in the provider's vault; a full op:// reference names the vault the item went to.
     const short = `${target.item}/${target.field}`
-    const reference = deps.providerVault(provider, config) === target.vault ? short : `op://${target.vault}/${short}`
+    const reference = after.setting(provider, "vault") === target.vault ? short : `op://${target.vault}/${short}`
     const recorded = outcome(await deps.run(fnoxSet([name, reference]), { ...common, timeoutMs: FNOX_TIMEOUT_MS }), "fnox set")
     if (recorded !== undefined) {
       fail(`${recorded} after the 1Password item was created; record it with \`fnox set ${name} ${quoted(reference)} --provider ${provider}\``)

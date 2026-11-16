@@ -1,17 +1,27 @@
+import { realpathSync } from "node:fs"
+import { homedir } from "node:os"
 import { isAbsolute, resolve } from "node:path"
 import { Plugin } from "@opencode/plugin"
 import { Error as ToolError } from "@opencode/plugin/promise/tool"
 import { appendResultText, isShellTool, leadingCdCwd, shellCall, WRITE_TOOLS } from "@srobroek/opencode-lib"
 import { rewriteCloseKeywords } from "./close-keywords.ts"
 import { externalDirectories, sessionRoots, shellFlagDirectories } from "./flag-directories.ts"
-import { providerSetting, providersOfType, readProviderTypes } from "./fnox-config.ts"
+import { readConfigSnapshot, readProviderTypes } from "./fnox-config.ts"
 import { GUARD_IDS, type GuardID, type GuardOptions, hardGate } from "./guards.ts"
 import { decideToolCall, type MigrationOptions, migrationOverride } from "./migrations.ts"
 import { createPackageAdvisor } from "./package-investigate.ts"
 import { type Decision, type DecisionID, type ReviewOptions, reviewPermission } from "./permission.ts"
 import { createRedactor, type RedactOptions, readRedactOptions } from "./redact.ts"
 import { allowScratch, scratchRoots } from "./scratch-dirs.ts"
-import { COMMAND_ACTION, runChild, STORE_ACTION, type StoreDeps, storeSecret } from "./secret-store.ts"
+import {
+  COMMAND_ACTION,
+  type Destination,
+  runChild,
+  STORE_ACTION,
+  type StoreDeps,
+  type StoreRequest,
+  storeSecret,
+} from "./secret-store.ts"
 
 export { normalize as normalizeCloseKeywords, rewriteCloseKeywords } from "./close-keywords.ts"
 export { externalDirectories, flagDirectories, shellFlagDirectories } from "./flag-directories.ts"
@@ -132,7 +142,7 @@ export type Overrides = {
   env?: NodeJS.ProcessEnv
   guard?: Pick<GuardOptions, "read" | "analyzeOp" | "providerTypes">
   scratch?: { roots?: readonly string[] }
-  secretStore?: Partial<Pick<StoreDeps, "run" | "which" | "providerType" | "providersOfType" | "providerVault" | "env">>
+  secretStore?: Partial<Pick<StoreDeps, "run" | "which" | "env" | "home">>
 }
 
 /** The model-facing schema of `safety_secret_store`; `parseRequest` checks every field again. */
@@ -170,7 +180,7 @@ export const SECRET_STORE_INPUT = {
       properties: { argv: { type: "array", items: { type: "string" }, minItems: 1 }, cwd: { type: "string" } },
       required: ["argv"],
     },
-    config: { type: "string", description: "fnox config file for `fnox set --config`, such as fnox.local.toml" },
+    config: { type: "string", description: "Existing fnox config file fnox gets as --config (default fnox.toml); outside the project asks first" },
     description: { type: "string", description: "fnox secret description" },
   },
   required: ["name", "target"],
@@ -182,6 +192,25 @@ export function confirmSecretCommand(evaluation: Evaluation): void {
   if (evaluation.action !== COMMAND_ACTION || evaluation.effect !== "allow") return
   evaluation.effect = "ask"
   evaluation.message = `Run this command for ${STORE_ACTION}? Its stdout becomes the secret and is never shown.`
+}
+
+/** The canonical path of an existing file or directory, symlinks resolved; `undefined` when missing. */
+function canonical(path: string): string | undefined {
+  try {
+    return realpathSync(path)
+  } catch {
+    return undefined
+  }
+}
+
+/** The store permission's resource: the secret name, where its value goes and the config fnox writes. */
+export function storeResource(request: StoreRequest, destination: Destination): string {
+  const target = request.target
+  const where =
+    target.kind === "1password"
+      ? `1password ${target.vault}/${target.item}/${target.field} (fnox provider ${destination.provider})`
+      : `fnox provider ${destination.provider}`
+  return `${request.name} -> ${where} in ${destination.file}`
 }
 
 /** argv as one shell-quoted line, for the permission prompt. */
@@ -337,30 +366,46 @@ export function createPlugin(overrides: Overrides = {}) {
             const directory = await sessionDirectory(context.sessionID)
             const source = { type: "tool" as const, messageID: context.messageID, id: context.id }
             const env = overrides.secretStore?.env ?? stringEnv(process.env)
-            let types: ReturnType<typeof readProviderTypes> | undefined
+            const home = overrides.secretStore?.home ?? homedir()
             const deps: StoreDeps = {
               directory,
+              roots: sessionRoots(directory).map((root) => canonical(root) ?? root),
               env,
+              home,
               which: (bin, cwd) => Bun.which(bin, { PATH: env.PATH ?? "", cwd }),
-              providerType: (name, config) => {
-                types ??= readProviderTypes(directory)
-                return types(name, config)
-              },
-              providersOfType: (type, config) => providersOfType(type, directory, config),
-              providerVault: (name, config) => providerSetting(name, "vault", directory, config),
+              realpath: canonical,
+              // A fresh read every time: the tool compares the config before and after the value is obtained.
+              snapshot: (path) => readConfigSnapshot(directory, path, home),
               run: runChild,
               ...overrides.secretStore,
               signal: context.signal,
-              askStore: (request) =>
+              askExternal: (external) =>
                 ctx.permission.assert({
                   sessionID: context.sessionID,
                   agent: context.agent,
                   source,
-                  action: STORE_ACTION,
-                  resources: [request.name],
-                  save: [request.name],
-                  metadata: { name: request.name, target: request.target, source: request.source.kind },
+                  action: "external_directory",
+                  resources: external.map((item) => item.resource),
+                  save: external.map((item) => item.save),
                 } as never),
+              askStore: (request, destination) => {
+                const resource = storeResource(request, destination)
+                return ctx.permission.assert({
+                  sessionID: context.sessionID,
+                  agent: context.agent,
+                  source,
+                  action: STORE_ACTION,
+                  resources: [resource],
+                  save: [resource],
+                  metadata: {
+                    name: request.name,
+                    target: request.target,
+                    provider: destination.provider,
+                    config: destination.file,
+                    source: request.source.kind,
+                  },
+                } as never)
+              },
               askCommand: (argv, cwd) =>
                 ctx.permission.assert({
                   sessionID: context.sessionID,

@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
+import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import {
   type Charset,
   commandSecret,
@@ -119,18 +122,37 @@ describe("itemTemplate", () => {
 
 type Call = { argv: string[]; options: RunOptions; stdin?: Uint8Array; stdinCopy?: string }
 
-/** Fake deps: every child run is recorded; `results` answers by argv[0]. */
-function fake(overrides: Partial<StoreDeps> = {}, results: Record<string, (call: Call) => RunResult> = {}) {
+/** The fnox config the fake snapshot reports; a test mutates it to model a change. */
+type Config = { types: Record<string, string>; vaults: Record<string, string>; digest: string; readable: boolean }
+
+type Ask = { kind: string; argv?: string[]; cwd?: string; resources?: string[]; file?: string; provider?: string }
+
+/** Fake deps: every child run is recorded; `results` answers by argv[0]. Paths resolve to themselves unless `links` maps them. */
+function fake(overrides: Partial<StoreDeps> = {}, results: Record<string, (call: Call, config: Config) => RunResult> = {}, links: Record<string, string | null> = {}) {
   const calls: Call[] = []
-  const asks: { kind: string; argv?: string[]; cwd?: string }[] = []
+  const asks: Ask[] = []
+  const reads: (string | undefined)[] = []
+  const config: Config = { types: { host: "age", op: "1password", plain: "plain" }, vaults: { op: "Dev" }, digest: "d1", readable: true }
   const deps: StoreDeps = {
     directory: "/project",
+    roots: ["/project"],
     env: { PATH: "/bin", HOME: "/home/u" },
     which: (bin) => `/bin/${bin}`,
-    providerType: (name) => ({ host: "age", op: "1password", plain: "plain" })[name],
-    providersOfType: (type) => (type === "1password" ? ["op"] : []),
-    providerVault: (name) => (name === "op" ? "Dev" : undefined),
-    askStore: async () => void asks.push({ kind: "store" }),
+    realpath: (path) => (path in links ? (links[path] ?? undefined) : path),
+    snapshot: (path) => {
+      reads.push(path)
+      if (!config.readable) return undefined
+      const types = { ...config.types }
+      const vaults = { ...config.vaults }
+      return {
+        digest: config.digest,
+        typeOf: (name) => types[name],
+        ofType: (type) => Object.keys(types).filter((name) => types[name] === type),
+        setting: (name, key) => (key === "vault" ? vaults[name] : undefined),
+      }
+    },
+    askExternal: async (external) => void asks.push({ kind: "external", resources: external.map((item) => item.resource) }),
+    askStore: async (_, destination) => void asks.push({ kind: "store", file: destination.file, provider: destination.provider }),
     askCommand: async (argv, cwd) => void asks.push({ kind: "command", argv, cwd }),
     run: async (argv, options) => {
       const call: Call = {
@@ -140,11 +162,11 @@ function fake(overrides: Partial<StoreDeps> = {}, results: Record<string, (call:
       }
       calls.push(call)
       const answer = results[argv[0] as string]
-      return answer ? answer(call) : { kind: "exited", exitCode: 0 }
+      return answer ? answer(call, config) : { kind: "exited", exitCode: 0 }
     },
     ...overrides,
   }
-  return { deps, calls, asks }
+  return { deps, calls, asks, config, reads }
 }
 
 const issued = (stdout: string): ((call: Call) => RunResult) => () => ({ kind: "exited", exitCode: 0, stdout: encoder.encode(stdout) })
@@ -158,39 +180,47 @@ describe("storeSecret into 1Password", () => {
     expect(result).toEqual({ name: "API_TOKEN", reference: "proj api/credential", stored: true })
     expect(calls.map((call) => call.argv)).toEqual([
       ["/bin/op", "item", "create", "--vault=Dev", "-"],
-      ["/bin/fnox", "set", "--provider=op", "--", "API_TOKEN", "proj api/credential"],
+      ["/bin/fnox", "--config=/project/fnox.toml", "set", "--provider=op", "--", "API_TOKEN", "proj api/credential"],
     ])
     const item = JSON.parse(calls[0]?.stdinCopy ?? "")
     expect(item.fields[0]).toMatchObject({ id: "credential", type: "CONCEALED", value: "0".repeat(32) })
     expect(calls[1]?.options.stdin).toBeUndefined()
   })
 
-  test("passes a description and an explicit config to fnox, and resolves a bare config name like the searched ones", async () => {
-    const seen: (string | undefined)[] = []
-    const { deps, calls } = fake({
-      providersOfType: (_, config) => {
-        seen.push(config)
-        return ["op"]
-      },
-    })
+  test("passes a description and the canonical config path to fnox, and reads exactly that file", async () => {
+    const { deps, calls, reads } = fake()
     await storeSecret({ name: "A", target: onePassword, generate: hex, description: "proj api", config: "fnox.local.toml" }, deps)
-    await storeSecret({ name: "B", target: onePassword, generate: hex, config: "custom.toml" }, deps)
-    expect(seen).toEqual([undefined, "custom.toml"])
-    expect(calls[1]?.argv).toEqual(["/bin/fnox", "--config=fnox.local.toml", "set", "--provider=op", "--description=proj api", "--", "A", "proj api/credential"])
+    expect(reads).toEqual(["/project/fnox.local.toml", "/project/fnox.local.toml"])
+    expect(calls[1]?.argv).toEqual([
+      "/bin/fnox",
+      "--config=/project/fnox.local.toml",
+      "set",
+      "--provider=op",
+      "--description=proj api",
+      "--",
+      "A",
+      "proj api/credential",
+    ])
   })
 
-  for (const [label, providers, target] of [
-    ["no 1Password provider", [], onePassword],
-    ["two 1Password providers", ["op", "shared"], onePassword],
-    ["an unreadable config", undefined, onePassword],
-    ["a named provider that is not 1Password", ["op"], { ...onePassword, provider: "host" }],
+  for (const [label, types, target] of [
+    ["no 1Password provider", { host: "age" }, onePassword],
+    ["two 1Password providers", { op: "1password", shared: "1password" }, onePassword],
+    ["a named provider that is not 1Password", { op: "1password", host: "age" }, { ...onePassword, provider: "host" }],
   ] as const)
     test(`fails closed on ${label}, before anything runs`, async () => {
-      const { deps, calls, asks } = fake({ providersOfType: () => (providers === undefined ? undefined : [...providers]) })
+      const { deps, calls, asks, config } = fake()
+      config.types = { ...types }
       await expect(storeSecret({ name: "A", target, generate: hex }, deps)).rejects.toThrow(/provider/)
-      expect(calls).toEqual([])
-      expect(asks).toEqual([])
+      expect([calls, asks]).toEqual([[], []])
     })
+
+  test("fails closed on an unreadable config, before anything runs", async () => {
+    const { deps, calls, asks, config } = fake()
+    config.readable = false
+    await expect(storeSecret({ name: "A", target: onePassword, generate: hex }, deps)).rejects.toThrow(/config/)
+    expect([calls, asks]).toEqual([[], []])
+  })
 
   test("stops on an op failure or timeout with the name and no retry", async () => {
     for (const answer of [{ kind: "exited", exitCode: 1 }, { kind: "timeout" }] as RunResult[]) {
@@ -231,7 +261,8 @@ describe("storeSecret configuration checks", () => {
     })
 
   test("records a full op:// reference when the provider's vault is uncertain", async () => {
-    const { deps } = fake({ providerVault: () => undefined })
+    const { deps, config } = fake()
+    config.vaults = {}
     expect(await storeSecret({ name: "A", target: onePassword, generate: hex }, deps)).toMatchObject({
       reference: "op://Dev/proj api/credential",
     })
@@ -258,6 +289,80 @@ describe("storeSecret configuration checks", () => {
   })
 })
 
+describe("a config change while the value is obtained", () => {
+  const command = { argv: ["gen"] }
+  for (const [label, target, change] of [
+    ["a store provider switched to plain", { kind: "fnox-store", provider: "host" }, (c: Config) => {
+      c.types.host = "plain"
+      c.digest = "d2"
+    }],
+    ["the 1Password provider switched to plain", onePassword, (c: Config) => {
+      c.types.op = "plain"
+      c.digest = "d2"
+    }],
+    ["an edit that keeps the provider types", { kind: "fnox-store", provider: "host" }, (c: Config) => {
+      c.digest = "d2"
+    }],
+    ["a config that no longer reads", onePassword, (c: Config) => {
+      c.readable = false
+    }],
+  ] as const)
+    test(`refuses ${label}, with no op item create and no fnox set`, async () => {
+      const { deps, calls } = fake(
+        {},
+        {
+          // The command edits the config the tool's own snapshot reads.
+          "/bin/gen": (_, config) => {
+            change(config)
+            return { kind: "exited", exitCode: 0, stdout: encoder.encode(`${SENTINEL}\n`) }
+          },
+        },
+      )
+      const error = String(await storeSecret({ name: "A", target, command }, deps).catch((e: Error) => e))
+      expect(error).toMatch(/config changed/)
+      expect(error).not.toContain(SENTINEL)
+      expect(calls.map((call) => call.argv[0])).toEqual(["/bin/gen"])
+    })
+})
+
+describe("the config path", () => {
+  const store = { kind: "fnox-store", provider: "host" } as const
+
+  test("a path outside the session's directories asks external_directory before anything else", async () => {
+    const { deps, asks, calls } = fake()
+    await storeSecret({ name: "A", target: store, generate: hex, config: "../other/fnox.toml" }, deps)
+    expect(asks[0]).toEqual({ kind: "external", resources: ["/other/*"] })
+    expect(asks[1]).toMatchObject({ kind: "store", file: "/other/fnox.toml" })
+    expect(calls[0]?.argv[1]).toBe("--config=/other/fnox.toml")
+  })
+
+  test("a refused external_directory stores nothing and asks nothing more", async () => {
+    const { deps, asks, calls } = fake({ askExternal: async () => Promise.reject(new Error("rejected")) })
+    await expect(storeSecret({ name: "A", target: store, generate: hex, config: "/elsewhere/fnox.toml" }, deps)).rejects.toThrow("rejected")
+    expect([asks, calls]).toEqual([[], []])
+  })
+
+  test("a symlink inside the project that points outside counts as outside, and fnox gets the target", async () => {
+    const { deps, asks, calls } = fake({}, {}, { "/project/fnox.local.toml": "/elsewhere/real.toml" })
+    await storeSecret({ name: "A", target: store, generate: hex, config: "fnox.local.toml" }, deps)
+    expect(asks[0]).toEqual({ kind: "external", resources: ["/elsewhere/*"] })
+    expect(asks[1]).toMatchObject({ kind: "store", file: "/elsewhere/real.toml" })
+    expect(calls[0]?.argv[1]).toBe("--config=/elsewhere/real.toml")
+  })
+
+  test("a path inside the project asks no external_directory", async () => {
+    const { deps, asks } = fake()
+    await storeSecret({ name: "A", target: store, generate: hex, config: "sub/fnox.toml" }, deps)
+    expect(asks.map((ask) => ask.kind)).toEqual(["store"])
+  })
+
+  test("a config file that does not exist is refused before anything runs", async () => {
+    const { deps, asks, calls } = fake({}, {}, { "/project/fnox.toml": null })
+    await expect(storeSecret({ name: "A", target: store, generate: hex }, deps)).rejects.toThrow(/does not exist/)
+    expect([asks, calls]).toEqual([[], []])
+  })
+})
+
 describe("storeSecret into a fnox store", () => {
   for (const [label, stdout] of [
     ["a leading no-break space", "\u00a0dummy\n"],
@@ -272,7 +377,7 @@ describe("storeSecret into a fnox store", () => {
     const { deps, calls } = fake({}, { "/bin/gh": issued(`${SENTINEL}\n`) })
     const result = await storeSecret({ name: "GH_TOKEN", target: { kind: "fnox-store", provider: "host" }, command: { argv: ["gh", "auth", "token"] } }, deps)
     expect(result).toEqual({ name: "GH_TOKEN", provider: "host", stored: true })
-    expect(calls[1]?.argv).toEqual(["/bin/fnox", "set", "--provider=host", "--", "GH_TOKEN"])
+    expect(calls[1]?.argv).toEqual(["/bin/fnox", "--config=/project/fnox.toml", "set", "--provider=host", "--", "GH_TOKEN"])
     expect(calls[1]?.stdinCopy).toBe(SENTINEL)
   })
 
@@ -300,7 +405,10 @@ describe("the command source", () => {
   test("asks the user with argv and cwd, then runs argv as given with no shell and a capped stdout", async () => {
     const { deps, calls, asks } = fake({}, { "/bin/gh": issued(`${SENTINEL}\n`) })
     await storeSecret(request, deps)
-    expect(asks).toEqual([{ kind: "store" }, { kind: "command", argv: ["gh", "auth", "token"], cwd: "/project/sub" }])
+    expect(asks).toEqual([
+      { kind: "store", file: "/project/fnox.toml", provider: "op" },
+      { kind: "command", argv: ["gh", "auth", "token"], cwd: "/project/sub" },
+    ])
     expect(calls[0]?.argv).toEqual(["/bin/gh", "auth", "token"])
     expect(calls[0]?.options).toMatchObject({ cwd: "/project/sub", capture: STDOUT_CAP })
   })
@@ -400,6 +508,19 @@ describe("runChild", () => {
     expect(result.kind).toBe("lost")
     expect(Date.now() - started).toBeLessThan(8_000)
   }, 15_000)
+
+  test("with reap, ends what the command left running in its process group once it exits", async () => {
+    const dir = mkdtempSync(join(realpathSync(tmpdir()), "secret-store-reap-"))
+    try {
+      const marker = join(dir, "late")
+      const result = await runChild(["/bin/sh", "-c", `(sleep 1; touch '${marker}') >/dev/null 2>&1 & printf v`], options({ capture: 64, reap: true }))
+      expect(result.kind).toBe("exited")
+      await Bun.sleep(1_500)
+      expect(existsSync(marker)).toBe(false)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 
   test("times out a child that hangs", async () => {
     expect((await runChild([bun, "-e", "await Bun.sleep(10000)"], options({ timeoutMs: 200 }))).kind).toBe("timeout")

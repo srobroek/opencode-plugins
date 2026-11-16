@@ -57,21 +57,34 @@ The inputs:
 - `target: { kind: "1password", vault, item, field?, tags?, provider? }` pipes the item JSON on stdin
   to `op item create --vault=<vault> -`. The item is an API Credential with a concealed `credential`
   field. Next the tool runs `fnox set --provider=<p> -- NAME '<item>/<field>'`. The provider is the
-  named one, or the only provider that every fnox config defines as `1password`. When the provider is
+  named one, or the only provider that the config file and the global config define as `1password`.
+  When the provider is
   uncertain, the tool fails before it runs anything. When the provider's configured vault is not
   `vault`, or is uncertain, the reference is the full `op://<vault>/<item>/<field>`.
 - `target: { kind: "fnox-store", provider }` pipes the value on stdin to `fnox set --provider=<p> -- NAME`.
   fnox reads a piped value when it gets no VALUE argument. The tool accepts only a provider that the
   op-guard rule counts as a value store. It refuses a value with whitespace at either end, since fnox
   trims it. This target replaces an existing value.
-- `config` goes to fnox as `--config=<file>`. A bare searched name such as `fnox.local.toml` resolves
-  like the normal search.
+- `config` names the fnox config file, `fnox.toml` in the session directory by default. The file must
+  exist. The tool resolves it with symlinks followed and passes the canonical path as
+  `fnox --config=<path>`, so fnox loads only that file and the global config.
 
-`op` and `fnox` must be on `PATH`. The tool reads the fnox config from `~/.config/fnox` and the
-directory path, so it refuses to run when `FNOX_CONFIG_DIR` or `FNOX_CONFIG` is set, or when
-`XDG_CONFIG_HOME` is not `~/.config`. Before it obtains a value, the tool asks for the
-`safety_secret_store` permission. The result is `{ name, reference, stored: true }` or
-`{ name, provider, stored: true }`, with no value or length.
+The config file pins where the value goes:
+
+1. A file outside the session directory and its repository asks for the `external_directory`
+   permission, the same way the host's file tools ask. A symlink inside the project that points
+   outside counts as outside.
+2. The tool reads the config file and the global config once and checks the provider against those
+   bytes.
+3. It asks for the `safety_secret_store` permission. The resource and the metadata name the secret,
+   the target, the provider and the canonical config path.
+4. It obtains the value. A command's process group is killed once the command exits.
+5. It reads the config again with no cached data. When the digest of the files (paths, symlink
+   targets, contents) differs, or the provider fails the check, the call stops and writes nothing.
+
+`op` and `fnox` must be on `PATH`. A set `FNOX_CONFIG_DIR` or `FNOX_CONFIG`, or an `XDG_CONFIG_HOME`
+other than `~/.config`, stops the call: fnox could then read a config the tool did not check. The result is `{ name, reference, stored: true }` or `{ name, provider, stored: true }`, with no
+value or length.
 
 A failure names the stage and the exit code, never child output. The tool retries nothing, so a
 refused or timed-out 1Password approval stops the call. After the store, the tool zeroes its value
@@ -82,6 +95,7 @@ buffers. Copies inside the runtime's pipe buffers stay out of its reach.
 The guard catches honest mistakes in the common forms of a command and refuses the forms it cannot
 follow. It is not a sandbox against a command built to evade it. For that reason it refuses every
 value-carrying `op item create|edit` and `fnox set` from the shell. The
-[`safety_secret_store`](#secret-store-tool) tool does that work without a shell. It reads the fnox
-config before it runs fnox. A process that rewrites the config in that gap can still change the
-provider fnox uses.
+[`safety_secret_store`](#secret-store-tool) tool does that work without a shell. It checks the fnox
+config again after the value is obtained, but fnox reads the file itself. A process outside the
+command's process group that rewrites the config between that check and fnox's read can still change
+the provider fnox uses.
