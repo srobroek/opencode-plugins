@@ -68,7 +68,10 @@ only when application code and AWS constructs are tightly coupled. If chosen:
   an npm-package template adds that this repo does not need (its own git repo, duplicate
   lockfiles). Do not template CDK code by hand.
 - Tasks: install (`cd infrastructure && bun install --frozen-lockfile`), `synth`
-  (`bun run cdk synth`); the gate is synth only.
+  (`bun run cdk synth`), `diff` (`bun run cdk diff --fail-on=broadening`, needs a read-only AWS
+  role, so CI only). The local gate is synth with `cdk-nag` packs applied to the app, plus
+  the template assertions; `cdk diff` and `cfn-lint` on `cdk.out` run beside synth in CI.
+  Concern tools: `aws-guidance` (`references/cdk.md`).
 - Never bootstrap or deploy unless the user asks in this conversation. Credentials for it
   come from `project-secrets` (AWS section), not from files.
 - Keep CDK's tests out of the root TypeScript config (exclude `infrastructure/` in the root
