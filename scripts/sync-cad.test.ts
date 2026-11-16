@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import {
@@ -9,6 +9,7 @@ import {
   formatPin,
   parsePin,
   readTree,
+  sync,
   type Tree,
   vendored,
   withDescription,
@@ -220,5 +221,116 @@ describe("readTree, writeTree and drift", () => {
       "missing  skills/c.md",
       "extra    skills/d.md",
     ])
+  })
+})
+
+describe("readTree symlinks", () => {
+  test("a symlinked script with the expected bytes and mode is drift", () => {
+    const dir = tmp()
+    const outside = path.join(tmp(), "run.py")
+    writeFileSync(outside, "run")
+    chmodSync(outside, 0o755)
+    mkdirSync(path.join(dir, "skills/cad-flow/scripts"), { recursive: true })
+    symlinkSync(outside, path.join(dir, "skills/cad-flow/scripts/run.py"))
+    const expected: Tree = new Map([["skills/cad-flow/scripts/run.py", { data: Buffer.from("run"), executable: true }]])
+    expect(drift(expected, readTree(dir))).toEqual(["symlink  skills/cad-flow/scripts/run.py must be a regular file or directory"])
+  })
+
+  test("a symlinked owned directory is drift, and its target is not read", () => {
+    const dir = tmp()
+    const outside = tmp()
+    mkdirSync(path.join(outside, "cad-flow"))
+    writeFileSync(path.join(outside, "cad-flow/SKILL.md"), "skill")
+    symlinkSync(outside, path.join(dir, "skills"))
+    const expected: Tree = new Map([["skills/cad-flow/SKILL.md", { data: Buffer.from("skill"), executable: false }]])
+    expect(drift(expected, readTree(dir))).toEqual([
+      "symlink  skills must be a regular file or directory",
+      "missing  skills/cad-flow/SKILL.md",
+    ])
+  })
+})
+
+describe("sync", () => {
+  const IDS = ["cad-analyst", "cad-concept-designer", "cad-dfm-reviewer", "cad-mech-reviewer", "cad-part-designer", "cad-sourcing-researcher"]
+  const run = (args: string[], cwd: string) => {
+    const result = Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" })
+    if (result.exitCode !== 0) throw new Error(result.stderr.toString())
+    return result.stdout.toString().trim()
+  }
+  /** A cad-agent repository with every agent and skill the script expects, tagged `tag`. */
+  const upstream = (tag: string) => {
+    const repo = tmp()
+    const write = (file: string, text: string) => {
+      mkdirSync(path.dirname(path.join(repo, file)), { recursive: true })
+      writeFileSync(path.join(repo, file), text)
+    }
+    for (const id of IDS) write(`agents/${id}.md`, agent(id, "read"))
+    for (const skill of ["cad-design", "cad-fits", "cad-motion"]) write(`skills/${skill}/SKILL.md`, `---\nname: ${skill}\ndescription: Long.\n---\n`)
+    write("skills/cad-flow/scripts/run.py", "run")
+    chmodSync(path.join(repo, "skills/cad-flow/scripts/run.py"), 0o755)
+    write("skills/cad-flow/tests/test_run.py", "test")
+    run(["init", "--quiet", "-b", "main"], repo)
+    run(["add", "-A"], repo)
+    run(["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--quiet", "-m", "one"], repo)
+    run(["tag", tag], repo)
+    return { repo, commit: run(["rev-parse", "HEAD"], repo) }
+  }
+  const plugin = (pin: { repository: string; tag: string; commit: string }) => {
+    const dir = tmp()
+    writeFileSync(path.join(dir, "cad-agent.json"), formatPin(pin))
+    return dir
+  }
+  const io = () => {
+    const lines: string[] = []
+    return { lines, io: { log: (line: string) => lines.push(line), error: (line: string) => lines.push(line) } }
+  }
+
+  test("vendors the pinned tag, then --check passes and fails on a local edit", () => {
+    const { repo, commit } = upstream("v1")
+    const dir = plugin({ repository: repo, tag: "v1", commit })
+    expect(sync([], dir, io().io)).toBe(0)
+    expect(readFileSync(path.join(dir, "skills/cad-flow/scripts/run.py"), "utf8")).toBe("run")
+    expect(existsSync(path.join(dir, "skills/cad-flow/tests"))).toBe(false)
+    expect(sync(["--check"], dir, io().io)).toBe(0)
+    writeFileSync(path.join(dir, "skills/cad-flow/scripts/run.py"), "edited")
+    const out = io()
+    expect(sync(["--check"], dir, out.io)).toBe(1)
+    expect(out.lines.slice(1)).toEqual(["  changed  skills/cad-flow/scripts/run.py"])
+  })
+
+  test("a moved tag is refused before anything is written", () => {
+    const { repo } = upstream("v1")
+    const pin = { repository: repo, tag: "v1", commit: "0".repeat(40) }
+    const dir = plugin(pin)
+    for (const args of [[], ["--check"]]) {
+      const out = io()
+      expect(sync(args, dir, out.io)).toBe(1)
+      expect(out.lines).toEqual([`cad-agent v1 is ${run(["rev-parse", "v1"], repo)}, but cad-agent.json pins ${"0".repeat(40)}: a moved tag needs review`])
+    }
+    expect(readFileSync(path.join(dir, "cad-agent.json"), "utf8")).toBe(formatPin(pin))
+    expect(existsSync(path.join(dir, "skills"))).toBe(false)
+  })
+
+  test("--tag moves the pin to that tag's commit", () => {
+    const { repo, commit } = upstream("v1")
+    writeFileSync(path.join(repo, "skills/cad-flow/scripts/run.py"), "run v2")
+    run(["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--quiet", "-am", "two"], repo)
+    run(["tag", "v2"], repo)
+    const dir = plugin({ repository: repo, tag: "v1", commit })
+    expect(sync(["--tag", "v2"], dir, io().io)).toBe(0)
+    expect(parsePin(readFileSync(path.join(dir, "cad-agent.json"), "utf8"))).toEqual({
+      repository: repo,
+      tag: "v2",
+      commit: run(["rev-parse", "v2"], repo),
+    })
+    expect(readFileSync(path.join(dir, "skills/cad-flow/scripts/run.py"), "utf8")).toBe("run v2")
+  })
+
+  test("a failed clone leaves no scratch directory", () => {
+    const before = readdirSync(os.tmpdir()).filter((name) => name.startsWith("sync-cad-") && !name.startsWith("sync-cad-test-"))
+    const dir = plugin({ repository: path.join(tmp(), "missing"), tag: "v1", commit: "0".repeat(40) })
+    expect(() => sync(["--check"], dir, io().io)).toThrow()
+    const after = readdirSync(os.tmpdir()).filter((name) => name.startsWith("sync-cad-") && !name.startsWith("sync-cad-test-"))
+    expect(after.filter((name) => !before.includes(name))).toEqual([])
   })
 })

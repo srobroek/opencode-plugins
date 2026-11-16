@@ -13,7 +13,7 @@
 //   bun scripts/sync-cad.ts --check         fail when the vendored files differ from the pinned tag
 //   --source <url|path>                     clone from there instead of the pin's repository
 
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
 
@@ -23,7 +23,8 @@ export const PIN_FILE = "cad-agent.json"
 export const OWNED = ["skills", "examples", "agents"] as const
 
 export type Pin = { repository: string; tag: string; commit: string }
-export type File = { data: Buffer; executable: boolean }
+/** A vendored file; `symlink` marks a symbolic link found in the plugin, which is never vendored. */
+export type File = { data: Buffer; executable: boolean; symlink?: true }
 /** Vendored files by their path relative to plugins/cad, with `/` separators. */
 export type Tree = Map<string, File>
 
@@ -229,21 +230,27 @@ export function collect(
   return tree
 }
 
-/** The files under the plugin's owned directories, ignoring Python caches and Finder metadata. */
+/**
+ * The files under the plugin's owned directories, ignoring Python caches and Finder metadata.
+ * Symbolic links, an owned directory's own included, are never followed: each is recorded as a
+ * `symlink` entry, so `drift` reports it even when its target holds the expected bytes.
+ */
 export function readTree(dir: string): Tree {
   const tree: Tree = new Map()
+  const link: File = { data: Buffer.alloc(0), executable: false, symlink: true }
   const walk = (relative: string) => {
     const full = path.join(dir, relative)
-    if (!existsSync(full)) return
-    for (const entry of readdirSync(full, { withFileTypes: true })) {
-      if (entry.name === "__pycache__" || entry.name === ".DS_Store" || entry.name.endsWith(".pyc")) continue
-      const child = relative === "" ? entry.name : `${relative}/${entry.name}`
-      if (entry.isDirectory()) walk(child)
-      else {
-        const file = path.join(dir, child)
-        tree.set(child, { data: readFileSync(file), executable: (statSync(file).mode & 0o111) !== 0 })
+    const stat = lstatSync(full, { throwIfNoEntry: false })
+    if (stat === undefined) return
+    if (stat.isSymbolicLink()) return void tree.set(relative, link)
+    if (stat.isDirectory()) {
+      for (const name of readdirSync(full)) {
+        if (name === "__pycache__" || name === ".DS_Store" || name.endsWith(".pyc")) continue
+        walk(`${relative}/${name}`)
       }
+      return
     }
+    tree.set(relative, { data: readFileSync(full), executable: (stat.mode & 0o111) !== 0 })
   }
   for (const owned of OWNED) walk(owned)
   return tree
@@ -252,13 +259,15 @@ export function readTree(dir: string): Tree {
 /** How `actual` differs from `expected`, one line per path, sorted. */
 export function drift(expected: Tree, actual: Tree): string[] {
   const problems: string[] = []
+  for (const [file, have] of actual) if (have.symlink) problems.push(`symlink  ${file} must be a regular file or directory`)
   for (const [file, want] of expected) {
     const have = actual.get(file)
+    if (have?.symlink) continue
     if (have === undefined) problems.push(`missing  ${file}`)
     else if (!have.data.equals(want.data)) problems.push(`changed  ${file}`)
     else if (have.executable !== want.executable) problems.push(`mode     ${file} should${want.executable ? "" : " not"} be executable`)
   }
-  for (const file of actual.keys()) if (!expected.has(file)) problems.push(`extra    ${file}`)
+  for (const [file, have] of actual) if (!have.symlink && !expected.has(file)) problems.push(`extra    ${file}`)
   return problems.sort((a, b) => a.slice(9).localeCompare(b.slice(9)))
 }
 
@@ -279,14 +288,13 @@ function git(args: string[], cwd?: string): string {
   return run.stdout.toString()
 }
 
-/** Clone `tag` from `source` into a scratch directory and return it with the commit it names. */
-function fetch(source: string, tag: string): { checkout: string; commit: string } {
-  const checkout = mkdtempSync(path.join(os.tmpdir(), "sync-cad-"))
+/** Clone `tag` from `source` into `checkout` and return the commit it names. */
+function fetch(source: string, tag: string, checkout: string): string {
   git(["-c", "advice.detachedHead=false", "clone", "--quiet", "--depth", "1", "--branch", tag, source, checkout])
-  return { checkout, commit: git(["rev-parse", "HEAD^{commit}"], checkout).trim() }
+  return git(["rev-parse", "HEAD^{commit}"], checkout).trim()
 }
 
-function option(argv: string[], name: string): string | undefined {
+function option(argv: readonly string[], name: string): string | undefined {
   const index = argv.indexOf(name)
   if (index === -1) return undefined
   const value = argv[index + 1]
@@ -294,31 +302,45 @@ function option(argv: string[], name: string): string | undefined {
   return value
 }
 
-async function main(argv: string[]) {
+export type Io = { log: (line: string) => void; error: (line: string) => void }
+
+/**
+ * The command line: vendor the pinned tag, move the pin with `--tag`, or `--check` for drift.
+ * Returns the exit status. Nothing is written when the pinned tag no longer names the pinned
+ * commit, and the scratch clone is always removed.
+ */
+export function sync(argv: readonly string[], pluginDir = PLUGIN_DIR, io: Io = { log: console.log, error: console.error }): number {
   const check = argv.includes("--check")
   const tag = option(argv, "--tag")
   if (check && tag !== undefined) throw new Error("--check verifies the pinned tag; it takes no --tag")
-  const pinFile = path.join(PLUGIN_DIR, PIN_FILE)
+  const pinFile = path.join(pluginDir, PIN_FILE)
   const pinned = parsePin(readFileSync(pinFile, "utf8"))
   const wanted = tag ?? pinned.tag
-  const { checkout, commit } = fetch(option(argv, "--source") ?? pinned.repository, wanted)
+  const checkout = mkdtempSync(path.join(os.tmpdir(), "sync-cad-"))
   try {
-    if (tag === undefined && commit !== pinned.commit)
-      throw new Error(`cad-agent ${wanted} is ${commit}, but ${PIN_FILE} pins ${pinned.commit}: a moved tag needs review`)
+    const commit = fetch(option(argv, "--source") ?? pinned.repository, wanted, checkout)
+    if (tag === undefined && commit !== pinned.commit) {
+      io.error(`cad-agent ${wanted} is ${commit}, but ${PIN_FILE} pins ${pinned.commit}: a moved tag needs review`)
+      return 1
+    }
     const tree = collect(checkout, git(["ls-files", "-s", "-z"], checkout), wanted)
     if (check) {
-      const problems = drift(tree, readTree(PLUGIN_DIR))
-      if (problems.length === 0) return console.log(`plugins/cad matches cad-agent ${wanted} (${commit})`)
-      console.error(`plugins/cad differs from cad-agent ${wanted}. Run \`bun run cad:sync\` and commit the result:`)
-      for (const problem of problems) console.error(`  ${problem}`)
-      process.exit(1)
+      const problems = drift(tree, readTree(pluginDir))
+      if (problems.length === 0) {
+        io.log(`plugins/cad matches cad-agent ${wanted} (${commit})`)
+        return 0
+      }
+      io.error(`plugins/cad differs from cad-agent ${wanted}. Run \`bun run cad:sync\` and commit the result:`)
+      for (const problem of problems) io.error(`  ${problem}`)
+      return 1
     }
-    writeTree(PLUGIN_DIR, tree)
+    writeTree(pluginDir, tree)
     writeFileSync(pinFile, formatPin({ ...pinned, tag: wanted, commit }))
-    console.log(`vendored ${tree.size} files from cad-agent ${wanted} (${commit}) into plugins/cad`)
+    io.log(`vendored ${tree.size} files from cad-agent ${wanted} (${commit}) into plugins/cad`)
+    return 0
   } finally {
     rmSync(checkout, { recursive: true, force: true })
   }
 }
 
-if (import.meta.main) await main(process.argv.slice(2))
+if (import.meta.main) process.exitCode = sync(process.argv.slice(2))
