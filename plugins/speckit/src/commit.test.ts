@@ -4,6 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
   artifactPath,
+  blobId,
   executeCommit,
   type GitFactory,
   gitEnvironment,
@@ -474,6 +475,52 @@ describe("executeCommit", () => {
       "specs/001-a/spec.md",
     ])
     expect(git("show", "HEAD:specs/001-a/spec.md")).toBe("three")
+  })
+
+  test("a SHA-256 repository commits, with the local blob id matching git's", async () => {
+    rmSync(join(repo, ".git"), { recursive: true, force: true })
+    git("init", "-q", "--object-format=sha256", "-b", "main")
+    git("config", "user.name", "Test")
+    git("config", "user.email", "test@example.com")
+    git("config", "commit.gpgsign", "false")
+    write("specs/001-a/spec.md", "sha256\n")
+    expect((await executeCommit({ message: "first" }, repo)).metadata.ok).toBe(true)
+    const oid = git("rev-parse", "HEAD:specs/001-a/spec.md")
+    expect(oid).toHaveLength(64)
+    expect(oid).toBe(blobId("sha256", new TextEncoder().encode("sha256\n")))
+    write("specs/001-a/spec.md", "changed\n")
+    write("specs/001-a/plan.md")
+    expect((await executeCommit({ message: "second" }, repo)).metadata.ok).toBe(true)
+    expect(git("show", "HEAD:specs/001-a/spec.md")).toBe("changed")
+  })
+
+  test("an unchanged tracked artifact writes no new blob while its changed sibling commits", async () => {
+    write("specs/001-a/spec.md", "same\n")
+    write("specs/001-a/plan.md", "one\n")
+    expect((await executeCommit({ message: "add" }, repo)).metadata.ok).toBe(true)
+    write("specs/001-a/plan.md", "two\n")
+    const hashed: string[] = []
+    const spy: GitFactory = (hooks) => {
+      const real = gitIn(repo, hooks)
+      return (args, options) => {
+        if (args[0] === "hash-object" && options?.stdin instanceof Uint8Array)
+          hashed.push(new TextDecoder().decode(options.stdin))
+        return real(args, options)
+      }
+    }
+    expect((await executeCommit({ message: "plan" }, repo, spy)).metadata.ok).toBe(true)
+    expect(hashed).toEqual(["two\n"])
+    expect(committedFiles()).toEqual(["specs/001-a/plan.md"])
+  })
+
+  test("refuses a tracked submodule under the paths", async () => {
+    write("specs/001-a/spec.md")
+    git("update-index", "--add", "--cacheinfo", `160000,${git("rev-parse", "HEAD")},specs/vendor`)
+    git("commit", "-q", "-m", "submodule")
+    const result = await executeCommit({ message: "x" }, repo)
+    expect(result.metadata.ok).toBe(false)
+    expect(result.content).toContain("specs/vendor is a submodule")
+    expect(git("log", "--format=%s")).toBe("submodule\ninit")
   })
 
   test("reports nothing to commit when the artifacts are unchanged", async () => {
