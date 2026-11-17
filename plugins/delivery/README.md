@@ -107,6 +107,7 @@ Inputs: `pr`, and when needed `merge_method` (`squash` by default, `merge`,
   keeps `denied` and nothing retries it. A later explicit `delivery_cleanup` call that is
   authorized clears it; one that is refused records a fresh denial and leaves the old one
   in place until then.
+  Limitation: the plugin API cannot ask what a permission rule for `delivery_cleanup` resolves to without prompting (the context only offers `assert`, which prompts, and the `evaluate` hook, which cannot be called), so a deny rule is recorded as a denial only when the inline cleanup's own prompt hits it, not when a rule blocks an explicit call before the tool runs.
 - If the forge accepted the merge but a later step refused, the result has
   `mergeIssued: true` and no receipt. Run the tool again with the same inputs: it
   sees the PR as MERGED, merges nothing, and writes the receipt.

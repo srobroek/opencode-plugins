@@ -384,6 +384,27 @@ export function createLifecycle(deps: LifecycleDeps) {
     return true
   }
 
+  /**
+   * The empty lane of a foreground `subagent` call that just returned. Same path as every other
+   * removal (lock, generation, fresh re-reads of the child, delivery's records and the gate's
+   * holds); the caller is blocked on this very call, so the returned result is the evidence that
+   * the parent is not mid-turn elsewhere. `gen` is read before the lane's status was.
+   */
+  const removeForeground = async (lane: Lane, gen: number): Promise<boolean> => {
+    const oid = await git.head(lane.directory)
+    if (oid === undefined) return false
+    return removeVerified({
+      directory: lane.directory,
+      projectID: lane.projectID,
+      branch: lane.branch,
+      parentDir: lane.parentDir,
+      oid,
+      gen,
+      lane,
+      recheck: recheckFor(lane, lane.directory, lane.parentDir, true),
+    })
+  }
+
   const act = async (lane: Lane, action: LaneAction, facts: LaneFacts, event: LaneEvent, gen: number) => {
     if (action.action === "remove") return removeLane(lane, action.basis, facts, gen)
     if (action.action === "defer" && action.quiet) {
@@ -770,7 +791,7 @@ export function createLifecycle(deps: LifecycleDeps) {
     await Promise.allSettled([chain, sweepChain])
   }
 
-  return { start, dispose, handleEvent, onIdle, onLanding, keep, noteResume, sweep: runSweep, maybeSweep, settle }
+  return { start, dispose, handleEvent, onIdle, onLanding, keep, removeForeground, generationOf, noteResume, sweep: runSweep, maybeSweep, settle }
 }
 
 export type Lifecycle = ReturnType<typeof createLifecycle>

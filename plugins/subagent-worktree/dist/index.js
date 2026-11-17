@@ -1381,6 +1381,21 @@ function createLifecycle(deps) {
     await save({ ...fresh, state: basis === "landed" ? "landed" : "removed" });
     return true;
   };
+  const removeForeground = async (lane, gen) => {
+    const oid = await git.head(lane.directory);
+    if (oid === undefined)
+      return false;
+    return removeVerified({
+      directory: lane.directory,
+      projectID: lane.projectID,
+      branch: lane.branch,
+      parentDir: lane.parentDir,
+      oid,
+      gen,
+      lane,
+      recheck: recheckFor(lane, lane.directory, lane.parentDir, true)
+    });
+  };
   const act = async (lane, action, facts, event, gen) => {
     if (action.action === "remove")
       return removeLane(lane, action.basis, facts, gen);
@@ -1753,7 +1768,7 @@ function createLifecycle(deps) {
       await new Promise((done) => setTimeout(done, debounceMs + 1));
     await Promise.allSettled([chain, sweepChain]);
   };
-  return { start, dispose, handleEvent, onIdle, onLanding, keep, noteResume, sweep: runSweep, maybeSweep, settle };
+  return { start, dispose, handleEvent, onIdle, onLanding, keep, removeForeground, generationOf, noteResume, sweep: runSweep, maybeSweep, settle };
 }
 
 // plugins/subagent-worktree/src/index.ts
@@ -2223,15 +2238,15 @@ ${skipped}`,
     if (lane2?.state !== "active")
       return;
     const resultStatus = event.status === "error" ? "error" : metadata.status === "running" ? "running" : "completed";
+    const gen = lifecycle.generationOf(lane2.directory);
     const status = await git2.status(lane2.directory, lane2.base);
     let removed = false;
     if (shouldRemove(status, resultStatus)) {
       try {
-        await moveHome(lane2);
-        await removeWorktree(lane2.projectID, lane2.directory, false);
-        await git2.deleteBranch(lane2.parentDir, lane2.branch);
-        lane2 = await retire(lane2, "removed");
-        removed = true;
+        if (await lifecycle.removeForeground(lane2, gen)) {
+          lane2 = await retire(lane2, "removed");
+          removed = true;
+        }
       } catch {}
     }
     const note = annotation(lane2, status, removed);

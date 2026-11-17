@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Error as ToolError } from "@opencode/plugin/promise/tool"
 import { createFakeContext, type FakeContext } from "@srobroek/opencode-lib/testing"
-import { readClaim } from "@srobroek/opencode-lib/worktree-claims"
+import { readClaim, writeLanding } from "@srobroek/opencode-lib/worktree-claims"
 import type { RunResult } from "./git.ts"
 import { createPlugin, SWEEP_TOOL } from "./index.ts"
 import { type Lane, laneKey, MERGE_TOOL, SUBAGENT_PREAMBLE, UNBORN_NOTE } from "./lane.ts"
@@ -30,6 +30,8 @@ type Repo = {
   /** HEAD commit by directory; BASE elsewhere. */
   heads: Record<string, string>
   porcelain: string
+  /** Called with every git command before it is answered. */
+  onCommand?: (cmd: string) => Promise<void> | void
 }
 
 function fakeRun(repo: Repo, log: string[][]) {
@@ -40,6 +42,7 @@ function fakeRun(repo: Repo, log: string[][]) {
     if (argv[0] === "wt") return repo.merge
     const [, , dir = "", ...args] = argv
     const cmd = args.join(" ")
+    await repo.onCommand?.(cmd)
     if (cmd === "rev-parse --is-inside-work-tree") return repo.git ? ok("true\n") : fail
     if (repo.unborn && cmd.startsWith("rev-parse --verify")) return fail
     if (repo.unborn && cmd === "symbolic-ref --quiet HEAD") return ok("refs/heads/main\n")
@@ -58,6 +61,8 @@ function fakeRun(repo: Repo, log: string[][]) {
     if (cmd === "status --porcelain") return ok(repo.dirty ? " M a.txt\n" : "")
     if (cmd === "status --porcelain --untracked-files=no -- :(top) :(top,exclude).beads") return ok(repo.local[dir]?.changed.length ? " M a.txt\n" : "")
     if (cmd.startsWith("branch --quiet -d")) return ok()
+    if (cmd.startsWith("stash list")) return ok()
+    if (cmd.startsWith("update-ref -d")) return ok()
     if (cmd === "worktree list --porcelain") return repo.git ? ok(repo.porcelain) : fail
     if (cmd === "diff --name-only -z HEAD") return ok(repo.local[dir]?.changed.map((file) => `${file}\0`).join("") ?? "")
     if (cmd === "ls-files --others --exclude-standard --full-name -z") {
@@ -875,10 +880,10 @@ describe("execute.after", () => {
     await spawn(setup)
     const event = await setup.fake.fire.tool("execute.after", completed("ses_fake1"))
     expect((event.result as { content: string }).content).toContain('state="removed"')
-    expect(setup.worktree.calls.at(-1)).toEqual({
-      method: "remove",
-      input: { projectID: "prj", directory: "/wt/subagent-write-hello-abc123", force: false },
-    })
+    expect(setup.worktree.calls.slice(-2)).toEqual([
+      { method: "remove", input: { projectID: "prj", directory: "/wt/subagent-write-hello-abc123", force: false } },
+      { method: "refresh", input: { projectID: "prj" } },
+    ])
     expect(setup.fake.calls.filter((entry) => entry.method === "session.move").at(-1)?.input).toEqual({
       sessionID: "ses_fake1",
       directory: REPO,
@@ -917,6 +922,47 @@ describe("execute.after", () => {
     expect(lane(setup.fake)).toBeUndefined()
   })
 
+  test("a resume that races the removal of an empty foreground lane leaves it in place", async () => {
+    const setup = await start()
+    await spawn(setup)
+    let resumed = false
+    setup.repo.onCommand = async (cmd) => {
+      if (cmd === "status --porcelain" && !resumed) {
+        resumed = true
+        await setup.fake.fire.tool("execute.before", call({ sessionID: "ses_fake1", prompt: "one more thing" }))
+      }
+    }
+    const event = await setup.fake.fire.tool("execute.after", completed("ses_fake1"))
+    expect(resumed).toBe(true)
+    expect((event.result as { content: string }).content).not.toContain('state="removed"')
+    expect(setup.worktree.calls.map((entry) => entry.method)).toEqual(["create"])
+    expect(lane(setup.fake)?.state).toBe("active")
+  })
+
+  test("without that resume the same foreground lane is removed", async () => {
+    const setup = await start()
+    await spawn(setup)
+    const event = await setup.fake.fire.tool("execute.after", completed("ses_fake1"))
+    expect((event.result as { content: string }).content).toContain('state="removed"')
+  })
+
+  test("a denial delivery recorded for the lane keeps even an empty foreground lane", async () => {
+    const setup = await start()
+    await spawn(setup)
+    const directory = lane(setup.fake)?.directory ?? ""
+    writeLanding(setup.common, {
+      receiptId: "r1",
+      worktree: directory,
+      headRefOid: BASE,
+      sessionID: PARENT,
+      landedAt: 1,
+      denied: { at: 2, sessionID: PARENT },
+    })
+    await setup.fake.fire.tool("execute.after", completed("ses_fake1"))
+    expect(lane(setup.fake)?.state).toBe("active")
+    expect(setup.worktree.calls.map((entry) => entry.method)).toEqual(["create"])
+  })
+
   test("keeps a dirty lane and a background lane", async () => {
     const setup = await start()
     await spawn(setup)
@@ -939,7 +985,7 @@ describe("execute.after", () => {
     await spawn(setup)
     await setup.fake.fire.tool("execute.after", completed("ses_fake1"))
     const event = await setup.fake.fire.tool("execute.before", call({ sessionID: "ses_fake1", prompt: "again" }))
-    expect(setup.worktree.calls.map((entry) => entry.method)).toEqual(["create", "remove", "create"])
+    expect(setup.worktree.calls.map((entry) => entry.method)).toEqual(["create", "remove", "refresh", "create"])
     expect(lane(setup.fake)?.state).toBe("active")
     const prompt = (event.input as { prompt: string }).prompt
     expect(prompt.startsWith(SUBAGENT_PREAMBLE)).toBe(false)

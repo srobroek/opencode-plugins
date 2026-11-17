@@ -618,15 +618,16 @@ export function createLanes(
     if (lane?.state !== "active") return
 
     const resultStatus = event.status === "error" ? "error" : metadata.status === "running" ? "running" : "completed"
+    // Read before the status: a resume that lands after this number was read cancels the removal.
+    const gen = lifecycle.generationOf(lane.directory)
     const status = await git.status(lane.directory, lane.base)
     let removed = false
     if (shouldRemove(status, resultStatus)) {
       try {
-        await moveHome(lane)
-        await removeWorktree(lane.projectID, lane.directory, false)
-        await git.deleteBranch(lane.parentDir, lane.branch)
-        lane = await retire(lane, "removed")
-        removed = true
+        if (await lifecycle.removeForeground(lane, gen)) {
+          lane = await retire(lane, "removed")
+          removed = true
+        }
       } catch {}
     }
     const note = annotation(lane, status, removed)
