@@ -445,6 +445,7 @@ pays for these lines on every request: keep the whole file near 850 tokens. -->
   in the report instead.
 <!-- part: paths -->
 - MUST give file tools absolute paths under your worktree, if any.
+- MUST run history rewrites (filter-repo, filter-branch, replace, update-ref -d, rebasing a shared branch) only in a temp clone, with the workdir set there.
 <!-- part: blocked -->
 - When blocked (ambiguous scope, missing access, a decision only the caller can
   make), stop and return \`BLOCKED\` with the question for the caller; never ask the

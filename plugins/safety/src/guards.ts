@@ -9,6 +9,7 @@ import { readFileSync } from "node:fs"
 import { isAbsolute, resolve } from "node:path"
 import { shellWriteTargets } from "@srobroek/opencode-lib"
 import { hasAttribution } from "./attribution.ts"
+import { historyRewrite } from "./history-rewrite.ts"
 import { CHECK_FAILED_MESSAGE, NESTING_MESSAGE, OP_MESSAGE, opGuard, type ProviderTypes } from "./op-guard.ts"
 import {
   base,
@@ -23,7 +24,15 @@ import {
   wtInvocation,
 } from "./shell.ts"
 
-export type GuardID = "indirection" | "remote-exec" | "attribution" | "worktree-tmp" | "git-defender" | "op-guard" | "dns-delegation"
+export type GuardID =
+  | "indirection"
+  | "remote-exec"
+  | "attribution"
+  | "worktree-tmp"
+  | "git-defender"
+  | "op-guard"
+  | "dns-delegation"
+  | "history-rewrite"
 
 export const GUARD_IDS: readonly GuardID[] = [
   "indirection",
@@ -33,6 +42,7 @@ export const GUARD_IDS: readonly GuardID[] = [
   "git-defender",
   "op-guard",
   "dns-delegation",
+  "history-rewrite",
 ]
 
 export type Refusal = { guard: GuardID; reason: string }
@@ -48,6 +58,8 @@ export const MESSAGES: Record<GuardID, string> = {
     "Blocked by safety (worktree-tmp-guard): do not create a worktree under /tmp or /private/tmp, where a container bind mount cannot see it. Use a path under $HOME, such as ~/tmp/worktrees/<repo>/<branch>.",
   "git-defender":
     "Blocked by safety (git-defender-user-only): only the user runs the Git Defender CLI. It acts under the user's corporate identity, so every subcommand is refused, read-looking ones included. Name the exact command you would have run and why, hand it to the user to run in their own terminal, and report the outcome you needed as unknown. Do not retry through eval, a wrapper, a script or a subagent.",
+  "history-rewrite":
+    "Blocked by safety (history-rewrite-guard): history-rewriting commands (`git filter-repo`, `git filter-branch`, `git replace`, `git update-ref -d` on a branch) must not run in place in a canonical checkout, and `filter-repo --force` must not run at all. Clone the repository into a temp directory and run the command there with the tool's workdir set to the clone.",
   "op-guard": OP_MESSAGE,
   "dns-delegation":
     "Blocked by safety (dns-delegation-guard): deleting a Route 53 hosted zone leaves any parent zone delegating to the deleted nameservers, a subdomain-takeover risk. Read ~/.config/opencode/steering/dns-delegation-cleanup.md, find the parent zone, then re-run with `DNS_PARENT_CHECKED=1` in front of the command to confirm you will delete the parent's NS (and DS) record set for the child and verify it. Do not report the zone as torn down until the parent delegation is gone.",
@@ -303,6 +315,10 @@ export type GuardOptions = {
   ) => string | undefined
   /** The `type` of a fnox provider by name, from the fnox config that applies; unknown means not a value store. */
   providerTypes?: ProviderTypes
+  /** Folders whose repositories count as disposable temp clones; defaults to the OS temp folders. */
+  tempRoots?: readonly string[]
+  /** The environment the shell inherits; the history-rewrite guard refuses when it already selects a repository. */
+  env?: NodeJS.ProcessEnv
 }
 
 /** The first hard gate `source` trips, or `undefined`. */
@@ -322,6 +338,10 @@ export function hardGate(source: string, cwd: string, options: GuardOptions = {}
     else if (on("worktree-tmp") && commands.some((command) => worktreeTmp(command, cwd)))
       refusal = refuse("worktree-tmp")
     else if (on("dns-delegation") && dnsDelegation(commands)) refusal = refuse("dns-delegation")
+    else if (on("history-rewrite")) {
+      const reason = historyRewrite(commands, cwd, options.tempRoots, options.env)
+      if (reason !== undefined) refusal = { guard: "history-rewrite", reason }
+    }
   } catch (error) {
     failure = { error }
   }

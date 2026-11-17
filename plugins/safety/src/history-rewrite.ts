@@ -1,0 +1,496 @@
+/**
+ * Refuse history-rewriting commands unless they provably run in a linked worktree or temp clone.
+ *
+ * `git filter-repo` writes to the current directory unless `--target` says otherwise, so a run
+ * meant for a temp clone but started from the main checkout rewrote its `main` and every tag.
+ * `git filter-branch`, `git replace` and a branch-deleting `git update-ref` do the same in place.
+ *
+ * The guard fails closed and models neither the shell nor git's repository selection. A rewriting
+ * command is refused when the same shell command also contains anything that could change the
+ * directory it runs in (`cd`, `pushd`, `popd`, `builtin`, `command`, `env`, a wrapper's
+ * `-C`/`--chdir`, `git --exec-path`, a nested shell, `eval`, `source`, `xargs`, `exec`, a function
+ * or alias) or select another repository (`--git-dir`, `--work-tree`, `--config-env`, `-c core.worktree`,
+ * `-c core.bare`, `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`, `GIT_INDEX_FILE`,
+ * `GIT_OBJECT_DIRECTORY`), or when the session's own environment sets one of the `GIT_*` names
+ * that select a repository. Otherwise only the tool call's workdir and `-C` (and filter-repo's
+ * `--target`) are judged. The directory must resolve to a real directory the same way logically
+ * and physically, and be a temp clone (under the OS temp folder) or a verified linked worktree. A false refusal costs one retry
+ * in a temp clone. `filter-repo --force` is refused everywhere. A directory outside any git
+ * repository passes: there is nothing to rewrite.
+ */
+
+import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, realpathSync, statSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { basename, dirname, isAbsolute, join, resolve } from "node:path"
+import { base, type Command, type GitInvocation, gitInvocation, positionals, SHELLS } from "./shell.ts"
+
+const PREFIX = "Blocked by safety (history-rewrite-guard)"
+const FILTER_REPO_NAME = /^git[-_]filter[-_]repo(?:\.py)?$/
+const MENTIONS_FILTER_REPO = /git[-_]filter[-_]repo/
+const UPDATE_REF_VALUED: ReadonlySet<string> = new Set(["-m"])
+const ZERO_OID = /^0{40,64}$/
+const MAX_METADATA = 4096
+
+/** Launcher options that take the next word as their value, so it is not the program. */
+const LAUNCHER_VALUED: ReadonlySet<string> = new Set([
+  "--from",
+  "--with",
+  "--with-requirements",
+  "--with-editable",
+  "-p",
+  "--python",
+  "--index",
+  "--index-url",
+  "-i",
+  "--extra-index-url",
+  "--default-index",
+  "--constraint",
+  "-c",
+  "--env-file",
+  "--directory",
+  "--project",
+  "--config-file",
+  "--cache-dir",
+  "--spec",
+  "--pip-args",
+  "--suffix",
+  "-W",
+  "-X",
+])
+const UV_NON_RUN: ReadonlySet<string> = new Set([
+  "pip",
+  "add",
+  "remove",
+  "sync",
+  "lock",
+  "venv",
+  "init",
+  "build",
+  "publish",
+  "python",
+  "cache",
+  "self",
+  "version",
+  "export",
+  "tree",
+  "help",
+])
+const PIPX_NON_RUN: ReadonlySet<string> = new Set([
+  "install",
+  "uninstall",
+  "uninstall-all",
+  "list",
+  "inject",
+  "uninject",
+  "upgrade",
+  "upgrade-all",
+  "reinstall",
+  "reinstall-all",
+  "ensurepath",
+  "environment",
+  "completions",
+  "runpip",
+  "pin",
+  "unpin",
+  "interpreter",
+  "upgrade-shared",
+])
+const PIPENV_NON_RUN: ReadonlySet<string> = new Set([
+  "install",
+  "uninstall",
+  "lock",
+  "sync",
+  "update",
+  "shell",
+  "graph",
+  "check",
+  "clean",
+  "requirements",
+  "verify",
+  "scripts",
+  "open",
+])
+/** Commands that change the directory, run other code, or rebind names, wherever they appear. */
+const CONSTRUCTS: ReadonlySet<string> = new Set([
+  "cd",
+  "pushd",
+  "popd",
+  "eval",
+  "source",
+  ".",
+  "xargs",
+  "exec",
+  "alias",
+  "unalias",
+  "function",
+  "builtin",
+  "command",
+  "env",
+])
+/** `name()` or `function name`: a function definition. */
+const FUNCTION_DEFINITION = /(?:^|[;&|{(\s])(?:function\s+[A-Za-z_][\w:.-]*|[A-Za-z_][\w:.-]*\s*\(\s*\))/
+
+/** Options and variables that point git at a repository other than the one the directory implies. */
+const REPOSITORY_SELECTION =
+  /(?<![\w-])(?:--git-dir|--work-tree|--config-env)(?![\w-])|(?<![\w])GIT_(?:DIR|WORK_TREE|COMMON_DIR|INDEX_FILE|OBJECT_DIRECTORY)(?![\w])|(?<![\w-])-c\s*['"]?core\.(?:worktree|bare)/i
+/** The `GIT_*` names whose presence in the session's own environment already selects a repository. */
+const INHERITED_SELECTION = ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"] as const
+
+/** A word whose value is unknown until the shell expands it. */
+const dynamic = (word: string): boolean => /[$`]/.test(word) || word.startsWith("~")
+
+type FilterRepo = { args: string[]; chdirs: string[] }
+type Launched = { program: string; args: string[] } | "not-run" | "unparsed"
+
+/** Index of the first word at or after `at` that is not an option (valued ones skip their value). */
+function skipOptions(argv: readonly string[], at: number, valued: ReadonlySet<string>): number {
+  let i = at
+  while (i < argv.length && (argv[i] as string).startsWith("-")) i += valued.has(argv[i] as string) ? 2 : 1
+  return i
+}
+
+/** The program a launcher (`uvx`, `uv`, `pipx`, `pipenv`, `python`) runs and its arguments. */
+function launched(argv: readonly string[]): Launched | undefined {
+  const name = base(argv[0])
+  let start: number
+  if (name === "uvx") start = 1
+  else if (name === "uv" || name === "pipx" || name === "pipenv") {
+    const at = skipOptions(argv, 1, name === "uv" ? LAUNCHER_VALUED : new Set())
+    const sub = argv[at]
+    if (name === "uv" && sub === "tool") {
+      if (argv[at + 1] === "run") start = at + 2
+      else return argv[at + 1] === undefined || argv[at + 1]?.startsWith("-") ? "unparsed" : "not-run"
+    } else if (sub === "run") start = at + 1
+    else if (sub === undefined) return "unparsed"
+    else {
+      const known = name === "uv" ? UV_NON_RUN : name === "pipx" ? PIPX_NON_RUN : PIPENV_NON_RUN
+      return known.has(sub) ? "not-run" : "unparsed"
+    }
+  } else if (/^python3?(?:\.\d+)?$/.test(name)) start = 1
+  else return undefined
+  const python = name.startsWith("python")
+  for (let i = start; i < argv.length; i++) {
+    const word = argv[i] as string
+    if (python && word === "-m") {
+      const module = argv[i + 1]
+      return module === undefined ? "unparsed" : { program: module, args: argv.slice(i + 2) }
+    }
+    if (python && word === "-c") return "not-run"
+    if (word.startsWith("-")) {
+      if (LAUNCHER_VALUED.has(word)) i++
+      continue
+    }
+    return { program: word, args: argv.slice(i + 1) }
+  }
+  return "unparsed"
+}
+
+/** `git filter-repo`, `git-filter-repo`, or either run through a launcher; `"uncertain"` when it cannot be told. */
+function filterRepo(command: Command): FilterRepo | "uncertain" | undefined {
+  const name = base(command.argv[0])
+  if (FILTER_REPO_NAME.test(name)) return { args: command.argv.slice(1), chdirs: [] }
+  const git = gitInvocation(command.argv)
+  if (git?.subcommand === "filter-repo") return { args: git.args, chdirs: git.chdirs }
+  const run = launched(command.argv)
+  if (run === undefined || run === "not-run") return undefined
+  if (run === "unparsed") return command.argv.some((word) => MENTIONS_FILTER_REPO.test(word)) ? "uncertain" : undefined
+  // `git-filter-repo@2.47.0`, `git-filter-repo==2.47`, `git-filter-repo[extra]`: the executable is the name.
+  const program = base(run.program.replace(/[@=<>~![].*$/, ""))
+  return FILTER_REPO_NAME.test(program) ? { args: run.args, chdirs: [] } : undefined
+}
+
+/** The value of `--name value` or `--name=value`. */
+function optionValue(args: readonly string[], name: string): string | undefined {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i] as string
+    if (arg === name) return args[i + 1]
+    if (arg.startsWith(`${name}=`)) return arg.slice(name.length + 1)
+  }
+  return undefined
+}
+
+function realOrUndefined(path: string): string | undefined {
+  try {
+    return realpathSync(path)
+  } catch {
+    return undefined
+  }
+}
+
+const realOrSelf = (path: string): string => realOrUndefined(path) ?? path
+
+function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory()
+  } catch {
+    return false
+  }
+}
+
+/** The folders whose clones are disposable: the OS temp directory, which holds OpenCode's. */
+export function defaultTempRoots(): string[] {
+  return [tmpdir(), "/tmp", "/private/tmp", "/var/tmp"].map(realOrSelf)
+}
+
+const within = (path: string, root: string): boolean =>
+  path === root || path.startsWith(root.endsWith("/") ? root : `${root}/`)
+
+const underTemp = (path: string, tempRoots: readonly string[]): boolean =>
+  tempRoots.some((root) => within(path, realOrSelf(root)))
+
+/** Step into `operand` physically: each symlink is resolved before a later `..`. `undefined` when a component is missing. */
+function enter(at: string, operand: string): string | undefined {
+  let here = operand.startsWith("/") ? "/" : at
+  for (const part of operand.split("/")) {
+    if (part === "" || part === ".") continue
+    if (part === "..") {
+      here = dirname(here)
+      continue
+    }
+    const next = realOrUndefined(join(here, part))
+    if (next === undefined) return undefined
+    here = next
+  }
+  return here
+}
+
+/**
+ * One directory change from the real directory `at`. The physical walk and the lexical path
+ * (`..` removes the previous component) must reach the same real directory, and it must be a
+ * directory. Otherwise `undefined`: the step is uncertain.
+ */
+function step(at: string, operand: string): string | undefined {
+  const physical = enter(at, operand)
+  if (physical === undefined || !isDirectory(physical)) return undefined
+  return realOrUndefined(resolve(at, operand)) === physical ? physical : undefined
+}
+
+/**
+ * A bounded read of a small regular file. The path is checked with `lstat` before it is opened, and
+ * opened without blocking and without following a symlink, so a FIFO or device planted where
+ * metadata belongs cannot hang the guard. `undefined` for anything that is not a small regular file.
+ */
+function readSmallFile(path: string): string | undefined {
+  let fd: number | undefined
+  try {
+    if (!lstatSync(path).isFile()) return undefined
+    fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW)
+    const info = fstatSync(fd)
+    if (!info.isFile() || info.size > MAX_METADATA) return undefined
+    const buffer = Buffer.alloc(info.size)
+    readSync(fd, buffer, 0, info.size, 0)
+    return buffer.toString("utf8")
+  } catch {
+    return undefined
+  } finally {
+    if (fd !== undefined) closeSync(fd)
+  }
+}
+
+/**
+ * Whether the gitfile at `gitFile` belongs to a linked worktree: `gitdir: <path>` names a directory
+ * directly inside a `worktrees/` folder that holds a `commondir` file and a `gitdir` file pointing
+ * back at this very `.git` file. Submodules and `--separate-git-dir` checkouts also have a gitfile,
+ * and fail this.
+ */
+function linkedWorktree(gitFile: string): boolean {
+  const text = readSmallFile(gitFile)
+  const match = text === undefined ? null : /^gitdir:[ \t]*(.+?)[ \t]*\r?\n?$/.exec(text)
+  if (match === null) return false
+  const adminDir = realOrUndefined(isAbsolute(match[1] as string) ? (match[1] as string) : resolve(dirname(gitFile), match[1] as string))
+  if (adminDir === undefined || !isDirectory(adminDir) || basename(dirname(adminDir)) !== "worktrees") return false
+  if (readSmallFile(join(adminDir, "commondir")) === undefined) return false
+  const back = readSmallFile(join(adminDir, "gitdir"))?.trim()
+  if (back === undefined || back === "") return false
+  return realOrUndefined(isAbsolute(back) ? back : resolve(adminDir, back)) === realOrUndefined(gitFile)
+}
+
+type Classified = { safe: true } | { safe: false; root: string; kind: "canonical" | "gitfile" }
+
+/** Whether `dir` is a temp clone, a verified linked worktree, not in a repository (safe), or neither. */
+function classify(dir: string, tempRoots: readonly string[]): Classified {
+  if (underTemp(dir, tempRoots)) return { safe: true }
+  let at = dir
+  for (;;) {
+    const git = join(at, ".git")
+    try {
+      const info = statSync(git)
+      if (info.isDirectory()) return { safe: false, root: at, kind: "canonical" }
+      return linkedWorktree(git) ? { safe: true } : { safe: false, root: at, kind: "gitfile" }
+    } catch {
+      // No .git here; look in the parent.
+    }
+    const parent = dirname(at)
+    if (parent === at) return { safe: true }
+    at = parent
+  }
+}
+
+const isBranchRef = (ref: string | undefined): boolean => ref === "HEAD" || ref?.startsWith("refs/heads/") === true
+
+/** A redirection's operator and descriptor, read from the source just before its target word. */
+function redirectKind(command: Command, at: number): { operator: string; fd: string | undefined } | undefined {
+  const word = command.redirects[at]
+  if (word === undefined) return undefined
+  const before = command.source.slice(Math.max(0, word.start - 12), word.start).trimEnd()
+  const match = /(\d+|\{[A-Za-z_]\w*\})?(<<<|<<-|<<|<&|<>|<|>>|>&|>\||&>|>)$/.exec(before)
+  return match === null ? undefined : { operator: match[2] as string, fd: match[1] }
+}
+
+/**
+ * What a `git update-ref --stdin` transaction deletes. Only a sole literal here-document or
+ * here-string is read; the shell uses the last stdin redirection, so any other arrangement (a pipe,
+ * a file, `<&`, `-z`, two redirections, an expansion, a quoted field) counts as a possible branch
+ * delete, as does an `update` with an empty new value.
+ */
+function stdinRewrite(command: Command, args: readonly string[]): string | undefined {
+  const unreadable =
+    "`git update-ref --stdin` (its transaction cannot be fully read, so a branch delete cannot be ruled out)"
+  if (args.includes("-z")) return unreadable
+  const stdin: { operator: string; at: number }[] = []
+  let heredocs = 0
+  const documentIndex = new Map<number, number>()
+  for (let at = 0; at < command.redirects.length; at++) {
+    const kind = redirectKind(command, at)
+    if (kind === undefined) return unreadable
+    if (kind.operator === "<<" || kind.operator === "<<-") documentIndex.set(at, heredocs++)
+    const intoStdin = (kind.operator.startsWith("<") && (kind.fd === undefined || kind.fd === "0")) || (kind.operator === ">&" && kind.fd === "0")
+    if (intoStdin) stdin.push({ operator: kind.operator, at })
+  }
+  if (stdin.length !== 1) return unreadable
+  const only = stdin[0] as { operator: string; at: number }
+  let source: string
+  if (only.operator === "<<" || only.operator === "<<-") {
+    const document = command.hereDocuments[documentIndex.get(only.at) as number]
+    if (document === undefined || (!document.quoted && /[$`]/.test(document.body))) return unreadable
+    source = document.body
+  } else if (only.operator === "<<<") {
+    const word = command.redirects[only.at]
+    if (word === undefined || word.expands) return unreadable
+    source = word.value
+  } else return unreadable
+  for (const line of source.split("\n")) {
+    if (line.includes('"')) return unreadable
+    const [verb, ref, value] = line.trim().split(" ")
+    if (!isBranchRef(ref)) continue
+    if (verb === "delete" || (verb === "update" && (value === undefined || value === "" || ZERO_OID.test(value))))
+      return `\`git update-ref --stdin\` deleting ${ref}`
+  }
+  return undefined
+}
+
+/** Why a `git update-ref` deletes a branch ref (or might), or `undefined`. */
+function updateRefRewrite(command: Command, git: GitInvocation): string | undefined {
+  if (git.args.includes("--stdin")) return stdinRewrite(command, git.args)
+  const deleting = git.args.includes("-d") || git.args.includes("--delete")
+  const [ref, value] = positionals(git.args, UPDATE_REF_VALUED)
+  const zero = value !== undefined && (value === "" || ZERO_OID.test(value))
+  if (!deleting && !zero) return undefined
+  if (ref === undefined || dynamic(ref)) return "`git update-ref` deleting a ref it cannot read"
+  return isBranchRef(ref) ? `\`git update-ref\` deleting ${ref}` : undefined
+}
+
+/** The first construct in the whole shell command that could change where a rewrite runs. */
+function directoryConstruct(commands: readonly Command[]): string | undefined {
+  const sources = new Set<string>()
+  for (const command of commands) {
+    const name = base(command.argv[0])
+    if (CONSTRUCTS.has(name)) return `\`${name}\``
+    if (SHELLS.has(name)) return `a nested shell (\`${name}\`)`
+    const wrapper = command.wrappers.find((item) => CONSTRUCTS.has(item))
+    if (wrapper !== undefined) return `\`${wrapper}\``
+    if (command.directories.length > 0) return "a wrapper's directory option (`env -C`, `sudo -D`)"
+    const git = gitInvocation(command.argv)
+    if (git !== undefined && command.argv.slice(1, git.offset - 1).some((word) => word.startsWith("--exec-path")))
+      return "`git --exec-path`"
+    sources.add(command.source)
+  }
+  for (const source of sources) if (FUNCTION_DEFINITION.test(source)) return "a function definition"
+  return undefined
+}
+
+const GUIDANCE =
+  "Clone the repository into a temp directory (`git clone <repo> \"$TMPDIR/<name>\"`) and run the command there with the tool's workdir set to the clone; a false refusal costs one retry."
+
+const refused = (what: string, root: string): string =>
+  `${PREFIX}: refused ${what}. ${root} is a canonical checkout (its .git is a directory), and this command rewrites or deletes history in place, which cannot be undone from the work tree. ${GUIDANCE}`
+
+const unverified = (what: string, root: string): string =>
+  `${PREFIX}: refused ${what}. ${root} has a .git file that is not a verified linked worktree (a submodule, a separate git directory, or unreadable metadata), and this command rewrites or deletes history in place. ${GUIDANCE}`
+
+const uncertain = (what: string, why: string): string =>
+  `${PREFIX}: refused ${what}. It rewrites or deletes history in place, and the guard cannot tell with certainty that it runs in a linked worktree or temp clone (${why}). ${GUIDANCE}`
+
+const withConstruct = (what: string, construct: string): string =>
+  `${PREFIX}: refused ${what}. The same shell command also contains ${construct}, which can change the directory the rewrite runs in, so the guard cannot tell where it runs. Set the shell tool's workdir to a temp clone or linked worktree, or run the rewrite on its own. ${GUIDANCE}`
+
+/** The first option or variable in the shell command that selects a repository, by name only. */
+function repositorySelection(commands: readonly Command[]): string | undefined {
+  for (const source of new Set(commands.map((command) => command.source))) {
+    const found = REPOSITORY_SELECTION.exec(source)
+    if (found !== null) return found[0].trim().startsWith("-c") ? "`-c core.worktree` or `-c core.bare`" : `\`${found[0]}\``
+  }
+  return undefined
+}
+
+const withSelection = (what: string, selection: string): string =>
+  `${PREFIX}: refused ${what}. ${selection} can point git at a repository other than the one the directory implies, so the guard cannot tell which repository the rewrite changes. Run the rewrite on its own in a temp clone, with the shell tool's workdir set there and without these options. ${GUIDANCE}`
+
+/**
+ * Why a command in `commands` is refused, or `undefined`. `cwd` is the tool call's workdir.
+ * `tempRoots` replaces the default temp folders (tests).
+ */
+export function historyRewrite(
+  commands: readonly Command[],
+  cwd: string,
+  tempRoots: readonly string[] = defaultTempRoots(),
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+  const judge = (what: string, moves: string[], git: GitInvocation | undefined): string | undefined => {
+    const selection = repositorySelection(commands)
+    if (selection !== undefined) return withSelection(what, selection)
+    const construct = directoryConstruct(commands)
+    if (construct !== undefined) return withConstruct(what, construct)
+    const inherited = INHERITED_SELECTION.find((name) => env[name] !== undefined)
+    if (inherited !== undefined) return withSelection(what, `The session's environment sets \`${inherited}\`, which`)
+    if (git?.overridden === true) return uncertain(what, "git was given a global option the guard does not read")
+    const start = realOrUndefined(cwd)
+    if (start === undefined) return uncertain(what, "the working directory cannot be resolved")
+    if (moves.some(dynamic)) return uncertain(what, "a directory option is expanded by the shell")
+    let dir = start
+    for (const move of moves) {
+      const next = step(dir, move)
+      if (next === undefined) return uncertain(what, `\`${move}\` is not a directory that resolves the same way logically and physically`)
+      dir = next
+    }
+    const where = classify(dir, tempRoots)
+    if (where.safe) return undefined
+    return where.kind === "canonical" ? refused(what, where.root) : unverified(what, where.root)
+  }
+  for (const command of commands) {
+    const git = gitInvocation(command.argv)
+    const text = `\`${command.argv.slice(0, 4).join(" ")}\``
+    const rewrite = filterRepo(command)
+    if (rewrite === "uncertain") return uncertain(text, "the launcher's command line could not be read")
+    if (rewrite !== undefined) {
+      if (rewrite.args.some((arg) => arg === "--force" || arg === "-f"))
+        return `${PREFIX}: refused ${text} with --force. filter-repo --force overwrites the repository's refs and history in the directory it runs in, wherever that is. Run it without --force in a fresh temp clone with the tool's workdir set there; a fresh clone needs no --force.`
+      const target = optionValue(rewrite.args, "--target")
+      const moves = [...(git?.chdirs ?? []), ...(target === undefined ? [] : [target])]
+      const reason = judge(text, moves, git)
+      if (reason !== undefined) return reason
+      continue
+    }
+    if (git === undefined) continue
+    let what: string | undefined
+    if (git.subcommand === "filter-branch") what = `\`git ${git.subcommand}\``
+    else if (git.subcommand === "replace") {
+      const reads = git.args.some((arg) => arg === "-l" || arg === "--list" || arg.startsWith("--format"))
+      if (!reads) what = `\`git ${git.subcommand}\``
+    } else if (git.subcommand === "update-ref") what = updateRefRewrite(command, git)
+    if (what === undefined) continue
+    const reason = judge(what, git.chdirs, git)
+    if (reason !== undefined) return reason
+  }
+  return undefined
+}

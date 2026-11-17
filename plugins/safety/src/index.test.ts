@@ -21,6 +21,7 @@ type Load = {
   env?: NodeJS.ProcessEnv
   projectID?: string
   scratchRoots?: string[]
+  guard?: Record<string, unknown>
   assert?: (input: FakeAssert) => Promise<void> | void
 }
 
@@ -35,6 +36,7 @@ async function load(options: Record<string, unknown> = {}, more: Load = {}) {
   const cleanup = await createPlugin({
     review: { gh: async () => "[]", timeoutMs: 30_000, budgetMs: 120_000 },
     env: more.env ?? {},
+    ...(more.guard ? { guard: more.guard } : {}),
     ...(more.scratchRoots ? { scratch: { roots: more.scratchRoots } } : {}),
   }).setup(fake.context)
   const before = (id: string, command: string, workdir?: string) =>
@@ -83,6 +85,23 @@ describe("hard gates", () => {
     await expect(before("c4", "git worktree add /tmp/x")).rejects.toThrow(/worktree-tmp-guard/)
     await expect(before("c5", "git defender status")).rejects.toThrow(/git-defender-user-only/)
     await expect(before("c6", "aws route53 delete-hosted-zone --id Z1")).rejects.toThrow(/dns-delegation-guard/)
+    await expect(before("c7", "uvx git-filter-repo --force --subdirectory-filter X")).rejects.toThrow(/history-rewrite-guard/)
+  })
+
+  test("a quoted cd into a canonical checkout does not hide a history rewrite", async () => {
+    const checkout = realpathSync(mkdtempSync(join(tmpdir(), "history-")))
+    try {
+      mkdirSync(join(checkout, ".git"))
+      const { before } = await load({}, { guard: { tempRoots: ["/nonexistent-temp-root"] } })
+      await expect(before("h1", `cd "${checkout}" && git filter-branch --env-filter true`)).rejects.toThrow(
+        /history-rewrite-guard/,
+      )
+      await expect(before("h2", `cd ${checkout} && git filter-branch --env-filter true`)).rejects.toThrow(
+        /history-rewrite-guard/,
+      )
+    } finally {
+      rmSync(checkout, { recursive: true, force: true })
+    }
   })
 
   test("other tools and harmless commands pass", async () => {

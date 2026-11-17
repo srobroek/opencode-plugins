@@ -21,6 +21,8 @@ export type Command = {
   source: string
   /** Basenames of the wrappers that ran the command, outermost first. */
   wrappers: string[]
+  /** Directories wrappers run the command in (`env -C DIR`, `sudo -D DIR`), outermost first, as written. */
+  directories: string[]
   /** Leading `NAME=value` assignments. */
   assignments: string[]
   redirects: ShellWord[]
@@ -135,7 +137,7 @@ export function walkShell(source: string): Walk {
         assignments.push(value)
       }
       const wrappers = commandWrappers(values)
-      const argv = commandWords(values).argv
+      const { argv, directories } = commandWords(values)
       const offset = values.length - argv.length
       const aligned = argv.every((value, i) => values[offset + i] === value) ? words.slice(offset) : undefined
       const command: Command = {
@@ -143,6 +145,7 @@ export function walkShell(source: string): Walk {
         words: aligned,
         source: text,
         wrappers,
+        directories,
         assignments,
         redirects: item.redirects,
         hereDocuments: item.hereDocuments,

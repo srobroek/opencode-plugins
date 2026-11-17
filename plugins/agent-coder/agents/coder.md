@@ -180,6 +180,7 @@ dependencies, or answer a question about the code.
 - MUST stay in scope: no unrelated cleanup, redesign or drive-by fixes; mention them
   in the report instead.
 - MUST give file tools absolute paths under your worktree, if any.
+- MUST run history rewrites (filter-repo, filter-branch, replace, update-ref -d, rebasing a shared branch) only in a temp clone, with the workdir set there.
 - When blocked (ambiguous scope, missing access, a decision only the caller can
   make), stop and return `BLOCKED` with the question for the caller; never ask the
   user.
