@@ -34,7 +34,14 @@ describe("a claim that carries or inherits any ledger selector is never tracked"
     expect(claim(command).kind).toBe("refused")
   })
 
-  test.each(["BEADS_DIR", "BEADS_DB", "BD_DB", "BEADS_DOLT_DATA_DIR"])(
+  test.each([
+    "BEADS_DB",
+    "BD_DB",
+    "BD_SOCKET",
+    "BEADS_DOLT_DATA_DIR",
+    "BEADS_DOLT_SERVER_PORT",
+    "BEADS_PROXIED_SERVER_ROOT_PATH",
+  ])(
     "%s set in the inherited environment",
     (name) => {
       const inspected = claim("bd update proj-1 --claim", { [name]: "/secret/path" })
@@ -43,6 +50,10 @@ describe("a claim that carries or inherits any ledger selector is never tracked"
       expect(JSON.stringify(inspected)).not.toContain("/secret/path")
     },
   )
+
+  test("an inherited BEADS_DIR is the default ledger, so the claim is still tracked", () => {
+    expect(claim("bd update proj-1 --claim", { BEADS_DIR: "/repo/.beads" }).kind).toBe("claim")
+  })
 
   test("an empty inherited variable selects nothing", () => {
     expect(claim("bd update proj-1 --claim", { BEADS_DIR: "", BD_DB: "" }).kind).toBe("claim")
@@ -211,6 +222,27 @@ describe("claim confirmation", () => {
   })
 })
 
+describe("why a claim is refused", () => {
+  const reason = (command: string) => {
+    const inspected = inspectClaim(command, "/repo", {}, { injected: "B", inherited: {} })
+    return inspected.kind === "refused" ? inspected.reason : inspected.kind
+  }
+
+  test("a quoted assignment before bd is named as such, not as a wrapper", () => {
+    expect(reason('BEADS_ACTOR="x" bd update proj-1 --claim')).toContain("quoted variable assignment")
+    expect(reason("BEADS_ACTOR='x' bd update proj-1 --claim")).toContain("quoted variable assignment")
+  })
+
+  test("an interpreter or wrapper is named as one", () => {
+    expect(reason("bash -c 'bd update proj-1 --claim'")).toContain("wrapper or interpreter")
+    expect(reason("env bd update proj-1 --claim")).toContain("wrapper")
+  })
+
+  test("an assigned ledger variable is named as one", () => {
+    expect(reason("BEADS_DB=x bd update proj-1 --claim")).toContain("BEADS_* or BD_*")
+  })
+})
+
 describe("which claims are refused", () => {
   test.each([
     ["a list", "bd update proj-1 --claim --json; bd show proj-1"],
@@ -253,12 +285,18 @@ describe("asking bd for json", () => {
   }
 
   test.each([
-    ["bd update proj-1 --claim", "bd update proj-1 --claim --json"],
-    ["bd update proj-1 --claim 2>&1", "bd update proj-1 --claim --json 2>&1"],
-    ["bd update proj-1 --claim # note", "bd update proj-1 --claim --json # note"],
-    ['bd update proj-1 --claim --notes "a; b"', 'bd update proj-1 --claim --notes "a; b" --json'],
-  ])("adds --json after the last word of %s", (command, expected) => {
-    expect(withJson(command, plan(command))).toBe(expected)
+    ["bd update proj-1 --claim", "bd update --json proj-1 --claim"],
+    ["bd update proj-1 --claim 2>&1", "bd update --json proj-1 --claim 2>&1"],
+    ["bd update proj-1 --claim # note", "bd update --json proj-1 --claim # note"],
+    ['bd update proj-1 --claim --notes "a; b"', 'bd update --json proj-1 --claim --notes "a; b"'],
+    ["bd update proj-1 --claim --assignee", "bd update --json proj-1 --claim --assignee"],
+    ["bd update proj-1 --claim --notes", "bd update --json proj-1 --claim --notes"],
+    ["BEADS_ACTOR=a/s1 bd ready --claim", "BEADS_ACTOR=a/s1 bd ready --json --claim"],
+    ["bd claim proj-1", "bd claim --json proj-1"],
+  ])("adds --json right after the verb of %s, leaving every other word as written", (command, expected) => {
+    const rewritten = withJson(command, plan(command))
+    expect(rewritten).toBe(expected)
+    expect(rewritten.replace(" --json", "")).toBe(command)
   })
 
   test("leaves a command that already asks for it alone", () => {

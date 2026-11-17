@@ -274,7 +274,7 @@ export type ClaimPlan = {
   ids: string[]
   /** The actors this invocation could have run as; bd's reported assignee must be one of them. */
   candidates: ReadonlySet<string>
-  /** Whether the command asks bd for `--json`; if not, `withJson` adds it at `jsonAt`. */
+  /** Whether the command asks bd for `--json`; if not, `withJson` adds it right after the verb, at `jsonAt`. */
   json: boolean
   jsonAt: number
 }
@@ -285,9 +285,11 @@ export type ClaimInspection = { kind: "none" } | { kind: "refused"; reason: stri
 /** A word that is, or starts like, a flag choosing a ledger: `-C`, `--db`, `--database`, `--directory`, `--global`, `--dolt-*`. */
 const LEDGER_SELECTOR = /^(?:-C|--db|--database|--directory|--global|--dolt-)/u
 
-/** Environment variables that choose which ledger or server bd opens. */
+/**
+ * Environment variables, other than `BEADS_DIR`, that choose which ledger or server bd opens.
+ * An inherited `BEADS_DIR` is the default ledger the plugin's own pin resolves from, so it is not here.
+ */
 const LEDGER_ENV = [
-  "BEADS_DIR",
   "BEADS_DB",
   "BD_DB",
   "BD_SOCKET",
@@ -356,7 +358,10 @@ export function inspectClaim(
   if (invocation === undefined) return refuse("it is not a single plain `bd` command")
   const bdIndex = item.words.findIndex((word) => !word.quoted && (word.value.split("/").pop() ?? word.value) === "bd")
   const prefix = item.words.slice(0, Math.max(bdIndex, 0))
-  if (bdIndex < 0 || !prefix.every((word) => !word.quoted && isAssignment(word.value)))
+  if (bdIndex < 0) return refuse("it does not start with `bd` (a wrapper or interpreter runs it)")
+  if (prefix.some((word) => word.quoted && isAssignment(word.value)))
+    return refuse("it has a quoted variable assignment before `bd`; only an unquoted literal BEADS_ACTOR=/BD_ACTOR= prefix is read")
+  if (!prefix.every((word) => !word.quoted && isAssignment(word.value)))
     return refuse("it does not start with `bd` (a wrapper or interpreter runs it)")
   // Any word the shell computes (expansion, substitution, glob, brace or `~`) could turn into a
   // ledger selector or an actor at run time, so the plugin cannot say where the claim lands.
@@ -372,8 +377,11 @@ export function inspectClaim(
   if (inheritedNames.length > 0)
     return refuse(`the environment sets ${inheritedNames.join(", ")}, which can choose the ledger`)
   if (invocation.args.includes("--")) return refuse("it uses `--`, so its arguments are not certain")
-  const last = item.words.at(-1)
-  if (last === undefined) return refuse("it is empty")
+  // `--json` goes right after the verb, never after the last word: a trailing option that takes a
+  // value (`--assignee`, `--notes`) would otherwise swallow it and change what the command does.
+  const verbWord = item.words[bdIndex + 1 + invocation.globals.length]
+  if (verbWord === undefined || verbWord.value !== invocation.verb || verbWord.quoted)
+    return refuse("its verb is not a plain literal word")
   const target = claimTarget(invocation, cwd, env, plannedTargets(command, cwd, env))
   if (target.ambiguous === true) return refuse("its ledger is ambiguous")
   // bd's precedence is flag over environment: an `--actor` anywhere in the argv (a post-verb one
@@ -397,12 +405,12 @@ export function inspectClaim(
       ids: mutationTargetIds(invocation.args),
       candidates,
       json: flagEnabled([...invocation.globals, ...invocation.args], ["--json"]),
-      jsonAt: last.end,
+      jsonAt: verbWord.end,
     },
   }
 }
 
-/** `command` asking bd for `--json`, added after its last word so a trailing redirect or comment is unaffected. */
+/** `command` asking bd for `--json`, added right after the verb so no option's value and no trailing redirect or comment is touched. */
 export function withJson(command: string, plan: ClaimPlan): string {
   return plan.json ? command : `${command.slice(0, plan.jsonAt)} --json${command.slice(plan.jsonAt)}`
 }

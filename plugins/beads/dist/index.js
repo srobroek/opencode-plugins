@@ -3924,7 +3924,6 @@ function claimEnabled(invocation) {
 }
 var LEDGER_SELECTOR = /^(?:-C|--db|--database|--directory|--global|--dolt-)/u;
 var LEDGER_ENV = [
-  "BEADS_DIR",
   "BEADS_DB",
   "BD_DB",
   "BD_SOCKET",
@@ -3980,7 +3979,11 @@ function inspectClaim(command, cwd, env, { injected, inherited }) {
     return refuse("it is not a single plain `bd` command");
   const bdIndex = item.words.findIndex((word) => !word.quoted && (word.value.split("/").pop() ?? word.value) === "bd");
   const prefix = item.words.slice(0, Math.max(bdIndex, 0));
-  if (bdIndex < 0 || !prefix.every((word) => !word.quoted && isAssignment(word.value)))
+  if (bdIndex < 0)
+    return refuse("it does not start with `bd` (a wrapper or interpreter runs it)");
+  if (prefix.some((word) => word.quoted && isAssignment(word.value)))
+    return refuse("it has a quoted variable assignment before `bd`; only an unquoted literal BEADS_ACTOR=/BD_ACTOR= prefix is read");
+  if (!prefix.every((word) => !word.quoted && isAssignment(word.value)))
     return refuse("it does not start with `bd` (a wrapper or interpreter runs it)");
   if (item.words.some((word) => !isLiteral(command, word)))
     return refuse("a word of the command is computed by the shell (a variable, substitution, glob, brace or ~)");
@@ -3993,9 +3996,9 @@ function inspectClaim(command, cwd, env, { injected, inherited }) {
     return refuse(`the environment sets ${inheritedNames.join(", ")}, which can choose the ledger`);
   if (invocation.args.includes("--"))
     return refuse("it uses `--`, so its arguments are not certain");
-  const last = item.words.at(-1);
-  if (last === undefined)
-    return refuse("it is empty");
+  const verbWord = item.words[bdIndex + 1 + invocation.globals.length];
+  if (verbWord === undefined || verbWord.value !== invocation.verb || verbWord.quoted)
+    return refuse("its verb is not a plain literal word");
   const target = claimTarget(invocation, cwd, env, plannedTargets(command, cwd, env));
   if (target.ambiguous === true)
     return refuse("its ledger is ambiguous");
@@ -4013,7 +4016,7 @@ function inspectClaim(command, cwd, env, { injected, inherited }) {
       ids: mutationTargetIds(invocation.args),
       candidates,
       json: flagEnabled([...invocation.globals, ...invocation.args], ["--json"]),
-      jsonAt: last.end
+      jsonAt: verbWord.end
     }
   };
 }
@@ -6201,6 +6204,14 @@ async function setupBeads(ctx, deps = {}) {
           await ctx.storage.set(key, true);
           advisories.push(stale);
         }
+      }
+      if (on("beads-claim-tracking") && isMutatingBdCommand(call.command) && shellExit(result) !== 0) {
+        const failed = inspectClaim(call.command, call.cwd, pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor), {
+          injected: call.injected,
+          inherited: deps.env ?? process.env
+        });
+        if (failed.kind !== "none")
+          advisories.push(untrackedClaim(`the claim failed (exit ${shellExit(result) ?? "unknown"})`));
       }
       if (on("beads-claim-tracking") && isMutatingBdCommand(call.command) && shellExit(result) === 0) {
         const key = `claims/${event.sessionID}`;

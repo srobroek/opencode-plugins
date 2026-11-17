@@ -312,7 +312,7 @@ while [ $# -gt 0 ]; do
     --db|--database) shift; ledger=$1 ;;
     --db=*) ledger=\${1#--db=} ;;
     --database=*) ledger=\${1#--database=} ;;
-    --dolt-auto-commit|--notes|--assignee) shift ;;
+    --dolt-auto-commit|--notes|--assignee) [ $# -gt 1 ] && shift ;;
     -*) ;;
     update|claim|ready) [ -z "$verb" ] && verb=$1 ;;
     *) [ -z "$id" ] && [ -n "$verb" ] && id=$1 ;;
@@ -342,7 +342,7 @@ fi
   })
   afterAll(() => rmSync(fixtureBin, { recursive: true, force: true }))
 
-  type ClaimOptions = { lost?: string; ignoresJson?: boolean; env?: Record<string, string>; inherited?: Record<string, string> }
+  type ClaimOptions = { lost?: string; ignoresJson?: boolean; env?: Record<string, string>; inherited?: Record<string, string>; childBeadsDir?: string }
 
   /**
    * Run `commands` in order as one session would: the plugin rewrites each in `execute.before`, the
@@ -379,7 +379,7 @@ fi
         env: {
           PATH: `${fixtureBin}:${process.env.PATH}`,
           HOME: process.env.HOME,
-          BEADS_DIR: store,
+          BEADS_DIR: options.childBeadsDir ?? store,
           FAKE_BD_LOG: log,
           ...options.env,
           ...(options.lost === undefined ? {} : { FAKE_BD_LOST: options.lost }),
@@ -408,10 +408,10 @@ fi
 
   test("tracks a plain claim under the actor bd reports, and adds --json to get that report", async () => {
     const run = await claimThrough(["bd update proj-1 --claim"])
-    expect(run.rewritten).toBe(`export BEADS_ACTOR='${GENERATED}'; bd update proj-1 --claim --json`)
+    expect(run.rewritten).toBe(`export BEADS_ACTOR='${GENERATED}'; bd update --json proj-1 --claim`)
     expect(run.recorded).toEqual({ "proj-1": GENERATED })
     expect(run.claims[0]?.store).toBe(run.store)
-    expect(run.log).toContain(`BEADS_DIR=${run.store} update proj-1 --claim --json`)
+    expect(run.log).toContain(`BEADS_DIR=${run.store} update --json proj-1 --claim`)
     expect(run.result).toContain('"status":"in_progress"')
     expect(run.result).toContain("added --json to this claim")
     await run.cleanup()
@@ -426,7 +426,7 @@ fi
 
   test("a semicolon, && or pipe inside a quoted --notes is not a command list: the claim is tracked", async () => {
     const run = await claimThrough(['bd update proj-1 --claim --notes "step 1; step 2 && done | ok"'])
-    expect(run.rewritten).toEndWith(`--notes "step 1; step 2 && done | ok" --json`)
+    expect(run.rewritten).toEndWith(`bd update --json proj-1 --claim --notes "step 1; step 2 && done | ok"`)
     expect(run.recorded).toEqual({ "proj-1": GENERATED })
     await run.cleanup()
   })
@@ -514,11 +514,20 @@ fi
     await run.cleanup()
   })
 
-  test.each(["BEADS_DB", "BD_DB", "BEADS_DIR"])("%s in the process environment leaves every claim untracked, naming it but not its value", async (name) => {
+  test.each(["BEADS_DB", "BD_DB", "BD_SOCKET", "BEADS_DOLT_SERVER_PORT"])("%s in the process environment leaves every claim untracked, naming it but not its value", async (name) => {
     const run = await claimThrough(["bd update proj-1 --claim"], { inherited: { [name]: "/private/ledger/path" } })
     expect(run.claims).toEqual([])
     expect(run.result).toContain(name)
     expect(run.result).not.toContain("/private/ledger/path")
+    await run.cleanup()
+  })
+
+  test("an inherited BEADS_DIR is the default ledger: a plain claim is tracked under that store", async () => {
+    const inherited = scratch(true)
+    const store = join(inherited, ".beads")
+    const run = await claimThrough(["bd update proj-1 --claim"], { inherited: { BEADS_DIR: store }, childBeadsDir: store })
+    expect(run.log).toContain(`LEDGER=${store} proj-1`)
+    expect(run.claims).toEqual([{ id: "proj-1", actor: GENERATED, store }])
     await run.cleanup()
   })
 
@@ -554,6 +563,31 @@ fi
     expect(run.result).toContain("✓ Updated issue: proj-1 — Title")
     expect(run.recorded).toEqual({})
     expect(run.result).toContain("bd printed no --json output")
+    await run.cleanup()
+  })
+
+  test.each([
+    ["--assignee", "bd update proj-1 --claim --assignee"],
+    ["--notes", "bd update proj-1 --claim --notes"],
+  ])("a trailing value option (%s) never swallows the added --json: bd's argv is otherwise identical", async (_name, command) => {
+    const run = await claimThrough([command])
+    const argv = (run.log.split("\n")[0] ?? "").replace(`BEADS_DIR=${run.store} `, "")
+    expect(argv).toBe(command.replace("bd ", "").replace("update ", "update --json "))
+    expect(argv.replace(" --json", "")).toBe(command.replace("bd ", ""))
+    expect(argv).not.toMatch(/--(assignee|notes) --json/)
+    await run.cleanup()
+  })
+
+  test("a failed claim says it is not tracked, naming the exit status", async () => {
+    const run = await claimThrough(["bd update proj-1 --claim"], { lost: "someone/else" })
+    expect(run.result).toContain("this claim is not tracked")
+    expect(run.result).toContain("the claim failed (exit 1)")
+    await run.cleanup()
+  })
+
+  test("a failed command that claims nothing gets no tracking warning", async () => {
+    const run = await claimThrough(["bd update proj-1 --status blocked"], { lost: "someone/else" })
+    expect(run.result).not.toContain("not tracked")
     await run.cleanup()
   })
 

@@ -329,6 +329,13 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
           advisories.push(stale)
         }
       }
+      if (on("beads-claim-tracking") && isMutatingBdCommand(call.command) && shellExit(result) !== 0) {
+        const failed = inspectClaim(call.command, call.cwd, pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor), {
+          injected: call.injected,
+          inherited: deps.env ?? process.env,
+        })
+        if (failed.kind !== "none") advisories.push(untrackedClaim(`the claim failed (exit ${shellExit(result) ?? "unknown"})`))
+      }
       if (on("beads-claim-tracking") && isMutatingBdCommand(call.command) && shellExit(result) === 0) {
         const key = `claims/${event.sessionID}`
         const env = environmentForCommand(call.command, pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor))
