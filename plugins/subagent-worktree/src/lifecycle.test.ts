@@ -167,6 +167,11 @@ const stored = (fake: Fake, child = CHILD) => fake.storage.get(laneKey(child)) a
 const synthetic = (fake: Fake) =>
   fake.calls.filter((entry) => entry.method === "session.synthetic").map((entry) => entry.input as { sessionID: string; text: string })
 const settle = (ms = 30) => new Promise((done) => setTimeout(done, ms))
+/** Wait until `condition` holds (a pass does real file I/O and takes longer under load than a fixed sleep), or `ms` pass. */
+const until = async (condition: () => boolean, ms = 5000) => {
+  const deadline = Date.now() + ms
+  while (!condition() && Date.now() < deadline) await settle(10)
+}
 const tool = { sessionID: PARENT, agent: "a", messageID: "m", id: "t" }
 
 describe("lane sync on a landing", () => {
@@ -1023,7 +1028,7 @@ describe("two plugin instances, one repository: coordination lives on disk", () 
     )
     state.ancestor = 0 // now landed
     fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
-    await settle()
+    await until(() => worktree.length > 0)
     expect(worktree[0]?.method).toBe("remove")
     await cleanup()
   })
