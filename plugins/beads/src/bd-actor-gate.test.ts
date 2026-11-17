@@ -357,6 +357,15 @@ describe("decideActorGate", () => {
       expect(d.reason).toContain("<harness>/<agent-name>/<session-id>")
     }
   })
+  test("refusal for a non-literal actor says to use a literal actor or none", () => {
+    const d = decideActorGate("BEADS_ACTOR=$A bd create --title x", emptyEnv)
+    expect(d.kind).toBe("block")
+    if (d.kind === "block") {
+      expect(d.reason).toContain("plugin supplies the session actor")
+      expect(d.reason).toContain("not a literal")
+      expect(d.reason).not.toContain("Set either variable")
+    }
+  })
   test("allows create with actor", () => {
     expect(decideActorGate("bd create --title 'new bead'", actorEnv).kind).toBe("allow")
   })
