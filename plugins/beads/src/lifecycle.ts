@@ -140,7 +140,8 @@ function shared(): Shared {
   const holder = globalThis as { [SHARED]?: Partial<Shared> }
   // An older instance of this plugin in the same process may have created the object
   // without the fields a later version added, so each field is backfilled on its own.
-  const state = (holder[SHARED] ??= {})
+  holder[SHARED] ??= {}
+  const state = holder[SHARED]
   state.events ??= new Set()
   state.deferred ??= new Set()
   state.foreground ??= new Map()

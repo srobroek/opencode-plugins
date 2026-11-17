@@ -4527,7 +4527,8 @@ function subagentChild(result) {
 var SHARED = Symbol.for("srobroek.beads.lifecycle");
 function shared() {
   const holder = globalThis;
-  const state = holder[SHARED] ??= {};
+  holder[SHARED] ??= {};
+  const state = holder[SHARED];
   state.events ??= new Set;
   state.deferred ??= new Set;
   state.foreground ??= new Map;
