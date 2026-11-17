@@ -272,7 +272,7 @@ export function createPlugin(overrides: Overrides = {}) {
             types ??= readProviderTypes(cwd)
             return types(name, config)
           })
-        const refusal = safely(() => hardGate(command, gateCwd, { ...guardOptions, providerTypes }))
+        const refusal = safely(() => hardGate(command, gateCwd, { baseCwd: cwd, ...guardOptions, providerTypes }))
         if (refusal !== undefined) throw new Error(refusal.reason)
         if (on("external-directory")) {
           const sessionDir = await sessionDirectory(event.sessionID)

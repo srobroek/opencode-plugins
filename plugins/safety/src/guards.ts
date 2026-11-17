@@ -317,6 +317,8 @@ export type GuardOptions = {
   providerTypes?: ProviderTypes
   /** Folders whose repositories count as disposable temp clones; defaults to the OS temp folders. */
   tempRoots?: readonly string[]
+  /** The call's directory before any `cd`; the history-rewrite guard applies the command's own `cd`s to it. Defaults to `cwd`. */
+  baseCwd?: string
 }
 
 /** The first hard gate `source` trips, or `undefined`. */
@@ -337,7 +339,7 @@ export function hardGate(source: string, cwd: string, options: GuardOptions = {}
       refusal = refuse("worktree-tmp")
     else if (on("dns-delegation") && dnsDelegation(commands)) refusal = refuse("dns-delegation")
     else if (on("history-rewrite")) {
-      const reason = historyRewrite(commands, cwd, options.tempRoots)
+      const reason = historyRewrite(commands, options.baseCwd ?? cwd, options.tempRoots)
       if (reason !== undefined) refusal = { guard: "history-rewrite", reason }
     }
   } catch (error) {
