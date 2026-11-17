@@ -256,7 +256,7 @@ describe("readTree symlinks", () => {
 describe("sync", () => {
   const IDS = ["cad-analyst", "cad-concept-designer", "cad-dfm-reviewer", "cad-mech-reviewer", "cad-part-designer", "cad-sourcing-researcher"]
   const run = (args: string[], cwd: string) => {
-    const result = Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" })
+    const result = Bun.spawnSync(["git", ...args], { cwd, env: process.env, stdout: "pipe", stderr: "pipe" })
     if (result.exitCode !== 0) throw new Error(result.stderr.toString())
     return result.stdout.toString().trim()
   }
