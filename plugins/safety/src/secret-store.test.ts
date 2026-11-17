@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, setDefaultTimeout, spyOn, test } from "bun:test"
 import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -16,6 +16,9 @@ import {
   type StoreDeps,
   storeSecret,
 } from "./secret-store.ts"
+
+// Real child processes: 2.1 s at load average 49; 30 s leaves headroom for a loaded machine (AGENTS.md, Testing).
+setDefaultTimeout(30_000)
 
 /** A dummy value that must never leave the child's stdin. */
 const SENTINEL = "SENTINEL-dummy-6ks-not-a-secret"

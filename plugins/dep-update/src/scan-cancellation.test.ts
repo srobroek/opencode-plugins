@@ -1,10 +1,13 @@
-import { describe, expect, spyOn, test } from "bun:test"
+import { describe, expect, setDefaultTimeout, spyOn, test } from "bun:test"
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
 import { fetchJson, queryRegistry, researchProject } from "./bump.ts"
 import plugin from "./index.ts"
+
+// Child-process scan: 2.0 s at load average 49; 30 s leaves headroom for a loaded machine (AGENTS.md, Testing).
+setDefaultTimeout(30_000)
 
 type ScanDetails = { complete: boolean; records: Array<{ name: string; status: string; reason?: string }> }
 type Execute = (input: unknown, context: unknown) => Promise<{ metadata: ScanDetails }>

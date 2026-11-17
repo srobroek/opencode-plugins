@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, test } from "bun:test"
+import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -11,6 +11,9 @@ import {
   parseMergeInvocation,
   spawnProbe,
 } from "./merge-gate.ts"
+
+// Real git repositories; 30 s leaves headroom for a loaded machine (AGENTS.md, Testing).
+setDefaultTimeout(30_000)
 
 const git =
   (defaultBranch: string | null, currentBranch: string | null = "worker"): Probe =>

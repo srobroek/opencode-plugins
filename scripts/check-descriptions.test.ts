@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test"
+import { describe, expect, setDefaultTimeout, test } from "bun:test"
 import path from "node:path"
 import {
   AGENT_DESCRIPTION,
@@ -12,6 +12,9 @@ import {
   TOOL_FIRST_LINE,
   unexempted,
 } from "./check-descriptions.ts"
+
+// Scans every plugin: 1.1 s alone, 3.5 s under load; 30 s leaves headroom for a loaded machine (AGENTS.md, Testing).
+setDefaultTimeout(30_000)
 
 const long = (n: number) => "x".repeat(n)
 

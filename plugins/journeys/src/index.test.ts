@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test"
+import { describe, expect, setDefaultTimeout, test } from "bun:test"
 import { execFile } from "node:child_process"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -10,6 +10,9 @@ import { createFakeContext } from "@srobroek/opencode-lib/testing"
 import { AGENT_IDS, type AgentFile, loadAgents, type Permission, parseAgentFile, shapeAgent } from "./agents.ts"
 import { createPlugin, indexResource, readIndexParams, SKILL_NAMES } from "./index.ts"
 import { type Exec, installFormulas, JOURNEYS_SCRIPT, journeysWrites, runJourneys } from "./journeys-tool.ts"
+
+// Real child processes: 3.0 s for the bounded-run case; 30 s leaves headroom for a loaded machine (AGENTS.md, Testing).
+setDefaultTimeout(30_000)
 
 const execFileAsync = promisify(execFile)
 

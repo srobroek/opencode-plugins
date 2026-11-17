@@ -2,7 +2,7 @@
 // Regressions for the review findings: S1 (project-file trust, hook env), S2 (agent id
 // collisions), S4 (symlink containment), P1b (moved sessions), P2a (dispose during a hook)
 // and P2b (unsupported SessionStart matchers).
-import { afterEach, expect, test } from "bun:test"
+import { afterEach, expect, setDefaultTimeout, test } from "bun:test"
 import { execFileSync } from "node:child_process"
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -11,6 +11,9 @@ import { createFakeContext } from "@srobroek/opencode-lib/testing"
 import { CHECK_TOOL, setupClaudeCompat, TRUST_COMMAND } from "./index.ts"
 import { gitCachePath, PROJECT_FILE } from "./source.ts"
 import { TRUST_ACTION } from "./trust.ts"
+
+// S1 git clone: 0.5 s alone, 7.8 s at load average 49; 30 s leaves headroom for a loaded machine (AGENTS.md, Testing).
+setDefaultTimeout(30_000)
 
 const MARKETPLACE = realpathSync(join(import.meta.dir, "..", "fixtures", "marketplace"))
 const scratch: string[] = []

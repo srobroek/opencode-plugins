@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test"
+import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
@@ -15,6 +15,9 @@ import {
   withDescription,
   writeTree,
 } from "./sync-cad.ts"
+
+// Real git clone and tag: 2.2 s at load average 49; 30 s leaves headroom for a loaded machine (AGENTS.md, Testing).
+setDefaultTimeout(30_000)
 
 const COMMIT = "b8f7a2ecb410e68d62a38464ffd800396cdb06c5"
 const scratch: string[] = []

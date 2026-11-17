@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test"
+import { describe, expect, setDefaultTimeout, test } from "bun:test"
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -6,6 +6,9 @@ import { createFakeContext } from "@srobroek/opencode-lib/testing"
 import { assistant, compaction, idle, SUMMARY, session, tool, user } from "./fixtures.ts"
 import plugin, { apiSource, ctxSource, parseSkill, pickSource, TOOL_NAME } from "./index.ts"
 import { listSessions, type ResumeEnv, readSession } from "./resume.ts"
+
+// Real child processes; 30 s leaves headroom for a loaded machine (AGENTS.md, Testing).
+setDefaultTimeout(30_000)
 
 const NOW = Date.parse("2026-10-26T12:00:00.000Z")
 const HOUR = 3_600_000

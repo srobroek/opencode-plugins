@@ -1,6 +1,9 @@
-import { describe, expect, test } from "bun:test"
+import { describe, expect, setDefaultTimeout, test } from "bun:test"
 import { join } from "node:path"
 import { loadSkills, parseSkillMarkdown, SKILL_NAMES, SKILLS_DIRECTORY } from "./skills.ts"
+
+// Runs Python regression tests: 1.4 s at load average 49; 30 s leaves headroom for a loaded machine (AGENTS.md, Testing).
+setDefaultTimeout(30_000)
 
 describe("parseSkillMarkdown", () => {
   test("reads name, description and body", () => {
