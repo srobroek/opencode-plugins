@@ -194,7 +194,7 @@ export type GitInvocation = {
   overridden: boolean
 }
 
-const GIT_VALUED: ReadonlySet<string> = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"])
+const GIT_VALUED: ReadonlySet<string> = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env"])
 const GIT_FLAGS: ReadonlySet<string> = new Set([
   "--no-pager",
   "-P",

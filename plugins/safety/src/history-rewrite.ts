@@ -142,6 +142,7 @@ const dynamic = (word: string): boolean => /[$`]/.test(word) || word.startsWith(
 type FilterRepo = { args: string[]; chdirs: string[] }
 type Launched = { program: string; args: string[] } | "not-run" | "unparsed"
 
+
 /** Index of the first word at or after `at` that is not an option (valued ones skip their value). */
 function skipOptions(argv: readonly string[], at: number, valued: ReadonlySet<string>): number {
   let i = at
@@ -199,14 +200,24 @@ function filterRepo(command: Command): FilterRepo | "uncertain" | undefined {
   return FILTER_REPO_NAME.test(program) ? { args: run.args, chdirs: [] } : undefined
 }
 
-/** The value of `--name value` or `--name=value`. */
+/** Whether `arg` spells long option `name`, in full or as an argparse prefix (`--targ`), with or without `=value`. */
+const spells = (arg: string, name: string): boolean => {
+  const head = arg.split("=", 1)[0] as string
+  return head.length > 2 && head.startsWith("--") && name.startsWith(head)
+}
+
+/** How many times the option is given under any spelling. */
+const optionCount = (args: readonly string[], name: string): number => args.filter((arg) => spells(arg, name)).length
+
+/** The value of `--name value` or `--name=value` under any spelling; the last one wins, as in filter-repo. */
 function optionValue(args: readonly string[], name: string): string | undefined {
+  let found: string | undefined
   for (let i = 0; i < args.length; i++) {
     const arg = args[i] as string
-    if (arg === name) return args[i + 1]
-    if (arg.startsWith(`${name}=`)) return arg.slice(name.length + 1)
+    if (!spells(arg, name)) continue
+    found = arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : args[i + 1]
   }
-  return undefined
+  return found
 }
 
 function realOrUndefined(path: string): string | undefined {
@@ -436,6 +447,109 @@ function repositorySelection(commands: readonly Command[]): string | undefined {
 const withSelection = (what: string, selection: string): string =>
   `${PREFIX}: refused ${what}. ${selection} can point git at a repository other than the one the directory implies, so the guard cannot tell which repository the rewrite changes. Run the rewrite on its own in a temp clone, with the shell tool's workdir set there and without these options. ${GUIDANCE}`
 
+/** Commands that only read or print their arguments: a rewrite word among them is data. */
+const NON_EXECUTING: ReadonlySet<string> = new Set(["grep", "rg", "echo", "printf", "cat", "bd", "head", "tail", "wc", "ls", "pip", "pip3"])
+/** Git subcommands that treat their arguments (`-m`, `--grep`, paths) as data. */
+const GIT_DATA_SUBCOMMANDS: ReadonlySet<string> = new Set(["log", "commit", "show", "diff", "grep", "status", "add", "blame", "shortlog"])
+/** Commands whose body the walker visits itself, so the commands inside are judged on their own. */
+const DESCENDED: ReadonlySet<string> = new Set(["eval", "xargs"])
+const REWRITE_FORM = /(?<![\w-])git[-_]filter[-_]repo(?![\w-])/
+const REWRITE_WORD = /(?<![\w/.-])(?:filter-repo|filter-branch|update-ref|replace)(?![\w/-]|\.\w)/
+const GIT_WORD = /(?<![\w/.-])d?git(?![\w-])/
+
+/** Options that run a program or pager (`git grep -O`, `git diff --ext-diff`, `rg --pre`), whatever their value. */
+const EXECUTABLE_OPTION =
+  /^(?:-O|--(?:open-files-in-pager|ext-diff|textconv|exec|exec-path|pager|config-env|upload-pack|receive-pack|pre|pre-glob|hostname-bin)(?![\w-]))/
+/** Options whose value is a pattern or message, never a program. */
+const DATA_OPTION = /^(?:--grep|--message|--regexp|--pattern)$/
+const mentioned = (word: string): boolean => REWRITE_FORM.test(word) || REWRITE_WORD.test(word)
+
+/** Short options that take a value: `-e`/`-m` a pattern or message, `-f` a file, `-A`/`-B`/`-C` a count. */
+const SHORT_VALUED = /[efmABC]/
+
+/** The letters of a short-option cluster up to and including its first value-taking letter, and the index of that letter. */
+function cluster(arg: string): { letters: string; at: number } {
+  const letters = arg.slice(1)
+  const at = letters.search(SHORT_VALUED)
+  return { letters, at }
+}
+
+/**
+ * Whether every rewrite word among `args` sits where the command treats it as data: a positional
+ * pattern or path, or the value of `-e`, `-m`, `--grep`, `--message`. A program-running option is
+ * looked for in every word, whatever option it might be the value of; only the data exemption
+ * follows the options' values.
+ */
+function mentionsOnlyAsData(args: readonly string[]): boolean {
+  for (const arg of args) {
+    if (!arg.startsWith("-") || arg === "-") continue
+    if (EXECUTABLE_OPTION.test(arg)) return false
+    if (!arg.startsWith("--")) {
+      const { letters, at } = cluster(arg)
+      if (letters.slice(0, at < 0 ? undefined : at).includes("O")) return false
+    }
+  }
+  let options = true
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i] as string
+    if (options && arg === "--") {
+      options = false
+      continue
+    }
+    if (!options || !arg.startsWith("-") || arg === "-") continue
+    if (arg.startsWith("--")) {
+      const head = arg.split("=", 1)[0] as string
+      if (DATA_OPTION.test(head)) {
+        if (!arg.includes("=")) i++
+        continue
+      }
+    } else {
+      const { letters, at } = cluster(arg)
+      if (at >= 0) {
+        const rest = letters.slice(at + 1)
+        const value = rest === "" ? args[++i] : rest
+        if (!"em".includes(letters[at] as string) && value !== undefined && mentioned(value)) return false
+        continue
+      }
+    }
+    if (mentioned(arg)) return false
+  }
+  return true
+}
+
+/**
+ * Whether a launcher command is accounted for, given `filterRepo` already judged a directly
+ * launched filter-repo: only an install or list (`not-run`, except `python -c`). Any other launcher
+ * (launched git, a nested launcher, a program after a valued option the reader may misparse) that
+ * mentions a rewrite is refused.
+ */
+function launcherJudged(argv: readonly string[]): boolean {
+  return launched(argv) === "not-run" && !base(argv[0]).startsWith("python")
+}
+
+/**
+ * The rewrite word a command names that the walker did not judge as a rewrite, or `undefined`.
+ * A text-level fallback: a word counts as a mention when it sits in the command's own words with
+ * `git` (or as `git-filter-repo`), unless the command only prints or searches its arguments, is a
+ * shell the walker descends into, or is a git subcommand that treats them as data.
+ */
+function unaccountedMention(command: Command, git: GitInvocation | undefined): string | undefined {
+  const text = command.argv.join(" ")
+  const found = REWRITE_FORM.exec(text) ?? (GIT_WORD.test(text) ? REWRITE_WORD.exec(text) : null)
+  if (found === null) return undefined
+  const name = base(command.argv[0])
+  if (SHELLS.has(name) || DESCENDED.has(name)) return undefined
+  if (NON_EXECUTING.has(name) && mentionsOnlyAsData(command.argv.slice(1))) return undefined
+  if (launcherJudged(command.argv)) return undefined
+  if (git !== undefined) {
+    if (["filter-branch", "replace", "update-ref"].includes(git.subcommand)) return undefined
+    const plain = !git.overridden && !command.argv.slice(1, git.offset - 1).includes("-c")
+    if (plain && GIT_DATA_SUBCOMMANDS.has(git.subcommand) && mentionsOnlyAsData(command.argv.slice(git.offset)))
+      return undefined
+  }
+  return found[0]
+}
+
 /**
  * Why a command in `commands` is refused, or `undefined`. `cwd` is the tool call's workdir.
  * `tempRoots` replaces the default temp folders (tests).
@@ -473,14 +587,20 @@ export function historyRewrite(
     const rewrite = filterRepo(command)
     if (rewrite === "uncertain") return uncertain(text, "the launcher's command line could not be read")
     if (rewrite !== undefined) {
-      if (rewrite.args.some((arg) => arg === "--force" || arg === "-f"))
+      if (rewrite.args.some((arg) => arg === "-f" || spells(arg, "--force")))
         return `${PREFIX}: refused ${text} with --force. filter-repo --force overwrites the repository's refs and history in the directory it runs in, wherever that is. Run it without --force in a fresh temp clone with the tool's workdir set there; a fresh clone needs no --force.`
+      for (const option of ["--target", "--source"])
+        if (optionCount(rewrite.args, option) > 1)
+          return uncertain(text, `\`${option}\` is repeated (possibly abbreviated) and filter-repo uses the last one`)
       const target = optionValue(rewrite.args, "--target")
       const moves = [...(git?.chdirs ?? []), ...(target === undefined ? [] : [target])]
       const reason = judge(text, moves, git)
       if (reason !== undefined) return reason
       continue
     }
+    const mention = unaccountedMention(command, git)
+    if (mention !== undefined)
+      return uncertain(text, `the command text mentions \`${mention}\` where the guard could not parse a rewrite`)
     if (git === undefined) continue
     let what: string | undefined
     if (git.subcommand === "filter-branch") what = `\`git ${git.subcommand}\``

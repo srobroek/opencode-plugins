@@ -2628,7 +2628,7 @@ function quote(word) {
     return word;
   return `'${word.replaceAll("'", "'\\''")}'`;
 }
-var GIT_VALUED = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"]);
+var GIT_VALUED = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env"]);
 var GIT_FLAGS = new Set([
   "--no-pager",
   "-P",
@@ -3771,15 +3771,20 @@ function filterRepo(command) {
   const program = base(run.program.replace(/[@=<>~![].*$/, ""));
   return FILTER_REPO_NAME.test(program) ? { args: run.args, chdirs: [] } : undefined;
 }
+var spells = (arg, name) => {
+  const head = arg.split("=", 1)[0];
+  return head.length > 2 && head.startsWith("--") && name.startsWith(head);
+};
+var optionCount = (args, name) => args.filter((arg) => spells(arg, name)).length;
 function optionValue(args, name) {
+  let found;
   for (let i = 0;i < args.length; i++) {
     const arg = args[i];
-    if (arg === name)
-      return args[i + 1];
-    if (arg.startsWith(`${name}=`))
-      return arg.slice(name.length + 1);
+    if (!spells(arg, name))
+      continue;
+    found = arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : args[i + 1];
   }
-  return;
+  return found;
 }
 function realOrUndefined(path) {
   try {
@@ -3978,6 +3983,88 @@ function repositorySelection(commands) {
   return;
 }
 var withSelection = (what, selection) => `${PREFIX}: refused ${what}. ${selection} can point git at a repository other than the one the directory implies, so the guard cannot tell which repository the rewrite changes. Run the rewrite on its own in a temp clone, with the shell tool's workdir set there and without these options. ${GUIDANCE}`;
+var NON_EXECUTING = new Set(["grep", "rg", "echo", "printf", "cat", "bd", "head", "tail", "wc", "ls", "pip", "pip3"]);
+var GIT_DATA_SUBCOMMANDS = new Set(["log", "commit", "show", "diff", "grep", "status", "add", "blame", "shortlog"]);
+var DESCENDED = new Set(["eval", "xargs"]);
+var REWRITE_FORM = /(?<![\w-])git[-_]filter[-_]repo(?![\w-])/;
+var REWRITE_WORD = /(?<![\w/.-])(?:filter-repo|filter-branch|update-ref|replace)(?![\w/-]|\.\w)/;
+var GIT_WORD = /(?<![\w/.-])d?git(?![\w-])/;
+var EXECUTABLE_OPTION = /^(?:-O|--(?:open-files-in-pager|ext-diff|textconv|exec|exec-path|pager|config-env|upload-pack|receive-pack|pre|pre-glob|hostname-bin)(?![\w-]))/;
+var DATA_OPTION = /^(?:--grep|--message|--regexp|--pattern)$/;
+var mentioned = (word) => REWRITE_FORM.test(word) || REWRITE_WORD.test(word);
+var SHORT_VALUED = /[efmABC]/;
+function cluster(arg) {
+  const letters = arg.slice(1);
+  const at = letters.search(SHORT_VALUED);
+  return { letters, at };
+}
+function mentionsOnlyAsData(args) {
+  for (const arg of args) {
+    if (!arg.startsWith("-") || arg === "-")
+      continue;
+    if (EXECUTABLE_OPTION.test(arg))
+      return false;
+    if (!arg.startsWith("--")) {
+      const { letters, at } = cluster(arg);
+      if (letters.slice(0, at < 0 ? undefined : at).includes("O"))
+        return false;
+    }
+  }
+  let options = true;
+  for (let i = 0;i < args.length; i++) {
+    const arg = args[i];
+    if (options && arg === "--") {
+      options = false;
+      continue;
+    }
+    if (!options || !arg.startsWith("-") || arg === "-")
+      continue;
+    if (arg.startsWith("--")) {
+      const head = arg.split("=", 1)[0];
+      if (DATA_OPTION.test(head)) {
+        if (!arg.includes("="))
+          i++;
+        continue;
+      }
+    } else {
+      const { letters, at } = cluster(arg);
+      if (at >= 0) {
+        const rest = letters.slice(at + 1);
+        const value = rest === "" ? args[++i] : rest;
+        if (!"em".includes(letters[at]) && value !== undefined && mentioned(value))
+          return false;
+        continue;
+      }
+    }
+    if (mentioned(arg))
+      return false;
+  }
+  return true;
+}
+function launcherJudged(argv) {
+  return launched(argv) === "not-run" && !base(argv[0]).startsWith("python");
+}
+function unaccountedMention(command, git) {
+  const text = command.argv.join(" ");
+  const found = REWRITE_FORM.exec(text) ?? (GIT_WORD.test(text) ? REWRITE_WORD.exec(text) : null);
+  if (found === null)
+    return;
+  const name = base(command.argv[0]);
+  if (SHELLS.has(name) || DESCENDED.has(name))
+    return;
+  if (NON_EXECUTING.has(name) && mentionsOnlyAsData(command.argv.slice(1)))
+    return;
+  if (launcherJudged(command.argv))
+    return;
+  if (git !== undefined) {
+    if (["filter-branch", "replace", "update-ref"].includes(git.subcommand))
+      return;
+    const plain = !git.overridden && !command.argv.slice(1, git.offset - 1).includes("-c");
+    if (plain && GIT_DATA_SUBCOMMANDS.has(git.subcommand) && mentionsOnlyAsData(command.argv.slice(git.offset)))
+      return;
+  }
+  return found[0];
+}
 function historyRewrite(commands, cwd, tempRoots = defaultTempRoots(), env = process.env) {
   const judge = (what, moves, git) => {
     const selection = repositorySelection(commands);
@@ -4015,8 +4102,11 @@ function historyRewrite(commands, cwd, tempRoots = defaultTempRoots(), env = pro
     if (rewrite === "uncertain")
       return uncertain(text, "the launcher's command line could not be read");
     if (rewrite !== undefined) {
-      if (rewrite.args.some((arg) => arg === "--force" || arg === "-f"))
+      if (rewrite.args.some((arg) => arg === "-f" || spells(arg, "--force")))
         return `${PREFIX}: refused ${text} with --force. filter-repo --force overwrites the repository's refs and history in the directory it runs in, wherever that is. Run it without --force in a fresh temp clone with the tool's workdir set there; a fresh clone needs no --force.`;
+      for (const option of ["--target", "--source"])
+        if (optionCount(rewrite.args, option) > 1)
+          return uncertain(text, `\`${option}\` is repeated (possibly abbreviated) and filter-repo uses the last one`);
       const target = optionValue(rewrite.args, "--target");
       const moves = [...git?.chdirs ?? [], ...target === undefined ? [] : [target]];
       const reason = judge(text, moves, git);
@@ -4024,6 +4114,9 @@ function historyRewrite(commands, cwd, tempRoots = defaultTempRoots(), env = pro
         return reason;
       continue;
     }
+    const mention = unaccountedMention(command, git);
+    if (mention !== undefined)
+      return uncertain(text, `the command text mentions \`${mention}\` where the guard could not parse a rewrite`);
     if (git === undefined)
       continue;
     let what;

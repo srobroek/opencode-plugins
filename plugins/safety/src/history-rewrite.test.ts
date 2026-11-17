@@ -454,7 +454,6 @@ describe("launcher spellings", () => {
     "pipenv install git-filter-repo",
     "uvx ruff check .",
     "python3 -c 'print(1)'",
-    "python3 script.py git-filter-repo --force",
   ])("does not treat %s as running filter-repo", (command) => {
     expect(run(command, "canonical")).toBeUndefined()
   })
@@ -482,6 +481,56 @@ describe("ordinary git is untouched in a canonical checkout", () => {
     "cd $X && git status",
     "pushd {linked} && git log",
   ])("%s", (command) => {
+    expect(run(command, "canonical")).toBeUndefined()
+  })
+})
+
+describe("a rewrite the walker cannot fully parse is refused", () => {
+  test.each([
+    ["a builtin-wrapped eval", "builtin eval 'git update-ref -d refs/heads/main'"],
+    ["--config-env with a separate value", "git --config-env core.x=X filter-branch --env-filter true"],
+    ["a repeated --target", "git filter-repo --target {linked} --target {canonical} --path a"],
+    ["python -c code that runs git", "python3 -c 'import os; os.system(\"git update-ref -d refs/heads/main\")'"],
+    ["a shell launched by uv run", "uv run bash -c \"builtin eval 'git update-ref -d refs/heads/main'\""],
+    ["a shell launched by uvx", "uvx sh -c 'git update-ref -d refs/heads/main'"],
+    ["a mixed-spelling --target", "git filter-repo --target {clone} --targ {canonical} --path a"],
+    ["an abbreviated repeated --target", "git filter-repo --tar={clone} --ta {canonical} --path a"],
+    ["git launched after a valued option", "uv run --package billing git update-ref -d refs/heads/main"],
+    ["git filter-branch launched after --with", "uv run --with x git filter-branch --env-filter true"],
+    ["a script that is handed a filter-repo word", "python3 script.py git-filter-repo --force"],
+    ["a pager option after a cluster that ends in a file option", "git grep -fe -O'sh -c \"git update-ref -d refs/heads/main\"' x"],
+    ["a cluster that includes the pager option", "git grep -iO'sh -c \"git update-ref -d refs/heads/main\"' x"],
+    ["git grep -O with a pager command", "git grep -O'sh -c \"git update-ref -d refs/heads/main\"' x"],
+    ["git grep --open-files-in-pager", "git grep --open-files-in-pager='sh -c \"git update-ref -d refs/heads/main\"' x"],
+    ["git diff --ext-diff with a mention", "git diff --ext-diff --foo='git update-ref -d refs/heads/main'"],
+    ["rg --pre with a mention", "rg --pre='git update-ref -d refs/heads/main' x ."],
+    ["git launched by uv run", "uv run git update-ref -d refs/heads/main"],
+    ["a nested launcher with --force", "uv run uv run git-filter-repo --force"],
+    ["a nested launcher behind --from", "uvx --from x uv run git-filter-repo"],
+    ["a git alias that runs a rewrite", "git -c alias.x='!git update-ref -d refs/heads/main' x"],
+  ])("refuses %s", (_name, command) => {
+    expect(run(command, "canonical")?.guard).toBe("history-rewrite")
+  })
+
+  test.each([
+    ["a repeated --source", "git filter-repo --source {clone} --sourc {canonical} --path a"],
+    ["an abbreviated --force", "git filter-repo --forc --path a"],
+  ])("refuses %s even in a temp clone", (_name, command) => {
+    expect(run(command, "clone")?.guard).toBe("history-rewrite")
+  })
+
+  test.each([
+    "grep filter-repo README.md",
+    "rg update-ref plugins/",
+    "echo update-ref",
+    "git log --grep=filter-branch",
+    "cat docs/filter-repo.md",
+    'git commit -m "fix update-ref guard"',
+    'git commit -am "fix update-ref guard"',
+    'grep -rie "git filter-branch" docs/',
+    'bd create --description "git replace misuse"',
+    "uv run --directory {linked} pytest",
+  ])("allows the mention in %s", (command) => {
     expect(run(command, "canonical")).toBeUndefined()
   })
 })
