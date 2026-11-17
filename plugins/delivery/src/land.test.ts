@@ -19,6 +19,7 @@ import { parseWorktreeList } from "./cleanup.ts"
 import { type CliResult, type CliRunner, runCli, SAFE_GIT_ARGS } from "./forge-adapter.ts"
 import {
   beadIdsFromBranch,
+  gitVersionFailure,
   inferWorktree,
   type LandDeps,
   type LandParams,
@@ -209,6 +210,8 @@ type Answers = {
   ancestor?: CliResult
   /** What `git merge-base --is-ancestor <landed> <base tip>` answers; `ancestor` when unset. */
   onBase?: CliResult
+  /** The version `git --version` prints; 2.45.1 when unset. */
+  gitVersion?: string
   /** What the checks read (`gh pr checks` or the GitLab merge request API) answers. */
   checks?: CliResult
 }
@@ -230,6 +233,7 @@ function runner(answers: Answers, canonical: string): { run: CliRunner; calls: C
   const run: CliRunner = (argv, options) => {
     calls.push({ argv: [...argv], cwd: options.cwd, timeoutMs: options.timeoutMs, env: options.env })
     const command = argv.join(" ")
+    if (argv[0] === "git" && argv.at(-1) === "--version") return completed(`git version ${answers.gitVersion ?? "2.45.1"}\n`)
     if (command.startsWith("git rev-parse --path-format=absolute --git-common-dir --show-toplevel")) {
       return completed(`${join(canonical, ".git")}\n${canonical}\n`)
     }
@@ -388,13 +392,15 @@ const numbered = (line: number, text: string): string =>
  * `transient` has the first reviewed commit add a scratch file and the second remove it,
  * so the last landed commit does not equal the reviewed head merged onto its parent.
  * `whitespace` lands the last line with trailing blanks, which `patch-id` ignores.
+ * `same-line` has both reviewed commits edit the one line of `base.txt`, so the second patch
+ * only applies on top of the first; `same-line-altered` lands that second edit with other text.
  *
  * The history is written by one `git fast-import`, the landed commits as the trees a
  * replay onto the moved base produces, instead of some fifteen porcelain commands
  * and a real rebase: under heavy load each child process costs a sizeable part of
  * Bun's per-test budget, and the proof reads only commits, trees and diffs.
  */
-function rebasedRepository(variant: "clean" | "altered" | "context-moved" | "transient" | "whitespace" = "clean"): {
+function rebasedRepository(variant: "clean" | "altered" | "context-moved" | "transient" | "whitespace" | "same-line" | "same-line-altered" = "clean"): {
   canonical: string
   receipts: string
   head: string
@@ -404,6 +410,7 @@ function rebasedRepository(variant: "clean" | "altered" | "context-moved" | "tra
 } {
   const moved = variant === "context-moved"
   const transient = variant === "transient"
+  const sameLine = variant === "same-line" || variant === "same-line-altered"
   const canonical = realpathSync(temporaryDirectory("delivery-land-rebase-"))
   const base = moved ? numbered(0, "") : "base\n"
   const reviewedTwo = moved ? numbered(6, "6, reviewed") : "base\ntwo\n"
@@ -445,13 +452,35 @@ function rebasedRepository(variant: "clean" | "altered" | "context-moved" | "tra
   }
   const stream = [
     commit("refs/heads/main", 1, "base", { "base.txt": base }),
-    commit(`refs/heads/${BRANCH}`, 2, "one", { "one.txt": "one\n", ...(transient ? { "scratch.txt": "scratch\n" } : {}) }, 1),
-    commit(`refs/heads/${BRANCH}`, 3, "two", transient ? { "scratch.txt": null } : { "base.txt": reviewedTwo }, 2),
+    commit(
+      `refs/heads/${BRANCH}`,
+      2,
+      "one",
+      sameLine ? { "base.txt": "first\n" } : { "one.txt": "one\n", ...(transient ? { "scratch.txt": "scratch\n" } : {}) },
+      1,
+    ),
+    commit(`refs/heads/${BRANCH}`, 3, "two", transient ? { "scratch.txt": null } : { "base.txt": sameLine ? "second\n" : reviewedTwo }, 2),
     moved
       ? commit("refs/heads/main", 4, "base moved", { "base.txt": movedBase }, 1)
       : commit("refs/heads/main", 4, "other", { "other.txt": "other\n" }, 1),
-    commit("refs/heads/landed", 5, "one", { "one.txt": "one\n", ...(transient ? { "scratch.txt": "scratch\n" } : {}) }, 4, "Forge Rebase"),
-    commit("refs/heads/landed", 6, "two", transient ? { "scratch.txt": null } : { "base.txt": landedTwo }, 5, "Forge Rebase"),
+    commit(
+      "refs/heads/landed",
+      5,
+      "one",
+      sameLine ? { "base.txt": "first\n" } : { "one.txt": "one\n", ...(transient ? { "scratch.txt": "scratch\n" } : {}) },
+      4,
+      "Forge Rebase",
+    ),
+    commit(
+      "refs/heads/landed",
+      6,
+      "two",
+      transient
+        ? { "scratch.txt": null }
+        : { "base.txt": variant === "same-line" ? "second\n" : variant === "same-line-altered" ? "third\n" : landedTwo },
+      5,
+      "Forge Rebase",
+    ),
   ].join("")
   const marks = join(canonical, ".git", "fixture-marks")
   git(canonical, ["init", "-q", "-b", "main"])
@@ -688,6 +717,30 @@ describe("delivery_land", () => {
       mergeShape: { rebase: { method: "patch-id", commits: 2 } },
     })
     expect(files()).toHaveLength(1)
+  }, 60_000)
+
+  test("a rebase of two commits that edit the same line is proved commit by commit", async () => {
+    const repo = rebasedRepository("same-line")
+    // The second patch's old side is the first commit's new text, so each commit's patch id
+    // is only meaningful when the diffs are read per commit, not against the fork point.
+    expect(git(repo.canonical, ["show", `${repo.head}:base.txt`])).toBe("second")
+    const { outcome, files } = await landRebase(repo)
+
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) throw new Error(outcome.reason)
+    expect(outcome.receipt.proof.evidence).toMatchObject({
+      mergeMethod: "rebase",
+      mergeShape: { rebase: { method: "patch-id", commits: 2 } },
+    })
+    expect(files()).toHaveLength(1)
+  }, 60_000)
+
+  test("a rebase of two commits that edit the same line refuses when the landed second edit differs", async () => {
+    const repo = rebasedRepository("same-line-altered")
+    const { outcome, files } = await landRebase(repo)
+
+    expect(reasonOf(outcome)).toContain("patch-id")
+    expect(files()).toHaveLength(0)
   }, 60_000)
 
   test("a rebase landing whose patches differ from the reviewed commits refuses and writes nothing", async () => {
@@ -1542,6 +1595,48 @@ describe("delivery_land", () => {
     expect(files()).toHaveLength(0)
   })
 
+  test.each([
+    ["git version 2.38.0\n", null],
+    ["git version 2.39.5 (Apple Git-154)\n", null],
+    ["git version 2.45.0.windows.1\n", null],
+    ["git version 3.0.0\n", null],
+    ["git version 2.37.9\n", "observed 2.37, expected 2.38 or newer"],
+    ["git version 1.99.0\n", "observed 1.99, expected 2.38 or newer"],
+    ["", 'expected "git version <major>.<minor>"'],
+    [null, 'expected "git version <major>.<minor>"'],
+  ])("gitVersionFailure reads %p", (output, failure) => {
+    const reason = gitVersionFailure(output)
+    if (failure === null) expect(reason).toBeNull()
+    else expect(reason).toContain(failure)
+  })
+
+  test.each(["2.37.9", "2.30.2", "1.9.5"])("git %s cannot run the content proof, so no merge is issued", async (gitVersion) => {
+    const { outcome, calls, files } = await land({ prView: [completed(githubPr())], gitVersion }, REVIEWED)
+
+    const reason = reasonOf(outcome)
+    expect(reason).toContain(`observed ${gitVersion.split(".").slice(0, 2).join(".")}, expected 2.38 or newer`)
+    expect(reason).toContain("no merge was issued")
+    expect(calls.filter((call) => merged(call.argv))).toEqual([])
+    expect(calls.filter((call) => call.argv[0] === "gh")).toEqual([])
+    expect(files()).toHaveLength(0)
+  })
+
+  test.each(["--output=/etc/delivery-poc", "-n1", "--upload-pack=touch /x"])(
+    "a merge commit id %p that reads as a git option reaches no git command",
+    async (oid) => {
+      const { outcome, calls, files } = await land(
+        { prView: [completed(mergedGithubPr({ mergeCommit: { oid } }))] },
+        REVIEWED,
+      )
+
+      expect(outcome.ok).toBe(false)
+      if (outcome.ok) throw new Error("expected a refusal")
+      expect(outcome.reason).toContain(oid)
+      expect(calls.filter((call) => call.argv[0] === "git" && call.argv.includes(oid))).toEqual([])
+      expect(files()).toHaveLength(0)
+    },
+  )
+
   test("ambient repository and host variables reach no forge command, on either forge", async () => {
     // Every spelling either CLI reads. `gh`: GH_REPO, GH_HOST. `glab`: GITLAB_HOST,
     // the older GL_HOST, GITLAB_URI, and GITLAB_API_HOST, which redirects API traffic
@@ -2382,7 +2477,7 @@ describe("choosing the remote and worktree of a landing", () => {
     expect(shows.length).toBeGreaterThan(0)
     for (const argv of shows) expect(argv).toContain("log.showSignature=false")
     // No command that could run a clean or smudge filter (status, diff, checkout, add, ...) is issued.
-    const allowed = ["rev-parse", "remote", "worktree", "cat-file", "show", "fetch", "rev-list", "merge-base", "diff-tree", "patch-id", "merge-tree"]
+    const allowed = ["rev-parse", "remote", "worktree", "cat-file", "show", "fetch", "rev-list", "merge-base", "diff-tree", "patch-id", "merge-tree", "--version"]
     for (const argv of reads) expect(allowed.some((verb) => argv.includes(verb))).toBe(true)
   })
 

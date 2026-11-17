@@ -1159,6 +1159,11 @@ function lsRemoteArgv(remote, ref) {
     ref
   ];
 }
+function remoteBranchTipArgv(remote, branch) {
+  if (!REMOTE_NAME.test(remote) || !isSafeArgument(remote) || !isValidBranchName(branch))
+    return null;
+  return lsRemoteArgv(remote, `refs/heads/${branch}`);
+}
 var FETCH_TIMEOUT_MS = 30000;
 function fetchCommitsArgv(remote, wants) {
   if (!REMOTE_NAME.test(remote) || !isSafeArgument(remote))
@@ -2926,7 +2931,8 @@ async function readChecks(run, bound) {
 }
 
 // plugins/delivery/src/merge-queue.ts
-import { chmodSync, existsSync as existsSync3, mkdirSync as mkdirSync3, readFileSync as readFileSync4, rmSync as rmSync2, writeFileSync as writeFileSync3 } from "fs";
+import { randomBytes as randomBytes2 } from "crypto";
+import { linkSync as linkSync2, mkdirSync as mkdirSync3, readFileSync as readFileSync4, rmSync as rmSync2, writeFileSync as writeFileSync3 } from "fs";
 import { join as join4 } from "path";
 var DEFAULT_QUEUE_WAIT_SECONDS = 600;
 var MAX_QUEUE_WAIT_SECONDS = 3600;
@@ -2934,7 +2940,11 @@ var FIRST_POLL_DELAY_MS = 5000;
 var MAX_POLL_DELAY_MS = 60000;
 var ABSENCES_BEFORE_REMOVED = 2;
 var RULES_PAGE = 100;
-var QUEUE_METHODS = { MERGE: "merge", SQUASH: "squash", REBASE: "rebase" };
+var QUEUE_METHODS = new Map([
+  ["MERGE", "merge"],
+  ["SQUASH", "squash"],
+  ["REBASE", "rebase"]
+]);
 function own3(holder, key) {
   if (typeof holder !== "object" || holder === null || Array.isArray(holder))
     return;
@@ -2963,7 +2973,7 @@ function queueRuleFrom(payload) {
   if (queue === undefined)
     return { required: false };
   const raw = text2(own3(queue, "parameters"), "merge_method");
-  const method = QUEUE_METHODS[raw ?? ""];
+  const method = raw === null ? undefined : QUEUE_METHODS.get(raw);
   if (method === undefined) {
     return {
       reason: `rules: observed merge_queue merge_method ${JSON.stringify(raw)}, expected MERGE, SQUASH or REBASE`
@@ -2971,16 +2981,61 @@ function queueRuleFrom(payload) {
   }
   return { required: true, method };
 }
+var NO_QUEUE_QUERY = `query($owner: String!, $name: String!, $branch: String!) { repository(owner: $owner, name: $name) { nameWithOwner mergeQueue(branch: $branch) { id } } }`;
+function mergeQueueArgv(repoPath, branch) {
+  const [owner = "", name = ""] = repoPath.split("/");
+  return ["gh", "api", "graphql", "-f", `query=${NO_QUEUE_QUERY}`, "-f", `owner=${owner}`, "-f", `name=${name}`, "-f", `branch=${branch}`];
+}
+function rulesetsArgv(repoPath) {
+  return ["gh", "api", `repos/${repoPath}/rulesets?per_page=${RULES_PAGE}`];
+}
+function succeeded(result) {
+  return result.ok && result.exitCode === 0 && result.error === undefined;
+}
+async function noQueueConfirmed(run, repoPath, branch, env) {
+  const graphql = mergeQueueArgv(repoPath, branch);
+  const queue = await run(graphql, { timeoutMs: FORGE_TIMEOUT_MS, env });
+  if (!succeeded(queue))
+    return `gh api graphql (mergeQueue of ${branch}) observed ${queue.error ?? `exit ${queue.exitCode}`}, expected exit 0`;
+  let payload;
+  try {
+    payload = JSON.parse(queue.stdout);
+  } catch {
+    return "gh api graphql (mergeQueue): observed unparseable output, expected one JSON object";
+  }
+  const errors = graphqlErrors(payload);
+  if (errors !== null)
+    return errors;
+  const repository = own3(own3(payload, "data"), "repository");
+  if (text2(repository, "nameWithOwner")?.toLowerCase() !== repoPath.toLowerCase()) {
+    return `gh api graphql (mergeQueue): observed repository ${JSON.stringify(text2(repository, "nameWithOwner"))}, expected ${JSON.stringify(repoPath)}`;
+  }
+  const field = typeof repository === "object" && repository !== null ? Object.getOwnPropertyDescriptor(repository, "mergeQueue") : undefined;
+  if (field === undefined || !("value" in field) || field.value !== null) {
+    return "gh api graphql (mergeQueue): observed a merge queue or no mergeQueue field, expected an explicit null";
+  }
+  const rulesets = rulesetsArgv(repoPath);
+  const listed = await run(rulesets, { timeoutMs: FORGE_TIMEOUT_MS, env });
+  if (!succeeded(listed))
+    return `${rulesets.join(" ")}: observed ${listed.error ?? `exit ${listed.exitCode}`}, expected a readable rulesets list`;
+  try {
+    if (!Array.isArray(JSON.parse(listed.stdout)))
+      return `${rulesets.join(" ")}: observed a payload that is not an array`;
+  } catch {
+    return `${rulesets.join(" ")}: observed unparseable output, expected a JSON array`;
+  }
+  return null;
+}
 async function readQueueRule(run, repoPath, branch, env) {
   const argv = rulesArgv(repoPath, branch);
   const result = await run(argv, { timeoutMs: FORGE_TIMEOUT_MS, env });
   if (!result.ok || result.exitCode !== 0 || result.error !== undefined) {
     const detail = `${argv.join(" ")}: observed ${result.error ?? `exit ${result.exitCode}`}, expected exit 0 to learn whether the branch requires a merge queue; ${result.stderr.trim().slice(0, 300)}`;
     if (result.error === undefined && /\b404\b|not found/i.test(result.stderr)) {
-      const probe = ["gh", "api", `repos/${repoPath}`, "--jq", ".full_name"];
-      const repo = await run(probe, { timeoutMs: FORGE_TIMEOUT_MS, env });
-      const confirmed = repo.ok && repo.exitCode === 0 && repo.error === undefined && repo.stdout.trim().toLowerCase() === repoPath.toLowerCase();
-      return confirmed ? { required: false } : { reason: `${detail}; ${probe.join(" ")} did not confirm repository access either` };
+      const unconfirmed = await noQueueConfirmed(run, repoPath, branch, env);
+      return unconfirmed === null ? { required: false } : {
+        reason: `${detail}; the 404 is not taken as "no merge queue" because ${unconfirmed}. Check that the gh token may read branch rules (repository administration read access), or land through the GitHub UI`
+      };
     }
     return { reason: detail };
   }
@@ -3064,6 +3119,9 @@ function bindingFailure(snapshot, expected) {
   if (snapshot.baseRefName !== expected.baseRefName) {
     return `graphql: observed baseRefName ${JSON.stringify(snapshot.baseRefName)}, expected ${JSON.stringify(expected.baseRefName)}; the pull request was re-targeted or the read is for another pull request`;
   }
+  if (snapshot.id !== expected.id) {
+    return `graphql: observed pull request node id ${JSON.stringify(snapshot.id)}, expected ${JSON.stringify(expected.id)} from the independent pr view read; the enqueue would act on another pull request`;
+  }
   return null;
 }
 function decideQueue(snapshot, expected, absent) {
@@ -3119,10 +3177,12 @@ async function awaitQueue(options) {
   for (let attempt = 0;; attempt++) {
     const observed = await options.read();
     if ("reason" in observed)
-      return { kind: "refused", reason: observed.reason };
+      return { kind: "refused", reason: observed.reason, terminal: false };
     const decision = decideQueue(observed.snapshot, options.expected, absent);
-    if (decision.kind !== "wait")
+    if (decision.kind === "merged")
       return decision;
+    if (decision.kind === "refused")
+      return { ...decision, terminal: true };
     absent = decision.absent;
     const delay = pollDelayMs(attempt);
     if (options.stopped() || spent + delay > options.budgetMs)
@@ -3147,29 +3207,156 @@ function containmentArgv(repoPath, oid, branch) {
 function branchContains(status) {
   return status.trim() === "ahead" || status.trim() === "identical";
 }
+function enqueueAnswer(result) {
+  if (!result.ok || result.error !== undefined) {
+    return { kind: "uncertain", reason: `observed ${result.error ?? "a run that did not complete"}, expected exit 0` };
+  }
+  let payload;
+  try {
+    payload = JSON.parse(result.stdout);
+  } catch {
+    return {
+      kind: "uncertain",
+      reason: `observed exit ${result.exitCode} with output that is not one JSON object; ${result.stderr.trim().slice(0, 300)}`
+    };
+  }
+  const errors = graphqlErrors(payload);
+  const entry = enqueuedEntry(payload);
+  if (errors !== null)
+    return entry === null ? { kind: "rejected", reason: errors } : { kind: "uncertain", reason: errors };
+  if (result.exitCode !== 0)
+    return { kind: "uncertain", reason: `observed exit ${result.exitCode}, expected exit 0` };
+  if (entry === null) {
+    return { kind: "uncertain", reason: "observed no mergeQueueEntry in the response, expected the queued entry" };
+  }
+  return { kind: "queued" };
+}
 function pendingPath(directory, number, head) {
   return join4(directory, `pending-queue-${number}-${head.slice(0, 12)}.json`);
 }
-function hasPending(directory, repository, number, head) {
+function readPending(directory, repository, number, head) {
   const path = pendingPath(directory, number, head);
-  if (!existsSync3(path))
-    return false;
+  let raw;
   try {
-    const record = JSON.parse(readFileSync4(path, "utf8"));
-    return text2(record, "repository")?.toLowerCase() === repository.toLowerCase() && own3(record, "number") === number && text2(record, "head") === head;
-  } catch {
-    return false;
+    raw = readFileSync4(path, "utf8");
+  } catch (error) {
+    if (error.code === "ENOENT")
+      return { kind: "absent" };
+    return { kind: "unreadable", path, reason: error instanceof Error ? error.message : String(error) };
   }
+  let record;
+  try {
+    record = JSON.parse(raw);
+  } catch {
+    return { kind: "unreadable", path, reason: "observed content that is not one JSON object, as a truncated write leaves" };
+  }
+  const named = text2(record, "method");
+  const method = named === null ? undefined : MERGE_METHODS.find((known) => known === named);
+  const holder = text2(record, "repository");
+  const mismatch = own3(record, "schema") !== 1 ? `schema ${JSON.stringify(own3(record, "schema"))}, expected 1` : holder === null || holder.toLowerCase() !== repository.toLowerCase() ? `repository ${JSON.stringify(holder)}, expected ${JSON.stringify(repository)}` : own3(record, "number") !== number ? `number ${JSON.stringify(own3(record, "number"))}, expected ${number}` : text2(record, "head") !== head ? `head ${JSON.stringify(text2(record, "head"))}, expected ${JSON.stringify(head)}` : method === undefined ? `method ${JSON.stringify(named)}, expected one of ${MERGE_METHODS.join(", ")}` : null;
+  if (mismatch !== null || holder === null || method === undefined) {
+    return { kind: "unreadable", path, reason: `observed ${mismatch ?? "an incomplete record"}` };
+  }
+  return {
+    kind: "record",
+    record: {
+      schema: 1,
+      repository: holder,
+      number,
+      head,
+      method,
+      enqueuedAt: text2(record, "enqueuedAt") ?? "",
+      generation: text2(record, "generation") ?? ""
+    }
+  };
+}
+function publishExclusive(path, content) {
+  const temporary = `${path}.${process.pid}.${randomBytes2(6).toString("hex")}.tmp`;
+  try {
+    writeFileSync3(temporary, content, { mode: 384, flag: "wx" });
+  } catch (error) {
+    if (error.code !== "EEXIST")
+      rmSync2(temporary, { force: true });
+    throw error;
+  }
+  try {
+    linkSync2(temporary, path);
+    return "created";
+  } catch (error) {
+    if (error.code === "EEXIST")
+      return "exists";
+    throw error;
+  } finally {
+    rmSync2(temporary, { force: true });
+  }
+}
+function newGeneration() {
+  return randomBytes2(12).toString("hex");
 }
 function writePending(directory, record) {
   mkdirSync3(directory, { recursive: true, mode: 448 });
-  const path = pendingPath(directory, record.number, record.head);
-  writeFileSync3(path, `${JSON.stringify({ schema: 1, ...record })}
-`, { mode: 384 });
-  chmodSync(path, 384);
+  const content = { schema: 1, ...record, generation: record.generation ?? newGeneration() };
+  return publishExclusive(pendingPath(directory, record.number, record.head), `${JSON.stringify(content)}
+`);
 }
-function clearPending(directory, number, head) {
+function enqueueLockPath(directory, number, head) {
+  return join4(directory, `pending-queue-${number}-${head.slice(0, 12)}.lock`);
+}
+function processAlive2(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+}
+function readOrNull(path) {
+  try {
+    return readFileSync4(path, "utf8");
+  } catch {
+    return null;
+  }
+}
+function acquireEnqueueLock(directory, number, head, nowMs, alive = processAlive2) {
+  mkdirSync3(directory, { recursive: true, mode: 448 });
+  const path = enqueueLockPath(directory, number, head);
+  const token = randomBytes2(12).toString("hex");
+  const content = `${JSON.stringify({ pid: process.pid, at: nowMs, token })}
+`;
+  if (publishExclusive(path, content) === "created") {
+    return { kind: "acquired", release: () => readOrNull(path) === content ? rmSync2(path, { force: true }) : undefined };
+  }
+  let holder = null;
+  try {
+    holder = JSON.parse(readOrNull(path) ?? "null");
+  } catch {}
+  const pid = own3(holder, "pid");
+  const at = own3(holder, "at");
+  const since = typeof at === "number" ? ` since ${new Date(at).toISOString()}` : "";
+  const detail = typeof pid !== "number" ? "by an unreadable holder" : alive(pid) ? `by process ${pid}${since}` : `by process ${pid}${since}, which has ended without releasing it`;
+  return { kind: "held", path, detail };
+}
+function removePendingLocked(directory, repository, number, head, generation) {
+  const now = readPending(directory, repository, number, head);
+  if (now.kind !== "record" || now.record.generation !== generation)
+    return "kept";
   rmSync2(pendingPath(directory, number, head), { force: true });
+  return "cleared";
+}
+function clearPending(directory, repository, number, head, generation, nowMs) {
+  let lock;
+  try {
+    lock = acquireEnqueueLock(directory, number, head, nowMs);
+  } catch {
+    return "kept";
+  }
+  if (lock.kind === "held")
+    return "kept";
+  try {
+    return removePendingLocked(directory, repository, number, head, generation);
+  } finally {
+    lock.release();
+  }
 }
 
 // plugins/delivery/src/land.ts
@@ -3177,7 +3364,7 @@ var GIT_TIMEOUT_MS2 = 5000;
 var POSITIVE_INTEGER2 = /^[1-9][0-9]*$/;
 var AGENT_BRANCH = /^(?:omp|opencode)\/agent\/([A-Za-z0-9][A-Za-z0-9._-]*)$/;
 var BEAD_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
-var PR_FIELDS2 = "number,url,state,baseRefName,headRefName,headRefOid,mergeCommit,mergedAt,title";
+var PR_FIELDS2 = "id,number,url,state,baseRefName,headRefName,headRefOid,mergeCommit,mergedAt,title";
 var FULL_OID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 function show3(value) {
   if (value === undefined)
@@ -3255,6 +3442,7 @@ function observePr(forge, payload) {
   const merge = forge === "github" ? mergeOid(stringField(ownValue(payload, "mergeCommit"), "oid")) : mergeOid(stringField(payload, "merge_commit_sha")) ?? mergeOid(stringField(payload, "squash_commit_sha"));
   const mergedAt = stringField(payload, keys.mergedAt);
   return {
+    nodeId: forge === "github" ? stringField(payload, "id") : null,
     number,
     url: stringField(payload, keys.url) ?? "",
     title: stringField(payload, "title"),
@@ -3350,13 +3538,13 @@ async function rebaseEquivalence(head, oid, git) {
       reason: `git merge-base ${head} ${oid}: observed ${fork === null ? "no completed read" : show3(fork)}, expected the commit the reviewed branch forked from`
     };
   }
-  const reviewed = oidLines(await git(["rev-list", "--reverse", "--topo-order", "--no-merges", `${fork}..${head}`]));
+  const reviewed = oidLines(await git(["rev-list", "--reverse", "--topo-order", "--no-merges", "--end-of-options", `${fork}..${head}`]));
   if (reviewed === null || reviewed.length === 0) {
     return {
       reason: `git rev-list ${fork}..${head}: observed ${reviewed === null ? "no completed read" : "no commits"}, expected the reviewed commits`
     };
   }
-  const chain = await git(["rev-list", "--first-parent", "--parents", `--max-count=${reviewed.length}`, oid]);
+  const chain = await git(["rev-list", "--first-parent", "--parents", `--max-count=${reviewed.length}`, "--end-of-options", oid]);
   const records = chain === null ? null : chain.split(`
 `).filter((line) => line !== "").map((line) => line.split(" "));
   if (records === null || records.length !== reviewed.length || records.some((ids) => ids.length !== 2 || !ids.every((id) => FULL_OID.test(id)))) {
@@ -3384,9 +3572,50 @@ async function rebaseEquivalence(head, oid, git) {
       };
     }
   }
+  const unproven = await contentFailure(head, oid, landedBase, git, false);
+  if (unproven !== null)
+    return unproven;
   return { method: "patch-id", reviewed: `${fork}..${head}`, landed: `${landedBase}..${oid}`, commits: reviewed.length };
 }
-async function mergeProof(pr, method, git, queued = false) {
+async function treeOf(commit, git) {
+  const printed = (await git(["rev-parse", "--verify", "--end-of-options", `${commit}^{tree}`]))?.trim().toLowerCase() ?? null;
+  return printed !== null && FULL_OID.test(printed) ? printed : null;
+}
+async function contentFailure(head, oid, parent, git, requireChange) {
+  const landedTree = await treeOf(oid, git);
+  const parentTree = await treeOf(parent, git);
+  if (landedTree === null || parentTree === null) {
+    return { reason: `git rev-parse ${landedTree === null ? oid : parent}^{tree}: observed no tree id, expected one` };
+  }
+  if (requireChange && landedTree === parentTree) {
+    return { reason: `landed commit ${oid}: observed the same tree as its parent ${parent}, expected the reviewed change` };
+  }
+  const merged = (await git(["merge-tree", "--write-tree", parent, head]))?.split(`
+`)[0]?.trim().toLowerCase() ?? null;
+  if (merged === null || !FULL_OID.test(merged)) {
+    return {
+      reason: `git merge-tree --write-tree ${parent} ${head}: observed ${merged === null ? "a conflict or no completed read" : show3(merged)}, expected a clean merge tree to compare with the landed tree`
+    };
+  }
+  if (merged !== landedTree) {
+    return {
+      reason: `landed commit ${oid}: observed tree ${landedTree}, expected ${merged}, the reviewed head ${head} applied to its parent ${parent}; the landed content is not the reviewed change`
+    };
+  }
+  return null;
+}
+async function baseContainmentFailure(oid, baseTip, git) {
+  const tip = await baseTip();
+  if (typeof tip !== "string")
+    return tip;
+  if (await git(["merge-base", "--is-ancestor", oid, tip]) === null) {
+    return {
+      reason: `git merge-base --is-ancestor ${oid} ${tip}: observed the landed commit outside the fetched base branch, expected it in the history of ${tip}`
+    };
+  }
+  return null;
+}
+async function mergeProof(pr, method, git, queued, baseTip) {
   if (pr.state.trim().toUpperCase() !== "MERGED" || pr.mergeCommitOid === null) {
     return {
       reason: `observed pr.state ${show3(pr.state)} and pr.mergeCommitOid ${show3(pr.mergeCommitOid)}, expected state "MERGED" and a non-empty merge commit oid`
@@ -3394,7 +3623,15 @@ async function mergeProof(pr, method, git, queued = false) {
   }
   const oid = pr.mergeCommitOid.trim().toLowerCase();
   const head = pr.headRefOid.trim().toLowerCase();
-  const output = await git(["-c", "log.showSignature=false", "show", "-s", "--format=%P", oid]);
+  for (const [field, value] of [
+    ["pr.mergeCommitOid", oid],
+    ["pr.headRefOid", head]
+  ]) {
+    if (!FULL_OID.test(value)) {
+      return { reason: `${field}: observed ${show3(value)}, expected a 40- or 64-character lowercase hex object id; no Git command was run` };
+    }
+  }
+  const output = await git(["-c", "log.showSignature=false", "show", "-s", "--format=%P", "--end-of-options", oid]);
   if (output === null)
     return { reason: `git show -s --format=%P ${oid}: observed no completed read, expected the merge commit's parents` };
   const text = output.trim();
@@ -3404,45 +3641,61 @@ async function mergeProof(pr, method, git, queued = false) {
       reason: `git show -s --format=%P ${oid}: observed malformed parent ids ${show3(text)}, expected full hexadecimal object ids`
     };
   }
+  const first = parents[0] ?? "";
+  const label = method === null ? "pre-merged request" : `merge_method "${method}"`;
   if (method === null) {
-    if (parents.length === 1)
-      return { oid, parents, rebase: null };
-    if (parents.length === 2 && parents[1]?.toLowerCase() === head)
-      return { oid, parents, rebase: null };
-    return {
-      reason: `pre-merged request: observed ${parents.length} parents, expected one parent or two with the reviewed head as the second parent`
-    };
-  }
-  if (method === "merge") {
-    if (parents.length !== 2)
+    if (parents.length === 2 && parents[1] !== head) {
+      return {
+        reason: `pre-merged request: observed second parent ${show3(parents[1])}, expected the reviewed head ${show3(head)}`
+      };
+    }
+    if (parents.length !== 1 && parents.length !== 2) {
+      return {
+        reason: `pre-merged request: observed ${parents.length} parents, expected one parent or two with the reviewed head as the second parent`
+      };
+    }
+  } else if (method === "merge") {
+    if (parents.length !== 2) {
       return {
         reason: `merge_method "merge": observed ${parents.length} parents, expected exactly 2 with the reviewed head as the second parent`
       };
+    }
     if (queued) {
       if (await git(["merge-base", "--is-ancestor", head, oid]) === null) {
         return {
           reason: `merge_method "merge": observed reviewed head ${show3(pr.headRefOid)} not an ancestor of the queue's merge commit ${oid}, expected the head in what landed`
         };
       }
-      return { oid, parents, rebase: null };
-    }
-    if (parents[1]?.toLowerCase() !== head) {
+    } else if (parents[1] !== head) {
       return {
         reason: `merge_method "merge": observed second parent ${show3(parents[1])}, expected reviewed head ${show3(pr.headRefOid)}`
       };
     }
-    return { oid, parents, rebase: null };
-  }
-  if (parents.length !== 1)
+  } else if (parents.length !== 1) {
     return {
       reason: `merge_method "${method}": observed ${parents.length} parents, expected exactly 1 for a linear landing`
     };
-  if (method === "squash")
+  }
+  const outside = await baseContainmentFailure(oid, baseTip, git);
+  if (outside !== null)
+    return { reason: `${label}: ${outside.reason}` };
+  if (parents.length === 2) {
+    const unproven = await contentFailure(head, oid, first, git, false);
+    return unproven === null ? { oid, parents, rebase: null } : { reason: `${label}: ${unproven.reason}` };
+  }
+  if (method === "rebase") {
+    const rebase = await rebaseEquivalence(head, oid, git);
+    return "reason" in rebase ? { reason: `merge_method "rebase": ${rebase.reason}` } : { oid, parents, rebase };
+  }
+  const single = await contentFailure(head, oid, first, git, true);
+  if (single === null)
     return { oid, parents, rebase: null };
+  if (method === "squash")
+    return { reason: `merge_method "squash": ${single.reason}` };
   const rebase = await rebaseEquivalence(head, oid, git);
-  if ("reason" in rebase)
-    return { reason: `merge_method "rebase": ${rebase.reason}` };
-  return { oid, parents, rebase };
+  if (!("reason" in rebase))
+    return { oid, parents, rebase };
+  return { reason: `pre-merged request: ${single.reason}; as a rebase landing: ${rebase.reason}` };
 }
 var FETCH_ATTEMPT_DELAYS_MS = [0, 2000, 5000];
 function abortableSleep(ms, signal) {
@@ -3510,6 +3763,19 @@ async function ensureLocalCommits(required, baseBranch, remote, git, fetch, slee
   }
   return { required: [...required], fetches };
 }
+var MIN_GIT_VERSION = { major: 2, minor: 38 };
+function gitVersionFailure(output) {
+  const need = `${MIN_GIT_VERSION.major}.${MIN_GIT_VERSION.minor}`;
+  const match = output === null ? null : /^git version (\d+)\.(\d+)/.exec(output.trim());
+  if (match === null) {
+    return `git --version: observed ${show3(output)}, expected "git version <major>.<minor>"; delivery_land needs Git ${need} or newer for git merge-tree --write-tree`;
+  }
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  if (major > MIN_GIT_VERSION.major || major === MIN_GIT_VERSION.major && minor >= MIN_GIT_VERSION.minor)
+    return null;
+  return `git --version: observed ${major}.${minor}, expected ${need} or newer, which git merge-tree --write-tree needs to prove the landed content; upgrade Git`;
+}
 async function gitOutput(run, cwd, argv, env, input) {
   const result = await run(["git", ...SAFE_GIT_ARGS, ...argv], { cwd, timeoutMs: GIT_TIMEOUT_MS2, env, input });
   if (!result.ok || result.error !== undefined || result.exitCode !== 0)
@@ -3574,6 +3840,30 @@ function missingBeadIdentity(ids, branch, ledger) {
   if (!ledger.active || ids.length > 0)
     return null;
   return `beads.ids: observed no bead identity for branch ${show3(branch)}, expected an "omp/agent/<bead-id>" or "opencode/agent/<bead-id>" branch or an explicit beadId; the ledger at canonical root ${show3(ledger.root)} is active, so this landing has no bead for the native close-out commands`;
+}
+function receiptQueueMethod(directory, expected) {
+  const landed = expected.mergeCommitOid?.trim().toLowerCase() ?? "";
+  if (!FULL_OID.test(landed))
+    return null;
+  let receipts;
+  try {
+    receipts = listReceipts(directory, { pr: expected.number });
+  } catch {
+    return null;
+  }
+  for (const receipt of receipts) {
+    if (receipt.emitter.tool !== "delivery_land" || receipt.outcome !== "landed" || receipt.repo.forge !== "github" || receipt.repo.nameWithOwner.toLowerCase() !== expected.repository.toLowerCase() || receipt.pr.baseRefName !== expected.baseRefName || receipt.pr.headRefOid.trim().toLowerCase() !== expected.head || receipt.pr.mergeCommitOid?.trim().toLowerCase() !== landed) {
+      continue;
+    }
+    const evidence = receipt.proof.evidence;
+    const recorded = ownValue(evidence, "queue");
+    const method = stringField(recorded, "method");
+    const known = MERGE_METHODS.find((candidate) => candidate === method);
+    if (stringField(recorded, "rule") === "merge_queue" && known !== undefined && stringField(evidence, "mergeMethod") === known) {
+      return known;
+    }
+  }
+  return null;
 }
 function observationMethod(argv) {
   const head = argv.slice(0, 3);
@@ -3714,6 +4004,9 @@ async function landPullRequest(params, deps = {}) {
   const resolved = await resolveLandingTarget(params, git, cwd, forgeEnv);
   if ("reason" in resolved)
     return refuse(resolved.reason);
+  const oldGit = gitVersionFailure(await git(["--version"]));
+  if (oldGit !== null)
+    return refuse(`${oldGit}; no merge was issued and no receipt was written`);
   const { remote, remoteUrl, forge, forgeHost, nameWithOwner, repository, cliRepo, forgeCommandEnv } = resolved;
   const gitlabHost = forgeHost === "github.com" ? undefined : forgeHost;
   const sessionCommonDir = repository.commonDir;
@@ -3798,6 +4091,25 @@ async function landPullRequest(params, deps = {}) {
     }
   }
   let queue = null;
+  const pendingDirectory = deps.receiptsDirectory ?? receiptDirectory(env, repository.key);
+  const pending = forge === "github" ? readPending(pendingDirectory, nameWithOwner, requested, head) : { kind: "absent" };
+  if (pending.kind === "unreadable") {
+    return refuse(`the pending-queue record ${pending.path} is unreadable (${pending.reason}), so whether an earlier call enqueued ${nameWithOwner}#${number} at ${head} cannot be told; check the pull request's merge queue on GitHub, then delete that file and call delivery_land again; nothing was enqueued or merged and no receipt was written`);
+  }
+  let ownedRecord = null;
+  if (alreadyMerged && forge === "github") {
+    const method = pending.kind === "record" ? pending.record.method : receiptQueueMethod(pendingDirectory, {
+      repository: nameWithOwner,
+      number: requested,
+      head,
+      baseRefName: first.pr.baseRefName,
+      mergeCommitOid: first.pr.mergeCommitOid
+    });
+    if (method !== null)
+      queue = { method };
+    if (pending.kind === "record")
+      ownedRecord = pending.record.generation;
+  }
   if (!alreadyMerged && forge === "github") {
     const path = normalizeRepoPath("github", nameWithOwner);
     if (path === null)
@@ -3828,12 +4140,14 @@ async function landPullRequest(params, deps = {}) {
   let proved = first.pr;
   let rereadArgv = null;
   let mergePolicy = null;
+  let queueTraceLost = null;
   const refuseMerged = (reason) => {
     if (mergeArgv === null) {
       const retry = alreadyMerged ? "; the request is already MERGED, so re-running delivery_land issues no merge" : "";
       return refuse(`${reason}; no receipt was written${retry}`);
     }
-    const text = `${reason}; no receipt was written. The forge accepted ${mergeArgv.join(" ")}, so the request is merged and must not be merged again: re-run delivery_land with the same pr and expectHeadSha ${head}; it reads the request as MERGED, issues no merge, and writes the receipt once the proof completes`;
+    const lost = queueTraceLost === null ? "" : `. ${queueTraceLost}, so a re-run cannot tell the queue landed it and holds it to the direct-merge proof: make the receipts directory writable first`;
+    const text = `${reason}; no receipt was written${lost}. The forge accepted ${mergeArgv.join(" ")}, so the request is merged and must not be merged again: re-run delivery_land with the same pr and expectHeadSha ${head}; it reads the request as MERGED, issues no merge, and writes the receipt once the proof completes`;
     return { ok: false, reason: text, text: `delivery_land refused: ${text}`, mergeIssued: true };
   };
   const rereadLanded = async () => {
@@ -3854,7 +4168,10 @@ async function landPullRequest(params, deps = {}) {
     if (!FULL_OID.test(head)) {
       return refuse(`pr.headRefOid: observed ${show3(first.pr.headRefOid)}, expected a 40- or 64-character hex object id to bind the enqueue to; nothing was enqueued`);
     }
-    const pendingDirectory = deps.receiptsDirectory ?? receiptDirectory(env, repository.key);
+    if (first.pr.nodeId === null || first.pr.nodeId === "") {
+      return refuse(`pr.id: observed ${show3(first.pr.nodeId)}, expected the pull request node id from ${first.argv.join(" ")} to pin the enqueue to; nothing was enqueued and no receipt was written`);
+    }
+    const nodeId = first.pr.nodeId;
     const read = async () => {
       const observed = await readSnapshot(run, owner, repoName, number, forgeCommandEnv);
       if ("reason" in observed)
@@ -3862,58 +4179,132 @@ async function landPullRequest(params, deps = {}) {
       const unbound = bindingFailure(observed.snapshot, {
         repository: nameWithOwner,
         number: requested,
-        baseRefName: first.pr.baseRefName
+        baseRefName: first.pr.baseRefName,
+        id: nodeId
       });
       return unbound === null ? observed : { reason: unbound };
     };
     const sleep = (ms) => (deps.sleep ?? abortableSleep)(ms, signal);
     const queueLabel = ["gh", "api", "graphql", "enqueuePullRequest", `expectedHeadOid=${head}`];
+    const nowMs = () => deps.now?.() ?? Date.now();
+    const recordedNow = () => {
+      const now = readPending(pendingDirectory, nameWithOwner, requested, head);
+      if (now.kind === "unreadable") {
+        return {
+          reason: `the pending-queue record ${now.path} is unreadable (${now.reason}), so whether an earlier call enqueued ${nameWithOwner}#${number} at ${head} cannot be told; check the pull request's merge queue on GitHub, then delete that file and call delivery_land again; nothing was enqueued and no receipt was written`
+        };
+      }
+      return { generation: now.kind === "record" ? now.record.generation : null };
+    };
+    const recordEnqueue = (generation) => {
+      try {
+        return writePending(pendingDirectory, {
+          repository: nameWithOwner,
+          number: requested,
+          head,
+          method: queue?.method ?? mergeMethod,
+          enqueuedAt: observedAt,
+          generation
+        });
+      } catch (error) {
+        return {
+          reason: `the pending-queue record could not be written (${error instanceof Error ? error.message : String(error)})`
+        };
+      }
+    };
+    const adoptRecord = () => {
+      for (let attempt = 0;attempt < 3; attempt++) {
+        const generation = newGeneration();
+        const written = recordEnqueue(generation);
+        if (typeof written !== "string")
+          return written;
+        if (written === "created") {
+          ownedRecord = generation;
+          return null;
+        }
+        const now = recordedNow();
+        if ("reason" in now)
+          return now;
+        if (now.generation !== null) {
+          ownedRecord = now.generation;
+          return null;
+        }
+      }
+      return { reason: "the pending-queue record could not be written (it was removed after each of three claims)" };
+    };
     const current = await read();
     if ("reason" in current)
       return refuse(`${current.reason}; nothing was enqueued and no receipt was written`);
     const standing = decideQueue(current.snapshot, head, 0);
     if (standing.kind === "refused") {
-      clearPending(pendingDirectory, requested, head);
+      if (pending.kind === "record") {
+        clearPending(pendingDirectory, nameWithOwner, requested, head, pending.record.generation, nowMs());
+      }
       return refuse(`${standing.reason}; nothing was enqueued and no receipt was written`);
     }
+    const joinEntry = () => {
+      const failed = adoptRecord();
+      return failed === null ? null : refuse(`${failed.reason} while the head is in the merge queue; call delivery_land again with the same pr and expectHeadSha ${head} to wait on the entry; no receipt was written`);
+    };
+    if (standing.kind === "wait" && current.snapshot.entry !== null) {
+      const unjoined = joinEntry();
+      if (unjoined !== null)
+        return unjoined;
+    }
     if (standing.kind === "wait" && current.snapshot.entry === null) {
-      if (hasPending(pendingDirectory, nameWithOwner, requested, head)) {
-        clearPending(pendingDirectory, requested, head);
-        return refuse("mergeQueueEntry: observed no entry for a pull request an earlier call enqueued, expected a queued or merged one; the entry was removed from the merge queue and was not enqueued again. Call delivery_land again only if the pull request should be re-enqueued; nothing was merged and no receipt was written");
-      }
-      const unenqueued = interrupted("before the enqueue; nothing was enqueued and no receipt was written");
-      if (unenqueued !== null)
-        return unenqueued;
-      const enqueue = await run(enqueueArgv(current.snapshot.id, head), {
-        cwd,
-        timeoutMs: FORGE_TIMEOUT_MS,
-        env: forgeCommandEnv
-      });
-      const enqueueFailure = cliFailure(queueLabel, enqueue);
-      if (enqueueFailure !== null)
-        return refuse(`${enqueueFailure}; no receipt was written`);
-      let response;
+      let lock;
       try {
-        response = JSON.parse(enqueue.stdout);
-      } catch {
-        return refuse(`${queueLabel.join(" ")}: observed unparseable output, expected one JSON object`);
-      }
-      const rejected = graphqlErrors(response);
-      if (rejected !== null)
-        return refuse(`${queueLabel.join(" ")}: ${rejected}; no receipt was written`);
-      if (enqueuedEntry(response) === null) {
-        return refuse(`${queueLabel.join(" ")}: observed no mergeQueueEntry in the response, expected the queued entry; no receipt was written`);
-      }
-      try {
-        writePending(pendingDirectory, {
-          repository: nameWithOwner,
-          number: requested,
-          head,
-          enqueuedAt: observedAt
-        });
+        lock = acquireEnqueueLock(pendingDirectory, requested, head, nowMs());
       } catch (error) {
-        return refuse(`the pending-queue record could not be written (${error instanceof Error ? error.message : String(error)}) after the head was enqueued; call delivery_land again with the same pr and expectHeadSha ${head} to wait on the entry`);
+        return refuse(`the pending-queue lock could not be written (${error instanceof Error ? error.message : String(error)}); nothing was enqueued and no receipt was written`);
       }
+      if (lock.kind === "held") {
+        return refuse(`the enqueue lock ${lock.path} for ${nameWithOwner}#${number} at ${head} is held ${lock.detail}, so another call is enqueuing it; this call did not enqueue. Call delivery_land again with the same pr and expectHeadSha ${head} to wait on that entry. If no delivery_land call is running, an interrupted call left the lock: check the pull request's merge queue on GitHub, then delete the lock; no receipt was written`);
+      }
+      const decided = await (async () => {
+        const locked = await read();
+        if ("reason" in locked)
+          return refuse(`${locked.reason}; nothing was enqueued and no receipt was written`);
+        const now = decideQueue(locked.snapshot, head, 0);
+        if (now.kind === "refused") {
+          const seen = recordedNow();
+          if (!("reason" in seen) && seen.generation !== null) {
+            removePendingLocked(pendingDirectory, nameWithOwner, requested, head, seen.generation);
+          }
+          return refuse(`${now.reason}; nothing was enqueued and no receipt was written`);
+        }
+        if (now.kind === "merged" || locked.snapshot.entry !== null)
+          return joinEntry();
+        const history = recordedNow();
+        if ("reason" in history)
+          return refuse(history.reason);
+        if (history.generation !== null) {
+          removePendingLocked(pendingDirectory, nameWithOwner, requested, head, history.generation);
+          return refuse("mergeQueueEntry: observed no entry for a pull request an earlier call enqueued, expected a queued or merged one; the entry was removed from the merge queue and was not enqueued again (an earlier enqueue whose answer was lost may also never have made one). Call delivery_land again only if the pull request should be re-enqueued; nothing was merged and no receipt was written");
+        }
+        const unenqueued = interrupted("before the enqueue; nothing was enqueued and no receipt was written");
+        if (unenqueued !== null)
+          return unenqueued;
+        const generation = newGeneration();
+        const claimed = recordEnqueue(generation);
+        if (typeof claimed !== "string")
+          return refuse(`${claimed.reason}; nothing was enqueued and no receipt was written`);
+        if (claimed === "exists") {
+          return refuse(`the pending-queue record for ${nameWithOwner}#${number} at ${head} appeared while this call was deciding, so another call is enqueuing it; this call did not enqueue. Call delivery_land again with the same pr and expectHeadSha ${head} to wait on that entry; no receipt was written`);
+        }
+        ownedRecord = generation;
+        const answer = enqueueAnswer(await run(enqueueArgv(nodeId, head), { cwd, timeoutMs: FORGE_TIMEOUT_MS, env: forgeCommandEnv }));
+        if (answer.kind === "rejected") {
+          removePendingLocked(pendingDirectory, nameWithOwner, requested, head, generation);
+          return refuse(`${queueLabel.join(" ")}: ${answer.reason}; nothing was enqueued and no receipt was written`);
+        }
+        if (answer.kind === "uncertain") {
+          return refuse(`${queueLabel.join(" ")}: ${answer.reason}; the enqueue may have been accepted, so its pending-queue record is kept. Call delivery_land again with the same pr and expectHeadSha ${head}: it waits on the entry if GitHub queued it, and otherwise refuses as removed without enqueuing, after which the next call enqueues afresh; no receipt was written`);
+        }
+        return null;
+      })().finally(lock.release);
+      if (decided !== null)
+        return decided;
     }
     const waited = await awaitQueue({
       read,
@@ -3923,32 +4314,21 @@ async function landPullRequest(params, deps = {}) {
       budgetMs: budget.ms
     });
     if (waited.kind === "refused") {
-      clearPending(pendingDirectory, requested, head);
+      if (waited.terminal && ownedRecord !== null) {
+        clearPending(pendingDirectory, nameWithOwner, requested, head, ownedRecord, nowMs());
+      }
       return refuse(`${waited.reason}; no direct merge was attempted and no receipt was written`);
     }
     if (waited.kind === "pending") {
       const reason = `the merge queue holds ${nameWithOwner}#${number} (${waited.detail}) and has not merged it within ${budget.ms / 1000} seconds; nothing else was merged and no receipt was written. Call delivery_land again with the same pr and expectHeadSha ${head}: it waits on the existing queue entry and does not enqueue twice`;
       return { ok: false, reason, text: `delivery_land pending: ${reason}`, queued: true };
     }
-    clearPending(pendingDirectory, requested, head);
     mergeArgv = queueLabel;
+    queueTraceLost = adoptRecord()?.reason ?? null;
     notes.push(`The base branch ${first.pr.baseRefName} requires a merge queue, so the reviewed head ${head} was enqueued with enqueuePullRequest(expectedHeadOid) and merged by the queue with ${queue.method}.`);
     const reread = await rereadLanded();
     if (reread !== null)
       return reread;
-    const landedOid = proved.mergeCommitOid?.trim().toLowerCase() ?? "";
-    const base = normalizeRepoPath("github", nameWithOwner);
-    if (FULL_OID.test(landedOid) && base !== null) {
-      const contains = containmentArgv(base, landedOid, proved.baseRefName);
-      const result = await run(contains, { timeoutMs: FORGE_TIMEOUT_MS, env: forgeCommandEnv });
-      const failure = cliFailure(contains, result);
-      if (failure !== null)
-        return refuseMerged(failure);
-      if (!branchContains(result.stdout)) {
-        return refuseMerged(`${contains.join(" ")}: observed ${show3(result.stdout.trim())}, expected "ahead" or "identical": the merge commit ${landedOid} is not in the history of ${proved.baseRefName}`);
-      }
-      notes.push(`The merge commit ${landedOid} is in the history of ${proved.baseRefName} (compare status ${result.stdout.trim()}).`);
-    }
   } else {
     if (mergeMethod === "merge") {
       mergePolicy = await allowMergeCommit(forge, nameWithOwner, boundForgeRun);
@@ -3981,13 +4361,28 @@ async function landPullRequest(params, deps = {}) {
     if (reread !== null)
       return reread;
   }
-  const proofMethod = alreadyMerged ? null : landMethod;
+  if (queue !== null) {
+    const landedOid = proved.mergeCommitOid?.trim().toLowerCase() ?? "";
+    const base = normalizeRepoPath("github", nameWithOwner);
+    if (!FULL_OID.test(landedOid) || base === null) {
+      return refuseMerged(`pr.mergeCommitOid: observed ${show3(proved.mergeCommitOid)} in ${show3(nameWithOwner)}, expected a whole object id to compare with ${proved.baseRefName}`);
+    }
+    const contains = containmentArgv(base, landedOid, proved.baseRefName);
+    const result = await run(contains, { timeoutMs: FORGE_TIMEOUT_MS, env: forgeCommandEnv });
+    const failure = cliFailure(contains, result);
+    if (failure !== null)
+      return refuseMerged(failure);
+    if (!branchContains(result.stdout)) {
+      return refuseMerged(`${contains.join(" ")}: observed ${show3(result.stdout.trim())}, expected "ahead" or "identical": the merge commit ${landedOid} is not in the history of ${proved.baseRefName}`);
+    }
+    notes.push(`The merge commit ${landedOid} is in the history of ${proved.baseRefName} (compare status ${result.stdout.trim()}).`);
+  }
+  const proofMethod = queue !== null ? queue.method : alreadyMerged ? null : landMethod;
   const provedOid = proved.mergeCommitOid?.trim().toLowerCase() ?? "";
   let localCommits = null;
+  const fetchRun = (argv) => Promise.resolve(run(argv, { cwd, timeoutMs: FETCH_TIMEOUT_MS, env: gitEnv }));
   if (proved.state.trim().toUpperCase() === "MERGED" && FULL_OID.test(provedOid)) {
-    const needsHead = proofMethod === "rebase" || queue !== null && proofMethod === "merge";
-    const required = needsHead && FULL_OID.test(head) && head !== provedOid ? [provedOid, head] : [provedOid];
-    const fetchRun = (argv) => Promise.resolve(run(argv, { cwd, timeoutMs: FETCH_TIMEOUT_MS, env: gitEnv }));
+    const required = FULL_OID.test(head) && head !== provedOid ? [provedOid, head] : [provedOid];
     const local = await ensureLocalCommits(required, proved.baseRefName, remote, git, fetchRun, deps.sleep ?? abortableSleep, merging ? undefined : signal);
     if ("reason" in local) {
       const source = alreadyMerged ? "the pull request read" : `the re-read after ${(mergeArgv ?? []).join(" ")}`;
@@ -3995,7 +4390,27 @@ async function landPullRequest(params, deps = {}) {
     }
     localCommits = local;
   }
-  const proof = await mergeProof(proved, proofMethod, git, queue !== null);
+  const baseTip = async () => {
+    const listing = remoteBranchTipArgv(remote, proved.baseRefName);
+    if (listing === null) {
+      return { reason: `git ls-remote ${remote}: observed operands it will not issue, expected a remote name and the base branch ${show3(proved.baseRefName)}` };
+    }
+    const result = await run(listing, { cwd, timeoutMs: FORGE_TIMEOUT_MS, env: gitEnv });
+    const failure = cliFailure(listing, result);
+    if (failure !== null)
+      return { reason: failure };
+    const wanted = `refs/heads/${proved.baseRefName}`;
+    const lines = result.stdout.split(`
+`).filter((line) => line.trim() !== "");
+    const fields = lines.length === 1 ? (lines[0] ?? "").split(/\s+/) : [];
+    const tip = fields[0]?.toLowerCase() ?? "";
+    if (fields.length !== 2 || fields[1] !== wanted || !FULL_OID.test(tip)) {
+      return { reason: `${listing.join(" ")}: observed ${show3(result.stdout.trim().slice(0, 200))}, expected exactly one line "<oid> ${wanted}"` };
+    }
+    const tipLocal = await ensureLocalCommits([tip], proved.baseRefName, remote, git, fetchRun, deps.sleep ?? abortableSleep, signal);
+    return "reason" in tipLocal ? { reason: tipLocal.reason } : tip;
+  };
+  const proof = await mergeProof(proved, proofMethod, git, queue !== null, baseTip);
   if ("reason" in proof) {
     const source = alreadyMerged ? "the pull request read" : `the re-read after ${(mergeArgv ?? []).join(" ")}`;
     return refuseMerged(`${source}: ${proof.reason}`);
@@ -4109,6 +4524,9 @@ async function landPullRequest(params, deps = {}) {
   } catch (error) {
     return refuseMerged(`the receipt could not be written: ${error instanceof Error ? error.message : String(error)}`);
   }
+  if (ownedRecord !== null) {
+    clearPending(pendingDirectory, nameWithOwner, requested, head, ownedRecord, deps.now?.() ?? Date.now());
+  }
   const next = receipt.beads.ledgerActive ? nativeCloseoutSteps(receipt, receiptPath, proof.oid) : ["delivery_cleanup"];
   const text = [
     `delivery_land proved ${nameWithOwner}#${proved.number} merged as ${proof.oid.slice(0, 12)} on ${forge}.`,
@@ -4124,7 +4542,7 @@ ${next.slice(0, -1).map((step) => `  ${step}`).join(`
 }
 
 // plugins/delivery/src/pending-cleanup.ts
-import { existsSync as existsSync5 } from "fs";
+import { existsSync as existsSync4 } from "fs";
 import { resolve as resolve6 } from "path";
 
 // plugins/lib/src/session-eviction.ts
@@ -4132,7 +4550,7 @@ import { basename as basename3, dirname as dirname4, resolve as resolve5 } from 
 
 // plugins/lib/src/worktree-claims.ts
 import { createHash as createHash2 } from "crypto";
-import { existsSync as existsSync4, mkdirSync as mkdirSync4, readdirSync as readdirSync2, readFileSync as readFileSync5, realpathSync as realpathSync4, renameSync, rmSync as rmSync3, writeFileSync as writeFileSync4 } from "fs";
+import { existsSync as existsSync3, mkdirSync as mkdirSync4, readdirSync as readdirSync2, readFileSync as readFileSync5, realpathSync as realpathSync4, renameSync, rmSync as rmSync3, writeFileSync as writeFileSync4 } from "fs";
 import { join as join5, resolve as resolve4 } from "path";
 var MAX_FILE_BYTES = 64 * 1024;
 var MAX_LANDINGS = 500;
@@ -4225,7 +4643,7 @@ function removeLanding(commonDir, receiptId) {
 }
 function listLandings(commonDir) {
   const directory = join5(commonDir, "opencode", "landings");
-  if (!existsSync4(directory))
+  if (!existsSync3(directory))
     return { records: [], unreadable: false };
   let names;
   try {
@@ -4366,7 +4784,7 @@ var WAIT_MS = 120000;
 var POLL_MS = 20;
 var POLL_MAX_MS = 400;
 var MAX_RECORD_BYTES = 64 * 1024;
-function processAlive2(pid) {
+function processAlive3(pid) {
   try {
     process.kill(pid, 0);
     return true;
@@ -4524,7 +4942,7 @@ async function withLease(lockPath, options, work) {
     steal: stealPathFor(lockPath),
     now: options.now ?? Date.now,
     host: options.host ?? hostname().split(".")[0] ?? "localhost",
-    alive: options.alive ?? processAlive2,
+    alive: options.alive ?? processAlive3,
     leaseMs: options.leaseMs ?? LEASE_MS,
     owner: options.owner,
     afterJudged: options.seams?.afterJudged
@@ -5022,7 +5440,7 @@ function createPendingCleanup(deps) {
     await gc();
     const present = [];
     for (const receipt of pending) {
-      if (receipt.worktree.path !== null && !existsSync5(receipt.worktree.path)) {
+      if (receipt.worktree.path !== null && !existsSync4(receipt.worktree.path)) {
         doneIds.add(receipt.receiptId);
         if (recorded.common !== null && recorded.byReceipt.get(receipt.receiptId)?.denied === undefined) {
           await dropLanding(recorded.common, { receiptId: receipt.receiptId, worktree: receipt.worktree.path }, false);

@@ -21,7 +21,7 @@
 ## `delivery_land` returns `queued: true` or reports a removed queue entry
 
 - **Symptom:** `ok: false, queued: true` with "the merge queue holds ... has not merged it", or a refusal saying the merge queue removed the entry.
-- **Cause:** The base branch requires a GitHub merge queue, so `delivery_land` enqueues the head and waits up to `queueWaitSeconds` (default 600). Queue entries can take longer. GitHub removes an entry when its checks fail, it conflicts, or the PR head changes; the tool then merges nothing.
+- **Cause:** The base branch requires a GitHub merge queue, so `delivery_land` enqueues the head and waits up to `queueWaitSeconds` (default 600). Queue entries can take longer. GitHub removes an entry when its checks fail, it conflicts, or the PR head changes; the tool then merges nothing. The GitHub API is trusted: the checks guard against races and mistakes, not a malicious forge.
 - **Fix:** For `queued: true`, call `delivery_land` again with the same `pr` and `expectHeadSha`: it waits on the existing entry and does not enqueue twice. For a removal, fix the cause on the PR (a new head needs a new review and a new `expectHeadSha`), then land again. A call that resumes after a removal refuses once without enqueuing again; the next call is a fresh enqueue. After `the enqueue may have been accepted`, call again the same way: it waits on the entry if GitHub queued it, and otherwise refuses once as removed. Never enable auto-merge on the PR.
 
 ## `delivery_land` refuses with an unreadable pending-queue record

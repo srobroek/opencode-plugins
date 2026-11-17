@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import type { CliResult } from "./forge-adapter.ts"
 import {
   acquireEnqueueLock,
   awaitQueue,
@@ -16,6 +17,7 @@ import {
   queueBudgetMs,
   queueRuleFrom,
   readPending,
+  readQueueRule,
   rulesArgv,
   writePending,
 } from "./merge-queue.ts"
@@ -184,6 +186,26 @@ describe("awaitQueue", () => {
     expect(await run([{ reason: "gh: exit 1" }])).toEqual({ kind: "refused", reason: "gh: exit 1", terminal: false })
   })
 
+  test("an abort raised while sleeping ends the wait as pending after that one read", async () => {
+    let aborted = false
+    let reads = 0
+    const waited = await awaitQueue({
+      read: async () => {
+        reads++
+        return { snapshot: snapshot({ entry: entry() }) }
+      },
+      sleep: async () => {
+        aborted = true
+      },
+      stopped: () => aborted,
+      expected: HEAD,
+      budgetMs: 600_000,
+    })
+
+    expect(waited.kind).toBe("pending")
+    expect(reads).toBe(2)
+  })
+
   test("a removed entry, a closed pull request and a moved head are terminal refusals", async () => {
     for (const observed of [snapshot({ state: "CLOSED" }), snapshot({ headRefOid: OTHER })]) {
       expect(await run([{ snapshot: observed }])).toMatchObject({ kind: "refused", terminal: true })
@@ -296,5 +318,33 @@ describe("enqueue lock", () => {
       expect(later).toMatchObject({ kind: "held", path: join(directory, `pending-queue-7-${HEAD.slice(0, 12)}.lock`) })
       expect(later.kind === "held" && later.detail).toContain(detail)
     })
+  })
+})
+
+describe("readQueueRule", () => {
+  const rules = (result: CliResult) => {
+    const argvs: string[][] = []
+    const run = async (argv: string[]): Promise<CliResult> => {
+      argvs.push(argv)
+      return result
+    }
+    return { read: () => readQueueRule(run, "o/r", "main", {}), argvs }
+  }
+
+  test.each<[string, CliResult]>([
+    ["a runner that timed out", { ok: false, exitCode: null, stdout: "", stderr: "", error: "timed out after 10000ms" }],
+    ["a 404 spelled by a runner that also failed to start", { ok: false, exitCode: null, stdout: "", stderr: "HTTP 404", error: "spawn failed" }],
+    ["a server error", { ok: true, exitCode: 1, stdout: "", stderr: "gh: HTTP 502" }],
+    ["a zero exit with unparseable output", { ok: true, exitCode: 0, stdout: "<html>", stderr: "" }],
+    ["a zero exit with an empty body", { ok: true, exitCode: 0, stdout: "", stderr: "" }],
+    ["an object where a rule array belongs", { ok: true, exitCode: 0, stdout: "{}", stderr: "" }],
+  ])("%s refuses and never reads as 'no merge queue'", async (_name, result) => {
+    const { read, argvs } = rules(result)
+    const answer = await read()
+
+    expect(answer).toHaveProperty("reason")
+    expect(answer).not.toHaveProperty("required")
+    // Nothing but the one rules read ran: no second signal was taken as an answer.
+    expect(argvs).toHaveLength(1)
   })
 })

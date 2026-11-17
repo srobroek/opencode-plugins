@@ -36,6 +36,9 @@ Inputs: `pr`, and when needed `merge_method` (`squash` by default, `merge`,
 `rebase`), `repo`, `remote`, `expectHeadSha`, `worktree`, `beadId`,
 `setupAutoDelete`, `requireApproval`, `requireGreenChecks`, `queueWaitSeconds`.
 
+Requires Git 2.38 or newer: the content proof compares the landed tree with
+`git merge-tree --write-tree`. An older or unreadable Git refuses before any merge is issued.
+
 - `expectHeadSha` is required whenever the call would merge. The merge is bound to
   that head (`gh pr merge --match-head-commit`, `glab mr merge --sha`), so a push
   between the read and the merge fails at the forge.

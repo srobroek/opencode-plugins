@@ -883,6 +883,28 @@ async function ensureLocalCommits(
   return { required: [...required], fetches }
 }
 
+/** The oldest Git whose `merge-tree --write-tree` the content proof reads (added in 2.38). */
+export const MIN_GIT_VERSION = { major: 2, minor: 38 } as const
+
+/**
+ * Why the Git that printed `output` for `--version` cannot run the content proof, or null.
+ *
+ * The proof compares the landed tree with `git merge-tree --write-tree`, which older Git
+ * rejects. Finding that out after the merge was issued would leave a merged request with
+ * no receipt, so the version is read first and an unreadable or older one refuses.
+ */
+export function gitVersionFailure(output: string | null): string | null {
+  const need = `${MIN_GIT_VERSION.major}.${MIN_GIT_VERSION.minor}`
+  const match = output === null ? null : /^git version (\d+)\.(\d+)/.exec(output.trim())
+  if (match === null) {
+    return `git --version: observed ${show(output)}, expected "git version <major>.<minor>"; delivery_land needs Git ${need} or newer for git merge-tree --write-tree`
+  }
+  const major = Number(match[1])
+  const minor = Number(match[2])
+  if (major > MIN_GIT_VERSION.major || (major === MIN_GIT_VERSION.major && minor >= MIN_GIT_VERSION.minor)) return null
+  return `git --version: observed ${major}.${minor}, expected ${need} or newer, which git merge-tree --write-tree needs to prove the landed content; upgrade Git`
+}
+
 /** Exact stdout of one successful local Git read, or null when Git did not complete it. */
 async function gitOutput(
   run: CliRunner,
@@ -1321,6 +1343,8 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
 
   const resolved = await resolveLandingTarget(params, git, cwd, forgeEnv)
   if ("reason" in resolved) return refuse(resolved.reason)
+  const oldGit = gitVersionFailure(await git(["--version"]))
+  if (oldGit !== null) return refuse(`${oldGit}; no merge was issued and no receipt was written`)
   const { remote, remoteUrl, forge, forgeHost, nameWithOwner, repository, cliRepo, forgeCommandEnv } = resolved
   const gitlabHost: GitlabHost | undefined = forgeHost === "github.com" ? undefined : forgeHost
   // A worktree is read with Git, so it must provably belong to the session repository
