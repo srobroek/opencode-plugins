@@ -67,6 +67,12 @@ export function claimToolContextNotice(state: NoticeState, sessionID: string, no
   return true
 }
 
+/** Whether the parent's tool error already posted the context note for `sessionID`, so the failure event stays quiet. */
+export function toolContextNoticeLive(state: NoticeState, sessionID: string, now: number): boolean {
+  const at = state.contextNotices.get(`${sessionID}\0tool-error`)
+  return at !== undefined && now - at < NOTICE_DEDUPE_MS
+}
+
 export type FailureReport = NoteFacts & {
   now: number
   /** The session the note goes to: the failed session, or a subagent's parent. */

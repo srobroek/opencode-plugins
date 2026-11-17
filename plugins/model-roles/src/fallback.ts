@@ -210,6 +210,11 @@ export function contextSwitchNote(facts: ContextSwitchFacts): string {
   return `${head}; ${where} has a larger-context candidate, ${target}. Switch to it or compact the session.`
 }
 
+/** The tool error's note when a larger-context candidate exists: it switches nothing, the child's failure report does. */
+export function contextPendingSwitchNote(facts: Pick<ContextSwitchFacts, "failed" | "limit" | "target" | "targetLimit">): string {
+  return `context too long for ${label(facts.failed)} (${tokens(facts.limit)}); model-roles moves it to ${label(facts.target)} (${tokens(facts.targetLimit)}) when its failure is reported.`
+}
+
 /** The note when no candidate of the tier can take a prompt that was too long. */
 /** The note for an overflow of a child whose model the user chose (a spawn `model` or an agent pin): it is never switched. */
 export function pinnedContextNote(failed: ModelRef, limit: number | undefined): string {

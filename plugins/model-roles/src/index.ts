@@ -42,6 +42,7 @@ import {
   type ContextLimits,
   contextFallback,
   contextNote,
+  contextPendingSwitchNote,
   contextSwitchNote,
   duration,
   failureNote,
@@ -87,7 +88,7 @@ import {
 } from "./health.ts"
 import { createLedgerStore, LEDGER_DISPOSE_TIMEOUT_MS, OUTCOME_KEY_PREFIX, readOutcome, type Usage } from "./ledger.ts"
 import { hostWarn } from "./log.ts"
-import { claimContextNotice, claimToolContextNotice, decideFailureNotice, decideRecovery, type FailureReport, forgetSession, NOTICE_DEDUPE_MS, newNoticeState, type RequestLog, recordRequest, settleRequest } from "./outage.ts"
+import { claimContextNotice, claimToolContextNotice, toolContextNoticeLive, decideFailureNotice, decideRecovery, type FailureReport, forgetSession, NOTICE_DEDUPE_MS, newNoticeState, type RequestLog, recordRequest, settleRequest } from "./outage.ts"
 import { explainSpawn, formatReceipts, pushReceipt, RECEIPTS_KEY, type Receipt, readReceipts, type SpawnRule, type SpawnSource } from "./receipt.ts"
 import { formatUsage, summarizeUsage } from "./report.ts"
 import {
@@ -627,8 +628,10 @@ export default Plugin.define({
       const key = sessionID ?? `${notifyTo}\0${overflow.agent ?? ""}`
       if (!claimContextNotice(noticeState, key, sessionID === undefined ? undefined : executionOf.get(sessionID), Date.now())) return
       const { role, tier, limits, limit, target, chosen } = await contextTarget(overflow)
-      if (chosen) return notify(notifyTo, pinnedContextNote(failed, limit), "context-length")
-      if (target === undefined) return notify(notifyTo, contextNote(failed, limit, tier), "context-length")
+      // The parent's tool error may have told it already; this execution still switches, it just does not repeat the note.
+      const say = (text: string) => (sessionID !== undefined && toolContextNoticeLive(noticeState, sessionID, Date.now()) ? undefined : notify(notifyTo, text, "context-length"))
+      if (chosen) return say(pinnedContextNote(failed, limit))
+      if (target === undefined) return say(contextNote(failed, limit, tier))
       let resumable: string | undefined
       if (overflow.isChild && sessionID !== undefined) {
         try {
@@ -650,13 +653,14 @@ export default Plugin.define({
           // The note names the larger candidate instead.
         }
       }
-      await notify(notifyTo, contextSwitchNote({ failed, limit, target, targetLimit: limits.get(healthKey(target)), tier, resumable }), "context-length")
+      await say(contextSwitchNote({ failed, limit, target, targetLimit: limits.get(healthKey(target)), tier, resumable }))
     }
 
     /**
      * The parent's `subagent` tool error for an overflow. It names no execution, and its model is whatever the
-     * child runs on now, so it never switches or records anything: it posts the note when the child's failure
-     * event has not, and stays quiet while a notice of that child is live.
+     * child runs on now, so it never switches or records anything, and its note never claims a switch: it says the
+     * child moves when its failure is reported. It posts when the child's failure event has not, and the event
+     * stays quiet while this note is live.
      */
     const onContextOverflowToolError = async (overflow: OverflowFacts) => {
       const { sessionID, notifyTo, failed } = overflow
@@ -666,7 +670,7 @@ export default Plugin.define({
         ? pinnedContextNote(failed, limit)
         : target === undefined
           ? contextNote(failed, limit, tier)
-          : contextSwitchNote({ failed, limit, target, targetLimit: limits.get(healthKey(target)), tier })
+          : contextPendingSwitchNote({ failed, limit, target, targetLimit: limits.get(healthKey(target)) })
       await notify(notifyTo, text, "context-length")
     }
 
