@@ -99,6 +99,14 @@ describe("registerModeReminders", () => {
     await dispose()
   })
 
+  test("a context payload without a messages array does nothing", async () => {
+    const { fake, dispose } = await started()
+    const payload = await fake.fire.session("context", { sessionID: "ses_1", agent: "alpha", system: [] as unknown[] })
+    expect(payload).toEqual({ sessionID: "ses_1", agent: "alpha", system: [] })
+    expect(synthetic(fake)).toEqual([])
+    await dispose()
+  })
+
   test("the cleanup removes the context hook", async () => {
     const { fake, dispose } = await started()
     await dispose()

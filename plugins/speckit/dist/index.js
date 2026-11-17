@@ -219,6 +219,8 @@ async function registerModeReminders(ctx, modes, options = {}) {
   const report = options.onError ?? (() => {});
   const synthetic = (sessionID, text) => ctx.session.synthetic({ sessionID, text, resume: false }).catch(report);
   const hook = await ctx.session.hook("context", async (event) => {
+    if (!Array.isArray(event.messages))
+      return;
     const missing = missingReminders(event.agent, event.messages, modes);
     if (missing.length === 0)
       return;

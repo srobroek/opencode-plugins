@@ -128,6 +128,8 @@ export async function registerModeReminders(
     ctx.session.synthetic({ sessionID, text, resume: false } as never).catch(report)
 
   const hook = await ctx.session.hook("context", async (event) => {
+    // A payload without a history has nothing to reconcile.
+    if (!Array.isArray(event.messages)) return
     const missing = missingReminders(event.agent as string, event.messages, modes)
     if (missing.length === 0) return
     const at = insertionIndex(event.messages, modes)
