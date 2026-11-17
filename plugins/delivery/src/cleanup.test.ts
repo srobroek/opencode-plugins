@@ -264,18 +264,65 @@ const ranMarkers = (markers: Record<string, string>): string[] =>
     .map(([name]) => name)
     .sort()
 
-/** One `git` start the PATH shim saw: its physical working directory, the repository selectors in its environment, and its arguments. */
-type GitSpawn = { cwd: string; gitDir: string; workTree: string; commonDir: string; args: string }
+/** One `git` start the PATH shim saw: its physical working directory, the repository selectors in its environment, and its argv. */
+type GitSpawn = { cwd: string; gitDir: string; workTree: string; commonDir: string; argv: string[] }
 
-/** The paths a spawn could have read a repository through. */
-const spawnPaths = (spawn: GitSpawn): string[] =>
-  [spawn.cwd, spawn.gitDir, spawn.workTree, spawn.commonDir].filter((path) => path !== "")
+/** `path` with every existing component resolved through symlinks and `..`, as the kernel would. */
+function canonical(path: string): string {
+  try {
+    return realpathSync(path)
+  } catch {
+    const parent = dirname(path)
+    return parent === path ? path : join(canonical(parent), basename(path))
+  }
+}
 
-const within = (path: string, root: string): boolean => path === root || path.startsWith(`${root}/`)
+/**
+ * Every path a start could select a repository through, made canonical: the working
+ * directory after each `-C`, `--git-dir` and `--work-tree` (as `=value` or a separate word),
+ * and `GIT_DIR`, `GIT_WORK_TREE` and `GIT_COMMON_DIR`, relative ones against that directory.
+ * Git reads these global options up to the subcommand, so parsing stops there.
+ */
+function repositorySelectors(spawn: GitSpawn): string[] {
+  let cwd = spawn.cwd
+  const selected = [cwd]
+  const options = spawn.argv
+  for (let at = 0; at < options.length; at++) {
+    const word = options[at] ?? ""
+    const value = (name: string): string | undefined =>
+      word === name ? options[++at] : word.startsWith(`${name}=`) ? word.slice(name.length + 1) : undefined
+    if (word === "-C") {
+      cwd = resolve(cwd, options[++at] ?? "")
+      selected.push(cwd)
+      continue
+    }
+    if (word === "-c") {
+      at++
+      continue
+    }
+    const path = value("--git-dir") ?? value("--work-tree")
+    if (path !== undefined) {
+      selected.push(resolve(cwd, path))
+      continue
+    }
+    if (!word.startsWith("-")) break
+  }
+  for (const path of [spawn.gitDir, spawn.workTree, spawn.commonDir]) if (path !== "") selected.push(resolve(cwd, path))
+  return selected.map(canonical)
+}
+
+/** The starts that selected a repository path outside `root`, compared canonically. */
+const outside = (log: GitSpawn[], root: string): GitSpawn[] => {
+  const allowed = canonical(root)
+  return log.filter((spawn) =>
+    repositorySelectors(spawn).some((path) => path !== allowed && !path.startsWith(`${allowed}/`)),
+  )
+}
 
 /**
  * Put a `git` shim first on PATH that records every start. Every Git child cleanup runs
- * gets the current environment, so each one passes through it, synchronous or not.
+ * gets the current environment, so each one passes through it, synchronous or not. Fields
+ * are separated by US (0x1f) and records by RS (0x1e), so any argv word survives.
  */
 function gitSpawnLog(): { log: () => GitSpawn[]; restore: () => void } {
   const dir = scratch("git-shim")
@@ -283,15 +330,15 @@ function gitSpawnLog(): { log: () => GitSpawn[]; restore: () => void } {
   const real = execFileSync("which", ["git"], { encoding: "utf8" }).trim()
   writeExecutable(
     join(dir, "git"),
-    `#!/bin/sh\nprintf '%s\\t%s\\t%s\\t%s\\t%s\\n' "$(pwd -P)" "$GIT_DIR" "$GIT_WORK_TREE" "$GIT_COMMON_DIR" "$*" >> "${logFile}"\nexec "${real}" "$@"\n`,
+    `#!/bin/sh\n{ printf '%s\\037' "$(pwd -P)" "$GIT_DIR" "$GIT_WORK_TREE" "$GIT_COMMON_DIR" "$@"; printf '\\036'; } >> "${logFile}"\nexec "${real}" "$@"\n`,
   )
   const before = process.env.PATH
   process.env.PATH = `${dir}:${before ?? ""}`
   return {
     log: () =>
-      (existsSync(logFile) ? readFileSync(logFile, "utf8").split("\n").filter(Boolean) : []).map((line) => {
-        const [cwd = "", gitDir = "", workTree = "", commonDir = "", args = ""] = line.split("\t")
-        return { cwd, gitDir, workTree, commonDir, args }
+      (existsSync(logFile) ? readFileSync(logFile, "utf8").split("\x1e").filter(Boolean) : []).map((record) => {
+        const [cwd = "", gitDir = "", workTree = "", commonDir = "", ...argv] = record.split("\x1f")
+        return { cwd, gitDir, workTree, commonDir, argv: argv.slice(0, -1) }
       }),
     restore: () => {
       process.env.PATH = before
@@ -2227,6 +2274,48 @@ describe("delivery_cleanup host worktree registry", () => {
 /** The options every checkout-bound Git command must carry, spelled out and independent of the source constant. */
 const EXPECTED_SAFE_GIT = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "--no-optional-locks"]
 
+describe("the Git start check", () => {
+  // The containment the two "no Git ran in the target" checks below rely on.
+  const session = () => fixture("selector-session")
+  const start = (cwd: string, argv: string[], env: Partial<Pick<GitSpawn, "gitDir" | "workTree" | "commonDir">> = {}): GitSpawn => ({
+    cwd,
+    gitDir: env.gitDir ?? "",
+    workTree: env.workTree ?? "",
+    commonDir: env.commonDir ?? "",
+    argv,
+  })
+
+  test("a start that selects only the allowed checkout is inside it", () => {
+    const { main } = session()
+    const pinned = start(main, [...SAFE_GIT_ARGS, "-C", ".", "--git-dir=.git", "status"], { gitDir: ".git", workTree: main })
+    expect(outside([pinned], main)).toEqual([])
+  })
+
+  test.each([
+    ["-C", (target: string) => ["-C", target, "rev-parse", "--git-dir"], {}],
+    ["--git-dir as a separate word", (target: string) => ["--git-dir", join(target, ".git"), "rev-parse"], {}],
+    ["--git-dir=", (target: string) => [`--git-dir=${join(target, ".git")}`, "rev-parse"], {}],
+    ["--work-tree=", (target: string) => [`--work-tree=${target}`, "status"], {}],
+    ["-C after -c", (target: string) => [...SAFE_GIT_ARGS, "-C", target, "status"], {}],
+  ] as const)("a start from the allowed directory that selects the target through %s is outside", (_name, argv) => {
+    const { main, linked } = session()
+    expect(outside([start(main, argv(linked))], main)).toHaveLength(1)
+  })
+
+  test("an environment path that only spells the allowed root before a .. is outside", () => {
+    const { main, linked } = session()
+    const lexical = `${main}/../${basename(linked)}`
+    expect(lexical.startsWith(`${main}/`)).toBe(true)
+    for (const env of [{ gitDir: `${lexical}/.git` }, { workTree: lexical }, { commonDir: `${main}/../${basename(main)}x` }])
+      expect(outside([start(main, ["status"], env)], main)).toHaveLength(1)
+  })
+
+  test("argv after the subcommand is not a repository selector", () => {
+    const { main, linked } = session()
+    expect(outside([start(main, ["log", "-C", linked])], main)).toEqual([])
+  })
+})
+
 describe("delivery_cleanup fails closed on another repository", () => {
   const selectors = [
     ["the receipt path", (f: Fixture): DeliveryCleanupParams => ({ receipt: f.receiptPath })],
@@ -2274,7 +2363,7 @@ describe("delivery_cleanup fails closed on another repository", () => {
         // Every Git start, not only those found in the target: each ran in the session's repository.
         const log = spawns.log()
         expect(log.length).toBeGreaterThan(0)
-        expect(log.filter((spawn) => spawnPaths(spawn).some((path) => !within(path, session.main)))).toEqual([])
+        expect(outside(log, session.main)).toEqual([])
       } finally {
         spawns.restore()
       }
@@ -2538,7 +2627,7 @@ describe("delivery_cleanup refuses a registered worktree whose directory is not 
       // Every Git start, not only those found in the target: each ran in the session's own checkout.
       const log = spawns.log()
       expect(log.length).toBeGreaterThan(0)
-      expect(log.filter((spawn) => spawnPaths(spawn).some((path) => !within(path, f.main)))).toEqual([])
+      expect(outside(log, f.main)).toEqual([])
     } finally {
       spawns.restore()
     }
