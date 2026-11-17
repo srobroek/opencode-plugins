@@ -451,7 +451,7 @@ describe("subagent claim release", () => {
       const call = { tool: "subagent", sessionID: parent, agent: "build", messageID: "m", id: "call_bgw", input: { prompt: "x", background: true } }
       await t.fake.fire.tool("execute.before", call)
       await t.fake.fire.tool("execute.after", { ...call, status: "completed" as const, result: { content: "started", metadata: { sessionID: child, status: "running" } } })
-      await t.shell(child, "bd update proj-4 --claim", "✓ Claimed proj-4")
+      await t.shell(child, "bd update proj-4 --claim", claimJson({ "proj-4": `opencode/${parent}/general/${child}` }))
       const unclaims = () => bd.calls.filter((args) => args[0] === "unclaim").length
       return { parent, child, t, unclaims }
     }
