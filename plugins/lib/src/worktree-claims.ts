@@ -29,6 +29,14 @@ export type LaneClaim = {
   sessionID: string
   parentID: string
   createdAt: number
+  /**
+   * Bumped, under the directory lock, by every resume of the lane's child. A removal captures it
+   * before collecting facts and aborts if it changed. Plugins load once per location, so this
+   * counter has to live on disk, not in memory.
+   */
+  generation: number
+  /** When the child was last resumed, for the resume window. */
+  resumedAt?: number
 }
 
 /** What delivery records about a landing whose worktree is not removed yet. */
@@ -62,7 +70,8 @@ export function parseClaim(value: unknown): LaneClaim | undefined {
   const parentID = text(value.parentID)
   const createdAt = finite(value.createdAt)
   if (!directory || !branch || !sessionID || !parentID || createdAt === undefined) return undefined
-  return { directory, branch, sessionID, parentID, createdAt }
+  const resumedAt = finite(value.resumedAt)
+  return { directory, branch, sessionID, parentID, createdAt, generation: finite(value.generation) ?? 0, ...(resumedAt === undefined ? {} : { resumedAt }) }
 }
 
 export function parseLanding(value: unknown): LandingRecord | undefined {
@@ -138,8 +147,25 @@ function writeAtomic(path: string, value: unknown) {
 export const readClaim = (commonDir: string, directory: string): Read<LaneClaim> =>
   readJson(claimFile(commonDir, directory), parseClaim)
 
-export function writeClaim(commonDir: string, claim: LaneClaim) {
-  writeAtomic(claimFile(commonDir, claim.directory), claim)
+export function writeClaim(commonDir: string, claim: Omit<LaneClaim, "generation"> & { generation?: number }) {
+  writeAtomic(claimFile(commonDir, claim.directory), { ...claim, generation: claim.generation ?? claim.createdAt })
+}
+
+/** The generation a claim read carries; -1 when there is no readable claim (so a later claim never matches it). Pure. */
+export function claimGeneration(read: Read<LaneClaim>): number {
+  return read.kind === "present" ? read.value.generation : -1
+}
+
+/**
+ * Record a resume: generation + 1 and `resumedAt`. The caller holds the directory lock. Returns the
+ * new generation, or -1 when the claim is missing or unreadable.
+ */
+export function bumpClaim(commonDir: string, directory: string, now: number): number {
+  const read = readClaim(commonDir, directory)
+  if (read.kind !== "present") return -1
+  const next = { ...read.value, generation: read.value.generation + 1, resumedAt: now }
+  writeAtomic(claimFile(commonDir, directory), next)
+  return next.generation
 }
 
 export function removeClaim(commonDir: string, directory: string) {

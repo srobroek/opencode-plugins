@@ -30,13 +30,16 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
 
-const claim = { directory: "/wt/a", branch: "lane-a", sessionID: "ses_c", parentID: "ses_p", createdAt: 5 }
+const claim = { directory: "/wt/a", branch: "lane-a", sessionID: "ses_c", parentID: "ses_p", createdAt: 5, generation: 5 }
 const landing: LandingRecord = { receiptId: "1-abc", worktree: "/wt/a", headRefOid: "h".repeat(40), sessionID: "ses_p", landedAt: 9 }
 
 describe("parsers", () => {
   test("a claim needs every field", () => {
     expect(parseClaim(claim)).toEqual(claim)
-    for (const key of Object.keys(claim)) expect(parseClaim({ ...claim, [key]: undefined })).toBeUndefined()
+    for (const key of Object.keys(claim).filter((name) => name !== "generation")) {
+      expect(parseClaim({ ...claim, [key]: undefined })).toBeUndefined()
+    }
+    expect(parseClaim({ ...claim, generation: undefined })?.generation).toBe(0)
     expect(parseClaim("x")).toBeUndefined()
     expect(parseClaim(null)).toBeUndefined()
   })

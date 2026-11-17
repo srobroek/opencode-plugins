@@ -57,7 +57,7 @@ test("the text swaps the cleanup instruction for the outcome", () => {
 })
 
 test("a lane's claim defers cleanup", () => {
-  const claim = { directory: "/w/a", branch: "lane", sessionID: "c", parentID: "p", createdAt: 1 }
+  const claim = { directory: "/w/a", branch: "lane", sessionID: "c", parentID: "p", createdAt: 1, generation: 1 }
   expect(inlineCleanupDecision(receipt(false), true, { owner: "lane", claim })).toEqual({
     run: false,
     reason: "owned by subagent-worktree lane",
