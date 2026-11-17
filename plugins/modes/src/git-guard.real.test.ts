@@ -8,6 +8,7 @@ import { forbiddenGit } from "./git-guard.ts"
 let home = ""
 let repo = ""
 let scratch = ""
+let origin = ""
 
 const git = (cwd: string, ...args: string[]) => {
   const run = Bun.spawnSync(["git", "-c", "user.name=t", "-c", "user.email=t@example.com", ...args], { cwd, stderr: "pipe", stdout: "pipe" })
@@ -26,6 +27,10 @@ beforeAll(() => {
   scratch = join(home, ".local/share/opencode/worktree/h1/debug-foo")
   mkdirSync(join(home, ".local/share/opencode/worktree/h1"), { recursive: true })
   git(repo, "worktree", "add", "-q", "-b", "debug-foo", scratch)
+  origin = join(home, "origin.git")
+  git(home, "init", "-q", "--bare", "-b", "main", origin)
+  git(repo, "remote", "add", "origin", origin)
+  git(repo, "push", "-q", "origin", "main")
 })
 afterAll(() => rmSync(home, { recursive: true, force: true }))
 
@@ -75,5 +80,46 @@ describe("checkout boundary against real repositories", () => {
   test("refactor works in the checkout by design and is unaffected", () => {
     expect(forbiddenGit("git commit -am x", "refactor", context(repo))).toBeUndefined()
     expect(forbiddenGit(`git -C ${repo} add -A`, "refactor", context(repo))).toBeUndefined()
+  })
+})
+
+/** Everything a bypass would change: HEAD, every ref, the config and the files in the user's checkout. */
+const snapshot = () => ({
+  head: git(repo, "rev-parse", "HEAD"),
+  refs: git(repo, "for-each-ref"),
+  config: git(repo, "config", "--list", "--local"),
+  status: git(repo, "status", "--porcelain"),
+  files: git(repo, "ls-files", "-s"),
+})
+
+/** The guard refuses every command, and (because none ran) the user's repository is exactly as it was. */
+const refusedLeavesRepoUnchanged = (agents: string[], commands: string[]) => {
+  const before = snapshot()
+  for (const agent of agents)
+    for (const command of commands)
+      expect({ agent, command, reason: forbiddenGit(command, agent, context(scratch)) }).toEqual({ agent, command, reason: expect.any(String) })
+  expect(snapshot()).toEqual(before)
+}
+
+describe("fetch against real repositories", () => {
+  test("debug may not fetch, so HEAD, refs and config stay as they were", () => {
+    refusedLeavesRepoUnchanged(["debug"], [
+      "git fetch",
+      "git fetch origin",
+      "git fetch --update-head-ok origin +main:main",
+      "git fetch origin +refs/heads/main:refs/heads/debug-foo",
+    ])
+  })
+  test("refactor may fetch remote-tracking refs but not heads or HEAD", () => {
+    refusedLeavesRepoUnchanged(["refactor"], [
+      "git fetch --update-head-ok origin main:main",
+      "git fetch origin +main:main",
+      "git fetch origin main:refs/heads/x",
+    ])
+    expect(forbiddenGit("git fetch origin", "refactor", context(repo))).toBeUndefined()
+    expect(forbiddenGit("git fetch origin refs/heads/main:refs/remotes/origin/main", "refactor", context(repo))).toBeUndefined()
+  })
+  test("the origin refs debug needs are already in the shared repository", () => {
+    expect(git(scratch, "rev-parse", "origin/main")).toBe(git(repo, "rev-parse", "origin/main"))
   })
 })

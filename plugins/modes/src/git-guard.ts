@@ -38,12 +38,13 @@ type Policy = { subcommands: ReadonlySet<string> }
 const COMMON = [
   "status", "diff", "log", "show", "rev-parse", "rev-list", "ls-files", "ls-tree", "cat-file", "blame", "grep",
   "worktree", "branch", "switch", "checkout", "commit", "add", "restore", "stash", "reset", "cherry-pick", "revert",
-  "apply", "am", "format-patch", "describe", "merge-base", "for-each-ref", "config", "fetch", "remote", "tag",
+  "apply", "am", "format-patch", "describe", "merge-base", "for-each-ref", "config", "remote", "tag",
 ]
 
 const POLICIES: Readonly<Record<string, Policy>> = {
   debug: { subcommands: new Set([...COMMON, "bisect"]) },
-  refactor: { subcommands: new Set(COMMON) },
+  // fetch writes refs and objects into the repository every worktree shares, so debug does not get it.
+  refactor: { subcommands: new Set([...COMMON, "fetch"]) },
 }
 
 /** The agents this guard covers. */
@@ -234,6 +235,15 @@ function checkGit(args: readonly string[], ctx: Ctx, cwd: string | undefined, wr
     case "bisect":
       if (rest[0] === "run") return checkRunner(rest.slice(1), ctx, tree)
       break
+    case "fetch": {
+      // Only remote-tracking refs may be written: no HEAD updates, no forced or local-branch refspecs.
+      if (rest.some((arg) => longOption(arg, "--update-head-ok") || longOption(arg, "--refmap") || cluster(arg, "u")))
+        return refuse("git fetch with --update-head-ok, -u or --refmap")
+      const refspecs = rest.filter((arg) => !arg.startsWith("-")).slice(1)
+      const bad = refspecs.find((spec) => spec.startsWith("+") || (spec.includes(":") && !(spec.split(":").pop() ?? "").startsWith("refs/remotes/")))
+      if (bad !== undefined) return refuse(`git fetch with the refspec ${bad}`)
+      break
+    }
     case "stash":
       // Stash refs are shared by every worktree, so drop, clear, pop and apply could delete or apply someone else's work.
       if (rest[0] !== undefined && !rest[0].startsWith("-") && !["list", "show", "push", "save"].includes(rest[0]))

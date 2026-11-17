@@ -1080,13 +1080,12 @@ var COMMON = [
   "merge-base",
   "for-each-ref",
   "config",
-  "fetch",
   "remote",
   "tag"
 ];
 var POLICIES = {
   debug: { subcommands: new Set([...COMMON, "bisect"]) },
-  refactor: { subcommands: new Set(COMMON) }
+  refactor: { subcommands: new Set([...COMMON, "fetch"]) }
 };
 var GUARDED_AGENTS = Object.keys(POLICIES);
 var SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh"]);
@@ -1266,6 +1265,15 @@ function checkGit(args, ctx, cwd, wrapped) {
       if (rest[0] === "run")
         return checkRunner(rest.slice(1), ctx, tree);
       break;
+    case "fetch": {
+      if (rest.some((arg) => longOption(arg, "--update-head-ok") || longOption(arg, "--refmap") || cluster(arg, "u")))
+        return refuse("git fetch with --update-head-ok, -u or --refmap");
+      const refspecs = rest.filter((arg) => !arg.startsWith("-")).slice(1);
+      const bad = refspecs.find((spec) => spec.startsWith("+") || spec.includes(":") && !(spec.split(":").pop() ?? "").startsWith("refs/remotes/"));
+      if (bad !== undefined)
+        return refuse(`git fetch with the refspec ${bad}`);
+      break;
+    }
     case "stash":
       if (rest[0] !== undefined && !rest[0].startsWith("-") && !["list", "show", "push", "save"].includes(rest[0]))
         return refuse(`git stash ${rest[0]}`);

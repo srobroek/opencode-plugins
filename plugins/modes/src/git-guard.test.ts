@@ -187,7 +187,6 @@ const ALLOWED = [
   "git config --list",
   "git remote -v",
   "git remote get-url origin",
-  "git fetch origin",
   `git worktree add ${WORKTREES}/debug-bar -b bar`,
   "git worktree list",
   `git worktree remove ${WT}`,
@@ -442,7 +441,6 @@ describe("checkout boundary (debug only)", () => {
     "git branch --contains abc",
     "git bisect log",
     "git worktree list",
-    "git fetch",
     "git config --get user.name",
     `git -C ${CHECKOUT} log`,
     `git --git-dir=${CHECKOUT}/.git show HEAD`,
@@ -455,6 +453,36 @@ describe("checkout boundary (debug only)", () => {
     expect(forbiddenGit("git commit -m x", "debug", { home: HOME, startDir: CHECKOUT, workdir: "../.local/share/opencode/worktree/h1/debug-foo" })).toBeUndefined()
     expect(forbiddenGit("git commit -m x", "debug", { home: HOME })).toBeString()
   })
+})
+
+const verdict = (agents: string[], command: string, expected: "refused" | "allowed") => {
+  for (const agent of agents) {
+    const reason = forbiddenGit(command, agent, context)
+    if (expected === "refused") expect({ agent, command, reason }).toEqual({ agent, command, reason: expect.any(String) })
+    else expect({ agent, command, reason }).toEqual({ agent, command, reason: undefined })
+  }
+}
+
+describe("fetch", () => {
+  test.each(["git fetch", "git fetch origin", "git fetch --all", "git fetch --update-head-ok origin +main:main", "git fetch origin main:refs/heads/x"])(
+    "debug may not run %j",
+    (command) => verdict(["debug"], command, "refused"),
+  )
+  test.each([
+    "git fetch --update-head-ok origin main:main",
+    "git fetch --update-head-o origin main:main",
+    "git fetch -u origin main:main",
+    "git fetch origin +main:main",
+    "git fetch origin +refs/heads/*:refs/remotes/o/*",
+    "git fetch origin main:refs/heads/x",
+    "git fetch origin main:x",
+    "git fetch origin refs/heads/main:refs/heads/main",
+    "git fetch --refmap=+refs/heads/*:refs/heads/* origin main",
+  ])("refactor may not run %j", (command) => verdict(["refactor"], command, "refused"))
+  test.each(["git fetch", "git fetch origin", "git fetch origin main", "git fetch origin refs/heads/main:refs/remotes/origin/main", "git fetch --prune origin"])(
+    "refactor may run %j",
+    (command) => verdict(["refactor"], command, "allowed"),
+  )
 })
 
 describe("symlinks before dot-dot", () => {
