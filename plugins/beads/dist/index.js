@@ -3627,7 +3627,7 @@ function canonicalStore2(path) {
   }
 }
 function bdStoreForInvocation(invocation, cwd, env) {
-  if (flagEnabled(invocation.globals, ["--global", "--database"]))
+  if (flagEnabled(invocation.globals, ["--global"]) || globalValue(invocation.globals, ["--database"]) !== undefined)
     return;
   const directory = globalValue(invocation.globals, ["-C", "--directory"]);
   const db = globalValue(invocation.globals, ["--db"]);
@@ -3924,6 +3924,34 @@ function claimEnabled(invocation) {
 }
 var LEDGER_SELECTOR = /^(?:-C|--directory|--db|--database|--global|--dolt-[a-z-]+)(?:=|$)/u;
 var isAssignment = (value) => /^[A-Za-z_][A-Za-z0-9_]*=/u.test(value);
+function selectsLedger(invocation) {
+  const { globals } = invocation;
+  return flagEnabled(globals, ["--global"]) || globalValue(globals, ["--database", "--db", "-C", "--directory"]) !== undefined;
+}
+function isLiteral(command, word) {
+  if (word.expands)
+    return false;
+  let quote;
+  const raw = command.slice(word.start, word.end);
+  for (let index = 0;index < raw.length; index++) {
+    const char = raw[index];
+    if (quote === "'") {
+      if (char === "'")
+        quote = undefined;
+    } else if (char === "\\")
+      index++;
+    else if (quote === '"') {
+      if (char === '"')
+        quote = undefined;
+      else if (char === "$" || char === "`")
+        return false;
+    } else if (char === "'" || char === '"')
+      quote = char;
+    else if ("$`*?[]{}~".includes(char))
+      return false;
+  }
+  return true;
+}
 function inspectClaim(command, cwd, env, injected) {
   const invocations = bdInvocations(command);
   const claims = invocations.filter(claimEnabled);
@@ -3941,9 +3969,8 @@ function inspectClaim(command, cwd, env, injected) {
   const prefix = item.words.slice(0, Math.max(bdIndex, 0));
   if (bdIndex < 0 || !prefix.every((word) => !word.quoted && isAssignment(word.value)))
     return refuse("it does not start with `bd` (a wrapper or interpreter runs it)");
-  const globalsEnd = bdIndex + 1 + invocation.globals.length;
-  if ([...prefix, ...item.words.slice(bdIndex + 1, globalsEnd)].some((word) => word.expands))
-    return refuse("its ledger or actor selection is computed by the shell");
+  if (item.words.some((word) => !isLiteral(command, word)))
+    return refuse("a word of the command is computed by the shell (a variable, substitution, glob, brace or ~), so the ledger is not certain");
   if (invocation.args.some((arg) => LEDGER_SELECTOR.test(arg)))
     return refuse("a ledger selector (-C, --directory, --db, --dolt-*) follows the verb, so the ledger is not certain");
   if (invocation.args.includes("--"))
@@ -3951,9 +3978,16 @@ function inspectClaim(command, cwd, env, injected) {
   const last = item.words.at(-1);
   if (last === undefined)
     return refuse("it is empty");
-  const target = claimTarget(invocation, cwd, env, plannedTargets(command, cwd, env));
+  let target = claimTarget(invocation, cwd, env, plannedTargets(command, cwd, env));
   if (target.ambiguous === true)
     return refuse("its ledger is ambiguous");
+  if (selectsLedger(invocation)) {
+    const ambient = bdStoreForInvocation({ ...invocation, globals: [] }, cwd, env);
+    const selected = bdStoreForInvocation(invocation, cwd, env);
+    if (ambient === undefined || selected === undefined || ambient !== selected)
+      return refuse("a ledger selector names a ledger that is not proven to be the ambient one");
+    target = { key: ambient, store: ambient };
+  }
   const flagActor = transitionFlags(invocation.args).actorOverride ?? globalValue(invocation.globals, ["--actor"]);
   const ownPrefix = invocation.prefix.some((token) => /^(BEADS_ACTOR|BD_ACTOR)=/.test(token));
   const possible = flagActor !== undefined ? [/[$`\\\0]/.test(flagActor) ? undefined : flagActor.trim()] : ownPrefix ? [invocationActor(invocation, env)] : [injected, invocationActor(invocation, env)];

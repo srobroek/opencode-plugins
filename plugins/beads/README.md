@@ -38,8 +38,8 @@ primary checkout's from a linked worktree) and clears `BEADS_DOLT_SHARED_SERVER`
 in the child environment. An explicitly set `BEADS_DIR` is left alone.
 
 `tool.hook("execute.after")` records successful claims per session in plugin
-storage, reading each holder from `bd show <id> --json` rather than from the shell
-text (a claim whose holder bd cannot report is not tracked, with a warning), and
+storage, confirming each claim from the claim command's own `--json` output (a claim
+bd does not confirm that way is not tracked, with a warning), and
 appends the contention-retry and stale-import advisories.
 
 `session.hook("context")` adds `bd prime` to the system prompt. The text is read

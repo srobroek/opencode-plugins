@@ -7,26 +7,50 @@ import { agentActor, blockReason, gateEnabled, sessionChain, shellInput } from "
 import { closeInvocations, parse, parsedInvocations } from "./shell.ts"
 import { claimJson, recordResult } from "./test-support.ts"
 
-describe("claim keys for a literal pre-verb selector", () => {
+describe("a pre-verb ledger selector", () => {
   const roots: string[] = []
   afterEach(() => {
     for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
   })
 
-  test.each([
-    ["--db nested/.beads", "nested/.beads"],
-    ["--directory nested", "nested"],
-    ["-C nested", "nested"],
-  ])("a relative %s selector is resolved against the directory the command runs in", (selector, relative) => {
+  function ledgers() {
     const root = realpathSync(mkdtempSync(join(tmpdir(), "beads-claims-")))
     roots.push(root)
     mkdirSync(join(root, "nested", ".beads"), { recursive: true })
-    const command = `bd ${selector} update proj-1 --claim --json`
+    mkdirSync(join(root, "elsewhere", ".beads"), { recursive: true })
+    return { root, ambient: join(root, "nested", ".beads"), other: join(root, "elsewhere") }
+  }
+
+  test.each([
+    ["--db nested/.beads"],
+    ["--db=nested/.beads"],
+    ["--directory nested"],
+    ["-C nested"],
+  ])("%s that names the ambient ledger is tracked under that ledger", (selector) => {
+    const { root, ambient } = ledgers()
     const state = readClaimState(undefined)
-    recordResult(state, command, root, {}, claimJson({ "proj-1": "a/s1" }), "a/s1")
-    const [claim] = Object.values(state.claims)
-    expect(claim?.id).toBe("proj-1")
-    expect(JSON.stringify(state.claims)).toContain(join(root, relative))
+    const command = `bd ${selector} update proj-1 --claim --json`
+    recordResult(state, command, root, { BEADS_DIR: ambient }, claimJson({ "proj-1": "a/s1" }), "a/s1")
+    expect(Object.values(state.claims)).toEqual([{ id: "proj-1", actor: "a/s1", store: ambient }])
+  })
+
+  test.each([
+    ["--db elsewhere/.beads"],
+    ["--db=elsewhere/.beads"],
+    ["--directory elsewhere"],
+    ["--directory=elsewhere"],
+    ["-C elsewhere"],
+    ["--database elsewhere/.beads"],
+    ["--database=elsewhere/.beads"],
+    ["--db missing/.beads"],
+    ["--global"],
+  ])("%s, a ledger not proven to be the ambient one, is never tracked", (selector) => {
+    const { root, ambient } = ledgers()
+    const command = `bd ${selector} update proj-1 --claim --json`
+    expect(inspectClaim(command, root, { BEADS_DIR: ambient }, "a/s1").kind).toBe("refused")
+    const state = readClaimState(undefined)
+    recordResult(state, command, root, { BEADS_DIR: ambient }, claimJson({ "proj-1": "a/s1" }), "a/s1")
+    expect(state.claims).toEqual({})
   })
 })
 
@@ -162,7 +186,6 @@ describe("claim confirmation", () => {
   test.each([
     ["a different assignee", "bd update proj-1 --claim --json", "A", "in_progress"],
     ["a status other than in_progress", "bd update proj-1 --claim --json", "B", "open"],
-    ["an --actor flag that is not literal", 'bd update proj-1 --claim --actor "$X" --json', "B", "in_progress"],
   ])("%s leaves the claim unconfirmed", (_name, command, holder, status) => {
     expect(confirm(command, holder, "B", status)).toMatchObject({ confirmed: [], unconfirmed: ["proj-1"] })
   })
@@ -204,6 +227,13 @@ describe("which claims are refused", () => {
     ["a post-verb --dolt flag", "bd update proj-1 --claim --json --dolt-auto-commit off"],
     ["a computed pre-verb selector", 'bd -C "$DIR" update proj-1 --claim --json'],
     ["a computed ledger prefix", "BEADS_DIR=$DIR bd update proj-1 --claim --json"],
+    ["a variable after the verb", 'bd update proj-1 --claim --json --notes "$X"'],
+    ["a variable in an --actor value", 'bd update proj-1 --claim --json --actor "$WHO"'],
+    ["a command substitution after the verb", "bd update proj-1 --claim --json --notes $(date)"],
+    ["a backtick substitution", "bd update proj-1 --claim --json --notes `date`"],
+    ["a glob after the verb", "bd update proj-1 --claim --json --notes *.md"],
+    ["a tilde after the verb", "bd update proj-1 --claim --json --notes ~/x"],
+    ["a brace expansion", "bd update proj-1 --claim --json --notes {a,b}"],
   ])("%s", (_name, command) => {
     expect(inspectClaim(command, "/repo", { BEADS_DIR: "/repo/.beads" }, "B").kind).toBe("refused")
   })

@@ -287,6 +287,37 @@ const LEDGER_SELECTOR = /^(?:-C|--directory|--db|--database|--global|--dolt-[a-z
 
 const isAssignment = (value: string): boolean => /^[A-Za-z_][A-Za-z0-9_]*=/u.test(value)
 
+/** Whether a pre-verb flag picks the ledger: a value-bearing `--db`/`-C`/`--directory`/`--database`, or `--global`. */
+function selectsLedger(invocation: BdInvocation): boolean {
+  const { globals } = invocation
+  return (
+    flagEnabled(globals, ["--global"]) ||
+    globalValue(globals, ["--database", "--db", "-C", "--directory"]) !== undefined
+  )
+}
+
+/**
+ * Whether the shell passes `word` through as written: no expansion or substitution, and no
+ * unquoted glob, brace or `~` character in its source text.
+ */
+function isLiteral(command: string, word: { start: number; end: number; expands: boolean }): boolean {
+  if (word.expands) return false
+  let quote: "'" | '"' | undefined
+  const raw = command.slice(word.start, word.end)
+  for (let index = 0; index < raw.length; index++) {
+    const char = raw[index] as string
+    if (quote === "'") {
+      if (char === "'") quote = undefined
+    } else if (char === "\\") index++
+    else if (quote === '"') {
+      if (char === '"') quote = undefined
+      else if (char === "$" || char === "`") return false
+    } else if (char === "'" || char === '"') quote = char
+    else if ("$`*?[]{}~".includes(char)) return false
+  }
+  return true
+}
+
 /**
  * Decide, from the parsed shell structure, whether `command` is a claim the plugin can track:
  * exactly one simple `bd` command (no list, pipe, subshell, substitution or background), whose
@@ -309,16 +340,27 @@ export function inspectClaim(command: string, cwd: string, env: NodeJS.ProcessEn
   const prefix = item.words.slice(0, Math.max(bdIndex, 0))
   if (bdIndex < 0 || !prefix.every((word) => !word.quoted && isAssignment(word.value)))
     return refuse("it does not start with `bd` (a wrapper or interpreter runs it)")
-  const globalsEnd = bdIndex + 1 + invocation.globals.length
-  if ([...prefix, ...item.words.slice(bdIndex + 1, globalsEnd)].some((word) => word.expands))
-    return refuse("its ledger or actor selection is computed by the shell")
+  // Any word the shell computes (expansion, substitution, glob, brace or `~`) could turn into a
+  // ledger selector or an actor at run time, so the plugin cannot say where the claim lands.
+  if (item.words.some((word) => !isLiteral(command, word)))
+    return refuse("a word of the command is computed by the shell (a variable, substitution, glob, brace or ~), so the ledger is not certain")
   if (invocation.args.some((arg) => LEDGER_SELECTOR.test(arg)))
     return refuse("a ledger selector (-C, --directory, --db, --dolt-*) follows the verb, so the ledger is not certain")
   if (invocation.args.includes("--")) return refuse("it uses `--`, so its arguments are not certain")
   const last = item.words.at(-1)
   if (last === undefined) return refuse("it is empty")
-  const target = claimTarget(invocation, cwd, env, plannedTargets(command, cwd, env))
+  let target = claimTarget(invocation, cwd, env, plannedTargets(command, cwd, env))
   if (target.ambiguous === true) return refuse("its ledger is ambiguous")
+  // A selector before the verb is accepted only when it provably names the ambient ledger. A
+  // `--global`/`--database` selector, an unresolvable path or a different store is an external
+  // ledger: the plugin cannot release a claim there, so it does not track one.
+  if (selectsLedger(invocation)) {
+    const ambient = bdStoreForInvocation({ ...invocation, globals: [] }, cwd, env)
+    const selected = bdStoreForInvocation(invocation, cwd, env)
+    if (ambient === undefined || selected === undefined || ambient !== selected)
+      return refuse("a ledger selector names a ledger that is not proven to be the ambient one")
+    target = { key: ambient, store: ambient }
+  }
   // bd's precedence is flag over environment: an `--actor` anywhere in the argv (a post-verb one
   // is the later, winning flag) is the only actor the invocation can run as. A flag whose value
   // is not a literal leaves no candidate. Otherwise the invocation's own prefix assignment is the

@@ -239,19 +239,17 @@ describe("held-claims advisory (the stop nudge)", () => {
     expect(heldClaimsAdvisory(state)).toBeUndefined()
   })
 
-  test("equivalent external database selector spellings clear tracked claims", () => {
-    const claim = "BD_ACTOR=a/s1 bd --database=/external -C /irrelevant-a update bd-probe-2m7 --claim"
-    const close = "BD_ACTOR=a/s1 bd --database /external -C /irrelevant-b close bd-probe-2m7"
+  test("a claim aimed at an external ledger is never tracked", () => {
     const held = { "bd-probe-2m7": "a/s1" }
-    expect(heldClaimsAdvisory(track([claim], {}, "/repo", held))).toBeDefined()
-    expect(heldClaimsAdvisory(track([claim, close], {}, "/repo", held))).toBeUndefined()
+    for (const selector of ["--database=/external", "--database /external", "-C /elsewhere", "--db /elsewhere/.beads"])
+      expect(track([`BD_ACTOR=a/s1 bd ${selector} update bd-probe-2m7 --claim`], {}, "/repo", held).claims).toEqual({})
   })
 
-  test("relative db selectors keep their effective directory identity", () => {
-    const claimed = ["BD_ACTOR=a/s1 bd -C /A --db .beads update bd-probe-2m7 --claim"]
+  test("a close in another ledger leaves the tracked claim, a close in its own ledger clears it", () => {
+    const claim = "BD_ACTOR=a/s1 bd update bd-probe-2m7 --claim"
     const held = { "bd-probe-2m7": "a/s1" }
-    expect(heldClaimsAdvisory(track([...claimed, "BD_ACTOR=a/s1 bd -C /B --db .beads close bd-probe-2m7"], {}, "/repo", held))).toBeDefined()
-    expect(heldClaimsAdvisory(track([...claimed, "BD_ACTOR=a/s1 bd -C /A --db .beads close bd-probe-2m7"], {}, "/repo", held))).toBeUndefined()
+    expect(heldClaimsAdvisory(track([claim, "BD_ACTOR=a/s1 bd -C /B close bd-probe-2m7"], {}, "/repo", held))).toBeDefined()
+    expect(heldClaimsAdvisory(track([claim, "BD_ACTOR=a/s1 bd close bd-probe-2m7"], {}, "/repo", held))).toBeUndefined()
   })
 
   test("a long list is capped and counted", () => {

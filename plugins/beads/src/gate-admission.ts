@@ -414,7 +414,8 @@ export function bdStoreForInvocation(
   cwd: string,
   env: NodeJS.ProcessEnv,
 ): string | undefined {
-  if (flagEnabled(invocation.globals, ["--global", "--database"])) return undefined
+  if (flagEnabled(invocation.globals, ["--global"]) || globalValue(invocation.globals, ["--database"]) !== undefined)
+    return undefined
   const directory = globalValue(invocation.globals, ["-C", "--directory"])
   const db = globalValue(invocation.globals, ["--db"])
   const base = directory === undefined ? cwd : resolve(cwd, directory)

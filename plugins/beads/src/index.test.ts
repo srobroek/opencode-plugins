@@ -299,14 +299,20 @@ describe("execute.after on shell", () => {
    * by <actor>` (JSON: an `error`/`failed` object) with exit 1. It logs `BEADS_DIR` and argv per call.
    */
   const FAKE_BD = `#!/bin/sh
+ledger=\${BEADS_DIR:-}; json=0; actor=\${BD_ACTOR:-\${BEADS_ACTOR:-}}; id=""; verb=""
 echo "BEADS_DIR=\${BEADS_DIR:-} $*" >> "$FAKE_BD_LOG"
-json=0; actor=\${BD_ACTOR:-\${BEADS_ACTOR:-}}; id=""; verb=""
+for arg in "$@"; do :; done
 while [ $# -gt 0 ]; do
   case $1 in
     --json) json=1 ;;
     --actor) shift; actor=$1 ;;
     --actor=*) actor=\${1#--actor=} ;;
-    -C|--directory|--db|--database|--dolt-auto-commit|--notes) shift ;;
+    -C|--directory) shift; ledger=$1/.beads ;;
+    --directory=*) ledger=\${1#--directory=}/.beads ;;
+    --db|--database) shift; ledger=$1 ;;
+    --db=*) ledger=\${1#--db=} ;;
+    --database=*) ledger=\${1#--database=} ;;
+    --dolt-auto-commit|--notes|--assignee) shift ;;
     -*) ;;
     update|claim|ready) [ -z "$verb" ] && verb=$1 ;;
     *) [ -z "$id" ] && [ -n "$verb" ] && id=$1 ;;
@@ -314,6 +320,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 [ -z "$id" ] && id=proj-ready
+echo "LEDGER=$ledger $id" >> "$FAKE_BD_LOG"
 if [ -n "\${FAKE_BD_LOST:-}" ]; then
   if [ $json = 1 ]; then
     printf '{"error":"1 of 1 issues failed to update","failed":[{"id":"%s","error":"updating issue: issue already claimed by %s"}],"schema_version":1}\\n' "$id" "$FAKE_BD_LOST"
@@ -335,16 +342,21 @@ fi
   })
   afterAll(() => rmSync(fixtureBin, { recursive: true, force: true }))
 
-  type ClaimOptions = { lost?: string; ignoresJson?: boolean }
+  type ClaimOptions = { lost?: string; ignoresJson?: boolean; env?: Record<string, string> }
 
   /**
    * Run `commands` in order as one session would: the plugin rewrites each in `execute.before`, the
    * rewritten command executes against the stand-in `bd` in a real shell, and its real output and
    * exit status go to `execute.after`. Returns the claims stored and the last result and command.
    */
-  async function claimThrough(commands: string[], options: ClaimOptions = {}, session = "ses_child") {
+  async function claimThrough(
+    input: string[] | ((where: { root: string; store: string }) => string[]),
+    options: ClaimOptions = {},
+    session = "ses_child",
+  ) {
     const root = scratch(true)
     const store = join(root, ".beads")
+    const commands = typeof input === "function" ? input({ root, store }) : input
     const log = join(root, "bd.log")
     writeFileSync(log, "")
     // Gate admission and release talk to bd through `run`; only the agent's own command reaches the stand-in.
@@ -367,6 +379,7 @@ fi
           HOME: process.env.HOME,
           BEADS_DIR: store,
           FAKE_BD_LOG: log,
+          ...options.env,
           ...(options.lost === undefined ? {} : { FAKE_BD_LOST: options.lost }),
           ...(options.ignoresJson === true ? { FAKE_BD_IGNORES_JSON: "1" } : {}),
         },
@@ -384,7 +397,8 @@ fi
       result,
       rewritten,
       store,
-      other: root,
+      root,
+      leases: Object.keys((fake.storage.get(`leases/${session}`) as object | undefined) ?? {}),
       log: readFileSync(log, "utf8"),
       cleanup,
     }
@@ -448,6 +462,55 @@ fi
     await run.cleanup()
   })
 
+  test.each([
+    ["-C", (other: string) => `-C ${other}`],
+    ["--directory", (other: string) => `--directory ${other}`],
+    ["--directory=", (other: string) => `--directory=${other}`],
+    ["--db", (other: string) => `--db ${other}/.beads`],
+    ["--db=", (other: string) => `--db=${other}/.beads`],
+    ["--database=", (other: string) => `--database=${other}/.beads`],
+  ])("a pre-verb %s to another ledger tracks nothing, though the ambient ledger shows the same bead and holder", async (_flag, selector) => {
+    // The ambient ledger is the session's own (BEADS_DIR); the claim is aimed at a second one.
+    const other = scratch(true)
+    const run = await claimThrough([`bd ${selector(other)} update proj-1 --claim`])
+    expect(run.log).toContain(`LEDGER=${join(other, ".beads")} proj-1`)
+    expect(run.log).not.toContain(`LEDGER=${run.store} `)
+    expect(run.claims).toEqual([])
+    expect(run.leases).toEqual([])
+    expect(run.result).toContain("this claim is not tracked")
+    await run.cleanup()
+  })
+
+  test.each([
+    ["-C", (root: string) => `-C ${root}`],
+    ["--db", (root: string) => `--db ${root}/.beads`],
+  ])("a pre-verb %s that names the ambient ledger is tracked under it", async (_flag, selector) => {
+    const run = await claimThrough(({ root }) => [`bd ${selector(root)} update proj-1 --claim`])
+    expect(run.log).toContain(`LEDGER=${run.store} proj-1`)
+    expect(run.claims).toEqual([{ id: "proj-1", actor: GENERATED, store: run.store }])
+    await run.cleanup()
+  })
+
+  test("a selector the shell computes after the verb leaves the claim untracked and reaches the other ledger", async () => {
+    const other = scratch(true)
+    const run = await claimThrough(["bd update proj-1 --claim $SEL"], { env: { SEL: `--db ${join(other, ".beads")}` } })
+    expect(run.log).toContain(`LEDGER=${join(other, ".beads")} proj-1`)
+    expect(run.claims).toEqual([])
+    expect(run.result).toContain("computed by the shell")
+    await run.cleanup()
+  })
+
+  test("a nonempty --assignee that names a known session actor ends tracking and renewal", async () => {
+    const claimed = await claimThrough(["bd update proj-1 --claim"])
+    expect(claimed.claims).toHaveLength(1)
+    expect(claimed.leases).toHaveLength(1)
+    await claimed.cleanup()
+    const run = await claimThrough(["bd update proj-1 --claim", `bd update proj-1 --assignee ${GENERATED}`])
+    expect(run.claims).toEqual([])
+    expect(run.leases).toEqual([])
+    await run.cleanup()
+  })
+
   test("a bd that ignores --json (text only) leaves the claim untracked, with a warning", async () => {
     const run = await claimThrough(["bd update proj-1 --claim"], { ignoresJson: true })
     expect(run.result).toContain("✓ Updated issue: proj-1 — Title")
@@ -469,7 +532,7 @@ fi
     await run.cleanup()
     const other = await claimThrough(['bd update proj-1 --claim --actor "$WHO" --json'])
     expect(other.recorded).toEqual({})
-    expect(other.result).toContain("did not show proj-1 as in_progress")
+    expect(other.result).toContain("computed by the shell")
     await other.cleanup()
   })
 
