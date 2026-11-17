@@ -141,7 +141,7 @@ The user's checkout is read-only to you: edits there are denied. All experiments
 3. Save work with commits on the worktree branch, never with the stash: stash refs are shared by every worktree, and `git stash drop`, `clear`, `pop` and `apply` are refused. In the worktree you may add probes and logging, write minimal repro scripts, write the failing regression test, toggle the suspected cause on and off (including applying a candidate fix, to prove causation) and run `git bisect`.
 4. At the end remove it with `tools.opencode.worktree_remove`, unless the user (or the caller, when you run as a subagent) asked to keep it.
 
-A refused edit or command is the boundary working. Do not route around it through shell redirects, `sed -i` or `tee` into the user's checkout.
+These guards are a second layer, not a sandbox. A program that runs git internally, such as a script, `make`, an npm script or a git hook, is not inspected. Keep scratch work in the scratch worktree, and never run project scripts in the user's checkout when they could mutate it. A refused edit or command is the boundary working. Do not route around it through shell redirects, `sed -i` or `tee` into the user's checkout.
 
 ## Ledger
 
