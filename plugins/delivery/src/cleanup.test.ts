@@ -3158,6 +3158,24 @@ describe("pending cleanup: one remover per worktree", () => {
       await h.finish()
     })
 
+    test("an update never overwrites an unreadable landing record", async () => {
+      const h = await harness("writes-unreadable")
+      await h.pending.record(h.f.receipt, "ses_lead", { denied: true })
+      const file = landingFile(h.common, h.f.receipt.receiptId)
+      writeFileSync(file, "{ this record is damaged")
+      const before = readFileSync(file)
+      // A plain update would otherwise replace the damaged record (and the denial it may hold) with a clean one.
+      await expect(h.pending.record(h.f.receipt, "ses_lead")).rejects.toThrow("cannot be read")
+      expect(readFileSync(file).equals(before)).toBe(true)
+      // And the retry keeps its hands off the worktree.
+      await h.pending.start()
+      await h.idle()
+      expect(removed(h)).toBe(false)
+      expect(mutationCalls(h.scripted.calls)).toEqual([])
+      expect(readFileSync(file).equals(before)).toBe(true)
+      await h.finish()
+    })
+
     test("only an authorized re-arm clears a denial", async () => {
       const h = await harness("writes-rearm")
       await h.pending.record(h.f.receipt, "ses_lead", { denied: true })
