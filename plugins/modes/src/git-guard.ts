@@ -73,13 +73,34 @@ const MENTIONS_GIT = /git/i
 const WORTH_PARSING = /git|[{*?[$`]/i
 const KEYWORDS = new Set(["if", "then", "else", "elif", "while", "until", "do", "!", "{", "(", "coproc"])
 const INTERPRETERS = /^(python[0-9.]*|node|nodejs|perl|ruby|php|lua|awk|gawk|mawk|osascript|tclsh|Rscript)$/
-/** The option that carries inline code, per interpreter. Running a script or module by name is not inspected. */
-const CODE_OPTIONS: ReadonlyArray<readonly [RegExp, readonly string[]]> = [
-  [/^python[0-9.]*$/, ["-c"]],
-  [/^(node|nodejs|bun|deno)$/, ["-e", "-p", "--eval", "--print"]],
-  [/^perl$/, ["-e", "-E"]],
-  [/^(ruby|lua|Rscript|osascript)$/, ["-e"]],
-  [/^php$/, ["-r"]],
+type InterpreterSpec = {
+  name: RegExp
+  /** Options that carry inline code. */
+  inline: readonly string[]
+  /** Options that take the next word as a value, so that word is not the script. */
+  valued: readonly string[]
+  /** Options after which the interpreter stops reading its own options (a module or a file to run). */
+  stop: readonly string[]
+  /** Whether the first inline program ends the interpreter's own options (the rest are the program's arguments). */
+  once: boolean
+}
+
+/** How each interpreter reads its command line. Only options before the script, module or subcommand are inspected. */
+const INTERPRETERS_SPECS: readonly InterpreterSpec[] = [
+  { name: /^python[0-9.]*$/, inline: ["-c"], valued: ["-W", "-X", "-Q"], stop: ["-m"], once: true },
+  {
+    name: /^(node|nodejs)$/,
+    inline: ["-e", "-p", "--eval", "--print"],
+    valued: ["-r", "--require", "--import", "--loader", "--experimental-loader", "-C", "--conditions", "--input-type", "--env-file"],
+    stop: [],
+    once: true,
+  },
+  { name: /^bun$/, inline: ["-e", "-p", "--eval", "--print"], valued: ["--cwd", "-c", "--config", "--env-file", "--preload", "-r", "--port"], stop: [], once: true },
+  { name: /^perl$/, inline: ["-e", "-E"], valued: ["-I"], stop: [], once: false },
+  { name: /^ruby$/, inline: ["-e"], valued: ["-I", "-r", "-C", "-E"], stop: [], once: false },
+  { name: /^php$/, inline: ["-r"], valued: ["-c", "-d", "-z"], stop: ["-f"], once: true },
+  { name: /^lua$/, inline: ["-e"], valued: ["-l"], stop: [], once: false },
+  { name: /^(Rscript|osascript)$/, inline: ["-e"], valued: ["-l"], stop: [], once: false },
 ]
 const AWKS = /^(awk|gawk|mawk)$/
 /** An operand that the shell or git would expand into something the guard cannot see. A leading `~/` is expanded by the guard. */
@@ -119,17 +140,23 @@ function inlineCode(exe: string, args: readonly string[]): string[] {
     }
     return []
   }
-  const options = CODE_OPTIONS.find(([name]) => name.test(exe))?.[1]
-  if (options === undefined) return []
+  if (exe === "deno") {
+    const subcommand = args.findIndex((arg) => !arg.startsWith("-"))
+    return subcommand >= 0 && args[subcommand] === "eval" ? args.slice(subcommand + 1).filter((arg) => !arg.startsWith("-")) : []
+  }
+  const spec = INTERPRETERS_SPECS.find((candidate) => candidate.name.test(exe))
+  if (spec === undefined) return []
   const code: string[] = []
-  if (exe === "deno" && args[0] === "eval") code.push(...args.slice(1).filter((arg) => !arg.startsWith("-")))
   for (let i = 0; i < args.length; i++) {
     const arg = args[i] as string
-    for (const option of options) {
-      if (arg === option) code.push(args[i + 1] ?? "")
-      else if (arg.startsWith(`${option}=`)) code.push(arg.slice(option.length + 1))
-      else if (!option.startsWith("--") && arg.startsWith(option) && arg.length > option.length) code.push(arg.slice(option.length))
-    }
+    if (arg === "--" || spec.stop.includes(arg)) break
+    const option = spec.inline.find((name) => arg === name || arg.startsWith(`${name}=`) || (!name.startsWith("--") && arg.startsWith(name) && arg.length > name.length))
+    if (option !== undefined) {
+      if (arg === option) code.push(args[++i] ?? "")
+      else code.push(arg.slice(arg.startsWith(`${option}=`) ? option.length + 1 : option.length))
+      if (spec.once) break
+    } else if (spec.valued.includes(arg)) i++
+    else if (!arg.startsWith("-")) break
   }
   return code
 }

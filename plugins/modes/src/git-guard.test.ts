@@ -562,6 +562,45 @@ describe("interpreters", () => {
     "awk -F: 'BEGIN{system(\"git push\")}' file",
     'lua -e "os.execute(\'git push\')"',
   ])("inline code in %j that mentions git is refused", (command) => verdict(["debug", "refactor"], command, "refused"))
+
+  // The interpreter stops reading its own options at the module, the script or the subcommand.
+  test.each([
+    "python3 -m pytest -c .github/pytest.ini",
+    "python3 -m pytest -c git.ini",
+    "python3 script.py -c 'import os; os.system(\"git push\")'",
+    "python3 -u script.py -c git",
+    "python3 -- script.py -c git",
+    "node script.js -e x",
+    "node script.js -e 'git push'",
+    "node -r ts-node/register script.js -p git",
+    "bun test -e git",
+    "bun run lint -e git",
+    "deno run -A main.ts -e git",
+    "deno test --filter git",
+    "perl script.pl -e git",
+    "perl -I lib script.pl -e git",
+    "ruby script.rb -e git",
+    "ruby -I lib script.rb -e git",
+    "php -f script.php -r git",
+    "lua script.lua -e git",
+  ])("arguments after the boundary in %j are not inline code", (command) => verdict(["debug", "refactor"], command, "allowed"))
+  test.each([
+    "python3 -u -c 'import os; os.system(\"git push\")'",
+    "python3 -W ignore -c 'import os; os.system(\"git push\")'",
+    "python3 -I -B -c 'import os; os.system(\"git push\")'",
+    "node -r ts-node/register -e \"require('child_process').execSync('git push')\"",
+    "node --require x --print \"require('child_process').execSync('git push')\"",
+    "node --input-type module -e \"import 'child_process'; // git push\"",
+    "bun --cwd x -e \"Bun.spawn(['git','push'])\"",
+    "perl -I lib -e 'system(\"git push\")'",
+    "perl -e 1 -e 'system(\"git push\")'",
+    "perl -w -E 'say `git push`'",
+    "ruby -I lib -e 'system(\"git push\")'",
+    "ruby -w -e 'system(\"git push\")'",
+    "php -d display_errors=1 -r 'system(\"git push\");'",
+    "lua -l mod -e \"os.execute('git push')\"",
+    "deno eval -q \"new Deno.Command('git')\"",
+  ])("inline code before the boundary in %j is refused", (command) => verdict(["debug", "refactor"], command, "refused"))
 })
 
 describe("branches the user owns (debug only)", () => {

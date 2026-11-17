@@ -1119,12 +1119,21 @@ var MENTIONS_GIT = /git/i;
 var WORTH_PARSING = /git|[{*?[$`]/i;
 var KEYWORDS = new Set(["if", "then", "else", "elif", "while", "until", "do", "!", "{", "(", "coproc"]);
 var INTERPRETERS = /^(python[0-9.]*|node|nodejs|perl|ruby|php|lua|awk|gawk|mawk|osascript|tclsh|Rscript)$/;
-var CODE_OPTIONS = [
-  [/^python[0-9.]*$/, ["-c"]],
-  [/^(node|nodejs|bun|deno)$/, ["-e", "-p", "--eval", "--print"]],
-  [/^perl$/, ["-e", "-E"]],
-  [/^(ruby|lua|Rscript|osascript)$/, ["-e"]],
-  [/^php$/, ["-r"]]
+var INTERPRETERS_SPECS = [
+  { name: /^python[0-9.]*$/, inline: ["-c"], valued: ["-W", "-X", "-Q"], stop: ["-m"], once: true },
+  {
+    name: /^(node|nodejs)$/,
+    inline: ["-e", "-p", "--eval", "--print"],
+    valued: ["-r", "--require", "--import", "--loader", "--experimental-loader", "-C", "--conditions", "--input-type", "--env-file"],
+    stop: [],
+    once: true
+  },
+  { name: /^bun$/, inline: ["-e", "-p", "--eval", "--print"], valued: ["--cwd", "-c", "--config", "--env-file", "--preload", "-r", "--port"], stop: [], once: true },
+  { name: /^perl$/, inline: ["-e", "-E"], valued: ["-I"], stop: [], once: false },
+  { name: /^ruby$/, inline: ["-e"], valued: ["-I", "-r", "-C", "-E"], stop: [], once: false },
+  { name: /^php$/, inline: ["-r"], valued: ["-c", "-d", "-z"], stop: ["-f"], once: true },
+  { name: /^lua$/, inline: ["-e"], valued: ["-l"], stop: [], once: false },
+  { name: /^(Rscript|osascript)$/, inline: ["-e"], valued: ["-l"], stop: [], once: false }
 ];
 var AWKS = /^(awk|gawk|mawk)$/;
 var unsafeOperand = (path) => /[$`*?[{]/.test(path) || /^~[^/]/.test(path);
@@ -1166,22 +1175,30 @@ function inlineCode(exe, args) {
     }
     return [];
   }
-  const options = CODE_OPTIONS.find(([name]) => name.test(exe))?.[1];
-  if (options === undefined)
+  if (exe === "deno") {
+    const subcommand = args.findIndex((arg) => !arg.startsWith("-"));
+    return subcommand >= 0 && args[subcommand] === "eval" ? args.slice(subcommand + 1).filter((arg) => !arg.startsWith("-")) : [];
+  }
+  const spec = INTERPRETERS_SPECS.find((candidate) => candidate.name.test(exe));
+  if (spec === undefined)
     return [];
   const code = [];
-  if (exe === "deno" && args[0] === "eval")
-    code.push(...args.slice(1).filter((arg) => !arg.startsWith("-")));
   for (let i = 0;i < args.length; i++) {
     const arg = args[i];
-    for (const option of options) {
+    if (arg === "--" || spec.stop.includes(arg))
+      break;
+    const option = spec.inline.find((name) => arg === name || arg.startsWith(`${name}=`) || !name.startsWith("--") && arg.startsWith(name) && arg.length > name.length);
+    if (option !== undefined) {
       if (arg === option)
-        code.push(args[i + 1] ?? "");
-      else if (arg.startsWith(`${option}=`))
-        code.push(arg.slice(option.length + 1));
-      else if (!option.startsWith("--") && arg.startsWith(option) && arg.length > option.length)
-        code.push(arg.slice(option.length));
-    }
+        code.push(args[++i] ?? "");
+      else
+        code.push(arg.slice(arg.startsWith(`${option}=`) ? option.length + 1 : option.length));
+      if (spec.once)
+        break;
+    } else if (spec.valued.includes(arg))
+      i++;
+    else if (!arg.startsWith("-"))
+      break;
   }
   return code;
 }
