@@ -4527,16 +4527,16 @@ function subagentChild(result) {
 var SHARED = Symbol.for("srobroek.beads.lifecycle");
 function shared() {
   const holder = globalThis;
-  holder[SHARED] ??= {
-    events: new Set,
-    deferred: new Set,
-    foreground: new Map,
-    releases: new Map,
-    reported: new WeakSet,
-    idle: new IdleReports,
-    held: new Map
-  };
-  return holder[SHARED];
+  holder[SHARED] ??= {};
+  const state = holder[SHARED];
+  state.events ??= new Set;
+  state.deferred ??= new Set;
+  state.foreground ??= new Map;
+  state.releases ??= new Map;
+  state.reported ??= new WeakSet;
+  state.idle ??= new IdleReports;
+  state.held ??= new Map;
+  return state;
 }
 var MAX_EVENTS = 2000;
 
@@ -6216,9 +6216,19 @@ async function setupBeads(ctx, deps = {}) {
   const compaction = await ctx.session.hook("compaction", primeHook);
   const generate = await ctx.session.hook("generate", primeHook);
   const promptHook = await ctx.session.hook("prompt", async (event) => {
-    await lifecycle.prompt(event.sessionID, event.metadata);
+    try {
+      await lifecycle.prompt(event.sessionID, event.metadata);
+    } catch (error) {
+      console.error("srobroek.beads: prompt hook failed", error);
+    }
   });
-  const idleHook = await ctx.session.hook("experimental.idle", (event) => lifecycle.idle(event));
+  const idleHook = await ctx.session.hook("experimental.idle", (event) => {
+    try {
+      lifecycle.idle(event);
+    } catch (error) {
+      console.error("srobroek.beads: idle hook failed", error);
+    }
+  });
   const skills = on("beads-skills") ? await registerSkills(ctx.skill, SKILL_NAMES.map((name) => join7(deps.skillsDirectory ?? SKILLS_DIRECTORY, name, "SKILL.md"))) : undefined;
   const abort = new AbortController;
   const iterator = ctx.event.subscribe({ signal: abort.signal })[Symbol.asyncIterator]();

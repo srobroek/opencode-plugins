@@ -137,17 +137,19 @@ const SHARED: unique symbol = Symbol.for("srobroek.beads.lifecycle") as never
 
 /** State every instance of this plugin in the process shares, so one event is handled once. */
 function shared(): Shared {
-  const holder = globalThis as { [SHARED]?: Shared }
-  holder[SHARED] ??= {
-    events: new Set(),
-    deferred: new Set(),
-    foreground: new Map(),
-    releases: new Map(),
-    reported: new WeakSet(),
-    idle: new IdleReports(),
-    held: new Map(),
-  }
-  return holder[SHARED]
+  const holder = globalThis as { [SHARED]?: Partial<Shared> }
+  // An older instance of this plugin in the same process may have created the object
+  // without the fields a later version added, so each field is backfilled on its own.
+  holder[SHARED] ??= {}
+  const state = holder[SHARED]
+  state.events ??= new Set()
+  state.deferred ??= new Set()
+  state.foreground ??= new Map()
+  state.releases ??= new Map()
+  state.reported ??= new WeakSet()
+  state.idle ??= new IdleReports()
+  state.held ??= new Map()
+  return state as Shared
 }
 
 type ChildRelease = { claims: Record<string, TrackedClaim>; outcome: ReleaseOutcome }
