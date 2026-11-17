@@ -287,33 +287,42 @@ export function createLifecycle(deps: LifecycleDeps) {
     projectID: string
     branch: string | undefined
     parentDir: string
-    /** The commit the landed proof covered. */
-    oid: string
     /** The generation read before the facts were collected. */
     gen: number
-    /** The lane whose child is moved home first. */
+    /** `empty`: HEAD is the commit the lane started from. `landed`: `isLanded(HEAD)`. */
+    basis: "landed" | "empty"
+    /** The commit an empty lane started from. */
+    base?: string
+    /** Whether a commit is landed; evaluated against the one HEAD captured under the lock. */
+    isLanded: (oid: string) => Promise<boolean>
+    /** The lane whose child is moved home first, and whose record is retired inside the same critical section. */
     lane?: Lane
     /** Run under the lock, right before the removal: the refusal to honour, if any. */
     recheck?: () => Promise<string | undefined>
   }
 
   /**
-   * The only removal path. Under the directory lock, and right before removing: the resume
-   * generation is unchanged, HEAD is still the proven commit, and the tree is still clean. The
-   * local branch is deleted only when the worktree was on it (not detached) and it still points
-   * at the proven commit, with a compare-and-delete that fails if the ref moved.
+   * The only removal path, one critical section against one snapshot. Under the directory lock:
+   * the resume generation is unchanged; HEAD is read once, and every proof (empty, or landed),
+   * the clean tree and the branch ref are evaluated against that one commit; fresh re-reads of
+   * ownership, records and liveness agree; then the worktree is removed, the branch deleted with a
+   * compare-and-delete on that commit, and the lane retired with its claim, all before the lock is
+   * released, so a resume that was waiting sees the finished state and revives from it.
    */
   const removeVerified = (removal: Removal): Promise<boolean> =>
     withLock(removal.directory, async () => {
-      const { directory, branch, oid } = removal
+      const { directory, branch } = removal
       if (generationOf(directory) !== removal.gen) return false
-      if ((await git.head(directory)) !== oid) return false
+      const oid = await git.head(directory)
+      if (oid === undefined) return false
       if ((await git.porcelain(directory)) !== "") return false
       if ((await busyTreeOf(directory, branch)) !== undefined) return false
+      const proven = removal.basis === "empty" ? oid === removal.base : await removal.isLanded(oid)
+      if (!proven) return false
       if ((await removal.recheck?.()) !== undefined) return false
       let deleteBranch = false
       if (branch !== undefined && (await git.branch(directory)) === branch) {
-        // On the branch: the ref must still be the commit the proof covered, or something moved it.
+        // On the branch: the ref must be the commit captured above, or something moved it.
         if ((await git.commit(removal.parentDir, `refs/heads/${branch}`)) !== oid) return false
         deleteBranch = true
       }
@@ -328,8 +337,24 @@ export function createLifecycle(deps: LifecycleDeps) {
       }
       await ctx.worktree.refresh({ projectID: removal.projectID } as never).catch(() => {})
       if (deleteBranch && branch !== undefined) await git.deleteBranchAt(removal.parentDir, branch, oid)
+      if (removal.lane) {
+        // Retire only the record this removal is about: same directory, still active, same generation.
+        const stored = await load(removal.lane.child)
+        if (stored?.state === "active" && canonical(stored.directory) === canonical(directory) && generationOf(directory) === removal.gen) {
+          await save({ ...stored, state: removal.basis === "empty" ? "removed" : "landed" })
+        }
+      }
       return true
     })
+
+  /** Whether `oid` is landed: delivery recorded it, it is an ancestor of origin/main, or a merged PR / `wt` says so. Read fresh. */
+  const landedProof = (directory: string, parentDir: string) => async (oid: string): Promise<boolean> => {
+    const records = await deliveryRecords(directory, parentDir)
+    if (records.heads.includes(oid)) return true
+    if (await git.isAncestor(directory, oid, "origin/main")) return true
+    const proofs = await proofsFor(parentDir)
+    return proofs.merged.has(oid) || proofs.integrated.has(oid)
+  }
 
   // --- actions ------------------------------------------------------------------------------
 
@@ -354,7 +379,10 @@ export function createLifecycle(deps: LifecycleDeps) {
    * and the parent idle now. `parentIdle` is true only when the idle hook itself is the evidence.
    */
   const recheckFor =
-    (lane: Lane | undefined, directory: string, parentDir: string, parentIdle: boolean) => async (): Promise<string | undefined> => {
+    (lane: Lane | undefined, directory: string, parentDir: string, parentIdle: boolean, owner?: { minAgeMs: number }) =>
+    async (): Promise<string | undefined> => {
+      // Every sweep candidate, lane or not: nobody may be working in it now (all pages read, fail closed).
+      if (owner !== undefined && (await ownerOf(directory, owner.minAgeMs)) !== "no") return "its ownership could not be confirmed"
       const records = await deliveryRecords(directory, parentDir)
       if (records.block !== undefined) return records.block
       const busy = busyHold(directory)
@@ -366,47 +394,29 @@ export function createLifecycle(deps: LifecycleDeps) {
     }
 
   /** A lane's removal, fenced by the generation read before its facts were collected. */
-  const removeLane = async (lane: Lane, basis: "landed" | "empty", facts: LaneFacts, gen: number, parentIdle = false): Promise<boolean> => {
-    if (facts.tip === undefined) return false
-    const removed = await removeVerified({
+  const removeLane = async (lane: Lane, basis: "landed" | "empty", gen: number, parentIdle = false): Promise<boolean> =>
+    removeVerified({
       directory: lane.directory,
       projectID: lane.projectID,
       branch: lane.branch,
       parentDir: lane.parentDir,
-      oid: facts.tip,
       gen,
+      basis,
+      base: lane.base,
+      isLanded: landedProof(lane.directory, lane.parentDir),
       lane,
       recheck: recheckFor(lane, lane.directory, lane.parentDir, parentIdle),
     })
-    if (!removed) return false
-    const fresh = (await load(lane.child)) ?? lane
-    await save({ ...fresh, state: basis === "landed" ? "landed" : "removed" })
-    return true
-  }
 
   /**
    * The empty lane of a foreground `subagent` call that just returned. Same path as every other
-   * removal (lock, generation, fresh re-reads of the child, delivery's records and the gate's
-   * holds); the caller is blocked on this very call, so the returned result is the evidence that
+   * removal; the caller is blocked on this very call, so the returned result is the evidence that
    * the parent is not mid-turn elsewhere. `gen` is read before the lane's status was.
    */
-  const removeForeground = async (lane: Lane, gen: number): Promise<boolean> => {
-    const oid = await git.head(lane.directory)
-    if (oid === undefined) return false
-    return removeVerified({
-      directory: lane.directory,
-      projectID: lane.projectID,
-      branch: lane.branch,
-      parentDir: lane.parentDir,
-      oid,
-      gen,
-      lane,
-      recheck: recheckFor(lane, lane.directory, lane.parentDir, true),
-    })
-  }
+  const removeForeground = (lane: Lane, gen: number): Promise<boolean> => removeLane(lane, "empty", gen, true)
 
   const act = async (lane: Lane, action: LaneAction, facts: LaneFacts, event: LaneEvent, gen: number) => {
-    if (action.action === "remove") return removeLane(lane, action.basis, facts, gen)
+    if (action.action === "remove") return removeLane(lane, action.basis, gen)
     if (action.action === "defer" && action.quiet) {
       const quietSince = action.quiet === "start" ? facts.now : undefined
       if (lane.quietSince !== quietSince) await save({ ...((await load(lane.child)) ?? lane), ...(quietSince === undefined ? { quietSince: undefined } : { quietSince }) })
@@ -562,8 +572,7 @@ export function createLifecycle(deps: LifecycleDeps) {
         policy,
       )
       for (const { lane, basis } of gate.remove) {
-        const facts = gateLanes.find((entry) => entry.lane.child === lane.child)?.facts
-        if (facts) await removeLane(lane, basis, facts, gens.get(lane.child) ?? generationOf(lane.directory), lane.parent === input.sessionID)
+        await removeLane(lane, basis, gens.get(lane.child) ?? generationOf(lane.directory), lane.parent === input.sessionID)
       }
       if (gate.message === undefined) return
       if (await send(input.sessionID, gate.message)) {
@@ -582,7 +591,11 @@ export function createLifecycle(deps: LifecycleDeps) {
     const gone = (path: string) => !existsSync(path)
     const lane = laneForLanding(event.result, lanes, canonical, gone)
     if (lane) {
-      await save({ ...((await load(lane.child)) ?? lane), state: "landed" })
+      // Bookkeeping in the same critical section as every removal: retire only the record that was removed.
+      await withLock(lane.directory, async () => {
+        const stored = await load(lane.child)
+        if (stored?.state === "active" && canonical(stored.directory) === canonical(lane.directory)) await save({ ...stored, state: "landed" })
+      })
       await ctx.worktree.refresh({ projectID: lane.projectID } as never).catch(() => {})
       return
     }
@@ -671,13 +684,12 @@ export function createLifecycle(deps: LifecycleDeps) {
     for (const entry of listed ?? []) directories.set(canonical(entry.directory), entry.directory)
     for (const lane of lanes) directories.set(canonical(lane.directory), lane.directory)
     const facts: WorktreeFacts[] = []
-    const proven = new Map<string, { oid: string | undefined; gen: number }>()
+    const proven = new Map<string, { gen: number }>()
     for (const [key, directory] of directories) {
       // The commit and generation are read first: the removal runs only if both are unchanged.
       const gen = generationOf(directory)
-      const oid = (await deps.exists(directory)) ? await git.head(directory) : undefined
       facts.push(await sweepFacts(directory, byDir.get(key), minAgeMs))
-      proven.set(key, { oid, gen })
+      proven.set(key, { gen })
     }
     const plan = planSweep(facts, { minAgeMs })
     if (mode === "prune") {
@@ -690,18 +702,19 @@ export function createLifecycle(deps: LifecycleDeps) {
         const key = canonical(entry.path)
         const lane = byDir.get(key)
         const covered = proven.get(key)
-        if (covered?.oid === undefined) continue
-        const removed = await removeVerified({
+        if (covered === undefined) continue
+        const parentDir = lane?.parentDir ?? ctx.location.directory
+        await removeVerified({
           directory: entry.path,
           projectID,
           branch: entry.deleteBranch ? entry.branch : undefined,
-          parentDir: lane?.parentDir ?? ctx.location.directory,
-          oid: covered.oid,
+          parentDir,
           gen: covered.gen,
+          basis: "landed",
+          isLanded: landedProof(entry.path, parentDir),
           ...(lane ? { lane } : {}),
-          recheck: recheckFor(lane, entry.path, lane?.parentDir ?? ctx.location.directory, false),
+          recheck: recheckFor(lane, entry.path, parentDir, false, { minAgeMs }),
         })
-        if (removed && lane) await save({ ...((await load(lane.child)) ?? lane), state: "landed" })
       }
     }
     await ctx.storage.set("sweep/last", { at: now(), mode, plan })

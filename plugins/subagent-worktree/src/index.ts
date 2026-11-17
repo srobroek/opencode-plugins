@@ -625,8 +625,9 @@ export function createLanes(
     if (shouldRemove(status, resultStatus)) {
       try {
         if (await lifecycle.removeForeground(lane, gen)) {
-          lane = await retire(lane, "removed")
+          // Retired inside the removal's critical section; the note below describes this removal.
           removed = true
+          lane = { ...lane, state: "removed" }
         }
       } catch {}
     }

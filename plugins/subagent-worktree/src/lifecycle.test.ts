@@ -80,7 +80,11 @@ function runner(world: World, log: string[][]) {
     if (cmd.startsWith("rev-parse --verify --quiet refs/heads/")) return ok(`${world.branchOid}\n`)
     if (cmd === "symbolic-ref --quiet --short HEAD") return world.onBranch ? ok("lane-a\n") : { code: 1, stdout: "", stderr: "" }
     if (cmd.startsWith("update-ref -d")) return { code: world.updateRefFails ? 1 : 0, stdout: "", stderr: "" }
-    if (cmd.startsWith("merge-base --is-ancestor")) return { code: world.ancestor, stdout: "", stderr: "" }
+    if (cmd.startsWith("merge-base --is-ancestor")) {
+      // Only the commit the proof was about is an ancestor; a different tip is not.
+      const [, , oid] = cmd.split(" ")
+      return { code: world.ancestor === 0 && oid === TIP ? 0 : 1, stdout: "", stderr: "" }
+    }
     if (cmd === "rev-parse --absolute-git-dir") return ok("/nonexistent/gitdir\n")
     if (cmd.startsWith("stash list")) return ok("")
     return ok()
@@ -858,6 +862,47 @@ describe("liveness is read when the removal is applied", () => {
     const result = await execute({ mode: "prune" }, tool)
     expect(result.metadata.plan[0]?.verdict).toBe("quarantine")
     expect(worktree).toEqual([])
+    await cleanup()
+  })
+})
+
+describe("the sweep re-checks ownership under the removal lock, for every candidate", () => {
+  const execute = (fake: Fake) =>
+    fake.tools.get("subagent_worktree_sweep")?.execute as (i: unknown, c: unknown) => Promise<{ metadata: { plan: Array<{ verdict: string }> } }>
+
+  test("a session that starts in an abandoned worktree after the facts were collected keeps it", async () => {
+    // No lane record: only an old worktree under an included root.
+    const { fake, worktree, cleanup } = await start({ ancestor: 0, age: 3 * 24 * 3_600_000 }, { stored: [], options: { include: ["/wt"] } })
+    let calls = 0
+    ;(fake.context.session as unknown as { list: unknown }).list = async () => {
+      calls++
+      return calls === 1 ? { data: [] } : { data: [{ id: "late", time: { busy: 9, idle: 2 } }] }
+    }
+    const result = await execute(fake)({ mode: "prune" }, tool)
+    expect(result.metadata.plan[0]?.verdict).toBe("prune")
+    expect(calls).toBeGreaterThan(1)
+    expect(worktree).toEqual([])
+    await cleanup()
+  })
+
+  test("a lookup that fails at removal time keeps it too", async () => {
+    const { fake, worktree, cleanup } = await start({ ancestor: 0, age: 3 * 24 * 3_600_000 }, { stored: [], options: { include: ["/wt"] } })
+    let calls = 0
+    ;(fake.context.session as unknown as { list: unknown }).list = async () => {
+      calls++
+      if (calls === 1) return { data: [] }
+      throw new Error("down")
+    }
+    await execute(fake)({ mode: "prune" }, tool)
+    expect(worktree).toEqual([])
+    await cleanup()
+  })
+
+  test("with no one in it at removal time, an abandoned worktree is pruned", async () => {
+    const { fake, worktree, cleanup } = await start({ ancestor: 0, age: 3 * 24 * 3_600_000 }, { stored: [], options: { include: ["/wt"] } })
+    ;(fake.context.session as unknown as { list: unknown }).list = async () => ({ data: [] })
+    await execute(fake)({ mode: "prune" }, tool)
+    expect(worktree[0]?.method).toBe("remove")
     await cleanup()
   })
 })

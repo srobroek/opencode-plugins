@@ -47,6 +47,9 @@ function fakeRun(repo: Repo, log: string[][]) {
     if (repo.unborn && cmd.startsWith("rev-parse --verify")) return fail
     if (repo.unborn && cmd === "symbolic-ref --quiet HEAD") return ok("refs/heads/main\n")
     if (repo.unborn && cmd === "for-each-ref --count=1") return ok()
+    // A lane branch points where its worktree is: the ref follows the worktree's HEAD.
+    const ref = /^rev-parse --verify --quiet refs\/heads\/(.+)\^\{commit\}$/.exec(cmd)
+    if (ref) return ok(`${repo.heads[`/wt/${ref[1]}`] ?? BASE}\n`)
     if (cmd.startsWith("rev-parse --verify")) return ok(`${repo.heads[dir] ?? BASE}\n`)
     if (cmd === "symbolic-ref --quiet --short HEAD") {
       const branch = repo.branch[dir]
@@ -99,6 +102,8 @@ async function start(
     exists?: (path: string) => Promise<boolean>
     now?: () => number
     commonDir?: (directory: string) => Promise<string | undefined>
+    /** Called inside the host removal, i.e. while the removal holds the directory lock. */
+    onRemove?: () => void
   } = {},
 ): Promise<Setup> {
   const fake = createFakeContext({
@@ -170,6 +175,7 @@ async function start(
       remove: async (input: Record<string, unknown>) => {
         expect(fake.sessions.get("ses_fake1")?.location).toEqual({ directory: REPO })
         worktree.calls.push({ method: "remove", input })
+        options.onRemove?.()
       },
       refresh: async (input: Record<string, unknown>) => void worktree.calls.push({ method: "refresh", input }),
     },
@@ -937,6 +943,52 @@ describe("execute.after", () => {
     expect((event.result as { content: string }).content).not.toContain('state="removed"')
     expect(setup.worktree.calls.map((entry) => entry.method)).toEqual(["create"])
     expect(lane(setup.fake)?.state).toBe("active")
+  })
+
+  test("a commit that lands between the empty check and the HEAD read keeps the lane and its branch", async () => {
+    const setup = await start()
+    await spawn(setup)
+    const directory = lane(setup.fake)?.directory ?? ""
+    let landed = false
+    setup.repo.onCommand = (cmd) => {
+      if (cmd === "status --porcelain" && !landed) {
+        landed = true
+        setup.repo.heads[directory] = "9".repeat(40)
+      }
+    }
+    const event = await setup.fake.fire.tool("execute.after", completed("ses_fake1"))
+    expect(landed).toBe(true)
+    expect((event.result as { content: string }).content).not.toContain('state="removed"')
+    expect(setup.worktree.calls.map((entry) => entry.method)).toEqual(["create"])
+    expect(setup.log.some((argv) => argv.includes("update-ref"))).toBe(false)
+    expect(lane(setup.fake)?.state).toBe("active")
+  })
+
+  test("a resume waiting on the lock revives the lane, and the revived lane and its claim survive the retirement", async () => {
+    let resumed: Promise<unknown> | undefined
+    let setup: Setup | undefined
+    setup = await start({
+      onRemove: () => {
+        // The removal holds the directory lock; the resume has to queue behind it.
+        resumed = setup?.fake.fire.tool("execute.before", call({ sessionID: "ses_fake1", prompt: "again" }))
+      },
+    })
+    // Storage takes a moment to write a retirement, as a real one does.
+    const storage = setup.fake.context.storage as unknown as { set: (key: string, value: unknown) => Promise<void> }
+    const write = storage.set.bind(storage)
+    storage.set = async (key, value) => {
+      if ((value as { state?: string })?.state !== undefined && (value as { state: string }).state !== "active") {
+        await new Promise((done) => setTimeout(done, 15))
+      }
+      return write(key, value)
+    }
+    await spawn(setup)
+    await setup.fake.fire.tool("execute.after", completed("ses_fake1"))
+    await resumed
+    const revived = lane(setup.fake)
+    expect(setup.worktree.calls.map((entry) => entry.method).filter((method) => method === "create")).toHaveLength(2)
+    expect(revived?.state).toBe("active")
+    expect(readClaim(setup.common, revived?.directory ?? "").kind).toBe("present")
   })
 
   test("without that resume the same foreground lane is removed", async () => {

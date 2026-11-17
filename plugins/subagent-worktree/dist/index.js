@@ -1301,14 +1301,18 @@ function createLifecycle(deps) {
     generations.set(canonical(directory), generationOf(directory) + 1);
   });
   const removeVerified = (removal) => withLock(removal.directory, async () => {
-    const { directory, branch, oid } = removal;
+    const { directory, branch } = removal;
     if (generationOf(directory) !== removal.gen)
       return false;
-    if (await git.head(directory) !== oid)
+    const oid = await git.head(directory);
+    if (oid === undefined)
       return false;
     if (await git.porcelain(directory) !== "")
       return false;
     if (await busyTreeOf(directory, branch) !== undefined)
+      return false;
+    const proven = removal.basis === "empty" ? oid === removal.base : await removal.isLanded(oid);
+    if (!proven)
       return false;
     if (await removal.recheck?.() !== undefined)
       return false;
@@ -1331,8 +1335,23 @@ function createLifecycle(deps) {
     await ctx.worktree.refresh({ projectID: removal.projectID }).catch(() => {});
     if (deleteBranch && branch !== undefined)
       await git.deleteBranchAt(removal.parentDir, branch, oid);
+    if (removal.lane) {
+      const stored = await load(removal.lane.child);
+      if (stored?.state === "active" && canonical(stored.directory) === canonical(directory) && generationOf(directory) === removal.gen) {
+        await save({ ...stored, state: removal.basis === "empty" ? "removed" : "landed" });
+      }
+    }
     return true;
   });
+  const landedProof = (directory, parentDir) => async (oid) => {
+    const records = await deliveryRecords(directory, parentDir);
+    if (records.heads.includes(oid))
+      return true;
+    if (await git.isAncestor(directory, oid, "origin/main"))
+      return true;
+    const proofs = await proofsFor(parentDir);
+    return proofs.merged.has(oid) || proofs.integrated.has(oid);
+  };
   const mark = async (child, key) => {
     const lane = await load(child);
     if (!lane)
@@ -1347,7 +1366,9 @@ function createLifecycle(deps) {
       return false;
     }
   };
-  const recheckFor = (lane, directory, parentDir, parentIdle) => async () => {
+  const recheckFor = (lane, directory, parentDir, parentIdle, owner) => async () => {
+    if (owner !== undefined && await ownerOf(directory, owner.minAgeMs) !== "no")
+      return "its ownership could not be confirmed";
     const records = await deliveryRecords(directory, parentDir);
     if (records.block !== undefined)
       return records.block;
@@ -1362,43 +1383,22 @@ function createLifecycle(deps) {
       return "the parent is not idle now";
     return;
   };
-  const removeLane = async (lane, basis, facts, gen, parentIdle = false) => {
-    if (facts.tip === undefined)
-      return false;
-    const removed = await removeVerified({
-      directory: lane.directory,
-      projectID: lane.projectID,
-      branch: lane.branch,
-      parentDir: lane.parentDir,
-      oid: facts.tip,
-      gen,
-      lane,
-      recheck: recheckFor(lane, lane.directory, lane.parentDir, parentIdle)
-    });
-    if (!removed)
-      return false;
-    const fresh = await load(lane.child) ?? lane;
-    await save({ ...fresh, state: basis === "landed" ? "landed" : "removed" });
-    return true;
-  };
-  const removeForeground = async (lane, gen) => {
-    const oid = await git.head(lane.directory);
-    if (oid === undefined)
-      return false;
-    return removeVerified({
-      directory: lane.directory,
-      projectID: lane.projectID,
-      branch: lane.branch,
-      parentDir: lane.parentDir,
-      oid,
-      gen,
-      lane,
-      recheck: recheckFor(lane, lane.directory, lane.parentDir, true)
-    });
-  };
+  const removeLane = async (lane, basis, gen, parentIdle = false) => removeVerified({
+    directory: lane.directory,
+    projectID: lane.projectID,
+    branch: lane.branch,
+    parentDir: lane.parentDir,
+    gen,
+    basis,
+    base: lane.base,
+    isLanded: landedProof(lane.directory, lane.parentDir),
+    lane,
+    recheck: recheckFor(lane, lane.directory, lane.parentDir, parentIdle)
+  });
+  const removeForeground = (lane, gen) => removeLane(lane, "empty", gen, true);
   const act = async (lane, action, facts, event, gen) => {
     if (action.action === "remove")
-      return removeLane(lane, action.basis, facts, gen);
+      return removeLane(lane, action.basis, gen);
     if (action.action === "defer" && action.quiet) {
       const quietSince = action.quiet === "start" ? facts.now : undefined;
       if (lane.quietSince !== quietSince)
@@ -1547,9 +1547,7 @@ function createLifecycle(deps) {
       const gens = new Map(gateLanes.map((entry) => [entry.lane.child, entry.gen]));
       const gate = idleGateAction({ id: input.sessionID, runningChildren: running, now: now(), lastMessageAt: lastGate.get(input.sessionID) }, gateLanes.map(({ lane, facts }) => ({ lane, facts })), policy);
       for (const { lane, basis } of gate.remove) {
-        const facts = gateLanes.find((entry) => entry.lane.child === lane.child)?.facts;
-        if (facts)
-          await removeLane(lane, basis, facts, gens.get(lane.child) ?? generationOf(lane.directory), lane.parent === input.sessionID);
+        await removeLane(lane, basis, gens.get(lane.child) ?? generationOf(lane.directory), lane.parent === input.sessionID);
       }
       if (gate.message === undefined)
         return;
@@ -1569,7 +1567,11 @@ function createLifecycle(deps) {
     const gone = (path) => !existsSync2(path);
     const lane = laneForLanding(event.result, lanes, canonical, gone);
     if (lane) {
-      await save({ ...await load(lane.child) ?? lane, state: "landed" });
+      await withLock(lane.directory, async () => {
+        const stored = await load(lane.child);
+        if (stored?.state === "active" && canonical(stored.directory) === canonical(lane.directory))
+          await save({ ...stored, state: "landed" });
+      });
       await ctx.worktree.refresh({ projectID: lane.projectID }).catch(() => {});
       return;
     }
@@ -1655,9 +1657,8 @@ function createLifecycle(deps) {
     const proven = new Map;
     for (const [key, directory] of directories) {
       const gen = generationOf(directory);
-      const oid = await deps.exists(directory) ? await git.head(directory) : undefined;
       facts.push(await sweepFacts(directory, byDir.get(key), minAgeMs));
-      proven.set(key, { oid, gen });
+      proven.set(key, { gen });
     }
     const plan = planSweep(facts, { minAgeMs });
     if (mode === "prune") {
@@ -1671,20 +1672,20 @@ function createLifecycle(deps) {
         const key = canonical(entry.path);
         const lane = byDir.get(key);
         const covered = proven.get(key);
-        if (covered?.oid === undefined)
+        if (covered === undefined)
           continue;
-        const removed = await removeVerified({
+        const parentDir = lane?.parentDir ?? ctx.location.directory;
+        await removeVerified({
           directory: entry.path,
           projectID,
           branch: entry.deleteBranch ? entry.branch : undefined,
-          parentDir: lane?.parentDir ?? ctx.location.directory,
-          oid: covered.oid,
+          parentDir,
           gen: covered.gen,
+          basis: "landed",
+          isLanded: landedProof(entry.path, parentDir),
           ...lane ? { lane } : {},
-          recheck: recheckFor(lane, entry.path, lane?.parentDir ?? ctx.location.directory, false)
+          recheck: recheckFor(lane, entry.path, parentDir, false, { minAgeMs })
         });
-        if (removed && lane)
-          await save({ ...await load(lane.child) ?? lane, state: "landed" });
       }
     }
     await ctx.storage.set("sweep/last", { at: now(), mode, plan });
@@ -2244,8 +2245,8 @@ ${skipped}`,
     if (shouldRemove(status, resultStatus)) {
       try {
         if (await lifecycle.removeForeground(lane2, gen)) {
-          lane2 = await retire(lane2, "removed");
           removed = true;
+          lane2 = { ...lane2, state: "removed" };
         }
       } catch {}
     }
