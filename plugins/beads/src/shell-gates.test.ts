@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test"
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { execFileSync } from "node:child_process"
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
@@ -7,6 +7,9 @@ import { GateAdmitter } from "./gate-admission.ts"
 import { parse } from "./shell.ts"
 import { actorForCommand, actorInjection, createLedgerWarning, decideShell, hasBdEdit, withActorPrefix } from "./shell-gates.ts"
 import { gateDeps } from "./test-support.ts"
+
+// Real child processes; 30 s leaves headroom for a loaded machine (AGENTS.md, Testing).
+setDefaultTimeout(30_000)
 
 describe("decideShell", () => {
   let root = ""

@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test"
+import { describe, expect, setDefaultTimeout, test } from "bun:test"
 import { BranchTracker } from "./branch.ts"
 import { parseWorktrees } from "./git.ts"
 import { looksLikeId, recommended, resolvePrefix, score, searchTerms, tokens } from "./rank.ts"
@@ -14,6 +14,9 @@ import {
   relativeTime,
   withCost,
 } from "./text.ts"
+
+// Real child processes; 30 s leaves headroom for a loaded machine (AGENTS.md, Testing).
+setDefaultTimeout(30_000)
 
 describe("text", () => {
   test("estimateTokens is a 4-chars-per-token ceiling", () => {

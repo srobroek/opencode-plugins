@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, setSystemTime, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, setDefaultTimeout, setSystemTime, test } from "bun:test"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -21,6 +21,9 @@ import {
   specifyVersionOk,
 } from "./setup.ts"
 import { executeSetup } from "./tools.ts"
+
+// Real child processes; 30 s leaves headroom for a loaded machine (AGENTS.md, Testing).
+setDefaultTimeout(30_000)
 
 type Metadata = { ok: boolean; phases?: { phase: string; status: string }[] }
 /** The `speckit_setup` execute as the plugin registers it, in session directory `cwd`. */

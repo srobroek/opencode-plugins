@@ -1,5 +1,8 @@
-import { describe, expect, test } from "bun:test"
+import { describe, expect, setDefaultTimeout, test } from "bun:test"
 import { defaultRun, OUTPUT_LIMIT_BYTES } from "./run.ts"
+
+// Real child processes; 30 s leaves headroom for a loaded machine (AGENTS.md, Testing).
+setDefaultTimeout(30_000)
 
 // Real subprocess deadlines and inherited pipes cannot be exercised with fake timers.
 describe("bounded discovery subprocesses", () => {

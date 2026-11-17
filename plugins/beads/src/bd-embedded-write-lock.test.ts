@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test"
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { hostname } from "node:os"
 import { join } from "node:path"
@@ -17,6 +17,9 @@ import {
 } from "./bd-embedded-write-lock.ts"
 import { main as runEmbeddedWriter, setCommandTimeoutForTests } from "./bd-embedded-write-runner.ts"
 import { parse } from "./shell.ts"
+
+// Real runner and lock processes: 1.5 to 8.4 s at load average 49; 30 s leaves headroom for a loaded machine (AGENTS.md, Testing).
+setDefaultTimeout(30_000)
 
 const host = hostname().split(".")[0] ?? "localhost"
 /** The scratch-store proof drives the real bd CLI; CI images without bd skip it. */

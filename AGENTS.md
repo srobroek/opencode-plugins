@@ -32,6 +32,12 @@ package whose entry point default-exports `Plugin.define({ id, setup })` from
 - `bun run concerns` fails when a language's testing and quality concerns table, registered in
   `plugins/toolchain/skills/toolchain-languages/references/concerns.md`, misses a concern, uses
   an unknown marker, pins an exact version or skips a required run.
+- Testing: a test that does real process or git work (spawns a child, runs `git init` or
+  `clone`, waits on a hook) sets a measured timeout, usually `setDefaultTimeout(30_000)` with
+  a comment giving the measurement, or uses a cheaper fixture (a local repository instead of a
+  clone, a fake child instead of `sleep`). Bun's 5 s default fails when several `bun run check`
+  runs share a machine: the S1 clone test took 0.5 s alone and 7.8 s at load average 49. Signal only
+  PIDs you started, never `pkill -f` or `killall`.
 - `bun run check` runs typecheck, lint, test, build:check, marketplaces:check,
   plugin-table:check, steering, pitfalls, agent-roles, descriptions and concerns before you hand work off.
 - `bun run cad:sync` vendors `plugins/cad/{skills,examples,agents}` from the cad-agent tag

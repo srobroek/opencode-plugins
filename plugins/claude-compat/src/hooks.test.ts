@@ -1,9 +1,12 @@
 // biome-ignore-all lint/suspicious/noTemplateCurlyInString: Fixtures exercise literal Claude placeholders.
-import { describe, expect, test } from "bun:test"
+import { describe, expect, setDefaultTimeout, test } from "bun:test"
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { claudeToolInput, claudeToolNames, type HookSpec, hookEnvironment, interpretHook, matcherMatches, parseHooks, runHook } from "./hooks.ts"
+
+// Real hook shells: sub-second alone, stretched by load; 30 s leaves headroom for a loaded machine (AGENTS.md, Testing).
+setDefaultTimeout(30_000)
 
 const ROOT = join(import.meta.dir, "..", "fixtures", "marketplace", "plugins", "demo")
 const fixture = () => parseHooks(JSON.parse(readFileSync(join(ROOT, "hooks/hooks.json"), "utf8")), "demo", ROOT, "hooks.json")
