@@ -492,6 +492,16 @@ describe("a rewrite the walker cannot fully parse is refused", () => {
     ["--config-env with a separate value", "git --config-env core.x=X filter-branch --env-filter true"],
     ["a repeated --target", "git filter-repo --target {linked} --target {canonical} --path a"],
     ["python -c code that runs git", "python3 -c 'import os; os.system(\"git update-ref -d refs/heads/main\")'"],
+    ["a shell launched by uv run", "uv run bash -c \"builtin eval 'git update-ref -d refs/heads/main'\""],
+    ["a shell launched by uvx", "uvx sh -c 'git update-ref -d refs/heads/main'"],
+    ["a mixed-spelling --target", "git filter-repo --target {clone} --targ {canonical} --path a"],
+    ["an abbreviated repeated --target", "git filter-repo --tar={clone} --ta {canonical} --path a"],
+    ["a repeated --source", "git filter-repo --source {clone} --sourc {canonical} --path a"],
+    ["an abbreviated --force", "git filter-repo --forc --path a"],
+    ["git grep -O with a pager command", "git grep -O'sh -c \"git update-ref -d refs/heads/main\"' x"],
+    ["git grep --open-files-in-pager", "git grep --open-files-in-pager='sh -c \"git update-ref -d refs/heads/main\"' x"],
+    ["git diff --ext-diff with a mention", "git diff --ext-diff --foo='git update-ref -d refs/heads/main'"],
+    ["rg --pre with a mention", "rg --pre='git update-ref -d refs/heads/main' x ."],
     ["a git alias that runs a rewrite", "git -c alias.x='!git update-ref -d refs/heads/main' x"],
   ])("refuses %s", (_name, command) => {
     expect(run(command, "canonical")?.guard).toBe("history-rewrite")

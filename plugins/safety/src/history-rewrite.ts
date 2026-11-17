@@ -200,18 +200,24 @@ function filterRepo(command: Command): FilterRepo | "uncertain" | undefined {
   return FILTER_REPO_NAME.test(program) ? { args: run.args, chdirs: [] } : undefined
 }
 
-/** How many times `--name value` or `--name=value` appears. */
-const optionCount = (args: readonly string[], name: string): number =>
-  args.filter((arg) => arg === name || arg.startsWith(`${name}=`)).length
+/** Whether `arg` spells long option `name`, in full or as an argparse prefix (`--targ`), with or without `=value`. */
+const spells = (arg: string, name: string): boolean => {
+  const head = arg.split("=", 1)[0] as string
+  return head.length > 2 && head.startsWith("--") && name.startsWith(head)
+}
 
-/** The value of `--name value` or `--name=value`. */
+/** How many times the option is given under any spelling. */
+const optionCount = (args: readonly string[], name: string): number => args.filter((arg) => spells(arg, name)).length
+
+/** The value of `--name value` or `--name=value` under any spelling; the last one wins, as in filter-repo. */
 function optionValue(args: readonly string[], name: string): string | undefined {
+  let found: string | undefined
   for (let i = 0; i < args.length; i++) {
     const arg = args[i] as string
-    if (arg === name) return args[i + 1]
-    if (arg.startsWith(`${name}=`)) return arg.slice(name.length + 1)
+    if (!spells(arg, name)) continue
+    found = arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : args[i + 1]
   }
-  return undefined
+  return found
 }
 
 function realOrUndefined(path: string): string | undefined {
@@ -451,6 +457,60 @@ const REWRITE_FORM = /(?<![\w-])git[-_]filter[-_]repo(?![\w-])/
 const REWRITE_WORD = /(?<![\w/.-])(?:filter-repo|filter-branch|update-ref|replace)(?![\w/-]|\.\w)/
 const GIT_WORD = /(?<![\w/.-])d?git(?![\w-])/
 
+/** Options that run a program or pager (`git grep -O`, `git diff --ext-diff`, `rg --pre`), whatever their value. */
+const EXECUTABLE_OPTION =
+  /^(?:-O|--(?:open-files-in-pager|ext-diff|textconv|exec|exec-path|pager|config-env|upload-pack|receive-pack|pre|pre-glob|hostname-bin)(?![\w-]))/
+/** Options whose value is a pattern or message, never a program. */
+const DATA_OPTION = /^(?:-[em]|--grep|--message|--regexp|--pattern)$/
+const mentioned = (word: string): boolean => REWRITE_FORM.test(word) || REWRITE_WORD.test(word)
+
+/**
+ * Whether every rewrite word among `args` sits where the command treats it as data: a positional
+ * pattern or path, or the value of `-e`, `-m`, `--grep`, `--message`. Any option that runs a program
+ * or pager, or a rewrite word in any other option value, is not data.
+ */
+function mentionsOnlyAsData(args: readonly string[]): boolean {
+  let options = true
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i] as string
+    if (options && arg === "--") {
+      options = false
+      continue
+    }
+    if (!options || !arg.startsWith("-") || arg === "-") continue
+    if (EXECUTABLE_OPTION.test(arg)) return false
+    const head = arg.split("=", 1)[0] as string
+    if (DATA_OPTION.test(head)) {
+      if (!arg.includes("=")) i++
+      continue
+    }
+    if (/^-[em]./.test(arg)) continue
+    if (mentioned(arg)) return false
+  }
+  return true
+}
+
+/** Programs that run code the walker does not read: shells, interpreters and the directory/exec constructs. */
+const OPAQUE_PROGRAM = /^(?:python3?(?:\.\d+)?|node|bun|bunx|npx|deno|ruby|perl|php|lua)$/
+const opaque = (program: string): boolean => {
+  const name = base(program.replace(/[@=<>~![].*$/, ""))
+  return SHELLS.has(name) || CONSTRUCTS.has(name) || DESCENDED.has(name) || OPAQUE_PROGRAM.test(name)
+}
+
+/**
+ * Whether a launcher command is fully accounted for: it installs or lists (`not-run`, except
+ * `python -c`), or the program it launches is neither a shell nor an interpreter (a nested launcher
+ * is checked the same way). `filterRepo` already judged a launched filter-repo.
+ */
+function launcherJudged(argv: readonly string[]): boolean {
+  const run = launched(argv)
+  if (run === undefined) return false
+  if (run === "not-run") return !base(argv[0]).startsWith("python")
+  if (run === "unparsed" || opaque(run.program)) return false
+  const nested = [run.program, ...run.args]
+  return launched(nested) === undefined || launcherJudged(nested)
+}
+
 /**
  * The rewrite word a command names that the walker did not judge as a rewrite, or `undefined`.
  * A text-level fallback: a word counts as a mention when it sits in the command's own words with
@@ -462,14 +522,14 @@ function unaccountedMention(command: Command, git: GitInvocation | undefined): s
   const found = REWRITE_FORM.exec(text) ?? (GIT_WORD.test(text) ? REWRITE_WORD.exec(text) : null)
   if (found === null) return undefined
   const name = base(command.argv[0])
-  if (NON_EXECUTING.has(name) || SHELLS.has(name) || DESCENDED.has(name)) return undefined
-  // filterRepo judged a launcher's program; `python -c` code is not judged.
-  const run = launched(command.argv)
-  if (run !== undefined && !(run === "not-run" && name.startsWith("python"))) return undefined
+  if (SHELLS.has(name) || DESCENDED.has(name)) return undefined
+  if (NON_EXECUTING.has(name) && mentionsOnlyAsData(command.argv.slice(1))) return undefined
+  if (launcherJudged(command.argv)) return undefined
   if (git !== undefined) {
     if (["filter-branch", "replace", "update-ref"].includes(git.subcommand)) return undefined
     const plain = !git.overridden && !command.argv.slice(1, git.offset - 1).includes("-c")
-    if (plain && GIT_DATA_SUBCOMMANDS.has(git.subcommand)) return undefined
+    if (plain && GIT_DATA_SUBCOMMANDS.has(git.subcommand) && mentionsOnlyAsData(command.argv.slice(git.offset)))
+      return undefined
   }
   return found[0]
 }
@@ -511,10 +571,11 @@ export function historyRewrite(
     const rewrite = filterRepo(command)
     if (rewrite === "uncertain") return uncertain(text, "the launcher's command line could not be read")
     if (rewrite !== undefined) {
-      if (rewrite.args.some((arg) => arg === "--force" || arg === "-f"))
+      if (rewrite.args.some((arg) => arg === "-f" || spells(arg, "--force")))
         return `${PREFIX}: refused ${text} with --force. filter-repo --force overwrites the repository's refs and history in the directory it runs in, wherever that is. Run it without --force in a fresh temp clone with the tool's workdir set there; a fresh clone needs no --force.`
-      if (optionCount(rewrite.args, "--target") > 1)
-        return uncertain(text, "`--target` is repeated and filter-repo uses the last one")
+      for (const option of ["--target", "--source"])
+        if (optionCount(rewrite.args, option) > 1)
+          return uncertain(text, `\`${option}\` is repeated (possibly abbreviated) and filter-repo uses the last one`)
       const target = optionValue(rewrite.args, "--target")
       const moves = [...(git?.chdirs ?? []), ...(target === undefined ? [] : [target])]
       const reason = judge(text, moves, git)
