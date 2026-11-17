@@ -1030,6 +1030,45 @@ function holdBlock(read, now, expiryMs = HOLD_EXPIRY_MS) {
   const first = live.jobs[0];
   return `session ${live.sessionID} has ${live.jobs.length} background job(s) running (${first?.kind} ${first?.id})`;
 }
+function coordinationWritable(commonDir) {
+  const root = join2(commonDir, "opencode");
+  try {
+    mkdirSync2(root, { recursive: true });
+    accessSync(root, constants2.W_OK);
+    const probe = join2(root, `.probe.${randomUUID()}`);
+    writeFileSync2(probe, "");
+    rmSync2(probe, { force: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+function holdsState(commonDir, directory, now, expiryMs = HOLD_EXPIRY_MS) {
+  const read = readHolds(commonDir, directory);
+  const blocked = holdBlock(read, now, expiryMs);
+  if (blocked !== undefined)
+    return blocked;
+  if (read.missing === true && !coordinationWritable(commonDir))
+    return "the coordination store is not writable, so running work cannot be ruled out";
+  return;
+}
+async function lockedWorktreeRemoval(commonDir, directory, lock, steps) {
+  let entered = false;
+  try {
+    return await withDiskLock(commonDir, directory, lock, async () => {
+      entered = true;
+      const reason = await steps.recheck();
+      if (reason !== undefined)
+        return { removed: false, reason };
+      return { removed: true, value: await steps.remove() };
+    });
+  } catch (error) {
+    if (entered)
+      throw error;
+    const message = error instanceof LockTimeout ? `the worktree is locked by another remover (${error.message})` : `the lock could not be taken (${error instanceof Error ? error.message : String(error)})`;
+    return { removed: false, reason: message };
+  }
+}
 
 // plugins/lib/src/worktree-state.ts
 var OPERATION_MARKERS = [
@@ -1486,7 +1525,7 @@ function createLifecycle(deps) {
     const common = await deps.commonDir(parentDir);
     if (common === undefined)
       return "the background-work records cannot be located";
-    return holdBlock(readHolds(common, directory), now());
+    return holdsState(common, directory, now());
   };
   const dirtyToken = (porcelain) => porcelain === "" ? "clean" : String(Bun.hash(porcelain));
   const laneFacts = async (lane, sessions) => {
@@ -1530,7 +1569,9 @@ function createLifecycle(deps) {
     const common = await deps.commonDir(parentDir);
     if (common === undefined)
       throw new Error(`subagent-worktree: no git common directory to lock ${directory}`);
-    const run = () => withDiskLock(common, directory, { sessionID: "subagent-worktree", now, ...deps.lock }, work);
+    return queueLocally(key, () => withDiskLock(common, directory, { sessionID: "subagent-worktree", now, ...deps.lock }, work));
+  };
+  const queueLocally = (key, run) => {
     const next = (localLocks.get(key) ?? Promise.resolve()).then(run, run);
     localLocks.set(key, next.catch(() => {}));
     return next;
@@ -1540,57 +1581,74 @@ function createLifecycle(deps) {
     if (common !== undefined)
       bumpClaim(common, directory, now());
   });
-  const removeVerified = (removal) => withLock(removal.directory, removal.parentDir, async () => {
+  const removeVerified = async (removal) => {
     const { directory, branch } = removal;
-    const common = await deps.commonDir(removal.parentDir);
-    if (common === undefined)
-      return false;
-    const claim = readClaim(common, directory);
-    if (claimGeneration(claim) !== removal.gen)
-      return false;
-    if (claim.kind === "present" && claim.value.resumedAt !== undefined && now() - claim.value.resumedAt < options.resumeGraceMs)
-      return false;
-    if (holdBlock(readHolds(common, directory), now()) !== undefined)
-      return false;
-    const oid = await git.head(directory);
-    if (oid === undefined)
-      return false;
-    if (await git.porcelain(directory) !== "")
-      return false;
-    if (await busyTreeOf(directory, branch) !== undefined)
-      return false;
-    const proven = removal.basis === "empty" ? oid === removal.base : await removal.isLanded(oid);
-    if (!proven)
-      return false;
-    if (await removal.recheck?.() !== undefined)
-      return false;
-    let deleteBranch = false;
-    if (branch !== undefined && await git.branch(directory) === branch) {
-      if (await git.commit(removal.parentDir, `refs/heads/${branch}`) !== oid)
-        return false;
-      deleteBranch = true;
-    }
     try {
-      if (removal.lane)
-        await deps.moveHome(removal.lane);
-      await deps.removeWorktree(removal.projectID, directory, false);
-    } catch {
-      if (removal.lane && await deps.exists(directory)) {
-        await ctx.session.move({ sessionID: removal.lane.child, directory }).catch(() => {});
-      }
+      const common = await deps.commonDir(removal.parentDir);
+      if (common === undefined)
+        return false;
+      let oid;
+      let deleteBranch = false;
+      const outcome = await queueLocally(canonical(directory), () => lockedWorktreeRemoval(common, directory, { sessionID: "subagent-worktree", now, ...deps.lock }, {
+        recheck: async () => {
+          const claim = readClaim(common, directory);
+          if (claimGeneration(claim) !== removal.gen)
+            return "the lane was resumed";
+          if (claim.kind === "present" && claim.value.resumedAt !== undefined && now() - claim.value.resumedAt < options.resumeGraceMs) {
+            return "the lane was resumed recently";
+          }
+          const running = holdsState(common, directory, now());
+          if (running !== undefined)
+            return running;
+          oid = await git.head(directory);
+          if (oid === undefined)
+            return "HEAD cannot be read";
+          if (await git.porcelain(directory) !== "")
+            return "the tree is not clean";
+          if (await busyTreeOf(directory, branch) !== undefined)
+            return "a stash or an operation is in progress";
+          const proven = removal.basis === "empty" ? oid === removal.base : await removal.isLanded(oid);
+          if (!proven)
+            return "HEAD is not the commit the proof covers";
+          const refusal = await removal.recheck?.();
+          if (refusal !== undefined)
+            return refusal;
+          if (branch !== undefined && await git.branch(directory) === branch) {
+            if (await git.commit(removal.parentDir, `refs/heads/${branch}`) !== oid)
+              return "the branch moved";
+            deleteBranch = true;
+          }
+          return;
+        },
+        remove: async () => {
+          try {
+            if (removal.lane)
+              await deps.moveHome(removal.lane);
+            await deps.removeWorktree(removal.projectID, directory, false);
+          } catch {
+            if (removal.lane && await deps.exists(directory)) {
+              await ctx.session.move({ sessionID: removal.lane.child, directory }).catch(() => {});
+            }
+            return false;
+          }
+          await ctx.worktree.refresh({ projectID: removal.projectID }).catch(() => {});
+          if (deleteBranch && branch !== undefined && oid !== undefined)
+            await git.deleteBranchAt(removal.parentDir, branch, oid);
+          if (removal.lane) {
+            const stored = await load(removal.lane.child);
+            if (stored?.state === "active" && canonical(stored.directory) === canonical(directory) && claimGeneration(readClaim(common, directory)) === removal.gen) {
+              await save({ ...stored, state: removal.basis === "empty" ? "removed" : "landed" });
+            }
+          }
+          return true;
+        }
+      }));
+      return outcome.removed && outcome.value;
+    } catch (error) {
+      console.error(`subagent-worktree: removal of ${directory} deferred:`, error instanceof Error ? error.message : error);
       return false;
     }
-    await ctx.worktree.refresh({ projectID: removal.projectID }).catch(() => {});
-    if (deleteBranch && branch !== undefined)
-      await git.deleteBranchAt(removal.parentDir, branch, oid);
-    if (removal.lane) {
-      const stored = await load(removal.lane.child);
-      if (stored?.state === "active" && canonical(stored.directory) === canonical(directory) && claimGeneration(readClaim(common, directory)) === removal.gen) {
-        await save({ ...stored, state: removal.basis === "empty" ? "removed" : "landed" });
-      }
-    }
-    return true;
-  });
+  };
   const landedProof = (directory, parentDir) => async (oid) => {
     const records = await deliveryRecords(directory, parentDir);
     if (records.heads.includes(oid))
@@ -1766,6 +1824,7 @@ function createLifecycle(deps) {
         await deps.ensureClaim(lane);
       const jobs = input.background ?? [];
       const running = new Set;
+      let holdsFailed = false;
       const gateLanes = await Promise.all(lanes.map(async (lane) => {
         const gen = await generationOf(lane.directory, lane.parentDir);
         const known = new Map;
@@ -1779,7 +1838,12 @@ function createLifecycle(deps) {
         const busy = matched[0]?.why;
         const common = await deps.commonDir(lane.parentDir);
         if (common !== undefined) {
-          setHold(common, lane.directory, input.sessionID, matched.map(({ job }) => ({ kind: job.kind, id: job.shellID ?? job.childSessionID ?? job.sessionID ?? "unknown" })), now());
+          try {
+            setHold(common, lane.directory, input.sessionID, matched.map(({ job }) => ({ kind: job.kind, id: job.shellID ?? job.childSessionID ?? job.sessionID ?? "unknown" })), now());
+          } catch (error) {
+            holdsFailed = true;
+            console.error(`subagent-worktree: could not record holds for ${lane.directory}:`, error instanceof Error ? error.message : error);
+          }
         }
         if (busy !== undefined && lane.parent === input.sessionID)
           running.add(lane.child);
@@ -1790,7 +1854,7 @@ function createLifecycle(deps) {
       }));
       const gens = new Map(gateLanes.map((entry) => [entry.lane.child, entry.gen]));
       const gate = idleGateAction({ id: input.sessionID, runningChildren: running, now: now(), lastMessageAt: lastGate.get(input.sessionID) }, gateLanes.map(({ lane, facts }) => ({ lane, facts })), policy);
-      for (const { lane, basis } of gate.remove) {
+      for (const { lane, basis } of holdsFailed ? [] : gate.remove) {
         await removeLane(lane, basis, gens.get(lane.child) ?? -2, lane.parent === input.sessionID);
       }
       if (gate.message === undefined)
@@ -1800,7 +1864,7 @@ function createLifecycle(deps) {
         for (const { child, key } of gate.marks)
           await mark(child, key);
       }
-    });
+    }).catch((error) => console.error("subagent-worktree: idle gate failed:", error instanceof Error ? error.message : error));
   };
   const onLanding = async (event) => {
     if (!LANDING_TOOLS.includes(event.tool) || event.status !== "completed")
@@ -1886,6 +1950,15 @@ function createLifecycle(deps) {
     };
   };
   const sweep = async (mode) => {
+    try {
+      return await sweepUnsafe(mode);
+    } catch (error) {
+      const why = error instanceof Error ? error.message : String(error);
+      console.error("subagent-worktree: sweep failed:", why);
+      return { plan: [], text: `subagent_worktree_sweep: failed (${why}); nothing was removed.` };
+    }
+  };
+  const sweepUnsafe = async (mode) => {
     if (projectID === undefined)
       return { plan: [], text: "subagent_worktree_sweep: the host reports no project." };
     const minAgeMs = options.minAgeHours * HOUR;

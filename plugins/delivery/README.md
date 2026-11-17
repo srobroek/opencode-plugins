@@ -117,6 +117,11 @@ Inputs: `pr`, and when needed `merge_method` (`squash` by default, `merge`,
   running background work keeps the worktree. Landing records are dropped only on positive evidence
   (their own receipt readable and cleaned or superseded); a denial is never dropped by cleanup of
   stale records, and a missing or unreadable receipt directory deletes nothing.
+- Every removal delivery makes (explicit, inline, retry) runs its last step inside
+  `lockedWorktreeRemoval`: the same on-disk lock `subagent-worktree` takes, then, under it and after
+  every proof, a final look at claims, background holds, running sessions and denials, then the
+  removal. The prompt, if any, comes before and outside the lock. If the coordination store cannot
+  be written, or a hold could not be recorded, the worktree is treated as unsafe and kept.
 - **A refusal sticks.** If the inline cleanup is refused at its prompt, the landing record
   keeps `denied` and nothing retries it. A later explicit `delivery_cleanup` call that is
   authorized clears it; one that is refused records a fresh denial and leaves the old one

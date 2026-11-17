@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
@@ -1037,6 +1037,70 @@ describe("background work is held on disk by every gate", () => {
   test("a hold older than the expiry (a crashed host) no longer blocks", async () => {
     const { fake, worktree, common, cleanup } = await start({ ancestor: 0 })
     setHold(common, WT, "ses_x", [{ kind: "shell", id: "x" }], NOW - 25 * 3_600_000)
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle()
+    expect(worktree[0]?.method).toBe("remove")
+    await cleanup()
+  })
+})
+
+describe("coordination errors never escape a hook and never remove", () => {
+  const needsPermissions = process.getuid?.() === 0 ? test.skip : test
+  const lockStore = (common: string) => chmodSync(join(common, "opencode"), 0o555)
+  const unlockStore = (common: string) => chmodSync(join(common, "opencode"), 0o755)
+
+  needsPermissions("an unwritable store: the idle hook resolves, nothing is removed", async () => {
+    const { fake, state, common, worktree, cleanup } = await start({ ancestor: 1 })
+    fake.emit({ type: "session.execution.succeeded", data: { sessionID: CHILD } })
+    await settle()
+    state.ancestor = 0 // landed now
+    lockStore(common)
+    try {
+      await fake.fire.session("experimental.idle", {
+        sessionID: PARENT,
+        background: [{ kind: "shell", sessionID: CHILD, shellID: "sh", command: "sleep 60" }],
+      } as never)
+      expect(worktree).toEqual([])
+      await fake.fire.session("experimental.idle", { sessionID: PARENT, background: [] } as never)
+      expect(worktree).toEqual([])
+    } finally {
+      unlockStore(common)
+    }
+    await cleanup()
+  })
+
+  needsPermissions("an unwritable store: the event pass removes nothing and the sweep reports without throwing", async () => {
+    const { fake, state, common, worktree, cleanup } = await start({ ancestor: 1, age: 3 * 24 * 3_600_000 })
+    fake.emit({ type: "session.execution.succeeded", data: { sessionID: CHILD } })
+    await settle()
+    state.ancestor = 0
+    lockStore(common)
+    try {
+      fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+      await settle()
+      expect(worktree).toEqual([])
+      const execute = fake.tools.get("subagent_worktree_sweep")?.execute as (i: unknown, c: unknown) => Promise<{ metadata: { plan: unknown[] } }>
+      await expect(execute({ mode: "prune" }, tool)).resolves.toBeDefined()
+      expect(worktree).toEqual([])
+    } finally {
+      unlockStore(common)
+    }
+    await cleanup()
+  })
+
+  test("delivery holding the shared lock keeps the lane remover out, then it proceeds when released", async () => {
+    const lockOptions = { attempts: 2, delayMs: () => 1, ttlMs: 60_000, alive: () => true, host: "this-host", now: () => NOW }
+    const { fake, state, common, worktree, cleanup } = await start({ ancestor: 1 }, { lock: lockOptions })
+    fake.emit({ type: "session.execution.succeeded", data: { sessionID: CHILD } })
+    await settle()
+    state.ancestor = 0
+    mkdirSync(join(common, "opencode", "locks"), { recursive: true })
+    const path = lockFile(common, WT)
+    writeFileSync(path, JSON.stringify({ pid: process.pid, host: "this-host", sessionID: "delivery", acquiredAt: NOW, token: "delivery" }))
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle()
+    expect(worktree).toEqual([])
+    rmSync(path)
     fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
     await settle()
     expect(worktree[0]?.method).toBe("remove")

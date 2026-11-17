@@ -178,7 +178,10 @@ lives under `<git-common-dir>/opencode/`, shared by every instance of the reposi
 - `locks/<sha1 of the directory>.lock`: one lock per worktree, created exclusively (a hard link from a
   fully written temp file) with `{ pid, host, sessionID, acquiredAt }`. Contenders retry with bounded
   backoff. A lock is broken only when it is older than two minutes **and** its pid is not alive on
-  this host; one from another host, or whose holder is alive, is never broken. Every removal and every
+  this host; one from another host, or whose holder is alive, is never broken. Breaking is itself
+  exclusive: a breaker takes `<lock>.break` first, re-reads the lock under it and unlinks it only if
+  it is still the content that was judged stale (a `.break` older than 30 s belongs to a crashed
+  breaker). `delivery` takes this same lock around its removals, so no two removers overlap. Every removal and every
   resume runs under it.
 - the lane's claim carries the resume `generation` and `resumedAt`. A resume takes the lock, bumps
   the generation and stamps the time; a removal captures the generation before collecting facts and,
@@ -188,7 +191,9 @@ lives under `<git-common-dir>/opencode/`, shared by every instance of the reposi
   running for the lane (its own, a descendant's, or a shell naming the lane directory). Every idle
   gate, child or parent, writes its own entry and clears it when it sees none; every remover reads
   all entries under the lock and a live entry blocks the removal. Entries older than 24 hours (a
-  crashed host) are ignored; an entry that cannot be read blocks.
+  crashed host) are ignored; an entry that cannot be read blocks, and so does a coordination store
+  that cannot be written (running work could not have been recorded). A coordination error in a
+  hook means a deferred outcome, logged; nothing is removed and nothing is thrown.
 
 ### Claims: one remover per worktree
 

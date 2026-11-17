@@ -991,6 +991,32 @@ describe("execute.after", () => {
     expect(readClaim(setup.common, revived?.directory ?? "").kind).toBe("present")
   })
 
+  test("a resume in another plugin instance that arrives mid-removal waits on the disk lock, then revives the lane", async () => {
+    let resumed: Promise<unknown> | undefined
+    let b: Setup | undefined
+    const a = await start({
+      onRemove: () => {
+        // Instance A holds the directory's disk lock here; instance B's resume has to queue behind it.
+        resumed = b?.fake.fire.tool("execute.before", call({ sessionID: "ses_fake1", prompt: "again" }))
+      },
+    })
+    b = await start({ commonDir: async () => a.common })
+    // One lane store behind both instances, as the host has.
+    Object.assign(b.fake.context.storage, a.fake.context.storage)
+    await spawn(a)
+    const session = a.fake.sessions.get("ses_fake1")
+    if (session) b.fake.sessions.set("ses_fake1", session)
+    await a.fake.fire.tool("execute.after", completed("ses_fake1"))
+    await resumed
+    expect(a.worktree.calls.map((entry) => entry.method)).toContain("remove")
+    expect(b.worktree.calls.map((entry) => entry.method)).toContain("create")
+    const revived = lane(a.fake)
+    expect(revived?.state).toBe("active")
+    expect(readClaim(a.common, revived?.directory ?? "").kind).toBe("present")
+    await a.cleanup()
+    await b.cleanup()
+  })
+
   test("without that resume the same foreground lane is removed", async () => {
     const setup = await start()
     await spawn(setup)

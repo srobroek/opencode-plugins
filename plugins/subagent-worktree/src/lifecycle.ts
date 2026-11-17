@@ -15,7 +15,7 @@ import { homedir } from "node:os"
 import { join, resolve } from "node:path"
 import type { Context } from "@opencode/plugin/promise/plugin"
 import { bumpClaim, claimGeneration, landingsFor, listLandings, readClaim } from "@srobroek/opencode-lib/worktree-claims"
-import { holdBlock, type LockOptions, readHolds, setHold, withDiskLock } from "@srobroek/opencode-lib/worktree-locks"
+import { holdsState, type LockOptions, lockedWorktreeRemoval, setHold, withDiskLock } from "@srobroek/opencode-lib/worktree-locks"
 import { OPERATION_MARKERS, operationsInProgress, stashesOnBranch } from "@srobroek/opencode-lib/worktree-state"
 import {
   type BackgroundJob,
@@ -222,7 +222,7 @@ export function createLifecycle(deps: LifecycleDeps) {
   const holdReason = async (directory: string, parentDir: string): Promise<string | undefined> => {
     const common = await deps.commonDir(parentDir)
     if (common === undefined) return "the background-work records cannot be located"
-    return holdBlock(readHolds(common, directory), now())
+    return holdsState(common, directory, now())
   }
 
   const dirtyToken = (porcelain: string): string => (porcelain === "" ? "clean" : String(Bun.hash(porcelain)))
@@ -284,7 +284,11 @@ export function createLifecycle(deps: LifecycleDeps) {
     const key = canonical(directory)
     const common = await deps.commonDir(parentDir)
     if (common === undefined) throw new Error(`subagent-worktree: no git common directory to lock ${directory}`)
-    const run = () => withDiskLock(common, directory, { sessionID: "subagent-worktree", now, ...deps.lock }, work)
+    return queueLocally(key, () => withDiskLock(common, directory, { sessionID: "subagent-worktree", now, ...deps.lock }, work))
+  }
+
+  /** In-process queue per directory, in front of the disk lock. */
+  const queueLocally = <T>(key: string, run: () => Promise<T>): Promise<T> => {
     const next = (localLocks.get(key) ?? Promise.resolve()).then(run, run)
     localLocks.set(key, next.catch(() => {}))
     return next
@@ -327,49 +331,70 @@ export function createLifecycle(deps: LifecycleDeps) {
    * compare-and-delete on that commit, and the lane retired with its claim, all before the lock is
    * released, so a resume that was waiting sees the finished state and revives from it.
    */
-  const removeVerified = (removal: Removal): Promise<boolean> =>
-    withLock(removal.directory, removal.parentDir, async () => {
-      const { directory, branch } = removal
+  const removeVerified = async (removal: Removal): Promise<boolean> => {
+    const { directory, branch } = removal
+    try {
       const common = await deps.commonDir(removal.parentDir)
       if (common === undefined) return false
-      // Re-read from disk under the lock: a resume by any instance bumps the generation and stamps resumedAt.
-      const claim = readClaim(common, directory)
-      if (claimGeneration(claim) !== removal.gen) return false
-      if (claim.kind === "present" && claim.value.resumedAt !== undefined && now() - claim.value.resumedAt < options.resumeGraceMs) return false
-      if (holdBlock(readHolds(common, directory), now()) !== undefined) return false
-      const oid = await git.head(directory)
-      if (oid === undefined) return false
-      if ((await git.porcelain(directory)) !== "") return false
-      if ((await busyTreeOf(directory, branch)) !== undefined) return false
-      const proven = removal.basis === "empty" ? oid === removal.base : await removal.isLanded(oid)
-      if (!proven) return false
-      if ((await removal.recheck?.()) !== undefined) return false
+      // Captured once under the lock and used by every proof and by the compare-and-delete.
+      let oid: string | undefined
       let deleteBranch = false
-      if (branch !== undefined && (await git.branch(directory)) === branch) {
-        // On the branch: the ref must be the commit captured above, or something moved it.
-        if ((await git.commit(removal.parentDir, `refs/heads/${branch}`)) !== oid) return false
-        deleteBranch = true
-      }
-      try {
-        if (removal.lane) await deps.moveHome(removal.lane)
-        await deps.removeWorktree(removal.projectID, directory, false)
-      } catch {
-        if (removal.lane && (await deps.exists(directory))) {
-          await ctx.session.move({ sessionID: removal.lane.child, directory } as never).catch(() => {})
-        }
-        return false
-      }
-      await ctx.worktree.refresh({ projectID: removal.projectID } as never).catch(() => {})
-      if (deleteBranch && branch !== undefined) await git.deleteBranchAt(removal.parentDir, branch, oid)
-      if (removal.lane) {
-        // Retire only the record this removal is about: same directory, still active, same generation.
-        const stored = await load(removal.lane.child)
-        if (stored?.state === "active" && canonical(stored.directory) === canonical(directory) && claimGeneration(readClaim(common, directory)) === removal.gen) {
-          await save({ ...stored, state: removal.basis === "empty" ? "removed" : "landed" })
-        }
-      }
-      return true
-    })
+      const outcome = await queueLocally(canonical(directory), () =>
+        lockedWorktreeRemoval(common, directory, { sessionID: "subagent-worktree", now, ...deps.lock }, {
+          recheck: async () => {
+            // Re-read from disk under the lock: a resume by any instance bumps the generation and stamps resumedAt.
+            const claim = readClaim(common, directory)
+            if (claimGeneration(claim) !== removal.gen) return "the lane was resumed"
+            if (claim.kind === "present" && claim.value.resumedAt !== undefined && now() - claim.value.resumedAt < options.resumeGraceMs) {
+              return "the lane was resumed recently"
+            }
+            const running = holdsState(common, directory, now())
+            if (running !== undefined) return running
+            oid = await git.head(directory)
+            if (oid === undefined) return "HEAD cannot be read"
+            if ((await git.porcelain(directory)) !== "") return "the tree is not clean"
+            if ((await busyTreeOf(directory, branch)) !== undefined) return "a stash or an operation is in progress"
+            const proven = removal.basis === "empty" ? oid === removal.base : await removal.isLanded(oid)
+            if (!proven) return "HEAD is not the commit the proof covers"
+            const refusal = await removal.recheck?.()
+            if (refusal !== undefined) return refusal
+            if (branch !== undefined && (await git.branch(directory)) === branch) {
+              // On the branch: the ref must be the commit captured above, or something moved it.
+              if ((await git.commit(removal.parentDir, `refs/heads/${branch}`)) !== oid) return "the branch moved"
+              deleteBranch = true
+            }
+            return undefined
+          },
+          remove: async () => {
+            try {
+              if (removal.lane) await deps.moveHome(removal.lane)
+              await deps.removeWorktree(removal.projectID, directory, false)
+            } catch {
+              if (removal.lane && (await deps.exists(directory))) {
+                await ctx.session.move({ sessionID: removal.lane.child, directory } as never).catch(() => {})
+              }
+              return false
+            }
+            await ctx.worktree.refresh({ projectID: removal.projectID } as never).catch(() => {})
+            if (deleteBranch && branch !== undefined && oid !== undefined) await git.deleteBranchAt(removal.parentDir, branch, oid)
+            if (removal.lane) {
+              // Retire only the record this removal is about: same directory, still active, same generation.
+              const stored = await load(removal.lane.child)
+              if (stored?.state === "active" && canonical(stored.directory) === canonical(directory) && claimGeneration(readClaim(common, directory)) === removal.gen) {
+                await save({ ...stored, state: removal.basis === "empty" ? "removed" : "landed" })
+              }
+            }
+            return true
+          },
+        }),
+      )
+      return outcome.removed && outcome.value
+    } catch (error) {
+      // A coordination or bookkeeping error is a held outcome: logged, never thrown out of a hook, never a reason to remove.
+      console.error(`subagent-worktree: removal of ${directory} deferred:`, error instanceof Error ? error.message : error)
+      return false
+    }
+  }
 
   /** Whether `oid` is landed: delivery recorded it, it is an ancestor of origin/main, or a merged PR / `wt` says so. Read fresh. */
   const landedProof = (directory: string, parentDir: string) => async (oid: string): Promise<boolean> => {
@@ -559,12 +584,15 @@ export function createLifecycle(deps: LifecycleDeps) {
 
   const onIdle = async (input: IdleInput) => {
     if (disposed) return
+    // A hook never throws: a coordination error means a deferred outcome (logged), never a removal.
     await serial(async () => {
       const lanes = (await deps.scan()).filter((lane) => lane.state === "active" && (lane.child === input.sessionID || lane.parent === input.sessionID))
       if (lanes.length === 0) return
       for (const lane of lanes) await deps.ensureClaim(lane)
       const jobs = input.background ?? []
       const running = new Set<string>()
+      // If what is running could not be recorded, running work cannot be ruled out: nothing is removed this time.
+      let holdsFailed = false
       const gateLanes = await Promise.all(
         lanes.map(async (lane) => {
           const gen = await generationOf(lane.directory, lane.parentDir)
@@ -580,13 +608,18 @@ export function createLifecycle(deps: LifecycleDeps) {
           // Any gate, child or parent, records what is running for this lane; the next gate that sees none clears it.
           const common = await deps.commonDir(lane.parentDir)
           if (common !== undefined) {
-            setHold(
-              common,
-              lane.directory,
-              input.sessionID,
-              matched.map(({ job }) => ({ kind: job.kind, id: job.shellID ?? job.childSessionID ?? job.sessionID ?? "unknown" })),
-              now(),
-            )
+            try {
+              setHold(
+                common,
+                lane.directory,
+                input.sessionID,
+                matched.map(({ job }) => ({ kind: job.kind, id: job.shellID ?? job.childSessionID ?? job.sessionID ?? "unknown" })),
+                now(),
+              )
+            } catch (error) {
+              holdsFailed = true
+              console.error(`subagent-worktree: could not record holds for ${lane.directory}:`, error instanceof Error ? error.message : error)
+            }
           }
           if (busy !== undefined && lane.parent === input.sessionID) running.add(lane.child)
           const child = busy !== undefined ? "running" : await statusOf(lane.child)
@@ -600,7 +633,7 @@ export function createLifecycle(deps: LifecycleDeps) {
         gateLanes.map(({ lane, facts }) => ({ lane, facts })),
         policy,
       )
-      for (const { lane, basis } of gate.remove) {
+      for (const { lane, basis } of holdsFailed ? [] : gate.remove) {
         await removeLane(lane, basis, gens.get(lane.child) ?? -2, lane.parent === input.sessionID)
       }
       if (gate.message === undefined) return
@@ -608,7 +641,7 @@ export function createLifecycle(deps: LifecycleDeps) {
         lastGate.set(input.sessionID, now())
         for (const { child, key } of gate.marks) await mark(child, key)
       }
-    })
+    }).catch((error) => console.error("subagent-worktree: idle gate failed:", error instanceof Error ? error.message : error))
   }
 
   // --- landings -----------------------------------------------------------------------------
@@ -707,6 +740,16 @@ export function createLifecycle(deps: LifecycleDeps) {
 
   /** The plan for this project; with mode "prune" it is also carried out. Never forces, never touches a remote. */
   const sweep = async (mode: "report" | "prune"): Promise<{ plan: PlanEntry[]; text: string }> => {
+    try {
+      return await sweepUnsafe(mode)
+    } catch (error) {
+      const why = error instanceof Error ? error.message : String(error)
+      console.error("subagent-worktree: sweep failed:", why)
+      return { plan: [], text: `subagent_worktree_sweep: failed (${why}); nothing was removed.` }
+    }
+  }
+
+  const sweepUnsafe = async (mode: "report" | "prune"): Promise<{ plan: PlanEntry[]; text: string }> => {
     if (projectID === undefined) return { plan: [], text: "subagent_worktree_sweep: the host reports no project." }
     const minAgeMs = options.minAgeHours * HOUR
     const listed = (await withinLookup(Promise.resolve(ctx.worktree.list({ projectID } as never)))) as readonly Entry[] | undefined
