@@ -50,6 +50,29 @@ export type SuperviseOptions = {
 export const EXIT_GRACE_MS = 2_000
 export const EXIT_POLL_MS = 100
 
+/**
+ * Decides, one poll at a time, that a child is gone without its exit being reported: it
+ * must be seen gone for `graceMs` of wall time AND on enough consecutive polls to span
+ * `graceMs`. Wall time alone is not enough: a process descheduled past the grace (a
+ * loaded machine) sees the whole gap across one late poll, while the child's exit is
+ * already queued behind it. Each later poll lets queued events run first.
+ */
+export function goneWatch(graceMs: number, pollMs: number): (alive: boolean) => boolean {
+  const polls = Math.max(1, Math.ceil(graceMs / Math.max(1, pollMs)))
+  let since: number | null = null
+  let seen = 0
+  return (alive) => {
+    if (alive) {
+      since = null
+      seen = 0
+      return false
+    }
+    since ??= Date.now()
+    seen++
+    return seen > polls && Date.now() - since >= graceMs
+  }
+}
+
 /** Whether a process with this pid exists (a zombie still does). */
 export function processAlive(pid: number): boolean {
   try {
@@ -131,7 +154,7 @@ export function supervise(child: SupervisedChild, options: SuperviseOptions = {}
     let ended: "timeout" | "aborted" | "lost" | null = null
     let exitSeen = false
     let settled = false
-    let goneSince: number | null = null
+    const gone = goneWatch(grace, pollMs)
     let deadline: ReturnType<typeof setTimeout> | undefined
     let graceTimer: ReturnType<typeof setTimeout> | undefined
     const settle = (run: SupervisedRun): void => {
@@ -157,12 +180,7 @@ export function supervise(child: SupervisedChild, options: SuperviseOptions = {}
     const onAbort = (): void => end("aborted")
     const poller = setInterval(() => {
       if (exitSeen || ended !== null || settled) return
-      if (alive(child.pid)) {
-        goneSince = null
-        return
-      }
-      goneSince ??= Date.now()
-      if (Date.now() - goneSince >= grace) end("lost")
+      if (gone(alive(child.pid))) end("lost")
     }, pollMs)
     unref(poller)
     if (timeoutMs !== undefined && timeoutMs > 0 && Number.isFinite(timeoutMs)) {

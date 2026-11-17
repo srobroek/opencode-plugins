@@ -46,6 +46,29 @@ describe("supervise", () => {
     expect(child.kills).toEqual([])
   })
 
+  test("an event loop stalled past the grace does not call a child lost whose exit is queued", async () => {
+    // A loaded machine can deschedule this process for longer than the grace. The child's
+    // exit is then already queued when the next poll runs; one late poll must not end it.
+    let exit: (code: number) => void = () => {}
+    const exited = new Promise<number>((resolve) => {
+      exit = resolve
+    })
+    let polls = 0
+    const alive = () => {
+      polls++
+      if (polls === 2) {
+        const until = Date.now() + 60
+        while (Date.now() < until) {
+          // The stall: no timer or I/O callback runs here.
+        }
+        exit(0)
+      }
+      return false
+    }
+    const run = await supervise(fake({ exited }), { alive, pollMs: 5, graceMs: 20 })
+    expect(run.kind).toBe("exited")
+  })
+
   test("a real child whose exit event never arrives resolves once Bun has reaped it", async () => {
     const real = Bun.spawn(["/bin/sh", "-c", "echo hi"], { stdout: "pipe", stderr: "pipe" })
     await real.exited

@@ -5,7 +5,7 @@
 
 import { spawn } from "node:child_process"
 
-import { EXIT_GRACE_MS, EXIT_POLL_MS, processAlive } from "@srobroek/opencode-lib/subprocess"
+import { EXIT_GRACE_MS, EXIT_POLL_MS, goneWatch, processAlive } from "@srobroek/opencode-lib/subprocess"
 
 export type RunResult = { ok: boolean; stdout: string; stderr: string }
 export type Run = (argv: string[], timeoutMs: number, signal?: AbortSignal) => Promise<RunResult>
@@ -65,15 +65,11 @@ export function defaultRun(argv: string[], timeoutMs: number, signal?: AbortSign
       const abort = () => stop("Cancelled")
       const ms = Number.isFinite(timeoutMs) ? Math.max(1, Math.min(timeoutMs, DEFAULT_MS)) : DEFAULT_MS
       const deadline = setTimeout(() => stop("Discovery command deadline exceeded"), ms)
-      let goneSince: number | undefined
+      const gone = goneWatch(EXIT_GRACE_MS, EXIT_POLL_MS)
       let exitSeen = false
       const poll = setInterval(() => {
-        if (exitSeen || !proc.pid || processAlive(proc.pid)) {
-          goneSince = undefined
-          return
-        }
-        goneSince ??= Date.now()
-        if (Date.now() - goneSince >= EXIT_GRACE_MS) stop("Discovery command ended without reporting an exit status")
+        if (gone(exitSeen || !proc.pid || processAlive(proc.pid)))
+          stop("Discovery command ended without reporting an exit status")
       }, EXIT_POLL_MS)
       poll.unref?.()
       const collect = (target: Buffer[], chunk: Buffer) => {
