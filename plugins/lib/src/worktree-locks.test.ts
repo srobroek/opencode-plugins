@@ -12,14 +12,12 @@ import {
   HOLD_EXPIRY_MS,
   holdBlock,
   holdsState,
-  type LockInfo,
   LockTimeout,
   lockedWorktreeRemoval,
+  lockedWrite,
   lockFile,
-  lockIsStale,
   parseHold,
   readHolds,
-  sameLock,
   setHold,
   withDiskLock,
 } from "./worktree-locks.ts"
@@ -32,97 +30,6 @@ const common = () => {
 }
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
-})
-
-const info = (over: Partial<LockInfo> = {}): LockInfo => ({ pid: 4242, host: "h", sessionID: "s", acquiredAt: 0, token: "t", ...over })
-const stale = (over: Partial<LockInfo>, facts: Partial<Parameters<typeof lockIsStale>[1]> = {}) =>
-  lockIsStale(info(over), { now: 10 * 60_000, ttlMs: 2 * 60_000, host: "h", alive: () => false, ...facts })
-
-describe("lockIsStale", () => {
-  test("old and its pid is gone: stale", () => expect(stale({})).toBe(true))
-  test("old but its pid is alive: kept", () => expect(stale({}, { alive: () => true })).toBe(false))
-  test("young, pid gone: kept until the TTL", () => expect(stale({ acquiredAt: 9 * 60_000 })).toBe(false))
-  test("old but taken on another host: never broken", () => expect(stale({ host: "other" })).toBe(false))
-  test("an unparseable lock is judged by its mtime alone", () => {
-    const facts = { now: 10 * 60_000, ttlMs: 2 * 60_000, host: "h", alive: () => true }
-    expect(lockIsStale(undefined, { ...facts, mtimeMs: 0 })).toBe(true)
-    expect(lockIsStale(undefined, { ...facts, mtimeMs: 9 * 60_000 })).toBe(false)
-    expect(lockIsStale(undefined, facts)).toBe(false)
-  })
-})
-
-describe("withDiskLock", () => {
-  const fast = { attempts: 4, delayMs: () => 0, sleep: async () => {} }
-
-  test("runs the work, holds the lock meanwhile, and releases it", async () => {
-    const dir = common()
-    let during = false
-    await withDiskLock(dir, "/wt/a", { sessionID: "s" }, async () => {
-      during = readdirSync(join(dir, "opencode", "locks")).some((name) => name.endsWith(".lock"))
-    })
-    expect(during).toBe(true)
-    expect(readdirSync(join(dir, "opencode", "locks")).filter((name) => name.endsWith(".lock"))).toEqual([])
-  })
-
-  test("releases when the work throws", async () => {
-    const dir = common()
-    await expect(
-      withDiskLock(dir, "/wt/a", { sessionID: "s" }, async () => {
-        throw new Error("boom")
-      }),
-    ).rejects.toThrow("boom")
-    await withDiskLock(dir, "/wt/a", { sessionID: "s" }, async () => {})
-  })
-
-  test("a second holder waits for the first (two instances, one lock)", async () => {
-    const dir = common()
-    const order: string[] = []
-    const first = withDiskLock(dir, "/wt/a", { sessionID: "a" }, async () => {
-      order.push("a-in")
-      await new Promise((done) => setTimeout(done, 40))
-      order.push("a-out")
-    })
-    await new Promise((done) => setTimeout(done, 5))
-    const second = withDiskLock(dir, "/wt/a", { sessionID: "b" }, async () => {
-      order.push("b-in")
-    })
-    await Promise.all([first, second])
-    expect(order).toEqual(["a-in", "a-out", "b-in"])
-  })
-
-  test("a live lock is kept: the waiter times out and the holder's file is untouched", async () => {
-    const dir = common()
-    mkdirSync(join(dir, "opencode", "locks"), { recursive: true })
-    const path = lockFile(dir, "/wt/a")
-    writeFileSync(path, JSON.stringify(info({ pid: process.pid, host: "h", acquiredAt: 0 })))
-    await expect(
-      withDiskLock(dir, "/wt/a", { ...fast, sessionID: "s", host: "h", now: () => 10 * 60_000, alive: () => true }, async () => {}),
-    ).rejects.toBeInstanceOf(LockTimeout)
-    expect(JSON.parse(require("node:fs").readFileSync(path, "utf8")).token).toBe("t")
-  })
-
-  test("a dead holder's old lock is broken and the work runs", async () => {
-    const dir = common()
-    mkdirSync(join(dir, "opencode", "locks"), { recursive: true })
-    writeFileSync(lockFile(dir, "/wt/a"), JSON.stringify(info({ host: "h", acquiredAt: 0 })))
-    let ran = false
-    await withDiskLock(dir, "/wt/a", { ...fast, sessionID: "s", host: "h", now: () => 10 * 60_000, alive: () => false }, async () => {
-      ran = true
-    })
-    expect(ran).toBe(true)
-    expect(readdirSync(join(dir, "opencode", "locks"))).toEqual([])
-  })
-
-  test("a different directory is a different lock", async () => {
-    const dir = common()
-    let inner = false
-    await withDiskLock(dir, "/wt/a", { sessionID: "s" }, async () => {
-      await withDiskLock(dir, "/wt/b", { ...fast, sessionID: "s" }, async () => {
-        inner = true
-      })
-    })
-    expect(inner).toBe(true)
-  })
 })
 
 describe("holds", () => {
@@ -179,109 +86,49 @@ describe("the resume generation lives in the claim", () => {
   })
 })
 
-describe("breaking a stale lock is itself exclusive", () => {
-  const NOW = 10 * 60_000
-  const opts = (sessionID: string, extra: Record<string, unknown> = {}) => ({
-    sessionID,
-    host: "h",
-    now: () => NOW,
-    alive: () => false,
-    attempts: 3,
-    delayMs: () => 0,
-    sleep: async () => {},
-    ...extra,
-  })
-  const plant = (dir: string, over: Partial<LockInfo> = {}) => {
-    mkdirSync(join(dir, "opencode", "locks"), { recursive: true })
-    writeFileSync(lockFile(dir, "/wt/a"), JSON.stringify(info({ host: "h", acquiredAt: 0, ...over })))
-  }
-  const tokenOnDisk = (dir: string) => JSON.parse(readFileSync(lockFile(dir, "/wt/a"), "utf8")).token as string
-
-  test("a slow breaker that validated the old lock cannot remove the fresh lock a faster one created", async () => {
-    const dir = common()
-    plant(dir, { token: "old" })
-    let release!: () => void
-    const gate = new Promise<void>((done) => (release = done))
-    let aInside!: () => void
-    const entered = new Promise<void>((done) => (aInside = done))
-    let a: Promise<void> | undefined
-    let tokenWhileHeld = ""
-    const b = withDiskLock(
-      dir,
-      "/wt/a",
-      opts("b", {
-        seams: {
-          // B has judged the old lock stale and is about to break it. A runs to completion first: it breaks the
-          // same old lock, takes a fresh one and holds it.
-          afterValidate: async () => {
-            a = withDiskLock(dir, "/wt/a", opts("a"), async () => {
-              tokenWhileHeld = tokenOnDisk(dir)
-              aInside()
-              await gate
-            })
-            await entered
-          },
-        },
-      }),
-      async () => {},
-    )
-    await expect(b).rejects.toBeInstanceOf(LockTimeout)
-    // B's delayed break did not touch A's fresh lock.
-    expect(tokenOnDisk(dir)).toBe(tokenWhileHeld)
-    expect(tokenWhileHeld).not.toBe("old")
-    release()
-    await a
-    expect(readdirSync(join(dir, "opencode", "locks")).filter((name) => name.endsWith(".lock"))).toEqual([])
-  })
-
-  test("release unlinks only a lock that still carries its own token", async () => {
-    const dir = common()
-    await withDiskLock(dir, "/wt/a", { sessionID: "s" }, async () => {
-      // Someone else's lock replaced ours while the work ran.
-      writeFileSync(lockFile(dir, "/wt/a"), JSON.stringify(info({ token: "someone-else", acquiredAt: Date.now() })))
-    })
-    expect(tokenOnDisk(dir)).toBe("someone-else")
-  })
-
-  test("a .break file older than 30 s belongs to a crashed breaker and is removed; the next try breaks the lock", async () => {
-    const dir = common()
-    plant(dir)
-    const breakFile = `${lockFile(dir, "/wt/a")}.break`
-    writeFileSync(breakFile, "{}")
-    const old = new Date(Date.now() - 120_000)
-    utimesSync(breakFile, old, old)
-    let ran = false
-    await withDiskLock(dir, "/wt/a", opts("s", { attempts: 6, now: () => Date.now() }), async () => {
-      ran = true
-    })
-    expect(ran).toBe(true)
-  })
-
-  test("a young .break file is respected: a breaker is at work, so this one does not break", async () => {
-    const dir = common()
-    plant(dir)
-    writeFileSync(`${lockFile(dir, "/wt/a")}.break`, "{}")
-    await expect(withDiskLock(dir, "/wt/a", opts("s", { now: () => Date.now() }), async () => {})).rejects.toBeInstanceOf(LockTimeout)
-    expect(tokenOnDisk(dir)).toBe("t")
-  })
-
-  test("normal acquisition never creates a .break file", async () => {
-    const dir = common()
-    await withDiskLock(dir, "/wt/a", { sessionID: "s" }, async () => {
-      expect(readdirSync(join(dir, "opencode", "locks")).some((name) => name.endsWith(".break"))).toBe(false)
-    })
-  })
+const heldByOther = () => ({
+  host: hostname().split(".")[0],
+  pid: process.pid,
+  owner: "other remover",
+  token: "theirs",
+  taken: Date.now(),
+  expires: Date.now() + 60_000,
 })
 
-describe("sameLock", () => {
-  test("token, pid, host and acquiredAt must all match", () => {
-    expect(sameLock(info(), info())).toBe(true)
-    for (const over of [{ token: "x" }, { pid: 1 }, { host: "z" }, { acquiredAt: 1 }]) expect(sameLock(info(), info(over))).toBe(false)
+describe("withDiskLock", () => {
+  test("holds the worktree's lock file while the work runs, and writers go through it too", async () => {
+    const dir = common()
+    const during: boolean[] = []
+    await withDiskLock(dir, "/wt/a", { sessionID: "s" }, async () => {
+      during.push(readdirSync(join(dir, "opencode", "locks")).some((name) => name.endsWith(".lock")))
+      // A write made inside the critical section does not wait on the section itself.
+      await lockedWrite(dir, "/wt/a", { sessionID: "s", waitMs: 20 }, () => during.push(true))
+    })
+    expect(during).toEqual([true, true])
+    expect(readdirSync(join(dir, "opencode", "locks"))).toEqual([])
   })
-  test("unparseable locks compare by their raw text", () => {
-    expect(sameLock(undefined, undefined, "garbage", "garbage")).toBe(true)
-    expect(sameLock(undefined, undefined, "garbage", "other")).toBe(false)
-    expect(sameLock(info(), undefined)).toBe(false)
+
+  test("a write from outside waits for a removal in flight, then runs", async () => {
+    const dir = common()
+    const order: string[] = []
+    const removal = withDiskLock(dir, "/wt/a", { sessionID: "remover" }, async () => {
+      order.push("remove-start")
+      await new Promise((done) => setTimeout(done, 60))
+      order.push("remove-end")
+    })
+    await new Promise((done) => setTimeout(done, 10))
+    await lockedWrite(dir, "/wt/a", { sessionID: "writer", waitMs: 2000 }, () => order.push("write"))
+    await removal
+    expect(order).toEqual(["remove-start", "remove-end", "write"])
+  })
+
+  test("a lock that cannot be taken in time throws LockTimeout and the work does not run", async () => {
+    const dir = common()
+    mkdirSync(join(dir, "opencode", "locks"), { recursive: true })
+    writeFileSync(lockFile(dir, "/wt/a"), JSON.stringify(heldByOther()))
+    let ran = false
+    await expect(withDiskLock(dir, "/wt/a", { sessionID: "s", waitMs: 40 }, async () => void (ran = true))).rejects.toBeInstanceOf(LockTimeout)
+    expect(ran).toBe(false)
   })
 })
 
@@ -320,9 +167,9 @@ describe("lockedWorktreeRemoval", () => {
   test("a lock held by someone else is a refusal, not an error, and nothing runs", async () => {
     const dir = common()
     mkdirSync(join(dir, "opencode", "locks"), { recursive: true })
-    writeFileSync(lockFile(dir, "/wt/a"), JSON.stringify(info({ pid: process.pid, acquiredAt: Date.now(), host: hostname() })))
+    writeFileSync(lockFile(dir, "/wt/a"), JSON.stringify(heldByOther()))
     let ran = false
-    const out = await lockedWorktreeRemoval(dir, "/wt/a", { sessionID: "s", attempts: 2, delayMs: () => 0, sleep: async () => {} }, {
+    const out = await lockedWorktreeRemoval(dir, "/wt/a", { sessionID: "s", waitMs: 60 }, {
       recheck: async () => {
         ran = true
         return undefined
@@ -351,6 +198,21 @@ describe("holdsState", () => {
     } finally {
       chmodSync(join(dir, "opencode"), 0o755)
     }
+  })
+
+  test("a holds directory that is readable but not writable is unsafe even with only expired records", () => {
+    if (process.getuid?.() === 0) return
+    const dir = common()
+    setHold(dir, "/wt/a", "s", [{ kind: "shell", id: "x" }], 1) // long expired by `now` below
+    const holdsRoot = join(dir, "opencode", "holds")
+    const holds = join(holdsRoot, readdirSync(holdsRoot)[0] as string)
+    chmodSync(holds, 0o555)
+    try {
+      expect(holdsState(dir, "/wt/a", 1 + HOLD_EXPIRY_MS + 1)).toContain("not writable")
+    } finally {
+      chmodSync(holds, 0o755)
+    }
+    expect(holdsState(dir, "/wt/a", 1 + HOLD_EXPIRY_MS + 1)).toBeUndefined()
   })
 
   test("a live hold blocks even when the store is writable", () => {

@@ -5,204 +5,76 @@
  * instance, so an in-memory lock, generation or hold coordinates nothing between them. This state
  * lives on disk, repository-scoped, next to the lane claims:
  *
- *   <common>/opencode/locks/<sha1(dir)>.lock               one lock per worktree
- *   <common>/opencode/holds/<sha1(dir)>/<sha1(session)>.json  running background jobs, per session
+ *   <common>/opencode/locks/<sha1(dir)>.lock                   one lock per worktree
+ *   <common>/opencode/holds/<sha1(dir)>/<sha1(session)>.json   running background jobs, per session
  *
- * The lock is created exclusively (a hard link from a fully written temp file, so the file is
- * never seen half-written and creation fails if it exists). A holder that died is detected, never
- * guessed: a lock is broken only when it is older than the TTL and its pid is not alive on this host.
+ * The lock is the Beads embedded write lock's protocol (`lease-lock.ts`). Everything that reads or
+ * writes this state for a worktree takes that lock around the read-decide-act or the write, so
+ * readers and writers are serialised.
  */
 
 import { createHash, randomUUID } from "node:crypto"
-import { accessSync, constants, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs"
-import { hostname } from "node:os"
+import { accessSync, constants, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
+import { type LeaseOptions, withLease } from "./lease-lock.ts"
 import { canonicalDirectory, type Read } from "./worktree-claims.ts"
 
-export const LOCK_TTL_MS = 2 * 60_000
-/** A `.break` file older than this belongs to a crashed breaker. */
-export const BREAK_TTL_MS = 30_000
 export const HOLD_EXPIRY_MS = 24 * 3_600_000
 
 const sha1 = (text: string) => createHash("sha1").update(text).digest("hex")
 const isObject = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value)
 
-export type LockInfo = { pid: number; host: string; sessionID: string; acquiredAt: number; token: string }
-
-export function parseLock(value: unknown): LockInfo | undefined {
-  if (!isObject(value)) return undefined
-  const { pid, host, sessionID, acquiredAt, token } = value
-  if (typeof pid !== "number" || !Number.isInteger(pid) || typeof host !== "string" || typeof sessionID !== "string") return undefined
-  if (typeof acquiredAt !== "number" || !Number.isFinite(acquiredAt) || typeof token !== "string") return undefined
-  return { pid, host, sessionID, acquiredAt, token }
-}
-
-/**
- * Whether a lock may be broken. Only when it is older than the TTL **and** its holder is provably
- * gone: same host, pid not alive. A lock from another host, or whose holder is alive, is never
- * stale however old. A lock file nobody can parse is judged by its mtime alone. Pure.
- */
-export function lockIsStale(
-  info: LockInfo | undefined,
-  facts: { now: number; ttlMs: number; host: string; alive: (pid: number) => boolean; mtimeMs?: number },
-): boolean {
-  if (info === undefined) return facts.mtimeMs !== undefined && facts.now - facts.mtimeMs > facts.ttlMs
-  if (facts.now - info.acquiredAt <= facts.ttlMs) return false
-  if (info.host !== facts.host) return false
-  return !facts.alive(info.pid)
-}
-
-export const processAlive = (pid: number): boolean => {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM"
-  }
-}
+/** The lease: a hold nobody renews expires after this. */
+export const LOCK_TTL_MS = 120_000
 
 export const lockFile = (commonDir: string, directory: string) =>
   join(commonDir, "opencode", "locks", `${sha1(canonicalDirectory(directory))}.lock`)
 
 export class LockTimeout extends Error {
-  constructor(readonly directory: string) {
-    super(`could not lock ${directory}`)
+  constructor(
+    readonly directory: string,
+    detail = "",
+  ) {
+    super(`could not lock ${directory}${detail === "" ? "" : ` (${detail})`}`)
     this.name = "LockTimeout"
   }
 }
 
-/** Seams for tests: run between validating a stale lock and breaking it. */
-export type LockSeams = { afterValidate?: () => Promise<void> | void }
-
 export type LockOptions = {
   sessionID: string
-  seams?: LockSeams
   ttlMs?: number
-  /** Attempts before giving up, with `delayMs(attempt)` between them. */
-  attempts?: number
-  delayMs?: (attempt: number) => number
+  renewMs?: number
+  /** How long to wait for a busy lock before it counts as held. */
+  waitMs?: number
   now?: () => number
   host?: string
   alive?: (pid: number) => boolean
   sleep?: (ms: number) => Promise<void>
-}
-
-const readLock = (path: string): { raw: string; info: LockInfo | undefined; mtimeMs: number } | undefined => {
-  try {
-    const raw = readFileSync(path, "utf8")
-    let info: LockInfo | undefined
-    try {
-      info = parseLock(JSON.parse(raw))
-    } catch {}
-    return { raw, info, mtimeMs: statSync(path).mtimeMs }
-  } catch {
-    return undefined
-  }
-}
-
-/** Whether two lock reads are the same holding: token, pid, host and acquiredAt. Pure. */
-export function sameLock(a: LockInfo | undefined, b: LockInfo | undefined, rawA?: string, rawB?: string): boolean {
-  if (a === undefined || b === undefined) return a === b && rawA !== undefined && rawA === rawB
-  return a.token === b.token && a.pid === b.pid && a.host === b.host && a.acquiredAt === b.acquiredAt
+  seams?: LeaseOptions["seams"]
 }
 
 /**
- * Break a lock that was judged stale. Two breakers must not both act on the same stale content: the
- * slower one would unlink the lock the faster one just created. So breaking itself takes a
- * `<lock>.break` file exclusively; while holding it the lock is read again, and it is unlinked only
- * if it is still exactly the content that was judged. A `.break` file older than 30 s belongs to a
- * crashed breaker and is removed directly: safe, because breaking only ever unlinks a lock whose
- * content was confirmed under the break lock. Normal acquisition never touches `.break`.
+ * Run `work` holding the worktree's on-disk lock. The protocol is the Beads embedded write lock's
+ * (see `lease-lock.ts`): a lease renewed on a heartbeat, takeover of abandoned holders under a
+ * steal lock. Re-entrant along one async call chain. Throws {@link LockTimeout} if it cannot be taken.
  */
-function breakStale(
-  path: string,
-  judged: { raw: string; info: LockInfo | undefined },
-  who: { now: () => number; token: string; host: string; sessionID: string },
-): void {
-  const breakPath = `${path}.break`
-  const temp = `${breakPath}.${who.token}.tmp`
-  try {
-    writeFileSync(temp, JSON.stringify({ pid: process.pid, host: who.host, sessionID: who.sessionID, acquiredAt: who.now(), token: who.token }))
-    try {
-      linkSync(temp, breakPath)
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error
-      // Someone is breaking, or crashed while doing so.
-      try {
-        if (who.now() - statSync(breakPath).mtimeMs > BREAK_TTL_MS) rmSync(breakPath, { force: true })
-      } catch {}
-      return
-    }
-  } finally {
-    rmSync(temp, { force: true })
-  }
-  try {
-    const now = readLock(path)
-    // Still exactly the lock that was judged? Then it is stale and nobody replaced it.
-    if (now !== undefined && sameLock(now.info, judged.info, now.raw, judged.raw)) rmSync(path, { force: true })
-  } finally {
-    const mine = (() => {
-      try {
-        return (JSON.parse(readFileSync(breakPath, "utf8")) as { token?: string }).token === who.token
-      } catch {
-        return false
-      }
-    })()
-    if (mine) rmSync(breakPath, { force: true })
-  }
-}
-
-/** Run `work` holding the on-disk lock for `directory`. Throws {@link LockTimeout} if it cannot be taken. */
 export async function withDiskLock<T>(commonDir: string, directory: string, options: LockOptions, work: () => Promise<T>): Promise<T> {
   const path = lockFile(commonDir, directory)
-  const now = options.now ?? Date.now
-  const host = options.host ?? hostname()
-  const hostName = hostname()
-  const alive = options.alive ?? processAlive
-  const ttlMs = options.ttlMs ?? LOCK_TTL_MS
-  const attempts = options.attempts ?? 60
-  const delayMs = options.delayMs ?? ((attempt) => Math.min(250, 10 * 2 ** Math.min(attempt, 5)))
-  const sleep = options.sleep ?? ((ms) => new Promise<void>((done) => setTimeout(done, ms)))
-  const token = randomUUID()
   mkdirSync(join(path, ".."), { recursive: true })
-
-  const tryCreate = (): boolean => {
-    const temp = `${path}.${token}.tmp`
-    const info: LockInfo = { pid: process.pid, host, sessionID: options.sessionID, acquiredAt: now(), token }
-    writeFileSync(temp, JSON.stringify(info))
-    try {
-      linkSync(temp, path)
-      return true
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "EEXIST") return false
-      throw error
-    } finally {
-      rmSync(temp, { force: true })
-    }
-  }
-
-  let held = false
-  for (let attempt = 0; attempt < attempts; attempt++) {
-    if (tryCreate()) {
-      held = true
-      break
-    }
-    const current = readLock(path)
-    if (current === undefined) continue // released between the two calls
-    if (lockIsStale(current.info, { now: now(), ttlMs, host, alive, mtimeMs: current.mtimeMs })) {
-      await options.seams?.afterValidate?.()
-      breakStale(path, current, { now, token, host: hostName, sessionID: options.sessionID })
-      continue
-    }
-    await sleep(delayMs(attempt))
-  }
-  if (!held) throw new LockTimeout(directory)
-  try {
-    return await work()
-  } finally {
-    if (readLock(path)?.info?.token === token) rmSync(path, { force: true })
-  }
+  const result = await withLease(path, {
+    owner: options.sessionID,
+    leaseMs: options.ttlMs ?? LOCK_TTL_MS,
+    waitMs: options.waitMs ?? 30_000,
+    ...(options.renewMs === undefined ? {} : { renewMs: options.renewMs }),
+    ...(options.now === undefined ? {} : { now: options.now }),
+    ...(options.host === undefined ? {} : { host: options.host }),
+    ...(options.alive === undefined ? {} : { alive: options.alive }),
+    ...(options.sleep === undefined ? {} : { sleep: options.sleep }),
+    ...(options.seams === undefined ? {} : { seams: options.seams }),
+  }, work)
+  if (result.kind === "done") return result.value
+  throw new LockTimeout(directory, result.reason)
 }
 
 // --- holds: running background work, written by every idle gate ------------------------------
@@ -291,17 +163,35 @@ export function coordinationWritable(commonDir: string): boolean {
   }
 }
 
+/** Whether a session's hold for `directory` can be written right now (a real probe write, in the holds directory when it exists). */
+export function holdsWritable(commonDir: string, directory: string): boolean {
+  const dir = holdsDir(commonDir, directory)
+  try {
+    accessSync(dir, constants.F_OK)
+  } catch {
+    return coordinationWritable(commonDir)
+  }
+  try {
+    const probe = join(dir, `.probe.${randomUUID()}`)
+    writeFileSync(probe, "")
+    rmSync(probe, { force: true })
+    return true
+  } catch {
+    return false
+  }
+}
+
 /**
  * Why background work or an unusable coordination store blocks a removal of `directory`, or
- * undefined. No holds directory is "no holds" only if holds could be written there: if the
- * coordination root is not writable, the gates that would have recorded work could not have, so
- * it is unsafe, not empty.
+ * undefined. Run before every removal, under the lock. The holds store must be writable whether or
+ * not it has entries: if it is not, the gates that would record running work could not have, so
+ * "no live entries" proves nothing. Expired entries are ignored; unreadable ones block.
  */
 export function holdsState(commonDir: string, directory: string, now: number, expiryMs: number = HOLD_EXPIRY_MS): string | undefined {
   const read = readHolds(commonDir, directory)
   const blocked = holdBlock(read, now, expiryMs)
   if (blocked !== undefined) return blocked
-  if (read.missing === true && !coordinationWritable(commonDir)) return "the coordination store is not writable, so running work cannot be ruled out"
+  if (!holdsWritable(commonDir, directory)) return "the coordination store is not writable, so running work cannot be ruled out"
   return undefined
 }
 
@@ -332,4 +222,13 @@ export async function lockedWorktreeRemoval<T>(
     const message = error instanceof LockTimeout ? `the worktree is locked by another remover (${error.message})` : `the lock could not be taken (${error instanceof Error ? error.message : String(error)})`
     return { removed: false, reason: message }
   }
+}
+
+/**
+ * A short write to coordination state (a hold, a landing record, a denial, a claim, a resume bump)
+ * under the worktree's lock, so it cannot land between a remover's last look and its removal.
+ * Re-entrant: inside a removal's own critical section it just runs.
+ */
+export function lockedWrite<T>(commonDir: string, directory: string, options: LockOptions, write: () => T): Promise<T> {
+  return withDiskLock(commonDir, directory, { waitMs: 10_000, ...options }, async () => write())
 }
