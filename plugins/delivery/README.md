@@ -111,6 +111,12 @@ Inputs: `pr`, and when needed `merge_method` (`squash` by default, `merge`,
   `autoCleanup` says; the option turns off only delivery's own inline cleanup and retry.
   The last check before any removal delivery makes on its own also re-reads the landing
   records for that directory: a denial, or a record that cannot be read, blocks it.
+- The idle hook also records the `background` list as holds on disk
+  (`<common>/opencode/holds/…`, the same format `subagent-worktree` writes): a shell that names the
+  worktree, or any job of a session working in it. The last check before a removal reads them, so
+  running background work keeps the worktree. Landing records are dropped only on positive evidence
+  (their own receipt readable and cleaned or superseded); a denial is never dropped by cleanup of
+  stale records, and a missing or unreadable receipt directory deletes nothing.
 - **A refusal sticks.** If the inline cleanup is refused at its prompt, the landing record
   keeps `denied` and nothing retries it. A later explicit `delivery_cleanup` call that is
   authorized clears it; one that is refused records a fresh denial and leaves the old one

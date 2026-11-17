@@ -3,7 +3,7 @@
 // plugins/subagent-worktree/src/index.ts
 import { realpath, stat as stat2 } from "fs/promises";
 import { homedir as homedir2 } from "os";
-import { join as join3, resolve as resolve3 } from "path";
+import { join as join4, resolve as resolve3 } from "path";
 import { Plugin } from "@opencode/plugin";
 import { Error as ToolError } from "@opencode/plugin/promise/tool";
 
@@ -82,7 +82,8 @@ function parseClaim(value) {
   const createdAt = finite(value.createdAt);
   if (!directory || !branch || !sessionID || !parentID || createdAt === undefined)
     return;
-  return { directory, branch, sessionID, parentID, createdAt };
+  const resumedAt = finite(value.resumedAt);
+  return { directory, branch, sessionID, parentID, createdAt, generation: finite(value.generation) ?? 0, ...resumedAt === undefined ? {} : { resumedAt } };
 }
 function parseLanding(value) {
   if (!isObject(value))
@@ -143,7 +144,18 @@ function writeAtomic(path, value) {
 }
 var readClaim = (commonDir, directory) => readJson(claimFile(commonDir, directory), parseClaim);
 function writeClaim(commonDir, claim) {
-  writeAtomic(claimFile(commonDir, claim.directory), claim);
+  writeAtomic(claimFile(commonDir, claim.directory), { ...claim, generation: claim.generation ?? claim.createdAt });
+}
+function claimGeneration(read) {
+  return read.kind === "present" ? read.value.generation : -1;
+}
+function bumpClaim(commonDir, directory, now) {
+  const read = readClaim(commonDir, directory);
+  if (read.kind !== "present")
+    return -1;
+  const next = { ...read.value, generation: read.value.generation + 1, resumedAt: now };
+  writeAtomic(claimFile(commonDir, directory), next);
+  return next.generation;
 }
 function removeClaim(commonDir, directory) {
   rmSync(claimFile(commonDir, directory), { force: true });
@@ -805,7 +817,180 @@ function createGit(run) {
 import { existsSync as existsSync2, realpathSync as realpathSync2 } from "fs";
 import { stat } from "fs/promises";
 import { homedir } from "os";
-import { join as join2, resolve as resolve2 } from "path";
+import { join as join3, resolve as resolve2 } from "path";
+
+// plugins/lib/src/worktree-locks.ts
+import { createHash as createHash2, randomUUID } from "crypto";
+import { linkSync, mkdirSync as mkdirSync2, readdirSync as readdirSync2, readFileSync as readFileSync2, renameSync as renameSync2, rmSync as rmSync2, statSync, writeFileSync as writeFileSync2 } from "fs";
+import { hostname } from "os";
+import { join as join2 } from "path";
+var LOCK_TTL_MS = 2 * 60000;
+var HOLD_EXPIRY_MS = 24 * 3600000;
+var sha1 = (text) => createHash2("sha1").update(text).digest("hex");
+var isObject2 = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+function parseLock(value) {
+  if (!isObject2(value))
+    return;
+  const { pid, host, sessionID, acquiredAt, token } = value;
+  if (typeof pid !== "number" || !Number.isInteger(pid) || typeof host !== "string" || typeof sessionID !== "string")
+    return;
+  if (typeof acquiredAt !== "number" || !Number.isFinite(acquiredAt) || typeof token !== "string")
+    return;
+  return { pid, host, sessionID, acquiredAt, token };
+}
+function lockIsStale(info, facts) {
+  if (info === undefined)
+    return facts.mtimeMs !== undefined && facts.now - facts.mtimeMs > facts.ttlMs;
+  if (facts.now - info.acquiredAt <= facts.ttlMs)
+    return false;
+  if (info.host !== facts.host)
+    return false;
+  return !facts.alive(info.pid);
+}
+var processAlive2 = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+};
+var lockFile = (commonDir, directory) => join2(commonDir, "opencode", "locks", `${sha1(canonicalDirectory(directory))}.lock`);
+
+class LockTimeout extends Error {
+  directory;
+  constructor(directory) {
+    super(`could not lock ${directory}`);
+    this.directory = directory;
+    this.name = "LockTimeout";
+  }
+}
+var readLock = (path) => {
+  try {
+    const raw = readFileSync2(path, "utf8");
+    let info;
+    try {
+      info = parseLock(JSON.parse(raw));
+    } catch {}
+    return { raw, info, mtimeMs: statSync(path).mtimeMs };
+  } catch {
+    return;
+  }
+};
+async function withDiskLock(commonDir, directory, options, work) {
+  const path = lockFile(commonDir, directory);
+  const now = options.now ?? Date.now;
+  const host = options.host ?? hostname();
+  const alive = options.alive ?? processAlive2;
+  const ttlMs = options.ttlMs ?? LOCK_TTL_MS;
+  const attempts = options.attempts ?? 60;
+  const delayMs = options.delayMs ?? ((attempt) => Math.min(250, 10 * 2 ** Math.min(attempt, 5)));
+  const sleep = options.sleep ?? ((ms) => new Promise((done) => setTimeout(done, ms)));
+  const token = randomUUID();
+  mkdirSync2(join2(path, ".."), { recursive: true });
+  const tryCreate = () => {
+    const temp = `${path}.${token}.tmp`;
+    const info = { pid: process.pid, host, sessionID: options.sessionID, acquiredAt: now(), token };
+    writeFileSync2(temp, JSON.stringify(info));
+    try {
+      linkSync(temp, path);
+      return true;
+    } catch (error) {
+      if (error.code === "EEXIST")
+        return false;
+      throw error;
+    } finally {
+      rmSync2(temp, { force: true });
+    }
+  };
+  let held = false;
+  for (let attempt = 0;attempt < attempts; attempt++) {
+    if (tryCreate()) {
+      held = true;
+      break;
+    }
+    const current = readLock(path);
+    if (current === undefined)
+      continue;
+    if (lockIsStale(current.info, { now: now(), ttlMs, host, alive, mtimeMs: current.mtimeMs })) {
+      if (readLock(path)?.raw === current.raw) {
+        try {
+          renameSync2(path, `${path}.stale.${token}`);
+          rmSync2(`${path}.stale.${token}`, { force: true });
+        } catch {}
+      }
+      continue;
+    }
+    await sleep(delayMs(attempt));
+  }
+  if (!held)
+    throw new LockTimeout(directory);
+  try {
+    return await work();
+  } finally {
+    if (readLock(path)?.info?.token === token)
+      rmSync2(path, { force: true });
+  }
+}
+function parseHold(value) {
+  if (!isObject2(value))
+    return;
+  const { sessionID, directory, jobs, updatedAt } = value;
+  if (typeof sessionID !== "string" || typeof directory !== "string" || typeof updatedAt !== "number" || !Array.isArray(jobs))
+    return;
+  const parsed = [];
+  for (const job of jobs) {
+    if (!isObject2(job) || typeof job.kind !== "string" || typeof job.id !== "string")
+      return;
+    parsed.push({ kind: job.kind, id: job.id });
+  }
+  return { sessionID, directory, jobs: parsed, updatedAt };
+}
+var holdsDir = (commonDir, directory) => join2(commonDir, "opencode", "holds", sha1(canonicalDirectory(directory)));
+var holdFile = (commonDir, directory, sessionID) => join2(holdsDir(commonDir, directory), `${sha1(sessionID)}.json`);
+function setHold(commonDir, directory, sessionID, jobs, now) {
+  const path = holdFile(commonDir, directory, sessionID);
+  if (jobs.length === 0) {
+    rmSync2(path, { force: true });
+    return;
+  }
+  mkdirSync2(holdsDir(commonDir, directory), { recursive: true });
+  const temp = `${path}.${randomUUID()}.tmp`;
+  writeFileSync2(temp, JSON.stringify({ sessionID, directory, jobs, updatedAt: now }));
+  renameSync2(temp, path);
+}
+function readHolds(commonDir, directory) {
+  const dir = holdsDir(commonDir, directory);
+  let names;
+  try {
+    names = readdirSync2(dir).filter((name) => name.endsWith(".json"));
+  } catch (error) {
+    return { holds: [], unreadable: error.code !== "ENOENT" };
+  }
+  const holds = [];
+  let unreadable = false;
+  for (const name of names) {
+    try {
+      const hold = parseHold(JSON.parse(readFileSync2(join2(dir, name), "utf8")));
+      if (hold === undefined)
+        unreadable = true;
+      else
+        holds.push(hold);
+    } catch {
+      unreadable = true;
+    }
+  }
+  return { holds, unreadable };
+}
+function holdBlock(read, now, expiryMs = HOLD_EXPIRY_MS) {
+  if (read.unreadable)
+    return "the background-work records cannot be read";
+  const live = read.holds.find((hold) => hold.jobs.length > 0 && now - hold.updatedAt < expiryMs);
+  if (live === undefined)
+    return;
+  const first = live.jobs[0];
+  return `session ${live.sessionID} has ${live.jobs.length} background job(s) running (${first?.kind} ${first?.id})`;
+}
 
 // plugins/lib/src/worktree-state.ts
 var OPERATION_MARKERS = [
@@ -968,30 +1153,38 @@ function idleGateAction(session, lanes, policy) {
   return { remove, message: `<system-reminder>${lines.join(`
 `)}</system-reminder>`, marks };
 }
-function laneBackgroundWork(lane, jobs, descendant) {
+function laneBackgroundJobs(lane, jobs, descendant) {
+  const matched = [];
   for (const job of jobs) {
     const ids = [job.sessionID, job.childSessionID].filter((id) => typeof id === "string");
+    let why;
     for (const id of ids) {
       if (id === lane.child)
-        return `the child has a ${job.kind} job running`;
-      const below = descendant(id);
-      if (below === undefined)
-        return `a ${job.kind} job could not be placed relative to the child`;
-      if (below)
-        return `a descendant of the child has a ${job.kind} job running`;
+        why = `the child has a ${job.kind} job running`;
+      else {
+        const below = descendant(id);
+        if (below === undefined)
+          why = `a ${job.kind} job could not be placed relative to the child`;
+        else if (below)
+          why = `a descendant of the child has a ${job.kind} job running`;
+      }
+      if (why !== undefined)
+        break;
     }
-    if (job.kind === "shell" && typeof job.command === "string" && job.command.includes(lane.directory)) {
-      return "a shell is running in the lane";
+    if (why === undefined && job.kind === "shell" && typeof job.command === "string" && job.command.includes(lane.directory)) {
+      why = "a shell is running in the lane";
     }
+    if (why !== undefined)
+      matched.push({ job, why });
   }
-  return;
+  return matched;
 }
 
 // plugins/subagent-worktree/src/landing.ts
 var LAND_TOOL = "delivery_land";
 var CLEANUP_TOOL = "delivery_cleanup";
 var LANDING_TOOLS = [LAND_TOOL, CLEANUP_TOOL];
-var isObject2 = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+var isObject3 = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 var text2 = (value) => typeof value === "string" && value !== "" ? value : undefined;
 function shapes(result) {
   const objects = [];
@@ -1003,17 +1196,17 @@ function shapes(result) {
       texts.push(value);
       try {
         const parsed = JSON.parse(value);
-        if (isObject2(parsed))
+        if (isObject3(parsed))
           visit(parsed, depth + 1);
       } catch {}
       return;
     }
     if (Array.isArray(value)) {
       for (const part of value)
-        visit(isObject2(part) && typeof part.text === "string" ? part.text : part, depth + 1);
+        visit(isObject3(part) && typeof part.text === "string" ? part.text : part, depth + 1);
       return;
     }
-    if (!isObject2(value))
+    if (!isObject3(value))
       return;
     objects.push(value);
     for (const key of ["output", "metadata", "content"])
@@ -1033,11 +1226,11 @@ function readLanding(result) {
       removed.add(worktree);
       named.add(worktree);
     }
-    const cleanup = isObject2(object.cleanup) ? object.cleanup : undefined;
+    const cleanup = isObject3(object.cleanup) ? object.cleanup : undefined;
     if (cleanup?.ok === true && text2(cleanup.removed))
       removed.add(text2(cleanup.removed));
-    const held = isObject2(object.receipt) ? object.receipt : undefined;
-    const path = isObject2(held?.worktree) ? text2(held.worktree.path) : undefined;
+    const held = isObject3(object.receipt) ? object.receipt : undefined;
+    const path = isObject3(held?.worktree) ? text2(held.worktree.path) : undefined;
     if (path)
       named.add(path);
   }
@@ -1138,8 +1331,8 @@ var canonical = (path) => {
   }
 };
 function defaultWorktreeRoot() {
-  const data = process.env.XDG_DATA_HOME || join2(homedir(), ".local", "share");
-  return join2(data, "opencode", "worktree");
+  const data = process.env.XDG_DATA_HOME || join3(homedir(), ".local", "share");
+  return join3(data, "opencode", "worktree");
 }
 function within2(path, root) {
   const base = root.replace(/\/+$/, "");
@@ -1225,7 +1418,7 @@ function createLifecycle(deps) {
   const busyTreeOf = async (directory, branch) => {
     const dir = await git.gitDir(directory);
     if (dir !== undefined) {
-      const operations = operationsInProgress(OPERATION_MARKERS.map((marker) => marker.name).filter((name) => existsSync2(join2(dir, name))));
+      const operations = operationsInProgress(OPERATION_MARKERS.map((marker) => marker.name).filter((name) => existsSync2(join3(dir, name))));
       if (operations.length > 0)
         return `a ${operations.join(", ")} is in progress`;
     }
@@ -1250,11 +1443,11 @@ function createLifecycle(deps) {
     const denied = mine.find((record) => record.denied !== undefined);
     return { heads, block: denied ? "delivery cleanup was denied; an explicit delivery_cleanup re-arms it" : undefined };
   };
-  const busyHolds = new Map;
-  const BUSY_HOLD_MS = HOUR;
-  const busyHold = (directory) => {
-    const held = busyHolds.get(canonical(directory));
-    return held !== undefined && held.until > now() ? held.reason : undefined;
+  const holdReason = async (directory, parentDir) => {
+    const common = await deps.commonDir(parentDir);
+    if (common === undefined)
+      return "the background-work records cannot be located";
+    return holdBlock(readHolds(common, directory), now());
   };
   const dirtyToken = (porcelain) => porcelain === "" ? "clean" : String(Bun.hash(porcelain));
   const laneFacts = async (lane, sessions) => {
@@ -1288,21 +1481,37 @@ function createLifecycle(deps) {
       denied: records.block
     };
   };
-  const generations = new Map;
-  const locks = new Map;
-  const generationOf = (directory) => generations.get(canonical(directory)) ?? 0;
-  const withLock = (directory, work) => {
+  const generationOf = async (directory, parentDir) => {
+    const common = await deps.commonDir(parentDir);
+    return common === undefined ? -1 : claimGeneration(readClaim(common, directory));
+  };
+  const localLocks = new Map;
+  const withLock = async (directory, parentDir, work) => {
     const key = canonical(directory);
-    const next = (locks.get(key) ?? Promise.resolve()).then(work, work);
-    locks.set(key, next.catch(() => {}));
+    const common = await deps.commonDir(parentDir);
+    if (common === undefined)
+      throw new Error(`subagent-worktree: no git common directory to lock ${directory}`);
+    const run = () => withDiskLock(common, directory, { sessionID: "subagent-worktree", now, ...deps.lock }, work);
+    const next = (localLocks.get(key) ?? Promise.resolve()).then(run, run);
+    localLocks.set(key, next.catch(() => {}));
     return next;
   };
-  const noteResume = (directory) => withLock(directory, async () => {
-    generations.set(canonical(directory), generationOf(directory) + 1);
+  const noteResume = (directory, parentDir) => withLock(directory, parentDir, async () => {
+    const common = await deps.commonDir(parentDir);
+    if (common !== undefined)
+      bumpClaim(common, directory, now());
   });
-  const removeVerified = (removal) => withLock(removal.directory, async () => {
+  const removeVerified = (removal) => withLock(removal.directory, removal.parentDir, async () => {
     const { directory, branch } = removal;
-    if (generationOf(directory) !== removal.gen)
+    const common = await deps.commonDir(removal.parentDir);
+    if (common === undefined)
+      return false;
+    const claim = readClaim(common, directory);
+    if (claimGeneration(claim) !== removal.gen)
+      return false;
+    if (claim.kind === "present" && claim.value.resumedAt !== undefined && now() - claim.value.resumedAt < options.resumeGraceMs)
+      return false;
+    if (holdBlock(readHolds(common, directory), now()) !== undefined)
       return false;
     const oid = await git.head(directory);
     if (oid === undefined)
@@ -1337,7 +1546,7 @@ function createLifecycle(deps) {
       await git.deleteBranchAt(removal.parentDir, branch, oid);
     if (removal.lane) {
       const stored = await load(removal.lane.child);
-      if (stored?.state === "active" && canonical(stored.directory) === canonical(directory) && generationOf(directory) === removal.gen) {
+      if (stored?.state === "active" && canonical(stored.directory) === canonical(directory) && claimGeneration(readClaim(common, directory)) === removal.gen) {
         await save({ ...stored, state: removal.basis === "empty" ? "removed" : "landed" });
       }
     }
@@ -1372,9 +1581,6 @@ function createLifecycle(deps) {
     const records = await deliveryRecords(directory, parentDir);
     if (records.block !== undefined)
       return records.block;
-    const busy = busyHold(directory);
-    if (busy !== undefined)
-      return busy;
     if (lane === undefined)
       return;
     if (await statusOf(lane.child) !== "finished")
@@ -1437,14 +1643,14 @@ function createLifecycle(deps) {
     }
     if (ownLane) {
       const event = { type: eventType, subject: "child" };
-      const gen = generationOf(ownLane.directory);
+      const gen = await generationOf(ownLane.directory, ownLane.parentDir);
       const parent = await statusOf(ownLane.parent);
       const facts = await laneFacts(ownLane, { child: "finished", parent: parent === "finished" ? "idle" : parent === "running" ? "busy" : "unknown" });
       await act(ownLane, laneEventAction(ownLane, facts, event, policy), facts, event, gen);
     }
     for (const lane of led) {
       const event = { type: "check", subject: "parent" };
-      const gen = generationOf(lane.directory);
+      const gen = await generationOf(lane.directory, lane.parentDir);
       const child = await statusOf(lane.child);
       const fresh = await load(lane.child) ?? lane;
       const parentStatus = await statusOf(sessionID);
@@ -1522,7 +1728,7 @@ function createLifecycle(deps) {
       const jobs = input.background ?? [];
       const running = new Set;
       const gateLanes = await Promise.all(lanes.map(async (lane) => {
-        const gen = generationOf(lane.directory);
+        const gen = await generationOf(lane.directory, lane.parentDir);
         const known = new Map;
         for (const job of jobs) {
           for (const id of [job.sessionID, job.childSessionID]) {
@@ -1530,12 +1736,11 @@ function createLifecycle(deps) {
               known.set(id, id === lane.child ? true : await descends(id, lane.child));
           }
         }
-        const busy = laneBackgroundWork(lane, jobs, (id) => known.get(id));
-        if (lane.parent === input.sessionID) {
-          if (busy !== undefined)
-            busyHolds.set(canonical(lane.directory), { reason: busy, until: now() + BUSY_HOLD_MS });
-          else
-            busyHolds.delete(canonical(lane.directory));
+        const matched = laneBackgroundJobs(lane, jobs, (id) => known.get(id));
+        const busy = matched[0]?.why;
+        const common = await deps.commonDir(lane.parentDir);
+        if (common !== undefined) {
+          setHold(common, lane.directory, input.sessionID, matched.map(({ job }) => ({ kind: job.kind, id: job.shellID ?? job.childSessionID ?? job.sessionID ?? "unknown" })), now());
         }
         if (busy !== undefined && lane.parent === input.sessionID)
           running.add(lane.child);
@@ -1547,7 +1752,7 @@ function createLifecycle(deps) {
       const gens = new Map(gateLanes.map((entry) => [entry.lane.child, entry.gen]));
       const gate = idleGateAction({ id: input.sessionID, runningChildren: running, now: now(), lastMessageAt: lastGate.get(input.sessionID) }, gateLanes.map(({ lane, facts }) => ({ lane, facts })), policy);
       for (const { lane, basis } of gate.remove) {
-        await removeLane(lane, basis, gens.get(lane.child) ?? generationOf(lane.directory), lane.parent === input.sessionID);
+        await removeLane(lane, basis, gens.get(lane.child) ?? -2, lane.parent === input.sessionID);
       }
       if (gate.message === undefined)
         return;
@@ -1567,7 +1772,7 @@ function createLifecycle(deps) {
     const gone = (path) => !existsSync2(path);
     const lane = laneForLanding(event.result, lanes, canonical, gone);
     if (lane) {
-      await withLock(lane.directory, async () => {
+      await withLock(lane.directory, lane.parentDir, async () => {
         const stored = await load(lane.child);
         if (stored?.state === "active" && canonical(stored.directory) === canonical(lane.directory))
           await save({ ...stored, state: "landed" });
@@ -1601,7 +1806,7 @@ function createLifecycle(deps) {
   };
   const ageOf = async (directory) => {
     try {
-      const info = await stat(join2(directory, ".git"));
+      const info = await stat(join3(directory, ".git"));
       const born = info.birthtimeMs > 0 ? info.birthtimeMs : info.mtimeMs;
       return Math.max(0, now() - born);
     } catch {
@@ -1636,7 +1841,7 @@ function createLifecycle(deps) {
       owner,
       ageMs,
       landed,
-      dirty: porcelain === undefined ? undefined : porcelain !== "" || busy !== undefined || records.block !== undefined || busyHold(directory) !== undefined,
+      dirty: porcelain === undefined ? undefined : porcelain !== "" || busy !== undefined || records.block !== undefined || await holdReason(directory, lane?.parentDir ?? ctx.location.directory) !== undefined,
       ahead: status?.ahead,
       unpushed
     };
@@ -1656,7 +1861,7 @@ function createLifecycle(deps) {
     const facts = [];
     const proven = new Map;
     for (const [key, directory] of directories) {
-      const gen = generationOf(directory);
+      const gen = await generationOf(directory, byDir.get(key)?.parentDir ?? ctx.location.directory);
       facts.push(await sweepFacts(directory, byDir.get(key), minAgeMs));
       proven.set(key, { gen });
     }
@@ -1821,7 +2026,7 @@ ${note}`;
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
 }
-function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, exists = directoryExists, now = Date.now, reserveMs = RESERVATION_MS, debounceMs, sweepDelayMs, age, commonDirOverride) {
+function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, exists = directoryExists, now = Date.now, reserveMs = RESERVATION_MS, debounceMs, sweepDelayMs, age, commonDirOverride, lock) {
   const load = async (child) => parseLane(await ctx.storage.get(laneKey(child)));
   const commonDirs = new Map;
   const commonDirOf = async (parentDir) => {
@@ -1917,7 +2122,7 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
   const locate = async (parentDir, requested) => {
     const porcelain = await git2.worktrees(parentDir);
     const entries = porcelain === undefined ? undefined : await Promise.all(parseWorktrees(porcelain).map(async (entry) => ({ ...entry, directory: await normalize(entry.directory) })));
-    const raw = requested.startsWith("~/") ? join3(homedir2(), requested.slice(2)) : requested;
+    const raw = requested.startsWith("~/") ? join4(homedir2(), requested.slice(2)) : requested;
     const path = await normalize(resolve3(parentDir, raw));
     const current = entries && containingWorktree(await normalize(parentDir), entries)?.directory;
     return { lookup: findWorktree(requested, path, entries), current };
@@ -2183,7 +2388,7 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
     const lane2 = await load(child);
     if (lane2?.state !== "active")
       return;
-    await lifecycle.noteResume(lane2.directory);
+    await lifecycle.noteResume(lane2.directory, lane2.parentDir);
     const fresh = await load(child) ?? lane2;
     if (fresh.state === "active")
       await save({ ...fresh, resumedAt: now(), quietSince: undefined });
@@ -2239,7 +2444,7 @@ ${skipped}`,
     if (lane2?.state !== "active")
       return;
     const resultStatus = event.status === "error" ? "error" : metadata.status === "running" ? "running" : "completed";
-    const gen = lifecycle.generationOf(lane2.directory);
+    const gen = await lifecycle.generationOf(lane2.directory, lane2.parentDir);
     const status = await git2.status(lane2.directory, lane2.base);
     let removed = false;
     if (shouldRemove(status, resultStatus)) {
@@ -2443,6 +2648,7 @@ ${output}`,
     ...sweepDelayMs === undefined ? {} : { sweepDelayMs },
     ...age === undefined ? {} : { age },
     commonDir: commonDirOf,
+    ...lock === undefined ? {} : { lock },
     ensureClaim: async (lane2) => {
       try {
         await syncClaim(lane2);
@@ -2459,7 +2665,7 @@ function createPlugin(overrides = {}) {
     async setup(ctx) {
       const options = readOptions(ctx.options);
       const git2 = createGit(overrides.run ?? spawnRunner);
-      const lanes = createLanes(ctx, options, git2, overrides.suffix ?? randomSuffix, overrides.lookupMs, overrides.directoryExists, overrides.now, overrides.reserveMs, overrides.debounceMs, overrides.sweepDelayMs, overrides.age, overrides.commonDir);
+      const lanes = createLanes(ctx, options, git2, overrides.suffix ?? randomSuffix, overrides.lookupMs, overrides.directoryExists, overrides.now, overrides.reserveMs, overrides.debounceMs, overrides.sweepDelayMs, overrides.age, overrides.commonDir, overrides.lock);
       const registrations = [];
       const cleanup = async () => {
         for (const registration of registrations.reverse())

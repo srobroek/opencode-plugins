@@ -169,6 +169,27 @@ An empty lane (no commits, clean) is removed only after its child and parent sta
 `sweep` defaults to `report`: the plan is stored under `sweep/last` and nothing is removed until
 you set `"sweep": "prune"` or call the tool with `mode: "prune"`.
 
+### Coordination on disk
+
+Plugins load once per location: the parent's checkout and each lane's worktree run their own
+instance, so in-memory locks, generations and holds would coordinate nothing between them. All of it
+lives under `<git-common-dir>/opencode/`, shared by every instance of the repository:
+
+- `locks/<sha1 of the directory>.lock`: one lock per worktree, created exclusively (a hard link from a
+  fully written temp file) with `{ pid, host, sessionID, acquiredAt }`. Contenders retry with bounded
+  backoff. A lock is broken only when it is older than two minutes **and** its pid is not alive on
+  this host; one from another host, or whose holder is alive, is never broken. Every removal and every
+  resume runs under it.
+- the lane's claim carries the resume `generation` and `resumedAt`. A resume takes the lock, bumps
+  the generation and stamps the time; a removal captures the generation before collecting facts and,
+  under the lock right before removing, re-reads both from disk and aborts if the generation changed
+  or the child was resumed inside the resume window.
+- `holds/<sha1 of the directory>/<sha1 of the session>.json`: the background jobs a session has
+  running for the lane (its own, a descendant's, or a shell naming the lane directory). Every idle
+  gate, child or parent, writes its own entry and clears it when it sees none; every remover reads
+  all entries under the lock and a live entry blocks the removal. Entries older than 24 hours (a
+  crashed host) are ignored; an entry that cannot be read blocks.
+
 ### Claims: one remover per worktree
 
 Every active lane has a claim file under the repository's git common directory,

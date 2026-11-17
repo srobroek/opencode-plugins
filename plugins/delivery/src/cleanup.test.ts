@@ -8,6 +8,7 @@ import {
   writeClaim,
   writeLanding,
 } from "@srobroek/opencode-lib/worktree-claims"
+import { readHolds, setHold } from "@srobroek/opencode-lib/worktree-locks"
 import { authorizeExplicit, createPendingCleanup } from "./pending-cleanup.ts"
 
 // Fixture setup creates several real Git repositories and measured about 20s under full-suite load;
@@ -2786,6 +2787,118 @@ describe("pending cleanup: one remover per worktree", () => {
     expect(removed(h)).toBe(true)
     expect(existsSync(parked)).toBe(true)
     await h.finish()
+  })
+
+  describe("background work", () => {
+    const idleHook = (h: Harness, background: unknown[]) =>
+      h.fake.fire.session("experimental.idle", { sessionID: "ses_lead", background } as never)
+
+    test("a running shell named by the idle session's background list keeps an unclaimed landed worktree", async () => {
+      const h = await harness("pending-bg-shell")
+      await h.pending.record(h.f.receipt, "ses_lead")
+      await h.pending.start()
+      await idleHook(h, [{ kind: "shell", sessionID: "ses_x", shellID: "sh1", command: `cd ${h.f.linked} && make test` }])
+      await h.pending.settle()
+      expect(removed(h)).toBe(false)
+      expect(readHolds(h.common, h.f.linked).holds.map((hold) => hold.sessionID)).toEqual(["ses_lead"])
+      await h.finish()
+    })
+
+    test("a job of a session that works in the worktree keeps it too", async () => {
+      const h = await harness("pending-bg-session")
+      h.fake.sessions.set("ses_in", { id: "ses_in", location: { directory: h.f.linked } })
+      await h.pending.record(h.f.receipt, "ses_lead")
+      await h.pending.start()
+      await idleHook(h, [{ kind: "shell", sessionID: "ses_in", shellID: "sh2", command: "sleep 30" }])
+      await h.pending.settle()
+      expect(removed(h)).toBe(false)
+      await h.finish()
+    })
+
+    test("a hold another instance wrote blocks the final check", async () => {
+      const h = await harness("pending-bg-foreign")
+      await h.pending.record(h.f.receipt, "ses_lead")
+      setHold(h.common, h.f.linked, "ses_child", [{ kind: "shell", id: "x" }], NOW)
+      await h.pending.start()
+      await h.idle()
+      expect(removed(h)).toBe(false)
+      expect(mutationCalls(h.scripted.calls)).toEqual([])
+      await h.finish()
+    })
+
+    test("when the next idle lists nothing the hold clears and the worktree is removed", async () => {
+      const h = await harness("pending-bg-clears")
+      await h.pending.record(h.f.receipt, "ses_lead")
+      await h.pending.start()
+      await idleHook(h, [{ kind: "shell", sessionID: "ses_x", shellID: "sh1", command: `cd ${h.f.linked}` }])
+      await h.pending.settle()
+      expect(removed(h)).toBe(false)
+      h.advance(60_000)
+      await idleHook(h, [])
+      await h.pending.settle()
+      expect(readHolds(h.common, h.f.linked).holds).toEqual([])
+      expect(removed(h)).toBe(true)
+      await h.finish()
+    })
+  })
+
+  describe("a landing record is dropped only on positive evidence", () => {
+    const receiptsDir = (h: Harness) => receiptDirectory(h.f.env, repoKey(h.f.main) as string)
+
+    test("a missing receipt directory deletes nothing, denial or not", async () => {
+      const h = await harness("gc-no-dir")
+      await h.pending.record(h.f.receipt, "ses_lead", { denied: true })
+      rmSync(receiptsDir(h), { recursive: true, force: true })
+      h.pending.gc()
+      expect(readLanding(h.common, h.f.receipt.receiptId)).toMatchObject({ kind: "present", value: { denied: { sessionID: "ses_lead" } } })
+      await h.finish()
+    })
+
+    test("a receipt that cannot be parsed deletes nothing", async () => {
+      const h = await harness("gc-corrupt")
+      await h.pending.record(h.f.receipt, "ses_lead", { denied: true })
+      await h.pending.record({ ...h.f.receipt, receiptId: "9-other" } as never, "ses_lead")
+      writeFileSync(join(receiptsDir(h), `${h.f.receipt.receiptId}.json`), "{not json")
+      h.pending.gc()
+      expect(readLanding(h.common, h.f.receipt.receiptId).kind).toBe("present")
+      expect(readLanding(h.common, "9-other").kind).toBe("present")
+      await h.finish()
+    })
+
+    test("a superseded receipt's record is dropped, but a denial never is", async () => {
+      const h = await harness("gc-superseded")
+      const key = repoKey(h.f.main) as string
+      const later = buildReceipt({
+        now: NOW + 5000,
+        emitter: h.f.receipt.emitter,
+        repo: h.f.receipt.repo,
+        pr: h.f.receipt.pr,
+        branch: h.f.receipt.branch,
+        worktree: { ...h.f.receipt.worktree, removed: true },
+        beads: h.f.receipt.beads,
+        proof: h.f.receipt.proof,
+        outcome: "cleaned",
+        supersedes: h.f.receipt.receiptId,
+      })
+      writeReceipt(later, receiptDirectory(h.f.env, key))
+      await h.pending.record(h.f.receipt, "ses_lead")
+      h.pending.gc()
+      expect(readLanding(h.common, h.f.receipt.receiptId)).toEqual({ kind: "missing" })
+      await h.pending.record(h.f.receipt, "ses_lead", { denied: true })
+      h.pending.gc()
+      expect(readLanding(h.common, h.f.receipt.receiptId).kind).toBe("present")
+      await h.finish()
+    })
+
+    test("a pass over a worktree that is gone keeps a denial", async () => {
+      const h = await harness("gc-gone-denied")
+      await h.pending.record(h.f.receipt, "ses_lead", { denied: true })
+      rmSync(h.f.linked, { recursive: true, force: true })
+      await h.pending.start()
+      await h.idle()
+      expect(readLanding(h.common, h.f.receipt.receiptId).kind).toBe("present")
+      await h.finish()
+    })
   })
 
   test("a worktree that is already gone is done and takes no slot", async () => {
