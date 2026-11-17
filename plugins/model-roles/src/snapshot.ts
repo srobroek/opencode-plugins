@@ -88,18 +88,25 @@ export function unavailableReason(model: ModelRef, available: ReadonlyArray<Avai
   return undefined
 }
 
-/** Keys to delete: unreadable or older than `maxAgeMs`, then the oldest beyond `limit`. */
+/**
+ * Keys to delete: unreadable or older than `maxAgeMs`, then the oldest beyond `limit`. A key in `open`
+ * (a child that never ended) is exempt from the age: after a restart the host resumes every child whose
+ * execution claim was never released, however long ago it began (opencode v2.3.0
+ * `packages/core/src/session/execution/restart.ts:368-466`). `limit` still bounds them, and the ledger
+ * drops an open record at its own age.
+ */
 export function staleSnapshots(
   entries: ReadonlyArray<{ key: string; value: unknown }>,
   now: number,
   limit = SNAPSHOT_LIMIT,
   maxAgeMs = SNAPSHOT_MAX_AGE_MS,
+  open: ReadonlySet<string> = new Set(),
 ): string[] {
   const stale: string[] = []
   const live: Array<{ key: string; at: number }> = []
   for (const { key, value } of entries) {
     const snapshot = readSnapshot(value)
-    if (snapshot === undefined || now - snapshot.at > maxAgeMs) stale.push(key)
+    if (snapshot === undefined || (now - snapshot.at > maxAgeMs && !open.has(key))) stale.push(key)
     else live.push({ key, at: snapshot.at })
   }
   live.sort((a, b) => b.at - a.at)

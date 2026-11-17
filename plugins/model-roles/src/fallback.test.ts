@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { contextFallback, contextNote, contextSwitchNote } from "./fallback.ts"
+import { contextFallback, contextNote, contextPendingSwitchNote, contextSwitchNote } from "./fallback.ts"
 
 const a = { providerID: "p", id: "a" }
 const b = { providerID: "p", id: "b" }
@@ -53,6 +53,14 @@ describe("contextSwitchNote", () => {
   test("a session that was not switched names the larger candidate", () => {
     expect(contextSwitchNote({ failed: a, limit: 200_000, target: c, targetLimit: 1_000_000, tier: "strong" })).toBe(
       "context too long for p/a (200000 tokens); tier strong has a larger-context candidate, q/c (1000000 tokens). Switch to it or compact the session.",
+    )
+  })
+})
+
+describe("contextPendingSwitchNote", () => {
+  test("says the move happens when the failure is reported, not that it happened", () => {
+    expect(contextPendingSwitchNote({ failed: a, limit: 200_000, target: c, targetLimit: 1_000_000 })).toBe(
+      "context too long for p/a (200000 tokens); model-roles moves it to q/c (1000000 tokens) when its failure is reported.",
     )
   })
 })

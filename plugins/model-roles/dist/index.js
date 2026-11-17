@@ -545,6 +545,9 @@ function contextSwitchNote(facts) {
   const where = facts.tier === undefined ? "its tier" : `tier ${facts.tier}`;
   return `${head}; ${where} has a larger-context candidate, ${target}. Switch to it or compact the session.`;
 }
+function contextPendingSwitchNote(facts) {
+  return `context too long for ${label(facts.failed)} (${tokens(facts.limit)}); model-roles moves it to ${label(facts.target)} (${tokens(facts.targetLimit)}) when its failure is reported.`;
+}
 function pinnedContextNote(failed, limit) {
   return `context too long for ${label(failed)} (${tokens(limit)}); ${label(failed)} was chosen explicitly, so model-roles does not switch it. Compact the session, or spawn with a larger-context model.`;
 }
@@ -3976,6 +3979,10 @@ function claimToolContextNotice(state, sessionID, now) {
   state.contextNotices.set(`${sessionID}\x00tool-error`, now);
   return true;
 }
+function toolContextNoticeLive(state, sessionID, now) {
+  const at = state.contextNotices.get(`${sessionID}\x00tool-error`);
+  return at !== undefined && now - at < NOTICE_DEDUPE_MS;
+}
 var stoppedKey = (report) => report.subagent?.sessionID ?? `${report.notifyTo}\x00${report.subagent?.agent ?? ""}`;
 var stoppedLine = (stopped, provider, kind, first) => {
   const who = stopped.agent === undefined ? "A subagent" : `Subagent '${stopped.agent}'`;
@@ -5240,12 +5247,12 @@ function unavailableReason(model, available) {
     return `the model has no variant '${model.variant}'`;
   return;
 }
-function staleSnapshots(entries, now, limit = SNAPSHOT_LIMIT, maxAgeMs = SNAPSHOT_MAX_AGE_MS) {
+function staleSnapshots(entries, now, limit = SNAPSHOT_LIMIT, maxAgeMs = SNAPSHOT_MAX_AGE_MS, open = new Set) {
   const stale = [];
   const live = [];
   for (const { key, value } of entries) {
     const snapshot = readSnapshot(value);
-    if (snapshot === undefined || now - snapshot.at > maxAgeMs)
+    if (snapshot === undefined || now - snapshot.at > maxAgeMs && !open.has(key))
       stale.push(key);
     else
       live.push({ key, at: snapshot.at });
@@ -5613,7 +5620,18 @@ ${refs.size}`;
         entries.push(...page.entries);
         after = page.next;
       } while (after !== undefined);
-      for (const key of staleSnapshots(entries, Date.now()))
+      const open = new Set;
+      let seen;
+      do {
+        const page = await ctx.storage.scan({ prefix: OUTCOME_KEY_PREFIX, ...seen === undefined ? {} : { after: seen } });
+        for (const entry of page.entries) {
+          const record = readOutcome(entry.value);
+          if (record !== undefined && record.outcome === undefined)
+            open.add(`${SPAWN_MODEL_KEY_PREFIX}${entry.key.slice(OUTCOME_KEY_PREFIX.length)}`);
+        }
+        seen = page.next;
+      } while (seen !== undefined);
+      for (const key of staleSnapshots(entries, Date.now(), SNAPSHOT_LIMIT, SNAPSHOT_MAX_AGE_MS, open))
         await ctx.storage.remove(key);
     } catch {}
     const outcomes = createLedgerStore(ctx.storage, { warn });
@@ -5779,10 +5797,11 @@ ${refs.size}`;
       if (!claimContextNotice(noticeState, key, sessionID === undefined ? undefined : executionOf.get(sessionID), Date.now()))
         return;
       const { role, tier, limits, limit, target, chosen } = await contextTarget(overflow);
+      const say = (text) => sessionID !== undefined && toolContextNoticeLive(noticeState, sessionID, Date.now()) ? undefined : notify(notifyTo, text, "context-length");
       if (chosen)
-        return notify(notifyTo, pinnedContextNote(failed, limit), "context-length");
+        return say(pinnedContextNote(failed, limit));
       if (target === undefined)
-        return notify(notifyTo, contextNote(failed, limit, tier), "context-length");
+        return say(contextNote(failed, limit, tier));
       let resumable;
       if (overflow.isChild && sessionID !== undefined) {
         try {
@@ -5802,14 +5821,14 @@ ${refs.size}`;
           });
         } catch {}
       }
-      await notify(notifyTo, contextSwitchNote({ failed, limit, target, targetLimit: limits.get(healthKey(target)), tier, resumable }), "context-length");
+      await say(contextSwitchNote({ failed, limit, target, targetLimit: limits.get(healthKey(target)), tier, resumable }));
     };
     const onContextOverflowToolError = async (overflow) => {
       const { sessionID, notifyTo, failed } = overflow;
       if (!claimToolContextNotice(noticeState, sessionID ?? `${notifyTo}\x00${overflow.agent ?? ""}`, Date.now()))
         return;
       const { tier, limits, limit, target, chosen } = await contextTarget(overflow);
-      const text = chosen ? pinnedContextNote(failed, limit) : target === undefined ? contextNote(failed, limit, tier) : contextSwitchNote({ failed, limit, target, targetLimit: limits.get(healthKey(target)), tier });
+      const text = chosen ? pinnedContextNote(failed, limit) : target === undefined ? contextNote(failed, limit, tier) : contextPendingSwitchNote({ failed, limit, target, targetLimit: limits.get(healthKey(target)) });
       await notify(notifyTo, text, "context-length");
     };
     const contextTier = (role, failed) => role !== undefined && Object.hasOwn(options.roles, role) ? role : rolesListing(options, failed)[0];
@@ -7419,6 +7438,7 @@ export {
   configuredModels,
   contextFallback,
   contextNote,
+  contextPendingSwitchNote,
   contextSwitchNote,
   cooldownFor,
   costLabel,

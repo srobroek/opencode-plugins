@@ -821,26 +821,42 @@ describe("runtime fallback", () => {
     await cleanup()
   })
 
+  const resumeNote =
+    "context too long for amazon-bedrock/claude-sonnet#high (200000 tokens); the session now runs anthropic/claude-haiku (1000000 tokens). Resume it with sessionID c to continue on the larger context."
+  const pendingNote =
+    "context too long for amazon-bedrock/claude-sonnet#high (200000 tokens); model-roles moves it to anthropic/claude-haiku (1000000 tokens) when its failure is reported."
+  const overflowSteps = (host: ReturnType<typeof createHost>) => ({
+    event: async () => {
+      host.emit(failed("c", tooLong))
+      await settle()
+    },
+    tool: async () => {
+      await host.spawnFailed({ agent: "general", prompt: "x" }, `Subagent failed (sessionID: c): ${tooLong.message}`, "r")
+      await settle()
+    },
+  })
+
   test.each([
-    ["the failure event first", ["event", "tool"], 1],
-    ["the tool error first", ["tool", "event"], 2],
-  ])("a child's overflow is switched by its failure event only, with %s", async (_name, order, noteCount) => {
+    ["the failure event first", ["event", "tool"], resumeNote],
+    ["the tool error first", ["tool", "event"], pendingNote],
+  ])("a child's overflow is switched by its failure event only and the parent hears once, with %s", async (_name, order, text) => {
     const host = childHost(windows(200_000, 1_000_000), fallbackOptions)
     const cleanup = await setup(host)
-    const steps = {
-      event: async () => {
-        host.emit(failed("c", tooLong))
-        await settle()
-      },
-      tool: async () => {
-        await host.spawnFailed({ agent: "general", prompt: "x" }, `Subagent failed (sessionID: c): ${tooLong.message}`, "r")
-        await settle()
-      },
-    }
+    const steps = overflowSteps(host)
     for (const step of order as Array<"event" | "tool">) await steps[step]()
     expect(methods(host, "switchModel").map((c) => c.input)).toEqual([{ sessionID: "c", model: haiku }])
-    expect(notes(host).map((n) => n.sessionID)).toEqual(Array(noteCount).fill("r"))
-    expect(notes(host).at(-1)?.text).toContain("Resume it with sessionID c")
+    expect(notes(host).map((n) => [n.sessionID, n.text])).toEqual([["r", text]])
+    host.close()
+    await cleanup()
+  })
+
+  test("a tool error whose failure event never arrives switches nothing and does not claim a switch", async () => {
+    const host = childHost(windows(200_000, 1_000_000), fallbackOptions)
+    const cleanup = await setup(host)
+    await overflowSteps(host).tool()
+    expect(methods(host, "switchModel")).toHaveLength(0)
+    expect(notes(host).map((n) => n.text)).toEqual([pendingNote])
+    expect(notes(host)[0]?.text).not.toContain("now runs")
     host.close()
     await cleanup()
   })
@@ -2928,18 +2944,17 @@ describe("a child keeps its resolved model", () => {
     }
 
     test.each([
-      ["failure event", [event, tool], 1],
-      ["tool error", [tool, event], 2],
-    ] as const)("a resumed child with no pending spawn routes by its stored tier when the %s comes first", async (_name, order, noteCount) => {
+      ["failure event", [event, tool], "the session now runs anthropic/claude-haiku (1000000 tokens)"],
+      ["tool error", [tool, event], "model-roles moves it to anthropic/claude-haiku (1000000 tokens) when its failure is reported"],
+    ] as const)("a resumed child with no pending spawn routes by its stored tier when the %s comes first", async (_name, order, wording) => {
       const { again, cleanupAgain } = await spawnThenReload(overlapping, limited)
       again.sessions.set("c", { id: "c", parentID: "r", agent: "plain", model: sonnet })
       for (const step of order) await step(again)
-      // Only the failure event switches; the tool error before it just names the candidate of the child's tier.
+      // Only the failure event switches; the parent hears once, and a tool error first only names the candidate of the child's tier.
       expect(methods(again, "switchModel").map((c) => c.input)).toEqual([{ sessionID: "c", model: haiku }])
       const notes = methods(again, "synthetic").map((c) => c.input as { sessionID: string; text: string })
-      expect(notes.map((n) => n.sessionID)).toEqual(Array(noteCount).fill("r"))
-      expect(notes.at(-1)?.text).toContain("the session now runs anthropic/claude-haiku (1000000 tokens)")
-      if (noteCount === 2) expect(notes[0]?.text).toContain("tier task has a larger-context candidate, anthropic/claude-haiku (1000000 tokens)")
+      expect(notes.map((n) => n.sessionID)).toEqual(["r"])
+      expect(notes[0]?.text).toContain(wording)
       again.close()
       await cleanupAgain()
     })
@@ -3603,6 +3618,21 @@ describe("a child keeps its resolved model", () => {
     expect(again.storage.has("spawn-role:c")).toBe(false)
     again.close()
     await cleanupAgain()
+  })
+
+  test("a restart keeps the snapshot of a child that never ended and prunes ended and old ones", async () => {
+    const host = createHost({ agents: [{ id: "plain" }], models, options: first })
+    const old = Date.now() - 31 * 24 * 60 * 60 * 1000
+    const entry = { model: sonnetHigh, configRevision: "x", at: old }
+    const outcome = (extra: Record<string, unknown>) => ({ at: old, agent: "plain", model: sonnetHigh, parentID: "r", resumes: 0, steps: 0, ms: 0, ...extra })
+    for (const id of ["open", "ended", "orphan"]) host.storage.set(`spawn-model:${id}`, entry)
+    host.storage.set("outcome:open", outcome({}))
+    host.storage.set("outcome:ended", outcome({ outcome: "succeeded" }))
+    const cleanup = await setup(host)
+    const kept = [...host.storage.keys()].filter((key) => key.startsWith("spawn-model:"))
+    expect(kept).toEqual(["spawn-model:open"])
+    host.close()
+    await cleanup()
   })
 
   test("setup prunes expired and surplus snapshots", async () => {

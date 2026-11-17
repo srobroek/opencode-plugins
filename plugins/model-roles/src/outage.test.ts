@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import type { FailureClass } from "./health.ts"
-import { claimContextNotice, claimToolContextNotice, decideFailureNotice, decideRecovery, type FailureReport, forgetSession, MAX_STOPPED, MAX_TRACKED, newNoticeState, type RequestLog, recordRequest, settleRequest } from "./outage.ts"
+import { claimContextNotice, claimToolContextNotice, decideFailureNotice, decideRecovery, type FailureReport, forgetSession, MAX_STOPPED, MAX_TRACKED, newNoticeState, type RequestLog, recordRequest, settleRequest, toolContextNoticeLive } from "./outage.ts"
 import type { ModelRef } from "./resolve.ts"
 
 const bedrock = (id: string): ModelRef => ({ providerID: "amazon-bedrock", id })
@@ -174,6 +174,10 @@ describe("model failure", () => {
     const state = newNoticeState()
     expect(claimToolContextNotice(state, "c1", 0)).toBe(true)
     expect(claimToolContextNotice(state, "c1", 1_000)).toBe(false)
+    // The event path sees the tool note and stays quiet; an event-only session has none.
+    expect(toolContextNoticeLive(state, "c1", 1_500)).toBe(true)
+    expect(toolContextNoticeLive(state, "c9", 1_500)).toBe(false)
+    expect(toolContextNoticeLive(state, "c1", 61_000)).toBe(false)
     // The failure event of the execution is still its own claim.
     expect(claimContextNotice(state, "c1", "e1", 2_000)).toBe(true)
     // A live event notice silences the tool error of another child session's late report.
