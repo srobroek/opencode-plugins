@@ -654,3 +654,37 @@ describe("skills", () => {
     expect(t.fake.active()).toBe(0)
   })
 })
+
+describe("shared state from an older instance", () => {
+  const KEY = Symbol.for("srobroek.beads.lifecycle")
+  const holder = globalThis as Record<symbol, unknown>
+  afterEach(() => {
+    delete holder[KEY]
+  })
+
+  test("an object without idle and held is backfilled and the idle hook does not throw", async () => {
+    const old = { events: new Set(), deferred: new Set(), foreground: new Map(), releases: new Map(), reported: new WeakSet() }
+    holder[KEY] = old
+    const t = await start([{ id: "ses_old" }])
+    await t.fake.fire.session("experimental.idle", { sessionID: "ses_old", background: [] } as never)
+    expect(holder[KEY]).toBe(old)
+    expect((old as Record<string, unknown>).idle).toBeDefined()
+    expect((old as Record<string, unknown>).held).toBeInstanceOf(Map)
+    await t.cleanup()
+  })
+
+  test("a throw inside the idle hook is logged and swallowed", async () => {
+    holder[KEY] = { idle: { record: () => { throw new Error("boom") } } }
+    const errors: unknown[][] = []
+    const original = console.error
+    console.error = (...args: unknown[]) => void errors.push(args)
+    try {
+      const t = await start([{ id: "ses_x" }])
+      await t.fake.fire.session("experimental.idle", { sessionID: "ses_x", background: [] } as never)
+      await t.cleanup()
+    } finally {
+      console.error = original
+    }
+    expect(errors.some((args) => String(args[0]).includes("idle hook failed"))).toBe(true)
+  })
+})

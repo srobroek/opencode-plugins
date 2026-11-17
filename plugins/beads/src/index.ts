@@ -371,9 +371,20 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
   const generate = await ctx.session.hook("generate", primeHook)
 
   const promptHook = await ctx.session.hook("prompt", async (event) => {
-    await lifecycle.prompt(event.sessionID, event.metadata)
+    try {
+      await lifecycle.prompt(event.sessionID, event.metadata)
+    } catch (error) {
+      console.error("srobroek.beads: prompt hook failed", error)
+    }
   })
-  const idleHook = await ctx.session.hook("experimental.idle", (event) => lifecycle.idle(event))
+  const idleHook = await ctx.session.hook("experimental.idle", (event) => {
+    // A throw here would kill the session that went idle.
+    try {
+      lifecycle.idle(event)
+    } catch (error) {
+      console.error("srobroek.beads: idle hook failed", error)
+    }
+  })
 
   const skills = on("beads-skills")
     ? await registerSkills(
