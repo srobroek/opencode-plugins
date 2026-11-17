@@ -1,9 +1,12 @@
 import { describe, expect, test } from "bun:test"
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { Error as ToolError } from "@opencode/plugin/promise/tool"
 import { createFakeContext, type FakeContext } from "@srobroek/opencode-lib/testing"
 import type { RunResult } from "./git.ts"
 import { createPlugin } from "./index.ts"
-import { type Lane, laneKey, MERGE_TOOL, SUBAGENT_PREAMBLE, UNBORN_NOTE } from "./lane.ts"
+import { goneKey, type Lane, laneKey, MERGE_TOOL, pendingKey, SUBAGENT_PREAMBLE, UNBORN_NOTE } from "./lane.ts"
 
 const BASE = "0123456789abcdef0123456789abcdef01234567"
 const PARENT = "ses_parent"
@@ -36,6 +39,7 @@ function fakeRun(repo: Repo, log: string[][]) {
     if (argv[0] === "wt") return repo.merge
     const [, , dir = "", ...args] = argv
     const cmd = args.join(" ")
+    if (cmd === "rev-parse --git-common-dir") return ok(".git\n")
     if (cmd === "rev-parse --is-inside-work-tree") return repo.git ? ok("true\n") : fail
     if (repo.unborn && cmd.startsWith("rev-parse --verify")) return fail
     if (repo.unborn && cmd === "symbolic-ref --quiet HEAD") return ok("refs/heads/main\n")
@@ -83,6 +87,9 @@ async function start(
     tools?: Array<Record<string, unknown> & { name: string }>
     exists?: (path: string) => Promise<boolean>
     now?: () => number
+    sweepStartMs?: number
+    /** Make `worktree.create` return this real directory (with a .git directory) instead of a fake path. */
+    realWorktree?: string
   } = {},
 ): Promise<Setup> {
   const fake = createFakeContext({
@@ -147,7 +154,7 @@ async function start(
     worktree: {
       create: async (input: Record<string, unknown>) => {
         worktree.calls.push({ method: "create", input })
-        const directory = `/wt/${input.name}`
+        const directory = options.realWorktree ?? `/wt/${input.name}`
         if (options.strategy !== "git") repo.branch[directory] = String(input.name)
         return { directory }
       },
@@ -165,7 +172,7 @@ async function start(
   const plugin = createPlugin({ run: async (argv) => {
     if (argv[0] === "wt") expect(fake.sessions.get("ses_fake1")?.location).toEqual({ directory: REPO })
     return fakeRun(repo, log)(argv)
-  }, suffix: () => "abc123", lookupMs: 20, directoryExists: options.exists ?? (async () => true), ...(options.now ? { now: options.now } : {}), reserveMs: 60_000 })
+  }, suffix: () => "abc123", lookupMs: 20, directoryExists: options.exists ?? (async () => true), ...(options.now ? { now: options.now } : {}), reserveMs: 60_000, sweepStartMs: options.sweepStartMs ?? 3_600_000 })
   const cleanup = (await plugin.setup(fake.context)) as () => Promise<void>
   return { fake, repo, log, worktree, cleanup }
 }
@@ -1083,5 +1090,97 @@ describe(MERGE_TOOL, () => {
     const none = await run(setup, { sessionID: "ses_fake1", method: "none" })
     expect(none.content).toContain("Commits ahead of base: 1")
     expect(setup.log.some((argv) => argv[0] === "wt")).toBe(false)
+  })
+})
+
+describe("lane ownership and cleanup wiring", () => {
+  const scratch = () => realpathSync(mkdtempSync(join(tmpdir(), "lane-own-")))
+
+  test("a lane records where its worktree is and which repository owns it, and a pending record exists only while the worktree is being created", async () => {
+    const dir = scratch()
+    try {
+      const root = join(dir, "worktrees")
+      const worktree = join(root, "lane")
+      mkdirSync(join(worktree, ".git"), { recursive: true })
+      const setup = await start({ realWorktree: worktree })
+      const create = setup.fake.context.worktree.create.bind(setup.fake.context.worktree)
+      let pendingDuringCreate: unknown
+      Object.assign(setup.fake.context.worktree, {
+        create: async (input: never) => {
+          pendingDuringCreate = setup.fake.storage.get(pendingKey("subagent-write-hello-abc123"))
+          return create(input)
+        },
+      })
+      await spawn(setup, { agent: "coder" })
+      expect(lane(setup.fake)?.ownership).toMatchObject({
+        physical: worktree,
+        root,
+        commonDir: join(worktree, ".git"),
+        strategy: "host",
+      })
+      expect(pendingDuringCreate).toMatchObject({ name: "subagent-write-hello-abc123", parent: PARENT })
+      expect(setup.fake.storage.has(pendingKey("subagent-write-hello-abc123"))).toBe(false)
+      await setup.cleanup()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("a lane whose worktree cannot be read gets no ownership record, so cleanup never touches it", async () => {
+    const setup = await start()
+    await spawn(setup, { agent: "coder" })
+    expect(lane(setup.fake)).toBeDefined()
+    expect(lane(setup.fake)?.ownership).toBeUndefined()
+    await setup.cleanup()
+  })
+
+  test("a failed worktree creation leaves no pending record", async () => {
+    const setup = await start()
+    Object.assign(setup.fake.context.worktree, {
+      create: async () => {
+        throw new Error("no space")
+      },
+    })
+    await expect(spawn(setup, { agent: "coder" })).rejects.toThrow(/no space/)
+    expect([...setup.fake.storage.keys()].filter((key) => key.startsWith("pending/"))).toEqual([])
+    await setup.cleanup()
+  })
+
+  test.each(["session.deleted", "session.archived"])("%s records the session as gone", async (type) => {
+    const setup = await start()
+    setup.fake.emit({ type, data: { sessionID: "ses_dead" } })
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    expect(setup.fake.storage.get(goneKey("ses_dead"))).toBeDefined()
+    await setup.cleanup()
+  })
+
+  test("the first sweep runs after the start delay and clears a stale pending record", async () => {
+    const setup = await start({ sweepStartMs: 10 })
+    setup.fake.storage.set(pendingKey("crashed"), { name: "crashed", parent: PARENT, projectID: "prj", createdAt: 0 })
+    await new Promise((resolve) => setTimeout(resolve, 80))
+    expect(setup.fake.storage.has(pendingKey("crashed"))).toBe(false)
+    await setup.cleanup()
+  })
+
+  test.each(["delivery_land", "delivery_cleanup"])("%s triggers a sweep", async (tool) => {
+    const setup = await start()
+    setup.fake.storage.set(pendingKey("crashed"), { name: "crashed", parent: PARENT, projectID: "prj", createdAt: 0 })
+    await setup.fake.fire.tool("execute.after", { tool, sessionID: PARENT, agent: "build", messageID: "m", id: "c", input: {}, status: "completed", result: { content: "ok" } })
+    await setup.cleanup()
+    expect(setup.fake.storage.has(pendingKey("crashed"))).toBe(false)
+  })
+
+  test("a tool error whose metadata still says running releases the worktree for the next writer", async () => {
+    const setup = await start()
+    const first = () => spawn(setup, { agent: "pinned", worktree: "feat" })
+    await first()
+    await setup.fake.fire.tool("execute.after", {
+      ...completed("ses_fake1"),
+      status: "error" as const,
+      error: new ToolError({ message: "boom", metadata: { sessionID: "ses_fake1", status: "running" } }),
+    } as never)
+    const next = await setup.fake.fire.tool("execute.before", { ...call({ agent: "pinned", worktree: "feat" }), id: "call_2" })
+    expect((next.input as { sessionID?: string }).sessionID).toBe("ses_fake2")
+    await setup.cleanup()
   })
 })

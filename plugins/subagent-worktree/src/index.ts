@@ -1,10 +1,12 @@
 import { realpath, stat } from "node:fs/promises"
 import { homedir } from "node:os"
-import { join, resolve } from "node:path"
+import { dirname, join, resolve } from "node:path"
 import { Plugin } from "@opencode/plugin"
 import type { Context } from "@opencode/plugin/promise/plugin"
 import { type Result, Error as ToolError } from "@opencode/plugin/promise/tool"
+import { physical } from "@srobroek/opencode-lib/checkout-marker"
 import { toJsonSchema, withOptionalString } from "@srobroek/opencode-lib/tool-schema"
+import { type Cleanup, createCleanup, diskFreeBytes, type Presence } from "./cleanup.ts"
 import { createGit, type Git, type Runner, spawnRunner } from "./git.ts"
 import {
   annotation,
@@ -16,6 +18,7 @@ import {
   FENCED_REASON,
   findWorktree,
   formatLaneList,
+  goneKey,
   isConflict,
   isRunning,
   LANE_PREFIX,
@@ -26,9 +29,12 @@ import {
   MERGE_TOOL,
   mergeArgs,
   type Options,
+  type Ownership,
+  type Pending,
   parseLane,
   parseModel,
   parseWorktrees,
+  pendingKey,
   planStart,
   RESERVATION_MS,
   type Reservation,
@@ -102,6 +108,10 @@ export type Overrides = {
   directoryExists?: (path: string) => Promise<boolean>
   now?: () => number
   reserveMs?: number
+  /** Milliseconds from setup to the first cleanup sweep, then between sweeps; the host never passes these. */
+  sweepStartMs?: number
+  sweepEveryMs?: number
+  freeBytes?: (path: string) => Promise<number | undefined>
 }
 
 const directoryExists = async (path: string) => {
@@ -139,6 +149,29 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+/** Runs work for one lane at a time; merge, revive, the after hook and cleanup share it. */
+function createLaneLock() {
+  const tails = new Map<string, Promise<unknown>>()
+  return <T>(child: string, work: () => Promise<T>): Promise<T> => {
+    const run = (tails.get(child) ?? Promise.resolve()).then(work, work)
+    const tail = run.then(
+      () => undefined,
+      () => undefined,
+    )
+    tails.set(child, tail)
+    void tail.then(() => {
+      if (tails.get(child) === tail) tails.delete(child)
+    })
+    return run
+  }
+}
+
+/** Tools after which a sweep runs: delivery removes its own worktrees, and lanes merged into the parent branch are ours. */
+export const SWEEP_AFTER_TOOLS: readonly string[] = ["delivery_land", "delivery_cleanup"]
+
+export const SWEEP_START_MS = 30_000
+export const SWEEP_EVERY_MS = 10 * 60_000
+
 export function createLanes(
   ctx: Context,
   options: Options,
@@ -148,6 +181,7 @@ export function createLanes(
   exists = directoryExists,
   now: () => number = Date.now,
   reserveMs = RESERVATION_MS,
+  freeBytes: (path: string) => Promise<number | undefined> = diskFreeBytes,
 ) {
   const load = async (child: string) => parseLane(await ctx.storage.get(laneKey(child)))
   const save = (lane: Lane) => ctx.storage.set(laneKey(lane.child), lane)
@@ -182,6 +216,18 @@ export function createLanes(
     await ctx.worktree.remove({ projectID, directory, force } as never)
   }
 
+  /** Where the worktree really is and which repository owns it, or undefined when that cannot be read: such a lane is never cleaned up. */
+  const ownershipOf = async (directory: string): Promise<Ownership | undefined> => {
+    const real = physical(directory)
+    const common = await git.run(["git", "-C", directory, "rev-parse", "--git-common-dir"])
+    if (real === null || common.code !== 0) return undefined
+    const commonDir = physical(resolve(directory, common.stdout.trim()))
+    return commonDir === null ? undefined : { createdAt: now(), physical: real, root: dirname(real), commonDir, strategy: "host" }
+  }
+
+  /** The lane record (or the removal after a failure) now accounts for the worktree, so its pending record goes. */
+  const settlePending = (name: string) => ctx.storage.remove(pendingKey(name)).catch(() => {})
+
   /** Create a worktree from `from` (the caller's checkout, or the worktree it named); the caller cleans it up if a later step fails. */
   const provision = async (parent: Session, description: string, from = parent.location.directory, named = false) => {
     const parentDir = from
@@ -191,7 +237,16 @@ export function createLanes(
     const target =
       ref !== "HEAD" && (await git.isLocalBranch(parentDir, ref)) ? ref : await git.branch(parentDir)
     const name = worktreeName(description, suffix())
-    const created = await ctx.worktree.create({ projectID: parent.projectID, name, branch: base } as never)
+    // Written before the worktree exists, so a crash between creating it and saving its lane leaves a trace for the sweep.
+    const pending: Pending = { name, parent: parent.id, projectID: parent.projectID, createdAt: now() }
+    await ctx.storage.set(pendingKey(name), pending)
+    let created: unknown
+    try {
+      created = await ctx.worktree.create({ projectID: parent.projectID, name, branch: base } as never)
+    } catch (error) {
+      await ctx.storage.remove(pendingKey(name)).catch(() => {})
+      throw error
+    }
     const directory = (created as { directory: string }).directory
     try {
       let branch = await git.branch(directory)
@@ -200,9 +255,12 @@ export function createLanes(
         if (!(await git.createBranch(directory, name))) throw new Error(`cannot create branch ${name} in ${directory}`)
         branch = name
       }
-      return { directory, branch, base, parentDir, ...(target ? { target } : {}) }
+      const ownership = await ownershipOf(directory)
+      const worktree = { directory, branch, base, parentDir, ...(target ? { target } : {}), ...(ownership ? { ownership } : {}) }
+      return { worktree, pending: name }
     } catch (error) {
       await removeWorktree(parent.projectID, directory, true).catch(() => {})
+      await ctx.storage.remove(pendingKey(name)).catch(() => {})
       throw error
     }
   }
@@ -284,7 +342,15 @@ export function createLanes(
   /** Skip notes by tool call id, appended to that call's result by `after`. */
   const notes = new Map<string, string>()
 
-  /** Worktrees reserved by an in-flight writer spawn, by canonical path; see `Reservation`. */
+  /**
+   * Worktrees reserved by an in-flight writer spawn, by canonical path; see `Reservation`.
+   *
+   * Known limits of the single-writer guard (the threat model is agent mistakes, not adversaries):
+   * it coordinates spawns inside this plugin instance only, so spawns from separate OpenCode server
+   * instances are not coordinated; a reservation lasts at most `reserveMs`; "live" is judged from
+   * `time.busy` against `time.idle`, so a session the host has not started yet is invisible until
+   * its reservation shows it; and a lookup that fails or times out allows the spawn with a warning.
+   */
   const reservations = new Map<string, Reservation>()
   let sequence = 0
 
@@ -345,7 +411,7 @@ export function createLanes(
         notes.set(event.id, note)
         return
       }
-      return revive(event, input.sessionID, input.prompt)
+      return withLane(input.sessionID, () => revive(event, input.sessionID as string, input.prompt))
     }
 
     const parent = await getSession(event.sessionID)
@@ -438,7 +504,7 @@ export function createLanes(
       notes.set(event.id, UNBORN_NOTE)
       return
     }
-    const worktree = await provision(parent, input.description || input.agent, plan.from, input.worktree !== undefined)
+    const { worktree, pending } = await provision(parent, input.description || input.agent, plan.from, input.worktree !== undefined)
     let child: string | undefined
     try {
       child = await createChild(event, input, agent, parent)
@@ -452,10 +518,12 @@ export function createLanes(
         state: "active",
       }
       await save(lane)
+      await settlePending(pending)
       event.input = { ...(event.input as object), sessionID: child, prompt: rewritePrompt(input.prompt, lane, true) }
     } catch (error) {
       if (child) await ctx.session.remove({ sessionID: child } as never).catch(() => {})
       await removeWorktree(parent.projectID, worktree.directory, true).catch(() => {})
+      await settlePending(pending)
       throw new Error(`subagent-worktree: ${errorMessage(error)}`)
     }
   }
@@ -485,16 +553,19 @@ export function createLanes(
     if (session.parentID !== event.sessionID) return
     const agent = (event.input as { agent?: string }).agent ?? ""
     await assertSubagent(event, (await getAgent(agent, parent.location.directory))?.id ?? agent)
-    const worktree = await provision(parent, lane.title ?? "task")
+    const { worktree, pending } = await provision(parent, lane.title ?? "task")
     try {
       await ctx.session.move({ sessionID: child, directory: worktree.directory } as never)
       const next: Lane = { ...lane, ...worktree, state: "active" }
       if (!worktree.target) delete next.target
+      if (!worktree.ownership) delete next.ownership
       await save(next)
+      await settlePending(pending)
       event.input = { ...(event.input as object), prompt: rewritePrompt(prompt, next, false) }
     } catch (error) {
       await moveHome(lane)
       await removeWorktree(parent.projectID, worktree.directory, true).catch(() => {})
+      await settlePending(pending)
       throw new Error(`subagent-worktree: ${errorMessage(error)}`)
     }
   }
@@ -523,6 +594,12 @@ export function createLanes(
       | { status: "error"; error: InstanceType<typeof ToolError> }
     ),
   ) => {
+    if (SWEEP_AFTER_TOOLS.includes(event.tool)) {
+      // Delivery removes the worktrees its receipt names; the sweep skips those and cleans lanes merged some other way.
+      const text = event.status === "completed" ? JSON.stringify(event.result.content ?? "") : event.error.message
+      track(cleanup.sweep({ skip: [text] }))
+      return
+    }
     if (event.tool !== SUBAGENT_TOOL) return
     const reported = (event.status === "completed" ? event.result.metadata : event.error.metadata) as { status?: unknown } | undefined
     if (event.id !== undefined) {
@@ -551,6 +628,17 @@ export function createLanes(
     const child =
       typeof metadata.sessionID === "string" ? metadata.sessionID : readSubagentInput(event.input)?.sessionID
     if (!child) return
+    return withLane(child, () => settleLane(event, metadata, child))
+  }
+
+  const settleLane = async (
+    event: { input: unknown } & (
+      | { status: "completed"; result: Result }
+      | { status: "error"; error: InstanceType<typeof ToolError> }
+    ),
+    metadata: Record<string, unknown>,
+    child: string,
+  ) => {
     let lane = await load(child)
     if (lane?.state !== "active") return
 
@@ -597,6 +685,97 @@ export function createLanes(
     } while (after !== undefined)
     return found
   }
+
+  const withLane = createLaneLock()
+  const detached = new Set<Promise<unknown>>()
+  const track = (work: Promise<unknown>) => {
+    const guarded = work.catch((error) => console.error("srobroek.subagent-worktree: cleanup failed", error))
+    detached.add(guarded)
+    void guarded.finally(() => detached.delete(guarded))
+  }
+
+  /** How a session stands, from deletion records and `session.get`; a failed or slow lookup is unknown, never gone. */
+  const presence = async (sessionID: string): Promise<{ presence: Presence; lastActivity?: number }> => {
+    if ((await ctx.storage.get(goneKey(sessionID))) !== undefined) return { presence: "gone" }
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<typeof TIMED_OUT>((done) => {
+      timer = setTimeout(() => done(TIMED_OUT), lookupMs)
+    })
+    try {
+      const found = await Promise.race([ctx.session.get({ sessionID } as never).catch(() => TIMED_OUT), timeout])
+      if (found === TIMED_OUT) return { presence: "unknown" }
+      const time = ((found as { time?: Record<string, unknown> }).time ?? {}) as Record<string, unknown>
+      if (toMillis(time.archived) !== undefined) return { presence: "gone" }
+      const busy = toMillis(time.busy)
+      const idle = toMillis(time.idle)
+      const stamps = [busy, idle, toMillis(time.updated)].filter((value): value is number => value !== undefined)
+      const lastActivity = stamps.length ? Math.max(...stamps) : undefined
+      const running = isRunning({ ...(busy === undefined ? {} : { busy }), ...(idle === undefined ? {} : { idle }) })
+      return { presence: running ? "running" : "idle", ...(lastActivity === undefined ? {} : { lastActivity }) }
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  const cleanup: Cleanup = createCleanup({
+    run: git.run,
+    now,
+    storage: {
+      get: (key) => ctx.storage.get(key),
+      set: (key, value) => ctx.storage.set(key, value as never),
+      remove: (key) => ctx.storage.remove(key),
+      scan: async (prefix) => {
+        const found: Array<{ key: string; value: unknown }> = []
+        let next: string | undefined
+        do {
+          const page = await ctx.storage.scan({ prefix, ...(next === undefined ? {} : { after: next }) } as never)
+          for (const entry of page.entries) found.push({ key: entry.key, value: entry.value })
+          next = page.next
+        } while (next !== undefined)
+        return found
+      },
+    },
+    lanes: () => scan(),
+    load,
+    save,
+    presence,
+    runningInside: async (lane, directory) => {
+      const sessions = await sessionsIn(lane.projectID, directory)
+      return sessions === undefined ? "unknown" : sessions.some((session) => isRunning(session)) ? "some" : "none"
+    },
+    removeWorktree: async (lane, real) => {
+      await moveHome(lane)
+      try {
+        try {
+          await removeWorktree(lane.projectID, real, false)
+        } catch {
+          const result = await git.run(["git", "-C", lane.parentDir, "worktree", "remove", real])
+          if (result.code !== 0) throw new Error(result.stderr.trim() || "git worktree remove failed")
+        }
+      } catch (error) {
+        // The child went home before removal; put it back where its worktree still is.
+        await ctx.session.move({ sessionID: lane.child, directory: lane.directory } as never).catch(() => {})
+        throw error
+      }
+    },
+    report: async (lane, parent, text) => {
+      if (parent === "running" || parent === "idle") {
+        await ctx.session
+          .synthetic({
+            sessionID: lane.parent,
+            text,
+            delivery: "queue",
+            resume: false,
+            metadata: { source: "srobroek.subagent-worktree", kind: "lane-cleanup" },
+          } as never)
+          .catch((error) => console.warn(`subagent-worktree: could not tell ${lane.parent}: ${errorMessage(error)}\n${text}`))
+      } else console.warn(text)
+    },
+    withLane,
+    freeBytes,
+    lowDiskBytes: options.lowDiskBytes,
+    log: (text) => console.warn(text),
+  })
 
   const alive = (sessionID: string) => liveness(ctx.session.get({ sessionID } as never), lookupMs)
 
@@ -651,7 +830,7 @@ export function createLanes(
     return directory === undefined ? [] : git.localFiles(directory)
   }
 
-  const merge = async (
+  const mergeLane = async (
     input: MergeInput,
     tool: { sessionID: string; agent: string; messageID: string; id: string },
   ): Promise<Result> => {
@@ -728,7 +907,26 @@ export function createLanes(
     }
   }
 
-  return { before, after, merge, load }
+  const merge = (input: MergeInput, tool: Parameters<typeof mergeLane>[1]): Promise<Result> =>
+    input.method !== "list" && input.sessionID
+      ? withLane(input.sessionID, () => mergeLane(input, tool))
+      : mergeLane(input, tool)
+
+  /** Lane events: a child or parent finishing, stopping or disappearing is a reason to look at its lanes. */
+  const handleEvent = async (event: unknown) => {
+    const { type, data } = (event ?? {}) as { type?: unknown; data?: { sessionID?: unknown } }
+    const sessionID = data?.sessionID
+    if (typeof type !== "string" || typeof sessionID !== "string") return
+    const ended = type === "session.deleted" || type === "session.archived"
+    if (!ended && !type.startsWith("session.execution.")) return
+    // Only a deletion or archive record proves a session is gone; a failed lookup does not.
+    if (ended) await ctx.storage.set(goneKey(sessionID), { at: now() })
+    for (const lane of await scan()) {
+      if (lane.state === "active" && lane.ownership && (lane.child === sessionID || lane.parent === sessionID)) await cleanup.clean(lane.child)
+    }
+  }
+
+  return { before, after, merge, load, cleanup, handleEvent, drain: () => Promise.allSettled([...detached]) }
 }
 
 export function createPlugin(overrides: Overrides = {}) {
@@ -737,9 +935,33 @@ export function createPlugin(overrides: Overrides = {}) {
     async setup(ctx) {
       const options = readOptions(ctx.options)
       const git = createGit(overrides.run ?? spawnRunner)
-      const lanes = createLanes(ctx, options, git, overrides.suffix ?? randomSuffix, overrides.lookupMs, overrides.directoryExists, overrides.now, overrides.reserveMs)
+      const lanes = createLanes(ctx, options, git, overrides.suffix ?? randomSuffix, overrides.lookupMs, overrides.directoryExists, overrides.now, overrides.reserveMs, overrides.freeBytes)
+      const abort = new AbortController()
+      const iterator = ctx.event.subscribe({ signal: abort.signal } as never)[Symbol.asyncIterator]()
+      // The loop itself is not awaited on dispose: a pending `next()` may never settle after `return()`.
+      let handling: Promise<unknown> = Promise.resolve()
+      void (async () => {
+        for (;;) {
+          const next = await iterator.next().catch(() => ({ done: true as const, value: undefined }))
+          if (next.done || abort.signal.aborted) return
+          handling = lanes.handleEvent(next.value).catch((error) => console.error("srobroek.subagent-worktree: lane event failed", error))
+          await handling
+        }
+      })()
+      const sweepEvery = overrides.sweepEveryMs ?? SWEEP_EVERY_MS
+      const sweep = () => void lanes.cleanup.sweep().catch((error) => console.error("srobroek.subagent-worktree: sweep failed", error))
+      const first = setTimeout(sweep, overrides.sweepStartMs ?? SWEEP_START_MS)
+      const every = setInterval(sweep, sweepEvery)
+      first.unref?.()
+      every.unref?.()
       const registrations: { dispose: () => Promise<void> }[] = []
       const cleanup = async () => {
+        clearTimeout(first)
+        clearInterval(every)
+        abort.abort()
+        await iterator.return?.()
+        await handling
+        await lanes.drain()
         for (const registration of registrations.reverse()) await registration.dispose()
       }
       try {

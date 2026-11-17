@@ -3,9 +3,132 @@
 // plugins/subagent-worktree/src/index.ts
 import { realpath, stat } from "fs/promises";
 import { homedir } from "os";
-import { join, resolve } from "path";
+import { dirname as dirname3, join as join3, resolve } from "path";
 import { Plugin } from "@opencode/plugin";
 import { Error as ToolError } from "@opencode/plugin/promise/tool";
+
+// plugins/lib/src/checkout-marker.ts
+import { closeSync, constants, fstatSync, lstatSync, openSync, readlinkSync, readSync } from "fs";
+import { dirname, join } from "path";
+var MAX_MARKER_BYTES = 64 * 1024;
+function readBounded(path) {
+  let fd;
+  try {
+    if (!lstatSync(path).isFile())
+      return { kind: "unreadable" };
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const info = fstatSync(fd);
+    if (!info.isFile() || info.size > MAX_MARKER_BYTES)
+      return { kind: "unreadable" };
+    const buffer = Buffer.alloc(info.size);
+    let offset = 0;
+    while (offset < buffer.length) {
+      const read = readSync(fd, buffer, offset, buffer.length - offset, offset);
+      if (read === 0)
+        break;
+      offset += read;
+    }
+    return { kind: "text", text: buffer.toString("utf8", 0, offset) };
+  } catch (error) {
+    return error.code === "ENOENT" ? { kind: "absent" } : { kind: "unreadable" };
+  } finally {
+    if (fd !== undefined)
+      closeSync(fd);
+  }
+}
+var MAX_LINKS = 40;
+function physical(path) {
+  const pending = (path.startsWith("/") ? path : `${process.cwd()}/${path}`).split("/").reverse();
+  let resolved = "";
+  let isDirectory = true;
+  let links = 0;
+  while (pending.length > 0) {
+    const part = pending.pop();
+    if (!isDirectory)
+      return null;
+    if (part === "" || part === ".")
+      continue;
+    if (part === "..") {
+      resolved = resolved.slice(0, resolved.lastIndexOf("/"));
+      continue;
+    }
+    const candidate = `${resolved}/${part}`;
+    try {
+      const stat = lstatSync(candidate);
+      if (!stat.isSymbolicLink()) {
+        resolved = candidate;
+        isDirectory = stat.isDirectory();
+        continue;
+      }
+      if (++links > MAX_LINKS)
+        return null;
+      const target = readlinkSync(candidate);
+      if (target.startsWith("/"))
+        resolved = "";
+      pending.push(...target.split("/").reverse());
+    } catch {
+      return null;
+    }
+  }
+  return resolved === "" ? "/" : resolved;
+}
+function physicalFrom(base, value) {
+  return physical(value.startsWith("/") ? value : `${base}/${value}`);
+}
+function gitFileValue(text) {
+  if (!text.startsWith("gitdir: "))
+    return null;
+  const value = text.slice("gitdir: ".length).replace(/\r?\n$/, "");
+  return value === "" || /[\r\n]/.test(value) ? null : value;
+}
+function commondirValue(text) {
+  const value = text.replace(/\r?\n$/, "");
+  return value === "" || /[\r\n]/.test(value) ? null : value;
+}
+function verifyCheckout(checkout, commonDir) {
+  const entry = join(checkout, ".git");
+  const workTree = checkout;
+  let stat;
+  try {
+    stat = lstatSync(entry);
+  } catch (error) {
+    const code = error.code;
+    return { state: code === "ENOENT" || code === "ENOTDIR" ? "absent" : "unsafe" };
+  }
+  if (stat.isSymbolicLink())
+    return { state: "unsafe" };
+  const pin = (gitDir) => ({ GIT_DIR: gitDir, GIT_WORK_TREE: workTree, GIT_COMMON_DIR: commonDir });
+  if (stat.isDirectory()) {
+    const real = physical(entry);
+    return real === commonDir ? { state: "same", pin: pin(commonDir) } : { state: real === null ? "unsafe" : "foreign" };
+  }
+  if (!stat.isFile())
+    return { state: "unsafe" };
+  const marker = readBounded(entry);
+  if (marker.kind !== "text")
+    return { state: "unsafe" };
+  const named = gitFileValue(marker.text);
+  const gitDir = named === null ? null : physicalFrom(checkout, named);
+  if (gitDir === null)
+    return { state: "unsafe" };
+  let claimed = gitDir;
+  const commondir = readBounded(join(gitDir, "commondir"));
+  if (commondir.kind === "unreadable")
+    return { state: "unsafe" };
+  if (commondir.kind === "text") {
+    const value = commondirValue(commondir.text);
+    const resolved = value === null ? null : physicalFrom(gitDir, value);
+    if (resolved === null)
+      return { state: "unsafe" };
+    claimed = resolved;
+  }
+  if (claimed !== commonDir)
+    return { state: "foreign" };
+  if (gitDir === commonDir)
+    return { state: "same", pin: pin(gitDir) };
+  const worktrees = physical(join(commonDir, "worktrees"));
+  return worktrees !== null && dirname(gitDir) === worktrees ? { state: "same", pin: pin(gitDir) } : { state: "unsafe" };
+}
 
 // plugins/lib/src/tool-schema.ts
 var isRecord = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -63,137 +186,20 @@ function withOptionalString(input, name, description) {
   return struct.mapFields((fields) => ({ ...fields, [name]: field }));
 }
 
-// plugins/lib/src/subprocess.ts
-import { constants } from "os";
-var EXIT_GRACE_MS = 2000;
-var EXIT_POLL_MS = 100;
-function processAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error.code === "EPERM";
-  }
-}
-function killChild(child, group) {
-  if (group) {
-    try {
-      process.kill(-child.pid, "SIGKILL");
-      return;
-    } catch {}
-  }
-  try {
-    child.kill("SIGKILL");
-  } catch {}
-}
-function unref(timer) {
-  timer.unref?.();
-}
-function capture(stream) {
-  if (!(stream instanceof ReadableStream))
-    return { text: Promise.resolve(""), snapshot: () => "", cancel: () => {} };
-  const reader = stream.getReader();
-  const decoder = new TextDecoder;
-  let collected = "";
-  const text = (async () => {
-    try {
-      for (;; ) {
-        const chunk = await reader.read();
-        if (chunk.done)
-          break;
-        collected += decoder.decode(chunk.value, { stream: true });
-      }
-    } catch {}
-    collected += decoder.decode();
-    return collected;
-  })();
-  const cancel = () => {
-    try {
-      reader.cancel().catch(() => {
-        return;
-      });
-    } catch {}
-  };
-  return { text, snapshot: () => collected, cancel };
-}
-function supervise(child, options = {}) {
-  const grace = Math.max(0, options.graceMs ?? EXIT_GRACE_MS);
-  const pollMs = Math.max(1, options.pollMs ?? EXIT_POLL_MS);
-  const alive = options.alive ?? processAlive;
-  const group = options.group ?? false;
-  const { signal, timeoutMs } = options;
-  const out = capture(child.stdout);
-  const err = capture(child.stderr);
-  return new Promise((resolve) => {
-    let ended = null;
-    let exitSeen = false;
-    let settled = false;
-    let goneSince = null;
-    let deadline;
-    let graceTimer;
-    const settle = (run) => {
-      if (settled)
-        return;
-      settled = true;
-      clearTimeout(deadline);
-      clearTimeout(graceTimer);
-      clearInterval(poller);
-      signal?.removeEventListener("abort", onAbort);
-      resolve(run);
-    };
-    const end = (cause) => {
-      if (ended !== null || settled)
-        return;
-      ended = cause;
-      if (cause !== "lost" || group)
-        killChild(child, group);
-      out.cancel();
-      err.cancel();
-      graceTimer = setTimeout(() => settle({ kind: cause, stdout: out.snapshot(), stderr: err.snapshot() }), grace);
-      if (options.unref)
-        unref(graceTimer);
-    };
-    const onAbort = () => end("aborted");
-    const poller = setInterval(() => {
-      if (exitSeen || ended !== null || settled)
-        return;
-      if (alive(child.pid)) {
-        goneSince = null;
-        return;
-      }
-      goneSince ??= Date.now();
-      if (Date.now() - goneSince >= grace)
-        end("lost");
-    }, pollMs);
-    unref(poller);
-    if (timeoutMs !== undefined && timeoutMs > 0 && Number.isFinite(timeoutMs)) {
-      deadline = setTimeout(() => end("timeout"), timeoutMs);
-      if (options.unref)
-        unref(deadline);
-    }
-    signal?.addEventListener("abort", onAbort, { once: true });
-    if (signal?.aborted)
-      onAbort();
-    child.exited.then(() => {
-      exitSeen = true;
-    }, () => {
-      return;
-    });
-    Promise.all([child.exited, out.text, err.text]).then(([exitCode, stdout, stderr]) => {
-      if (ended !== null)
-        settle({ kind: ended, stdout, stderr });
-      else
-        settle({ kind: "exited", exitCode, signalCode: signalName(child.signalCode), stdout, stderr });
-    }, () => end("lost"));
-  });
-}
-function signalName(code) {
-  if (code === null || code === undefined)
-    return null;
-  if (typeof code === "string")
-    return code;
-  return Object.entries(constants.signals).find(([, n]) => n === code)?.[0] ?? String(code);
-}
+// plugins/subagent-worktree/src/cleanup.ts
+import { existsSync, lstatSync as lstatSync2 } from "fs";
+import { rm, statfs } from "fs/promises";
+import { basename, dirname as dirname2, join as join2 } from "path";
+
+// plugins/lib/src/safe-git.ts
+import { devNull } from "os";
+var SAFE_GIT_ARGS = [
+  "-c",
+  "core.fsmonitor=false",
+  "-c",
+  `core.hooksPath=${devNull}`,
+  "--no-optional-locks"
+];
 
 // plugins/lib/src/patterns.ts
 var compiled = new Map;
@@ -223,7 +229,31 @@ var DEFAULT_AGENTS = ["coder", "implementer", "implementer-high", "general"];
 function readOptions(options) {
   const agents = Array.isArray(options?.agents) ? options.agents.filter((agent) => typeof agent === "string" && agent !== "") : DEFAULT_AGENTS;
   const base = typeof options?.base === "string" && options.base.trim() !== "" ? options.base.trim() : "HEAD";
-  return { agents, base };
+  const lowDisk = options?.lowDiskBytes;
+  const lowDiskBytes = typeof lowDisk === "number" && Number.isFinite(lowDisk) && lowDisk > 0 ? Math.floor(lowDisk) : 0;
+  return { agents, base, lowDiskBytes };
+}
+var PENDING_PREFIX = "pending/";
+var GONE_PREFIX = "gone/";
+var LEASE_KEY = "sweep/lease";
+function pendingKey(name) {
+  return `${PENDING_PREFIX}${name}`;
+}
+function goneKey(sessionID) {
+  return `${GONE_PREFIX}${sessionID}`;
+}
+function parseOwnership(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value))
+    return;
+  const own = value;
+  for (const key of ["physical", "root", "commonDir"])
+    if (typeof own[key] !== "string" || own[key] === "")
+      return;
+  if (typeof own.createdAt !== "number" || !Number.isFinite(own.createdAt))
+    return;
+  if (own.strategy !== "host" && own.strategy !== "git")
+    return;
+  return value;
 }
 function laneKey(child) {
   return `${LANE_PREFIX}${child}`;
@@ -242,7 +272,9 @@ function parseLane(value) {
     return;
   if (lane.title !== undefined && typeof lane.title !== "string")
     return;
-  return value;
+  const { ownership, ...rest } = lane;
+  const parsed = ownership === undefined ? undefined : parseOwnership(ownership);
+  return parsed ? { ...rest, ownership: parsed } : rest;
 }
 function readSubagentInput(input) {
   if (input === null || typeof input !== "object" || Array.isArray(input))
@@ -601,6 +633,370 @@ function reservationStatus(reservation, now, token) {
 }
 var FENCED_REASON = "another writer spawn took over this worktree while it waited. Check for a live writer session, then spawn again.";
 
+// plugins/subagent-worktree/src/cleanup.ts
+var GRACE_MS = 30 * 60000;
+var LEASE_MS = 5 * 60000;
+var PENDING_MS = 10 * 60000;
+var BUILD_DIRS = [
+  "target",
+  "node_modules/.cache",
+  ".turbo",
+  ".next/cache",
+  ".pytest_cache",
+  ".mypy_cache",
+  ".ruff_cache",
+  "dist",
+  "build"
+];
+var BUSY_MARKERS = ["rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "BISECT_LOG", "index.lock", "locked"];
+function decideCleanup(facts) {
+  const { git } = facts;
+  if (git === undefined)
+    return { kind: "untouched", reason: "the lane's git state could not be read" };
+  if (facts.owner === "running" || facts.owner === "unknown")
+    return { kind: "untouched", reason: facts.owner === "running" ? "its session is running" : "its session could not be checked" };
+  if (git.busy)
+    return { kind: "keep", reason: "a git operation is in progress or the worktree is locked", freeBuild: false, report: true };
+  const unmergedLocal = git.ahead > 0 && !git.merged && !git.pushed;
+  if (git.dirty || unmergedLocal) {
+    const idle = facts.owner === "gone" || facts.inactiveMs >= facts.graceMs || facts.lowDisk;
+    return {
+      kind: "keep",
+      reason: git.dirty ? "it has uncommitted changes" : "it has commits that are on no remote and not merged",
+      freeBuild: idle,
+      report: true
+    };
+  }
+  if (git.ahead === 0 || git.merged)
+    return { kind: "remove", branch: "delete", reason: git.ahead === 0 ? "it is empty" : "it is merged" };
+  if (facts.parent === "gone")
+    return { kind: "remove", branch: "keep", reason: "it is pushed and its parent is gone" };
+  return { kind: "keep", reason: "it is pushed but not merged and its parent is still alive", freeBuild: false, report: false };
+}
+function parseListed(porcelain) {
+  return porcelain.split(/\n\n+/).map((block) => block.split(`
+`)).filter((lines) => lines.some((line) => line.startsWith("worktree "))).map((lines) => ({
+    path: lines.find((line) => line.startsWith("worktree "))?.slice("worktree ".length) ?? "",
+    locked: lines.some((line) => line === "locked" || line.startsWith("locked "))
+  }));
+}
+var free = async (path) => {
+  try {
+    const stats = await statfs(path);
+    return stats.bavail * stats.bsize;
+  } catch {
+    return;
+  }
+};
+var diskFreeBytes = free;
+function createCleanup(deps) {
+  const holder = `${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+  const graceMs = deps.graceMs ?? GRACE_MS;
+  const gitAt = (gitDir, real, args) => deps.run(["git", ...SAFE_GIT_ARGS, "--git-dir", gitDir, "--work-tree", real, ...args]);
+  const verify = async (lane) => {
+    const own = lane.ownership;
+    if (own === undefined)
+      return { ok: false, reason: "the lane has no ownership record" };
+    const real = physical(lane.directory);
+    if (real === null)
+      return { ok: false, reason: `${lane.directory} does not exist` };
+    if (real !== own.physical)
+      return { ok: false, reason: `${lane.directory} resolves to ${real}, not the recorded ${own.physical}` };
+    if (dirname2(real) !== own.root)
+      return { ok: false, reason: `${real} is not directly under the recorded root ${own.root}` };
+    const verdict = verifyCheckout(real, own.commonDir);
+    if (verdict.state !== "same")
+      return { ok: false, reason: `${real} is not a checkout of the recorded repository (${verdict.state})` };
+    const listed = await deps.run(["git", ...SAFE_GIT_ARGS, "--git-dir", own.commonDir, "worktree", "list", "--porcelain"]);
+    if (listed.code !== 0)
+      return { ok: false, reason: "git worktree list failed" };
+    const entries = parseListed(listed.stdout);
+    const at = entries.findIndex((entry) => physical(entry.path) === real);
+    if (at < 0)
+      return { ok: false, reason: `git does not list ${real}` };
+    if (at === 0)
+      return { ok: false, reason: `${real} is the main worktree` };
+    if (entries[at]?.locked)
+      return { ok: false, reason: `${real} is locked` };
+    return { ok: true, real, gitDir: verdict.pin.GIT_DIR };
+  };
+  const factsOf = async (lane, v) => {
+    const status = await gitAt(v.gitDir, v.real, ["status", "--porcelain", "--untracked-files=all"]);
+    const ahead = await gitAt(v.gitDir, v.real, ["rev-list", "--count", `${lane.base}..HEAD`]);
+    if (status.code !== 0 || ahead.code !== 0)
+      return;
+    let merged = false;
+    if (lane.target !== undefined) {
+      merged = (await gitAt(v.gitDir, v.real, ["merge-base", "--is-ancestor", "HEAD", `refs/heads/${lane.target}`])).code === 0;
+    }
+    const contained = await gitAt(v.gitDir, v.real, ["branch", "-r", "--contains", "HEAD"]);
+    return {
+      dirty: status.stdout.trim() !== "",
+      ahead: Number.parseInt(ahead.stdout.trim(), 10) || 0,
+      merged,
+      pushed: contained.code === 0 && contained.stdout.trim() !== "",
+      busy: BUSY_MARKERS.some((name) => existsSync(join2(v.gitDir, name)))
+    };
+  };
+  const freeBuildDirs = async (v) => {
+    const before = await deps.freeBytes(v.real);
+    for (const rel of BUILD_DIRS) {
+      const target = join2(v.real, rel);
+      try {
+        const stat = lstatSync2(target);
+        if (stat.isSymbolicLink() || !stat.isDirectory() || physical(target) !== target)
+          continue;
+      } catch {
+        continue;
+      }
+      const ignored = await gitAt(v.gitDir, v.real, ["check-ignore", "-q", "--", rel]);
+      const tracked = await gitAt(v.gitDir, v.real, ["ls-files", "--", rel]);
+      if (ignored.code !== 0 || tracked.code !== 0 || tracked.stdout.trim() !== "")
+        continue;
+      await rm(target, { recursive: true, force: true }).catch(() => {});
+    }
+    const after = await deps.freeBytes(v.real);
+    return before !== undefined && after !== undefined ? Math.max(0, after - before) : 0;
+  };
+  const clean = (child) => deps.withLane(child, async () => {
+    const lane = await deps.load(child);
+    if (lane?.state !== "active" || !lane.ownership)
+      return { action: "untouched", reason: "no active lane with an ownership record" };
+    const v = await verify(lane);
+    if (!v.ok) {
+      deps.log(`subagent-worktree: lane ${lane.branch} left alone: ${v.reason}`);
+      return { action: "untouched", reason: v.reason };
+    }
+    const owner = await deps.presence(lane.child);
+    const parent = await deps.presence(lane.parent);
+    if (owner.presence === "running" || owner.presence === "unknown") {
+      return { action: "untouched", reason: owner.presence === "running" ? "its session is running" : "its session could not be checked" };
+    }
+    if (await deps.runningInside(lane, v.real) !== "none")
+      return { action: "untouched", reason: "a live session works inside the worktree" };
+    const room = deps.lowDiskBytes > 0 ? await deps.freeBytes(v.real) : undefined;
+    const lowDisk = room !== undefined && room < deps.lowDiskBytes;
+    const decision = decideCleanup({
+      owner: owner.presence,
+      parent: parent.presence,
+      inactiveMs: owner.lastActivity === undefined ? 0 : Math.max(0, deps.now() - owner.lastActivity),
+      graceMs,
+      lowDisk,
+      git: await factsOf(lane, v)
+    });
+    if (decision.kind === "untouched")
+      return { action: "untouched", reason: decision.reason };
+    if (decision.kind === "remove") {
+      const again = await verify(lane);
+      const facts = again.ok ? await factsOf(lane, again) : undefined;
+      if (!again.ok || again.real !== v.real || facts === undefined || facts.dirty || facts.busy) {
+        return { action: "untouched", reason: "the lane changed while cleanup was deciding" };
+      }
+      try {
+        await deps.removeWorktree(lane, v.real);
+      } catch (error) {
+        deps.log(`subagent-worktree: could not remove ${v.real}: ${error instanceof Error ? error.message : String(error)}`);
+        return { action: "untouched", reason: "the worktree could not be removed" };
+      }
+      if (existsSync(v.real))
+        return { action: "untouched", reason: "the worktree is still there after removal" };
+      await deps.save({ ...lane, state: "removed" });
+      let branchDeleted = false;
+      if (decision.branch === "delete") {
+        branchDeleted = (await deps.run(["git", ...SAFE_GIT_ARGS, "--git-dir", lane.ownership.commonDir, "branch", "--quiet", "-d", lane.branch])).code === 0;
+      }
+      return { action: "removed", reason: decision.reason, branchDeleted };
+    }
+    const freed = decision.freeBuild ? await freeBuildDirs(v) : 0;
+    if (lowDisk && decision.freeBuild)
+      deps.log(`subagent-worktree: low disk space; freed build directories in ${v.real}`);
+    const state = lane.ownership.cleanup ?? {};
+    const finding = `kept: ${decision.reason}`;
+    if (decision.report && state.reported !== finding) {
+      const tail = freed > 0 ? ` Freed ${freed} bytes of build directories.` : "";
+      await deps.report(lane, parent.presence, `subagent-worktree: lane ${lane.branch} at ${lane.directory} was not removed because ${decision.reason}.${tail}`);
+      await deps.save({ ...lane, ownership: { ...lane.ownership, cleanup: { ...state, reported: finding, freedBytes: (state.freedBytes ?? 0) + freed } } });
+    } else if (freed > 0) {
+      await deps.save({ ...lane, ownership: { ...lane.ownership, cleanup: { ...state, freedBytes: (state.freedBytes ?? 0) + freed } } });
+    }
+    return { action: "kept", reason: decision.reason, freedBytes: freed };
+  });
+  const sweepPending = async (lanes) => {
+    for (const { key, value } of await deps.storage.scan(PENDING_PREFIX)) {
+      const pending = value;
+      if (typeof pending?.name !== "string" || typeof pending.createdAt !== "number") {
+        await deps.storage.remove(key);
+        continue;
+      }
+      if (deps.now() - pending.createdAt < PENDING_MS)
+        continue;
+      if (!lanes.some((lane) => basename(lane.directory) === pending.name)) {
+        deps.log(`subagent-worktree: a worktree named ${pending.name} may have been left by a spawn that stopped early; check \`git worktree list\``);
+      }
+      await deps.storage.remove(pendingKey(pending.name));
+    }
+  };
+  let flight;
+  const sweep = (options = {}) => {
+    if (flight)
+      return flight;
+    flight = (async () => {
+      const lease = await deps.storage.get(LEASE_KEY);
+      if (lease?.holder !== undefined && lease.holder !== holder && (lease.until ?? 0) > deps.now()) {
+        return { swept: 0, skipped: "another server is sweeping" };
+      }
+      await deps.storage.set(LEASE_KEY, { holder, until: deps.now() + LEASE_MS });
+      try {
+        const lanes = await deps.lanes();
+        await sweepPending(lanes);
+        const named = options.skip ?? [];
+        const todo = lanes.filter((lane) => lane.state === "active" && lane.ownership && !named.some((text) => text.includes(lane.directory)));
+        for (const lane of todo)
+          await clean(lane.child);
+        return { swept: todo.length };
+      } finally {
+        await deps.storage.remove(LEASE_KEY);
+      }
+    })().finally(() => {
+      flight = undefined;
+    });
+    return flight;
+  };
+  return { clean, sweep, verify };
+}
+
+// plugins/lib/src/subprocess.ts
+import { constants as constants2 } from "os";
+var EXIT_GRACE_MS = 2000;
+var EXIT_POLL_MS = 100;
+function processAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+}
+function killChild(child, group) {
+  if (group) {
+    try {
+      process.kill(-child.pid, "SIGKILL");
+      return;
+    } catch {}
+  }
+  try {
+    child.kill("SIGKILL");
+  } catch {}
+}
+function unref(timer) {
+  timer.unref?.();
+}
+function capture(stream) {
+  if (!(stream instanceof ReadableStream))
+    return { text: Promise.resolve(""), snapshot: () => "", cancel: () => {} };
+  const reader = stream.getReader();
+  const decoder = new TextDecoder;
+  let collected = "";
+  const text = (async () => {
+    try {
+      for (;; ) {
+        const chunk = await reader.read();
+        if (chunk.done)
+          break;
+        collected += decoder.decode(chunk.value, { stream: true });
+      }
+    } catch {}
+    collected += decoder.decode();
+    return collected;
+  })();
+  const cancel = () => {
+    try {
+      reader.cancel().catch(() => {
+        return;
+      });
+    } catch {}
+  };
+  return { text, snapshot: () => collected, cancel };
+}
+function supervise(child, options = {}) {
+  const grace = Math.max(0, options.graceMs ?? EXIT_GRACE_MS);
+  const pollMs = Math.max(1, options.pollMs ?? EXIT_POLL_MS);
+  const alive = options.alive ?? processAlive;
+  const group = options.group ?? false;
+  const { signal, timeoutMs } = options;
+  const out = capture(child.stdout);
+  const err = capture(child.stderr);
+  return new Promise((resolve) => {
+    let ended = null;
+    let exitSeen = false;
+    let settled = false;
+    let goneSince = null;
+    let deadline;
+    let graceTimer;
+    const settle = (run) => {
+      if (settled)
+        return;
+      settled = true;
+      clearTimeout(deadline);
+      clearTimeout(graceTimer);
+      clearInterval(poller);
+      signal?.removeEventListener("abort", onAbort);
+      resolve(run);
+    };
+    const end = (cause) => {
+      if (ended !== null || settled)
+        return;
+      ended = cause;
+      if (cause !== "lost" || group)
+        killChild(child, group);
+      out.cancel();
+      err.cancel();
+      graceTimer = setTimeout(() => settle({ kind: cause, stdout: out.snapshot(), stderr: err.snapshot() }), grace);
+      if (options.unref)
+        unref(graceTimer);
+    };
+    const onAbort = () => end("aborted");
+    const poller = setInterval(() => {
+      if (exitSeen || ended !== null || settled)
+        return;
+      if (alive(child.pid)) {
+        goneSince = null;
+        return;
+      }
+      goneSince ??= Date.now();
+      if (Date.now() - goneSince >= grace)
+        end("lost");
+    }, pollMs);
+    unref(poller);
+    if (timeoutMs !== undefined && timeoutMs > 0 && Number.isFinite(timeoutMs)) {
+      deadline = setTimeout(() => end("timeout"), timeoutMs);
+      if (options.unref)
+        unref(deadline);
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted)
+      onAbort();
+    child.exited.then(() => {
+      exitSeen = true;
+    }, () => {
+      return;
+    });
+    Promise.all([child.exited, out.text, err.text]).then(([exitCode, stdout, stderr]) => {
+      if (ended !== null)
+        settle({ kind: ended, stdout, stderr });
+      else
+        settle({ kind: "exited", exitCode, signalCode: signalName(child.signalCode), stdout, stderr });
+    }, () => end("lost"));
+  });
+}
+function signalName(code) {
+  if (code === null || code === undefined)
+    return null;
+  if (typeof code === "string")
+    return code;
+  return Object.entries(constants2.signals).find(([, n]) => n === code)?.[0] ?? String(code);
+}
+
 // plugins/subagent-worktree/src/git.ts
 var GIT_TIMEOUT_MS = 60000;
 var spawnRunner = async (argv) => {
@@ -716,7 +1112,27 @@ ${note}`;
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
 }
-function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, exists = directoryExists, now = Date.now, reserveMs = RESERVATION_MS) {
+function createLaneLock() {
+  const tails = new Map;
+  return (child, work) => {
+    const run = (tails.get(child) ?? Promise.resolve()).then(work, work);
+    const tail = run.then(() => {
+      return;
+    }, () => {
+      return;
+    });
+    tails.set(child, tail);
+    tail.then(() => {
+      if (tails.get(child) === tail)
+        tails.delete(child);
+    });
+    return run;
+  };
+}
+var SWEEP_AFTER_TOOLS = ["delivery_land", "delivery_cleanup"];
+var SWEEP_START_MS = 30000;
+var SWEEP_EVERY_MS = 10 * 60000;
+function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, exists = directoryExists, now = Date.now, reserveMs = RESERVATION_MS, freeBytes = diskFreeBytes) {
   const load = async (child) => parseLane(await ctx.storage.get(laneKey(child)));
   const save = (lane2) => ctx.storage.set(laneKey(lane2.child), lane2);
   const getSession = (sessionID) => ctx.session.get({ sessionID }).then((session) => session, () => {
@@ -740,6 +1156,15 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
   const removeWorktree = async (projectID, directory, force) => {
     await ctx.worktree.remove({ projectID, directory, force });
   };
+  const ownershipOf = async (directory) => {
+    const real = physical(directory);
+    const common = await git2.run(["git", "-C", directory, "rev-parse", "--git-common-dir"]);
+    if (real === null || common.code !== 0)
+      return;
+    const commonDir = physical(resolve(directory, common.stdout.trim()));
+    return commonDir === null ? undefined : { createdAt: now(), physical: real, root: dirname3(real), commonDir, strategy: "host" };
+  };
+  const settlePending = (name) => ctx.storage.remove(pendingKey(name)).catch(() => {});
   const provision = async (parent, description, from = parent.location.directory, named = false) => {
     const parentDir = from;
     const ref = named ? "HEAD" : options.base;
@@ -748,7 +1173,15 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
       throw new Error(`subagent-worktree: cannot resolve base ${ref} in ${parentDir}`);
     const target = ref !== "HEAD" && await git2.isLocalBranch(parentDir, ref) ? ref : await git2.branch(parentDir);
     const name = worktreeName(description, suffix());
-    const created = await ctx.worktree.create({ projectID: parent.projectID, name, branch: base });
+    const pending = { name, parent: parent.id, projectID: parent.projectID, createdAt: now() };
+    await ctx.storage.set(pendingKey(name), pending);
+    let created;
+    try {
+      created = await ctx.worktree.create({ projectID: parent.projectID, name, branch: base });
+    } catch (error) {
+      await ctx.storage.remove(pendingKey(name)).catch(() => {});
+      throw error;
+    }
     const directory = created.directory;
     try {
       let branch = await git2.branch(directory);
@@ -757,9 +1190,12 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
           throw new Error(`cannot create branch ${name} in ${directory}`);
         branch = name;
       }
-      return { directory, branch, base, parentDir, ...target ? { target } : {} };
+      const ownership = await ownershipOf(directory);
+      const worktree = { directory, branch, base, parentDir, ...target ? { target } : {}, ...ownership ? { ownership } : {} };
+      return { worktree, pending: name };
     } catch (error) {
       await removeWorktree(parent.projectID, directory, true).catch(() => {});
+      await ctx.storage.remove(pendingKey(name)).catch(() => {});
       throw error;
     }
   };
@@ -776,7 +1212,7 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
   const locate = async (parentDir, requested) => {
     const porcelain = await git2.worktrees(parentDir);
     const entries = porcelain === undefined ? undefined : await Promise.all(parseWorktrees(porcelain).map(async (entry) => ({ ...entry, directory: await normalize(entry.directory) })));
-    const raw = requested.startsWith("~/") ? join(homedir(), requested.slice(2)) : requested;
+    const raw = requested.startsWith("~/") ? join3(homedir(), requested.slice(2)) : requested;
     const path = await normalize(resolve(parentDir, raw));
     const current = entries && containingWorktree(await normalize(parentDir), entries)?.directory;
     return { lookup: findWorktree(requested, path, entries), current };
@@ -874,7 +1310,7 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
         notes.set(event.id, note);
         return;
       }
-      return revive(event, input.sessionID, input.prompt);
+      return withLane(input.sessionID, () => revive(event, input.sessionID, input.prompt));
     }
     const parent = await getSession(event.sessionID);
     if (!parent)
@@ -974,7 +1410,7 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
       notes.set(event.id, UNBORN_NOTE);
       return;
     }
-    const worktree = await provision(parent, input.description || input.agent, plan.from, input.worktree !== undefined);
+    const { worktree, pending } = await provision(parent, input.description || input.agent, plan.from, input.worktree !== undefined);
     let child;
     try {
       child = await createChild(event, input, agent, parent);
@@ -988,11 +1424,13 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
         state: "active"
       };
       await save(lane2);
+      await settlePending(pending);
       event.input = { ...event.input, sessionID: child, prompt: rewritePrompt(input.prompt, lane2, true) };
     } catch (error) {
       if (child)
         await ctx.session.remove({ sessionID: child }).catch(() => {});
       await removeWorktree(parent.projectID, worktree.directory, true).catch(() => {});
+      await settlePending(pending);
       throw new Error(`subagent-worktree: ${errorMessage(error)}`);
     }
   };
@@ -1018,17 +1456,21 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
       return;
     const agent = event.input.agent ?? "";
     await assertSubagent(event, (await getAgent(agent, parent.location.directory))?.id ?? agent);
-    const worktree = await provision(parent, lane2.title ?? "task");
+    const { worktree, pending } = await provision(parent, lane2.title ?? "task");
     try {
       await ctx.session.move({ sessionID: child, directory: worktree.directory });
       const next = { ...lane2, ...worktree, state: "active" };
       if (!worktree.target)
         delete next.target;
+      if (!worktree.ownership)
+        delete next.ownership;
       await save(next);
+      await settlePending(pending);
       event.input = { ...event.input, prompt: rewritePrompt(prompt, next, false) };
     } catch (error) {
       await moveHome(lane2);
       await removeWorktree(parent.projectID, worktree.directory, true).catch(() => {});
+      await settlePending(pending);
       throw new Error(`subagent-worktree: ${errorMessage(error)}`);
     }
   };
@@ -1049,6 +1491,11 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
     return retire(lane2, "removed");
   };
   const after = async (event) => {
+    if (SWEEP_AFTER_TOOLS.includes(event.tool)) {
+      const text = event.status === "completed" ? JSON.stringify(event.result.content ?? "") : event.error.message;
+      track(cleanup.sweep({ skip: [text] }));
+      return;
+    }
     if (event.tool !== SUBAGENT_TOOL)
       return;
     const reported = event.status === "completed" ? event.result.metadata : event.error.metadata;
@@ -1084,6 +1531,9 @@ ${skipped}`,
     const child = typeof metadata.sessionID === "string" ? metadata.sessionID : readSubagentInput(event.input)?.sessionID;
     if (!child)
       return;
+    return withLane(child, () => settleLane(event, metadata, child));
+  };
+  const settleLane = async (event, metadata, child) => {
     let lane2 = await load(child);
     if (lane2?.state !== "active")
       return;
@@ -1132,6 +1582,97 @@ ${note}`,
     } while (after !== undefined);
     return found;
   };
+  const withLane = createLaneLock();
+  const detached = new Set;
+  const track = (work) => {
+    const guarded = work.catch((error) => console.error("srobroek.subagent-worktree: cleanup failed", error));
+    detached.add(guarded);
+    guarded.finally(() => detached.delete(guarded));
+  };
+  const presence = async (sessionID) => {
+    if (await ctx.storage.get(goneKey(sessionID)) !== undefined)
+      return { presence: "gone" };
+    let timer;
+    const timeout = new Promise((done) => {
+      timer = setTimeout(() => done(TIMED_OUT), lookupMs);
+    });
+    try {
+      const found = await Promise.race([ctx.session.get({ sessionID }).catch(() => TIMED_OUT), timeout]);
+      if (found === TIMED_OUT)
+        return { presence: "unknown" };
+      const time = found.time ?? {};
+      if (toMillis(time.archived) !== undefined)
+        return { presence: "gone" };
+      const busy = toMillis(time.busy);
+      const idle = toMillis(time.idle);
+      const stamps = [busy, idle, toMillis(time.updated)].filter((value) => value !== undefined);
+      const lastActivity = stamps.length ? Math.max(...stamps) : undefined;
+      const running = isRunning({ ...busy === undefined ? {} : { busy }, ...idle === undefined ? {} : { idle } });
+      return { presence: running ? "running" : "idle", ...lastActivity === undefined ? {} : { lastActivity } };
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  const cleanup = createCleanup({
+    run: git2.run,
+    now,
+    storage: {
+      get: (key) => ctx.storage.get(key),
+      set: (key, value) => ctx.storage.set(key, value),
+      remove: (key) => ctx.storage.remove(key),
+      scan: async (prefix) => {
+        const found = [];
+        let next;
+        do {
+          const page = await ctx.storage.scan({ prefix, ...next === undefined ? {} : { after: next } });
+          for (const entry of page.entries)
+            found.push({ key: entry.key, value: entry.value });
+          next = page.next;
+        } while (next !== undefined);
+        return found;
+      }
+    },
+    lanes: () => scan(),
+    load,
+    save,
+    presence,
+    runningInside: async (lane2, directory) => {
+      const sessions = await sessionsIn(lane2.projectID, directory);
+      return sessions === undefined ? "unknown" : sessions.some((session) => isRunning(session)) ? "some" : "none";
+    },
+    removeWorktree: async (lane2, real) => {
+      await moveHome(lane2);
+      try {
+        try {
+          await removeWorktree(lane2.projectID, real, false);
+        } catch {
+          const result = await git2.run(["git", "-C", lane2.parentDir, "worktree", "remove", real]);
+          if (result.code !== 0)
+            throw new Error(result.stderr.trim() || "git worktree remove failed");
+        }
+      } catch (error) {
+        await ctx.session.move({ sessionID: lane2.child, directory: lane2.directory }).catch(() => {});
+        throw error;
+      }
+    },
+    report: async (lane2, parent, text) => {
+      if (parent === "running" || parent === "idle") {
+        await ctx.session.synthetic({
+          sessionID: lane2.parent,
+          text,
+          delivery: "queue",
+          resume: false,
+          metadata: { source: "srobroek.subagent-worktree", kind: "lane-cleanup" }
+        }).catch((error) => console.warn(`subagent-worktree: could not tell ${lane2.parent}: ${errorMessage(error)}
+${text}`));
+      } else
+        console.warn(text);
+    },
+    withLane,
+    freeBytes,
+    lowDiskBytes: options.lowDiskBytes,
+    log: (text) => console.warn(text)
+  });
   const alive = (sessionID) => liveness(ctx.session.get({ sessionID }), lookupMs);
   const list = async (caller) => {
     const session = await getSession(caller);
@@ -1177,7 +1718,7 @@ Missing worktrees: moved child sessions back to their parent directory: ${repair
     const directory = worktreeForBranch(porcelain, target);
     return directory === undefined ? [] : git2.localFiles(directory);
   };
-  const merge = async (input, tool) => {
+  const mergeLane = async (input, tool) => {
     if (input.method === "list") {
       await ctx.permission.assert({
         sessionID: tool.sessionID,
@@ -1251,7 +1792,23 @@ ${output}`,
       metadata: { ok: true, lane: merged }
     };
   };
-  return { before, after, merge, load };
+  const merge = (input, tool) => input.method !== "list" && input.sessionID ? withLane(input.sessionID, () => mergeLane(input, tool)) : mergeLane(input, tool);
+  const handleEvent = async (event) => {
+    const { type, data } = event ?? {};
+    const sessionID = data?.sessionID;
+    if (typeof type !== "string" || typeof sessionID !== "string")
+      return;
+    const ended = type === "session.deleted" || type === "session.archived";
+    if (!ended && !type.startsWith("session.execution."))
+      return;
+    if (ended)
+      await ctx.storage.set(goneKey(sessionID), { at: now() });
+    for (const lane2 of await scan()) {
+      if (lane2.state === "active" && lane2.ownership && (lane2.child === sessionID || lane2.parent === sessionID))
+        await cleanup.clean(lane2.child);
+    }
+  };
+  return { before, after, merge, load, cleanup, handleEvent, drain: () => Promise.allSettled([...detached]) };
 }
 function createPlugin(overrides = {}) {
   return Plugin.define({
@@ -1259,9 +1816,33 @@ function createPlugin(overrides = {}) {
     async setup(ctx) {
       const options = readOptions(ctx.options);
       const git2 = createGit(overrides.run ?? spawnRunner);
-      const lanes = createLanes(ctx, options, git2, overrides.suffix ?? randomSuffix, overrides.lookupMs, overrides.directoryExists, overrides.now, overrides.reserveMs);
+      const lanes = createLanes(ctx, options, git2, overrides.suffix ?? randomSuffix, overrides.lookupMs, overrides.directoryExists, overrides.now, overrides.reserveMs, overrides.freeBytes);
+      const abort = new AbortController;
+      const iterator = ctx.event.subscribe({ signal: abort.signal })[Symbol.asyncIterator]();
+      let handling = Promise.resolve();
+      (async () => {
+        for (;; ) {
+          const next = await iterator.next().catch(() => ({ done: true, value: undefined }));
+          if (next.done || abort.signal.aborted)
+            return;
+          handling = lanes.handleEvent(next.value).catch((error) => console.error("srobroek.subagent-worktree: lane event failed", error));
+          await handling;
+        }
+      })();
+      const sweepEvery = overrides.sweepEveryMs ?? SWEEP_EVERY_MS;
+      const sweep = () => void lanes.cleanup.sweep().catch((error) => console.error("srobroek.subagent-worktree: sweep failed", error));
+      const first = setTimeout(sweep, overrides.sweepStartMs ?? SWEEP_START_MS);
+      const every = setInterval(sweep, sweepEvery);
+      first.unref?.();
+      every.unref?.();
       const registrations = [];
       const cleanup = async () => {
+        clearTimeout(first);
+        clearInterval(every);
+        abort.abort();
+        await iterator.return?.();
+        await handling;
+        await lanes.drain();
         for (const registration of registrations.reverse())
           await registration.dispose();
       };
@@ -1300,15 +1881,21 @@ export {
   DIRTY_CHECKOUT_NOTE,
   FENCED_REASON,
   GIT_TIMEOUT_MS,
+  GONE_PREFIX,
   LANE_PREFIX,
+  LEASE_KEY,
   MERGE_DESCRIPTION,
   MERGE_INPUT,
   MERGE_TOOL,
+  PENDING_PREFIX,
   RESERVATION_MS,
   RESUME_WORKTREE_NOTE,
   SESSION_LOOKUP_MS,
   SUBAGENT_PREAMBLE,
   SUBAGENT_TOOL,
+  SWEEP_AFTER_TOOLS,
+  SWEEP_EVERY_MS,
+  SWEEP_START_MS,
   TRACKED_DIRTY_PATHSPEC,
   UNBORN_NOTE,
   WORKTREE_PARAM,
@@ -1327,6 +1914,7 @@ export {
   diffCommand,
   findWorktree,
   formatLaneList,
+  goneKey,
   isConflict,
   isRunning,
   isUnbornHead,
@@ -1340,6 +1928,7 @@ export {
   parseLane,
   parseModel,
   parseWorktrees,
+  pendingKey,
   planStart,
   readOptions,
   readSubagentInput,
