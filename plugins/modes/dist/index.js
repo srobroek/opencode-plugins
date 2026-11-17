@@ -1119,7 +1119,14 @@ var MENTIONS_GIT = /git/i;
 var WORTH_PARSING = /git|[{*?[$`]/i;
 var KEYWORDS = new Set(["if", "then", "else", "elif", "while", "until", "do", "!", "{", "(", "coproc"]);
 var INTERPRETERS = /^(python[0-9.]*|node|nodejs|perl|ruby|php|lua|awk|gawk|mawk|osascript|tclsh|Rscript)$/;
-var INLINE_CODE_RUNNERS = /^(bun|deno)$/;
+var CODE_OPTIONS = [
+  [/^python[0-9.]*$/, ["-c"]],
+  [/^(node|nodejs|bun|deno)$/, ["-e", "-p", "--eval", "--print"]],
+  [/^perl$/, ["-e", "-E"]],
+  [/^(ruby|lua|Rscript|osascript)$/, ["-e"]],
+  [/^php$/, ["-r"]]
+];
+var AWKS = /^(awk|gawk|mawk)$/;
 var unsafeOperand = (path) => /[$`*?[{]/.test(path) || /^~[^/]/.test(path);
 var unbackslash = (word) => word.replace(/\\(.)/gs, "$1");
 var escapeRegex = (text) => text.replace(/[.+^${}()|[\]\\*?]/g, "\\$&");
@@ -1143,6 +1150,40 @@ function wordPattern(word) {
       out += escapeRegex(c);
   }
   return new RegExp(`^${out}$`);
+}
+function inlineCode(exe, args) {
+  if (AWKS.test(exe)) {
+    if (args.includes("-f"))
+      return [];
+    for (let i = 0;i < args.length; i++) {
+      const arg = args[i];
+      if (arg === "--")
+        return args[i + 1] === undefined ? [] : [args[i + 1]];
+      if (arg === "-F" || arg === "-v")
+        i++;
+      else if (!arg.startsWith("-"))
+        return [arg];
+    }
+    return [];
+  }
+  const options = CODE_OPTIONS.find(([name]) => name.test(exe))?.[1];
+  if (options === undefined)
+    return [];
+  const code = [];
+  if (exe === "deno" && args[0] === "eval")
+    code.push(...args.slice(1).filter((arg) => !arg.startsWith("-")));
+  for (let i = 0;i < args.length; i++) {
+    const arg = args[i];
+    for (const option of options) {
+      if (arg === option)
+        code.push(args[i + 1] ?? "");
+      else if (arg.startsWith(`${option}=`))
+        code.push(arg.slice(option.length + 1));
+      else if (!option.startsWith("--") && arg.startsWith(option) && arg.length > option.length)
+        code.push(arg.slice(option.length));
+    }
+  }
+  return code;
 }
 function couldBeGit(word) {
   const pattern = wordPattern(word);
@@ -1437,8 +1478,8 @@ function checkWords(input, ctx) {
       cwd = joinPath(cwd, directory, ctx.env.home);
     return checkGit(args, ctx, cwd, directories.length > 0);
   }
-  if ((INTERPRETERS.test(exe) || INLINE_CODE_RUNNERS.test(exe) && args.some((arg) => ["-e", "--eval", "-p", "--print"].includes(arg))) && args.some((arg) => MENTIONS_GIT.test(arg)))
-    return "an interpreter running code that mentions git cannot be checked";
+  if (inlineCode(exe, args).some((code) => MENTIONS_GIT.test(code)))
+    return "an interpreter running inline code that mentions git cannot be checked";
   if (SHELLS.has(exe)) {
     const flag = args.findIndex((arg) => /^-[a-zA-Z]*c[a-zA-Z]*$/.test(arg));
     const payload = flag >= 0 ? args[flag + 1] : undefined;

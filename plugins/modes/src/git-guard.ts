@@ -73,7 +73,15 @@ const MENTIONS_GIT = /git/i
 const WORTH_PARSING = /git|[{*?[$`]/i
 const KEYWORDS = new Set(["if", "then", "else", "elif", "while", "until", "do", "!", "{", "(", "coproc"])
 const INTERPRETERS = /^(python[0-9.]*|node|nodejs|perl|ruby|php|lua|awk|gawk|mawk|osascript|tclsh|Rscript)$/
-const INLINE_CODE_RUNNERS = /^(bun|deno)$/
+/** The option that carries inline code, per interpreter. Running a script or module by name is not inspected. */
+const CODE_OPTIONS: ReadonlyArray<readonly [RegExp, readonly string[]]> = [
+  [/^python[0-9.]*$/, ["-c"]],
+  [/^(node|nodejs|bun|deno)$/, ["-e", "-p", "--eval", "--print"]],
+  [/^perl$/, ["-e", "-E"]],
+  [/^(ruby|lua|Rscript|osascript)$/, ["-e"]],
+  [/^php$/, ["-r"]],
+]
+const AWKS = /^(awk|gawk|mawk)$/
 /** An operand that the shell or git would expand into something the guard cannot see. A leading `~/` is expanded by the guard. */
 const unsafeOperand = (path: string) => /[$`*?[{]/.test(path) || /^~[^/]/.test(path)
 const unbackslash = (word: string) => word.replace(/\\(.)/gs, "$1")
@@ -97,6 +105,33 @@ function wordPattern(word: string): RegExp {
     } else out += escapeRegex(c)
   }
   return new RegExp(`^${out}$`)
+}
+
+/** The inline program text an interpreter is given on its command line, if any. */
+function inlineCode(exe: string, args: readonly string[]): string[] {
+  if (AWKS.test(exe)) {
+    if (args.includes("-f")) return []
+    for (let i = 0; i < args.length; i++) {
+      const arg = args[i] as string
+      if (arg === "--") return args[i + 1] === undefined ? [] : [args[i + 1] as string]
+      if (arg === "-F" || arg === "-v") i++
+      else if (!arg.startsWith("-")) return [arg]
+    }
+    return []
+  }
+  const options = CODE_OPTIONS.find(([name]) => name.test(exe))?.[1]
+  if (options === undefined) return []
+  const code: string[] = []
+  if (exe === "deno" && args[0] === "eval") code.push(...args.slice(1).filter((arg) => !arg.startsWith("-")))
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i] as string
+    for (const option of options) {
+      if (arg === option) code.push(args[i + 1] ?? "")
+      else if (arg.startsWith(`${option}=`)) code.push(arg.slice(option.length + 1))
+      else if (!option.startsWith("--") && arg.startsWith(option) && arg.length > option.length) code.push(arg.slice(option.length))
+    }
+  }
+  return code
 }
 
 /** Whether a command word with a glob or brace could name the git executable. */
@@ -425,11 +460,8 @@ function checkWords(input: readonly string[], ctx: Ctx): string | undefined {
     for (const directory of directories) cwd = joinPath(cwd, directory, ctx.env.home)
     return checkGit(args, ctx, cwd, directories.length > 0)
   }
-  if (
-    (INTERPRETERS.test(exe) || (INLINE_CODE_RUNNERS.test(exe) && args.some((arg) => ["-e", "--eval", "-p", "--print"].includes(arg)))) &&
-    args.some((arg) => MENTIONS_GIT.test(arg))
-  )
-    return "an interpreter running code that mentions git cannot be checked"
+  if (inlineCode(exe, args).some((code) => MENTIONS_GIT.test(code)))
+    return "an interpreter running inline code that mentions git cannot be checked"
   if (SHELLS.has(exe)) {
     const flag = args.findIndex((arg) => /^-[a-zA-Z]*c[a-zA-Z]*$/.test(arg))
     const payload = flag >= 0 ? args[flag + 1] : undefined

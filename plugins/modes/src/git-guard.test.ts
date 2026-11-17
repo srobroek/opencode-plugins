@@ -532,6 +532,38 @@ describe("remote", () => {
   )
 })
 
+describe("interpreters", () => {
+  test.each([
+    "python3 -m pytest tests/test_git.py",
+    "python -c 'print(1)'",
+    "bun test git-guard.test.ts",
+    "node scripts/check-git.js",
+    "perl script-git.pl",
+    "ruby lib/git_helper.rb",
+    "bun run check:git",
+    "deno test git.test.ts",
+    "awk '{print $1}' .gitignore",
+    "node --check git.js",
+    "python3 -c 'import sys; print(sys.argv)' .gitignore",
+  ])("running %j is not flagged", (command) => verdict(["debug", "refactor"], command, "allowed"))
+  test.each([
+    'python3 -c "import subprocess; subprocess.run([\'git\',\'push\'])"',
+    'python3 -c"import os; os.system(\'git push\')"',
+    'node -e "require(\'child_process\').execSync(\'git push\')"',
+    'node --eval "require(\'child_process\').execSync(\'git push\')"',
+    'node -p "require(\'child_process\').execSync(\'git push\')"',
+    "perl -e 'system(\"git push\")'",
+    "ruby -e 'system(\"git push\")'",
+    "php -r 'system(\"git push\");'",
+    'bun -e "Bun.spawn([\'git\',\'push\'])"',
+    'bun --eval "Bun.spawn([\'git\',\'push\'])"',
+    'deno eval "new Deno.Command(\'git\', {args:[\'push\']})"',
+    "awk 'BEGIN{system(\"git push\")}'",
+    "awk -F: 'BEGIN{system(\"git push\")}' file",
+    'lua -e "os.execute(\'git push\')"',
+  ])("inline code in %j that mentions git is refused", (command) => verdict(["debug", "refactor"], command, "refused"))
+})
+
 describe("symlinks before dot-dot", () => {
   let home = ""
   beforeAll(() => {
