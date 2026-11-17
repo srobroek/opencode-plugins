@@ -264,16 +264,35 @@ const ranMarkers = (markers: Record<string, string>): string[] =>
     .map(([name]) => name)
     .sort()
 
-/** Put a `git` shim first on PATH that logs the directory of every spawn, sync or async. */
-function gitSpawnLog(): { log: () => string[]; restore: () => void } {
+/** One `git` start the PATH shim saw: its physical working directory, the repository selectors in its environment, and its arguments. */
+type GitSpawn = { cwd: string; gitDir: string; workTree: string; commonDir: string; args: string }
+
+/** The paths a spawn could have read a repository through. */
+const spawnPaths = (spawn: GitSpawn): string[] =>
+  [spawn.cwd, spawn.gitDir, spawn.workTree, spawn.commonDir].filter((path) => path !== "")
+
+const within = (path: string, root: string): boolean => path === root || path.startsWith(`${root}/`)
+
+/**
+ * Put a `git` shim first on PATH that records every start. Every Git child cleanup runs
+ * gets the current environment, so each one passes through it, synchronous or not.
+ */
+function gitSpawnLog(): { log: () => GitSpawn[]; restore: () => void } {
   const dir = scratch("git-shim")
   const logFile = join(dir, "spawns.log")
   const real = execFileSync("which", ["git"], { encoding: "utf8" }).trim()
-  writeExecutable(join(dir, "git"), `#!/bin/sh\npwd -P >> "${logFile}"\nexec "${real}" "$@"\n`)
+  writeExecutable(
+    join(dir, "git"),
+    `#!/bin/sh\nprintf '%s\\t%s\\t%s\\t%s\\t%s\\n' "$(pwd -P)" "$GIT_DIR" "$GIT_WORK_TREE" "$GIT_COMMON_DIR" "$*" >> "${logFile}"\nexec "${real}" "$@"\n`,
+  )
   const before = process.env.PATH
   process.env.PATH = `${dir}:${before ?? ""}`
   return {
-    log: () => (existsSync(logFile) ? readFileSync(logFile, "utf8").split("\n").filter(Boolean) : []),
+    log: () =>
+      (existsSync(logFile) ? readFileSync(logFile, "utf8").split("\n").filter(Boolean) : []).map((line) => {
+        const [cwd = "", gitDir = "", workTree = "", commonDir = "", args = ""] = line.split("\t")
+        return { cwd, gitDir, workTree, commonDir, args }
+      }),
     restore: () => {
       process.env.PATH = before
     },
@@ -2252,9 +2271,10 @@ describe("delivery_cleanup fails closed on another repository", () => {
         const reason = refusal(result)
         expect(reason).toContain("worktree.owner")
         expect(reason).toContain("from a session in that repository")
-        const foreign = [f.main, f.linked, dirname(f.main)].map((path) => realpathSync(path))
-        const entered = spawns.log().filter((dir) => foreign.some((path) => dir === path || dir.startsWith(`${path}/`)))
-        expect(entered).toEqual([])
+        // Every Git start, not only those found in the target: each ran in the session's repository.
+        const log = spawns.log()
+        expect(log.length).toBeGreaterThan(0)
+        expect(log.filter((spawn) => spawnPaths(spawn).some((path) => !within(path, session.main)))).toEqual([])
       } finally {
         spawns.restore()
       }
@@ -2504,7 +2524,6 @@ describe("delivery_cleanup refuses a registered worktree whose directory is not 
     const { markers } = hostileConfig(foreign)
     for (const marker of Object.values(markers)) rmSync(marker, { force: true })
     replace(f, foreign)
-    const target = realpathSync(f.linked)
 
     const spawns = gitSpawnLog()
     const scripted = runner(f, {})
@@ -2516,8 +2535,10 @@ describe("delivery_cleanup refuses a registered worktree whose directory is not 
         bounds: HEAVY_FIXTURE_BOUNDS,
       })
       expect(refusal(result)).toContain("worktree.marker")
-      const entered = spawns.log().filter((dir) => dir === target || dir.startsWith(`${target}/`))
-      expect(entered).toEqual([])
+      // Every Git start, not only those found in the target: each ran in the session's own checkout.
+      const log = spawns.log()
+      expect(log.length).toBeGreaterThan(0)
+      expect(log.filter((spawn) => spawnPaths(spawn).some((path) => !within(path, f.main)))).toEqual([])
     } finally {
       spawns.restore()
     }
