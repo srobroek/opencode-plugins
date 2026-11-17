@@ -14,12 +14,14 @@
  */
 
 import { createHash, randomUUID } from "node:crypto"
-import { linkSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { accessSync, constants, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { hostname } from "node:os"
 import { join } from "node:path"
 import { canonicalDirectory, type Read } from "./worktree-claims.ts"
 
 export const LOCK_TTL_MS = 2 * 60_000
+/** A `.break` file older than this belongs to a crashed breaker. */
+export const BREAK_TTL_MS = 30_000
 export const HOLD_EXPIRY_MS = 24 * 3_600_000
 
 const sha1 = (text: string) => createHash("sha1").update(text).digest("hex")
@@ -70,8 +72,12 @@ export class LockTimeout extends Error {
   }
 }
 
+/** Seams for tests: run between validating a stale lock and breaking it. */
+export type LockSeams = { afterValidate?: () => Promise<void> | void }
+
 export type LockOptions = {
   sessionID: string
+  seams?: LockSeams
   ttlMs?: number
   /** Attempts before giving up, with `delayMs(attempt)` between them. */
   attempts?: number
@@ -95,11 +101,64 @@ const readLock = (path: string): { raw: string; info: LockInfo | undefined; mtim
   }
 }
 
+/** Whether two lock reads are the same holding: token, pid, host and acquiredAt. Pure. */
+export function sameLock(a: LockInfo | undefined, b: LockInfo | undefined, rawA?: string, rawB?: string): boolean {
+  if (a === undefined || b === undefined) return a === b && rawA !== undefined && rawA === rawB
+  return a.token === b.token && a.pid === b.pid && a.host === b.host && a.acquiredAt === b.acquiredAt
+}
+
+/**
+ * Break a lock that was judged stale. Two breakers must not both act on the same stale content: the
+ * slower one would unlink the lock the faster one just created. So breaking itself takes a
+ * `<lock>.break` file exclusively; while holding it the lock is read again, and it is unlinked only
+ * if it is still exactly the content that was judged. A `.break` file older than 30 s belongs to a
+ * crashed breaker and is removed directly: safe, because breaking only ever unlinks a lock whose
+ * content was confirmed under the break lock. Normal acquisition never touches `.break`.
+ */
+function breakStale(
+  path: string,
+  judged: { raw: string; info: LockInfo | undefined },
+  who: { now: () => number; token: string; host: string; sessionID: string },
+): void {
+  const breakPath = `${path}.break`
+  const temp = `${breakPath}.${who.token}.tmp`
+  try {
+    writeFileSync(temp, JSON.stringify({ pid: process.pid, host: who.host, sessionID: who.sessionID, acquiredAt: who.now(), token: who.token }))
+    try {
+      linkSync(temp, breakPath)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error
+      // Someone is breaking, or crashed while doing so.
+      try {
+        if (who.now() - statSync(breakPath).mtimeMs > BREAK_TTL_MS) rmSync(breakPath, { force: true })
+      } catch {}
+      return
+    }
+  } finally {
+    rmSync(temp, { force: true })
+  }
+  try {
+    const now = readLock(path)
+    // Still exactly the lock that was judged? Then it is stale and nobody replaced it.
+    if (now !== undefined && sameLock(now.info, judged.info, now.raw, judged.raw)) rmSync(path, { force: true })
+  } finally {
+    const mine = (() => {
+      try {
+        return (JSON.parse(readFileSync(breakPath, "utf8")) as { token?: string }).token === who.token
+      } catch {
+        return false
+      }
+    })()
+    if (mine) rmSync(breakPath, { force: true })
+  }
+}
+
 /** Run `work` holding the on-disk lock for `directory`. Throws {@link LockTimeout} if it cannot be taken. */
 export async function withDiskLock<T>(commonDir: string, directory: string, options: LockOptions, work: () => Promise<T>): Promise<T> {
   const path = lockFile(commonDir, directory)
   const now = options.now ?? Date.now
   const host = options.host ?? hostname()
+  const hostName = hostname()
   const alive = options.alive ?? processAlive
   const ttlMs = options.ttlMs ?? LOCK_TTL_MS
   const attempts = options.attempts ?? 60
@@ -132,13 +191,8 @@ export async function withDiskLock<T>(commonDir: string, directory: string, opti
     const current = readLock(path)
     if (current === undefined) continue // released between the two calls
     if (lockIsStale(current.info, { now: now(), ttlMs, host, alive, mtimeMs: current.mtimeMs })) {
-      // Break exactly the lock that was judged: if its content changed, someone else took it.
-      if (readLock(path)?.raw === current.raw) {
-        try {
-          renameSync(path, `${path}.stale.${token}`)
-          rmSync(`${path}.stale.${token}`, { force: true })
-        } catch {}
-      }
+      await options.seams?.afterValidate?.()
+      breakStale(path, current, { now, token, host: hostName, sessionID: options.sessionID })
       continue
     }
     await sleep(delayMs(attempt))
@@ -188,13 +242,14 @@ export function setHold(commonDir: string, directory: string, sessionID: string,
 }
 
 /** Every session's hold for `directory`. `unreadable` when the directory or any entry could not be read. */
-export function readHolds(commonDir: string, directory: string): { holds: SessionHold[]; unreadable: boolean } {
+export function readHolds(commonDir: string, directory: string): { holds: SessionHold[]; unreadable: boolean; missing?: boolean } {
   const dir = holdsDir(commonDir, directory)
   let names: string[]
   try {
     names = readdirSync(dir).filter((name) => name.endsWith(".json"))
   } catch (error) {
-    return { holds: [], unreadable: (error as NodeJS.ErrnoException).code !== "ENOENT" }
+    const absent = (error as NodeJS.ErrnoException).code === "ENOENT"
+    return { holds: [], unreadable: !absent, ...(absent ? { missing: true } : {}) }
   }
   const holds: SessionHold[] = []
   let unreadable = false
@@ -220,3 +275,57 @@ export function holdBlock(read: { holds: readonly SessionHold[]; unreadable: boo
 }
 
 export type { Read }
+
+/** Whether the coordination root can be written (holds, locks, claims). Creates it when missing. */
+export function coordinationWritable(commonDir: string): boolean {
+  const root = join(commonDir, "opencode")
+  try {
+    mkdirSync(root, { recursive: true })
+    accessSync(root, constants.W_OK)
+    const probe = join(root, `.probe.${randomUUID()}`)
+    writeFileSync(probe, "")
+    rmSync(probe, { force: true })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Why background work or an unusable coordination store blocks a removal of `directory`, or
+ * undefined. No holds directory is "no holds" only if holds could be written there: if the
+ * coordination root is not writable, the gates that would have recorded work could not have, so
+ * it is unsafe, not empty.
+ */
+export function holdsState(commonDir: string, directory: string, now: number, expiryMs: number = HOLD_EXPIRY_MS): string | undefined {
+  const read = readHolds(commonDir, directory)
+  const blocked = holdBlock(read, now, expiryMs)
+  if (blocked !== undefined) return blocked
+  if (read.missing === true && !coordinationWritable(commonDir)) return "the coordination store is not writable, so running work cannot be ruled out"
+  return undefined
+}
+
+/**
+ * The one removal boundary. Under the worktree's on-disk lock: `recheck` (claim, holds, landing
+ * records and denials, the final cleanup proofs: whatever the caller must confirm last) and, only
+ * if it returns no refusal, `remove` (the worktree removal and the compare-and-delete of its ref).
+ * Every remover, in every plugin, goes through here, so they exclude each other on one lock name.
+ * A lock that cannot be taken is a refusal, not an error.
+ */
+export async function lockedWorktreeRemoval<T>(
+  commonDir: string,
+  directory: string,
+  lock: LockOptions,
+  steps: { recheck: () => Promise<string | undefined>; remove: () => Promise<T> },
+): Promise<{ removed: false; reason: string } | { removed: true; value: T }> {
+  try {
+    return await withDiskLock(commonDir, directory, lock, async () => {
+      const reason = await steps.recheck()
+      if (reason !== undefined) return { removed: false as const, reason }
+      return { removed: true as const, value: await steps.remove() }
+    })
+  } catch (error) {
+    if (error instanceof LockTimeout) return { removed: false, reason: `the worktree is locked by another remover (${error.message})` }
+    throw error
+  }
+}
