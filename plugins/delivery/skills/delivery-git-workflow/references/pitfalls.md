@@ -53,3 +53,9 @@
 - **Symptom:** `already has a live writer session ses_` from subagent-worktree, or two writers committing to the same branch and worktree after OpenCode restarted
 - **Cause:** After a restart OpenCode resumes interrupted subagents on its own, and they show as running. Re-spawning a writer for the same branch then adds a second live session to that worktree.
 - **Fix:** After a restart, list your background work first. Re-spawn only sessions that are gone, never two writers per worktree. Send a follow-up (pass its `sessionID`) to the surviving session, or stop it before you spawn a new one. The plugin only coordinates spawns within one OpenCode server instance; concurrent spawns from separate server instances are not coordinated, so keep one orchestrator per worktree.
+
+## A subagent worktree stays after its agent stopped
+
+- **Symptom:** `git worktree list` shows `lane/` or `subagent-` worktrees whose sessions are gone, or a `subagent-worktree: lane ... was not removed because` message
+- **Cause:** subagent-worktree removes only lanes that are clean and empty or merged. A lane with uncommitted changes, commits on no remote, a git operation in progress or a lock is kept on purpose, and only its ignored build directories are freed. A squash merge also looks unmerged.
+- **Fix:** Read the message for the reason. Commit and push or merge the work, or finish the rebase, then the next sweep (every 10 minutes, or after `delivery_land`) removes the worktree. After a squash merge, remove it yourself with `git worktree remove <path>` and `git branch -D <branch>` once you checked the work is on the target.

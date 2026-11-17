@@ -18,6 +18,7 @@ the `wt` strategy when the [worktrunk](../worktrunk) plugin is loaded, OpenCode'
 | --- | --- | --- |
 | `agents` | `["coder", "implementer", "implementer-high", "general"]` | Agents (id or name) whose subagent calls get a worktree. |
 | `base` | `"HEAD"` | Ref the worktree starts from, resolved in the caller's checkout. |
+| `lowDiskBytes` | `0` (off) | When free space on a lane's disk falls below this many bytes, cleanup also frees build directories of idle lanes and logs a warning. |
 
 ```jsonc
 { "plugins": [{ "package": "...", "options": { "agents": ["implementer"], "base": "HEAD" } }] }
@@ -117,6 +118,45 @@ session lookup has a 2 second limit and reports `unknown` when it runs out. Lane
 parent session is gone, or whose worktree git cannot read, are flagged as orphans. `list` only
 repairs missing worktrees by moving their child sessions back to the parent's directory and
 marking the lanes removed, and reports these repairs. It does not delete any worktree.
+
+## Lane cleanup
+
+A lane's worktree goes away when its agent has stopped, without risking work. Each new lane
+records its owner (creation time, physical path, the directory it sits in, the repository's
+common directory) in plugin storage, and a `pending/` record is written before the worktree is
+created so a crash in between leaves a trace. A lane without that record, or whose path no longer
+matches it, is never touched.
+
+Cleanup runs when a child or parent session finishes, stops, is archived or deleted
+(`session.execution.*`, `session.deleted`, `session.archived`), 30 seconds after startup and every
+10 minutes (one sweep at a time, guarded by a lease key against a second server), and after
+`delivery_land` or `delivery_cleanup` (worktrees the result names are skipped). It decides per lane:
+
+| Lane state | Action |
+| --- | --- |
+| Its session runs, or cannot be checked, or a running session works inside it | untouched |
+| Clean and empty, or merged into its target | worktree removed, branch deleted with `branch -d` |
+| Clean, pushed to a remote, not merged | kept while the parent session lives; worktree removed (branch kept) once it is gone |
+| Uncommitted changes, or commits on no remote and not merged | never removed; the parent is told once |
+| Rebase, merge, cherry-pick, revert or bisect in progress, or worktree locked | never removed; the parent is told once |
+
+For a kept lane whose owner is gone, idle for 30 minutes, or on a nearly full disk
+(`lowDiskBytes`), cleanup deletes these build directories if each is a real directory, ignored by
+git and holds no tracked file: `target`, `node_modules/.cache`, `.turbo`, `.next/cache`,
+`.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `dist`, `build`. The report goes to the parent as a
+queued message that starts no turn, or to the log when the parent is gone. A session counts as gone
+only when a deletion or archive record proves it; a failed lookup is unknown and protects the lane.
+
+Before it removes anything, cleanup checks that the path still resolves to the recorded one under
+the recorded directory, that its `.git` belongs to the recorded repository, that git lists it as
+a linked worktree and does not lock it, and then checks again right before removal. Removal uses
+the host strategy (`wt remove` under worktrunk) and falls back to `git worktree remove` without
+`--force`.
+
+Limits: a PR that was squash-merged leaves the lane branch unmerged, so such a lane stays until it
+is pushed and its parent is gone. Spawns and cleanup from separate OpenCode server instances are
+not coordinated beyond the sweep lease. A `pending/` record that no lane matches is logged, not
+acted on, because its owner is unknown.
 
 ## Credits
 
