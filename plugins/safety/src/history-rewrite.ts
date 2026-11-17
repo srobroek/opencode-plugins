@@ -166,6 +166,16 @@ function uvDirectories(argv: readonly string[], from: number, to: number): { chd
   return found
 }
 
+/** uv's environment variables that name the directory it runs in or the project it uses. */
+const UV_DIRECTORY_ENV = /(?<![\w])UV_(?:WORKING_DIR|PROJECT)(?![\w])/
+
+/** Whether `command` could set `UV_WORKING_DIR` or `UV_PROJECT` for a later command (`X=…`, `export`, `declare -x`, `set -a`). */
+function setsUvDirectory(command: Command): boolean {
+  if (command.assignments.some((item) => UV_DIRECTORY_ENV.test(item.split("=")[0] as string))) return true
+  if (command.argv.some((word) => UV_DIRECTORY_ENV.test(word))) return true
+  return base(command.argv[0]) === "set" && command.argv.slice(1).some((word) => /^-[a-zA-Z]*a|^allexport$/.test(word))
+}
+
 /** The value of an inline `NAME=value` assignment (the last one wins), outer quotes removed, as a list of zero or one. */
 function assigned(command: Command, name: string): string[] {
   const found = command.assignments.filter((item) => item.startsWith(`${name}=`)).at(-1)
@@ -616,12 +626,19 @@ export function historyRewrite(
     if (where.safe) return undefined
     return where.kind === "canonical" ? refused(what, where.root) : unverified(what, where.root)
   }
-  for (const command of commands) {
+  for (const [position, command] of commands.entries()) {
     const git = gitInvocation(command.argv)
     const text = `\`${command.argv.slice(0, 4).join(" ")}\``
     const rewrite = filterRepo(command)
     if (rewrite === "uncertain") return uncertain(text, "the launcher's command line could not be read")
     if (rewrite !== undefined) {
+      if (base(command.argv[0]).startsWith("uv")) {
+        // A wrapper (`sudo`, `env -i`, `nice`, …) may drop an inline variable, and an earlier segment may set one.
+        if (command.wrappers.length > 0 && UV_DIRECTORY_ENV.test(command.source))
+          return uncertain(text, "a wrapper may drop or change uv's UV_WORKING_DIR or UV_PROJECT")
+        if (commands.slice(0, position).some(setsUvDirectory))
+          return uncertain(text, "an earlier command may set uv's UV_WORKING_DIR or UV_PROJECT")
+      }
       if (rewrite.args.some((arg) => arg === "-f" || spells(arg, "--force")))
         return `${PREFIX}: refused ${text} with --force. filter-repo --force overwrites the repository's refs and history in the directory it runs in, wherever that is. Run it without --force in a fresh temp clone with the tool's workdir set there; a fresh clone needs no --force.`
       for (const option of ["--target", "--source"])

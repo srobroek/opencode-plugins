@@ -555,6 +555,45 @@ describe("uv's directory options decide where the rewrite runs", () => {
     expect(run("UV_WORKING_DIR={clone} UV_PROJECT=sub uvx git-filter-repo --path a", "canonical")).toBeUndefined()
   })
 
+  test.each([
+    ["sudo", "UV_WORKING_DIR={clone} sudo uvx git-filter-repo --path a"],
+    ["env -i", "UV_WORKING_DIR={clone} env -i uvx git-filter-repo --path a"],
+    ["nice", "UV_WORKING_DIR={clone} nice uvx git-filter-repo --path a"],
+    ["nohup", "UV_WORKING_DIR={clone} nohup uvx git-filter-repo --path a"],
+    ["timeout", "UV_WORKING_DIR={clone} timeout 60 uvx git-filter-repo --path a"],
+    ["time", "UV_WORKING_DIR={clone} time uvx git-filter-repo --path a"],
+    ["doas", "UV_PROJECT={clone} doas uvx git-filter-repo --path a"],
+    ["command", "UV_WORKING_DIR={clone} command uvx git-filter-repo --path a"],
+    ["a variable after the wrapper", "sudo UV_WORKING_DIR={clone} uvx git-filter-repo --path a"],
+  ])("refuses an inline variable that crosses %s", (_name, command) => {
+    expect(run(command, "canonical")?.guard).toBe("history-rewrite")
+  })
+
+  test("still judges a wrapper without a uv variable by the workdir", () => {
+    expect(run("sudo uvx git-filter-repo --path a", "linked")).toBeUndefined()
+    expect(run("sudo uvx git-filter-repo --path a", "canonical")?.guard).toBe("history-rewrite")
+  })
+
+  test.each([
+    ["export", "export UV_WORKING_DIR={clone}; uvx git-filter-repo --path a"],
+    ["export project", "export UV_PROJECT={clone}; uvx git-filter-repo --path a"],
+    ["a plain assignment", "UV_WORKING_DIR={clone}; uvx git-filter-repo --path a"],
+    ["declare -x", "declare -x UV_WORKING_DIR={clone}; uvx git-filter-repo --path a"],
+    ["set -a", "set -a; UV_WORKING_DIR={clone}; uvx git-filter-repo --path a"],
+    ["set -a alone", "set -a && uvx git-filter-repo --path a"],
+    ["an export on an earlier line", "export UV_PROJECT={clone}\nuv run git-filter-repo --path a"],
+    ["an export without a value", "export UV_WORKING_DIR && uvx git-filter-repo --path a"],
+    ["a conditional", "true && export UV_WORKING_DIR={canonical} && uvx git-filter-repo --path a"],
+  ])("refuses an earlier setter: %s", (_name, command) => {
+    expect(run(command, "linked")?.guard).toBe("history-rewrite")
+    expect(run(command, "clone")?.guard).toBe("history-rewrite")
+  })
+
+  test("ignores a later setter and unrelated exports", () => {
+    expect(run("export FOO=1; uvx git-filter-repo --path a", "linked")).toBeUndefined()
+    expect(run("uvx git-filter-repo --path a; export UV_WORKING_DIR={canonical}", "linked")).toBeUndefined()
+  })
+
   test("an option beats the variable, as in uv", () => {
     expect(run("UV_WORKING_DIR={canonical} uvx --directory {linked} git-filter-repo --path a", "linked")).toBeUndefined()
     expect(run("UV_WORKING_DIR={linked} uvx --directory {canonical} git-filter-repo --path a", "linked")?.guard).toBe(

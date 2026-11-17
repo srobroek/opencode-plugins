@@ -3726,6 +3726,14 @@ function uvDirectories(argv, from, to) {
   }
   return found;
 }
+var UV_DIRECTORY_ENV = /(?<![\w])UV_(?:WORKING_DIR|PROJECT)(?![\w])/;
+function setsUvDirectory(command) {
+  if (command.assignments.some((item) => UV_DIRECTORY_ENV.test(item.split("=")[0])))
+    return true;
+  if (command.argv.some((word) => UV_DIRECTORY_ENV.test(word)))
+    return true;
+  return base(command.argv[0]) === "set" && command.argv.slice(1).some((word) => /^-[a-zA-Z]*a|^allexport$/.test(word));
+}
 function assigned(command, name) {
   const found = command.assignments.filter((item) => item.startsWith(`${name}=`)).at(-1);
   return found === undefined ? [] : [found.slice(name.length + 1).replace(/^(["'])(.*)\1$/s, "$2")];
@@ -4127,13 +4135,19 @@ function historyRewrite(commands, cwd, tempRoots = defaultTempRoots(), env = pro
       return;
     return where.kind === "canonical" ? refused(what, where.root) : unverified(what, where.root);
   };
-  for (const command of commands) {
+  for (const [position, command] of commands.entries()) {
     const git = gitInvocation(command.argv);
     const text = `\`${command.argv.slice(0, 4).join(" ")}\``;
     const rewrite = filterRepo(command);
     if (rewrite === "uncertain")
       return uncertain(text, "the launcher's command line could not be read");
     if (rewrite !== undefined) {
+      if (base(command.argv[0]).startsWith("uv")) {
+        if (command.wrappers.length > 0 && UV_DIRECTORY_ENV.test(command.source))
+          return uncertain(text, "a wrapper may drop or change uv's UV_WORKING_DIR or UV_PROJECT");
+        if (commands.slice(0, position).some(setsUvDirectory))
+          return uncertain(text, "an earlier command may set uv's UV_WORKING_DIR or UV_PROJECT");
+      }
       if (rewrite.args.some((arg) => arg === "-f" || spells(arg, "--force")))
         return `${PREFIX}: refused ${text} with --force. filter-repo --force overwrites the repository's refs and history in the directory it runs in, wherever that is. Run it without --force in a fresh temp clone with the tool's workdir set there; a fresh clone needs no --force.`;
       for (const option of ["--target", "--source"])
