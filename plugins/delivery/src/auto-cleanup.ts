@@ -4,16 +4,16 @@
  * the decision and the result shape; the proofs and the non-force removal stay in
  * `cleanup.ts`, so there is one copy of the safety logic.
  *
- * Another plugin can hold inline cleanup back without delivery knowing it: its
- * `execute.before` hook on `delivery_land` adds `cleanupHold` entries to the input, each
- * naming a directory that is still in use and why. A held worktree is not cleaned
- * inline; the holder removes it later, once its own conditions are met, or
- * `delivery_cleanup` is called. A hold can only delay a removal, never cause one.
+ * A worktree a lane owns is never removed here. `subagent-worktree` writes a claim file for
+ * every lane under the git common directory (`@srobroek/opencode-lib/worktree-claims`);
+ * while one exists, or cannot be read, delivery only records the landing and reports the
+ * cleanup as deferred. The owner removes it once the lane is finished and landed.
  *
  * Inline cleanup is skipped when the receipt's Beads ledger is active: cleanup proves
  * every receipt bead is closed with `metadata.merge_sha`, and those closes are the
  * agent's next steps, so an inline run would always refuse before them.
  */
+import type { Ownership } from "@srobroek/opencode-lib/worktree-claims"
 import type { CleanupResult } from "./cleanup.ts"
 import type { LandingReceipt } from "./landing-receipt.ts"
 
@@ -30,34 +30,24 @@ export type CleanupReport = {
   denied?: boolean
 }
 
-/** A worktree another plugin is still using, and why. */
-export type CleanupHold = { directory: string; reason: string }
-
-/** The holds in a `delivery_land` input; anything malformed is ignored. */
-export function readCleanupHolds(input: unknown): CleanupHold[] {
-  const raw = (input as { cleanupHold?: unknown } | null | undefined)?.cleanupHold
-  if (!Array.isArray(raw)) return []
-  return raw.flatMap((entry): CleanupHold[] => {
-    const { directory, reason } = (entry ?? {}) as Record<string, unknown>
-    return typeof directory === "string" && directory !== "" && typeof reason === "string" && reason !== ""
-      ? [{ directory, reason }]
-      : []
-  })
-}
-
 export type InlineDecision = { run: true } | { run: false; reason: string; deferred?: string }
 
-/** Whether landing may run cleanup now. Pure given `canonical`. */
+/** Why a lane keeps the worktree, or undefined when nobody does. Pure. */
+export function ownershipDeferral(ownership: Ownership): string | undefined {
+  if (ownership.owner === "lane") return "owned by subagent-worktree lane"
+  if (ownership.owner === "unknown") return `lane claim unreadable (${ownership.reason})`
+  return undefined
+}
+
+/** Whether landing may run cleanup now. Pure. */
 export function inlineCleanupDecision(
   receipt: Pick<LandingReceipt, "beads" | "worktree">,
   enabled: boolean,
-  holds: readonly CleanupHold[] = [],
-  canonical: (path: string) => string = (path) => path,
+  ownership: Ownership = { owner: "none" },
 ): InlineDecision {
   if (!enabled) return { run: false, reason: "autoCleanup is off" }
-  const path = receipt.worktree.path
-  const held = path === null || path === undefined ? undefined : holds.find((hold) => canonical(hold.directory) === canonical(path))
-  if (held !== undefined) return { run: false, reason: held.reason, deferred: held.reason }
+  const deferred = ownershipDeferral(ownership)
+  if (deferred !== undefined) return { run: false, reason: deferred, deferred }
   if (receipt.beads.ledgerActive) {
     return {
       run: false,
@@ -100,7 +90,7 @@ const NEXT_CLEANUP_LINE = "next: run delivery_cleanup to remove the worktree and
 export function textAfterCleanup(text: string, report: CleanupReport): string {
   if (report.skipped) return text
   if (report.deferred !== undefined) {
-    return [...text.split("\n"), `cleanup: deferred (${report.deferred}); it is removed once that holds no longer, or call delivery_cleanup.`].join("\n")
+    return [...text.split("\n"), `cleanup: deferred (${report.deferred}); its owner removes it once the lane is finished and landed, or call delivery_cleanup.`].join("\n")
   }
   const lines = text.split("\n")
   if (report.ok) {

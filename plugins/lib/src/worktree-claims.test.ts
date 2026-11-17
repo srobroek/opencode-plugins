@@ -86,12 +86,10 @@ describe("claims on disk", () => {
     expect(readClaim(common, "/wt/a").kind).toBe("unreadable")
   })
 
-  test.each([
-    [{ kind: "present" as const, value: claim }, "lane"],
-    [{ kind: "unreadable" as const, reason: "x" }, "unknown"],
-    [{ kind: "missing" as const }, "none"],
-  ])("ownership of %p is %s", (read, owner) => {
-    expect(ownershipOf(read).owner).toBe(owner)
+  test("ownership: a claim means the lane, an unreadable claim means nobody, no claim means none", () => {
+    expect(ownershipOf({ kind: "present", value: claim }).owner).toBe("lane")
+    expect(ownershipOf({ kind: "unreadable", reason: "x" }).owner).toBe("unknown")
+    expect(ownershipOf({ kind: "missing" }).owner).toBe("none")
   })
 })
 

@@ -1,6 +1,13 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
-import { createPendingCleanup } from "./pending-cleanup.ts"
+import {
+  claimFile,
+  landingFile,
+  readLanding,
+  removeClaim,
+  writeClaim,
+} from "@srobroek/opencode-lib/worktree-claims"
+import { authorizeExplicit, createPendingCleanup } from "./pending-cleanup.ts"
 
 // Fixture setup creates several real Git repositories and measured about 20s under full-suite load;
 // keep three times that headroom instead of letting Bun's 5s default kill a child process mid-fixture.
@@ -44,6 +51,7 @@ import {
   readReceipt,
   receiptDirectory,
   repoKey,
+  repositoryContext,
   validateReceipt,
   writeReceipt,
 } from "./landing-receipt.ts"
@@ -2472,210 +2480,289 @@ describe("delivery_cleanup refuses a registered worktree whose directory is not 
   }, 30_000)
 })
 
-describe("pending cleanup retries when a turn ends", () => {
-  const sessionIdle = (sessionID: string) => ({ type: "session.idle", data: { sessionID } })
-
-  test("a receipt landed with beads open is nudged once; after the beads close, the next idle removes the worktree", async () => {
-    const f = fixture("pending-retry")
-    const options: RunnerOptions = { beadStatus: "open" }
+describe("pending cleanup: one remover per worktree", () => {
+  type Harness = Awaited<ReturnType<typeof harness>>
+  async function harness(
+    name: string,
+    over: { beadStatus?: string; maxPerPass?: number; list?: (query: Record<string, unknown>) => Promise<unknown>; before?: RunnerOptions["before"]; hook?: boolean } = {},
+  ) {
+    const f = fixture(name)
+    const options: RunnerOptions = { beadStatus: over.beadStatus ?? "closed", ...(over.before ? { before: over.before } : {}) }
     const scripted = runner(f, options)
     const fake = createFakeContext({ directory: f.main })
+    if (over.list) (fake.context.session as unknown as { list: unknown }).list = over.list
+    if (over.hook === false) {
+      const session = fake.context.session as unknown as { hook: (name: string, callback: unknown) => Promise<unknown> }
+      const original = session.hook.bind(session)
+      session.hook = (hookName, callback) =>
+        hookName === "experimental.idle" ? Promise.reject(new Error("unknown hook")) : original(hookName, callback)
+    }
     let clock = NOW + 10
     const pending = createPendingCleanup({
       ctx: fake.context,
       cwd: f.main,
       env: f.env,
       host: () => undefined,
-      canonical: (path) => path,
       debounceMs: 1,
+      ...(over.maxPerPass === undefined ? {} : { maxPerPass: over.maxPerPass }),
       cleanup: { run: stripped(scripted.run), now: () => NOW + 10, bounds: HEAVY_FIXTURE_BOUNDS },
       now: () => clock,
     })
-    await pending.record(f.receipt, "ses_lead", [])
-    await pending.start()
-    const synthetic = () => fake.calls.filter((entry) => entry.method === "session.synthetic")
-
-    fake.emit(sessionIdle("ses_lead"))
-    await pending.settle()
-    expect(synthetic()).toHaveLength(1)
-    expect(JSON.stringify(synthetic()[0]?.input)).toContain("Landed PR #17: close beads delivery-17")
-    expect(existsSync(f.linked)).toBe(true)
-
-    fake.emit(sessionIdle("ses_lead"))
-    await pending.settle()
-    expect(synthetic()).toHaveLength(1)
-    expect(existsSync(f.linked)).toBe(true)
-
-    options.beadStatus = "closed"
-    clock += 60_000
-    fake.emit(sessionIdle("ses_lead"))
-    await pending.settle()
-    expect(existsSync(f.linked)).toBe(false)
-    expect(synthetic()).toHaveLength(1)
-    await pending.dispose()
-    rmSync(f.root, { recursive: true, force: true })
-  })
-
-  test("a worktree claimed at land time is left to its claimant", async () => {
-    const f = fixture("pending-claimed")
-    const scripted = runner(f, { beadStatus: "closed" })
-    const fake = createFakeContext({ directory: f.main })
-    const pending = createPendingCleanup({
-      ctx: fake.context,
-      cwd: f.main,
-      env: f.env,
-      host: () => undefined,
-      canonical: (path) => path,
-      debounceMs: 1,
-      cleanup: { run: stripped(scripted.run), now: () => NOW + 10, bounds: HEAVY_FIXTURE_BOUNDS },
-    })
-    await pending.record(f.receipt, "ses_lead", [{ directory: f.linked, reason: "lane x still active" }])
-    await pending.start()
-    fake.emit(sessionIdle("ses_lead"))
-    await pending.settle()
-    expect(existsSync(f.linked)).toBe(true)
-    expect(mutationCalls(scripted.calls)).toEqual([])
-    await pending.dispose()
-    rmSync(f.root, { recursive: true, force: true })
-  })
-})
-
-describe("a denied cleanup stays denied until an explicit delivery_cleanup re-arms it", () => {
-  test("deny, then idle: nothing is removed; re-armed, the next idle removes it", async () => {
-    const f = fixture("pending-denied")
-    const scripted = runner(f, { beadStatus: "closed" })
-    const fake = createFakeContext({ directory: f.main })
-    let clock = NOW + 10
-    const pending = createPendingCleanup({
-      ctx: fake.context,
-      cwd: f.main,
-      env: f.env,
-      host: () => undefined,
-      canonical: (path) => path,
-      debounceMs: 1,
-      cleanup: { run: stripped(scripted.run), now: () => NOW + 10, bounds: HEAVY_FIXTURE_BOUNDS },
-      now: () => clock,
-    })
-    await pending.record(f.receipt, "ses_lead", [], { denied: true })
-    await pending.start()
-    fake.emit({ type: "session.idle", data: { sessionID: "ses_lead" } })
-    await pending.settle()
-    expect(existsSync(f.linked)).toBe(true)
-    expect(mutationCalls(scripted.calls)).toEqual([])
-
-    await pending.rearm({ receipt: f.receiptPath })
-    clock += 60_000
-    fake.emit({ type: "session.idle", data: { sessionID: "ses_lead" } })
-    await pending.settle()
-    expect(existsSync(f.linked)).toBe(false)
-    await pending.dispose()
-    rmSync(f.root, { recursive: true, force: true })
-  })
-})
-
-describe("pending cleanup fails closed on who is in the worktree", () => {
-  async function idleWith(name: string, list: (query: Record<string, unknown>) => Promise<unknown>) {
-    const f = fixture(name)
-    const scripted = runner(f, { beadStatus: "closed" })
-    const fake = createFakeContext({ directory: f.main })
-    ;(fake.context.session as unknown as { list: unknown }).list = list
-    const pending = createPendingCleanup({
-      ctx: fake.context,
-      cwd: f.main,
-      env: f.env,
-      host: () => undefined,
-      canonical: (path) => path,
-      debounceMs: 1,
-      cleanup: { run: stripped(scripted.run), now: () => NOW + 10, bounds: HEAVY_FIXTURE_BOUNDS },
-    })
-    await pending.record(f.receipt, "ses_lead", [])
-    await pending.start()
-    fake.emit({ type: "session.idle", data: { sessionID: "ses_lead" } })
-    await pending.settle()
-    const result = { removed: !existsSync(f.linked), mutations: mutationCalls(scripted.calls) }
-    await pending.dispose()
-    rmSync(f.root, { recursive: true, force: true })
-    return result
+    const common = repositoryContext(f.main)?.commonDir as string
+    const advance = (ms: number) => {
+      clock += ms
+    }
+    const idle = async (sessionID = "ses_lead") => {
+      fake.emit({ type: "session.idle", data: { sessionID } })
+      await pending.settle()
+    }
+    const claim = () =>
+      writeClaim(common, { directory: f.linked, branch: f.branch, sessionID: "ses_child", parentID: "ses_lead", createdAt: 1 })
+    const finish = async () => {
+      await pending.dispose()
+      rmSync(f.root, { recursive: true, force: true })
+    }
+    return { f, options, scripted, fake, pending, common, advance, idle, claim, finish }
   }
+  const removed = (h: Harness) => !existsSync(h.f.linked)
+  const synthetic = (h: Harness) => h.fake.calls.filter((entry) => entry.method === "session.synthetic")
 
-  test("a lookup error holds the worktree", async () => {
-    const result = await idleWith("pending-list-error", async () => {
-      throw new Error("boom")
+  test("a receipt landed with beads open is nudged once; after the beads close, the next idle removes the worktree", async () => {
+    const h = await harness("pending-retry", { beadStatus: "open" })
+    await h.pending.record(h.f.receipt, "ses_lead")
+    await h.pending.start()
+    await h.idle()
+    expect(synthetic(h)).toHaveLength(1)
+    expect(JSON.stringify(synthetic(h)[0]?.input)).toContain("Landed PR #17: close beads delivery-17")
+    await h.idle()
+    expect(synthetic(h)).toHaveLength(1)
+    expect(removed(h)).toBe(false)
+    h.options.beadStatus = "closed"
+    h.advance(60_000)
+    await h.idle()
+    expect(removed(h)).toBe(true)
+    expect(readLanding(h.common, h.f.receipt.receiptId)).toEqual({ kind: "missing" })
+    await h.finish()
+  })
+
+  test("a lane's claim keeps delivery from removing the worktree, however many turns end", async () => {
+    const h = await harness("pending-claimed")
+    await h.pending.record(h.f.receipt, "ses_lead")
+    h.claim()
+    await h.pending.start()
+    await h.idle()
+    h.advance(60_000)
+    await h.idle()
+    expect(removed(h)).toBe(false)
+    expect(mutationCalls(h.scripted.calls)).toEqual([])
+    expect(readLanding(h.common, h.f.receipt.receiptId).kind).toBe("present")
+    await h.finish()
+  })
+
+  test("an unreadable claim is not 'no claim': delivery keeps the worktree", async () => {
+    const h = await harness("pending-claim-corrupt")
+    await h.pending.record(h.f.receipt, "ses_lead")
+    mkdirSync(dirname(claimFile(h.common, h.f.linked)), { recursive: true })
+    writeFileSync(claimFile(h.common, h.f.linked), "{not json")
+    await h.pending.start()
+    await h.idle()
+    expect(removed(h)).toBe(false)
+    await h.finish()
+  })
+
+  test("a lane claimed after delivery's snapshot is not removed: ownership is checked again before the removal", async () => {
+    let claimed = false
+    let h: Harness | undefined
+    h = await harness("pending-claimed-late", {
+      before: (argv) => {
+        if (argv.includes("status") && !claimed) {
+          claimed = true
+          h?.claim()
+        }
+      },
     })
-    expect(result).toEqual({ removed: false, mutations: [] })
+    await h.pending.record(h.f.receipt, "ses_lead")
+    await h.pending.start()
+    await h.idle()
+    expect(claimed).toBe(true)
+    expect(removed(h)).toBe(false)
+    expect(mutationCalls(h.scripted.calls)).toEqual([])
+    await h.finish()
   })
 
-  test("an owner on the second page holds the worktree", async () => {
-    const result = await idleWith("pending-page-two", async (query) =>
-      query.cursor === undefined
-        ? { data: [{ id: "old", time: { busy: 1, idle: 2 } }], cursor: { next: "p2" } }
-        : { data: [{ id: "live", time: { busy: 9, idle: 2 } }] },
-    )
-    expect(result).toEqual({ removed: false, mutations: [] })
+  test("once the claim is gone the same receipt is removed", async () => {
+    const h = await harness("pending-claim-released")
+    await h.pending.record(h.f.receipt, "ses_lead")
+    h.claim()
+    await h.pending.start()
+    await h.idle()
+    expect(removed(h)).toBe(false)
+    removeClaim(h.common, h.f.linked)
+    h.advance(60_000)
+    await h.idle()
+    expect(removed(h)).toBe(true)
+    await h.finish()
   })
 
-  test("with no one in it (every page read) the worktree is removed", async () => {
-    const result = await idleWith("pending-page-clear", async (query) =>
-      query.cursor === undefined
-        ? { data: [{ id: "old", time: { busy: 1, idle: 2 } }], cursor: { next: "p2" } }
-        : { data: [{ id: "older", time: { busy: 1, idle: 2 } }] },
-    )
-    expect(result.removed).toBe(true)
-  })
-
-  test("a claim holds until 24 hours pass, then the retry removes the worktree", async () => {
-    const f = fixture("pending-claim-expiry")
-    const scripted = runner(f, { beadStatus: "closed" })
-    const fake = createFakeContext({ directory: f.main })
-    let clock = NOW + 10
-    const pending = createPendingCleanup({
-      ctx: fake.context,
-      cwd: f.main,
-      env: f.env,
-      host: () => undefined,
-      canonical: (path) => path,
-      debounceMs: 1,
-      cleanup: { run: stripped(scripted.run), now: () => NOW + 10, bounds: HEAVY_FIXTURE_BOUNDS },
-      now: () => clock,
+  describe("denials", () => {
+    test("a denied cleanup is not retried in the background", async () => {
+      const h = await harness("pending-denied")
+      await h.pending.record(h.f.receipt, "ses_lead", { denied: true })
+      await h.pending.start()
+      await h.idle()
+      expect(removed(h)).toBe(false)
+      expect(mutationCalls(h.scripted.calls)).toEqual([])
+      await h.finish()
     })
-    await pending.record(f.receipt, "ses_lead", [{ directory: f.linked, reason: "lane x still active" }])
-    await pending.start()
-    clock += 23 * 3_600_000
-    fake.emit({ type: "session.idle", data: { sessionID: "ses_lead" } })
-    await pending.settle()
-    expect(existsSync(f.linked)).toBe(true)
-    clock += 2 * 3_600_000
-    fake.emit({ type: "session.idle", data: { sessionID: "ses_lead" } })
-    await pending.settle()
-    expect(existsSync(f.linked)).toBe(false)
-    await pending.dispose()
-    rmSync(f.root, { recursive: true, force: true })
+
+    test("a refused explicit call keeps (and renews) the denial; idle still removes nothing", async () => {
+      const h = await harness("pending-denied-again")
+      await h.pending.record(h.f.receipt, "ses_lead", { denied: true })
+      const first = readLanding(h.common, h.f.receipt.receiptId)
+      h.advance(60_000)
+      await expect(
+        authorizeExplicit(h.pending, async () => {
+          throw new Error("denied by the user")
+        }, "ses_lead", { worktree: h.f.linked }),
+      ).rejects.toThrow("denied by the user")
+      const second = readLanding(h.common, h.f.receipt.receiptId)
+      expect(second.kind === "present" && second.value.denied !== undefined).toBe(true)
+      expect(second.kind === "present" && first.kind === "present" && (second.value.denied?.at ?? 0) > (first.value.denied?.at ?? 0)).toBe(true)
+      await h.pending.start()
+      await h.idle()
+      expect(removed(h)).toBe(false)
+      await h.finish()
+    })
+
+    test("a refused explicit call on a receipt with no record yet creates the denial", async () => {
+      const h = await harness("pending-denied-fresh")
+      await expect(
+        authorizeExplicit(h.pending, async () => {
+          throw new Error("no")
+        }, "ses_lead", { worktree: h.f.linked }),
+      ).rejects.toThrow("no")
+      expect(readLanding(h.common, h.f.receipt.receiptId)).toMatchObject({ kind: "present", value: { denied: { sessionID: "ses_lead" } } })
+      await h.finish()
+    })
+
+    test("an authorized explicit call re-arms it, and the next idle removes the worktree", async () => {
+      const h = await harness("pending-rearmed")
+      await h.pending.record(h.f.receipt, "ses_lead", { denied: true })
+      await authorizeExplicit(h.pending, async () => {}, "ses_lead", { worktree: h.f.linked })
+      expect(readLanding(h.common, h.f.receipt.receiptId)).toMatchObject({ kind: "present" })
+      const record = readLanding(h.common, h.f.receipt.receiptId)
+      expect(record.kind === "present" && record.value.denied).toBeFalsy()
+      await h.pending.start()
+      await h.idle()
+      expect(removed(h)).toBe(true)
+      await h.finish()
+    })
+  })
+
+  describe("it fails closed on who is in the worktree", () => {
+    const clear = (query: Record<string, unknown>) =>
+      Promise.resolve(
+        query.cursor === undefined
+          ? { data: [{ id: "old", time: { busy: 1, idle: 2 } }], cursor: { next: "p2" } }
+          : { data: [{ id: "older", time: { busy: 1, idle: 2 } }] },
+      )
+
+    test("a lookup error holds the worktree", async () => {
+      const h = await harness("pending-list-error", {
+        list: async () => {
+          throw new Error("boom")
+        },
+      })
+      await h.pending.record(h.f.receipt, "ses_lead")
+      await h.pending.start()
+      await h.idle()
+      expect(removed(h)).toBe(false)
+      expect(mutationCalls(h.scripted.calls)).toEqual([])
+      await h.finish()
+    })
+
+    test("an owner on the second page holds the worktree", async () => {
+      const h = await harness("pending-page-two", {
+        list: async (query) =>
+          query.cursor === undefined
+            ? { data: [{ id: "old", time: { busy: 1, idle: 2 } }], cursor: { next: "p2" } }
+            : { data: [{ id: "live", time: { busy: 9, idle: 2 } }] },
+      })
+      await h.pending.record(h.f.receipt, "ses_lead")
+      await h.pending.start()
+      await h.idle()
+      expect(removed(h)).toBe(false)
+      await h.finish()
+    })
+
+    test("with every page read and no owner the worktree is removed", async () => {
+      const h = await harness("pending-page-clear", { list: clear })
+      await h.pending.record(h.f.receipt, "ses_lead")
+      await h.pending.start()
+      await h.idle()
+      expect(removed(h)).toBe(true)
+      await h.finish()
+    })
   })
 
   test("without the experimental.idle hook the events still retry", async () => {
-    const f = fixture("pending-no-hook")
-    const scripted = runner(f, { beadStatus: "closed" })
-    const fake = createFakeContext({ directory: f.main })
-    const session = fake.context.session as unknown as { hook: (name: string, callback: unknown) => Promise<unknown> }
-    const original = session.hook.bind(session)
-    session.hook = (name, callback) =>
-      name === "experimental.idle" ? Promise.reject(new Error("unknown hook")) : original(name, callback)
-    const pending = createPendingCleanup({
-      ctx: fake.context,
-      cwd: f.main,
-      env: f.env,
-      host: () => undefined,
-      canonical: (path) => path,
-      debounceMs: 1,
-      cleanup: { run: stripped(scripted.run), now: () => NOW + 10, bounds: HEAVY_FIXTURE_BOUNDS },
+    const h = await harness("pending-no-hook", { hook: false })
+    await h.pending.record(h.f.receipt, "ses_lead")
+    await h.pending.start()
+    expect(h.fake.hooks("session")).not.toContain("experimental.idle")
+    h.fake.emit({ type: "session.execution.succeeded", data: { sessionID: "ses_lead" } })
+    await h.pending.settle()
+    expect(removed(h)).toBe(true)
+    await h.finish()
+  })
+
+  test("receipts that need no attempt do not starve one that does", async () => {
+    const h = await harness("pending-window", { maxPerPass: 1 })
+    const key = repoKey(h.f.main) as string
+    const parked = join(h.f.root, "parked worktree")
+    mkdirSync(parked)
+    const newer = buildReceipt({
+      now: NOW + 5000,
+      emitter: h.f.receipt.emitter,
+      repo: h.f.receipt.repo,
+      pr: { ...h.f.receipt.pr, number: 18 },
+      branch: { ...h.f.receipt.branch, name: "feat/parked" },
+      worktree: { ...h.f.receipt.worktree, path: parked },
+      beads: h.f.receipt.beads,
+      proof: h.f.receipt.proof,
+      outcome: "landed",
     })
-    await pending.record(f.receipt, "ses_lead", [])
-    await pending.start()
-    expect(fake.hooks("session")).not.toContain("experimental.idle")
-    fake.emit({ type: "session.execution.succeeded", data: { sessionID: "ses_lead" } })
-    await pending.settle()
-    expect(existsSync(f.linked)).toBe(false)
-    await pending.dispose()
-    rmSync(f.root, { recursive: true, force: true })
+    writeReceipt(newer, receiptDirectory(h.f.env, key))
+    await h.pending.record(newer, "ses_lead", { denied: true })
+    await h.pending.record(h.f.receipt, "ses_lead")
+    await h.pending.start()
+    await h.idle()
+    expect(removed(h)).toBe(true)
+    expect(existsSync(parked)).toBe(true)
+    await h.finish()
+  })
+
+  test("a worktree that is already gone is done and takes no slot", async () => {
+    const h = await harness("pending-gone", { maxPerPass: 1 })
+    const key = repoKey(h.f.main) as string
+    const gone = buildReceipt({
+      now: NOW + 5000,
+      emitter: h.f.receipt.emitter,
+      repo: h.f.receipt.repo,
+      pr: { ...h.f.receipt.pr, number: 19 },
+      branch: { ...h.f.receipt.branch, name: "feat/gone" },
+      worktree: { ...h.f.receipt.worktree, path: join(h.f.root, "no such worktree") },
+      beads: h.f.receipt.beads,
+      proof: h.f.receipt.proof,
+      outcome: "landed",
+    })
+    writeReceipt(gone, receiptDirectory(h.f.env, key))
+    await h.pending.record(gone, "ses_lead")
+    await h.pending.start()
+    await h.idle()
+    expect(removed(h)).toBe(true)
+    expect(readLanding(h.common, gone.receiptId)).toEqual({ kind: "missing" })
+    expect(existsSync(landingFile(h.common, gone.receiptId))).toBe(false)
+    await h.finish()
   })
 })

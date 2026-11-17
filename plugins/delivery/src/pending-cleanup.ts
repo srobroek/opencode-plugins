@@ -1,5 +1,6 @@
 /**
- * Cleanup that did not finish inside `delivery_land` is retried by delivery itself.
+ * Cleanup that did not finish inside `delivery_land` is retried by delivery itself, for
+ * worktrees nothing else owns.
  *
  * With an active Beads ledger the beads close only after the land, so inline cleanup is
  * always skipped there; relying on the agent to call `delivery_cleanup` afterwards is the
@@ -8,18 +9,32 @@
  * `experimental.idle` hook), with the same proofs `delivery_cleanup` applies, and nudges the
  * session that landed it once while its beads are still open.
  *
- * A worktree another plugin claimed at land time (the `cleanupHold` the input carried) is
- * left to that plugin until the claim expires: it removes the worktree under its own rules
- * and the receipt is then done. Delivery does not know who the claimant is.
+ * One remover per worktree. A lane's worktree is owned by `subagent-worktree`, which writes a
+ * claim file under the git common directory. While a claim exists (or cannot be read) delivery
+ * never removes the worktree: it records the landing, and any denial, in a landing record on
+ * disk next to the claim, and the owner reads that record before it acts. For a worktree no one
+ * claims, ownership (the claim file and every page of the sessions in the directory) is checked
+ * again immediately before the removal, after all proofs.
  *
  * `pendingCleanupAction` is the pure decision; `createPendingCleanup` gathers the facts and
  * carries it out.
  */
 
 import { existsSync } from "node:fs"
-import { basename, resolve } from "node:path"
+import { resolve } from "node:path"
 import type { Context } from "@opencode/plugin/promise/plugin"
-import type { CleanupHold } from "./auto-cleanup.ts"
+import {
+  canonicalDirectory,
+  type LandingRecord,
+  landingsFor,
+  listLandings,
+  type Ownership,
+  ownershipOf,
+  readClaim,
+  removeLanding,
+  writeLanding,
+} from "@srobroek/opencode-lib/worktree-claims"
+import { ownershipDeferral } from "./auto-cleanup.ts"
 import { type CleanupDeps, type CleanupResult, cleanupDelivery, type HostWorktrees, ledgerState } from "./cleanup.ts"
 import {
   closeoutCommands,
@@ -27,11 +42,10 @@ import {
   listReceipts,
   receiptDirectory,
   repoKey,
+  repositoryContext,
 } from "./landing-receipt.ts"
 
-/** A claim by another plugin lapses after this, so a vanished claimant cannot strand a worktree. */
-export const CLAIM_TTL_MS = 24 * 3_600_000
-/** The same receipt is not tried twice within this window: an event and the idle hook fire for one turn end. */
+/** The same receipt is not retried within this window: an event and the idle hook fire for one turn end. */
 export const RETRY_WINDOW_MS = 5_000
 export const DEBOUNCE_MS = 2_000
 const MAX_PER_PASS = 20
@@ -40,15 +54,15 @@ const MAX_SESSION_PAGES = 20
 export type PendingAction = "retry" | "nudge" | "done" | "hold" | "skip"
 
 export type PendingFacts = {
-  /** The receipt's worktree is already gone, or a later receipt supersedes this one. */
+  /** The receipt's worktree is already gone. */
   worktreeGone: boolean
   /** Cleanup already succeeded for this receipt in this process. */
   done: boolean
-  /** Why a claimant or a running session keeps the worktree; undefined when nothing does. */
+  /** Why an owner or a running session keeps the worktree; undefined when nothing does. */
   hold: string | undefined
   /** `open`: a bead is not closed yet. `closed`: all are, or the ledger is inactive. */
   beads: "open" | "closed" | "unknown"
-  /** Tried within {@link RETRY_WINDOW_MS}. */
+  /** Retried within {@link RETRY_WINDOW_MS}. */
   recentlyTried: boolean
   /** This turn end belongs to the session that ran `delivery_land`. */
   landingSession: boolean
@@ -56,7 +70,7 @@ export type PendingFacts = {
   idle: boolean
   /** The nudge for this receipt was already sent. */
   nudged: boolean
-  /** The inline cleanup was denied; only an explicit `delivery_cleanup` call re-arms it. */
+  /** The cleanup was denied; only an authorized explicit `delivery_cleanup` call re-arms it. */
   denied: boolean
 }
 
@@ -100,28 +114,51 @@ export function pendingReceipts(receipts: readonly LandingReceipt[]): LandingRec
   )
 }
 
-/** What delivery remembers about a landing, beyond the receipt. */
-export type PendingMeta = {
-  /** The session that ran `delivery_land`. */
-  sessionID?: string
-  /** Worktrees another plugin claimed, and when. */
-  claims?: CleanupHold[]
-  claimedAt?: number
-  nudged?: boolean
-  /** The inline cleanup was denied (when, and in which session). */
-  denied?: { at: number; sessionID: string }
+/**
+ * Which receipts one pass looks at. Receipts that need no attempt (denied, or owned by a lane)
+ * do not take a slot, and the rest are ordered by when they were last looked at, so a few that
+ * stay held cannot starve the others. Pure.
+ */
+export function selectWindow<T extends { receiptId: string }>(
+  candidates: readonly T[],
+  options: { skip: (candidate: T) => boolean; lastAttempt: (candidate: T) => number | undefined; limit: number },
+): T[] {
+  return candidates
+    .filter((candidate) => !options.skip(candidate))
+    .map((candidate, index) => ({ candidate, index, at: options.lastAttempt(candidate) ?? Number.NEGATIVE_INFINITY }))
+    .sort((a, b) => (a.at === b.at ? a.index - b.index : a.at < b.at ? -1 : 1))
+    .slice(0, options.limit)
+    .map((entry) => entry.candidate)
 }
 
-const metaKey = (receiptId: string) => `delivery/pending/${receiptId}`
+/**
+ * `authorize` for an explicit `delivery_cleanup` call. A refused call is a new denial, whatever
+ * came before; an earlier denial is cleared only once this call is authorized.
+ */
+export async function authorizeExplicit(
+  pending: { deny: (worktree: string, sessionID: string) => Promise<void>; arm: (worktree: string) => Promise<void> } | undefined,
+  ask: (request: { worktree: string }) => Promise<void>,
+  sessionID: string,
+  request: { worktree: string },
+): Promise<void> {
+  try {
+    await ask(request)
+  } catch (error) {
+    await pending?.deny(request.worktree, sessionID).catch(() => {})
+    throw error
+  }
+  await pending?.arm(request.worktree).catch(() => {})
+}
 
 export type PendingDeps = {
   ctx: Context
   cwd: string
   env: NodeJS.ProcessEnv
   host: () => HostWorktrees | undefined
-  canonical: (path: string) => string
   now?: () => number
   debounceMs?: number
+  /** Receipts looked at per pass. */
+  maxPerPass?: number
   /** Test seam: the runner, bounds and clock the cleanup proofs use. */
   cleanup?: Pick<CleanupDeps, "run" | "bounds" | "now">
 }
@@ -130,8 +167,10 @@ export function createPendingCleanup(deps: PendingDeps) {
   const { ctx, cwd, env } = deps
   const now = deps.now ?? Date.now
   const debounceMs = deps.debounceMs ?? DEBOUNCE_MS
+  const limit = deps.maxPerPass ?? MAX_PER_PASS
   const doneIds = new Set<string>()
-  const triedAt = new Map<string, number>()
+  const retriedAt = new Map<string, number>()
+  const attemptedAt = new Map<string, number>()
   const timers = new Map<string, ReturnType<typeof setTimeout>>()
   const pendingIdle = new Set<string>()
   let disposed = false
@@ -142,37 +181,81 @@ export function createPendingCleanup(deps: PendingDeps) {
     return next
   }
 
-  const readMeta = async (receiptId: string): Promise<PendingMeta> => {
-    const value = await ctx.storage.get(metaKey(receiptId)).catch(() => undefined)
-    return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as PendingMeta) : {}
-  }
-  const writeMeta = (receiptId: string, meta: PendingMeta) => ctx.storage.set(metaKey(receiptId), meta as never)
+  /** The repository's git common directory, where claims and landing records live; null if it cannot be resolved. */
+  const commonDir = (): string | null => repositoryContext(cwd)?.commonDir ?? null
 
-  /** `delivery_land` finished without removing the worktree: remember who landed it and who claimed it. */
-  const record = async (
-    receipt: LandingReceipt,
-    sessionID: string,
-    claims: readonly CleanupHold[],
-    outcome: { denied?: boolean } = {},
-  ) => {
+  /** Who may remove `path`: a lane's claim means its owner only; an unreadable claim means no one. */
+  const ownership = (path: string): Ownership => {
+    const common = commonDir()
+    if (common === null) return { owner: "unknown", reason: "the git common directory could not be resolved" }
+    return ownershipOf(readClaim(common, path))
+  }
+
+  /** Landing records by receipt id; `unreadable` when any record could not be read. */
+  const landings = (): { byReceipt: Map<string, LandingRecord>; unreadable: boolean; common: string | null } => {
+    const common = commonDir()
+    if (common === null) return { byReceipt: new Map(), unreadable: true, common }
+    const listed = listLandings(common)
+    return { byReceipt: new Map(listed.records.map((record) => [record.receiptId, record])), unreadable: listed.unreadable, common }
+  }
+
+  const write = (receiptId: string, update: (record: LandingRecord | undefined) => LandingRecord | undefined) => {
+    const { byReceipt, common } = landings()
+    if (common === null) return
+    const next = update(byReceipt.get(receiptId))
+    if (next === undefined) removeLanding(common, receiptId)
+    else writeLanding(common, next)
+  }
+
+  /** `delivery_land` finished without removing the worktree: record the landing for whoever removes it. */
+  const record = async (receipt: LandingReceipt, sessionID: string, outcome: { denied?: boolean } = {}) => {
     const path = receipt.worktree.path
-    const mine = path === null ? [] : claims.filter((hold) => deps.canonical(hold.directory) === deps.canonical(path))
-    await writeMeta(receipt.receiptId, {
+    if (path === null) return
+    write(receipt.receiptId, (existing) => ({
+      receiptId: receipt.receiptId,
+      worktree: path,
+      headRefOid: receipt.pr.headRefOid,
       sessionID,
-      ...(mine.length > 0 ? { claims: mine, claimedAt: now() } : {}),
-      ...(outcome.denied ? { denied: { at: now(), sessionID } } : {}),
-    })
+      landedAt: existing?.landedAt ?? now(),
+      ...(existing?.nudged ? { nudged: true } : {}),
+      ...(outcome.denied ? { denied: { at: now(), sessionID } } : existing?.denied ? { denied: existing.denied } : {}),
+    }))
   }
 
-  /** A claim is a hold only while it is fresh; a running session in the directory is a hold too. */
-  const holdFor = async (receipt: LandingReceipt, meta: PendingMeta): Promise<string | undefined> => {
-    if (meta.claims && meta.claims.length > 0 && meta.claimedAt !== undefined && now() - meta.claimedAt < CLAIM_TTL_MS) {
-      return meta.claims[0]?.reason
+  /** Receipts, newest first, whose worktree is `path`. */
+  const receiptsFor = (path: string): LandingReceipt[] => {
+    const key = repoKey(cwd)
+    if (key === null) return []
+    const want = canonicalDirectory(path)
+    return pendingReceipts(listReceipts(resolve(receiptDirectory(env, key)))).filter(
+      (receipt) => receipt.worktree.path !== null && canonicalDirectory(receipt.worktree.path) === want,
+    )
+  }
+
+  /** An explicit `delivery_cleanup` for `worktree` was refused: that is a (new) denial, whatever came before. */
+  const deny = async (worktree: string, sessionID: string) => {
+    for (const receipt of receiptsFor(worktree)) await record(receipt, sessionID, { denied: true })
+  }
+
+  /** An explicit `delivery_cleanup` for `worktree` was authorized: only now is an earlier denial cleared. */
+  const arm = async (worktree: string) => {
+    const { byReceipt } = landings()
+    for (const entry of landingsFor([...byReceipt.values()], worktree)) {
+      if (entry.denied === undefined) continue
+      const { denied: _denied, ...rest } = entry
+      write(entry.receiptId, () => rest)
     }
-    const path = receipt.worktree.path
-    if (path === null) return undefined
+  }
+
+  /**
+   * Whether `path` may be removed by delivery right now: no lane claims it (or can be read to
+   * say so) and no session is running in it. Every page of the sessions is read; a lookup that
+   * fails or is incomplete holds. Returns the reason to hold, or undefined.
+   */
+  const holdFor = async (path: string): Promise<string | undefined> => {
+    const owned = ownershipDeferral(ownership(path))
+    if (owned !== undefined) return owned
     const projectID = (ctx.location as { project?: { id?: string } }).project?.id
-    // Fail closed: a lookup that errors, or whose pages cannot all be read, holds the worktree.
     try {
       let query: Record<string, unknown> = {
         ...(projectID === undefined ? {} : { project: projectID }),
@@ -198,6 +281,12 @@ export function createPendingCleanup(deps: PendingDeps) {
     }
   }
 
+  /** `authorize` for a removal delivery makes on its own: runs after every proof, right before the removal. */
+  const guard = async (request: { worktree: string }) => {
+    const hold = await holdFor(request.worktree)
+    if (hold !== undefined) throw new Error(`held: ${hold}`)
+  }
+
   /** One pass over this repository's pending receipts for a finished turn of `sessionID`. */
   const run = async (sessionID: string, idle: boolean) => {
     const key = repoKey(cwd)
@@ -205,73 +294,73 @@ export function createPendingCleanup(deps: PendingDeps) {
     const directory = resolve(receiptDirectory(env, key))
     let pending: LandingReceipt[]
     try {
-      pending = pendingReceipts(listReceipts(directory)).slice(0, MAX_PER_PASS)
+      pending = pendingReceipts(listReceipts(directory))
     } catch {
       return
     }
+    const recorded = landings()
+    // Records of receipts that are no longer pending are stale: drop them.
+    if (recorded.common !== null && !recorded.unreadable) {
+      const live = new Set(pending.map((receipt) => receipt.receiptId))
+      for (const id of recorded.byReceipt.keys()) if (!live.has(id)) removeLanding(recorded.common, id)
+    }
+    // A worktree that is gone is done, whatever the window holds.
+    const present: LandingReceipt[] = []
     for (const receipt of pending) {
+      if (receipt.worktree.path !== null && !existsSync(receipt.worktree.path)) {
+        doneIds.add(receipt.receiptId)
+        if (recorded.common !== null) removeLanding(recorded.common, receipt.receiptId)
+      } else if (!doneIds.has(receipt.receiptId)) present.push(receipt)
+    }
+    const window = selectWindow(present, {
+      // Denied and lane-owned receipts need no attempt; they must not take a slot.
+      skip: (receipt) =>
+        recorded.byReceipt.get(receipt.receiptId)?.denied !== undefined ||
+        (receipt.worktree.path !== null && ownership(receipt.worktree.path).owner !== "none"),
+      lastAttempt: (receipt) => attemptedAt.get(receipt.receiptId),
+      limit,
+    })
+    for (const receipt of window) {
       if (disposed) return
+      attemptedAt.set(receipt.receiptId, now())
       const path = resolve(directory, `${receipt.receiptId}.json`)
-      const meta = await readMeta(receipt.receiptId)
-      const recentlyTried = now() - (triedAt.get(receipt.receiptId) ?? Number.NEGATIVE_INFINITY) < RETRY_WINDOW_MS
-      const worktreeGone = receipt.worktree.path !== null && !existsSync(receipt.worktree.path)
-      const hold = worktreeGone ? undefined : await holdFor(receipt, meta)
-      const beads = worktreeGone || hold !== undefined || recentlyTried ? "unknown" : await ledgerState(receipt, cwd, path, deps.cleanup?.run)
+      const meta = recorded.byReceipt.get(receipt.receiptId)
+      const recentlyTried = now() - (retriedAt.get(receipt.receiptId) ?? Number.NEGATIVE_INFINITY) < RETRY_WINDOW_MS
+      const worktree = receipt.worktree.path as string
+      const hold = await holdFor(worktree)
+      const beads = hold !== undefined || recentlyTried ? "unknown" : await ledgerState(receipt, cwd, path, deps.cleanup?.run)
       const decision = pendingCleanupAction(receipt, {
-        worktreeGone,
+        worktreeGone: false,
         done: doneIds.has(receipt.receiptId),
         hold,
         beads,
         recentlyTried,
-        landingSession: meta.sessionID === sessionID,
+        landingSession: meta?.sessionID === sessionID,
         idle,
-        nudged: meta.nudged === true,
-        denied: meta.denied !== undefined,
+        nudged: meta?.nudged === true,
+        denied: false,
       })
-      if (decision.action === "done") {
-        doneIds.add(receipt.receiptId)
-        await ctx.storage.remove(metaKey(receipt.receiptId)).catch(() => {})
-      } else if (decision.action === "nudge") {
+      if (decision.action === "nudge") {
         const sent = await ctx.session.synthetic({ sessionID, text: nudgeText(receipt, path) } as never).then(
           () => true,
           () => false,
         )
-        if (sent) await writeMeta(receipt.receiptId, { ...meta, nudged: true })
+        if (sent && meta) write(receipt.receiptId, (existing) => (existing ? { ...existing, nudged: true } : existing))
       } else if (decision.action === "retry") {
-        triedAt.set(receipt.receiptId, now())
+        retriedAt.set(receipt.receiptId, now())
         let result: CleanupResult
         try {
-          result = await cleanupDelivery({ receipt: path }, cwd, { env, host: deps.host(), ...deps.cleanup })
+          // `guard` re-checks ownership after the proofs and before the removal.
+          result = await cleanupDelivery({ receipt: path }, cwd, { env, host: deps.host(), authorize: guard, ...deps.cleanup })
         } catch {
           continue
         }
-        // A refusal is silent: the proofs say what is missing and the next turn end tries again.
+        // A refusal is silent: the proofs say what is missing and a later turn end tries again.
         if (result.ok) {
           doneIds.add(receipt.receiptId)
-          await ctx.storage.remove(metaKey(receipt.receiptId)).catch(() => {})
+          if (recorded.common !== null) removeLanding(recorded.common, receipt.receiptId)
         }
       }
-    }
-  }
-
-  /** An explicit `delivery_cleanup` call re-arms the receipts it names (the newest one without a selector). */
-  const rearm = async (params: { receipt?: string; pr?: number; branch?: string }) => {
-    const key = repoKey(cwd)
-    if (key === null) return
-    const directory = resolve(receiptDirectory(env, key))
-    const wanted = params.receipt === undefined ? undefined : basename(params.receipt, ".json")
-    const matches = pendingReceipts(listReceipts(directory)).filter(
-      (receipt) =>
-        (wanted === undefined || receipt.receiptId === wanted) &&
-        (params.pr === undefined || receipt.pr.number === params.pr) &&
-        (params.branch === undefined || receipt.branch.name === params.branch),
-    )
-    const selected = params.receipt === undefined && params.pr === undefined && params.branch === undefined ? matches.slice(0, 1) : matches
-    for (const receipt of selected) {
-      const meta = await readMeta(receipt.receiptId)
-      if (meta.denied === undefined) continue
-      const { denied: _denied, ...rest } = meta
-      await writeMeta(receipt.receiptId, rest)
     }
   }
 
@@ -281,21 +370,17 @@ export function createPendingCleanup(deps: PendingDeps) {
   /** Debounced per session: `succeeded` and `idle` for one turn are one pass. */
   const schedule = (sessionID: string, idle: boolean) => {
     if (disposed) return
-    const held = timers.get(sessionID)
-    if (held !== undefined) {
-      if (idle) pendingIdle.add(sessionID)
-      return
-    }
     if (idle) pendingIdle.add(sessionID)
+    if (timers.has(sessionID)) return
     timers.set(
       sessionID,
       setTimeout(() => {
         timers.delete(sessionID)
-        const wasIdle = pendingIdle.delete(sessionID)
-        void retryNow(sessionID, wasIdle)
+        void retryNow(sessionID, pendingIdle.delete(sessionID))
       }, debounceMs),
     )
   }
+
   const handleEvent = (raw: unknown) => {
     const event = raw as { type?: string; data?: { sessionID?: unknown } }
     const sessionID = event.data?.sessionID
@@ -350,5 +435,5 @@ export function createPendingCleanup(deps: PendingDeps) {
     await chain
   }
 
-  return { start, dispose, record, rearm, retryNow, handleEvent, settle }
+  return { start, dispose, record, deny, arm, ownership, guard, retryNow, handleEvent, settle }
 }

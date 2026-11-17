@@ -81,22 +81,32 @@ Inputs: `pr`, and when needed `merge_method` (`squash` by default, `merge`,
   attempted (`cleanup.skipped`), because it proves the beads are closed and those
   closes come first. `autoCleanup: false` keeps the two-call flow.
   Cleanup still refuses a worktree that moved past the landed head (`worktree.HEAD`,
-  `worktree.branch`). An integration can hold a worktree back by adding
-  `cleanupHold: [{ directory, reason }]` to the `delivery_land` input from an
-  `execute.before` hook; the result then reports `cleanup: { ok: false, deferred }`
-  and `next` keeps `delivery_cleanup`. `subagent-worktree` does this for a lane whose
-  child is still active.
-- With an active ledger inline cleanup cannot run, so delivery retries it itself: after
-  each `session.execution.succeeded`, `session.execution.failed` and `session.idle`
-  (debounced 2 s per session, plus the `experimental.idle` hook when the host has it) it
-  re-runs `delivery_cleanup`'s proofs for this repository's receipts whose worktree is
-  still there, at most once per receipt every 5 s. Open beads make the proof refuse and
-  the retry is silent; once they close, the next turn end removes the worktree. The
-  session that ran `delivery_land` gets one reminder, when it goes idle with beads still
-  open, naming the beads and their close commands. A worktree an integration claimed with
-  `cleanupHold` at land time (or one a running session sits in) is left alone; a claim
-  lapses after 24 hours. The retry runs only while `autoCleanup` is on; the land prompt
-  is the user's approval for it.
+  `worktree.branch`) or that is not clean (changes, an operation in progress, a stash).
+- **One remover per worktree.** A worktree that `subagent-worktree` created as a lane is
+  claimed by a file under the git common directory
+  (`<common>/opencode/lane-claims/<sha1 of the directory>.json`, which every worktree of
+  the repository shares and neither plugin has to import the other to read). While a claim
+  exists, or cannot be read, delivery never removes that worktree, inline or in the
+  background. It writes what it knows to `<common>/opencode/landings/<receiptId>.json`
+  (the landed head, the landing session, a denial) for the owner to read, and the result
+  reports `cleanup: { ok: false, deferred: "owned by subagent-worktree lane" }`.
+- With an active ledger inline cleanup cannot run, so delivery retries it itself for
+  worktrees nothing owns: after each `session.execution.succeeded`,
+  `session.execution.failed` and `session.idle` (debounced 2 s per session, plus the
+  `experimental.idle` hook when the host has it) it re-runs `delivery_cleanup`'s proofs
+  for this repository's receipts whose worktree is still there, at most once per receipt
+  every 5 s and at most 20 receipts per pass, least recently looked at first (receipts that
+  are denied or owned take no slot). Open beads make the proof refuse and the retry is
+  silent; once they close, the next turn end removes the worktree. Immediately before the
+  removal, after the proofs, it checks ownership again (the claim file, and every page of
+  the sessions in the directory; a lookup that fails or is incomplete holds). The session
+  that ran `delivery_land` gets one reminder, when it goes idle with beads still open,
+  naming the beads and their close commands. The retry runs only while `autoCleanup` is
+  on, and no prompt is shown for it.
+- **A refusal sticks.** If the inline cleanup is refused at its prompt, the landing record
+  keeps `denied` and nothing retries it. A later explicit `delivery_cleanup` call that is
+  authorized clears it; one that is refused records a fresh denial and leaves the old one
+  in place until then.
 - If the forge accepted the merge but a later step refused, the result has
   `mergeIssued: true` and no receipt. Run the tool again with the same inputs: it
   sees the PR as MERGED, merges nothing, and writes the receipt.

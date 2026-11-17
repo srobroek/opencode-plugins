@@ -1,5 +1,4 @@
-import { readFileSync, realpathSync } from "node:fs"
-import { resolve } from "node:path"
+import { readFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import { Plugin } from "@opencode/plugin"
 import type { Context } from "@opencode/plugin/promise/plugin"
@@ -21,14 +20,13 @@ import {
   type CleanupReport,
   inlineCleanupDecision,
   nextAfterCleanup,
-  readCleanupHolds,
   runInlineCleanup,
   textAfterCleanup,
 } from "./auto-cleanup.ts"
 import { type CleanupResult, cleanupDelivery, type DeliveryCleanupParams, type HostWorktrees } from "./cleanup.ts"
 import { MERGE_METHODS } from "./forge-adapter.ts"
 import { type LandOutcome, type LandParams, landPullRequest } from "./land.ts"
-import { createPendingCleanup, type PendingDeps } from "./pending-cleanup.ts"
+import { authorizeExplicit, createPendingCleanup, type PendingDeps } from "./pending-cleanup.ts"
 import { malformedNote, parseVerdict } from "./verdict.ts"
 
 export {
@@ -141,15 +139,6 @@ const LAND_INPUT = {
     requireGreenChecks: { type: "boolean", description: "Require every check on the head to pass" },
     setupAutoDelete: { type: "boolean", description: "Enable deletion-on-merge after the landing is proved" },
     worktree: { type: "string", description: "Landed worktree for cleanup (HEAD = PR head); inferred if omitted" },
-    cleanupHold: {
-      type: "array",
-      description: "Set by integrations: worktrees still in use. Holds inline cleanup only.",
-      items: {
-        type: "object",
-        properties: { directory: { type: "string" }, reason: { type: "string" } },
-        required: ["directory", "reason"],
-      },
-    },
     beadId: {
       type: "string",
       description: "Bead this closes when the branch is not <omp|opencode>/agent/<bead-id>; required then on a ledger",
@@ -287,15 +276,6 @@ export function hostWorktrees(ctx: Context): HostWorktrees | undefined {
   }
 }
 
-/** The real path when it exists, else the resolved one: holds and receipts compare by this. */
-function canonicalPath(path: string): string {
-  try {
-    return realpathSync(path)
-  } catch {
-    return resolve(path)
-  }
-}
-
 function environment(options: DeliveryOptions): NodeJS.ProcessEnv {
   return options.receiptsDirectory === undefined
     ? process.env
@@ -338,7 +318,6 @@ export async function setupDelivery(
         cwd: directory,
         env: environment(options),
         host: () => hostWorktrees(ctx),
-        canonical: canonicalPath,
         ...overrides,
       })
     : undefined
@@ -361,11 +340,11 @@ export async function setupDelivery(
           const output = landOutput(outcome)
           return { output, content: outcome.text, metadata: metadataOf(output) }
         }
+        const receiptPath = outcome.receipt.worktree.path
         const decision = inlineCleanupDecision(
           outcome.receipt,
           options.autoCleanup,
-          readCleanupHolds(input),
-          canonicalPath,
+          receiptPath === null || pending === undefined ? { owner: "none" } : pending.ownership(receiptPath),
         )
         // A refused prompt is a denial: recorded, and never retried without a new explicit call.
         let denied = false
@@ -383,6 +362,8 @@ export async function setupDelivery(
                     denied = true
                     throw error
                   }
+                  // After the prompt and every proof, right before the removal: ownership again.
+                  await pending?.guard(request)
                 },
                 host: hostWorktrees(ctx),
               })
@@ -395,7 +376,7 @@ export async function setupDelivery(
         if (denied && cleanup !== undefined) cleanup.denied = true
         // Cleanup that did not finish stays pending: delivery retries it when a turn ends.
         if (pending !== undefined && cleanup?.ok !== true) {
-          await pending.record(outcome.receipt, context.sessionID, readCleanupHolds(input), { denied }).catch(() => {})
+          await pending.record(outcome.receipt, context.sessionID, { denied }).catch(() => {})
         }
         const output = landOutput(outcome, cleanup)
         const content = cleanup === undefined ? outcome.text : textAfterCleanup(outcome.text, cleanup)
@@ -409,11 +390,10 @@ export async function setupDelivery(
       output: CLEANUP_OUTPUT,
       execute: async (input, context) => {
         const ask = asserter(ctx, context, CLEANUP_ACTION)
-        await pending?.rearm(input as DeliveryCleanupParams).catch(() => {})
         const result = await cleanupDelivery(input as DeliveryCleanupParams, directory, {
           env: environment(options),
           signal: context.signal,
-          authorize: (request) => ask(request.worktree, { ...request }),
+          authorize: (request) => authorizeExplicit(pending, (req) => ask(req.worktree, { ...request }), context.sessionID, request),
           host: hostWorktrees(ctx),
         })
         const output = cleanupOutput(result)

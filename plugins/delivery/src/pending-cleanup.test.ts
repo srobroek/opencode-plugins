@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import type { LandingReceipt } from "./landing-receipt.ts"
-import { nudgeText, type PendingFacts, pendingCleanupAction, pendingReceipts } from "./pending-cleanup.ts"
+import { nudgeText, type PendingFacts, pendingCleanupAction, pendingReceipts, selectWindow } from "./pending-cleanup.ts"
 
 const receipt = (over: Record<string, unknown> = {}) =>
   ({
@@ -69,4 +69,28 @@ test("the nudge names the beads and their close-out commands", () => {
   expect(text).toContain("Landed PR #17: close beads delivery-17 (commands: bd update delivery-17")
   expect(text).toContain("bd close delivery-17")
   expect(text).toContain("so its worktree can be cleaned up.")
+})
+
+describe("selectWindow", () => {
+  const ids = (count: number) => Array.from({ length: count }, (_, index) => ({ receiptId: `r${index + 1}` }))
+
+  test("25 receipts, 20 of them denied or owned: the 25th is still attempted", () => {
+    const all = ids(25)
+    const parked = new Set(all.slice(0, 20).map((entry) => entry.receiptId))
+    const picked = selectWindow(all, { skip: (entry) => parked.has(entry.receiptId), lastAttempt: () => undefined, limit: 20 })
+    expect(picked.map((entry) => entry.receiptId)).toEqual(["r21", "r22", "r23", "r24", "r25"])
+  })
+
+  test("the window rotates: what was looked at last time goes to the back", () => {
+    const all = ids(5)
+    const seen = new Map<string, number>()
+    const first = selectWindow(all, { skip: () => false, lastAttempt: (entry) => seen.get(entry.receiptId), limit: 2 })
+    expect(first.map((entry) => entry.receiptId)).toEqual(["r1", "r2"])
+    for (const entry of first) seen.set(entry.receiptId, 1)
+    const second = selectWindow(all, { skip: () => false, lastAttempt: (entry) => seen.get(entry.receiptId), limit: 2 })
+    expect(second.map((entry) => entry.receiptId)).toEqual(["r3", "r4"])
+    for (const entry of second) seen.set(entry.receiptId, 2)
+    const third = selectWindow(all, { skip: () => false, lastAttempt: (entry) => seen.get(entry.receiptId), limit: 2 })
+    expect(third.map((entry) => entry.receiptId)).toEqual(["r5", "r1"])
+  })
 })
