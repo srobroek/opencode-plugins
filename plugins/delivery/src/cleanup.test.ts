@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test"
+import { afterAll, afterEach, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { outsideLocks } from "@srobroek/opencode-lib/lease-lock"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
 import {
@@ -63,6 +63,15 @@ import {
 } from "./landing-receipt.ts"
 
 const ROOTS: string[] = []
+// Each test's scratch is removed when it ends. Removing every fixture of the file in one
+// afterAll took over a minute where each unlink is endpoint-scanned, past the hook timeout.
+afterEach(() => {
+  const template = normalTemplateCache?.root
+  for (const root of ROOTS.splice(0)) {
+    if (root === template) ROOTS.push(root)
+    else rmSync(root, { recursive: true, force: true })
+  }
+})
 afterAll(() => {
   for (const root of ROOTS) rmSync(root, { recursive: true, force: true })
 })
