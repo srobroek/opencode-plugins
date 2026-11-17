@@ -123,6 +123,7 @@ export type Overrides = {
   sweepDelayMs?: number
   age?: (directory: string) => Promise<number | undefined>
   commonDir?: (directory: string) => Promise<string | undefined>
+  lock?: Parameters<typeof createLifecycle>[0]["lock"]
 }
 
 const directoryExists = async (path: string) => {
@@ -162,6 +163,7 @@ export function createLanes(
   sweepDelayMs?: number,
   age?: (directory: string) => Promise<number | undefined>,
   commonDirOverride?: (directory: string) => Promise<string | undefined>,
+  lock?: Parameters<typeof createLifecycle>[0]["lock"],
 ) {
   const load = async (child: string) => parseLane(await ctx.storage.get(laneKey(child)))
   /** The repository's git common directory: where a lane's claim lives. Cached per checkout. */
@@ -563,7 +565,7 @@ export function createLanes(
     const lane = await load(child)
     if (lane?.state !== "active") return
     // Waits for a removal already under way, and fences any that collected its facts before this.
-    await lifecycle.noteResume(lane.directory)
+    await lifecycle.noteResume(lane.directory, lane.parentDir)
     const fresh = (await load(child)) ?? lane
     if (fresh.state === "active") await save({ ...fresh, resumedAt: now(), quietSince: undefined })
   }
@@ -619,7 +621,7 @@ export function createLanes(
 
     const resultStatus = event.status === "error" ? "error" : metadata.status === "running" ? "running" : "completed"
     // Read before the status: a resume that lands after this number was read cancels the removal.
-    const gen = lifecycle.generationOf(lane.directory)
+    const gen = await lifecycle.generationOf(lane.directory, lane.parentDir)
     const status = await git.status(lane.directory, lane.base)
     let removed = false
     if (shouldRemove(status, resultStatus)) {
@@ -838,6 +840,7 @@ export function createLanes(
     ...(sweepDelayMs === undefined ? {} : { sweepDelayMs }),
     ...(age === undefined ? {} : { age }),
     commonDir: commonDirOf,
+    ...(lock === undefined ? {} : { lock }),
     ensureClaim: async (lane) => {
       try {
         await syncClaim(lane)
@@ -856,7 +859,7 @@ export function createPlugin(overrides: Overrides = {}) {
     async setup(ctx) {
       const options = readOptions(ctx.options)
       const git = createGit(overrides.run ?? spawnRunner)
-      const lanes = createLanes(ctx, options, git, overrides.suffix ?? randomSuffix, overrides.lookupMs, overrides.directoryExists, overrides.now, overrides.reserveMs, overrides.debounceMs, overrides.sweepDelayMs, overrides.age, overrides.commonDir)
+      const lanes = createLanes(ctx, options, git, overrides.suffix ?? randomSuffix, overrides.lookupMs, overrides.directoryExists, overrides.now, overrides.reserveMs, overrides.debounceMs, overrides.sweepDelayMs, overrides.age, overrides.commonDir, overrides.lock)
       const registrations: { dispose: () => Promise<void> }[] = []
       const cleanup = async () => {
         for (const registration of registrations.reverse()) await registration.dispose()

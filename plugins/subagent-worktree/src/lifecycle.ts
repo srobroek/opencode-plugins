@@ -14,7 +14,8 @@ import { stat } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join, resolve } from "node:path"
 import type { Context } from "@opencode/plugin/promise/plugin"
-import { landingsFor, listLandings } from "@srobroek/opencode-lib/worktree-claims"
+import { bumpClaim, claimGeneration, landingsFor, listLandings, readClaim } from "@srobroek/opencode-lib/worktree-claims"
+import { holdBlock, type LockOptions, readHolds, setHold, withDiskLock } from "@srobroek/opencode-lib/worktree-locks"
 import { OPERATION_MARKERS, operationsInProgress, stashesOnBranch } from "@srobroek/opencode-lib/worktree-state"
 import {
   type BackgroundJob,
@@ -26,7 +27,7 @@ import {
   type LaneFacts,
   type LanePolicy,
   landedDirtyNotice,
-  laneBackgroundWork,
+  laneBackgroundJobs,
   laneEventAction,
   outcomeNotice,
   stateToken,
@@ -81,6 +82,8 @@ export type LifecycleDeps = {
   commonDir: (directory: string) => Promise<string | undefined>
   /** Make sure the lane's claim file exists (it is the lane's protection from every other remover). */
   ensureClaim: (lane: Lane) => Promise<void>
+  /** Test seam for the on-disk lock (attempts, ttl, clock, liveness). */
+  lock?: Partial<LockOptions>
   /** Test seam: how long ago a worktree was created. */
   age?: (directory: string) => Promise<number | undefined>
 }
@@ -215,12 +218,11 @@ export function createLifecycle(deps: LifecycleDeps) {
     return { heads, block: denied ? "delivery cleanup was denied; an explicit delivery_cleanup re-arms it" : undefined }
   }
 
-  /** Worktrees the idle gate found busy (a job of the child or a descendant, or a shell in the lane), until the gate sees them clear. */
-  const busyHolds = new Map<string, { reason: string; until: number }>()
-  const BUSY_HOLD_MS = HOUR
-  const busyHold = (directory: string): string | undefined => {
-    const held = busyHolds.get(canonical(directory))
-    return held !== undefined && held.until > now() ? held.reason : undefined
+  /** Why background work (from any session's idle gate) blocks removing `directory`; read fresh from disk. */
+  const holdReason = async (directory: string, parentDir: string): Promise<string | undefined> => {
+    const common = await deps.commonDir(parentDir)
+    if (common === undefined) return "the background-work records cannot be located"
+    return holdBlock(readHolds(common, directory), now())
   }
 
   const dirtyToken = (porcelain: string): string => (porcelain === "" ? "clean" : String(Bun.hash(porcelain)))
@@ -263,23 +265,39 @@ export function createLifecycle(deps: LifecycleDeps) {
 
   // --- one fence for every removal ----------------------------------------------------------
 
-  /** Bumped by a resume; a removal that collected its facts under an older number does not run. */
-  const generations = new Map<string, number>()
-  const locks = new Map<string, Promise<unknown>>()
-  const generationOf = (directory: string) => generations.get(canonical(directory)) ?? 0
+  /**
+   * The resume generation, read from the lane's claim on disk (plugins load once per location, so a
+   * resume by another instance has to be visible here). -1 when there is no readable claim.
+   */
+  const generationOf = async (directory: string, parentDir: string): Promise<number> => {
+    const common = await deps.commonDir(parentDir)
+    return common === undefined ? -1 : claimGeneration(readClaim(common, directory))
+  }
 
-  /** One at a time per directory: removals, the resume bump and sweep removals all pass here. */
-  const withLock = <T>(directory: string, work: () => Promise<T>): Promise<T> => {
+  const localLocks = new Map<string, Promise<unknown>>()
+
+  /**
+   * One at a time per directory, across every plugin instance of the repository: an in-process queue
+   * first (cheap, fair), then the on-disk lock. A lock that cannot be taken rejects.
+   */
+  const withLock = async <T>(directory: string, parentDir: string, work: () => Promise<T>): Promise<T> => {
     const key = canonical(directory)
-    const next = (locks.get(key) ?? Promise.resolve()).then(work, work)
-    locks.set(key, next.catch(() => {}))
+    const common = await deps.commonDir(parentDir)
+    if (common === undefined) throw new Error(`subagent-worktree: no git common directory to lock ${directory}`)
+    const run = () => withDiskLock(common, directory, { sessionID: "subagent-worktree", now, ...deps.lock }, work)
+    const next = (localLocks.get(key) ?? Promise.resolve()).then(run, run)
+    localLocks.set(key, next.catch(() => {}))
     return next
   }
 
-  /** A `subagent` call is about to resume the child of this lane: waits for an in-flight removal, then fences later ones. */
-  const noteResume = (directory: string) =>
-    withLock(directory, async () => {
-      generations.set(canonical(directory), generationOf(directory) + 1)
+  /**
+   * A `subagent` call is about to resume the child of this lane: waits for a removal in flight (in
+   * any instance), then bumps the generation on disk and records when, so later removals abort.
+   */
+  const noteResume = (directory: string, parentDir: string) =>
+    withLock(directory, parentDir, async () => {
+      const common = await deps.commonDir(parentDir)
+      if (common !== undefined) bumpClaim(common, directory, now())
     })
 
   type Removal = {
@@ -310,9 +328,15 @@ export function createLifecycle(deps: LifecycleDeps) {
    * released, so a resume that was waiting sees the finished state and revives from it.
    */
   const removeVerified = (removal: Removal): Promise<boolean> =>
-    withLock(removal.directory, async () => {
+    withLock(removal.directory, removal.parentDir, async () => {
       const { directory, branch } = removal
-      if (generationOf(directory) !== removal.gen) return false
+      const common = await deps.commonDir(removal.parentDir)
+      if (common === undefined) return false
+      // Re-read from disk under the lock: a resume by any instance bumps the generation and stamps resumedAt.
+      const claim = readClaim(common, directory)
+      if (claimGeneration(claim) !== removal.gen) return false
+      if (claim.kind === "present" && claim.value.resumedAt !== undefined && now() - claim.value.resumedAt < options.resumeGraceMs) return false
+      if (holdBlock(readHolds(common, directory), now()) !== undefined) return false
       const oid = await git.head(directory)
       if (oid === undefined) return false
       if ((await git.porcelain(directory)) !== "") return false
@@ -340,7 +364,7 @@ export function createLifecycle(deps: LifecycleDeps) {
       if (removal.lane) {
         // Retire only the record this removal is about: same directory, still active, same generation.
         const stored = await load(removal.lane.child)
-        if (stored?.state === "active" && canonical(stored.directory) === canonical(directory) && generationOf(directory) === removal.gen) {
+        if (stored?.state === "active" && canonical(stored.directory) === canonical(directory) && claimGeneration(readClaim(common, directory)) === removal.gen) {
           await save({ ...stored, state: removal.basis === "empty" ? "removed" : "landed" })
         }
       }
@@ -385,8 +409,6 @@ export function createLifecycle(deps: LifecycleDeps) {
       if (owner !== undefined && (await ownerOf(directory, owner.minAgeMs)) !== "no") return "its ownership could not be confirmed"
       const records = await deliveryRecords(directory, parentDir)
       if (records.block !== undefined) return records.block
-      const busy = busyHold(directory)
-      if (busy !== undefined) return busy
       if (lane === undefined) return undefined
       if ((await statusOf(lane.child)) !== "finished") return "the child is not finished now"
       if (!parentIdle && (await statusOf(lane.parent)) !== "finished") return "the parent is not idle now"
@@ -457,14 +479,14 @@ export function createLifecycle(deps: LifecycleDeps) {
     }
     if (ownLane) {
       const event: LaneEvent = { type: eventType, subject: "child" }
-      const gen = generationOf(ownLane.directory)
+      const gen = await generationOf(ownLane.directory, ownLane.parentDir)
       const parent = await statusOf(ownLane.parent)
       const facts = await laneFacts(ownLane, { child: "finished", parent: parent === "finished" ? "idle" : parent === "running" ? "busy" : "unknown" })
       await act(ownLane, laneEventAction(ownLane, facts, event, policy), facts, event, gen)
     }
     for (const lane of led) {
       const event: LaneEvent = { type: "check", subject: "parent" }
-      const gen = generationOf(lane.directory)
+      const gen = await generationOf(lane.directory, lane.parentDir)
       const child = await statusOf(lane.child)
       const fresh = (await load(lane.child)) ?? lane
       // The parent's status is read now: an event does not say it is still idle after the debounce.
@@ -545,7 +567,7 @@ export function createLifecycle(deps: LifecycleDeps) {
       const running = new Set<string>()
       const gateLanes = await Promise.all(
         lanes.map(async (lane) => {
-          const gen = generationOf(lane.directory)
+          const gen = await generationOf(lane.directory, lane.parentDir)
           // Every kind of job counts, and the child's status is read, not inferred from the list.
           const known = new Map<string, boolean | undefined>()
           for (const job of jobs) {
@@ -553,11 +575,18 @@ export function createLifecycle(deps: LifecycleDeps) {
               if (typeof id === "string" && !known.has(id)) known.set(id, id === lane.child ? true : await descends(id, lane.child))
             }
           }
-          const busy = laneBackgroundWork(lane, jobs, (id) => known.get(id))
-          if (lane.parent === input.sessionID) {
-            // The lead's own list is the evidence; share it with the event pass and the sweep until it clears.
-            if (busy !== undefined) busyHolds.set(canonical(lane.directory), { reason: busy, until: now() + BUSY_HOLD_MS })
-            else busyHolds.delete(canonical(lane.directory))
+          const matched = laneBackgroundJobs(lane, jobs, (id) => known.get(id))
+          const busy = matched[0]?.why
+          // Any gate, child or parent, records what is running for this lane; the next gate that sees none clears it.
+          const common = await deps.commonDir(lane.parentDir)
+          if (common !== undefined) {
+            setHold(
+              common,
+              lane.directory,
+              input.sessionID,
+              matched.map(({ job }) => ({ kind: job.kind, id: job.shellID ?? job.childSessionID ?? job.sessionID ?? "unknown" })),
+              now(),
+            )
           }
           if (busy !== undefined && lane.parent === input.sessionID) running.add(lane.child)
           const child = busy !== undefined ? "running" : await statusOf(lane.child)
@@ -572,7 +601,7 @@ export function createLifecycle(deps: LifecycleDeps) {
         policy,
       )
       for (const { lane, basis } of gate.remove) {
-        await removeLane(lane, basis, gens.get(lane.child) ?? generationOf(lane.directory), lane.parent === input.sessionID)
+        await removeLane(lane, basis, gens.get(lane.child) ?? -2, lane.parent === input.sessionID)
       }
       if (gate.message === undefined) return
       if (await send(input.sessionID, gate.message)) {
@@ -592,7 +621,7 @@ export function createLifecycle(deps: LifecycleDeps) {
     const lane = laneForLanding(event.result, lanes, canonical, gone)
     if (lane) {
       // Bookkeeping in the same critical section as every removal: retire only the record that was removed.
-      await withLock(lane.directory, async () => {
+      await withLock(lane.directory, lane.parentDir, async () => {
         const stored = await load(lane.child)
         if (stored?.state === "active" && canonical(stored.directory) === canonical(lane.directory)) await save({ ...stored, state: "landed" })
       })
@@ -667,7 +696,10 @@ export function createLifecycle(deps: LifecycleDeps) {
       ageMs,
       landed,
       // A denial (or unreadable records) or a gate-held worktree reads as "dirty": quarantined, never pruned.
-      dirty: porcelain === undefined ? undefined : porcelain !== "" || busy !== undefined || records.block !== undefined || busyHold(directory) !== undefined,
+      dirty:
+        porcelain === undefined
+          ? undefined
+          : porcelain !== "" || busy !== undefined || records.block !== undefined || (await holdReason(directory, lane?.parentDir ?? ctx.location.directory)) !== undefined,
       ahead: status?.ahead,
       unpushed,
     }
@@ -687,7 +719,7 @@ export function createLifecycle(deps: LifecycleDeps) {
     const proven = new Map<string, { gen: number }>()
     for (const [key, directory] of directories) {
       // The commit and generation are read first: the removal runs only if both are unchanged.
-      const gen = generationOf(directory)
+      const gen = await generationOf(directory, byDir.get(key)?.parentDir ?? ctx.location.directory)
       facts.push(await sweepFacts(directory, byDir.get(key), minAgeMs))
       proven.set(key, { gen })
     }

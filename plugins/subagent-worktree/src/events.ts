@@ -270,30 +270,45 @@ export function idleGateAction(session: IdleSession, lanes: readonly GateLane[],
 }
 
 /** One entry of the idle hook's `background` list. */
-export type BackgroundJob = { kind: string; sessionID?: string; childSessionID?: string; command?: string }
+export type BackgroundJob = { kind: string; sessionID?: string; childSessionID?: string; shellID?: string; command?: string }
 
 /**
- * Why a lane's child still has work running, from every kind of background job: a job the
- * child owns, one a descendant of the child owns (or started), or a shell whose command
- * names the lane directory. `descendant(id)` says whether session `id` descends from the
- * child: true, false, or undefined when it could not be established, which counts as busy.
+ * The background jobs that belong to a lane: a job the child owns, one a descendant of the child
+ * owns (or started), or a shell whose command names the lane directory. `descendant(id)` says
+ * whether session `id` descends from the child: true, false, or undefined when it could not be
+ * established, which counts as belonging (and is marked `unplaced`).
  */
+export function laneBackgroundJobs(
+  lane: Pick<Lane, "child" | "directory">,
+  jobs: readonly BackgroundJob[],
+  descendant: (sessionID: string) => boolean | undefined,
+): Array<{ job: BackgroundJob; why: string }> {
+  const matched: Array<{ job: BackgroundJob; why: string }> = []
+  for (const job of jobs) {
+    const ids = [job.sessionID, job.childSessionID].filter((id): id is string => typeof id === "string")
+    let why: string | undefined
+    for (const id of ids) {
+      if (id === lane.child) why = `the child has a ${job.kind} job running`
+      else {
+        const below = descendant(id)
+        if (below === undefined) why = `a ${job.kind} job could not be placed relative to the child`
+        else if (below) why = `a descendant of the child has a ${job.kind} job running`
+      }
+      if (why !== undefined) break
+    }
+    if (why === undefined && job.kind === "shell" && typeof job.command === "string" && job.command.includes(lane.directory)) {
+      why = "a shell is running in the lane"
+    }
+    if (why !== undefined) matched.push({ job, why })
+  }
+  return matched
+}
+
+/** Why a lane's child still has work running, or undefined. */
 export function laneBackgroundWork(
   lane: Pick<Lane, "child" | "directory">,
   jobs: readonly BackgroundJob[],
   descendant: (sessionID: string) => boolean | undefined,
 ): string | undefined {
-  for (const job of jobs) {
-    const ids = [job.sessionID, job.childSessionID].filter((id): id is string => typeof id === "string")
-    for (const id of ids) {
-      if (id === lane.child) return `the child has a ${job.kind} job running`
-      const below = descendant(id)
-      if (below === undefined) return `a ${job.kind} job could not be placed relative to the child`
-      if (below) return `a descendant of the child has a ${job.kind} job running`
-    }
-    if (job.kind === "shell" && typeof job.command === "string" && job.command.includes(lane.directory)) {
-      return "a shell is running in the lane"
-    }
-  }
-  return undefined
+  return laneBackgroundJobs(lane, jobs, descendant)[0]?.why
 }

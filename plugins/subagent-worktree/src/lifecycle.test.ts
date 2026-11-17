@@ -1,9 +1,10 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
 import { landingFile, readClaim, removeClaim, writeLanding } from "@srobroek/opencode-lib/worktree-claims"
+import { lockFile, readHolds, setHold } from "@srobroek/opencode-lib/worktree-locks"
 import type { RunResult } from "./git.ts"
 import { createPlugin } from "./index.ts"
 import { type Lane, laneKey } from "./lane.ts"
@@ -41,6 +42,7 @@ type World = {
   /** Heads `wt list` reports as integrated. */
   integratedHeads: string[]
   updateRefFails: boolean
+  resumedByB?: boolean
   /** Called with every git command before it is answered. */
   onGit?: (cmd: string) => Promise<void> | void
 }
@@ -93,9 +95,18 @@ function runner(world: World, log: string[][]) {
 
 async function start(
   world: Partial<World> = {},
-  options: { stored?: Lane[]; options?: Record<string, unknown>; sweepDelayMs?: number; debounceMs?: number } = {},
+  options: {
+    stored?: Lane[]
+    options?: Record<string, unknown>
+    sweepDelayMs?: number
+    debounceMs?: number
+    /** Share the git common directory and the world with another instance. */
+    common?: string
+    world?: World
+    lock?: Record<string, unknown>
+  } = {},
 ) {
-  const state: World = {
+  const state: World = options.world ?? {
     ahead: 2,
     porcelain: "",
     ancestor: 1,
@@ -134,8 +145,8 @@ async function start(
       refresh: async (input: Record<string, unknown>) => void worktree.push({ method: "refresh", input }),
     },
   })
-  const common = mkdtempSync(join(tmpdir(), "common-"))
-  COMMONS.push(common)
+  const common = options.common ?? mkdtempSync(join(tmpdir(), "common-"))
+  if (!options.common) COMMONS.push(common)
   const log: string[][] = []
   const plugin = createPlugin({
     commonDir: async () => common,
@@ -145,6 +156,7 @@ async function start(
     now: () => state.now,
     debounceMs: options.debounceMs ?? 1,
     age: async () => state.age,
+    ...(options.lock === undefined ? {} : { lock: options.lock }),
     ...(options.sweepDelayMs === undefined ? {} : { sweepDelayMs: options.sweepDelayMs }),
   })
   const cleanup = (await plugin.setup(fake.context)) as () => Promise<void>
@@ -902,6 +914,131 @@ describe("the sweep re-checks ownership under the removal lock, for every candid
     const { fake, worktree, cleanup } = await start({ ancestor: 0, age: 3 * 24 * 3_600_000 }, { stored: [], options: { include: ["/wt"] } })
     ;(fake.context.session as unknown as { list: unknown }).list = async () => ({ data: [] })
     await execute(fake)({ mode: "prune" }, tool)
+    expect(worktree[0]?.method).toBe("remove")
+    await cleanup()
+  })
+})
+
+describe("two plugin instances, one repository: coordination lives on disk", () => {
+  const resumeCall = {
+    tool: "subagent",
+    sessionID: PARENT,
+    agent: "build",
+    messageID: "m",
+    id: "call-resume",
+    input: { agent: "general", prompt: "one more thing", sessionID: CHILD },
+  }
+
+  test("instance B resuming the lane while instance A collects its facts cancels A's removal", async () => {
+    const a = await start({ ancestor: 0 })
+    const b = await start({}, { common: a.common, world: a.state })
+    a.state.onGit = async (cmd) => {
+      if (cmd === "status --porcelain" && !a.state.resumedByB) {
+        a.state.resumedByB = true
+        await b.fake.fire.tool("execute.before", resumeCall as never)
+      }
+    }
+    a.fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle()
+    expect(a.state.resumedByB).toBe(true)
+    expect(a.worktree).toEqual([])
+    await a.cleanup()
+    await b.cleanup()
+  })
+
+  test("a resume instance B recorded before A's pass began keeps the lane through the resume window", async () => {
+    const a = await start({ ancestor: 1 })
+    const b = await start({}, { common: a.common, world: a.state })
+    // A makes sure the claim exists, then B resumes (bumping the generation on disk).
+    a.fake.emit({ type: "session.execution.succeeded", data: { sessionID: CHILD } })
+    await settle()
+    await b.fake.fire.tool("execute.before", resumeCall as never)
+    a.state.ancestor = 0 // now landed
+    a.state.now += 60_000
+    a.fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle()
+    expect(a.worktree).toEqual([])
+    await a.cleanup()
+    await b.cleanup()
+  })
+
+  test("a live lock held by another instance keeps the removal from running", async () => {
+    const lockOptions = { attempts: 3, delayMs: () => 1, ttlMs: 60_000, alive: () => true, host: "this-host", now: () => NOW }
+    const { fake, state, common, worktree, cleanup } = await start({ ancestor: 1 }, { lock: lockOptions })
+    fake.emit({ type: "session.execution.succeeded", data: { sessionID: CHILD } })
+    await settle()
+    mkdirSync(join(common, "opencode", "locks"), { recursive: true })
+    writeFileSync(
+      lockFile(common, WT),
+      JSON.stringify({ pid: process.pid, host: "this-host", sessionID: "other", acquiredAt: NOW, token: "theirs" }),
+    )
+    state.ancestor = 0 // now landed
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle()
+    expect(worktree).toEqual([])
+    expect(JSON.parse(readFileSync(lockFile(common, WT), "utf8")).token).toBe("theirs")
+    await cleanup()
+  })
+
+  test("a stale lock (old, holder dead) is broken and the removal runs", async () => {
+    const lockOptions = { attempts: 3, delayMs: () => 1, ttlMs: 60_000, alive: () => false, host: "this-host", now: () => NOW }
+    const { fake, state, common, worktree, cleanup } = await start({ ancestor: 1 }, { lock: lockOptions })
+    fake.emit({ type: "session.execution.succeeded", data: { sessionID: CHILD } })
+    await settle()
+    mkdirSync(join(common, "opencode", "locks"), { recursive: true })
+    writeFileSync(
+      lockFile(common, WT),
+      JSON.stringify({ pid: 999_999, host: "this-host", sessionID: "dead", acquiredAt: NOW - 3_600_000, token: "old" }),
+    )
+    state.ancestor = 0 // now landed
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle()
+    expect(worktree[0]?.method).toBe("remove")
+    await cleanup()
+  })
+})
+
+describe("background work is held on disk by every gate", () => {
+  const gate = (fake: Fake, sessionID: string, background: unknown[]) =>
+    fake.fire.session("experimental.idle", { sessionID, background } as never)
+
+  test("the child's own gate reports a running shell; the parent going idle afterwards does not remove the lane", async () => {
+    const { fake, worktree, common, cleanup } = await start({ ancestor: 0 })
+    await gate(fake, CHILD, [{ kind: "shell", sessionID: CHILD, shellID: "sh1", command: "sleep 60" }])
+    expect(readHolds(common, WT).holds.map((hold) => hold.sessionID)).toEqual([CHILD])
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle()
+    expect(worktree).toEqual([])
+    await cleanup()
+  })
+
+  test("once the child's gate sees nothing running, the hold clears and the lane is removed", async () => {
+    const { fake, worktree, common, cleanup } = await start({ ancestor: 0 })
+    await gate(fake, CHILD, [{ kind: "shell", sessionID: CHILD, shellID: "sh1", command: "sleep 60" }])
+    await gate(fake, CHILD, [])
+    expect(readHolds(common, WT).holds).toEqual([])
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle()
+    expect(worktree[0]?.method).toBe("remove")
+    await cleanup()
+  })
+
+  test("a hold that cannot be read blocks the removal", async () => {
+    const { fake, worktree, common, cleanup } = await start({ ancestor: 0 })
+    setHold(common, WT, "ses_x", [{ kind: "shell", id: "x" }], NOW)
+    const root = join(common, "opencode", "holds")
+    writeFileSync(join(root, readdirSync(root)[0] as string, "bad.json"), "garbage")
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle()
+    expect(worktree).toEqual([])
+    await cleanup()
+  })
+
+  test("a hold older than the expiry (a crashed host) no longer blocks", async () => {
+    const { fake, worktree, common, cleanup } = await start({ ancestor: 0 })
+    setHold(common, WT, "ses_x", [{ kind: "shell", id: "x" }], NOW - 25 * 3_600_000)
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle()
     expect(worktree[0]?.method).toBe("remove")
     await cleanup()
   })
