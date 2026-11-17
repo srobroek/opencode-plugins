@@ -31,7 +31,7 @@ beforeAll(() => {
   git(home, "init", "-q", "--bare", "-b", "main", origin)
   git(repo, "remote", "add", "origin", origin)
   git(repo, "push", "-q", "origin", "main")
-})
+}, 60_000)
 afterAll(() => rmSync(home, { recursive: true, force: true }))
 
 const context = (workdir: string) => ({ home, startDir: repo, workdir })
