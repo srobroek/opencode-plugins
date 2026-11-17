@@ -14,6 +14,7 @@ import { stat } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join, resolve } from "node:path"
 import type { Context } from "@opencode/plugin/promise/plugin"
+import { canonicalCheckout, evictSessions, repairStrandedSessions, type SessionApi } from "@srobroek/opencode-lib/session-eviction"
 import { bumpClaim, claimGeneration, landingsFor, listLandings, readClaim } from "@srobroek/opencode-lib/worktree-claims"
 import { holdsState, type LockOptions, lockedWorktreeRemoval, lockedWrite, setHold, withDiskLock } from "@srobroek/opencode-lib/worktree-locks"
 import { OPERATION_MARKERS, operationsInProgress, stashesOnBranch } from "@srobroek/opencode-lib/worktree-state"
@@ -392,6 +393,21 @@ export function createLifecycle(deps: LifecycleDeps) {
             try {
               if (removal.lane) await deps.moveHome(removal.lane)
               if ((await finalRefusal()) !== undefined) {
+                if (removal.lane && (await deps.exists(directory))) {
+                  await ctx.session.move({ sessionID: removal.lane.child, directory } as never).catch(() => {})
+                }
+                return false
+              }
+              // Last, so nothing that refused above has moved anyone: every other idle session in the worktree
+              // goes to the checkout, or the removal is refused (a running one, a failed lookup or move).
+              const evicted = await evictSessions(ctx.session as unknown as SessionApi, {
+                projectID: removal.projectID,
+                directory,
+                destination: canonicalCheckout(common, removal.parentDir),
+                ...(removal.lane ? { exclude: new Set([removal.lane.child]) } : {}),
+              })
+              if (!evicted.ok) {
+                console.error(`subagent-worktree: not removing ${directory}: ${evicted.reason}`)
                 if (removal.lane && (await deps.exists(directory))) {
                   await ctx.session.move({ sessionID: removal.lane.child, directory } as never).catch(() => {})
                 }
@@ -836,6 +852,25 @@ export function createLifecycle(deps: LifecycleDeps) {
     return next
   }
 
+  /**
+   * Heal sessions stranded by earlier removals (including ones other tools made): every session of this
+   * project whose directory no longer exists is moved to the canonical checkout of its repository, else
+   * the project root. Such a session cannot run, so this is safe. Each move is logged.
+   */
+  const repairSessions = async () => {
+    if (projectID === undefined) return
+    const lanes = await deps.scan()
+    const parentOf = new Map(lanes.map((lane) => [lane.child, lane.parentDir]))
+    const root = canonicalCheckout(await deps.commonDir(ctx.location.directory), ctx.location.directory)
+    const result = await repairStrandedSessions(ctx.session as unknown as SessionApi, {
+      projectID,
+      destinationFor: (session) => parentOf.get(session.id) ?? root,
+      exists: deps.exists,
+      log: (line) => console.error(`subagent-worktree: ${line}`),
+    })
+    if ("error" in result) console.error(`subagent-worktree: session repair skipped: ${result.error}`)
+  }
+
   /** The background sweep: off, or throttled to once per `intervalHours` per project. */
   const maybeSweep = async () => {
     if (disposed || options.sweep === "off" || projectID === undefined) return
@@ -843,6 +878,7 @@ export function createLifecycle(deps: LifecycleDeps) {
       const last = (await ctx.storage.get(sweepKey())) as number | undefined
       if (typeof last === "number" && now() - last < options.intervalHours * HOUR) return
       await ctx.storage.set(sweepKey(), now())
+      await repairSessions().catch((error) => console.error("subagent-worktree: session repair failed:", error))
       await runSweep(options.sweep)
     } catch (error) {
       console.error("subagent-worktree: sweep failed", error)

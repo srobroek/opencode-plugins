@@ -196,6 +196,23 @@ lives under `<git-common-dir>/opencode/`, shared by every instance of the reposi
   that cannot be written (running work could not have been recorded). A coordination error in a
   hook means a deferred outcome, logged; nothing is removed and nothing is thrown.
 
+### Sessions are moved out before a worktree goes
+
+OpenCode resolves a session's location for every request that touches the session, so a session
+left pointing at a removed directory fails with `Location not found` (in the TUI, on a wake or
+drain, on `session.get`). Every removal therefore, under the lock and right before the host
+removal, lists the project's sessions (every page; an incomplete listing refuses) and:
+
+- refuses if a session in the worktree, or below it, is running;
+- moves each idle one to the repository's canonical checkout, and refuses if a move fails.
+
+This covers lane removals, the foreground empty-lane removal and the sweep. `delivery` does the same
+in its removal section. The background pass (startup and every `intervalHours`, whenever `sweep` is
+not `off`, including the default `report`) also repairs sessions stranded by earlier removals,
+including ones made by other tools: a session of this project whose directory no longer exists is
+moved to its lane's parent checkout, else the project's canonical checkout, and each move is logged.
+A session whose directory is gone cannot run, so this is safe.
+
 ### Claims: one remover per worktree
 
 Every active lane has a claim file under the repository's git common directory,

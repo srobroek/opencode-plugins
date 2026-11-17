@@ -129,7 +129,7 @@ export async function repairStrandedSessions(
   options: {
     projectID: string | undefined
     destinationFor: (session: SessionLike) => string
-    exists?: (path: string) => boolean
+    exists?: (path: string) => boolean | Promise<boolean>
     log?: (line: string) => void
   },
 ): Promise<Repair | { error: string }> {
@@ -139,7 +139,7 @@ export async function repairStrandedSessions(
   const result: Repair = { moved: [], failed: [] }
   for (const session of sessions) {
     const where = session.location?.directory
-    if (typeof where !== "string" || where === "" || exists(resolve(where))) continue
+    if (typeof where !== "string" || where === "" || (await exists(resolve(where)))) continue
     if (sessionRunning(session)) continue
     const to = options.destinationFor(session)
     try {

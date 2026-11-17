@@ -3743,7 +3743,10 @@ ${next.slice(0, -1).map((step) => `  ${step}`).join(`
 
 // plugins/delivery/src/pending-cleanup.ts
 import { existsSync as existsSync4 } from "fs";
-import { resolve as resolve5 } from "path";
+import { resolve as resolve6 } from "path";
+
+// plugins/lib/src/session-eviction.ts
+import { basename as basename3, dirname as dirname4, resolve as resolve5 } from "path";
 
 // plugins/lib/src/worktree-claims.ts
 import { createHash as createHash2 } from "crypto";
@@ -3871,6 +3874,83 @@ function ownershipOf(read) {
   if (read.kind === "unreadable")
     return { owner: "unknown", reason: read.reason };
   return { owner: "none" };
+}
+
+// plugins/lib/src/session-eviction.ts
+var MAX_PAGES = 100;
+var toMillis = (value) => {
+  if (typeof value === "number")
+    return value;
+  if (value instanceof Date)
+    return value.getTime();
+  if (typeof value === "string") {
+    const parsed = Date.parse(value);
+    return Number.isNaN(parsed) ? undefined : parsed;
+  }
+  return;
+};
+function sessionRunning(session) {
+  const busy = toMillis(session.time?.busy);
+  const idle = toMillis(session.time?.idle);
+  return busy !== undefined && (idle === undefined || busy > idle);
+}
+function insideDirectory(path, directory) {
+  const root = directory.replace(/\/+$/, "");
+  return path === root || path.startsWith(`${root}/`);
+}
+function canonicalCheckout(commonDir, fallback) {
+  if (commonDir !== undefined && basename3(commonDir) === ".git")
+    return dirname4(commonDir);
+  return fallback;
+}
+async function listProjectSessions(api, projectID) {
+  const found = [];
+  let query = { ...projectID === undefined ? {} : { project: projectID }, archived: false, limit: 100 };
+  try {
+    for (let pages = 0;pages < MAX_PAGES; pages++) {
+      const page = await api.list(query);
+      if (!page || !Array.isArray(page.data))
+        return;
+      for (const raw of page.data) {
+        const session = raw;
+        if (typeof session?.id === "string")
+          found.push(session);
+      }
+      const next = page.cursor?.next;
+      if (!next)
+        return found;
+      query = { cursor: next };
+    }
+  } catch {
+    return;
+  }
+  return;
+}
+async function evictSessions(api, options) {
+  const sessions = await listProjectSessions(api, options.projectID);
+  if (sessions === undefined)
+    return { ok: false, reason: `the sessions of the project could not all be listed, so who is in ${options.directory} is unknown` };
+  const target = canonicalDirectory(options.directory);
+  const inside = sessions.filter((session) => {
+    if (options.exclude?.has(session.id))
+      return false;
+    const where = session.location?.directory;
+    return typeof where === "string" && insideDirectory(canonicalDirectory(where), target);
+  });
+  const running = inside.find(sessionRunning);
+  if (running)
+    return { ok: false, reason: `session ${running.id} is running in ${options.directory}` };
+  const moved = [];
+  for (const session of inside) {
+    try {
+      await api.move({ sessionID: session.id, directory: options.destination });
+      moved.push(session.id);
+    } catch (error) {
+      const why = error instanceof Error ? error.message : String(error);
+      return { ok: false, reason: `session ${session.id} could not be moved out of ${options.directory} (${why}); nothing was removed` };
+    }
+  }
+  return { ok: true, moved };
 }
 
 // plugins/lib/src/worktree-locks.ts
@@ -4379,9 +4459,9 @@ function createPendingCleanup(deps) {
     const key = repoKey(cwd, deps.observe, observationMs);
     if (key === null)
       return false;
-    const directory = resolve5(receiptDirectory(env, key));
+    const directory = resolve6(receiptDirectory(env, key));
     try {
-      const own = readReceipt(resolve5(directory, `${receiptId}.json`));
+      const own = readReceipt(resolve6(directory, `${receiptId}.json`));
       if (!own.ok)
         return false;
       if (own.receipt.outcome === "cleaned" || own.receipt.worktree.removed)
@@ -4420,7 +4500,7 @@ function createPendingCleanup(deps) {
     if (key === null)
       return [];
     const want = canonicalDirectory(path);
-    return pendingReceipts(listReceipts(resolve5(receiptDirectory(env, key)))).filter((receipt) => receipt.worktree.path !== null && canonicalDirectory(receipt.worktree.path) === want);
+    return pendingReceipts(listReceipts(resolve6(receiptDirectory(env, key)))).filter((receipt) => receipt.worktree.path !== null && canonicalDirectory(receipt.worktree.path) === want);
   };
   const deny = async (worktree, sessionID) => {
     for (const receipt of receiptsFor(worktree))
@@ -4508,7 +4588,13 @@ function createPendingCleanup(deps) {
       return outcome.value;
     return { ok: false, reason: `worktree.held: observed ${outcome.reason}, expected no owner, hold, denial or competing remover; nothing was removed` };
   };
-  const finalCheck = async (worktree) => await holdFor(worktree) ?? landingBlock(worktree);
+  const finalCheck = async (worktree) => await holdFor(worktree) ?? landingBlock(worktree) ?? await evict(worktree);
+  const evict = async (worktree) => {
+    const projectID = ctx.location.project?.id;
+    const destination = canonicalCheckout(commonDir() ?? undefined, cwd);
+    const result = await evictSessions(ctx.session, { projectID, directory: worktree, destination });
+    return result.ok ? undefined : result.reason;
+  };
   const removal = { removalSection: section, finalCheck };
   const explicit = (ask, sessionID) => ({
     authorize: (request) => authorizeExplicit(api, ask, sessionID, request),
@@ -4528,7 +4614,7 @@ function createPendingCleanup(deps) {
     const key = repoKey(cwd, deps.observe, observationMs);
     if (key === null)
       return;
-    const directory = resolve5(receiptDirectory(env, key));
+    const directory = resolve6(receiptDirectory(env, key));
     let pending;
     try {
       pending = pendingReceipts(listReceipts(directory));
@@ -4556,7 +4642,7 @@ function createPendingCleanup(deps) {
       if (disposed)
         return;
       attemptedAt.set(receipt.receiptId, now());
-      const path = resolve5(directory, `${receipt.receiptId}.json`);
+      const path = resolve6(directory, `${receipt.receiptId}.json`);
       const meta = recorded.byReceipt.get(receipt.receiptId);
       const recentlyTried = now() - (retriedAt.get(receipt.receiptId) ?? Number.NEGATIVE_INFINITY) < RETRY_WINDOW_MS;
       const worktree = receipt.worktree.path;
@@ -4624,7 +4710,7 @@ function createPendingCleanup(deps) {
       return;
     let pending;
     try {
-      pending = pendingReceipts(listReceipts(resolve5(receiptDirectory(env, key)))).slice(0, 100);
+      pending = pendingReceipts(listReceipts(resolve6(receiptDirectory(env, key)))).slice(0, 100);
     } catch {
       return;
     }

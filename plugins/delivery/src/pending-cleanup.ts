@@ -23,6 +23,7 @@
 import { existsSync } from "node:fs"
 import { resolve } from "node:path"
 import type { Context } from "@opencode/plugin/promise/plugin"
+import { canonicalCheckout, evictSessions, type SessionApi } from "@srobroek/opencode-lib/session-eviction"
 import {
   canonicalDirectory,
   type LandingRecord,
@@ -440,7 +441,20 @@ export function createPendingCleanup(deps: PendingDeps) {
   }
 
   /** The last look before the removal call itself (claims, holds, sessions, denials), read fresh. */
-  const finalCheck = async (worktree: string): Promise<string | undefined> => (await holdFor(worktree)) ?? landingBlock(worktree)
+  const finalCheck = async (worktree: string): Promise<string | undefined> =>
+    (await holdFor(worktree)) ?? landingBlock(worktree) ?? (await evict(worktree))
+
+  /**
+   * Last step before the removal: move every idle session whose location is the worktree (or inside it)
+   * to the repository's canonical checkout, so none is left pointing at a directory that is gone
+   * ("Location not found"). A running session, a failed listing or a failed move refuses the removal.
+   */
+  const evict = async (worktree: string): Promise<string | undefined> => {
+    const projectID = (ctx.location as { project?: { id?: string } }).project?.id
+    const destination = canonicalCheckout(commonDir() ?? undefined, cwd)
+    const result = await evictSessions(ctx.session as unknown as SessionApi, { projectID, directory: worktree, destination })
+    return result.ok ? undefined : result.reason
+  }
 
   /** The removal dependencies every delivery remover passes to `cleanupDelivery`. */
   const removal = { removalSection: section, finalCheck }

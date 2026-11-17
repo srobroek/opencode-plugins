@@ -43,6 +43,10 @@ type World = {
   integratedHeads: string[]
   updateRefFails: boolean
   resumedByB?: boolean
+  /** Paths that do not exist on disk, whatever `exists` says. */
+  missing?: string[]
+  /** Called inside the host removal. */
+  onRemove?: () => void
   /** Called with every git command before it is answered. */
   onGit?: (cmd: string) => Promise<void> | void
 }
@@ -141,7 +145,10 @@ async function start(
     location: { ...(fake.context.location as object), directory: REPO, project: { id: "prj" } },
     worktree: {
       list: async () => [{ directory: WT }],
-      remove: async (input: Record<string, unknown>) => void worktree.push({ method: "remove", input }),
+      remove: async (input: Record<string, unknown>) => {
+        worktree.push({ method: "remove", input })
+        state.onRemove?.()
+      },
       refresh: async (input: Record<string, unknown>) => void worktree.push({ method: "refresh", input }),
     },
   })
@@ -152,7 +159,7 @@ async function start(
     commonDir: async () => common,
     run: runner(state, log),
     lookupMs: 20,
-    directoryExists: async () => state.exists,
+    directoryExists: async (path: string) => state.exists && !(state.missing ?? []).includes(path),
     now: () => state.now,
     debounceMs: options.debounceMs ?? 1,
     age: async () => state.age,
@@ -1190,6 +1197,93 @@ describe("an unwritable holds store stays unsafe across passes", () => {
     expect(worktree).toEqual([])
     await gate(fake, [])
     expect(worktree[0]?.method).toBe("remove")
+    await cleanup()
+  })
+})
+
+describe("sessions are moved out of a worktree before it is removed", () => {
+  const moves = (fake: Fake) =>
+    fake.calls.filter((entry) => entry.method === "session.move").map((entry) => entry.input as { sessionID: string; directory: string })
+  const addSession = (fake: Fake, id: string, directory: string, time: Record<string, number> = { busy: 1, idle: 2 }) =>
+    fake.sessions.set(id, { id, projectID: "prj", location: { directory }, time })
+
+  test("an idle session of another tool inside the lane is moved to the checkout first, then the worktree goes", async () => {
+    const { fake, state, worktree, cleanup } = await start({ ancestor: 0 })
+    addSession(fake, "ses_other", WT)
+    let movedAtRemoval: string[] = []
+    state.onRemove = () => {
+      movedAtRemoval = moves(fake).map((move) => move.sessionID)
+    }
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await until(() => worktree.some((entry) => entry.method === "remove"))
+    expect(movedAtRemoval).toContain("ses_other")
+    expect(moves(fake).find((move) => move.sessionID === "ses_other")).toEqual({ sessionID: "ses_other", directory: REPO })
+    await cleanup()
+  })
+
+  test("a running session inside blocks the removal", async () => {
+    const { fake, worktree, cleanup } = await start({ ancestor: 0 })
+    addSession(fake, "ses_busy", `${WT}/pkg`, { busy: 9, idle: 2 })
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle(150)
+    expect(worktree).toEqual([])
+    await cleanup()
+  })
+
+  test("a failed move blocks the removal, and the lane's own child is put back", async () => {
+    const { fake, worktree, cleanup } = await start({ ancestor: 0 })
+    addSession(fake, "ses_other", WT)
+    const session = fake.context.session as unknown as { move: (input: { sessionID: string; directory: string }) => Promise<unknown> }
+    const original = session.move.bind(session)
+    session.move = (input) => (input.sessionID === "ses_other" ? Promise.reject(new Error("host refused")) : original(input))
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle(150)
+    expect(worktree).toEqual([])
+    expect(moves(fake).filter((move) => move.sessionID === CHILD).at(-1)?.directory).toBe(WT)
+    await cleanup()
+  })
+
+  test("a sweep removal moves sessions out as well", async () => {
+    const { fake, worktree, cleanup } = await start({ ancestor: 0, age: 3 * 24 * 3_600_000 })
+    addSession(fake, "ses_other", WT)
+    const execute = fake.tools.get("subagent_worktree_sweep")?.execute as (i: unknown, c: unknown) => Promise<unknown>
+    await execute({ mode: "prune" }, tool)
+    expect(worktree.some((entry) => entry.method === "remove")).toBe(true)
+    expect(moves(fake).some((move) => move.sessionID === "ses_other")).toBe(true)
+    await cleanup()
+  })
+})
+
+describe("the repair pass heals sessions stranded by earlier removals", () => {
+  const addSession = (fake: Fake, id: string, directory: string) =>
+    fake.sessions.set(id, { id, projectID: "prj", location: { directory }, time: { busy: 1, idle: 2 } })
+  const moved = (fake: Fake) =>
+    fake.calls.filter((entry) => entry.method === "session.move").map((entry) => entry.input as { sessionID: string; directory: string })
+
+  test("a session whose directory is gone is moved to the project's checkout; one with an existing directory is left alone", async () => {
+    const { fake, cleanup } = await start({ missing: ["/wt/removed-long-ago"] }, { options: { sweep: "report" }, sweepDelayMs: 80 })
+    addSession(fake, "ses_stranded", "/wt/removed-long-ago")
+    addSession(fake, "ses_fine", "/wt/still-here")
+    await until(() => moved(fake).length > 0)
+    expect(moved(fake)).toEqual([{ sessionID: "ses_stranded", directory: REPO }])
+    await cleanup()
+  })
+
+  test("a stranded lane child goes to its lane's parent checkout", async () => {
+    const { fake, cleanup } = await start(
+      { missing: [WT] },
+      { options: { sweep: "report" }, sweepDelayMs: 80, stored: [lane({ parentDir: "/other/checkout", state: "removed" })] },
+    )
+    await until(() => moved(fake).length > 0)
+    expect(moved(fake).find((move) => move.sessionID === CHILD)).toEqual({ sessionID: CHILD, directory: "/other/checkout" })
+    await cleanup()
+  })
+
+  test("with the sweep off, nothing is repaired", async () => {
+    const { fake, cleanup } = await start({ missing: ["/wt/removed-long-ago"] }, { options: { sweep: "off" }, sweepDelayMs: 80 })
+    addSession(fake, "ses_stranded", "/wt/removed-long-ago")
+    await settle(120)
+    expect(moved(fake)).toEqual([])
     await cleanup()
   })
 })

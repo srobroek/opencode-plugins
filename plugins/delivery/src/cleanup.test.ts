@@ -2957,6 +2957,65 @@ describe("pending cleanup: one remover per worktree", () => {
       await h.finish()
     })
 
+    describe("sessions inside the worktree are moved out before it goes", () => {
+      const moves = (h: Harness) =>
+        h.fake.calls.filter((entry) => entry.method === "session.move").map((entry) => entry.input as { sessionID: string; directory: string })
+
+      test("an idle session inside is moved to the main checkout first, then the worktree is removed", async () => {
+        let movedBeforeRemoval: number | undefined
+        let h: Harness | undefined
+        h = await harness("evict-idle", {
+          before: (argv) => {
+            if (argv.includes("remove") && h) movedBeforeRemoval = moves(h).length
+          },
+        })
+        h.fake.sessions.set("ses_idle", { id: "ses_idle", location: { directory: h.f.linked }, time: { busy: 1, idle: 2 } })
+        h.fake.sessions.set("ses_elsewhere", { id: "ses_elsewhere", location: { directory: h.f.main }, time: { busy: 1, idle: 2 } })
+        const result = await explicitCleanup(h)
+        expect(result.ok).toBe(true)
+        expect(moves(h)).toEqual([{ sessionID: "ses_idle", directory: realpathSync(h.f.main) }])
+        expect(movedBeforeRemoval).toBe(1)
+        expect(removed(h)).toBe(true)
+        await h.finish()
+      })
+
+      test("a running session inside blocks the removal, and nothing is moved", async () => {
+        const h = await harness("evict-running")
+        h.fake.sessions.set("ses_busy", { id: "ses_busy", location: { directory: h.f.linked }, time: { busy: 9, idle: 2 } })
+        h.fake.sessions.set("ses_idle", { id: "ses_idle", location: { directory: h.f.linked }, time: { busy: 1, idle: 2 } })
+        const result = await explicitCleanup(h)
+        expect(result.ok).toBe(false)
+        expect(removed(h)).toBe(false)
+        expect(moves(h)).toEqual([])
+        await h.finish()
+      })
+
+      test("a failed move blocks the removal and is reported", async () => {
+        const h = await harness("evict-move-fails")
+        h.fake.sessions.set("ses_idle", { id: "ses_idle", location: { directory: h.f.linked }, time: { busy: 1, idle: 2 } })
+        ;(h.fake.context.session as unknown as { move: unknown }).move = async () => {
+          throw new Error("host refused")
+        }
+        const result = await explicitCleanup(h)
+        expect(refusal(result)).toContain("ses_idle could not be moved")
+        expect(refusal(result)).toContain("host refused")
+        expect(removed(h)).toBe(false)
+        expect(mutationCalls(h.scripted.calls)).toEqual([])
+        await h.finish()
+      })
+
+      test("the background retry moves an idle session out too", async () => {
+        const h = await harness("evict-retry")
+        h.fake.sessions.set("ses_idle", { id: "ses_idle", location: { directory: h.f.linked }, time: { busy: 1, idle: 2 } })
+        await h.pending.record(h.f.receipt, "ses_lead")
+        await h.pending.start()
+        await h.idle()
+        expect(moves(h).map((move) => move.sessionID)).toEqual(["ses_idle"])
+        expect(removed(h)).toBe(true)
+        await h.finish()
+      })
+    })
+
     test("the removal runs while the shared disk lock is held", async () => {
       let heldDuring = false
       let h: Harness | undefined

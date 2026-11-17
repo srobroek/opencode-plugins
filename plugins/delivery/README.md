@@ -127,6 +127,10 @@ Inputs: `pr`, and when needed `merge_method` (`squash` by default, `merge`,
   every proof, a final look at claims, background holds, running sessions and denials, then the
   removal. The prompt, if any, comes before and outside the lock. If the coordination store cannot
   be written, or a hold could not be recorded, the worktree is treated as unsafe and kept.
+- Before the removal, delivery moves every idle session whose location is the worktree (or below it)
+  to the repository's canonical checkout, so none is left pointing at a directory that is gone
+  (`Location not found`). A running session, an incomplete session listing or a failed move
+  refuses the removal.
 - **A refusal sticks.** If the inline cleanup is refused at its prompt, the landing record
   keeps `denied` and nothing retries it. A later explicit `delivery_cleanup` call that is
   authorized clears it; one that is refused records a fresh denial and leaves the old one

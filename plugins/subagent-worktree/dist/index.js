@@ -3,7 +3,7 @@
 // plugins/subagent-worktree/src/index.ts
 import { realpath, stat as stat2 } from "fs/promises";
 import { homedir as homedir2 } from "os";
-import { join as join4, resolve as resolve3 } from "path";
+import { join as join4, resolve as resolve4 } from "path";
 import { Plugin } from "@opencode/plugin";
 import { Error as ToolError } from "@opencode/plugin/promise/tool";
 
@@ -1187,10 +1187,114 @@ function createGit(run) {
 }
 
 // plugins/subagent-worktree/src/lifecycle.ts
-import { existsSync as existsSync2, realpathSync as realpathSync2 } from "fs";
+import { existsSync as existsSync3, realpathSync as realpathSync2 } from "fs";
 import { stat } from "fs/promises";
 import { homedir } from "os";
-import { join as join3, resolve as resolve2 } from "path";
+import { join as join3, resolve as resolve3 } from "path";
+
+// plugins/lib/src/session-eviction.ts
+import { existsSync as existsSync2 } from "fs";
+import { basename, dirname, resolve as resolve2 } from "path";
+var MAX_PAGES = 100;
+var toMillis = (value) => {
+  if (typeof value === "number")
+    return value;
+  if (value instanceof Date)
+    return value.getTime();
+  if (typeof value === "string") {
+    const parsed = Date.parse(value);
+    return Number.isNaN(parsed) ? undefined : parsed;
+  }
+  return;
+};
+function sessionRunning(session) {
+  const busy = toMillis(session.time?.busy);
+  const idle = toMillis(session.time?.idle);
+  return busy !== undefined && (idle === undefined || busy > idle);
+}
+function insideDirectory(path, directory) {
+  const root = directory.replace(/\/+$/, "");
+  return path === root || path.startsWith(`${root}/`);
+}
+function canonicalCheckout(commonDir, fallback) {
+  if (commonDir !== undefined && basename(commonDir) === ".git")
+    return dirname(commonDir);
+  return fallback;
+}
+async function listProjectSessions(api, projectID) {
+  const found = [];
+  let query = { ...projectID === undefined ? {} : { project: projectID }, archived: false, limit: 100 };
+  try {
+    for (let pages = 0;pages < MAX_PAGES; pages++) {
+      const page = await api.list(query);
+      if (!page || !Array.isArray(page.data))
+        return;
+      for (const raw of page.data) {
+        const session = raw;
+        if (typeof session?.id === "string")
+          found.push(session);
+      }
+      const next = page.cursor?.next;
+      if (!next)
+        return found;
+      query = { cursor: next };
+    }
+  } catch {
+    return;
+  }
+  return;
+}
+async function evictSessions(api, options) {
+  const sessions = await listProjectSessions(api, options.projectID);
+  if (sessions === undefined)
+    return { ok: false, reason: `the sessions of the project could not all be listed, so who is in ${options.directory} is unknown` };
+  const target = canonicalDirectory(options.directory);
+  const inside = sessions.filter((session) => {
+    if (options.exclude?.has(session.id))
+      return false;
+    const where = session.location?.directory;
+    return typeof where === "string" && insideDirectory(canonicalDirectory(where), target);
+  });
+  const running = inside.find(sessionRunning);
+  if (running)
+    return { ok: false, reason: `session ${running.id} is running in ${options.directory}` };
+  const moved = [];
+  for (const session of inside) {
+    try {
+      await api.move({ sessionID: session.id, directory: options.destination });
+      moved.push(session.id);
+    } catch (error) {
+      const why = error instanceof Error ? error.message : String(error);
+      return { ok: false, reason: `session ${session.id} could not be moved out of ${options.directory} (${why}); nothing was removed` };
+    }
+  }
+  return { ok: true, moved };
+}
+async function repairStrandedSessions(api, options) {
+  const sessions = await listProjectSessions(api, options.projectID);
+  if (sessions === undefined)
+    return { error: "the sessions of the project could not all be listed" };
+  const exists = options.exists ?? existsSync2;
+  const result = { moved: [], failed: [] };
+  for (const session of sessions) {
+    const where = session.location?.directory;
+    if (typeof where !== "string" || where === "" || await exists(resolve2(where)))
+      continue;
+    if (sessionRunning(session))
+      continue;
+    const to = options.destinationFor(session);
+    try {
+      await api.move({ sessionID: session.id, directory: to });
+      result.moved.push({ sessionID: session.id, from: where, to });
+      options.log?.(`moved session ${session.id} out of ${where} (gone) to ${to}`);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      result.failed.push({ sessionID: session.id, reason });
+      options.log?.(`could not move session ${session.id} out of ${where}: ${reason}`);
+    }
+  }
+  return result;
+}
 
 // plugins/lib/src/worktree-state.ts
 var OPERATION_MARKERS = [
@@ -1502,7 +1606,7 @@ function formatPlan(plan, mode) {
 }
 
 // plugins/subagent-worktree/src/lifecycle.ts
-function toMillis(value) {
+function toMillis2(value) {
   if (typeof value === "number")
     return value;
   if (value instanceof Date)
@@ -1527,7 +1631,7 @@ var canonical = (path) => {
   try {
     return realpathSync2(path);
   } catch {
-    return resolve2(path);
+    return resolve3(path);
   }
 };
 function defaultWorktreeRoot() {
@@ -1573,7 +1677,7 @@ function createLifecycle(deps) {
     const session = await withinLookup(deps.getSession(sessionID));
     if (!session)
       return "unknown";
-    return isRunning({ busy: toMillis(session.time?.busy), idle: toMillis(session.time?.idle) }) ? "running" : "finished";
+    return isRunning({ busy: toMillis2(session.time?.busy), idle: toMillis2(session.time?.idle) }) ? "running" : "finished";
   };
   const proofCache = new Map;
   const proofsFor = async (parentDir) => {
@@ -1618,7 +1722,7 @@ function createLifecycle(deps) {
   const busyTreeOf = async (directory, branch) => {
     const dir = await git.gitDir(directory);
     if (dir !== undefined) {
-      const operations = operationsInProgress(OPERATION_MARKERS.map((marker) => marker.name).filter((name) => existsSync2(join3(dir, name))));
+      const operations = operationsInProgress(OPERATION_MARKERS.map((marker) => marker.name).filter((name) => existsSync3(join3(dir, name))));
       if (operations.length > 0)
         return `a ${operations.join(", ")} is in progress`;
     }
@@ -1766,6 +1870,19 @@ function createLifecycle(deps) {
             if (removal.lane)
               await deps.moveHome(removal.lane);
             if (await finalRefusal() !== undefined) {
+              if (removal.lane && await deps.exists(directory)) {
+                await ctx.session.move({ sessionID: removal.lane.child, directory }).catch(() => {});
+              }
+              return false;
+            }
+            const evicted = await evictSessions(ctx.session, {
+              projectID: removal.projectID,
+              directory,
+              destination: canonicalCheckout(common, removal.parentDir),
+              ...removal.lane ? { exclude: new Set([removal.lane.child]) } : {}
+            });
+            if (!evicted.ok) {
+              console.error(`subagent-worktree: not removing ${directory}: ${evicted.reason}`);
               if (removal.lane && await deps.exists(directory)) {
                 await ctx.session.move({ sessionID: removal.lane.child, directory }).catch(() => {});
               }
@@ -2022,7 +2139,7 @@ function createLifecycle(deps) {
     const lanes = (await deps.scan()).filter((lane) => lane.state === "active");
     if (lanes.length === 0)
       return;
-    const gone = (path) => !existsSync2(path);
+    const gone = (path) => !existsSync3(path);
     const lane = laneForLanding(event.result, lanes, canonical, gone);
     if (lane) {
       await withLock(lane.directory, lane.parentDir, async () => {
@@ -2044,9 +2161,9 @@ function createLifecycle(deps) {
       if (!page || !Array.isArray(page.data))
         return "unknown";
       for (const raw of page.data) {
-        const busy = toMillis(raw.time?.busy);
-        const idle = toMillis(raw.time?.idle);
-        const updated = toMillis(raw.time?.updated);
+        const busy = toMillis2(raw.time?.busy);
+        const idle = toMillis2(raw.time?.idle);
+        const updated = toMillis2(raw.time?.updated);
         if (isRunning({ busy, idle }) || updated !== undefined && now() - updated < minAgeMs)
           return "yes";
       }
@@ -2163,6 +2280,21 @@ function createLifecycle(deps) {
     sweepChain = next.catch(() => {});
     return next;
   };
+  const repairSessions = async () => {
+    if (projectID === undefined)
+      return;
+    const lanes = await deps.scan();
+    const parentOf = new Map(lanes.map((lane) => [lane.child, lane.parentDir]));
+    const root = canonicalCheckout(await deps.commonDir(ctx.location.directory), ctx.location.directory);
+    const result = await repairStrandedSessions(ctx.session, {
+      projectID,
+      destinationFor: (session) => parentOf.get(session.id) ?? root,
+      exists: deps.exists,
+      log: (line) => console.error(`subagent-worktree: ${line}`)
+    });
+    if ("error" in result)
+      console.error(`subagent-worktree: session repair skipped: ${result.error}`);
+  };
   const maybeSweep = async () => {
     if (disposed || options.sweep === "off" || projectID === undefined)
       return;
@@ -2171,6 +2303,7 @@ function createLifecycle(deps) {
       if (typeof last === "number" && now() - last < options.intervalHours * HOUR)
         return;
       await ctx.storage.set(sweepKey(), now());
+      await repairSessions().catch((error) => console.error("subagent-worktree: session repair failed:", error));
       await runSweep(options.sweep);
     } catch (error) {
       console.error("subagent-worktree: sweep failed", error);
@@ -2275,7 +2408,7 @@ var directoryExists = async (path) => {
 };
 var TIMED_OUT = Symbol("timed out");
 var randomSuffix = () => crypto.randomUUID().slice(0, 6);
-var normalize = (path) => realpath(path).catch(() => resolve3(path));
+var normalize = (path) => realpath(path).catch(() => resolve4(path));
 function appendContent(content, note) {
   if (content === undefined)
     return note;
@@ -2386,7 +2519,7 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
     const porcelain = await git2.worktrees(parentDir);
     const entries = porcelain === undefined ? undefined : await Promise.all(parseWorktrees(porcelain).map(async (entry) => ({ ...entry, directory: await normalize(entry.directory) })));
     const raw = requested.startsWith("~/") ? join4(homedir2(), requested.slice(2)) : requested;
-    const path = await normalize(resolve3(parentDir, raw));
+    const path = await normalize(resolve4(parentDir, raw));
     const current = entries && containingWorktree(await normalize(parentDir), entries)?.directory;
     return { lookup: findWorktree(requested, path, entries), current };
   };
@@ -2414,8 +2547,8 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
         if (typeof raw.id !== "string")
           continue;
         const time = raw.time ?? {};
-        const busy = toMillis(time.busy);
-        const idle = toMillis(time.idle);
+        const busy = toMillis2(time.busy);
+        const idle = toMillis2(time.idle);
         const session = {
           id: raw.id,
           ...typeof raw.parentID === "string" ? { parentID: raw.parentID } : {},
