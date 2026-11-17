@@ -8,9 +8,11 @@ import { GOAL_SOURCE, isGoalActive } from "./goal.ts"
 import { HEARTBEAT_INTERVAL_MS, type HeartbeatClock } from "./heartbeat.ts"
 import { type AdapterDeps, SKILL_NAMES, setupBeads } from "./index.ts"
 import {
+  BACKGROUND_HOLD_MS,
   BEADS_SOURCE,
   childFinished,
   goalEnded,
+  type HoldTimer,
   isPluginPrompt,
   readExecutionEvent,
   rootStopAction,
@@ -94,6 +96,24 @@ class FakeClock implements HeartbeatClock {
   }
 }
 
+class FakeHoldTimer implements HoldTimer {
+  #next = 0
+  readonly callbacks = new Map<number, () => void>()
+  setTimeout(callback: () => void, ms: number): unknown {
+    expect(ms).toBe(BACKGROUND_HOLD_MS)
+    this.callbacks.set(++this.#next, callback)
+    return this.#next
+  }
+  clearTimeout(timer: unknown): void {
+    this.callbacks.delete(timer as number)
+  }
+  expire(): void {
+    const callbacks = [...this.callbacks.values()]
+    this.callbacks.clear()
+    for (const callback of callbacks) callback()
+  }
+}
+
 const roots: string[] = []
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
@@ -133,10 +153,12 @@ async function start(sessions: Array<{ id: string; parentID?: string }>, deps: A
   const detached: Array<Promise<unknown>> = []
   const waiters = new Map<string, () => void>()
   const clock = new FakeClock()
+  const holdTimer = new FakeHoldTimer()
   const cleanup = await setupBeads(fake.context, {
     env: { PATH: process.env.PATH, HOME: process.env.HOME } as NodeJS.ProcessEnv,
     pinFor: () => undefined,
     clock,
+    holdTimer,
     detach: (task) => void detached.push(task),
     eventHandled: (event) => {
       const id = (event as { id: string }).id
@@ -170,7 +192,7 @@ async function start(sessions: Array<{ id: string; parentID?: string }>, deps: A
     fake.calls
       .filter((call) => call.method === "session.synthetic")
       .map((call) => call.input as { sessionID: string; text: string; resume: boolean; delivery: string; metadata: { source: string } })
-  return { fake, cleanup, emit, shell, settle, synthetics, clock, directory }
+  return { fake, cleanup, emit, shell, settle, synthetics, clock, holdTimer, directory }
 }
 
 describe("stop nudge and release in a root session", () => {
@@ -417,6 +439,55 @@ describe("subagent claim release", () => {
     expect(told).toMatchObject({ sessionID: parent, resume: false, metadata: { source: BEADS_SOURCE } })
     expect(told?.text).toContain(`finished background subagent session ${child} were released`)
     await t.cleanup()
+  })
+
+  describe("a background subagent that goes idle with its own background work still running", () => {
+    const working = (child: string) => ({ sessionID: child, background: [{ kind: "shell", sessionID: child, shellID: "sh_1", command: "sleep 240" }] })
+    const backgroundChild = async () => {
+      const parent = sid("parent")
+      const child = sid("child")
+      const bd = ledger({ "proj-4": { status: "in_progress", assignee: `opencode/${parent}/general/${child}` } })
+      const t = await start([{ id: parent }, { id: child, parentID: parent }], { run: bd.run })
+      const call = { tool: "subagent", sessionID: parent, agent: "build", messageID: "m", id: "call_bgw", input: { prompt: "x", background: true } }
+      await t.fake.fire.tool("execute.before", call)
+      await t.fake.fire.tool("execute.after", { ...call, status: "completed" as const, result: { content: "started", metadata: { sessionID: child, status: "running" } } })
+      await t.shell(child, "bd update proj-4 --claim", "✓ Claimed proj-4")
+      await t.fake.fire.session("experimental.idle", working(child) as never)
+      await t.emit("session.execution.succeeded", child)
+      const unclaims = () => bd.calls.filter((args) => args[0] === "unclaim").length
+      return { parent, child, t, unclaims }
+    }
+
+    test("keeps its claims and lease until its final idle, then releases them once", async () => {
+      const { child, t, unclaims } = await backgroundChild()
+      expect(unclaims()).toBe(0)
+      expect(t.clock.callbacks.size).toBe(1)
+      await t.emit("session.execution.started", child)
+      await t.fake.fire.session("experimental.idle", { sessionID: child, background: [] } as never)
+      await t.emit("session.execution.succeeded", child)
+      expect(unclaims()).toBe(1)
+      expect(t.holdTimer.callbacks.size).toBe(0)
+      expect(t.synthetics().filter((m) => m.text.includes(`finished background subagent session ${child}`))).toHaveLength(1)
+      await t.cleanup()
+    })
+
+    test("releases at the hold timeout when it never reports again", async () => {
+      const { t, unclaims } = await backgroundChild()
+      expect(t.holdTimer.callbacks.size).toBe(1)
+      t.holdTimer.expire()
+      await t.settle()
+      expect(unclaims()).toBe(1)
+      expect(t.clock.callbacks.size).toBe(0)
+      await t.cleanup()
+    })
+
+    test("releases when its session is deleted", async () => {
+      const { child, t, unclaims } = await backgroundChild()
+      await t.emit("session.deleted", child)
+      expect(unclaims()).toBe(1)
+      expect(t.holdTimer.callbacks.size).toBe(0)
+      await t.cleanup()
+    })
   })
 
   test("a superseded subagent keeps its claims; the release gate switches release off", async () => {

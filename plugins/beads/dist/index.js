@@ -4410,9 +4410,37 @@ class Heartbeats {
   }
 }
 
+// plugins/lib/src/idle-background.ts
+function childStillWorking(idle) {
+  return Array.isArray(idle?.background) && idle.background.length > 0;
+}
+
+class IdleReports {
+  #working = new Map;
+  record(idle) {
+    if (childStillWorking(idle))
+      this.#working.set(idle.sessionID, true);
+    else
+      this.#working.delete(idle.sessionID);
+  }
+  take(sessionID) {
+    const working = this.#working.get(sessionID) === true;
+    this.#working.delete(sessionID);
+    return working;
+  }
+  clear() {
+    this.#working.clear();
+  }
+}
+
 // plugins/beads/src/lifecycle.ts
 var BEADS_SOURCE = "srobroek.beads";
 var FOREGROUND_RELEASE_MS = 25000;
+var BACKGROUND_HOLD_MS = 30 * 60000;
+var SYSTEM_HOLD_TIMER = {
+  setTimeout: (callback, ms) => setTimeout(callback, ms),
+  clearTimeout: (timer) => clearTimeout(timer)
+};
 function rootStopAction(end, state) {
   if (end.kind !== "succeeded" || state.claims === 0 || state.continuing)
     return "none";
@@ -4464,7 +4492,15 @@ function subagentChild(result) {
 var SHARED = Symbol.for("srobroek.beads.lifecycle");
 function shared() {
   const holder = globalThis;
-  holder[SHARED] ??= { events: new Set, deferred: new Set, foreground: new Map, releases: new Map, reported: new WeakSet };
+  holder[SHARED] ??= {
+    events: new Set,
+    deferred: new Set,
+    foreground: new Map,
+    releases: new Map,
+    reported: new WeakSet,
+    idle: new IdleReports,
+    held: new Map
+  };
   return holder[SHARED];
 }
 var MAX_EVENTS = 2000;
@@ -4509,26 +4545,64 @@ class Lifecycle {
     }
     if (event.type === "session.execution.started") {
       shared().deferred.delete(sessionID);
+      this.#unhold(sessionID);
       const leases = readLeases(await this.#deps.ctx.storage.get(`leases/${sessionID}`));
       this.#deps.heartbeats.run(sessionID, leases, true);
       return;
     }
     if (event.type === "session.deleted") {
+      shared().idle.take(sessionID);
+      const hold = this.#unhold(sessionID);
       this.#deps.heartbeats.pause(sessionID);
       await this.#deps.ctx.storage.remove(`leases/${sessionID}`);
       await this.#deps.ctx.storage.remove(`nudged/${sessionID}`);
       this.#parents.delete(sessionID);
       shared().deferred.delete(sessionID);
+      if (hold !== undefined)
+        this.#childEnd(sessionID, hold.parentID, { kind: "succeeded" });
       return;
     }
     if (event.end === undefined)
       return;
-    this.#deps.heartbeats.pause(sessionID);
+    const working = shared().idle.take(sessionID);
     const parentID = await this.parentOf(sessionID);
+    if (parentID !== undefined && working && event.end.kind === "succeeded" && this.#deps.release) {
+      this.#hold(sessionID, parentID);
+      return;
+    }
+    this.#unhold(sessionID);
+    this.#deps.heartbeats.pause(sessionID);
     if (parentID === undefined)
       await this.#rootStop(sessionID, event.end);
     else
       this.#childEnd(sessionID, parentID, event.end);
+  }
+  idle(event) {
+    shared().idle.record(event);
+  }
+  dispose() {
+    for (const [sessionID, hold] of shared().held)
+      if (hold.owner === this)
+        this.#unhold(sessionID);
+  }
+  #hold(sessionID, parentID) {
+    this.#unhold(sessionID);
+    const timer = (this.#deps.holdTimer ?? SYSTEM_HOLD_TIMER).setTimeout(() => {
+      if (shared().held.get(sessionID)?.timer !== timer)
+        return;
+      shared().held.delete(sessionID);
+      this.#deps.heartbeats.pause(sessionID);
+      this.#childEnd(sessionID, parentID, { kind: "succeeded" });
+    }, BACKGROUND_HOLD_MS);
+    shared().held.set(sessionID, { parentID, owner: this, timer });
+  }
+  #unhold(sessionID) {
+    const hold = shared().held.get(sessionID);
+    if (hold === undefined)
+      return;
+    shared().held.delete(sessionID);
+    (hold.owner.#deps.holdTimer ?? SYSTEM_HOLD_TIMER).clearTimeout(hold.timer);
+    return hold;
   }
   async prompt(sessionID, metadata) {
     if (isPluginPrompt(metadata))
@@ -5943,7 +6017,8 @@ async function setupBeads(ctx, deps = {}) {
     nudge: on("beads-stop-nudge"),
     release: on("beads-claim-release"),
     goal: deps.goal ?? (async (sessionID) => ctx.rpc(GoalRpc).get({ sessionID })),
-    detach
+    detach,
+    holdTimer: deps.holdTimer
   });
   const cachedPinFor = (cwd) => {
     const hit = pins.get(cwd);
@@ -6108,6 +6183,7 @@ async function setupBeads(ctx, deps = {}) {
   const promptHook = await ctx.session.hook("prompt", async (event) => {
     await lifecycle.prompt(event.sessionID, event.metadata);
   });
+  const idleHook = await ctx.session.hook("experimental.idle", (event) => lifecycle.idle(event));
   const skills = on("beads-skills") ? await registerSkills(ctx.skill, SKILL_NAMES.map((name) => join7(deps.skillsDirectory ?? SKILLS_DIRECTORY, name, "SKILL.md"))) : undefined;
   const abort = new AbortController;
   const iterator = ctx.event.subscribe({ signal: abort.signal })[Symbol.asyncIterator]();
@@ -6129,7 +6205,9 @@ async function setupBeads(ctx, deps = {}) {
     abort.abort();
     await iterator.return?.();
     heartbeats.dispose();
+    lifecycle.dispose();
     await skills?.dispose();
+    await idleHook.dispose();
     await promptHook.dispose();
     await generate.dispose();
     await compaction.dispose();

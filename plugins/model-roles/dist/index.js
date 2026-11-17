@@ -4,6 +4,29 @@
 import { homedir } from "os";
 import { Plugin } from "@opencode/plugin";
 
+// plugins/lib/src/idle-background.ts
+function childStillWorking(idle) {
+  return Array.isArray(idle?.background) && idle.background.length > 0;
+}
+
+class IdleReports {
+  #working = new Map;
+  record(idle) {
+    if (childStillWorking(idle))
+      this.#working.set(idle.sessionID, true);
+    else
+      this.#working.delete(idle.sessionID);
+  }
+  take(sessionID) {
+    const working = this.#working.get(sessionID) === true;
+    this.#working.delete(sessionID);
+    return working;
+  }
+  clear() {
+    this.#working.clear();
+  }
+}
+
 // plugins/model-roles/src/resolve.ts
 var ROLE_HEADER = "x-opencode-model-role";
 var FALLBACK_HEADER = "x-opencode-model-fallback";
@@ -6111,6 +6134,9 @@ ${refs.size}`;
       if (typeof sessionID === "string" && model !== undefined && (kind === undefined || kind === "primary"))
         recordRequest(requestLog, sessionID, model, Date.now());
     });
+    const idleReports = new IdleReports;
+    const heldOpen = new Set;
+    const idleHook = await ctx.session.hook("experimental.idle", (event) => idleReports.record(event));
     const tools = await ctx.tool.transform((editor) => {
       editor.add({
         name: CHECK_TOOL,
@@ -7041,6 +7067,8 @@ ${refs.size}`;
           if (typeof data?.sessionID !== "string" || !isRecord11(data.error))
             continue;
           const sessionID = data.sessionID;
+          idleReports.take(sessionID);
+          heldOpen.delete(sessionID);
           settleRequest(requestLog, sessionID, endedAt(event));
           const error = data.error;
           await outcomes.signals(sessionID, NO_SIGNALS);
@@ -7054,10 +7082,15 @@ ${refs.size}`;
           if (typeof sessionID !== "string")
             continue;
           const model = settleRequest(requestLog, sessionID, endedAt(event));
-          await outcomes.signals(sessionID, NO_SIGNALS);
           if (model !== undefined)
             healthHistory = recordRecovery(healthHistory, model.providerID, finishedAt(event));
-          await outcomes.end(sessionID, "succeeded", finishedAt(event));
+          if (idleReports.take(sessionID))
+            heldOpen.add(sessionID);
+          else {
+            heldOpen.delete(sessionID);
+            await outcomes.signals(sessionID, NO_SIGNALS);
+            await outcomes.end(sessionID, "succeeded", finishedAt(event));
+          }
           pruneChildModels();
           if (noticeState.outages.size > 0)
             await queue(() => onSessionSucceeded(sessionID, model)).catch(() => {});
@@ -7066,6 +7099,8 @@ ${refs.size}`;
         if (type === INTERRUPTED_EVENT) {
           const sessionID = event.data?.sessionID;
           if (typeof sessionID === "string") {
+            idleReports.take(sessionID);
+            heldOpen.delete(sessionID);
             settleRequest(requestLog, sessionID, endedAt(event));
             await outcomes.signals(sessionID, NO_SIGNALS);
             await outcomes.end(sessionID, "interrupted", finishedAt(event));
@@ -7097,6 +7132,11 @@ ${refs.size}`;
             requestLog.delete(sessionID);
             executionOf.delete(sessionID);
             forgetSession(noticeState, sessionID);
+            idleReports.take(sessionID);
+            if (heldOpen.delete(sessionID)) {
+              await outcomes.signals(sessionID, NO_SIGNALS);
+              await outcomes.end(sessionID, "succeeded", finishedAt(event));
+            }
           }
           continue;
         }
@@ -7146,6 +7186,9 @@ ${refs.size}`;
       await subagentTool.dispose();
       await tools.dispose();
       await strip.dispose();
+      await idleHook.dispose();
+      idleReports.clear();
+      heldOpen.clear();
       await retries.dispose();
       await registration.dispose();
       await references.dispose();

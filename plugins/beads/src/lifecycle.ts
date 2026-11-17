@@ -9,12 +9,17 @@
  * - A root session that stops again, still holding them, gets them released.
  * - A subagent's claims are released when it finishes. A foreground subagent's release
  *   is reported in its `subagent` tool result; a background one's in a synthetic message
- *   to its parent, which does not wake the parent.
+ *   to its parent, which does not wake the parent. A background subagent that goes idle
+ *   with its own background work still running keeps its claims and leases until its final
+ *   idle, its deletion or `BACKGROUND_HOLD_MS`, whichever comes first. A background subagent that goes idle
+ *   with its own background work still running keeps its claims and leases until its final
+ *   idle, its deletion or `BACKGROUND_HOLD_MS`, whichever comes first.
  * - Lease heartbeats pause when an execution ends and resume when the next one starts.
  */
 
 import type { Context } from "@opencode/plugin/promise/plugin"
 import type { Result } from "@opencode/plugin/promise/tool"
+import { type IdleReport, IdleReports } from "@srobroek/opencode-lib/idle-background"
 import { type ClaimState, readClaimState, type TrackedClaim } from "./claims.ts"
 import type { BdRun } from "./gate-admission.ts"
 import { GOAL_SOURCE, isGoalActive } from "./goal.ts"
@@ -26,6 +31,24 @@ export const BEADS_SOURCE = "srobroek.beads"
 
 /** How long a foreground subagent's release may hold up its parent's tool result. */
 export const FOREGROUND_RELEASE_MS = 25_000
+
+/**
+ * How long a subagent that went idle with background work still running keeps its claims
+ * without reporting again. Its work's notice normally wakes it well before; after this the
+ * claims are released as at any other end, so a child that never reports cannot hold them.
+ */
+export const BACKGROUND_HOLD_MS = 30 * 60_000
+
+/** The timer behind `BACKGROUND_HOLD_MS`; tests pass a fake. */
+export type HoldTimer = {
+  setTimeout: (callback: () => void, ms: number) => unknown
+  clearTimeout: (timer: unknown) => void
+}
+
+const SYSTEM_HOLD_TIMER: HoldTimer = {
+  setTimeout: (callback, ms) => setTimeout(callback, ms),
+  clearTimeout: (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>),
+}
 
 export type ExecutionEnd =
   | { kind: "succeeded" }
@@ -106,14 +129,28 @@ type Shared = {
   releases: Map<string, Promise<ChildRelease | undefined>>
   /** Releases a foreground tool result reports, so the child's own end does not report them again. */
   reported: WeakSet<Promise<ChildRelease | undefined>>
+  /** Each session's last idle report: whether it still had background work running. */
+  idle: IdleReports
+  /** Subagents that went idle with background work still running, whose release waits for their final idle. */
+  held: Map<string, Hold>
 }
+
+type Hold = { parentID: string; owner: Lifecycle; timer: unknown }
 
 const SHARED: unique symbol = Symbol.for("srobroek.beads.lifecycle") as never
 
 /** State every instance of this plugin in the process shares, so one event is handled once. */
 function shared(): Shared {
   const holder = globalThis as { [SHARED]?: Shared }
-  holder[SHARED] ??= { events: new Set(), deferred: new Set(), foreground: new Map(), releases: new Map(), reported: new WeakSet() }
+  holder[SHARED] ??= {
+    events: new Set(),
+    deferred: new Set(),
+    foreground: new Map(),
+    releases: new Map(),
+    reported: new WeakSet(),
+    idle: new IdleReports(),
+    held: new Map(),
+  }
   return holder[SHARED]
 }
 
@@ -131,6 +168,8 @@ export type LifecycleDeps = {
   goal: (sessionID: string) => Promise<unknown>
   /** Receives every detached task; tests join them. */
   detach: (task: Promise<unknown>) => void
+  /** The timer behind `BACKGROUND_HOLD_MS`; defaults to the system timer. */
+  holdTimer?: HoldTimer
 }
 
 const MAX_EVENTS = 2_000
@@ -175,23 +214,64 @@ export class Lifecycle {
     }
     if (event.type === "session.execution.started") {
       shared().deferred.delete(sessionID)
+      // A held child woke up; its next end decides its claims.
+      this.#unhold(sessionID)
       const leases = readLeases(await this.#deps.ctx.storage.get(`leases/${sessionID}`))
       this.#deps.heartbeats.run(sessionID, leases, true)
       return
     }
     if (event.type === "session.deleted") {
+      shared().idle.take(sessionID)
+      const hold = this.#unhold(sessionID)
       this.#deps.heartbeats.pause(sessionID)
       await this.#deps.ctx.storage.remove(`leases/${sessionID}`)
       await this.#deps.ctx.storage.remove(`nudged/${sessionID}`)
       this.#parents.delete(sessionID)
       shared().deferred.delete(sessionID)
+      if (hold !== undefined) this.#childEnd(sessionID, hold.parentID, { kind: "succeeded" })
       return
     }
     if (event.end === undefined) return
-    this.#deps.heartbeats.pause(sessionID)
+    const working = shared().idle.take(sessionID)
     const parentID = await this.parentOf(sessionID)
+    // Its background work's notice wakes the child again: its claims and leases stay until its final idle.
+    if (parentID !== undefined && working && event.end.kind === "succeeded" && this.#deps.release) {
+      this.#hold(sessionID, parentID)
+      return
+    }
+    this.#unhold(sessionID)
+    this.#deps.heartbeats.pause(sessionID)
     if (parentID === undefined) await this.#rootStop(sessionID, event.end)
     else this.#childEnd(sessionID, parentID, event.end)
+  }
+
+  /** Record the background work a session's `experimental.idle` hook reports. */
+  idle(event: IdleReport): void {
+    shared().idle.record(event)
+  }
+
+  /** Stop the hold timers this instance started; their children keep their claims. */
+  dispose(): void {
+    for (const [sessionID, hold] of shared().held) if (hold.owner === this) this.#unhold(sessionID)
+  }
+
+  #hold(sessionID: string, parentID: string): void {
+    this.#unhold(sessionID)
+    const timer = (this.#deps.holdTimer ?? SYSTEM_HOLD_TIMER).setTimeout(() => {
+      if (shared().held.get(sessionID)?.timer !== timer) return
+      shared().held.delete(sessionID)
+      this.#deps.heartbeats.pause(sessionID)
+      this.#childEnd(sessionID, parentID, { kind: "succeeded" })
+    }, BACKGROUND_HOLD_MS)
+    shared().held.set(sessionID, { parentID, owner: this, timer })
+  }
+
+  #unhold(sessionID: string): Hold | undefined {
+    const hold = shared().held.get(sessionID)
+    if (hold === undefined) return undefined
+    shared().held.delete(sessionID)
+    ;(hold.owner.#deps.holdTimer ?? SYSTEM_HOLD_TIMER).clearTimeout(hold.timer)
+    return hold
   }
 
   /** A real user prompt re-arms the stop nudge. */

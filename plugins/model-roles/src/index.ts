@@ -2,6 +2,7 @@ import { homedir } from "node:os"
 import { Plugin } from "@opencode/plugin"
 import type { Context } from "@opencode/plugin/promise/plugin"
 import type { SessionRetry } from "@opencode/plugin/promise/session"
+import { IdleReports } from "@srobroek/opencode-lib/idle-background"
 import {
   type AutoOptions,
   type AutoReason,
@@ -1130,6 +1131,12 @@ export default Plugin.define({
         recordRequest(requestLog, sessionID, model, Date.now())
     })
 
+    /** Each Session's last idle report: a child idle with background work still running has not ended. */
+    const idleReports = new IdleReports()
+    /** Children whose outcome stays open because they went idle with background work still running. */
+    const heldOpen = new Set<string>()
+    const idleHook = await ctx.session.hook("experimental.idle", (event) => idleReports.record(event))
+
     const tools = await ctx.tool.transform((editor) => {
       editor.add({
         name: CHECK_TOOL,
@@ -2142,6 +2149,8 @@ export default Plugin.define({
           const data = (event as { data?: { sessionID?: unknown; error?: unknown } }).data
           if (typeof data?.sessionID !== "string" || !isRecord(data.error)) continue
           const sessionID = data.sessionID
+          idleReports.take(sessionID)
+          heldOpen.delete(sessionID)
           settleRequest(requestLog, sessionID, endedAt(event))
           const error = data.error as { type?: string; message?: string; status?: number }
           await outcomes.signals(sessionID, NO_SIGNALS)
@@ -2156,9 +2165,14 @@ export default Plugin.define({
           const sessionID = (event as { data?: { sessionID?: unknown } }).data?.sessionID
           if (typeof sessionID !== "string") continue
           const model = settleRequest(requestLog, sessionID, endedAt(event))
-          await outcomes.signals(sessionID, NO_SIGNALS)
           if (model !== undefined) healthHistory = recordRecovery(healthHistory, model.providerID, finishedAt(event))
-          await outcomes.end(sessionID, "succeeded", finishedAt(event))
+          // Background work still running wakes the child again; its last idle, or its deletion, ends it.
+          if (idleReports.take(sessionID)) heldOpen.add(sessionID)
+          else {
+            heldOpen.delete(sessionID)
+            await outcomes.signals(sessionID, NO_SIGNALS)
+            await outcomes.end(sessionID, "succeeded", finishedAt(event))
+          }
           pruneChildModels()
           if (noticeState.outages.size > 0) await queue(() => onSessionSucceeded(sessionID, model)).catch(() => {})
           continue
@@ -2167,6 +2181,8 @@ export default Plugin.define({
           // Neither a success nor a failure: the interrupted request only leaves the log.
           const sessionID = (event as { data?: { sessionID?: unknown } }).data?.sessionID
           if (typeof sessionID === "string") {
+            idleReports.take(sessionID)
+            heldOpen.delete(sessionID)
             settleRequest(requestLog, sessionID, endedAt(event))
             await outcomes.signals(sessionID, NO_SIGNALS)
             await outcomes.end(sessionID, "interrupted", finishedAt(event))
@@ -2195,6 +2211,11 @@ export default Plugin.define({
             requestLog.delete(sessionID)
             executionOf.delete(sessionID)
             forgetSession(noticeState, sessionID)
+            idleReports.take(sessionID)
+            if (heldOpen.delete(sessionID)) {
+              await outcomes.signals(sessionID, NO_SIGNALS)
+              await outcomes.end(sessionID, "succeeded", finishedAt(event))
+            }
           }
           continue
         }
@@ -2240,6 +2261,9 @@ export default Plugin.define({
       await subagentTool.dispose()
       await tools.dispose()
       await strip.dispose()
+      await idleHook.dispose()
+      idleReports.clear()
+      heldOpen.clear()
       await retries.dispose()
       await registration.dispose()
       await references.dispose()

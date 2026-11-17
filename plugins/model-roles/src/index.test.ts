@@ -229,6 +229,10 @@ function createHost(input: {
       for (const hook of hooks) if (hook.name === "retry") await hook.callback(payload)
       return payload.decision
     },
+    /** Run the `experimental.idle` hooks as the host does just before a Session's execution ends. */
+    fireIdle: async (event: { sessionID: string; background?: unknown[] }) => {
+      for (const hook of hooks) if (hook.name === "experimental.idle") await hook.callback(event)
+    },
     fireModelRequest: (headers: Record<string, string>, extra: { sessionID?: string; model?: ModelRef; kind?: string } = {}) => {
       for (const hook of hooks) if (hook.name === "model.request") hook.callback({ headers, ...extra })
       return headers
@@ -1560,6 +1564,35 @@ describe("runtime fallback", () => {
     describe("outcome signals", () => {
       const text = (text: string) => ({ type: "session.text.ended", data: { sessionID: "c", assistantMessageID: "m", ordinal: 0, text } })
       const finish = (host: Awaited<ReturnType<typeof withChild>>["host"]) => host.emit({ type: "session.execution.succeeded", data: { sessionID: "c" } })
+
+      test("a child idle with background work still running is not its end; its later test run counts", async () => {
+        const { host, cleanup } = await withChild()
+        const spawned = (host.storage.get("outcome:c") as { at: number }).at
+        await host.fireIdle({ sessionID: "c", background: [{ kind: "shell", sessionID: "c", shellID: "sh_1", command: "bun test" }] })
+        host.emit({ type: "session.execution.succeeded", created: spawned + 1_000, data: { sessionID: "c" } })
+        await settle()
+        expect(host.storage.get("outcome:c")).not.toHaveProperty("outcome")
+        expect(host.storage.get("outcome:c")).not.toHaveProperty("tests")
+        await host.toolDone("bash", { command: "bun test" }, { exit: 0 }, "c", "t1")
+        await host.fireIdle({ sessionID: "c", background: [] })
+        host.emit({ type: "session.execution.succeeded", created: spawned + 60_000, data: { sessionID: "c" } })
+        await settle()
+        expect(host.storage.get("outcome:c")).toMatchObject({ outcome: "succeeded", tests: "pass", ms: 60_000 })
+        host.close()
+        await cleanup()
+      })
+
+      test("a child held open by background work ends when its session is deleted", async () => {
+        const { host, cleanup } = await withChild()
+        const spawned = (host.storage.get("outcome:c") as { at: number }).at
+        await host.fireIdle({ sessionID: "c", background: [{ kind: "subagent", sessionID: "c", childSessionID: "g", agent: "x", description: "y" }] })
+        host.emit({ type: "session.execution.succeeded", created: spawned + 1_000, data: { sessionID: "c" } })
+        host.emit({ type: "session.deleted", created: spawned + 5_000, data: { sessionID: "c" } })
+        await settle()
+        expect(host.storage.get("outcome:c")).toMatchObject({ outcome: "succeeded", tests: "none", ms: 5_000 })
+        host.close()
+        await cleanup()
+      })
 
       test("a reviewer's last VERDICT line is kept as an enum and no text", async () => {
         const { host, cleanup } = await withChild()

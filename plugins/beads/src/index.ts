@@ -36,7 +36,7 @@ import {
   sessionChain,
   shellInput,
 } from "./host.ts"
-import { BEADS_SOURCE, Lifecycle } from "./lifecycle.ts"
+import { BEADS_SOURCE, type HoldTimer, Lifecycle } from "./lifecycle.ts"
 import { PRIME_WAIT_MS, readPrime, storedPrime } from "./prime.ts"
 import { type StartDeps, sessionStartAdvisories } from "./session-start.ts"
 import { actorInjection, decideShell, type ShellGateDeps, TOOL_CALL_BUDGET_MS } from "./shell-gates.ts"
@@ -122,6 +122,8 @@ export type AdapterDeps = {
   repositoryControl?: ShellGateDeps["repositoryControl"]
   env?: NodeJS.ProcessEnv
   clock?: HeartbeatClock
+  /** The timer behind `BACKGROUND_HOLD_MS`. */
+  holdTimer?: HoldTimer
   /** Receives every detached task (claim releases); tests join them. */
   detach?: (task: Promise<unknown>) => void
   /** The session's built-in goal state; production asks OpenCode's `opencode.goal` RPC. */
@@ -205,6 +207,7 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
     release: on("beads-claim-release"),
     goal: deps.goal ?? (async (sessionID) => ctx.rpc(GoalRpc).get({ sessionID })),
     detach,
+    holdTimer: deps.holdTimer,
   })
 
   const cachedPinFor = (cwd: string): string | undefined => {
@@ -369,6 +372,7 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
   const promptHook = await ctx.session.hook("prompt", async (event) => {
     await lifecycle.prompt(event.sessionID, event.metadata)
   })
+  const idleHook = await ctx.session.hook("experimental.idle", (event) => lifecycle.idle(event))
 
   const skills = on("beads-skills")
     ? await registerSkills(
@@ -397,7 +401,9 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
     abort.abort()
     await iterator.return?.()
     heartbeats.dispose()
+    lifecycle.dispose()
     await skills?.dispose()
+    await idleHook.dispose()
     await promptHook.dispose()
     await generate.dispose()
     await compaction.dispose()
