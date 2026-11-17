@@ -1,5 +1,16 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test"
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+  writeSync,
+} from "node:fs"
 import { hostname } from "node:os"
 import { join } from "node:path"
 import {
@@ -13,6 +24,7 @@ import {
   resolveBunBinary,
   setPreflightWaitForTests,
   setProcessStartIdentityForTests,
+  withEmbeddedWriteLock,
   writeWaitFromOptions,
 } from "./bd-embedded-write-lock.ts"
 import { main as runEmbeddedWriter, setCommandTimeoutForTests } from "./bd-embedded-write-runner.ts"
@@ -946,5 +958,74 @@ describe("waiting for a busy ledger", () => {
         expect(Date.now() - started).toBeLessThan(3000)
       })
     })
+  })
+})
+
+describe("registry left by another plugin version", () => {
+  const KEY = Symbol.for("com.srobroek.beads.embedded-write-lock.v1")
+  const holder = globalThis as Record<symbol, unknown>
+
+  function embeddedFixture(prefix: string): { root: string; store: string } {
+    const root = mkdtempSync(join(Bun.env.TMPDIR ?? "/tmp", prefix))
+    const store = join(root, ".beads")
+    mkdirSync(store)
+    writeFileSync(join(store, "metadata.json"), "{}")
+    return { root, store }
+  }
+
+  test("an object without `queues` is backfilled in place and two writes do not overlap", async () => {
+    const { root, store } = embeddedFixture("beads-lock-old-shape-")
+    const previous = holder[KEY]
+    const old: Record<string, unknown> = { owned: new Map() }
+    holder[KEY] = old
+    try {
+      let active = 0
+      let overlapped = false
+      const write = async () => {
+        active++
+        if (active > 1) overlapped = true
+        await new Promise((resolve) => setTimeout(resolve, 60))
+        active--
+      }
+      const env = { ...process.env, BEADS_DIR: store }
+      const results = await Promise.all([
+        withEmbeddedWriteLock(root, "writer-a", write, env),
+        withEmbeddedWriteLock(root, "writer-b", write, env),
+      ])
+      expect(results.map((r) => r.kind)).toEqual(["done", "done"])
+      expect(overlapped).toBe(false)
+      expect(holder[KEY]).toBe(old)
+      expect(old.queues).toBeInstanceOf(Map)
+    } finally {
+      holder[KEY] = previous
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test("a hold an older version took, without the newer writer fields, is waited for", async () => {
+    const { root, store } = embeddedFixture("beads-lock-old-holder-")
+    const lock = join(store, "omp-embedded-write.lock")
+    const previous = holder[KEY]
+    const owned = new Map<string, unknown>()
+    holder[KEY] = { owned, queues: new Map() }
+    try {
+      const fd = openSync(lock, "wx")
+      const taken = Date.now()
+      writeSync(fd, JSON.stringify({ host, pid: process.pid, owner: "old", token: "old-token", taken, expires: taken + 60_000 }))
+      owned.set(lock, { fd, holders: new Map([["old", 1]]), renew: setInterval(() => {}, 60_000), token: "old-token" })
+      let acquired = false
+      const waiting = hold(store, "new", 10_000).then((got) => {
+        acquired = true
+        return got
+      })
+      await new Promise((resolve) => setTimeout(resolve, 200))
+      expect(acquired).toBe(false)
+      release(store, "old")
+      expect((await waiting).kind).toBe("held")
+      release(store, "new")
+    } finally {
+      holder[KEY] = previous
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 })

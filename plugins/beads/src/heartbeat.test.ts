@@ -186,4 +186,25 @@ describe("heartbeat timers", () => {
     one.dispose()
     expect(clock.callbacks.size).toBe(0)
   })
+
+  test("a timer an older version registered without `running` or `clock` still ticks and stops", async () => {
+    const key = Symbol.for("srobroek.beads.heartbeats")
+    const holder = globalThis as Record<symbol, Map<string, unknown> | undefined>
+    const oldTimers = new Map<string, unknown>([["ses_old\0a", { owner: {}, timer: 7 }]])
+    const previous = holder[key]
+    holder[key] = oldTimers
+    try {
+      const beats: string[] = []
+      const heartbeats = new Heartbeats(async (sessionID) => void beats.push(sessionID), new FakeClock())
+      expect(heartbeats.active("ses_old", "a")).toBe(true)
+      heartbeats.run("ses_old", { a: lease("old-1") }, true)
+      await flush()
+      expect(beats).toEqual(["ses_old"])
+      heartbeats.pause("ses_old")
+      expect(heartbeats.active("ses_old", "a")).toBe(false)
+      expect(holder[key]).toBe(oldTimers)
+    } finally {
+      holder[key] = previous
+    }
+  })
 })

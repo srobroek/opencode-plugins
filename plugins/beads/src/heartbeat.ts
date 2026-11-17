@@ -117,8 +117,13 @@ type Timer = { owner: object; timer: unknown; clock: HeartbeatClock; running: bo
 
 const REGISTRY: unique symbol = Symbol.for("srobroek.beads.heartbeats") as never
 
-function timers(): Map<string, Timer> {
-  const holder = globalThis as { [REGISTRY]?: Map<string, Timer> }
+/**
+ * Never change this key: every plugin version in a process must see the same timers.
+ * Entries an older version created may lack fields a newer one added, so a reader
+ * treats every field except `owner` and `timer` as optional.
+ */
+function timers(): Map<string, Partial<Timer> & Pick<Timer, "owner" | "timer">> {
+  const holder = globalThis as { [REGISTRY]?: Map<string, Partial<Timer> & Pick<Timer, "owner" | "timer">> }
   holder[REGISTRY] ??= new Map()
   return holder[REGISTRY]
 }
@@ -176,7 +181,7 @@ export class Heartbeats {
     if (entry === undefined) return
     timers().delete(key)
     try {
-      entry.clock.clearInterval(entry.timer)
+      (entry.clock ?? this.#clock).clearInterval(entry.timer)
     } catch {
       // The host may already have cleared it.
     }

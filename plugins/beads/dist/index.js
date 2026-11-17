@@ -2133,8 +2133,11 @@ var REGISTRY_KEY = Symbol.for("com.srobroek.beads.embedded-write-lock.v1");
 function registry() {
   const holder = globalThis;
   const existing = holder[REGISTRY_KEY];
-  if (existing !== undefined)
+  if (existing !== undefined) {
+    existing.owned ??= new Map;
+    existing.queues ??= new Map;
     return existing;
+  }
   const created = { owned: new Map, queues: new Map };
   holder[REGISTRY_KEY] = created;
   process.on("exit", () => {
@@ -4394,7 +4397,7 @@ class Heartbeats {
       return;
     timers().delete(key);
     try {
-      entry.clock.clearInterval(entry.timer);
+      (entry.clock ?? this.#clock).clearInterval(entry.timer);
     } catch {}
   }
   async#tick(id, sessionID, key, lease) {
