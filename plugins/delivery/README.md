@@ -117,6 +117,11 @@ Inputs: `pr`, and when needed `merge_method` (`squash` by default, `merge`,
   running background work keeps the worktree. Landing records are dropped only on positive evidence
   (their own receipt readable and cleaned or superseded); a denial is never dropped by cleanup of
   stale records, and a missing or unreadable receipt directory deletes nothing.
+- The lock is the Beads embedded write lock's protocol (a leased, token-owned file with a steal
+  lock), shared through `plugins/lib/src/lease-lock.ts`. Delivery's coordination writes (holds,
+  landing records, denials) take it too. The last look (claims, holds, sessions, denials) runs
+  inside the removal section after the final tree, ref and host reads, immediately before the
+  removal call.
 - Every removal delivery makes (explicit, inline, retry) runs its last step inside
   `lockedWorktreeRemoval`: the same on-disk lock `subagent-worktree` takes, then, under it and after
   every proof, a final look at claims, background holds, running sessions and denials, then the

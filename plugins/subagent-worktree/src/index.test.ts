@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Error as ToolError } from "@opencode/plugin/promise/tool"
+import { outsideLocks } from "@srobroek/opencode-lib/lease-lock"
 import { createFakeContext, type FakeContext } from "@srobroek/opencode-lib/testing"
 import { readClaim, writeLanding } from "@srobroek/opencode-lib/worktree-claims"
 import type { RunResult } from "./git.ts"
@@ -997,7 +998,7 @@ describe("execute.after", () => {
     const a = await start({
       onRemove: () => {
         // Instance A holds the directory's disk lock here; instance B's resume has to queue behind it.
-        resumed = b?.fake.fire.tool("execute.before", call({ sessionID: "ses_fake1", prompt: "again" }))
+        resumed = outsideLocks(() => b?.fake.fire.tool("execute.before", call({ sessionID: "ses_fake1", prompt: "again" })))
       },
     })
     b = await start({ commonDir: async () => a.common })

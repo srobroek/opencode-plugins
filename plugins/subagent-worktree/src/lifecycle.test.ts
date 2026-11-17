@@ -963,14 +963,14 @@ describe("two plugin instances, one repository: coordination lives on disk", () 
   })
 
   test("a live lock held by another instance keeps the removal from running", async () => {
-    const lockOptions = { attempts: 3, delayMs: () => 1, ttlMs: 60_000, alive: () => true, host: "this-host", now: () => NOW }
+    const lockOptions = { waitMs: 40, ttlMs: 60_000, alive: () => true, host: "this-host", now: () => NOW }
     const { fake, state, common, worktree, cleanup } = await start({ ancestor: 1 }, { lock: lockOptions })
     fake.emit({ type: "session.execution.succeeded", data: { sessionID: CHILD } })
     await settle()
     mkdirSync(join(common, "opencode", "locks"), { recursive: true })
     writeFileSync(
       lockFile(common, WT),
-      JSON.stringify({ pid: process.pid, host: "this-host", sessionID: "other", acquiredAt: NOW, token: "theirs" }),
+      JSON.stringify({ pid: process.pid, host: "this-host", owner: "other", token: "theirs", taken: NOW, expires: NOW + 60_000 }),
     )
     state.ancestor = 0 // now landed
     fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
@@ -981,14 +981,14 @@ describe("two plugin instances, one repository: coordination lives on disk", () 
   })
 
   test("a stale lock (old, holder dead) is broken and the removal runs", async () => {
-    const lockOptions = { attempts: 3, delayMs: () => 1, ttlMs: 60_000, alive: () => false, host: "this-host", now: () => NOW }
+    const lockOptions = { waitMs: 200, ttlMs: 60_000, alive: () => false, host: "this-host", now: () => NOW }
     const { fake, state, common, worktree, cleanup } = await start({ ancestor: 1 }, { lock: lockOptions })
     fake.emit({ type: "session.execution.succeeded", data: { sessionID: CHILD } })
     await settle()
     mkdirSync(join(common, "opencode", "locks"), { recursive: true })
     writeFileSync(
       lockFile(common, WT),
-      JSON.stringify({ pid: 999_999, host: "this-host", sessionID: "dead", acquiredAt: NOW - 3_600_000, token: "old" }),
+      JSON.stringify({ pid: 999_999, host: "this-host", owner: "dead", token: "old", taken: NOW - 3_600_000, expires: NOW - 3_000_000 }),
     )
     state.ancestor = 0 // now landed
     fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
@@ -1089,20 +1089,70 @@ describe("coordination errors never escape a hook and never remove", () => {
   })
 
   test("delivery holding the shared lock keeps the lane remover out, then it proceeds when released", async () => {
-    const lockOptions = { attempts: 2, delayMs: () => 1, ttlMs: 60_000, alive: () => true, host: "this-host", now: () => NOW }
+    const lockOptions = { waitMs: 40, ttlMs: 60_000, alive: () => true, host: "this-host", now: () => NOW }
     const { fake, state, common, worktree, cleanup } = await start({ ancestor: 1 }, { lock: lockOptions })
     fake.emit({ type: "session.execution.succeeded", data: { sessionID: CHILD } })
     await settle()
     state.ancestor = 0
     mkdirSync(join(common, "opencode", "locks"), { recursive: true })
     const path = lockFile(common, WT)
-    writeFileSync(path, JSON.stringify({ pid: process.pid, host: "this-host", sessionID: "delivery", acquiredAt: NOW, token: "delivery" }))
+    writeFileSync(path, JSON.stringify({ pid: process.pid, host: "this-host", owner: "delivery", token: "delivery", taken: NOW, expires: NOW + 60_000 }))
     fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
     await settle()
     expect(worktree).toEqual([])
     rmSync(path)
     fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
     await settle()
+    expect(worktree[0]?.method).toBe("remove")
+    await cleanup()
+  })
+})
+
+describe("an unwritable holds store stays unsafe across passes", () => {
+  const needsPermissions = process.getuid?.() === 0 ? test.skip : test
+  const gate = (fake: Fake, background: unknown[]) =>
+    fake.fire.session("experimental.idle", { sessionID: PARENT, background } as never)
+
+  needsPermissions("readable holds directory with only expired records, a failed write, then a later event: no removal", async () => {
+    const { fake, state, common, worktree, cleanup } = await start({ ancestor: 1 })
+    fake.emit({ type: "session.execution.succeeded", data: { sessionID: CHILD } })
+    await settle()
+    state.ancestor = 0
+    // Only an expired record: the directory exists and reads as empty.
+    setHold(common, WT, "ses_old", [{ kind: "shell", id: "old" }], NOW - 25 * 3_600_000)
+    const holdsRoot = join(common, "opencode", "holds")
+    const holds = join(holdsRoot, readdirSync(holdsRoot)[0] as string)
+    chmodSync(holds, 0o555)
+    try {
+      // The gate cannot record the child's running shell: that must be remembered ...
+      await gate(fake, [{ kind: "shell", sessionID: CHILD, shellID: "sh", command: "sleep 60" }])
+      expect(worktree).toEqual([])
+      // ... for the passes that follow, not just this invocation.
+      fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+      await settle()
+      expect(worktree).toEqual([])
+    } finally {
+      chmodSync(holds, 0o755)
+    }
+    await cleanup()
+  })
+
+  needsPermissions("the unsafe state ends with a later hold write that succeeds", async () => {
+    const { fake, state, common, worktree, cleanup } = await start({ ancestor: 1 })
+    fake.emit({ type: "session.execution.succeeded", data: { sessionID: CHILD } })
+    await settle()
+    state.ancestor = 0
+    setHold(common, WT, "ses_old", [{ kind: "shell", id: "old" }], NOW - 25 * 3_600_000)
+    const holdsRoot = join(common, "opencode", "holds")
+    const holds = join(holdsRoot, readdirSync(holdsRoot)[0] as string)
+    chmodSync(holds, 0o555)
+    await gate(fake, [{ kind: "shell", sessionID: CHILD, shellID: "sh", command: "sleep 60" }])
+    chmodSync(holds, 0o755)
+    // Writable again, but the earlier failure is only forgotten by a write that succeeds.
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle()
+    expect(worktree).toEqual([])
+    await gate(fake, [])
     expect(worktree[0]?.method).toBe("remove")
     await cleanup()
   })

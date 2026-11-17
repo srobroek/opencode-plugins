@@ -129,6 +129,13 @@ export type LeaseResult<T> = { kind: "done"; value: T } | { kind: "failed"; reas
 
 const insideLock = new AsyncLocalStorage<ReadonlySet<string>>()
 
+/**
+ * Run `fn` outside any lock this call chain holds. Another PROCESS never inherits the holder's
+ * re-entrancy; tests that simulate a second plugin instance inside one process use this to be a
+ * stranger to the lock.
+ */
+export const outsideLocks = <T>(fn: () => T): T => insideLock.exit(fn)
+
 const stealPathFor = (lock: string) => `${lock}.steal`
 
 /** Delay before poll `attempt`: exponential, capped, jittered (beads' `backoffDelayMs`). */

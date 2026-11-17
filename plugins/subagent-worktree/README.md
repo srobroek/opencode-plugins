@@ -175,14 +175,15 @@ Plugins load once per location: the parent's checkout and each lane's worktree r
 instance, so in-memory locks, generations and holds would coordinate nothing between them. All of it
 lives under `<git-common-dir>/opencode/`, shared by every instance of the repository:
 
-- `locks/<sha1 of the directory>.lock`: one lock per worktree, created exclusively (a hard link from a
-  fully written temp file) with `{ pid, host, sessionID, acquiredAt }`. Contenders retry with bounded
-  backoff. A lock is broken only when it is older than two minutes **and** its pid is not alive on
-  this host; one from another host, or whose holder is alive, is never broken. Breaking is itself
-  exclusive: a breaker takes `<lock>.break` first, re-reads the lock under it and unlinks it only if
-  it is still the content that was judged stale (a `.break` older than 30 s belongs to a crashed
-  breaker). `delivery` takes this same lock around its removals, so no two removers overlap. Every removal and every
-  resume runs under it.
+- `locks/<sha1 of the directory>.lock`: one lock per worktree, using the protocol the Beads embedded
+  write lock ships (`plugins/beads/src/bd-embedded-write-lock.ts`), reproduced in
+  `plugins/lib/src/lease-lock.ts` because it is entangled with Beads' store resolution and writer
+  registry there. A hold is an `O_EXCL`-created file with a token and a lease renewed on a heartbeat;
+  a holder on this host whose pid is gone, or whose lease nobody renewed, is taken over under a steal
+  lock that is held only synchronously. Release is by token under the steal lock, so a stalled owner
+  cannot remove its successor's hold. Every removal, every resume and every write to coordination
+  state (holds, claims, landing records, denials) takes it, so readers and writers are serialised;
+  it is re-entrant inside a removal's own critical section. `delivery` takes this same lock.
 - the lane's claim carries the resume `generation` and `resumedAt`. A resume takes the lock, bumps
   the generation and stamps the time; a removal captures the generation before collecting facts and,
   under the lock right before removing, re-reads both from disk and aborts if the generation changed

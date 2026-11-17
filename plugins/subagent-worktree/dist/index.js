@@ -188,11 +188,401 @@ function landingsFor(records, directory) {
   return records.filter((record) => canonicalDirectory(record.worktree) === want);
 }
 
+// plugins/lib/src/worktree-locks.ts
+import { createHash as createHash2, randomUUID as randomUUID2 } from "crypto";
+import { accessSync, constants as constants2, mkdirSync as mkdirSync2, readdirSync as readdirSync2, readFileSync as readFileSync2, renameSync as renameSync2, rmSync as rmSync2, writeFileSync as writeFileSync2 } from "fs";
+import { join as join2 } from "path";
+
+// plugins/lib/src/lease-lock.ts
+import { AsyncLocalStorage } from "async_hooks";
+import { randomUUID } from "crypto";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, statSync, unlinkSync, writeSync } from "fs";
+import { hostname } from "os";
+var LEASE_MS = 120000;
+var RENEW_MS = 20000;
+var WAIT_MS = 120000;
+var POLL_MS = 20;
+var POLL_MAX_MS = 400;
+var MAX_RECORD_BYTES = 64 * 1024;
+function processAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+}
+function parseLeaseRecord(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value))
+    return;
+  const { host, pid, owner, token, taken, expires } = value;
+  if (typeof host !== "string" || typeof owner !== "string" || typeof token !== "string")
+    return;
+  if (typeof pid !== "number" || !Number.isInteger(pid) || typeof taken !== "number" || typeof expires !== "number")
+    return;
+  return { host, pid, owner, token, taken, expires };
+}
+function leaseAbandoned(record, facts) {
+  if (record === undefined)
+    return facts.ageMs > facts.leaseMs;
+  if (record.host === facts.host && !facts.alive(record.pid))
+    return true;
+  return facts.now > record.expires;
+}
+function readBounded(path) {
+  let fd;
+  try {
+    if (!lstatSync(path).isFile())
+      return { kind: "unreadable" };
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const info = fstatSync(fd);
+    if (!info.isFile() || info.size > MAX_RECORD_BYTES)
+      return { kind: "unreadable" };
+    const buffer = Buffer.alloc(info.size);
+    let offset = 0;
+    while (offset < buffer.length) {
+      const read = readSync(fd, buffer, offset, buffer.length - offset, offset);
+      if (read === 0)
+        break;
+      offset += read;
+    }
+    return { kind: "text", text: buffer.toString("utf8", 0, offset) };
+  } catch (error) {
+    return error.code === "ENOENT" ? { kind: "absent" } : { kind: "unreadable" };
+  } finally {
+    if (fd !== undefined)
+      closeSync(fd);
+  }
+}
+var insideLock = new AsyncLocalStorage;
+var stealPathFor = (lock) => `${lock}.steal`;
+function backoffDelayMs(attempt, random = Math.random) {
+  const ceiling = Math.min(POLL_MAX_MS, POLL_MS * 2 ** Math.min(attempt, 16));
+  return Math.max(1, Math.round(ceiling / 2 + ceiling / 2 * random()));
+}
+var ageOf = (path, now) => {
+  try {
+    return now - statSync(path).mtimeMs;
+  } catch {
+    return 0;
+  }
+};
+function abandoned(path, c) {
+  const record = readBounded(path);
+  if (record.kind !== "text")
+    return false;
+  let parsed;
+  try {
+    parsed = parseLeaseRecord(JSON.parse(record.text));
+  } catch {
+    parsed = undefined;
+  }
+  return leaseAbandoned(parsed, { now: c.now(), host: c.host, alive: c.alive, leaseMs: c.leaseMs, ageMs: ageOf(path, c.now()) });
+}
+var recordFor = (c, token) => {
+  const taken = c.now();
+  return { host: c.host, pid: process.pid, owner: c.owner.slice(0, 256), token, taken, expires: taken + c.leaseMs };
+};
+function stillOurs(lock, token, host) {
+  try {
+    const record = readBounded(lock);
+    if (record.kind !== "text")
+      return false;
+    const parsed = parseLeaseRecord(JSON.parse(record.text));
+    return parsed?.token === token && parsed.pid === process.pid && parsed.host === host;
+  } catch {
+    return false;
+  }
+}
+function takeOverIfAbandoned(c) {
+  if (!abandoned(c.lock, c))
+    return;
+  c.afterJudged?.();
+  let fd;
+  try {
+    fd = openSync(c.steal, "wx");
+  } catch (error) {
+    if (error.code !== "EEXIST")
+      return;
+    if (abandoned(c.steal, c)) {
+      try {
+        unlinkSync(c.steal);
+      } catch {}
+    }
+    return;
+  }
+  try {
+    writeSync(fd, JSON.stringify(recordFor(c, `steal-${randomUUID()}`)));
+    if (abandoned(c.lock, c))
+      unlinkSync(c.lock);
+  } catch {} finally {
+    closeSync(fd);
+    try {
+      unlinkSync(c.steal);
+    } catch {}
+  }
+}
+function withOwnership(c, token, change) {
+  let fd;
+  try {
+    fd = openSync(c.steal, "wx");
+  } catch (error) {
+    if (error.code === "EEXIST")
+      return "busy";
+    throw error;
+  }
+  try {
+    if (!stillOurs(c.lock, token, c.host))
+      return "lost";
+    change();
+    return "done";
+  } finally {
+    closeSync(fd);
+    try {
+      unlinkSync(c.steal);
+    } catch {}
+  }
+}
+function rewrite(c, token) {
+  return withOwnership(c, token, () => {
+    const fd = openSync(c.lock, "w");
+    try {
+      writeSync(fd, JSON.stringify(recordFor(c, token)));
+    } finally {
+      closeSync(fd);
+    }
+  });
+}
+async function withLease(lockPath, options, work) {
+  const held = insideLock.getStore();
+  if (held?.has(lockPath))
+    return { kind: "done", value: await work() };
+  const c = {
+    lock: lockPath,
+    steal: stealPathFor(lockPath),
+    now: options.now ?? Date.now,
+    host: options.host ?? hostname().split(".")[0] ?? "localhost",
+    alive: options.alive ?? processAlive,
+    leaseMs: options.leaseMs ?? LEASE_MS,
+    owner: options.owner,
+    afterJudged: options.seams?.afterJudged
+  };
+  const sleep = options.sleep ?? ((ms) => new Promise((done) => setTimeout(done, ms)));
+  const random = options.random ?? Math.random;
+  const deadline = Date.now() + (options.waitMs ?? WAIT_MS);
+  const token = `${process.pid}-${Date.now()}-${randomUUID()}`;
+  let attempt = 0;
+  let fd;
+  while (fd === undefined) {
+    try {
+      fd = openSync(lockPath, "wx");
+      writeSync(fd, JSON.stringify(recordFor(c, token)));
+    } catch (error) {
+      if (fd !== undefined) {
+        closeSync(fd);
+        fd = undefined;
+      }
+      const code = error.code;
+      if (code !== "EEXIST")
+        return { kind: "failed", reason: `the lock at ${lockPath} could not be taken (${code ?? "unknown error"})` };
+      if (readBounded(lockPath).kind === "unreadable" || readBounded(c.steal).kind === "unreadable") {
+        return { kind: "failed", reason: `the lock path ${lockPath} (or its steal lock) is not a small regular file, so its holder cannot be read safely` };
+      }
+      takeOverIfAbandoned(c);
+      if (Date.now() >= deadline) {
+        return { kind: "failed", busy: true, reason: `the lock at ${lockPath} stayed held for ${Math.round((options.waitMs ?? WAIT_MS) / 1000 * 10) / 10}s` };
+      }
+      await sleep(Math.min(backoffDelayMs(attempt++, random), Math.max(1, deadline - Date.now())));
+    }
+  }
+  const owned = fd;
+  const heartbeat = setInterval(() => {
+    try {
+      if (rewrite(c, token) === "lost")
+        clearInterval(heartbeat);
+    } catch {}
+  }, options.renewMs ?? RENEW_MS);
+  heartbeat.unref?.();
+  try {
+    const value = await insideLock.run(new Set([...held ?? [], lockPath]), async () => work());
+    return { kind: "done", value };
+  } finally {
+    clearInterval(heartbeat);
+    try {
+      closeSync(owned);
+    } catch {}
+    const releaseBy = Date.now() + 2000;
+    for (;; ) {
+      try {
+        if (withOwnership(c, token, () => unlinkSync(lockPath)) !== "busy")
+          break;
+      } catch {
+        break;
+      }
+      if (Date.now() >= releaseBy)
+        break;
+      await sleep(POLL_MS);
+    }
+  }
+}
+
+// plugins/lib/src/worktree-locks.ts
+var HOLD_EXPIRY_MS = 24 * 3600000;
+var sha1 = (text) => createHash2("sha1").update(text).digest("hex");
+var isObject2 = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+var LOCK_TTL_MS = 120000;
+var lockFile = (commonDir, directory) => join2(commonDir, "opencode", "locks", `${sha1(canonicalDirectory(directory))}.lock`);
+
+class LockTimeout extends Error {
+  directory;
+  constructor(directory, detail = "") {
+    super(`could not lock ${directory}${detail === "" ? "" : ` (${detail})`}`);
+    this.directory = directory;
+    this.name = "LockTimeout";
+  }
+}
+async function withDiskLock(commonDir, directory, options, work) {
+  const path = lockFile(commonDir, directory);
+  mkdirSync2(join2(path, ".."), { recursive: true });
+  const result = await withLease(path, {
+    owner: options.sessionID,
+    leaseMs: options.ttlMs ?? LOCK_TTL_MS,
+    waitMs: options.waitMs ?? 30000,
+    ...options.renewMs === undefined ? {} : { renewMs: options.renewMs },
+    ...options.now === undefined ? {} : { now: options.now },
+    ...options.host === undefined ? {} : { host: options.host },
+    ...options.alive === undefined ? {} : { alive: options.alive },
+    ...options.sleep === undefined ? {} : { sleep: options.sleep },
+    ...options.seams === undefined ? {} : { seams: options.seams }
+  }, work);
+  if (result.kind === "done")
+    return result.value;
+  throw new LockTimeout(directory, result.reason);
+}
+function parseHold(value) {
+  if (!isObject2(value))
+    return;
+  const { sessionID, directory, jobs, updatedAt } = value;
+  if (typeof sessionID !== "string" || typeof directory !== "string" || typeof updatedAt !== "number" || !Array.isArray(jobs))
+    return;
+  const parsed = [];
+  for (const job of jobs) {
+    if (!isObject2(job) || typeof job.kind !== "string" || typeof job.id !== "string")
+      return;
+    parsed.push({ kind: job.kind, id: job.id });
+  }
+  return { sessionID, directory, jobs: parsed, updatedAt };
+}
+var holdsDir = (commonDir, directory) => join2(commonDir, "opencode", "holds", sha1(canonicalDirectory(directory)));
+var holdFile = (commonDir, directory, sessionID) => join2(holdsDir(commonDir, directory), `${sha1(sessionID)}.json`);
+function setHold(commonDir, directory, sessionID, jobs, now) {
+  const path = holdFile(commonDir, directory, sessionID);
+  if (jobs.length === 0) {
+    rmSync2(path, { force: true });
+    return;
+  }
+  mkdirSync2(holdsDir(commonDir, directory), { recursive: true });
+  const temp = `${path}.${randomUUID2()}.tmp`;
+  writeFileSync2(temp, JSON.stringify({ sessionID, directory, jobs, updatedAt: now }));
+  renameSync2(temp, path);
+}
+function readHolds(commonDir, directory) {
+  const dir = holdsDir(commonDir, directory);
+  let names;
+  try {
+    names = readdirSync2(dir).filter((name) => name.endsWith(".json"));
+  } catch (error) {
+    const absent = error.code === "ENOENT";
+    return { holds: [], unreadable: !absent, ...absent ? { missing: true } : {} };
+  }
+  const holds = [];
+  let unreadable = false;
+  for (const name of names) {
+    try {
+      const hold = parseHold(JSON.parse(readFileSync2(join2(dir, name), "utf8")));
+      if (hold === undefined)
+        unreadable = true;
+      else
+        holds.push(hold);
+    } catch {
+      unreadable = true;
+    }
+  }
+  return { holds, unreadable };
+}
+function holdBlock(read, now, expiryMs = HOLD_EXPIRY_MS) {
+  if (read.unreadable)
+    return "the background-work records cannot be read";
+  const live = read.holds.find((hold) => hold.jobs.length > 0 && now - hold.updatedAt < expiryMs);
+  if (live === undefined)
+    return;
+  const first = live.jobs[0];
+  return `session ${live.sessionID} has ${live.jobs.length} background job(s) running (${first?.kind} ${first?.id})`;
+}
+function coordinationWritable(commonDir) {
+  const root = join2(commonDir, "opencode");
+  try {
+    mkdirSync2(root, { recursive: true });
+    accessSync(root, constants2.W_OK);
+    const probe = join2(root, `.probe.${randomUUID2()}`);
+    writeFileSync2(probe, "");
+    rmSync2(probe, { force: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+function holdsWritable(commonDir, directory) {
+  const dir = holdsDir(commonDir, directory);
+  try {
+    accessSync(dir, constants2.F_OK);
+  } catch {
+    return coordinationWritable(commonDir);
+  }
+  try {
+    const probe = join2(dir, `.probe.${randomUUID2()}`);
+    writeFileSync2(probe, "");
+    rmSync2(probe, { force: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+function holdsState(commonDir, directory, now, expiryMs = HOLD_EXPIRY_MS) {
+  const read = readHolds(commonDir, directory);
+  const blocked = holdBlock(read, now, expiryMs);
+  if (blocked !== undefined)
+    return blocked;
+  if (!holdsWritable(commonDir, directory))
+    return "the coordination store is not writable, so running work cannot be ruled out";
+  return;
+}
+async function lockedWorktreeRemoval(commonDir, directory, lock, steps) {
+  let entered = false;
+  try {
+    return await withDiskLock(commonDir, directory, lock, async () => {
+      entered = true;
+      const reason = await steps.recheck();
+      if (reason !== undefined)
+        return { removed: false, reason };
+      return { removed: true, value: await steps.remove() };
+    });
+  } catch (error) {
+    if (entered)
+      throw error;
+    const message = error instanceof LockTimeout ? `the worktree is locked by another remover (${error.message})` : `the lock could not be taken (${error instanceof Error ? error.message : String(error)})`;
+    return { removed: false, reason: message };
+  }
+}
+function lockedWrite(commonDir, directory, options, write) {
+  return withDiskLock(commonDir, directory, { waitMs: 1e4, ...options }, async () => write());
+}
+
 // plugins/lib/src/subprocess.ts
-import { constants } from "os";
+import { constants as constants3 } from "os";
 var EXIT_GRACE_MS = 2000;
 var EXIT_POLL_MS = 100;
-function processAlive(pid) {
+function processAlive2(pid) {
   try {
     process.kill(pid, 0);
     return true;
@@ -244,7 +634,7 @@ function capture(stream) {
 function supervise(child, options = {}) {
   const grace = Math.max(0, options.graceMs ?? EXIT_GRACE_MS);
   const pollMs = Math.max(1, options.pollMs ?? EXIT_POLL_MS);
-  const alive = options.alive ?? processAlive;
+  const alive = options.alive ?? processAlive2;
   const group = options.group ?? false;
   const { signal, timeoutMs } = options;
   const out = capture(child.stdout);
@@ -317,7 +707,7 @@ function signalName(code) {
     return null;
   if (typeof code === "string")
     return code;
-  return Object.entries(constants.signals).find(([, n]) => n === code)?.[0] ?? String(code);
+  return Object.entries(constants3.signals).find(([, n]) => n === code)?.[0] ?? String(code);
 }
 
 // plugins/lib/src/patterns.ts
@@ -819,257 +1209,6 @@ import { stat } from "fs/promises";
 import { homedir } from "os";
 import { join as join3, resolve as resolve2 } from "path";
 
-// plugins/lib/src/worktree-locks.ts
-import { createHash as createHash2, randomUUID } from "crypto";
-import { accessSync, constants as constants2, linkSync, mkdirSync as mkdirSync2, readdirSync as readdirSync2, readFileSync as readFileSync2, renameSync as renameSync2, rmSync as rmSync2, statSync, writeFileSync as writeFileSync2 } from "fs";
-import { hostname } from "os";
-import { join as join2 } from "path";
-var LOCK_TTL_MS = 2 * 60000;
-var BREAK_TTL_MS = 30000;
-var HOLD_EXPIRY_MS = 24 * 3600000;
-var sha1 = (text) => createHash2("sha1").update(text).digest("hex");
-var isObject2 = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
-function parseLock(value) {
-  if (!isObject2(value))
-    return;
-  const { pid, host, sessionID, acquiredAt, token } = value;
-  if (typeof pid !== "number" || !Number.isInteger(pid) || typeof host !== "string" || typeof sessionID !== "string")
-    return;
-  if (typeof acquiredAt !== "number" || !Number.isFinite(acquiredAt) || typeof token !== "string")
-    return;
-  return { pid, host, sessionID, acquiredAt, token };
-}
-function lockIsStale(info, facts) {
-  if (info === undefined)
-    return facts.mtimeMs !== undefined && facts.now - facts.mtimeMs > facts.ttlMs;
-  if (facts.now - info.acquiredAt <= facts.ttlMs)
-    return false;
-  if (info.host !== facts.host)
-    return false;
-  return !facts.alive(info.pid);
-}
-var processAlive2 = (pid) => {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error.code === "EPERM";
-  }
-};
-var lockFile = (commonDir, directory) => join2(commonDir, "opencode", "locks", `${sha1(canonicalDirectory(directory))}.lock`);
-
-class LockTimeout extends Error {
-  directory;
-  constructor(directory) {
-    super(`could not lock ${directory}`);
-    this.directory = directory;
-    this.name = "LockTimeout";
-  }
-}
-var readLock = (path) => {
-  try {
-    const raw = readFileSync2(path, "utf8");
-    let info;
-    try {
-      info = parseLock(JSON.parse(raw));
-    } catch {}
-    return { raw, info, mtimeMs: statSync(path).mtimeMs };
-  } catch {
-    return;
-  }
-};
-function sameLock(a, b, rawA, rawB) {
-  if (a === undefined || b === undefined)
-    return a === b && rawA !== undefined && rawA === rawB;
-  return a.token === b.token && a.pid === b.pid && a.host === b.host && a.acquiredAt === b.acquiredAt;
-}
-function breakStale(path, judged, who) {
-  const breakPath = `${path}.break`;
-  const temp = `${breakPath}.${who.token}.tmp`;
-  try {
-    writeFileSync2(temp, JSON.stringify({ pid: process.pid, host: who.host, sessionID: who.sessionID, acquiredAt: who.now(), token: who.token }));
-    try {
-      linkSync(temp, breakPath);
-    } catch (error) {
-      if (error.code !== "EEXIST")
-        throw error;
-      try {
-        if (who.now() - statSync(breakPath).mtimeMs > BREAK_TTL_MS)
-          rmSync2(breakPath, { force: true });
-      } catch {}
-      return;
-    }
-  } finally {
-    rmSync2(temp, { force: true });
-  }
-  try {
-    const now = readLock(path);
-    if (now !== undefined && sameLock(now.info, judged.info, now.raw, judged.raw))
-      rmSync2(path, { force: true });
-  } finally {
-    const mine = (() => {
-      try {
-        return JSON.parse(readFileSync2(breakPath, "utf8")).token === who.token;
-      } catch {
-        return false;
-      }
-    })();
-    if (mine)
-      rmSync2(breakPath, { force: true });
-  }
-}
-async function withDiskLock(commonDir, directory, options, work) {
-  const path = lockFile(commonDir, directory);
-  const now = options.now ?? Date.now;
-  const host = options.host ?? hostname();
-  const hostName = hostname();
-  const alive = options.alive ?? processAlive2;
-  const ttlMs = options.ttlMs ?? LOCK_TTL_MS;
-  const attempts = options.attempts ?? 60;
-  const delayMs = options.delayMs ?? ((attempt) => Math.min(250, 10 * 2 ** Math.min(attempt, 5)));
-  const sleep = options.sleep ?? ((ms) => new Promise((done) => setTimeout(done, ms)));
-  const token = randomUUID();
-  mkdirSync2(join2(path, ".."), { recursive: true });
-  const tryCreate = () => {
-    const temp = `${path}.${token}.tmp`;
-    const info = { pid: process.pid, host, sessionID: options.sessionID, acquiredAt: now(), token };
-    writeFileSync2(temp, JSON.stringify(info));
-    try {
-      linkSync(temp, path);
-      return true;
-    } catch (error) {
-      if (error.code === "EEXIST")
-        return false;
-      throw error;
-    } finally {
-      rmSync2(temp, { force: true });
-    }
-  };
-  let held = false;
-  for (let attempt = 0;attempt < attempts; attempt++) {
-    if (tryCreate()) {
-      held = true;
-      break;
-    }
-    const current = readLock(path);
-    if (current === undefined)
-      continue;
-    if (lockIsStale(current.info, { now: now(), ttlMs, host, alive, mtimeMs: current.mtimeMs })) {
-      await options.seams?.afterValidate?.();
-      breakStale(path, current, { now, token, host: hostName, sessionID: options.sessionID });
-      continue;
-    }
-    await sleep(delayMs(attempt));
-  }
-  if (!held)
-    throw new LockTimeout(directory);
-  try {
-    return await work();
-  } finally {
-    if (readLock(path)?.info?.token === token)
-      rmSync2(path, { force: true });
-  }
-}
-function parseHold(value) {
-  if (!isObject2(value))
-    return;
-  const { sessionID, directory, jobs, updatedAt } = value;
-  if (typeof sessionID !== "string" || typeof directory !== "string" || typeof updatedAt !== "number" || !Array.isArray(jobs))
-    return;
-  const parsed = [];
-  for (const job of jobs) {
-    if (!isObject2(job) || typeof job.kind !== "string" || typeof job.id !== "string")
-      return;
-    parsed.push({ kind: job.kind, id: job.id });
-  }
-  return { sessionID, directory, jobs: parsed, updatedAt };
-}
-var holdsDir = (commonDir, directory) => join2(commonDir, "opencode", "holds", sha1(canonicalDirectory(directory)));
-var holdFile = (commonDir, directory, sessionID) => join2(holdsDir(commonDir, directory), `${sha1(sessionID)}.json`);
-function setHold(commonDir, directory, sessionID, jobs, now) {
-  const path = holdFile(commonDir, directory, sessionID);
-  if (jobs.length === 0) {
-    rmSync2(path, { force: true });
-    return;
-  }
-  mkdirSync2(holdsDir(commonDir, directory), { recursive: true });
-  const temp = `${path}.${randomUUID()}.tmp`;
-  writeFileSync2(temp, JSON.stringify({ sessionID, directory, jobs, updatedAt: now }));
-  renameSync2(temp, path);
-}
-function readHolds(commonDir, directory) {
-  const dir = holdsDir(commonDir, directory);
-  let names;
-  try {
-    names = readdirSync2(dir).filter((name) => name.endsWith(".json"));
-  } catch (error) {
-    const absent = error.code === "ENOENT";
-    return { holds: [], unreadable: !absent, ...absent ? { missing: true } : {} };
-  }
-  const holds = [];
-  let unreadable = false;
-  for (const name of names) {
-    try {
-      const hold = parseHold(JSON.parse(readFileSync2(join2(dir, name), "utf8")));
-      if (hold === undefined)
-        unreadable = true;
-      else
-        holds.push(hold);
-    } catch {
-      unreadable = true;
-    }
-  }
-  return { holds, unreadable };
-}
-function holdBlock(read, now, expiryMs = HOLD_EXPIRY_MS) {
-  if (read.unreadable)
-    return "the background-work records cannot be read";
-  const live = read.holds.find((hold) => hold.jobs.length > 0 && now - hold.updatedAt < expiryMs);
-  if (live === undefined)
-    return;
-  const first = live.jobs[0];
-  return `session ${live.sessionID} has ${live.jobs.length} background job(s) running (${first?.kind} ${first?.id})`;
-}
-function coordinationWritable(commonDir) {
-  const root = join2(commonDir, "opencode");
-  try {
-    mkdirSync2(root, { recursive: true });
-    accessSync(root, constants2.W_OK);
-    const probe = join2(root, `.probe.${randomUUID()}`);
-    writeFileSync2(probe, "");
-    rmSync2(probe, { force: true });
-    return true;
-  } catch {
-    return false;
-  }
-}
-function holdsState(commonDir, directory, now, expiryMs = HOLD_EXPIRY_MS) {
-  const read = readHolds(commonDir, directory);
-  const blocked = holdBlock(read, now, expiryMs);
-  if (blocked !== undefined)
-    return blocked;
-  if (read.missing === true && !coordinationWritable(commonDir))
-    return "the coordination store is not writable, so running work cannot be ruled out";
-  return;
-}
-async function lockedWorktreeRemoval(commonDir, directory, lock, steps) {
-  let entered = false;
-  try {
-    return await withDiskLock(commonDir, directory, lock, async () => {
-      entered = true;
-      const reason = await steps.recheck();
-      if (reason !== undefined)
-        return { removed: false, reason };
-      return { removed: true, value: await steps.remove() };
-    });
-  } catch (error) {
-    if (entered)
-      throw error;
-    const message = error instanceof LockTimeout ? `the worktree is locked by another remover (${error.message})` : `the lock could not be taken (${error instanceof Error ? error.message : String(error)})`;
-    return { removed: false, reason: message };
-  }
-}
-
 // plugins/lib/src/worktree-state.ts
 var OPERATION_MARKERS = [
   { name: "MERGE_HEAD", operation: "merge" },
@@ -1521,7 +1660,11 @@ function createLifecycle(deps) {
     const denied = mine.find((record) => record.denied !== undefined);
     return { heads, block: denied ? "delivery cleanup was denied; an explicit delivery_cleanup re-arms it" : undefined };
   };
+  const unsafeHolds = new Map;
   const holdReason = async (directory, parentDir) => {
+    const failed = unsafeHolds.get(canonical(directory));
+    if (failed !== undefined)
+      return failed;
     const common = await deps.commonDir(parentDir);
     if (common === undefined)
       return "the background-work records cannot be located";
@@ -1597,6 +1740,9 @@ function createLifecycle(deps) {
           if (claim.kind === "present" && claim.value.resumedAt !== undefined && now() - claim.value.resumedAt < options.resumeGraceMs) {
             return "the lane was resumed recently";
           }
+          const failedWrite = unsafeHolds.get(canonical(directory));
+          if (failedWrite !== undefined)
+            return failedWrite;
           const running = holdsState(common, directory, now());
           if (running !== undefined)
             return running;
@@ -1839,10 +1985,13 @@ function createLifecycle(deps) {
         const common = await deps.commonDir(lane.parentDir);
         if (common !== undefined) {
           try {
-            setHold(common, lane.directory, input.sessionID, matched.map(({ job }) => ({ kind: job.kind, id: job.shellID ?? job.childSessionID ?? job.sessionID ?? "unknown" })), now());
+            await lockedWrite(common, lane.directory, { sessionID: input.sessionID, now, ...deps.lock }, () => setHold(common, lane.directory, input.sessionID, matched.map(({ job }) => ({ kind: job.kind, id: job.shellID ?? job.childSessionID ?? job.sessionID ?? "unknown" })), now()));
+            unsafeHolds.delete(canonical(lane.directory));
           } catch (error) {
+            const why = error instanceof Error ? error.message : String(error);
             holdsFailed = true;
-            console.error(`subagent-worktree: could not record holds for ${lane.directory}:`, error instanceof Error ? error.message : error);
+            unsafeHolds.set(canonical(lane.directory), `its running work could not be recorded (${why})`);
+            console.error(`subagent-worktree: could not record holds for ${lane.directory}:`, why);
           }
         }
         if (busy !== undefined && lane.parent === input.sessionID)
@@ -2157,18 +2306,19 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
         throw new Error(`subagent-worktree: cannot find the git common directory of ${lane2.parentDir} to claim ${lane2.directory}`);
       return;
     }
+    const guard = (write) => lockedWrite(common, lane2.directory, { sessionID: lane2.child, now, ...lock ?? {} }, write);
     if (lane2.state !== "active")
-      return removeClaim(common, lane2.directory);
+      return guard(() => removeClaim(common, lane2.directory));
     const existing = readClaim(common, lane2.directory);
     if (existing.kind === "present" && existing.value.sessionID === lane2.child && existing.value.branch === lane2.branch)
       return;
-    writeClaim(common, {
+    await guard(() => writeClaim(common, {
       directory: lane2.directory,
       branch: lane2.branch,
       sessionID: lane2.child,
       parentID: lane2.parent,
       createdAt: now()
-    });
+    }));
   };
   const save = async (lane2) => {
     if (lane2.state === "active")

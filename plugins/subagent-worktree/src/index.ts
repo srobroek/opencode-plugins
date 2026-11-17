@@ -6,6 +6,7 @@ import type { Context } from "@opencode/plugin/promise/plugin"
 import { type Result, Error as ToolError } from "@opencode/plugin/promise/tool"
 import { toJsonSchema, withOptionalString } from "@srobroek/opencode-lib/tool-schema"
 import { readClaim, removeClaim, writeClaim } from "@srobroek/opencode-lib/worktree-claims"
+import { lockedWrite } from "@srobroek/opencode-lib/worktree-locks"
 import { createGit, type Git, type Runner, spawnRunner } from "./git.ts"
 import {
   annotation,
@@ -187,16 +188,20 @@ export function createLanes(
       if (lane.state === "active") throw new Error(`subagent-worktree: cannot find the git common directory of ${lane.parentDir} to claim ${lane.directory}`)
       return
     }
-    if (lane.state !== "active") return removeClaim(common, lane.directory)
+    // Claim writes take the worktree's lock briefly (re-entrant inside a removal), so none lands between a remover's last look and its removal.
+    const guard = <T>(write: () => T) => lockedWrite(common, lane.directory, { sessionID: lane.child, now, ...(lock ?? {}) }, write)
+    if (lane.state !== "active") return guard(() => removeClaim(common, lane.directory))
     const existing = readClaim(common, lane.directory)
     if (existing.kind === "present" && existing.value.sessionID === lane.child && existing.value.branch === lane.branch) return
-    writeClaim(common, {
-      directory: lane.directory,
-      branch: lane.branch,
-      sessionID: lane.child,
-      parentID: lane.parent,
-      createdAt: now(),
-    })
+    await guard(() =>
+      writeClaim(common, {
+        directory: lane.directory,
+        branch: lane.branch,
+        sessionID: lane.child,
+        parentID: lane.parent,
+        createdAt: now(),
+      }),
+    )
   }
 
   const save = async (lane: Lane) => {

@@ -15,7 +15,7 @@ import { homedir } from "node:os"
 import { join, resolve } from "node:path"
 import type { Context } from "@opencode/plugin/promise/plugin"
 import { bumpClaim, claimGeneration, landingsFor, listLandings, readClaim } from "@srobroek/opencode-lib/worktree-claims"
-import { holdsState, type LockOptions, lockedWorktreeRemoval, setHold, withDiskLock } from "@srobroek/opencode-lib/worktree-locks"
+import { holdsState, type LockOptions, lockedWorktreeRemoval, lockedWrite, setHold, withDiskLock } from "@srobroek/opencode-lib/worktree-locks"
 import { OPERATION_MARKERS, operationsInProgress, stashesOnBranch } from "@srobroek/opencode-lib/worktree-state"
 import {
   type BackgroundJob,
@@ -218,8 +218,16 @@ export function createLifecycle(deps: LifecycleDeps) {
     return { heads, block: denied ? "delivery cleanup was denied; an explicit delivery_cleanup re-arms it" : undefined }
   }
 
+  /**
+   * Worktrees whose running work could not be recorded: kept across passes (not per invocation) until a
+   * later hold write for them succeeds. Nothing is removed from them meanwhile.
+   */
+  const unsafeHolds = new Map<string, string>()
+
   /** Why background work (from any session's idle gate) blocks removing `directory`; read fresh from disk. */
   const holdReason = async (directory: string, parentDir: string): Promise<string | undefined> => {
+    const failed = unsafeHolds.get(canonical(directory))
+    if (failed !== undefined) return failed
     const common = await deps.commonDir(parentDir)
     if (common === undefined) return "the background-work records cannot be located"
     return holdsState(common, directory, now())
@@ -348,6 +356,8 @@ export function createLifecycle(deps: LifecycleDeps) {
             if (claim.kind === "present" && claim.value.resumedAt !== undefined && now() - claim.value.resumedAt < options.resumeGraceMs) {
               return "the lane was resumed recently"
             }
+            const failedWrite = unsafeHolds.get(canonical(directory))
+            if (failedWrite !== undefined) return failedWrite
             const running = holdsState(common, directory, now())
             if (running !== undefined) return running
             oid = await git.head(directory)
@@ -609,16 +619,21 @@ export function createLifecycle(deps: LifecycleDeps) {
           const common = await deps.commonDir(lane.parentDir)
           if (common !== undefined) {
             try {
-              setHold(
-                common,
-                lane.directory,
-                input.sessionID,
-                matched.map(({ job }) => ({ kind: job.kind, id: job.shellID ?? job.childSessionID ?? job.sessionID ?? "unknown" })),
-                now(),
+              await lockedWrite(common, lane.directory, { sessionID: input.sessionID, now, ...deps.lock }, () =>
+                setHold(
+                  common,
+                  lane.directory,
+                  input.sessionID,
+                  matched.map(({ job }) => ({ kind: job.kind, id: job.shellID ?? job.childSessionID ?? job.sessionID ?? "unknown" })),
+                  now(),
+                ),
               )
+              unsafeHolds.delete(canonical(lane.directory))
             } catch (error) {
+              const why = error instanceof Error ? error.message : String(error)
               holdsFailed = true
-              console.error(`subagent-worktree: could not record holds for ${lane.directory}:`, error instanceof Error ? error.message : error)
+              unsafeHolds.set(canonical(lane.directory), `its running work could not be recorded (${why})`)
+              console.error(`subagent-worktree: could not record holds for ${lane.directory}:`, why)
             }
           }
           if (busy !== undefined && lane.parent === input.sessionID) running.add(lane.child)
