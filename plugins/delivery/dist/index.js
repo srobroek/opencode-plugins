@@ -3900,6 +3900,21 @@ function pendingReceipts(receipts) {
 function selectWindow(candidates, options) {
   return candidates.filter((candidate) => !options.skip(candidate)).map((candidate, index) => ({ candidate, index, at: options.lastAttempt(candidate) ?? Number.NEGATIVE_INFINITY })).sort((a, b) => a.at === b.at ? a.index - b.index : a.at < b.at ? -1 : 1).slice(0, options.limit).map((entry) => entry.candidate);
 }
+
+class CleanupDeferred extends Error {
+  deferred;
+  constructor(deferred) {
+    super(deferred);
+    this.deferred = deferred;
+    this.name = "CleanupDeferred";
+  }
+}
+function explicitDeferral(ownership) {
+  const why = ownershipDeferral(ownership);
+  if (why === undefined)
+    return;
+  return ownership.owner === "lane" ? `${why}; removed by its owner once finished` : `${why}; not removed until it can be read`;
+}
 async function authorizeExplicit(pending, ask, sessionID, request) {
   try {
     await ask(request);
@@ -3908,6 +3923,9 @@ async function authorizeExplicit(pending, ask, sessionID, request) {
     throw error;
   }
   await pending?.arm(request.worktree).catch(() => {});
+  const deferred = pending === undefined ? undefined : explicitDeferral(pending.ownership(request.worktree));
+  if (deferred !== undefined)
+    throw new CleanupDeferred(deferred);
 }
 function createPendingCleanup(deps) {
   const { ctx, cwd, env } = deps;
@@ -3974,6 +3992,9 @@ function createPendingCleanup(deps) {
   const deny = async (worktree, sessionID) => {
     for (const receipt of receiptsFor(worktree))
       await record(receipt, sessionID, { denied: true });
+    for (const entry of landingsFor([...landings().byReceipt.values()], worktree)) {
+      write(entry.receiptId, (existing) => existing ? { ...existing, denied: { at: now(), sessionID } } : existing);
+    }
   };
   const arm = async (worktree) => {
     const { byReceipt } = landings();
@@ -4020,6 +4041,30 @@ function createPendingCleanup(deps) {
     const hold = await holdFor(request.worktree);
     if (hold !== undefined)
       throw new Error(`held: ${hold}`);
+    const common = commonDir();
+    if (common === null)
+      throw new Error("held: the git common directory could not be resolved");
+    const listed = listLandings(common);
+    if (listed.unreadable)
+      throw new Error("held: the landing records could not be read");
+    if (landingsFor(listed.records, request.worktree).some((entry) => entry.denied !== undefined)) {
+      throw new Error("held: cleanup was denied; an explicit delivery_cleanup re-arms it");
+    }
+  };
+  const gc = () => {
+    const key = repoKey(cwd);
+    const recorded = landings();
+    if (key === null || recorded.common === null || recorded.unreadable)
+      return;
+    let live;
+    try {
+      live = new Set(pendingReceipts(listReceipts(resolve5(receiptDirectory(env, key)))).map((receipt) => receipt.receiptId));
+    } catch {
+      return;
+    }
+    for (const id of recorded.byReceipt.keys())
+      if (!live.has(id))
+        removeLanding(recorded.common, id);
   };
   const run = async (sessionID, idle) => {
     const key = repoKey(cwd);
@@ -4156,7 +4201,7 @@ function createPendingCleanup(deps) {
       await new Promise((done) => setTimeout(done, debounceMs + 1));
     await chain;
   };
-  return { start, dispose, record, deny, arm, ownership, guard, retryNow, handleEvent, settle };
+  return { start, dispose, record, deny, arm, ownership, guard, gc, retryNow, handleEvent, settle };
 }
 
 // plugins/delivery/src/verdict.ts
@@ -4362,10 +4407,14 @@ var CLEANUP_OUTPUT = {
     worktree: { type: "string" },
     remoteBranchAbsence: { type: "string", enum: ["absent", "present", "unknown"] },
     reason: { type: "string" },
+    deferred: { type: "string" },
     receipt: { type: "object" }
   },
   required: ["ok"]
 };
+function deferredOutput(deferred) {
+  return { ok: true, deferred };
+}
 var LAND_DESCRIPTION = `Merge a reviewed pull request at most once, prove it landed, and write one landing receipt.
 ` + "Refuses unless expectHeadSha names the PR head (required whenever the call would merge) " + "and, when worktree is given, it is a worktree of the session repository (never another repository's) whose HEAD is that head. With requireApproval/requireGreenChecks it also requires an approval artifact on the PR for that exact head " + "and green checks before merging. Merges at most once (an already MERGED request is proved, not re-merged) with merge_method (squash by default, PR title as subject), " + "binds the merge to the head, re-reads it, fetches the landed commits and checks the method's commit shape, observes the remote branch, then writes the receipt. " + "Writes no Beads ledger: when beads.ledgerActive, run the returned next steps child-before-parent, then delivery_cleanup. " + "A refusal with mergeIssued true means the PR is merged: re-run with the same pr and expectHeadSha to write the receipt.";
 var CLEANUP_DESCRIPTION = `Remove a landed PR's worktree and local branch after proving the landing receipt, and write a continuation receipt.
@@ -4446,13 +4495,13 @@ async function setupDelivery(ctx, overrides = {}) {
   const options = parseOptions(ctx.options);
   const directory = ctx.location.directory;
   const disposers = [];
-  const pending = options.autoCleanup ? createPendingCleanup({
+  const pending = createPendingCleanup({
     ctx,
     cwd: directory,
     env: environment(options),
     host: () => hostWorktrees(ctx),
     ...overrides
-  }) : undefined;
+  });
   const tools = await ctx.tool.transform((editor) => {
     editor.add({
       name: LAND_ACTION,
@@ -4493,7 +4542,7 @@ async function setupDelivery(ctx, overrides = {}) {
         }) : options.autoCleanup ? decision.deferred === undefined ? { ok: false, skipped: true, reason: decision.reason } : { ok: false, deferred: decision.deferred } : undefined;
         if (denied && cleanup !== undefined)
           cleanup.denied = true;
-        if (pending !== undefined && cleanup?.ok !== true) {
+        if (cleanup?.ok !== true) {
           await pending.record(outcome.receipt, context.sessionID, { denied }).catch(() => {});
         }
         const output = landOutput(outcome, cleanup);
@@ -4508,12 +4557,21 @@ async function setupDelivery(ctx, overrides = {}) {
       output: CLEANUP_OUTPUT,
       execute: async (input, context) => {
         const ask = asserter(ctx, context, CLEANUP_ACTION);
-        const result = await cleanupDelivery(input, directory, {
-          env: environment(options),
-          signal: context.signal,
-          authorize: (request) => authorizeExplicit(pending, (req) => ask(req.worktree, { ...request }), context.sessionID, request),
-          host: hostWorktrees(ctx)
-        });
+        let result;
+        try {
+          result = await cleanupDelivery(input, directory, {
+            env: environment(options),
+            signal: context.signal,
+            authorize: (request) => authorizeExplicit(pending, (req) => ask(req.worktree, { ...request }), context.sessionID, request),
+            host: hostWorktrees(ctx)
+          });
+        } catch (error) {
+          if (!(error instanceof CleanupDeferred))
+            throw error;
+          const output = deferredOutput(error.deferred);
+          return { output, content: `delivery_cleanup deferred: ${error.deferred}`, metadata: metadataOf(output) };
+        }
+        pending.gc();
         const output = cleanupOutput(result);
         const text = result.ok ? `delivery_cleanup removed ${result.receipt.worktree.path} and branch ${result.receipt.branch.name}; remote branch ${result.remoteBranchAbsence}.
 receipt: ${result.path}` : `delivery_cleanup refused: ${result.reason}`;
@@ -4522,10 +4580,9 @@ receipt: ${result.path}` : `delivery_cleanup refused: ${result.reason}`;
     });
   });
   disposers.push(() => tools.dispose());
-  if (pending !== undefined) {
+  if (options.autoCleanup)
     await pending.start();
-    disposers.push(() => pending.dispose());
-  }
+  disposers.push(() => pending.dispose());
   if (options.confirm) {
     const gate = await ctx.permission.hook("evaluate", confirmDelivery);
     disposers.push(() => gate.dispose());

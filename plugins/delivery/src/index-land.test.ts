@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
-import { claimFile, readLanding, removeClaim, removeLanding, writeClaim } from "@srobroek/opencode-lib/worktree-claims"
+import { claimFile, readLanding, removeClaim, removeLanding, writeClaim, writeLanding } from "@srobroek/opencode-lib/worktree-claims"
 import type { CleanupDeps, CleanupResult } from "./cleanup.ts"
 import * as realCleanup from "./cleanup.ts"
 import * as realLand from "./land.ts"
@@ -52,7 +52,7 @@ beforeEach(() => {
   removeLanding(common, "r7")
   ledgerActive = false
   cleanupCalls = []
-  cleanupResult = { ok: true, receipt: { worktree: { path: "/w/a" } }, path: "/r", remoteBranchAbsence: "absent" } as never
+  cleanupResult = { ok: true, receipt: { worktree: { path: "/w/a" }, branch: { name: "b" } }, path: "/r", remoteBranchAbsence: "absent" } as never
 })
 
 type Result = { output: { ok: boolean; next: string[]; cleanup?: Record<string, unknown> }; content: string }
@@ -151,7 +151,7 @@ test("a claim on another worktree does not stop cleanup", async () => {
 })
 
 test("a lane claimed between the decision and the removal is refused at the last check", async () => {
-  cleanupResult = { ok: true, receipt: { worktree: { path: "/w/a" } }, path: "/r", remoteBranchAbsence: "absent" } as never
+  cleanupResult = { ok: true, receipt: { worktree: { path: "/w/a" }, branch: { name: "b" } }, path: "/r", remoteBranchAbsence: "absent" } as never
   const claimBeforeAuthorize = (assert: { action: string }) => {
     if (assert.action === "delivery_cleanup") claimLane()
   }
@@ -180,4 +180,83 @@ test("a cleanup that is refused for another reason is not recorded as denied", a
   expect(result.output.cleanup).not.toHaveProperty("denied")
   const record = readLanding(common, "r7")
   expect(record.kind === "present" && record.value.denied).toBeFalsy()
+})
+
+type Tools = { fake: ReturnType<typeof createFakeContext>; land: () => Promise<Result>; cleanup: (input?: Record<string, unknown>) => Promise<{ output: Record<string, unknown>; content: string }> }
+
+async function plugin(options: Record<string, unknown> = {}, fakeOptions: Parameters<typeof createFakeContext>[0] = {}): Promise<Tools> {
+  const fake = createFakeContext({ directory: repo, ...fakeOptions })
+  const context = fake.context as unknown as { location: unknown; worktree: unknown; options: unknown }
+  context.location = { ...(context.location as object), project: { id: "prj" } }
+  context.options = options
+  context.worktree = { list: async () => [{ directory: "/w/a" }], remove: async () => {} }
+  const { default: definition, LAND_ACTION, CLEANUP_ACTION } = await import("./index.ts")
+  await definition.setup(fake.context)
+  const call = { sessionID: "s", agent: "a", messageID: "m", id: "c", signal: new AbortController().signal }
+  return {
+    fake,
+    land: () => (fake.tools.get(LAND_ACTION)?.execute as (i: unknown, c: unknown) => Promise<Result>)({ pr: 7 }, call),
+    cleanup: (input = {}) =>
+      (fake.tools.get(CLEANUP_ACTION)?.execute as (i: unknown, c: unknown) => Promise<{ output: Record<string, unknown>; content: string }>)(input, call),
+  }
+}
+
+const aLanding = (over: Record<string, unknown> = {}) => ({
+  receiptId: "r7",
+  worktree: "/w/a",
+  headRefOid: "h".repeat(40),
+  sessionID: "s",
+  landedAt: 1,
+  ...over,
+})
+
+test("an explicit delivery_cleanup of a claimed lane removes nothing, re-arms the denial and reports the deferral", async () => {
+  claimLane()
+  writeLanding(common, aLanding({ denied: { at: 2, sessionID: "s" } }))
+  const { cleanup } = await plugin()
+  const result = await cleanup()
+  expect(result.output).toMatchObject({ ok: true, deferred: "owned by subagent-worktree lane; removed by its owner once finished" })
+  expect(result.output).not.toHaveProperty("receipt")
+  const record = readLanding(common, "r7")
+  expect(record.kind).toBe("present")
+  expect(record.kind === "present" && record.value.denied).toBeUndefined()
+  removeClaim(common, "/w/a")
+})
+
+test("an explicit delivery_cleanup of a worktree whose claim cannot be read removes nothing either", async () => {
+  mkdirSync(join(common, "opencode", "lane-claims"), { recursive: true })
+  writeFileSync(claimFile(common, "/w/a"), "{broken")
+  const { cleanup } = await plugin()
+  const result = await cleanup()
+  expect(result.output.ok).toBe(true)
+  expect(String(result.output.deferred)).toContain("lane claim unreadable")
+  removeClaim(common, "/w/a")
+})
+
+test("an explicit delivery_cleanup of an unclaimed worktree runs as before", async () => {
+  const { cleanup } = await plugin()
+  const result = await cleanup()
+  expect(result.output).toMatchObject({ ok: true, worktree: "/w/a" })
+  expect(result.output).not.toHaveProperty("deferred")
+})
+
+test("with autoCleanup false a rejected explicit prompt still writes a denial the owner can read", async () => {
+  const rejectCleanup = (assert: { action: string }) => {
+    if (assert.action === "delivery_cleanup") throw new Error("denied by the user")
+  }
+  const { land, cleanup } = await plugin({ autoCleanup: false }, { assert: rejectCleanup as never })
+  const landed = await land()
+  expect(landed.output.cleanup).toBeUndefined()
+  expect(readLanding(common, "r7").kind).toBe("present")
+  await expect(cleanup()).rejects.toThrow("denied by the user")
+  expect(readLanding(common, "r7")).toMatchObject({ kind: "present", value: { denied: { sessionID: "s" } } })
+})
+
+test("with autoCleanup false an authorized explicit call clears the denial", async () => {
+  const { cleanup } = await plugin({ autoCleanup: false })
+  writeLanding(common, aLanding({ denied: { at: 2, sessionID: "s" } }))
+  await cleanup()
+  // Cleared by the authorized call (and then dropped with the cleaned receipt's record).
+  const record = readLanding(common, "r7")
+  expect(record.kind === "present" ? record.value.denied : undefined).toBeUndefined()
 })

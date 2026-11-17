@@ -6,6 +6,7 @@ import {
   readLanding,
   removeClaim,
   writeClaim,
+  writeLanding,
 } from "@srobroek/opencode-lib/worktree-claims"
 import { authorizeExplicit, createPendingCleanup } from "./pending-cleanup.ts"
 
@@ -2587,6 +2588,51 @@ describe("pending cleanup: one remover per worktree", () => {
     expect(claimed).toBe(true)
     expect(removed(h)).toBe(false)
     expect(mutationCalls(h.scripted.calls)).toEqual([])
+    await h.finish()
+  })
+
+  test("a denial written after the snapshot blocks the removal at the last check", async () => {
+    let written = false
+    let h: Harness | undefined
+    h = await harness("pending-denied-late", {
+      before: (argv) => {
+        if (argv.includes("status") && !written && h) {
+          written = true
+          writeLanding(h.common, {
+            receiptId: h.f.receipt.receiptId,
+            worktree: h.f.linked,
+            headRefOid: h.f.head,
+            sessionID: "ses_lead",
+            landedAt: 1,
+            denied: { at: 2, sessionID: "ses_lead" },
+          })
+        }
+      },
+    })
+    await h.pending.start()
+    await h.idle()
+    expect(written).toBe(true)
+    expect(removed(h)).toBe(false)
+    expect(mutationCalls(h.scripted.calls)).toEqual([])
+    await h.finish()
+  })
+
+  test("a landing record that cannot be read blocks the removal at the last check", async () => {
+    let written = false
+    let h: Harness | undefined
+    h = await harness("pending-record-corrupt-late", {
+      before: (argv) => {
+        if (argv.includes("status") && !written && h) {
+          written = true
+          mkdirSync(dirname(landingFile(h.common, "9-bad")), { recursive: true })
+          writeFileSync(landingFile(h.common, "9-bad"), "garbage")
+        }
+      },
+    })
+    await h.pending.start()
+    await h.idle()
+    expect(written).toBe(true)
+    expect(removed(h)).toBe(false)
     await h.finish()
   })
 

@@ -103,6 +103,14 @@ Inputs: `pr`, and when needed `merge_method` (`squash` by default, `merge`,
   that ran `delivery_land` gets one reminder, when it goes idle with beads still open,
   naming the beads and their close commands. The retry runs only while `autoCleanup` is
   on, and no prompt is shown for it.
+- An explicit `delivery_cleanup` of a worktree a lane owns, or whose claim cannot be read,
+  is authorized and re-arms any earlier denial on disk, then stops: it returns
+  `{ ok: true, deferred: "owned by subagent-worktree lane; removed by its owner once finished" }`
+  and removes nothing. The owner removes it when the lane is finished and landed.
+- The coordination files (landing records, denials, claim checks) are written whatever
+  `autoCleanup` says; the option turns off only delivery's own inline cleanup and retry.
+  The last check before any removal delivery makes on its own also re-reads the landing
+  records for that directory: a denial, or a record that cannot be read, blocks it.
 - **A refusal sticks.** If the inline cleanup is refused at its prompt, the landing record
   keeps `denied` and nothing retries it. A later explicit `delivery_cleanup` call that is
   authorized clears it; one that is refused records a fresh denial and leaves the old one

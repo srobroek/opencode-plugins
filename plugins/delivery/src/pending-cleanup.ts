@@ -131,12 +131,34 @@ export function selectWindow<T extends { receiptId: string }>(
     .map((entry) => entry.candidate)
 }
 
+/** An explicit `delivery_cleanup` was authorized but its target belongs to a lane: nothing is removed here. */
+export class CleanupDeferred extends Error {
+  constructor(readonly deferred: string) {
+    super(deferred)
+    this.name = "CleanupDeferred"
+  }
+}
+
+/** The text for a worktree an owner removes later, or undefined when delivery may remove it. Pure. */
+export function explicitDeferral(ownership: Ownership): string | undefined {
+  const why = ownershipDeferral(ownership)
+  if (why === undefined) return undefined
+  return ownership.owner === "lane" ? `${why}; removed by its owner once finished` : `${why}; not removed until it can be read`
+}
+
 /**
  * `authorize` for an explicit `delivery_cleanup` call. A refused call is a new denial, whatever
- * came before; an earlier denial is cleared only once this call is authorized.
+ * came before. Once authorized, an earlier denial is cleared (so the owner may proceed) and, if a
+ * lane owns the worktree, delivery stops there with {@link CleanupDeferred}: one remover per worktree.
  */
 export async function authorizeExplicit(
-  pending: { deny: (worktree: string, sessionID: string) => Promise<void>; arm: (worktree: string) => Promise<void> } | undefined,
+  pending:
+    | {
+        deny: (worktree: string, sessionID: string) => Promise<void>
+        arm: (worktree: string) => Promise<void>
+        ownership: (worktree: string) => Ownership
+      }
+    | undefined,
   ask: (request: { worktree: string }) => Promise<void>,
   sessionID: string,
   request: { worktree: string },
@@ -148,6 +170,8 @@ export async function authorizeExplicit(
     throw error
   }
   await pending?.arm(request.worktree).catch(() => {})
+  const deferred = pending === undefined ? undefined : explicitDeferral(pending.ownership(request.worktree))
+  if (deferred !== undefined) throw new CleanupDeferred(deferred)
 }
 
 export type PendingDeps = {
@@ -235,6 +259,10 @@ export function createPendingCleanup(deps: PendingDeps) {
   /** An explicit `delivery_cleanup` for `worktree` was refused: that is a (new) denial, whatever came before. */
   const deny = async (worktree: string, sessionID: string) => {
     for (const receipt of receiptsFor(worktree)) await record(receipt, sessionID, { denied: true })
+    // A record that exists without a pending receipt in view (for example after a restart) is denied too.
+    for (const entry of landingsFor([...landings().byReceipt.values()], worktree)) {
+      write(entry.receiptId, (existing) => (existing ? { ...existing, denied: { at: now(), sessionID } } : existing))
+    }
   }
 
   /** An explicit `delivery_cleanup` for `worktree` was authorized: only now is an earlier denial cleared. */
@@ -285,6 +313,29 @@ export function createPendingCleanup(deps: PendingDeps) {
   const guard = async (request: { worktree: string }) => {
     const hold = await holdFor(request.worktree)
     if (hold !== undefined) throw new Error(`held: ${hold}`)
+    // The landing records are read again here, after every proof: a denial written since the
+    // snapshot, or records that cannot be read, block exactly as they do for the lane's owner.
+    const common = commonDir()
+    if (common === null) throw new Error("held: the git common directory could not be resolved")
+    const listed = listLandings(common)
+    if (listed.unreadable) throw new Error("held: the landing records could not be read")
+    if (landingsFor(listed.records, request.worktree).some((entry) => entry.denied !== undefined)) {
+      throw new Error("held: cleanup was denied; an explicit delivery_cleanup re-arms it")
+    }
+  }
+
+  /** Drop landing records whose receipt is no longer pending (cleaned, superseded). */
+  const gc = () => {
+    const key = repoKey(cwd)
+    const recorded = landings()
+    if (key === null || recorded.common === null || recorded.unreadable) return
+    let live: Set<string>
+    try {
+      live = new Set(pendingReceipts(listReceipts(resolve(receiptDirectory(env, key)))).map((receipt) => receipt.receiptId))
+    } catch {
+      return
+    }
+    for (const id of recorded.byReceipt.keys()) if (!live.has(id)) removeLanding(recorded.common, id)
   }
 
   /** One pass over this repository's pending receipts for a finished turn of `sessionID`. */
@@ -435,5 +486,5 @@ export function createPendingCleanup(deps: PendingDeps) {
     await chain
   }
 
-  return { start, dispose, record, deny, arm, ownership, guard, retryNow, handleEvent, settle }
+  return { start, dispose, record, deny, arm, ownership, guard, gc, retryNow, handleEvent, settle }
 }
