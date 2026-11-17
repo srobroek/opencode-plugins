@@ -1255,11 +1255,17 @@ function checkGit(args, ctx, cwd, wrapped) {
   const risky = rest.find((arg) => RISKY_OPTION.test(arg) || sub === "grep" && /^-O/.test(arg));
   if (risky !== undefined)
     return refuse(`git ${sub} ${risky}`);
+  if (agent === "debug") {
+    const moved = branchRefusal(sub, rest) ?? (sub === "worktree" && rest[0] === "add" ? worktreeAddRefusal(rest.slice(1)) : undefined);
+    if (moved !== undefined)
+      return refuse(moved);
+  }
   if (agent === "debug" && changesTree(sub, rest)) {
     const base = startingDirectory(ctx.env);
     const why = redirected ? "uses -C, --work-tree, --git-dir or --namespace" : wrapped ? "runs through a wrapper that changes directory" : ctx.state.moved ? "runs after cd, pushd or popd" : ctx.depth > 0 ? "runs inside a nested shell, substitution or runner" : base === undefined || !scratch(base, ctx) ? "does not have a debug-* scratch worktree as its workdir" : undefined;
     if (why !== undefined)
       return refuse(`git ${sub} ${why}; run it directly with the shell workdir set to your debug-* scratch worktree`);
+    ctx.report.mutates = true;
   }
   const outputs = outputDestinations(sub, rest);
   if (sub === "format-patch" && !rest.includes("--stdout") && outputs?.length === 0)
@@ -1390,6 +1396,92 @@ function changesTree(sub, rest) {
     default:
       return false;
   }
+}
+var debugRef = (name) => /^(refs\/heads\/)?debug[-/]./.test(name);
+var COMMIT_ID = /^[0-9a-f]{7,40}$/i;
+var NOT_A_BRANCH = /[~^:@{]|^HEAD$/;
+function createdBranch(args, i, options) {
+  const arg = args[i];
+  for (const option of options) {
+    if (arg === option)
+      return args[i + 1] ?? "";
+    if (arg.startsWith(`${option}=`))
+      return arg.slice(option.length + 1);
+    if (!option.startsWith("--") && arg.startsWith(option) && arg.length > option.length)
+      return arg.slice(option.length);
+  }
+  return;
+}
+function branchRefusal(sub, rest) {
+  if (sub === "checkout" || sub === "switch") {
+    if (rest.some((arg) => longOption(arg, "--ignore-other-worktrees")))
+      return `git ${sub} --ignore-other-worktrees (it lets a second worktree share a branch)`;
+    const end = rest.indexOf("--");
+    const args = end < 0 ? rest : rest.slice(0, end);
+    const creating = sub === "switch" ? ["-c", "-C", "--create", "--force-create", "--orphan"] : ["-b", "-B", "--orphan"];
+    let detach = false;
+    const created = [];
+    const positional = [];
+    for (let i = 0;i < args.length; i++) {
+      const arg = args[i];
+      if (arg === "--detach" || longOption(arg, "--detach") || sub === "switch" && arg === "-d") {
+        detach = true;
+        continue;
+      }
+      const name = createdBranch(args, i, creating);
+      if (name !== undefined) {
+        created.push(name);
+        if (args[i] === creating.find((option) => option === args[i]))
+          i++;
+      } else if (arg === "-" || !arg.startsWith("-"))
+        positional.push(arg);
+    }
+    const owned = created.find((name) => !debugRef(name));
+    if (owned !== undefined)
+      return `git ${sub} creating the branch ${owned}`;
+    if (detach || created.length > 0 || end >= 0 || positional.length !== 1)
+      return;
+    const target = positional[0];
+    if (sub === "checkout" && (COMMIT_ID.test(target) || NOT_A_BRANCH.test(target)))
+      return;
+    return debugRef(target) ? undefined : `git ${sub} ${target} (it may be a branch the user owns; use --detach or a debug/* branch)`;
+  }
+  if (sub === "branch" && changesTree(sub, rest)) {
+    const name = rest.find((arg) => !arg.startsWith("-"));
+    if (name !== undefined && !debugRef(name))
+      return `git branch ${name}`;
+  }
+  if (sub === "bisect" && rest[0] === "reset" && rest[1] !== undefined && !debugRef(rest[1]) && !COMMIT_ID.test(rest[1]))
+    return `git bisect reset ${rest[1]}`;
+  return;
+}
+function worktreeAddRefusal(args) {
+  let detach = false;
+  let branch;
+  const positional = [];
+  for (let i = 0;i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "-f" || arg === "--force" || longOption(arg, "--force") || cluster(arg, "f"))
+      return "git worktree add --force (it shares a branch between worktrees)";
+    if (arg === "--detach" || longOption(arg, "--detach"))
+      detach = true;
+    else if (arg === "--reason")
+      i++;
+    else if (arg === "-b" || arg === "-B")
+      branch = args[++i] ?? "";
+    else if (arg.startsWith("-b") || arg.startsWith("-B"))
+      branch = arg.slice(2);
+    else if (!arg.startsWith("-"))
+      positional.push(arg);
+  }
+  if (detach)
+    return;
+  if (branch !== undefined)
+    return debugRef(branch) ? undefined : `git worktree add -b ${branch}`;
+  const [path, commitish] = positional;
+  if (commitish !== undefined)
+    return debugRef(commitish) ? undefined : `git worktree add of ${commitish} (it may be a branch the user owns)`;
+  return path !== undefined && debugRef(basename2(path)) ? undefined : "git worktree add without --detach or a debug-* branch";
 }
 function worktreeTarget(action, args) {
   for (let i = 0;i < args.length; i++) {
@@ -1542,26 +1634,69 @@ function startingDirectory(env) {
     return;
   return env.workdir === undefined ? env.startDir : joinPath(env.startDir, env.workdir, env.home);
 }
-function forbiddenGit(command, agent, env = {}) {
+function inspectGit(command, agent, env = {}) {
   const policy = POLICIES[agent];
   if (policy === undefined)
-    return;
-  return checkCommand(command, {
+    return { mutates: false };
+  const report = { mutates: false };
+  const reason = checkCommand(command, {
     agent,
     policy,
     mentions: false,
     depth: 0,
     env,
-    state: { cwd: startingDirectory(env), moved: false }
+    state: { cwd: startingDirectory(env), moved: false },
+    report
   });
+  return reason === undefined ? { mutates: report.mutates } : { reason, mutates: false };
 }
-function guardShellCall(tool, input, agent, env = {}) {
+function inspectShellCall(tool, input, agent, env = {}) {
   if (POLICIES[agent] === undefined || !isShellTool(tool))
-    return;
+    return { mutates: false };
   const call = shellCall(tool, input);
   if (call === undefined || call.command.trim() === "")
-    return "the shell input has no recognisable command, so its git use cannot be checked";
-  return forbiddenGit(call.command, agent, { ...env, workdir: call.workdir ?? env.workdir });
+    return { reason: "the shell input has no recognisable command, so its git use cannot be checked", mutates: false };
+  const merged = { ...env, workdir: call.workdir ?? env.workdir };
+  return { ...inspectGit(call.command, agent, merged), workdir: startingDirectory(merged) };
+}
+
+// plugins/modes/src/head-guard.ts
+import { execFile } from "child_process";
+var runSymbolicRef = (cwd) => new Promise((resolve, reject) => {
+  execFile("git", ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "symbolic-ref", "-q", "HEAD"], {
+    cwd,
+    timeout: 1e4,
+    env: {
+      PATH: process.env.PATH ?? "/usr/bin:/bin",
+      LC_ALL: "C",
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_OPTIONAL_LOCKS: "0"
+    }
+  }, (error, stdout) => {
+    const code = error?.code;
+    if (error === null)
+      resolve({ code: 0, stdout: String(stdout) });
+    else if (code === 1)
+      resolve({ code: 1, stdout: String(stdout) });
+    else
+      reject(error);
+  });
+});
+async function headRefusal(workdir, run = runSymbolicRef) {
+  if (workdir === undefined)
+    return "the shell workdir is unknown, so the checked-out branch cannot be read";
+  try {
+    const { code, stdout } = await run(workdir);
+    if (code === 1)
+      return;
+    const ref = stdout.trim();
+    if (/^refs\/heads\/debug[-/]./.test(ref))
+      return;
+    return `the worktree is on ${ref || "an unreadable HEAD"}, a branch the user may own; run git switch --detach or git switch -c debug/<slug> first`;
+  } catch (error) {
+    return `the checked-out branch could not be read (${error.message}), so the command is refused`;
+  }
 }
 
 // plugins/modes/src/modes.ts
@@ -1606,7 +1741,8 @@ function enabledModes(options) {
 
 // plugins/modes/src/index.ts
 var AGENTS_DIR = fileURLToPath(new URL("../agents", import.meta.url));
-async function setupModes(ctx) {
+async function setupModes(ctx, overrides = {}) {
+  const headCheck = overrides.headCheck ?? ((workdir) => headRefusal(workdir));
   const options = parseOptions(ctx.options);
   const disposers = [];
   const cleanup = async () => {
@@ -1622,9 +1758,14 @@ async function setupModes(ctx) {
       const guard = await ctx.tool.hook("execute.before", async (event) => {
         if (!GUARDED_AGENTS.includes(event.agent))
           return;
-        const reason = guardShellCall(event.tool, event.input, event.agent, { startDir: await startDirectory(event.sessionID) });
-        if (reason !== undefined)
-          throw new Error(reason);
+        const inspected = inspectShellCall(event.tool, event.input, event.agent, { startDir: await startDirectory(event.sessionID) });
+        if (inspected.reason !== undefined)
+          throw new Error(inspected.reason);
+        if (inspected.mutates) {
+          const head = await headCheck(inspected.workdir);
+          if (head !== undefined)
+            throw new Error(head);
+        }
       });
       disposers.push(() => guard.dispose());
     }
@@ -1649,7 +1790,7 @@ async function setupModes(ctx) {
   }
   return cleanup;
 }
-var src_default = Plugin.define({ id: "srobroek.modes", setup: setupModes });
+var src_default = Plugin.define({ id: "srobroek.modes", setup: (ctx) => setupModes(ctx) });
 export {
   AGENTS_DIR,
   AGENT_IDS,

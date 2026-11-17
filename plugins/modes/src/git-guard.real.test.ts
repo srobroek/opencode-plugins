@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { forbiddenGit } from "./git-guard.ts"
+import { headRefusal } from "./head-guard.ts"
 
 // Real repositories: the user's checkout and a linked debug-* worktree that shares its object store and refs.
 let home = ""
@@ -169,4 +170,72 @@ describe("remote against real repositories", () => {
     for (const command of ["git remote -v", "git remote get-url origin", "git remote show -n origin"])
       expect(forbiddenGit(command, "debug", context(scratch))).toBeUndefined()
   })
+})
+
+describe("branch sharing against real repositories", () => {
+  let lane = ""
+  const mainRef = () => git(repo, "rev-parse", "refs/heads/main")
+  const userState = () => ({
+    head: git(repo, "rev-parse", "HEAD"),
+    main: mainRef(),
+    branch: git(repo, "symbolic-ref", "HEAD"),
+    status: git(repo, "status", "--porcelain"),
+  })
+
+  beforeAll(() => {
+    lane = join(home, ".local/share/opencode/worktree/h1/debug-seq")
+    git(repo, "worktree", "add", "-q", "--detach", lane)
+  }, 60_000)
+
+  test("the bypass sequence is refused statically, and neither the user's HEAD nor main moves", () => {
+    const before = userState()
+    for (const command of [
+      "git checkout --ignore-other-worktrees main",
+      "git switch --ignore-other-worktrees main",
+      "git checkout main",
+      "git switch main",
+      "git switch --force-create main",
+      `git worktree add --force ${home}/.local/share/opencode/worktree/h1/debug-x main`,
+      `git worktree add ${home}/.local/share/opencode/worktree/h1/debug-x main`,
+    ])
+      expect({ command, reason: forbiddenGit(command, "debug", context(lane)) }).toEqual({ command, reason: expect.any(String) })
+    expect(userState()).toEqual(before)
+  })
+
+  test("if a worktree is on main anyway, the HEAD check refuses before a commit can move it", async () => {
+    const before = userState()
+    git(lane, "checkout", "-q", "--ignore-other-worktrees", "main")
+    try {
+      expect(await headRefusal(lane)).toContain("refs/heads/main")
+      expect(userState()).toEqual(before)
+    } finally {
+      git(lane, "checkout", "-q", "--detach")
+    }
+  }, 30_000)
+
+  test("a commit on debug/x in scratch works and leaves main alone", async () => {
+    const before = userState()
+    expect(forbiddenGit("git switch -c debug/x", "debug", context(lane))).toBeUndefined()
+    git(lane, "switch", "-q", "-c", "debug/x")
+    expect(await headRefusal(lane)).toBeUndefined()
+    writeFileSync(join(lane, "b.txt"), "x\n")
+    expect(forbiddenGit("git add -A", "debug", context(lane))).toBeUndefined()
+    git(lane, "add", "-A")
+    expect(forbiddenGit("git commit -m probe", "debug", context(lane))).toBeUndefined()
+    git(lane, "commit", "-q", "-m", "probe")
+    expect(userState()).toEqual(before)
+    expect(git(lane, "rev-parse", "refs/heads/debug/x")).not.toBe(before.main)
+    git(lane, "checkout", "-q", "--detach")
+  }, 60_000)
+
+  test("a commit on a detached HEAD in scratch works and leaves main alone", async () => {
+    const before = userState()
+    expect(forbiddenGit("git switch --detach", "debug", context(lane))).toBeUndefined()
+    git(lane, "switch", "-q", "--detach")
+    expect(await headRefusal(lane)).toBeUndefined()
+    writeFileSync(join(lane, "c.txt"), "y\n")
+    git(lane, "add", "-A")
+    git(lane, "commit", "-q", "-m", "detached probe")
+    expect(userState()).toEqual(before)
+  }, 60_000)
 })

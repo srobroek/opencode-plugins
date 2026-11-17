@@ -164,8 +164,8 @@ const ALLOWED = [
   "git commit -m 'EDITOR note'",
   "git diff main -- clean.ts",
   "git commit -m x",
-  "git checkout -b probe",
-  "git switch -c probe",
+  "git checkout -b debug/probe",
+  "git switch -c debug/probe",
   "git add -A && git commit -m x",
   "git stash",
   "git stash -u",
@@ -179,7 +179,7 @@ const ALLOWED = [
   "git restore file",
   "git branch",
   "git branch -a",
-  "git branch probe",
+  "git branch debug-probe",
   "git branch --show-current",
   "git tag",
   "git tag -l 'v*'",
@@ -269,8 +269,8 @@ describe("output options", () => {
     "git log -p",
     "git diff --output-indicator-new=+",
     "git blame --contents notes.txt file.ts",
-    `git worktree add ${WORKTREES}/debug-bar -b bar`,
-    `git worktree add -f --detach ${WORKTREES}/debug-bar HEAD`,
+    `git worktree add ${WORKTREES}/debug-bar -b debug-bar`,
+    `git worktree add --detach ${WORKTREES}/debug-bar HEAD`,
     `git worktree remove --force ${WT}`,
     "git worktree list",
     "git format-patch --stdout HEAD~1",
@@ -337,8 +337,8 @@ describe("checkout boundary (debug only)", () => {
   const mutating = [
     "git commit -am x",
     "git add -A",
-    "git checkout main",
-    "git switch main",
+    "git checkout --detach main",
+    "git switch --detach main",
     "git reset HEAD~1",
     "git restore f",
     "git stash",
@@ -347,7 +347,7 @@ describe("checkout boundary (debug only)", () => {
     "git revert abc",
     "git apply p.diff",
     "git am p.mbox",
-    "git branch newone",
+    "git branch debug-newone",
     "git bisect start",
     "git bisect good",
     "git bisect run bun test x",
@@ -498,10 +498,10 @@ describe("worktree", () => {
     "%j is refused for both",
     (command) => verdict(["debug", "refactor"], command, "refused"),
   )
-  test.each([`git worktree add ${WORKTREES}/debug-bar -b bar`, `git worktree remove ${WT}`])("debug may run %j", (command) =>
+  test.each([`git worktree add ${WORKTREES}/debug-bar -b debug-bar`, `git worktree remove ${WT}`])("debug may run %j", (command) =>
     verdict(["debug"], command, "allowed"),
   )
-  test.each([`git worktree add ${WORKTREES}/debug-bar -b bar`, `git worktree remove ${WT}`])("refactor may not run %j", (command) =>
+  test.each([`git worktree add ${WORKTREES}/debug-bar -b debug-bar`, `git worktree remove ${WT}`])("refactor may not run %j", (command) =>
     verdict(["refactor"], command, "refused"),
   )
   test("worktree list is allowed for both", () => verdict(["debug", "refactor"], "git worktree list", "allowed"))
@@ -562,6 +562,84 @@ describe("interpreters", () => {
     "awk -F: 'BEGIN{system(\"git push\")}' file",
     'lua -e "os.execute(\'git push\')"',
   ])("inline code in %j that mentions git is refused", (command) => verdict(["debug", "refactor"], command, "refused"))
+})
+
+describe("branches the user owns (debug only)", () => {
+  const refused = [
+    "git checkout --ignore-other-worktrees main",
+    "git checkout --ignore-other-worktrees --detach main",
+    "git checkout --ignore-other debug-x",
+    "git switch --ignore-other-worktrees main",
+    "git switch --ignore-other-worktrees debug-x",
+    "git checkout main",
+    "git checkout feature/x",
+    "git checkout origin/main",
+    "git checkout v1.0",
+    "git checkout -b main",
+    "git checkout -B main",
+    "git checkout -b feature/x origin/main",
+    "git checkout --orphan main",
+    "git switch main",
+    "git switch feature/x",
+    "git switch -",
+    "git switch -c main",
+    "git switch -C main",
+    "git switch --create main",
+    "git switch -cmain",
+    "git switch --orphan main",
+    "git branch main-copy",
+    "git branch feature/x origin/main",
+    "git bisect reset main",
+    "git worktree add -f ../x",
+    `git worktree add --force ${WORKTREES}/debug-bar`,
+    `git worktree add -f ${WORKTREES}/debug-bar -b debug-bar`,
+    `git worktree add ${WORKTREES}/debug-bar main`,
+    `git worktree add ${WORKTREES}/debug-bar -b main`,
+    `git worktree add -B main ${WORKTREES}/debug-bar`,
+    `git worktree add ${WORKTREES}/debug-bar/sub`,
+  ]
+  test.each(refused)("debug may not run %j", (command) => verdict(["debug"], command, "refused"))
+  const allowed = [
+    "git checkout --detach",
+    "git checkout --detach main",
+    "git checkout --detach origin/main",
+    "git checkout abc1234",
+    "git checkout 0123456789abcdef0123456789abcdef01234567",
+    "git checkout HEAD~1",
+    "git checkout HEAD",
+    "git checkout debug-x",
+    "git checkout debug/x",
+    "git checkout -b debug-x",
+    "git checkout -b debug/x origin/main",
+    "git checkout -B debug/x",
+    "git checkout main -- src/a.ts",
+    "git checkout -- src/a.ts",
+    "git switch --detach main",
+    "git switch -d origin/main",
+    "git switch debug-x",
+    "git switch debug/x",
+    "git switch -c debug-x",
+    "git switch -c debug/x main",
+    "git switch -C debug/x",
+    "git switch --create debug/x",
+    "git branch debug-x",
+    "git branch debug/x origin/main",
+    "git branch --list 'main*'",
+    "git branch --contains abc1234",
+    "git bisect reset",
+    "git bisect reset debug-x",
+    `git worktree add --detach ${WORKTREES}/debug-bar`,
+    `git worktree add --detach ${WORKTREES}/debug-bar origin/main`,
+    `git worktree add -b debug-bar ${WORKTREES}/debug-bar`,
+    `git worktree add -b debug/bar ${WORKTREES}/debug-bar origin/main`,
+    `git worktree add ${WORKTREES}/debug-bar`,
+    `git worktree add ${WORKTREES}/debug-bar debug-baz`,
+  ]
+  test.each(allowed)("debug may run %j", (command) => verdict(["debug"], command, "allowed"))
+  test("refactor works on the user's branches by design", () => {
+    for (const command of ["git checkout main", "git switch main", "git switch -c feature/x", "git branch feature/x", "git checkout --ignore-other-worktrees main"])
+      verdict(["refactor"], command, "allowed")
+  })
 })
 
 describe("symlinks before dot-dot", () => {

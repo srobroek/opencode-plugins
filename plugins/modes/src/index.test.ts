@@ -5,7 +5,7 @@ import { join } from "node:path"
 import { agentPaths, permissionEffect, readAgentFile } from "@srobroek/opencode-lib/agent-files"
 import { MODEL_TIERS } from "@srobroek/opencode-lib/model-roles"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
-import plugin, { AGENTS_DIR, enabledModes, parseOptions, selectAgents } from "./index.ts"
+import plugin, { AGENTS_DIR, enabledModes, parseOptions, selectAgents, setupModes } from "./index.ts"
 
 const agent = (id: string) => readAgentFile(`${AGENTS_DIR}/${id}.md`)
 const effect = (id: string, action: string, resource = "*") => permissionEffect(agent(id).permissions, action, resource)
@@ -154,7 +154,7 @@ describe("setup", () => {
   })
   test("the shell guard keeps debug's mutating git out of the session's starting checkout", async () => {
     const fake = createFakeContext({ sessions: [{ id: "ses_1", location: { directory: "/repo" } }] })
-    await plugin.setup(fake.context)
+    await setupModes(fake.context, { headCheck: async () => undefined })
     const run = (agent: string, command: string, workdir?: string) =>
       fake.fire.tool("execute.before", { tool: "shell", agent, sessionID: "ses_1", input: { command, workdir } })
     const scratch = `${homedir()}/.local/share/opencode/worktree/h1/debug-foo`
@@ -162,6 +162,36 @@ describe("setup", () => {
     await expect(run("debug", `git -C ${scratch} commit -m x`)).rejects.toThrow("workdir")
     await expect(run("debug", "git commit -m x", scratch)).resolves.toBeDefined()
     await expect(run("refactor", "git commit -m x")).resolves.toBeDefined()
+  })
+  test("a mutating git command also needs HEAD to be detached or on a debug branch, read before it runs", async () => {
+    const fake = createFakeContext({ sessions: [{ id: "ses_1", location: { directory: "/repo" } }] })
+    const asked: Array<string | undefined> = []
+    let verdict: string | undefined
+    await setupModes(fake.context, {
+      headCheck: async (workdir) => {
+        asked.push(workdir)
+        return verdict
+      },
+    })
+    const run = (agent: string, command: string, workdir?: string) =>
+      fake.fire.tool("execute.before", { tool: "shell", agent, sessionID: "ses_1", input: { command, workdir } })
+    const scratch = `${homedir()}/.local/share/opencode/worktree/h1/debug-foo`
+    await expect(run("debug", "git commit -m x", scratch)).resolves.toBeDefined()
+    expect(asked).toEqual([scratch])
+    verdict = "the worktree is on refs/heads/main"
+    await expect(run("debug", "git commit -m x", scratch)).rejects.toThrow("refs/heads/main")
+    await run("debug", "git log -p", scratch)
+    await run("debug", "git status", "/repo")
+    await run("refactor", "git commit -m x")
+    expect(asked).toEqual([scratch, scratch])
+  })
+  test("a refused command never reads HEAD, and the real check refuses a workdir that is not a repository", async () => {
+    const fake = createFakeContext({ sessions: [{ id: "ses_1", location: { directory: "/repo" } }] })
+    await setupModes(fake.context)
+    const scratch = `${homedir()}/.local/share/opencode/worktree/h1/debug-missing`
+    await expect(
+      fake.fire.tool("execute.before", { tool: "shell", agent: "debug", sessionID: "ses_1", input: { command: "git commit -m x", workdir: scratch } }),
+    ).rejects.toThrow("could not be read")
   })
   test("the shell guard is not registered when debug and refactor are off", async () => {
     const fake = createFakeContext({ options: { agents: { debug: false, refactor: false } } })

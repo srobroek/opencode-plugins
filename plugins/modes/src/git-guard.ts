@@ -203,6 +203,10 @@ function checkGit(args: readonly string[], ctx: Ctx, cwd: string | undefined, wr
   if (!policy.subcommands.has(sub)) return refuse(`git ${sub}`)
   const risky = rest.find((arg) => RISKY_OPTION.test(arg) || (sub === "grep" && /^-O/.test(arg)))
   if (risky !== undefined) return refuse(`git ${sub} ${risky}`)
+  if (agent === "debug") {
+    const moved = branchRefusal(sub, rest) ?? (sub === "worktree" && rest[0] === "add" ? worktreeAddRefusal(rest.slice(1)) : undefined)
+    if (moved !== undefined) return refuse(moved)
+  }
   if (agent === "debug" && changesTree(sub, rest)) {
     // Only the shell's workdir is trusted: -C, --work-tree, cd, wrappers and nested shells all change
     // the tree in ways that are hard to follow, so they are refused for commands that write.
@@ -220,6 +224,7 @@ function checkGit(args: readonly string[], ctx: Ctx, cwd: string | undefined, wr
               : undefined
     if (why !== undefined)
       return refuse(`git ${sub} ${why}; run it directly with the shell workdir set to your debug-* scratch worktree`)
+    ctx.report.mutates = true
   }
   const outputs = outputDestinations(sub, rest)
   // format-patch writes its files to the current directory unless told otherwise.
@@ -364,6 +369,85 @@ function changesTree(sub: string, rest: readonly string[]): boolean {
   }
 }
 
+/** A branch the debug agent owns: `debug-*` or `debug/*`. */
+const debugRef = (name: string) => /^(refs\/heads\/)?debug[-/]./.test(name)
+const COMMIT_ID = /^[0-9a-f]{7,40}$/i
+/** Characters and names git does not allow in a branch name, so a checkout of them detaches HEAD. */
+const NOT_A_BRANCH = /[~^:@{]|^HEAD$/
+
+/** Read a create-style option (`-c name`, `-cname`, `--create name`, `--create=name`); the name, or undefined if `arg` is not one. */
+function createdBranch(args: readonly string[], i: number, options: readonly string[]): string | undefined {
+  const arg = args[i] as string
+  for (const option of options) {
+    if (arg === option) return args[i + 1] ?? ""
+    if (arg.startsWith(`${option}=`)) return arg.slice(option.length + 1)
+    if (!option.startsWith("--") && arg.startsWith(option) && arg.length > option.length) return arg.slice(option.length)
+  }
+  return undefined
+}
+
+/**
+ * Why a checkout, switch, branch or bisect reset would put the session on a branch the user owns.
+ * A commit made there would move that branch for every worktree, including the user's checkout.
+ */
+function branchRefusal(sub: string, rest: readonly string[]): string | undefined {
+  if (sub === "checkout" || sub === "switch") {
+    if (rest.some((arg) => longOption(arg, "--ignore-other-worktrees"))) return `git ${sub} --ignore-other-worktrees (it lets a second worktree share a branch)`
+    const end = rest.indexOf("--")
+    const args = end < 0 ? rest : rest.slice(0, end)
+    const creating = sub === "switch" ? ["-c", "-C", "--create", "--force-create", "--orphan"] : ["-b", "-B", "--orphan"]
+    let detach = false
+    const created: string[] = []
+    const positional: string[] = []
+    for (let i = 0; i < args.length; i++) {
+      const arg = args[i] as string
+      if (arg === "--detach" || longOption(arg, "--detach") || (sub === "switch" && arg === "-d")) {
+        detach = true
+        continue
+      }
+      const name = createdBranch(args, i, creating)
+      if (name !== undefined) {
+        created.push(name)
+        if (args[i] === creating.find((option) => option === args[i])) i++
+      } else if (arg === "-" || !arg.startsWith("-")) positional.push(arg)
+    }
+    const owned = created.find((name) => !debugRef(name))
+    if (owned !== undefined) return `git ${sub} creating the branch ${owned}`
+    if (detach || created.length > 0 || end >= 0 || positional.length !== 1) return undefined
+    const target = positional[0] as string
+    if (sub === "checkout" && (COMMIT_ID.test(target) || NOT_A_BRANCH.test(target))) return undefined
+    return debugRef(target) ? undefined : `git ${sub} ${target} (it may be a branch the user owns; use --detach or a debug/* branch)`
+  }
+  if (sub === "branch" && changesTree(sub, rest)) {
+    const name = rest.find((arg) => !arg.startsWith("-"))
+    if (name !== undefined && !debugRef(name)) return `git branch ${name}`
+  }
+  if (sub === "bisect" && rest[0] === "reset" && rest[1] !== undefined && !debugRef(rest[1]) && !COMMIT_ID.test(rest[1]))
+    return `git bisect reset ${rest[1]}`
+  return undefined
+}
+
+/** Why `git worktree add <args>` would share a branch with the user's checkout, or undefined. */
+function worktreeAddRefusal(args: readonly string[]): string | undefined {
+  let detach = false
+  let branch: string | undefined
+  const positional: string[] = []
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i] as string
+    if (arg === "-f" || arg === "--force" || longOption(arg, "--force") || cluster(arg, "f")) return "git worktree add --force (it shares a branch between worktrees)"
+    if (arg === "--detach" || longOption(arg, "--detach")) detach = true
+    else if (arg === "--reason") i++
+    else if (arg === "-b" || arg === "-B") branch = args[++i] ?? ""
+    else if (arg.startsWith("-b") || arg.startsWith("-B")) branch = arg.slice(2)
+    else if (!arg.startsWith("-")) positional.push(arg)
+  }
+  if (detach) return undefined
+  if (branch !== undefined) return debugRef(branch) ? undefined : `git worktree add -b ${branch}`
+  const [path, commitish] = positional
+  if (commitish !== undefined) return debugRef(commitish) ? undefined : `git worktree add of ${commitish} (it may be a branch the user owns)`
+  return path !== undefined && debugRef(basename(path)) ? undefined : "git worktree add without --detach or a debug-* branch"
+}
+
 /** The path argument of `git worktree add|remove`. */
 function worktreeTarget(action: string, args: readonly string[]): string | undefined {
   for (let i = 0; i < args.length; i++) {
@@ -440,6 +524,8 @@ type Ctx = {
   env: GitContext
   /** The current directory, unknown once `cd` ran, and whether any `cd` ran. Shared by the commands of one line. */
   state: { cwd: string | undefined; moved: boolean }
+  /** Set when the command line holds a mutating git subcommand the guard accepted. Shared by every nested check. */
+  report: { mutates: boolean }
 }
 const deeper = (ctx: Ctx): Ctx => ({ ...ctx, depth: ctx.depth + 1 })
 
@@ -518,18 +604,28 @@ function startingDirectory(env: GitContext): string | undefined {
   return env.workdir === undefined ? env.startDir : joinPath(env.startDir, env.workdir, env.home)
 }
 
-/** Why `command` is refused for `agent`, or undefined when it may run. */
-export function forbiddenGit(command: string, agent: string, env: GitContext = {}): string | undefined {
+/** The verdict on a command line, and whether it holds a mutating git subcommand (debug only) that passed. */
+export type GitInspection = { reason?: string; mutates: boolean }
+
+export function inspectGit(command: string, agent: string, env: GitContext = {}): GitInspection {
   const policy = POLICIES[agent]
-  if (policy === undefined) return undefined
-  return checkCommand(command, {
+  if (policy === undefined) return { mutates: false }
+  const report = { mutates: false }
+  const reason = checkCommand(command, {
     agent,
     policy,
     mentions: false,
     depth: 0,
     env,
     state: { cwd: startingDirectory(env), moved: false },
+    report,
   })
+  return reason === undefined ? { mutates: report.mutates } : { reason, mutates: false }
+}
+
+/** Why `command` is refused for `agent`, or undefined when it may run. */
+export function forbiddenGit(command: string, agent: string, env: GitContext = {}): string | undefined {
+  return inspectGit(command, agent, env).reason
 }
 
 /**
@@ -538,9 +634,15 @@ export function forbiddenGit(command: string, agent: string, env: GitContext = {
  * A shell call whose input has no recognisable command is refused for guarded agents, because
  * another hook may rewrite it into one.
  */
-export function guardShellCall(tool: string, input: unknown, agent: string, env: GitContext = {}): string | undefined {
-  if (POLICIES[agent] === undefined || !isShellTool(tool)) return undefined
+export function inspectShellCall(tool: string, input: unknown, agent: string, env: GitContext = {}): GitInspection & { workdir?: string } {
+  if (POLICIES[agent] === undefined || !isShellTool(tool)) return { mutates: false }
   const call = shellCall(tool, input)
-  if (call === undefined || call.command.trim() === "") return "the shell input has no recognisable command, so its git use cannot be checked"
-  return forbiddenGit(call.command, agent, { ...env, workdir: call.workdir ?? env.workdir })
+  if (call === undefined || call.command.trim() === "")
+    return { reason: "the shell input has no recognisable command, so its git use cannot be checked", mutates: false }
+  const merged = { ...env, workdir: call.workdir ?? env.workdir }
+  return { ...inspectGit(call.command, agent, merged), workdir: startingDirectory(merged) }
+}
+
+export function guardShellCall(tool: string, input: unknown, agent: string, env: GitContext = {}): string | undefined {
+  return inspectShellCall(tool, input, agent, env).reason
 }

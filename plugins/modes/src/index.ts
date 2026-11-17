@@ -3,7 +3,8 @@ import { Plugin } from "@opencode/plugin"
 import type { Context } from "@opencode/plugin/promise/plugin"
 import { agentPaths, registerAgents } from "@srobroek/opencode-lib/agent-files"
 import { registerModeReminders } from "@srobroek/opencode-lib/mode-reminders"
-import { GUARDED_AGENTS, guardShellCall } from "./git-guard.ts"
+import { GUARDED_AGENTS, inspectShellCall } from "./git-guard.ts"
+import { headRefusal } from "./head-guard.ts"
 import { enabledModes, parseOptions, selectAgents } from "./modes.ts"
 import { guardDebugWrite } from "./path-guard.ts"
 
@@ -11,7 +12,14 @@ export { AGENT_IDS, enabledModes, MODES, parseOptions, selectAgents } from "./mo
 
 export const AGENTS_DIR = fileURLToPath(new URL("../agents", import.meta.url))
 
-export async function setupModes(ctx: Context): Promise<() => Promise<void>> {
+/** Test seam; the host never passes it. */
+export type Overrides = {
+  /** Why a mutating git command may not run in this workdir; defaults to reading HEAD with git. */
+  headCheck?: (workdir: string | undefined) => Promise<string | undefined>
+}
+
+export async function setupModes(ctx: Context, overrides: Overrides = {}): Promise<() => Promise<void>> {
+  const headCheck = overrides.headCheck ?? ((workdir: string | undefined) => headRefusal(workdir))
   const options = parseOptions(ctx.options as Record<string, unknown>)
   const disposers: Array<() => Promise<void>> = []
   const cleanup = async () => {
@@ -31,8 +39,13 @@ export async function setupModes(ctx: Context): Promise<() => Promise<void>> {
       // Permission rules cannot see past git's global options (`git -C dir push`), so check the subcommand here.
       const guard = await ctx.tool.hook("execute.before", async (event) => {
         if (!GUARDED_AGENTS.includes(event.agent as string)) return
-        const reason = guardShellCall(event.tool, event.input, event.agent as string, { startDir: await startDirectory(event.sessionID) })
-        if (reason !== undefined) throw new Error(reason)
+        const inspected = inspectShellCall(event.tool, event.input, event.agent as string, { startDir: await startDirectory(event.sessionID) })
+        if (inspected.reason !== undefined) throw new Error(inspected.reason)
+        // A linked worktree shares branches: only commit on a debug branch or a detached HEAD, never on one the user owns.
+        if (inspected.mutates) {
+          const head = await headCheck(inspected.workdir)
+          if (head !== undefined) throw new Error(head)
+        }
       })
       disposers.push(() => guard.dispose())
     }
@@ -56,4 +69,4 @@ export async function setupModes(ctx: Context): Promise<() => Promise<void>> {
   return cleanup
 }
 
-export default Plugin.define({ id: "srobroek.modes", setup: setupModes })
+export default Plugin.define({ id: "srobroek.modes", setup: (ctx) => setupModes(ctx) })
