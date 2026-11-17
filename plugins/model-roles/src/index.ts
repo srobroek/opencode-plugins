@@ -88,7 +88,7 @@ import {
 } from "./health.ts"
 import { createLedgerStore, LEDGER_DISPOSE_TIMEOUT_MS, OUTCOME_KEY_PREFIX, readOutcome, type Usage } from "./ledger.ts"
 import { hostWarn } from "./log.ts"
-import { claimContextNotice, claimToolContextNotice, toolContextNoticeLive, decideFailureNotice, decideRecovery, type FailureReport, forgetSession, NOTICE_DEDUPE_MS, newNoticeState, type RequestLog, recordRequest, settleRequest } from "./outage.ts"
+import { claimContextNotice, claimToolContextNotice, decideFailureNotice, decideRecovery, type FailureReport, forgetSession, NOTICE_DEDUPE_MS, newNoticeState, type RequestLog, recordRequest, settleRequest, toolContextNoticeLive } from "./outage.ts"
 import { explainSpawn, formatReceipts, pushReceipt, RECEIPTS_KEY, type Receipt, readReceipts, type SpawnRule, type SpawnSource } from "./receipt.ts"
 import { formatUsage, summarizeUsage } from "./report.ts"
 import {

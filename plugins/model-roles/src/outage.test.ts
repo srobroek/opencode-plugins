@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import type { FailureClass } from "./health.ts"
-import { claimContextNotice, claimToolContextNotice, toolContextNoticeLive, decideFailureNotice, decideRecovery, type FailureReport, forgetSession, MAX_STOPPED, MAX_TRACKED, newNoticeState, type RequestLog, recordRequest, settleRequest } from "./outage.ts"
+import { claimContextNotice, claimToolContextNotice, decideFailureNotice, decideRecovery, type FailureReport, forgetSession, MAX_STOPPED, MAX_TRACKED, newNoticeState, type RequestLog, recordRequest, settleRequest, toolContextNoticeLive } from "./outage.ts"
 import type { ModelRef } from "./resolve.ts"
 
 const bedrock = (id: string): ModelRef => ({ providerID: "amazon-bedrock", id })
