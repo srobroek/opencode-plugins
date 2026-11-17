@@ -4010,27 +4010,24 @@ function mentionsOnlyAsData(args) {
         i++;
       continue;
     }
-    if (/^-[em]./.test(arg))
-      continue;
+    if (!arg.startsWith("--")) {
+      const letters = arg.slice(1);
+      const at = letters.search(/[em]/);
+      if (/O/.test(at < 0 ? letters : letters.slice(0, at)))
+        return false;
+      if (at >= 0) {
+        if (at === letters.length - 1)
+          i++;
+        continue;
+      }
+    }
     if (mentioned(arg))
       return false;
   }
   return true;
 }
-var OPAQUE_PROGRAM = /^(?:python3?(?:\.\d+)?|node|bun|bunx|npx|deno|ruby|perl|php|lua)$/;
-var opaque = (program) => {
-  const name = base(program.replace(/[@=<>~![].*$/, ""));
-  return SHELLS.has(name) || CONSTRUCTS.has(name) || DESCENDED.has(name) || OPAQUE_PROGRAM.test(name);
-};
 function launcherJudged(argv) {
-  const run = launched(argv);
-  if (run === undefined)
-    return false;
-  if (run === "not-run")
-    return !base(argv[0]).startsWith("python");
-  if (run === "unparsed" || opaque(run.program) || ["git", "dgit"].includes(base(run.program)))
-    return false;
-  return launched([run.program, ...run.args]) === undefined;
+  return launched(argv) === "not-run" && !base(argv[0]).startsWith("python");
 }
 function unaccountedMention(command, git) {
   const text = command.argv.join(" ");
