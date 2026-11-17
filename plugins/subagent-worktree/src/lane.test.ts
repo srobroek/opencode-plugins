@@ -68,11 +68,11 @@ test("external working-directory directives are conservative", () => {
 describe("readOptions", () => {
   test("defaults", () => {
     expect(DEFAULT_AGENTS).toEqual(["coder", "implementer", "implementer-high", "general"])
-    expect(readOptions(undefined)).toEqual({ agents: DEFAULT_AGENTS, base: "HEAD" })
+    expect(readOptions(undefined)).toEqual({ agents: DEFAULT_AGENTS, base: "HEAD", lowDiskBytes: 0 })
   })
   test("reads agents and base, dropping junk", () => {
-    expect(readOptions({ agents: ["a", 1, ""], base: " dev " })).toEqual({ agents: ["a"], base: "dev" })
-    expect(readOptions({ agents: [], base: "" })).toEqual({ agents: [], base: "HEAD" })
+    expect(readOptions({ agents: ["a", 1, ""], base: " dev " })).toEqual({ agents: ["a"], base: "dev", lowDiskBytes: 0 })
+    expect(readOptions({ agents: [], base: "" })).toEqual({ agents: [], base: "HEAD", lowDiskBytes: 0 })
   })
 })
 
@@ -554,5 +554,36 @@ describe("blockingReservation and holdsReservation", () => {
     ["another live token", { ...held, token: "t2" }, 500, "t1", "replaced"],
   ] as const)("status: %s", (_name, reservation, now, token, expected) => {
     expect(reservationStatus(reservation, now, token)).toBe(expected)
+  })
+})
+
+describe("lane ownership records", () => {
+  const own = { createdAt: 1, physical: "/w/a", root: "/w", commonDir: "/r/.git", strategy: "host" } as const
+  const base = { child: "c", parent: "p", projectID: "x", directory: "/w/a", branch: "b", base: "abc", parentDir: "/r", state: "active" }
+
+  test("a well-formed ownership record survives parsing", () => {
+    expect(parseLane({ ...base, ownership: own })?.ownership).toEqual(own)
+  })
+
+  test.each([
+    ["a missing field", { ...own, root: undefined }],
+    ["an unknown strategy", { ...own, strategy: "rm" }],
+    ["a non-numeric time", { ...own, createdAt: "now" }],
+  ])("%s drops the ownership record but keeps the lane", (_name, ownership) => {
+    const lane = parseLane({ ...base, ownership })
+    expect(lane?.branch).toBe("b")
+    expect(lane?.ownership).toBeUndefined()
+  })
+})
+
+describe("lowDiskBytes option", () => {
+  test.each([
+    [undefined, 0],
+    [0, 0],
+    [-5, 0],
+    ["big", 0],
+    [1024.9, 1024],
+  ])("%j reads as %d", (value, expected) => {
+    expect(readOptions({ lowDiskBytes: value }).lowDiskBytes).toBe(expected)
   })
 })

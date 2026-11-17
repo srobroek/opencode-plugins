@@ -17,6 +17,8 @@ export type Options = {
   agents: readonly string[]
   /** The ref, resolved in the caller's checkout, that each worktree starts from. */
   base: string
+  /** Free build directories in idle lanes when free space on a lane's disk drops below this many bytes; 0 is off. */
+  lowDiskBytes: number
 }
 
 export function readOptions(options: Readonly<Record<string, unknown>> | undefined): Options {
@@ -24,7 +26,9 @@ export function readOptions(options: Readonly<Record<string, unknown>> | undefin
     ? options.agents.filter((agent): agent is string => typeof agent === "string" && agent !== "")
     : DEFAULT_AGENTS
   const base = typeof options?.base === "string" && options.base.trim() !== "" ? options.base.trim() : "HEAD"
-  return { agents, base }
+  const lowDisk = options?.lowDiskBytes
+  const lowDiskBytes = typeof lowDisk === "number" && Number.isFinite(lowDisk) && lowDisk > 0 ? Math.floor(lowDisk) : 0
+  return { agents, base, lowDiskBytes }
 }
 
 /** A worktree that a child session runs in. Stored as JSON under `lane/<child>`. */
@@ -43,6 +47,53 @@ export type Lane = {
   title?: string
   /** `removed`: the worktree is gone (empty lane, or merged); the child runs in `parentDir`. */
   state: "active" | "removed" | "merged"
+  /** Who made the worktree and where; without it, cleanup never touches the lane. */
+  ownership?: Ownership
+}
+
+/** Which mechanism removes the worktree: the host strategy that created it, or plain git as the fallback. */
+export type Ownership = {
+  /** Epoch milliseconds when the worktree was created. */
+  createdAt: number
+  /** The physical path at creation. */
+  physical: string
+  /** The physical directory the worktree sits in. */
+  root: string
+  /** The physical git common directory of the repository. */
+  commonDir: string
+  strategy: "host" | "git"
+  cleanup?: CleanupState
+}
+
+export type CleanupState = {
+  /** The last report sent to the parent or logged, so the same finding is not repeated. */
+  reported?: string
+  /** Bytes freed from build directories. */
+  freedBytes?: number
+}
+
+/** Written before the worktree is created, so a crash between creation and the lane record leaves a trace. */
+export type Pending = { name: string; parent: string; projectID: string; createdAt: number }
+
+export const PENDING_PREFIX = "pending/"
+export const GONE_PREFIX = "gone/"
+export const LEASE_KEY = "sweep/lease"
+
+export function pendingKey(name: string): string {
+  return `${PENDING_PREFIX}${name}`
+}
+
+export function goneKey(sessionID: string): string {
+  return `${GONE_PREFIX}${sessionID}`
+}
+
+function parseOwnership(value: unknown): Ownership | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined
+  const own = value as Record<string, unknown>
+  for (const key of ["physical", "root", "commonDir"]) if (typeof own[key] !== "string" || own[key] === "") return undefined
+  if (typeof own.createdAt !== "number" || !Number.isFinite(own.createdAt)) return undefined
+  if (own.strategy !== "host" && own.strategy !== "git") return undefined
+  return value as Ownership
 }
 
 export function laneKey(child: string): string {
@@ -58,7 +109,10 @@ export function parseLane(value: unknown): Lane | undefined {
   if (lane.state !== "active" && lane.state !== "removed" && lane.state !== "merged") return undefined
   if (lane.target !== undefined && typeof lane.target !== "string") return undefined
   if (lane.title !== undefined && typeof lane.title !== "string") return undefined
-  return value as Lane
+  // A malformed ownership record is dropped: a lane without one is never cleaned up.
+  const { ownership, ...rest } = lane
+  const parsed = ownership === undefined ? undefined : parseOwnership(ownership)
+  return (parsed ? { ...rest, ownership: parsed } : rest) as Lane
 }
 
 /** The subagent call's input, when it is one this plugin can read. */
