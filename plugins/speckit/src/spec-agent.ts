@@ -5,9 +5,19 @@
  */
 
 import { basename } from "node:path"
+import { defineMode } from "@srobroek/opencode-lib/mode-reminders"
 import { speckitWorkspace, usesSpeckit } from "./workflow.ts"
 
 export const SPEC_AGENT = "spec"
+
+/** The mode reminder text for the `spec` agent. */
+export const SPEC_MODE = defineMode({
+  id: SPEC_AGENT,
+  name: "Spec",
+  purpose: "you drive SpecKit artifacts under `specs/` and `.specify/` and never implement.",
+  allowed: "`specs/` and `.specify/`",
+  redirect: "switch to `build` or dispatch the task beads",
+})
 
 /** `auto`: only where the location or its project root holds `.specify/`. */
 export type SpecAgentSetting = "auto" | boolean

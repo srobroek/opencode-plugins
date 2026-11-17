@@ -91,3 +91,10 @@ test("every allowlisted router member's router is allowlisted too", async () => 
   for (const router of ["lang-go", "lang-python", "lang-typescript", "lang-rust", "toolchain-guide", "architecture-guide", "trunk-dev-guide"])
     expect(permissionEffect(rules, "skill", router)).toBe("allow")
 })
+
+test("coder may spawn debug alongside its other helpers, and no other agent", async () => {
+  const { cleanup, rules } = await setup()
+  for (const helper of ["debug", "explore", "mechanic", "code-reviewer", "operator"]) expect(permissionEffect(rules, "subagent", helper)).toBe("allow")
+  expect(permissionEffect(rules, "subagent", "general")).toBe("deny")
+  await cleanup?.()
+})

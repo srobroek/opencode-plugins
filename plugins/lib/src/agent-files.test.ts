@@ -170,6 +170,22 @@ describe("registerAgents", () => {
   })
 })
 
+describe("registerAgents color", () => {
+  test("a file's color reaches a newly registered agent that had none, and a configured color wins", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agent-files-"))
+    try {
+      writeFileSync(join(dir, "tinted.md"), '---\nmode: primary\ncolor: "#e5484d"\npermissions: []\n---\nBody.')
+      const fake = createFakeContext({ agents: [{ id: "kept", color: "blue" }] })
+      writeFileSync(join(dir, "kept.md"), '---\nmode: primary\ncolor: "#e5484d"\npermissions: []\n---\nBody.')
+      await registerAgents(fake.context.agent, agentPaths(dir))
+      expect(fake.agents.get("tinted")?.color).toBe("#e5484d")
+      expect(fake.agents.get("kept")?.color).toBe("blue")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
 describe("registerAgentFiles", () => {
   const file = { id: "x:a", mode: "subagent" as const, system: "S", permissions: [{ action: "*", resource: "*", effect: "deny" as const }] }
   test("onExisting skips and reports an id the host already has, leaving it untouched", async () => {
@@ -189,4 +205,12 @@ describe("registerAgentFiles", () => {
       { action: "z", resource: "*", effect: "ask" },
     ])
   })
+})
+
+test("reads color and an agent's own color wins over the file's", () => {
+  const file = parseAgentFile('---\nmode: primary\ncolor: "#ff0000"\npermissions: []\n---\nhi', "x")
+  expect(file.color).toBe("#ff0000")
+  const agent: { color?: string } = { color: "blue" }
+  shapeAgent(agent, file, false)
+  expect(agent.color).toBe("blue")
 })

@@ -7,6 +7,7 @@ You are the lead: plan, delegate, integrate, verify and report. Route each unit 
 - `explore`: lookups across unknown files.
 - `operator`: one bounded command with long output (CI logs, `aws logs`, scans); ask for the relevant lines.
 - `code-reviewer`, `security-reviewer`: review a diff.
+- `debug`: diagnose a failure of unknown cause before anyone fixes it (when available).
 - `researcher`: external questions that need citations.
 - `shepherd`: land an approved PR.
 - `general`: non-code work only.

@@ -20,7 +20,7 @@ MUST set `execution_agent_type` in `metadata` at creation on every work bead, wi
 
 Choose each bead's type from the work that bead itself does, never from the plan's overall importance, risk, or size:
 
-- `implementer-high`: root-cause debugging where the cause is not yet known, concurrency or data-integrity logic, a change to a contract other modules consume, algorithmic or numeric precision rules, or acceptance that needs a design decision the bead text does not make.
+- `implementer-high`: root-cause debugging where the cause is not yet known, concurrency or data-integrity logic, a change to a contract other modules consume, algorithmic or numeric precision rules, or acceptance that needs a design decision the bead text does not make. For an unknown cause, a `debug` diagnosis can come first when available; route the fix as usual.
 - `implementer`, the default: every other bead that edits files. This includes multi-file, prose, rule, prompt, config, and test edits whose change the bead already specifies, and fixes whose cause is already known.
 - `researcher`: answers a question, inventories, or analyses existing data or results, with no product-code edits.
 - `operator`: runs one exact, known command or a bounded mechanical step with no design judgment.

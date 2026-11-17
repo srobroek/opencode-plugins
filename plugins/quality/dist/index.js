@@ -92,7 +92,9 @@ function parseAgentFile(text, id) {
       if (!Number.isInteger(steps) || steps <= 0)
         throw new Error(`agent ${id}: steps must be a positive integer`);
       agent.steps = steps;
-    } else if (key === "request") {
+    } else if (key === "color")
+      agent.color = scalar(value);
+    else if (key === "request") {
       if (value.trim() !== "")
         throw new Error(`agent ${id}: request must be a map`);
       section = "request";
@@ -127,6 +129,8 @@ function shapeAgent(agent, file, created) {
     agent.hidden = file.hidden;
   if (file.steps !== undefined)
     agent.steps ??= file.steps;
+  if (file.color !== undefined)
+    agent.color ??= file.color;
   if (file.request)
     agent.request = { ...agent.request, headers: { ...file.request.headers, ...agent.request?.headers } };
   agent.permissions = [...agent.permissions ?? [], ...file.permissions];

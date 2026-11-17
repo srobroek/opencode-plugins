@@ -211,6 +211,52 @@ describe("spec agent registration", () => {
       expect(fake.active()).toBe(0)
     }))
 
+  const synthetic = (fake: Fake) =>
+    fake.calls.filter((call) => call.method === "session.synthetic").map((call) => (call.input as { text: string }).text)
+  const switchTo = async (fake: Fake, agent: string, previous: string) => {
+    fake.emit({ type: "session.agent.selected", data: { sessionID: "ses_main", agent, previous } })
+    await Bun.sleep(0)
+  }
+
+  test("switching to spec stores the Spec mode reminder, and switching away withdraws it", () =>
+    withDir(async (dir) => {
+      mkdirSync(join(dir, ".specify"))
+      const { fake, cleanup } = await start({ directory: dir })
+      await switchTo(fake, "spec", "build")
+      await switchTo(fake, "build", "spec")
+      const [enter, leave] = synthetic(fake)
+      expect(enter).toContain("You are in Spec mode")
+      expect(enter).toContain("`specs/` and `.specify/`")
+      expect(leave).toContain("You are NO LONGER in Spec mode")
+      await cleanup()
+    }))
+
+  test("a switch between other agents stores nothing", () =>
+    withDir(async (dir) => {
+      mkdirSync(join(dir, ".specify"))
+      const { fake, cleanup } = await start({ directory: dir })
+      await switchTo(fake, "plan", "build")
+      expect(synthetic(fake)).toEqual([])
+      await cleanup()
+    }))
+
+  test("no reminder is registered where the spec agent is not", () =>
+    withDir(async (dir) => {
+      const { fake, cleanup } = await start({ directory: dir })
+      await switchTo(fake, "spec", "build")
+      expect(synthetic(fake)).toEqual([])
+      await cleanup()
+    }))
+
+  test("the cleanup removes the reminder's context hook", () =>
+    withDir(async (dir) => {
+      mkdirSync(join(dir, ".specify"))
+      const { fake, cleanup } = await start({ directory: dir, plugin: { workflow: false } })
+      expect(fake.hooks("session")).toEqual(["context"])
+      await cleanup()
+      expect(fake.hooks("session")).toEqual([])
+    }))
+
   test("skips the spec agent in a plain repository but keeps the subagents", () =>
     withDir(async (dir) => {
       const { fake, cleanup } = await start({ directory: dir })

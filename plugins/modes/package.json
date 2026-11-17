@@ -1,0 +1,31 @@
+{
+  "name": "@srobroek/opencode-modes",
+  "version": "0.0.0",
+  "description": "Debug, refactor and concept agents with plan-style mode reminders: root-cause diagnosis in a scratch worktree, behaviour-preserving refactoring, and design iteration.",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "index.js",
+    "agents"
+  ],
+  "opencode-plugins": {
+    "claude": false,
+    "codex": false,
+    "scope": "global"
+  },
+  "peerDependencies": {
+    "@opencode/plugin": "^2.1.4"
+  },
+  "peerDependenciesMeta": {
+    "@opencode/plugin": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@srobroek/opencode-lib": "workspace:*"
+  }
+}

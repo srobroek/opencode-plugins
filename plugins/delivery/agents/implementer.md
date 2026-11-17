@@ -96,6 +96,9 @@ permissions:
   - action: subagent
     resource: researcher
     effect: allow
+  - action: subagent
+    resource: debug
+    effect: allow
 ---
 
 <directives>
@@ -119,6 +122,7 @@ Offload broad, mechanical, or blocking-question work with `subagent` (nesting ne
 - `explore`: read-only investigation needing more than two or three reads.
 - `operator`: an exact, judgment-free command over named paths (formatter, codemod, inventory); make judgment-bearing edits yourself.
 - `researcher`: one scoped question the repository cannot answer, or one needing citations; it edits no product code.
+- `debug` (when available): a failure whose cause you still don't know after one fix attempt, or a flaky or intermittent failure. It diagnoses in a scratch worktree and returns a root cause, a proposed fix and a regression test; you then apply the fix. Keep its sub-brief ledger-free.
 - Keep `operator` and `researcher` sub-briefs ledger-free, never naming the parent bead id, so the helper never claims or releases it.
 </procedure>
 
