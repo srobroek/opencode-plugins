@@ -7,7 +7,7 @@ import { type Result, Error as ToolError } from "@opencode/plugin/promise/tool"
 import { physical } from "@srobroek/opencode-lib/checkout-marker"
 import { toJsonSchema, withOptionalString } from "@srobroek/opencode-lib/tool-schema"
 import { type Cleanup, createCleanup, diskFreeBytes, type Presence } from "./cleanup.ts"
-import { createGit, type Git, type Runner, spawnRunner } from "./git.ts"
+import { createGit, type Git, type Runner, spawnGh, spawnRunner, spawnWithInput } from "./git.ts"
 import {
   annotation,
   blockingReservation,
@@ -772,6 +772,8 @@ export function createLanes(
       } else console.warn(text)
     },
     withLane,
+    gh: spawnGh,
+    runWithInput: spawnWithInput,
     freeBytes,
     lowDiskBytes: options.lowDiskBytes,
     log: (text) => console.warn(text),

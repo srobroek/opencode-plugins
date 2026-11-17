@@ -657,7 +657,7 @@ function decideCleanup(facts) {
     return { kind: "untouched", reason: facts.owner === "running" ? "its session is running" : "its session could not be checked" };
   if (git.busy)
     return { kind: "keep", reason: "a git operation is in progress or the worktree is locked", freeBuild: false, report: true };
-  const unmergedLocal = git.ahead > 0 && !git.merged && !git.pushed;
+  const unmergedLocal = git.ahead > 0 && !git.merged && !git.pushed && git.done === undefined;
   if (git.dirty || unmergedLocal) {
     const idle = facts.owner === "gone" || facts.inactiveMs >= facts.graceMs || facts.lowDisk;
     return {
@@ -669,6 +669,10 @@ function decideCleanup(facts) {
   }
   if (git.ahead === 0 || git.merged)
     return { kind: "remove", branch: "delete", reason: git.ahead === 0 ? "it is empty" : "it is merged" };
+  if (git.done === "merged")
+    return { kind: "remove", branch: "delete", reason: "its pull request was merged or its patches are on the default branch" };
+  if (git.done === "closed")
+    return { kind: "remove", branch: "keep", reason: "its pull request was closed without merging; the branch is kept" };
   if (facts.parent === "gone")
     return { kind: "remove", branch: "keep", reason: "it is pushed and its parent is gone" };
   return { kind: "keep", reason: "it is pushed but not merged and its parent is still alive", freeBuild: false, report: false };
@@ -738,6 +742,62 @@ function createCleanup(deps) {
       busy: BUSY_MARKERS.some((name) => existsSync(join2(v.gitDir, name)))
     };
   };
+  const prState = async (lane, v) => {
+    const result = await deps.gh(["pr", "view", lane.branch, "--json", "state,mergeCommit"], v.real);
+    if (result.code !== 0)
+      return;
+    try {
+      const state = JSON.parse(result.stdout).state;
+      return state === "MERGED" ? "merged" : state === "CLOSED" ? "closed" : state === "OPEN" ? "open" : undefined;
+    } catch {
+      return;
+    }
+  };
+  const patchIds = async (text) => {
+    const result = await deps.runWithInput(["git", ...SAFE_GIT_ARGS, "patch-id", "--stable"], text);
+    return result.code === 0 ? result.stdout.split(`
+`).map((line) => line.split(" ")[0] ?? "").filter((id) => id !== "") : undefined;
+  };
+  const appliedUpstream = async (lane, v) => {
+    const remote = await gitAt(v.gitDir, v.real, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]);
+    const upstream = remote.code === 0 && remote.stdout.trim() !== "" ? remote.stdout.trim() : lane.target ? `refs/heads/${lane.target}` : undefined;
+    if (upstream === undefined)
+      return false;
+    const cherry = await gitAt(v.gitDir, v.real, ["cherry", upstream, "HEAD"]);
+    if (cherry.code === 0) {
+      const lines = cherry.stdout.split(`
+`).filter((line) => line !== "");
+      if (lines.length > 0 && lines.every((line) => line.startsWith("-")))
+        return true;
+    }
+    const base = await gitAt(v.gitDir, v.real, ["merge-base", upstream, "HEAD"]);
+    if (base.code !== 0)
+      return false;
+    const mine = await gitAt(v.gitDir, v.real, ["diff", "--no-ext-diff", base.stdout.trim(), "HEAD"]);
+    if (mine.code !== 0 || mine.stdout === "")
+      return false;
+    const landed = await gitAt(v.gitDir, v.real, ["log", "-p", "--no-ext-diff", "--no-merges", "--format=commit %H", "-n", "200", `${base.stdout.trim()}..${upstream}`]);
+    if (landed.code !== 0 || landed.stdout === "")
+      return false;
+    const [ownId] = await patchIds(mine.stdout) ?? [];
+    const theirs = await patchIds(landed.stdout);
+    return ownId !== undefined && theirs?.includes(ownId) === true;
+  };
+  const doneCache = new Map;
+  const DONE_RECHECK_MS = 5 * 60000;
+  const detectDone = async (lane, v) => {
+    const head = await gitAt(v.gitDir, v.real, ["rev-parse", "HEAD"]);
+    const cached = doneCache.get(lane.child);
+    if (cached && cached.head === head.stdout.trim() && deps.now() - cached.at < DONE_RECHECK_MS)
+      return;
+    const state = await prState(lane, v);
+    if (state === "merged" || state === "closed")
+      return state;
+    if (state === undefined && await appliedUpstream(lane, v))
+      return "merged";
+    doneCache.set(lane.child, { at: deps.now(), head: head.stdout.trim() });
+    return;
+  };
   const freeBuildDirs = async (v) => {
     const before = await deps.freeBytes(v.real);
     for (const rel of BUILD_DIRS) {
@@ -774,6 +834,12 @@ function createCleanup(deps) {
     }
     if (await deps.runningInside(lane, v.real) !== "none")
       return { action: "untouched", reason: "a live session works inside the worktree" };
+    const git = await factsOf(lane, v);
+    if (git && git.ahead > 0 && !git.merged && !git.dirty && !git.busy) {
+      const done = await detectDone(lane, v);
+      if (done)
+        git.done = done;
+    }
     const room = deps.lowDiskBytes > 0 ? await deps.freeBytes(v.real) : undefined;
     const lowDisk = room !== undefined && room < deps.lowDiskBytes;
     const decision = decideCleanup({
@@ -782,7 +848,7 @@ function createCleanup(deps) {
       inactiveMs: owner.lastActivity === undefined ? 0 : Math.max(0, deps.now() - owner.lastActivity),
       graceMs,
       lowDisk,
-      git: await factsOf(lane, v)
+      git
     });
     if (decision.kind === "untouched")
       return { action: "untouched", reason: decision.reason };
@@ -1012,6 +1078,34 @@ ${argv[0]} ${why}`.trim() };
     return { code: 127, stdout: "", stderr: error instanceof Error ? error.message : String(error) };
   }
 };
+var GH_TIMEOUT_MS = 15000;
+async function spawnGh(args, cwd) {
+  const env = { ...process.env, GH_PROMPT_DISABLED: "1", NO_COLOR: "1", GH_NO_UPDATE_NOTIFIER: "1" };
+  const bin = Bun.which("gh", { PATH: env.PATH ?? "" });
+  if (bin === null)
+    return { code: 127, stdout: "", stderr: "gh is not installed" };
+  try {
+    const child = Bun.spawn([bin, ...args], { cwd, env, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+    const run = await supervise(child, { timeoutMs: GH_TIMEOUT_MS });
+    if (run.kind === "exited")
+      return { code: run.exitCode, stdout: run.stdout, stderr: run.stderr };
+    return { code: 124, stdout: run.stdout, stderr: `${run.stderr}
+gh ${run.kind === "timeout" ? "timed out" : "ended without an exit status"}`.trim() };
+  } catch (error) {
+    return { code: 127, stdout: "", stderr: error instanceof Error ? error.message : String(error) };
+  }
+}
+async function spawnWithInput(argv, input) {
+  try {
+    const child = Bun.spawn(argv, { stdin: new Blob([input]), stdout: "pipe", stderr: "pipe" });
+    const run = await supervise(child, { timeoutMs: GIT_TIMEOUT_MS });
+    if (run.kind === "exited")
+      return { code: run.exitCode, stdout: run.stdout, stderr: run.stderr };
+    return { code: 124, stdout: run.stdout, stderr: `${argv[0]} ${run.kind}`.trim() };
+  } catch (error) {
+    return { code: 127, stdout: "", stderr: error instanceof Error ? error.message : String(error) };
+  }
+}
 async function readHeadFacts(run, directory) {
   const out = async (...args) => {
     const result = await run(["git", "-C", directory, ...args]);
@@ -1669,6 +1763,8 @@ ${text}`));
         console.warn(text);
     },
     withLane,
+    gh: spawnGh,
+    runWithInput: spawnWithInput,
     freeBytes,
     lowDiskBytes: options.lowDiskBytes,
     log: (text) => console.warn(text)
@@ -1880,6 +1976,7 @@ export {
   DEFAULT_AGENTS,
   DIRTY_CHECKOUT_NOTE,
   FENCED_REASON,
+  GH_TIMEOUT_MS,
   GIT_TIMEOUT_MS,
   GONE_PREFIX,
   LANE_PREFIX,
@@ -1940,7 +2037,9 @@ export {
   shortSha,
   shouldRemove,
   slug,
+  spawnGh,
   spawnRunner,
+  spawnWithInput,
   startPrompt,
   tail,
   targetsExternalDirectory,

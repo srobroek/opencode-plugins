@@ -136,6 +136,8 @@ Cleanup runs when a child or parent session finishes, stops, is archived or dele
 | --- | --- |
 | Its session runs, or cannot be checked, or a running session works inside it | untouched |
 | Clean and empty, or merged into its target | worktree removed, branch deleted with `branch -d` |
+| Clean, pull request merged (or its patches are on the default branch) | worktree removed; branch deleted if `branch -d` accepts it |
+| Clean, pull request closed without merging | worktree removed, branch kept |
 | Clean, pushed to a remote, not merged | kept while the parent session lives; worktree removed (branch kept) once it is gone |
 | Uncommitted changes, or commits on no remote and not merged | never removed; the parent is told once |
 | Rebase, merge, cherry-pick, revert or bisect in progress, or worktree locked | never removed; the parent is told once |
@@ -153,10 +155,22 @@ a linked worktree and does not lock it, and then checks again right before remov
 the host strategy (`wt remove` under worktrunk) and falls back to `git worktree remove` without
 `--force`.
 
-Limits: a PR that was squash-merged leaves the lane branch unmerged, so such a lane stays until it
-is pushed and its parent is gone. Spawns and cleanup from separate OpenCode server instances are
-not coordinated beyond the sweep lease. A `pending/` record that no lane matches is logged, not
-acted on, because its owner is unknown.
+Squash merges and closed pull requests: a lane with commits that are not in its target is not
+simply unmerged. Cleanup asks `gh pr view <branch> --json state,mergeCommit` in the lane's
+worktree (no shell, 15 s limit). MERGED means the lane is done. CLOSED without a merge means the
+worktree may go but the branch is kept, because the work was never merged. If `gh` is missing,
+not signed in, offline or slow, cleanup compares patches instead: `git cherry` against the
+default branch (`origin/HEAD`, else the lane's target), then the patch-id of the lane's combined
+diff against the commits that landed on the default branch since the merge base. A match counts
+as merged. When neither source answers, the lane is kept. A done lane is removed only when its
+worktree is clean (no tracked changes and no untracked files that git does not ignore) and every
+path check above passes. A merged lane's branch is deleted only if `branch -d` accepts it, which
+it does not for a squash merge, so that branch stays for you to delete. A "not done" answer is
+reused for 5 minutes.
+
+Limits: spawns and cleanup from separate OpenCode server instances are not coordinated beyond
+the sweep lease. A `pending/` record that no lane matches is logged, not acted on, because its
+owner is unknown.
 
 ## Credits
 
