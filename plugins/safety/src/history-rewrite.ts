@@ -139,8 +139,8 @@ const INHERITED_SELECTION = ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"] as co
 /** A word whose value is unknown until the shell expands it. */
 const dynamic = (word: string): boolean => /[$`]/.test(word) || word.startsWith("~")
 
-type FilterRepo = { args: string[]; chdirs: string[] }
-type Launched = { program: string; args: string[] } | "not-run" | "unparsed"
+type FilterRepo = { args: string[]; chdirs: string[]; projects: string[] }
+type Launched = { program: string; args: string[]; chdirs: string[]; projects: string[] } | "not-run" | "unparsed"
 
 
 /** Index of the first word at or after `at` that is not an option (valued ones skip their value). */
@@ -148,6 +148,22 @@ function skipOptions(argv: readonly string[], at: number, valued: ReadonlySet<st
   let i = at
   while (i < argv.length && (argv[i] as string).startsWith("-")) i += valued.has(argv[i] as string) ? 2 : 1
   return i
+}
+
+/**
+ * uv's `--directory` (changes the working directory before running) and `--project` (names the
+ * project directory) values in `argv[from, to)`. A missing value is `""`, which never resolves.
+ */
+function uvDirectories(argv: readonly string[], from: number, to: number): { chdirs: string[]; projects: string[] } {
+  const found = { chdirs: [] as string[], projects: [] as string[] }
+  for (let i = from; i < to; i++) {
+    const word = argv[i] as string
+    for (const [name, into] of [["--directory", found.chdirs], ["--project", found.projects]] as const) {
+      if (word === name) into.push(argv[i + 1] ?? "")
+      else if (word.startsWith(`${name}=`)) into.push(word.slice(name.length + 1))
+    }
+  }
+  return found
 }
 
 /** The program a launcher (`uvx`, `uv`, `pipx`, `pipenv`, `python`) runs and its arguments. */
@@ -174,14 +190,15 @@ function launched(argv: readonly string[]): Launched | undefined {
     const word = argv[i] as string
     if (python && word === "-m") {
       const module = argv[i + 1]
-      return module === undefined ? "unparsed" : { program: module, args: argv.slice(i + 2) }
+      return module === undefined ? "unparsed" : { program: module, args: argv.slice(i + 2), chdirs: [], projects: [] }
     }
     if (python && word === "-c") return "not-run"
     if (word.startsWith("-")) {
       if (LAUNCHER_VALUED.has(word)) i++
       continue
     }
-    return { program: word, args: argv.slice(i + 1) }
+    const dirs = name === "uv" || name === "uvx" ? uvDirectories(argv, 1, i) : { chdirs: [], projects: [] }
+    return { program: word, args: argv.slice(i + 1), ...dirs }
   }
   return "unparsed"
 }
@@ -189,15 +206,15 @@ function launched(argv: readonly string[]): Launched | undefined {
 /** `git filter-repo`, `git-filter-repo`, or either run through a launcher; `"uncertain"` when it cannot be told. */
 function filterRepo(command: Command): FilterRepo | "uncertain" | undefined {
   const name = base(command.argv[0])
-  if (FILTER_REPO_NAME.test(name)) return { args: command.argv.slice(1), chdirs: [] }
+  if (FILTER_REPO_NAME.test(name)) return { args: command.argv.slice(1), chdirs: [], projects: [] }
   const git = gitInvocation(command.argv)
-  if (git?.subcommand === "filter-repo") return { args: git.args, chdirs: git.chdirs }
+  if (git?.subcommand === "filter-repo") return { args: git.args, chdirs: git.chdirs, projects: [] }
   const run = launched(command.argv)
   if (run === undefined || run === "not-run") return undefined
   if (run === "unparsed") return command.argv.some((word) => MENTIONS_FILTER_REPO.test(word)) ? "uncertain" : undefined
   // `git-filter-repo@2.47.0`, `git-filter-repo==2.47`, `git-filter-repo[extra]`: the executable is the name.
   const program = base(run.program.replace(/[@=<>~![].*$/, ""))
-  return FILTER_REPO_NAME.test(program) ? { args: run.args, chdirs: [] } : undefined
+  return FILTER_REPO_NAME.test(program) ? { args: run.args, chdirs: run.chdirs, projects: run.projects } : undefined
 }
 
 /** Whether `arg` spells long option `name`, in full or as an argparse prefix (`--targ`), with or without `=value`. */
@@ -593,9 +610,11 @@ export function historyRewrite(
         if (optionCount(rewrite.args, option) > 1)
           return uncertain(text, `\`${option}\` is repeated (possibly abbreviated) and filter-repo uses the last one`)
       const target = optionValue(rewrite.args, "--target")
-      const moves = [...(git?.chdirs ?? []), ...(target === undefined ? [] : [target])]
-      const reason = judge(text, moves, git)
-      if (reason !== undefined) return reason
+      const moves = [...rewrite.chdirs, ...(target === undefined ? [] : [target])]
+      for (const chain of [moves, ...rewrite.projects.map((project) => [project])]) {
+        const reason = judge(text, chain, git)
+        if (reason !== undefined) return reason
+      }
       continue
     }
     const mention = unaccountedMention(command, git)

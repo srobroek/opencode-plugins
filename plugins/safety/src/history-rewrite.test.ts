@@ -459,6 +459,37 @@ describe("launcher spellings", () => {
   })
 })
 
+describe("uv's directory options decide where the rewrite runs", () => {
+  const launchers = [
+    "uvx {opt} git-filter-repo --path a",
+    "uv tool run {opt} git-filter-repo --path a",
+    "uv run {opt} git-filter-repo --path a",
+    "uv {opt} run git-filter-repo --path a",
+    "uv {opt} tool run git-filter-repo --path a",
+  ]
+  const options = ["--directory={d}", "--directory {d}", "--project={d}", "--project {d}"]
+  const cases = launchers.flatMap((launcher) => options.map((option) => launcher.replace("{opt}", option)))
+
+  test.each(cases)("refuses %s into a canonical checkout from a linked worktree", (command) => {
+    expect(run(command.replace("{d}", "{canonical}"), "linked")?.guard).toBe("history-rewrite")
+  })
+
+  test.each(cases)("allows %s into another linked worktree", (command) => {
+    // --directory moves the process; --project only names a project, so the start directory still counts.
+    expect(run(command.replace("{d}", "{linked}"), "canonical")?.guard).toBe(
+      command.includes("--directory") ? undefined : "history-rewrite",
+    )
+    expect(run(command.replace("{d}", "{linked}"), "linked")).toBeUndefined()
+  })
+
+  test.each(["uvx --directory $D git-filter-repo", "uvx --directory git-filter-repo"])(
+    "refuses %s when the directory cannot be resolved",
+    (command) => {
+      expect(run(command, "linked")?.guard).toBe("history-rewrite")
+    },
+  )
+})
+
 describe("ordinary git is untouched in a canonical checkout", () => {
   test.each([
     "git status",
