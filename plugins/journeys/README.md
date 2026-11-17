@@ -11,8 +11,10 @@ Ported from the omp-plugins `journeys` plugin.
 opencode plugin add 'github:srobroek/opencode-plugins::path:plugins/journeys'
 ```
 
-Not exported to Claude Code or Codex: the skills lean on this plugin's tools and
-subagents.
+The plugin is also in this repository's Claude Code and Codex marketplaces
+(`journeys@srobroek-opencode`). Both get the skills. Claude Code also gets the two
+subagents as `journeys:journey-scribe` and `journeys:journey-validator`. Without the
+tools, the skills run the copied `journeys.py` helper and copy the formulas by hand.
 
 ## Skills
 
