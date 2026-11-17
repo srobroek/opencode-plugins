@@ -3494,7 +3494,7 @@ function staleSkipNotice(output) {
     return;
   return [
     `\`bd import\` skipped stale rows (${stale}): the JSONL export is BEHIND this database and local state was kept.`,
-    "Commit a fresh export (`bd export -o .beads/issues.jsonl`, then stage it) BEFORE pulling peer changes -- otherwise the next export overwrites what a peer committed."
+    "Sync with Dolt: run `bd dolt pull` to take peer changes (and `bd dolt push` to share yours). Do not stage or commit `.beads/issues.jsonl`: it is an optional export, not the sync channel."
   ].join(" ");
 }
 var internalRuns = 0;
