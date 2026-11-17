@@ -67,4 +67,13 @@ describe("staleSnapshots", () => {
     const entries = [1, 2, 3, 4].map((n) => ({ key: `k:${n}`, value: snap(now - n * 1000) }))
     expect(staleSnapshots(entries, now, 2).sort()).toEqual(["k:3", "k:4"])
   })
+
+  test("an open entry outlives the age window but not the limit", () => {
+    const entries = [
+      { key: "k:open", value: snap(now - SNAPSHOT_MAX_AGE_MS - 1) },
+      { key: "k:ended", value: snap(now - SNAPSHOT_MAX_AGE_MS - 1) },
+    ]
+    expect(staleSnapshots(entries, now, 10, SNAPSHOT_MAX_AGE_MS, new Set(["k:open"]))).toEqual(["k:ended"])
+    expect(staleSnapshots(entries, now, 0, SNAPSHOT_MAX_AGE_MS, new Set(["k:open"])).sort()).toEqual(["k:ended", "k:open"])
+  })
 })

@@ -3605,6 +3605,21 @@ describe("a child keeps its resolved model", () => {
     await cleanupAgain()
   })
 
+  test("a restart keeps the snapshot of a child that never ended and prunes ended and old ones", async () => {
+    const host = createHost({ agents: [{ id: "plain" }], models, options: first })
+    const old = Date.now() - 31 * 24 * 60 * 60 * 1000
+    const entry = { model: sonnetHigh, configRevision: "x", at: old }
+    const outcome = (extra: Record<string, unknown>) => ({ at: old, agent: "plain", model: sonnetHigh, parentID: "r", resumes: 0, steps: 0, ms: 0, ...extra })
+    for (const id of ["open", "ended", "orphan"]) host.storage.set(`spawn-model:${id}`, entry)
+    host.storage.set("outcome:open", outcome({}))
+    host.storage.set("outcome:ended", outcome({ outcome: "succeeded" }))
+    const cleanup = await setup(host)
+    const kept = [...host.storage.keys()].filter((key) => key.startsWith("spawn-model:"))
+    expect(kept).toEqual(["spawn-model:open"])
+    host.close()
+    await cleanup()
+  })
+
   test("setup prunes expired and surplus snapshots", async () => {
     const host = createHost({ agents: [{ id: "plain" }], models, options: first })
     const now = Date.now()

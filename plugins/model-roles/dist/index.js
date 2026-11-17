@@ -5240,12 +5240,12 @@ function unavailableReason(model, available) {
     return `the model has no variant '${model.variant}'`;
   return;
 }
-function staleSnapshots(entries, now, limit = SNAPSHOT_LIMIT, maxAgeMs = SNAPSHOT_MAX_AGE_MS) {
+function staleSnapshots(entries, now, limit = SNAPSHOT_LIMIT, maxAgeMs = SNAPSHOT_MAX_AGE_MS, open = new Set) {
   const stale = [];
   const live = [];
   for (const { key, value } of entries) {
     const snapshot = readSnapshot(value);
-    if (snapshot === undefined || now - snapshot.at > maxAgeMs)
+    if (snapshot === undefined || now - snapshot.at > maxAgeMs && !open.has(key))
       stale.push(key);
     else
       live.push({ key, at: snapshot.at });
@@ -5613,7 +5613,18 @@ ${refs.size}`;
         entries.push(...page.entries);
         after = page.next;
       } while (after !== undefined);
-      for (const key of staleSnapshots(entries, Date.now()))
+      const open = new Set;
+      let seen;
+      do {
+        const page = await ctx.storage.scan({ prefix: OUTCOME_KEY_PREFIX, ...seen === undefined ? {} : { after: seen } });
+        for (const entry of page.entries) {
+          const record = readOutcome(entry.value);
+          if (record !== undefined && record.outcome === undefined)
+            open.add(`${SPAWN_MODEL_KEY_PREFIX}${entry.key.slice(OUTCOME_KEY_PREFIX.length)}`);
+        }
+        seen = page.next;
+      } while (seen !== undefined);
+      for (const key of staleSnapshots(entries, Date.now(), SNAPSHOT_LIMIT, SNAPSHOT_MAX_AGE_MS, open))
         await ctx.storage.remove(key);
     } catch {}
     const outcomes = createLedgerStore(ctx.storage, { warn });

@@ -85,7 +85,7 @@ import {
   readHealth,
   recordFailure,
 } from "./health.ts"
-import { createLedgerStore, LEDGER_DISPOSE_TIMEOUT_MS, type Usage } from "./ledger.ts"
+import { createLedgerStore, LEDGER_DISPOSE_TIMEOUT_MS, OUTCOME_KEY_PREFIX, readOutcome, type Usage } from "./ledger.ts"
 import { hostWarn } from "./log.ts"
 import { claimContextNotice, claimToolContextNotice, decideFailureNotice, decideRecovery, type FailureReport, forgetSession, NOTICE_DEDUPE_MS, newNoticeState, type RequestLog, recordRequest, settleRequest } from "./outage.ts"
 import { explainSpawn, formatReceipts, pushReceipt, RECEIPTS_KEY, type Receipt, readReceipts, type SpawnRule, type SpawnSource } from "./receipt.ts"
@@ -111,7 +111,7 @@ import {
 import { resumeGuard, tierModels } from "./resume-guard.ts"
 import { TiersRpc } from "./rpc.ts"
 import { exitStatusOf, parseEvaluate, parseVerdict, testRun, touchesTests } from "./signals.ts"
-import { configRevision, hasOverflowed, type ModelSnapshot, readSnapshot, SPAWN_MODEL_KEY_PREFIX, snapshotModel, staleSnapshots, unavailableReason } from "./snapshot.ts"
+import { configRevision, hasOverflowed, type ModelSnapshot, readSnapshot, SNAPSHOT_LIMIT, SNAPSHOT_MAX_AGE_MS, SPAWN_MODEL_KEY_PREFIX, snapshotModel, staleSnapshots, unavailableReason } from "./snapshot.ts"
 import {
   applyFrozenTierParam,
   captureTierParam,
@@ -396,7 +396,18 @@ export default Plugin.define({
         entries.push(...page.entries)
         after = page.next
       } while (after !== undefined)
-      for (const key of staleSnapshots(entries, Date.now())) await ctx.storage.remove(key)
+      // A child that never ended may be resumed by the host after this restart: its snapshot outlives the age window.
+      const open = new Set<string>()
+      let seen: string | undefined
+      do {
+        const page = await ctx.storage.scan({ prefix: OUTCOME_KEY_PREFIX, ...(seen === undefined ? {} : { after: seen }) })
+        for (const entry of page.entries) {
+          const record = readOutcome(entry.value)
+          if (record !== undefined && record.outcome === undefined) open.add(`${SPAWN_MODEL_KEY_PREFIX}${entry.key.slice(OUTCOME_KEY_PREFIX.length)}`)
+        }
+        seen = page.next
+      } while (seen !== undefined)
+      for (const key of staleSnapshots(entries, Date.now(), SNAPSHOT_LIMIT, SNAPSHOT_MAX_AGE_MS, open)) await ctx.storage.remove(key)
     } catch {
       // Stale snapshots wait for the next start.
     }
