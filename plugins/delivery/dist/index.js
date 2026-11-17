@@ -3890,6 +3890,8 @@ var toMillis = (value) => {
   return;
 };
 function sessionRunning(session) {
+  if (session.time?.archived !== undefined && session.time.archived !== null)
+    return false;
   const busy = toMillis(session.time?.busy);
   const idle = toMillis(session.time?.idle);
   return busy !== undefined && (idle === undefined || busy > idle);
@@ -3903,9 +3905,9 @@ function canonicalCheckout(commonDir, fallback) {
     return dirname4(commonDir);
   return fallback;
 }
-async function listProjectSessions(api, projectID) {
+async function listPass(api, projectID, archived) {
   const found = [];
-  let query = { ...projectID === undefined ? {} : { project: projectID }, archived: false, limit: 100 };
+  let query = { ...projectID === undefined ? {} : { project: projectID }, archived, limit: 100 };
   try {
     for (let pages = 0;pages < MAX_PAGES; pages++) {
       const page = await api.list(query);
@@ -3925,6 +3927,19 @@ async function listProjectSessions(api, projectID) {
     return;
   }
   return;
+}
+async function listProjectSessions(api, projectID) {
+  const live = await listPass(api, projectID, false);
+  const shelved = live === undefined ? undefined : await listPass(api, projectID, true);
+  if (live === undefined || shelved === undefined)
+    return;
+  const byId = new Map;
+  for (const session of [...live, ...shelved]) {
+    if (projectID !== undefined && session.projectID !== undefined && session.projectID !== projectID)
+      continue;
+    byId.set(session.id, session);
+  }
+  return [...byId.values()];
 }
 async function evictSessions(api, options) {
   const sessions = await listProjectSessions(api, options.projectID);

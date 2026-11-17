@@ -210,8 +210,12 @@ This covers lane removals, the foreground empty-lane removal and the sweep. `del
 in its removal section. The background pass (startup and every `intervalHours`, whenever `sweep` is
 not `off`, including the default `report`) also repairs sessions stranded by earlier removals,
 including ones made by other tools: a session of this project whose directory no longer exists is
-moved to its lane's parent checkout, else the project's canonical checkout, and each move is logged.
-A session whose directory is gone cannot run, so this is safe.
+moved, and each move is logged. Archived sessions count (unarchiving one in a removed worktree would
+otherwise fail), as idle. The destination is the first of these that exists: the checkout the lane came
+from, the repository's canonical checkout, the project root; with none, the session is left alone and
+reported. A running session is never moved, and a stat error other than "not found" (permissions, I/O)
+means unknown, so that session is left alone. A session whose directory is gone cannot run, so the
+move is safe.
 
 ### Claims: one remover per worktree
 

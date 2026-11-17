@@ -45,6 +45,8 @@ type World = {
   resumedByB?: boolean
   /** Paths that do not exist on disk, whatever `exists` says. */
   missing?: string[]
+  /** Paths whose existence check fails with this errno code instead of answering. */
+  statErrors?: Record<string, string>
   /** Called inside the host removal. */
   onRemove?: () => void
   /** Called with every git command before it is answered. */
@@ -159,7 +161,11 @@ async function start(
     commonDir: async () => common,
     run: runner(state, log),
     lookupMs: 20,
-    directoryExists: async (path: string) => state.exists && !(state.missing ?? []).includes(path),
+    directoryExists: async (path: string) => {
+      const code = state.statErrors?.[path]
+      if (code !== undefined) throw Object.assign(new Error(`cannot stat ${path}`), { code })
+      return state.exists && !(state.missing ?? []).includes(path)
+    },
     now: () => state.now,
     debounceMs: options.debounceMs ?? 1,
     age: async () => state.age,
@@ -1221,6 +1227,15 @@ describe("sessions are moved out of a worktree before it is removed", () => {
     await cleanup()
   })
 
+  test("an archived idle session inside the lane is moved out too", async () => {
+    const { fake, worktree, cleanup } = await start({ ancestor: 0 })
+    addSession(fake, "ses_shelved", WT, { busy: 9, idle: 2, archived: 3 })
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await until(() => worktree.some((entry) => entry.method === "remove"))
+    expect(moves(fake).find((move) => move.sessionID === "ses_shelved")).toEqual({ sessionID: "ses_shelved", directory: REPO })
+    await cleanup()
+  })
+
   test("a running session inside blocks the removal", async () => {
     const { fake, worktree, cleanup } = await start({ ancestor: 0 })
     addSession(fake, "ses_busy", `${WT}/pkg`, { busy: 9, idle: 2 })
@@ -1276,6 +1291,56 @@ describe("the repair pass heals sessions stranded by earlier removals", () => {
     )
     await until(() => moved(fake).length > 0)
     expect(moved(fake).find((move) => move.sessionID === CHILD)).toEqual({ sessionID: CHILD, directory: "/other/checkout" })
+    await cleanup()
+  })
+
+  const addWith = (fake: Fake, id: string, directory: string, over: { projectID?: string; time?: Record<string, number> } = {}) =>
+    fake.sessions.set(id, { id, projectID: over.projectID ?? "prj", location: { directory }, time: over.time ?? { busy: 1, idle: 2 } })
+
+  test("a running stranded session is never moved", async () => {
+    const { fake, cleanup } = await start({ missing: ["/wt/gone"] }, { options: { sweep: "report" }, sweepDelayMs: 80 })
+    addWith(fake, "ses_running", "/wt/gone", { time: { busy: 9, idle: 2 } })
+    addWith(fake, "ses_idle", "/wt/gone")
+    await until(() => moved(fake).length > 0)
+    await settle(60)
+    expect(moved(fake).map((move) => move.sessionID)).toEqual(["ses_idle"])
+    await cleanup()
+  })
+
+  test.each(["EACCES", "EIO"])("a %s from the existence check moves nothing: unknown is not gone", async (code) => {
+    const { fake, cleanup } = await start({ statErrors: { "/wt/unsure": code } }, { options: { sweep: "report" }, sweepDelayMs: 80 })
+    addWith(fake, "ses_unsure", "/wt/unsure")
+    await settle(300)
+    expect(moved(fake)).toEqual([])
+    await cleanup()
+  })
+
+  test("a stranded session of another project is not touched", async () => {
+    const { fake, cleanup } = await start({ missing: ["/wt/gone"] }, { options: { sweep: "report" }, sweepDelayMs: 80 })
+    addWith(fake, "ses_mine", "/wt/gone")
+    addWith(fake, "ses_theirs", "/wt/gone", { projectID: "other-project" })
+    await until(() => moved(fake).length > 0)
+    await settle(60)
+    expect(moved(fake).map((move) => move.sessionID)).toEqual(["ses_mine"])
+    await cleanup()
+  })
+
+  test("an archived stranded session is repaired as well", async () => {
+    const { fake, cleanup } = await start({ missing: ["/wt/gone"] }, { options: { sweep: "report" }, sweepDelayMs: 80 })
+    addWith(fake, "ses_shelved", "/wt/gone", { time: { busy: 1, idle: 2, archived: 3 } })
+    await until(() => moved(fake).length > 0)
+    expect(moved(fake)).toEqual([{ sessionID: "ses_shelved", directory: REPO }])
+    await cleanup()
+  })
+
+  test("a lane whose parent checkout has been removed too falls back to the canonical checkout, never to the missing path", async () => {
+    const { fake, cleanup } = await start(
+      { missing: [WT, "/gone/linked-checkout"] },
+      { options: { sweep: "report" }, sweepDelayMs: 80, stored: [lane({ parentDir: "/gone/linked-checkout", state: "removed" })] },
+    )
+    await until(() => moved(fake).length > 0)
+    expect(moved(fake).find((move) => move.sessionID === CHILD)).toEqual({ sessionID: CHILD, directory: REPO })
+    expect(moved(fake).some((move) => move.directory === "/gone/linked-checkout")).toBe(false)
     await cleanup()
   })
 

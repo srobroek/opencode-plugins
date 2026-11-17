@@ -861,10 +861,14 @@ export function createLifecycle(deps: LifecycleDeps) {
     if (projectID === undefined) return
     const lanes = await deps.scan()
     const parentOf = new Map(lanes.map((lane) => [lane.child, lane.parentDir]))
-    const root = canonicalCheckout(await deps.commonDir(ctx.location.directory), ctx.location.directory)
+    // The project's own checkout: where this plugin runs. Its repository's canonical checkout is its fallback.
+    const projectRoot = ctx.location.directory
+    const canonicalMain = canonicalCheckout(await deps.commonDir(projectRoot), projectRoot)
     const result = await repairStrandedSessions(ctx.session as unknown as SessionApi, {
       projectID,
-      destinationFor: (session) => parentOf.get(session.id) ?? root,
+      // In order: the checkout the lane came from, the repository's canonical checkout, the project root.
+      // The helper moves only to the first that exists, so a removed linked checkout is skipped.
+      destinationsFor: (session) => [...new Set([parentOf.get(session.id), canonicalMain, projectRoot].filter((path): path is string => path !== undefined))],
       exists: deps.exists,
       log: (line) => console.error(`subagent-worktree: ${line}`),
     })
