@@ -2958,6 +2958,7 @@ function text2(holder, key) {
 function rulesArgv(repoPath, branch) {
   return ["gh", "api", `repos/${repoPath}/rules/branches/${encodeURIComponent(branch)}?per_page=${RULES_PAGE}`];
 }
+var PLAN_GATE_MESSAGE = "Upgrade to GitHub Pro or make this repository public to enable this feature";
 function queueRuleFrom(payload) {
   if (!Array.isArray(payload))
     return { reason: "rules: observed a payload that is not an array of rules" };
@@ -3031,6 +3032,9 @@ async function readQueueRule(run, repoPath, branch, env) {
   const result = await run(argv, { timeoutMs: FORGE_TIMEOUT_MS, env });
   if (!result.ok || result.exitCode !== 0 || result.error !== undefined) {
     const detail = `${argv.join(" ")}: observed ${result.error ?? `exit ${result.exitCode}`}, expected exit 0 to learn whether the branch requires a merge queue; ${result.stderr.trim().slice(0, 300)}`;
+    if (result.error === undefined && result.exitCode === 1 && /\(HTTP 403\)/.test(result.stderr) && result.stderr.includes(PLAN_GATE_MESSAGE)) {
+      return { required: false, planGated: true };
+    }
     if (result.error === undefined && /\b404\b|not found/i.test(result.stderr)) {
       const unconfirmed = await noQueueConfirmed(run, repoPath, branch, env);
       return unconfirmed === null ? { required: false } : {
@@ -4114,6 +4118,7 @@ async function landPullRequest(params, deps = {}) {
     if (pending.kind === "record")
       ownedRecord = pending.record.generation;
   }
+  let planGated = false;
   if (!alreadyMerged && forge === "github") {
     const path = normalizeRepoPath("github", nameWithOwner);
     if (path === null)
@@ -4121,6 +4126,7 @@ async function landPullRequest(params, deps = {}) {
     const rules = await readQueueRule(run, path, first.pr.baseRefName, forgeCommandEnv);
     if ("reason" in rules)
       return refuse(`${rules.reason}; no merge was issued and no receipt was written`);
+    planGated = !rules.required && rules.planGated === true;
     if (rules.required) {
       if (params.merge_method !== undefined && params.merge_method !== rules.method) {
         return refuse(`merge_method: observed ${show3(params.merge_method)}, expected ${show3(rules.method)} or no value; the merge queue of ${show3(first.pr.baseRefName)} lands with ${rules.method}; no merge was issued and no receipt was written`);
@@ -4140,6 +4146,9 @@ async function landPullRequest(params, deps = {}) {
     setupAutoDelete: params.setupAutoDelete === true
   });
   const notes = [];
+  if (planGated) {
+    notes.push(`No merge queue was found: the branch rules of ${first.pr.baseRefName} are plan-gated (HTTP 403, "${PLAN_GATE_MESSAGE}"), so merge queues are unavailable on this repository and the merge was direct.`);
+  }
   let mergeArgv = null;
   let proved = first.pr;
   let rereadArgv = null;

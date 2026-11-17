@@ -3131,6 +3131,36 @@ describe("delivery_land through a GitHub merge queue", () => {
     expect(merges(calls)).toEqual([])
   })
 
+  const PLAN_GATE = "gh: Upgrade to GitHub Pro or make this repository public to enable this feature. (HTTP 403)"
+
+  test("a plan-gated rules read means no merge queue is possible, so it merges directly and says why", async () => {
+    const { outcome, calls, files } = await land(
+      { prView: [completed(githubPr()), completed(mergedGithubPr())], rules: completed("", 1, PLAN_GATE) },
+      REVIEWED,
+    )
+
+    if (!outcome.ok) throw new Error(outcome.reason)
+    expect(merges(calls)).toHaveLength(1)
+    expect(enqueues(calls)).toEqual([])
+    expect(outcome.receipt.proof.evidence).toMatchObject({ mergeMethod: "squash" })
+    expect(JSON.stringify(outcome.receipt)).toContain("plan-gated")
+    expect(files()).toHaveLength(1)
+  })
+
+  test.each([
+    ["a 403 with another message", "gh: Resource not accessible by personal access token (HTTP 403)"],
+    ["a 403 with no message", "gh: HTTP 403"],
+    ["the plan-gate message with a 500 status", "gh: Upgrade to GitHub Pro or make this repository public to enable this feature. (HTTP 500)"],
+    ["the plan-gate message and no status", "gh: Upgrade to GitHub Pro or make this repository public to enable this feature."],
+    ["a 5xx", "gh: Bad Gateway (HTTP 502)"],
+  ])("%s refuses instead of assuming a direct merge", async (_name, stderr) => {
+    const { outcome, calls } = await inQueue({ prView: [completed(githubPr())], rules: completed("", 1, stderr) })
+
+    expect(reasonOf(outcome)).toContain("whether the branch requires a merge queue")
+    expect(merges(calls)).toEqual([])
+    expect(enqueues(calls)).toEqual([])
+  })
+
   test("a rules read that fails for any other reason refuses instead of assuming a direct merge", async () => {
     const { outcome, calls } = await inQueue({
       prView: [completed(githubPr())],

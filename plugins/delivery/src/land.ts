@@ -134,6 +134,7 @@ import {
   enqueueAnswer,
   enqueueArgv,
   newGeneration,
+  PLAN_GATE_MESSAGE,
   queueBudgetMs,
   readPending,
   readQueueRule,
@@ -1495,11 +1496,13 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
     if (method !== null) queue = { method }
     if (pending.kind === "record") ownedRecord = pending.record.generation
   }
+  let planGated = false
   if (!alreadyMerged && forge === "github") {
     const path = normalizeRepoPath("github", nameWithOwner)
     if (path === null) return refuse(`repo: observed ${show(nameWithOwner)}, expected "<owner>/<name>"`)
     const rules = await readQueueRule(run, path, first.pr.baseRefName, forgeCommandEnv)
     if ("reason" in rules) return refuse(`${rules.reason}; no merge was issued and no receipt was written`)
+    planGated = !rules.required && rules.planGated === true
     if (rules.required) {
       if (params.merge_method !== undefined && params.merge_method !== rules.method) {
         return refuse(
@@ -1523,6 +1526,11 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
   })
 
   const notes: string[] = []
+  if (planGated) {
+    notes.push(
+      `No merge queue was found: the branch rules of ${first.pr.baseRefName} are plan-gated (HTTP 403, "${PLAN_GATE_MESSAGE}"), so merge queues are unavailable on this repository and the merge was direct.`,
+    )
+  }
   let mergeArgv: string[] | null = null
   let proved: PrObservation = first.pr
   let rereadArgv = null as string[] | null

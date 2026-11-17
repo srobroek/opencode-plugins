@@ -59,7 +59,14 @@ export function rulesArgv(repoPath: string, branch: string): string[] {
   return ["gh", "api", `repos/${repoPath}/rules/branches/${encodeURIComponent(branch)}?per_page=${RULES_PAGE}`]
 }
 
-export type QueueRule = { required: false } | { required: true; method: MergeMethod }
+/**
+ * What GitHub says when a private repository's plan has no rules for the branch. The status
+ * is matched with it, never the message alone.
+ */
+export const PLAN_GATE_MESSAGE = "Upgrade to GitHub Pro or make this repository public to enable this feature"
+
+/** `planGated` marks a "no queue" that is the plan's limit, not a read of the branch's rules. */
+export type QueueRule = { required: false; planGated?: true } | { required: true; method: MergeMethod }
 
 /**
  * Whether the rules payload requires a merge queue, and the method it lands with.
@@ -171,6 +178,9 @@ export async function readQueueRule(
   const result = await run(argv, { timeoutMs: FORGE_TIMEOUT_MS, env })
   if (!result.ok || result.exitCode !== 0 || result.error !== undefined) {
     const detail = `${argv.join(" ")}: observed ${result.error ?? `exit ${result.exitCode}`}, expected exit 0 to learn whether the branch requires a merge queue; ${result.stderr.trim().slice(0, 300)}`
+    if (result.error === undefined && result.exitCode === 1 && /\(HTTP 403\)/.test(result.stderr) && result.stderr.includes(PLAN_GATE_MESSAGE)) {
+      return { required: false, planGated: true }
+    }
     if (result.error === undefined && /\b404\b|not found/i.test(result.stderr)) {
       const unconfirmed = await noQueueConfirmed(run, repoPath, branch, env)
       return unconfirmed === null

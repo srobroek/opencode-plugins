@@ -10,6 +10,7 @@ import {
   branchContains,
   clearPending,
   decideQueue,
+  PLAN_GATE_MESSAGE,
   parseSnapshot,
   pollDelayMs,
   type QueueRule,
@@ -332,6 +333,21 @@ describe("readQueueRule", () => {
     return { read: () => readQueueRule(run, "o/r", "main", {}), argvs }
   }
 
+  test("the plan-gate 403 reads as no queue possible, with the reason", async () => {
+    const { read, argvs } = rules({ ok: true, exitCode: 1, stdout: "", stderr: `gh: ${PLAN_GATE_MESSAGE}. (HTTP 403)` })
+
+    expect(await read()).toEqual({ required: false, planGated: true })
+    expect(argvs).toHaveLength(1)
+  })
+
+  test("the plan-gate message at a 404 takes the 404 path, which an unconfirmed second signal refuses", async () => {
+    const { read } = rules({ ok: true, exitCode: 1, stdout: "", stderr: `${PLAN_GATE_MESSAGE} (HTTP 404)` })
+
+    const answer = await read()
+    expect(answer).toHaveProperty("reason")
+    expect(answer).not.toHaveProperty("planGated")
+  })
+
   test.each<[string, CliResult]>([
     ["a runner that timed out", { ok: false, exitCode: null, stdout: "", stderr: "", error: "timed out after 10000ms" }],
     ["a 404 spelled by a runner that also failed to start", { ok: false, exitCode: null, stdout: "", stderr: "HTTP 404", error: "spawn failed" }],
@@ -339,6 +355,9 @@ describe("readQueueRule", () => {
     ["a zero exit with unparseable output", { ok: true, exitCode: 0, stdout: "<html>", stderr: "" }],
     ["a zero exit with an empty body", { ok: true, exitCode: 0, stdout: "", stderr: "" }],
     ["an object where a rule array belongs", { ok: true, exitCode: 0, stdout: "{}", stderr: "" }],
+    ["a 403 with another message", { ok: true, exitCode: 1, stdout: "", stderr: "gh: Must have admin rights (HTTP 403)" }],
+    ["the plan-gate message at a 500 status", { ok: true, exitCode: 1, stdout: "", stderr: `${PLAN_GATE_MESSAGE} (HTTP 500)` }],
+    ["the plan-gate message from a runner that errored", { ok: false, exitCode: null, stdout: "", stderr: `${PLAN_GATE_MESSAGE} (HTTP 403)`, error: "timed out" }],
   ])("%s refuses and never reads as 'no merge queue'", async (_name, result) => {
     const { read, argvs } = rules(result)
     const answer = await read()

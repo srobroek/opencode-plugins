@@ -66,6 +66,12 @@ Requires Git 2.38 or newer: the content proof compares the landed tree with
   skipped), with at least one check present. On GitLab the head pipeline must have
   succeeded on the head.
 - A squash uses the PR title as the commit subject.
+- Merge queues need a paid GitHub plan or a public repository. On a private repository
+  whose plan has none, the rules read fails with `(HTTP 403)` and "Upgrade to GitHub Pro or
+  make this repository public to enable this feature"; the tool then takes that as "no
+  merge queue possible", lands directly through the proofs below, and records the plan gate
+  in the receipt notes. Any other failed rules read, including a 403 with another message,
+  still refuses.
 - A GitHub base branch with a merge queue (an active `merge_queue` rule, read from
   `GET /repos/{owner}/{repo}/rules/branches/{branch}`) takes no direct merge. The tool
   checks approval and checks as above, then enqueues the reviewed head with the
