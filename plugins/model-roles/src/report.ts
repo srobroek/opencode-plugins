@@ -7,6 +7,7 @@
  * never reported, so their 0 is ambiguous and read as unknown; a version 2 record's 0 is a real 0.
  */
 
+import { BACKGROUND_HOLD_MS } from "@srobroek/opencode-lib/idle-background"
 import { LEDGER_MAX_AGE_MS, type OutcomeRecord } from "./ledger.ts"
 
 const DAY_MS = 24 * 60 * 60 * 1000
@@ -25,10 +26,12 @@ export type Stats = {
   succeeded: number
   failed: number
   interrupted: number
-  /** succeeded ÷ n. */
-  successRate: number
-  /** Elapsed time of the runs, ms. */
-  ms: { mean: number; p50: number; p90: number }
+  /** Runs the hold timeout ended after an idle with background work: neither a success nor a failure. */
+  heldExpired: number
+  /** succeeded ÷ the runs that did not end at the hold timeout; undefined when every run did. */
+  successRate?: number
+  /** Elapsed time of the runs that did not end at the hold timeout, ms; undefined when every run did. */
+  ms?: { mean: number; p50: number; p90: number }
   /** Runs that reported tokens, and runs that reported cost: the coverage of the figures below. */
   tokenRuns: number
   costRuns: number
@@ -36,7 +39,7 @@ export type Stats = {
   tokens?: { total: TokenTotals; mean: TokenTotals; cacheShare?: number }
   /** Summed cost as the host reported it, over the `costRuns` runs; undefined when none reported. */
   cost?: number
-  /** Cost of the runs with a known cost ÷ the successes among them; undefined without either. */
+  /** Cost of the runs with a known cost, hold-timeout ends aside, ÷ the successes among them; undefined without either. */
   costPerSuccess?: number
   /** Runs a failover moved to another model ÷ n. */
   failoverRate: number
@@ -87,13 +90,18 @@ function stats(records: readonly OutcomeRecord[]): Stats {
   let tokenRuns = 0
   let cost = 0
   let costRuns = 0
+  /** Cost and successes of the runs with a known cost that did not end at the hold timeout. */
+  let rateCost = 0
   let costSuccesses = 0
+  let heldExpired = 0
   let failovers = 0
   let resumes = 0
   for (const r of records) {
+    const expired = r.heldExpired === true
     const kind = kindOf(r.outcome)
-    if (kind !== undefined) kinds[kind]++
-    times.push(finite(r.ms) ?? 0)
+    if (expired) heldExpired++
+    else if (kind !== undefined) kinds[kind]++
+    if (!expired) times.push(finite(r.ms) ?? 0)
     const values = TOKEN_FIELDS.map(([, field]) => known(r, r[field]))
     if (values.some((v) => v !== undefined)) {
       tokenRuns++
@@ -113,18 +121,25 @@ function stats(records: readonly OutcomeRecord[]): Stats {
     if (c !== undefined) {
       cost += c
       costRuns++
-      if (kind === "succeeded") costSuccesses++
+      if (!expired) rateCost += c
+      if (!expired && kind === "succeeded") costSuccesses++
     }
     if (r.failedOver === true) failovers++
     resumes += finite(r.resumes) ?? 0
   }
   const n = records.length
+  const rated = n - heldExpired
   const sorted = [...times].sort((a, b) => a - b)
   const out: Stats = {
     n,
     ...kinds,
-    successRate: kinds.succeeded / n,
-    ms: { mean: times.reduce((a, b) => a + b, 0) / n, p50: percentile(sorted, 0.5), p90: percentile(sorted, 0.9) },
+    heldExpired,
+    ...(rated > 0
+      ? {
+          successRate: kinds.succeeded / rated,
+          ms: { mean: times.reduce((a, b) => a + b, 0) / rated, p50: percentile(sorted, 0.5), p90: percentile(sorted, 0.9) },
+        }
+      : {}),
     tokenRuns,
     costRuns,
     failoverRate: failovers / n,
@@ -139,7 +154,7 @@ function stats(records: readonly OutcomeRecord[]): Stats {
   }
   if (costRuns > 0) {
     out.cost = cost
-    if (costSuccesses > 0) out.costPerSuccess = cost / costSuccesses
+    if (costSuccesses > 0) out.costPerSuccess = rateCost / costSuccesses
   }
   return out
 }
@@ -194,15 +209,20 @@ const NA = "n/a"
 const percent = (v: number | undefined) => (v === undefined ? NA : `${Math.round(v * 100)}%`)
 const count = (v: number | undefined): string => (v === undefined ? NA : v >= 1e6 ? `${+(v / 1e6).toFixed(1)}M` : v >= 1e3 ? `${+(v / 1e3).toFixed(1)}k` : `${Math.round(v)}`)
 const money = (v: number | undefined) => (v === undefined ? NA : `$${v.toFixed(v >= 1 ? 2 : 3)}`)
-const duration = (ms: number): string => (ms < 1000 ? `${Math.round(ms)}ms` : ms < 60_000 ? `${+(ms / 1000).toFixed(1)}s` : `${+(ms / 60_000).toFixed(1)}m`)
+const duration = (ms: number | undefined): string =>
+  ms === undefined ? NA : (ms < 1000 ? `${Math.round(ms)}ms` : ms < 60_000 ? `${+(ms / 1000).toFixed(1)}s` : `${+(ms / 60_000).toFixed(1)}m`)
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`
 
 /** ` 12/20` when only some runs reported; nothing when all did or none did (n/a says so). */
 const coverage = (runs: number, n: number) => (runs > 0 && runs < n ? ` ${runs}/${n}` : "")
 
-/** Short text for a list row: runs, success rate, median time, cost. */
+/** How a run the hold timeout ended is named. */
+const HELD = `held past ${BACKGROUND_HOLD_MS / 60_000} min`
+
+/** Short text for a list row: runs, success rate, hold-timeout ends, median time, cost. */
 export function usageBrief(s: Stats): string {
-  return `${plural(s.n, "run")} · ${percent(s.successRate)} ok · p50 ${duration(s.ms.p50)} · ${money(s.cost)}${coverage(s.costRuns, s.n)}`
+  const held = s.heldExpired > 0 ? ` · ${s.heldExpired} ${HELD}` : ""
+  return `${plural(s.n, "run")} · ${percent(s.successRate)} ok${held} · p50 ${duration(s.ms?.p50)} · ${money(s.cost)}${coverage(s.costRuns, s.n)}`
 }
 
 /** Every figure of one group, on one line. */
@@ -213,8 +233,8 @@ export function usageLine(s: Stats): string {
       ? "tokens n/a"
       : `${coverage(s.tokenRuns, s.n).trim() === "" ? "" : `tokens ${s.tokenRuns}/${s.n}: `}in ${count(t.total.input)} out ${count(t.total.output)} reasoning ${count(t.total.reasoning)} cache r${count(t.total.cacheRead)}/w${count(t.total.cacheWrite)} (${percent(t.cacheShare)} read)`
   return [
-    `${plural(s.n, "run")}: ${s.succeeded} ok, ${s.failed} failed, ${s.interrupted} interrupted (${percent(s.successRate)})`,
-    `time mean ${duration(s.ms.mean)} p50 ${duration(s.ms.p50)} p90 ${duration(s.ms.p90)}`,
+    `${plural(s.n, "run")}: ${s.succeeded} ok, ${s.failed} failed, ${s.interrupted} interrupted${s.heldExpired > 0 ? `, ${s.heldExpired} ${HELD}` : ""} (${percent(s.successRate)})`,
+    s.ms === undefined ? "time n/a" : `time mean ${duration(s.ms.mean)} p50 ${duration(s.ms.p50)} p90 ${duration(s.ms.p90)}`,
     tokens,
     `cost${coverage(s.costRuns, s.n)} ${money(s.cost)} (${money(s.costPerSuccess)}/success)`,
     `failover ${percent(s.failoverRate)}`,

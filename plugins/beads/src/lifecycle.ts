@@ -228,7 +228,8 @@ export class Lifecycle {
       return
     }
     if (event.end === undefined) return
-    const working = shared().idle.take(sessionID, event.created)
+    // Evidence lost past the report cap counts as work still running: holding is the safe side.
+    const working = shared().idle.take(sessionID, event.created) !== "done"
     const parentID = await this.parentOf(sessionID)
     // Its background work's notice wakes the child again: its claims and leases stay until its final idle.
     if (parentID !== undefined && working && event.end.kind === "succeeded" && this.#deps.release) {

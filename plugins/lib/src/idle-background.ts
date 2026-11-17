@@ -45,12 +45,22 @@ export function childStillWorking(idle: IdleReport | undefined): boolean {
 }
 
 /**
+ * What an execution end learns from the idle reports before it: `working` when the last one
+ * had background work the Session owns, `done` when it had none or there was no report, and
+ * `unknown` when that report was dropped past `MAX_IDLE_REPORTS`. A caller treats `unknown` as
+ * `working`, so lost evidence holds rather than ends.
+ */
+export type IdleEvidence = "working" | "done" | "unknown"
+
+/**
  * Each Session's idle reports, stamped when the hook runs and read by the execution ends that
  * follow. The hook carries no execution id, so a report belongs to the first end whose
  * `created` time is not before it: events read late still meet their own report.
  */
 export class IdleReports {
   readonly #reports = new Map<string, Array<{ at: number; working: boolean }>>()
+  /** Per Session, the time of the newest report dropped past `MAX_IDLE_REPORTS` and not yet read past. */
+  readonly #dropped = new Map<string, number>()
   readonly #now: () => number
 
   constructor(now: () => number = Date.now) {
@@ -60,31 +70,39 @@ export class IdleReports {
   record(idle: IdleReport): void {
     const reports = this.#reports.get(idle.sessionID) ?? []
     reports.push({ at: this.#now(), working: childStillWorking(idle) })
-    if (reports.length > MAX_IDLE_REPORTS) reports.splice(0, reports.length - MAX_IDLE_REPORTS)
+    if (reports.length > MAX_IDLE_REPORTS) {
+      const dropped = reports.splice(0, reports.length - MAX_IDLE_REPORTS)
+      const newest = dropped.at(-1)?.at
+      if (newest !== undefined) this.#dropped.set(idle.sessionID, newest)
+    }
     this.#reports.set(idle.sessionID, reports)
   }
 
   /**
-   * For an execution end published at `endedAt`: whether its last idle report had background
-   * work the Session owns. Reads and drops every report made up to `endedAt`; an end without a
-   * time reads them all.
+   * For an execution end published at `endedAt`: what its last idle report said. Reads and
+   * drops every report made up to `endedAt`; an end without a time reads them all.
    */
-  take(sessionID: string, endedAt = Number.POSITIVE_INFINITY): boolean {
-    const reports = this.#reports.get(sessionID)
-    if (reports === undefined) return false
+  take(sessionID: string, endedAt = Number.POSITIVE_INFINITY): IdleEvidence {
+    const dropped = this.#dropped.get(sessionID)
+    const lost = dropped !== undefined && dropped <= endedAt
+    if (lost) this.#dropped.delete(sessionID)
+    const reports = this.#reports.get(sessionID) ?? []
     let read = 0
     while (read < reports.length && (reports[read]?.at ?? Number.POSITIVE_INFINITY) <= endedAt) read++
-    const working = read > 0 && reports[read - 1]?.working === true
+    const last = read > 0 ? reports[read - 1] : undefined
     reports.splice(0, read)
     if (reports.length === 0) this.#reports.delete(sessionID)
-    return working
+    if (last !== undefined) return last.working ? "working" : "done"
+    return lost ? "unknown" : "done"
   }
 
   forget(sessionID: string): void {
     this.#reports.delete(sessionID)
+    this.#dropped.delete(sessionID)
   }
 
   clear(): void {
     this.#reports.clear()
+    this.#dropped.clear()
   }
 }

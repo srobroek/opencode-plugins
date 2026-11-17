@@ -27,36 +27,44 @@ describe("IdleReports", () => {
     const reports = at([100, 300])
     reports.record({ sessionID: "ses_c", background: [shell("ses_c")] })
     reports.record({ sessionID: "ses_c", background: [] })
-    expect(reports.take("ses_c", 200)).toBe(true)
-    expect(reports.take("ses_c", 400)).toBe(false)
+    expect(reports.take("ses_c", 200)).toBe("working")
+    expect(reports.take("ses_c", 400)).toBe("done")
   })
 
   test("the last report before an end wins, and an end with no report of its own reads none", () => {
     const reports = at([100, 150])
     reports.record({ sessionID: "ses_c", background: [] })
     reports.record({ sessionID: "ses_c", background: [shell("ses_c")] })
-    expect(reports.take("ses_c", 200)).toBe(true)
-    expect(reports.take("ses_c", 300)).toBe(false)
+    expect(reports.take("ses_c", 200)).toBe("working")
+    expect(reports.take("ses_c", 300)).toBe("done")
   })
 
   test("an end without a time reads every report so far", () => {
     const reports = at([100])
     reports.record({ sessionID: "ses_c", background: [shell("ses_c")] })
-    expect(reports.take("ses_c")).toBe(true)
-    expect(reports.take("ses_c")).toBe(false)
+    expect(reports.take("ses_c")).toBe("working")
+    expect(reports.take("ses_c")).toBe("done")
   })
 
-  test("keeps at most MAX_IDLE_REPORTS per session, dropping the oldest", () => {
+  test("past MAX_IDLE_REPORTS, an end whose report was dropped reads unknown; the next end reads its own", () => {
+    // Reports at 1..17, none with work; the one at 1 is dropped. Ends at 1 and 2.
     const reports = at(Array.from({ length: MAX_IDLE_REPORTS + 1 }, (_, i) => i + 1))
-    reports.record({ sessionID: "ses_c", background: [shell("ses_c")] })
-    for (let i = 0; i < MAX_IDLE_REPORTS; i++) reports.record({ sessionID: "ses_c", background: [] })
-    expect(reports.take("ses_c", 1)).toBe(false)
+    for (let i = 0; i <= MAX_IDLE_REPORTS; i++) reports.record({ sessionID: "ses_c", background: [] })
+    expect(reports.take("ses_c", 1)).toBe("unknown")
+    expect(reports.take("ses_c", 2)).toBe("done")
+  })
+
+  test("an end after the dropped reports that reads a kept one is not unknown", () => {
+    // Reports at 1..17; the one at 1 is dropped. One end at 17 reads the kept report at 17.
+    const reports = at(Array.from({ length: MAX_IDLE_REPORTS + 1 }, (_, i) => i + 1))
+    for (let i = 0; i <= MAX_IDLE_REPORTS; i++) reports.record({ sessionID: "ses_c", background: [] })
+    expect(reports.take("ses_c", 17)).toBe("done")
   })
 
   test("forgetting a session drops its reports", () => {
     const reports = at([100])
     reports.record({ sessionID: "ses_c", background: [shell("ses_c")] })
     reports.forget("ses_c")
-    expect(reports.take("ses_c", 200)).toBe(false)
+    expect(reports.take("ses_c", 200)).toBe("done")
   })
 })

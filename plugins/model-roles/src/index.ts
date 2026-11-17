@@ -2193,7 +2193,8 @@ export default Plugin.define({
           const model = settleRequest(requestLog, sessionID, endedAt(event))
           if (model !== undefined) healthHistory = recordRecovery(healthHistory, model.providerID, finishedAt(event))
           // Background work the child owns wakes it again; its last idle, its deletion or the hold timeout ends it.
-          if (idleReports.take(sessionID, endedAt(event))) hold(sessionID, finishedAt(event))
+          // Evidence lost past the report cap counts as work still running: holding is the safe side.
+          if (idleReports.take(sessionID, endedAt(event)) !== "done") hold(sessionID, finishedAt(event))
           else {
             unhold(sessionID)
             await outcomes.signals(sessionID, NO_SIGNALS)

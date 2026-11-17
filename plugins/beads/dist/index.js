@@ -4429,6 +4429,7 @@ function childStillWorking(idle) {
 
 class IdleReports {
   #reports = new Map;
+  #dropped = new Map;
   #now;
   constructor(now = Date.now) {
     this.#now = now;
@@ -4436,28 +4437,38 @@ class IdleReports {
   record(idle) {
     const reports = this.#reports.get(idle.sessionID) ?? [];
     reports.push({ at: this.#now(), working: childStillWorking(idle) });
-    if (reports.length > MAX_IDLE_REPORTS)
-      reports.splice(0, reports.length - MAX_IDLE_REPORTS);
+    if (reports.length > MAX_IDLE_REPORTS) {
+      const dropped = reports.splice(0, reports.length - MAX_IDLE_REPORTS);
+      const newest = dropped.at(-1)?.at;
+      if (newest !== undefined)
+        this.#dropped.set(idle.sessionID, newest);
+    }
     this.#reports.set(idle.sessionID, reports);
   }
   take(sessionID, endedAt = Number.POSITIVE_INFINITY) {
-    const reports = this.#reports.get(sessionID);
-    if (reports === undefined)
-      return false;
+    const dropped = this.#dropped.get(sessionID);
+    const lost = dropped !== undefined && dropped <= endedAt;
+    if (lost)
+      this.#dropped.delete(sessionID);
+    const reports = this.#reports.get(sessionID) ?? [];
     let read = 0;
     while (read < reports.length && (reports[read]?.at ?? Number.POSITIVE_INFINITY) <= endedAt)
       read++;
-    const working = read > 0 && reports[read - 1]?.working === true;
+    const last = read > 0 ? reports[read - 1] : undefined;
     reports.splice(0, read);
     if (reports.length === 0)
       this.#reports.delete(sessionID);
-    return working;
+    if (last !== undefined)
+      return last.working ? "working" : "done";
+    return lost ? "unknown" : "done";
   }
   forget(sessionID) {
     this.#reports.delete(sessionID);
+    this.#dropped.delete(sessionID);
   }
   clear() {
     this.#reports.clear();
+    this.#dropped.clear();
   }
 }
 
@@ -4588,7 +4599,7 @@ class Lifecycle {
     }
     if (event.end === undefined)
       return;
-    const working = shared().idle.take(sessionID, event.created);
+    const working = shared().idle.take(sessionID, event.created) !== "done";
     const parentID = await this.parentOf(sessionID);
     if (parentID !== undefined && working && event.end.kind === "succeeded" && this.#deps.release) {
       this.#hold(sessionID, parentID);
