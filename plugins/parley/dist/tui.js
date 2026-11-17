@@ -4384,6 +4384,7 @@ var ParleyRpc = Rpc.define({
         required: ["roundID", "answers"],
         properties: {
           roundID: { type: "string" },
+          sessionID: { type: "string" },
           answers: { type: "array", items: { type: "object" } },
           final: { type: "boolean" }
         }
@@ -4809,6 +4810,7 @@ var tui_default = Plugin.define({
       const problems = await submitRound({
         submit: () => rpc.submit({
           roundID: view.roundID,
+          sessionID: view.sessionID,
           answers,
           final: true
         }, {

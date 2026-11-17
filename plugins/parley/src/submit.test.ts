@@ -99,3 +99,9 @@ test("isUnknownRound and isUndeliveredRound match only their own errors", () => 
   expect(isUndeliveredRound(["undelivered round rnd_1: down"])).toBe(true)
   expect(isUndeliveredRound(["unknown round rnd_1"])).toBe(false)
 })
+
+test("a round of another session returns the error for the card, keeping the draft, with no choice offered", async () => {
+  const { flow: f, log } = flow({ submit: async () => ({ ok: false, errors: ["round rnd_1 belongs to another session"] }) })
+  expect(await submitRound(f)).toEqual(["round rnd_1 belongs to another session"])
+  expect(log).toEqual(["submit"])
+})

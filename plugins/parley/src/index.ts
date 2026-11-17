@@ -129,7 +129,7 @@ export default Plugin.define({
       },
       pending: async (input) => service.pending((input ?? {}) as { sessionID?: string }),
       submit: async (input) =>
-        service.submit(input as { roundID: string; answers: SubmittedAnswer[]; final?: boolean }),
+        service.submit(input as { roundID: string; sessionID?: string; answers: SubmittedAnswer[]; final?: boolean }),
       cancel: async (input) => service.cancel(input as { roundID: string; reason?: string }),
       deliver: async (input) =>
         service.deliver(

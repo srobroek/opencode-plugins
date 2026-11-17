@@ -284,7 +284,7 @@ export default Plugin.define({
       const entry = rounds().find((item) => item.view.roundID === view.roundID)
       if (!entry) return ["This round is no longer open."]
       const problems = await submitRound({
-        submit: () => rpc.submit({ roundID: view.roundID, answers, final: true }, { location: entry.location }) as Promise<Outcome>,
+        submit: () => rpc.submit({ roundID: view.roundID, sessionID: view.sessionID, answers, final: true }, { location: entry.location }) as Promise<Outcome>,
         deliver: () =>
           rpc.deliver(
             {
