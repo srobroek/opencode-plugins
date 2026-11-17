@@ -349,3 +349,47 @@ describe("question takeover", () => {
     expect(await service.takeover({ questions: single }, { sessionID: "s" })).toBe(BUILTIN)
   })
 })
+
+describe("round ownership", () => {
+  const prompts = [
+    { question: "Which database?", header: "Database", options: [{ label: "SQLite (Recommended)", description: "Embedded" }, { label: "Postgres", description: "Server" }] },
+  ]
+  async function open(warn?: (m: string) => void) {
+    const events: RoundEvent[] = []
+    const service = new Parley({ settings, emit: async (e) => void events.push(e), deliver: async () => {}, ...(warn ? { warn } : {}) })
+    service.attach({ clientID: "tui" })
+    const asking = service.takeover({ questions: prompts }, { sessionID: "s1" })
+    await tick()
+    const [round] = service.pending({ sessionID: "s1" }).rounds
+    return { service, asking, roundID: round?.roundID ?? "" }
+  }
+  const answers = [{ id: "q1", status: "accepted" as const }]
+
+  test("a submit from another session is rejected and leaves the round open and unanswered", async () => {
+    const { service, roundID } = await open()
+    const out = await service.submit({ roundID, sessionID: "s2", answers })
+    expect(out).toEqual({ ok: false, errors: [`round ${roundID} belongs to another session`] })
+    expect(service.pending({ sessionID: "s1" }).rounds).toHaveLength(1)
+    expect(service.rounds.get(roundID)).toMatchObject({ status: "open", answers: new Map() })
+  })
+
+  test("a submit from the owning session succeeds", async () => {
+    const { service, roundID, asking } = await open()
+    expect((await service.submit({ roundID, sessionID: "s1", answers })).ok).toBe(true)
+    expect(await asking).not.toBe(BUILTIN)
+  })
+
+  test("a deliver for another session's round is rejected", async () => {
+    const { service, roundID } = await open()
+    const out = await service.deliver({ sessionID: "s2", roundID, questions: [], answers: [] })
+    expect(out).toEqual({ ok: false, errors: [`round ${roundID} belongs to another session`] })
+  })
+
+  test("a submit without a session id is accepted with one warning", async () => {
+    const warnings: string[] = []
+    const { service, roundID } = await open((m) => void warnings.push(m))
+    expect((await service.submit({ roundID, answers, final: false })).ok).toBe(true)
+    await service.submit({ roundID, answers, final: false })
+    expect(warnings).toHaveLength(1)
+  })
+})

@@ -712,9 +712,25 @@ export class Parley {
     return { rounds: rounds.map(view), instance: this.instance }
   }
 
-  async submit(input: { roundID: string; answers: readonly SubmittedAnswer[]; final?: boolean }) {
+  /** The error for a round another session owns, or undefined. A caller without a session id is an older TUI: accepted, warned once. */
+  #foreignRound(round: Round | undefined, sessionID: string | undefined) {
+    if (!round) return undefined
+    if (sessionID === undefined) {
+      if (!this.#warnedNoSession) {
+        this.#warnedNoSession = true
+        this.deps.warn?.("parley: a submit without a session id was accepted; the TUI is older than the server")
+      }
+      return undefined
+    }
+    return round.sessionID === sessionID ? undefined : `round ${round.id} belongs to another session`
+  }
+  #warnedNoSession = false
+
+  async submit(input: { roundID: string; sessionID?: string; answers: readonly SubmittedAnswer[]; final?: boolean }) {
     const final = input.final !== false
     const known = this.rounds.get(input.roundID)
+    const foreign = this.#foreignRound(known, input.sessionID)
+    if (foreign) return { ok: false, errors: [foreign] }
     // A closed round whose message failed: the client offers to send it again or dismiss it.
     if (known?.delivery?.status === "failed")
       return { ok: false, errors: [`undelivered round ${known.id}: ${known.delivery.error ?? "the message was not admitted"}`] }
@@ -760,6 +776,8 @@ export class Parley {
   }) {
     if (!this.deps.deliver) return { ok: false, errors: ["Cannot message the session from here."] }
     const round = input.roundID === undefined ? undefined : this.rounds.get(input.roundID)
+    const foreign = this.#foreignRound(round, input.sessionID)
+    if (foreign) return { ok: false, errors: [foreign] }
     if (round?.delivery) return this.#resendRound(round)
     const key = input.deliveryID ?? `anon-${crypto.randomUUID()}`
     const existing = this.#outbox.get(key)

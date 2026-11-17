@@ -1862,6 +1862,7 @@ var ParleyRpc = Rpc.define({
         required: ["roundID", "answers"],
         properties: {
           roundID: { type: "string" },
+          sessionID: { type: "string" },
           answers: { type: "array", items: { type: "object" } },
           final: { type: "boolean" }
         }
@@ -2743,9 +2744,25 @@ class Parley {
     const rounds = this.rounds.list().filter((round) => round.status === "open" || round.delivery?.status === "failed").filter((round) => input.sessionID === undefined || round.sessionID === input.sessionID);
     return { rounds: rounds.map(view), instance: this.instance };
   }
+  #foreignRound(round, sessionID) {
+    if (!round)
+      return;
+    if (sessionID === undefined) {
+      if (!this.#warnedNoSession) {
+        this.#warnedNoSession = true;
+        this.deps.warn?.("parley: a submit without a session id was accepted; the TUI is older than the server");
+      }
+      return;
+    }
+    return round.sessionID === sessionID ? undefined : `round ${round.id} belongs to another session`;
+  }
+  #warnedNoSession = false;
   async submit(input) {
     const final = input.final !== false;
     const known = this.rounds.get(input.roundID);
+    const foreign = this.#foreignRound(known, input.sessionID);
+    if (foreign)
+      return { ok: false, errors: [foreign] };
     if (known?.delivery?.status === "failed")
       return { ok: false, errors: [`undelivered round ${known.id}: ${known.delivery.error ?? "the message was not admitted"}`] };
     const copied = this.#copyUploads(input.roundID, input.answers);
@@ -2777,6 +2794,9 @@ class Parley {
     if (!this.deps.deliver)
       return { ok: false, errors: ["Cannot message the session from here."] };
     const round = input.roundID === undefined ? undefined : this.rounds.get(input.roundID);
+    const foreign = this.#foreignRound(round, input.sessionID);
+    if (foreign)
+      return { ok: false, errors: [foreign] };
     if (round?.delivery)
       return this.#resendRound(round);
     const key = input.deliveryID ?? `anon-${crypto.randomUUID()}`;

@@ -28,6 +28,8 @@ export const ParleyRpc = Rpc.define({
         required: ["roundID", "answers"],
         properties: {
           roundID: { type: "string" },
+          /** The session the client shows; the server rejects a round of another session. */
+          sessionID: { type: "string" },
           answers: { type: "array", items: { type: "object" } },
           final: { type: "boolean" },
         },

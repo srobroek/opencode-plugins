@@ -51,7 +51,7 @@ test("the cleanup waits for queued saves, so the next instance restores the fina
   await tick()
   const { rounds } = (await first.call("pending", {})) as { rounds: Array<{ roundID: string }> }
   const roundID = rounds[0]?.roundID ?? ""
-  await first.call("submit", { roundID, answers: [{ id: "q", status: "accepted" }], final: false })
+  await first.call("submit", { roundID, sessionID: "s", answers: [{ id: "q", status: "accepted" }], final: false })
   const draining = typeof cleanup === "function" ? cleanup() : undefined
   expect(draining).toBeInstanceOf(Promise)
   await draining
