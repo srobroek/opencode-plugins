@@ -10,11 +10,13 @@
  *   submodule/.git (gitfile)          gitfile into canonical/.git/modules/sm
  *   separate/.git (gitfile)           gitfile into a separate git dir
  *   half/.git, mismatch/.git, garbage/.git   gitfiles with incomplete, misdirected or invalid metadata
+ *   fifo/.git (a FIFO), fifometa/.git (metadata with a FIFO commondir), symlinked/.git (a symlink to a gitfile)
  *   temp/clone/.git/                  temp clone
  *   plain/                            not a repository; plain/link -> ../canonical/sub
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { spawnSync } from "node:child_process"
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -50,6 +52,15 @@ beforeEach(() => {
   file(`gitdir: ${join(root, "canonical", ".git", "worktrees", "linked")}\n`, "mismatch", ".git")
   dir("garbage")
   file("this is not a gitfile\n", "garbage", ".git")
+  dir("fifo")
+  spawnSync("mkfifo", [join(root, "fifo", ".git")])
+  dir("canonical", ".git", "worktrees", "fifometa")
+  spawnSync("mkfifo", [join(root, "canonical", ".git", "worktrees", "fifometa", "commondir")])
+  file(`${join(root, "fifometa", ".git")}\n`, "canonical", ".git", "worktrees", "fifometa", "gitdir")
+  dir("fifometa")
+  file(`gitdir: ${join(root, "canonical", ".git", "worktrees", "fifometa")}\n`, "fifometa", ".git")
+  dir("symlinked")
+  symlinkSync(join(root, "linked", ".git"), join(root, "symlinked", ".git"))
   dir("temp", "clone", ".git")
   dir("temp", "clone", "sub")
   dir("plain")
@@ -67,14 +78,17 @@ beforeEach(() => {
     half: join(root, "half"),
     mismatch: join(root, "mismatch"),
     garbage: join(root, "garbage"),
+    fifo: join(root, "fifo"),
+    fifometa: join(root, "fifometa"),
+    symlinked: join(root, "symlinked"),
   }
 })
 afterEach(() => rmSync(root, { recursive: true, force: true }))
 
 /** Substitute `{name}` with the absolute path of a layout directory. */
 const fill = (command: string): string => command.replace(/\{([\w/-]+)\}/g, (_, name: string) => where[name] ?? name)
-const run = (command: string, cwd: string) =>
-  hardGate(fill(command), where[cwd] as string, { tempRoots: [join(root, "temp")] })
+const run = (command: string, cwd: string, env: NodeJS.ProcessEnv = {}) =>
+  hardGate(fill(command), where[cwd] as string, { tempRoots: [join(root, "temp")], env })
 
 const R = "git filter-branch --env-filter true"
 const ZERO = "0".repeat(40)
@@ -103,8 +117,6 @@ describe("a rewrite passes only in a temp clone or a verified linked worktree", 
     ["a relative -C into a linked worktree", `git -C ../linked ${R.slice(4)}`, "canonical"],
     ["chained -C into a linked subdirectory", `git -C {linked} -C sub ${R.slice(4)}`, "canonical"],
     ["--target into a linked worktree", "git filter-repo --target {linked} --path a", "canonical"],
-    ["--git-dir and --work-tree of a temp clone", `git --git-dir={clone}/.git --work-tree={clone} ${R.slice(4)}`, "canonical"],
-    ["GIT_DIR and GIT_WORK_TREE of a temp clone", `GIT_DIR={clone}/.git GIT_WORK_TREE={clone} ${R}`, "canonical"],
     ["a sole literal transaction in a linked worktree", "git update-ref --stdin <<< 'delete refs/heads/main'", "linked"],
   ]
   test.each(allowed)("allows %s", (_name, command, cwd) => {
@@ -136,6 +148,19 @@ describe("a rewrite passes only in a temp clone or a verified linked worktree", 
   })
 })
 
+describe("a FIFO where metadata belongs cannot hang the guard", () => {
+  test.each(["fifo", "fifometa"])("%s is refused promptly", (cwd) => {
+    // A blocking open would hang the process; run it in a child with a hard timeout.
+    const code = `import { hardGate } from ${JSON.stringify(join(import.meta.dir, "guards.ts"))}
+const refusal = hardGate(${JSON.stringify(R)}, ${JSON.stringify(where[cwd])}, { tempRoots: [${JSON.stringify(join(root, "temp"))}], env: {} })
+console.log(refusal?.guard ?? "allowed")`
+    const child = spawnSync(process.execPath, ["-e", code], { timeout: 30_000, encoding: "utf8" })
+    expect(child.error).toBeUndefined()
+    expect(child.status).toBe(0)
+    expect(child.stdout.trim()).toBe("history-rewrite")
+  })
+})
+
 describe("a .git file proves a linked worktree only with matching metadata", () => {
   test.each([
     ["a submodule checkout", "submodule"],
@@ -143,6 +168,9 @@ describe("a .git file proves a linked worktree only with matching metadata", () 
     ["a worktree entry without a commondir file", "half"],
     ["a worktree entry that points back at another checkout", "mismatch"],
     ["an unreadable gitfile", "garbage"],
+    ["a .git FIFO", "fifo"],
+    ["worktree metadata with a FIFO commondir", "fifometa"],
+    ["a symlinked gitfile", "symlinked"],
   ])("refuses %s", (_name, cwd) => {
     const refusal = run(R, cwd)
     expect(refusal?.guard).toBe("history-rewrite")
@@ -210,6 +238,80 @@ describe("anything in the same command that could change the directory is refuse
       "echo a | xargs git show",
     ])
       expect(run(command, "canonical")).toBeUndefined()
+  })
+})
+
+describe("anything that can select another repository is refused", () => {
+  const selection: Case[] = [
+    ["--work-tree to a temp clone", `git --work-tree={clone} update-ref -d refs/heads/main`, "canonical"],
+    ["--work-tree=... to a linked worktree", `git --work-tree={linked} ${R.slice(4)}`, "linked"],
+    ["--git-dir", `git --git-dir={clone}/.git ${R.slice(4)}`, "clone"],
+    ["--git-dir and --work-tree of a temp clone", `git --git-dir={clone}/.git --work-tree={clone} ${R.slice(4)}`, "canonical"],
+    ["GIT_DIR and GIT_WORK_TREE", `GIT_DIR={clone}/.git GIT_WORK_TREE={clone} ${R}`, "canonical"],
+    ["an environment assignment under a CLI option", `GIT_WORK_TREE={canonical} git --work-tree={clone} ${R.slice(4)}`, "clone"],
+    ["a CLI option under an environment assignment", `GIT_DIR={canonical}/.git git --git-dir={clone}/.git ${R.slice(4)}`, "clone"],
+    ["env GIT_DIR=", `env GIT_DIR={clone}/.git ${R}`, "canonical"],
+    ["env GIT_WORK_TREE=", `env GIT_WORK_TREE={clone} ${R}`, "canonical"],
+    ["any env wrapper", `env FOO=1 ${R}`, "linked"],
+    ["an env wrapper with unset", `env -u FOO ${R}`, "linked"],
+    ["an exported GIT_DIR", `export GIT_DIR={clone}/.git; ${R}`, "canonical"],
+    ["GIT_COMMON_DIR", `GIT_COMMON_DIR={clone}/.git ${R}`, "linked"],
+    ["GIT_INDEX_FILE", `GIT_INDEX_FILE=/x/index ${R}`, "linked"],
+    ["GIT_OBJECT_DIRECTORY", `GIT_OBJECT_DIRECTORY=/x/objects ${R}`, "linked"],
+    ["-c core.worktree", `git -c core.worktree={clone} ${R.slice(4)}`, "canonical"],
+    ["-ccore.worktree", `git -ccore.worktree={clone} ${R.slice(4)}`, "canonical"],
+    ["-c core.bare", `git -c core.bare=true ${R.slice(4)}`, "linked"],
+    ["--config-env", `git --config-env=core.worktree=WT ${R.slice(4)}`, "canonical"],
+    ["builtin cd", `builtin cd {linked} && ${R}`, "canonical"],
+    ["command cd", `command cd {linked} && ${R}`, "canonical"],
+    ["command dispatch", `command ${R}`, "linked"],
+    ["builtin dispatch", `builtin eval 'true'; ${R}`, "linked"],
+  ]
+  test.each(selection)("refuses a rewrite with %s", (_name, command, cwd) => {
+    const refusal = run(command, cwd)
+    expect(refusal?.guard).toBe("history-rewrite")
+    expect(refusal?.reason).toContain("workdir")
+  })
+
+  test.each([
+    ["GIT_DIR", { GIT_DIR: "/secret/git-dir" }],
+    ["GIT_WORK_TREE", { GIT_WORK_TREE: "/secret/work-tree" }],
+    ["GIT_COMMON_DIR", { GIT_COMMON_DIR: "/secret/common" }],
+    ["an empty GIT_DIR", { GIT_DIR: "" }],
+  ])("refuses a rewrite when the session environment sets %s, naming it but never its value", (_name, env) => {
+    for (const cwd of ["linked", "clone", "canonical"]) {
+      const refusal = run(R, cwd, env)
+      expect(refusal?.guard).toBe("history-rewrite")
+      expect(refusal?.reason).toContain(Object.keys(env)[0] as string)
+      expect(refusal?.reason).not.toContain("/secret")
+    }
+  })
+
+  test("other inherited variables, and an unset environment, change nothing", () => {
+    expect(run(R, "linked", { GIT_INDEX_FILE: "/x", HOME: "/h", GIT_AUTHOR_NAME: "a" })).toBeUndefined()
+    expect(run(R, "linked", {})).toBeUndefined()
+  })
+
+  test("ordinary git with these options and variables is untouched", () => {
+    const env = { GIT_DIR: "/secret/git-dir", GIT_WORK_TREE: "/secret/work-tree" }
+    for (const command of [
+      "git --git-dir={clone}/.git status",
+      "git --work-tree={clone} diff",
+      "GIT_DIR={clone}/.git git log",
+      "env GIT_DIR={clone}/.git git status",
+      "export GIT_WORK_TREE={clone}; git status",
+      "git -c core.worktree={clone} status",
+      "git --config-env=core.worktree=WT status",
+      "builtin cd {linked}",
+      "command cd {linked} && git status",
+      "command -v git",
+      "env FOO=1 git log",
+      "git update-ref refs/heads/main abc123",
+      "git update-ref -d refs/tags/v1",
+    ]) {
+      expect(run(command, "canonical")).toBeUndefined()
+      expect(run(command, "canonical", env)).toBeUndefined()
+    }
   })
 })
 

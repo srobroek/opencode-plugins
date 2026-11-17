@@ -3538,7 +3538,7 @@ function hasAttribution(text) {
 }
 
 // plugins/safety/src/history-rewrite.ts
-import { closeSync, fstatSync, openSync, readSync, realpathSync as realpathSync2, statSync as statSync2 } from "fs";
+import { closeSync, constants as constants2, fstatSync, lstatSync, openSync, readSync, realpathSync as realpathSync2, statSync as statSync2 } from "fs";
 import { tmpdir } from "os";
 import { basename as basename2, dirname as dirname3, isAbsolute as isAbsolute4, join as join5, resolve as resolve5 } from "path";
 var PREFIX = "Blocked by safety (history-rewrite-guard)";
@@ -3636,9 +3636,14 @@ var CONSTRUCTS = new Set([
   "exec",
   "alias",
   "unalias",
-  "function"
+  "function",
+  "builtin",
+  "command",
+  "env"
 ]);
 var FUNCTION_DEFINITION = /(?:^|[;&|{(\s])(?:function\s+[A-Za-z_][\w:.-]*|[A-Za-z_][\w:.-]*\s*\(\s*\))/;
+var REPOSITORY_SELECTION = /(?<![\w-])(?:--git-dir|--work-tree|--config-env)(?![\w-])|(?<![\w])GIT_(?:DIR|WORK_TREE|COMMON_DIR|INDEX_FILE|OBJECT_DIRECTORY)(?![\w])|(?<![\w-])-c\s*['"]?core\.(?:worktree|bare)/i;
+var INHERITED_SELECTION = ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"];
 var dynamic = (word) => /[$`]/.test(word) || word.startsWith("~");
 function skipOptions(argv, at, valued) {
   let i = at;
@@ -3759,7 +3764,9 @@ function step(at, operand) {
 function readSmallFile(path) {
   let fd;
   try {
-    fd = openSync(path, "r");
+    if (!lstatSync(path).isFile())
+      return;
+    fd = openSync(path, constants2.O_RDONLY | constants2.O_NONBLOCK | constants2.O_NOFOLLOW);
     const info = fstatSync(fd);
     if (!info.isFile() || info.size > MAX_METADATA)
       return;
@@ -3900,60 +3907,39 @@ var refused = (what, root) => `${PREFIX}: refused ${what}. ${root} is a canonica
 var unverified = (what, root) => `${PREFIX}: refused ${what}. ${root} has a .git file that is not a verified linked worktree (a submodule, a separate git directory, or unreadable metadata), and this command rewrites or deletes history in place. ${GUIDANCE}`;
 var uncertain = (what, why) => `${PREFIX}: refused ${what}. It rewrites or deletes history in place, and the guard cannot tell with certainty that it runs in a linked worktree or temp clone (${why}). ${GUIDANCE}`;
 var withConstruct = (what, construct) => `${PREFIX}: refused ${what}. The same shell command also contains ${construct}, which can change the directory the rewrite runs in, so the guard cannot tell where it runs. Set the shell tool's workdir to a temp clone or linked worktree, or run the rewrite on its own. ${GUIDANCE}`;
-function repositoryOverrides(command, git) {
-  const out = {};
-  const globals = command.argv.slice(1, git.offset - 1);
-  for (let i = 0;i < globals.length; i++) {
-    const word = globals[i];
-    for (const [name, key] of [
-      ["--git-dir", "gitDir"],
-      ["--work-tree", "workTree"]
-    ]) {
-      if (word === name)
-        out[key] = globals[++i];
-      else if (word.startsWith(`${name}=`))
-        out[key] = word.slice(name.length + 1);
-    }
+function repositorySelection(commands) {
+  for (const source of new Set(commands.map((command) => command.source))) {
+    const found = REPOSITORY_SELECTION.exec(source);
+    if (found !== null)
+      return found[0].trim().startsWith("-c") ? "`-c core.worktree` or `-c core.bare`" : `\`${found[0]}\``;
   }
-  for (const item of command.assignments) {
-    if (item.startsWith("GIT_DIR="))
-      out.gitDir = item.slice("GIT_DIR=".length);
-    else if (item.startsWith("GIT_WORK_TREE="))
-      out.workTree = item.slice("GIT_WORK_TREE=".length);
-  }
-  return out;
+  return;
 }
-function historyRewrite(commands, cwd, tempRoots = defaultTempRoots()) {
-  const judge = (command, what, moves, git) => {
+var withSelection = (what, selection) => `${PREFIX}: refused ${what}. ${selection} can point git at a repository other than the one the directory implies, so the guard cannot tell which repository the rewrite changes. Run the rewrite on its own in a temp clone, with the shell tool's workdir set there and without these options. ${GUIDANCE}`;
+function historyRewrite(commands, cwd, tempRoots = defaultTempRoots(), env = process.env) {
+  const judge = (what, moves, git) => {
+    const selection = repositorySelection(commands);
+    if (selection !== undefined)
+      return withSelection(what, selection);
     const construct = directoryConstruct(commands);
     if (construct !== undefined)
       return withConstruct(what, construct);
+    const inherited = INHERITED_SELECTION.find((name) => env[name] !== undefined);
+    if (inherited !== undefined)
+      return withSelection(what, `The session's environment sets \`${inherited}\`, which`);
+    if (git?.overridden === true)
+      return uncertain(what, "git was given a global option the guard does not read");
     const start = realOrUndefined(cwd);
     if (start === undefined)
       return uncertain(what, "the working directory cannot be resolved");
-    const overrides = git === undefined ? {} : repositoryOverrides(command, git);
-    const named = [...moves, overrides.workTree, overrides.gitDir].filter((value) => value !== undefined);
-    if (named.some(dynamic))
+    if (moves.some(dynamic))
       return uncertain(what, "a directory option is expanded by the shell");
-    if (git?.overridden === true && overrides.gitDir === undefined && overrides.workTree === undefined)
-      return uncertain(what, "git was given a global option the guard does not read");
     let dir = start;
     for (const move of moves) {
       const next = step(dir, move);
       if (next === undefined)
         return uncertain(what, `\`${move}\` is not a directory that resolves the same way logically and physically`);
       dir = next;
-    }
-    if (overrides.workTree !== undefined) {
-      const next = step(dir, overrides.workTree);
-      if (next === undefined)
-        return uncertain(what, "--work-tree does not resolve to a directory");
-      dir = next;
-    }
-    if (overrides.gitDir !== undefined) {
-      const gitDir = step(dir, overrides.gitDir);
-      if (gitDir === undefined || !underTemp(gitDir, tempRoots))
-        return uncertain(what, "--git-dir or GIT_DIR points outside a temp directory");
     }
     const where = classify(dir, tempRoots);
     if (where.safe)
@@ -3971,7 +3957,7 @@ function historyRewrite(commands, cwd, tempRoots = defaultTempRoots()) {
         return `${PREFIX}: refused ${text} with --force. filter-repo --force overwrites the repository's refs and history in the directory it runs in, wherever that is. Run it without --force in a fresh temp clone with the tool's workdir set there; a fresh clone needs no --force.`;
       const target = optionValue(rewrite.args, "--target");
       const moves = [...git?.chdirs ?? [], ...target === undefined ? [] : [target]];
-      const reason = judge(command, text, moves, git);
+      const reason = judge(text, moves, git);
       if (reason !== undefined)
         return reason;
       continue;
@@ -3989,7 +3975,7 @@ function historyRewrite(commands, cwd, tempRoots = defaultTempRoots()) {
       what = updateRefRewrite(command, git);
     if (what === undefined)
       continue;
-    const reason = judge(command, what, git.chdirs, git);
+    const reason = judge(what, git.chdirs, git);
     if (reason !== undefined)
       return reason;
   }
@@ -4261,7 +4247,7 @@ function hardGate(source, cwd, options = {}) {
     else if (on("dns-delegation") && dnsDelegation(commands))
       refusal = refuse("dns-delegation");
     else if (on("history-rewrite")) {
-      const reason = historyRewrite(commands, cwd, options.tempRoots);
+      const reason = historyRewrite(commands, cwd, options.tempRoots, options.env);
       if (reason !== undefined)
         refusal = { guard: "history-rewrite", reason };
     }
@@ -5643,7 +5629,7 @@ function createRedactor(env, options = DEFAULT_REDACT) {
 }
 
 // plugins/safety/src/scratch-dirs.ts
-import { existsSync as existsSync4, lstatSync, realpathSync as realpathSync6 } from "fs";
+import { existsSync as existsSync4, lstatSync as lstatSync2, realpathSync as realpathSync6 } from "fs";
 import { homedir as homedir6, tmpdir as tmpdir2 } from "os";
 import { basename as basename4, dirname as dirname5, isAbsolute as isAbsolute9, join as join8, relative as relative3, sep } from "path";
 function scratchRoots(projectID, where = {}) {
@@ -5681,11 +5667,11 @@ function pinned(root, uid = () => process.getuid?.()) {
     let at = sep;
     for (const part of root.split(sep).filter(Boolean)) {
       at = join8(at, part);
-      if (lstatSync(at).isSymbolicLink())
+      if (lstatSync2(at).isSymbolicLink())
         return false;
     }
     const owner = uid();
-    return owner === undefined || lstatSync(root).uid === owner;
+    return owner === undefined || lstatSync2(root).uid === owner;
   } catch {
     return false;
   }
@@ -6303,7 +6289,12 @@ function createPlugin(overrides = {}) {
     async setup(ctx) {
       const { disabled, redact, opAllow, scratchDirs } = readOptions(ctx.options);
       const on = (id) => !disabled.has(id);
-      const guardOptions = { ...overrides.guard, disabled, opAllow };
+      const guardOptions = {
+        env: overrides.env ?? process.env,
+        ...overrides.guard,
+        disabled,
+        opAllow
+      };
       const reviewOptions = { ...overrides.review, disabled };
       const pending = new Map;
       const advisor = createPackageAdvisor();

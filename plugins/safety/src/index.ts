@@ -229,7 +229,12 @@ export function createPlugin(overrides: Overrides = {}) {
     async setup(ctx) {
       const { disabled, redact, opAllow, scratchDirs } = readOptions(ctx.options)
       const on = (id: FeatureID) => !disabled.has(id)
-      const guardOptions = { ...overrides.guard, disabled: disabled as ReadonlySet<GuardID>, opAllow }
+      const guardOptions = {
+        env: overrides.env ?? process.env,
+        ...overrides.guard,
+        disabled: disabled as ReadonlySet<GuardID>,
+        opAllow,
+      }
       const reviewOptions: ReviewOptions = { ...overrides.review, disabled: disabled as ReadonlySet<DecisionID> }
       const pending = new Map<string, Pending>()
       const advisor = createPackageAdvisor()
