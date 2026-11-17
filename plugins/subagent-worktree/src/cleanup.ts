@@ -8,8 +8,9 @@
  * its branch; a clean pushed-but-unmerged lane is kept while its parent lives, then its
  * worktree goes and the branch stays. Every removal re-verifies the recorded path first.
  *
- * Known limit: PR squash merges leave the lane branch a non-ancestor of its target, so such a
- * lane counts as unmerged and is kept until it is pushed and the parent is gone.
+ * Squash merges leave the lane branch a non-ancestor of its target, so a lane whose commits git
+ * cannot find in the target is also asked about: the pull request state first (`gh pr view`),
+ * then a patch-id comparison against the default branch. When neither answers, the lane is kept.
  */
 
 import { existsSync, lstatSync } from "node:fs"
@@ -17,7 +18,7 @@ import { rm, statfs } from "node:fs/promises"
 import { basename, dirname, join } from "node:path"
 import { physical, verifyCheckout } from "@srobroek/opencode-lib/checkout-marker"
 import { SAFE_GIT_ARGS } from "@srobroek/opencode-lib/safe-git"
-import type { Runner } from "./git.ts"
+import type { Runner, RunResult } from "./git.ts"
 import { type Lane, LEASE_KEY, PENDING_PREFIX, type Pending, pendingKey } from "./lane.ts"
 
 /** An owner idle this long may have its build directories freed even when its work is kept. */
@@ -56,6 +57,8 @@ export type GitFacts = {
   pushed: boolean
   /** A rebase, merge, cherry-pick, revert or bisect is in progress, or the worktree is locked. */
   busy: boolean
+  /** The lane's work is finished with: its pull request merged (or its patches are on the default branch) or was closed. */
+  done?: "merged" | "closed"
 }
 
 export type CleanupFacts = {
@@ -81,7 +84,7 @@ export function decideCleanup(facts: CleanupFacts): CleanupDecision {
     return { kind: "untouched", reason: facts.owner === "running" ? "its session is running" : "its session could not be checked" }
   if (git.busy)
     return { kind: "keep", reason: "a git operation is in progress or the worktree is locked", freeBuild: false, report: true }
-  const unmergedLocal = git.ahead > 0 && !git.merged && !git.pushed
+  const unmergedLocal = git.ahead > 0 && !git.merged && !git.pushed && git.done === undefined
   if (git.dirty || unmergedLocal) {
     const idle = facts.owner === "gone" || facts.inactiveMs >= facts.graceMs || facts.lowDisk
     return {
@@ -92,6 +95,8 @@ export function decideCleanup(facts: CleanupFacts): CleanupDecision {
     }
   }
   if (git.ahead === 0 || git.merged) return { kind: "remove", branch: "delete", reason: git.ahead === 0 ? "it is empty" : "it is merged" }
+  if (git.done === "merged") return { kind: "remove", branch: "delete", reason: "its pull request was merged or its patches are on the default branch" }
+  if (git.done === "closed") return { kind: "remove", branch: "keep", reason: "its pull request was closed without merging; the branch is kept" }
   if (facts.parent === "gone") return { kind: "remove", branch: "keep", reason: "it is pushed and its parent is gone" }
   return { kind: "keep", reason: "it is pushed but not merged and its parent is still alive", freeBuild: false, report: false }
 }
@@ -135,6 +140,10 @@ export type CleanupDeps = {
   /** Tell the parent (queued, no turn) when it lives, else log. */
   report: (lane: Lane, parent: Presence, text: string) => Promise<void>
   withLane: <T>(child: string, work: () => Promise<T>) => Promise<T>
+  /** `gh` in `cwd`, no shell, bounded; any failure is a non-zero code. */
+  gh: (args: string[], cwd: string) => Promise<RunResult>
+  /** Run a command with text on standard input. */
+  runWithInput: (argv: string[], input: string) => Promise<RunResult>
   /** Free bytes on the disk holding `path`; undefined when unknown. */
   freeBytes: (path: string) => Promise<number | undefined>
   lowDiskBytes: number
@@ -203,6 +212,63 @@ export function createCleanup(deps: CleanupDeps) {
     }
   }
 
+  /** Pull request state for the lane's branch: MERGED or CLOSED mean done, OPEN means not, undefined means gh could not say. */
+  const prState = async (lane: Lane, v: Verified): Promise<"merged" | "closed" | "open" | undefined> => {
+    const result = await deps.gh(["pr", "view", lane.branch, "--json", "state,mergeCommit"], v.real)
+    if (result.code !== 0) return undefined
+    try {
+      const state = (JSON.parse(result.stdout) as { state?: unknown }).state
+      return state === "MERGED" ? "merged" : state === "CLOSED" ? "closed" : state === "OPEN" ? "open" : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  const patchIds = async (text: string): Promise<string[] | undefined> => {
+    const result = await deps.runWithInput(["git", ...SAFE_GIT_ARGS, "patch-id", "--stable"], text)
+    return result.code === 0 ? result.stdout.split("\n").map((line) => line.split(" ")[0] ?? "").filter((id) => id !== "") : undefined
+  }
+
+  /**
+   * Whether the lane's commits already sit on the default branch under other hashes: `git cherry`
+   * for one-to-one copies, then the patch-id of the combined diff against the patch-ids of the
+   * commits that landed since the merge base (a squash). True only on a match; anything else is unknown.
+   */
+  const appliedUpstream = async (lane: Lane, v: Verified): Promise<boolean> => {
+    const remote = await gitAt(v.gitDir, v.real, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"])
+    const upstream = remote.code === 0 && remote.stdout.trim() !== "" ? remote.stdout.trim() : lane.target ? `refs/heads/${lane.target}` : undefined
+    if (upstream === undefined) return false
+    const cherry = await gitAt(v.gitDir, v.real, ["cherry", upstream, "HEAD"])
+    if (cherry.code === 0) {
+      const lines = cherry.stdout.split("\n").filter((line) => line !== "")
+      if (lines.length > 0 && lines.every((line) => line.startsWith("-"))) return true
+    }
+    const base = await gitAt(v.gitDir, v.real, ["merge-base", upstream, "HEAD"])
+    if (base.code !== 0) return false
+    const mine = await gitAt(v.gitDir, v.real, ["diff", "--no-ext-diff", base.stdout.trim(), "HEAD"])
+    if (mine.code !== 0 || mine.stdout === "") return false
+    const landed = await gitAt(v.gitDir, v.real, ["log", "-p", "--no-ext-diff", "--no-merges", "--format=commit %H", "-n", "200", `${base.stdout.trim()}..${upstream}`])
+    if (landed.code !== 0 || landed.stdout === "") return false
+    const [ownId] = (await patchIds(mine.stdout)) ?? []
+    const theirs = await patchIds(landed.stdout)
+    return ownId !== undefined && theirs?.includes(ownId) === true
+  }
+
+  /** Remember a "not done" answer for a while, so a lane that stays open does not cost a gh call per trigger. */
+  const doneCache = new Map<string, { at: number; head: string }>()
+  const DONE_RECHECK_MS = 5 * 60_000
+
+  const detectDone = async (lane: Lane, v: Verified): Promise<"merged" | "closed" | undefined> => {
+    const head = await gitAt(v.gitDir, v.real, ["rev-parse", "HEAD"])
+    const cached = doneCache.get(lane.child)
+    if (cached && cached.head === head.stdout.trim() && deps.now() - cached.at < DONE_RECHECK_MS) return undefined
+    const state = await prState(lane, v)
+    if (state === "merged" || state === "closed") return state
+    if (state === undefined && (await appliedUpstream(lane, v))) return "merged"
+    doneCache.set(lane.child, { at: deps.now(), head: head.stdout.trim() })
+    return undefined
+  }
+
   /** Delete each allow-listed build directory that is a real ignored directory with nothing tracked in it. */
   const freeBuildDirs = async (v: Verified): Promise<number> => {
     const before = await deps.freeBytes(v.real)
@@ -238,6 +304,12 @@ export function createCleanup(deps: CleanupDeps) {
         return { action: "untouched", reason: owner.presence === "running" ? "its session is running" : "its session could not be checked" }
       }
       if ((await deps.runningInside(lane, v.real)) !== "none") return { action: "untouched", reason: "a live session works inside the worktree" }
+      const git = await factsOf(lane, v)
+      // A lane whose commits are not in the target may still be finished: ask the pull request, then the patches.
+      if (git && git.ahead > 0 && !git.merged && !git.dirty && !git.busy) {
+        const done = await detectDone(lane, v)
+        if (done) git.done = done
+      }
       const room = deps.lowDiskBytes > 0 ? await deps.freeBytes(v.real) : undefined
       const lowDisk = room !== undefined && room < deps.lowDiskBytes
       const decision = decideCleanup({
@@ -246,7 +318,7 @@ export function createCleanup(deps: CleanupDeps) {
         inactiveMs: owner.lastActivity === undefined ? 0 : Math.max(0, deps.now() - owner.lastActivity),
         graceMs,
         lowDisk,
-        git: await factsOf(lane, v),
+        git,
       })
       if (decision.kind === "untouched") return { action: "untouched", reason: decision.reason }
 

@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, 
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { type CleanupDeps, createCleanup, decideCleanup, type GitFacts, GRACE_MS, LEASE_MS, type Presence, parseListed } from "./cleanup.ts"
-import { spawnRunner } from "./git.ts"
+import { type RunResult, spawnGh, spawnRunner, spawnWithInput } from "./git.ts"
 import { type Lane, LEASE_KEY, pendingKey } from "./lane.ts"
 
 const SCRATCH = realpathSync(mkdtempSync(join(tmpdir(), "lane-cleanup-")))
@@ -69,7 +69,9 @@ type Setup = {
   saved: () => Lane
 }
 
-function setup(over: { lowDiskBytes?: number; free?: (lane: Lane) => number } = {}, name = "lane-x"): Setup {
+const NO_GH = async (): Promise<RunResult> => ({ code: 127, stdout: "", stderr: "gh is not installed" })
+
+function setup(over: { lowDiskBytes?: number; free?: (lane: Lane) => number; gh?: CleanupDeps["gh"] } = {}, name = "lane-x"): Setup {
   const fx = fixture()
   const lane = fx.lane(name)
   fx.storage.set(`lane/${lane.child}`, lane)
@@ -96,6 +98,8 @@ function setup(over: { lowDiskBytes?: number; free?: (lane: Lane) => number } = 
     },
     report: async (_l, parent, text) => void reports.push({ parent, text }),
     withLane: (_child, work) => work(),
+    gh: over.gh ?? NO_GH,
+    runWithInput: spawnWithInput,
     freeBytes: async () => (over.free ? over.free(lane) : undefined),
     lowDiskBytes: over.lowDiskBytes ?? 0,
     log: (text) => void logs.push(text),
@@ -157,6 +161,18 @@ describe("decideCleanup", () => {
     ["low disk", { lowDisk: true }, true],
   ])("dirty lane frees build dirs: %s", (_name, over, expected) => {
     expect(decideCleanup(ownerFacts(clean({ dirty: true }), over))).toMatchObject({ kind: "keep", freeBuild: expected })
+  })
+
+  test.each([
+    ["merged", { kind: "remove", branch: "delete" }],
+    ["closed", { kind: "remove", branch: "keep" }],
+  ] as const)("a lane whose pull request is %s is removed, unpushed or not", (done, expected) => {
+    expect(decideCleanup(ownerFacts(clean({ ahead: 3, done })))).toMatchObject(expected)
+  })
+
+  test("a done lane that is dirty or busy is kept", () => {
+    expect(decideCleanup(ownerFacts(clean({ ahead: 3, done: "merged", dirty: true })))).toMatchObject({ kind: "keep" })
+    expect(decideCleanup(ownerFacts(clean({ ahead: 3, done: "closed", busy: true })))).toMatchObject({ kind: "keep" })
   })
 
   test("a busy operation never frees build dirs", () => {
@@ -326,16 +342,6 @@ describe("clean", () => {
     expect(existsSync(s.lane.directory)).toBe(true)
   })
 
-  test("a squash-merged lane counts as unmerged and is kept", async () => {
-    const s = setup()
-    commitIn(s.lane.directory)
-    git(s.fx.repo, "merge", "-q", "--squash", s.lane.branch)
-    git(s.fx.repo, "commit", "-q", "-m", "squash")
-    s.set({ owner: "gone", parent: "gone" })
-    expect(await s.clean.clean(s.lane.child)).toMatchObject({ action: "kept", reason: "it has commits that are on no remote and not merged" })
-    expect(existsSync(s.lane.directory)).toBe(true)
-  })
-
   test("a tracked dist/ survives while an ignored target/ is freed", async () => {
     const s = setup()
     mkdirSync(join(s.lane.directory, "dist"))
@@ -411,5 +417,122 @@ describe("sweep", () => {
     expect(s.fx.storage.has(pendingKey("crashed"))).toBe(false)
     expect(s.fx.storage.has(pendingKey("fresh"))).toBe(true)
     expect(s.logs.some((line) => line.includes("crashed"))).toBe(true)
+  })
+})
+
+const reply = (stdout: string, code = 0) => async (): Promise<RunResult> => ({ code, stdout, stderr: code === 0 ? "" : "gh: failed" })
+
+/** Squash `lane` into main the way a PR squash-merge does and return the squash commit. */
+function squashInto(s: Setup): string {
+  git(s.fx.repo, "merge", "-q", "--squash", s.lane.branch)
+  git(s.fx.repo, "commit", "-q", "-m", "squash")
+  return git(s.fx.repo, "rev-parse", "HEAD")
+}
+
+describe("finished pull requests", () => {
+  test("a squash-merged lane (gh says MERGED) is removed; the branch stays because -d refuses it", async () => {
+    const s = setup({ gh: reply(JSON.stringify({ state: "MERGED", mergeCommit: { oid: "abc" } })) })
+    commitIn(s.lane.directory)
+    squashInto(s)
+    expect(await s.clean.clean(s.lane.child)).toMatchObject({ action: "removed", branchDeleted: false })
+    expect(existsSync(s.lane.directory)).toBe(false)
+    expect(git(s.fx.repo, "branch", "--list", s.lane.branch)).toContain(s.lane.branch)
+  })
+
+  test("gh runs in the lane's worktree with the branch name and no shell", async () => {
+    const calls: Array<{ args: string[]; cwd: string }> = []
+    const s = setup({
+      gh: async (args, cwd) => {
+        calls.push({ args, cwd })
+        return reply(JSON.stringify({ state: "MERGED" }))()
+      },
+    })
+    commitIn(s.lane.directory)
+    const real = realpathSync(s.lane.directory)
+    await s.clean.clean(s.lane.child)
+    expect(calls).toEqual([{ args: ["pr", "view", s.lane.branch, "--json", "state,mergeCommit"], cwd: real }])
+  })
+
+  test("a closed, unmerged lane: the worktree is removed and the branch is kept", async () => {
+    const s = setup({ gh: reply(JSON.stringify({ state: "CLOSED" })) })
+    commitIn(s.lane.directory)
+    expect(await s.clean.clean(s.lane.child)).toMatchObject({ action: "removed", branchDeleted: false })
+    expect(existsSync(s.lane.directory)).toBe(false)
+    expect(git(s.fx.repo, "branch", "--list", s.lane.branch)).toContain(s.lane.branch)
+  })
+
+  test("an open pull request keeps the lane, and gh's answer is not asked again within the recheck window", async () => {
+    let asked = 0
+    const s = setup({
+      gh: async () => {
+        asked++
+        return reply(JSON.stringify({ state: "OPEN" }))()
+      },
+    })
+    commitIn(s.lane.directory)
+    expect((await s.clean.clean(s.lane.child)).action).toBe("kept")
+    await s.clean.clean(s.lane.child)
+    expect(asked).toBe(1)
+    s.set({ now: 10 * GRACE_MS * 2 })
+    await s.clean.clean(s.lane.child)
+    expect(asked).toBe(2)
+    expect(existsSync(s.lane.directory)).toBe(true)
+  })
+
+  test("offline gh: a squash commit with the same combined patch-id counts as merged", async () => {
+    const s = setup({ gh: reply("", 1) })
+    commitIn(s.lane.directory, "one.txt", "one\n")
+    commitIn(s.lane.directory, "two.txt", "two\n")
+    squashInto(s)
+    expect(await s.clean.clean(s.lane.child)).toMatchObject({ action: "removed" })
+    expect(existsSync(s.lane.directory)).toBe(false)
+  })
+
+  test("offline gh: a one-to-one cherry-pick is found by git cherry", async () => {
+    const s = setup({ gh: reply("", 1) })
+    commitIn(s.lane.directory)
+    git(s.fx.repo, "cherry-pick", s.lane.branch)
+    expect(await s.clean.clean(s.lane.child)).toMatchObject({ action: "removed" })
+  })
+
+  test("offline gh with no matching patch keeps the lane (fail closed)", async () => {
+    const s = setup({ gh: reply("", 1) })
+    commitIn(s.lane.directory)
+    commitIn(s.fx.repo, "other.txt", "other\n")
+    expect(await s.clean.clean(s.lane.child)).toMatchObject({ action: "kept", reason: "it has commits that are on no remote and not merged" })
+    expect(existsSync(s.lane.directory)).toBe(true)
+  })
+
+  test("gh that is not installed behaves like offline gh", async () => {
+    const s = setup()
+    commitIn(s.lane.directory)
+    expect((await s.clean.clean(s.lane.child)).action).toBe("kept")
+  })
+
+  test("a squash-merged lane with uncommitted changes is kept", async () => {
+    const s = setup({ gh: reply(JSON.stringify({ state: "MERGED" })) })
+    commitIn(s.lane.directory)
+    squashInto(s)
+    writeFileSync(join(s.lane.directory, "late.txt"), "late\n")
+    expect(await s.clean.clean(s.lane.child)).toMatchObject({ action: "kept", reason: "it has uncommitted changes" })
+    expect(existsSync(join(s.lane.directory, "late.txt"))).toBe(true)
+  })
+
+  test("the real gh runner reads a stub on PATH and reports a failing stub as a failure", async () => {
+    const bin = join(SCRATCH, `gh-stub-${++counter}`)
+    mkdirSync(bin)
+    const stub = (body: string) => writeFileSync(join(bin, "gh"), `#!/bin/sh\n${body}\n`, { mode: 0o755 })
+    const before = process.env.PATH
+    process.env.PATH = `${bin}:${before ?? ""}`
+    try {
+      stub('echo \'{"state":"MERGED"}\'')
+      expect(await spawnGh(["pr", "view", "x"], SCRATCH)).toMatchObject({ code: 0, stdout: expect.stringContaining("MERGED") })
+      stub("echo offline >&2; exit 1")
+      expect((await spawnGh(["pr", "view", "x"], SCRATCH)).code).toBe(1)
+      process.env.PATH = "/nonexistent"
+      expect((await spawnGh(["pr", "view", "x"], SCRATCH)).code).toBe(127)
+    } finally {
+      process.env.PATH = before
+    }
   })
 })

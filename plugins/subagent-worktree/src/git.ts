@@ -24,6 +24,36 @@ export const spawnRunner: Runner = async (argv) => {
   }
 }
 
+/** Bound on a `gh` query: it may wait on the network, and cleanup must not hang on it. */
+export const GH_TIMEOUT_MS = 15_000
+
+/** Run `gh` in `cwd` without a shell. Missing, unauthenticated, offline or slow all come back as a non-zero code. */
+export async function spawnGh(args: string[], cwd: string): Promise<RunResult> {
+  const env: Record<string, string | undefined> = { ...process.env, GH_PROMPT_DISABLED: "1", NO_COLOR: "1", GH_NO_UPDATE_NOTIFIER: "1" }
+  const bin = Bun.which("gh", { PATH: env.PATH ?? "" })
+  if (bin === null) return { code: 127, stdout: "", stderr: "gh is not installed" }
+  try {
+    const child = Bun.spawn([bin, ...args], { cwd, env, stdin: "ignore", stdout: "pipe", stderr: "pipe" })
+    const run = await supervise(child, { timeoutMs: GH_TIMEOUT_MS })
+    if (run.kind === "exited") return { code: run.exitCode, stdout: run.stdout, stderr: run.stderr }
+    return { code: 124, stdout: run.stdout, stderr: `${run.stderr}\ngh ${run.kind === "timeout" ? "timed out" : "ended without an exit status"}`.trim() }
+  } catch (error) {
+    return { code: 127, stdout: "", stderr: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+/** Run a command with `input` on its standard input (for `git patch-id`). */
+export async function spawnWithInput(argv: string[], input: string): Promise<RunResult> {
+  try {
+    const child = Bun.spawn(argv, { stdin: new Blob([input]), stdout: "pipe", stderr: "pipe" })
+    const run = await supervise(child, { timeoutMs: GIT_TIMEOUT_MS })
+    if (run.kind === "exited") return { code: run.exitCode, stdout: run.stdout, stderr: run.stderr }
+    return { code: 124, stdout: run.stdout, stderr: `${argv[0]} ${run.kind}`.trim() }
+  } catch (error) {
+    return { code: 127, stdout: "", stderr: error instanceof Error ? error.message : String(error) }
+  }
+}
+
 /** The raw git facts `isUnbornHead` decides on, from one directory. */
 async function readHeadFacts(run: Runner, directory: string): Promise<HeadFacts> {
   const out = async (...args: string[]) => {
