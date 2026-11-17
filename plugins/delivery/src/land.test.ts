@@ -2611,7 +2611,7 @@ describe("delivery_land brings the landed commits local before proving their sha
     const { canonical, receipts } = repository()
     const { run, calls } = runner(
       {
-        prView: [completed(githubPr()), completed(mergedGithubPr())],
+        prView: [completed(mergedGithubPr())],
         present: Array.from({ length: 20 }, () => false),
         fetch: [
           { ok: true, exitCode: 128, stdout: "", stderr: "" },
