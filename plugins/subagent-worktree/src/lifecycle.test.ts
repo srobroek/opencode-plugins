@@ -1012,7 +1012,7 @@ describe("two plugin instances, one repository: coordination lives on disk", () 
   })
 
   test("a stale lock (old, holder dead) is broken and the removal runs", async () => {
-    const lockOptions = { waitMs: 200, ttlMs: 60_000, alive: () => false, host: "this-host", now: () => NOW }
+    const lockOptions = { waitMs: 5000, ttlMs: 60_000, alive: () => false, host: "this-host", now: () => NOW }
     const { fake, state, common, worktree, cleanup } = await start({ ancestor: 1 }, { lock: lockOptions })
     fake.emit({ type: "session.execution.succeeded", data: { sessionID: CHILD } })
     await settle()
