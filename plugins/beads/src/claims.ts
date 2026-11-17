@@ -287,6 +287,9 @@ const LEDGER_SELECTOR = /^(?:-C|--directory|--db|--database|--global|--dolt-[a-z
 
 const isAssignment = (value: string): boolean => /^[A-Za-z_][A-Za-z0-9_]*=/u.test(value)
 
+/** A pre-verb token that is itself a ledger selector flag (not a value), in any spelling. */
+const PRE_VERB_SELECTOR = /^(?:-C|--directory|--db|--database|--global)(?:=|$)/u
+
 /** Whether a pre-verb flag picks the ledger: a value-bearing `--db`/`-C`/`--directory`/`--database`, or `--global`. */
 function selectsLedger(invocation: BdInvocation): boolean {
   const { globals } = invocation
@@ -355,6 +358,10 @@ export function inspectClaim(command: string, cwd: string, env: NodeJS.ProcessEn
   // `--global`/`--database` selector, an unresolvable path or a different store is an external
   // ledger: the plugin cannot release a claim there, so it does not track one.
   if (selectsLedger(invocation)) {
+    // bd takes the last value of a repeated flag, which `globalValue` does not read: two selectors
+    // of any kind leave the ledger unproven.
+    const selectors = invocation.globals.filter((token) => PRE_VERB_SELECTOR.test(token))
+    if (selectors.length > 1) return refuse("more than one ledger selector precedes the verb, so the ledger is not certain")
     const ambient = bdStoreForInvocation({ ...invocation, globals: [] }, cwd, env)
     const selected = bdStoreForInvocation(invocation, cwd, env)
     if (ambient === undefined || selected === undefined || ambient !== selected)

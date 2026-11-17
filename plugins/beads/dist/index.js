@@ -3924,6 +3924,7 @@ function claimEnabled(invocation) {
 }
 var LEDGER_SELECTOR = /^(?:-C|--directory|--db|--database|--global|--dolt-[a-z-]+)(?:=|$)/u;
 var isAssignment = (value) => /^[A-Za-z_][A-Za-z0-9_]*=/u.test(value);
+var PRE_VERB_SELECTOR = /^(?:-C|--directory|--db|--database|--global)(?:=|$)/u;
 function selectsLedger(invocation) {
   const { globals } = invocation;
   return flagEnabled(globals, ["--global"]) || globalValue(globals, ["--database", "--db", "-C", "--directory"]) !== undefined;
@@ -3982,6 +3983,9 @@ function inspectClaim(command, cwd, env, injected) {
   if (target.ambiguous === true)
     return refuse("its ledger is ambiguous");
   if (selectsLedger(invocation)) {
+    const selectors = invocation.globals.filter((token) => PRE_VERB_SELECTOR.test(token));
+    if (selectors.length > 1)
+      return refuse("more than one ledger selector precedes the verb, so the ledger is not certain");
     const ambient = bdStoreForInvocation({ ...invocation, globals: [] }, cwd, env);
     const selected = bdStoreForInvocation(invocation, cwd, env);
     if (ambient === undefined || selected === undefined || ambient !== selected)

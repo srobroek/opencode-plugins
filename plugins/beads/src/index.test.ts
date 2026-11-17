@@ -481,6 +481,25 @@ fi
     await run.cleanup()
   })
 
+  test.each<[string, (ambient: { root: string; store: string }, other: string) => string]>([
+    ["--db twice", ({ store }, other) => `--db ${store} --db ${join(other, ".beads")}`],
+    ["--db= twice", ({ store }, other) => `--db=${store} --db=${join(other, ".beads")}`],
+    ["-C twice", ({ root }, other) => `-C ${root} -C ${other}`],
+    ["--directory twice", ({ root }, other) => `--directory ${root} --directory ${other}`],
+    ["-C then --directory", ({ root }, other) => `-C ${root} --directory ${other}`],
+    ["--db then --database", ({ store }, other) => `--db ${store} --database ${join(other, ".beads")}`],
+    ["--db then -C", ({ store }, other) => `--db ${store} -C ${other}`],
+  ])("repeated or mixed selectors (%s) whose last value is another ledger track nothing", async (_name, selectors) => {
+    const other = scratch(true)
+    const run = await claimThrough((ambient) => [`bd ${selectors(ambient, other)} update proj-1 --claim`])
+    // bd took the last value: the stand-in received the other ledger, not the ambient one.
+    expect(run.log).toContain(`LEDGER=${join(other, ".beads")} proj-1`)
+    expect(run.claims).toEqual([])
+    expect(run.leases).toEqual([])
+    expect(run.result).toContain("more than one ledger selector")
+    await run.cleanup()
+  })
+
   test.each([
     ["-C", (root: string) => `-C ${root}`],
     ["--db", (root: string) => `--db ${root}/.beads`],

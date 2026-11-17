@@ -44,6 +44,11 @@ describe("a pre-verb ledger selector", () => {
     ["--database=elsewhere/.beads"],
     ["--db missing/.beads"],
     ["--global"],
+    ["--db nested/.beads --db elsewhere/.beads"],
+    ["--db elsewhere/.beads --db nested/.beads"],
+    ["-C nested --directory nested"],
+    ["--db nested/.beads --database nested/.beads"],
+    ["--global --db nested/.beads"],
   ])("%s, a ledger not proven to be the ambient one, is never tracked", (selector) => {
     const { root, ambient } = ledgers()
     const command = `bd ${selector} update proj-1 --claim --json`
