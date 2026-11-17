@@ -498,6 +498,7 @@ describe("a rewrite the walker cannot fully parse is refused", () => {
     ["git launched after a valued option", "uv run --package billing git update-ref -d refs/heads/main"],
     ["git filter-branch launched after --with", "uv run --with x git filter-branch --env-filter true"],
     ["a script that is handed a filter-repo word", "python3 script.py git-filter-repo --force"],
+    ["a pager option after a cluster that ends in a file option", "git grep -fe -O'sh -c \"git update-ref -d refs/heads/main\"' x"],
     ["a cluster that includes the pager option", "git grep -iO'sh -c \"git update-ref -d refs/heads/main\"' x"],
     ["git grep -O with a pager command", "git grep -O'sh -c \"git update-ref -d refs/heads/main\"' x"],
     ["git grep --open-files-in-pager", "git grep --open-files-in-pager='sh -c \"git update-ref -d refs/heads/main\"' x"],

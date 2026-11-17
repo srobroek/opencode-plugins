@@ -3990,9 +3990,26 @@ var REWRITE_FORM = /(?<![\w-])git[-_]filter[-_]repo(?![\w-])/;
 var REWRITE_WORD = /(?<![\w/.-])(?:filter-repo|filter-branch|update-ref|replace)(?![\w/-]|\.\w)/;
 var GIT_WORD = /(?<![\w/.-])d?git(?![\w-])/;
 var EXECUTABLE_OPTION = /^(?:-O|--(?:open-files-in-pager|ext-diff|textconv|exec|exec-path|pager|config-env|upload-pack|receive-pack|pre|pre-glob|hostname-bin)(?![\w-]))/;
-var DATA_OPTION = /^(?:-[em]|--grep|--message|--regexp|--pattern)$/;
+var DATA_OPTION = /^(?:--grep|--message|--regexp|--pattern)$/;
 var mentioned = (word) => REWRITE_FORM.test(word) || REWRITE_WORD.test(word);
+var SHORT_VALUED = /[efmABC]/;
+function cluster(arg) {
+  const letters = arg.slice(1);
+  const at = letters.search(SHORT_VALUED);
+  return { letters, at };
+}
 function mentionsOnlyAsData(args) {
+  for (const arg of args) {
+    if (!arg.startsWith("-") || arg === "-")
+      continue;
+    if (EXECUTABLE_OPTION.test(arg))
+      return false;
+    if (!arg.startsWith("--")) {
+      const { letters, at } = cluster(arg);
+      if (letters.slice(0, at < 0 ? undefined : at).includes("O"))
+        return false;
+    }
+  }
   let options = true;
   for (let i = 0;i < args.length; i++) {
     const arg = args[i];
@@ -4002,22 +4019,20 @@ function mentionsOnlyAsData(args) {
     }
     if (!options || !arg.startsWith("-") || arg === "-")
       continue;
-    if (EXECUTABLE_OPTION.test(arg))
-      return false;
-    const head = arg.split("=", 1)[0];
-    if (DATA_OPTION.test(head)) {
-      if (!arg.includes("="))
-        i++;
-      continue;
-    }
-    if (!arg.startsWith("--")) {
-      const letters = arg.slice(1);
-      const at = letters.search(/[em]/);
-      if (/O/.test(at < 0 ? letters : letters.slice(0, at)))
-        return false;
-      if (at >= 0) {
-        if (at === letters.length - 1)
+    if (arg.startsWith("--")) {
+      const head = arg.split("=", 1)[0];
+      if (DATA_OPTION.test(head)) {
+        if (!arg.includes("="))
           i++;
+        continue;
+      }
+    } else {
+      const { letters, at } = cluster(arg);
+      if (at >= 0) {
+        const rest = letters.slice(at + 1);
+        const value = rest === "" ? args[++i] : rest;
+        if (!"em".includes(letters[at]) && value !== undefined && mentioned(value))
+          return false;
         continue;
       }
     }

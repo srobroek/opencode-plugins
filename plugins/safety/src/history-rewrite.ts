@@ -461,15 +461,34 @@ const GIT_WORD = /(?<![\w/.-])d?git(?![\w-])/
 const EXECUTABLE_OPTION =
   /^(?:-O|--(?:open-files-in-pager|ext-diff|textconv|exec|exec-path|pager|config-env|upload-pack|receive-pack|pre|pre-glob|hostname-bin)(?![\w-]))/
 /** Options whose value is a pattern or message, never a program. */
-const DATA_OPTION = /^(?:-[em]|--grep|--message|--regexp|--pattern)$/
+const DATA_OPTION = /^(?:--grep|--message|--regexp|--pattern)$/
 const mentioned = (word: string): boolean => REWRITE_FORM.test(word) || REWRITE_WORD.test(word)
+
+/** Short options that take a value: `-e`/`-m` a pattern or message, `-f` a file, `-A`/`-B`/`-C` a count. */
+const SHORT_VALUED = /[efmABC]/
+
+/** The letters of a short-option cluster up to and including its first value-taking letter, and the index of that letter. */
+function cluster(arg: string): { letters: string; at: number } {
+  const letters = arg.slice(1)
+  const at = letters.search(SHORT_VALUED)
+  return { letters, at }
+}
 
 /**
  * Whether every rewrite word among `args` sits where the command treats it as data: a positional
- * pattern or path, or the value of `-e`, `-m`, `--grep`, `--message`. Any option that runs a program
- * or pager, or a rewrite word in any other option value, is not data.
+ * pattern or path, or the value of `-e`, `-m`, `--grep`, `--message`. A program-running option is
+ * looked for in every word, whatever option it might be the value of; only the data exemption
+ * follows the options' values.
  */
 function mentionsOnlyAsData(args: readonly string[]): boolean {
+  for (const arg of args) {
+    if (!arg.startsWith("-") || arg === "-") continue
+    if (EXECUTABLE_OPTION.test(arg)) return false
+    if (!arg.startsWith("--")) {
+      const { letters, at } = cluster(arg)
+      if (letters.slice(0, at < 0 ? undefined : at).includes("O")) return false
+    }
+  }
   let options = true
   for (let i = 0; i < args.length; i++) {
     const arg = args[i] as string
@@ -478,19 +497,18 @@ function mentionsOnlyAsData(args: readonly string[]): boolean {
       continue
     }
     if (!options || !arg.startsWith("-") || arg === "-") continue
-    if (EXECUTABLE_OPTION.test(arg)) return false
-    const head = arg.split("=", 1)[0] as string
-    if (DATA_OPTION.test(head)) {
-      if (!arg.includes("=")) i++
-      continue
-    }
-    if (!arg.startsWith("--")) {
-      // A short-option cluster: letters up to the first value-taking `-e`/`-m`, whose value is data.
-      const letters = arg.slice(1)
-      const at = letters.search(/[em]/)
-      if (/O/.test(at < 0 ? letters : letters.slice(0, at))) return false
+    if (arg.startsWith("--")) {
+      const head = arg.split("=", 1)[0] as string
+      if (DATA_OPTION.test(head)) {
+        if (!arg.includes("=")) i++
+        continue
+      }
+    } else {
+      const { letters, at } = cluster(arg)
       if (at >= 0) {
-        if (at === letters.length - 1) i++
+        const rest = letters.slice(at + 1)
+        const value = rest === "" ? args[++i] : rest
+        if (!"em".includes(letters[at] as string) && value !== undefined && mentioned(value)) return false
         continue
       }
     }
