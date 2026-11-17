@@ -4,9 +4,11 @@
  * Git: tests run real `git` in scratch repositories, and the developer's global and
  * system config would otherwise apply there: commit signing, system-wide hooks
  * (`core.hooksPath`), credential helpers and filters each start extra programs per
- * command, and they are absent in CI. Every child process inherits `process.env`, so
- * the suite sees the config-free Git that CI has. A test or production path that
- * builds its own environment still controls it.
+ * command, and they are absent in CI. A child started through `node:child_process`,
+ * `Bun.$` or with `env: process.env` inherits these settings, so those tests see the
+ * config-free Git that CI has. `Bun.spawn` and `Bun.spawnSync` without `env` start the
+ * child in the environment the process started with and do not see them. A test or
+ * production path that builds its own environment still controls it.
  *
  * Solid: `@opentui/solid/preload` imports Babel when it registers its JSX transform,
  * which costs seconds per test process even when no file has JSX. This registers the
