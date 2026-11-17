@@ -127,7 +127,11 @@ describe("withDiskLock", () => {
     mkdirSync(join(dir, "opencode", "locks"), { recursive: true })
     writeFileSync(lockFile(dir, "/wt/a"), JSON.stringify(heldByOther()))
     let ran = false
-    await expect(withDiskLock(dir, "/wt/a", { sessionID: "s", waitMs: 40 }, async () => void (ran = true))).rejects.toBeInstanceOf(LockTimeout)
+    await expect(
+      withDiskLock(dir, "/wt/a", { sessionID: "s", waitMs: 40 }, async () => {
+        ran = true
+      }),
+    ).rejects.toBeInstanceOf(LockTimeout)
     expect(ran).toBe(false)
   })
 })
