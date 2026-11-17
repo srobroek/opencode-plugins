@@ -2758,6 +2758,35 @@ describe("delivery_land brings the landed commits local before proving their sha
     expect(seen.every((signal) => signal === undefined)).toBe(true)
   })
 
+  test("an abort during the merge does not stop the fetch of a base tip that is missing locally", async () => {
+    const { canonical, receipts } = repository()
+    const { run, calls } = runner({ prView: [completed(githubPr()), completed(mergedGithubPr())] }, canonical)
+    const controller = new AbortController()
+    let tipFetched = false
+    const aborting: CliRunner = (argv, options) => {
+      if (merged(argv)) controller.abort()
+      // The base moved on after the merge: its tip is absent until it is fetched by id.
+      if (argv.includes("cat-file") && argv.some((part) => part.startsWith(TIP_OID)) && !tipFetched) {
+        return completed("", 1, "fatal: not a commit")
+      }
+      if (argv.includes("fetch") && argv.includes(TIP_OID)) {
+        // A fetch that still carries the cancelled signal is what the real runner refuses.
+        if (options.signal?.aborted === true) return { ok: false, exitCode: null, stdout: "", stderr: "", error: "aborted" }
+        tipFetched = true
+      }
+      return run(argv, options)
+    }
+    const outcome = await landPullRequest(
+      { pr: 470, ...REVIEWED },
+      { run: aborting, cwd: canonical, now: () => NOW, receiptsDirectory: receipts, env: {}, sleep: async () => {}, signal: controller.signal },
+    )
+
+    if (!outcome.ok) throw new Error(outcome.reason)
+    expect(tipFetched).toBe(true)
+    expect(fetches(calls).map(operands)).toContainEqual(["origin", TIP_OID])
+    expect(readdirSync(receipts)).toHaveLength(1)
+  })
+
   test("without a signal a clean land behaves as before", async () => {
     const { outcome } = await land({ prView: [completed(githubPr()), completed(mergedGithubPr())] }, REVIEWED)
     expect(outcome.ok).toBe(true)

@@ -406,7 +406,11 @@ export async function awaitQueue(options: {
 }): Promise<QueueWait> {
   let absent = options.absent ?? 0
   let spent = 0
+  let detail = ""
   for (let attempt = 0; ; attempt++) {
+    // A stop raised during the sleep ends the wait before the next read: that read would be
+    // refused as cancelled, which is a refusal, where the last observation is still resumable.
+    if (attempt > 0 && options.stopped()) return { kind: "pending", detail }
     const observed = await options.read()
     // A failed read observed nothing: the entry may still be queued, so it is not terminal.
     if ("reason" in observed) return { kind: "refused", reason: observed.reason, terminal: false }
@@ -414,6 +418,7 @@ export async function awaitQueue(options: {
     if (decision.kind === "merged") return decision
     if (decision.kind === "refused") return { ...decision, terminal: true }
     absent = decision.absent
+    detail = decision.detail
     const delay = pollDelayMs(attempt)
     if (options.stopped() || spent + delay > options.budgetMs) return { kind: "pending", detail: decision.detail }
     spent += delay

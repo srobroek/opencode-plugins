@@ -186,24 +186,25 @@ describe("awaitQueue", () => {
     expect(await run([{ reason: "gh: exit 1" }])).toEqual({ kind: "refused", reason: "gh: exit 1", terminal: false })
   })
 
-  test("an abort raised while sleeping ends the wait as pending after that one read", async () => {
-    let aborted = false
+  test("an abort raised while sleeping ends the wait as pending without another read", async () => {
+    const controller = new AbortController()
     let reads = 0
     const waited = await awaitQueue({
+      // Like the real runner, a read made after the abort is refused rather than answered.
       read: async () => {
         reads++
-        return { snapshot: snapshot({ entry: entry() }) }
+        return controller.signal.aborted
+          ? { reason: "signal: observed an abort before the read" }
+          : { snapshot: snapshot({ entry: entry() }) }
       },
-      sleep: async () => {
-        aborted = true
-      },
-      stopped: () => aborted,
+      sleep: async () => controller.abort(),
+      stopped: () => controller.signal.aborted,
       expected: HEAD,
       budgetMs: 600_000,
     })
 
     expect(waited.kind).toBe("pending")
-    expect(reads).toBe(2)
+    expect(reads).toBe(1)
   })
 
   test("a removed entry, a closed pull request and a moved head are terminal refusals", async () => {

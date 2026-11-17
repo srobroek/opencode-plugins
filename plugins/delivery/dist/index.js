@@ -3174,7 +3174,10 @@ async function readSnapshot(run, owner, name, number, env) {
 async function awaitQueue(options) {
   let absent = options.absent ?? 0;
   let spent = 0;
+  let detail = "";
   for (let attempt = 0;; attempt++) {
+    if (attempt > 0 && options.stopped())
+      return { kind: "pending", detail };
     const observed = await options.read();
     if ("reason" in observed)
       return { kind: "refused", reason: observed.reason, terminal: false };
@@ -3184,6 +3187,7 @@ async function awaitQueue(options) {
     if (decision.kind === "refused")
       return { ...decision, terminal: true };
     absent = decision.absent;
+    detail = decision.detail;
     const delay = pollDelayMs(attempt);
     if (options.stopped() || spent + delay > options.budgetMs)
       return { kind: "pending", detail: decision.detail };
@@ -4407,7 +4411,7 @@ async function landPullRequest(params, deps = {}) {
     if (fields.length !== 2 || fields[1] !== wanted || !FULL_OID.test(tip)) {
       return { reason: `${listing.join(" ")}: observed ${show3(result.stdout.trim().slice(0, 200))}, expected exactly one line "<oid> ${wanted}"` };
     }
-    const tipLocal = await ensureLocalCommits([tip], proved.baseRefName, remote, git, fetchRun, deps.sleep ?? abortableSleep, signal);
+    const tipLocal = await ensureLocalCommits([tip], proved.baseRefName, remote, git, fetchRun, deps.sleep ?? abortableSleep, merging ? undefined : signal);
     return "reason" in tipLocal ? { reason: tipLocal.reason } : tip;
   };
   const proof = await mergeProof(proved, proofMethod, git, queue !== null, baseTip);

@@ -1886,7 +1886,7 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
     if (fields.length !== 2 || fields[1] !== wanted || !FULL_OID.test(tip)) {
       return { reason: `${listing.join(" ")}: observed ${show(result.stdout.trim().slice(0, 200))}, expected exactly one line "<oid> ${wanted}"` }
     }
-    const tipLocal = await ensureLocalCommits([tip], proved.baseRefName, remote, git, fetchRun, deps.sleep ?? abortableSleep, signal)
+    const tipLocal = await ensureLocalCommits([tip], proved.baseRefName, remote, git, fetchRun, deps.sleep ?? abortableSleep, merging ? undefined : signal)
     return "reason" in tipLocal ? { reason: tipLocal.reason } : tip
   }
 
