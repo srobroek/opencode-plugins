@@ -486,6 +486,31 @@ describe("ordinary git is untouched in a canonical checkout", () => {
   })
 })
 
+describe("a rewrite the walker cannot fully parse is refused", () => {
+  test.each([
+    ["a builtin-wrapped eval", "builtin eval 'git update-ref -d refs/heads/main'"],
+    ["--config-env with a separate value", "git --config-env core.x=X filter-branch --env-filter true"],
+    ["a repeated --target", "git filter-repo --target {linked} --target {canonical} --path a"],
+    ["python -c code that runs git", "python3 -c 'import os; os.system(\"git update-ref -d refs/heads/main\")'"],
+    ["a git alias that runs a rewrite", "git -c alias.x='!git update-ref -d refs/heads/main' x"],
+  ])("refuses %s", (_name, command) => {
+    expect(run(command, "canonical")?.guard).toBe("history-rewrite")
+  })
+
+  test.each([
+    "grep filter-repo README.md",
+    "rg update-ref plugins/",
+    "echo update-ref",
+    "git log --grep=filter-branch",
+    "cat docs/filter-repo.md",
+    'git commit -m "fix update-ref guard"',
+    'bd create --description "git replace misuse"',
+    "uv run --directory {linked} pytest",
+  ])("allows the mention in %s", (command) => {
+    expect(run(command, "canonical")).toBeUndefined()
+  })
+})
+
 test("the guard can be switched off", () => {
   expect(
     hardGate(R, where.canonical as string, { tempRoots: [join(root, "temp")], disabled: new Set(["history-rewrite"]) }),

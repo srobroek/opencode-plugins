@@ -142,6 +142,7 @@ const dynamic = (word: string): boolean => /[$`]/.test(word) || word.startsWith(
 type FilterRepo = { args: string[]; chdirs: string[] }
 type Launched = { program: string; args: string[] } | "not-run" | "unparsed"
 
+
 /** Index of the first word at or after `at` that is not an option (valued ones skip their value). */
 function skipOptions(argv: readonly string[], at: number, valued: ReadonlySet<string>): number {
   let i = at
@@ -198,6 +199,10 @@ function filterRepo(command: Command): FilterRepo | "uncertain" | undefined {
   const program = base(run.program.replace(/[@=<>~![].*$/, ""))
   return FILTER_REPO_NAME.test(program) ? { args: run.args, chdirs: [] } : undefined
 }
+
+/** How many times `--name value` or `--name=value` appears. */
+const optionCount = (args: readonly string[], name: string): number =>
+  args.filter((arg) => arg === name || arg.startsWith(`${name}=`)).length
 
 /** The value of `--name value` or `--name=value`. */
 function optionValue(args: readonly string[], name: string): string | undefined {
@@ -436,6 +441,39 @@ function repositorySelection(commands: readonly Command[]): string | undefined {
 const withSelection = (what: string, selection: string): string =>
   `${PREFIX}: refused ${what}. ${selection} can point git at a repository other than the one the directory implies, so the guard cannot tell which repository the rewrite changes. Run the rewrite on its own in a temp clone, with the shell tool's workdir set there and without these options. ${GUIDANCE}`
 
+/** Commands that only read or print their arguments: a rewrite word among them is data. */
+const NON_EXECUTING: ReadonlySet<string> = new Set(["grep", "rg", "echo", "printf", "cat", "bd", "head", "tail", "wc", "ls", "pip", "pip3"])
+/** Git subcommands that treat their arguments (`-m`, `--grep`, paths) as data. */
+const GIT_DATA_SUBCOMMANDS: ReadonlySet<string> = new Set(["log", "commit", "show", "diff", "grep", "status", "add", "blame", "shortlog"])
+/** Commands whose body the walker visits itself, so the commands inside are judged on their own. */
+const DESCENDED: ReadonlySet<string> = new Set(["eval", "xargs"])
+const REWRITE_FORM = /(?<![\w-])git[-_]filter[-_]repo(?![\w-])/
+const REWRITE_WORD = /(?<![\w/.-])(?:filter-repo|filter-branch|update-ref|replace)(?![\w/-]|\.\w)/
+const GIT_WORD = /(?<![\w/.-])d?git(?![\w-])/
+
+/**
+ * The rewrite word a command names that the walker did not judge as a rewrite, or `undefined`.
+ * A text-level fallback: a word counts as a mention when it sits in the command's own words with
+ * `git` (or as `git-filter-repo`), unless the command only prints or searches its arguments, is a
+ * shell the walker descends into, or is a git subcommand that treats them as data.
+ */
+function unaccountedMention(command: Command, git: GitInvocation | undefined): string | undefined {
+  const text = command.argv.join(" ")
+  const found = REWRITE_FORM.exec(text) ?? (GIT_WORD.test(text) ? REWRITE_WORD.exec(text) : null)
+  if (found === null) return undefined
+  const name = base(command.argv[0])
+  if (NON_EXECUTING.has(name) || SHELLS.has(name) || DESCENDED.has(name)) return undefined
+  // filterRepo judged a launcher's program; `python -c` code is not judged.
+  const run = launched(command.argv)
+  if (run !== undefined && !(run === "not-run" && name.startsWith("python"))) return undefined
+  if (git !== undefined) {
+    if (["filter-branch", "replace", "update-ref"].includes(git.subcommand)) return undefined
+    const plain = !git.overridden && !command.argv.slice(1, git.offset - 1).includes("-c")
+    if (plain && GIT_DATA_SUBCOMMANDS.has(git.subcommand)) return undefined
+  }
+  return found[0]
+}
+
 /**
  * Why a command in `commands` is refused, or `undefined`. `cwd` is the tool call's workdir.
  * `tempRoots` replaces the default temp folders (tests).
@@ -475,12 +513,17 @@ export function historyRewrite(
     if (rewrite !== undefined) {
       if (rewrite.args.some((arg) => arg === "--force" || arg === "-f"))
         return `${PREFIX}: refused ${text} with --force. filter-repo --force overwrites the repository's refs and history in the directory it runs in, wherever that is. Run it without --force in a fresh temp clone with the tool's workdir set there; a fresh clone needs no --force.`
+      if (optionCount(rewrite.args, "--target") > 1)
+        return uncertain(text, "`--target` is repeated and filter-repo uses the last one")
       const target = optionValue(rewrite.args, "--target")
       const moves = [...(git?.chdirs ?? []), ...(target === undefined ? [] : [target])]
       const reason = judge(text, moves, git)
       if (reason !== undefined) return reason
       continue
     }
+    const mention = unaccountedMention(command, git)
+    if (mention !== undefined)
+      return uncertain(text, `the command text mentions \`${mention}\` where the guard could not parse a rewrite`)
     if (git === undefined) continue
     let what: string | undefined
     if (git.subcommand === "filter-branch") what = `\`git ${git.subcommand}\``

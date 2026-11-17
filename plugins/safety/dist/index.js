@@ -2628,7 +2628,7 @@ function quote(word) {
     return word;
   return `'${word.replaceAll("'", "'\\''")}'`;
 }
-var GIT_VALUED = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"]);
+var GIT_VALUED = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env"]);
 var GIT_FLAGS = new Set([
   "--no-pager",
   "-P",
@@ -3771,6 +3771,7 @@ function filterRepo(command) {
   const program = base(run.program.replace(/[@=<>~![].*$/, ""));
   return FILTER_REPO_NAME.test(program) ? { args: run.args, chdirs: [] } : undefined;
 }
+var optionCount = (args, name) => args.filter((arg) => arg === name || arg.startsWith(`${name}=`)).length;
 function optionValue(args, name) {
   for (let i = 0;i < args.length; i++) {
     const arg = args[i];
@@ -3978,6 +3979,32 @@ function repositorySelection(commands) {
   return;
 }
 var withSelection = (what, selection) => `${PREFIX}: refused ${what}. ${selection} can point git at a repository other than the one the directory implies, so the guard cannot tell which repository the rewrite changes. Run the rewrite on its own in a temp clone, with the shell tool's workdir set there and without these options. ${GUIDANCE}`;
+var NON_EXECUTING = new Set(["grep", "rg", "echo", "printf", "cat", "bd", "head", "tail", "wc", "ls", "pip", "pip3"]);
+var GIT_DATA_SUBCOMMANDS = new Set(["log", "commit", "show", "diff", "grep", "status", "add", "blame", "shortlog"]);
+var DESCENDED = new Set(["eval", "xargs"]);
+var REWRITE_FORM = /(?<![\w-])git[-_]filter[-_]repo(?![\w-])/;
+var REWRITE_WORD = /(?<![\w/.-])(?:filter-repo|filter-branch|update-ref|replace)(?![\w/-]|\.\w)/;
+var GIT_WORD = /(?<![\w/.-])d?git(?![\w-])/;
+function unaccountedMention(command, git) {
+  const text = command.argv.join(" ");
+  const found = REWRITE_FORM.exec(text) ?? (GIT_WORD.test(text) ? REWRITE_WORD.exec(text) : null);
+  if (found === null)
+    return;
+  const name = base(command.argv[0]);
+  if (NON_EXECUTING.has(name) || SHELLS.has(name) || DESCENDED.has(name))
+    return;
+  const run = launched(command.argv);
+  if (run !== undefined && !(run === "not-run" && name.startsWith("python")))
+    return;
+  if (git !== undefined) {
+    if (["filter-branch", "replace", "update-ref"].includes(git.subcommand))
+      return;
+    const plain = !git.overridden && !command.argv.slice(1, git.offset - 1).includes("-c");
+    if (plain && GIT_DATA_SUBCOMMANDS.has(git.subcommand))
+      return;
+  }
+  return found[0];
+}
 function historyRewrite(commands, cwd, tempRoots = defaultTempRoots(), env = process.env) {
   const judge = (what, moves, git) => {
     const selection = repositorySelection(commands);
@@ -4017,6 +4044,8 @@ function historyRewrite(commands, cwd, tempRoots = defaultTempRoots(), env = pro
     if (rewrite !== undefined) {
       if (rewrite.args.some((arg) => arg === "--force" || arg === "-f"))
         return `${PREFIX}: refused ${text} with --force. filter-repo --force overwrites the repository's refs and history in the directory it runs in, wherever that is. Run it without --force in a fresh temp clone with the tool's workdir set there; a fresh clone needs no --force.`;
+      if (optionCount(rewrite.args, "--target") > 1)
+        return uncertain(text, "`--target` is repeated and filter-repo uses the last one");
       const target = optionValue(rewrite.args, "--target");
       const moves = [...git?.chdirs ?? [], ...target === undefined ? [] : [target]];
       const reason = judge(text, moves, git);
@@ -4024,6 +4053,9 @@ function historyRewrite(commands, cwd, tempRoots = defaultTempRoots(), env = pro
         return reason;
       continue;
     }
+    const mention = unaccountedMention(command, git);
+    if (mention !== undefined)
+      return uncertain(text, `the command text mentions \`${mention}\` where the guard could not parse a rewrite`);
     if (git === undefined)
       continue;
     let what;
