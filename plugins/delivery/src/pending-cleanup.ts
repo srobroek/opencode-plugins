@@ -34,11 +34,21 @@ import {
   removeLanding,
   writeLanding,
 } from "@srobroek/opencode-lib/worktree-claims"
-import { holdBlock, readHolds, setHold } from "@srobroek/opencode-lib/worktree-locks"
+import { holdsState, type LockOptions, lockedWorktreeRemoval, setHold } from "@srobroek/opencode-lib/worktree-locks"
 import { ownershipDeferral } from "./auto-cleanup.ts"
-import { CLEANUP_BOUNDS, type CleanupDeps, type CleanupResult, cleanupDelivery, type HostWorktrees, ledgerState } from "./cleanup.ts"
+import {
+  CLEANUP_BOUNDS,
+  type CleanupDeps,
+  type CleanupFailure,
+  type CleanupResult,
+  cleanupDelivery,
+  type HostWorktrees,
+  ledgerState,
+  type RemovalFacts,
+} from "./cleanup.ts"
 import {
   closeoutCommands,
+  type GitRunner,
   type LandingReceipt,
   listReceipts,
   readReceipt,
@@ -153,6 +163,9 @@ export function explicitDeferral(ownership: Ownership): string | undefined {
  * came before. Once authorized, an earlier denial is cleared (so the owner may proceed) and, if a
  * lane owns the worktree, delivery stops there with {@link CleanupDeferred}: one remover per worktree.
  */
+/** What `cleanupDelivery` hands `authorize`. */
+export type ExplicitRequest = { worktree: string; branch?: string; pr?: number }
+
 export async function authorizeExplicit(
   pending:
     | {
@@ -161,9 +174,9 @@ export async function authorizeExplicit(
         ownership: (worktree: string) => Ownership
       }
     | undefined,
-  ask: (request: { worktree: string }) => Promise<void>,
+  ask: (request: ExplicitRequest) => Promise<void>,
   sessionID: string,
-  request: { worktree: string },
+  request: ExplicitRequest,
 ): Promise<void> {
   try {
     await ask(request)
@@ -190,6 +203,10 @@ export type PendingDeps = {
   maxPerPass?: number
   /** Test seam: the runner, bounds and clock the cleanup proofs use. */
   cleanup?: Pick<CleanupDeps, "run" | "bounds" | "now">
+  /** Test seam: the git runner the repository observations use. */
+  observe?: GitRunner
+  /** Test seam: the on-disk lock (attempts, ttl, clock, liveness). */
+  lock?: Partial<LockOptions>
 }
 
 export function createPendingCleanup(deps: PendingDeps) {
@@ -199,6 +216,8 @@ export function createPendingCleanup(deps: PendingDeps) {
   const limit = deps.maxPerPass ?? MAX_PER_PASS
   // The same ref-read bound `delivery_cleanup` uses (injectable through `cleanup.bounds`), not a fixed 5 s.
   const observationMs = deps.cleanup?.bounds?.refReadMs ?? CLEANUP_BOUNDS.refReadMs
+  /** Worktrees whose hold could not be recorded: nothing is removed from them until a later write succeeds. */
+  const unsafe = new Map<string, string>()
   const doneIds = new Set<string>()
   const retriedAt = new Map<string, number>()
   const attemptedAt = new Map<string, number>()
@@ -213,7 +232,7 @@ export function createPendingCleanup(deps: PendingDeps) {
   }
 
   /** The repository's git common directory, where claims and landing records live; null if it cannot be resolved. */
-  const commonDir = (): string | null => repositoryContext(cwd, undefined, observationMs)?.commonDir ?? null
+  const commonDir = (): string | null => repositoryContext(cwd, deps.observe, observationMs)?.commonDir ?? null
 
   /** Who may remove `path`: a lane's claim means its owner only; an unreadable claim means no one. */
   const ownership = (path: string): Ownership => {
@@ -255,7 +274,7 @@ export function createPendingCleanup(deps: PendingDeps) {
 
   /** Receipts, newest first, whose worktree is `path`. */
   const receiptsFor = (path: string): LandingReceipt[] => {
-    const key = repoKey(cwd, undefined, observationMs)
+    const key = repoKey(cwd, deps.observe, observationMs)
     if (key === null) return []
     const want = canonicalDirectory(path)
     return pendingReceipts(listReceipts(resolve(receiptDirectory(env, key)))).filter(
@@ -290,10 +309,13 @@ export function createPendingCleanup(deps: PendingDeps) {
   const holdFor = async (path: string): Promise<string | undefined> => {
     const owned = ownershipDeferral(ownership(path))
     if (owned !== undefined) return owned
-    // Background work any idle gate (this plugin's or the lane owner's) recorded for this directory.
+    // Background work any idle gate (this plugin's or the lane owner's) recorded for this directory,
+    // and whether the store those records live in can be written at all.
     const common = commonDir()
     if (common === null) return "the git common directory could not be resolved"
-    const running = holdBlock(readHolds(common, path), now())
+    const failed = unsafe.get(canonicalDirectory(path))
+    if (failed !== undefined) return failed
+    const running = holdsState(common, path, now())
     if (running !== undefined) return running
     const projectID = (ctx.location as { project?: { id?: string } }).project?.id
     try {
@@ -321,20 +343,43 @@ export function createPendingCleanup(deps: PendingDeps) {
     }
   }
 
-  /** `authorize` for a removal delivery makes on its own: runs after every proof, right before the removal. */
-  const guard = async (request: { worktree: string }) => {
-    const hold = await holdFor(request.worktree)
-    if (hold !== undefined) throw new Error(`held: ${hold}`)
-    // The landing records are read again here, after every proof: a denial written since the
-    // snapshot, or records that cannot be read, block exactly as they do for the lane's owner.
+  /** A denial recorded for `path`, or records that cannot be read, read fresh. */
+  const landingBlock = (path: string): string | undefined => {
     const common = commonDir()
-    if (common === null) throw new Error("held: the git common directory could not be resolved")
+    if (common === null) return "the git common directory could not be resolved"
     const listed = listLandings(common)
-    if (listed.unreadable) throw new Error("held: the landing records could not be read")
-    if (landingsFor(listed.records, request.worktree).some((entry) => entry.denied !== undefined)) {
-      throw new Error("held: cleanup was denied; an explicit delivery_cleanup re-arms it")
+    if (listed.unreadable) return "the landing records could not be read"
+    if (landingsFor(listed.records, path).some((entry) => entry.denied !== undefined)) {
+      return "cleanup was denied; an explicit delivery_cleanup re-arms it"
     }
+    return undefined
   }
+
+  /**
+   * The removal boundary every delivery remover goes through (explicit, inline, retry): the same
+   * on-disk lock `subagent-worktree` takes, then, under it and after every proof, the last look at
+   * claims, running work, sessions and denials, then the removal itself. Refuses (does not throw)
+   * when anything holds.
+   */
+  const section = async (
+    worktree: string,
+    run: () => Promise<CleanupFailure | RemovalFacts>,
+  ): Promise<CleanupFailure | RemovalFacts> => {
+    const common = commonDir()
+    if (common === null) return { ok: false, reason: "worktree.held: observed the git common directory could not be resolved, expected a coordination store; nothing was removed" }
+    const outcome = await lockedWorktreeRemoval(common, worktree, { sessionID: "delivery", now, ...deps.lock }, {
+      recheck: async () => (await holdFor(worktree)) ?? landingBlock(worktree),
+      remove: run,
+    })
+    if (outcome.removed) return outcome.value
+    return { ok: false, reason: `worktree.held: observed ${outcome.reason}, expected no owner, hold, denial or competing remover; nothing was removed` }
+  }
+
+  /** `authorize` and `removalSection` for an explicit `delivery_cleanup` call. */
+  const explicit = (ask: (request: ExplicitRequest) => Promise<void>, sessionID: string) => ({
+    authorize: (request: ExplicitRequest) => authorizeExplicit(api, ask, sessionID, request),
+    removalSection: section,
+  })
 
   /**
    * Drop landing records, only on positive evidence: the record's own receipt is readable and is
@@ -343,7 +388,7 @@ export function createPendingCleanup(deps: PendingDeps) {
    * cannot be parsed, nothing is deleted.
    */
   const gc = () => {
-    const key = repoKey(cwd, undefined, observationMs)
+    const key = repoKey(cwd, deps.observe, observationMs)
     const recorded = landings()
     if (key === null || recorded.common === null || recorded.unreadable) return
     const directory = resolve(receiptDirectory(env, key))
@@ -366,7 +411,7 @@ export function createPendingCleanup(deps: PendingDeps) {
 
   /** One pass over this repository's pending receipts for a finished turn of `sessionID`. */
   const run = async (sessionID: string, idle: boolean) => {
-    const key = repoKey(cwd, undefined, observationMs)
+    const key = repoKey(cwd, deps.observe, observationMs)
     if (key === null) return
     const directory = resolve(receiptDirectory(env, key))
     let pending: LandingReceipt[]
@@ -427,7 +472,7 @@ export function createPendingCleanup(deps: PendingDeps) {
         let result: CleanupResult
         try {
           // `guard` re-checks ownership after the proofs and before the removal.
-          result = await cleanupDelivery({ receipt: path }, cwd, { env, host: deps.host(), authorize: guard, ...deps.cleanup })
+          result = await cleanupDelivery({ receipt: path }, cwd, { env, host: deps.host(), removalSection: section, ...deps.cleanup })
         } catch {
           continue
         }
@@ -474,7 +519,7 @@ export function createPendingCleanup(deps: PendingDeps) {
    */
   const recordHolds = async (sessionID: string, background: ReadonlyArray<BackgroundJob>) => {
     const common = commonDir()
-    const key = repoKey(cwd, undefined, observationMs)
+    const key = repoKey(cwd, deps.observe, observationMs)
     if (common === null || key === null) return
     let pending: LandingReceipt[]
     try {
@@ -504,7 +549,15 @@ export function createPendingCleanup(deps: PendingDeps) {
         }
         if (inside) jobs.push({ kind: job.kind, id: job.shellID ?? job.childSessionID ?? job.sessionID ?? "unknown" })
       }
-      setHold(common, path, sessionID, jobs, now())
+      try {
+        setHold(common, path, sessionID, jobs, now())
+        unsafe.delete(want)
+      } catch (error) {
+        // The record could not be written, so running work cannot be ruled out: nothing is removed from this worktree until a write succeeds.
+        const why = error instanceof Error ? error.message : String(error)
+        unsafe.set(want, `its running work could not be recorded (${why})`)
+        console.error(`delivery: could not record holds for ${path}: ${why}`)
+      }
     }
   }
 
@@ -533,7 +586,12 @@ export function createPendingCleanup(deps: PendingDeps) {
         await ctx.session.hook(
           "experimental.idle" as never,
           (async (input: { sessionID: string; background?: ReadonlyArray<BackgroundJob> }) => {
-            await recordHolds(input.sessionID, input.background ?? []).catch(() => {})
+            // Never throws out of the hook: coordination errors mean a held outcome, never a removal.
+            try {
+              await recordHolds(input.sessionID, input.background ?? [])
+            } catch (error) {
+              console.error("delivery: recording holds failed", error)
+            }
             await retryNow(input.sessionID, true)
           }) as never,
         ),
@@ -560,5 +618,7 @@ export function createPendingCleanup(deps: PendingDeps) {
     await chain
   }
 
-  return { start, dispose, record, deny, arm, ownership, guard, gc, retryNow, handleEvent, settle }
+  const api = { deny, arm, ownership }
+
+  return { start, dispose, record, deny, arm, ownership, section, explicit, gc, retryNow, handleEvent, settle }
 }

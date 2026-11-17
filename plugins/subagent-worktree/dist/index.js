@@ -821,10 +821,11 @@ import { join as join3, resolve as resolve2 } from "path";
 
 // plugins/lib/src/worktree-locks.ts
 import { createHash as createHash2, randomUUID } from "crypto";
-import { linkSync, mkdirSync as mkdirSync2, readdirSync as readdirSync2, readFileSync as readFileSync2, renameSync as renameSync2, rmSync as rmSync2, statSync, writeFileSync as writeFileSync2 } from "fs";
+import { accessSync, constants as constants2, linkSync, mkdirSync as mkdirSync2, readdirSync as readdirSync2, readFileSync as readFileSync2, renameSync as renameSync2, rmSync as rmSync2, statSync, writeFileSync as writeFileSync2 } from "fs";
 import { hostname } from "os";
 import { join as join2 } from "path";
 var LOCK_TTL_MS = 2 * 60000;
+var BREAK_TTL_MS = 30000;
 var HOLD_EXPIRY_MS = 24 * 3600000;
 var sha1 = (text) => createHash2("sha1").update(text).digest("hex");
 var isObject2 = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -877,10 +878,51 @@ var readLock = (path) => {
     return;
   }
 };
+function sameLock(a, b, rawA, rawB) {
+  if (a === undefined || b === undefined)
+    return a === b && rawA !== undefined && rawA === rawB;
+  return a.token === b.token && a.pid === b.pid && a.host === b.host && a.acquiredAt === b.acquiredAt;
+}
+function breakStale(path, judged, who) {
+  const breakPath = `${path}.break`;
+  const temp = `${breakPath}.${who.token}.tmp`;
+  try {
+    writeFileSync2(temp, JSON.stringify({ pid: process.pid, host: who.host, sessionID: who.sessionID, acquiredAt: who.now(), token: who.token }));
+    try {
+      linkSync(temp, breakPath);
+    } catch (error) {
+      if (error.code !== "EEXIST")
+        throw error;
+      try {
+        if (who.now() - statSync(breakPath).mtimeMs > BREAK_TTL_MS)
+          rmSync2(breakPath, { force: true });
+      } catch {}
+      return;
+    }
+  } finally {
+    rmSync2(temp, { force: true });
+  }
+  try {
+    const now = readLock(path);
+    if (now !== undefined && sameLock(now.info, judged.info, now.raw, judged.raw))
+      rmSync2(path, { force: true });
+  } finally {
+    const mine = (() => {
+      try {
+        return JSON.parse(readFileSync2(breakPath, "utf8")).token === who.token;
+      } catch {
+        return false;
+      }
+    })();
+    if (mine)
+      rmSync2(breakPath, { force: true });
+  }
+}
 async function withDiskLock(commonDir, directory, options, work) {
   const path = lockFile(commonDir, directory);
   const now = options.now ?? Date.now;
   const host = options.host ?? hostname();
+  const hostName = hostname();
   const alive = options.alive ?? processAlive2;
   const ttlMs = options.ttlMs ?? LOCK_TTL_MS;
   const attempts = options.attempts ?? 60;
@@ -913,12 +955,8 @@ async function withDiskLock(commonDir, directory, options, work) {
     if (current === undefined)
       continue;
     if (lockIsStale(current.info, { now: now(), ttlMs, host, alive, mtimeMs: current.mtimeMs })) {
-      if (readLock(path)?.raw === current.raw) {
-        try {
-          renameSync2(path, `${path}.stale.${token}`);
-          rmSync2(`${path}.stale.${token}`, { force: true });
-        } catch {}
-      }
+      await options.seams?.afterValidate?.();
+      breakStale(path, current, { now, token, host: hostName, sessionID: options.sessionID });
       continue;
     }
     await sleep(delayMs(attempt));
@@ -965,7 +1003,8 @@ function readHolds(commonDir, directory) {
   try {
     names = readdirSync2(dir).filter((name) => name.endsWith(".json"));
   } catch (error) {
-    return { holds: [], unreadable: error.code !== "ENOENT" };
+    const absent = error.code === "ENOENT";
+    return { holds: [], unreadable: !absent, ...absent ? { missing: true } : {} };
   }
   const holds = [];
   let unreadable = false;

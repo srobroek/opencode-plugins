@@ -26,7 +26,7 @@ import {
 import { type CleanupResult, cleanupDelivery, type DeliveryCleanupParams, type HostWorktrees } from "./cleanup.ts"
 import { MERGE_METHODS } from "./forge-adapter.ts"
 import { type LandOutcome, type LandParams, landPullRequest } from "./land.ts"
-import { authorizeExplicit, CleanupDeferred, createPendingCleanup, type PendingDeps } from "./pending-cleanup.ts"
+import { CleanupDeferred, createPendingCleanup, type PendingDeps } from "./pending-cleanup.ts"
 import { malformedNote, parseVerdict } from "./verdict.ts"
 
 export {
@@ -368,9 +368,8 @@ export async function setupDelivery(
                     denied = true
                     throw error
                   }
-                  // After the prompt and every proof, right before the removal: ownership again.
-                  await pending?.guard(request)
                 },
+                removalSection: pending.section,
                 host: hostWorktrees(ctx),
               })
             })
@@ -401,7 +400,7 @@ export async function setupDelivery(
           result = await cleanupDelivery(input as DeliveryCleanupParams, directory, {
             env: environment(options),
             signal: context.signal,
-            authorize: (request) => authorizeExplicit(pending, (req) => ask(req.worktree, { ...request }), context.sessionID, request),
+            ...pending.explicit((req) => ask(req.worktree, { ...req }), context.sessionID),
             host: hostWorktrees(ctx),
           })
         } catch (error) {

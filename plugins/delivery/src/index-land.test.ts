@@ -29,7 +29,9 @@ beforeAll(() => {
     cleanupDelivery: async (params: unknown, _cwd: string, deps: CleanupDeps) => {
       cleanupCalls.push({ params, deps })
       await deps.authorize?.({ worktree: "/w/a", branch: "b", pr: 7 })
-      return cleanupResult
+      // The removal runs inside the caller's critical section, as cleanupDelivery does.
+      const run = async () => cleanupResult as never
+      return deps.removalSection ? deps.removalSection("/w/a", run) : run()
     },
   }))
   mock.module("./land.ts", () => ({
@@ -158,7 +160,7 @@ test("a lane claimed between the decision and the removal is refused at the last
   const { result } = await land({}, {}, { assert: claimBeforeAuthorize as never })
   expect(result.output.ok).toBe(true)
   expect(result.output.cleanup).toMatchObject({ ok: false })
-  expect(JSON.stringify(result.output.cleanup)).toContain("held: owned by subagent-worktree lane")
+  expect(JSON.stringify(result.output.cleanup)).toContain("owned by subagent-worktree lane")
   removeClaim(common, "/w/a")
 })
 

@@ -8,7 +8,7 @@ import {
   writeClaim,
   writeLanding,
 } from "@srobroek/opencode-lib/worktree-claims"
-import { readHolds, setHold } from "@srobroek/opencode-lib/worktree-locks"
+import { lockFile, readHolds, setHold } from "@srobroek/opencode-lib/worktree-locks"
 import { authorizeExplicit, createPendingCleanup } from "./pending-cleanup.ts"
 
 // Fixture setup creates several real Git repositories and measured about 20s under full-suite load;
@@ -18,6 +18,7 @@ setDefaultTimeout(60_000)
 import { execFileSync } from "node:child_process"
 import {
   appendFileSync,
+  chmodSync,
   copyFileSync,
   cpSync,
   existsSync,
@@ -31,7 +32,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs"
-import { devNull, tmpdir } from "node:os"
+import { devNull, hostname, tmpdir } from "node:os"
 import { basename, dirname, join, resolve } from "node:path"
 import pkg from "../package.json" with { type: "json" }
 import {
@@ -48,6 +49,7 @@ import { type CliResult, type CliRunner, runCli, SAFE_GIT_ARGS } from "./forge-a
 import { type LandDeps, type LandParams, landPullRequest as landPullRequestUnwrapped } from "./land.ts"
 import {
   buildReceipt,
+  type GitRunner,
   type LandingReceipt,
   listReceipts,
   readReceipt,
@@ -2486,7 +2488,16 @@ describe("pending cleanup: one remover per worktree", () => {
   type Harness = Awaited<ReturnType<typeof harness>>
   async function harness(
     name: string,
-    over: { beadStatus?: string; maxPerPass?: number; list?: (query: Record<string, unknown>) => Promise<unknown>; before?: RunnerOptions["before"]; hook?: boolean } = {},
+    over: {
+      beadStatus?: string
+      maxPerPass?: number
+      list?: (query: Record<string, unknown>) => Promise<unknown>
+      before?: RunnerOptions["before"]
+      hook?: boolean
+      bounds?: Partial<CleanupBounds>
+      observe?: GitRunner
+      lock?: Record<string, unknown>
+    } = {},
   ) {
     const f = fixture(name)
     const options: RunnerOptions = { beadStatus: over.beadStatus ?? "closed", ...(over.before ? { before: over.before } : {}) }
@@ -2507,8 +2518,10 @@ describe("pending cleanup: one remover per worktree", () => {
       host: () => undefined,
       debounceMs: 1,
       ...(over.maxPerPass === undefined ? {} : { maxPerPass: over.maxPerPass }),
-      cleanup: { run: stripped(scripted.run), now: () => NOW + 10, bounds: HEAVY_FIXTURE_BOUNDS },
+      cleanup: { run: stripped(scripted.run), now: () => NOW + 10, bounds: over.bounds ?? HEAVY_FIXTURE_BOUNDS },
       now: () => clock,
+      ...(over.observe === undefined ? {} : { observe: over.observe }),
+      ...(over.lock === undefined ? {} : { lock: over.lock }),
     })
     const common = repositoryContext(f.main)?.commonDir as string
     const advance = (ms: number) => {
@@ -2787,6 +2800,174 @@ describe("pending cleanup: one remover per worktree", () => {
     expect(removed(h)).toBe(true)
     expect(existsSync(parked)).toBe(true)
     await h.finish()
+  })
+
+  describe("one removal boundary for every delivery remover", () => {
+    const explicitCleanup = (h: Harness) =>
+      cleanupDelivery({ receipt: h.f.receiptPath }, h.f.main, {
+        run: h.scripted.run,
+        now: () => NOW + 10,
+        env: h.f.env,
+        bounds: HEAVY_FIXTURE_BOUNDS,
+        ...h.pending.explicit(async () => {}, "ses_lead"),
+      })
+
+    test("an authorized explicit cleanup of an unclaimed worktree with a live hold removes nothing", async () => {
+      const h = await harness("explicit-hold")
+      setHold(h.common, h.f.linked, "ses_x", [{ kind: "shell", id: "x" }], NOW + 10)
+      const result = await explicitCleanup(h)
+      expect(result.ok).toBe(false)
+      expect(refusal(result)).toContain("worktree.held")
+      expect(refusal(result)).toContain("background job")
+      expect(removed(h)).toBe(false)
+      expect(mutationCalls(h.scripted.calls)).toEqual([])
+      await h.finish()
+    })
+
+    test("the same explicit cleanup removes the worktree once nothing holds it", async () => {
+      const h = await harness("explicit-clear")
+      const result = await explicitCleanup(h)
+      expect(result.ok).toBe(true)
+      expect(removed(h)).toBe(true)
+      await h.finish()
+    })
+
+    test("a lock another remover holds keeps delivery's removal from running", async () => {
+      const h = await harness("explicit-locked", { lock: { attempts: 2, delayMs: () => 0, sleep: async () => {} } })
+      mkdirSync(join(h.common, "opencode", "locks"), { recursive: true })
+      writeFileSync(
+        lockFile(h.common, h.f.linked),
+        JSON.stringify({ pid: process.pid, host: hostname(), sessionID: "subagent-worktree", acquiredAt: Date.now(), token: "theirs" }),
+      )
+      await h.pending.record(h.f.receipt, "ses_lead")
+      await h.pending.start()
+      await h.idle()
+      expect(removed(h)).toBe(false)
+      expect(mutationCalls(h.scripted.calls)).toEqual([])
+      expect(JSON.parse(readFileSync(lockFile(h.common, h.f.linked), "utf8")).token).toBe("theirs")
+      await h.finish()
+    })
+
+    test("the removal runs while the shared disk lock is held", async () => {
+      let heldDuring = false
+      let h: Harness | undefined
+      h = await harness("explicit-lock-held", {
+        before: (argv) => {
+          if (argv.includes("remove") && h) {
+            heldDuring = readdirSync(join(h.common, "opencode", "locks")).some((name) => name.endsWith(".lock"))
+          }
+        },
+      })
+      const result = await explicitCleanup(h)
+      expect(result.ok).toBe(true)
+      expect(heldDuring).toBe(true)
+      await h.finish()
+    })
+  })
+
+  describe("a coordination store that cannot be written is unsafe, not empty", () => {
+    const needsPermissions = process.getuid?.() === 0 ? test.skip : test
+    const lock = (h: Harness) => chmodSync(join(h.common, "opencode"), 0o555)
+    const unlock = (h: Harness) => chmodSync(join(h.common, "opencode"), 0o755)
+
+    needsPermissions("an unwritable store and a running shell: the idle hook resolves and nothing is removed", async () => {
+      const h = await harness("unwritable-shell")
+      await h.pending.record(h.f.receipt, "ses_lead")
+      await h.pending.start()
+      lock(h)
+      try {
+        await h.fake.fire.session("experimental.idle", {
+          sessionID: "ses_lead",
+          background: [{ kind: "shell", sessionID: "ses_x", shellID: "sh1", command: `cd ${h.f.linked} && make` }],
+        } as never)
+        await h.pending.settle()
+        expect(removed(h)).toBe(false)
+        expect(mutationCalls(h.scripted.calls)).toEqual([])
+      } finally {
+        unlock(h)
+      }
+      await h.finish()
+    })
+
+    needsPermissions("with no holds directory and an unwritable store, a plain turn end removes nothing either", async () => {
+      const h = await harness("unwritable-missing")
+      await h.pending.record(h.f.receipt, "ses_lead")
+      await h.pending.start()
+      lock(h)
+      try {
+        await h.idle()
+        expect(removed(h)).toBe(false)
+      } finally {
+        unlock(h)
+      }
+      await h.finish()
+    })
+
+    needsPermissions("a failed hold write blocks removal even though the holds directory exists and reads as empty", async () => {
+      const h = await harness("unwritable-holds-dir")
+      await h.pending.record(h.f.receipt, "ses_lead")
+      // An older entry makes the holds directory exist; it is then made read-only.
+      setHold(h.common, h.f.linked, "ses_old", [{ kind: "shell", id: "old" }], NOW - 25 * 3_600_000)
+      const holdsRoot = join(h.common, "opencode", "holds")
+      const holdsDir = join(holdsRoot, readdirSync(holdsRoot)[0] as string)
+      await h.pending.start()
+      chmodSync(holdsDir, 0o555)
+      try {
+        await h.fake.fire.session("experimental.idle", {
+          sessionID: "ses_lead",
+          background: [{ kind: "shell", sessionID: "ses_x", shellID: "sh1", command: `cd ${h.f.linked} && make` }],
+        } as never)
+        await h.pending.settle()
+        expect(removed(h)).toBe(false)
+        expect(mutationCalls(h.scripted.calls)).toEqual([])
+      } finally {
+        chmodSync(holdsDir, 0o755)
+      }
+      await h.finish()
+    })
+
+    needsPermissions("a later hold write that succeeds clears the unsafe state", async () => {
+      const h = await harness("unwritable-recovers")
+      await h.pending.record(h.f.receipt, "ses_lead")
+      await h.pending.start()
+      lock(h)
+      await h.fake.fire.session("experimental.idle", { sessionID: "ses_lead", background: [{ kind: "shell", sessionID: "x", command: h.f.linked }] } as never)
+      await h.pending.settle()
+      expect(removed(h)).toBe(false)
+      unlock(h)
+      h.advance(60_000)
+      await h.fake.fire.session("experimental.idle", { sessionID: "ses_lead", background: [] } as never)
+      await h.pending.settle()
+      expect(removed(h)).toBe(true)
+      await h.finish()
+    })
+  })
+
+  describe("the repository observations follow the cleanup bound", () => {
+    // A git that needs about 6 s: it answers only when allowed at least that long.
+    const slowGit: GitRunner = (argv, cwd, timeoutMs) => {
+      if (timeoutMs < 6000) return null
+      const proc = Bun.spawnSync(["git", ...argv], { cwd, stdout: "pipe", stderr: "pipe" })
+      return proc.exitCode === 0 ? proc.stdout.toString() : null
+    }
+
+    test("with the cleanup bound injected (61 s) a 6 s observation succeeds and the worktree is removed", async () => {
+      const h = await harness("bound-injected", { bounds: { refReadMs: 61_000 }, observe: slowGit })
+      await h.pending.record(h.f.receipt, "ses_lead")
+      await h.pending.start()
+      await h.idle()
+      expect(removed(h)).toBe(true)
+      await h.finish()
+    })
+
+    test("with a 5 s bound the same observation times out and nothing is removed", async () => {
+      const h = await harness("bound-5s", { bounds: { refReadMs: 5_000 }, observe: slowGit })
+      await h.pending.record(h.f.receipt, "ses_lead")
+      await h.pending.start()
+      await h.idle()
+      expect(removed(h)).toBe(false)
+      await h.finish()
+    })
   })
 
   describe("background work", () => {

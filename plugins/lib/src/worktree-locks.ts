@@ -318,14 +318,18 @@ export async function lockedWorktreeRemoval<T>(
   lock: LockOptions,
   steps: { recheck: () => Promise<string | undefined>; remove: () => Promise<T> },
 ): Promise<{ removed: false; reason: string } | { removed: true; value: T }> {
+  let entered = false
   try {
     return await withDiskLock(commonDir, directory, lock, async () => {
+      entered = true
       const reason = await steps.recheck()
       if (reason !== undefined) return { removed: false as const, reason }
       return { removed: true as const, value: await steps.remove() }
     })
   } catch (error) {
-    if (error instanceof LockTimeout) return { removed: false, reason: `the worktree is locked by another remover (${error.message})` }
-    throw error
+    // Failing to take the lock (contention, an unwritable store) is a refusal; a failure inside the steps is not ours to mask.
+    if (entered) throw error
+    const message = error instanceof LockTimeout ? `the worktree is locked by another remover (${error.message})` : `the lock could not be taken (${error instanceof Error ? error.message : String(error)})`
+    return { removed: false, reason: message }
   }
 }

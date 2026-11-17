@@ -2666,64 +2666,71 @@ async function cleanupDelivery(params, cwd, deps = {}) {
   const ledger = await verifyLedger(receipt, cwd, resolution.path, run, bounds.bdShowMs);
   if (ledger !== null)
     return ledger;
-  const localRef = await verifyLocalRef(receipt, cwd, run, bounds.refReadMs);
-  if (localRef !== null)
-    return localRef;
-  const boundary = await revalidateBoundary(receipt, cwd, run, bounds);
-  if (isFailure(boundary))
-    return boundary;
-  const executionCwd = safeExecutionCwd(receipt, boundary.records, cwd);
-  if (executionCwd === null)
-    return refuse2("worktree.executionCwd", null, "a different listed worktree for the same repository");
-  const executionDir = physicalPath(executionCwd);
-  const executionVerdict = executionDir === null ? { state: "absent" } : verifyCheckout(executionDir, boundary.common);
-  if (executionDir === null || executionVerdict.state !== "same")
-    return refuse2("worktree.executionCwd", `${executionCwd} (.git ${executionVerdict.state})`, "a verified worktree of this repository");
-  const executionPin = executionVerdict.pin;
-  const targetPath = boundary.target.path;
-  await deps.authorize?.({ worktree: targetPath, branch: receipt.branch.name, pr: receipt.pr.number });
-  const removeArgv = ["worktree", "remove", targetPath];
-  let route = "git";
-  if (deps.host !== undefined) {
-    try {
-      route = removalRoute(await deps.host.list(), targetPath);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      return refuse2("worktree.owner", `host worktree.list failed (${message.trim().slice(0, 400)})`, "a readable OpenCode worktree registry; nothing was removed, so retry delivery_cleanup once the host responds");
+  await deps.authorize?.({ worktree: path, branch: receipt.branch.name, pr: receipt.pr.number });
+  const removeSection = async () => {
+    const localRef = await verifyLocalRef(receipt, cwd, run, bounds.refReadMs);
+    if (localRef !== null)
+      return localRef;
+    const boundary = await revalidateBoundary(receipt, cwd, run, bounds);
+    if (isFailure(boundary))
+      return boundary;
+    const executionCwd = safeExecutionCwd(receipt, boundary.records, cwd);
+    if (executionCwd === null)
+      return refuse2("worktree.executionCwd", null, "a different listed worktree for the same repository");
+    const executionDir = physicalPath(executionCwd);
+    const executionVerdict = executionDir === null ? { state: "absent" } : verifyCheckout(executionDir, boundary.common);
+    if (executionDir === null || executionVerdict.state !== "same")
+      return refuse2("worktree.executionCwd", `${executionCwd} (.git ${executionVerdict.state})`, "a verified worktree of this repository");
+    const executionPin = executionVerdict.pin;
+    const targetPath = boundary.target.path;
+    const removeArgv = ["worktree", "remove", targetPath];
+    let route = "git";
+    if (deps.host !== undefined) {
+      try {
+        route = removalRoute(await deps.host.list(), targetPath);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return refuse2("worktree.owner", `host worktree.list failed (${message.trim().slice(0, 400)})`, "a readable OpenCode worktree registry; nothing was removed, so retry delivery_cleanup once the host responds");
+      }
     }
-  }
-  if (signal?.aborted === true)
-    return refuse2("signal", "an abort", "no interrupt before the worktree removal; nothing was removed");
-  if (route === "host" && deps.host !== undefined) {
-    try {
-      await deps.host.remove(targetPath);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      return refuse2("worktree.removed", `host worktree.remove ${JSON.stringify(targetPath)} (error ${message.trim().slice(0, 400)})`, "host removal without force");
+    if (signal?.aborted === true)
+      return refuse2("signal", "an abort", "no interrupt before the worktree removal; nothing was removed");
+    if (route === "host" && deps.host !== undefined) {
+      try {
+        await deps.host.remove(targetPath);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return refuse2("worktree.removed", `host worktree.remove ${JSON.stringify(targetPath)} (error ${message.trim().slice(0, 400)})`, "host removal without force");
+      }
+    } else {
+      const removed = await runGit(commit, executionDir, removeArgv, bounds.mutationMs, executionPin);
+      if (!completed(removed)) {
+        return commandFailure("worktree.removed", ["git", ...removeArgv], removed, "exit 0 without --force");
+      }
     }
-  } else {
-    const removed = await runGit(commit, executionDir, removeArgv, bounds.mutationMs, executionPin);
-    if (!completed(removed)) {
-      return commandFailure("worktree.removed", ["git", ...removeArgv], removed, "exit 0 without --force");
+    const registration = await registrationAbsence(executionDir, targetPath, commit, bounds.refReadMs, executionPin);
+    const pathGone = pathAbsence(targetPath);
+    if (registration !== "absent")
+      return refuse2("worktree.registrationAbsence", registration, '"absent" after removal');
+    if (pathGone !== "absent")
+      return refuse2("worktree.pathAbsence", pathGone, '"absent" after removal');
+    const refAfterWorktree = await verifyLocalRef(receipt, executionDir, commit, bounds.refReadMs, executionPin);
+    if (refAfterWorktree !== null)
+      return refAfterWorktree;
+    const deleteArgv = branchDeleteArgs(receipt.branch.name);
+    const deleted = await runGit(commit, executionDir, deleteArgv, bounds.mutationMs, executionPin);
+    if (!completed(deleted)) {
+      return commandFailure("worktree.localRefDeleted", ["git", ...deleteArgv], deleted, "exit 0 without -D");
     }
-  }
-  const registration = await registrationAbsence(executionDir, targetPath, commit, bounds.refReadMs, executionPin);
-  const pathGone = pathAbsence(targetPath);
-  if (registration !== "absent")
-    return refuse2("worktree.registrationAbsence", registration, '"absent" after removal');
-  if (pathGone !== "absent")
-    return refuse2("worktree.pathAbsence", pathGone, '"absent" after removal');
-  const refAfterWorktree = await verifyLocalRef(receipt, executionDir, commit, bounds.refReadMs, executionPin);
-  if (refAfterWorktree !== null)
-    return refAfterWorktree;
-  const deleteArgv = branchDeleteArgs(receipt.branch.name);
-  const deleted = await runGit(commit, executionDir, deleteArgv, bounds.mutationMs, executionPin);
-  if (!completed(deleted)) {
-    return commandFailure("worktree.localRefDeleted", ["git", ...deleteArgv], deleted, "exit 0 without -D");
-  }
-  const localAbsence = await localRefAbsence(executionDir, receipt.branch.name, commit, bounds.refReadMs, executionPin);
-  if (localAbsence !== "absent")
-    return refuse2("worktree.localRefAbsence", localAbsence, '"absent" after branch -d');
+    const localAbsence = await localRefAbsence(executionDir, receipt.branch.name, commit, bounds.refReadMs, executionPin);
+    if (localAbsence !== "absent")
+      return refuse2("worktree.localRefAbsence", localAbsence, '"absent" after branch -d');
+    return { ok: true, registration, pathGone, localAbsence, executionDir };
+  };
+  const section = deps.removalSection === undefined ? await removeSection() : await deps.removalSection(path, removeSection);
+  if (isFailure(section))
+    return section;
+  const { registration, pathGone, localAbsence, executionDir } = section;
   const remoteAbsence = await remoteBranchAbsent(observed.identity.remoteUrl, receipt.branch.name, executionDir, commit);
   const issuedAt = nextReceiptEpoch(receipt, now);
   const verifiedAt = new Date(issuedAt).toISOString();
@@ -3861,12 +3868,155 @@ function ownershipOf(read) {
 
 // plugins/lib/src/worktree-locks.ts
 import { createHash as createHash3, randomUUID } from "crypto";
-import { linkSync as linkSync2, mkdirSync as mkdirSync4, readdirSync as readdirSync3, readFileSync as readFileSync5, renameSync as renameSync2, rmSync as rmSync3, statSync, writeFileSync as writeFileSync4 } from "fs";
+import { accessSync, constants as constants4, linkSync as linkSync2, mkdirSync as mkdirSync4, readdirSync as readdirSync3, readFileSync as readFileSync5, renameSync as renameSync2, rmSync as rmSync3, statSync, writeFileSync as writeFileSync4 } from "fs";
+import { hostname } from "os";
 import { join as join5 } from "path";
 var LOCK_TTL_MS = 2 * 60000;
+var BREAK_TTL_MS = 30000;
 var HOLD_EXPIRY_MS = 24 * 3600000;
 var sha1 = (text) => createHash3("sha1").update(text).digest("hex");
 var isObject2 = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+function parseLock(value) {
+  if (!isObject2(value))
+    return;
+  const { pid, host, sessionID, acquiredAt, token } = value;
+  if (typeof pid !== "number" || !Number.isInteger(pid) || typeof host !== "string" || typeof sessionID !== "string")
+    return;
+  if (typeof acquiredAt !== "number" || !Number.isFinite(acquiredAt) || typeof token !== "string")
+    return;
+  return { pid, host, sessionID, acquiredAt, token };
+}
+function lockIsStale(info, facts) {
+  if (info === undefined)
+    return facts.mtimeMs !== undefined && facts.now - facts.mtimeMs > facts.ttlMs;
+  if (facts.now - info.acquiredAt <= facts.ttlMs)
+    return false;
+  if (info.host !== facts.host)
+    return false;
+  return !facts.alive(info.pid);
+}
+var processAlive2 = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+};
+var lockFile = (commonDir, directory) => join5(commonDir, "opencode", "locks", `${sha1(canonicalDirectory(directory))}.lock`);
+
+class LockTimeout extends Error {
+  directory;
+  constructor(directory) {
+    super(`could not lock ${directory}`);
+    this.directory = directory;
+    this.name = "LockTimeout";
+  }
+}
+var readLock = (path) => {
+  try {
+    const raw = readFileSync5(path, "utf8");
+    let info;
+    try {
+      info = parseLock(JSON.parse(raw));
+    } catch {}
+    return { raw, info, mtimeMs: statSync(path).mtimeMs };
+  } catch {
+    return;
+  }
+};
+function sameLock(a, b, rawA, rawB) {
+  if (a === undefined || b === undefined)
+    return a === b && rawA !== undefined && rawA === rawB;
+  return a.token === b.token && a.pid === b.pid && a.host === b.host && a.acquiredAt === b.acquiredAt;
+}
+function breakStale(path, judged, who) {
+  const breakPath = `${path}.break`;
+  const temp = `${breakPath}.${who.token}.tmp`;
+  try {
+    writeFileSync4(temp, JSON.stringify({ pid: process.pid, host: who.host, sessionID: who.sessionID, acquiredAt: who.now(), token: who.token }));
+    try {
+      linkSync2(temp, breakPath);
+    } catch (error) {
+      if (error.code !== "EEXIST")
+        throw error;
+      try {
+        if (who.now() - statSync(breakPath).mtimeMs > BREAK_TTL_MS)
+          rmSync3(breakPath, { force: true });
+      } catch {}
+      return;
+    }
+  } finally {
+    rmSync3(temp, { force: true });
+  }
+  try {
+    const now = readLock(path);
+    if (now !== undefined && sameLock(now.info, judged.info, now.raw, judged.raw))
+      rmSync3(path, { force: true });
+  } finally {
+    const mine = (() => {
+      try {
+        return JSON.parse(readFileSync5(breakPath, "utf8")).token === who.token;
+      } catch {
+        return false;
+      }
+    })();
+    if (mine)
+      rmSync3(breakPath, { force: true });
+  }
+}
+async function withDiskLock(commonDir, directory, options, work) {
+  const path = lockFile(commonDir, directory);
+  const now = options.now ?? Date.now;
+  const host = options.host ?? hostname();
+  const hostName = hostname();
+  const alive = options.alive ?? processAlive2;
+  const ttlMs = options.ttlMs ?? LOCK_TTL_MS;
+  const attempts = options.attempts ?? 60;
+  const delayMs = options.delayMs ?? ((attempt) => Math.min(250, 10 * 2 ** Math.min(attempt, 5)));
+  const sleep = options.sleep ?? ((ms) => new Promise((done) => setTimeout(done, ms)));
+  const token = randomUUID();
+  mkdirSync4(join5(path, ".."), { recursive: true });
+  const tryCreate = () => {
+    const temp = `${path}.${token}.tmp`;
+    const info = { pid: process.pid, host, sessionID: options.sessionID, acquiredAt: now(), token };
+    writeFileSync4(temp, JSON.stringify(info));
+    try {
+      linkSync2(temp, path);
+      return true;
+    } catch (error) {
+      if (error.code === "EEXIST")
+        return false;
+      throw error;
+    } finally {
+      rmSync3(temp, { force: true });
+    }
+  };
+  let held = false;
+  for (let attempt = 0;attempt < attempts; attempt++) {
+    if (tryCreate()) {
+      held = true;
+      break;
+    }
+    const current = readLock(path);
+    if (current === undefined)
+      continue;
+    if (lockIsStale(current.info, { now: now(), ttlMs, host, alive, mtimeMs: current.mtimeMs })) {
+      await options.seams?.afterValidate?.();
+      breakStale(path, current, { now, token, host: hostName, sessionID: options.sessionID });
+      continue;
+    }
+    await sleep(delayMs(attempt));
+  }
+  if (!held)
+    throw new LockTimeout(directory);
+  try {
+    return await work();
+  } finally {
+    if (readLock(path)?.info?.token === token)
+      rmSync3(path, { force: true });
+  }
+}
 function parseHold(value) {
   if (!isObject2(value))
     return;
@@ -3900,7 +4050,8 @@ function readHolds(commonDir, directory) {
   try {
     names = readdirSync3(dir).filter((name) => name.endsWith(".json"));
   } catch (error) {
-    return { holds: [], unreadable: error.code !== "ENOENT" };
+    const absent = error.code === "ENOENT";
+    return { holds: [], unreadable: !absent, ...absent ? { missing: true } : {} };
   }
   const holds = [];
   let unreadable = false;
@@ -3925,6 +4076,45 @@ function holdBlock(read, now, expiryMs = HOLD_EXPIRY_MS) {
     return;
   const first = live.jobs[0];
   return `session ${live.sessionID} has ${live.jobs.length} background job(s) running (${first?.kind} ${first?.id})`;
+}
+function coordinationWritable(commonDir) {
+  const root = join5(commonDir, "opencode");
+  try {
+    mkdirSync4(root, { recursive: true });
+    accessSync(root, constants4.W_OK);
+    const probe = join5(root, `.probe.${randomUUID()}`);
+    writeFileSync4(probe, "");
+    rmSync3(probe, { force: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+function holdsState(commonDir, directory, now, expiryMs = HOLD_EXPIRY_MS) {
+  const read = readHolds(commonDir, directory);
+  const blocked = holdBlock(read, now, expiryMs);
+  if (blocked !== undefined)
+    return blocked;
+  if (read.missing === true && !coordinationWritable(commonDir))
+    return "the coordination store is not writable, so running work cannot be ruled out";
+  return;
+}
+async function lockedWorktreeRemoval(commonDir, directory, lock, steps) {
+  let entered = false;
+  try {
+    return await withDiskLock(commonDir, directory, lock, async () => {
+      entered = true;
+      const reason = await steps.recheck();
+      if (reason !== undefined)
+        return { removed: false, reason };
+      return { removed: true, value: await steps.remove() };
+    });
+  } catch (error) {
+    if (entered)
+      throw error;
+    const message = error instanceof LockTimeout ? `the worktree is locked by another remover (${error.message})` : `the lock could not be taken (${error instanceof Error ? error.message : String(error)})`;
+    return { removed: false, reason: message };
+  }
 }
 
 // plugins/delivery/src/pending-cleanup.ts
@@ -4002,6 +4192,7 @@ function createPendingCleanup(deps) {
   const debounceMs = deps.debounceMs ?? DEBOUNCE_MS;
   const limit = deps.maxPerPass ?? MAX_PER_PASS;
   const observationMs = deps.cleanup?.bounds?.refReadMs ?? CLEANUP_BOUNDS.refReadMs;
+  const unsafe = new Map;
   const doneIds = new Set;
   const retriedAt = new Map;
   const attemptedAt = new Map;
@@ -4014,7 +4205,7 @@ function createPendingCleanup(deps) {
     chain = next.catch(() => {});
     return next;
   };
-  const commonDir = () => repositoryContext(cwd, undefined, observationMs)?.commonDir ?? null;
+  const commonDir = () => repositoryContext(cwd, deps.observe, observationMs)?.commonDir ?? null;
   const ownership = (path) => {
     const common = commonDir();
     if (common === null)
@@ -4053,7 +4244,7 @@ function createPendingCleanup(deps) {
     }));
   };
   const receiptsFor = (path) => {
-    const key = repoKey(cwd, undefined, observationMs);
+    const key = repoKey(cwd, deps.observe, observationMs);
     if (key === null)
       return [];
     const want = canonicalDirectory(path);
@@ -4082,7 +4273,10 @@ function createPendingCleanup(deps) {
     const common = commonDir();
     if (common === null)
       return "the git common directory could not be resolved";
-    const running = holdBlock(readHolds(common, path), now());
+    const failed = unsafe.get(canonicalDirectory(path));
+    if (failed !== undefined)
+      return failed;
+    const running = holdsState(common, path, now());
     if (running !== undefined)
       return running;
     const projectID = ctx.location.project?.id;
@@ -4113,22 +4307,36 @@ function createPendingCleanup(deps) {
       return `the sessions in ${path} could not be listed`;
     }
   };
-  const guard = async (request) => {
-    const hold = await holdFor(request.worktree);
-    if (hold !== undefined)
-      throw new Error(`held: ${hold}`);
+  const landingBlock = (path) => {
     const common = commonDir();
     if (common === null)
-      throw new Error("held: the git common directory could not be resolved");
+      return "the git common directory could not be resolved";
     const listed = listLandings(common);
     if (listed.unreadable)
-      throw new Error("held: the landing records could not be read");
-    if (landingsFor(listed.records, request.worktree).some((entry) => entry.denied !== undefined)) {
-      throw new Error("held: cleanup was denied; an explicit delivery_cleanup re-arms it");
+      return "the landing records could not be read";
+    if (landingsFor(listed.records, path).some((entry) => entry.denied !== undefined)) {
+      return "cleanup was denied; an explicit delivery_cleanup re-arms it";
     }
+    return;
   };
+  const section = async (worktree, run) => {
+    const common = commonDir();
+    if (common === null)
+      return { ok: false, reason: "worktree.held: observed the git common directory could not be resolved, expected a coordination store; nothing was removed" };
+    const outcome = await lockedWorktreeRemoval(common, worktree, { sessionID: "delivery", now, ...deps.lock }, {
+      recheck: async () => await holdFor(worktree) ?? landingBlock(worktree),
+      remove: run
+    });
+    if (outcome.removed)
+      return outcome.value;
+    return { ok: false, reason: `worktree.held: observed ${outcome.reason}, expected no owner, hold, denial or competing remover; nothing was removed` };
+  };
+  const explicit = (ask, sessionID) => ({
+    authorize: (request) => authorizeExplicit(api, ask, sessionID, request),
+    removalSection: section
+  });
   const gc = () => {
-    const key = repoKey(cwd, undefined, observationMs);
+    const key = repoKey(cwd, deps.observe, observationMs);
     const recorded = landings();
     if (key === null || recorded.common === null || recorded.unreadable)
       return;
@@ -4152,7 +4360,7 @@ function createPendingCleanup(deps) {
     }
   };
   const run = async (sessionID, idle) => {
-    const key = repoKey(cwd, undefined, observationMs);
+    const key = repoKey(cwd, deps.observe, observationMs);
     if (key === null)
       return;
     const directory = resolve5(receiptDirectory(env, key));
@@ -4208,7 +4416,7 @@ function createPendingCleanup(deps) {
         retriedAt.set(receipt.receiptId, now());
         let result;
         try {
-          result = await cleanupDelivery({ receipt: path }, cwd, { env, host: deps.host(), authorize: guard, ...deps.cleanup });
+          result = await cleanupDelivery({ receipt: path }, cwd, { env, host: deps.host(), removalSection: section, ...deps.cleanup });
         } catch {
           continue;
         }
@@ -4246,7 +4454,7 @@ function createPendingCleanup(deps) {
   };
   const recordHolds = async (sessionID, background) => {
     const common = commonDir();
-    const key = repoKey(cwd, undefined, observationMs);
+    const key = repoKey(cwd, deps.observe, observationMs);
     if (common === null || key === null)
       return;
     let pending;
@@ -4283,7 +4491,14 @@ function createPendingCleanup(deps) {
         if (inside)
           jobs.push({ kind: job.kind, id: job.shellID ?? job.childSessionID ?? job.sessionID ?? "unknown" });
       }
-      setHold(common, path, sessionID, jobs, now());
+      try {
+        setHold(common, path, sessionID, jobs, now());
+        unsafe.delete(want);
+      } catch (error) {
+        const why = error instanceof Error ? error.message : String(error);
+        unsafe.set(want, `its running work could not be recorded (${why})`);
+        console.error(`delivery: could not record holds for ${path}: ${why}`);
+      }
     }
   };
   const abort = new AbortController;
@@ -4306,7 +4521,11 @@ function createPendingCleanup(deps) {
     })();
     try {
       registrations.push(await ctx.session.hook("experimental.idle", async (input) => {
-        await recordHolds(input.sessionID, input.background ?? []).catch(() => {});
+        try {
+          await recordHolds(input.sessionID, input.background ?? []);
+        } catch (error) {
+          console.error("delivery: recording holds failed", error);
+        }
         await retryNow(input.sessionID, true);
       }));
     } catch {}
@@ -4328,7 +4547,8 @@ function createPendingCleanup(deps) {
       await new Promise((done) => setTimeout(done, debounceMs + 1));
     await chain;
   };
-  return { start, dispose, record, deny, arm, ownership, guard, gc, retryNow, handleEvent, settle };
+  const api = { deny, arm, ownership };
+  return { start, dispose, record, deny, arm, ownership, section, explicit, gc, retryNow, handleEvent, settle };
 }
 
 // plugins/delivery/src/verdict.ts
@@ -4662,8 +4882,8 @@ async function setupDelivery(ctx, overrides = {}) {
                 denied = true;
                 throw error;
               }
-              await pending?.guard(request);
             },
+            removalSection: pending.section,
             host: hostWorktrees(ctx)
           });
         }) : options.autoCleanup ? decision.deferred === undefined ? { ok: false, skipped: true, reason: decision.reason } : { ok: false, deferred: decision.deferred } : undefined;
@@ -4689,7 +4909,7 @@ async function setupDelivery(ctx, overrides = {}) {
           result = await cleanupDelivery(input, directory, {
             env: environment(options),
             signal: context.signal,
-            authorize: (request) => authorizeExplicit(pending, (req) => ask(req.worktree, { ...request }), context.sessionID, request),
+            ...pending.explicit((req) => ask(req.worktree, { ...req }), context.sessionID),
             host: hostWorktrees(ctx)
           });
         } catch (error) {
