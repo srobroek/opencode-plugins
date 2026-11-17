@@ -187,9 +187,7 @@ const ALLOWED = [
   "git config --list",
   "git remote -v",
   "git remote get-url origin",
-  `git worktree add ${WORKTREES}/debug-bar -b bar`,
   "git worktree list",
-  `git worktree remove ${WT}`,
   "git blame file",
   "git grep push",
   "git --version",
@@ -493,6 +491,20 @@ describe("apply", () => {
   test.each(["git apply p.diff", "git apply --check p.diff", "git apply --3way -p2 p.diff", "git apply --stat p.diff"])("allows %j", (command) =>
     verdict(["debug", "refactor"], command, "allowed"),
   )
+})
+
+describe("worktree", () => {
+  test.each(["git worktree lock x", "git worktree unlock x", "git worktree move x y", "git worktree repair", "git worktree prune", "git worktree"])(
+    "%j is refused for both",
+    (command) => verdict(["debug", "refactor"], command, "refused"),
+  )
+  test.each([`git worktree add ${WORKTREES}/debug-bar -b bar`, `git worktree remove ${WT}`])("debug may run %j", (command) =>
+    verdict(["debug"], command, "allowed"),
+  )
+  test.each([`git worktree add ${WORKTREES}/debug-bar -b bar`, `git worktree remove ${WT}`])("refactor may not run %j", (command) =>
+    verdict(["refactor"], command, "refused"),
+  )
+  test("worktree list is allowed for both", () => verdict(["debug", "refactor"], "git worktree list", "allowed"))
 })
 
 describe("symlinks before dot-dot", () => {

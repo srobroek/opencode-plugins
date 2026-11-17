@@ -254,8 +254,9 @@ function checkGit(args: readonly string[], ctx: Ctx, cwd: string | undefined, wr
         return refuse(`git stash ${rest[0]}`)
       break
     case "worktree": {
+      // Only list for refactor; debug may add and remove its own scratch worktrees. lock, move, repair and prune touch shared metadata.
       const action = rest[0] ?? ""
-      if (!["add", "list", "remove", "lock", "unlock", "move", "repair"].includes(action)) return refuse(`git worktree ${action}`)
+      if (!(action === "list" || (agent === "debug" && (action === "add" || action === "remove")))) return refuse(`git worktree ${action}`)
       if (action === "add" || action === "remove") {
         const target = worktreeTarget(action, rest.slice(1))
         const resolved = target === undefined || unsafeOperand(target) ? undefined : joinPath(tree, target, ctx.env.home)
@@ -318,8 +319,6 @@ function changesTree(sub: string, rest: readonly string[]): boolean {
       )
     case "bisect":
       return !["log", "visualize", "view", "terms"].includes(rest[0] ?? "")
-    case "worktree":
-      return ["lock", "unlock", "move", "repair"].includes(rest[0] ?? "")
     default:
       return false
   }

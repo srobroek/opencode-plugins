@@ -1284,7 +1284,7 @@ function checkGit(args, ctx, cwd, wrapped) {
       break;
     case "worktree": {
       const action = rest[0] ?? "";
-      if (!["add", "list", "remove", "lock", "unlock", "move", "repair"].includes(action))
+      if (!(action === "list" || agent === "debug" && (action === "add" || action === "remove")))
         return refuse(`git worktree ${action}`);
       if (action === "add" || action === "remove") {
         const target = worktreeTarget(action, rest.slice(1));
@@ -1344,8 +1344,6 @@ function changesTree(sub, rest) {
       return rest.some((arg) => !arg.startsWith("-")) && !rest.some((arg) => ["-l", "--list", "--contains", "--no-contains", "--merged", "--no-merged", "--points-at"].includes(arg));
     case "bisect":
       return !["log", "visualize", "view", "terms"].includes(rest[0] ?? "");
-    case "worktree":
-      return ["lock", "unlock", "move", "repair"].includes(rest[0] ?? "");
     default:
       return false;
   }

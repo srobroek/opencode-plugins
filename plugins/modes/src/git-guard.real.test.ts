@@ -136,3 +136,19 @@ describe("apply against real repositories", () => {
     expect(forbiddenGit("git apply p.diff", "debug", context(scratch))).toBeUndefined()
   })
 })
+
+describe("worktree against real repositories", () => {
+  test("lock, move, repair and prune cannot touch the shared worktree metadata", () => {
+    refusedLeavesRepoUnchanged(["debug", "refactor"], [
+      `git worktree lock ${scratch}`,
+      `git worktree move ${scratch} ${home}/moved`,
+      "git worktree repair",
+      "git worktree prune",
+    ])
+  })
+  test("refactor cannot add or remove worktrees, and debug only scratch ones", () => {
+    refusedLeavesRepoUnchanged(["refactor"], [`git worktree add ${home}/.local/share/opencode/worktree/h1/debug-bar`, `git worktree remove ${scratch}`])
+    refusedLeavesRepoUnchanged(["debug"], [`git worktree add ${home}/sibling`, `git worktree remove ${repo}`])
+    expect(forbiddenGit(`git worktree add ${home}/.local/share/opencode/worktree/h1/debug-bar`, "debug", context(scratch))).toBeUndefined()
+  })
+})
