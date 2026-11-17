@@ -262,7 +262,7 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
     if (on("beads-claim-tracking")) {
       const inspected = inspectClaim(call.command, call.cwd, environmentForCommand(call.command, env), {
         injected,
-        inherited: deps.env ?? process.env,
+        inherited: pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor),
       })
       if (inspected.kind === "claim" && !inspected.plan.json) {
         command = withJson(call.command, inspected.plan)
@@ -320,6 +320,14 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
     const output = claimResultOutput(result)
     const contention = contentionAdvisory(output)
     if (contention !== undefined) advisories.push(contention)
+    if (call !== undefined && on("beads-claim-tracking") && bdInvocations(call.command).length === 0) {
+      // A claim typed behind the embedded-write runner is invisible to the gates below; warn once.
+      const wrapped = inspectClaim(call.command, call.cwd, pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor), {
+        injected: call.injected,
+        inherited: pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor),
+      })
+      if (wrapped.kind === "refused") advisories.push(untrackedClaim(wrapped.reason))
+    }
     if (call !== undefined && bdInvocations(call.command).length > 0) {
       const stale = staleSkipNotice(output)
       if (stale !== undefined) {
@@ -332,7 +340,7 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
       if (on("beads-claim-tracking") && isMutatingBdCommand(call.command) && shellExit(result) !== 0) {
         const failed = inspectClaim(call.command, call.cwd, pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor), {
           injected: call.injected,
-          inherited: deps.env ?? process.env,
+          inherited: pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor),
         })
         if (failed.kind !== "none") advisories.push(untrackedClaim(`the claim failed (exit ${shellExit(result) ?? "unknown"})`))
       }
@@ -342,7 +350,7 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
         const invocations = bdInvocations(call.command)
         const inspected = inspectClaim(call.command, call.cwd, env, {
           injected: call.injected,
-          inherited: deps.env ?? process.env,
+          inherited: pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor),
         })
         let confirmed: ConfirmedClaim[] = []
         if (inspected.kind === "refused") advisories.push(untrackedClaim(inspected.reason))

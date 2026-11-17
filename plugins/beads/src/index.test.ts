@@ -514,11 +514,41 @@ fi
     await run.cleanup()
   })
 
-  test.each(["BEADS_DB", "BD_DB", "BD_SOCKET", "BEADS_DOLT_SERVER_PORT"])("%s in the process environment leaves every claim untracked, naming it but not its value", async (name) => {
+  test.each(["BEADS_DB", "BD_DB", "BD_SOCKET", "BEADS_DOLT_SERVER_PORT"])("%s in the plugin's own environment is its ledger: a plain claim is tracked with a lease", async (name) => {
     const run = await claimThrough(["bd update proj-1 --claim"], { inherited: { [name]: "/private/ledger/path" } })
-    expect(run.claims).toEqual([])
-    expect(run.result).toContain(name)
-    expect(run.result).not.toContain("/private/ledger/path")
+    expect(run.recorded).toEqual({ "proj-1": GENERATED })
+    expect(run.leases).toHaveLength(1)
+    expect(run.result).not.toContain("not tracked")
+    await run.cleanup()
+  })
+
+  test("an inline BEADS_DIR other than the plugin's own is refused with a warning", async () => {
+    const own = join(scratch(true), ".beads")
+    const other = join(scratch(true), ".beads")
+    const run = await claimThrough([`BEADS_DIR=${other} bd update proj-1 --claim`], { inherited: { BEADS_DIR: own }, env: { BEADS_DIR: own } })
+    expect(run.recorded).toEqual({})
+    expect(run.result).toContain("this claim is not tracked")
+    await run.cleanup()
+  })
+
+  test("an inline BEADS_DIR equal to the plugin's own is tracked", async () => {
+    const own = join(scratch(true), ".beads")
+    const run = await claimThrough([`BEADS_DIR=${own}/ bd update proj-1 --claim`], { inherited: { BEADS_DIR: own }, env: { BEADS_DIR: own } })
+    expect(run.recorded).toEqual({ "proj-1": GENERATED })
+    expect(run.leases).toHaveLength(1)
+    await run.cleanup()
+  })
+
+  test("a runner-wrapped claim the agent types is not tracked and warns", async () => {
+    const run = await claimThrough(({ root }) => {
+      const runner = join(root, "bd-embedded-write-runner.js")
+      writeFileSync(runner, 'while [ "$1" != -- ]; do shift; done; shift; exec "$@"\n')
+      return [`sh ${runner} --beads-store ${root} -- bd update proj-1 --claim`]
+    })
+    expect(run.recorded).toEqual({})
+    expect(run.leases).toEqual([])
+    expect(run.result).toContain("this claim is not tracked")
+    expect(run.result).toContain("embedded-write runner")
     await run.cleanup()
   })
 
