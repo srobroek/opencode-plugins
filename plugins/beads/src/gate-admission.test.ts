@@ -126,7 +126,10 @@ describe("staleSkipNotice", () => {
     const notice = staleSkipNotice(output) ?? ""
     expect(notice).toContain("bd-probe-2m7")
     expect(notice).toContain("BEHIND this database")
-    expect(notice).toContain("BEFORE pulling peer changes")
+    expect(notice).toContain("`bd dolt pull`")
+    expect(notice).toContain("`bd dolt push`")
+    expect(notice).toContain("Do not stage or commit")
+    expect(notice).not.toContain("bd export")
   })
   test("bd's plain-text form counts too", () => {
     expect(staleSkipNotice("Imported 3 issues from .beads/issues.jsonl (2 stale skipped; use --allow-stale to restore older rows)")).toContain(
