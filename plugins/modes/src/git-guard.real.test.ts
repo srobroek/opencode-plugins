@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { forbiddenGit } from "./git-guard.ts"
+import { forbiddenGit, inspectGit } from "./git-guard.ts"
 import { headRefusal } from "./head-guard.ts"
 
 // Real repositories: the user's checkout and a linked debug-* worktree that shares its object store and refs.
@@ -150,7 +150,7 @@ describe("worktree against real repositories", () => {
   test("refactor cannot add or remove worktrees, and debug only scratch ones", () => {
     refusedLeavesRepoUnchanged(["refactor"], [`git worktree add ${home}/.local/share/opencode/worktree/h1/debug-bar`, `git worktree remove ${scratch}`])
     refusedLeavesRepoUnchanged(["debug"], [`git worktree add ${home}/sibling`, `git worktree remove ${repo}`])
-    expect(forbiddenGit(`git worktree add ${home}/.local/share/opencode/worktree/h1/debug-bar`, "debug", context(scratch))).toBeUndefined()
+    expect(forbiddenGit(`git worktree add --detach ${home}/.local/share/opencode/worktree/h1/debug-bar`, "debug", context(scratch))).toBeUndefined()
   })
 })
 
@@ -236,6 +236,67 @@ describe("branch sharing against real repositories", () => {
     writeFileSync(join(lane, "c.txt"), "y\n")
     git(lane, "add", "-A")
     git(lane, "commit", "-q", "-m", "detached probe")
+    expect(userState()).toEqual(before)
+  }, 60_000)
+})
+
+describe("bootstrapping off a user branch against real repositories", () => {
+  let lane = ""
+  const userState = () => ({
+    head: git(repo, "rev-parse", "HEAD"),
+    main: git(repo, "rev-parse", "refs/heads/main"),
+    branch: git(repo, "symbolic-ref", "HEAD"),
+    status: git(repo, "status", "--porcelain"),
+  })
+  /** What the hook does for one shell call: the static verdict, then the HEAD check when it asks for one. */
+  const call = async (command: string) => {
+    const inspected = inspectGit(command, "debug", context(lane))
+    if (inspected.reason !== undefined) return inspected.reason
+    return inspected.mutates ? await headRefusal(lane) : undefined
+  }
+  const forceOntoMain = () => git(lane, "checkout", "-q", "--ignore-other-worktrees", "main")
+
+  beforeAll(() => {
+    lane = join(home, ".local/share/opencode/worktree/h1/debug-boot")
+    git(repo, "worktree", "add", "-q", "--detach", lane)
+    git(repo, "branch", "deadbeef")
+  }, 60_000)
+
+  test("names that look like options, hex or reflog entries never count as a detach", async () => {
+    const before = userState()
+    for (const command of ["git switch -qCmain debug/x", "git switch --cr main", "git checkout -Bmain", "git checkout deadbeef", "git checkout @{-1}", "git switch @{-1}"])
+      expect({ command, reason: await call(command) }).toEqual({ command, reason: expect.any(String) })
+    expect(userState()).toEqual(before)
+  })
+
+  test("a branch change and a commit in one line are refused", async () => {
+    expect(await call("git switch -c debug/boot && git commit -am x")).toContain("its own call")
+    expect(await call("git add -A; git switch --detach")).toContain("its own call")
+  })
+
+  test("starting on main: commit is refused, switch -c debug/x is allowed, and then a separate commit works", async () => {
+    const before = userState()
+    forceOntoMain()
+    expect(await call("git commit -am x")).toContain("refs/heads/main")
+    expect(await call("git switch -c debug/boot")).toBeUndefined()
+    git(lane, "switch", "-q", "-c", "debug/boot")
+    writeFileSync(join(lane, "d.txt"), "z\n")
+    git(lane, "add", "-A")
+    expect(await call("git commit -am x")).toBeUndefined()
+    git(lane, "commit", "-q", "-m", "on debug/boot")
+    expect(userState()).toEqual(before)
+    git(lane, "checkout", "-q", "--detach")
+  }, 60_000)
+
+  test("starting on main: switch --detach is allowed, and a commit after it moves nothing the user owns", async () => {
+    const before = userState()
+    forceOntoMain()
+    expect(await call("git switch --detach")).toBeUndefined()
+    git(lane, "switch", "-q", "--detach")
+    writeFileSync(join(lane, "e.txt"), "w\n")
+    git(lane, "add", "-A")
+    expect(await call("git commit -am x")).toBeUndefined()
+    git(lane, "commit", "-q", "-m", "detached")
     expect(userState()).toEqual(before)
   }, 60_000)
 })

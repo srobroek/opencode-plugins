@@ -45,7 +45,7 @@ export async function headRefusal(workdir: string | undefined, run: HeadRun = ru
     if (code === 1) return undefined
     const ref = stdout.trim()
     if (/^refs\/heads\/debug[-/]./.test(ref)) return undefined
-    return `the worktree is on ${ref || "an unreadable HEAD"}, a branch the user may own; run git switch --detach or git switch -c debug/<slug> first`
+    return `the worktree is on ${ref || "an unreadable HEAD"}, a branch the user may own; run git switch --detach or git switch -c debug/<slug> first, in its own call`
   } catch (error) {
     return `the checked-out branch could not be read (${(error as Error).message}), so the command is refused`
   }

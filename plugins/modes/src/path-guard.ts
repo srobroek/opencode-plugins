@@ -134,6 +134,17 @@ export function isScratchPath(path: string, options: PathGuardOptions): boolean 
   }
 }
 
+/** Whether `path` is exactly a `debug-*` scratch worktree directory, `<worktree root>/<hash>/debug-<slug>`, not something inside one. */
+export function isScratchRoot(path: string, options: PathGuardOptions): boolean {
+  try {
+    const home = canonical(options.home ?? homedir())
+    const worktrees = join(home, ".local", "share", "opencode", "worktree")
+    return isScratchPath(path, options) && readings(isAbsolute(path) ? path : `${canonical(options.startDir)}${sep}${path}`).every((resolved) => relative(worktrees, resolved).split(sep).length === 2)
+  } catch {
+    return false
+  }
+}
+
 /** `checkDebugWrite` for an edit, write or patch call by the `debug` agent. */
 export function guardDebugWrite(tool: string, input: unknown, agent: string, options: PathGuardOptions): string | undefined {
   if (agent !== "debug" || !WRITE_TOOLS.has(tool)) return undefined

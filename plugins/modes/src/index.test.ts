@@ -185,6 +185,25 @@ describe("setup", () => {
     await run("refactor", "git commit -m x")
     expect(asked).toEqual([scratch, scratch])
   })
+  test("a lone branch change skips the HEAD check, which any other mutating call still needs", async () => {
+    const fake = createFakeContext({ sessions: [{ id: "ses_1", location: { directory: "/repo" } }] })
+    const asked: Array<string | undefined> = []
+    await setupModes(fake.context, {
+      headCheck: async (workdir) => {
+        asked.push(workdir)
+        return "the worktree is on refs/heads/main"
+      },
+    })
+    const run = (command: string, workdir: string) =>
+      fake.fire.tool("execute.before", { tool: "shell", agent: "debug", sessionID: "ses_1", input: { command, workdir } })
+    const scratch = `${homedir()}/.local/share/opencode/worktree/h1/debug-foo`
+    await expect(run("git switch -c debug/x", scratch)).resolves.toBeDefined()
+    await expect(run("git switch --detach", scratch)).resolves.toBeDefined()
+    expect(asked).toEqual([])
+    await expect(run("git commit -am x", scratch)).rejects.toThrow("refs/heads/main")
+    await expect(run("git switch -c debug/x && git commit -am x", scratch)).rejects.toThrow("its own call")
+    expect(asked).toEqual([scratch])
+  })
   test("a refused command never reads HEAD, and the real check refuses a workdir that is not a repository", async () => {
     const fake = createFakeContext({ sessions: [{ id: "ses_1", location: { directory: "/repo" } }] })
     await setupModes(fake.context)

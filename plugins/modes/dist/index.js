@@ -1035,6 +1035,15 @@ function isScratchPath(path, options) {
     return false;
   }
 }
+function isScratchRoot(path, options) {
+  try {
+    const home = canonical(options.home ?? homedir());
+    const worktrees = join2(home, ".local", "share", "opencode", "worktree");
+    return isScratchPath(path, options) && readings(isAbsolute(path) ? path : `${canonical(options.startDir)}${sep}${path}`).every((resolved) => relative(worktrees, resolved).split(sep).length === 2);
+  } catch {
+    return false;
+  }
+}
 function guardDebugWrite(tool, input, agent, options) {
   if (agent !== "debug" || !WRITE_TOOLS.has(tool))
     return;
@@ -1273,16 +1282,24 @@ function checkGit(args, ctx, cwd, wrapped) {
   if (risky !== undefined)
     return refuse(`git ${sub} ${risky}`);
   if (agent === "debug") {
-    const moved = branchRefusal(sub, rest) ?? (sub === "worktree" && rest[0] === "add" ? worktreeAddRefusal(rest.slice(1)) : undefined);
-    if (moved !== undefined)
-      return refuse(moved);
+    const form = branchForm(sub, rest);
+    if (form.why !== undefined)
+      return refuse(form.why);
+    if (sub === "worktree" && rest[0] === "add") {
+      if (!worktreeAddForm(rest.slice(1)))
+        return refuse("git worktree add is not an allowed form; use --detach <path> [<start>] or -b debug/<slug> <path> [<start>]");
+      ctx.report.mutating++;
+      ctx.report.branch++;
+    }
+    if (form.change)
+      ctx.report.branch++;
   }
   if (agent === "debug" && changesTree(sub, rest)) {
     const base = startingDirectory(ctx.env);
     const why = redirected ? "uses -C, --work-tree, --git-dir or --namespace" : wrapped ? "runs through a wrapper that changes directory" : ctx.state.moved ? "runs after cd, pushd or popd" : ctx.depth > 0 ? "runs inside a nested shell, substitution or runner" : base === undefined || !scratch(base, ctx) ? "does not have a debug-* scratch worktree as its workdir" : undefined;
     if (why !== undefined)
       return refuse(`git ${sub} ${why}; run it directly with the shell workdir set to your debug-* scratch worktree`);
-    ctx.report.mutates = true;
+    ctx.report.mutating++;
   }
   const outputs = outputDestinations(sub, rest);
   if (sub === "format-patch" && !rest.includes("--stdout") && outputs?.length === 0)
@@ -1355,8 +1372,8 @@ function checkGit(args, ctx, cwd, wrapped) {
       if (action === "add" || action === "remove") {
         const target = worktreeTarget(action, rest.slice(1));
         const resolved = target === undefined || unsafeOperand(target) ? undefined : joinPath(tree, target, ctx.env.home);
-        if (resolved === undefined || !scratch(resolved, ctx))
-          return refuse(`git worktree ${action} outside a debug-* scratch worktree`);
+        if (resolved === undefined || !scratchRoot(resolved, ctx))
+          return refuse(`git worktree ${action} on a path other than a debug-* scratch worktree directory`);
       }
       break;
     }
@@ -1414,91 +1431,33 @@ function changesTree(sub, rest) {
       return false;
   }
 }
-var debugRef = (name) => /^(refs\/heads\/)?debug[-/]./.test(name);
-var COMMIT_ID = /^[0-9a-f]{7,40}$/i;
-var NOT_A_BRANCH = /[~^:@{]|^HEAD$/;
-function createdBranch(args, i, options) {
-  const arg = args[i];
-  for (const option of options) {
-    if (arg === option)
-      return args[i + 1] ?? "";
-    if (arg.startsWith(`${option}=`))
-      return arg.slice(option.length + 1);
-    if (!option.startsWith("--") && arg.startsWith(option) && arg.length > option.length)
-      return arg.slice(option.length);
+var DEBUG_BRANCH = /^(?!.*\.\.)debug[-/][A-Za-z0-9._-]+$/;
+var START_POINT = /^(?!.*\.\.)(?:[0-9a-f]{40}|[0-9a-f]{64}|origin\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*)$/;
+var same = (args, form) => args.length === form.length && form.every((expected, i) => typeof expected === "string" ? args[i] === expected : expected(args[i]));
+var branch = (word) => DEBUG_BRANCH.test(word);
+var start = (word) => START_POINT.test(word);
+var anyWord = (word) => !word.startsWith("-");
+var oneOf = (args, ...forms) => forms.some((form) => same(args, form) || same(args, [...form, start]));
+function branchForm(sub, rest) {
+  const refused = (what, use) => ({ why: `git ${sub} ${what} is not an allowed form; ${use}` });
+  if (sub === "switch") {
+    if (oneOf(rest, ["-c", branch], ["--create", branch], ["--detach"]) || same(rest, [branch]))
+      return { change: true };
+    return refused(rest.join(" "), "use git switch -c debug/<slug> [<start>], git switch debug/<slug>, or git switch --detach [<start>]");
   }
-  return;
+  if (sub === "checkout") {
+    if (oneOf(rest, ["--detach"]) || same(rest, [branch]))
+      return { change: true };
+    return refused(rest.join(" "), "use git switch (for branches) or git restore -- <paths> (for files)");
+  }
+  if (sub === "branch" && changesTree(sub, rest))
+    return refused(rest.join(" "), "create a branch with git switch -c debug/<slug>");
+  if (sub === "bisect" && rest[0] === "reset" && rest.length > 1 && !same(rest.slice(1), [branch]) && !same(rest.slice(1), [(w) => /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(w)]))
+    return refused(rest.join(" "), "use git bisect reset with a debug/<slug> branch or a full object id");
+  return {};
 }
-function branchRefusal(sub, rest) {
-  if (sub === "checkout" || sub === "switch") {
-    if (rest.some((arg) => longOption(arg, "--ignore-other-worktrees")))
-      return `git ${sub} --ignore-other-worktrees (it lets a second worktree share a branch)`;
-    const end = rest.indexOf("--");
-    const args = end < 0 ? rest : rest.slice(0, end);
-    const creating = sub === "switch" ? ["-c", "-C", "--create", "--force-create", "--orphan"] : ["-b", "-B", "--orphan"];
-    let detach = false;
-    const created = [];
-    const positional = [];
-    for (let i = 0;i < args.length; i++) {
-      const arg = args[i];
-      if (arg === "--detach" || longOption(arg, "--detach") || sub === "switch" && arg === "-d") {
-        detach = true;
-        continue;
-      }
-      const name = createdBranch(args, i, creating);
-      if (name !== undefined) {
-        created.push(name);
-        if (args[i] === creating.find((option) => option === args[i]))
-          i++;
-      } else if (arg === "-" || !arg.startsWith("-"))
-        positional.push(arg);
-    }
-    const owned = created.find((name) => !debugRef(name));
-    if (owned !== undefined)
-      return `git ${sub} creating the branch ${owned}`;
-    if (detach || created.length > 0 || end >= 0 || positional.length !== 1)
-      return;
-    const target = positional[0];
-    if (sub === "checkout" && (COMMIT_ID.test(target) || NOT_A_BRANCH.test(target)))
-      return;
-    return debugRef(target) ? undefined : `git ${sub} ${target} (it may be a branch the user owns; use --detach or a debug/* branch)`;
-  }
-  if (sub === "branch" && changesTree(sub, rest)) {
-    const name = rest.find((arg) => !arg.startsWith("-"));
-    if (name !== undefined && !debugRef(name))
-      return `git branch ${name}`;
-  }
-  if (sub === "bisect" && rest[0] === "reset" && rest[1] !== undefined && !debugRef(rest[1]) && !COMMIT_ID.test(rest[1]))
-    return `git bisect reset ${rest[1]}`;
-  return;
-}
-function worktreeAddRefusal(args) {
-  let detach = false;
-  let branch;
-  const positional = [];
-  for (let i = 0;i < args.length; i++) {
-    const arg = args[i];
-    if (arg === "-f" || arg === "--force" || longOption(arg, "--force") || cluster(arg, "f"))
-      return "git worktree add --force (it shares a branch between worktrees)";
-    if (arg === "--detach" || longOption(arg, "--detach"))
-      detach = true;
-    else if (arg === "--reason")
-      i++;
-    else if (arg === "-b" || arg === "-B")
-      branch = args[++i] ?? "";
-    else if (arg.startsWith("-b") || arg.startsWith("-B"))
-      branch = arg.slice(2);
-    else if (!arg.startsWith("-"))
-      positional.push(arg);
-  }
-  if (detach)
-    return;
-  if (branch !== undefined)
-    return debugRef(branch) ? undefined : `git worktree add -b ${branch}`;
-  const [path, commitish] = positional;
-  if (commitish !== undefined)
-    return debugRef(commitish) ? undefined : `git worktree add of ${commitish} (it may be a branch the user owns)`;
-  return path !== undefined && debugRef(basename2(path)) ? undefined : "git worktree add without --detach or a debug-* branch";
+function worktreeAddForm(args) {
+  return oneOf(args, ["--detach", anyWord]) || oneOf(args, ["-b", branch, anyWord]);
 }
 function worktreeTarget(action, args) {
   for (let i = 0;i < args.length; i++) {
@@ -1511,6 +1470,9 @@ function worktreeTarget(action, args) {
       i++;
   }
   return;
+}
+function scratchRoot(path, ctx) {
+  return ctx.env.startDir !== undefined && isScratchRoot(path, { home: ctx.env.home, startDir: ctx.env.startDir });
 }
 function scratch(path, ctx) {
   return ctx.env.startDir !== undefined && isScratchPath(path, { home: ctx.env.home, startDir: ctx.env.startDir });
@@ -1655,7 +1617,7 @@ function inspectGit(command, agent, env = {}) {
   const policy = POLICIES[agent];
   if (policy === undefined)
     return { mutates: false };
-  const report = { mutates: false };
+  const report = { mutating: 0, branch: 0 };
   const reason = checkCommand(command, {
     agent,
     policy,
@@ -1665,7 +1627,11 @@ function inspectGit(command, agent, env = {}) {
     state: { cwd: startingDirectory(env), moved: false },
     report
   });
-  return reason === undefined ? { mutates: report.mutates } : { reason, mutates: false };
+  if (reason !== undefined)
+    return { reason, mutates: false };
+  if (report.branch > 0 && report.mutating > 1)
+    return { reason: "a branch change and another mutating git command in one call; run the branch change in its own call", mutates: false };
+  return { mutates: report.mutating > 0 && report.branch === 0 };
 }
 function inspectShellCall(tool, input, agent, env = {}) {
   if (POLICIES[agent] === undefined || !isShellTool(tool))
@@ -1710,7 +1676,7 @@ async function headRefusal(workdir, run = runSymbolicRef) {
     const ref = stdout.trim();
     if (/^refs\/heads\/debug[-/]./.test(ref))
       return;
-    return `the worktree is on ${ref || "an unreadable HEAD"}, a branch the user may own; run git switch --detach or git switch -c debug/<slug> first`;
+    return `the worktree is on ${ref || "an unreadable HEAD"}, a branch the user may own; run git switch --detach or git switch -c debug/<slug> first, in its own call`;
   } catch (error) {
     return `the checked-out branch could not be read (${error.message}), so the command is refused`;
   }
