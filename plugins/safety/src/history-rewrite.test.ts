@@ -63,6 +63,9 @@ beforeEach(() => {
   symlinkSync(join(root, "linked", ".git"), join(root, "symlinked", ".git"))
   dir("temp", "clone", ".git")
   dir("temp", "clone", "sub")
+  file("", "canonical", "pyproject.toml")
+  file("", "linked", "pyproject.toml")
+  file("", "temp", "clone", "sub", "pyproject.toml")
   dir("plain")
   symlinkSync(join(root, "canonical", "sub"), join(root, "plain", "link"))
   where = {
@@ -511,6 +514,61 @@ describe("uv's directory options decide where the rewrite runs", () => {
       command.includes("--directory") ? undefined : "history-rewrite",
     )
     expect(run(command.replace("{d}", "{linked}"), "linked")).toBeUndefined()
+  })
+
+  test("resolves --project from the directory --directory selects", () => {
+    // Run from a canonical checkout: the process and the project both end up inside the temp clone.
+    expect(run("uvx --directory {clone} --project sub git-filter-repo --path a", "canonical")).toBeUndefined()
+    expect(run("uv --directory={clone} run --project=sub git-filter-repo --path a", "canonical")).toBeUndefined()
+    expect(run("uvx --directory {clone} --project {canonical} git-filter-repo --path a", "canonical")?.guard).toBe(
+      "history-rewrite",
+    )
+    expect(run("uvx --directory {clone} --project ../../canonical git-filter-repo --path a", "linked")?.guard).toBe(
+      "history-rewrite",
+    )
+  })
+
+  test("normalizes a project file to the directory that holds it", () => {
+    expect(run("uvx --project {linked}/pyproject.toml git-filter-repo --path a", "linked")).toBeUndefined()
+    expect(run("uvx --project {canonical}/pyproject.toml git-filter-repo --path a", "linked")?.guard).toBe("history-rewrite")
+    expect(run("uvx --project pyproject.toml git-filter-repo --path a", "canonical")?.guard).toBe("history-rewrite")
+    expect(run("uvx --directory {clone}/sub --project pyproject.toml git-filter-repo --path a", "canonical")).toBeUndefined()
+  })
+
+  test.each([
+    ["uvx", "UV_WORKING_DIR={canonical} uvx git-filter-repo --path a"],
+    ["uv run", "UV_WORKING_DIR={canonical} uv run git-filter-repo --path a"],
+    ["a quoted value", 'UV_WORKING_DIR="{canonical}" uvx git-filter-repo --path a'],
+    ["a project variable", "UV_PROJECT={canonical} uvx git-filter-repo --path a"],
+    ["a project file variable", "UV_PROJECT={canonical}/pyproject.toml uvx git-filter-repo --path a"],
+    ["an expanded value", "UV_WORKING_DIR=$D uvx git-filter-repo --path a"],
+    ["an expanded project", "UV_PROJECT=$D uvx git-filter-repo --path a"],
+    ["env", "env UV_WORKING_DIR={canonical} uvx git-filter-repo --path a"],
+    ["env for the project", "env UV_PROJECT={canonical} uvx git-filter-repo --path a"],
+  ])("refuses %s from a linked worktree", (_name, command) => {
+    expect(run(command, "linked")?.guard).toBe("history-rewrite")
+  })
+
+  test("allows the variables when they name a linked worktree or temp clone", () => {
+    expect(run("UV_WORKING_DIR={clone} uvx git-filter-repo --path a", "canonical")).toBeUndefined()
+    expect(run("UV_PROJECT={linked} uvx git-filter-repo --path a", "linked")).toBeUndefined()
+    expect(run("UV_WORKING_DIR={clone} UV_PROJECT=sub uvx git-filter-repo --path a", "canonical")).toBeUndefined()
+  })
+
+  test("an option beats the variable, as in uv", () => {
+    expect(run("UV_WORKING_DIR={canonical} uvx --directory {linked} git-filter-repo --path a", "linked")).toBeUndefined()
+    expect(run("UV_WORKING_DIR={linked} uvx --directory {canonical} git-filter-repo --path a", "linked")?.guard).toBe(
+      "history-rewrite",
+    )
+  })
+
+  test.each([
+    "uvx --directory {linked} --directory {canonical} git-filter-repo",
+    "uvx --directory={canonical} --directory={linked} git-filter-repo",
+    "uv --directory {linked} run --directory {canonical} git-filter-repo",
+    "uvx --project {linked} --project {canonical} git-filter-repo",
+  ])("refuses a repeated option, which uv rejects: %s", (command) => {
+    expect(run(command, "linked")?.guard).toBe("history-rewrite")
   })
 
   test.each(["uvx --directory $D git-filter-repo", "uvx --directory git-filter-repo"])(

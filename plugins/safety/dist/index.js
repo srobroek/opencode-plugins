@@ -3726,6 +3726,10 @@ function uvDirectories(argv, from, to) {
   }
   return found;
 }
+function assigned(command, name) {
+  const found = command.assignments.filter((item) => item.startsWith(`${name}=`)).at(-1);
+  return found === undefined ? [] : [found.slice(name.length + 1).replace(/^(["'])(.*)\1$/s, "$2")];
+}
 function launched(argv) {
   const name = base(argv[0]);
   let start;
@@ -3783,7 +3787,18 @@ function filterRepo(command) {
   if (run === "unparsed")
     return command.argv.some((word) => MENTIONS_FILTER_REPO.test(word)) ? "uncertain" : undefined;
   const program = base(run.program.replace(/[@=<>~![].*$/, ""));
-  return FILTER_REPO_NAME.test(program) ? { args: run.args, chdirs: run.chdirs, projects: run.projects } : undefined;
+  if (!FILTER_REPO_NAME.test(program))
+    return;
+  let { chdirs, projects } = run;
+  if (chdirs.length > 1 || projects.length > 1)
+    return "uncertain";
+  if (base(command.argv[0]).startsWith("uv")) {
+    if (chdirs.length === 0)
+      chdirs = assigned(command, "UV_WORKING_DIR");
+    if (projects.length === 0)
+      projects = assigned(command, "UV_PROJECT");
+  }
+  return { args: run.args, chdirs, projects };
 }
 var spells = (arg, name) => {
   const head = arg.split("=", 1)[0];
@@ -4081,7 +4096,7 @@ function unaccountedMention(command, git) {
   return found[0];
 }
 function historyRewrite(commands, cwd, tempRoots = defaultTempRoots(), env = process.env) {
-  const judge = (what, moves, git) => {
+  const judge = (what, moves, git, fileLast = false) => {
     const selection = repositorySelection(commands);
     if (selection !== undefined)
       return withSelection(what, selection);
@@ -4099,7 +4114,9 @@ function historyRewrite(commands, cwd, tempRoots = defaultTempRoots(), env = pro
     if (moves.some(dynamic))
       return uncertain(what, "a directory option is expanded by the shell");
     let dir = start;
-    for (const move of moves) {
+    for (const [at, operand] of moves.entries()) {
+      const held = fileLast && at === moves.length - 1 ? enter(dir, operand) : undefined;
+      const move = held !== undefined && !isDirectory2(held) ? dirname3(operand) : operand;
       const next = step(dir, move);
       if (next === undefined)
         return uncertain(what, `\`${move}\` is not a directory that resolves the same way logically and physically`);
@@ -4124,10 +4141,13 @@ function historyRewrite(commands, cwd, tempRoots = defaultTempRoots(), env = pro
           return uncertain(text, `\`${option}\` is repeated (possibly abbreviated) and filter-repo uses the last one`);
       const target = optionValue(rewrite.args, "--target");
       const moves = [...rewrite.chdirs, ...target === undefined ? [] : [target]];
-      for (const chain of [moves, ...rewrite.projects.map((project) => [project])]) {
-        const reason = judge(text, chain, git);
-        if (reason !== undefined)
-          return reason;
+      const reason = judge(text, moves, git);
+      if (reason !== undefined)
+        return reason;
+      for (const project of rewrite.projects) {
+        const inProject = judge(text, [...rewrite.chdirs, project], git, true);
+        if (inProject !== undefined)
+          return inProject;
       }
       continue;
     }

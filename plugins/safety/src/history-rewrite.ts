@@ -166,6 +166,12 @@ function uvDirectories(argv: readonly string[], from: number, to: number): { chd
   return found
 }
 
+/** The value of an inline `NAME=value` assignment (the last one wins), outer quotes removed, as a list of zero or one. */
+function assigned(command: Command, name: string): string[] {
+  const found = command.assignments.filter((item) => item.startsWith(`${name}=`)).at(-1)
+  return found === undefined ? [] : [found.slice(name.length + 1).replace(/^(["'])(.*)\1$/s, "$2")]
+}
+
 /** The program a launcher (`uvx`, `uv`, `pipx`, `pipenv`, `python`) runs and its arguments. */
 function launched(argv: readonly string[]): Launched | undefined {
   const name = base(argv[0])
@@ -214,7 +220,15 @@ function filterRepo(command: Command): FilterRepo | "uncertain" | undefined {
   if (run === "unparsed") return command.argv.some((word) => MENTIONS_FILTER_REPO.test(word)) ? "uncertain" : undefined
   // `git-filter-repo@2.47.0`, `git-filter-repo==2.47`, `git-filter-repo[extra]`: the executable is the name.
   const program = base(run.program.replace(/[@=<>~![].*$/, ""))
-  return FILTER_REPO_NAME.test(program) ? { args: run.args, chdirs: run.chdirs, projects: run.projects } : undefined
+  if (!FILTER_REPO_NAME.test(program)) return undefined
+  let { chdirs, projects } = run
+  // uv rejects a repeated option; an option beats the matching environment variable.
+  if (chdirs.length > 1 || projects.length > 1) return "uncertain"
+  if (base(command.argv[0]).startsWith("uv")) {
+    if (chdirs.length === 0) chdirs = assigned(command, "UV_WORKING_DIR")
+    if (projects.length === 0) projects = assigned(command, "UV_PROJECT")
+  }
+  return { args: run.args, chdirs, projects }
 }
 
 /** Whether `arg` spells long option `name`, in full or as an argparse prefix (`--targ`), with or without `=value`. */
@@ -578,7 +592,7 @@ export function historyRewrite(
   tempRoots: readonly string[] = defaultTempRoots(),
   env: NodeJS.ProcessEnv = process.env,
 ): string | undefined {
-  const judge = (what: string, moves: string[], git: GitInvocation | undefined): string | undefined => {
+  const judge = (what: string, moves: string[], git: GitInvocation | undefined, fileLast = false): string | undefined => {
     const selection = repositorySelection(commands)
     if (selection !== undefined) return withSelection(what, selection)
     const construct = directoryConstruct(commands)
@@ -590,7 +604,10 @@ export function historyRewrite(
     if (start === undefined) return uncertain(what, "the working directory cannot be resolved")
     if (moves.some(dynamic)) return uncertain(what, "a directory option is expanded by the shell")
     let dir = start
-    for (const move of moves) {
+    for (const [at, operand] of moves.entries()) {
+      // uv accepts a project file such as `pyproject.toml`: judge the directory that holds it.
+      const held = fileLast && at === moves.length - 1 ? enter(dir, operand) : undefined
+      const move = held !== undefined && !isDirectory(held) ? dirname(operand) : operand
       const next = step(dir, move)
       if (next === undefined) return uncertain(what, `\`${move}\` is not a directory that resolves the same way logically and physically`)
       dir = next
@@ -612,9 +629,12 @@ export function historyRewrite(
           return uncertain(text, `\`${option}\` is repeated (possibly abbreviated) and filter-repo uses the last one`)
       const target = optionValue(rewrite.args, "--target")
       const moves = [...rewrite.chdirs, ...(target === undefined ? [] : [target])]
-      for (const chain of [moves, ...rewrite.projects.map((project) => [project])]) {
-        const reason = judge(text, chain, git)
-        if (reason !== undefined) return reason
+      const reason = judge(text, moves, git)
+      if (reason !== undefined) return reason
+      // `--project` does not move the process; it is resolved from uv's effective directory.
+      for (const project of rewrite.projects) {
+        const inProject = judge(text, [...rewrite.chdirs, project], git, true)
+        if (inProject !== undefined) return inProject
       }
       continue
     }
