@@ -391,7 +391,8 @@ function stdinRewrite(command: Command, args: readonly string[]): string | undef
   if (only.operator === "<<" || only.operator === "<<-") {
     const document = command.hereDocuments[documentIndex.get(only.at) as number]
     if (document === undefined || (!document.quoted && /[$`]/.test(document.body))) return unreadable
-    source = document.body
+    // An unquoted body loses each backslash-newline before git reads it; a doubled backslash is an escaped one.
+    source = document.quoted ? document.body : document.body.replace(/\\(\n|\\)/g, (_, next: string) => (next === "\n" ? "" : next))
   } else if (only.operator === "<<<") {
     const word = command.redirects[only.at]
     if (word === undefined || word.expands) return unreadable

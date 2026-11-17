@@ -3713,6 +3713,19 @@ function skipOptions(argv, at, valued) {
     i += valued.has(argv[i]) ? 2 : 1;
   return i;
 }
+function uvDirectories(argv, from, to) {
+  const found = { chdirs: [], projects: [] };
+  for (let i = from;i < to; i++) {
+    const word = argv[i];
+    for (const [name, into] of [["--directory", found.chdirs], ["--project", found.projects]]) {
+      if (word === name)
+        into.push(argv[i + 1] ?? "");
+      else if (word.startsWith(`${name}=`))
+        into.push(word.slice(name.length + 1));
+    }
+  }
+  return found;
+}
 function launched(argv) {
   const name = base(argv[0]);
   let start;
@@ -3743,7 +3756,7 @@ function launched(argv) {
     const word = argv[i];
     if (python && word === "-m") {
       const module = argv[i + 1];
-      return module === undefined ? "unparsed" : { program: module, args: argv.slice(i + 2) };
+      return module === undefined ? "unparsed" : { program: module, args: argv.slice(i + 2), chdirs: [], projects: [] };
     }
     if (python && word === "-c")
       return "not-run";
@@ -3752,24 +3765,25 @@ function launched(argv) {
         i++;
       continue;
     }
-    return { program: word, args: argv.slice(i + 1) };
+    const dirs = name === "uv" || name === "uvx" ? uvDirectories(argv, 1, i) : { chdirs: [], projects: [] };
+    return { program: word, args: argv.slice(i + 1), ...dirs };
   }
   return "unparsed";
 }
 function filterRepo(command) {
   const name = base(command.argv[0]);
   if (FILTER_REPO_NAME.test(name))
-    return { args: command.argv.slice(1), chdirs: [] };
+    return { args: command.argv.slice(1), chdirs: [], projects: [] };
   const git = gitInvocation(command.argv);
   if (git?.subcommand === "filter-repo")
-    return { args: git.args, chdirs: git.chdirs };
+    return { args: git.args, chdirs: git.chdirs, projects: [] };
   const run = launched(command.argv);
   if (run === undefined || run === "not-run")
     return;
   if (run === "unparsed")
     return command.argv.some((word) => MENTIONS_FILTER_REPO.test(word)) ? "uncertain" : undefined;
   const program = base(run.program.replace(/[@=<>~![].*$/, ""));
-  return FILTER_REPO_NAME.test(program) ? { args: run.args, chdirs: [] } : undefined;
+  return FILTER_REPO_NAME.test(program) ? { args: run.args, chdirs: run.chdirs, projects: run.projects } : undefined;
 }
 var spells = (arg, name) => {
   const head = arg.split("=", 1)[0];
@@ -3914,7 +3928,8 @@ function stdinRewrite(command, args) {
     const document = command.hereDocuments[documentIndex.get(only.at)];
     if (document === undefined || !document.quoted && /[$`]/.test(document.body))
       return unreadable;
-    source = document.body;
+    source = document.quoted ? document.body : document.body.replace(/\\(\n|\\)/g, (_, next) => next === `
+` ? "" : next);
   } else if (only.operator === "<<<") {
     const word = command.redirects[only.at];
     if (word === undefined || word.expands)
@@ -4108,10 +4123,12 @@ function historyRewrite(commands, cwd, tempRoots = defaultTempRoots(), env = pro
         if (optionCount(rewrite.args, option) > 1)
           return uncertain(text, `\`${option}\` is repeated (possibly abbreviated) and filter-repo uses the last one`);
       const target = optionValue(rewrite.args, "--target");
-      const moves = [...git?.chdirs ?? [], ...target === undefined ? [] : [target]];
-      const reason = judge(text, moves, git);
-      if (reason !== undefined)
-        return reason;
+      const moves = [...rewrite.chdirs, ...target === undefined ? [] : [target]];
+      for (const chain of [moves, ...rewrite.projects.map((project) => [project])]) {
+        const reason = judge(text, chain, git);
+        if (reason !== undefined)
+          return reason;
+      }
       continue;
     }
     const mention = unaccountedMention(command, git);

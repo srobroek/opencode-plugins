@@ -371,6 +371,16 @@ describe("update-ref --stdin is read exactly or refused", () => {
     ["-z input", "git update-ref -z --stdin <<< 'x'"],
     ["an expanded here-string", 'git update-ref --stdin <<< "delete refs/heads/$B"'],
     ["an expanded here-document", "git update-ref --stdin <<EOF\ndelete refs/heads/$B\nEOF"],
+    // An unquoted here-document loses each backslash-newline before git reads it.
+    ["a verb split by a continuation", "git update-ref --stdin <<EOF\ndel\\\nete refs/heads/main\nEOF"],
+    ["a ref split by a continuation", "git update-ref --stdin <<EOF\ndelete refs/he\\\nads/main\nEOF"],
+    ["a zero-OID update split by a continuation", `git update-ref --stdin <<EOF\nupdate refs/heads/main 0000\\\n${"0".repeat(36)}\nEOF`],
+    ["a continuation in an indented <<- here-document", "git update-ref --stdin <<-EOF\n\tdel\\\nete refs/heads/main\nEOF"],
+    ["a substitution in an unquoted here-document", "git update-ref --stdin <<EOF\n$(echo delete) refs/heads/main\nEOF"],
+    ["a backtick in an unquoted here-document", "git update-ref --stdin <<EOF\n`echo delete` refs/heads/main\nEOF"],
+    ["a variable in an unquoted here-document", "git update-ref --stdin <<EOF\n$V refs/heads/main\nEOF"],
+    ["a variable in a tag-only unquoted here-document", "git update-ref --stdin <<EOF\ndelete refs/tags/$T\nEOF"],
+    ["a verb split in a here-string", "git update-ref --stdin <<< del\\\nete\\ refs/heads/main"],
     // The shell uses the LAST stdin redirection, so two of them are never parsed.
     ["a tag-only here-string followed by a file", "git update-ref --stdin <<< 'delete refs/tags/v1' < ops.txt"],
     ["a file followed by a tag-only here-string", "git update-ref --stdin < ops.txt <<< 'delete refs/tags/v1'"],
@@ -397,6 +407,27 @@ describe("update-ref --stdin is read exactly or refused", () => {
     ["start\nupdate refs/tags/v1 abc\nprepare\ncommit"],
   ])("leaves a sole literal transaction that spares branches alone: %s", (body) => {
     expect(run(`git update-ref --stdin <<EOF\n${body}\nEOF`, "canonical")).toBeUndefined()
+  })
+
+  test.each([
+    ["a tag-only delete with a variable", "delete refs/tags/$T"],
+    ["a split verb on a tag", "del\\\nete refs/tags/v1"],
+    ["a split line that git reads as two non-transactions", "del\\\nete refs/remotes/origin/x"],
+  ])("judges a quoted here-document by its content: %s", (_name, body) => {
+    // A quoted delimiter keeps the body literal: no expansion, no continuation joining.
+    expect(run(`git update-ref --stdin <<'EOF'\n${body}\nEOF`, "canonical")).toBeUndefined()
+  })
+
+  test.each([
+    "delete refs/heads/main",
+    "delete refs/heads/$B",
+    "update refs/heads/main",
+  ])("still refuses a branch delete in a quoted here-document: %s", (body) => {
+    expect(run(`git update-ref --stdin <<'EOF'\n${body}\nEOF`, "canonical")?.guard).toBe("history-rewrite")
+  })
+
+  test("a continuation joins nothing in a quoted here-document", () => {
+    expect(run("git update-ref --stdin <<'EOF'\ndelete refs/tags/v1\\\nx\nEOF", "canonical")).toBeUndefined()
   })
 
   test("a sole literal here-string on stdout-redirected output is still read", () => {
