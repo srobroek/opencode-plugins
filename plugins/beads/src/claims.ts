@@ -282,21 +282,30 @@ export type ClaimPlan = {
 /** `none`: not a claim. `refused`: a claim the plugin cannot track, and why. */
 export type ClaimInspection = { kind: "none" } | { kind: "refused"; reason: string } | { kind: "claim"; plan: ClaimPlan }
 
-/** Flags that choose a ledger other than the one the environment names. */
-const LEDGER_SELECTOR = /^(?:-C|--directory|--db|--database|--global|--dolt-[a-z-]+)(?:=|$)/u
+/** A word that is, or starts like, a flag choosing a ledger: `-C`, `--db`, `--database`, `--directory`, `--global`, `--dolt-*`. */
+const LEDGER_SELECTOR = /^(?:-C|--db|--database|--directory|--global|--dolt-)/u
+
+/** Environment variables that choose which ledger or server bd opens. */
+const LEDGER_ENV = [
+  "BEADS_DIR",
+  "BEADS_DB",
+  "BD_DB",
+  "BD_SOCKET",
+  "BEADS_DOLT_DATA_DIR",
+  "BEADS_DOLT_PORT",
+  "BEADS_DOLT_SERVER_HOST",
+  "BEADS_DOLT_SERVER_PORT",
+  "BEADS_DOLT_SERVER_SOCKET",
+  "BEADS_DOLT_SERVER_MODE",
+  "BEADS_PROXIED_SERVER_ROOT_PATH",
+  "BEADS_PROXIED_SERVER_CONFIG",
+]
 
 const isAssignment = (value: string): boolean => /^[A-Za-z_][A-Za-z0-9_]*=/u.test(value)
 
-/** A pre-verb token that is itself a ledger selector flag (not a value), in any spelling. */
-const PRE_VERB_SELECTOR = /^(?:-C|--directory|--db|--database|--global)(?:=|$)/u
-
-/** Whether a pre-verb flag picks the ledger: a value-bearing `--db`/`-C`/`--directory`/`--database`, or `--global`. */
-function selectsLedger(invocation: BdInvocation): boolean {
-  const { globals } = invocation
-  return (
-    flagEnabled(globals, ["--global"]) ||
-    globalValue(globals, ["--database", "--db", "-C", "--directory"]) !== undefined
-  )
+/** The ledger-choosing variables a non-empty environment sets, by name only. */
+export function ledgerEnvNames(env: NodeJS.ProcessEnv): string[] {
+  return LEDGER_ENV.filter((name) => (env[name] ?? "") !== "")
 }
 
 /**
@@ -323,12 +332,18 @@ function isLiteral(command: string, word: { start: number; end: number; expands:
 
 /**
  * Decide, from the parsed shell structure, whether `command` is a claim the plugin can track:
- * exactly one simple `bd` command (no list, pipe, subshell, substitution or background), whose
- * ledger the environment and literal flags alone decide. Anything else is `refused`, because a
+ * exactly one simple `bd` command (no list, pipe, subshell, substitution or background) with no
+ * ledger selector, flag or variable at all, so the plugin's own pin is the only ledger it can mean.
+ * `env` is the environment with that pin; `inherited` the one the user or agent set, before it. Anything else is `refused`, because a
  * claim recorded for the wrong ledger or for a command that did not finish would later release
  * somebody else's bead. A missed heartbeat costs far less than that.
  */
-export function inspectClaim(command: string, cwd: string, env: NodeJS.ProcessEnv, injected?: string): ClaimInspection {
+export function inspectClaim(
+  command: string,
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  { injected, inherited }: { injected?: string; inherited: NodeJS.ProcessEnv },
+): ClaimInspection {
   const invocations = bdInvocations(command)
   const claims = invocations.filter(claimEnabled)
   if (claims.length === 0) return { kind: "none" }
@@ -346,28 +361,21 @@ export function inspectClaim(command: string, cwd: string, env: NodeJS.ProcessEn
   // Any word the shell computes (expansion, substitution, glob, brace or `~`) could turn into a
   // ledger selector or an actor at run time, so the plugin cannot say where the claim lands.
   if (item.words.some((word) => !isLiteral(command, word)))
-    return refuse("a word of the command is computed by the shell (a variable, substitution, glob, brace or ~), so the ledger is not certain")
-  if (invocation.args.some((arg) => LEDGER_SELECTOR.test(arg)))
-    return refuse("a ledger selector (-C, --directory, --db, --dolt-*) follows the verb, so the ledger is not certain")
+    return refuse("a word of the command is computed by the shell (a variable, substitution, glob, brace or ~)")
+  // The plugin does not interpret selectors: any flag or assignment that could choose another
+  // ledger, anywhere in the command, leaves the claim untracked.
+  if (item.words.slice(bdIndex + 1).some((word) => LEDGER_SELECTOR.test(word.value)))
+    return refuse("it carries a ledger selector flag (-C, --db, --database, --directory, --global, --dolt-*)")
+  if (prefix.some((word) => /^(?:BEADS|BD)_(?!ACTOR=)/u.test(word.value)))
+    return refuse("it assigns a BEADS_* or BD_* variable that could choose the ledger")
+  const inheritedNames = ledgerEnvNames(inherited)
+  if (inheritedNames.length > 0)
+    return refuse(`the environment sets ${inheritedNames.join(", ")}, which can choose the ledger`)
   if (invocation.args.includes("--")) return refuse("it uses `--`, so its arguments are not certain")
   const last = item.words.at(-1)
   if (last === undefined) return refuse("it is empty")
-  let target = claimTarget(invocation, cwd, env, plannedTargets(command, cwd, env))
+  const target = claimTarget(invocation, cwd, env, plannedTargets(command, cwd, env))
   if (target.ambiguous === true) return refuse("its ledger is ambiguous")
-  // A selector before the verb is accepted only when it provably names the ambient ledger. A
-  // `--global`/`--database` selector, an unresolvable path or a different store is an external
-  // ledger: the plugin cannot release a claim there, so it does not track one.
-  if (selectsLedger(invocation)) {
-    // bd takes the last value of a repeated flag, which `globalValue` does not read: two selectors
-    // of any kind leave the ledger unproven.
-    const selectors = invocation.globals.filter((token) => PRE_VERB_SELECTOR.test(token))
-    if (selectors.length > 1) return refuse("more than one ledger selector precedes the verb, so the ledger is not certain")
-    const ambient = bdStoreForInvocation({ ...invocation, globals: [] }, cwd, env)
-    const selected = bdStoreForInvocation(invocation, cwd, env)
-    if (ambient === undefined || selected === undefined || ambient !== selected)
-      return refuse("a ledger selector names a ledger that is not proven to be the ambient one")
-    target = { key: ambient, store: ambient }
-  }
   // bd's precedence is flag over environment: an `--actor` anywhere in the argv (a post-verb one
   // is the later, winning flag) is the only actor the invocation can run as. A flag whose value
   // is not a literal leaves no candidate. Otherwise the invocation's own prefix assignment is the

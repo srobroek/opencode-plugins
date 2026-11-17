@@ -40,7 +40,7 @@ export function recordResult(
   output: string,
   injected?: string,
 ): void {
-  const inspected = inspectClaim(command, cwd, env, injected)
+  const inspected = inspectClaim(command, cwd, env, { injected, inherited: {} })
   const confirmed = inspected.kind === "claim" ? confirmClaims(inspected.plan, [output]).confirmed : []
   recordClaimTransitions(state, command, cwd, env, bdInvocations(command), confirmed)
 }

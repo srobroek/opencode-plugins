@@ -3922,12 +3922,24 @@ function claimEnabled(invocation) {
     return false;
   return invocation.verb === "claim" || (invocation.verb === "update" || invocation.verb === "ready") && flags.claim;
 }
-var LEDGER_SELECTOR = /^(?:-C|--directory|--db|--database|--global|--dolt-[a-z-]+)(?:=|$)/u;
+var LEDGER_SELECTOR = /^(?:-C|--db|--database|--directory|--global|--dolt-)/u;
+var LEDGER_ENV = [
+  "BEADS_DIR",
+  "BEADS_DB",
+  "BD_DB",
+  "BD_SOCKET",
+  "BEADS_DOLT_DATA_DIR",
+  "BEADS_DOLT_PORT",
+  "BEADS_DOLT_SERVER_HOST",
+  "BEADS_DOLT_SERVER_PORT",
+  "BEADS_DOLT_SERVER_SOCKET",
+  "BEADS_DOLT_SERVER_MODE",
+  "BEADS_PROXIED_SERVER_ROOT_PATH",
+  "BEADS_PROXIED_SERVER_CONFIG"
+];
 var isAssignment = (value) => /^[A-Za-z_][A-Za-z0-9_]*=/u.test(value);
-var PRE_VERB_SELECTOR = /^(?:-C|--directory|--db|--database|--global)(?:=|$)/u;
-function selectsLedger(invocation) {
-  const { globals } = invocation;
-  return flagEnabled(globals, ["--global"]) || globalValue(globals, ["--database", "--db", "-C", "--directory"]) !== undefined;
+function ledgerEnvNames(env) {
+  return LEDGER_ENV.filter((name) => (env[name] ?? "") !== "");
 }
 function isLiteral(command, word) {
   if (word.expands)
@@ -3953,7 +3965,7 @@ function isLiteral(command, word) {
   }
   return true;
 }
-function inspectClaim(command, cwd, env, injected) {
+function inspectClaim(command, cwd, env, { injected, inherited }) {
   const invocations = bdInvocations(command);
   const claims = invocations.filter(claimEnabled);
   if (claims.length === 0)
@@ -3971,27 +3983,22 @@ function inspectClaim(command, cwd, env, injected) {
   if (bdIndex < 0 || !prefix.every((word) => !word.quoted && isAssignment(word.value)))
     return refuse("it does not start with `bd` (a wrapper or interpreter runs it)");
   if (item.words.some((word) => !isLiteral(command, word)))
-    return refuse("a word of the command is computed by the shell (a variable, substitution, glob, brace or ~), so the ledger is not certain");
-  if (invocation.args.some((arg) => LEDGER_SELECTOR.test(arg)))
-    return refuse("a ledger selector (-C, --directory, --db, --dolt-*) follows the verb, so the ledger is not certain");
+    return refuse("a word of the command is computed by the shell (a variable, substitution, glob, brace or ~)");
+  if (item.words.slice(bdIndex + 1).some((word) => LEDGER_SELECTOR.test(word.value)))
+    return refuse("it carries a ledger selector flag (-C, --db, --database, --directory, --global, --dolt-*)");
+  if (prefix.some((word) => /^(?:BEADS|BD)_(?!ACTOR=)/u.test(word.value)))
+    return refuse("it assigns a BEADS_* or BD_* variable that could choose the ledger");
+  const inheritedNames = ledgerEnvNames(inherited);
+  if (inheritedNames.length > 0)
+    return refuse(`the environment sets ${inheritedNames.join(", ")}, which can choose the ledger`);
   if (invocation.args.includes("--"))
     return refuse("it uses `--`, so its arguments are not certain");
   const last = item.words.at(-1);
   if (last === undefined)
     return refuse("it is empty");
-  let target = claimTarget(invocation, cwd, env, plannedTargets(command, cwd, env));
+  const target = claimTarget(invocation, cwd, env, plannedTargets(command, cwd, env));
   if (target.ambiguous === true)
     return refuse("its ledger is ambiguous");
-  if (selectsLedger(invocation)) {
-    const selectors = invocation.globals.filter((token) => PRE_VERB_SELECTOR.test(token));
-    if (selectors.length > 1)
-      return refuse("more than one ledger selector precedes the verb, so the ledger is not certain");
-    const ambient = bdStoreForInvocation({ ...invocation, globals: [] }, cwd, env);
-    const selected = bdStoreForInvocation(invocation, cwd, env);
-    if (ambient === undefined || selected === undefined || ambient !== selected)
-      return refuse("a ledger selector names a ledger that is not proven to be the ambient one");
-    target = { key: ambient, store: ambient };
-  }
   const flagActor = transitionFlags(invocation.args).actorOverride ?? globalValue(invocation.globals, ["--actor"]);
   const ownPrefix = invocation.prefix.some((token) => /^(BEADS_ACTOR|BD_ACTOR)=/.test(token));
   const possible = flagActor !== undefined ? [/[$`\\\0]/.test(flagActor) ? undefined : flagActor.trim()] : ownPrefix ? [invocationActor(invocation, env)] : [injected, invocationActor(invocation, env)];
@@ -6127,7 +6134,10 @@ async function setupBeads(ctx, deps = {}) {
     const advisories = [];
     let command = call.command;
     if (on("beads-claim-tracking")) {
-      const inspected = inspectClaim(call.command, call.cwd, environmentForCommand(call.command, env), injected);
+      const inspected = inspectClaim(call.command, call.cwd, environmentForCommand(call.command, env), {
+        injected,
+        inherited: deps.env ?? process.env
+      });
       if (inspected.kind === "claim" && !inspected.plan.json) {
         command = withJson(call.command, inspected.plan);
         advisories.push("Beads: added --json to this claim so the plugin can confirm it from bd's own output and track it; the result is bd's JSON.");
@@ -6196,7 +6206,10 @@ async function setupBeads(ctx, deps = {}) {
         const key = `claims/${event.sessionID}`;
         const env = environmentForCommand(call.command, pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor));
         const invocations = bdInvocations(call.command);
-        const inspected = inspectClaim(call.command, call.cwd, env, call.injected);
+        const inspected = inspectClaim(call.command, call.cwd, env, {
+          injected: call.injected,
+          inherited: deps.env ?? process.env
+        });
         let confirmed = [];
         if (inspected.kind === "refused")
           advisories.push(untrackedClaim(inspected.reason));

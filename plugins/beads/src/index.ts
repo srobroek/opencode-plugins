@@ -260,7 +260,10 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
     const advisories: string[] = []
     let command = call.command
     if (on("beads-claim-tracking")) {
-      const inspected = inspectClaim(call.command, call.cwd, environmentForCommand(call.command, env), injected)
+      const inspected = inspectClaim(call.command, call.cwd, environmentForCommand(call.command, env), {
+        injected,
+        inherited: deps.env ?? process.env,
+      })
       if (inspected.kind === "claim" && !inspected.plan.json) {
         command = withJson(call.command, inspected.plan)
         advisories.push(
@@ -330,7 +333,10 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
         const key = `claims/${event.sessionID}`
         const env = environmentForCommand(call.command, pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor))
         const invocations = bdInvocations(call.command)
-        const inspected = inspectClaim(call.command, call.cwd, env, call.injected)
+        const inspected = inspectClaim(call.command, call.cwd, env, {
+          injected: call.injected,
+          inherited: deps.env ?? process.env,
+        })
         let confirmed: ConfirmedClaim[] = []
         if (inspected.kind === "refused") advisories.push(untrackedClaim(inspected.reason))
         else if (inspected.kind === "claim") {

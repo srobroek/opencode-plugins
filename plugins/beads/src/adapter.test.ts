@@ -1,61 +1,56 @@
-import { afterEach, describe, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { describe, expect, test } from "bun:test"
 import { CONTENTION_ADVISORY, confirmClaims, contentionAdvisory, inspectClaim, readClaimState, withJson } from "./claims.ts"
 import { agentActor, blockReason, gateEnabled, sessionChain, shellInput } from "./host.ts"
 import { closeInvocations, parse, parsedInvocations } from "./shell.ts"
 import { claimJson, recordResult } from "./test-support.ts"
 
-describe("a pre-verb ledger selector", () => {
-  const roots: string[] = []
-  afterEach(() => {
-    for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
-  })
-
-  function ledgers() {
-    const root = realpathSync(mkdtempSync(join(tmpdir(), "beads-claims-")))
-    roots.push(root)
-    mkdirSync(join(root, "nested", ".beads"), { recursive: true })
-    mkdirSync(join(root, "elsewhere", ".beads"), { recursive: true })
-    return { root, ambient: join(root, "nested", ".beads"), other: join(root, "elsewhere") }
-  }
+describe("a claim that carries or inherits any ledger selector is never tracked", () => {
+  const claim = (command: string, inherited: NodeJS.ProcessEnv = {}) =>
+    inspectClaim(command, "/repo", { BEADS_DIR: "/repo/.beads" }, { injected: "a/s1", inherited })
 
   test.each([
-    ["--db nested/.beads"],
-    ["--db=nested/.beads"],
-    ["--directory nested"],
-    ["-C nested"],
-  ])("%s that names the ambient ledger is tracked under that ledger", (selector) => {
-    const { root, ambient } = ledgers()
-    const state = readClaimState(undefined)
-    const command = `bd ${selector} update proj-1 --claim --json`
-    recordResult(state, command, root, { BEADS_DIR: ambient }, claimJson({ "proj-1": "a/s1" }), "a/s1")
-    expect(Object.values(state.claims)).toEqual([{ id: "proj-1", actor: "a/s1", store: ambient }])
+    ["--db before the verb", "bd --db /x/.beads update proj-1 --claim"],
+    ["--db= before the verb", "bd --db=/x/.beads update proj-1 --claim"],
+    ["--db after the verb", "bd update proj-1 --claim --db /x/.beads"],
+    ["--database before", "bd --database x update proj-1 --claim"],
+    ["--database= after", "bd update proj-1 --claim --database=x"],
+    ["-C before, separate value", "bd -C /x update proj-1 --claim"],
+    ["-C before, attached value", "bd -C/x update proj-1 --claim"],
+    ["-C after, attached value", "bd update proj-1 --claim -C/x"],
+    ["--directory before", "bd --directory /x update proj-1 --claim"],
+    ["--directory= after", "bd update proj-1 --claim --directory=/x"],
+    ["--global before", "bd --global update proj-1 --claim"],
+    ["--global=false then --global", "bd --global=false --global update proj-1 --claim"],
+    ["--global=false alone", "bd --global=false update proj-1 --claim"],
+    ["a --dolt flag", "bd update proj-1 --claim --dolt-auto-commit off"],
+    ["a repeated selector", "bd --db /a --db /b update proj-1 --claim"],
+    ["a BEADS_DIR assignment", "BEADS_DIR=/x/.beads bd update proj-1 --claim"],
+    ["a BEADS_DB assignment", "BEADS_DB=x bd update proj-1 --claim"],
+    ["a BD_DB assignment", "BD_DB=x bd update proj-1 --claim"],
+    ["another BEADS_ path assignment", "BEADS_DOLT_DATA_DIR=/x bd update proj-1 --claim"],
+    ["an export", "export BEADS_DIR=/x/.beads; bd update proj-1 --claim"],
+    ["an env wrapper", "env BEADS_DIR=/x bd update proj-1 --claim"],
+  ])("%s", (_name, command) => {
+    expect(claim(command).kind).toBe("refused")
   })
 
-  test.each([
-    ["--db elsewhere/.beads"],
-    ["--db=elsewhere/.beads"],
-    ["--directory elsewhere"],
-    ["--directory=elsewhere"],
-    ["-C elsewhere"],
-    ["--database elsewhere/.beads"],
-    ["--database=elsewhere/.beads"],
-    ["--db missing/.beads"],
-    ["--global"],
-    ["--db nested/.beads --db elsewhere/.beads"],
-    ["--db elsewhere/.beads --db nested/.beads"],
-    ["-C nested --directory nested"],
-    ["--db nested/.beads --database nested/.beads"],
-    ["--global --db nested/.beads"],
-  ])("%s, a ledger not proven to be the ambient one, is never tracked", (selector) => {
-    const { root, ambient } = ledgers()
-    const command = `bd ${selector} update proj-1 --claim --json`
-    expect(inspectClaim(command, root, { BEADS_DIR: ambient }, "a/s1").kind).toBe("refused")
-    const state = readClaimState(undefined)
-    recordResult(state, command, root, { BEADS_DIR: ambient }, claimJson({ "proj-1": "a/s1" }), "a/s1")
-    expect(state.claims).toEqual({})
+  test.each(["BEADS_DIR", "BEADS_DB", "BD_DB", "BEADS_DOLT_DATA_DIR"])(
+    "%s set in the inherited environment",
+    (name) => {
+      const inspected = claim("bd update proj-1 --claim", { [name]: "/secret/path" })
+      expect(inspected.kind).toBe("refused")
+      expect(JSON.stringify(inspected)).toContain(name)
+      expect(JSON.stringify(inspected)).not.toContain("/secret/path")
+    },
+  )
+
+  test("an empty inherited variable selects nothing", () => {
+    expect(claim("bd update proj-1 --claim", { BEADS_DIR: "", BD_DB: "" }).kind).toBe("claim")
+  })
+
+  test("the actor variables and the plugin's own pin are not selectors", () => {
+    expect(claim("BEADS_ACTOR=a/s1 bd update proj-1 --claim").kind).toBe("claim")
+    expect(claim("bd update proj-1 --claim", { BEADS_ACTOR: "a/s1" }).kind).toBe("claim")
   })
 })
 
@@ -171,7 +166,7 @@ describe("bd shell parsing", () => {
 
 describe("claim confirmation", () => {
   const confirm = (command: string, assignee: string, injected = "B", status = "in_progress") => {
-    const inspected = inspectClaim(command, "/repo", {}, injected)
+    const inspected = inspectClaim(command, "/repo", {}, { injected, inherited: {} })
     if (inspected.kind !== "claim") return inspected
     return confirmClaims(inspected.plan, [JSON.stringify([{ id: "proj-1", status, assignee }])])
   }
@@ -183,7 +178,7 @@ describe("claim confirmation", () => {
     ["a post-verb --actor= form", "BEADS_ACTOR=B bd update proj-1 --claim --actor=A --json", "A", ["A"]],
     ["a post-verb --actor over a pre-verb one", "bd --actor B update proj-1 --claim --actor A --json", "A", ["A"]],
   ])("%s is the actor bd's report must name", (_name, command, holder, candidates) => {
-    const inspected = inspectClaim(command, "/repo", {}, "B")
+    const inspected = inspectClaim(command, "/repo", {}, { injected: "B", inherited: {} })
     expect(inspected.kind === "claim" ? [...inspected.plan.candidates] : inspected).toEqual(candidates)
     expect(confirm(command, holder)).toMatchObject({ confirmed: [{ id: "proj-1", actor: holder }], unconfirmed: [] })
   })
@@ -196,20 +191,20 @@ describe("claim confirmation", () => {
   })
 
   test("another bead's issue in the output does not confirm the claimed one", () => {
-    const inspected = inspectClaim("bd update proj-1 --claim --json", "/repo", {}, "B")
+    const inspected = inspectClaim("bd update proj-1 --claim --json", "/repo", {}, { injected: "B", inherited: {} })
     if (inspected.kind !== "claim") throw new Error("expected a claim")
     const outcome = confirmClaims(inspected.plan, [JSON.stringify([{ id: "proj-2", status: "in_progress", assignee: "B" }])])
     expect(outcome).toEqual({ confirmed: [], unconfirmed: ["proj-1"], jsonFound: true })
   })
 
   test("text output is no confirmation", () => {
-    const inspected = inspectClaim("bd update proj-1 --claim", "/repo", {}, "B")
+    const inspected = inspectClaim("bd update proj-1 --claim", "/repo", {}, { injected: "B", inherited: {} })
     if (inspected.kind !== "claim") throw new Error("expected a claim")
     expect(confirmClaims(inspected.plan, ["✓ Updated issue: proj-1 — Title"]).confirmed).toEqual([])
   })
 
   test("reads bd's JSON after a warning line ahead of it", () => {
-    const inspected = inspectClaim("bd update proj-1 --claim --json", "/repo", {}, "B")
+    const inspected = inspectClaim("bd update proj-1 --claim --json", "/repo", {}, { injected: "B", inherited: {} })
     if (inspected.kind !== "claim") throw new Error("expected a claim")
     const out = `warning: workspace gate unavailable\n${claimJson({ "proj-1": "B" })}`
     expect(confirmClaims(inspected.plan, [out]).confirmed).toHaveLength(1)
@@ -226,10 +221,6 @@ describe("which claims are refused", () => {
     ["a command substitution", "x=$(bd update proj-1 --claim --json)"],
     ["a background job", "bd update proj-1 --claim --json &"],
     ["a wrapper", "bash -c 'bd update proj-1 --claim --json'"],
-    ["a post-verb -C", "bd update proj-1 --claim --json -C /other"],
-    ["a post-verb --directory", "bd update proj-1 --claim --json --directory=/other"],
-    ["a post-verb --db", "bd update proj-1 --claim --json --db /other/.beads"],
-    ["a post-verb --dolt flag", "bd update proj-1 --claim --json --dolt-auto-commit off"],
     ["a computed pre-verb selector", 'bd -C "$DIR" update proj-1 --claim --json'],
     ["a computed ledger prefix", "BEADS_DIR=$DIR bd update proj-1 --claim --json"],
     ["a variable after the verb", 'bd update proj-1 --claim --json --notes "$X"'],
@@ -240,23 +231,23 @@ describe("which claims are refused", () => {
     ["a tilde after the verb", "bd update proj-1 --claim --json --notes ~/x"],
     ["a brace expansion", "bd update proj-1 --claim --json --notes {a,b}"],
   ])("%s", (_name, command) => {
-    expect(inspectClaim(command, "/repo", { BEADS_DIR: "/repo/.beads" }, "B").kind).toBe("refused")
+    expect(inspectClaim(command, "/repo", { BEADS_DIR: "/repo/.beads" }, { injected: "B", inherited: {} }).kind).toBe("refused")
   })
 
   test("a semicolon inside a quoted note is not a command separator", () => {
     const command = 'bd update proj-1 --claim --json --notes "step 1; step 2 && done | ok"'
-    expect(inspectClaim(command, "/repo", { BEADS_DIR: "/repo/.beads" }, "B").kind).toBe("claim")
+    expect(inspectClaim(command, "/repo", { BEADS_DIR: "/repo/.beads" }, { injected: "B", inherited: {} }).kind).toBe("claim")
   })
 
   test("a command that claims nothing is not a claim", () => {
-    expect(inspectClaim("bd update proj-1 --status blocked", "/repo", {}, "B").kind).toBe("none")
-    expect(inspectClaim("ls; echo hi", "/repo", {}, "B").kind).toBe("none")
+    expect(inspectClaim("bd update proj-1 --status blocked", "/repo", {}, { injected: "B", inherited: {} }).kind).toBe("none")
+    expect(inspectClaim("ls; echo hi", "/repo", {}, { injected: "B", inherited: {} }).kind).toBe("none")
   })
 })
 
 describe("asking bd for json", () => {
   const plan = (command: string) => {
-    const inspected = inspectClaim(command, "/repo", { BEADS_DIR: "/repo/.beads" }, "B")
+    const inspected = inspectClaim(command, "/repo", { BEADS_DIR: "/repo/.beads" }, { injected: "B", inherited: {} })
     if (inspected.kind !== "claim") throw new Error("expected a claim")
     return inspected.plan
   }

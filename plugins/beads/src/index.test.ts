@@ -342,7 +342,7 @@ fi
   })
   afterAll(() => rmSync(fixtureBin, { recursive: true, force: true }))
 
-  type ClaimOptions = { lost?: string; ignoresJson?: boolean; env?: Record<string, string> }
+  type ClaimOptions = { lost?: string; ignoresJson?: boolean; env?: Record<string, string>; inherited?: Record<string, string> }
 
   /**
    * Run `commands` in order as one session would: the plugin rewrites each in `execute.before`, the
@@ -361,7 +361,9 @@ fi
     writeFileSync(log, "")
     // Gate admission and release talk to bd through `run`; only the agent's own command reaches the stand-in.
     const { fake, cleanup } = await start(root, {
-      env: { ...quietEnv, PATH: `${fixtureBin}:${process.env.PATH}`, BEADS_DIR: store },
+      // The plugin pins the session's ledger itself; the process environment sets no ledger.
+      env: { ...quietEnv, PATH: `${fixtureBin}:${process.env.PATH}`, ...options.inherited },
+      pinFor: () => store,
       run: async () => ({ output: "null" }),
     })
     let rewritten = ""
@@ -496,15 +498,32 @@ fi
     expect(run.log).toContain(`LEDGER=${join(other, ".beads")} proj-1`)
     expect(run.claims).toEqual([])
     expect(run.leases).toEqual([])
-    expect(run.result).toContain("more than one ledger selector")
+    expect(run.result).toContain("ledger selector")
     await run.cleanup()
   })
 
   test.each([
-    ["-C", (root: string) => `-C ${root}`],
-    ["--db", (root: string) => `--db ${root}/.beads`],
-  ])("a pre-verb %s that names the ambient ledger is tracked under it", async (_flag, selector) => {
-    const run = await claimThrough(({ root }) => [`bd ${selector(root)} update proj-1 --claim`])
+    ["BEADS_DB=x", "BEADS_DB"],
+    ["BD_DB=x", "BD_DB"],
+    ["BEADS_DIR=x", "BEADS_DIR"],
+  ])("a %s assignment on the command leaves the claim untracked", async (assignment) => {
+    const run = await claimThrough([`${assignment} bd update proj-1 --claim`])
+    expect(run.claims).toEqual([])
+    expect(run.leases).toEqual([])
+    expect(run.result).toContain("this claim is not tracked")
+    await run.cleanup()
+  })
+
+  test.each(["BEADS_DB", "BD_DB", "BEADS_DIR"])("%s in the process environment leaves every claim untracked, naming it but not its value", async (name) => {
+    const run = await claimThrough(["bd update proj-1 --claim"], { inherited: { [name]: "/private/ledger/path" } })
+    expect(run.claims).toEqual([])
+    expect(run.result).toContain(name)
+    expect(run.result).not.toContain("/private/ledger/path")
+    await run.cleanup()
+  })
+
+  test("a session whose ledger the plugin pinned still tracks a plain claim", async () => {
+    const run = await claimThrough(["bd update proj-1 --claim"])
     expect(run.log).toContain(`LEDGER=${run.store} proj-1`)
     expect(run.claims).toEqual([{ id: "proj-1", actor: GENERATED, store: run.store }])
     await run.cleanup()
