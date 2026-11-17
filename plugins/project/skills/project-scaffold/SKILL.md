@@ -97,7 +97,8 @@ the project needs:
 - `plugins`: the project-specific plugins from step 6 (arrays merge with the global list).
 - `formatter`: disable the built-ins the project opts out of
   (`"formatter": { "ruff": { "disabled": true } }`), or the second formatter when two
-  match the same files (`references/formatters.md`).
+  match the same files, or re-enable one the global config disables, such as
+  Prettier (`references/formatters.md`).
 - `instructions`: only extra files the global list does not already load.
 - `permissions`: allow the project's check commands (`just check`, `cargo clippy *`)
   when the user wants fewer prompts.

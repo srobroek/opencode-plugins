@@ -18,7 +18,8 @@ defaults that may not match the code, and every agent edit rewrites lines it did
 
 ## Python: Ruff
 
-Put the config in `pyproject.toml` (or `ruff.toml` when there is no `pyproject.toml`):
+Put the config in `pyproject.toml`. In a `ruff.toml` (only when there is no `pyproject.toml`),
+drop the `tool.ruff` prefix: settings sit at the root and the tables are `[format]` and `[lint]`.
 
 ```toml
 [tool.ruff]
@@ -78,8 +79,9 @@ runs the first matching built-in that succeeds, and the gate and the agent then 
   If Biome stays for linting, set `"formatter": { "enabled": false }` in `biome.json` and add
   `"biome": { "disabled": true }` to the project's OpenCode `formatter` block, so Biome does
   not also format the JS and TS files.
-- Prettier stays off globally. A project that wants it adds `prettier` as a dev dependency
-  explicitly and disables Biome and oxfmt for the same files.
+- Prettier stays off globally. A project that wants it adds `prettier` as a dev dependency,
+  re-enables it with `"prettier": { "disabled": false }` in its OpenCode `formatter` block,
+  and disables Biome and oxfmt for the same files.
 
 ## Existing code
 
