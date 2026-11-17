@@ -159,7 +159,7 @@ describe("setup", () => {
       fake.fire.tool("execute.before", { tool: "shell", agent, sessionID: "ses_1", input: { command, workdir } })
     const scratch = `${homedir()}/.local/share/opencode/worktree/h1/debug-foo`
     await expect(run("debug", "git commit -m x")).rejects.toThrow("scratch worktree")
-    await expect(run("debug", `git -C ${scratch} commit -m x`)).resolves.toBeDefined()
+    await expect(run("debug", `git -C ${scratch} commit -m x`)).rejects.toThrow("workdir")
     await expect(run("debug", "git commit -m x", scratch)).resolves.toBeDefined()
     await expect(run("refactor", "git commit -m x")).resolves.toBeDefined()
   })

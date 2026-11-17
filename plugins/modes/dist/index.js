@@ -1162,11 +1162,11 @@ function joinPath(base, path, home) {
     return path;
   return base === undefined ? undefined : `${base.replace(/\/$/, "")}/${path}`;
 }
-function checkGit(args, ctx, cwd) {
+function checkGit(args, ctx, cwd, wrapped) {
   const { agent, policy } = ctx;
   const refuse = (what) => `${what} is not allowed for the ${agent} agent`;
   let tree = cwd;
-  let gitDir = false;
+  let redirected = false;
   let i = 0;
   for (;i < args.length; i++) {
     const word = args[i];
@@ -1179,8 +1179,11 @@ function checkGit(args, ctx, cwd) {
       if (value === undefined)
         return refuse("git -C without a path");
       if (word === "-C")
+        redirected = true;
+      if (word === "-C")
         tree = unsafeOperand(value) ? undefined : joinPath(tree, value, ctx.env.home);
     } else if (word.startsWith("-C")) {
+      redirected = true;
       tree = unsafeOperand(word.slice(2)) ? undefined : joinPath(tree, word.slice(2), ctx.env.home);
     } else if (word.startsWith("-c")) {
       if (!SAFE_CONFIG.test(word.slice(2).split("=")[0] ?? ""))
@@ -1198,8 +1201,8 @@ function checkGit(args, ctx, cwd) {
         return refuse(`git ${word} without a value`);
       if (name === "--work-tree")
         tree = unsafeOperand(value) ? undefined : joinPath(tree, value, ctx.env.home);
-      if (name === "--git-dir")
-        gitDir = true;
+      if (name === "--git-dir" || name === "--work-tree" || name === "--namespace")
+        redirected = true;
     } else
       return refuse(`git option ${word}`);
   }
@@ -1213,10 +1216,10 @@ function checkGit(args, ctx, cwd) {
   if (risky !== undefined)
     return refuse(`git ${sub} ${risky}`);
   if (agent === "debug" && changesTree(sub, rest)) {
-    if (gitDir)
-      return refuse(`git ${sub} with --git-dir`);
-    if (tree === undefined || !scratch(tree, ctx))
-      return refuse(`git ${sub} outside a debug-* scratch worktree (it would change the user's checkout or shared refs)`);
+    const base = startingDirectory(ctx.env);
+    const why = redirected ? "uses -C, --work-tree, --git-dir or --namespace" : wrapped ? "runs through a wrapper that changes directory" : ctx.state.moved ? "runs after cd, pushd or popd" : ctx.depth > 0 ? "runs inside a nested shell, substitution or runner" : base === undefined || !scratch(base, ctx) ? "does not have a debug-* scratch worktree as its workdir" : undefined;
+    if (why !== undefined)
+      return refuse(`git ${sub} ${why}; run it directly with the shell workdir set to your debug-* scratch worktree`);
   }
   const outputs = outputDestinations(sub, rest);
   if (sub === "format-patch" && !rest.includes("--stdout") && outputs?.length === 0)
@@ -1420,7 +1423,7 @@ function checkWords(input, ctx) {
     let cwd = ctx.state.cwd;
     for (const directory of directories)
       cwd = joinPath(cwd, directory, ctx.env.home);
-    return checkGit(args, ctx, cwd);
+    return checkGit(args, ctx, cwd, directories.length > 0);
   }
   if ((INTERPRETERS.test(exe) || INLINE_CODE_RUNNERS.test(exe) && args.some((arg) => ["-e", "--eval", "-p", "--print"].includes(arg))) && args.some((arg) => MENTIONS_GIT.test(arg)))
     return "an interpreter running code that mentions git cannot be checked";
@@ -1447,17 +1450,12 @@ function checkWords(input, ctx) {
   }
   return;
 }
-var CD_UNSAFE = /[$`*?[{~]/;
 function followDirectory(position, ctx) {
   const { argv } = realCommand(position.argv);
-  const exe = basename2(argv[0] ?? "");
-  if (exe === "pushd" || exe === "popd")
-    ctx.state.cwd = undefined;
-  else if (exe === "cd") {
-    const target = argv[1];
-    ctx.state.cwd = ctx.trusted && target !== undefined && !target.startsWith("-") && !CD_UNSAFE.test(target) && argv.length === 2 ? joinPath(ctx.state.cwd, target, ctx.env.home) : undefined;
-  } else
+  if (!["cd", "pushd", "popd"].includes(basename2(argv[0] ?? "")))
     return false;
+  ctx.state.cwd = undefined;
+  ctx.state.moved = true;
   return true;
 }
 function checkParsed(parsed, ctx) {
@@ -1469,13 +1467,12 @@ function checkParsed(parsed, ctx) {
       return reason;
   }
   for (const child of parsed.nested) {
-    const reason = checkParsed(child, { ...deeper(ctx), state: { cwd: ctx.state.cwd }, trusted: onlyAndChains(child.command) });
+    const reason = checkParsed(child, { ...deeper(ctx), state: { ...ctx.state } });
     if (reason !== undefined)
       return reason;
   }
   return;
 }
-var onlyAndChains = (command) => !/[;|&(){}`\n]|\$\(/.test(command.replaceAll("&&", " "));
 function checkCommand(command, ctx) {
   const text = unbackslash(command.replace(/['"]/g, ""));
   if (!WORTH_PARSING.test(text))
@@ -1483,7 +1480,7 @@ function checkCommand(command, ctx) {
   const parsed = parse(command);
   if (parsed.unknown)
     return MENTIONS_GIT.test(text) || ctx.mentions ? "the command could not be parsed, so its git use cannot be checked" : undefined;
-  return checkParsed(parsed, { ...ctx, mentions: ctx.mentions || MENTIONS_GIT.test(text), state: { cwd: ctx.state.cwd }, trusted: onlyAndChains(command) });
+  return checkParsed(parsed, { ...ctx, mentions: ctx.mentions || MENTIONS_GIT.test(text), state: { ...ctx.state } });
 }
 function startingDirectory(env) {
   if (env.workdir !== undefined && isAbsolute2(env.workdir))
@@ -1502,8 +1499,7 @@ function forbiddenGit(command, agent, env = {}) {
     mentions: false,
     depth: 0,
     env,
-    state: { cwd: startingDirectory(env) },
-    trusted: onlyAndChains(command)
+    state: { cwd: startingDirectory(env), moved: false }
   });
 }
 function guardShellCall(tool, input, agent, env = {}) {

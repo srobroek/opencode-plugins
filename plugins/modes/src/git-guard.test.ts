@@ -163,8 +163,8 @@ const ALLOWED = [
   "env FOO=1 git status",
   "git commit -m 'EDITOR note'",
   "git diff main -- clean.ts",
-  `git -C ${WT} commit -m x`,
-  `git -C ${WT} checkout -b probe`,
+  "git commit -m x",
+  "git checkout -b probe",
   "git switch -c probe",
   "git add -A && git commit -m x",
   "git stash",
@@ -213,7 +213,7 @@ describe("forbiddenGit", () => {
   })
   test("bisect is allowed for debug and refused for refactor", () => {
     expect(forbiddenGit("git bisect start", "debug", context)).toBeUndefined()
-    expect(forbiddenGit("git -C wt bisect good", "debug", context)).toBeUndefined()
+    expect(forbiddenGit("git bisect good", "debug", context)).toBeUndefined()
     expect(forbiddenGit("git bisect start", "refactor", context)).toBeString()
   })
   test("other agents are not guarded", () => {
@@ -267,7 +267,6 @@ describe("output options", () => {
     `git format-patch -o ${WT}/patches HEAD~1`,
     `git format-patch --output-directory=${HOME}/.opencode/debug/p HEAD~1`,
     "git format-patch -o patches HEAD~1",
-    `git -C ${WT} format-patch -o patches HEAD~1`,
     `git diff --output=${HOME}/.opencode/debug/d.patch`,
     "git diff --output=out.patch",
     "git log -p",
@@ -377,12 +376,20 @@ describe("checkout boundary (debug only)", () => {
   const redirected = [
     `git -C ${CHECKOUT} commit -m x`,
     `git -C ${CHECKOUT}/src add f`,
+    `git -C ${WT} commit -am x`,
+    `git -C ${WT}/src add f`,
     "git -C .. commit -m x",
+    "git -C . commit -m x",
     `git --work-tree=${CHECKOUT} checkout .`,
     `git --work-tree ${CHECKOUT} checkout .`,
+    `git --work-tree=${WT} reset`,
     `git --git-dir=${CHECKOUT}/.git commit -m x`,
     `git --git-dir=${WT}/.git commit -m x`,
+    "git --namespace=x commit -m x",
+    `git -C ${WT} bisect run bun test x`,
     `cd ${CHECKOUT} && git commit -m x`,
+    `cd ${WT} && git commit -am x`,
+    `cd ${WT}/src && git add f && git commit -m x`,
     `cd ${CHECKOUT}; git commit -m x`,
     `(cd ${WT} && true); git commit -m x`,
     `(cd ${CHECKOUT} && git commit -m x)`,
@@ -391,24 +398,39 @@ describe("checkout boundary (debug only)", () => {
     "cd .. && git commit -m x",
     `pushd ${CHECKOUT} && git commit -m x`,
     `env -C ${CHECKOUT} git commit -m x`,
-    `sh -c 'cd ${CHECKOUT} && git commit -m x'`,
+    `env -C ${WT} git commit -m x`,
+    `env -C ${CHECKOUT} sh -c 'git commit -m x'`,
+    `sudo -D ${CHECKOUT} git commit -m x`,
+    "sh -c 'git commit -m x'",
+    "bash -lc 'git add -A'",
+    `sh -c 'cd ${WT} && git commit -m x'`,
+    "eval 'git commit -m x'",
+    "echo x | xargs git commit -m",
+    "find . -exec git add {} ';'",
+    "echo $(git commit -m x)",
+    `GIT_DIR=${CHECKOUT}/.git git commit -m x`,
+    `GIT_WORK_TREE=${CHECKOUT} git add -A`,
   ]
-  test.each(redirected)("refuses %j from the scratch worktree", (command) => {
+  test.each(redirected)("refuses %j even from the scratch workdir", (command) => {
     expect(forbiddenGit(command, "debug", context)).toBeString()
   })
-  const scratchTargets = [
-    `git -C ${WT} commit -am x`,
-    `git -C ${WT}/src add f`,
-    `git --work-tree=${WT} reset`,
-    `cd ${WT} && git commit -am x`,
-    `cd ${WT}/src && git add f && git commit -m x`,
-    `git -C ${WT} bisect run bun test x`,
-    `env -C ${WT} git commit -m x`,
-    `sh -c 'cd ${WT} && git commit -m x'`,
-  ]
-  test.each(scratchTargets)("allows %j from the user's checkout", (command) => {
-    expect(forbiddenGit(command, "debug", inCheckout)).toBeUndefined()
+  test("the refusal tells the agent to set workdir", () => {
+    expect(forbiddenGit(`git -C ${WT} commit -m x`, "debug", inCheckout)).toContain("workdir")
+    expect(forbiddenGit("git commit -m x", "debug", inCheckout)).toContain("workdir")
   })
+  test.each([`git -C ${WT} commit -am x`, `cd ${WT} && git commit -am x`, `env -C ${WT} git commit -m x`, "sh -c 'git commit -m x'"])(
+    "leaves refactor free to run %j",
+    (command) => {
+      expect(forbiddenGit(command, "refactor", inCheckout)).toBeUndefined()
+    },
+  )
+  test.each(["git status", "git log -p", "git diff", `git -C ${CHECKOUT} log`, `cd ${CHECKOUT} && git status`, `git -C ${WT} diff`])(
+    "allows the read-only %j with -C, cd or a checkout workdir",
+    (command) => {
+      expect(forbiddenGit(command, "debug", inCheckout)).toBeUndefined()
+      expect(forbiddenGit(command, "debug", context)).toBeUndefined()
+    },
+  )
   const readOnly = [
     "git status",
     "git log -p",
