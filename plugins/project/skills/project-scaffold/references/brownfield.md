@@ -10,7 +10,9 @@ formatter configs, `AGENTS.md`/`CLAUDE.md`, `.gitignore`, `mise.toml`, `justfile
    silently; merge into it (a `CLAUDE.md` content folds into `AGENTS.md`; keep the user's
    hooks and justfile tasks; keep unmanaged text outside anything you add).
 3. Keep the project's existing choices (package manager, test runner, formatter) unless the
-   user asks to standardise (`toolchain-stack-defaults`).
+   user asks to standardise (`toolchain-stack-defaults`). A project with no formatter config
+   gets one that matches its code, committed with a one-time format pass in its own commit
+   (`formatters.md`).
 4. Report, do not hide: CI workflows that would go inactive or are called by nothing after
    your change; checks you could not run (missing tool, no network) as "not run"; steps a
    missing toolchain skipped.

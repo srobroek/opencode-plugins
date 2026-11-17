@@ -61,9 +61,12 @@ in the final report instead of inventing a value.
    `toolchain-stack-defaults`; a larger monorepo may want `moon` (ask).
 4. Run the language setup from `references/<lang>.md`: `rust.md`, `python.md`,
    `go.md`, `typescript.md`. Several languages or packages: `references/monorepo.md`.
-5. Add the license through `license-picker`, then a short `README.md` (what, install,
+5. Formatter config: commit an explicit formatter config for each language
+   (`references/formatters.md`): Ruff in `pyproject.toml`, `biome.json` or `.oxfmtrc.json`
+   (one formatter per file type). OpenCode's config-gated formatters run only with it.
+6. Add the license through `license-picker`, then a short `README.md` (what, install,
    usage, how to run `just check`).
-6. Secrets: decide project secrets handling and load the `project-secrets` skill
+7. Secrets: decide project secrets handling and load the `project-secrets` skill
    (fnox.toml with 1Password vault refs, local sync cache, GitHub Actions push
    targets, AWS leases). Skip it when the project has no secrets.
 
@@ -92,8 +95,10 @@ root or `.opencode/opencode.jsonc`; pick one form. It merges over the global
 the project needs:
 
 - `plugins`: the project-specific plugins from step 6 (arrays merge with the global list).
-- `formatter`: only when the global config has not enabled it, or to override one
-  built-in for this project (biome over prettier is the preference).
+- `formatter`: disable the built-ins the project opts out of
+  (`"formatter": { "ruff": { "disabled": true } }`), or the second formatter when two
+  match the same files, or re-enable one the global config disables, such as
+  Prettier (`references/formatters.md`).
 - `instructions`: only extra files the global list does not already load.
 - `permissions`: allow the project's check commands (`just check`, `cargo clippy *`)
   when the user wants fewer prompts.
@@ -135,5 +140,5 @@ workflow, show the shortlist with one line each, install only what the user acce
 4. Report: what was created, versions chosen, commands to run, open decisions.
 
 Checklist before reporting: git initialised; tools pinned; gate green; license set;
-`README.md`, `AGENTS.md`, `docs/stack.md` written; `.gitignore` covers build output
+`README.md`, `AGENTS.md`, `docs/stack.md` written; formatter config committed; `.gitignore` covers build output
 and `.env`; no secrets committed; plugins and OpenCode config as agreed; one commit.
