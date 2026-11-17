@@ -498,17 +498,17 @@ const opaque = (program: string): boolean => {
 }
 
 /**
- * Whether a launcher command is fully accounted for: it installs or lists (`not-run`, except
- * `python -c`), or the program it launches is neither a shell nor an interpreter (a nested launcher
- * is checked the same way). `filterRepo` already judged a launched filter-repo.
+ * Whether a launcher command is accounted for, given `filterRepo` already judged a directly
+ * launched filter-repo. Left: an install or list (`not-run`, except `python -c`), or a plain program
+ * that is not a shell, an interpreter, git or another launcher (launched git and nested launchers
+ * are never judged here, so a rewrite mention in them is refused).
  */
 function launcherJudged(argv: readonly string[]): boolean {
   const run = launched(argv)
   if (run === undefined) return false
   if (run === "not-run") return !base(argv[0]).startsWith("python")
-  if (run === "unparsed" || opaque(run.program)) return false
-  const nested = [run.program, ...run.args]
-  return launched(nested) === undefined || launcherJudged(nested)
+  if (run === "unparsed" || opaque(run.program) || ["git", "dgit"].includes(base(run.program))) return false
+  return launched([run.program, ...run.args]) === undefined
 }
 
 /**

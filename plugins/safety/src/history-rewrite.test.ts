@@ -502,6 +502,9 @@ describe("a rewrite the walker cannot fully parse is refused", () => {
     ["git grep --open-files-in-pager", "git grep --open-files-in-pager='sh -c \"git update-ref -d refs/heads/main\"' x"],
     ["git diff --ext-diff with a mention", "git diff --ext-diff --foo='git update-ref -d refs/heads/main'"],
     ["rg --pre with a mention", "rg --pre='git update-ref -d refs/heads/main' x ."],
+    ["git launched by uv run", "uv run git update-ref -d refs/heads/main"],
+    ["a nested launcher with --force", "uv run uv run git-filter-repo --force"],
+    ["a nested launcher behind --from", "uvx --from x uv run git-filter-repo"],
     ["a git alias that runs a rewrite", "git -c alias.x='!git update-ref -d refs/heads/main' x"],
   ])("refuses %s", (_name, command) => {
     expect(run(command, "canonical")?.guard).toBe("history-rewrite")

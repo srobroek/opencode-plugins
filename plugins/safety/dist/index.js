@@ -4028,10 +4028,9 @@ function launcherJudged(argv) {
     return false;
   if (run === "not-run")
     return !base(argv[0]).startsWith("python");
-  if (run === "unparsed" || opaque(run.program))
+  if (run === "unparsed" || opaque(run.program) || ["git", "dgit"].includes(base(run.program)))
     return false;
-  const nested = [run.program, ...run.args];
-  return launched(nested) === undefined || launcherJudged(nested);
+  return launched([run.program, ...run.args]) === undefined;
 }
 function unaccountedMention(command, git) {
   const text = command.argv.join(" ");
