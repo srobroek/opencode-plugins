@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, test } from "bun:test"
 import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
 import { landingFile, readClaim, removeClaim, writeLanding } from "@srobroek/opencode-lib/worktree-claims"
 import { lockFile, readHolds, setHold } from "@srobroek/opencode-lib/worktree-locks"
@@ -108,6 +108,8 @@ async function start(
     debounceMs?: number
     /** Share the git common directory and the world with another instance. */
     common?: string
+    /** Make the git common directory `<tmp>/main-checkout/.git`, so the repository has a canonical main checkout distinct from the project root. */
+    mainCheckout?: boolean
     world?: World
     lock?: Record<string, unknown>
   } = {},
@@ -154,8 +156,15 @@ async function start(
       refresh: async (input: Record<string, unknown>) => void worktree.push({ method: "refresh", input }),
     },
   })
-  const common = options.common ?? mkdtempSync(join(tmpdir(), "common-"))
-  if (!options.common) COMMONS.push(common)
+  const makeCommon = () => {
+    if (!options.mainCheckout) return mkdtempSync(join(tmpdir(), "common-"))
+    const root = mkdtempSync(join(tmpdir(), "repo-"))
+    COMMONS.push(root)
+    mkdirSync(join(root, "main-checkout", ".git"), { recursive: true })
+    return join(root, "main-checkout", ".git")
+  }
+  const common = options.common ?? makeCommon()
+  if (!options.common && !options.mainCheckout) COMMONS.push(common)
   const log: string[][] = []
   const plugin = createPlugin({
     commonDir: async () => common,
@@ -1333,15 +1342,71 @@ describe("the repair pass heals sessions stranded by earlier removals", () => {
     await cleanup()
   })
 
-  test("a lane whose parent checkout has been removed too falls back to the canonical checkout, never to the missing path", async () => {
-    const { fake, cleanup } = await start(
-      { missing: [WT, "/gone/linked-checkout"] },
-      { options: { sweep: "report" }, sweepDelayMs: 80, stored: [lane({ parentDir: "/gone/linked-checkout", state: "removed" })] },
-    )
-    await until(() => moved(fake).length > 0)
-    expect(moved(fake).find((move) => move.sessionID === CHILD)).toEqual({ sessionID: CHILD, directory: REPO })
-    expect(moved(fake).some((move) => move.directory === "/gone/linked-checkout")).toBe(false)
-    await cleanup()
+  /**
+   * The three destinations are told apart: the lane's stored parent checkout, the repository's canonical
+   * main checkout (the parent of `<common>/.git`), and the project root (REPO). Here the main checkout is a
+   * real directory that is neither of the other two.
+   */
+  describe("destination order: stored parent, then canonical main checkout, then the project root", () => {
+    const PARENT_CHECKOUT = "/gone/linked-checkout"
+    const run = async (missing: (main: string) => string[]) => {
+      // The main checkout's path is only known once the fixture exists, so `missing` is filled in afterwards.
+      const state = { missing: [] as string[] }
+      const errors: string[] = []
+      const spy = console.error
+      console.error = (...args: unknown[]) => void errors.push(args.map(String).join(" "))
+      try {
+        const started = await start(
+          { missing: state.missing },
+          {
+            options: { sweep: "report" },
+            sweepDelayMs: 150,
+            mainCheckout: true,
+            stored: [lane({ parentDir: PARENT_CHECKOUT, state: "removed" })],
+          },
+        )
+        const main = dirname(started.common)
+        expect(main).not.toBe(REPO)
+        state.missing.push(WT, ...missing(main))
+        return { ...started, main, errors, restore: () => (console.error = spy) }
+      } catch (error) {
+        console.error = spy
+        throw error
+      }
+    }
+
+    test("parent missing: the canonical main checkout wins", async () => {
+      const t = await run(() => [PARENT_CHECKOUT])
+      await until(() => moved(t.fake).length > 0)
+      t.restore()
+      expect(moved(t.fake).find((move) => move.sessionID === CHILD)).toEqual({ sessionID: CHILD, directory: t.main })
+      await t.cleanup()
+    })
+
+    test("parent and main checkout missing: the project root wins", async () => {
+      const t = await run((main) => [PARENT_CHECKOUT, main])
+      await until(() => moved(t.fake).length > 0)
+      t.restore()
+      expect(moved(t.fake).find((move) => move.sessionID === CHILD)).toEqual({ sessionID: CHILD, directory: REPO })
+      await t.cleanup()
+    })
+
+    test("all three missing: nothing is moved, and the session is reported as failed", async () => {
+      const t = await run((main) => [PARENT_CHECKOUT, main, REPO])
+      await until(() => t.errors.some((line) => line.includes("no existing destination")), 3000)
+      t.restore()
+      expect(moved(t.fake)).toEqual([])
+      expect(t.errors.join("\n")).toContain(`could not move session ${CHILD} out of ${WT}: no existing destination`)
+      await t.cleanup()
+    })
+
+    test("the stored parent is preferred when it exists", async () => {
+      const t = await run(() => [])
+      await until(() => moved(t.fake).length > 0)
+      t.restore()
+      expect(moved(t.fake).find((move) => move.sessionID === CHILD)).toEqual({ sessionID: CHILD, directory: PARENT_CHECKOUT })
+      await t.cleanup()
+    })
   })
 
   test("with the sweep off, nothing is repaired", async () => {
