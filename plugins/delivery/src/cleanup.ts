@@ -120,6 +120,12 @@ export type CleanupDeps = {
    * refuses. Absent, `run` is called directly. `authorize` (a prompt) happens before and outside it.
    */
   removalSection?: (worktree: string, run: () => Promise<CleanupFailure | RemovalFacts>) => Promise<CleanupFailure | RemovalFacts>
+  /**
+   * The last look, called inside the removal section after every read (identity, tree, host
+   * registry) and immediately before the removal call, so nothing that changed during those reads
+   * can slip past it. A returned reason refuses the removal.
+   */
+  finalCheck?: (worktree: string) => Promise<string | undefined>
 }
 
 /** What the removal section proved and did, for the continuation receipt. */
@@ -1246,6 +1252,10 @@ export async function cleanupDelivery(
     // with the worktree gone and no continuation receipt.
     if (signal?.aborted === true)
       return refuse("signal", "an abort", "no interrupt before the worktree removal; nothing was removed")
+    const held = await deps.finalCheck?.(targetPath)
+    if (held !== undefined) {
+      return refuse("worktree.held", held, "no owner, hold, denial or competing remover at the moment of removal; nothing was removed")
+    }
     if (route === "host" && deps.host !== undefined) {
       try {
         await deps.host.remove(targetPath)

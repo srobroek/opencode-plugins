@@ -369,7 +369,7 @@ export async function setupDelivery(
                     throw error
                   }
                 },
-                removalSection: pending.section,
+                ...pending.removal,
                 host: hostWorktrees(ctx),
               })
             })
@@ -408,7 +408,7 @@ export async function setupDelivery(
           const output = deferredOutput(error.deferred)
           return { output, content: `delivery_cleanup deferred: ${error.deferred}`, metadata: metadataOf(output) }
         }
-        pending.gc()
+        await pending.gc()
         const output = cleanupOutput(result)
         const text = result.ok
           ? `delivery_cleanup removed ${result.receipt.worktree.path} and branch ${result.receipt.branch.name}; remote branch ${result.remoteBranchAbsence}.\nreceipt: ${result.path}`

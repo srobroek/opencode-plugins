@@ -34,7 +34,7 @@ import {
   removeLanding,
   writeLanding,
 } from "@srobroek/opencode-lib/worktree-claims"
-import { holdsState, type LockOptions, lockedWorktreeRemoval, setHold } from "@srobroek/opencode-lib/worktree-locks"
+import { holdsState, type LockOptions, lockedWorktreeRemoval, lockedWrite, setHold } from "@srobroek/opencode-lib/worktree-locks"
 import { ownershipDeferral } from "./auto-cleanup.ts"
 import {
   CLEANUP_BOUNDS,
@@ -218,6 +218,8 @@ export function createPendingCleanup(deps: PendingDeps) {
   const observationMs = deps.cleanup?.bounds?.refReadMs ?? CLEANUP_BOUNDS.refReadMs
   /** Worktrees whose hold could not be recorded: nothing is removed from them until a later write succeeds. */
   const unsafe = new Map<string, string>()
+  /** Denials that could not be written to disk, until an authorized re-arm. */
+  const deniedInMemory = new Map<string, string>()
   const doneIds = new Set<string>()
   const retriedAt = new Map<string, number>()
   const attemptedAt = new Map<string, number>()
@@ -249,19 +251,38 @@ export function createPendingCleanup(deps: PendingDeps) {
     return { byReceipt: new Map(listed.records.map((record) => [record.receiptId, record])), unreadable: listed.unreadable, common }
   }
 
-  const write = (receiptId: string, update: (record: LandingRecord | undefined) => LandingRecord | undefined) => {
+  /** A short write to coordination state for `worktree`, under the same lock every remover takes. */
+  const locked = <T>(worktree: string, write: () => T): Promise<T> => {
+    const common = commonDir()
+    if (common === null) return Promise.reject(new Error("the git common directory could not be resolved"))
+    return lockedWrite(common, worktree, { sessionID: "delivery", now, ...deps.lock }, write)
+  }
+
+  const write = async (receiptId: string, update: (record: LandingRecord | undefined) => LandingRecord | undefined) => {
     const { byReceipt, common } = landings()
     if (common === null) return
-    const next = update(byReceipt.get(receiptId))
-    if (next === undefined) removeLanding(common, receiptId)
-    else writeLanding(common, next)
+    const existing = byReceipt.get(receiptId)
+    const next = update(existing)
+    const worktree = next?.worktree ?? existing?.worktree
+    if (worktree === undefined) return
+    await locked(worktree, () => {
+      if (next === undefined) removeLanding(common, receiptId)
+      else writeLanding(common, next)
+    })
   }
+
+  /** Delete a landing record, under the lock of the worktree it names. */
+  const dropLanding = async (common: string, record: { receiptId: string; worktree: string }) =>
+    locked(record.worktree, () => removeLanding(common, record.receiptId))
 
   /** `delivery_land` finished without removing the worktree: record the landing for whoever removes it. */
   const record = async (receipt: LandingReceipt, sessionID: string, outcome: { denied?: boolean } = {}) => {
     const path = receipt.worktree.path
     if (path === null) return
-    write(receipt.receiptId, (existing) => ({
+    // If the denial cannot be written to disk (the lock is busy, the store is unwritable), it is still
+    // remembered here: the retry must never remove what was denied just because the record is missing.
+    if (outcome.denied) deniedInMemory.set(receipt.receiptId, canonicalDirectory(path))
+    await write(receipt.receiptId, (existing) => ({
       receiptId: receipt.receiptId,
       worktree: path,
       headRefOid: receipt.pr.headRefOid,
@@ -287,17 +308,18 @@ export function createPendingCleanup(deps: PendingDeps) {
     for (const receipt of receiptsFor(worktree)) await record(receipt, sessionID, { denied: true })
     // A record that exists without a pending receipt in view (for example after a restart) is denied too.
     for (const entry of landingsFor([...landings().byReceipt.values()], worktree)) {
-      write(entry.receiptId, (existing) => (existing ? { ...existing, denied: { at: now(), sessionID } } : existing))
+      await write(entry.receiptId, (existing) => (existing ? { ...existing, denied: { at: now(), sessionID } } : existing))
     }
   }
 
   /** An explicit `delivery_cleanup` for `worktree` was authorized: only now is an earlier denial cleared. */
   const arm = async (worktree: string) => {
+    for (const [id, where] of deniedInMemory) if (where === canonicalDirectory(worktree)) deniedInMemory.delete(id)
     const { byReceipt } = landings()
     for (const entry of landingsFor([...byReceipt.values()], worktree)) {
       if (entry.denied === undefined) continue
       const { denied: _denied, ...rest } = entry
-      write(entry.receiptId, () => rest)
+      await write(entry.receiptId, () => rest)
     }
   }
 
@@ -349,6 +371,7 @@ export function createPendingCleanup(deps: PendingDeps) {
     if (common === null) return "the git common directory could not be resolved"
     const listed = listLandings(common)
     if (listed.unreadable) return "the landing records could not be read"
+    if ([...deniedInMemory.values()].includes(canonicalDirectory(path))) return "cleanup was denied; an explicit delivery_cleanup re-arms it"
     if (landingsFor(listed.records, path).some((entry) => entry.denied !== undefined)) {
       return "cleanup was denied; an explicit delivery_cleanup re-arms it"
     }
@@ -375,10 +398,16 @@ export function createPendingCleanup(deps: PendingDeps) {
     return { ok: false, reason: `worktree.held: observed ${outcome.reason}, expected no owner, hold, denial or competing remover; nothing was removed` }
   }
 
-  /** `authorize` and `removalSection` for an explicit `delivery_cleanup` call. */
+  /** The last look before the removal call itself (claims, holds, sessions, denials), read fresh. */
+  const finalCheck = async (worktree: string): Promise<string | undefined> => (await holdFor(worktree)) ?? landingBlock(worktree)
+
+  /** The removal dependencies every delivery remover passes to `cleanupDelivery`. */
+  const removal = { removalSection: section, finalCheck }
+
+  /** `authorize` and the removal dependencies for an explicit `delivery_cleanup` call. */
   const explicit = (ask: (request: ExplicitRequest) => Promise<void>, sessionID: string) => ({
     authorize: (request: ExplicitRequest) => authorizeExplicit(api, ask, sessionID, request),
-    removalSection: section,
+    ...removal,
   })
 
   /**
@@ -387,7 +416,7 @@ export function createPendingCleanup(deps: PendingDeps) {
    * re-arm clears it first). If the receipt directory is missing or unreadable, or the receipt
    * cannot be parsed, nothing is deleted.
    */
-  const gc = () => {
+  const gc = async () => {
     const key = repoKey(cwd, deps.observe, observationMs)
     const recorded = landings()
     if (key === null || recorded.common === null || recorded.unreadable) return
@@ -404,7 +433,7 @@ export function createPendingCleanup(deps: PendingDeps) {
       const own = readReceipt(resolve(directory, `${record.receiptId}.json`))
       if (!own.ok) continue
       if (own.receipt.outcome === "cleaned" || own.receipt.worktree.removed || superseded.has(record.receiptId)) {
-        removeLanding(recorded.common, record.receiptId)
+        await dropLanding(recorded.common, record)
       }
     }
   }
@@ -421,7 +450,7 @@ export function createPendingCleanup(deps: PendingDeps) {
       return
     }
     const recorded = landings()
-    gc()
+    await gc()
     // A worktree that is gone is done, whatever the window holds.
     const present: LandingReceipt[] = []
     for (const receipt of pending) {
@@ -429,7 +458,7 @@ export function createPendingCleanup(deps: PendingDeps) {
         doneIds.add(receipt.receiptId)
         // Gone is evidence the worktree is done, but never erases a denial.
         if (recorded.common !== null && recorded.byReceipt.get(receipt.receiptId)?.denied === undefined) {
-          removeLanding(recorded.common, receipt.receiptId)
+          await dropLanding(recorded.common, { receiptId: receipt.receiptId, worktree: receipt.worktree.path })
         }
       } else if (!doneIds.has(receipt.receiptId)) present.push(receipt)
     }
@@ -437,6 +466,7 @@ export function createPendingCleanup(deps: PendingDeps) {
       // Denied and lane-owned receipts need no attempt; they must not take a slot.
       skip: (receipt) =>
         recorded.byReceipt.get(receipt.receiptId)?.denied !== undefined ||
+        deniedInMemory.has(receipt.receiptId) ||
         (receipt.worktree.path !== null && ownership(receipt.worktree.path).owner !== "none"),
       lastAttempt: (receipt) => attemptedAt.get(receipt.receiptId),
       limit,
@@ -466,13 +496,13 @@ export function createPendingCleanup(deps: PendingDeps) {
           () => true,
           () => false,
         )
-        if (sent && meta) write(receipt.receiptId, (existing) => (existing ? { ...existing, nudged: true } : existing))
+        if (sent && meta) await write(receipt.receiptId, (existing) => (existing ? { ...existing, nudged: true } : existing))
       } else if (decision.action === "retry") {
         retriedAt.set(receipt.receiptId, now())
         let result: CleanupResult
         try {
           // `guard` re-checks ownership after the proofs and before the removal.
-          result = await cleanupDelivery({ receipt: path }, cwd, { env, host: deps.host(), removalSection: section, ...deps.cleanup })
+          result = await cleanupDelivery({ receipt: path }, cwd, { env, host: deps.host(), ...removal, ...deps.cleanup })
         } catch {
           continue
         }
@@ -480,7 +510,7 @@ export function createPendingCleanup(deps: PendingDeps) {
         if (result.ok) {
           doneIds.add(receipt.receiptId)
           if (recorded.common !== null && recorded.byReceipt.get(receipt.receiptId)?.denied === undefined) {
-            removeLanding(recorded.common, receipt.receiptId)
+            await dropLanding(recorded.common, { receiptId: receipt.receiptId, worktree })
           }
         }
       }
@@ -550,7 +580,7 @@ export function createPendingCleanup(deps: PendingDeps) {
         if (inside) jobs.push({ kind: job.kind, id: job.shellID ?? job.childSessionID ?? job.sessionID ?? "unknown" })
       }
       try {
-        setHold(common, path, sessionID, jobs, now())
+        await locked(path, () => setHold(common, path, sessionID, jobs, now()))
         unsafe.delete(want)
       } catch (error) {
         // The record could not be written, so running work cannot be ruled out: nothing is removed from this worktree until a write succeeds.
@@ -620,5 +650,5 @@ export function createPendingCleanup(deps: PendingDeps) {
 
   const api = { deny, arm, ownership }
 
-  return { start, dispose, record, deny, arm, ownership, section, explicit, gc, retryNow, handleEvent, settle }
+  return { start, dispose, record, deny, arm, ownership, section, removal, explicit, gc, retryNow, handleEvent, settle }
 }
