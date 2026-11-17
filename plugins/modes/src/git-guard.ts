@@ -220,9 +220,14 @@ function checkGit(args: readonly string[], ctx: Ctx, cwd: string | undefined, wr
       break
     }
     case "remote": {
-      const [first, ...others] = rest
-      const ok = first === undefined || first === "-v" || first === "--verbose" || (first === "get-url" && others.every((arg) => !arg.startsWith("-") || arg === "--all"))
-      if (!ok) return refuse("git remote changes")
+      // Read-only forms only: bare, get-url <name> and show -n <name>, after any leading -v.
+      let args = rest
+      while (args[0] === "-v" || args[0] === "--verbose") args = args.slice(1)
+      const ok =
+        args.length === 0 ||
+        (args[0] === "get-url" && args.length === 2 && !(args[1] as string).startsWith("-")) ||
+        (args[0] === "show" && args[1] === "-n" && args.length === 3 && !(args[2] as string).startsWith("-"))
+      if (!ok) return refuse("git remote changes or contacts remotes")
       break
     }
     case "tag": {

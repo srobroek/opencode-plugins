@@ -152,3 +152,21 @@ describe("worktree against real repositories", () => {
     expect(forbiddenGit(`git worktree add ${home}/.local/share/opencode/worktree/h1/debug-bar`, "debug", context(scratch))).toBeUndefined()
   })
 })
+
+describe("remote against real repositories", () => {
+  test("changing, pruning or updating remotes would rewrite the shared config and refs", () => {
+    refusedLeavesRepoUnchanged(["debug", "refactor"], [
+      "git remote -v add evil https://example.com/x.git",
+      "git remote --verbose set-url origin https://example.com/x.git",
+      "git remote -v remove origin",
+      "git remote -v rename origin o2",
+      "git remote prune origin",
+      "git remote -v update",
+      "git remote set-head origin -a",
+    ])
+  })
+  test("reading remotes is allowed", () => {
+    for (const command of ["git remote -v", "git remote get-url origin", "git remote show -n origin"])
+      expect(forbiddenGit(command, "debug", context(scratch))).toBeUndefined()
+  })
+})

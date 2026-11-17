@@ -507,6 +507,31 @@ describe("worktree", () => {
   test("worktree list is allowed for both", () => verdict(["debug", "refactor"], "git worktree list", "allowed"))
 })
 
+describe("remote", () => {
+  test.each([
+    "git remote -v add o url",
+    "git remote --verbose set-url o url",
+    "git remote -v remove o",
+    "git remote -v rename a b",
+    "git remote -v prune o",
+    "git remote -v update",
+    "git remote show origin",
+    "git remote show -n origin extra",
+    "git remote get-url",
+    "git remote get-url a b",
+    "git remote get-url --all",
+    "git remote add o url",
+    "git remote prune origin",
+    "git remote update",
+    "git remote set-head origin -a",
+    "git remote -v -v set-url o url",
+  ])("%j is refused", (command) => verdict(["debug", "refactor"], command, "refused"))
+  test.each(["git remote", "git remote -v", "git remote --verbose", "git remote get-url origin", "git remote -v get-url origin", "git remote show -n origin"])(
+    "%j is allowed",
+    (command) => verdict(["debug", "refactor"], command, "allowed"),
+  )
+})
+
 describe("symlinks before dot-dot", () => {
   let home = ""
   beforeAll(() => {
