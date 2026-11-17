@@ -33,7 +33,7 @@
 ## `delivery_land` refuses because the enqueue lock is held
 
 - **Symptom:** `the enqueue lock <path> for <repo>#<n> at <sha> is held`
-- **Cause:** Another `delivery_land` call is deciding or sending the enqueue for this head, or a call that was killed left its `pending-queue-<pr>-<head>.lock`. No call removes another call's lock.
+- **Cause:** Another `delivery_land` call is deciding or sending the enqueue for this head, or clearing its record, or a call that was killed left its `pending-queue-<pr>-<head>.lock`. No call removes another call's lock.
 - **Fix:** Wait and call again with the same `pr` and `expectHeadSha`. If the refusal says the holder `has ended without releasing it`, or no `delivery_land` call is running, check the merge queue on GitHub, delete the lock the refusal names, and call again.
 
 ## `delivery_cleanup` refuses another repository or a changed worktree

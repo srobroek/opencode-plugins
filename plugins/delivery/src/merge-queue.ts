@@ -491,6 +491,12 @@ export type PendingRecord = {
   /** The merge method the queue lands with, so a resume after the merge can pick the queue-aware proof. */
   method: MergeMethod
   enqueuedAt: string
+  /**
+   * A nonce that names this record among every record ever written for the head. A call
+   * deletes a record only if it still carries the generation that call wrote or observed, so
+   * a call acting on what it saw earlier never deletes a newer call's record.
+   */
+  generation: string
 }
 
 /**
@@ -543,7 +549,16 @@ export function readPending(directory: string, repository: string, number: numbe
   }
   return {
     kind: "record",
-    record: { schema: 1, repository: holder, number, head, method, enqueuedAt: text(record, "enqueuedAt") ?? "" },
+    record: {
+      schema: 1,
+      repository: holder,
+      number,
+      head,
+      method,
+      enqueuedAt: text(record, "enqueuedAt") ?? "",
+      // A record written before generations existed reads as the empty generation.
+      generation: text(record, "generation") ?? "",
+    },
   }
 }
 
@@ -573,10 +588,22 @@ function publishExclusive(path: string, content: string): "created" | "exists" {
   }
 }
 
-/** Claim the record without replacing one: `exists` means another call recorded this head first. */
-export function writePending(directory: string, record: Omit<PendingRecord, "schema">): "created" | "exists" {
+/** A fresh record generation. */
+export function newGeneration(): string {
+  return randomBytes(12).toString("hex")
+}
+
+/**
+ * Claim the record without replacing one: `exists` means another call recorded this head first.
+ * The generation defaults to a fresh one; a caller that will delete the record passes its own.
+ */
+export function writePending(
+  directory: string,
+  record: Omit<PendingRecord, "schema" | "generation"> & { generation?: string },
+): "created" | "exists" {
   mkdirSync(directory, { recursive: true, mode: 0o700 })
-  return publishExclusive(pendingPath(directory, record.number, record.head), `${JSON.stringify({ schema: 1, ...record })}\n`)
+  const content = { schema: 1, ...record, generation: record.generation ?? newGeneration() }
+  return publishExclusive(pendingPath(directory, record.number, record.head), `${JSON.stringify(content)}\n`)
 }
 
 export function enqueueLockPath(directory: string, number: number, head: string): string {
@@ -604,10 +631,10 @@ function readOrNull(path: string): string | null {
 export type EnqueueLock = { kind: "acquired"; release: () => void } | { kind: "held"; path: string; detail: string }
 
 /**
- * Serialize the no-entry decision for one head: whether to refuse as removed, and claiming the
- * record, sending the enqueue and reading its answer. Without it a second call that saw no entry
- * yet could take a first call's in-flight record for a removal and clear it, so a lost answer
- * would leave no trace.
+ * Serialize the no-entry decision for one head (whether to refuse as removed, and claiming the
+ * record, sending the enqueue and reading its answer) and every deletion of its record. Without
+ * it a second call that saw no entry yet could take a first call's in-flight record for a
+ * removal and clear it, so a lost answer would leave no trace.
  *
  * The lock is an exclusively created file, and no call ever removes another call's lock: there
  * is no atomic compare-and-delete on a path, so an automatic takeover could let two calls in at
@@ -647,6 +674,47 @@ export function acquireEnqueueLock(
   return { kind: "held", path, detail }
 }
 
-export function clearPending(directory: string, number: number, head: string): void {
+/**
+ * Delete the record for this head only if it still carries `generation`. The caller holds the
+ * enqueue lock: every deletion runs under it and a record is only ever replaced by deleting it
+ * first, so the record cannot change between this read and the removal.
+ */
+export function removePendingLocked(
+  directory: string,
+  repository: string,
+  number: number,
+  head: string,
+  generation: string,
+): "cleared" | "kept" {
+  const now = readPending(directory, repository, number, head)
+  if (now.kind !== "record" || now.record.generation !== generation) return "kept"
   rmSync(pendingPath(directory, number, head), { force: true })
+  return "cleared"
+}
+
+/**
+ * Delete the record for this head only if it still carries `generation`, under the enqueue
+ * lock. A held lock means another call is deciding or enqueuing this head and owns what the
+ * record says next, so the record is kept; so it is when the lock cannot be written.
+ */
+export function clearPending(
+  directory: string,
+  repository: string,
+  number: number,
+  head: string,
+  generation: string,
+  nowMs: number,
+): "cleared" | "kept" {
+  let lock: EnqueueLock
+  try {
+    lock = acquireEnqueueLock(directory, number, head, nowMs)
+  } catch {
+    return "kept"
+  }
+  if (lock.kind === "held") return "kept"
+  try {
+    return removePendingLocked(directory, repository, number, head, generation)
+  } finally {
+    lock.release()
+  }
 }

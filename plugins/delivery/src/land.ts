@@ -133,10 +133,12 @@ import {
   decideQueue,
   enqueueAnswer,
   enqueueArgv,
+  newGeneration,
   queueBudgetMs,
   readPending,
   readQueueRule,
   readSnapshot,
+  removePendingLocked,
   writePending,
 } from "./merge-queue.ts"
 
@@ -1448,6 +1450,9 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
       `the pending-queue record ${pending.path} is unreadable (${pending.reason}), so whether an earlier call enqueued ${nameWithOwner}#${number} at ${head} cannot be told; check the pull request's merge queue on GitHub, then delete that file and call delivery_land again; nothing was enqueued or merged and no receipt was written`,
     )
   }
+  // The generation of the pending-queue record this call wrote or observed: the only record it
+  // may delete, so a call acting on an older view never deletes a newer call's record.
+  let ownedRecord: string | null = null
   if (alreadyMerged && forge === "github") {
     // A merge this tool enqueued earlier and the queue has since landed reads as MERGED, and the
     // direct-merge proof cannot recognise the queue's integration commit. The record of that
@@ -1464,6 +1469,7 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
             mergeCommitOid: first.pr.mergeCommitOid,
           })
     if (method !== null) queue = { method }
+    if (pending.kind === "record") ownedRecord = pending.record.generation
   }
   if (!alreadyMerged && forge === "github") {
     const path = normalizeRepoPath("github", nameWithOwner)
@@ -1497,6 +1503,9 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
   let proved: PrObservation = first.pr
   let rereadArgv = null as string[] | null
   let mergePolicy: boolean | "unknown" | null = null
+  // Why the record of a queue landing could not be written; a retry then reads the request as
+  // MERGED with no trace of the queue, so a refusal must say so.
+  let queueTraceLost: string | null = null
   // A refusal once a landing exists on the forge. No receipt is written for a landing
   // this call could not prove, so cleanup never acts on one; instead the refusal says
   // the forge holds it and that re-running is safe: the next call reads the request as
@@ -1507,7 +1516,11 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
       const retry = alreadyMerged ? "; the request is already MERGED, so re-running delivery_land issues no merge" : ""
       return refuse(`${reason}; no receipt was written${retry}`)
     }
-    const text = `${reason}; no receipt was written. The forge accepted ${mergeArgv.join(" ")}, so the request is merged and must not be merged again: re-run delivery_land with the same pr and expectHeadSha ${head}; it reads the request as MERGED, issues no merge, and writes the receipt once the proof completes`
+    const lost =
+      queueTraceLost === null
+        ? ""
+        : `. ${queueTraceLost}, so a re-run cannot tell the queue landed it and holds it to the direct-merge proof: make the receipts directory writable first`
+    const text = `${reason}; no receipt was written${lost}. The forge accepted ${mergeArgv.join(" ")}, so the request is merged and must not be merged again: re-run delivery_land with the same pr and expectHeadSha ${head}; it reads the request as MERGED, issues no merge, and writes the receipt once the proof completes`
     return { ok: false, reason: text, text: `delivery_land refused: ${text}`, mergeIssued: true }
   }
   // The re-read after the forge reports the landing. It must describe the same pull
@@ -1556,20 +1569,21 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
     }
     const sleep = (ms: number): Promise<void> => (deps.sleep ?? abortableSleep)(ms, signal)
     const queueLabel = ["gh", "api", "graphql", "enqueuePullRequest", `expectedHeadOid=${head}`]
-    // Whether a record says this head is, or may be, in the queue, so a call that finds no
-    // entry can tell "removed" from "never enqueued". Read again right before each decision:
-    // another call may have enqueued and recorded this head since the read above.
-    const recordedNow = (): { recorded: boolean } | { reason: string } => {
+    const nowMs = (): number => deps.now?.() ?? Date.now()
+    // The generation of the record that says this head is, or may be, in the queue, so a call
+    // that finds no entry can tell "removed" from "never enqueued"; null when there is none.
+    // Read again right before each decision: another call may have recorded this head since.
+    const recordedNow = (): { generation: string | null } | { reason: string } => {
       const now = readPending(pendingDirectory, nameWithOwner, requested, head)
       if (now.kind === "unreadable") {
         return {
           reason: `the pending-queue record ${now.path} is unreadable (${now.reason}), so whether an earlier call enqueued ${nameWithOwner}#${number} at ${head} cannot be told; check the pull request's merge queue on GitHub, then delete that file and call delivery_land again; nothing was enqueued and no receipt was written`,
         }
       }
-      return { recorded: now.kind === "record" }
+      return { generation: now.kind === "record" ? now.record.generation : null }
     }
     // Claims the record without replacing one: `exists` means another call recorded this head.
-    const recordEnqueue = (): "created" | "exists" | { reason: string } => {
+    const recordEnqueue = (generation: string): "created" | "exists" | { reason: string } => {
       try {
         return writePending(pendingDirectory, {
           repository: nameWithOwner,
@@ -1577,6 +1591,7 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
           head,
           method: queue?.method ?? mergeMethod,
           enqueuedAt: observedAt,
+          generation,
         })
       } catch (error) {
         return {
@@ -1584,31 +1599,57 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
         }
       }
     }
+    // Writes this call's record, or adopts the one another call made, and owns its generation.
+    const adoptRecord = (): { reason: string } | null => {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const generation = newGeneration()
+        const written = recordEnqueue(generation)
+        if (typeof written !== "string") return written
+        if (written === "created") {
+          ownedRecord = generation
+          return null
+        }
+        const now = recordedNow()
+        if ("reason" in now) return now
+        if (now.generation !== null) {
+          ownedRecord = now.generation
+          return null
+        }
+        // Another call removed the record between the claim and the read: claim again.
+      }
+      return { reason: "the pending-queue record could not be written (it was removed after each of three claims)" }
+    }
     const current = await read()
     if ("reason" in current) return refuse(`${current.reason}; nothing was enqueued and no receipt was written`)
     // An entry for this head already exists, or the request merged since the first read:
     // wait on it instead of enqueuing again. Anything else about the head refuses here.
     const standing = decideQueue(current.snapshot, head, 0)
     if (standing.kind === "refused") {
-      clearPending(pendingDirectory, requested, head)
+      if (pending.kind === "record") {
+        clearPending(pendingDirectory, nameWithOwner, requested, head, pending.record.generation, nowMs())
+      }
       return refuse(`${standing.reason}; nothing was enqueued and no receipt was written`)
     }
+    // Waiting on an entry, whether this call enqueued it or someone else did, records it; a
+    // record another call already made is kept as it is, and this call owns that generation.
+    const joinEntry = (): LandOutcome | null => {
+      const failed = adoptRecord()
+      return failed === null
+        ? null
+        : refuse(
+            `${failed.reason} while the head is in the merge queue; call delivery_land again with the same pr and expectHeadSha ${head} to wait on the entry; no receipt was written`,
+          )
+    }
     if (standing.kind === "wait" && current.snapshot.entry !== null) {
-      // Written whether this call enqueued or joined an entry someone else made; a record
-      // another call already made is kept as it is.
-      const unrecorded = recordEnqueue()
-      if (typeof unrecorded !== "string") {
-        return refuse(
-          `${unrecorded.reason} while the head is in the merge queue; call delivery_land again with the same pr and expectHeadSha ${head} to wait on the entry; no receipt was written`,
-        )
-      }
+      const unjoined = joinEntry()
+      if (unjoined !== null) return unjoined
     }
     if (standing.kind === "wait" && current.snapshot.entry === null) {
       // The whole no-entry decision runs under a per-head lock, so a call that sees no entry
       // while another call's enqueue is in flight cannot take that call's record for a removal.
       let lock: ReturnType<typeof acquireEnqueueLock>
       try {
-        lock = acquireEnqueueLock(pendingDirectory, requested, head, deps.now?.() ?? Date.now())
+        lock = acquireEnqueueLock(pendingDirectory, requested, head, nowMs())
       } catch (error) {
         return refuse(
           `the pending-queue lock could not be written (${error instanceof Error ? error.message : String(error)}); nothing was enqueued and no receipt was written`,
@@ -1620,13 +1661,28 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
         )
       }
       const decided = await (async (): Promise<LandOutcome | null> => {
+        // Decided on a read made under the lock: the read above may predate an enqueue another
+        // call has since made, recorded and released the lock on, and taking that call's record
+        // for a removal would lose it.
+        const locked = await read()
+        if ("reason" in locked) return refuse(`${locked.reason}; nothing was enqueued and no receipt was written`)
+        const now = decideQueue(locked.snapshot, head, 0)
+        if (now.kind === "refused") {
+          const seen = recordedNow()
+          if (!("reason" in seen) && seen.generation !== null) {
+            removePendingLocked(pendingDirectory, nameWithOwner, requested, head, seen.generation)
+          }
+          return refuse(`${now.reason}; nothing was enqueued and no receipt was written`)
+        }
+        // An entry, or a merge, appeared since: wait on it as a call that saw it first would.
+        if (now.kind === "merged" || locked.snapshot.entry !== null) return joinEntry()
         // No entry. If an earlier call enqueued (or tried to enqueue) this head, the entry was
         // removed since, by the queue or by hand, or never made: re-enqueuing would override a
         // removal, so it refuses once and the next call, which finds no record, decides afresh.
         const history = recordedNow()
         if ("reason" in history) return refuse(history.reason)
-        if (history.recorded) {
-          clearPending(pendingDirectory, requested, head)
+        if (history.generation !== null) {
+          removePendingLocked(pendingDirectory, nameWithOwner, requested, head, history.generation)
           return refuse(
             "mergeQueueEntry: observed no entry for a pull request an earlier call enqueued, expected a queued or merged one; the entry was removed from the merge queue and was not enqueued again (an earlier enqueue whose answer was lost may also never have made one). Call delivery_land again only if the pull request should be re-enqueued; nothing was merged and no receipt was written",
           )
@@ -1635,7 +1691,8 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
         if (unenqueued !== null) return unenqueued
         // The intent is recorded before the mutation is sent: GitHub can accept it and the answer
         // still be lost, and without the record a retry would read that as "never enqueued".
-        const claimed = recordEnqueue()
+        const generation = newGeneration()
+        const claimed = recordEnqueue(generation)
         if (typeof claimed !== "string") return refuse(`${claimed.reason}; nothing was enqueued and no receipt was written`)
         if (claimed === "exists") {
           // Another call recorded this head between the read and the claim: it is enqueuing or
@@ -1644,11 +1701,12 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
             `the pending-queue record for ${nameWithOwner}#${number} at ${head} appeared while this call was deciding, so another call is enqueuing it; this call did not enqueue. Call delivery_land again with the same pr and expectHeadSha ${head} to wait on that entry; no receipt was written`,
           )
         }
+        ownedRecord = generation
         const answer = enqueueAnswer(
           await run(enqueueArgv(nodeId, head), { cwd, timeoutMs: FORGE_TIMEOUT_MS, env: forgeCommandEnv }),
         )
         if (answer.kind === "rejected") {
-          clearPending(pendingDirectory, requested, head)
+          removePendingLocked(pendingDirectory, nameWithOwner, requested, head, generation)
           return refuse(`${queueLabel.join(" ")}: ${answer.reason}; nothing was enqueued and no receipt was written`)
         }
         if (answer.kind === "uncertain") {
@@ -1670,8 +1728,11 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
     if (waited.kind === "refused") {
       // Only a confirmed end (closed, head changed, entry removed) forgets the enqueue. A read
       // that failed observed nothing, and the entry may still be queued: the record stays so a
-      // retry does not enqueue over it.
-      if (waited.terminal) clearPending(pendingDirectory, requested, head)
+      // retry does not enqueue over it. Only the record this call wrote or joined is forgotten:
+      // a newer call may have recorded a fresh enqueue since this call last read the queue.
+      if (waited.terminal && ownedRecord !== null) {
+        clearPending(pendingDirectory, nameWithOwner, requested, head, ownedRecord, nowMs())
+      }
       return refuse(`${waited.reason}; no direct merge was attempted and no receipt was written`)
     }
     if (waited.kind === "pending") {
@@ -1679,8 +1740,10 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
       return { ok: false, reason, text: `delivery_land pending: ${reason}`, queued: true }
     }
     // The record stays until the receipt is written: a retry after a failed proof reads the
-    // request as MERGED and needs it to choose the queue-aware proof.
+    // request as MERGED and needs it to choose the queue-aware proof. It is written here, before
+    // any fallible proof step, also when the queue merged an entry this call never saw.
     mergeArgv = queueLabel
+    queueTraceLost = adoptRecord()?.reason ?? null
     notes.push(
       `The base branch ${first.pr.baseRefName} requires a merge queue, so the reviewed head ${head} was enqueued with enqueuePullRequest(expectedHeadOid) and merged by the queue with ${queue.method}.`,
     )
@@ -1962,8 +2025,10 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
   } catch (error) {
     return refuseMerged(`the receipt could not be written: ${error instanceof Error ? error.message : String(error)}`)
   }
-  // The landing is recorded, so the enqueue record has done its work.
-  if (queue !== null) clearPending(pendingDirectory, requested, head)
+  // The landing is recorded, so the enqueue record this call wrote or read has done its work.
+  if (ownedRecord !== null) {
+    clearPending(pendingDirectory, nameWithOwner, requested, head, ownedRecord, deps.now?.() ?? Date.now())
+  }
 
   const next = receipt.beads.ledgerActive
     ? nativeCloseoutSteps(receipt, receiptPath, proof.oid)

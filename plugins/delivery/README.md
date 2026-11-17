@@ -91,10 +91,16 @@ Inputs: `pr`, and when needed `merge_method` (`squash` by default, `merge`,
     unreadable reply), so the record stays then. A resumed
     call that finds no entry refuses as removed and does not enqueue again. It clears
     the record, so the next call decides afresh. A GraphQL rejection clears the record
-    at once. That decision and the enqueue run under a per-head `.lock` file, so a call
-    that overlaps another call's enqueue refuses and leaves its record alone. No call
-    removes another call's lock; a lock an interrupted call left is named in the refusal,
-    to delete after checking the queue.
+    at once. That decision and the enqueue run under a per-head `.lock` file, and the call
+    reads the queue again once it holds the lock, so an entry another call made in the
+    meantime is waited on, not taken for a removal. A call that overlaps another call's
+    enqueue refuses and leaves its record alone. Each record carries a generation, and a
+    call deletes a record only under the lock and only while it still carries the
+    generation that call wrote or read, so an older call never deletes a newer enqueue's
+    record. A queue that merged the PR before this call saw an entry also gets a record,
+    written before the proof, so a retry after a failed proof still judges the queue's
+    shape. No call removes another call's lock; a lock an interrupted call left is named
+    in the refusal, to delete after checking the queue.
   - A record that exists but does not parse, or that names another landing, refuses.
     The tool never reads it as "never enqueued". Check the queue on GitHub, delete the
     file the refusal names, and call again.

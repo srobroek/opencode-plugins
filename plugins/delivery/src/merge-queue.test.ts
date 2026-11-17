@@ -206,7 +206,7 @@ describe("pending record", () => {
     }
   }
 
-  test("round-trips the repository, number, head and merge method, leaving only the record behind", () => {
+  test("round-trips the record, and a clear removes it only under the generation it carries", () => {
     withDirectory((directory) => {
       writePending(directory, record)
       expect(readdirSync(directory)).toEqual([`pending-queue-7-${HEAD.slice(0, 12)}.json`])
@@ -214,8 +214,22 @@ describe("pending record", () => {
         kind: "record",
         record: { number: 7, head: HEAD, method: "merge" },
       })
-      clearPending(directory, 7, HEAD)
+      clearPending(directory, "o/r", 7, HEAD, "", 0)
+      expect(readdirSync(directory)).toEqual([`pending-queue-7-${HEAD.slice(0, 12)}.json`])
+      const generation = readPending(directory, "o/r", 7, HEAD)
+      if (generation.kind !== "record") throw new Error("expected the record")
+      expect(clearPending(directory, "o/r", 7, HEAD, generation.record.generation, 0)).toBe("cleared")
       expect(readdirSync(directory)).toEqual([])
+    })
+  })
+
+  test("a clear while another call holds the enqueue lock keeps the record", () => {
+    withDirectory((directory) => {
+      writePending(directory, { ...record, generation: "g1" })
+      const lock = acquireEnqueueLock(directory, 7, HEAD, 0)
+      expect(clearPending(directory, "o/r", 7, HEAD, "g1", 0)).toBe("kept")
+      if (lock.kind === "acquired") lock.release()
+      expect(clearPending(directory, "o/r", 7, HEAD, "g1", 0)).toBe("cleared")
     })
   })
 

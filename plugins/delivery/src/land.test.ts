@@ -187,6 +187,8 @@ type Answers = {
   rules?: CliResult
   /** What each merge queue state read (`gh api graphql` query) answers, in call order; the last repeats. */
   queueStates?: CliResult[]
+  /** Runs while queue state read `index` (0-based) is in flight; the read answers once it settles. */
+  duringQueueState?: (index: number) => Promise<void> | undefined
   /** What the `enqueuePullRequest` mutation answers. */
   enqueue?: CliResult
   /** Runs while the `enqueuePullRequest` mutation is in flight, and supplies its answer. */
@@ -223,6 +225,7 @@ function runner(answers: Answers, canonical: string): { run: CliRunner; calls: C
   const present = [...(answers.present ?? [])]
   const fetches = [...(answers.fetch ?? [])]
   const states = [...(answers.queueStates ?? [])]
+  let stateReads = 0
   const calls: Call[] = []
   const run: CliRunner = (argv, options) => {
     calls.push({ argv: [...argv], cwd: options.cwd, timeoutMs: options.timeoutMs, env: options.env })
@@ -268,8 +271,9 @@ function runner(answers: Answers, canonical: string): { run: CliRunner; calls: C
     if (argv[1] === "api" && argv[2] === "graphql") {
       if (argv.some((part) => part.startsWith("query=mutation")))
         return answers.duringEnqueue?.() ?? answers.enqueue ?? completed("{}")
-      const state = states.length > 1 ? states.shift() : states[0]
-      return state ?? completed("{}")
+      const state = (states.length > 1 ? states.shift() : states[0]) ?? completed("{}")
+      const during = answers.duringQueueState?.(stateReads++)
+      return during === undefined ? state : during.then(() => state)
     }
     if (argv[1] === "api" && argv.some((part) => part.endsWith("/approvals")))
       return answers.approval ?? completed("{}")
@@ -3029,7 +3033,7 @@ describe("delivery_land through a GitHub merge queue", () => {
   test("a squash queue enqueues the reviewed head, waits, proves the commit is on base, and writes the receipt", async () => {
     const { outcome, calls, files } = await inQueue({
       prView: [completed(githubPr()), completed(mergedGithubPr())],
-      queueStates: [snapshot("OPEN", null), snapshot("OPEN", queued), snapshot("MERGED", null)],
+      queueStates: [snapshot("OPEN", null), snapshot("OPEN", null), snapshot("OPEN", queued), snapshot("MERGED", null)],
     })
     expect(outcome.ok).toBe(true)
     if (!outcome.ok) throw new Error(outcome.reason)
@@ -3056,7 +3060,7 @@ describe("delivery_land through a GitHub merge queue", () => {
   test("a squash queue's commit may have any single parent, as when a grouped entry follows another", async () => {
     const { outcome } = await inQueue({
       prView: [completed(githubPr()), completed(mergedGithubPr())],
-      queueStates: [snapshot("OPEN", null), snapshot("MERGED", null)],
+      queueStates: [snapshot("OPEN", null), snapshot("OPEN", null), snapshot("MERGED", null)],
       parents: INTEGRATION_OID,
     })
     expect(outcome.ok).toBe(true)
@@ -3065,7 +3069,7 @@ describe("delivery_land through a GitHub merge queue", () => {
   test("a squash queue refuses a two-parent commit, and the PR is reported as merged for a retry", async () => {
     const { outcome, files } = await inQueue({
       prView: [completed(githubPr()), completed(mergedGithubPr())],
-      queueStates: [snapshot("OPEN", null), snapshot("MERGED", null)],
+      queueStates: [snapshot("OPEN", null), snapshot("OPEN", null), snapshot("MERGED", null)],
       parents: `${BASE_OID} ${HEAD_OID}`,
     })
     expect(reasonOf(outcome)).toContain('merge_method "squash": observed 2 parents')
@@ -3077,7 +3081,7 @@ describe("delivery_land through a GitHub merge queue", () => {
     const { outcome, calls } = await inQueue({
       rules: queueRules("MERGE"),
       prView: [completed(githubPr()), completed(mergedGithubPr())],
-      queueStates: [snapshot("OPEN", null), snapshot("MERGED", null)],
+      queueStates: [snapshot("OPEN", null), snapshot("OPEN", null), snapshot("MERGED", null)],
       parents: `${BASE_OID} ${INTEGRATION_OID}`,
     })
     expect(outcome.ok).toBe(true)
@@ -3091,7 +3095,7 @@ describe("delivery_land through a GitHub merge queue", () => {
     const { outcome, files } = await inQueue({
       rules: queueRules("MERGE"),
       prView: [completed(githubPr()), completed(mergedGithubPr())],
-      queueStates: [snapshot("OPEN", null), snapshot("MERGED", null)],
+      queueStates: [snapshot("OPEN", null), snapshot("OPEN", null), snapshot("MERGED", null)],
       parents: `${BASE_OID} ${INTEGRATION_OID}`,
       ancestor: completed("", 1),
     })
@@ -3104,7 +3108,7 @@ describe("delivery_land through a GitHub merge queue", () => {
     const { outcome, calls, files } = await landRebase(repo, {
       rules: queueRules("REBASE"),
       enqueue: enqueued,
-      queueStates: [snapshot("OPEN", null, { head: repo.head }), snapshot("MERGED", null, { head: repo.head })],
+      queueStates: [snapshot("OPEN", null, { head: repo.head }), snapshot("OPEN", null, { head: repo.head }), snapshot("MERGED", null, { head: repo.head })],
     })
     expect(outcome.ok).toBe(true)
     if (!outcome.ok) throw new Error(outcome.reason)
@@ -3117,7 +3121,7 @@ describe("delivery_land through a GitHub merge queue", () => {
   test("a merge commit the base branch does not contain is not proof", async () => {
     const { outcome, files } = await inQueue({
       prView: [completed(githubPr()), completed(mergedGithubPr())],
-      queueStates: [snapshot("OPEN", null), snapshot("MERGED", null)],
+      queueStates: [snapshot("OPEN", null), snapshot("OPEN", null), snapshot("MERGED", null)],
       compare: completed("diverged\n"),
     })
     expect(reasonOf(outcome)).toContain("is not in the history of")
@@ -3128,7 +3132,7 @@ describe("delivery_land through a GitHub merge queue", () => {
   test("a merged pull request whose head is not the enqueued head writes no receipt", async () => {
     const { outcome, files } = await inQueue({
       prView: [completed(githubPr()), completed(mergedGithubPr({ headRefOid: BASE_OID }))],
-      queueStates: [snapshot("OPEN", null), snapshot("MERGED", null)],
+      queueStates: [snapshot("OPEN", null), snapshot("OPEN", null), snapshot("MERGED", null)],
     })
     expect(reasonOf(outcome)).toContain("the head moved after the merge was bound to it")
     expect(files()).toEqual([])
@@ -3137,7 +3141,7 @@ describe("delivery_land through a GitHub merge queue", () => {
   test("an entry the queue removed is a refusal, and nothing else merges the pull request", async () => {
     const { outcome, calls, files } = await inQueue({
       prView: [completed(githubPr())],
-      queueStates: [snapshot("OPEN", null), snapshot("OPEN", queued), snapshot("OPEN", null)],
+      queueStates: [snapshot("OPEN", null), snapshot("OPEN", null), snapshot("OPEN", queued), snapshot("OPEN", null)],
     })
     expect(reasonOf(outcome)).toContain("the merge queue removed it")
     expect(outcome.ok === false && outcome.queued).toBeUndefined()
@@ -3148,7 +3152,7 @@ describe("delivery_land through a GitHub merge queue", () => {
   test("a head that changed while queued is a refusal", async () => {
     const { outcome, files } = await inQueue({
       prView: [completed(githubPr())],
-      queueStates: [snapshot("OPEN", null), snapshot("OPEN", queued), snapshot("OPEN", null, { head: BASE_OID })],
+      queueStates: [snapshot("OPEN", null), snapshot("OPEN", null), snapshot("OPEN", queued), snapshot("OPEN", null, { head: BASE_OID })],
     })
     expect(reasonOf(outcome)).toContain(`observed ${BASE_OID}, expected ${HEAD_OID}`)
     expect(files()).toEqual([])
@@ -3173,7 +3177,7 @@ describe("delivery_land through a GitHub merge queue", () => {
     const queuedSquash = (answers: Answers) =>
       inQueue({
         prView: [completed(githubPr()), completed(mergedGithubPr())],
-        queueStates: [snapshot("OPEN", null), snapshot("MERGED", null)],
+        queueStates: [snapshot("OPEN", null), snapshot("OPEN", null), snapshot("MERGED", null)],
         ...answers,
       })
 
@@ -3227,7 +3231,7 @@ describe("delivery_land through a GitHub merge queue", () => {
       {
         rules: queueRules("MERGE"),
         prView: [completed(githubPr())],
-        queueStates: [snapshot("OPEN", null), snapshot("OPEN", queued)],
+        queueStates: [snapshot("OPEN", null), snapshot("OPEN", null), snapshot("OPEN", queued)],
       },
       { queueWaitSeconds: 0 },
       { receiptsDirectory: shared },
@@ -3250,7 +3254,7 @@ describe("delivery_land through a GitHub merge queue", () => {
       {
         rules: queueRules("MERGE"),
         prView: [completed(githubPr()), completed(mergedGithubPr())],
-        queueStates: [snapshot("OPEN", null), snapshot("MERGED", null)],
+        queueStates: [snapshot("OPEN", null), snapshot("OPEN", null), snapshot("MERGED", null)],
         parents: `${BASE_OID} ${INTEGRATION_OID}`,
         ancestor: completed("", 1),
       },
@@ -3266,10 +3270,37 @@ describe("delivery_land through a GitHub merge queue", () => {
     expect(retried.outcome.ok).toBe(true)
   })
 
+  test("a queue that merged the head before the first queue read records it, so a retry after a failed proof proves the queue shape", async () => {
+    const shared = temporaryDirectory("delivery-land-pending-")
+    const failed = await inQueue(
+      {
+        rules: queueRules("MERGE"),
+        prView: [completed(githubPr()), completed(mergedGithubPr())],
+        // Another actor's entry merged between the pull request read and the queue read.
+        queueStates: [snapshot("MERGED", null)],
+        parents: `${BASE_OID} ${INTEGRATION_OID}`,
+        compare: completed("", 1, "HTTP 502"),
+      },
+      {},
+      { receiptsDirectory: shared },
+    )
+    expect(reasonOf(failed.outcome)).toContain("HTTP 502")
+    expect(enqueues(failed.calls)).toEqual([])
+    const retried = await inQueue(
+      { prView: [completed(mergedGithubPr())], parents: `${BASE_OID} ${INTEGRATION_OID}` },
+      {},
+      { receiptsDirectory: shared },
+    )
+    expect(retried.outcome.ok).toBe(true)
+    if (!retried.outcome.ok) throw new Error(retried.outcome.reason)
+    expect(retried.outcome.receipt.proof.evidence).toMatchObject({ mergeMethod: "merge", queue: { method: "merge" } })
+    expect(readdirSync(shared).filter((name) => name.startsWith("pending-"))).toEqual([])
+  })
+
   test("a failed queue read keeps the record, so the next call refuses as removed instead of enqueuing again", async () => {
     const shared = temporaryDirectory("delivery-land-pending-")
     const failed = await inQueue(
-      { prView: [completed(githubPr())], queueStates: [snapshot("OPEN", null), completed("", 1, "HTTP 502")] },
+      { prView: [completed(githubPr())], queueStates: [snapshot("OPEN", null), snapshot("OPEN", null), completed("", 1, "HTTP 502")] },
       {},
       { receiptsDirectory: shared },
     )
@@ -3310,7 +3341,7 @@ describe("delivery_land through a GitHub merge queue", () => {
   test("an exhausted budget is pending; the next call waits on the entry without enqueuing again", async () => {
     const shared = temporaryDirectory("delivery-land-pending-")
     const first = await inQueue(
-      { prView: [completed(githubPr())], queueStates: [snapshot("OPEN", null), snapshot("OPEN", queued)] },
+      { prView: [completed(githubPr())], queueStates: [snapshot("OPEN", null), snapshot("OPEN", null), snapshot("OPEN", queued)] },
       { queueWaitSeconds: 0 },
       { receiptsDirectory: shared },
     )
@@ -3338,7 +3369,7 @@ describe("delivery_land through a GitHub merge queue", () => {
   test("a resume whose entry was removed refuses as removed instead of enqueuing again; a later fresh call enqueues", async () => {
     const shared = temporaryDirectory("delivery-land-pending-")
     await inQueue(
-      { prView: [completed(githubPr())], queueStates: [snapshot("OPEN", null), snapshot("OPEN", queued)] },
+      { prView: [completed(githubPr())], queueStates: [snapshot("OPEN", null), snapshot("OPEN", null), snapshot("OPEN", queued)] },
       { queueWaitSeconds: 0 },
       { receiptsDirectory: shared },
     )
@@ -3354,7 +3385,7 @@ describe("delivery_land through a GitHub merge queue", () => {
     const fresh = await inQueue(
       {
         prView: [completed(githubPr()), completed(mergedGithubPr())],
-        queueStates: [snapshot("OPEN", null), snapshot("MERGED", null)],
+        queueStates: [snapshot("OPEN", null), snapshot("OPEN", null), snapshot("MERGED", null)],
       },
       {},
       { receiptsDirectory: shared },
@@ -3481,6 +3512,97 @@ describe("delivery_land through a GitHub merge queue", () => {
       expect(enqueues(retry.calls)).toEqual([])
     })
 
+    test("a call whose first read missed an entry another call has since made waits on it and keeps that call's record", async () => {
+      const shared = temporaryDirectory("delivery-land-pending-")
+      let earlier: Awaited<ReturnType<typeof inQueue>> | null = null
+      const later = await inQueue(
+        {
+          prView: [completed(githubPr())],
+          // The first read answers no entry; before it returns, another call enqueues and
+          // records the head and releases the lock; GitHub then shows the entry.
+          queueStates: [snapshot("OPEN", null), snapshot("OPEN", queued)],
+          duringQueueState: (index) =>
+            index === 0
+              ? (async () => {
+                  earlier = await inQueue(
+                    { prView: [completed(githubPr())], queueStates: [snapshot("OPEN", null)] },
+                    { queueWaitSeconds: 0 },
+                    { receiptsDirectory: shared },
+                  )
+                })()
+              : undefined,
+        },
+        { queueWaitSeconds: 0 },
+        { receiptsDirectory: shared },
+      )
+      const first = earlier as Awaited<ReturnType<typeof inQueue>> | null
+      if (first === null) throw new Error("the earlier call did not run")
+      expect(enqueues(first.calls)).toHaveLength(1)
+      expect(later.outcome.ok === false && later.outcome.queued).toBe(true)
+      expect(enqueues(later.calls)).toEqual([])
+      expect(readdirSync(shared)).toEqual([pendingName])
+    })
+
+    test.each([
+      ["while the newer enqueue is in flight", true],
+      ["after the newer enqueue answered", false],
+    ])("a waiter that sees its entry removed leaves a newer enqueue's record alone %s", async (_name, inFlight) => {
+      const shared = temporaryDirectory("delivery-land-pending-")
+      const recorded = (): boolean => readdirSync(shared).includes(pendingName)
+      // A call that sees the removal and clears the old record, then a fresh call that enqueues.
+      const removeThenEnqueue = async (duringEnqueue?: () => Promise<CliResult>) => {
+        const removed = await inQueue(
+          { prView: [completed(githubPr())], queueStates: [snapshot("OPEN", null)] },
+          {},
+          { receiptsDirectory: shared },
+        )
+        expect(reasonOf(removed.outcome)).toContain("was not enqueued again")
+        return inQueue(
+          { prView: [completed(githubPr())], queueStates: [snapshot("OPEN", null)], ...(duringEnqueue ? { duringEnqueue } : {}) },
+          { queueWaitSeconds: 0 },
+          { receiptsDirectory: shared },
+        )
+      }
+      const reached = Promise.withResolvers<void>()
+      const gate = Promise.withResolvers<void>()
+      // The waiter joins an entry, then reads it gone twice; its last read is held at the gate.
+      const waiter = inQueue(
+        {
+          prView: [completed(githubPr())],
+          queueStates: [snapshot("OPEN", queued), snapshot("OPEN", null), snapshot("OPEN", null)],
+          duringQueueState: (index) => {
+            if (index !== 2) return undefined
+            reached.resolve()
+            return inFlight ? gate.promise : removeThenEnqueue().then(() => undefined)
+          },
+        },
+        {},
+        { receiptsDirectory: shared },
+      )
+      let keptDuringEnqueue: boolean | null = null
+      if (inFlight) {
+        await reached.promise
+        await removeThenEnqueue(async () => {
+          gate.resolve()
+          await waiter
+          keptDuringEnqueue = recorded()
+          return enqueued
+        })
+        expect(keptDuringEnqueue as boolean | null).toBe(true)
+      }
+      const waited = await waiter
+      expect(reasonOf(waited.outcome)).toContain("the merge queue removed it")
+      expect(recorded()).toBe(true)
+
+      const retry = await inQueue(
+        { prView: [completed(githubPr())], queueStates: [snapshot("OPEN", null)] },
+        {},
+        { receiptsDirectory: shared },
+      )
+      expect(reasonOf(retry.outcome)).toContain("was not enqueued again")
+      expect(enqueues(retry.calls)).toEqual([])
+    })
+
     test("an enqueue intent that cannot be persisted sends no enqueue", async () => {
       const shared = temporaryDirectory("delivery-land-pending-")
       chmodSync(shared, 0o500)
@@ -3526,7 +3648,7 @@ describe("delivery_land through a GitHub merge queue", () => {
         {
           rules: queueRules(method),
           prView: [completed(githubPr())],
-          queueStates: [snapshot("OPEN", null), snapshot("OPEN", queued)],
+          queueStates: [snapshot("OPEN", null), snapshot("OPEN", null), snapshot("OPEN", queued)],
         },
         { queueWaitSeconds: 0 },
         { receiptsDirectory: shared },
@@ -3562,7 +3684,7 @@ describe("delivery_land through a GitHub merge queue", () => {
         {
           rules: queueRules("REBASE"),
           prView: [completed(githubPr({ headRefOid: repo.head }))],
-          queueStates: [snapshot("OPEN", null, { head: repo.head }), snapshot("OPEN", queued, { head: repo.head })],
+          queueStates: [snapshot("OPEN", null, { head: repo.head }), snapshot("OPEN", null, { head: repo.head }), snapshot("OPEN", queued, { head: repo.head })],
           enqueue: enqueued,
         },
         { queueWaitSeconds: 0 },
@@ -3587,7 +3709,7 @@ describe("delivery_land through a GitHub merge queue", () => {
       {
         rules: queueRules("MERGE"),
         prView: [completed(githubPr()), completed(mergedGithubPr())],
-        queueStates: [snapshot("OPEN", null), snapshot("MERGED", null)],
+        queueStates: [snapshot("OPEN", null), snapshot("OPEN", null), snapshot("MERGED", null)],
         parents: `${BASE_OID} ${INTEGRATION_OID}`,
       },
       {},
@@ -3621,7 +3743,7 @@ describe("delivery_land through a GitHub merge queue", () => {
       {
         rules: queueRules("MERGE"),
         prView: [completed(githubPr()), completed(mergedGithubPr())],
-        queueStates: [snapshot("OPEN", null), snapshot("MERGED", null)],
+        queueStates: [snapshot("OPEN", null), snapshot("OPEN", null), snapshot("MERGED", null)],
         parents: `${BASE_OID} ${INTEGRATION_OID}`,
       },
       {},
