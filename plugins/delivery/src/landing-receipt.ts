@@ -249,8 +249,11 @@ export type GitRunner = (argv: readonly string[], cwd: string, timeoutMs: number
 
 const spawnGit: GitRunner = (argv, cwd, timeoutMs) => {
   try {
+    // Without `env`, Bun starts the child in the environment this process started with;
+    // the current one is what every other Git child of this plugin gets.
     const proc = Bun.spawnSync(["git", ...SAFE_GIT_ARGS, ...argv], {
       cwd,
+      env: process.env,
       stdout: "pipe",
       stderr: "pipe",
       timeout: Math.max(1, timeoutMs),

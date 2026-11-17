@@ -1322,6 +1322,7 @@ var spawnGit = (argv, cwd, timeoutMs) => {
   try {
     const proc = Bun.spawnSync(["git", ...SAFE_GIT_ARGS, ...argv], {
       cwd,
+      env: process.env,
       stdout: "pipe",
       stderr: "pipe",
       timeout: Math.max(1, timeoutMs)

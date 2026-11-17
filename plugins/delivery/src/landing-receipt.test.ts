@@ -9,6 +9,7 @@ setDefaultTimeout(60_000)
 
 import {
   chmodSync,
+  existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -22,6 +23,7 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
+import { writeExecutable } from "@srobroek/opencode-lib/executable-fixture"
 import pkg from "../package.json" with { type: "json" }
 
 import {
@@ -814,6 +816,27 @@ describe("repoKey", () => {
     expect(repoKey("/elsewhere", () => common)).toBe(key)
     repoKey("/anywhere", run, 60_000)
     expect(seen[1]?.timeoutMs).toBe(60_000)
+  })
+
+  test("the default Git runner starts the git on the current PATH, in the current environment", () => {
+    // Bun.spawnSync without `env` uses the environment the process started with, so a
+    // PATH or GIT_* change made since would not reach it.
+    const bin = scratch("default-runner-bin")
+    const log = join(bin, "spawns.log")
+    const real = Bun.spawnSync(["which", "git"]).stdout.toString().trim()
+    writeExecutable(join(bin, "git"), `#!/bin/sh\nprintf '%s|%s\\n' "$(pwd -P)" "$DELIVERY_PROBE" >> "${log}"\nexec "${real}" "$@"\n`)
+    const directory = realpathSync(scratch("default-runner-cwd"))
+    const before = { path: process.env.PATH, probe: process.env.DELIVERY_PROBE }
+    process.env.PATH = `${bin}:${before.path ?? ""}`
+    process.env.DELIVERY_PROBE = "live"
+    try {
+      repoKey(directory)
+    } finally {
+      process.env.PATH = before.path
+      if (before.probe === undefined) delete process.env.DELIVERY_PROBE
+      else process.env.DELIVERY_PROBE = before.probe
+    }
+    expect(existsSync(log) ? readFileSync(log, "utf8") : "").toBe(`${directory}|live\n`)
   })
 
   test("what repoKey mints is always accepted as a directory name", () => {
