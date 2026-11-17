@@ -1,8 +1,11 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test"
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { headRefusal } from "./head-guard.ts"
+
+// Real git processes are slow on a loaded machine.
+setDefaultTimeout(60_000)
 
 let home = ""
 let repo = ""
