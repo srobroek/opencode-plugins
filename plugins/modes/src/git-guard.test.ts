@@ -485,6 +485,16 @@ describe("fetch", () => {
   )
 })
 
+describe("apply", () => {
+  test.each(["git apply --unsafe-paths p.diff", "git apply --unsafe p.diff", "git apply --directory=../x p.diff", "git apply --directory ../x p.diff", "git apply --dir=x p.diff"])(
+    "refuses %j",
+    (command) => verdict(["debug", "refactor"], command, "refused"),
+  )
+  test.each(["git apply p.diff", "git apply --check p.diff", "git apply --3way -p2 p.diff", "git apply --stat p.diff"])("allows %j", (command) =>
+    verdict(["debug", "refactor"], command, "allowed"),
+  )
+})
+
 describe("symlinks before dot-dot", () => {
   let home = ""
   beforeAll(() => {

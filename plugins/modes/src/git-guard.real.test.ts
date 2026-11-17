@@ -45,7 +45,7 @@ describe("checkout boundary against real repositories", () => {
     expect(git(repo, "rev-parse", "HEAD")).toBe(before.head)
     expect(git(repo, "status", "--porcelain")).toBe(before.status)
     expect(git(scratch, "rev-parse", "HEAD")).not.toBe(before.head)
-  })
+  }, 30_000)
 
   test("bisect run and ordinary reads are allowed with the scratch workdir", () => {
     expect(forbiddenGit("git bisect run bun test x", "debug", context(scratch))).toBeUndefined()
@@ -121,5 +121,18 @@ describe("fetch against real repositories", () => {
   })
   test("the origin refs debug needs are already in the shared repository", () => {
     expect(git(scratch, "rev-parse", "origin/main")).toBe(git(repo, "rev-parse", "origin/main"))
+  })
+})
+
+describe("apply against real repositories", () => {
+  test("--directory and --unsafe-paths cannot point a patch outside the scratch worktree", () => {
+    refusedLeavesRepoUnchanged(["debug", "refactor"], [
+      `git apply --directory=${repo} p.diff`,
+      "git apply --directory=../../../../../../../../repo p.diff",
+      "git apply --unsafe-paths p.diff",
+    ])
+  })
+  test("a plain apply is allowed under the scratch workdir", () => {
+    expect(forbiddenGit("git apply p.diff", "debug", context(scratch))).toBeUndefined()
   })
 })

@@ -1265,6 +1265,10 @@ function checkGit(args, ctx, cwd, wrapped) {
       if (rest[0] === "run")
         return checkRunner(rest.slice(1), ctx, tree);
       break;
+    case "apply":
+      if (rest.some((arg) => longOption(arg, "--directory") || longOption(arg, "--unsafe-paths")))
+        return refuse("git apply with --directory or --unsafe-paths");
+      break;
     case "fetch": {
       if (rest.some((arg) => longOption(arg, "--update-head-ok") || longOption(arg, "--refmap") || cluster(arg, "u")))
         return refuse("git fetch with --update-head-ok, -u or --refmap");

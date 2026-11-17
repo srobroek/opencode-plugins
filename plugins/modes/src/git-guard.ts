@@ -235,6 +235,10 @@ function checkGit(args: readonly string[], ctx: Ctx, cwd: string | undefined, wr
     case "bisect":
       if (rest[0] === "run") return checkRunner(rest.slice(1), ctx, tree)
       break
+    case "apply":
+      // --directory and --unsafe-paths let a patch land outside the work tree it runs in.
+      if (rest.some((arg) => longOption(arg, "--directory") || longOption(arg, "--unsafe-paths"))) return refuse("git apply with --directory or --unsafe-paths")
+      break
     case "fetch": {
       // Only remote-tracking refs may be written: no HEAD updates, no forced or local-branch refspecs.
       if (rest.some((arg) => longOption(arg, "--update-head-ok") || longOption(arg, "--refmap") || cluster(arg, "u")))
