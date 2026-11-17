@@ -21,6 +21,8 @@ export type Command = {
   source: string
   /** Basenames of the wrappers that ran the command, outermost first. */
   wrappers: string[]
+  /** Directories wrappers run the command in (`env -C DIR`, `sudo -D DIR`), outermost first, as written. */
+  directories: string[]
   /** Leading `NAME=value` assignments. */
   assignments: string[]
   redirects: ShellWord[]
@@ -32,16 +34,6 @@ export type Command = {
   stage: number
   /** Index in the walk's output, in source order within one source. */
   index: number
-  /** Commands from one `visit` of the walk (a script, substitution or eval body) share a scope. */
-  scope: number
-  /** Inside `( … )`: a subshell, so a `cd` here does not reach later commands. */
-  subshell: boolean
-  /** Inside `if`/`while`/`until`/`for`/`select`/`case`: whether it runs depends on the condition. */
-  compound: boolean
-  /** Run in the background (`cmd &`), so a `cd` here does not reach later commands. */
-  background: boolean
-  /** Follows a `||` in its list: it runs only if an earlier command failed. */
-  orList: boolean
 }
 
 export type Walk = {
@@ -51,8 +43,6 @@ export type Walk = {
 }
 
 export const SHELLS: ReadonlySet<string> = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish", "ash", "mksh"])
-const COMPOUND_OPEN: ReadonlySet<string> = new Set(["if", "while", "until", "for", "select", "case"])
-const COMPOUND_CLOSE: ReadonlySet<string> = new Set(["fi", "done", "esac"])
 const RESERVED: ReadonlySet<string> = new Set([
   "!",
   "if",
@@ -118,7 +108,6 @@ export function walkShell(source: string): Walk {
   const commands: Command[] = []
   let complete = true
   let pipelines = 0
-  let scopes = 0
 
   const visit = (text: string, context: Context, depth: number): void => {
     if (depth > MAX_DEPTH) {
@@ -127,32 +116,15 @@ export function walkShell(source: string): Walk {
     }
     const scan = scanShell(text)
     if (!scan.complete) complete = false
-    const scope = scopes++
     let pipeline = pipelines++
     let stage = 0
-    let parens = 0
-    let compounds = 0
-    let orList = false
-    let current: Command[] = []
     for (const item of scan.items) {
       if (item.kind === "operator") {
         if (item.operator === "|" || item.operator === "|&") continue
-        if (item.operator === "(") parens++
-        else if (item.operator === ")") parens = Math.max(0, parens - 1)
         if (["(", ")", "{", "}"].includes(item.operator)) continue
-        if (item.operator === "&") for (const command of current) command.background = true
-        if (item.operator === "||") orList = true
-        else if (item.operator !== "&&") orList = false
         pipeline = pipelines++
         stage = 0
-        // A whole `a && b &` list is backgrounded together.
-        if (item.operator !== "&&" && item.operator !== "||") current = []
         continue
-      }
-      const leading = item.words[0]
-      if (leading !== undefined && !leading.quoted) {
-        if (COMPOUND_OPEN.has(leading.value)) compounds++
-        else if (COMPOUND_CLOSE.has(leading.value)) compounds = Math.max(0, compounds - 1)
       }
       let start = 0
       while (start < item.words.length && !item.words[start]?.quoted && RESERVED.has(item.words[start]?.value ?? ""))
@@ -165,7 +137,7 @@ export function walkShell(source: string): Walk {
         assignments.push(value)
       }
       const wrappers = commandWrappers(values)
-      const argv = commandWords(values).argv
+      const { argv, directories } = commandWords(values)
       const offset = values.length - argv.length
       const aligned = argv.every((value, i) => values[offset + i] === value) ? words.slice(offset) : undefined
       const command: Command = {
@@ -173,6 +145,7 @@ export function walkShell(source: string): Walk {
         words: aligned,
         source: text,
         wrappers,
+        directories,
         assignments,
         redirects: item.redirects,
         hereDocuments: item.hereDocuments,
@@ -180,14 +153,8 @@ export function walkShell(source: string): Walk {
         pipeline,
         stage: stage++,
         index: commands.length,
-        scope,
-        subshell: parens > 0,
-        compound: compounds > 0,
-        background: false,
-        orList,
       }
       commands.push(command)
-      current.push(command)
       if (argv.length === 0) continue
       const name = base(argv[0])
       if (SHELLS.has(name)) {

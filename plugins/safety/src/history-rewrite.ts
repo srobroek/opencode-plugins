@@ -5,27 +5,28 @@
  * meant for a temp clone but started from the main checkout rewrote its `main` and every tag.
  * `git filter-branch`, `git replace` and a branch-deleting `git update-ref` do the same in place.
  *
- * The guard fails closed. A rewriting command passes only when its directory resolves to a linked
- * worktree (`.git` is a file) or a temp clone (under the OS temp folder), by BOTH the logical rule
- * (shell `cd` semantics: `..` removes the previous path component) and the physical rule (each
- * symlink resolved before the next component). Anything the guard cannot settle is refused:
- * expansions, `~`, `cd -`, `pushd`, a `cd` whose effect on later commands depends on shell
- * structure, a symlink where the two rules disagree, a step that does not resolve, and an
- * `update-ref --stdin` transaction that is not fully readable. A false refusal costs one retry in
- * a temp clone. `filter-repo --force` is refused everywhere. A directory outside any git
+ * The guard fails closed and does not model the shell. A rewriting command is refused when the
+ * same shell command also contains anything that could change the directory it runs in (`cd`,
+ * `pushd`, `popd`, a wrapper's `-C`/`--chdir`, `git --exec-path`, a nested shell, `eval`, `source`,
+ * `xargs`, `exec`, a function or alias). Otherwise only the tool call's workdir and the command's
+ * own `-C`, `--target`, `--git-dir`, `--work-tree`, `GIT_DIR` and `GIT_WORK_TREE` are judged. The
+ * directory must resolve to a real directory the same way logically and physically, and be a temp
+ * clone (under the OS temp folder) or a verified linked worktree. A false refusal costs one retry
+ * in a temp clone. `filter-repo --force` is refused everywhere. A directory outside any git
  * repository passes: there is nothing to rewrite.
  */
 
-import { realpathSync, statSync } from "node:fs"
+import { closeSync, fstatSync, openSync, readSync, realpathSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { dirname, join, resolve } from "node:path"
-import { base, type Command, type GitInvocation, gitInvocation, positionals } from "./shell.ts"
+import { basename, dirname, isAbsolute, join, resolve } from "node:path"
+import { base, type Command, type GitInvocation, gitInvocation, positionals, SHELLS } from "./shell.ts"
 
 const PREFIX = "Blocked by safety (history-rewrite-guard)"
 const FILTER_REPO_NAME = /^git[-_]filter[-_]repo(?:\.py)?$/
 const MENTIONS_FILTER_REPO = /git[-_]filter[-_]repo/
 const UPDATE_REF_VALUED: ReadonlySet<string> = new Set(["-m"])
 const ZERO_OID = /^0{40,64}$/
+const MAX_METADATA = 4096
 
 /** Launcher options that take the next word as their value, so it is not the program. */
 const LAUNCHER_VALUED: ReadonlySet<string> = new Set([
@@ -106,6 +107,22 @@ const PIPENV_NON_RUN: ReadonlySet<string> = new Set([
   "scripts",
   "open",
 ])
+/** Commands that change the directory, run other code, or rebind names, wherever they appear. */
+const CONSTRUCTS: ReadonlySet<string> = new Set([
+  "cd",
+  "pushd",
+  "popd",
+  "eval",
+  "source",
+  ".",
+  "xargs",
+  "exec",
+  "alias",
+  "unalias",
+  "function",
+])
+/** `name()` or `function name`: a function definition. */
+const FUNCTION_DEFINITION = /(?:^|[;&|{(\s])(?:function\s+[A-Za-z_][\w:.-]*|[A-Za-z_][\w:.-]*\s*\(\s*\))/
 
 /** A word whose value is unknown until the shell expands it. */
 const dynamic = (word: string): boolean => /[$`]/.test(word) || word.startsWith("~")
@@ -190,6 +207,14 @@ function realOrUndefined(path: string): string | undefined {
 
 const realOrSelf = (path: string): string => realOrUndefined(path) ?? path
 
+function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory()
+  } catch {
+    return false
+  }
+}
+
 /** The folders whose clones are disposable: the OS temp directory, which holds OpenCode's. */
 export function defaultTempRoots(): string[] {
   return [tmpdir(), "/tmp", "/private/tmp", "/var/tmp"].map(realOrSelf)
@@ -198,8 +223,8 @@ export function defaultTempRoots(): string[] {
 const within = (path: string, root: string): boolean =>
   path === root || path.startsWith(root.endsWith("/") ? root : `${root}/`)
 
-/** A real directory and the lexical path the shell would show for it. */
-type Track = { logical: string; physical: string }
+const underTemp = (path: string, tempRoots: readonly string[]): boolean =>
+  tempRoots.some((root) => within(path, realOrSelf(root)))
 
 /** Step into `operand` physically: each symlink is resolved before a later `..`. `undefined` when a component is missing. */
 function enter(at: string, operand: string): string | undefined {
@@ -218,123 +243,116 @@ function enter(at: string, operand: string): string | undefined {
 }
 
 /**
- * Apply one directory change. `shell` follows `cd`'s logical rule (the lexical `..`); a physical
- * `cd -P` and git's `-C` follow the symlinks. `undefined` when the two rules disagree about the
- * real directory or a component does not resolve: the step is then uncertain.
+ * One directory change from the real directory `at`. The physical walk and the lexical path
+ * (`..` removes the previous component) must reach the same real directory, and it must be a
+ * directory. Otherwise `undefined`: the step is uncertain.
  */
-function step(at: Track, operand: string, mode: "shell" | "physical"): Track | undefined {
-  const physical = enter(at.physical, operand)
-  if (physical === undefined) return undefined
-  const logicalBase = mode === "shell" ? at.logical : at.physical
-  const logical = resolve(logicalBase, operand)
-  if (realOrUndefined(logical) !== physical) return undefined
-  return { logical: mode === "shell" ? logical : physical, physical }
+function step(at: string, operand: string): string | undefined {
+  const physical = enter(at, operand)
+  if (physical === undefined || !isDirectory(physical)) return undefined
+  return realOrUndefined(resolve(at, operand)) === physical ? physical : undefined
 }
 
-type Where = { dir: string } | { uncertain: string }
-
-/** `cd`'s operand and mode, or why it is uncertain. */
-function cdOperand(argv: readonly string[]): { operand: string; mode: "shell" | "physical" } | string {
-  let mode: "shell" | "physical" = "shell"
-  let i = 1
-  for (; i < argv.length && (argv[i] as string).startsWith("-") && argv[i] !== "-"; i++) {
-    if (argv[i] === "--") {
-      i++
-      break
-    }
-    if (argv[i] === "-P") mode = "physical"
-    else if (argv[i] === "-L") mode = "shell"
+/** A bounded read of a small regular file; `undefined` when it is missing, not a regular file, or too large. */
+function readSmallFile(path: string): string | undefined {
+  let fd: number | undefined
+  try {
+    fd = openSync(path, "r")
+    const info = fstatSync(fd)
+    if (!info.isFile() || info.size > MAX_METADATA) return undefined
+    const buffer = Buffer.alloc(info.size)
+    readSync(fd, buffer, 0, info.size, 0)
+    return buffer.toString("utf8")
+  } catch {
+    return undefined
+  } finally {
+    if (fd !== undefined) closeSync(fd)
   }
-  const operand = argv[i]
-  if (operand === undefined || operand === "-") return "a cd without a directory, or `cd -`"
-  if (argv.length > i + 1) return "a cd with extra arguments"
-  if (dynamic(operand)) return "a cd to an expanded directory"
-  return { operand, mode }
 }
 
 /**
- * The directory `command` runs in: the call's directory, every `cd` that provably reaches it, then
- * its own `-C` and `--target` changes. A `cd` in a subshell, a pipeline, the background or a separate
- * process does not reach it; one in a branch, after `||`, through `eval`, or via `pushd`/`popd`
- * might, so the result is uncertain.
+ * Whether the gitfile at `gitFile` belongs to a linked worktree: `gitdir: <path>` names a directory
+ * directly inside a `worktrees/` folder that holds a `commondir` file and a `gitdir` file pointing
+ * back at this very `.git` file. Submodules and `--separate-git-dir` checkouts also have a gitfile,
+ * and fail this.
  */
-function runDirectory(
-  commands: readonly Command[],
-  command: Command,
-  cwd: string,
-  moves: readonly string[],
-): Where {
-  const real = realOrUndefined(cwd)
-  if (real === undefined) return { uncertain: "the working directory cannot be resolved" }
-  let track: Track = { logical: resolve(cwd), physical: real }
-  const pipelineSize = new Map<number, number>()
-  for (const other of commands) pipelineSize.set(other.pipeline, (pipelineSize.get(other.pipeline) ?? 0) + 1)
-  for (const other of commands) {
-    if (other.index >= command.index) break
-    const name = base(other.argv[0])
-    if (name !== "cd" && name !== "pushd" && name !== "popd") continue
-    const detached = other.subshell || other.background || (pipelineSize.get(other.pipeline) ?? 1) > 1
-    if (detached) continue
-    if (other.scope !== command.scope) {
-      // A separate process (a script, a substitution) cannot change this shell's directory; `eval` can.
-      if (["shell", "substitution", "here-document", "xargs"].includes(other.context)) continue
-      return { uncertain: "a directory change in another scope may reach it" }
-    }
-    if (name !== "cd") return { uncertain: `\`${name}\` changes the directory stack` }
-    if (other.compound || other.orList) return { uncertain: "a cd in a branch, loop or after || may not run" }
-    const read = cdOperand(other.argv)
-    if (typeof read === "string") return { uncertain: read }
-    const next = step(track, read.operand, read.mode)
-    if (next === undefined) return { uncertain: `\`cd ${read.operand}\` does not resolve the same way logically and physically` }
-    track = next
-  }
-  for (const move of moves) {
-    if (dynamic(move)) return { uncertain: "a -C or --target directory is expanded by the shell" }
-    const next = step(track, move, "physical")
-    if (next === undefined) return { uncertain: `\`${move}\` does not resolve the same way logically and physically` }
-    track = next
-  }
-  return { dir: track.physical }
+function linkedWorktree(gitFile: string): boolean {
+  const text = readSmallFile(gitFile)
+  const match = text === undefined ? null : /^gitdir:[ \t]*(.+?)[ \t]*\r?\n?$/.exec(text)
+  if (match === null) return false
+  const adminDir = realOrUndefined(isAbsolute(match[1] as string) ? (match[1] as string) : resolve(dirname(gitFile), match[1] as string))
+  if (adminDir === undefined || !isDirectory(adminDir) || basename(dirname(adminDir)) !== "worktrees") return false
+  if (readSmallFile(join(adminDir, "commondir")) === undefined) return false
+  const back = readSmallFile(join(adminDir, "gitdir"))?.trim()
+  if (back === undefined || back === "") return false
+  return realOrUndefined(isAbsolute(back) ? back : resolve(adminDir, back)) === realOrUndefined(gitFile)
 }
 
-/** The repository root when `dir` is a canonical checkout; `undefined` for a linked worktree, a temp clone or no repository. */
-function canonicalCheckout(dir: string, tempRoots: readonly string[]): string | undefined {
-  if (tempRoots.some((root) => within(dir, realOrSelf(root)))) return undefined
+type Classified = { safe: true } | { safe: false; root: string; kind: "canonical" | "gitfile" }
+
+/** Whether `dir` is a temp clone, a verified linked worktree, not in a repository (safe), or neither. */
+function classify(dir: string, tempRoots: readonly string[]): Classified {
+  if (underTemp(dir, tempRoots)) return { safe: true }
   let at = dir
   for (;;) {
+    const git = join(at, ".git")
     try {
-      return statSync(join(at, ".git")).isDirectory() ? at : undefined
+      const info = statSync(git)
+      if (info.isDirectory()) return { safe: false, root: at, kind: "canonical" }
+      return linkedWorktree(git) ? { safe: true } : { safe: false, root: at, kind: "gitfile" }
     } catch {
       // No .git here; look in the parent.
     }
     const parent = dirname(at)
-    if (parent === at) return undefined
+    if (parent === at) return { safe: true }
     at = parent
   }
 }
 
 const isBranchRef = (ref: string | undefined): boolean => ref === "HEAD" || ref?.startsWith("refs/heads/") === true
 
+/** A redirection's operator and descriptor, read from the source just before its target word. */
+function redirectKind(command: Command, at: number): { operator: string; fd: string | undefined } | undefined {
+  const word = command.redirects[at]
+  if (word === undefined) return undefined
+  const before = command.source.slice(Math.max(0, word.start - 12), word.start).trimEnd()
+  const match = /(\d+|\{[A-Za-z_]\w*\})?(<<<|<<-|<<|<&|<>|<|>>|>&|>\||&>|>)$/.exec(before)
+  return match === null ? undefined : { operator: match[2] as string, fd: match[1] }
+}
+
 /**
- * What a `git update-ref --stdin` transaction deletes, read from a literal here-document or
- * here-string. Anything not fully readable (a pipe, a file, `-z`, an expansion, a quoted field)
- * counts as a possible branch delete, as does an `update` with an empty new value.
+ * What a `git update-ref --stdin` transaction deletes. Only a sole literal here-document or
+ * here-string is read; the shell uses the last stdin redirection, so any other arrangement (a pipe,
+ * a file, `<&`, `-z`, two redirections, an expansion, a quoted field) counts as a possible branch
+ * delete, as does an `update` with an empty new value.
  */
 function stdinRewrite(command: Command, args: readonly string[]): string | undefined {
-  const unreadable = "`git update-ref --stdin` (its transaction cannot be fully read, so a branch delete cannot be ruled out)"
+  const unreadable =
+    "`git update-ref --stdin` (its transaction cannot be fully read, so a branch delete cannot be ruled out)"
   if (args.includes("-z")) return unreadable
-  const sources: string[] = []
-  for (const document of command.hereDocuments) {
-    if (!document.quoted && /[$`]/.test(document.body)) return unreadable
-    sources.push(document.body)
+  const stdin: { operator: string; at: number }[] = []
+  let heredocs = 0
+  const documentIndex = new Map<number, number>()
+  for (let at = 0; at < command.redirects.length; at++) {
+    const kind = redirectKind(command, at)
+    if (kind === undefined) return unreadable
+    if (kind.operator === "<<" || kind.operator === "<<-") documentIndex.set(at, heredocs++)
+    const intoStdin = (kind.operator.startsWith("<") && (kind.fd === undefined || kind.fd === "0")) || (kind.operator === ">&" && kind.fd === "0")
+    if (intoStdin) stdin.push({ operator: kind.operator, at })
   }
-  for (const redirect of command.redirects) {
-    if (redirect.hereString !== true) continue
-    if (redirect.expands) return unreadable
-    sources.push(redirect.value)
-  }
-  if (sources.length === 0) return unreadable
-  for (const line of sources.join("\n").split("\n")) {
+  if (stdin.length !== 1) return unreadable
+  const only = stdin[0] as { operator: string; at: number }
+  let source: string
+  if (only.operator === "<<" || only.operator === "<<-") {
+    const document = command.hereDocuments[documentIndex.get(only.at) as number]
+    if (document === undefined || (!document.quoted && /[$`]/.test(document.body))) return unreadable
+    source = document.body
+  } else if (only.operator === "<<<") {
+    const word = command.redirects[only.at]
+    if (word === undefined || word.expands) return unreadable
+    source = word.value
+  } else return unreadable
+  for (const line of source.split("\n")) {
     if (line.includes('"')) return unreadable
     const [verb, ref, value] = line.trim().split(" ")
     if (!isBranchRef(ref)) continue
@@ -355,29 +373,99 @@ function updateRefRewrite(command: Command, git: GitInvocation): string | undefi
   return isBranchRef(ref) ? `\`git update-ref\` deleting ${ref}` : undefined
 }
 
+/** The first construct in the whole shell command that could change where a rewrite runs. */
+function directoryConstruct(commands: readonly Command[]): string | undefined {
+  const sources = new Set<string>()
+  for (const command of commands) {
+    const name = base(command.argv[0])
+    if (CONSTRUCTS.has(name)) return `\`${name}\``
+    if (SHELLS.has(name)) return `a nested shell (\`${name}\`)`
+    const wrapper = command.wrappers.find((item) => CONSTRUCTS.has(item))
+    if (wrapper !== undefined) return `\`${wrapper}\``
+    if (command.directories.length > 0) return "a wrapper's directory option (`env -C`, `sudo -D`)"
+    const git = gitInvocation(command.argv)
+    if (git !== undefined && command.argv.slice(1, git.offset - 1).some((word) => word.startsWith("--exec-path")))
+      return "`git --exec-path`"
+    sources.add(command.source)
+  }
+  for (const source of sources) if (FUNCTION_DEFINITION.test(source)) return "a function definition"
+  return undefined
+}
+
 const GUIDANCE =
   "Clone the repository into a temp directory (`git clone <repo> \"$TMPDIR/<name>\"`) and run the command there with the tool's workdir set to the clone; a false refusal costs one retry."
 
 const refused = (what: string, root: string): string =>
   `${PREFIX}: refused ${what}. ${root} is a canonical checkout (its .git is a directory), and this command rewrites or deletes history in place, which cannot be undone from the work tree. ${GUIDANCE}`
 
+const unverified = (what: string, root: string): string =>
+  `${PREFIX}: refused ${what}. ${root} has a .git file that is not a verified linked worktree (a submodule, a separate git directory, or unreadable metadata), and this command rewrites or deletes history in place. ${GUIDANCE}`
+
 const uncertain = (what: string, why: string): string =>
   `${PREFIX}: refused ${what}. It rewrites or deletes history in place, and the guard cannot tell with certainty that it runs in a linked worktree or temp clone (${why}). ${GUIDANCE}`
 
+const withConstruct = (what: string, construct: string): string =>
+  `${PREFIX}: refused ${what}. The same shell command also contains ${construct}, which can change the directory the rewrite runs in, so the guard cannot tell where it runs. Set the shell tool's workdir to a temp clone or linked worktree, or run the rewrite on its own. ${GUIDANCE}`
+
+/** The git options that name a repository or work tree, from the global options and the environment. */
+function repositoryOverrides(command: Command, git: GitInvocation): { gitDir?: string; workTree?: string } {
+  const out: { gitDir?: string; workTree?: string } = {}
+  const globals = command.argv.slice(1, git.offset - 1)
+  for (let i = 0; i < globals.length; i++) {
+    const word = globals[i] as string
+    for (const [name, key] of [
+      ["--git-dir", "gitDir"],
+      ["--work-tree", "workTree"],
+    ] as const) {
+      if (word === name) out[key] = globals[++i]
+      else if (word.startsWith(`${name}=`)) out[key] = word.slice(name.length + 1)
+    }
+  }
+  for (const item of command.assignments) {
+    if (item.startsWith("GIT_DIR=")) out.gitDir = item.slice("GIT_DIR=".length)
+    else if (item.startsWith("GIT_WORK_TREE=")) out.workTree = item.slice("GIT_WORK_TREE=".length)
+  }
+  return out
+}
+
 /**
- * Why a command in `commands` is refused, or `undefined`. `cwd` is the directory the tool call
- * starts in, before any `cd`. `tempRoots` replaces the default temp folders (tests).
+ * Why a command in `commands` is refused, or `undefined`. `cwd` is the tool call's workdir.
+ * `tempRoots` replaces the default temp folders (tests).
  */
 export function historyRewrite(
   commands: readonly Command[],
   cwd: string,
   tempRoots: readonly string[] = defaultTempRoots(),
 ): string | undefined {
-  const verdict = (command: Command, what: string, moves: string[]): string | undefined => {
-    const where = runDirectory(commands, command, cwd, moves)
-    if ("uncertain" in where) return uncertain(what, where.uncertain)
-    const root = canonicalCheckout(where.dir, tempRoots)
-    return root === undefined ? undefined : refused(what, root)
+  const judge = (command: Command, what: string, moves: string[], git: GitInvocation | undefined): string | undefined => {
+    const construct = directoryConstruct(commands)
+    if (construct !== undefined) return withConstruct(what, construct)
+    const start = realOrUndefined(cwd)
+    if (start === undefined) return uncertain(what, "the working directory cannot be resolved")
+    const overrides = git === undefined ? {} : repositoryOverrides(command, git)
+    const named = [...moves, overrides.workTree, overrides.gitDir].filter((value): value is string => value !== undefined)
+    if (named.some(dynamic)) return uncertain(what, "a directory option is expanded by the shell")
+    if (git?.overridden === true && overrides.gitDir === undefined && overrides.workTree === undefined)
+      return uncertain(what, "git was given a global option the guard does not read")
+    let dir = start
+    for (const move of moves) {
+      const next = step(dir, move)
+      if (next === undefined) return uncertain(what, `\`${move}\` is not a directory that resolves the same way logically and physically`)
+      dir = next
+    }
+    if (overrides.workTree !== undefined) {
+      const next = step(dir, overrides.workTree)
+      if (next === undefined) return uncertain(what, "--work-tree does not resolve to a directory")
+      dir = next
+    }
+    if (overrides.gitDir !== undefined) {
+      const gitDir = step(dir, overrides.gitDir)
+      if (gitDir === undefined || !underTemp(gitDir, tempRoots))
+        return uncertain(what, "--git-dir or GIT_DIR points outside a temp directory")
+    }
+    const where = classify(dir, tempRoots)
+    if (where.safe) return undefined
+    return where.kind === "canonical" ? refused(what, where.root) : unverified(what, where.root)
   }
   for (const command of commands) {
     const git = gitInvocation(command.argv)
@@ -389,7 +477,7 @@ export function historyRewrite(
         return `${PREFIX}: refused ${text} with --force. filter-repo --force overwrites the repository's refs and history in the directory it runs in, wherever that is. Run it without --force in a fresh temp clone with the tool's workdir set there; a fresh clone needs no --force.`
       const target = optionValue(rewrite.args, "--target")
       const moves = [...(git?.chdirs ?? []), ...(target === undefined ? [] : [target])]
-      const reason = verdict(command, text, moves)
+      const reason = judge(command, text, moves, git)
       if (reason !== undefined) return reason
       continue
     }
@@ -401,9 +489,7 @@ export function historyRewrite(
       if (!reads) what = `\`git ${git.subcommand}\``
     } else if (git.subcommand === "update-ref") what = updateRefRewrite(command, git)
     if (what === undefined) continue
-    if (git.overridden || command.assignments.some((item) => /^GIT_(?:DIR|WORK_TREE)=/.test(item)))
-      return uncertain(what, "git is pointed at a repository by --git-dir, --work-tree, GIT_DIR or GIT_WORK_TREE")
-    const reason = verdict(command, what, git.chdirs)
+    const reason = judge(command, what, git.chdirs, git)
     if (reason !== undefined) return reason
   }
   return undefined

@@ -1,14 +1,17 @@
 /**
- * The history-rewrite guard fails closed: a rewriting command passes only when its directory
- * resolves unambiguously to a linked worktree or a temp clone, by the logical rule (shell `cd`)
- * and the physical rule (symlinks resolved per component).
+ * The history-rewrite guard fails closed and does not model the shell: a rewrite passes only when
+ * its command contains nothing that could change the directory, and the workdir plus the command's
+ * own `-C`/`--target`/`--git-dir`/`--work-tree` resolve to a temp clone or a verified linked
+ * worktree, by the logical and the physical rule.
  *
  * Layout (tempRoots = [temp], so only `temp/clone` is a temp clone):
- *   canonical/.git/        canonical checkout       canonical/to-linked -> ../linked
- *   canonical/sub/                                  canonical/to-clone  -> ../temp/clone
- *   linked/.git (file)     linked worktree
- *   temp/clone/.git/       temp clone               temp/clone/to-canonical -> ../../canonical/sub
- *   plain/                 not a repository         plain/link -> ../canonical/sub
+ *   canonical/.git/                   canonical checkout; its worktrees/linked has commondir + gitdir
+ *   linked/.git (gitfile)             verified linked worktree of canonical
+ *   submodule/.git (gitfile)          gitfile into canonical/.git/modules/sm
+ *   separate/.git (gitfile)           gitfile into a separate git dir
+ *   half/.git, mismatch/.git, garbage/.git   gitfiles with incomplete, misdirected or invalid metadata
+ *   temp/clone/.git/                  temp clone
+ *   plain/                            not a repository; plain/link -> ../canonical/sub
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
@@ -26,16 +29,30 @@ beforeEach(() => {
     mkdirSync(join(root, ...parts), { recursive: true })
     return join(root, ...parts)
   }
-  dir("canonical", ".git")
+  const file = (content: string, ...parts: string[]) => writeFileSync(join(root, ...parts), content)
+  dir("canonical", ".git", "worktrees", "linked")
+  dir("canonical", ".git", "worktrees", "half")
+  dir("canonical", ".git", "modules", "sm")
   dir("canonical", "sub")
+  file("../..\n", "canonical", ".git", "worktrees", "linked", "commondir")
+  file(`${join(root, "linked", ".git")}\n`, "canonical", ".git", "worktrees", "linked", "gitdir")
+  file(`${join(root, "half", ".git")}\n`, "canonical", ".git", "worktrees", "half", "gitdir")
   dir("linked", "sub")
-  writeFileSync(join(root, "linked", ".git"), "gitdir: /elsewhere/.git/worktrees/linked\n")
+  file(`gitdir: ${join(root, "canonical", ".git", "worktrees", "linked")}\n`, "linked", ".git")
+  dir("submodule")
+  file(`gitdir: ${join(root, "canonical", ".git", "modules", "sm")}\n`, "submodule", ".git")
+  dir("separate")
+  dir("sepgit")
+  file(`gitdir: ${join(root, "sepgit")}\n`, "separate", ".git")
+  dir("half")
+  file(`gitdir: ${join(root, "canonical", ".git", "worktrees", "half")}\n`, "half", ".git")
+  dir("mismatch")
+  file(`gitdir: ${join(root, "canonical", ".git", "worktrees", "linked")}\n`, "mismatch", ".git")
+  dir("garbage")
+  file("this is not a gitfile\n", "garbage", ".git")
   dir("temp", "clone", ".git")
   dir("temp", "clone", "sub")
   dir("plain")
-  symlinkSync(join(root, "linked"), join(root, "canonical", "to-linked"))
-  symlinkSync(join(root, "temp", "clone"), join(root, "canonical", "to-clone"))
-  symlinkSync(join(root, "canonical", "sub"), join(root, "temp", "clone", "to-canonical"))
   symlinkSync(join(root, "canonical", "sub"), join(root, "plain", "link"))
   where = {
     canonical: join(root, "canonical"),
@@ -45,6 +62,11 @@ beforeEach(() => {
     clone: join(root, "temp", "clone"),
     "clone/sub": join(root, "temp", "clone", "sub"),
     plain: join(root, "plain"),
+    submodule: join(root, "submodule"),
+    separate: join(root, "separate"),
+    half: join(root, "half"),
+    mismatch: join(root, "mismatch"),
+    garbage: join(root, "garbage"),
   }
 })
 afterEach(() => rmSync(root, { recursive: true, force: true }))
@@ -59,7 +81,13 @@ const ZERO = "0".repeat(40)
 
 type Case = [name: string, command: string, cwd: string]
 
-describe("a rewrite passes only where it provably runs in a linked worktree or temp clone", () => {
+const expectRefused = (command: string, cwd: string): void => {
+  const refusal = run(command, cwd)
+  expect(refusal?.guard).toBe("history-rewrite")
+  expect(refusal?.reason).toContain("workdir")
+}
+
+describe("a rewrite passes only in a temp clone or a verified linked worktree", () => {
   const allowed: Case[] = [
     ["in a linked worktree", R, "linked"],
     ["in a linked worktree subdirectory", R, "linked/sub"],
@@ -73,18 +101,11 @@ describe("a rewrite passes only where it provably runs in a linked worktree or t
     ["-C into a linked worktree", `git -C {linked} ${R.slice(4)}`, "canonical"],
     ["-C into a temp clone", `git -C {clone} ${R.slice(4)}`, "canonical"],
     ["a relative -C into a linked worktree", `git -C ../linked ${R.slice(4)}`, "canonical"],
-    ["an unquoted cd into a linked worktree", `cd {linked} && ${R}`, "canonical"],
-    ["a quoted cd into a linked worktree", `cd "{linked}" && ${R}`, "canonical"],
-    ["a single-quoted cd into a temp clone", `cd '{clone}' && ${R}`, "canonical"],
-    ["a relative cd into a linked worktree subdirectory", `cd ../../linked/sub && ${R}`, "canonical/sub"],
-    ["cd through a symlink that agrees both ways", `cd to-linked && ${R}`, "canonical"],
+    ["chained -C into a linked subdirectory", `git -C {linked} -C sub ${R.slice(4)}`, "canonical"],
     ["--target into a linked worktree", "git filter-repo --target {linked} --path a", "canonical"],
-    ["a subshell cd that does not reach it", `(cd {canonical}); ${R}`, "linked"],
-    ["a pipeline cd that does not reach it", `cd {canonical} | cat; ${R}`, "linked"],
-    ["a background cd that does not reach it", `cd {canonical} & ${R}`, "linked"],
-    ["a separate script's cd", `bash -c 'cd {canonical}'; ${R}`, "linked"],
-    ["a substitution's cd", `echo $(cd {canonical}); ${R}`, "linked"],
-    ["a literal transaction deleting a branch, in a linked worktree", `git update-ref --stdin <<< 'delete refs/heads/main'`, "linked"],
+    ["--git-dir and --work-tree of a temp clone", `git --git-dir={clone}/.git --work-tree={clone} ${R.slice(4)}`, "canonical"],
+    ["GIT_DIR and GIT_WORK_TREE of a temp clone", `GIT_DIR={clone}/.git GIT_WORK_TREE={clone} ${R}`, "canonical"],
+    ["a sole literal transaction in a linked worktree", "git update-ref --stdin <<< 'delete refs/heads/main'", "linked"],
   ]
   test.each(allowed)("allows %s", (_name, command, cwd) => {
     expect(run(command, cwd)).toBeUndefined()
@@ -100,65 +121,121 @@ describe("a rewrite passes only where it provably runs in a linked worktree or t
     ["a zero-OID update", `git update-ref refs/heads/main ${ZERO}`, "canonical"],
     ["an empty new value", 'git update-ref refs/heads/main ""', "canonical"],
     ["deleting HEAD's branch", "git update-ref -d HEAD", "canonical"],
+    ["update-ref -d of an expanded ref", "git update-ref -d $REF", "canonical"],
     ["-C into a canonical checkout", `git -C {canonical} ${R.slice(4)}`, "linked"],
-    ["cd into a canonical checkout", `cd {canonical} && ${R}`, "linked"],
-    ["a quoted cd into a canonical checkout", `cd "{canonical}" && ${R}`, "linked"],
     ["--target into a canonical checkout", "git filter-repo --target {canonical} --path a", "linked"],
-    ["a subshell cd that does not reach it", `(cd {linked}); ${R}`, "canonical"],
-    ["a pipeline cd that does not reach it", `cd {linked} | cat; ${R}`, "canonical"],
-    ["a background cd that does not reach it", `cd {linked} & ${R}`, "canonical"],
-    ["a script's cd that does not reach it", `bash -c 'cd {linked}'; ${R}`, "canonical"],
+    ["--work-tree of a canonical checkout", `git --work-tree={canonical} ${R.slice(4)}`, "clone"],
+    ["--git-dir of a canonical checkout", `git --git-dir={canonical}/.git ${R.slice(4)}`, "clone"],
+    ["--git-dir outside the temp folder, even with a temp work tree", `git --git-dir={canonical}/.git --work-tree={clone} ${R.slice(4)}`, "clone"],
+    ["GIT_DIR of a canonical checkout", `GIT_DIR={canonical}/.git ${R}`, "clone"],
+    ["GIT_WORK_TREE of a canonical checkout", `GIT_WORK_TREE={canonical} ${R}`, "clone"],
+    ["an unknown git global option", `git --no-such-option ${R.slice(4)}`, "linked"],
   ]
   test.each(refused)("refuses %s", (_name, command, cwd) => {
-    const refusal = run(command, cwd)
-    expect(refusal?.guard).toBe("history-rewrite")
-    expect(refusal?.reason).toContain("temp")
-    expect(refusal?.reason).toContain("workdir")
+    expectRefused(command, cwd)
   })
 })
 
-describe("anything the guard cannot settle is refused", () => {
+describe("a .git file proves a linked worktree only with matching metadata", () => {
+  test.each([
+    ["a submodule checkout", "submodule"],
+    ["a separate git directory", "separate"],
+    ["a worktree entry without a commondir file", "half"],
+    ["a worktree entry that points back at another checkout", "mismatch"],
+    ["an unreadable gitfile", "garbage"],
+  ])("refuses %s", (_name, cwd) => {
+    const refusal = run(R, cwd)
+    expect(refusal?.guard).toBe("history-rewrite")
+    expect(refusal?.reason).toContain("not a verified linked worktree")
+  })
+
+  test("allows the same gitfile layouts inside a temp folder", () => {
+    // A temp clone is disposable whatever its .git looks like.
+    expect(hardGate(R, where.submodule as string, { tempRoots: [root] })).toBeUndefined()
+  })
+})
+
+describe("anything in the same command that could change the directory is refused", () => {
+  // Every row runs from a linked worktree, where the rewrite alone would pass.
+  const constructs: Case[] = [
+    ["cd", `cd sub && ${R}`, "linked"],
+    ["a quoted cd", `cd "{linked}" && ${R}`, "linked"],
+    ["cd after the rewrite", `${R}; cd /tmp`, "linked"],
+    ["cd in a subshell", `(cd sub); ${R}`, "linked"],
+    ["cd in a pipeline", `cd sub | cat; ${R}`, "linked"],
+    ["cd in the background", `cd sub & ${R}`, "linked"],
+    ["cd behind a skipped &&", `false && cd sub; ${R}`, "linked"],
+    ["cd behind ||", `true || cd sub; ${R}`, "linked"],
+    ["cd in an if", `if true; then cd sub; fi; ${R}`, "linked"],
+    ["a nested subshell cd", `cd {linked}; ( cd {canonical}; ${R} )`, "linked"],
+    ["a cd to a file", `cd {linked}/.git && ${R}`, "linked"],
+    ["pushd", `pushd {linked} && ${R}`, "linked"],
+    ["popd", `popd && ${R}`, "linked"],
+    ["env -C", `env -C {canonical} git filter-branch --env-filter true`, "linked"],
+    ["env --chdir", `env --chdir={canonical} git filter-branch --env-filter true`, "linked"],
+    ["sudo -D", `sudo -D {canonical} git filter-branch --env-filter true`, "linked"],
+    ["git --exec-path", `git --exec-path=/x ${R.slice(4)}`, "linked"],
+    ["bash -c", `bash -c '${R}'`, "linked"],
+    ["sh -c", `sh -c '${R}'`, "linked"],
+    ["zsh -c", `zsh -c '${R}'`, "linked"],
+    ["fish -c", `fish -c '${R}'`, "linked"],
+    ["a script run by a shell", `bash script.sh; ${R}`, "linked"],
+    ["eval", `eval 'true'; ${R}`, "linked"],
+    ["source", `source ./env.sh; ${R}`, "linked"],
+    ["dot", `. ./env.sh; ${R}`, "linked"],
+    ["xargs", "echo a | xargs git replace b", "linked"],
+    ["exec", `exec ${R}`, "linked"],
+    ["a function definition", `f() { cd /; }; ${R}`, "linked"],
+    ["a function keyword definition", `function f { :; }; ${R}`, "linked"],
+    ["an alias", `alias g=git; ${R}`, "linked"],
+    ["unalias", `unalias git; ${R}`, "linked"],
+  ]
+  test.each(constructs)("refuses a rewrite with %s", (_name, command, cwd) => {
+    const refusal = run(command, cwd)
+    expect(refusal?.guard).toBe("history-rewrite")
+    expect(refusal?.reason).toContain("workdir")
+    expect(refusal?.reason).toContain("on its own")
+  })
+
+  test("the same constructs are harmless for ordinary git", () => {
+    for (const command of [
+      "cd {linked} && git status",
+      "cd $X && git log",
+      "pushd {linked} && git diff",
+      "bash -c 'git status'",
+      "eval 'git status'",
+      "f() { git status; }; f",
+      "env -C {linked} git status",
+      "git --exec-path=/x status",
+      "echo a | xargs git show",
+    ])
+      expect(run(command, "canonical")).toBeUndefined()
+  })
+})
+
+describe("anything the directory options cannot settle is refused", () => {
   const uncertain: Case[] = [
-    // The shell's logical `..` and the physical `..` through a symlink disagree.
-    ["cd link/.. from a canonical checkout (stays in canonical)", `cd "to-linked/.." && ${R}`, "canonical"],
-    ["cd link/.. unquoted", `cd to-linked/.. && ${R}`, "canonical"],
-    ["cd link/.. from a temp clone (logical stays in the clone)", `cd "to-canonical/.." && ${R}`, "clone"],
-    ["cd link/.. from a linked worktree", `cd {canonical}/to-linked/.. && ${R}`, "linked"],
+    // The lexical `..` and the physical `..` through a symlink disagree.
     ["-C link/..", `git -C link/.. ${R.slice(4)}`, "plain"],
     ["chained -C link then ..", `git -C link -C .. ${R.slice(4)}`, "plain"],
     ["--target link/..", "git filter-repo --target link/.. --path a", "plain"],
-    ["a quoted cd -P through a link", `cd -P "to-linked/.." && ${R}`, "canonical"],
+    ["--work-tree link/..", `git --work-tree=link/.. ${R.slice(4)}`, "plain"],
     // Values the shell decides.
     ["git -C $X", `git -C $X ${R.slice(4)}`, "linked"],
     ["git -C with a substitution", `git -C "$(pwd)" ${R.slice(4)}`, "linked"],
     ["git -C ~", `git -C ~ ${R.slice(4)}`, "linked"],
-    ["cd $X", `cd $X && ${R}`, "linked"],
-    ["cd with a substitution", `cd "$(mktemp -d)" && ${R}`, "linked"],
-    ["cd ~", `cd ~ && ${R}`, "linked"],
-    ["cd -", `cd - && ${R}`, "linked"],
-    ["a bare cd", `cd && ${R}`, "linked"],
-    ["pushd", `pushd {linked} && ${R}`, "linked"],
-    ["popd", `popd && ${R}`, "linked"],
     ["--target $X", "git filter-repo --target $X --path a", "linked"],
-    // Steps that do not resolve.
+    ["--git-dir $X", `git --git-dir=$X ${R.slice(4)}`, "linked"],
+    ["GIT_DIR=$X", `GIT_DIR=$X ${R}`, "linked"],
+    // Steps that do not resolve to a directory.
     ["a missing -C directory", `git -C missing ${R.slice(4)}`, "linked"],
-    ["a missing cd directory", `cd missing && ${R}`, "linked"],
-    // A cd whose effect depends on shell structure.
-    ["a cd after ||", `true || cd {linked}; ${R}`, "canonical"],
-    ["a cd inside an if", `if true; then cd {linked}; fi; ${R}`, "canonical"],
-    ["a cd inside a loop", `for i in 1; do cd {linked}; done; ${R}`, "canonical"],
-    ["a cd through eval", `eval 'cd {linked}'; ${R}`, "canonical"],
-    ["a cd before a nested script", `cd {linked} && bash -c '${R}'`, "canonical"],
-    // Repository overrides.
-    ["--git-dir", `git --git-dir={linked}/.git ${R.slice(4)}`, "linked"],
-    ["--work-tree", `git --work-tree={linked} ${R.slice(4)}`, "linked"],
-    ["GIT_DIR", `GIT_DIR=/x/.git ${R}`, "linked"],
-    ["GIT_WORK_TREE", `GIT_WORK_TREE=/x ${R}`, "linked"],
+    ["a -C step that is a file", `git -C {linked}/.git ${R.slice(4)}`, "canonical"],
+    ["a -C step through a file", `git -C {linked}/.git/x ${R.slice(4)}`, "canonical"],
+    ["a --target that is a file", "git filter-repo --target {linked}/.git --path a", "canonical"],
+    ["a --work-tree that is a file", `git --work-tree={linked}/.git ${R.slice(4)}`, "canonical"],
     // Launchers.
     ["an unreadable uv command line that names filter-repo", "uv weird-subcommand git-filter-repo --path a", "linked"],
     ["an unreadable pipx command line that names filter-repo", "pipx exotic git-filter-repo --path a", "linked"],
-    // Branch deletes it cannot read.
-    ["update-ref -d of an expanded ref", "git update-ref -d $REF", "canonical"],
   ]
   test.each(uncertain)("refuses %s", (_name, command, cwd) => {
     const refusal = run(command, cwd)
@@ -166,9 +243,10 @@ describe("anything the guard cannot settle is refused", () => {
     expect(refusal?.reason).toContain("workdir")
   })
 
-  test("the refusal says why the directory is uncertain", () => {
+  test("the refusals say why", () => {
     expect(run(`git -C $X ${R.slice(4)}`, "linked")?.reason).toContain("cannot tell with certainty")
     expect(run(R, "canonical")?.reason).toContain("canonical checkout")
+    expect(run(`cd sub && ${R}`, "linked")?.reason).toContain("also contains `cd`")
   })
 })
 
@@ -183,7 +261,7 @@ describe("update-ref --stdin is read exactly or refused", () => {
     ["a quoted empty new value", 'git update-ref --stdin <<EOF\nupdate refs/heads/main ""\nEOF'],
     ["a quoted ref", 'git update-ref --stdin <<EOF\ndelete "refs/heads/main"\nEOF'],
     ["a quoted tag ref", 'git update-ref --stdin <<EOF\ndelete "refs/tags/v1"\nEOF'],
-    ["a C-style escaped ref", 'git update-ref --stdin <<< \'delete "refs/heads/ma\\151n"\''],
+    ["a C-style escaped ref", "git update-ref --stdin <<< 'delete \"refs/heads/ma\\151n\"'"],
     ["deleting HEAD's branch", "git update-ref --stdin <<EOF\ndelete HEAD\nEOF"],
     ["a pipe", "printf 'delete refs/heads/main\\n' | git update-ref --stdin"],
     ["a file", "git update-ref --stdin < ops.txt"],
@@ -191,12 +269,20 @@ describe("update-ref --stdin is read exactly or refused", () => {
     ["-z input", "git update-ref -z --stdin <<< 'x'"],
     ["an expanded here-string", 'git update-ref --stdin <<< "delete refs/heads/$B"'],
     ["an expanded here-document", "git update-ref --stdin <<EOF\ndelete refs/heads/$B\nEOF"],
+    // The shell uses the LAST stdin redirection, so two of them are never parsed.
+    ["a tag-only here-string followed by a file", "git update-ref --stdin <<< 'delete refs/tags/v1' < ops.txt"],
+    ["a file followed by a tag-only here-string", "git update-ref --stdin < ops.txt <<< 'delete refs/tags/v1'"],
+    ["two here-strings", "git update-ref --stdin <<< 'delete refs/tags/v1' <<< 'delete refs/heads/main'"],
+    ["a here-document and a here-string", "git update-ref --stdin <<< 'delete refs/tags/v1' <<EOF\ndelete refs/heads/main\nEOF"],
+    ["a descriptor duplicated onto stdin", "git update-ref --stdin <<< 'delete refs/tags/v1' <&3"],
+    ["a read-write redirection", "git update-ref --stdin <> ops.txt"],
+    ["a here-string on another descriptor only", "git update-ref --stdin 3<<< 'delete refs/tags/v1'"],
   ] as const
   test.each(refusedInCanonical)("refuses %s in a canonical checkout", (_name, command) => {
     expect(run(command, "canonical")?.guard).toBe("history-rewrite")
   })
 
-  test.each(refusedInCanonical)("refuses %s from a canonical checkout even through -C into a symlinked directory", (_name, command) => {
+  test.each(refusedInCanonical)("refuses %s through -C into a canonical checkout", (_name, command) => {
     expect(run(command.replace("git update-ref", "git -C {canonical}/sub update-ref"), "linked")?.guard).toBe(
       "history-rewrite",
     )
@@ -207,8 +293,15 @@ describe("update-ref --stdin is read exactly or refused", () => {
     ["update refs/remotes/origin/x abc\ndelete refs/remotes/origin/y"],
     ["create refs/heads/new abc"],
     ["start\nupdate refs/tags/v1 abc\nprepare\ncommit"],
-  ])("leaves a readable transaction that spares branches alone: %s", (body) => {
+  ])("leaves a sole literal transaction that spares branches alone: %s", (body) => {
     expect(run(`git update-ref --stdin <<EOF\n${body}\nEOF`, "canonical")).toBeUndefined()
+  })
+
+  test("a sole literal here-string on stdout-redirected output is still read", () => {
+    expect(run("git update-ref --stdin <<< 'delete refs/tags/v1' > out.txt", "canonical")).toBeUndefined()
+    expect(run("git update-ref --stdin <<< 'delete refs/heads/main' > out.txt", "canonical")?.guard).toBe(
+      "history-rewrite",
+    )
   })
 })
 
@@ -225,8 +318,7 @@ describe("filter-repo --force is refused everywhere", () => {
     "uv --directory . tool run git-filter-repo --force",
   ])("%s", (command) => {
     for (const cwd of ["canonical", "linked", "clone", "plain"]) {
-      const refusal = run(command, cwd)
-      expect(refusal?.reason).toContain("--force")
+      expect(run(command, cwd)?.reason).toContain("--force")
     }
   })
 })

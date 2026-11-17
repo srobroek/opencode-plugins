@@ -3,7 +3,7 @@
 // plugins/safety/src/index.ts
 import { realpathSync as realpathSync7 } from "fs";
 import { homedir as homedir8 } from "os";
-import { isAbsolute as isAbsolute10, resolve as resolve11 } from "path";
+import { isAbsolute as isAbsolute11, resolve as resolve11 } from "path";
 import { Plugin } from "@opencode/plugin";
 import { Tool } from "@opencode/plugin/effect";
 // plugins/lib/src/shell-tokenizer.ts
@@ -2423,8 +2423,6 @@ import { dirname, isAbsolute as isAbsolute2, join as join2, resolve as resolve3 
 
 // plugins/safety/src/shell.ts
 var SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish", "ash", "mksh"]);
-var COMPOUND_OPEN = new Set(["if", "while", "until", "for", "select", "case"]);
-var COMPOUND_CLOSE = new Set(["fi", "done", "esac"]);
 var RESERVED = new Set([
   "!",
   "if",
@@ -2488,7 +2486,6 @@ function walkShell(source) {
   const commands = [];
   let complete = true;
   let pipelines = 0;
-  let scopes = 0;
   const visit = (text, context, depth) => {
     if (depth > MAX_DEPTH) {
       complete = false;
@@ -2497,42 +2494,17 @@ function walkShell(source) {
     const scan = scanShell(text);
     if (!scan.complete)
       complete = false;
-    const scope = scopes++;
     let pipeline = pipelines++;
     let stage = 0;
-    let parens = 0;
-    let compounds = 0;
-    let orList = false;
-    let current = [];
     for (const item of scan.items) {
       if (item.kind === "operator") {
         if (item.operator === "|" || item.operator === "|&")
           continue;
-        if (item.operator === "(")
-          parens++;
-        else if (item.operator === ")")
-          parens = Math.max(0, parens - 1);
         if (["(", ")", "{", "}"].includes(item.operator))
           continue;
-        if (item.operator === "&")
-          for (const command of current)
-            command.background = true;
-        if (item.operator === "||")
-          orList = true;
-        else if (item.operator !== "&&")
-          orList = false;
         pipeline = pipelines++;
         stage = 0;
-        if (item.operator !== "&&" && item.operator !== "||")
-          current = [];
         continue;
-      }
-      const leading = item.words[0];
-      if (leading !== undefined && !leading.quoted) {
-        if (COMPOUND_OPEN.has(leading.value))
-          compounds++;
-        else if (COMPOUND_CLOSE.has(leading.value))
-          compounds = Math.max(0, compounds - 1);
       }
       let start = 0;
       while (start < item.words.length && !item.words[start]?.quoted && RESERVED.has(item.words[start]?.value ?? ""))
@@ -2546,7 +2518,7 @@ function walkShell(source) {
         assignments.push(value);
       }
       const wrappers = commandWrappers(values);
-      const argv = commandWords(values).argv;
+      const { argv, directories } = commandWords(values);
       const offset = values.length - argv.length;
       const aligned = argv.every((value, i) => values[offset + i] === value) ? words.slice(offset) : undefined;
       const command = {
@@ -2554,21 +2526,16 @@ function walkShell(source) {
         words: aligned,
         source: text,
         wrappers,
+        directories,
         assignments,
         redirects: item.redirects,
         hereDocuments: item.hereDocuments,
         context,
         pipeline,
         stage: stage++,
-        index: commands.length,
-        scope,
-        subshell: parens > 0,
-        compound: compounds > 0,
-        background: false,
-        orList
+        index: commands.length
       };
       commands.push(command);
-      current.push(command);
       if (argv.length === 0)
         continue;
       const name = base(argv[0]);
@@ -3562,7 +3529,7 @@ function readConfigSnapshot(cwd, config, home = homedir4()) {
 
 // plugins/safety/src/guards.ts
 import { readFileSync as readFileSync2 } from "fs";
-import { isAbsolute as isAbsolute4, resolve as resolve6 } from "path";
+import { isAbsolute as isAbsolute5, resolve as resolve6 } from "path";
 
 // plugins/safety/src/attribution.ts
 var ATTRIBUTION = /co-authored-by:[^\n]{0,120}(?:claude|codex|gpt|copilot|cursor|devin|anthropic|openai|gemini)|generated (?:with|by) [[(]?(?:claude|codex|copilot|opencode|gemini)|noreply@(?:anthropic|openai)\.com/i;
@@ -3571,14 +3538,15 @@ function hasAttribution(text) {
 }
 
 // plugins/safety/src/history-rewrite.ts
-import { realpathSync as realpathSync2, statSync as statSync2 } from "fs";
+import { closeSync, fstatSync, openSync, readSync, realpathSync as realpathSync2, statSync as statSync2 } from "fs";
 import { tmpdir } from "os";
-import { dirname as dirname3, join as join5, resolve as resolve5 } from "path";
+import { basename as basename2, dirname as dirname3, isAbsolute as isAbsolute4, join as join5, resolve as resolve5 } from "path";
 var PREFIX = "Blocked by safety (history-rewrite-guard)";
 var FILTER_REPO_NAME = /^git[-_]filter[-_]repo(?:\.py)?$/;
 var MENTIONS_FILTER_REPO = /git[-_]filter[-_]repo/;
 var UPDATE_REF_VALUED = new Set(["-m"]);
 var ZERO_OID = /^0{40,64}$/;
+var MAX_METADATA = 4096;
 var LAUNCHER_VALUED = new Set([
   "--from",
   "--with",
@@ -3657,6 +3625,20 @@ var PIPENV_NON_RUN = new Set([
   "scripts",
   "open"
 ]);
+var CONSTRUCTS = new Set([
+  "cd",
+  "pushd",
+  "popd",
+  "eval",
+  "source",
+  ".",
+  "xargs",
+  "exec",
+  "alias",
+  "unalias",
+  "function"
+]);
+var FUNCTION_DEFINITION = /(?:^|[;&|{(\s])(?:function\s+[A-Za-z_][\w:.-]*|[A-Za-z_][\w:.-]*\s*\(\s*\))/;
 var dynamic = (word) => /[$`]/.test(word) || word.startsWith("~");
 function skipOptions(argv, at, valued) {
   let i = at;
@@ -3740,10 +3722,18 @@ function realOrUndefined(path) {
   }
 }
 var realOrSelf = (path) => realOrUndefined(path) ?? path;
+function isDirectory2(path) {
+  try {
+    return statSync2(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
 function defaultTempRoots() {
   return [tmpdir(), "/tmp", "/private/tmp", "/var/tmp"].map(realOrSelf);
 }
 var within = (path, root) => path === root || path.startsWith(root.endsWith("/") ? root : `${root}/`);
+var underTemp = (path, tempRoots) => tempRoots.some((root) => within(path, realOrSelf(root)));
 function enter(at, operand) {
   let here = operand.startsWith("/") ? "/" : at;
   for (const part of operand.split("/")) {
@@ -3760,118 +3750,105 @@ function enter(at, operand) {
   }
   return here;
 }
-function step(at, operand, mode) {
-  const physical = enter(at.physical, operand);
-  if (physical === undefined)
+function step(at, operand) {
+  const physical = enter(at, operand);
+  if (physical === undefined || !isDirectory2(physical))
     return;
-  const logicalBase = mode === "shell" ? at.logical : at.physical;
-  const logical = resolve5(logicalBase, operand);
-  if (realOrUndefined(logical) !== physical)
+  return realOrUndefined(resolve5(at, operand)) === physical ? physical : undefined;
+}
+function readSmallFile(path) {
+  let fd;
+  try {
+    fd = openSync(path, "r");
+    const info = fstatSync(fd);
+    if (!info.isFile() || info.size > MAX_METADATA)
+      return;
+    const buffer = Buffer.alloc(info.size);
+    readSync(fd, buffer, 0, info.size, 0);
+    return buffer.toString("utf8");
+  } catch {
     return;
-  return { logical: mode === "shell" ? logical : physical, physical };
-}
-function cdOperand(argv) {
-  let mode = "shell";
-  let i = 1;
-  for (;i < argv.length && argv[i].startsWith("-") && argv[i] !== "-"; i++) {
-    if (argv[i] === "--") {
-      i++;
-      break;
-    }
-    if (argv[i] === "-P")
-      mode = "physical";
-    else if (argv[i] === "-L")
-      mode = "shell";
+  } finally {
+    if (fd !== undefined)
+      closeSync(fd);
   }
-  const operand = argv[i];
-  if (operand === undefined || operand === "-")
-    return "a cd without a directory, or `cd -`";
-  if (argv.length > i + 1)
-    return "a cd with extra arguments";
-  if (dynamic(operand))
-    return "a cd to an expanded directory";
-  return { operand, mode };
 }
-function runDirectory(commands, command, cwd, moves) {
-  const real = realOrUndefined(cwd);
-  if (real === undefined)
-    return { uncertain: "the working directory cannot be resolved" };
-  let track = { logical: resolve5(cwd), physical: real };
-  const pipelineSize = new Map;
-  for (const other of commands)
-    pipelineSize.set(other.pipeline, (pipelineSize.get(other.pipeline) ?? 0) + 1);
-  for (const other of commands) {
-    if (other.index >= command.index)
-      break;
-    const name = base(other.argv[0]);
-    if (name !== "cd" && name !== "pushd" && name !== "popd")
-      continue;
-    const detached = other.subshell || other.background || (pipelineSize.get(other.pipeline) ?? 1) > 1;
-    if (detached)
-      continue;
-    if (other.scope !== command.scope) {
-      if (["shell", "substitution", "here-document", "xargs"].includes(other.context))
-        continue;
-      return { uncertain: "a directory change in another scope may reach it" };
-    }
-    if (name !== "cd")
-      return { uncertain: `\`${name}\` changes the directory stack` };
-    if (other.compound || other.orList)
-      return { uncertain: "a cd in a branch, loop or after || may not run" };
-    const read = cdOperand(other.argv);
-    if (typeof read === "string")
-      return { uncertain: read };
-    const next = step(track, read.operand, read.mode);
-    if (next === undefined)
-      return { uncertain: `\`cd ${read.operand}\` does not resolve the same way logically and physically` };
-    track = next;
-  }
-  for (const move of moves) {
-    if (dynamic(move))
-      return { uncertain: "a -C or --target directory is expanded by the shell" };
-    const next = step(track, move, "physical");
-    if (next === undefined)
-      return { uncertain: `\`${move}\` does not resolve the same way logically and physically` };
-    track = next;
-  }
-  return { dir: track.physical };
+function linkedWorktree(gitFile) {
+  const text = readSmallFile(gitFile);
+  const match = text === undefined ? null : /^gitdir:[ \t]*(.+?)[ \t]*\r?\n?$/.exec(text);
+  if (match === null)
+    return false;
+  const adminDir = realOrUndefined(isAbsolute4(match[1]) ? match[1] : resolve5(dirname3(gitFile), match[1]));
+  if (adminDir === undefined || !isDirectory2(adminDir) || basename2(dirname3(adminDir)) !== "worktrees")
+    return false;
+  if (readSmallFile(join5(adminDir, "commondir")) === undefined)
+    return false;
+  const back = readSmallFile(join5(adminDir, "gitdir"))?.trim();
+  if (back === undefined || back === "")
+    return false;
+  return realOrUndefined(isAbsolute4(back) ? back : resolve5(adminDir, back)) === realOrUndefined(gitFile);
 }
-function canonicalCheckout(dir, tempRoots) {
-  if (tempRoots.some((root) => within(dir, realOrSelf(root))))
-    return;
+function classify(dir, tempRoots) {
+  if (underTemp(dir, tempRoots))
+    return { safe: true };
   let at = dir;
   for (;; ) {
+    const git = join5(at, ".git");
     try {
-      return statSync2(join5(at, ".git")).isDirectory() ? at : undefined;
+      const info = statSync2(git);
+      if (info.isDirectory())
+        return { safe: false, root: at, kind: "canonical" };
+      return linkedWorktree(git) ? { safe: true } : { safe: false, root: at, kind: "gitfile" };
     } catch {}
     const parent = dirname3(at);
     if (parent === at)
-      return;
+      return { safe: true };
     at = parent;
   }
 }
 var isBranchRef = (ref) => ref === "HEAD" || ref?.startsWith("refs/heads/") === true;
+function redirectKind(command, at) {
+  const word = command.redirects[at];
+  if (word === undefined)
+    return;
+  const before = command.source.slice(Math.max(0, word.start - 12), word.start).trimEnd();
+  const match = /(\d+|\{[A-Za-z_]\w*\})?(<<<|<<-|<<|<&|<>|<|>>|>&|>\||&>|>)$/.exec(before);
+  return match === null ? undefined : { operator: match[2], fd: match[1] };
+}
 function stdinRewrite(command, args) {
   const unreadable = "`git update-ref --stdin` (its transaction cannot be fully read, so a branch delete cannot be ruled out)";
   if (args.includes("-z"))
     return unreadable;
-  const sources = [];
-  for (const document of command.hereDocuments) {
-    if (!document.quoted && /[$`]/.test(document.body))
+  const stdin = [];
+  let heredocs = 0;
+  const documentIndex = new Map;
+  for (let at = 0;at < command.redirects.length; at++) {
+    const kind = redirectKind(command, at);
+    if (kind === undefined)
       return unreadable;
-    sources.push(document.body);
+    if (kind.operator === "<<" || kind.operator === "<<-")
+      documentIndex.set(at, heredocs++);
+    const intoStdin = kind.operator.startsWith("<") && (kind.fd === undefined || kind.fd === "0") || kind.operator === ">&" && kind.fd === "0";
+    if (intoStdin)
+      stdin.push({ operator: kind.operator, at });
   }
-  for (const redirect of command.redirects) {
-    if (redirect.hereString !== true)
-      continue;
-    if (redirect.expands)
-      return unreadable;
-    sources.push(redirect.value);
-  }
-  if (sources.length === 0)
+  if (stdin.length !== 1)
     return unreadable;
-  for (const line of sources.join(`
-`).split(`
+  const only = stdin[0];
+  let source;
+  if (only.operator === "<<" || only.operator === "<<-") {
+    const document = command.hereDocuments[documentIndex.get(only.at)];
+    if (document === undefined || !document.quoted && /[$`]/.test(document.body))
+      return unreadable;
+    source = document.body;
+  } else if (only.operator === "<<<") {
+    const word = command.redirects[only.at];
+    if (word === undefined || word.expands)
+      return unreadable;
+    source = word.value;
+  } else
+    return unreadable;
+  for (const line of source.split(`
 `)) {
     if (line.includes('"'))
       return unreadable;
@@ -3895,16 +3872,93 @@ function updateRefRewrite(command, git) {
     return "`git update-ref` deleting a ref it cannot read";
   return isBranchRef(ref) ? `\`git update-ref\` deleting ${ref}` : undefined;
 }
+function directoryConstruct(commands) {
+  const sources = new Set;
+  for (const command of commands) {
+    const name = base(command.argv[0]);
+    if (CONSTRUCTS.has(name))
+      return `\`${name}\``;
+    if (SHELLS.has(name))
+      return `a nested shell (\`${name}\`)`;
+    const wrapper = command.wrappers.find((item) => CONSTRUCTS.has(item));
+    if (wrapper !== undefined)
+      return `\`${wrapper}\``;
+    if (command.directories.length > 0)
+      return "a wrapper's directory option (`env -C`, `sudo -D`)";
+    const git = gitInvocation(command.argv);
+    if (git !== undefined && command.argv.slice(1, git.offset - 1).some((word) => word.startsWith("--exec-path")))
+      return "`git --exec-path`";
+    sources.add(command.source);
+  }
+  for (const source of sources)
+    if (FUNCTION_DEFINITION.test(source))
+      return "a function definition";
+  return;
+}
 var GUIDANCE = 'Clone the repository into a temp directory (`git clone <repo> "$TMPDIR/<name>"`) and run the command there with the tool\'s workdir set to the clone; a false refusal costs one retry.';
 var refused = (what, root) => `${PREFIX}: refused ${what}. ${root} is a canonical checkout (its .git is a directory), and this command rewrites or deletes history in place, which cannot be undone from the work tree. ${GUIDANCE}`;
+var unverified = (what, root) => `${PREFIX}: refused ${what}. ${root} has a .git file that is not a verified linked worktree (a submodule, a separate git directory, or unreadable metadata), and this command rewrites or deletes history in place. ${GUIDANCE}`;
 var uncertain = (what, why) => `${PREFIX}: refused ${what}. It rewrites or deletes history in place, and the guard cannot tell with certainty that it runs in a linked worktree or temp clone (${why}). ${GUIDANCE}`;
+var withConstruct = (what, construct) => `${PREFIX}: refused ${what}. The same shell command also contains ${construct}, which can change the directory the rewrite runs in, so the guard cannot tell where it runs. Set the shell tool's workdir to a temp clone or linked worktree, or run the rewrite on its own. ${GUIDANCE}`;
+function repositoryOverrides(command, git) {
+  const out = {};
+  const globals = command.argv.slice(1, git.offset - 1);
+  for (let i = 0;i < globals.length; i++) {
+    const word = globals[i];
+    for (const [name, key] of [
+      ["--git-dir", "gitDir"],
+      ["--work-tree", "workTree"]
+    ]) {
+      if (word === name)
+        out[key] = globals[++i];
+      else if (word.startsWith(`${name}=`))
+        out[key] = word.slice(name.length + 1);
+    }
+  }
+  for (const item of command.assignments) {
+    if (item.startsWith("GIT_DIR="))
+      out.gitDir = item.slice("GIT_DIR=".length);
+    else if (item.startsWith("GIT_WORK_TREE="))
+      out.workTree = item.slice("GIT_WORK_TREE=".length);
+  }
+  return out;
+}
 function historyRewrite(commands, cwd, tempRoots = defaultTempRoots()) {
-  const verdict = (command, what, moves) => {
-    const where = runDirectory(commands, command, cwd, moves);
-    if ("uncertain" in where)
-      return uncertain(what, where.uncertain);
-    const root = canonicalCheckout(where.dir, tempRoots);
-    return root === undefined ? undefined : refused(what, root);
+  const judge = (command, what, moves, git) => {
+    const construct = directoryConstruct(commands);
+    if (construct !== undefined)
+      return withConstruct(what, construct);
+    const start = realOrUndefined(cwd);
+    if (start === undefined)
+      return uncertain(what, "the working directory cannot be resolved");
+    const overrides = git === undefined ? {} : repositoryOverrides(command, git);
+    const named = [...moves, overrides.workTree, overrides.gitDir].filter((value) => value !== undefined);
+    if (named.some(dynamic))
+      return uncertain(what, "a directory option is expanded by the shell");
+    if (git?.overridden === true && overrides.gitDir === undefined && overrides.workTree === undefined)
+      return uncertain(what, "git was given a global option the guard does not read");
+    let dir = start;
+    for (const move of moves) {
+      const next = step(dir, move);
+      if (next === undefined)
+        return uncertain(what, `\`${move}\` is not a directory that resolves the same way logically and physically`);
+      dir = next;
+    }
+    if (overrides.workTree !== undefined) {
+      const next = step(dir, overrides.workTree);
+      if (next === undefined)
+        return uncertain(what, "--work-tree does not resolve to a directory");
+      dir = next;
+    }
+    if (overrides.gitDir !== undefined) {
+      const gitDir = step(dir, overrides.gitDir);
+      if (gitDir === undefined || !underTemp(gitDir, tempRoots))
+        return uncertain(what, "--git-dir or GIT_DIR points outside a temp directory");
+    }
+    const where = classify(dir, tempRoots);
+    if (where.safe)
+      return;
+    return where.kind === "canonical" ? refused(what, where.root) : unverified(what, where.root);
   };
   for (const command of commands) {
     const git = gitInvocation(command.argv);
@@ -3917,7 +3971,7 @@ function historyRewrite(commands, cwd, tempRoots = defaultTempRoots()) {
         return `${PREFIX}: refused ${text} with --force. filter-repo --force overwrites the repository's refs and history in the directory it runs in, wherever that is. Run it without --force in a fresh temp clone with the tool's workdir set there; a fresh clone needs no --force.`;
       const target = optionValue(rewrite.args, "--target");
       const moves = [...git?.chdirs ?? [], ...target === undefined ? [] : [target]];
-      const reason = verdict(command, text, moves);
+      const reason = judge(command, text, moves, git);
       if (reason !== undefined)
         return reason;
       continue;
@@ -3935,9 +3989,7 @@ function historyRewrite(commands, cwd, tempRoots = defaultTempRoots()) {
       what = updateRefRewrite(command, git);
     if (what === undefined)
       continue;
-    if (git.overridden || command.assignments.some((item) => /^GIT_(?:DIR|WORK_TREE)=/.test(item)))
-      return uncertain(what, "git is pointed at a repository by --git-dir, --work-tree, GIT_DIR or GIT_WORK_TREE");
-    const reason = verdict(command, what, git.chdirs);
+    const reason = judge(command, what, git.chdirs, git);
     if (reason !== undefined)
       return reason;
   }
@@ -4100,13 +4152,13 @@ var readText = (path) => {
 };
 function writtenInto(commands, before, path, cwd) {
   const out = [];
-  const target = isAbsolute4(path) ? path : resolve6(cwd, path);
+  const target = isAbsolute5(path) ? path : resolve6(cwd, path);
   for (const command of commands) {
     if (command.index >= before.index && command.source === before.source)
       break;
     const writes = command.redirects.some((word) => {
       const value = word.value;
-      return value === path || (!isAbsolute4(value) ? resolve6(cwd, value) : value) === target;
+      return value === path || (!isAbsolute5(value) ? resolve6(cwd, value) : value) === target;
     });
     const tee = base(command.argv[0]) === "tee" && command.argv.slice(1).includes(path);
     if (!writes && !tee)
@@ -4138,7 +4190,7 @@ function attribution(commands, cwd, read = readText) {
           }
       } else {
         const dir = git.chdirs.reduce((at, chdir) => resolve6(at, chdir), cwd);
-        const content = read(isAbsolute4(file) ? file : resolve6(dir, file));
+        const content = read(isAbsolute5(file) ? file : resolve6(dir, file));
         if (content !== undefined)
           sources.push(content);
         sources.push(...writtenInto(commands, command, file, dir));
@@ -4160,7 +4212,7 @@ function worktreeTmp(command, cwd) {
     const path = positionals(git.args.slice(1), WORKTREE_ADD_VALUED)[0];
     if (path === undefined || path.startsWith("~") || path.startsWith("$"))
       return false;
-    return underTmp(isAbsolute4(path) ? path : resolve6(dir, path));
+    return underTmp(isAbsolute5(path) ? path : resolve6(dir, path));
   }
   const wt = wtInvocation(command.argv);
   if (wt && ["switch", "new", "co", "agent"].includes(wt.subcommand)) {
@@ -4209,7 +4261,7 @@ function hardGate(source, cwd, options = {}) {
     else if (on("dns-delegation") && dnsDelegation(commands))
       refusal = refuse("dns-delegation");
     else if (on("history-rewrite")) {
-      const reason = historyRewrite(commands, options.baseCwd ?? cwd, options.tempRoots);
+      const reason = historyRewrite(commands, cwd, options.tempRoots);
       if (reason !== undefined)
         refusal = { guard: "history-rewrite", reason };
     }
@@ -4446,16 +4498,16 @@ function createPackageAdvisor() {
 }
 
 // plugins/safety/src/permission.ts
-import { isAbsolute as isAbsolute7, resolve as resolve9 } from "path";
+import { isAbsolute as isAbsolute8, resolve as resolve9 } from "path";
 
 // plugins/safety/src/branch-delete.ts
 import { realpathSync as realpathSync5 } from "fs";
 import { homedir as homedir5 } from "os";
-import { basename as basename2, isAbsolute as isAbsolute6, resolve as resolve8 } from "path";
+import { basename as basename3, isAbsolute as isAbsolute7, resolve as resolve8 } from "path";
 
 // plugins/safety/src/worktree-detached.ts
 import { realpathSync as realpathSync4 } from "fs";
-import { isAbsolute as isAbsolute5, join as join7, resolve as resolve7 } from "path";
+import { isAbsolute as isAbsolute6, join as join7, resolve as resolve7 } from "path";
 var MAX_COMMAND_LENGTH2 = 64000;
 var PREFIX2 = "Worktree removal refused";
 var OPAQUE = new Set(["ssh", "parallel"]);
@@ -4472,7 +4524,7 @@ var VALUE_FLAGS = new Set([
 function joinChdirs(chdirs) {
   if (chdirs.length === 0)
     return null;
-  return chdirs.reduce((at, next) => isAbsolute5(next) ? next : join7(at, next));
+  return chdirs.reduce((at, next) => isAbsolute6(next) ? next : join7(at, next));
 }
 function removals(command) {
   const found = [];
@@ -4779,12 +4831,12 @@ function commandLine(words) {
         gitEnvironment = true;
       continue;
     }
-    if (PASSTHROUGH.has(basename2(word.value)) && !words[i + 1]?.value.startsWith("-"))
+    if (PASSTHROUGH.has(basename3(word.value)) && !words[i + 1]?.value.startsWith("-"))
       continue;
     break;
   }
   const head = words[i];
-  return head ? { name: basename2(head.value), args: words.slice(i + 1), gitEnvironment } : null;
+  return head ? { name: basename3(head.value), args: words.slice(i + 1), gitEnvironment } : null;
 }
 function untrusted(word) {
   if (EXPANSION.test(word.value))
@@ -5020,7 +5072,7 @@ function directoryTarget(line, from) {
   if (line.args.length > 1 || untrusted(word) || word.value === "" || word.value.startsWith("-"))
     return null;
   const path = pathOf(word);
-  if (isAbsolute6(path))
+  if (isAbsolute7(path))
     return path;
   if (process.env.CDPATH && !/^\.\.?(?:\/|$)/.test(path))
     return null;
@@ -5114,7 +5166,7 @@ async function wtBranchNames(git, request) {
   const names = new Set;
   for (const target of request.targets) {
     const path = realpath(resolve8(dir, target));
-    const matches = worktrees.filter((w) => realpath(w.path) === path || basename2(w.path) === target || w.branch === target);
+    const matches = worktrees.filter((w) => realpath(w.path) === path || basename3(w.path) === target || w.branch === target);
     for (const match of matches)
       if (!match.detached && match.branch)
         names.add(match.branch);
@@ -5239,7 +5291,7 @@ function describe(unlanded) {
   return out.join(`
 `);
 }
-async function classify(requests, options) {
+async function classify2(requests, options) {
   const budget2 = budget(options);
   const git = gitIn(budget2);
   const repos = new Map;
@@ -5321,7 +5373,7 @@ async function reviewBranchDeletes(command, cwd, options = {}) {
   if (requests.length === 0)
     return ALLOW;
   try {
-    return await classify(requests, options);
+    return await classify2(requests, options);
   } catch (error) {
     if (error instanceof ProbeTimeout) {
       return refuse(`\`${error.message}\` timed out, so the branches' state cannot be proved. Re-run once git answers promptly.`, false);
@@ -5367,7 +5419,7 @@ function destructions(commands, cwd) {
     if (!git)
       continue;
     const literal = command.context === "top" && command.words !== undefined && !git.overridden;
-    const dir = literal && cwd !== undefined && !command.assignments.some((value) => value.startsWith("GIT_")) ? git.chdirs.reduce((at, chdir) => isAbsolute7(chdir) ? chdir : resolve9(at, chdir), cwd) : undefined;
+    const dir = literal && cwd !== undefined && !command.assignments.some((value) => value.startsWith("GIT_")) ? git.chdirs.reduce((at, chdir) => isAbsolute8(chdir) ? chdir : resolve9(at, chdir), cwd) : undefined;
     const [verb] = git.args;
     if (git.subcommand === "stash" && (verb === "drop" || verb === "clear")) {
       found.push({ kind: verb === "drop" ? "stash-drop" : "stash-clear", command, dir });
@@ -5593,7 +5645,7 @@ function createRedactor(env, options = DEFAULT_REDACT) {
 // plugins/safety/src/scratch-dirs.ts
 import { existsSync as existsSync4, lstatSync, realpathSync as realpathSync6 } from "fs";
 import { homedir as homedir6, tmpdir as tmpdir2 } from "os";
-import { basename as basename3, dirname as dirname5, isAbsolute as isAbsolute8, join as join8, relative as relative3, sep } from "path";
+import { basename as basename4, dirname as dirname5, isAbsolute as isAbsolute9, join as join8, relative as relative3, sep } from "path";
 function scratchRoots(projectID, where = {}) {
   const home = where.home ?? homedir6();
   const env = where.env ?? process.env;
@@ -5604,14 +5656,14 @@ function resolved(path) {
   const missing = [];
   let at = path;
   while (!existsSync4(at) && dirname5(at) !== at) {
-    missing.unshift(basename3(at));
+    missing.unshift(basename4(at));
     at = dirname5(at);
   }
   return join8(realpathSync6(at), ...missing);
 }
 function inside(resource, roots) {
   const expanded = resource === "~" || resource.startsWith("~/") ? join8(homedir6(), resource.slice(1)) : resource;
-  if (!isAbsolute8(expanded))
+  if (!isAbsolute9(expanded))
     return false;
   const path = expanded.replace(/\/\*{1,2}$/, "");
   if (/[*?[\]{}]/.test(path) || path.split("/").includes(".."))
@@ -5619,12 +5671,12 @@ function inside(resource, roots) {
   const real = resolved(path);
   return roots.some((root) => {
     const rel = relative3(resolved(root), real);
-    return rel === "" || !rel.startsWith("..") && !isAbsolute8(rel);
+    return rel === "" || !rel.startsWith("..") && !isAbsolute9(rel);
   });
 }
 function pinned(root, uid = () => process.getuid?.()) {
   try {
-    if (!isAbsolute8(root) || realpathSync6(root) !== root)
+    if (!isAbsolute9(root) || realpathSync6(root) !== root)
       return false;
     let at = sep;
     for (const part of root.split(sep).filter(Boolean)) {
@@ -5650,7 +5702,7 @@ function allowScratch(evaluation, roots, uid) {
 
 // plugins/safety/src/secret-store.ts
 import { homedir as homedir7 } from "os";
-import { dirname as dirname6, isAbsolute as isAbsolute9, resolve as resolve10 } from "path";
+import { dirname as dirname6, isAbsolute as isAbsolute10, resolve as resolve10 } from "path";
 var STORE_ACTION = "safety_secret_store";
 var COMMAND_ACTION = "safety_secret_command";
 var STDOUT_CAP = 64 * 1024;
@@ -6032,7 +6084,7 @@ async function obtain(request, deps) {
   const source = request.source;
   if (source.kind === "generate")
     return generateSecret(source.charset, source.length, deps.random);
-  const cwd = source.cwd === undefined ? deps.directory : isAbsolute9(source.cwd) ? source.cwd : resolve10(deps.directory, source.cwd);
+  const cwd = source.cwd === undefined ? deps.directory : isAbsolute10(source.cwd) ? source.cwd : resolve10(deps.directory, source.cwd);
   const program = source.argv[0];
   const resolved = program.includes("/") ? program : onPath(deps, program, cwd);
   await deps.askCommand(source.argv, cwd);
@@ -6148,7 +6200,7 @@ function readOptions(options) {
 function shellCwd(workdir, sessionDirectory) {
   if (workdir === undefined)
     return sessionDirectory;
-  return isAbsolute10(workdir) ? workdir : resolve11(sessionDirectory, workdir);
+  return isAbsolute11(workdir) ? workdir : resolve11(sessionDirectory, workdir);
 }
 function applyDecision(evaluation, decision) {
   if (decision === undefined || evaluation.effect === "deny")
@@ -6286,7 +6338,7 @@ function createPlugin(overrides = {}) {
           types ??= readProviderTypes(cwd);
           return types(name, config);
         });
-        const refusal = safely(() => hardGate(command, gateCwd, { baseCwd: cwd, ...guardOptions, providerTypes }));
+        const refusal = safely(() => hardGate(command, gateCwd, { ...guardOptions, providerTypes }));
         if (refusal !== undefined)
           throw new Error(refusal.reason);
         if (on("external-directory")) {
